@@ -105,7 +105,6 @@ def remove_tool_message(state: "LumiAgentState"):
 async def offload_tool_result(messages: list) -> list[ToolMessage]:
     """将指定工具的大量结果卸载到文件系统
 
-    通过沙箱会话的 write_file 方法写入文件，兼容 Bubblewrap 和 K8s 沙箱。
 
     Args:
         messages: 消息列表

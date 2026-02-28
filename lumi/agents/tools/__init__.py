@@ -53,9 +53,9 @@ async def get_tools(
 
     Example:
         tools = await get_tools()
-        tools = await get_tools(tools=["read_file", "write_file"])
+        tools = await get_tools(tools=["read", "write"])
         tools = await get_tools(disabled_tools=["bash"])
-        tools = await get_tools(tools=["read_file", "write_file"], disabled_tools=["write_file"])
+        tools = await get_tools(tools=["read", "write"], disabled_tools=["write"])
     """
     all_tools = await ToolRegistry.instance().get_tools()
 

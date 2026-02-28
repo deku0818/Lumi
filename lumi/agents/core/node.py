@@ -29,6 +29,9 @@ from lumi.utils.llm_chain import chat_chain, tiktoken_counter, tool_call_chain
 from lumi.utils.logger import logger
 from lumi.utils.read_config import get_config
 
+# 自带中断机制的工具，跳过审批直接执行
+_APPROVAL_BYPASS_TOOLS = frozenset({"ask"})
+
 
 async def call_model(state: LumiAgentState, runtime: Runtime[LumiAgentContext]):
 
@@ -109,6 +112,8 @@ def is_use_tool(state: LumiAgentState):
     if is_structured_output_call(tool_calls):
         return "ExtractStructuredOutput"
     if state.get("tool_mode", "") == "auto":
+        return "ToolExecutor"
+    if all(tc["name"] in _APPROVAL_BYPASS_TOOLS for tc in tool_calls):
         return "ToolExecutor"
     return "HumanApproval"
 
