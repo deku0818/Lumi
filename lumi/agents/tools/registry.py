@@ -11,18 +11,20 @@ from lumi.utils.logger import logger
 class ToolRegistry:
     """极简工具注册表 - 自动收集工具"""
 
-    _instance = None
-    _providers = {}  # {"mcp": get_mcp_tools_func, "skill": skill_module, ...}
+    _instance: "ToolRegistry | None" = None
+
+    def __init__(self) -> None:
+        self._providers: dict = {}
 
     @classmethod
-    def instance(cls):
+    def instance(cls) -> "ToolRegistry":
         """获取全局单例"""
         if cls._instance is None:
             cls._instance = cls()
         return cls._instance
 
     @classmethod
-    def register(cls, name: str, provider):
+    def register(cls, name: str, provider) -> None:
         """
         注册工具提供者
 
@@ -40,7 +42,7 @@ class ToolRegistry:
             from lumi.agents.tools.providers import skill
             ToolRegistry.register("skill", skill)
         """
-        cls._providers[name] = provider
+        cls.instance()._providers[name] = provider
         logger.debug(f"Registered tool provider: {name}")
 
     @staticmethod

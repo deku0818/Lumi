@@ -2,22 +2,17 @@
 
 提供消息处理相关的函数，包括：
 - 清理不完整的工具调用
-- 移除工具消息
 - 卸载大型工具结果到文件
 - 消息辅助函数
 """
 
 from datetime import datetime
-from typing import TYPE_CHECKING
 
 from langchain_core.messages import AIMessage, HumanMessage, RemoveMessage, ToolMessage
 
 from lumi.utils.logger import logger
 from lumi.utils.read_config import get_config
 from lumi.utils.token_counter import str_token_counter
-
-if TYPE_CHECKING:
-    from lumi.agents.core.scheme import LumiAgentState
 
 
 def get_last_human_message(messages: list) -> HumanMessage | None:
@@ -71,35 +66,6 @@ def cleanup_incomplete_tool_calls(messages: list) -> list[RemoveMessage]:
                 messages_to_remove.append(RemoveMessage(id=msg.id))
 
     return messages_to_remove
-
-
-def remove_tool_message(state: "LumiAgentState"):
-    """删除工具消息及其对应的 AI 消息
-
-    遍历消息列表，找出所有 ToolMessage 及其前一条消息（通常是 AIMessage 或另一个 ToolMessage），
-    并生成 RemoveMessage 列表用于从状态中移除这些消息。
-
-    Args:
-        state: Agent 状态
-
-    Returns:
-        包含更新后消息列表的字典
-    """
-    messages = state["messages"]
-    messages_to_remove = []
-
-    # 遍历消息列表，找出需要删除的消息
-    for i, msg in enumerate(messages):
-        if isinstance(msg, ToolMessage):
-            messages_to_remove.append(msg.id)
-            # 检查前一条消息是否为 AIMessage 或 ToolMessage
-            if i > 0 and isinstance(messages[i - 1], (AIMessage, ToolMessage)):
-                messages_to_remove.append(messages[i - 1].id)
-
-    if messages_to_remove:
-        state["messages"] = [RemoveMessage(id=msg_id) for msg_id in messages_to_remove]
-
-    return {"messages": state["messages"]}
 
 
 async def offload_tool_result(messages: list) -> list[ToolMessage]:

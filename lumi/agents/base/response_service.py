@@ -1,7 +1,6 @@
 import asyncio
 import json
 import os
-from typing import Any
 
 import httpx
 from langchain_core.load import dumpd
@@ -14,8 +13,15 @@ from lumi.utils.model_manager import detect_model_type
 from lumi.utils.read_config import get_config
 
 
-def _extract_ainvoke_content(content):
-    """从结果中提取响应内容"""
+def extract_ainvoke_content(content) -> str:
+    """从 LLM 响应中提取文本内容
+
+    Args:
+        content: LLM 响应的 content 字段，可能是 str 或 list[dict]
+
+    Returns:
+        提取的文本内容
+    """
     if isinstance(content, list) and len(content) > 0:
         # 遍历查找包含 text 字段的项（跳过 thinking 等）
         for item in content:
@@ -31,26 +37,8 @@ def _extract_ainvoke_content(content):
     elif isinstance(content, str):
         return content
     else:
-        logger.error(f"_extract_ainvoke_content函数出现未知类型: {type(content)}")
+        logger.error(f"extract_ainvoke_content 出现未知类型: {type(content)}")
         return str(content) if content else ""
-
-
-async def ainvoke_response(graph: CompiledStateGraph, input_data: dict, config: Any):
-    """非流式响应"""
-    result = await graph.ainvoke(input_data, config)
-    content = result["messages"][-1].content if result["messages"] else ""
-
-    response_data = {
-        "status": "success",
-        "response": _extract_ainvoke_content(content),
-        "all_response": result,
-    }
-
-    # 如果有结构化输出结果，添加到响应中
-    if result.get("structured_output"):
-        response_data["structured_output"] = result["structured_output"]
-
-    return response_data
 
 
 async def astream_raw_events(

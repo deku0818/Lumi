@@ -5,27 +5,40 @@
 
 import asyncio
 from dataclasses import dataclass
+from enum import StrEnum
 from typing import AsyncGenerator
 
 from langchain_core.messages import HumanMessage
 from langchain_core.runnables.config import RunnableConfig
-from langgraph.checkpoint.memory import MemorySaver
 from langgraph.types import Command
 
-from lumi.agents.core.graph import LumiAgent
+from lumi.agents.core.graph import LumiAgent, create_agent
 from lumi.agents.core.scheme import LumiAgentContext
-from lumi.agents.tools import get_tools
 from lumi.agents.tools.session import get_session_manager
 from lumi.utils.logger import logger
 from lumi.utils.model_manager import DEFAULT_MODEL_NAME
-from lumi.utils.read_config import get_config
 from lumi.utils.thread_id import generate_thread_id
 
 
-# 事件数据类型
+class EventKind(StrEnum):
+    """Bridge 事件类型"""
+
+    MODEL_START = "model_start"
+    STREAM_TOKEN = "stream_token"
+    MODEL_END = "model_end"
+    TOOL_START = "tool_start"
+    TOOL_END = "tool_end"
+    ASK = "ask"
+    TOOL_APPROVAL = "tool_approval"
+    DONE = "done"
+    ERROR = "error"
+
+
 @dataclass
 class BridgeEvent:
-    kind: str  # "model_start" | "stream_token" | "model_end" | "tool_start" | "tool_end" | "ask" | "tool_approval" | "done" | "error"
+    """Bridge 事件数据"""
+
+    kind: EventKind
     text: str = ""
     name: str = ""
     args: dict | None = None
@@ -42,19 +55,11 @@ class AgentBridge:
         self._agent: LumiAgent | None = None
         self._context: LumiAgentContext | None = None
         self._config: RunnableConfig | None = None
-        self._cancel_event: asyncio.Event | None = None
         self.model_name: str = DEFAULT_MODEL_NAME
 
     async def initialize(self) -> None:
         """初始化 Agent"""
-        tools = await get_tools()
-        checkpointer = MemorySaver()
-        self._agent = LumiAgent(checkpointer=checkpointer)
-        self._context = LumiAgentContext(
-            tools=tools,
-            system_prompt=get_config().load_system_prompt(),
-            model_name=DEFAULT_MODEL_NAME,
-        )
+        self._agent, self._context = await create_agent()
         thread_id = generate_thread_id()
         self._config = RunnableConfig(configurable={"thread_id": thread_id})
         logger.info(
@@ -95,17 +100,17 @@ class AgentBridge:
                 kind = event.get("event", "")
 
                 if kind == "on_chat_model_start":
-                    yield BridgeEvent(kind="model_start")
+                    yield BridgeEvent(kind=EventKind.MODEL_START)
 
                 elif kind == "on_chat_model_stream":
                     chunk = event.get("data", {}).get("chunk")
                     if chunk:
                         text = self._extract_text_from_chunk(chunk)
                         if text:
-                            yield BridgeEvent(kind="stream_token", text=text)
+                            yield BridgeEvent(kind=EventKind.STREAM_TOKEN, text=text)
 
                 elif kind == "on_chat_model_end":
-                    yield BridgeEvent(kind="model_end")
+                    yield BridgeEvent(kind=EventKind.MODEL_END)
 
                 elif kind == "on_tool_start":
                     name = event.get("name", "unknown")
@@ -118,7 +123,7 @@ class AgentBridge:
                         tool_call_id = ""
                         args = {}
                     yield BridgeEvent(
-                        kind="tool_start",
+                        kind=EventKind.TOOL_START,
                         name=name,
                         args=args,
                         tool_call_id=tool_call_id,
@@ -143,22 +148,21 @@ class AgentBridge:
                     if isinstance(inp, dict):
                         tool_call_id = inp.get("tool_call_id", "")
                     yield BridgeEvent(
-                        kind="tool_end",
+                        kind=EventKind.TOOL_END,
                         name=name,
                         output=str(output) if output else "",
                         tool_call_id=tool_call_id,
                     )
 
             # 流结束后检测中断
-            interrupt_event = await self._check_interrupts()
-            yield interrupt_event
+            yield await self._check_interrupts()
 
         except asyncio.CancelledError:
             logger.info("[AgentBridge] 流式任务被取消")
             raise
         except Exception as e:
             logger.error(f"[AgentBridge] 流式事件错误: {e}", exc_info=True)
-            yield BridgeEvent(kind="error", error=str(e))
+            yield BridgeEvent(kind=EventKind.ERROR, error=str(e))
 
     async def _check_interrupts(self) -> BridgeEvent:
         """检查中断，返回对应事件"""
@@ -166,7 +170,7 @@ class AgentBridge:
         state = await graph.aget_state(self._config)
 
         if not state.next:
-            return BridgeEvent(kind="done")
+            return BridgeEvent(kind=EventKind.DONE)
 
         for task in state.tasks:
             for intr in task.interrupts:
@@ -174,12 +178,12 @@ class AgentBridge:
                 if isinstance(data, dict):
                     interrupt_type = data.get("type", "")
                     if interrupt_type == "ask":
-                        return BridgeEvent(kind="ask", data=data)
+                        return BridgeEvent(kind=EventKind.ASK, data=data)
                     elif interrupt_type == "tool_approval":
-                        return BridgeEvent(kind="tool_approval", data=data)
+                        return BridgeEvent(kind=EventKind.TOOL_APPROVAL, data=data)
 
         logger.warning(f"[AgentBridge] 未知中断类型, next={state.next}")
-        return BridgeEvent(kind="done")
+        return BridgeEvent(kind=EventKind.DONE)
 
     @staticmethod
     def _extract_text_from_chunk(chunk) -> str:

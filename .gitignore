@@ -12,3 +12,6 @@ wheels/
 logs
 .claude
 test
+.pytest_cache
+.ruff_cache
+.kiro

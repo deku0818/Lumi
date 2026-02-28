@@ -1,6 +1,7 @@
 from typing import Literal
 
 from langgraph.checkpoint.base import BaseCheckpointSaver
+from langgraph.checkpoint.memory import MemorySaver
 from langgraph.graph import END, START
 
 from lumi.agents.base.graph import BaseGraph
@@ -13,7 +14,9 @@ from lumi.agents.core.node import (
     summarizer,
     tool_executor,
 )
-from lumi.agents.core.scheme import LumiAgentState
+from lumi.agents.core.scheme import LumiAgentContext, LumiAgentState
+from lumi.agents.tools import get_tools
+from lumi.utils.model_manager import DEFAULT_MODEL_NAME
 from lumi.utils.read_config import get_config
 
 
@@ -95,13 +98,28 @@ class LumiAgent(BaseGraph):
             raise RuntimeError("checkpointer 不支持 adelete_thread 方法")
 
 
+async def create_agent() -> tuple["LumiAgent", LumiAgentContext]:
+    """创建 LumiAgent 及其上下文的工厂函数
+
+    统一 TUI 和 API 的初始化逻辑，避免重复代码。
+
+    Returns:
+        (agent, context) 元组
+    """
+    tools = await get_tools()
+    agent = LumiAgent(checkpointer=MemorySaver())
+    context = LumiAgentContext(
+        tools=tools,
+        system_prompt=get_config().load_system_prompt(),
+        model_name=DEFAULT_MODEL_NAME,
+    )
+    return agent, context
+
+
 if __name__ == "__main__":
     import asyncio
 
     from langchain_core.messages import HumanMessage
-
-    from lumi.agents.core.scheme import LumiAgentContext
-    from lumi.agents.tools import get_tools
 
     async def main():
         # 加载所有已注册的工具

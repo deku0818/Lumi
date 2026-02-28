@@ -5,9 +5,10 @@ from textual.app import App, ComposeResult
 from textual.widgets import Static
 
 from lumi import __version__
-from lumi.tui.agent_bridge import AgentBridge
+from lumi.tui.agent_bridge import AgentBridge, EventKind
 from lumi.tui.theme import APP_CSS
-from lumi.tui.widgets.ask_dialog import AskDialog, ToolApproval
+from lumi.tui.widgets.ask_dialog import AskDialog
+from lumi.tui.widgets.tool_approval import ToolApproval
 from lumi.tui.widgets.assistant_message import AssistantMessage
 from lumi.tui.widgets.title_block import TitleBlock
 from lumi.tui.widgets.chat_log import ChatLog
@@ -75,11 +76,9 @@ class LumiApp(App):
         self._agent_running = True
         self.query_one(InputBar).set_disabled(True)
 
-        # 直接在主 event loop 上迭代流
         await self._run_stream(text, tool_mode)
 
     async def _run_stream(self, text: str, tool_mode: str = "approve") -> None:
-        """直接迭代 bridge 事件流，每个 yield 之间 Textual 可以处理渲染"""
         await self._consume_events(self._bridge.stream_response(text, tool_mode))
 
     async def _run_resume(self, value) -> None:
@@ -97,28 +96,26 @@ class LumiApp(App):
     async def _apply_event(self, evt, chat_log: ChatLog) -> None:
         """处理单个 bridge 事件并更新 UI"""
         match evt.kind:
-            case "model_start":
+            case EventKind.MODEL_START:
                 self._current_thinking = ThinkingIndicator()
                 await chat_log.mount(self._current_thinking)
                 await chat_log.auto_scroll_if_needed()
 
-            case "stream_token":
+            case EventKind.STREAM_TOKEN:
                 self._stop_thinking()
-
                 if self._current_assistant_msg is None:
                     self._current_assistant_msg = AssistantMessage()
                     await chat_log.mount(self._current_assistant_msg)
-
                 self._current_assistant_msg.append_token(evt.text)
                 await chat_log.auto_scroll_if_needed()
 
-            case "model_end":
+            case EventKind.MODEL_END:
                 self._stop_thinking()
                 if self._current_assistant_msg:
                     self._current_assistant_msg.finalize()
                     self._current_assistant_msg = None
 
-            case "tool_start":
+            case EventKind.TOOL_START:
                 if self._current_assistant_msg:
                     self._current_assistant_msg.finalize()
                     self._current_assistant_msg = None
@@ -127,27 +124,27 @@ class LumiApp(App):
                 await chat_log.mount(block)
                 await chat_log.auto_scroll_if_needed()
 
-            case "tool_end":
+            case EventKind.TOOL_END:
                 key = evt.tool_call_id or evt.name
                 block = self._tool_blocks.pop(key, None)
                 if block:
                     block.set_done(evt.output)
                 await chat_log.auto_scroll_if_needed()
 
-            case "ask":
+            case EventKind.ASK:
                 dialog = AskDialog(evt.data)
                 await chat_log.mount(dialog)
                 await chat_log.auto_scroll_if_needed()
 
-            case "tool_approval":
+            case EventKind.TOOL_APPROVAL:
                 approval = ToolApproval(evt.data)
                 await chat_log.mount(approval)
                 await chat_log.auto_scroll_if_needed()
 
-            case "done":
+            case EventKind.DONE:
                 self._finish_run()
 
-            case "error":
+            case EventKind.ERROR:
                 await self._show_error(chat_log, evt.error)
 
     def _stop_thinking(self) -> None:

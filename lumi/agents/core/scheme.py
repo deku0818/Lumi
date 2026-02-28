@@ -1,8 +1,17 @@
+from __future__ import annotations
+
 from typing import Annotated, Any, Literal, NotRequired, TypedDict
 
 from langgraph.graph.message import add_messages
 
 from dataclasses import dataclass, field
+
+
+class SummaryData(TypedDict, total=False):
+    """摘要数据结构"""
+
+    summarized_ids: list[str]
+    summary_text: str
 
 
 @dataclass
@@ -19,8 +28,8 @@ class LumiAgentState(TypedDict):
     tool_mode: Literal["auto", "reject", "approve"]
     todos: NotRequired[list]
     """任务列表，用于追踪复杂任务的执行进度"""
-    summary: dict
-    """摘要信息，格式：{summarized_ids: list, summary_text: str, system_msg_id: str | None}"""
+    summary: SummaryData
+    """摘要信息"""
     output_schema: NotRequired[dict[str, Any]]
     """结构化输出的 JSON Schema"""
     output_enrich: NotRequired[list[dict[str, Any]]]

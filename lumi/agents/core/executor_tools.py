@@ -1,8 +1,9 @@
 """工具执行器模块
 
 提供工具执行相关的辅助函数，包括：
-- MCP 工具合并
 - 工具结果截断
+- JSON 提取与修复
+- 工具错误处理
 """
 
 import json
@@ -10,34 +11,10 @@ import re
 
 from json_repair import repair_json
 from jsonschema import ValidationError, validate
-from langchain_core.tools.structured import StructuredTool
 
 from lumi.utils.llm_chain import structured_output, truncate_docs_to_max_tokens
 from lumi.utils.logger import logger
 from lumi.utils.read_config import get_config
-
-
-def merge_mcp_tools(
-    base_tools: list[StructuredTool], mcp_tools: list[StructuredTool]
-) -> list[StructuredTool]:
-    """合并工具列表，MCP 工具优先
-
-    当存在同名工具时，使用动态加载的 MCP 工具替换基础工具中的静态版本。
-
-    Args:
-        base_tools: 基础工具列表（API 启动时加载的静态工具）
-        mcp_tools: 动态加载的 MCP 工具列表
-
-    Returns:
-        合并后的工具列表
-    """
-    if not mcp_tools:
-        return base_tools
-
-    mcp_tool_names = {t.name for t in mcp_tools}
-    # 过滤掉基础工具中与 MCP 工具同名的
-    filtered_base = [t for t in base_tools if t.name not in mcp_tool_names]
-    return filtered_base + mcp_tools
 
 
 def truncate_tool_results(messages_list: list) -> list:

@@ -29,5 +29,5 @@ class AssistantMessage(Static):
         self.update(self._text)
 
     def finalize(self) -> None:
-        """标记消息完成"""
-        self.update(self._text)
+        """标记消息完成（当前为空操作，内容已在 append_token 中实时更新）"""
+        pass

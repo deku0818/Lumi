@@ -42,7 +42,7 @@ async def task(name: str, prompt: str):
     """Task工具 - 委托给 LumiAgent 执行"""
     # Lazy import避免循环依赖
     from lumi.agents.base.response_service import (
-        _extract_ainvoke_content,
+        extract_ainvoke_content,
     )
     from lumi.agents.core.graph import LumiAgent
     from lumi.agents.core.scheme import LumiAgentContext
@@ -76,4 +76,4 @@ async def task(name: str, prompt: str):
     result = await agent.graph.ainvoke(inputs, context=context)
 
     content = result["messages"][-1].content if result["messages"] else ""
-    return _extract_ainvoke_content(content)
+    return extract_ainvoke_content(content)

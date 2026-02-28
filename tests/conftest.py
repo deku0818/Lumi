@@ -37,9 +37,6 @@ def reset_session_manager():
 def reset_registry():
     """每次测试重置 ToolRegistry 单例"""
     old_instance = ToolRegistry._instance
-    old_providers = ToolRegistry._providers.copy()
     ToolRegistry._instance = None
-    ToolRegistry._providers = {}
     yield
     ToolRegistry._instance = old_instance
-    ToolRegistry._providers = old_providers

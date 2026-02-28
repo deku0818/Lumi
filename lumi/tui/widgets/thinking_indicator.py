@@ -39,4 +39,5 @@ class ThinkingIndicator(Static):
         self._stopped = True
         if self._timer:
             self._timer.stop()
-        self.remove()
+        if self.parent is not None:
+            self.remove()

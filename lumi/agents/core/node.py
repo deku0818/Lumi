@@ -24,7 +24,7 @@ from lumi.agents.core.structured_tool import (
     extract_structured_args,
     is_structured_output_call,
 )
-from lumi.agents.base.response_service import _extract_ainvoke_content
+from lumi.agents.base.response_service import extract_ainvoke_content
 from lumi.utils.llm_chain import chat_chain, tiktoken_counter, tool_call_chain
 from lumi.utils.logger import logger
 from lumi.utils.read_config import get_config
@@ -233,15 +233,12 @@ async def summarizer(state: LumiAgentState):
         prompt = get_config().load_prompt("summary")
         if prompt:
             logger.warning(
-                "使用 summary.md 作为摘要提示词已废弃，"
-                "请将文件重命名为 SUMMARY.md。\n"
-                "运行 `omniagent init --update` 生成模板文件。"
+                "使用 summary.md 作为摘要提示词已废弃，请将文件重命名为 SUMMARY.md。"
             )
     if not prompt:
         raise ValueError(
             "未找到摘要提示词配置 'SUMMARY.md'。\n"
-            "请在 .omniagent/prompts/SUMMARY.md 中配置摘要提示词，\n"
-            "或运行 `omniagent init --update` 生成模板文件。"
+            "请在 .lumi/prompts/SUMMARY.md 中配置摘要提示词。"
         )
     summary_messages = messages_to_summarize + [HumanMessage(content=prompt)]
     chain = chat_chain(
@@ -249,7 +246,7 @@ async def summarizer(state: LumiAgentState):
         temperature=1,
     )
     response = await chain.ainvoke({"messages": summary_messages})
-    summary_text = _extract_ainvoke_content(response.content)
+    summary_text = extract_ainvoke_content(response.content)
 
     logger.info(f"[Summarizer] 摘要生成完成，压缩 {len(summarized_ids)} 条消息")
 

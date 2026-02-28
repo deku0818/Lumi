@@ -20,6 +20,12 @@ class ChatLog(VerticalScroll):
         """用户手动上滚时禁用自动滚动"""
         self._auto_scroll = False
 
+    def on_scroll_change(self) -> None:
+        """滚动位置变化时，若已到底部则重新启用自动滚动"""
+        at_bottom = self.scroll_offset.y >= self.max_scroll_offset.y - 1
+        if at_bottom:
+            self._auto_scroll = True
+
     async def scroll_to_end(self) -> None:
         """滚动到底部并重新启用自动滚动"""
         self._auto_scroll = True
