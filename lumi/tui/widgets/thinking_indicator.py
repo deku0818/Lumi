@@ -10,8 +10,8 @@ class ThinkingIndicator(Static):
     ThinkingIndicator {
         margin: 0 0 0 2;
         padding: 0 1;
-        color: #888899;
         height: 1;
+        color: $text-muted;
     }
     """
 
@@ -39,5 +39,5 @@ class ThinkingIndicator(Static):
         self._stopped = True
         if self._timer:
             self._timer.stop()
-        if self.parent is not None:
+        if self.is_mounted:
             self.remove()

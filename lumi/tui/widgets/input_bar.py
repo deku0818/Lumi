@@ -6,17 +6,55 @@ from textual.events import Key
 from textual.message import Message
 from textual.widgets import Input, Static
 
+from lumi.tui.theme import get_color
 
 _TOOL_MODES = ("approve", "auto")
 
-_MODE_DISPLAY = {
-    "approve": ("✔ approve mode", "#4caf50"),
-    "auto": ("⚡ auto mode", "#ffcc00"),
+# 值为 (label, 语义角色名)，颜色在渲染时通过 get_color() 解析
+_MODE_DISPLAY: dict[str, tuple[str, str]] = {
+    "approve": ("✔ approve mode", "success"),
+    "auto": ("⚡ auto mode", "accent"),
 }
 
 
 class InputBox(Static):
     """输入框容器 - 带边框，类似 TitleBlock"""
+
+    DEFAULT_CSS = """
+    InputBox {
+        height: auto;
+        border-title-style: bold;
+        padding: 0 1;
+        border: round $accent;
+        border-title-color: $accent;
+    }
+
+    #input-row {
+        height: auto;
+    }
+
+    InputBox #prompt-label {
+        text-style: bold;
+        width: 3;
+        height: 1;
+        padding: 0;
+        color: $accent;
+    }
+
+    InputBox Input {
+        background: transparent;
+        border: none !important;
+        width: 1fr;
+        height: 1;
+        padding: 0;
+        margin: 0;
+        color: $foreground;
+    }
+
+    InputBox Input:focus {
+        border: none !important;
+    }
+    """
 
     def compose(self) -> ComposeResult:
         with Horizontal(id="input-row"):
@@ -26,6 +64,22 @@ class InputBox(Static):
 
 class InputBar(Vertical):
     """底部输入栏 - 带 > 提示符 + 模式指示器"""
+
+    DEFAULT_CSS = """
+    InputBar {
+        dock: bottom;
+        height: auto;
+        max-height: 10;
+        background: transparent;
+        padding: 0 2 1 2;
+    }
+
+    #mode-indicator {
+        height: 1;
+        padding: 0 0 0 1;
+        color: $text-muted;
+    }
+    """
 
     class Submitted(Message):
         """用户提交消息"""
@@ -41,7 +95,8 @@ class InputBar(Vertical):
 
     def compose(self) -> ComposeResult:
         yield InputBox()
-        label, color = _MODE_DISPLAY[self._tool_mode]
+        label, role = _MODE_DISPLAY[self._tool_mode]
+        color = get_color(role)
         yield Static(
             f"[{color}]{label}[/] [dim](shift+tab to switch)[/dim]",
             id="mode-indicator",
@@ -71,7 +126,8 @@ class InputBar(Vertical):
         self._update_mode_indicator()
 
     def _update_mode_indicator(self) -> None:
-        label, color = _MODE_DISPLAY[self._tool_mode]
+        label, role = _MODE_DISPLAY[self._tool_mode]
+        color = get_color(role)
         indicator = self.query_one("#mode-indicator", Static)
         indicator.update(f"[{color}]{label}[/] [dim](shift+tab to switch)[/dim]")
 

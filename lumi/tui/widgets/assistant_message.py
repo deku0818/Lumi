@@ -3,6 +3,8 @@
 from rich.text import Text
 from textual.widgets import Static
 
+from lumi.tui.theme import get_color
+
 
 class AssistantMessage(Static):
     """AI 助手消息 - 带 ● 前缀，支持流式追加"""
@@ -11,15 +13,15 @@ class AssistantMessage(Static):
     AssistantMessage {
         margin: 0 0 0 0;
         padding: 0 1;
-        color: #e0e0e0;
         height: auto;
+        color: $foreground;
     }
     """
 
     def __init__(self) -> None:
         super().__init__("", classes="assistant-message", markup=False)
         self._text = Text()
-        self._text.append("● ", style="bold #ffcc00")
+        self._text.append("● ", style=f"bold {get_color('accent')}")
         self._has_content = False
 
     def append_token(self, token: str) -> None:

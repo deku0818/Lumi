@@ -1,12 +1,17 @@
 """Lumi TUI 主应用"""
 
+import asyncio
+import sys
+
 from rich.text import Text
 from textual.app import App, ComposeResult
-from textual.widgets import Static
+from textual.binding import Binding
+from textual.css.query import NoMatches
+from textual.widgets import Collapsible, Static
 
 from lumi import __version__
 from lumi.tui.agent_bridge import AgentBridge, EventKind
-from lumi.tui.theme import APP_CSS
+from lumi.tui.theme import APP_CSS, LUMI_DARK_THEME, LUMI_LIGHT_THEME, get_color
 from lumi.tui.widgets.ask_block import AskBlock
 from lumi.tui.widgets.ask_dialog import AskDialog
 from lumi.tui.widgets.tool_approval import ToolApproval
@@ -28,29 +33,80 @@ class LumiApp(App):
     BINDINGS = [
         ("escape", "cancel_generation", "Cancel"),
         ("ctrl+c", "quit_app", "Quit"),
+        Binding("ctrl+t", "toggle_theme", "Toggle Theme", priority=True),
     ]
 
     def __init__(self) -> None:
         super().__init__()
+        self.register_theme(LUMI_DARK_THEME)
+        self.register_theme(LUMI_LIGHT_THEME)
+        self.theme = "lumi-dark"  # 默认暗色，on_mount 中检测系统主题后切换
         self._bridge = AgentBridge()
         self._current_assistant_msg: AssistantMessage | None = None
         self._current_thinking: ThinkingIndicator | None = None
         self._agent_running = False
         self._tool_blocks: dict[str, ToolBlock] = {}
         self._current_ask_block: AskBlock | None = None
+        self._current_task: asyncio.Task | None = None
 
     def compose(self) -> ComposeResult:
         yield ChatLog()
         yield InputBar(id="input-area")
 
+    async def _detect_system_theme(self) -> bool:
+        """检测系统主题，返回 True 表示暗色。
+
+        macOS 通过 `defaults read -g AppleInterfaceStyle` 检测：
+        - 返回 "Dark" → 暗色 (True)
+        - 命令失败（亮色模式下该 key 不存在）→ 亮色 (False)
+        非 macOS 平台默认暗色。
+        """
+        if sys.platform != "darwin":
+            return True
+        try:
+            proc = await asyncio.create_subprocess_exec(
+                "defaults",
+                "read",
+                "-g",
+                "AppleInterfaceStyle",
+                stdout=asyncio.subprocess.PIPE,
+                stderr=asyncio.subprocess.PIPE,
+            )
+            stdout, _ = await asyncio.wait_for(proc.communicate(), timeout=2.0)
+            return stdout.decode().strip().lower() == "dark"
+        except asyncio.TimeoutError:
+            logger.debug("[LumiApp] 系统主题检测超时，使用暗色主题")
+            return True
+        except FileNotFoundError:
+            logger.debug("[LumiApp] 'defaults' 命令不可用，使用暗色主题")
+            return True
+        except Exception:
+            logger.warning(
+                "[LumiApp] 系统主题检测意外失败，使用暗色主题", exc_info=True
+            )
+            return True
+
+    async def _poll_system_theme(self) -> None:
+        """定时轮询系统主题变化"""
+        is_dark = await self._detect_system_theme()
+        target = "lumi-dark" if is_dark else "lumi-light"
+        if self.theme != target:
+            self.theme = target
+
     async def on_mount(self) -> None:
+        # 检测系统主题并启动轮询
+        is_dark = await self._detect_system_theme()
+        logger.info("系统主题检测结果: dark=%s", is_dark)
+        self.theme = "lumi-dark" if is_dark else "lumi-light"
+        self.set_interval(5, self._poll_system_theme)
+
         try:
             await self._bridge.initialize()
         except Exception as e:
             chat_log = self.query_one(ChatLog)
             err_text = Text()
-            err_text.append("✗ 初始化失败: ", style="bold #ef5350")
-            err_text.append(str(e), style="#ef5350")
+            err_text.append("✗ 初始化失败: ", style=f"bold {get_color('error')}")
+            err_text.append(str(e), style=get_color("error"))
             await chat_log.mount(Static(err_text, markup=False))
             return
 
@@ -78,13 +134,15 @@ class LumiApp(App):
         self._agent_running = True
         self.query_one(InputBar).set_disabled(True)
 
-        await self._run_stream(text, tool_mode)
+        self._current_task = asyncio.create_task(self._run_stream(text, tool_mode))
 
     async def _run_stream(self, text: str, tool_mode: str = "approve") -> None:
         await self._consume_events(self._bridge.stream_response(text, tool_mode))
 
     async def _run_resume(self, value) -> None:
-        await self._consume_events(self._bridge.stream_resume(value))
+        self._current_task = asyncio.create_task(
+            self._consume_events(self._bridge.stream_resume(value))
+        )
 
     async def _consume_events(self, event_stream) -> None:
         chat_log = self.query_one(ChatLog)
@@ -99,9 +157,7 @@ class LumiApp(App):
         """处理单个 bridge 事件并更新 UI"""
         match evt.kind:
             case EventKind.MODEL_START:
-                self._current_thinking = ThinkingIndicator()
-                await chat_log.mount(self._current_thinking)
-                await chat_log.auto_scroll_if_needed()
+                await self._start_thinking(chat_log)
 
             case EventKind.STREAM_TOKEN:
                 self._stop_thinking()
@@ -112,19 +168,24 @@ class LumiApp(App):
                 await chat_log.auto_scroll_if_needed()
 
             case EventKind.MODEL_END:
-                self._stop_thinking()
-                if self._current_assistant_msg:
-                    self._current_assistant_msg.finalize()
-                    self._current_assistant_msg = None
+                # 文字输出结束后，LLM 可能正在生成 tool call 参数，
+                # 重新显示 thinking 指示器，直到 TOOL_START / DONE / ERROR 出现
+                self._finalize_assistant_msg()
+
+            case EventKind.TOOL_CALL_CHUNK:
+                # LLM 正在生成工具调用参数，显示 thinking 指示器
+                if not self._current_thinking:
+                    await self._start_thinking(chat_log)
 
             case EventKind.TOOL_START:
-                if self._current_assistant_msg:
-                    self._current_assistant_msg.finalize()
-                    self._current_assistant_msg = None
+                self._stop_thinking()
+                self._finalize_assistant_msg()
                 # ask 工具由 AskBlock 统一处理，不创建 ToolBlock
                 if evt.name == "ask":
                     return
-                block = ToolBlock(evt.name, evt.args or {})
+                block = ToolBlock(
+                    evt.name, evt.args or {}, approval_mode=evt.approval_mode
+                )
                 self._tool_blocks[evt.tool_call_id or evt.name] = block
                 await chat_log.mount(block)
                 await chat_log.auto_scroll_if_needed()
@@ -140,12 +201,14 @@ class LumiApp(App):
                 await chat_log.auto_scroll_if_needed()
 
             case EventKind.ASK:
+                self._stop_thinking()
                 ask_block = AskBlock(evt.data)
                 self._current_ask_block = ask_block
                 await chat_log.mount(ask_block)
                 await chat_log.auto_scroll_if_needed()
 
             case EventKind.TOOL_APPROVAL:
+                self._stop_thinking()
                 approval = ToolApproval(evt.data)
                 await chat_log.mount(approval)
                 await chat_log.auto_scroll_if_needed()
@@ -161,13 +224,23 @@ class LumiApp(App):
             self._current_thinking.stop()
             self._current_thinking = None
 
+    def _finalize_assistant_msg(self) -> None:
+        if self._current_assistant_msg:
+            self._current_assistant_msg.finalize()
+            self._current_assistant_msg = None
+
+    async def _start_thinking(self, chat_log: ChatLog) -> None:
+        self._current_thinking = ThinkingIndicator()
+        await chat_log.mount(self._current_thinking)
+        await chat_log.auto_scroll_if_needed()
+
     async def _show_error(self, chat_log: ChatLog, error: str) -> None:
         self._stop_thinking()
         if len(error) > 300:
             error = error[:300] + "..."
         err_text = Text()
-        err_text.append("✗ Error: ", style="bold #ef5350")
-        err_text.append(error, style="#ef5350")
+        err_text.append("✗ Error: ", style=f"bold {get_color('error')}")
+        err_text.append(error, style=get_color("error"))
         await chat_log.mount(Static(err_text, markup=False))
         await chat_log.auto_scroll_if_needed()
         self._finish_run()
@@ -183,6 +256,14 @@ class LumiApp(App):
     async def on_tool_approval_decided(self, event: ToolApproval.Decided) -> None:
         if event.decision == "auto":
             self.query_one(InputBar).set_tool_mode("auto")
+        # 审批后折叠所有审批模式下展开的 ToolBlock
+        for block in self._tool_blocks.values():
+            if block.approval_mode:
+                try:
+                    collapsible = block.query_one(Collapsible)
+                    collapsible.collapsed = True
+                except NoMatches:
+                    pass
         await self._run_resume(event.decision)
 
     # ── 操作 ──
@@ -196,10 +277,19 @@ class LumiApp(App):
         try:
             self.query_one(InputBar).set_disabled(False)
         except Exception:
-            pass
+            logger.error("[LumiApp] 无法重新启用输入栏，UI 可能已损坏", exc_info=True)
+
+    def action_toggle_theme(self) -> None:
+        """手动切换亮/暗主题"""
+        if self.theme == "lumi-dark":
+            self.theme = "lumi-light"
+        else:
+            self.theme = "lumi-dark"
 
     async def action_cancel_generation(self) -> None:
         if self._agent_running:
+            if self._current_task and not self._current_task.done():
+                self._current_task.cancel()
             self._finish_run()
 
     async def action_quit_app(self) -> None:

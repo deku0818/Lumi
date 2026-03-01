@@ -3,6 +3,8 @@
 from rich.text import Text
 from textual.widgets import Static
 
+from lumi.tui.theme import get_color
+
 
 class UserMessage(Static):
     """用户消息 - 带 > 前缀"""
@@ -11,15 +13,15 @@ class UserMessage(Static):
     UserMessage {
         margin: 1 0 0 0;
         padding: 0 1;
-        color: #e0e0e0;
-        background: #1e1e2e;
         width: auto;
         height: auto;
+        color: $foreground;
+        background: $surface;
     }
     """
 
     def __init__(self, text: str) -> None:
         display = Text()
-        display.append("> ", style="bold #ffcc00")
+        display.append("> ", style=f"bold {get_color('accent')}")
         display.append(text)
         super().__init__(display, classes="user-message", markup=False)

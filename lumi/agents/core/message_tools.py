@@ -6,7 +6,9 @@
 - 消息辅助函数
 """
 
+import asyncio
 from datetime import datetime
+from pathlib import Path
 
 from langchain_core.messages import AIMessage, HumanMessage, RemoveMessage, ToolMessage
 
@@ -74,7 +76,6 @@ async def offload_tool_result(messages: list) -> list[ToolMessage]:
 
     Args:
         messages: 消息列表
-        session: 沙箱会话实例
 
     Returns:
         list[ToolMessage]: 替换后的消息列表
@@ -115,16 +116,17 @@ async def offload_tool_result(messages: list) -> list[ToolMessage]:
         if token_count < offload_config.token_threshold:
             continue
 
-        # 生成文件名并通过沙箱会话写入
+        # 生成文件名并写入 .lumi/offload/ 目录
         timestamp = datetime.now().strftime("%H%M%S")
         file_name = f"{tool_name}_result_{timestamp}.txt"
-        virtual_path = f"/workspace/offloaded/{file_name}"
+        offload_dir = get_config().config_dir / "offload"
+        file_path = offload_dir / file_name
 
         try:
-            ### 这里要卸载内容到文件（未实现占位）
+            await asyncio.to_thread(_write_offload_file, file_path, content_str)
 
             # 创建替换消息
-            new_content = f"执行结果已保存到:{virtual_path}"
+            new_content = f"执行结果已保存到:{file_path}"
             new_msg = ToolMessage(
                 content=new_content,
                 tool_call_id=msg.tool_call_id,
@@ -134,16 +136,22 @@ async def offload_tool_result(messages: list) -> list[ToolMessage]:
             updated_messages.append(new_msg)
 
             logger.info(
-                f"[PreprocessMessages] {tool_name} 结果已卸载到 {virtual_path} "
+                f"[PreprocessMessages] {tool_name} 结果已卸载到 {file_path} "
                 f"(原始 {token_count} tokens)"
             )
 
         except Exception as e:
             logger.error(
                 f"[PreprocessMessages] 写入文件失败: {type(e).__name__}: {e}. "
-                f"工具: {tool_name}, 路径: {virtual_path}, "
+                f"工具: {tool_name}, 路径: {file_path}, "
                 f"内容大小: {token_count} tokens. "
                 f"将使用原始内容（可能导致token超限）"
             )
 
     return updated_messages
+
+
+def _write_offload_file(file_path: Path, content: str) -> None:
+    """将内容写入卸载文件（同步，供 asyncio.to_thread 调用）"""
+    file_path.parent.mkdir(parents=True, exist_ok=True)
+    file_path.write_text(content, encoding="utf-8")

@@ -6,6 +6,7 @@ from textual.app import ComposeResult
 from textual.containers import Vertical
 from textual.widgets import Static
 
+from lumi.tui.theme import get_color
 from lumi.tui.widgets.ask_dialog import AskDialog
 
 _DECLINED_TEXT = "User declined to answer questions"
@@ -32,10 +33,10 @@ class AskBlock(Vertical):
     }
 
     AskBlock .ask-block-result {
-        color: #888899;
         padding: 0 0 0 2;
         margin: 0;
         height: auto;
+        color: $text-muted;
     }
     """
 
@@ -48,7 +49,7 @@ class AskBlock(Vertical):
 
     def compose(self) -> ComposeResult:
         yield Static(
-            f"[#888899]●[/] [bold #ffcc00]ask[/]({self._label})",
+            f"[{get_color('text_muted')}]●[/] [bold {get_color('accent')}]ask[/]({self._label})",
             classes="ask-block-title",
             id=f"ask-title-{id(self)}",
         )
@@ -63,9 +64,13 @@ class AskBlock(Vertical):
             display = display[:500] + "..."
 
         # 更新状态圆点
-        dot = "[#ef5350]●[/]" if is_declined else "[#4caf50]●[/]"
+        dot = (
+            f"[{get_color('error')}]●[/]"
+            if is_declined
+            else f"[{get_color('success')}]●[/]"
+        )
         self.query_one(f"#ask-title-{id(self)}", Static).update(
-            f"{dot} [bold #ffcc00]ask[/]({self._label})"
+            f"{dot} [bold {get_color('accent')}]ask[/]({self._label})"
         )
 
         for dialog in self.query(AskDialog):

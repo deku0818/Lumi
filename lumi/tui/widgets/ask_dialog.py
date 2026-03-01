@@ -5,8 +5,11 @@ from __future__ import annotations
 from rich.markup import escape
 from textual.app import ComposeResult
 from textual.containers import Horizontal, Vertical
+from textual.css.query import NoMatches
 from textual.message import Message
 from textual.widgets import Input, Static
+
+from lumi.tui.theme import get_color
 
 
 class AskDialog(Vertical):
@@ -35,9 +38,9 @@ class AskDialog(Vertical):
     }
 
     AskDialog .ask-question {
-        color: #ffcc00;
         text-style: bold;
         margin: 0 0 1 0;
+        color: $accent;
     }
 
     AskDialog .ask-body {
@@ -56,14 +59,14 @@ class AskDialog(Vertical):
 
     AskDialog Input {
         width: 1fr;
-        background: #1a1a2e;
-        color: #e0e0e0;
-        border: solid #333340;
+        background: $panel;
+        color: $foreground;
+        border: solid $border-blurred;
     }
 
     AskDialog .ask-hint {
-        color: #555566;
         margin: 1 0 0 1;
+        color: $border;
     }
 
     AskDialog .ask-nav {
@@ -131,7 +134,7 @@ class AskDialog(Vertical):
         # 问题体（全部预先 compose，通过渲染切换可见性）
         for qi, q in enumerate(self._questions):
             yield Static(
-                f"[bold #ffcc00][/] {q['question']}",
+                f"[bold {get_color('accent')}][/] {q['question']}",
                 id=f"ask-q-{qi}",
                 classes="ask-question",
             )
@@ -178,12 +181,12 @@ class AskDialog(Vertical):
         for i, q in enumerate(self._questions):
             header = escape(q.get("header", f"Q{i + 1}"))
             if i == self._current_tab:
-                parts.append(f"[bold #ffcc00]「{header}」[/]")
+                parts.append(f"[bold {get_color('accent')}]「{header}」[/]")
             else:
                 parts.append(f"[dim]「{header}」[/]")
         if len(self._questions) > 1:
             if self._current_tab >= len(self._questions):
-                parts.append("[bold #4caf50]「Submit」[/]")
+                parts.append(f"[bold {get_color('success')}]「Submit」[/]")
             else:
                 parts.append("[dim]「Submit」[/]")
         return "  ".join(parts)
@@ -204,13 +207,17 @@ class AskDialog(Vertical):
                 check = "◉" if i in selected else "○"
                 prefix = f"{check} {num}."
                 if is_hl:
-                    lines.append(f"[bold #ffcc00]{prefix} {label}[/]{suffix}")
+                    lines.append(
+                        f"[bold {get_color('accent')}]{prefix} {label}[/]{suffix}"
+                    )
                 else:
                     lines.append(f"{prefix} {label}{suffix}")
             else:
                 prefix = f"{num}."
                 if is_hl:
-                    lines.append(f"[bold #ffcc00]{prefix} {label}[/]{suffix}")
+                    lines.append(
+                        f"[bold {get_color('accent')}]{prefix} {label}[/]{suffix}"
+                    )
                 else:
                     lines.append(f"{prefix} {label}{suffix}")
         return "\n".join(lines)
@@ -232,7 +239,7 @@ class AskDialog(Vertical):
                 try:
                     widget = self.query_one(f"#{suffix}")
                     widget.display = visible
-                except Exception:
+                except NoMatches:
                     pass
 
     def _refresh_current(self, *, tabs_changed: bool = False) -> None:
@@ -243,17 +250,17 @@ class AskDialog(Vertical):
                 self.query_one(f"#ask-opts-{qi}", Static).update(
                     self._render_options_list(qi)
                 )
-            except Exception:
+            except NoMatches:
                 pass
         if tabs_changed:
             if not self._is_simple:
                 try:
                     self.query_one("#ask-tabs", Static).update(self._render_tabs())
-                except Exception:
+                except NoMatches:
                     pass
             try:
                 self.query_one("#ask-hint", Static).update(self._render_hint())
-            except Exception:
+            except NoMatches:
                 pass
 
     def _refresh_nav(self) -> None:
@@ -273,10 +280,10 @@ class AskDialog(Vertical):
                 len(self._questions) > 1
                 and self._current_tab == len(self._questions) - 1
             ):
-                next_w.update("[bold #4caf50][Submit][/]")
+                next_w.update(f"[bold {get_color('success')}][Submit][/]")
             else:
                 next_w.update("")
-        except Exception:
+        except NoMatches:
             pass
 
     def _focus_custom_input(self, qi: int) -> None:
@@ -285,7 +292,7 @@ class AskDialog(Vertical):
         self._input_focused = True
         try:
             self.query_one(f"#ask-input-{qi}", Input).focus()
-        except Exception:
+        except NoMatches:
             pass
         self._refresh_current()
 
@@ -315,19 +322,19 @@ class AskDialog(Vertical):
             try:
                 inp = self.query_one(f"#ask-input-{qi}", Input)
                 self._custom_text[qi] = inp.value.strip()
-            except Exception:
+            except NoMatches:
                 pass
 
     def _submit(self) -> None:
         self._save_custom_input()
         answer = self._format_answers()
         self.post_message(self.Answered(answer))
-        self.remove()
+        self.call_later(self.remove)
 
     def _decline(self) -> None:
         """用户按 Esc 拒绝回答"""
         self.post_message(self.Answered("User declined to answer questions"))
-        self.remove()
+        self.call_later(self.remove)
 
     def _format_answers(self) -> str:
         parts = []

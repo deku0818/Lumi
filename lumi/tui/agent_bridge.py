@@ -13,6 +13,7 @@ from langchain_core.runnables.config import RunnableConfig
 from langgraph.types import Command
 
 from lumi.agents.core.graph import LumiAgent, create_agent
+from lumi.agents.core.node import APPROVAL_BYPASS_TOOLS
 from lumi.agents.core.scheme import LumiAgentContext
 from lumi.agents.tools.session import get_session_manager
 from lumi.utils.logger import logger
@@ -26,6 +27,7 @@ class EventKind(StrEnum):
     MODEL_START = "model_start"
     STREAM_TOKEN = "stream_token"
     MODEL_END = "model_end"
+    TOOL_CALL_CHUNK = "tool_call_chunk"  # LLM 正在生成工具调用参数
     TOOL_START = "tool_start"
     TOOL_END = "tool_end"
     ASK = "ask"
@@ -46,6 +48,7 @@ class BridgeEvent:
     output: str = ""
     data: dict | None = None
     error: str = ""
+    approval_mode: bool = False  # 是否处于审批模式（工具需要用户审批确认）
 
 
 class AgentBridge:
@@ -74,24 +77,38 @@ class AgentBridge:
             "messages": [HumanMessage(content=text)],
             "tool_mode": tool_mode,
         }
-        async for event in self._stream(input_data):
+        async for event in self._stream(input_data, tool_mode=tool_mode):
             yield event
 
     async def stream_resume(self, value) -> AsyncGenerator[BridgeEvent, None]:
-        """恢复中断并 yield 事件流"""
+        """恢复中断并 yield 事件流
+
+        恢复时工具已通过审批，使用 "auto" 跳过审批判断。
+        """
         input_data = Command(resume=value)
-        async for event in self._stream(input_data):
+        async for event in self._stream(input_data, tool_mode="auto"):
             yield event
 
     async def close(self) -> None:
         """清理资源"""
         await get_session_manager().close_all()
 
-    async def _stream(self, input_data) -> AsyncGenerator[BridgeEvent, None]:
-        """核心流式处理 - yield BridgeEvent"""
-        graph = self._agent.graph
+    async def _stream(
+        self, input_data, *, tool_mode: str = "approve"
+    ) -> AsyncGenerator[BridgeEvent, None]:
+        """核心流式处理 - yield BridgeEvent
 
+        Args:
+            input_data: 输入数据（消息或 Command）
+            tool_mode: 工具执行模式，用于判断审批状态
+        """
         try:
+            if self._agent is None or self._config is None:
+                yield BridgeEvent(
+                    kind=EventKind.ERROR, error="Agent 未初始化，请重启 Lumi"
+                )
+                return
+            graph = self._agent.graph
             async for event in graph.astream_events(
                 input_data,
                 self._config,
@@ -108,6 +125,9 @@ class AgentBridge:
                         text = self._extract_text_from_chunk(chunk)
                         if text:
                             yield BridgeEvent(kind=EventKind.STREAM_TOKEN, text=text)
+                        elif self._has_tool_call_chunk(chunk):
+                            # LLM 正在生成工具调用参数，通知 TUI 显示 loading
+                            yield BridgeEvent(kind=EventKind.TOOL_CALL_CHUNK)
 
                 elif kind == "on_chat_model_end":
                     yield BridgeEvent(kind=EventKind.MODEL_END)
@@ -122,11 +142,16 @@ class AgentBridge:
                     else:
                         tool_call_id = ""
                         args = {}
+                    # 判断是否处于审批模式：非 auto 模式且工具不在免审批列表中
+                    approval_mode = (
+                        tool_mode != "auto" and name not in APPROVAL_BYPASS_TOOLS
+                    )
                     yield BridgeEvent(
                         kind=EventKind.TOOL_START,
                         name=name,
                         args=args,
                         tool_call_id=tool_call_id,
+                        approval_mode=approval_mode,
                     )
 
                 elif kind == "on_tool_end":
@@ -166,8 +191,20 @@ class AgentBridge:
 
     async def _check_interrupts(self) -> BridgeEvent:
         """检查中断，返回对应事件"""
-        graph = self._agent.graph
-        state = await graph.aget_state(self._config)
+        try:
+            graph = self._agent.graph
+            state = await graph.aget_state(self._config)
+        except Exception as e:
+            thread_id = (
+                (self._config or {}).get("configurable", {}).get("thread_id", "unknown")
+            )
+            logger.error(
+                "[AgentBridge] 获取中断状态失败: %s (thread_id=%s)",
+                e,
+                thread_id,
+                exc_info=True,
+            )
+            return BridgeEvent(kind=EventKind.DONE)
 
         if not state.next:
             return BridgeEvent(kind=EventKind.DONE)
@@ -197,3 +234,15 @@ class AgentBridge:
                     if isinstance(item, dict) and item.get("type") == "text":
                         return item.get("text", "")
         return ""
+
+    @staticmethod
+    def _has_tool_call_chunk(chunk) -> bool:
+        """检测 chunk 是否包含工具调用数据"""
+        # LangChain AIMessageChunk 的 tool_call_chunks 属性
+        if hasattr(chunk, "tool_call_chunks") and chunk.tool_call_chunks:
+            return True
+        # 备用：检查 additional_kwargs 中的 tool_calls
+        if hasattr(chunk, "additional_kwargs"):
+            if chunk.additional_kwargs.get("tool_calls"):
+                return True
+        return False
