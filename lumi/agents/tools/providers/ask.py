@@ -99,7 +99,7 @@ def ask(
         update={
             "messages": [
                 ToolMessage(
-                    content=f"用户的回答：\n{user_response}",
+                    content=user_response,
                     tool_call_id=tool_call_id,
                 )
             ],

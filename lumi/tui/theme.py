@@ -24,7 +24,8 @@ TitleBlock {
 }
 
 #left-panel {
-    width: 1fr;
+    width: auto;
+    min-width: 28;
     height: auto;
     padding: 1 2;
     text-align: center;
@@ -56,22 +57,29 @@ TitleBlock {
     scrollbar-color-active: #ffcc00;
 }
 
-/* ── InputBar 需要在 APP_CSS 层级设置 dock，确保优先级 ── */
+/* ── InputBar 外层容器 ── */
 #input-area {
     dock: bottom;
     height: auto;
-    max-height: 8;
+    max-height: 10;
     background: transparent;
-    border-top: solid #333340;
-    padding: 1 2;
+    padding: 0 2 1 2;
+}
+
+/* ── 输入框（带边框） ── */
+InputBox {
+    height: auto;
+    border: round #ffcc00;
+    border-title-color: #ffcc00;
+    border-title-style: bold;
+    padding: 0 1;
 }
 
 #input-row {
     height: auto;
-    width: 1fr;
 }
 
-#input-area #prompt-label {
+InputBox #prompt-label {
     color: #ffcc00;
     text-style: bold;
     width: 3;
@@ -79,22 +87,23 @@ TitleBlock {
     padding: 0;
 }
 
-#input-area Input {
+InputBox Input {
     background: transparent;
     color: #e0e0e0;
-    border: none;
+    border: none !important;
     width: 1fr;
     height: 1;
     padding: 0;
+    margin: 0;
 }
 
-#input-area Input:focus {
-    border: none;
+InputBox Input:focus {
+    border: none !important;
 }
 
 #mode-indicator {
     height: 1;
-    padding: 0 0 0 3;
+    padding: 0 0 0 1;
     color: #888888;
 }
 """

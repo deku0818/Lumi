@@ -5,6 +5,7 @@ from lumi.tui.widgets.assistant_message import AssistantMessage
 from lumi.tui.widgets.tool_block import ToolBlock
 from lumi.tui.widgets.thinking_indicator import ThinkingIndicator
 from lumi.tui.widgets.input_bar import InputBar
+from lumi.tui.widgets.ask_block import AskBlock
 from lumi.tui.widgets.ask_dialog import AskDialog
 from lumi.tui.widgets.tool_approval import ToolApproval
 
@@ -16,6 +17,7 @@ __all__ = [
     "ToolBlock",
     "ThinkingIndicator",
     "InputBar",
+    "AskBlock",
     "AskDialog",
     "ToolApproval",
 ]

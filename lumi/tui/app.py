@@ -7,6 +7,7 @@ from textual.widgets import Static
 from lumi import __version__
 from lumi.tui.agent_bridge import AgentBridge, EventKind
 from lumi.tui.theme import APP_CSS
+from lumi.tui.widgets.ask_block import AskBlock
 from lumi.tui.widgets.ask_dialog import AskDialog
 from lumi.tui.widgets.tool_approval import ToolApproval
 from lumi.tui.widgets.assistant_message import AssistantMessage
@@ -36,6 +37,7 @@ class LumiApp(App):
         self._current_thinking: ThinkingIndicator | None = None
         self._agent_running = False
         self._tool_blocks: dict[str, ToolBlock] = {}
+        self._current_ask_block: AskBlock | None = None
 
     def compose(self) -> ComposeResult:
         yield ChatLog()
@@ -119,12 +121,18 @@ class LumiApp(App):
                 if self._current_assistant_msg:
                     self._current_assistant_msg.finalize()
                     self._current_assistant_msg = None
+                # ask 工具由 AskBlock 统一处理，不创建 ToolBlock
+                if evt.name == "ask":
+                    return
                 block = ToolBlock(evt.name, evt.args or {})
                 self._tool_blocks[evt.tool_call_id or evt.name] = block
                 await chat_log.mount(block)
                 await chat_log.auto_scroll_if_needed()
 
             case EventKind.TOOL_END:
+                # ask 工具由 AskBlock 统一处理
+                if evt.name == "ask":
+                    return
                 key = evt.tool_call_id or evt.name
                 block = self._tool_blocks.pop(key, None)
                 if block:
@@ -132,8 +140,9 @@ class LumiApp(App):
                 await chat_log.auto_scroll_if_needed()
 
             case EventKind.ASK:
-                dialog = AskDialog(evt.data)
-                await chat_log.mount(dialog)
+                ask_block = AskBlock(evt.data)
+                self._current_ask_block = ask_block
+                await chat_log.mount(ask_block)
                 await chat_log.auto_scroll_if_needed()
 
             case EventKind.TOOL_APPROVAL:
@@ -166,6 +175,9 @@ class LumiApp(App):
     # ── 中断恢复 ──
 
     async def on_ask_dialog_answered(self, event: AskDialog.Answered) -> None:
+        if self._current_ask_block:
+            self._current_ask_block.set_result(event.answer)
+            self._current_ask_block = None
         await self._run_resume(event.answer)
 
     async def on_tool_approval_decided(self, event: ToolApproval.Decided) -> None:
@@ -178,6 +190,7 @@ class LumiApp(App):
     def _finish_run(self) -> None:
         self._agent_running = False
         self._current_assistant_msg = None
+        self._current_ask_block = None
         self._stop_thinking()
         self._tool_blocks.clear()
         try:

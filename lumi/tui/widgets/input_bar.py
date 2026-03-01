@@ -10,15 +10,22 @@ from textual.widgets import Input, Static
 _TOOL_MODES = ("approve", "auto")
 
 _MODE_DISPLAY = {
-    "approve": ("🛡 approve mode", "#4caf50"),
+    "approve": ("✔ approve mode", "#4caf50"),
     "auto": ("⚡ auto mode", "#ffcc00"),
 }
 
 
+class InputBox(Static):
+    """输入框容器 - 带边框，类似 TitleBlock"""
+
+    def compose(self) -> ComposeResult:
+        with Horizontal(id="input-row"):
+            yield Static("> ", id="prompt-label")
+            yield Input(placeholder="输入消息...", id="user-input")
+
+
 class InputBar(Vertical):
     """底部输入栏 - 带 > 提示符 + 模式指示器"""
-
-    # 样式由 APP_CSS (#input-area) 统一管理
 
     class Submitted(Message):
         """用户提交消息"""
@@ -33,9 +40,7 @@ class InputBar(Vertical):
         self._tool_mode = "approve"
 
     def compose(self) -> ComposeResult:
-        with Horizontal(id="input-row"):
-            yield Static("> ", id="prompt-label")
-            yield Input(placeholder="输入消息...", id="user-input")
+        yield InputBox()
         label, color = _MODE_DISPLAY[self._tool_mode]
         yield Static(
             f"[{color}]{label}[/] [dim](shift+tab to switch)[/dim]",
@@ -43,6 +48,7 @@ class InputBar(Vertical):
         )
 
     def on_mount(self) -> None:
+        self.query_one(InputBox).border_title = "Input"
         self.query_one("#user-input", Input).focus()
 
     def on_key(self, event: Key) -> None:

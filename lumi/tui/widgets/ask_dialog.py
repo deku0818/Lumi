@@ -23,10 +23,9 @@ class AskDialog(Vertical):
 
     DEFAULT_CSS = """
     AskDialog {
-        margin: 0 1 0 2;
-        padding: 1;
-        background: #18182a;
-        border: solid #ffcc00;
+        margin: 0;
+        padding: 0;
+        background: transparent;
         height: auto;
     }
 
@@ -86,6 +85,13 @@ class AskDialog(Vertical):
             super().__init__()
             self.answer = answer
 
+    class TabChanged(Message):
+        """用户切换了问题 tab"""
+
+        def __init__(self, header: str) -> None:
+            super().__init__()
+            self.header = header
+
     def __init__(self, interrupt_data: dict) -> None:
         super().__init__(classes="ask-dialog")
         self._data = interrupt_data
@@ -125,7 +131,7 @@ class AskDialog(Vertical):
         # 问题体（全部预先 compose，通过渲染切换可见性）
         for qi, q in enumerate(self._questions):
             yield Static(
-                f"[bold #ffcc00]?[/] {q['question']}",
+                f"[bold #ffcc00][/] {q['question']}",
                 id=f"ask-q-{qi}",
                 classes="ask-question",
             )
@@ -162,6 +168,7 @@ class AskDialog(Vertical):
         self._apply_visibility()
 
     def on_mount(self) -> None:
+        self._apply_visibility()
         self.focus()
 
     # ── 渲染辅助 ──
@@ -211,11 +218,11 @@ class AskDialog(Vertical):
     def _render_hint(self) -> str:
         qi = self._current_tab
         if qi >= len(self._questions):
-            return "[dim](enter 提交所有答案)[/dim]"
+            return "[dim](enter 提交所有答案, esc 跳过)[/dim]"
         multi = self._questions[qi].get("multiSelect", False)
         if multi:
-            return "[dim](↑↓ 移动, 空格 切换, 数字键 快选, tab 输入框)[/dim]"
-        return "[dim](↑↓ 移动, enter/数字键 选择, tab 输入框)[/dim]"
+            return "[dim](↑↓ 移动, 空格 切换, 数字键 快选, tab 输入框, esc 跳过)[/dim]"
+        return "[dim](↑↓ 移动, enter/数字键 选择, tab 输入框, esc 跳过)[/dim]"
 
     def _apply_visibility(self) -> None:
         """根据 _current_tab 切换问题体的可见性"""
@@ -294,6 +301,10 @@ class AskDialog(Vertical):
         self._apply_visibility()
         self._refresh_current(tabs_changed=True)
         self._refresh_nav()
+        # 通知父组件更新标题
+        if new_tab < len(self._questions):
+            header = self._questions[new_tab].get("header", "ask")
+            self.post_message(self.TabChanged(header))
         # 如果切到 Submit 伪 tab（多问题场景），直接提交
         if new_tab >= len(self._questions):
             self._submit()
@@ -311,6 +322,11 @@ class AskDialog(Vertical):
         self._save_custom_input()
         answer = self._format_answers()
         self.post_message(self.Answered(answer))
+        self.remove()
+
+    def _decline(self) -> None:
+        """用户按 Esc 拒绝回答"""
+        self.post_message(self.Answered("User declined to answer questions"))
         self.remove()
 
     def _format_answers(self) -> str:
@@ -366,6 +382,11 @@ class AskDialog(Vertical):
         total = self._total_items(qi)
         multi = self._questions[qi].get("multiSelect", False)
         highlighted = self._highlighted.get(qi, 0)
+
+        if event.key == "escape":
+            self._decline()
+            event.stop()
+            return
 
         if event.key == "up":
             self._highlighted[qi] = (highlighted - 1) % total
