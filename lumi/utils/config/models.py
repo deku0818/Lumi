@@ -27,14 +27,6 @@ class AgentsConfig(BaseModel):
         default=100,
         description="Agent 递归执行限制，控制 agent 最大执行轮次",
     )
-    prompt_caching_ttl: Literal["5m", "1h"] | None = Field(
-        default=None,
-        description="Anthropic prompt caching TTL，设置即开启（'5m' 或 '1h'），默认 None 不开启",
-    )
-    subagent_prompt_caching_ttl: Literal["5m", "1h"] | None = Field(
-        default=None,
-        description="Subagent prompt caching TTL，设置即开启（'5m' 或 '1h'），默认 None 不开启",
-    )
     vision_mode: Literal["model", "tool"] = Field(
         default="model",
         description="图片识别模式：'model' - 使用模型多模态能力（默认）；'tool' - 将图片 URL 转为文本，通过工具识别",

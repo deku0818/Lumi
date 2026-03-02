@@ -14,6 +14,7 @@ from lumi.agents.core.executor_tools import (
 )
 from lumi.agents.core.message_tools import (
     cleanup_incomplete_tool_calls,
+    inject_message_cache_breakpoints,
     offload_tool_result,
 )
 from lumi.agents.core.scheme import LumiAgentContext, LumiAgentState
@@ -25,8 +26,9 @@ from lumi.agents.core.structured_tool import (
     is_structured_output_call,
 )
 from lumi.agents.base.response_service import extract_ainvoke_content
-from lumi.utils.llm_chain import chat_chain, tiktoken_counter, tool_call_chain
+from lumi.utils.llm_chain import tiktoken_counter, tool_call_chain
 from lumi.utils.logger import logger
+from lumi.utils.model_manager import detect_model_type
 from lumi.utils.read_config import get_config
 
 # 自带中断机制的工具，跳过审批直接执行
@@ -57,7 +59,12 @@ async def call_model(state: LumiAgentState, runtime: Runtime[LumiAgentContext]):
     )
     iterations = state.get("iterations", 1)
 
-    response = await chain.ainvoke({"messages": state["messages"]})
+    # Anthropic 模型：为对话消息注入缓存断点（滑动窗口策略）
+    messages = list(state["messages"])
+    if detect_model_type(model_name) in ("anthropic", "bedrock"):
+        inject_message_cache_breakpoints(messages)
+
+    response = await chain.ainvoke({"messages": messages})
 
     if response.tool_calls:
         logger.debug(f"[SimpleAgent]正在进行第「{iterations}」次工具调用迭代")
@@ -176,11 +183,14 @@ async def extract_structured_output(state: LumiAgentState):
     return {"structured_output": {}}
 
 
-async def summarizer(state: LumiAgentState):
+async def summarizer(state: LumiAgentState, runtime: Runtime[LumiAgentContext]):
     """总结历史聊天消息，记录摘要信息到 state（不直接替换）
 
     此函数在后台运行，与 CallModel 并行执行。
     生成的摘要会在下一轮对话时由 preprocess_messages 执行实际替换。
+
+    缓存安全的分叉：复用主对话的 system_prompt + tools 前缀，
+    只在末尾追加摘要指令，前面全部命中缓存。
 
     触发条件：
     - 消息 token 数 >= model_max_tokens * summary_threshold
@@ -227,23 +237,24 @@ async def summarizer(state: LumiAgentState):
     # 4. 记录需要总结的 message id
     summarized_ids = [msg.id for msg in messages_to_summarize]
 
-    # 5. 生成摘要（直接使用 LLM chain，避免递归）
+    # 5. 生成摘要
     prompt = get_config().load_prompt("SUMMARY")
-    if prompt is None:
-        prompt = get_config().load_prompt("summary")
-        if prompt:
-            logger.warning(
-                "使用 summary.md 作为摘要提示词已废弃，请将文件重命名为 SUMMARY.md。"
-            )
     if not prompt:
         raise ValueError(
             "未找到摘要提示词配置 'SUMMARY.md'。\n"
             "请在 .lumi/prompts/SUMMARY.md 中配置摘要提示词。"
         )
+
+    # 缓存安全的分叉：使用与主对话相同的 system_prompt + tools 构建 chain，
+    # 确保请求前缀一致，复用 Prompt Caching。
+    # 传入 tools 仅为保持缓存前缀，摘要本身不需要工具调用。
     summary_messages = messages_to_summarize + [HumanMessage(content=prompt)]
-    chain = chat_chain(
-        system_prompt="你是一个智能总结助手，请遵循我的指令进行准确完善的总结。",
+    chain = tool_call_chain(
+        runtime.context.tools,
+        system_prompt=runtime.context.system_prompt,
+        model_name=runtime.context.model_name,
         temperature=1,
+        streaming=False,
     )
     response = await chain.ainvoke({"messages": summary_messages})
     summary_text = extract_ainvoke_content(response.content)

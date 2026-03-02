@@ -8,7 +8,6 @@ from langchain_core.tools import tool
 
 from lumi.agents.tools.config import load_agents
 from lumi.agents.tools.registry import ToolRegistry
-from lumi.utils.read_config import get_config
 
 
 def _create_task_schema():
@@ -62,9 +61,7 @@ async def task(name: str, prompt: str):
     tools = [t for t in all_tools if t.name != "task"]
 
     # 创建并执行agent
-    agent = LumiAgent(
-        prompt_caching_ttl=get_config().config.agents.subagent_prompt_caching_ttl,
-    )
+    agent = LumiAgent()
 
     context = LumiAgentContext(
         tools=tools,

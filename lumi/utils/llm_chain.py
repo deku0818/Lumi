@@ -19,6 +19,7 @@ from langchain_core.prompts import (
 )
 from pydantic import BaseModel
 
+from lumi.agents.core.message_tools import CACHE_CONTROL
 from lumi.utils.logger import logger
 from lumi.utils.model_manager import DEFAULT_MODEL_NAME as MODEL_NAME
 from lumi.utils.model_manager import create_llm, detect_model_type
@@ -268,7 +269,6 @@ def tool_call_chain(
     model_name: str = None,
     use_cache: bool = True,
     tool_choice: str | dict | None = None,
-    prompt_caching_ttl: str | None = None,
     **llm_params,
 ):
     """
@@ -284,7 +284,6 @@ def tool_call_chain(
             强制调用指定工具: Anthropic 用 {"type": "tool", "name": "xxx"}，
             OpenAI 用 {"type": "function", "function": {"name": "xxx"}}
             但是langchain自行做了适配，所以传入的值会自动转换为适合的值
-        prompt_caching_ttl: Anthropic prompt caching TTL，设置即开启（'5m' 或 '1h'），None 不开启
         **llm_params: LLM的其他参数
     """
     # 设置默认参数
@@ -308,17 +307,14 @@ def tool_call_chain(
 
     messages = []
     if system_prompt:
-        if prompt_caching_ttl and isinstance(llm, ChatAnthropic):
+        if isinstance(llm, ChatAnthropic):
             messages.append(
                 SystemMessage(
                     content=[
                         {
                             "type": "text",
                             "text": system_prompt,
-                            "cache_control": {
-                                "type": "ephemeral",
-                                "ttl": prompt_caching_ttl,
-                            },
+                            "cache_control": CACHE_CONTROL,
                         }
                     ]
                 )

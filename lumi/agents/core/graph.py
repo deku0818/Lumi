@@ -1,5 +1,3 @@
-from typing import Literal
-
 from langgraph.checkpoint.base import BaseCheckpointSaver
 from langgraph.checkpoint.memory import MemorySaver
 from langgraph.graph import END, START
@@ -26,25 +24,14 @@ class LumiAgent(BaseGraph):
     def __init__(
         self,
         checkpointer: BaseCheckpointSaver | None = None,
-        prompt_caching_ttl: Literal["5m", "1h"] | None = None,
     ):
         """
         初始化SimpleAgent
 
         Args:
             checkpointer: checkpointer 实例，用于状态持久化，默认为 None（不使用）
-            tools (list): 工具列表
-            system_prompt (str | None): 系统提示词，默认从配置文件加载（SOUL.md + GUARDRAILS.md + AGENTS.md）
-            model_name (str): 指定使用的模型名称，默认使用环境变量配置
-            prompt_caching_ttl: （仅对Anthropic模型生效）Anthropic prompt caching TTL，设置即开启（'5m' 或 '1h'），None 不开启
-            **llm_params: LLM的其他参数，会传递给tool_call_chain
         """
         self.checkpointer = checkpointer
-        # 如果未指定 prompt_caching_ttl，则从配置加载
-        if prompt_caching_ttl is None:
-            self.prompt_caching_ttl = get_config().config.agents.prompt_caching_ttl
-        else:
-            self.prompt_caching_ttl = prompt_caching_ttl
 
         super().__init__()
         # 直接编译 graph

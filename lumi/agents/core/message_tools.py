@@ -155,3 +155,64 @@ def _write_offload_file(file_path: Path, content: str) -> None:
     """将内容写入卸载文件（同步，供 asyncio.to_thread 调用）"""
     file_path.parent.mkdir(parents=True, exist_ok=True)
     file_path.write_text(content, encoding="utf-8")
+
+
+# Anthropic prompt 缓存控制标记
+CACHE_CONTROL = {"type": "ephemeral", "ttl": "5m"}
+
+
+def _add_cache_control(
+    msg: HumanMessage | AIMessage | ToolMessage,
+) -> HumanMessage | AIMessage | ToolMessage:
+    """为消息的最后一个内容块添加 cache_control，返回新消息对象。
+
+    如果 content 既非字符串也非非空列表，则原样返回。
+    """
+    content = msg.content
+
+    if isinstance(content, str):
+        new_content = [
+            {"type": "text", "text": content, "cache_control": CACHE_CONTROL}
+        ]
+    elif isinstance(content, list) and content:
+        new_content = list(content)
+        last = new_content[-1]
+        if isinstance(last, dict):
+            new_content[-1] = {**last, "cache_control": CACHE_CONTROL}
+        elif isinstance(last, str):
+            new_content[-1] = {
+                "type": "text",
+                "text": last,
+                "cache_control": CACHE_CONTROL,
+            }
+        else:
+            return msg
+    else:
+        return msg
+
+    return msg.model_copy(update={"content": new_content})
+
+
+def inject_message_cache_breakpoints(messages: list) -> None:
+    """为消息列表末尾添加缓存断点（滑动窗口策略）。
+
+    在倒数第 2 条和最后 1 条非系统消息上添加 cache_control，
+    使每轮新请求的断点随对话向后滑动，上一轮末尾自动被前缀缓存覆盖。
+
+    仅对 Anthropic 模型有意义，调用侧应判断模型类型后再调用。
+
+    Args:
+        messages: 消息列表，就地替换对应元素
+    """
+    from langchain_core.messages import SystemMessage
+
+    non_system = [i for i, m in enumerate(messages) if not isinstance(m, SystemMessage)]
+    if not non_system:
+        return
+
+    if len(non_system) >= 2:
+        idx = non_system[-2]
+        messages[idx] = _add_cache_control(messages[idx])
+
+    idx = non_system[-1]
+    messages[idx] = _add_cache_control(messages[idx])
