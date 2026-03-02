@@ -301,15 +301,6 @@ def tool_call_chain(
 
     llm = create_llm(model_name=model_name, use_cache=use_cache, **default_llm_params)
 
-    # Anthropic prompt caching: prompt_caching_ttl 有值时才设置 cache_control，
-    # 在最后一个工具上设置，使 API 缓存所有工具定义（cache breakpoint 覆盖之前所有内容）
-    if prompt_caching_ttl and isinstance(llm, ChatAnthropic) and tools:
-        cache_control = {"type": "ephemeral", "ttl": prompt_caching_ttl}
-        tools[-1].extras = {
-            **(tools[-1].extras or {}),
-            "cache_control": cache_control,
-        }
-
     if tool_choice is not None:
         llm_with_tools = llm.bind_tools(tools, tool_choice=tool_choice)
     else:

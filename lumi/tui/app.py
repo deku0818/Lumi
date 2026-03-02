@@ -31,7 +31,7 @@ class LumiApp(App):
     CSS = APP_CSS
     TITLE = "Lumi"
     BINDINGS = [
-        ("escape", "cancel_generation", "Cancel"),
+        Binding("escape", "cancel_generation", "Cancel", priority=True),
         ("ctrl+c", "quit_app", "Quit"),
         Binding("ctrl+t", "toggle_theme", "Toggle Theme", priority=True),
     ]
@@ -290,6 +290,14 @@ class LumiApp(App):
         if self._agent_running:
             if self._current_task and not self._current_task.done():
                 self._current_task.cancel()
+            self._stop_thinking()
+            self._finalize_assistant_msg()
+            chat_log = self.query_one(ChatLog)
+            hint = Text()
+            hint.append("⏹ ", style="dim")
+            hint.append("已中断生成", style=f"dim {get_color('warning')}")
+            await chat_log.mount(Static(hint, markup=False))
+            await chat_log.auto_scroll_if_needed()
             self._finish_run()
 
     async def action_quit_app(self) -> None:

@@ -92,6 +92,9 @@ class InputBar(Vertical):
     def __init__(self, *args, **kwargs) -> None:
         super().__init__(*args, **kwargs)
         self._tool_mode = "approve"
+        self._history: list[str] = []
+        self._history_index: int = -1
+        self._draft: str = ""  # 暂存当前未提交的输入
 
     def compose(self) -> ComposeResult:
         yield InputBox()
@@ -111,13 +114,49 @@ class InputBar(Vertical):
             event.prevent_default()
             event.stop()
             self.action_switch_tool_mode()
+        elif event.key == "up":
+            event.prevent_default()
+            event.stop()
+            self._navigate_history(-1)
+        elif event.key == "down":
+            event.prevent_default()
+            event.stop()
+            self._navigate_history(1)
 
     def on_input_submitted(self, event: Input.Submitted) -> None:
         """Input 原生 Enter 提交"""
         text = event.value.strip()
         if text:
+            self._history.append(text)
+            self._history_index = -1
+            self._draft = ""
             event.input.value = ""
             self.post_message(self.Submitted(text, self._tool_mode))
+
+    def _navigate_history(self, direction: int) -> None:
+        """上下键浏览输入历史
+
+        Args:
+            direction: -1 向上（更早），1 向下（更近）
+        """
+        if not self._history:
+            return
+        inp = self.query_one("#user-input", Input)
+        # 首次按上键时，暂存当前输入
+        if self._history_index == -1 and direction == -1:
+            self._draft = inp.value
+        new_index = self._history_index - direction
+        if new_index < 0:
+            # 回到当前草稿
+            self._history_index = -1
+            inp.value = self._draft
+        elif new_index >= len(self._history):
+            return
+        else:
+            self._history_index = new_index
+            inp.value = self._history[len(self._history) - 1 - new_index]
+        # 光标移到末尾
+        inp.cursor_position = len(inp.value)
 
     def action_switch_tool_mode(self) -> None:
         """循环切换 tool_mode"""

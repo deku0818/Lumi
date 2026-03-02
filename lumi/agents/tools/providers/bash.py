@@ -37,16 +37,16 @@ async def bash(command: str) -> str:
     """在本地环境中执行非交互式 shell 命令。
 
     环境: 工作目录为当前项目目录，会话状态持久化（cd、export、alias 等）。
-
     限制: 不支持交互式命令（python、vim、ssh 等无参数调用会超时）。
-
-    示例 - 执行 Python 代码:
+    用法:
+    可执行所有的非交互式命令
+    - 如: 执行 Python 代码:
     ```
     python << 'EOF'
     print("Hello, World!")
     EOF
     ```
-    """
+    - 当有需求时请执行`date`获取当前时间"""
     try:
         working_dir = str(get_authorized_directory())
         session = get_session_manager().get_session(

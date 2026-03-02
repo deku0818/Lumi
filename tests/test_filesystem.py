@@ -257,7 +257,7 @@ class TestToolWrappers:
 
         f = authorized_tmp_dir / "r.txt"
         f.write_text("hello\nworld")
-        result = await read.ainvoke({"path": str(f)})
+        result = await read.ainvoke({"file_path": str(f)})
         assert "hello" in result
         assert "world" in result
 
@@ -265,7 +265,7 @@ class TestToolWrappers:
         from lumi.agents.tools.providers.filesystem import write
 
         path = str(authorized_tmp_dir / "w.txt")
-        result = await write.ainvoke({"path": path, "content": "data"})
+        result = await write.ainvoke({"file_path": path, "content": "data"})
         assert "成功" in result
 
     async def test_write_tool_error(self, authorized_tmp_dir):
@@ -273,7 +273,7 @@ class TestToolWrappers:
 
         f = authorized_tmp_dir / "exists.txt"
         f.write_text("old")
-        result = await write.ainvoke({"path": str(f), "content": "new"})
+        result = await write.ainvoke({"file_path": str(f), "content": "new"})
         assert "错误" in result
 
     async def test_edit_tool_success(self, authorized_tmp_dir):
@@ -282,7 +282,7 @@ class TestToolWrappers:
         f = authorized_tmp_dir / "ed.txt"
         f.write_text("foo bar")
         result = await edit.ainvoke(
-            {"path": str(f), "old_text": "foo", "new_text": "baz"}
+            {"file_path": str(f), "old_string": "foo", "new_string": "baz"}
         )
         assert "成功" in result
         assert "1" in result

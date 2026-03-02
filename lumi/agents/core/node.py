@@ -30,7 +30,7 @@ from lumi.utils.logger import logger
 from lumi.utils.read_config import get_config
 
 # 自带中断机制的工具，跳过审批直接执行
-APPROVAL_BYPASS_TOOLS = frozenset({"ask"})
+APPROVAL_BYPASS_TOOLS = frozenset({"ask", "read"})
 
 
 async def call_model(state: LumiAgentState, runtime: Runtime[LumiAgentContext]):
