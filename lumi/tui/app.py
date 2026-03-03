@@ -22,6 +22,9 @@ from lumi.tui.widgets.input_bar import InputBar
 from lumi.tui.widgets.thinking_indicator import ThinkingIndicator
 from lumi.tui.widgets.tool_block import ToolBlock
 from lumi.tui.widgets.user_message import UserMessage
+from lumi.tui.screens.init_flow_screen import InitFlowScreen
+from lumi.tui.screens.settings_screen import SettingsScreen
+from lumi.utils.config import GlobalConfig, GlobalConfigManager
 from lumi.utils.logger import logger
 
 
@@ -33,14 +36,14 @@ class LumiApp(App):
     BINDINGS = [
         Binding("escape", "cancel_generation", "Cancel", priority=True),
         ("ctrl+c", "quit_app", "Quit"),
-        Binding("ctrl+t", "toggle_theme", "Toggle Theme", priority=True),
+        Binding("ctrl+s", "open_settings", "Settings", priority=True),
     ]
 
     def __init__(self) -> None:
         super().__init__()
         self.register_theme(LUMI_DARK_THEME)
         self.register_theme(LUMI_LIGHT_THEME)
-        self.theme = "lumi-dark"  # 默认暗色，on_mount 中检测系统主题后切换
+        self.theme = "lumi-dark"  # 默认暗色，on_mount 中根据全局配置切换
         self._bridge = AgentBridge()
         self._current_assistant_msg: AssistantMessage | None = None
         self._current_thinking: ThinkingIndicator | None = None
@@ -48,6 +51,7 @@ class LumiApp(App):
         self._tool_blocks: dict[str, ToolBlock] = {}
         self._current_ask_block: AskBlock | None = None
         self._current_task: asyncio.Task | None = None
+        self._global_config = None
 
     def compose(self) -> ComposeResult:
         yield ChatLog()
@@ -86,19 +90,42 @@ class LumiApp(App):
             )
             return True
 
-    async def _poll_system_theme(self) -> None:
-        """定时轮询系统主题变化"""
-        is_dark = await self._detect_system_theme()
-        target = "lumi-dark" if is_dark else "lumi-light"
-        if self.theme != target:
-            self.theme = target
+    async def _apply_theme_mode(self, mode: str) -> None:
+        """根据 theme_mode 设置主题。
+
+        Args:
+            mode: 主题模式，可选值为 "dark"、"light"、"system"。
+        """
+        if mode == "dark":
+            self.theme = "lumi-dark"
+        elif mode == "light":
+            self.theme = "lumi-light"
+        else:
+            # system 模式：检测一次系统主题
+            is_dark = await self._detect_system_theme()
+            logger.info("系统主题检测结果: dark=%s", is_dark)
+            self.theme = "lumi-dark" if is_dark else "lumi-light"
 
     async def on_mount(self) -> None:
-        # 检测系统主题并启动轮询
-        is_dark = await self._detect_system_theme()
-        logger.info("系统主题检测结果: dark=%s", is_dark)
-        self.theme = "lumi-dark" if is_dark else "lumi-light"
-        self.set_interval(5, self._poll_system_theme)
+        # 加载全局配置
+        self._global_config = GlobalConfigManager.load()
+
+        # 首次启动引导：initialized 为 False 时触发引导流程
+        if not self._global_config.initialized:
+            self.push_screen(InitFlowScreen(), callback=self._on_init_flow_done)
+            return
+
+        # 已初始化，直接完成启动
+        await self._finish_mount()
+
+    async def _on_init_flow_done(self, config: GlobalConfig) -> None:
+        """初始化引导完成后的回调。"""
+        self._global_config = config
+        await self._finish_mount()
+
+    async def _finish_mount(self) -> None:
+        """应用主题并初始化 Agent bridge。"""
+        await self._apply_theme_mode(self._global_config.theme_mode)
 
         try:
             await self._bridge.initialize()
@@ -279,12 +306,19 @@ class LumiApp(App):
         except Exception:
             logger.error("[LumiApp] 无法重新启用输入栏，UI 可能已损坏", exc_info=True)
 
-    def action_toggle_theme(self) -> None:
-        """手动切换亮/暗主题"""
-        if self.theme == "lumi-dark":
-            self.theme = "lumi-light"
-        else:
-            self.theme = "lumi-dark"
+    async def action_open_settings(self) -> None:
+        """打开设置界面。"""
+        if self._global_config is None:
+            self._global_config = GlobalConfigManager.load()
+        self.push_screen(
+            SettingsScreen(self._global_config), callback=self._on_settings_done
+        )
+
+    async def _on_settings_done(self, result: GlobalConfig | None) -> None:
+        """设置界面关闭后的回调。"""
+        if result is not None:
+            self._global_config = result
+            await self._apply_theme_mode(result.theme_mode)
 
     async def action_cancel_generation(self) -> None:
         if self._agent_running:

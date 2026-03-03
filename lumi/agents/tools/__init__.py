@@ -20,11 +20,11 @@ ToolRegistry.register("ask", ask)
 # 条件注册：仅在有配置时才导入和注册
 try:
     if load_agents():
-        from .providers import task
+        from .providers import agent
 
-        ToolRegistry.register("task", task)
+        ToolRegistry.register("agent", agent)
 except Exception as e:
-    logger.warning(f"加载 agent 配置失败，'task' 工具不可用: {e}")
+    logger.warning(f"加载 agent 配置失败，'agent' 工具不可用: {e}")
 
 try:
     if load_skills():

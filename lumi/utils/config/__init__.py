@@ -17,11 +17,16 @@ from .models import (
     ToolArgsConfig,
     ToolOffloadConfig,
 )
+from .global_manager import GlobalConfigManager
+from .global_models import GlobalConfig
 from .reader import MissingEnvVarError, load_json_config, load_yaml_config
 
 __all__ = [
     # discovery
     "ConfigDiscovery",
+    # global config
+    "GlobalConfig",
+    "GlobalConfigManager",
     # manager
     "LumiConfig",
     "get_config",

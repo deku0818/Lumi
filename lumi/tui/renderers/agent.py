@@ -1,6 +1,6 @@
-"""任务委托工具（task）渲染器
+"""任务委托工具（agent）渲染器
 
-标题格式: task(代理名称)
+标题格式: agent(代理名称)
 参数区域: 展示任务描述（prompt），长文本截断折叠
 输出区域: 展示子代理返回的执行结果摘要
 """
@@ -17,15 +17,15 @@ from lumi.tui.theme import get_color
 _PROMPT_MAX_LEN = 500
 
 
-class TaskRenderer:
-    """task 工具渲染器"""
+class AgentRenderer:
+    """agent 工具渲染器"""
 
     def render_title(self, name: str, args: dict) -> str:
-        """生成标题，格式: task(代理名称)"""
+        """生成标题，格式: agent(代理名称)"""
         agent_name = args.get("name", "unknown")
         if not agent_name:
             agent_name = "unknown"
-        return f"task({agent_name})"
+        return f"agent({agent_name})"
 
     def render_args(self, args: dict, *, approval_mode: bool = False) -> Widget:
         """展示任务描述（prompt），长文本截断

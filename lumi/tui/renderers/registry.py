@@ -47,7 +47,7 @@ def _register_builtins() -> None:
     from lumi.tui.renderers.ls import LsRenderer
     from lumi.tui.renderers.read import ReadRenderer
     from lumi.tui.renderers.skill import SkillRenderer
-    from lumi.tui.renderers.task import TaskRenderer
+    from lumi.tui.renderers.agent import AgentRenderer
     from lumi.tui.renderers.todos import TodosRenderer
     from lumi.tui.renderers.write import WriteRenderer
 
@@ -59,7 +59,7 @@ def _register_builtins() -> None:
     register("glob", GlobRenderer)
     register("grep", GrepRenderer)
     register("todos", TodosRenderer)
-    register("task", TaskRenderer)
+    register("agent", AgentRenderer)
     register("skill", SkillRenderer)
 
 

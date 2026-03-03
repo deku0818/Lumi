@@ -1,4 +1,4 @@
-"""Task工具提供者 - 提供任务委托工具
+"""Agent工具提供者 - 提供任务委托工具
 
 将复杂任务委托给子代理执行。使用 LumiAgent 替代 OmniAgent 的 SimpleAgent。
 """
@@ -10,15 +10,15 @@ from lumi.agents.tools.config import load_agents
 from lumi.agents.tools.registry import ToolRegistry
 
 
-def _create_task_schema():
-    """动态创建task工具的schema"""
+def _create_agent_schema():
+    """动态创建agent工具的schema"""
     agents = load_agents()
     schema = {
         "type": "object",
         "properties": {
             "name": {
                 "type": "string",
-                "enum": [agent.name for agent in agents],
+                "enum": [a.name for a in agents],
                 "description": "代理名称",
             },
             "prompt": {
@@ -30,15 +30,15 @@ def _create_task_schema():
         "required": ["name", "prompt"],
     }
     description = "启动一个新的代理来自主处理复杂的多步骤任务。\n"
-    for agent in agents:
-        description += f"{agent.name}：{agent.description}\n"
+    for a in agents:
+        description += f"{a.name}：{a.description}\n"
 
     return description, schema
 
 
-@tool(description=_create_task_schema()[0], args_schema=_create_task_schema()[1])
-async def task(name: str, prompt: str):
-    """Task工具 - 委托给 LumiAgent 执行"""
+@tool(description=_create_agent_schema()[0], args_schema=_create_agent_schema()[1])
+async def agent(name: str, prompt: str):
+    """Agent工具 - 委托给 LumiAgent 执行"""
     # Lazy import避免循环依赖
     from lumi.agents.base.response_service import (
         extract_ainvoke_content,
@@ -53,15 +53,15 @@ async def task(name: str, prompt: str):
 
     agent_config = agent_configs[0]
 
-    # 获取工具 (排除task工具自身避免递归)
+    # 获取工具 (排除agent工具自身避免递归)
     registry = ToolRegistry.instance()
     all_tools = await registry.get_tools(
         names=agent_config.tools if agent_config.tools else None,
     )
-    tools = [t for t in all_tools if t.name != "task"]
+    tools = [t for t in all_tools if t.name != "agent"]
 
     # 创建并执行agent
-    agent = LumiAgent()
+    lumi_agent = LumiAgent()
 
     context = LumiAgentContext(
         tools=tools,
@@ -70,7 +70,7 @@ async def task(name: str, prompt: str):
     )
 
     inputs = {"messages": [HumanMessage(content=prompt)], "tool_mode": "auto"}
-    result = await agent.graph.ainvoke(inputs, context=context)
+    result = await lumi_agent.graph.ainvoke(inputs, context=context)
 
     content = result["messages"][-1].content if result["messages"] else ""
     return extract_ainvoke_content(content)

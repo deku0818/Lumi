@@ -29,7 +29,7 @@ class ToolRegistry:
         注册工具提供者
 
         Args:
-            name: 提供者名称 (如 "mcp", "skill", "task")
+            name: 提供者名称 (如 "mcp", "skill", "agent")
             provider: 可以是:
                 - async函数: async def(filter_names=None) -> List[StructuredTool]
                 - 模块对象: 自动收集模块中所有StructuredTool对象
