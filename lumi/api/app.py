@@ -1,5 +1,6 @@
 """FastAPI LangGraph 原始事件流 API"""
 
+import json
 from contextlib import asynccontextmanager
 
 from fastapi import FastAPI
@@ -37,8 +38,42 @@ async def lifespan(app: FastAPI):
     )
     app.state.agent = agent
     app.state.context = context
+
+    # 初始化定时任务子系统
+    try:
+        from lumi.agents.cron.delivery import APIDelivery, DeliveryManager
+        from lumi.agents.cron.job_store import JobStore
+        from lumi.agents.cron.run_log import RunLog
+        from lumi.agents.cron.scheduler import Scheduler
+        from lumi.agents.tools.providers.cron import init_cron_tool
+        from lumi.utils.config.global_manager import GLOBAL_CONFIG_DIR
+
+        cron_dir = GLOBAL_CONFIG_DIR / "cron"
+        job_store = JobStore(cron_dir / "jobs.json")
+        run_log = RunLog(cron_dir / "runs")
+        delivery = DeliveryManager()
+        api_delivery = APIDelivery()
+        delivery.register(api_delivery)
+        scheduler = Scheduler(job_store, run_log, delivery)
+        init_cron_tool(scheduler, job_store, run_log)
+        await scheduler.start()
+        app.state.scheduler = scheduler
+        app.state.delivery = delivery
+        app.state.api_delivery = api_delivery
+        logger.info("[API] 定时任务子系统已启动")
+    except Exception:
+        logger.error("[API] 定时任务子系统启动失败，cron 功能不可用", exc_info=True)
+        app.state.scheduler = None
+        app.state.delivery = None
+        app.state.api_delivery = None
+
     yield
-    # 关闭
+
+    # 关闭：优雅停止定时任务子系统
+    if app.state.scheduler:
+        await app.state.scheduler.stop()
+    if app.state.delivery:
+        await app.state.delivery.close_all()
     await agent.aclose()
     await get_session_manager().close_all()
 
@@ -68,6 +103,21 @@ async def langgraph_stream(body: LangGraphRequest):
         astream_raw_events(graph, input_data, config, context=app.state.context),
         media_type="text/event-stream",
     )
+
+
+@app.get("/api/cron/events")
+async def cron_events() -> StreamingResponse:
+    """SSE 端点，订阅定时任务执行结果。"""
+    from lumi.agents.cron.delivery import APIDelivery
+
+    api_delivery: APIDelivery = app.state.api_delivery
+
+    async def event_stream():
+        async for msg in api_delivery.subscribe():
+            data = json.dumps(msg, ensure_ascii=False)
+            yield f"data: {data}\n\n"
+
+    return StreamingResponse(event_stream(), media_type="text/event-stream")
 
 
 if __name__ == "__main__":

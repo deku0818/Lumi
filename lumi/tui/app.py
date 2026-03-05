@@ -1,5 +1,7 @@
 """Lumi TUI 主应用"""
 
+from __future__ import annotations
+
 import asyncio
 import sys
 
@@ -10,6 +12,11 @@ from textual.css.query import NoMatches
 from textual.widgets import Collapsible, Static
 
 from lumi import __version__
+from lumi.agents.cron.delivery import DeliveryManager, TUIDelivery
+from lumi.agents.cron.job_store import JobStore
+from lumi.agents.cron.run_log import RunLog
+from lumi.agents.cron.scheduler import Scheduler
+from lumi.agents.tools.providers.cron import init_cron_tool
 from lumi.tui.agent_bridge import AgentBridge, EventKind
 from lumi.tui.theme import APP_CSS, LUMI_DARK_THEME, LUMI_LIGHT_THEME, get_color
 from lumi.tui.widgets.ask_block import AskBlock
@@ -25,6 +32,7 @@ from lumi.tui.widgets.user_message import UserMessage
 from lumi.tui.screens.init_flow_screen import InitFlowScreen
 from lumi.tui.screens.settings_screen import SettingsScreen
 from lumi.utils.config import GlobalConfig, GlobalConfigManager, get_config
+from lumi.utils.config.global_manager import GLOBAL_CONFIG_DIR
 from lumi.utils.logger import logger
 
 
@@ -52,6 +60,8 @@ class LumiApp(App):
         self._current_ask_block: AskBlock | None = None
         self._current_task: asyncio.Task | None = None
         self._global_config = None
+        self._scheduler: Scheduler | None = None
+        self._delivery: DeliveryManager | None = None
 
     def compose(self) -> ComposeResult:
         yield ChatLog()
@@ -151,6 +161,23 @@ class LumiApp(App):
         )
         title.border_title = f"Lumi v{__version__}"
         await chat_log.mount(title)
+
+        # 初始化定时任务子系统
+        try:
+            cron_dir = GLOBAL_CONFIG_DIR / "cron"
+            job_store = JobStore(cron_dir / "jobs.json")
+            run_log = RunLog(cron_dir / "runs")
+            delivery = DeliveryManager()
+            delivery.register(TUIDelivery(self))
+            scheduler = Scheduler(job_store, run_log, delivery)
+            init_cron_tool(scheduler, job_store, run_log)
+            await scheduler.start()
+            self._scheduler = scheduler
+            self._delivery = delivery
+            logger.info("[LumiApp] 定时任务子系统已启动")
+        except Exception:
+            logger.warning("[LumiApp] 定时任务子系统启动失败", exc_info=True)
+            self.notify("定时任务子系统启动失败，cron 功能不可用", severity="warning")
 
     # ── 输入处理 ──
 
@@ -341,5 +368,12 @@ class LumiApp(App):
             self._finish_run()
 
     async def action_quit_app(self) -> None:
-        await self._bridge.close()
+        try:
+            if self._scheduler:
+                await self._scheduler.stop()
+            if self._delivery:
+                await self._delivery.close_all()
+            await self._bridge.close()
+        except Exception:
+            logger.warning("[LumiApp] 关闭资源时出错", exc_info=True)
         self.exit()

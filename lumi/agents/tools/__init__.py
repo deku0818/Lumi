@@ -7,7 +7,7 @@ from lumi.utils.logger import logger
 from .config import AgentConfig, SkillConfig, load_agents, load_skills
 
 # 导入工具提供者模块
-from .providers import ask, bash, filesystem, mcp, todo
+from .providers import ask, bash, cron, filesystem, mcp, todo
 from .registry import ToolRegistry
 
 # 注册常驻工具提供者
@@ -16,6 +16,7 @@ ToolRegistry.register("filesystem", filesystem)
 ToolRegistry.register("bash", bash)
 ToolRegistry.register("todo", todo)
 ToolRegistry.register("ask", ask)
+ToolRegistry.register("cron", cron)
 
 # 条件注册：仅在有配置时才导入和注册
 try:

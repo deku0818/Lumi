@@ -32,7 +32,7 @@ from lumi.utils.model_manager import detect_model_type
 from lumi.utils.read_config import get_config
 
 # 自带中断机制的工具，跳过审批直接执行
-APPROVAL_BYPASS_TOOLS = frozenset({"ask", "read"})
+APPROVAL_BYPASS_TOOLS = frozenset({"ask", "read", "cron"})
 
 
 async def call_model(state: LumiAgentState, runtime: Runtime[LumiAgentContext]):

@@ -1,0 +1,278 @@
+"""CronTool：对话工具，管理主动行为定时任务。
+
+提供 create、list、update、delete、run、pause、runs 七种操作，
+通过模块级变量持有运行时依赖（Scheduler、JobStore、RunLog），
+在应用启动时通过 ``init_cron_tool()`` 注入。
+"""
+
+from __future__ import annotations
+
+from typing import Literal
+
+from langchain_core.tools import tool
+from pydantic import BaseModel, Field
+
+from lumi.agents.cron.job_store import JobStore
+from lumi.agents.cron.models import Job, Schedule
+from lumi.agents.cron.run_log import RunLog
+from lumi.agents.cron.scheduler import Scheduler
+from lumi.utils.logger import logger
+
+# ---------------------------------------------------------------------------
+# 运行时依赖：应用启动时通过 init_cron_tool() 注入
+# ---------------------------------------------------------------------------
+_scheduler: Scheduler | None = None
+_job_store: JobStore | None = None
+_run_log: RunLog | None = None
+
+
+def init_cron_tool(scheduler: Scheduler, job_store: JobStore, run_log: RunLog) -> None:
+    """在应用启动时调用，注入运行时依赖。
+
+    Args:
+        scheduler: 调度器实例。
+        job_store: 任务持久化存储实例。
+        run_log: 执行日志实例。
+    """
+    global _scheduler, _job_store, _run_log  # noqa: PLW0603
+    _scheduler = scheduler
+    _job_store = job_store
+    _run_log = run_log
+
+
+def _require_deps() -> tuple[Scheduler, JobStore, RunLog]:
+    """获取运行时依赖，未初始化时抛出友好错误。"""
+    if _scheduler is None or _job_store is None or _run_log is None:
+        raise RuntimeError("cron 工具尚未初始化，请先调用 init_cron_tool()")
+    return _scheduler, _job_store, _run_log
+
+
+# ---------------------------------------------------------------------------
+# 输入 Schema
+# ---------------------------------------------------------------------------
+
+
+class CronInput(BaseModel):
+    """cron 工具的输入参数。
+
+    Attributes:
+        operation: 操作类型。
+        name: 任务名称（create 必填）。
+        schedule: 调度规则字符串（create 必填，update 可选）。
+        prompt: 执行载荷/提示词（create 必填，update 可选）。
+        job_id: 任务 ID（除 create/list 外必填）。
+        limit: runs 操作返回的最大记录数，默认 20。
+    """
+
+    operation: Literal["create", "list", "update", "delete", "run", "pause", "runs"] = (
+        Field(description="操作类型：create/list/update/delete/run/pause/runs")
+    )
+    name: str | None = Field(
+        default=None, description="任务名称（create 必填，update 可选）"
+    )
+    schedule: str | None = Field(
+        default=None,
+        description="调度规则：ISO 8601 时间点、间隔简写（30s/5m/2h/1d）或 cron 表达式",
+    )
+    prompt: str | None = Field(
+        default=None,
+        description="执行载荷，发送给 Agent 的提示词（create 必填，update 可选）",
+    )
+    job_id: str | None = Field(
+        default=None, description="任务 ID（除 create/list 外必填）"
+    )
+    limit: int = Field(default=20, description="runs 操作返回的最大记录数")
+
+
+# ---------------------------------------------------------------------------
+# 各操作实现
+# ---------------------------------------------------------------------------
+
+
+async def _handle_create(name: str, schedule_raw: str, prompt: str) -> str:
+    """创建新任务。"""
+    scheduler, job_store, _ = _require_deps()
+    sched = Schedule.parse(schedule_raw)
+    job = Job(name=name, schedule=sched, prompt=prompt)
+    await job_store.upsert(job)
+    scheduler.add_job(job)
+    return f"✅ 任务已创建：{job.name}（ID: {job.id}，调度: {sched.type.value} {sched.value}）"
+
+
+async def _handle_list() -> str:
+    """列出所有任务。"""
+    _, job_store, _ = _require_deps()
+    jobs = await job_store.get_all()
+    if not jobs:
+        return "当前没有任何定时任务。"
+    lines: list[str] = []
+    for j in jobs:
+        status = "✅ 启用" if j.enabled else "⏸️ 暂停"
+        lines.append(
+            f"- {j.name}（ID: {j.id}）| 调度: {j.schedule.type.value} {j.schedule.value} | {status}"
+        )
+    return "\n".join(lines)
+
+
+async def _handle_update(
+    job_id: str,
+    schedule_raw: str | None,
+    prompt: str | None,
+    name: str | None,
+) -> str:
+    """修改任务。"""
+    scheduler, job_store, _ = _require_deps()
+    job = await job_store.get(job_id)
+    if job is None:
+        return f"❌ 任务 {job_id} 不存在"
+
+    schedule_changed = False
+    if schedule_raw is not None:
+        job.schedule = Schedule.parse(schedule_raw)
+        schedule_changed = True
+    if prompt is not None:
+        job.prompt = prompt
+    if name is not None:
+        job.name = name
+
+    await job_store.upsert(job)
+
+    # 调度规则变更时重新注册到 APScheduler
+    if schedule_changed and job.enabled:
+        scheduler.add_job(job)
+
+    return f"✅ 任务已更新：{job.name}（ID: {job.id}）"
+
+
+async def _handle_delete(job_id: str) -> str:
+    """删除任务。"""
+    scheduler, job_store, _ = _require_deps()
+    job = await job_store.get(job_id)
+    if job is None:
+        return f"❌ 任务 {job_id} 不存在"
+
+    scheduler.remove_job(job_id)
+    await job_store.delete(job_id)
+    return f"✅ 任务已删除：{job.name}（ID: {job_id}）"
+
+
+async def _handle_run(job_id: str) -> str:
+    """立即执行一次任务。"""
+    scheduler, _, _ = _require_deps()
+    await scheduler.trigger(job_id)
+    return f"✅ 任务 {job_id} 已触发执行（异步），请稍后使用 runs 查看结果"
+
+
+async def _handle_pause(job_id: str) -> str:
+    """切换任务启用状态。"""
+    scheduler, job_store, _ = _require_deps()
+    job = await job_store.get(job_id)
+    if job is None:
+        return f"❌ 任务 {job_id} 不存在"
+
+    job.enabled = not job.enabled
+    await job_store.upsert(job)
+
+    if job.enabled:
+        scheduler.add_job(job)
+        return f"▶️ 任务已恢复：{job.name}（ID: {job.id}）"
+    else:
+        scheduler.remove_job(job_id)
+        return f"⏸️ 任务已暂停：{job.name}（ID: {job.id}）"
+
+
+async def _handle_runs(job_id: str, limit: int) -> str:
+    """查看最近执行记录。"""
+    _, _, run_log = _require_deps()
+    records = await run_log.get_recent(job_id, limit=limit)
+    if not records:
+        return f"任务 {job_id} 暂无执行记录。"
+    lines: list[str] = []
+    for r in records:
+        lines.append(
+            f"- [{r.status}] {r.started_at:%Y-%m-%d %H:%M:%S} | "
+            f"耗时 {r.duration_ms}ms | {r.output_summary[:80]}"
+            + (f" | 错误: {r.error}" if r.error else "")
+        )
+    return "\n".join(lines)
+
+
+# ---------------------------------------------------------------------------
+# 工具定义
+# ---------------------------------------------------------------------------
+
+CRON_DESCRIPTION = """管理主动行为定时任务，支持以下操作：
+
+- **create**: 创建新任务（需要 name、schedule、prompt）
+- **list**: 列出所有任务
+- **update**: 修改任务（需要 job_id，可选 schedule、prompt、name）
+- **delete**: 删除任务（需要 job_id）
+- **run**: 立即执行一次任务（需要 job_id）
+- **pause**: 暂停/恢复任务（需要 job_id）
+- **runs**: 查看最近执行记录（需要 job_id，可选 limit）
+
+调度规则支持三种格式：
+- ISO 8601 时间点：如 2025-01-15T09:00:00（一次性执行）
+- 固定间隔：如 30s、5m、2h、1d
+- cron 表达式（5 字段）：如 */5 * * * *"""
+
+
+@tool(description=CRON_DESCRIPTION, args_schema=CronInput)
+async def cron(
+    operation: str,
+    name: str | None = None,
+    schedule: str | None = None,
+    prompt: str | None = None,
+    job_id: str | None = None,
+    limit: int = 20,
+) -> str:
+    """管理主动行为定时任务。"""
+    try:
+        match operation:
+            case "create":
+                if not name:
+                    return "❌ 创建任务需要提供 name 参数"
+                if not schedule:
+                    return "❌ 创建任务需要提供 schedule 参数"
+                if not prompt:
+                    return "❌ 创建任务需要提供 prompt 参数"
+                return await _handle_create(name, schedule, prompt)
+
+            case "list":
+                return await _handle_list()
+
+            case "update":
+                if not job_id:
+                    return "❌ 更新任务需要提供 job_id 参数"
+                return await _handle_update(job_id, schedule, prompt, name)
+
+            case "delete":
+                if not job_id:
+                    return "❌ 删除任务需要提供 job_id 参数"
+                return await _handle_delete(job_id)
+
+            case "run":
+                if not job_id:
+                    return "❌ 执行任务需要提供 job_id 参数"
+                return await _handle_run(job_id)
+
+            case "pause":
+                if not job_id:
+                    return "❌ 暂停任务需要提供 job_id 参数"
+                return await _handle_pause(job_id)
+
+            case "runs":
+                if not job_id:
+                    return "❌ 查看执行记录需要提供 job_id 参数"
+                return await _handle_runs(job_id, limit)
+
+            case _:
+                return f"❌ 未知操作: {operation}"
+
+    except ValueError as e:
+        return f"❌ {e}"
+    except (KeyError, RuntimeError) as e:
+        return f"❌ {e}"
+    except Exception as e:
+        logger.error("[CronTool] 操作 %s 发生意外错误", operation, exc_info=True)
+        return f"❌ 内部错误: {type(e).__name__}: {e}"
