@@ -11,6 +11,7 @@ from rich.text import Text
 from textual.widget import Widget
 from textual.widgets import Static
 
+from lumi.tui.renderers.utils import get_arg
 from lumi.tui.theme import get_color
 
 
@@ -19,10 +20,7 @@ class GlobRenderer:
 
     def render_title(self, name: str, args: dict) -> str:
         """生成标题，格式: glob(搜索模式)"""
-        pattern = args.get("pattern", "unknown")
-        if not pattern:
-            pattern = "unknown"
-        return f"glob({pattern})"
+        return f"glob({get_arg(args, 'pattern')})"
 
     def render_args(self, args: dict, *, approval_mode: bool = False) -> Widget:
         """glob 参数简单（pattern + path），模式已在标题中展示，无需额外渲染"""

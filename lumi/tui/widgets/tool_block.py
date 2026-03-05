@@ -12,6 +12,7 @@ from textual.css.query import NoMatches
 from textual.widgets import Collapsible, Static
 
 from lumi.tui.renderers import get as get_renderer
+from lumi.tui.renderers.utils import SPINNER_FRAMES
 from lumi.tui.renderers.default import DefaultRenderer
 from lumi.tui.theme import get_color
 
@@ -36,8 +37,6 @@ class ToolBlock(Vertical):
     审批模式下自动展开详细内容，便于用户审阅。
     运行中时标题行显示 spinner 动画。
     """
-
-    SPINNER_FRAMES = ("⠋", "⠙", "⠹", "⠸", "⠼", "⠴", "⠦", "⠧", "⠇", "⠏")
 
     DEFAULT_CSS = """
     ToolBlock {
@@ -135,7 +134,7 @@ class ToolBlock(Vertical):
 
     def _running_status_text(self) -> str:
         """生成带 spinner 的运行状态文本"""
-        frame = self.SPINNER_FRAMES[self._spinner_frame % len(self.SPINNER_FRAMES)]
+        frame = SPINNER_FRAMES[self._spinner_frame % len(SPINNER_FRAMES)]
         return f"[{get_color('text_muted')}]{frame} Running...[/]"
 
     def _stop_spinner(self) -> None:

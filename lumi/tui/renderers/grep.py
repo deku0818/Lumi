@@ -14,6 +14,7 @@ from rich.text import Text
 from textual.widget import Widget
 from textual.widgets import Static
 
+from lumi.tui.renderers.utils import get_arg
 from lumi.tui.theme import get_color
 
 
@@ -25,12 +26,8 @@ class GrepRenderer:
 
     def render_title(self, name: str, args: dict) -> str:
         """生成标题，格式: grep(搜索模式)"""
-        pattern = args.get("pattern", "unknown")
-        if not pattern:
-            pattern = "unknown"
-        # 缓存 pattern 供 render_output 高亮使用
-        self._pattern = pattern
-        return f"grep({pattern})"
+        self._pattern = get_arg(args, "pattern")
+        return f"grep({self._pattern})"
 
     def render_args(self, args: dict, *, approval_mode: bool = False) -> Widget:
         """grep 参数简单（pattern + path + file_glob），模式已在标题中展示，无需额外渲染"""

@@ -11,6 +11,7 @@ from rich.text import Text
 from textual.widget import Widget
 from textual.widgets import Static
 
+from lumi.tui.renderers.utils import get_arg
 from lumi.tui.theme import get_color
 
 
@@ -19,10 +20,7 @@ class LsRenderer:
 
     def render_title(self, name: str, args: dict) -> str:
         """生成标题，格式: ls(目录路径)"""
-        path = args.get("path", "unknown")
-        if not path:
-            path = "unknown"
-        return f"ls({path})"
+        return f"ls({get_arg(args, 'path')})"
 
     def render_args(self, args: dict, *, approval_mode: bool = False) -> Widget:
         """ls 参数简单（仅 path），路径已在标题中展示，无需额外渲染"""

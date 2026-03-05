@@ -11,6 +11,7 @@ from rich.text import Text
 from textual.widget import Widget
 from textual.widgets import Static
 
+from lumi.tui.renderers.utils import get_arg
 from lumi.tui.theme import get_color
 
 # 提示词内容截断阈值（字符数）
@@ -22,10 +23,7 @@ class SkillRenderer:
 
     def render_title(self, name: str, args: dict) -> str:
         """生成标题，格式: skill(技能名称)"""
-        skill_name = args.get("name", "unknown")
-        if not skill_name:
-            skill_name = "unknown"
-        return f"skill({skill_name})"
+        return f"skill({get_arg(args, 'name')})"
 
     def render_args(self, args: dict, *, approval_mode: bool = False) -> Widget:
         """skill 参数仅 name，已在标题中展示，无需额外渲染"""

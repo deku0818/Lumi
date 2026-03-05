@@ -15,6 +15,7 @@ from rich.text import Text
 from textual.widget import Widget
 from textual.widgets import Static
 
+from lumi.tui.renderers.utils import get_arg, render_status_output
 from lumi.tui.theme import get_color
 
 # 折叠摘要的 diff 行数阈值
@@ -50,10 +51,7 @@ class EditRenderer:
 
     def render_title(self, name: str, args: dict) -> str:
         """生成标题，格式: edit(文件路径)"""
-        path = args.get("path", "unknown")
-        if not path:
-            path = "unknown"
-        return f"edit({path})"
+        return f"edit({get_arg(args, 'path')})"
 
     def render_args(self, args: dict, *, approval_mode: bool = False) -> Widget:
         """以带行号的 Diff 视图展示 old_text 和 new_text 之间的差异
@@ -87,14 +85,7 @@ class EditRenderer:
 
     def render_output(self, output: str) -> Widget:
         """显示编辑成功/失败状态"""
-        if not output:
-            return Static("", markup=False)
-
-        lower = output.lower()
-        if "error" in lower or "fail" in lower or "traceback" in lower:
-            return Static(Text(output, style=get_color("error")))
-
-        return Static(Text(output, style=get_color("success")))
+        return render_status_output(output)
 
 
 def _parse_diff(

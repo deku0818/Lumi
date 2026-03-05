@@ -218,79 +218,85 @@ class LumiApp(App):
         match evt.kind:
             case EventKind.MODEL_START:
                 await self._start_thinking(chat_log)
-
             case EventKind.STREAM_TOKEN:
-                self._stop_thinking()
-                if self._current_assistant_msg is None:
-                    self._current_assistant_msg = AssistantMessage()
-                    await chat_log.mount(self._current_assistant_msg)
-                self._current_assistant_msg.append_token(evt.text)
-                await chat_log.auto_scroll_if_needed()
-
+                await self._handle_stream_token(evt, chat_log)
             case EventKind.MODEL_END:
-                # 文字输出结束后，LLM 可能正在生成 tool call 参数，
-                # 重新显示 thinking 指示器，直到 TOOL_START / DONE / ERROR 出现
                 self._finalize_assistant_msg()
-
             case EventKind.TOOL_CALL_CHUNK:
-                # LLM 正在生成工具调用参数，显示 thinking 指示器
                 if not self._current_thinking:
                     await self._start_thinking(chat_log)
-
             case EventKind.TOOL_START:
-                self._stop_thinking()
-                self._finalize_assistant_msg()
-                # ask 工具由 AskBlock 统一处理，不创建 ToolBlock
-                if evt.name == "ask":
-                    return
-                key = evt.tool_call_id or evt.name
-                # 审批模式下 ToolBlock 已在 TOOL_APPROVAL 阶段创建
-                if key not in self._tool_blocks:
-                    block = ToolBlock(
-                        evt.name, evt.args or {}, approval_mode=evt.approval_mode
-                    )
-                    self._tool_blocks[key] = block
-                    await chat_log.mount(block)
-                await chat_log.auto_scroll_if_needed()
-
+                await self._handle_tool_start(evt, chat_log)
             case EventKind.TOOL_END:
-                # ask 工具由 AskBlock 统一处理
-                if evt.name == "ask":
-                    return
-                key = evt.tool_call_id or evt.name
-                block = self._tool_blocks.pop(key, None)
-                if block:
-                    block.set_done(evt.output)
-                await chat_log.auto_scroll_if_needed()
-
+                await self._handle_tool_end(evt, chat_log)
             case EventKind.ASK:
-                self._stop_thinking()
-                ask_block = AskBlock(evt.data)
-                self._current_ask_block = ask_block
-                await chat_log.mount(ask_block)
-                await chat_log.auto_scroll_if_needed()
-
+                await self._handle_ask(evt, chat_log)
             case EventKind.TOOL_APPROVAL:
-                self._stop_thinking()
-                self._finalize_assistant_msg()
-                # 为审批中的工具创建 ToolBlock（审批模式展开）
-                tool_calls = (evt.data or {}).get("tool_calls", [])
-                for tc in tool_calls:
-                    name = tc.get("name", "unknown")
-                    args = tc.get("args", {})
-                    key = tc.get("id") or name
-                    block = ToolBlock(name, args, approval_mode=True)
-                    self._tool_blocks[key] = block
-                    await chat_log.mount(block)
-                approval = ToolApproval(evt.data)
-                await chat_log.mount(approval)
-                await chat_log.auto_scroll_if_needed()
-
+                await self._handle_tool_approval(evt, chat_log)
             case EventKind.DONE:
                 self._finish_run()
-
             case EventKind.ERROR:
                 await self._show_error(chat_log, evt.error)
+
+    async def _handle_stream_token(self, evt, chat_log: ChatLog) -> None:
+        """处理流式 token 事件"""
+        self._stop_thinking()
+        if self._current_assistant_msg is None:
+            self._current_assistant_msg = AssistantMessage()
+            await chat_log.mount(self._current_assistant_msg)
+        self._current_assistant_msg.append_token(evt.text)
+        await chat_log.auto_scroll_if_needed()
+
+    async def _handle_tool_start(self, evt, chat_log: ChatLog) -> None:
+        """处理工具开始执行事件"""
+        self._stop_thinking()
+        self._finalize_assistant_msg()
+        # ask 工具由 AskBlock 统一处理，不创建 ToolBlock
+        if evt.name == "ask":
+            return
+        key = evt.tool_call_id or evt.name
+        # 审批模式下 ToolBlock 已在 TOOL_APPROVAL 阶段创建
+        if key not in self._tool_blocks:
+            block = ToolBlock(evt.name, evt.args or {}, approval_mode=evt.approval_mode)
+            self._tool_blocks[key] = block
+            await chat_log.mount(block)
+        await chat_log.auto_scroll_if_needed()
+
+    async def _handle_tool_end(self, evt, chat_log: ChatLog) -> None:
+        """处理工具执行完成事件"""
+        # ask 工具由 AskBlock 统一处理
+        if evt.name == "ask":
+            return
+        key = evt.tool_call_id or evt.name
+        block = self._tool_blocks.pop(key, None)
+        if block:
+            block.set_done(evt.output)
+        await chat_log.auto_scroll_if_needed()
+
+    async def _handle_ask(self, evt, chat_log: ChatLog) -> None:
+        """处理 ask 中断事件"""
+        self._stop_thinking()
+        ask_block = AskBlock(evt.data)
+        self._current_ask_block = ask_block
+        await chat_log.mount(ask_block)
+        await chat_log.auto_scroll_if_needed()
+
+    async def _handle_tool_approval(self, evt, chat_log: ChatLog) -> None:
+        """处理工具审批中断事件"""
+        self._stop_thinking()
+        self._finalize_assistant_msg()
+        # 为审批中的工具创建 ToolBlock（审批模式展开）
+        tool_calls = (evt.data or {}).get("tool_calls", [])
+        for tc in tool_calls:
+            name = tc.get("name", "unknown")
+            args = tc.get("args", {})
+            key = tc.get("id") or name
+            block = ToolBlock(name, args, approval_mode=True)
+            self._tool_blocks[key] = block
+            await chat_log.mount(block)
+        approval = ToolApproval(evt.data)
+        await chat_log.mount(approval)
+        await chat_log.auto_scroll_if_needed()
 
     def _stop_thinking(self) -> None:
         if self._current_thinking:

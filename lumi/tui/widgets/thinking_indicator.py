@@ -2,6 +2,8 @@
 
 from textual.widgets import Static
 
+from lumi.tui.renderers.utils import SPINNER_FRAMES
+
 
 class ThinkingIndicator(Static):
     """思考中指示器 - 显示旋转动画"""
@@ -14,8 +16,6 @@ class ThinkingIndicator(Static):
         color: $text-muted;
     }
     """
-
-    SPINNER_FRAMES = ["⠋", "⠙", "⠹", "⠸", "⠼", "⠴", "⠦", "⠧", "⠇", "⠏"]
 
     def __init__(self) -> None:
         super().__init__("", classes="thinking-indicator")
@@ -30,7 +30,7 @@ class ThinkingIndicator(Static):
         self._timer = self.set_interval(0.1, self._tick)
 
     def _tick(self) -> None:
-        frame = self.SPINNER_FRAMES[self._frame % len(self.SPINNER_FRAMES)]
+        frame = SPINNER_FRAMES[self._frame % len(SPINNER_FRAMES)]
         self.update(f"{frame} Thinking...")
         self._frame += 1
 

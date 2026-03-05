@@ -12,6 +12,7 @@ from rich.text import Text
 from textual.widget import Widget
 from textual.widgets import Static
 
+from lumi.tui.renderers.utils import get_arg
 from lumi.tui.theme import get_color
 
 # 折叠摘要的输出行数阈值
@@ -28,10 +29,7 @@ class BashRenderer:
 
     def render_title(self, name: str, args: dict) -> str:
         """生成标题，格式: bash(命令)"""
-        command = args.get("command", "unknown")
-        if not command:
-            command = "unknown"
-        return f"bash({command})"
+        return f"bash({get_arg(args, 'command')})"
 
     def render_args(self, args: dict, *, approval_mode: bool = False) -> Widget:
         """展示将要执行的命令文本"""

@@ -7,13 +7,12 @@
 
 from __future__ import annotations
 
-import os
-
 from rich.syntax import Syntax
 from rich.text import Text
 from textual.widget import Widget
 from textual.widgets import Static
 
+from lumi.tui.renderers.utils import get_arg, guess_lexer, render_status_output
 from lumi.tui.theme import get_color
 
 # 折叠摘要的行数阈值
@@ -25,10 +24,7 @@ class WriteRenderer:
 
     def render_title(self, name: str, args: dict) -> str:
         """生成标题，格式: write(文件路径)"""
-        path = args.get("path", "unknown")
-        if not path:
-            path = "unknown"
-        return f"write({path})"
+        return f"write({get_arg(args, 'path')})"
 
     def render_args(self, args: dict, *, approval_mode: bool = False) -> Widget:
         """以语法高亮代码块展示将要写入的文件内容
@@ -52,7 +48,7 @@ class WriteRenderer:
             return Static(summary)
 
         # 根据文件扩展名推断语言
-        lexer = _guess_lexer(path)
+        lexer = guess_lexer(path)
         syntax = Syntax(
             content,
             lexer,
@@ -64,49 +60,4 @@ class WriteRenderer:
 
     def render_output(self, output: str) -> Widget:
         """显示写入成功/失败状态"""
-        if not output:
-            return Static("", markup=False)
-
-        lower = output.lower()
-        if "error" in lower or "fail" in lower or "traceback" in lower:
-            return Static(Text(output, style=get_color("error")))
-
-        return Static(Text(output, style=get_color("success")))
-
-
-def _guess_lexer(path: str) -> str:
-    """根据文件路径推断语法高亮语言"""
-    if not path:
-        return "text"
-
-    _, ext = os.path.splitext(path)
-    ext = ext.lower()
-
-    lexer_map: dict[str, str] = {
-        ".py": "python",
-        ".js": "javascript",
-        ".ts": "typescript",
-        ".tsx": "tsx",
-        ".jsx": "jsx",
-        ".json": "json",
-        ".yaml": "yaml",
-        ".yml": "yaml",
-        ".toml": "toml",
-        ".md": "markdown",
-        ".html": "html",
-        ".css": "css",
-        ".sh": "bash",
-        ".bash": "bash",
-        ".rs": "rust",
-        ".go": "go",
-        ".java": "java",
-        ".rb": "ruby",
-        ".sql": "sql",
-        ".xml": "xml",
-        ".c": "c",
-        ".cpp": "cpp",
-        ".h": "c",
-        ".hpp": "cpp",
-    }
-
-    return lexer_map.get(ext, "text")
+        return render_status_output(output)

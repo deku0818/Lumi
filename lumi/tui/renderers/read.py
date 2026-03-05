@@ -7,13 +7,12 @@
 
 from __future__ import annotations
 
-import os
-
 from rich.syntax import Syntax
 from rich.text import Text
 from textual.widget import Widget
 from textual.widgets import Static
 
+from lumi.tui.renderers.utils import get_arg, guess_lexer
 from lumi.tui.theme import get_color
 
 # 折叠摘要的行数阈值
@@ -28,11 +27,8 @@ class ReadRenderer:
 
     def render_title(self, name: str, args: dict) -> str:
         """生成标题，格式: read(文件路径)"""
-        path = args.get("path", "unknown")
-        if not path:
-            path = "unknown"
-        self._path = path
-        return f"read({path})"
+        self._path = get_arg(args, "path")
+        return f"read({self._path})"
 
     def render_args(self, args: dict, *, approval_mode: bool = False) -> Widget:
         """read 参数简单（path/offset/limit），路径已在标题中展示，无需额外渲染"""
@@ -58,7 +54,7 @@ class ReadRenderer:
             return Static(summary)
 
         # 根据文件扩展名推断语言
-        lexer = _guess_lexer(self._path)
+        lexer = guess_lexer(self._path)
         syntax = Syntax(
             output,
             lexer,
@@ -67,41 +63,3 @@ class ReadRenderer:
             word_wrap=True,
         )
         return Static(syntax)
-
-
-def _guess_lexer(path: str) -> str:
-    """根据文件路径推断语法高亮语言"""
-    if not path:
-        return "text"
-
-    _, ext = os.path.splitext(path)
-    ext = ext.lower()
-
-    lexer_map: dict[str, str] = {
-        ".py": "python",
-        ".js": "javascript",
-        ".ts": "typescript",
-        ".tsx": "tsx",
-        ".jsx": "jsx",
-        ".json": "json",
-        ".yaml": "yaml",
-        ".yml": "yaml",
-        ".toml": "toml",
-        ".md": "markdown",
-        ".html": "html",
-        ".css": "css",
-        ".sh": "bash",
-        ".bash": "bash",
-        ".rs": "rust",
-        ".go": "go",
-        ".java": "java",
-        ".rb": "ruby",
-        ".sql": "sql",
-        ".xml": "xml",
-        ".c": "c",
-        ".cpp": "cpp",
-        ".h": "c",
-        ".hpp": "cpp",
-    }
-
-    return lexer_map.get(ext, "text")
