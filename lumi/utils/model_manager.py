@@ -16,8 +16,11 @@ from langchain_openai import ChatOpenAI
 
 from lumi.utils.logger import logger
 
+
 # 默认模型名称
-DEFAULT_MODEL_NAME = os.getenv("LLM_MODEL_NAME", "gpt-4.1-mini")
+def get_default_model_name() -> str:
+    """延迟读取环境变量，确保 config.yaml 的 env 已注入"""
+    return os.getenv("LLM_MODEL_NAME", "qwen3-max")
 
 
 class ModelManager:
@@ -66,7 +69,7 @@ class ModelManager:
             LLM实例 (ChatOpenAI, ChatAnthropic 或 ChatDeepSeek)
         """
         if model_name is None:
-            model_name = DEFAULT_MODEL_NAME
+            model_name = get_default_model_name()
 
         # 检测模型类型
         model_type = self._detect_model_type(model_name)

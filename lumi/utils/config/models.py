@@ -5,7 +5,9 @@
 
 from typing import Literal
 
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, Field, model_validator
+
+type CheckpointMode = Literal["memory", "sqlite", "postgres"]
 
 
 class AgentsConfig(BaseModel):
@@ -31,10 +33,24 @@ class AgentsConfig(BaseModel):
         default="model",
         description="图片识别模式：'model' - 使用模型多模态能力（默认）；'tool' - 将图片 URL 转为文本，通过工具识别",
     )
+    checkpoint: CheckpointMode = Field(
+        default="memory",
+        description="检查点存储模式：'memory' - 内存存储（默认）；'sqlite' - SQLite 持久化存储；'postgres' - PostgreSQL 持久化存储",
+    )
+    postgres_uri: str = Field(
+        default="",
+        description="PostgreSQL 连接 URI，仅在 checkpoint 为 'postgres' 时使用",
+    )
     max_upload_size_mb: int = Field(
         default=32,
         description="文档上传最大文件大小(MB)",
     )
+
+    @model_validator(mode="after")
+    def validate_postgres_uri(self) -> "AgentsConfig":
+        if self.checkpoint == "postgres" and not self.postgres_uri:
+            raise ValueError("checkpoint 为 'postgres' 时必须配置 agents.postgres_uri")
+        return self
 
 
 class TokenConfig(BaseModel):
@@ -203,4 +219,8 @@ class Config(BaseModel):
     )
     filesystem: FilesystemConfig = Field(
         default_factory=FilesystemConfig, description="文件系统工具配置"
+    )
+    env: dict[str, str] = Field(
+        default_factory=dict,
+        description="自定义环境变量，启动时注入到 os.environ",
     )

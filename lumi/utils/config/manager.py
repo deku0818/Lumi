@@ -4,6 +4,7 @@
 """
 
 import json
+import os
 from pathlib import Path
 from typing import Optional
 
@@ -79,10 +80,33 @@ class LumiConfig:
         if not config_file.exists():
             return Config()
 
-        with open(config_file, encoding="utf-8") as f:
-            config_dict = yaml.safe_load(f) or {}
+        try:
+            with open(config_file, encoding="utf-8") as f:
+                config_dict = yaml.safe_load(f) or {}
+        except yaml.YAMLError as e:
+            logger.error(f"config.yaml 格式错误，使用默认配置: {e}")
+            return Config()
+        except (OSError, UnicodeDecodeError) as e:
+            logger.error(f"config.yaml 读取失败，使用默认配置: {e}")
+            return Config()
 
-        return Config(**config_dict)
+        try:
+            return Config(**config_dict)
+        except ValueError as e:
+            logger.error(f"config.yaml 字段校验失败，使用默认配置: {e}")
+            return Config()
+
+    def apply_env(self) -> None:
+        """将配置中的 env 字段注入到 os.environ
+
+        仅设置尚未存在的环境变量，不覆盖已有值。
+        """
+        for key, value in self.config.env.items():
+            if key not in os.environ:
+                os.environ[key] = str(value)
+                logger.debug(f"注入环境变量: {key}")
+            else:
+                logger.debug(f"环境变量已存在，跳过: {key}")
 
     # === 目录路径属性 ===
 

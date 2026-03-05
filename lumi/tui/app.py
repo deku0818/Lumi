@@ -24,7 +24,7 @@ from lumi.tui.widgets.tool_block import ToolBlock
 from lumi.tui.widgets.user_message import UserMessage
 from lumi.tui.screens.init_flow_screen import InitFlowScreen
 from lumi.tui.screens.settings_screen import SettingsScreen
-from lumi.utils.config import GlobalConfig, GlobalConfigManager
+from lumi.utils.config import GlobalConfig, GlobalConfigManager, get_config
 from lumi.utils.logger import logger
 
 
@@ -124,8 +124,14 @@ class LumiApp(App):
         await self._finish_mount()
 
     async def _finish_mount(self) -> None:
-        """应用主题并初始化 Agent bridge。"""
+        """应用主题、注入环境变量并初始化 Agent bridge。"""
         await self._apply_theme_mode(self._global_config.theme_mode)
+
+        # 注入 config.yaml 中的 env 环境变量
+        try:
+            get_config().apply_env()
+        except Exception as e:
+            logger.warning(f"注入环境变量失败: {e}")
 
         try:
             await self._bridge.initialize()

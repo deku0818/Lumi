@@ -1,6 +1,7 @@
 """MCP工具提供者 - 从MCP服务器加载工具"""
 
 import copy
+import json
 import os
 from typing import Any
 from urllib.parse import parse_qsl, urlencode, urlparse, urlunparse
@@ -9,7 +10,6 @@ from langchain_core.tools.structured import StructuredTool
 from langchain_mcp_adapters.client import MultiServerMCPClient
 
 from lumi.agents.tools.interceptors import ToolArgsInterceptor
-from lumi.utils.config.reader import load_json_config
 from lumi.utils.logger import logger
 from lumi.utils.read_config import get_config
 
@@ -36,7 +36,7 @@ def _get_mcp_config_path() -> str:
 
 
 def _load_base_mcp_config() -> dict[str, Any]:
-    """加载基础MCP配置，支持 ${ENV_VAR} 语法引用环境变量"""
+    """加载基础MCP配置"""
     config_path = _get_mcp_config_path()
 
     if not os.path.exists(config_path):
@@ -44,7 +44,8 @@ def _load_base_mcp_config() -> dict[str, Any]:
         return {}
 
     try:
-        mcp_config = load_json_config(config_path)
+        with open(config_path, encoding="utf-8") as f:
+            mcp_config = json.load(f)
     except Exception as e:
         logger.error(f"MCP配置文件加载失败。文件路径: {config_path}, 错误: {e}")
         return {}

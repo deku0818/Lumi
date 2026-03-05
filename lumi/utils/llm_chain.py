@@ -21,7 +21,7 @@ from pydantic import BaseModel
 
 from lumi.agents.core.message_tools import CACHE_CONTROL
 from lumi.utils.logger import logger
-from lumi.utils.model_manager import DEFAULT_MODEL_NAME as MODEL_NAME
+from lumi.utils.model_manager import get_default_model_name
 from lumi.utils.model_manager import create_llm, detect_model_type
 from lumi.utils.read_config import get_config
 from lumi.utils.token_counter import str_token_counter
@@ -234,7 +234,10 @@ def structured_output(
     default_llm_params.update(llm_params)
 
     # Anthropic / Bedrock 模型禁用 thinking 以避免与 structured_output 冲突
-    if detect_model_type(model_name or MODEL_NAME) in ("anthropic", "bedrock"):
+    if detect_model_type(model_name or get_default_model_name()) in (
+        "anthropic",
+        "bedrock",
+    ):
         default_llm_params["thinking"] = None
 
     llm = create_llm(model_name=model_name, use_cache=use_cache, **default_llm_params)
@@ -291,7 +294,9 @@ def tool_call_chain(
     default_llm_params.update(llm_params)
 
     # Anthropic: thinking 与强制 tool_choice 不兼容，需禁用 thinking
-    if tool_choice is not None and detect_model_type(model_name or MODEL_NAME) in (
+    if tool_choice is not None and detect_model_type(
+        model_name or get_default_model_name()
+    ) in (
         "anthropic",
         "bedrock",
     ):

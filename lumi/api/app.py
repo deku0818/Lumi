@@ -11,6 +11,7 @@ from pydantic import BaseModel
 from lumi.agents.base.response_service import astream_raw_events
 from lumi.agents.core.graph import create_agent
 from lumi.agents.tools.session import get_session_manager
+from lumi.utils.logger import logger
 from lumi.utils.thread_id import generate_thread_id
 
 
@@ -22,12 +23,23 @@ class LangGraphRequest(BaseModel):
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
-    # 启动
-    agent, context = await create_agent()
+    # 启动：注入 config.yaml 中的 env 环境变量
+    from lumi.utils.config import get_config
+
+    try:
+        get_config().apply_env()
+    except Exception as e:
+        logger.warning(f"注入环境变量失败: {e}")
+        raise
+
+    agent, context = await create_agent(
+        checkpoint=get_config().config.agents.checkpoint,
+    )
     app.state.agent = agent
     app.state.context = context
     yield
     # 关闭
+    await agent.aclose()
     await get_session_manager().close_all()
 
 

@@ -17,7 +17,8 @@ from lumi.agents.core.node import APPROVAL_BYPASS_TOOLS
 from lumi.agents.core.scheme import LumiAgentContext
 from lumi.agents.tools.session import get_session_manager
 from lumi.utils.logger import logger
-from lumi.utils.model_manager import DEFAULT_MODEL_NAME
+from lumi.utils.model_manager import get_default_model_name
+from lumi.utils.read_config import get_config
 from lumi.utils.thread_id import generate_thread_id
 
 
@@ -58,15 +59,18 @@ class AgentBridge:
         self._agent: LumiAgent | None = None
         self._context: LumiAgentContext | None = None
         self._config: RunnableConfig | None = None
-        self.model_name: str = DEFAULT_MODEL_NAME
+        self.model_name: str = ""
 
     async def initialize(self) -> None:
         """初始化 Agent"""
-        self._agent, self._context = await create_agent()
+        self._agent, self._context = await create_agent(
+            checkpoint=get_config().config.agents.checkpoint,
+        )
+        self.model_name = get_default_model_name()
         thread_id = generate_thread_id()
         self._config = RunnableConfig(configurable={"thread_id": thread_id})
         logger.info(
-            f"[AgentBridge] 初始化完成, model={DEFAULT_MODEL_NAME}, thread={thread_id}"
+            f"[AgentBridge] 初始化完成, model={self.model_name}, thread={thread_id}"
         )
 
     async def stream_response(
@@ -91,6 +95,8 @@ class AgentBridge:
 
     async def close(self) -> None:
         """清理资源"""
+        if self._agent is not None:
+            await self._agent.aclose()
         await get_session_manager().close_all()
 
     async def _stream(

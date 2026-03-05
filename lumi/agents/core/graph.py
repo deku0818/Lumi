@@ -1,6 +1,12 @@
 from langgraph.checkpoint.base import BaseCheckpointSaver
-from langgraph.checkpoint.memory import MemorySaver
+from langgraph.checkpoint.memory import InMemorySaver
+from langgraph.checkpoint.postgres.aio import AsyncPostgresSaver
+from langgraph.checkpoint.sqlite.aio import AsyncSqliteSaver
 from langgraph.graph import END, START
+
+import aiosqlite
+from psycopg import AsyncConnection
+from psycopg.rows import dict_row
 
 from lumi.agents.base.graph import BaseGraph
 from lumi.agents.core.node import (
@@ -14,7 +20,9 @@ from lumi.agents.core.node import (
 )
 from lumi.agents.core.scheme import LumiAgentContext, LumiAgentState
 from lumi.agents.tools import get_tools
-from lumi.utils.model_manager import DEFAULT_MODEL_NAME
+from lumi.utils.config import CheckpointMode, GlobalConfigManager
+from lumi.utils.logger import logger
+from lumi.utils.model_manager import get_default_model_name
 from lumi.utils.read_config import get_config
 
 
@@ -84,21 +92,98 @@ class LumiAgent(BaseGraph):
         else:
             raise RuntimeError("checkpointer 不支持 adelete_thread 方法")
 
+    async def aclose(self) -> None:
+        """关闭 checkpointer 连接，释放资源"""
+        if self.checkpointer is None:
+            return
+        conn = getattr(self.checkpointer, "conn", None)
+        if conn is not None and hasattr(conn, "close"):
+            try:
+                await conn.close()
+            except Exception as e:
+                logger.error(f"关闭 checkpointer 连接失败: {e}")
 
-async def create_agent() -> tuple["LumiAgent", LumiAgentContext]:
+
+async def create_checkpointer(
+    checkpoint: CheckpointMode | None = None,
+) -> BaseCheckpointSaver | None:
+    """根据指定模式创建 checkpointer 实例
+
+    Args:
+        checkpoint: 检查点模式，可选值为 "memory"、"sqlite"、"postgres"、None。
+                    None 表示不使用 checkpointer。
+
+    Returns:
+        BaseCheckpointSaver 实例，或 None（不使用 checkpointer）
+    """
+    if checkpoint is None:
+        return None
+
+    match checkpoint:
+        case "sqlite":
+            checkpoint_dir = GlobalConfigManager.load().get_checkpoint_dir()
+            db_path = str(checkpoint_dir / "checkpoints.db")
+            try:
+                checkpoint_dir.mkdir(parents=True, exist_ok=True)
+                conn = await aiosqlite.connect(db_path)
+                checkpointer = AsyncSqliteSaver(conn)
+                await checkpointer.setup()
+                return checkpointer
+            except Exception as e:
+                raise RuntimeError(
+                    f"SQLite checkpointer 初始化失败 ({db_path}): {e}"
+                ) from e
+        case "postgres":
+            uri = get_config().config.agents.postgres_uri
+            if not uri:
+                raise ValueError(
+                    "checkpoint 设为 'postgres' 时必须配置 agents.postgres_uri"
+                )
+            conn = await AsyncConnection.connect(
+                uri, autocommit=True, prepare_threshold=0, row_factory=dict_row
+            )
+            checkpointer = AsyncPostgresSaver(conn=conn)
+            await checkpointer.setup()
+            return checkpointer
+        case _:
+            return InMemorySaver()
+
+
+async def create_agent(
+    tools: list | None = None,
+    system_prompt: str | None = None,
+    model_name: str | None = None,
+    checkpoint: CheckpointMode | None = None,
+) -> tuple["LumiAgent", LumiAgentContext]:
     """创建 LumiAgent 及其上下文的工厂函数
 
-    统一 TUI 和 API 的初始化逻辑，避免重复代码。
+    所有参数均可选，未指定时从配置文件读取默认值。
+    子 agent 场景可传入自定义参数并设置 checkpoint=None 跳过持久化。
+
+    Args:
+        tools: 工具列表，默认从注册表加载全部工具
+        system_prompt: 系统提示词，默认从配置文件加载
+        model_name: 模型名称，默认使用环境变量配置
+        checkpoint: 检查点模式，None 表示不使用 checkpointer
 
     Returns:
         (agent, context) 元组
     """
-    tools = await get_tools()
-    agent = LumiAgent(checkpointer=MemorySaver())
+    config = get_config()
+
+    if tools is None:
+        tools = await get_tools()
+    if system_prompt is None:
+        system_prompt = config.load_system_prompt()
+    if model_name is None:
+        model_name = get_default_model_name()
+
+    checkpointer = await create_checkpointer(checkpoint)
+    agent = LumiAgent(checkpointer=checkpointer)
     context = LumiAgentContext(
         tools=tools,
-        system_prompt=get_config().load_system_prompt(),
-        model_name=DEFAULT_MODEL_NAME,
+        system_prompt=system_prompt,
+        model_name=model_name,
     )
     return agent, context
 

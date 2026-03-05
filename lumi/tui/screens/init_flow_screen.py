@@ -16,12 +16,7 @@ from textual.widgets import Label, RadioButton, RadioSet, Rule, Static
 
 from lumi.utils.config import GlobalConfig, GlobalConfigManager
 
-# 主题模式选项映射：显示文本 → 配置值
-_THEME_OPTIONS: list[tuple[str, str]] = [
-    ("● 暗色 (Dark)", "dark"),
-    ("○ 明亮 (Light)", "light"),
-    ("◐ 跟随系统 (System)", "system"),
-]
+from ._constants import THEME_OPTIONS as _THEME_OPTIONS
 
 _DEFAULT_THEME_MODE = "system"
 
@@ -88,7 +83,8 @@ class InitFlowScreen(ModalScreen[GlobalConfig]):
     def compose(self) -> ComposeResult:
         """渲染初始化引导界面。"""
         default_index = next(
-            i for i, (_, v) in enumerate(_THEME_OPTIONS) if v == _DEFAULT_THEME_MODE
+            (i for i, (_, v) in enumerate(_THEME_OPTIONS) if v == _DEFAULT_THEME_MODE),
+            0,
         )
         container = Vertical()
         container.border_title = "Lumi Setup"
@@ -127,12 +123,21 @@ class InitFlowScreen(ModalScreen[GlobalConfig]):
         pressed_index = radio_set.pressed_index
         if pressed_index < 0:
             pressed_index = next(
-                i for i, (_, v) in enumerate(_THEME_OPTIONS) if v == _DEFAULT_THEME_MODE
+                (
+                    i
+                    for i, (_, v) in enumerate(_THEME_OPTIONS)
+                    if v == _DEFAULT_THEME_MODE
+                ),
+                0,
             )
 
         _, selected_value = _THEME_OPTIONS[pressed_index]
         config = GlobalConfig(initialized=True, theme_mode=selected_value)
-        GlobalConfigManager.save(config)
+        try:
+            GlobalConfigManager.save(config)
+        except Exception as e:
+            self.app.notify(f"配置保存失败: {e}", severity="error")
+            return
         self.dismiss(config)
 
     async def action_quit_app(self) -> None:

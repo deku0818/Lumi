@@ -35,23 +35,29 @@ class GlobalConfigManager:
         """
         try:
             GlobalConfigManager._ensure_dir()
-        except PermissionError:
-            logger.error("无法创建 ~/.lumi/ 目录")
+        except OSError as e:
+            logger.error(f"无法创建 ~/.lumi/ 目录: {e}")
             return GlobalConfig()
 
         if not GLOBAL_CONFIG_FILE.exists():
             config = GlobalConfig()
             try:
                 GlobalConfigManager.save(config)
-            except Exception:
-                logger.error("无法写入默认配置文件")
+            except Exception as e:
+                logger.error(f"无法写入默认配置文件: {e}")
             return config
 
         try:
             data = json.loads(GLOBAL_CONFIG_FILE.read_text("utf-8"))
             return GlobalConfig(**data)
-        except (json.JSONDecodeError, ValueError):
-            logger.warning("lumi.json 解析失败，使用默认配置")
+        except json.JSONDecodeError as e:
+            logger.warning(f"lumi.json 解析失败，使用默认配置: {e}")
+            return GlobalConfig()
+        except (OSError, UnicodeDecodeError) as e:
+            logger.error(f"lumi.json 读取失败，使用默认配置: {e}")
+            return GlobalConfig()
+        except ValueError as e:
+            logger.warning(f"lumi.json 字段校验失败，使用默认配置: {e}")
             return GlobalConfig()
 
     @staticmethod

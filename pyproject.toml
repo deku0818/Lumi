@@ -16,6 +16,9 @@ dependencies = [
     "uvicorn>=0.41.0",
     "wcmatch>=10.1",
     "textual>=3.0.0",
+    "langgraph-checkpoint-sqlite>=3.0.3",
+    "langgraph-checkpoint-postgres>=3.0.4",
+    "psycopg[binary]>=3.3.3",
 ]
 
 [project.scripts]

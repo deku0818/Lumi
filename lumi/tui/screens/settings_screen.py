@@ -13,12 +13,7 @@ from textual.widgets import Label, RadioButton, RadioSet, Rule, Static
 
 from lumi.utils.config import GlobalConfig, GlobalConfigManager
 
-# 主题模式选项映射：显示文本 → 配置值
-_THEME_OPTIONS: list[tuple[str, str]] = [
-    ("● 暗色 (Dark)", "dark"),
-    ("○ 明亮 (Light)", "light"),
-    ("◐ 跟随系统 (System)", "system"),
-]
+from ._constants import THEME_OPTIONS as _THEME_OPTIONS
 
 
 class SettingsScreen(ModalScreen[GlobalConfig | None]):
@@ -118,14 +113,21 @@ class SettingsScreen(ModalScreen[GlobalConfig | None]):
         pressed_index = radio_set.pressed_index
         if pressed_index < 0:
             pressed_index = next(
-                i
-                for i, (_, v) in enumerate(_THEME_OPTIONS)
-                if v == self._config.theme_mode
+                (
+                    i
+                    for i, (_, v) in enumerate(_THEME_OPTIONS)
+                    if v == self._config.theme_mode
+                ),
+                0,
             )
 
         _, selected_value = _THEME_OPTIONS[pressed_index]
         self._config.theme_mode = selected_value
-        GlobalConfigManager.save(self._config)
+        try:
+            GlobalConfigManager.save(self._config)
+        except Exception as e:
+            self.app.notify(f"配置保存失败: {e}", severity="error")
+            return
         self.dismiss(self._config)
 
     async def action_quit_app(self) -> None:

@@ -36,15 +36,15 @@ def _create_agent_schema():
     return description, schema
 
 
-@tool(description=_create_agent_schema()[0], args_schema=_create_agent_schema()[1])
+_agent_description, _agent_schema = _create_agent_schema()
+
+
+@tool(description=_agent_description, args_schema=_agent_schema)
 async def agent(name: str, prompt: str):
     """Agent工具 - 委托给 LumiAgent 执行"""
     # Lazy import避免循环依赖
-    from lumi.agents.base.response_service import (
-        extract_ainvoke_content,
-    )
-    from lumi.agents.core.graph import LumiAgent
-    from lumi.agents.core.scheme import LumiAgentContext
+    from lumi.agents.base.response_service import extract_ainvoke_content
+    from lumi.agents.core.graph import create_agent
 
     # 加载agent配置
     agent_configs = load_agents(name=name)
@@ -54,19 +54,16 @@ async def agent(name: str, prompt: str):
     agent_config = agent_configs[0]
 
     # 获取工具 (排除agent工具自身避免递归)
-    registry = ToolRegistry.instance()
-    all_tools = await registry.get_tools(
+    all_tools = await ToolRegistry.instance().get_tools(
         names=agent_config.tools if agent_config.tools else None,
     )
     tools = [t for t in all_tools if t.name != "agent"]
 
-    # 创建并执行agent
-    lumi_agent = LumiAgent()
-
-    context = LumiAgentContext(
+    # 创建并执行agent（子agent不使用checkpointer）
+    lumi_agent, context = await create_agent(
         tools=tools,
         system_prompt=agent_config.system_prompt,
-        model_name=agent_config.model or "",
+        model_name=agent_config.model or None,
     )
 
     inputs = {"messages": [HumanMessage(content=prompt)], "tool_mode": "auto"}
