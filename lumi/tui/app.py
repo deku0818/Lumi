@@ -243,11 +243,14 @@ class LumiApp(App):
                 # ask 工具由 AskBlock 统一处理，不创建 ToolBlock
                 if evt.name == "ask":
                     return
-                block = ToolBlock(
-                    evt.name, evt.args or {}, approval_mode=evt.approval_mode
-                )
-                self._tool_blocks[evt.tool_call_id or evt.name] = block
-                await chat_log.mount(block)
+                key = evt.tool_call_id or evt.name
+                # 审批模式下 ToolBlock 已在 TOOL_APPROVAL 阶段创建
+                if key not in self._tool_blocks:
+                    block = ToolBlock(
+                        evt.name, evt.args or {}, approval_mode=evt.approval_mode
+                    )
+                    self._tool_blocks[key] = block
+                    await chat_log.mount(block)
                 await chat_log.auto_scroll_if_needed()
 
             case EventKind.TOOL_END:
@@ -269,6 +272,16 @@ class LumiApp(App):
 
             case EventKind.TOOL_APPROVAL:
                 self._stop_thinking()
+                self._finalize_assistant_msg()
+                # 为审批中的工具创建 ToolBlock（审批模式展开）
+                tool_calls = (evt.data or {}).get("tool_calls", [])
+                for tc in tool_calls:
+                    name = tc.get("name", "unknown")
+                    args = tc.get("args", {})
+                    key = tc.get("id") or name
+                    block = ToolBlock(name, args, approval_mode=True)
+                    self._tool_blocks[key] = block
+                    await chat_log.mount(block)
                 approval = ToolApproval(evt.data)
                 await chat_log.mount(approval)
                 await chat_log.auto_scroll_if_needed()
@@ -314,17 +327,22 @@ class LumiApp(App):
         await self._run_resume(event.answer)
 
     async def on_tool_approval_decided(self, event: ToolApproval.Decided) -> None:
-        if event.decision == "auto":
-            self.query_one(InputBar).set_tool_mode("auto")
-        # 审批后折叠所有审批模式下展开的 ToolBlock
+        decision = event.decision
+
         for block in self._tool_blocks.values():
             if block.approval_mode:
-                try:
-                    collapsible = block.query_one(Collapsible)
-                    collapsible.collapsed = True
-                except NoMatches:
-                    pass
-        await self._run_resume(event.decision)
+                if decision == "cancel":
+                    block.set_error("用户中断了审批")
+                elif decision == "reject":
+                    block.set_error("用户拒绝了此工具执行")
+                else:
+                    # 允许：折叠审批展开的内容
+                    try:
+                        collapsible = block.query_one(Collapsible)
+                        collapsible.collapsed = True
+                    except NoMatches:
+                        pass
+        await self._run_resume(decision)
 
     # ── 操作 ──
 
@@ -354,6 +372,15 @@ class LumiApp(App):
             await self._apply_theme_mode(result.theme_mode)
 
     async def action_cancel_generation(self) -> None:
+        # 如果当前有审批组件，esc 触发审批中断而非取消生成
+        try:
+            approval = self.query_one(ToolApproval)
+            approval.post_message(ToolApproval.Decided("cancel"))
+            approval.call_later(approval.remove)
+            return
+        except NoMatches:
+            pass
+
         if self._agent_running:
             if self._current_task and not self._current_task.done():
                 self._current_task.cancel()

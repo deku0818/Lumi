@@ -1,3 +1,5 @@
+from pathlib import Path
+
 from langgraph.checkpoint.base import BaseCheckpointSaver
 from langgraph.checkpoint.memory import InMemorySaver
 from langgraph.checkpoint.postgres.aio import AsyncPostgresSaver
@@ -20,6 +22,7 @@ from lumi.agents.core.node import (
 )
 from lumi.agents.core.scheme import LumiAgentContext, LumiAgentState
 from lumi.agents.tools import get_tools
+from lumi.agents.tools.permissions.engine import PermissionEngine
 from lumi.utils.config import CheckpointMode, GlobalConfigManager
 from lumi.utils.logger import logger
 from lumi.utils.model_manager import get_default_model_name
@@ -178,12 +181,20 @@ async def create_agent(
     if model_name is None:
         model_name = get_default_model_name()
 
+    # 初始化权限引擎
+    try:
+        permission_engine = PermissionEngine(Path.cwd())
+    except Exception:
+        logger.error("权限引擎创建失败，将以无权限模式运行", exc_info=True)
+        permission_engine = None
+
     checkpointer = await create_checkpointer(checkpoint)
     agent = LumiAgent(checkpointer=checkpointer)
     context = LumiAgentContext(
         tools=tools,
         system_prompt=system_prompt,
         model_name=model_name,
+        permission_engine=permission_engine,
     )
     return agent, context
 

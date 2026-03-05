@@ -2,6 +2,7 @@ from langchain_core.messages import (
     HumanMessage,
     RemoveMessage,
     SystemMessage,
+    ToolMessage,
 )
 from langgraph.graph import END
 from langgraph.prebuilt import ToolNode
@@ -18,6 +19,15 @@ from lumi.agents.core.message_tools import (
     offload_tool_result,
 )
 from lumi.agents.core.scheme import LumiAgentContext, LumiAgentState
+from lumi.agents.tools.permissions.matcher import (
+    _COMMAND_ARG_KEYS,
+    _COMMAND_TOOLS,
+    _PATH_ARG_KEYS,
+    _PATH_TOOLS,
+    _extract_arg,
+)
+from lumi.agents.tools.permissions.models import BYPASS_TOOLS, PermissionDecision
+from lumi.agents.tools.workspace import add_authorized_directory
 from lumi.agents.core.structured_tool import (
     STRUCTURED_OUTPUT_INSTRUCTION,
     apply_output_enrich,
@@ -31,8 +41,8 @@ from lumi.utils.logger import logger
 from lumi.utils.model_manager import detect_model_type
 from lumi.utils.read_config import get_config
 
-# 自带中断机制的工具，跳过审批直接执行
-APPROVAL_BYPASS_TOOLS = frozenset({"ask", "read", "cron"})
+# ask 等自带中断机制的工具，跳过所有审批直接执行（向后兼容导出）
+APPROVAL_BYPASS_TOOLS = BYPASS_TOOLS
 
 
 async def call_model(state: LumiAgentState, runtime: Runtime[LumiAgentContext]):
@@ -97,18 +107,16 @@ async def tool_executor(state: LumiAgentState, runtime: Runtime[LumiAgentContext
     return {"messages": messages_list}
 
 
-def is_use_tool(state: LumiAgentState):
-    """
-    条件路由函数 - 判断下一步执行哪个节点
+def is_use_tool(state: LumiAgentState, runtime: Runtime[LumiAgentContext]):
+    """条件路由函数 - 判断下一步执行哪个节点
 
     路由优先级：
-    - 有 tool_calls 且包含结构化输出工具 → "ExtractStructuredOutput" 直接提取结构化数据
-    - 有 tool_calls 且 tool_mode="auto" → "ToolExecutor" 直接执行
-    - 有 tool_calls 且 tool_mode!="auto" → "HumanApproval" 等待人工审批
+    - 有 tool_calls 且包含结构化输出工具 → "ExtractStructuredOutput"
+    - BYPASS_TOOLS (如 ask) → "ToolExecutor" 直接执行
+    - privileged 模式 → "ToolExecutor" 直接执行
+    - auto 模式 + 全部 allow → "ToolExecutor" 直接执行
+    - 其他 → "HumanApproval" 等待审批
     - 无 tool_calls → "END" 结束流程
-
-    注意：当 output_schema 存在时，call_model 会设置 tool_choice="any" 强制模型调用工具，
-    因此不会出现"无 tool_calls + 有 output_schema"的情况。
     """
     last_message = state.get("messages", [])[-1]
     tool_calls = getattr(last_message, "tool_calls", [])
@@ -118,39 +126,229 @@ def is_use_tool(state: LumiAgentState):
 
     if is_structured_output_call(tool_calls):
         return "ExtractStructuredOutput"
-    if state.get("tool_mode", "") == "auto":
+
+    # BYPASS_TOOLS 始终直接执行
+    if all(tc["name"] in BYPASS_TOOLS for tc in tool_calls):
         return "ToolExecutor"
-    if all(tc["name"] in APPROVAL_BYPASS_TOOLS for tc in tool_calls):
+
+    tool_mode = state.get("tool_mode", "approve")
+
+    # 特权模式：跳过所有审批
+    if tool_mode == "privileged":
+        return "ToolExecutor"
+
+    # 使用权限引擎评估
+    engine = runtime.context.permission_engine
+    if engine is not None:
+        engine.reload()
+
+        # 特权模式（通过配置或环境变量）
+        if engine.is_privileged:
+            return "ToolExecutor"
+
+        if tool_mode == "auto":
+            # auto 模式：全部 allow 才直接执行，否则需要审批
+            all_allowed = all(
+                engine.evaluate(tc["name"], tc.get("args", {}))
+                == PermissionDecision.ALLOW
+                and engine.check_workspace_boundary(tc["name"], tc.get("args", {}))
+                for tc in tool_calls
+            )
+            if all_allowed:
+                return "ToolExecutor"
+            return "HumanApproval"
+
+    # supervised/approve 模式：需要审批
+    if tool_mode == "auto":
         return "ToolExecutor"
     return "HumanApproval"
 
 
-def human_approval(state: LumiAgentState) -> Command:
+def human_approval(
+    state: LumiAgentState, runtime: Runtime[LumiAgentContext]
+) -> Command:
     """使用 interrupt 暂停执行，等待用户审批
 
-    中断时返回结构化数据，包含：
-    - type: 中断类型，固定为 "tool_approval"
-    - message: 提示信息
-    - tool_calls: 待审批的工具调用列表
+    根据 tool_mode 和 PermissionDecision 构造不同的中断数据：
+    - supervised + allow → 仅执行确认
+    - supervised + deny/unmatched → 合并审批（执行确认 + 权限选项 + deny 警告）
+    - auto + deny/unmatched → 仅权限审批（权限选项 + deny 警告）
     """
     last_message = state["messages"][-1]
+    tool_mode = state.get("tool_mode", "approve")
+    engine = runtime.context.permission_engine
 
-    decision = interrupt(
-        {
-            "type": "tool_approval",
-            "message": "是否执行以下工具？",
-            "tool_calls": [
-                {"name": tc["name"], "args": tc["args"]}
-                for tc in last_message.tool_calls
-            ],
-        }
-    )
+    tool_calls_data = [
+        {"name": tc["name"], "args": tc["args"]} for tc in last_message.tool_calls
+    ]
 
-    if decision == "approve":
-        return Command(goto="ToolExecutor")
-    if decision == "auto":
-        return Command(goto="ToolExecutor", update={"tool_mode": "auto"})
-    return Command(goto=END)
+    # 无权限引擎时回退到简单审批
+    if engine is None:
+        decision = interrupt(
+            {
+                "type": "tool_approval",
+                "message": "是否执行以下工具？",
+                "tool_calls": tool_calls_data,
+            }
+        )
+        if decision == "approve":
+            return Command(goto="ToolExecutor")
+        reject_messages = _build_reject_messages(last_message.tool_calls)
+        return Command(goto=END, update={"messages": reject_messages})
+
+    # 收集权限决策、边界违规和警告
+    decisions: list[PermissionDecision] = []
+    warnings: list[str] = []
+    boundary_violations: list[str] = []
+
+    for tc in last_message.tool_calls:
+        name, args = tc["name"], tc.get("args", {})
+
+        # 工作区边界检查
+        violations = engine.get_boundary_violations(name, args)
+        boundary_violations.extend(violations)
+
+        # 权限评估
+        decision = engine.evaluate(name, args)
+        decisions.append(decision)
+        if decision == PermissionDecision.DENY:
+            warnings.append(f"⚠ 工具 {name} 命中 deny 规则，该操作被标记为危险")
+
+    # 构造审批选项
+    options: list[dict] = []
+    needs_permission_options = any(
+        d in (PermissionDecision.DENY, PermissionDecision.UNMATCHED) for d in decisions
+    ) or bool(boundary_violations)
+
+    if needs_permission_options:
+        # 构造精确匹配和宽泛模式的工具表达式
+        tc = last_message.tool_calls[0]
+        exact_expr = _build_exact_expr(tc["name"], tc.get("args", {}))
+        pattern_expr = _build_pattern_expr(tc["name"], tc.get("args", {}))
+
+        options = [
+            {"key": "allow_once", "label": "允许执行这一次"},
+            {
+                "key": "always_allow_exact",
+                "label": f"始终允许: {exact_expr}",
+                "tool_expr": exact_expr,
+            },
+        ]
+        if pattern_expr and pattern_expr != exact_expr:
+            options.append(
+                {
+                    "key": "always_allow_pattern",
+                    "label": f"始终允许: {pattern_expr}",
+                    "tool_expr": pattern_expr,
+                }
+            )
+        options.append({"key": "reject", "label": "拒绝"})
+
+    # 构造中断数据
+    interrupt_data: dict = {
+        "type": "tool_approval",
+        "tool_calls": tool_calls_data,
+        "decisions": [d.value for d in decisions],
+    }
+
+    interrupt_data["message"] = "是否执行以下工具？"
+    if tool_mode == "auto":
+        # auto 模式：仅权限审批
+        interrupt_data["message"] = "以下工具需要权限授权"
+        interrupt_data["options"] = options
+    elif needs_permission_options:
+        # supervised + deny/unmatched：合并审批
+        interrupt_data["options"] = options
+
+    if warnings:
+        interrupt_data["warnings"] = warnings
+    if boundary_violations:
+        interrupt_data["boundary_violations"] = boundary_violations
+
+    decision_str = interrupt(interrupt_data)
+
+    # 处理用户选择
+    match decision_str:
+        case "approve" | "allow_once":
+            # 临时授权 boundary violation 路径（不持久化）
+            for v in boundary_violations:
+                add_authorized_directory(v)
+            return Command(goto="ToolExecutor")
+        case "always_allow_exact" | "always_allow_pattern":
+            expr = next(
+                (o["tool_expr"] for o in options if o["key"] == decision_str),
+                None,
+            )
+            if expr:
+                engine.add_allow_rule(expr)
+            for v in boundary_violations:
+                engine.add_workspace(v)
+            return Command(goto="ToolExecutor")
+        case "cancel":
+            # esc 中断：模拟 ToolMessage 后直接结束
+            cancel_messages = _build_reject_messages(
+                last_message.tool_calls, content="用户中断了工具调用请求"
+            )
+            return Command(goto=END, update={"messages": cancel_messages})
+        case _:
+            # 拒绝：模拟 ToolMessage 后直接结束
+            reject_messages = _build_reject_messages(last_message.tool_calls)
+            return Command(goto=END, update={"messages": reject_messages})
+
+
+def _build_reject_messages(
+    tool_calls: list[dict], content: str = "用户拒绝了工具执行"
+) -> list[ToolMessage]:
+    """为被拒绝/中断的工具调用构造模拟 ToolMessage 列表。
+
+    Args:
+        tool_calls: AIMessage 中的 tool_calls 列表
+        content: 拒绝/中断原因文本
+
+    Returns:
+        每个 tool_call 对应一条结果的 ToolMessage
+    """
+    return [
+        ToolMessage(
+            content=content,
+            tool_call_id=tc.get("id", ""),
+            name=tc["name"],
+        )
+        for tc in tool_calls
+    ]
+
+
+def _build_exact_expr(tool_name: str, tool_args: dict) -> str:
+    """构造精确匹配的工具表达式。"""
+    if tool_name in _COMMAND_TOOLS:
+        cmd = _extract_arg(tool_args, _COMMAND_ARG_KEYS) or ""
+        return f"{tool_name}({cmd})" if cmd else tool_name
+    if tool_name in _PATH_TOOLS:
+        path = _extract_arg(tool_args, _PATH_ARG_KEYS) or ""
+        return f"{tool_name}({path})" if path else tool_name
+    return tool_name
+
+
+def _build_pattern_expr(tool_name: str, tool_args: dict) -> str:
+    """构造宽泛模式的工具表达式。"""
+    if tool_name in _COMMAND_TOOLS:
+        cmd = _extract_arg(tool_args, _COMMAND_ARG_KEYS) or ""
+        if cmd:
+            words = cmd.split()
+            first_word = words[0] if words else cmd
+            return f"{tool_name}({first_word} *)"
+        return tool_name
+    if tool_name in _PATH_TOOLS:
+        from pathlib import Path
+
+        path = _extract_arg(tool_args, _PATH_ARG_KEYS) or ""
+        if path:
+            suffix = Path(path).suffix
+            if suffix:
+                return f"{tool_name}(**/*{suffix})"
+            return f"{tool_name}(**/*)"
+        return tool_name
+    return tool_name
 
 
 async def extract_structured_output(state: LumiAgentState):

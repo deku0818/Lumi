@@ -8,12 +8,13 @@ from textual.widgets import Input, Static
 
 from lumi.tui.theme import get_color
 
-_TOOL_MODES = ("approve", "auto")
+_TOOL_MODES = ("approve", "auto", "privileged")
 
 # 值为 (label, 语义角色名)，颜色在渲染时通过 get_color() 解析
 _MODE_DISPLAY: dict[str, tuple[str, str]] = {
     "approve": ("✔ approve mode", "success"),
     "auto": ("⚡ auto mode", "accent"),
+    "privileged": ("🔓 privileged mode", "error"),
 }
 
 

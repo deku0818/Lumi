@@ -246,7 +246,8 @@ class Scheduler:
             agent, context = await create_agent(checkpoint=None)
             inputs = {
                 "messages": [HumanMessage(content=job.prompt)],
-                "tool_mode": "auto",
+                # 定时任务无人在场审批，使用 privileged 模式跳过 interrupt
+                "tool_mode": "privileged",
             }
             response = await asyncio.wait_for(
                 agent.graph.ainvoke(inputs, context=context),

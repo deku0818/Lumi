@@ -1,4 +1,8 @@
-"""工具审批组件 - Unicode box-drawing 布局"""
+"""工具审批组件 - Unicode box-drawing 布局
+
+支持权限引擎的动态选项（allow_once / always_allow_exact / always_allow_pattern / reject），
+同时向后兼容无 options 字段的简单审批。
+"""
 
 from __future__ import annotations
 
@@ -20,28 +24,34 @@ _FALLBACK_RENDERER = DefaultRenderer()
 # 分隔线宽度
 _SEP_WIDTH = 30
 
+# 默认选项（无权限引擎时的回退）
+_DEFAULT_OPTIONS: tuple[dict[str, str], ...] = (
+    {"key": "approve", "label": "允许本次执行"},
+    {"key": "reject", "label": "拒绝"},
+)
+
+# 选项 key → 语义颜色角色映射
+_OPTION_COLOR_ROLES: dict[str, str] = {
+    "approve": "success",
+    "allow_once": "success",
+    "always_allow_exact": "accent",
+    "always_allow_pattern": "accent",
+    "reject": "error",
+}
+
 
 class ToolApproval(Vertical):
     """工具审批组件 - 键盘驱动的列表选择器
 
     使用 Unicode box-drawing 字符（│├└）构建视觉边界，
     将工具内容和操作选项清晰分隔。
+
+    支持两种模式：
+    - 动态选项：从 interrupt 数据的 options 字段读取（权限引擎）
+    - 默认选项：approve / reject（无权限引擎时回退）
     """
 
     can_focus = True
-
-    _options: tuple[tuple[str, str], ...] = (
-        ("approve", "允许本次执行"),
-        ("auto", "允许本次会话内的所有工具调用"),
-        ("reject", "拒绝"),
-    )
-
-    # 选项 key → 语义颜色角色映射
-    _OPTION_COLOR_ROLES: dict[str, str] = {
-        "approve": "success",
-        "auto": "accent",
-        "reject": "error",
-    }
 
     DEFAULT_CSS = """
     ToolApproval {
@@ -81,6 +91,11 @@ class ToolApproval(Vertical):
         padding: 0;
         color: $border;
     }
+
+    ToolApproval .approval-warning {
+        margin: 0;
+        padding: 0;
+    }
     """
 
     class Decided(Message):
@@ -88,18 +103,41 @@ class ToolApproval(Vertical):
 
         def __init__(self, decision: str) -> None:
             super().__init__()
-            self.decision = decision  # "approve" | "auto" | "reject"
+            self.decision = decision
 
     def __init__(self, interrupt_data: dict) -> None:
         super().__init__(classes="tool-approval")
         self._data = interrupt_data
         self._selected = 0
 
+        # 从 interrupt 数据构建选项列表
+        raw_options = interrupt_data.get("options")
+        if raw_options and isinstance(raw_options, list):
+            self._options: tuple[dict[str, str], ...] = tuple(raw_options)
+        else:
+            self._options = _DEFAULT_OPTIONS
+
     def compose(self) -> ComposeResult:
         msg = escape(self._data.get("message", "是否执行以下工具？"))
         accent = get_color("accent")
         border = get_color("border_separator")
         yield Static(f"[bold {accent}]⚠[/] {msg}", classes="approval-label")
+
+        # 渲染警告信息（deny 规则命中等）
+        warnings = self._data.get("warnings", [])
+        for warning in warnings:
+            yield Static(
+                f"  [bold red]{escape(warning)}[/]",
+                classes="approval-warning",
+            )
+
+        # 渲染工作区边界违规
+        boundary_violations = self._data.get("boundary_violations", [])
+        for violation in boundary_violations:
+            yield Static(
+                f"  [bold yellow]⚠ 路径超出工作区边界: {escape(violation)}[/]",
+                classes="approval-warning",
+            )
 
         tool_calls = self._data.get("tool_calls", [])
         for i, tc in enumerate(tool_calls):
@@ -175,12 +213,12 @@ class ToolApproval(Vertical):
             self._refresh_options()
             event.stop()
         elif event.key == "enter":
-            decision = self._options[self._selected][0]
+            decision = self._options[self._selected]["key"]
             self.post_message(self.Decided(decision))
             self.call_later(self.remove)
             event.stop()
         elif event.key == "escape":
-            self.post_message(self.Decided("reject"))
+            self.post_message(self.Decided("cancel"))
             self.call_later(self.remove)
             event.stop()
 
@@ -188,12 +226,14 @@ class ToolApproval(Vertical):
         """渲染选项列表，每行带竖线前缀"""
         border = get_color("border_separator")
         lines: list[str] = []
-        for i, (key, label) in enumerate(self._options):
-            color = get_color(self._OPTION_COLOR_ROLES[key])
+        for i, opt in enumerate(self._options):
+            key = opt["key"]
+            label = opt.get("label", key)
+            color = get_color(_OPTION_COLOR_ROLES.get(key, "foreground"))
             if i == self._selected:
-                lines.append(f"[{border}]  │[/]  [bold {color}]● {label}[/]")
+                lines.append(f"[{border}]  │[/]  [bold {color}]● {escape(label)}[/]")
             else:
-                lines.append(f"[{border}]  │[/]    {label}")
+                lines.append(f"[{border}]  │[/]    {escape(label)}")
         return "\n".join(lines)
 
     def _refresh_options(self) -> None:

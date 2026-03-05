@@ -1,6 +1,9 @@
 from __future__ import annotations
 
-from typing import Annotated, Any, Literal, NotRequired, TypedDict
+from typing import TYPE_CHECKING, Annotated, Any, Literal, NotRequired, TypedDict
+
+if TYPE_CHECKING:
+    from lumi.agents.tools.permissions.engine import PermissionEngine
 
 from langgraph.graph.message import add_messages
 
@@ -19,13 +22,15 @@ class LumiAgentContext:
     tools: list = field(default_factory=list)
     system_prompt: str = field(default="")
     model_name: str = field(default="")
+    permission_engine: "PermissionEngine | None" = field(default=None)
+    """PermissionEngine 实例，用于工具权限评估"""
 
 
 class LumiAgentState(TypedDict):
     messages: Annotated[list, add_messages]
     agent_outcome: dict
     iterations: int
-    tool_mode: Literal["auto", "reject", "approve"]
+    tool_mode: Literal["auto", "approve", "supervised", "privileged"]
     todos: NotRequired[list]
     """任务列表，用于追踪复杂任务的执行进度"""
     summary: SummaryData

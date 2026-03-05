@@ -11,10 +11,10 @@ from lumi.agents.tools.registry import ToolRegistry
 @pytest.fixture
 def authorized_tmp_dir(tmp_path):
     """设置 authorized_directory 为 tmp_path，teardown 恢复"""
-    old = workspace._authorized_directory
-    workspace._authorized_directory = tmp_path
+    old = workspace._authorized_directories[:]
+    workspace._authorized_directories = [tmp_path]
     yield tmp_path
-    workspace._authorized_directory = old
+    workspace._authorized_directories = old
 
 
 @pytest.fixture(autouse=True)
