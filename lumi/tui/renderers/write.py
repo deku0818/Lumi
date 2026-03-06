@@ -24,7 +24,7 @@ class WriteRenderer:
 
     def render_title(self, name: str, args: dict) -> str:
         """生成标题，格式: write(文件路径)"""
-        return f"write({get_arg(args, 'path')})"
+        return f"write({get_arg(args, 'file_path')})"
 
     def render_args(self, args: dict, *, approval_mode: bool = False) -> Widget:
         """以语法高亮代码块展示将要写入的文件内容
@@ -32,7 +32,7 @@ class WriteRenderer:
         超过 50 行时在折叠摘要中显示行数提示（审批模式下跳过折叠）。
         """
         content = args.get("content", "")
-        path = args.get("path", "")
+        path = args.get("file_path", "")
 
         if not content:
             return Static("", markup=False)

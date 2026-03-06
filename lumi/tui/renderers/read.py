@@ -27,7 +27,7 @@ class ReadRenderer:
 
     def render_title(self, name: str, args: dict) -> str:
         """生成标题，格式: read(文件路径)"""
-        self._path = get_arg(args, "path")
+        self._path = get_arg(args, "file_path")
         return f"read({self._path})"
 
     def render_args(self, args: dict, *, approval_mode: bool = False) -> Widget:

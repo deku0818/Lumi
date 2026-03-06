@@ -218,9 +218,13 @@ class TestBackendGrepRaw:
     async def test_grep_match(self, backend, authorized_tmp_dir):
         f = authorized_tmp_dir / "code.py"
         f.write_text("def hello():\n    pass\ndef world():\n    pass")
-        results = await backend.grep_raw("def \\w+", str(authorized_tmp_dir))
-        assert isinstance(results, list)
-        assert len(results) >= 2
+        result = await backend.grep_raw("def \\w+", str(authorized_tmp_dir))
+        assert isinstance(result, dict)
+        assert "matches" in result
+        assert len(result["matches"]) >= 2
+        assert "total" in result
+        assert "offset" in result
+        assert "truncated" in result
 
     async def test_grep_invalid_regex(self, backend, authorized_tmp_dir):
         result = await backend.grep_raw("[invalid", str(authorized_tmp_dir))
@@ -230,18 +234,20 @@ class TestBackendGrepRaw:
     async def test_grep_no_match(self, backend, authorized_tmp_dir):
         f = authorized_tmp_dir / "empty_search.txt"
         f.write_text("nothing here")
-        results = await backend.grep_raw("zzzzz_no_match", str(authorized_tmp_dir))
-        assert isinstance(results, list)
-        assert len(results) == 0
+        result = await backend.grep_raw("zzzzz_no_match", str(authorized_tmp_dir))
+        assert isinstance(result, dict)
+        assert len(result["matches"]) == 0
+        assert result["total"] == 0
+        assert result["truncated"] is False
 
     async def test_grep_file_glob_filter(self, backend, authorized_tmp_dir):
         (authorized_tmp_dir / "a.py").write_text("target_word")
         (authorized_tmp_dir / "b.txt").write_text("target_word")
-        results = await backend.grep_raw(
+        result = await backend.grep_raw(
             "target_word", str(authorized_tmp_dir), file_glob="*.py"
         )
-        assert isinstance(results, list)
-        assert all("a.py" in r["path"] for r in results)
+        assert isinstance(result, dict)
+        assert all("a.py" in r["path"] for r in result["matches"])
 
 
 # ============================================================================
@@ -300,7 +306,21 @@ class TestToolWrappers:
         from lumi.agents.tools.providers.filesystem import grep
 
         (authorized_tmp_dir / "g.txt").write_text("findme here")
+        # 默认 output_mode 为 files_with_matches
         result = await grep.ainvoke(
             {"pattern": "findme", "path": str(authorized_tmp_dir)}
+        )
+        assert "找到" in result and "匹配文件" in result
+
+    async def test_grep_tool_content_mode(self, authorized_tmp_dir):
+        from lumi.agents.tools.providers.filesystem import grep
+
+        (authorized_tmp_dir / "g.txt").write_text("findme here")
+        result = await grep.ainvoke(
+            {
+                "pattern": "findme",
+                "path": str(authorized_tmp_dir),
+                "output_mode": "content",
+            }
         )
         assert "找到" in result and "匹配" in result

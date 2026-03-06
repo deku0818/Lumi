@@ -51,7 +51,7 @@ class EditRenderer:
 
     def render_title(self, name: str, args: dict) -> str:
         """生成标题，格式: edit(文件路径)"""
-        return f"edit({get_arg(args, 'path')})"
+        return f"edit({get_arg(args, 'file_path')})"
 
     def render_args(self, args: dict, *, approval_mode: bool = False) -> Widget:
         """以带行号的 Diff 视图展示 old_text 和 new_text 之间的差异
@@ -60,8 +60,8 @@ class EditRenderer:
         - 超过 30 行差异时显示变更行数摘要（审批模式下跳过折叠）
         - 参数缺少 old_text 或 new_text 时回退到 DefaultRenderer
         """
-        old_text = args.get("old_text")
-        new_text = args.get("new_text")
+        old_text = args.get("old_string")
+        new_text = args.get("new_string")
 
         # 参数缺失时回退到 DefaultRenderer
         if old_text is None or new_text is None:

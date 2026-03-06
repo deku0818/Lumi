@@ -15,3 +15,4 @@ test
 .pytest_cache
 .ruff_cache
 .kiro
+.hypothesis

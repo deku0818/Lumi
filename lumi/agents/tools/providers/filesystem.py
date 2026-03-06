@@ -11,6 +11,7 @@ import json
 import re
 from datetime import datetime
 from pathlib import Path
+from typing import Literal
 
 from langchain_core.tools import tool
 from pydantic import BaseModel, Field
@@ -244,14 +245,24 @@ class LocalFilesystemBackend:
                 }
             )
 
-        return sorted(results, key=lambda x: x["path"])
+        return sorted(results, key=lambda x: x["modified_at"], reverse=True)
 
     async def grep_raw(
         self,
         pattern: str,
         path: str | None = None,
         file_glob: str | None = None,
-    ) -> list[dict] | str:
+        type_filter: str | None = None,
+        after_context: int | None = None,
+        before_context: int | None = None,
+        context: int | None = None,
+        case_insensitive: bool = False,
+        multiline: bool = False,
+        output_mode: str = "content",
+        offset: int = 0,
+        head_limit: int | None = None,
+        line_number: bool = True,
+    ) -> list[dict] | dict | str:
         """在文件内容中搜索正则表达式模式
 
         优先使用 ripgrep，不可用时自动降级到纯 Python 实现。
@@ -260,9 +271,21 @@ class LocalFilesystemBackend:
             pattern: 正则表达式搜索模式
             path: 搜索目录，默认为授权工作目录
             file_glob: 文件过滤模式，如 *.py
+            type_filter: ripgrep 文件类型过滤，如 py、js
+            after_context: 匹配行之后显示的行数（-A）
+            before_context: 匹配行之前显示的行数（-B）
+            context: 匹配行前后显示的行数（-C）
+            case_insensitive: 是否大小写不敏感搜索
+            multiline: 是否启用多行匹配模式
+            output_mode: 输出模式 content/files_with_matches/count
+            offset: 跳过前 N 条匹配结果
+            head_limit: 最多返回的匹配结果数
+            line_number: 是否在输出中包含行号
 
         Returns:
-            匹配结果列表；正则无效时返回错误字符串
+            content 模式返回分页字典 {"matches", "total", "offset", "truncated"}；
+            files_with_matches/count 模式返回 list[dict]；
+            正则无效时返回错误字符串。
         """
         try:
             re.compile(pattern)
@@ -278,19 +301,93 @@ class LocalFilesystemBackend:
                 return f"错误: {e}"
 
         # 优先尝试 ripgrep
-        results = await self._ripgrep_search(pattern, search_path, file_glob)
+        results = await self._ripgrep_search(
+            pattern,
+            search_path,
+            file_glob,
+            type_filter=type_filter,
+            after_context=after_context,
+            before_context=before_context,
+            context=context,
+            case_insensitive=case_insensitive,
+            multiline=multiline,
+            output_mode=output_mode,
+        )
         if results is None:
             results = await self._python_search(pattern, search_path, file_glob)
+
+        # 对 content 模式应用分页截断
+        if isinstance(results, list) and output_mode == "content":
+            total = len(results)
+            effective_limit = head_limit if head_limit is not None else 1000
+            paginated = results[offset : offset + effective_limit]
+            return {
+                "matches": paginated,
+                "total": total,
+                "offset": offset,
+                "truncated": total > offset + len(paginated),
+            }
 
         return results
 
     async def _ripgrep_search(
-        self, pattern: str, search_path: str, file_glob: str | None
+        self,
+        pattern: str,
+        search_path: str,
+        file_glob: str | None,
+        type_filter: str | None = None,
+        after_context: int | None = None,
+        before_context: int | None = None,
+        context: int | None = None,
+        case_insensitive: bool = False,
+        multiline: bool = False,
+        output_mode: str = "content",
     ) -> list[dict] | None:
-        """使用 ripgrep 搜索文件内容"""
-        cmd_parts = ["rg", "--json"]
+        """使用 ripgrep 搜索文件内容
+
+        Args:
+            pattern: 正则表达式搜索模式
+            search_path: 搜索目录路径
+            file_glob: 文件过滤 glob 模式
+            type_filter: ripgrep 文件类型过滤（如 py、js）
+            after_context: 匹配行之后显示的行数（-A）
+            before_context: 匹配行之前显示的行数（-B）
+            context: 匹配行前后显示的行数（-C）
+            case_insensitive: 是否大小写不敏感搜索
+            multiline: 是否启用多行匹配模式
+            output_mode: 输出模式 content/files_with_matches/count
+
+        Returns:
+            匹配结果列表；ripgrep 不可用时返回 None
+        """
+        cmd_parts = ["rg"]
+
+        # files_with_matches 和 count 模式不使用 --json
+        if output_mode == "files_with_matches":
+            cmd_parts.append("-l")
+        elif output_mode == "count":
+            cmd_parts.append("--count")
+        else:
+            cmd_parts.append("--json")
+
         if file_glob:
             cmd_parts.extend(["--glob", file_glob])
+        if type_filter:
+            cmd_parts.extend(["--type", type_filter])
+        if after_context is not None:
+            cmd_parts.extend(["-A", str(after_context)])
+        if before_context is not None:
+            cmd_parts.extend(["-B", str(before_context)])
+        if context is not None:
+            cmd_parts.extend(["-C", str(context)])
+        if case_insensitive:
+            cmd_parts.append("-i")
+        else:
+            # 显式指定大小写敏感，避免 ripgrep smart-case 行为
+            cmd_parts.append("--case-sensitive")
+        if multiline:
+            cmd_parts.append("--multiline")
+
         cmd_parts.extend(["--", pattern, search_path])
 
         try:
@@ -318,6 +415,32 @@ class LocalFilesystemBackend:
             return None
 
         stdout = stdout_bytes.decode("utf-8", errors="replace")
+
+        # files_with_matches 模式：每行一个文件路径
+        if output_mode == "files_with_matches":
+            matches = []
+            for line in stdout.splitlines():
+                line = line.strip()
+                if line:
+                    matches.append({"path": line})
+            return matches
+
+        # count 模式：path:count 格式
+        if output_mode == "count":
+            matches = []
+            for line in stdout.splitlines():
+                line = line.strip()
+                if not line:
+                    continue
+                parts = line.rsplit(":", 1)
+                if len(parts) == 2:
+                    try:
+                        matches.append({"path": parts[0], "count": int(parts[1])})
+                    except ValueError:
+                        continue
+            return matches
+
+        # content 模式：解析 JSON 输出
         matches = []
         for line in stdout.splitlines():
             try:
@@ -325,17 +448,36 @@ class LocalFilesystemBackend:
             except json.JSONDecodeError:
                 continue
 
-            if data.get("type") != "match":
-                continue
-
-            pdata = data.get("data", {})
-            file_path = pdata.get("path", {}).get("text")
-            ln = pdata.get("line_number")
-            if not file_path or ln is None:
-                continue
-
-            lt = pdata.get("lines", {}).get("text", "").rstrip("\n")
-            matches.append({"path": file_path, "line": int(ln), "text": lt})
+            if data.get("type") == "context":
+                pdata = data.get("data", {})
+                file_path = pdata.get("path", {}).get("text")
+                ln = pdata.get("line_number")
+                if not file_path or ln is None:
+                    continue
+                lt = pdata.get("lines", {}).get("text", "").rstrip("\n")
+                matches.append(
+                    {
+                        "path": file_path,
+                        "line": int(ln),
+                        "text": lt,
+                        "is_context": True,
+                    }
+                )
+            elif data.get("type") == "match":
+                pdata = data.get("data", {})
+                file_path = pdata.get("path", {}).get("text")
+                ln = pdata.get("line_number")
+                if not file_path or ln is None:
+                    continue
+                lt = pdata.get("lines", {}).get("text", "").rstrip("\n")
+                matches.append(
+                    {
+                        "path": file_path,
+                        "line": int(ln),
+                        "text": lt,
+                        "is_context": False,
+                    }
+                )
 
         return matches
 
@@ -450,9 +592,59 @@ class GlobInput(BaseModel):
 
 
 class GrepInput(BaseModel):
-    pattern: str = Field(description="正则表达式搜索模式")
-    path: str | None = Field(default=None, description="搜索目录")
-    file_glob: str | None = Field(default=None, description="文件过滤模式,如 *.py")
+    """Grep 工具输入模型"""
+
+    pattern: str = Field(
+        description="要在文件内容中搜索的正则表达式模式",
+    )
+    path: str | None = Field(
+        default=None,
+        description="搜索的文件或目录路径，默认为当前工作目录",
+    )
+    glob: str | None = Field(
+        default=None,
+        description='用于过滤文件的 glob 模式（如 "*.js"、"*.{ts,tsx}"），映射到 rg --glob',
+    )
+    type: str | None = Field(
+        default=None,
+        description="按文件类型搜索（rg --type），常见类型：js、py、rust、go、java 等。对标准文件类型比 glob 更高效",
+    )
+    after_context: int | None = Field(
+        default=None,
+        description='每个匹配行之后显示的行数（对应 rg -A）。需要 output_mode 为 "content"，否则忽略',
+    )
+    before_context: int | None = Field(
+        default=None,
+        description='每个匹配行之前显示的行数（对应 rg -B）。需要 output_mode 为 "content"，否则忽略',
+    )
+    context: int | None = Field(
+        default=None,
+        description='每个匹配行前后显示的行数（对应 rg -C）。需要 output_mode 为 "content"，否则忽略',
+    )
+    case_insensitive: bool = Field(
+        default=False,
+        description="大小写不敏感搜索（对应 rg -i）",
+    )
+    line_number: bool = Field(
+        default=True,
+        description='输出中显示行号（对应 rg -n）。需要 output_mode 为 "content"，否则忽略。默认 true',
+    )
+    multiline: bool = Field(
+        default=False,
+        description="启用多行模式，正则中的 '.' 将可匹配换行符，搜索模式可跨行匹配（对应 rg -U --multiline-dotall）。默认 false",
+    )
+    output_mode: Literal["content", "files_with_matches", "count"] = Field(
+        default="files_with_matches",
+        description='输出模式："content" 显示匹配行（支持上下文行、行号、head_limit），"files_with_matches" 显示文件路径（支持 head_limit），"count" 显示匹配计数（支持 head_limit）。默认 "files_with_matches"',
+    )
+    offset: int = Field(
+        default=0,
+        description="跳过前 N 条结果后再应用 head_limit。适用于所有输出模式。默认 0",
+    )
+    head_limit: int = Field(
+        default=0,
+        description="限制输出前 N 条结果。适用于所有输出模式：content（限制输出行数）、files_with_matches（限制文件路径数）、count（限制计数条目数）。默认 0（不限制）",
+    )
 
 
 # ============================================================================
@@ -540,28 +732,129 @@ async def glob(pattern: str, path: str = ".") -> str:
         return f"未找到匹配 '{pattern}' 的文件"
 
     lines = [f"找到 {len(items)} 个文件:"]
-    lines.extend(f"  {item['path']}" for item in items)
+    for item in items:
+        size_kb = item.get("size", 0) / 1024
+        modified = item.get("modified_at", "")
+        if modified:
+            modified = modified.split("T")[0]
+        lines.append(f"  {item['path']} ({size_kb:.1f}KB, {modified or '未知'})")
     return "\n".join(lines)
 
 
-@tool(args_schema=GrepInput)
+_GREP_DESCRIPTION = """A powerful search tool built on ripgrep
+
+  Usage:
+  - ALWAYS use Grep for search tasks. NEVER invoke `grep` or `rg` as a Bash command. The Grep tool has been optimized for correct permissions and access.
+  - Supports full regex syntax (e.g., "log.*Error", "function\\s+\\w+")
+  - Filter files with glob parameter (e.g., "*.js", "**/*.tsx") or type parameter (e.g., "js", "py", "rust")
+  - Output modes: "content" shows matching lines, "files_with_matches" shows only file paths (default), "count" shows match counts
+  - Use Agent tool for open-ended searches requiring multiple rounds
+  - Pattern syntax: Uses ripgrep (not grep) - literal braces need escaping (use `interface\\{\\}` to find `interface{}` in Go code)
+  - Multiline matching: By default patterns match within single lines only. For cross-line patterns like `struct \\{[\\s\\S]*?field`, use `multiline: true`
+"""
+
+
+@tool(args_schema=GrepInput, description=_GREP_DESCRIPTION)
 async def grep(
     pattern: str,
     path: str | None = None,
-    file_glob: str | None = None,
+    glob: str | None = None,
+    type: str | None = None,
+    after_context: int | None = None,
+    before_context: int | None = None,
+    context: int | None = None,
+    case_insensitive: bool = False,
+    line_number: bool = True,
+    multiline: bool = False,
+    output_mode: Literal[
+        "content", "files_with_matches", "count"
+    ] = "files_with_matches",
+    offset: int = 0,
+    head_limit: int = 0,
 ) -> str:
-    """在文件内容中搜索正则表达式。返回匹配行的路径、行号和内容。"""
+    """A powerful search tool built on ripgrep"""
     backend = _get_backend()
-    result = await backend.grep_raw(pattern, path, file_glob)
+    # head_limit=0 表示无限制，映射为 None 传递给后端
+    effective_head_limit = None if head_limit == 0 else head_limit
+    result = await backend.grep_raw(
+        pattern,
+        path,
+        file_glob=glob,
+        type_filter=type,
+        after_context=after_context,
+        before_context=before_context,
+        context=context,
+        case_insensitive=case_insensitive,
+        multiline=multiline,
+        output_mode=output_mode,
+        offset=offset,
+        head_limit=effective_head_limit,
+        line_number=line_number,
+    )
 
+    # 错误字符串直接返回
     if isinstance(result, str):
         return result
+
+    # content 模式返回分页字典
+    if isinstance(result, dict):
+        matches = result["matches"]
+        total = result["total"]
+        if not matches and result["offset"] == 0:
+            return f"未找到匹配 '{pattern}' 的内容"
+
+        lines = [f"找到 {total} 处匹配:"]
+        # 按匹配块分组，用 -- 分隔不同文件或不连续的匹配块
+        prev_path = None
+        prev_line = None
+        for match in matches:
+            current_path = match["path"]
+            current_line = match["line"]
+
+            # 不同文件或不连续行时添加分隔符
+            if prev_path is not None and (
+                current_path != prev_path
+                or (prev_line is not None and current_line > prev_line + 1)
+            ):
+                lines.append("--")
+
+            is_ctx = match.get("is_context", False)
+            sep = "-" if is_ctx else ":"
+            if line_number:
+                lines.append(f"  {current_path}:{current_line}{sep} {match['text']}")
+            else:
+                lines.append(f"  {current_path}{sep} {match['text']}")
+
+            prev_path = current_path
+            prev_line = current_line
+
+        if result["truncated"]:
+            shown = len(matches)
+            off = result["offset"]
+            lines.append(
+                f"  [已截断] 共 {total} 处匹配，显示第 {off + 1}-{off + shown} 条"
+            )
+        return "\n".join(lines)
+
+    # files_with_matches 模式
+    if output_mode == "files_with_matches":
+        if not result:
+            return f"未找到匹配 '{pattern}' 的文件"
+        lines = [f"找到 {len(result)} 个匹配文件:"]
+        for item in result:
+            lines.append(f"  {item['path']}")
+        return "\n".join(lines)
+
+    # count 模式
+    if output_mode == "count":
+        if not result:
+            return f"未找到匹配 '{pattern}' 的内容"
+        lines = [f"在 {len(result)} 个文件中找到匹配:"]
+        for item in result:
+            lines.append(f"  {item['path']}: {item['count']} 处匹配")
+        return "\n".join(lines)
+
+    # 兜底
     if not result:
         return f"未找到匹配 '{pattern}' 的内容"
-
-    lines = [f"找到 {len(result)} 处匹配:"]
-    for match in result[:100]:
-        lines.append(f"  {match['path']}:{match['line']}: {match['text']}")
-    if len(result) > 100:
-        lines.append(f"  ... 还有 {len(result) - 100} 处匹配未显示")
-    return "\n".join(lines)
+    return str(result)

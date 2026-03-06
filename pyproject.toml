@@ -20,6 +20,7 @@ dependencies = [
     "langgraph-checkpoint-postgres>=3.0.4",
     "psycopg[binary]>=3.3.3",
     "apscheduler>=3.11.2",
+    "ripgrep>=15.0.0",
 ]
 
 [project.scripts]
