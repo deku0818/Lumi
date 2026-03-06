@@ -11,7 +11,7 @@ class UserMessage(Static):
 
     DEFAULT_CSS = """
     UserMessage {
-        margin: 1 0 0 0;
+        margin: 1 0 1 0;
         padding: 0 1;
         width: auto;
         height: auto;

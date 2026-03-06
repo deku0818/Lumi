@@ -22,7 +22,8 @@ class AskBlock(Vertical):
 
     DEFAULT_CSS = """
     AskBlock {
-        margin: 0 1 0 2;
+        margin: 0 1 0 0;
+        padding: 0 1;
         height: auto;
     }
 

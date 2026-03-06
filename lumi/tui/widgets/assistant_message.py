@@ -11,7 +11,7 @@ class AssistantMessage(Static):
 
     DEFAULT_CSS = """
     AssistantMessage {
-        margin: 0 0 0 0;
+        margin: 1 0 1 0;
         padding: 0 1;
         height: auto;
         color: $foreground;
@@ -31,5 +31,9 @@ class AssistantMessage(Static):
         self.update(self._text)
 
     def finalize(self) -> None:
-        """标记消息完成（当前为空操作，内容已在 append_token 中实时更新）"""
-        pass
+        """标记消息完成，去除末尾多余空行"""
+        plain = self._text.plain
+        trailing = len(plain) - len(plain.rstrip("\n"))
+        if trailing > 0:
+            self._text.truncate(len(plain) - trailing)
+            self.update(self._text)

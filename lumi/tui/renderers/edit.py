@@ -22,8 +22,8 @@ from lumi.tui.theme import get_color
 _DIFF_LINE_THRESHOLD = 30
 
 # 样式常量（背景色保持不变，不属于语义颜色角色）
-_STYLE_DEL = "on #3d1114"  # 红色背景 - 删除行
-_STYLE_ADD = "on #1a3d1a"  # 绿色背景 - 新增行
+_STYLE_DEL = "on #351015"  # 红色背景 - 删除行
+_STYLE_ADD = "on #1a3520"  # 绿色背景 - 新增行
 
 
 def _style_hunk() -> str:

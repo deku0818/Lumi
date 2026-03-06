@@ -23,11 +23,13 @@ class DefaultRenderer:
         return f"{name}({first_value})"
 
     def render_args(self, args: dict, *, approval_mode: bool = False) -> Widget:
-        """以键值对形式展示参数，每个参数独占一行，长文本截断"""
+        """以键值对形式展示参数，跳过首个参数（已在标题中展示），长文本截断"""
         if not args:
             return Static("", markup=False)
         lines: list[str] = []
-        for key, value in args.items():
+        for i, (key, value) in enumerate(args.items()):
+            if i == 0:
+                continue
             display_value = _truncate(str(value), _MAX_VALUE_LEN)
             lines.append(f"{key}: {display_value}")
         return Static("\n".join(lines), markup=False)

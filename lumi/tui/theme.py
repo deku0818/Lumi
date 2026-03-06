@@ -76,8 +76,8 @@ DARK_PALETTE = ThemePalette(
     border_separator="#555566",
     accent="#ffcc00",
     accent_dim="#666666",
-    success="#4caf50",
-    error="#ef5350",
+    success="#4CD964",
+    error="#D94C4C",
     info="#42a5f5",
     scrollbar_default="#333340",
 )
@@ -94,8 +94,8 @@ LIGHT_PALETTE = ThemePalette(
     border_separator="#aaaabb",
     accent="#b8860b",
     accent_dim="#999999",
-    success="#2e7d32",
-    error="#c62828",
+    success="#3BA855",
+    error="#B33A3A",
     info="#1565c0",
     scrollbar_default="#cccccc",
 )

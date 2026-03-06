@@ -9,7 +9,7 @@ from rich.text import Text
 from textual.app import App, ComposeResult
 from textual.binding import Binding
 from textual.css.query import NoMatches
-from textual.widgets import Collapsible, Static
+from textual.widgets import Static
 
 from lumi import __version__
 from lumi.agents.cron.delivery import DeliveryManager, TUIDelivery
@@ -57,6 +57,7 @@ class LumiApp(App):
         self._current_thinking: ThinkingIndicator | None = None
         self._agent_running = False
         self._tool_blocks: dict[str, ToolBlock] = {}
+        self._last_approval_tool_calls: list[dict] = []
         self._current_ask_block: AskBlock | None = None
         self._current_task: asyncio.Task | None = None
         self._global_config = None
@@ -224,6 +225,7 @@ class LumiApp(App):
                 self._finalize_assistant_msg()
             case EventKind.TOOL_CALL_CHUNK:
                 if not self._current_thinking:
+                    self._finalize_assistant_msg()
                     await self._start_thinking(chat_log)
             case EventKind.TOOL_START:
                 await self._handle_tool_start(evt, chat_log)
@@ -285,15 +287,12 @@ class LumiApp(App):
         """处理工具审批中断事件"""
         self._stop_thinking()
         self._finalize_assistant_msg()
-        # 为审批中的工具创建 ToolBlock（审批模式展开）
+        # 保存工具调用信息，供拒绝/取消时创建 ToolBlock
         tool_calls = (evt.data or {}).get("tool_calls", [])
+        self._last_approval_tool_calls = tool_calls
         for tc in tool_calls:
-            name = tc.get("name", "unknown")
-            args = tc.get("args", {})
-            key = tc.get("id") or name
-            block = ToolBlock(name, args, approval_mode=True)
-            self._tool_blocks[key] = block
-            await chat_log.mount(block)
+            key = tc.get("id") or tc.get("name", "unknown")
+            self._tool_blocks.pop(key, None)
         approval = ToolApproval(evt.data)
         await chat_log.mount(approval)
         await chat_log.auto_scroll_if_needed()
@@ -334,20 +333,24 @@ class LumiApp(App):
 
     async def on_tool_approval_decided(self, event: ToolApproval.Decided) -> None:
         decision = event.decision
-
-        for block in self._tool_blocks.values():
-            if block.approval_mode:
-                if decision == "cancel":
-                    block.set_error("用户中断了审批")
-                elif decision == "reject":
-                    block.set_error("用户拒绝了此工具执行")
-                else:
-                    # 允许：折叠审批展开的内容
-                    try:
-                        collapsible = block.query_one(Collapsible)
-                        collapsible.collapsed = True
-                    except NoMatches:
-                        pass
+        # 拒绝或取消时，创建标记为错误的 ToolBlock 保留视觉记录
+        if decision in ("reject", "cancel"):
+            chat_log = self.query_one(ChatLog)
+            tool_calls = getattr(event, "_tool_calls", None)
+            # 从最近的 ToolApproval 数据中恢复工具信息
+            if tool_calls is None:
+                # ToolApproval 已被 remove，从 _last_approval_data 获取
+                tool_calls = self._last_approval_tool_calls
+            for tc in tool_calls:
+                name = tc.get("name", "unknown")
+                args = tc.get("args", {})
+                block = ToolBlock(name, args)
+                await chat_log.mount(block)
+                msg = (
+                    "用户中断了审批" if decision == "cancel" else "用户拒绝了此工具执行"
+                )
+                block.set_error(msg)
+            await chat_log.auto_scroll_if_needed()
         await self._run_resume(decision)
 
     # ── 操作 ──

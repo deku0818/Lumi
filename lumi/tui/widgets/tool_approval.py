@@ -55,8 +55,8 @@ class ToolApproval(Vertical):
 
     DEFAULT_CSS = """
     ToolApproval {
-        margin: 0 1 0 2;
-        padding: 0;
+        margin: 0 1 0 0;
+        padding: 0 1;
         background: transparent;
         border: none;
         height: auto;
@@ -246,7 +246,7 @@ class _IndentedContent(Vertical):
 
     DEFAULT_CSS = """
     _IndentedContent {
-        margin: 0 0 0 5;
+        margin: 0 0 0 4;
         padding: 0;
         height: auto;
     }

@@ -40,14 +40,27 @@ class ToolBlock(Vertical):
 
     DEFAULT_CSS = """
     ToolBlock {
-        margin: 0 1 0 2;
+        margin: 0 1 1 0;
         height: auto;
     }
 
     ToolBlock Collapsible {
         background: transparent;
         border: none;
+        border-top: none;
         padding: 0;
+        margin: 0;
+    }
+
+    ToolBlock CollapsibleTitle {
+        padding: 0;
+        margin: 0;
+    }
+
+    ToolBlock Contents {
+        padding: 0 0 0 1;
+        margin: 0 0 0 1;
+        border-left: solid $text-muted;
     }
 
     ToolBlock .tool-args {
@@ -57,8 +70,7 @@ class ToolBlock(Vertical):
 
     ToolBlock .tool-output {
         padding: 0 1;
-        margin: 1 0 0 0;
-        color: $foreground;
+        color: $text-muted;
     }
     """
 
@@ -84,7 +96,7 @@ class ToolBlock(Vertical):
 
     def compose(self) -> ComposeResult:
         """组合子组件：标题 + 参数区域 + 输出区域"""
-        title_markup = self._build_title_markup(self._running_status_text())
+        title_markup = self._build_title_markup()
         collapsed = not self._approval_mode  # 审批模式自动展开
 
         # 获取参数区域 Widget
@@ -101,7 +113,11 @@ class ToolBlock(Vertical):
             args_widget = _FALLBACK_RENDERER.render_args(self._args)
 
         with Collapsible(
-            title=title_markup, collapsed=collapsed, id=f"tool-{id(self)}"
+            title=title_markup,
+            collapsed=collapsed,
+            collapsed_symbol="",
+            expanded_symbol="",
+            id=f"tool-{id(self)}",
         ):
             yield args_widget
             yield Static(
@@ -123,7 +139,7 @@ class ToolBlock(Vertical):
         self._spinner_frame += 1
         try:
             collapsible = self.query_one(Collapsible)
-            collapsible.title = self._build_title_markup(self._running_status_text())
+            collapsible.title = self._build_title_markup()
         except NoMatches:
             pass  # 尚未挂载，下次再试
         except Exception:
@@ -135,7 +151,7 @@ class ToolBlock(Vertical):
     def _running_status_text(self) -> str:
         """生成带 spinner 的运行状态文本"""
         frame = SPINNER_FRAMES[self._spinner_frame % len(SPINNER_FRAMES)]
-        return f"[{get_color('text_muted')}]{frame} Running...[/]"
+        return f"[{get_color('text_muted')}]{frame}[/]"
 
     def _stop_spinner(self) -> None:
         """停止 spinner 动画"""
@@ -148,7 +164,7 @@ class ToolBlock(Vertical):
         self._status = ToolStatus.DONE
         self._stop_spinner()
         collapsible = self.query_one(Collapsible)
-        collapsible.title = self._build_title_markup(f"[{get_color('success')}]Done[/]")
+        collapsible.title = self._build_title_markup(collapsed=True)
         collapsible.collapsed = True
 
         if output:
@@ -171,15 +187,34 @@ class ToolBlock(Vertical):
         self._status = ToolStatus.ERROR
         self._stop_spinner()
         collapsible = self.query_one(Collapsible)
-        collapsible.title = self._build_title_markup(f"[{get_color('error')}]Error[/]")
+        collapsible.title = self._build_title_markup(collapsed=True)
         if error:
             output_widget = self.query_one(f"#tool-output-{id(self)}", Static)
-            output_widget.update(Text(error, style=get_color("error")))
+            output_widget.update(Text(error, style=get_color("text_muted")))
 
     @property
     def approval_mode(self) -> bool:
         return self._approval_mode
 
-    def _build_title_markup(self, status: str) -> str:
-        """构建标题 markup，格式: [bold #ffcc00]渲染器标题[/]  状态"""
-        return f"[bold {get_color('accent')}]{self._title_text}[/]  {status}"
+    def _get_symbol(self, collapsed: bool | None = None) -> str:
+        """根据状态返回带颜色的圆圈符号"""
+        match self._status:
+            case ToolStatus.RUNNING:
+                return self._running_status_text()
+            case ToolStatus.DONE:
+                return f"[{get_color('success')}]●[/]"
+            case ToolStatus.ERROR:
+                return f"[{get_color('error')}]●[/]"
+
+    def _build_title_markup(self, collapsed: bool | None = None) -> str:
+        """构建标题 markup，圆圈颜色反映状态，标题文字保持白色"""
+        hint = (
+            f" [{get_color('text_muted')}](click to expand)[/]"
+            if self._status != ToolStatus.RUNNING
+            else ""
+        )
+        return f"{self._get_symbol(collapsed)} {self._title_text}{hint}"
+
+    def on_collapsible_toggled(self, event: Collapsible.Toggled) -> None:
+        """折叠/展开时更新标题"""
+        event.stop()
