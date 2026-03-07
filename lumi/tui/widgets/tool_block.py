@@ -12,7 +12,7 @@ from textual.css.query import NoMatches
 from textual.widgets import Collapsible, Static
 
 from lumi.tui.renderers import get as get_renderer
-from lumi.tui.renderers.utils import SPINNER_FRAMES
+from lumi.tui.renderers.utils import SPINNER_FRAMES, SpinnerMixin
 from lumi.tui.renderers.default import DefaultRenderer
 from lumi.tui.theme import get_color
 
@@ -30,7 +30,7 @@ class ToolStatus(StrEnum):
     ERROR = "error"
 
 
-class ToolBlock(Vertical):
+class ToolBlock(Vertical, SpinnerMixin):
     """工具调用块 - 可折叠，显示工具名称、参数和输出
 
     通过 ToolDisplayRegistry 获取对应渲染器，生成专属的标题、参数和输出展示。
@@ -80,8 +80,6 @@ class ToolBlock(Vertical):
         self._args = args
         self._approval_mode = approval_mode
         self._status = ToolStatus.RUNNING
-        self._spinner_frame = 0
-        self._spinner_timer = None
 
         self._renderer = get_renderer(name)
 
@@ -130,13 +128,12 @@ class ToolBlock(Vertical):
     def on_mount(self) -> None:
         """挂载后启动 spinner 动画"""
         if self._status == ToolStatus.RUNNING:
-            self._spinner_timer = self.set_interval(0.1, self._tick_spinner)
+            self._start_spinner()
 
-    def _tick_spinner(self) -> None:
-        """更新 spinner 帧"""
+    def _on_spinner_tick(self, frame_char: str) -> None:
+        """SpinnerMixin 回调：更新标题行 spinner"""
         if self._status != ToolStatus.RUNNING:
             return
-        self._spinner_frame += 1
         try:
             collapsible = self.query_one(Collapsible)
             collapsible.title = self._build_title_markup()
@@ -152,12 +149,6 @@ class ToolBlock(Vertical):
         """生成带 spinner 的运行状态文本"""
         frame = SPINNER_FRAMES[self._spinner_frame % len(SPINNER_FRAMES)]
         return f"[{get_color('text_muted')}]{frame}[/]"
-
-    def _stop_spinner(self) -> None:
-        """停止 spinner 动画"""
-        if self._spinner_timer:
-            self._spinner_timer.stop()
-            self._spinner_timer = None
 
     def set_done(self, output: str = "") -> None:
         """标记工具执行完成"""

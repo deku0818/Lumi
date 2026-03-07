@@ -2,11 +2,16 @@
 
 from textual.widgets import Static
 
-from lumi.tui.renderers.utils import SPINNER_FRAMES
+from lumi.tui.renderers.utils import SpinnerMixin
 
 
-class ThinkingIndicator(Static):
-    """思考中指示器 - 显示旋转动画"""
+class ThinkingIndicator(Static, SpinnerMixin):
+    """思考中指示器 — 用 CSS class 切换可见性，避免频繁 mount/remove。
+
+    生命周期:
+        mount 后 spinner 立即运行；通过 ``show()`` / ``hide()`` 控制可见性；
+        ``teardown()`` 停止 spinner 并从 DOM 移除。
+    """
 
     DEFAULT_CSS = """
     ThinkingIndicator {
@@ -15,29 +20,30 @@ class ThinkingIndicator(Static):
         height: 1;
         color: $text-muted;
     }
+    ThinkingIndicator.-hidden {
+        display: none;
+    }
     """
 
     def __init__(self) -> None:
         super().__init__("", classes="thinking-indicator")
-        self._frame = 0
-        self._timer = None
-        self._stopped = False
 
     def on_mount(self) -> None:
-        if self._stopped:
-            self.remove()
+        self._start_spinner()
+
+    def _on_spinner_tick(self, frame_char: str) -> None:
+        if self.has_class("-hidden"):
             return
-        self._timer = self.set_interval(0.1, self._tick)
+        self.update(f"{frame_char} Thinking...")
 
-    def _tick(self) -> None:
-        frame = SPINNER_FRAMES[self._frame % len(SPINNER_FRAMES)]
-        self.update(f"{frame} Thinking...")
-        self._frame += 1
+    def show(self) -> None:
+        self._spinner_frame = 0
+        self.remove_class("-hidden")
 
-    def stop(self) -> None:
-        """停止动画并移除"""
-        self._stopped = True
-        if self._timer:
-            self._timer.stop()
+    def hide(self) -> None:
+        self.add_class("-hidden")
+
+    def teardown(self) -> None:
+        self._stop_spinner()
         if self.is_mounted:
             self.remove()

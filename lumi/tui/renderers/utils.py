@@ -5,6 +5,7 @@ from __future__ import annotations
 import os
 
 from rich.text import Text
+from textual.timer import Timer
 from textual.widget import Widget
 from textual.widgets import Static
 
@@ -12,6 +13,35 @@ from lumi.tui.theme import get_color
 
 # spinner 动画帧序列，供 ToolBlock 和 ThinkingIndicator 共用
 SPINNER_FRAMES: tuple[str, ...] = ("⠋", "⠙", "⠹", "⠸", "⠼", "⠴", "⠦", "⠧", "⠇", "⠏")
+
+
+class SpinnerMixin:
+    """Spinner 动画 mixin，消除 ThinkingIndicator 和 ToolBlock 的重复代码。
+
+    宿主类需要是 Textual Widget（提供 ``set_interval``）。
+    子类须实现 ``_on_spinner_tick(frame_char)`` 来响应每一帧。
+    """
+
+    _spinner_frame: int = 0
+    _spinner_timer: Timer | None = None
+
+    def _start_spinner(self, interval: float = 0.1) -> None:
+        self._spinner_frame = 0
+        self._spinner_timer = self.set_interval(interval, self.__spinner_tick)  # type: ignore[attr-defined]
+
+    def __spinner_tick(self) -> None:
+        char = SPINNER_FRAMES[self._spinner_frame % len(SPINNER_FRAMES)]
+        self._spinner_frame += 1
+        self._on_spinner_tick(char)
+
+    def _on_spinner_tick(self, frame_char: str) -> None:
+        raise NotImplementedError
+
+    def _stop_spinner(self) -> None:
+        if self._spinner_timer:
+            self._spinner_timer.stop()
+            self._spinner_timer = None
+
 
 # 文件扩展名 → 语法高亮语言映射
 _LEXER_MAP: dict[str, str] = {
@@ -70,6 +100,29 @@ def get_arg(args: dict, key: str, fallback: str = "unknown") -> str:
     """
     value = args.get(key, fallback)
     return value if value else fallback
+
+
+# 标题中参数值的最大显示长度
+_TITLE_MAX_LEN = 60
+
+
+def truncate_for_title(text: str, max_len: int = _TITLE_MAX_LEN) -> str:
+    """截断文本用于标题显示，只保留第一行且限制长度。
+
+    多行文本只取第一行，超出 max_len 时添加省略号。
+
+    Args:
+        text: 原始文本
+        max_len: 最大显示长度
+
+    Returns:
+        截断后的单行文本
+    """
+    # 只取第一行
+    first_line = text.split("\n", 1)[0].strip()
+    if len(first_line) <= max_len:
+        return first_line
+    return first_line[:max_len] + "…"
 
 
 def render_status_output(output: str) -> Widget:

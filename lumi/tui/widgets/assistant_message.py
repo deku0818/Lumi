@@ -31,9 +31,13 @@ class AssistantMessage(Static):
         self.update(self._text)
 
     def finalize(self) -> None:
-        """标记消息完成，去除末尾多余空行"""
+        """标记消息完成，去除末尾多余空行
+
+        使用 right_crop 按字符数移除末尾换行，避免 truncate 按 cell width
+        截断导致中文内容（每字符占 2 cell）被多截。
+        """
         plain = self._text.plain
         trailing = len(plain) - len(plain.rstrip("\n"))
         if trailing > 0:
-            self._text.truncate(len(plain) - trailing)
+            self._text.right_crop(trailing)
             self.update(self._text)

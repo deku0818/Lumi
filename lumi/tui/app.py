@@ -19,7 +19,8 @@ from lumi.agents.cron.job_store import JobStore
 from lumi.agents.cron.run_log import RunLog
 from lumi.agents.cron.scheduler import Scheduler
 from lumi.agents.tools.providers.cron import init_cron_tool
-from lumi.tui.agent_bridge import AgentBridge, EventKind
+from lumi.tui.agent_bridge import AgentBridge, BridgeEvent, EventKind
+from lumi.tui.run_state import RunContext, RunPhase
 from lumi.tui.theme import APP_CSS, LUMI_DARK_THEME, LUMI_LIGHT_THEME, get_color
 from lumi.tui.widgets.ask_block import AskBlock
 from lumi.tui.widgets.ask_dialog import AskDialog
@@ -57,13 +58,8 @@ class LumiApp(App):
         self.register_theme(LUMI_LIGHT_THEME)
         self.theme = "lumi-dark"  # 默认暗色，on_mount 中根据全局配置切换
         self._bridge = AgentBridge()
-        self._current_assistant_msg: AssistantMessage | None = None
-        self._current_thinking: ThinkingIndicator | None = None
-        self._agent_running = False
-        self._tool_blocks: dict[str, ToolBlock] = {}
-        self._last_approval_tool_calls: list[dict] = []
-        self._current_ask_block: AskBlock | None = None
-        self._current_task: asyncio.Task | None = None
+        self._run = RunContext()
+        self._thinking: ThinkingIndicator | None = None
         self._last_ctrl_c: float = 0.0
         self._global_config = None
         self._scheduler: Scheduler | None = None
@@ -189,7 +185,7 @@ class LumiApp(App):
     # ── 输入处理 ──
 
     async def on_input_bar_submitted(self, event: InputBar.Submitted) -> None:
-        if self._agent_running:
+        if self._run.is_running:
             return
 
         text = event.text
@@ -198,16 +194,16 @@ class LumiApp(App):
         await chat_log.mount(UserMessage(text))
         await chat_log.auto_scroll_if_needed()
 
-        self._agent_running = True
+        self._run.phase = RunPhase.IDLE  # 即将启动
         self.query_one(InputBar).set_disabled(True)
 
-        self._current_task = asyncio.create_task(self._run_stream(text, tool_mode))
+        self._run.task = asyncio.create_task(self._run_stream(text, tool_mode))
 
     async def _run_stream(self, text: str, tool_mode: str = "approve") -> None:
         await self._consume_events(self._bridge.stream_response(text, tool_mode))
 
     async def _run_resume(self, value) -> None:
-        self._current_task = asyncio.create_task(
+        self._run.task = asyncio.create_task(
             self._consume_events(self._bridge.stream_resume(value))
         )
 
@@ -220,19 +216,59 @@ class LumiApp(App):
             logger.error(f"[TUI] 事件流异常: {e}", exc_info=True)
             await self._show_error(chat_log, str(e))
 
-    async def _apply_event(self, evt, chat_log: ChatLog) -> None:
-        """处理单个 bridge 事件并更新 UI"""
+    # ── 状态机 ──
+
+    _THINKING_PHASES = {RunPhase.THINKING, RunPhase.TOOL_CALL_PENDING}
+
+    def _transition(self, evt: BridgeEvent) -> tuple[RunPhase, RunPhase]:
+        """纯逻辑状态转换，不操作 DOM。返回 (old, new)。"""
+        old = self._run.phase
         match evt.kind:
             case EventKind.MODEL_START:
-                await self._start_thinking(chat_log)
+                new = RunPhase.THINKING
+            case EventKind.STREAM_TOKEN:
+                new = RunPhase.STREAMING
+            case EventKind.MODEL_END:
+                new = old  # 不改变可见状态
+            case EventKind.TOOL_CALL_CHUNK:
+                new = RunPhase.TOOL_CALL_PENDING
+            case EventKind.TOOL_START:
+                new = RunPhase.TOOL_RUNNING
+            case EventKind.TOOL_END:
+                new = RunPhase.TOOL_RUNNING
+            case EventKind.ASK:
+                new = RunPhase.WAITING_ASK
+            case EventKind.TOOL_APPROVAL:
+                new = RunPhase.WAITING_APPROVAL
+            case EventKind.DONE | EventKind.ERROR:
+                new = RunPhase.IDLE
+            case _:
+                new = old
+        self._run.phase = new
+        return old, new
+
+    async def _apply_event(self, evt: BridgeEvent, chat_log: ChatLog) -> None:
+        """两阶段事件处理：先做状态转换驱动的 UI 切换，再执行事件特定逻辑。"""
+        old, new = self._transition(evt)
+
+        # 阶段离开 thinking → 移除 indicator（下次进入时重新 mount 到正确位置）
+        if old in self._THINKING_PHASES and new not in self._THINKING_PHASES:
+            if self._thinking:
+                self._thinking.teardown()
+                self._thinking = None
+
+        # 阶段进入 thinking → 显示 indicator
+        if new in self._THINKING_PHASES and old not in self._THINKING_PHASES:
+            await self._ensure_thinking(chat_log)
+
+        # 离开 STREAMING → finalize assistant message
+        if old == RunPhase.STREAMING and new != RunPhase.STREAMING:
+            self._finalize_assistant_msg()
+
+        # 事件特定 UI 更新
+        match evt.kind:
             case EventKind.STREAM_TOKEN:
                 await self._handle_stream_token(evt, chat_log)
-            case EventKind.MODEL_END:
-                self._finalize_assistant_msg()
-            case EventKind.TOOL_CALL_CHUNK:
-                if not self._current_thinking:
-                    self._finalize_assistant_msg()
-                    await self._start_thinking(chat_log)
             case EventKind.TOOL_START:
                 await self._handle_tool_start(evt, chat_log)
             case EventKind.TOOL_END:
@@ -246,89 +282,74 @@ class LumiApp(App):
             case EventKind.ERROR:
                 await self._show_error(chat_log, evt.error)
 
-    async def _handle_stream_token(self, evt, chat_log: ChatLog) -> None:
-        """处理流式 token 事件"""
-        self._stop_thinking()
-        if self._current_assistant_msg is None:
-            self._current_assistant_msg = AssistantMessage()
-            await chat_log.mount(self._current_assistant_msg)
-        self._current_assistant_msg.append_token(evt.text)
+    # ── 事件 handlers（已解耦 thinking 管理）──
+
+    async def _handle_stream_token(self, evt: BridgeEvent, chat_log: ChatLog) -> None:
+        if self._run.assistant_msg is None:
+            self._run.assistant_msg = AssistantMessage()
+            await chat_log.mount(self._run.assistant_msg)
+        self._run.assistant_msg.append_token(evt.text)
         await chat_log.auto_scroll_if_needed()
 
-    async def _handle_tool_start(self, evt, chat_log: ChatLog) -> None:
-        """处理工具开始执行事件"""
-        self._stop_thinking()
-        self._finalize_assistant_msg()
+    async def _handle_tool_start(self, evt: BridgeEvent, chat_log: ChatLog) -> None:
         # ask 工具由 AskBlock 统一处理，不创建 ToolBlock
         if evt.name == "ask":
             return
         key = evt.tool_call_id or evt.name
         # 审批模式下 ToolBlock 已在 TOOL_APPROVAL 阶段创建
-        if key not in self._tool_blocks:
+        if key not in self._run.tool_blocks:
             block = ToolBlock(evt.name, evt.args or {}, approval_mode=evt.approval_mode)
-            self._tool_blocks[key] = block
+            self._run.tool_blocks[key] = block
             await chat_log.mount(block)
         await chat_log.auto_scroll_if_needed()
 
-    async def _handle_tool_end(self, evt, chat_log: ChatLog) -> None:
-        """处理工具执行完成事件"""
-        self._stop_thinking()
+    async def _handle_tool_end(self, evt: BridgeEvent, chat_log: ChatLog) -> None:
         # ask 工具由 AskBlock 统一处理
         if evt.name == "ask":
             return
         key = evt.tool_call_id or evt.name
-        block = self._tool_blocks.pop(key, None)
+        block = self._run.tool_blocks.pop(key, None)
         if block:
             block.set_done(evt.output)
         await chat_log.auto_scroll_if_needed()
 
-    async def _handle_ask(self, evt, chat_log: ChatLog) -> None:
-        """处理 ask 中断事件"""
-        self._stop_thinking()
+    async def _handle_ask(self, evt: BridgeEvent, chat_log: ChatLog) -> None:
         ask_block = AskBlock(evt.data)
-        self._current_ask_block = ask_block
+        self._run.ask_block = ask_block
         await chat_log.mount(ask_block)
         await chat_log.auto_scroll_if_needed()
 
-    async def _handle_tool_approval(self, evt, chat_log: ChatLog) -> None:
-        """处理工具审批中断事件"""
-        self._stop_thinking()
+    async def _handle_tool_approval(self, evt: BridgeEvent, chat_log: ChatLog) -> None:
         self._finalize_assistant_msg()
         # 保存工具调用信息，供拒绝/取消时创建 ToolBlock
         tool_calls = (evt.data or {}).get("tool_calls", [])
-        self._last_approval_tool_calls = tool_calls
+        self._run.last_approval_tool_calls = tool_calls
         for tc in tool_calls:
             key = tc.get("id") or tc.get("name", "unknown")
-            self._tool_blocks.pop(key, None)
+            self._run.tool_blocks.pop(key, None)
         approval = ToolApproval(evt.data)
         await chat_log.mount(approval)
         await chat_log.auto_scroll_if_needed()
 
-    def _stop_thinking(self) -> None:
-        if self._current_thinking:
-            self._current_thinking.stop()
-            self._current_thinking = None
-        # 清理可能残留在 DOM 中的 ThinkingIndicator
-        try:
-            for indicator in self.query(ThinkingIndicator):
-                indicator.stop()
-                indicator.remove()
-        except Exception:
-            pass
+    # ── 辅助方法 ──
 
     def _finalize_assistant_msg(self) -> None:
-        if self._current_assistant_msg:
-            self._current_assistant_msg.finalize()
-            self._current_assistant_msg = None
+        if self._run.assistant_msg:
+            self._run.assistant_msg.finalize()
+            self._run.assistant_msg = None
 
-    async def _start_thinking(self, chat_log: ChatLog) -> None:
-        self._stop_thinking()
-        self._current_thinking = ThinkingIndicator()
-        await chat_log.mount(self._current_thinking)
+    async def _ensure_thinking(self, chat_log: ChatLog) -> None:
+        """在 chat log 底部显示 ThinkingIndicator。
+
+        始终 teardown 旧实例并重新 mount，确保位置在最新内容之后。
+        """
+        if self._thinking:
+            self._thinking.teardown()
+        self._thinking = ThinkingIndicator()
+        await chat_log.mount(self._thinking)
         await chat_log.auto_scroll_if_needed()
 
     async def _show_error(self, chat_log: ChatLog, error: str) -> None:
-        self._stop_thinking()
         if len(error) > 300:
             error = error[:300] + "..."
         err_text = Text()
@@ -341,9 +362,9 @@ class LumiApp(App):
     # ── 中断恢复 ──
 
     async def on_ask_dialog_answered(self, event: AskDialog.Answered) -> None:
-        if self._current_ask_block:
-            self._current_ask_block.set_result(event.answer)
-            self._current_ask_block = None
+        if self._run.ask_block:
+            self._run.ask_block.set_result(event.answer)
+            self._run.ask_block = None
         await self._run_resume(event.answer)
 
     async def on_tool_approval_decided(self, event: ToolApproval.Decided) -> None:
@@ -354,8 +375,7 @@ class LumiApp(App):
             tool_calls = getattr(event, "_tool_calls", None)
             # 从最近的 ToolApproval 数据中恢复工具信息
             if tool_calls is None:
-                # ToolApproval 已被 remove，从 _last_approval_data 获取
-                tool_calls = self._last_approval_tool_calls
+                tool_calls = self._run.last_approval_tool_calls
             for tc in tool_calls:
                 name = tc.get("name", "unknown")
                 args = tc.get("args", {})
@@ -405,11 +425,10 @@ class LumiApp(App):
             )
 
     def _finish_run(self) -> None:
-        self._agent_running = False
-        self._current_assistant_msg = None
-        self._current_ask_block = None
-        self._stop_thinking()
-        self._tool_blocks.clear()
+        if self._thinking:
+            self._thinking.teardown()
+            self._thinking = None
+        self._run.reset()
         try:
             self.query_one(InputBar).set_disabled(False)
         except Exception:
@@ -439,10 +458,9 @@ class LumiApp(App):
         except NoMatches:
             pass
 
-        if self._agent_running:
-            if self._current_task and not self._current_task.done():
-                self._current_task.cancel()
-            self._stop_thinking()
+        if self._run.is_running:
+            if self._run.task and not self._run.task.done():
+                self._run.task.cancel()
             self._finalize_assistant_msg()
             chat_log = self.query_one(ChatLog)
             hint = Text()
