@@ -316,7 +316,12 @@ class Scheduler:
         # 广播结果（成功时广播输出，失败/超时时广播错误信息）
         broadcast_text = output if status == "success" else f"[{status}] {error}"
         try:
-            await self._delivery.broadcast(job.name, broadcast_text)
+            await self._delivery.broadcast(
+                job.name,
+                broadcast_text,
+                started_at=started_at,
+                duration_ms=duration_ms,
+            )
         except Exception:
             logger.warning("广播结果失败: %s [%s]", job.name, job.id, exc_info=True)
 

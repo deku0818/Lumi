@@ -177,6 +177,7 @@ APP_CSS = """
 Screen {
     background: $background;
     color: $foreground;
+    layers: base overlay;
 }
 
 /* ── 聊天日志 ── */

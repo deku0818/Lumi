@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import asyncio
 import sys
+from datetime import datetime
 
 from rich.text import Text
 from textual.app import App, ComposeResult
@@ -26,6 +27,7 @@ from lumi.tui.widgets.assistant_message import AssistantMessage
 from lumi.tui.widgets.title_block import TitleBlock
 from lumi.tui.widgets.chat_log import ChatLog
 from lumi.tui.widgets.input_bar import InputBar
+from lumi.tui.widgets.notification_panel import NotificationChanged, NotificationPanel
 from lumi.tui.widgets.thinking_indicator import ThinkingIndicator
 from lumi.tui.widgets.tool_block import ToolBlock
 from lumi.tui.widgets.user_message import UserMessage
@@ -45,6 +47,7 @@ class LumiApp(App):
         Binding("escape", "cancel_generation", "Cancel", priority=True),
         ("ctrl+c", "quit_app", "Quit"),
         Binding("ctrl+s", "open_settings", "Settings", priority=True),
+        Binding("ctrl+n", "toggle_notifications", "Notifications", priority=True),
     ]
 
     def __init__(self) -> None:
@@ -66,6 +69,7 @@ class LumiApp(App):
 
     def compose(self) -> ComposeResult:
         yield ChatLog()
+        yield NotificationPanel()
         yield InputBar(id="input-area")
 
     async def _detect_system_theme(self) -> bool:
@@ -354,6 +358,40 @@ class LumiApp(App):
         await self._run_resume(decision)
 
     # ── 操作 ──
+
+    def add_notification(
+        self,
+        job_name: str,
+        output: str,
+        started_at: datetime | None = None,
+        duration_ms: int | None = None,
+    ) -> None:
+        try:
+            self.query_one(NotificationPanel).add_notification(
+                job_name, output, started_at=started_at, duration_ms=duration_ms
+            )
+        except Exception:
+            logger.warning("[LumiApp] 通知面板不可用", exc_info=True)
+
+    def action_toggle_notifications(self) -> None:
+        """切换通知面板显示/隐藏 (Ctrl+N)。"""
+        try:
+            self.query_one(NotificationPanel).toggle_panel()
+        except NoMatches:
+            logger.debug("[LumiApp] NotificationPanel 尚未挂载")
+        except Exception:
+            logger.warning("[LumiApp] 切换通知面板失败", exc_info=True)
+
+    def on_notification_changed(self, event: NotificationChanged) -> None:
+        """通知数量变化时更新 InputBar 铃铛。"""
+        try:
+            self.query_one(InputBar).update_bell(event.unread)
+        except NoMatches:
+            logger.debug("[LumiApp] InputBar 尚未挂载")
+        except Exception:
+            logger.warning(
+                "[LumiApp] 铃铛更新失败, unread=%s", event.unread, exc_info=True
+            )
 
     def _finish_run(self) -> None:
         self._agent_running = False

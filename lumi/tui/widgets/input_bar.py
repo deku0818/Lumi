@@ -75,10 +75,22 @@ class InputBar(Vertical):
         padding: 0 2 1 2;
     }
 
-    #mode-indicator {
+    #status-row {
         height: 1;
         padding: 0 0 0 1;
+    }
+
+    #mode-indicator {
+        width: 1fr;
+        height: 1;
         color: $text-muted;
+    }
+
+    #bell-indicator {
+        width: auto;
+        height: 1;
+        color: $text-muted;
+        padding: 0 1 0 0;
     }
     """
 
@@ -101,10 +113,12 @@ class InputBar(Vertical):
         yield InputBox()
         label, role = _MODE_DISPLAY[self._tool_mode]
         color = get_color(role)
-        yield Static(
-            f"[{color}]{label}[/] [dim](shift+tab to switch)[/dim]",
-            id="mode-indicator",
-        )
+        with Horizontal(id="status-row"):
+            yield Static(
+                f"[{color}]{label}[/] [dim](shift+tab to switch)[/dim]",
+                id="mode-indicator",
+            )
+            yield Static("🔔", id="bell-indicator")
 
     def on_mount(self) -> None:
         self.query_one(InputBox).border_title = "Input"
@@ -183,3 +197,16 @@ class InputBar(Vertical):
         inp.disabled = disabled
         if not disabled:
             inp.focus()
+
+    def update_bell(self, unread: int) -> None:
+        """更新铃铛指示器的未读数量。
+
+        Args:
+            unread: 未读通知数量。
+        """
+        bell = self.query_one("#bell-indicator", Static)
+        if unread > 0:
+            color = get_color("accent")
+            bell.update(f"[{color}]🔔 {unread}[/]")
+        else:
+            bell.update("🔔")

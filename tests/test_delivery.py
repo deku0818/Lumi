@@ -4,18 +4,34 @@ from __future__ import annotations
 
 import asyncio
 
+from datetime import datetime
+
 from lumi.agents.cron.delivery import APIDelivery, DeliveryManager, ResultDelivery
 
 
 class FakeDelivery(ResultDelivery):
-    """测试用的假投递通道，记录收到的消息。"""
+    """测试用的假投递通道，记录收到的消息（含全部字段）。"""
 
     def __init__(self) -> None:
-        self.messages: list[tuple[str, str]] = []
+        self.messages: list[dict] = []
         self.closed: bool = False
 
-    async def deliver(self, job_name: str, output: str) -> None:
-        self.messages.append((job_name, output))
+    async def deliver(
+        self,
+        job_name: str,
+        output: str,
+        *,
+        started_at: datetime | None = None,
+        duration_ms: int | None = None,
+    ) -> None:
+        self.messages.append(
+            {
+                "job_name": job_name,
+                "output": output,
+                "started_at": started_at,
+                "duration_ms": duration_ms,
+            }
+        )
 
     async def close(self) -> None:
         self.closed = True
@@ -24,14 +40,28 @@ class FakeDelivery(ResultDelivery):
 class FailingDelivery(ResultDelivery):
     """测试用的总是失败的投递通道。"""
 
-    async def deliver(self, job_name: str, output: str) -> None:
+    async def deliver(
+        self,
+        job_name: str,
+        output: str,
+        *,
+        started_at: datetime | None = None,
+        duration_ms: int | None = None,
+    ) -> None:
         raise RuntimeError("投递失败")
 
 
 class FailingCloseDelivery(ResultDelivery):
     """close 时抛异常的投递通道。"""
 
-    async def deliver(self, job_name: str, output: str) -> None:
+    async def deliver(
+        self,
+        job_name: str,
+        output: str,
+        *,
+        started_at: datetime | None = None,
+        duration_ms: int | None = None,
+    ) -> None:
         pass
 
     async def close(self) -> None:
@@ -48,7 +78,11 @@ async def test_register_and_broadcast() -> None:
 
     await dm.broadcast("job1", "hello")
 
-    assert ch.messages == [("job1", "hello")]
+    assert len(ch.messages) == 1
+    assert ch.messages[0]["job_name"] == "job1"
+    assert ch.messages[0]["output"] == "hello"
+    assert ch.messages[0]["started_at"] is None
+    assert ch.messages[0]["duration_ms"] is None
 
 
 async def test_unregister_removes_channel() -> None:
@@ -59,7 +93,7 @@ async def test_unregister_removes_channel() -> None:
 
     await dm.broadcast("job1", "hello")
 
-    assert ch.messages == []
+    assert len(ch.messages) == 0
 
 
 # -- broadcast 隔离 --
@@ -78,8 +112,10 @@ async def test_broadcast_isolates_channel_failure() -> None:
 
     await dm.broadcast("job1", "result")
 
-    assert ok.messages == [("job1", "result")]
-    assert ok2.messages == [("job1", "result")]
+    assert len(ok.messages) == 1
+    assert ok.messages[0]["job_name"] == "job1"
+    assert len(ok2.messages) == 1
+    assert ok2.messages[0]["job_name"] == "job1"
 
 
 # -- close_all --
@@ -98,7 +134,7 @@ async def test_close_all_closes_channels_and_clears() -> None:
     assert ch2.closed
     # close_all 后广播不再投递
     await dm.broadcast("job1", "after-close")
-    assert ch1.messages == []
+    assert len(ch1.messages) == 0
 
 
 async def test_close_all_tolerates_close_failure() -> None:
@@ -125,7 +161,8 @@ async def test_api_delivery_buffers_when_no_subscribers() -> None:
     await ad.deliver("job2", "result2")
 
     assert len(ad._buffer) == 2
-    assert ad._buffer[0] == {"job_name": "job1", "output": "result1"}
+    assert ad._buffer[0]["job_name"] == "job1"
+    assert ad._buffer[0]["output"] == "result1"
 
 
 async def test_api_delivery_buffer_evicts_oldest_when_full() -> None:
@@ -162,8 +199,10 @@ async def test_api_delivery_pushes_to_subscribers() -> None:
     await asyncio.wait_for(task, timeout=2)
 
     assert len(received) == 2
-    assert received[0] == {"job_name": "j1", "output": "o1"}
-    assert received[1] == {"job_name": "j2", "output": "o2"}
+    assert received[0]["job_name"] == "j1"
+    assert received[0]["output"] == "o1"
+    assert received[1]["job_name"] == "j2"
+    assert received[1]["output"] == "o2"
     assert ad._buffer == []
 
 
@@ -241,5 +280,108 @@ async def test_api_delivery_multiple_subscribers() -> None:
 
     await asyncio.wait_for(asyncio.gather(t1, t2), timeout=2)
 
-    assert r1 == [{"job_name": "shared", "output": "data"}]
-    assert r2 == [{"job_name": "shared", "output": "data"}]
+    assert r1[0]["job_name"] == "shared"
+    assert r1[0]["output"] == "data"
+    assert r2[0]["job_name"] == "shared"
+    assert r2[0]["output"] == "data"
+
+
+# -- broadcast 传递 started_at / duration_ms --
+
+
+async def test_broadcast_forwards_timing_metadata() -> None:
+    """broadcast 将 started_at 和 duration_ms 正确传递到通道。"""
+    dm = DeliveryManager()
+    ch = FakeDelivery()
+    dm.register(ch)
+
+    ts = datetime(2026, 3, 7, 12, 0, 0)
+    await dm.broadcast("job1", "result", started_at=ts, duration_ms=1234)
+
+    assert len(ch.messages) == 1
+    assert ch.messages[0]["started_at"] == ts
+    assert ch.messages[0]["duration_ms"] == 1234
+
+
+# -- APIDelivery 序列化 started_at / duration_ms --
+
+
+async def test_api_delivery_serializes_timing_metadata() -> None:
+    """APIDelivery 将 started_at 序列化为 ISO 格式字符串。"""
+    ad = APIDelivery()
+
+    ts = datetime(2026, 3, 7, 12, 0, 0)
+    await ad.deliver("job1", "out", started_at=ts, duration_ms=500)
+
+    assert len(ad._buffer) == 1
+    assert ad._buffer[0]["started_at"] == "2026-03-07T12:00:00"
+    assert ad._buffer[0]["duration_ms"] == 500
+
+
+async def test_api_delivery_none_timing_metadata() -> None:
+    """不提供 started_at/duration_ms 时，缓存中为 None。"""
+    ad = APIDelivery()
+
+    await ad.deliver("job1", "out")
+
+    assert ad._buffer[0]["started_at"] is None
+    assert ad._buffer[0]["duration_ms"] is None
+
+
+async def test_api_delivery_subscriber_receives_timing_metadata() -> None:
+    """订阅者接收到序列化后的 started_at 和 duration_ms。"""
+    ad = APIDelivery()
+    received: list[dict] = []
+
+    async def consume() -> None:
+        async for msg in ad.subscribe():
+            received.append(msg)
+            if len(received) >= 1:
+                break
+
+    task = asyncio.create_task(consume())
+    await asyncio.sleep(0.05)
+
+    ts = datetime(2026, 3, 7, 15, 30, 0)
+    await ad.deliver("j1", "o1", started_at=ts, duration_ms=2000)
+
+    await asyncio.wait_for(task, timeout=2)
+
+    assert received[0]["started_at"] == "2026-03-07T15:30:00"
+    assert received[0]["duration_ms"] == 2000
+
+
+# -- TUIDelivery --
+
+
+async def test_tui_delivery_calls_add_notification() -> None:
+    """TUIDelivery 在 app 有 add_notification 时通过 call_later 调用。"""
+    from unittest.mock import MagicMock
+
+    from lumi.agents.cron.delivery import TUIDelivery
+
+    app = MagicMock()
+    app.add_notification = MagicMock()
+    # call_later 接收一个 lambda，立即执行以验证
+    app.call_later = lambda fn: fn()
+
+    delivery = TUIDelivery(app)
+    ts = datetime(2026, 3, 7, 12, 0, 0)
+    await delivery.deliver("job1", "output", started_at=ts, duration_ms=100)
+
+    app.add_notification.assert_called_once_with(
+        "job1", "output", started_at=ts, duration_ms=100
+    )
+
+
+async def test_tui_delivery_logs_warning_when_no_add_notification() -> None:
+    """TUIDelivery 在 app 缺少 add_notification 时不抛异常。"""
+    from unittest.mock import MagicMock
+
+    from lumi.agents.cron.delivery import TUIDelivery
+
+    app = MagicMock(spec=[])  # 空 spec，无任何属性
+    delivery = TUIDelivery(app)
+
+    # 不应抛异常
+    await delivery.deliver("job1", "output")

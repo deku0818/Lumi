@@ -5,6 +5,7 @@ from __future__ import annotations
 import asyncio
 from abc import ABC, abstractmethod
 from collections.abc import AsyncGenerator
+from datetime import datetime
 from typing import TYPE_CHECKING
 
 from lumi.utils.logger import logger
@@ -21,12 +22,21 @@ class ResultDelivery(ABC):
     """
 
     @abstractmethod
-    async def deliver(self, job_name: str, output: str) -> None:
+    async def deliver(
+        self,
+        job_name: str,
+        output: str,
+        *,
+        started_at: datetime | None = None,
+        duration_ms: int | None = None,
+    ) -> None:
         """将任务执行结果投递到目标通道。
 
         Args:
             job_name: 任务名称。
             output: 任务执行结果文本。
+            started_at: 任务开始执行的时间。
+            duration_ms: 任务执行耗时（毫秒）。
         """
         ...
 
@@ -64,18 +74,37 @@ class DeliveryManager:
         """
         self._channels.remove(channel)
 
-    async def broadcast(self, job_name: str, output: str) -> None:
+    async def broadcast(
+        self,
+        job_name: str,
+        output: str,
+        *,
+        started_at: datetime | None = None,
+        duration_ms: int | None = None,
+    ) -> None:
         """向所有已注册通道投递结果，单个通道失败不影响其他通道。
 
         Args:
             job_name: 任务名称。
             output: 任务执行结果文本。
+            started_at: 任务开始执行的时间。
+            duration_ms: 任务执行耗时（毫秒）。
         """
         for ch in self._channels:
             try:
-                await ch.deliver(job_name, output)
+                await ch.deliver(
+                    job_name,
+                    output,
+                    started_at=started_at,
+                    duration_ms=duration_ms,
+                )
             except Exception:
-                logger.warning("投递到 %s 失败", type(ch).__name__, exc_info=True)
+                logger.warning(
+                    "投递到 %s 失败 (job=%s)",
+                    type(ch).__name__,
+                    job_name,
+                    exc_info=True,
+                )
 
     async def close_all(self) -> None:
         """关闭所有通道并释放资源，关闭后清空通道列表。"""
@@ -88,25 +117,45 @@ class DeliveryManager:
 
 
 class TUIDelivery(ResultDelivery):
-    """通过 Textual 的 notify 将定时任务执行结果展示为系统通知。
+    """将定时任务执行结果持久化到 TUI 通知面板。
 
     Args:
-        app: Textual App 实例，用于调用 ``notify()`` 展示通知。
+        app: LumiApp 实例，用于调用 ``add_notification()`` 向通知面板推送通知。
     """
 
     def __init__(self, app: "App") -> None:
         self._app = app
 
-    async def deliver(self, job_name: str, output: str) -> None:
-        """将任务执行结果以 toast 通知形式展示在 TUI 界面中。
+    async def deliver(
+        self,
+        job_name: str,
+        output: str,
+        *,
+        started_at: datetime | None = None,
+        duration_ms: int | None = None,
+    ) -> None:
+        """将任务执行结果持久化到通知面板。
 
         Args:
             job_name: 任务名称。
             output: 任务执行结果文本。
+            started_at: 任务开始执行的时间。
+            duration_ms: 任务执行耗时（毫秒）。
         """
-        # 截取前 200 字符避免通知过长
-        summary = output[:200] + ("…" if len(output) > 200 else "")
-        self._app.notify(summary, title=f"⏰ {job_name}")
+        if not hasattr(self._app, "add_notification"):
+            logger.warning(
+                "[TUIDelivery] App 缺少 add_notification 方法，'%s' 的通知将不会展示",
+                job_name,
+            )
+            return
+        self._app.call_later(
+            lambda: self._app.add_notification(
+                job_name,
+                output,
+                started_at=started_at,
+                duration_ms=duration_ms,
+            )
+        )
 
 
 class APIDelivery(ResultDelivery):
@@ -124,17 +173,33 @@ class APIDelivery(ResultDelivery):
 
     def __init__(self, max_buffer: int = 50) -> None:
         self._max_buffer = max_buffer
-        self._buffer: list[dict[str, str]] = []
-        self._subscribers: list[asyncio.Queue[dict[str, str] | object]] = []
+        self._buffer: list[dict[str, str | int | None]] = []
+        self._subscribers: list[
+            asyncio.Queue[dict[str, str | int | None] | object]
+        ] = []
 
-    async def deliver(self, job_name: str, output: str) -> None:
+    async def deliver(
+        self,
+        job_name: str,
+        output: str,
+        *,
+        started_at: datetime | None = None,
+        duration_ms: int | None = None,
+    ) -> None:
         """将任务执行结果投递给所有订阅者，无订阅者时缓存。
 
         Args:
             job_name: 任务名称。
             output: 任务执行结果文本。
+            started_at: 任务开始执行的时间。
+            duration_ms: 任务执行耗时（毫秒）。
         """
-        message: dict[str, str] = {"job_name": job_name, "output": output}
+        message: dict[str, str | int | None] = {
+            "job_name": job_name,
+            "output": output,
+            "started_at": started_at.isoformat() if started_at else None,
+            "duration_ms": duration_ms,
+        }
 
         if not self._subscribers:
             # 无活跃订阅者，放入缓存
@@ -151,16 +216,16 @@ class APIDelivery(ResultDelivery):
             except asyncio.QueueFull:
                 logger.warning("SSE 订阅者队列已满，丢弃消息: %s", job_name)
 
-    async def subscribe(self) -> AsyncGenerator[dict[str, str], None]:
+    async def subscribe(self) -> AsyncGenerator[dict[str, str | int | None], None]:
         """创建一个 SSE 订阅，返回异步生成器。
 
         新订阅者连接后先接收所有缓存结果，然后持续等待新结果。
         生成器在 ``close()`` 被调用或订阅者断开时终止。
 
         Yields:
-            包含 ``job_name`` 和 ``output`` 的字典。
+            包含 ``job_name``、``output``、``started_at``、``duration_ms`` 的字典。
         """
-        queue: asyncio.Queue[dict[str, str] | object] = asyncio.Queue()
+        queue: asyncio.Queue[dict[str, str | int | None] | object] = asyncio.Queue()
         self._subscribers.append(queue)
 
         try:

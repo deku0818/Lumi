@@ -237,18 +237,18 @@ async def test_execute_job_creates_agent_and_returns_success(
     mock_create.assert_awaited_once_with(checkpoint=None)
 
 
-async def test_execute_job_sets_tool_mode_auto(scheduler: Scheduler) -> None:
-    """_execute_job() 应将 tool_mode 设为 'auto' 跳过人工审批。"""
+async def test_execute_job_sets_tool_mode_privileged(scheduler: Scheduler) -> None:
+    """_execute_job() 应将 tool_mode 设为 'privileged' 跳过人工审批。"""
     job = _make_interval_job("auto-mode-test")
     mock_create = _mock_create_agent()
 
     with patch(_PATCH_CREATE_AGENT, mock_create):
         await scheduler._execute_job(job)
 
-    # 验证 ainvoke 的 inputs 包含 tool_mode="auto"
+    # 验证 ainvoke 的 inputs 包含 tool_mode="privileged"
     call_args = mock_create.return_value[0].graph.ainvoke.call_args
     inputs = call_args[0][0]
-    assert inputs["tool_mode"] == "auto"
+    assert inputs["tool_mode"] == "privileged"
 
 
 async def test_execute_job_timeout(scheduler: Scheduler, run_log: RunLog) -> None:

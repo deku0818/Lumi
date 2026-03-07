@@ -14,7 +14,7 @@ class Logger:
     """日志管理类，支持控制台和文件输出。
 
     支持通过环境变量 LOG_LEVEL 控制日志级别，默认为 INFO。
-    可选择输出日志到指定目录。
+    指定 log_dir 时仅写入文件（避免干扰 TUI 渲染），否则输出到控制台。
 
     Attributes:
         name: 日志记录器名称
@@ -52,12 +52,11 @@ class Logger:
         # 添加事件循环关闭错误过滤器
         self.logger.addFilter(EventLoopClosedFilter())
 
-        # 添加控制台处理器
-        self._add_console_handler()
-
-        # 如果指定了日志目录，添加文件处理器
+        # 有文件日志时只写文件，避免 StreamHandler 干扰 TUI 渲染
         if log_dir:
             self._add_file_handler()
+        else:
+            self._add_console_handler()
 
     def _get_formatter(self) -> logging.Formatter:
         """获取统一的日志格式。"""
@@ -100,7 +99,9 @@ class Logger:
         self.logger.critical(msg, *args, **kwargs)
 
 
-logger = Logger("Lumi", log_dir="./logs").logger
+# 日志统一写入 ~/.lumi/logs/，与全局配置目录保持一致
+_LOG_DIR = str(Path.home() / ".lumi" / "logs")
+logger = Logger("Lumi", log_dir=_LOG_DIR).logger
 
 # 也为根日志记录器添加过滤器，以防有些日志不经过我们的Logger类
 root_logger = logging.getLogger()
@@ -110,9 +111,3 @@ root_logger.addFilter(EventLoopClosedFilter())
 NOISY_LOGGERS = ("httpx", "httpcore", "mcp")
 for _name in NOISY_LOGGERS:
     logging.getLogger(_name).setLevel(logging.WARNING)
-
-# 测试代码
-if __name__ == "__main__":
-    # 创建一个带文件输出的日志记录器
-    logger.info("测试日志输出")
-    logger.error("测试错误日志")
