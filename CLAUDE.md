@@ -1,52 +1,39 @@
-## Workflow Orchestration
+# Lumi 项目概览
 
-### 1. Plan Node Default
-- Enter plan mode for ANY non-trivial task (3+ steps or architectural decisions)
-- If something goes sideways, STOP and re-plan immediately - don't keep pushing
-- Use plan mode for verification steps, not just building
-- Write detailed specs upfront to reduce ambiguity
+Lumi 是一个基于 LangGraph 的 AI Agent 框架，提供终端 TUI 界面和 HTTP API 两种交互方式。
 
-### 2. Subagent Strategy
-- Use subagents liberally to keep main context window clean
-- Offload research, exploration, and parallel analysis to subagents
-- For complex problems, throw more compute at it via subagents
-- One tack per subagent for focused execution
+## 技术栈
 
-### 3. Self-Improvement Loop
-- After ANY correction from the user: update `tasks/lessons.md` with the pattern
-- Write rules for yourself that prevent the same mistake
-- Ruthlessly iterate on these lessons until mistake rate drops
-- Review lessons at session start for relevant project
+- Python 3.12+，包管理用 uv
+- LangGraph + LangChain（Agent 编排）
+- Textual（TUI 界面）
+- FastAPI + Uvicorn（HTTP API）
+- pytest + pytest-asyncio（测试）
+- ruff（格式化和 lint）
 
-### 4. Verification Before Done
-- Never mark a task complete without proving it works
-- Diff behavior between main and your changes when relevant
-- Ask yourself: "Would a staff engineer approve this?"
-- Run tests, check logs, demonstrate correctness
+## 目录结构
 
-### 5. Demand Elegance (Balanced)
-- For non-trivial changes: pause and ask "is there a more elegant way?"
-- If a fix feels hacky: "Knowing everything I know now, implement the elegant solution"
-- Skip this for simple, obvious fixes - don't over-engineer
-- Challenge your own work before presenting it
+```
+lumi/
+  agents/
+    base/       # 基础 graph 和 response service
+    core/       # 核心节点、消息处理、状态定义
+    tools/      # 工具注册、会话、工作区管理
+      providers/ # 各工具实现（bash、ask、filesystem 等）
+  api/          # FastAPI HTTP 接口
+  tui/          # Textual 终端 UI
+    widgets/    # UI 组件
+  utils/        # 通用工具（llm_chain、logger、config 等）
+tests/          # pytest 测试套件
+.lumi/prompts/  # Agent 系统提示（SOUL、AGENTS、GUARDRAILS）
+```
+## 代码风格
 
-### 6. Autonomous Bug Fixing
-- When given a bug report: just fix it. Don't ask for hand-holding
-- Point at logs, errors, failing tests - then resolve them
-- Zero context switching required from the user
-- Go fix failing CI tests without being told how
+Lumi 的代码应当具备可读性、简洁性和高效性。
+- 我们倾向于使用简洁明确的函数，每个函数专注于单一任务，并且其输入和输出类型应明确指定。
+- 通常更倾向于组合而非继承，因为继承可能导致同一对象承载过多功能。
+- 在可能的情况下，我们偏好不可变对象（即对象在初始化后不再发生变化）。代码的可重用性至关重要。
+- 我们坚决避免使用可变的全局状态，应确保在同一进程中可以存在多个相互独立的代码实例。
+- 架构应采用分层设计：底层基于基本操作和数据结构，当正确组合时，能够提供充分的灵活性；而高层则应提供一个更简单的 API，开箱即用，足以满足大多数使用场景。
 
-## Task Management
-
-1. **Plan First**: Write plan to `tasks/todo.md` with checkable items
-2. **Verify Plan**: Check in before starting implementation
-3. **Track Progress**: Mark items complete as you go
-4. **Explain Changes**: High-level summary at each step
-5. **Document Results**: Add review section to `tasks/todo.md`
-6. **Capture Lessons**: Update `tasks/lessons.md` after corrections
-
-## Core Principles
-
-- **Simplicity First**: Make every change as simple as possible. Impact minimal code.
-- **No Laziness**: Find root causes. No temporary fixes. Senior developer standards.
-- **Minimat Impact**: Changes should only touch what's necessary. Avoid introducing bugs.
+项目是基于uv进行管理，添加依赖尽可能不要直接修改pyproject.toml, 而是使用uv add 添加

@@ -272,6 +272,7 @@ class LumiApp(App):
 
     async def _handle_tool_end(self, evt, chat_log: ChatLog) -> None:
         """处理工具执行完成事件"""
+        self._stop_thinking()
         # ask 工具由 AskBlock 统一处理
         if evt.name == "ask":
             return
@@ -307,6 +308,13 @@ class LumiApp(App):
         if self._current_thinking:
             self._current_thinking.stop()
             self._current_thinking = None
+        # 清理可能残留在 DOM 中的 ThinkingIndicator
+        try:
+            for indicator in self.query(ThinkingIndicator):
+                indicator.stop()
+                indicator.remove()
+        except Exception:
+            pass
 
     def _finalize_assistant_msg(self) -> None:
         if self._current_assistant_msg:
@@ -314,6 +322,7 @@ class LumiApp(App):
             self._current_assistant_msg = None
 
     async def _start_thinking(self, chat_log: ChatLog) -> None:
+        self._stop_thinking()
         self._current_thinking = ThinkingIndicator()
         await chat_log.mount(self._current_thinking)
         await chat_log.auto_scroll_if_needed()
