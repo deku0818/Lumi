@@ -180,12 +180,22 @@ Screen {
     layers: base overlay;
 }
 
+/* ── 全局滚动条美化 ── */
+* {
+    scrollbar-size-vertical: 1;
+    scrollbar-size-horizontal: 1;
+    scrollbar-background: transparent;
+    scrollbar-background-hover: transparent;
+    scrollbar-background-active: transparent;
+    scrollbar-corner-color: transparent;
+    scrollbar-color: $scrollbar;
+    scrollbar-color-hover: $accent;
+    scrollbar-color-active: $accent;
+}
+
 /* ── 聊天日志 ── */
 #chat-log {
     background: transparent;
     padding: 0 1;
-    scrollbar-color: $scrollbar;
-    scrollbar-color-hover: $accent;
-    scrollbar-color-active: $accent;
 }
 """

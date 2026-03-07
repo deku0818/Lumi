@@ -12,10 +12,17 @@ _TOOL_MODES = ("approve", "auto", "privileged")
 
 # 值为 (label, 语义角色名)，颜色在渲染时通过 get_color() 解析
 _MODE_DISPLAY: dict[str, tuple[str, str]] = {
-    "approve": ("✔ approve mode", "success"),
-    "auto": ("⚡ auto mode", "accent"),
-    "privileged": ("🔓 privileged mode", "error"),
+    "approve": ("⏸ approve mode", "#E8D888"),
+    "auto": ("▶ auto mode", "#88E8A0"),
+    "privileged": ("▶▶ privileged mode ⚠", "#88A0E8"),
 }
+
+
+def _resolve_color(role_or_hex: str) -> str:
+    """解析颜色：如果是 hex 值直接返回，否则通过 get_color 查找。"""
+    if role_or_hex.startswith("#"):
+        return role_or_hex
+    return get_color(role_or_hex)
 
 
 class InputBox(Static):
@@ -112,13 +119,13 @@ class InputBar(Vertical):
     def compose(self) -> ComposeResult:
         yield InputBox()
         label, role = _MODE_DISPLAY[self._tool_mode]
-        color = get_color(role)
+        color = _resolve_color(role)
         with Horizontal(id="status-row"):
             yield Static(
                 f"[{color}]{label}[/] [dim](shift+tab to switch)[/dim]",
                 id="mode-indicator",
             )
-            yield Static("🔔", id="bell-indicator")
+            yield Static("[#B888E8]⚑[/]", id="bell-indicator")
 
     def on_mount(self) -> None:
         self.query_one(InputBox).border_title = "Input"
@@ -181,7 +188,7 @@ class InputBar(Vertical):
 
     def _update_mode_indicator(self) -> None:
         label, role = _MODE_DISPLAY[self._tool_mode]
-        color = get_color(role)
+        color = _resolve_color(role)
         indicator = self.query_one("#mode-indicator", Static)
         indicator.update(f"[{color}]{label}[/] [dim](shift+tab to switch)[/dim]")
 
@@ -206,7 +213,6 @@ class InputBar(Vertical):
         """
         bell = self.query_one("#bell-indicator", Static)
         if unread > 0:
-            color = get_color("accent")
-            bell.update(f"[{color}]🔔 {unread}[/]")
+            bell.update(f"[#B888E8]⚑ {unread}[/]")
         else:
-            bell.update("🔔")
+            bell.update("[#B888E8]⚑[/]")

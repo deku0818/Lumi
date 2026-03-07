@@ -10,7 +10,8 @@ from rich.text import Text
 from textual.app import App, ComposeResult
 from textual.binding import Binding
 from textual.css.query import NoMatches
-from textual.widgets import Static
+from textual.events import Key
+from textual.widgets import Input, Static
 
 from lumi import __version__
 from lumi.agents.cron.delivery import DeliveryManager, TUIDelivery
@@ -45,7 +46,7 @@ class LumiApp(App):
     TITLE = "Lumi"
     BINDINGS = [
         Binding("escape", "cancel_generation", "Cancel", priority=True),
-        ("ctrl+c", "quit_app", "Quit"),
+        Binding("ctrl+c", "handle_ctrl_c", "Quit", priority=True),
         Binding("ctrl+s", "open_settings", "Settings", priority=True),
         Binding("ctrl+n", "toggle_notifications", "Notifications", priority=True),
     ]
@@ -63,6 +64,7 @@ class LumiApp(App):
         self._last_approval_tool_calls: list[dict] = []
         self._current_ask_block: AskBlock | None = None
         self._current_task: asyncio.Task | None = None
+        self._last_ctrl_c: float = 0.0
         self._global_config = None
         self._scheduler: Scheduler | None = None
         self._delivery: DeliveryManager | None = None
@@ -451,3 +453,31 @@ class LumiApp(App):
         except Exception:
             logger.warning("[LumiApp] 关闭资源时出错", exc_info=True)
         self.exit()
+
+    async def action_handle_ctrl_c(self) -> None:
+        """Ctrl+C: 输入框有内容时清空；空框时 1.5 秒内再按一次退出。"""
+        import time
+
+        try:
+            inp = self.query_one("#user-input", Input)
+        except Exception:
+            await self.action_quit_app()
+            return
+
+        # 输入框有内容 → 清空，重置退出计时
+        if inp.value:
+            inp.value = ""
+            self._last_ctrl_c = 0.0
+            return
+
+        # 输入框已空 → 判断是否双击退出
+        now = time.monotonic()
+        if now - self._last_ctrl_c < 1.5:
+            await self.action_quit_app()
+            return
+        self._last_ctrl_c = now
+
+    def on_key(self, event: Key) -> None:
+        """任意非 Ctrl+C 按键重置双击退出窗口。"""
+        if event.key != "ctrl+c":
+            self._last_ctrl_c = 0.0
