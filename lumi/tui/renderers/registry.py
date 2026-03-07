@@ -44,7 +44,6 @@ def _register_builtins() -> None:
     from lumi.tui.renderers.edit import EditRenderer
     from lumi.tui.renderers.glob import GlobRenderer
     from lumi.tui.renderers.grep import GrepRenderer
-    from lumi.tui.renderers.ls import LsRenderer
     from lumi.tui.renderers.read import ReadRenderer
     from lumi.tui.renderers.skill import SkillRenderer
     from lumi.tui.renderers.agent import AgentRenderer
@@ -55,7 +54,6 @@ def _register_builtins() -> None:
     register("edit", EditRenderer)
     register("read", ReadRenderer)
     register("bash", BashRenderer)
-    register("ls", LsRenderer)
     register("glob", GlobRenderer)
     register("grep", GrepRenderer)
     register("todos", TodosRenderer)

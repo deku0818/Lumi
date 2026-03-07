@@ -77,7 +77,7 @@ class WorkspaceBoundary:
     ) -> list[Path]:
         """从工具调用参数中提取涉及的文件/目录路径。
 
-        对于文件操作工具（read/write/edit/ls/glob/grep），从参数中提取路径。
+        对于文件操作工具（read/write/edit/glob/grep），从参数中提取路径。
         对于 bash 工具，尝试从命令字符串中提取目标路径。
 
         Args:

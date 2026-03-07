@@ -60,7 +60,7 @@ Lumi 内置了基于配置文件的工具权限管理系统，支持 allow/deny 
 
 ### 路径模式（文件操作工具）
 
-适用于 `read`、`write`、`edit`、`ls`、`glob`、`grep` 等工具：
+适用于 `read`、`write`、`edit`、`glob`、`grep` 等工具：
 
 - `*` 匹配单层目录中的任意字符（不含 `/`）
 - `**` 匹配零或多层目录
@@ -152,7 +152,6 @@ Lumi 内置了基于配置文件的工具权限管理系统，支持 allow/deny 
   "permissions": {
     "allow": [
       "read",
-      "ls",
       "glob",
       "grep",
       "bash(npm *)",

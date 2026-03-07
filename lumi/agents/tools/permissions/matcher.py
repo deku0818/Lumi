@@ -15,7 +15,7 @@ from lumi.utils.logger import logger
 _COMMAND_TOOLS: frozenset[str] = frozenset({"bash"})
 
 # 需要通过路径模式匹配的工具
-_PATH_TOOLS: frozenset[str] = frozenset({"read", "write", "edit", "ls", "glob", "grep"})
+_PATH_TOOLS: frozenset[str] = frozenset({"read", "write", "edit", "glob", "grep"})
 
 # bash 工具中命令参数的可能键名
 _COMMAND_ARG_KEYS: tuple[str, ...] = ("command", "cmd")

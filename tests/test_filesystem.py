@@ -169,30 +169,6 @@ class TestBackendEdit:
         assert result["error"] is not None
 
 
-class TestBackendLsInfo:
-    async def test_ls_with_content(self, backend, authorized_tmp_dir):
-        (authorized_tmp_dir / "file.txt").write_text("hi")
-        (authorized_tmp_dir / "subdir").mkdir()
-        items = await backend.ls_info(str(authorized_tmp_dir))
-        assert len(items) == 2
-        paths = [i["path"] for i in items]
-        assert any("file.txt" in p for p in paths)
-        assert any("subdir" in p for p in paths)
-
-    async def test_ls_empty_dir(self, backend, authorized_tmp_dir):
-        empty = authorized_tmp_dir / "empty_dir"
-        empty.mkdir()
-        items = await backend.ls_info(str(empty))
-        assert items == []
-
-    async def test_ls_sorted(self, backend, authorized_tmp_dir):
-        (authorized_tmp_dir / "b.txt").write_text("b")
-        (authorized_tmp_dir / "a.txt").write_text("a")
-        items = await backend.ls_info(str(authorized_tmp_dir))
-        paths = [i["path"] for i in items]
-        assert paths == sorted(paths)
-
-
 class TestBackendGlobInfo:
     async def test_glob_py(self, backend, authorized_tmp_dir):
         (authorized_tmp_dir / "main.py").write_text("pass")
@@ -292,15 +268,6 @@ class TestToolWrappers:
         )
         assert "成功" in result
         assert "1" in result
-
-    async def test_ls_tool_format(self, authorized_tmp_dir):
-        from lumi.agents.tools.providers.filesystem import ls
-
-        (authorized_tmp_dir / "file.txt").write_text("hi")
-        (authorized_tmp_dir / "dir").mkdir()
-        result = await ls.ainvoke({"path": str(authorized_tmp_dir)})
-        assert "[目录]" in result
-        assert "[文件]" in result
 
     async def test_grep_tool_format(self, authorized_tmp_dir):
         from lumi.agents.tools.providers.filesystem import grep

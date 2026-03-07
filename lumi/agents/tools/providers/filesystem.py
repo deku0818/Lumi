@@ -163,39 +163,6 @@ class LocalFilesystemBackend:
         except Exception as e:
             return {"path": file_path, "error": f"编辑文件失败: {e}", "occurrences": 0}
 
-    async def ls_info(self, path: str) -> list[dict]:
-        """列出目录中的文件和子目录"""
-        try:
-            resolved = validate_path(path)
-        except PermissionError as e:
-            logger.warning(f"路径校验失败: {e}")
-            return []
-
-        if not resolved.exists() or not resolved.is_dir():
-            return []
-
-        results = []
-        for item in resolved.iterdir():
-            is_dir = item.is_dir()
-            stat = item.stat()
-            full_path = str(item) + ("/" if is_dir else "")
-            modified_at = (
-                datetime.fromtimestamp(stat.st_mtime).isoformat()
-                if stat.st_mtime
-                else ""
-            )
-
-            results.append(
-                {
-                    "path": full_path,
-                    "is_dir": is_dir,
-                    "size": 0 if is_dir else stat.st_size,
-                    "modified_at": modified_at,
-                }
-            )
-
-        return sorted(results, key=lambda x: x["path"])
-
     async def glob_info(self, pattern: str, path: str | None = None) -> list[dict]:
         """使用 glob 模式递归查找文件
 
@@ -582,10 +549,6 @@ class EditInput(BaseModel):
     replace_all: bool = Field(default=False, description="是否替换所有匹配项")
 
 
-class LsInput(BaseModel):
-    path: str = Field(default=".", description="目录路径")
-
-
 class GlobInput(BaseModel):
     pattern: str = Field(description="glob模式,如 *.py 或 **/*.json")
     path: str = Field(default=".", description="搜索起始目录")
@@ -696,30 +659,6 @@ async def edit(
     if result["error"]:
         return f"错误: {result['error']}"
     return f"成功编辑文件: {file_path} (替换了 {result['occurrences']} 处)"
-
-
-@tool(args_schema=LsInput)
-async def ls(path: str = ".") -> str:
-    """列出指定目录的直接子项(不递归子目录)。"""
-    backend = _get_backend()
-    items = await backend.ls_info(path)
-
-    if not items:
-        return f"目录 {path} 为空或不存在"
-
-    lines = []
-    for item in items:
-        if item["is_dir"]:
-            lines.append(f"[目录] {item['path']}")
-        else:
-            size_kb = item.get("size", 0) / 1024
-            modified = item.get("modified_at", "")
-            if modified:
-                modified = modified.split("T")[0]
-            lines.append(
-                f"[文件] {item['path']} ({size_kb:.1f}KB, {modified or '未知'})"
-            )
-    return "\n".join(lines)
 
 
 @tool(args_schema=GlobInput)

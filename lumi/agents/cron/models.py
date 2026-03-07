@@ -5,7 +5,7 @@ from __future__ import annotations
 import re
 import uuid
 from dataclasses import dataclass, field
-from datetime import datetime
+from datetime import datetime, timedelta
 from enum import StrEnum
 
 from apscheduler.triggers.cron import CronTrigger
@@ -22,6 +22,9 @@ _UNIT_SECONDS: dict[str, int] = {
 
 # 间隔简写正则：数字 + 单位字母
 _INTERVAL_RE = re.compile(r"^(\d+)([smhd])$")
+
+# 相对时间简写正则：+数字+单位字母（如 +10m、+2h）
+_RELATIVE_RE = re.compile(r"^\+(\d+)([smhd])$")
 
 
 def _parse_interval_to_seconds(value: str) -> int:
@@ -92,9 +95,10 @@ class Schedule:
         """解析用户输入为 Schedule，自动识别调度类型。
 
         识别顺序：
-        1. 间隔简写（如 30s、5m、2h、1d）— 正则匹配
-        2. ISO 8601 时间点（如 2025-01-15T09:00:00）— datetime.fromisoformat
-        3. 5 字段 cron 表达式（如 */5 * * * *）— CronTrigger.from_crontab
+        1. 相对时间简写（如 +10m、+2h）— 转换为绝对时间的 AT 类型
+        2. 间隔简写（如 30s、5m、2h、1d）— 正则匹配
+        3. ISO 8601 时间点（如 2025-01-15T09:00:00）— datetime.fromisoformat
+        4. 5 字段 cron 表达式（如 */5 * * * *）— CronTrigger.from_crontab
 
         Args:
             raw: 用户输入的调度规则字符串。
@@ -109,7 +113,18 @@ class Schedule:
         if not raw:
             raise ValueError("调度规则不能为空")
 
-        # 1. 尝试间隔简写
+        # 1. 尝试相对时间简写（如 +10m、+2h），转换为绝对时间
+        rel_match = _RELATIVE_RE.match(raw)
+        if rel_match:
+            amount = int(rel_match.group(1))
+            unit = rel_match.group(2)
+            if amount <= 0:
+                raise ValueError(f"相对时间必须大于 0，收到: {raw}")
+            delta_seconds = amount * _UNIT_SECONDS[unit]
+            run_at = datetime.now() + timedelta(seconds=delta_seconds)
+            return Schedule(type=ScheduleType.AT, value=run_at.isoformat())
+
+        # 2. 尝试间隔简写
         if _INTERVAL_RE.match(raw):
             # 验证能正确解析（包括数值 > 0 检查）
             _parse_interval_to_seconds(raw)
@@ -131,6 +146,7 @@ class Schedule:
 
         raise ValueError(
             f"无法识别调度规则 '{raw}'，支持以下格式：\n"
+            "  - 相对时间：如 +10m、+2h（从现在起）\n"
             "  - ISO 8601 时间点：如 2025-01-15T09:00:00\n"
             "  - 固定间隔：如 30s、5m、2h、1d\n"
             "  - cron 表达式（5 字段）：如 */5 * * * *"

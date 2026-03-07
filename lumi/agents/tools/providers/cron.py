@@ -7,13 +7,14 @@
 
 from __future__ import annotations
 
+from datetime import datetime
 from typing import Literal
 
 from langchain_core.tools import tool
 from pydantic import BaseModel, Field
 
 from lumi.agents.cron.job_store import JobStore
-from lumi.agents.cron.models import Job, Schedule
+from lumi.agents.cron.models import Job, Schedule, ScheduleType
 from lumi.agents.cron.run_log import RunLog
 from lumi.agents.cron.scheduler import Scheduler
 from lumi.utils.logger import logger
@@ -72,7 +73,7 @@ class CronInput(BaseModel):
     )
     schedule: str | None = Field(
         default=None,
-        description="调度规则：ISO 8601 时间点、间隔简写（30s/5m/2h/1d）或 cron 表达式",
+        description="调度规则：相对时间（+10m/+2h）、ISO 8601 时间点、间隔简写（30s/5m/2h/1d）或 cron 表达式",
     )
     prompt: str | None = Field(
         default=None,
@@ -96,6 +97,14 @@ async def _handle_create(name: str, schedule_raw: str, prompt: str) -> str:
     job = Job(name=name, schedule=sched, prompt=prompt)
     await job_store.upsert(job)
     scheduler.add_job(job)
+
+    # AT 类型显示具体执行时间，方便用户确认
+    if sched.type == ScheduleType.AT:
+        run_at = datetime.fromisoformat(sched.value)
+        return (
+            f"✅ 任务已创建：{job.name}（ID: {job.id}）\n"
+            f"   将在 {run_at:%Y-%m-%d %H:%M:%S} 执行"
+        )
     return f"✅ 任务已创建：{job.name}（ID: {job.id}，调度: {sched.type.value} {sched.value}）"
 
 
@@ -211,7 +220,8 @@ CRON_DESCRIPTION = """管理主动行为定时任务，支持以下操作：
 - **pause**: 暂停/恢复任务（需要 job_id）
 - **runs**: 查看最近执行记录（需要 job_id，可选 limit）
 
-调度规则支持三种格式：
+调度规则支持四种格式：
+- 相对时间：如 +10m、+2h、+1d（从现在起）
 - ISO 8601 时间点：如 2025-01-15T09:00:00（一次性执行）
 - 固定间隔：如 30s、5m、2h、1d
 - cron 表达式（5 字段）：如 */5 * * * *"""
