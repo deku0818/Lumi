@@ -11,11 +11,6 @@ from langchain_core.messages import HumanMessage
 from lumi.agents.core.message_tools import inject_text_into_message
 from lumi.agents.tools.config import SkillConfig
 
-# 固定说明文本头
-SYSTEM_REMINDER_HEADER = (
-    "以下是当前可用的技能列表，你可以通过 skill 工具按名称调用对应技能获取详细指导："
-)
-
 
 def format_skill_reminder(skills: list[SkillConfig]) -> str:
     """将技能列表格式化为 <system-reminder> 块。
@@ -35,7 +30,7 @@ def format_skill_reminder(skills: list[SkillConfig]) -> str:
             lines.append(f"- {skill.name}: {skill.description}")
 
     skill_list = "\n".join(lines)
-    return f"<system-reminder>\n{SYSTEM_REMINDER_HEADER}\n{skill_list}\n</system-reminder>\n"
+    return f"<system-reminder>\n以下技能可用于 skill 工具\n{skill_list}\n</system-reminder>\n"
 
 
 def inject_skills_into_message(

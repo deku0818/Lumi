@@ -74,11 +74,16 @@ class AgentBridge:
         )
 
     async def stream_response(
-        self, text: str, tool_mode: str = "approve"
+        self, content: str | list, tool_mode: str = "approve"
     ) -> AsyncGenerator[BridgeEvent, None]:
-        """发送消息并 yield 事件流"""
+        """发送消息并 yield 事件流
+
+        Args:
+            content: 纯文本字符串或多模态 content blocks 列表。
+            tool_mode: 工具执行模式。
+        """
         input_data = {
-            "messages": [HumanMessage(content=text)],
+            "messages": [HumanMessage(content=content)],
             "tool_mode": tool_mode,
         }
         async for event in self._stream(input_data, tool_mode=tool_mode):

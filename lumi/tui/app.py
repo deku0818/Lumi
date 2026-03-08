@@ -189,17 +189,36 @@ class LumiApp(App):
 
         text = event.text
         tool_mode = event.tool_mode
+        images = event.images
         chat_log = self.query_one(ChatLog)
-        await chat_log.mount(UserMessage(text))
+
+        await chat_log.mount(UserMessage(text, image_count=len(images)))
         await chat_log.auto_scroll_if_needed()
+
+        # 构建 content：有图片时使用多模态 content blocks
+        if images:
+            content: str | list = [{"type": "text", "text": text}]
+            for img in images:
+                content.append(
+                    {
+                        "type": "image_url",
+                        "image_url": {
+                            "url": f"data:{img.media_type};base64,{img.data}"
+                        },
+                    }
+                )
+        else:
+            content = text
 
         self._run.phase = RunPhase.IDLE  # 即将启动
         self.query_one(InputBar).set_disabled(True)
 
-        self._run.task = asyncio.create_task(self._run_stream(text, tool_mode))
+        self._run.task = asyncio.create_task(self._run_stream(content, tool_mode))
 
-    async def _run_stream(self, text: str, tool_mode: str = "approve") -> None:
-        await self._consume_events(self._bridge.stream_response(text, tool_mode))
+    async def _run_stream(
+        self, content: str | list, tool_mode: str = "approve"
+    ) -> None:
+        await self._consume_events(self._bridge.stream_response(content, tool_mode))
 
     async def _run_resume(self, value) -> None:
         self._run.task = asyncio.create_task(
@@ -506,20 +525,33 @@ class LumiApp(App):
             await self.action_quit_app()
             return
 
-        # 输入框有内容 → 清空，重置退出计时
+        # 输入框有内容 → 清空文本，重置退出计时
         if inp.value:
             inp.value = ""
             self._last_ctrl_c = 0.0
             return
 
-        # 输入框已空 → 判断是否双击退出
+        # 文本已空但有待发送图片 → 清空图片，重置退出计时
+        input_bar = self.query_one(InputBar)
+        if input_bar.has_pending_images:
+            input_bar.clear_images()
+            self._last_ctrl_c = 0.0
+            return
+
+        # 输入框和图片都已空 → 判断是否双击退出
         now = time.monotonic()
         if now - self._last_ctrl_c < 1.5:
             await self.action_quit_app()
             return
         self._last_ctrl_c = now
+        input_bar.show_exit_hint()
 
     def on_key(self, event: Key) -> None:
         """任意非 Ctrl+C 按键重置双击退出窗口。"""
         if event.key != "ctrl+c":
-            self._last_ctrl_c = 0.0
+            if self._last_ctrl_c:
+                self._last_ctrl_c = 0.0
+                try:
+                    self.query_one(InputBar).hide_exit_hint()
+                except NoMatches:
+                    pass

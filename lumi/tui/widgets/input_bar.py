@@ -1,5 +1,7 @@
 """底部输入栏"""
 
+from __future__ import annotations
+
 from textual.app import ComposeResult
 from textual.containers import Horizontal, Vertical
 from textual.events import Key
@@ -7,6 +9,7 @@ from textual.message import Message
 from textual.widgets import Input, Static
 
 from lumi.tui.theme import get_color
+from lumi.utils.image import ImageData
 
 _TOOL_MODES = ("approve", "auto", "privileged")
 
@@ -99,19 +102,34 @@ class InputBar(Vertical):
         color: $text-muted;
         padding: 0 1 0 0;
     }
+
+    #exit-hint {
+        height: 1;
+        padding: 0 0 0 1;
+        color: $text-muted;
+        display: none;
+    }
     """
 
     class Submitted(Message):
         """用户提交消息"""
 
-        def __init__(self, text: str, tool_mode: str) -> None:
+        def __init__(
+            self,
+            text: str,
+            tool_mode: str,
+            images: list[ImageData] | None = None,
+        ) -> None:
             super().__init__()
             self.text = text
             self.tool_mode = tool_mode
+            self.images: list[ImageData] = images or []
 
     def __init__(self, *args, **kwargs) -> None:
         super().__init__(*args, **kwargs)
         self._tool_mode = "approve"
+        self._pending_images: list[ImageData] = []
+        self._exit_hint_timer = None
         self._history: list[str] = []
         self._history_index: int = -1
         self._draft: str = ""  # 暂存当前未提交的输入
@@ -126,13 +144,18 @@ class InputBar(Vertical):
                 id="mode-indicator",
             )
             yield Static("[#B888E8]⚑[/]", id="bell-indicator")
+        yield Static("[dim]再按一次 Ctrl+C 退出[/dim]", id="exit-hint")
 
     def on_mount(self) -> None:
         self.query_one(InputBox).border_title = "Input"
         self.query_one("#user-input", Input).focus()
 
     def on_key(self, event: Key) -> None:
-        if event.key == "shift+tab":
+        if event.key == "ctrl+v":
+            event.prevent_default()
+            event.stop()
+            self._try_paste_image()
+        elif event.key == "shift+tab":
             event.prevent_default()
             event.stop()
             self.action_switch_tool_mode()
@@ -145,6 +168,10 @@ class InputBar(Vertical):
             event.stop()
             self._navigate_history(1)
 
+    def on_input_changed(self, event: Input.Changed) -> None:
+        """输入内容变化时隐藏退出提示。"""
+        self.hide_exit_hint()
+
     def on_input_submitted(self, event: Input.Submitted) -> None:
         """Input 原生 Enter 提交"""
         text = event.value.strip()
@@ -153,7 +180,10 @@ class InputBar(Vertical):
             self._history_index = -1
             self._draft = ""
             event.input.value = ""
-            self.post_message(self.Submitted(text, self._tool_mode))
+            images = self._pending_images.copy()
+            self._pending_images.clear()
+            self._update_image_indicator()
+            self.post_message(self.Submitted(text, self._tool_mode, images=images))
 
     def _navigate_history(self, direction: int) -> None:
         """上下键浏览输入历史
@@ -180,6 +210,28 @@ class InputBar(Vertical):
         # 光标移到末尾
         inp.cursor_position = len(inp.value)
 
+    def _try_paste_image(self) -> None:
+        """尝试从剪贴板粘贴图片（异步）。"""
+        from lumi.utils.clipboard import read_image_from_clipboard
+
+        async def _do_paste() -> None:
+            image = await read_image_from_clipboard()
+            if image is not None:
+                self._pending_images.append(image)
+                self._update_image_indicator()
+                self.hide_exit_hint()
+
+        self.run_worker(_do_paste(), exclusive=False)
+
+    def _update_image_indicator(self) -> None:
+        """更新输入框标题以反映图片附件状态。"""
+        box = self.query_one(InputBox)
+        count = len(self._pending_images)
+        if count > 0:
+            box.border_title = f"Input [{count} 张图片]"
+        else:
+            box.border_title = "Input"
+
     def action_switch_tool_mode(self) -> None:
         """循环切换 tool_mode"""
         idx = _TOOL_MODES.index(self._tool_mode)
@@ -197,6 +249,29 @@ class InputBar(Vertical):
         if mode in _TOOL_MODES:
             self._tool_mode = mode
             self._update_mode_indicator()
+
+    def show_exit_hint(self) -> None:
+        """显示退出提示，1.5 秒后自动隐藏。"""
+        if self._exit_hint_timer is not None:
+            self._exit_hint_timer.stop()
+        self.query_one("#exit-hint", Static).styles.display = "block"
+        self._exit_hint_timer = self.set_timer(1.5, self.hide_exit_hint)
+
+    def hide_exit_hint(self) -> None:
+        """隐藏退出提示并取消计时器。"""
+        if self._exit_hint_timer is not None:
+            self._exit_hint_timer.stop()
+            self._exit_hint_timer = None
+        self.query_one("#exit-hint", Static).styles.display = "none"
+
+    @property
+    def has_pending_images(self) -> bool:
+        return bool(self._pending_images)
+
+    def clear_images(self) -> None:
+        """清空所有待发送图片。"""
+        self._pending_images.clear()
+        self._update_image_indicator()
 
     def set_disabled(self, disabled: bool) -> None:
         """禁用/启用输入"""

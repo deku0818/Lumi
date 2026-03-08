@@ -20,8 +20,10 @@ class UserMessage(Static):
     }
     """
 
-    def __init__(self, text: str) -> None:
+    def __init__(self, text: str, image_count: int = 0) -> None:
         display = Text()
         display.append("> ", style=f"bold {get_color('accent')}")
         display.append(text)
+        if image_count > 0:
+            display.append(f" [{image_count} 张图片]", style="dim")
         super().__init__(display, classes="user-message", markup=False)
