@@ -36,6 +36,9 @@ from lumi.agents.core.structured_tool import (
     is_structured_output_call,
 )
 from lumi.agents.base.response_service import extract_ainvoke_content
+from lumi.agents.core.summary_injector import inject_summary_into_message
+from lumi.agents.tools.skill_detector import SkillChangeDetector
+from lumi.agents.tools.skill_injector import inject_skills_into_message
 from lumi.utils.llm_chain import tiktoken_counter, tool_call_chain
 from lumi.utils.logger import logger
 from lumi.utils.model_manager import detect_model_type
@@ -474,6 +477,7 @@ async def preprocess_messages(state: LumiAgentState):
     0. 检查并执行摘要替换（如果 state["summary"] 有值）
     1. 清理不完整的工具调用
     2. 卸载大工具结果到文件系统
+    3. 技能动态注入（检测 .skills/ 变更并将技能列表注入最后一条用户消息）
     """
     messages = state["messages"]
     result_messages = []
@@ -484,15 +488,28 @@ async def preprocess_messages(state: LumiAgentState):
         summarized_ids = summary_data["summarized_ids"]
         summary_text = summary_data["summary_text"]
 
-        # 第一个 ID 用于摘要消息（替换位置），其他 ID 删除
-        first_id = summarized_ids[0]
-        ids_to_remove = summarized_ids[1:]
-
-        for msg_id in ids_to_remove:
+        # 删除所有被摘要的消息
+        for msg_id in summarized_ids:
             result_messages.append(RemoveMessage(id=msg_id))
 
-        summary_content = f"[历史对话摘要]\n{summary_text}\n\n[以下是最近的对话]"
-        result_messages.append(HumanMessage(content=summary_content, id=first_id))
+        # 找到最后一条 HumanMessage（用户当前消息）
+        last_human = None
+        for msg in reversed(messages):
+            if isinstance(msg, HumanMessage):
+                last_human = msg
+                break
+
+        if last_human is not None:
+            # 注入摘要到用户消息
+            new_msg = inject_summary_into_message(last_human, summary_text)
+
+            # 摘要后注入当前技能列表，避免 summary 吞掉之前的 system-reminder
+            skills, _ = SkillChangeDetector.get_instance().check()
+            if skills:
+                new_msg = inject_skills_into_message(new_msg, skills)
+
+            result_messages.append(RemoveMessage(id=last_human.id))
+            result_messages.append(new_msg)
 
         logger.info(f"[PreprocessMessages] 已替换 {len(summarized_ids)} 条消息为摘要")
         return {"messages": result_messages, "summary": {}}
@@ -502,6 +519,21 @@ async def preprocess_messages(state: LumiAgentState):
 
     # 2. 卸载大工具结果到本地文件系统
     result_messages.extend(await offload_tool_result(messages))
+
+    # 3. 技能动态注入
+    last_human = None
+    for msg in reversed(messages):
+        if isinstance(msg, HumanMessage):
+            last_human = msg
+            break
+
+    if last_human is not None:
+        detector = SkillChangeDetector.get_instance()
+        skills, changed = detector.check()
+        if changed and skills:
+            new_msg = inject_skills_into_message(last_human, skills)
+            result_messages.append(RemoveMessage(id=last_human.id))
+            result_messages.append(new_msg)
 
     if result_messages:
         return {"messages": result_messages}

@@ -23,45 +23,6 @@ def _get_skills_root() -> Path:
     return get_config().skills_dir
 
 
-def _create_skill_schema():
-    """动态创建skill工具的schema"""
-    skills = load_skills()
-    schema = {
-        "type": "object",
-        "properties": {
-            "name": {
-                "type": "string",
-                "enum": [skill.name for skill in skills],
-                "description": "技能名称",
-            }
-        },
-        "required": ["name"],
-    }
-
-    # 构建技能列表
-    skill_list = "\n".join(f"- {skill.name}: {skill.description}" for skill in skills)
-
-    description = f"""在主对话中执行一个技能。
-<skills_instructions>
-当用户要求你执行任务时，检查下方可用技能列表中是否有技能可以更有效地帮助完成该任务。技能提供了专门的能力和领域知识。
-
-调用方式：
-- 使用此工具时仅传入技能名称
-- 示例：`name: "故障码查询"` —— 调用故障码查询技能
-
-重要事项：
-- 当某个技能与用户任务相关时，应优先调用此工具获取技能指导
-- 只能使用在下面 <available_skills> 中列出的技能
-- 技能资源位于本地 skills 目录下
-</skills_instructions>
-
-<available_skills>
-{skill_list}
-</available_skills>"""
-
-    return description, schema
-
-
 def _get_skill_source_dir(skill_name: str) -> Path | None:
     """根据 skill 名称找到源目录
 
@@ -113,18 +74,36 @@ def _get_skill_execution_config() -> dict:
     return defaults
 
 
+_SKILL_DESCRIPTION = """在主对话中执行技能
+
+当用户要求你执行任务时，请检查是否有任何可用的技能匹配。技能提供专门的功能和领域知识。
+当用户提到“斜杠命令”或“/<某个内容>”（例如，“/commit”、“/review-pr”）时，他们指的是一个技能。请使用此工具调用该技能。
+
+如何调用：
+- 使用此工具并指定技能名称及可选参数
+- 示例：`skill: "pdf"` — 调用 pdf 技能
+
+重要事项：
+- 可用技能列在对话中的 system-reminder 中
+- 当用户的请求与某项技能匹配时，这是强制性要求：必须先调用相关技能工具，再生成任何其他关于该任务的回复
+- 切勿提及技能而不实际调用此工具
+- 不要调用已在运行的技能
+- 不要将此工具用于内置 CLI 命令（如 /help、/clear 等）
+- 如果在当前对话轮次中看到 <command-name> 标签，表示该技能已被加载 — 请直接遵循说明，不要再次调用此工具"""
+
+
 class SkillInput(BaseModel):
     """Skill工具的输入参数"""
 
     name: str = Field(description="技能名称")
 
 
-@tool(description=_create_skill_schema()[0], args_schema=SkillInput)
+@tool(description=_SKILL_DESCRIPTION, args_schema=SkillInput)
 async def skill(name: str) -> str:
     """Skill工具 - 根据名称返回对应的技能提示词"""
     skill_configs = load_skills(name=name)
     if not skill_configs:
-        return f"Skill '{name}' not found"
+        return f"技能 '{name}' 不存在，请检查技能名称是否正确"
 
     skill_config = skill_configs[0]
     prompt_content = skill_config.prompt

@@ -17,6 +17,31 @@ from lumi.utils.read_config import get_config
 from lumi.utils.token_counter import str_token_counter
 
 
+def inject_text_into_message(message: HumanMessage, text: str) -> HumanMessage:
+    """将文本块插入到 HumanMessage content 最前面，返回新消息。
+
+    当 content 为字符串时，先转换为列表格式再插入。
+    不修改原消息（不可变原则）。
+
+    Args:
+        message: 原始用户消息
+        text: 要注入的文本
+
+    Returns:
+        注入后的新 HumanMessage
+    """
+    if isinstance(message.content, str):
+        content_blocks: list[dict[str, str]] = [
+            {"type": "text", "text": message.content}
+        ]
+    else:
+        content_blocks = list(message.content)
+
+    content_blocks.insert(0, {"type": "text", "text": text})
+
+    return HumanMessage(content=content_blocks)
+
+
 def get_last_human_message(messages: list) -> HumanMessage | None:
     """从消息列表中获取最后一条人类消息"""
     for message in reversed(messages):

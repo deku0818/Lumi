@@ -7,7 +7,7 @@ from lumi.utils.logger import logger
 from .config import AgentConfig, SkillConfig, load_agents, load_skills
 
 # 导入工具提供者模块
-from .providers import ask, bash, cron, filesystem, mcp, todo
+from .providers import ask, bash, cron, filesystem, mcp, todo, skill
 from .registry import ToolRegistry
 
 # 注册常驻工具提供者
@@ -17,6 +17,7 @@ ToolRegistry.register("bash", bash)
 ToolRegistry.register("todo", todo)
 ToolRegistry.register("ask", ask)
 ToolRegistry.register("cron", cron)
+ToolRegistry.register("skill", skill)
 
 # 条件注册：仅在有配置时才导入和注册
 try:
@@ -26,14 +27,6 @@ try:
         ToolRegistry.register("agent", agent)
 except Exception as e:
     logger.warning(f"加载 agent 配置失败，'agent' 工具不可用: {e}")
-
-try:
-    if load_skills():
-        from .providers import skill
-
-        ToolRegistry.register("skill", skill)
-except Exception as e:
-    logger.warning(f"加载 skill 配置失败，'skill' 工具不可用: {e}")
 
 
 async def get_tools(
