@@ -22,7 +22,6 @@ from lumi.agents.tools.providers.cron import init_cron_tool
 from lumi.tui.agent_bridge import AgentBridge, BridgeEvent, EventKind
 from lumi.tui.run_state import RunContext, RunPhase
 from lumi.tui.theme import APP_CSS, LUMI_DARK_THEME, LUMI_LIGHT_THEME, get_color
-from lumi.tui.widgets.ask_block import AskBlock
 from lumi.tui.widgets.ask_dialog import AskDialog
 from lumi.tui.widgets.tool_approval import ToolApproval
 from lumi.tui.widgets.assistant_message import AssistantMessage
@@ -292,9 +291,6 @@ class LumiApp(App):
         await chat_log.auto_scroll_if_needed()
 
     async def _handle_tool_start(self, evt: BridgeEvent, chat_log: ChatLog) -> None:
-        # ask 工具由 AskBlock 统一处理，不创建 ToolBlock
-        if evt.name == "ask":
-            return
         key = evt.tool_call_id or evt.name
         # 审批模式下 ToolBlock 已在 TOOL_APPROVAL 阶段创建
         if key not in self._run.tool_blocks:
@@ -304,19 +300,32 @@ class LumiApp(App):
         await chat_log.auto_scroll_if_needed()
 
     async def _handle_tool_end(self, evt: BridgeEvent, chat_log: ChatLog) -> None:
-        # ask 工具由 AskBlock 统一处理
-        if evt.name == "ask":
-            return
         key = evt.tool_call_id or evt.name
         block = self._run.tool_blocks.pop(key, None)
+        # Fallback: tool_call_id 可能在 TOOL_START/END 间不一致
+        if block is None:
+            for k, b in self._run.tool_blocks.items():
+                if b._name == evt.name:
+                    block = self._run.tool_blocks.pop(k)
+                    break
         if block:
             block.set_done(evt.output)
         await chat_log.auto_scroll_if_needed()
 
     async def _handle_ask(self, evt: BridgeEvent, chat_log: ChatLog) -> None:
-        ask_block = AskBlock(evt.data)
-        self._run.ask_block = ask_block
-        await chat_log.mount(ask_block)
+        tool_call_id = (evt.data or {}).get("tool_call_id", "")
+        key = tool_call_id or "ask"
+        block = self._run.tool_blocks.get(key)
+        # Fallback: TOOL_START 中 InjectedToolCallId 可能不在事件 input 中，
+        # 导致 ToolBlock 以工具名 "ask" 为 key 存储
+        if block is None:
+            for k, b in self._run.tool_blocks.items():
+                if b._name == "ask":
+                    block = b
+                    break
+        if block:
+            dialog = AskDialog(evt.data)
+            await block.mount_interactive(dialog)
         await chat_log.auto_scroll_if_needed()
 
     async def _handle_tool_approval(self, evt: BridgeEvent, chat_log: ChatLog) -> None:
@@ -362,9 +371,7 @@ class LumiApp(App):
     # ── 中断恢复 ──
 
     async def on_ask_dialog_answered(self, event: AskDialog.Answered) -> None:
-        if self._run.ask_block:
-            self._run.ask_block.set_result(event.answer)
-            self._run.ask_block = None
+        # decline 和正常回答统一走 resume，由图自行处理
         await self._run_resume(event.answer)
 
     async def on_tool_approval_decided(self, event: ToolApproval.Decided) -> None:
@@ -454,6 +461,14 @@ class LumiApp(App):
             approval = self.query_one(ToolApproval)
             approval.post_message(ToolApproval.Decided("cancel"))
             approval.call_later(approval.remove)
+            return
+        except NoMatches:
+            pass
+
+        # 如果当前有 AskDialog，esc 触发拒绝回答
+        try:
+            dialog = self.query_one(AskDialog)
+            dialog._decline()
             return
         except NoMatches:
             pass

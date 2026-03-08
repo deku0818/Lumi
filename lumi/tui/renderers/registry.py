@@ -40,6 +40,7 @@ def _register_builtins() -> None:
 
     在函数内部导入各渲染器，避免循环导入。
     """
+    from lumi.tui.renderers.ask import AskRenderer
     from lumi.tui.renderers.bash import BashRenderer
     from lumi.tui.renderers.edit import EditRenderer
     from lumi.tui.renderers.glob import GlobRenderer
@@ -50,6 +51,7 @@ def _register_builtins() -> None:
     from lumi.tui.renderers.todos import TodosRenderer
     from lumi.tui.renderers.write import WriteRenderer
 
+    register("ask", AskRenderer)
     register("write", WriteRenderer)
     register("edit", EditRenderer)
     register("read", ReadRenderer)

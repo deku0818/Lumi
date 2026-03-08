@@ -9,6 +9,7 @@ from rich.text import Text
 from textual.app import ComposeResult
 from textual.containers import Vertical
 from textual.css.query import NoMatches
+from textual.widget import Widget
 from textual.widgets import Collapsible, Static
 
 from lumi.tui.renderers import get as get_renderer
@@ -80,6 +81,7 @@ class ToolBlock(Vertical, SpinnerMixin):
         self._args = args
         self._approval_mode = approval_mode
         self._status = ToolStatus.RUNNING
+        self._interactive: Widget | None = None
 
         self._renderer = get_renderer(name)
 
@@ -150,8 +152,27 @@ class ToolBlock(Vertical, SpinnerMixin):
         frame = SPINNER_FRAMES[self._spinner_frame % len(SPINNER_FRAMES)]
         return f"[{get_color('text_muted')}]{frame}[/]"
 
+    async def mount_interactive(self, widget: Widget) -> None:
+        """将交互组件挂载到 Collapsible 内容区（output Static 之前）"""
+        self._stop_spinner()
+        output_widget = self.query_one(f"#tool-output-{id(self)}", Static)
+        parent = output_widget.parent
+        await parent.mount(widget, before=output_widget)
+        self._interactive = widget
+        # 展开 Collapsible 以显示交互组件
+        collapsible = self.query_one(Collapsible)
+        collapsible.collapsed = False
+
+    def remove_interactive(self) -> None:
+        """移除交互组件（decline 场景用）"""
+        if self._interactive is not None and self._interactive.is_attached:
+            self._interactive.remove()
+            self._interactive = None
+
     def set_done(self, output: str = "") -> None:
         """标记工具执行完成"""
+        # 如果交互组件仍在 DOM 中，先移除
+        self.remove_interactive()
         self._status = ToolStatus.DONE
         self._stop_spinner()
         collapsible = self.query_one(Collapsible)
@@ -208,4 +229,8 @@ class ToolBlock(Vertical, SpinnerMixin):
 
     def on_collapsible_toggled(self, event: Collapsible.Toggled) -> None:
         """折叠/展开时更新标题"""
+        event.stop()
+
+    def on_ask_dialog_tab_changed(self, event) -> None:
+        """阻止 AskDialog TabChanged 事件冒泡"""
         event.stop()

@@ -65,6 +65,7 @@ class RuleMatcher:
         """匹配 bash 命令模式（支持 * 通配符）。
 
         将 `*` 转为正则 `.*`，其他特殊字符转义，做全匹配。
+        使用 DOTALL 模式使 `.` 匹配换行符，支持多行命令（如 heredoc）。
 
         Args:
             pattern: 命令模式，如 "npm *"
@@ -77,7 +78,7 @@ class RuleMatcher:
             # 先转义所有正则特殊字符，再将转义后的 `\\*` 替换为 `.*`
             escaped = re.escape(pattern)
             regex = escaped.replace(r"\*", ".*")
-            return re.fullmatch(regex, command) is not None
+            return re.fullmatch(regex, command, re.DOTALL) is not None
         except re.error:
             logger.warning("命令模式语法错误: %s", pattern)
             return False

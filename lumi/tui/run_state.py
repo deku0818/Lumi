@@ -8,7 +8,6 @@ from enum import StrEnum
 from typing import TYPE_CHECKING
 
 if TYPE_CHECKING:
-    from lumi.tui.widgets.ask_block import AskBlock
     from lumi.tui.widgets.assistant_message import AssistantMessage
     from lumi.tui.widgets.tool_block import ToolBlock
 
@@ -32,7 +31,6 @@ class RunContext:
     phase: RunPhase = RunPhase.IDLE
     assistant_msg: AssistantMessage | None = None
     tool_blocks: dict[str, ToolBlock] = field(default_factory=dict)
-    ask_block: AskBlock | None = None
     last_approval_tool_calls: list[dict] = field(default_factory=list)
     task: asyncio.Task | None = None
 
@@ -44,6 +42,5 @@ class RunContext:
         self.phase = RunPhase.IDLE
         self.assistant_msg = None
         self.tool_blocks.clear()
-        self.ask_block = None
         self.last_approval_tool_calls.clear()
         self.task = None

@@ -227,9 +227,10 @@ class AskDialog(Vertical):
         if qi >= len(self._questions):
             return "[dim](enter 提交所有答案, esc 跳过)[/dim]"
         multi = self._questions[qi].get("multiSelect", False)
+        nav = "←→ 切题, " if not self._is_simple else ""
         if multi:
-            return "[dim](↑↓ 移动, 空格 切换, 数字键 快选, tab 输入框, esc 跳过)[/dim]"
-        return "[dim](↑↓ 移动, enter/数字键 选择, tab 输入框, esc 跳过)[/dim]"
+            return f"[dim]({nav}↑↓ 移动, 空格 切换, 数字键 快选, tab 输入框, esc 跳过)[/dim]"
+        return f"[dim]({nav}↑↓ 移动, enter/数字键 选择, tab 输入框, esc 跳过)[/dim]"
 
     def _apply_visibility(self) -> None:
         """根据 _current_tab 切换问题体的可见性"""
@@ -329,12 +330,10 @@ class AskDialog(Vertical):
         self._save_custom_input()
         answer = self._format_answers()
         self.post_message(self.Answered(answer))
-        self.call_later(self.remove)
 
     def _decline(self) -> None:
         """用户按 Esc 拒绝回答"""
         self.post_message(self.Answered("User declined to answer questions"))
-        self.call_later(self.remove)
 
     def _format_answers(self) -> str:
         parts = []
@@ -395,7 +394,17 @@ class AskDialog(Vertical):
             event.stop()
             return
 
-        if event.key == "up":
+        if event.key == "left":
+            if not self._is_simple and self._current_tab > 0:
+                self._switch_tab(self._current_tab - 1)
+            event.stop()
+
+        elif event.key == "right":
+            if not self._is_simple and self._current_tab < len(self._questions) - 1:
+                self._switch_tab(self._current_tab + 1)
+            event.stop()
+
+        elif event.key == "up":
             self._highlighted[qi] = (highlighted - 1) % total
             self._input_focused = False
             self._refresh_current()

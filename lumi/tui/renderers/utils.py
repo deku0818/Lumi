@@ -109,7 +109,7 @@ _TITLE_MAX_LEN = 60
 def truncate_for_title(text: str, max_len: int = _TITLE_MAX_LEN) -> str:
     """截断文本用于标题显示，只保留第一行且限制长度。
 
-    多行文本只取第一行，超出 max_len 时添加省略号。
+    多行文本只取第一行，超出 max_len 时截断并附带隐藏字符数提示。
 
     Args:
         text: 原始文本
@@ -118,11 +118,13 @@ def truncate_for_title(text: str, max_len: int = _TITLE_MAX_LEN) -> str:
     Returns:
         截断后的单行文本
     """
-    # 只取第一行
     first_line = text.split("\n", 1)[0].strip()
-    if len(first_line) <= max_len:
+    total = len(text.strip())
+    if len(first_line) <= max_len and total == len(first_line):
         return first_line
-    return first_line[:max_len] + "…"
+    shown = min(len(first_line), max_len)
+    hidden = total - shown
+    return f"{first_line[:max_len]} ...[+{hidden} chars]"
 
 
 def render_status_output(output: str) -> Widget:

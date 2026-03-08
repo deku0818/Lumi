@@ -16,6 +16,7 @@ from textual.widgets import Static
 
 from lumi.tui.renderers import get as get_renderer
 from lumi.tui.renderers.default import DefaultRenderer
+from lumi.tui.renderers.utils import truncate_for_title
 from lumi.tui.theme import get_color
 
 logger = logging.getLogger(__name__)
@@ -223,12 +224,14 @@ class ToolApproval(Vertical):
             event.stop()
 
     def _render_options(self) -> str:
-        """渲染选项列表，每行带竖线前缀"""
+        """渲染选项列表，每行带竖线前缀，长 label 截断显示"""
         border = get_color("border_separator")
         lines: list[str] = []
         for i, opt in enumerate(self._options):
             key = opt["key"]
             label = opt.get("label", key)
+            # 截断过长的选项 label（如包含完整命令路径的 always_allow 选项）
+            label = truncate_for_title(label, max_len=70)
             color = get_color(_OPTION_COLOR_ROLES.get(key, "foreground"))
             if i == self._selected:
                 lines.append(f"[{border}]  │[/]  [bold {color}]● {escape(label)}[/]")
