@@ -12,6 +12,7 @@ from psycopg.rows import dict_row
 
 from lumi.agents.base.graph import BaseGraph
 from lumi.agents.core.node import (
+    after_tool_executor,
     call_model,
     extract_structured_output,
     human_approval,
@@ -76,7 +77,11 @@ class LumiAgent(BaseGraph):
                 "END": END,
             },
         )
-        self.builder.add_edge("ToolExecutor", "CallModel")
+        self.builder.add_conditional_edges(
+            "ToolExecutor",
+            after_tool_executor,
+            {"CallModel": "CallModel", "END": END},
+        )
         self.builder.add_edge("ExtractStructuredOutput", END)
 
     async def adelete_thread(self, thread_id: str) -> None:

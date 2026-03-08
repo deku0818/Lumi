@@ -390,7 +390,15 @@ class LumiApp(App):
     # ── 中断恢复 ──
 
     async def on_ask_dialog_answered(self, event: AskDialog.Answered) -> None:
-        # decline 和正常回答统一走 resume，由图自行处理
+        from lumi.agents.tools.providers.ask import ASK_CANCELLED
+
+        if event.answer == ASK_CANCELLED:
+            # 取消时补充视觉反馈，与 tool_approval cancel 一致
+            chat_log = self.query_one(ChatLog)
+            block = self._run.tool_blocks.get("ask")
+            if block:
+                block.set_error("User declined to answer questions")
+            await chat_log.auto_scroll_if_needed()
         await self._run_resume(event.answer)
 
     async def on_tool_approval_decided(self, event: ToolApproval.Decided) -> None:

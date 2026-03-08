@@ -21,6 +21,7 @@ dependencies = [
     "psycopg[binary]>=3.3.3",
     "apscheduler>=3.11.2",
     "ripgrep>=15.0.0",
+    "pillow>=12.1.1",
 ]
 
 [project.scripts]

@@ -333,7 +333,9 @@ class AskDialog(Vertical):
 
     def _decline(self) -> None:
         """用户按 Esc 拒绝回答"""
-        self.post_message(self.Answered("User declined to answer questions"))
+        from lumi.agents.tools.providers.ask import ASK_CANCELLED
+
+        self.post_message(self.Answered(ASK_CANCELLED))
 
     def _format_answers(self) -> str:
         parts = []

@@ -41,3 +41,5 @@ class LumiAgentState(TypedDict):
     """结构化输出附加数据规则"""
     structured_output: NotRequired[dict[str, Any]]
     """结构化输出结果"""
+    tool_cancelled: NotRequired[bool]
+    """工具执行被用户取消时置 True，供条件边路由到 END"""

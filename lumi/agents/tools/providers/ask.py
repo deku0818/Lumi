@@ -11,6 +11,9 @@ from langchain_core.tools import InjectedToolCallId, tool
 from langgraph.types import Command, interrupt
 from pydantic import BaseModel, Field
 
+# 取消信号常量，TUI 和 ask 工具共享
+ASK_CANCELLED = "__ask_cancelled__"
+
 
 class QuestionOption(BaseModel):
     """问题选项定义"""
@@ -94,6 +97,20 @@ def ask(
 
     # 触发中断，等待用户回答
     user_response = interrupt(interrupt_data)
+
+    # 用户取消：设置 _tool_cancelled 标记，由条件边路由到 END
+    if user_response == ASK_CANCELLED:
+        return Command(
+            update={
+                "messages": [
+                    ToolMessage(
+                        content="User declined to answer questions",
+                        tool_call_id=tool_call_id,
+                    )
+                ],
+                "tool_cancelled": True,
+            },
+        )
 
     return Command(
         update={

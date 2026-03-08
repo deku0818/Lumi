@@ -110,6 +110,13 @@ async def tool_executor(state: LumiAgentState, runtime: Runtime[LumiAgentContext
     return {"messages": messages_list}
 
 
+def after_tool_executor(state: LumiAgentState) -> str:
+    """ToolExecutor 后的条件路由：工具被取消时走向 END，否则继续 CallModel"""
+    if state.get("tool_cancelled"):
+        return "END"
+    return "CallModel"
+
+
 def is_use_tool(state: LumiAgentState, runtime: Runtime[LumiAgentContext]):
     """条件路由函数 - 判断下一步执行哪个节点
 
@@ -481,6 +488,11 @@ async def preprocess_messages(state: LumiAgentState):
     """
     messages = state["messages"]
     result_messages = []
+    updates: dict = {}
+
+    # 重置工具取消标记
+    if state.get("tool_cancelled"):
+        updates["tool_cancelled"] = False
 
     # 0. 检查并执行摘要替换
     summary_data = state.get("summary", {})
@@ -512,7 +524,7 @@ async def preprocess_messages(state: LumiAgentState):
             result_messages.append(new_msg)
 
         logger.info(f"[PreprocessMessages] 已替换 {len(summarized_ids)} 条消息为摘要")
-        return {"messages": result_messages, "summary": {}}
+        return {"messages": result_messages, "summary": {}, **updates}
 
     # 1. 清理不完整的工具调用
     result_messages.extend(cleanup_incomplete_tool_calls(messages))
@@ -535,6 +547,6 @@ async def preprocess_messages(state: LumiAgentState):
             result_messages.append(RemoveMessage(id=last_human.id))
             result_messages.append(new_msg)
 
-    if result_messages:
-        return {"messages": result_messages}
+    if result_messages or updates:
+        return {"messages": result_messages, **updates}
     return {"messages": []}
