@@ -23,7 +23,18 @@ class UserMessage(Static):
     def __init__(self, text: str, image_count: int = 0) -> None:
         display = Text()
         display.append("> ", style=f"bold {get_color('accent')}")
-        display.append(text)
+        # 超长文本折叠显示：保留首行 + 折叠提示
+        lines = text.splitlines()
+        if len(lines) > 20:
+            first_line = lines[0][:80].strip()
+            if first_line:
+                display.append(first_line + "\n")
+            display.append(
+                f"[Pasted text +{len(lines)} lines]",
+                style="dim italic",
+            )
+        else:
+            display.append(text)
         if image_count > 0:
             display.append(f" [{image_count} 张图片]", style="dim")
         super().__init__(display, classes="user-message", markup=False)

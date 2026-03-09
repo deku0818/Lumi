@@ -11,7 +11,7 @@ from textual.app import App, ComposeResult
 from textual.binding import Binding
 from textual.css.query import NoMatches
 from textual.events import Key
-from textual.widgets import Input, Static
+from textual.widgets import Static
 
 from lumi import __version__
 from lumi.agents.cron.delivery import DeliveryManager, TUIDelivery
@@ -27,7 +27,7 @@ from lumi.tui.widgets.tool_approval import ToolApproval
 from lumi.tui.widgets.assistant_message import AssistantMessage
 from lumi.tui.widgets.title_block import TitleBlock
 from lumi.tui.widgets.chat_log import ChatLog
-from lumi.tui.widgets.input_bar import InputBar
+from lumi.tui.widgets.input_bar import ChatInput, InputBar
 from lumi.tui.widgets.notification_panel import NotificationChanged, NotificationPanel
 from lumi.tui.widgets.thinking_indicator import ThinkingIndicator
 from lumi.tui.widgets.tool_block import ToolBlock
@@ -528,7 +528,7 @@ class LumiApp(App):
         import time
 
         try:
-            inp = self.query_one("#user-input", Input)
+            inp = self.query_one("#user-input", ChatInput)
         except Exception:
             await self.action_quit_app()
             return

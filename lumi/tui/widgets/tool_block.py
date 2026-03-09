@@ -5,6 +5,7 @@ from __future__ import annotations
 import logging
 from enum import StrEnum
 
+from rich.markup import escape
 from rich.text import Text
 from textual.app import ComposeResult
 from textual.containers import Vertical
@@ -225,7 +226,7 @@ class ToolBlock(Vertical, SpinnerMixin):
             if self._status != ToolStatus.RUNNING
             else ""
         )
-        return f"{self._get_symbol(collapsed)} {self._title_text}{hint}"
+        return f"{self._get_symbol(collapsed)} {escape(self._title_text)}{hint}"
 
     def on_collapsible_toggled(self, event: Collapsible.Toggled) -> None:
         """折叠/展开时更新标题"""

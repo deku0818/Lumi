@@ -3,6 +3,7 @@
 import os
 from pathlib import Path
 
+from rich.markup import escape
 from textual.app import ComposeResult
 from textual.containers import Horizontal, Vertical
 from textual.widgets import Static
@@ -100,7 +101,7 @@ class TitleBlock(Static):
             yield Static(
                 f"{_build_logo()}\n"
                 f"[bold {text_primary}]lumi[/] [dim]v{__version__}[/]\n"
-                f"[dim]{self._model_name} · {self._project_path}[/]",
+                f"[dim]{escape(self._model_name)} · {escape(self._project_path)}[/]",
                 id="left-panel",
             )
             # ── 右侧: 上下分区 ──

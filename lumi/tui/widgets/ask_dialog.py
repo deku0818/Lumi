@@ -134,7 +134,7 @@ class AskDialog(Vertical):
         # 问题体（全部预先 compose，通过渲染切换可见性）
         for qi, q in enumerate(self._questions):
             yield Static(
-                f"[bold {get_color('accent')}][/] {q['question']}",
+                f"[bold {get_color('accent')}][/] {escape(q['question'])}",
                 id=f"ask-q-{qi}",
                 classes="ask-question",
             )

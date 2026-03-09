@@ -13,6 +13,7 @@ from datetime import UTC, datetime
 from enum import StrEnum
 from pathlib import Path
 
+from rich.markup import escape
 from textual.app import ComposeResult
 from textual.containers import Horizontal, VerticalScroll
 from textual.message import Message
@@ -189,11 +190,11 @@ class NotificationItem(Widget):
         # 未读：右侧 ✓ 标记已读；已读：右侧 ✕ 删除
         action_label = "✕" if self._show_dismiss else "✓"
         with Horizontal(classes="item-header-row"):
-            yield Static(f"{r.job_name}{meta_str}", classes=title_class)
+            yield Static(f"{escape(r.job_name)}{meta_str}", classes=title_class)
             action_btn = Static(action_label, classes="item-action")
             action_btn.record_id = r.id  # type: ignore[attr-defined]
             yield action_btn
-        yield Static(r.summary, classes="item-body", id=f"body-{r.id}")
+        yield Static(r.summary, classes="item-body", id=f"body-{r.id}", markup=False)
 
     def _toggle_expand(self) -> None:
         """切换展开/收起完整内容。"""

@@ -9,6 +9,7 @@ from __future__ import annotations
 import logging
 
 from rich.markup import escape
+from rich.text import Text
 from textual.app import ComposeResult
 from textual.containers import Vertical
 from textual.message import Message
@@ -187,7 +188,10 @@ class ToolApproval(Vertical):
 
         # 选项区域（带竖线前缀）
         yield Static(
-            self._render_options(), id="approval-options", classes="approval-options"
+            self._render_options(),
+            id="approval-options",
+            classes="approval-options",
+            markup=False,
         )
 
         # 提示行
@@ -223,21 +227,26 @@ class ToolApproval(Vertical):
             self.call_later(self.remove)
             event.stop()
 
-    def _render_options(self) -> str:
-        """渲染选项列表，每行带竖线前缀，长 label 截断显示"""
+    def _render_options(self) -> Text:
+        """渲染选项列表，每行带竖线前缀，长 label 截断显示。
+
+        返回 Rich Text 对象，避免动态内容触发 Textual markup 解析错误。
+        """
         border = get_color("border_separator")
-        lines: list[str] = []
+        result = Text()
         for i, opt in enumerate(self._options):
+            if i > 0:
+                result.append("\n")
             key = opt["key"]
             label = opt.get("label", key)
-            # 截断过长的选项 label（如包含完整命令路径的 always_allow 选项）
             label = truncate_for_title(label, max_len=70)
             color = get_color(_OPTION_COLOR_ROLES.get(key, "foreground"))
+            result.append("  │", style=border)
             if i == self._selected:
-                lines.append(f"[{border}]  │[/]  [bold {color}]● {escape(label)}[/]")
+                result.append(f"  ● {label}", style=f"bold {color}")
             else:
-                lines.append(f"[{border}]  │[/]    {escape(label)}")
-        return "\n".join(lines)
+                result.append(f"    {label}")
+        return result
 
     def _refresh_options(self) -> None:
         """刷新选项显示"""

@@ -4,14 +4,17 @@ from __future__ import annotations
 
 from textual.app import ComposeResult
 from textual.containers import Horizontal, Vertical
-from textual.events import Key
+from textual.events import Key, Paste
 from textual.message import Message
-from textual.widgets import Input, Static
+from textual.widgets import Static, TextArea
 
 from lumi.tui.theme import get_color
 from lumi.utils.image import ImageData
 
 _TOOL_MODES = ("approve", "auto", "privileged")
+
+# 粘贴内容超过此行数时折叠显示
+PASTE_COLLAPSE_THRESHOLD = 20
 
 # 值为 (label, 语义角色名)，颜色在渲染时通过 get_color() 解析
 _MODE_DISPLAY: dict[str, tuple[str, str]] = {
@@ -26,6 +29,108 @@ def _resolve_color(role_or_hex: str) -> str:
     if role_or_hex.startswith("#"):
         return role_or_hex
     return get_color(role_or_hex)
+
+
+class ChatInput(TextArea):
+    """聊天输入框 - 基于 TextArea，支持自动换行和粘贴折叠。
+
+    Enter 提交，Shift+Enter 换行。粘贴超长内容时自动折叠。
+    """
+
+    DEFAULT_CSS = """
+    ChatInput {
+        background: transparent;
+        border: none !important;
+        width: 1fr;
+        height: auto;
+        min-height: 1;
+        max-height: 8;
+        padding: 0;
+        margin: 0;
+        color: $foreground;
+    }
+
+    ChatInput:focus {
+        border: none !important;
+    }
+
+    ChatInput > .text-area--cursor-line {
+        background: transparent;
+    }
+    """
+
+    class Submitted(Message):
+        """用户按 Enter 提交"""
+
+        def __init__(self, value: str) -> None:
+            super().__init__()
+            self.value = value
+
+    def __init__(self, **kwargs) -> None:
+        super().__init__(
+            id="user-input",
+            show_line_numbers=False,
+            soft_wrap=True,
+            tab_behavior="focus",
+            **kwargs,
+        )
+        # 粘贴计数器和原始文本存储
+        self._paste_counter: int = 0
+        self._pasted_texts: dict[int, str] = {}
+
+    @property
+    def value(self) -> str:
+        """兼容旧 Input.value 接口，返回实际文本（展开折叠内容）。"""
+        text = self.text
+        # 展开所有折叠标记为原始文本
+        for idx, original in self._pasted_texts.items():
+            tag = f"[Pasted text #{idx}"
+            if tag in text:
+                # 找到完整标记并替换
+                import re
+
+                pattern = rf"\[Pasted text #{idx} \+\d+ lines\]"
+                text = re.sub(pattern, original, text)
+        return text
+
+    @value.setter
+    def value(self, new_value: str) -> None:
+        """兼容旧 Input.value = '' 接口。"""
+        self._pasted_texts.clear()
+        self.clear()
+        if new_value:
+            self.insert(new_value)
+
+    async def _on_key(self, event: Key) -> None:
+        """Enter 提交，Shift+Enter 换行。"""
+        if event.key == "enter":
+            event.prevent_default()
+            event.stop()
+            text = self.value.strip()
+            if text:
+                self.post_message(self.Submitted(text))
+        # shift+enter 由 TextArea 默认处理为换行，无需干预
+
+    def _on_paste(self, event: Paste) -> None:
+        """拦截粘贴事件，超长内容折叠显示。"""
+        pasted = event.text
+        if not pasted:
+            return
+
+        lines = pasted.splitlines()
+        line_count = len(lines)
+
+        if line_count > PASTE_COLLAPSE_THRESHOLD:
+            event.prevent_default()
+            event.stop()
+            self._paste_counter += 1
+            idx = self._paste_counter
+            # 保存原始文本
+            self._pasted_texts[idx] = pasted
+            # 在输入框中显示折叠标记
+            collapse_tag = f"[Pasted text #{idx} +{line_count} lines]"
+            self.insert(collapse_tag)
+        # 短内容正常粘贴，TextArea 自动换行
 
 
 class InputBox(Static):
@@ -51,26 +156,12 @@ class InputBox(Static):
         padding: 0;
         color: $accent;
     }
-
-    InputBox Input {
-        background: transparent;
-        border: none !important;
-        width: 1fr;
-        height: 1;
-        padding: 0;
-        margin: 0;
-        color: $foreground;
-    }
-
-    InputBox Input:focus {
-        border: none !important;
-    }
     """
 
     def compose(self) -> ComposeResult:
         with Horizontal(id="input-row"):
             yield Static("> ", id="prompt-label")
-            yield Input(placeholder="输入消息...", id="user-input")
+            yield ChatInput()
 
 
 class InputBar(Vertical):
@@ -80,7 +171,7 @@ class InputBar(Vertical):
     InputBar {
         dock: bottom;
         height: auto;
-        max-height: 10;
+        max-height: 14;
         background: transparent;
         padding: 0 2 1 2;
     }
@@ -148,7 +239,7 @@ class InputBar(Vertical):
 
     def on_mount(self) -> None:
         self.query_one(InputBox).border_title = "Input"
-        self.query_one("#user-input", Input).focus()
+        self.query_one("#user-input", ChatInput).focus()
 
     def on_key(self, event: Key) -> None:
         if event.key == "ctrl+v":
@@ -160,26 +251,36 @@ class InputBar(Vertical):
             event.stop()
             self.action_switch_tool_mode()
         elif event.key == "up":
-            event.prevent_default()
-            event.stop()
-            self._navigate_history(-1)
+            inp = self.query_one("#user-input", ChatInput)
+            # 只在光标在第一行时才浏览历史
+            row, _col = inp.cursor_location
+            if row == 0:
+                event.prevent_default()
+                event.stop()
+                self._navigate_history(-1)
         elif event.key == "down":
-            event.prevent_default()
-            event.stop()
-            self._navigate_history(1)
+            inp = self.query_one("#user-input", ChatInput)
+            # 只在光标在最后一行时才浏览历史
+            row, _col = inp.cursor_location
+            last_row = inp.document.line_count - 1
+            if row >= last_row:
+                event.prevent_default()
+                event.stop()
+                self._navigate_history(1)
 
-    def on_input_changed(self, event: Input.Changed) -> None:
+    def on_text_area_changed(self, event: TextArea.Changed) -> None:
         """输入内容变化时隐藏退出提示。"""
         self.hide_exit_hint()
 
-    def on_input_submitted(self, event: Input.Submitted) -> None:
-        """Input 原生 Enter 提交"""
+    def on_chat_input_submitted(self, event: ChatInput.Submitted) -> None:
+        """ChatInput Enter 提交"""
         text = event.value.strip()
         if text:
             self._history.append(text)
             self._history_index = -1
             self._draft = ""
-            event.input.value = ""
+            inp = self.query_one("#user-input", ChatInput)
+            inp.value = ""
             images = self._pending_images.copy()
             self._pending_images.clear()
             self._update_image_indicator()
@@ -193,7 +294,7 @@ class InputBar(Vertical):
         """
         if not self._history:
             return
-        inp = self.query_one("#user-input", Input)
+        inp = self.query_one("#user-input", ChatInput)
         # 首次按上键时，暂存当前输入
         if self._history_index == -1 and direction == -1:
             self._draft = inp.value
@@ -208,7 +309,7 @@ class InputBar(Vertical):
             self._history_index = new_index
             inp.value = self._history[len(self._history) - 1 - new_index]
         # 光标移到末尾
-        inp.cursor_position = len(inp.value)
+        inp.move_cursor(inp.document.end)
 
     def _try_paste_image(self) -> None:
         """尝试从剪贴板粘贴图片（异步）。"""
@@ -275,7 +376,7 @@ class InputBar(Vertical):
 
     def set_disabled(self, disabled: bool) -> None:
         """禁用/启用输入"""
-        inp = self.query_one("#user-input", Input)
+        inp = self.query_one("#user-input", ChatInput)
         inp.disabled = disabled
         if not disabled:
             inp.focus()
