@@ -28,6 +28,7 @@ from lumi.tui.widgets.assistant_message import AssistantMessage
 from lumi.tui.widgets.title_block import TitleBlock
 from lumi.tui.widgets.chat_log import ChatLog
 from lumi.tui.widgets.input_bar import ChatInput, InputBar
+from lumi.tui.widgets.command_result_panel import CommandResultPanel
 from lumi.tui.widgets.notification_panel import NotificationChanged, NotificationPanel
 from lumi.tui.widgets.thinking_indicator import ThinkingIndicator
 from lumi.tui.widgets.tool_block import ToolBlock
@@ -37,6 +38,12 @@ from lumi.tui.screens.settings_screen import SettingsScreen
 from lumi.utils.config import GlobalConfig, GlobalConfigManager, get_config
 from lumi.utils.config.global_manager import GLOBAL_CONFIG_DIR
 from lumi.utils.logger import logger
+
+from lumi.tui.slash_commands.registry import CommandRegistry
+from lumi.tui.slash_commands.models import CommandType, SlashCommand
+from lumi.tui.slash_commands.parser import parse_command_input
+from lumi.tui.slash_commands.handlers import make_skill_handler, build_skills_output
+from lumi.agents.tools.skill_detector import SkillChangeDetector
 
 
 class LumiApp(App):
@@ -64,9 +71,11 @@ class LumiApp(App):
         self._scheduler: Scheduler | None = None
         self._delivery: DeliveryManager | None = None
         self._interrupted: bool = False
+        self._command_registry = CommandRegistry()
 
     def compose(self) -> ComposeResult:
         yield ChatLog()
+        yield CommandResultPanel()
         yield NotificationPanel()
         yield InputBar(id="input-area")
 
@@ -165,6 +174,9 @@ class LumiApp(App):
         title.border_title = f"Lumi v{__version__}"
         await chat_log.mount(title)
 
+        # 初始化斜杠命令系统
+        self._init_slash_commands()
+
         # 初始化定时任务子系统
         try:
             cron_dir = GLOBAL_CONFIG_DIR / "cron"
@@ -182,11 +194,66 @@ class LumiApp(App):
             logger.warning("[LumiApp] 定时任务子系统启动失败", exc_info=True)
             self.notify("定时任务子系统启动失败，cron 功能不可用", severity="warning")
 
+    # ── 斜杠命令 ──
+
+    def _init_slash_commands(self) -> None:
+        """初始化斜杠命令系统：注册内置命令和技能命令。"""
+
+        # 注册 /skills 内置命令
+        async def _skills_handler(extra_text: str = "") -> None:
+            detector = SkillChangeDetector.get_instance()
+            skills, _ = detector.check()
+            content = build_skills_output(skills, detector.skills_dir)
+            self.query_one(CommandResultPanel).show(content, command_name="skills")
+
+        self._command_registry.register(
+            SlashCommand(
+                name="skills",
+                description="查看所有可用技能",
+                command_type=CommandType.BUILTIN,
+                handler=_skills_handler,
+            )
+        )
+
+        # 加载技能命令
+        self._sync_skill_commands()
+
+        # 注入命令注册表到 InputBar
+        self.query_one(InputBar).set_command_registry(self._command_registry)
+
+    def _sync_skill_commands(self) -> None:
+        """同步技能命令到注册表。"""
+        try:
+            skills, _ = SkillChangeDetector.get_instance().check()
+            self._command_registry.sync_skills(
+                skills,
+                lambda skill: make_skill_handler(skill, self._send_skill_to_agent),
+            )
+        except Exception:
+            logger.warning("[LumiApp] 技能命令同步失败", exc_info=True)
+
+    async def _send_skill_to_agent(self, skill_name: str, content: str) -> None:
+        """技能命令的 send_to_agent 回调：附加 system-reminder 后发送给 Agent。"""
+        reminder = (
+            "<system-reminder>\n"
+            f"用户主动执行了技能 <command-name>/{skill_name}</command-name>\n"
+            "</system-reminder>"
+        )
+        multi_content: list[dict[str, str]] = [
+            {"type": "text", "text": reminder},
+            {"type": "text", "text": content},
+        ]
+        self._run.phase = RunPhase.IDLE
+        self.query_one(InputBar).set_disabled(True)
+        self._run.task = asyncio.create_task(self._run_stream(multi_content))
+
     # ── 输入处理 ──
 
     async def on_input_bar_submitted(self, event: InputBar.Submitted) -> None:
         if self._run.is_running:
             return
+
+        self._try_dismiss_command_panel()
 
         text = event.text
         tool_mode = event.tool_mode
@@ -195,6 +262,27 @@ class LumiApp(App):
 
         await chat_log.mount(UserMessage(text, image_count=len(images)))
         await chat_log.auto_scroll_if_needed()
+
+        # 斜杠命令路由
+        if text.startswith("/"):
+            command_name, extra_text = parse_command_input(text)
+            command = self._command_registry.get(command_name)
+            if command:
+                try:
+                    await command.handler(extra_text)
+                except Exception as e:
+                    logger.error(
+                        "[LumiApp] 命令 /%s 执行失败", command_name, exc_info=True
+                    )
+                    err_text = Text()
+                    err_text.append(
+                        f"✗ /{command_name} 执行失败: ",
+                        style=f"bold {get_color('error')}",
+                    )
+                    err_text.append(str(e), style=get_color("error"))
+                    await chat_log.mount(Static(err_text, markup=False))
+                    await chat_log.auto_scroll_if_needed()
+                return
 
         # 构建 content：有图片时使用多模态 content blocks
         if images:
@@ -475,6 +563,31 @@ class LumiApp(App):
                 "[LumiApp] 铃铛更新失败, unread=%s", event.unread, exc_info=True
             )
 
+    async def on_command_result_panel_dismissed(
+        self, event: CommandResultPanel.Dismissed
+    ) -> None:
+        """命令结果面板关闭时，在 ChatLog 中追加状态行。"""
+        self._append_dismiss_status(event.command_name)
+
+    def _try_dismiss_command_panel(self) -> bool:
+        """若命令结果面板可见则关闭，返回是否关闭了面板。"""
+        panel = self.query_one(CommandResultPanel)
+        if panel.is_visible:
+            name = panel.hide()
+            self._append_dismiss_status(name)
+            return True
+        return False
+
+    def _append_dismiss_status(self, command_name: str) -> None:
+        """在 ChatLog 末尾追加面板关闭状态行。"""
+        chat_log = self.query_one(ChatLog)
+        hint = Text()
+        hint.append("└ ", style="dim")
+        hint.append("对话框已关闭", style="dim")
+        widget = Static(hint, markup=False)
+        widget.styles.padding = (0, 1)
+        chat_log.mount(widget)
+
     def _finish_run(self) -> None:
         if self._thinking:
             self._thinking.teardown()
@@ -500,6 +613,9 @@ class LumiApp(App):
             await self._apply_theme_mode(result.theme_mode)
 
     async def action_cancel_generation(self) -> None:
+        if self._try_dismiss_command_panel():
+            return
+
         # 如果当前有审批组件，esc 触发审批中断而非取消生成
         try:
             approval = self.query_one(ToolApproval)
@@ -549,7 +665,7 @@ class LumiApp(App):
 
         try:
             inp = self.query_one("#user-input", ChatInput)
-        except Exception:
+        except NoMatches:
             await self.action_quit_app()
             return
 

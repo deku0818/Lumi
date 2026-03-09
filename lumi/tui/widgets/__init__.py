@@ -7,6 +7,7 @@ from lumi.tui.widgets.thinking_indicator import ThinkingIndicator
 from lumi.tui.widgets.input_bar import InputBar
 from lumi.tui.widgets.ask_dialog import AskDialog
 from lumi.tui.widgets.tool_approval import ToolApproval
+from lumi.tui.widgets.command_result_panel import CommandResultPanel
 
 __all__ = [
     "TitleBlock",
@@ -18,4 +19,5 @@ __all__ = [
     "InputBar",
     "AskDialog",
     "ToolApproval",
+    "CommandResultPanel",
 ]

@@ -4,11 +4,15 @@ from __future__ import annotations
 
 from textual.app import ComposeResult
 from textual.containers import Horizontal, Vertical
+from textual.css.query import NoMatches
 from textual.events import Key, Paste
 from textual.message import Message
 from textual.widgets import Static, TextArea
 
+from lumi.tui.slash_commands.parser import extract_command_prefix, is_command_mode
+from lumi.tui.slash_commands.registry import CommandRegistry
 from lumi.tui.theme import get_color
+from lumi.tui.widgets.completion_menu import CompletionMenu
 from lumi.utils.image import ImageData
 
 _TOOL_MODES = ("auto", "approve", "privileged")
@@ -102,8 +106,24 @@ class ChatInput(TextArea):
             self.insert(new_value)
 
     async def _on_key(self, event: Key) -> None:
-        """Enter 提交，Shift+Enter 换行。"""
+        """Enter 提交，Shift+Enter 换行。
+
+        Textual 键盘事件流：聚焦组件(ChatInput) → 冒泡到父容器(InputBar)。
+        补全菜单的确认逻辑统一在 InputBar.on_key 中处理，因此这里需要：
+        - 菜单可见时：prevent_default 阻止 TextArea 插入换行，
+          但 **不调用 stop()** 让事件冒泡到 InputBar 完成补全确认。
+        - 菜单不可见时：prevent_default + stop 拦截事件，作为消息提交。
+        """
         if event.key == "enter":
+            # 补全菜单可见 → 阻止换行，放行冒泡给 InputBar 处理补全
+            try:
+                menu = self.screen.query_one(CompletionMenu)
+                if menu.is_visible:
+                    event.prevent_default()
+                    return
+            except NoMatches:
+                pass
+            # 普通提交 → 阻止换行并停止冒泡
             event.prevent_default()
             event.stop()
             text = self.value.strip()
@@ -224,9 +244,15 @@ class InputBar(Vertical):
         self._history: list[str] = []
         self._history_index: int = -1
         self._draft: str = ""  # 暂存当前未提交的输入
+        self._command_registry: CommandRegistry | None = None
+
+    def set_command_registry(self, registry: CommandRegistry) -> None:
+        """允许外部（如 LumiApp）注入命令注册表。"""
+        self._command_registry = registry
 
     def compose(self) -> ComposeResult:
         yield InputBox()
+        yield CompletionMenu()
         label, role = _MODE_DISPLAY[self._tool_mode]
         color = _resolve_color(role)
         with Horizontal(id="status-row"):
@@ -242,6 +268,21 @@ class InputBar(Vertical):
         self.query_one("#user-input", ChatInput).focus()
 
     def on_key(self, event: Key) -> None:
+        # 补全菜单可见时，拦截导航和确认键
+        menu = self.query_one(CompletionMenu)
+        if menu.is_visible and event.key in ("up", "down", "enter", "tab", "escape"):
+            event.prevent_default()
+            event.stop()
+            if event.key == "up":
+                menu.move_selection(-1)
+            elif event.key == "down":
+                menu.move_selection(1)
+            elif event.key in ("enter", "tab"):
+                menu.confirm_selection()
+            else:  # escape
+                menu.hide()
+            return
+
         if event.key == "ctrl+v":
             event.prevent_default()
             event.stop()
@@ -269,8 +310,30 @@ class InputBar(Vertical):
                 self._navigate_history(1)
 
     def on_text_area_changed(self, event: TextArea.Changed) -> None:
-        """输入内容变化时隐藏退出提示。"""
+        """输入内容变化时隐藏退出提示，并检测命令模式。
+
+        仅在用户正在输入命令前缀时（无空格）展示补全菜单，
+        输入空格后表示命令名已确定，隐藏菜单。
+        """
         self.hide_exit_hint()
+        text = event.text_area.text
+        menu = self.query_one(CompletionMenu)
+        # 命令模式：以 / 开头且尚未输入空格（仍在输入命令名）
+        if self._command_registry and is_command_mode(text) and " " not in text:
+            prefix = extract_command_prefix(text)
+            matched = self._command_registry.match(prefix)
+            menu.show_commands(matched)
+        else:
+            menu.hide()
+
+    def on_completion_menu_command_selected(
+        self, event: CompletionMenu.CommandSelected
+    ) -> None:
+        """补全菜单选中命令后，填入输入框。"""
+        inp = self.query_one("#user-input", ChatInput)
+        inp.value = f"/{event.command_name} "
+        inp.move_cursor(inp.document.end)
+        self.query_one(CompletionMenu).hide()
 
     def on_chat_input_submitted(self, event: ChatInput.Submitted) -> None:
         """ChatInput Enter 提交"""

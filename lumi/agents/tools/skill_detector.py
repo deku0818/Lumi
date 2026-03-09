@@ -33,6 +33,11 @@ class SkillChangeDetector:
         self._cached_digest: str = ""
         self._cached_skills: list[SkillConfig] = []
 
+    @property
+    def skills_dir(self) -> Path:
+        """技能目录路径。"""
+        return self._skills_dir
+
     def _compute_digest(self) -> str:
         """计算 .skills/ 目录下所有 SKILL.md 的 digest。
 
