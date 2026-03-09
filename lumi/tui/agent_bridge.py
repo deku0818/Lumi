@@ -74,7 +74,7 @@ class AgentBridge:
         )
 
     async def stream_response(
-        self, content: str | list, tool_mode: str = "approve"
+        self, content: str | list, tool_mode: str = "auto"
     ) -> AsyncGenerator[BridgeEvent, None]:
         """发送消息并 yield 事件流
 
@@ -105,7 +105,7 @@ class AgentBridge:
         await get_session_manager().close_all()
 
     async def _stream(
-        self, input_data, *, tool_mode: str = "approve"
+        self, input_data, *, tool_mode: str = "auto"
     ) -> AsyncGenerator[BridgeEvent, None]:
         """核心流式处理 - yield BridgeEvent
 

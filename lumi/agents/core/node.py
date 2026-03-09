@@ -141,7 +141,7 @@ def is_use_tool(state: LumiAgentState, runtime: Runtime[LumiAgentContext]):
     if all(tc["name"] in BYPASS_TOOLS for tc in tool_calls):
         return "ToolExecutor"
 
-    tool_mode = state.get("tool_mode", "approve")
+    tool_mode = state.get("tool_mode", "auto")
 
     # 特权模式：跳过所有审批
     if tool_mode == "privileged":
@@ -185,7 +185,7 @@ def human_approval(
     - auto + deny/unmatched → 仅权限审批（权限选项 + deny 警告）
     """
     last_message = state["messages"][-1]
-    tool_mode = state.get("tool_mode", "approve")
+    tool_mode = state.get("tool_mode", "auto")
     engine = runtime.context.permission_engine
 
     tool_calls_data = [

@@ -63,6 +63,7 @@ class LumiApp(App):
         self._global_config = None
         self._scheduler: Scheduler | None = None
         self._delivery: DeliveryManager | None = None
+        self._interrupted: bool = False
 
     def compose(self) -> ComposeResult:
         yield ChatLog()
@@ -209,6 +210,22 @@ class LumiApp(App):
                 )
         else:
             content = text
+
+        # 中断提示：告知 LLM 上一轮回复被用户中断
+        if self._interrupted:
+            interrupted_hint = (
+                "<system-reminder>\n"
+                "The user interrupted the conversation before the previous reply was completed.\n"
+                "</system-reminder>\n"
+            )
+            if isinstance(content, list):
+                content.insert(0, {"type": "text", "text": interrupted_hint})
+            else:
+                content = [
+                    {"type": "text", "text": interrupted_hint},
+                    {"type": "text", "text": content},
+                ]
+            self._interrupted = False
 
         self._run.phase = RunPhase.IDLE  # 即将启动
         self.query_one(InputBar).set_disabled(True)
@@ -506,10 +523,13 @@ class LumiApp(App):
             self._finalize_assistant_msg()
             chat_log = self.query_one(ChatLog)
             hint = Text()
-            hint.append("⏹ ", style="dim")
-            hint.append("已中断生成", style=f"dim {get_color('warning')}")
-            await chat_log.mount(Static(hint, markup=False))
+            hint.append("● ", style=f"{get_color('error')}")
+            hint.append("Interrupted", style=f"dim {get_color('error')}")
+            widget = Static(hint, markup=False)
+            widget.styles.padding = (0, 1)
+            await chat_log.mount(widget)
             await chat_log.auto_scroll_if_needed()
+            self._interrupted = True
             self._finish_run()
 
     async def action_quit_app(self) -> None:

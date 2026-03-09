@@ -11,7 +11,7 @@ from textual.widgets import Static, TextArea
 from lumi.tui.theme import get_color
 from lumi.utils.image import ImageData
 
-_TOOL_MODES = ("approve", "auto", "privileged")
+_TOOL_MODES = ("auto", "approve", "privileged")
 
 # 粘贴内容超过此行数时折叠显示
 PASTE_COLLAPSE_THRESHOLD = 20
@@ -218,7 +218,7 @@ class InputBar(Vertical):
 
     def __init__(self, *args, **kwargs) -> None:
         super().__init__(*args, **kwargs)
-        self._tool_mode = "approve"
+        self._tool_mode = "auto"
         self._pending_images: list[ImageData] = []
         self._exit_hint_timer = None
         self._history: list[str] = []
