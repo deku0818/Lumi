@@ -5,6 +5,7 @@ from __future__ import annotations
 import asyncio
 import re
 import sys
+from collections.abc import Awaitable, Callable
 from datetime import datetime
 
 from textual.app import App, ComposeResult
@@ -28,7 +29,6 @@ from lumi.tui.widgets.title_block import TitleBlock
 from lumi.tui.widgets.chat_log import ChatLog
 from lumi.tui.widgets.input_bar import ChatInput, InputBar
 from lumi.tui.widgets.command_result_panel import CommandResultPanel
-from lumi.tui.widgets.notification_panel import NotificationChanged, NotificationPanel
 from lumi.tui.widgets.thinking_indicator import ThinkingIndicator
 from lumi.tui.widgets.tool_block import ToolBlock
 from lumi.tui.widgets.user_message import UserMessage
@@ -37,11 +37,12 @@ from lumi.tui.screens.settings_screen import SettingsScreen
 from lumi.utils.config import GlobalConfig, GlobalConfigManager, get_config
 from lumi.utils.config.global_manager import GLOBAL_CONFIG_DIR
 from lumi.utils.logger import logger
+from lumi.utils.thread_id import generate_thread_id
 
 from lumi.tui.slash_commands.registry import CommandRegistry
 from lumi.tui.slash_commands.models import CommandType, SlashCommand
 from lumi.tui.slash_commands.parser import parse_command_input
-from lumi.tui.slash_commands.handlers import make_skill_handler, build_skills_output
+from lumi.tui.slash_commands.handlers import make_skill_handler
 from lumi.agents.tools.skill_detector import SkillChangeDetector
 
 
@@ -54,7 +55,6 @@ class LumiApp(App):
         Binding("escape", "cancel_generation", "Cancel", priority=True),
         Binding("ctrl+c", "handle_ctrl_c", "Quit", priority=True),
         Binding("ctrl+s", "open_settings", "Settings", priority=True),
-        Binding("ctrl+n", "toggle_notifications", "Notifications", priority=True),
     ]
 
     def __init__(self) -> None:
@@ -76,7 +76,6 @@ class LumiApp(App):
     def compose(self) -> ComposeResult:
         yield ChatLog()
         yield CommandResultPanel()
-        yield NotificationPanel()
         yield InputBar(id="input-area")
 
     async def _detect_system_theme(self) -> bool:
@@ -174,6 +173,9 @@ class LumiApp(App):
         # 初始化斜杠命令系统
         self._init_slash_commands()
 
+        # 初始化铃铛未读数
+        self._refresh_bell()
+
         # 初始化定时任务子系统
         try:
             cron_dir = GLOBAL_CONFIG_DIR / "cron"
@@ -196,34 +198,30 @@ class LumiApp(App):
     def _init_slash_commands(self) -> None:
         """初始化斜杠命令系统：注册内置命令和技能命令。"""
 
-        # 注册 /skills 内置命令
-        async def _skills_handler(extra_text: str = "") -> None:
-            detector = SkillChangeDetector.get_instance()
-            skills, _ = detector.check()
-            content = build_skills_output(skills, detector.skills_dir)
-            self.query_one(CommandResultPanel).show(content, command_name="skills")
-
-        self._command_registry.register(
-            SlashCommand(
-                name="skills",
-                description="查看所有可用技能",
-                command_type=CommandType.BUILTIN,
-                handler=_skills_handler,
+        builtins: list[tuple[str, str, Callable[..., Awaitable[None]]]] = [
+            ("skills", "查看所有可用技能", lambda _="": self._open_skills_screen()),
+            ("resume", "恢复历史会话", lambda _="": self._open_resume_screen()),
+            ("cron", "查看和管理定时任务", lambda _="": self._open_cron_screen()),
+            (
+                "cron-notify",
+                "查看定时任务通知",
+                lambda _="": self._open_cron_notify_screen(),
+            ),
+            (
+                "clear",
+                "清空对话历史，开始新会话",
+                lambda _="": self._clear_conversation(),
+            ),
+        ]
+        for name, desc, handler in builtins:
+            self._command_registry.register(
+                SlashCommand(
+                    name=name,
+                    description=desc,
+                    command_type=CommandType.BUILTIN,
+                    handler=handler,
+                )
             )
-        )
-
-        # 注册 /resume 内置命令
-        async def _resume_handler(extra_text: str = "") -> None:
-            await self._open_resume_screen()
-
-        self._command_registry.register(
-            SlashCommand(
-                name="resume",
-                description="恢复历史会话",
-                command_type=CommandType.BUILTIN,
-                handler=_resume_handler,
-            )
-        )
 
         # 加载技能命令
         self._sync_skill_commands()
@@ -345,6 +343,141 @@ class LumiApp(App):
         # 重置运行状态
         self._run.reset()
         self._interrupted = False
+
+    # ── 清空对话 ──
+
+    async def _clear_conversation(self) -> None:
+        """清空当前对话，生成新 thread_id 开始新会话。"""
+        new_tid = generate_thread_id()
+        self._bridge.switch_thread(new_tid)
+
+        chat_log = self.query_one(ChatLog)
+        await chat_log.remove_children()
+
+        title = TitleBlock(
+            model_name=self._bridge.model_name,
+            id="title-block",
+        )
+        title.border_title = f"Lumi v{__version__}"
+        await chat_log.mount(title)
+
+        await chat_log.append_hint("● ", "已开始新会话")
+        await chat_log.scroll_to_end()
+
+        self._run.reset()
+        self._interrupted = False
+
+    # ── 技能列表 ──
+
+    async def _open_skills_screen(self) -> None:
+        """打开技能列表界面。"""
+        detector = SkillChangeDetector.get_instance()
+        skills, _ = detector.check()
+
+        if not skills:
+            chat_log = self.query_one(ChatLog)
+            await chat_log.append_hint("● ", "暂无可用技能")
+            return
+
+        from lumi.tui.screens.skills_screen import SkillsScreen
+
+        self.push_screen(SkillsScreen(skills), callback=self._on_skills_done)
+
+    async def _on_skills_done(self, skill_name: str | None) -> None:
+        """技能列表界面关闭回调。
+
+        Args:
+            skill_name: 选中的技能名称，取消时为 None。
+        """
+
+    # ── 定时任务管理 ──
+
+    async def _open_cron_screen(self) -> None:
+        """打开定时任务管理界面。"""
+        if self._scheduler is None:
+            chat_log = self.query_one(ChatLog)
+            await chat_log.append_hint("● ", "定时任务子系统未启动，/cron 不可用")
+            return
+
+        jobs = await self._scheduler.get_all_jobs()
+
+        from lumi.tui.screens.cron_screen import CronScreen
+
+        self.push_screen(
+            CronScreen(jobs, on_delete=self._delete_cron_job),
+            callback=self._on_cron_done,
+        )
+
+    async def _delete_cron_job(self, job_id: str) -> None:
+        """执行实际的 cron 任务删除。
+
+        Args:
+            job_id: 要删除的任务 ID。
+        """
+        if self._scheduler is None:
+            logger.warning("[LumiApp] 无法删除任务 %s: 调度器未初始化", job_id)
+            return
+        job = await self._scheduler.get_job(job_id)
+        name = job.name if job else job_id
+        await self._scheduler.delete_job(job_id)
+        chat_log = self.query_one(ChatLog)
+        await chat_log.append_hint("● ", f"已删除定时任务「{name}」({job_id})")
+
+    async def _on_cron_done(self, result: str | None) -> None:
+        """定时任务管理界面关闭回调。
+
+        Args:
+            result: "changed" 表示有删除操作，None 表示无变更。
+        """
+        if result == "changed":
+            self._refresh_bell()
+
+    # ── 定时任务通知 ──
+
+    async def _open_cron_notify_screen(self) -> None:
+        """打开定时任务通知界面。"""
+        from lumi.tui.widgets.notification_panel import NotificationStore
+
+        store = NotificationStore()
+        records = store.load()
+
+        if not records:
+            chat_log = self.query_one(ChatLog)
+            await chat_log.append_hint("● ", "暂无通知")
+            return
+
+        from lumi.tui.screens.cron_notify_screen import CronNotifyScreen
+
+        self.push_screen(
+            CronNotifyScreen(records, store=store),
+            callback=self._on_cron_notify_done,
+        )
+
+    async def _on_cron_notify_done(self, result: str | None) -> None:
+        """通知界面关闭回调，更新铃铛未读数。
+
+        Args:
+            result: "changed" 表示有变更，None 表示无变更。
+        """
+        if result == "changed":
+            self._refresh_bell()
+
+    def _refresh_bell(self) -> None:
+        """从 NotificationStore 刷新铃铛未读数。"""
+        try:
+            from lumi.tui.widgets.notification_panel import NotificationStore
+
+            records = NotificationStore().load()
+            unread = sum(1 for r in records if not r.read)
+        except Exception:
+            logger.warning("[LumiApp] 通知记录加载失败", exc_info=True)
+            return
+        try:
+            self.query_one(InputBar).update_bell(unread)
+        except NoMatches:
+            logger.debug("[LumiApp] InputBar 尚未挂载，跳过铃铛更新")
+        except Exception:
+            logger.warning("[LumiApp] 铃铛更新失败, unread=%s", unread, exc_info=True)
 
     # 工具被拒绝/中断时的输出关键词
     _TOOL_REJECT_KEYWORDS: frozenset[str] = frozenset(
@@ -792,31 +925,24 @@ class LumiApp(App):
         duration_ms: int | None = None,
     ) -> None:
         try:
-            self.query_one(NotificationPanel).add_notification(
+            from lumi.tui.widgets.notification_panel import (
+                NotificationRecord,
+                NotificationStore,
+            )
+
+            store = NotificationStore()
+            records = store.load()
+            record = NotificationRecord.create(
                 job_name, output, started_at=started_at, duration_ms=duration_ms
             )
+            records.insert(0, record)
+            if len(records) > 100:
+                records = records[:100]
+            store.save(records)
         except Exception:
-            logger.warning("[LumiApp] 通知面板不可用", exc_info=True)
-
-    def action_toggle_notifications(self) -> None:
-        """切换通知面板显示/隐藏 (Ctrl+N)。"""
-        try:
-            self.query_one(NotificationPanel).toggle_panel()
-        except NoMatches:
-            logger.debug("[LumiApp] NotificationPanel 尚未挂载")
-        except Exception:
-            logger.warning("[LumiApp] 切换通知面板失败", exc_info=True)
-
-    def on_notification_changed(self, event: NotificationChanged) -> None:
-        """通知数量变化时更新 InputBar 铃铛。"""
-        try:
-            self.query_one(InputBar).update_bell(event.unread)
-        except NoMatches:
-            logger.debug("[LumiApp] InputBar 尚未挂载")
-        except Exception:
-            logger.warning(
-                "[LumiApp] 铃铛更新失败, unread=%s", event.unread, exc_info=True
-            )
+            logger.warning("[LumiApp] 保存通知失败: job=%s", job_name, exc_info=True)
+            return
+        self._refresh_bell()
 
     async def on_command_result_panel_dismissed(
         self, event: CommandResultPanel.Dismissed

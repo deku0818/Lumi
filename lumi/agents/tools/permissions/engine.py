@@ -18,7 +18,10 @@ from lumi.agents.tools.permissions.models import (
     PermissionRule,
     ToolCallInfo,
 )
-from lumi.agents.tools.workspace import add_authorized_directory
+from lumi.agents.tools.workspace import (
+    add_authorized_directory,
+    set_authorized_directory,
+)
 from lumi.utils.logger import logger
 
 
@@ -84,6 +87,7 @@ class PermissionEngine:
         self._boundary = WorkspaceBoundary(workspace_paths)
 
         # 同步到 filesystem 层的授权目录列表
+        set_authorized_directory(self._project_dir)
         for wp in workspace_paths[1:]:
             add_authorized_directory(wp)
 

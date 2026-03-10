@@ -66,6 +66,7 @@ class JobStore:
 
     def __init__(self, path: Path) -> None:
         self._path = path
+        self._lock = asyncio.Lock()
 
     async def load(self) -> list[Job]:
         """从磁盘加载任务列表。
@@ -123,21 +124,25 @@ class JobStore:
         """创建或更新单个任务。
 
         如果已存在相同 ID 的任务则替换，否则追加。
+        使用锁防止并发写入导致数据丢失。
 
         Args:
             job: 要创建或更新的任务。
         """
-        jobs = await self.load()
-        for i, existing in enumerate(jobs):
-            if existing.id == job.id:
-                jobs[i] = job
-                break
-        else:
-            jobs.append(job)
-        await self.save(jobs)
+        async with self._lock:
+            jobs = await self.load()
+            for i, existing in enumerate(jobs):
+                if existing.id == job.id:
+                    jobs[i] = job
+                    break
+            else:
+                jobs.append(job)
+            await self.save(jobs)
 
     async def delete(self, job_id: str) -> bool:
         """删除指定 ID 的任务。
+
+        使用锁防止并发写入导致数据丢失。
 
         Args:
             job_id: 要删除的任务 ID。
@@ -145,12 +150,13 @@ class JobStore:
         Returns:
             是否成功删除（ID 存在则为 True）。
         """
-        jobs = await self.load()
-        new_jobs = [j for j in jobs if j.id != job_id]
-        if len(new_jobs) == len(jobs):
-            return False
-        await self.save(new_jobs)
-        return True
+        async with self._lock:
+            jobs = await self.load()
+            new_jobs = [j for j in jobs if j.id != job_id]
+            if len(new_jobs) == len(jobs):
+                return False
+            await self.save(new_jobs)
+            return True
 
     async def get_all(self) -> list[Job]:
         """获取所有任务。

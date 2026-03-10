@@ -9,6 +9,7 @@
 
 from __future__ import annotations
 
+import re
 from dataclasses import dataclass
 from datetime import datetime, timezone
 from typing import TYPE_CHECKING
@@ -63,6 +64,42 @@ class SessionSummary:
         return self.created_at.strftime("%Y-%m-%d")
 
 
+_COMMAND_NAME_RE = re.compile(r"<command-name>(/[\w-]+)</command-name>")
+_USER_INPUT_RE = re.compile(r"<user-input>(.*?)</user-input>", re.DOTALL)
+
+
+def _clean_display_text(raw: str) -> str:
+    """清理消息中的 XML 标签，还原用户可读文本。
+
+    技能命令消息从 <command-name> 和 <user-input> 标签还原用户输入，
+    非技能消息则过滤掉所有 XML 标签块。
+
+    Args:
+        raw: 原始消息文本
+
+    Returns:
+        清理后的显示文本
+    """
+    # 从 command-name + user-input 还原用户输入
+    cmd_match = _COMMAND_NAME_RE.search(raw)
+    if cmd_match:
+        cmd = cmd_match.group(1)
+        ui_match = _USER_INPUT_RE.search(raw)
+        if ui_match:
+            user_input = ui_match.group(1).strip()
+            return f"{cmd} {user_input}" if user_input else cmd
+        return cmd
+
+    # 非技能消息：过滤 system-reminder 块和其他 XML 标签
+    cleaned = re.sub(
+        r"<system-reminder>.*?</system-reminder>\s*",
+        "",
+        raw,
+        flags=re.DOTALL,
+    ).strip()
+    return cleaned or raw
+
+
 def _extract_first_human_message(messages: list) -> str:
     """从消息列表中提取首条用户消息
 
@@ -85,12 +122,12 @@ def _extract_first_human_message(messages: list) -> str:
             continue
 
         if isinstance(content, str):
-            return content[:100]
+            return _clean_display_text(content)[:100]
         # 多模态消息：提取文本部分
         if isinstance(content, list):
             for block in content:
                 if isinstance(block, dict) and block.get("type") == "text":
-                    return block.get("text", "")[:100]
+                    return _clean_display_text(block.get("text", ""))[:100]
     return ""
 
 

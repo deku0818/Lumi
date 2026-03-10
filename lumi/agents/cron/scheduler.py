@@ -146,6 +146,34 @@ class Scheduler:
             replace_existing=True,
         )
 
+    async def get_all_jobs(self) -> list[Job]:
+        """获取所有持久化任务。
+
+        Returns:
+            所有任务列表。
+        """
+        return await self._job_store.get_all()
+
+    async def get_job(self, job_id: str) -> Job | None:
+        """按 ID 获取单个任务。
+
+        Args:
+            job_id: 任务 ID。
+
+        Returns:
+            任务对象，不存在时返回 None。
+        """
+        return await self._job_store.get(job_id)
+
+    async def delete_job(self, job_id: str) -> None:
+        """从 APScheduler 和 JobStore 中删除任务。
+
+        Args:
+            job_id: 要删除的任务 ID。
+        """
+        self.remove_job(job_id)
+        await self._job_store.delete(job_id)
+
     def add_job(self, job: Job) -> None:
         """添加新任务到 APScheduler。
 
