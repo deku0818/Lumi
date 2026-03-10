@@ -11,29 +11,20 @@ from rich.text import Text
 from textual.widget import Widget
 from textual.widgets import Static
 
-from lumi.tui.renderers.utils import get_arg
+from lumi.tui.renderers.base import BaseRenderer
 from lumi.tui.theme import get_color
 
 # 提示词内容截断阈值（字符数）
 _PROMPT_MAX_LEN = 500
 
 
-class SkillRenderer:
+class SkillRenderer(BaseRenderer):
     """skill 工具渲染器"""
 
-    def render_title(self, name: str, args: dict) -> str:
-        """生成标题，格式: skill(技能名称)"""
-        return f"skill({get_arg(args, 'name')})"
-
-    def render_args(self, args: dict, *, approval_mode: bool = False) -> Widget:
-        """skill 参数仅 name，已在标题中展示，无需额外渲染"""
-        return Static("", markup=False)
+    title_arg_key = "name"
 
     def render_output(self, output: str) -> Widget:
-        """以折叠形式展示技能返回的提示词内容
-
-        超过 500 字符时截断并添加省略号提示。
-        """
+        """以折叠形式展示技能返回的提示词内容，超过 500 字符时截断。"""
         if not output:
             return Static("", markup=False)
 

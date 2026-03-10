@@ -12,24 +12,23 @@ from rich.text import Text
 from textual.widget import Widget
 from textual.widgets import Static
 
-from lumi.tui.renderers.utils import get_arg, guess_lexer, render_status_output
+from lumi.tui.renderers.base import BaseRenderer
+from lumi.tui.renderers.utils import guess_lexer, render_status_output
 from lumi.tui.theme import get_color
 
 # 折叠摘要的行数阈值
 _LINE_THRESHOLD = 50
 
 
-class WriteRenderer:
+class WriteRenderer(BaseRenderer):
     """write 工具渲染器"""
 
-    def render_title(self, name: str, args: dict) -> str:
-        """生成标题，格式: write(文件路径)"""
-        return f"write({get_arg(args, 'file_path')})"
+    title_arg_key = "file_path"
 
     def render_args(self, args: dict, *, approval_mode: bool = False) -> Widget:
-        """以语法高亮代码块展示将要写入的文件内容
+        """以语法高亮代码块展示将要写入的文件内容。
 
-        超过 50 行时在折叠摘要中显示行数提示（审批模式下跳过折叠）。
+        超过 50 行时显示行数提示（审批模式下展示完整内容）。
         """
         content = args.get("content", "")
         path = args.get("file_path", "")
@@ -39,7 +38,6 @@ class WriteRenderer:
 
         line_count = content.count("\n") + (1 if not content.endswith("\n") else 0)
 
-        # 超过阈值时显示行数提示（审批模式下展示完整内容）
         if not approval_mode and line_count > _LINE_THRESHOLD:
             summary = Text(
                 f"📄 {line_count} 行内容",
@@ -47,7 +45,6 @@ class WriteRenderer:
             )
             return Static(summary)
 
-        # 根据文件扩展名推断语言
         lexer = guess_lexer(path)
         syntax = Syntax(
             content,

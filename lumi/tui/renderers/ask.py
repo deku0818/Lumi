@@ -10,10 +10,11 @@ from __future__ import annotations
 from textual.widget import Widget
 from textual.widgets import Static
 
+from lumi.tui.renderers.base import BaseRenderer
 from lumi.tui.renderers.utils import truncate_for_title
 
 
-class AskRenderer:
+class AskRenderer(BaseRenderer):
     """ask 工具渲染器"""
 
     def render_title(self, name: str, args: dict) -> str:
@@ -21,7 +22,6 @@ class AskRenderer:
         questions = args.get("questions", [])
         count = len(questions)
         if count <= 1:
-            # 单问题：显示问题文本摘要
             q_text = (
                 questions[0].get("question", "A question")
                 if questions
@@ -29,10 +29,6 @@ class AskRenderer:
             )
             return f"ask({truncate_for_title(q_text)})"
         return f"ask({count} questions)"
-
-    def render_args(self, args: dict, *, approval_mode: bool = False) -> Widget:
-        """ask 参数由 AskDialog 交互处理，无需额外渲染"""
-        return Static("", markup=False)
 
     def render_output(self, output: str) -> Widget:
         """展示用户回答摘要"""

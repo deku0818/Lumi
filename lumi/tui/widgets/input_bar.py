@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+import re
+
 from textual.app import ComposeResult
 from textual.containers import Horizontal, Vertical
 from textual.css.query import NoMatches
@@ -90,9 +92,6 @@ class ChatInput(TextArea):
         for idx, original in self._pasted_texts.items():
             tag = f"[Pasted text #{idx}"
             if tag in text:
-                # 找到完整标记并替换
-                import re
-
                 pattern = rf"\[Pasted text #{idx} \+\d+ lines\]"
                 text = re.sub(pattern, original, text)
         return text

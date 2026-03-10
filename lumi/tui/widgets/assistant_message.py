@@ -8,7 +8,10 @@ from lumi.tui.theme import get_color
 
 
 class AssistantMessage(Horizontal):
-    """AI 助手消息 - 带 ● 前缀，内容 Markdown 渲染并与首行对齐"""
+    """AI 助手消息 - 带 ● 前缀，内容 Markdown 渲染并与首行对齐
+
+    流式 token 追加时使用节流机制（50ms），避免每个 token 都触发全量 Markdown 重渲染。
+    """
 
     DEFAULT_CSS = """
     AssistantMessage {
@@ -42,6 +45,9 @@ class AssistantMessage(Horizontal):
     }
     """
 
+    # 节流间隔（秒）
+    _THROTTLE_INTERVAL: float = 0.05
+
     def __init__(self) -> None:
         super().__init__(classes="assistant-message")
         prefix = Text("● ", style=f"bold {get_color('accent')}")
@@ -49,6 +55,8 @@ class AssistantMessage(Horizontal):
         self._body = Markdown("", classes="body")
         self._raw = ""
         self._has_content = False
+        self._dirty = False
+        self._update_scheduled = False
 
     def compose(self):
         """组合圆点前缀和 Markdown 主体"""
@@ -56,12 +64,27 @@ class AssistantMessage(Horizontal):
         yield self._body
 
     def append_token(self, token: str) -> None:
-        """追加流式 token，重新渲染 Markdown"""
+        """追加流式 token，节流后批量重渲染 Markdown。
+
+        每次追加仅标记 dirty，通过 50ms 定时器合并多次 token 为一次渲染。
+        """
         self._raw += token
         self._has_content = True
-        self._body.update(self._raw)
+        self._dirty = True
+        if not self._update_scheduled:
+            self._update_scheduled = True
+            self.set_timer(self._THROTTLE_INTERVAL, self._flush_update)
+
+    def _flush_update(self) -> None:
+        """定时器回调：将累积的 token 一次性渲染到 Markdown。"""
+        self._update_scheduled = False
+        if self._dirty:
+            self._dirty = False
+            self._body.update(self._raw)
 
     def finalize(self) -> None:
-        """标记消息完成，去除末尾多余空行后做最终渲染"""
+        """标记消息完成，立即刷新最终内容。"""
         self._raw = self._raw.rstrip("\n")
+        self._dirty = False
+        self._update_scheduled = False
         self._body.update(self._raw)

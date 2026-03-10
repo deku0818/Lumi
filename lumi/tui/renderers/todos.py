@@ -2,8 +2,7 @@
 
 标题格式: todos（无关键参数）
 参数区域: 以待办事项列表形式展示，顶部显示状态摘要
-         pending 用 ○、in_progress 用 ◉、completed 用 ✓
-输出区域: 同参数展示
+输出区域: 简单文本展示
 """
 
 from __future__ import annotations
@@ -12,6 +11,7 @@ from rich.text import Text
 from textual.widget import Widget
 from textual.widgets import Static
 
+from lumi.tui.renderers.base import BaseRenderer
 from lumi.tui.theme import get_color
 
 # 各状态对应的图标
@@ -36,12 +36,8 @@ _STATUS_COLOR_ROLES: dict[str, str] = {
 }
 
 
-class TodosRenderer:
+class TodosRenderer(BaseRenderer):
     """todos 工具渲染器"""
-
-    def render_title(self, name: str, args: dict) -> str:
-        """生成标题，todos 无关键参数"""
-        return "todos"
 
     def render_args(self, args: dict, *, approval_mode: bool = False) -> Widget:
         """以待办事项列表形式展示任务，顶部显示状态摘要"""
@@ -50,15 +46,9 @@ class TodosRenderer:
             return Static("", markup=False)
         return Static(_build_todos_text(todos))
 
-    def render_output(self, output: str) -> Widget:
-        """输出区域：简单文本展示"""
-        if not output:
-            return Static("", markup=False)
-        return Static(output, markup=False)
-
 
 def _build_todos_text(todos: list[dict]) -> Text:
-    """构建待办事项列表的 Rich Text
+    """构建待办事项列表的 Rich Text。
 
     Args:
         todos: 任务列表，每项包含 content 和 status 字段

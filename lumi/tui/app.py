@@ -6,12 +6,10 @@ import asyncio
 import sys
 from datetime import datetime
 
-from rich.text import Text
 from textual.app import App, ComposeResult
 from textual.binding import Binding
 from textual.css.query import NoMatches
 from textual.events import Key
-from textual.widgets import Static
 
 from lumi import __version__
 from lumi.agents.cron.delivery import DeliveryManager, TUIDelivery
@@ -159,10 +157,7 @@ class LumiApp(App):
             await self._bridge.initialize()
         except Exception as e:
             chat_log = self.query_one(ChatLog)
-            err_text = Text()
-            err_text.append("✗ 初始化失败: ", style=f"bold {get_color('error')}")
-            err_text.append(str(e), style=get_color("error"))
-            await chat_log.mount(Static(err_text, markup=False))
+            await chat_log.append_error("初始化失败:", str(e))
             return
 
         # TitleBlock 挂载到 ChatLog 内部，随聊天内容一起滚动
@@ -253,7 +248,7 @@ class LumiApp(App):
         if self._run.is_running:
             return
 
-        self._try_dismiss_command_panel()
+        await self._try_dismiss_command_panel()
 
         text = event.text
         tool_mode = event.tool_mode
@@ -274,14 +269,7 @@ class LumiApp(App):
                     logger.error(
                         "[LumiApp] 命令 /%s 执行失败", command_name, exc_info=True
                     )
-                    err_text = Text()
-                    err_text.append(
-                        f"✗ /{command_name} 执行失败: ",
-                        style=f"bold {get_color('error')}",
-                    )
-                    err_text.append(str(e), style=get_color("error"))
-                    await chat_log.mount(Static(err_text, markup=False))
-                    await chat_log.auto_scroll_if_needed()
+                    await chat_log.append_error(f"/{command_name} 执行失败:", str(e))
                 return
 
         # 构建 content：有图片时使用多模态 content blocks
@@ -485,11 +473,7 @@ class LumiApp(App):
     async def _show_error(self, chat_log: ChatLog, error: str) -> None:
         if len(error) > 300:
             error = error[:300] + "..."
-        err_text = Text()
-        err_text.append("✗ Error: ", style=f"bold {get_color('error')}")
-        err_text.append(error, style=get_color("error"))
-        await chat_log.mount(Static(err_text, markup=False))
-        await chat_log.auto_scroll_if_needed()
+        await chat_log.append_error("Error:", error)
         self._finish_run()
 
     # ── 中断恢复 ──
@@ -567,26 +551,21 @@ class LumiApp(App):
         self, event: CommandResultPanel.Dismissed
     ) -> None:
         """命令结果面板关闭时，在 ChatLog 中追加状态行。"""
-        self._append_dismiss_status(event.command_name)
+        await self._append_dismiss_status(event.command_name)
 
-    def _try_dismiss_command_panel(self) -> bool:
+    async def _try_dismiss_command_panel(self) -> bool:
         """若命令结果面板可见则关闭，返回是否关闭了面板。"""
         panel = self.query_one(CommandResultPanel)
         if panel.is_visible:
             name = panel.hide()
-            self._append_dismiss_status(name)
+            await self._append_dismiss_status(name)
             return True
         return False
 
-    def _append_dismiss_status(self, command_name: str) -> None:
+    async def _append_dismiss_status(self, command_name: str) -> None:
         """在 ChatLog 末尾追加面板关闭状态行。"""
         chat_log = self.query_one(ChatLog)
-        hint = Text()
-        hint.append("└ ", style="dim")
-        hint.append("对话框已关闭", style="dim")
-        widget = Static(hint, markup=False)
-        widget.styles.padding = (0, 1)
-        chat_log.mount(widget)
+        await chat_log.append_hint("└ ", "对话框已关闭")
 
     def _finish_run(self) -> None:
         if self._thinking:
@@ -613,7 +592,7 @@ class LumiApp(App):
             await self._apply_theme_mode(result.theme_mode)
 
     async def action_cancel_generation(self) -> None:
-        if self._try_dismiss_command_panel():
+        if await self._try_dismiss_command_panel():
             return
 
         # 如果当前有审批组件，esc 触发审批中断而非取消生成
@@ -638,13 +617,11 @@ class LumiApp(App):
                 self._run.task.cancel()
             self._finalize_assistant_msg()
             chat_log = self.query_one(ChatLog)
-            hint = Text()
-            hint.append("● ", style=f"{get_color('error')}")
-            hint.append("Interrupted", style=f"dim {get_color('error')}")
-            widget = Static(hint, markup=False)
-            widget.styles.padding = (0, 1)
-            await chat_log.mount(widget)
-            await chat_log.auto_scroll_if_needed()
+            await chat_log.append_hint(
+                "● ",
+                "Interrupted",
+                style=f"dim {get_color('error')}",
+            )
             self._interrupted = True
             self._finish_run()
 

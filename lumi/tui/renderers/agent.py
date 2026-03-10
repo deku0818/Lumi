@@ -11,25 +11,24 @@ from rich.text import Text
 from textual.widget import Widget
 from textual.widgets import Static
 
-from lumi.tui.renderers.utils import get_arg
+from lumi.tui.renderers.base import BaseRenderer
 from lumi.tui.theme import get_color
 
 # prompt 文本截断阈值（字符数）
 _PROMPT_MAX_LEN = 500
 
 
-class AgentRenderer:
+class AgentRenderer(BaseRenderer):
     """agent 工具渲染器"""
+
+    title_arg_key = "name"
 
     def render_title(self, name: str, args: dict) -> str:
         """生成标题，格式: agent(代理名称)"""
-        return f"agent({get_arg(args, 'name')})"
+        return f"agent({args.get('name', 'unknown')})"
 
     def render_args(self, args: dict, *, approval_mode: bool = False) -> Widget:
-        """展示任务描述（prompt），长文本截断
-
-        超过 500 字符时截断并添加省略号提示。
-        """
+        """展示任务描述（prompt），超过 500 字符时截断。"""
         prompt = args.get("prompt", "")
         if not prompt:
             return Static("", markup=False)

@@ -35,3 +35,41 @@ class ChatLog(VerticalScroll):
         """如果自动滚动开启，则滚到底部"""
         if self._auto_scroll:
             self.scroll_end(animate=False)
+
+    async def append_error(self, message: str, detail: str = "") -> None:
+        """在聊天日志中追加错误提示行。
+
+        Args:
+            message: 错误前缀文本（如 "初始化失败"）
+            detail: 错误详情（可选）
+        """
+        from rich.text import Text
+        from textual.widgets import Static
+
+        from lumi.tui.theme import get_color
+
+        err = Text()
+        err.append(f"✗ {message}", style=f"bold {get_color('error')}")
+        if detail:
+            err.append(f" {detail}", style=get_color("error"))
+        await self.mount(Static(err, markup=False))
+        await self.auto_scroll_if_needed()
+
+    async def append_hint(self, prefix: str, text: str, *, style: str = "dim") -> None:
+        """在聊天日志中追加提示行（如中断、面板关闭等）。
+
+        Args:
+            prefix: 前缀字符（如 "● "、"└ "）
+            text: 提示文本
+            style: Rich 样式字符串
+        """
+        from rich.text import Text
+        from textual.widgets import Static
+
+        hint = Text()
+        hint.append(prefix, style=style)
+        hint.append(text, style=style)
+        widget = Static(hint, markup=False)
+        widget.styles.padding = (0, 1)
+        await self.mount(widget)
+        await self.auto_scroll_if_needed()

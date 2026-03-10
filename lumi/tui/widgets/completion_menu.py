@@ -28,7 +28,7 @@ class CompletionMenu(Static):
         width: 100%;
         max-height: 12;
         padding: 0 1;
-        background: $surface;
+        background: transparent;
         color: $text;
         overflow-x: hidden;
     }

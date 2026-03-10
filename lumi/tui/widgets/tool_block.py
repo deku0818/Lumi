@@ -177,7 +177,7 @@ class ToolBlock(Vertical, SpinnerMixin):
         self._status = ToolStatus.DONE
         self._stop_spinner()
         collapsible = self.query_one(Collapsible)
-        collapsible.title = self._build_title_markup(collapsed=True)
+        collapsible.title = self._build_title_markup()
         collapsible.collapsed = True
 
         if output:
@@ -200,7 +200,7 @@ class ToolBlock(Vertical, SpinnerMixin):
         self._status = ToolStatus.ERROR
         self._stop_spinner()
         collapsible = self.query_one(Collapsible)
-        collapsible.title = self._build_title_markup(collapsed=True)
+        collapsible.title = self._build_title_markup()
         if error:
             output_widget = self.query_one(f"#tool-output-{id(self)}", Static)
             output_widget.update(Text(error, style=get_color("text_muted")))
@@ -209,7 +209,7 @@ class ToolBlock(Vertical, SpinnerMixin):
     def approval_mode(self) -> bool:
         return self._approval_mode
 
-    def _get_symbol(self, collapsed: bool | None = None) -> str:
+    def _get_symbol(self) -> str:
         """根据状态返回带颜色的圆圈符号"""
         match self._status:
             case ToolStatus.RUNNING:
@@ -219,14 +219,14 @@ class ToolBlock(Vertical, SpinnerMixin):
             case ToolStatus.ERROR:
                 return f"[{get_color('error')}]●[/]"
 
-    def _build_title_markup(self, collapsed: bool | None = None) -> str:
+    def _build_title_markup(self) -> str:
         """构建标题 markup，圆圈颜色反映状态，标题文字保持白色"""
         hint = (
             f" [{get_color('text_muted')}](click to expand)[/]"
             if self._status != ToolStatus.RUNNING
             else ""
         )
-        return f"{self._get_symbol(collapsed)} {escape(self._title_text)}{hint}"
+        return f"{self._get_symbol()} {escape(self._title_text)}{hint}"
 
     def on_collapsible_toggled(self, event: Collapsible.Toggled) -> None:
         """折叠/展开时更新标题"""
