@@ -3,10 +3,12 @@
 直接调用 LumiAgent graph（不走 HTTP），镜像 lumi/api/app.py 的初始化模式。
 """
 
+from __future__ import annotations
+
 import asyncio
 from dataclasses import dataclass
 from enum import StrEnum
-from typing import AsyncGenerator
+from typing import TYPE_CHECKING, AsyncGenerator
 
 from langchain_core.messages import HumanMessage
 from langchain_core.runnables.config import RunnableConfig
@@ -20,6 +22,9 @@ from lumi.utils.logger import logger
 from lumi.utils.model_manager import get_default_model_name
 from lumi.utils.read_config import get_config
 from lumi.utils.thread_id import generate_thread_id
+
+if TYPE_CHECKING:
+    from langgraph.graph.state import CompiledStateGraph
 
 
 class EventKind(StrEnum):
@@ -72,6 +77,27 @@ class AgentBridge:
         logger.info(
             f"[AgentBridge] 初始化完成, model={self.model_name}, thread={thread_id}"
         )
+
+    @property
+    def current_thread_id(self) -> str:
+        """当前会话的 thread_id"""
+        if self._config is None:
+            return ""
+        return self._config.get("configurable", {}).get("thread_id", "")
+
+    @property
+    def graph(self) -> "CompiledStateGraph | None":
+        """底层 LangGraph 编译图实例，用于 get_state 等操作"""
+        return self._agent.graph if self._agent else None
+
+    def switch_thread(self, thread_id: str) -> None:
+        """切换到指定的会话线程
+
+        Args:
+            thread_id: 目标会话的 thread_id
+        """
+        self._config = RunnableConfig(configurable={"thread_id": thread_id})
+        logger.info("[AgentBridge] 切换到会话: %s", thread_id)
 
     async def stream_response(
         self, content: str | list, tool_mode: str = "auto"

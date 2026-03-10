@@ -6,7 +6,6 @@ import re
 
 from textual.app import ComposeResult
 from textual.containers import Horizontal, Vertical
-from textual.css.query import NoMatches
 from textual.events import Key, Paste
 from textual.message import Message
 from textual.widgets import Static, TextArea
@@ -115,13 +114,10 @@ class ChatInput(TextArea):
         """
         if event.key == "enter":
             # 补全菜单可见 → 阻止换行，放行冒泡给 InputBar 处理补全
-            try:
-                menu = self.screen.query_one(CompletionMenu)
-                if menu.is_visible:
-                    event.prevent_default()
-                    return
-            except NoMatches:
-                pass
+            menu = self.screen.query_one(CompletionMenu)
+            if menu.is_visible:
+                event.prevent_default()
+                return
             # 普通提交 → 阻止换行并停止冒泡
             event.prevent_default()
             event.stop()

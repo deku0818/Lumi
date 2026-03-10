@@ -16,7 +16,7 @@ if TYPE_CHECKING:
 
 def make_skill_handler(
     skill: SkillConfig,
-    send_to_agent: Callable[[str, str], Awaitable[None]],
+    send_to_agent: Callable[[str, str, str], Awaitable[None]],
 ) -> Callable[..., Awaitable[None]]:
     """创建技能命令处理器闭包。
 
@@ -24,7 +24,7 @@ def make_skill_handler(
 
     Args:
         skill: 技能配置
-        send_to_agent: 接收 (skill_name, content) 的异步回调
+        send_to_agent: 接收 (skill_name, content, extra_text) 的异步回调
 
     Returns:
         接收 extra_text 参数的异步处理器
@@ -34,7 +34,7 @@ def make_skill_handler(
         content = skill.prompt
         if extra_text:
             content = f"{content}\n\n{extra_text}"
-        await send_to_agent(skill.name, content)
+        await send_to_agent(skill.name, content, extra_text)
 
     return handler
 

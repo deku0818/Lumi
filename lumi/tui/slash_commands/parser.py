@@ -31,13 +31,7 @@ def extract_command_prefix(text: str) -> str:
     Returns:
         去掉 "/" 后到第一个空格（或字符串末尾）之间的子串
     """
-    # 去掉 "/" 前缀
-    without_slash = text[1:]
-    # 取第一个空格之前的部分
-    space_idx = without_slash.find(" ")
-    if space_idx == -1:
-        return without_slash
-    return without_slash[:space_idx]
+    return text[1:].split(" ", 1)[0]
 
 
 def parse_command_input(text: str) -> tuple[str, str]:

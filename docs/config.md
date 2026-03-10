@@ -43,7 +43,7 @@ agents:
 | 值 | 说明 | 适用场景 |
 |---|---|---|
 | `memory` | 内存存储（默认），进程退出后丢失 | 开发调试、临时使用 |
-| `sqlite` | SQLite 文件持久化，存储在 `~/.lumi/checkpoints/` | 单机部署、需要会话恢复 |
+| `sqlite` | SQLite 文件持久化，存储在 `~/.lumi/checkpoints/` | 单机部署、需要会话恢复（[`/resume`](slash_commands.md#会话恢复resume)） |
 | `postgres` | PostgreSQL 持久化，需配置 `postgres_uri` | 多实例部署、生产环境 |
 
 使用 `sqlite` 时，存储目录可通过全局配置 `~/.lumi/lumi.json` 的 `checkpoint_dir` 字段自定义。

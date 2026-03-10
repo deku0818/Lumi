@@ -110,16 +110,16 @@ def test_skill_handler_prompt_concatenation(
         name=skill_name, description=skill_description, prompt=skill_prompt
     )
 
-    captured: list[tuple[str, str]] = []
+    captured: list[tuple[str, str, str]] = []
 
-    async def mock_send_to_agent(name: str, content: str) -> None:
-        captured.append((name, content))
+    async def mock_send_to_agent(name: str, content: str, extra: str) -> None:
+        captured.append((name, content, extra))
 
     handler = make_skill_handler(skill, mock_send_to_agent)
     asyncio.run(handler(extra_text))
 
     assert len(captured) == 1
-    sent_name, sent_content = captured[0]
+    sent_name, sent_content, sent_extra = captured[0]
 
     # 技能名称正确传递
     assert sent_name == skill_name
@@ -130,6 +130,9 @@ def test_skill_handler_prompt_concatenation(
     # 额外文本非空时也应包含
     if extra_text:
         assert extra_text in sent_content
+        assert sent_extra == extra_text
+    else:
+        assert sent_extra == ""
 
 
 # Feature: slash-commands, Property 10: 命令路由正确性

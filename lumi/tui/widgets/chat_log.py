@@ -1,6 +1,10 @@
 """可滚动对话区域"""
 
+from rich.text import Text
 from textual.containers import VerticalScroll
+from textual.widgets import Static
+
+from lumi.tui.theme import get_color
 
 
 class ChatLog(VerticalScroll):
@@ -43,11 +47,6 @@ class ChatLog(VerticalScroll):
             message: 错误前缀文本（如 "初始化失败"）
             detail: 错误详情（可选）
         """
-        from rich.text import Text
-        from textual.widgets import Static
-
-        from lumi.tui.theme import get_color
-
         err = Text()
         err.append(f"✗ {message}", style=f"bold {get_color('error')}")
         if detail:
@@ -63,9 +62,6 @@ class ChatLog(VerticalScroll):
             text: 提示文本
             style: Rich 样式字符串
         """
-        from rich.text import Text
-        from textual.widgets import Static
-
         hint = Text()
         hint.append(prefix, style=style)
         hint.append(text, style=style)

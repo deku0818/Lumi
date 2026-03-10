@@ -23,10 +23,6 @@ class AgentRenderer(BaseRenderer):
 
     title_arg_key = "name"
 
-    def render_title(self, name: str, args: dict) -> str:
-        """生成标题，格式: agent(代理名称)"""
-        return f"agent({args.get('name', 'unknown')})"
-
     def render_args(self, args: dict, *, approval_mode: bool = False) -> Widget:
         """展示任务描述（prompt），超过 500 字符时截断。"""
         prompt = args.get("prompt", "")

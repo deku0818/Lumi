@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import asyncio
+import re
 import sys
 from datetime import datetime
 
@@ -70,6 +71,7 @@ class LumiApp(App):
         self._delivery: DeliveryManager | None = None
         self._interrupted: bool = False
         self._command_registry = CommandRegistry()
+        self._pending_system_commands: list[str] = []
 
     def compose(self) -> ComposeResult:
         yield ChatLog()
@@ -210,6 +212,19 @@ class LumiApp(App):
             )
         )
 
+        # 注册 /resume 内置命令
+        async def _resume_handler(extra_text: str = "") -> None:
+            await self._open_resume_screen()
+
+        self._command_registry.register(
+            SlashCommand(
+                name="resume",
+                description="恢复历史会话",
+                command_type=CommandType.BUILTIN,
+                handler=_resume_handler,
+            )
+        )
+
         # 加载技能命令
         self._sync_skill_commands()
 
@@ -227,20 +242,258 @@ class LumiApp(App):
         except Exception:
             logger.warning("[LumiApp] 技能命令同步失败", exc_info=True)
 
-    async def _send_skill_to_agent(self, skill_name: str, content: str) -> None:
-        """技能命令的 send_to_agent 回调：附加 system-reminder 后发送给 Agent。"""
-        reminder = (
-            "<system-reminder>\n"
-            f"用户主动执行了技能 <command-name>/{skill_name}</command-name>\n"
-            "</system-reminder>"
+    async def _send_skill_to_agent(
+        self, skill_name: str, content: str, extra_text: str = ""
+    ) -> None:
+        """技能命令的 send_to_agent 回调：构建结构化消息发送给 Agent。
+
+        消息格式：
+            Block 0: <command-name>/xxx</command-name><command-type>skill</command-type>
+            Block 1: <skill-content>{prompt}</skill-content>
+            Block 2 (可选): <user-input>{extra_text}</user-input>
+
+        Args:
+            skill_name: 技能名称
+            content: skill.prompt（可能拼接了 extra_text）
+            extra_text: 用户在斜杠命令后追加的原始文本
+        """
+        meta = (
+            f"<command-name>/{skill_name}</command-name>"
+            f"<command-type>skill</command-type>"
         )
-        multi_content: list[dict[str, str]] = [
-            {"type": "text", "text": reminder},
-            {"type": "text", "text": content},
+        skill_block = f"<skill-content>{content}</skill-content>"
+
+        blocks: list[dict[str, str]] = [
+            {"type": "text", "text": meta},
+            {"type": "text", "text": skill_block},
         ]
+        if extra_text:
+            blocks.append(
+                {"type": "text", "text": f"<user-input>{extra_text}</user-input>"}
+            )
+
         self._run.phase = RunPhase.IDLE
         self.query_one(InputBar).set_disabled(True)
-        self._run.task = asyncio.create_task(self._run_stream(multi_content))
+        self._run.task = asyncio.create_task(self._run_stream(blocks))
+
+    # ── 会话恢复 ──
+
+    async def _open_resume_screen(self) -> None:
+        """打开会话恢复选择界面。"""
+        from lumi.tui.session_store import list_sessions
+
+        # 检查 checkpoint 模式是否支持持久化
+        checkpoint_mode = get_config().config.agents.checkpoint
+        if checkpoint_mode == "memory":
+            chat_log = self.query_one(ChatLog)
+            await chat_log.append_hint(
+                "● ",
+                "当前 checkpoint 模式为 memory，会话不会持久化。"
+                "请在 config.yaml 中设置 agents.checkpoint: sqlite 以启用会话恢复。",
+            )
+            return
+
+        graph = self._bridge.graph
+        if graph is None:
+            chat_log = self.query_one(ChatLog)
+            await chat_log.append_hint("● ", "Agent 未初始化，无法恢复会话")
+            return
+
+        sessions = await list_sessions(
+            graph,
+            current_thread_id=self._bridge.current_thread_id,
+        )
+        if not sessions:
+            chat_log = self.query_one(ChatLog)
+            await chat_log.append_hint("● ", "没有可恢复的历史会话")
+            return
+
+        from lumi.tui.screens.resume_screen import ResumeScreen
+
+        self.push_screen(ResumeScreen(sessions), callback=self._on_resume_done)
+
+    async def _on_resume_done(self, thread_id: str | None) -> None:
+        """会话恢复选择完成后的回调。
+
+        切换 thread_id，从 StateSnapshot 中读取历史消息并重新渲染到 ChatLog。
+
+        Args:
+            thread_id: 用户选择的 thread_id，取消时为 None
+        """
+        if thread_id is None:
+            return
+
+        self._bridge.switch_thread(thread_id)
+
+        # 清空当前聊天界面
+        chat_log = self.query_one(ChatLog)
+        await chat_log.remove_children()
+
+        title = TitleBlock(
+            model_name=self._bridge.model_name,
+            id="title-block",
+        )
+        title.border_title = f"Lumi v{__version__}"
+        await chat_log.mount(title)
+
+        # 从 StateSnapshot 中恢复历史消息
+        await self._restore_messages(thread_id, chat_log)
+
+        await chat_log.append_hint("● ", f"已恢复会话 {thread_id[:16]}...")
+        await chat_log.scroll_to_end()
+
+        # 重置运行状态
+        self._run.reset()
+        self._interrupted = False
+
+    # 工具被拒绝/中断时的输出关键词
+    _TOOL_REJECT_KEYWORDS: frozenset[str] = frozenset(
+        {
+            "用户拒绝了工具执行",
+            "用户中断了工具调用请求",
+            "User declined to answer questions",
+        }
+    )
+
+    # 从 system-reminder 中提取 command-name 的正则
+    _COMMAND_NAME_RE: re.Pattern[str] = re.compile(
+        r"<command-name>(/[\w-]+)</command-name>"
+    )
+
+    # 从消息中提取 user-input 的正则
+    _USER_INPUT_RE: re.Pattern[str] = re.compile(
+        r"<user-input>(.*?)</user-input>", re.DOTALL
+    )
+
+    async def _restore_messages(self, thread_id: str, chat_log: ChatLog) -> None:
+        """从 checkpoint 恢复历史消息并渲染到 ChatLog。
+
+        处理 human、ai（含 tool_calls）和 tool 类型消息。
+        先收集所有 tool 消息的输出，再按顺序渲染，确保 ToolBlock 能匹配到输出。
+
+        Args:
+            thread_id: 会话线程 ID
+            chat_log: 聊天日志组件
+        """
+        graph = self._bridge.graph
+        if graph is None:
+            return
+
+        try:
+            config = {"configurable": {"thread_id": thread_id}}
+            snapshot = await graph.aget_state(config)
+            if not snapshot or not snapshot.values:
+                return
+
+            messages = snapshot.values.get("messages", [])
+
+            # 预先收集所有 tool 消息的输出，key 为 tool_call_id
+            tool_outputs: dict[str, str] = {}
+            for msg in messages:
+                msg_type = getattr(msg, "type", None)
+                if msg_type == "tool":
+                    tc_id = getattr(msg, "tool_call_id", None)
+                    content = getattr(msg, "content", "")
+                    if tc_id:
+                        tool_outputs[tc_id] = self._extract_text_content(content)
+
+            for msg in messages:
+                msg_type = getattr(msg, "type", None) or (
+                    msg.get("type") if isinstance(msg, dict) else None
+                )
+                content = getattr(msg, "content", None) or (
+                    msg.get("content", "") if isinstance(msg, dict) else ""
+                )
+
+                if msg_type == "human":
+                    display = self._extract_human_display_text(content)
+                    if display:
+                        await chat_log.mount(UserMessage(display))
+
+                elif msg_type == "ai":
+                    # 渲染文本内容
+                    text = self._extract_text_content(content)
+                    if text:
+                        assistant_msg = AssistantMessage()
+                        await chat_log.mount(assistant_msg)
+                        assistant_msg.append_token(text)
+                        assistant_msg.finalize()
+
+                    # 渲染 tool_calls
+                    tool_calls = getattr(msg, "tool_calls", None) or []
+                    for tc in tool_calls:
+                        name = tc.get("name", "unknown")
+                        args = tc.get("args", {})
+                        tc_id = tc.get("id", "")
+                        block = ToolBlock(name, args)
+                        await chat_log.mount(block)
+                        output = tool_outputs.get(tc_id, "")
+                        if output in self._TOOL_REJECT_KEYWORDS:
+                            block.set_error(output)
+                        else:
+                            block.set_done(output)
+
+                # tool 类型消息已通过 tool_outputs 映射处理，跳过
+
+        except Exception as e:
+            logger.warning("恢复历史消息失败: %s", e, exc_info=True)
+            await chat_log.append_error("恢复历史消息失败:", str(e))
+
+    def _extract_human_display_text(self, content: str | list) -> str:
+        """从 human 消息中提取用于显示的文本。
+
+        技能命令消息从 <command-name> 和 <user-input> 标签还原用户输入，
+        如 "/media-digest 介绍下这个"。
+        非技能消息则过滤掉所有 system-reminder 块，返回剩余纯文本。
+
+        Args:
+            content: 字符串或多模态 content blocks 列表
+
+        Returns:
+            用于显示的文本
+        """
+        raw = self._extract_text_content(content)
+
+        # 从 command-name + user-input 还原用户输入
+        cmd_match = self._COMMAND_NAME_RE.search(raw)
+        if cmd_match:
+            cmd = cmd_match.group(1)
+            ui_match = self._USER_INPUT_RE.search(raw)
+            if ui_match:
+                user_input = ui_match.group(1).strip()
+                return f"{cmd} {user_input}" if user_input else cmd
+            return cmd
+
+        # 非技能消息：过滤 system-reminder 块，只保留用户实际输入
+        cleaned = re.sub(
+            r"<system-reminder>.*?</system-reminder>\s*",
+            "",
+            raw,
+            flags=re.DOTALL,
+        ).strip()
+        return cleaned or raw
+
+    @staticmethod
+    def _extract_text_content(content: str | list) -> str:
+        """从消息 content 中提取纯文本。
+
+        Args:
+            content: 字符串或多模态 content blocks 列表
+
+        Returns:
+            提取的文本内容
+        """
+        if isinstance(content, str):
+            return content
+        if isinstance(content, list):
+            parts = []
+            for block in content:
+                if isinstance(block, dict) and block.get("type") == "text":
+                    parts.append(block.get("text", ""))
+                elif isinstance(block, str):
+                    parts.append(block)
+            return "\n".join(parts)
+        return ""
 
     # ── 输入处理 ──
 
@@ -265,6 +518,9 @@ class LumiApp(App):
             if command:
                 try:
                     await command.handler(extra_text)
+                    # system 命令记录到待注入列表，下次 human message 时告知模型
+                    if command.command_type == CommandType.BUILTIN:
+                        self._pending_system_commands.append(f"/{command_name}")
                 except Exception as e:
                     logger.error(
                         "[LumiApp] 命令 /%s 执行失败", command_name, exc_info=True
@@ -302,6 +558,21 @@ class LumiApp(App):
                     {"type": "text", "text": content},
                 ]
             self._interrupted = False
+
+        # 注入待告知的系统命令（用户在上次对话间执行的 /skills、/resume 等）
+        if self._pending_system_commands:
+            hints = "".join(
+                f"<command-name>{cmd}</command-name><command-type>system</command-type>\n"
+                for cmd in self._pending_system_commands
+            )
+            if isinstance(content, list):
+                content.insert(0, {"type": "text", "text": hints})
+            else:
+                content = [
+                    {"type": "text", "text": hints},
+                    {"type": "text", "text": content},
+                ]
+            self._pending_system_commands.clear()
 
         self._run.phase = RunPhase.IDLE  # 即将启动
         self.query_one(InputBar).set_disabled(True)
@@ -592,6 +863,12 @@ class LumiApp(App):
             await self._apply_theme_mode(result.theme_mode)
 
     async def action_cancel_generation(self) -> None:
+        # 如果当前有 pushed screen（如 ResumeScreen、SettingsScreen），
+        # dismiss 当前 screen 而非执行取消生成逻辑
+        if len(self.screen_stack) > 1:
+            self.screen.dismiss(None)
+            return
+
         if await self._try_dismiss_command_panel():
             return
 

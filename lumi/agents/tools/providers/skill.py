@@ -74,22 +74,22 @@ def _get_skill_execution_config() -> dict:
     return defaults
 
 
-_SKILL_DESCRIPTION = """在主对话中执行技能
+_SKILL_DESCRIPTION = """Execute skills in the main conversation
 
-当用户要求你执行任务时，请检查是否有任何可用的技能匹配。技能提供专门的功能和领域知识。
-当用户提到“斜杠命令”或“/<某个内容>”（例如，“/commit”、“/review-pr”）时，他们指的是一个技能。请使用此工具调用该技能。
+When a user asks you to perform a task, check if any available skills match. Skills provide specialized functionality and domain knowledge.  
+When a user mentions a "slash command" or "/<something>" (e.g., "/commit", "/review-pr"), they are referring to a skill. Please use this tool to invoke that skill.
 
-如何调用：
-- 使用此工具并指定技能名称及可选参数
-- 示例：`skill: "pdf"` — 调用 pdf 技能
+How to invoke:  
+- Use this tool and specify the skill name and optional parameters  
+- Example: `skill: "pdf"` — invokes the pdf skill  
 
-重要事项：
-- 可用技能列在对话中的 system-reminder 中
-- 当用户的请求与某项技能匹配时，这是强制性要求：必须先调用相关技能工具，再生成任何其他关于该任务的回复
-- 切勿提及技能而不实际调用此工具
-- 不要调用已在运行的技能
-- 不要将此工具用于内置 CLI 命令（如 /help、/clear 等）
-- 如果在当前对话轮次中看到 <command-name> 标签，表示该技能已被加载 — 请直接遵循说明，不要再次调用此工具"""
+Important notes:  
+- Available skills are listed in the <system-reminder> within the conversation  
+- When a user's request matches a skill, it is mandatory: you must invoke the relevant skill tool before generating any other response about that task  
+- Never mention a skill without actually invoking this tool  
+- Do not invoke a skill that is already running  
+- Do not use this tool for built-in CLI system commands of type <command-type>:system (e.g., /skills, /help, /clear, etc.)  
+- If you see a <command-name> tag in the current conversation turn, it means the skill has already been loaded — follow the <skill-content> directly and do not invoke this tool again"""
 
 
 class SkillInput(BaseModel):

@@ -21,8 +21,6 @@ from lumi.tui.theme import get_color
 class GrepRenderer(BaseRenderer):
     """grep 工具渲染器"""
 
-    title_arg_key = "pattern"
-
     def __init__(self) -> None:
         self._pattern: str = ""
 

@@ -14,6 +14,29 @@ from lumi.tui.theme import get_color
 _NAME_COL_WIDTH = 28
 
 
+def _truncate_by_width(text: str, max_width: int) -> str:
+    """按显示宽度截断文本（CJK 字符占 2 列），超出时加省略号。
+
+    Args:
+        text: 原始文本
+        max_width: 最大显示宽度
+
+    Returns:
+        截断后的文本
+    """
+    if cell_len(text) <= max_width:
+        return text
+    result = ""
+    width = 0
+    for ch in text:
+        cw = cell_len(ch)
+        if width + cw >= max_width:
+            break
+        result += ch
+        width += cw
+    return result + "…"
+
+
 class CompletionMenu(Static):
     """补全菜单 — 展示匹配的斜杠命令列表。
 
@@ -110,17 +133,10 @@ class CompletionMenu(Static):
             name_str = f"/{cmd.name}"
             name_padded = name_str.ljust(_NAME_COL_WIDTH)
             # 描述：去除换行，按显示宽度截断（CJK 字符占 2 列）
-            desc = " ".join(cmd.description.replace("\n", " ").split())
-            if cell_len(desc) > desc_width:
-                truncated = ""
-                w_acc = 0
-                for ch in desc:
-                    cw = cell_len(ch)
-                    if w_acc + cw >= desc_width:
-                        break
-                    truncated += ch
-                    w_acc += cw
-                desc = truncated + "…"
+            desc = _truncate_by_width(
+                " ".join(cmd.description.replace("\n", " ").split()),
+                desc_width,
+            )
 
             if i == self._selected_index:
                 output.append(name_padded, style=f"bold {accent}")
