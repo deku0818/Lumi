@@ -11,6 +11,7 @@ from pydantic import BaseModel
 
 from lumi.agents.base.response_service import astream_raw_events
 from lumi.agents.core.graph import create_agent
+from lumi.agents.tools.providers.mcp import get_mcp_session_manager
 from lumi.agents.tools.session import get_session_manager
 from lumi.utils.logger import logger
 from lumi.utils.thread_id import generate_thread_id
@@ -75,6 +76,7 @@ async def lifespan(app: FastAPI):
     if app.state.delivery:
         await app.state.delivery.close_all()
     await agent.aclose()
+    await get_mcp_session_manager().close()
     await get_session_manager().close_all()
 
 

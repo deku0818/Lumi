@@ -76,20 +76,22 @@ def _get_skill_execution_config() -> dict:
 
 _SKILL_DESCRIPTION = """Execute skills in the main conversation
 
-When a user asks you to perform a task, check if any available skills match. Skills provide specialized functionality and domain knowledge.  
+When a user asks you to perform a task, check if any available skills match it. Skills provide specialized functionality and domain knowledge.
+
 When a user mentions a "slash command" or "/<something>" (e.g., "/commit", "/review-pr"), they are referring to a skill. Please use this tool to invoke that skill.
 
-How to invoke:  
-- Use this tool and specify the skill name and optional parameters  
-- Example: `skill: "pdf"` — invokes the pdf skill  
+How to invoke:
 
-Important notes:  
-- Available skills are listed in the <system-reminder> within the conversation  
-- When a user's request matches a skill, it is mandatory: you must invoke the relevant skill tool before generating any other response about that task  
-- Never mention a skill without actually invoking this tool  
-- Do not invoke a skill that is already running  
-- Do not use this tool for built-in CLI system commands of type <command-type>:system (e.g., /skills, /help, /clear, etc.)  
-- If you see a <command-name> tag in the current conversation turn, it means the skill has already been loaded — follow the <skill-content> directly and do not invoke this tool again"""
+- Use this tool and specify the skill name
+- Example: `skill: "pdf"` — invokes the pdf skill
+
+Important notes:
+
+- Available skills are listed in the `<system-reminder>` within the conversation
+- When a user's request matches a skill, it is mandatory: you must call the relevant skill tool before generating any other response for that task
+- Do not call a skill that is already running
+- Do not use this tool for built-in CLI system commands of type `<command-type>:system` (e.g., /skills, /mcp, /clear, etc.)
+- If you see a `<command-name>` tag in the current conversation turn, it means the skill is already loaded — follow the `<skill-content>` instructions directly and do not call this tool again"""
 
 
 class SkillInput(BaseModel):

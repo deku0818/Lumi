@@ -207,6 +207,7 @@ class LumiApp(App):
                 "查看定时任务通知",
                 lambda _="": self._open_cron_notify_screen(),
             ),
+            ("mcp", "查看 MCP 服务器状态", lambda _="": self._open_mcp_screen()),
             (
                 "clear",
                 "清空对话历史，开始新会话",
@@ -461,6 +462,27 @@ class LumiApp(App):
         """
         if result == "changed":
             self._refresh_bell()
+
+    # ── MCP 状态 ──
+
+    async def _open_mcp_screen(self) -> None:
+        """打开 MCP 服务器状态界面。"""
+        from lumi.agents.tools.providers.mcp import get_mcp_session_manager
+
+        manager = get_mcp_session_manager()
+        servers = manager.get_server_info()
+
+        if not servers:
+            chat_log = self.query_one(ChatLog)
+            await chat_log.append_hint("● ", "未配置任何 MCP 服务器")
+            return
+
+        from lumi.tui.screens.mcp_screen import MCPScreen
+
+        self.push_screen(MCPScreen(servers), callback=self._on_mcp_done)
+
+    async def _on_mcp_done(self, result: str | None) -> None:
+        """MCP 界面关闭回调。"""
 
     def _refresh_bell(self) -> None:
         """从 NotificationStore 刷新铃铛未读数。"""

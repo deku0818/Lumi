@@ -17,6 +17,7 @@ from langgraph.types import Command
 from lumi.agents.core.graph import LumiAgent, create_agent
 from lumi.agents.core.node import APPROVAL_BYPASS_TOOLS
 from lumi.agents.core.scheme import LumiAgentContext
+from lumi.agents.tools.providers.mcp import get_mcp_session_manager
 from lumi.agents.tools.session import get_session_manager
 from lumi.utils.logger import logger
 from lumi.utils.model_manager import get_default_model_name
@@ -128,6 +129,7 @@ class AgentBridge:
         """清理资源"""
         if self._agent is not None:
             await self._agent.aclose()
+        await get_mcp_session_manager().close()
         await get_session_manager().close_all()
 
     async def _stream(
