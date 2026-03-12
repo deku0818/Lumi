@@ -175,7 +175,7 @@ def get_color(role: str) -> str:
 APP_CSS = """
 /* ── Screen ── */
 Screen {
-    background: $background;
+    background: ansi_default;
     color: $foreground;
     layers: base overlay;
 }

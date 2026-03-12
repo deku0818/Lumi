@@ -8,7 +8,6 @@ from __future__ import annotations
 
 import logging
 
-from rich.markup import escape
 from rich.text import Text
 from textual.app import ComposeResult
 from textual.containers import Vertical
@@ -17,7 +16,7 @@ from textual.widgets import Static
 
 from lumi.tui.renderers import get as get_renderer
 from lumi.tui.renderers.default import DefaultRenderer
-from lumi.tui.renderers.utils import truncate_for_title
+from lumi.tui.renderers.utils import truncate_for_title, escape_markup
 from lumi.tui.theme import get_color
 
 logger = logging.getLogger(__name__)
@@ -120,7 +119,7 @@ class ToolApproval(Vertical):
             self._options = _DEFAULT_OPTIONS
 
     def compose(self) -> ComposeResult:
-        msg = escape(self._data.get("message", "是否执行以下工具？"))
+        msg = escape_markup(self._data.get("message", "是否执行以下工具？"))
         accent = get_color("accent")
         border = get_color("border_separator")
         yield Static(f"[bold {accent}]⚠[/] {msg}", classes="approval-label")
@@ -129,7 +128,7 @@ class ToolApproval(Vertical):
         warnings = self._data.get("warnings", [])
         for warning in warnings:
             yield Static(
-                f"  [bold red]{escape(warning)}[/]",
+                f"  [bold red]{escape_markup(warning)}[/]",
                 classes="approval-warning",
             )
 
@@ -137,7 +136,7 @@ class ToolApproval(Vertical):
         boundary_violations = self._data.get("boundary_violations", [])
         for violation in boundary_violations:
             yield Static(
-                f"  [bold yellow]⚠ 路径超出工作区边界: {escape(violation)}[/]",
+                f"  [bold yellow]⚠ 路径超出工作区边界: {escape_markup(violation)}[/]",
                 classes="approval-warning",
             )
 
@@ -161,7 +160,7 @@ class ToolApproval(Vertical):
 
             # 工具标题行
             yield Static(
-                f"  [bold {accent}]● {escape(title_text)}[/]",
+                f"  [bold {accent}]● {escape_markup(title_text)}[/]",
                 classes="tool-call-title",
             )
             # 竖线 + 工具内容

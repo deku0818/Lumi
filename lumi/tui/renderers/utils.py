@@ -15,6 +15,17 @@ from lumi.tui.theme import get_color
 SPINNER_FRAMES: tuple[str, ...] = ("⠋", "⠙", "⠹", "⠸", "⠼", "⠴", "⠦", "⠧", "⠇", "⠏")
 
 
+def escape_markup(text: str) -> str:
+    """转义所有方括号，防止 Textual 8 markup parser 误解析用户内容。
+
+    ``rich.markup.escape`` 和 ``textual.markup.escape`` 仅转义看起来像
+    markup 标签的 ``[...]``，对大写字母开头等不匹配其正则的方括号不做处理，
+    导致内部的引号等字符触发 MarkupError。
+    此函数无条件转义所有 ``[`` 和 ``]``，确保纯文本安全嵌入 markup。
+    """
+    return text.replace("[", r"\[").replace("]", r"\]")
+
+
 class SpinnerMixin:
     """Spinner 动画 mixin，消除 ThinkingIndicator 和 ToolBlock 的重复代码。
 

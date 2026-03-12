@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from rich.markup import escape
+from lumi.tui.renderers.utils import escape_markup as escape
 from textual.app import ComposeResult
 from textual.containers import Horizontal, Vertical
 from textual.css.query import NoMatches

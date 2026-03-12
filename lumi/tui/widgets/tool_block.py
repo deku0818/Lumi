@@ -5,7 +5,6 @@ from __future__ import annotations
 import logging
 from enum import StrEnum
 
-from rich.markup import escape
 from rich.text import Text
 from textual.app import ComposeResult
 from textual.containers import Vertical
@@ -14,7 +13,7 @@ from textual.widget import Widget
 from textual.widgets import Collapsible, Static
 
 from lumi.tui.renderers import get as get_renderer
-from lumi.tui.renderers.utils import SPINNER_FRAMES, SpinnerMixin
+from lumi.tui.renderers.utils import SPINNER_FRAMES, SpinnerMixin, escape_markup
 from lumi.tui.renderers.default import DefaultRenderer
 from lumi.tui.theme import get_color
 
@@ -176,9 +175,15 @@ class ToolBlock(Vertical, SpinnerMixin):
         self.remove_interactive()
         self._status = ToolStatus.DONE
         self._stop_spinner()
-        collapsible = self.query_one(Collapsible)
-        collapsible.title = self._build_title_markup()
-        collapsible.collapsed = True
+        try:
+            collapsible = self.query_one(Collapsible)
+            collapsible.title = self._build_title_markup()
+            collapsible.collapsed = True
+        except NoMatches:
+            logger.debug(
+                "set_done: Collapsible 未挂载（compose 可能失败）: %s", self._name
+            )
+            return
 
         if output:
             output_widget = self.query_one(f"#tool-output-{id(self)}", Static)
@@ -199,8 +204,14 @@ class ToolBlock(Vertical, SpinnerMixin):
         """标记工具执行错误"""
         self._status = ToolStatus.ERROR
         self._stop_spinner()
-        collapsible = self.query_one(Collapsible)
-        collapsible.title = self._build_title_markup()
+        try:
+            collapsible = self.query_one(Collapsible)
+            collapsible.title = self._build_title_markup()
+        except NoMatches:
+            logger.debug(
+                "set_error: Collapsible 未挂载（compose 可能失败）: %s", self._name
+            )
+            return
         if error:
             output_widget = self.query_one(f"#tool-output-{id(self)}", Static)
             output_widget.update(Text(error, style=get_color("text_muted")))
@@ -226,7 +237,7 @@ class ToolBlock(Vertical, SpinnerMixin):
             if self._status != ToolStatus.RUNNING
             else ""
         )
-        return f"{self._get_symbol()} {escape(self._title_text)}{hint}"
+        return f"{self._get_symbol()} {escape_markup(self._title_text)}{hint}"
 
     def on_collapsible_toggled(self, event: Collapsible.Toggled) -> None:
         """折叠/展开时更新标题"""

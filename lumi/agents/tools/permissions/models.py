@@ -42,12 +42,10 @@ class PermissionConfig:
     """权限配置（不可变）
 
     Attributes:
-        privileged: 是否启用特权模式
         workspaces: 工作区目录路径列表
         permissions: 权限规则元组
     """
 
-    privileged: bool = False
     workspaces: tuple[str, ...] = ()
     permissions: tuple[PermissionRule, ...] = ()
 

@@ -5,7 +5,6 @@
 
 from __future__ import annotations
 
-import os
 from pathlib import Path
 
 from lumi.agents.tools.permissions.boundary import WorkspaceBoundary
@@ -57,23 +56,10 @@ class PermissionEngine:
         # 构建工作区边界检查器并同步到 filesystem 层
         self._rebuild_boundary()
 
-        # 特权模式检查
-        if self.is_privileged:
-            logger.warning("权限引擎已启用特权模式，所有审批检查将被跳过")
-
     @property
     def config(self) -> PermissionConfig:
         """当前权限配置。"""
         return self._config
-
-    @property
-    def is_privileged(self) -> bool:
-        """是否处于特权模式。
-
-        通过环境变量 LUMI_PRIVILEGED=true 或配置文件 privileged: true 启用。
-        """
-        env_val = os.environ.get("LUMI_PRIVILEGED", "").lower()
-        return self._config.privileged or env_val == "true"
 
     def _rebuild_boundary(self) -> None:
         """重建工作区边界检查器并同步到 filesystem 授权目录。"""
@@ -181,7 +167,6 @@ class PermissionEngine:
 
         # 更新内存中的配置
         self._config = PermissionConfig(
-            privileged=self._config.privileged,
             workspaces=self._config.workspaces,
             permissions=(*self._config.permissions, new_rule),
         )
@@ -192,7 +177,6 @@ class PermissionEngine:
             if local_cfg is None:
                 local_cfg = PermissionConfig()
             updated = PermissionConfig(
-                privileged=local_cfg.privileged,
                 workspaces=local_cfg.workspaces,
                 permissions=(*local_cfg.permissions, new_rule),
             )
@@ -215,7 +199,6 @@ class PermissionEngine:
 
         # 更新内存
         self._config = PermissionConfig(
-            privileged=self._config.privileged,
             workspaces=(*self._config.workspaces, directory),
             permissions=self._config.permissions,
         )
@@ -227,7 +210,6 @@ class PermissionEngine:
             if local_cfg is None:
                 local_cfg = PermissionConfig()
             updated = PermissionConfig(
-                privileged=local_cfg.privileged,
                 workspaces=(*local_cfg.workspaces, directory),
                 permissions=local_cfg.permissions,
             )

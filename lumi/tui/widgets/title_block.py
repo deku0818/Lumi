@@ -3,7 +3,7 @@
 import os
 from pathlib import Path
 
-from rich.markup import escape
+from lumi.tui.renderers.utils import escape_markup as escape
 from textual.app import ComposeResult
 from textual.containers import Horizontal, Vertical
 from textual.widgets import Static

@@ -13,7 +13,7 @@ from datetime import UTC, datetime
 from enum import StrEnum
 from pathlib import Path
 
-from rich.markup import escape
+from lumi.tui.renderers.utils import escape_markup as escape
 from textual.app import ComposeResult
 from textual.containers import Horizontal, VerticalScroll
 from textual.message import Message

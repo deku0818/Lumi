@@ -240,6 +240,7 @@ class InputBar(Vertical):
         self._history_index: int = -1
         self._draft: str = ""  # 暂存当前未提交的输入
         self._command_registry: CommandRegistry | None = None
+        self._submit_disabled: bool = False
 
     def set_command_registry(self, registry: CommandRegistry) -> None:
         """允许外部（如 LumiApp）注入命令注册表。"""
@@ -332,6 +333,8 @@ class InputBar(Vertical):
 
     def on_chat_input_submitted(self, event: ChatInput.Submitted) -> None:
         """ChatInput Enter 提交"""
+        if self._submit_disabled:
+            return
         text = event.value.strip()
         if text:
             self._history.append(text)
@@ -433,10 +436,10 @@ class InputBar(Vertical):
         self._update_image_indicator()
 
     def set_disabled(self, disabled: bool) -> None:
-        """禁用/启用输入"""
-        inp = self.query_one("#user-input", ChatInput)
-        inp.disabled = disabled
+        """禁用/启用输入提交（输入框始终保持可编辑，避免 Textual 渲染黑框）"""
+        self._submit_disabled = disabled
         if not disabled:
+            inp = self.query_one("#user-input", ChatInput)
             inp.focus()
 
     def update_bell(self, unread: int) -> None:

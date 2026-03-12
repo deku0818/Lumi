@@ -65,12 +65,10 @@ def _config_from_dict(data: dict) -> PermissionConfig:
     Returns:
         PermissionConfig 实例
     """
-    privileged = bool(data.get("privileged", False))
     workspaces = tuple(data.get("workspaces", []))
     raw_permissions = data.get("permissions", {})
     permissions = _parse_rules(raw_permissions) if raw_permissions else ()
     return PermissionConfig(
-        privileged=privileged,
         workspaces=workspaces,
         permissions=permissions,
     )
@@ -100,7 +98,6 @@ def _config_to_dict(config: PermissionConfig) -> dict:
         permissions["deny"] = deny_list
 
     return {
-        "privileged": config.privileged,
         "workspaces": list(config.workspaces),
         "permissions": permissions,
     }
@@ -120,13 +117,10 @@ def _merge_configs(configs: list[PermissionConfig]) -> PermissionConfig:
     """
     # 使用 dict 保持插入顺序，后插入的覆盖先插入的
     rule_map: dict[str, PermissionRule] = {}
-    privileged = False
     all_workspaces: list[str] = []
     seen_workspaces: set[str] = set()
 
     for cfg in configs:
-        if cfg.privileged:
-            privileged = True
         for ws in cfg.workspaces:
             if ws not in seen_workspaces:
                 all_workspaces.append(ws)
@@ -140,7 +134,6 @@ def _merge_configs(configs: list[PermissionConfig]) -> PermissionConfig:
             rule_map[rule.tool] = rule
 
     return PermissionConfig(
-        privileged=privileged,
         workspaces=tuple(all_workspaces),
         permissions=tuple(rule_map.values()),
     )

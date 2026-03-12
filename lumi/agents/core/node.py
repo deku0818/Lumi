@@ -123,7 +123,7 @@ def is_use_tool(state: LumiAgentState, runtime: Runtime[LumiAgentContext]):
     路由优先级：
     - 有 tool_calls 且包含结构化输出工具 → "ExtractStructuredOutput"
     - BYPASS_TOOLS (如 ask) → "ToolExecutor" 直接执行
-    - privileged 模式 → "ToolExecutor" 直接执行
+    - privileged 模式（tool_mode） → "ToolExecutor" 直接执行
     - auto 模式 + 全部 allow → "ToolExecutor" 直接执行
     - 其他 → "HumanApproval" 等待审批
     - 无 tool_calls → "END" 结束流程
@@ -151,10 +151,6 @@ def is_use_tool(state: LumiAgentState, runtime: Runtime[LumiAgentContext]):
     engine = runtime.context.permission_engine
     if engine is not None:
         engine.reload()
-
-        # 特权模式（通过配置或环境变量）
-        if engine.is_privileged:
-            return "ToolExecutor"
 
         if tool_mode == "auto":
             # auto 模式：全部 allow 才直接执行，否则需要审批
