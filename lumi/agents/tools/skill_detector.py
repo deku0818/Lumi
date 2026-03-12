@@ -73,6 +73,19 @@ class SkillChangeDetector:
             hasher.update(repr(entry).encode())
         return hasher.hexdigest()
 
+    def peek(self) -> list[SkillConfig]:
+        """获取当前技能列表，不更新变更检测状态。
+
+        供 TUI 等只需读取技能列表的场景使用，
+        不会影响 check() 的 changed 判断。
+
+        Returns:
+            技能配置列表
+        """
+        if not self._skills_dir.exists():
+            return []
+        return load_skills(directory=str(self._skills_dir))
+
     def check(self) -> tuple[list[SkillConfig], bool]:
         """检查技能是否变更。
 

@@ -163,8 +163,10 @@ class LumiApp(App):
 
         # TitleBlock 挂载到 ChatLog 内部，随聊天内容一起滚动
         chat_log = self.query_one(ChatLog)
+        recent_sessions = await self._load_recent_sessions()
         title = TitleBlock(
             model_name=self._bridge.model_name,
+            recent_sessions=recent_sessions,
             id="title-block",
         )
         title.border_title = f"Lumi v{__version__}"
@@ -193,6 +195,30 @@ class LumiApp(App):
             logger.warning("[LumiApp] 定时任务子系统启动失败", exc_info=True)
             self.notify("定时任务子系统启动失败，cron 功能不可用", severity="warning")
 
+    async def _load_recent_sessions(self, limit: int = 3) -> list:
+        """加载最近的历史会话摘要。
+
+        Args:
+            limit: 最大返回数量
+
+        Returns:
+            SessionSummary 列表，加载失败返回空列表
+        """
+        graph = self._bridge.graph
+        if graph is None or graph.checkpointer is None:
+            return []
+        try:
+            from lumi.tui.session_store import list_sessions
+
+            return await list_sessions(
+                graph,
+                current_thread_id=self._bridge.current_thread_id,
+                limit=limit,
+            )
+        except Exception:
+            logger.debug("[LumiApp] 加载最近会话失败", exc_info=True)
+            return []
+
     # ── 斜杠命令 ──
 
     def _init_slash_commands(self) -> None:
@@ -207,6 +233,7 @@ class LumiApp(App):
                 "查看定时任务通知",
                 lambda _="": self._open_cron_notify_screen(),
             ),
+            ("agents", "查看所有可用 Agent", lambda _="": self._open_agents_screen()),
             ("mcp", "查看 MCP 服务器状态", lambda _="": self._open_mcp_screen()),
             (
                 "clear",
@@ -233,7 +260,7 @@ class LumiApp(App):
     def _sync_skill_commands(self) -> None:
         """同步技能命令到注册表。"""
         try:
-            skills, _ = SkillChangeDetector.get_instance().check()
+            skills = SkillChangeDetector.get_instance().peek()
             self._command_registry.sync_skills(
                 skills,
                 lambda skill: make_skill_handler(skill, self._send_skill_to_agent),
@@ -389,6 +416,30 @@ class LumiApp(App):
 
         Args:
             skill_name: 选中的技能名称，取消时为 None。
+        """
+
+    # ── Agent 列表 ──
+
+    async def _open_agents_screen(self) -> None:
+        """打开 Agent 列表界面。"""
+        from lumi.agents.tools.config import load_agents
+
+        agents = load_agents()
+
+        if not agents:
+            chat_log = self.query_one(ChatLog)
+            await chat_log.append_hint("● ", "暂无可用 Agent")
+            return
+
+        from lumi.tui.screens.agents_screen import AgentsScreen
+
+        self.push_screen(AgentsScreen(agents), callback=self._on_agents_done)
+
+    async def _on_agents_done(self, agent_name: str | None) -> None:
+        """Agent 列表界面关闭回调。
+
+        Args:
+            agent_name: 选中的 Agent 名称，取消时为 None。
         """
 
     # ── 定时任务管理 ──

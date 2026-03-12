@@ -30,7 +30,7 @@ def format_skill_reminder(skills: list[SkillConfig]) -> str:
             lines.append(f"- {skill.name}: {skill.description}")
 
     skill_list = "\n".join(lines)
-    return f"<system-reminder>\n以下技能可用于 skill 工具\n{skill_list}\n</system-reminder>\n"
+    return f"<system-reminder>\n以下技能可用于 skill 工具:\n{skill_list}\n</system-reminder>\n"
 
 
 def inject_skills_into_message(

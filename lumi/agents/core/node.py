@@ -39,6 +39,7 @@ from lumi.agents.base.response_service import extract_ainvoke_content
 from lumi.agents.core.summary_injector import inject_summary_into_message
 from lumi.agents.tools.skill_detector import SkillChangeDetector
 from lumi.agents.tools.skill_injector import inject_skills_into_message
+from lumi.agents.tools.system_info_injector import inject_system_info_into_message
 from lumi.utils.llm_chain import tiktoken_counter, tool_call_chain
 from lumi.utils.logger import logger
 from lumi.utils.model_manager import detect_model_type
@@ -516,6 +517,9 @@ async def preprocess_messages(state: LumiAgentState):
             if skills:
                 new_msg = inject_skills_into_message(new_msg, skills)
 
+            # 注入系统环境信息
+            new_msg = inject_system_info_into_message(new_msg)
+
             result_messages.append(RemoveMessage(id=last_human.id))
             result_messages.append(new_msg)
 
@@ -528,7 +532,7 @@ async def preprocess_messages(state: LumiAgentState):
     # 2. 卸载大工具结果到本地文件系统
     result_messages.extend(await offload_tool_result(messages))
 
-    # 3. 技能动态注入
+    # 3. 技能动态注入 + 系统信息注入
     last_human = None
     for msg in reversed(messages):
         if isinstance(msg, HumanMessage):
@@ -536,10 +540,23 @@ async def preprocess_messages(state: LumiAgentState):
             break
 
     if last_human is not None:
+        new_msg = last_human
+        need_replace = False
+
+        # 技能变更时注入技能列表
         detector = SkillChangeDetector.get_instance()
         skills, changed = detector.check()
         if changed and skills:
-            new_msg = inject_skills_into_message(last_human, skills)
+            new_msg = inject_skills_into_message(new_msg, skills)
+            need_replace = True
+
+        # 首条消息注入系统环境信息
+        human_count = sum(1 for m in messages if isinstance(m, HumanMessage))
+        if human_count <= 1:
+            new_msg = inject_system_info_into_message(new_msg)
+            need_replace = True
+
+        if need_replace:
             result_messages.append(RemoveMessage(id=last_human.id))
             result_messages.append(new_msg)
 

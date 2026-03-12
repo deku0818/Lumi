@@ -1,7 +1,10 @@
 """顶部标题区块 - 像素太阳 Logo + 左右分栏布局"""
 
+from __future__ import annotations
+
 import os
 from pathlib import Path
+from typing import TYPE_CHECKING
 
 from lumi.tui.renderers.utils import escape_markup as escape
 from textual.app import ComposeResult
@@ -10,6 +13,9 @@ from textual.widgets import Static
 
 from lumi import __version__
 from lumi.tui.theme import get_color
+
+if TYPE_CHECKING:
+    from lumi.tui.session_store import SessionSummary
 
 
 def _build_logo() -> str:
@@ -78,10 +84,12 @@ class TitleBlock(Static):
         self,
         model_name: str = "",
         project_path: str = "",
+        recent_sessions: list[SessionSummary] | None = None,
         **kwargs,
     ) -> None:
         super().__init__(**kwargs)
         self._model_name = model_name
+        self._recent_sessions = recent_sessions or []
         if project_path:
             self._project_path = project_path
         else:
@@ -113,6 +121,29 @@ class TitleBlock(Static):
                     id="right-top",
                 )
                 yield Static(
-                    f"[{accent}]Recent activity[/]\n[dim]No recent activity[/]",
+                    self._build_recent_activity(accent),
                     id="right-bottom",
                 )
+
+    _MAX_RECENT: int = 3
+
+    def _build_recent_activity(self, accent: str) -> str:
+        """构建最近会话活动的 Rich markup 文本。
+
+        Args:
+            accent: 主题强调色
+
+        Returns:
+            Rich markup 格式的最近活动文本
+        """
+        header = f"[{accent}]Recent activity[/]"
+        if not self._recent_sessions:
+            return f"{header}\n[dim]No recent activity[/]"
+
+        lines = [header]
+        for s in self._recent_sessions[: self._MAX_RECENT]:
+            msg = escape(s.first_message)
+            if len(msg) > 30:
+                msg = msg[:27] + "..."
+            lines.append(f"[dim]{s.display_time}[/]  {msg}")
+        return "\n".join(lines)
