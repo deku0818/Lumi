@@ -318,12 +318,12 @@ class MCPSessionManager:
 
     @staticmethod
     def _kill_subprocesses() -> None:
-        """强制终止当前进程的所有子进程。
+        """强制终止当前进程的所有子进程（跨平台）。
 
-        先发 SIGTERM 给子进程一个优雅关闭的机会，
-        短暂等待后再 SIGKILL 确保彻底清理。
+        Unix: 先发 SIGTERM 优雅关闭，短暂等待后 SIGKILL 兜底。
+        Windows: 使用 taskkill /F /T 强制终止进程树。
         """
-        import signal
+        import sys
         import time
 
         try:
@@ -331,22 +331,37 @@ class MCPSessionManager:
             if not child_pids:
                 return
 
-            # 先 SIGTERM
-            for pid in child_pids:
-                try:
-                    os.kill(pid, signal.SIGTERM)
-                except (ProcessLookupError, PermissionError):
-                    pass
+            if sys.platform == "win32":
+                import subprocess
 
-            # 短暂等待让子进程自行退出
-            time.sleep(0.3)
+                for pid in child_pids:
+                    try:
+                        subprocess.run(
+                            ["taskkill", "/F", "/PID", str(pid)],
+                            capture_output=True,
+                            timeout=5,
+                        )
+                    except Exception:
+                        pass
+            else:
+                import signal
 
-            # 再 SIGKILL 兜底
-            for pid in child_pids:
-                try:
-                    os.kill(pid, signal.SIGKILL)
-                except (ProcessLookupError, PermissionError):
-                    pass
+                # 先 SIGTERM
+                for pid in child_pids:
+                    try:
+                        os.kill(pid, signal.SIGTERM)
+                    except (ProcessLookupError, PermissionError):
+                        pass
+
+                # 短暂等待让子进程自行退出
+                time.sleep(0.3)
+
+                # 再 SIGKILL 兜底
+                for pid in child_pids:
+                    try:
+                        os.kill(pid, signal.SIGKILL)
+                    except (ProcessLookupError, PermissionError):
+                        pass
         except Exception:
             pass
 
@@ -399,7 +414,7 @@ class MCPSessionManager:
 
 
 def _get_child_pids(parent_pid: int) -> list[int]:
-    """获取指定进程的所有子进程 PID（macOS/Linux）。
+    """获取指定进程的所有子进程 PID（跨平台）。
 
     Args:
         parent_pid: 父进程 PID
@@ -408,25 +423,54 @@ def _get_child_pids(parent_pid: int) -> list[int]:
         子进程 PID 列表
     """
     import subprocess
+    import sys
 
     try:
-        result = subprocess.run(
-            ["pgrep", "-P", str(parent_pid)],
-            capture_output=True,
-            text=True,
-            timeout=2,
-        )
-        if result.returncode == 0 and result.stdout.strip():
-            pids = []
-            for line in result.stdout.strip().split("\n"):
-                try:
-                    pid = int(line.strip())
-                    # 递归获取子进程的子进程
-                    pids.append(pid)
-                    pids.extend(_get_child_pids(pid))
-                except ValueError:
-                    continue
-            return pids
+        if sys.platform == "win32":
+            # Windows: 使用 wmic 查询子进程
+            result = subprocess.run(
+                [
+                    "wmic",
+                    "process",
+                    "where",
+                    f"ParentProcessId={parent_pid}",
+                    "get",
+                    "ProcessId",
+                ],
+                capture_output=True,
+                text=True,
+                timeout=5,
+            )
+            if result.returncode == 0 and result.stdout.strip():
+                pids = []
+                for line in result.stdout.strip().split("\n"):
+                    line = line.strip()
+                    if line and line != "ProcessId":
+                        try:
+                            pid = int(line)
+                            pids.append(pid)
+                            pids.extend(_get_child_pids(pid))
+                        except ValueError:
+                            continue
+                return pids
+        else:
+            # macOS / Linux: 使用 pgrep
+            result = subprocess.run(
+                ["pgrep", "-P", str(parent_pid)],
+                capture_output=True,
+                text=True,
+                timeout=2,
+            )
+            if result.returncode == 0 and result.stdout.strip():
+                pids = []
+                for line in result.stdout.strip().split("\n"):
+                    try:
+                        pid = int(line.strip())
+                        pids.append(pid)
+                        pids.extend(_get_child_pids(pid))
+                    except ValueError:
+                        continue
+                return pids
     except Exception:
         pass
     return []

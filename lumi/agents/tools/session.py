@@ -6,6 +6,7 @@
 
 import asyncio
 import os
+import sys
 import uuid
 from dataclasses import dataclass
 
@@ -27,24 +28,38 @@ class LocalShellSession:
 
     通过 stdin/stdout 与后台 shell 进程通信。
     支持 cd、export、alias 等环境状态跨调用保持。
+    Windows 下使用 cmd.exe，Unix 下使用 bash。
     """
 
     def __init__(self, working_dir: str | None = None):
         self._process: asyncio.subprocess.Process | None = None
         self._working_dir = working_dir or os.getcwd()
         self._lock = asyncio.Lock()
+        self._is_windows = sys.platform == "win32"
 
     async def _ensure_process(self) -> asyncio.subprocess.Process:
-        """确保 shell 进程存在且运行中"""
+        """确保 shell 进程存在且运行中。
+
+        Windows 下启动 cmd.exe，Unix 下启动 bash。
+        """
         if self._process is None or self._process.returncode is not None:
-            self._process = await asyncio.create_subprocess_shell(
-                "/bin/bash --norc --noprofile",
-                stdin=asyncio.subprocess.PIPE,
-                stdout=asyncio.subprocess.PIPE,
-                stderr=asyncio.subprocess.STDOUT,
-                cwd=self._working_dir,
-                env={**os.environ, "TERM": "dumb", "PS1": "", "PS2": ""},
-            )
+            if self._is_windows:
+                self._process = await asyncio.create_subprocess_exec(
+                    "cmd.exe",
+                    stdin=asyncio.subprocess.PIPE,
+                    stdout=asyncio.subprocess.PIPE,
+                    stderr=asyncio.subprocess.STDOUT,
+                    cwd=self._working_dir,
+                )
+            else:
+                self._process = await asyncio.create_subprocess_shell(
+                    "/bin/bash --norc --noprofile",
+                    stdin=asyncio.subprocess.PIPE,
+                    stdout=asyncio.subprocess.PIPE,
+                    stderr=asyncio.subprocess.STDOUT,
+                    cwd=self._working_dir,
+                    env={**os.environ, "TERM": "dumb", "PS1": "", "PS2": ""},
+                )
         return self._process
 
     async def execute(self, command: str, timeout: float = 120.0) -> CommandResult:
@@ -75,9 +90,15 @@ class LocalShellSession:
             sentinel = f"__LUMI_SENTINEL_{uuid.uuid4().hex[:12]}__"
 
             # 构造命令：执行用户命令，然后打印哨兵标记和退出码
-            wrapped_command = (
-                f'{command}\n__lumi_ec=$?\necho ""\necho "{sentinel} $__lumi_ec"\n'
-            )
+            if self._is_windows:
+                # cmd.exe: 用 %ERRORLEVEL% 获取退出码
+                wrapped_command = (
+                    f"{command}\r\necho.\r\necho {sentinel} %ERRORLEVEL%\r\n"
+                )
+            else:
+                wrapped_command = (
+                    f'{command}\n__lumi_ec=$?\necho ""\necho "{sentinel} $__lumi_ec"\n'
+                )
 
             process.stdin.write(wrapped_command.encode())
             await process.stdin.drain()
@@ -96,14 +117,19 @@ class LocalShellSession:
                         # 进程已终止
                         break
 
-                    line = line_bytes.decode("utf-8", errors="replace").rstrip("\n")
+                    line = (
+                        line_bytes.decode("utf-8", errors="replace")
+                        .rstrip("\n")
+                        .rstrip("\r")
+                    )
 
-                    if line.startswith(sentinel):
+                    if sentinel in line:
                         # 解析退出码
-                        parts = line.split()
+                        parts = line.split(sentinel)
                         if len(parts) >= 2:
+                            code_str = parts[1].strip()
                             try:
-                                exit_code = int(parts[1])
+                                exit_code = int(code_str)
                             except ValueError:
                                 exit_code = -1
                         break

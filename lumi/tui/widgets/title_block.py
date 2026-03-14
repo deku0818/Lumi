@@ -55,7 +55,7 @@ class TitleBlock(Static):
 
     #left-panel {
         width: auto;
-        min-width: 28;
+        min-width: 40;
         height: auto;
         padding: 1 2;
         text-align: center;
@@ -109,7 +109,8 @@ class TitleBlock(Static):
             yield Static(
                 f"{_build_logo()}\n"
                 f"[bold {text_primary}]lumi[/] [dim]v{__version__}[/]\n"
-                f"[dim]{escape(self._model_name)} · {escape(self._project_path)}[/]",
+                f"[dim]{escape(self._model_name)}[/]\n"
+                f"[dim]{escape(self._project_path)}[/]",
                 id="left-panel",
             )
             # ── 右侧: 上下分区 ──

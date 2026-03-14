@@ -72,13 +72,13 @@ def _clean_display_text(raw: str) -> str:
     """清理消息中的 XML 标签，还原用户可读文本。
 
     技能命令消息从 <command-name> 和 <user-input> 标签还原用户输入，
-    非技能消息则过滤掉所有 XML 标签块。
+    非技能消息则过滤掉所有注入块（system-reminder、summary 等）。
 
     Args:
         raw: 原始消息文本
 
     Returns:
-        清理后的显示文本
+        清理后的显示文本，纯注入内容返回空字符串
     """
     # 从 command-name + user-input 还原用户输入
     cmd_match = _COMMAND_NAME_RE.search(raw)
@@ -90,20 +90,27 @@ def _clean_display_text(raw: str) -> str:
             return f"{cmd} {user_input}" if user_input else cmd
         return cmd
 
-    # 非技能消息：过滤 system-reminder 块和其他 XML 标签
+    # 非技能消息：过滤所有注入块
     cleaned = re.sub(
         r"<system-reminder>.*?</system-reminder>\s*",
         "",
         raw,
         flags=re.DOTALL,
-    ).strip()
-    return cleaned or raw
+    )
+    cleaned = re.sub(
+        r"<summary>.*?</summary>\s*",
+        "",
+        cleaned,
+        flags=re.DOTALL,
+    )
+    return cleaned.strip()
 
 
 def _extract_first_human_message(messages: list) -> str:
     """从消息列表中提取首条用户消息
 
     支持 LangChain Message 对象和字典两种格式。
+    自动跳过 system-reminder 等注入块，提取用户实际输入。
 
     Args:
         messages: StateSnapshot.values 中的 messages 列表
@@ -123,11 +130,13 @@ def _extract_first_human_message(messages: list) -> str:
 
         if isinstance(content, str):
             return _clean_display_text(content)[:100]
-        # 多模态消息：提取文本部分
+        # 多模态消息：遍历所有 text block，跳过 system-reminder
         if isinstance(content, list):
             for block in content:
                 if isinstance(block, dict) and block.get("type") == "text":
-                    return _clean_display_text(block.get("text", ""))[:100]
+                    cleaned = _clean_display_text(block.get("text", ""))
+                    if cleaned:
+                        return cleaned[:100]
     return ""
 
 

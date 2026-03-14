@@ -81,13 +81,19 @@ class LumiApp(App):
     async def _detect_system_theme(self) -> bool:
         """检测系统主题，返回 True 表示暗色。
 
-        macOS 通过 `defaults read -g AppleInterfaceStyle` 检测：
-        - 返回 "Dark" → 暗色 (True)
-        - 命令失败（亮色模式下该 key 不存在）→ 亮色 (False)
-        非 macOS 平台默认暗色。
+        macOS: 通过 `defaults read -g AppleInterfaceStyle` 检测。
+        Windows: 通过注册表 AppsUseLightTheme 键值检测。
+        Linux 及其他平台: 默认暗色。
         """
-        if sys.platform != "darwin":
-            return True
+        if sys.platform == "darwin":
+            return await self._detect_macos_theme()
+        if sys.platform == "win32":
+            return self._detect_windows_theme()
+        # Linux 及其他平台默认暗色
+        return True
+
+    async def _detect_macos_theme(self) -> bool:
+        """macOS 暗色主题检测。"""
         try:
             proc = await asyncio.create_subprocess_exec(
                 "defaults",
@@ -109,6 +115,24 @@ class LumiApp(App):
             logger.warning(
                 "[LumiApp] 系统主题检测意外失败，使用暗色主题", exc_info=True
             )
+            return True
+
+    @staticmethod
+    def _detect_windows_theme() -> bool:
+        """Windows 暗色主题检测，通过注册表读取 AppsUseLightTheme。"""
+        try:
+            import winreg
+
+            key = winreg.OpenKey(
+                winreg.HKEY_CURRENT_USER,
+                r"Software\Microsoft\Windows\CurrentVersion\Themes\Personalize",
+            )
+            value, _ = winreg.QueryValueEx(key, "AppsUseLightTheme")
+            winreg.CloseKey(key)
+            # 0 = 暗色, 1 = 亮色
+            return value == 0
+        except Exception:
+            logger.debug("[LumiApp] Windows 注册表主题检测失败，使用暗色主题")
             return True
 
     async def _apply_theme_mode(self, mode: str) -> None:
@@ -650,7 +674,7 @@ class LumiApp(App):
 
         技能命令消息从 <command-name> 和 <user-input> 标签还原用户输入，
         如 "/media-digest 介绍下这个"。
-        非技能消息则过滤掉所有 system-reminder 块，返回剩余纯文本。
+        非技能消息则过滤掉所有注入块（system-reminder、summary），返回剩余纯文本。
 
         Args:
             content: 字符串或多模态 content blocks 列表
@@ -670,14 +694,20 @@ class LumiApp(App):
                 return f"{cmd} {user_input}" if user_input else cmd
             return cmd
 
-        # 非技能消息：过滤 system-reminder 块，只保留用户实际输入
+        # 非技能消息：过滤所有注入块，只保留用户实际输入
         cleaned = re.sub(
             r"<system-reminder>.*?</system-reminder>\s*",
             "",
             raw,
             flags=re.DOTALL,
-        ).strip()
-        return cleaned or raw
+        )
+        cleaned = re.sub(
+            r"<summary>.*?</summary>\s*",
+            "",
+            cleaned,
+            flags=re.DOTALL,
+        )
+        return cleaned.strip()
 
     @staticmethod
     def _extract_text_content(content: str | list) -> str:

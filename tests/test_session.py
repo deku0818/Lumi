@@ -1,11 +1,18 @@
 """Shell 会话管理测试"""
 
+import sys
+import tempfile
+
 import pytest
 
 from lumi.agents.tools.session import (
     LocalShellSession,
     SessionManager,
 )
+
+# Windows 下 shell 会话使用 cmd.exe，bash 语法不适用
+_IS_WINDOWS = sys.platform == "win32"
+_SKIP_WINDOWS = pytest.mark.skipif(_IS_WINDOWS, reason="bash-only test")
 
 
 @pytest.fixture
@@ -22,12 +29,14 @@ async def test_execute_simple_command(shell_session):
     assert "hello" in result.stdout
 
 
+@_SKIP_WINDOWS
 async def test_execute_failing_command(shell_session):
     result = await shell_session.execute("false")
     assert not result.success
     assert result.exit_code == 1
 
 
+@_SKIP_WINDOWS
 async def test_execute_preserves_env_state(shell_session):
     await shell_session.execute("export FOO=bar")
     result = await shell_session.execute("echo $FOO")
@@ -35,6 +44,7 @@ async def test_execute_preserves_env_state(shell_session):
     assert "bar" in result.stdout
 
 
+@_SKIP_WINDOWS
 async def test_execute_cd_persistence(shell_session, tmp_path):
     subdir = tmp_path / "mydir"
     subdir.mkdir()
@@ -44,6 +54,7 @@ async def test_execute_cd_persistence(shell_session, tmp_path):
     assert str(subdir) in result.stdout
 
 
+@_SKIP_WINDOWS
 async def test_execute_timeout():
     s = LocalShellSession()
     try:
@@ -64,7 +75,7 @@ async def test_session_close():
 
 async def test_session_manager_get_and_reuse():
     mgr = SessionManager()
-    s1 = mgr.get_session("thread-a", working_dir="/tmp")
+    s1 = mgr.get_session("thread-a", working_dir=tempfile.gettempdir())
     s2 = mgr.get_session("thread-a")
     assert s1 is s2
     await mgr.close_all()

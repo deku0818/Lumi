@@ -22,18 +22,28 @@ def collect_system_info() -> dict[str, str]:
     Returns:
         包含 os、version、arch、shell、cwd 等键值对的字典
     """
-    shell = os.environ.get("SHELL", "")
-    if shell:
-        shell = os.path.basename(shell)
-    elif shutil.which("powershell") or shutil.which("pwsh"):
-        shell = "powershell"
-    elif shutil.which("cmd"):
-        shell = "cmd"
+    import sys
+
+    if sys.platform == "win32":
+        # Windows: 优先检测 PowerShell，再回退到 cmd
+        if shutil.which("pwsh"):
+            shell = "pwsh"
+        elif shutil.which("powershell"):
+            shell = "powershell"
+        else:
+            shell = "cmd"
+    else:
+        # Unix: 从 SHELL 环境变量获取
+        shell = os.environ.get("SHELL", "")
+        if shell:
+            shell = os.path.basename(shell)
+        else:
+            shell = "sh"
 
     return {
         "os": platform.platform(terse=True),
         "python": platform.python_version(),
-        "shell": shell or "unknown",
+        "shell": shell,
         "cwd": os.getcwd(),
     }
 

@@ -1,5 +1,7 @@
 """文件系统工具测试（helpers + backend + tool wrappers）"""
 
+import os
+
 import pytest
 
 from lumi.agents.tools.providers.filesystem import (
@@ -116,7 +118,11 @@ class TestBackendRead:
         assert "空" in result
 
     async def test_read_path_outside(self, backend, authorized_tmp_dir):
-        result = await backend.read("/etc/passwd")
+        # 使用当前系统上一定存在但在授权目录之外的路径
+        import tempfile
+
+        outside_path = os.path.join(tempfile.gettempdir(), "lumi_test_outside.txt")
+        result = await backend.read(outside_path)
         assert "错误" in result
 
 
