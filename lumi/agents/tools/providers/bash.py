@@ -30,32 +30,74 @@ class BashInput(BaseModel):
     """Bash 命令执行的输入参数"""
 
     command: str = Field(description="要执行的 shell 命令")
+    description: str = Field(description="命令用途描述，帮助理解命令意图")
+    timeout: float = Field(default=120.0, ge=1, le=600, description="超时秒数")
+    run_in_background: bool = Field(default=False, description="是否后台执行")
 
 
 @tool(args_schema=BashInput)
-async def bash(command: str) -> str:
-    """在本地环境中执行非交互式 shell 命令。
+async def bash(
+    command: str,
+    description: str,
+    timeout: float = 120.0,
+    run_in_background: bool = False,
+) -> str:
+    """**Executes a given bash command and returns its output.**
 
-    环境: 工作目录为当前项目目录，会话状态持久化（cd、export、alias 等）。
-    限制: 不支持交互式命令（python、vim、ssh 等无参数调用会超时）。
-    用法:
-    可执行所有的非交互式命令
-    - 如: 执行 Python 代码:
-    ```
-    python << 'EOF'
-    print("Hello, World!")
-    EOF
-    ```
-    - 当有需求时请执行`date`获取当前时间"""
+    The working directory persists between commands, but shell state does not. The shell environment is initialized from the user's profile (bash or zsh).
+
+    **IMPORTANT**: Avoid using this tool to run `find`, `grep`, `cat`, `head`, `tail`, `sed`, `awk`, or `echo` commands, unless explicitly instructed or after you have verified that a dedicated tool cannot accomplish your task. Instead, use the appropriate dedicated tool:
+
+    - File search: Use **Glob** (NOT find or ls)
+    - Content search: Use **Grep** (NOT grep or rg)
+    - Read files: Use **Read** (NOT cat/head/tail)
+    - Edit files: Use **Edit** (NOT sed/awk)
+    - Write files: Use **Write** (NOT echo >/cat <<EOF)
+    - Communication: Output text directly (NOT echo/printf)
+
+    ## Parameters
+
+    | 参数 | 类型 | 必填 | 说明 |
+    |------|------|------|------|
+    | `command` | string | 是 | 要执行的命令 |
+    | `description` | string | 是 | 命令的简明描述 |
+    | `timeout` | number | 否 | 超时时间（秒），最大 600（10分钟），默认 120（2分钟） |
+    | `run_in_background` | boolean | 否 | 设为 true 可在后台运行，完成后会收到通知 |
+
+    ## 关键规则
+
+    - 文件路径包含空格时用双引号括起来
+    - 尽量使用绝对路径，避免 `cd`
+    - 独立命令可以并行调用多个 Bash 工具
+    - 依赖前一个命令结果的用 `&&` 串联
+    - 后台任务用 `run_in_background`，不需要加 `&`
+    - 避免不必要的 `sleep`
+    - Git 操作有严格的安全协议（不强制推送、不跳过 hooks、不 amend 除非明确要求等）
+    """
     try:
         working_dir = str(get_authorized_directory())
-        session = get_session_manager().get_session(
-            thread_id="default",
-            working_dir=working_dir,
-        )
-        result = await session.execute(command)
+        sm = get_session_manager()
+        session = sm.get_session(thread_id="default", working_dir=working_dir)
+
+        if run_in_background:
+            current_cwd = await session.get_cwd()
+            task = await sm.bg_manager.start_task(
+                command=command,
+                timeout=timeout,
+                working_dir=current_cwd,
+            )
+            return (
+                f"后台任务已启动\n"
+                f"Task ID: {task.task_id}\n"
+                f"Output File: {task.output_file.resolve()}\n"
+            )
+
+        result = await session.execute(command, timeout=timeout)
         return _format_result(result)
 
+    except OSError as e:
+        logger.error(f"[bash] 系统错误: {e}", exc_info=True)
+        return f"系统错误（进程/文件操作失败）: {e}"
     except Exception as e:
-        logger.error(f"[bash] 执行失败: {e}")
-        return f"执行失败: {e}"
+        logger.error(f"[bash] 未预期的错误: {e}", exc_info=True)
+        return f"执行失败（内部错误）: {e}"

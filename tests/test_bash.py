@@ -31,5 +31,7 @@ class TestFormatResult:
 async def test_bash_tool_executes_command(authorized_tmp_dir):
     from lumi.agents.tools.providers.bash import bash
 
-    result = await bash.ainvoke({"command": "echo integration_test"})
+    result = await bash.ainvoke(
+        {"command": "echo integration_test", "description": "集成测试"}
+    )
     assert "integration_test" in result

@@ -45,6 +45,11 @@ from lumi.tui.slash_commands.parser import parse_command_input
 from lumi.tui.slash_commands.handlers import make_skill_handler
 from lumi.agents.tools.skill_detector import SkillChangeDetector
 
+from typing import Final
+
+# 后台任务通知轮询间隔（秒）
+_NOTIFICATION_POLL_INTERVAL: Final = 2.0
+
 
 class LumiApp(App):
     """Lumi TUI 主应用"""
@@ -72,6 +77,7 @@ class LumiApp(App):
         self._interrupted: bool = False
         self._command_registry = CommandRegistry()
         self._pending_system_commands: list[str] = []
+        self._notification_poll_timer = None
 
     def compose(self) -> ComposeResult:
         yield ChatLog()
@@ -218,6 +224,11 @@ class LumiApp(App):
         except Exception:
             logger.warning("[LumiApp] 定时任务子系统启动失败", exc_info=True)
             self.notify("定时任务子系统启动失败，cron 功能不可用", severity="warning")
+
+        # 启动后台任务通知轮询
+        self._notification_poll_timer = self.set_interval(
+            _NOTIFICATION_POLL_INTERVAL, self._poll_notifications
+        )
 
     async def _load_recent_sessions(self, limit: int = 3) -> list:
         """加载最近的历史会话摘要。
@@ -1076,6 +1087,32 @@ class LumiApp(App):
             self.query_one(InputBar).set_disabled(False)
         except Exception:
             logger.error("[LumiApp] 无法重新启用输入栏，UI 可能已损坏", exc_info=True)
+
+    async def _poll_notifications(self) -> None:
+        """轮询后台任务通知队列
+
+        仅在 Agent 空闲（IDLE）时检查队列，有通知则作为用户消息触发新一轮 Agent 处理。
+        """
+        if self._run.is_running:
+            return
+
+        notifications = self._bridge.drain_notifications()
+        if not notifications:
+            return
+
+        logger.info(f"[LumiApp] 收到 {len(notifications)} 条后台任务通知")
+        combined = "\n".join(notifications)
+        hint = f"{combined}\nRead the output file to retrieve the result."
+
+        # 先设为 THINKING 防止下一次 poll 重入
+        self._run.phase = RunPhase.THINKING
+        try:
+            self.query_one(InputBar).set_disabled(True)
+        except NoMatches:
+            logger.error("[LumiApp] 通知处理时找不到 InputBar，跳过")
+            self._run.phase = RunPhase.IDLE
+            return
+        self._run.task = asyncio.create_task(self._run_stream(hint, tool_mode="auto"))
 
     async def action_open_settings(self) -> None:
         """打开设置界面。"""

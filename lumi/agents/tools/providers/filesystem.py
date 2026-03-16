@@ -29,9 +29,9 @@ from lumi.utils.read_config import get_config
 def check_empty_content(content: str) -> str | None:
     """检查文件内容是否为空"""
     if not content:
-        return "警告: 文件存在但内容为空"
+        return "文件存在但内容为空"
     if not content.strip():
-        return "警告: 文件只包含空白字符"
+        return "文件只包含空白字符"
     return None
 
 
