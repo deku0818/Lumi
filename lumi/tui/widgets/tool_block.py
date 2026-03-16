@@ -29,6 +29,7 @@ class ToolStatus(StrEnum):
     RUNNING = "running"
     DONE = "done"
     ERROR = "error"
+    INTERRUPTED = "interrupted"
 
 
 class ToolBlock(Vertical, SpinnerMixin):
@@ -216,6 +217,22 @@ class ToolBlock(Vertical, SpinnerMixin):
             output_widget = self.query_one(f"#tool-output-{id(self)}", Static)
             output_widget.update(Text(error, style=get_color("text_muted")))
 
+    def set_interrupted(self) -> None:
+        """标记工具执行被用户中断"""
+        self.remove_interactive()
+        self._status = ToolStatus.INTERRUPTED
+        self._stop_spinner()
+        try:
+            collapsible = self.query_one(Collapsible)
+            collapsible.title = self._build_title_markup()
+            collapsible.collapsed = True
+        except NoMatches:
+            logger.debug("set_interrupted: Collapsible 未挂载: %s", self._name)
+
+    @property
+    def status(self) -> ToolStatus:
+        return self._status
+
     @property
     def approval_mode(self) -> bool:
         return self._approval_mode
@@ -227,8 +244,10 @@ class ToolBlock(Vertical, SpinnerMixin):
                 return self._running_status_text()
             case ToolStatus.DONE:
                 return f"[{get_color('success')}]●[/]"
-            case ToolStatus.ERROR:
+            case ToolStatus.ERROR | ToolStatus.INTERRUPTED:
                 return f"[{get_color('error')}]●[/]"
+            case _:
+                return "●"
 
     def _build_title_markup(self) -> str:
         """构建标题 markup，圆圈颜色反映状态，标题文字保持白色"""

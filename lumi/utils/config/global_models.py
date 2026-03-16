@@ -10,6 +10,20 @@ from typing import Literal
 from pydantic import BaseModel, Field
 
 
+class KeyBindings(BaseModel):
+    """TUI 快捷键配置
+
+    所有字段值为 Textual 格式的按键字符串（如 "ctrl+shift+c"）。
+    """
+
+    model_config = {"extra": "ignore"}
+
+    copy_selection: str = Field(
+        default="ctrl+shift+c",
+        description="复制选中文本到系统剪贴板",
+    )
+
+
 class GlobalConfig(BaseModel):
     """全局配置数据模型
 
@@ -29,6 +43,10 @@ class GlobalConfig(BaseModel):
     checkpoint_dir: str = Field(
         default="",
         description="检查点存储目录，为空时使用默认路径 ~/.lumi/checkpoints/",
+    )
+    keybindings: KeyBindings = Field(
+        default_factory=KeyBindings,
+        description="TUI 快捷键配置",
     )
 
     def get_checkpoint_dir(self) -> Path:

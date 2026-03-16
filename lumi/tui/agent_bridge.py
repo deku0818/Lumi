@@ -27,6 +27,9 @@ from lumi.utils.thread_id import generate_thread_id
 if TYPE_CHECKING:
     from langgraph.graph.state import CompiledStateGraph
 
+# LangChain 框架注入的内部字段，不传递给 TUI 渲染
+_TOOL_INTERNAL_KEYS = frozenset({"tool_call_id", "runtime"})
+
 
 class EventKind(StrEnum):
     """Bridge 事件类型"""
@@ -184,7 +187,11 @@ class AgentBridge:
                     args = data.get("input", {})
                     if isinstance(args, dict):
                         tool_call_id = args.get("tool_call_id", "")
-                        args = {k: v for k, v in args.items() if k != "tool_call_id"}
+                        args = {
+                            k: v
+                            for k, v in args.items()
+                            if k not in _TOOL_INTERNAL_KEYS
+                        }
                     else:
                         tool_call_id = ""
                         args = {}

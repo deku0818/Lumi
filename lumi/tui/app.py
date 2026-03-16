@@ -30,10 +30,11 @@ from lumi.tui.widgets.chat_log import ChatLog
 from lumi.tui.widgets.input_bar import ChatInput, InputBar
 from lumi.tui.widgets.command_result_panel import CommandResultPanel
 from lumi.tui.widgets.thinking_indicator import ThinkingIndicator
-from lumi.tui.widgets.tool_block import ToolBlock
+from lumi.tui.widgets.tool_block import ToolBlock, ToolStatus
 from lumi.tui.widgets.user_message import UserMessage
 from lumi.tui.screens.init_flow_screen import InitFlowScreen
 from lumi.tui.screens.settings_screen import SettingsScreen
+from lumi.utils.clipboard import copy_to_clipboard
 from lumi.utils.config import GlobalConfig, GlobalConfigManager, get_config
 from lumi.utils.config.global_manager import GLOBAL_CONFIG_DIR
 from lumi.utils.logger import logger
@@ -229,6 +230,45 @@ class LumiApp(App):
         self._notification_poll_timer = self.set_interval(
             _NOTIFICATION_POLL_INTERVAL, self._poll_notifications
         )
+
+        # 绑定用户自定义快捷键
+        self._bind_custom_keys(self._global_config)
+
+    def _bind_custom_keys(self, config: GlobalConfig) -> None:
+        """根据配置绑定用户自定义快捷键。"""
+        kb = config.keybindings
+        try:
+            self.bind(kb.copy_selection, "copy_selection", description="复制选中文本")
+        except Exception:
+            logger.warning(
+                f"[LumiApp] 绑定快捷键失败: copy_selection={kb.copy_selection}",
+                exc_info=True,
+            )
+
+    def _get_last_assistant_raw(self) -> str | None:
+        """获取最近一条 AssistantMessage 的原始文本。"""
+        try:
+            chat_log = self.query_one(ChatLog)
+            msgs = chat_log.query(AssistantMessage)
+            if msgs:
+                last: AssistantMessage = msgs.last()
+                return last._raw if last._has_content else None
+        except NoMatches:
+            pass
+        return None
+
+    async def action_copy_selection(self) -> None:
+        """复制选中文本到系统剪贴板，无选中时回退到最近一条 AI 回复。"""
+        text = self.screen.get_selected_text()
+        if not text:
+            text = self._get_last_assistant_raw()
+        if not text:
+            return
+        ok = await asyncio.to_thread(copy_to_clipboard, text)
+        try:
+            self.query_one(InputBar).flash_message("Copied" if ok else "Copy failed")
+        except NoMatches:
+            pass
 
     async def _load_recent_sessions(self, limit: int = 3) -> list:
         """加载最近的历史会话摘要。
@@ -1082,6 +1122,15 @@ class LumiApp(App):
         if self._thinking:
             self._thinking.teardown()
             self._thinking = None
+        # 清理所有残留的运行中 ToolBlock（on_tool_end 未匹配到时的兜底）
+        for block in self._run.tool_blocks.values():
+            if block.status == ToolStatus.RUNNING:
+                logger.warning(
+                    "[LumiApp] ToolBlock '%s' still RUNNING at _finish_run, "
+                    "marking as done (on_tool_end may have been missed)",
+                    block._name,
+                )
+                block.set_done()
         self._run.reset()
         try:
             self.query_one(InputBar).set_disabled(False)
@@ -1158,6 +1207,10 @@ class LumiApp(App):
         if self._run.is_running:
             if self._run.task and not self._run.task.done():
                 self._run.task.cancel()
+            # 将所有仍在运行中的 ToolBlock 标记为中断，停止 spinner
+            for block in self._run.tool_blocks.values():
+                if block.status == ToolStatus.RUNNING:
+                    block.set_interrupted()
             self._finalize_assistant_msg()
             chat_log = self.query_one(ChatLog)
             await chat_log.append_hint(

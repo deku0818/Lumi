@@ -209,12 +209,6 @@ class InputBar(Vertical):
         padding: 0 1 0 0;
     }
 
-    #exit-hint {
-        height: 1;
-        padding: 0 0 0 1;
-        color: $text-muted;
-        display: none;
-    }
     """
 
     class Submitted(Message):
@@ -236,6 +230,7 @@ class InputBar(Vertical):
         self._tool_mode = "auto"
         self._pending_images: list[ImageData] = []
         self._exit_hint_timer = None
+        self._flash_timer = None
         self._history: list[str] = []
         self._history_index: int = -1
         self._draft: str = ""  # 暂存当前未提交的输入
@@ -257,7 +252,6 @@ class InputBar(Vertical):
                 id="mode-indicator",
             )
             yield Static("[#B888E8]⚑[/]", id="bell-indicator")
-        yield Static("[dim]再按一次 Ctrl+C 退出[/dim]", id="exit-hint")
 
     def on_mount(self) -> None:
         self.query_one(InputBox).border_title = "Input"
@@ -406,6 +400,29 @@ class InputBar(Vertical):
         indicator = self.query_one("#mode-indicator", Static)
         indicator.update(f"[{color}]{label}[/] [dim](shift+tab to switch)[/dim]")
 
+    def flash_message(self, message: str, duration: float = 1.5) -> None:
+        """在状态栏短暂显示提示消息，之后恢复原内容。
+
+        Args:
+            message: 提示文本（如 "Copied"）。
+            duration: 显示时长（秒）。
+        """
+        # 取消可能冲突的计时器
+        if self._flash_timer is not None:
+            self._flash_timer.stop()
+        if self._exit_hint_timer is not None:
+            self._exit_hint_timer.stop()
+            self._exit_hint_timer = None
+        color = _resolve_color("success")
+        indicator = self.query_one("#mode-indicator", Static)
+        indicator.update(f"[{color}]✓ {message}[/]")
+        self._flash_timer = self.set_timer(duration, self._restore_from_flash)
+
+    def _restore_from_flash(self) -> None:
+        """flash_message 计时器回调：恢复状态栏。"""
+        self._flash_timer = None
+        self._update_mode_indicator()
+
     def set_tool_mode(self, mode: str) -> None:
         """外部设置 tool_mode 并更新指示器"""
         if mode in _TOOL_MODES:
@@ -413,18 +430,23 @@ class InputBar(Vertical):
             self._update_mode_indicator()
 
     def show_exit_hint(self) -> None:
-        """显示退出提示，1.5 秒后自动隐藏。"""
+        """在状态栏显示退出提示，1.5 秒后自动恢复。"""
+        if self._flash_timer is not None:
+            self._flash_timer.stop()
+            self._flash_timer = None
         if self._exit_hint_timer is not None:
             self._exit_hint_timer.stop()
-        self.query_one("#exit-hint", Static).styles.display = "block"
+        color = _resolve_color("error")
+        indicator = self.query_one("#mode-indicator", Static)
+        indicator.update(f"[{color}]Double press ctrl+c to exit[/]")
         self._exit_hint_timer = self.set_timer(1.5, self.hide_exit_hint)
 
     def hide_exit_hint(self) -> None:
-        """隐藏退出提示并取消计时器。"""
+        """恢复状态栏原内容并取消计时器。"""
         if self._exit_hint_timer is not None:
             self._exit_hint_timer.stop()
             self._exit_hint_timer = None
-        self.query_one("#exit-hint", Static).styles.display = "none"
+        self._update_mode_indicator()
 
     @property
     def has_pending_images(self) -> bool:

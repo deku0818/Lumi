@@ -13,7 +13,7 @@ class UserMessage(Static):
     UserMessage {
         margin: 1 0 1 0;
         padding: 0 1;
-        width: auto;
+        width: 1fr;
         height: auto;
         color: $foreground;
         background: $surface;

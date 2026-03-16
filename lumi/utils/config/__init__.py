@@ -5,7 +5,7 @@
 
 from .discovery import ConfigDiscovery
 from .global_manager import GlobalConfigManager
-from .global_models import GlobalConfig
+from .global_models import GlobalConfig, KeyBindings
 from .manager import LumiConfig, get_config
 from .models import (
     AgentsConfig,
@@ -27,6 +27,7 @@ __all__ = [
     # global config
     "GlobalConfig",
     "GlobalConfigManager",
+    "KeyBindings",
     # manager
     "LumiConfig",
     "get_config",
