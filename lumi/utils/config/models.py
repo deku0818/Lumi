@@ -26,7 +26,7 @@ class AgentsConfig(BaseModel):
         description="模型输出最大token数",
     )
     recursion_limit: int = Field(
-        default=100,
+        default=5000,
         description="Agent 递归执行限制，控制 agent 最大执行轮次",
     )
     vision_mode: Literal["model", "tool"] = Field(
@@ -40,10 +40,6 @@ class AgentsConfig(BaseModel):
     postgres_uri: str = Field(
         default="",
         description="PostgreSQL 连接 URI，仅在 checkpoint 为 'postgres' 时使用",
-    )
-    max_upload_size_mb: int = Field(
-        default=32,
-        description="文档上传最大文件大小(MB)",
     )
 
     @model_validator(mode="after")

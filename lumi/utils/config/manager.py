@@ -99,14 +99,11 @@ class LumiConfig:
     def apply_env(self) -> None:
         """将配置中的 env 字段注入到 os.environ
 
-        仅设置尚未存在的环境变量，不覆盖已有值。
+        config.yaml 中的 env 优先级高于系统环境变量，始终覆盖。
         """
         for key, value in self.config.env.items():
-            if key not in os.environ:
-                os.environ[key] = str(value)
-                logger.debug(f"注入环境变量: {key}")
-            else:
-                logger.debug(f"环境变量已存在，跳过: {key}")
+            os.environ[key] = str(value)
+            logger.debug(f"注入环境变量: {key}")
 
     # === 目录路径属性 ===
 

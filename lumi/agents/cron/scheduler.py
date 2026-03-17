@@ -16,12 +16,14 @@ from apscheduler.jobstores.base import JobLookupError
 from apscheduler.schedulers.asyncio import AsyncIOScheduler
 from apscheduler.triggers.date import DateTrigger
 from langchain_core.messages import HumanMessage
+from langchain_core.runnables.config import RunnableConfig
 
 from lumi.agents.cron.delivery import DeliveryManager
 from lumi.agents.cron.job_store import JobStore
 from lumi.agents.cron.models import Job, ScheduleType
 from lumi.agents.cron.run_log import RunLog, RunRecord
 from lumi.utils.logger import logger
+from lumi.utils.read_config import get_config
 
 # 退避重试间隔（秒）：第 1、2、3 次重试
 BACKOFF_INTERVALS: tuple[int, ...] = (30, 60, 300)
@@ -277,8 +279,11 @@ class Scheduler:
                 # 定时任务无人在场审批，使用 privileged 模式跳过 interrupt
                 "tool_mode": "privileged",
             }
+            config = RunnableConfig(
+                recursion_limit=get_config().config.agents.recursion_limit,
+            )
             response = await asyncio.wait_for(
-                agent.graph.ainvoke(inputs, context=context),
+                agent.graph.ainvoke(inputs, config=config, context=context),
                 timeout=self._execution_timeout,
             )
             # 从 response 中提取输出文本

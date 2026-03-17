@@ -73,12 +73,17 @@ class AgentBridge:
 
     async def initialize(self) -> None:
         """初始化 Agent"""
+        agents_config = get_config().config.agents
         self._agent, self._context = await create_agent(
-            checkpoint=get_config().config.agents.checkpoint,
+            checkpoint=agents_config.checkpoint,
         )
         self.model_name = get_default_model_name()
         thread_id = generate_thread_id()
-        self._config = RunnableConfig(configurable={"thread_id": thread_id})
+        recursion_limit = agents_config.recursion_limit
+        self._config = RunnableConfig(
+            configurable={"thread_id": thread_id},
+            recursion_limit=recursion_limit,
+        )
         logger.info(
             f"[AgentBridge] 初始化完成, model={self.model_name}, thread={thread_id}"
         )
@@ -101,7 +106,11 @@ class AgentBridge:
         Args:
             thread_id: 目标会话的 thread_id
         """
-        self._config = RunnableConfig(configurable={"thread_id": thread_id})
+        recursion_limit = get_config().config.agents.recursion_limit
+        self._config = RunnableConfig(
+            configurable={"thread_id": thread_id},
+            recursion_limit=recursion_limit,
+        )
         logger.info("[AgentBridge] 切换到会话: %s", thread_id)
 
     async def stream_response(
