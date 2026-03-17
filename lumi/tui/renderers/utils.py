@@ -11,7 +11,7 @@ from textual.widgets import Static
 
 from lumi.tui.theme import get_color
 
-# spinner 动画帧序列，供 ToolBlock 和 ThinkingIndicator 共用
+# spinner 动画帧序列，供 ToolBlock 和 RunStatusBar 共用
 SPINNER_FRAMES: tuple[str, ...] = ("⠋", "⠙", "⠹", "⠸", "⠼", "⠴", "⠦", "⠧", "⠇", "⠏")
 
 
@@ -27,7 +27,7 @@ def escape_markup(text: str) -> str:
 
 
 class SpinnerMixin:
-    """Spinner 动画 mixin，消除 ThinkingIndicator 和 ToolBlock 的重复代码。
+    """Spinner 动画 mixin，消除 RunStatusBar 和 ToolBlock 的重复代码。
 
     宿主类需要是 Textual Widget（提供 ``set_interval``）。
     子类须实现 ``_on_spinner_tick(frame_char)`` 来响应每一帧。

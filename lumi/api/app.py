@@ -25,6 +25,11 @@ class LangGraphRequest(BaseModel):
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
+    # 应用运行时补丁
+    from lumi.utils.patches import apply_all
+
+    apply_all()
+
     # 启动：注入 config.yaml 中的 env 环境变量
     from lumi.utils.config import get_config
 

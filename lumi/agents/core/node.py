@@ -398,7 +398,7 @@ async def summarizer(state: LumiAgentState, runtime: Runtime[LumiAgentContext]):
     只在末尾追加摘要指令，前面全部命中缓存。
 
     触发条件：
-    - 消息 token 数 >= model_max_tokens * summary_threshold
+    - 消息 token 数 >= context_length * summary_threshold
 
     保留规则：
     - 头：SystemMessage 不参与摘要
@@ -415,7 +415,7 @@ async def summarizer(state: LumiAgentState, runtime: Runtime[LumiAgentContext]):
 
     # 1. 计算 token，判断是否需要触发摘要
     token_config = get_config().config.token
-    threshold = token_config.model_max_tokens * token_config.summary_threshold
+    threshold = token_config.context_length * token_config.summary_threshold
     total_tokens = tiktoken_counter(messages)
 
     if total_tokens < threshold:

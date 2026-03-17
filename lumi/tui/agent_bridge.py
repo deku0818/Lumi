@@ -59,6 +59,7 @@ class BridgeEvent:
     data: dict | None = None
     error: str = ""
     approval_mode: bool = False  # 是否处于审批模式（工具需要用户审批确认）
+    usage_metadata: dict | None = None  # token 用量信息
 
 
 class AgentBridge:
@@ -171,15 +172,25 @@ class AgentBridge:
                 elif kind == "on_chat_model_stream":
                     chunk = event.get("data", {}).get("chunk")
                     if chunk:
+                        usage = self._extract_usage(chunk)
                         text = self._extract_text_from_chunk(chunk)
                         if text:
-                            yield BridgeEvent(kind=EventKind.STREAM_TOKEN, text=text)
+                            yield BridgeEvent(
+                                kind=EventKind.STREAM_TOKEN,
+                                text=text,
+                                usage_metadata=usage,
+                            )
                         elif self._has_tool_call_chunk(chunk):
                             # LLM 正在生成工具调用参数，通知 TUI 显示 loading
-                            yield BridgeEvent(kind=EventKind.TOOL_CALL_CHUNK)
+                            yield BridgeEvent(
+                                kind=EventKind.TOOL_CALL_CHUNK,
+                                usage_metadata=usage,
+                            )
 
                 elif kind == "on_chat_model_end":
-                    yield BridgeEvent(kind=EventKind.MODEL_END)
+                    output = event.get("data", {}).get("output")
+                    usage = self._extract_usage(output) if output else None
+                    yield BridgeEvent(kind=EventKind.MODEL_END, usage_metadata=usage)
 
                 elif kind == "on_tool_start":
                     name = event.get("name", "unknown")
@@ -260,7 +271,9 @@ class AgentBridge:
             return BridgeEvent(kind=EventKind.DONE)
 
         if not state.next:
-            return BridgeEvent(kind=EventKind.DONE)
+            # 从 state 的最后一条 AI message 提取完整 usage（含 cache 详情）
+            usage = self._extract_last_ai_usage(state)
+            return BridgeEvent(kind=EventKind.DONE, usage_metadata=usage)
 
         for task in state.tasks:
             for intr in task.interrupts:
@@ -275,6 +288,20 @@ class AgentBridge:
         logger.warning(f"[AgentBridge] 未知中断类型, next={state.next}")
         return BridgeEvent(kind=EventKind.DONE)
 
+    @classmethod
+    def _extract_last_ai_usage(cls, state) -> dict | None:
+        """从 graph state 的最后一条 AI message 提取 usage_metadata。
+
+        作为 on_chat_model_end 的补充数据源，某些 API 在 state 中保留了
+        比流式聚合更完整的 usage（如 cache 详情）。
+        复用 _extract_usage 确保 input_token_details 等字段被一致提取。
+        """
+        messages = (state.values or {}).get("messages", [])
+        for msg in reversed(messages):
+            if getattr(msg, "usage_metadata", None) is not None:
+                return cls._extract_usage(msg)
+        return None
+
     @staticmethod
     def _extract_text_from_chunk(chunk) -> str:
         """从 LangChain chunk 中提取文本"""
@@ -287,6 +314,32 @@ class AgentBridge:
                     if isinstance(item, dict) and item.get("type") == "text":
                         return item.get("text", "")
         return ""
+
+    @staticmethod
+    def _extract_usage(obj) -> dict | None:
+        """从 LangChain 对象中提取 usage_metadata。"""
+        um = getattr(obj, "usage_metadata", None)
+        if um is None:
+            return None
+        if isinstance(um, dict):
+            return um if um else None
+        # UsageMetadata (TypedDict subclass) → 转 dict，保留 input_token_details
+        result = {
+            "input_tokens": getattr(um, "input_tokens", 0),
+            "output_tokens": getattr(um, "output_tokens", 0),
+            "total_tokens": getattr(um, "total_tokens", 0),
+        }
+        itd = getattr(um, "input_token_details", None)
+        if itd:
+            result["input_token_details"] = (
+                dict(itd) if not isinstance(itd, dict) else itd
+            )
+        otd = getattr(um, "output_token_details", None)
+        if otd:
+            result["output_token_details"] = (
+                dict(otd) if not isinstance(otd, dict) else otd
+            )
+        return result
 
     @staticmethod
     def _has_tool_call_chunk(chunk) -> bool:

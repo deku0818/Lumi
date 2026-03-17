@@ -3,7 +3,7 @@ from lumi.tui.widgets.chat_log import ChatLog
 from lumi.tui.widgets.user_message import UserMessage
 from lumi.tui.widgets.assistant_message import AssistantMessage
 from lumi.tui.widgets.tool_block import ToolBlock
-from lumi.tui.widgets.thinking_indicator import ThinkingIndicator
+from lumi.tui.widgets.run_status_bar import RunStatusBar
 from lumi.tui.widgets.input_bar import InputBar
 from lumi.tui.widgets.ask_dialog import AskDialog
 from lumi.tui.widgets.tool_approval import ToolApproval
@@ -15,7 +15,7 @@ __all__ = [
     "UserMessage",
     "AssistantMessage",
     "ToolBlock",
-    "ThinkingIndicator",
+    "RunStatusBar",
     "InputBar",
     "AskDialog",
     "ToolApproval",

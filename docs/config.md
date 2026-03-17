@@ -64,7 +64,7 @@ agents:
 token:
   once_tool_max_tokens: 10000    # 单次工具调用返回结果最大 token 数
   trim_messages_max_tokens: 192000  # 消息修剪器最大 token 数
-  model_max_tokens: 200000       # 模型上下文窗口最大 token 数
+  context_length: 200000           # 模型上下文窗口最大 token 数（自动从 OpenRouter 获取）
   summary_threshold: 0.7         # 触发总结的阈值比例
 ```
 
@@ -159,7 +159,7 @@ agents:
   recursion_limit: 100
 
 token:
-  model_max_tokens: 200000
+  context_length: 200000
   summary_threshold: 0.7
 
 llm_params:

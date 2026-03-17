@@ -23,9 +23,9 @@ PASTE_COLLAPSE_THRESHOLD = 20
 
 # 值为 (label, 语义角色名)，颜色在渲染时通过 get_color() 解析
 _MODE_DISPLAY: dict[str, tuple[str, str]] = {
-    "approve": ("⏸ approve mode", "#E8D888"),
-    "auto": ("▶ auto mode", "#88E8A0"),
-    "privileged": ("▶▶ privileged mode ⚠", "#88A0E8"),
+    "approve": ("⏸ approve", "#E8D888"),
+    "auto": ("▶ auto", "#88E8A0"),
+    "privileged": ("▶▶ privileged ⚠", "#88A0E8"),
 }
 
 
@@ -248,7 +248,7 @@ class InputBar(Vertical):
         color = _resolve_color(role)
         with Horizontal(id="status-row"):
             yield Static(
-                f"[{color}]{label}[/] [dim](shift+tab to switch)[/dim]",
+                f"[{color}]{label}[/] [dim](shift+tab)[/dim]",
                 id="mode-indicator",
             )
             yield Static("[#B888E8]⚑[/]", id="bell-indicator")
@@ -398,7 +398,7 @@ class InputBar(Vertical):
         label, role = _MODE_DISPLAY[self._tool_mode]
         color = _resolve_color(role)
         indicator = self.query_one("#mode-indicator", Static)
-        indicator.update(f"[{color}]{label}[/] [dim](shift+tab to switch)[/dim]")
+        indicator.update(f"[{color}]{label}[/] [dim](shift+tab)[/dim]")
 
     def flash_message(self, message: str, duration: float = 1.5) -> None:
         """在状态栏短暂显示提示消息，之后恢复原内容。

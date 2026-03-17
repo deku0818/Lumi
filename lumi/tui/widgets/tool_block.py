@@ -27,6 +27,7 @@ class ToolStatus(StrEnum):
     """工具执行状态"""
 
     RUNNING = "running"
+    WAITING = "waiting"  # 等待用户交互（ask dialog）
     DONE = "done"
     ERROR = "error"
     INTERRUPTED = "interrupted"
@@ -155,13 +156,15 @@ class ToolBlock(Vertical, SpinnerMixin):
 
     async def mount_interactive(self, widget: Widget) -> None:
         """将交互组件挂载到 Collapsible 内容区（output Static 之前）"""
+        self._status = ToolStatus.WAITING
         self._stop_spinner()
         output_widget = self.query_one(f"#tool-output-{id(self)}", Static)
         parent = output_widget.parent
         await parent.mount(widget, before=output_widget)
         self._interactive = widget
-        # 展开 Collapsible 以显示交互组件
+        # 展开 Collapsible 以显示交互组件，刷新标题显示等待圆圈
         collapsible = self.query_one(Collapsible)
+        collapsible.title = self._build_title_markup()
         collapsible.collapsed = False
 
     def remove_interactive(self) -> None:
@@ -242,6 +245,8 @@ class ToolBlock(Vertical, SpinnerMixin):
         match self._status:
             case ToolStatus.RUNNING:
                 return self._running_status_text()
+            case ToolStatus.WAITING:
+                return f"[{get_color('warning')}]○[/]"
             case ToolStatus.DONE:
                 return f"[{get_color('success')}]●[/]"
             case ToolStatus.ERROR | ToolStatus.INTERRUPTED:
@@ -251,16 +256,26 @@ class ToolBlock(Vertical, SpinnerMixin):
 
     def _build_title_markup(self) -> str:
         """构建标题 markup，圆圈颜色反映状态，标题文字保持白色"""
-        hint = (
-            f" [{get_color('text_muted')}](click to expand)[/]"
-            if self._status != ToolStatus.RUNNING
-            else ""
-        )
+        if self._status in (ToolStatus.RUNNING, ToolStatus.WAITING):
+            hint = ""
+        else:
+            # 根据折叠状态显示不同提示
+            try:
+                collapsed = self.query_one(Collapsible).collapsed
+            except NoMatches:
+                collapsed = True
+            tip = "click to expand" if collapsed else "click to collapse"
+            hint = f" [{get_color('text_muted')}]({tip})[/]"
         return f"{self._get_symbol()} {escape_markup(self._title_text)}{hint}"
 
     def on_collapsible_toggled(self, event: Collapsible.Toggled) -> None:
-        """折叠/展开时更新标题"""
+        """折叠/展开时更新标题提示文字"""
         event.stop()
+        try:
+            collapsible = self.query_one(Collapsible)
+            collapsible.title = self._build_title_markup()
+        except NoMatches:
+            pass
 
     def on_ask_dialog_tab_changed(self, event) -> None:
         """阻止 AskDialog TabChanged 事件冒泡"""

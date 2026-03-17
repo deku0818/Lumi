@@ -96,6 +96,7 @@ class ModelManager:
                     **self.openai_params,
                     **config_params,
                     "model": model_name,
+                    "stream_usage": True,
                 }
                 final_params.update(llm_params)
 

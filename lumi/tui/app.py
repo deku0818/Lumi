@@ -12,6 +12,7 @@ from textual.app import App, ComposeResult
 from textual.binding import Binding
 from textual.css.query import NoMatches
 from textual.events import Key
+from textual.widget import Widget
 
 from lumi import __version__
 from lumi.agents.cron.delivery import DeliveryManager, TUIDelivery
@@ -29,7 +30,8 @@ from lumi.tui.widgets.title_block import TitleBlock
 from lumi.tui.widgets.chat_log import ChatLog
 from lumi.tui.widgets.input_bar import ChatInput, InputBar
 from lumi.tui.widgets.command_result_panel import CommandResultPanel
-from lumi.tui.widgets.thinking_indicator import ThinkingIndicator
+from lumi.tui.widgets.run_status_bar import RunStatusBar
+from lumi.tui.widgets.status_line import StatusLine
 from lumi.tui.widgets.tool_block import ToolBlock, ToolStatus
 from lumi.tui.widgets.user_message import UserMessage
 from lumi.tui.screens.init_flow_screen import InitFlowScreen
@@ -51,6 +53,9 @@ from typing import Final
 # 后台任务通知轮询间隔（秒）
 _NOTIFICATION_POLL_INTERVAL: Final = 2.0
 
+# 等待用户交互的阶段（计时暂停）
+_WAITING_PHASES: Final = frozenset({RunPhase.WAITING_ASK, RunPhase.WAITING_APPROVAL})
+
 
 class LumiApp(App):
     """Lumi TUI 主应用"""
@@ -70,7 +75,6 @@ class LumiApp(App):
         self.theme = "lumi-dark"  # 默认暗色，on_mount 中根据全局配置切换
         self._bridge = AgentBridge()
         self._run = RunContext()
-        self._thinking: ThinkingIndicator | None = None
         self._last_ctrl_c: float = 0.0
         self._global_config = None
         self._scheduler: Scheduler | None = None
@@ -80,10 +84,19 @@ class LumiApp(App):
         self._pending_system_commands: list[str] = []
         self._notification_poll_timer = None
 
+    def _query_safe(self, widget_type: type[Widget]) -> Widget | None:
+        """按类型查询 widget，未挂载时返回 None 而非抛异常。"""
+        try:
+            return self.query_one(widget_type)
+        except NoMatches:
+            return None
+
     def compose(self) -> ComposeResult:
         yield ChatLog()
+        yield RunStatusBar()
         yield CommandResultPanel()
         yield InputBar(id="input-area")
+        yield StatusLine()
 
     async def _detect_system_theme(self) -> bool:
         """检测系统主题，返回 True 表示暗色。
@@ -177,6 +190,9 @@ class LumiApp(App):
 
     async def _finish_mount(self) -> None:
         """应用主题、注入环境变量并初始化 Agent bridge。"""
+        # 绑定 RunContext 到 RunStatusBar，使 spinner tick 可读取实时状态
+        self.query_one(RunStatusBar).bind_run_context(self._run)
+
         await self._apply_theme_mode(self._global_config.theme_mode)
 
         # 注入 config.yaml 中的 env 环境变量
@@ -191,6 +207,26 @@ class LumiApp(App):
             chat_log = self.query_one(ChatLog)
             await chat_log.append_error("初始化失败:", str(e))
             return
+
+        # 配置 StatusLine（尝试从 OpenRouter 获取 context_length）
+        from lumi.utils.model_info import fetch_model_info
+        from lumi.utils.read_config import get_config as get_yaml_config
+
+        config_context_length = get_yaml_config().config.token.context_length
+        model_name = self._bridge.model_name
+
+        model_info = await fetch_model_info(model_name)
+        context_max = (
+            model_info.context_length
+            if model_info and model_info.context_length > 0
+            else config_context_length
+        )
+
+        self.query_one(StatusLine).configure(
+            run_ctx=self._run,
+            model_name=model_name,
+            context_max=context_max,
+        )
 
         # TitleBlock 挂载到 ChatLog 内部，随聊天内容一起滚动
         chat_log = self.query_one(ChatLog)
@@ -374,6 +410,7 @@ class LumiApp(App):
             )
 
         self._run.phase = RunPhase.IDLE
+        self._run.start()
         self.query_one(InputBar).set_disabled(True)
         self._run.task = asyncio.create_task(self._run_stream(blocks))
 
@@ -444,8 +481,11 @@ class LumiApp(App):
         await chat_log.scroll_to_end()
 
         # 重置运行状态
-        self._run.reset()
+        self._run.reset_session()
         self._interrupted = False
+        sl = self._query_safe(StatusLine)
+        if sl:
+            sl.refresh_display()
 
     # ── 清空对话 ──
 
@@ -467,8 +507,11 @@ class LumiApp(App):
         await chat_log.append_hint("● ", "已开始新会话")
         await chat_log.scroll_to_end()
 
-        self._run.reset()
+        self._run.reset_session()
         self._interrupted = False
+        sl = self._query_safe(StatusLine)
+        if sl:
+            sl.refresh_display()
 
     # ── 技能列表 ──
 
@@ -862,6 +905,7 @@ class LumiApp(App):
             self._pending_system_commands.clear()
 
         self._run.phase = RunPhase.IDLE  # 即将启动
+        self._run.start()
         self.query_one(InputBar).set_disabled(True)
 
         self._run.task = asyncio.create_task(self._run_stream(content, tool_mode))
@@ -886,8 +930,6 @@ class LumiApp(App):
             await self._show_error(chat_log, str(e))
 
     # ── 状态机 ──
-
-    _THINKING_PHASES = {RunPhase.THINKING, RunPhase.TOOL_CALL_PENDING}
 
     def _transition(self, evt: BridgeEvent) -> tuple[RunPhase, RunPhase]:
         """纯逻辑状态转换，不操作 DOM。返回 (old, new)。"""
@@ -920,19 +962,32 @@ class LumiApp(App):
         """两阶段事件处理：先做状态转换驱动的 UI 切换，再执行事件特定逻辑。"""
         old, new = self._transition(evt)
 
-        # 阶段离开 thinking → 移除 indicator（下次进入时重新 mount 到正确位置）
-        if old in self._THINKING_PHASES and new not in self._THINKING_PHASES:
-            if self._thinking:
-                self._thinking.teardown()
-                self._thinking = None
-
-        # 阶段进入 thinking → 显示 indicator
-        if new in self._THINKING_PHASES and old not in self._THINKING_PHASES:
-            await self._ensure_thinking(chat_log)
-
         # 离开 STREAMING → finalize assistant message
         if old == RunPhase.STREAMING and new != RunPhase.STREAMING:
             self._finalize_assistant_msg()
+
+        # token 跟踪
+        if evt.kind == EventKind.STREAM_TOKEN:
+            self._run.count_stream_token()
+        self._run.accumulate_usage(evt.usage_metadata)
+        # MODEL_END 携带精确 total_tokens，累加到会话计数并刷新状态行
+        if evt.kind == EventKind.MODEL_END:
+            self._run.commit_model_usage(evt.usage_metadata)
+            sl = self._query_safe(StatusLine)
+            if sl:
+                sl.refresh_display()
+
+        # 首次进入非 IDLE → 显示状态栏
+        if old == RunPhase.IDLE and new != RunPhase.IDLE:
+            bar = self._query_safe(RunStatusBar)
+            if bar:
+                bar.show_running()
+
+        # 进入/离开等待用户交互阶段 → 暂停/恢复计时
+        if new in _WAITING_PHASES and old not in _WAITING_PHASES:
+            self._run.pause_timer()
+        elif old in _WAITING_PHASES and new not in _WAITING_PHASES:
+            self._run.resume_timer()
 
         # 事件特定 UI 更新
         match evt.kind:
@@ -947,6 +1002,9 @@ class LumiApp(App):
             case EventKind.TOOL_APPROVAL:
                 await self._handle_tool_approval(evt, chat_log)
             case EventKind.DONE:
+                # 从 state 补充 usage（仅当 MODEL_END 未提供 cache 详情时）
+                if evt.usage_metadata and not self._run.cache_read_tokens:
+                    self._run.commit_model_usage(evt.usage_metadata)
                 self._finish_run()
             case EventKind.ERROR:
                 await self._show_error(chat_log, evt.error)
@@ -1016,17 +1074,6 @@ class LumiApp(App):
         if self._run.assistant_msg:
             self._run.assistant_msg.finalize()
             self._run.assistant_msg = None
-
-    async def _ensure_thinking(self, chat_log: ChatLog) -> None:
-        """在 chat log 底部显示 ThinkingIndicator。
-
-        始终 teardown 旧实例并重新 mount，确保位置在最新内容之后。
-        """
-        if self._thinking:
-            self._thinking.teardown()
-        self._thinking = ThinkingIndicator()
-        await chat_log.mount(self._thinking)
-        await chat_log.auto_scroll_if_needed()
 
     async def _show_error(self, chat_log: ChatLog, error: str) -> None:
         if len(error) > 300:
@@ -1119,9 +1166,10 @@ class LumiApp(App):
         await chat_log.append_hint("└ ", "对话框已关闭")
 
     def _finish_run(self) -> None:
-        if self._thinking:
-            self._thinking.teardown()
-            self._thinking = None
+        # 隐藏运行状态栏
+        bar = self._query_safe(RunStatusBar)
+        if bar:
+            bar.hide()
         # 清理所有残留的运行中 ToolBlock（on_tool_end 未匹配到时的兜底）
         for block in self._run.tool_blocks.values():
             if block.status == ToolStatus.RUNNING:
@@ -1131,11 +1179,14 @@ class LumiApp(App):
                     block._name,
                 )
                 block.set_done()
+        # 刷新底部状态行（token 计数在 reset 前刷新）
+        sl = self._query_safe(StatusLine)
+        if sl:
+            sl.refresh_display()
         self._run.reset()
-        try:
-            self.query_one(InputBar).set_disabled(False)
-        except Exception:
-            logger.error("[LumiApp] 无法重新启用输入栏，UI 可能已损坏", exc_info=True)
+        input_bar = self._query_safe(InputBar)
+        if input_bar:
+            input_bar.set_disabled(False)
 
     async def _poll_notifications(self) -> None:
         """轮询后台任务通知队列
@@ -1155,6 +1206,7 @@ class LumiApp(App):
 
         # 先设为 THINKING 防止下一次 poll 重入
         self._run.phase = RunPhase.THINKING
+        self._run.start()
         try:
             self.query_one(InputBar).set_disabled(True)
         except NoMatches:

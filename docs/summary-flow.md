@@ -31,7 +31,7 @@ START
 
 1. **Token 计算与阈值判断**
    - 计算当前 `messages` 的总 token 数（使用 `tiktoken_counter`）
-   - 阈值公式：`model_max_tokens × summary_threshold`
+   - 阈值公式：`context_length × summary_threshold`
    - 默认值：`200000 × 0.7 = 140000` tokens
    - 若 token 数 < 阈值，直接返回空 `summary`，不触发摘要
 
@@ -83,7 +83,7 @@ START
 
 ```yaml
 token:
-  model_max_tokens: 200000       # 模型上下文窗口大小
+  context_length: 200000       # 模型上下文窗口大小
   summary_threshold: 0.7         # 触发摘要的阈值比例
 ```
 

@@ -6,10 +6,13 @@
 """
 
 from lumi.tui.app import LumiApp
+from lumi.utils.patches import apply_all
 
 
 def main() -> None:
     import sys
+
+    apply_all()
 
     _original_unraisablehook = sys.unraisablehook
 

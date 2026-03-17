@@ -62,12 +62,10 @@ class TokenConfig(BaseModel):
     trim_messages_max_tokens: int = Field(
         default=192000, description="消息修剪器最大token数"
     )
-    model_max_tokens: int = Field(
-        default=200000, description="模型上下文窗口最大token数"
-    )
+    context_length: int = Field(default=200000, description="模型上下文窗口最大token数")
     summary_threshold: float = Field(
         default=0.7,
-        description="触发总结的阈值比例，当消息token数 >= model_max_tokens * summary_threshold 时触发",
+        description="触发总结的阈值比例，当消息token数 >= context_length * summary_threshold 时触发",
     )
 
 

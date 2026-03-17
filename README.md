@@ -128,7 +128,7 @@ agents:
   vision_mode: model              # 图片识别：model | tool
 
 token:
-  model_max_tokens: 200000        # 模型上下文窗口
+  context_length: 200000        # 模型上下文窗口
   summary_threshold: 0.7          # 触发摘要的阈值比例
 
 llm_params:                       # 按模型类型配置参数
