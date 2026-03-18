@@ -11,8 +11,11 @@ from textual.widgets import Static
 
 from lumi.tui.theme import get_color
 
-# spinner 动画帧序列，供 ToolBlock 和 RunStatusBar 共用
+# braille spinner 动画帧序列，供 RunStatusBar（thinking）使用
 SPINNER_FRAMES: tuple[str, ...] = ("⠋", "⠙", "⠹", "⠸", "⠼", "⠴", "⠦", "⠧", "⠇", "⠏")
+
+# 圆圈闪烁帧序列，供 ToolBlock（工具执行中）使用
+BLINK_FRAMES: tuple[str, ...] = ("●", " ")
 
 
 def escape_markup(text: str) -> str:

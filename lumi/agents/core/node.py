@@ -91,7 +91,7 @@ async def tool_executor(state: LumiAgentState, runtime: Runtime[LumiAgentContext
     tools = runtime.context.tools
 
     tool_node = ToolNode(tools, handle_tool_errors=handle_tool_error)
-    tool_messages = await tool_node.ainvoke({"messages": state["messages"]})
+    tool_messages = await tool_node.ainvoke(state)
 
     # 3. 处理返回值
     # 兼容 ToolNode 返回值格式（可能是字典、列表或 Command）

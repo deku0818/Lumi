@@ -60,6 +60,8 @@ class BridgeEvent:
     error: str = ""
     approval_mode: bool = False  # 是否处于审批模式（工具需要用户审批确认）
     usage_metadata: dict | None = None  # token 用量信息
+    parent_run_id: str = ""  # 非空时表示该事件属于某个 agent 工具的子代理
+    run_id: str = ""  # agent 工具自身的 run_id，用于并发 agent 场景下的精确映射
 
 
 class AgentBridge:
@@ -70,6 +72,8 @@ class AgentBridge:
         self._context: LumiAgentContext | None = None
         self._config: RunnableConfig | None = None
         self.model_name: str = ""
+        # 活跃的 agent 工具 run_id 集合，跨 _stream 调用保持追踪（审批恢复场景）
+        self._active_agent_runs: set[str] = set()
 
     async def initialize(self) -> None:
         """初始化 Agent"""
@@ -122,6 +126,8 @@ class AgentBridge:
             content: 纯文本字符串或多模态 content blocks 列表。
             tool_mode: 工具执行模式。
         """
+        # 新一轮对话，清理上一轮残留的 agent 追踪状态
+        self._active_agent_runs.clear()
         input_data = {
             "messages": [HumanMessage(content=content)],
             "tool_mode": tool_mode,
@@ -133,7 +139,9 @@ class AgentBridge:
         """恢复中断并 yield 事件流
 
         恢复时工具已通过审批，使用 "auto" 跳过审批判断。
+        清理 _active_agent_runs：replay 会重新发出 agent 的 start 事件来重建。
         """
+        self._active_agent_runs.clear()
         input_data = Command(resume=value)
         async for event in self._stream(input_data, tool_mode="auto"):
             yield event
@@ -174,9 +182,32 @@ class AgentBridge:
                 context=self._context,
             ):
                 kind = event.get("event", "")
+                run_id = event.get("run_id", "")
+                parent_ids = event.get("parent_ids", [])
+
+                # 判断当前事件是否属于子代理：
+                # 排除当前事件自身的 run_id，避免 agent 工具的
+                # on_tool_start 把自己误判为子代理事件
+                parent_id = ""
+                if self._active_agent_runs and parent_ids:
+                    candidates = self._active_agent_runs & (set(parent_ids) - {run_id})
+                    if candidates:
+                        parent_id = next(iter(candidates))
+
+                # agent 工具开始时记录 run_id（放在匹配之后，
+                # 确保 agent 自身的 on_tool_start 不会自匹配）
+                if kind == "on_tool_start" and event.get("name") == "agent":
+                    self._active_agent_runs.add(run_id)
+
+                # agent 工具结束时移除 run_id，避免残留影响后续匹配
+                if kind == "on_tool_end" and event.get("name") == "agent":
+                    self._active_agent_runs.discard(run_id)
 
                 if kind == "on_chat_model_start":
-                    yield BridgeEvent(kind=EventKind.MODEL_START)
+                    yield BridgeEvent(
+                        kind=EventKind.MODEL_START,
+                        parent_run_id=parent_id,
+                    )
 
                 elif kind == "on_chat_model_stream":
                     chunk = event.get("data", {}).get("chunk")
@@ -188,18 +219,23 @@ class AgentBridge:
                                 kind=EventKind.STREAM_TOKEN,
                                 text=text,
                                 usage_metadata=usage,
+                                parent_run_id=parent_id,
                             )
                         elif self._has_tool_call_chunk(chunk):
-                            # LLM 正在生成工具调用参数，通知 TUI 显示 loading
                             yield BridgeEvent(
                                 kind=EventKind.TOOL_CALL_CHUNK,
                                 usage_metadata=usage,
+                                parent_run_id=parent_id,
                             )
 
                 elif kind == "on_chat_model_end":
                     output = event.get("data", {}).get("output")
                     usage = self._extract_usage(output) if output else None
-                    yield BridgeEvent(kind=EventKind.MODEL_END, usage_metadata=usage)
+                    yield BridgeEvent(
+                        kind=EventKind.MODEL_END,
+                        usage_metadata=usage,
+                        parent_run_id=parent_id,
+                    )
 
                 elif kind == "on_tool_start":
                     name = event.get("name", "unknown")
@@ -215,7 +251,6 @@ class AgentBridge:
                     else:
                         tool_call_id = ""
                         args = {}
-                    # 判断是否处于审批模式：非 auto 模式且工具不在免审批列表中
                     approval_mode = (
                         tool_mode != "auto" and name not in APPROVAL_BYPASS_TOOLS
                     )
@@ -225,14 +260,14 @@ class AgentBridge:
                         args=args,
                         tool_call_id=tool_call_id,
                         approval_mode=approval_mode,
+                        parent_run_id=parent_id,
+                        run_id=run_id if name == "agent" else "",
                     )
 
                 elif kind == "on_tool_end":
                     name = event.get("name", "unknown")
                     data = event.get("data", {})
                     output = data.get("output", "")
-                    # Command 返回值（如 ask 工具）不适合直接 str()，
-                    # 提取其中 ToolMessage 的 content 作为展示文本
                     if isinstance(output, Command):
                         msgs = (output.update or {}).get("messages", [])
                         if msgs and hasattr(msgs[0], "content"):
@@ -250,6 +285,8 @@ class AgentBridge:
                         name=name,
                         output=str(output) if output else "",
                         tool_call_id=tool_call_id,
+                        parent_run_id=parent_id,
+                        run_id=run_id if name == "agent" else "",
                     )
 
             # 流结束后检测中断
@@ -261,6 +298,12 @@ class AgentBridge:
         except Exception as e:
             logger.error(f"[AgentBridge] 流式事件错误: {e}", exc_info=True)
             yield BridgeEvent(kind=EventKind.ERROR, error=str(e))
+
+    def _subagent_marker(self) -> str:
+        """如果当前有活跃的 agent 工具运行，返回其 run_id 作为子代理标记。"""
+        if self._active_agent_runs:
+            return next(iter(self._active_agent_runs))
+        return ""
 
     async def _check_interrupts(self) -> BridgeEvent:
         """检查中断，返回对应事件"""
@@ -290,9 +333,17 @@ class AgentBridge:
                 if isinstance(data, dict):
                     interrupt_type = data.get("type", "")
                     if interrupt_type == "ask":
-                        return BridgeEvent(kind=EventKind.ASK, data=data)
+                        return BridgeEvent(
+                            kind=EventKind.ASK,
+                            data=data,
+                            parent_run_id=self._subagent_marker(),
+                        )
                     elif interrupt_type == "tool_approval":
-                        return BridgeEvent(kind=EventKind.TOOL_APPROVAL, data=data)
+                        return BridgeEvent(
+                            kind=EventKind.TOOL_APPROVAL,
+                            data=data,
+                            parent_run_id=self._subagent_marker(),
+                        )
 
         logger.warning(f"[AgentBridge] 未知中断类型, next={state.next}")
         return BridgeEvent(kind=EventKind.DONE)

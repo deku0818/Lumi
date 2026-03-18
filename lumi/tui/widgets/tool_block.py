@@ -13,7 +13,7 @@ from textual.widget import Widget
 from textual.widgets import Collapsible, Static
 
 from lumi.tui.renderers import get as get_renderer
-from lumi.tui.renderers.utils import SPINNER_FRAMES, SpinnerMixin, escape_markup
+from lumi.tui.renderers.utils import BLINK_FRAMES, SpinnerMixin
 from lumi.tui.renderers.default import DefaultRenderer
 from lumi.tui.theme import get_color
 
@@ -39,6 +39,7 @@ class ToolBlock(Vertical, SpinnerMixin):
     通过 ToolDisplayRegistry 获取对应渲染器，生成专属的标题、参数和输出展示。
     审批模式下自动展开详细内容，便于用户审阅。
     运行中时标题行显示 spinner 动画。
+    agent 工具类型额外提供子代理日志容器，用于嵌套展示子代理的执行过程。
     """
 
     DEFAULT_CSS = """
@@ -75,6 +76,17 @@ class ToolBlock(Vertical, SpinnerMixin):
         padding: 0 1;
         color: $text-muted;
     }
+
+    ToolBlock .subagent-log {
+        padding: 0 0 0 1;
+        margin: 0 0 0 1;
+        border-left: solid $text-muted;
+        height: auto;
+    }
+
+    ToolBlock .subagent-log ToolBlock {
+        margin: 0 0 0 0;
+    }
     """
 
     def __init__(self, name: str, args: dict, approval_mode: bool = False) -> None:
@@ -84,6 +96,7 @@ class ToolBlock(Vertical, SpinnerMixin):
         self._approval_mode = approval_mode
         self._status = ToolStatus.RUNNING
         self._interactive: Widget | None = None
+        self._is_agent = name == "agent"
 
         self._renderer = get_renderer(name)
 
@@ -97,7 +110,7 @@ class ToolBlock(Vertical, SpinnerMixin):
             self._title_text = _FALLBACK_RENDERER.render_title(name, args)
 
     def compose(self) -> ComposeResult:
-        """组合子组件：标题 + 参数区域 + 输出区域"""
+        """组合子组件：标题 + 参数区域 + (子代理日志) + 输出区域"""
         title_markup = self._build_title_markup()
         collapsed = not self._approval_mode  # 审批模式自动展开
 
@@ -122,6 +135,12 @@ class ToolBlock(Vertical, SpinnerMixin):
             id=f"tool-{id(self)}",
         ):
             yield args_widget
+            # agent 工具额外提供子代理日志容器
+            if self._is_agent:
+                yield Vertical(
+                    classes="subagent-log",
+                    id=f"subagent-log-{id(self)}",
+                )
             yield Static(
                 "",
                 classes="tool-output",
@@ -130,9 +149,9 @@ class ToolBlock(Vertical, SpinnerMixin):
             )
 
     def on_mount(self) -> None:
-        """挂载后启动 spinner 动画"""
+        """挂载后启动闪烁动画"""
         if self._status == ToolStatus.RUNNING:
-            self._start_spinner()
+            self._start_spinner(interval=0.5)
 
     def _on_spinner_tick(self, frame_char: str) -> None:
         """SpinnerMixin 回调：更新标题行 spinner"""
@@ -149,10 +168,10 @@ class ToolBlock(Vertical, SpinnerMixin):
             )
             self._stop_spinner()
 
-    def _running_status_text(self) -> str:
-        """生成带 spinner 的运行状态文本"""
-        frame = SPINNER_FRAMES[self._spinner_frame % len(SPINNER_FRAMES)]
-        return f"[{get_color('text_muted')}]{frame}[/]"
+    def _running_status_text(self) -> Text:
+        """生成带闪烁效果的运行状态文本"""
+        frame = BLINK_FRAMES[self._spinner_frame % len(BLINK_FRAMES)]
+        return Text(frame, style=get_color("text_muted"))
 
     async def mount_interactive(self, widget: Widget) -> None:
         """将交互组件挂载到 Collapsible 内容区（output Static 之前）"""
@@ -240,40 +259,54 @@ class ToolBlock(Vertical, SpinnerMixin):
     def approval_mode(self) -> bool:
         return self._approval_mode
 
-    def _get_symbol(self) -> str:
+    def _get_symbol(self) -> Text:
         """根据状态返回带颜色的圆圈符号"""
         match self._status:
             case ToolStatus.RUNNING:
                 return self._running_status_text()
             case ToolStatus.WAITING:
-                return f"[{get_color('warning')}]○[/]"
+                return Text("○", style=get_color("warning"))
             case ToolStatus.DONE:
-                return f"[{get_color('success')}]●[/]"
+                return Text("●", style=get_color("success"))
             case ToolStatus.ERROR | ToolStatus.INTERRUPTED:
-                return f"[{get_color('error')}]●[/]"
+                return Text("●", style=get_color("error"))
             case _:
-                return "●"
+                return Text("●")
 
-    def _build_title_markup(self) -> str:
-        """构建标题 markup，圆圈颜色反映状态，标题文字保持白色"""
-        if self._status in (ToolStatus.RUNNING, ToolStatus.WAITING):
-            hint = ""
-        else:
-            # 根据折叠状态显示不同提示
-            try:
-                collapsed = self.query_one(Collapsible).collapsed
-            except NoMatches:
-                collapsed = True
-            tip = "click to expand" if collapsed else "click to collapse"
-            hint = f" [{get_color('text_muted')}]({tip})[/]"
-        return f"{self._get_symbol()} {escape_markup(self._title_text)}{hint}"
+    def _build_title_markup(self) -> Text:
+        """构建标题，圆圈颜色反映状态，标题文字保持默认色"""
+        return Text.assemble(self._get_symbol(), " ", self._title_text)
 
     def on_collapsible_toggled(self, event: Collapsible.Toggled) -> None:
-        """折叠/展开时更新标题提示文字"""
+        """阻止折叠/展开事件冒泡"""
         event.stop()
+
+    @property
+    def subagent_log(self) -> Vertical | None:
+        """获取子代理日志容器（仅 agent 工具有效）"""
+        if not self._is_agent:
+            return None
+        try:
+            return self.query_one(f"#subagent-log-{id(self)}", Vertical)
+        except NoMatches:
+            return None
+
+    def reset_for_retry(self) -> None:
+        """重置 agent block 的 UI 状态以便在 cancel/reject 后复用。
+
+        清空子代理日志容器的子节点，恢复 RUNNING 状态和 spinner。
+        子代理的数据状态由 SubagentTracker 管理。
+        """
+        # 不清空子代理日志内容 — 保留历史记录。
+        # DOM 清理推迟到 _handle_tool_start 的 remap 分支，
+        # 仅在确认有新周期时才清空。
+        # 确保状态为 RUNNING
+        self._status = ToolStatus.RUNNING
+        self._start_spinner(interval=0.5)
         try:
             collapsible = self.query_one(Collapsible)
             collapsible.title = self._build_title_markup()
+            collapsible.collapsed = True
         except NoMatches:
             pass
 

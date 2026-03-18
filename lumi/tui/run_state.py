@@ -48,6 +48,12 @@ class RunContext:
     cache_read_tokens: int = 0
     cache_creation_tokens: int = 0
 
+    def finalize_assistant_msg(self) -> None:
+        """结束当前流式 AssistantMessage。"""
+        if self.assistant_msg is not None:
+            self.assistant_msg.finalize()
+            self.assistant_msg = None
+
     @property
     def is_running(self) -> bool:
         return self.phase != RunPhase.IDLE
