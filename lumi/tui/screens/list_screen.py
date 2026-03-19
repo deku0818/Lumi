@@ -84,16 +84,19 @@ class ListScreen(ModalScreen[str | None], Generic[T]):
     }
     """
 
-    def __init__(self, items: list[T]) -> None:
+    def __init__(self, items: list[T], *, initial_index: int = 0) -> None:
         """初始化列表弹窗。
 
         Args:
             items: 完整数据列表。
+            initial_index: 初始选中项索引，-1 表示最后一项。
         """
         super().__init__()
         self._all_items: list[T] = list(items)
         self._filtered: list[T] = list(items)
-        self._selected_index: int = 0
+        if initial_index < 0:
+            initial_index = max(0, len(items) + initial_index)
+        self._selected_index: int = initial_index
         self._item_widgets: list[Widget] = []
 
     # ── 子类必须实现 ──

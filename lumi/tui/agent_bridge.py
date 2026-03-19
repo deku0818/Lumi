@@ -17,6 +17,7 @@ from langgraph.types import Command
 from lumi.agents.core.graph import LumiAgent, create_agent
 from lumi.agents.core.node import APPROVAL_BYPASS_TOOLS
 from lumi.agents.core.scheme import LumiAgentContext
+from lumi.agents.tools.checkpoint import CheckpointInfo, ShadowGitManager
 from lumi.agents.tools.providers.mcp import get_mcp_session_manager
 from lumi.agents.tools.session import get_session_manager
 from lumi.utils.logger import logger
@@ -25,6 +26,7 @@ from lumi.utils.read_config import get_config
 from lumi.utils.thread_id import generate_thread_id
 
 if TYPE_CHECKING:
+    from pathlib import Path
     from langgraph.graph.state import CompiledStateGraph
 
 # LangChain 框架注入的内部字段，不传递给 TUI 渲染
@@ -74,6 +76,7 @@ class AgentBridge:
         self.model_name: str = ""
         # 活跃的 agent 工具 run_id 集合，跨 _stream 调用保持追踪（审批恢复场景）
         self._active_agent_runs: set[str] = set()
+        self._shadow: ShadowGitManager | None = None
 
     async def initialize(self) -> None:
         """初始化 Agent"""
@@ -115,6 +118,9 @@ class AgentBridge:
             configurable={"thread_id": thread_id},
             recursion_limit=recursion_limit,
         )
+        # 切换 shadow git manager
+        if self._shadow is not None:
+            self._shadow = ShadowGitManager(thread_id, self._shadow.project_dir)
         logger.info("[AgentBridge] 切换到会话: %s", thread_id)
 
     async def stream_response(
@@ -126,6 +132,9 @@ class AgentBridge:
             content: 纯文本字符串或多模态 content blocks 列表。
             tool_mode: 工具执行模式。
         """
+        # 在 agent 执行前创建 checkpoint（快照当前文件状态）
+        await self._create_checkpoint_before_turn(content)
+
         # 新一轮对话，清理上一轮残留的 agent 追踪状态
         self._active_agent_runs.clear()
         input_data = {
@@ -374,6 +383,141 @@ class AgentBridge:
                     if isinstance(item, dict) and item.get("type") == "text":
                         return item.get("text", "")
         return ""
+
+    # ── Shadow Git Checkpoint ──
+
+    def init_shadow_git(self, project_dir: "Path") -> None:
+        """初始化 shadow git manager
+
+        Args:
+            project_dir: 项目根目录路径
+        """
+        from pathlib import Path as _Path
+
+        tid = self.current_thread_id
+        if tid:
+            self._shadow = ShadowGitManager(tid, _Path(project_dir))
+
+    async def _create_checkpoint_before_turn(self, content: str | list) -> None:
+        """在每轮 agent 执行前创建 checkpoint。
+
+        从 content 提取用户消息摘要作为 label，
+        从 LangGraph state 获取当前 checkpoint_id。
+        """
+        if self._shadow is None:
+            return
+
+        try:
+            label = self._extract_label(content)
+
+            # 获取当前 LangGraph checkpoint_id
+            lg_cp_id = ""
+            lg_parent_cp_id = ""
+            if self._agent and self._config:
+                try:
+                    state = await self._agent.graph.aget_state(self._config)
+                    if state and state.config:
+                        configurable = state.config.get("configurable", {})
+                        lg_cp_id = configurable.get("checkpoint_id", "")
+                        # parent 是上一个 checkpoint
+                        parent_config = state.parent_config
+                        if parent_config:
+                            lg_parent_cp_id = parent_config.get("configurable", {}).get(
+                                "checkpoint_id", ""
+                            )
+                except Exception:
+                    logger.warning(
+                        "[AgentBridge] 获取 LangGraph checkpoint_id 失败，"
+                        "checkpoint 将无法回退 LangGraph 会话",
+                        exc_info=True,
+                    )
+
+            # 在线程池中执行 git 操作，避免阻塞事件循环
+            import asyncio
+
+            await asyncio.to_thread(
+                self._shadow.create_checkpoint,
+                label,
+                lg_cp_id,
+                lg_parent_cp_id,
+            )
+        except Exception:
+            logger.error("[AgentBridge] 创建 checkpoint 失败", exc_info=True)
+
+    async def list_checkpoints(self) -> list[CheckpointInfo]:
+        """列出当前 thread 的所有 checkpoint"""
+        if self._shadow is None:
+            return []
+        return await asyncio.to_thread(self._shadow.list_checkpoints)
+
+    async def rewind_to_checkpoint(
+        self, checkpoint: CheckpointInfo
+    ) -> tuple[bool, str]:
+        """回退到指定 checkpoint：恢复文件 + 回退 LangGraph 会话。
+
+        Args:
+            checkpoint: 要回退到的 checkpoint
+
+        Returns:
+            (success, error_message) 元组
+        """
+        if self._shadow is None:
+            return False, "Shadow Git 未初始化"
+
+        try:
+            import asyncio
+
+            # 1. 恢复文件（在线程池中执行）
+            file_ok = await asyncio.to_thread(
+                self._shadow.restore_checkpoint, checkpoint.commit_hash
+            )
+            if not file_ok:
+                return False, "文件恢复失败"
+
+            # 2. 回退 LangGraph 会话
+            if self._agent and self._config and checkpoint.langgraph_checkpoint_id:
+                try:
+                    graph = self._agent.graph
+                    # 构建包含目标 checkpoint_id 的 config，传给 aupdate_state 进行 fork
+                    target_config = {
+                        "configurable": {
+                            "thread_id": self.current_thread_id,
+                            "checkpoint_ns": "",
+                            "checkpoint_id": checkpoint.langgraph_checkpoint_id,
+                        }
+                    }
+                    # update_state 从目标 checkpoint fork，
+                    # 传空 values 不修改状态，as_node="__start__" 消除歧义
+                    fork_config = await graph.aupdate_state(
+                        target_config, values={}, as_node="__start__"
+                    )
+                    # 更新当前 config 以使用 fork 后的 checkpoint
+                    if fork_config and "configurable" in fork_config:
+                        self._config["configurable"].update(fork_config["configurable"])
+                except Exception:
+                    logger.error("[AgentBridge] LangGraph 会话回退失败", exc_info=True)
+                    return True, "文件已恢复，但 LangGraph 会话回退失败"
+
+            return True, ""
+
+        except Exception as e:
+            logger.error("[AgentBridge] rewind 失败", exc_info=True)
+            return False, str(e)
+
+    @staticmethod
+    def _extract_label(content: str | list) -> str:
+        """从用户消息中提取摘要 label"""
+        if isinstance(content, str):
+            return content.replace("\n", " ").strip()[:100]
+        if isinstance(content, list):
+            for block in content:
+                if isinstance(block, dict) and block.get("type") == "text":
+                    text = block.get("text", "")
+                    # 跳过系统注入的 XML 块
+                    if text.startswith("<"):
+                        continue
+                    return text.replace("\n", " ").strip()[:100]
+        return "checkpoint"
 
     @staticmethod
     def _extract_usage(obj) -> dict | None:

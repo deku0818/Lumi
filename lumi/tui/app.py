@@ -91,6 +91,8 @@ class LumiApp(App):
         self._command_registry = CommandRegistry()
         self._pending_system_commands: list[str] = []
         self._notification_poll_timer = None
+        self._last_esc: float = 0.0  # 双击 Esc 检测时间戳
+        self._rewind_checkpoints: dict = {}  # _open_rewind_screen 缓存
 
     def _query_safe(self, widget_type: type[Widget]) -> Widget | None:
         """按类型查询 widget，未挂载时返回 None 而非抛异常。"""
@@ -215,6 +217,11 @@ class LumiApp(App):
             chat_log = self.query_one(ChatLog)
             await chat_log.append_error("初始化失败:", str(e))
             return
+
+        # 初始化 Shadow Git Checkpoint
+        from pathlib import Path as _Path
+
+        self._bridge.init_shadow_git(_Path.cwd())
 
         # 配置 StatusLine（尝试从 OpenRouter 获取 context_length）
         from lumi.utils.model_info import fetch_model_info
@@ -346,6 +353,11 @@ class LumiApp(App):
         builtins: list[tuple[str, str, Callable[..., Awaitable[None]]]] = [
             ("skills", "查看所有可用技能", lambda _="": self._open_skills_screen()),
             ("resume", "恢复历史会话", lambda _="": self._open_resume_screen()),
+            (
+                "rewind",
+                "回退到历史 checkpoint（恢复文件和会话）",
+                lambda _="": self._open_rewind_screen(),
+            ),
             ("cron", "查看和管理定时任务", lambda _="": self._open_cron_screen()),
             (
                 "cron-notify",
@@ -515,6 +527,100 @@ class LumiApp(App):
         await chat_log.append_hint("● ", "已开始新会话")
         await chat_log.scroll_to_end()
 
+        self._run.reset_session()
+        self._interrupted = False
+        sl = self._query_safe(StatusLine)
+        if sl:
+            sl.refresh_display()
+
+    # ── Rewind ──
+
+    async def _open_rewind_screen(self) -> None:
+        """打开 rewind checkpoint 选择界面。"""
+        checkpoints = await self._bridge.list_checkpoints()
+        if not checkpoints:
+            chat_log = self.query_one(ChatLog)
+            await chat_log.append_hint("● ", "No checkpoints available")
+            return
+
+        # 缓存 checkpoint 列表，供回调使用（避免重复调用 list_checkpoints）
+        self._rewind_checkpoints = {cp.commit_hash: cp for cp in checkpoints}
+
+        # 正序展示（按时间从旧到新），初始选中最后一项（最新的 checkpoint）
+        from lumi.tui.screens.rewind_screen import RewindScreen
+
+        self.push_screen(
+            RewindScreen(checkpoints, initial_index=-1),
+            callback=self._on_rewind_done,
+        )
+
+    async def _on_rewind_done(self, commit_hash: str | None) -> None:
+        """Rewind 选择界面关闭后的回调。"""
+        if commit_hash is None:
+            self._rewind_checkpoints = {}
+            return
+
+        # 从缓存中查找选中的 checkpoint
+        target = self._rewind_checkpoints.get(commit_hash)
+        self._rewind_checkpoints = {}
+
+        if target is None:
+            chat_log = self.query_one(ChatLog)
+            await chat_log.append_hint("● ", "Checkpoint not found")
+            return
+
+        # 执行 rewind
+        success, warning = await self._bridge.rewind_to_checkpoint(target)
+
+        chat_log = self.query_one(ChatLog)
+        if not success:
+            await chat_log.append_hint(
+                "● ",
+                f"Rewind failed: {warning}",
+                style=f"dim {get_color('error')}",
+            )
+            return
+
+        # 清空 ChatLog 并从恢复后的 state 重新渲染历史消息
+        await chat_log.remove_children()
+
+        title = TitleBlock(
+            model_name=self._bridge.model_name,
+            id="title-block",
+        )
+        title.border_title = f"Lumi v{__version__}"
+        await chat_log.mount(title)
+
+        thread_id = self._bridge.current_thread_id
+        # 使用目标 checkpoint 记录的 langgraph_checkpoint_id 读取
+        # 该轮用户消息发送前的会话状态，确保恢复的消息不包含该轮及之后的内容
+        # 若为空（第一条消息之前），则跳过消息恢复，聊天窗口保持空白
+        if target.langgraph_checkpoint_id:
+            await self._restore_messages(
+                thread_id,
+                chat_log,
+                checkpoint_id=target.langgraph_checkpoint_id,
+            )
+
+        # 部分成功时显示警告（如文件已恢复但 LangGraph 会话回退失败）
+        if warning:
+            await chat_log.append_hint(
+                "● ",
+                warning,
+                style=f"dim {get_color('warning')}",
+            )
+
+        await chat_log.scroll_to_end()
+
+        # 将回退的 prompt 内容填充到输入框，用户可直接重新发送
+        try:
+            inp = self.query_one("#user-input", ChatInput)
+            inp.value = target.label
+            inp.move_cursor(inp.document.end)
+        except NoMatches:
+            logger.debug("[LumiApp] rewind 后未找到输入框组件")
+
+        # 重置运行状态
         self._run.reset_session()
         self._interrupted = False
         sl = self._query_safe(StatusLine)
@@ -697,7 +803,13 @@ class LumiApp(App):
         r"<user-input>(.*?)</user-input>", re.DOTALL
     )
 
-    async def _restore_messages(self, thread_id: str, chat_log: ChatLog) -> None:
+    async def _restore_messages(
+        self,
+        thread_id: str,
+        chat_log: ChatLog,
+        *,
+        checkpoint_id: str = "",
+    ) -> None:
         """从 checkpoint 恢复历史消息并渲染到 ChatLog。
 
         处理 human、ai（含 tool_calls）和 tool 类型消息。
@@ -706,13 +818,17 @@ class LumiApp(App):
         Args:
             thread_id: 会话线程 ID
             chat_log: 聊天日志组件
+            checkpoint_id: 指定 LangGraph checkpoint_id，为空则读取最新 HEAD
         """
         graph = self._bridge.graph
         if graph is None:
             return
 
         try:
-            config = {"configurable": {"thread_id": thread_id}}
+            configurable: dict[str, str] = {"thread_id": thread_id}
+            if checkpoint_id:
+                configurable["checkpoint_id"] = checkpoint_id
+            config = {"configurable": configurable}
             snapshot = await graph.aget_state(config)
             if not snapshot or not snapshot.values:
                 return
@@ -1446,6 +1562,8 @@ class LumiApp(App):
             await self._apply_theme_mode(result.theme_mode)
 
     async def action_cancel_generation(self) -> None:
+        import time as _time
+
         # 如果当前有 pushed screen（如 ResumeScreen、SettingsScreen），
         # dismiss 当前 screen 而非执行取消生成逻辑
         if len(self.screen_stack) > 1:
@@ -1488,6 +1606,15 @@ class LumiApp(App):
             )
             self._interrupted = True
             self._finish_run()
+            return
+
+        # IDLE 状态下双击 Esc → 打开 rewind 界面
+        now = _time.monotonic()
+        if now - self._last_esc < 0.5:
+            self._last_esc = 0.0
+            await self._open_rewind_screen()
+            return
+        self._last_esc = now
 
     async def action_quit_app(self) -> None:
         try:
@@ -1532,11 +1659,13 @@ class LumiApp(App):
         input_bar.show_exit_hint()
 
     def on_key(self, event: Key) -> None:
-        """任意非 Ctrl+C 按键重置双击退出窗口。"""
-        if event.key != "ctrl+c":
+        """任意非 Ctrl+C/Escape 按键重置双击退出/rewind 窗口。"""
+        if event.key != "ctrl+c" and event.key != "escape":
             if self._last_ctrl_c:
                 self._last_ctrl_c = 0.0
                 try:
                     self.query_one(InputBar).hide_exit_hint()
                 except NoMatches:
                     pass
+            if self._last_esc:
+                self._last_esc = 0.0
