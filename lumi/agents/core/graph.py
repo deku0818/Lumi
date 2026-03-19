@@ -162,6 +162,7 @@ async def create_agent(
     system_prompt: str | None = None,
     model_name: str | None = None,
     checkpoint: CheckpointMode | None = None,
+    permission_engine: PermissionEngine | None = None,
 ) -> tuple["LumiAgent", LumiAgentContext]:
     """创建 LumiAgent 及其上下文的工厂函数
 
@@ -173,6 +174,8 @@ async def create_agent(
         system_prompt: 系统提示词，默认从配置文件加载
         model_name: 模型名称，默认使用环境变量配置
         checkpoint: 检查点模式，None 表示不使用 checkpointer
+        permission_engine: 权限引擎实例，传入时复用（子 agent 场景），
+                           None 时新建
 
     Returns:
         (agent, context) 元组
@@ -186,12 +189,12 @@ async def create_agent(
     if model_name is None:
         model_name = get_default_model_name()
 
-    # 初始化权限引擎
-    try:
-        permission_engine = PermissionEngine(Path.cwd())
-    except Exception:
-        logger.error("权限引擎创建失败，将以无权限模式运行", exc_info=True)
-        permission_engine = None
+    # 复用或新建权限引擎
+    if permission_engine is None:
+        try:
+            permission_engine = PermissionEngine(Path.cwd())
+        except Exception:
+            logger.error("权限引擎创建失败，将以无权限模式运行", exc_info=True)
 
     checkpointer = await create_checkpointer(checkpoint)
     agent = LumiAgent(checkpointer=checkpointer)

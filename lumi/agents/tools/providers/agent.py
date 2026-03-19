@@ -103,11 +103,12 @@ async def agent(
     )
     tools = [t for t in all_tools if t.name != "agent"]
 
-    # 创建并执行agent（子agent不使用checkpointer）
+    # 创建并执行agent（子agent不使用checkpointer，复用主agent权限引擎）
     lumi_agent, context = await create_agent(
         tools=tools,
         system_prompt=agent_config.system_prompt,
         model_name=agent_config.model or None,
+        permission_engine=runtime.context.permission_engine,
     )
 
     tool_mode = runtime.state.get("tool_mode", "auto")

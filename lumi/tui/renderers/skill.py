@@ -11,6 +11,7 @@ from rich.text import Text
 from textual.widget import Widget
 from textual.widgets import Static
 
+from lumi.tui.renderers._core import register_renderer
 from lumi.tui.renderers.base import BaseRenderer
 from lumi.tui.theme import get_color
 
@@ -18,6 +19,7 @@ from lumi.tui.theme import get_color
 _PROMPT_MAX_LEN = 500
 
 
+@register_renderer("skill")
 class SkillRenderer(BaseRenderer):
     """skill 工具渲染器"""
 

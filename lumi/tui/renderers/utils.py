@@ -158,3 +158,34 @@ def render_status_output(output: str) -> Widget:
     if "error" in lower or "fail" in lower or "traceback" in lower:
         return Static(Text(output, style=get_color("error")))
     return Static(Text(output, style=get_color("success")))
+
+
+def make_summary_static(text: str, style: str | None = None) -> Static:
+    """生成一行折叠摘要 Static，统一视觉风格。
+
+    Args:
+        text: 摘要文本，如 "📄 50 行内容"
+        style: 自定义样式，默认使用 italic + text_muted
+    """
+    final_style = style or f"italic {get_color('text_muted')}"
+    return Static(Text(text, style=final_style))
+
+
+def render_truncated_text(
+    text: str,
+    max_len: int,
+    emoji: str,
+    header: str,
+) -> Static:
+    """长文本截断展示，带字符数提示。
+
+    Args:
+        text: 原始文本
+        max_len: 最大字符数
+        emoji: 前缀 emoji
+        header: 描述文本
+    """
+    if len(text) <= max_len:
+        return Static(text, markup=False)
+    summary = f"{emoji} {header}（共 {len(text)} 字符）"
+    return make_summary_static(summary)

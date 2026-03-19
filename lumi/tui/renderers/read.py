@@ -8,18 +8,18 @@
 from __future__ import annotations
 
 from rich.syntax import Syntax
-from rich.text import Text
 from textual.widget import Widget
 from textual.widgets import Static
 
+from lumi.tui.renderers._core import register_renderer
 from lumi.tui.renderers.base import BaseRenderer
-from lumi.tui.renderers.utils import guess_lexer
-from lumi.tui.theme import get_color
+from lumi.tui.renderers.utils import guess_lexer, make_summary_static
 
 # 折叠摘要的行数阈值
 _LINE_THRESHOLD = 50
 
 
+@register_renderer("read")
 class ReadRenderer(BaseRenderer):
     """read 工具渲染器"""
 
@@ -42,11 +42,7 @@ class ReadRenderer(BaseRenderer):
         line_count = len(lines)
 
         if line_count > _LINE_THRESHOLD:
-            summary = Text(
-                f"📄 {line_count} 行内容",
-                style=f"italic {get_color('text_muted')}",
-            )
-            return Static(summary)
+            return make_summary_static(f"📄 {line_count} 行内容")
 
         lexer = guess_lexer(self._path)
         syntax = Syntax(

@@ -14,13 +14,9 @@ from textual.widgets import Collapsible, Static
 
 from lumi.tui.renderers import get as get_renderer
 from lumi.tui.renderers.utils import BLINK_FRAMES, SpinnerMixin
-from lumi.tui.renderers.default import DefaultRenderer
 from lumi.tui.theme import get_color
 
 logger = logging.getLogger(__name__)
-
-# 回退用默认渲染器实例
-_FALLBACK_RENDERER = DefaultRenderer()
 
 
 class ToolStatus(StrEnum):
@@ -59,6 +55,8 @@ class ToolBlock(Vertical, SpinnerMixin):
     ToolBlock CollapsibleTitle {
         padding: 0;
         margin: 0;
+        color: $foreground;
+        text-style: none;
     }
 
     ToolBlock Contents {
@@ -101,31 +99,17 @@ class ToolBlock(Vertical, SpinnerMixin):
         self._renderer = get_renderer(name)
 
         # 预计算标题文本（不随 spinner 变化，避免每帧重复调用 render_title）
-        try:
-            self._title_text = self._renderer.render_title(name, args)
-        except Exception:
-            logger.warning(
-                "渲染器 render_title 失败，回退到默认渲染器: %s", name, exc_info=True
-            )
-            self._title_text = _FALLBACK_RENDERER.render_title(name, args)
+        self._title_text = self._renderer.render_title(name, args)
 
     def compose(self) -> ComposeResult:
         """组合子组件：标题 + 参数区域 + (子代理日志) + 输出区域"""
         title_markup = self._build_title_markup()
         collapsed = not self._approval_mode  # 审批模式自动展开
 
-        # 获取参数区域 Widget
-        try:
-            args_widget = self._renderer.render_args(
-                self._args, approval_mode=self._approval_mode
-            )
-        except Exception:
-            logger.warning(
-                "渲染器 render_args 失败，回退到默认渲染器: %s",
-                self._name,
-                exc_info=True,
-            )
-            args_widget = _FALLBACK_RENDERER.render_args(self._args)
+        # 获取参数区域 Widget（_SafeRenderer 已处理异常回退）
+        args_widget = self._renderer.render_args(
+            self._args, approval_mode=self._approval_mode
+        )
 
         with Collapsible(
             title=title_markup,
@@ -149,7 +133,8 @@ class ToolBlock(Vertical, SpinnerMixin):
             )
 
     def on_mount(self) -> None:
-        """挂载后启动闪烁动画"""
+        """挂载后刷新标题颜色并启动闪烁动画"""
+        self._update_title_label()
         if self._status == ToolStatus.RUNNING:
             self._start_spinner(interval=0.5)
 
@@ -158,8 +143,7 @@ class ToolBlock(Vertical, SpinnerMixin):
         if self._status != ToolStatus.RUNNING:
             return
         try:
-            collapsible = self.query_one(Collapsible)
-            collapsible.title = self._build_title_markup()
+            self._update_title_label()
         except NoMatches:
             pass  # 尚未挂载，下次再试
         except Exception:
@@ -171,7 +155,7 @@ class ToolBlock(Vertical, SpinnerMixin):
     def _running_status_text(self) -> Text:
         """生成带闪烁效果的运行状态文本"""
         frame = BLINK_FRAMES[self._spinner_frame % len(BLINK_FRAMES)]
-        return Text(frame, style=get_color("text_muted"))
+        return Text(frame, style=get_color("accent"))
 
     async def mount_interactive(self, widget: Widget) -> None:
         """将交互组件挂载到 Collapsible 内容区（output Static 之前）"""
@@ -182,9 +166,8 @@ class ToolBlock(Vertical, SpinnerMixin):
         await parent.mount(widget, before=output_widget)
         self._interactive = widget
         # 展开 Collapsible 以显示交互组件，刷新标题显示等待圆圈
-        collapsible = self.query_one(Collapsible)
-        collapsible.title = self._build_title_markup()
-        collapsible.collapsed = False
+        self._update_title_label()
+        self.query_one(Collapsible).collapsed = False
 
     def remove_interactive(self) -> None:
         """移除交互组件（decline 场景用）"""
@@ -199,9 +182,8 @@ class ToolBlock(Vertical, SpinnerMixin):
         self._status = ToolStatus.DONE
         self._stop_spinner()
         try:
-            collapsible = self.query_one(Collapsible)
-            collapsible.title = self._build_title_markup()
-            collapsible.collapsed = True
+            self._update_title_label()
+            self.query_one(Collapsible).collapsed = True
         except NoMatches:
             logger.debug(
                 "set_done: Collapsible 未挂载（compose 可能失败）: %s", self._name
@@ -210,26 +192,16 @@ class ToolBlock(Vertical, SpinnerMixin):
 
         if output:
             output_widget = self.query_one(f"#tool-output-{id(self)}", Static)
-            try:
-                new_widget = self._renderer.render_output(output)
-                # 从渲染器返回的 Static 中提取 renderable 更新现有 widget
-                output_widget.update(new_widget.renderable)
-            except Exception:
-                logger.warning(
-                    "渲染器 render_output 失败，回退到默认渲染器: %s",
-                    self._name,
-                    exc_info=True,
-                )
-                display = output if len(output) <= 500 else output[:500] + "\n..."
-                output_widget.update(display)
+            new_widget = self._renderer.render_output(output)
+            # 从渲染器返回的 Static 中提取 visual 更新现有 widget
+            output_widget.update(new_widget.visual)
 
     def set_error(self, error: str = "") -> None:
         """标记工具执行错误"""
         self._status = ToolStatus.ERROR
         self._stop_spinner()
         try:
-            collapsible = self.query_one(Collapsible)
-            collapsible.title = self._build_title_markup()
+            self._update_title_label()
         except NoMatches:
             logger.debug(
                 "set_error: Collapsible 未挂载（compose 可能失败）: %s", self._name
@@ -245,9 +217,8 @@ class ToolBlock(Vertical, SpinnerMixin):
         self._status = ToolStatus.INTERRUPTED
         self._stop_spinner()
         try:
-            collapsible = self.query_one(Collapsible)
-            collapsible.title = self._build_title_markup()
-            collapsible.collapsed = True
+            self._update_title_label()
+            self.query_one(Collapsible).collapsed = True
         except NoMatches:
             logger.debug("set_interrupted: Collapsible 未挂载: %s", self._name)
 
@@ -277,6 +248,27 @@ class ToolBlock(Vertical, SpinnerMixin):
         """构建标题，圆圈颜色反映状态，标题文字保持默认色"""
         return Text.assemble(self._get_symbol(), " ", self._title_text)
 
+    def _update_title_label(self) -> None:
+        """直接更新 CollapsibleTitle 显示内容以保留 Rich 样式。
+
+        Textual 8.x 的 Content.__eq__ 只比较文本不比较 spans，
+        导致 reactive 系统认为值未变化而跳过更新。
+        因此直接调用 update() 绕过 reactive 机制。
+        """
+        from textual.content import Content
+
+        collapsible = self.query_one(Collapsible)
+        title_widget = collapsible._title
+        label = Content.from_text(self._build_title_markup())
+        # collapsed_symbol / expanded_symbol 均为空字符串，
+        # 但仍需与 _update_label 保持一致的 assemble 格式
+        symbol = (
+            title_widget.collapsed_symbol
+            if title_widget.collapsed
+            else title_widget.expanded_symbol
+        )
+        title_widget.update(Content.assemble(symbol, " ", label))
+
     def on_collapsible_toggled(self, event: Collapsible.Toggled) -> None:
         """阻止折叠/展开事件冒泡"""
         event.stop()
@@ -304,9 +296,8 @@ class ToolBlock(Vertical, SpinnerMixin):
         self._status = ToolStatus.RUNNING
         self._start_spinner(interval=0.5)
         try:
-            collapsible = self.query_one(Collapsible)
-            collapsible.title = self._build_title_markup()
-            collapsible.collapsed = True
+            self._update_title_label()
+            self.query_one(Collapsible).collapsed = True
         except NoMatches:
             pass
 

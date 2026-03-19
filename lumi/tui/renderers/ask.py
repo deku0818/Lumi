@@ -10,10 +10,12 @@ from __future__ import annotations
 from textual.widget import Widget
 from textual.widgets import Static
 
+from lumi.tui.renderers._core import register_renderer
 from lumi.tui.renderers.base import BaseRenderer
 from lumi.tui.renderers.utils import truncate_for_title
 
 
+@register_renderer("ask")
 class AskRenderer(BaseRenderer):
     """ask 工具渲染器"""
 

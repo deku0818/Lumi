@@ -1,66 +1,80 @@
 """工具展示渲染器注册表
 
-按工具名称注册和查询对应的 ToolRenderer，未注册的工具返回默认渲染器。
+按工具名称查询对应的 ToolRenderer，未注册的工具返回默认渲染器。
+所有渲染器通过 _SafeRenderer 包装，确保异常时自动回退到 DefaultRenderer。
+注册由各渲染器模块的 @register_renderer 装饰器完成，本模块仅负责查询。
 """
 
 from __future__ import annotations
 
+import logging
+
+from textual.widget import Widget
+
+from lumi.tui.renderers._core import _REGISTRY
 from lumi.tui.renderers.default import DefaultRenderer
 from lumi.tui.renderers.protocol import ToolRenderer
 
-_REGISTRY: dict[str, type] = {}
-_DEFAULT_CLASS: type = DefaultRenderer
+logger = logging.getLogger(__name__)
 
 
-def register(name: str, renderer_cls: type) -> None:
-    """注册工具渲染器类
+class _SafeRenderer:
+    """渲染器安全包装，任何方法异常时回退到 DefaultRenderer。"""
 
-    Args:
-        name: 工具名称
-        renderer_cls: 对应的渲染器类（每次 get 时实例化）
-    """
-    _REGISTRY[name] = renderer_cls
+    def __init__(self, inner: ToolRenderer) -> None:
+        self._inner = inner
+
+    def render_title(self, name: str, args: dict) -> str:
+        try:
+            return self._inner.render_title(name, args)
+        except Exception:
+            logger.warning("render_title 失败，回退: %s", name, exc_info=True)
+            return DefaultRenderer().render_title(name, args)
+
+    def render_args(self, args: dict, *, approval_mode: bool = False) -> Widget:
+        try:
+            return self._inner.render_args(args, approval_mode=approval_mode)
+        except Exception:
+            logger.warning("render_args 失败，回退", exc_info=True)
+            return DefaultRenderer().render_args(args)
+
+    def render_output(self, output: str) -> Widget:
+        try:
+            return self._inner.render_output(output)
+        except Exception:
+            logger.warning("render_output 失败，回退", exc_info=True)
+            return DefaultRenderer().render_output(output)
 
 
 def get(name: str) -> ToolRenderer:
-    """获取工具渲染器，每次返回新实例避免跨 ToolBlock 的状态共享
+    """获取工具渲染器，异常时自动回退到 DefaultRenderer。
+
+    每次返回 _SafeRenderer 包装的新实例，避免跨 ToolBlock 的状态共享。
 
     Args:
         name: 工具名称
 
     Returns:
-        渲染器新实例，未注册时返回 DefaultRenderer 实例
+        _SafeRenderer 包装的渲染器实例，未注册时返回 DefaultRenderer
     """
-    cls = _REGISTRY.get(name, _DEFAULT_CLASS)
-    return cls()
+    cls = _REGISTRY.get(name, DefaultRenderer)
+    return _SafeRenderer(cls())
 
 
 def _register_builtins() -> None:
-    """注册所有内置工具渲染器，模块加载时自动调用
-
-    在函数内部导入各渲染器，避免循环导入。
-    """
-    from lumi.tui.renderers.ask import AskRenderer
-    from lumi.tui.renderers.bash import BashRenderer
-    from lumi.tui.renderers.edit import EditRenderer
-    from lumi.tui.renderers.glob import GlobRenderer
-    from lumi.tui.renderers.grep import GrepRenderer
-    from lumi.tui.renderers.read import ReadRenderer
-    from lumi.tui.renderers.skill import SkillRenderer
-    from lumi.tui.renderers.agent import AgentRenderer
-    from lumi.tui.renderers.todos import TodosRenderer
-    from lumi.tui.renderers.write import WriteRenderer
-
-    register("ask", AskRenderer)
-    register("write", WriteRenderer)
-    register("edit", EditRenderer)
-    register("read", ReadRenderer)
-    register("bash", BashRenderer)
-    register("glob", GlobRenderer)
-    register("grep", GrepRenderer)
-    register("todos", TodosRenderer)
-    register("agent", AgentRenderer)
-    register("skill", SkillRenderer)
+    """触发所有渲染器模块的导入，使装饰器执行注册。"""
+    from lumi.tui.renderers import (  # noqa: F401
+        agent,
+        ask,
+        bash,
+        edit,
+        glob,
+        grep,
+        read,
+        skill,
+        todos,
+        write,
+    )
 
 
 # 模块加载时自动注册内置渲染器

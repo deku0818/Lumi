@@ -3,9 +3,8 @@
 from __future__ import annotations
 
 import asyncio
-import re
 import sys
-from collections.abc import Awaitable, Callable
+from collections.abc import Awaitable, Callable, Sequence
 from datetime import datetime
 
 from textual.app import App, ComposeResult
@@ -21,7 +20,7 @@ from lumi.agents.cron.job_store import JobStore
 from lumi.agents.cron.run_log import RunLog
 from lumi.agents.cron.scheduler import Scheduler
 from lumi.agents.tools.providers.cron import init_cron_tool
-from lumi.tui.agent_bridge import AgentBridge, BridgeEvent, EventKind
+from lumi.tui.agent_bridge import AgentBridge, BridgeEvent
 from lumi.tui.run_state import RunContext, RunPhase
 from lumi.tui.subagent_tracker import SubagentTracker
 from lumi.tui.theme import APP_CSS, LUMI_DARK_THEME, LUMI_LIGHT_THEME, get_color
@@ -44,6 +43,8 @@ from lumi.utils.config.global_manager import GLOBAL_CONFIG_DIR
 from lumi.utils.logger import logger
 from lumi.utils.thread_id import generate_thread_id
 
+from lumi.tui.event_router import EventRouter
+from lumi.tui.message_restore import restore_messages
 from lumi.tui.slash_commands.registry import CommandRegistry
 from lumi.tui.slash_commands.models import CommandType, SlashCommand
 from lumi.tui.slash_commands.parser import parse_command_input
@@ -54,14 +55,6 @@ from typing import Final
 
 # 后台任务通知轮询间隔（秒）
 _NOTIFICATION_POLL_INTERVAL: Final = 2.0
-
-# 等待用户交互的阶段（计时暂停）
-_WAITING_PHASES: Final = frozenset({RunPhase.WAITING_ASK, RunPhase.WAITING_APPROVAL})
-
-# agent 工具因 cancel/reject 结束时的输出文本，匹配后 block 保持 RUNNING 以便复用
-_AGENT_CANCEL_OUTPUTS: Final = frozenset(
-    {"用户中断了工具调用请求", "用户拒绝了工具执行"}
-)
 
 
 class LumiApp(App):
@@ -198,6 +191,26 @@ class LumiApp(App):
         self._global_config = config
         await self._finish_mount()
 
+    async def _mount_title_block(
+        self, chat_log: ChatLog, recent_sessions: list | None = None
+    ) -> None:
+        """创建并挂载 TitleBlock，统一配置 model_name 和 border_title。"""
+        title = TitleBlock(
+            model_name=self._bridge.model_name,
+            recent_sessions=recent_sessions or [],
+            id="title-block",
+        )
+        title.border_title = f"Lumi v{__version__}"
+        await chat_log.mount(title)
+
+    def _reset_session_state(self) -> None:
+        """重置会话状态（reset_session + interrupted + StatusLine 刷新）。"""
+        self._run.reset_session()
+        self._interrupted = False
+        sl = self._query_safe(StatusLine)
+        if sl:
+            sl.refresh_display()
+
     async def _finish_mount(self) -> None:
         """应用主题、注入环境变量并初始化 Agent bridge。"""
         # 绑定 RunContext 到 RunStatusBar，使 spinner tick 可读取实时状态
@@ -246,13 +259,7 @@ class LumiApp(App):
         # TitleBlock 挂载到 ChatLog 内部，随聊天内容一起滚动
         chat_log = self.query_one(ChatLog)
         recent_sessions = await self._load_recent_sessions()
-        title = TitleBlock(
-            model_name=self._bridge.model_name,
-            recent_sessions=recent_sessions,
-            id="title-block",
-        )
-        title.border_title = f"Lumi v{__version__}"
-        await chat_log.mount(title)
+        await self._mount_title_block(chat_log, recent_sessions=recent_sessions)
 
         # 初始化斜杠命令系统
         self._init_slash_commands()
@@ -471,13 +478,7 @@ class LumiApp(App):
         self.push_screen(ResumeScreen(sessions), callback=self._on_resume_done)
 
     async def _on_resume_done(self, thread_id: str | None) -> None:
-        """会话恢复选择完成后的回调。
-
-        切换 thread_id，从 StateSnapshot 中读取历史消息并重新渲染到 ChatLog。
-
-        Args:
-            thread_id: 用户选择的 thread_id，取消时为 None
-        """
+        """会话恢复选择完成后的回调：切换 thread_id 并重新渲染历史消息。"""
         if thread_id is None:
             return
 
@@ -487,25 +488,16 @@ class LumiApp(App):
         chat_log = self.query_one(ChatLog)
         await chat_log.remove_children()
 
-        title = TitleBlock(
-            model_name=self._bridge.model_name,
-            id="title-block",
-        )
-        title.border_title = f"Lumi v{__version__}"
-        await chat_log.mount(title)
+        await self._mount_title_block(chat_log)
 
         # 从 StateSnapshot 中恢复历史消息
-        await self._restore_messages(thread_id, chat_log)
+        await restore_messages(self._bridge.graph, chat_log, thread_id)
 
         await chat_log.append_hint("● ", f"已恢复会话 {thread_id[:16]}...")
         await chat_log.scroll_to_end()
 
         # 重置运行状态
-        self._run.reset_session()
-        self._interrupted = False
-        sl = self._query_safe(StatusLine)
-        if sl:
-            sl.refresh_display()
+        self._reset_session_state()
 
     # ── 清空对话 ──
 
@@ -517,21 +509,12 @@ class LumiApp(App):
         chat_log = self.query_one(ChatLog)
         await chat_log.remove_children()
 
-        title = TitleBlock(
-            model_name=self._bridge.model_name,
-            id="title-block",
-        )
-        title.border_title = f"Lumi v{__version__}"
-        await chat_log.mount(title)
+        await self._mount_title_block(chat_log)
 
         await chat_log.append_hint("● ", "已开始新会话")
         await chat_log.scroll_to_end()
 
-        self._run.reset_session()
-        self._interrupted = False
-        sl = self._query_safe(StatusLine)
-        if sl:
-            sl.refresh_display()
+        self._reset_session_state()
 
     # ── Rewind ──
 
@@ -584,21 +567,17 @@ class LumiApp(App):
         # 清空 ChatLog 并从恢复后的 state 重新渲染历史消息
         await chat_log.remove_children()
 
-        title = TitleBlock(
-            model_name=self._bridge.model_name,
-            id="title-block",
-        )
-        title.border_title = f"Lumi v{__version__}"
-        await chat_log.mount(title)
+        await self._mount_title_block(chat_log)
 
         thread_id = self._bridge.current_thread_id
         # 使用目标 checkpoint 记录的 langgraph_checkpoint_id 读取
         # 该轮用户消息发送前的会话状态，确保恢复的消息不包含该轮及之后的内容
         # 若为空（第一条消息之前），则跳过消息恢复，聊天窗口保持空白
         if target.langgraph_checkpoint_id:
-            await self._restore_messages(
-                thread_id,
+            await restore_messages(
+                self._bridge.graph,
                 chat_log,
+                thread_id,
                 checkpoint_id=target.langgraph_checkpoint_id,
             )
 
@@ -621,11 +600,22 @@ class LumiApp(App):
             logger.debug("[LumiApp] rewind 后未找到输入框组件")
 
         # 重置运行状态
-        self._run.reset_session()
-        self._interrupted = False
-        sl = self._query_safe(StatusLine)
-        if sl:
-            sl.refresh_display()
+        self._reset_session_state()
+
+    # ── 列表类 Screen 通用流程 ──
+
+    async def _push_list_screen(
+        self,
+        items: Sequence,
+        screen_factory: Callable[[Sequence], object],
+        empty_hint: str,
+        callback: Callable | None = None,
+    ) -> None:
+        """列表类 screen 的标准打开流程：空数据提示 / push screen。"""
+        if not items:
+            await self.query_one(ChatLog).append_hint("● ", empty_hint)
+            return
+        self.push_screen(screen_factory(items), callback=callback or (lambda _: None))
 
     # ── 技能列表 ──
 
@@ -634,21 +624,14 @@ class LumiApp(App):
         detector = SkillChangeDetector.get_instance()
         skills, _ = detector.check()
 
-        if not skills:
-            chat_log = self.query_one(ChatLog)
-            await chat_log.append_hint("● ", "暂无可用技能")
-            return
-
         from lumi.tui.screens.skills_screen import SkillsScreen
 
-        self.push_screen(SkillsScreen(skills), callback=self._on_skills_done)
+        await self._push_list_screen(
+            skills, SkillsScreen, "暂无可用技能", self._on_skills_done
+        )
 
     async def _on_skills_done(self, skill_name: str | None) -> None:
-        """技能列表界面关闭回调。
-
-        Args:
-            skill_name: 选中的技能名称，取消时为 None。
-        """
+        """技能列表界面关闭回调。"""
 
     # ── Agent 列表 ──
 
@@ -658,21 +641,14 @@ class LumiApp(App):
 
         agents = load_agents()
 
-        if not agents:
-            chat_log = self.query_one(ChatLog)
-            await chat_log.append_hint("● ", "暂无可用 Agent")
-            return
-
         from lumi.tui.screens.agents_screen import AgentsScreen
 
-        self.push_screen(AgentsScreen(agents), callback=self._on_agents_done)
+        await self._push_list_screen(
+            agents, AgentsScreen, "暂无可用 Agent", self._on_agents_done
+        )
 
     async def _on_agents_done(self, agent_name: str | None) -> None:
-        """Agent 列表界面关闭回调。
-
-        Args:
-            agent_name: 选中的 Agent 名称，取消时为 None。
-        """
+        """Agent 列表界面关闭回调。"""
 
     # ── 定时任务管理 ──
 
@@ -693,11 +669,7 @@ class LumiApp(App):
         )
 
     async def _delete_cron_job(self, job_id: str) -> None:
-        """执行实际的 cron 任务删除。
-
-        Args:
-            job_id: 要删除的任务 ID。
-        """
+        """执行实际的 cron 任务删除。"""
         if self._scheduler is None:
             logger.warning("[LumiApp] 无法删除任务 %s: 调度器未初始化", job_id)
             return
@@ -708,11 +680,7 @@ class LumiApp(App):
         await chat_log.append_hint("● ", f"已删除定时任务「{name}」({job_id})")
 
     async def _on_cron_done(self, result: str | None) -> None:
-        """定时任务管理界面关闭回调。
-
-        Args:
-            result: "changed" 表示有删除操作，None 表示无变更。
-        """
+        """定时任务管理界面关闭回调。"""
         if result == "changed":
             self._refresh_bell()
 
@@ -725,24 +693,17 @@ class LumiApp(App):
         store = NotificationStore()
         records = store.load()
 
-        if not records:
-            chat_log = self.query_one(ChatLog)
-            await chat_log.append_hint("● ", "暂无通知")
-            return
-
         from lumi.tui.screens.cron_notify_screen import CronNotifyScreen
 
-        self.push_screen(
-            CronNotifyScreen(records, store=store),
-            callback=self._on_cron_notify_done,
+        await self._push_list_screen(
+            records,
+            lambda r: CronNotifyScreen(r, store=store),
+            "暂无通知",
+            self._on_cron_notify_done,
         )
 
     async def _on_cron_notify_done(self, result: str | None) -> None:
-        """通知界面关闭回调，更新铃铛未读数。
-
-        Args:
-            result: "changed" 表示有变更，None 表示无变更。
-        """
+        """通知界面关闭回调，更新铃铛未读数。"""
         if result == "changed":
             self._refresh_bell()
 
@@ -755,14 +716,11 @@ class LumiApp(App):
         manager = get_mcp_session_manager()
         servers = manager.get_server_info()
 
-        if not servers:
-            chat_log = self.query_one(ChatLog)
-            await chat_log.append_hint("● ", "未配置任何 MCP 服务器")
-            return
-
         from lumi.tui.screens.mcp_screen import MCPScreen
 
-        self.push_screen(MCPScreen(servers), callback=self._on_mcp_done)
+        await self._push_list_screen(
+            servers, MCPScreen, "未配置任何 MCP 服务器", self._on_mcp_done
+        )
 
     async def _on_mcp_done(self, result: str | None) -> None:
         """MCP 界面关闭回调。"""
@@ -783,171 +741,6 @@ class LumiApp(App):
             logger.debug("[LumiApp] InputBar 尚未挂载，跳过铃铛更新")
         except Exception:
             logger.warning("[LumiApp] 铃铛更新失败, unread=%s", unread, exc_info=True)
-
-    # 工具被拒绝/中断时的输出关键词
-    _TOOL_REJECT_KEYWORDS: frozenset[str] = frozenset(
-        {
-            "用户拒绝了工具执行",
-            "用户中断了工具调用请求",
-            "User declined to answer questions",
-        }
-    )
-
-    # 从 system-reminder 中提取 command-name 的正则
-    _COMMAND_NAME_RE: re.Pattern[str] = re.compile(
-        r"<command-name>(/[\w-]+)</command-name>"
-    )
-
-    # 从消息中提取 user-input 的正则
-    _USER_INPUT_RE: re.Pattern[str] = re.compile(
-        r"<user-input>(.*?)</user-input>", re.DOTALL
-    )
-
-    async def _restore_messages(
-        self,
-        thread_id: str,
-        chat_log: ChatLog,
-        *,
-        checkpoint_id: str = "",
-    ) -> None:
-        """从 checkpoint 恢复历史消息并渲染到 ChatLog。
-
-        处理 human、ai（含 tool_calls）和 tool 类型消息。
-        先收集所有 tool 消息的输出，再按顺序渲染，确保 ToolBlock 能匹配到输出。
-
-        Args:
-            thread_id: 会话线程 ID
-            chat_log: 聊天日志组件
-            checkpoint_id: 指定 LangGraph checkpoint_id，为空则读取最新 HEAD
-        """
-        graph = self._bridge.graph
-        if graph is None:
-            return
-
-        try:
-            configurable: dict[str, str] = {"thread_id": thread_id}
-            if checkpoint_id:
-                configurable["checkpoint_id"] = checkpoint_id
-            config = {"configurable": configurable}
-            snapshot = await graph.aget_state(config)
-            if not snapshot or not snapshot.values:
-                return
-
-            messages = snapshot.values.get("messages", [])
-
-            # 预先收集所有 tool 消息的输出，key 为 tool_call_id
-            tool_outputs: dict[str, str] = {}
-            for msg in messages:
-                msg_type = getattr(msg, "type", None)
-                if msg_type == "tool":
-                    tc_id = getattr(msg, "tool_call_id", None)
-                    content = getattr(msg, "content", "")
-                    if tc_id:
-                        tool_outputs[tc_id] = self._extract_text_content(content)
-
-            for msg in messages:
-                msg_type = getattr(msg, "type", None) or (
-                    msg.get("type") if isinstance(msg, dict) else None
-                )
-                content = getattr(msg, "content", None) or (
-                    msg.get("content", "") if isinstance(msg, dict) else ""
-                )
-
-                if msg_type == "human":
-                    display = self._extract_human_display_text(content)
-                    if display:
-                        await chat_log.mount(UserMessage(display))
-
-                elif msg_type == "ai":
-                    # 渲染文本内容
-                    text = self._extract_text_content(content)
-                    if text:
-                        assistant_msg = AssistantMessage()
-                        await chat_log.mount(assistant_msg)
-                        assistant_msg.append_token(text)
-                        assistant_msg.finalize()
-
-                    # 渲染 tool_calls
-                    tool_calls = getattr(msg, "tool_calls", None) or []
-                    for tc in tool_calls:
-                        name = tc.get("name", "unknown")
-                        args = tc.get("args", {})
-                        tc_id = tc.get("id", "")
-                        block = ToolBlock(name, args)
-                        await chat_log.mount(block)
-                        output = tool_outputs.get(tc_id, "")
-                        if output in self._TOOL_REJECT_KEYWORDS:
-                            block.set_error(output)
-                        else:
-                            block.set_done(output)
-
-                # tool 类型消息已通过 tool_outputs 映射处理，跳过
-
-        except Exception as e:
-            logger.warning("恢复历史消息失败: %s", e, exc_info=True)
-            await chat_log.append_error("恢复历史消息失败:", str(e))
-
-    def _extract_human_display_text(self, content: str | list) -> str:
-        """从 human 消息中提取用于显示的文本。
-
-        技能命令消息从 <command-name> 和 <user-input> 标签还原用户输入，
-        如 "/media-digest 介绍下这个"。
-        非技能消息则过滤掉所有注入块（system-reminder、summary），返回剩余纯文本。
-
-        Args:
-            content: 字符串或多模态 content blocks 列表
-
-        Returns:
-            用于显示的文本
-        """
-        raw = self._extract_text_content(content)
-
-        # 从 command-name + user-input 还原用户输入
-        cmd_match = self._COMMAND_NAME_RE.search(raw)
-        if cmd_match:
-            cmd = cmd_match.group(1)
-            ui_match = self._USER_INPUT_RE.search(raw)
-            if ui_match:
-                user_input = ui_match.group(1).strip()
-                return f"{cmd} {user_input}" if user_input else cmd
-            return cmd
-
-        # 非技能消息：过滤所有注入块，只保留用户实际输入
-        cleaned = re.sub(
-            r"<system-reminder>.*?</system-reminder>\s*",
-            "",
-            raw,
-            flags=re.DOTALL,
-        )
-        cleaned = re.sub(
-            r"<summary>.*?</summary>\s*",
-            "",
-            cleaned,
-            flags=re.DOTALL,
-        )
-        return cleaned.strip()
-
-    @staticmethod
-    def _extract_text_content(content: str | list) -> str:
-        """从消息 content 中提取纯文本。
-
-        Args:
-            content: 字符串或多模态 content blocks 列表
-
-        Returns:
-            提取的文本内容
-        """
-        if isinstance(content, str):
-            return content
-        if isinstance(content, list):
-            parts = []
-            for block in content:
-                if isinstance(block, dict) and block.get("type") == "text":
-                    parts.append(block.get("text", ""))
-                elif isinstance(block, str):
-                    parts.append(block)
-            return "\n".join(parts)
-        return ""
 
     # ── 输入处理 ──
 
@@ -1048,298 +841,14 @@ class LumiApp(App):
 
     async def _consume_events(self, event_stream) -> None:
         chat_log = self.query_one(ChatLog)
+        router = EventRouter(self._run, self._subagent_tracker, self)
         try:
             async for evt in event_stream:
-                await self._apply_event(evt, chat_log)
+                await router.dispatch(evt, chat_log)
+                await chat_log.auto_scroll_if_needed()
         except Exception as e:
             logger.error(f"[TUI] 事件流异常: {e}", exc_info=True)
             await self._show_error(chat_log, str(e))
-
-    # ── 状态机 ──
-
-    def _transition(self, evt: BridgeEvent) -> tuple[RunPhase, RunPhase]:
-        """纯逻辑状态转换，不操作 DOM。返回 (old, new)。"""
-        old = self._run.phase
-        match evt.kind:
-            case EventKind.MODEL_START:
-                new = RunPhase.THINKING
-            case EventKind.STREAM_TOKEN:
-                new = RunPhase.STREAMING
-            case EventKind.MODEL_END:
-                new = old  # 不改变可见状态
-            case EventKind.TOOL_CALL_CHUNK:
-                new = RunPhase.TOOL_CALL_PENDING
-            case EventKind.TOOL_START:
-                new = RunPhase.TOOL_RUNNING
-            case EventKind.TOOL_END:
-                new = RunPhase.TOOL_RUNNING
-            case EventKind.ASK:
-                new = RunPhase.WAITING_ASK
-            case EventKind.TOOL_APPROVAL:
-                new = RunPhase.WAITING_APPROVAL
-            case EventKind.DONE | EventKind.ERROR:
-                new = RunPhase.IDLE
-            case _:
-                new = old
-        self._run.phase = new
-        return old, new
-
-    async def _apply_event(self, evt: BridgeEvent, chat_log: ChatLog) -> None:
-        """两阶段事件处理：先解析渲染上下文，再走统一分支。
-
-        子代理事件（parent_run_id 非空且非 TOOL_APPROVAL/ASK）
-        路由到对应 agent ToolBlock 的子容器，复用共享渲染方法；
-        主流程事件走完整的状态机转换 + 事件 handler。
-        """
-        # ── 1) 解析渲染上下文 ──
-        is_subagent = False
-        sa_state = None
-        if evt.parent_run_id and evt.kind not in (
-            EventKind.TOOL_APPROVAL,
-            EventKind.ASK,
-        ):
-            sa_state = self._subagent_tracker.get(evt.parent_run_id)
-            if sa_state is None:
-                logger.debug(
-                    "[_apply_event] subagent event DROPPED: kind=%s name=%s "
-                    "parent_run_id=%s (tracker miss)",
-                    evt.kind,
-                    evt.name,
-                    evt.parent_run_id,
-                )
-                return
-            log = sa_state.agent_block.subagent_log
-            if log is None:
-                logger.debug(
-                    "[_apply_event] subagent event DROPPED: kind=%s name=%s "
-                    "parent_run_id=%s (subagent_log is None)",
-                    evt.kind,
-                    evt.name,
-                    evt.parent_run_id,
-                )
-                return
-            mount_target, render_state = log, sa_state
-            is_subagent = True
-            logger.debug(
-                "[_apply_event] subagent routed: kind=%s name=%s "
-                "parent_run_id=%s tool_call_id=%s",
-                evt.kind,
-                evt.name,
-                evt.parent_run_id,
-                evt.tool_call_id,
-            )
-        else:
-            mount_target, render_state = chat_log, self._run
-
-        # ── 2) 主流程：状态机转换 + token 计数（子代理跳过）──
-        if not is_subagent:
-            old, new = self._transition(evt)
-
-            # 离开 STREAMING → finalize assistant message
-            if old == RunPhase.STREAMING and new != RunPhase.STREAMING:
-                self._finalize_assistant_msg()
-
-            # token 跟踪
-            if evt.kind == EventKind.STREAM_TOKEN:
-                self._run.count_stream_token()
-            self._run.accumulate_usage(evt.usage_metadata)
-            # MODEL_END 携带精确 total_tokens，累加到会话计数并刷新状态行
-            if evt.kind == EventKind.MODEL_END:
-                self._run.commit_model_usage(evt.usage_metadata)
-                sl = self._query_safe(StatusLine)
-                if sl:
-                    sl.refresh_display()
-
-            # 首次进入非 IDLE → 显示状态栏
-            if old == RunPhase.IDLE and new != RunPhase.IDLE:
-                bar = self._query_safe(RunStatusBar)
-                if bar:
-                    bar.show_running()
-
-            # 进入/离开等待用户交互阶段 → 暂停/恢复计时
-            if new in _WAITING_PHASES and old not in _WAITING_PHASES:
-                self._run.pause_timer()
-            elif old in _WAITING_PHASES and new not in _WAITING_PHASES:
-                self._run.resume_timer()
-
-        # ── 3) 子代理：pending_dom_clear 检查 ──
-        if is_subagent and sa_state.pending_dom_clear:
-            if evt.kind in (EventKind.STREAM_TOKEN, EventKind.TOOL_START):
-                await mount_target.remove_children()
-                sa_state.pending_dom_clear = False
-
-        # ── 4) 统一 match 分支 ──
-        match evt.kind:
-            case EventKind.STREAM_TOKEN:
-                if is_subagent:
-                    await self._render_stream_token(evt, mount_target, render_state)
-                else:
-                    await self._handle_stream_token(evt, chat_log)
-            case EventKind.TOOL_START:
-                if is_subagent:
-                    await self._render_tool_start(evt, mount_target, render_state)
-                else:
-                    await self._handle_tool_start(evt, chat_log)
-            case EventKind.TOOL_END:
-                if is_subagent:
-                    await self._render_tool_end(evt, render_state)
-                else:
-                    await self._handle_tool_end(evt, chat_log)
-            case EventKind.MODEL_END:
-                render_state.finalize_assistant_msg()
-                if not is_subagent:
-                    pass  # commit_model_usage 已在上方处理
-            case EventKind.ASK:
-                await self._handle_ask(evt, chat_log)
-            case EventKind.TOOL_APPROVAL:
-                await self._handle_tool_approval(evt, chat_log)
-            case EventKind.DONE:
-                # 从 state 补充 usage（仅当 MODEL_END 未提供 cache 详情时）
-                if evt.usage_metadata and not self._run.cache_read_tokens:
-                    self._run.commit_model_usage(evt.usage_metadata)
-                self._finish_run()
-            case EventKind.ERROR:
-                await self._show_error(chat_log, evt.error)
-
-        await chat_log.auto_scroll_if_needed()
-
-    # ── 共享渲染方法（主流程和子代理复用）──
-
-    async def _render_stream_token(self, evt: BridgeEvent, mount_target, state) -> None:
-        """创建或追加 AssistantMessage（主流程与子代理共用）。"""
-        if state.assistant_msg is None:
-            state.assistant_msg = AssistantMessage()
-            logger.debug(
-                "[_render] STREAM_TOKEN: new AssistantMessage mounted in %s",
-                type(mount_target).__name__,
-            )
-            await mount_target.mount(state.assistant_msg)
-        state.assistant_msg.append_token(evt.text)
-
-    async def _render_tool_start(self, evt: BridgeEvent, mount_target, state) -> None:
-        """创建 ToolBlock 并挂载（主流程与子代理共用）。"""
-        state.finalize_assistant_msg()
-        key = evt.tool_call_id or evt.name
-        if key not in state.tool_blocks:
-            block = ToolBlock(evt.name, evt.args or {})
-            state.tool_blocks[key] = block
-            logger.debug(
-                "[_render] TOOL_START: mounted ToolBlock(%s) key=%s in %s, "
-                "children_count=%d",
-                evt.name,
-                key,
-                type(mount_target).__name__,
-                len(mount_target.children),
-            )
-            await mount_target.mount(block)
-        else:
-            logger.debug(
-                "[_render] TOOL_START: key=%s already in tool_blocks, skip mount",
-                key,
-            )
-
-    async def _render_tool_end(self, evt: BridgeEvent, state) -> None:
-        """结束 ToolBlock（主流程与子代理共用）。"""
-        state.finalize_assistant_msg()
-        key = evt.tool_call_id or evt.name
-        block = state.tool_blocks.pop(key, None)
-        if block is None:
-            for k, b in list(state.tool_blocks.items()):
-                if b._name == evt.name:
-                    block = state.tool_blocks.pop(k)
-                    break
-        if block:
-            block.set_done(evt.output)
-            logger.debug(
-                "[_render] TOOL_END: set_done ToolBlock(%s) key=%s",
-                evt.name,
-                key,
-            )
-        else:
-            logger.warning(
-                "[_render] TOOL_END: ToolBlock NOT FOUND for name=%s key=%s "
-                "(tool_blocks keys: %s)",
-                evt.name,
-                key,
-                list(state.tool_blocks.keys()),
-            )
-
-    # ── 事件 handlers（已解耦 thinking 管理）──
-
-    async def _handle_stream_token(self, evt: BridgeEvent, chat_log: ChatLog) -> None:
-        await self._render_stream_token(evt, chat_log, self._run)
-        await chat_log.auto_scroll_if_needed()
-
-    async def _handle_tool_start(self, evt: BridgeEvent, chat_log: ChatLog) -> None:
-        # agent 工具用 run_id 作为 key（支持并发），其他工具用 tool_call_id 或 name
-        key = (
-            evt.run_id
-            if evt.name == "agent" and evt.run_id
-            else (evt.tool_call_id or evt.name)
-        )
-        # 审批模式下 ToolBlock 已在 TOOL_APPROVAL 阶段创建
-        if key not in self._run.tool_blocks:
-            # agent 工具：恢复场景下可能已有 block（replay 产生新 run_id），
-            # 从 tracker 中查找未映射的 RUNNING agent block 并重新关联
-            if evt.name == "agent" and evt.run_id:
-                existing = self._subagent_tracker.find_unmapped_running(evt.args)
-                if existing:
-                    self._subagent_tracker.remap(evt.run_id, existing)
-                    # DOM 清理推迟到子代理首个 STREAM_TOKEN/TOOL_START，
-                    # 避免 agent 被立即 cancel 时丢失上一周期的可视记录。
-                    self._run.tool_blocks[key] = existing
-                    await chat_log.auto_scroll_if_needed()
-                    return
-            block = ToolBlock(evt.name, evt.args or {}, approval_mode=evt.approval_mode)
-            self._run.tool_blocks[key] = block
-            if evt.name == "agent" and evt.run_id:
-                self._subagent_tracker.register(evt.run_id, block)
-            await chat_log.mount(block)
-        else:
-            # 已存在的 block，确保 tracker 映射更新（replay 场景）
-            if evt.name == "agent" and evt.run_id:
-                existing_block = self._run.tool_blocks[key]
-                if self._subagent_tracker.get(evt.run_id) is None:
-                    self._subagent_tracker.remap(evt.run_id, existing_block)
-        await chat_log.auto_scroll_if_needed()
-
-    async def _handle_tool_end(self, evt: BridgeEvent, chat_log: ChatLog) -> None:
-        # agent 工具用 run_id 作为 key（与 _handle_tool_start 一致）
-        key = (
-            evt.run_id
-            if evt.name == "agent" and evt.run_id
-            else (evt.tool_call_id or evt.name)
-        )
-        block = self._run.tool_blocks.pop(key, None)
-        # Fallback: tool_call_id 可能在 TOOL_START/END 间不一致
-        if block is None:
-            for k, b in list(self._run.tool_blocks.items()):
-                if b._name == evt.name:
-                    block = self._run.tool_blocks.pop(k)
-                    break
-        if block:
-            # agent 工具：replay 的 on_tool_end 没有 output，跳过 set_done
-            # 保持 block 在 RUNNING 状态，等待真正的结束事件
-            if block._is_agent and not evt.output:
-                self._run.tool_blocks[key] = block  # 放回 tool_blocks
-                await chat_log.auto_scroll_if_needed()
-                return
-            # agent 工具：cancel/reject 导致的结束，重置 block 以便 replay 复用
-            if block._is_agent and evt.output in _AGENT_CANCEL_OUTPUTS:
-                block.reset_for_retry()
-                self._run.tool_blocks[key] = block  # 放回 tool_blocks
-                if evt.run_id:
-                    # 标记为 unmapped 而非 unregister，使 find_unmapped_running 能找到
-                    self._subagent_tracker.mark_unmapped(evt.run_id)
-                await chat_log.auto_scroll_if_needed()
-                return
-            # agent 工具结束前，finalize 子代理残留的 AssistantMessage
-            if block._is_agent and evt.run_id:
-                sa_state = self._subagent_tracker.unregister(evt.run_id)
-                if sa_state:
-                    sa_state.finalize_assistant_msg()
-            block.set_done(evt.output)
-        await chat_log.auto_scroll_if_needed()
 
     async def _handle_ask(self, evt: BridgeEvent, chat_log: ChatLog) -> None:
         tool_call_id = (evt.data or {}).get("tool_call_id", "")
@@ -1355,7 +864,6 @@ class LumiApp(App):
         if block:
             dialog = AskDialog(evt.data)
             await block.mount_interactive(dialog)
-        await chat_log.auto_scroll_if_needed()
 
     async def _handle_tool_approval(self, evt: BridgeEvent, chat_log: ChatLog) -> None:
         self._finalize_assistant_msg()
@@ -1384,7 +892,6 @@ class LumiApp(App):
         else:
             self._subagent_tracker.clear_approval_context()
             await chat_log.mount(approval)
-        await chat_log.auto_scroll_if_needed()
 
     # ── 辅助方法 ──
 

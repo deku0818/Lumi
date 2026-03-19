@@ -160,9 +160,16 @@ class PermissionEngine:
     def add_allow_rule(self, tool_expr: str) -> None:
         """将 allow 规则追加到项目本地配置并更新内存。
 
+        已存在相同表达式的 allow 规则时跳过，避免重复。
+
         Args:
             tool_expr: 工具表达式，如 "bash(ls -la)" 或 "bash(ls *)"
         """
+        # 去重：内存中已有相同 allow 规则则跳过
+        for rule in self._config.permissions:
+            if rule.tool == tool_expr and rule.permission == Permission.ALLOW:
+                return
+
         new_rule = PermissionRule(tool=tool_expr, permission=Permission.ALLOW)
 
         # 更新内存中的配置
@@ -176,6 +183,14 @@ class PermissionEngine:
             local_cfg = self._loader.load_single(self._loader.local_config_path)
             if local_cfg is None:
                 local_cfg = PermissionConfig()
+            # 文件中也做去重检查
+            existing = {
+                r.tool
+                for r in local_cfg.permissions
+                if r.permission == Permission.ALLOW
+            }
+            if tool_expr in existing:
+                return
             updated = PermissionConfig(
                 workspaces=local_cfg.workspaces,
                 permissions=(*local_cfg.permissions, new_rule),

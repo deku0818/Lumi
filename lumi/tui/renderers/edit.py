@@ -14,6 +14,7 @@ from rich.text import Text
 from textual.widget import Widget
 from textual.widgets import Static
 
+from lumi.tui.renderers._core import register_renderer
 from lumi.tui.renderers.base import BaseRenderer
 from lumi.tui.renderers.utils import render_status_output
 from lumi.tui.theme import get_color
@@ -26,6 +27,7 @@ _STYLE_DEL = "on #351015"  # 红色背景 - 删除行
 _STYLE_ADD = "on #1a3520"  # 绿色背景 - 新增行
 
 
+@register_renderer("edit")
 class EditRenderer(BaseRenderer):
     """edit 工具渲染器"""
 

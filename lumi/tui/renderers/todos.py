@@ -11,6 +11,7 @@ from rich.text import Text
 from textual.widget import Widget
 from textual.widgets import Static
 
+from lumi.tui.renderers._core import register_renderer
 from lumi.tui.renderers.base import BaseRenderer
 from lumi.tui.theme import get_color
 
@@ -36,6 +37,7 @@ _STATUS_COLOR_ROLES: dict[str, str] = {
 }
 
 
+@register_renderer("todos")
 class TodosRenderer(BaseRenderer):
     """todos 工具渲染器"""
 

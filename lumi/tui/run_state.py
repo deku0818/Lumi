@@ -6,7 +6,7 @@ import asyncio
 from dataclasses import dataclass, field
 from enum import StrEnum
 from time import monotonic
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, Protocol
 
 if TYPE_CHECKING:
     from lumi.tui.widgets.assistant_message import AssistantMessage
@@ -23,6 +23,18 @@ class RunPhase(StrEnum):
     TOOL_RUNNING = "tool_running"
     WAITING_ASK = "waiting_ask"
     WAITING_APPROVAL = "waiting_approval"
+
+
+class RenderState(Protocol):
+    """渲染方法所需的最小状态接口。
+
+    RunContext（主流程）和 SubagentState（子代理）均满足此协议。
+    """
+
+    assistant_msg: AssistantMessage | None
+    tool_blocks: dict[str, ToolBlock]
+
+    def finalize_assistant_msg(self) -> None: ...
 
 
 @dataclass

@@ -24,7 +24,6 @@ from __future__ import annotations
 import logging
 from dataclasses import dataclass
 
-from textual.app import App
 from textual.theme import Theme
 
 logger = logging.getLogger(__name__)
@@ -142,7 +141,7 @@ LUMI_LIGHT_THEME = _build_theme("lumi-light", LIGHT_PALETTE, dark=False)
 def get_color(role: str) -> str:
     """获取当前主题下指定语义角色的颜色值。
 
-    通过 ``App.current()`` 获取当前运行的 app 实例，根据当前主题名
+    通过 ``active_app`` 上下文变量获取当前运行的 app 实例，根据当前主题名
     选择暗色或亮色色板，再按 *role* 取对应色值。
 
     用于 Rich markup 中需要具体十六进制色值的场景（Rich 不支持 $variable）。
@@ -154,7 +153,9 @@ def get_color(role: str) -> str:
         十六进制颜色字符串，如 ``"#ffcc00"``。
     """
     try:
-        app = App.current()
+        from textual import active_app
+
+        app = active_app.get()
         is_dark = getattr(app, "theme", "lumi-dark") == "lumi-dark"
     except LookupError:
         is_dark = True

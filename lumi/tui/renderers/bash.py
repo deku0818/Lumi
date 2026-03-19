@@ -12,8 +12,9 @@ from rich.text import Text
 from textual.widget import Widget
 from textual.widgets import Static
 
+from lumi.tui.renderers._core import register_renderer
 from lumi.tui.renderers.base import BaseRenderer
-from lumi.tui.renderers.utils import get_arg, truncate_for_title
+from lumi.tui.renderers.utils import get_arg, make_summary_static, truncate_for_title
 from lumi.tui.theme import get_color
 
 # 折叠摘要的输出行数阈值
@@ -25,6 +26,7 @@ _ERROR_KEYWORDS = frozenset(
 )
 
 
+@register_renderer("bash")
 class BashRenderer(BaseRenderer):
     """bash 工具渲染器"""
 
@@ -55,11 +57,7 @@ class BashRenderer(BaseRenderer):
         line_count = len(lines)
 
         if line_count > _OUTPUT_LINE_THRESHOLD:
-            summary = Text(
-                f"🖥️ {line_count} 行输出",
-                style=f"italic {get_color('text_muted')}",
-            )
-            return Static(summary)
+            return make_summary_static(f"🖥️ {line_count} 行输出")
 
         lower = output.lower()
         is_error = any(kw in lower for kw in _ERROR_KEYWORDS)

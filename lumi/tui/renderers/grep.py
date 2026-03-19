@@ -13,11 +13,13 @@ from rich.text import Text
 from textual.widget import Widget
 from textual.widgets import Static
 
+from lumi.tui.renderers._core import register_renderer
 from lumi.tui.renderers.base import BaseRenderer
 from lumi.tui.renderers.utils import get_arg
 from lumi.tui.theme import get_color
 
 
+@register_renderer("grep")
 class GrepRenderer(BaseRenderer):
     """grep 工具渲染器"""
 
