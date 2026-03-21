@@ -39,7 +39,7 @@ class SpinnerMixin:
     _spinner_frame: int = 0
     _spinner_timer: Timer | None = None
 
-    def _start_spinner(self, interval: float = 0.1) -> None:
+    def _start_spinner(self, interval: float = 0.2) -> None:
         self._spinner_frame = 0
         self._spinner_timer = self.set_interval(interval, self.__spinner_tick)  # type: ignore[attr-defined]
 

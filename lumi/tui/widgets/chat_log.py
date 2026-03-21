@@ -16,9 +16,13 @@ class ChatLog(VerticalScroll):
     }
     """
 
+    # scroll 节流间隔（秒）— 合并高频事件中的多次 scroll 为一次
+    _SCROLL_THROTTLE: float = 0.05
+
     def __init__(self, **kwargs) -> None:
         super().__init__(id="chat-log", **kwargs)
         self._auto_scroll = True
+        self._scroll_pending = False
 
     def on_scroll_up(self) -> None:
         """用户手动上滚时禁用自动滚动"""
@@ -36,7 +40,15 @@ class ChatLog(VerticalScroll):
         self.scroll_end(animate=False)
 
     async def auto_scroll_if_needed(self) -> None:
-        """如果自动滚动开启，则滚到底部"""
+        """节流式自动滚动：合并短时间内的多次调用为一次 scroll_end。"""
+        if not self._auto_scroll or self._scroll_pending:
+            return
+        self._scroll_pending = True
+        self.set_timer(self._SCROLL_THROTTLE, self._do_scroll)
+
+    def _do_scroll(self) -> None:
+        """定时器回调：执行实际的滚动操作。"""
+        self._scroll_pending = False
         if self._auto_scroll:
             self.scroll_end(animate=False)
 

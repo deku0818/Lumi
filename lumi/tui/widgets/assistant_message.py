@@ -45,8 +45,8 @@ class AssistantMessage(Horizontal):
     }
     """
 
-    # 节流间隔（秒）
-    _THROTTLE_INTERVAL: float = 0.05
+    # 节流间隔（秒）— 100ms 平衡流畅度与 Markdown 重解析开销
+    _THROTTLE_INTERVAL: float = 0.1
 
     def __init__(self) -> None:
         super().__init__(classes="assistant-message")

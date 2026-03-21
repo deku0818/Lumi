@@ -2,7 +2,6 @@
 
 from __future__ import annotations
 
-import logging
 from enum import StrEnum
 
 from rich.text import Text
@@ -15,8 +14,7 @@ from textual.widgets import Collapsible, Static
 from lumi.tui.renderers import get as get_renderer
 from lumi.tui.renderers.utils import BLINK_FRAMES, SpinnerMixin
 from lumi.tui.theme import get_color
-
-logger = logging.getLogger(__name__)
+from lumi.utils.logger import logger
 
 
 class ToolStatus(StrEnum):
@@ -87,7 +85,12 @@ class ToolBlock(Vertical, SpinnerMixin):
     }
     """
 
-    def __init__(self, name: str, args: dict, approval_mode: bool = False) -> None:
+    def __init__(
+        self,
+        name: str,
+        args: dict,
+        approval_mode: bool = False,
+    ) -> None:
         super().__init__(classes="tool-block")
         self._name = name
         self._args = args
@@ -95,6 +98,8 @@ class ToolBlock(Vertical, SpinnerMixin):
         self._status = ToolStatus.RUNNING
         self._interactive: Widget | None = None
         self._is_agent = name == "agent"
+        self._error_text: str = ""
+        self._output_text: str = ""
 
         self._renderer = get_renderer(name)
 
@@ -125,12 +130,6 @@ class ToolBlock(Vertical, SpinnerMixin):
                     classes="subagent-log",
                     id=f"subagent-log-{id(self)}",
                 )
-            yield Static(
-                "",
-                classes="tool-output",
-                id=f"tool-output-{id(self)}",
-                markup=False,
-            )
 
     def on_mount(self) -> None:
         """挂载后刷新标题颜色并启动闪烁动画"""
@@ -158,12 +157,11 @@ class ToolBlock(Vertical, SpinnerMixin):
         return Text(frame, style=get_color("accent"))
 
     async def mount_interactive(self, widget: Widget) -> None:
-        """将交互组件挂载到 Collapsible 内容区（output Static 之前）"""
+        """将交互组件挂载到 Collapsible 内容区"""
         self._status = ToolStatus.WAITING
         self._stop_spinner()
-        output_widget = self.query_one(f"#tool-output-{id(self)}", Static)
-        parent = output_widget.parent
-        await parent.mount(widget, before=output_widget)
+        contents = self.query_one(Collapsible).query_one("Contents")
+        await contents.mount(widget)
         self._interactive = widget
         # 展开 Collapsible 以显示交互组件，刷新标题显示等待圆圈
         self._update_title_label()
@@ -176,9 +174,9 @@ class ToolBlock(Vertical, SpinnerMixin):
             self._interactive = None
 
     def set_done(self, output: str = "") -> None:
-        """标记工具执行完成"""
-        # 如果交互组件仍在 DOM 中，先移除
+        """标记工具执行完成（输出文本存实例，展开时懒渲染）"""
         self.remove_interactive()
+        self._output_text = output
         self._status = ToolStatus.DONE
         self._stop_spinner()
         try:
@@ -188,17 +186,11 @@ class ToolBlock(Vertical, SpinnerMixin):
             logger.debug(
                 "set_done: Collapsible 未挂载（compose 可能失败）: %s", self._name
             )
-            return
-
-        if output:
-            output_widget = self.query_one(f"#tool-output-{id(self)}", Static)
-            new_widget = self._renderer.render_output(output)
-            # 从渲染器返回的 Static 中提取 visual 更新现有 widget
-            output_widget.update(new_widget.visual)
 
     def set_error(self, error: str = "") -> None:
-        """标记工具执行错误"""
+        """标记工具执行错误（错误文本存实例，展开时懒渲染）"""
         self._status = ToolStatus.ERROR
+        self._error_text = error
         self._stop_spinner()
         try:
             self._update_title_label()
@@ -206,10 +198,6 @@ class ToolBlock(Vertical, SpinnerMixin):
             logger.debug(
                 "set_error: Collapsible 未挂载（compose 可能失败）: %s", self._name
             )
-            return
-        if error:
-            output_widget = self.query_one(f"#tool-output-{id(self)}", Static)
-            output_widget.update(Text(error, style=get_color("text_muted")))
 
     def set_interrupted(self) -> None:
         """标记工具执行被用户中断"""
@@ -269,9 +257,47 @@ class ToolBlock(Vertical, SpinnerMixin):
         )
         title_widget.update(Content.assemble(symbol, " ", label))
 
-    def on_collapsible_toggled(self, event: Collapsible.Toggled) -> None:
-        """阻止折叠/展开事件冒泡"""
+    async def on_collapsible_expanded(self, event: Collapsible.Expanded) -> None:
+        """展开时懒渲染 output widget"""
         event.stop()
+        await self._mount_output()
+
+    async def on_collapsible_collapsed(self, event: Collapsible.Collapsed) -> None:
+        """折叠时销毁 output widget"""
+        event.stop()
+        await self._destroy_output()
+
+    def _get_contents(self) -> Widget:
+        """获取当前 ToolBlock 的 Collapsible Contents 容器"""
+        return self.query_one(Collapsible).query_one("Contents")
+
+    async def _mount_output(self) -> None:
+        """展开时按需渲染 output widget"""
+        contents = self._get_contents()
+        # 仅检查直接子节点，避免误判嵌套 ToolBlock 的 .tool-output
+        if any(w.has_class("tool-output") for w in contents.children):
+            return
+
+        widget: Widget | None = None
+        if self._error_text:
+            widget = Static(
+                Text(self._error_text, style=get_color("text_muted")),
+                classes="tool-output",
+                markup=False,
+            )
+        elif self._output_text:
+            widget = self._renderer.render_output(self._output_text)
+            widget.add_class("tool-output")
+
+        if widget is not None:
+            await contents.mount(widget)
+
+    async def _destroy_output(self) -> None:
+        """折叠时移除 output widget（仅当前层级，不影响嵌套 ToolBlock）"""
+        contents = self._get_contents()
+        for w in list(contents.children):
+            if w.has_class("tool-output"):
+                await w.remove()
 
     @property
     def subagent_log(self) -> Vertical | None:
@@ -292,6 +318,8 @@ class ToolBlock(Vertical, SpinnerMixin):
         # 不清空子代理日志内容 — 保留历史记录。
         # DOM 清理推迟到 _handle_tool_start 的 remap 分支，
         # 仅在确认有新周期时才清空。
+        self._error_text = ""
+        self._output_text = ""
         # 确保状态为 RUNNING
         self._status = ToolStatus.RUNNING
         self._start_spinner(interval=0.5)
