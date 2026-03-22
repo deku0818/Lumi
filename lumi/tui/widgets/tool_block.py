@@ -267,13 +267,19 @@ class ToolBlock(Vertical, SpinnerMixin):
         event.stop()
         await self._destroy_output()
 
-    def _get_contents(self) -> Widget:
+    def _get_contents(self) -> Widget | None:
         """获取当前 ToolBlock 的 Collapsible Contents 容器"""
-        return self.query_one(Collapsible).query_one("Contents")
+        try:
+            return self.query_one(Collapsible).query_one("Contents")
+        except NoMatches:
+            logger.warning("Contents not found in ToolBlock: %s", self._name)
+            return None
 
     async def _mount_output(self) -> None:
         """展开时按需渲染 output widget"""
         contents = self._get_contents()
+        if contents is None:
+            return
         # 仅检查直接子节点，避免误判嵌套 ToolBlock 的 .tool-output
         if any(w.has_class("tool-output") for w in contents.children):
             return
@@ -286,18 +292,47 @@ class ToolBlock(Vertical, SpinnerMixin):
                 markup=False,
             )
         elif self._output_text:
-            widget = self._renderer.render_output(self._output_text)
-            widget.add_class("tool-output")
+            try:
+                widget = self._renderer.render_output(self._output_text)
+                widget.add_class("tool-output")
+            except Exception:
+                logger.warning(
+                    "Renderer failed for ToolBlock %s, showing raw output",
+                    self._name,
+                    exc_info=True,
+                )
+                # 渲染器崩溃时回退到纯文本，让用户至少能看到输出
+                widget = Static(
+                    Text(self._output_text[:2000], style=get_color("text_muted")),
+                    classes="tool-output",
+                    markup=False,
+                )
 
         if widget is not None:
-            await contents.mount(widget)
+            try:
+                await contents.mount(widget)
+            except Exception:
+                logger.warning(
+                    "Failed to mount output widget for ToolBlock: %s",
+                    self._name,
+                    exc_info=True,
+                )
 
     async def _destroy_output(self) -> None:
         """折叠时移除 output widget（仅当前层级，不影响嵌套 ToolBlock）"""
         contents = self._get_contents()
+        if contents is None:
+            return
         for w in list(contents.children):
             if w.has_class("tool-output"):
-                await w.remove()
+                try:
+                    await w.remove()
+                except Exception:
+                    logger.warning(
+                        "Failed to remove output widget in ToolBlock: %s",
+                        self._name,
+                        exc_info=True,
+                    )
 
     @property
     def subagent_log(self) -> Vertical | None:
@@ -307,6 +342,7 @@ class ToolBlock(Vertical, SpinnerMixin):
         try:
             return self.query_one(f"#subagent-log-{id(self)}", Vertical)
         except NoMatches:
+            logger.debug("Subagent log container not found: %s", self._name)
             return None
 
     def reset_for_retry(self) -> None:
@@ -327,7 +363,7 @@ class ToolBlock(Vertical, SpinnerMixin):
             self._update_title_label()
             self.query_one(Collapsible).collapsed = True
         except NoMatches:
-            pass
+            logger.debug("reset_for_retry: Collapsible not found: %s", self._name)
 
     def on_ask_dialog_tab_changed(self, event) -> None:
         """阻止 AskDialog TabChanged 事件冒泡"""

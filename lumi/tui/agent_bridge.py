@@ -260,8 +260,10 @@ class AgentBridge:
                     else:
                         tool_call_id = ""
                         args = {}
+                    # "privileged" 模式：特权工具可绕过审批（与 "auto" 相同）
                     approval_mode = (
-                        tool_mode != "auto" and name not in APPROVAL_BYPASS_TOOLS
+                        tool_mode not in ("auto", "privileged")
+                        and name not in APPROVAL_BYPASS_TOOLS
                     )
                     yield BridgeEvent(
                         kind=EventKind.TOOL_START,
@@ -510,13 +512,25 @@ class AgentBridge:
         if isinstance(content, str):
             return content.replace("\n", " ").strip()[:100]
         if isinstance(content, list):
+            command_label = ""
             for block in content:
                 if isinstance(block, dict) and block.get("type") == "text":
                     text = block.get("text", "")
-                    # 跳过系统注入的 XML 块
+                    # 从 <command-name> 标签中提取命令名作为备选 label
+                    if text.startswith("<command-name>"):
+                        import re
+
+                        m = re.search(r"<command-name>(.*?)</command-name>", text)
+                        if m and not command_label:
+                            command_label = m.group(1).strip()
+                        continue
+                    # 跳过其他系统注入的 XML 块
                     if text.startswith("<"):
                         continue
                     return text.replace("\n", " ").strip()[:100]
+            # 所有 text block 都是系统注入的，使用命令名作为 label
+            if command_label:
+                return command_label[:100]
         return "checkpoint"
 
     @staticmethod

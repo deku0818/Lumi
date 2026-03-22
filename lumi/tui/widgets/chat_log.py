@@ -5,6 +5,7 @@ from textual.containers import VerticalScroll
 from textual.widgets import Static
 
 from lumi.tui.theme import get_color
+from lumi.utils.logger import logger
 
 
 class ChatLog(VerticalScroll):
@@ -48,9 +49,12 @@ class ChatLog(VerticalScroll):
 
     def _do_scroll(self) -> None:
         """定时器回调：执行实际的滚动操作。"""
-        self._scroll_pending = False
-        if self._auto_scroll:
-            self.scroll_end(animate=False)
+        try:
+            self._scroll_pending = False
+            if self._auto_scroll:
+                self.scroll_end(animate=False)
+        except Exception:
+            logger.debug("Scroll failed", exc_info=True)
 
     async def append_error(self, message: str, detail: str = "") -> None:
         """在聊天日志中追加错误提示行。
@@ -59,12 +63,20 @@ class ChatLog(VerticalScroll):
             message: 错误前缀文本（如 "初始化失败"）
             detail: 错误详情（可选）
         """
-        err = Text()
-        err.append(f"✗ {message}", style=f"bold {get_color('error')}")
-        if detail:
-            err.append(f" {detail}", style=get_color("error"))
-        await self.mount(Static(err, markup=False))
-        await self.auto_scroll_if_needed()
+        try:
+            err = Text()
+            err.append(f"✗ {message}", style=f"bold {get_color('error')}")
+            if detail:
+                err.append(f" {detail}", style=get_color("error"))
+            await self.mount(Static(err, markup=False))
+            await self.auto_scroll_if_needed()
+        except Exception:
+            logger.warning(
+                "Failed to append error message: %s (detail=%s)",
+                message,
+                detail,
+                exc_info=True,
+            )
 
     async def append_hint(self, prefix: str, text: str, *, style: str = "dim") -> None:
         """在聊天日志中追加提示行（如中断、面板关闭等）。
@@ -74,10 +86,18 @@ class ChatLog(VerticalScroll):
             text: 提示文本
             style: Rich 样式字符串
         """
-        hint = Text()
-        hint.append(prefix, style=style)
-        hint.append(text, style=style)
-        widget = Static(hint, markup=False)
-        widget.styles.padding = (0, 1)
-        await self.mount(widget)
-        await self.auto_scroll_if_needed()
+        try:
+            hint = Text()
+            hint.append(prefix, style=style)
+            hint.append(text, style=style)
+            widget = Static(hint, markup=False)
+            widget.styles.padding = (0, 1)
+            await self.mount(widget)
+            await self.auto_scroll_if_needed()
+        except Exception:
+            logger.warning(
+                "Failed to append hint: prefix=%r text=%r",
+                prefix,
+                text,
+                exc_info=True,
+            )

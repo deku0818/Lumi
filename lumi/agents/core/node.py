@@ -155,12 +155,25 @@ def is_use_tool(state: LumiAgentState, runtime: Runtime[LumiAgentContext]):
 
         if tool_mode == "auto":
             # auto 模式：全部 allow 才直接执行，否则需要审批
-            all_allowed = all(
-                engine.evaluate(tc["name"], tc.get("args", {}))
-                == PermissionDecision.ALLOW
-                and engine.check_workspace_boundary(tc["name"], tc.get("args", {}))
-                for tc in tool_calls
-            )
+            all_allowed = True
+            for tc in tool_calls:
+                name = tc["name"]
+                args = tc.get("args", {})
+                decision = engine.evaluate(name, args)
+                boundary_ok = engine.check_workspace_boundary(name, args)
+                if decision != PermissionDecision.ALLOW or not boundary_ok:
+                    logger.warning(
+                        "[权限调试] 工具 %s 未通过自动审批: decision=%s, boundary=%s, args=%s",
+                        name,
+                        decision.value,
+                        boundary_ok,
+                        {
+                            k: v
+                            for k, v in args.items()
+                            if isinstance(v, str) and len(str(v)) < 200
+                        },
+                    )
+                    all_allowed = False
             if all_allowed:
                 return "ToolExecutor"
             return "HumanApproval"
