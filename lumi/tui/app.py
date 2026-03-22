@@ -12,7 +12,6 @@ from textual.binding import Binding
 from textual.css.query import NoMatches
 from textual.events import Key
 from textual.widget import Widget
-from textual.widgets import Collapsible
 
 from lumi import __version__
 from lumi.agents.cron.delivery import DeliveryManager, TUIDelivery
@@ -882,24 +881,12 @@ class LumiApp(App):
             key = tc.get("id") or tc.get("name", "unknown")
             self._run.tool_blocks.pop(key, None)
         approval = ToolApproval(evt.data)
-        # 如果审批来自子代理，将审批 UI 挂载到 agent block 内部
+        # 子代理审批直接挂载到 chat_log（AgentGroup 模式下无嵌套 DOM）
         if evt.parent_run_id:
             self._subagent_tracker.set_approval_context(evt.parent_run_id)
-            agent_block = self._subagent_tracker.get_approval_block()
         else:
             self._subagent_tracker.clear_approval_context()
-            agent_block = None
-        if agent_block and agent_block.subagent_log is not None:
-            # 自动展开 agent block，确保用户能看到审批 UI
-            try:
-                collapsible = agent_block.query_one(Collapsible)
-                collapsible.collapsed = False
-            except NoMatches:
-                pass
-            await agent_block.subagent_log.mount(approval)
-        else:
-            self._subagent_tracker.clear_approval_context()
-            await chat_log.mount(approval)
+        await chat_log.mount(approval)
 
     # ── 辅助方法 ──
 
@@ -935,30 +922,26 @@ class LumiApp(App):
             # 从最近的 ToolApproval 数据中恢复工具信息
             if tool_calls is None:
                 tool_calls = self._run.last_approval_tool_calls
-            # 如果审批发生在子代理上下文中，ToolBlock 挂载到 agent block 内部
+            # AgentGroup 模式下，子代理审批拒绝/取消不创建 ToolBlock，
+            # 错误信息由 agent TOOL_END → finish_agent_error 在 AgentGroup 中展示
             agent_block = self._subagent_tracker.get_approval_block()
-            mount_target = (
-                agent_block.subagent_log
-                if agent_block and agent_block.subagent_log is not None
-                else chat_log
+            is_agent_group_mode = (
+                agent_block is not None and self._run.agent_group is not None
             )
-            for tc in tool_calls:
-                name = tc.get("name", "unknown")
-                args = tc.get("args", {})
-                block = ToolBlock(name, args)
-                await mount_target.mount(block)
-                msg = (
-                    "用户中断了审批" if decision == "cancel" else "用户拒绝了此工具执行"
-                )
-                block.set_error(msg)
+            if not is_agent_group_mode:
+                for tc in tool_calls:
+                    name = tc.get("name", "unknown")
+                    args = tc.get("args", {})
+                    block = ToolBlock(name, args)
+                    await chat_log.mount(block)
+                    msg = (
+                        "用户中断了审批"
+                        if decision == "cancel"
+                        else "用户拒绝了此工具执行"
+                    )
+                    block.set_error(msg)
             await chat_log.auto_scroll_if_needed()
-        # 审批结束：收起之前展开的 agent block
-        agent_block = self._subagent_tracker.get_approval_block()
-        if agent_block:
-            try:
-                agent_block.query_one(Collapsible).collapsed = True
-            except NoMatches:
-                pass
+        # 清理审批上下文
         self._subagent_tracker.clear_approval_context()
         await self._run_resume(decision)
 
@@ -1025,6 +1008,9 @@ class LumiApp(App):
                     block._name,
                 )
                 block.set_done()
+        # 兜底：确保 AgentGroup 已 finalize（中断/错误场景）
+        if self._run.agent_group is not None:
+            self._run.agent_group.force_finalize()
         # 刷新底部状态行（token 计数在 reset 前刷新）
         sl = self._query_safe(StatusLine)
         if sl:
@@ -1112,6 +1098,9 @@ class LumiApp(App):
             for block in self._run.tool_blocks.values():
                 if block.status == ToolStatus.RUNNING:
                     block.set_interrupted()
+            # 强制终止 AgentGroup（将未完成的 agent 标记为 interrupted）
+            if self._run.agent_group is not None:
+                self._run.agent_group.force_finalize()
             self._finalize_assistant_msg()
             chat_log = self.query_one(ChatLog)
             await chat_log.append_hint(

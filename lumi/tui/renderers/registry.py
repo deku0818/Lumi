@@ -24,6 +24,26 @@ class _SafeRenderer:
     def __init__(self, inner: ToolRenderer) -> None:
         self._inner = inner
 
+    # ── ToolGroup 分组属性转发 ──
+
+    @property
+    def group_verb(self) -> str:
+        return getattr(self._inner, "group_verb", "")
+
+    @property
+    def group_verb_active(self) -> str:
+        return getattr(self._inner, "group_verb_active", "")
+
+    @property
+    def group_noun(self) -> str:
+        return getattr(self._inner, "group_noun", "")
+
+    @property
+    def group_target_key(self) -> str:
+        return getattr(self._inner, "group_target_key", "") or getattr(
+            self._inner, "title_arg_key", ""
+        )
+
     def render_title(self, name: str, args: dict) -> str:
         try:
             return self._inner.render_title(name, args)

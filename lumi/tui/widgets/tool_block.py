@@ -38,7 +38,8 @@ class ToolBlock(Vertical, SpinnerMixin):
 
     DEFAULT_CSS = """
     ToolBlock {
-        margin: 0 1 1 0;
+        margin: 0 0 1 0;
+        padding: 0 1;
         height: auto;
     }
 
@@ -133,6 +134,17 @@ class ToolBlock(Vertical, SpinnerMixin):
 
     def on_mount(self) -> None:
         """挂载后刷新标题颜色并启动闪烁动画"""
+        # 覆盖 CollapsibleTitle._update_label，避免空 symbol 拼出前导空格
+        collapsible = self.query_one(Collapsible)
+        title_widget = collapsible._title
+        original_update_label = title_widget._update_label
+
+        def _patched_update_label() -> None:
+            original_update_label()
+            # 立即用我们的版本覆盖（去掉前导空格）
+            self._update_title_label()
+
+        title_widget._update_label = _patched_update_label
         self._update_title_label()
         if self._status == ToolStatus.RUNNING:
             self._start_spinner(interval=0.5)
@@ -249,13 +261,16 @@ class ToolBlock(Vertical, SpinnerMixin):
         title_widget = collapsible._title
         label = Content.from_text(self._build_title_markup())
         # collapsed_symbol / expanded_symbol 均为空字符串，
-        # 但仍需与 _update_label 保持一致的 assemble 格式
+        # 为空时直接用 label，避免前面多出一个空格导致 ● 右移
         symbol = (
             title_widget.collapsed_symbol
             if title_widget.collapsed
             else title_widget.expanded_symbol
         )
-        title_widget.update(Content.assemble(symbol, " ", label))
+        if symbol:
+            title_widget.update(Content.assemble(symbol, " ", label))
+        else:
+            title_widget.update(label)
 
     async def on_collapsible_expanded(self, event: Collapsible.Expanded) -> None:
         """展开时懒渲染 output widget"""

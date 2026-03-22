@@ -30,6 +30,10 @@ _ERROR_KEYWORDS = frozenset(
 class BashRenderer(BaseRenderer):
     """bash 工具渲染器"""
 
+    group_verb = "Ran"
+    group_verb_active = "Running"
+    group_noun = "command"
+
     def render_title(self, name: str, args: dict) -> str:
         """生成标题，格式: bash(命令)，多行/超长命令截断显示"""
         raw = get_arg(args, "command")

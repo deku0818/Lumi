@@ -2,19 +2,17 @@
 
 从 app.py 抽取事件处理逻辑，包括：
 - 状态机转换 (_transition)
-- 渲染上下文解析 (_resolve_context)
-- 共享渲染方法 (_render_stream_token / _render_tool_start / _render_tool_end)
 - 主流程 handler (_handle_stream_token / _handle_tool_start / _handle_tool_end)
+- AgentGroup 轻量摘要模式（子代理事件仅更新统计，不渲染 DOM）
 """
 
 from __future__ import annotations
 
 import logging
-from dataclasses import dataclass
 from typing import TYPE_CHECKING, Final, Protocol
 
 from lumi.tui.agent_bridge import BridgeEvent, EventKind
-from lumi.tui.run_state import RenderState, RunContext, RunPhase
+from lumi.tui.run_state import RunContext, RunPhase
 from lumi.tui.subagent_tracker import SubagentTracker
 
 if TYPE_CHECKING:
@@ -45,22 +43,11 @@ class AppCallbacks(Protocol):
     def _query_safe(self, widget_type: type[Widget]) -> Widget | None: ...
 
 
-@dataclass(frozen=True)
-class RenderContext:
-    """事件渲染上下文 — 统一 mount_target + state + is_subagent 三元组。"""
-
-    mount_target: Widget
-    """挂载目标：ChatLog（主流程）或 ToolBlock.subagent_log（子代理）"""
-
-    state: RenderState
-    """渲染状态：RunContext（主流程）或 SubagentState（子代理）"""
-
-    is_subagent: bool
-    """是否为子代理事件"""
-
-
 class EventRouter:
-    """统一的事件分发器，解耦事件解析与 UI 编排。"""
+    """统一的事件分发器，解耦事件解析与 UI 编排。
+
+    子代理事件走 AgentGroup 轻量摘要模式：仅更新统计数据，不渲染 DOM。
+    """
 
     def __init__(
         self,
@@ -76,70 +63,45 @@ class EventRouter:
 
     async def dispatch(self, evt: BridgeEvent, chat_log: ChatLog) -> None:
         """入口：解析上下文 → 状态转换 → 渲染分发。"""
-        # 1) 解析渲染上下文
-        ctx = self._resolve_context(evt, chat_log)
-        if ctx is None:
-            return  # 子代理事件被丢弃
-
-        # 2) 主流程：状态机转换 + token 计数（子代理跳过）
-        if not ctx.is_subagent:
-            self._apply_main_flow_transition(evt)
-
-        # 3) 子代理：pending_dom_clear 检查
-        if ctx.is_subagent:
-            sa_state = self._tracker.get(evt.parent_run_id)
-            if sa_state and sa_state.pending_dom_clear:
-                if evt.kind in (EventKind.STREAM_TOKEN, EventKind.TOOL_START):
-                    await ctx.mount_target.remove_children()
-                    sa_state.pending_dom_clear = False
-
-        # 4) 统一 match 分支
-        await self._route_event(evt, chat_log, ctx)
-
-    # ── 上下文解析 ──
-
-    def _resolve_context(
-        self, evt: BridgeEvent, chat_log: ChatLog
-    ) -> RenderContext | None:
-        """判定事件归属（主流程 or subagent），返回统一的渲染上下文。
-
-        子代理事件无法路由时返回 None（事件被丢弃）。
-        """
+        # 子代理事件走轻量统计路径（审批/ask 除外，需要 UI 交互）
         if evt.parent_run_id and evt.kind not in (
             EventKind.TOOL_APPROVAL,
             EventKind.ASK,
         ):
-            sa_state = self._tracker.get(evt.parent_run_id)
-            if sa_state is None:
-                logger.debug(
-                    "[EventRouter] subagent event DROPPED: kind=%s name=%s "
-                    "parent_run_id=%s (tracker miss)",
-                    evt.kind,
-                    evt.name,
-                    evt.parent_run_id,
-                )
-                return None
-            log = sa_state.agent_block.subagent_log
-            if log is None:
-                logger.debug(
-                    "[EventRouter] subagent event DROPPED: kind=%s name=%s "
-                    "parent_run_id=%s (subagent_log is None)",
-                    evt.kind,
-                    evt.name,
-                    evt.parent_run_id,
-                )
-                return None
-            logger.debug(
-                "[EventRouter] subagent routed: kind=%s name=%s "
-                "parent_run_id=%s tool_call_id=%s",
-                evt.kind,
-                evt.name,
-                evt.parent_run_id,
-                evt.tool_call_id,
-            )
-            return RenderContext(mount_target=log, state=sa_state, is_subagent=True)
+            self._dispatch_subagent(evt)
+            return
 
-        return RenderContext(mount_target=chat_log, state=self._run, is_subagent=False)
+        # 主流程事件
+        self._apply_main_flow_transition(evt)
+        await self._route_main_event(evt, chat_log)
+
+    # ── 子代理轻量路径 ──
+
+    def _dispatch_subagent(self, evt: BridgeEvent) -> None:
+        """子代理事件仅更新 AgentGroup 统计，不操作 DOM。"""
+        group = self._run.agent_group
+        if group is None:
+            logger.warning(
+                "Subagent event discarded: agent_group is None "
+                "(kind=%s, parent_run_id=%s)",
+                evt.kind,
+                evt.parent_run_id,
+            )
+            return
+        run_id = evt.parent_run_id
+        match evt.kind:
+            case EventKind.MODEL_START:
+                group.record_model_start(run_id)
+            case EventKind.STREAM_TOKEN:
+                group.record_stream_token(run_id, evt.text)
+            case EventKind.MODEL_END:
+                group.record_tokens(run_id, evt.usage_metadata)
+            case EventKind.TOOL_START:
+                group.record_tool_start(run_id, evt.name, evt.args or {})
+            case EventKind.TOOL_END:
+                group.record_tool_end(run_id)
+            case _:
+                pass
 
     # ── 状态机 ──
 
@@ -205,182 +167,175 @@ class EventRouter:
         elif old in _WAITING_PHASES and new not in _WAITING_PHASES:
             self._run.resume_timer()
 
-    # ── 事件路由 ──
+    # ── 主流程事件路由 ──
 
-    async def _route_event(
-        self, evt: BridgeEvent, chat_log: ChatLog, ctx: RenderContext
-    ) -> None:
-        """按 EventKind 分发到对应 handler 或 AppCallbacks。"""
+    async def _route_main_event(self, evt: BridgeEvent, chat_log: ChatLog) -> None:
+        """主流程事件分发（子代理事件已在 dispatch 中拦截）。"""
         match evt.kind:
             case EventKind.STREAM_TOKEN:
-                if ctx.is_subagent:
-                    await self._render_stream_token(evt, ctx.mount_target, ctx.state)
-                else:
-                    await self._handle_stream_token(evt, chat_log)
+                await self._handle_stream_token(evt, chat_log)
             case EventKind.TOOL_START:
-                if ctx.is_subagent:
-                    await self._render_tool_start(evt, ctx.mount_target, ctx.state)
-                else:
-                    await self._handle_tool_start(evt, chat_log)
+                await self._handle_tool_start(evt, chat_log)
             case EventKind.TOOL_END:
-                if ctx.is_subagent:
-                    await self._render_tool_end(evt, ctx.state)
-                else:
-                    await self._handle_tool_end(evt, chat_log)
+                await self._handle_tool_end(evt, chat_log)
             case EventKind.MODEL_END:
-                ctx.state.finalize_assistant_msg()
+                self._run.finalize_assistant_msg()
             case EventKind.ASK:
+                await self._finalize_active_group(chat_log)
                 await self._app._handle_ask(evt, chat_log)
             case EventKind.TOOL_APPROVAL:
+                await self._finalize_active_group(chat_log)
                 await self._app._handle_tool_approval(evt, chat_log)
             case EventKind.DONE:
-                # 从 state 补充 usage（仅当 MODEL_END 未提供 cache 详情时）
+                await self._finalize_active_group(chat_log)
                 if evt.usage_metadata and not self._run.cache_read_tokens:
                     self._run.commit_model_usage(evt.usage_metadata)
                 self._app._finish_run()
             case EventKind.ERROR:
+                await self._finalize_active_group(chat_log)
                 await self._app._show_error(chat_log, evt.error)
 
-    # ── 共享渲染方法（主流程和子代理复用）──
+    # ── ToolGroup 管理 ──
 
-    async def _render_stream_token(
-        self, evt: BridgeEvent, mount_target: Widget, state: RenderState
-    ) -> None:
-        """创建或追加 AssistantMessage（主流程与子代理共用）。"""
-        from lumi.tui.widgets.assistant_message import AssistantMessage
+    async def _finalize_active_group(self, chat_log: "ChatLog | None" = None) -> None:
+        """关闭当前活跃的 ToolGroup（遇到文本/交互事件时调用）。
 
-        if state.assistant_msg is None:
-            state.assistant_msg = AssistantMessage()
-            logger.debug(
-                "[EventRouter] STREAM_TOKEN: new AssistantMessage mounted in %s",
-                type(mount_target).__name__,
-            )
-            await mount_target.mount(state.assistant_msg)
-        state.assistant_msg.append_token(evt.text)
+        若只有一个待合并的 block（尚未创建 ToolGroup），直接挂载到 chat_log。
+        """
+        # 先处理待合并的单个 block
+        if self._run.pending_block is not None and chat_log is not None:
+            await chat_log.mount(self._run.pending_block)
+            self._run.pending_block = None
 
-    async def _render_tool_start(
-        self, evt: BridgeEvent, mount_target: Widget, state: RenderState
-    ) -> None:
-        """创建 ToolBlock 并挂载（主流程与子代理共用）。"""
-        from lumi.tui.widgets.tool_block import ToolBlock
-
-        state.finalize_assistant_msg()
-        key = evt.tool_call_id or evt.name
-        if key not in state.tool_blocks:
-            block = ToolBlock(evt.name, evt.args or {})
-            state.tool_blocks[key] = block
-            logger.debug(
-                "[EventRouter] TOOL_START: mounted ToolBlock(%s) key=%s in %s, "
-                "children_count=%d",
-                evt.name,
-                key,
-                type(mount_target).__name__,
-                len(mount_target.children),
-            )
-            await mount_target.mount(block)
-        else:
-            logger.debug(
-                "[EventRouter] TOOL_START: key=%s already in tool_blocks, skip mount",
-                key,
-            )
-
-    async def _render_tool_end(self, evt: BridgeEvent, state: RenderState) -> None:
-        """结束 ToolBlock（主流程与子代理共用）。"""
-        state.finalize_assistant_msg()
-        key = evt.tool_call_id or evt.name
-        block = state.tool_blocks.pop(key, None)
-        if block is None:
-            for k, b in list(state.tool_blocks.items()):
-                if b._name == evt.name:
-                    block = state.tool_blocks.pop(k)
-                    break
-        if block:
-            block.set_done(evt.output)
-            logger.debug(
-                "[EventRouter] TOOL_END: set_done ToolBlock(%s) key=%s",
-                evt.name,
-                key,
-            )
-        else:
-            logger.warning(
-                "[EventRouter] TOOL_END: ToolBlock NOT FOUND for name=%s key=%s "
-                "(tool_blocks keys: %s)",
-                evt.name,
-                key,
-                list(state.tool_blocks.keys()),
-            )
+        group = self._run.active_group
+        if group is None:
+            return
+        self._run.active_group = None
+        group.finalize_group()
 
     # ── 主流程 handlers ──
 
     async def _handle_stream_token(self, evt: BridgeEvent, chat_log: ChatLog) -> None:
-        await self._render_stream_token(evt, chat_log, self._run)
+        """主流程 STREAM_TOKEN 处理。"""
+        from lumi.tui.widgets.assistant_message import AssistantMessage
+
+        await self._finalize_active_group(chat_log)
+        if self._run.assistant_msg is None:
+            self._run.assistant_msg = AssistantMessage()
+            await chat_log.mount(self._run.assistant_msg)
+        self._run.assistant_msg.append_token(evt.text)
 
     async def _handle_tool_start(self, evt: BridgeEvent, chat_log: ChatLog) -> None:
-        """主流程 TOOL_START 处理，含 agent replay 逻辑。"""
-        from lumi.tui.widgets.tool_block import ToolBlock
+        """主流程 TOOL_START 处理。
 
-        # agent 工具用 run_id 作为 key（支持并发），其他工具用 tool_call_id 或 name
-        key = (
-            evt.run_id
-            if evt.name == "agent" and evt.run_id
-            else (evt.tool_call_id or evt.name)
-        )
-        # 审批模式下 ToolBlock 已在 TOOL_APPROVAL 阶段创建
+        agent 工具走 AgentGroup 轻量摘要模式，其他工具走 ToolGroup 合并。
+        """
+        from lumi.tui.widgets.agent_group import AgentGroup as AgentGroupCls
+        from lumi.tui.widgets.tool_block import ToolBlock
+        from lumi.tui.widgets.tool_group import ToolGroup, should_exclude_from_group
+
+        # agent 工具 → AgentGroup 轻量模式
+        if evt.name == "agent" and evt.run_id:
+            agent_name = (evt.args or {}).get("name", "agent")
+            prompt = (evt.args or {}).get("prompt", "")
+
+            # 创建或复用 AgentGroup
+            if self._run.agent_group is None:
+                await self._finalize_active_group(chat_log)
+                self._run.finalize_assistant_msg()
+                group = AgentGroupCls()
+                self._run.agent_group = group
+                await chat_log.mount(group)
+
+            self._run.agent_group.add_agent(evt.run_id, agent_name, prompt)
+            # 在 tracker 中注册（审批事件需要通过 tracker 找到 parent）
+            # 使用一个轻量占位 ToolBlock 仅用于 tracker 映射
+            placeholder = ToolBlock(evt.name, evt.args or {})
+            self._run.tool_blocks[evt.run_id] = placeholder
+            self._tracker.register(evt.run_id, placeholder)
+            return
+
+        # 非 agent 工具的常规处理
+        key = evt.tool_call_id or evt.name
         if key not in self._run.tool_blocks:
-            # agent 工具：恢复场景下可能已有 block（replay 产生新 run_id），
-            # 从 tracker 中查找未映射的 RUNNING agent block 并重新关联
-            if evt.name == "agent" and evt.run_id:
-                existing = self._tracker.find_unmapped_running(evt.args)
-                if existing:
-                    self._tracker.remap(evt.run_id, existing)
-                    # DOM 清理推迟到子代理首个 STREAM_TOKEN/TOOL_START，
-                    # 避免 agent 被立即 cancel 时丢失上一周期的可视记录。
-                    self._run.tool_blocks[key] = existing
-                    return
             block = ToolBlock(evt.name, evt.args or {}, approval_mode=evt.approval_mode)
             self._run.tool_blocks[key] = block
-            if evt.name == "agent" and evt.run_id:
-                self._tracker.register(evt.run_id, block)
-            await chat_log.mount(block)
-        else:
-            # 已存在的 block，确保 tracker 映射更新（replay 场景）
-            if evt.name == "agent" and evt.run_id:
-                existing_block = self._run.tool_blocks[key]
-                if self._tracker.get(evt.run_id) is None:
-                    self._tracker.remap(evt.run_id, existing_block)
+
+            if should_exclude_from_group(evt.name, evt.approval_mode):
+                await self._finalize_active_group(chat_log)
+                await chat_log.mount(block)
+            elif (
+                self._run.pending_block is not None
+                or self._run.active_group is not None
+            ):
+                # 第二个及后续 block → 创建或追加到 ToolGroup
+                if self._run.active_group is None:
+                    group = ToolGroup()
+                    self._run.active_group = group
+                    await chat_log.mount(group)
+                    # 把之前暂存的第一个 block 也加入 group
+                    pending = self._run.pending_block
+                    self._run.pending_block = None
+                    if pending is not None:
+                        await group.add_block(pending, pending._name, pending._args)
+                await self._run.active_group.add_block(block, evt.name, evt.args or {})
+            else:
+                # 第一个 block → 暂存，等看后续是否有更多
+                self._run.pending_block = block
 
     async def _handle_tool_end(self, evt: BridgeEvent, chat_log: ChatLog) -> None:
-        """主流程 TOOL_END 处理，含 agent cancel/replay 逻辑。"""
-        # agent 工具用 run_id 作为 key（与 _handle_tool_start 一致）
-        key = (
-            evt.run_id
-            if evt.name == "agent" and evt.run_id
-            else (evt.tool_call_id or evt.name)
-        )
+        """主流程 TOOL_END 处理。
+
+        agent 工具结束时通知 AgentGroup，其他工具走常规 ToolBlock 流程。
+        """
+        # agent 工具 → 通知 AgentGroup
+        if evt.name == "agent" and evt.run_id:
+            key = evt.run_id
+            block = self._run.tool_blocks.pop(key, None)
+
+            # replay 的空 output → 放回等待真正结束
+            if block and not evt.output:
+                replay_count = getattr(block, "_empty_end_count", 0) + 1
+                block._empty_end_count = replay_count  # type: ignore[attr-defined]
+                if replay_count > 1:
+                    logger.warning(
+                        "Agent TOOL_END with empty output repeated %d times "
+                        "(run_id=%s), possible bridge bug",
+                        replay_count,
+                        key,
+                    )
+                self._run.tool_blocks[key] = block
+                return
+
+            # cancel/reject → 通知 AgentGroup 标记错误
+            if block and evt.output in _AGENT_CANCEL_OUTPUTS:
+                if self._run.agent_group:
+                    self._run.agent_group.finish_agent_error(key, evt.output)
+                self._tracker.mark_unmapped(evt.run_id)
+                return
+
+            # 正常结束
+            self._tracker.unregister(evt.run_id)
+            if self._run.agent_group:
+                self._run.agent_group.finish_agent(key, evt.output)
+            return
+
+        # 非 agent 工具的常规处理
+        key = evt.tool_call_id or evt.name
         block = self._run.tool_blocks.pop(key, None)
-        # Fallback: tool_call_id 可能在 TOOL_START/END 间不一致
         if block is None:
             for k, b in list(self._run.tool_blocks.items()):
                 if b._name == evt.name:
                     block = self._run.tool_blocks.pop(k)
                     break
-        if block:
-            # agent 工具：replay 的 on_tool_end 没有 output，跳过 set_done
-            # 保持 block 在 RUNNING 状态，等待真正的结束事件
-            if block._is_agent and not evt.output:
-                self._run.tool_blocks[key] = block  # 放回 tool_blocks
-                return
-            # agent 工具：cancel/reject 导致的结束，重置 block 以便 replay 复用
-            if block._is_agent and evt.output in _AGENT_CANCEL_OUTPUTS:
-                block.reset_for_retry()
-                self._run.tool_blocks[key] = block  # 放回 tool_blocks
-                if evt.run_id:
-                    # 标记为 unmapped 而非 unregister，使 find_unmapped_running 能找到
-                    self._tracker.mark_unmapped(evt.run_id)
-                return
-            # agent 工具结束前，finalize 子代理残留的 AssistantMessage
-            if block._is_agent and evt.run_id:
-                sa_state = self._tracker.unregister(evt.run_id)
-                if sa_state:
-                    sa_state.finalize_assistant_msg()
-            block.set_done(evt.output)
+        if block is None:
+            logger.warning(
+                "TOOL_END dropped: no matching block (key=%s, name=%s, tracked=%s)",
+                key,
+                evt.name,
+                list(self._run.tool_blocks.keys()),
+            )
+            return
+        block.set_done(evt.output)
+        if self._run.active_group is not None:
+            self._run.active_group.notify_block_done(block)

@@ -25,6 +25,14 @@ class BaseRenderer:
     # 子类覆盖：标题中使用的参数 key，为空时标题不含参数值
     title_arg_key: str = ""
 
+    # ── ToolGroup 合并摘要属性 ──
+    # 子类覆盖以支持工具组合并显示
+    group_verb: str = ""  # 完成态动词，如 "Read" / "Edited"
+    group_verb_active: str = ""  # 进行态动词，如 "Reading" / "Editing"
+    group_noun: str = ""  # 分组名词，如 "file" / "command"
+    # 用于提取文件路径的参数 key（合并摘要中显示文件名），默认复用 title_arg_key
+    group_target_key: str = ""
+
     def render_title(self, name: str, args: dict) -> str:
         """生成标题，格式: 工具名(参数值)"""
         if self.title_arg_key:

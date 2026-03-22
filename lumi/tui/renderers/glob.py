@@ -21,6 +21,9 @@ class GlobRenderer(BaseRenderer):
     """glob 工具渲染器"""
 
     title_arg_key = "pattern"
+    group_verb = "Searched"
+    group_verb_active = "Searching"
+    group_noun = "pattern"
 
     def render_output(self, output: str) -> Widget:
         """以列表形式展示匹配到的文件路径，并显示匹配文件总数。"""

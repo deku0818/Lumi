@@ -32,6 +32,9 @@ class EditRenderer(BaseRenderer):
     """edit 工具渲染器"""
 
     title_arg_key = "file_path"
+    group_verb = "Edited"
+    group_verb_active = "Editing"
+    group_noun = "file"
 
     def render_args(self, args: dict, *, approval_mode: bool = False) -> Widget:
         """以带行号的 Diff 视图展示 old_text 和 new_text 之间的差异。

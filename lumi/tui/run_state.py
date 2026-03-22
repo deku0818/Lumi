@@ -6,11 +6,13 @@ import asyncio
 from dataclasses import dataclass, field
 from enum import StrEnum
 from time import monotonic
-from typing import TYPE_CHECKING, Protocol
+from typing import TYPE_CHECKING
 
 if TYPE_CHECKING:
+    from lumi.tui.widgets.agent_group import AgentGroup
     from lumi.tui.widgets.assistant_message import AssistantMessage
     from lumi.tui.widgets.tool_block import ToolBlock
+    from lumi.tui.widgets.tool_group import ToolGroup
 
 
 class RunPhase(StrEnum):
@@ -25,18 +27,6 @@ class RunPhase(StrEnum):
     WAITING_APPROVAL = "waiting_approval"
 
 
-class RenderState(Protocol):
-    """渲染方法所需的最小状态接口。
-
-    RunContext（主流程）和 SubagentState（子代理）均满足此协议。
-    """
-
-    assistant_msg: AssistantMessage | None
-    tool_blocks: dict[str, ToolBlock]
-
-    def finalize_assistant_msg(self) -> None: ...
-
-
 @dataclass
 class RunContext:
     """单次 run 的上下文，统一管理所有运行态变量"""
@@ -46,6 +36,9 @@ class RunContext:
     tool_blocks: dict[str, ToolBlock] = field(default_factory=dict)
     last_approval_tool_calls: list[dict] = field(default_factory=list)
     task: asyncio.Task | None = None
+    active_group: ToolGroup | None = None
+    agent_group: AgentGroup | None = None  # AgentGroup 实例，跨 resume 保持引用
+    pending_block: ToolBlock | None = None  # 待合并的第一个 block，跨 router 保持
 
     # 计时和 token 跟踪（单次 run）
     _timer_origin: float = 0.0  # monotonic 起点（运行中）
@@ -144,6 +137,9 @@ class RunContext:
         self.tool_blocks.clear()
         self.last_approval_tool_calls.clear()
         self.task = None
+        self.active_group = None
+        self.agent_group = None
+        self.pending_block = None
         self._timer_origin = 0.0
         self._timer_banked = 0.0
         self._timer_paused = False

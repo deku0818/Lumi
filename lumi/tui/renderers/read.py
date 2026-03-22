@@ -24,6 +24,9 @@ class ReadRenderer(BaseRenderer):
     """read 工具渲染器"""
 
     title_arg_key = "file_path"
+    group_verb = "Read"
+    group_verb_active = "Reading"
+    group_noun = "file"
 
     def __init__(self) -> None:
         self._path: str = ""

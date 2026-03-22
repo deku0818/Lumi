@@ -28,6 +28,9 @@ class WriteRenderer(BaseRenderer):
     """write 工具渲染器"""
 
     title_arg_key = "file_path"
+    group_verb = "Wrote"
+    group_verb_active = "Writing"
+    group_noun = "file"
 
     def render_args(self, args: dict, *, approval_mode: bool = False) -> Widget:
         """以语法高亮代码块展示将要写入的文件内容。
