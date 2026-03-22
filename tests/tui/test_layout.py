@@ -20,6 +20,7 @@ from lumi.tui.event_router import EventRouter
 from lumi.tui.run_state import RunContext
 from lumi.tui.subagent_tracker import SubagentTracker
 from lumi.tui.theme import LUMI_DARK_THEME, LUMI_LIGHT_THEME
+from lumi.tui.widget_assembler import WidgetAssembler
 from lumi.tui.widgets.agent_group import AgentGroup
 from lumi.tui.widgets.chat_log import ChatLog
 from lumi.tui.widgets.tool_block import ToolBlock
@@ -106,7 +107,8 @@ async def test_single_tool_block_no_group():
         run = RunContext()
         tracker = SubagentTracker()
         cb = _FakeCallbacks()
-        router = EventRouter(run, tracker, cb)
+        asm = WidgetAssembler(chat_log)
+        router = EventRouter(run, asm, tracker, cb)
 
         # 发送一个 read 工具的 TOOL_START + TOOL_END
         await router.dispatch(
@@ -150,7 +152,8 @@ async def test_single_tool_block_padding():
         run = RunContext()
         tracker = SubagentTracker()
         cb = _FakeCallbacks()
-        router = EventRouter(run, tracker, cb)
+        asm = WidgetAssembler(chat_log)
+        router = EventRouter(run, asm, tracker, cb)
 
         await router.dispatch(
             _evt(
@@ -181,7 +184,8 @@ async def test_multiple_tools_create_group():
         run = RunContext()
         tracker = SubagentTracker()
         cb = _FakeCallbacks()
-        router = EventRouter(run, tracker, cb)
+        asm = WidgetAssembler(chat_log)
+        router = EventRouter(run, asm, tracker, cb)
 
         # 第一个工具
         await router.dispatch(
@@ -227,7 +231,8 @@ async def test_tool_group_summary_updates():
         run = RunContext()
         tracker = SubagentTracker()
         cb = _FakeCallbacks()
-        router = EventRouter(run, tracker, cb)
+        asm = WidgetAssembler(chat_log)
+        router = EventRouter(run, asm, tracker, cb)
 
         await router.dispatch(
             _evt(
@@ -274,7 +279,8 @@ async def test_text_between_tools_splits_groups():
         run = RunContext()
         tracker = SubagentTracker()
         cb = _FakeCallbacks()
-        router = EventRouter(run, tracker, cb)
+        asm = WidgetAssembler(chat_log)
+        router = EventRouter(run, asm, tracker, cb)
 
         # 第一个工具
         await router.dispatch(
@@ -330,7 +336,8 @@ async def test_agent_group_creation():
         run = RunContext()
         tracker = SubagentTracker()
         cb = _FakeCallbacks()
-        router = EventRouter(run, tracker, cb)
+        asm = WidgetAssembler(chat_log)
+        router = EventRouter(run, asm, tracker, cb)
 
         await router.dispatch(
             _evt(
@@ -343,7 +350,7 @@ async def test_agent_group_creation():
         )
         await pilot.pause()
 
-        assert run.agent_group is not None
+        assert asm.agent_group is not None
         groups = chat_log.query(AgentGroup)
         assert len(groups) == 1
 
@@ -362,7 +369,8 @@ async def test_agent_group_finish():
         run = RunContext()
         tracker = SubagentTracker()
         cb = _FakeCallbacks()
-        router = EventRouter(run, tracker, cb)
+        asm = WidgetAssembler(chat_log)
+        router = EventRouter(run, asm, tracker, cb)
 
         await router.dispatch(
             _evt(
@@ -396,7 +404,8 @@ async def test_agent_group_error():
         run = RunContext()
         tracker = SubagentTracker()
         cb = _FakeCallbacks()
-        router = EventRouter(run, tracker, cb)
+        asm = WidgetAssembler(chat_log)
+        router = EventRouter(run, asm, tracker, cb)
 
         await router.dispatch(
             _evt(
@@ -432,7 +441,8 @@ async def test_agent_group_multiple_agents():
         run = RunContext()
         tracker = SubagentTracker()
         cb = _FakeCallbacks()
-        router = EventRouter(run, tracker, cb)
+        asm = WidgetAssembler(chat_log)
+        router = EventRouter(run, asm, tracker, cb)
 
         await router.dispatch(
             _evt(
@@ -469,7 +479,8 @@ async def test_subagent_events_update_stats():
         run = RunContext()
         tracker = SubagentTracker()
         cb = _FakeCallbacks()
-        router = EventRouter(run, tracker, cb)
+        asm = WidgetAssembler(chat_log)
+        router = EventRouter(run, asm, tracker, cb)
 
         # 创建 agent
         await router.dispatch(
@@ -517,16 +528,17 @@ async def test_subagent_events_update_stats():
 
 
 async def test_agent_group_persists_across_resume():
-    """AgentGroup 存储在 RunContext 中，跨 EventRouter 实例持久化。"""
+    """AgentGroup 存储在 WidgetAssembler 中，跨 EventRouter 实例持久化。"""
     app = LayoutTestApp()
     async with app.run_test() as pilot:
         chat_log = app.query_one(ChatLog)
         run = RunContext()
+        asm = WidgetAssembler(chat_log)
         tracker = SubagentTracker()
         cb = _FakeCallbacks()
 
         # 第一个 EventRouter 创建 AgentGroup
-        router1 = EventRouter(run, tracker, cb)
+        router1 = EventRouter(run, asm, tracker, cb)
         await router1.dispatch(
             _evt(
                 EventKind.TOOL_START,
@@ -538,14 +550,14 @@ async def test_agent_group_persists_across_resume():
         )
         await pilot.pause()
 
-        ag_ref = run.agent_group
+        ag_ref = asm.agent_group
         assert ag_ref is not None
 
-        # 模拟 resume：创建新的 EventRouter，但共享同一个 RunContext
-        router2 = EventRouter(run, tracker, cb)
+        # 模拟 resume：创建新的 EventRouter，共享同一个 WidgetAssembler
+        router2 = EventRouter(run, asm, tracker, cb)
 
-        # 新 router 应能通过 RunContext 访问同一个 AgentGroup
-        assert run.agent_group is ag_ref
+        # 新 router 应能通过 WidgetAssembler 访问同一个 AgentGroup
+        assert asm.agent_group is ag_ref
 
         # 新 agent 事件应加入已有的 AgentGroup
         await router2.dispatch(
@@ -562,7 +574,7 @@ async def test_agent_group_persists_across_resume():
         # 仍然只有一个 AgentGroup
         groups = chat_log.query(AgentGroup)
         assert len(groups) == 1
-        assert run.agent_group is ag_ref
+        assert asm.agent_group is ag_ref
 
 
 # ── 5. 子代理审批取消不创建多余 ToolBlock ──
@@ -576,7 +588,8 @@ async def test_agent_cancel_no_stray_toolblock():
         run = RunContext()
         tracker = SubagentTracker()
         cb = _FakeCallbacks()
-        router = EventRouter(run, tracker, cb)
+        asm = WidgetAssembler(chat_log)
+        router = EventRouter(run, asm, tracker, cb)
 
         # 创建 agent
         await router.dispatch(
@@ -690,7 +703,8 @@ async def test_tool_group_toggle():
         run = RunContext()
         tracker = SubagentTracker()
         cb = _FakeCallbacks()
-        router = EventRouter(run, tracker, cb)
+        asm = WidgetAssembler(chat_log)
+        router = EventRouter(run, asm, tracker, cb)
 
         await router.dispatch(
             _evt(
@@ -733,7 +747,8 @@ async def test_approval_tool_excluded_from_group():
         run = RunContext()
         tracker = SubagentTracker()
         cb = _FakeCallbacks()
-        router = EventRouter(run, tracker, cb)
+        asm = WidgetAssembler(chat_log)
+        router = EventRouter(run, asm, tracker, cb)
 
         # 普通工具
         await router.dispatch(
@@ -768,14 +783,18 @@ async def test_approval_tool_excluded_from_group():
 # ── 9. RunContext 重置 ──
 
 
-async def test_run_context_reset_clears_agent_group():
-    """RunContext.reset() 应清除 agent_group 引用。"""
-    run = RunContext()
-    run.agent_group = AgentGroup()
-    run.active_group = ToolGroup()
-    run.reset()
-    assert run.agent_group is None
-    assert run.active_group is None
+async def test_assembler_reset_clears_groups():
+    """WidgetAssembler.reset() 应清除 agent_group 和 active_group 引用。"""
+    app = LayoutTestApp()
+    async with app.run_test():
+        chat_log = app.query_one(ChatLog)
+        asm = WidgetAssembler(chat_log)
+        # 手动设置内部状态模拟运行中
+        asm._agent_group = AgentGroup()
+        asm._active_group = ToolGroup()
+        asm.reset()
+        assert asm.agent_group is None
+        assert asm.active_group is None
 
 
 # ── 10. AgentGroup detail 展开/折叠 ──
@@ -789,7 +808,8 @@ async def test_agent_detail_toggle():
         run = RunContext()
         tracker = SubagentTracker()
         cb = _FakeCallbacks()
-        router = EventRouter(run, tracker, cb)
+        asm = WidgetAssembler(chat_log)
+        router = EventRouter(run, asm, tracker, cb)
 
         await router.dispatch(
             _evt(
@@ -831,7 +851,8 @@ async def test_agent_detail_not_toggleable_while_running():
         run = RunContext()
         tracker = SubagentTracker()
         cb = _FakeCallbacks()
-        router = EventRouter(run, tracker, cb)
+        asm = WidgetAssembler(chat_log)
+        router = EventRouter(run, asm, tracker, cb)
 
         await router.dispatch(
             _evt(
@@ -864,7 +885,8 @@ async def test_agent_group_force_finalize_on_interrupt():
         run = RunContext()
         tracker = SubagentTracker()
         cb = _FakeCallbacks()
-        router = EventRouter(run, tracker, cb)
+        asm = WidgetAssembler(chat_log)
+        router = EventRouter(run, asm, tracker, cb)
 
         # 启动两个 agent，只完成一个
         await router.dispatch(
@@ -926,7 +948,8 @@ async def test_agent_group_force_finalize_idempotent():
         run = RunContext()
         tracker = SubagentTracker()
         cb = _FakeCallbacks()
-        router = EventRouter(run, tracker, cb)
+        asm = WidgetAssembler(chat_log)
+        router = EventRouter(run, asm, tracker, cb)
 
         await router.dispatch(
             _evt(

@@ -1,4 +1,8 @@
-"""TUI run 生命周期状态管理"""
+"""TUI run 生命周期状态管理
+
+RunContext 仅管理运行阶段、计时和 token 计数。
+widget 引用（assistant_msg、tool_blocks 等）由 WidgetAssembler 管理。
+"""
 
 from __future__ import annotations
 
@@ -6,13 +10,6 @@ import asyncio
 from dataclasses import dataclass, field
 from enum import StrEnum
 from time import monotonic
-from typing import TYPE_CHECKING
-
-if TYPE_CHECKING:
-    from lumi.tui.widgets.agent_group import AgentGroup
-    from lumi.tui.widgets.assistant_message import AssistantMessage
-    from lumi.tui.widgets.tool_block import ToolBlock
-    from lumi.tui.widgets.tool_group import ToolGroup
 
 
 class RunPhase(StrEnum):
@@ -29,20 +26,15 @@ class RunPhase(StrEnum):
 
 @dataclass
 class RunContext:
-    """单次 run 的上下文，统一管理所有运行态变量"""
+    """单次 run 的上下文 — 阶段、计时、token 计数。"""
 
     phase: RunPhase = RunPhase.IDLE
-    assistant_msg: AssistantMessage | None = None
-    tool_blocks: dict[str, ToolBlock] = field(default_factory=dict)
     last_approval_tool_calls: list[dict] = field(default_factory=list)
     task: asyncio.Task | None = None
-    active_group: ToolGroup | None = None
-    agent_group: AgentGroup | None = None  # AgentGroup 实例，跨 resume 保持引用
-    pending_block: ToolBlock | None = None  # 待合并的第一个 block，跨 router 保持
 
     # 计时和 token 跟踪（单次 run）
-    _timer_origin: float = 0.0  # monotonic 起点（运行中）
-    _timer_banked: float = 0.0  # 暂停前已累计的秒数
+    _timer_origin: float = 0.0
+    _timer_banked: float = 0.0
     _timer_paused: bool = False
     output_tokens: int = 0
     input_tokens: int = 0
@@ -52,12 +44,6 @@ class RunContext:
     # 缓存 token（cache_read + cache_creation）
     cache_read_tokens: int = 0
     cache_creation_tokens: int = 0
-
-    def finalize_assistant_msg(self) -> None:
-        """结束当前流式 AssistantMessage。"""
-        if self.assistant_msg is not None:
-            self.assistant_msg.finalize()
-            self.assistant_msg = None
 
     @property
     def is_running(self) -> bool:
@@ -93,7 +79,7 @@ class RunContext:
             self._timer_paused = False
 
     def count_stream_token(self) -> None:
-        """每收到一个 STREAM_TOKEN 事件调用，近似 +1 output token（仅用于状态栏显示）。"""
+        """每收到一个 STREAM_TOKEN 事件调用，近似 +1 output token。"""
         self.output_tokens += 1
 
     def accumulate_usage(self, usage: dict | None) -> None:
@@ -106,7 +92,6 @@ class RunContext:
             self.input_tokens = max(self.input_tokens, input_val)
         if output_val:
             self.output_tokens = max(self.output_tokens, output_val)
-        # cache 详情（流式阶段也可能携带）
         details = usage.get("input_token_details") or {}
         cr = details.get("cache_read", 0) or 0
         cc = details.get("cache_creation", 0) or 0
@@ -116,14 +101,13 @@ class RunContext:
             self.cache_creation_tokens = max(self.cache_creation_tokens, cc)
 
     def commit_model_usage(self, usage: dict | None) -> None:
-        """MODEL_END 时调用：记录最新的 total_tokens 和 cache 详情（直接覆盖，不累加）。"""
+        """MODEL_END 时调用：记录最新的 total_tokens 和 cache 详情。"""
         if usage:
             total_val = usage.get("total_tokens", 0)
             if total_val:
                 self.total_tokens = total_val
             else:
                 self.total_tokens = self.input_tokens + self.output_tokens
-            # 提取 cache 详情
             details = usage.get("input_token_details") or {}
             self.cache_read_tokens = details.get("cache_read", 0) or 0
             self.cache_creation_tokens = details.get("cache_creation", 0) or 0
@@ -133,13 +117,8 @@ class RunContext:
     def reset(self) -> None:
         """重置单次 run 状态（保留会话级 token 计数供 StatusLine 显示）。"""
         self.phase = RunPhase.IDLE
-        self.assistant_msg = None
-        self.tool_blocks.clear()
         self.last_approval_tool_calls.clear()
         self.task = None
-        self.active_group = None
-        self.agent_group = None
-        self.pending_block = None
         self._timer_origin = 0.0
         self._timer_banked = 0.0
         self._timer_paused = False

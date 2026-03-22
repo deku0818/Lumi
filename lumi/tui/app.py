@@ -44,6 +44,7 @@ from lumi.utils.thread_id import generate_thread_id
 
 from lumi.tui.event_router import EventRouter
 from lumi.tui.message_restore import restore_messages
+from lumi.tui.widget_assembler import WidgetAssembler
 from lumi.tui.slash_commands.registry import CommandRegistry
 from lumi.tui.slash_commands.models import CommandType, SlashCommand
 from lumi.tui.slash_commands.parser import parse_command_input
@@ -95,6 +96,7 @@ class LumiApp(App):
         self._bridge = AgentBridge()
         self._run = RunContext()
         self._subagent_tracker = SubagentTracker()
+        self._assembler: WidgetAssembler | None = None
         self._last_ctrl_c: float = 0.0
         self._global_config = None
         self._scheduler: Scheduler | None = None
@@ -225,6 +227,8 @@ class LumiApp(App):
     def _reset_session_state(self) -> None:
         """重置会话状态（reset_session + interrupted + StatusLine 刷新）。"""
         self._run.reset_session()
+        if self._assembler:
+            self._assembler.reset()
         self._interrupted = False
         sl = self._query_safe(StatusLine)
         if sl:
@@ -232,6 +236,8 @@ class LumiApp(App):
 
     async def _finish_mount(self) -> None:
         """应用主题、注入环境变量并初始化 Agent bridge。"""
+        # 初始化 WidgetAssembler（ChatLog 已在 compose 中创建）
+        self._assembler = WidgetAssembler(self.query_one(ChatLog))
         # 绑定 RunContext 到 RunStatusBar，使 spinner tick 可读取实时状态
         self.query_one(RunStatusBar).bind_run_context(self._run)
 
@@ -868,7 +874,7 @@ class LumiApp(App):
 
     async def _consume_events(self, event_stream) -> None:
         chat_log = self.query_one(ChatLog)
-        router = EventRouter(self._run, self._subagent_tracker, self)
+        router = EventRouter(self._run, self._assembler, self._subagent_tracker, self)
         try:
             async for evt in event_stream:
                 await router.dispatch(evt, chat_log)
@@ -882,26 +888,25 @@ class LumiApp(App):
     async def _handle_ask(self, evt: BridgeEvent, chat_log: ChatLog) -> None:
         tool_call_id = (evt.data or {}).get("tool_call_id", "")
         key = tool_call_id or "ask"
-        block = self._run.tool_blocks.get(key)
+        block = self._assembler.tool_blocks.get(key)
         # Fallback: TOOL_START 中 InjectedToolCallId 可能不在事件 input 中，
         # 导致 ToolBlock 以工具名 "ask" 为 key 存储
         if block is None:
-            for k, b in self._run.tool_blocks.items():
-                if b._name == "ask":
-                    block = b
-                    break
+            result = self._assembler.find_tool_block_by_name("ask")
+            if result is not None:
+                _, block = result
         if block:
             dialog = AskDialog(evt.data)
             await block.mount_interactive(dialog)
 
     async def _handle_tool_approval(self, evt: BridgeEvent, chat_log: ChatLog) -> None:
-        self._finalize_assistant_msg()
+        self._assembler.finalize_assistant_msg()
         # 保存工具调用信息，供拒绝/取消时创建 ToolBlock
         tool_calls = (evt.data or {}).get("tool_calls", [])
         self._run.last_approval_tool_calls = tool_calls
         for tc in tool_calls:
             key = tc.get("id") or tc.get("name", "unknown")
-            self._run.tool_blocks.pop(key, None)
+            self._assembler.pop_tool_block(key)
         approval = ToolApproval(evt.data)
         # 子代理审批直接挂载到 chat_log（AgentGroup 模式下无嵌套 DOM）
         if evt.parent_run_id:
@@ -913,7 +918,8 @@ class LumiApp(App):
     # ── 辅助方法 ──
 
     def _finalize_assistant_msg(self) -> None:
-        self._run.finalize_assistant_msg()
+        if self._assembler:
+            self._assembler.finalize_assistant_msg()
 
     async def _show_error(self, chat_log: ChatLog, error: str) -> None:
         if len(error) > 300:
@@ -929,7 +935,7 @@ class LumiApp(App):
         if event.answer == ASK_CANCELLED:
             # 取消时补充视觉反馈，与 tool_approval cancel 一致
             chat_log = self.query_one(ChatLog)
-            block = self._run.tool_blocks.get("ask")
+            block = self._assembler.tool_blocks.get("ask")
             if block:
                 block.set_error("User declined to answer questions")
             await chat_log.auto_scroll_if_needed()
@@ -948,7 +954,7 @@ class LumiApp(App):
             # 错误信息由 agent TOOL_END → finish_agent_error 在 AgentGroup 中展示
             agent_block = self._subagent_tracker.get_approval_block()
             is_agent_group_mode = (
-                agent_block is not None and self._run.agent_group is not None
+                agent_block is not None and self._assembler.agent_group is not None
             )
             if not is_agent_group_mode:
                 for tc in tool_calls:
@@ -1022,7 +1028,7 @@ class LumiApp(App):
         if bar:
             bar.hide()
         # 清理所有残留的运行中 ToolBlock（on_tool_end 未匹配到时的兜底）
-        for block in self._run.tool_blocks.values():
+        for block in self._assembler.tool_blocks.values():
             if block.status == ToolStatus.RUNNING:
                 logger.warning(
                     "[LumiApp] ToolBlock '%s' still RUNNING at _finish_run, "
@@ -1031,13 +1037,14 @@ class LumiApp(App):
                 )
                 block.set_done()
         # 兜底：确保 AgentGroup 已 finalize（中断/错误场景）
-        if self._run.agent_group is not None:
-            self._run.agent_group.force_finalize()
+        if self._assembler.agent_group is not None:
+            self._assembler.agent_group.force_finalize()
         # 刷新底部状态行（token 计数在 reset 前刷新）
         sl = self._query_safe(StatusLine)
         if sl:
             sl.refresh_display()
         self._subagent_tracker.reset()
+        self._assembler.reset()
         self._run.reset()
         input_bar = self._query_safe(InputBar)
         if input_bar:
@@ -1135,12 +1142,12 @@ class LumiApp(App):
             if self._run.task and not self._run.task.done():
                 self._run.task.cancel()
             # 将所有仍在运行中的 ToolBlock 标记为中断，停止 spinner
-            for block in self._run.tool_blocks.values():
+            for block in self._assembler.tool_blocks.values():
                 if block.status == ToolStatus.RUNNING:
                     block.set_interrupted()
             # 强制终止 AgentGroup（将未完成的 agent 标记为 interrupted）
-            if self._run.agent_group is not None:
-                self._run.agent_group.force_finalize()
+            if self._assembler.agent_group is not None:
+                self._assembler.agent_group.force_finalize()
             self._finalize_assistant_msg()
             chat_log = self.query_one(ChatLog)
             await chat_log.append_hint(
