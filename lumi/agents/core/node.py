@@ -125,12 +125,25 @@ def is_use_tool(state: LumiAgentState, runtime: Runtime[LumiAgentContext]):
     - 有 tool_calls 且包含结构化输出工具 → "ExtractStructuredOutput"
     - BYPASS_TOOLS (如 ask) → "ToolExecutor" 直接执行
     - privileged 模式（tool_mode） → "ToolExecutor" 直接执行
-    - auto 模式 + 全部 allow → "ToolExecutor" 直接执行
-    - 其他 → "HumanApproval" 等待审批
+    - auto 模式 + 全部 allow + 边界检查通过 → "ToolExecutor" 直接执行
+    - supervised/approve 模式 → "HumanApproval" 等待审批
+    - engine is None 时回退到简单审批流程
     - 无 tool_calls → "END" 结束流程
     """
-    last_message = state.get("messages", [])[-1]
-    tool_calls = getattr(last_message, "tool_calls", [])
+    messages = state.get("messages", [])
+    if not messages:
+        logger.warning("[is_use_tool] 消息列表为空，无法判断工具调用")
+        return "END"
+
+    last_message = messages[-1]
+    if last_message is None:
+        logger.warning("[is_use_tool] 最后一条消息为 None")
+        return "END"
+
+    tool_calls = getattr(last_message, "tool_calls", None) or []
+    if not isinstance(tool_calls, list):
+        logger.error(f"[is_use_tool] tool_calls 类型异常：{type(tool_calls)}")
+        tool_calls = []
 
     if not tool_calls:
         return "END"
@@ -139,7 +152,7 @@ def is_use_tool(state: LumiAgentState, runtime: Runtime[LumiAgentContext]):
         return "ExtractStructuredOutput"
 
     # BYPASS_TOOLS 始终直接执行
-    if all(tc["name"] in BYPASS_TOOLS for tc in tool_calls):
+    if all(tc.get("name") in BYPASS_TOOLS for tc in tool_calls):
         return "ToolExecutor"
 
     tool_mode = state.get("tool_mode", "auto")
@@ -154,33 +167,40 @@ def is_use_tool(state: LumiAgentState, runtime: Runtime[LumiAgentContext]):
         engine.reload()
 
         if tool_mode == "auto":
-            # auto 模式：全部 allow 才直接执行，否则需要审批
+            # auto 模式：全部 allow 且未越界才直接执行，否则需要审批
             all_allowed = True
             for tc in tool_calls:
-                name = tc["name"]
-                args = tc.get("args", {})
-                decision = engine.evaluate(name, args)
-                boundary_ok = engine.check_workspace_boundary(name, args)
-                if decision != PermissionDecision.ALLOW or not boundary_ok:
-                    logger.warning(
-                        "[权限调试] 工具 %s 未通过自动审批: decision=%s, boundary=%s, args=%s",
-                        name,
-                        decision.value,
-                        boundary_ok,
-                        {
-                            k: v
-                            for k, v in args.items()
-                            if isinstance(v, str) and len(str(v)) < 200
-                        },
+                try:
+                    decision = engine.evaluate(tc["name"], tc.get("args", {}))
+                    boundary_ok = engine.check_workspace_boundary(
+                        tc["name"], tc.get("args", {})
                     )
+                    if decision != PermissionDecision.ALLOW or not boundary_ok:
+                        all_allowed = False
+                        logger.debug(
+                            f"[PermissionCheck] 工具 {tc['name']} 需要审批："
+                            f"decision={decision.value}, boundary_ok={boundary_ok}"
+                        )
+                        break
+                except Exception as e:
+                    # 权限评估异常时保守处理：要求人工审批，并记录详细错误
                     all_allowed = False
+                    logger.error(
+                        f"[PermissionCheck] 工具 {tc['name']} 权限评估异常：{e}",
+                        exc_info=True,
+                    )
+                    break
+
             if all_allowed:
                 return "ToolExecutor"
             return "HumanApproval"
 
     # supervised/approve 模式：需要审批
-    if tool_mode == "auto":
-        return "ToolExecutor"
+    # engine is None 时回退到简单审批流程
+    if tool_mode in ("supervised", "approve"):
+        return "HumanApproval"
+    # engine is None 且 tool_mode 为 auto 时，保守处理：需要审批
+    logger.warning("[is_use_tool] 权限引擎不可用，tool_mode=auto 回退到人工审批")
     return "HumanApproval"
 
 
@@ -193,6 +213,8 @@ def human_approval(
     - supervised + allow → 仅执行确认
     - supervised + deny/unmatched → 合并审批（执行确认 + 权限选项 + deny 警告）
     - auto + deny/unmatched → 仅权限审批（权限选项 + deny 警告）
+    - privileged → 不应到达此节点（已在 should_execute 直接执行）
+    - engine is None → 回退到简单审批流程
     """
     last_message = state["messages"][-1]
     tool_mode = state.get("tool_mode", "auto")

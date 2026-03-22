@@ -90,6 +90,21 @@ class PermissionEngine:
         Returns:
             权限决策结果
         """
+        # 参数验证
+        if not isinstance(tool_name, str) or not tool_name:
+            logger.error(f"[PermissionEngine.evaluate] tool_name 无效：{tool_name!r}")
+            return PermissionDecision.UNMATCHED
+
+        if not isinstance(tool_args, dict):
+            logger.error(
+                f"[PermissionEngine.evaluate] tool_args 类型异常：{type(tool_args)}"
+            )
+            return PermissionDecision.UNMATCHED
+
+        if self._config is None or self._config.permissions is None:
+            logger.warning("[PermissionEngine.evaluate] 配置未加载，返回 UNMATCHED")
+            return PermissionDecision.UNMATCHED
+
         # 先检查 deny 规则
         for rule in self._config.permissions:
             if rule.permission == Permission.DENY:
@@ -127,16 +142,41 @@ class PermissionEngine:
         Returns:
             True 表示在边界内（或无法提取路径），False 表示超出边界
         """
-        paths = self._boundary.extract_paths_from_tool_call(tool_name, tool_args)
+        # 边界检查器未初始化时保守拒绝
+        if self._boundary is None:
+            logger.error(f"[PermissionEngine] 边界检查器未初始化，拒绝工具 {tool_name}")
+            return False
+
+        try:
+            paths = self._boundary.extract_paths_from_tool_call(tool_name, tool_args)
+        except Exception as e:
+            logger.error(
+                f"[PermissionEngine] 工具 {tool_name} 路径提取失败：{e}",
+                exc_info=True,
+            )
+            return False  # 保守策略：无法提取路径时拒绝执行
+
         if not paths:
-            # 无法提取路径，视为边界内
+            # 无法提取路径，记录调试信息但视为边界内
+            logger.debug(f"[PermissionEngine] 工具 {tool_name} 未包含可提取的路径参数")
             return True
 
         for p in paths:
-            # 相对路径基于项目目录解析
-            resolved = p if p.is_absolute() else self._project_dir / p
-            if not self._boundary.is_within_boundary(resolved):
-                return False
+            try:
+                # 相对路径基于项目目录解析
+                resolved = p if p.is_absolute() else self._project_dir / p
+                if not self._boundary.is_within_boundary(resolved):
+                    logger.warning(
+                        f"[PermissionEngine] 工具 {tool_name} 超出工作区边界：{resolved}"
+                    )
+                    return False
+            except Exception as e:
+                logger.error(
+                    f"[PermissionEngine] 工具 {tool_name} 边界检查异常 (路径：{p}): {e}",
+                    exc_info=True,
+                )
+                return False  # 保守策略：检查异常时拒绝执行
+
         return True
 
     def get_boundary_violations(self, tool_name: str, tool_args: dict) -> list[str]:

@@ -438,8 +438,10 @@ class LumiApp(App):
 
         self._run.phase = RunPhase.IDLE
         self._run.start()
-        self.query_one(InputBar).set_disabled(True)
-        self._run.task = asyncio.create_task(self._run_stream(blocks))
+        input_bar = self.query_one(InputBar)
+        input_bar.set_disabled(True)
+        tool_mode = input_bar.tool_mode
+        self._run.task = asyncio.create_task(self._run_stream(blocks, tool_mode))
 
     # ── 会话恢复 ──
 
@@ -830,6 +832,12 @@ class LumiApp(App):
     async def _run_stream(
         self, content: str | list, tool_mode: str = "approve"
     ) -> None:
+        """执行流 - 默认使用 approve 模式以保证安全
+
+        Args:
+            content: 用户输入内容
+            tool_mode: 工具执行模式，默认为 "approve"（需要人工审批）
+        """
         await self._consume_events(self._bridge.stream_response(content, tool_mode))
 
     async def _run_resume(self, value) -> None:

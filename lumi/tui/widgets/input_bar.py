@@ -423,6 +423,11 @@ class InputBar(Vertical):
         self._flash_timer = None
         self._update_mode_indicator()
 
+    @property
+    def tool_mode(self) -> str:
+        """获取当前 tool_mode"""
+        return self._tool_mode
+
     def set_tool_mode(self, mode: str) -> None:
         """外部设置 tool_mode 并更新指示器"""
         if mode in _TOOL_MODES:
