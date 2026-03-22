@@ -65,6 +65,26 @@ class LumiApp(App):
         Binding("escape", "cancel_generation", "Cancel", priority=True),
         Binding("ctrl+c", "handle_ctrl_c", "Quit", priority=True),
         Binding("ctrl+s", "open_settings", "Settings", priority=True),
+        Binding(
+            "shift+up", "scroll_chat('up')", "Scroll Up", show=False, priority=True
+        ),
+        Binding(
+            "shift+down",
+            "scroll_chat('down')",
+            "Scroll Down",
+            show=False,
+            priority=True,
+        ),
+        Binding(
+            "pageup", "scroll_chat('page_up')", "Page Up", show=False, priority=True
+        ),
+        Binding(
+            "pagedown",
+            "scroll_chat('page_down')",
+            "Page Down",
+            show=False,
+            priority=True,
+        ),
     ]
 
     def __init__(self) -> None:
@@ -853,6 +873,8 @@ class LumiApp(App):
             async for evt in event_stream:
                 await router.dispatch(evt, chat_log)
                 await chat_log.auto_scroll_if_needed()
+                # 定期检查是否需要压缩旧消息
+                chat_log.schedule_compact()
         except Exception as e:
             logger.error(f"[TUI] 事件流异常: {e}", exc_info=True)
             await self._show_error(chat_log, str(e))
@@ -1047,6 +1069,24 @@ class LumiApp(App):
             self._run.phase = RunPhase.IDLE
             return
         self._run.task = asyncio.create_task(self._run_stream(hint, tool_mode="auto"))
+
+    def action_scroll_chat(self, direction: str) -> None:
+        """滚动聊天日志区域。
+
+        Args:
+            direction: 滚动方向 — "up" / "down" / "page_up" / "page_down"
+        """
+        chat_log = self._query_safe(ChatLog)
+        if chat_log is None:
+            return
+        if direction == "up":
+            chat_log.scroll_up(animate=False)
+        elif direction == "down":
+            chat_log.scroll_down(animate=False)
+        elif direction == "page_up":
+            chat_log.scroll_page_up(animate=False)
+        elif direction == "page_down":
+            chat_log.scroll_page_down(animate=False)
 
     async def action_open_settings(self) -> None:
         """打开设置界面。"""
