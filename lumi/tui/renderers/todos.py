@@ -48,6 +48,28 @@ class TodosRenderer(BaseRenderer):
             return Static("", markup=False)
         return Static(_build_todos_text(todos))
 
+    def render_summary(self, args: dict, output: str, *, is_error: bool = False) -> str:
+        """生成摘要：各状态任务数统计"""
+        if is_error:
+            return "Error"
+        todos: list[dict] = args.get("todos", [])
+        if not todos:
+            return "Done"
+        counts: dict[str, int] = {"pending": 0, "in_progress": 0, "completed": 0}
+        for todo in todos:
+            status = todo.get("status", "pending")
+            if status in counts:
+                counts[status] += 1
+        parts: list[str] = []
+        for key, label in (
+            ("completed", "completed"),
+            ("in_progress", "in progress"),
+            ("pending", "pending"),
+        ):
+            if counts[key]:
+                parts.append(f"{counts[key]} {label}")
+        return ", ".join(parts) if parts else "No tasks"
+
 
 def _build_todos_text(todos: list[dict]) -> Text:
     """构建待办事项列表的 Rich Text。

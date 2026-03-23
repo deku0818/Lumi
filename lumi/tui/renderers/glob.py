@@ -1,8 +1,9 @@
 """文件搜索工具（glob）渲染器
 
 标题格式: glob(搜索模式)
+摘要格式: Matched N files
 参数区域: 无（模式已在标题中展示）
-输出区域: 以列表形式展示匹配到的文件路径，并显示匹配文件总数
+输出区域: 以列表形式展示匹配到的文件路径
 """
 
 from __future__ import annotations
@@ -25,16 +26,23 @@ class GlobRenderer(BaseRenderer):
     group_verb_active = "Searching"
     group_noun = "pattern"
 
+    def render_summary(self, args: dict, output: str, *, is_error: bool = False) -> str:
+        """生成摘要：Matched N files"""
+        if is_error:
+            return "Error"
+        if not output:
+            return "No matches"
+        paths = [line.strip() for line in output.splitlines() if line.strip()]
+        return f"Matched {len(paths)} files"
+
     def render_output(self, output: str) -> Widget:
-        """以列表形式展示匹配到的文件路径，并显示匹配文件总数。"""
+        """以列表形式展示匹配到的文件路径。"""
         if not output:
             return Static("", markup=False)
 
         paths = [line.strip() for line in output.splitlines() if line.strip()]
-        total = len(paths)
 
         result = Text()
-        result.append(f"🔍 匹配 {total} 个文件\n", style=f"bold {get_color('accent')}")
         for path in paths:
             result.append("  📄 ", style=get_color("info"))
             result.append(path + "\n", style=get_color("text_muted"))

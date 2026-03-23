@@ -1,9 +1,9 @@
 """Bash 工具渲染器
 
 标题格式: bash(命令)
+摘要格式: Ran successfully / Exited with error
 参数区域: 命令文本
-输出区域: 终端风格展示命令输出，失败时红色高亮错误信息
-         超过 30 行输出时在折叠摘要中显示行数
+输出区域: 终端风格展示命令输出
 """
 
 from __future__ import annotations
@@ -48,6 +48,16 @@ class BashRenderer(BaseRenderer):
         cmd_text.append("$ ", style=f"bold {get_color('success')}")
         cmd_text.append(command, style="bold")
         return Static(cmd_text)
+
+    def render_summary(self, args: dict, output: str, *, is_error: bool = False) -> str:
+        """生成摘要：Ran successfully / Exited with error"""
+        if is_error:
+            return "Exited with error"
+        if output:
+            lower = output.lower()
+            if any(kw in lower for kw in _ERROR_KEYWORDS):
+                return "Exited with error"
+        return "Ran successfully"
 
     def render_output(self, output: str) -> Widget:
         """以终端风格展示命令输出。

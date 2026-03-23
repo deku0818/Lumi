@@ -1,6 +1,11 @@
 """渲染器基类 - 提供常见默认实现，减少各渲染器的样板代码
 
 子类只需覆盖 ``title_arg_key`` 和有特殊逻辑的方法即可。
+
+渲染层次（工具完成后展开态）：
+  ● tool_name(title_args)          ← render_title
+    ⎿ 摘要文本                      ← render_summary（始终可见）
+      详细内容...                    ← render_output（可选详情层）
 """
 
 from __future__ import annotations
@@ -19,6 +24,7 @@ class BaseRenderer:
 
     标题格式: 工具名(title_arg_key 对应的参数值)
     参数展示: 默认为空（大多数工具参数已在标题中展示）
+    摘要展示: 默认 "Done"（子类按需覆盖）
     输出展示: 纯文本
     """
 
@@ -43,6 +49,24 @@ class BaseRenderer:
     def render_args(self, args: dict, *, approval_mode: bool = False) -> Widget:
         """默认参数展示：空（子类按需覆盖）"""
         return Static("", markup=False)
+
+    def render_summary(self, args: dict, output: str, *, is_error: bool = False) -> str:
+        """生成 ⎿ 后面的摘要文本。
+
+        默认实现：错误时返回 "Error"，成功时返回 "Done"。
+        子类覆盖以提供更有意义的摘要（如行数、匹配数等）。
+
+        Args:
+            args: 工具参数字典
+            output: 工具输出文本
+            is_error: 是否为错误状态
+
+        Returns:
+            摘要文本（不含 ⎿ 前缀）
+        """
+        if is_error:
+            return "Error"
+        return "Done"
 
     def render_output(self, output: str) -> Widget:
         """默认输出展示：纯文本"""

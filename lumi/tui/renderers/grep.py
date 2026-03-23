@@ -1,6 +1,7 @@
 """内容搜索工具（grep）渲染器
 
 标题格式: grep(搜索模式)
+摘要格式: Found N matches in M files
 参数区域: 无（模式已在标题中展示）
 输出区域: 以分组形式展示匹配结果，匹配关键词高亮显示
 """
@@ -34,6 +35,16 @@ class GrepRenderer(BaseRenderer):
         """生成标题，格式: grep(搜索模式)，同时缓存 pattern 供 render_output 使用。"""
         self._pattern = get_arg(args, "pattern")
         return f"grep({self._pattern})"
+
+    def render_summary(self, args: dict, output: str, *, is_error: bool = False) -> str:
+        """生成摘要：从输出首行提取匹配统计"""
+        if is_error:
+            return "Error"
+        if not output:
+            return "No matches"
+        # 输出首行通常是匹配统计（如 "Found 8 matches in 5 files"）
+        first_line = output.splitlines()[0].strip()
+        return first_line if first_line else "Done"
 
     def render_output(self, output: str) -> Widget:
         """以分组形式展示匹配结果，关键词高亮。"""

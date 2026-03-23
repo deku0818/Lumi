@@ -17,6 +17,7 @@ class DefaultRenderer(BaseRenderer):
 
     标题格式: 工具名(首个参数值)
     参数展示: 格式化键值对，每个参数独占一行，长文本截断
+    摘要展示: 继承 BaseRenderer 的 "Done" / "Error"
     输出展示: 继承 BaseRenderer 的纯文本实现
     """
 

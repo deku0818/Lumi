@@ -1,9 +1,9 @@
 """文件编辑工具（edit）渲染器
 
 标题格式: edit(文件路径)
-参数区域: 带行号的 Diff 视图，删除行红色背景、新增行绿色背景
-         超过 30 行差异时显示变更行数摘要
-输出区域: 编辑成功/失败状态
+摘要格式: Added X lines, removed Y lines
+参数区域: 带行号的 Diff 视图（审批模式下使用）
+输出区域: 带行号的 Diff 视图（展开时作为详情层）
 """
 
 from __future__ import annotations
@@ -22,9 +22,25 @@ from lumi.tui.theme import get_color
 # 折叠摘要的 diff 行数阈值
 _DIFF_LINE_THRESHOLD = 30
 
-# 样式常量（背景色保持不变，不属于语义颜色角色）
-_STYLE_DEL = "on #351015"  # 红色背景 - 删除行
-_STYLE_ADD = "on #1a3520"  # 绿色背景 - 新增行
+# diff 背景色（暗色/亮色主题各一套）
+_DARK_STYLE_DEL = "on #351015"
+_DARK_STYLE_ADD = "on #1a3520"
+_LIGHT_STYLE_DEL = "on #fdd"
+_LIGHT_STYLE_ADD = "on #dfd"
+
+
+def _diff_styles() -> tuple[str, str]:
+    """根据当前主题返回 (删除行样式, 新增行样式)。"""
+    try:
+        from textual import active_app
+
+        app = active_app.get()
+        is_dark = getattr(app, "theme", "lumi-dark") == "lumi-dark"
+    except (LookupError, Exception):
+        is_dark = True
+    if is_dark:
+        return _DARK_STYLE_DEL, _DARK_STYLE_ADD
+    return _LIGHT_STYLE_DEL, _LIGHT_STYLE_ADD
 
 
 @register_renderer("edit")
@@ -63,6 +79,27 @@ class EditRenderer(BaseRenderer):
             return Static(summary)
 
         return Static(_render_diff_text(diff_lines))
+
+    def render_summary(self, args: dict, output: str, *, is_error: bool = False) -> str:
+        """生成摘要：Added X lines, removed Y lines"""
+        if is_error:
+            return "Error"
+
+        old_text = args.get("old_string", "")
+        new_text = args.get("new_string", "")
+        if old_text is None or new_text is None:
+            return "Done"
+
+        diff_lines = _parse_diff(str(old_text or ""), str(new_text or ""))
+        added = sum(1 for kind, _, _, _ in diff_lines if kind == "+")
+        removed = sum(1 for kind, _, _, _ in diff_lines if kind == "-")
+
+        parts: list[str] = []
+        if added:
+            parts.append(f"Added {added} lines")
+        if removed:
+            parts.append(f"removed {removed} lines")
+        return ", ".join(parts) if parts else "No changes"
 
     def render_output(self, output: str) -> Widget:
         """显示编辑成功/失败状态"""
@@ -119,6 +156,8 @@ def _render_diff_text(
     diff_lines: list[tuple[str, int | None, int | None, str]],
 ) -> Text:
     """将结构化 diff 行渲染为带行号、红绿背景色块的 Rich Text。"""
+    style_del, style_add = _diff_styles()
+
     max_no = 0
     for _, old_no, new_no, _ in diff_lines:
         if old_no and old_no > max_no:
@@ -139,11 +178,11 @@ def _render_diff_text(
         elif kind == "-":
             no_str = str(old_no).rjust(width) if old_no else " " * width
             result.append(f"{no_str} ", style=del_no_style)
-            result.append(f"-{content}\n", style=_STYLE_DEL)
+            result.append(f"-{content}\n", style=style_del)
         elif kind == "+":
             no_str = str(new_no).rjust(width) if new_no else " " * width
             result.append(f"{no_str} ", style=add_no_style)
-            result.append(f"+{content}\n", style=_STYLE_ADD)
+            result.append(f"+{content}\n", style=style_add)
         else:
             no_str = str(old_no).rjust(width) if old_no else " " * width
             result.append(f"{no_str}  {content}\n", style=ctx_style)

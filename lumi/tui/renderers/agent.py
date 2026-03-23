@@ -1,6 +1,7 @@
 """任务委托工具（agent）渲染器
 
 标题格式: agent(代理名称)
+摘要格式: Completed / Failed
 参数区域: 原始 prompt 文本
 输出区域: 原始模型输出
 """
@@ -26,3 +27,9 @@ class AgentRenderer(BaseRenderer):
         if not prompt:
             return Static("", markup=False)
         return Static(prompt, markup=False)
+
+    def render_summary(self, args: dict, output: str, *, is_error: bool = False) -> str:
+        """生成摘要：Completed / Failed"""
+        if is_error:
+            return "Failed"
+        return "Completed"

@@ -64,9 +64,13 @@ class ToolBlock(Vertical, SpinnerMixin):
     }
 
     ToolBlock Contents {
-        padding: 0 0 0 1;
-        margin: 0 0 0 1;
-        border-left: solid $text-muted;
+        padding: 0 0 0 3;
+        margin: 0;
+    }
+
+    ToolBlock .tool-summary {
+        padding: 0;
+        color: $text-muted;
     }
 
     ToolBlock .tool-args {
@@ -80,9 +84,8 @@ class ToolBlock(Vertical, SpinnerMixin):
     }
 
     ToolBlock .subagent-log {
-        padding: 0 0 0 1;
-        margin: 0 0 0 1;
-        border-left: solid $text-muted;
+        padding: 0 0 0 3;
+        margin: 0;
         height: auto;
     }
 
@@ -122,6 +125,7 @@ class ToolBlock(Vertical, SpinnerMixin):
             self._args, approval_mode=self._approval_mode
         )
 
+        args_widget.add_class("tool-args")
         with Collapsible(
             title=title_markup,
             collapsed=collapsed,
@@ -138,7 +142,11 @@ class ToolBlock(Vertical, SpinnerMixin):
                 )
 
     def on_mount(self) -> None:
-        """挂载后刷新标题颜色并启动闪烁动画"""
+        """挂载后刷新标题颜色并启动闪烁动画。
+
+        若 block 在 pending 阶段已被标记为 DONE/ERROR（set_done/set_error
+        在挂载前调用），此时补挂摘要行并更新标题和折叠状态。
+        """
         # 覆盖 CollapsibleTitle._update_label，避免空 symbol 拼出前导空格
         collapsible = self.query_one(Collapsible)
         title_widget = collapsible._title
@@ -151,7 +159,12 @@ class ToolBlock(Vertical, SpinnerMixin):
 
         title_widget._update_label = _patched_update_label
         self._update_title_label()
-        if self._status == ToolStatus.RUNNING:
+
+        if self._status in (ToolStatus.DONE, ToolStatus.ERROR, ToolStatus.INTERRUPTED):
+            # pending 阶段已完成，补挂摘要行并折叠
+            self._try_mount_summary()
+            collapsible.collapsed = True
+        elif self._status == ToolStatus.RUNNING:
             self._start_spinner(interval=0.5)
 
     def _on_spinner_tick(self, frame_char: str) -> None:
@@ -191,12 +204,17 @@ class ToolBlock(Vertical, SpinnerMixin):
             self._interactive = None
 
     def set_done(self, output: str = "") -> None:
-        """标记工具执行完成（输出文本存实例，展开时懒渲染）"""
+        """标记工具执行完成，生成摘要行并折叠。
+
+        摘要行（⎿ 文本）在挂载后由 on_mount 创建。若 block 已在 DOM 中
+        则立即挂载；若尚未挂载（pending 状态），on_mount 时会检查并补挂。
+        """
         self.remove_interactive()
         self._output_text = output
         self._status = ToolStatus.DONE
         self._stop_spinner()
         try:
+            self._try_mount_summary()
             self._update_title_label()
             self.query_one(Collapsible).collapsed = True
         except NoMatches:
@@ -205,12 +223,13 @@ class ToolBlock(Vertical, SpinnerMixin):
             )
 
     def set_error(self, error: str = "") -> None:
-        """标记工具执行错误（错误文本存实例，展开时懒渲染）"""
+        """标记工具执行错误，生成摘要行并折叠。"""
         self.remove_interactive()
         self._status = ToolStatus.ERROR
         self._error_text = error
         self._stop_spinner()
         try:
+            self._try_mount_summary()
             self._update_title_label()
             self.query_one(Collapsible).collapsed = True
         except NoMatches:
@@ -297,8 +316,58 @@ class ToolBlock(Vertical, SpinnerMixin):
             logger.warning("Contents not found in ToolBlock: %s", self._name)
             return None
 
+    def _mount_summary(self, *, is_error: bool) -> None:
+        """生成 ⎿ 摘要行并同步挂载到 Contents。
+
+        摘要行在工具完成时创建，作为展开态的第一行始终可见。
+        使用 mount（同步）确保在 set_done/set_error 中立即生效。
+        """
+        contents = self._get_contents()
+        if contents is None:
+            return
+        # 避免重复挂载
+        if any(w.has_class("tool-summary") for w in contents.children):
+            return
+
+        output = self._error_text if is_error else self._output_text
+        summary_text = self._renderer.render_summary(
+            self._args, output, is_error=is_error
+        )
+        if not summary_text:
+            return
+
+        styled = Text()
+        styled.append("⎿ ", style=get_color("text_muted"))
+        styled.append(summary_text, style=get_color("text_muted"))
+        widget = Static(styled, classes="tool-summary", markup=False)
+
+        # 插入到 Contents 最前面（参数 widget 之前），确保紧跟标题行
+        first_child = contents.children[0] if contents.children else None
+        if first_child is not None:
+            contents.mount(widget, before=first_child)
+        else:
+            contents.mount(widget)
+
+        # 隐藏空的参数 widget，避免标题和摘要之间出现空白行
+        for w in contents.children:
+            if w.has_class("tool-args"):
+                rendered = w.render()
+                plain = rendered.plain if hasattr(rendered, "plain") else str(rendered)
+                if not plain.strip():
+                    w.display = False
+                break
+
+    def _try_mount_summary(self) -> None:
+        """尝试挂载摘要行。
+
+        若 block 尚未挂载到 DOM（pending 状态），_get_contents() 返回 None，
+        此时跳过；on_mount 时会再次调用以补挂。
+        """
+        is_error = self._status in (ToolStatus.ERROR, ToolStatus.INTERRUPTED)
+        self._mount_summary(is_error=is_error)
+
     async def _mount_output(self) -> None:
-        """展开时按需渲染 output widget"""
+        """展开时按需渲染详情层 output widget（摘要行下方）"""
         contents = self._get_contents()
         if contents is None:
             return
@@ -323,7 +392,6 @@ class ToolBlock(Vertical, SpinnerMixin):
                     self._name,
                     exc_info=True,
                 )
-                # 渲染器崩溃时回退到纯文本，让用户至少能看到输出
                 widget = Static(
                     Text(self._output_text[:2000], style=get_color("text_muted")),
                     classes="tool-output",
@@ -341,7 +409,7 @@ class ToolBlock(Vertical, SpinnerMixin):
                 )
 
     async def _destroy_output(self) -> None:
-        """折叠时移除 output widget（仅当前层级，不影响嵌套 ToolBlock）"""
+        """折叠时移除详情层 output widget（保留摘要行，不影响嵌套 ToolBlock）"""
         contents = self._get_contents()
         if contents is None:
             return

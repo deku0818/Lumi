@@ -58,6 +58,13 @@ class _SafeRenderer:
             logger.warning("render_args 失败，回退", exc_info=True)
             return DefaultRenderer().render_args(args)
 
+    def render_summary(self, args: dict, output: str, *, is_error: bool = False) -> str:
+        try:
+            return self._inner.render_summary(args, output, is_error=is_error)
+        except Exception:
+            logger.warning("render_summary 失败，回退", exc_info=True)
+            return DefaultRenderer().render_summary(args, output, is_error=is_error)
+
     def render_output(self, output: str) -> Widget:
         try:
             return self._inner.render_output(output)

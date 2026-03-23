@@ -186,8 +186,8 @@ class ToolGroup(Vertical):
 
     ToolGroup .group-blocks {
         height: auto;
-        padding: 0 0 0 1;
-        margin: 0 0 0 1;
+        padding: 0 0 0 3;
+        margin: 0;
     }
 
     ToolGroup .group-blocks ToolBlock {

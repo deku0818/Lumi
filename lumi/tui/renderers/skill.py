@@ -1,6 +1,7 @@
 """技能工具（skill）渲染器
 
 标题格式: skill(技能名称)
+摘要格式: Loaded prompt (N chars)
 参数区域: 无（name 已在标题中展示）
 输出区域: 以折叠形式展示技能返回的提示词内容，长文本截断
 """
@@ -24,6 +25,14 @@ class SkillRenderer(BaseRenderer):
     """skill 工具渲染器"""
 
     title_arg_key = "name"
+
+    def render_summary(self, args: dict, output: str, *, is_error: bool = False) -> str:
+        """生成摘要：Loaded prompt (N chars)"""
+        if is_error:
+            return "Error"
+        if not output:
+            return "Done"
+        return f"Loaded prompt ({len(output)} chars)"
 
     def render_output(self, output: str) -> Widget:
         """以折叠形式展示技能返回的提示词内容，超过 500 字符时截断。"""
