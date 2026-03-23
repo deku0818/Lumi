@@ -148,9 +148,10 @@ class AgentBridge:
         """恢复中断并 yield 事件流
 
         恢复时工具已通过审批，使用 "auto" 跳过审批判断。
-        清理 _active_agent_runs：replay 会重新发出 agent 的 start 事件来重建。
+        保留 _active_agent_runs：子代理内部工具审批后 resume 可能不会
+        重新发出 agent 的 on_tool_start，需要保留已有映射才能正确识别
+        后续子代理事件的 parent_run_id。
         """
-        self._active_agent_runs.clear()
         input_data = Command(resume=value)
         async for event in self._stream(input_data, tool_mode="auto"):
             yield event
@@ -291,10 +292,19 @@ class AgentBridge:
                     inp = data.get("input", {})
                     if isinstance(inp, dict):
                         tool_call_id = inp.get("tool_call_id", "")
+
+                    # ask 等 BYPASS 工具使用 interrupt() 中断，LangGraph 会在
+                    # 中断时提前发出 on_tool_end（output 为空），此时不应标记
+                    # ToolBlock 为 Done，否则后续 ASK 事件找不到 block 来挂载对话框。
+                    # 真正的 TOOL_END 在 resume 后才会带有实际 output。
+                    resolved_output = str(output) if output else ""
+                    if name in APPROVAL_BYPASS_TOOLS and not resolved_output:
+                        continue
+
                     yield BridgeEvent(
                         kind=EventKind.TOOL_END,
                         name=name,
-                        output=str(output) if output else "",
+                        output=resolved_output,
                         tool_call_id=tool_call_id,
                         parent_run_id=parent_id,
                         run_id=run_id if name == "agent" else "",

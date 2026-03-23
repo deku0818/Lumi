@@ -34,6 +34,8 @@ class AgentEntry:
     name: str
     prompt: str
     run_id: str
+    widget_id: str = ""
+    """DOM widget 的固定 id 后缀，始终为初始注册时的 run_id。"""
     tool_uses: int = 0
     input_tokens: int = 0
     output_tokens: int = 0
@@ -42,6 +44,10 @@ class AgentEntry:
     done: bool = False
     error: bool = False
     expanded: bool = False
+
+    def __post_init__(self) -> None:
+        if not self.widget_id:
+            self.widget_id = self.run_id
 
 
 def _format_tokens(n: int) -> str:
@@ -133,10 +139,15 @@ class AgentGroup(Vertical):
     def __init__(self) -> None:
         super().__init__()
         self._entries: dict[str, AgentEntry] = {}  # run_id → AgentEntry
-        self._order: list[str] = []  # 保持插入顺序
+        self._order: list[str] = []  # 保持插入顺序（唯一，无 alias）
         self._finalized = False
         self._spinner_frame = 0
         self._spinner_timer: Timer | None = None
+
+    @property
+    def _unique_entries(self) -> list[AgentEntry]:
+        """返回去重后的 entry 列表（按 _order 顺序）。"""
+        return [self._entries[rid] for rid in self._order if rid in self._entries]
 
     def compose(self) -> ComposeResult:
         yield _HeaderLine("", markup=False, id=f"ag-header-{id(self)}")
@@ -172,6 +183,23 @@ class AgentGroup(Vertical):
                 run_id,
             )
         self._refresh_header()
+
+    def remap_agent(self, old_run_id: str, new_run_id: str) -> bool:
+        """将已有条目的 run_id 映射到新值（replay 场景）。
+
+        保留旧 run_id 作为别名，widget_id 不变（DOM 稳定性）。
+
+        Returns:
+            True 映射成功，False 旧 run_id 不存在。
+        """
+        entry = self._entries.get(old_run_id)
+        if entry is None:
+            return False
+        entry.run_id = new_run_id
+        # 新 key 指向同一个 entry，旧 key 保留作为别名
+        self._entries[new_run_id] = entry
+        self._order = [new_run_id if r == old_run_id else r for r in self._order]
+        return True
 
     def record_tool_start(self, run_id: str, tool_name: str, args: dict) -> None:
         """记录子 agent 的工具调用开始。"""
@@ -254,17 +282,31 @@ class AgentGroup(Vertical):
         """获取子 agent 条目。"""
         return self._entries.get(run_id)
 
+    def _find_entry_by_widget_id(self, widget_id: str) -> AgentEntry | None:
+        """通过 widget_id 反查 AgentEntry。"""
+        for entry in self._entries.values():
+            if entry.widget_id == widget_id:
+                return entry
+        return None
+
     def toggle_agent_detail(self, run_id: str) -> None:
-        """切换单个 agent 的详情展开/折叠。"""
+        """切换单个 agent 的详情展开/折叠。
+
+        run_id 可以是当前 run_id 或 widget_id，均可正确查找。
+        """
         entry = self._entries.get(run_id)
+        if entry is None:
+            # 可能传入的是 widget_id（来自 on_click），尝试反查
+            entry = self._find_entry_by_widget_id(run_id)
         if entry is None or not entry.done:
             return
         entry.expanded = not entry.expanded
-        self._refresh_line(run_id)
+        wid = entry.widget_id
+        self._refresh_line(entry.run_id)
         if entry.expanded:
-            self.call_after_refresh(lambda: self._mount_agent_detail(run_id))
+            self.call_after_refresh(lambda: self._mount_agent_detail(wid))
         else:
-            self._remove_agent_detail(run_id)
+            self._remove_agent_detail(wid)
 
     @property
     def is_finalized(self) -> bool:
@@ -274,7 +316,7 @@ class AgentGroup(Vertical):
         """强制终止 — 中断场景下调用，将未完成的 agent 标记为 error 后 finalize。"""
         if self._finalized:
             return
-        for entry in self._entries.values():
+        for entry in self._unique_entries:
             if not entry.done:
                 entry.done = True
                 entry.error = True
@@ -292,14 +334,13 @@ class AgentGroup(Vertical):
             logger.debug("_refresh_header: header widget not ready")
             return
 
-        total = len(self._entries)
+        total = len(self._order)
 
         if self._finalized:
-            total_tools = sum(e.tool_uses for e in self._entries.values())
-            total_tokens = sum(
-                e.input_tokens + e.output_tokens for e in self._entries.values()
-            )
-            errors = sum(1 for e in self._entries.values() if e.error)
+            entries = self._unique_entries
+            total_tools = sum(e.tool_uses for e in entries)
+            total_tokens = sum(e.input_tokens + e.output_tokens for e in entries)
+            errors = sum(1 for e in entries if e.error)
             text = Text()
             text.append("● ", style=get_color("success"))
             summary = (
@@ -332,10 +373,12 @@ class AgentGroup(Vertical):
         entry = self._entries.get(run_id)
         if entry is None:
             return
+        # widget DOM id 始终使用初始注册时的 widget_id，而非可能被 remap 的 run_id
+        wid = entry.widget_id
         try:
-            line = self.query_one(f"#ag-line-{run_id}", _AgentLine)
+            line = self.query_one(f"#ag-line-{wid}", _AgentLine)
         except NoMatches:
-            logger.debug("_refresh_line: line widget not ready (run_id=%s)", run_id)
+            logger.debug("_refresh_line: line widget not ready (widget_id=%s)", wid)
             return
 
         is_last = run_id == self._order[-1] if self._order else False
@@ -373,7 +416,7 @@ class AgentGroup(Vertical):
 
     def _check_all_done(self) -> None:
         """检查是否所有 agent 都已完成。"""
-        if all(e.done for e in self._entries.values()):
+        if all(e.done for e in self._unique_entries):
             self._finalize()
 
     def _finalize(self) -> None:
@@ -385,13 +428,16 @@ class AgentGroup(Vertical):
         self._refresh_header()
         self._refresh_lines()
 
-    async def _mount_agent_detail(self, run_id: str) -> None:
-        """在 agent 行下方挂载该 agent 的 prompt + result 详情。"""
-        entry = self._entries.get(run_id)
+    async def _mount_agent_detail(self, widget_id: str) -> None:
+        """在 agent 行下方挂载该 agent 的 prompt + result 详情。
+
+        参数 widget_id 为 AgentEntry.widget_id（DOM 稳定 id）。
+        """
+        entry = self._find_entry_by_widget_id(widget_id)
         if entry is None:
             return
 
-        detail_id = f"ag-detail-{run_id}"
+        detail_id = f"ag-detail-{widget_id}"
         try:
             self.query_one(f"#{detail_id}", _AgentDetail)
             return
@@ -402,12 +448,12 @@ class AgentGroup(Vertical):
 
         try:
             container = self.query_one(".agent-lines", Vertical)
-            line = self.query_one(f"#ag-line-{run_id}", _AgentLine)
+            line = self.query_one(f"#ag-line-{widget_id}", _AgentLine)
             await container.mount(detail, after=line)
         except NoMatches:
             logger.error(
-                "_mount_agent_detail failed: container not found (run_id=%s)",
-                run_id,
+                "_mount_agent_detail failed: container not found (widget_id=%s)",
+                widget_id,
             )
             return
 
@@ -432,9 +478,12 @@ class AgentGroup(Vertical):
             Static(result_text, markup=False, classes="agent-detail-content")
         )
 
-    def _remove_agent_detail(self, run_id: str) -> None:
-        """移除某个 agent 的详情区域。"""
-        detail_id = f"ag-detail-{run_id}"
+    def _remove_agent_detail(self, widget_id: str) -> None:
+        """移除某个 agent 的详情区域。
+
+        参数 widget_id 为 AgentEntry.widget_id（DOM 稳定 id）。
+        """
+        detail_id = f"ag-detail-{widget_id}"
         try:
             detail = self.query_one(f"#{detail_id}", _AgentDetail)
             detail.remove()

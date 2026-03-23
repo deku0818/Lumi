@@ -12,6 +12,7 @@ from textual.binding import Binding
 from textual.css.query import NoMatches
 from textual.events import Key
 from textual.widget import Widget
+from textual.widgets import Static
 
 from lumi import __version__
 from lumi.agents.cron.delivery import DeliveryManager, TUIDelivery
@@ -107,6 +108,8 @@ class LumiApp(App):
         self._notification_poll_timer = None
         self._last_esc: float = 0.0  # 双击 Esc 检测时间戳
         self._rewind_checkpoints: dict = {}  # _open_rewind_screen 缓存
+        self._todos_all_done: bool = False  # todos 全完成，下次发消息时清除面板
+        self._todos_hidden_for_approval: bool = False  # 审批期间临时隐藏 todos-bar
 
     def _query_safe(self, widget_type: type[Widget]) -> Widget | None:
         """按类型查询 widget，未挂载时返回 None 而非抛异常。"""
@@ -115,9 +118,62 @@ class LumiApp(App):
         except NoMatches:
             return None
 
+    def _update_todos_bar(self, todos: list[dict]) -> None:
+        """更新 #todos-bar 面板内容。
+
+        无任务时隐藏；全部完成时仍然渲染（展示最终全勾状态），
+        但标记 _todos_all_done，下次用户发消息时再清除面板。
+        """
+        from lumi.tui.renderers.todos import build_todos_text
+
+        try:
+            bar = self.query_one("#todos-bar", Static)
+        except NoMatches:
+            return
+        if not todos:
+            bar.update("")
+            bar.remove_class("-visible")
+            self._todos_all_done = False
+            return
+        bar.update(build_todos_text(todos))
+        bar.add_class("-visible")
+        self._todos_all_done = all(t.get("status") == "completed" for t in todos)
+
+    def _clear_todos_bar(self) -> None:
+        """隐藏并清空 #todos-bar 面板。"""
+        self._todos_all_done = False
+        try:
+            bar = self.query_one("#todos-bar", Static)
+        except NoMatches:
+            return
+        bar.update("")
+        bar.remove_class("-visible")
+
+    def _hide_todos_bar_for_approval(self) -> None:
+        """审批期间临时隐藏 todos-bar，避免遮挡审批 UI。"""
+        try:
+            bar = self.query_one("#todos-bar", Static)
+        except NoMatches:
+            return
+        self._todos_hidden_for_approval = bar.has_class("-visible")
+        bar.remove_class("-visible")
+
+    def _restore_todos_bar_after_approval(self) -> None:
+        """审批结束后恢复 todos-bar 的可见状态。"""
+        if not getattr(self, "_todos_hidden_for_approval", False):
+            return
+        self._todos_hidden_for_approval = False
+        try:
+            bar = self.query_one("#todos-bar", Static)
+        except NoMatches:
+            return
+        # 隐藏前已记录可见状态，直接恢复
+        bar.add_class("-visible")
+
     def compose(self) -> ComposeResult:
         yield ChatLog()
         yield RunStatusBar()
+        yield Static("", id="todos-bar")
         yield CommandResultPanel()
         yield InputBar(id="input-area")
         yield StatusLine()
@@ -518,7 +574,16 @@ class LumiApp(App):
         await self._mount_title_block(chat_log)
 
         # 从 StateSnapshot 中恢复历史消息
-        await restore_messages(self._bridge.graph, chat_log, thread_id)
+        todos = await restore_messages(self._bridge.graph, chat_log, thread_id)
+        if todos:
+            # 全部完成的任务不再展示，避免 resume 进已完成会话时残留面板
+            all_done = all(t.get("status") == "completed" for t in todos)
+            if not all_done:
+                self._update_todos_bar(todos)
+            else:
+                self._clear_todos_bar()
+        else:
+            self._clear_todos_bar()
 
         await chat_log.scroll_to_end()
 
@@ -540,6 +605,7 @@ class LumiApp(App):
         await chat_log.append_hint("● ", "已开始新会话")
         await chat_log.scroll_to_end()
 
+        self._clear_todos_bar()
         self._reset_session_state()
 
     # ── Rewind ──
@@ -599,13 +665,16 @@ class LumiApp(App):
         # 使用目标 checkpoint 记录的 langgraph_checkpoint_id 读取
         # 该轮用户消息发送前的会话状态，确保恢复的消息不包含该轮及之后的内容
         # 若为空（第一条消息之前），则跳过消息恢复，聊天窗口保持空白
+        self._clear_todos_bar()
         if target.langgraph_checkpoint_id:
-            await restore_messages(
+            todos = await restore_messages(
                 self._bridge.graph,
                 chat_log,
                 thread_id,
                 checkpoint_id=target.langgraph_checkpoint_id,
             )
+            if todos:
+                self._update_todos_bar(todos)
 
         # 部分成功时显示警告（如文件已恢复但 LangGraph 会话回退失败）
         if warning:
@@ -774,6 +843,10 @@ class LumiApp(App):
         if self._run.is_running:
             return
 
+        # 上一轮 todos 全部完成 → 清除面板
+        if self._todos_all_done:
+            self._clear_todos_bar()
+
         await self._try_dismiss_command_panel()
 
         text = event.text
@@ -912,6 +985,8 @@ class LumiApp(App):
             self._subagent_tracker.set_approval_context(evt.parent_run_id)
         else:
             self._subagent_tracker.clear_approval_context()
+        # 审批期间临时隐藏 todos-bar，避免遮挡审批 UI
+        self._hide_todos_bar_for_approval()
         await chat_log.mount(approval)
 
     # ── 辅助方法 ──
@@ -968,6 +1043,8 @@ class LumiApp(App):
                     )
                     block.set_error(msg)
             await chat_log.auto_scroll_if_needed()
+        # 审批结束，恢复 todos-bar
+        self._restore_todos_bar_after_approval()
         # 清理审批上下文
         self._subagent_tracker.clear_approval_context()
         await self._run_resume(decision)

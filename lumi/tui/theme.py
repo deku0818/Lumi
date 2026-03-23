@@ -194,9 +194,30 @@ Screen {
     scrollbar-color-active: $accent;
 }
 
+/* ── Markdown 内联代码 - 覆盖 Textual 默认的 error 配色 ── */
+MarkdownBlock {
+    &:light > .code_inline {
+        background: #e8e8ee;
+        color: $accent;
+    }
+}
+
 /* ── 聊天日志 ── */
 #chat-log {
     background: transparent;
     padding: 0 1;
+}
+
+/* ── Todos 面板（输入框上方持久显示） ── */
+#todos-bar {
+    display: none;
+    margin: 0 0 0 1;
+    padding: 0 1;
+    height: auto;
+    max-height: 10;
+    color: $text-muted;
+}
+#todos-bar.-visible {
+    display: block;
 }
 """

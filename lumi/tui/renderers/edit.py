@@ -25,8 +25,8 @@ _DIFF_LINE_THRESHOLD = 30
 # diff 背景色（暗色/亮色主题各一套）
 _DARK_STYLE_DEL = "on #351015"
 _DARK_STYLE_ADD = "on #1a3520"
-_LIGHT_STYLE_DEL = "on #fdd"
-_LIGHT_STYLE_ADD = "on #dfd"
+_LIGHT_STYLE_DEL = "on #ffdddd"
+_LIGHT_STYLE_ADD = "on #ddffdd"
 
 
 def _diff_styles() -> tuple[str, str]:

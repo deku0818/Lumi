@@ -57,7 +57,7 @@ async def restore_messages(
     chat_log: ChatLog,
     thread_id: str,
     checkpoint_id: str = "",
-) -> None:
+) -> list[dict] | None:
     """从 checkpoint 恢复历史消息并渲染到 ChatLog。
 
     Args:
@@ -65,9 +65,12 @@ async def restore_messages(
         chat_log: 聊天日志组件
         thread_id: 会话线程 ID
         checkpoint_id: 指定 LangGraph checkpoint_id，为空则读取最新 HEAD
+
+    Returns:
+        snapshot 中的 todos 列表（可用于恢复 #todos-bar），无数据时返回 None
     """
     if graph is None:
-        return
+        return None
 
     try:
         configurable: dict[str, str] = {"thread_id": thread_id}
@@ -76,7 +79,16 @@ async def restore_messages(
         config = {"configurable": configurable}
         snapshot = await graph.aget_state(config)
         if not snapshot or not snapshot.values:
-            return
+            return None
+
+        # 提取 todos 数据供调用方恢复 #todos-bar
+        raw_todos = snapshot.values.get("todos", None)
+        todos_data: list[dict] | None = None
+        if raw_todos:
+            todos_data = [
+                t.model_dump() if hasattr(t, "model_dump") else dict(t)
+                for t in raw_todos
+            ]
 
         messages = snapshot.values.get("messages", [])
 
@@ -115,9 +127,12 @@ async def restore_messages(
             ag.call_after_refresh(ag._refresh_header)
             ag.call_after_refresh(ag._refresh_lines)
 
+        return todos_data
+
     except Exception as e:
         logger.warning("恢复历史消息失败: %s", e, exc_info=True)
         await chat_log.append_error("恢复历史消息失败:", str(e))
+        return None
 
 
 def _messages_to_items(
@@ -160,6 +175,10 @@ def _messages_to_items(
                 tc_id = tc.get("id", "")
                 output = tool_outputs.get(tc_id, "")
                 is_error = output in _TOOL_REJECT_KEYWORDS
+
+                # todos 工具由 #todos-bar 面板展示，不创建 ToolBlock
+                if name == "todos":
+                    continue
 
                 if name == "agent":
                     run_id = f"restore-{tc_id}" if tc_id else f"restore-{id(tc)}"
