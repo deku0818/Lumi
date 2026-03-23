@@ -92,18 +92,16 @@ async def test_single_select_by_digit():
 
 
 async def test_custom_input_via_arrow_enter():
-    """↓ 导航到自定义输入项 → Enter 激活 → 输入文本 → Enter 退出"""
+    """↓ 导航到自定义输入项 → 自动激活输入 → 输入文本 → Enter 退出"""
     app = AskDialogTestApp(_make_interrupt())
     async with app.run_test() as pilot:
         dialog = app.query_one(AskDialog)
         # 3 个有效选项，自定义输入在第 4 位（index 3）
         await pilot.press("down")  # 1 → Beta
         await pilot.press("down")  # 2 → Gamma
-        await pilot.press("down")  # 3 → 自定义输入
-        assert dialog._highlighted[0] == 3
-
-        await pilot.press("enter")  # 激活输入框
+        await pilot.press("down")  # 3 → 自定义输入（自动激活）
         await pilot.pause()
+        assert dialog._highlighted[0] == 3
         assert dialog._input_focused is True
 
         # 输入行应可见

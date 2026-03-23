@@ -520,7 +520,6 @@ class LumiApp(App):
         # 从 StateSnapshot 中恢复历史消息
         await restore_messages(self._bridge.graph, chat_log, thread_id)
 
-        await chat_log.append_hint("● ", f"已恢复会话 {thread_id[:16]}...")
         await chat_log.scroll_to_end()
 
         # 重置运行状态

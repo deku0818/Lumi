@@ -58,6 +58,11 @@ class ToolBlock(Vertical, SpinnerMixin):
         text-style: none;
     }
 
+    ToolBlock CollapsibleTitle:focus {
+        text-style: none;
+        background: transparent;
+    }
+
     ToolBlock Contents {
         padding: 0 0 0 1;
         margin: 0 0 0 1;
@@ -201,11 +206,13 @@ class ToolBlock(Vertical, SpinnerMixin):
 
     def set_error(self, error: str = "") -> None:
         """标记工具执行错误（错误文本存实例，展开时懒渲染）"""
+        self.remove_interactive()
         self._status = ToolStatus.ERROR
         self._error_text = error
         self._stop_spinner()
         try:
             self._update_title_label()
+            self.query_one(Collapsible).collapsed = True
         except NoMatches:
             logger.debug(
                 "set_error: Collapsible 未挂载（compose 可能失败）: %s", self._name

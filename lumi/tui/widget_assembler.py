@@ -15,6 +15,7 @@ import logging
 from typing import TYPE_CHECKING, Any
 
 from lumi.tui.grouping import GroupDecision, GroupingEngine
+from lumi.tui.widgets.tool_block import ToolStatus
 from lumi.tui.render_items import (
     AgentEndItem,
     AgentStartItem,
@@ -258,6 +259,9 @@ class WidgetAssembler:
 
         if item.is_error:
             block.set_error(item.output)
+        elif block._status in (ToolStatus.ERROR, ToolStatus.INTERRUPTED):
+            # 已经被标记为 ERROR/INTERRUPTED（如 ask 被 ESC 取消），不要覆盖
+            pass
         else:
             block.set_done(item.output)
 

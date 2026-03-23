@@ -490,12 +490,20 @@ class AskDialog(Vertical):
                     self._switch_tab(self._current_tab + 1)
                 event.stop()
             case "up":
-                self._highlighted[qi] = (highlighted - 1) % total
-                self._refresh_current()
+                new_h = (highlighted - 1) % total
+                self._highlighted[qi] = new_h
+                if new_h == len(opts):
+                    self._activate_input(qi)
+                else:
+                    self._refresh_current()
                 event.stop()
             case "down":
-                self._highlighted[qi] = (highlighted + 1) % total
-                self._refresh_current()
+                new_h = (highlighted + 1) % total
+                self._highlighted[qi] = new_h
+                if new_h == len(opts):
+                    self._activate_input(qi)
+                else:
+                    self._refresh_current()
                 event.stop()
             case "tab":
                 event.stop()
