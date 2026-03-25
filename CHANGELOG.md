@@ -1,5 +1,23 @@
 # Changelog
 
+## [0.0.5] - 2026-03-25
+
+### Added
+- 工具结果卸载功能：大文件自动写入 `~/.lumi/offload/` 目录，消息中保留文件路径引用，避免占用过多上下文窗口
+- 新增 `lumi.cli` CLI 入口模块，支持 `textual-serve` 集成
+
+### Changed
+- Token 配置从固定 token 数改为相对于 `context_length` 的比例配置（`once_tool_ratio`、`trim_messages_ratio`），更灵活适配不同模型的上下文窗口
+- TUI 渲染架构重构：统一为 WidgetAssembler 模式，支持摘要层和懒渲染优化
+- ToolGroup 和 AgentGroup 支持合并显示与轻量摘要模式，提升长对话可读性
+- TUI 事件路由解耦，采用渲染器注册机制，提高可扩展性
+
+### Fixed
+- 修复 sub-agent 审批 replay 渲染与 todos-bar 持久化问题
+- 修复 TUI ask 取消状态处理、ToolBlock 焦点样式与 resume 提示
+- 修复 TUI 滚动异常、消息恢复分组逻辑
+- 增强权限引擎异常处理与边界检查
+
 ## [0.0.3] - 2026-03-19
 
 ### Added

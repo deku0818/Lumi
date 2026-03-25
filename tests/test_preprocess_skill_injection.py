@@ -36,10 +36,9 @@ def _make_state(
 
 
 def _patch_preprocessing():
-    """返回三层 patch 装饰器，mock 掉清理和卸载步骤。"""
+    """返回两层 patch 装饰器，mock 掉清理步骤。"""
     return (
         patch("lumi.agents.core.node.cleanup_incomplete_tool_calls", return_value=[]),
-        patch("lumi.agents.core.node.offload_tool_result", return_value=[]),
         patch("lumi.agents.core.node.SkillChangeDetector"),
     )
 
@@ -48,11 +47,9 @@ def _patch_preprocessing():
 
 
 @patch("lumi.agents.core.node.SkillChangeDetector")
-@patch("lumi.agents.core.node.offload_tool_result", return_value=[])
 @patch("lumi.agents.core.node.cleanup_incomplete_tool_calls", return_value=[])
 async def test_skill_injection_after_preprocessing(
     mock_cleanup: MagicMock,
-    mock_offload: MagicMock,
     mock_detector_cls: MagicMock,
 ) -> None:
     """验证技能变更时，注入逻辑生成 RemoveMessage + 新 HumanMessage。
@@ -94,18 +91,15 @@ async def test_skill_injection_after_preprocessing(
 
     # 确认预处理步骤被调用
     mock_cleanup.assert_called_once()
-    mock_offload.assert_called_once()
 
 
 # --- 测试 2: 仅最后一条 HumanMessage 被注入（Property 6）---
 
 
 @patch("lumi.agents.core.node.SkillChangeDetector")
-@patch("lumi.agents.core.node.offload_tool_result", return_value=[])
 @patch("lumi.agents.core.node.cleanup_incomplete_tool_calls", return_value=[])
 async def test_only_last_human_message_injected(
     mock_cleanup: MagicMock,
-    mock_offload: MagicMock,
     mock_detector_cls: MagicMock,
 ) -> None:
     """多条 HumanMessage 时，仅最后一条被注入。
@@ -154,11 +148,9 @@ async def test_only_last_human_message_injected(
 
 
 @patch("lumi.agents.core.node.SkillChangeDetector")
-@patch("lumi.agents.core.node.offload_tool_result", return_value=[])
 @patch("lumi.agents.core.node.cleanup_incomplete_tool_calls", return_value=[])
 async def test_no_injection_when_not_changed(
     mock_cleanup: MagicMock,
-    mock_offload: MagicMock,
     mock_detector_cls: MagicMock,
 ) -> None:
     """技能未发生变更时（changed=False），不应注入。
@@ -189,11 +181,9 @@ async def test_no_injection_when_not_changed(
 
 
 @patch("lumi.agents.core.node.SkillChangeDetector")
-@patch("lumi.agents.core.node.offload_tool_result", return_value=[])
 @patch("lumi.agents.core.node.cleanup_incomplete_tool_calls", return_value=[])
 async def test_no_injection_when_skills_empty(
     mock_cleanup: MagicMock,
-    mock_offload: MagicMock,
     mock_detector_cls: MagicMock,
 ) -> None:
     """技能变更但列表为空时，不应注入。

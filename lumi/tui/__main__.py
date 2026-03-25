@@ -2,7 +2,6 @@
 
 用法:
     python -m lumi.tui
-    lumi  (通过 pyproject.toml scripts)
 """
 
 from lumi.tui.app import LumiApp
@@ -10,6 +9,7 @@ from lumi.utils.patches import apply_all
 
 
 def main() -> None:
+    """启动 TUI（供 python -m lumi.tui 和 textual-serve 子进程调用）。"""
     import sys
 
     apply_all()

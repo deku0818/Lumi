@@ -16,7 +16,6 @@ from lumi.agents.core.executor_tools import (
 from lumi.agents.core.message_tools import (
     cleanup_incomplete_tool_calls,
     inject_message_cache_breakpoints,
-    offload_tool_result,
 )
 from lumi.agents.core.scheme import LumiAgentContext, LumiAgentState
 from lumi.agents.tools.permissions.matcher import (
@@ -105,8 +104,8 @@ async def tool_executor(state: LumiAgentState, runtime: Runtime[LumiAgentContext
     else:
         messages_list = tool_messages.get("messages", [])
 
-    # 4. 截断结果
-    truncate_tool_results(messages_list)
+    # 4. 截断结果（含卸载）
+    await truncate_tool_results(messages_list)
 
     return {"messages": messages_list}
 
@@ -515,8 +514,7 @@ async def preprocess_messages(state: LumiAgentState):
 
     0. 检查并执行摘要替换（如果 state["summary"] 有值）
     1. 清理不完整的工具调用
-    2. 卸载大工具结果到文件系统
-    3. 技能动态注入（检测 .skills/ 变更并将技能列表注入最后一条用户消息）
+    2. 技能动态注入（检测 .skills/ 变更并将技能列表注入最后一条用户消息）
     """
     messages = state["messages"]
     result_messages = []
@@ -564,10 +562,7 @@ async def preprocess_messages(state: LumiAgentState):
     # 1. 清理不完整的工具调用
     result_messages.extend(cleanup_incomplete_tool_calls(messages))
 
-    # 2. 卸载大工具结果到本地文件系统
-    result_messages.extend(await offload_tool_result(messages))
-
-    # 3. 技能动态注入 + 系统信息注入
+    # 2. 技能动态注入 + 系统信息注入
     last_human = None
     for msg in reversed(messages):
         if isinstance(msg, HumanMessage):

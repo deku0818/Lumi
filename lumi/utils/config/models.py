@@ -50,19 +50,35 @@ class AgentsConfig(BaseModel):
 
 
 class TokenConfig(BaseModel):
-    """Token处理配置类"""
+    """Token处理配置类
 
-    once_tool_max_tokens: int = Field(
-        default=10000, description="单次工具调用返回结果最大token数"
+    once_tool_ratio / trim_messages_ratio / summary_threshold 均为相对于
+    context_length 的比例（0~1），实际 token 数通过属性方法计算。
+    """
+
+    once_tool_ratio: float = Field(
+        default=0.1,
+        description="单次工具调用返回结果最大 token 占比（相对于 context_length）",
     )
-    trim_messages_max_tokens: int = Field(
-        default=192000, description="消息修剪器最大token数"
+    trim_messages_ratio: float = Field(
+        default=0.96,
+        description="消息修剪器最大 token 占比（相对于 context_length）",
     )
     context_length: int = Field(default=200000, description="模型上下文窗口最大token数")
     summary_threshold: float = Field(
         default=0.7,
         description="触发总结的阈值比例，当消息token数 >= context_length * summary_threshold 时触发",
     )
+
+    @property
+    def once_tool_max_tokens(self) -> int:
+        """单次工具调用返回结果最大 token 数"""
+        return int(self.context_length * self.once_tool_ratio)
+
+    @property
+    def trim_messages_max_tokens(self) -> int:
+        """消息修剪器最大 token 数"""
+        return int(self.context_length * self.trim_messages_ratio)
 
 
 class ToolArgsConfig(BaseModel):

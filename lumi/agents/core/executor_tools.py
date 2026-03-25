@@ -1,13 +1,16 @@
 """工具执行器模块
 
 提供工具执行相关的辅助函数，包括：
-- 工具结果截断
+- 工具结果截断与卸载
 - JSON 提取与修复
 - 工具错误处理
 """
 
+import asyncio
 import json
 import re
+from datetime import datetime
+from pathlib import Path
 
 from json_repair import repair_json
 from jsonschema import ValidationError, validate
@@ -15,19 +18,84 @@ from jsonschema import ValidationError, validate
 from lumi.utils.llm_chain import structured_output, truncate_docs_to_max_tokens
 from lumi.utils.logger import logger
 from lumi.utils.read_config import get_config
+from lumi.utils.token_counter import str_token_counter
+
+# 使用截断+分段读取提示的工具（这些工具自身支持 offset/limit 分段读取）
+_TRUNCATE_ONLY_TOOLS: frozenset[str] = frozenset({"read"})
 
 
-def truncate_tool_results(messages_list: list) -> list:
-    """截断工具返回结果
+def _content_to_str(content: str | list | object) -> str:
+    """将消息 content 转换为纯文本字符串。
 
-    确保工具调用结果不超过最大 token 数。
-    截断后会在内容末尾添加"已被截断"的提示。
+    Args:
+        content: ToolMessage 的 content，可能是 str、list[dict] 或其他类型
+
+    Returns:
+        纯文本字符串
+    """
+    if isinstance(content, str):
+        return content
+    if isinstance(content, list):
+        parts = []
+        for block in content:
+            if isinstance(block, str):
+                parts.append(block)
+            elif isinstance(block, dict) and "text" in block:
+                parts.append(block["text"])
+        return "\n".join(parts)
+    return str(content)
+
+
+def _build_truncation_summary(
+    content_str: str,
+    truncated_str: str,
+    max_tokens: int,
+) -> str:
+    """构建截断元信息摘要。
+
+    Args:
+        content_str: 原始完整文本
+        truncated_str: 截断后文本
+        max_tokens: 单次工具最大 token 数
+
+    Returns:
+        格式化的截断摘要文本
+    """
+    token_count = str_token_counter(content_str)
+    truncated_token_count = str_token_counter(truncated_str)
+    remaining_tokens = token_count - truncated_token_count
+    line_count = content_str.count("\n") + 1
+    truncated_line_count = truncated_str.count("\n") + 1
+    remaining_lines = line_count - truncated_line_count
+
+    return (
+        f"... [内容已被截断]\n"
+        f"已显示：{truncated_token_count} tokens, {truncated_line_count} 行\n"
+        f"剩余：{remaining_tokens} tokens, {remaining_lines} 行\n"
+        f"原始：{len(content_str)} 字符, {token_count} tokens, {line_count} 行\n"
+        f"单次工具最大 {max_tokens} tokens"
+    )
+
+
+def _write_offload_file(file_path: Path, content: str) -> None:
+    """将内容写入卸载文件（同步，供 asyncio.to_thread 调用）。"""
+    file_path.parent.mkdir(parents=True, exist_ok=True)
+    file_path.write_text(content, encoding="utf-8")
+
+
+async def truncate_tool_results(messages_list: list) -> list:
+    """截断或卸载工具返回结果。
+
+    当工具调用结果超过最大 token 数时，根据工具类型采取不同策略：
+    - read 等支持分段读取的工具：截断并提示使用 offset/limit 分段读取
+    - 其他工具：优先将完整内容卸载到本地文件系统，消息中保留文件路径引用；
+      卸载失败时回退到截断
 
     Args:
         messages_list: 工具消息列表
 
     Returns:
-        截断后的消息列表
+        处理后的消息列表
     """
     max_tokens = get_config().config.token.once_tool_max_tokens
 
@@ -39,10 +107,37 @@ def truncate_tool_results(messages_list: list) -> list:
             truncated_content = truncate_docs_to_max_tokens(
                 original_content, max_tokens=max_tokens
             )
-            # 如果内容被截断，添加提示
-            if truncated_content != original_content:
-                truncated_content += "\n\n... [内容已被截断]"
-            msg.content = truncated_content
+
+            # 内容未超限，无需处理
+            if truncated_content == original_content:
+                continue
+
+            content_str = _content_to_str(original_content)
+            truncated_str = _content_to_str(truncated_content)
+            tool_name = getattr(msg, "name", "unknown")
+
+            # read 工具：始终截断并附带分段读取提示
+            if tool_name in _TRUNCATE_ONLY_TOOLS:
+                summary = _build_truncation_summary(
+                    content_str, truncated_str, max_tokens
+                )
+                msg.content = (
+                    f"{truncated_str}\n\n{summary}\n"
+                    f"可使用 offset 和 limit 参数分段读取剩余内容。"
+                )
+                continue
+
+            # 其他工具：尝试卸载到文件系统
+            offloaded = await _try_offload_to_file(tool_name, content_str, max_tokens)
+            if offloaded:
+                msg.content = offloaded
+            else:
+                # 卸载失败，回退到截断
+                summary = _build_truncation_summary(
+                    content_str, truncated_str, max_tokens
+                )
+                msg.content = f"{truncated_str}\n\n{summary}"
+
         except json.JSONDecodeError as e:
             content_preview = (
                 msg.content[:200] + "..."
@@ -55,6 +150,50 @@ def truncate_tool_results(messages_list: list) -> list:
             )
 
     return messages_list
+
+
+async def _try_offload_to_file(
+    tool_name: str,
+    content_str: str,
+    max_tokens: int,
+) -> str | None:
+    """尝试将工具结果卸载到本地文件系统。
+
+    Args:
+        tool_name: 工具名称
+        content_str: 完整的工具返回文本
+        max_tokens: 单次工具最大 token 数
+
+    Returns:
+        卸载成功时返回替换消息文本，失败时返回 None
+    """
+    token_count = str_token_counter(content_str)
+    line_count = content_str.count("\n") + 1
+
+    timestamp = datetime.now().strftime("%H%M%S%f")
+    file_name = f"{tool_name}_result_{timestamp}.txt"
+    offload_dir = get_config().config_dir / "offload"
+    file_path = offload_dir / file_name
+
+    try:
+        await asyncio.to_thread(_write_offload_file, file_path, content_str)
+
+        logger.info(
+            f"[truncate_tool_results] {tool_name} 结果已卸载到 "
+            f"{file_path} (原始 {token_count} tokens)"
+        )
+        return (
+            f"工具返回内容过大，已卸载到文件：{file_path}\n"
+            f"文件信息：\n"
+            f"{len(content_str)} 字符, {token_count} tokens, {line_count} 行\n"
+            f"单次工具最大 {max_tokens} tokens\n"
+            f"请使用 read 分段读取或 grep 搜索关键内容。"
+        )
+    except Exception as e:
+        logger.warning(
+            f"[truncate_tool_results] 写入文件失败: {type(e).__name__}: {e}，回退到截断"
+        )
+        return None
 
 
 def try_extract_json(content: str, schema: dict | None = None) -> dict | None:

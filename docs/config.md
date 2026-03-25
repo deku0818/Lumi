@@ -61,10 +61,10 @@ agents:
 
 ```yaml
 token:
-  once_tool_max_tokens: 10000    # 单次工具调用返回结果最大 token 数
-  trim_messages_max_tokens: 192000  # 消息修剪器最大 token 数
+  once_tool_ratio: 0.1             # 单次工具调用返回结果最大 token 占比（相对于 context_length）
+  trim_messages_ratio: 0.96        # 消息修剪器最大 token 占比（相对于 context_length）
   context_length: 200000           # 模型上下文窗口最大 token 数（自动从 OpenRouter 获取）
-  summary_threshold: 0.7         # 触发总结的阈值比例
+  summary_threshold: 0.7           # 触发总结的阈值比例
 ```
 
 ---
