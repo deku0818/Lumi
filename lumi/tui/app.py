@@ -12,7 +12,6 @@ from textual.binding import Binding
 from textual.css.query import NoMatches
 from textual.events import Key
 from textual.widget import Widget
-from textual.widgets import Static
 
 from lumi import __version__
 from lumi.agents.cron.delivery import DeliveryManager, TUIDelivery
@@ -33,6 +32,7 @@ from lumi.tui.widgets.input_bar import ChatInput, InputBar
 from lumi.tui.widgets.command_result_panel import CommandResultPanel
 from lumi.tui.widgets.run_status_bar import RunStatusBar
 from lumi.tui.widgets.status_line import StatusLine
+from lumi.tui.widgets.todos_bar import TodosBar
 from lumi.tui.widgets.tool_block import ToolBlock, ToolStatus
 from lumi.tui.widgets.user_message import UserMessage
 from lumi.tui.screens.init_flow_screen import InitFlowScreen
@@ -108,7 +108,6 @@ class LumiApp(App):
         self._notification_poll_timer = None
         self._last_esc: float = 0.0  # 双击 Esc 检测时间戳
         self._rewind_checkpoints: dict = {}  # _open_rewind_screen 缓存
-        self._todos_all_done: bool = False  # todos 全完成，下次发消息时清除面板
         self._todos_hidden_for_approval: bool = False  # 审批期间临时隐藏 todos-bar
 
     def _query_safe(self, widget_type: type[Widget]) -> Widget | None:
@@ -119,40 +118,38 @@ class LumiApp(App):
             return None
 
     def _update_todos_bar(self, todos: list[dict]) -> None:
-        """更新 #todos-bar 面板内容。
+        """更新 #todos-bar 面板内容，并同步当前任务名到 RunStatusBar。
 
-        无任务时隐藏；全部完成时仍然渲染（展示最终全勾状态），
-        但标记 _todos_all_done，下次用户发消息时再清除面板。
+        无任务时隐藏；全部完成时由 _finish_run 统一清除。
         """
-        from lumi.tui.renderers.todos import build_todos_text
-
         try:
-            bar = self.query_one("#todos-bar", Static)
+            bar = self.query_one(TodosBar)
         except NoMatches:
             return
-        if not todos:
-            bar.update("")
-            bar.remove_class("-visible")
-            self._todos_all_done = False
-            return
-        bar.update(build_todos_text(todos))
-        bar.add_class("-visible")
-        self._todos_all_done = all(t.get("status") == "completed" for t in todos)
+        bar.update_todos(todos)
+
+        # 提取当前 in_progress 任务名同步到 RunStatusBar
+        current_task = ""
+        for t in todos:
+            if t.get("status") == "in_progress":
+                current_task = t.get("content", "")
+                break
+        status_bar = self._query_safe(RunStatusBar)
+        if status_bar:
+            status_bar.set_task_label(current_task)
 
     def _clear_todos_bar(self) -> None:
         """隐藏并清空 #todos-bar 面板。"""
-        self._todos_all_done = False
         try:
-            bar = self.query_one("#todos-bar", Static)
+            bar = self.query_one(TodosBar)
         except NoMatches:
             return
-        bar.update("")
-        bar.remove_class("-visible")
+        bar.clear()
 
     def _hide_todos_bar_for_approval(self) -> None:
         """审批期间临时隐藏 todos-bar，避免遮挡审批 UI。"""
         try:
-            bar = self.query_one("#todos-bar", Static)
+            bar = self.query_one(TodosBar)
         except NoMatches:
             return
         self._todos_hidden_for_approval = bar.has_class("-visible")
@@ -164,7 +161,7 @@ class LumiApp(App):
             return
         self._todos_hidden_for_approval = False
         try:
-            bar = self.query_one("#todos-bar", Static)
+            bar = self.query_one(TodosBar)
         except NoMatches:
             return
         # 隐藏前已记录可见状态，直接恢复
@@ -173,7 +170,7 @@ class LumiApp(App):
     def compose(self) -> ComposeResult:
         yield ChatLog()
         yield RunStatusBar()
-        yield Static("", id="todos-bar")
+        yield TodosBar()
         yield CommandResultPanel()
         yield InputBar(id="input-area")
         yield StatusLine()
@@ -576,12 +573,7 @@ class LumiApp(App):
         # 从 StateSnapshot 中恢复历史消息
         todos = await restore_messages(self._bridge.graph, chat_log, thread_id)
         if todos:
-            # 全部完成的任务不再展示，避免 resume 进已完成会话时残留面板
-            all_done = all(t.get("status") == "completed" for t in todos)
-            if not all_done:
-                self._update_todos_bar(todos)
-            else:
-                self._clear_todos_bar()
+            self._update_todos_bar(todos)
         else:
             self._clear_todos_bar()
 
@@ -843,10 +835,6 @@ class LumiApp(App):
         if self._run.is_running:
             return
 
-        # 上一轮 todos 全部完成 → 清除面板
-        if self._todos_all_done:
-            self._clear_todos_bar()
-
         await self._try_dismiss_command_panel()
 
         text = event.text
@@ -1103,6 +1091,13 @@ class LumiApp(App):
         bar = self._query_safe(RunStatusBar)
         if bar:
             bar.hide()
+        # 任务全部完成 → 清除 TodosBar
+        try:
+            todos_bar = self.query_one(TodosBar)
+            if todos_bar.is_all_done:
+                todos_bar.clear()
+        except NoMatches:
+            pass
         # 清理所有残留的运行中 ToolBlock（on_tool_end 未匹配到时的兜底）
         for block in self._assembler.tool_blocks.values():
             if block.status == ToolStatus.RUNNING:

@@ -50,6 +50,7 @@ class RunStatusBar(Static, SpinnerMixin):
         super().__init__("", id="run-status-bar")
         self._run_ctx: RunContext | None = None
         self._last_frame: str = "⠋"
+        self._task_label: str = ""  # 当前 in_progress 任务名，空则用默认标签
 
     def bind_run_context(self, ctx: RunContext) -> None:
         """绑定 RunContext，之后 spinner tick 自动读取最新状态。"""
@@ -74,7 +75,16 @@ class RunStatusBar(Static, SpinnerMixin):
     def hide(self) -> None:
         """隐藏状态栏并停止 spinner，避免 IDLE 期间空跑 timer。"""
         self._stop_spinner()
+        self._task_label = ""
         self.remove_class("-visible")
+
+    def set_task_label(self, label: str) -> None:
+        """设置当前任务名，用于替换 Thinking… 等默认标签。
+
+        Args:
+            label: 任务名，空字符串表示恢复默认标签
+        """
+        self._task_label = label
 
     def _render_status(
         self, phase: RunPhase, elapsed: float, output_tokens: int
@@ -82,6 +92,14 @@ class RunStatusBar(Static, SpinnerMixin):
         label = _PHASE_LABELS.get(phase, "")
         if not label:
             return
+
+        # 有 in_progress 任务时，THINKING/TOOL_RUNNING 阶段用任务名替换默认标签
+        if self._task_label and phase in (
+            RunPhase.THINKING,
+            RunPhase.TOOL_CALL_PENDING,
+            RunPhase.TOOL_RUNNING,
+        ):
+            label = self._task_label
 
         # 时间：<60s 显示秒，>=60s 显示 m:ss
         secs = int(elapsed)

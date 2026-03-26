@@ -208,16 +208,4 @@ MarkdownBlock {
     padding: 0 1;
 }
 
-/* ── Todos 面板（输入框上方持久显示） ── */
-#todos-bar {
-    display: none;
-    margin: 0 0 0 1;
-    padding: 0 1;
-    height: auto;
-    max-height: 10;
-    color: $text-muted;
-}
-#todos-bar.-visible {
-    display: block;
-}
 """

@@ -81,7 +81,7 @@ Lumi 内置了基于配置文件的工具权限管理系统，支持 allow/deny 
 
 权限引擎按以下顺序评估每个工具调用：
 
-1. `BYPASS_TOOLS`（如 `ask`）始终直接执行，不经过权限评估
+1. `BYPASS_TOOLS`（如 `ask`、`read`、`glob`、`grep`、`todos`、`skill`、`agent`）始终直接执行，不经过权限评估
 2. `tool_mode` 为 `privileged` 时跳过所有审批（通过 TUI 切换或定时任务自动设置）
 3. 先匹配 deny 规则 → 命中则返回 `deny`
 4. 再匹配 allow 规则 → 命中则返回 `allow`
@@ -93,7 +93,7 @@ Lumi 内置了基于配置文件的工具权限管理系统，支持 allow/deny 
 |---|---|---|
 | `privileged` | 直接执行 | 直接执行 |
 | `auto` | 直接执行 | 弹出权限审批 |
-| `approve`/`supervised` | 弹出执行确认 | 弹出合并审批（确认 + 权限选项） |
+| `approve` | 弹出执行确认 | 弹出合并审批（确认 + 权限选项） |
 
 ---
 
@@ -148,8 +148,13 @@ Lumi 内置了基于配置文件的工具权限管理系统，支持 allow/deny 
 
 某些工具被设计为始终绕过审批（即使在 `auto` 模式下），称为"特权工具"。这些工具通常是低风险操作或用户交互类工具，例如：
 
-- `ask` - 向用户提问
-- 其他内置安全工具（详见 `lumi/tui/agent_bridge.py` 中的 `APPROVAL_BYPASS_TOOLS` 常量）
+- `ask` — 向用户提问（自带中断机制）
+- `read`、`glob`、`grep` — 文件系统只读操作
+- `todos` — 仅更新会话内部状态，无文件系统副作用
+- `skill` — 读取技能提示词，只读操作
+- `agent` — 子 agent 调度，权限由子 agent 自身的工具调用独立评估
+
+完整列表见 `lumi/agents/tools/permissions/models.py` 中的 `BYPASS_TOOLS` 常量。
 
 特权工具的判定优先级高于 `tool_mode`，因此无论在何种模式下都会直接执行。
 
