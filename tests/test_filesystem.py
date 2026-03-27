@@ -19,10 +19,10 @@ from lumi.agents.tools.providers.filesystem import (
 
 class TestCheckEmptyContent:
     def test_empty_string(self):
-        assert check_empty_content("") == "警告: 文件存在但内容为空"
+        assert check_empty_content("") == "文件存在但内容为空"
 
     def test_whitespace_only(self):
-        assert check_empty_content("   \n\t ") == "警告: 文件只包含空白字符"
+        assert check_empty_content("   \n\t ") == "文件只包含空白字符"
 
     def test_has_content(self):
         assert check_empty_content("hello") is None

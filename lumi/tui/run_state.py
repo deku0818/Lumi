@@ -22,6 +22,7 @@ class RunPhase(StrEnum):
     TOOL_RUNNING = "tool_running"
     WAITING_ASK = "waiting_ask"
     WAITING_APPROVAL = "waiting_approval"
+    WAITING_PLAN_APPROVAL = "waiting_plan_approval"
 
 
 @dataclass

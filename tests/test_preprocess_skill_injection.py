@@ -46,11 +46,13 @@ def _patch_preprocessing():
 # --- 测试 1: 技能注入在预处理之后执行 ---
 
 
+@patch("lumi.agents.core.node.inject_system_info_into_message", side_effect=lambda m: m)
 @patch("lumi.agents.core.node.SkillChangeDetector")
 @patch("lumi.agents.core.node.cleanup_incomplete_tool_calls", return_value=[])
 async def test_skill_injection_after_preprocessing(
     mock_cleanup: MagicMock,
     mock_detector_cls: MagicMock,
+    mock_sys_info: MagicMock,
 ) -> None:
     """验证技能变更时，注入逻辑生成 RemoveMessage + 新 HumanMessage。
 
@@ -153,7 +155,9 @@ async def test_no_injection_when_not_changed(
     mock_cleanup: MagicMock,
     mock_detector_cls: MagicMock,
 ) -> None:
-    """技能未发生变更时（changed=False），不应注入。
+    """技能未发生变更时（changed=False），不应注入技能列表。
+
+    使用多条 HumanMessage 避免首条消息的系统信息注入干扰。
 
     Validates: Requirements 3.3
     """
@@ -164,7 +168,11 @@ async def test_no_injection_when_not_changed(
     mock_detector_cls.get_instance.return_value = mock_detector
 
     state = _make_state(
-        messages=[HumanMessage(content="你好", id="msg1")],
+        messages=[
+            HumanMessage(content="第一条", id="msg0"),
+            AIMessage(content="AI 回复", id="ai0"),
+            HumanMessage(content="你好", id="msg1"),
+        ],
     )
 
     result = await preprocess_messages(state)
@@ -186,7 +194,9 @@ async def test_no_injection_when_skills_empty(
     mock_cleanup: MagicMock,
     mock_detector_cls: MagicMock,
 ) -> None:
-    """技能变更但列表为空时，不应注入。
+    """技能变更但列表为空时，不应注入技能列表。
+
+    使用多条 HumanMessage 避免首条消息的系统信息注入干扰。
 
     Validates: Requirements 3.3
     """
@@ -197,7 +207,11 @@ async def test_no_injection_when_skills_empty(
     mock_detector_cls.get_instance.return_value = mock_detector
 
     state = _make_state(
-        messages=[HumanMessage(content="你好", id="msg1")],
+        messages=[
+            HumanMessage(content="第一条", id="msg0"),
+            AIMessage(content="AI 回复", id="ai0"),
+            HumanMessage(content="你好", id="msg1"),
+        ],
     )
 
     result = await preprocess_messages(state)
@@ -257,8 +271,9 @@ async def test_summary_injects_skills_into_summary_message(
     )
     assert has_reminder, "摘要消息应包含 system-reminder"
 
-    # 摘要内容也应保留
+    # 摘要内容也应保留（format_summary_block 使用 <summary> 标签包裹）
     has_summary = any(
-        isinstance(b, dict) and "历史对话摘要" in b.get("text", "") for b in content
+        isinstance(b, dict) and "用户和 AI 进行了一段对话" in b.get("text", "")
+        for b in content
     )
     assert has_summary, "摘要消息应保留摘要内容"

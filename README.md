@@ -1,5 +1,9 @@
 # Lumi
 
+[![Python 3.12+](https://img.shields.io/badge/python-3.12+-blue.svg)](https://www.python.org/downloads/)
+[![License: MIT](https://img.shields.io/badge/License-MIT-green.svg)](LICENSE)
+[![Version](https://img.shields.io/badge/version-0.0.6-orange.svg)](CHANGELOG.md)
+
 基于 LangGraph 的终端 AI Agent 框架，提供丰富的 TUI 交互界面和 HTTP API，支持多模型、工具调用、定时任务、技能扩展和 MCP 协议集成。
 
 ## 特性
@@ -9,12 +13,12 @@
 - **HTTP API** — FastAPI + SSE 流式接口，可集成到任意客户端
 - **内置工具** — 文件读写编辑、Bash 命令执行、Glob/Grep 搜索、任务管理
 - **MCP 协议** — 通过 `.lumi/mcp_server.json` 配置外部 MCP 工具服务器
-- **定时任务** — 内置 cron 系统，支持相对时间、固定间隔、cron 表达式，自动重试
-- **技能系统** — 通过 `.lumi/skills/` 目录扩展自定义技能，斜杠命令触发
-- **子 Agent** — 通过 `.lumi/agents/` 配置子代理，委托复杂任务
-- **权限控制** — 基于 allow/deny 规则的工具权限管理，工作区边界保护
-- **会话持久化** — 支持 Memory / SQLite / PostgreSQL 三种检查点模式
-- **对话摘要** — 自动压缩长对话历史，异步并行不阻塞主对话
+- **定时任务** — 内置 cron 系统，支持自然语言创建（[详情](docs/cron.md)）
+- **技能系统** — 通过 `.lumi/skills/` 扩展自定义技能，斜杠命令触发（[详情](docs/slash_commands.md)）
+- **子 Agent** — 通过 `.lumi/agents/` 配置子代理，委托复杂任务（[详情](docs/agents.md)）
+- **权限控制** — 基于 allow/deny 规则的工具权限管理，工作区边界保护（[详情](docs/permissions.md)）
+- **会话持久化** — 支持 Memory / SQLite / PostgreSQL 三种检查点模式（[详情](docs/checkpoint.md)）
+- **对话摘要** — 自动压缩长对话历史，异步并行不阻塞主对话（[详情](docs/summary-flow.md)）
 - **图片识别** — 支持 model 和 tool 两种视觉模式
 
 ## 安装
@@ -28,8 +32,8 @@
 
 ```bash
 # 克隆仓库
-git clone https://github.com/pinkpills/lumi.git
-cd lumi
+git clone https://github.com/deku0818/Lumi.git
+cd Lumi
 
 # 安装依赖
 uv sync
@@ -59,7 +63,23 @@ env:
 lumi
 ```
 
-### 3. 启动 HTTP API
+### 3. Headless 模式
+
+```bash
+lumi -p "你的问题"
+```
+
+直接输出到 stdout，适合脚本集成和管道操作。
+
+### 4. 浏览器模式
+
+```bash
+lumi web-server --host 0.0.0.0 --port 8000
+```
+
+通过 textual-serve 在浏览器中运行 TUI，支持 `--host`、`--port`、`--title`、`--debug` 参数。
+
+### 5. HTTP API
 
 ```bash
 uvicorn lumi.api.app:app --host 0.0.0.0 --port 8090
@@ -74,6 +94,7 @@ API 端点：
 | 按键 | 功能 |
 |------|------|
 | `Escape` | 取消当前生成 |
+| `Escape` x2 | 打开 Rewind 界面（回退到历史 checkpoint） |
 | `Ctrl+C` | 退出应用 |
 | `Ctrl+T` | 切换明暗主题 |
 
@@ -85,6 +106,7 @@ API 端点：
 |------|------|
 | `/clear` | 清空对话，开始新会话 |
 | `/resume` | 恢复历史会话（需 sqlite/postgres 持久化） |
+| `/rewind` | 回退到历史 checkpoint（恢复文件和会话状态） |
 | `/skills` | 查看可用技能列表 |
 | `/agents` | 查看可用 Agent 列表 |
 | `/mcp` | 查看 MCP 服务器状态和工具 |
@@ -128,7 +150,7 @@ agents:
   vision_mode: model              # 图片识别：model | tool
 
 token:
-  context_length: 200000        # 模型上下文窗口
+  context_length: 200000          # 模型上下文窗口
   summary_threshold: 0.7          # 触发摘要的阈值比例
 
 llm_params:                       # 按模型类型配置参数
@@ -138,42 +160,9 @@ llm_params:                       # 按模型类型配置参数
     temperature: 0.7
 ```
 
-完整配置说明见 [docs/config.md](docs/config.md)。
-
-### MCP 工具服务器
-
-在 `.lumi/mcp_server.json` 中配置外部 MCP 工具：
-
-```json
-{
-  "my-server": {
-    "command": "npx",
-    "args": ["@my-org/mcp-server@latest"],
-    "transport": "stdio"
-  }
-}
-```
-
-### 权限控制
-
-通过 `permissions.json` 配置工具的 allow/deny 规则：
-
-```json
-{
-  "permissions": {
-    "allow": [
-      "read",
-      "bash(npm *)",
-      "edit(src/**/*.py)"
-    ],
-    "deny": [
-      "bash(rm -rf *)"
-    ]
-  }
-}
-```
-
-详见 [docs/permissions.md](docs/permissions.md)。
+- MCP 工具服务器配置见 [docs/config.md](docs/config.md)
+- 权限控制详见 [docs/permissions.md](docs/permissions.md)
+- 完整配置说明见 [docs/config.md](docs/config.md)
 
 ## 内置工具
 
@@ -191,62 +180,20 @@ llm_params:                       # 按模型类型配置参数
 | `skill` | 调用自定义技能 |
 | `agent` | 委托任务给子 Agent |
 
-## 定时任务
+## 文档
 
-在对话中自然语言描述即可创建定时任务：
-
-```
-用户：每天早上 9 点帮我总结待办事项
-Agent：✅ 任务已创建：每日待办总结（调度: cron 0 9 * * *）
-```
-
-支持四种调度格式：
-- 相对时间：`+10m`、`+2h`
-- 固定间隔：`30s`、`5m`、`2h`
-- 一次性：`2025-03-10T14:00:00`
-- cron 表达式：`*/5 * * * *`
-
-详见 [docs/cron.md](docs/cron.md)。
-
-## 技能扩展
-
-在 `.lumi/skills/` 下创建技能目录：
-
-```
-.lumi/skills/my-skill/
-├── SKILL.md          # 技能定义（name、description、prompt）
-└── scripts/          # 可选的可执行脚本
-```
-
-`SKILL.md` 示例：
-
-```markdown
----
-name: my-skill
-description: 我的自定义技能
----
-
-这里是发送给 Agent 的 prompt 内容...
-```
-
-在 TUI 中通过 `/my-skill` 触发。
-
-## 项目结构
-
-```
-lumi/
-├── agents/
-│   ├── base/           # 基础 Graph 和响应服务
-│   ├── core/           # 核心节点、状态定义、消息处理
-│   ├── cron/           # 定时任务子系统
-│   └── tools/          # 工具注册表和提供者
-│       ├── providers/  # 各工具实现
-│       └── permissions/# 权限引擎
-├── api/                # FastAPI HTTP 接口
-├── tui/                # Textual TUI 界面
-│   └── widgets/        # UI 组件
-└── utils/              # 通用工具（模型管理、配置、日志）
-```
+| 主题 | 链接 |
+|------|------|
+| 完整配置说明 | [docs/config.md](docs/config.md) |
+| 权限控制 | [docs/permissions.md](docs/permissions.md) |
+| 定时任务 | [docs/cron.md](docs/cron.md) |
+| Checkpoint 回退 | [docs/checkpoint.md](docs/checkpoint.md) |
+| 子 Agent | [docs/agents.md](docs/agents.md) |
+| 斜杠命令 | [docs/slash_commands.md](docs/slash_commands.md) |
+| 对话摘要 | [docs/summary-flow.md](docs/summary-flow.md) |
+| Grep/Glob 工具 | [docs/grep_glob.md](docs/grep_glob.md) |
+| 计划模式 | [docs/plan.md](docs/plan.md) |
+| 缓存机制 | [docs/cache.md](docs/cache.md) |
 
 ## 开发
 

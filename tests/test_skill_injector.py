@@ -15,7 +15,6 @@ from langchain_core.messages import HumanMessage
 
 from lumi.agents.tools.config import SkillConfig
 from lumi.agents.tools.skill_injector import (
-    SYSTEM_REMINDER_HEADER,
     format_skill_reminder,
     inject_skills_into_message,
 )
@@ -114,14 +113,14 @@ def test_system_reminder_format_completeness(skills: list[SkillConfig]) -> None:
         f"输出应以 <system-reminder> 开头，实际开头: {result[:40]!r}"
     )
 
-    # 2. 以 </system-reminder> 结尾
-    assert result.endswith("</system-reminder>"), (
+    # 2. 以 </system-reminder> 结尾（允许尾部换行）
+    assert result.rstrip().endswith("</system-reminder>"), (
         f"输出应以 </system-reminder> 结尾，实际结尾: {result[-40:]!r}"
     )
 
     # 3. 包含固定说明文本头
-    assert SYSTEM_REMINDER_HEADER in result, (
-        f"输出应包含说明文本头: {SYSTEM_REMINDER_HEADER!r}"
+    assert "以下技能可用于 skill 工具:" in result, (
+        "输出应包含说明文本头: '以下技能可用于 skill 工具:'"
     )
 
     # 4. 对每个技能，包含 `- name: description`

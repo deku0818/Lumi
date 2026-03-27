@@ -105,6 +105,7 @@ class ApprovalRequest:
 # - todos: 仅更新会话内部状态，无文件系统副作用
 # - skill: 读取技能提示词，只读操作
 # - agent: 子 agent 调度，权限由子 agent 自身的工具调用独立评估
+# - EnterPlanMode: 进入计划模式，只读操作
 BYPASS_TOOLS: frozenset[str] = frozenset(
     {
         "ask",
@@ -114,6 +115,8 @@ BYPASS_TOOLS: frozenset[str] = frozenset(
         "todos",
         "skill",
         "agent",
+        "EnterPlanMode",
+        "ExitPlanMode",
     }
 )
 

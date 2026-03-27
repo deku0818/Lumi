@@ -1,4 +1,4 @@
-"""工具审批组件 - Unicode box-drawing 布局
+"""工具审批组件 - 圆角卡片布局
 
 支持权限引擎的动态选项（allow_once / always_allow_exact / always_allow_pattern / reject），
 同时向后兼容无 options 字段的简单审批。
@@ -16,14 +16,14 @@ from textual.widgets import Static
 
 from lumi.tui.renderers import get as get_renderer
 from lumi.tui.renderers.default import DefaultRenderer
-from lumi.tui.renderers.utils import truncate_for_title, escape_markup
+from lumi.tui.renderers.utils import escape_markup, truncate_for_title
 from lumi.tui.theme import get_color
 
 logger = logging.getLogger(__name__)
 _FALLBACK_RENDERER = DefaultRenderer()
 
 # 分隔线宽度
-_SEP_WIDTH = 30
+_SEP_WIDTH = 46
 
 # 默认选项（无权限引擎时的回退）
 _DEFAULT_OPTIONS: tuple[dict[str, str], ...] = (
@@ -44,8 +44,8 @@ _OPTION_COLOR_ROLES: dict[str, str] = {
 class ToolApproval(Vertical):
     """工具审批组件 - 键盘驱动的列表选择器
 
-    使用 Unicode box-drawing 字符（│├└）构建视觉边界，
-    将工具内容和操作选项清晰分隔。
+    使用圆角卡片布局（╭│├╰），标题嵌入顶部边框，
+    提示嵌入底部边框。
 
     支持两种模式：
     - 动态选项：从 interrupt 数据的 options 字段读取（权限引擎）
@@ -63,22 +63,14 @@ class ToolApproval(Vertical):
         height: auto;
     }
 
-    ToolApproval .approval-label {
-        text-style: bold;
-        margin: 0;
-        padding: 0;
-        color: $accent;
-    }
-
-    ToolApproval .tool-call-title {
+    ToolApproval .approval-border {
         margin: 0;
         padding: 0;
     }
 
-    ToolApproval .approval-sep {
+    ToolApproval .approval-line {
         margin: 0;
         padding: 0;
-        color: $border;
     }
 
     ToolApproval .approval-options {
@@ -87,15 +79,15 @@ class ToolApproval(Vertical):
         padding: 0;
     }
 
-    ToolApproval .approval-hint {
-        margin: 0;
-        padding: 0;
-        color: $border;
-    }
-
     ToolApproval .approval-warning {
         margin: 0;
         padding: 0;
+    }
+
+    ToolApproval .approval-tool-content {
+        margin: 0 0 0 6;
+        padding: 0;
+        height: auto;
     }
     """
 
@@ -119,16 +111,20 @@ class ToolApproval(Vertical):
             self._options = _DEFAULT_OPTIONS
 
     def compose(self) -> ComposeResult:
-        msg = escape_markup(self._data.get("message", "是否执行以下工具？"))
         accent = get_color("accent")
         border = get_color("border_separator")
-        yield Static(f"[bold {accent}]⚠[/] {msg}", classes="approval-label")
 
-        # 渲染警告信息（deny 规则命中等）
+        # 顶部圆角 + 标题
+        yield Static(
+            f"[{border}]  ╭─[/] [{accent} bold]⚠ 权限审批[/] [{border}]{'─' * _SEP_WIDTH}[/]",
+            classes="approval-border",
+        )
+
+        # 渲染警告信息
         warnings = self._data.get("warnings", [])
         for warning in warnings:
             yield Static(
-                f"  [bold red]{escape_markup(warning)}[/]",
+                f"[{border}]  │[/]   [bold red]{escape_markup(warning)}[/]",
                 classes="approval-warning",
             )
 
@@ -136,12 +132,16 @@ class ToolApproval(Vertical):
         boundary_violations = self._data.get("boundary_violations", [])
         for violation in boundary_violations:
             yield Static(
-                f"  [bold yellow]⚠ 路径超出工作区边界: {escape_markup(violation)}[/]",
+                f"[{border}]  │[/]   [bold yellow]⚠ 路径超出工作区边界: {escape_markup(violation)}[/]",
                 classes="approval-warning",
             )
 
+        # 空行
+        yield Static(f"[{border}]  │[/]", classes="approval-line")
+
+        # 工具列表
         tool_calls = self._data.get("tool_calls", [])
-        for i, tc in enumerate(tool_calls):
+        for tc in tool_calls:
             name = tc.get("name", "unknown")
             args = tc.get("args", {})
             if not isinstance(args, dict):
@@ -158,13 +158,12 @@ class ToolApproval(Vertical):
                 )
                 title_text = _FALLBACK_RENDERER.render_title(name, args)
 
-            # 工具标题行
             yield Static(
-                f"  [bold {accent}]● {escape_markup(title_text)}[/]",
-                classes="tool-call-title",
+                f"[{border}]  │[/]   [{accent} bold]● {escape_markup(title_text)}[/]",
+                classes="approval-line",
             )
-            # 竖线 + 工具内容
-            yield Static(f"[{border}]  │[/]")
+
+            # 渲染工具参数内容
             try:
                 args_widget = renderer.render_args(args, approval_mode=True)
             except Exception:
@@ -176,16 +175,14 @@ class ToolApproval(Vertical):
                 args_widget = _FALLBACK_RENDERER.render_args(args)
             yield _IndentedContent(args_widget)
 
-            # 工具之间用 ├─── 分隔
-            if i < len(tool_calls) - 1:
-                yield Static(
-                    f"[{border}]  ├{'─' * _SEP_WIDTH}[/]", classes="approval-sep"
-                )
+        # 空行 + 分隔线
+        yield Static(f"[{border}]  │[/]", classes="approval-line")
+        yield Static(
+            f"[{border}]  ├{'─' * (_SEP_WIDTH + 10)}[/]",
+            classes="approval-border",
+        )
 
-        # 工具内容与选项之间的分隔线
-        yield Static(f"[{border}]  ├{'─' * _SEP_WIDTH}[/]", classes="approval-sep")
-
-        # 选项区域（带竖线前缀）
+        # 选项区域
         yield Static(
             self._render_options(),
             id="approval-options",
@@ -193,14 +190,14 @@ class ToolApproval(Vertical):
             markup=False,
         )
 
-        # 提示行
-        yield Static(
-            f"[{border}]  │[/]  [dim](↑↓ 选择, enter 确认, esc 拒绝)[/dim]",
-            classes="approval-hint",
-        )
+        # 空行
+        yield Static(f"[{border}]  │[/]", classes="approval-line")
 
-        # 底部收尾
-        yield Static(f"[{border}]  └{'─' * _SEP_WIDTH}[/]", classes="approval-sep")
+        # 底部圆角 + 提示
+        yield Static(
+            f"[{border}]  ╰─[/] [dim]↑↓ 选择 · enter 确认 · esc 拒绝[/dim] [{border}]{'─' * (_SEP_WIDTH - 18)}[/]",
+            classes="approval-border",
+        )
 
     def on_mount(self) -> None:
         """挂载后自动获取焦点"""
@@ -227,10 +224,7 @@ class ToolApproval(Vertical):
             event.stop()
 
     def _render_options(self) -> Text:
-        """渲染选项列表，每行带竖线前缀，长 label 截断显示。
-
-        返回 Rich Text 对象，避免动态内容触发 Textual markup 解析错误。
-        """
+        """渲染选项列表，每行带竖线前缀，长 label 截断显示。"""
         border = get_color("border_separator")
         result = Text()
         for i, opt in enumerate(self._options):
@@ -242,9 +236,9 @@ class ToolApproval(Vertical):
             color = get_color(_OPTION_COLOR_ROLES.get(key, "foreground"))
             result.append("  │", style=border)
             if i == self._selected:
-                result.append(f"  ● {label}", style=f"bold {color}")
+                result.append(f"   ❯ {label}", style=f"bold {color}")
             else:
-                result.append(f"    {label}")
+                result.append(f"     {label}")
         return result
 
     def _refresh_options(self) -> None:
@@ -257,7 +251,7 @@ class _IndentedContent(Vertical):
 
     DEFAULT_CSS = """
     _IndentedContent {
-        margin: 0 0 0 4;
+        margin: 0 0 0 6;
         padding: 0;
         height: auto;
     }

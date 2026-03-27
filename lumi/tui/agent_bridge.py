@@ -44,6 +44,7 @@ class EventKind(StrEnum):
     TOOL_END = "tool_end"
     ASK = "ask"
     TOOL_APPROVAL = "tool_approval"
+    EXIT_PLAN_MODE = "ExitPlanMode"
     DONE = "done"
     ERROR = "error"
 
@@ -362,6 +363,12 @@ class AgentBridge:
                     elif interrupt_type == "tool_approval":
                         return BridgeEvent(
                             kind=EventKind.TOOL_APPROVAL,
+                            data=data,
+                            parent_run_id=self._subagent_marker(),
+                        )
+                    elif interrupt_type == "ExitPlanMode":
+                        return BridgeEvent(
+                            kind=EventKind.EXIT_PLAN_MODE,
                             data=data,
                             parent_run_id=self._subagent_marker(),
                         )

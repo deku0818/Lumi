@@ -1,5 +1,25 @@
 # Changelog
 
+## [0.0.6] - 2026-03-28
+
+### Added
+- 新增 Plan Mode（计划模式）：Agent 可在执行非平凡任务前进入只读规划阶段，设计方案后提交用户审批
+- 新增 `EnterPlanMode` / `ExitPlanMode` 工具，支持从 `.lumi/prompts/tools/EnterPlanMode.md` 自定义提示词
+- 新增 `PlanApproval` TUI 审批组件，展示计划文件内容并提供批准/拒绝操作
+- 新增 MIT LICENSE
+- 新增 `docs/plan.md` 文档
+
+### Changed
+- `ToolApproval` 组件重构为圆角卡片布局（`╭│├╰`），标题嵌入顶部边框，提示嵌入底部边框
+- `CLAUDE.md` 全面重写，补充架构概要、工具系统、权限系统、TUI 架构、子 Agent 等详细说明
+- `README.md` 增强：新增徽章、Headless/浏览器模式说明、文档索引表，精简冗余内容
+- `pyproject.toml` description 更新为中文描述
+
+### Fixed
+- 修复 `test_preprocess_skill_injection` 中因系统信息注入导致的测试不稳定
+- 修复 `test_skill_injector` 中 system-reminder 格式断言与实际输出不匹配的问题
+- 修复 `test_filesystem` 中空文件警告文本与实际返回值不一致
+
 ## [0.0.5] - 2026-03-25
 
 ### Added

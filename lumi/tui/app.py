@@ -25,6 +25,7 @@ from lumi.tui.subagent_tracker import SubagentTracker
 from lumi.tui.theme import APP_CSS, LUMI_DARK_THEME, LUMI_LIGHT_THEME, get_color
 from lumi.tui.widgets.ask_dialog import AskDialog
 from lumi.tui.widgets.tool_approval import ToolApproval
+from lumi.tui.widgets.plan_approval import PlanApproval
 from lumi.tui.widgets.assistant_message import AssistantMessage
 from lumi.tui.widgets.title_block import TitleBlock
 from lumi.tui.widgets.chat_log import ChatLog
@@ -977,6 +978,18 @@ class LumiApp(App):
         self._hide_todos_bar_for_approval()
         await chat_log.mount(approval)
 
+    async def _handle_exit_plan_mode(self, evt: BridgeEvent, chat_log: ChatLog) -> None:
+        tool_call_id = (evt.data or {}).get("tool_call_id", "")
+        key = tool_call_id or "ExitPlanMode"
+        block = self._assembler.tool_blocks.get(key)
+        if block is None:
+            result = self._assembler.find_tool_block_by_name("ExitPlanMode")
+            if result is not None:
+                _, block = result
+        if block:
+            dialog = PlanApproval(evt.data)
+            await block.mount_interactive(dialog)
+
     # ── 辅助方法 ──
 
     def _finalize_assistant_msg(self) -> None:
@@ -1036,6 +1049,14 @@ class LumiApp(App):
         # 清理审批上下文
         self._subagent_tracker.clear_approval_context()
         await self._run_resume(decision)
+
+    async def on_plan_approval_decided(self, event: PlanApproval.Decided) -> None:
+        from lumi.agents.tools.providers.plan import PLAN_REJECTED
+
+        if event.decision == "rejected":
+            await self._run_resume(PLAN_REJECTED)
+        else:
+            await self._run_resume(event.decision)
 
     # ── 操作 ──
 

@@ -30,7 +30,9 @@ if TYPE_CHECKING:
 from lumi.utils.logger import logger
 
 # 等待用户交互的阶段（计时暂停）
-_WAITING_PHASES: Final = frozenset({RunPhase.WAITING_ASK, RunPhase.WAITING_APPROVAL})
+_WAITING_PHASES: Final = frozenset(
+    {RunPhase.WAITING_ASK, RunPhase.WAITING_APPROVAL, RunPhase.WAITING_PLAN_APPROVAL}
+)
 
 # agent 工具因 cancel/reject 结束时的输出文本
 _AGENT_CANCEL_OUTPUTS: Final = frozenset(
@@ -43,6 +45,9 @@ class AppCallbacks(Protocol):
 
     async def _handle_ask(self, evt: BridgeEvent, chat_log: ChatLog) -> None: ...
     async def _handle_tool_approval(
+        self, evt: BridgeEvent, chat_log: ChatLog
+    ) -> None: ...
+    async def _handle_exit_plan_mode(
         self, evt: BridgeEvent, chat_log: ChatLog
     ) -> None: ...
     async def _show_error(self, chat_log: ChatLog, error: str) -> None: ...
@@ -78,6 +83,7 @@ class EventRouter:
         if evt.parent_run_id and evt.kind not in (
             EventKind.TOOL_APPROVAL,
             EventKind.ASK,
+            EventKind.EXIT_PLAN_MODE,
         ):
             self._dispatch_subagent(evt)
             return
@@ -143,6 +149,8 @@ class EventRouter:
                 new = RunPhase.WAITING_ASK
             case EventKind.TOOL_APPROVAL:
                 new = RunPhase.WAITING_APPROVAL
+            case EventKind.EXIT_PLAN_MODE:
+                new = RunPhase.WAITING_PLAN_APPROVAL
             case EventKind.DONE | EventKind.ERROR:
                 new = RunPhase.IDLE
             case _:
@@ -209,6 +217,9 @@ class EventRouter:
                 case EventKind.TOOL_APPROVAL:
                     await self._asm.flush_groups()
                     await self._app._handle_tool_approval(evt, chat_log)
+                case EventKind.EXIT_PLAN_MODE:
+                    await self._asm.flush_groups()
+                    await self._app._handle_exit_plan_mode(evt, chat_log)
                 case EventKind.DONE:
                     await self._asm.flush_groups()
                     if evt.usage_metadata and not self._run.cache_read_tokens:

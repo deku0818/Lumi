@@ -1,6 +1,6 @@
 """工具提供者 - 导出常驻工具提供者模块（skill/task 按需条件导入）"""
 
-from . import ask, bash, filesystem, mcp, todo
+from . import ask, bash, filesystem, mcp, plan, todo
 
 __all__ = [
     "mcp",
@@ -8,4 +8,5 @@ __all__ = [
     "bash",
     "todo",
     "ask",
+    "plan",
 ]
