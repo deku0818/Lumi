@@ -136,10 +136,17 @@ class WidgetAssembler:
 
     # ── 分组管理 ──
 
+    def _detach_agent_group(self) -> None:
+        """分离当前 AgentGroup，重置 widget 引用和分组状态。"""
+        self._agent_group = None
+        self._grouping.flush_agents()
+
     async def flush_groups(self) -> None:
-        """结束当前活跃的 ToolGroup（遇到文本/交互事件时调用）。
+        """结束当前活跃的 ToolGroup，并分离已完成的 AgentGroup。
 
         若只有一个待合并的 block（尚未创建 ToolGroup），直接挂载到 ChatLog。
+        同时，若当前 AgentGroup 已全部完成，也将其分离，使下次 agent
+        调用创建新的 AgentGroup。
         """
         if self._pending_block is not None:
             await self._safe_mount(self._pending_block)
@@ -151,10 +158,28 @@ class WidgetAssembler:
 
         self._grouping.flush_tools()
 
+        if self._agent_group is not None and self._agent_group.is_finalized:
+            self._detach_agent_group()
+
     async def flush_all(self) -> None:
-        """结束所有活跃分组。"""
+        """结束所有活跃分组，强制分离 AgentGroup（即使仍在运行）。"""
         await self.flush_groups()
-        self._grouping.flush_agents()
+        if self._agent_group is not None:
+            if not self._agent_group.is_finalized:
+                logger.debug(
+                    "flush_all: force-detaching non-finalized AgentGroup "
+                    "(agent_group_id=%s)",
+                    id(self._agent_group),
+                )
+                try:
+                    self._agent_group.force_finalize()
+                except Exception:
+                    logger.error(
+                        "force_finalize failed for AgentGroup (agent_group_id=%s)",
+                        id(self._agent_group),
+                        exc_info=True,
+                    )
+            self._detach_agent_group()
 
     def reset(self) -> None:
         """完全重置（新 run 或 /clear 时调用）。"""
@@ -271,12 +296,32 @@ class WidgetAssembler:
     async def _apply_agent_start(self, item: AgentStartItem) -> None:
         from lumi.tui.widgets.agent_group import AgentGroup as AgentGroupCls
 
+        # 安全兜底：已完成的 AgentGroup 应被分离（正常路径由 flush_groups 处理）
+        if self._agent_group is not None and self._agent_group.is_finalized:
+            logger.warning(
+                "Detaching finalized AgentGroup in _apply_agent_start — "
+                "expected flush_groups to have handled this "
+                "(agent_group_id=%s, new_run_id=%s)",
+                id(self._agent_group),
+                item.run_id,
+            )
+            self._detach_agent_group()
+
         if self._agent_group is None:
             await self.flush_groups()
             self.finalize_assistant_msg()
             group = AgentGroupCls()
+            if not await self._safe_mount(group):
+                logger.error(
+                    "Failed to mount AgentGroup — agent_start dropped "
+                    "(run_id=%s, agent=%s)",
+                    item.run_id,
+                    item.agent_name,
+                )
+                # TODO: surface a user-visible error notification;
+                # all subsequent agent_end events for this run_id will also be lost.
+                return
             self._agent_group = group
-            await self._safe_mount(group)
 
         self._agent_group.add_agent(item.run_id, item.agent_name, item.prompt)
 

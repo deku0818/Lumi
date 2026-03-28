@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import re
 
+from rich.style import Style
 from textual.app import ComposeResult
 from textual.containers import Horizontal, Vertical
 from textual.events import Key, Paste
@@ -73,6 +74,18 @@ class ChatInput(TextArea):
         # 粘贴计数器和原始文本存储
         self._paste_counter: int = 0
         self._pasted_texts: dict[int, str] = {}
+        # 斜杠命令高亮
+        self._command_registry: CommandRegistry | None = None
+        self._cmd_highlight_end: int = 0
+        # 注册自定义 theme，包含 slash_command 样式
+        from textual._text_area_theme import TextAreaTheme
+
+        theme = TextAreaTheme(
+            name="lumi-input",
+            syntax_styles={"slash_command": Style(color="#7eb6ff", bold=True)},
+        )
+        self.register_theme(theme)
+        self.theme = "lumi-input"
 
     @property
     def value(self) -> str:
@@ -137,6 +150,42 @@ class ChatInput(TextArea):
             collapse_tag = f"[Pasted text #{idx} +{line_count} lines]"
             self.insert(collapse_tag)
         # 短内容正常粘贴，TextArea 自动换行
+
+    def set_command_registry(self, registry: CommandRegistry) -> None:
+        """注入命令注册表，用于斜杠命令高亮。"""
+        self._command_registry = registry
+
+    def update_command_highlight(self) -> None:
+        """根据当前文本更新斜杠命令高亮范围。
+
+        输入含空格/换行时要求精确匹配命令名，否则按前缀模糊匹配。
+        """
+        text = self.text
+        prefix = extract_command_prefix(text) if text.startswith("/") else ""
+
+        if prefix and self._command_registry:
+            has_space = " " in text or "\n" in text
+            matched = (
+                self._command_registry.get(prefix) is not None
+                if has_space
+                else len(self._command_registry.match(prefix)) > 0
+            )
+            self._cmd_highlight_end = 1 + len(prefix) if matched else 0
+        else:
+            self._cmd_highlight_end = 0
+
+        self._apply_cmd_highlight()
+
+    def _apply_cmd_highlight(self) -> None:
+        """将当前命令高亮写入第 0 行的 _highlights（斜杠命令仅出现在首行）并刷新渲染缓存。"""
+        end = self._cmd_highlight_end
+        self._highlights[0] = [(0, end, "slash_command")] if end > 0 else []
+        self._line_cache.clear()
+
+    def _build_highlight_map(self) -> None:
+        """Override: 在基类高亮重建后，重新注入斜杠命令高亮。"""
+        super()._build_highlight_map()
+        self._apply_cmd_highlight()
 
 
 class InputBox(Static):
@@ -238,6 +287,7 @@ class InputBar(Vertical):
     def set_command_registry(self, registry: CommandRegistry) -> None:
         """允许外部（如 LumiApp）注入命令注册表。"""
         self._command_registry = registry
+        self.query_one("#user-input", ChatInput).set_command_registry(registry)
 
     def compose(self) -> ComposeResult:
         yield InputBox()
@@ -314,6 +364,9 @@ class InputBar(Vertical):
             menu.show_commands(matched)
         else:
             menu.hide()
+        # 更新斜杠命令高亮
+        inp = self.query_one("#user-input", ChatInput)
+        inp.update_command_highlight()
 
     def on_completion_menu_command_selected(
         self, event: CompletionMenu.CommandSelected
@@ -323,6 +376,7 @@ class InputBar(Vertical):
         inp.value = f"/{event.command_name} "
         inp.move_cursor(inp.document.end)
         self.query_one(CompletionMenu).hide()
+        inp.update_command_highlight()
 
     def on_chat_input_submitted(self, event: ChatInput.Submitted) -> None:
         """ChatInput Enter 提交"""

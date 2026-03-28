@@ -972,3 +972,320 @@ async def test_agent_group_force_finalize_idempotent():
         assert ag.is_finalized
         e1 = ag.get_entry("run-1")
         assert e1.done and not e1.error
+
+
+# ── 12. AgentGroup 分组分离 ──
+
+
+async def test_agent_groups_split_by_text():
+    """被文本输出分隔的 agent 调用应创建独立的 AgentGroup。"""
+    app = LayoutTestApp()
+    async with app.run_test() as pilot:
+        chat_log = app.query_one(ChatLog)
+        run = RunContext()
+        tracker = SubagentTracker()
+        cb = _FakeCallbacks()
+        asm = WidgetAssembler(chat_log)
+        router = EventRouter(run, asm, tracker, cb)
+
+        # 第一个 agent — 启动并完成
+        await router.dispatch(
+            _evt(
+                EventKind.TOOL_START,
+                name="agent",
+                args={"name": "coder", "prompt": "code"},
+                run_id="run-1",
+            ),
+            chat_log,
+        )
+        await router.dispatch(
+            _evt(
+                EventKind.TOOL_END,
+                name="agent",
+                run_id="run-1",
+                output="done coding",
+            ),
+            chat_log,
+        )
+
+        # 中间有文本输出
+        await router.dispatch(
+            _evt(EventKind.STREAM_TOKEN, text="Now let me review..."),
+            chat_log,
+        )
+
+        # 第二个 agent — 应创建新的 AgentGroup
+        await router.dispatch(
+            _evt(
+                EventKind.TOOL_START,
+                name="agent",
+                args={"name": "reviewer", "prompt": "review"},
+                run_id="run-2",
+            ),
+            chat_log,
+        )
+        await router.dispatch(
+            _evt(
+                EventKind.TOOL_END,
+                name="agent",
+                run_id="run-2",
+                output="looks good",
+            ),
+            chat_log,
+        )
+        await router.dispatch(_evt(EventKind.DONE), chat_log)
+        await pilot.pause()
+
+        groups = chat_log.query(AgentGroup)
+        assert len(groups) == 2, f"期望 2 个 AgentGroup，实际 {len(groups)}"
+
+
+async def test_parallel_agents_share_group():
+    """并行 agent 调用（未完成时又来新的）应共享同一个 AgentGroup。"""
+    app = LayoutTestApp()
+    async with app.run_test() as pilot:
+        chat_log = app.query_one(ChatLog)
+        run = RunContext()
+        tracker = SubagentTracker()
+        cb = _FakeCallbacks()
+        asm = WidgetAssembler(chat_log)
+        router = EventRouter(run, asm, tracker, cb)
+
+        # 两个 agent 并行启动
+        await router.dispatch(
+            _evt(
+                EventKind.TOOL_START,
+                name="agent",
+                args={"name": "coder", "prompt": "code"},
+                run_id="run-1",
+            ),
+            chat_log,
+        )
+        await router.dispatch(
+            _evt(
+                EventKind.TOOL_START,
+                name="agent",
+                args={"name": "reviewer", "prompt": "review"},
+                run_id="run-2",
+            ),
+            chat_log,
+        )
+
+        # agent 运行中有文本到来 — 不应分离未完成的 AgentGroup
+        await router.dispatch(
+            _evt(EventKind.STREAM_TOKEN, text="waiting..."),
+            chat_log,
+        )
+
+        await router.dispatch(
+            _evt(
+                EventKind.TOOL_END,
+                name="agent",
+                run_id="run-1",
+                output="done",
+            ),
+            chat_log,
+        )
+        await router.dispatch(
+            _evt(
+                EventKind.TOOL_END,
+                name="agent",
+                run_id="run-2",
+                output="done",
+            ),
+            chat_log,
+        )
+        await router.dispatch(_evt(EventKind.DONE), chat_log)
+        await pilot.pause()
+
+        groups = chat_log.query(AgentGroup)
+        assert len(groups) == 1, "并行 agent 应共享同一个 AgentGroup"
+
+
+async def test_agent_groups_split_by_normal_tool():
+    """被普通工具调用分隔的 agent 调用应创建独立的 AgentGroup。"""
+    app = LayoutTestApp()
+    async with app.run_test() as pilot:
+        chat_log = app.query_one(ChatLog)
+        run = RunContext()
+        tracker = SubagentTracker()
+        cb = _FakeCallbacks()
+        asm = WidgetAssembler(chat_log)
+        router = EventRouter(run, asm, tracker, cb)
+
+        # 第一个 agent
+        await router.dispatch(
+            _evt(
+                EventKind.TOOL_START,
+                name="agent",
+                args={"name": "coder", "prompt": "code"},
+                run_id="run-1",
+            ),
+            chat_log,
+        )
+        await router.dispatch(
+            _evt(
+                EventKind.TOOL_END,
+                name="agent",
+                run_id="run-1",
+                output="done",
+            ),
+            chat_log,
+        )
+
+        # 中间有普通工具调用
+        await router.dispatch(
+            _evt(EventKind.STREAM_TOKEN, text="Let me check..."),
+            chat_log,
+        )
+        await router.dispatch(
+            _evt(
+                EventKind.TOOL_START,
+                name="read",
+                args={"path": "foo.py"},
+                tool_call_id="tc1",
+            ),
+            chat_log,
+        )
+        await router.dispatch(
+            _evt(EventKind.TOOL_END, name="read", tool_call_id="tc1", output="content"),
+            chat_log,
+        )
+
+        # 第二个 agent — 应创建新的 AgentGroup
+        await router.dispatch(
+            _evt(
+                EventKind.TOOL_START,
+                name="agent",
+                args={"name": "reviewer", "prompt": "review"},
+                run_id="run-2",
+            ),
+            chat_log,
+        )
+        await router.dispatch(
+            _evt(
+                EventKind.TOOL_END,
+                name="agent",
+                run_id="run-2",
+                output="looks good",
+            ),
+            chat_log,
+        )
+        await router.dispatch(_evt(EventKind.DONE), chat_log)
+        await pilot.pause()
+
+        groups = chat_log.query(AgentGroup)
+        assert len(groups) == 2, f"期望 2 个 AgentGroup，实际 {len(groups)}"
+
+
+# ── 13. AgentGroup 硬边界与兜底分离 ──
+
+
+async def test_agent_group_split_by_flush_all():
+    """flush_all（硬边界）应强制分离仍在运行的 AgentGroup。"""
+    app = LayoutTestApp()
+    async with app.run_test() as pilot:
+        chat_log = app.query_one(ChatLog)
+        run = RunContext()
+        tracker = SubagentTracker()
+        cb = _FakeCallbacks()
+        asm = WidgetAssembler(chat_log)
+        router = EventRouter(run, asm, tracker, cb)
+
+        # agent 启动但未完成
+        await router.dispatch(
+            _evt(
+                EventKind.TOOL_START,
+                name="agent",
+                args={"name": "coder", "prompt": "code"},
+                run_id="run-1",
+            ),
+            chat_log,
+        )
+
+        # 硬边界：模拟用户消息触发 flush_all
+        await asm.flush_all()
+
+        # 第二个 agent — 应创建新的 AgentGroup
+        await router.dispatch(
+            _evt(
+                EventKind.TOOL_START,
+                name="agent",
+                args={"name": "reviewer", "prompt": "review"},
+                run_id="run-2",
+            ),
+            chat_log,
+        )
+        await router.dispatch(
+            _evt(
+                EventKind.TOOL_END,
+                name="agent",
+                run_id="run-2",
+                output="done",
+            ),
+            chat_log,
+        )
+        await router.dispatch(_evt(EventKind.DONE), chat_log)
+        await pilot.pause()
+
+        groups = chat_log.query(AgentGroup)
+        assert len(groups) == 2, f"期望 2 个 AgentGroup，实际 {len(groups)}"
+        # 第一个组应被 force_finalize
+        assert groups[0].is_finalized
+
+
+async def test_agent_group_defensive_detach_back_to_back():
+    """连续两组 agent 调用之间无文本时，_apply_agent_start 兜底逻辑应分离已完成的组。"""
+    app = LayoutTestApp()
+    async with app.run_test() as pilot:
+        chat_log = app.query_one(ChatLog)
+        run = RunContext()
+        tracker = SubagentTracker()
+        cb = _FakeCallbacks()
+        asm = WidgetAssembler(chat_log)
+        router = EventRouter(run, asm, tracker, cb)
+
+        # 第一个 agent — 启动并完成
+        await router.dispatch(
+            _evt(
+                EventKind.TOOL_START,
+                name="agent",
+                args={"name": "coder", "prompt": "code"},
+                run_id="run-1",
+            ),
+            chat_log,
+        )
+        await router.dispatch(
+            _evt(
+                EventKind.TOOL_END,
+                name="agent",
+                run_id="run-1",
+                output="done",
+            ),
+            chat_log,
+        )
+
+        # 无文本/工具，直接第二个 agent — 触发兜底分离
+        await router.dispatch(
+            _evt(
+                EventKind.TOOL_START,
+                name="agent",
+                args={"name": "reviewer", "prompt": "review"},
+                run_id="run-2",
+            ),
+            chat_log,
+        )
+        await router.dispatch(
+            _evt(
+                EventKind.TOOL_END,
+                name="agent",
+                run_id="run-2",
+                output="looks good",
+            ),
+            chat_log,
+        )
+        await router.dispatch(_evt(EventKind.DONE), chat_log)
+        await pilot.pause()
+
+        groups = chat_log.query(AgentGroup)
+        assert len(groups) == 2, f"期望 2 个 AgentGroup，实际 {len(groups)}"

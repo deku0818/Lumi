@@ -383,6 +383,7 @@ class AgentGroup(Vertical):
 
         is_last = run_id == self._order[-1] if self._order else False
         prefix = "└─ " if is_last else "├─ "
+        sub_prefix = "\n   └ " if is_last else "\n│  └ "
 
         text = Text()
         text.append(prefix, style=get_color("text_muted"))
@@ -396,12 +397,12 @@ class AgentGroup(Vertical):
             if entry.error:
                 text.append(entry.name, style=f"bold {get_color('error')}")
                 text.append(stats, style=get_color("text_muted"))
-                text.append("\n│  └ ", style=get_color("text_muted"))
+                text.append(sub_prefix, style=get_color("text_muted"))
                 text.append("Error", style=get_color("error"))
             else:
                 text.append(entry.name, style=get_color("text_muted"))
                 text.append(stats, style=get_color("text_muted"))
-                text.append("\n│  └ ", style=get_color("text_muted"))
+                text.append(sub_prefix, style=get_color("text_muted"))
                 text.append("Done", style=get_color("success"))
         else:
             text.append(entry.name, style="bold")
@@ -409,7 +410,7 @@ class AgentGroup(Vertical):
             action = entry.current_action
             if len(action) > _ACTION_MAX_LEN:
                 action = action[:_ACTION_MAX_LEN] + "…"
-            text.append("\n│  └ ", style=get_color("text_muted"))
+            text.append(sub_prefix, style=get_color("text_muted"))
             text.append(action, style=get_color("text_muted"))
 
         line.update(text)
