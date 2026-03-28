@@ -66,7 +66,7 @@ class PlanApproval(Vertical):
     }
 
     PlanApproval .plan-content {
-        margin: 0 0 0 5;
+        margin: 0 0 0 6;
         padding: 0;
         height: auto;
         max-height: 30;
@@ -97,17 +97,24 @@ class PlanApproval(Vertical):
             classes="plan-border",
         )
 
-        # 计划文件路径
+        # 空行
+        yield Static(f"[{border}]  │[/]", classes="plan-line")
+
+        # 计划文件标题（类似 ToolApproval 的工具名）
         if plan_path:
+            filename = Path(plan_path).name
             yield Static(
-                f"[{border}]  │[/]   [dim]{escape_markup(plan_path)}[/dim]",
+                f"[{border}]  │[/]   [{accent} bold]● {escape_markup(filename)}[/]",
+                classes="plan-line",
+            )
+            yield Static(
+                f"[{border}]  │[/]     [dim]{escape_markup(plan_path)}[/dim]",
                 classes="plan-line",
             )
 
-        # 读取并展示计划文件内容
+        # 计划内容
         plan_content = self._read_plan_file(plan_path)
         if plan_content:
-            yield Static(f"[{border}]  │[/]", classes="plan-line")
             yield Markdown(plan_content, classes="plan-content")
 
         # 空行 + 分隔线

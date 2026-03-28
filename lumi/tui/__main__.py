@@ -4,14 +4,15 @@
     python -m lumi.tui
 """
 
+import os
+import sys
+
 from lumi.tui.app import LumiApp
 from lumi.utils.patches import apply_all
 
 
 def main() -> None:
     """启动 TUI（供 python -m lumi.tui 和 textual-serve 子进程调用）。"""
-    import sys
-
     apply_all()
 
     _original_unraisablehook = sys.unraisablehook
@@ -24,7 +25,8 @@ def main() -> None:
 
     sys.unraisablehook = _quiet_unraisablehook
 
-    app = LumiApp()
+    privileged = os.environ.get("LUMI_PRIVILEGED") == "1"
+    app = LumiApp(privileged=privileged)
     app.run()
 
 

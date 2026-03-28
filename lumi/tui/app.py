@@ -90,7 +90,7 @@ class LumiApp(App):
         ),
     ]
 
-    def __init__(self) -> None:
+    def __init__(self, *, privileged: bool = False) -> None:
         super().__init__()
         self.register_theme(LUMI_DARK_THEME)
         self.register_theme(LUMI_LIGHT_THEME)
@@ -110,6 +110,7 @@ class LumiApp(App):
         self._last_esc: float = 0.0  # 双击 Esc 检测时间戳
         self._rewind_checkpoints: dict = {}  # _open_rewind_screen 缓存
         self._todos_hidden_for_approval: bool = False  # 审批期间临时隐藏 todos-bar
+        self._privileged = privileged
 
     def _query_safe(self, widget_type: type[Widget]) -> Widget | None:
         """按类型查询 widget，未挂载时返回 None 而非抛异常。"""
@@ -370,6 +371,10 @@ class LumiApp(App):
 
         # 绑定用户自定义快捷键
         self._bind_custom_keys(self._global_config)
+
+        # 设置 privileged 模式（CLI --privileged-danger）
+        if self._privileged:
+            self.query_one(InputBar).set_privileged(True)
 
     def _bind_custom_keys(self, config: GlobalConfig) -> None:
         """根据配置绑定用户自定义快捷键。"""
@@ -840,6 +845,8 @@ class LumiApp(App):
 
         text = event.text
         tool_mode = event.tool_mode
+        plan_mode = event.plan_mode
+        plan_reminder_pending = event.plan_reminder_pending
         images = event.images
         chat_log = self.query_one(ChatLog)
 
@@ -909,20 +916,23 @@ class LumiApp(App):
                 ]
             self._pending_system_commands.clear()
 
+        # Plan mode reminder 注入（仅首次进入 plan mode 时注入一次）
+        if plan_mode and plan_reminder_pending:
+            content = self._prepend_plan_reminder(content)
+            self.query_one(InputBar).consume_plan_reminder()
+
         self._run.phase = RunPhase.IDLE  # 即将启动
         self._run.start()
         self.query_one(InputBar).set_disabled(True)
 
         self._run.task = asyncio.create_task(self._run_stream(content, tool_mode))
 
-    async def _run_stream(
-        self, content: str | list, tool_mode: str = "approve"
-    ) -> None:
-        """执行流 - 默认使用 approve 模式以保证安全
+    async def _run_stream(self, content: str | list, tool_mode: str = "auto") -> None:
+        """执行流
 
         Args:
             content: 用户输入内容
-            tool_mode: 工具执行模式，默认为 "approve"（需要人工审批）
+            tool_mode: 工具执行模式，默认为 "auto"
         """
         await self._consume_events(self._bridge.stream_response(content, tool_mode))
 
@@ -1056,7 +1066,26 @@ class LumiApp(App):
         if event.decision == "rejected":
             await self._run_resume(PLAN_REJECTED)
         else:
+            # Plan 被批准 → 关闭 plan mode 指示器
+            self.query_one(InputBar).set_plan_mode(False)
             await self._run_resume(event.decision)
+
+    @staticmethod
+    def _prepend_plan_reminder(content: str | list) -> list:
+        """将 plan mode reminder 注入到 content 前端。"""
+        from lumi.agents.tools.providers.plan import plan_mode_response
+
+        reminder = {"type": "text", "text": plan_mode_response}
+        if isinstance(content, list):
+            return [reminder, *content]
+        return [reminder, {"type": "text", "text": content}]
+
+    def _sync_plan_mode_from_tool(self) -> None:
+        """LLM 调用 EnterPlanMode 工具后同步 InputBar 指示器。
+
+        reminder_pending=False 因为 tool response 已包含 reminder。
+        """
+        self.query_one(InputBar).set_plan_mode(True, reminder_pending=False)
 
     # ── 操作 ──
 

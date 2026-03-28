@@ -80,7 +80,6 @@ def _evt(
     run_id: str = "",
     parent_run_id: str = "",
     text: str = "",
-    approval_mode: bool = False,
 ) -> BridgeEvent:
     """构造 BridgeEvent 的便捷工厂。"""
     return BridgeEvent(
@@ -92,7 +91,6 @@ def _evt(
         run_id=run_id,
         parent_run_id=parent_run_id,
         text=text,
-        approval_mode=approval_mode,
     )
 
 
@@ -736,11 +734,11 @@ async def test_tool_group_toggle():
         assert not group._expanded
 
 
-# ── 8. approval_mode 工具不参与合并 ──
+# ── 8. 两个工具可合并到同一个 ToolGroup ──
 
 
-async def test_approval_tool_excluded_from_group():
-    """审批模式的工具不应被合并到 ToolGroup。"""
+async def test_two_tools_merged_into_group():
+    """两个连续的非 BYPASS 工具应被合并到同一个 ToolGroup。"""
     app = LayoutTestApp()
     async with app.run_test() as pilot:
         chat_log = app.query_one(ChatLog)
@@ -750,7 +748,6 @@ async def test_approval_tool_excluded_from_group():
         asm = WidgetAssembler(chat_log)
         router = EventRouter(run, asm, tracker, cb)
 
-        # 普通工具
         await router.dispatch(
             _evt(
                 EventKind.TOOL_START,
@@ -760,22 +757,18 @@ async def test_approval_tool_excluded_from_group():
             ),
             chat_log,
         )
-        # 审批模式工具（应独立挂载）
         await router.dispatch(
             _evt(
                 EventKind.TOOL_START,
-                name="bash",
-                args={"command": "rm -rf /"},
+                name="read",
+                args={"path": "b.py"},
                 tool_call_id="tc2",
-                approval_mode=True,
             ),
             chat_log,
         )
         await router.dispatch(_evt(EventKind.DONE), chat_log)
         await pilot.pause()
 
-        groups = chat_log.query(ToolGroup)
-        assert len(groups) == 0, "审批工具不应参与 ToolGroup 合并"
         blocks = chat_log.query(ToolBlock)
         assert len(blocks) == 2
 

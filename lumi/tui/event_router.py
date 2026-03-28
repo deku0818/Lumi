@@ -50,6 +50,7 @@ class AppCallbacks(Protocol):
     async def _handle_exit_plan_mode(
         self, evt: BridgeEvent, chat_log: ChatLog
     ) -> None: ...
+    def _sync_plan_mode_from_tool(self) -> None: ...
     async def _show_error(self, chat_log: ChatLog, error: str) -> None: ...
     def _finish_run(self) -> None: ...
     def _query_safe(self, widget_type: type[Widget]) -> Widget | None: ...
@@ -293,7 +294,7 @@ class EventRouter:
                     key=key,
                     name=evt.name,
                     args=evt.args or {},
-                    approval_mode=evt.approval_mode,
+                    approval_mode=False,
                 )
             )
 
@@ -339,6 +340,10 @@ class EventRouter:
         # todos 工具 → 无 ToolBlock，跳过
         if evt.name == "todos":
             return
+
+        # EnterPlanMode 工具结束 → 同步 InputBar 指示器
+        if evt.name == "EnterPlanMode":
+            self._app._sync_plan_mode_from_tool()
 
         # 非 agent 工具 → 委托给 assembler
         key = evt.tool_call_id or evt.name

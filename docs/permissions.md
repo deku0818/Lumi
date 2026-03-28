@@ -93,7 +93,6 @@ Lumi 内置了基于配置文件的工具权限管理系统，支持 allow/deny 
 |---|---|---|
 | `privileged` | 直接执行 | 直接执行 |
 | `auto` | 直接执行 | 弹出权限审批 |
-| `approve` | 弹出执行确认 | 弹出合并审批（确认 + 权限选项） |
 
 ---
 
@@ -140,7 +139,15 @@ Lumi 内置了基于配置文件的工具权限管理系统，支持 allow/deny 
 
 ## 特权模式
 
-通过 TUI 中切换 `tool_mode` 为 `privileged` 启用特权模式，跳过所有审批。定时任务（cron）执行时也会自动使用此模式。
+通过 CLI 启动参数 `--privileged-danger` 启用特权模式，跳过所有审批。定时任务（cron）执行时也会自动使用此模式。
+
+```bash
+lumi --privileged-danger
+lumi --privileged-danger -p "执行所有迁移"
+lumi web-server --privileged-danger
+```
+
+特权模式下状态栏显示 `▶▶ privileged ⚠`，`Shift+Tab` 不可用。
 
 > 注意：特权模式下所有工具调用将直接执行，请谨慎使用。
 

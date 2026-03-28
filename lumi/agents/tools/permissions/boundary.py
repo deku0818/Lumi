@@ -10,20 +10,30 @@ from pathlib import Path
 
 from lumi.utils.logger import logger
 
-# bash 命令中常见的路径参数位置提取规则
-# 格式: (命令前缀, 路径参数索引)
-_BASH_PATH_COMMANDS: dict[str, int] = {
-    "ls": 1,
-    "cat": 1,
-    "cd": 1,
-    "cp": -1,  # 最后一个参数
-    "mv": -1,
-    "rm": -1,
-    "mkdir": -1,
-    "touch": -1,
-    "chmod": -1,
-    "chown": -1,
-}
+# bash 命令中常见的路径操作命令，匹配时提取所有非标志参数作为路径
+_BASH_PATH_COMMANDS: frozenset[str] = frozenset(
+    {
+        "ls",
+        "cat",
+        "cd",
+        "cp",
+        "mv",
+        "rm",
+        "mkdir",
+        "touch",
+        "chmod",
+        "chown",
+    }
+)
+
+# 重定向符号：后面的 token 是文件路径，需要检查边界
+_REDIRECT_TO_PATH: frozenset[str] = frozenset({">", ">>", "<", "2>", "2>>", "&>"})
+
+# heredoc 符号：后面的 token 是定界符，不是路径
+_HEREDOC_OPERATORS: frozenset[str] = frozenset({"<<", "<<<"})
+
+# 命令分隔/管道符号：遇到后停止解析（后续是新命令）
+_COMMAND_SEPARATORS: frozenset[str] = frozenset({"|", "||", "&&", ";", "&"})
 
 # 文件操作工具的路径参数键名（与实际工具定义一致）
 _PATH_ARG_KEYS: tuple[str, ...] = ("file_path", "path")
@@ -110,11 +120,24 @@ class WorkspaceBoundary:
         if not isinstance(command, str) or not command.strip():
             return []
 
+        # 多行命令处理：仅在检测到 heredoc 操作符时截断，其他多行命令逐行解析
+        lines = command.split("\n")
+        parse_target = lines[0]
+        for i, line in enumerate(lines):
+            stripped = line.rstrip()
+            # 检测 heredoc 操作符，截断后续行（heredoc 内容不是路径）
+            if "<<" in stripped:
+                parse_target = "\n".join(lines[: i + 1])
+                break
+        else:
+            # 无 heredoc：拼接所有行（处理反斜杠续行和多行命令）
+            parse_target = " ".join(line.rstrip("\\").strip() for line in lines)
+
         try:
-            parts = shlex.split(command)
+            parts = shlex.split(parse_target)
         except ValueError:
-            logger.warning("bash 命令含无效引号，跳过边界检查: %.200s", command)
-            return []
+            logger.warning("bash 命令含无效引号，视为越界: %.200s", parse_target)
+            return [Path("/⟨unparseable-command⟩")]
 
         if not parts:
             return []
@@ -134,5 +157,23 @@ class WorkspaceBoundary:
         if cmd_name not in _BASH_PATH_COMMANDS:
             return []
 
-        args = parts[cmd_start + 1 :]
-        return [Path(a) for a in args if not a.startswith("-")]
+        # 过滤标志参数、shell 操作符，正确处理重定向和 heredoc
+        raw_args = parts[cmd_start + 1 :]
+        path_args: list[str] = []
+        skip_next = False
+        for arg in raw_args:
+            if skip_next:
+                skip_next = False
+                continue
+            if arg in _COMMAND_SEPARATORS:
+                break  # 管道/分号后是新命令，停止解析
+            if arg in _HEREDOC_OPERATORS:
+                skip_next = True  # heredoc 定界符不是路径
+                continue
+            if arg in _REDIRECT_TO_PATH:
+                continue  # 跳过符号本身，路径 token 在下轮迭代正常收集
+            if arg.startswith("-"):
+                continue
+            path_args.append(arg)
+
+        return [Path(a) for a in path_args]

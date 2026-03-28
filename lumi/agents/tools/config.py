@@ -74,11 +74,38 @@ def _parse_md_file(file_path: str) -> dict | None:
             "model": metadata.get("model"),
             "tools": tools_data,
             "prompt": prompt,
+            "raw_metadata": metadata,
         }
 
     except Exception as e:
         logger.error(f"处理文件失败 {file_path}: {e}")
         return None
+
+
+def _load_agents_from_dir(directory: str) -> dict[str, AgentConfig]:
+    """从指定目录加载 agent 配置，返回 {name: AgentConfig} 字典。"""
+    result: dict[str, AgentConfig] = {}
+    md_files = glob.glob(os.path.join(directory, "*.md"))
+
+    for file_path in md_files:
+        config_dict = _parse_md_file(file_path)
+        if config_dict is None:
+            continue
+
+        try:
+            agent_config = AgentConfig(
+                name=config_dict["name"],
+                description=config_dict["description"],
+                model=config_dict.get("model"),
+                tools=config_dict["tools"],
+                system_prompt=config_dict["prompt"],
+            )
+        except (KeyError, TypeError) as e:
+            logger.error(f"agent 配置不完整，跳过 {file_path}: {e}")
+            continue
+        result[agent_config.name] = agent_config
+
+    return result
 
 
 def load_agents(
@@ -87,6 +114,9 @@ def load_agents(
     """
     从配置目录加载agent配置
 
+    当 active_style 不是 "default" 时，先加载风格内置 agents，
+    再加载用户 .lumi/agents/ 中的 agents。同名时用户优先并输出 warning。
+
     Args:
         name: 可选的代理名称过滤
         directory: agent配置目录，如果为None则从配置获取
@@ -94,25 +124,37 @@ def load_agents(
     Returns:
         List[AgentConfig]: agent配置列表
     """
+    config = get_config()
+    merged: dict[str, AgentConfig] = {}
+
+    # 1. 加载风格内置 agents
+    style = config.active_style
+    from lumi.styles import get_style_agents_dir
+
+    try:
+        style_agents_dir = get_style_agents_dir(style)
+        merged = _load_agents_from_dir(str(style_agents_dir))
+        if merged:
+            logger.info(
+                f"从风格 '{style}' 加载了 {len(merged)} 个内置 agent: "
+                f"{', '.join(merged.keys())}"
+            )
+    except ValueError as e:
+        logger.warning(f"加载风格 '{style}' agents 失败: {e}")
+
+    # 2. 加载用户 agents（directory 参数或 .lumi/agents/）
     if directory is None:
-        directory = str(get_config().agents_dir)
+        directory = str(config.agents_dir)
 
-    agents = []
-    md_files = glob.glob(os.path.join(directory, "*.md"))
+    user_agents = _load_agents_from_dir(directory)
+    for agent_name, agent_config in user_agents.items():
+        if agent_name in merged:
+            logger.warning(
+                f"用户 agent '{agent_name}' 覆盖了风格 '{style}' 的内置同名 agent"
+            )
+        merged[agent_name] = agent_config
 
-    for file_path in md_files:
-        config_dict = _parse_md_file(file_path)
-        if config_dict is None:
-            continue
-
-        agent_config = AgentConfig(
-            name=config_dict["name"],
-            description=config_dict["description"],
-            model=config_dict.get("model"),
-            tools=config_dict["tools"],
-            system_prompt=config_dict["prompt"],
-        )
-        agents.append(agent_config)
+    agents = list(merged.values())
 
     if name is not None:
         agents = [agent for agent in agents if agent.name == name]

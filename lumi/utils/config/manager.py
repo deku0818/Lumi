@@ -32,6 +32,18 @@ class LumiConfig:
         self.discovery = ConfigDiscovery(config_dir)
         self._config: Config | None = None
         self._config_dir: Path | None = None
+        self._style_override: str | None = None
+
+    def set_style_override(self, style: str) -> None:
+        """设置风格覆盖（CLI --style 参数优先于 config.yaml）"""
+        self._style_override = style
+
+    @property
+    def active_style(self) -> str:
+        """当前生效的风格名称。优先级：CLI override > config.yaml > "default" """
+        if self._style_override is not None:
+            return self._style_override
+        return self.config.style
 
     @classmethod
     def get_instance(
@@ -143,34 +155,58 @@ class LumiConfig:
     def load_system_prompt(self) -> str:
         """加载三文件组合提示词 (SOUL.md + GUARDRAILS.md + AGENTS.md)
 
-        每部分用对应的 XML 标签包裹，优先使用三文件组合，
-        如果无有效内容则回退到 simple.md。
+        加载顺序：先从 style 内置目录读取基础文件，
+        再用用户 .lumi/prompts/ 下的同名文件覆盖。
+        每部分用对应的 XML 标签包裹。
 
         Raises:
             ValueError: 未找到任何提示词配置
         """
-        parts = []
-        for name in ["SOUL", "GUARDRAILS", "AGENTS"]:
-            content = self.load_prompt(name)
+        from lumi.styles import get_style_prompts_dir
+
+        style = self.active_style
+        file_names = ["SOUL", "GUARDRAILS", "AGENTS"]
+
+        # 按 name 收集最终路径：style 内置 → 用户覆盖
+        resolved: dict[str, Path] = {}
+
+        # 1. style 内置
+        try:
+            style_dir = get_style_prompts_dir(style)
+            for name in file_names:
+                path = style_dir / f"{name}.md"
+                if path.exists():
+                    resolved[name] = path
+        except ValueError as e:
+            logger.warning(f"加载风格 '{style}' prompts 失败: {e}")
+
+        # 2. 用户 .lumi/prompts/ 覆盖
+        for name in file_names:
+            user_path = self.prompts_dir / f"{name}.md"
+            if user_path.exists():
+                resolved[name] = user_path
+
+        # 构建 XML 包裹的提示词
+        parts: list[str] = []
+        for name in file_names:
+            path = resolved.get(name)
+            if path is None:
+                continue
+            try:
+                content = path.read_text(encoding="utf-8").strip()
+            except (OSError, UnicodeDecodeError) as e:
+                raise ValueError(f"提示词文件读取失败: {path} ({e})") from e
             if content:
                 parts.append(f"<{name}>\n{content}\n</{name}>")
 
         if parts:
+            logger.info(f"使用风格 '{style}' 的系统提示词")
             return "\n\n".join(parts)
 
-        # 三文件无有效内容，回退到 simple.md
-        prompt = self.load_prompt("simple")
-        if prompt:
-            logger.warning(
-                "使用 simple.md 作为系统提示词已废弃，"
-                "请将提示词迁移到 prompts/SOUL.md, GUARDRAILS.md, AGENTS.md。\n"
-                "运行 `omniagent init --update` 生成模板文件。"
-            )
-            return prompt
-
         raise ValueError(
-            "未找到提示词配置。\n"
-            "请在 .lumi/prompts/ 中配置 SOUL.md, GUARDRAILS.md, AGENTS.md。"
+            f"未找到提示词配置（风格: {style}）。\n"
+            f"请在 lumi/styles/{style}/prompts/ 或 .lumi/prompts/ 中配置 "
+            "SOUL.md, GUARDRAILS.md, AGENTS.md。"
         )
 
     def load_prompt(self, name: str) -> str | None:

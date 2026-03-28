@@ -125,7 +125,7 @@ def is_use_tool(state: LumiAgentState, runtime: Runtime[LumiAgentContext]):
     - BYPASS_TOOLS (如 ask) → "ToolExecutor" 直接执行
     - privileged 模式（tool_mode） → "ToolExecutor" 直接执行
     - auto 模式 + 全部 allow + 边界检查通过 → "ToolExecutor" 直接执行
-    - approve 模式 → "HumanApproval" 等待审批
+    - auto 模式 + 任意 deny/unmatched → "HumanApproval" 等待审批
     - engine is None 时回退到简单审批流程
     - 无 tool_calls → "END" 结束流程
     """
@@ -194,11 +194,7 @@ def is_use_tool(state: LumiAgentState, runtime: Runtime[LumiAgentContext]):
                 return "ToolExecutor"
             return "HumanApproval"
 
-    # approve 模式：需要审批
-    # engine is None 时回退到简单审批流程
-    if tool_mode == "approve":
-        return "HumanApproval"
-    # engine is None 且 tool_mode 为 auto 时，保守处理：需要审批
+    # engine is None 时保守处理：需要审批
     logger.warning("[is_use_tool] 权限引擎不可用，tool_mode=auto 回退到人工审批")
     return "HumanApproval"
 
@@ -209,14 +205,11 @@ def human_approval(
     """使用 interrupt 暂停执行，等待用户审批
 
     根据 tool_mode 和 PermissionDecision 构造不同的中断数据：
-    - approve + allow → 仅执行确认
-    - approve + deny/unmatched → 合并审批（执行确认 + 权限选项 + deny 警告）
-    - auto + deny/unmatched → 仅权限审批（权限选项 + deny 警告）
-    - privileged → 不应到达此节点（已在 should_execute 直接执行）
+    - auto + deny/unmatched → 权限审批（权限选项 + deny 警告）
+    - privileged → 不应到达此节点（已在 is_use_tool 直接执行）
     - engine is None → 回退到简单审批流程
     """
     last_message = state["messages"][-1]
-    tool_mode = state.get("tool_mode", "auto")
     engine = runtime.context.permission_engine
 
     tool_calls_data = [
@@ -292,13 +285,9 @@ def human_approval(
         "decisions": [d.value for d in decisions],
     }
 
-    interrupt_data["message"] = "是否执行以下工具？"
-    if tool_mode == "auto":
-        # auto 模式：仅权限审批
-        interrupt_data["message"] = "以下工具需要权限授权"
-        interrupt_data["options"] = options
-    elif needs_permission_options:
-        # approve + deny/unmatched：合并审批
+    # auto 模式：权限审批
+    interrupt_data["message"] = "以下工具需要权限授权"
+    if needs_permission_options:
         interrupt_data["options"] = options
 
     if warnings:

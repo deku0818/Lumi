@@ -16,7 +16,9 @@ uv run pytest tests/test_foo.py::test_bar    # 运行单个测试函数
 uv run ruff format .       # 代码格式化
 uv run ruff check --fix .  # Lint 检查并自动修复
 lumi                       # 启动 TUI
+lumi -s code               # 指定提示词风格启动
 lumi -p "query"            # Headless 模式（直接输出到 stdout）
+lumi --privileged-danger   # 特权模式（跳过所有工具审批）
 ```
 
 添加依赖使用 `uv add <package>`，不要直接修改 pyproject.toml。
@@ -37,7 +39,7 @@ START → PreprocessMessages → CallModel → is_use_tool() 条件路由:
 并行分支: Summarizer（对话摘要）→ END
 ```
 
-**关键状态 `LumiAgentState`：** messages（LangGraph add_messages reducer）、tool_mode（auto/approve/privileged）、summary、todos、output_schema 等。
+**关键状态 `LumiAgentState`：** messages（LangGraph add_messages reducer）、tool_mode（auto/privileged）、summary、todos、output_schema 等。
 
 **运行时上下文 `LumiAgentContext`：** 通过 LangGraph 的 `Runtime` 参数传递，包含 tools、system_prompt、model_name、permission_engine。在节点函数中通过 `Runtime[LumiAgentContext]` 访问。所有节点共享同一实例。
 
@@ -60,11 +62,12 @@ START → PreprocessMessages → CallModel → is_use_tool() 条件路由:
 
 ### TUI 架构
 
-- **LumiApp**（`tui/app.py`）：Textual App 主体
+- **LumiApp**（`tui/app.py`）：Textual App 主体，支持 `privileged` 参数（CLI `--privileged-danger`）
 - **AgentBridge**（`tui/agent_bridge.py`）：直接调用 LangGraph（非 HTTP），流式产生 `BridgeEvent`
 - **EventRouter**（`tui/event_router.py`）：状态机 + 事件分发，管理 `RunPhase` 转换
 - **WidgetAssembler**（`tui/widget_assembler.py`）：将 `RenderItem` 转换为 Textual Widget
 - **SubagentTracker**（`tui/subagent_tracker.py`）：跟踪并发子 Agent 执行状态
+- **InputBar**（`tui/widgets/input_bar.py`）：输入栏，管理 plan mode 切换（Shift+Tab）和模式指示器（auto/plan/privileged）
 
 **Tool 渲染器**：Protocol 模式（`ToolRenderer`），通过 `@register_renderer("bash")` 注册自定义渲染，每个渲染器被 `_SafeRenderer` 包装以容错。
 
@@ -76,6 +79,16 @@ START → PreprocessMessages → CallModel → is_use_tool() 条件路由:
 - 创建新 `LumiAgent` 实例，**无 checkpointer**（节省开销），复用父级 `PermissionEngine`
 - tool_mode 从父状态继承
 - 父 TUI 通过 `parent_run_id` 识别子 Agent 事件，路由到 `AgentGroup` 做轻量统计展示
+
+### 风格系统（Styles）
+
+`lumi/styles/` 下每个子目录是一种风格，包含 `prompts/` 和 `agents/` 子目录。
+
+- **加载优先级**：用户 `.lumi/` 下的同名文件 > style 内置文件
+- **配置方式**：`config.yaml` 的 `style` 字段，或 CLI `-s/--style` 参数（优先级更高）
+- **内置风格**：`default`（仅工具模板）、`code`（完整编程提示词 + 子 Agent）
+- **工具提示词**：`prompts/tools/` 下的 MD 文件定义工具 description 和 response，启动时加载，缺失则 RuntimeError
+- **`active_style` 属性**（`LumiConfig`）：返回当前生效的风格名，CLI override > config.yaml > "default"
 
 ## 测试
 

@@ -30,7 +30,7 @@ class LumiAgentState(TypedDict):
     messages: Annotated[list, add_messages]
     agent_outcome: dict
     iterations: int
-    tool_mode: Literal["auto", "approve", "privileged"]
+    tool_mode: Literal["auto", "privileged"]
     todos: NotRequired[list]
     """任务列表，用于追踪复杂任务的执行进度"""
     summary: SummaryData

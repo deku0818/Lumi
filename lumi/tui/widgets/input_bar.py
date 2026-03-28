@@ -16,24 +16,15 @@ from lumi.tui.theme import get_color
 from lumi.tui.widgets.completion_menu import CompletionMenu
 from lumi.utils.image import ImageData
 
-_TOOL_MODES = ("auto", "approve", "privileged")
-
 # 粘贴内容超过此行数时折叠显示
 PASTE_COLLAPSE_THRESHOLD = 20
 
-# 值为 (label, 语义角色名)，颜色在渲染时通过 get_color() 解析
+# 值为 (label, 颜色)
 _MODE_DISPLAY: dict[str, tuple[str, str]] = {
-    "approve": ("⏸ approve", "#E8D888"),
     "auto": ("▶ auto", "#88E8A0"),
+    "plan": ("⏸ plan", "#E8D888"),
     "privileged": ("▶▶ privileged ⚠", "#88A0E8"),
 }
-
-
-def _resolve_color(role_or_hex: str) -> str:
-    """解析颜色：如果是 hex 值直接返回，否则通过 get_color 查找。"""
-    if role_or_hex.startswith("#"):
-        return role_or_hex
-    return get_color(role_or_hex)
 
 
 class ChatInput(TextArea):
@@ -218,16 +209,23 @@ class InputBar(Vertical):
             self,
             text: str,
             tool_mode: str,
+            plan_mode: bool = False,
+            plan_reminder_pending: bool = False,
             images: list[ImageData] | None = None,
         ) -> None:
             super().__init__()
             self.text = text
             self.tool_mode = tool_mode
+            self.plan_mode = plan_mode
+            self.plan_reminder_pending = plan_reminder_pending
             self.images: list[ImageData] = images or []
 
     def __init__(self, *args, **kwargs) -> None:
         super().__init__(*args, **kwargs)
         self._tool_mode = "auto"
+        self._plan_mode = False
+        self._plan_reminder_pending = False
+        self._privileged = False
         self._pending_images: list[ImageData] = []
         self._exit_hint_timer = None
         self._flash_timer = None
@@ -244,11 +242,12 @@ class InputBar(Vertical):
     def compose(self) -> ComposeResult:
         yield InputBox()
         yield CompletionMenu()
-        label, role = _MODE_DISPLAY[self._tool_mode]
-        color = _resolve_color(role)
+        display_key = self._current_display_key()
+        label, color = _MODE_DISPLAY[display_key]
+        hint = " [dim](shift+tab)[/dim]"
         with Horizontal(id="status-row"):
             yield Static(
-                f"[{color}]{label}[/] [dim](shift+tab)[/dim]",
+                f"[{color}]{label}[/]{hint}",
                 id="mode-indicator",
             )
             yield Static("[#B888E8]⚑[/]", id="bell-indicator")
@@ -280,7 +279,7 @@ class InputBar(Vertical):
         elif event.key == "shift+tab":
             event.prevent_default()
             event.stop()
-            self.action_switch_tool_mode()
+            self.action_toggle_plan_mode()
         elif event.key == "up":
             inp = self.query_one("#user-input", ChatInput)
             # 只在光标在第一行时才浏览历史
@@ -339,7 +338,16 @@ class InputBar(Vertical):
             images = self._pending_images.copy()
             self._pending_images.clear()
             self._update_image_indicator()
-            self.post_message(self.Submitted(text, self._tool_mode, images=images))
+            pending = self._plan_reminder_pending
+            self.post_message(
+                self.Submitted(
+                    text,
+                    self._tool_mode,
+                    plan_mode=self._plan_mode,
+                    plan_reminder_pending=pending,
+                    images=images,
+                )
+            )
 
     def _navigate_history(self, direction: int) -> None:
         """上下键浏览输入历史
@@ -388,17 +396,24 @@ class InputBar(Vertical):
         else:
             box.border_title = "Input"
 
-    def action_switch_tool_mode(self) -> None:
-        """循环切换 tool_mode"""
-        idx = _TOOL_MODES.index(self._tool_mode)
-        self._tool_mode = _TOOL_MODES[(idx + 1) % len(_TOOL_MODES)]
+    def action_toggle_plan_mode(self) -> None:
+        """切换 plan mode"""
+        self._plan_mode = not self._plan_mode
+        self._plan_reminder_pending = self._plan_mode
         self._update_mode_indicator()
 
+    def _current_display_key(self) -> str:
+        """根据当前状态返回 _MODE_DISPLAY 的 key。"""
+        if self._plan_mode:
+            return "plan"
+        return "privileged" if self._privileged else "auto"
+
     def _update_mode_indicator(self) -> None:
-        label, role = _MODE_DISPLAY[self._tool_mode]
-        color = _resolve_color(role)
+        display_key = self._current_display_key()
+        label, color = _MODE_DISPLAY[display_key]
+        hint = " [dim](shift+tab)[/dim]"
         indicator = self.query_one("#mode-indicator", Static)
-        indicator.update(f"[{color}]{label}[/] [dim](shift+tab)[/dim]")
+        indicator.update(f"[{color}]{label}[/]{hint}")
 
     def flash_message(self, message: str, duration: float = 1.5) -> None:
         """在状态栏短暂显示提示消息，之后恢复原内容。
@@ -413,7 +428,7 @@ class InputBar(Vertical):
         if self._exit_hint_timer is not None:
             self._exit_hint_timer.stop()
             self._exit_hint_timer = None
-        color = _resolve_color("success")
+        color = get_color("success")
         indicator = self.query_one("#mode-indicator", Static)
         indicator.update(f"[{color}]✓ {message}[/]")
         self._flash_timer = self.set_timer(duration, self._restore_from_flash)
@@ -428,11 +443,37 @@ class InputBar(Vertical):
         """获取当前 tool_mode"""
         return self._tool_mode
 
-    def set_tool_mode(self, mode: str) -> None:
-        """外部设置 tool_mode 并更新指示器"""
-        if mode in _TOOL_MODES:
-            self._tool_mode = mode
-            self._update_mode_indicator()
+    @property
+    def plan_mode(self) -> bool:
+        """获取当前 plan_mode"""
+        return self._plan_mode
+
+    @property
+    def plan_reminder_pending(self) -> bool:
+        """是否有待注入的 plan reminder"""
+        return self._plan_reminder_pending
+
+    def consume_plan_reminder(self) -> None:
+        """标记 plan reminder 已注入，后续消息不再重复注入"""
+        self._plan_reminder_pending = False
+
+    def set_plan_mode(self, on: bool, *, reminder_pending: bool = True) -> None:
+        """外部设置 plan mode 并更新指示器。
+
+        Args:
+            on: 是否开启 plan mode
+            reminder_pending: 是否需要在下一条消息注入 reminder。
+                LLM 调用 EnterPlanMode 时设为 False（tool response 已含 reminder）。
+        """
+        self._plan_mode = on
+        self._plan_reminder_pending = on and reminder_pending
+        self._update_mode_indicator()
+
+    def set_privileged(self, on: bool) -> None:
+        """设置 privileged 模式（仅启动时通过 CLI flag 设置）"""
+        self._privileged = on
+        self._tool_mode = "privileged" if on else "auto"
+        self._update_mode_indicator()
 
     def show_exit_hint(self) -> None:
         """在状态栏显示退出提示，1.5 秒后自动恢复。"""
@@ -441,7 +482,7 @@ class InputBar(Vertical):
             self._flash_timer = None
         if self._exit_hint_timer is not None:
             self._exit_hint_timer.stop()
-        color = _resolve_color("error")
+        color = get_color("error")
         indicator = self.query_one("#mode-indicator", Static)
         indicator.update(f"[{color}]Double press ctrl+c to exit[/]")
         self._exit_hint_timer = self.set_timer(1.5, self.hide_exit_hint)

@@ -1,5 +1,24 @@
 # Changelog
 
+## [0.0.7] - 2026-03-28
+
+### Added
+- 新增 Style 系统：支持通过 `style` 配置切换系统提示词风格，内置 `default` 和 `code` 两种风格
+- 新增 `lumi/styles/` 目录，包含风格内置的 prompts、tools、agents 配置
+- 新增 CLI `--style / -s` 参数，运行时覆盖 config.yaml 中的风格配置
+- 新增 CLI `--privileged-danger` 参数，启动时进入特权模式跳过所有审批
+- 新增 `docs/styles.md` 文档
+- Plan Mode 支持用户手动开启（Shift+Tab 切换 `⏸ plan` 指示器）
+
+### Changed
+- 移除 `approve` 工具模式，简化为 `auto` / `plan` / `privileged` 三种状态指示
+- Plan Mode 工具提示词从硬编码迁移到 style MD 文件加载，缺失时抛出 RuntimeError 而非静默回退
+- 系统提示词加载逻辑重构：先从 style 内置目录读取，再用用户 `.lumi/prompts/` 覆盖
+- `BridgeEvent` 移除 `approval_mode` 字段
+- `InputBar` 重构：Shift+Tab 改为切换 plan mode，移除 tool_mode 循环切换
+- `PlanApproval` 组件布局优化，计划文件名突出显示
+- `docs/config.md`、`docs/permissions.md`、`docs/plan.md` 文档更新
+
 ## [0.0.6] - 2026-03-28
 
 ### Added

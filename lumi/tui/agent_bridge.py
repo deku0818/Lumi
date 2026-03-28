@@ -61,7 +61,6 @@ class BridgeEvent:
     output: str = ""
     data: dict | None = None
     error: str = ""
-    approval_mode: bool = False  # 是否处于审批模式（工具需要用户审批确认）
     usage_metadata: dict | None = None  # token 用量信息
     parent_run_id: str = ""  # 非空时表示该事件属于某个 agent 工具的子代理
     run_id: str = ""  # agent 工具自身的 run_id，用于并发 agent 场景下的精确映射
@@ -262,17 +261,11 @@ class AgentBridge:
                     else:
                         tool_call_id = ""
                         args = {}
-                    # "privileged" 模式：特权工具可绕过审批（与 "auto" 相同）
-                    approval_mode = (
-                        tool_mode not in ("auto", "privileged")
-                        and name not in APPROVAL_BYPASS_TOOLS
-                    )
                     yield BridgeEvent(
                         kind=EventKind.TOOL_START,
                         name=name,
                         args=args,
                         tool_call_id=tool_call_id,
-                        approval_mode=approval_mode,
                         parent_run_id=parent_id,
                         run_id=run_id if name == "agent" else "",
                     )
