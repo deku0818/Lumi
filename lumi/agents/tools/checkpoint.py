@@ -446,7 +446,8 @@ class ShadowGitManager:
                     break
 
             if target_idx is not None:
-                meta = meta[:target_idx]
+                # 保留目标 checkpoint 及之前的记录（截断之后的）
+                meta = meta[: target_idx + 1]
                 self._save_meta(meta)
 
             # 重置 shadow git HEAD 到目标 commit

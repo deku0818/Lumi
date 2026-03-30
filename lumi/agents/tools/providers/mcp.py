@@ -11,6 +11,7 @@ import json
 import os
 from contextlib import AsyncExitStack
 from dataclasses import dataclass, field
+from functools import wraps
 from typing import Any
 from urllib.parse import parse_qsl, urlencode, urlparse, urlunparse
 
@@ -25,6 +26,22 @@ from lumi.utils.read_config import get_config
 
 # 需要持久会话的传输类型（stdio 子进程启停开销大，必须保持连接）
 _PERSISTENT_TRANSPORTS: frozenset[str] = frozenset({"stdio"})
+
+# stdio 子进程 stderr 默认输出到 sys.stderr，会污染 TUI 界面。
+# 用 devnull 替代，将 MCP 子进程的 stderr 静默丢弃。
+
+
+_DEVNULL = open(os.devnull, "w")  # noqa: SIM115  # 模块级单例，避免每次调用泄漏 fd
+
+
+def _make_quiet_stdio_client(original_stdio_client: Any) -> Any:
+    """包装 stdio_client，将 errlog 重定向到 devnull 以避免污染 TUI"""
+
+    @wraps(original_stdio_client)
+    def wrapper(server, errlog=None):
+        return original_stdio_client(server, errlog=_DEVNULL)
+
+    return wrapper
 
 
 def _format_exception_details(e: Exception) -> str:
@@ -227,6 +244,33 @@ class MCPSessionManager:
             else:
                 stateless_servers[name] = config
 
+        # Patch stdio_client 以抑制 MCP 子进程 stderr 输出（避免污染 TUI）
+        import langchain_mcp_adapters.sessions as _mcp_sessions
+
+        _original_stdio_client = _mcp_sessions.stdio_client
+        _mcp_sessions.stdio_client = _make_quiet_stdio_client(_original_stdio_client)
+        try:
+            await self._start_servers(
+                persistent_servers,
+                stateless_servers,
+                tool_interceptors,
+                all_tools,
+            )
+        finally:
+            _mcp_sessions.stdio_client = _original_stdio_client
+
+        self._tools = all_tools
+        self._started = True
+        return all_tools
+
+    async def _start_servers(
+        self,
+        persistent_servers: dict[str, Any],
+        stateless_servers: dict[str, Any],
+        tool_interceptors: list[ToolArgsInterceptor] | None,
+        all_tools: list[StructuredTool],
+    ) -> None:
+        """启动持久和无状态服务器，加载工具"""
         # 为需要持久会话的服务器创建长连接
         for server_name, server_config in persistent_servers.items():
             try:
@@ -281,10 +325,6 @@ class MCPSessionManager:
                     f"[MCP] 无状态服务器 {server_name} 工具加载失败: "
                     f"{_format_exception_details(e)}"
                 )
-
-        self._tools = all_tools
-        self._started = True
-        return all_tools
 
     def get_tools(self) -> list[StructuredTool]:
         """获取已加载的工具列表"""

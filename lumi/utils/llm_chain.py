@@ -1,6 +1,7 @@
 from typing import Any, Literal, overload
 
 import anthropic
+import httpx
 import openai
 from langchain_anthropic import ChatAnthropic
 from langchain_core.documents import Document
@@ -259,7 +260,13 @@ def structured_output(
     chain = prompt | my_trim_messages() | structured_llm
     chain = chain.with_retry(
         stop_after_attempt=5,
-        retry_if_exception_type=(openai.APIError, anthropic.APIError),
+        retry_if_exception_type=(
+            openai.APIError,
+            anthropic.APIError,
+            httpx.RemoteProtocolError,
+            httpx.ConnectError,
+            httpx.ReadError,
+        ),
         wait_exponential_jitter=True,
         exponential_jitter_params={"initial": 15, "max": 300},
     )
@@ -332,6 +339,8 @@ def tool_call_chain(
     prompt = ChatPromptTemplate.from_messages(messages)
     chain = prompt | my_trim_messages() | llm_with_tools
 
+    # 流式 chain：只 retry 连接前的错误（rate limit 等），
+    # 不 retry 流式中途断开的 httpx 错误（会导致 TUI 重复输出）
     chain = chain.with_retry(
         stop_after_attempt=5,
         retry_if_exception_type=(openai.APIError, anthropic.APIError),
@@ -377,7 +386,13 @@ def chat_chain(
 
     chain = chain.with_retry(
         stop_after_attempt=5,
-        retry_if_exception_type=(openai.APIError, anthropic.APIError),
+        retry_if_exception_type=(
+            openai.APIError,
+            anthropic.APIError,
+            httpx.RemoteProtocolError,
+            httpx.ConnectError,
+            httpx.ReadError,
+        ),
         wait_exponential_jitter=True,
         exponential_jitter_params={"initial": 15, "max": 300},
     )

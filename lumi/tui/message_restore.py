@@ -6,7 +6,6 @@
 
 from __future__ import annotations
 
-import re
 from typing import TYPE_CHECKING, Final
 
 from lumi.tui.render_items import (
@@ -19,6 +18,7 @@ from lumi.tui.render_items import (
     ToolStartItem,
     UserItem,
 )
+from lumi.tui.text_cleaning import extract_display_text
 from lumi.tui.widget_assembler import WidgetAssembler
 from lumi.utils.logger import logger
 
@@ -39,16 +39,6 @@ _TOOL_REJECT_KEYWORDS: frozenset[str] = frozenset(
         "用户中断了工具调用请求",
         "User declined to answer questions",
     }
-)
-
-# 从 system-reminder 中提取 command-name 的正则
-_COMMAND_NAME_RE: re.Pattern[str] = re.compile(
-    r"<command-name>(/[\w-]+)</command-name>"
-)
-
-# 从消息中提取 user-input 的正则
-_USER_INPUT_RE: re.Pattern[str] = re.compile(
-    r"<user-input>(.*?)</user-input>", re.DOTALL
 )
 
 
@@ -120,13 +110,6 @@ async def restore_messages(
         for item in items:
             await assembler.apply_item(item)
 
-        # AgentGroup 的 add_agent 通过 call_after_refresh 延迟挂载 _AgentLine，
-        # 需要额外刷新一次确保显示最终状态。
-        if assembler.agent_group is not None:
-            ag = assembler.agent_group
-            ag.call_after_refresh(ag._refresh_header)
-            ag.call_after_refresh(ag._refresh_lines)
-
         return todos_data
 
     except Exception as e:
@@ -167,8 +150,11 @@ def _messages_to_items(
                 items.append(FlushItem())
                 items.append(AssistantTextItem(text=text, finalized=True))
 
-            # tool_calls
+            # tool_calls — agent 调用先收集所有 Start 再收集所有 End，
+            # 模拟并发执行顺序，确保同一 AI 消息的多个 agent 归入同一 AgentGroup。
             tool_calls = getattr(msg, "tool_calls", None) or []
+            agent_starts: list[RenderItem] = []
+            agent_ends: list[RenderItem] = []
             for tc in tool_calls:
                 name = tc.get("name", "unknown")
                 args = tc.get("args", {})
@@ -182,14 +168,14 @@ def _messages_to_items(
 
                 if name == "agent":
                     run_id = f"restore-{tc_id}" if tc_id else f"restore-{id(tc)}"
-                    items.append(
+                    agent_starts.append(
                         AgentStartItem(
                             run_id=run_id,
                             agent_name=args.get("name", "agent"),
                             prompt=args.get("prompt", ""),
                         )
                     )
-                    items.append(
+                    agent_ends.append(
                         AgentEndItem(
                             run_id=run_id,
                             output=output,
@@ -207,6 +193,8 @@ def _messages_to_items(
                             is_error=is_error,
                         )
                     )
+            items.extend(agent_starts)
+            items.extend(agent_ends)
 
         # tool 类型消息已通过 tool_outputs 映射处理，跳过
 
@@ -219,34 +207,10 @@ def extract_human_display_text(content: str | list) -> str:
 
     技能命令消息从 <command-name> 和 <user-input> 标签还原用户输入，
     如 "/media-digest 介绍下这个"。
-    非技能消息则过滤掉所有注入块（system-reminder、summary），返回剩余纯文本。
+    非技能消息则过滤掉所有注入块（system-reminder、summary、command-*），
+    返回剩余纯文本。
     """
-    raw = extract_text_content(content)
-
-    # 从 command-name + user-input 还原用户输入
-    cmd_match = _COMMAND_NAME_RE.search(raw)
-    if cmd_match:
-        cmd = cmd_match.group(1)
-        ui_match = _USER_INPUT_RE.search(raw)
-        if ui_match:
-            user_input = ui_match.group(1).strip()
-            return f"{cmd} {user_input}" if user_input else cmd
-        return cmd
-
-    # 非技能消息：过滤所有注入块，只保留用户实际输入
-    cleaned = re.sub(
-        r"<system-reminder>.*?</system-reminder>\s*",
-        "",
-        raw,
-        flags=re.DOTALL,
-    )
-    cleaned = re.sub(
-        r"<summary>.*?</summary>\s*",
-        "",
-        cleaned,
-        flags=re.DOTALL,
-    )
-    return cleaned.strip()
+    return extract_display_text(extract_text_content(content))
 
 
 def extract_text_content(content: str | list) -> str:

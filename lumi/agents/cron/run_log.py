@@ -164,6 +164,37 @@ class RunLog:
         except OSError:
             logger.warning("裁剪日志文件失败: %s", path, exc_info=True)
 
+    def get_last_run_sync(self, job_id: str) -> RunRecord | None:
+        """同步获取指定任务最近一条执行记录。
+
+        用于启动时检查错过的任务，避免在 async context 之外使用。
+
+        Args:
+            job_id: 任务 ID。
+
+        Returns:
+            最近的执行记录，无记录时返回 None。
+        """
+        path = _log_path(self._base_dir, job_id)
+        lines = _read_lines_sync(path)
+        if not lines:
+            return None
+
+        # 从后往前找第一条可解析的记录（最新的）
+        for line in reversed(lines):
+            line = line.strip()
+            if not line:
+                continue
+            try:
+                data = json.loads(line)
+                return RunRecord.from_dict(data)
+            except (json.JSONDecodeError, KeyError, TypeError, ValueError):
+                logger.warning(
+                    "跳过无法解析的日志行: %s (job_id=%s)", line[:100], job_id
+                )
+                continue
+        return None
+
     async def get_recent(self, job_id: str, limit: int = 20) -> list[RunRecord]:
         """获取指定任务最近 N 条执行记录，按时间倒序。
 

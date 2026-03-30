@@ -174,12 +174,14 @@ def is_use_tool(state: LumiAgentState, runtime: Runtime[LumiAgentContext]):
                     boundary_ok = engine.check_workspace_boundary(
                         tc["name"], tc.get("args", {})
                     )
+                    logger.debug(
+                        "[PermissionCheck] 工具 %s: decision=%s, boundary_ok=%s",
+                        tc["name"],
+                        decision.value,
+                        boundary_ok,
+                    )
                     if decision != PermissionDecision.ALLOW or not boundary_ok:
                         all_allowed = False
-                        logger.debug(
-                            f"[PermissionCheck] 工具 {tc['name']} 需要审批："
-                            f"decision={decision.value}, boundary_ok={boundary_ok}"
-                        )
                         break
                 except Exception as e:
                     # 权限评估异常时保守处理：要求人工审批，并记录详细错误

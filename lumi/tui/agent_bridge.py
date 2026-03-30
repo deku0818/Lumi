@@ -24,6 +24,7 @@ from lumi.utils.logger import logger
 from lumi.utils.model_manager import get_default_model_name
 from lumi.utils.read_config import get_config
 from lumi.utils.thread_id import generate_thread_id
+from lumi.utils.workspace_id import get_workspace_dir
 
 if TYPE_CHECKING:
     from pathlib import Path
@@ -89,6 +90,7 @@ class AgentBridge:
         recursion_limit = agents_config.recursion_limit
         self._config = RunnableConfig(
             configurable={"thread_id": thread_id},
+            metadata={"workspace_dir": get_workspace_dir()},
             recursion_limit=recursion_limit,
         )
         logger.info(
@@ -116,6 +118,7 @@ class AgentBridge:
         recursion_limit = get_config().config.agents.recursion_limit
         self._config = RunnableConfig(
             configurable={"thread_id": thread_id},
+            metadata={"workspace_dir": get_workspace_dir()},
             recursion_limit=recursion_limit,
         )
         # 切换 shadow git manager
@@ -311,8 +314,19 @@ class AgentBridge:
             logger.info("[AgentBridge] 流式任务被取消")
             raise
         except Exception as e:
-            logger.error(f"[AgentBridge] 流式事件错误: {e}", exc_info=True)
-            yield BridgeEvent(kind=EventKind.ERROR, error=str(e))
+            err_type = type(e).__qualname__
+            err_module = type(e).__module__ or ""
+            cause = e.__cause__
+            cause_info = f", cause={type(cause).__qualname__}: {cause}" if cause else ""
+            logger.error(
+                "[AgentBridge] 流式事件错误: [%s.%s] %s%s",
+                err_module,
+                err_type,
+                e,
+                cause_info,
+                exc_info=True,
+            )
+            yield BridgeEvent(kind=EventKind.ERROR, error=f"[{err_type}] {e}")
 
     def _subagent_marker(self) -> str:
         """如果当前有活跃的 agent 工具运行，返回其 run_id 作为子代理标记。"""
@@ -366,8 +380,25 @@ class AgentBridge:
                             parent_run_id=self._subagent_marker(),
                         )
 
-        logger.warning(f"[AgentBridge] 未知中断类型, next={state.next}")
-        return BridgeEvent(kind=EventKind.DONE)
+        # 记录详细的中断信息以便排查
+        tasks_info = []
+        for task in state.tasks:
+            interrupts_info = [
+                {"type": type(intr.value).__name__, "value": repr(intr.value)[:200]}
+                for intr in (task.interrupts or [])
+            ]
+            tasks_info.append(
+                {"id": task.id, "name": task.name, "interrupts": interrupts_info}
+            )
+        logger.error(
+            "[AgentBridge] 图状态异常: next=%s 但无可识别的中断, tasks=%s",
+            state.next,
+            tasks_info,
+        )
+        return BridgeEvent(
+            kind=EventKind.ERROR,
+            error=f"执行异常：图停滞在 {state.next}，可能是上一轮请求失败导致状态残留，请重试",
+        )
 
     @classmethod
     def _extract_last_ai_usage(cls, state) -> dict | None:

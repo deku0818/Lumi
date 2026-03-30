@@ -5,15 +5,18 @@
 
 底层使用轻量 SQL 查询获取 thread_id 列表（避免全量反序列化），
 再逐个调用 get_state 获取完整快照。
+
+workspace 隔离通过 RunnableConfig 的 metadata 字段实现，
+checkpointer 在 SQL 层按 metadata.workspace_dir 过滤。
 """
 
 from __future__ import annotations
 
-import re
 from dataclasses import dataclass
 from datetime import datetime, timezone
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, Any
 
+from lumi.tui.text_cleaning import extract_display_text
 from lumi.utils.logger import logger
 
 if TYPE_CHECKING:
@@ -64,48 +67,6 @@ class SessionSummary:
         return self.created_at.strftime("%Y-%m-%d")
 
 
-_COMMAND_NAME_RE = re.compile(r"<command-name>(/[\w-]+)</command-name>")
-_USER_INPUT_RE = re.compile(r"<user-input>(.*?)</user-input>", re.DOTALL)
-
-
-def _clean_display_text(raw: str) -> str:
-    """清理消息中的 XML 标签，还原用户可读文本。
-
-    技能命令消息从 <command-name> 和 <user-input> 标签还原用户输入，
-    非技能消息则过滤掉所有注入块（system-reminder、summary 等）。
-
-    Args:
-        raw: 原始消息文本
-
-    Returns:
-        清理后的显示文本，纯注入内容返回空字符串
-    """
-    # 从 command-name + user-input 还原用户输入
-    cmd_match = _COMMAND_NAME_RE.search(raw)
-    if cmd_match:
-        cmd = cmd_match.group(1)
-        ui_match = _USER_INPUT_RE.search(raw)
-        if ui_match:
-            user_input = ui_match.group(1).strip()
-            return f"{cmd} {user_input}" if user_input else cmd
-        return cmd
-
-    # 非技能消息：过滤所有注入块
-    cleaned = re.sub(
-        r"<system-reminder>.*?</system-reminder>\s*",
-        "",
-        raw,
-        flags=re.DOTALL,
-    )
-    cleaned = re.sub(
-        r"<summary>.*?</summary>\s*",
-        "",
-        cleaned,
-        flags=re.DOTALL,
-    )
-    return cleaned.strip()
-
-
 def _extract_first_human_message(messages: list) -> str:
     """从消息列表中提取首条用户消息
 
@@ -129,18 +90,22 @@ def _extract_first_human_message(messages: list) -> str:
             continue
 
         if isinstance(content, str):
-            return _clean_display_text(content)[:100]
+            return extract_display_text(content)[:100]
         # 多模态消息：遍历所有 text block，跳过 system-reminder
         if isinstance(content, list):
             for block in content:
                 if isinstance(block, dict) and block.get("type") == "text":
-                    cleaned = _clean_display_text(block.get("text", ""))
+                    cleaned = extract_display_text(block.get("text", ""))
                     if cleaned:
                         return cleaned[:100]
     return ""
 
 
-async def _get_thread_ids(graph: CompiledStateGraph) -> list[str]:
+async def _get_thread_ids(
+    graph: CompiledStateGraph,
+    *,
+    filter: dict[str, Any] | None = None,  # noqa: A002
+) -> list[str]:
     """从 checkpointer 获取所有 thread_id 列表
 
     使用 checkpointer 的 alist 接口获取所有 checkpoint，
@@ -148,6 +113,7 @@ async def _get_thread_ids(graph: CompiledStateGraph) -> list[str]:
 
     Args:
         graph: 已编译的 LangGraph 状态图
+        filter: metadata 过滤条件，传递给 checkpointer.alist()
 
     Returns:
         按最近活跃时间降序排列的 thread_id 列表
@@ -161,7 +127,7 @@ async def _get_thread_ids(graph: CompiledStateGraph) -> list[str]:
 
     # alist(config=None) 返回所有 checkpoint，按 checkpoint_id DESC
     # 只取每个 thread 的第一条（最新的）
-    async for cp_tuple in checkpointer.alist(None):
+    async for cp_tuple in checkpointer.alist(None, filter=filter):
         tid = cp_tuple.config["configurable"]["thread_id"]
         ns = cp_tuple.config["configurable"].get("checkpoint_ns", "")
         # 只取根命名空间的 checkpoint
@@ -178,6 +144,7 @@ async def list_sessions(
     graph: CompiledStateGraph,
     *,
     current_thread_id: str = "",
+    workspace: str = "",
     limit: int = 50,
 ) -> list[SessionSummary]:
     """查询所有历史会话摘要
@@ -188,6 +155,7 @@ async def list_sessions(
     Args:
         graph: 已编译的 LangGraph 状态图（需要带 checkpointer）
         current_thread_id: 当前会话 thread_id，将从结果中排除
+        workspace: 按工作目录过滤，空字符串表示不过滤
         limit: 最大返回数量
 
     Returns:
@@ -196,7 +164,8 @@ async def list_sessions(
     if graph.checkpointer is None:
         return []
 
-    thread_ids = await _get_thread_ids(graph)
+    metadata_filter = {"workspace_dir": workspace} if workspace else None
+    thread_ids = await _get_thread_ids(graph, filter=metadata_filter)
     sessions: list[SessionSummary] = []
 
     for tid in thread_ids:

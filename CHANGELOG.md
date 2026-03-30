@@ -1,5 +1,35 @@
 # Changelog
 
+## [0.0.8] - 2026-03-30
+
+### Added
+- Workspace 隔离：cron 定时任务和会话历史按工作目录隔离存储，不同项目互不干扰
+- Cron 错过任务补偿：Scheduler 启动时自动检测并补偿执行离线期间错过的定时任务
+- Cron TUI 执行状态指示器：InputBar 右侧显示正在执行的定时任务动画
+- `lumi/utils/workspace_id.py`：基于 SHA256 的工作目录唯一标识生成
+- `lumi/tui/text_cleaning.py`：统一的 XML 标签过滤和用户输入还原模块
+- `RunLog.get_last_run_sync()`：同步获取最近执行记录，用于启动时补偿检查
+
+### Fixed
+- Checkpoint 截断 bug：`restore_to` 现在正确保留目标 checkpoint 记录而非截断它
+- AgentBridge 错误信息增强：流式错误包含异常类型和 cause 链，图状态异常提供详细诊断
+- MCP stdio 子进程 stderr 静默：避免 MCP 子进程日志输出污染 TUI 界面
+- Headless 模式移除 stderr 重定向 hack，改为 MCP 层面解决
+- Agent 响应多模态 content 提取：正确处理 list 类型的 content 块
+
+### Changed
+- TUI 审批对话框（AskDialog、ToolApproval、PlanApproval）从 ToolBlock 内部挂载改为 InputBar 前挂载
+- 只读工具（read、glob、grep）不再检查工作区边界，仅写操作受边界保护
+- AgentGroup `add_agent` 改为 async，直接 await mount 替代 `call_after_refresh`
+- Agent 工具 schema 延迟初始化：避免模块导入时重复加载配置
+- LLM 超时从 120s 增大到 300s
+- `structured_output` 和 `chat_chain` 新增 httpx 网络错误重试（RemoteProtocolError、ConnectError、ReadError）
+- 权限检查日志改为始终输出（不仅在需要审批时），便于排查
+- TodosBar 操作统一使用 `_query_safe` 替代 try/except NoMatches
+- AgentGroup 统一 `_get_entry` 方法减少重复代码，统计摘要在无数据时省略括号
+- `_prepend_plan_reminder` 泛化为 `_prepend_text_block`，消除重复的 content 注入逻辑
+- `docs/cron.md`、`docs/permissions.md` 文档更新
+
 ## [0.0.7] - 2026-03-28
 
 ### Added

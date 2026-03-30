@@ -10,6 +10,7 @@
 from __future__ import annotations
 
 import asyncio
+from collections.abc import Callable
 from datetime import datetime, timedelta
 
 from apscheduler.jobstores.base import JobLookupError
@@ -82,6 +83,7 @@ class Scheduler:
         run_log: RunLog,
         delivery: DeliveryManager,
         execution_timeout: int = 600,
+        on_job_status: Callable[[list[str]], None] | None = None,
     ) -> None:
         self._aps = AsyncIOScheduler()
         self._job_store = job_store
@@ -89,9 +91,15 @@ class Scheduler:
         self._delivery = delivery
         self._execution_timeout = execution_timeout
         self._running_tasks: set[asyncio.Task[RunRecord]] = set()
+        self._running_job_names: list[str] = []
+        self._on_job_status = on_job_status
+        self._compensate_task: asyncio.Task | None = None
 
     async def start(self) -> None:
-        """从 JobStore 加载所有启用的任务，注册到 APScheduler 并启动调度器。"""
+        """从 JobStore 加载所有启用的任务，注册到 APScheduler 并启动调度器。
+
+        启动后检查是否有错过的任务需要补偿执行。
+        """
         jobs = await self._job_store.load()
         for job in jobs:
             if job.enabled:
@@ -104,6 +112,96 @@ class Scheduler:
         self._aps.start()
         logger.info("Scheduler 已启动，加载了 %d 个任务", len(jobs))
 
+        # 补偿执行错过的任务
+        enabled_jobs = [j for j in jobs if j.enabled]
+        if enabled_jobs:
+            self._compensate_task = asyncio.create_task(
+                self._compensate_missed_runs(enabled_jobs)
+            )
+            self._compensate_task.add_done_callback(self._on_compensate_done)
+
+    @staticmethod
+    def _on_compensate_done(task: asyncio.Task) -> None:
+        """补偿任务完成回调，记录未被内部 try-except 捕获的异常。"""
+        if task.cancelled():
+            return
+        exc = task.exception()
+        if exc is not None:
+            logger.error("补偿任务异常终止: %s", exc, exc_info=exc)
+
+    async def _compensate_missed_runs(self, jobs: list[Job]) -> None:
+        """检查并补偿执行在离线期间错过的任务。
+
+        对每个任务，从 RunLog 获取最近一次执行记录，
+        结合调度规则判断是否有错过的执行，有则补执行一次（coalesce）。
+        """
+        now = datetime.now()
+        compensated = 0
+
+        for job in jobs:
+            try:
+                if await self._should_compensate(job, now):
+                    logger.info("补偿执行错过的任务: %s [%s]", job.name, job.id)
+                    await self._run_job_task(job)
+                    compensated += 1
+            except Exception:
+                logger.warning(
+                    "检查错过任务失败: %s [%s] (schedule=%s/%s)",
+                    job.name,
+                    job.id,
+                    job.schedule.type.value,
+                    job.schedule.value,
+                    exc_info=True,
+                )
+
+        if compensated:
+            logger.info("补偿执行了 %d 个错过的任务", compensated)
+
+    async def _should_compensate(self, job: Job, now: datetime) -> bool:
+        """判断任务是否需要补偿执行。
+
+        Args:
+            job: 任务定义。
+            now: 当前时间。
+
+        Returns:
+            True 表示需要补偿执行。
+        """
+        last_run = await asyncio.to_thread(self._run_log.get_last_run_sync, job.id)
+
+        match job.schedule.type:
+            case ScheduleType.AT:
+                # 一次性任务：如果执行时间已过且没有成功执行过 → 补偿
+                run_date = datetime.fromisoformat(job.schedule.value)
+                if run_date >= now:
+                    return False
+                return last_run is None or last_run.status != "success"
+
+            case ScheduleType.INTERVAL:
+                # 间隔任务：上次执行 + 间隔 < 当前时间 → 补偿
+                from lumi.agents.cron.models import parse_interval_to_seconds
+
+                interval_secs = parse_interval_to_seconds(job.schedule.value)
+                if last_run is None:
+                    # 从未执行过，如果创建时间 + 间隔 < now → 补偿
+                    return (now - job.created_at).total_seconds() >= interval_secs
+                expected_next = last_run.started_at + timedelta(seconds=interval_secs)
+                return expected_next < now
+
+            case ScheduleType.CRON:
+                # cron 任务：用 trigger 计算上次应触发时间
+                trigger = job.schedule.to_trigger()
+                ref_time = last_run.started_at if last_run else job.created_at
+                next_fire = trigger.get_next_fire_time(None, ref_time)
+                if next_fire is None:
+                    return False
+                # APScheduler 可能返回 aware datetime，统一转为 naive 比较
+                if next_fire.tzinfo is not None:
+                    next_fire = next_fire.replace(tzinfo=None)
+                return next_fire < now
+
+        return False
+
     async def stop(self, grace_period: int = 30) -> None:
         """优雅停止调度器，等待执行中的任务完成。
 
@@ -113,7 +211,12 @@ class Scheduler:
         Args:
             grace_period: 等待执行中任务完成的最大秒数，默认 30。
         """
+        if not self._aps.running:
+            return
         self._aps.shutdown(wait=False)
+
+        if self._compensate_task and not self._compensate_task.done():
+            self._compensate_task.cancel()
 
         if self._running_tasks:
             logger.info(
@@ -272,6 +375,10 @@ class Scheduler:
         error: str = ""
         caught_exc: BaseException | None = None
 
+        # 通知 TUI 任务开始执行
+        self._running_job_names.append(job.name)
+        self._notify_job_status()
+
         try:
             agent, context = await create_agent(checkpoint=None)
             inputs = {
@@ -291,7 +398,17 @@ class Scheduler:
             if not messages:
                 raise ValueError("Agent 响应中无消息")
             last_msg = messages[-1]
-            output = last_msg.content if hasattr(last_msg, "content") else str(last_msg)
+            raw_content = (
+                last_msg.content if hasattr(last_msg, "content") else str(last_msg)
+            )
+            # content 可能是多模态 list，提取纯文本
+            if isinstance(raw_content, list):
+                output = "\n".join(
+                    block.get("text", "") if isinstance(block, dict) else str(block)
+                    for block in raw_content
+                ).strip()
+            else:
+                output = str(raw_content)
 
         except asyncio.TimeoutError as exc:
             status = "timeout"
@@ -368,7 +485,22 @@ class Scheduler:
                     "删除一次性任务失败: %s [%s]", job.name, job.id, exc_info=True
                 )
 
+        # 通知 TUI 任务执行完毕
+        try:
+            self._running_job_names.remove(job.name)
+        except ValueError:
+            logger.warning("任务 %s [%s] 不在 running 列表中", job.name, job.id)
+        self._notify_job_status()
+
         return record
+
+    def _notify_job_status(self) -> None:
+        """将当前正在执行的任务名列表通知给 TUI。"""
+        if self._on_job_status:
+            try:
+                self._on_job_status(list(self._running_job_names))
+            except Exception:
+                logger.error("通知 TUI 任务状态失败", exc_info=True)
 
     def _schedule_retry(self, job: Job) -> None:
         """通过 APScheduler DateTrigger 安排退避重试。

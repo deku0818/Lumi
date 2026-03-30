@@ -54,8 +54,10 @@ async def lifespan(app: FastAPI):
         from lumi.agents.cron.scheduler import Scheduler
         from lumi.agents.tools.providers.cron import init_cron_tool
         from lumi.utils.config.global_manager import GLOBAL_CONFIG_DIR
+        from lumi.utils.workspace_id import get_workspace_id
 
-        cron_dir = GLOBAL_CONFIG_DIR / "cron"
+        cron_dir = GLOBAL_CONFIG_DIR / "cron" / get_workspace_id()
+        cron_dir.mkdir(parents=True, exist_ok=True)
         job_store = JobStore(cron_dir / "jobs.json")
         run_log = RunLog(cron_dir / "runs")
         delivery = DeliveryManager()

@@ -323,7 +323,7 @@ class WidgetAssembler:
                 return
             self._agent_group = group
 
-        self._agent_group.add_agent(item.run_id, item.agent_name, item.prompt)
+        await self._agent_group.add_agent(item.run_id, item.agent_name, item.prompt)
 
     async def _apply_agent_end(self, item: AgentEndItem) -> None:
         if self._agent_group is None:

@@ -166,7 +166,7 @@ class AgentGroup(Vertical):
 
     # ── 公开 API ──
 
-    def add_agent(self, run_id: str, name: str, prompt: str) -> None:
+    async def add_agent(self, run_id: str, name: str, prompt: str) -> None:
         """注册一个新的子 agent。"""
         if run_id in self._entries:
             return
@@ -176,7 +176,7 @@ class AgentGroup(Vertical):
         try:
             container = self.query_one(".agent-lines", Vertical)
             line = _AgentLine("", markup=False, id=f"ag-line-{run_id}")
-            self.call_after_refresh(lambda: container.mount(line))
+            await container.mount(line)
         except NoMatches:
             logger.error(
                 "add_agent failed: container not ready (event_type=add_agent, run_id=%s)",
@@ -201,11 +201,16 @@ class AgentGroup(Vertical):
         self._order = [new_run_id if r == old_run_id else r for r in self._order]
         return True
 
-    def record_tool_start(self, run_id: str, tool_name: str, args: dict) -> None:
-        """记录子 agent 的工具调用开始。"""
+    def _get_entry(self, run_id: str, caller: str = "") -> AgentEntry | None:
+        """按 run_id 查找 AgentEntry，未找到时记录日志。"""
         entry = self._entries.get(run_id)
         if entry is None:
-            logger.debug("record_tool_start: unknown run_id=%s", run_id)
+            logger.debug("%s: unknown run_id=%s", caller or "AgentGroup", run_id)
+        return entry
+
+    def record_tool_start(self, run_id: str, tool_name: str, args: dict) -> None:
+        """记录子 agent 的工具调用开始。"""
+        if (entry := self._get_entry(run_id, "record_tool_start")) is None:
             return
         entry.tool_uses += 1
         entry.current_action = self._describe_action(tool_name, args)
@@ -213,17 +218,13 @@ class AgentGroup(Vertical):
 
     def record_tool_end(self, run_id: str) -> None:
         """记录子 agent 的工具调用结束。"""
-        entry = self._entries.get(run_id)
-        if entry is None:
-            logger.debug("record_tool_end: unknown run_id=%s", run_id)
+        if (entry := self._get_entry(run_id, "record_tool_end")) is None:
             return
         entry.current_action = "Thinking…"
 
     def record_model_start(self, run_id: str) -> None:
         """记录子 agent 开始思考。"""
-        entry = self._entries.get(run_id)
-        if entry is None:
-            logger.debug("record_model_start: unknown run_id=%s", run_id)
+        if (entry := self._get_entry(run_id, "record_model_start")) is None:
             return
         entry.current_action = "Thinking…"
 
@@ -231,9 +232,7 @@ class AgentGroup(Vertical):
         """累加子 agent 的 token 用量。"""
         if not usage:
             return
-        entry = self._entries.get(run_id)
-        if entry is None:
-            logger.debug("record_tokens: unknown run_id=%s", run_id)
+        if (entry := self._get_entry(run_id, "record_tokens")) is None:
             return
         inp = usage.get("input_tokens", 0)
         out = usage.get("output_tokens", 0)
@@ -244,9 +243,7 @@ class AgentGroup(Vertical):
 
     def record_stream_token(self, run_id: str, text: str) -> None:
         """累积子 agent 的流式输出文本（用于最终 result）。"""
-        entry = self._entries.get(run_id)
-        if entry is None:
-            logger.debug("record_stream_token: unknown run_id=%s", run_id)
+        if (entry := self._get_entry(run_id, "record_stream_token")) is None:
             return
         entry.result += text
         if entry.current_action == "Thinking…":
@@ -254,9 +251,7 @@ class AgentGroup(Vertical):
 
     def finish_agent(self, run_id: str, output: str) -> None:
         """标记子 agent 完成。"""
-        entry = self._entries.get(run_id)
-        if entry is None:
-            logger.warning("finish_agent: unknown run_id=%s", run_id)
+        if (entry := self._get_entry(run_id, "finish_agent")) is None:
             return
         entry.done = True
         entry.current_action = "Done"
@@ -267,9 +262,7 @@ class AgentGroup(Vertical):
 
     def finish_agent_error(self, run_id: str, error: str) -> None:
         """标记子 agent 出错。"""
-        entry = self._entries.get(run_id)
-        if entry is None:
-            logger.warning("finish_agent_error: unknown run_id=%s", run_id)
+        if (entry := self._get_entry(run_id, "finish_agent_error")) is None:
             return
         entry.done = True
         entry.error = True
@@ -343,10 +336,12 @@ class AgentGroup(Vertical):
             errors = sum(1 for e in entries if e.error)
             text = Text()
             text.append("● ", style=get_color("success"))
-            summary = (
-                f"Ran {total} agents "
-                f"({total_tools} tool uses · {_format_tokens(total_tokens)} tokens)"
-            )
+            summary = f"Ran {total} agent{'s' if total != 1 else ''}"
+            if total_tools or total_tokens:
+                summary += (
+                    f" ({total_tools} tool uses"
+                    f" · {_format_tokens(total_tokens)} tokens)"
+                )
             if errors:
                 summary += f" ({errors} failed)"
                 text.append(summary, style=get_color("error"))
@@ -389,9 +384,12 @@ class AgentGroup(Vertical):
         text.append(prefix, style=get_color("text_muted"))
 
         total_tokens = entry.input_tokens + entry.output_tokens
-        stats = (
-            f" · {entry.tool_uses} tool uses · {_format_tokens(total_tokens)} tokens"
-        )
+        stats = ""
+        if entry.tool_uses or total_tokens:
+            stats = (
+                f" · {entry.tool_uses} tool uses"
+                f" · {_format_tokens(total_tokens)} tokens"
+            )
 
         if entry.done:
             if entry.error:

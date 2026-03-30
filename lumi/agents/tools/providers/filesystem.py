@@ -18,7 +18,6 @@ from pydantic import BaseModel, Field
 from wcmatch import glob as wcglob
 
 from lumi.agents.tools.workspace import get_authorized_directory, validate_path
-from lumi.utils.logger import logger
 from lumi.utils.read_config import get_config
 
 # ============================================================================
@@ -80,10 +79,7 @@ class LocalFilesystemBackend:
 
     async def read(self, file_path: str, offset: int = 0, limit: int = 2000) -> str:
         """读取文件内容并添加行号"""
-        try:
-            resolved = validate_path(file_path)
-        except PermissionError as e:
-            return f"错误: {e}"
+        resolved = Path(file_path).resolve()
 
         if not resolved.exists():
             return f"错误: 文件 '{file_path}' 不存在"
@@ -109,10 +105,7 @@ class LocalFilesystemBackend:
 
     async def write(self, file_path: str, content: str) -> dict:
         """创建新文件并写入内容"""
-        try:
-            resolved = validate_path(file_path)
-        except PermissionError as e:
-            return {"path": file_path, "error": str(e)}
+        resolved = validate_path(file_path)
 
         if resolved.exists():
             return {
@@ -135,10 +128,7 @@ class LocalFilesystemBackend:
         replace_all: bool = False,
     ) -> dict:
         """通过字符串替换编辑文件"""
-        try:
-            resolved = validate_path(file_path)
-        except PermissionError as e:
-            return {"path": file_path, "error": str(e), "occurrences": 0}
+        resolved = validate_path(file_path)
 
         if not resolved.exists():
             return {
@@ -176,11 +166,7 @@ class LocalFilesystemBackend:
         if path is None:
             search_path = get_authorized_directory()
         else:
-            try:
-                search_path = validate_path(path)
-            except PermissionError as e:
-                logger.warning(f"路径校验失败: {e}")
-                return []
+            search_path = Path(path).resolve()
 
         if not search_path.exists() or not search_path.is_dir():
             return []
@@ -262,10 +248,7 @@ class LocalFilesystemBackend:
         if path is None:
             search_path = str(get_authorized_directory())
         else:
-            try:
-                search_path = str(validate_path(path))
-            except PermissionError as e:
-                return f"错误: {e}"
+            search_path = str(Path(path).resolve())
 
         # 优先尝试 ripgrep
         results = await self._ripgrep_search(

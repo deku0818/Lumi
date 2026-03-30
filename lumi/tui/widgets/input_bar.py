@@ -64,6 +64,12 @@ class ChatInput(TextArea):
             self.value = value
 
     def __init__(self, **kwargs) -> None:
+        # 必须在 super().__init__() 之前初始化，因为 _set_document -> _build_highlight_map -> _apply_cmd_highlight 会访问这些属性
+        self._paste_counter: int = 0
+        self._pasted_texts: dict[int, str] = {}
+        self._command_registry: CommandRegistry | None = None
+        self._cmd_highlight_end: int = 0
+
         super().__init__(
             id="user-input",
             show_line_numbers=False,
@@ -71,12 +77,6 @@ class ChatInput(TextArea):
             tab_behavior="focus",
             **kwargs,
         )
-        # 粘贴计数器和原始文本存储
-        self._paste_counter: int = 0
-        self._pasted_texts: dict[int, str] = {}
-        # 斜杠命令高亮
-        self._command_registry: CommandRegistry | None = None
-        self._cmd_highlight_end: int = 0
         # 注册自定义 theme，包含 slash_command 样式
         from textual._text_area_theme import TextAreaTheme
 
@@ -242,6 +242,13 @@ class InputBar(Vertical):
         color: $text-muted;
     }
 
+    #cron-indicator {
+        width: auto;
+        height: 1;
+        color: $text-muted;
+        padding: 0 1 0 0;
+    }
+
     #bell-indicator {
         width: auto;
         height: 1;
@@ -269,6 +276,8 @@ class InputBar(Vertical):
             self.plan_reminder_pending = plan_reminder_pending
             self.images: list[ImageData] = images or []
 
+    _CRON_FRAMES = ("▰▱▱", "▱▰▱", "▱▱▰")
+
     def __init__(self, *args, **kwargs) -> None:
         super().__init__(*args, **kwargs)
         self._tool_mode = "auto"
@@ -277,6 +286,9 @@ class InputBar(Vertical):
         self._privileged = False
         self._pending_images: list[ImageData] = []
         self._exit_hint_timer = None
+        self._cron_job_names: list[str] = []
+        self._cron_frame: int = 0
+        self._cron_timer = None
         self._flash_timer = None
         self._history: list[str] = []
         self._history_index: int = -1
@@ -300,6 +312,7 @@ class InputBar(Vertical):
                 f"[{color}]{label}[/]{hint}",
                 id="mode-indicator",
             )
+            yield Static("", id="cron-indicator")
             yield Static("[#B888E8]⚑[/]", id="bell-indicator")
 
     def on_mount(self) -> None:
@@ -563,6 +576,40 @@ class InputBar(Vertical):
         if not disabled:
             inp = self.query_one("#user-input", ChatInput)
             inp.focus()
+
+    def update_cron_status(self, job_names: list[str]) -> None:
+        """更新定时任务执行状态指示器。
+
+        Args:
+            job_names: 正在执行的任务名称列表，空列表表示清除指示器。
+        """
+        self._cron_job_names = job_names
+        if job_names and self._cron_timer is None:
+            self._cron_frame = 0
+            self._render_cron_frame()
+            self._cron_timer = self.set_interval(0.3, self._tick_cron)
+        elif not job_names:
+            if self._cron_timer is not None:
+                self._cron_timer.stop()
+                self._cron_timer = None
+            self.query_one("#cron-indicator", Static).update("")
+
+    def _tick_cron(self) -> None:
+        """动画帧推进。"""
+        self._cron_frame = (self._cron_frame + 1) % len(self._CRON_FRAMES)
+        self._render_cron_frame()
+
+    def _render_cron_frame(self) -> None:
+        """渲染当前帧到指示器。"""
+        names = self._cron_job_names
+        if not names:
+            return
+        bar = self._CRON_FRAMES[self._cron_frame]
+        if len(names) <= 3:
+            text = f"[#B888E8]{bar} {', '.join(names)} 执行中[/]"
+        else:
+            text = f"[#B888E8]{bar} {len(names)} 个任务执行中[/]"
+        self.query_one("#cron-indicator", Static).update(text)
 
     def update_bell(self, unread: int) -> None:
         """更新铃铛指示器的未读数量。

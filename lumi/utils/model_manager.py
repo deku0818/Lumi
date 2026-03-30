@@ -29,10 +29,10 @@ class ModelManager:
     def __init__(self):
         """初始化模型管理器"""
         self._cache: dict[str, Any] = {}
-        self.anthropic_params = {"temperature": 0.6, "timeout": 120}
+        self.anthropic_params = {"temperature": 0.6, "timeout": 300}
         self.openai_params = {
             "temperature": 0.6,
-            "timeout": 120,
+            "timeout": 300,
         }
 
     def _create_cache_key(self, model_name: str, **params) -> str:

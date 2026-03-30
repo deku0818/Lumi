@@ -3,9 +3,11 @@
 from __future__ import annotations
 
 import asyncio
+import json
 import sys
 from collections.abc import Awaitable, Callable, Sequence
 from datetime import datetime
+from pathlib import Path
 
 from textual.app import App, ComposeResult
 from textual.binding import Binding
@@ -43,6 +45,7 @@ from lumi.utils.config import GlobalConfig, GlobalConfigManager, get_config
 from lumi.utils.config.global_manager import GLOBAL_CONFIG_DIR
 from lumi.utils.logger import logger
 from lumi.utils.thread_id import generate_thread_id
+from lumi.utils.workspace_id import get_workspace_dir, get_workspace_id
 
 from lumi.tui.event_router import EventRouter
 from lumi.tui.message_restore import restore_messages
@@ -111,6 +114,9 @@ class LumiApp(App):
         self._rewind_checkpoints: dict = {}  # _open_rewind_screen 缓存
         self._todos_hidden_for_approval: bool = False  # 审批期间临时隐藏 todos-bar
         self._privileged = privileged
+        self._workspace_id = get_workspace_id()
+        self._workspace_dir = get_workspace_dir()
+        self._cron_dir = GLOBAL_CONFIG_DIR / "cron" / self._workspace_id
 
     def _query_safe(self, widget_type: type[Widget]) -> Widget | None:
         """按类型查询 widget，未挂载时返回 None 而非抛异常。"""
@@ -124,9 +130,8 @@ class LumiApp(App):
 
         无任务时隐藏；全部完成时由 _finish_run 统一清除。
         """
-        try:
-            bar = self.query_one(TodosBar)
-        except NoMatches:
+        bar = self._query_safe(TodosBar)
+        if bar is None:
             return
         bar.update_todos(todos)
 
@@ -142,32 +147,26 @@ class LumiApp(App):
 
     def _clear_todos_bar(self) -> None:
         """隐藏并清空 #todos-bar 面板。"""
-        try:
-            bar = self.query_one(TodosBar)
-        except NoMatches:
-            return
-        bar.clear()
+        bar = self._query_safe(TodosBar)
+        if bar:
+            bar.clear()
 
     def _hide_todos_bar_for_approval(self) -> None:
         """审批期间临时隐藏 todos-bar，避免遮挡审批 UI。"""
-        try:
-            bar = self.query_one(TodosBar)
-        except NoMatches:
+        bar = self._query_safe(TodosBar)
+        if bar is None:
             return
         self._todos_hidden_for_approval = bar.has_class("-visible")
         bar.remove_class("-visible")
 
     def _restore_todos_bar_after_approval(self) -> None:
         """审批结束后恢复 todos-bar 的可见状态。"""
-        if not getattr(self, "_todos_hidden_for_approval", False):
+        if not self._todos_hidden_for_approval:
             return
         self._todos_hidden_for_approval = False
-        try:
-            bar = self.query_one(TodosBar)
-        except NoMatches:
-            return
-        # 隐藏前已记录可见状态，直接恢复
-        bar.add_class("-visible")
+        bar = self._query_safe(TodosBar)
+        if bar:
+            bar.add_class("-visible")
 
     def compose(self) -> ComposeResult:
         yield ChatLog()
@@ -312,9 +311,7 @@ class LumiApp(App):
             return
 
         # 初始化 Shadow Git Checkpoint
-        from pathlib import Path as _Path
-
-        self._bridge.init_shadow_git(_Path.cwd())
+        self._bridge.init_shadow_git(Path.cwd())
 
         # 配置 StatusLine（尝试从 OpenRouter 获取 context_length）
         from lumi.utils.model_info import fetch_model_info
@@ -347,19 +344,43 @@ class LumiApp(App):
         # 初始化铃铛未读数
         self._refresh_bell()
 
-        # 初始化定时任务子系统
+        # 初始化定时任务子系统（按工作目录隔离）
         try:
-            cron_dir = GLOBAL_CONFIG_DIR / "cron"
+            cron_dir = self._cron_dir
+            cron_dir.mkdir(parents=True, exist_ok=True)
+            # 写入 workspace.meta 便于调试（非关键，失败不影响 cron）
+            try:
+                meta_file = cron_dir / "workspace.meta"
+                if not meta_file.exists():
+                    meta_file.write_text(
+                        json.dumps(
+                            {
+                                "path": self._workspace_dir,
+                                "created_at": datetime.now().isoformat(),
+                            },
+                            ensure_ascii=False,
+                        ),
+                        encoding="utf-8",
+                    )
+            except OSError:
+                logger.debug("workspace.meta 写入失败（非关键）", exc_info=True)
             job_store = JobStore(cron_dir / "jobs.json")
             run_log = RunLog(cron_dir / "runs")
             delivery = DeliveryManager()
             delivery.register(TUIDelivery(self))
-            scheduler = Scheduler(job_store, run_log, delivery)
+            scheduler = Scheduler(
+                job_store,
+                run_log,
+                delivery,
+                on_job_status=self._on_cron_job_status,
+            )
             init_cron_tool(scheduler, job_store, run_log)
             await scheduler.start()
             self._scheduler = scheduler
             self._delivery = delivery
-            logger.info("[LumiApp] 定时任务子系统已启动")
+            logger.info(
+                "[LumiApp] 定时任务子系统已启动 (workspace=%s)", self._workspace_id
+            )
         except Exception:
             logger.warning("[LumiApp] 定时任务子系统启动失败", exc_info=True)
             self.notify("定时任务子系统启动失败，cron 功能不可用", severity="warning")
@@ -430,6 +451,7 @@ class LumiApp(App):
             return await list_sessions(
                 graph,
                 current_thread_id=self._bridge.current_thread_id,
+                workspace=self._workspace_dir,
                 limit=limit,
             )
         except Exception:
@@ -553,6 +575,7 @@ class LumiApp(App):
         sessions = await list_sessions(
             graph,
             current_thread_id=self._bridge.current_thread_id,
+            workspace=self._workspace_dir,
         )
         if not sessions:
             chat_log = self.query_one(ChatLog)
@@ -783,7 +806,7 @@ class LumiApp(App):
         """打开定时任务通知界面。"""
         from lumi.tui.widgets.notification_panel import NotificationStore
 
-        store = NotificationStore()
+        store = NotificationStore(self._cron_notifications_path)
         records = store.load()
 
         from lumi.tui.screens.cron_notify_screen import CronNotifyScreen
@@ -818,12 +841,24 @@ class LumiApp(App):
     async def _on_mcp_done(self, result: str | None) -> None:
         """MCP 界面关闭回调。"""
 
+    @property
+    def _cron_notifications_path(self) -> Path:
+        """当前 workspace 的通知文件路径。"""
+        return self._cron_dir / "notifications.json"
+
+    def _on_cron_job_status(self, job_names: list[str]) -> None:
+        """Scheduler 回调：定时任务开始/结束时更新 InputBar 指示器。"""
+        try:
+            self.query_one(InputBar).update_cron_status(job_names)
+        except NoMatches:
+            logger.debug("[LumiApp] _on_cron_job_status: InputBar 未挂载，跳过")
+
     def _refresh_bell(self) -> None:
         """从 NotificationStore 刷新铃铛未读数。"""
         try:
             from lumi.tui.widgets.notification_panel import NotificationStore
 
-            records = NotificationStore().load()
+            records = NotificationStore(self._cron_notifications_path).load()
             unread = sum(1 for r in records if not r.read)
         except Exception:
             logger.warning("[LumiApp] 通知记录加载失败", exc_info=True)
@@ -887,18 +922,12 @@ class LumiApp(App):
 
         # 中断提示：告知 LLM 上一轮回复被用户中断
         if self._interrupted:
-            interrupted_hint = (
+            content = self._prepend_text_block(
+                content,
                 "<system-reminder>\n"
                 "The user interrupted the conversation before the previous reply was completed.\n"
-                "</system-reminder>\n"
+                "</system-reminder>\n",
             )
-            if isinstance(content, list):
-                content.insert(0, {"type": "text", "text": interrupted_hint})
-            else:
-                content = [
-                    {"type": "text", "text": interrupted_hint},
-                    {"type": "text", "text": content},
-                ]
             self._interrupted = False
 
         # 注入待告知的系统命令（用户在上次对话间执行的 /skills、/resume 等）
@@ -907,18 +936,14 @@ class LumiApp(App):
                 f"<command-name>{cmd}</command-name><command-type>system</command-type>\n"
                 for cmd in self._pending_system_commands
             )
-            if isinstance(content, list):
-                content.insert(0, {"type": "text", "text": hints})
-            else:
-                content = [
-                    {"type": "text", "text": hints},
-                    {"type": "text", "text": content},
-                ]
+            content = self._prepend_text_block(content, hints)
             self._pending_system_commands.clear()
 
         # Plan mode reminder 注入（仅首次进入 plan mode 时注入一次）
         if plan_mode and plan_reminder_pending:
-            content = self._prepend_plan_reminder(content)
+            from lumi.agents.tools.providers.plan import plan_mode_response
+
+            content = self._prepend_text_block(content, plan_mode_response)
             self.query_one(InputBar).consume_plan_reminder()
 
         self._run.phase = RunPhase.IDLE  # 即将启动
@@ -956,19 +981,34 @@ class LumiApp(App):
             logger.error(f"[TUI] 事件流异常: {e}", exc_info=True)
             await self._show_error(chat_log, str(e))
 
-    async def _handle_ask(self, evt: BridgeEvent, chat_log: ChatLog) -> None:
-        tool_call_id = (evt.data or {}).get("tool_call_id", "")
-        key = tool_call_id or "ask"
+    def _get_approval_anchor(self) -> Widget:
+        """获取审批 widget 的挂载锚点（InputBar 之前）。"""
+        return self.query_one(InputBar)
+
+    def _hide_input_for_approval(self) -> None:
+        """审批期间隐藏输入栏，审批 widget 已占据交互位置。"""
+        self.query_one(InputBar).display = False
+
+    def _restore_input_after_approval(self) -> None:
+        """审批结束后恢复输入栏。"""
+        self.query_one(InputBar).display = True
+
+    def _set_tool_waiting(self, tool_call_id: str, fallback_name: str) -> None:
+        """查找 ToolBlock 并设置为 WAITING 状态（ask / ExitPlanMode 共用）。"""
+        key = tool_call_id or fallback_name
         block = self._assembler.tool_blocks.get(key)
-        # Fallback: TOOL_START 中 InjectedToolCallId 可能不在事件 input 中，
-        # 导致 ToolBlock 以工具名 "ask" 为 key 存储
         if block is None:
-            result = self._assembler.find_tool_block_by_name("ask")
+            result = self._assembler.find_tool_block_by_name(fallback_name)
             if result is not None:
                 _, block = result
         if block:
-            dialog = AskDialog(evt.data)
-            await block.mount_interactive(dialog)
+            block.set_waiting()
+
+    async def _handle_ask(self, evt: BridgeEvent, chat_log: ChatLog) -> None:
+        self._set_tool_waiting((evt.data or {}).get("tool_call_id", ""), "ask")
+        dialog = AskDialog(evt.data)
+        self._hide_input_for_approval()
+        await self.mount(dialog, before=self._get_approval_anchor())
 
     async def _handle_tool_approval(self, evt: BridgeEvent, chat_log: ChatLog) -> None:
         self._assembler.finalize_assistant_msg()
@@ -986,19 +1026,14 @@ class LumiApp(App):
             self._subagent_tracker.clear_approval_context()
         # 审批期间临时隐藏 todos-bar，避免遮挡审批 UI
         self._hide_todos_bar_for_approval()
-        await chat_log.mount(approval)
+        self._hide_input_for_approval()
+        await self.mount(approval, before=self._get_approval_anchor())
 
     async def _handle_exit_plan_mode(self, evt: BridgeEvent, chat_log: ChatLog) -> None:
-        tool_call_id = (evt.data or {}).get("tool_call_id", "")
-        key = tool_call_id or "ExitPlanMode"
-        block = self._assembler.tool_blocks.get(key)
-        if block is None:
-            result = self._assembler.find_tool_block_by_name("ExitPlanMode")
-            if result is not None:
-                _, block = result
-        if block:
-            dialog = PlanApproval(evt.data)
-            await block.mount_interactive(dialog)
+        self._set_tool_waiting((evt.data or {}).get("tool_call_id", ""), "ExitPlanMode")
+        dialog = PlanApproval(evt.data)
+        self._hide_input_for_approval()
+        await self.mount(dialog, before=self._get_approval_anchor())
 
     # ── 辅助方法 ──
 
@@ -1024,6 +1059,7 @@ class LumiApp(App):
             if block:
                 block.set_error("User declined to answer questions")
             await chat_log.auto_scroll_if_needed()
+        self._restore_input_after_approval()
         await self._run_resume(event.answer)
 
     async def on_tool_approval_decided(self, event: ToolApproval.Decided) -> None:
@@ -1054,8 +1090,9 @@ class LumiApp(App):
                     )
                     block.set_error(msg)
             await chat_log.auto_scroll_if_needed()
-        # 审批结束，恢复 todos-bar
+        # 审批结束，恢复 todos-bar 和 InputBar
         self._restore_todos_bar_after_approval()
+        self._restore_input_after_approval()
         # 清理审批上下文
         self._subagent_tracker.clear_approval_context()
         await self._run_resume(decision)
@@ -1063,6 +1100,7 @@ class LumiApp(App):
     async def on_plan_approval_decided(self, event: PlanApproval.Decided) -> None:
         from lumi.agents.tools.providers.plan import PLAN_REJECTED
 
+        self._restore_input_after_approval()
         if event.decision == "rejected":
             await self._run_resume(PLAN_REJECTED)
         else:
@@ -1071,14 +1109,12 @@ class LumiApp(App):
             await self._run_resume(event.decision)
 
     @staticmethod
-    def _prepend_plan_reminder(content: str | list) -> list:
-        """将 plan mode reminder 注入到 content 前端。"""
-        from lumi.agents.tools.providers.plan import plan_mode_response
-
-        reminder = {"type": "text", "text": plan_mode_response}
+    def _prepend_text_block(content: str | list, text: str) -> list:
+        """将文本块注入到 content 前端，str 自动转为 list 格式。"""
+        block = {"type": "text", "text": text}
         if isinstance(content, list):
-            return [reminder, *content]
-        return [reminder, {"type": "text", "text": content}]
+            return [block, *content]
+        return [block, {"type": "text", "text": content}]
 
     def _sync_plan_mode_from_tool(self) -> None:
         """LLM 调用 EnterPlanMode 工具后同步 InputBar 指示器。
@@ -1102,7 +1138,7 @@ class LumiApp(App):
                 NotificationStore,
             )
 
-            store = NotificationStore()
+            store = NotificationStore(self._cron_notifications_path)
             records = store.load()
             record = NotificationRecord.create(
                 job_name, output, started_at=started_at, duration_ms=duration_ms

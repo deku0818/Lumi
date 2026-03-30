@@ -10,11 +10,11 @@ from apscheduler.triggers.interval import IntervalTrigger
 from lumi.agents.cron.models import (
     Schedule,
     ScheduleType,
-    _parse_interval_to_seconds,
+    parse_interval_to_seconds,
 )
 
 
-# === _parse_interval_to_seconds ===
+# === parse_interval_to_seconds ===
 
 
 class TestParseIntervalToSeconds:
@@ -32,7 +32,7 @@ class TestParseIntervalToSeconds:
         ],
     )
     def test_valid_intervals(self, value: str, expected: int) -> None:
-        assert _parse_interval_to_seconds(value) == expected
+        assert parse_interval_to_seconds(value) == expected
 
     @pytest.mark.parametrize(
         "value",
@@ -40,7 +40,7 @@ class TestParseIntervalToSeconds:
     )
     def test_invalid_intervals(self, value: str) -> None:
         with pytest.raises(ValueError):
-            _parse_interval_to_seconds(value)
+            parse_interval_to_seconds(value)
 
 
 # === Schedule.parse ===

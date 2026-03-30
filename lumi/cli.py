@@ -117,21 +117,9 @@ def _run_headless(prompt: str, *, privileged: bool = False) -> None:
 
         get_config().apply_env()
 
-        # OS 层面静默 stderr，拦截 MCP 子进程的日志输出
-        import os
-
-        _stderr_fd = os.dup(2)
-        _devnull = os.open(os.devnull, os.O_WRONLY)
-        os.dup2(_devnull, 2)
-        os.close(_devnull)
-
         bridge = AgentBridge()
         try:
             await bridge.initialize()
-
-            # 恢复 stderr，让真正的错误能输出
-            os.dup2(_stderr_fd, 2)
-            os.close(_stderr_fd)
             async for evt in bridge.stream_response(prompt, tool_mode=tool_mode):
                 if evt.kind == EventKind.STREAM_TOKEN and evt.text:
                     sys.stdout.write(evt.text)

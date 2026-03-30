@@ -441,36 +441,32 @@ async def test_pagination_parameters(offset, head_limit):
 @given(
     unauthorized_suffix=st.from_regex(r"[a-z]{3,8}", fullmatch=True),
 )
-async def test_path_security_blocks_unauthorized_access(unauthorized_suffix):
-    """越权路径应被安全校验拦截"""
+async def test_readonly_tools_allow_any_path(unauthorized_suffix):
+    """只读工具（grep/glob）不限制工作区边界，可读取任意路径"""
     backend = LocalFilesystemBackend()
     with tempfile.TemporaryDirectory() as tmp:
         tmp_dir = Path(tmp).resolve()
-        # Create a separate unauthorized directory
-        unauthorized_dir = Path(tempfile.mkdtemp()) / unauthorized_suffix
-        unauthorized_dir.mkdir(parents=True, exist_ok=True)
-        (unauthorized_dir / "secret.txt").write_text("secret data")
+        # Create a separate directory outside authorized workspace
+        external_dir = Path(tempfile.mkdtemp()) / unauthorized_suffix
+        external_dir.mkdir(parents=True, exist_ok=True)
+        (external_dir / "data.txt").write_text("some data")
 
         old_dirs = workspace._authorized_directories[:]
         workspace._authorized_directories = [tmp_dir]
         try:
-            # grep_raw should return error string
-            grep_result = await backend.grep_raw("secret", str(unauthorized_dir))
-            assert isinstance(grep_result, str), (
-                f"期望错误字符串，实际: {type(grep_result)}"
-            )
-            assert "错误" in grep_result, f"错误消息不包含'错误': {grep_result}"
+            # grep should be able to search outside workspace
+            grep_result = await backend.grep_raw("some", str(external_dir))
+            assert isinstance(grep_result, (str, dict))
 
-            # glob_info should return empty list
-            glob_result = await backend.glob_info("*", str(unauthorized_dir))
-            assert glob_result == [], f"越权 glob 应返回空列表，实际: {glob_result}"
+            # glob should be able to list outside workspace
+            glob_result = await backend.glob_info("*", str(external_dir))
+            assert len(glob_result) >= 1, f"应能列出外部目录文件，实际: {glob_result}"
         finally:
             workspace._authorized_directories = old_dirs
-            # Cleanup
             shutil.rmtree(
-                unauthorized_dir.parent
-                if unauthorized_dir.parent != Path(tempfile.gettempdir())
-                else unauthorized_dir,
+                external_dir.parent
+                if external_dir.parent != Path(tempfile.gettempdir())
+                else external_dir,
                 ignore_errors=True,
             )
 

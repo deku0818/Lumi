@@ -105,7 +105,6 @@ class ToolBlock(Vertical, SpinnerMixin):
         self._args = args
         self._approval_mode = approval_mode
         self._status = ToolStatus.RUNNING
-        self._interactive: Widget | None = None
         self._is_agent = name == "agent"
         self._error_text: str = ""
         self._output_text: str = ""
@@ -186,67 +185,46 @@ class ToolBlock(Vertical, SpinnerMixin):
         frame = BLINK_FRAMES[self._spinner_frame % len(BLINK_FRAMES)]
         return Text(frame, style=get_color("accent"))
 
-    async def mount_interactive(self, widget: Widget) -> None:
-        """将交互组件挂载到 Collapsible 内容区"""
-        self._status = ToolStatus.WAITING
-        self._stop_spinner()
-        contents = self.query_one(Collapsible).query_one("Contents")
-        await contents.mount(widget)
-        self._interactive = widget
-        # 展开 Collapsible 以显示交互组件，刷新标题显示等待圆圈
-        self._update_title_label()
-        self.query_one(Collapsible).collapsed = False
-
-    def remove_interactive(self) -> None:
-        """移除交互组件（decline 场景用）"""
-        if self._interactive is not None and self._interactive.is_attached:
-            self._interactive.remove()
-            self._interactive = None
-
     def set_done(self, output: str = "") -> None:
         """标记工具执行完成，生成摘要行并折叠。
 
         摘要行（⎿ 文本）在挂载后由 on_mount 创建。若 block 已在 DOM 中
         则立即挂载；若尚未挂载（pending 状态），on_mount 时会检查并补挂。
         """
-        self.remove_interactive()
         self._output_text = output
-        self._status = ToolStatus.DONE
-        self._stop_spinner()
-        try:
-            self._try_mount_summary()
-            self._update_title_label()
-            self.query_one(Collapsible).collapsed = True
-        except NoMatches:
-            logger.debug(
-                "set_done: Collapsible 未挂载（compose 可能失败）: %s", self._name
-            )
+        self._finalize(ToolStatus.DONE)
 
     def set_error(self, error: str = "") -> None:
         """标记工具执行错误，生成摘要行并折叠。"""
-        self.remove_interactive()
-        self._status = ToolStatus.ERROR
         self._error_text = error
+        self._finalize(ToolStatus.ERROR)
+
+    def set_interrupted(self) -> None:
+        """标记工具执行被用户中断"""
+        self._finalize(ToolStatus.INTERRUPTED)
+
+    def set_waiting(self) -> None:
+        """标记工具进入等待用户交互状态（ask dialog 等）。"""
+        self._status = ToolStatus.WAITING
         self._stop_spinner()
         try:
-            self._try_mount_summary()
+            self._update_title_label()
+        except NoMatches:
+            pass
+
+    def _finalize(self, status: ToolStatus) -> None:
+        """统一的完成/错误/中断处理：更新状态、停止 spinner、挂载摘要并折叠。"""
+        self._status = status
+        self._stop_spinner()
+        try:
+            if status != ToolStatus.INTERRUPTED:
+                self._try_mount_summary()
             self._update_title_label()
             self.query_one(Collapsible).collapsed = True
         except NoMatches:
             logger.debug(
-                "set_error: Collapsible 未挂载（compose 可能失败）: %s", self._name
+                "_finalize: Collapsible 未挂载（compose 可能失败）: %s", self._name
             )
-
-    def set_interrupted(self) -> None:
-        """标记工具执行被用户中断"""
-        self.remove_interactive()
-        self._status = ToolStatus.INTERRUPTED
-        self._stop_spinner()
-        try:
-            self._update_title_label()
-            self.query_one(Collapsible).collapsed = True
-        except NoMatches:
-            logger.debug("set_interrupted: Collapsible 未挂载: %s", self._name)
 
     @property
     def status(self) -> ToolStatus:

@@ -405,12 +405,14 @@ class AskDialog(Vertical):
         """提交所有答案"""
         self._save_custom_input()
         self.post_message(self.Answered(self._format_answers()))
+        self.call_later(self.remove)
 
     def _decline(self) -> None:
         """用户按 Esc 拒绝回答"""
         from lumi.agents.tools.providers.ask import ASK_CANCELLED
 
         self.post_message(self.Answered(ASK_CANCELLED))
+        self.call_later(self.remove)
 
     def _advance_or_submit(self) -> None:
         """跳转到下一题；多问题时最后一题跳到 Submit 确认页，单问题直接提交"""

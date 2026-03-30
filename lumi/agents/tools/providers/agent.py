@@ -54,9 +54,12 @@ function isPrime(n) {
     )
 
 
-def _create_agent_schema() -> tuple[str, dict]:
+def _create_agent_schema(
+    agents: list[AgentConfig] | None = None,
+) -> tuple[str, dict]:
     """动态创建agent工具的description和schema。"""
-    agents = load_agents()
+    if agents is None:
+        agents = load_agents()
     schema = {
         "type": "object",
         "properties": {
@@ -76,7 +79,17 @@ def _create_agent_schema() -> tuple[str, dict]:
     return _build_agent_description(agents), schema
 
 
-_agent_description, _agent_schema = _create_agent_schema()
+_agent_description: str = ""
+_agent_schema: dict = {}
+
+
+def _init_schema(agents: list[AgentConfig]) -> None:
+    """由 __init__.py 调用，传入已加载的 agents 列表以避免重复加载。"""
+    global _agent_description, _agent_schema
+    _agent_description, _agent_schema = _create_agent_schema(agents)
+    # 更新已装饰的 tool 对象属性（@tool 装饰器在导入时已用空值创建）
+    agent.description = _agent_description
+    agent.args_schema = _agent_schema
 
 
 @tool(description=_agent_description, args_schema=_agent_schema)

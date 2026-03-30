@@ -22,9 +22,11 @@ ToolRegistry.register("plan", plan)
 
 # 条件注册：仅在有配置时才导入和注册
 try:
-    if load_agents():
+    _agents = load_agents()
+    if _agents:
         from .providers import agent
 
+        agent._init_schema(_agents)
         ToolRegistry.register("agent", agent)
 except Exception as e:
     logger.warning(f"加载 agent 配置失败，'agent' 工具不可用: {e}")

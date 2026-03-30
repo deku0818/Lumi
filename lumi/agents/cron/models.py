@@ -27,7 +27,7 @@ _INTERVAL_RE = re.compile(r"^(\d+)([smhd])$")
 _RELATIVE_RE = re.compile(r"^\+(\d+)([smhd])$")
 
 
-def _parse_interval_to_seconds(value: str) -> int:
+def parse_interval_to_seconds(value: str) -> int:
     """将间隔简写（如 30s、5m、2h、1d）解析为秒数。
 
     Args:
@@ -85,7 +85,7 @@ class Schedule:
             case ScheduleType.AT:
                 return DateTrigger(run_date=datetime.fromisoformat(self.value))
             case ScheduleType.INTERVAL:
-                seconds = _parse_interval_to_seconds(self.value)
+                seconds = parse_interval_to_seconds(self.value)
                 return IntervalTrigger(seconds=seconds)
             case ScheduleType.CRON:
                 return CronTrigger.from_crontab(self.value)
@@ -127,7 +127,7 @@ class Schedule:
         # 2. 尝试间隔简写
         if _INTERVAL_RE.match(raw):
             # 验证能正确解析（包括数值 > 0 检查）
-            _parse_interval_to_seconds(raw)
+            parse_interval_to_seconds(raw)
             return Schedule(type=ScheduleType.INTERVAL, value=raw)
 
         # 2. 尝试 ISO 8601 时间点
