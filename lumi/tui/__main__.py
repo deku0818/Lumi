@@ -26,8 +26,9 @@ def main() -> None:
     sys.unraisablehook = _quiet_unraisablehook
 
     privileged = os.environ.get("LUMI_PRIVILEGED") == "1"
+    no_mouse = os.environ.get("LUMI_NO_MOUSE") == "1"
     app = LumiApp(privileged=privileged)
-    app.run()
+    app.run(mouse=not no_mouse)
 
 
 if __name__ == "__main__":

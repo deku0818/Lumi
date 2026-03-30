@@ -130,7 +130,9 @@ class NotificationStore:
 
 
 class NotificationItem(Widget):
-    """单条通知条目，点击展开/收起内容，标题行按钮操作已读/删除。"""
+    """单条通知条目，点击或按键展开/收起内容，标题行按钮操作已读/删除。"""
+
+    can_focus = True
 
     DEFAULT_CSS = """
     NotificationItem {
@@ -140,6 +142,7 @@ class NotificationItem(Widget):
         border-bottom: solid $border-blurred;
     }
     NotificationItem:hover { background: $panel; }
+    NotificationItem:focus { background: $panel; }
     .item-header-row { height: 1; }
     .item-title { width: 1fr; height: 1; color: $text-muted; }
     .item-title.unread { color: $accent; text-style: bold; }
@@ -224,6 +227,19 @@ class NotificationItem(Widget):
             )
         self._toggle_expand()
 
+    def on_key(self, event) -> None:
+        """Enter/Space 展开收起，d 键执行已读/删除。"""
+        if event.key in ("enter", "space"):
+            event.stop()
+            event.prevent_default()
+            self._toggle_expand()
+        elif event.key == "d":
+            event.stop()
+            if self._show_dismiss:
+                self.post_message(self.Dismissed(self._record.id))
+            else:
+                self.post_message(self.MarkRead(self._record.id))
+
 
 class _NotifTab(StrEnum):
     """通知面板的筛选标签页。"""
@@ -233,7 +249,9 @@ class _NotifTab(StrEnum):
 
 
 class _TabButton(Static):
-    """可点击的标签按钮，点击时发送 TabClicked 消息。"""
+    """可点击/可聚焦的标签按钮，点击或按键时发送 TabClicked 消息。"""
+
+    can_focus = True
 
     class TabClicked(Message):
         """标签被点击。"""
@@ -250,9 +268,17 @@ class _TabButton(Static):
         event.stop()
         self.post_message(self.TabClicked(self._tab))
 
+    def on_key(self, event) -> None:
+        if event.key in ("enter", "space"):
+            event.stop()
+            event.prevent_default()
+            self.post_message(self.TabClicked(self._tab))
+
 
 class _ActionButton(Static):
     """标签栏右侧的操作按钮（一键已读 / 一键清空）。"""
+
+    can_focus = True
 
     class Clicked(Message):
         """操作按钮被点击。"""
@@ -260,6 +286,12 @@ class _ActionButton(Static):
     def on_click(self, event) -> None:
         event.stop()
         self.post_message(self.Clicked())
+
+    def on_key(self, event) -> None:
+        if event.key in ("enter", "space"):
+            event.stop()
+            event.prevent_default()
+            self.post_message(self.Clicked())
 
 
 class NotificationPanel(Widget):

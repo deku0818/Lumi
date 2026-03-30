@@ -11,7 +11,10 @@ import json
 import re
 from datetime import datetime
 from pathlib import Path
-from typing import Literal
+from typing import TYPE_CHECKING, Literal
+
+if TYPE_CHECKING:
+    from lumi.agents.tools.file_tracker import FileChangeTracker
 
 from langchain_core.tools import tool
 from pydantic import BaseModel, Field
@@ -77,6 +80,13 @@ class LocalFilesystemBackend:
     所有路径在操作前都会经过授权目录校验。
     """
 
+    def __init__(self) -> None:
+        self._tracker: FileChangeTracker | None = None
+
+    def set_tracker(self, tracker: "FileChangeTracker") -> None:
+        """注册文件变更追踪器，用于 checkpoint 系统。"""
+        self._tracker = tracker
+
     async def read(self, file_path: str, offset: int = 0, limit: int = 2000) -> str:
         """读取文件内容并添加行号"""
         resolved = Path(file_path).resolve()
@@ -114,6 +124,8 @@ class LocalFilesystemBackend:
             }
 
         try:
+            if self._tracker and self._tracker.active:
+                self._tracker.record_pre_write(resolved)
             resolved.parent.mkdir(parents=True, exist_ok=True)
             resolved.write_text(content, encoding="utf-8")
             return {"path": file_path, "error": None}
@@ -138,6 +150,8 @@ class LocalFilesystemBackend:
             }
 
         try:
+            if self._tracker and self._tracker.active:
+                self._tracker.record_pre_edit(resolved)
             content = resolved.read_text(encoding="utf-8")
 
             result = perform_string_replacement(

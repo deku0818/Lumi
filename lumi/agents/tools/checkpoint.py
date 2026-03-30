@@ -1,51 +1,52 @@
-"""Shadow Git Checkpoint — 文件快照管理
+"""File-level Checkpoint — 文件级快照管理
 
-在项目目录之外维护一个独立的 shadow git repository，
-每轮用户 prompt 发送前自动 commit 当前工作区状态。
-回滚时 git checkout 恢复文件到指定快照。
+只追踪 edit/write 工具修改的文件，回退时仅恢复这些文件。
+不依赖 git，使用目录结构保存原始文件内容。
 
-项目本身的 Git 历史完全不受影响。
-
-Shadow repo 位置：
-    ~/.lumi/checkpoints/shadow/{thread_id}/.git
-    GIT_WORK_TREE 指向项目目录
+存储位置：
+    ~/.lumi/checkpoints/filediff/{thread_id}/
+        meta.json                              # checkpoint 列表
+        changes/{checkpoint_id}/
+            manifest.json                      # 变更文件清单
+            files/{safe_filename}              # 原始文件内容副本
 """
 
 from __future__ import annotations
 
+import difflib
 import json
-import subprocess
+import shutil
 import tempfile
 import time
+import urllib.parse
+import uuid
 from dataclasses import dataclass
 from pathlib import Path
 
+from lumi.agents.tools.file_tracker import FileChange, FileChangeTracker
 from lumi.utils.logger import logger
 
 # 单个 thread 最多保留的 checkpoint 数量
 _MAX_CHECKPOINTS = 20
-
-# git / 文件系统操作可能抛出的异常
-_GIT_FS_ERRORS = (RuntimeError, OSError, subprocess.SubprocessError)
 
 
 @dataclass(frozen=True)
 class CheckpointInfo:
     """Checkpoint 摘要信息（用于 UI 展示）"""
 
-    commit_hash: str  # shadow git commit hash (full)
+    commit_hash: str  # checkpoint hash (full)
     timestamp: float
     label: str  # 用户消息摘要
     langgraph_checkpoint_id: str  # 关联的 LangGraph checkpoint_id
     langgraph_parent_checkpoint_id: str | None = None
-    # diff 统计（与前一个 checkpoint 对比），由 list_checkpoints 填充
+    # diff 统计（该轮 agent 执行后产生的文件变更）
     files_changed: int = 0
     insertions: int = 0
     deletions: int = 0
 
     @property
     def checkpoint_id(self) -> str:
-        """shadow git commit hash (short, 前 8 位)"""
+        """checkpoint hash (short, 前 8 位)"""
         return self.commit_hash[:8]
 
     @property
@@ -68,119 +69,48 @@ class CheckpointInfo:
         return ts.strftime("%m-%d %H:%M")
 
 
-class ShadowGitManager:
-    """Shadow Git Checkpoint 管理器
+def _generate_checkpoint_hash(thread_id: str, timestamp: float) -> str:
+    """生成 checkpoint hash"""
+    return uuid.uuid4().hex
 
-    使用独立的 git 仓库追踪项目工作区的文件变化，
-    不影响项目本身的 git 历史。
+
+def _safe_filename(file_path: str) -> str:
+    """将绝对路径转为安全的文件名（URL encode）"""
+    return urllib.parse.quote(file_path, safe="")
+
+
+class FileCheckpointManager:
+    """文件级 Checkpoint 管理器
+
+    只追踪 edit/write 工具修改的文件，不影响项目中其他文件。
     """
 
-    def __init__(self, thread_id: str, project_dir: Path, base_dir: Path | None = None):
+    def __init__(
+        self,
+        thread_id: str,
+        project_dir: Path,
+        tracker: FileChangeTracker,
+        base_dir: Path | None = None,
+    ):
         """
         Args:
             thread_id: 会话线程 ID
-            project_dir: 项目根目录路径（shadow git 的 GIT_WORK_TREE）
-            base_dir: shadow repo 根目录，默认 ~/.lumi/checkpoints/shadow
+            project_dir: 项目根目录路径
+            tracker: 文件变更追踪器
+            base_dir: 存储根目录，默认 ~/.lumi/checkpoints/filediff
         """
         if base_dir is None:
-            base_dir = Path.home() / ".lumi" / "checkpoints" / "shadow"
+            base_dir = Path.home() / ".lumi" / "checkpoints" / "filediff"
         self._thread_id = thread_id
         self._project_dir = project_dir.resolve()
-        self._repo_dir = (base_dir / thread_id).resolve()
-        self._git_dir = self._repo_dir / ".git"
-        self._meta_path = self._repo_dir / "meta.json"
-        self._initialized = False
-
-    @property
-    def git_dir(self) -> Path:
-        return self._git_dir
+        self._tracker = tracker
+        self._store_dir = (base_dir / thread_id).resolve()
+        self._meta_path = self._store_dir / "meta.json"
+        self._changes_dir = self._store_dir / "changes"
 
     @property
     def project_dir(self) -> Path:
         return self._project_dir
-
-    # ── Git 命令执行 ──
-
-    def _git(self, *args: str, check: bool = True, timeout: int = 30) -> str:
-        """执行 git 命令，自动设置 GIT_DIR 和 GIT_WORK_TREE。
-
-        Returns:
-            命令的 stdout
-        """
-        env_override = {
-            "GIT_DIR": str(self._git_dir),
-            "GIT_WORK_TREE": str(self._project_dir),
-            # 禁用项目级 git hooks 和配置干扰
-            "GIT_CONFIG_NOSYSTEM": "1",
-            "HOME": str(self._repo_dir),  # 避免读取用户 .gitconfig
-        }
-        import os
-
-        env = {**os.environ, **env_override}
-
-        result = subprocess.run(
-            ["git", *args],
-            cwd=str(self._project_dir),
-            capture_output=True,
-            text=True,
-            timeout=timeout,
-            env=env,
-        )
-        if check and result.returncode != 0:
-            raise RuntimeError(
-                f"git {' '.join(args)} failed (rc={result.returncode}): "
-                f"{result.stderr.strip()}"
-            )
-        return result.stdout.strip()
-
-    # ── 初始化 ──
-
-    def _ensure_init(self) -> None:
-        """确保 shadow git repo 已初始化"""
-        if self._initialized:
-            return
-
-        if not self._git_dir.exists():
-            self._repo_dir.mkdir(parents=True, exist_ok=True)
-            # git init 不能带 GIT_WORK_TREE/GIT_DIR，需要干净环境
-            import os as _os
-
-            clean_env = {
-                k: v
-                for k, v in _os.environ.items()
-                if k not in ("GIT_DIR", "GIT_WORK_TREE")
-            }
-            subprocess.run(
-                ["git", "init", str(self._repo_dir)],
-                capture_output=True,
-                text=True,
-                timeout=10,
-                check=True,
-                env=clean_env,
-            )
-            # 配置 shadow repo
-            self._git("config", "user.name", "lumi-checkpoint")
-            self._git("config", "user.email", "checkpoint@lumi.local")
-            # 复用项目的 .gitignore（如果存在）
-            gitignore = self._project_dir / ".gitignore"
-            if gitignore.exists():
-                exclude_dir = self._git_dir / "info"
-                exclude_dir.mkdir(parents=True, exist_ok=True)
-                exclude_file = exclude_dir / "exclude"
-                exclude_file.write_text(
-                    gitignore.read_text(encoding="utf-8"), encoding="utf-8"
-                )
-            logger.info(
-                "[ShadowGit] 初始化 shadow repo: %s (project_dir=%s)",
-                self._git_dir,
-                self._project_dir,
-            )
-
-        # 确保 meta 文件存在
-        if not self._meta_path.exists():
-            self._save_meta([])
-
-        self._initialized = True
 
     # ── Checkpoint 创建 ──
 
@@ -192,9 +122,9 @@ class ShadowGitManager:
     ) -> CheckpointInfo | None:
         """在 agent 执行前创建一个 checkpoint。
 
-        对工作区执行 git add -A && git commit，保存当前文件状态。
-        如果工作区没有变化（和上次 commit 完全一样），仍然创建
-        一个空 commit 以记录会话断点。
+        1. 收集上一轮 tracker 中的变更，保存到上一个 checkpoint 的 changes 目录
+        2. 创建新的 checkpoint 条目
+        3. 启动新一轮的变更追踪
 
         Args:
             label: 用户消息摘要
@@ -205,24 +135,23 @@ class ShadowGitManager:
             CheckpointInfo，失败返回 None
         """
         try:
-            self._ensure_init()
+            self._store_dir.mkdir(parents=True, exist_ok=True)
 
-            # Stage 所有变化（包括新文件和删除）
-            self._git("add", "-A")
+            # 1. 收集上一轮变更并持久化到上一个 checkpoint
+            prev_changes = self._tracker.end_turn()
+            meta = self._load_meta()
+            if prev_changes and meta:
+                prev_cp_id = meta[-1]["commit_hash"]
+                self._save_changes(prev_cp_id, prev_changes)
+                logger.info(
+                    "[FileCheckpoint] 保存上一轮 %d 个文件变更到 %s",
+                    len(prev_changes),
+                    prev_cp_id[:8],
+                )
 
-            # Commit（允许空 commit 以记录会话断点）
+            # 2. 创建新 checkpoint
             now = time.time()
-            safe_label = label.replace('"', '\\"')[:100]
-            commit_msg = (
-                f"checkpoint: {safe_label}\n\n"
-                f"timestamp: {now}\n"
-                f"langgraph_cp: {langgraph_checkpoint_id}\n"
-                f"langgraph_parent_cp: {langgraph_parent_checkpoint_id}"
-            )
-            self._git("commit", "--allow-empty", "-m", commit_msg)
-
-            # 获取 commit hash
-            commit_hash = self._git("rev-parse", "HEAD")
+            commit_hash = _generate_checkpoint_hash(self._thread_id, now)
 
             info = CheckpointInfo(
                 commit_hash=commit_hash,
@@ -232,44 +161,41 @@ class ShadowGitManager:
                 langgraph_parent_checkpoint_id=langgraph_parent_checkpoint_id or None,
             )
 
-            # 追加到 meta — 即使失败，git commit 已存在，记录 ERROR 但仍返回 info
-            try:
-                meta = self._load_meta()
-                meta.append(self._info_to_dict(info))
-                if len(meta) > _MAX_CHECKPOINTS:
-                    meta = meta[-_MAX_CHECKPOINTS:]
-                self._save_meta(meta)
-            except _GIT_FS_ERRORS:
-                logger.error(
-                    "[ShadowGit] checkpoint %s 已提交但 meta.json 写入失败",
-                    info.checkpoint_id,
-                    exc_info=True,
-                )
+            # 追加到 meta（复用已加载的 meta）
+            meta.append(self._info_to_dict(info))
+            if len(meta) > _MAX_CHECKPOINTS:
+                # 清理最旧的 checkpoint 的 changes 目录
+                removed = meta[: len(meta) - _MAX_CHECKPOINTS]
+                for old in removed:
+                    self._delete_changes(old["commit_hash"])
+                meta = meta[-_MAX_CHECKPOINTS:]
+            self._save_meta(meta)
+
+            # 3. 开始追踪新一轮
+            self._tracker.start_turn()
 
             logger.info(
-                "[ShadowGit] checkpoint %s: %s (lg_cp=%s)",
+                "[FileCheckpoint] checkpoint %s: %s (lg_cp=%s)",
                 info.checkpoint_id,
                 label[:50],
                 langgraph_checkpoint_id[:16] if langgraph_checkpoint_id else "N/A",
             )
             return info
 
-        except _GIT_FS_ERRORS:
-            logger.error("[ShadowGit] 创建 checkpoint 失败", exc_info=True)
+        except (OSError, json.JSONDecodeError, KeyError, ValueError) as exc:
+            logger.error(
+                "[FileCheckpoint] 创建 checkpoint 失败: %s", exc, exc_info=True
+            )
             return None
 
     # ── Checkpoint 列表 ──
 
     def list_checkpoints(self) -> list[CheckpointInfo]:
-        """列出所有 checkpoint（按时间正序，最旧在前），附带 diff 统计。
+        """列出所有 checkpoint（按时间正序），附带 diff 统计。
 
         diff 归属逻辑：每个 checkpoint 显示的是该轮 agent 执行后产生的文件变更。
-        - checkpoint N 的 diff = diff(checkpoint N, checkpoint N+1)
-        - 最后一个 checkpoint 的 diff = diff(checkpoint N, 当前工作区)
-        - 第一个 checkpoint 无特殊处理，同样按上述规则
         """
         try:
-            self._ensure_init()
             meta = self._load_meta()
             if not meta:
                 return []
@@ -279,16 +205,18 @@ class ShadowGitManager:
                 try:
                     info = self._dict_to_info(d)
                 except (KeyError, TypeError) as e:
-                    logger.warning("[ShadowGit] 跳过损坏的 meta 条目 %d: %s", i, e)
+                    logger.warning("[FileCheckpoint] 跳过损坏的 meta 条目 %d: %s", i, e)
                     continue
+
+                # 计算 diff 统计
+                cp_id = d["commit_hash"]
                 if i + 1 < len(meta):
-                    # 非最后一个：对比当前 commit 和下一个 commit
-                    files, ins, dels = self._diff_stat(
-                        d["commit_hash"], meta[i + 1]["commit_hash"]
-                    )
+                    # 非最后一个：从已保存的 changes 目录读取
+                    files, ins, dels = self._diff_stat_from_changes(cp_id)
                 else:
-                    # 最后一个：对比当前 commit 和工作区
-                    files, ins, dels = self._diff_stat_worktree(d["commit_hash"])
+                    # 最后一个：从 tracker 内存 + 当前文件对比
+                    files, ins, dels = self._diff_stat_current()
+
                 info = CheckpointInfo(
                     commit_hash=info.commit_hash,
                     timestamp=info.timestamp,
@@ -301,143 +229,27 @@ class ShadowGitManager:
                 )
                 infos.append(info)
             return infos
-        except _GIT_FS_ERRORS:
-            logger.error("[ShadowGit] 列出 checkpoint 失败", exc_info=True)
+        except (OSError, json.JSONDecodeError, KeyError, ValueError) as exc:
+            logger.error(
+                "[FileCheckpoint] 列出 checkpoint 失败: %s", exc, exc_info=True
+            )
             return []
-
-    def _diff_stat_worktree(self, from_hash: str) -> tuple[int, int, int]:
-        """计算指定 commit 与当前工作区之间的 diff 统计。
-
-        先暂存工作区变更，对比后恢复暂存区状态。
-
-        Args:
-            from_hash: 起始 commit hash
-
-        Returns:
-            (files_changed, insertions, deletions)
-        """
-        try:
-            # 暂存所有工作区变更以便 diff 能检测到未追踪文件
-            self._git("add", "-A")
-            try:
-                stat = self._git(
-                    "diff", "--cached", "--shortstat", from_hash, check=False
-                )
-                return self._parse_shortstat(stat)
-            finally:
-                # 恢复暂存区到 HEAD 状态，不影响工作区文件
-                self._git("reset", "HEAD", "--", ".", check=False)
-        except _GIT_FS_ERRORS:
-            logger.debug("[ShadowGit] worktree diff stat 失败", exc_info=True)
-            return 0, 0, 0
-
-    def _diff_stat(self, from_hash: str, to_hash: str) -> tuple[int, int, int]:
-        """计算两个 commit 之间的 diff 统计。
-
-        Args:
-            from_hash: 起始 commit hash
-            to_hash: 目标 commit hash
-
-        Returns:
-            (files_changed, insertions, deletions)
-        """
-        try:
-            stat = self._git("diff", "--shortstat", from_hash, to_hash, check=False)
-            return self._parse_shortstat(stat)
-        except _GIT_FS_ERRORS:
-            logger.debug("[ShadowGit] diff stat 失败", exc_info=True)
-            return 0, 0, 0
-
-    @staticmethod
-    def _parse_shortstat(stat: str) -> tuple[int, int, int]:
-        """解析 git diff --shortstat 输出。
-
-        示例: " 3 files changed, 10 insertions(+), 5 deletions(-)"
-
-        Returns:
-            (files_changed, insertions, deletions)
-        """
-        import re
-
-        if not stat.strip():
-            return 0, 0, 0
-        files = ins = dels = 0
-        m = re.search(r"(\d+) file", stat)
-        if m:
-            files = int(m.group(1))
-        m = re.search(r"(\d+) insertion", stat)
-        if m:
-            ins = int(m.group(1))
-        m = re.search(r"(\d+) deletion", stat)
-        if m:
-            dels = int(m.group(1))
-        return files, ins, dels
 
     # ── Checkpoint 恢复 ──
 
     def restore_checkpoint(self, commit_hash: str) -> bool:
-        """恢复工作区到指定 checkpoint 的文件状态。
+        """恢复到指定 checkpoint 的文件状态。
 
-        使用 git checkout 将工作区文件恢复到指定 commit 的状态，
-        并清理该 commit 之后新增的文件（包括未提交的工作区变更）。
+        收集目标 checkpoint 之后所有轮次的文件变更，
+        对每个文件取最早的原始内容进行恢复。
 
         Args:
-            commit_hash: 要恢复到的 checkpoint 的 git commit hash
+            commit_hash: 要恢复到的 checkpoint hash
 
         Returns:
             恢复成功返回 True
         """
         try:
-            self._ensure_init()
-
-            # 先暂存当前工作区所有变更，确保新增文件被 git 追踪
-            self._git("add", "-A")
-
-            # 列出目标 commit 之后新增的文件（对比工作区暂存区 vs 目标 commit）
-            # git checkout 只能恢复目标 commit 中存在的文件，不会删除后续新增的文件，
-            # 因此需要这一步获取新增文件列表，在 checkout 后手动删除
-            files_to_delete: list[str] = []
-            try:
-                diff_output = self._git(
-                    "diff",
-                    "--cached",
-                    "--name-only",
-                    "--diff-filter=A",
-                    commit_hash,
-                    check=False,
-                )
-                if diff_output:
-                    files_to_delete = [
-                        p.strip() for p in diff_output.splitlines() if p.strip()
-                    ]
-            except _GIT_FS_ERRORS:
-                logger.debug("[ShadowGit] 获取新增文件列表时出错", exc_info=True)
-
-            # 用 git checkout 恢复已追踪文件到目标 commit 的状态
-            self._git("checkout", commit_hash, "--", ".")
-
-            # 逐文件删除目标 commit 中不存在的文件，单个文件失败不中止整体流程
-            failed_deletes: list[str] = []
-            for rel_path in files_to_delete:
-                full_path = self._project_dir / rel_path
-                try:
-                    if full_path.exists() and full_path.is_file():
-                        full_path.unlink()
-                        logger.debug("[ShadowGit] 删除文件: %s", rel_path)
-                except OSError:
-                    logger.warning(
-                        "[ShadowGit] 无法删除文件: %s", rel_path, exc_info=True
-                    )
-                    failed_deletes.append(rel_path)
-
-            if failed_deletes:
-                logger.error(
-                    "[ShadowGit] %d 个文件在恢复时无法删除: %s",
-                    len(failed_deletes),
-                    failed_deletes,
-                )
-
-            # 更新 meta 和 HEAD（即使文件删除部分失败，也需保持 shadow git 一致）
             meta = self._load_meta()
             target_idx = None
             for i, d in enumerate(meta):
@@ -445,20 +257,226 @@ class ShadowGitManager:
                     target_idx = i
                     break
 
-            if target_idx is not None:
-                # 保留目标 checkpoint 及之前的记录（截断之后的）
-                meta = meta[: target_idx + 1]
-                self._save_meta(meta)
+            if target_idx is None:
+                logger.error("[FileCheckpoint] 未找到 checkpoint: %s", commit_hash[:8])
+                return False
 
-            # 重置 shadow git HEAD 到目标 commit
-            self._git("reset", "--soft", commit_hash)
+            # 收集目标之后所有 checkpoint 的变更
+            # （包括当前 tracker 中尚未持久化的变更）
+            restore_map: dict[str, FileChange] = {}
 
-            logger.info("[ShadowGit] 恢复到 checkpoint %s", commit_hash[:8])
+            for d in meta[target_idx + 1 :]:
+                changes = self._load_changes(d["commit_hash"])
+                for path, change in changes.items():
+                    if path not in restore_map:
+                        restore_map[path] = change
+
+            # 加入当前 tracker 中的变更（最新一轮，尚未持久化）
+            current_changes = self._tracker.end_turn()
+            for path, change in current_changes.items():
+                if path not in restore_map:
+                    restore_map[path] = change
+
+            # 执行恢复
+            failed: list[str] = []
+            for path, change in restore_map.items():
+                try:
+                    p = Path(path)
+                    if change.change_type == "created":
+                        # 新建的文件：删除
+                        if p.exists() and p.is_file():
+                            p.unlink()
+                            logger.debug("[FileCheckpoint] 删除文件: %s", path)
+                    elif (
+                        change.change_type == "modified"
+                        and change.original_content is not None
+                    ):
+                        # 修改的文件：写回原始内容
+                        p.parent.mkdir(parents=True, exist_ok=True)
+                        p.write_text(change.original_content, encoding="utf-8")
+                        logger.debug("[FileCheckpoint] 恢复文件: %s", path)
+                except Exception:
+                    logger.warning(
+                        "[FileCheckpoint] 恢复文件失败: %s", path, exc_info=True
+                    )
+                    failed.append(path)
+
+            if failed:
+                logger.error(
+                    "[FileCheckpoint] %d 个文件恢复失败: %s", len(failed), failed
+                )
+                return False
+
+            # 截断 meta 到目标 checkpoint
+            meta = meta[: target_idx + 1]
+            self._save_meta(meta)
+
+            # 清理多余的 changes 目录
+            self._cleanup_orphan_changes(meta)
+
+            logger.info("[FileCheckpoint] 恢复到 checkpoint %s", commit_hash[:8])
             return True
 
-        except _GIT_FS_ERRORS:
-            logger.error("[ShadowGit] 恢复 checkpoint 失败", exc_info=True)
+        except (OSError, json.JSONDecodeError, KeyError, ValueError) as exc:
+            logger.error(
+                "[FileCheckpoint] 恢复 checkpoint 失败: %s", exc, exc_info=True
+            )
             return False
+
+    # ── Changes 持久化 ──
+
+    def _save_changes(self, checkpoint_id: str, changes: dict[str, FileChange]) -> None:
+        """将一轮的文件变更保存到磁盘。"""
+        cp_dir = self._changes_dir / checkpoint_id
+        files_dir = cp_dir / "files"
+        files_dir.mkdir(parents=True, exist_ok=True)
+
+        manifest = []
+        for path, change in changes.items():
+            safe_name = _safe_filename(path)
+            manifest.append(
+                {
+                    "path": path,
+                    "change_type": change.change_type,
+                    "safe_name": safe_name,
+                }
+            )
+            if change.change_type == "modified" and change.original_content is not None:
+                (files_dir / safe_name).write_text(
+                    change.original_content, encoding="utf-8"
+                )
+
+        self._atomic_write_json(cp_dir / "manifest.json", manifest)
+
+    def _load_changes(self, checkpoint_id: str) -> dict[str, FileChange]:
+        """从磁盘加载一轮的文件变更。"""
+        cp_dir = self._changes_dir / checkpoint_id
+        manifest_path = cp_dir / "manifest.json"
+        if not manifest_path.exists():
+            return {}
+
+        try:
+            manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
+        except (json.JSONDecodeError, OSError):
+            logger.warning("[FileCheckpoint] manifest.json 损坏: %s", checkpoint_id[:8])
+            return {}
+
+        changes: dict[str, FileChange] = {}
+        files_dir = cp_dir / "files"
+        for entry in manifest:
+            path = entry["path"]
+            change_type = entry["change_type"]
+            original_content = None
+            if change_type == "modified":
+                safe_name = entry.get("safe_name", _safe_filename(path))
+                content_path = files_dir / safe_name
+                if content_path.exists():
+                    try:
+                        original_content = content_path.read_text(encoding="utf-8")
+                    except (OSError, UnicodeDecodeError):
+                        logger.warning("[FileCheckpoint] 无法读取原始内容: %s", path)
+                else:
+                    logger.warning(
+                        "[FileCheckpoint] 备份文件缺失，恢复时将跳过: %s (checkpoint=%s)",
+                        path,
+                        checkpoint_id[:8],
+                    )
+            changes[path] = FileChange(
+                path=path,
+                change_type=change_type,
+                original_content=original_content,
+            )
+        return changes
+
+    def _delete_changes(self, checkpoint_id: str) -> None:
+        """删除指定 checkpoint 的 changes 目录。"""
+        cp_dir = self._changes_dir / checkpoint_id
+        if cp_dir.exists():
+            try:
+                shutil.rmtree(cp_dir)
+            except OSError:
+                logger.warning(
+                    "[FileCheckpoint] 无法清理 changes 目录: %s",
+                    checkpoint_id[:8],
+                    exc_info=True,
+                )
+
+    def _cleanup_orphan_changes(self, meta: list[dict]) -> None:
+        """清理不在 meta 中的 changes 目录。"""
+        if not self._changes_dir.exists():
+            return
+        valid_ids = {d["commit_hash"] for d in meta}
+        for child in self._changes_dir.iterdir():
+            if child.is_dir() and child.name not in valid_ids:
+                try:
+                    shutil.rmtree(child)
+                except OSError:
+                    logger.warning(
+                        "[FileCheckpoint] 无法清理孤立 changes 目录: %s",
+                        child.name[:8],
+                        exc_info=True,
+                    )
+
+    # ── Diff 统计 ──
+
+    def _diff_stat_from_changes(self, checkpoint_id: str) -> tuple[int, int, int]:
+        """从已保存的 changes 目录计算 diff 统计。"""
+        changes = self._load_changes(checkpoint_id)
+        if not changes:
+            return 0, 0, 0
+        return self._compute_diff_stat(changes)
+
+    def _diff_stat_current(self) -> tuple[int, int, int]:
+        """从当前 tracker 内存中的变更计算 diff 统计。
+
+        不消耗 tracker 状态（只读取，不 end_turn）。
+        """
+        changes = self._tracker.peek_changes()
+        if not changes:
+            return 0, 0, 0
+        return self._compute_diff_stat(changes)
+
+    @staticmethod
+    def _compute_diff_stat(changes: dict[str, FileChange]) -> tuple[int, int, int]:
+        """计算变更的 diff 统计（文件数、插入行数、删除行数）。
+
+        对比原始内容与变更后内容（从下一个 checkpoint 的原始内容推断，
+        但由于我们可能没有下一个 checkpoint 的数据，简化为统计 manifest 条目数
+        和原始内容的行数变化）。
+        """
+        files = len(changes)
+        insertions = 0
+        deletions = 0
+        for change in changes.values():
+            if change.change_type == "created":
+                # 新建文件：当前文件内容全部算作插入
+                p = Path(change.path)
+                if p.exists():
+                    try:
+                        content = p.read_text(encoding="utf-8")
+                        insertions += len(content.splitlines())
+                    except (OSError, UnicodeDecodeError):
+                        logger.debug(
+                            "[FileCheckpoint] 无法读取文件计算 diff: %s",
+                            change.path,
+                        )
+            elif (
+                change.change_type == "modified" and change.original_content is not None
+            ):
+                # 修改文件：对比原始内容和当前内容
+                p = Path(change.path)
+                if p.exists():
+                    try:
+                        current = p.read_text(encoding="utf-8")
+                        ins, dels = _line_diff_stat(change.original_content, current)
+                        insertions += ins
+                        deletions += dels
+                    except (OSError, UnicodeDecodeError):
+                        logger.debug(
+                            "[FileCheckpoint] 无法读取文件计算 diff: %s",
+                            change.path,
+                        )
+        return files, insertions, deletions
 
     # ── Meta 文件管理 ──
 
@@ -468,26 +486,40 @@ class ShadowGitManager:
         try:
             return json.loads(self._meta_path.read_text(encoding="utf-8"))
         except (json.JSONDecodeError, UnicodeDecodeError, OSError):
-            logger.error("[ShadowGit] meta.json 损坏，已备份后重置", exc_info=True)
-            # 备份损坏文件，防止数据彻底丢失
+            logger.error("[FileCheckpoint] meta.json 损坏，已备份后重置", exc_info=True)
             try:
                 backup = self._meta_path.with_suffix(".json.bak")
                 self._meta_path.rename(backup)
             except OSError:
-                pass
+                logger.error(
+                    "[FileCheckpoint] 无法备份损坏的 meta.json，尝试删除",
+                    exc_info=True,
+                )
+                try:
+                    self._meta_path.unlink()
+                except OSError:
+                    logger.error(
+                        "[FileCheckpoint] 无法删除损坏的 meta.json", exc_info=True
+                    )
             return []
 
     def _save_meta(self, meta: list[dict]) -> None:
-        """原子写入 meta.json（先写临时文件再 rename，防止 crash 导致损坏）"""
+        """原子写入 meta.json"""
+        self._store_dir.mkdir(parents=True, exist_ok=True)
+        self._atomic_write_json(self._meta_path, meta)
+
+    def _atomic_write_json(self, path: Path, data: object) -> None:
+        """原子写入 JSON 文件（先写临时文件再 rename）"""
         import os
 
-        data = json.dumps(meta, ensure_ascii=False, indent=2)
-        tmp_fd, tmp_path = tempfile.mkstemp(dir=str(self._repo_dir), suffix=".meta.tmp")
+        content = json.dumps(data, ensure_ascii=False, indent=2)
+        path.parent.mkdir(parents=True, exist_ok=True)
+        tmp_fd, tmp_path = tempfile.mkstemp(dir=str(path.parent), suffix=".tmp")
         os.close(tmp_fd)
         tmp = Path(tmp_path)
         try:
-            tmp.write_text(data, encoding="utf-8")
-            tmp.replace(self._meta_path)
+            tmp.write_text(content, encoding="utf-8")
+            tmp.replace(path)
         except BaseException:
             tmp.unlink(missing_ok=True)
             raise
@@ -513,3 +545,26 @@ class ShadowGitManager:
             langgraph_checkpoint_id=d["langgraph_checkpoint_id"],
             langgraph_parent_checkpoint_id=parent,
         )
+
+
+def _line_diff_stat(old: str, new: str) -> tuple[int, int]:
+    """计算两段文本之间的行级 diff 统计。
+
+    Returns:
+        (insertions, deletions)
+    """
+    old_lines = old.splitlines(keepends=True)
+    new_lines = new.splitlines(keepends=True)
+    insertions = 0
+    deletions = 0
+    for tag, i1, i2, j1, j2 in difflib.SequenceMatcher(
+        None, old_lines, new_lines
+    ).get_opcodes():
+        if tag == "replace":
+            deletions += i2 - i1
+            insertions += j2 - j1
+        elif tag == "delete":
+            deletions += i2 - i1
+        elif tag == "insert":
+            insertions += j2 - j1
+    return insertions, deletions

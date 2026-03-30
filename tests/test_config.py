@@ -74,11 +74,15 @@ prompt
     assert result is None
 
 
-def test_load_agents_from_directory(tmp_path):
+def test_load_agents_from_directory(tmp_path, monkeypatch):
     for name in ["alpha", "beta"]:
         (tmp_path / f"{name}.md").write_text(
             f"---\nname: {name}\ndescription: {name} desc\n---\nprompt for {name}"
         )
+    # mock 掉风格内置 agents，只测试用户目录加载
+    empty_dir = tmp_path / "_empty_style"
+    empty_dir.mkdir()
+    monkeypatch.setattr("lumi.styles.get_style_agents_dir", lambda _: empty_dir)
     agents = load_agents(directory=str(tmp_path))
     assert len(agents) == 2
     names = {a.name for a in agents}

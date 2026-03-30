@@ -105,9 +105,11 @@ def _build_expanded(todos: list[dict]) -> Text:
 class TodosBar(Static):
     """可折叠的任务列表面板。
 
-    默认收起显示一行摘要，点击切换展开/收起。
+    默认收起显示一行摘要，点击或按 Enter 切换展开/收起。
     run 结束时若全部完成则由 app._finish_run 清除。
     """
+
+    can_focus = True
 
     DEFAULT_CSS = """
     TodosBar {
@@ -120,6 +122,9 @@ class TodosBar(Static):
     }
     TodosBar.-visible {
         display: block;
+    }
+    TodosBar:focus {
+        text-style: reverse;
     }
     """
 

@@ -476,6 +476,8 @@ class LocalShellSession:
                     process.kill()
                 except ProcessLookupError:
                     pass
+                # 清理 transport 防止事件循环关闭时 __del__ 报错
+                await self._close_process_transport(process)
                 self._process = None
 
             stdout = "\n".join(output_lines)
@@ -488,17 +490,31 @@ class LocalShellSession:
 
     async def close(self) -> None:
         """关闭 shell 会话"""
-        if self._process is not None and self._process.returncode is None:
+        proc = self._process
+        if proc is not None and proc.returncode is None:
             try:
-                self._process.stdin.write(b"exit\n")
-                await self._process.stdin.drain()
+                proc.stdin.write(b"exit\n")
+                await proc.stdin.drain()
                 try:
-                    await asyncio.wait_for(self._process.wait(), timeout=5.0)
+                    await asyncio.wait_for(proc.wait(), timeout=5.0)
                 except asyncio.TimeoutError:
-                    self._process.kill()
+                    proc.kill()
+                    await proc.wait()
             except (ProcessLookupError, BrokenPipeError, OSError):
                 pass
-            self._process = None
+        if proc is not None:
+            await self._close_process_transport(proc)
+        self._process = None
+
+    @staticmethod
+    async def _close_process_transport(proc: asyncio.subprocess.Process) -> None:
+        """显式关闭子进程 transport，避免事件循环关闭时
+        BaseSubprocessTransport.__del__ 触发 RuntimeError('Event loop is closed')。
+        """
+        transport = getattr(proc, "_transport", None)
+        if transport is not None and not transport.is_closing():
+            transport.close()
+        await asyncio.sleep(0)
 
 
 class SessionManager:

@@ -17,7 +17,8 @@ from langgraph.types import Command
 from lumi.agents.core.graph import LumiAgent, create_agent
 from lumi.agents.core.node import APPROVAL_BYPASS_TOOLS
 from lumi.agents.core.scheme import LumiAgentContext
-from lumi.agents.tools.checkpoint import CheckpointInfo, ShadowGitManager
+from lumi.agents.tools.checkpoint import CheckpointInfo, FileCheckpointManager
+from lumi.agents.tools.file_tracker import FileChangeTracker
 from lumi.agents.tools.providers.mcp import get_mcp_session_manager
 from lumi.agents.tools.session import get_session_manager
 from lumi.utils.logger import logger
@@ -77,7 +78,8 @@ class AgentBridge:
         self.model_name: str = ""
         # 活跃的 agent 工具 run_id 集合，跨 _stream 调用保持追踪（审批恢复场景）
         self._active_agent_runs: set[str] = set()
-        self._shadow: ShadowGitManager | None = None
+        self._shadow: FileCheckpointManager | None = None
+        self._tracker: FileChangeTracker | None = None
 
     async def initialize(self) -> None:
         """初始化 Agent"""
@@ -121,9 +123,11 @@ class AgentBridge:
             metadata={"workspace_dir": get_workspace_dir()},
             recursion_limit=recursion_limit,
         )
-        # 切换 shadow git manager
-        if self._shadow is not None:
-            self._shadow = ShadowGitManager(thread_id, self._shadow.project_dir)
+        # 切换 checkpoint manager（复用 tracker）
+        if self._shadow is not None and self._tracker is not None:
+            self._shadow = FileCheckpointManager(
+                thread_id, self._shadow.project_dir, self._tracker
+            )
         logger.info("[AgentBridge] 切换到会话: %s", thread_id)
 
     async def stream_response(
@@ -189,123 +193,135 @@ class AgentBridge:
                 )
                 return
             graph = self._agent.graph
-            async for event in graph.astream_events(
-                input_data,
-                self._config,
-                context=self._context,
-            ):
-                kind = event.get("event", "")
-                run_id = event.get("run_id", "")
-                parent_ids = event.get("parent_ids", [])
 
-                # 判断当前事件是否属于子代理：
-                # 排除当前事件自身的 run_id，避免 agent 工具的
-                # on_tool_start 把自己误判为子代理事件
-                parent_id = ""
-                if self._active_agent_runs and parent_ids:
-                    candidates = self._active_agent_runs & (set(parent_ids) - {run_id})
-                    if candidates:
-                        parent_id = next(iter(candidates))
+            # 检测残留图状态（待执行节点但无中断），自动恢复
+            await self._recover_stale_state(graph)
 
-                # agent 工具开始时记录 run_id（放在匹配之后，
-                # 确保 agent 自身的 on_tool_start 不会自匹配）
-                if kind == "on_tool_start" and event.get("name") == "agent":
-                    self._active_agent_runs.add(run_id)
+            try:
+                async for event in graph.astream_events(
+                    input_data,
+                    self._config,
+                    context=self._context,
+                ):
+                    kind = event.get("event", "")
+                    run_id = event.get("run_id", "")
+                    parent_ids = event.get("parent_ids", [])
 
-                # agent 工具结束时移除 run_id，避免残留影响后续匹配
-                if kind == "on_tool_end" and event.get("name") == "agent":
-                    self._active_agent_runs.discard(run_id)
+                    # 判断当前事件是否属于子代理：
+                    # 排除当前事件自身的 run_id，避免 agent 工具的
+                    # on_tool_start 把自己误判为子代理事件
+                    parent_id = ""
+                    if self._active_agent_runs and parent_ids:
+                        candidates = self._active_agent_runs & (
+                            set(parent_ids) - {run_id}
+                        )
+                        if candidates:
+                            parent_id = next(iter(candidates))
 
-                if kind == "on_chat_model_start":
-                    yield BridgeEvent(
-                        kind=EventKind.MODEL_START,
-                        parent_run_id=parent_id,
-                    )
+                    # agent 工具开始时记录 run_id（放在匹配之后，
+                    # 确保 agent 自身的 on_tool_start 不会自匹配）
+                    if kind == "on_tool_start" and event.get("name") == "agent":
+                        self._active_agent_runs.add(run_id)
 
-                elif kind == "on_chat_model_stream":
-                    chunk = event.get("data", {}).get("chunk")
-                    if chunk:
-                        usage = self._extract_usage(chunk)
-                        text = self._extract_text_from_chunk(chunk)
-                        if text:
-                            yield BridgeEvent(
-                                kind=EventKind.STREAM_TOKEN,
-                                text=text,
-                                usage_metadata=usage,
-                                parent_run_id=parent_id,
-                            )
-                        elif self._has_tool_call_chunk(chunk):
-                            yield BridgeEvent(
-                                kind=EventKind.TOOL_CALL_CHUNK,
-                                usage_metadata=usage,
-                                parent_run_id=parent_id,
-                            )
+                    # agent 工具结束时移除 run_id，避免残留影响后续匹配
+                    if kind == "on_tool_end" and event.get("name") == "agent":
+                        self._active_agent_runs.discard(run_id)
 
-                elif kind == "on_chat_model_end":
-                    output = event.get("data", {}).get("output")
-                    usage = self._extract_usage(output) if output else None
-                    yield BridgeEvent(
-                        kind=EventKind.MODEL_END,
-                        usage_metadata=usage,
-                        parent_run_id=parent_id,
-                    )
+                    if kind == "on_chat_model_start":
+                        yield BridgeEvent(
+                            kind=EventKind.MODEL_START,
+                            parent_run_id=parent_id,
+                        )
 
-                elif kind == "on_tool_start":
-                    name = event.get("name", "unknown")
-                    data = event.get("data", {})
-                    args = data.get("input", {})
-                    if isinstance(args, dict):
-                        tool_call_id = args.get("tool_call_id", "")
-                        args = {
-                            k: v
-                            for k, v in args.items()
-                            if k not in _TOOL_INTERNAL_KEYS
-                        }
-                    else:
-                        tool_call_id = ""
-                        args = {}
-                    yield BridgeEvent(
-                        kind=EventKind.TOOL_START,
-                        name=name,
-                        args=args,
-                        tool_call_id=tool_call_id,
-                        parent_run_id=parent_id,
-                        run_id=run_id if name == "agent" else "",
-                    )
+                    elif kind == "on_chat_model_stream":
+                        chunk = event.get("data", {}).get("chunk")
+                        if chunk:
+                            usage = self._extract_usage(chunk)
+                            text = self._extract_text_from_chunk(chunk)
+                            if text:
+                                yield BridgeEvent(
+                                    kind=EventKind.STREAM_TOKEN,
+                                    text=text,
+                                    usage_metadata=usage,
+                                    parent_run_id=parent_id,
+                                )
+                            elif self._has_tool_call_chunk(chunk):
+                                yield BridgeEvent(
+                                    kind=EventKind.TOOL_CALL_CHUNK,
+                                    usage_metadata=usage,
+                                    parent_run_id=parent_id,
+                                )
 
-                elif kind == "on_tool_end":
-                    name = event.get("name", "unknown")
-                    data = event.get("data", {})
-                    output = data.get("output", "")
-                    if isinstance(output, Command):
-                        msgs = (output.update or {}).get("messages", [])
-                        if msgs and hasattr(msgs[0], "content"):
-                            output = msgs[0].content
+                    elif kind == "on_chat_model_end":
+                        output = event.get("data", {}).get("output")
+                        usage = self._extract_usage(output) if output else None
+                        yield BridgeEvent(
+                            kind=EventKind.MODEL_END,
+                            usage_metadata=usage,
+                            parent_run_id=parent_id,
+                        )
+
+                    elif kind == "on_tool_start":
+                        name = event.get("name", "unknown")
+                        data = event.get("data", {})
+                        args = data.get("input", {})
+                        if isinstance(args, dict):
+                            tool_call_id = args.get("tool_call_id", "")
+                            args = {
+                                k: v
+                                for k, v in args.items()
+                                if k not in _TOOL_INTERNAL_KEYS
+                            }
                         else:
-                            output = ""
-                    elif hasattr(output, "content"):
-                        output = output.content
-                    tool_call_id = ""
-                    inp = data.get("input", {})
-                    if isinstance(inp, dict):
-                        tool_call_id = inp.get("tool_call_id", "")
+                            tool_call_id = ""
+                            args = {}
+                        yield BridgeEvent(
+                            kind=EventKind.TOOL_START,
+                            name=name,
+                            args=args,
+                            tool_call_id=tool_call_id,
+                            parent_run_id=parent_id,
+                            run_id=run_id if name == "agent" else "",
+                        )
 
-                    # ask 等 BYPASS 工具使用 interrupt() 中断，LangGraph 会在
-                    # 中断时提前发出 on_tool_end（output 为空），此时不应标记
-                    # ToolBlock 为 Done，否则后续 ASK 事件找不到 block 来挂载对话框。
-                    # 真正的 TOOL_END 在 resume 后才会带有实际 output。
-                    resolved_output = str(output) if output else ""
-                    if name in APPROVAL_BYPASS_TOOLS and not resolved_output:
-                        continue
+                    elif kind == "on_tool_end":
+                        name = event.get("name", "unknown")
+                        data = event.get("data", {})
+                        output = data.get("output", "")
+                        if isinstance(output, Command):
+                            msgs = (output.update or {}).get("messages", [])
+                            if msgs and hasattr(msgs[0], "content"):
+                                output = msgs[0].content
+                            else:
+                                output = ""
+                        elif hasattr(output, "content"):
+                            output = output.content
+                        tool_call_id = ""
+                        inp = data.get("input", {})
+                        if isinstance(inp, dict):
+                            tool_call_id = inp.get("tool_call_id", "")
 
-                    yield BridgeEvent(
-                        kind=EventKind.TOOL_END,
-                        name=name,
-                        output=resolved_output,
-                        tool_call_id=tool_call_id,
-                        parent_run_id=parent_id,
-                        run_id=run_id if name == "agent" else "",
-                    )
+                        # ask 等 BYPASS 工具使用 interrupt() 中断，LangGraph 会在
+                        # 中断时提前发出 on_tool_end（output 为空），此时不应标记
+                        # ToolBlock 为 Done，否则后续 ASK 事件找不到 block 来挂载对话框。
+                        # 真正的 TOOL_END 在 resume 后才会带有实际 output。
+                        resolved_output = str(output) if output else ""
+                        if name in APPROVAL_BYPASS_TOOLS and not resolved_output:
+                            continue
+
+                        yield BridgeEvent(
+                            kind=EventKind.TOOL_END,
+                            name=name,
+                            output=resolved_output,
+                            tool_call_id=tool_call_id,
+                            parent_run_id=parent_id,
+                            run_id=run_id if name == "agent" else "",
+                        )
+
+            finally:
+                # 清除 rewind 或恢复时设置的 checkpoint_id，
+                # 确保后续 aget_state 获取最新 checkpoint
+                self._config["configurable"].pop("checkpoint_id", None)
 
             # 流结束后检测中断
             yield await self._check_interrupts()
@@ -400,6 +416,57 @@ class AgentBridge:
             error=f"执行异常：图停滞在 {state.next}，可能是上一轮请求失败导致状态残留，请重试",
         )
 
+    async def _recover_stale_state(self, graph: "CompiledStateGraph") -> None:
+        """检测并恢复残留的图状态。
+
+        当上一轮执行异常或 rewind 后，checkpoint 可能残留待执行节点但无中断，
+        导致 astream_events 无法正常启动新的执行。此方法回退到最近的干净
+        checkpoint（state.next 为空），使下次 astream_events 能正常工作。
+        """
+        try:
+            state = await graph.aget_state(self._config)
+        except Exception:
+            logger.warning(
+                "[AgentBridge] 无法获取图状态进行残留检测，跳过恢复",
+                exc_info=True,
+            )
+            return
+
+        if not state.next:
+            return
+
+        has_interrupts = any(intr for task in state.tasks for intr in task.interrupts)
+        if has_interrupts:
+            return
+
+        logger.warning(
+            "[AgentBridge] 检测到残留图状态 next=%s，尝试恢复",
+            state.next,
+        )
+        clean_cp_id = await self._find_clean_checkpoint_id(graph, state)
+        if clean_cp_id:
+            self._config["configurable"]["checkpoint_id"] = clean_cp_id
+            logger.info("[AgentBridge] 已回退到干净的 checkpoint")
+        else:
+            # 找不到干净的父 checkpoint，移除 checkpoint_id 让 LangGraph 重新开始
+            self._config["configurable"].pop("checkpoint_id", None)
+            logger.warning("[AgentBridge] 未找到干净 checkpoint，将从头开始")
+
+    async def _find_clean_checkpoint_id(
+        self, graph: "CompiledStateGraph", state
+    ) -> str | None:
+        """沿 parent_config 链回溯，找到 state.next 为空的 checkpoint_id。"""
+        _MAX_WALK = 10
+        current = state
+        for _ in range(_MAX_WALK):
+            parent_config = current.parent_config
+            if not parent_config or "configurable" not in parent_config:
+                return None
+            current = await graph.aget_state(parent_config)
+            if not current.next:
+                return parent_config["configurable"].get("checkpoint_id")
+        return None
+
     @classmethod
     def _extract_last_ai_usage(cls, state) -> dict | None:
         """从 graph state 的最后一条 AI message 提取 usage_metadata。
@@ -427,19 +494,24 @@ class AgentBridge:
                         return item.get("text", "")
         return ""
 
-    # ── Shadow Git Checkpoint ──
+    # ── File-level Checkpoint ──
 
-    def init_shadow_git(self, project_dir: "Path") -> None:
-        """初始化 shadow git manager
+    def init_checkpoint(self, project_dir: "Path") -> None:
+        """初始化文件级 checkpoint manager
 
         Args:
             project_dir: 项目根目录路径
         """
         from pathlib import Path as _Path
 
+        from lumi.agents.tools.providers.filesystem import _get_backend
+
         tid = self.current_thread_id
         if tid:
-            self._shadow = ShadowGitManager(tid, _Path(project_dir))
+            self._tracker = FileChangeTracker()
+            self._shadow = FileCheckpointManager(tid, _Path(project_dir), self._tracker)
+            # 将 tracker 注册到 filesystem backend
+            _get_backend().set_tracker(self._tracker)
 
     async def _create_checkpoint_before_turn(self, content: str | list) -> None:
         """在每轮 agent 执行前创建 checkpoint。
@@ -475,9 +547,7 @@ class AgentBridge:
                         exc_info=True,
                     )
 
-            # 在线程池中执行 git 操作，避免阻塞事件循环
-            import asyncio
-
+            # 在线程池中执行文件操作，避免阻塞事件循环
             await asyncio.to_thread(
                 self._shadow.create_checkpoint,
                 label,
@@ -505,11 +575,9 @@ class AgentBridge:
             (success, error_message) 元组
         """
         if self._shadow is None:
-            return False, "Shadow Git 未初始化"
+            return False, "Checkpoint 未初始化"
 
         try:
-            import asyncio
-
             # 1. 恢复文件（在线程池中执行）
             file_ok = await asyncio.to_thread(
                 self._shadow.restore_checkpoint, checkpoint.commit_hash
@@ -518,28 +586,14 @@ class AgentBridge:
                 return False, "文件恢复失败"
 
             # 2. 回退 LangGraph 会话
-            if self._agent and self._config and checkpoint.langgraph_checkpoint_id:
-                try:
-                    graph = self._agent.graph
-                    # 构建包含目标 checkpoint_id 的 config，传给 aupdate_state 进行 fork
-                    target_config = {
-                        "configurable": {
-                            "thread_id": self.current_thread_id,
-                            "checkpoint_ns": "",
-                            "checkpoint_id": checkpoint.langgraph_checkpoint_id,
-                        }
-                    }
-                    # update_state 从目标 checkpoint fork，
-                    # 传空 values 不修改状态，as_node="__start__" 消除歧义
-                    fork_config = await graph.aupdate_state(
-                        target_config, values={}, as_node="__start__"
-                    )
-                    # 更新当前 config 以使用 fork 后的 checkpoint
-                    if fork_config and "configurable" in fork_config:
-                        self._config["configurable"].update(fork_config["configurable"])
-                except Exception:
-                    logger.error("[AgentBridge] LangGraph 会话回退失败", exc_info=True)
-                    return True, "文件已恢复，但 LangGraph 会话回退失败"
+            # 直接将 config 指向目标 checkpoint（它是图完成时捕获的，next 为空）。
+            # 下次 astream_events 调用会自然从该 checkpoint 分支出新的执行。
+            # 避免使用 aupdate_state(as_node="__start__") 创建 fork，
+            # 因为那会产生 next=('PreprocessMessages',) 的悬挂状态。
+            if self._config and checkpoint.langgraph_checkpoint_id:
+                self._config["configurable"]["checkpoint_id"] = (
+                    checkpoint.langgraph_checkpoint_id
+                )
 
             return True, ""
 

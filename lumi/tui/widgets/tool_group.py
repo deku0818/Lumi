@@ -20,7 +20,7 @@ from rich.text import Text
 from textual.app import ComposeResult
 from textual.containers import Vertical
 from textual.css.query import NoMatches
-from textual.events import Click
+from textual.events import Click, Key
 from textual.widgets import Static
 
 from lumi.tui.renderers import get as get_renderer
@@ -148,7 +148,9 @@ def _build_summary_text(entries: list[_BlockEntry], *, is_running: bool) -> str:
 
 
 class _SummaryLine(Static):
-    """可点击的摘要行，点击时切换 ToolGroup 的展开/折叠状态。"""
+    """可点击/可聚焦的摘要行，点击或按 Enter/Space 时切换 ToolGroup 的展开/折叠状态。"""
+
+    can_focus = True
 
     DEFAULT_CSS = """
     _SummaryLine {
@@ -157,14 +159,26 @@ class _SummaryLine(Static):
         height: auto;
         width: 1fr;
     }
+    _SummaryLine:focus {
+        text-style: reverse;
+    }
     """
+
+    def _toggle_parent(self) -> None:
+        parent = self.parent
+        if isinstance(parent, ToolGroup):
+            parent.toggle_expanded()
 
     def on_click(self, event: Click) -> None:
         """点击摘要行时通知父 ToolGroup 切换展开状态。"""
         event.stop()
-        parent = self.parent
-        if isinstance(parent, ToolGroup):
-            parent.toggle_expanded()
+        self._toggle_parent()
+
+    def on_key(self, event: Key) -> None:
+        if event.key in ("enter", "space"):
+            event.stop()
+            event.prevent_default()
+            self._toggle_parent()
 
 
 class ToolGroup(Vertical):

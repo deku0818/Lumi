@@ -290,6 +290,12 @@ class LumiApp(App):
 
     async def _finish_mount(self) -> None:
         """应用主题、注入环境变量并初始化 Agent bridge。"""
+        import os
+
+        if os.environ.get("SSH_CONNECTION") or os.environ.get("SSH_TTY"):
+            logger.info(
+                "检测到 SSH 环境。如遇鼠标问题，请使用 --no-mouse 标志或设置 LUMI_NO_MOUSE=1"
+            )
         # 初始化 WidgetAssembler（ChatLog 已在 compose 中创建）
         self._assembler = WidgetAssembler(self.query_one(ChatLog))
         # 绑定 RunContext 到 RunStatusBar，使 spinner tick 可读取实时状态
@@ -310,8 +316,8 @@ class LumiApp(App):
             await chat_log.append_error("初始化失败:", str(e))
             return
 
-        # 初始化 Shadow Git Checkpoint
-        self._bridge.init_shadow_git(Path.cwd())
+        # 初始化文件级 Checkpoint
+        self._bridge.init_checkpoint(Path.cwd())
 
         # 配置 StatusLine（尝试从 OpenRouter 获取 context_length）
         from lumi.utils.model_info import fetch_model_info

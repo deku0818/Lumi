@@ -1,5 +1,29 @@
 # Changelog
 
+## [0.0.9] - 2026-03-30
+
+### Changed
+- Checkpoint 系统从 Shadow Git 重构为文件级快照：不再依赖 git，只追踪 edit/write 工具修改的文件，占用更少磁盘空间
+- 新增 `FileChangeTracker`（`lumi/agents/tools/file_tracker.py`）：拦截文件操作记录修改前原始内容
+- 新增 `FileCheckpointManager` 替代 `ShadowGitManager`：基于目录结构保存变更清单和原始文件副本
+- `FileChangeTracker` 新增 `peek_changes()` 公共方法替代内部属性直接访问
+- Checkpoint hash 生成从 `id(object())` + SHA1 改为 `uuid4`，消除碰撞风险
+
+### Fixed
+- Checkpoint 三处顶层异常捕获从裸 `except Exception` 收窄为 `(OSError, json.JSONDecodeError, KeyError, ValueError)`
+- diff 统计计算中 4 处 `except Exception: pass` 收窄为 `(OSError, UnicodeDecodeError)` 并添加日志
+- `_recover_stale_state` 裸 `except Exception: return` 添加 `logger.warning` 日志
+- `restore_checkpoint` 部分文件恢复失败时正确返回 `False` 而非 `True`
+- `_load_meta` 备份失败时尝试删除损坏文件而非静默忽略
+- `_load_changes` 备份文件缺失时添加警告日志
+- `shutil.rmtree(ignore_errors=True)` 改为显式 `try/except OSError` 加日志
+- `record_pre_edit` 异常捕获收窄为 `(OSError, UnicodeDecodeError)`
+- Shell 会话关闭时显式清理子进程 transport，修复 pytest 中 `RuntimeError('Event loop is closed')` 警告
+- 用户提示中 "Shadow Git 未初始化" 更新为 "Checkpoint 未初始化"
+- 移除 `_unsafe_filename` 死代码、冗余 `asyncio` 导入、无用注释
+- 消除 `_compute_diff_stat` 与 `_compute_diff_stat_live` 的 ~30 行重复代码
+- `create_checkpoint` 中双重 `_load_meta()` 调用优化为单次
+
 ## [0.0.8] - 2026-03-30
 
 ### Added

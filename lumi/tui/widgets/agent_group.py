@@ -14,7 +14,7 @@ from rich.text import Text
 from textual.app import ComposeResult
 from textual.containers import Vertical
 from textual.css.query import NoMatches
-from textual.events import Click
+from textual.events import Click, Key
 from textual.timer import Timer
 from textual.widgets import Static
 
@@ -71,7 +71,9 @@ class _HeaderLine(Static):
 
 
 class _AgentLine(Static):
-    """单个子 agent 的摘要行，完成后可点击展开 prompt + result。"""
+    """单个子 agent 的摘要行，完成后可点击或按键展开 prompt + result。"""
+
+    can_focus = True
 
     DEFAULT_CSS = """
     _AgentLine {
@@ -80,21 +82,31 @@ class _AgentLine(Static):
         padding: 0 0 0 2;
         margin: 0;
     }
+    _AgentLine:focus {
+        text-style: reverse;
+    }
     """
 
-    def on_click(self, event: Click) -> None:
-        """点击时通知 AgentGroup 切换该 agent 的详情展开状态。"""
-        event.stop()
-        group = self.ancestors_with_self
-        for ancestor in group:
+    def _toggle(self) -> None:
+        for ancestor in self.ancestors_with_self:
             if isinstance(ancestor, AgentGroup):
-                # 从 widget id 提取 run_id
                 wid = self.id or ""
                 prefix = "ag-line-"
                 if wid.startswith(prefix):
                     run_id = wid[len(prefix) :]
                     ancestor.toggle_agent_detail(run_id)
                 break
+
+    def on_click(self, event: Click) -> None:
+        """点击时通知 AgentGroup 切换该 agent 的详情展开状态。"""
+        event.stop()
+        self._toggle()
+
+    def on_key(self, event: Key) -> None:
+        if event.key in ("enter", "space"):
+            event.stop()
+            event.prevent_default()
+            self._toggle()
 
 
 class _AgentDetail(Vertical):
