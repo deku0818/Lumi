@@ -1,5 +1,19 @@
 # Changelog
 
+## [0.0.10] - 2026-03-31
+
+### Added
+- `LumiAgent.aprune_checkpoints_after()`：支持按 checkpoint_id 清理指定位置之后的 LangGraph checkpoint 数据（SQLite / Postgres / InMemory）
+- ToolApproval 审批卡片内容区域支持滚动（`shift+↑↓` / `pgup/pgdn`），解决长内容审批时无法查看完整参数的问题
+- PlanApproval 计划审批同样支持内容区域滚动
+
+### Fixed
+- Checkpoint 回退（rewind）现在正确恢复到目标轮次执行前的状态：收集目标及之后的变更进行恢复，meta 截断到目标之前
+- Rewind 后清理目标之后的所有 LangGraph checkpoint，避免旧分支数据残留
+- `_create_checkpoint_before_turn` 检测 stale checkpoint 时区分有 interrupt 和无 interrupt 的情况，仅对无 interrupt 的 stale 状态沿 parent 链回退到 clean checkpoint
+- Rewind 回退到第一条消息之前时移除 `checkpoint_id` 并删除整个 thread，等效于空会话
+- `_reset_run_state` 中清理 `_pending_system_commands`，防止残留命令影响下一轮
+
 ## [0.0.9] - 2026-03-30
 
 ### Changed

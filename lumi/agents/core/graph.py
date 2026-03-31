@@ -100,6 +100,80 @@ class LumiAgent(BaseGraph):
         else:
             raise RuntimeError("checkpointer 不支持 adelete_thread 方法")
 
+    async def aprune_checkpoints_after(self, thread_id: str, checkpoint_id: str) -> int:
+        """删除指定 checkpoint_id 之后的所有 checkpoint（用于 rewind 清理旧分支）。
+
+        LangGraph checkpoint_id 使用 UUID6（时间有序），字符串比较可正确判断先后。
+
+        Args:
+            thread_id: 线程 ID
+            checkpoint_id: 保留此 checkpoint 及之前的所有记录，删除之后的
+
+        Returns:
+            删除的 checkpoint 数量
+        """
+        if self.checkpointer is None:
+            logger.warning(
+                "[LumiAgent] aprune_checkpoints_after: checkpointer 未配置，跳过清理"
+            )
+            return 0
+
+        cp = self.checkpointer
+        deleted = 0
+
+        if isinstance(cp, AsyncSqliteSaver):
+            async with cp.lock, cp.conn.cursor() as cur:
+                await cur.execute(
+                    "DELETE FROM checkpoints"
+                    " WHERE thread_id = ? AND checkpoint_ns = '' AND checkpoint_id > ?",
+                    (thread_id, checkpoint_id),
+                )
+                # aiosqlite 的 rowcount 对 DELETE 可能返回 -1，改用 changes()
+                await cur.execute("SELECT changes()")
+                row = await cur.fetchone()
+                deleted = row[0] if row else 0
+                await cur.execute(
+                    "DELETE FROM writes"
+                    " WHERE thread_id = ? AND checkpoint_ns = '' AND checkpoint_id > ?",
+                    (thread_id, checkpoint_id),
+                )
+                await cp.conn.commit()
+        elif isinstance(cp, AsyncPostgresSaver):
+            async with cp._cursor(pipeline=True) as cur:
+                await cur.execute(
+                    "DELETE FROM checkpoints"
+                    " WHERE thread_id = %s AND checkpoint_ns = '' AND checkpoint_id > %s",
+                    (thread_id, checkpoint_id),
+                )
+                deleted = cur.rowcount if cur.rowcount >= 0 else 0
+                await cur.execute(
+                    "DELETE FROM checkpoint_writes"
+                    " WHERE thread_id = %s AND checkpoint_ns = '' AND checkpoint_id > %s",
+                    (thread_id, checkpoint_id),
+                )
+                # checkpoint_blobs 以 (thread_id, channel, version) 为键，
+                # 无法按 checkpoint_id 精确清理；孤立 blob 无害，
+                # 在 adelete_thread 时会一并删除。
+        elif isinstance(cp, InMemorySaver):
+            # 仅清理根 namespace（""）
+            ns_dict = cp.storage.get(thread_id, {}).get("", {})
+            to_remove = [cid for cid in ns_dict if cid > checkpoint_id]
+            deleted = len(to_remove)
+            for cid in to_remove:
+                del ns_dict[cid]
+            for key in list(cp.writes.keys()):
+                if key[0] == thread_id and key[1] == "" and key[2] > checkpoint_id:
+                    del cp.writes[key]
+        else:
+            logger.error(
+                "[LumiAgent] aprune_checkpoints_after: 不支持的 checkpointer 类型 %s，"
+                "旧 checkpoint 数据将不会被清理",
+                type(cp).__name__,
+            )
+            return -1
+
+        return deleted
+
     async def aclose(self) -> None:
         """关闭 checkpointer 连接，释放资源"""
         if self.checkpointer is None:

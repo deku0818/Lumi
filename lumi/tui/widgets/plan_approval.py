@@ -12,6 +12,7 @@ from pathlib import Path
 from rich.text import Text
 from textual.app import ComposeResult
 from textual.containers import Vertical
+from textual.css.query import NoMatches
 from textual.message import Message
 from textual.widgets import Markdown, Static
 
@@ -143,6 +144,21 @@ class PlanApproval(Vertical):
 
     def on_mount(self) -> None:
         self.focus()
+
+    def scroll_content(self, direction: str) -> None:
+        """滚动计划内容区域，由 app 级快捷键委派调用。"""
+        try:
+            content = self.query_one(".plan-content")
+        except NoMatches:
+            return
+        if direction == "up":
+            content.scroll_up(animate=False)
+        elif direction == "down":
+            content.scroll_down(animate=False)
+        elif direction == "page_up":
+            content.scroll_page_up(animate=False)
+        elif direction == "page_down":
+            content.scroll_page_down(animate=False)
 
     def on_key(self, event) -> None:
         if event.key == "up":

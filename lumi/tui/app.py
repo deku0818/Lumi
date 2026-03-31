@@ -284,6 +284,7 @@ class LumiApp(App):
         if self._assembler:
             self._assembler.reset()
         self._interrupted = False
+        self._pending_system_commands.clear()
         sl = self._query_safe(StatusLine)
         if sl:
             sl.refresh_display()
@@ -1241,11 +1242,17 @@ class LumiApp(App):
         self._run.task = asyncio.create_task(self._run_stream(hint, tool_mode="auto"))
 
     def action_scroll_chat(self, direction: str) -> None:
-        """滚动聊天日志区域。
+        """滚动聊天日志区域，审批组件激活时委派到其内容区域。
 
         Args:
             direction: 滚动方向 — "up" / "down" / "page_up" / "page_down"
         """
+        # 审批组件激活时，滚动其内容区域而非 ChatLog
+        approval = self._query_safe(ToolApproval) or self._query_safe(PlanApproval)
+        if approval is not None:
+            approval.scroll_content(direction)
+            return
+
         chat_log = self._query_safe(ChatLog)
         if chat_log is None:
             return

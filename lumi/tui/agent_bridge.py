@@ -467,6 +467,19 @@ class AgentBridge:
                 return parent_config["configurable"].get("checkpoint_id")
         return None
 
+    @staticmethod
+    def _extract_cp_ids(state) -> tuple[str, str]:
+        """从 state 中提取 checkpoint_id 和 parent checkpoint_id。"""
+        configurable = state.config.get("configurable", {})
+        cp_id = configurable.get("checkpoint_id", "")
+        parent_cp_id = ""
+        parent_config = state.parent_config
+        if parent_config:
+            parent_cp_id = parent_config.get("configurable", {}).get(
+                "checkpoint_id", ""
+            )
+        return cp_id, parent_cp_id
+
     @classmethod
     def _extract_last_ai_usage(cls, state) -> dict | None:
         """从 graph state 的最后一条 AI message 提取 usage_metadata。
@@ -517,7 +530,9 @@ class AgentBridge:
         """在每轮 agent 执行前创建 checkpoint。
 
         从 content 提取用户消息摘要作为 label，
-        从 LangGraph state 获取当前 checkpoint_id。
+        从 LangGraph state 获取当前 **clean** checkpoint_id。
+        若最新 checkpoint 处于 stale 状态（上一轮被中断，state.next 非空），
+        则沿 parent 链回退到 clean checkpoint，确保回滚时不包含中断轮次的消息。
         """
         if self._shadow is None:
             return
@@ -525,27 +540,40 @@ class AgentBridge:
         try:
             label = self._extract_label(content)
 
-            # 获取当前 LangGraph checkpoint_id
+            # 获取当前 LangGraph checkpoint_id（必须是 clean 状态）
             lg_cp_id = ""
             lg_parent_cp_id = ""
             if self._agent and self._config:
                 try:
-                    state = await self._agent.graph.aget_state(self._config)
-                    if state and state.config:
-                        configurable = state.config.get("configurable", {})
-                        lg_cp_id = configurable.get("checkpoint_id", "")
-                        # parent 是上一个 checkpoint
-                        parent_config = state.parent_config
-                        if parent_config:
-                            lg_parent_cp_id = parent_config.get("configurable", {}).get(
-                                "checkpoint_id", ""
-                            )
+                    graph = self._agent.graph
+                    state = await graph.aget_state(self._config)
                 except Exception:
                     logger.warning(
-                        "[AgentBridge] 获取 LangGraph checkpoint_id 失败，"
+                        "[AgentBridge] aget_state 失败，"
                         "checkpoint 将无法回退 LangGraph 会话",
                         exc_info=True,
                     )
+                    state = None
+
+                if state and state.config:
+                    # 非 stale 或有 interrupt 的 stale：直接使用当前 checkpoint
+                    has_interrupts = state.next and any(
+                        intr for task in state.tasks for intr in task.interrupts
+                    )
+                    if not state.next or has_interrupts:
+                        lg_cp_id, lg_parent_cp_id = self._extract_cp_ids(state)
+                    else:
+                        # stale 且无 interrupt：回退到 clean checkpoint
+                        clean_id = await self._find_clean_checkpoint_id(graph, state)
+                        if clean_id:
+                            lg_cp_id = clean_id
+                            # clean checkpoint 的 parent 即为其前一个 checkpoint
+                            lg_parent_cp_id = self._extract_cp_ids(state)[1]
+                        else:
+                            logger.warning(
+                                "[AgentBridge] 未找到 clean checkpoint，"
+                                "此轮 checkpoint 将无法回退 LangGraph 会话"
+                            )
 
             # 在线程池中执行文件操作，避免阻塞事件循环
             await asyncio.to_thread(
@@ -585,18 +613,46 @@ class AgentBridge:
             if not file_ok:
                 return False, "文件恢复失败"
 
-            # 2. 回退 LangGraph 会话
-            # 直接将 config 指向目标 checkpoint（它是图完成时捕获的，next 为空）。
-            # 下次 astream_events 调用会自然从该 checkpoint 分支出新的执行。
-            # 避免使用 aupdate_state(as_node="__start__") 创建 fork，
-            # 因为那会产生 next=('PreprocessMessages',) 的悬挂状态。
-            if self._config and checkpoint.langgraph_checkpoint_id:
-                self._config["configurable"]["checkpoint_id"] = (
-                    checkpoint.langgraph_checkpoint_id
-                )
+            # 2. 回退 LangGraph 会话 + 清理旧分支 checkpoints
+            if self._config:
+                thread_id = self._config["configurable"].get("thread_id", "")
+                lg_cp_id = checkpoint.langgraph_checkpoint_id
+
+                if lg_cp_id:
+                    # 指向目标 checkpoint，下次 astream_events 从此分支
+                    self._config["configurable"]["checkpoint_id"] = lg_cp_id
+                else:
+                    # 回滚到第一条消息之前：移除 checkpoint_id，等效于空会话
+                    self._config["configurable"].pop("checkpoint_id", None)
+
+                # 清理目标之后的所有 LangGraph checkpoints
+                if thread_id and self._agent:
+                    try:
+                        if lg_cp_id:
+                            deleted = await self._agent.aprune_checkpoints_after(
+                                thread_id, lg_cp_id
+                            )
+                        else:
+                            # 回到最初：删除整个 thread 的所有 checkpoints
+                            await self._agent.adelete_thread(thread_id)
+                            deleted = -1
+                        if deleted:
+                            logger.info(
+                                "[AgentBridge] rewind 清理了旧 checkpoint (deleted=%s)",
+                                deleted,
+                            )
+                    except asyncio.CancelledError:
+                        raise
+                    except Exception:
+                        logger.warning(
+                            "[AgentBridge] rewind checkpoint 清理失败，不影响回退",
+                            exc_info=True,
+                        )
 
             return True, ""
 
+        except asyncio.CancelledError:
+            raise
         except Exception as e:
             logger.error("[AgentBridge] rewind 失败", exc_info=True)
             return False, str(e)

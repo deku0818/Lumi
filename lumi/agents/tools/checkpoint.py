@@ -261,11 +261,13 @@ class FileCheckpointManager:
                 logger.error("[FileCheckpoint] 未找到 checkpoint: %s", commit_hash[:8])
                 return False
 
-            # 收集目标之后所有 checkpoint 的变更
-            # （包括当前 tracker 中尚未持久化的变更）
+            # 收集目标及之后所有 checkpoint 的变更
+            # 目标 checkpoint 自身的 changes 也需要恢复（它代表该轮的文件变更），
+            # 因为回滚到目标意味着回到"该轮执行前"的状态。
+            # 同时收集当前 tracker 中尚未持久化的变更。
             restore_map: dict[str, FileChange] = {}
 
-            for d in meta[target_idx + 1 :]:
+            for d in meta[target_idx:]:
                 changes = self._load_changes(d["commit_hash"])
                 for path, change in changes.items():
                     if path not in restore_map:
@@ -307,8 +309,8 @@ class FileCheckpointManager:
                 )
                 return False
 
-            # 截断 meta 到目标 checkpoint
-            meta = meta[: target_idx + 1]
+            # 截断 meta 到目标之前（排除目标本身，用户回滚后会重新发送创建新 checkpoint）
+            meta = meta[:target_idx]
             self._save_meta(meta)
 
             # 清理多余的 changes 目录

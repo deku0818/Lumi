@@ -10,7 +10,8 @@ import logging
 
 from rich.text import Text
 from textual.app import ComposeResult
-from textual.containers import Vertical
+from textual.containers import Vertical, VerticalScroll
+from textual.css.query import NoMatches
 from textual.message import Message
 from textual.widgets import Static
 
@@ -89,6 +90,14 @@ class ToolApproval(Vertical):
         padding: 0;
         height: auto;
     }
+
+    ToolApproval _ScrollableContent {
+        margin: 0;
+        padding: 0;
+        height: auto;
+        max-height: 20;
+        scrollbar-size: 1 1;
+    }
     """
 
     class Decided(Message):
@@ -120,63 +129,65 @@ class ToolApproval(Vertical):
             classes="approval-border",
         )
 
-        # 渲染警告信息
-        warnings = self._data.get("warnings", [])
-        for warning in warnings:
-            yield Static(
-                f"[{border}]  │[/]   [bold red]{escape_markup(warning)}[/]",
-                classes="approval-warning",
-            )
-
-        # 渲染工作区边界违规
-        boundary_violations = self._data.get("boundary_violations", [])
-        for violation in boundary_violations:
-            yield Static(
-                f"[{border}]  │[/]   [bold yellow]⚠ 路径超出工作区边界: {escape_markup(violation)}[/]",
-                classes="approval-warning",
-            )
-
-        # 空行
-        yield Static(f"[{border}]  │[/]", classes="approval-line")
-
-        # 工具列表
-        tool_calls = self._data.get("tool_calls", [])
-        for tc in tool_calls:
-            name = tc.get("name", "unknown")
-            args = tc.get("args", {})
-            if not isinstance(args, dict):
-                args = {}
-
-            renderer = get_renderer(name)
-            try:
-                title_text = renderer.render_title(name, args)
-            except Exception:
-                logger.warning(
-                    "[ToolApproval] render_title 失败，回退到默认: %s",
-                    name,
-                    exc_info=True,
+        # 可滚动内容区域（shift+↑↓ / pgup/pgdn 滚动）
+        with _ScrollableContent(id="tool-approval-content"):
+            # 渲染警告信息
+            warnings = self._data.get("warnings", [])
+            for warning in warnings:
+                yield Static(
+                    f"[{border}]  │[/]   [bold red]{escape_markup(warning)}[/]",
+                    classes="approval-warning",
                 )
-                title_text = _FALLBACK_RENDERER.render_title(name, args)
 
-            yield Static(
-                f"[{border}]  │[/]   [{accent} bold]● {escape_markup(title_text)}[/]",
-                classes="approval-line",
-            )
-
-            # 渲染工具参数内容
-            try:
-                args_widget = renderer.render_args(args, approval_mode=True)
-            except Exception:
-                logger.warning(
-                    "[ToolApproval] render_args 失败，回退到默认: %s",
-                    name,
-                    exc_info=True,
+            # 渲染工作区边界违规
+            boundary_violations = self._data.get("boundary_violations", [])
+            for violation in boundary_violations:
+                yield Static(
+                    f"[{border}]  │[/]   [bold yellow]⚠ 路径超出工作区边界: {escape_markup(violation)}[/]",
+                    classes="approval-warning",
                 )
-                args_widget = _FALLBACK_RENDERER.render_args(args)
-            yield _IndentedContent(args_widget)
 
-        # 空行 + 分隔线
-        yield Static(f"[{border}]  │[/]", classes="approval-line")
+            # 空行
+            yield Static(f"[{border}]  │[/]", classes="approval-line")
+
+            # 工具列表
+            tool_calls = self._data.get("tool_calls", [])
+            for tc in tool_calls:
+                name = tc.get("name", "unknown")
+                args = tc.get("args", {})
+                if not isinstance(args, dict):
+                    args = {}
+
+                renderer = get_renderer(name)
+                try:
+                    title_text = renderer.render_title(name, args)
+                except Exception:
+                    logger.warning(
+                        "[ToolApproval] render_title 失败，回退到默认: %s",
+                        name,
+                        exc_info=True,
+                    )
+                    title_text = _FALLBACK_RENDERER.render_title(name, args)
+
+                yield Static(
+                    f"[{border}]  │[/]   [{accent} bold]● {escape_markup(title_text)}[/]",
+                    classes="approval-line",
+                )
+
+                # 渲染工具参数内容
+                try:
+                    args_widget = renderer.render_args(args, approval_mode=True)
+                except Exception:
+                    logger.warning(
+                        "[ToolApproval] render_args 失败，回退到默认: %s",
+                        name,
+                        exc_info=True,
+                    )
+                    args_widget = _FALLBACK_RENDERER.render_args(args)
+                yield _IndentedContent(args_widget)
+
+            # 空行
+            yield Static(f"[{border}]  │[/]", classes="approval-line")
         yield Static(
             f"[{border}]  ├{'─' * (_SEP_WIDTH + 10)}[/]",
             classes="approval-border",
@@ -195,13 +206,28 @@ class ToolApproval(Vertical):
 
         # 底部圆角 + 提示
         yield Static(
-            f"[{border}]  ╰─[/] [dim]↑↓ 选择 · enter 确认 · esc 拒绝[/dim] [{border}]{'─' * (_SEP_WIDTH - 18)}[/]",
+            f"[{border}]  ╰─[/] [dim]↑↓ 选择 · shift+↑↓ 滚动 · enter 确认 · esc 拒绝[/dim] [{border}]{'─' * (_SEP_WIDTH - 27)}[/]",
             classes="approval-border",
         )
 
     def on_mount(self) -> None:
         """挂载后自动获取焦点"""
         self.focus()
+
+    def scroll_content(self, direction: str) -> None:
+        """滚动内容区域，由 app 级快捷键委派调用。"""
+        try:
+            container = self.query_one("#tool-approval-content", VerticalScroll)
+        except NoMatches:
+            return
+        if direction == "up":
+            container.scroll_up(animate=False)
+        elif direction == "down":
+            container.scroll_down(animate=False)
+        elif direction == "page_up":
+            container.scroll_page_up(animate=False)
+        elif direction == "page_down":
+            container.scroll_page_down(animate=False)
 
     def on_key(self, event) -> None:
         """键盘事件处理"""
@@ -244,6 +270,10 @@ class ToolApproval(Vertical):
     def _refresh_options(self) -> None:
         """刷新选项显示"""
         self.query_one("#approval-options", Static).update(self._render_options())
+
+
+class _ScrollableContent(VerticalScroll):
+    """审批内容的可滚动容器"""
 
 
 class _IndentedContent(Vertical):
