@@ -12,16 +12,16 @@ from lumi.agents.tools.permissions.models import PermissionRule
 from lumi.utils.logger import logger
 
 # 需要通过命令模式匹配的工具
-_COMMAND_TOOLS: frozenset[str] = frozenset({"bash"})
+COMMAND_TOOLS: frozenset[str] = frozenset({"bash"})
 
 # 需要通过路径模式匹配的工具
-_PATH_TOOLS: frozenset[str] = frozenset({"read", "write", "edit", "glob", "grep"})
+PATH_TOOLS: frozenset[str] = frozenset({"read", "write", "edit", "glob", "grep"})
 
 # bash 工具中命令参数的可能键名
-_COMMAND_ARG_KEYS: tuple[str, ...] = ("command", "cmd")
+COMMAND_ARG_KEYS: tuple[str, ...] = ("command", "cmd")
 
 # 路径工具中路径参数的可能键名（与实际工具定义一致）
-_PATH_ARG_KEYS: tuple[str, ...] = ("file_path", "path")
+PATH_ARG_KEYS: tuple[str, ...] = ("file_path", "path")
 
 
 class RuleMatcher:
@@ -157,16 +157,16 @@ class RuleMatcher:
             return True
 
         # 有模式，根据工具类型选择匹配方式
-        if tool_name in _COMMAND_TOOLS:
+        if tool_name in COMMAND_TOOLS:
             # bash 工具：匹配命令内容
-            command = _extract_arg(tool_args, _COMMAND_ARG_KEYS)
+            command = extract_arg(tool_args, COMMAND_ARG_KEYS)
             if command is None:
                 return False
             return RuleMatcher.match_command_pattern(pattern, command)
 
-        if tool_name in _PATH_TOOLS:
+        if tool_name in PATH_TOOLS:
             # 文件操作工具：匹配路径
-            file_path = _extract_arg(tool_args, _PATH_ARG_KEYS)
+            file_path = extract_arg(tool_args, PATH_ARG_KEYS)
             if file_path is None:
                 return False
             # 使用当前工作目录作为默认项目目录
@@ -180,6 +180,84 @@ class RuleMatcher:
             ):
                 return True
         return False
+
+
+# 双字符复合分隔符（优先匹配）
+_DOUBLE_SEPARATORS: frozenset[str] = frozenset({"&&", "||"})
+# 单字符复合分隔符
+_SINGLE_SEPARATORS: frozenset[str] = frozenset({"|", ";", "&"})
+
+
+def split_compound_command(command: str) -> list[str]:
+    """拆分由 &&、||、;、| 连接的复合命令，返回各子命令字符串。
+
+    使用字符级状态机，正确处理引号（单引号、双引号）内的分隔符不拆分。
+    单命令返回 [command]。
+
+    Args:
+        command: 完整的 bash 命令字符串
+
+    Returns:
+        子命令字符串列表
+    """
+    if not command or not command.strip():
+        return [command] if command else []
+
+    segments: list[str] = []
+    current: list[str] = []
+    i = 0
+    n = len(command)
+    in_single_quote = False
+    in_double_quote = False
+
+    while i < n:
+        c = command[i]
+
+        # 引号状态切换
+        if c == "'" and not in_double_quote:
+            in_single_quote = not in_single_quote
+            current.append(c)
+            i += 1
+        elif c == '"' and not in_single_quote:
+            in_double_quote = not in_double_quote
+            current.append(c)
+            i += 1
+        elif c == "\\" and in_double_quote and i + 1 < n:
+            # 双引号内的转义
+            current.append(c)
+            current.append(command[i + 1])
+            i += 2
+        elif not in_single_quote and not in_double_quote:
+            # 非引号内：检查分隔符
+            two = command[i : i + 2]
+            if two in _DOUBLE_SEPARATORS:
+                seg = "".join(current).strip()
+                if seg:
+                    segments.append(seg)
+                current = []
+                i += 2
+            elif c in _SINGLE_SEPARATORS:
+                seg = "".join(current).strip()
+                if seg:
+                    segments.append(seg)
+                current = []
+                i += 1
+            else:
+                current.append(c)
+                i += 1
+        else:
+            current.append(c)
+            i += 1
+
+    # 末尾段
+    seg = "".join(current).strip()
+    if seg:
+        segments.append(seg)
+
+    if not segments:
+        return [command.strip()]
+
+    return segments
 
 
 def _glob_to_regex(pattern: str) -> str:
@@ -232,7 +310,60 @@ def _glob_to_regex(pattern: str) -> str:
     return "".join(result)
 
 
-def _extract_arg(args: dict, keys: tuple[str, ...]) -> str | None:
+def build_exact_expr(tool_name: str, tool_args: dict) -> str:
+    """构造精确匹配的工具表达式。
+
+    根据工具类型提取具体的命令或路径参数，生成如 "bash(npm test)" 的表达式。
+    无参数时返回纯工具名。
+
+    Args:
+        tool_name: 工具名称
+        tool_args: 工具参数
+
+    Returns:
+        工具表达式字符串
+    """
+    if tool_name in COMMAND_TOOLS:
+        cmd = extract_arg(tool_args, COMMAND_ARG_KEYS) or ""
+        return f"{tool_name}({cmd})" if cmd else tool_name
+    if tool_name in PATH_TOOLS:
+        path = extract_arg(tool_args, PATH_ARG_KEYS) or ""
+        return f"{tool_name}({path})" if path else tool_name
+    return tool_name
+
+
+def build_pattern_expr(tool_name: str, tool_args: dict) -> str:
+    """构造宽泛模式的工具表达式。
+
+    对命令工具取首个单词加 *，对路径工具取文件扩展名加 **/*。
+    无参数时返回纯工具名。
+
+    Args:
+        tool_name: 工具名称
+        tool_args: 工具参数
+
+    Returns:
+        工具表达式字符串
+    """
+    if tool_name in COMMAND_TOOLS:
+        cmd = extract_arg(tool_args, COMMAND_ARG_KEYS) or ""
+        if cmd:
+            words = cmd.split()
+            first_word = words[0] if words else cmd
+            return f"{tool_name}({first_word} *)"
+        return tool_name
+    if tool_name in PATH_TOOLS:
+        path = extract_arg(tool_args, PATH_ARG_KEYS) or ""
+        if path:
+            suffix = Path(path).suffix
+            if suffix:
+                return f"{tool_name}(**/*{suffix})"
+            return f"{tool_name}(**/*)"
+        return tool_name
+    return tool_name
+
+
+def extract_arg(args: dict, keys: tuple[str, ...]) -> str | None:
     """从参数字典中按优先级提取字符串值。
 
     Args:

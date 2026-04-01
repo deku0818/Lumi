@@ -2,6 +2,7 @@
 
 Agent 在计划模式完成后调用 exit_plan_mode 工具触发此组件，
 用户可以批准计划（开始实施）或拒绝（继续修改计划）。
+使用 Textual 原生 CSS border 实现自适应闭合边框。
 """
 
 from __future__ import annotations
@@ -9,15 +10,12 @@ from __future__ import annotations
 import logging
 from pathlib import Path
 
-from rich.text import Text
 from textual.app import ComposeResult
-from textual.containers import Vertical
-from textual.css.query import NoMatches
-from textual.message import Message
-from textual.widgets import Markdown, Static
+from textual.widgets import Markdown, Rule, Static
 
 from lumi.tui.renderers.utils import escape_markup
 from lumi.tui.theme import get_color
+from lumi.tui.widgets.approval_base import BaseApproval
 
 logger = logging.getLogger(__name__)
 
@@ -33,26 +31,20 @@ _OPTION_COLOR_ROLES: dict[str, str] = {
     "rejected": "error",
 }
 
-_SEP_WIDTH = 46
 
-
-class PlanApproval(Vertical):
+class PlanApproval(BaseApproval):
     """计划审批组件 - 键盘驱动的批准/拒绝选择器"""
 
-    can_focus = True
+    class Decided(BaseApproval.Decided):
+        """计划审批决定（独立类型，确保 Textual 消息路由正确）"""
 
     DEFAULT_CSS = """
     PlanApproval {
-        margin: 0 1 0 0;
+        margin: 0 0 0 2;
         padding: 0 1;
         background: transparent;
-        border: none;
         height: auto;
-    }
-
-    PlanApproval .plan-border {
-        margin: 0;
-        padding: 0;
+        border: round $accent;
     }
 
     PlanApproval .plan-line {
@@ -67,49 +59,45 @@ class PlanApproval(Vertical):
     }
 
     PlanApproval .plan-content {
-        margin: 0 0 0 6;
+        margin: 0 0 0 4;
         padding: 0;
         height: auto;
         max-height: 30;
         overflow-y: auto;
     }
+
+    PlanApproval Rule {
+        margin: 0;
+        color: $accent;
+    }
     """
 
-    class Decided(Message):
-        """用户做出计划审批决定"""
-
-        def __init__(self, decision: str) -> None:
-            super().__init__()
-            self.decision = decision
-
     def __init__(self, interrupt_data: dict) -> None:
-        super().__init__(classes="plan-approval")
+        super().__init__(
+            options=_OPTIONS,
+            option_color_roles=_OPTION_COLOR_ROLES,
+            cancel_key="rejected",
+            options_selector="#plan-approval-options",
+            content_selector=".plan-content",
+            classes="plan-approval",
+        )
         self._data = interrupt_data
-        self._selected = 0
+        self.border_title = "📋 计划审批"
+        self.border_subtitle = "↑↓ 选择 · enter 确认 · esc 拒绝"
 
     def compose(self) -> ComposeResult:
         accent = get_color("accent")
-        border = get_color("border_separator")
         plan_path = self._data.get("plan_file_path", "")
 
-        # 顶部圆角 + 标题
-        yield Static(
-            f"[{border}]  ╭─[/] [{accent} bold]📋 计划审批[/] [{border}]{'─' * _SEP_WIDTH}[/]",
-            classes="plan-border",
-        )
-
-        # 空行
-        yield Static(f"[{border}]  │[/]", classes="plan-line")
-
-        # 计划文件标题（类似 ToolApproval 的工具名）
+        # 计划文件标题
         if plan_path:
             filename = Path(plan_path).name
             yield Static(
-                f"[{border}]  │[/]   [{accent} bold]● {escape_markup(filename)}[/]",
+                f"[{accent} bold]● {escape_markup(filename)}[/]",
                 classes="plan-line",
             )
             yield Static(
-                f"[{border}]  │[/]     [dim]{escape_markup(plan_path)}[/dim]",
+                f"  [dim]{escape_markup(plan_path)}[/dim]",
                 classes="plan-line",
             )
 
@@ -118,12 +106,8 @@ class PlanApproval(Vertical):
         if plan_content:
             yield Markdown(plan_content, classes="plan-content")
 
-        # 空行 + 分隔线
-        yield Static(f"[{border}]  │[/]", classes="plan-line")
-        yield Static(
-            f"[{border}]  ├{'─' * (_SEP_WIDTH + 10)}[/]",
-            classes="plan-border",
-        )
+        # 分隔线
+        yield Rule()
 
         # 选项
         yield Static(
@@ -132,71 +116,6 @@ class PlanApproval(Vertical):
             classes="plan-options",
             markup=False,
         )
-
-        # 空行
-        yield Static(f"[{border}]  │[/]", classes="plan-line")
-
-        # 底部圆角 + 提示
-        yield Static(
-            f"[{border}]  ╰─[/] [dim]↑↓ 选择 · enter 确认 · esc 拒绝[/dim] [{border}]{'─' * (_SEP_WIDTH - 18)}[/]",
-            classes="plan-border",
-        )
-
-    def on_mount(self) -> None:
-        self.focus()
-
-    def scroll_content(self, direction: str) -> None:
-        """滚动计划内容区域，由 app 级快捷键委派调用。"""
-        try:
-            content = self.query_one(".plan-content")
-        except NoMatches:
-            return
-        if direction == "up":
-            content.scroll_up(animate=False)
-        elif direction == "down":
-            content.scroll_down(animate=False)
-        elif direction == "page_up":
-            content.scroll_page_up(animate=False)
-        elif direction == "page_down":
-            content.scroll_page_down(animate=False)
-
-    def on_key(self, event) -> None:
-        if event.key == "up":
-            self._selected = (self._selected - 1) % len(_OPTIONS)
-            self._refresh_options()
-            event.stop()
-        elif event.key == "down":
-            self._selected = (self._selected + 1) % len(_OPTIONS)
-            self._refresh_options()
-            event.stop()
-        elif event.key == "enter":
-            decision = _OPTIONS[self._selected]["key"]
-            self.post_message(self.Decided(decision))
-            self.call_later(self.remove)
-            event.stop()
-        elif event.key == "escape":
-            self.post_message(self.Decided("rejected"))
-            self.call_later(self.remove)
-            event.stop()
-
-    def _render_options(self) -> Text:
-        border = get_color("border_separator")
-        result = Text()
-        for i, opt in enumerate(_OPTIONS):
-            if i > 0:
-                result.append("\n")
-            key = opt["key"]
-            label = opt["label"]
-            color = get_color(_OPTION_COLOR_ROLES.get(key, "foreground"))
-            result.append("  │", style=border)
-            if i == self._selected:
-                result.append(f"   ❯ {label}", style=f"bold {color}")
-            else:
-                result.append(f"     {label}")
-        return result
-
-    def _refresh_options(self) -> None:
-        self.query_one("#plan-approval-options", Static).update(self._render_options())
 
     @staticmethod
     def _read_plan_file(plan_path: str) -> str:

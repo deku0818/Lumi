@@ -5,11 +5,18 @@
 
 from __future__ import annotations
 
+import json
 from pathlib import Path
 
 from lumi.agents.tools.permissions.boundary import WorkspaceBoundary
 from lumi.agents.tools.permissions.config_loader import ConfigLoader
-from lumi.agents.tools.permissions.matcher import RuleMatcher
+from lumi.agents.tools.permissions.matcher import (
+    COMMAND_ARG_KEYS,
+    COMMAND_TOOLS,
+    RuleMatcher,
+    extract_arg,
+    split_compound_command,
+)
 from lumi.agents.tools.permissions.models import (
     Permission,
     PermissionConfig,
@@ -47,8 +54,8 @@ class PermissionEngine:
         try:
             self._loader = ConfigLoader(project_dir, user_config_dir)
             self._config = self._loader.load()
-        except Exception:
-            logger.error("权限引擎初始化失败，回退到无规则状态", exc_info=True)
+        except (OSError, json.JSONDecodeError, ValueError, KeyError) as e:
+            logger.error("权限配置加载失败 (%s)，回退到无规则状态", e, exc_info=True)
             if not hasattr(self, "_loader"):
                 self._loader = ConfigLoader(project_dir, user_config_dir)
             self._config = PermissionConfig()
@@ -82,6 +89,7 @@ class PermissionEngine:
 
         评估顺序：先检查 deny 规则，再检查 allow 规则。
         未匹配任何规则返回 unmatched。
+        对 bash 复合命令（含 &&、||、;、|），拆分后逐个子命令评估。
 
         Args:
             tool_name: 工具名称
@@ -101,23 +109,77 @@ class PermissionEngine:
             )
             return PermissionDecision.UNMATCHED
 
-        if self._config is None or self._config.permissions is None:
+        if self._config is None:
             logger.warning("[PermissionEngine.evaluate] 配置未加载，返回 UNMATCHED")
             return PermissionDecision.UNMATCHED
 
-        # 先检查 deny 规则
+        # bash 复合命令：拆分后逐个子命令评估，取最严格结果
+        if tool_name in COMMAND_TOOLS:
+            command = extract_arg(tool_args, COMMAND_ARG_KEYS)
+            if command:
+                subs = split_compound_command(command)
+                if len(subs) > 1:
+                    return self._evaluate_compound(tool_name, subs)
+
+        return self._evaluate_single(tool_name, tool_args)
+
+    # 权限严格度：数值越小越严格
+    _STRICTNESS: dict[Permission, int] = {
+        Permission.DENY: 0,
+        Permission.ASK: 1,
+        Permission.ALLOW: 2,
+    }
+    _TO_DECISION: dict[Permission, PermissionDecision] = {
+        Permission.DENY: PermissionDecision.DENY,
+        Permission.ASK: PermissionDecision.ASK,
+        Permission.ALLOW: PermissionDecision.ALLOW,
+    }
+
+    def _evaluate_single(self, tool_name: str, tool_args: dict) -> PermissionDecision:
+        """评估单条命令（不拆分复合命令）。
+
+        单次遍历规则列表，取最严格的匹配结果。
+        优先级：deny > ask > allow > unmatched。
+        """
+        best_priority = 3  # UNMATCHED 哨兵值
+        best_decision = PermissionDecision.UNMATCHED
+
         for rule in self._config.permissions:
-            if rule.permission == Permission.DENY:
-                if RuleMatcher.match_rule(rule, tool_name, tool_args):
+            priority = self._STRICTNESS[rule.permission]
+            if priority < best_priority and RuleMatcher.match_rule(
+                rule, tool_name, tool_args
+            ):
+                best_priority = priority
+                best_decision = self._TO_DECISION[rule.permission]
+                if best_priority == 0:  # DENY: 不可能更严格，立即短路
                     return PermissionDecision.DENY
 
-        # 再检查 allow 规则
-        for rule in self._config.permissions:
-            if rule.permission == Permission.ALLOW:
-                if RuleMatcher.match_rule(rule, tool_name, tool_args):
-                    return PermissionDecision.ALLOW
+        return best_decision
 
-        return PermissionDecision.UNMATCHED
+    def _evaluate_compound(
+        self, tool_name: str, sub_commands: list[str]
+    ) -> PermissionDecision:
+        """评估复合命令：逐个子命令评估，取最严格结果。
+
+        严格度：DENY > ASK > UNMATCHED > ALLOW。
+        ANY deny → DENY；ANY ask → ASK；ANY unmatched → UNMATCHED；ALL allow → ALLOW。
+        """
+        has_unmatched = False
+        has_ask = False
+        for sub in sub_commands:
+            decision = self._evaluate_single(tool_name, {"command": sub})
+            if decision == PermissionDecision.DENY:
+                return PermissionDecision.DENY
+            if decision == PermissionDecision.ASK:
+                has_ask = True
+            elif decision == PermissionDecision.UNMATCHED:
+                has_unmatched = True
+
+        if has_ask:
+            return PermissionDecision.ASK
+        if has_unmatched:
+            return PermissionDecision.UNMATCHED
+        return PermissionDecision.ALLOW
 
     def evaluate_batch(
         self, tool_calls: list[ToolCallInfo]
@@ -189,12 +251,30 @@ class PermissionEngine:
         Returns:
             超出边界的路径字符串列表
         """
-        paths = self._boundary.extract_paths_from_tool_call(tool_name, tool_args)
+        try:
+            paths = self._boundary.extract_paths_from_tool_call(tool_name, tool_args)
+        except Exception as e:
+            logger.error(
+                "[PermissionEngine] get_boundary_violations 路径提取失败 (%s): %s",
+                tool_name,
+                e,
+                exc_info=True,
+            )
+            return []
+
         violations: list[str] = []
         for p in paths:
-            resolved = p if p.is_absolute() else self._project_dir / p
-            if not self._boundary.is_within_boundary(resolved):
-                violations.append(str(resolved))
+            try:
+                resolved = p if p.is_absolute() else self._project_dir / p
+                if not self._boundary.is_within_boundary(resolved):
+                    violations.append(str(resolved))
+            except Exception as e:
+                logger.error(
+                    "[PermissionEngine] 边界检查异常 (路径: %s): %s",
+                    p,
+                    e,
+                    exc_info=True,
+                )
         return violations
 
     def add_allow_rule(self, tool_expr: str) -> None:
@@ -271,6 +351,27 @@ class PermissionEngine:
             self._loader.save_local(updated)
         except Exception:
             logger.error("持久化工作区配置失败: %s", directory, exc_info=True)
+
+    def add_ephemeral_rules(self, allow_exprs: list[str]) -> None:
+        """添加临时 allow 规则（仅内存，不持久化）。
+
+        用于 CLI --allow 参数传入的会话级规则。
+
+        Args:
+            allow_exprs: 工具表达式列表，如 ["bash(npm *)", "edit"]
+        """
+        new_rules = []
+        existing = {
+            r.tool for r in self._config.permissions if r.permission == Permission.ALLOW
+        }
+        for expr in allow_exprs:
+            if expr and expr not in existing:
+                new_rules.append(PermissionRule(tool=expr, permission=Permission.ALLOW))
+        if new_rules:
+            self._config = PermissionConfig(
+                workspaces=self._config.workspaces,
+                permissions=(*self._config.permissions, *new_rules),
+            )
 
     def reload(self) -> None:
         """重新加载配置文件（仅在文件变更时）。"""

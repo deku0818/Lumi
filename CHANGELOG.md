@@ -1,5 +1,31 @@
 # Changelog
 
+## [0.0.11] - 2026-04-01
+
+### Added
+- ASK 权限规则：支持 `ask` 级别配置（优先级介于 deny 和 allow 之间），适用于"允许但需确认"的操作如 `git push`、`npm publish`
+- Bypass-immune 安全检查：即使 privileged 模式也不可跳过的保护层，覆盖 shell 配置（`.bashrc`/`.zshrc`）、SSH/GPG 密钥、项目权限配置等敏感路径
+- Bash 命令安全警告：审批界面对 `git push --force`、`git reset --hard`、`curl | sh` 等危险模式显示警告辅助决策
+- 复合命令拆分评估：bash 复合命令（`&&`、`||`、`;`、`|`）逐个子命令评估权限，取最严格结果
+- 临时规则（CLI `--allow`）：支持会话级 allow 规则，不持久化
+- 审批组件基类 `BaseApproval`：提取 ToolApproval 和 PlanApproval 的共享逻辑（键盘导航、选项渲染、滚动委派）
+
+### Fixed
+- `_check_bash_tool` 补充对 `.ssh/`、`.gnupg/` 前缀路径和项目级受保护路径（`.lumi/permissions.json`、`.git/config`）的写入检查
+- `split_compound_command` 从 `shlex.split` 改为字符级状态机，修复引号内分隔符被错误拆分的安全问题
+- bypass-immune 安全检查对非字符串参数保守标记为需审批（而非默认放行）
+- `Path.home()` 模块级调用改为 try/except，避免 HOME 未设置时导入崩溃
+- `human_approval` 中 `engine.evaluate()` 和 `get_boundary_violations()` 添加 try/except 保护
+- privileged 模式下 `is_bypass_immune` 调用添加异常保护，防止路由崩溃
+- `PermissionEngine.__init__` 的 `except Exception` 收窄为 `(OSError, json.JSONDecodeError, ValueError, KeyError)`
+- 移除 `PermissionConfig.permissions is None` 死代码检查
+- `_DANGER_PATTERNS` 的 level 字段标注为 `Literal["warning", "danger"]`，消除 type: ignore
+
+### Changed
+- 权限评估从两遍扫描（先 deny 后 allow）改为单遍扫描取最严格结果，支持三级优先级：deny > ask > allow
+- `PermissionEngine.get_boundary_violations` 添加与 `check_workspace_boundary` 一致的防御性错误处理
+- `ToolApproval._render_options` 去重，委派到基类 `BaseApproval._render_options(max_label_len)`
+
 ## [0.0.10] - 2026-03-31
 
 ### Added

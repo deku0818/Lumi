@@ -32,6 +32,10 @@ Lumi 内置了基于配置文件的工具权限管理系统，支持 allow/deny 
     ],
     "deny": [
       "bash(rm -rf *)"    // 禁止 rm -rf 命令
+    ],
+    "ask": [
+      "bash(git push *)",  // git push 需要确认
+      "bash(npm publish *)" // npm publish 需要确认
     ]
   }
 }
@@ -82,16 +86,40 @@ Lumi 内置了基于配置文件的工具权限管理系统，支持 allow/deny 
 权限引擎按以下顺序评估每个工具调用：
 
 1. `BYPASS_TOOLS`（如 `ask`、`read`、`glob`、`grep`、`todos`、`skill`、`agent`）始终直接执行，不经过权限评估
-2. `tool_mode` 为 `privileged` 时跳过所有审批（通过 TUI 切换或定时任务自动设置）
-3. 先匹配 deny 规则 → 命中则返回 `deny`
-4. 再匹配 allow 规则 → 命中则返回 `allow`
-5. 未匹配任何规则 → 返回 `unmatched`
+2. `tool_mode` 为 `privileged` 时跳过所有审批（bypass-immune 检查除外，见下文）
+3. 遍历所有规则，取最严格的匹配结果：`deny` > `ask` > `allow` > `unmatched`
+4. 对 bash 复合命令（含 `&&`、`||`、`;`、`|`），拆分后逐个子命令评估，取最严格结果
+
+### 权限类型
+
+| 权限 | 说明 |
+|---|---|
+| `allow` | 直接放行，不弹出审批 |
+| `deny` | 标记为危险，审批界面显示警告 |
+| `ask` | 需要确认，即使存在更宽泛的 allow 规则也会弹出审批 |
+
+`ask` 规则适用于"允许但需确认"的场景，如 `git push`、`npm publish` 等不可逆操作。`ask` 的优先级高于 `allow` 但低于 `deny`：
+
+- `deny` + `ask` → `deny`（deny 始终最高优先级）
+- `ask` + `allow` → `ask`（ask 覆盖 allow）
+- `ask` + `unmatched` → `ask`
+
+### 复合命令评估
+
+bash 复合命令（如 `git add . && git push origin main`）会被拆分为独立子命令，逐个评估后取最严格结果：
+
+- 任意子命令 deny → 整体 `deny`
+- 任意子命令 ask → 整体 `ask`
+- 任意子命令 unmatched → 整体 `unmatched`
+- 全部子命令 allow → 整体 `allow`
+
+引号内的分隔符不会被拆分（如 `bash -c "cmd1 && cmd2"` 作为单条命令评估）。
 
 ### 审批模式与权限决策的交互
 
-| tool_mode | 全部 allow | 含 deny/unmatched |
+| tool_mode | 全部 allow | 含 deny/ask/unmatched |
 |---|---|---|
-| `privileged` | 直接执行 | 直接执行 |
+| `privileged` | 直接执行 | 直接执行（bypass-immune 除外） |
 | `auto` | 直接执行 | 弹出权限审批 |
 
 ---
@@ -151,6 +179,32 @@ lumi web-server --privileged-danger
 
 > 注意：特权模式下所有工具调用将直接执行，请谨慎使用。
 
+### Bypass-immune 安全检查
+
+即使在特权模式下，以下操作仍然需要人工审批（不可跳过）：
+
+| 类别 | 受保护目标 |
+|---|---|
+| Shell 配置 | `~/.bashrc`、`~/.zshrc`、`~/.bash_profile`、`~/.zprofile`、`~/.profile`、`~/.login` |
+| Git 配置 | `~/.gitconfig` |
+| SSH/GPG | `~/.ssh/*`、`~/.gnupg/*` |
+| 项目权限配置 | `.lumi/permissions.json`、`.lumi/permissions.local.json`、`.git/config` |
+| 危险 bash 模式 | `curl ... \| sh`、`wget ... \| bash` |
+
+检查范围包括 `write`/`edit` 工具的目标路径以及 bash 命令中的写入操作（重定向、`tee`、`sed -i`、`cp`、`mv`）。只读操作不触发此检查。
+
+### Bash 命令安全警告
+
+审批界面会对以下 bash 命令模式显示安全警告（不阻断执行，仅辅助决策）：
+
+| 模式 | 级别 | 说明 |
+|---|---|---|
+| `git push --force` | danger | 可能覆盖远程提交历史 |
+| `git reset --hard` | danger | 会丢失未提交的本地更改 |
+| `git clean -f` | danger | 会删除未跟踪的文件 |
+| `curl ... \| sh` | danger | 从网络下载并直接执行脚本 |
+| `chmod 777` | warning | 开放所有权限 |
+
 ### 特权工具列表
 
 某些工具被设计为始终绕过审批（即使在 `auto` 模式下），称为"特权工具"。这些工具通常是低风险操作或用户交互类工具，例如：
@@ -186,6 +240,10 @@ lumi web-server --privileged-danger
     "deny": [
       "bash(rm -rf *)",
       "bash(sudo *)"
+    ],
+    "ask": [
+      "bash(git push *)",
+      "bash(npm publish *)"
     ]
   }
 }

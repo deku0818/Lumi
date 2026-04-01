@@ -2,7 +2,12 @@
 
 from pathlib import Path
 
-from lumi.agents.tools.permissions.matcher import RuleMatcher
+from lumi.agents.tools.permissions.matcher import (
+    RuleMatcher,
+    build_exact_expr,
+    build_pattern_expr,
+    split_compound_command,
+)
 from lumi.agents.tools.permissions.models import Permission, PermissionRule
 
 
@@ -170,3 +175,118 @@ class TestMatchRule:
     def test_deny_rule_matches(self):
         rule = PermissionRule(tool="bash(rm -rf *)", permission=Permission.DENY)
         assert RuleMatcher.match_rule(rule, "bash", {"command": "rm -rf /"}) is True
+
+
+class TestSplitCompoundCommand:
+    """split_compound_command 测试（纯字符串操作，不执行任何命令）"""
+
+    def test_single_command(self):
+        assert split_compound_command("git push") == ["git push"]
+
+    def test_and_operator(self):
+        result = split_compound_command("git add . && git commit -m msg")
+        assert result == ["git add .", "git commit -m msg"]
+
+    def test_or_operator(self):
+        result = split_compound_command("test -f foo || echo missing")
+        assert result == ["test -f foo", "echo missing"]
+
+    def test_semicolon(self):
+        result = split_compound_command("echo a ; echo b")
+        assert result == ["echo a", "echo b"]
+
+    def test_pipe(self):
+        result = split_compound_command("ls | grep foo")
+        assert result == ["ls", "grep foo"]
+
+    def test_multiple_separators(self):
+        result = split_compound_command("a && b ; c | d")
+        assert len(result) == 4
+        assert result[0] == "a"
+        assert result[1] == "b"
+        assert result[2] == "c"
+        assert result[3] == "d"
+
+    def test_quoted_separator_not_split(self):
+        # 引号内的 && 不应拆分
+        result = split_compound_command("echo 'a && b'")
+        assert len(result) == 1
+        assert "a && b" in result[0]
+
+    def test_empty_command(self):
+        assert split_compound_command("") == []
+
+    def test_whitespace_only(self):
+        result = split_compound_command("   ")
+        assert len(result) <= 1
+
+    def test_unclosed_quote_returns_original(self):
+        # 引号未闭合时不拆分，返回原命令
+        result = split_compound_command("echo 'hello && world")
+        assert len(result) == 1
+
+    def test_background_operator(self):
+        result = split_compound_command("sleep 1 & echo done")
+        assert result == ["sleep 1", "echo done"]
+
+    def test_double_quoted_separator_not_split(self):
+        """双引号内的 && 不应拆分"""
+        result = split_compound_command('echo "a && b"')
+        assert len(result) == 1
+        assert "a && b" in result[0]
+
+    def test_bash_c_quoted_not_split(self):
+        """bash -c 内的引号命令不应拆分"""
+        result = split_compound_command('bash -c "git push && echo done"')
+        assert len(result) == 1
+        assert "git push && echo done" in result[0]
+
+    def test_unclosed_quote_not_split(self):
+        """引号未闭合时不拆分（引号内的分隔符被忽略）"""
+        result = split_compound_command("echo 'hello && world")
+        assert len(result) == 1
+
+
+class TestBuildExactExpr:
+    """build_exact_expr 测试"""
+
+    def test_bash_tool(self):
+        assert build_exact_expr("bash", {"command": "npm test"}) == "bash(npm test)"
+
+    def test_path_tool(self):
+        assert (
+            build_exact_expr("edit", {"file_path": "src/main.py"})
+            == "edit(src/main.py)"
+        )
+
+    def test_no_args(self):
+        assert build_exact_expr("bash", {}) == "bash"
+
+    def test_other_tool(self):
+        assert build_exact_expr("agent", {"prompt": "hi"}) == "agent"
+
+
+class TestBuildPatternExpr:
+    """build_pattern_expr 测试"""
+
+    def test_bash_tool(self):
+        assert build_pattern_expr("bash", {"command": "npm test"}) == "bash(npm *)"
+
+    def test_path_tool_with_extension(self):
+        assert (
+            build_pattern_expr("edit", {"file_path": "src/main.py"}) == "edit(**/*.py)"
+        )
+
+    def test_path_tool_without_extension(self):
+        assert build_pattern_expr("edit", {"file_path": "Makefile"}) == "edit(**/*)"
+
+    def test_no_args(self):
+        assert build_pattern_expr("bash", {}) == "bash"
+
+    def test_other_tool(self):
+        assert build_pattern_expr("agent", {"prompt": "hi"}) == "agent"
+
+    def test_pattern_differs_from_exact(self):
+        exact = build_exact_expr("bash", {"command": "npm test"})
+        pattern = build_pattern_expr("bash", {"command": "npm test"})
+        assert exact != pattern

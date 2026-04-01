@@ -15,7 +15,7 @@ from langchain_core.runnables.config import RunnableConfig
 from langgraph.types import Command
 
 from lumi.agents.core.graph import LumiAgent, create_agent
-from lumi.agents.core.node import APPROVAL_BYPASS_TOOLS
+from lumi.agents.tools.permissions.models import BYPASS_TOOLS
 from lumi.agents.core.scheme import LumiAgentContext
 from lumi.agents.tools.checkpoint import CheckpointInfo, FileCheckpointManager
 from lumi.agents.tools.file_tracker import FileChangeTracker
@@ -306,7 +306,7 @@ class AgentBridge:
                         # ToolBlock 为 Done，否则后续 ASK 事件找不到 block 来挂载对话框。
                         # 真正的 TOOL_END 在 resume 后才会带有实际 output。
                         resolved_output = str(output) if output else ""
-                        if name in APPROVAL_BYPASS_TOOLS and not resolved_output:
+                        if name in BYPASS_TOOLS and not resolved_output:
                             continue
 
                         yield BridgeEvent(

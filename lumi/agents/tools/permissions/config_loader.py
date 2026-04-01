@@ -37,7 +37,7 @@ def _parse_rules(raw: dict) -> tuple[PermissionRule, ...]:
         return ()
 
     rules: list[PermissionRule] = []
-    for perm_str in ("allow", "deny"):
+    for perm_str in ("allow", "deny", "ask"):
         tool_list = raw.get(perm_str, [])
         if not isinstance(tool_list, list):
             logger.warning("permissions.%s 应为数组，已跳过", perm_str)
@@ -85,17 +85,22 @@ def _config_to_dict(config: PermissionConfig) -> dict:
     """
     allow_list: list[str] = []
     deny_list: list[str] = []
+    ask_list: list[str] = []
     for r in config.permissions:
         if r.permission == Permission.ALLOW:
             allow_list.append(r.tool)
         elif r.permission == Permission.DENY:
             deny_list.append(r.tool)
+        elif r.permission == Permission.ASK:
+            ask_list.append(r.tool)
 
     permissions: dict[str, list[str]] = {}
     if allow_list:
         permissions["allow"] = allow_list
     if deny_list:
         permissions["deny"] = deny_list
+    if ask_list:
+        permissions["ask"] = ask_list
 
     return {
         "workspaces": list(config.workspaces),

@@ -14,6 +14,7 @@ class Permission(Enum):
 
     ALLOW = "allow"
     DENY = "deny"
+    ASK = "ask"
 
 
 class PermissionDecision(Enum):
@@ -21,6 +22,7 @@ class PermissionDecision(Enum):
 
     ALLOW = "allow"
     DENY = "deny"
+    ASK = "ask"
     UNMATCHED = "unmatched"
 
 

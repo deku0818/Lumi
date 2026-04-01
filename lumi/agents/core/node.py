@@ -19,11 +19,8 @@ from lumi.agents.core.message_tools import (
 )
 from lumi.agents.core.scheme import LumiAgentContext, LumiAgentState
 from lumi.agents.tools.permissions.matcher import (
-    _COMMAND_ARG_KEYS,
-    _COMMAND_TOOLS,
-    _PATH_ARG_KEYS,
-    _PATH_TOOLS,
-    _extract_arg,
+    build_exact_expr,
+    build_pattern_expr,
 )
 from lumi.agents.tools.permissions.models import BYPASS_TOOLS, PermissionDecision
 from lumi.agents.tools.workspace import add_authorized_directory
@@ -44,11 +41,8 @@ from lumi.utils.logger import logger
 from lumi.utils.model_manager import detect_model_type
 from lumi.utils.read_config import get_config
 
-# ask 等自带中断机制的工具，跳过所有审批直接执行（向后兼容导出）
-APPROVAL_BYPASS_TOOLS = BYPASS_TOOLS
 
-
-async def call_model(state: LumiAgentState, runtime: Runtime[LumiAgentContext]):
+async def call_model(state: LumiAgentState, runtime: Runtime[LumiAgentContext]) -> dict:
 
     system_prompt = runtime.context.system_prompt
     model_name = runtime.context.model_name
@@ -85,7 +79,9 @@ async def call_model(state: LumiAgentState, runtime: Runtime[LumiAgentContext]):
     return {"messages": [response], "iterations": iterations + 1}
 
 
-async def tool_executor(state: LumiAgentState, runtime: Runtime[LumiAgentContext]):
+async def tool_executor(
+    state: LumiAgentState, runtime: Runtime[LumiAgentContext]
+) -> dict | Command | list:
     """工具执行器，负责执行LLM调用的工具"""
     tools = runtime.context.tools
 
@@ -117,7 +113,7 @@ def after_tool_executor(state: LumiAgentState) -> str:
     return "CallModel"
 
 
-def is_use_tool(state: LumiAgentState, runtime: Runtime[LumiAgentContext]):
+def is_use_tool(state: LumiAgentState, runtime: Runtime[LumiAgentContext]) -> str:
     """条件路由函数 - 判断下一步执行哪个节点
 
     路由优先级：
@@ -156,8 +152,24 @@ def is_use_tool(state: LumiAgentState, runtime: Runtime[LumiAgentContext]):
 
     tool_mode = state.get("tool_mode", "auto")
 
-    # 特权模式：跳过所有审批
+    # 特权模式：跳过所有审批（bypass-immune 除外）
     if tool_mode == "privileged":
+        from lumi.agents.tools.permissions.safety import is_bypass_immune
+
+        for tc in tool_calls:
+            try:
+                immune, reason = is_bypass_immune(tc["name"], tc.get("args", {}))
+            except Exception as e:
+                logger.error(
+                    "[SafetyCheck] bypass-immune 检查异常 (%s): %s, 保守要求审批",
+                    tc["name"],
+                    e,
+                    exc_info=True,
+                )
+                return "HumanApproval"
+            if immune:
+                logger.warning("[SafetyCheck] Bypass-immune: %s", reason)
+                return "HumanApproval"
         return "ToolExecutor"
 
     # 使用权限引擎评估
@@ -237,30 +249,58 @@ def human_approval(
     warnings: list[str] = []
     boundary_violations: list[str] = []
 
+    from lumi.agents.tools.permissions.validators import validate_bash_command
+
     for tc in last_message.tool_calls:
         name, args = tc["name"], tc.get("args", {})
 
         # 工作区边界检查
-        violations = engine.get_boundary_violations(name, args)
-        boundary_violations.extend(violations)
+        try:
+            violations = engine.get_boundary_violations(name, args)
+            boundary_violations.extend(violations)
+        except Exception as e:
+            logger.error(
+                "[HumanApproval] 边界检查异常 (%s): %s", name, e, exc_info=True
+            )
 
         # 权限评估
-        decision = engine.evaluate(name, args)
+        try:
+            decision = engine.evaluate(name, args)
+        except Exception as e:
+            logger.error(
+                "[HumanApproval] 权限评估异常 (%s): %s", name, e, exc_info=True
+            )
+            decision = PermissionDecision.UNMATCHED
         decisions.append(decision)
         if decision == PermissionDecision.DENY:
             warnings.append(f"⚠ 工具 {name} 命中 deny 规则，该操作被标记为危险")
+        elif decision == PermissionDecision.ASK:
+            warnings.append(f"ℹ 工具 {name} 命中 ask 规则，需要确认")
+
+        # Bash 安全校验器警告
+        if name == "bash":
+            cmd = args.get("command") or args.get("cmd", "")
+            for w in validate_bash_command(cmd):
+                prefix = "⚠" if w.level == "danger" else "⚡"
+                warnings.append(f"{prefix} {w.message}")
 
     # 构造审批选项
     options: list[dict] = []
     needs_permission_options = any(
-        d in (PermissionDecision.DENY, PermissionDecision.UNMATCHED) for d in decisions
+        d
+        in (
+            PermissionDecision.DENY,
+            PermissionDecision.UNMATCHED,
+            PermissionDecision.ASK,
+        )
+        for d in decisions
     ) or bool(boundary_violations)
 
     if needs_permission_options:
         # 构造精确匹配和宽泛模式的工具表达式
         tc = last_message.tool_calls[0]
-        exact_expr = _build_exact_expr(tc["name"], tc.get("args", {}))
-        pattern_expr = _build_pattern_expr(tc["name"], tc.get("args", {}))
+        exact_expr = build_exact_expr(tc["name"], tc.get("args", {}))
+        pattern_expr = build_pattern_expr(tc["name"], tc.get("args", {}))
 
         options = [
             {"key": "allow_once", "label": "允许执行这一次"},
@@ -350,40 +390,7 @@ def _build_reject_messages(
     ]
 
 
-def _build_exact_expr(tool_name: str, tool_args: dict) -> str:
-    """构造精确匹配的工具表达式。"""
-    if tool_name in _COMMAND_TOOLS:
-        cmd = _extract_arg(tool_args, _COMMAND_ARG_KEYS) or ""
-        return f"{tool_name}({cmd})" if cmd else tool_name
-    if tool_name in _PATH_TOOLS:
-        path = _extract_arg(tool_args, _PATH_ARG_KEYS) or ""
-        return f"{tool_name}({path})" if path else tool_name
-    return tool_name
-
-
-def _build_pattern_expr(tool_name: str, tool_args: dict) -> str:
-    """构造宽泛模式的工具表达式。"""
-    if tool_name in _COMMAND_TOOLS:
-        cmd = _extract_arg(tool_args, _COMMAND_ARG_KEYS) or ""
-        if cmd:
-            words = cmd.split()
-            first_word = words[0] if words else cmd
-            return f"{tool_name}({first_word} *)"
-        return tool_name
-    if tool_name in _PATH_TOOLS:
-        from pathlib import Path
-
-        path = _extract_arg(tool_args, _PATH_ARG_KEYS) or ""
-        if path:
-            suffix = Path(path).suffix
-            if suffix:
-                return f"{tool_name}(**/*{suffix})"
-            return f"{tool_name}(**/*)"
-        return tool_name
-    return tool_name
-
-
-async def extract_structured_output(state: LumiAgentState):
+async def extract_structured_output(state: LumiAgentState) -> dict:
     """从结构化输出工具调用中提取结构化数据
 
     从最后一条 AIMessage 的 tool_calls 中找到 __structured_output__ 结构化输出工具，
@@ -413,7 +420,7 @@ async def extract_structured_output(state: LumiAgentState):
     return {"structured_output": {}}
 
 
-async def summarizer(state: LumiAgentState, runtime: Runtime[LumiAgentContext]):
+async def summarizer(state: LumiAgentState, runtime: Runtime[LumiAgentContext]) -> dict:
     """总结历史聊天消息，记录摘要信息到 state（不直接替换）
 
     此函数在后台运行，与 CallModel 并行执行。
@@ -500,7 +507,7 @@ async def summarizer(state: LumiAgentState, runtime: Runtime[LumiAgentContext]):
     }
 
 
-async def preprocess_messages(state: LumiAgentState):
+async def preprocess_messages(state: LumiAgentState) -> dict:
     """消息预处理节点，在调用模型前执行以下操作:
 
     0. 检查并执行摘要替换（如果 state["summary"] 有值）

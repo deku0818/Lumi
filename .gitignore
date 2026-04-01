@@ -16,3 +16,4 @@ test
 .ruff_cache
 .kiro
 .hypothesis
+docs/claude-code/
