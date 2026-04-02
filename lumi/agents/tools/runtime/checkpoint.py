@@ -23,7 +23,7 @@ import uuid
 from dataclasses import dataclass
 from pathlib import Path
 
-from lumi.agents.tools.file_tracker import FileChange, FileChangeTracker
+from lumi.agents.tools.runtime.file_tracker import FileChange, FileChangeTracker
 from lumi.utils.logger import logger
 
 # 单个 thread 最多保留的 checkpoint 数量

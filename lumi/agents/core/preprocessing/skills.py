@@ -8,8 +8,8 @@ from __future__ import annotations
 
 from langchain_core.messages import HumanMessage
 
-from lumi.agents.core.message_tools import inject_text_into_message
-from lumi.agents.tools.config import SkillConfig
+from lumi.agents.core.node_helpers.messages import inject_text_into_message
+from lumi.agents.tools.loader import SkillConfig
 
 
 def format_skill_reminder(skills: list[SkillConfig]) -> str:

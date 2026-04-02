@@ -17,7 +17,7 @@ from langchain_core.messages import ToolMessage
 from langchain_core.tools import InjectedToolCallId, tool
 from langgraph.types import Command, interrupt
 
-from lumi.agents.tools.config import _parse_md_file
+from lumi.agents.tools.loader import _parse_md_file
 from lumi.utils.logger import logger
 from lumi.utils.read_config import get_config
 

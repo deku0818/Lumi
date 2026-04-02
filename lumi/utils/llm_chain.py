@@ -20,7 +20,7 @@ from langchain_core.prompts import (
 )
 from pydantic import BaseModel
 
-from lumi.agents.core.message_tools import CACHE_CONTROL
+from lumi.agents.core.node_helpers.messages import CACHE_CONTROL
 from lumi.utils.logger import logger
 from lumi.utils.model_manager import get_default_model_name
 from lumi.utils.model_manager import create_llm, detect_model_type

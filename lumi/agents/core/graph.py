@@ -10,18 +10,19 @@ import aiosqlite
 from psycopg import AsyncConnection
 from psycopg.rows import dict_row
 
-from lumi.agents.base.graph import BaseGraph
-from lumi.agents.core.node import (
+from lumi.agents.core.base_graph import BaseGraph
+from lumi.agents.core.nodes import (
     after_tool_executor,
     call_model,
     extract_structured_output,
     human_approval,
     is_use_tool,
+    policy_reject,
     preprocess_messages,
     summarizer,
     tool_executor,
 )
-from lumi.agents.core.scheme import LumiAgentContext, LumiAgentState
+from lumi.agents.core.state import LumiAgentContext, LumiAgentState
 from lumi.agents.tools import get_tools
 from lumi.agents.tools.permissions.engine import PermissionEngine
 from lumi.utils.config import CheckpointMode, GlobalConfigManager
@@ -59,6 +60,7 @@ class LumiAgent(BaseGraph):
         self.builder.add_node("CallModel", call_model)
         self.builder.add_node("ToolExecutor", tool_executor)
         self.builder.add_node("HumanApproval", human_approval)
+        self.builder.add_node("PolicyReject", policy_reject)
         self.builder.add_node("ExtractStructuredOutput", extract_structured_output)
 
     def _draw_edges(self):
@@ -73,6 +75,7 @@ class LumiAgent(BaseGraph):
             {
                 "ToolExecutor": "ToolExecutor",
                 "HumanApproval": "HumanApproval",
+                "PolicyReject": "PolicyReject",
                 "ExtractStructuredOutput": "ExtractStructuredOutput",
                 "END": END,
             },

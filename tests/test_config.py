@@ -2,7 +2,7 @@
 
 import pytest
 
-from lumi.agents.tools.config import (
+from lumi.agents.tools.loader import (
     AgentConfig,
     SkillConfig,
     _parse_md_file,

@@ -2,8 +2,8 @@
 
 import pytest
 
-import lumi.agents.tools.workspace as workspace
-import lumi.agents.tools.session as session
+import lumi.agents.tools.permissions.workspace as workspace
+import lumi.agents.tools.runtime.session as session
 from lumi.agents.tools.providers import filesystem
 from lumi.agents.tools.registry import ToolRegistry
 

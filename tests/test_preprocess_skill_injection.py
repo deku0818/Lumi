@@ -12,7 +12,7 @@ from unittest.mock import MagicMock, patch
 
 from langchain_core.messages import AIMessage, HumanMessage, RemoveMessage
 
-from lumi.agents.tools.config import SkillConfig
+from lumi.agents.tools.loader import SkillConfig
 
 # 测试用的技能配置
 _TEST_SKILLS = [
@@ -38,17 +38,17 @@ def _make_state(
 def _patch_preprocessing():
     """返回两层 patch 装饰器，mock 掉清理步骤。"""
     return (
-        patch("lumi.agents.core.node.cleanup_incomplete_tool_calls", return_value=[]),
-        patch("lumi.agents.core.node.SkillChangeDetector"),
+        patch("lumi.agents.core.nodes.cleanup_incomplete_tool_calls", return_value=[]),
+        patch("lumi.agents.core.nodes.SkillChangeDetector"),
     )
 
 
 # --- 测试 1: 技能注入在预处理之后执行 ---
 
 
-@patch("lumi.agents.core.node.inject_system_info_into_message", side_effect=lambda m: m)
-@patch("lumi.agents.core.node.SkillChangeDetector")
-@patch("lumi.agents.core.node.cleanup_incomplete_tool_calls", return_value=[])
+@patch("lumi.agents.core.nodes.inject_system_info_into_message", side_effect=lambda m: m)
+@patch("lumi.agents.core.nodes.SkillChangeDetector")
+@patch("lumi.agents.core.nodes.cleanup_incomplete_tool_calls", return_value=[])
 async def test_skill_injection_after_preprocessing(
     mock_cleanup: MagicMock,
     mock_detector_cls: MagicMock,
@@ -58,7 +58,7 @@ async def test_skill_injection_after_preprocessing(
 
     Validates: Requirements 3.1, 3.3
     """
-    from lumi.agents.core.node import preprocess_messages
+    from lumi.agents.core.nodes import preprocess_messages
 
     # 配置 mock detector
     mock_detector = MagicMock()
@@ -98,8 +98,8 @@ async def test_skill_injection_after_preprocessing(
 # --- 测试 2: 仅最后一条 HumanMessage 被注入（Property 6）---
 
 
-@patch("lumi.agents.core.node.SkillChangeDetector")
-@patch("lumi.agents.core.node.cleanup_incomplete_tool_calls", return_value=[])
+@patch("lumi.agents.core.nodes.SkillChangeDetector")
+@patch("lumi.agents.core.nodes.cleanup_incomplete_tool_calls", return_value=[])
 async def test_only_last_human_message_injected(
     mock_cleanup: MagicMock,
     mock_detector_cls: MagicMock,
@@ -108,7 +108,7 @@ async def test_only_last_human_message_injected(
 
     **Validates: Requirements 3.2** (Property 6)
     """
-    from lumi.agents.core.node import preprocess_messages
+    from lumi.agents.core.nodes import preprocess_messages
 
     mock_detector = MagicMock()
     mock_detector.check.return_value = (_TEST_SKILLS, True)
@@ -149,8 +149,8 @@ async def test_only_last_human_message_injected(
 # --- 测试 4: 技能未变更时不注入 ---
 
 
-@patch("lumi.agents.core.node.SkillChangeDetector")
-@patch("lumi.agents.core.node.cleanup_incomplete_tool_calls", return_value=[])
+@patch("lumi.agents.core.nodes.SkillChangeDetector")
+@patch("lumi.agents.core.nodes.cleanup_incomplete_tool_calls", return_value=[])
 async def test_no_injection_when_not_changed(
     mock_cleanup: MagicMock,
     mock_detector_cls: MagicMock,
@@ -161,7 +161,7 @@ async def test_no_injection_when_not_changed(
 
     Validates: Requirements 3.3
     """
-    from lumi.agents.core.node import preprocess_messages
+    from lumi.agents.core.nodes import preprocess_messages
 
     mock_detector = MagicMock()
     mock_detector.check.return_value = (_TEST_SKILLS, False)
@@ -188,8 +188,8 @@ async def test_no_injection_when_not_changed(
 # --- 测试 5: 技能列表为空时不注入 ---
 
 
-@patch("lumi.agents.core.node.SkillChangeDetector")
-@patch("lumi.agents.core.node.cleanup_incomplete_tool_calls", return_value=[])
+@patch("lumi.agents.core.nodes.SkillChangeDetector")
+@patch("lumi.agents.core.nodes.cleanup_incomplete_tool_calls", return_value=[])
 async def test_no_injection_when_skills_empty(
     mock_cleanup: MagicMock,
     mock_detector_cls: MagicMock,
@@ -200,7 +200,7 @@ async def test_no_injection_when_skills_empty(
 
     Validates: Requirements 3.3
     """
-    from lumi.agents.core.node import preprocess_messages
+    from lumi.agents.core.nodes import preprocess_messages
 
     mock_detector = MagicMock()
     mock_detector.check.return_value = ([], True)
@@ -227,7 +227,7 @@ async def test_no_injection_when_skills_empty(
 # --- 测试: summary 后摘要消息注入技能列表 ---
 
 
-@patch("lumi.agents.core.node.SkillChangeDetector")
+@patch("lumi.agents.core.nodes.SkillChangeDetector")
 async def test_summary_injects_skills_into_summary_message(
     mock_detector_cls: MagicMock,
 ) -> None:
@@ -236,7 +236,7 @@ async def test_summary_injects_skills_into_summary_message(
     场景：聊天期间修改了 skill，触发 summary 后，
     摘要消息需要带上最新技能列表，否则 LLM 会丢失技能感知。
     """
-    from lumi.agents.core.node import preprocess_messages
+    from lumi.agents.core.nodes import preprocess_messages
 
     mock_detector = MagicMock()
     mock_detector.check.return_value = (_TEST_SKILLS, False)

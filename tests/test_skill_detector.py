@@ -13,7 +13,7 @@ from pathlib import Path
 
 from hypothesis import given, settings, strategies as st
 
-from lumi.agents.tools.skill_detector import SkillChangeDetector
+from lumi.agents.core.preprocessing.skill_detector import SkillChangeDetector
 
 # --- 策略定义 ---
 

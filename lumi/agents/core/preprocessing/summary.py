@@ -7,7 +7,7 @@ from __future__ import annotations
 
 from langchain_core.messages import HumanMessage
 
-from lumi.agents.core.message_tools import inject_text_into_message
+from lumi.agents.core.node_helpers.messages import inject_text_into_message
 
 
 def format_summary_block(summary_text: str) -> str:

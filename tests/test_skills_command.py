@@ -5,7 +5,7 @@
 
 from __future__ import annotations
 
-from lumi.agents.tools.config import SkillConfig
+from lumi.agents.tools.loader import SkillConfig
 from lumi.tui.slash_commands.handlers import build_skills_output
 from lumi.tui.slash_commands.models import CommandType, SlashCommand
 from lumi.tui.slash_commands.registry import CommandRegistry

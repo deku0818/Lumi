@@ -20,7 +20,7 @@ from langchain_mcp_adapters.client import MultiServerMCPClient
 from langchain_mcp_adapters.tools import load_mcp_tools
 from mcp import ClientSession
 
-from lumi.agents.tools.interceptors import ToolArgsInterceptor
+from lumi.agents.tools.runtime.interceptors import ToolArgsInterceptor
 from lumi.utils.logger import logger
 from lumi.utils.read_config import get_config
 

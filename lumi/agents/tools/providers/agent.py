@@ -7,7 +7,7 @@ from langchain_core.messages import HumanMessage
 from langchain_core.tools import tool
 from langgraph.prebuilt.tool_node import ToolRuntime
 
-from lumi.agents.tools.config import AgentConfig, load_agents
+from lumi.agents.tools.loader import AgentConfig, load_agents
 from lumi.agents.tools.registry import ToolRegistry
 from lumi.utils.logger import logger
 
@@ -100,7 +100,7 @@ async def agent(
 ):
     """Agent工具 - 委托给 LumiAgent 执行"""
     # Lazy import避免循环依赖
-    from lumi.agents.base.response_service import extract_ainvoke_content
+    from lumi.agents.core.response import extract_ainvoke_content
     from lumi.agents.core.graph import create_agent
 
     # 加载agent配置
@@ -116,6 +116,23 @@ async def agent(
     )
     tools = [t for t in all_tools if t.name != "agent"]
 
+    # Layer 3: 根据执行模式策略过滤工具列表
+    execution_mode = runtime.state.get("execution_mode", "normal")
+    if execution_mode != "normal":
+        from lumi.agents.tools.permissions.mode_policy import (
+            filter_tools_for_mode,
+            get_policy,
+        )
+
+        policy = get_policy(execution_mode)
+        if policy is not None:
+            tools = filter_tools_for_mode(tools, policy)
+            logger.debug(
+                "[agent tool] %s: 过滤后工具列表=%s",
+                policy.label,
+                [t.name for t in tools],
+            )
+
     # 创建并执行agent（子agent不使用checkpointer，复用主agent权限引擎）
     lumi_agent, context = await create_agent(
         tools=tools,
@@ -125,8 +142,12 @@ async def agent(
     )
 
     tool_mode = runtime.state.get("tool_mode", "auto")
-    logger.debug("[agent tool] resolved tool_mode=%s", tool_mode)
-    inputs = {"messages": [HumanMessage(content=prompt)], "tool_mode": tool_mode}
+    logger.debug("[agent tool] resolved tool_mode=%s, execution_mode=%s", tool_mode, execution_mode)
+    inputs = {
+        "messages": [HumanMessage(content=prompt)],
+        "tool_mode": tool_mode,
+        "execution_mode": execution_mode,
+    }
     result = await lumi_agent.graph.ainvoke(inputs, context=context)
 
     content = result["messages"][-1].content if result["messages"] else ""

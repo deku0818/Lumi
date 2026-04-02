@@ -54,7 +54,7 @@ from lumi.tui.slash_commands.registry import CommandRegistry
 from lumi.tui.slash_commands.models import CommandType, SlashCommand
 from lumi.tui.slash_commands.parser import parse_command_input
 from lumi.tui.slash_commands.handlers import make_skill_handler
-from lumi.agents.tools.skill_detector import SkillChangeDetector
+from lumi.agents.core.preprocessing.skill_detector import SkillChangeDetector
 
 from typing import Final
 
@@ -760,7 +760,7 @@ class LumiApp(App):
 
     async def _open_agents_screen(self) -> None:
         """打开 Agent 列表界面。"""
-        from lumi.agents.tools.config import load_agents
+        from lumi.agents.tools.loader import load_agents
 
         agents = load_agents()
 
@@ -957,16 +957,29 @@ class LumiApp(App):
         self._run.start()
         self.query_one(InputBar).set_disabled(True)
 
-        self._run.task = asyncio.create_task(self._run_stream(content, tool_mode))
+        execution_mode = "plan" if plan_mode else "normal"
+        self._run.task = asyncio.create_task(
+            self._run_stream(content, tool_mode, execution_mode=execution_mode)
+        )
 
-    async def _run_stream(self, content: str | list, tool_mode: str = "auto") -> None:
+    async def _run_stream(
+        self,
+        content: str | list,
+        tool_mode: str = "auto",
+        execution_mode: str = "normal",
+    ) -> None:
         """执行流
 
         Args:
             content: 用户输入内容
-            tool_mode: 工具执行模式，默认为 "auto"
+            tool_mode: 工具审批模式，默认为 "auto"
+            execution_mode: 执行模式，默认为 "normal"
         """
-        await self._consume_events(self._bridge.stream_response(content, tool_mode))
+        await self._consume_events(
+            self._bridge.stream_response(
+                content, tool_mode, execution_mode=execution_mode
+            )
+        )
 
     async def _run_resume(self, value) -> None:
         # resume 前保留 agent blocks，清除 run_id 映射以便 replay 重新关联
@@ -1071,7 +1084,7 @@ class LumiApp(App):
         await self._run_resume(event.answer)
 
     async def on_tool_approval_decided(self, event: ToolApproval.Decided) -> None:
-        from lumi.agents.tools.workspace import add_authorized_directory
+        from lumi.agents.tools.permissions.workspace import add_authorized_directory
 
         decision = event.decision
         approval_data = self._run.last_approval_data

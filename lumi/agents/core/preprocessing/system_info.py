@@ -13,7 +13,7 @@ import shutil
 
 from langchain_core.messages import HumanMessage
 
-from lumi.agents.core.message_tools import inject_text_into_message
+from lumi.agents.core.node_helpers.messages import inject_text_into_message
 
 
 def collect_system_info() -> dict[str, str]:

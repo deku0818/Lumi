@@ -24,7 +24,7 @@ from lumi.agents.tools.permissions.models import (
     PermissionRule,
     ToolCallInfo,
 )
-from lumi.agents.tools.workspace import (
+from lumi.agents.tools.permissions.workspace import (
     add_authorized_directory,
     set_authorized_directory,
 )

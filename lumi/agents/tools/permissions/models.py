@@ -101,13 +101,8 @@ class ApprovalRequest:
     boundary_violations: list[str] = field(default_factory=list)
 
 
-# 只读工具和自带中断机制的工具，始终跳过所有审批（不走权限评估流程）
-# - ask: 自带中断机制
-# - read, glob, grep: 文件系统只读操作
-# - todos: 仅更新会话内部状态，无文件系统副作用
-# - skill: 读取技能提示词，只读操作
-# - agent: 子 agent 调度，权限由子 agent 自身的工具调用独立评估
-# - EnterPlanMode: 进入计划模式，只读操作
+# 注意: BYPASS_TOOLS 已迁移至 capability.should_bypass_approval()
+# 保留此常量供 permissions/__init__.py 导出兼容，新代码应使用 capability 模块
 BYPASS_TOOLS: frozenset[str] = frozenset(
     {
         "ask",

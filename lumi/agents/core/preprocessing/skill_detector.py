@@ -9,7 +9,7 @@ from __future__ import annotations
 import hashlib
 from pathlib import Path
 
-from lumi.agents.tools.config import SkillConfig, load_skills
+from lumi.agents.tools.loader import SkillConfig, load_skills
 from lumi.utils.logger import logger
 from lumi.utils.read_config import get_config
 

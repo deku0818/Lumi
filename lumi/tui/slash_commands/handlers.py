@@ -11,7 +11,7 @@ from rich.text import Text
 from lumi.utils.token_counter import str_token_counter
 
 if TYPE_CHECKING:
-    from lumi.agents.tools.config import SkillConfig
+    from lumi.agents.tools.loader import SkillConfig
 
 
 def make_skill_handler(

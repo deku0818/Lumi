@@ -9,16 +9,17 @@ from langgraph.prebuilt import ToolNode
 from langgraph.types import Command, interrupt
 from langgraph.runtime import Runtime
 
-from lumi.agents.core.executor_tools import (
+from lumi.agents.core.node_helpers.execution import (
     handle_tool_error,
     truncate_tool_results,
 )
-from lumi.agents.core.message_tools import (
+from lumi.agents.core.node_helpers.messages import (
     cleanup_incomplete_tool_calls,
     inject_message_cache_breakpoints,
 )
-from lumi.agents.core.scheme import LumiAgentContext, LumiAgentState
-from lumi.agents.tools.permissions.models import BYPASS_TOOLS, PermissionDecision
+from lumi.agents.core.state import LumiAgentContext, LumiAgentState
+from lumi.agents.tools.capability import should_bypass_approval
+from lumi.agents.tools.permissions.models import PermissionDecision
 from lumi.agents.tools.permissions.safety import is_bypass_immune
 from lumi.agents.core.structured_tool import (
     STRUCTURED_OUTPUT_INSTRUCTION,
@@ -27,11 +28,11 @@ from lumi.agents.core.structured_tool import (
     extract_structured_args,
     is_structured_output_call,
 )
-from lumi.agents.base.response_service import extract_ainvoke_content
-from lumi.agents.core.summary_injector import inject_summary_into_message
-from lumi.agents.tools.skill_detector import SkillChangeDetector
-from lumi.agents.tools.skill_injector import inject_skills_into_message
-from lumi.agents.tools.system_info_injector import inject_system_info_into_message
+from lumi.agents.core.response import extract_ainvoke_content
+from lumi.agents.core.preprocessing.summary import inject_summary_into_message
+from lumi.agents.core.preprocessing.skill_detector import SkillChangeDetector
+from lumi.agents.core.preprocessing.skills import inject_skills_into_message
+from lumi.agents.core.preprocessing.system_info import inject_system_info_into_message
 from lumi.utils.llm_chain import tiktoken_counter, tool_call_chain
 from lumi.utils.logger import logger
 from lumi.utils.model_manager import detect_model_type
@@ -109,18 +110,55 @@ def after_tool_executor(state: LumiAgentState) -> str:
     return "CallModel"
 
 
+def policy_reject(state: LumiAgentState) -> Command:
+    """通用策略拒绝节点 — 自动拒绝被执行模式策略阻止的工具调用
+
+    为每个被阻止的 tool_call 生成拒绝 ToolMessage，路由回 CallModel 让模型调整。
+    确保 tool_call_id 匹配（避免 LangGraph 校验失败）。
+    """
+    from lumi.agents.tools.permissions.mode_policy import check_policy, get_policy
+
+    mode = state.get("execution_mode", "normal")
+    policy = get_policy(mode)
+
+    last_message = state["messages"][-1]
+    messages = []
+    for tc in last_message.tool_calls:
+        if policy is not None:
+            result = check_policy(policy, tc.get("name", ""), tc.get("args", {}))
+        else:
+            result = None
+
+        if result is not None and not result.allowed:
+            content = (
+                f"[{policy.label}] 操作被阻止: {result.reason}。"
+                f"当前处于 {policy.label}，只允许策略内的操作。"
+            )
+        else:
+            content = f"[{policy.label}] 同批次中存在被阻止的操作，此调用被跳过。"
+        messages.append(
+            ToolMessage(
+                content=content,
+                tool_call_id=tc.get("id", ""),
+                name=tc["name"],
+            )
+        )
+    return Command(goto="CallModel", update={"messages": messages})
+
+
 def is_use_tool(state: LumiAgentState, runtime: Runtime[LumiAgentContext]) -> str:
     """条件路由函数 - 判断下一步执行哪个节点
 
     路由优先级：
     1. 无 tool_calls → END
     2. 结构化输出 → ExtractStructuredOutput
-    3. 全部 BYPASS_TOOLS → ToolExecutor
-    4. bypass-immune 检查（所有模式）→ 命中则 HumanApproval
-    5. 权限引擎 DENY（所有模式）→ HumanApproval（节点内自动拒绝，路由回 CallModel）
-    6. privileged 模式 → ASK 命中则 HumanApproval，其余 ToolExecutor
-    7. auto 模式：全部 ALLOW + 边界 OK → ToolExecutor（快速路径）
-    8. 其他 → HumanApproval
+    3. 全部 bypass 类工具 → ToolExecutor
+    4. 执行模式策略守卫 → PolicyReject（Layer 2 模式级工具限制）
+    5. bypass-immune 检查（所有模式）→ 命中则 HumanApproval
+    6. 权限引擎 DENY（所有模式）→ HumanApproval（节点内自动拒绝，路由回 CallModel）
+    7. privileged 模式 → ASK 命中则 HumanApproval，其余 ToolExecutor
+    8. auto 模式：全部 ALLOW + 边界 OK → ToolExecutor（快速路径）
+    9. 其他 → HumanApproval
     """
     messages = state.get("messages", [])
     if not messages:
@@ -143,9 +181,32 @@ def is_use_tool(state: LumiAgentState, runtime: Runtime[LumiAgentContext]) -> st
     if is_structured_output_call(tool_calls):
         return "ExtractStructuredOutput"
 
-    # BYPASS_TOOLS 始终直接执行
-    if all(tc.get("name") in BYPASS_TOOLS for tc in tool_calls):
+    # 只读/中断/状态修改类工具跳过审批，直接执行
+    if all(
+        should_bypass_approval(tc.get("name", ""), tc.get("args", {}))
+        for tc in tool_calls
+    ):
         return "ToolExecutor"
+
+    # 执行模式策略守卫（Layer 2: 根据当前模式策略拦截不允许的工具调用）
+    execution_mode = state.get("execution_mode", "normal")
+    if execution_mode != "normal":
+        from lumi.agents.tools.permissions.mode_policy import check_policy, get_policy
+
+        policy = get_policy(execution_mode)
+        if policy is not None:
+            for tc in tool_calls:
+                result = check_policy(
+                    policy, tc.get("name", ""), tc.get("args", {})
+                )
+                if not result.allowed:
+                    logger.info(
+                        "[PolicyGuard] %s 拒绝: %s - %s",
+                        policy.label,
+                        tc.get("name"),
+                        result.reason,
+                    )
+                    return "PolicyReject"
 
     # bypass-immune 安全检查（所有模式都执行）
     for tc in tool_calls:

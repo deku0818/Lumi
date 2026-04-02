@@ -4,7 +4,7 @@ from langchain_core.tools.structured import StructuredTool
 
 from lumi.utils.logger import logger
 
-from .config import AgentConfig, SkillConfig, load_agents, load_skills
+from .loader import AgentConfig, SkillConfig, load_agents, load_skills
 
 # 导入工具提供者模块
 from .providers import ask, bash, cron, filesystem, mcp, plan, todo, skill

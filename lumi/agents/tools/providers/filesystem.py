@@ -14,13 +14,13 @@ from pathlib import Path
 from typing import TYPE_CHECKING, Literal
 
 if TYPE_CHECKING:
-    from lumi.agents.tools.file_tracker import FileChangeTracker
+    from lumi.agents.tools.runtime.file_tracker import FileChangeTracker
 
 from langchain_core.tools import tool
 from pydantic import BaseModel, Field
 from wcmatch import glob as wcglob
 
-from lumi.agents.tools.workspace import get_authorized_directory, validate_path
+from lumi.agents.tools.permissions.workspace import get_authorized_directory, validate_path
 from lumi.utils.read_config import get_config
 
 # ============================================================================

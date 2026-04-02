@@ -16,11 +16,11 @@ from langgraph.types import Command
 
 from lumi.agents.core.graph import LumiAgent, create_agent
 from lumi.agents.tools.permissions.models import BYPASS_TOOLS
-from lumi.agents.core.scheme import LumiAgentContext
-from lumi.agents.tools.checkpoint import CheckpointInfo, FileCheckpointManager
-from lumi.agents.tools.file_tracker import FileChangeTracker
+from lumi.agents.core.state import LumiAgentContext
+from lumi.agents.tools.runtime.checkpoint import CheckpointInfo, FileCheckpointManager
+from lumi.agents.tools.runtime.file_tracker import FileChangeTracker
 from lumi.agents.tools.providers.mcp import get_mcp_session_manager
-from lumi.agents.tools.session import get_session_manager
+from lumi.agents.tools.runtime.session import get_session_manager
 from lumi.utils.logger import logger
 from lumi.utils.model_manager import get_default_model_name
 from lumi.utils.read_config import get_config
@@ -131,13 +131,17 @@ class AgentBridge:
         logger.info("[AgentBridge] 切换到会话: %s", thread_id)
 
     async def stream_response(
-        self, content: str | list, tool_mode: str = "auto"
+        self,
+        content: str | list,
+        tool_mode: str = "auto",
+        execution_mode: str = "normal",
     ) -> AsyncGenerator[BridgeEvent, None]:
         """发送消息并 yield 事件流
 
         Args:
             content: 纯文本字符串或多模态 content blocks 列表。
-            tool_mode: 工具执行模式。
+            tool_mode: 工具审批模式（auto / privileged）。
+            execution_mode: 执行模式（normal / plan / readonly / 自定义）。
         """
         # 在 agent 执行前创建 checkpoint（快照当前文件状态）
         await self._create_checkpoint_before_turn(content)
@@ -147,6 +151,7 @@ class AgentBridge:
         input_data = {
             "messages": [HumanMessage(content=content)],
             "tool_mode": tool_mode,
+            "execution_mode": execution_mode,
         }
         async for event in self._stream(input_data):
             yield event

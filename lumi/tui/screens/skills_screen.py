@@ -14,7 +14,7 @@ from textual.screen import ModalScreen
 from textual.widget import Widget
 from textual.widgets import Rule, Static
 
-from lumi.agents.tools.config import SkillConfig
+from lumi.agents.tools.loader import SkillConfig
 from lumi.tui.screens.list_screen import ListScreen
 from lumi.utils.token_counter import str_token_counter
 

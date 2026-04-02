@@ -13,8 +13,8 @@ import copy
 from hypothesis import given, settings, strategies as st
 from langchain_core.messages import HumanMessage
 
-from lumi.agents.tools.config import SkillConfig
-from lumi.agents.tools.skill_injector import (
+from lumi.agents.tools.loader import SkillConfig
+from lumi.agents.core.preprocessing.skills import (
     format_skill_reminder,
     inject_skills_into_message,
 )

@@ -4,7 +4,7 @@ from __future__ import annotations
 
 from hypothesis import given, settings, strategies as st
 
-from lumi.agents.tools.config import SkillConfig
+from lumi.agents.tools.loader import SkillConfig
 from lumi.tui.slash_commands.models import CommandType, SlashCommand
 from lumi.tui.slash_commands.registry import CommandRegistry
 

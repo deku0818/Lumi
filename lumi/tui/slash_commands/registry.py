@@ -10,7 +10,7 @@ from lumi.utils.logger import logger
 from .models import CommandType, SlashCommand
 
 if TYPE_CHECKING:
-    from lumi.agents.tools.config import SkillConfig
+    from lumi.agents.tools.loader import SkillConfig
 
 
 class CommandRegistry:

@@ -9,8 +9,8 @@
 from langchain_core.tools import tool
 from pydantic import BaseModel, Field
 
-from lumi.agents.tools.session import CommandResult, get_session_manager
-from lumi.agents.tools.workspace import get_authorized_directory
+from lumi.agents.tools.runtime.session import CommandResult, get_session_manager
+from lumi.agents.tools.permissions.workspace import get_authorized_directory
 from lumi.utils.logger import logger
 
 

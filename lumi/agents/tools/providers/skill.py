@@ -13,7 +13,7 @@ from pathlib import Path
 from langchain_core.tools import tool
 from pydantic import BaseModel, Field
 
-from lumi.agents.tools.config import load_skills
+from lumi.agents.tools.loader import load_skills
 from lumi.utils.logger import logger
 from lumi.utils.read_config import get_config
 
@@ -32,7 +32,7 @@ def _get_skill_source_dir(skill_name: str) -> Path | None:
     Returns:
         源目录路径，未找到返回 None
     """
-    from lumi.agents.tools.config import _parse_md_file
+    from lumi.agents.tools.loader import _parse_md_file
 
     skills_root = _get_skills_root()
     if not skills_root.exists():
