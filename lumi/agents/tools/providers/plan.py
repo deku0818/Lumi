@@ -165,6 +165,7 @@ def ExitPlanMode(  # noqa: N802
                         tool_call_id=tool_call_id,
                     )
                 ],
+                "tool_cancelled": True,
             },
         )
 

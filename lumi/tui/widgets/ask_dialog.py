@@ -458,6 +458,19 @@ class AskDialog(Vertical):
         if event.key in ("escape", "enter"):
             self._deactivate_input()
             event.stop()
+        elif event.key in ("up", "down"):
+            self._deactivate_input()
+            qi = self._current_tab
+            opts = self._opts(qi)
+            total = self._total_items(qi)
+            cur = self._highlighted.get(qi, len(opts))
+            new_h = (cur - 1) % total if event.key == "up" else (cur + 1) % total
+            self._highlighted[qi] = new_h
+            if new_h == len(opts):
+                self._activate_input(qi)
+            else:
+                self._refresh_current()
+            event.stop()
 
     def _handle_submit_key(self, event: Key) -> None:
         """Submit 确认页的按键处理"""
