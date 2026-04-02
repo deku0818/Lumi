@@ -31,6 +31,10 @@ class LumiAgentState(TypedDict):
     agent_outcome: dict
     iterations: int
     tool_mode: Literal["auto", "privileged"]
+    """工具审批模式:
+    - "auto": 权限引擎评估，未通过则由 TUI 询问用户审批
+    - "privileged": 权限引擎评估但自动放行，仅 bypass-immune 仍需审批
+    """
     todos: NotRequired[list]
     """任务列表，用于追踪复杂任务的执行进度"""
     summary: SummaryData

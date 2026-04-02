@@ -31,6 +31,8 @@ class RunContext:
 
     phase: RunPhase = RunPhase.IDLE
     last_approval_tool_calls: list[dict] = field(default_factory=list)
+    last_approval_data: dict = field(default_factory=dict)
+    """最近一次 tool_approval interrupt 的完整数据（含 options/warnings/boundary_violations）"""
     task: asyncio.Task | None = None
 
     # 计时和 token 跟踪（单次 run）
@@ -119,6 +121,7 @@ class RunContext:
         """重置单次 run 状态（保留会话级 token 计数供 StatusLine 显示）。"""
         self.phase = RunPhase.IDLE
         self.last_approval_tool_calls.clear()
+        self.last_approval_data.clear()
         self.task = None
         self._timer_origin = 0.0
         self._timer_banked = 0.0

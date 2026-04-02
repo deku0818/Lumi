@@ -67,6 +67,9 @@ class RuleMatcher:
         将 `*` 转为正则 `.*`，其他特殊字符转义，做全匹配。
         使用 DOTALL 模式使 `.` 匹配换行符，支持多行命令（如 heredoc）。
 
+        特殊语义：若模式以 " *" 结尾且仅含一个通配符，则尾部空格和参数
+        变为可选，即 "ls *" 同时匹配 "ls" 和 "ls -la /dir"。
+
         Args:
             pattern: 命令模式，如 "npm *"
             command: 实际命令字符串
@@ -78,6 +81,13 @@ class RuleMatcher:
             # 先转义所有正则特殊字符，再将转义后的 `\\*` 替换为 `.*`
             escaped = re.escape(pattern)
             regex = escaped.replace(r"\*", ".*")
+
+            # 若模式以 " *" 结尾且仅含一个通配符，使尾部空格和参数可选
+            # 例如 "ls *" 同时匹配 "ls" 和 "ls -la /dir"
+            if pattern.endswith(" *") and pattern.count("*") == 1:
+                # escaped 中空格被转义为 "\ "，尾部为 "\ .*"（4字符）
+                regex = regex[:-4] + "( .*)?"
+
             return re.fullmatch(regex, command, re.DOTALL) is not None
         except re.error:
             logger.warning("命令模式语法错误: %s", pattern)

@@ -1019,7 +1019,8 @@ class LumiApp(App):
 
     async def _handle_tool_approval(self, evt: BridgeEvent, chat_log: ChatLog) -> None:
         self._assembler.finalize_assistant_msg()
-        # 保存工具调用信息，供拒绝/取消时创建 ToolBlock
+        # 保存完整审批数据，供决策时使用（持久化/boundary/warnings）
+        self._run.last_approval_data = dict(evt.data or {})
         tool_calls = (evt.data or {}).get("tool_calls", [])
         self._run.last_approval_tool_calls = tool_calls
         for tc in tool_calls:
@@ -1070,39 +1071,87 @@ class LumiApp(App):
         await self._run_resume(event.answer)
 
     async def on_tool_approval_decided(self, event: ToolApproval.Decided) -> None:
+        from lumi.agents.tools.workspace import add_authorized_directory
+
         decision = event.decision
-        # 拒绝或取消时，创建标记为错误的 ToolBlock 保留视觉记录
-        if decision in ("reject", "cancel"):
-            chat_log = self.query_one(ChatLog)
-            tool_calls = getattr(event, "_tool_calls", None)
-            # 从最近的 ToolApproval 数据中恢复工具信息
-            if tool_calls is None:
-                tool_calls = self._run.last_approval_tool_calls
-            # AgentGroup 模式下，子代理审批拒绝/取消不创建 ToolBlock，
-            # 错误信息由 agent TOOL_END → finish_agent_error 在 AgentGroup 中展示
-            agent_block = self._subagent_tracker.get_approval_block()
-            is_agent_group_mode = (
-                agent_block is not None and self._assembler.agent_group is not None
-            )
-            if not is_agent_group_mode:
-                for tc in tool_calls:
-                    name = tc.get("name", "unknown")
-                    args = tc.get("args", {})
-                    block = ToolBlock(name, args)
-                    await chat_log.mount(block)
-                    msg = (
-                        "用户中断了审批"
-                        if decision == "cancel"
-                        else "用户拒绝了此工具执行"
-                    )
-                    block.set_error(msg)
-            await chat_log.auto_scroll_if_needed()
+        approval_data = self._run.last_approval_data
+        resume_value: dict
+
+        # ── Approve 变体：TUI 层处理持久化，统一发送 approve ──
+        if decision in ("always_allow_exact", "always_allow_pattern"):
+            self._persist_allow_rule(decision, approval_data)
+            resume_value = {"decision": "approve"}
+        elif decision in ("approve", "allow_once"):
+            # 临时授权 boundary violation 路径
+            for v in approval_data.get("boundary_violations", []):
+                add_authorized_directory(v)
+            resume_value = {"decision": "approve"}
+
+        # ── Cancel（ESC）──
+        elif decision == "cancel":
+            resume_value = {
+                "decision": "cancel",
+                "message": "用户中断了工具调用请求",
+            }
+            await self._show_rejection_tool_blocks("用户中断了审批")
+
+        # ── Reject ──
+        else:
+            reason = self._build_reject_reason(approval_data)
+            resume_value = {"decision": "reject", "message": reason}
+            await self._show_rejection_tool_blocks("用户拒绝了此工具执行")
+
         # 审批结束，恢复 todos-bar 和 InputBar
         self._restore_todos_bar_after_approval()
         self._restore_input_after_approval()
         # 清理审批上下文
         self._subagent_tracker.clear_approval_context()
-        await self._run_resume(decision)
+        await self._run_resume(resume_value)
+
+    def _persist_allow_rule(self, decision_key: str, approval_data: dict) -> None:
+        """从审批数据中提取 tool_expr 并持久化到权限引擎。"""
+        options = approval_data.get("options", [])
+        expr = next(
+            (o["tool_expr"] for o in options if o.get("key") == decision_key),
+            None,
+        )
+        if expr:
+            self._bridge.add_allow_rule(expr)
+        else:
+            logger.error(
+                "[ToolApproval] 无法找到 tool_expr (decision=%s, options=%s)，规则未持久化",
+                decision_key,
+                [o.get("key") for o in options],
+            )
+        for v in approval_data.get("boundary_violations", []):
+            self._bridge.add_workspace(v)
+
+    @staticmethod
+    def _build_reject_reason(approval_data: dict) -> str:
+        """从审批数据中构建人类可读的拒绝原因。"""
+        warnings = approval_data.get("warnings", [])
+        if warnings:
+            return "用户拒绝了工具执行: " + "; ".join(warnings)
+        return "用户拒绝了工具执行"
+
+    async def _show_rejection_tool_blocks(self, error_msg: str) -> None:
+        """为拒绝/取消的工具调用创建标记为错误的 ToolBlock。"""
+        chat_log = self.query_one(ChatLog)
+        tool_calls = self._run.last_approval_tool_calls
+        # AgentGroup 模式下，子代理审批拒绝/取消不创建 ToolBlock，
+        # 错误信息由 agent TOOL_END → finish_agent_error 在 AgentGroup 中展示
+        agent_block = self._subagent_tracker.get_approval_block()
+        is_agent_group_mode = (
+            agent_block is not None and self._assembler.agent_group is not None
+        )
+        if not is_agent_group_mode:
+            for tc in tool_calls:
+                name = tc.get("name", "unknown")
+                args = tc.get("args", {})
+                block = ToolBlock(name, args)
+                await chat_log.mount(block)
+                block.set_error(error_msg)
+        await chat_log.auto_scroll_if_needed()
 
     async def on_plan_approval_decided(self, event: PlanApproval.Decided) -> None:
         from lumi.agents.tools.providers.plan import PLAN_REJECTED

@@ -18,12 +18,8 @@ from lumi.agents.core.message_tools import (
     inject_message_cache_breakpoints,
 )
 from lumi.agents.core.scheme import LumiAgentContext, LumiAgentState
-from lumi.agents.tools.permissions.matcher import (
-    build_exact_expr,
-    build_pattern_expr,
-)
 from lumi.agents.tools.permissions.models import BYPASS_TOOLS, PermissionDecision
-from lumi.agents.tools.workspace import add_authorized_directory
+from lumi.agents.tools.permissions.safety import is_bypass_immune
 from lumi.agents.core.structured_tool import (
     STRUCTURED_OUTPUT_INSTRUCTION,
     apply_output_enrich,
@@ -117,13 +113,14 @@ def is_use_tool(state: LumiAgentState, runtime: Runtime[LumiAgentContext]) -> st
     """条件路由函数 - 判断下一步执行哪个节点
 
     路由优先级：
-    - 有 tool_calls 且包含结构化输出工具 → "ExtractStructuredOutput"
-    - BYPASS_TOOLS (如 ask) → "ToolExecutor" 直接执行
-    - privileged 模式（tool_mode） → "ToolExecutor" 直接执行
-    - auto 模式 + 全部 allow + 边界检查通过 → "ToolExecutor" 直接执行
-    - auto 模式 + 任意 deny/unmatched → "HumanApproval" 等待审批
-    - engine is None 时回退到简单审批流程
-    - 无 tool_calls → "END" 结束流程
+    1. 无 tool_calls → END
+    2. 结构化输出 → ExtractStructuredOutput
+    3. 全部 BYPASS_TOOLS → ToolExecutor
+    4. bypass-immune 检查（所有模式）→ 命中则 HumanApproval
+    5. 权限引擎 DENY（所有模式）→ HumanApproval（节点内自动拒绝，路由回 CallModel）
+    6. privileged 模式 → ASK 命中则 HumanApproval，其余 ToolExecutor
+    7. auto 模式：全部 ALLOW + 边界 OK → ToolExecutor（快速路径）
+    8. 其他 → HumanApproval
     """
     messages = state.get("messages", [])
     if not messages:
@@ -150,66 +147,83 @@ def is_use_tool(state: LumiAgentState, runtime: Runtime[LumiAgentContext]) -> st
     if all(tc.get("name") in BYPASS_TOOLS for tc in tool_calls):
         return "ToolExecutor"
 
+    # bypass-immune 安全检查（所有模式都执行）
+    for tc in tool_calls:
+        args = tc.get("args", {})
+        try:
+            immune, reason = is_bypass_immune(tc["name"], args)
+        except Exception as e:
+            logger.error(
+                "[SafetyCheck] bypass-immune 检查异常 (%s): %s, 保守要求审批",
+                tc["name"],
+                e,
+                exc_info=True,
+            )
+            return "HumanApproval"
+        if immune:
+            logger.warning("[SafetyCheck] Bypass-immune: %s", reason)
+            return "HumanApproval"
+
+    # 权限引擎评估（所有模式共用）
+    engine = runtime.context.permission_engine
     tool_mode = state.get("tool_mode", "auto")
 
-    # 特权模式：跳过所有审批（bypass-immune 除外）
-    if tool_mode == "privileged":
-        from lumi.agents.tools.permissions.safety import is_bypass_immune
+    if engine is not None:
+        engine.reload()
+        has_deny = False
+        has_ask = False
+        all_allowed = True
 
         for tc in tool_calls:
+            name = tc["name"]
+            args = tc.get("args", {})
             try:
-                immune, reason = is_bypass_immune(tc["name"], tc.get("args", {}))
+                decision = engine.evaluate(name, args)
+                boundary_ok = engine.check_workspace_boundary(name, args)
+                logger.debug(
+                    "[PermissionCheck] 工具 %s: decision=%s, boundary_ok=%s",
+                    name,
+                    decision.value,
+                    boundary_ok,
+                )
+                if decision == PermissionDecision.DENY:
+                    has_deny = True
+                    break
+                if decision == PermissionDecision.ASK:
+                    has_ask = True
+                if decision != PermissionDecision.ALLOW or not boundary_ok:
+                    all_allowed = False
             except Exception as e:
                 logger.error(
-                    "[SafetyCheck] bypass-immune 检查异常 (%s): %s, 保守要求审批",
-                    tc["name"],
+                    "[PermissionCheck] 工具 %s 权限评估异常: %s, 保守要求审批",
+                    name,
                     e,
                     exc_info=True,
                 )
+                # 评估异常时保守处理：所有模式都要求人工审批
                 return "HumanApproval"
-            if immune:
-                logger.warning("[SafetyCheck] Bypass-immune: %s", reason)
-                return "HumanApproval"
-        return "ToolExecutor"
 
-    # 使用权限引擎评估
-    engine = runtime.context.permission_engine
-    if engine is not None:
-        engine.reload()
-
-        if tool_mode == "auto":
-            # auto 模式：全部 allow 且未越界才直接执行，否则需要审批
-            all_allowed = True
-            for tc in tool_calls:
-                try:
-                    decision = engine.evaluate(tc["name"], tc.get("args", {}))
-                    boundary_ok = engine.check_workspace_boundary(
-                        tc["name"], tc.get("args", {})
-                    )
-                    logger.debug(
-                        "[PermissionCheck] 工具 %s: decision=%s, boundary_ok=%s",
-                        tc["name"],
-                        decision.value,
-                        boundary_ok,
-                    )
-                    if decision != PermissionDecision.ALLOW or not boundary_ok:
-                        all_allowed = False
-                        break
-                except Exception as e:
-                    # 权限评估异常时保守处理：要求人工审批，并记录详细错误
-                    all_allowed = False
-                    logger.error(
-                        f"[PermissionCheck] 工具 {tc['name']} 权限评估异常：{e}",
-                        exc_info=True,
-                    )
-                    break
-
-            if all_allowed:
-                return "ToolExecutor"
+        # DENY：所有模式下路由到审批节点（节点内自动拒绝）
+        if has_deny:
             return "HumanApproval"
 
-    # engine is None 时保守处理：需要审批
-    logger.warning("[is_use_tool] 权限引擎不可用，tool_mode=auto 回退到人工审批")
+        # privileged 模式：ASK 仍需审批，其余自动放行
+        if tool_mode == "privileged":
+            if has_ask:
+                return "HumanApproval"
+            return "ToolExecutor"
+
+        # auto 模式：全部 ALLOW + 边界 OK 才直接执行
+        if all_allowed:
+            return "ToolExecutor"
+
+        return "HumanApproval"
+
+    # engine is None：privileged 放行，auto 审批
+    if tool_mode == "privileged":
+        logger.warning("[is_use_tool] 权限引擎不可用，privileged 模式直接放行")
+        return "ToolExecutor"
+    logger.warning("[is_use_tool] 权限引擎不可用，回退到人工审批")
     return "HumanApproval"
 
 
@@ -218,154 +232,74 @@ def human_approval(
 ) -> Command:
     """使用 interrupt 暂停执行，等待用户审批
 
-    根据 tool_mode 和 PermissionDecision 构造不同的中断数据：
-    - auto + deny/unmatched → 权限审批（权限选项 + deny 警告）
-    - privileged → 不应到达此节点（已在 is_use_tool 直接执行）
-    - engine is None → 回退到简单审批流程
+    Graph 侧处理：
+    - DENY 命中 → 跳过 interrupt，直接拒绝并路由回 CallModel
+    - 非 DENY → interrupt 等待用户审批：
+      - approve → ToolExecutor
+      - reject  → END（附带拒绝原因 ToolMessage）
+      - cancel  → END（附带取消原因 ToolMessage）
+
+    权限评估、选项构建、规则持久化由 TUI/Bridge 层负责。
+    resume 值为 dict: {"decision": "approve"/"reject"/"cancel", "message": "..."}
     """
     last_message = state["messages"][-1]
-    engine = runtime.context.permission_engine
-
     tool_calls_data = [
-        {"name": tc["name"], "args": tc["args"]} for tc in last_message.tool_calls
+        {"id": tc.get("id", ""), "name": tc["name"], "args": tc["args"]}
+        for tc in last_message.tool_calls
     ]
 
-    # 无权限引擎时回退到简单审批
-    if engine is None:
-        decision = interrupt(
-            {
-                "type": "tool_approval",
-                "message": "是否执行以下工具？",
-                "tool_calls": tool_calls_data,
-            }
-        )
-        if decision == "approve":
-            return Command(goto="ToolExecutor")
-        reject_messages = _build_reject_messages(last_message.tool_calls)
-        return Command(goto=END, update={"messages": reject_messages})
+    # DENY 命中：跳过 interrupt，直接拒绝并路由回 CallModel 让模型调整
+    # 注：is_use_tool 已将 DENY 路由到此节点，此处为防御性二次确认
+    engine = runtime.context.permission_engine
+    if engine is not None:
+        for tc in last_message.tool_calls:
+            try:
+                decision = engine.evaluate(tc["name"], tc.get("args", {}))
+                if decision == PermissionDecision.DENY:
+                    messages = _build_reject_messages(
+                        last_message.tool_calls,
+                        content="你执行的此操作命中了用户的禁止策略，你的操作可能被用户视为危险操作，你应该思考此操作的风险使用更低风险的操作来完成目标。",
+                    )
+                    return Command(goto="CallModel", update={"messages": messages})
+            except Exception as e:
+                logger.error(
+                    "[HumanApproval] DENY 检查异常 (%s): %s, 保守拒绝",
+                    tc["name"],
+                    e,
+                    exc_info=True,
+                )
+                messages = _build_reject_messages(
+                    last_message.tool_calls,
+                    content="权限评估异常，无法确认操作安全性，已自动拒绝。",
+                )
+                return Command(goto="CallModel", update={"messages": messages})
 
-    # 收集权限决策、边界违规和警告
-    decisions: list[PermissionDecision] = []
-    warnings: list[str] = []
-    boundary_violations: list[str] = []
+    result = interrupt({"type": "tool_approval", "tool_calls": tool_calls_data})
 
-    from lumi.agents.tools.permissions.validators import validate_bash_command
+    # 解析 resume 值
+    if isinstance(result, dict):
+        decision = result.get("decision", "reject")
+        message = result.get("message", "")
+    else:
+        # 兼容字符串（简单场景 / headless）
+        decision = str(result)
+        message = ""
 
-    for tc in last_message.tool_calls:
-        name, args = tc["name"], tc.get("args", {})
-
-        # 工作区边界检查
-        try:
-            violations = engine.get_boundary_violations(name, args)
-            boundary_violations.extend(violations)
-        except Exception as e:
-            logger.error(
-                "[HumanApproval] 边界检查异常 (%s): %s", name, e, exc_info=True
-            )
-
-        # 权限评估
-        try:
-            decision = engine.evaluate(name, args)
-        except Exception as e:
-            logger.error(
-                "[HumanApproval] 权限评估异常 (%s): %s", name, e, exc_info=True
-            )
-            decision = PermissionDecision.UNMATCHED
-        decisions.append(decision)
-        if decision == PermissionDecision.DENY:
-            warnings.append(f"⚠ 工具 {name} 命中 deny 规则，该操作被标记为危险")
-        elif decision == PermissionDecision.ASK:
-            warnings.append(f"ℹ 工具 {name} 命中 ask 规则，需要确认")
-
-        # Bash 安全校验器警告
-        if name == "bash":
-            cmd = args.get("command") or args.get("cmd", "")
-            for w in validate_bash_command(cmd):
-                prefix = "⚠" if w.level == "danger" else "⚡"
-                warnings.append(f"{prefix} {w.message}")
-
-    # 构造审批选项
-    options: list[dict] = []
-    needs_permission_options = any(
-        d
-        in (
-            PermissionDecision.DENY,
-            PermissionDecision.UNMATCHED,
-            PermissionDecision.ASK,
-        )
-        for d in decisions
-    ) or bool(boundary_violations)
-
-    if needs_permission_options:
-        # 构造精确匹配和宽泛模式的工具表达式
-        tc = last_message.tool_calls[0]
-        exact_expr = build_exact_expr(tc["name"], tc.get("args", {}))
-        pattern_expr = build_pattern_expr(tc["name"], tc.get("args", {}))
-
-        options = [
-            {"key": "allow_once", "label": "允许执行这一次"},
-            {
-                "key": "always_allow_exact",
-                "label": f"始终允许: {exact_expr}",
-                "tool_expr": exact_expr,
-            },
-        ]
-        if pattern_expr and pattern_expr != exact_expr:
-            options.append(
-                {
-                    "key": "always_allow_pattern",
-                    "label": f"始终允许: {pattern_expr}",
-                    "tool_expr": pattern_expr,
-                }
-            )
-        options.append({"key": "reject", "label": "拒绝"})
-
-    # 构造中断数据
-    interrupt_data: dict = {
-        "type": "tool_approval",
-        "tool_calls": tool_calls_data,
-        "decisions": [d.value for d in decisions],
-    }
-
-    # auto 模式：权限审批
-    interrupt_data["message"] = "以下工具需要权限授权"
-    if needs_permission_options:
-        interrupt_data["options"] = options
-
-    if warnings:
-        interrupt_data["warnings"] = warnings
-    if boundary_violations:
-        interrupt_data["boundary_violations"] = boundary_violations
-
-    decision_str = interrupt(interrupt_data)
-
-    # 处理用户选择
-    match decision_str:
-        case "approve" | "allow_once":
-            # 临时授权 boundary violation 路径（不持久化）
-            for v in boundary_violations:
-                add_authorized_directory(v)
-            return Command(goto="ToolExecutor")
-        case "always_allow_exact" | "always_allow_pattern":
-            expr = next(
-                (o["tool_expr"] for o in options if o["key"] == decision_str),
-                None,
-            )
-            if expr:
-                engine.add_allow_rule(expr)
-            for v in boundary_violations:
-                engine.add_workspace(v)
+    match decision:
+        case "approve":
             return Command(goto="ToolExecutor")
         case "cancel":
-            # esc 中断：模拟 ToolMessage 后直接结束
-            cancel_messages = _build_reject_messages(
-                last_message.tool_calls, content="用户中断了工具调用请求"
+            messages = _build_reject_messages(
+                last_message.tool_calls,
+                content=message or "用户中断了工具调用请求",
             )
-            return Command(goto=END, update={"messages": cancel_messages})
-        case _:
-            # 拒绝：模拟 ToolMessage 后直接结束
-            reject_messages = _build_reject_messages(last_message.tool_calls)
-            return Command(goto=END, update={"messages": reject_messages})
+            return Command(goto=END, update={"messages": messages})
+        case _:  # reject 及默认
+            messages = _build_reject_messages(
+                last_message.tool_calls,
+                content=message or "用户拒绝了工具执行",
+            )
+            return Command(goto=END, update={"messages": messages})
 
 
 def _build_reject_messages(

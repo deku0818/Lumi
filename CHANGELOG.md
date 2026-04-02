@@ -1,5 +1,24 @@
 # Changelog
 
+## [0.1.0a] - 2026-04-02
+
+### Changed
+- 权限审批流重构：Graph 层 `human_approval` 简化为纯三态契约（approve/reject/cancel），权限评估、选项构建、规则持久化迁移至 Bridge/TUI 层
+- `is_use_tool` 路由逻辑统一：bypass-immune → 权限引擎评估 → 模式分派，所有模式共用同一评估循环
+- `stream_resume` 不再强制 `tool_mode="auto"`，由 Graph 状态自行维护
+- 审批 resume 值从字符串改为 `dict`（`{"decision": ..., "message": ...}`），支持结构化拒绝原因
+- `ToolApproval` 简化：单工具直接渲染参数，多工具使用缩进子标题；border_title 显示工具名而非固定文案
+- `RuleMatcher` 通配符增强：`"ls *"` 同时匹配 `"ls"`（无参数）和 `"ls -la /dir"`
+
+### Fixed
+- **权限评估异常在 privileged 模式下穿透到自动放行**：异常时直接路由到 HumanApproval 而非继续执行
+- **`human_approval` DENY 检查的 `except Exception: pass`**：改为记录日志并保守拒绝
+- 边界检查异常时向用户展示警告（而非静默忽略）
+- `add_allow_rule`/`add_workspace` 引擎不可用时记录 warning
+- `_persist_allow_rule` 找不到 tool_expr 时记录 error（而非静默跳过）
+- `engine is None` 路径恢复审计日志
+- `_render_tool_args` 中 `get_renderer()` 移入 try 块防止注册表异常崩溃 widget
+
 ## [0.0.11] - 2026-04-01
 
 ### Added
