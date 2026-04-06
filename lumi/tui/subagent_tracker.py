@@ -44,6 +44,7 @@ class SubagentTracker:
 
     def __init__(self) -> None:
         self._by_run_id: dict[str, SubagentState] = {}
+        self._unmapped: list[SubagentState] = []
         self._approval_run_id: str | None = None
 
     # ── 注册 / 查找 / 注销 ──
@@ -55,12 +56,22 @@ class SubagentTracker:
         return state
 
     def get(self, run_id: str) -> SubagentState | None:
-        """通过 run_id 精确查找。O(1)。"""
-        return self._by_run_id.get(run_id)
+        """通过 run_id 精确查找。优先查 _by_run_id，回退到 _unmapped。"""
+        state = self._by_run_id.get(run_id)
+        if state is not None:
+            return state
+        # replay fallback: _unmapped 中可能保留旧 run_id
+        for s in self._unmapped:
+            if s.run_id == run_id:
+                return s
+        return None
 
     def get_by_block(self, agent_block: "ToolBlock") -> SubagentState | None:
         """通过 ToolBlock 实例反查 SubagentState。"""
         for state in self._by_run_id.values():
+            if state.agent_block is agent_block:
+                return state
+        for state in self._unmapped:
             if state.agent_block is agent_block:
                 return state
         return None
@@ -79,7 +90,7 @@ class SubagentTracker:
             return
         state.finalize_assistant_msg()
         state.tool_blocks.clear()
-        self._by_run_id[f"__unmapped_{id(state.agent_block)}"] = state
+        self._unmapped.append(state)
 
     @property
     def active_run_ids(self) -> frozenset[str]:
@@ -94,7 +105,7 @@ class SubagentTracker:
     def get_approval_block(self) -> "ToolBlock | None":
         """获取正在等待审批的 subagent 的 agent ToolBlock。"""
         if self._approval_run_id:
-            state = self._by_run_id.get(self._approval_run_id)
+            state = self.get(self._approval_run_id)
             return state.agent_block if state else None
         return None
 
@@ -104,26 +115,20 @@ class SubagentTracker:
     # ── Resume / Replay 支持 ──
 
     def prepare_for_resume(self) -> None:
-        """resume 前调用：保留 agent blocks，添加 unmapped 别名供 replay 匹配。
+        """resume 前调用：保留 agent blocks，移入 _unmapped 供 replay 匹配。
 
         replay 会产生新的 run_id，_handle_tool_start 会调用 remap() 重新关联。
-        旧 run_id 键保留，使得 replay 期间携带旧 parent_run_id 的子代理事件
-        仍能通过 get() 正确路由到对应的 SubagentState。
+        旧 run_id 通过 get() 的 fallback 查找仍能路由到对应的 SubagentState。
         """
-        # 去重：同一 state 可能已有多个键（如 run_id + __unmapped_）
         seen: set[int] = set()
-        unique_states: list[SubagentState] = []
         for state in self._by_run_id.values():
             sid = id(state)
             if sid not in seen:
                 seen.add(sid)
-                unique_states.append(state)
-
-        for state in unique_states:
-            state.finalize_assistant_msg()
-            state.tool_blocks.clear()
-            # 添加 __unmapped_ 别名（find_unmapped_running 用），旧键自动保留
-            self._by_run_id[f"__unmapped_{id(state.agent_block)}"] = state
+                state.finalize_assistant_msg()
+                state.tool_blocks.clear()
+                self._unmapped.append(state)
+        self._by_run_id.clear()
         self._approval_run_id = None
 
     def find_unmapped_running(self, args: dict | None = None) -> "ToolBlock | None":
@@ -136,11 +141,8 @@ class SubagentTracker:
         from lumi.tui.widgets.tool_block import ToolStatus
 
         fallback: ToolBlock | None = None
-        for key, state in self._by_run_id.items():
-            if (
-                key.startswith("__unmapped_")
-                and state.agent_block.status == ToolStatus.RUNNING
-            ):
+        for state in self._unmapped:
+            if state.agent_block.status == ToolStatus.RUNNING:
                 if args and state.agent_block._args == args:
                     return state.agent_block
                 if fallback is None:
@@ -150,19 +152,15 @@ class SubagentTracker:
     def remap(self, new_run_id: str, agent_block: "ToolBlock") -> SubagentState | None:
         """将已有 block 关联到新的 run_id（replay 场景）。
 
-        移除指向该 block 的所有旧键（包括旧 run_id 和 __unmapped_ 别名），
-        然后用 new_run_id 重新注册。
+        从 _unmapped 中找到目标 state 并移入 _by_run_id。
         """
         target: SubagentState | None = None
-        keys_to_remove: list[str] = []
-        for key, state in self._by_run_id.items():
+        for i, state in enumerate(self._unmapped):
             if state.agent_block is agent_block:
-                keys_to_remove.append(key)
-                target = state
+                target = self._unmapped.pop(i)
+                break
         if target is None:
             return None
-        for key in keys_to_remove:
-            del self._by_run_id[key]
         target.run_id = new_run_id
         target.finalize_assistant_msg()
         target.tool_blocks.clear()
@@ -175,4 +173,5 @@ class SubagentTracker:
     def reset(self) -> None:
         """run 结束时清空所有状态。"""
         self._by_run_id.clear()
+        self._unmapped.clear()
         self._approval_run_id = None

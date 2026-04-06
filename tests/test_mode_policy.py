@@ -5,7 +5,6 @@
 
 import pytest
 
-from lumi.agents.tools.capability import ToolEffect
 from lumi.agents.tools.permissions.mode_policy import (
     ModePolicy,
     PLAN_POLICY,
@@ -42,7 +41,7 @@ class TestPolicyRegistry:
         custom = ModePolicy(
             name="audit",
             label="Audit mode",
-            allowed_effects=ToolEffect.NONE,
+            allow_write=False,
         )
         register_policy("audit", custom)
         assert get_policy("audit") is custom
@@ -68,15 +67,22 @@ class TestCheckPolicyPlan:
     def test_readonly_allowed(self, tool_name):
         assert check_policy(self.policy, tool_name, {}).allowed
 
-    # 中断工具 → 放行
-    @pytest.mark.parametrize("tool_name", ["ask", "ExitPlanMode"])
-    def test_interrupt_allowed(self, tool_name):
+    # ask / todos → 放行（只读）
+    @pytest.mark.parametrize("tool_name", ["ask", "ExitPlanMode", "todos"])
+    def test_interaction_tools_allowed(self, tool_name):
         assert check_policy(self.policy, tool_name, {}).allowed
 
-    # 状态修改 → 放行
-    @pytest.mark.parametrize("tool_name", ["todos", "cron"])
-    def test_state_mutate_allowed(self, tool_name):
-        assert check_policy(self.policy, tool_name, {}).allowed
+    # cron 只读操作 → 放行
+    def test_cron_list_allowed(self):
+        assert check_policy(self.policy, "cron", {"operation": "list"}).allowed
+
+    def test_cron_runs_allowed(self):
+        assert check_policy(self.policy, "cron", {"operation": "runs"}).allowed
+
+    # cron 写入操作 → 拒绝
+    def test_cron_create_blocked(self):
+        r = check_policy(self.policy, "cron", {"operation": "create"})
+        assert not r.allowed
 
     # 文件写入 — 非 plan 文件 → 拒绝
     def test_write_src_file_blocked(self):
@@ -137,17 +143,20 @@ class TestCheckPolicyReadonly:
     def test_readonly_allowed(self, tool_name):
         assert check_policy(self.policy, tool_name, {}).allowed
 
-    # 中断 → 放行
+    # ask / todos → 放行（只读）
     def test_ask_allowed(self):
         assert check_policy(self.policy, "ask", {}).allowed
 
-    # 状态修改 → 拒绝（比 plan mode 更严格）
-    def test_todos_blocked(self):
-        r = check_policy(self.policy, "todos", {})
-        assert not r.allowed
+    def test_todos_allowed(self):
+        assert check_policy(self.policy, "todos", {}).allowed
 
-    def test_cron_blocked(self):
-        r = check_policy(self.policy, "cron", {})
+    # cron 只读操作 → 放行
+    def test_cron_list_allowed(self):
+        assert check_policy(self.policy, "cron", {"operation": "list"}).allowed
+
+    # cron 写入操作 → 拒绝
+    def test_cron_create_blocked(self):
+        r = check_policy(self.policy, "cron", {"operation": "create"})
         assert not r.allowed
 
     # 所有写入 → 拒绝（无 path_filter，plan 文件也不允许）
@@ -175,28 +184,38 @@ class TestCheckPolicyReadonly:
 class TestCheckPolicyCustom:
     """自定义策略测试"""
 
-    def test_custom_allows_only_none(self):
-        """只允许 NONE 效果的极简策略"""
+    def test_custom_no_write(self):
+        """不允许写入的极简策略"""
         strict = ModePolicy(
             name="strict",
             label="Strict mode",
-            allowed_effects=ToolEffect.NONE,
+            allow_write=False,
         )
         assert check_policy(strict, "read", {}).allowed
-        assert not check_policy(strict, "ask", {}).allowed  # INTERRUPT 不在 allowed
-        assert not check_policy(strict, "todos", {}).allowed
+        assert check_policy(strict, "ask", {}).allowed
+        assert check_policy(strict, "todos", {}).allowed
         assert not check_policy(strict, "write", {"file_path": "x"}).allowed
 
     def test_custom_with_path_filter(self):
-        """自定义路径过滤器 — FILE_WRITE 不在 allowed_effects 中，由 path_filter 控制"""
+        """自定义路径过滤器"""
         docs_only = ModePolicy(
             name="docs",
             label="Docs mode",
-            allowed_effects=ToolEffect.NONE,  # FILE_WRITE 不在此，走 path_filter
+            allow_write=False,
             path_filter=lambda p: p.endswith(".md"),
         )
         assert check_policy(docs_only, "write", {"file_path": "README.md"}).allowed
         assert not check_policy(docs_only, "write", {"file_path": "main.py"}).allowed
+
+    def test_allow_write_mode(self):
+        """allow_write=True 时不限制"""
+        permissive = ModePolicy(
+            name="permissive",
+            label="Permissive mode",
+            allow_write=True,
+        )
+        assert check_policy(permissive, "write", {"file_path": "x"}).allowed
+        assert check_policy(permissive, "bash", {"command": "rm -rf /"}).allowed
 
 
 # ── _is_under_lumi_plans ──
@@ -227,13 +246,13 @@ class TestIsUnderLumiPlans:
 
 
 class TestFilterToolsForMode:
-    """Layer 3: 子 Agent 工具过滤"""
+    """子 Agent 工具过滤"""
 
     class FakeTool:
         def __init__(self, name: str):
             self.name = name
 
-    def test_plan_keeps_readonly_and_interrupt(self):
+    def test_plan_keeps_readonly_and_write_with_filter(self):
         tools = [
             self.FakeTool(n) for n in ["read", "glob", "ask", "write", "edit", "bash"]
         ]
@@ -242,8 +261,8 @@ class TestFilterToolsForMode:
         assert "read" in names
         assert "glob" in names
         assert "ask" in names
-        assert "bash" in names  # bash 保留（运行时 Layer 2 判断）
-        # write/edit 有 path_filter → 也保留（运行时 Layer 2 检查路径）
+        assert "bash" in names  # bash 保留（运行时动态判断）
+        # write/edit 有 path_filter → 也保留（运行时检查路径）
         assert "write" in names
         assert "edit" in names
 
@@ -258,19 +277,22 @@ class TestFilterToolsForMode:
         assert "glob" in names
         assert "ask" in names
         assert "bash" in names  # bash 保留
+        assert "todos" in names  # todos 现在是只读
         # write/edit 无 path_filter → 移除
         assert "write" not in names
         assert "edit" not in names
-        # todos STATE_MUTATE 不在 readonly allowed → 移除
-        assert "todos" not in names
 
-    def test_strict_mode_removes_most(self):
+    def test_strict_mode_removes_write(self):
         strict = ModePolicy(
             name="strict",
             label="Strict",
-            allowed_effects=ToolEffect.NONE,
+            allow_write=False,
         )
         tools = [self.FakeTool(n) for n in ["read", "ask", "write", "todos", "bash"]]
         filtered = filter_tools_for_mode(tools, strict)
         names = [t.name for t in filtered]
-        assert names == ["read", "bash"]  # read=NONE, bash 保留
+        assert "read" in names
+        assert "ask" in names
+        assert "todos" in names
+        assert "bash" in names  # bash 保留
+        assert "write" not in names

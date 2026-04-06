@@ -9,6 +9,7 @@ from __future__ import annotations
 from enum import StrEnum
 
 from lumi.tui.widgets.tool_group import should_exclude_from_group
+from lumi.utils.logger import logger
 
 
 class GroupDecision(StrEnum):
@@ -31,12 +32,18 @@ class GroupingEngine:
       - 每次清理 widget 分组状态后必须调用 flush_tools/flush_agents
     """
 
-    __slots__ = ("_has_pending", "_has_active_group", "_has_agent_group")
+    __slots__ = (
+        "_has_pending",
+        "_has_active_group",
+        "_has_agent_group",
+        "_pending_decision",
+    )
 
     def __init__(self) -> None:
         self._has_pending: bool = False
         self._has_active_group: bool = False
         self._has_agent_group: bool = False
+        self._pending_decision: GroupDecision | None = None
 
     # ── 公开 API ──
 
@@ -47,16 +54,32 @@ class GroupingEngine:
             name: 工具名称
             approval_mode: 是否处于审批模式
         """
+        if self._pending_decision is not None:
+            raise RuntimeError(
+                f"decide_tool() called twice without on_tool_started(). "
+                f"Pending decision: {self._pending_decision}"
+            )
         if name == "agent":
-            return GroupDecision.AGENT
-        if should_exclude_from_group(name, approval_mode):
-            return GroupDecision.STANDALONE
-        if self._has_pending or self._has_active_group:
-            return GroupDecision.GROUP_APPEND
-        return GroupDecision.GROUP_FIRST
+            decision = GroupDecision.AGENT
+        elif should_exclude_from_group(name, approval_mode):
+            decision = GroupDecision.STANDALONE
+        elif self._has_pending or self._has_active_group:
+            decision = GroupDecision.GROUP_APPEND
+        else:
+            decision = GroupDecision.GROUP_FIRST
+        self._pending_decision = decision
+        return decision
 
     def on_tool_started(self, decision: GroupDecision) -> None:
         """决策被应用后更新内部状态。"""
+        if self._pending_decision is None:
+            raise RuntimeError("on_tool_started() called without prior decide_tool()")
+        if self._pending_decision != decision:
+            raise RuntimeError(
+                f"on_tool_started({decision}) doesn't match "
+                f"pending decision {self._pending_decision}"
+            )
+        self._pending_decision = None
         match decision:
             case GroupDecision.GROUP_FIRST:
                 self._has_pending = True
@@ -70,8 +93,15 @@ class GroupingEngine:
 
     def flush_tools(self) -> None:
         """重置工具分组状态（遇到文本/交互事件时调用）。"""
+        if self._pending_decision is not None:
+            logger.warning(
+                "flush_tools() called with pending decision: %s "
+                "(decide_tool → on_tool_started contract was broken)",
+                self._pending_decision,
+            )
         self._has_pending = False
         self._has_active_group = False
+        self._pending_decision = None
 
     def flush_agents(self) -> None:
         """重置 agent 分组状态。"""
@@ -87,6 +117,7 @@ class GroupingEngine:
         self._has_pending = False
         self._has_active_group = False
         self._has_agent_group = False
+        self._pending_decision = None
 
     # ── 状态查询 ──
 

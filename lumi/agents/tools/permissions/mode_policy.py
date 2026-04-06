@@ -1,11 +1,8 @@
-"""执行模式策略 — 通用的模式级工具限制体系
-
-三层工具限制机制的 Layer 2：基于当前执行模式的策略评估。
+"""执行模式策略 — 基于当前执行模式的工具限制
 
 每种执行模式（plan / readonly / 自定义）对应一个 ModePolicy 实例，声明：
-- allowed_effects: 无条件允许的 ToolEffect 集合
-- path_filter: FILE_WRITE 效果时的路径过滤（返回 True 表示允许写入该路径）
-- label: 拒绝消息中显示的模式名称
+- allow_write: 是否允许写入操作
+- path_filter: 写入操作的路径白名单（仅 allow_write=False 时生效）
 
 "normal" 模式无策略限制（policy 为 None），工具调用直接走后续权限引擎。
 
@@ -19,7 +16,7 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import TYPE_CHECKING
 
-from lumi.agents.tools.capability import ToolEffect, get_tool_effect
+from lumi.agents.tools.capability import is_write_tool
 
 if TYPE_CHECKING:
     from langchain_core.tools.structured import StructuredTool
@@ -35,15 +32,18 @@ class ModePolicy:
     Attributes:
         name: 模式标识符，如 "plan", "readonly"
         label: 显示名称，用于拒绝消息（如 "Plan mode"）
-        allowed_effects: 无条件放行的 ToolEffect 集合
-        path_filter: FILE_WRITE 路径白名单函数。
-            None → 不允许任何文件写入。
+        allow_write: 是否允许写入操作。
+            True → 不限制写入（等同于无策略）。
+            False → 写入操作被拦截，除非 path_filter 放行。
+        path_filter: 写入操作的路径白名单函数。
+            仅在 allow_write=False 时生效。
+            None → 不允许任何写入。
             返回 True → 该路径允许写入。
     """
 
     name: str
     label: str
-    allowed_effects: ToolEffect
+    allow_write: bool = True
     path_filter: Callable[[str], bool] | None = None
 
 
@@ -75,15 +75,15 @@ def _is_under_lumi_plans(file_path: str) -> bool:
 PLAN_POLICY = ModePolicy(
     name="plan",
     label="Plan mode",
-    allowed_effects=ToolEffect.NONE | ToolEffect.INTERRUPT | ToolEffect.STATE_MUTATE,
+    allow_write=False,
     path_filter=_is_under_lumi_plans,
 )
 
 READONLY_POLICY = ModePolicy(
     name="readonly",
     label="Read-only mode",
-    allowed_effects=ToolEffect.NONE | ToolEffect.INTERRUPT,
-    path_filter=None,  # 不允许任何文件写入
+    allow_write=False,
+    path_filter=None,
 )
 
 # ── 策略注册表 ──
@@ -117,7 +117,7 @@ def register_policy(mode: str, policy: ModePolicy) -> None:
     _POLICIES[mode] = policy
 
 
-# ── Layer 2: 通用策略守卫 ──
+# ── 策略守卫 ──
 
 
 def check_policy(policy: ModePolicy, tool_name: str, tool_args: dict) -> PolicyResult:
@@ -131,24 +131,21 @@ def check_policy(policy: ModePolicy, tool_name: str, tool_args: dict) -> PolicyR
     Returns:
         PolicyResult，allowed=False 时 reason 说明拒绝原因
     """
-    effect = get_tool_effect(tool_name, tool_args)
-
-    # 效果全部在允许集合内 → 放行
-    if not (effect & ~policy.allowed_effects):
+    # 允许写入的策略 → 全部放行
+    if policy.allow_write:
         return PolicyResult(allowed=True)
 
-    # 文件写入 → 检查路径白名单
-    if ToolEffect.FILE_WRITE in effect:
-        file_path = tool_args.get("file_path", "")
-        if policy.path_filter is not None and policy.path_filter(file_path):
-            return PolicyResult(allowed=True)
-        return PolicyResult(
-            allowed=False,
-            reason=f"{policy.label} 禁止写入: {file_path}",
-        )
+    # 只读操作 → 放行
+    if not is_write_tool(tool_name, tool_args):
+        return PolicyResult(allowed=True)
 
-    # Shell 执行（bash 命令未通过只读检查）
-    if ToolEffect.SHELL_EXEC in effect:
+    # 写入操作 → 检查路径白名单
+    file_path = tool_args.get("file_path", "")
+    if policy.path_filter is not None and file_path and policy.path_filter(file_path):
+        return PolicyResult(allowed=True)
+
+    # bash 写入命令
+    if tool_name == "bash":
         cmd = tool_args.get("command", "")
         preview = cmd[:60] + "..." if len(cmd) > 60 else cmd
         return PolicyResult(
@@ -156,14 +153,21 @@ def check_policy(policy: ModePolicy, tool_name: str, tool_args: dict) -> PolicyR
             reason=f"{policy.label} 禁止执行写入命令: {preview}",
         )
 
-    # 未知效果 → 保守拒绝
+    # 文件写入
+    if file_path:
+        return PolicyResult(
+            allowed=False,
+            reason=f"{policy.label} 禁止写入: {file_path}",
+        )
+
+    # 其他写入工具（如 cron 写入操作）
     return PolicyResult(
         allowed=False,
-        reason=f"{policy.label} 下不允许 {tool_name} 工具",
+        reason=f"{policy.label} 禁止 {tool_name} 写入操作",
     )
 
 
-# ── Layer 3: 子 Agent 工具过滤 ──
+# ── 子 Agent 工具过滤 ──
 
 
 def filter_tools_for_mode(
@@ -171,8 +175,8 @@ def filter_tools_for_mode(
 ) -> list["StructuredTool"]:
     """根据模式策略过滤工具列表
 
-    移除静态效果不在 allowed_effects 内的工具。
-    bash 工具保留（其只读性在运行时由 Layer 2 动态判断）。
+    移除写入工具。bash 保留（其只读性在运行时动态判断）。
+    有 path_filter 的策略保留文件写入工具（运行时检查路径）。
 
     Args:
         tools: 原始工具列表
@@ -181,20 +185,22 @@ def filter_tools_for_mode(
     Returns:
         过滤后的工具列表
     """
+    if policy.allow_write:
+        return tools
+
     filtered = []
     for t in tools:
-        # bash 保留：其只读性取决于命令内容，运行时由 Layer 2 动态判断
+        # bash 保留：其只读性取决于命令内容，运行时动态判断
         if t.name == "bash":
             filtered.append(t)
             continue
-        effect = get_tool_effect(t.name, {})
-        # 静态效果在允许集合内 → 保留
-        if not (effect & ~policy.allowed_effects):
+        # 只读工具 → 保留
+        if not is_write_tool(t.name, {}):
             filtered.append(t)
             continue
-        # FILE_WRITE 且有 path_filter → 保留（运行时由 Layer 2 检查路径）
-        if ToolEffect.FILE_WRITE in effect and policy.path_filter is not None:
+        # 有 path_filter 的写入工具 → 保留（运行时检查路径）
+        if policy.path_filter is not None:
             filtered.append(t)
             continue
-        # 其余 → 移除
+        # 其余写入工具 → 移除
     return filtered

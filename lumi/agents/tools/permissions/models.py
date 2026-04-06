@@ -101,8 +101,7 @@ class ApprovalRequest:
     boundary_violations: list[str] = field(default_factory=list)
 
 
-# 注意: BYPASS_TOOLS 已迁移至 capability.should_bypass_approval()
-# 保留此常量供 permissions/__init__.py 导出兼容，新代码应使用 capability 模块
+# 兼容性保留，新代码应使用 capability.is_write_tool()
 BYPASS_TOOLS: frozenset[str] = frozenset(
     {
         "ask",

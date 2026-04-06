@@ -3,63 +3,57 @@
 import pytest
 
 from lumi.agents.tools.capability import (
-    ToolEffect,
-    get_tool_effect,
     is_read_only,
     is_readonly_command,
-    should_bypass_approval,
+    is_write_tool,
 )
 
 
-# ── ToolEffect 基础 ──
+# ── is_write_tool ──
 
 
-class TestToolEffect:
-    def test_none_is_falsy(self):
-        assert not ToolEffect.NONE
-
-    def test_flag_combination(self):
-        combined = ToolEffect.FILE_WRITE | ToolEffect.SHELL_EXEC
-        assert ToolEffect.FILE_WRITE in combined
-        assert ToolEffect.SHELL_EXEC in combined
-        assert ToolEffect.INTERRUPT not in combined
-
-
-# ── get_tool_effect ──
-
-
-class TestGetToolEffect:
+class TestIsWriteTool:
     @pytest.mark.parametrize(
         "tool_name",
-        ["read", "glob", "grep", "skill", "EnterPlanMode", "agent"],
+        ["read", "glob", "grep", "skill", "EnterPlanMode", "ExitPlanMode", "agent"],
     )
     def test_readonly_tools(self, tool_name):
-        assert get_tool_effect(tool_name, {}) == ToolEffect.NONE
+        assert not is_write_tool(tool_name, {})
+
+    @pytest.mark.parametrize("tool_name", ["ask", "todos"])
+    def test_ask_todos_are_readonly(self, tool_name):
+        assert not is_write_tool(tool_name, {})
 
     @pytest.mark.parametrize("tool_name", ["write", "edit"])
-    def test_file_write_tools(self, tool_name):
-        assert get_tool_effect(tool_name, {}) == ToolEffect.FILE_WRITE
+    def test_write_tools(self, tool_name):
+        assert is_write_tool(tool_name, {})
 
-    @pytest.mark.parametrize("tool_name", ["todos", "cron"])
-    def test_state_mutate_tools(self, tool_name):
-        assert get_tool_effect(tool_name, {}) == ToolEffect.STATE_MUTATE
-
-    @pytest.mark.parametrize("tool_name", ["ask", "ExitPlanMode"])
-    def test_interrupt_tools(self, tool_name):
-        assert get_tool_effect(tool_name, {}) == ToolEffect.INTERRUPT
-
-    def test_unknown_tool_defaults_to_shell_exec(self):
-        """未知工具 fail-closed，视为有副作用"""
-        assert get_tool_effect("unknown_tool", {}) == ToolEffect.SHELL_EXEC
+    def test_unknown_tool_is_write(self):
+        """未知工具 fail-closed，视为写入"""
+        assert is_write_tool("unknown_tool", {})
 
     def test_bash_readonly_command(self):
-        assert get_tool_effect("bash", {"command": "ls -la"}) == ToolEffect.NONE
+        assert not is_write_tool("bash", {"command": "ls -la"})
 
     def test_bash_write_command(self):
-        assert (
-            get_tool_effect("bash", {"command": "rm -rf /tmp/test"})
-            == ToolEffect.SHELL_EXEC
-        )
+        assert is_write_tool("bash", {"command": "rm -rf /tmp/test"})
+
+    # cron 按 operation 区分
+    def test_cron_list_is_readonly(self):
+        assert not is_write_tool("cron", {"operation": "list"})
+
+    def test_cron_runs_is_readonly(self):
+        assert not is_write_tool("cron", {"operation": "runs"})
+
+    @pytest.mark.parametrize(
+        "operation", ["create", "update", "delete", "run", "pause"]
+    )
+    def test_cron_write_operations(self, operation):
+        assert is_write_tool("cron", {"operation": operation})
+
+    def test_cron_no_operation_is_write(self):
+        """无 operation 参数时 fail-closed"""
+        assert is_write_tool("cron", {})
 
 
 # ── is_read_only ──
@@ -78,42 +72,11 @@ class TestIsReadOnly:
     def test_bash_rm_is_not_readonly(self):
         assert not is_read_only("bash", {"command": "rm file"})
 
-    def test_ask_is_not_readonly(self):
-        """ask 有 INTERRUPT 效果，不算 NONE"""
-        assert not is_read_only("ask", {})
+    def test_ask_is_readonly(self):
+        assert is_read_only("ask", {})
 
-
-# ── should_bypass_approval ──
-
-
-class TestShouldBypassApproval:
-    @pytest.mark.parametrize(
-        "tool_name",
-        ["read", "glob", "grep", "skill", "EnterPlanMode", "agent"],
-    )
-    def test_readonly_tools_bypass(self, tool_name):
-        assert should_bypass_approval(tool_name, {})
-
-    @pytest.mark.parametrize("tool_name", ["ask", "ExitPlanMode"])
-    def test_interrupt_tools_bypass(self, tool_name):
-        assert should_bypass_approval(tool_name, {})
-
-    @pytest.mark.parametrize("tool_name", ["todos", "cron"])
-    def test_state_mutate_tools_bypass(self, tool_name):
-        assert should_bypass_approval(tool_name, {})
-
-    @pytest.mark.parametrize("tool_name", ["write", "edit"])
-    def test_write_tools_do_not_bypass(self, tool_name):
-        assert not should_bypass_approval(tool_name, {})
-
-    def test_bash_readonly_bypasses(self):
-        assert should_bypass_approval("bash", {"command": "git status"})
-
-    def test_bash_write_does_not_bypass(self):
-        assert not should_bypass_approval("bash", {"command": "mkdir /tmp/test"})
-
-    def test_unknown_tool_does_not_bypass(self):
-        assert not should_bypass_approval("unknown_tool", {})
+    def test_todos_is_readonly(self):
+        assert is_read_only("todos", {})
 
 
 # ── is_readonly_command ──

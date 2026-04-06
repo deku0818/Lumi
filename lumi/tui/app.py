@@ -4,7 +4,6 @@ from __future__ import annotations
 
 import asyncio
 import json
-import sys
 from collections.abc import Awaitable, Callable, Sequence
 from datetime import datetime
 from pathlib import Path
@@ -176,79 +175,6 @@ class LumiApp(App):
         yield InputBar(id="input-area")
         yield StatusLine()
 
-    async def _detect_system_theme(self) -> bool:
-        """检测系统主题，返回 True 表示暗色。
-
-        macOS: 通过 `defaults read -g AppleInterfaceStyle` 检测。
-        Windows: 通过注册表 AppsUseLightTheme 键值检测。
-        Linux 及其他平台: 默认暗色。
-        """
-        if sys.platform == "darwin":
-            return await self._detect_macos_theme()
-        if sys.platform == "win32":
-            return self._detect_windows_theme()
-        # Linux 及其他平台默认暗色
-        return True
-
-    async def _detect_macos_theme(self) -> bool:
-        """macOS 暗色主题检测。"""
-        try:
-            proc = await asyncio.create_subprocess_exec(
-                "defaults",
-                "read",
-                "-g",
-                "AppleInterfaceStyle",
-                stdout=asyncio.subprocess.PIPE,
-                stderr=asyncio.subprocess.PIPE,
-            )
-            stdout, _ = await asyncio.wait_for(proc.communicate(), timeout=2.0)
-            return stdout.decode().strip().lower() == "dark"
-        except asyncio.TimeoutError:
-            logger.debug("[LumiApp] 系统主题检测超时，使用暗色主题")
-            return True
-        except FileNotFoundError:
-            logger.debug("[LumiApp] 'defaults' 命令不可用，使用暗色主题")
-            return True
-        except Exception:
-            logger.warning(
-                "[LumiApp] 系统主题检测意外失败，使用暗色主题", exc_info=True
-            )
-            return True
-
-    @staticmethod
-    def _detect_windows_theme() -> bool:
-        """Windows 暗色主题检测，通过注册表读取 AppsUseLightTheme。"""
-        try:
-            import winreg
-
-            key = winreg.OpenKey(
-                winreg.HKEY_CURRENT_USER,
-                r"Software\Microsoft\Windows\CurrentVersion\Themes\Personalize",
-            )
-            value, _ = winreg.QueryValueEx(key, "AppsUseLightTheme")
-            winreg.CloseKey(key)
-            # 0 = 暗色, 1 = 亮色
-            return value == 0
-        except Exception:
-            logger.debug("[LumiApp] Windows 注册表主题检测失败，使用暗色主题")
-            return True
-
-    async def _apply_theme_mode(self, mode: str) -> None:
-        """根据 theme_mode 设置主题。
-
-        Args:
-            mode: 主题模式，可选值为 "dark"、"light"、"system"。
-        """
-        if mode == "dark":
-            self.theme = "lumi-dark"
-        elif mode == "light":
-            self.theme = "lumi-light"
-        else:
-            # system 模式：检测一次系统主题
-            is_dark = await self._detect_system_theme()
-            logger.info("系统主题检测结果: dark=%s", is_dark)
-            self.theme = "lumi-dark" if is_dark else "lumi-light"
-
     async def on_mount(self) -> None:
         # 加载全局配置
         self._global_config = GlobalConfigManager.load()
@@ -302,7 +228,9 @@ class LumiApp(App):
         # 绑定 RunContext 到 RunStatusBar，使 spinner tick 可读取实时状态
         self.query_one(RunStatusBar).bind_run_context(self._run)
 
-        await self._apply_theme_mode(self._global_config.theme_mode)
+        from lumi.tui._app_lifecycle import apply_theme_mode
+
+        await apply_theme_mode(self, self._global_config.theme_mode)
 
         # 注入 config.yaml 中的 env 环境变量
         try:
@@ -1338,8 +1266,10 @@ class LumiApp(App):
     async def _on_settings_done(self, result: GlobalConfig | None) -> None:
         """设置界面关闭后的回调。"""
         if result is not None:
+            from lumi.tui._app_lifecycle import apply_theme_mode
+
             self._global_config = result
-            await self._apply_theme_mode(result.theme_mode)
+            await apply_theme_mode(self, result.theme_mode)
 
     async def action_cancel_generation(self) -> None:
         import time as _time

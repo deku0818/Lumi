@@ -1,104 +1,69 @@
-"""工具能力声明 — 统一的工具副作用元数据
+"""工具能力声明 — 只读 vs 写入的统一判定
 
-每个工具声明自身的副作用类型，取代分散在多处的硬编码集合（BYPASS_TOOLS 等）。
-bash 工具根据命令内容动态判断是否只读。
-
-三层工具限制机制的 Layer 1：
-- Layer 1 (本模块): 工具级元数据 — 声明每个工具的副作用类型
-- Layer 2 (plan_guard): 权限引擎层 — plan mode 下拦截写操作
-- Layer 3 (agent.py):  子 Agent 层 — 创建时移除写工具
+每个工具分为只读或写入两类。只读工具跳过权限审批，写入工具走权限引擎。
+bash 工具根据命令内容动态判断；cron 工具根据 operation 参数判断。
 """
 
 from __future__ import annotations
 
 import re
-from enum import Flag, auto
 
 
-class ToolEffect(Flag):
-    """工具副作用类型（位标志，可组合）
+# ── 只读工具集合 ──
 
-    Examples:
-        ToolEffect.NONE                        # 纯只读
-        ToolEffect.FILE_WRITE                  # 写文件
-        ToolEffect.FILE_WRITE | ToolEffect.SHELL_EXEC  # 组合检查
-    """
-
-    NONE = 0
-    """纯只读操作：read, glob, grep, skill"""
-
-    FILE_WRITE = auto()
-    """写文件操作：write, edit"""
-
-    SHELL_EXEC = auto()
-    """执行命令（非只读 bash）"""
-
-    STATE_MUTATE = auto()
-    """修改会话内部状态：todos, cron"""
-
-    INTERRUPT = auto()
-    """中断等待用户输入：ask, ExitPlanMode"""
-
-
-# ── 静态效果声明 ──
-
-_STATIC_EFFECTS: dict[str, ToolEffect] = {
-    # 只读
-    "read": ToolEffect.NONE,
-    "glob": ToolEffect.NONE,
-    "grep": ToolEffect.NONE,
-    "skill": ToolEffect.NONE,
-    "EnterPlanMode": ToolEffect.NONE,
-    "agent": ToolEffect.NONE,  # 子 agent 权限由自身独立评估
-    # 写文件
-    "write": ToolEffect.FILE_WRITE,
-    "edit": ToolEffect.FILE_WRITE,
-    # 状态修改
-    "cron": ToolEffect.STATE_MUTATE,
-    "todos": ToolEffect.STATE_MUTATE,
-    # 中断
-    "ask": ToolEffect.INTERRUPT,
-    "ExitPlanMode": ToolEffect.INTERRUPT,
-}
-
-# 跳过权限审批的效果集合
-BYPASS_EFFECTS: ToolEffect = (
-    ToolEffect.NONE | ToolEffect.INTERRUPT | ToolEffect.STATE_MUTATE
+# 无论参数如何，始终为只读的工具
+_ALWAYS_READONLY: frozenset[str] = frozenset(
+    {
+        "read",
+        "glob",
+        "grep",
+        "skill",
+        "agent",
+        "EnterPlanMode",
+        "ExitPlanMode",
+        "ask",
+        "todos",
+    }
 )
+
+# 无论参数如何，始终为写入的工具
+_ALWAYS_WRITE: frozenset[str] = frozenset({"write", "edit"})
+
+# cron 中的只读操作
+_CRON_READONLY_OPS: frozenset[str] = frozenset({"list", "runs"})
 
 
 # ── 公共 API ──
 
 
-def get_tool_effect(tool_name: str, tool_args: dict) -> ToolEffect:
-    """获取工具调用的副作用类型
+def is_write_tool(tool_name: str, tool_args: dict) -> bool:
+    """判断工具调用是否为写入操作
+
+    只读工具跳过权限审批，写入工具需要经过权限引擎评估。
+    未知工具默认视为写入（fail-closed）。
 
     Args:
         tool_name: 工具名称
-        tool_args: 工具参数（bash 需要此参数判断命令内容）
+        tool_args: 工具参数
 
     Returns:
-        ToolEffect 标志。未知工具默认返回 SHELL_EXEC（fail-closed）。
+        True 表示写入操作，False 表示只读
     """
+    if tool_name in _ALWAYS_READONLY:
+        return False
+    if tool_name in _ALWAYS_WRITE:
+        return True
     if tool_name == "bash":
-        return _bash_effect(tool_args)
-    return _STATIC_EFFECTS.get(tool_name, ToolEffect.SHELL_EXEC)
+        return not is_readonly_command(tool_args.get("command", ""))
+    if tool_name == "cron":
+        return tool_args.get("operation", "") not in _CRON_READONLY_OPS
+    # 未知工具 fail-closed
+    return True
 
 
 def is_read_only(tool_name: str, tool_args: dict) -> bool:
-    """工具调用是否只读"""
-    return get_tool_effect(tool_name, tool_args) == ToolEffect.NONE
-
-
-def should_bypass_approval(tool_name: str, tool_args: dict) -> bool:
-    """是否跳过权限审批流程
-
-    语义化替代原 BYPASS_TOOLS 硬编码集合。
-    只读、中断、状态修改类工具跳过审批。
-    """
-    effect = get_tool_effect(tool_name, tool_args)
-    # 效果全部在 BYPASS_EFFECTS 集合内 → 跳过审批
-    return not (effect & ~BYPASS_EFFECTS)
+    """工具调用是否只读（is_write_tool 的反义）"""
+    return not is_write_tool(tool_name, tool_args)
 
 
 # ── bash 只读命令判断 ──
@@ -280,11 +245,3 @@ def _matches_readonly_prefix(command: str) -> bool:
         ):
             return True
     return False
-
-
-def _bash_effect(args: dict) -> ToolEffect:
-    """bash 工具根据命令内容判断副作用"""
-    command = args.get("command", "")
-    if is_readonly_command(command):
-        return ToolEffect.NONE
-    return ToolEffect.SHELL_EXEC

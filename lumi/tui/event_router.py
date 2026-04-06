@@ -122,7 +122,7 @@ class EventRouter:
             )
             return
         run_id = evt.parent_run_id
-        entry = group._entries.get(run_id)
+        entry = group.get_entry(run_id)
         if entry is None:
             logger.debug(
                 "_dispatch_subagent: parent_run_id=%s not in entries (kind=%s)",

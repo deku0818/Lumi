@@ -18,7 +18,7 @@ from lumi.agents.core.node_helpers.messages import (
     inject_message_cache_breakpoints,
 )
 from lumi.agents.core.state import LumiAgentContext, LumiAgentState
-from lumi.agents.tools.capability import should_bypass_approval
+from lumi.agents.tools.capability import is_write_tool
 from lumi.agents.tools.permissions.models import PermissionDecision
 from lumi.agents.tools.permissions.safety import is_bypass_immune
 from lumi.agents.core.structured_tool import (
@@ -200,10 +200,9 @@ def is_use_tool(state: LumiAgentState, runtime: Runtime[LumiAgentContext]) -> st
                     exc_info=True,
                 )
 
-    # 只读/中断/状态修改类工具跳过审批，直接执行
+    # 只读工具跳过审批，直接执行
     if all(
-        should_bypass_approval(tc.get("name", ""), tc.get("args", {}))
-        for tc in tool_calls
+        not is_write_tool(tc.get("name", ""), tc.get("args", {})) for tc in tool_calls
     ):
         return "ToolExecutor"
 

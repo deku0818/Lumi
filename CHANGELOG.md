@@ -1,5 +1,15 @@
 # Changelog
 
+## [0.1.0a3] - 2026-04-06
+
+### Changed
+- `ToolEffect` 五值枚举简化为 `is_write_tool(name, args) -> bool` 二值判定，消除 FILE_WRITE/SHELL_EXEC/STATE_MUTATE/INTERRUPT 的无意义分类
+- `ModePolicy.allowed_effects: ToolEffect` 简化为 `allow_write: bool` + `path_filter`
+- `cron` 工具按 operation 区分只读（list/runs）与写入（create/update/delete/run/pause），写入操作现在经过权限引擎评估
+- `ask`、`todos` 归类为只读工具（原为 INTERRUPT/STATE_MUTATE）
+- 文档重组为三层结构：`docs/guides/`（用户指南）、`docs/architecture/`（开发者文档）、`docs/reference/`（外部参考）
+- `cache.md` + `cache_docs.md` 合并为 `reference/prompt-caching.md`
+
 ## [0.1.0a2] - 2026-04-06
 
 ### Changed

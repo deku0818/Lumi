@@ -11,9 +11,22 @@
 2. [AgentGroup 私有属性访问封装](#2-agentgroup-私有属性访问封装)
 3. [GroupingEngine 同步契约加固](#3-groupingengine-同步契约加固)
 4. [SubagentTracker 消除 magic prefix 键](#4-subagenttracker-消除-magic-prefix-键)
-5. [审批 UI 改用 Textual ModalScreen](#5-审批-ui-改用-textual-modalscreen)
+5. [审批 UI 改用浮层方案](#5-审批-ui-改用浮层方案)
 6. [LumiApp 上帝类拆分为 Controller 层](#6-lumiapp-上帝类拆分为-controller-层)
 7. [引入 Protocol 接口层消除循环依赖](#7-引入-protocol-接口层消除循环依赖)
+
+---
+
+## 依赖关系
+
+```
+#1 ─┐
+#2 ─┤ 独立，可立即执行
+#3 ─┤
+#4 ─┘
+#5 ──→ #6（Controller 拆分中 ApprovalController 的接口设计依赖审批方案确定）
+#7 ──→ 与 #6 同步执行
+```
 
 ---
 
@@ -58,19 +71,20 @@ entry = group._entries.get(run_id)
 
 ### 方案
 
-在 `AgentGroup` 上暴露查询方法：
+在 `AgentGroup` 上暴露查询方法（`event_router.py:125` 实际使用了返回值 `entry`，因此需要 `get_entry` 而非 `has_entry`）：
 
 ```python
 # widgets/agent_group.py
-def has_entry(self, run_id: str) -> bool:
-    """检查指定 run_id 是否在当前 AgentGroup 中。"""
-    return run_id in self._entries
+def get_entry(self, run_id: str) -> AgentEntry | None:
+    """获取指定 run_id 的 AgentEntry，不存在则返回 None。"""
+    return self._entries.get(run_id)
 ```
 
 `event_router.py` 改为：
 
 ```python
-if not group.has_entry(run_id):
+entry = group.get_entry(run_id)
+if entry is None:
     logger.debug(
         "_dispatch_subagent: parent_run_id=%s not in entries (kind=%s)",
         run_id, evt.kind,
@@ -138,9 +152,15 @@ class GroupingEngine:
         return GroupDecision.GROUP_FIRST
 
     def flush_tools(self) -> None:
+        if self._pending_decision is not None:
+            logger.warning(
+                "flush_tools() called with pending decision: %s "
+                "(decide_tool → on_tool_started contract was broken)",
+                self._pending_decision,
+            )
         self._has_pending = False
         self._has_active_group = False
-        self._pending_decision = None  # flush 时也要清除
+        self._pending_decision = None
 
     def reset(self) -> None:
         self._has_pending = False
@@ -246,11 +266,26 @@ class SubagentTracker:
         self._approval_run_id = None
 ```
 
-**注意事项**：`prepare_for_resume` 中不再需要保留旧 run_id 键，因为 replay 期间携带旧 `parent_run_id` 的子代理事件可以在 `get()` 未命中时，回退查 `_unmapped` 列表。需要在 `get()` 中加 fallback 逻辑，或者在 `prepare_for_resume` 中同时保留旧键映射（作为过渡别名）。
+**注意事项**：`prepare_for_resume` 后，replay 期间携带旧 `parent_run_id` 的子代理事件需要 fallback 查找逻辑。为 tracker 添加统一的 `get()` 方法：
+
+```python
+def get(self, run_id: str) -> SubagentState | None:
+    """按 run_id 查找状态，未命中则回退到 _unmapped 列表（按 run_id 匹配）。"""
+    state = self._by_run_id.get(run_id)
+    if state is not None:
+        return state
+    # replay fallback: _unmapped 中可能保留旧 run_id
+    for s in self._unmapped:
+        if s.run_id == run_id:
+            return s
+    return None
+```
+
+另外，`remap` 方法中遍历 `_by_run_id` 查找 `old_keys` 的逻辑在分离后不再需要——旧 key 已在 `mark_unmapped` 中 pop 掉，可以删除那段遍历。
 
 ---
 
-## 5. 审批 UI 改用 Textual ModalScreen
+## 5. 审批 UI 改用浮层方案
 
 **难度**：2-3h | **收益**：消除所有 `_hidden_for_approval` 状态补丁 | **时机**：下次修改审批流程时
 
@@ -268,55 +303,143 @@ app._restore_todos_bar_after_approval()
 
 每新增一个需要在审批期间隐藏的元素，就要新增一对 hide/restore 方法和一个 bool flag。
 
-### 方案
+### ~~ModalScreen 方案（已排除）~~
 
-使用 Textual 原生的 `ModalScreen`：
+经验证（Textual 8.0.0 源码 `screen.py:2008`），`ModalScreen` 会**完全阻断底层屏幕的鼠标事件**（包括滚动），用户在审批期间无法滚动 ChatLog 查看之前的对话。这对审批体验是不可接受的——用户经常需要回看上下文再决定是否批准。
 
-```python
-# tui/screens/approval_screen.py
-from textual.screen import ModalScreen
+### 方案：ApprovalSlot 统一管理
 
-class ApprovalScreen(ModalScreen[str]):
-    """审批浮层 — Textual 原生模态，自动遮盖底层 UI。"""
-
-    DEFAULT_CSS = """
-    ApprovalScreen {
-        align: center bottom;
-    }
-    """
-
-    def __init__(self, approval_widget: Widget) -> None:
-        super().__init__()
-        self._widget = approval_widget
-
-    def compose(self) -> ComposeResult:
-        yield self._widget
+当前 DOM 布局（`compose` 顺序）：
+```
+LumiApp
+├── ChatLog              ← 可滚动对话区
+├── RunStatusBar
+├── TodosBar             ← 审批时需隐藏（通过 CSS class -visible 控制）
+├── CommandResultPanel
+├── InputBar             ← dock: bottom，审批时需隐藏（通过 display 控制）
+└── StatusLine           ← dock: bottom
 ```
 
-调用方：
+审批时 `mount(approval, before=InputBar)` 把审批 widget 插到 InputBar 前面，然后手动隐藏 InputBar 和 TodosBar。问题不在 DOM 结构，而是 hide/restore 逻辑分散在 `_app_approval.py` 的 4 个函数 + `app.py` 的 2 个方法 + 1 个 bool flag 中。
+
+**核心思路**：不改变 DOM 结构，只把分散的 hide/restore 逻辑收拢到一个纯逻辑类中。
 
 ```python
-# _app_approval.py — 统一简化
-async def handle_tool_approval(app: LumiApp, evt: BridgeEvent, chat_log: ChatLog) -> None:
-    app._assembler.finalize_assistant_msg()
-    app._run.last_approval_data = dict(evt.data or {})
-    app._run.last_approval_tool_calls = (evt.data or {}).get("tool_calls", [])
+# tui/approval_slot.py
+from __future__ import annotations
 
-    approval = ToolApproval(evt.data)
-    # push_screen_wait 阻塞直到用户做出决定，底层 UI 自动被遮盖
-    decision = await app.push_screen_wait(ApprovalScreen(approval))
-    await on_tool_approval_decided(app, decision)
+from typing import TYPE_CHECKING
+
+if TYPE_CHECKING:
+    from textual.widget import Widget
+
+
+class ApprovalSlot:
+    """管理审批期间底部 widget 的可见性切换。
+
+    收拢 hide_input_for_approval / restore_input_after_approval /
+    _hide_todos_bar_for_approval / _restore_todos_bar_after_approval
+    四处逻辑，消除 _todos_hidden_for_approval flag。
+
+    不持有 app 引用，只持有需要管理的 widget 列表。
+    """
+
+    def __init__(self, managed: list[_ManagedWidget]) -> None:
+        self._managed = managed
+        self._saved: dict[int, object] = {}
+
+    async def enter(self, approval: Widget, anchor: Widget) -> None:
+        """挂载审批 widget，隐藏托管元素。"""
+        for m in self._managed:
+            self._saved[id(m)] = m.save()
+            m.hide()
+        await anchor.app.mount(approval, before=anchor)  # 保持原 mount 语义
+
+    def exit(self) -> None:
+        """卸载审批 widget，恢复托管元素。"""
+        for m in self._managed:
+            state = self._saved.pop(id(m), None)
+            if state is not None:
+                m.restore(state)
+
+
+class _ManagedWidget:
+    """统一不同 widget 的 hide/restore 协议。"""
+
+    def save(self) -> object: ...
+    def hide(self) -> None: ...
+    def restore(self, state: object) -> None: ...
+```
+
+InputBar 和 TodosBar 的隐藏方式不同（一个改 `display`，一个改 CSS class），用两个适配器统一：
+
+```python
+class DisplayToggle(_ManagedWidget):
+    """通过 display 属性控制可见性（InputBar）。"""
+
+    def __init__(self, widget: Widget) -> None:
+        self._w = widget
+
+    def save(self) -> bool:
+        return self._w.display
+
+    def hide(self) -> None:
+        self._w.display = False
+
+    def restore(self, state: object) -> None:
+        self._w.display = bool(state)
+
+
+class CssClassToggle(_ManagedWidget):
+    """通过 CSS class 控制可见性（TodosBar 的 -visible class）。"""
+
+    def __init__(self, widget: Widget, class_name: str = "-visible") -> None:
+        self._w = widget
+        self._cls = class_name
+
+    def save(self) -> bool:
+        return self._w.has_class(self._cls)
+
+    def hide(self) -> None:
+        self._w.remove_class(self._cls)
+
+    def restore(self, state: object) -> None:
+        if state:
+            self._w.add_class(self._cls)
+```
+
+初始化（在 `_finish_mount` 中）：
+
+```python
+self._approval_slot = ApprovalSlot([
+    DisplayToggle(self.query_one(InputBar)),
+    CssClassToggle(self.query_one(TodosBar)),
+])
+```
+
+调用方简化：
+
+```python
+# _app_approval.py — handle_tool_approval 中
+await app._approval_slot.enter(approval, anchor=get_approval_anchor(app))
+
+# on_tool_approval_decided 中
+app._approval_slot.exit()
+approval.remove()
 ```
 
 **收益**：
-- 删除 `hide_input_for_approval` / `restore_input_after_approval`
-- 删除 `_hide_todos_bar_for_approval` / `_restore_todos_bar_after_approval`
+- 删除 `hide_input_for_approval` / `restore_input_after_approval`（2 个函数）
+- 删除 `_hide_todos_bar_for_approval` / `_restore_todos_bar_after_approval`（2 个方法）
 - 删除 `_todos_hidden_for_approval` flag
-- 未来新增底层 UI 元素时无需修改审批代码
+- 未来新增需隐藏的底部元素，只需在 `_managed` 列表加一项
+- DOM 结构和消息机制完全不变，改动风险低
+- ChatLog 保持可滚动
 
 **注意事项**：
-- `ToolApproval` / `AskDialog` / `PlanApproval` 的 `Decided` / `Answered` 消息机制需要改为调用 `screen.dismiss(result)` 返回结果
-- 子代理审批的 `set_approval_context` 仍然需要，但 UI 可见性管理完全由 ModalScreen 接管
+- `ToolApproval` / `AskDialog` / `PlanApproval` 的 `Decided` / `Answered` 消息机制保持不变（冒泡到 App）
+- 子代理审批的 `set_approval_context` 仍然需要
+- `enter` 的 mount 调用需要 `await`，与原有 `app.mount()` 语义一致
 
 ---
 
@@ -353,15 +476,17 @@ class ApprovalController:
         assembler: WidgetAssembler,
         tracker: SubagentTracker,
         run: RunContext,
-        push_modal: Callable[[ModalScreen], Awaitable[str]],
+        slot: ApprovalSlot,
+        get_anchor: Callable[[], Widget],
     ) -> None:
         self._asm = assembler
         self._tracker = tracker
         self._run = run
-        self._push_modal = push_modal
+        self._slot = slot
+        self._get_anchor = get_anchor
 
     async def handle_tool_approval(self, evt: BridgeEvent) -> None:
-        """处理工具审批事件，返回后 agent 自动 resume。"""
+        """处理工具审批事件。"""
         self._asm.finalize_assistant_msg()
         self._run.last_approval_data = dict(evt.data or {})
         tool_calls = (evt.data or {}).get("tool_calls", [])
@@ -373,9 +498,13 @@ class ApprovalController:
         if evt.parent_run_id:
             self._tracker.set_approval_context(evt.parent_run_id)
 
-        decision = await self._push_modal(ApprovalScreen(ToolApproval(evt.data)))
+        await self._slot.enter(ToolApproval(evt.data), anchor=self._get_anchor())
+        # Decided 消息通过冒泡到达 App，App 调用 on_decided()
+
+    def on_decided(self, decision: str) -> None:
+        """审批完成回调。"""
+        self._slot.exit()
         self._tracker.clear_approval_context()
-        return decision
 ```
 
 ```python
@@ -387,7 +516,8 @@ class LumiApp(App):
             assembler=self._assembler,
             tracker=self._subagent_tracker,
             run=self._run,
-            push_modal=self.push_screen_wait,
+            slot=self._approval_slot,
+            get_anchor=lambda: self.query_one(InputBar),
         )
         self._input = InputController(...)
         self._cron = CronController(...)
@@ -415,6 +545,10 @@ class EventRouter:
         on_finish: Callable[[], None],
     ) -> None: ...
 ```
+
+**注意事项**：
+- `_finish_run` 等需要协调多个 Controller 的操作，仍由 LumiApp 作为顶层协调点调用各 Controller 的方法，避免 Controller 之间产生横向依赖
+- #6 依赖 #5 先完成——`ApprovalController` 的接口设计取决于审批方案（`ApprovalSlot`）
 
 ---
 
@@ -490,14 +624,14 @@ class EventRouter:
 
 ## 优先级总览
 
-| # | 改进项 | 难度 | 收益 | 建议时机 |
-|---|--------|------|------|----------|
-| 1 | 清理重复主题检测 | 5min | 消除混淆 | 立即 |
-| 2 | AgentGroup 私有属性封装 | 5min | 封装性 | 立即 |
-| 3 | GroupingEngine 守卫 | 30min | 防御性 | 本周 |
-| 4 | SubagentTracker 分离字典 | 1h | 可读性 | 本周 |
-| 5 | 审批改 ModalScreen | 2-3h | 消除状态补丁 | 下次动审批时 |
-| 6 | App Controller 拆分 | 1-2d | 架构质量 | 功能冻结后 |
-| 7 | Protocol 接口层 | 1-2d | 消除循环依赖 | 与 #6 一起 |
+| # | 改进项 | 难度 | 收益 | 前置依赖 | 建议时机 |
+|---|--------|------|------|----------|----------|
+| 1 | 清理重复主题检测 | 5min | 消除混淆 | 无 | 立即 |
+| 2 | AgentGroup 私有属性封装 | 5min | 封装性 | 无 | 立即 |
+| 3 | GroupingEngine 守卫 | 30min | 防御性 | 无 | 本周 |
+| 4 | SubagentTracker 分离字典 | 1h | 可读性 | 无 | 本周 |
+| 5 | 审批改浮层方案 | 2-3h | 消除状态补丁 | 无 | 下次动审批时 |
+| 6 | App Controller 拆分 | 1-2d | 架构质量 | #5 | 功能冻结后 |
+| 7 | Protocol 接口层 | 1-2d | 消除循环依赖 | 与 #6 同步 | 功能冻结后 |
 
 建议 #1-#4 作为日常清理逐步完成，#5 在下次修改审批流程时顺手做，#6 和 #7 作为一次专门的重构迭代。
