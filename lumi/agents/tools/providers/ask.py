@@ -1,10 +1,11 @@
-"""Ask User 工具提供者 - 提供向用户提问的功能
+"""Ask User 工具提供者 - 让 Agent 在执行过程中向用户提问
 
-该模块提供 ask_user_question 工具，让 Agent 在执行过程中可以向用户提问，
-通过中断机制暂停执行并等待用户回答。
+通过 LangGraph 中断机制暂停执行并等待用户回答。
 """
 
-from typing import Annotated
+from __future__ import annotations
+
+from typing import Annotated, Any
 
 from langchain_core.messages import ToolMessage
 from langchain_core.tools import InjectedToolCallId, tool
@@ -58,6 +59,23 @@ ASK_USER_DESCRIPTION = """当你在执行过程中需要向用户提问时，使
 """
 
 
+def _build_question_data(index: int, question: Question) -> dict[str, Any]:
+    """将 Question 模型转换为中断数据所需的字典格式。"""
+    options: list[dict[str, str]] = [
+        {"label": opt.label, "description": opt.description} for opt in question.options
+    ]
+    # 末尾自动添加自定义输入选项
+    options.append({"label": "", "description": "输入内容"})
+
+    return {
+        "id": index,
+        "question": question.question,
+        "header": question.header,
+        "options": options,
+        "multiSelect": question.multiSelect,
+    }
+
+
 @tool(description=ASK_USER_DESCRIPTION)
 def ask(
     questions: Annotated[
@@ -69,36 +87,17 @@ def ask(
     tool_call_id: Annotated[str, InjectedToolCallId],
 ) -> Command:
     """向用户提问并等待回答"""
-    # 构建问题列表，添加 ID
-    questions_data = []
-    for i, q in enumerate(questions):
-        # 构建选项列表，末尾添加自定义输入选项
-        options = [
-            {"label": opt.label, "description": opt.description} for opt in q.options
-        ]
-        options.append({"label": "", "description": "输入内容"})
+    questions_data = [_build_question_data(i, q) for i, q in enumerate(questions)]
 
-        questions_data.append(
-            {
-                "id": i,
-                "question": q.question,
-                "header": q.header,
-                "options": options,
-                "multiSelect": q.multiSelect,
-            }
-        )
+    user_response = interrupt(
+        {
+            "type": "ask",
+            "tool_call_id": tool_call_id,
+            "questions": questions_data,
+        }
+    )
 
-    # 构建中断数据
-    interrupt_data = {
-        "type": "ask",
-        "tool_call_id": tool_call_id,
-        "questions": questions_data,
-    }
-
-    # 触发中断，等待用户回答
-    user_response = interrupt(interrupt_data)
-
-    # 用户取消：设置 _tool_cancelled 标记，由条件边路由到 END
+    # 用户取消：设置 tool_cancelled 标记，由条件边路由到 END
     if user_response == ASK_CANCELLED:
         return Command(
             update={

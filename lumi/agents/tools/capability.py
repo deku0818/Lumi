@@ -62,7 +62,9 @@ _STATIC_EFFECTS: dict[str, ToolEffect] = {
 }
 
 # 跳过权限审批的效果集合
-BYPASS_EFFECTS: ToolEffect = ToolEffect.NONE | ToolEffect.INTERRUPT | ToolEffect.STATE_MUTATE
+BYPASS_EFFECTS: ToolEffect = (
+    ToolEffect.NONE | ToolEffect.INTERRUPT | ToolEffect.STATE_MUTATE
+)
 
 
 # ── 公共 API ──

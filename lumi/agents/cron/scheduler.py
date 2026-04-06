@@ -28,7 +28,7 @@ from lumi.utils.read_config import get_config
 
 # 退避重试间隔（秒）：第 1、2、3 次重试
 BACKOFF_INTERVALS: tuple[int, ...] = (30, 60, 300)
-MAX_RETRIES = 3
+MAX_RETRIES: int = 3
 
 
 def _is_transient_error(exc: BaseException) -> bool:
@@ -38,12 +38,6 @@ def _is_transient_error(exc: BaseException) -> bool:
     - asyncio.TimeoutError（网络超时）
     - httpx.HTTPStatusError 且状态码为 429 或 5xx
     - ConnectionError、OSError（网络连接问题）
-
-    Args:
-        exc: 捕获到的异常。
-
-    Returns:
-        True 表示瞬态错误，应重试；False 表示永久错误，不重试。
     """
     if isinstance(exc, asyncio.TimeoutError):
         return True
@@ -58,10 +52,7 @@ def _is_transient_error(exc: BaseException) -> bool:
     except ImportError:
         pass
 
-    if isinstance(exc, (ConnectionError, OSError)):
-        return True
-
-    return False
+    return isinstance(exc, (ConnectionError, OSError))
 
 
 class Scheduler:
@@ -69,12 +60,6 @@ class Scheduler:
 
     启动时从 JobStore 加载所有启用的任务并注册到 AsyncIOScheduler，
     提供任务的增删改查和暂停/恢复操作。
-
-    Args:
-        job_store: 任务持久化存储。
-        run_log: 执行日志管理。
-        delivery: 结果投递管理器。
-        execution_timeout: 单次任务执行超时（秒），默认 600（10 分钟）。
     """
 
     def __init__(
@@ -93,7 +78,7 @@ class Scheduler:
         self._running_tasks: set[asyncio.Task[RunRecord]] = set()
         self._running_job_names: list[str] = []
         self._on_job_status = on_job_status
-        self._compensate_task: asyncio.Task | None = None
+        self._compensate_task: asyncio.Task[None] | None = None
 
     async def start(self) -> None:
         """从 JobStore 加载所有启用的任务，注册到 APScheduler 并启动调度器。
@@ -102,17 +87,17 @@ class Scheduler:
         """
         jobs = await self._job_store.load()
         for job in jobs:
-            if job.enabled:
-                try:
-                    self._register_job(job)
-                except Exception:
-                    logger.warning(
-                        "注册任务失败，跳过: %s [%s]", job.name, job.id, exc_info=True
-                    )
+            if not job.enabled:
+                continue
+            try:
+                self._register_job(job)
+            except Exception:
+                logger.warning(
+                    "注册任务失败，跳过: %s [%s]", job.name, job.id, exc_info=True
+                )
         self._aps.start()
         logger.info("Scheduler 已启动，加载了 %d 个任务", len(jobs))
 
-        # 补偿执行错过的任务
         enabled_jobs = [j for j in jobs if j.enabled]
         if enabled_jobs:
             self._compensate_task = asyncio.create_task(
@@ -121,7 +106,7 @@ class Scheduler:
             self._compensate_task.add_done_callback(self._on_compensate_done)
 
     @staticmethod
-    def _on_compensate_done(task: asyncio.Task) -> None:
+    def _on_compensate_done(task: asyncio.Task[None]) -> None:
         """补偿任务完成回调，记录未被内部 try-except 捕获的异常。"""
         if task.cancelled():
             return
@@ -130,11 +115,7 @@ class Scheduler:
             logger.error("补偿任务异常终止: %s", exc, exc_info=exc)
 
     async def _compensate_missed_runs(self, jobs: list[Job]) -> None:
-        """检查并补偿执行在离线期间错过的任务。
-
-        对每个任务，从 RunLog 获取最近一次执行记录，
-        结合调度规则判断是否有错过的执行，有则补执行一次（coalesce）。
-        """
+        """检查并补偿在离线期间错过的任务，有则补执行一次（coalesce）。"""
         now = datetime.now()
         compensated = 0
 
@@ -158,38 +139,26 @@ class Scheduler:
             logger.info("补偿执行了 %d 个错过的任务", compensated)
 
     async def _should_compensate(self, job: Job, now: datetime) -> bool:
-        """判断任务是否需要补偿执行。
-
-        Args:
-            job: 任务定义。
-            now: 当前时间。
-
-        Returns:
-            True 表示需要补偿执行。
-        """
+        """判断任务是否需要补偿执行。"""
         last_run = await asyncio.to_thread(self._run_log.get_last_run_sync, job.id)
 
         match job.schedule.type:
             case ScheduleType.AT:
-                # 一次性任务：如果执行时间已过且没有成功执行过 → 补偿
                 run_date = datetime.fromisoformat(job.schedule.value)
                 if run_date >= now:
                     return False
                 return last_run is None or last_run.status != "success"
 
             case ScheduleType.INTERVAL:
-                # 间隔任务：上次执行 + 间隔 < 当前时间 → 补偿
                 from lumi.agents.cron.models import parse_interval_to_seconds
 
                 interval_secs = parse_interval_to_seconds(job.schedule.value)
                 if last_run is None:
-                    # 从未执行过，如果创建时间 + 间隔 < now → 补偿
                     return (now - job.created_at).total_seconds() >= interval_secs
                 expected_next = last_run.started_at + timedelta(seconds=interval_secs)
                 return expected_next < now
 
             case ScheduleType.CRON:
-                # cron 任务：用 trigger 计算上次应触发时间
                 trigger = job.schedule.to_trigger()
                 ref_time = last_run.started_at if last_run else job.created_at
                 next_fire = trigger.get_next_fire_time(None, ref_time)
@@ -344,46 +313,56 @@ class Scheduler:
         self._running_tasks.add(task)
         task.add_done_callback(self._on_task_done)
 
-    def _on_task_done(self, task: asyncio.Task) -> None:
+    def _on_task_done(self, task: asyncio.Task[RunRecord]) -> None:
         self._running_tasks.discard(task)
         if not task.cancelled() and (exc := task.exception()):
             logger.error("定时任务意外失败: %s", exc, exc_info=exc)
 
+    # ------------------------------------------------------------------
+    # Job execution: split into invoke / retry / deliver sub-functions
+    # ------------------------------------------------------------------
+
     async def _execute_job(self, job: Job) -> RunRecord:
-        """执行单个任务：创建独立 Agent 子会话，处理超时、重试，广播结果并记录日志。
-
-        流程：
-        1. 调用 ``create_agent(checkpoint=None)`` 创建无状态子 Agent
-        2. 使用 ``asyncio.wait_for`` 限制执行时间（默认 10 分钟）
-        3. 失败时判断是否为瞬态错误，若是且未超过重试上限则安排退避重试
-        4. 成功执行后重置 ``consecutive_errors`` 为 0
-        5. 通过 ``DeliveryManager.broadcast()`` 广播结果
-        6. 记录 ``RunRecord`` 到 ``RunLog``
-        7. 一次性任务（at 类型）执行后从 JobStore 删除
-
-        Args:
-            job: 要执行的任务。
-
-        Returns:
-            执行记录。
-        """
-        from lumi.agents.core.graph import create_agent
-
+        """执行单个任务：Agent 调用、重试判定、结果投递与日志记录。"""
         started_at = datetime.now()
-        status: str = "success"
-        output: str = ""
-        error: str = ""
-        caught_exc: BaseException | None = None
 
-        # 通知 TUI 任务开始执行
         self._running_job_names.append(job.name)
         self._notify_job_status()
+
+        try:
+            output, status, error, caught_exc = await self._invoke_agent(job)
+            await self._handle_retry(job, caught_exc)
+
+            finished_at = datetime.now()
+            duration_ms = int((finished_at - started_at).total_seconds() * 1000)
+
+            record = RunRecord(
+                job_id=job.id,
+                job_name=job.name,
+                started_at=started_at,
+                finished_at=finished_at,
+                status=status,
+                duration_ms=duration_ms,
+                output_summary=output[:500],
+                error=error,
+            )
+            await self._deliver_and_log(job, record, output)
+            return record
+        finally:
+            try:
+                self._running_job_names.remove(job.name)
+            except ValueError:
+                logger.warning("任务 %s [%s] 不在 running 列表中", job.name, job.id)
+            self._notify_job_status()
+
+    async def _invoke_agent(self, job: Job) -> tuple[str, str, str, Exception | None]:
+        """创建 Agent 子会话并执行任务 prompt，返回 (output, status, error, exception)。"""
+        from lumi.agents.core.graph import create_agent
 
         try:
             agent, context = await create_agent(checkpoint=None)
             inputs = {
                 "messages": [HumanMessage(content=job.prompt)],
-                # 定时任务无人在场审批，使用 privileged 模式跳过 interrupt
                 "tool_mode": "privileged",
             }
             config = RunnableConfig(
@@ -393,41 +372,41 @@ class Scheduler:
                 agent.graph.ainvoke(inputs, config=config, context=context),
                 timeout=self._execution_timeout,
             )
-            # 从 response 中提取输出文本
-            messages = response.get("messages", [])
-            if not messages:
-                raise ValueError("Agent 响应中无消息")
-            last_msg = messages[-1]
-            raw_content = (
-                last_msg.content if hasattr(last_msg, "content") else str(last_msg)
-            )
-            # content 可能是多模态 list，提取纯文本
-            if isinstance(raw_content, list):
-                output = "\n".join(
-                    block.get("text", "") if isinstance(block, dict) else str(block)
-                    for block in raw_content
-                ).strip()
-            else:
-                output = str(raw_content)
+            output = self._extract_output(response)
+            return output, "success", "", None
 
         except asyncio.TimeoutError as exc:
-            status = "timeout"
-            error = f"任务执行超时（{self._execution_timeout}s）"
-            caught_exc = exc
             logger.warning("任务执行超时: %s [%s]", job.name, job.id)
+            return "", "timeout", f"任务执行超时（{self._execution_timeout}s）", exc
         except asyncio.CancelledError:
             raise
         except Exception as exc:
-            status = "failed"
-            error = f"{type(exc).__name__}: {exc}"
-            caught_exc = exc
             logger.exception("任务执行失败: %s [%s]", job.name, job.id)
+            return "", "failed", f"{type(exc).__name__}: {exc}", exc
 
-        # --- 重试逻辑 ---
+    @staticmethod
+    def _extract_output(response: dict) -> str:
+        """从 Agent 响应中提取纯文本输出。"""
+        messages = response.get("messages", [])
+        if not messages:
+            raise ValueError("Agent 响应中无消息")
+        last_msg = messages[-1]
+        raw_content = (
+            last_msg.content if hasattr(last_msg, "content") else str(last_msg)
+        )
+        if isinstance(raw_content, list):
+            return "\n".join(
+                block.get("text", "") if isinstance(block, dict) else str(block)
+                for block in raw_content
+            ).strip()
+        return str(raw_content)
+
+    async def _handle_retry(self, job: Job, caught_exc: Exception | None) -> None:
+        """根据执行结果决定是否安排退避重试或重置错误计数。"""
         if caught_exc is not None and _is_transient_error(caught_exc):
             if job.consecutive_errors < MAX_RETRIES:
                 job.consecutive_errors += 1
-                await self._update_consecutive_errors(job)
+                await self._persist_consecutive_errors(job)
                 self._schedule_retry(job)
             else:
                 logger.error(
@@ -437,45 +416,37 @@ class Scheduler:
                     job.name,
                     job.id,
                 )
-        elif caught_exc is None:
-            # 成功执行，重置连续错误计数
-            if job.consecutive_errors > 0:
-                job.consecutive_errors = 0
-                await self._update_consecutive_errors(job)
+        elif caught_exc is None and job.consecutive_errors > 0:
+            job.consecutive_errors = 0
+            await self._persist_consecutive_errors(job)
 
-        finished_at = datetime.now()
-        duration_ms = int((finished_at - started_at).total_seconds() * 1000)
-
-        record = RunRecord(
-            job_id=job.id,
-            job_name=job.name,
-            started_at=started_at,
-            finished_at=finished_at,
-            status=status,
-            duration_ms=duration_ms,
-            output_summary=output[:500],
-            error=error,
-        )
-
-        # 记录执行日志
+    async def _deliver_and_log(
+        self,
+        job: Job,
+        record: RunRecord,
+        output: str,
+    ) -> None:
+        """记录执行日志、广播结果、清理一次性任务。"""
         try:
             await self._run_log.append(record)
         except Exception:
             logger.warning("记录执行日志失败: %s [%s]", job.name, job.id, exc_info=True)
 
-        # 广播结果（成功时广播输出，失败/超时时广播错误信息）
-        broadcast_text = output if status == "success" else f"[{status}] {error}"
+        broadcast_text = (
+            output
+            if record.status == "success"
+            else f"[{record.status}] {record.error}"
+        )
         try:
             await self._delivery.broadcast(
                 job.name,
                 broadcast_text,
-                started_at=started_at,
-                duration_ms=duration_ms,
+                started_at=record.started_at,
+                duration_ms=record.duration_ms,
             )
         except Exception:
             logger.warning("广播结果失败: %s [%s]", job.name, job.id, exc_info=True)
 
-        # 一次性任务（at 类型）执行后从 JobStore 删除
         if job.schedule.type == ScheduleType.AT:
             try:
                 await self._job_store.delete(job.id)
@@ -485,32 +456,21 @@ class Scheduler:
                     "删除一次性任务失败: %s [%s]", job.name, job.id, exc_info=True
                 )
 
-        # 通知 TUI 任务执行完毕
-        try:
-            self._running_job_names.remove(job.name)
-        except ValueError:
-            logger.warning("任务 %s [%s] 不在 running 列表中", job.name, job.id)
-        self._notify_job_status()
-
-        return record
+    # ------------------------------------------------------------------
+    # Helpers
+    # ------------------------------------------------------------------
 
     def _notify_job_status(self) -> None:
         """将当前正在执行的任务名列表通知给 TUI。"""
-        if self._on_job_status:
-            try:
-                self._on_job_status(list(self._running_job_names))
-            except Exception:
-                logger.error("通知 TUI 任务状态失败", exc_info=True)
+        if not self._on_job_status:
+            return
+        try:
+            self._on_job_status(list(self._running_job_names))
+        except Exception:
+            logger.error("通知 TUI 任务状态失败", exc_info=True)
 
     def _schedule_retry(self, job: Job) -> None:
-        """通过 APScheduler DateTrigger 安排退避重试。
-
-        根据当前 ``consecutive_errors`` 选择退避间隔，使用 DateTrigger
-        在指定时间后触发一次重试执行。
-
-        Args:
-            job: 需要重试的任务。
-        """
+        """通过 APScheduler DateTrigger 安排退避重试。"""
         idx = min(job.consecutive_errors - 1, len(BACKOFF_INTERVALS) - 1)
         delay = BACKOFF_INTERVALS[idx]
         run_at = datetime.now() + timedelta(seconds=delay)
@@ -532,12 +492,8 @@ class Scheduler:
             job.id,
         )
 
-    async def _update_consecutive_errors(self, job: Job) -> None:
-        """将 Job 的 consecutive_errors 更新到 JobStore。
-
-        Args:
-            job: 已更新 consecutive_errors 的任务。
-        """
+    async def _persist_consecutive_errors(self, job: Job) -> None:
+        """将 Job 的 consecutive_errors 持久化到 JobStore。"""
         try:
             await self._job_store.upsert(job)
         except Exception:

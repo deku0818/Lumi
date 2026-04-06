@@ -195,13 +195,13 @@ class _CronJobItem(Widget):
 
     def set_selected(self, selected: bool) -> None:
         """设置选中状态并更新指示符。"""
+        from textual.css.query import NoMatches
+
         self._selected = selected
         self.set_class(selected, "selected")
         indicator = "▸" if selected else " "
         status = "✅" if self._job.enabled else "⏸️"
         short_id = self._job.id[:8]
-        from textual.css.query import NoMatches
-
         try:
             left = self.query_one(f"#left-{self._index}", Static)
             left.update(f"{indicator} {status} {self._job.name}({short_id})")
@@ -279,34 +279,26 @@ class CronScreen(ListScreen[Job]):
 
     def _request_delete(self) -> None:
         """弹出确认弹窗请求删除选中任务。"""
-        if not self._filtered or self._selected_index >= len(self._filtered):
+        if (job := self._selected_item) is None:
             return
-        job = self._filtered[self._selected_index]
         self.app.push_screen(_ConfirmDialog(job.name), callback=self._on_confirm_result)
 
     def _on_confirm_result(self, confirmed: bool) -> None:
         """确认弹窗回调：确认则执行删除并刷新列表，取消则留在列表。"""
         if not confirmed:
             return
-        if not self._filtered or self._selected_index >= len(self._filtered):
+        if (job := self._selected_item) is None:
             return
-        job = self._filtered[self._selected_index]
 
-        # 从内部列表中移除
         self._all_items = [j for j in self._all_items if j.id != job.id]
         self._filtered = [j for j in self._filtered if j.id != job.id]
         self._has_deleted = True
+        self._clamp_selected_index()
 
-        # 调整选中索引
-        if self._selected_index >= len(self._filtered):
-            self._selected_index = max(0, len(self._filtered) - 1)
-
-        # 调用外部删除回调（异步）
         if self._on_delete is not None:
             task = asyncio.create_task(self._on_delete(job.id))
             task.add_done_callback(self._on_delete_task_done)
 
-        # 刷新列表和标题
         self.call_later(self._refresh_after_delete)
 
     @staticmethod

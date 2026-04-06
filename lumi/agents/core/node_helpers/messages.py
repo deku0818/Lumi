@@ -1,14 +1,14 @@
-"""消息处理工具模块
+"""消息处理辅助模块
 
-提供消息处理相关的函数，包括：
-- 清理不完整的工具调用
-- 卸载大型工具结果到文件
-- 消息辅助函数
+提供消息预处理函数：清理不完整工具调用、卸载大型工具结果、Anthropic 缓存断点注入。
 """
+
+from __future__ import annotations
 
 import asyncio
 from datetime import datetime
 from pathlib import Path
+from typing import Any
 
 from langchain_core.messages import AIMessage, HumanMessage, RemoveMessage, ToolMessage
 
@@ -17,19 +17,42 @@ from lumi.utils.read_config import get_config
 from lumi.utils.token_counter import str_token_counter
 
 
-def inject_text_into_message(message: HumanMessage, text: str) -> HumanMessage:
-    """将文本块插入到 HumanMessage content 最前面，返回新消息。
+# ---------------------------------------------------------------------------
+# 共享工具函数（供 executor_tools 等模块复用，避免循环导入）
+# ---------------------------------------------------------------------------
 
-    当 content 为字符串时，先转换为列表格式再插入。
-    不修改原消息（不可变原则）。
 
-    Args:
-        message: 原始用户消息
-        text: 要注入的文本
+def content_to_str(content: str | list[Any] | object) -> str:
+    """将消息 content 转换为纯文本字符串。
 
-    Returns:
-        注入后的新 HumanMessage
+    支持 str、list[str | dict] 以及任意对象（fallback ``str()``）。
     """
+    if isinstance(content, str):
+        return content
+    if isinstance(content, list):
+        parts: list[str] = []
+        for block in content:
+            if isinstance(block, str):
+                parts.append(block)
+            elif isinstance(block, dict) and "text" in block:
+                parts.append(block["text"])
+        return "\n".join(parts)
+    return str(content)
+
+
+def write_offload_file(file_path: Path, content: str) -> None:
+    """将内容写入卸载文件（同步，供 ``asyncio.to_thread`` 调用）。"""
+    file_path.parent.mkdir(parents=True, exist_ok=True)
+    file_path.write_text(content, encoding="utf-8")
+
+
+# ---------------------------------------------------------------------------
+# 消息注入
+# ---------------------------------------------------------------------------
+
+
+def inject_text_into_message(message: HumanMessage, text: str) -> HumanMessage:
+    """将文本块插入到 HumanMessage content 最前面，返回新消息（不可变原则）。"""
     if isinstance(message.content, str):
         content_blocks: list[dict[str, str]] = [
             {"type": "text", "text": message.content}
@@ -38,165 +61,149 @@ def inject_text_into_message(message: HumanMessage, text: str) -> HumanMessage:
         content_blocks = list(message.content)
 
     content_blocks.insert(0, {"type": "text", "text": text})
-
     return HumanMessage(content=content_blocks)
 
 
-def get_last_human_message(messages: list) -> HumanMessage | None:
-    """从消息列表中获取最后一条人类消息"""
+def get_last_human_message(messages: list[Any]) -> HumanMessage | None:
+    """从消息列表中获取最后一条 HumanMessage。"""
     for message in reversed(messages):
         if isinstance(message, HumanMessage):
             return message
     return None
 
 
-def cleanup_incomplete_tool_calls(messages: list) -> list[RemoveMessage]:
-    """清理没有对应 ToolMessage 的 AIMessage (tool_use)
+# ---------------------------------------------------------------------------
+# 清理不完整工具调用
+# ---------------------------------------------------------------------------
 
-    当工具调用中途出错时，会留下没有对应 tool_result 的 tool_use 消息，
-    这会导致 Anthropic API 返回 400 错误。此函数会检测并返回需要删除的消息。
 
-    Args:
-        messages: 消息列表
+def _extract_tool_call_ids(tool_calls: list[Any]) -> set[str | None]:
+    """从 tool_calls 中提取所有 id。"""
+    ids: set[str | None] = set()
+    for tc in tool_calls:
+        if isinstance(tc, dict):
+            ids.add(tc.get("id"))
+        else:
+            ids.add(getattr(tc, "id", None))
+    return ids
 
-    Returns:
-        list[RemoveMessage]: 需要删除的消息列表
+
+def _has_matching_tool_result(
+    messages: list[Any], index: int, tool_call_ids: set[str | None]
+) -> bool:
+    """检查 ``messages[index]`` 之后是否紧跟匹配的 ToolMessage。"""
+    if index + 1 >= len(messages):
+        return False
+    next_msg = messages[index + 1]
+    if not isinstance(next_msg, ToolMessage):
+        return False
+    return getattr(next_msg, "tool_call_id", None) in tool_call_ids
+
+
+def cleanup_incomplete_tool_calls(messages: list[Any]) -> list[RemoveMessage]:
+    """清理没有对应 ToolMessage 的 AIMessage(tool_use)。
+
+    遗留的无结果工具调用会导致 Anthropic API 400 错误。
     """
-    messages_to_remove = []
+    to_remove: list[RemoveMessage] = []
 
     for i, msg in enumerate(messages):
-        if isinstance(msg, AIMessage) and hasattr(msg, "tool_calls") and msg.tool_calls:
-            # 检查下一条消息是否为 ToolMessage
-            has_tool_result = False
-            if i + 1 < len(messages):
-                next_msg = messages[i + 1]
-                if isinstance(next_msg, ToolMessage):
-                    # 检查 tool_call_id 是否匹配
-                    tool_call_ids = {
-                        tc.get("id") for tc in msg.tool_calls if isinstance(tc, dict)
-                    }
-                    if not tool_call_ids:
-                        tool_call_ids = {
-                            getattr(tc, "id", None) for tc in msg.tool_calls
-                        }
-                    if (
-                        hasattr(next_msg, "tool_call_id")
-                        and next_msg.tool_call_id in tool_call_ids
-                    ):
-                        has_tool_result = True
+        if not isinstance(msg, AIMessage):
+            continue
+        if not getattr(msg, "tool_calls", None):
+            continue
 
-            if not has_tool_result:
-                logger.warning(
-                    f"[PreprocessMessages] 发现不完整的工具调用消息 (id: {msg.id}), "
-                    f"将其删除以避免 API 错误"
-                )
-                messages_to_remove.append(RemoveMessage(id=msg.id))
+        tool_call_ids = _extract_tool_call_ids(msg.tool_calls)
+        if _has_matching_tool_result(messages, i, tool_call_ids):
+            continue
 
-    return messages_to_remove
+        logger.warning(
+            "[PreprocessMessages] 发现不完整的工具调用消息 (id: %s), 将其删除以避免 API 错误",
+            msg.id,
+        )
+        to_remove.append(RemoveMessage(id=msg.id))
+
+    return to_remove
 
 
-async def offload_tool_result(messages: list) -> list[ToolMessage]:
-    """将指定工具的大量结果卸载到文件系统
+# ---------------------------------------------------------------------------
+# 工具结果卸载（按配置规则）
+# ---------------------------------------------------------------------------
 
 
-    Args:
-        messages: 消息列表
-
-    Returns:
-        list[ToolMessage]: 替换后的消息列表
-    """
+async def offload_tool_result(messages: list[Any]) -> list[ToolMessage]:
+    """将配置中指定工具的大型结果卸载到文件系统。"""
     offload_config = get_config().config.tool_offload
-    updated_messages = []
-
     if not offload_config.enabled:
-        return updated_messages
+        return []
+
+    updated: list[ToolMessage] = []
 
     for msg in messages:
         if not isinstance(msg, ToolMessage):
             continue
 
         tool_name = getattr(msg, "name", None)
-        if tool_name not in offload_config.tools:
+        if tool_name not in offload_config.tools or not msg.content:
             continue
 
-        content = msg.content
-        if not content:
-            continue
-
-        # 将非字符串 content 提取为纯文本
-        if isinstance(content, str):
-            content_str = content
-        elif isinstance(content, list):
-            parts = []
-            for block in content:
-                if isinstance(block, str):
-                    parts.append(block)
-                elif isinstance(block, dict) and "text" in block:
-                    parts.append(block["text"])
-            content_str = "\n".join(parts)
-        else:
-            content_str = str(content)
-
+        content_str = content_to_str(msg.content)
         token_count = str_token_counter(content_str)
         if token_count < offload_config.token_threshold:
             continue
 
-        # 生成文件名并写入 .lumi/offload/ 目录
         timestamp = datetime.now().strftime("%H%M%S")
-        file_name = f"{tool_name}_result_{timestamp}.txt"
-        offload_dir = get_config().config_dir / "offload"
-        file_path = offload_dir / file_name
+        file_path = (
+            get_config().config_dir / "offload" / f"{tool_name}_result_{timestamp}.txt"
+        )
 
         try:
-            await asyncio.to_thread(_write_offload_file, file_path, content_str)
+            await asyncio.to_thread(write_offload_file, file_path, content_str)
+        except OSError as exc:
+            logger.error(
+                "[PreprocessMessages] 写入文件失败: %s: %s. 工具: %s, 路径: %s, "
+                "内容大小: %d tokens. 将使用原始内容（可能导致token超限）",
+                type(exc).__name__,
+                exc,
+                tool_name,
+                file_path,
+                token_count,
+            )
+            continue
 
-            # 创建替换消息
-            new_content = f"执行结果已保存到:{file_path}"
-            new_msg = ToolMessage(
-                content=new_content,
+        updated.append(
+            ToolMessage(
+                content=f"执行结果已保存到:{file_path}",
                 tool_call_id=msg.tool_call_id,
                 name=msg.name,
                 id=msg.id,
             )
-            updated_messages.append(new_msg)
+        )
+        logger.info(
+            "[PreprocessMessages] %s 结果已卸载到 %s (原始 %d tokens)",
+            tool_name,
+            file_path,
+            token_count,
+        )
 
-            logger.info(
-                f"[PreprocessMessages] {tool_name} 结果已卸载到 {file_path} "
-                f"(原始 {token_count} tokens)"
-            )
-
-        except Exception as e:
-            logger.error(
-                f"[PreprocessMessages] 写入文件失败: {type(e).__name__}: {e}. "
-                f"工具: {tool_name}, 路径: {file_path}, "
-                f"内容大小: {token_count} tokens. "
-                f"将使用原始内容（可能导致token超限）"
-            )
-
-    return updated_messages
+    return updated
 
 
-def _write_offload_file(file_path: Path, content: str) -> None:
-    """将内容写入卸载文件（同步，供 asyncio.to_thread 调用）"""
-    file_path.parent.mkdir(parents=True, exist_ok=True)
-    file_path.write_text(content, encoding="utf-8")
+# ---------------------------------------------------------------------------
+# Anthropic prompt 缓存
+# ---------------------------------------------------------------------------
 
-
-# Anthropic prompt 缓存控制标记
-CACHE_CONTROL = {"type": "ephemeral", "ttl": "5m"}
+CACHE_CONTROL: dict[str, str] = {"type": "ephemeral", "ttl": "5m"}
 
 
 def _add_cache_control(
     msg: HumanMessage | AIMessage | ToolMessage,
 ) -> HumanMessage | AIMessage | ToolMessage:
-    """为消息的最后一个内容块添加 cache_control，返回新消息对象。
-
-    如果 content 既非字符串也非非空列表，则原样返回。
-    """
+    """为消息最后一个内容块添加 ``cache_control``，返回新消息对象。"""
     content = msg.content
 
     if isinstance(content, str):
-        new_content = [
+        new_content: list[dict[str, Any]] = [
             {"type": "text", "text": content, "cache_control": CACHE_CONTROL}
         ]
     elif isinstance(content, list) and content:
@@ -218,26 +225,25 @@ def _add_cache_control(
     return msg.model_copy(update={"content": new_content})
 
 
-def inject_message_cache_breakpoints(messages: list) -> None:
+def inject_message_cache_breakpoints(messages: list[Any]) -> None:
     """为消息列表末尾添加缓存断点（滑动窗口策略）。
 
-    在倒数第 2 条和最后 1 条非系统消息上添加 cache_control，
-    使每轮新请求的断点随对话向后滑动，上一轮末尾自动被前缀缓存覆盖。
-
-    仅对 Anthropic 模型有意义，调用侧应判断模型类型后再调用。
-
-    Args:
-        messages: 消息列表，就地替换对应元素
+    在倒数第 2 条和最后 1 条非系统消息上添加 ``cache_control``，
+    使每轮请求的断点随对话向后滑动。仅对 Anthropic 模型有意义。
     """
     from langchain_core.messages import SystemMessage
 
-    non_system = [i for i, m in enumerate(messages) if not isinstance(m, SystemMessage)]
-    if not non_system:
+    non_system_indices = [
+        i for i, m in enumerate(messages) if not isinstance(m, SystemMessage)
+    ]
+    if not non_system_indices:
         return
 
-    if len(non_system) >= 2:
-        idx = non_system[-2]
+    # 倒数第 2 条（如果存在）
+    if len(non_system_indices) >= 2:
+        idx = non_system_indices[-2]
         messages[idx] = _add_cache_control(messages[idx])
 
-    idx = non_system[-1]
+    # 最后 1 条
+    idx = non_system_indices[-1]
     messages[idx] = _add_cache_control(messages[idx])

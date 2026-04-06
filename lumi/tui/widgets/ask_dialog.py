@@ -7,11 +7,16 @@ from textual.containers import Horizontal, Vertical
 from textual.css.query import NoMatches
 from textual.events import DescendantBlur, DescendantFocus, Key
 from textual.message import Message
+from textual.widget import Widget
 from textual.widgets import Input, Static
 
 from lumi.tui.renderers.utils import escape_markup as escape
 from lumi.tui.theme import get_color
 from lumi.utils.logger import logger
+
+# Checkbox symbols for multiselect mode
+_CHECKBOX_CHECKED = "◉"
+_CHECKBOX_UNCHECKED = "○"
 
 
 class AskDialog(Vertical):
@@ -64,9 +69,9 @@ class AskDialog(Vertical):
             super().__init__()
             self.header = header
 
-    def __init__(self, interrupt_data: dict) -> None:
+    def __init__(self, interrupt_data: dict[str, object]) -> None:
         super().__init__(classes="ask-dialog")
-        self._questions: list[dict] = interrupt_data.get("questions", [])
+        self._questions: list[dict[str, object]] = interrupt_data.get("questions", [])  # type: ignore[assignment]
         n = len(self._questions)
         self._current_tab: int = 0
         self._selected: dict[int, set[int]] = {i: set() for i in range(n)}
@@ -74,8 +79,8 @@ class AskDialog(Vertical):
         self._custom_text: dict[int, str] = {i: "" for i in range(n)}
         self._input_focused: bool = False
         # 缓存每个问题的有效选项列表（有 label 的）
-        self._opts_cache: dict[int, list[dict]] = {
-            i: [o for o in q.get("options", []) if o.get("label")]
+        self._opts_cache: dict[int, list[dict[str, object]]] = {
+            i: [o for o in q.get("options", []) if o.get("label")]  # type: ignore[union-attr]
             for i, q in enumerate(self._questions)
         }
 
@@ -188,27 +193,31 @@ class AskDialog(Vertical):
             self._deactivate_input()
 
     @staticmethod
-    def _is_ask_input(widget) -> bool:
+    def _is_ask_input(widget: Widget) -> bool:
         """判断 widget 是否为本组件的 Input"""
         return isinstance(widget, Input) and (widget.id or "").startswith("ask-input-")
 
     # ── 渲染辅助 ──
 
+    def _custom_checkbox(self, qi: int) -> str:
+        """Return the checkbox symbol for the custom input item of question qi."""
+        if not self._is_multi(qi):
+            return ""
+        return (
+            _CHECKBOX_CHECKED if self._custom_text.get(qi, "") else _CHECKBOX_UNCHECKED
+        )
+
     def _build_custom_prefix(self, qi: int) -> str:
         """构建自定义输入项的 prefix（序号 + 多选 checkbox）"""
         idx = len(self._opts(qi)) + 1
-        if self._is_multi(qi):
-            check = "◉" if self._custom_text.get(qi, "") else "○"
-            return f"{check} {idx}."
-        return f"{idx}."
+        check = self._custom_checkbox(qi)
+        return f"{check} {idx}." if check else f"{idx}."
 
     def _build_input_prefix(self, qi: int) -> str:
         """构建 Input 行的 prefix markup"""
         idx = len(self._opts(qi)) + 1
-        if self._is_multi(qi):
-            check = "◉" if self._custom_text.get(qi, "") else "○"
-            return f"{check} [dim]{idx}.[/] "
-        return f"[dim]{idx}.[/] "
+        check = self._custom_checkbox(qi)
+        return f"{check} [dim]{idx}.[/] " if check else f"[dim]{idx}.[/] "
 
     def _render_tabs(self) -> str:
         """渲染 Tab 栏"""
@@ -237,36 +246,73 @@ class AskDialog(Vertical):
         lines: list[str] = []
 
         for i, opt in enumerate(opts):
-            label = escape(opt["label"])
-            desc = escape(opt.get("description", ""))
-            suffix = f"  [dim]{desc}[/]" if desc else ""
-            num = i + 1
-            is_hl = (i == highlighted) and not self._input_focused
-            if multi:
-                check = "◉" if i in selected else "○"
-                prefix = f"{check} {num}."
-            else:
-                prefix = f"{num}."
-            if is_hl:
-                lines.append(f"[bold {accent}]{prefix} {label}[/]{suffix}")
-            else:
-                lines.append(f"{prefix} {label}{suffix}")
+            lines.append(
+                self._render_option_line(
+                    opt,
+                    index=i,
+                    multi=multi,
+                    highlighted=highlighted,
+                    selected=selected,
+                    accent=accent,
+                )
+            )
 
         # 自定义输入项：Input 未激活时显示为普通选项行
         if not self._input_focused:
-            prefix = self._build_custom_prefix(qi)
-            custom = self._custom_text.get(qi, "")
-            is_hl = highlighted == len(opts)
-            label = escape(custom) if custom else "[dim]Type something[/]"
-            if is_hl:
-                if custom:
-                    lines.append(f"[bold {accent}]{prefix} {label}[/]")
-                else:
-                    lines.append(f"[bold {accent}]{prefix}[/] {label}")
-            else:
-                lines.append(f"{prefix} {label}")
+            lines.append(
+                self._render_custom_input_line(
+                    qi,
+                    opts_count=len(opts),
+                    highlighted=highlighted,
+                    accent=accent,
+                )
+            )
 
         return "\n".join(lines)
+
+    def _render_option_line(
+        self,
+        opt: dict[str, object],
+        *,
+        index: int,
+        multi: bool,
+        highlighted: int,
+        selected: set[int],
+        accent: str,
+    ) -> str:
+        """Render a single option line with optional highlight and checkbox."""
+        label = escape(str(opt["label"]))
+        desc = escape(str(opt.get("description", "")))
+        suffix = f"  [dim]{desc}[/]" if desc else ""
+        num = index + 1
+        is_hl = (index == highlighted) and not self._input_focused
+        if multi:
+            check = _CHECKBOX_CHECKED if index in selected else _CHECKBOX_UNCHECKED
+            prefix = f"{check} {num}."
+        else:
+            prefix = f"{num}."
+        if is_hl:
+            return f"[bold {accent}]{prefix} {label}[/]{suffix}"
+        return f"{prefix} {label}{suffix}"
+
+    def _render_custom_input_line(
+        self,
+        qi: int,
+        *,
+        opts_count: int,
+        highlighted: int,
+        accent: str,
+    ) -> str:
+        """Render the custom text input line at the bottom of options."""
+        prefix = self._build_custom_prefix(qi)
+        custom = self._custom_text.get(qi, "")
+        is_hl = highlighted == opts_count
+        label = escape(custom) if custom else "[dim]Type something[/]"
+        if is_hl:
+            if custom:
+                return f"[bold {accent}]{prefix} {label}[/]"
+            return f"[bold {accent}]{prefix}[/] {label}"
+        return f"{prefix} {label}"
 
     def _render_hint(self) -> str:
         """渲染操作提示"""
@@ -457,19 +503,6 @@ class AskDialog(Vertical):
         """输入框激活时的按键处理"""
         if event.key in ("escape", "enter"):
             self._deactivate_input()
-            event.stop()
-        elif event.key in ("up", "down"):
-            self._deactivate_input()
-            qi = self._current_tab
-            opts = self._opts(qi)
-            total = self._total_items(qi)
-            cur = self._highlighted.get(qi, len(opts))
-            new_h = (cur - 1) % total if event.key == "up" else (cur + 1) % total
-            self._highlighted[qi] = new_h
-            if new_h == len(opts):
-                self._activate_input(qi)
-            else:
-                self._refresh_current()
             event.stop()
 
     def _handle_submit_key(self, event: Key) -> None:

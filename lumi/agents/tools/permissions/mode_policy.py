@@ -120,9 +120,7 @@ def register_policy(mode: str, policy: ModePolicy) -> None:
 # ── Layer 2: 通用策略守卫 ──
 
 
-def check_policy(
-    policy: ModePolicy, tool_name: str, tool_args: dict
-) -> PolicyResult:
+def check_policy(policy: ModePolicy, tool_name: str, tool_args: dict) -> PolicyResult:
     """检查工具调用是否被模式策略允许
 
     Args:

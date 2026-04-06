@@ -15,19 +15,35 @@ from __future__ import annotations
 
 import difflib
 import json
+import os
 import shutil
 import tempfile
 import time
 import urllib.parse
 import uuid
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from pathlib import Path
+from typing import Any
 
 from lumi.agents.tools.runtime.file_tracker import FileChange, FileChangeTracker
 from lumi.utils.logger import logger
 
-# 单个 thread 最多保留的 checkpoint 数量
+# ── 常量 ──
+
 _MAX_CHECKPOINTS = 20
+"""单个 thread 最多保留的 checkpoint 数量"""
+
+_HASH_SHORT_LENGTH = 8
+"""checkpoint hash 短格式长度"""
+
+_LOG_LABEL_LENGTH = 50
+"""日志中 label 截断长度"""
+
+_LOG_CHECKPOINT_ID_LENGTH = 16
+"""日志中 langgraph checkpoint_id 截断长度"""
+
+_DiffStat = tuple[int, int, int]
+"""(files_changed, insertions, deletions)"""
 
 
 @dataclass(frozen=True)
@@ -46,8 +62,8 @@ class CheckpointInfo:
 
     @property
     def checkpoint_id(self) -> str:
-        """checkpoint hash (short, 前 8 位)"""
-        return self.commit_hash[:8]
+        """checkpoint hash (short)"""
+        return self.commit_hash[:_HASH_SHORT_LENGTH]
 
     @property
     def display_time(self) -> str:
@@ -69,7 +85,7 @@ class CheckpointInfo:
         return ts.strftime("%m-%d %H:%M")
 
 
-def _generate_checkpoint_hash(thread_id: str, timestamp: float) -> str:
+def _generate_checkpoint_hash() -> str:
     """生成 checkpoint hash"""
     return uuid.uuid4().hex
 
@@ -77,6 +93,129 @@ def _generate_checkpoint_hash(thread_id: str, timestamp: float) -> str:
 def _safe_filename(file_path: str) -> str:
     """将绝对路径转为安全的文件名（URL encode）"""
     return urllib.parse.quote(file_path, safe="")
+
+
+# ── 序列化 ──
+
+
+def _serialize_checkpoint(info: CheckpointInfo) -> dict[str, Any]:
+    """将 CheckpointInfo 序列化为可持久化的 dict。"""
+    return {
+        "checkpoint_id": info.checkpoint_id,
+        "commit_hash": info.commit_hash,
+        "timestamp": info.timestamp,
+        "label": info.label,
+        "langgraph_checkpoint_id": info.langgraph_checkpoint_id,
+        "langgraph_parent_checkpoint_id": info.langgraph_parent_checkpoint_id or "",
+    }
+
+
+def _deserialize_checkpoint(d: dict[str, Any]) -> CheckpointInfo:
+    """从 dict 反序列化为 CheckpointInfo。
+
+    Raises:
+        KeyError: 缺少必要字段
+        TypeError: 字段类型不匹配
+    """
+    parent = d.get("langgraph_parent_checkpoint_id", "") or None
+    return CheckpointInfo(
+        commit_hash=d["commit_hash"],
+        timestamp=d["timestamp"],
+        label=d["label"],
+        langgraph_checkpoint_id=d["langgraph_checkpoint_id"],
+        langgraph_parent_checkpoint_id=parent,
+    )
+
+
+def _serialize_manifest(
+    changes: dict[str, FileChange],
+) -> list[dict[str, str]]:
+    """将文件变更构建为 manifest 条目列表。"""
+    manifest: list[dict[str, str]] = []
+    for path, change in changes.items():
+        manifest.append(
+            {
+                "path": path,
+                "change_type": change.change_type,
+                "safe_name": _safe_filename(path),
+            }
+        )
+    return manifest
+
+
+# ── Diff 计算 ──
+
+
+def _line_diff_stat(old: str, new: str) -> tuple[int, int]:
+    """计算两段文本之间的行级 diff 统计。
+
+    Returns:
+        (insertions, deletions)
+    """
+    old_lines = old.splitlines(keepends=True)
+    new_lines = new.splitlines(keepends=True)
+    insertions = 0
+    deletions = 0
+    for tag, i1, i2, j1, j2 in difflib.SequenceMatcher(
+        None, old_lines, new_lines
+    ).get_opcodes():
+        if tag == "replace":
+            deletions += i2 - i1
+            insertions += j2 - j1
+        elif tag == "delete":
+            deletions += i2 - i1
+        elif tag == "insert":
+            insertions += j2 - j1
+    return insertions, deletions
+
+
+def _read_text_safe(path: Path) -> str | None:
+    """安全读取文本文件，失败返回 None。"""
+    try:
+        return path.read_text(encoding="utf-8")
+    except (OSError, UnicodeDecodeError) as e:
+        logger.debug("[FileCheckpoint] 无法读取文件: %s: %s", path, e)
+        return None
+
+
+def _compute_diff_stat(changes: dict[str, FileChange]) -> _DiffStat:
+    """计算变更的 diff 统计（文件数、插入行数、删除行数）。"""
+    files = len(changes)
+    insertions = 0
+    deletions = 0
+    for change in changes.values():
+        if change.change_type == "created":
+            content = _read_text_safe(Path(change.path))
+            if content is not None:
+                insertions += len(content.splitlines())
+        elif change.change_type == "modified" and change.original_content is not None:
+            current = _read_text_safe(Path(change.path))
+            if current is not None:
+                ins, dels = _line_diff_stat(change.original_content, current)
+                insertions += ins
+                deletions += dels
+    return files, insertions, deletions
+
+
+# ── 原子写入 ──
+
+
+def _atomic_write_json(path: Path, data: object) -> None:
+    """原子写入 JSON 文件（先写临时文件再 rename）。
+
+    使用 tempfile + rename 确保写入不会留下半写状态的文件。
+    """
+    content = json.dumps(data, ensure_ascii=False, indent=2)
+    path.parent.mkdir(parents=True, exist_ok=True)
+    tmp_fd, tmp_path = tempfile.mkstemp(dir=str(path.parent), suffix=".tmp")
+    os.close(tmp_fd)
+    tmp = Path(tmp_path)
+    try:
+        tmp.write_text(content, encoding="utf-8")
+        tmp.replace(path)
+    except BaseException:
+        tmp.unlink(missing_ok=True)
+        raise
 
 
 class FileCheckpointManager:
@@ -91,14 +230,7 @@ class FileCheckpointManager:
         project_dir: Path,
         tracker: FileChangeTracker,
         base_dir: Path | None = None,
-    ):
-        """
-        Args:
-            thread_id: 会话线程 ID
-            project_dir: 项目根目录路径
-            tracker: 文件变更追踪器
-            base_dir: 存储根目录，默认 ~/.lumi/checkpoints/filediff
-        """
+    ) -> None:
         if base_dir is None:
             base_dir = Path.home() / ".lumi" / "checkpoints" / "filediff"
         self._thread_id = thread_id
@@ -126,108 +258,106 @@ class FileCheckpointManager:
         2. 创建新的 checkpoint 条目
         3. 启动新一轮的变更追踪
 
-        Args:
-            label: 用户消息摘要
-            langgraph_checkpoint_id: 当前 LangGraph checkpoint_id
-            langgraph_parent_checkpoint_id: LangGraph parent checkpoint_id
-
         Returns:
             CheckpointInfo，失败返回 None
         """
         try:
             self._store_dir.mkdir(parents=True, exist_ok=True)
-
-            # 1. 收集上一轮变更并持久化到上一个 checkpoint
-            prev_changes = self._tracker.end_turn()
-            meta = self._load_meta()
-            if prev_changes and meta:
-                prev_cp_id = meta[-1]["commit_hash"]
-                self._save_changes(prev_cp_id, prev_changes)
-                logger.info(
-                    "[FileCheckpoint] 保存上一轮 %d 个文件变更到 %s",
-                    len(prev_changes),
-                    prev_cp_id[:8],
-                )
-
-            # 2. 创建新 checkpoint
-            now = time.time()
-            commit_hash = _generate_checkpoint_hash(self._thread_id, now)
-
-            info = CheckpointInfo(
-                commit_hash=commit_hash,
-                timestamp=now,
-                label=label[:100],
-                langgraph_checkpoint_id=langgraph_checkpoint_id,
-                langgraph_parent_checkpoint_id=langgraph_parent_checkpoint_id or None,
+            meta = self._persist_previous_turn_changes()
+            info = self._append_new_checkpoint(
+                meta, label, langgraph_checkpoint_id, langgraph_parent_checkpoint_id
             )
-
-            # 追加到 meta（复用已加载的 meta）
-            meta.append(self._info_to_dict(info))
-            if len(meta) > _MAX_CHECKPOINTS:
-                # 清理最旧的 checkpoint 的 changes 目录
-                removed = meta[: len(meta) - _MAX_CHECKPOINTS]
-                for old in removed:
-                    self._delete_changes(old["commit_hash"])
-                meta = meta[-_MAX_CHECKPOINTS:]
-            self._save_meta(meta)
-
-            # 3. 开始追踪新一轮
             self._tracker.start_turn()
-
-            logger.info(
-                "[FileCheckpoint] checkpoint %s: %s (lg_cp=%s)",
-                info.checkpoint_id,
-                label[:50],
-                langgraph_checkpoint_id[:16] if langgraph_checkpoint_id else "N/A",
-            )
             return info
-
         except (OSError, json.JSONDecodeError, KeyError, ValueError) as exc:
             logger.error(
                 "[FileCheckpoint] 创建 checkpoint 失败: %s", exc, exc_info=True
             )
             return None
 
+    def _persist_previous_turn_changes(self) -> list[dict[str, Any]]:
+        """收集上一轮变更并持久化到上一个 checkpoint，返回当前 meta。"""
+        prev_changes = self._tracker.end_turn()
+        meta = self._load_meta()
+        if prev_changes and meta:
+            prev_cp_id = meta[-1]["commit_hash"]
+            self._save_changes(prev_cp_id, prev_changes)
+            logger.info(
+                "[FileCheckpoint] 保存上一轮 %d 个文件变更到 %s",
+                len(prev_changes),
+                prev_cp_id[:_HASH_SHORT_LENGTH],
+            )
+        return meta
+
+    def _append_new_checkpoint(
+        self,
+        meta: list[dict[str, Any]],
+        label: str,
+        langgraph_checkpoint_id: str,
+        langgraph_parent_checkpoint_id: str,
+    ) -> CheckpointInfo:
+        """创建新 checkpoint 条目，追加到 meta 并写盘。"""
+        info = CheckpointInfo(
+            commit_hash=_generate_checkpoint_hash(),
+            timestamp=time.time(),
+            label=label,
+            langgraph_checkpoint_id=langgraph_checkpoint_id,
+            langgraph_parent_checkpoint_id=langgraph_parent_checkpoint_id or None,
+        )
+        meta.append(_serialize_checkpoint(info))
+        self._evict_old_checkpoints(meta)
+        self._save_meta(meta)
+
+        logger.info(
+            "[FileCheckpoint] checkpoint %s: %s (lg_cp=%s)",
+            info.checkpoint_id,
+            label[:_LOG_LABEL_LENGTH],
+            langgraph_checkpoint_id[:_LOG_CHECKPOINT_ID_LENGTH]
+            if langgraph_checkpoint_id
+            else "N/A",
+        )
+        return info
+
+    def _evict_old_checkpoints(self, meta: list[dict[str, Any]]) -> None:
+        """淘汰超过上限的旧 checkpoint。"""
+        if len(meta) <= _MAX_CHECKPOINTS:
+            return
+        removed = meta[: len(meta) - _MAX_CHECKPOINTS]
+        for old in removed:
+            self._delete_changes(old["commit_hash"])
+        del meta[: len(meta) - _MAX_CHECKPOINTS]
+
     # ── Checkpoint 列表 ──
 
     def list_checkpoints(self) -> list[CheckpointInfo]:
-        """列出所有 checkpoint（按时间正序），附带 diff 统计。
-
-        diff 归属逻辑：每个 checkpoint 显示的是该轮 agent 执行后产生的文件变更。
-        """
+        """列出所有 checkpoint（按时间正序），附带 diff 统计。"""
         try:
             meta = self._load_meta()
             if not meta:
                 return []
 
             infos: list[CheckpointInfo] = []
+            last_idx = len(meta) - 1
             for i, d in enumerate(meta):
                 try:
-                    info = self._dict_to_info(d)
+                    info = _deserialize_checkpoint(d)
                 except (KeyError, TypeError) as e:
                     logger.warning("[FileCheckpoint] 跳过损坏的 meta 条目 %d: %s", i, e)
                     continue
 
-                # 计算 diff 统计
-                cp_id = d["commit_hash"]
-                if i + 1 < len(meta):
-                    # 非最后一个：从已保存的 changes 目录读取
-                    files, ins, dels = self._diff_stat_from_changes(cp_id)
+                if i < last_idx:
+                    diff = self._diff_stat_from_changes(d["commit_hash"])
                 else:
-                    # 最后一个：从 tracker 内存 + 当前文件对比
-                    files, ins, dels = self._diff_stat_current()
+                    diff = self._diff_stat_current()
 
-                info = CheckpointInfo(
-                    commit_hash=info.commit_hash,
-                    timestamp=info.timestamp,
-                    label=info.label,
-                    langgraph_checkpoint_id=info.langgraph_checkpoint_id,
-                    langgraph_parent_checkpoint_id=info.langgraph_parent_checkpoint_id,
-                    files_changed=files,
-                    insertions=ins,
-                    deletions=dels,
+                infos.append(
+                    replace(
+                        info,
+                        files_changed=diff[0],
+                        insertions=diff[1],
+                        deletions=diff[2],
+                    )
                 )
-                infos.append(info)
             return infos
         except (OSError, json.JSONDecodeError, KeyError, ValueError) as exc:
             logger.error(
@@ -242,88 +372,74 @@ class FileCheckpointManager:
 
         收集目标 checkpoint 之后所有轮次的文件变更，
         对每个文件取最早的原始内容进行恢复。
-
-        Args:
-            commit_hash: 要恢复到的 checkpoint hash
-
-        Returns:
-            恢复成功返回 True
         """
         try:
             meta = self._load_meta()
-            target_idx = None
-            for i, d in enumerate(meta):
-                if d["commit_hash"] == commit_hash:
-                    target_idx = i
-                    break
-
+            target_idx = self._find_checkpoint_index(meta, commit_hash)
             if target_idx is None:
-                logger.error("[FileCheckpoint] 未找到 checkpoint: %s", commit_hash[:8])
-                return False
-
-            # 收集目标及之后所有 checkpoint 的变更
-            # 目标 checkpoint 自身的 changes 也需要恢复（它代表该轮的文件变更），
-            # 因为回滚到目标意味着回到"该轮执行前"的状态。
-            # 同时收集当前 tracker 中尚未持久化的变更。
-            restore_map: dict[str, FileChange] = {}
-
-            for d in meta[target_idx:]:
-                changes = self._load_changes(d["commit_hash"])
-                for path, change in changes.items():
-                    if path not in restore_map:
-                        restore_map[path] = change
-
-            # 加入当前 tracker 中的变更（最新一轮，尚未持久化）
-            current_changes = self._tracker.end_turn()
-            for path, change in current_changes.items():
-                if path not in restore_map:
-                    restore_map[path] = change
-
-            # 执行恢复
-            failed: list[str] = []
-            for path, change in restore_map.items():
-                try:
-                    p = Path(path)
-                    if change.change_type == "created":
-                        # 新建的文件：删除
-                        if p.exists() and p.is_file():
-                            p.unlink()
-                            logger.debug("[FileCheckpoint] 删除文件: %s", path)
-                    elif (
-                        change.change_type == "modified"
-                        and change.original_content is not None
-                    ):
-                        # 修改的文件：写回原始内容
-                        p.parent.mkdir(parents=True, exist_ok=True)
-                        p.write_text(change.original_content, encoding="utf-8")
-                        logger.debug("[FileCheckpoint] 恢复文件: %s", path)
-                except Exception:
-                    logger.warning(
-                        "[FileCheckpoint] 恢复文件失败: %s", path, exc_info=True
-                    )
-                    failed.append(path)
-
-            if failed:
                 logger.error(
-                    "[FileCheckpoint] %d 个文件恢复失败: %s", len(failed), failed
+                    "[FileCheckpoint] 未找到 checkpoint: %s",
+                    commit_hash[:_HASH_SHORT_LENGTH],
                 )
                 return False
 
-            # 截断 meta 到目标之前（排除目标本身，用户回滚后会重新发送创建新 checkpoint）
+            restore_map = self._collect_restore_map(meta, target_idx)
+            if not self._apply_restore(restore_map):
+                return False
+
             meta = meta[:target_idx]
             self._save_meta(meta)
-
-            # 清理多余的 changes 目录
             self._cleanup_orphan_changes(meta)
 
-            logger.info("[FileCheckpoint] 恢复到 checkpoint %s", commit_hash[:8])
+            logger.info(
+                "[FileCheckpoint] 恢复到 checkpoint %s",
+                commit_hash[:_HASH_SHORT_LENGTH],
+            )
             return True
-
         except (OSError, json.JSONDecodeError, KeyError, ValueError) as exc:
             logger.error(
                 "[FileCheckpoint] 恢复 checkpoint 失败: %s", exc, exc_info=True
             )
             return False
+
+    @staticmethod
+    def _find_checkpoint_index(
+        meta: list[dict[str, Any]], commit_hash: str
+    ) -> int | None:
+        """在 meta 列表中查找 commit_hash 对应的索引。"""
+        for i, d in enumerate(meta):
+            if d["commit_hash"] == commit_hash:
+                return i
+        return None
+
+    def _collect_restore_map(
+        self, meta: list[dict[str, Any]], target_idx: int
+    ) -> dict[str, FileChange]:
+        """收集目标 checkpoint 及之后所有轮次的文件变更（含当前未持久化的）。"""
+        restore_map: dict[str, FileChange] = {}
+        for d in meta[target_idx:]:
+            for path, change in self._load_changes(d["commit_hash"]).items():
+                if path not in restore_map:
+                    restore_map[path] = change
+        for path, change in self._tracker.end_turn().items():
+            if path not in restore_map:
+                restore_map[path] = change
+        return restore_map
+
+    @staticmethod
+    def _apply_restore(restore_map: dict[str, FileChange]) -> bool:
+        """按 restore_map 恢复文件，返回是否全部成功。"""
+        failed: list[str] = []
+        for path, change in restore_map.items():
+            try:
+                _restore_single_file(path, change)
+            except OSError:
+                logger.warning("[FileCheckpoint] 恢复文件失败: %s", path, exc_info=True)
+                failed.append(path)
+        if failed:
+            logger.error("[FileCheckpoint] %d 个文件恢复失败: %s", len(failed), failed)
+            return False
+        return True
 
     # ── Changes 持久化 ──
 
@@ -333,56 +449,39 @@ class FileCheckpointManager:
         files_dir = cp_dir / "files"
         files_dir.mkdir(parents=True, exist_ok=True)
 
-        manifest = []
-        for path, change in changes.items():
-            safe_name = _safe_filename(path)
-            manifest.append(
-                {
-                    "path": path,
-                    "change_type": change.change_type,
-                    "safe_name": safe_name,
-                }
-            )
+        manifest = _serialize_manifest(changes)
+        for entry, (_, change) in zip(manifest, changes.items(), strict=True):
             if change.change_type == "modified" and change.original_content is not None:
-                (files_dir / safe_name).write_text(
+                (files_dir / entry["safe_name"]).write_text(
                     change.original_content, encoding="utf-8"
                 )
-
-        self._atomic_write_json(cp_dir / "manifest.json", manifest)
+        _atomic_write_json(cp_dir / "manifest.json", manifest)
 
     def _load_changes(self, checkpoint_id: str) -> dict[str, FileChange]:
         """从磁盘加载一轮的文件变更。"""
-        cp_dir = self._changes_dir / checkpoint_id
-        manifest_path = cp_dir / "manifest.json"
+        manifest_path = self._changes_dir / checkpoint_id / "manifest.json"
         if not manifest_path.exists():
             return {}
 
         try:
-            manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
+            manifest: list[dict[str, str]] = json.loads(
+                manifest_path.read_text(encoding="utf-8")
+            )
         except (json.JSONDecodeError, OSError):
-            logger.warning("[FileCheckpoint] manifest.json 损坏: %s", checkpoint_id[:8])
+            logger.warning(
+                "[FileCheckpoint] manifest.json 损坏: %s",
+                checkpoint_id[:_HASH_SHORT_LENGTH],
+            )
             return {}
 
+        files_dir = self._changes_dir / checkpoint_id / "files"
         changes: dict[str, FileChange] = {}
-        files_dir = cp_dir / "files"
         for entry in manifest:
             path = entry["path"]
             change_type = entry["change_type"]
-            original_content = None
-            if change_type == "modified":
-                safe_name = entry.get("safe_name", _safe_filename(path))
-                content_path = files_dir / safe_name
-                if content_path.exists():
-                    try:
-                        original_content = content_path.read_text(encoding="utf-8")
-                    except (OSError, UnicodeDecodeError):
-                        logger.warning("[FileCheckpoint] 无法读取原始内容: %s", path)
-                else:
-                    logger.warning(
-                        "[FileCheckpoint] 备份文件缺失，恢复时将跳过: %s (checkpoint=%s)",
-                        path,
-                        checkpoint_id[:8],
-                    )
+            original_content = self._load_original_content(
+                entry, files_dir, checkpoint_id
+            )
             changes[path] = FileChange(
                 path=path,
                 change_type=change_type,
@@ -390,20 +489,42 @@ class FileCheckpointManager:
             )
         return changes
 
+    @staticmethod
+    def _load_original_content(
+        entry: dict[str, str], files_dir: Path, checkpoint_id: str
+    ) -> str | None:
+        """从备份文件读取原始内容（仅 modified 类型）。"""
+        if entry["change_type"] != "modified":
+            return None
+        safe_name = entry.get("safe_name", _safe_filename(entry["path"]))
+        content_path = files_dir / safe_name
+        if not content_path.exists():
+            logger.warning(
+                "[FileCheckpoint] 备份文件缺失，恢复时将跳过: %s (checkpoint=%s)",
+                entry["path"],
+                checkpoint_id[:_HASH_SHORT_LENGTH],
+            )
+            return None
+        content = _read_text_safe(content_path)
+        if content is None:
+            logger.warning("[FileCheckpoint] 无法读取原始内容: %s", entry["path"])
+        return content
+
     def _delete_changes(self, checkpoint_id: str) -> None:
         """删除指定 checkpoint 的 changes 目录。"""
         cp_dir = self._changes_dir / checkpoint_id
-        if cp_dir.exists():
-            try:
-                shutil.rmtree(cp_dir)
-            except OSError:
-                logger.warning(
-                    "[FileCheckpoint] 无法清理 changes 目录: %s",
-                    checkpoint_id[:8],
-                    exc_info=True,
-                )
+        if not cp_dir.exists():
+            return
+        try:
+            shutil.rmtree(cp_dir)
+        except OSError:
+            logger.warning(
+                "[FileCheckpoint] 无法清理 changes 目录: %s",
+                checkpoint_id[:_HASH_SHORT_LENGTH],
+                exc_info=True,
+            )
 
-    def _cleanup_orphan_changes(self, meta: list[dict]) -> None:
+    def _cleanup_orphan_changes(self, meta: list[dict[str, Any]]) -> None:
         """清理不在 meta 中的 changes 目录。"""
         if not self._changes_dir.exists():
             return
@@ -415,158 +536,75 @@ class FileCheckpointManager:
                 except OSError:
                     logger.warning(
                         "[FileCheckpoint] 无法清理孤立 changes 目录: %s",
-                        child.name[:8],
+                        child.name[:_HASH_SHORT_LENGTH],
                         exc_info=True,
                     )
 
     # ── Diff 统计 ──
 
-    def _diff_stat_from_changes(self, checkpoint_id: str) -> tuple[int, int, int]:
+    def _diff_stat_from_changes(self, checkpoint_id: str) -> _DiffStat:
         """从已保存的 changes 目录计算 diff 统计。"""
         changes = self._load_changes(checkpoint_id)
         if not changes:
             return 0, 0, 0
-        return self._compute_diff_stat(changes)
+        return _compute_diff_stat(changes)
 
-    def _diff_stat_current(self) -> tuple[int, int, int]:
-        """从当前 tracker 内存中的变更计算 diff 统计。
-
-        不消耗 tracker 状态（只读取，不 end_turn）。
-        """
+    def _diff_stat_current(self) -> _DiffStat:
+        """从当前 tracker 内存中的变更计算 diff 统计（只读）。"""
         changes = self._tracker.peek_changes()
         if not changes:
             return 0, 0, 0
-        return self._compute_diff_stat(changes)
-
-    @staticmethod
-    def _compute_diff_stat(changes: dict[str, FileChange]) -> tuple[int, int, int]:
-        """计算变更的 diff 统计（文件数、插入行数、删除行数）。
-
-        对比原始内容与变更后内容（从下一个 checkpoint 的原始内容推断，
-        但由于我们可能没有下一个 checkpoint 的数据，简化为统计 manifest 条目数
-        和原始内容的行数变化）。
-        """
-        files = len(changes)
-        insertions = 0
-        deletions = 0
-        for change in changes.values():
-            if change.change_type == "created":
-                # 新建文件：当前文件内容全部算作插入
-                p = Path(change.path)
-                if p.exists():
-                    try:
-                        content = p.read_text(encoding="utf-8")
-                        insertions += len(content.splitlines())
-                    except (OSError, UnicodeDecodeError):
-                        logger.debug(
-                            "[FileCheckpoint] 无法读取文件计算 diff: %s",
-                            change.path,
-                        )
-            elif (
-                change.change_type == "modified" and change.original_content is not None
-            ):
-                # 修改文件：对比原始内容和当前内容
-                p = Path(change.path)
-                if p.exists():
-                    try:
-                        current = p.read_text(encoding="utf-8")
-                        ins, dels = _line_diff_stat(change.original_content, current)
-                        insertions += ins
-                        deletions += dels
-                    except (OSError, UnicodeDecodeError):
-                        logger.debug(
-                            "[FileCheckpoint] 无法读取文件计算 diff: %s",
-                            change.path,
-                        )
-        return files, insertions, deletions
+        return _compute_diff_stat(changes)
 
     # ── Meta 文件管理 ──
 
-    def _load_meta(self) -> list[dict]:
+    def _load_meta(self) -> list[dict[str, Any]]:
+        """加载 meta.json，损坏时备份并重置。"""
         if not self._meta_path.exists():
             return []
         try:
             return json.loads(self._meta_path.read_text(encoding="utf-8"))
         except (json.JSONDecodeError, UnicodeDecodeError, OSError):
             logger.error("[FileCheckpoint] meta.json 损坏，已备份后重置", exc_info=True)
-            try:
-                backup = self._meta_path.with_suffix(".json.bak")
-                self._meta_path.rename(backup)
-            except OSError:
-                logger.error(
-                    "[FileCheckpoint] 无法备份损坏的 meta.json，尝试删除",
-                    exc_info=True,
-                )
-                try:
-                    self._meta_path.unlink()
-                except OSError:
-                    logger.error(
-                        "[FileCheckpoint] 无法删除损坏的 meta.json", exc_info=True
-                    )
+            self._backup_corrupted_meta()
             return []
 
-    def _save_meta(self, meta: list[dict]) -> None:
+    def _backup_corrupted_meta(self) -> None:
+        """备份或删除损坏的 meta.json。"""
+        try:
+            backup = self._meta_path.with_suffix(".json.bak")
+            self._meta_path.rename(backup)
+        except OSError:
+            logger.error(
+                "[FileCheckpoint] 无法备份损坏的 meta.json，尝试删除",
+                exc_info=True,
+            )
+            try:
+                self._meta_path.unlink()
+            except OSError:
+                logger.error("[FileCheckpoint] 无法删除损坏的 meta.json", exc_info=True)
+
+    def _save_meta(self, meta: list[dict[str, Any]]) -> None:
         """原子写入 meta.json"""
         self._store_dir.mkdir(parents=True, exist_ok=True)
-        self._atomic_write_json(self._meta_path, meta)
-
-    def _atomic_write_json(self, path: Path, data: object) -> None:
-        """原子写入 JSON 文件（先写临时文件再 rename）"""
-        import os
-
-        content = json.dumps(data, ensure_ascii=False, indent=2)
-        path.parent.mkdir(parents=True, exist_ok=True)
-        tmp_fd, tmp_path = tempfile.mkstemp(dir=str(path.parent), suffix=".tmp")
-        os.close(tmp_fd)
-        tmp = Path(tmp_path)
-        try:
-            tmp.write_text(content, encoding="utf-8")
-            tmp.replace(path)
-        except BaseException:
-            tmp.unlink(missing_ok=True)
-            raise
-
-    @staticmethod
-    def _info_to_dict(info: CheckpointInfo) -> dict:
-        return {
-            "checkpoint_id": info.checkpoint_id,
-            "commit_hash": info.commit_hash,
-            "timestamp": info.timestamp,
-            "label": info.label,
-            "langgraph_checkpoint_id": info.langgraph_checkpoint_id,
-            "langgraph_parent_checkpoint_id": info.langgraph_parent_checkpoint_id or "",
-        }
-
-    @staticmethod
-    def _dict_to_info(d: dict) -> CheckpointInfo:
-        parent = d.get("langgraph_parent_checkpoint_id", "") or None
-        return CheckpointInfo(
-            commit_hash=d["commit_hash"],
-            timestamp=d["timestamp"],
-            label=d["label"],
-            langgraph_checkpoint_id=d["langgraph_checkpoint_id"],
-            langgraph_parent_checkpoint_id=parent,
-        )
+        _atomic_write_json(self._meta_path, meta)
 
 
-def _line_diff_stat(old: str, new: str) -> tuple[int, int]:
-    """计算两段文本之间的行级 diff 统计。
+# ── 文件恢复 ──
 
-    Returns:
-        (insertions, deletions)
+
+def _restore_single_file(path: str, change: FileChange) -> None:
+    """恢复单个文件到原始状态。
+
+    Raises:
+        OSError: 文件操作失败
     """
-    old_lines = old.splitlines(keepends=True)
-    new_lines = new.splitlines(keepends=True)
-    insertions = 0
-    deletions = 0
-    for tag, i1, i2, j1, j2 in difflib.SequenceMatcher(
-        None, old_lines, new_lines
-    ).get_opcodes():
-        if tag == "replace":
-            deletions += i2 - i1
-            insertions += j2 - j1
-        elif tag == "delete":
-            deletions += i2 - i1
-        elif tag == "insert":
-            insertions += j2 - j1
-    return insertions, deletions
+    p = Path(path)
+    if change.change_type == "created":
+        if p.exists() and p.is_file():
+            p.unlink()
+            logger.debug("[FileCheckpoint] 删除文件: %s", path)
+    elif change.change_type == "modified" and change.original_content is not None:
+        p.parent.mkdir(parents=True, exist_ok=True)
+        p.write_text(change.original_content, encoding="utf-8")
+        logger.debug("[FileCheckpoint] 恢复文件: %s", path)

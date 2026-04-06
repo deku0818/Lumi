@@ -118,10 +118,8 @@ class MCPScreen(ListScreen[MCPServerInfo]):
     def _on_key(self, event: Key) -> None:
         """Enter 时打开工具详情子界面而非 dismiss。"""
         if event.key == "enter":
-            if self._filtered and 0 <= self._selected_index < len(self._filtered):
-                server = self._filtered[self._selected_index]
-                if server.tools:
-                    self.app.push_screen(MCPToolsScreen(server))
+            if (server := self._selected_item) is not None and server.tools:
+                self.app.push_screen(MCPToolsScreen(server))
             event.prevent_default()
             event.stop()
             return

@@ -1,16 +1,19 @@
-"""工具系统 - 公共API"""
+"""工具系统 — 注册所有 provider 并暴露公共 API。"""
+
+from __future__ import annotations
 
 from langchain_core.tools.structured import StructuredTool
 
 from lumi.utils.logger import logger
 
 from .loader import AgentConfig, SkillConfig, load_agents, load_skills
-
-# 导入工具提供者模块
-from .providers import ask, bash, cron, filesystem, mcp, plan, todo, skill
+from .providers import ask, bash, cron, filesystem, mcp, plan, skill, todo
 from .registry import ToolRegistry
 
-# 注册常驻工具提供者
+# ------------------------------------------------------------------
+# Provider 注册
+# ------------------------------------------------------------------
+
 ToolRegistry.register("mcp", mcp.get_mcp_tools)
 ToolRegistry.register("filesystem", filesystem)
 ToolRegistry.register("bash", bash)
@@ -20,7 +23,7 @@ ToolRegistry.register("cron", cron)
 ToolRegistry.register("skill", skill)
 ToolRegistry.register("plan", plan)
 
-# 条件注册：仅在有配置时才导入和注册
+# 条件注册: 仅在有 agent 配置时才启用
 try:
     _agents = load_agents()
     if _agents:
@@ -32,49 +35,39 @@ except Exception as e:
     logger.warning(f"加载 agent 配置失败，'agent' 工具不可用: {e}")
 
 
+# ------------------------------------------------------------------
+# 公共 API
+# ------------------------------------------------------------------
+
+
 async def get_tools(
     tools: list[str] | None = None,
     disabled_tools: list[str] | None = None,
 ) -> list[StructuredTool]:
-    """
-    获取工具，支持白名单和黑名单过滤
-
-    过滤逻辑：
-    1. 如果 tools 为空 → 使用所有工具
-    2. 如果 tools 非空 → 只使用 tools 中指定的工具
-    3. 最后从结果中移除 disabled_tools 中的工具（优先级更高）
+    """获取工具列表，支持白名单 + 黑名单过滤。
 
     Args:
-        tools: 启用的工具列表（白名单），空列表或 None 表示启用所有工具
-        disabled_tools: 要禁用的工具名称列表（黑名单）
-
-    Example:
-        tools = await get_tools()
-        tools = await get_tools(tools=["read", "write"])
-        tools = await get_tools(disabled_tools=["bash"])
-        tools = await get_tools(tools=["read", "write"], disabled_tools=["write"])
+        tools: 白名单 — 只保留这些工具。``None`` 表示全部。
+        disabled_tools: 黑名单 — 从结果中移除（优先级高于白名单）。
     """
-    all_tools = await ToolRegistry.instance().get_tools()
+    result = await ToolRegistry.instance().get_tools()
 
-    # 白名单过滤
     if tools:
-        all_tools = [t for t in all_tools if t.name in tools]
+        allowed = set(tools)
+        result = [t for t in result if t.name in allowed]
 
-    # 黑名单过滤（优先级更高）
     if disabled_tools:
-        all_tools = [t for t in all_tools if t.name not in disabled_tools]
+        blocked = set(disabled_tools)
+        result = [t for t in result if t.name not in blocked]
 
-    return all_tools
+    return result
 
 
 __all__ = [
-    # 配置加载
     "AgentConfig",
     "SkillConfig",
+    "ToolRegistry",
+    "get_tools",
     "load_agents",
     "load_skills",
-    # 工具注册表
-    "ToolRegistry",
-    # 便捷函数
-    "get_tools",
 ]

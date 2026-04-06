@@ -181,6 +181,25 @@ def is_use_tool(state: LumiAgentState, runtime: Runtime[LumiAgentContext]) -> st
     if is_structured_output_call(tool_calls):
         return "ExtractStructuredOutput"
 
+    # 权限引擎 DENY 检查（优先于 bypass，deny 规则不可绕过）
+    engine = runtime.context.permission_engine
+    tool_mode = state.get("tool_mode", "auto")
+
+    if engine is not None:
+        engine.reload()
+        for tc in tool_calls:
+            try:
+                decision = engine.evaluate(tc["name"], tc.get("args", {}))
+                if decision == PermissionDecision.DENY:
+                    return "HumanApproval"
+            except Exception as e:
+                logger.error(
+                    "[PermissionCheck] DENY 前置检查异常 (%s): %s",
+                    tc["name"],
+                    e,
+                    exc_info=True,
+                )
+
     # 只读/中断/状态修改类工具跳过审批，直接执行
     if all(
         should_bypass_approval(tc.get("name", ""), tc.get("args", {}))
@@ -196,9 +215,7 @@ def is_use_tool(state: LumiAgentState, runtime: Runtime[LumiAgentContext]) -> st
         policy = get_policy(execution_mode)
         if policy is not None:
             for tc in tool_calls:
-                result = check_policy(
-                    policy, tc.get("name", ""), tc.get("args", {})
-                )
+                result = check_policy(policy, tc.get("name", ""), tc.get("args", {}))
                 if not result.allowed:
                     logger.info(
                         "[PolicyGuard] %s 拒绝: %s - %s",
@@ -225,9 +242,7 @@ def is_use_tool(state: LumiAgentState, runtime: Runtime[LumiAgentContext]) -> st
             logger.warning("[SafetyCheck] Bypass-immune: %s", reason)
             return "HumanApproval"
 
-    # 权限引擎评估（所有模式共用）
-    engine = runtime.context.permission_engine
-    tool_mode = state.get("tool_mode", "auto")
+    # 权限引擎完整评估（deny 已在上方处理，此处处理 allow/ask/unmatched）
 
     if engine is not None:
         engine.reload()

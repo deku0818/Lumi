@@ -30,14 +30,29 @@ if TYPE_CHECKING:
 from lumi.utils.logger import logger
 
 # 等待用户交互的阶段（计时暂停）
-_WAITING_PHASES: Final = frozenset(
+_WAITING_PHASES: Final[frozenset[RunPhase]] = frozenset(
     {RunPhase.WAITING_ASK, RunPhase.WAITING_APPROVAL, RunPhase.WAITING_PLAN_APPROVAL}
 )
 
 # agent 工具因 cancel/reject 结束时的输出文本
-_AGENT_CANCEL_OUTPUTS: Final = frozenset(
+_AGENT_CANCEL_OUTPUTS: Final[frozenset[str]] = frozenset(
     {"用户中断了工具调用请求", "用户拒绝了工具执行"}
 )
+
+# EventKind → RunPhase 的确定性映射（不依赖旧状态）
+# MODEL_END 不在此映射中，保持当前阶段不变
+_PHASE_MAP: Final[dict[EventKind, RunPhase]] = {
+    EventKind.MODEL_START: RunPhase.THINKING,
+    EventKind.STREAM_TOKEN: RunPhase.STREAMING,
+    EventKind.TOOL_CALL_CHUNK: RunPhase.TOOL_CALL_PENDING,
+    EventKind.TOOL_START: RunPhase.TOOL_RUNNING,
+    EventKind.TOOL_END: RunPhase.TOOL_RUNNING,
+    EventKind.ASK: RunPhase.WAITING_ASK,
+    EventKind.TOOL_APPROVAL: RunPhase.WAITING_APPROVAL,
+    EventKind.EXIT_PLAN_MODE: RunPhase.WAITING_PLAN_APPROVAL,
+    EventKind.DONE: RunPhase.IDLE,
+    EventKind.ERROR: RunPhase.IDLE,
+}
 
 
 class AppCallbacks(Protocol):
@@ -131,31 +146,12 @@ class EventRouter:
     # ── 状态机 ──
 
     def _transition(self, evt: BridgeEvent) -> tuple[RunPhase, RunPhase]:
-        """纯逻辑状态转换，不操作 DOM。返回 (old, new)。"""
+        """纯逻辑状态转换，不操作 DOM。返回 (old, new)。
+
+        MODEL_END 和未知事件类型不改变当前阶段。
+        """
         old = self._run.phase
-        match evt.kind:
-            case EventKind.MODEL_START:
-                new = RunPhase.THINKING
-            case EventKind.STREAM_TOKEN:
-                new = RunPhase.STREAMING
-            case EventKind.MODEL_END:
-                new = old  # 不改变可见状态
-            case EventKind.TOOL_CALL_CHUNK:
-                new = RunPhase.TOOL_CALL_PENDING
-            case EventKind.TOOL_START:
-                new = RunPhase.TOOL_RUNNING
-            case EventKind.TOOL_END:
-                new = RunPhase.TOOL_RUNNING
-            case EventKind.ASK:
-                new = RunPhase.WAITING_ASK
-            case EventKind.TOOL_APPROVAL:
-                new = RunPhase.WAITING_APPROVAL
-            case EventKind.EXIT_PLAN_MODE:
-                new = RunPhase.WAITING_PLAN_APPROVAL
-            case EventKind.DONE | EventKind.ERROR:
-                new = RunPhase.IDLE
-            case _:
-                new = old
+        new = _PHASE_MAP.get(evt.kind, old)
         self._run.phase = new
         return old, new
 
@@ -248,37 +244,7 @@ class EventRouter:
     async def _handle_tool_start(self, evt: BridgeEvent) -> None:
         """主流程 TOOL_START：委托给 WidgetAssembler，处理 SubagentTracker 注册。"""
         if evt.name == "agent" and evt.run_id:
-            # replay 场景：审批后 resume 会重新发出 agent TOOL_START（新 run_id），
-            # 尝试复用已有的 unmapped block，避免在 AgentGroup 中重复新增条目
-            existing = self._tracker.find_unmapped_running(evt.args)
-            if existing is not None:
-                # 获取旧 run_id（remap 会覆盖 state.run_id）
-                old_state = self._tracker.get_by_block(existing)
-                old_run_id = old_state.run_id if old_state else ""
-                self._tracker.remap(evt.run_id, existing)
-                self._asm.tool_blocks[evt.run_id] = existing
-                # 同步更新 AgentGroup 中的 run_id 映射，
-                # 使后续子代理事件（parent_run_id=新 run_id）能正确路由
-                if old_run_id and self._asm.agent_group:
-                    self._asm.agent_group.remap_agent(old_run_id, evt.run_id)
-                return
-
-            # 全新 agent 工具 → AgentGroup 轻量模式
-            agent_name = (evt.args or {}).get("name", "agent")
-            prompt = (evt.args or {}).get("prompt", "")
-            await self._asm.apply_item(
-                AgentStartItem(
-                    run_id=evt.run_id,
-                    agent_name=agent_name,
-                    prompt=prompt,
-                )
-            )
-            # 在 tracker 中注册占位 ToolBlock（审批事件需要通过 tracker 找到 parent）
-            from lumi.tui.widgets.tool_block import ToolBlock
-
-            placeholder = ToolBlock(evt.name, evt.args or {})
-            self._asm.tool_blocks[evt.run_id] = placeholder
-            self._tracker.register(evt.run_id, placeholder)
+            await self._handle_agent_start(evt)
             return
 
         # todos 工具 → 仅更新 #todos-bar，不创建 ToolBlock
@@ -298,43 +264,41 @@ class EventRouter:
                 )
             )
 
+    async def _handle_agent_start(self, evt: BridgeEvent) -> None:
+        """处理 agent 工具 TOOL_START（replay 复用或全新注册）。"""
+        # replay 场景：审批后 resume 会重新发出 agent TOOL_START（新 run_id），
+        # 尝试复用已有的 unmapped block，避免在 AgentGroup 中重复新增条目
+        existing = self._tracker.find_unmapped_running(evt.args)
+        if existing is not None:
+            old_state = self._tracker.get_by_block(existing)
+            old_run_id = old_state.run_id if old_state else ""
+            self._tracker.remap(evt.run_id, existing)
+            self._asm.tool_blocks[evt.run_id] = existing
+            # 同步更新 AgentGroup 中的 run_id 映射
+            if old_run_id and self._asm.agent_group:
+                self._asm.agent_group.remap_agent(old_run_id, evt.run_id)
+            return
+
+        # 全新 agent 工具 → AgentGroup 轻量模式
+        args = evt.args or {}
+        await self._asm.apply_item(
+            AgentStartItem(
+                run_id=evt.run_id,
+                agent_name=args.get("name", "agent"),
+                prompt=args.get("prompt", ""),
+            )
+        )
+        # 在 tracker 中注册占位 ToolBlock（审批事件需要通过 tracker 找到 parent）
+        from lumi.tui.widgets.tool_block import ToolBlock
+
+        placeholder = ToolBlock(evt.name, args)
+        self._asm.tool_blocks[evt.run_id] = placeholder
+        self._tracker.register(evt.run_id, placeholder)
+
     async def _handle_tool_end(self, evt: BridgeEvent) -> None:
         """主流程 TOOL_END：agent 工具有特殊逻辑，其他委托给 assembler。"""
-        # agent 工具 → 特殊处理（replay 重试、cancel 检测）
         if evt.name == "agent" and evt.run_id:
-            key = evt.run_id
-            block = self._asm.pop_tool_block(key)
-
-            # replay 的空 output → 放回等待真正结束
-            if block and not evt.output:
-                replay_count = getattr(block, "_empty_end_count", 0) + 1
-                block._empty_end_count = replay_count  # type: ignore[attr-defined]
-                if replay_count > 1:
-                    logger.warning(
-                        "Agent TOOL_END with empty output repeated %d times "
-                        "(run_id=%s), possible bridge bug",
-                        replay_count,
-                        key,
-                    )
-                self._asm.tool_blocks[key] = block
-                return
-
-            # cancel/reject → 标记错误
-            if block and evt.output in _AGENT_CANCEL_OUTPUTS:
-                if self._asm.agent_group:
-                    self._asm.agent_group.finish_agent_error(key, evt.output)
-                self._tracker.mark_unmapped(evt.run_id)
-                return
-
-            # 正常结束
-            self._tracker.unregister(evt.run_id)
-            await self._asm.apply_item(
-                AgentEndItem(
-                    run_id=key,
-                    output=evt.output,
-                    is_error=False,
-                )
-            )
+            await self._handle_agent_end(evt)
             return
 
         # todos 工具 → 无 ToolBlock，跳过
@@ -354,4 +318,36 @@ class EventRouter:
                 output=evt.output,
                 is_error=False,
             )
+        )
+
+    async def _handle_agent_end(self, evt: BridgeEvent) -> None:
+        """处理 agent 工具 TOOL_END（replay 重试、cancel 检测、正常结束）。"""
+        key = evt.run_id
+        block = self._asm.pop_tool_block(key)
+
+        # replay 的空 output → 放回等待真正结束
+        if block and not evt.output:
+            replay_count = getattr(block, "_empty_end_count", 0) + 1
+            block._empty_end_count = replay_count  # type: ignore[attr-defined]
+            if replay_count > 1:
+                logger.warning(
+                    "Agent TOOL_END with empty output repeated %d times "
+                    "(run_id=%s), possible bridge bug",
+                    replay_count,
+                    key,
+                )
+            self._asm.tool_blocks[key] = block
+            return
+
+        # cancel/reject → 标记错误
+        if block and evt.output in _AGENT_CANCEL_OUTPUTS:
+            if self._asm.agent_group:
+                self._asm.agent_group.finish_agent_error(key, evt.output)
+            self._tracker.mark_unmapped(evt.run_id)
+            return
+
+        # 正常结束
+        self._tracker.unregister(evt.run_id)
+        await self._asm.apply_item(
+            AgentEndItem(run_id=key, output=evt.output, is_error=False)
         )

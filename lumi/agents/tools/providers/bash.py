@@ -1,10 +1,10 @@
 """Bash 工具提供者 - 提供本地 shell 命令执行功能
 
-该模块为 AI 代理提供 shell 命令执行能力:
-- 本地持久化 shell 会话
-- 持久化会话，保持环境变量、别名、工作目录等状态
-- 超时和输出限制
+持久化 shell 会话，保持环境变量、别名、工作目录等状态，
+支持超时控制和后台执行。
 """
+
+from __future__ import annotations
 
 from langchain_core.tools import tool
 from pydantic import BaseModel, Field
@@ -15,7 +15,7 @@ from lumi.utils.logger import logger
 
 
 def _format_result(result: CommandResult) -> str:
-    """格式化执行结果"""
+    """将命令执行结果格式化为用户可读的字符串。"""
     if result.success:
         return result.stdout or "<no output>"
     if result.timed_out:
@@ -76,12 +76,12 @@ async def bash(
     """
     try:
         working_dir = str(get_authorized_directory())
-        sm = get_session_manager()
-        session = sm.get_session(thread_id="default", working_dir=working_dir)
+        session_mgr = get_session_manager()
+        session = session_mgr.get_session(thread_id="default", working_dir=working_dir)
 
         if run_in_background:
             current_cwd = await session.get_cwd()
-            task = await sm.bg_manager.start_task(
+            task = await session_mgr.bg_manager.start_task(
                 command=command,
                 timeout=timeout,
                 working_dir=current_cwd,
@@ -92,12 +92,12 @@ async def bash(
                 f"Output File: {task.output_file.resolve()}\n"
             )
 
-        result = await session.execute(command, timeout=timeout)
-        return _format_result(result)
+        command_result = await session.execute(command, timeout=timeout)
+        return _format_result(command_result)
 
     except OSError as e:
-        logger.error(f"[bash] 系统错误: {e}", exc_info=True)
+        logger.error("[bash] 系统错误: %s", e, exc_info=True)
         return f"系统错误（进程/文件操作失败）: {e}"
     except Exception as e:
-        logger.error(f"[bash] 未预期的错误: {e}", exc_info=True)
+        logger.error("[bash] 未预期的错误: %s", e, exc_info=True)
         return f"执行失败（内部错误）: {e}"

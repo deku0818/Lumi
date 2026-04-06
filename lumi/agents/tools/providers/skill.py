@@ -1,39 +1,34 @@
-"""Skill工具提供者 - 提供基于提示词模板的技能工具
+"""Skill 工具提供者 - 提供基于提示词模板的技能工具
 
-该模块支持多文件技能:
-- 技能目录结构: .skills/skill_name/SKILL.md
-- 辅助文档: .skills/skill_name/*.md
-- 可执行脚本: .skills/skill_name/scripts/
-
-使用技能时，直接从本地 skills 目录读取，无需沙箱同步。
+技能目录结构:
+- .skills/skill_name/SKILL.md    主配置文件
+- .skills/skill_name/*.md        辅助文档
+- .skills/skill_name/scripts/    可执行脚本
 """
+
+from __future__ import annotations
 
 from pathlib import Path
 
 from langchain_core.tools import tool
 from pydantic import BaseModel, Field
 
-from lumi.agents.tools.loader import load_skills
+from lumi.agents.tools.loader import SkillConfig, _parse_md_file, load_skills
 from lumi.utils.logger import logger
 from lumi.utils.read_config import get_config
 
 
 def _get_skills_root() -> Path:
-    """获取 skills 根目录"""
+    """获取 skills 根目录。"""
     return get_config().skills_dir
 
 
-def _get_skill_source_dir(skill_name: str) -> Path | None:
-    """根据 skill 名称找到源目录
+def _find_skill_source_dir(skill_name: str) -> Path | None:
+    """根据 skill 名称在 skills 根目录下查找对应的源目录。
 
-    Args:
-        skill_name: 技能名称
-
-    Returns:
-        源目录路径，未找到返回 None
+    遍历每个子目录的 SKILL.md，匹配 name 字段。
+    未找到返回 None。
     """
-    from lumi.agents.tools.loader import _parse_md_file
-
     skills_root = _get_skills_root()
     if not skills_root.exists():
         return None
@@ -47,31 +42,57 @@ def _get_skill_source_dir(skill_name: str) -> Path | None:
         config = _parse_md_file(str(skill_file))
         if config and config.get("name") == skill_name:
             return skill_dir
+
     return None
 
 
-def _get_skill_execution_config() -> dict:
-    """获取技能命令执行配置"""
-    defaults = {
+def _get_skill_execution_config() -> dict[str, bool | float | int]:
+    """获取技能嵌入式命令的执行配置。
+
+    返回包含 enabled、timeout、max_output_bytes 的字典，
+    配置加载失败时回退到默认值。
+    """
+    defaults: dict[str, bool | float | int] = {
         "enabled": True,
         "timeout": 10.0,
         "max_output_bytes": 10_000,
     }
 
     try:
-        config = get_config().config
-
-        if hasattr(config, "skill_execution"):
-            se_config = config.skill_execution
+        app_config = get_config().config
+        if hasattr(app_config, "skill_execution"):
+            se = app_config.skill_execution
             return {
-                "enabled": se_config.enabled,
-                "timeout": se_config.command_timeout,
-                "max_output_bytes": se_config.max_output_bytes,
+                "enabled": se.enabled,
+                "timeout": se.command_timeout,
+                "max_output_bytes": se.max_output_bytes,
             }
-    except Exception as e:
-        logger.warning(f"无法加载技能执行配置,使用默认值: {e}")
+    except (AttributeError, TypeError) as e:
+        logger.warning("无法加载技能执行配置,使用默认值: %s", e)
 
     return defaults
+
+
+async def _execute_embedded_commands(
+    prompt_content: str, source_dir: Path, skill_name: str
+) -> str:
+    """若提示词中包含嵌入式命令且执行功能已启用，则执行并替换。"""
+    exec_config = _get_skill_execution_config()
+    if not exec_config["enabled"]:
+        return prompt_content
+
+    from lumi.agents.tools.providers.skill_executor import SkillCommandExecutor
+
+    if not SkillCommandExecutor.has_commands(prompt_content):
+        return prompt_content
+
+    executor = SkillCommandExecutor(
+        working_dir=str(source_dir),
+        skill_name=skill_name,
+        timeout=float(exec_config["timeout"]),
+        max_output_bytes=int(exec_config["max_output_bytes"]),
+    )
+    return await executor.execute_commands(prompt_content)
 
 
 _SKILL_DESCRIPTION = """Execute skills in the main conversation
@@ -95,43 +116,30 @@ Important notes:
 
 
 class SkillInput(BaseModel):
-    """Skill工具的输入参数"""
+    """Skill 工具的输入参数"""
 
     name: str = Field(description="技能名称")
 
 
 @tool(description=_SKILL_DESCRIPTION, args_schema=SkillInput)
 async def skill(name: str) -> str:
-    """Skill工具 - 根据名称返回对应的技能提示词"""
-    skill_configs = load_skills(name=name)
-    if not skill_configs:
+    """根据名称查找并返回对应的技能提示词。"""
+    matched_skills: list[SkillConfig] = load_skills(name=name)
+    if not matched_skills:
         return f"技能 '{name}' 不存在，请检查技能名称是否正确"
 
-    skill_config = skill_configs[0]
+    skill_config = matched_skills[0]
     prompt_content = skill_config.prompt
 
-    # 找到源目录
-    source_dir = _get_skill_source_dir(skill_config.name)
+    # 查找源目录并尝试执行嵌入式命令
+    source_dir = _find_skill_source_dir(skill_config.name)
     if source_dir:
-        # 执行嵌入式命令(如果启用且存在)
-        exec_config = _get_skill_execution_config()
-
-        if exec_config["enabled"]:
-            try:
-                from lumi.agents.tools.providers.skill_executor import (
-                    SkillCommandExecutor,
-                )
-
-                if SkillCommandExecutor.has_commands(prompt_content):
-                    executor = SkillCommandExecutor(
-                        working_dir=str(source_dir),
-                        skill_name=skill_config.name,
-                        timeout=exec_config["timeout"],
-                        max_output_bytes=exec_config["max_output_bytes"],
-                    )
-                    prompt_content = await executor.execute_commands(prompt_content)
-            except Exception as e:
-                logger.error(f"执行技能命令失败: {e}")
+        try:
+            prompt_content = await _execute_embedded_commands(
+                prompt_content, source_dir, skill_config.name
+            )
+        except Exception as e:
+            logger.error("执行技能命令失败: %s", e)
 
     # 返回 prompt + Tips
     skill_path = str(source_dir) if source_dir else f"skills/{skill_config.name}"

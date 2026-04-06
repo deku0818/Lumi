@@ -1,8 +1,10 @@
-"""Todo 工具提供者 - 提供任务列表管理功能
+"""Todo 工具提供者 - 任务列表管理
 
-该模块提供 write_todos 工具，用于帮助 AI 代理管理和追踪复杂任务的执行进度。
-工具返回 Command 对象，直接更新图状态中的 todos 字段。
+提供 write_todos 工具，返回 Command 对象直接更新图状态中的 todos 字段，
+用于帮助 AI 代理管理和追踪复杂任务的执行进度。
 """
+
+from __future__ import annotations
 
 from typing import Annotated, Literal
 
@@ -78,25 +80,28 @@ TODOS_DESCRIPTION = """使用此工具为当前会话创建和管理结构化任
 如有疑问，请使用此工具。主动进行任务管理可以体现专注度，并确保成功完成所有需求。"""
 
 
+def _build_status_summary(todo_list: list[Todo]) -> str:
+    """统计各状态的任务数量并生成摘要。"""
+    pending = sum(1 for t in todo_list if t.status == "pending")
+    in_progress = sum(1 for t in todo_list if t.status == "in_progress")
+    completed = sum(1 for t in todo_list if t.status == "completed")
+    return f"待处理: {pending}, 进行中: {in_progress}, 已完成: {completed}"
+
+
 @tool(description=TODOS_DESCRIPTION)
 def todos(
     todos: list[Todo],
     tool_call_id: Annotated[str, InjectedToolCallId],
 ) -> Command:
     """创建和管理任务列表，用于追踪当前工作进度"""
-    # 统计各状态的任务数量
-    pending_count = sum(1 for t in todos if t.status == "pending")
-    in_progress_count = sum(1 for t in todos if t.status == "in_progress")
-    completed_count = sum(1 for t in todos if t.status == "completed")
-
-    status_summary = f"待处理: {pending_count}, 进行中: {in_progress_count}, 已完成: {completed_count}"
+    summary = _build_status_summary(todos)
 
     return Command(
         update={
             "todos": todos,
             "messages": [
                 ToolMessage(
-                    content=f"已更新任务列表，共 {len(todos)} 项任务。{status_summary}",
+                    content=f"已更新任务列表，共 {len(todos)} 项任务。{summary}",
                     tool_call_id=tool_call_id,
                 )
             ],

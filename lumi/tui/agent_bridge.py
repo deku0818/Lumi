@@ -10,6 +10,7 @@ from dataclasses import dataclass
 from enum import StrEnum
 from typing import TYPE_CHECKING, AsyncGenerator
 
+import httpx
 from langchain_core.messages import HumanMessage
 from langchain_core.runnables.config import RunnableConfig
 from langgraph.types import Command
@@ -181,6 +182,15 @@ class AgentBridge:
         await get_mcp_session_manager().close()
         await get_session_manager().close_all()
 
+    # 网络瞬态错误：流式传输中途断连可自动重试
+    _TRANSIENT_NETWORK_ERRORS = (
+        httpx.RemoteProtocolError,
+        httpx.ConnectError,
+        httpx.ReadError,
+    )
+    _MAX_STREAM_RETRIES = 2
+    _RETRY_BASE_WAIT = 5  # 秒
+
     async def _stream(self, input_data) -> AsyncGenerator[BridgeEvent, None]:
         """核心流式处理 - yield BridgeEvent
 
@@ -198,131 +208,160 @@ class AgentBridge:
             # 检测残留图状态（待执行节点但无中断），自动恢复
             await self._recover_stale_state(graph)
 
-            try:
-                async for event in graph.astream_events(
-                    input_data,
-                    self._config,
-                    context=self._context,
-                ):
-                    kind = event.get("event", "")
-                    run_id = event.get("run_id", "")
-                    parent_ids = event.get("parent_ids", [])
+            for attempt in range(self._MAX_STREAM_RETRIES + 1):
+                try:
+                    # 首次使用原始 input；重试时传 None，
+                    # LangGraph 从 checkpoint 恢复执行待定节点
+                    stream_input = input_data if attempt == 0 else None
+                    try:
+                        async for event in graph.astream_events(
+                            stream_input,
+                            self._config,
+                            context=self._context,
+                        ):
+                            kind = event.get("event", "")
+                            run_id = event.get("run_id", "")
+                            parent_ids = event.get("parent_ids", [])
 
-                    # 判断当前事件是否属于子代理：
-                    # 排除当前事件自身的 run_id，避免 agent 工具的
-                    # on_tool_start 把自己误判为子代理事件
-                    parent_id = ""
-                    if self._active_agent_runs and parent_ids:
-                        candidates = self._active_agent_runs & (
-                            set(parent_ids) - {run_id}
-                        )
-                        if candidates:
-                            parent_id = next(iter(candidates))
-
-                    # agent 工具开始时记录 run_id（放在匹配之后，
-                    # 确保 agent 自身的 on_tool_start 不会自匹配）
-                    if kind == "on_tool_start" and event.get("name") == "agent":
-                        self._active_agent_runs.add(run_id)
-
-                    # agent 工具结束时移除 run_id，避免残留影响后续匹配
-                    if kind == "on_tool_end" and event.get("name") == "agent":
-                        self._active_agent_runs.discard(run_id)
-
-                    if kind == "on_chat_model_start":
-                        yield BridgeEvent(
-                            kind=EventKind.MODEL_START,
-                            parent_run_id=parent_id,
-                        )
-
-                    elif kind == "on_chat_model_stream":
-                        chunk = event.get("data", {}).get("chunk")
-                        if chunk:
-                            usage = self._extract_usage(chunk)
-                            text = self._extract_text_from_chunk(chunk)
-                            if text:
-                                yield BridgeEvent(
-                                    kind=EventKind.STREAM_TOKEN,
-                                    text=text,
-                                    usage_metadata=usage,
-                                    parent_run_id=parent_id,
+                            # 判断当前事件是否属于子代理：
+                            # 排除当前事件自身的 run_id，避免 agent 工具的
+                            # on_tool_start 把自己误判为子代理事件
+                            parent_id = ""
+                            if self._active_agent_runs and parent_ids:
+                                candidates = self._active_agent_runs & (
+                                    set(parent_ids) - {run_id}
                                 )
-                            elif self._has_tool_call_chunk(chunk):
+                                if candidates:
+                                    parent_id = next(iter(candidates))
+
+                            # agent 工具开始时记录 run_id（放在匹配之后，
+                            # 确保 agent 自身的 on_tool_start 不会自匹配）
+                            if kind == "on_tool_start" and event.get("name") == "agent":
+                                self._active_agent_runs.add(run_id)
+
+                            # agent 工具结束时移除 run_id，避免残留影响后续匹配
+                            if kind == "on_tool_end" and event.get("name") == "agent":
+                                self._active_agent_runs.discard(run_id)
+
+                            if kind == "on_chat_model_start":
                                 yield BridgeEvent(
-                                    kind=EventKind.TOOL_CALL_CHUNK,
-                                    usage_metadata=usage,
+                                    kind=EventKind.MODEL_START,
                                     parent_run_id=parent_id,
                                 )
 
-                    elif kind == "on_chat_model_end":
-                        output = event.get("data", {}).get("output")
-                        usage = self._extract_usage(output) if output else None
-                        yield BridgeEvent(
-                            kind=EventKind.MODEL_END,
-                            usage_metadata=usage,
-                            parent_run_id=parent_id,
-                        )
+                            elif kind == "on_chat_model_stream":
+                                chunk = event.get("data", {}).get("chunk")
+                                if chunk:
+                                    usage = self._extract_usage(chunk)
+                                    text = self._extract_text_from_chunk(chunk)
+                                    if text:
+                                        yield BridgeEvent(
+                                            kind=EventKind.STREAM_TOKEN,
+                                            text=text,
+                                            usage_metadata=usage,
+                                            parent_run_id=parent_id,
+                                        )
+                                    elif self._has_tool_call_chunk(chunk):
+                                        yield BridgeEvent(
+                                            kind=EventKind.TOOL_CALL_CHUNK,
+                                            usage_metadata=usage,
+                                            parent_run_id=parent_id,
+                                        )
 
-                    elif kind == "on_tool_start":
-                        name = event.get("name", "unknown")
-                        data = event.get("data", {})
-                        args = data.get("input", {})
-                        if isinstance(args, dict):
-                            tool_call_id = args.get("tool_call_id", "")
-                            args = {
-                                k: v
-                                for k, v in args.items()
-                                if k not in _TOOL_INTERNAL_KEYS
-                            }
-                        else:
-                            tool_call_id = ""
-                            args = {}
-                        yield BridgeEvent(
-                            kind=EventKind.TOOL_START,
-                            name=name,
-                            args=args,
-                            tool_call_id=tool_call_id,
-                            parent_run_id=parent_id,
-                            run_id=run_id if name == "agent" else "",
-                        )
+                            elif kind == "on_chat_model_end":
+                                output = event.get("data", {}).get("output")
+                                usage = self._extract_usage(output) if output else None
+                                yield BridgeEvent(
+                                    kind=EventKind.MODEL_END,
+                                    usage_metadata=usage,
+                                    parent_run_id=parent_id,
+                                )
 
-                    elif kind == "on_tool_end":
-                        name = event.get("name", "unknown")
-                        data = event.get("data", {})
-                        output = data.get("output", "")
-                        if isinstance(output, Command):
-                            msgs = (output.update or {}).get("messages", [])
-                            if msgs and hasattr(msgs[0], "content"):
-                                output = msgs[0].content
-                            else:
-                                output = ""
-                        elif hasattr(output, "content"):
-                            output = output.content
-                        tool_call_id = ""
-                        inp = data.get("input", {})
-                        if isinstance(inp, dict):
-                            tool_call_id = inp.get("tool_call_id", "")
+                            elif kind == "on_tool_start":
+                                name = event.get("name", "unknown")
+                                data = event.get("data", {})
+                                args = data.get("input", {})
+                                if isinstance(args, dict):
+                                    tool_call_id = args.get("tool_call_id", "")
+                                    args = {
+                                        k: v
+                                        for k, v in args.items()
+                                        if k not in _TOOL_INTERNAL_KEYS
+                                    }
+                                else:
+                                    tool_call_id = ""
+                                    args = {}
+                                yield BridgeEvent(
+                                    kind=EventKind.TOOL_START,
+                                    name=name,
+                                    args=args,
+                                    tool_call_id=tool_call_id,
+                                    parent_run_id=parent_id,
+                                    run_id=run_id if name == "agent" else "",
+                                )
 
-                        # ask 等 BYPASS 工具使用 interrupt() 中断，LangGraph 会在
-                        # 中断时提前发出 on_tool_end（output 为空），此时不应标记
-                        # ToolBlock 为 Done，否则后续 ASK 事件找不到 block 来挂载对话框。
-                        # 真正的 TOOL_END 在 resume 后才会带有实际 output。
-                        resolved_output = str(output) if output else ""
-                        if name in BYPASS_TOOLS and not resolved_output:
-                            continue
+                            elif kind == "on_tool_end":
+                                name = event.get("name", "unknown")
+                                data = event.get("data", {})
+                                output = data.get("output", "")
+                                if isinstance(output, Command):
+                                    msgs = (output.update or {}).get("messages", [])
+                                    if msgs and hasattr(msgs[0], "content"):
+                                        output = msgs[0].content
+                                    else:
+                                        output = ""
+                                elif hasattr(output, "content"):
+                                    output = output.content
+                                tool_call_id = ""
+                                inp = data.get("input", {})
+                                if isinstance(inp, dict):
+                                    tool_call_id = inp.get("tool_call_id", "")
 
-                        yield BridgeEvent(
-                            kind=EventKind.TOOL_END,
-                            name=name,
-                            output=resolved_output,
-                            tool_call_id=tool_call_id,
-                            parent_run_id=parent_id,
-                            run_id=run_id if name == "agent" else "",
-                        )
+                                # ask 等 BYPASS 工具使用 interrupt() 中断，LangGraph 会在
+                                # 中断时提前发出 on_tool_end（output 为空），此时不应标记
+                                # ToolBlock 为 Done，否则后续 ASK 事件找不到 block 来挂载对话框。
+                                # 真正的 TOOL_END 在 resume 后才会带有实际 output。
+                                resolved_output = str(output) if output else ""
+                                if name in BYPASS_TOOLS and not resolved_output:
+                                    continue
 
-            finally:
-                # 清除 rewind 或恢复时设置的 checkpoint_id，
-                # 确保后续 aget_state 获取最新 checkpoint
-                self._config["configurable"].pop("checkpoint_id", None)
+                                yield BridgeEvent(
+                                    kind=EventKind.TOOL_END,
+                                    name=name,
+                                    output=resolved_output,
+                                    tool_call_id=tool_call_id,
+                                    parent_run_id=parent_id,
+                                    run_id=run_id if name == "agent" else "",
+                                )
+                    finally:
+                        # 清除 rewind 或恢复时设置的 checkpoint_id，
+                        # 确保后续 aget_state 获取最新 checkpoint
+                        self._config["configurable"].pop("checkpoint_id", None)
+
+                    # 流正常结束，退出重试循环
+                    break
+
+                except self._TRANSIENT_NETWORK_ERRORS as e:
+                    if attempt >= self._MAX_STREAM_RETRIES:
+                        raise
+                    wait = self._RETRY_BASE_WAIT * (attempt + 1)
+                    logger.warning(
+                        "[AgentBridge] 网络瞬态错误 (%s)，%ds 后重试 (%d/%d)",
+                        type(e).__name__,
+                        wait,
+                        attempt + 1,
+                        self._MAX_STREAM_RETRIES,
+                    )
+                    # 结束 TUI 中未完成的 assistant message，避免残留碎片
+                    yield BridgeEvent(kind=EventKind.MODEL_END)
+                    # 用 STREAM_TOKEN 显示重试提示（不使用 ERROR，因为它会终止 run）
+                    retry_msg = (
+                        f"\n\n*网络连接中断，{wait}s 后自动重试 "
+                        f"({attempt + 1}/{self._MAX_STREAM_RETRIES})…*\n\n"
+                    )
+                    yield BridgeEvent(kind=EventKind.STREAM_TOKEN, text=retry_msg)
+                    yield BridgeEvent(kind=EventKind.MODEL_END)
+                    await asyncio.sleep(wait)
 
             # 流结束后检测中断
             yield await self._check_interrupts()
@@ -788,9 +827,9 @@ class AgentBridge:
 
     @staticmethod
     def _extract_label(content: str | list) -> str:
-        """从用户消息中提取摘要 label"""
+        """从用户消息中提取完整文本作为 label（保留换行）。"""
         if isinstance(content, str):
-            return content.replace("\n", " ").strip()[:100]
+            return content.strip()
         if isinstance(content, list):
             command_label = ""
             for block in content:
@@ -807,10 +846,10 @@ class AgentBridge:
                     # 跳过其他系统注入的 XML 块
                     if text.startswith("<"):
                         continue
-                    return text.replace("\n", " ").strip()[:100]
+                    return text.strip()
             # 所有 text block 都是系统注入的，使用命令名作为 label
             if command_label:
-                return command_label[:100]
+                return command_label
         return "checkpoint"
 
     @staticmethod

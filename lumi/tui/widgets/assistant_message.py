@@ -1,10 +1,12 @@
-"""AI 助手消息组件 - 支持流式 token 追加，Markdown 渲染
+"""AI 助手消息组件 - 支持流式 token 追加，Markdown 实时渲染
 
-流式阶段使用轻量 Static 显示纯文本（零 Markdown 解析开销），
-finalize 时切换为 Markdown 渲染最终内容，大幅降低流式输出时的 CPU 占用。
+流式阶段即使用 Markdown widget 渲染，节流间隔 300ms 控制开销。
 """
 
+from __future__ import annotations
+
 from rich.text import Text
+from textual.app import ComposeResult
 from textual.containers import Horizontal
 from textual.widgets import Markdown, Static
 
@@ -12,10 +14,9 @@ from lumi.tui.theme import get_color
 
 
 class AssistantMessage(Horizontal):
-    """AI 助手消息 - 带 ● 前缀，内容 Markdown 渲染并与首行对齐
+    """AI 助手消息 - 带 ● 前缀，内容 Markdown 实时渲染
 
-    流式阶段用 Static 显示纯文本，finalize 后替换为 Markdown 渲染。
-    节流间隔 150ms，合并多次 token 为一次 Static.update()。
+    流式阶段直接使用 Markdown widget，节流间隔 300ms 合并多次 token。
     """
 
     DEFAULT_CSS = """
@@ -50,31 +51,26 @@ class AssistantMessage(Horizontal):
     }
     """
 
-    # 节流间隔（秒）— 150ms 平衡流畅度与渲染开销
-    _THROTTLE_INTERVAL: float = 0.15
+    # 节流间隔（秒）— 300ms 平衡 Markdown 渲染开销与流畅度
+    _THROTTLE_INTERVAL: float = 0.3
 
     def __init__(self) -> None:
         super().__init__(classes="assistant-message")
         prefix = Text("● ", style=f"bold {get_color('accent')}")
-        self._prefix = Static(prefix, classes="prefix", markup=False)
-        # 流式阶段用 Static（纯文本更新，无 Markdown 解析开销）
-        self._body_static = Static("", classes="body", markup=False)
-        self._raw = ""
-        self._has_content = False
-        self._dirty = False
-        self._update_scheduled = False
-        self._finalized = False
+        self._prefix: Static = Static(prefix, classes="prefix", markup=False)
+        self._body: Markdown = Markdown("", classes="body")
+        self._raw: str = ""
+        self._has_content: bool = False
+        self._dirty: bool = False
+        self._update_scheduled: bool = False
+        self._finalized: bool = False
 
-    def compose(self):
-        """组合圆点前缀和文本主体"""
+    def compose(self) -> ComposeResult:
         yield self._prefix
-        yield self._body_static
+        yield self._body
 
     def append_token(self, token: str) -> None:
-        """追加流式 token，节流后批量更新 Static。
-
-        每次追加仅标记 dirty，通过定时器合并多次 token 为一次渲染。
-        """
+        """追加流式 token，节流后批量更新 Markdown。"""
         self._raw += token
         self._has_content = True
         self._dirty = True
@@ -83,22 +79,18 @@ class AssistantMessage(Horizontal):
             self.set_timer(self._THROTTLE_INTERVAL, self._flush_update)
 
     def _flush_update(self) -> None:
-        """定时器回调：将累积的 token 一次性更新到 Static。"""
+        """定时器回调：将累积的 token 一次性更新到 Markdown。"""
         self._update_scheduled = False
         if self._dirty:
             self._dirty = False
-            self._body_static.update(self._raw)
+            self._body.update(self._raw)
 
     def finalize(self) -> None:
-        """标记消息完成，替换为 Markdown 渲染最终内容。"""
+        """标记消息完成，做最终渲染。"""
         if self._finalized:
             return
         self._finalized = True
         self._raw = self._raw.rstrip("\n")
         self._dirty = False
         self._update_scheduled = False
-        # 将 Static 替换为 Markdown 渲染
-        md = Markdown(self._raw, classes="body")
-        self._body_static.remove()
-        self.mount(md)
-        self._body_static = None
+        self._body.update(self._raw)

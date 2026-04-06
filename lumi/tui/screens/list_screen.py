@@ -18,6 +18,10 @@ from textual.widgets import Input, Label, Rule, Static
 
 T = TypeVar("T")
 
+# Widget protocol: make_item_widget 返回的 widget 需满足此协议
+# - index: int 属性
+# - set_selected(bool) 方法
+
 
 class ListScreen(ModalScreen[str | None], Generic[T]):
     """通用列表弹窗基类。
@@ -158,6 +162,20 @@ class ListScreen(ModalScreen[str | None], Generic[T]):
             传给 dismiss() 的字符串。
         """
 
+    # ── 选中项访问 ──
+
+    @property
+    def _selected_item(self) -> T | None:
+        """返回当前选中的列表项，越界或列表为空时返回 None。"""
+        if self._filtered and 0 <= self._selected_index < len(self._filtered):
+            return self._filtered[self._selected_index]
+        return None
+
+    def _clamp_selected_index(self) -> None:
+        """将选中索引限制在有效范围内（删除列表项后调用）。"""
+        if self._selected_index >= len(self._filtered):
+            self._selected_index = max(0, len(self._filtered) - 1)
+
     # ── 布局 ──
 
     def _format_title(self, filtered_count: int, total_count: int) -> str:
@@ -262,9 +280,8 @@ class ListScreen(ModalScreen[str | None], Generic[T]):
                 event.prevent_default()
                 event.stop()
             case "enter":
-                if self._filtered and 0 <= self._selected_index < len(self._filtered):
-                    selected = self._filtered[self._selected_index]
-                    self.dismiss(self.get_dismiss_value(selected))
+                if (item := self._selected_item) is not None:
+                    self.dismiss(self.get_dismiss_value(item))
                 event.prevent_default()
                 event.stop()
 

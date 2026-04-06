@@ -1,7 +1,10 @@
-"""配置加载模块 - 解析MD文件的Agent和Skill配置"""
+"""配置加载 — 从 Markdown 文件解析 Agent 和 Skill 配置。
 
-import glob
-import os
+文件格式: YAML frontmatter (``---`` 分隔) + Markdown 正文作为 prompt。
+"""
+
+from __future__ import annotations
+
 from pathlib import Path
 
 import yaml
@@ -11,8 +14,13 @@ from lumi.utils.logger import logger
 from lumi.utils.read_config import get_config
 
 
+# ------------------------------------------------------------------
+# 数据模型
+# ------------------------------------------------------------------
+
+
 class AgentConfig(BaseModel):
-    """Agent配置模型"""
+    """Agent 配置。"""
 
     name: str = Field(description="代理名称")
     description: str = Field(description="代理描述")
@@ -22,118 +30,114 @@ class AgentConfig(BaseModel):
 
 
 class SkillConfig(BaseModel):
-    """Skill配置模型"""
+    """Skill 配置。"""
 
     name: str = Field(description="技能名称")
     description: str = Field(description="技能描述")
     prompt: str = Field(description="技能的提示词")
 
 
-def _parse_md_file(file_path: str) -> dict | None:
-    """
-    解析MD文件,提取YAML前置元数据和内容
+# ------------------------------------------------------------------
+# Markdown 文件解析
+# ------------------------------------------------------------------
 
-    Args:
-        file_path: MD文件路径
+
+def _parse_md_file(file_path: str) -> dict[str, object] | None:
+    """解析带 YAML frontmatter 的 Markdown 文件。
 
     Returns:
-        dict | None: 包含 name, description, tools, prompt 的字典
+        包含 ``name``, ``description``, ``model``, ``tools``, ``prompt``,
+        ``raw_metadata`` 的字典；解析失败返回 ``None``。
     """
     try:
-        with open(file_path, encoding="utf-8") as f:
-            content = f.read()
-
-        # 分离YAML前置元数据和提示词
-        if content.startswith("---"):
-            parts = content.split("---", 2)
-            if len(parts) >= 3:
-                yaml_content = parts[1].strip()
-                prompt = parts[2].strip()
-            else:
-                logger.warning(f"文件格式不正确: {file_path}")
-                return None
-        else:
-            logger.warning(f"文件缺少YAML前置元数据: {file_path}")
-            return None
-
-        # 解析YAML元数据
-        try:
-            metadata = yaml.safe_load(yaml_content)
-        except yaml.YAMLError as e:
-            logger.error(f"解析YAML失败 {file_path}: {e}")
-            return None
-
-        # 处理tools字段
-        tools_data = metadata.get("tools", [])
-        if isinstance(tools_data, str):
-            tools_data = [tool.strip() for tool in tools_data.split(",")]
-
-        return {
-            "name": metadata.get("name", ""),
-            "description": metadata.get("description", ""),
-            "model": metadata.get("model"),
-            "tools": tools_data,
-            "prompt": prompt,
-            "raw_metadata": metadata,
-        }
-
-    except Exception as e:
-        logger.error(f"处理文件失败 {file_path}: {e}")
+        content = Path(file_path).read_text(encoding="utf-8")
+    except OSError as e:
+        logger.error(f"读取文件失败 {file_path}: {e}")
         return None
 
+    # 分离 YAML frontmatter 和正文
+    if not content.startswith("---"):
+        logger.warning(f"文件缺少 YAML frontmatter: {file_path}")
+        return None
 
-def _load_agents_from_dir(directory: str) -> dict[str, AgentConfig]:
-    """从指定目录加载 agent 配置，返回 {name: AgentConfig} 字典。"""
+    parts = content.split("---", 2)
+    if len(parts) < 3:
+        logger.warning(f"文件格式不正确: {file_path}")
+        return None
+
+    try:
+        metadata: dict = yaml.safe_load(parts[1].strip()) or {}
+    except yaml.YAMLError as e:
+        logger.error(f"解析 YAML 失败 {file_path}: {e}")
+        return None
+
+    # tools 支持 CSV 字符串和列表两种写法
+    tools_raw = metadata.get("tools", [])
+    tools = (
+        [t.strip() for t in tools_raw.split(",")]
+        if isinstance(tools_raw, str)
+        else tools_raw
+    )
+
+    return {
+        "name": metadata.get("name", ""),
+        "description": metadata.get("description", ""),
+        "model": metadata.get("model"),
+        "tools": tools,
+        "prompt": parts[2].strip(),
+        "raw_metadata": metadata,
+    }
+
+
+# ------------------------------------------------------------------
+# Agent 加载
+# ------------------------------------------------------------------
+
+
+def _load_agents_from_dir(directory: Path) -> dict[str, AgentConfig]:
+    """从目录中加载所有 ``*.md`` 文件为 AgentConfig。"""
     result: dict[str, AgentConfig] = {}
-    md_files = glob.glob(os.path.join(directory, "*.md"))
-
-    for file_path in md_files:
-        config_dict = _parse_md_file(file_path)
-        if config_dict is None:
+    for md_file in directory.glob("*.md"):
+        parsed = _parse_md_file(str(md_file))
+        if parsed is None:
             continue
-
         try:
-            agent_config = AgentConfig(
-                name=config_dict["name"],
-                description=config_dict["description"],
-                model=config_dict.get("model"),
-                tools=config_dict["tools"],
-                system_prompt=config_dict["prompt"],
+            cfg = AgentConfig(
+                name=parsed["name"],
+                description=parsed["description"],
+                model=parsed.get("model"),
+                tools=parsed["tools"],
+                system_prompt=parsed["prompt"],
             )
         except (KeyError, TypeError) as e:
-            logger.error(f"agent 配置不完整，跳过 {file_path}: {e}")
+            logger.error(f"Agent 配置不完整，跳过 {md_file}: {e}")
             continue
-        result[agent_config.name] = agent_config
-
+        result[cfg.name] = cfg
     return result
 
 
 def load_agents(
-    name: str | None = None, directory: str | None = None
+    name: str | None = None,
+    directory: str | None = None,
 ) -> list[AgentConfig]:
-    """
-    从配置目录加载agent配置
+    """加载 Agent 配置。
 
-    当 active_style 不是 "default" 时，先加载风格内置 agents，
-    再加载用户 .lumi/agents/ 中的 agents。同名时用户优先并输出 warning。
+    加载优先级: 风格内置 agents → 用户 ``.lumi/agents/`` (同名覆盖)。
 
     Args:
-        name: 可选的代理名称过滤
-        directory: agent配置目录，如果为None则从配置获取
-
-    Returns:
-        List[AgentConfig]: agent配置列表
+        name: 只返回指定名称的 agent。
+        directory: 用户 agent 目录，默认从全局配置获取。
     """
     config = get_config()
     merged: dict[str, AgentConfig] = {}
 
-    # 1. 加载风格内置 agents
+    # 1) 风格内置 agents
     style = config.active_style
     from lumi.styles import get_style_agents_dir
 
     try:
-        style_agents_dir = get_style_agents_dir(style)
-        merged = _load_agents_from_dir(str(style_agents_dir))
+        style_dir = get_style_agents_dir(style)
+        merged = _load_agents_from_dir(Path(style_dir))
         if merged:
             logger.info(
                 f"从风格 '{style}' 加载了 {len(merged)} 个内置 agent: "
@@ -142,72 +146,60 @@ def load_agents(
     except ValueError as e:
         logger.warning(f"加载风格 '{style}' agents 失败: {e}")
 
-    # 2. 加载用户 agents（directory 参数或 .lumi/agents/）
-    if directory is None:
-        directory = str(config.agents_dir)
-
-    user_agents = _load_agents_from_dir(directory)
-    for agent_name, agent_config in user_agents.items():
+    # 2) 用户 agents（同名覆盖风格内置）
+    user_dir = Path(directory) if directory else config.agents_dir
+    for agent_name, agent_cfg in _load_agents_from_dir(user_dir).items():
         if agent_name in merged:
             logger.warning(
                 f"用户 agent '{agent_name}' 覆盖了风格 '{style}' 的内置同名 agent"
             )
-        merged[agent_name] = agent_config
+        merged[agent_name] = agent_cfg
 
     agents = list(merged.values())
-
     if name is not None:
-        agents = [agent for agent in agents if agent.name == name]
-
+        agents = [a for a in agents if a.name == name]
     return agents
 
 
-def load_skills(
-    name: str | None = None, directory: str | None = None
-) -> list[SkillConfig]:
-    """
-    从配置目录加载skill配置
+# ------------------------------------------------------------------
+# Skill 加载
+# ------------------------------------------------------------------
 
-    支持目录格式: .skills/skill_name/SKILL.md
-    每个技能是一个包含 SKILL.md 的子目录
+
+def load_skills(
+    name: str | None = None,
+    directory: str | None = None,
+) -> list[SkillConfig]:
+    """加载 Skill 配置。
+
+    目录结构: ``<skills_dir>/<skill_name>/SKILL.md``
 
     Args:
-        name: 可选的技能名称过滤
-        directory: skill配置目录，如果为None则从配置获取
-
-    Returns:
-        List[SkillConfig]: skill配置列表
+        name: 只返回指定名称的 skill。
+        directory: skill 根目录，默认从全局配置获取。
     """
-    if directory is None:
-        directory = str(get_config().skills_dir)
+    base = Path(directory) if directory else Path(str(get_config().skills_dir))
+    if not base.exists():
+        return []
 
-    skills = []
-    base_path = Path(directory)
-
-    if not base_path.exists():
-        return skills
-
-    # 扫描子目录中的 SKILL.md
-    for skill_dir in base_path.iterdir():
-        if not skill_dir.is_dir():
-            continue
-
+    skills: list[SkillConfig] = []
+    for skill_dir in base.iterdir():
         skill_file = skill_dir / "SKILL.md"
-        if not skill_file.exists():
+        if not skill_dir.is_dir() or not skill_file.exists():
             continue
 
-        config_dict = _parse_md_file(str(skill_file))
-        if config_dict is None:
+        parsed = _parse_md_file(str(skill_file))
+        if parsed is None:
             continue
 
-        skill_config = SkillConfig(
-            name=config_dict["name"],
-            description=config_dict["description"],
-            prompt=config_dict["prompt"],
+        skills.append(
+            SkillConfig(
+                name=parsed["name"],
+                description=parsed["description"],
+                prompt=parsed["prompt"],
+            )
         )
-        skills.append(skill_config)
 
     if name is not None:
-        skills = [skill for skill in skills if skill.name == name]
-
+        skills = [s for s in skills if s.name == name]
     return skills

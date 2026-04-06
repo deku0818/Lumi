@@ -14,6 +14,7 @@ from textual.widgets import Label, RadioButton, RadioSet, Rule, Static
 from lumi.utils.config import GlobalConfig, GlobalConfigManager
 
 from ._constants import THEME_OPTIONS as _THEME_OPTIONS
+from ._constants import theme_index_of as _theme_index_of
 
 
 class SettingsScreen(ModalScreen[GlobalConfig | None]):
@@ -112,20 +113,13 @@ class SettingsScreen(ModalScreen[GlobalConfig | None]):
         radio_set = self.query_one("#theme-mode", RadioSet)
         pressed_index = radio_set.pressed_index
         if pressed_index < 0:
-            pressed_index = next(
-                (
-                    i
-                    for i, (_, v) in enumerate(_THEME_OPTIONS)
-                    if v == self._config.theme_mode
-                ),
-                0,
-            )
+            pressed_index = _theme_index_of(self._config.theme_mode)
 
         _, selected_value = _THEME_OPTIONS[pressed_index]
         self._config.theme_mode = selected_value
         try:
             GlobalConfigManager.save(self._config)
-        except Exception as e:
+        except OSError as e:
             self.app.notify(f"配置保存失败: {e}", severity="error")
             return
         self.dismiss(self._config)

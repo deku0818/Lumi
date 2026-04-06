@@ -75,76 +75,70 @@ def _get_group_attrs(name: str) -> tuple[str, str, str]:
     return verb, verb_active, noun
 
 
-def _build_summary_text(entries: list[_BlockEntry], *, is_running: bool) -> str:
-    """根据 entries 列表生成摘要文本。
+def _resolve_verb_noun(name: str, *, is_running: bool) -> tuple[str, str]:
+    """获取工具的动词和名词，缺失时回退到通用词汇。"""
+    verb, verb_active, noun = _get_group_attrs(name)
+    active_verb = verb_active if is_running else verb
+    if not active_verb or not noun:
+        active_verb = "Performing" if is_running else "Performed"
+        noun = "action"
+    return active_verb, noun
 
-    Args:
-        entries: 工具调用条目列表
-        is_running: 是否有工具仍在执行中
-    """
-    if not entries:
-        return ""
 
+def _pluralize(noun: str, count: int) -> str:
+    """简易复数：count > 1 时加 s。"""
+    return f"{noun}s" if count > 1 else noun
+
+
+def _build_single_tool_summary(entries: list[_BlockEntry], *, is_running: bool) -> str:
+    """单一工具类型的摘要文本。"""
     count = len(entries)
-    tool_names = {e.tool_name for e in entries}
+    name = entries[0].tool_name
+    active_verb, noun = _resolve_verb_noun(name, is_running=is_running)
 
-    # 单一工具类型
-    if len(tool_names) == 1:
-        name = entries[0].tool_name
-        verb, verb_active, noun = _get_group_attrs(name)
-        active_verb = verb_active if is_running else verb
+    targets = [e.target for e in entries if e.target]
+    unique_targets = list(dict.fromkeys(targets))  # 保序去重
 
-        # 没有配置分组属性的工具，回退到通用格式
-        if not active_verb or not noun:
-            active_verb = "Performing" if is_running else "Performed"
-            noun = "action"
-
-        targets = [e.target for e in entries if e.target]
-        unique_targets = list(dict.fromkeys(targets))  # 保序去重
-
-        # 同工具 + 同文件
-        if len(unique_targets) == 1:
-            filename = os.path.basename(unique_targets[0])
-            if count == 1:
-                return f"{active_verb} {filename}"
-            return f"{active_verb} {filename} {count} times"
-
-        # 同工具 + 不同文件（有文件参数）
-        if unique_targets:
-            return f"{active_verb} {count} {noun}s"
-
-        # 同工具 + 无文件参数
+    # 同工具 + 同文件
+    if len(unique_targets) == 1:
+        filename = os.path.basename(unique_targets[0])
         if count == 1:
-            return f"{active_verb} 1 {noun}"
-        return f"{active_verb} {count} {noun}s"
+            return f"{active_verb} {filename}"
+        return f"{active_verb} {filename} {count} times"
 
-    # 混合工具类型：按工具分别描述，如 "Searched 1 pattern, read 1 file, edited 1 file"
-    parts: list[str] = []
-    # 按出现顺序分组
-    seen_tools: list[str] = []
+    # 同工具 + 多文件或无文件
+    return f"{active_verb} {count} {_pluralize(noun, count)}"
+
+
+def _build_mixed_tool_summary(entries: list[_BlockEntry], *, is_running: bool) -> str:
+    """混合工具类型的摘要：按出现顺序逐工具描述。"""
+    # 按出现顺序统计每种工具的调用次数
     tool_counts: dict[str, int] = {}
     for e in entries:
-        if e.tool_name not in tool_counts:
-            seen_tools.append(e.tool_name)
-            tool_counts[e.tool_name] = 0
+        tool_counts.setdefault(e.tool_name, 0)
         tool_counts[e.tool_name] += 1
 
-    for i, name in enumerate(seen_tools):
-        cnt = tool_counts[name]
-        verb, verb_active, noun = _get_group_attrs(name)
-        # 首个工具用大写开头，后续小写
-        active_verb = verb_active if is_running else verb
-        if not active_verb or not noun:
-            active_verb = "performed" if not is_running else "performing"
-            noun = "action"
+    parts: list[str] = []
+    for i, (name, cnt) in enumerate(tool_counts.items()):
+        active_verb, noun = _resolve_verb_noun(name, is_running=is_running)
+        # 首个工具首字母大写，后续小写
         if i == 0:
             active_verb = active_verb[0].upper() + active_verb[1:]
         else:
             active_verb = active_verb[0].lower() + active_verb[1:]
-        plural = f"{noun}s" if cnt > 1 else noun
-        parts.append(f"{active_verb} {cnt} {plural}")
+        parts.append(f"{active_verb} {cnt} {_pluralize(noun, cnt)}")
 
     return ", ".join(parts)
+
+
+def _build_summary_text(entries: list[_BlockEntry], *, is_running: bool) -> str:
+    """根据 entries 列表生成摘要文本。"""
+    if not entries:
+        return ""
+    tool_names = {e.tool_name for e in entries}
+    if len(tool_names) == 1:
+        return _build_single_tool_summary(entries, is_running=is_running)
+    return _build_mixed_tool_summary(entries, is_running=is_running)
 
 
 class _SummaryLine(Static):

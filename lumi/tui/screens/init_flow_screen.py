@@ -17,6 +17,7 @@ from textual.widgets import Label, RadioButton, RadioSet, Rule, Static
 from lumi.utils.config import GlobalConfig, GlobalConfigManager
 
 from ._constants import THEME_OPTIONS as _THEME_OPTIONS
+from ._constants import theme_index_of as _theme_index_of
 
 _DEFAULT_THEME_MODE = "system"
 
@@ -82,10 +83,7 @@ class InitFlowScreen(ModalScreen[GlobalConfig]):
 
     def compose(self) -> ComposeResult:
         """渲染初始化引导界面。"""
-        default_index = next(
-            (i for i, (_, v) in enumerate(_THEME_OPTIONS) if v == _DEFAULT_THEME_MODE),
-            0,
-        )
+        default_index = _theme_index_of(_DEFAULT_THEME_MODE)
         container = Vertical()
         container.border_title = "Lumi Setup"
         with container:
@@ -108,11 +106,6 @@ class InitFlowScreen(ModalScreen[GlobalConfig]):
             event.prevent_default()
             event.stop()
 
-    def on_radio_set_changed(self, event: RadioSet.Changed) -> None:
-        """用户切换选项后自动确认保存。"""
-        # 不在切换时自动保存，等用户按 enter
-        pass
-
     def key_enter(self) -> None:
         """按 Enter 确认当前选择。"""
         self._confirm()
@@ -122,20 +115,13 @@ class InitFlowScreen(ModalScreen[GlobalConfig]):
         radio_set = self.query_one("#theme-mode", RadioSet)
         pressed_index = radio_set.pressed_index
         if pressed_index < 0:
-            pressed_index = next(
-                (
-                    i
-                    for i, (_, v) in enumerate(_THEME_OPTIONS)
-                    if v == _DEFAULT_THEME_MODE
-                ),
-                0,
-            )
+            pressed_index = _theme_index_of(_DEFAULT_THEME_MODE)
 
         _, selected_value = _THEME_OPTIONS[pressed_index]
         config = GlobalConfig(initialized=True, theme_mode=selected_value)
         try:
             GlobalConfigManager.save(config)
-        except Exception as e:
+        except OSError as e:
             self.app.notify(f"配置保存失败: {e}", severity="error")
             return
         self.dismiss(config)

@@ -7,6 +7,7 @@ from __future__ import annotations
 
 import shlex
 from pathlib import Path
+from typing import Any
 
 from lumi.utils.logger import logger
 
@@ -83,7 +84,7 @@ class WorkspaceBoundary:
         return False
 
     def extract_paths_from_tool_call(
-        self, tool_name: str, tool_args: dict
+        self, tool_name: str, tool_args: dict[str, Any]
     ) -> list[Path]:
         """从工具调用参数中提取涉及的文件/目录路径。
 
@@ -101,7 +102,7 @@ class WorkspaceBoundary:
             return self._extract_bash_paths(tool_args)
         return self._extract_file_tool_paths(tool_args)
 
-    def _extract_file_tool_paths(self, tool_args: dict) -> list[Path]:
+    def _extract_file_tool_paths(self, tool_args: dict[str, Any]) -> list[Path]:
         """从文件操作工具参数中提取路径。"""
         paths: list[Path] = []
         for key in _PATH_ARG_KEYS:
@@ -110,7 +111,7 @@ class WorkspaceBoundary:
                 paths.append(Path(value))
         return paths
 
-    def _extract_bash_paths(self, tool_args: dict) -> list[Path]:
+    def _extract_bash_paths(self, tool_args: dict[str, Any]) -> list[Path]:
         """从 bash 命令中尝试提取目标路径。
 
         解析命令字符串，识别常见命令并提取路径参数。

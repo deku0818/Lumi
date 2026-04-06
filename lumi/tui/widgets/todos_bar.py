@@ -26,79 +26,55 @@ _STATUS_ICONS: dict[str, str] = {
 }
 
 
-def _build_summary(todos: list[dict]) -> Text:
-    """构建一行摘要文本：▸ Tasks: ■ 当前任务名 (完成数/总数)"""
-    total = len(todos)
-    completed = sum(1 for t in todos if t.get("status") == "completed")
-
-    # 找到当前进行中的任务，没有则取第一个未完成的
-    current = ""
+def _find_current_task(todos: list[dict]) -> str:
+    """找到当前进行中的任务名，没有则取第一个未完成的。"""
     for t in todos:
         if t.get("status") == "in_progress":
-            current = t.get("content", "")
-            break
-    if not current:
-        for t in todos:
-            if t.get("status") != "completed":
-                current = t.get("content", "")
-                break
+            return t.get("content", "")
+    for t in todos:
+        if t.get("status") != "completed":
+            return t.get("content", "")
+    return ""
 
-    result = Text()
+
+def _truncate_task_name(name: str, max_len: int = 40) -> str:
+    """截断过长的任务名。"""
+    if len(name) <= max_len:
+        return name
+    return name[: max_len - 3] + "…"
+
+
+def _build_header(todos: list[dict], *, icon: str) -> Text:
+    """构建任务栏头部行（折叠/展开共用）。"""
+    total = len(todos)
+    completed = sum(1 for t in todos if t.get("status") == "completed")
+    current = _find_current_task(todos)
+
     accent = get_color("accent")
     muted = get_color("text_muted")
 
-    result.append(f"  {_ICON_COLLAPSED} ", style=muted)
+    result = Text()
+    result.append(f"  {icon} ", style=muted)
     result.append("Tasks: ", style=muted)
     if current:
-        icon = _STATUS_ICONS.get("in_progress", "■")
-        result.append(f"{icon} ", style=accent)
-        # 截断过长的任务名
-        display = current if len(current) <= 40 else current[:37] + "…"
-        result.append(display, style=accent)
+        result.append(f"{_STATUS_ICONS['in_progress']} ", style=accent)
+        result.append(_truncate_task_name(current), style=accent)
         result.append(f" ({completed}/{total})", style=muted)
     else:
         result.append(f"({completed}/{total})", style=muted)
-
     return result
 
 
+def _build_summary(todos: list[dict]) -> Text:
+    """构建一行折叠态摘要文本。"""
+    return _build_header(todos, icon=_ICON_COLLAPSED)
+
+
 def _build_expanded(todos: list[dict]) -> Text:
-    """构建展开状态的完整文本：摘要行 + 任务列表"""
-    total = len(todos)
-    completed = sum(1 for t in todos if t.get("status") == "completed")
-
-    # 找到当前进行中的任务
-    current = ""
-    for t in todos:
-        if t.get("status") == "in_progress":
-            current = t.get("content", "")
-            break
-    if not current:
-        for t in todos:
-            if t.get("status") != "completed":
-                current = t.get("content", "")
-                break
-
-    result = Text()
-    accent = get_color("accent")
-    muted = get_color("text_muted")
-
-    # 摘要行（展开图标）
-    result.append(f"  {_ICON_EXPANDED} ", style=muted)
-    result.append("Tasks: ", style=muted)
-    if current:
-        icon = _STATUS_ICONS.get("in_progress", "■")
-        result.append(f"{icon} ", style=accent)
-        display = current if len(current) <= 40 else current[:37] + "…"
-        result.append(display, style=accent)
-        result.append(f" ({completed}/{total})", style=muted)
-    else:
-        result.append(f"({completed}/{total})", style=muted)
-
-    # 任务列表
+    """构建展开态完整文本：摘要行 + 任务列表。"""
+    result = _build_header(todos, icon=_ICON_EXPANDED)
     result.append("\n")
     result.append(build_todos_text(todos))
-
     return result
 
 

@@ -46,7 +46,9 @@ def _patch_preprocessing():
 # --- 测试 1: 技能注入在预处理之后执行 ---
 
 
-@patch("lumi.agents.core.nodes.inject_system_info_into_message", side_effect=lambda m: m)
+@patch(
+    "lumi.agents.core.nodes.inject_system_info_into_message", side_effect=lambda m: m
+)
 @patch("lumi.agents.core.nodes.SkillChangeDetector")
 @patch("lumi.agents.core.nodes.cleanup_incomplete_tool_calls", return_value=[])
 async def test_skill_injection_after_preprocessing(

@@ -34,8 +34,8 @@ class _CheckpointItem(Static):
         self._index = index
 
         label = info.label.replace("\n", " ").strip()
-        if len(label) > 70:
-            label = label[:67] + "..."
+        if len(label) > 80:
+            label = label[:77] + "..."
 
         text = Text()
         text.append(f"› {label}\n", style="bold")

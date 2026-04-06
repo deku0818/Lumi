@@ -1,8 +1,7 @@
 """系统信息注入模块
 
-收集用户操作系统、架构、Shell 等环境信息，
-格式化为 <system-reminder> 块注入到用户消息中，
-使 LLM 能感知用户的运行环境以提供更精准的建议。
+收集操作系统、Shell 等环境信息，格式化为 ``<system-reminder>`` 块注入到用户消息中，
+使 LLM 能感知运行环境以提供更精准的建议。
 """
 
 from __future__ import annotations
@@ -10,58 +9,41 @@ from __future__ import annotations
 import os
 import platform
 import shutil
+import sys
 
 from langchain_core.messages import HumanMessage
 
 from lumi.agents.core.node_helpers.messages import inject_text_into_message
 
 
-def collect_system_info() -> dict[str, str]:
-    """收集当前系统环境信息。
-
-    Returns:
-        包含 os、version、arch、shell、cwd 等键值对的字典
-    """
-    import sys
-
+def _detect_shell() -> str:
+    """检测当前 shell 名称。"""
     if sys.platform == "win32":
-        # Windows: 优先检测 PowerShell，再回退到 cmd
-        if shutil.which("pwsh"):
-            shell = "pwsh"
-        elif shutil.which("powershell"):
-            shell = "powershell"
-        else:
-            shell = "cmd"
-    else:
-        # Unix: 从 SHELL 环境变量获取
-        shell = os.environ.get("SHELL", "")
-        if shell:
-            shell = os.path.basename(shell)
-        else:
-            shell = "sh"
+        for candidate in ("pwsh", "powershell"):
+            if shutil.which(candidate):
+                return candidate
+        return "cmd"
+    # Unix
+    shell = os.environ.get("SHELL", "")
+    return os.path.basename(shell) if shell else "sh"
 
+
+def collect_system_info() -> dict[str, str]:
+    """收集当前系统环境信息。"""
     return {
         "os": platform.platform(terse=True),
         "python": platform.python_version(),
-        "shell": shell,
+        "shell": _detect_shell(),
         "cwd": os.getcwd(),
     }
 
 
 def format_system_reminder(info: dict[str, str] | None = None) -> str:
-    """将系统信息格式化为 <system-reminder> 块。
-
-    Args:
-        info: 系统信息字典，为 None 时自动收集
-
-    Returns:
-        格式化后的 system-reminder 文本
-    """
+    """将系统信息格式化为 ``<system-reminder>`` 块。"""
     if info is None:
         info = collect_system_info()
 
-    lines = [f"- {k}: {v}" for k, v in info.items() if v]
-    body = "\n".join(lines)
+    body = "\n".join(f"- {k}: {v}" for k, v in info.items() if v)
     return f"<system-reminder>\n用户当前系统环境信息\n{body}\n</system-reminder>\n"
 
 
@@ -69,16 +51,5 @@ def inject_system_info_into_message(
     message: HumanMessage,
     info: dict[str, str] | None = None,
 ) -> HumanMessage:
-    """将系统信息 system-reminder 块注入到用户消息中。
-
-    插入到用户原始内容之前，返回新的 HumanMessage（不可变原则）。
-
-    Args:
-        message: 原始用户消息
-        info: 系统信息字典，为 None 时自动收集
-
-    Returns:
-        注入后的新 HumanMessage
-    """
-    reminder_text = format_system_reminder(info)
-    return inject_text_into_message(message, reminder_text)
+    """将系统信息 ``<system-reminder>`` 块注入到用户消息 content 最前面，返回新消息。"""
+    return inject_text_into_message(message, format_system_reminder(info))

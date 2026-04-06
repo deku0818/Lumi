@@ -126,19 +126,10 @@ class ChatLog(VerticalScroll):
         if not to_remove:
             return
 
-        # 统计被压缩的消息数（合并已有占位符的计数）
-        compacted_count = 0
-        for w in to_remove:
-            if w.has_class(_COMPACTED_CLASS):
-                compacted_count += getattr(w, "_compacted_count", 0)
-            else:
-                compacted_count += 1
-
-        # 移除旧 widget
+        compacted_count = self._count_compacted(to_remove)
         for w in to_remove:
             w.remove()
 
-        # 插入占位符
         placeholder = Static(
             Text(
                 f"  ↑ {compacted_count} 条早期消息已折叠",
@@ -155,6 +146,17 @@ class ChatLog(VerticalScroll):
             len(to_remove),
             compacted_count,
         )
+
+    @staticmethod
+    def _count_compacted(widgets: list) -> int:
+        """统计被压缩的消息数（合并已有占位符的计数）。"""
+        count = 0
+        for w in widgets:
+            if w.has_class(_COMPACTED_CLASS):
+                count += getattr(w, "_compacted_count", 0)
+            else:
+                count += 1
+        return count
 
     async def append_error(self, message: str, detail: str = "") -> None:
         """在聊天日志中追加错误提示行。

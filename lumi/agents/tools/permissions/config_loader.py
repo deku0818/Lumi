@@ -8,6 +8,7 @@ from __future__ import annotations
 import json
 import tempfile
 from pathlib import Path
+from typing import Any
 
 from lumi.agents.tools.permissions.jsonc import parse_jsonc
 from lumi.agents.tools.permissions.models import (
@@ -19,7 +20,7 @@ from lumi.agents.tools.permissions.models import (
 from lumi.utils.logger import logger
 
 
-def _parse_rules(raw: dict) -> tuple[PermissionRule, ...]:
+def _parse_rules(raw: dict[str, Any]) -> tuple[PermissionRule, ...]:
     """将 JSON permissions 字段解析为 PermissionRule 元组。
 
     格式: {"allow": ["read", "bash(npm *)"], "deny": ["bash(rm -rf *)"]}
@@ -56,7 +57,7 @@ def _parse_rules(raw: dict) -> tuple[PermissionRule, ...]:
     return tuple(rules)
 
 
-def _config_from_dict(data: dict) -> PermissionConfig:
+def _config_from_dict(data: dict[str, Any]) -> PermissionConfig:
     """从字典构建 PermissionConfig。
 
     Args:
@@ -74,7 +75,7 @@ def _config_from_dict(data: dict) -> PermissionConfig:
     )
 
 
-def _config_to_dict(config: PermissionConfig) -> dict:
+def _config_to_dict(config: PermissionConfig) -> dict[str, Any]:
     """将 PermissionConfig 序列化为字典（新格式）。
 
     Args:

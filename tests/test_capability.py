@@ -56,7 +56,10 @@ class TestGetToolEffect:
         assert get_tool_effect("bash", {"command": "ls -la"}) == ToolEffect.NONE
 
     def test_bash_write_command(self):
-        assert get_tool_effect("bash", {"command": "rm -rf /tmp/test"}) == ToolEffect.SHELL_EXEC
+        assert (
+            get_tool_effect("bash", {"command": "rm -rf /tmp/test"})
+            == ToolEffect.SHELL_EXEC
+        )
 
 
 # ── is_read_only ──

@@ -16,6 +16,8 @@ from pathlib import Path
 from lumi.tui.renderers.utils import escape_markup as escape
 from textual.app import ComposeResult
 from textual.containers import Horizontal, VerticalScroll
+from textual.css.query import NoMatches
+from textual.events import Click, Key
 from textual.message import Message
 from textual.reactive import reactive
 from textual.widget import Widget
@@ -26,6 +28,13 @@ from lumi.utils.logger import logger
 # 持久化文件路径
 _NOTIFICATIONS_FILE: Path = Path.home() / ".lumi" / "cron" / "notifications.json"
 _ISO_FMT = "%Y-%m-%dT%H:%M:%S.%f"
+
+# 摘要截断长度
+_SUMMARY_MAX_LEN = 120
+
+# 时间格式化阈值（毫秒）
+_MS_PER_MINUTE = 60_000
+_MS_PER_SECOND = 1000
 
 
 @dataclass
@@ -50,7 +59,9 @@ class NotificationRecord:
         started_at: datetime | None = None,
         duration_ms: int | None = None,
     ) -> NotificationRecord:
-        summary = content[:120] + ("…" if len(content) > 120 else "")
+        summary = content[:_SUMMARY_MAX_LEN] + (
+            "…" if len(content) > _SUMMARY_MAX_LEN else ""
+        )
         return cls(
             id=str(uuid.uuid4()),
             job_name=job_name,
@@ -111,7 +122,7 @@ class NotificationStore:
         for i, d in enumerate(data):
             try:
                 records.append(NotificationRecord.from_dict(d))
-            except Exception:
+            except (KeyError, ValueError, TypeError):
                 logger.warning("通知记录 #%d 解析失败，已跳过", i, exc_info=True)
         return records
 
@@ -125,7 +136,7 @@ class NotificationStore:
                 ),
                 encoding="utf-8",
             )
-        except Exception:
+        except OSError:
             logger.warning("保存通知文件失败: %s", self._path, exc_info=True)
 
 
@@ -173,22 +184,30 @@ class NotificationItem(Widget):
         self._show_dismiss = show_dismiss
         self._expanded = False
 
+    @staticmethod
+    def _format_duration(duration_ms: int) -> str:
+        """Format millisecond duration into a human-readable string."""
+        if duration_ms >= _MS_PER_MINUTE:
+            mins, secs = divmod(duration_ms // 1000, 60)
+            return f"{mins}m{secs}s"
+        if duration_ms >= _MS_PER_SECOND:
+            return f"{duration_ms / 1000:.1f}s"
+        return f"{duration_ms}ms"
+
+    def _build_meta_str(self) -> str:
+        """Build the metadata suffix string (time and duration)."""
+        r = self._record
+        parts: list[str] = []
+        if r.started_at is not None:
+            parts.append(r.started_at.strftime("%H:%M:%S"))
+        if r.duration_ms is not None:
+            parts.append(self._format_duration(r.duration_ms))
+        return f"  [dim]{' · '.join(parts)}[/dim]" if parts else ""
+
     def compose(self) -> ComposeResult:
         r = self._record
         title_class = "item-title unread" if not r.read else "item-title"
-
-        meta_parts: list[str] = []
-        if r.started_at is not None:
-            meta_parts.append(r.started_at.strftime("%H:%M:%S"))
-        if r.duration_ms is not None:
-            if r.duration_ms >= 60_000:
-                mins, secs = divmod(r.duration_ms // 1000, 60)
-                meta_parts.append(f"{mins}m{secs}s")
-            elif r.duration_ms >= 1000:
-                meta_parts.append(f"{r.duration_ms / 1000:.1f}s")
-            else:
-                meta_parts.append(f"{r.duration_ms}ms")
-        meta_str = f"  [dim]{' · '.join(meta_parts)}[/dim]" if meta_parts else ""
+        meta_str = self._build_meta_str()
 
         # 未读：右侧 ✓ 标记已读；已读：右侧 ✕ 删除
         action_label = "✕" if self._show_dismiss else "✓"
@@ -203,31 +222,32 @@ class NotificationItem(Widget):
         """切换展开/收起完整内容。"""
         try:
             body = self.query_one(f"#body-{self._record.id}", Static)
-        except Exception:
+        except NoMatches:
             return
         self._expanded = not self._expanded
         body.update(self._record.content if self._expanded else self._record.summary)
 
-    def on_click(self, event) -> None:
+    def _handle_action_button(self) -> None:
+        """Dispatch the appropriate action message based on dismiss/read mode."""
+        if self._show_dismiss:
+            self.post_message(self.Dismissed(self._record.id))
+        else:
+            self.post_message(self.MarkRead(self._record.id))
+
+    def on_click(self, event: Click) -> None:
         """点击操作按钮执行已读/删除，点击其他区域展开/收起。"""
         try:
             btn = self.query_one(".item-action")
-            if btn.region.contains_point(event.screen_offset):
-                if self._show_dismiss:
-                    self.post_message(self.Dismissed(self._record.id))
-                else:
-                    self.post_message(self.MarkRead(self._record.id))
-                event.stop()
-                return
-        except Exception:
-            logger.warning(
-                "[NotificationItem] 操作按钮点击处理失败, record=%s",
-                self._record.id,
-                exc_info=True,
-            )
+        except NoMatches:
+            self._toggle_expand()
+            return
+        if btn.region.contains_point(event.screen_offset):
+            self._handle_action_button()
+            event.stop()
+            return
         self._toggle_expand()
 
-    def on_key(self, event) -> None:
+    def on_key(self, event: Key) -> None:
         """Enter/Space 展开收起，d 键执行已读/删除。"""
         if event.key in ("enter", "space"):
             event.stop()
@@ -235,10 +255,7 @@ class NotificationItem(Widget):
             self._toggle_expand()
         elif event.key == "d":
             event.stop()
-            if self._show_dismiss:
-                self.post_message(self.Dismissed(self._record.id))
-            else:
-                self.post_message(self.MarkRead(self._record.id))
+            self._handle_action_button()
 
 
 class _NotifTab(StrEnum):
@@ -264,11 +281,11 @@ class _TabButton(Static):
         super().__init__(label, **kwargs)
         self._tab = tab
 
-    def on_click(self, event) -> None:
+    def on_click(self, event: Click) -> None:
         event.stop()
         self.post_message(self.TabClicked(self._tab))
 
-    def on_key(self, event) -> None:
+    def on_key(self, event: Key) -> None:
         if event.key in ("enter", "space"):
             event.stop()
             event.prevent_default()
@@ -283,11 +300,11 @@ class _ActionButton(Static):
     class Clicked(Message):
         """操作按钮被点击。"""
 
-    def on_click(self, event) -> None:
+    def on_click(self, event: Click) -> None:
         event.stop()
         self.post_message(self.Clicked())
 
-    def on_key(self, event) -> None:
+    def on_key(self, event: Key) -> None:
         if event.key in ("enter", "space"):
             event.stop()
             event.prevent_default()
@@ -426,7 +443,7 @@ class NotificationPanel(Widget):
             tab_unread = self.query_one("#tab-unread")
             tab_read = self.query_one("#tab-read")
             action = self.query_one("#notif-action", Static)
-        except Exception:
+        except NoMatches:
             return
         tab_unread.set_classes(
             "notif-tab active" if new_tab == _NotifTab.UNREAD else "notif-tab"
@@ -443,7 +460,7 @@ class NotificationPanel(Widget):
         try:
             tab_unread = self.query_one("#tab-unread", Static)
             tab_read = self.query_one("#tab-read", Static)
-        except Exception:
+        except NoMatches:
             return
         unread = self.unread_count
         read = self.read_count
@@ -525,7 +542,7 @@ class NotificationPanel(Widget):
                 break
         self._save_and_refresh()
 
-    def on_key(self, event) -> None:
+    def on_key(self, event: Key) -> None:
         if event.key == "escape" and self.has_class("visible"):
             self.remove_class("visible")
             event.stop()

@@ -163,8 +163,7 @@ class SkillsScreen(ListScreen[SkillConfig]):
     def _on_key(self, event: Key) -> None:
         """Enter 打开详情弹窗而非 dismiss。"""
         if event.key == "enter":
-            if self._filtered and 0 <= self._selected_index < len(self._filtered):
-                skill = self._filtered[self._selected_index]
+            if (skill := self._selected_item) is not None:
                 self.app.push_screen(_SkillDetailScreen(skill))
             event.prevent_default()
             event.stop()

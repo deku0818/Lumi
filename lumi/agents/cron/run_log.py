@@ -46,7 +46,7 @@ class RunRecord:
     output_summary: str
     error: str = ""
 
-    def to_dict(self) -> dict:
+    def to_dict(self) -> dict[str, object]:
         """序列化为字典，用于 JSON 存储。"""
         return {
             "job_id": self.job_id,
@@ -60,7 +60,7 @@ class RunRecord:
         }
 
     @staticmethod
-    def from_dict(data: dict) -> RunRecord:
+    def from_dict(data: dict[str, object]) -> RunRecord:
         """从字典反序列化为 RunRecord。
 
         Args:

@@ -12,7 +12,7 @@ from textual.containers import Vertical, VerticalScroll
 from textual.events import Key
 from textual.screen import ModalScreen
 from textual.widget import Widget
-from textual.widgets import Rule, Static
+from textual.widgets import Input, Rule, Static
 
 from lumi.tui.screens.list_screen import ListScreen
 from lumi.tui.widgets.notification_panel import NotificationRecord, NotificationStore
@@ -202,8 +202,7 @@ class CronNotifyScreen(ListScreen[NotificationRecord]):
         """扩展键盘处理：Enter 查看详情、r 标记已读、R 全部已读、Delete 删除。"""
         match event.key:
             case "enter":
-                if self._filtered and 0 <= self._selected_index < len(self._filtered):
-                    record = self._filtered[self._selected_index]
+                if (record := self._selected_item) is not None:
                     self._mark_read(record)
                     self.app.push_screen(_NotifyDetailScreen(record))
                 event.prevent_default()
@@ -212,32 +211,22 @@ class CronNotifyScreen(ListScreen[NotificationRecord]):
                 self._delete_selected()
                 event.prevent_default()
                 event.stop()
-            case "r":
-                # 搜索框有焦点时不拦截字母键
-                if not self._is_search_focused():
-                    self._mark_selected_read()
-                    event.prevent_default()
-                    event.stop()
-                    return
-                super()._on_key(event)
-            case "R":
-                if not self._is_search_focused():
+            case "r" | "R" if not self._is_search_focused():
+                if event.key == "R":
                     self._mark_all_read()
-                    event.prevent_default()
-                    event.stop()
-                    return
-                super()._on_key(event)
+                else:
+                    self._mark_selected_read()
+                event.prevent_default()
+                event.stop()
             case _:
                 super()._on_key(event)
 
     def _is_search_focused(self) -> bool:
         """判断搜索框是否有焦点。"""
         from textual.css.query import NoMatches
-        from textual.widgets import Input
 
         try:
-            search = self.query_one("#ls-search", Input)
-            return search.has_focus
+            return self.query_one("#ls-search", Input).has_focus
         except NoMatches:
             return False
 
@@ -251,9 +240,8 @@ class CronNotifyScreen(ListScreen[NotificationRecord]):
 
     def _mark_selected_read(self) -> None:
         """标记选中通知为已读并刷新。"""
-        if not self._filtered or self._selected_index >= len(self._filtered):
+        if (record := self._selected_item) is None:
             return
-        record = self._filtered[self._selected_index]
         self._mark_read(record)
         self._refresh_sync()
 
@@ -271,16 +259,12 @@ class CronNotifyScreen(ListScreen[NotificationRecord]):
 
     def _delete_selected(self) -> None:
         """删除选中通知并刷新。"""
-        if not self._filtered or self._selected_index >= len(self._filtered):
+        if (record := self._selected_item) is None:
             return
-        record = self._filtered[self._selected_index]
         self._all_items = [r for r in self._all_items if r.id != record.id]
         self._filtered = [r for r in self._filtered if r.id != record.id]
         self._has_changed = True
-
-        if self._selected_index >= len(self._filtered):
-            self._selected_index = max(0, len(self._filtered) - 1)
-
+        self._clamp_selected_index()
         self._save()
         self._refresh_sync()
 

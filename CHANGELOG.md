@@ -1,5 +1,24 @@
 # Changelog
 
+## [0.1.0a2] - 2026-04-06
+
+### Changed
+- 全局添加 `from __future__ import annotations`，精确化类型标注（`dict` → `dict[str, Any]` 等）
+- 将不依赖 `self` 的实例方法提取为模块级函数（checkpoint、registry、loader 等）
+- 移除冗余 docstring，保留类型自文档化
+- EventRouter `_transition` 由 match/case 重构为 `_PHASE_MAP` 字典查找
+- `CommandResult` 改为 `frozen=True, slots=True` 不可变数据类
+- 子 Agent 不再继承 `execution_mode`（有意为之，子 Agent 独立运行）
+
+### Fixed
+- ExitPlanMode 拒绝时 `tool_cancelled` 标记丢失，导致用户拒绝 plan 后 Agent 继续执行
+- 原子写入（job_store、run_log、checkpoint）`except BaseException` 被误改为 `except Exception`，`KeyboardInterrupt` 时临时文件泄漏
+- `config_loader` 误删 `Permission.ASK` 配置解析，导致 settings 中 ask 规则被静默忽略
+- Scheduler `start()`/`_compensate_missed_runs` 异常捕获过窄（`ValueError, KeyError`），APScheduler 异常导致整个调度器崩溃
+- Scheduler `_deliver_and_log`/`_persist_consecutive_errors` 异常捕获过窄（`OSError`），非 IO 异常导致任务执行流中断
+- Cron 工具移除 `KeyError` 捕获，job 未找到时返回通用错误而非友好提示
+- `_read_text_safe` 文件读取失败时无日志，diff 统计静默不准确
+
 ## [0.1.0a] - 2026-04-02
 
 ### Changed

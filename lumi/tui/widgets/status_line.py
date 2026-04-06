@@ -78,47 +78,44 @@ class StatusLine(Static):
         ctx = self._run_ctx
         muted = get_color("text_muted")
         accent = get_color("accent")
-        dim = "dim"
 
-        # 模型名
         model = self._model_name or "unknown"
-
-        # token 用量（含上下文上限）
         total = ctx.total_tokens if ctx else 0
+        input_tokens = ctx.input_tokens if ctx else 0
+        sep = " [dim]│[/dim] "
+
+        # token 用量
         token_str = _format_tokens(total)
         max_str = _format_max(self._context_max)
 
-        # cache token（有缓存时才显示）
-        cache_read = ctx.cache_read_tokens if ctx else 0
-        cache_creation = ctx.cache_creation_tokens if ctx else 0
-        cache_parts: list[str] = []
-        if cache_read:
-            cache_parts.append(f"r:{_format_tokens(cache_read)}")
-        if cache_creation:
-            cache_parts.append(f"w:{_format_tokens(cache_creation)}")
-
         # 上下文进度条
-        input_tokens = ctx.input_tokens if ctx else 0
         ratio = min(input_tokens / self._context_max, 1.0)
         pct = int(ratio * 100)
         filled = max(int(ratio * _BAR_LEN), 1) if input_tokens > 0 else 0
         empty = _BAR_LEN - filled
-
         bar = f"[{accent}]{_FILLED * filled}[/][{muted}]{_EMPTY * empty}[/]"
 
-        sep = f" [{dim}]│[/{dim}] "
+        parts = [
+            f"[{muted}]{model}[/]",
+            f"[{muted}]⛁ {token_str}/{max_str}[/]",
+            f"{bar} [{muted}]{pct}%[/]",
+        ]
 
-        line = (
-            f"[{muted}]{model}[/]"
-            f"{sep}"
-            f"[{muted}]⛁ {token_str}/{max_str}[/]"
-            f"{sep}"
-            f"{bar}"
-            f" [{muted}]{pct}%[/]"
-        )
-
-        # cache 信息追加到末尾
+        # cache 信息（有缓存时才追加）
+        cache_parts = self._format_cache_parts(ctx)
         if cache_parts:
-            line += f"{sep}[{muted}]cache {','.join(cache_parts)}[/]"
+            parts.append(f"[{muted}]cache {','.join(cache_parts)}[/]")
 
-        self.update(line)
+        self.update(sep.join(parts))
+
+    @staticmethod
+    def _format_cache_parts(ctx: RunContext | None) -> list[str]:
+        """格式化 cache token 信息片段。"""
+        if ctx is None:
+            return []
+        result: list[str] = []
+        if ctx.cache_read_tokens:
+            result.append(f"r:{_format_tokens(ctx.cache_read_tokens)}")
+        if ctx.cache_creation_tokens:
+            result.append(f"w:{_format_tokens(ctx.cache_creation_tokens)}")
+        return result

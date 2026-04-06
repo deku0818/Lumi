@@ -11,6 +11,8 @@ from textual.events import Key, Paste
 from textual.message import Message
 from textual.widgets import Static, TextArea
 
+from textual.timer import Timer
+
 from lumi.tui.slash_commands.parser import extract_command_prefix, is_command_mode
 from lumi.tui.slash_commands.registry import CommandRegistry
 from lumi.tui.theme import get_color
@@ -20,12 +22,23 @@ from lumi.utils.image import ImageData
 # 粘贴内容超过此行数时折叠显示
 PASTE_COLLAPSE_THRESHOLD = 20
 
+# 状态栏提示消息默认显示时长（秒）
+_FLASH_DURATION_DEFAULT = 1.5
+# 退出提示显示时长（秒）
+_EXIT_HINT_DURATION = 1.5
+# cron 动画帧间隔（秒）
+_CRON_ANIMATION_INTERVAL = 0.3
+# cron 任务名称显示阈值（超过此数量显示计数）
+_CRON_NAME_DISPLAY_LIMIT = 3
+
 # 值为 (label, 颜色)
 _MODE_DISPLAY: dict[str, tuple[str, str]] = {
     "auto": ("▶ auto", "#88E8A0"),
     "plan": ("⏸ plan", "#E8D888"),
     "privileged": ("▶▶ privileged ⚠", "#88A0E8"),
 }
+
+_MODE_HINT_SUFFIX = " [dim](shift+tab)[/dim]"
 
 
 class ChatInput(TextArea):
@@ -63,7 +76,7 @@ class ChatInput(TextArea):
             super().__init__()
             self.value = value
 
-    def __init__(self, **kwargs) -> None:
+    def __init__(self, **kwargs: object) -> None:
         # 必须在 super().__init__() 之前初始化，因为 _set_document -> _build_highlight_map -> _apply_cmd_highlight 会访问这些属性
         self._paste_counter: int = 0
         self._pasted_texts: dict[int, str] = {}
@@ -278,18 +291,18 @@ class InputBar(Vertical):
 
     _CRON_FRAMES = ("▰▱▱", "▱▰▱", "▱▱▰")
 
-    def __init__(self, *args, **kwargs) -> None:
+    def __init__(self, *args: object, **kwargs: object) -> None:
         super().__init__(*args, **kwargs)
         self._tool_mode = "auto"
         self._plan_mode = False
         self._plan_reminder_pending = False
         self._privileged = False
         self._pending_images: list[ImageData] = []
-        self._exit_hint_timer = None
+        self._exit_hint_timer: Timer | None = None
         self._cron_job_names: list[str] = []
         self._cron_frame: int = 0
-        self._cron_timer = None
-        self._flash_timer = None
+        self._cron_timer: Timer | None = None
+        self._flash_timer: Timer | None = None
         self._history: list[str] = []
         self._history_index: int = -1
         self._draft: str = ""  # 暂存当前未提交的输入
@@ -306,10 +319,9 @@ class InputBar(Vertical):
         yield CompletionMenu()
         display_key = self._current_display_key()
         label, color = _MODE_DISPLAY[display_key]
-        hint = " [dim](shift+tab)[/dim]"
         with Horizontal(id="status-row"):
             yield Static(
-                f"[{color}]{label}[/]{hint}",
+                f"[{color}]{label}[/]{_MODE_HINT_SUFFIX}",
                 id="mode-indicator",
             )
             yield Static("", id="cron-indicator")
@@ -478,11 +490,12 @@ class InputBar(Vertical):
     def _update_mode_indicator(self) -> None:
         display_key = self._current_display_key()
         label, color = _MODE_DISPLAY[display_key]
-        hint = " [dim](shift+tab)[/dim]"
         indicator = self.query_one("#mode-indicator", Static)
-        indicator.update(f"[{color}]{label}[/]{hint}")
+        indicator.update(f"[{color}]{label}[/]{_MODE_HINT_SUFFIX}")
 
-    def flash_message(self, message: str, duration: float = 1.5) -> None:
+    def flash_message(
+        self, message: str, duration: float = _FLASH_DURATION_DEFAULT
+    ) -> None:
         """在状态栏短暂显示提示消息，之后恢复原内容。
 
         Args:
@@ -552,7 +565,7 @@ class InputBar(Vertical):
         color = get_color("error")
         indicator = self.query_one("#mode-indicator", Static)
         indicator.update(f"[{color}]Double press ctrl+c to exit[/]")
-        self._exit_hint_timer = self.set_timer(1.5, self.hide_exit_hint)
+        self._exit_hint_timer = self.set_timer(_EXIT_HINT_DURATION, self.hide_exit_hint)
 
     def hide_exit_hint(self) -> None:
         """恢复状态栏原内容并取消计时器。"""
@@ -587,7 +600,9 @@ class InputBar(Vertical):
         if job_names and self._cron_timer is None:
             self._cron_frame = 0
             self._render_cron_frame()
-            self._cron_timer = self.set_interval(0.3, self._tick_cron)
+            self._cron_timer = self.set_interval(
+                _CRON_ANIMATION_INTERVAL, self._tick_cron
+            )
         elif not job_names:
             if self._cron_timer is not None:
                 self._cron_timer.stop()
@@ -605,7 +620,7 @@ class InputBar(Vertical):
         if not names:
             return
         bar = self._CRON_FRAMES[self._cron_frame]
-        if len(names) <= 3:
+        if len(names) <= _CRON_NAME_DISPLAY_LIMIT:
             text = f"[#B888E8]{bar} {', '.join(names)} 执行中[/]"
         else:
             text = f"[#B888E8]{bar} {len(names)} 个任务执行中[/]"

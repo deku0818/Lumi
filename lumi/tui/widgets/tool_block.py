@@ -314,19 +314,20 @@ class ToolBlock(Vertical, SpinnerMixin):
         if not summary_text:
             return
 
-        styled = Text()
-        styled.append("⎿ ", style=get_color("text_muted"))
-        styled.append(summary_text, style=get_color("text_muted"))
+        muted = get_color("text_muted")
+        styled = Text.assemble(("⎿ ", muted), (summary_text, muted))
         widget = Static(styled, classes="tool-summary", markup=False)
 
         # 插入到 Contents 最前面（参数 widget 之前），确保紧跟标题行
         first_child = contents.children[0] if contents.children else None
-        if first_child is not None:
-            contents.mount(widget, before=first_child)
-        else:
-            contents.mount(widget)
+        mount_kwargs: dict = {"before": first_child} if first_child else {}
+        contents.mount(widget, **mount_kwargs)
 
-        # 隐藏空的参数 widget，避免标题和摘要之间出现空白行
+        self._hide_empty_args(contents)
+
+    @staticmethod
+    def _hide_empty_args(contents: Widget) -> None:
+        """隐藏空的参数 widget，避免标题和摘要之间出现空白行。"""
         for w in contents.children:
             if w.has_class("tool-args"):
                 rendered = w.render()
@@ -345,7 +346,7 @@ class ToolBlock(Vertical, SpinnerMixin):
         self._mount_summary(is_error=is_error)
 
     async def _mount_output(self) -> None:
-        """展开时按需渲染详情层 output widget（摘要行下方）"""
+        """展开时按需渲染详情层 output widget（摘要行下方）。"""
         contents = self._get_contents()
         if contents is None:
             return
@@ -353,38 +354,44 @@ class ToolBlock(Vertical, SpinnerMixin):
         if any(w.has_class("tool-output") for w in contents.children):
             return
 
-        widget: Widget | None = None
+        widget = self._create_output_widget()
+        if widget is None:
+            return
+
+        try:
+            await contents.mount(widget)
+        except Exception:
+            logger.warning(
+                "Failed to mount output widget for ToolBlock: %s",
+                self._name,
+                exc_info=True,
+            )
+
+    def _create_output_widget(self) -> Widget | None:
+        """创建输出 widget：错误文本、渲染器输出或 None。"""
         if self._error_text:
-            widget = Static(
+            return Static(
                 Text(self._error_text, style=get_color("text_muted")),
                 classes="tool-output",
                 markup=False,
             )
-        elif self._output_text:
-            try:
-                widget = self._renderer.render_output(self._output_text)
-                widget.add_class("tool-output")
-            except Exception:
-                logger.warning(
-                    "Renderer failed for ToolBlock %s, showing raw output",
-                    self._name,
-                    exc_info=True,
-                )
-                widget = Static(
-                    Text(self._output_text[:2000], style=get_color("text_muted")),
-                    classes="tool-output",
-                    markup=False,
-                )
-
-        if widget is not None:
-            try:
-                await contents.mount(widget)
-            except Exception:
-                logger.warning(
-                    "Failed to mount output widget for ToolBlock: %s",
-                    self._name,
-                    exc_info=True,
-                )
+        if not self._output_text:
+            return None
+        try:
+            widget = self._renderer.render_output(self._output_text)
+            widget.add_class("tool-output")
+            return widget
+        except Exception:
+            logger.warning(
+                "Renderer failed for ToolBlock %s, showing raw output",
+                self._name,
+                exc_info=True,
+            )
+            return Static(
+                Text(self._output_text[:2000], style=get_color("text_muted")),
+                classes="tool-output",
+                markup=False,
+            )
 
     async def _destroy_output(self) -> None:
         """折叠时移除详情层 output widget（保留摘要行，不影响嵌套 ToolBlock）"""

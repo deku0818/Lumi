@@ -48,6 +48,7 @@ class TestPolicyRegistry:
         assert get_policy("audit") is custom
         # 清理
         from lumi.agents.tools.permissions.mode_policy import _POLICIES
+
         del _POLICIES["audit"]
 
 
@@ -151,9 +152,7 @@ class TestCheckPolicyReadonly:
 
     # 所有写入 → 拒绝（无 path_filter，plan 文件也不允许）
     def test_write_plan_file_blocked(self):
-        r = check_policy(
-            self.policy, "write", {"file_path": "~/.lumi/plans/x.md"}
-        )
+        r = check_policy(self.policy, "write", {"file_path": "~/.lumi/plans/x.md"})
         assert not r.allowed
 
     def test_edit_any_file_blocked(self):
@@ -235,7 +234,9 @@ class TestFilterToolsForMode:
             self.name = name
 
     def test_plan_keeps_readonly_and_interrupt(self):
-        tools = [self.FakeTool(n) for n in ["read", "glob", "ask", "write", "edit", "bash"]]
+        tools = [
+            self.FakeTool(n) for n in ["read", "glob", "ask", "write", "edit", "bash"]
+        ]
         filtered = filter_tools_for_mode(tools, PLAN_POLICY)
         names = [t.name for t in filtered]
         assert "read" in names
@@ -247,7 +248,10 @@ class TestFilterToolsForMode:
         assert "edit" in names
 
     def test_readonly_removes_write_tools(self):
-        tools = [self.FakeTool(n) for n in ["read", "glob", "ask", "write", "edit", "bash", "todos"]]
+        tools = [
+            self.FakeTool(n)
+            for n in ["read", "glob", "ask", "write", "edit", "bash", "todos"]
+        ]
         filtered = filter_tools_for_mode(tools, READONLY_POLICY)
         names = [t.name for t in filtered]
         assert "read" in names

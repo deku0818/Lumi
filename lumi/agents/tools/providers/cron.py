@@ -1,8 +1,7 @@
-"""CronTool：对话工具，管理主动行为定时任务。
+"""CronTool：管理主动行为定时任务。
 
 提供 create、list、update、delete、run、pause、runs 七种操作，
-通过模块级变量持有运行时依赖（Scheduler、JobStore、RunLog），
-在应用启动时通过 ``init_cron_tool()`` 注入。
+运行时依赖（Scheduler、JobStore、RunLog）在应用启动时通过 ``init_cron_tool()`` 注入。
 """
 
 from __future__ import annotations
@@ -28,13 +27,7 @@ _run_log: RunLog | None = None
 
 
 def init_cron_tool(scheduler: Scheduler, job_store: JobStore, run_log: RunLog) -> None:
-    """在应用启动时调用，注入运行时依赖。
-
-    Args:
-        scheduler: 调度器实例。
-        job_store: 任务持久化存储实例。
-        run_log: 执行日志实例。
-    """
+    """在应用启动时调用，注入运行时依赖。"""
     global _scheduler, _job_store, _run_log  # noqa: PLW0603
     _scheduler = scheduler
     _job_store = job_store
@@ -48,22 +41,20 @@ def _require_deps() -> tuple[Scheduler, JobStore, RunLog]:
     return _scheduler, _job_store, _run_log
 
 
+def _require_job_id(job_id: str | None, operation_name: str) -> str:
+    """校验 job_id 非空，返回有效值或用户可读的错误消息。"""
+    if not job_id:
+        raise ValueError(f"{operation_name}需要提供 job_id 参数")
+    return job_id
+
+
 # ---------------------------------------------------------------------------
 # 输入 Schema
 # ---------------------------------------------------------------------------
 
 
 class CronInput(BaseModel):
-    """cron 工具的输入参数。
-
-    Attributes:
-        operation: 操作类型。
-        name: 任务名称（create 必填）。
-        schedule: 调度规则字符串（create 必填，update 可选）。
-        prompt: 执行载荷/提示词（create 必填，update 可选）。
-        job_id: 任务 ID（除 create/list 外必填）。
-        limit: runs 操作返回的最大记录数，默认 20。
-    """
+    """cron 工具的输入参数。"""
 
     operation: Literal["create", "list", "update", "delete", "run", "pause", "runs"] = (
         Field(description="操作类型：create/list/update/delete/run/pause/runs")
@@ -98,7 +89,6 @@ async def _handle_create(name: str, schedule_raw: str, prompt: str) -> str:
     await job_store.upsert(job)
     scheduler.add_job(job)
 
-    # AT 类型显示具体执行时间，方便用户确认
     if sched.type == ScheduleType.AT:
         run_at = datetime.fromisoformat(sched.value)
         return (
@@ -185,9 +175,9 @@ async def _handle_pause(job_id: str) -> str:
     if job.enabled:
         scheduler.add_job(job)
         return f"▶️ 任务已恢复：{job.name}（ID: {job.id}）"
-    else:
-        scheduler.remove_job(job_id)
-        return f"⏸️ 任务已暂停：{job.name}（ID: {job.id}）"
+
+    scheduler.remove_job(job_id)
+    return f"⏸️ 任务已暂停：{job.name}（ID: {job.id}）"
 
 
 async def _handle_runs(job_id: str, limit: int) -> str:
@@ -198,11 +188,13 @@ async def _handle_runs(job_id: str, limit: int) -> str:
         return f"任务 {job_id} 暂无执行记录。"
     lines: list[str] = []
     for r in records:
-        lines.append(
+        line = (
             f"- [{r.status}] {r.started_at:%Y-%m-%d %H:%M:%S} | "
             f"耗时 {r.duration_ms}ms | {r.output_summary[:80]}"
-            + (f" | 错误: {r.error}" if r.error else "")
         )
+        if r.error:
+            line += f" | 错误: {r.error}"
+        lines.append(line)
     return "\n".join(lines)
 
 
@@ -252,36 +244,30 @@ async def cron(
                 return await _handle_list()
 
             case "update":
-                if not job_id:
-                    return "❌ 更新任务需要提供 job_id 参数"
-                return await _handle_update(job_id, schedule, prompt, name)
+                return await _handle_update(
+                    _require_job_id(job_id, "更新任务"), schedule, prompt, name
+                )
 
             case "delete":
-                if not job_id:
-                    return "❌ 删除任务需要提供 job_id 参数"
-                return await _handle_delete(job_id)
+                return await _handle_delete(_require_job_id(job_id, "删除任务"))
 
             case "run":
-                if not job_id:
-                    return "❌ 执行任务需要提供 job_id 参数"
-                return await _handle_run(job_id)
+                return await _handle_run(_require_job_id(job_id, "执行任务"))
 
             case "pause":
-                if not job_id:
-                    return "❌ 暂停任务需要提供 job_id 参数"
-                return await _handle_pause(job_id)
+                return await _handle_pause(_require_job_id(job_id, "暂停任务"))
 
             case "runs":
-                if not job_id:
-                    return "❌ 查看执行记录需要提供 job_id 参数"
-                return await _handle_runs(job_id, limit)
+                return await _handle_runs(
+                    _require_job_id(job_id, "查看执行记录"), limit
+                )
 
             case _:
                 return f"❌ 未知操作: {operation}"
 
-    except ValueError as e:
+    except (ValueError, KeyError) as e:
         return f"❌ {e}"
-    except (KeyError, RuntimeError) as e:
+    except RuntimeError as e:
         return f"❌ {e}"
     except Exception as e:
         logger.error("[CronTool] 操作 %s 发生意外错误", operation, exc_info=True)

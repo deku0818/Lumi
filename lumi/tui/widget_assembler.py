@@ -12,7 +12,7 @@ WidgetAssembler 与 GroupingEngine 之间的同步契约：
 from __future__ import annotations
 
 import logging
-from typing import TYPE_CHECKING, Any
+from typing import TYPE_CHECKING
 
 from lumi.tui.grouping import GroupDecision, GroupingEngine
 from lumi.tui.widgets.tool_block import ToolStatus
@@ -28,6 +28,8 @@ from lumi.tui.render_items import (
 )
 
 if TYPE_CHECKING:
+    from textual.widget import Widget
+
     from lumi.tui.widgets.agent_group import AgentGroup
     from lumi.tui.widgets.assistant_message import AssistantMessage
     from lumi.tui.widgets.chat_log import ChatLog
@@ -192,7 +194,7 @@ class WidgetAssembler:
 
     # ── 安全挂载 ──
 
-    async def _safe_mount(self, widget: Any) -> bool:
+    async def _safe_mount(self, widget: Widget) -> bool:
         """安全地将 widget 挂载到 ChatLog，失败时记录错误。
 
         Returns:
@@ -264,14 +266,7 @@ class WidgetAssembler:
                 )
 
     async def _apply_tool_end(self, item: ToolEndItem) -> None:
-        block = self._tool_blocks.pop(item.key, None)
-        if block is None:
-            # 按名称回退查找
-            result = self.find_tool_block_by_name(item.name)
-            if result is not None:
-                key, block = result
-                del self._tool_blocks[key]
-
+        block = self._resolve_tool_block(item.key, item.name)
         if block is None:
             logger.warning(
                 "ToolEndItem dropped: no matching block "
@@ -282,16 +277,31 @@ class WidgetAssembler:
             )
             return
 
-        if item.is_error:
-            block.set_error(item.output)
-        elif block._status in (ToolStatus.ERROR, ToolStatus.INTERRUPTED):
-            # 已经被标记为 ERROR/INTERRUPTED（如 ask 被 ESC 取消），不要覆盖
-            pass
-        else:
-            block.set_done(item.output)
+        self._finalize_block(block, item.output, is_error=item.is_error)
 
         if self._active_group is not None:
             self._active_group.notify_block_done(block)
+
+    def _resolve_tool_block(self, key: str, name: str) -> ToolBlock | None:
+        """按 key 查找 ToolBlock，回退到按名称查找。找到后从跟踪表中移除。"""
+        block = self._tool_blocks.pop(key, None)
+        if block is not None:
+            return block
+        result = self.find_tool_block_by_name(name)
+        if result is not None:
+            fallback_key, block = result
+            del self._tool_blocks[fallback_key]
+            return block
+        return None
+
+    @staticmethod
+    def _finalize_block(block: ToolBlock, output: str, *, is_error: bool) -> None:
+        """根据错误标记和 block 当前状态决定如何标记完成。"""
+        if is_error:
+            block.set_error(output)
+        elif block.status not in (ToolStatus.ERROR, ToolStatus.INTERRUPTED):
+            # 已经被标记为 ERROR/INTERRUPTED（如 ask 被 ESC 取消），不覆盖
+            block.set_done(output)
 
     async def _apply_agent_start(self, item: AgentStartItem) -> None:
         from lumi.tui.widgets.agent_group import AgentGroup as AgentGroupCls

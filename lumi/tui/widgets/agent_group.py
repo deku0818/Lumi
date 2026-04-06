@@ -26,6 +26,12 @@ logger = logging.getLogger(__name__)
 # 当前动作描述的最大长度
 _ACTION_MAX_LEN = 60
 
+# 定时刷新间隔（秒）
+_SPINNER_INTERVAL = 0.5
+
+# bash 命令预览截断长度
+_BASH_CMD_PREVIEW_LEN = 40
+
 
 @dataclass
 class AgentEntry:
@@ -167,7 +173,7 @@ class AgentGroup(Vertical):
 
     def on_mount(self) -> None:
         """挂载后启动 spinner。"""
-        self._spinner_timer = self.set_interval(0.5, self._tick)
+        self._spinner_timer = self.set_interval(_SPINNER_INTERVAL, self._tick)
 
     def _tick(self) -> None:
         """定时刷新：更新标题和各 agent 行。"""
@@ -339,36 +345,46 @@ class AgentGroup(Vertical):
             logger.debug("_refresh_header: header widget not ready")
             return
 
-        total = len(self._order)
+        text = (
+            self._build_finalized_header()
+            if self._finalized
+            else self._build_running_header()
+        )
+        header.update(text)
 
-        if self._finalized:
-            entries = self._unique_entries
-            total_tools = sum(e.tool_uses for e in entries)
-            total_tokens = sum(e.input_tokens + e.output_tokens for e in entries)
-            errors = sum(1 for e in entries if e.error)
-            text = Text()
-            text.append("● ", style=get_color("success"))
-            summary = f"Ran {total} agent{'s' if total != 1 else ''}"
-            if total_tools or total_tokens:
-                summary += (
-                    f" ({total_tools} tool uses"
-                    f" · {_format_tokens(total_tokens)} tokens)"
-                )
-            if errors:
-                summary += f" ({errors} failed)"
-                text.append(summary, style=get_color("error"))
-            else:
-                text.append(summary, style=get_color("text_muted"))
-            header.update(text)
-        else:
-            frame = BLINK_FRAMES[self._spinner_frame % len(BLINK_FRAMES)]
-            text = Text()
-            text.append(frame, style=get_color("accent"))
-            text.append(
-                f" Running {total} agent{'s' if total != 1 else ''}…",
-                style=get_color("text_muted"),
+    def _build_finalized_header(self) -> Text:
+        """Build the header text for finalized (all agents done) state."""
+        total = len(self._order)
+        entries = self._unique_entries
+        total_tools = sum(e.tool_uses for e in entries)
+        total_tokens = sum(e.input_tokens + e.output_tokens for e in entries)
+        errors = sum(1 for e in entries if e.error)
+
+        text = Text()
+        text.append("● ", style=get_color("success"))
+        summary = f"Ran {total} agent{'s' if total != 1 else ''}"
+        if total_tools or total_tokens:
+            summary += (
+                f" ({total_tools} tool uses · {_format_tokens(total_tokens)} tokens)"
             )
-            header.update(text)
+        if errors:
+            summary += f" ({errors} failed)"
+            text.append(summary, style=get_color("error"))
+        else:
+            text.append(summary, style=get_color("text_muted"))
+        return text
+
+    def _build_running_header(self) -> Text:
+        """Build the header text for in-progress state."""
+        total = len(self._order)
+        frame = BLINK_FRAMES[self._spinner_frame % len(BLINK_FRAMES)]
+        text = Text()
+        text.append(frame, style=get_color("accent"))
+        text.append(
+            f" Running {total} agent{'s' if total != 1 else ''}…",
+            style=get_color("text_muted"),
+        )
+        return text
 
     def _refresh_lines(self) -> None:
         """刷新所有 agent 行。"""
@@ -389,41 +405,61 @@ class AgentGroup(Vertical):
             return
 
         is_last = run_id == self._order[-1] if self._order else False
+        text = self._build_agent_line_text(entry, is_last=is_last)
+        line.update(text)
+
+    def _build_agent_line_text(self, entry: AgentEntry, *, is_last: bool) -> Text:
+        """Build the Rich Text for a single agent summary line."""
         prefix = "└─ " if is_last else "├─ "
         sub_prefix = "\n   └ " if is_last else "\n│  └ "
 
         text = Text()
         text.append(prefix, style=get_color("text_muted"))
 
-        total_tokens = entry.input_tokens + entry.output_tokens
-        stats = ""
-        if entry.tool_uses or total_tokens:
-            stats = (
-                f" · {entry.tool_uses} tool uses"
-                f" · {_format_tokens(total_tokens)} tokens"
-            )
+        stats = self._format_entry_stats(entry)
 
         if entry.done:
-            if entry.error:
-                text.append(entry.name, style=f"bold {get_color('error')}")
-                text.append(stats, style=get_color("text_muted"))
-                text.append(sub_prefix, style=get_color("text_muted"))
-                text.append("Error", style=get_color("error"))
-            else:
-                text.append(entry.name, style=get_color("text_muted"))
-                text.append(stats, style=get_color("text_muted"))
-                text.append(sub_prefix, style=get_color("text_muted"))
-                text.append("Done", style=get_color("success"))
+            self._append_done_line(text, entry, stats, sub_prefix)
         else:
-            text.append(entry.name, style="bold")
-            text.append(stats, style=get_color("text_muted"))
-            action = entry.current_action
-            if len(action) > _ACTION_MAX_LEN:
-                action = action[:_ACTION_MAX_LEN] + "…"
-            text.append(sub_prefix, style=get_color("text_muted"))
-            text.append(action, style=get_color("text_muted"))
+            self._append_running_line(text, entry, stats, sub_prefix)
+        return text
 
-        line.update(text)
+    @staticmethod
+    def _format_entry_stats(entry: AgentEntry) -> str:
+        """Format the tool-uses / token stats suffix for an agent entry."""
+        total_tokens = entry.input_tokens + entry.output_tokens
+        if not entry.tool_uses and not total_tokens:
+            return ""
+        return f" · {entry.tool_uses} tool uses · {_format_tokens(total_tokens)} tokens"
+
+    @staticmethod
+    def _append_done_line(
+        text: Text, entry: AgentEntry, stats: str, sub_prefix: str
+    ) -> None:
+        """Append name/stats/status for a completed agent."""
+        if entry.error:
+            text.append(entry.name, style=f"bold {get_color('error')}")
+            text.append(stats, style=get_color("text_muted"))
+            text.append(sub_prefix, style=get_color("text_muted"))
+            text.append("Error", style=get_color("error"))
+        else:
+            text.append(entry.name, style=get_color("text_muted"))
+            text.append(stats, style=get_color("text_muted"))
+            text.append(sub_prefix, style=get_color("text_muted"))
+            text.append("Done", style=get_color("success"))
+
+    @staticmethod
+    def _append_running_line(
+        text: Text, entry: AgentEntry, stats: str, sub_prefix: str
+    ) -> None:
+        """Append name/stats/action for a still-running agent."""
+        text.append(entry.name, style="bold")
+        text.append(stats, style=get_color("text_muted"))
+        action = entry.current_action
+        if len(action) > _ACTION_MAX_LEN:
+            action = action[:_ACTION_MAX_LEN] + "…"
+        text.append(sub_prefix, style=get_color("text_muted"))
+        text.append(action, style=get_color("text_muted"))
 
     def _check_all_done(self) -> None:
         """检查是否所有 agent 都已完成。"""
@@ -451,12 +487,11 @@ class AgentGroup(Vertical):
         detail_id = f"ag-detail-{widget_id}"
         try:
             self.query_one(f"#{detail_id}", _AgentDetail)
-            return
+            return  # already mounted
         except NoMatches:
             pass
 
         detail = _AgentDetail(id=detail_id)
-
         try:
             container = self.query_one(".agent-lines", Vertical)
             line = self.query_one(f"#ag-line-{widget_id}", _AgentLine)
@@ -468,23 +503,26 @@ class AgentGroup(Vertical):
             )
             return
 
+        await self._mount_detail_content(detail, entry)
+
+    @staticmethod
+    async def _mount_detail_content(detail: _AgentDetail, entry: AgentEntry) -> None:
+        """Mount prompt and result Static widgets inside a detail container."""
+        label_style = f"italic {get_color('text_muted')}"
+
         # Prompt
-        prompt_label = Text("Prompt: ", style=f"italic {get_color('text_muted')}")
-        prompt_text = Text.assemble(prompt_label, entry.prompt)
+        prompt_text = Text.assemble(Text("Prompt: ", style=label_style), entry.prompt)
         await detail.mount(
             Static(prompt_text, markup=False, classes="agent-detail-content")
         )
 
         # Result
-        result_label = Text("Result: ", style=f"italic {get_color('text_muted')}")
         result_content = entry.result.strip()
         if entry.error:
-            result_text = Text.assemble(
-                result_label,
-                Text(result_content, style=get_color("error")),
-            )
+            result_body = Text(result_content, style=get_color("error"))
         else:
-            result_text = Text.assemble(result_label, result_content)
+            result_body = Text(result_content)
+        result_text = Text.assemble(Text("Result: ", style=label_style), result_body)
         await detail.mount(
             Static(result_text, markup=False, classes="agent-detail-content")
         )
@@ -517,7 +555,7 @@ class AgentGroup(Vertical):
             case "bash":
                 cmd = args.get("command", "")
                 if cmd:
-                    short = cmd[:40]
+                    short = cmd[:_BASH_CMD_PREVIEW_LEN]
                     return f"Running `{short}`…"
                 return "Running command…"
             case "grep" | "search":

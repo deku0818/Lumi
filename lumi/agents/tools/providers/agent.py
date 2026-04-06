@@ -1,7 +1,8 @@
-"""Agent工具提供者 - 提供任务委托工具
+"""Agent 工具提供者 - 将复杂任务委托给子代理执行。"""
 
-将复杂任务委托给子代理执行。使用 LumiAgent 替代 OmniAgent 的 SimpleAgent。
-"""
+from __future__ import annotations
+
+from typing import Any
 
 from langchain_core.messages import HumanMessage
 from langchain_core.tools import tool
@@ -11,10 +12,7 @@ from lumi.agents.tools.loader import AgentConfig, load_agents
 from lumi.agents.tools.registry import ToolRegistry
 from lumi.utils.logger import logger
 
-
-def _build_agent_description(agents: list[AgentConfig]) -> str:
-    """根据已注册的代理列表生成工具描述文本。"""
-    _AGENT_EXAMPLES = """使用示例：
+_AGENT_EXAMPLES = """使用示例：
 <example_agent_descriptions>
 "test-runner"：在完成代码编写后，使用此代理运行测试
 "greeting-responder"：使用此代理以友好的笑话回应用户问候
@@ -45,6 +43,10 @@ function isPrime(n) {
 </commentary>
 助手："我将使用 Agent 工具启动 greeting-responder 代理"
 </example>"""
+
+
+def _build_agent_description(agents: list[AgentConfig]) -> str:
+    """根据已注册的代理列表生成工具描述文本。"""
     agent_list = "\n".join(f"- {a.name}：{a.description}" for a in agents)
     return (
         "agent 工具会启动专门的代理（子进程），这些代理可自主处理复杂任务。"
@@ -56,11 +58,11 @@ function isPrime(n) {
 
 def _create_agent_schema(
     agents: list[AgentConfig] | None = None,
-) -> tuple[str, dict]:
-    """动态创建agent工具的description和schema。"""
+) -> tuple[str, dict[str, Any]]:
+    """动态创建 agent 工具的 description 和 JSON schema。"""
     if agents is None:
         agents = load_agents()
-    schema = {
+    schema: dict[str, Any] = {
         "type": "object",
         "properties": {
             "name": {
@@ -79,76 +81,50 @@ def _create_agent_schema(
     return _build_agent_description(agents), schema
 
 
-_agent_description: str = ""
-_agent_schema: dict = {}
-
-
 def _init_schema(agents: list[AgentConfig]) -> None:
-    """由 __init__.py 调用，传入已加载的 agents 列表以避免重复加载。"""
-    global _agent_description, _agent_schema
-    _agent_description, _agent_schema = _create_agent_schema(agents)
+    """由外部调用，传入已加载的 agents 列表，更新 tool 对象的描述和 schema。"""
+    description, schema = _create_agent_schema(agents)
     # 更新已装饰的 tool 对象属性（@tool 装饰器在导入时已用空值创建）
-    agent.description = _agent_description
-    agent.args_schema = _agent_schema
+    agent.description = description
+    agent.args_schema = schema
 
 
-@tool(description=_agent_description, args_schema=_agent_schema)
+# 初始描述/schema 为空占位符，由 _init_schema() 在启动时填充
+@tool(description="", args_schema={})
 async def agent(
     name: str,
     prompt: str,
     runtime: ToolRuntime,
-):
+) -> str:
     """Agent工具 - 委托给 LumiAgent 执行"""
-    # Lazy import避免循环依赖
+    # Lazy import 避免循环依赖
     from lumi.agents.core.response import extract_ainvoke_content
     from lumi.agents.core.graph import create_agent
 
-    # 加载agent配置
-    agent_configs = load_agents(name=name)
-    if not agent_configs:
+    matched_configs = load_agents(name=name)
+    if not matched_configs:
         return f"Agent '{name}' not found"
 
-    agent_config = agent_configs[0]
+    agent_config = matched_configs[0]
 
-    # 获取工具 (排除agent工具自身避免递归)
+    # 获取工具（排除 agent 工具自身以避免递归）
     all_tools = await ToolRegistry.instance().get_tools(
-        names=agent_config.tools if agent_config.tools else None,
+        names=agent_config.tools or None,
     )
-    tools = [t for t in all_tools if t.name != "agent"]
+    available_tools = [t for t in all_tools if t.name != "agent"]
 
-    # Layer 3: 根据执行模式策略过滤工具列表
-    execution_mode = runtime.state.get("execution_mode", "normal")
-    if execution_mode != "normal":
-        from lumi.agents.tools.permissions.mode_policy import (
-            filter_tools_for_mode,
-            get_policy,
-        )
-
-        policy = get_policy(execution_mode)
-        if policy is not None:
-            tools = filter_tools_for_mode(tools, policy)
-            logger.debug(
-                "[agent tool] %s: 过滤后工具列表=%s",
-                policy.label,
-                [t.name for t in tools],
-            )
-
-    # 创建并执行agent（子agent不使用checkpointer，复用主agent权限引擎）
+    # 创建并执行 agent（子 agent 不使用 checkpointer，复用主 agent 权限引擎）
     lumi_agent, context = await create_agent(
-        tools=tools,
+        tools=available_tools,
         system_prompt=agent_config.system_prompt,
         model_name=agent_config.model or None,
         permission_engine=runtime.context.permission_engine,
     )
 
-    tool_mode = runtime.state.get("tool_mode", "auto")
-    logger.debug("[agent tool] resolved tool_mode=%s, execution_mode=%s", tool_mode, execution_mode)
-    inputs = {
-        "messages": [HumanMessage(content=prompt)],
-        "tool_mode": tool_mode,
-        "execution_mode": execution_mode,
-    }
-    result = await lumi_agent.graph.ainvoke(inputs, context=context)
+    tool_mode: str = runtime.state.get("tool_mode", "auto")
+    logger.debug("[agent tool] resolved tool_mode=%s", tool_mode)
+    inputs = {"messages": [HumanMessage(content=prompt)], "tool_mode": tool_mode}
+    invoke_result = await lumi_agent.graph.ainvoke(inputs, context=context)
 
-    content = result["messages"][-1].content if result["messages"] else ""
+    content = invoke_result["messages"][-1].content if invoke_result["messages"] else ""
     return extract_ainvoke_content(content)

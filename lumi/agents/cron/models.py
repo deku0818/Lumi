@@ -175,7 +175,7 @@ class Job:
     created_at: datetime = field(default_factory=datetime.now)
     consecutive_errors: int = 0
 
-    def to_dict(self) -> dict:
+    def to_dict(self) -> dict[str, object]:
         """将 Job 序列化为字典，用于 JSON 持久化。
 
         Returns:
@@ -195,7 +195,7 @@ class Job:
         }
 
     @staticmethod
-    def from_dict(data: dict) -> Job:
+    def from_dict(data: dict[str, object]) -> Job:
         """从字典反序列化为 Job 对象。
 
         Args:
