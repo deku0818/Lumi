@@ -170,11 +170,10 @@ class AgentBridge:
             yield event
 
     def drain_notifications(self) -> list[str]:
-        """从 BackgroundTaskManager 的 NotificationQueue 中取出所有待发送通知"""
-        sm = get_session_manager()
-        if not sm.has_bg_manager:
-            return []
-        return sm.bg_manager.notification_queue.drain_all()
+        """从 TaskRegistry 的 NotificationQueue 中取出所有待发送通知。"""
+        from lumi.agents.tools.runtime.task_registry import get_task_registry
+
+        return get_task_registry().notification_queue.drain_all()
 
     async def close(self) -> None:
         """清理资源"""

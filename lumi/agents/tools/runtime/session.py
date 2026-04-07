@@ -12,16 +12,25 @@ import sys
 import time
 import uuid
 from dataclasses import dataclass
-from enum import StrEnum
 from pathlib import Path
 from typing import IO
 
+from lumi.agents.tools.runtime.task_registry import (
+    BackgroundTaskEntry,
+    NotificationQueue,
+    TaskKind,
+    TaskStatus,
+    get_task_registry,
+)
 from lumi.utils.constants import (
     CWD_QUERY_TIMEOUT,
     DEFAULT_COMMAND_TIMEOUT,
     GRACEFUL_SHUTDOWN_TIMEOUT,
 )
 from lumi.utils.logger import logger
+
+# Re-export for backward compatibility
+__all__ = ["TaskStatus", "NotificationQueue"]
 
 # ---------------------------------------------------------------------------
 # Constants
@@ -55,90 +64,17 @@ class CommandResult:
     timed_out: bool
 
 
-class TaskStatus(StrEnum):
-    """后台任务状态枚举。"""
-
-    RUNNING = "running"
-    COMPLETED = "completed"
-    TIMED_OUT = "timed_out"
-    FAILED = "failed"
-
-
 @dataclass
-class BackgroundTask:
-    """后台任务数据模型。
+class BashProcessHandle:
+    """Bash 后台进程句柄。
 
-    记录后台任务的完整生命周期信息，包括进程句柄、状态和输出文件路径。
-    task_id 格式为 ``bg_{uuid_hex[:12]}``。
+    只持有进程管理所需字段，不持有 status/exit_code/error。
+    所有状态由 TaskRegistry 统一管理。
     """
 
     task_id: str
-    command: str
-    status: TaskStatus
-    output_file: Path
     process: asyncio.subprocess.Process
-    started_at: float
     timeout: float
-    exit_code: int | None = None
-    error: str | None = None
-
-
-# ---------------------------------------------------------------------------
-# Notification queue
-# ---------------------------------------------------------------------------
-
-
-class NotificationQueue:
-    """后台任务通知队列。
-
-    后台任务完成时将通知 XML 入队，由运行时框架在 Agent 空闲时统一取出注入。
-    """
-
-    def __init__(self) -> None:
-        self._queue: asyncio.Queue[str] = asyncio.Queue()
-
-    def enqueue(self, notification_xml: str) -> None:
-        """将通知 XML 放入队列（非阻塞）。"""
-        self._queue.put_nowait(notification_xml)
-
-    def drain_all(self) -> list[str]:
-        """取出队列中所有待发送通知并清空队列。"""
-        items: list[str] = []
-        while not self._queue.empty():
-            try:
-                items.append(self._queue.get_nowait())
-            except asyncio.QueueEmpty:
-                break
-        return items
-
-    def is_empty(self) -> bool:
-        """队列是否为空。"""
-        return self._queue.empty()
-
-
-# ---------------------------------------------------------------------------
-# Notification formatting
-# ---------------------------------------------------------------------------
-
-
-def format_task_notification(task: BackgroundTask) -> str:
-    """将后台任务状态格式化为 task-notification XML 字符串。"""
-    match task.status:
-        case TaskStatus.COMPLETED:
-            summary = f'命令 "{task.command}" 已完成，退出码 {task.exit_code}'
-        case TaskStatus.TIMED_OUT:
-            summary = f'命令 "{task.command}" 超时'
-        case _:
-            summary = f'命令 "{task.command}" 失败，退出码 {task.exit_code}'
-
-    return (
-        "<task-notification>\n"
-        f"  <task-id>{task.task_id}</task-id>\n"
-        f"  <status>{task.status}</status>\n"
-        f"  <output-file>{task.output_file.resolve()}</output-file>\n"
-        f"  <summary>{summary}</summary>\n"
-        "</task-notification>"
-    )
 
 
 # ---------------------------------------------------------------------------
@@ -181,29 +117,29 @@ async def _close_process_transport(proc: asyncio.subprocess.Process) -> None:
 
 
 class BackgroundTaskManager:
-    """后台任务管理器。
+    """后台 Bash 任务管理器。
 
-    管理后台任务的生命周期：启动、监控、超时、清理。
-    通过独立子进程执行后台命令，避免与前台 shell 会话的锁竞争。
+    管理 Bash 后台任务的进程生命周期：启动、监控、超时、清理。
+    所有状态由 TaskRegistry 统一管理，本类只持有进程句柄。
     """
 
     def __init__(self) -> None:
-        self._tasks: dict[str, BackgroundTask] = {}
+        self._handles: dict[str, BashProcessHandle] = {}
         self._monitors: dict[str, asyncio.Task[None]] = {}
-        self._notification_queue = NotificationQueue()
+        self._registry = get_task_registry()
 
     @property
     def notification_queue(self) -> NotificationQueue:
-        """获取通知队列。"""
-        return self._notification_queue
+        """获取通知队列（委托给 TaskRegistry）。"""
+        return self._registry.notification_queue
 
     async def start_task(
         self, command: str, timeout: float, working_dir: str
-    ) -> BackgroundTask:
-        """启动后台任务。
+    ) -> BackgroundTaskEntry:
+        """启动后台 Bash 任务。
 
-        通过 ``asyncio.create_subprocess_shell()`` 启动独立子进程，
-        输出重定向到 ``.lumi/bg_tasks/{task_id}.txt``。
+        Returns:
+            注册到 TaskRegistry 的 BackgroundTaskEntry。
 
         Raises:
             OSError: 进程启动失败。
@@ -226,57 +162,59 @@ class BackgroundTaskManager:
             output_fd.close()
             raise
 
-        task = BackgroundTask(
+        handle = BashProcessHandle(
             task_id=task_id,
-            command=command,
-            status=TaskStatus.RUNNING,
-            output_file=output_file,
             process=process,
-            started_at=time.time(),
             timeout=timeout,
         )
-
-        self._tasks[task_id] = task
+        self._handles[task_id] = handle
         self._monitors[task_id] = asyncio.create_task(
-            self._monitor_task(task, output_fd)
+            self._monitor_task(handle, output_fd)
         )
 
-        logger.info(f"[BackgroundTask] 已启动后台任务 {task_id}: {command}")
-        return task
+        entry = BackgroundTaskEntry(
+            task_id=task_id,
+            kind=TaskKind.BASH,
+            status=TaskStatus.RUNNING,
+            label=command,
+            started_at=time.time(),
+            output_file=output_file,
+        )
+        self._registry.register(entry)
 
-    def get_task(self, task_id: str) -> BackgroundTask | None:
-        """查询任务状态。"""
-        return self._tasks.get(task_id)
+        logger.info("[BackgroundTask] 已启动后台任务 %s: %s", task_id, command)
+        return entry
 
     async def cancel_task(self, task_id: str) -> None:
-        """取消指定任务。
+        """取消指定 Bash 任务。
 
-        先取消监控协程并等待其 finally 完成（关闭 fd），
-        再 terminate 进程，最后设置状态。
+        先更新 registry 状态（避免 monitor finally 发错误通知），
+        再取消 monitor 协程，最后 terminate 进程。
         """
-        task = self._tasks.get(task_id)
-        if task is None or task.status != TaskStatus.RUNNING:
+        handle = self._handles.get(task_id)
+        if handle is None:
             return
 
-        await self._cancel_monitor(task_id)
-        await _terminate_process(task.process)
-        task.status = TaskStatus.FAILED
-        task.error = "任务被取消"
+        entry = self._registry.get(task_id)
+        if entry is None or entry.status != TaskStatus.RUNNING:
+            return
 
-        logger.info(f"[BackgroundTask] 已取消任务 {task_id}")
+        # 先更新状态，再取消 monitor — 确保 monitor finally 发的通知状态正确
+        self._registry.update_status(task_id, TaskStatus.FAILED, error="任务被取消")
+        await self._cancel_monitor(task_id)
+        await _terminate_process(handle.process)
+        self._registry.enqueue_notification(task_id)
+
+        logger.info("[BackgroundTask] 已取消任务 %s", task_id)
 
     async def cleanup_all(self) -> None:
-        """终止所有运行中的任务，清理输出文件和进程资源。"""
+        """终止所有运行中的任务并清理进程资源。"""
         await self._cancel_all_monitors()
 
-        for task in self._tasks.values():
-            if task.status == TaskStatus.RUNNING:
-                await _terminate_process(task.process)
-                task.status = TaskStatus.FAILED
-                task.error = "清理时终止"
-            self._cleanup_output_file(task)
+        for handle in self._handles.values():
+            await _terminate_process(handle.process)
 
-        self._tasks.clear()
+        self._handles.clear()
         self._monitors.clear()
         logger.info("[BackgroundTask] 已清理所有后台任务")
 
@@ -304,23 +242,44 @@ class BackgroundTaskManager:
         if monitors_to_await:
             await asyncio.gather(*monitors_to_await, return_exceptions=True)
 
-    async def _monitor_task(self, task: BackgroundTask, output_fd: IO[str]) -> None:
-        """监控后台任务，等待完成或超时。
+    async def _monitor_task(
+        self, handle: BashProcessHandle, output_fd: IO[str]
+    ) -> None:
+        """监控后台 Bash 任务，等待完成或超时。
 
-        任务完成后生成通知 XML 入队到 NotificationQueue。
+        谁完成谁负责：update_status + enqueue_notification。
+        CancelledError 场景由 cancel_task 在调用前已更新状态。
         """
         try:
-            await self._wait_for_completion(task)
+            await asyncio.wait_for(handle.process.wait(), timeout=handle.timeout)
+            exit_code = handle.process.returncode
+            if exit_code == 0:
+                self._registry.update_status(
+                    handle.task_id, TaskStatus.COMPLETED, exit_code=exit_code
+                )
+            else:
+                self._registry.update_status(
+                    handle.task_id,
+                    TaskStatus.FAILED,
+                    exit_code=exit_code,
+                    error=f"进程退出码: {exit_code}",
+                )
         except asyncio.TimeoutError:
-            task.status = TaskStatus.TIMED_OUT
-            await _terminate_process(task.process)
+            await _terminate_process(handle.process)
+            self._registry.update_status(
+                handle.task_id, TaskStatus.TIMED_OUT, error="超时"
+            )
         except asyncio.CancelledError:
+            # cancel_task 已在调用前更新了 registry 状态，这里只需关闭 fd
             raise
         except Exception as e:
-            task.status = TaskStatus.FAILED
-            task.error = str(e)
+            self._registry.update_status(
+                handle.task_id, TaskStatus.FAILED, error=str(e)
+            )
             logger.error(
-                f"[BackgroundTask] 监控任务 {task.task_id} 异常: {e}",
+                "[BackgroundTask] 监控任务 %s 异常: %s",
+                handle.task_id,
+                e,
                 exc_info=True,
             )
         finally:
@@ -328,38 +287,15 @@ class BackgroundTaskManager:
                 output_fd.close()
             except OSError as e:
                 logger.warning(
-                    f"[BackgroundTask] 关闭输出文件句柄失败 {task.task_id}: {e}"
+                    "[BackgroundTask] 关闭输出文件句柄失败 %s: %s",
+                    handle.task_id,
+                    e,
                 )
-            self._enqueue_notification(task)
-
-    @staticmethod
-    async def _wait_for_completion(task: BackgroundTask) -> None:
-        """等待任务进程完成并更新状态。"""
-        await asyncio.wait_for(task.process.wait(), timeout=task.timeout)
-        exit_code = task.process.returncode
-        task.exit_code = exit_code
-        if exit_code == 0:
-            task.status = TaskStatus.COMPLETED
-        else:
-            task.status = TaskStatus.FAILED
-            task.error = f"进程退出码: {exit_code}"
-
-    def _enqueue_notification(self, task: BackgroundTask) -> None:
-        """生成通知 XML 并入队。"""
-        try:
-            xml = format_task_notification(task)
-            self._notification_queue.enqueue(xml)
-        except Exception as e:
-            logger.error(f"[BackgroundTask] 通知入队失败: {e}")
-
-    @staticmethod
-    def _cleanup_output_file(task: BackgroundTask) -> None:
-        """删除任务输出文件。"""
-        try:
-            if task.output_file.exists():
-                task.output_file.unlink()
-        except OSError as e:
-            logger.warning(f"[BackgroundTask] 删除输出文件失败 {task.output_file}: {e}")
+            # 终态保护：如果已在终态（如 cancel_task 已设置），enqueue_notification 正常工作
+            # 如果被 CancelledError 且 cancel_task 未提前设置状态，此处不发通知
+            entry = self._registry.get(handle.task_id)
+            if entry and entry.status != TaskStatus.RUNNING:
+                self._registry.enqueue_notification(handle.task_id)
 
 
 # ---------------------------------------------------------------------------
@@ -638,6 +574,7 @@ class SessionManager:
         """关闭所有会话并清理后台任务。"""
         if self._bg_manager is not None:
             await self._bg_manager.cleanup_all()
+        get_task_registry().cleanup()
         for session in self._sessions.values():
             await session.close()
         self._sessions.clear()

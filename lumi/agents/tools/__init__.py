@@ -7,7 +7,17 @@ from langchain_core.tools.structured import StructuredTool
 from lumi.utils.logger import logger
 
 from .loader import AgentConfig, SkillConfig, load_agents, load_skills
-from .providers import ask, bash, cron, filesystem, mcp, plan, skill, todo
+from .providers import (
+    ask,
+    background_task,
+    bash,
+    cron,
+    filesystem,
+    mcp,
+    plan,
+    skill,
+    todo,
+)
 from .registry import ToolRegistry
 
 # ------------------------------------------------------------------
@@ -22,6 +32,7 @@ ToolRegistry.register("ask", ask)
 ToolRegistry.register("cron", cron)
 ToolRegistry.register("skill", skill)
 ToolRegistry.register("plan", plan)
+ToolRegistry.register("background_task", background_task)
 
 # 条件注册: 仅在有 agent 配置时才启用
 try:

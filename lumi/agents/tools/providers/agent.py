@@ -2,6 +2,10 @@
 
 from __future__ import annotations
 
+import asyncio
+import time
+import uuid
+from pathlib import Path
 from typing import Any
 
 from langchain_core.messages import HumanMessage
@@ -10,7 +14,16 @@ from langgraph.prebuilt.tool_node import ToolRuntime
 
 from lumi.agents.tools.loader import AgentConfig, load_agents
 from lumi.agents.tools.registry import ToolRegistry
+from lumi.agents.tools.runtime.task_registry import (
+    BackgroundTaskEntry,
+    TaskKind,
+    TaskStatus,
+    get_task_registry,
+)
 from lumi.utils.logger import logger
+
+_BG_TASKS_DIR = ".lumi/bg_tasks"
+_TASK_ID_HEX_LENGTH = 12
 
 _AGENT_EXAMPLES = """使用示例：
 <example_agent_descriptions>
@@ -75,6 +88,11 @@ def _create_agent_schema(
                 "description": "交给agent执行的任务的描述",
                 "default": "",
             },
+            "run_in_background": {
+                "type": "boolean",
+                "description": "设为 true 可在后台运行，完成后会收到通知",
+                "default": False,
+            },
         },
         "required": ["name", "prompt"],
     }
@@ -95,6 +113,7 @@ async def agent(
     name: str,
     prompt: str,
     runtime: ToolRuntime,
+    run_in_background: bool = False,
 ) -> str:
     """Agent工具 - 委托给 LumiAgent 执行"""
     # Lazy import 避免循环依赖
@@ -121,6 +140,10 @@ async def agent(
         permission_engine=runtime.context.permission_engine,
     )
 
+    if run_in_background:
+        return _start_background_agent(name, prompt, lumi_agent, context)
+
+    # 前台同步执行路径（不变）
     tool_mode: str = runtime.state.get("tool_mode", "auto")
     logger.debug("[agent tool] resolved tool_mode=%s", tool_mode)
     inputs = {"messages": [HumanMessage(content=prompt)], "tool_mode": tool_mode}
@@ -128,3 +151,105 @@ async def agent(
 
     content = invoke_result["messages"][-1].content if invoke_result["messages"] else ""
     return extract_ainvoke_content(content)
+
+
+# ---------------------------------------------------------------------------
+# Background agent helpers
+# ---------------------------------------------------------------------------
+
+
+def _start_background_agent(
+    name: str,
+    prompt: str,
+    lumi_agent,
+    context,
+) -> str:
+    """注册后台 Agent 任务并 fire-and-forget 启动。"""
+    task_id = f"bg_{uuid.uuid4().hex[:_TASK_ID_HEX_LENGTH]}"
+
+    from lumi.agents.tools.permissions.workspace import get_authorized_directory
+
+    output_dir = Path(str(get_authorized_directory())) / _BG_TASKS_DIR
+    output_dir.mkdir(parents=True, exist_ok=True)
+    output_file = output_dir / f"{task_id}.txt"
+
+    entry = BackgroundTaskEntry(
+        task_id=task_id,
+        kind=TaskKind.AGENT,
+        status=TaskStatus.RUNNING,
+        label=f"agent:{name}",
+        started_at=time.time(),
+        output_file=output_file,
+        agent_name=name,
+    )
+
+    registry = get_task_registry()
+    registry.register(entry)
+
+    inputs = {"messages": [HumanMessage(content=prompt)], "tool_mode": "privileged"}
+    async_task = asyncio.create_task(
+        _run_agent_background(task_id, lumi_agent, context, inputs, output_file)
+    )
+    entry.async_task = async_task
+
+    def _on_task_done(t: asyncio.Task) -> None:
+        if t.cancelled():
+            return
+        exc = t.exception()
+        if exc is not None:
+            logger.error(
+                "[agent bg] 未处理的异常 task %s: %s", task_id, exc, exc_info=exc
+            )
+
+    async_task.add_done_callback(_on_task_done)
+
+    return (
+        f"后台代理任务已启动\n"
+        f"Task ID: {task_id}\n"
+        f"Agent: {name}\n"
+        f"Output File: {output_file.resolve()}\n"
+    )
+
+
+def _safe_write(output_file: Path, content: str, task_id: str) -> None:
+    """安全写入输出文件，失败时只记录日志不抛异常。"""
+    try:
+        output_file.write_text(content, encoding="utf-8")
+    except OSError as e:
+        logger.warning("[agent bg] 写入输出文件失败 %s: %s", task_id, e)
+
+
+async def _run_agent_background(
+    task_id: str,
+    lumi_agent,
+    context,
+    inputs: dict,
+    output_file: Path,
+) -> None:
+    """后台执行 Agent 并在完成后更新 TaskRegistry。
+
+    谁完成谁负责：update_status + enqueue_notification。
+    """
+    from lumi.agents.core.response import extract_ainvoke_content
+
+    registry = get_task_registry()
+    try:
+        invoke_result = await lumi_agent.graph.ainvoke(inputs, context=context)
+        content = (
+            invoke_result["messages"][-1].content if invoke_result["messages"] else ""
+        )
+        result_text = extract_ainvoke_content(content)
+        _safe_write(output_file, result_text, task_id)
+        registry.update_status(task_id, TaskStatus.COMPLETED)
+    except asyncio.CancelledError:
+        _safe_write(output_file, "任务被取消", task_id)
+        registry.update_status(task_id, TaskStatus.FAILED, error="任务被取消")
+        logger.info("[agent bg] task %s cancelled", task_id)
+        raise
+    except Exception as e:
+        error_msg = str(e)
+        _safe_write(output_file, f"Error: {error_msg}", task_id)
+        registry.update_status(task_id, TaskStatus.FAILED, error=error_msg)
+        logger.error("[agent bg] task %s failed: %s", task_id, e, exc_info=True)
+    finally:
+        registry.enqueue_notification(task_id)

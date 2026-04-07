@@ -4,6 +4,7 @@ import pytest
 
 import lumi.agents.tools.permissions.workspace as workspace
 import lumi.agents.tools.runtime.session as session
+import lumi.agents.tools.runtime.task_registry as task_registry
 from lumi.agents.tools.providers import filesystem
 from lumi.agents.tools.registry import ToolRegistry
 
@@ -40,3 +41,11 @@ def reset_registry():
     ToolRegistry._instance = None
     yield
     ToolRegistry._instance = old_instance
+
+
+@pytest.fixture(autouse=True)
+def reset_task_registry():
+    """每次测试重置 TaskRegistry 单例"""
+    task_registry._registry = None
+    yield
+    task_registry._registry = None
