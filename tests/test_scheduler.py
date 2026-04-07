@@ -13,7 +13,8 @@ from lumi.agents.cron.delivery import DeliveryManager, ResultDelivery
 from lumi.agents.cron.job_store import JobStore
 from lumi.agents.cron.models import Job, Schedule, ScheduleType
 from lumi.agents.cron.run_log import RunLog
-from lumi.agents.cron.scheduler import MAX_RETRIES, Scheduler, _is_transient_error
+from lumi.agents.cron.scheduler import Scheduler, _is_transient_error
+from lumi.utils.constants import MAX_CRON_RETRIES
 
 
 @pytest.fixture
@@ -530,7 +531,7 @@ async def test_retry_exhausted_no_more_retries(
 ) -> None:
     """重试次数耗尽后不再安排重试。"""
     job = _make_interval_job("exhausted-test")
-    job.consecutive_errors = MAX_RETRIES  # 已达上限
+    job.consecutive_errors = MAX_CRON_RETRIES  # 已达上限
     await job_store.upsert(job)
 
     await scheduler.start()
@@ -545,10 +546,10 @@ async def test_retry_exhausted_no_more_retries(
 
         assert record.status == "failed"
         # consecutive_errors 不应再递增（已达上限，不重试）
-        assert job.consecutive_errors == MAX_RETRIES
+        assert job.consecutive_errors == MAX_CRON_RETRIES
 
         # 不应有新的重试任务
-        retry_id = f"{job.id}-retry-{MAX_RETRIES + 1}"
+        retry_id = f"{job.id}-retry-{MAX_CRON_RETRIES + 1}"
         assert scheduler._aps.get_job(retry_id) is None
     finally:
         await scheduler.stop()

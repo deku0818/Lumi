@@ -23,12 +23,9 @@ from lumi.agents.cron.delivery import DeliveryManager
 from lumi.agents.cron.job_store import JobStore
 from lumi.agents.cron.models import Job, ScheduleType
 from lumi.agents.cron.run_log import RunLog, RunRecord
+from lumi.utils.constants import CRON_BACKOFF_INTERVALS, MAX_CRON_RETRIES
 from lumi.utils.logger import logger
 from lumi.utils.read_config import get_config
-
-# 退避重试间隔（秒）：第 1、2、3 次重试
-BACKOFF_INTERVALS: tuple[int, ...] = (30, 60, 300)
-MAX_RETRIES: int = 3
 
 
 def _is_transient_error(exc: BaseException) -> bool:
@@ -404,7 +401,7 @@ class Scheduler:
     async def _handle_retry(self, job: Job, caught_exc: Exception | None) -> None:
         """根据执行结果决定是否安排退避重试或重置错误计数。"""
         if caught_exc is not None and _is_transient_error(caught_exc):
-            if job.consecutive_errors < MAX_RETRIES:
+            if job.consecutive_errors < MAX_CRON_RETRIES:
                 job.consecutive_errors += 1
                 await self._persist_consecutive_errors(job)
                 self._schedule_retry(job)
@@ -412,7 +409,7 @@ class Scheduler:
                 logger.error(
                     "任务重试次数耗尽（%d/%d），记录最终失败: %s [%s]",
                     job.consecutive_errors,
-                    MAX_RETRIES,
+                    MAX_CRON_RETRIES,
                     job.name,
                     job.id,
                 )
@@ -471,8 +468,8 @@ class Scheduler:
 
     def _schedule_retry(self, job: Job) -> None:
         """通过 APScheduler DateTrigger 安排退避重试。"""
-        idx = min(job.consecutive_errors - 1, len(BACKOFF_INTERVALS) - 1)
-        delay = BACKOFF_INTERVALS[idx]
+        idx = min(job.consecutive_errors - 1, len(CRON_BACKOFF_INTERVALS) - 1)
+        delay = CRON_BACKOFF_INTERVALS[idx]
         run_at = datetime.now() + timedelta(seconds=delay)
         retry_id = f"{job.id}-retry-{job.consecutive_errors}"
 
@@ -486,7 +483,7 @@ class Scheduler:
         logger.info(
             "已安排重试 %d/%d，%d 秒后执行: %s [%s]",
             job.consecutive_errors,
-            MAX_RETRIES,
+            MAX_CRON_RETRIES,
             delay,
             job.name,
             job.id,

@@ -254,10 +254,10 @@ async def finish_mount(app: LumiApp) -> None:
     app._scheduler, app._delivery = await init_cron_subsystem(app)
 
     # Start notification polling
-    from lumi.tui.app import _NOTIFICATION_POLL_INTERVAL
+    from lumi.utils.constants import NOTIFICATION_POLL_INTERVAL
 
     app._notification_poll_timer = app.set_interval(
-        _NOTIFICATION_POLL_INTERVAL, app._poll_notifications
+        NOTIFICATION_POLL_INTERVAL, app._poll_notifications
     )
 
     # Custom keybindings

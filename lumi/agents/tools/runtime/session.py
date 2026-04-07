@@ -16,6 +16,11 @@ from enum import StrEnum
 from pathlib import Path
 from typing import IO
 
+from lumi.utils.constants import (
+    CWD_QUERY_TIMEOUT,
+    DEFAULT_COMMAND_TIMEOUT,
+    GRACEFUL_SHUTDOWN_TIMEOUT,
+)
 from lumi.utils.logger import logger
 
 # ---------------------------------------------------------------------------
@@ -27,15 +32,6 @@ _SENTINEL_PREFIX = "__LUMI_SENTINEL_"
 
 _SENTINEL_SUFFIX = "__"
 """命令输出边界标记后缀。"""
-
-_DEFAULT_COMMAND_TIMEOUT: float = 120.0
-"""execute() 默认超时秒数。"""
-
-_CWD_QUERY_TIMEOUT: float = 5.0
-"""get_cwd() 查询超时秒数。"""
-
-_GRACEFUL_SHUTDOWN_TIMEOUT: float = 5.0
-"""进程优雅关闭等待秒数（terminate 后等待退出的时长）。"""
 
 _BG_TASKS_DIR = ".lumi/bg_tasks"
 """后台任务输出文件相对目录。"""
@@ -156,7 +152,7 @@ async def _terminate_process(process: asyncio.subprocess.Process) -> None:
         return
     try:
         process.terminate()
-        await asyncio.wait_for(process.wait(), timeout=_GRACEFUL_SHUTDOWN_TIMEOUT)
+        await asyncio.wait_for(process.wait(), timeout=GRACEFUL_SHUTDOWN_TIMEOUT)
     except asyncio.TimeoutError:
         try:
             process.kill()
@@ -430,7 +426,7 @@ class LocalShellSession:
         通过在 shell 中执行 pwd 命令获取，反映 cd 命令后的真实路径。
         如果查询失败，回退到初始工作目录。
         """
-        result = await self.execute("pwd", timeout=_CWD_QUERY_TIMEOUT)
+        result = await self.execute("pwd", timeout=CWD_QUERY_TIMEOUT)
         if result.success and result.stdout.strip():
             return result.stdout.strip()
         logger.warning(
@@ -440,7 +436,7 @@ class LocalShellSession:
         return self._working_dir
 
     async def execute(
-        self, command: str, timeout: float = _DEFAULT_COMMAND_TIMEOUT
+        self, command: str, timeout: float = DEFAULT_COMMAND_TIMEOUT
     ) -> CommandResult:
         """执行命令并返回结果。
 
@@ -581,7 +577,7 @@ class LocalShellSession:
             assert proc.stdin is not None
             proc.stdin.write(b"exit\n")
             await proc.stdin.drain()
-            await asyncio.wait_for(proc.wait(), timeout=_GRACEFUL_SHUTDOWN_TIMEOUT)
+            await asyncio.wait_for(proc.wait(), timeout=GRACEFUL_SHUTDOWN_TIMEOUT)
         except asyncio.TimeoutError:
             proc.kill()
             await proc.wait()

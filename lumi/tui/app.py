@@ -54,11 +54,7 @@ from lumi.tui.slash_commands.models import CommandType, SlashCommand
 from lumi.tui.slash_commands.parser import parse_command_input
 from lumi.tui.slash_commands.handlers import make_skill_handler
 from lumi.agents.core.preprocessing.skill_detector import SkillChangeDetector
-
-from typing import Final
-
-# 后台任务通知轮询间隔（秒）
-_NOTIFICATION_POLL_INTERVAL: Final = 2.0
+from lumi.utils.constants import NOTIFICATION_POLL_INTERVAL
 
 
 class LumiApp(App):
@@ -248,6 +244,9 @@ class LumiApp(App):
         # 初始化文件级 Checkpoint
         self._bridge.init_checkpoint(Path.cwd())
 
+        # 后台清理过期 checkpoint thread 目录
+        asyncio.create_task(self._cleanup_stale_checkpoints())
+
         # 配置 StatusLine（尝试从 OpenRouter 获取 context_length）
         from lumi.utils.model_info import fetch_model_info
         from lumi.utils.read_config import get_config as get_yaml_config
@@ -322,7 +321,7 @@ class LumiApp(App):
 
         # 启动后台任务通知轮询
         self._notification_poll_timer = self.set_interval(
-            _NOTIFICATION_POLL_INTERVAL, self._poll_notifications
+            NOTIFICATION_POLL_INTERVAL, self._poll_notifications
         )
 
         # 绑定用户自定义快捷键
@@ -342,6 +341,19 @@ class LumiApp(App):
                 f"[LumiApp] 绑定快捷键失败: copy_selection={kb.copy_selection}",
                 exc_info=True,
             )
+
+    async def _cleanup_stale_checkpoints(self) -> None:
+        """后台清理过期的 checkpoint thread 目录。"""
+        try:
+            from lumi.agents.tools.runtime.checkpoint import cleanup_stale_threads
+
+            removed = await asyncio.to_thread(cleanup_stale_threads)
+            if removed:
+                logger.info(
+                    "[LumiApp] Cleaned up %d stale checkpoint thread(s)", removed
+                )
+        except Exception:
+            logger.warning("[LumiApp] Stale checkpoint cleanup failed", exc_info=True)
 
     def _get_last_assistant_raw(self) -> str | None:
         """获取最近一条 AssistantMessage 的原始文本。"""

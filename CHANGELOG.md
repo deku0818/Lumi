@@ -1,5 +1,15 @@
 # Changelog
 
+## [0.1.0a4] - 2026-04-07
+
+### Changed
+- `FileCheckpointManager` 和 `cleanup_stale_threads` 直接读取 `GlobalConfig`，移除冗余的 `max_checkpoints`/`base_dir`/`stale_days` 参数传递链
+- 新建 `lumi/utils/constants.py`，集中管理 16 个行为性内部常量（超时、限制、间隔、重试），消除跨模块散落的魔法数字
+- `cleanup_stale_checkpoints` 错误日志级别从 `debug` 提升为 `warning`，避免后台清理失败被静默吞没
+
+### Fixed
+- `switch_thread()` 创建新 `FileCheckpointManager` 时未传递用户配置的 `max_checkpoints`，静默回退到硬编码默认值 20
+
 ## [0.1.0a3] - 2026-04-06
 
 ### Changed

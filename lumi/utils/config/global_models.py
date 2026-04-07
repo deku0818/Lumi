@@ -44,6 +44,14 @@ class GlobalConfig(BaseModel):
         default="",
         description="检查点存储目录，为空时使用默认路径 ~/.lumi/checkpoints/",
     )
+    max_checkpoints: int = Field(
+        default=20,
+        description="单个 thread 最多保留的 checkpoint 数量",
+    )
+    stale_thread_days: int = Field(
+        default=30,
+        description="自动清理超过指定天数未更新的 checkpoint thread 目录，0 表示不清理",
+    )
     keybindings: KeyBindings = Field(
         default_factory=KeyBindings,
         description="TUI 快捷键配置",

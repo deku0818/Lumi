@@ -16,10 +16,9 @@ from datetime import datetime
 from pathlib import Path
 from typing import Literal
 
-logger = logging.getLogger("Lumi")
+from lumi.utils.constants import MAX_RUN_LOG_FILE_SIZE
 
-# 单个 JSONL 文件的最大大小（字节）
-_MAX_FILE_SIZE = 2 * 1024 * 1024  # 2MB
+logger = logging.getLogger("Lumi")
 
 
 @dataclass(frozen=True)
@@ -101,7 +100,7 @@ def _trim_file_sync(path: Path) -> None:
     if not path.exists():
         return
     size = path.stat().st_size
-    if size <= _MAX_FILE_SIZE:
+    if size <= MAX_RUN_LOG_FILE_SIZE:
         return
 
     with open(path, encoding="utf-8") as f:

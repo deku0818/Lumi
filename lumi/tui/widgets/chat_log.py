@@ -14,13 +14,8 @@ from textual.timer import Timer
 from textual.widgets import Static
 
 from lumi.tui.theme import get_color
+from lumi.utils.constants import KEEP_WIDGETS, MAX_LIVE_WIDGETS
 from lumi.utils.logger import logger
-
-# 保留在 DOM 中的最大 widget 数量（超出后压缩旧消息）
-_MAX_LIVE_WIDGETS: Final[int] = 80
-
-# 压缩后保留的 widget 数量（留出余量避免频繁触发）
-_KEEP_WIDGETS: Final[int] = 50
 
 # 压缩占位符的 CSS class
 _COMPACTED_CLASS: Final[str] = "compacted-placeholder"
@@ -29,7 +24,7 @@ _COMPACTED_CLASS: Final[str] = "compacted-placeholder"
 class ChatLog(VerticalScroll):
     """可滚动的对话日志区域
 
-    当子节点数超过 _MAX_LIVE_WIDGETS 时，自动将最早的消息替换为
+    当子节点数超过 MAX_LIVE_WIDGETS 时，自动将最早的消息替换为
     轻量 Static 占位符，控制 DOM 规模以保持滚动流畅。
     """
 
@@ -113,16 +108,16 @@ class ChatLog(VerticalScroll):
     def _do_compact(self) -> None:
         """将超出阈值的旧消息替换为轻量占位符。
 
-        保留最后 _KEEP_WIDGETS 个 widget，前面的全部移除，
+        保留最后 KEEP_WIDGETS 个 widget，前面的全部移除，
         插入一个 Static 占位符显示被隐藏的消息数。
         已有的占位符会被合并计数。
         """
         self._compact_scheduled = False
         children = list(self.children)
-        if len(children) <= _MAX_LIVE_WIDGETS:
+        if len(children) <= MAX_LIVE_WIDGETS:
             return
 
-        to_remove = children[: len(children) - _KEEP_WIDGETS]
+        to_remove = children[: len(children) - KEEP_WIDGETS]
         if not to_remove:
             return
 

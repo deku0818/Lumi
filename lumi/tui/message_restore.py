@@ -6,7 +6,7 @@
 
 from __future__ import annotations
 
-from typing import TYPE_CHECKING, Final
+from typing import TYPE_CHECKING
 
 from lumi.tui.render_items import (
     AgentEndItem,
@@ -29,8 +29,7 @@ if TYPE_CHECKING:
 
 # ── 常量 ──
 
-# 恢复历史消息的最大数量（限制 DOM 节点数）
-_MAX_RESTORE_MESSAGES: Final[int] = 60
+from lumi.utils.constants import MAX_RESTORE_MESSAGES
 
 # 工具被拒绝/中断时的输出关键词
 _TOOL_REJECT_KEYWORDS: frozenset[str] = frozenset(
@@ -84,9 +83,9 @@ async def restore_messages(
 
         # 限制恢复数量，只保留最近的消息
         total_count = len(messages)
-        truncated = total_count > _MAX_RESTORE_MESSAGES
+        truncated = total_count > MAX_RESTORE_MESSAGES
         if truncated:
-            messages = messages[-_MAX_RESTORE_MESSAGES:]
+            messages = messages[-MAX_RESTORE_MESSAGES:]
 
         # 预先收集所有 tool 消息的输出，key 为 tool_call_id
         tool_outputs: dict[str, str] = {}
@@ -101,7 +100,7 @@ async def restore_messages(
         if truncated:
             await chat_log.append_hint(
                 "● ",
-                f"仅显示最近 {_MAX_RESTORE_MESSAGES} 条消息（共 {total_count} 条）",
+                f"仅显示最近 {MAX_RESTORE_MESSAGES} 条消息（共 {total_count} 条）",
             )
 
         # 转换为 RenderItem 列表，交由 WidgetAssembler 统一组装

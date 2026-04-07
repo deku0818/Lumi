@@ -10,6 +10,7 @@ from urllib.parse import urlparse
 
 import httpx
 
+from lumi.utils.constants import IMAGE_FETCH_TIMEOUT, MAX_IMAGE_SIZE
 from lumi.utils.logger import logger
 
 # 支持的图片 MIME 类型
@@ -30,9 +31,6 @@ _EXT_TO_MEDIA_TYPE: dict[str, str] = {
     ".gif": "image/gif",
     ".webp": "image/webp",
 }
-
-MAX_IMAGE_SIZE = 20 * 1024 * 1024  # 20MB
-DEFAULT_TIMEOUT = 30.0  # 秒
 
 
 @dataclass(frozen=True)
@@ -69,7 +67,7 @@ def _detect_media_type(url: str, content_type: str | None) -> str:
 
 
 async def download_image_as_base64(
-    url: str, timeout: float = DEFAULT_TIMEOUT
+    url: str, timeout: float = IMAGE_FETCH_TIMEOUT
 ) -> ImageData:
     """异步下载图片并返回 base64 编码数据
 

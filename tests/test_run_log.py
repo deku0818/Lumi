@@ -4,7 +4,8 @@ import json
 from datetime import datetime
 from pathlib import Path
 
-from lumi.agents.cron.run_log import RunLog, RunRecord, _MAX_FILE_SIZE
+from lumi.agents.cron.run_log import RunLog, RunRecord
+from lumi.utils.constants import MAX_RUN_LOG_FILE_SIZE
 
 
 def _make_record(
@@ -137,7 +138,7 @@ class TestRunLogTrim:
         line = json.dumps(record.to_dict(), ensure_ascii=False) + "\n"
         line_size = len(line.encode("utf-8"))
         # 需要的行数：略超过 2MB
-        num_lines = (_MAX_FILE_SIZE // line_size) + 10
+        num_lines = (MAX_RUN_LOG_FILE_SIZE // line_size) + 10
 
         # 直接写入大文件（避免逐条 append 太慢）
         path.parent.mkdir(parents=True, exist_ok=True)
@@ -145,7 +146,7 @@ class TestRunLogTrim:
             for _ in range(num_lines):
                 f.write(line)
 
-        assert path.stat().st_size > _MAX_FILE_SIZE
+        assert path.stat().st_size > MAX_RUN_LOG_FILE_SIZE
 
         # 再 append 一条触发裁剪
         new_record = _make_record(job_id=job_id, output_summary="新记录")
@@ -153,7 +154,7 @@ class TestRunLogTrim:
 
         # 裁剪后文件应小于原始大小
         new_size = path.stat().st_size
-        assert new_size < _MAX_FILE_SIZE * 1.1  # 允许少量误差
+        assert new_size < MAX_RUN_LOG_FILE_SIZE * 1.1  # 允许少量误差
 
     async def test_trim_preserves_recent_records(self, tmp_path: Path) -> None:
         log = RunLog(tmp_path)
@@ -164,7 +165,7 @@ class TestRunLogTrim:
         record = _make_record(job_id=job_id, output_summary="x" * 400)
         line = json.dumps(record.to_dict(), ensure_ascii=False) + "\n"
         line_size = len(line.encode("utf-8"))
-        num_lines = (_MAX_FILE_SIZE // line_size) + 10
+        num_lines = (MAX_RUN_LOG_FILE_SIZE // line_size) + 10
 
         path.parent.mkdir(parents=True, exist_ok=True)
         with open(path, "w", encoding="utf-8") as f:

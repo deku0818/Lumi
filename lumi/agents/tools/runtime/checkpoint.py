@@ -30,8 +30,6 @@ from lumi.utils.logger import logger
 
 # ── 常量 ──
 
-_MAX_CHECKPOINTS = 20
-"""单个 thread 最多保留的 checkpoint 数量"""
 
 _HASH_SHORT_LENGTH = 8
 """checkpoint hash 短格式长度"""
@@ -229,13 +227,15 @@ class FileCheckpointManager:
         thread_id: str,
         project_dir: Path,
         tracker: FileChangeTracker,
-        base_dir: Path | None = None,
     ) -> None:
-        if base_dir is None:
-            base_dir = Path.home() / ".lumi" / "checkpoints" / "filediff"
+        from lumi.utils.config import GlobalConfigManager
+
+        config = GlobalConfigManager.load()
+        base_dir = config.get_checkpoint_dir() / "filediff"
         self._thread_id = thread_id
         self._project_dir = project_dir.resolve()
         self._tracker = tracker
+        self._max_checkpoints = config.max_checkpoints
         self._store_dir = (base_dir / thread_id).resolve()
         self._meta_path = self._store_dir / "meta.json"
         self._changes_dir = self._store_dir / "changes"
@@ -320,12 +320,12 @@ class FileCheckpointManager:
 
     def _evict_old_checkpoints(self, meta: list[dict[str, Any]]) -> None:
         """淘汰超过上限的旧 checkpoint。"""
-        if len(meta) <= _MAX_CHECKPOINTS:
+        if len(meta) <= self._max_checkpoints:
             return
-        removed = meta[: len(meta) - _MAX_CHECKPOINTS]
+        removed = meta[: len(meta) - self._max_checkpoints]
         for old in removed:
             self._delete_changes(old["commit_hash"])
-        del meta[: len(meta) - _MAX_CHECKPOINTS]
+        del meta[: len(meta) - self._max_checkpoints]
 
     # ── Checkpoint 列表 ──
 
@@ -608,3 +608,80 @@ def _restore_single_file(path: str, change: FileChange) -> None:
         p.parent.mkdir(parents=True, exist_ok=True)
         p.write_text(change.original_content, encoding="utf-8")
         logger.debug("[FileCheckpoint] 恢复文件: %s", path)
+
+
+# ── 过期 thread 清理 ──
+
+
+def cleanup_stale_threads() -> int:
+    """清理超过配置天数未更新的 thread 目录。
+
+    从 GlobalConfig 读取 checkpoint_dir 和 stale_thread_days，
+    扫描 filediff 目录下所有 thread 子目录，根据 meta.json 中最新
+    checkpoint 的 timestamp 判断是否过期。
+
+    Returns:
+        删除的 thread 目录数量
+    """
+    from lumi.utils.config import GlobalConfigManager
+
+    config = GlobalConfigManager.load()
+    stale_days = config.stale_thread_days
+    if stale_days <= 0:
+        return 0
+    base_dir = config.get_checkpoint_dir() / "filediff"
+    if not base_dir.is_dir():
+        return 0
+
+    cutoff = time.time() - stale_days * 86400
+    removed = 0
+
+    for child in base_dir.iterdir():
+        if not child.is_dir():
+            continue
+        meta_path = child / "meta.json"
+
+        # 无 meta.json → 孤立目录，清理
+        if not meta_path.exists():
+            if _remove_thread_dir(child):
+                removed += 1
+            continue
+
+        # 读取 meta.json
+        try:
+            meta = json.loads(meta_path.read_text(encoding="utf-8"))
+        except (json.JSONDecodeError, UnicodeDecodeError, OSError):
+            logger.warning("[FileCheckpoint] 跳过损坏的 thread 目录: %s", child.name)
+            continue
+
+        # 空列表 → 无 checkpoint，清理
+        if not meta:
+            if _remove_thread_dir(child):
+                removed += 1
+            continue
+
+        # 取最新 timestamp
+        max_ts = max(
+            (d.get("timestamp", 0) for d in meta if isinstance(d, dict)),
+            default=0,
+        )
+        if max_ts < cutoff:
+            if _remove_thread_dir(child):
+                removed += 1
+
+    return removed
+
+
+def _remove_thread_dir(thread_dir: Path) -> bool:
+    """安全删除 thread 目录，失败时仅 warning。"""
+    try:
+        shutil.rmtree(thread_dir)
+        logger.info("[FileCheckpoint] 清理过期 thread 目录: %s", thread_dir.name)
+        return True
+    except OSError:
+        logger.warning(
+            "[FileCheckpoint] 无法清理 thread 目录: %s",
+            thread_dir.name,
+            exc_info=True,
+        )
+        return False

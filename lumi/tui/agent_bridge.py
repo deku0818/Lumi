@@ -22,6 +22,7 @@ from lumi.agents.tools.runtime.checkpoint import CheckpointInfo, FileCheckpointM
 from lumi.agents.tools.runtime.file_tracker import FileChangeTracker
 from lumi.agents.tools.providers.mcp import get_mcp_session_manager
 from lumi.agents.tools.runtime.session import get_session_manager
+from lumi.utils.constants import MAX_STREAM_RETRIES, RETRY_BASE_WAIT
 from lumi.utils.logger import logger
 from lumi.utils.model_manager import get_default_model_name
 from lumi.utils.read_config import get_config
@@ -188,8 +189,6 @@ class AgentBridge:
         httpx.ConnectError,
         httpx.ReadError,
     )
-    _MAX_STREAM_RETRIES = 2
-    _RETRY_BASE_WAIT = 5  # 秒
 
     async def _stream(self, input_data) -> AsyncGenerator[BridgeEvent, None]:
         """核心流式处理 - yield BridgeEvent
@@ -208,7 +207,7 @@ class AgentBridge:
             # 检测残留图状态（待执行节点但无中断），自动恢复
             await self._recover_stale_state(graph)
 
-            for attempt in range(self._MAX_STREAM_RETRIES + 1):
+            for attempt in range(MAX_STREAM_RETRIES + 1):
                 try:
                     # 首次使用原始 input；重试时传 None，
                     # LangGraph 从 checkpoint 恢复执行待定节点
@@ -342,22 +341,22 @@ class AgentBridge:
                     break
 
                 except self._TRANSIENT_NETWORK_ERRORS as e:
-                    if attempt >= self._MAX_STREAM_RETRIES:
+                    if attempt >= MAX_STREAM_RETRIES:
                         raise
-                    wait = self._RETRY_BASE_WAIT * (attempt + 1)
+                    wait = RETRY_BASE_WAIT * (attempt + 1)
                     logger.warning(
                         "[AgentBridge] 网络瞬态错误 (%s)，%ds 后重试 (%d/%d)",
                         type(e).__name__,
                         wait,
                         attempt + 1,
-                        self._MAX_STREAM_RETRIES,
+                        MAX_STREAM_RETRIES,
                     )
                     # 结束 TUI 中未完成的 assistant message，避免残留碎片
                     yield BridgeEvent(kind=EventKind.MODEL_END)
                     # 用 STREAM_TOKEN 显示重试提示（不使用 ERROR，因为它会终止 run）
                     retry_msg = (
                         f"\n\n*网络连接中断，{wait}s 后自动重试 "
-                        f"({attempt + 1}/{self._MAX_STREAM_RETRIES})…*\n\n"
+                        f"({attempt + 1}/{MAX_STREAM_RETRIES})…*\n\n"
                     )
                     yield BridgeEvent(kind=EventKind.STREAM_TOKEN, text=retry_msg)
                     yield BridgeEvent(kind=EventKind.MODEL_END)
@@ -690,7 +689,11 @@ class AgentBridge:
         tid = self.current_thread_id
         if tid:
             self._tracker = FileChangeTracker()
-            self._shadow = FileCheckpointManager(tid, _Path(project_dir), self._tracker)
+            self._shadow = FileCheckpointManager(
+                tid,
+                _Path(project_dir),
+                self._tracker,
+            )
             # 将 tracker 注册到 filesystem backend
             _get_backend().set_tracker(self._tracker)
 

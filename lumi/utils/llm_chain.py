@@ -21,6 +21,7 @@ from langchain_core.prompts import (
 from pydantic import BaseModel
 
 from lumi.agents.core.node_helpers.messages import CACHE_CONTROL
+from lumi.utils.constants import IMAGE_TOKEN_ESTIMATE
 from lumi.utils.logger import logger
 from lumi.utils.model_manager import get_default_model_name
 from lumi.utils.model_manager import create_llm, detect_model_type
@@ -128,10 +129,6 @@ def truncate_docs_to_max_tokens(
     )
 
     return truncated_items
-
-
-# 图片在 token 计算中的固定估算值（避免 base64 数据膨胀 token 计数）
-IMAGE_TOKEN_ESTIMATE = 800
 
 
 def _count_content_tokens(content) -> int:

@@ -4,15 +4,14 @@ from __future__ import annotations
 
 import asyncio
 from datetime import datetime
-from typing import TYPE_CHECKING, Final
+from typing import TYPE_CHECKING
 
 from lumi.tui.run_state import RunPhase
+from lumi.utils.constants import MAX_NOTIFICATIONS
 from lumi.utils.logger import logger
 
 if TYPE_CHECKING:
     from lumi.tui.app import LumiApp
-
-_MAX_NOTIFICATIONS: Final[int] = 100
 
 
 def on_cron_job_status(app: LumiApp, job_names: list[str]) -> None:
@@ -69,8 +68,8 @@ def add_notification(
             job_name, output, started_at=started_at, duration_ms=duration_ms
         )
         records.insert(0, record)
-        if len(records) > _MAX_NOTIFICATIONS:
-            records = records[:_MAX_NOTIFICATIONS]
+        if len(records) > MAX_NOTIFICATIONS:
+            records = records[:MAX_NOTIFICATIONS]
         store.save(records)
     except Exception:
         logger.warning("[LumiApp] 保存通知失败: job=%s", job_name, exc_info=True)
