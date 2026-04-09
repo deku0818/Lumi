@@ -106,4 +106,6 @@ async def poll_notifications(app: LumiApp) -> None:
         logger.error("[LumiApp] 通知处理时找不到 InputBar，跳过")
         app._run.phase = RunPhase.IDLE
         return
-    app._run.task = asyncio.create_task(app._run_stream(hint, tool_mode="auto"))
+    app._run.task = asyncio.create_task(
+        app._run_stream(hint, tool_mode="auto", is_meta=True)
+    )

@@ -86,6 +86,7 @@ class LumiApp(App):
             show=False,
             priority=True,
         ),
+        Binding("ctrl+b", "open_bg", "Background", show=False, priority=True),
     ]
 
     def __init__(self, *, privileged: bool = False) -> None:
@@ -324,6 +325,9 @@ class LumiApp(App):
             NOTIFICATION_POLL_INTERVAL, self._poll_notifications
         )
 
+        # 启动后台任务指示器更新
+        self._bg_indicator_timer = self.set_interval(1.0, self._update_bg_indicator)
+
         # 绑定用户自定义快捷键
         self._bind_custom_keys(self._global_config)
 
@@ -345,7 +349,7 @@ class LumiApp(App):
     async def _cleanup_stale_checkpoints(self) -> None:
         """后台清理过期的 checkpoint thread 目录。"""
         try:
-            from lumi.agents.tools.runtime.checkpoint import cleanup_stale_threads
+            from lumi.agents.tools.checkpoint import cleanup_stale_threads
 
             removed = await asyncio.to_thread(cleanup_stale_threads)
             if removed:
@@ -425,6 +429,7 @@ class LumiApp(App):
                 lambda _="": self._open_cron_notify_screen(),
             ),
             ("agents", "查看所有可用 Agent", lambda _="": self._open_agents_screen()),
+            ("bg", "查看后台任务", lambda _="": self._open_bg_screen()),
             ("mcp", "查看 MCP 服务器状态", lambda _="": self._open_mcp_screen()),
             (
                 "clear",
@@ -582,8 +587,6 @@ class LumiApp(App):
         """打开 rewind checkpoint 选择界面。"""
         checkpoints = await self._bridge.list_checkpoints()
         if not checkpoints:
-            chat_log = self.query_one(ChatLog)
-            await chat_log.append_hint("● ", "No checkpoints available")
             return
 
         # 缓存 checkpoint 列表，供回调使用（避免重复调用 list_checkpoints）
@@ -712,6 +715,44 @@ class LumiApp(App):
 
     async def _on_agents_done(self, agent_name: str | None) -> None:
         """Agent 列表界面关闭回调。"""
+
+    # ── 后台任务管理 ──
+
+    async def action_open_bg(self) -> None:
+        """Ctrl+B 打开后台任务面板。"""
+        await self._open_bg_screen()
+
+    async def _open_bg_screen(self) -> None:
+        """打开后台任务列表界面。"""
+        from lumi.agents.tools.task_registry import TaskStatus, get_task_registry
+
+        entries = [
+            e for e in get_task_registry().all_tasks() if e.status == TaskStatus.RUNNING
+        ]
+
+        if not entries:
+            return
+
+        from lumi.tui.screens.bg_screen import BgScreen
+
+        self.push_screen(BgScreen(entries), callback=lambda _: None)
+
+    def _update_bg_indicator(self) -> None:
+        """定时更新 InputBar 中的后台任务指示器。"""
+        from lumi.agents.tools.task_registry import (
+            TaskStatus,
+            get_task_registry,
+        )
+
+        try:
+            bar = self.query_one(InputBar)
+        except NoMatches:
+            return
+
+        entries = [
+            e for e in get_task_registry().all_tasks() if e.status == TaskStatus.RUNNING
+        ]
+        bar.update_bg_indicator(entries)
 
     # ── 定时任务管理 ──
 
@@ -907,6 +948,7 @@ class LumiApp(App):
         content: str | list,
         tool_mode: str = "auto",
         execution_mode: str = "normal",
+        is_meta: bool = False,
     ) -> None:
         """执行流
 
@@ -914,10 +956,11 @@ class LumiApp(App):
             content: 用户输入内容
             tool_mode: 工具审批模式，默认为 "auto"
             execution_mode: 执行模式，默认为 "normal"
+            is_meta: 标记为系统生成的不可见消息（restore 时不显示）
         """
         await self._consume_events(
             self._bridge.stream_response(
-                content, tool_mode, execution_mode=execution_mode
+                content, tool_mode, execution_mode=execution_mode, is_meta=is_meta
             )
         )
 
@@ -1241,7 +1284,9 @@ class LumiApp(App):
             logger.error("[LumiApp] 通知处理时找不到 InputBar，跳过")
             self._run.phase = RunPhase.IDLE
             return
-        self._run.task = asyncio.create_task(self._run_stream(hint, tool_mode="auto"))
+        self._run.task = asyncio.create_task(
+            self._run_stream(hint, tool_mode="auto", is_meta=True)
+        )
 
     def action_scroll_chat(self, direction: str) -> None:
         """滚动聊天日志区域，审批组件激活时委派到其内容区域。

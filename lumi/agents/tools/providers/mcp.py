@@ -15,6 +15,7 @@ import signal
 import subprocess
 import sys
 import time
+from collections.abc import Awaitable, Callable
 from contextlib import AsyncExitStack
 from dataclasses import dataclass, field
 from functools import wraps
@@ -26,9 +27,60 @@ from langchain_mcp_adapters.client import MultiServerMCPClient
 from langchain_mcp_adapters.tools import load_mcp_tools
 from mcp import ClientSession
 
-from lumi.agents.tools.runtime.interceptors import ToolArgsInterceptor
+from langchain_mcp_adapters.interceptors import (
+    MCPToolCallRequest,
+    MCPToolCallResult,
+)
+from langgraph.prebuilt import ToolRuntime
+
 from lumi.utils.logger import logger
 from lumi.utils.read_config import get_config
+
+# ── 拦截器 ──
+
+
+@dataclass
+class ToolArgsInterceptor:
+    """MCP 工具参数注入拦截器
+
+    从 runtime.config["configurable"]["tool_args"] 读取参数，
+    根据 config.yaml 中的 tool_args 映射关系注入到对应工具。
+    """
+
+    async def __call__(
+        self,
+        request: MCPToolCallRequest,
+        handler: Callable[[MCPToolCallRequest], Awaitable[MCPToolCallResult]],
+    ) -> MCPToolCallResult:
+        runtime = request.runtime
+
+        if runtime is None or not isinstance(runtime, ToolRuntime):
+            return await handler(request)
+
+        api_tool_args = runtime.config.get("configurable", {}).get("tool_args", {})
+        if not api_tool_args:
+            return await handler(request)
+
+        param_mappings = get_config().config.tool_args.get_all_param_mappings()
+        if not param_mappings:
+            return await handler(request)
+
+        tool_name = request.name
+        params_to_inject: dict[str, Any] = {}
+
+        for param_name, allowed_tools in param_mappings.items():
+            if tool_name in allowed_tools and param_name in api_tool_args:
+                params_to_inject[param_name] = api_tool_args[param_name]
+
+        if params_to_inject:
+            new_args = {**request.args, **params_to_inject}
+            request = request.override(args=new_args)
+            logger.info(
+                f"[ToolArgsInterceptor] 为工具 {tool_name} 注入参数: {params_to_inject}"
+            )
+
+        return await handler(request)
+
 
 # ── 常量 ──
 

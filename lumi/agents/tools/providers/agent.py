@@ -13,8 +13,8 @@ from langchain_core.tools import tool
 from langgraph.prebuilt.tool_node import ToolRuntime
 
 from lumi.agents.tools.loader import AgentConfig, load_agents
-from lumi.agents.tools.registry import ToolRegistry
-from lumi.agents.tools.runtime.task_registry import (
+from lumi.agents.tools.registry import get_tool_registry
+from lumi.agents.tools.task_registry import (
     BackgroundTaskEntry,
     TaskKind,
     TaskStatus,
@@ -127,7 +127,7 @@ async def agent(
     agent_config = matched_configs[0]
 
     # 获取工具（排除 agent 工具自身以避免递归）
-    all_tools = await ToolRegistry.instance().get_tools(
+    all_tools = await get_tool_registry().get_tools(
         names=agent_config.tools or None,
     )
     available_tools = [t for t in all_tools if t.name != "agent"]
@@ -181,6 +181,7 @@ def _start_background_agent(
         started_at=time.time(),
         output_file=output_file,
         agent_name=name,
+        prompt=prompt,
     )
 
     registry = get_task_registry()

@@ -8,7 +8,7 @@ from typing import Literal
 from langchain_core.tools import tool
 from pydantic import BaseModel, Field
 
-from lumi.agents.tools.runtime.task_registry import (
+from lumi.agents.tools.task_registry import (
     TaskKind,
     TaskStatus,
     get_task_registry,
@@ -52,11 +52,11 @@ async def background_task(
     """管理后台任务"""
     match action:
         case "list":
-            return _handle_list()
+            return _format_task_list()
         case "status":
             if not task_id:
                 return "错误: status 操作需要提供 task_id"
-            return _handle_status(task_id)
+            return _format_task_status(task_id)
         case "stop":
             if not task_id:
                 return "错误: stop 操作需要提供 task_id"
@@ -65,8 +65,8 @@ async def background_task(
             return f"未知操作: {action}"
 
 
-def _handle_list() -> str:
-    """列出所有后台任务。"""
+def _format_task_list() -> str:
+    """格式化所有后台任务为表格字符串。"""
     registry = get_task_registry()
     entries = registry.all_tasks()
 
@@ -85,8 +85,8 @@ def _handle_list() -> str:
     return "\n".join(lines)
 
 
-def _handle_status(task_id: str) -> str:
-    """查询指定任务的详细状态。"""
+def _format_task_status(task_id: str) -> str:
+    """格式化指定任务的详细状态。"""
     registry = get_task_registry()
     entry = registry.get(task_id)
 
@@ -140,7 +140,7 @@ async def _handle_stop(task_id: str) -> str:
 
 async def _stop_bash_task(task_id: str) -> str:
     """停止 Bash 后台任务。"""
-    from lumi.agents.tools.runtime.session import get_session_manager
+    from lumi.agents.tools.session import get_session_manager
 
     session_mgr = get_session_manager()
     if not session_mgr.has_bg_manager:

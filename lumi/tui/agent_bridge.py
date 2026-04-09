@@ -18,10 +18,10 @@ from langgraph.types import Command
 from lumi.agents.core.graph import LumiAgent, create_agent
 from lumi.agents.tools.permissions.models import BYPASS_TOOLS
 from lumi.agents.core.state import LumiAgentContext
-from lumi.agents.tools.runtime.checkpoint import CheckpointInfo, FileCheckpointManager
-from lumi.agents.tools.runtime.file_tracker import FileChangeTracker
+from lumi.agents.tools.checkpoint import CheckpointInfo, FileCheckpointManager
+from lumi.agents.tools.file_tracker import FileChangeTracker
 from lumi.agents.tools.providers.mcp import get_mcp_session_manager
-from lumi.agents.tools.runtime.session import get_session_manager
+from lumi.agents.tools.session import get_session_manager
 from lumi.utils.constants import MAX_STREAM_RETRIES, RETRY_BASE_WAIT
 from lumi.utils.logger import logger
 from lumi.utils.model_manager import get_default_model_name
@@ -137,6 +137,7 @@ class AgentBridge:
         content: str | list,
         tool_mode: str = "auto",
         execution_mode: str = "normal",
+        is_meta: bool = False,
     ) -> AsyncGenerator[BridgeEvent, None]:
         """发送消息并 yield 事件流
 
@@ -144,14 +145,18 @@ class AgentBridge:
             content: 纯文本字符串或多模态 content blocks 列表。
             tool_mode: 工具审批模式（auto / privileged）。
             execution_mode: 执行模式（normal / plan / readonly / 自定义）。
+            is_meta: 标记为系统生成的不可见消息（restore 时不显示）。
         """
         # 在 agent 执行前创建 checkpoint（快照当前文件状态）
-        await self._create_checkpoint_before_turn(content)
+        # is_meta 消息（如后台任务通知）不创建 checkpoint 条目，避免在 Rewind 中显示
+        if not is_meta:
+            await self._create_checkpoint_before_turn(content)
 
         # 新一轮对话，清理上一轮残留的 agent 追踪状态
         self._active_agent_runs.clear()
+        extra_kwargs = {"is_meta": True} if is_meta else {}
         input_data = {
-            "messages": [HumanMessage(content=content)],
+            "messages": [HumanMessage(content=content, additional_kwargs=extra_kwargs)],
             "tool_mode": tool_mode,
             "execution_mode": execution_mode,
         }
@@ -171,7 +176,7 @@ class AgentBridge:
 
     def drain_notifications(self) -> list[str]:
         """从 TaskRegistry 的 NotificationQueue 中取出所有待发送通知。"""
-        from lumi.agents.tools.runtime.task_registry import get_task_registry
+        from lumi.agents.tools.task_registry import get_task_registry
 
         return get_task_registry().notification_queue.drain_all()
 
@@ -683,7 +688,7 @@ class AgentBridge:
         """
         from pathlib import Path as _Path
 
-        from lumi.agents.tools.providers.filesystem import _get_backend
+        from lumi.agents.tools.providers.filesystem import get_backend
 
         tid = self.current_thread_id
         if tid:
@@ -694,7 +699,7 @@ class AgentBridge:
                 self._tracker,
             )
             # 将 tracker 注册到 filesystem backend
-            _get_backend().set_tracker(self._tracker)
+            get_backend().set_tracker(self._tracker)
 
     async def _create_checkpoint_before_turn(self, content: str | list) -> None:
         """在每轮 agent 执行前创建 checkpoint。

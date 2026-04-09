@@ -1,12 +1,94 @@
-"""工具能力声明 — 只读 vs 写入的统一判定
+"""工具能力声明 — 只读 vs 写入的统一判定 + bash 命令拆分
 
 每个工具分为只读或写入两类。只读工具跳过权限审批，写入工具走权限引擎。
 bash 工具根据命令内容动态判断；cron 工具根据 operation 参数判断。
+
+同时提供 split_compound_command，供模块内部判定和 permissions 权限匹配层共用。
 """
 
 from __future__ import annotations
 
 import re
+
+
+# ── 复合命令拆分 ──
+
+# 双字符复合分隔符（优先匹配）
+_DOUBLE_SEPARATORS: frozenset[str] = frozenset({"&&", "||"})
+# 单字符复合分隔符
+_SINGLE_SEPARATORS: frozenset[str] = frozenset({"|", ";", "&"})
+
+
+def split_compound_command(command: str) -> list[str]:
+    """拆分由 &&、||、;、| 连接的复合命令，返回各子命令字符串。
+
+    使用字符级状态机，正确处理引号（单引号、双引号）内的分隔符不拆分。
+    单命令返回 [command]。
+
+    Args:
+        command: 完整的 bash 命令字符串
+
+    Returns:
+        子命令字符串列表
+    """
+    if not command or not command.strip():
+        return [command] if command else []
+
+    segments: list[str] = []
+    current: list[str] = []
+    i = 0
+    n = len(command)
+    in_single_quote = False
+    in_double_quote = False
+
+    while i < n:
+        c = command[i]
+
+        # 引号状态切换
+        if c == "'" and not in_double_quote:
+            in_single_quote = not in_single_quote
+            current.append(c)
+            i += 1
+        elif c == '"' and not in_single_quote:
+            in_double_quote = not in_double_quote
+            current.append(c)
+            i += 1
+        elif c == "\\" and in_double_quote and i + 1 < n:
+            # 双引号内的转义
+            current.append(c)
+            current.append(command[i + 1])
+            i += 2
+        elif not in_single_quote and not in_double_quote:
+            # 非引号内：检查分隔符
+            two = command[i : i + 2]
+            if two in _DOUBLE_SEPARATORS:
+                seg = "".join(current).strip()
+                if seg:
+                    segments.append(seg)
+                current = []
+                i += 2
+            elif c in _SINGLE_SEPARATORS:
+                seg = "".join(current).strip()
+                if seg:
+                    segments.append(seg)
+                current = []
+                i += 1
+            else:
+                current.append(c)
+                i += 1
+        else:
+            current.append(c)
+            i += 1
+
+    # 末尾段
+    seg = "".join(current).strip()
+    if seg:
+        segments.append(seg)
+
+    if not segments:
+        return [command.strip()]
+
+    return segments
 
 
 # ── 只读工具集合 ──
@@ -218,8 +300,6 @@ def is_readonly_command(command: str) -> bool:
     cleaned = re.sub(r"\d+>\s*/dev/null", "", cleaned)
 
     # 拆分复合命令，每个子命令都必须匹配只读前缀
-    from lumi.agents.tools.permissions.matcher import split_compound_command
-
     sub_commands = split_compound_command(cleaned)
 
     for sub in sub_commands:

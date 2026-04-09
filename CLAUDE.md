@@ -5,6 +5,7 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 ## 项目概览
 
 Lumi 是一个基于 LangGraph 的 AI Agent 框架，提供终端 TUI 界面（Textual）和 HTTP API（FastAPI）两种交互方式。支持多模型（OpenAI、Anthropic、Bedrock）、工具调用、权限控制、定时任务、技能扩展和 MCP 协议集成。
+Lumi 并非仅仅面向Coder，也面向所有非技术人员。
 
 ## 常用命令
 

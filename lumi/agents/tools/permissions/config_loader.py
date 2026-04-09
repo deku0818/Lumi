@@ -10,7 +10,7 @@ import tempfile
 from pathlib import Path
 from typing import Any
 
-from lumi.agents.tools.permissions.jsonc import parse_jsonc
+from lumi.utils.jsonc import parse_jsonc
 from lumi.agents.tools.permissions.models import (
     DEFAULT_RULES,
     Permission,

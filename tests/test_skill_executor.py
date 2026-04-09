@@ -2,7 +2,7 @@
 
 import pytest
 
-from lumi.agents.tools.providers.skill_executor import SkillCommandExecutor
+from lumi.agents.tools.providers.skill import SkillCommandExecutor
 
 
 @pytest.fixture

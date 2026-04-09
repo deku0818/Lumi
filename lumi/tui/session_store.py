@@ -16,6 +16,7 @@ from dataclasses import dataclass
 from datetime import datetime, timezone
 from typing import TYPE_CHECKING, Any
 
+from lumi.tui.message_visibility import should_show_human_message
 from lumi.tui.text_cleaning import extract_display_text
 from lumi.utils.logger import logger
 
@@ -87,6 +88,9 @@ def _extract_first_human_message(messages: list) -> str:
         elif isinstance(msg, dict) and msg.get("type") == "human":
             content = msg.get("content", "")
         else:
+            continue
+
+        if not should_show_human_message(msg):
             continue
 
         if isinstance(content, str):

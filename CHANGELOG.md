@@ -1,5 +1,30 @@
 # Changelog
 
+## [0.1.0a5] - 2026-04-09
+
+### Added
+- 后台任务管理界面 `BgScreen`（Ctrl+B），支持搜索、详情查看和停止任务
+- `InputBar` 后台任务指示器，实时显示运行中的后台任务数量
+- `is_meta` 消息机制 — 系统生成的消息（如后台任务通知）不创建 checkpoint，不在 Rewind 中显示
+- `message_visibility` 模块，集中管理消息可见性判定逻辑
+- `AssistantMessage.unfinalize()` 支持复用已结束的气泡，保持连续文本流
+- `utils/jsonc.py` 单元测试（14 个用例）
+
+### Changed
+- `tools/runtime/` 扁平化到 `tools/`（checkpoint、file_tracker、session、task_registry）
+- `SkillCommandExecutor` 从独立文件内联到 `providers/skill.py`
+- `ToolArgsInterceptor` 从独立文件内联到 `providers/mcp.py`
+- `permissions/jsonc.py` 迁移到 `utils/jsonc.py`
+- `split_compound_command` 从 `permissions/matcher.py` 迁移到 `capability.py`，消除循环依赖
+- `ToolRegistry` 从类级单例改为模块级 `get_tool_registry()` 函数
+- `filesystem._get_backend` 改为公开 `get_backend`
+- `inject_text_into_message` 保留原消息的 `additional_kwargs` 和 `id`
+
+### Fixed
+- Agent 注册时 broad `except Exception` 吞掉 `SyntaxError`/`ImportError` 等代码 bug，现分层处理
+- `BgScreen._stop_bash` broad catch 收窄为 `OSError`/`ProcessLookupError` + 意外异常分层
+- `_stop_task` 不检查 `cancel_agent_task()` 返回值，现记录 warning
+
 ## [0.1.0a4] - 2026-04-07
 
 ### Changed

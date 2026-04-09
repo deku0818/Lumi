@@ -18,21 +18,22 @@ from .providers import (
     skill,
     todo,
 )
-from .registry import ToolRegistry
+from .registry import ToolRegistry, get_tool_registry
 
 # ------------------------------------------------------------------
 # Provider 注册
 # ------------------------------------------------------------------
 
-ToolRegistry.register("mcp", mcp.get_mcp_tools)
-ToolRegistry.register("filesystem", filesystem)
-ToolRegistry.register("bash", bash)
-ToolRegistry.register("todo", todo)
-ToolRegistry.register("ask", ask)
-ToolRegistry.register("cron", cron)
-ToolRegistry.register("skill", skill)
-ToolRegistry.register("plan", plan)
-ToolRegistry.register("background_task", background_task)
+_registry = get_tool_registry()
+_registry.register("mcp", mcp.get_mcp_tools)
+_registry.register("filesystem", filesystem)
+_registry.register("bash", bash)
+_registry.register("todo", todo)
+_registry.register("ask", ask)
+_registry.register("cron", cron)
+_registry.register("skill", skill)
+_registry.register("plan", plan)
+_registry.register("background_task", background_task)
 
 # 条件注册: 仅在有 agent 配置时才启用
 try:
@@ -41,9 +42,11 @@ try:
         from .providers import agent
 
         agent._init_schema(_agents)
-        ToolRegistry.register("agent", agent)
-except Exception as e:
-    logger.warning(f"加载 agent 配置失败，'agent' 工具不可用: {e}")
+        _registry.register("agent", agent)
+except (FileNotFoundError, ValueError, OSError) as e:
+    logger.warning("加载 agent 配置失败，'agent' 工具不可用: %s", e)
+except Exception:
+    logger.error("agent 工具初始化出现意外错误", exc_info=True)
 
 
 # ------------------------------------------------------------------
@@ -61,7 +64,7 @@ async def get_tools(
         tools: 白名单 — 只保留这些工具。``None`` 表示全部。
         disabled_tools: 黑名单 — 从结果中移除（优先级高于白名单）。
     """
-    result = await ToolRegistry.instance().get_tools()
+    result = await get_tool_registry().get_tools()
 
     if tools:
         allowed = set(tools)
@@ -78,6 +81,7 @@ __all__ = [
     "AgentConfig",
     "SkillConfig",
     "ToolRegistry",
+    "get_tool_registry",
     "get_tools",
     "load_agents",
     "load_skills",

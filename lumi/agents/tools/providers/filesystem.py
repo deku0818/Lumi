@@ -14,7 +14,7 @@ from pathlib import Path
 from typing import TYPE_CHECKING, Literal
 
 if TYPE_CHECKING:
-    from lumi.agents.tools.runtime.file_tracker import FileChangeTracker
+    from lumi.agents.tools.file_tracker import FileChangeTracker
 
 from langchain_core.tools import tool
 from pydantic import BaseModel, Field
@@ -544,7 +544,7 @@ class LocalFilesystemBackend:
 _backend: LocalFilesystemBackend | None = None
 
 
-def _get_backend() -> LocalFilesystemBackend:
+def get_backend() -> LocalFilesystemBackend:
     """获取文件系统后端单例"""
     global _backend
     if _backend is None:
@@ -644,7 +644,7 @@ class GrepInput(BaseModel):
 @tool(args_schema=ReadInput)
 async def read(file_path: str, offset: int = 0, limit: int = 200) -> str:
     """读取文件内容并返回带行号的文本。适用于查看配置文件、代码文件、日志等。"""
-    backend = _get_backend()
+    backend = get_backend()
     return await backend.read(file_path, offset, limit)
 
 
@@ -656,7 +656,7 @@ async def write(file_path: str, content: str) -> str:
     - 始终优先编辑代码库中已有的文件。除非明确要求，否则绝不要创建新文件。
     - 不要主动创建文档文件（*.md）或 README 文件。仅在用户明确要求时才创建文档文件。
     - 仅在用户明确要求时才使用表情符号。除非被要求，否则避免在文件中写入表情符号。"""
-    backend = _get_backend()
+    backend = get_backend()
     result = await backend.write(file_path, content)
     return (
         f"错误: {result['error']}" if result["error"] else f"成功写入文件: {file_path}"
@@ -680,7 +680,7 @@ async def edit(
     - 仅在用户明确要求时才使用表情符号。除非被要求，否则避免在文件中添加表情符号。
     - 如果`old_string`在文件中不是唯一的，此次编辑将失败。请提供包含更多上下文的更大字符串以确保其唯一性，或使用`replace_all`来替换文件中所有出现的`old_string`。
     - 使用 `replace_all` 可在整个文件中批量替换或重命名字符串。例如，当你需要重命名变量时，这个参数非常有用。"""
-    backend = _get_backend()
+    backend = get_backend()
     result = await backend.edit(file_path, old_string, new_string, replace_all)
     if result["error"]:
         return f"错误: {result['error']}"
@@ -690,7 +690,7 @@ async def edit(
 @tool(args_schema=GlobInput)
 async def glob(pattern: str, path: str = ".") -> str:
     """使用glob模式递归查找文件。如 *.py 或 **/*.json"""
-    backend = _get_backend()
+    backend = get_backend()
     items = await backend.glob_info(pattern, path)
 
     if not items:
@@ -797,7 +797,7 @@ async def grep(
     head_limit: int = 0,
 ) -> str:
     """A powerful search tool built on ripgrep"""
-    backend = _get_backend()
+    backend = get_backend()
     # head_limit=0 表示无限制，映射为 None 传递给后端
     effective_head_limit = None if head_limit == 0 else head_limit
     result = await backend.grep_raw(

@@ -25,7 +25,7 @@ from dataclasses import dataclass, replace
 from pathlib import Path
 from typing import Any
 
-from lumi.agents.tools.runtime.file_tracker import FileChange, FileChangeTracker
+from lumi.agents.tools.file_tracker import FileChange, FileChangeTracker
 from lumi.utils.logger import logger
 
 # ── 常量 ──

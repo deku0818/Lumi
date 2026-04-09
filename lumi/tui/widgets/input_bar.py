@@ -255,6 +255,13 @@ class InputBar(Vertical):
         color: $text-muted;
     }
 
+    #bg-indicator {
+        width: auto;
+        height: 1;
+        color: $accent;
+        padding: 0 1 0 0;
+    }
+
     #cron-indicator {
         width: auto;
         height: 1;
@@ -324,6 +331,7 @@ class InputBar(Vertical):
                 f"[{color}]{label}[/]{_MODE_HINT_SUFFIX}",
                 id="mode-indicator",
             )
+            yield Static("", id="bg-indicator")
             yield Static("", id="cron-indicator")
             yield Static("[#B888E8]⚑[/]", id="bell-indicator")
 
@@ -625,6 +633,32 @@ class InputBar(Vertical):
         else:
             text = f"[#B888E8]{bar} {len(names)} 个任务执行中[/]"
         self.query_one("#cron-indicator", Static).update(text)
+
+    def update_bg_indicator(self, running_entries: list) -> None:
+        """更新后台任务指示器。
+
+        Args:
+            running_entries: 状态为 RUNNING 的 BackgroundTaskEntry 列表。
+        """
+        indicator = self.query_one("#bg-indicator", Static)
+        if not running_entries:
+            indicator.update("")
+            return
+
+        if len(running_entries) == 1:
+            entry = running_entries[0]
+            indicator.update(f"[cyan]⬡ {entry.label}[/]")
+            return
+
+        from collections import Counter
+
+        counts = Counter(e.kind for e in running_entries)
+        parts = []
+        if counts.get("agent", 0):
+            parts.append(f"{counts['agent']} agents")
+        if counts.get("bash", 0):
+            parts.append(f"{counts['bash']} bash")
+        indicator.update(f"[cyan]⬡ {' · '.join(parts)}[/]")
 
     def update_bell(self, unread: int) -> None:
         """更新铃铛指示器的未读数量。

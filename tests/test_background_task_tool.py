@@ -8,11 +8,11 @@ from unittest.mock import AsyncMock
 import pytest
 
 from lumi.agents.tools.providers.background_task import (
-    _handle_list,
-    _handle_status,
+    _format_task_list,
+    _format_task_status,
     _handle_stop,
 )
-from lumi.agents.tools.runtime.task_registry import (
+from lumi.agents.tools.task_registry import (
     BackgroundTaskEntry,
     TaskKind,
     TaskStatus,
@@ -31,7 +31,7 @@ def registry():
 
 
 def test_list_empty(registry):
-    result = _handle_list()
+    result = _format_task_list()
     assert "没有后台任务" in result
 
 
@@ -58,7 +58,7 @@ def test_list_with_tasks(registry):
             agent_name="runner",
         )
     )
-    result = _handle_list()
+    result = _format_task_list()
     assert "bg_aaa" in result
     assert "bg_bbb" in result
     assert "bash" in result
@@ -71,7 +71,7 @@ def test_list_with_tasks(registry):
 
 
 def test_status_nonexistent(registry):
-    result = _handle_status("bg_nonexistent")
+    result = _format_task_status("bg_nonexistent")
     assert "不存在" in result
 
 
@@ -86,7 +86,7 @@ def test_status_running_bash(registry):
             output_file=Path("/tmp/bg_ccc.txt"),
         )
     )
-    result = _handle_status("bg_ccc")
+    result = _format_task_status("bg_ccc")
     assert "bg_ccc" in result
     assert "bash" in result
     assert "running" in result
@@ -106,7 +106,7 @@ def test_status_completed_agent(registry):
             agent_name="test",
         )
     )
-    result = _handle_status("bg_ddd")
+    result = _format_task_status("bg_ddd")
     assert "Agent: test" in result
     assert "Read" in result
 
@@ -125,7 +125,7 @@ def test_status_failed_with_error(registry):
             error="进程退出码: 1",
         )
     )
-    result = _handle_status("bg_eee")
+    result = _format_task_status("bg_eee")
     assert "Exit Code: 1" in result
     assert "Error:" in result
 
@@ -188,7 +188,7 @@ async def test_stop_bash_task(registry):
             output_file=Path("/tmp/bg_hhh.txt"),
         )
     )
-    import lumi.agents.tools.runtime.session as session_mod
+    import lumi.agents.tools.session as session_mod
 
     mock_mgr = AsyncMock()
     mock_mgr.cancel_task = AsyncMock()

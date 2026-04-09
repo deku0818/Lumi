@@ -121,7 +121,6 @@ async def open_rewind_screen(app: LumiApp) -> None:
     """Open the rewind checkpoint picker."""
     checkpoints = await app._bridge.list_checkpoints()
     if not checkpoints:
-        await app.query_one(ChatLog).append_hint("● ", "No checkpoints available")
         return
 
     app._rewind_checkpoints = {cp.commit_hash: cp for cp in checkpoints}

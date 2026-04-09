@@ -94,3 +94,12 @@ class AssistantMessage(Horizontal):
         self._dirty = False
         self._update_scheduled = False
         self._body.update(self._raw)
+
+    @property
+    def is_finalized(self) -> bool:
+        """消息是否已完成。"""
+        return self._finalized
+
+    def unfinalize(self) -> None:
+        """重新开放已完成的消息以接收更多 token。"""
+        self._finalized = False

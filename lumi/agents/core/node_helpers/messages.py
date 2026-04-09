@@ -61,7 +61,11 @@ def inject_text_into_message(message: HumanMessage, text: str) -> HumanMessage:
         content_blocks = list(message.content)
 
     content_blocks.insert(0, {"type": "text", "text": text})
-    return HumanMessage(content=content_blocks)
+    return HumanMessage(
+        content=content_blocks,
+        additional_kwargs=message.additional_kwargs,
+        id=message.id,
+    )
 
 
 def get_last_human_message(messages: list[Any]) -> HumanMessage | None:

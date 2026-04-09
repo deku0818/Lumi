@@ -66,6 +66,7 @@ class BackgroundTaskEntry:
     exit_code: int | None = None
     error: str | None = None
     agent_name: str | None = None
+    prompt: str = ""
     async_task: asyncio.Task | None = field(default=None, repr=False)
 
 

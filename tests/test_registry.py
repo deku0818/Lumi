@@ -4,12 +4,12 @@ import types
 
 from langchain_core.tools import tool as langchain_tool
 
-from lumi.agents.tools.registry import ToolRegistry
+from lumi.agents.tools.registry import get_tool_registry
 
 
-def test_instance_singleton():
-    a = ToolRegistry.instance()
-    b = ToolRegistry.instance()
+def test_get_tool_registry_singleton():
+    a = get_tool_registry()
+    b = get_tool_registry()
     assert a is b
 
 
@@ -23,8 +23,8 @@ async def test_register_module_provider():
     mod = types.ModuleType("fake_mod")
     mod.dummy_tool = dummy_tool
 
-    registry = ToolRegistry.instance()
-    ToolRegistry.register("test_mod", mod)
+    registry = get_tool_registry()
+    registry.register("test_mod", mod)
     tools = await registry.get_tools()
     names = [t.name for t in tools]
     assert "dummy_tool" in names
@@ -42,8 +42,8 @@ async def test_register_async_function_provider():
             tools = [t for t in tools if t.name in names]
         return tools
 
-    registry = ToolRegistry.instance()
-    ToolRegistry.register("test_async", provider)
+    registry = get_tool_registry()
+    registry.register("test_async", provider)
     tools = await registry.get_tools()
     names = [t.name for t in tools]
     assert "another_tool" in names
@@ -64,8 +64,8 @@ async def test_get_tools_with_names_filter():
     mod.tool_a = tool_a
     mod.tool_b = tool_b
 
-    registry = ToolRegistry.instance()
-    ToolRegistry.register("multi", mod)
+    registry = get_tool_registry()
+    registry.register("multi", mod)
     tools = await registry.get_tools(names=["tool_a"])
     names = [t.name for t in tools]
     assert "tool_a" in names
@@ -84,9 +84,9 @@ async def test_provider_failure_graceful():
     async def bad_provider(names=None):
         raise RuntimeError("Provider exploded")
 
-    registry = ToolRegistry.instance()
-    ToolRegistry.register("good", mod)
-    ToolRegistry.register("bad", bad_provider)
+    registry = get_tool_registry()
+    registry.register("good", mod)
+    registry.register("bad", bad_provider)
     tools = await registry.get_tools()
     # good provider 的工具仍然可用
     names = [t.name for t in tools]

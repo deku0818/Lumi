@@ -5,7 +5,7 @@ import time
 from pathlib import Path
 
 
-from lumi.agents.tools.runtime.task_registry import (
+from lumi.agents.tools.task_registry import (
     BackgroundTaskEntry,
     NotificationQueue,
     TaskKind,

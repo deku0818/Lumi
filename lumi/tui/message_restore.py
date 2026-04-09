@@ -18,6 +18,7 @@ from lumi.tui.render_items import (
     ToolStartItem,
     UserItem,
 )
+from lumi.tui.message_visibility import should_show_human_message
 from lumi.tui.text_cleaning import extract_display_text
 from lumi.tui.widget_assembler import WidgetAssembler
 from lumi.utils.logger import logger
@@ -137,6 +138,8 @@ def _messages_to_items(
         )
 
         if msg_type == "human":
+            if not should_show_human_message(msg):
+                continue
             items.append(FlushItem())
             display = extract_human_display_text(content)
             if display:

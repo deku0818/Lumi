@@ -2,11 +2,11 @@
 
 from pathlib import Path
 
+from lumi.agents.tools.capability import split_compound_command
 from lumi.agents.tools.permissions.matcher import (
     RuleMatcher,
     build_exact_expr,
     build_pattern_expr,
-    split_compound_command,
 )
 from lumi.agents.tools.permissions.models import Permission, PermissionRule
 

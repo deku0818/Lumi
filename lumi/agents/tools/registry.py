@@ -25,33 +25,19 @@ type ToolProvider = (
 
 
 class ToolRegistry:
-    """极简工具注册表 — 单例模式，并发加载所有 provider。"""
-
-    _instance: ToolRegistry | None = None
+    """极简工具注册表 — 并发加载所有 provider。"""
 
     def __init__(self) -> None:
         self._providers: dict[str, ToolProvider] = {}
 
-    # ------------------------------------------------------------------
-    # 单例 & 注册
-    # ------------------------------------------------------------------
-
-    @classmethod
-    def instance(cls) -> ToolRegistry:
-        """获取全局单例。"""
-        if cls._instance is None:
-            cls._instance = cls()
-        return cls._instance
-
-    @classmethod
-    def register(cls, name: str, provider: ToolProvider) -> None:
+    def register(self, name: str, provider: ToolProvider) -> None:
         """注册工具提供者。
 
         Args:
             name: 提供者名称（如 ``"mcp"``, ``"bash"``）。
             provider: 异步加载函数或包含 ``StructuredTool`` 的模块。
         """
-        cls.instance()._providers[name] = provider
+        self._providers[name] = provider
         logger.debug(f"Registered tool provider: {name}")
 
     # ------------------------------------------------------------------
@@ -129,3 +115,18 @@ def _deduplicate(tools: list[StructuredTool]) -> list[StructuredTool]:
             seen.add(tool.name)
             unique.append(tool)
     return unique
+
+
+# ------------------------------------------------------------------
+# 全局单例
+# ------------------------------------------------------------------
+
+_registry: ToolRegistry | None = None
+
+
+def get_tool_registry() -> ToolRegistry:
+    """获取全局 ToolRegistry 单例。"""
+    global _registry
+    if _registry is None:
+        _registry = ToolRegistry()
+    return _registry

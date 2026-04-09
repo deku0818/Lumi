@@ -10,12 +10,12 @@ from pathlib import Path
 
 from lumi.agents.tools.permissions.boundary import WorkspaceBoundary
 from lumi.agents.tools.permissions.config_loader import ConfigLoader
+from lumi.agents.tools.capability import split_compound_command
 from lumi.agents.tools.permissions.matcher import (
     COMMAND_ARG_KEYS,
     COMMAND_TOOLS,
     RuleMatcher,
     extract_arg,
-    split_compound_command,
 )
 from lumi.agents.tools.permissions.models import (
     Permission,

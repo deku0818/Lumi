@@ -12,7 +12,7 @@ from pydantic import BaseModel
 from lumi.agents.core.response import astream_raw_events
 from lumi.agents.core.graph import create_agent
 from lumi.agents.tools.providers.mcp import get_mcp_session_manager
-from lumi.agents.tools.runtime.session import get_session_manager
+from lumi.agents.tools.session import get_session_manager
 from lumi.utils.logger import logger
 from lumi.utils.read_config import get_config
 from lumi.utils.thread_id import generate_thread_id

@@ -11,7 +11,6 @@ WidgetAssembler 与 GroupingEngine 之间的同步契约：
 
 from __future__ import annotations
 
-import logging
 from typing import TYPE_CHECKING
 
 from lumi.tui.grouping import GroupDecision, GroupingEngine
@@ -26,6 +25,7 @@ from lumi.tui.render_items import (
     ToolStartItem,
     UserItem,
 )
+from lumi.utils.logger import logger
 
 if TYPE_CHECKING:
     from textual.widget import Widget
@@ -35,8 +35,6 @@ if TYPE_CHECKING:
     from lumi.tui.widgets.chat_log import ChatLog
     from lumi.tui.widgets.tool_block import ToolBlock
     from lumi.tui.widgets.tool_group import ToolGroup
-
-logger = logging.getLogger(__name__)
 
 
 class WidgetAssembler:
@@ -88,13 +86,24 @@ class WidgetAssembler:
     # ── 流式 API（live 路径专用）──
 
     async def append_stream_token(self, text: str) -> None:
-        """追加流式 token 到当前 AssistantMessage（无则创建）。"""
+        """追加流式 token 到当前 AssistantMessage（无则创建或复用）。"""
         from lumi.tui.widgets.assistant_message import AssistantMessage
 
         await self.flush_groups()
         if self._assistant_msg is None:
-            self._assistant_msg = AssistantMessage()
-            await self._safe_mount(self._assistant_msg)
+            # 若 chat_log 最后一个 widget 是已 finalize 的 AssistantMessage，
+            # 则复用它以保持文本连续，而非创建新气泡。
+            last = self._chat_log.children[-1] if self._chat_log.children else None
+            if (
+                isinstance(last, AssistantMessage)
+                and last.is_finalized
+                and last.is_mounted
+            ):
+                last.unfinalize()
+                self._assistant_msg = last
+            else:
+                self._assistant_msg = AssistantMessage()
+                await self._safe_mount(self._assistant_msg)
         self._assistant_msg.append_token(text)
 
     def finalize_assistant_msg(self) -> None:

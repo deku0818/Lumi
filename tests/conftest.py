@@ -3,10 +3,10 @@
 import pytest
 
 import lumi.agents.tools.permissions.workspace as workspace
-import lumi.agents.tools.runtime.session as session
-import lumi.agents.tools.runtime.task_registry as task_registry
+import lumi.agents.tools.session as session
+import lumi.agents.tools.task_registry as task_registry
 from lumi.agents.tools.providers import filesystem
-from lumi.agents.tools.registry import ToolRegistry
+import lumi.agents.tools.registry as registry
 
 
 @pytest.fixture
@@ -37,10 +37,10 @@ def reset_session_manager():
 @pytest.fixture(autouse=True)
 def reset_registry():
     """每次测试重置 ToolRegistry 单例"""
-    old_instance = ToolRegistry._instance
-    ToolRegistry._instance = None
+    old_instance = registry._registry
+    registry._registry = None
     yield
-    ToolRegistry._instance = old_instance
+    registry._registry = old_instance
 
 
 @pytest.fixture(autouse=True)

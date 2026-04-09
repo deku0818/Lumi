@@ -15,7 +15,7 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import IO
 
-from lumi.agents.tools.runtime.task_registry import (
+from lumi.agents.tools.task_registry import (
     BackgroundTaskEntry,
     NotificationQueue,
     TaskKind,

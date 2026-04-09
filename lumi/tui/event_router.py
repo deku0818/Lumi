@@ -44,7 +44,7 @@ _AGENT_CANCEL_OUTPUTS: Final[frozenset[str]] = frozenset(
 _PHASE_MAP: Final[dict[EventKind, RunPhase]] = {
     EventKind.MODEL_START: RunPhase.THINKING,
     EventKind.STREAM_TOKEN: RunPhase.STREAMING,
-    EventKind.TOOL_CALL_CHUNK: RunPhase.TOOL_CALL_PENDING,
+    EventKind.TOOL_CALL_CHUNK: RunPhase.STREAMING,  # chunk 阶段模型仍在流式输出
     EventKind.TOOL_START: RunPhase.TOOL_RUNNING,
     EventKind.TOOL_END: RunPhase.TOOL_RUNNING,
     EventKind.ASK: RunPhase.WAITING_ASK,

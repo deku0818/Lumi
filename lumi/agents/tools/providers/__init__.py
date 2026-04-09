@@ -1,12 +1,15 @@
-"""工具提供者 - 导出常驻工具提供者模块（skill/task 按需条件导入）"""
+"""工具提供者 — 所有常驻工具 provider 模块。"""
 
-from . import ask, bash, filesystem, mcp, plan, todo
+from . import ask, background_task, bash, cron, filesystem, mcp, plan, skill, todo
 
 __all__ = [
-    "mcp",
-    "filesystem",
-    "bash",
-    "todo",
     "ask",
+    "background_task",
+    "bash",
+    "cron",
+    "filesystem",
+    "mcp",
     "plan",
+    "skill",
+    "todo",
 ]
