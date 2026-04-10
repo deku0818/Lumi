@@ -135,7 +135,7 @@ class AgentBridge:
     async def stream_response(
         self,
         content: str | list,
-        tool_mode: str = "auto",
+        tool_mode: str = "default",
         execution_mode: str = "normal",
         is_meta: bool = False,
     ) -> AsyncGenerator[BridgeEvent, None]:
@@ -143,7 +143,7 @@ class AgentBridge:
 
         Args:
             content: 纯文本字符串或多模态 content blocks 列表。
-            tool_mode: 工具审批模式（auto / privileged）。
+            tool_mode: 工具审批模式（default / accept_edits / privileged）。
             execution_mode: 执行模式（normal / plan / readonly / 自定义）。
             is_meta: 标记为系统生成的不可见消息（restore 时不显示）。
         """
@@ -470,7 +470,6 @@ class AgentBridge:
         """
         from lumi.agents.tools.permissions.matcher import (
             build_exact_expr,
-            build_pattern_expr,
         )
         from lumi.agents.tools.permissions.models import PermissionDecision
         from lumi.agents.tools.permissions.validators import validate_bash_command
@@ -534,9 +533,10 @@ class AgentBridge:
             # DENY 命中：防御性分支（正常流程 DENY 不到达此处）
             options = [{"key": "reject", "label": "拒绝（命中 deny 规则）"}]
         elif needs_permission_options and tool_calls:
+            from lumi.agents.tools.capability import is_file_edit_tool
+
             tc = tool_calls[0]
             exact_expr = build_exact_expr(tc.get("name", ""), tc.get("args", {}))
-            pattern_expr = build_pattern_expr(tc.get("name", ""), tc.get("args", {}))
 
             options = [
                 {"key": "allow_once", "label": "允许执行这一次"},
@@ -546,13 +546,9 @@ class AgentBridge:
                     "tool_expr": exact_expr,
                 },
             ]
-            if pattern_expr and pattern_expr != exact_expr:
+            if all(is_file_edit_tool(t.get("name", "")) for t in tool_calls):
                 options.append(
-                    {
-                        "key": "always_allow_pattern",
-                        "label": f"始终允许: {pattern_expr}",
-                        "tool_expr": pattern_expr,
-                    }
+                    {"key": "accept_edits_session", "label": "本次会话自动编辑"}
                 )
             options.append({"key": "reject", "label": "拒绝"})
 

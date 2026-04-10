@@ -118,6 +118,11 @@ _CRON_READONLY_OPS: frozenset[str] = frozenset({"list", "runs"})
 # ── 公共 API ──
 
 
+def is_file_edit_tool(tool_name: str) -> bool:
+    """判断是否为文件编辑工具（write/edit），不含 bash。"""
+    return tool_name in _ALWAYS_WRITE
+
+
 def is_write_tool(tool_name: str, tool_args: dict) -> bool:
     """判断工具调用是否为写入操作
 

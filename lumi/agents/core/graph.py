@@ -306,7 +306,7 @@ if __name__ == "__main__":
                     content="帮我写一个python脚本呗，只要hello word 即可，在/Users/y-pc/Cocoon 目录下"
                 )
             ],
-            "tool_mode": "auto",
+            "tool_mode": "default",
         }
         response = await agent.graph.ainvoke(inputs, context=context)
         print(response)

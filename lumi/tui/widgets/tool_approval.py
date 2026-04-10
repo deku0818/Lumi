@@ -34,6 +34,7 @@ _OPTION_COLOR_ROLES: dict[str, str] = {
     "allow_once": "success",
     "always_allow_exact": "accent",
     "always_allow_pattern": "accent",
+    "accept_edits_session": "accent",
     "reject": "error",
 }
 

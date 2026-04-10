@@ -301,11 +301,12 @@ is_use_tool() 路由优先级：
 4. 全部 bypass 类工具 → ToolExecutor（Layer 1: should_bypass_approval）
 5. 执行模式策略守卫 → PolicyReject（Layer 2: check_policy）
 6. bypass-immune 安全检查 → 命中则 HumanApproval（所有模式）
-7. 权限引擎完整评估:
+7. accept_edits 模式: 文件编辑工具(write/edit)工作区内自动放行，其余 → HumanApproval
+8. 权限引擎完整评估:
    ├─ 有 DENY → HumanApproval（节点内自动拒绝）
    ├─ privileged 模式: ASK → HumanApproval，其余 → ToolExecutor
-   └─ auto 模式: 全部 ALLOW + 边界 OK → ToolExecutor，否则 → HumanApproval
-8. 引擎不可用: privileged → ToolExecutor，auto → HumanApproval
+   └─ default 模式: 全部 ALLOW + 边界 OK → ToolExecutor，否则 → HumanApproval
+9. 引擎不可用: privileged → ToolExecutor，default/accept_edits → HumanApproval
 ```
 
 关键设计：

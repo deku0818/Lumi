@@ -33,7 +33,8 @@ _CRON_NAME_DISPLAY_LIMIT = 3
 
 # 值为 (label, 颜色)
 _MODE_DISPLAY: dict[str, tuple[str, str]] = {
-    "auto": ("▶ auto", "#88E8A0"),
+    "default": ("", ""),
+    "accept_edits": ("✎ accept edits", "#E8A888"),
     "plan": ("⏸ plan", "#E8D888"),
     "privileged": ("▶▶ privileged ⚠", "#88A0E8"),
 }
@@ -300,7 +301,7 @@ class InputBar(Vertical):
 
     def __init__(self, *args: object, **kwargs: object) -> None:
         super().__init__(*args, **kwargs)
-        self._tool_mode = "auto"
+        self._tool_mode = "default"
         self._plan_mode = False
         self._plan_reminder_pending = False
         self._privileged = False
@@ -326,9 +327,10 @@ class InputBar(Vertical):
         yield CompletionMenu()
         display_key = self._current_display_key()
         label, color = _MODE_DISPLAY[display_key]
+        initial_text = "" if not label else f"[{color}]{label}[/]{_MODE_HINT_SUFFIX}"
         with Horizontal(id="status-row"):
             yield Static(
-                f"[{color}]{label}[/]{_MODE_HINT_SUFFIX}",
+                initial_text,
                 id="mode-indicator",
             )
             yield Static("", id="bg-indicator")
@@ -484,22 +486,36 @@ class InputBar(Vertical):
             box.border_title = "Input"
 
     def action_toggle_plan_mode(self) -> None:
-        """切换 plan mode"""
-        self._plan_mode = not self._plan_mode
-        self._plan_reminder_pending = self._plan_mode
+        """循环切换模式: default → accept_edits → plan → default"""
+        if self._privileged:
+            self._plan_mode = not self._plan_mode
+            self._plan_reminder_pending = self._plan_mode
+        elif self._plan_mode:
+            self._plan_mode = False
+            self._plan_reminder_pending = False
+            self._tool_mode = "default"
+        elif self._tool_mode == "default":
+            self._tool_mode = "accept_edits"
+        elif self._tool_mode == "accept_edits":
+            self._tool_mode = "default"
+            self._plan_mode = True
+            self._plan_reminder_pending = True
         self._update_mode_indicator()
 
     def _current_display_key(self) -> str:
         """根据当前状态返回 _MODE_DISPLAY 的 key。"""
         if self._plan_mode:
             return "plan"
-        return "privileged" if self._privileged else "auto"
+        return self._tool_mode
 
     def _update_mode_indicator(self) -> None:
         display_key = self._current_display_key()
         label, color = _MODE_DISPLAY[display_key]
         indicator = self.query_one("#mode-indicator", Static)
-        indicator.update(f"[{color}]{label}[/]{_MODE_HINT_SUFFIX}")
+        if not label:
+            indicator.update("")
+        else:
+            indicator.update(f"[{color}]{label}[/]{_MODE_HINT_SUFFIX}")
 
     def flash_message(
         self, message: str, duration: float = _FLASH_DURATION_DEFAULT
@@ -560,8 +576,14 @@ class InputBar(Vertical):
     def set_privileged(self, on: bool) -> None:
         """设置 privileged 模式（仅启动时通过 CLI flag 设置）"""
         self._privileged = on
-        self._tool_mode = "privileged" if on else "auto"
+        self._tool_mode = "privileged" if on else "default"
         self._update_mode_indicator()
+
+    def set_accept_edits(self, on: bool) -> None:
+        """设置 accept_edits 模式（通过 CLI flag 或切换）"""
+        if not self._privileged:
+            self._tool_mode = "accept_edits" if on else "default"
+            self._update_mode_indicator()
 
     def show_exit_hint(self) -> None:
         """在状态栏显示退出提示，1.5 秒后自动恢复。"""

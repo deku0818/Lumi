@@ -1,5 +1,23 @@
 # Changelog
 
+## [0.1.0a6] - 2026-04-10
+
+### Added
+- `accept_edits` 工具审批模式 — 文件编辑工具（`write`/`edit`）在工作区边界内自动放行，`bash` 等有副作用的命令仍需审批
+- CLI `--accept-edits` flag 和 `Shift+Tab` 模式循环（`default` → `accept_edits` → `plan`）
+- 工具审批对话框新增"本次会话自动编辑"选项 — 当所有待审批工具都是 `write`/`edit` 时显示，选中后批准当前调用并切换当前 run 和后续消息到 `accept_edits` 模式
+- `is_file_edit_tool()` helper（`lumi/agents/tools/capability.py`）
+- `human_approval` 节点支持 resume dict 中的 `set_tool_mode` 字段，用于从审批动作反向更新运行中的 graph state
+
+### Changed
+- `tool_mode` Literal 从 `"auto" | "privileged"` 改为 `"default" | "accept_edits" | "privileged"`，原 `auto` 重命名为 `default`，`auto` 保留给未来 AI 审批模式
+- 工具审批对话框移除"始终允许：通配符模式"选项（如 `bash(echo *)`、`write(**/*.py)`），保留精确匹配（如 `bash(echo hello)`），避免过度授权
+- `docs/guides/permissions.md` 和 `docs/architecture/permissions.md` 同步新的模式命名和 `accept_edits` 说明
+
+### Removed
+- 删除 `lumi/tui/_app_approval.py`、`_app_cron.py`、`_app_input.py`、`_app_screens.py` 共约 1000 行死代码 — 这些文件的函数早已全部内联到 `app.py`，无任何 import
+- 精简 `lumi/tui/_app_lifecycle.py`（296 行 → 78 行），只保留 `apply_theme_mode` 等实际被 `app.py` 使用的主题检测函数
+
 ## [0.1.0a5] - 2026-04-09
 
 ### Added

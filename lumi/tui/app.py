@@ -89,7 +89,7 @@ class LumiApp(App):
         Binding("ctrl+b", "open_bg", "Background", show=False, priority=True),
     ]
 
-    def __init__(self, *, privileged: bool = False) -> None:
+    def __init__(self, *, privileged: bool = False, accept_edits: bool = False) -> None:
         super().__init__()
         self.register_theme(LUMI_DARK_THEME)
         self.register_theme(LUMI_LIGHT_THEME)
@@ -110,6 +110,7 @@ class LumiApp(App):
         self._rewind_checkpoints: dict = {}  # _open_rewind_screen 缓存
         self._todos_hidden_for_approval: bool = False  # 审批期间临时隐藏 todos-bar
         self._privileged = privileged
+        self._accept_edits = accept_edits
         self._workspace_id = get_workspace_id()
         self._workspace_dir = get_workspace_dir()
         self._cron_dir = GLOBAL_CONFIG_DIR / "cron" / self._workspace_id
@@ -334,6 +335,8 @@ class LumiApp(App):
         # 设置 privileged 模式（CLI --privileged-danger）
         if self._privileged:
             self.query_one(InputBar).set_privileged(True)
+        elif self._accept_edits:
+            self.query_one(InputBar).set_accept_edits(True)
 
     def _bind_custom_keys(self, config: GlobalConfig) -> None:
         """根据配置绑定用户自定义快捷键。"""
@@ -946,7 +949,7 @@ class LumiApp(App):
     async def _run_stream(
         self,
         content: str | list,
-        tool_mode: str = "auto",
+        tool_mode: str = "default",
         execution_mode: str = "normal",
         is_meta: bool = False,
     ) -> None:
@@ -954,7 +957,7 @@ class LumiApp(App):
 
         Args:
             content: 用户输入内容
-            tool_mode: 工具审批模式，默认为 "auto"
+            tool_mode: 工具审批模式，默认为 "default"
             execution_mode: 执行模式，默认为 "normal"
             is_meta: 标记为系统生成的不可见消息（restore 时不显示）
         """
@@ -1077,6 +1080,17 @@ class LumiApp(App):
         if decision in ("always_allow_exact", "always_allow_pattern"):
             self._persist_allow_rule(decision, approval_data)
             resume_value = {"decision": "approve"}
+        elif decision == "accept_edits_session":
+            # 1. 临时授权 boundary violation 路径（与 allow_once 一致）
+            for v in approval_data.get("boundary_violations", []):
+                add_authorized_directory(v)
+            # 2. 切换 InputBar 模式，后续消息使用 accept_edits
+            self.query_one(InputBar).set_accept_edits(True)
+            # 3. 同时更新正在运行的 graph state，当前 run 的后续工具调用也自动通过
+            resume_value = {
+                "decision": "approve",
+                "set_tool_mode": "accept_edits",
+            }
         elif decision in ("approve", "allow_once"):
             # 临时授权 boundary violation 路径
             for v in approval_data.get("boundary_violations", []):
@@ -1285,7 +1299,7 @@ class LumiApp(App):
             self._run.phase = RunPhase.IDLE
             return
         self._run.task = asyncio.create_task(
-            self._run_stream(hint, tool_mode="auto", is_meta=True)
+            self._run_stream(hint, tool_mode="default", is_meta=True)
         )
 
     def action_scroll_chat(self, direction: str) -> None:

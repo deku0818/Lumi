@@ -162,7 +162,28 @@ bash 复合命令（如 `git add . && git push`）会被拆分为独立子命令
 
 ---
 
-## 特权模式
+## 工具审批模式
+
+Lumi 提供三种工具审批模式，控制工具调用何时需要人工审批：
+
+| 模式 | 行为 | 启用方式 | 状态栏 |
+|---|---|---|---|
+| `default` | 权限引擎评估，`allow` 规则 + 边界 OK 直接放行，其余弹出审批 | 默认 | 无 |
+| `accept_edits` | 文件编辑工具（`write`/`edit`）在工作区内自动放行，`bash` 等仍需审批 | `--accept-edits` 或 `Shift+Tab` 切换 | `✎ accept edits` |
+| `privileged` | 权限引擎评估但自动放行，仅 `ask`/`deny`/bypass-immune 仍需审批 | `--privileged-danger` | `▶▶ privileged ⚠` |
+
+### accept_edits 模式
+
+适合连续执行多个文件编辑的场景。文件编辑工具在工作区边界内自动放行，但 `bash` 等具有副作用的命令仍需审批：
+
+```bash
+lumi --accept-edits
+lumi --accept-edits -p "重构这个文件的类型定义"
+```
+
+运行中也可以通过工具审批对话框的"本次会话自动编辑"选项即时切换 — 该选项仅在所有待审批工具都是 `write`/`edit` 时出现，选择后当前 agent 运行和后续消息都启用 `accept_edits`。
+
+### 特权模式
 
 通过 `--privileged-danger` 启用特权模式，跳过所有常规审批：
 
@@ -170,8 +191,6 @@ bash 复合命令（如 `git add . && git push`）会被拆分为独立子命令
 lumi --privileged-danger
 lumi --privileged-danger -p "执行所有迁移"
 ```
-
-特权模式下状态栏显示 `▶▶ privileged ⚠`。
 
 > **注意**：特权模式下，`ask` 规则仍会弹出审批，`deny` 规则仍会触发自动拒绝。只有 `unmatched` 和 `allow` 的工具调用会直接放行。
 
@@ -193,7 +212,7 @@ lumi --privileged-danger -p "执行所有迁移"
 
 ## 执行模式
 
-除了 `auto`（默认）和 `privileged`（特权）外，Lumi 还支持以下执行模式：
+除了上述工具审批模式，Lumi 还支持以下执行模式（与工具审批模式正交）：
 
 | 模式 | 行为 | 切换方式 |
 |---|---|---|

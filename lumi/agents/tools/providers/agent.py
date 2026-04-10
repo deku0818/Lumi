@@ -144,7 +144,7 @@ async def agent(
         return _start_background_agent(name, prompt, lumi_agent, context)
 
     # 前台同步执行路径（不变）
-    tool_mode: str = runtime.state.get("tool_mode", "auto")
+    tool_mode: str = runtime.state.get("tool_mode", "default")
     logger.debug("[agent tool] resolved tool_mode=%s", tool_mode)
     inputs = {"messages": [HumanMessage(content=prompt)], "tool_mode": tool_mode}
     invoke_result = await lumi_agent.graph.ainvoke(inputs, context=context)

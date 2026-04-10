@@ -44,6 +44,14 @@ def _default(
             is_flag=True,
         ),
     ] = False,
+    accept_edits: Annotated[
+        bool,
+        typer.Option(
+            "--accept-edits",
+            help="自动放行文件编辑(write/edit)，bash 仍需审批",
+            is_flag=True,
+        ),
+    ] = False,
     no_mouse: Annotated[
         bool,
         typer.Option(
@@ -63,9 +71,13 @@ def _default(
         get_config().set_style_override(style)
 
     if prompt is not None:
-        _run_headless(prompt, privileged=privileged_danger)
+        _run_headless(prompt, privileged=privileged_danger, accept_edits=accept_edits)
     else:
-        _run_tui(privileged=privileged_danger, no_mouse=no_mouse)
+        _run_tui(
+            privileged=privileged_danger,
+            accept_edits=accept_edits,
+            no_mouse=no_mouse,
+        )
 
 
 @app.command("web-server")
@@ -99,7 +111,9 @@ def web_server(
     server.serve(debug=debug)
 
 
-def _run_tui(*, privileged: bool = False, no_mouse: bool = False) -> None:
+def _run_tui(
+    *, privileged: bool = False, accept_edits: bool = False, no_mouse: bool = False
+) -> None:
     """启动终端 TUI。"""
     import os
 
@@ -120,16 +134,23 @@ def _run_tui(*, privileged: bool = False, no_mouse: bool = False) -> None:
     if no_mouse or os.environ.get("LUMI_NO_MOUSE") == "1":
         no_mouse = True
 
-    LumiApp(privileged=privileged).run(mouse=not no_mouse)
+    LumiApp(privileged=privileged, accept_edits=accept_edits).run(mouse=not no_mouse)
 
 
-def _run_headless(prompt: str, *, privileged: bool = False) -> None:
+def _run_headless(
+    prompt: str, *, privileged: bool = False, accept_edits: bool = False
+) -> None:
     """非交互模式：调用 Agent 输出结果后退出。"""
     import asyncio
 
     from lumi.tui.agent_bridge import AgentBridge, EventKind
 
-    tool_mode = "privileged" if privileged else "auto"
+    if privileged:
+        tool_mode = "privileged"
+    elif accept_edits:
+        tool_mode = "accept_edits"
+    else:
+        tool_mode = "default"
 
     async def _execute() -> None:
         # 注入 config.yaml 中的环境变量（API key 等）

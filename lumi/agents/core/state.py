@@ -30,10 +30,12 @@ class LumiAgentState(TypedDict):
     messages: Annotated[list, add_messages]
     agent_outcome: dict
     iterations: int
-    tool_mode: Literal["auto", "privileged"]
+    tool_mode: Literal["default", "accept_edits", "privileged"]
     """工具审批模式:
-    - "auto": 权限引擎评估，未通过则由 TUI 询问用户审批
+    - "default": 权限引擎评估，未通过则由 TUI 询问用户审批
+    - "accept_edits": 文件编辑工具(write/edit)在工作区内自动放行，bash 等仍需审批
     - "privileged": 权限引擎评估但自动放行，仅 bypass-immune 仍需审批
+    注: "auto" 预留给未来 AI 审批模式
     """
     todos: NotRequired[list]
     """任务列表，用于追踪复杂任务的执行进度"""

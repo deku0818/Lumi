@@ -18,7 +18,7 @@ from lumi.agents.core.node_helpers.messages import (
     inject_message_cache_breakpoints,
 )
 from lumi.agents.core.state import LumiAgentContext, LumiAgentState
-from lumi.agents.tools.capability import is_write_tool
+from lumi.agents.tools.capability import is_file_edit_tool, is_write_tool
 from lumi.agents.tools.permissions.models import PermissionDecision
 from lumi.agents.tools.permissions.safety import is_bypass_immune
 from lumi.agents.core.structured_tool import (
@@ -156,9 +156,10 @@ def is_use_tool(state: LumiAgentState, runtime: Runtime[LumiAgentContext]) -> st
     4. 执行模式策略守卫 → PolicyReject（Layer 2 模式级工具限制）
     5. bypass-immune 检查（所有模式）→ 命中则 HumanApproval
     6. 权限引擎 DENY（所有模式）→ HumanApproval（节点内自动拒绝，路由回 CallModel）
-    7. privileged 模式 → ASK 命中则 HumanApproval，其余 ToolExecutor
-    8. auto 模式：全部 ALLOW + 边界 OK → ToolExecutor（快速路径）
-    9. 其他 → HumanApproval
+    7. accept_edits 模式 → 文件编辑工具(write/edit)工作区内自动放行，其余 HumanApproval
+    8. privileged 模式 → ASK 命中则 HumanApproval，其余 ToolExecutor
+    9. default 模式：全部 ALLOW + 边界 OK → ToolExecutor（快速路径）
+    10. 其他 → HumanApproval
     """
     messages = state.get("messages", [])
     if not messages:
@@ -183,7 +184,7 @@ def is_use_tool(state: LumiAgentState, runtime: Runtime[LumiAgentContext]) -> st
 
     # 权限引擎 DENY 检查（优先于 bypass，deny 规则不可绕过）
     engine = runtime.context.permission_engine
-    tool_mode = state.get("tool_mode", "auto")
+    tool_mode = state.get("tool_mode", "default")
 
     if engine is not None:
         engine.reload()
@@ -241,6 +242,25 @@ def is_use_tool(state: LumiAgentState, runtime: Runtime[LumiAgentContext]) -> st
             logger.warning("[SafetyCheck] Bypass-immune: %s", reason)
             return "HumanApproval"
 
+    # accept_edits 模式：文件编辑工具(write/edit)在工作区内自动放行
+    if tool_mode == "accept_edits":
+        all_auto = True
+        for tc in tool_calls:
+            name = tc.get("name", "")
+            if is_file_edit_tool(name):
+                if engine is not None and engine.check_workspace_boundary(
+                    name, tc.get("args", {})
+                ):
+                    continue
+                all_auto = False
+                break
+            else:
+                all_auto = False
+                break
+        if all_auto:
+            return "ToolExecutor"
+        return "HumanApproval"
+
     # 权限引擎完整评估（deny 已在上方处理，此处处理 allow/ask/unmatched）
 
     if engine is not None:
@@ -288,13 +308,13 @@ def is_use_tool(state: LumiAgentState, runtime: Runtime[LumiAgentContext]) -> st
                 return "HumanApproval"
             return "ToolExecutor"
 
-        # auto 模式：全部 ALLOW + 边界 OK 才直接执行
+        # default 模式：全部 ALLOW + 边界 OK 才直接执行
         if all_allowed:
             return "ToolExecutor"
 
         return "HumanApproval"
 
-    # engine is None：privileged 放行，auto 审批
+    # engine is None：privileged 放行，default/accept_edits 审批
     if tool_mode == "privileged":
         logger.warning("[is_use_tool] 权限引擎不可用，privileged 模式直接放行")
         return "ToolExecutor"
@@ -352,9 +372,11 @@ def human_approval(
     result = interrupt({"type": "tool_approval", "tool_calls": tool_calls_data})
 
     # 解析 resume 值
+    set_tool_mode: str | None = None
     if isinstance(result, dict):
         decision = result.get("decision", "reject")
         message = result.get("message", "")
+        set_tool_mode = result.get("set_tool_mode")
     else:
         # 兼容字符串（简单场景 / headless）
         decision = str(result)
@@ -362,7 +384,14 @@ def human_approval(
 
     match decision:
         case "approve":
-            return Command(goto="ToolExecutor")
+            update: dict = {}
+            if set_tool_mode:
+                update["tool_mode"] = set_tool_mode
+            return (
+                Command(goto="ToolExecutor", update=update)
+                if update
+                else Command(goto="ToolExecutor")
+            )
         case "cancel":
             messages = _build_reject_messages(
                 last_message.tool_calls,
