@@ -1,6 +1,6 @@
 # 权限系统架构
 
-权限系统位于 `lumi/agents/tools/permissions/`，负责在 Agent 执行工具调用前评估权限、检查工作区边界、保护敏感文件。本文档面向开发者，介绍内部架构、数据流和扩展方式。
+权限系统位于 `lumi/agents/permissions/`，负责在 Agent 执行工具调用前评估权限、检查工作区边界、保护敏感文件。本文档面向开发者，介绍内部架构、数据流和扩展方式。
 
 用户使用指南见 [`docs/guides/permissions.md`](../guides/permissions.md)。
 
@@ -9,7 +9,7 @@
 ## 模块总览
 
 ```
-lumi/agents/tools/permissions/
+lumi/agents/permissions/
 ├── models.py         # 数据模型：枚举、frozen dataclass、常量
 ├── engine.py         # 权限引擎：协调配置加载、规则匹配、边界检查
 ├── config_loader.py  # 三级配置加载、JSONC 解析、合并、持久化
@@ -18,8 +18,7 @@ lumi/agents/tools/permissions/
 ├── safety.py         # Bypass-immune 安全检查：受保护文件/命令检测
 ├── validators.py     # Bash 命令安全警告（非阻断）
 ├── mode_policy.py    # 执行模式策略（plan/readonly）
-├── workspace.py      # 授权路径管理（全局状态，供 filesystem provider 使用）
-└── jsonc.py          # JSONC 解析（去注释）
+└── workspace.py      # 授权路径管理（全局状态，供 filesystem provider 使用）
 
 lumi/agents/tools/capability.py  # 工具副作用声明（ToolEffect）+ bash 只读判断
 ```
@@ -350,7 +349,7 @@ _READONLY_PREFIXES = frozenset({..., "my-readonly-cmd"})
 ### 注册自定义执行模式
 
 ```python
-from lumi.agents.tools.permissions.mode_policy import ModePolicy, register_policy
+from lumi.agents.permissions.mode_policy import ModePolicy, register_policy
 
 register_policy("my_mode", ModePolicy(
     name="my_mode",

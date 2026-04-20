@@ -3,8 +3,8 @@
 import tempfile
 from pathlib import Path
 
-from lumi.agents.tools.permissions.engine import PermissionEngine
-from lumi.agents.tools.permissions.models import (
+from lumi.agents.permissions.engine import PermissionEngine
+from lumi.agents.permissions.models import (
     Permission,
     PermissionConfig,
     PermissionDecision,

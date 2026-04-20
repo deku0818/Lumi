@@ -2,9 +2,9 @@
 
 import pytest
 
-import lumi.agents.tools.permissions.workspace as workspace
-import lumi.agents.tools.session as session
-import lumi.agents.tools.task_registry as task_registry
+import lumi.agents.permissions.workspace as workspace
+import lumi.agents.runtime.session as session
+import lumi.agents.runtime.bg_tasks as task_registry
 from lumi.agents.tools.providers import filesystem
 import lumi.agents.tools.registry as registry
 

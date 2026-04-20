@@ -5,7 +5,7 @@
 
 import pytest
 
-from lumi.agents.tools.permissions.mode_policy import (
+from lumi.agents.permissions.mode_policy import (
     ModePolicy,
     PLAN_POLICY,
     READONLY_POLICY,
@@ -46,7 +46,7 @@ class TestPolicyRegistry:
         register_policy("audit", custom)
         assert get_policy("audit") is custom
         # 清理
-        from lumi.agents.tools.permissions.mode_policy import _POLICIES
+        from lumi.agents.permissions.mode_policy import _POLICIES
 
         del _POLICIES["audit"]
 

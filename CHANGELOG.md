@@ -1,5 +1,15 @@
 # Changelog
 
+## [0.1.0a8] - 2026-04-21
+
+### Changed
+- `lumi/agents/` 结构重构 — tools 子系统职责收敛为装配 + 暴露，跨子系统的运行时状态与权限策略上提到 agents 根层，和 core/cron/tools 平级
+  - 新增 `lumi/agents/runtime/`，收录 `session.py`（原 `tools/session.py`）、`checkpoint.py`（原 `tools/checkpoint.py`）、`file_tracker.py`（原 `tools/file_tracker.py`）、`bg_tasks.py`（原 `tools/task_registry.py`，同时更名消除和 `tools/registry.py` 的命名撞车）
+  - `lumi/agents/tools/permissions/` 上提到 `lumi/agents/permissions/`——决策对象是工具调用，但作用域是 agent 整体（`core/nodes.py` 是核心消费者）
+  - `tools/providers/filesystem.py` 升级为 package，原 `providers/_media.py` 移入 `providers/filesystem/media.py` 并去掉下划线前缀（原下划线用于补救"providers 目录下每个文件 = tool provider"这个承诺被破坏的语义问题）
+- 所有外部 import 路径同步更新（`lumi.agents.tools.session` → `lumi.agents.runtime.session` 等），共 42 个文件；`StructuredTool` 名字、registry 注册名、配置文件引用的 tool 名全部保持不变
+- `docs/architecture/permissions.md`、`docs/architecture/checkpoint.md`、`CLAUDE.md` 同步新路径
+
 ## [0.1.0a7] - 2026-04-21
 
 ### Added

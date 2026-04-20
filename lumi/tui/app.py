@@ -352,7 +352,7 @@ class LumiApp(App):
     async def _cleanup_stale_checkpoints(self) -> None:
         """后台清理过期的 checkpoint thread 目录。"""
         try:
-            from lumi.agents.tools.checkpoint import cleanup_stale_threads
+            from lumi.agents.runtime.checkpoint import cleanup_stale_threads
 
             removed = await asyncio.to_thread(cleanup_stale_threads)
             if removed:
@@ -727,7 +727,7 @@ class LumiApp(App):
 
     async def _open_bg_screen(self) -> None:
         """打开后台任务列表界面。"""
-        from lumi.agents.tools.task_registry import TaskStatus, get_task_registry
+        from lumi.agents.runtime.bg_tasks import TaskStatus, get_task_registry
 
         entries = [
             e for e in get_task_registry().all_tasks() if e.status == TaskStatus.RUNNING
@@ -742,7 +742,7 @@ class LumiApp(App):
 
     def _update_bg_indicator(self) -> None:
         """定时更新 InputBar 中的后台任务指示器。"""
-        from lumi.agents.tools.task_registry import (
+        from lumi.agents.runtime.bg_tasks import (
             TaskStatus,
             get_task_registry,
         )
@@ -1070,7 +1070,7 @@ class LumiApp(App):
         await self._run_resume(event.answer)
 
     async def on_tool_approval_decided(self, event: ToolApproval.Decided) -> None:
-        from lumi.agents.tools.permissions.workspace import add_authorized_directory
+        from lumi.agents.permissions.workspace import add_authorized_directory
 
         decision = event.decision
         approval_data = self._run.last_approval_data

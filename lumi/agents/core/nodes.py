@@ -19,8 +19,8 @@ from lumi.agents.core.node_helpers.messages import (
 )
 from lumi.agents.core.state import LumiAgentContext, LumiAgentState
 from lumi.agents.tools.capability import is_file_edit_tool, is_write_tool
-from lumi.agents.tools.permissions.models import PermissionDecision
-from lumi.agents.tools.permissions.safety import is_bypass_immune
+from lumi.agents.permissions.models import PermissionDecision
+from lumi.agents.permissions.safety import is_bypass_immune
 from lumi.agents.core.structured_tool import (
     STRUCTURED_OUTPUT_INSTRUCTION,
     apply_output_enrich,
@@ -125,7 +125,7 @@ def policy_reject(state: LumiAgentState) -> Command:
     为每个被阻止的 tool_call 生成拒绝 ToolMessage，路由回 CallModel 让模型调整。
     确保 tool_call_id 匹配（避免 LangGraph 校验失败）。
     """
-    from lumi.agents.tools.permissions.mode_policy import check_policy, get_policy
+    from lumi.agents.permissions.mode_policy import check_policy, get_policy
 
     mode = state.get("execution_mode", "normal")
     policy = get_policy(mode)
@@ -219,7 +219,7 @@ def is_use_tool(state: LumiAgentState, runtime: Runtime[LumiAgentContext]) -> st
     # 执行模式策略守卫（Layer 2: 根据当前模式策略拦截不允许的工具调用）
     execution_mode = state.get("execution_mode", "normal")
     if execution_mode != "normal":
-        from lumi.agents.tools.permissions.mode_policy import check_policy, get_policy
+        from lumi.agents.permissions.mode_policy import check_policy, get_policy
 
         policy = get_policy(execution_mode)
         if policy is not None:

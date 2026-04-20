@@ -12,7 +12,7 @@ from lumi.agents.tools.providers.background_task import (
     _format_task_status,
     _handle_stop,
 )
-from lumi.agents.tools.task_registry import (
+from lumi.agents.runtime.bg_tasks import (
     BackgroundTaskEntry,
     TaskKind,
     TaskStatus,
@@ -188,7 +188,7 @@ async def test_stop_bash_task(registry):
             output_file=Path("/tmp/bg_hhh.txt"),
         )
     )
-    import lumi.agents.tools.session as session_mod
+    import lumi.agents.runtime.session as session_mod
 
     mock_mgr = AsyncMock()
     mock_mgr.cancel_task = AsyncMock()

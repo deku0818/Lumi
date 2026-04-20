@@ -17,12 +17,12 @@ from langgraph.types import Command
 
 from lumi.agents.core.graph import LumiAgent, create_agent
 from lumi.agents.core.meta_message import meta_human_message
-from lumi.agents.tools.permissions.models import BYPASS_TOOLS
+from lumi.agents.permissions.models import BYPASS_TOOLS
 from lumi.agents.core.state import LumiAgentContext
-from lumi.agents.tools.checkpoint import CheckpointInfo, FileCheckpointManager
-from lumi.agents.tools.file_tracker import FileChangeTracker
+from lumi.agents.runtime.checkpoint import CheckpointInfo, FileCheckpointManager
+from lumi.agents.runtime.file_tracker import FileChangeTracker
 from lumi.agents.tools.providers.mcp import get_mcp_session_manager
-from lumi.agents.tools.session import get_session_manager
+from lumi.agents.runtime.session import get_session_manager
 from lumi.utils.constants import MAX_STREAM_RETRIES, RETRY_BASE_WAIT
 from lumi.utils.logger import logger
 from lumi.utils.model_manager import get_default_model_name
@@ -177,7 +177,7 @@ class AgentBridge:
 
     def drain_notifications(self) -> list[str]:
         """从 TaskRegistry 的 NotificationQueue 中取出所有待发送通知。"""
-        from lumi.agents.tools.task_registry import get_task_registry
+        from lumi.agents.runtime.bg_tasks import get_task_registry
 
         return get_task_registry().notification_queue.drain_all()
 
@@ -469,11 +469,11 @@ class AgentBridge:
         原 human_approval 节点中的权限评估、边界检查、选项构建逻辑迁移至此，
         使 Graph 侧保持纯净的三态契约。
         """
-        from lumi.agents.tools.permissions.matcher import (
+        from lumi.agents.permissions.matcher import (
             build_exact_expr,
         )
-        from lumi.agents.tools.permissions.models import PermissionDecision
-        from lumi.agents.tools.permissions.validators import validate_bash_command
+        from lumi.agents.permissions.models import PermissionDecision
+        from lumi.agents.permissions.validators import validate_bash_command
 
         engine = self._context.permission_engine if self._context else None
         tool_calls = data.get("tool_calls", [])

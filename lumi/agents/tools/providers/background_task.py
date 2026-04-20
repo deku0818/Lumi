@@ -8,7 +8,7 @@ from typing import Literal
 from langchain_core.tools import tool
 from pydantic import BaseModel, Field
 
-from lumi.agents.tools.task_registry import (
+from lumi.agents.runtime.bg_tasks import (
     TaskKind,
     TaskStatus,
     get_task_registry,
@@ -140,7 +140,7 @@ async def _handle_stop(task_id: str) -> str:
 
 async def _stop_bash_task(task_id: str) -> str:
     """停止 Bash 后台任务。"""
-    from lumi.agents.tools.session import get_session_manager
+    from lumi.agents.runtime.session import get_session_manager
 
     session_mgr = get_session_manager()
     if not session_mgr.has_bg_manager:

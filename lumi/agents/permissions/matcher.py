@@ -8,7 +8,7 @@ from __future__ import annotations
 import re
 from pathlib import Path
 
-from lumi.agents.tools.permissions.models import PermissionRule
+from lumi.agents.permissions.models import PermissionRule
 from lumi.utils.logger import logger
 
 # 需要通过命令模式匹配的工具

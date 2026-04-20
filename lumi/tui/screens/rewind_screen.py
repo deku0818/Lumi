@@ -10,7 +10,7 @@ from rich.text import Text
 from textual.widget import Widget
 from textual.widgets import Static
 
-from lumi.agents.tools.checkpoint import CheckpointInfo
+from lumi.agents.runtime.checkpoint import CheckpointInfo
 from lumi.tui.screens.list_screen import ListScreen
 
 

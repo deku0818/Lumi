@@ -3,12 +3,12 @@
 from pathlib import Path
 
 from lumi.agents.tools.capability import split_compound_command
-from lumi.agents.tools.permissions.matcher import (
+from lumi.agents.permissions.matcher import (
     RuleMatcher,
     build_exact_expr,
     build_pattern_expr,
 )
-from lumi.agents.tools.permissions.models import Permission, PermissionRule
+from lumi.agents.permissions.models import Permission, PermissionRule
 
 
 class TestParseToolExpression:

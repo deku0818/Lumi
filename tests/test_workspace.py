@@ -2,8 +2,8 @@
 
 import pytest
 
-import lumi.agents.tools.permissions.workspace as workspace
-from lumi.agents.tools.permissions.workspace import (
+import lumi.agents.permissions.workspace as workspace
+from lumi.agents.permissions.workspace import (
     add_authorized_directory,
     get_authorized_directory,
     set_authorized_directory,

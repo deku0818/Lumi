@@ -24,7 +24,7 @@ from lumi.agents.core.nodes import (
 )
 from lumi.agents.core.state import LumiAgentContext, LumiAgentState
 from lumi.agents.tools import get_tools
-from lumi.agents.tools.permissions.engine import PermissionEngine
+from lumi.agents.permissions.engine import PermissionEngine
 from lumi.utils.config import CheckpointMode, GlobalConfigManager
 from lumi.utils.logger import logger
 from lumi.utils.model_manager import get_default_model_name

@@ -1,7 +1,7 @@
 """Bash 工具测试"""
 
 from lumi.agents.tools.providers.bash import _format_result
-from lumi.agents.tools.session import CommandResult
+from lumi.agents.runtime.session import CommandResult
 
 
 class TestFormatResult:

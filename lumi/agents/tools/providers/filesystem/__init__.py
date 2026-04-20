@@ -14,7 +14,7 @@ from pathlib import Path
 from typing import TYPE_CHECKING, Annotated, Literal
 
 if TYPE_CHECKING:
-    from lumi.agents.tools.file_tracker import FileChangeTracker
+    from lumi.agents.runtime.file_tracker import FileChangeTracker
 
 import fitz
 from langchain_core.messages import ToolMessage
@@ -24,11 +24,11 @@ from pydantic import BaseModel, Field
 from wcmatch import glob as wcglob
 
 from lumi.agents.core.meta_message import meta_human_message
-from lumi.agents.tools.permissions.workspace import (
+from lumi.agents.permissions.workspace import (
     get_authorized_directory,
     validate_path,
 )
-from lumi.agents.tools.providers._media import (
+from lumi.agents.tools.providers.filesystem.media import (
     PDF_INLINE_PAGE_THRESHOLD,
     PDF_MAX_EXTRACT_SIZE,
     PDF_MAX_PAGES_PER_READ,

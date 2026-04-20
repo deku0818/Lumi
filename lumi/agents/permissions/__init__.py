@@ -4,17 +4,17 @@
 工作区边界保护和多级配置加载。
 """
 
-from lumi.agents.tools.permissions.boundary import WorkspaceBoundary
-from lumi.agents.tools.permissions.config_loader import ConfigLoader
-from lumi.agents.tools.permissions.engine import PermissionEngine
+from lumi.agents.permissions.boundary import WorkspaceBoundary
+from lumi.agents.permissions.config_loader import ConfigLoader
+from lumi.agents.permissions.engine import PermissionEngine
 from lumi.agents.tools.capability import split_compound_command
-from lumi.agents.tools.permissions.matcher import (
+from lumi.agents.permissions.matcher import (
     RuleMatcher,
     build_exact_expr,
     build_pattern_expr,
 )
-from lumi.agents.tools.permissions.safety import is_bypass_immune
-from lumi.agents.tools.permissions.models import (
+from lumi.agents.permissions.safety import is_bypass_immune
+from lumi.agents.permissions.models import (
     BYPASS_TOOLS,
     DEFAULT_RULES,
     ApprovalOption,

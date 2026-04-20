@@ -5,7 +5,7 @@ import tempfile
 
 import pytest
 
-from lumi.agents.tools.session import (
+from lumi.agents.runtime.session import (
     LocalShellSession,
     SessionManager,
 )

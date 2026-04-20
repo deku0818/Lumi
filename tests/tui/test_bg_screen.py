@@ -5,7 +5,7 @@ from __future__ import annotations
 import time
 from pathlib import Path
 
-from lumi.agents.tools.task_registry import (
+from lumi.agents.runtime.bg_tasks import (
     BackgroundTaskEntry,
     TaskKind,
     TaskStatus,

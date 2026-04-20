@@ -2,7 +2,7 @@
 
 from pathlib import Path
 
-from lumi.agents.tools.permissions.safety import is_bypass_immune
+from lumi.agents.permissions.safety import is_bypass_immune
 
 
 class TestFileToolSafety:

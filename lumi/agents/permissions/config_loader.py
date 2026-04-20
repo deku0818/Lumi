@@ -11,7 +11,7 @@ from pathlib import Path
 from typing import Any
 
 from lumi.utils.jsonc import parse_jsonc
-from lumi.agents.tools.permissions.models import (
+from lumi.agents.permissions.models import (
     DEFAULT_RULES,
     Permission,
     PermissionConfig,

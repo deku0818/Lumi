@@ -54,7 +54,7 @@ START → PreprocessMessages → CallModel → is_use_tool() 条件路由:
 
 ### 权限系统
 
-`agents/tools/permissions/` 下的 `PermissionEngine`：
+`agents/permissions/` 下的 `PermissionEngine`：
 - 从 `~/.lumi/settings.json`（用户级）和 `.lumi/settings.json`（项目级）加载规则
 - 评估顺序：Deny → Allow → Unmatched
 - 工作区边界检查：限制工具只能访问授权目录

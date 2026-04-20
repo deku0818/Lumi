@@ -14,7 +14,7 @@ from langgraph.prebuilt.tool_node import ToolRuntime
 
 from lumi.agents.tools.loader import AgentConfig, load_agents
 from lumi.agents.tools.registry import get_tool_registry
-from lumi.agents.tools.task_registry import (
+from lumi.agents.runtime.bg_tasks import (
     BackgroundTaskEntry,
     TaskKind,
     TaskStatus,
@@ -167,7 +167,7 @@ def _start_background_agent(
     """注册后台 Agent 任务并 fire-and-forget 启动。"""
     task_id = f"bg_{uuid.uuid4().hex[:_TASK_ID_HEX_LENGTH]}"
 
-    from lumi.agents.tools.permissions.workspace import get_authorized_directory
+    from lumi.agents.permissions.workspace import get_authorized_directory
 
     output_dir = Path(str(get_authorized_directory())) / _BG_TASKS_DIR
     output_dir.mkdir(parents=True, exist_ok=True)

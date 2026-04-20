@@ -17,7 +17,7 @@ from textual.screen import ModalScreen
 from textual.widget import Widget
 from textual.widgets import Rule, Static
 
-from lumi.agents.tools.task_registry import (
+from lumi.agents.runtime.bg_tasks import (
     BackgroundTaskEntry,
     TaskKind,
     TaskStatus,
@@ -262,7 +262,7 @@ class BgScreen(ListScreen[BackgroundTaskEntry]):
 
 async def _stop_bash(task_id: str) -> None:
     """异步停止 Bash 后台任务。"""
-    from lumi.agents.tools.session import get_session_manager
+    from lumi.agents.runtime.session import get_session_manager
 
     session_mgr = get_session_manager()
     if session_mgr.has_bg_manager:

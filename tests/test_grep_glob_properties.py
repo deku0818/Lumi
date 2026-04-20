@@ -10,7 +10,7 @@ from pathlib import Path
 
 from hypothesis import given, settings, strategies as st
 
-import lumi.agents.tools.permissions.workspace as workspace
+import lumi.agents.permissions.workspace as workspace
 from lumi.agents.tools.providers.filesystem import LocalFilesystemBackend
 
 

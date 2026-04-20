@@ -1,6 +1,6 @@
 """Bash 安全校验器测试（纯字符串匹配，不执行任何真实命令）"""
 
-from lumi.agents.tools.permissions.validators import validate_bash_command
+from lumi.agents.permissions.validators import validate_bash_command
 
 
 class TestValidateBashCommand:

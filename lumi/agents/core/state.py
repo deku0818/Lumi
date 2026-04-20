@@ -3,7 +3,7 @@ from __future__ import annotations
 from typing import TYPE_CHECKING, Annotated, Any, Literal, NotRequired, TypedDict
 
 if TYPE_CHECKING:
-    from lumi.agents.tools.permissions.engine import PermissionEngine
+    from lumi.agents.permissions.engine import PermissionEngine
 
 from langgraph.graph.message import add_messages
 

@@ -14,7 +14,7 @@ import pytest
 from langchain_core.messages import HumanMessage
 from PIL import Image
 
-from lumi.agents.tools.providers._media import (
+from lumi.agents.tools.providers.filesystem.media import (
     IMAGE_FALLBACK_DIMENSION,
     IMAGE_MAX_DIMENSION,
     PDF_MAX_EXTRACT_SIZE,

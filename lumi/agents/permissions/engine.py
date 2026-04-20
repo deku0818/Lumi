@@ -8,23 +8,23 @@ from __future__ import annotations
 import json
 from pathlib import Path
 
-from lumi.agents.tools.permissions.boundary import WorkspaceBoundary
-from lumi.agents.tools.permissions.config_loader import ConfigLoader
+from lumi.agents.permissions.boundary import WorkspaceBoundary
+from lumi.agents.permissions.config_loader import ConfigLoader
 from lumi.agents.tools.capability import split_compound_command
-from lumi.agents.tools.permissions.matcher import (
+from lumi.agents.permissions.matcher import (
     COMMAND_ARG_KEYS,
     COMMAND_TOOLS,
     RuleMatcher,
     extract_arg,
 )
-from lumi.agents.tools.permissions.models import (
+from lumi.agents.permissions.models import (
     Permission,
     PermissionConfig,
     PermissionDecision,
     PermissionRule,
     ToolCallInfo,
 )
-from lumi.agents.tools.permissions.workspace import (
+from lumi.agents.permissions.workspace import (
     add_authorized_directory,
     set_authorized_directory,
 )
