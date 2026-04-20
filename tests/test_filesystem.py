@@ -245,9 +245,17 @@ class TestToolWrappers:
 
         f = authorized_tmp_dir / "r.txt"
         f.write_text("hello\nworld")
-        result = await read.ainvoke({"file_path": str(f)})
-        assert "hello" in result
-        assert "world" in result
+        # 使用完整 ToolCall 格式调用,以满足 InjectedToolCallId 的注入要求
+        tool_call = {
+            "name": "read",
+            "args": {"file_path": str(f)},
+            "id": "test_call_1",
+            "type": "tool_call",
+        }
+        result = await read.ainvoke(tool_call)
+        assert hasattr(result, "content")
+        assert "hello" in result.content
+        assert "world" in result.content
 
     async def test_write_tool_success(self, authorized_tmp_dir):
         from lumi.agents.tools.providers.filesystem import write

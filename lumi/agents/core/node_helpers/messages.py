@@ -23,10 +23,7 @@ from lumi.utils.token_counter import str_token_counter
 
 
 def content_to_str(content: str | list[Any] | object) -> str:
-    """将消息 content 转换为纯文本字符串。
-
-    支持 str、list[str | dict] 以及任意对象（fallback ``str()``）。
-    """
+    """将消息 content 转换为纯文本字符串。多模态 block 转占位避免泄漏 base64。"""
     if isinstance(content, str):
         return content
     if isinstance(content, list):
@@ -34,7 +31,32 @@ def content_to_str(content: str | list[Any] | object) -> str:
         for block in content:
             if isinstance(block, str):
                 parts.append(block)
-            elif isinstance(block, dict) and "text" in block:
+                continue
+            if not isinstance(block, dict):
+                continue
+            btype = block.get("type")
+            if btype == "text" and "text" in block:
+                parts.append(block["text"])
+            elif btype == "image":
+                source = block.get("source", {})
+                mt = (
+                    source.get("media_type", "image/?")
+                    if isinstance(source, dict)
+                    else "image/?"
+                )
+                parts.append(f"[image: {mt}]")
+            elif btype == "image_url":
+                parts.append("[image_url]")
+            elif btype == "document":
+                source = block.get("source", {})
+                mt = (
+                    source.get("media_type", "application/?")
+                    if isinstance(source, dict)
+                    else "application/?"
+                )
+                parts.append(f"[document: {mt}]")
+            elif "text" in block:
+                # 其他类型(例如 thinking)若带 text 字段仍保留
                 parts.append(block["text"])
         return "\n".join(parts)
     return str(content)

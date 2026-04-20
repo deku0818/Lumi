@@ -1,5 +1,24 @@
 # Changelog
 
+## [0.1.0a7] - 2026-04-21
+
+### Added
+- `read` 工具多模态支持 — 图片(PNG/JPG/JPEG/GIF/WebP)和 PDF 自动渲染为 image block 注入对话,让模型直接"看到"文件内容
+- `lumi/agents/tools/providers/_media.py` 媒体处理模块 — 两阶段图片压缩管线(API 硬约束 5MB/2000px + token 预算 25k)、PDF 按页渲染(150 DPI)、magic bytes 校验防伪装文件污染 session
+- PDF `pages` 参数 — 支持 `"1-5"` / `"1,3,5"` / `"1-3,7,9-10"` 等范围格式,单次最多 20 页;≤10 页 PDF 不传 `pages` 时整体渲染,>10 页必须分段
+- `lumi/agents/core/meta_message.py` — 集中管理 meta human message 的构造和识别(`META_KEY` / `meta_human_message()` / `is_meta_message()`),取代分散在各处的 `additional_kwargs["is_meta"]` 操作
+- `docs/guides/read-multimodal.md` — read 工具多模态读取使用指南
+
+### Changed
+- `call_model` 前对 `HumanMessage` 中的多模态 content 按 provider 做格式转换(Anthropic 原样 / OpenAI 转 `image_url` 支持 base64 data URL),统一内部走 Anthropic 风格 block
+- `content_to_str` 对多模态 block(image / image_url / document)转为 `[image: media/type]` 占位,避免 base64 泄漏到摘要/日志中
+- 消息截断 `_truncate_single_message` 跳过含多模态 block 的消息 — 图片已走过压缩管线,再截文本会破坏 block 结构
+- `vision_mode` 配置从 `simple_agent.vision_mode` 读取迁移到 `agents.vision_mode`,与其他 agent 配置同组
+- `tui/agent_bridge.py` 和 `tui/message_visibility.py` 改用 `meta_message` 模块
+
+### Fixed
+- OpenAI 格式转换现在正确处理 `image_url` 原样 block 和 `image` base64 source(此前只处理 URL source)
+
 ## [0.1.0a6] - 2026-04-10
 
 ### Added

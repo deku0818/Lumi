@@ -17,3 +17,4 @@ test
 .kiro
 .hypothesis
 docs/claude-code/
+.DS_store

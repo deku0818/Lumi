@@ -88,12 +88,27 @@ async def _try_offload_to_file(
     )
 
 
+def _has_multimodal_blocks(content: Any) -> bool:
+    """判断 content 是否是包含 image/document block 的 list。"""
+    if not isinstance(content, list):
+        return False
+    return any(
+        isinstance(b, dict) and b.get("type") in ("image", "image_url", "document")
+        for b in content
+    )
+
+
 async def _truncate_single_message(msg: object, max_tokens: int) -> None:
     """对单条消息执行截断/卸载，就地修改 ``msg.content``。"""
     if not hasattr(msg, "content"):
         return
 
     original_content = msg.content
+
+    # 多模态 content 不截断:图片已走过压缩管线,再截文本会破坏 block 结构
+    if _has_multimodal_blocks(original_content):
+        return
+
     truncated_content = truncate_docs_to_max_tokens(
         original_content, max_tokens=max_tokens
     )

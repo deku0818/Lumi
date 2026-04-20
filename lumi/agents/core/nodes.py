@@ -28,7 +28,7 @@ from lumi.agents.core.structured_tool import (
     extract_structured_args,
     is_structured_output_call,
 )
-from lumi.agents.core.response import extract_ainvoke_content
+from lumi.agents.core.response import extract_ainvoke_content, message_transform
 from lumi.agents.core.preprocessing.summary import inject_summary_into_message
 from lumi.agents.core.preprocessing.skill_detector import SkillChangeDetector
 from lumi.agents.core.preprocessing.skills import inject_skills_into_message
@@ -68,7 +68,16 @@ async def call_model(state: LumiAgentState, runtime: Runtime[LumiAgentContext]) 
     if detect_model_type(model_name) in ("anthropic", "bedrock"):
         inject_message_cache_breakpoints(messages)
 
-    response = await chain.ainvoke({"messages": messages})
+    # 多模态 block 内部统一 Anthropic 风格,在此按 provider 转换
+    transformed_messages: list = []
+    for m in messages:
+        if isinstance(m, HumanMessage) and isinstance(m.content, list):
+            new_content = await message_transform(m.content, model_name=model_name)
+            transformed_messages.append(m.model_copy(update={"content": new_content}))
+        else:
+            transformed_messages.append(m)
+
+    response = await chain.ainvoke({"messages": transformed_messages})
 
     if response.tool_calls:
         logger.debug(f"[SimpleAgent]正在进行第「{iterations}」次工具调用迭代")

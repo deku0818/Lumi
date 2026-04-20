@@ -16,6 +16,7 @@ from langchain_core.runnables.config import RunnableConfig
 from langgraph.types import Command
 
 from lumi.agents.core.graph import LumiAgent, create_agent
+from lumi.agents.core.meta_message import meta_human_message
 from lumi.agents.tools.permissions.models import BYPASS_TOOLS
 from lumi.agents.core.state import LumiAgentContext
 from lumi.agents.tools.checkpoint import CheckpointInfo, FileCheckpointManager
@@ -154,9 +155,9 @@ class AgentBridge:
 
         # 新一轮对话，清理上一轮残留的 agent 追踪状态
         self._active_agent_runs.clear()
-        extra_kwargs = {"is_meta": True} if is_meta else {}
+        msg = meta_human_message(content) if is_meta else HumanMessage(content=content)
         input_data = {
-            "messages": [HumanMessage(content=content, additional_kwargs=extra_kwargs)],
+            "messages": [msg],
             "tool_mode": tool_mode,
             "execution_mode": execution_mode,
         }

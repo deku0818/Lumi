@@ -96,7 +96,7 @@ async def message_transform(
     if isinstance(question, str):
         return question
 
-    if get_config().config.simple_agent.vision_mode == "tool":
+    if get_config().config.agents.vision_mode == "tool":
         return _convert_content_to_tool_mode(question)
 
     if model_name is None:
@@ -141,7 +141,11 @@ def _convert_content_to_tool_mode(content: list[dict]) -> str:
 def _convert_content_to_openai_format(
     content: list[dict], model_name: str
 ) -> list[dict]:
-    """将 Anthropic content blocks 转换为 OpenAI 格式"""
+    """将 Anthropic content blocks 转换为 OpenAI 格式。
+
+    - text / image_url block: 原样保留
+    - image block (url / base64): → image_url (raw URL / data URL)
+    """
     converted = []
 
     for item in content:
@@ -153,6 +157,8 @@ def _convert_content_to_openai_format(
 
         if item_type == "text":
             converted.append(item)
+        elif item_type == "image_url":
+            converted.append(item)
         elif item_type == "image":
             source = item.get("source", {})
             if isinstance(source, dict) and source.get("type") == "url":
@@ -160,6 +166,15 @@ def _convert_content_to_openai_format(
                     {
                         "type": "image_url",
                         "image_url": {"url": source.get("url", "")},
+                    }
+                )
+            elif isinstance(source, dict) and source.get("type") == "base64":
+                media_type = source.get("media_type", "image/png")
+                data = source.get("data", "")
+                converted.append(
+                    {
+                        "type": "image_url",
+                        "image_url": {"url": f"data:{media_type};base64,{data}"},
                     }
                 )
             else:
