@@ -13,6 +13,8 @@ from lumi.tui.theme import get_color
 # 命令名列宽（含 / 前缀），描述占剩余空间并截断
 _NAME_COL_WIDTH = 28
 
+_VIEWPORT_SIZE = 12
+
 
 def _truncate_by_width(text: str, max_width: int) -> str:
     """按显示宽度截断文本（CJK 字符占 2 列），超出时加省略号。
@@ -45,16 +47,16 @@ class CompletionMenu(Static):
     左列命令名固定宽度，右列描述自动截断不换行。
     """
 
-    DEFAULT_CSS = """
-    CompletionMenu {
+    DEFAULT_CSS = f"""
+    CompletionMenu {{
         display: none;
         width: 100%;
-        max-height: 12;
+        max-height: {_VIEWPORT_SIZE};
         padding: 0 1;
         background: transparent;
         color: $text;
         overflow-x: hidden;
-    }
+    }}
     """
 
     class CommandSelected(Message):
@@ -68,6 +70,7 @@ class CompletionMenu(Static):
         super().__init__(**kwargs)
         self._commands: tuple[SlashCommand, ...] = ()
         self._selected_index: int = 0
+        self._viewport_start: int = 0
 
     def show_commands(self, commands: tuple[SlashCommand, ...]) -> None:
         """更新并展示命令列表。列表为空时自动隐藏。"""
@@ -78,6 +81,7 @@ class CompletionMenu(Static):
             return
         self._commands = commands
         self._selected_index = 0
+        self._viewport_start = 0
         self._render_menu()
         self.styles.display = "block"
 
@@ -86,6 +90,7 @@ class CompletionMenu(Static):
         self.styles.display = "none"
         self._commands = ()
         self._selected_index = 0
+        self._viewport_start = 0
 
     def move_selection(self, direction: int) -> None:
         """上下移动高亮选项。
@@ -111,6 +116,16 @@ class CompletionMenu(Static):
         """菜单是否可见。"""
         return self.styles.display != "none"
 
+    def _adjust_viewport(self) -> None:
+        """确保选中项在可见窗口内，必要时滑动窗口。"""
+        if len(self._commands) <= _VIEWPORT_SIZE:
+            self._viewport_start = 0
+            return
+        if self._selected_index < self._viewport_start:
+            self._viewport_start = self._selected_index
+        elif self._selected_index >= self._viewport_start + _VIEWPORT_SIZE:
+            self._viewport_start = self._selected_index - _VIEWPORT_SIZE + 1
+
     def _render_menu(self) -> None:
         """根据当前命令列表和选中索引渲染菜单内容。
 
@@ -125,23 +140,27 @@ class CompletionMenu(Static):
         accent = get_color("accent")
         muted = get_color("text_muted")
 
+        self._adjust_viewport()
+        start = self._viewport_start
+        end = min(start + _VIEWPORT_SIZE, len(self._commands))
+
         output = Text()
-        for i, cmd in enumerate(self._commands):
-            if i > 0:
+        for i in range(start, end):
+            cmd = self._commands[i]
+            if i > start:
                 output.append("\n")
             # 命令名固定宽度，左对齐
-            name_str = f"/{cmd.name}"
-            name_padded = name_str.ljust(_NAME_COL_WIDTH)
+            name_padded = f"/{cmd.name}".ljust(_NAME_COL_WIDTH)
             # 描述：去除换行，按显示宽度截断（CJK 字符占 2 列）
             desc = _truncate_by_width(
                 " ".join(cmd.description.replace("\n", " ").split()),
                 desc_width,
             )
-
             if i == self._selected_index:
                 output.append(name_padded, style=f"bold {accent}")
                 output.append(desc, style=accent)
             else:
                 output.append(name_padded, style=f"bold {muted}")
                 output.append(desc, style=muted)
+
         self.update(output)

@@ -240,7 +240,7 @@ class InputBar(Vertical):
     InputBar {
         dock: bottom;
         height: auto;
-        max-height: 14;
+        max-height: 24;
         background: transparent;
         padding: 0 2 1 2;
     }

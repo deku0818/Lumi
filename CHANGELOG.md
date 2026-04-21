@@ -1,5 +1,16 @@
 # Changelog
 
+## [0.1.0a9] - 2026-04-21
+
+### Added
+- 斜杠命令补全菜单支持 viewport 滑动 — 匹配项超过 12 项时，窗口跟随 `↑↓` 选中项自动滑动，选中项始终可见
+
+### Changed
+- `InputBar` `max-height` 由 14 提升至 24 — 容纳满高度的 ChatInput(8) + CompletionMenu(12) + 状态行(1)，避免菜单被截断
+- `CompletionMenu._VIEWPORT_SIZE` 作为单一事实源，通过 f-string 注入 CSS `max-height`，消除 Python 常量与 CSS 值的重复
+- `CLAUDE.md` 精简 —— "常用命令" 章节移除，代码风格原则合并重写
+- `docs/guides/slash-commands.md` 补充长列表自动滑动说明
+
 ## [0.1.0a8] - 2026-04-21
 
 ### Changed

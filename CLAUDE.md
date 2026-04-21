@@ -7,22 +7,20 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 Lumi 是一个基于 LangGraph 的 AI Agent 框架，提供终端 TUI 界面（Textual）和 HTTP API（FastAPI）两种交互方式。支持多模型（OpenAI、Anthropic、Bedrock）、工具调用、权限控制、定时任务、技能扩展和 MCP 协议集成。
 Lumi 并非仅仅面向Coder，也面向所有非技术人员。
 
-## 常用命令
+## 代码风格
 
-```bash
-uv sync --all              # 安装所有依赖（含 dev）
-uv run pytest              # 运行全部测试
-uv run pytest tests/test_foo.py              # 运行单个测试文件
-uv run pytest tests/test_foo.py::test_bar    # 运行单个测试函数
-uv run ruff format .       # 代码格式化
-uv run ruff check --fix .  # Lint 检查并自动修复
-lumi                       # 启动 TUI
-lumi -s code               # 指定提示词风格启动
-lumi -p "query"            # Headless 模式（直接输出到 stdout）
-lumi --privileged-danger   # 特权模式（跳过所有工具审批）
-```
+- 架构采用分层设计：底层提供基本操作和数据结构，组合后具备充分的灵活性；高层提供开箱即用的 API，足以满足大多数使用场景。
+- 偏好简洁明确的函数，每个函数专注于单一任务，输入和输出类型应明确指定。
+- 用最少的代码解决问题，不要任何预设之外的东西，如果你写了 200 行，而 50 行足矣，推倒重写。
+- 不为不可能发生的场景写错误处理。
+- 自问一句："一位资深工程师看到这段代码，会觉得过度设计吗？"答案若是肯定，就精简。
+- 偏好不可变对象（初始化后不再变化）。复用性优先。
 
-添加依赖使用 `uv add <package>`，不要直接修改 pyproject.toml。
+项目使用 uv 管理；项目依赖始终使用 uv 进行管理，而非直接改 `pyproject.toml`。
+
+## 重要原则
+
+- 对于不确定的东西不要"猜"而是"验证"，禁止"可能是这样"的行为
 
 ## 架构概要
 
@@ -98,14 +96,4 @@ START → PreprocessMessages → CallModel → is_use_tool() 条件路由:
 - TUI 测试在 `tests/tui/`
 - TUI 界面开发时应使用 Textual 的 SVG 能力主动验证样式，参考 `test/TUI_VISUAL_TESTING.md`
 
-## 代码风格
 
-- 简洁明确的函数，单一职责，明确的输入输出类型
-- 组合优于继承
-- 偏好不可变对象
-- 禁止可变全局状态，确保同进程多实例独立
-- 分层架构：底层提供灵活的基本操作，高层提供开箱即用的简单 API
-
-## 重要原则
-
-- 对于不确定的东西不要"猜"而是"验证"，禁止"可能是这样"的行为
