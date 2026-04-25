@@ -65,6 +65,37 @@ async def test_execute_timeout():
         await s.close()
 
 
+@_SKIP_WINDOWS
+async def test_execute_truncates_oversized_output(shell_session):
+    # yes | head 产生 40KB 输出，超过 30KB 阈值 → 触发截断 trailer
+    result = await shell_session.execute("yes | head -n 20000", timeout=10.0)
+    assert result.success
+    assert result.stdout.startswith("y")
+    assert "[output truncated" in result.stdout
+    assert "KB dropped]" in result.stdout
+    # 总大小不超过 30KB + trailer 少量开销（给 2KB 余量）
+    assert len(result.stdout.encode()) <= 30 * 1024 + 2048
+
+
+@_SKIP_WINDOWS
+async def test_execute_small_output_no_trailer(shell_session):
+    result = await shell_session.execute("echo hello")
+    assert result.success
+    assert "hello" in result.stdout
+    assert "[output truncated" not in result.stdout
+
+
+@_SKIP_WINDOWS
+async def test_execute_truncates_multibyte_utf8(shell_session):
+    # 每个 "中" UTF-8 占 3 字节；20000 行 ≈ 80KB → 必然截断
+    # 防回归：确保字节会计用 encode() 而非 len(str)
+    result = await shell_session.execute("yes 中文 | head -n 20000", timeout=10.0)
+    assert result.success
+    assert "[output truncated" in result.stdout
+    # 实际字节数应受 30KB 上限约束（trailer 约 30 字节）
+    assert len(result.stdout.encode()) <= 30 * 1024 + 2048
+
+
 async def test_session_close():
     s = LocalShellSession()
     await s.execute("echo init")

@@ -1,5 +1,15 @@
 # Changelog
 
+## [0.1.0a10] - 2026-04-26
+
+### Added
+- `bash` 工具 stdout 字节级截断 — 单次执行累积超过 `BASH_MAX_OUTPUT_BYTES`（30 KB）后整行丢弃，末尾追加 `... [output truncated - N KB dropped]` trailer
+- `_BoundedOutputBuffer` 流式累加器（`lumi/agents/runtime/session.py`）— 保头丢尾，超限后仍持续 drain pipe 直至 sentinel，避免 shell 因 stdout 阻塞挂起
+- `docs/guides/bash.md` — bash 工具使用指南，覆盖持久化会话、输出截断、后台执行、超时与权限
+
+### Changed
+- `LocalShellSession._collect_output` 由聚合 `list[str]` 改为聚合 `_BoundedOutputBuffer`，sentinel 行不入 buffer 以保证 exit code 解析不受截断影响
+
 ## [0.1.0a9] - 2026-04-21
 
 ### Added

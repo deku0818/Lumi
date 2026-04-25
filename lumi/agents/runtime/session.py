@@ -23,6 +23,7 @@ from lumi.agents.runtime.bg_tasks import (
     get_task_registry,
 )
 from lumi.utils.constants import (
+    BASH_MAX_OUTPUT_BYTES,
     CWD_QUERY_TIMEOUT,
     DEFAULT_COMMAND_TIMEOUT,
     GRACEFUL_SHUTDOWN_TIMEOUT,
@@ -75,6 +76,38 @@ class BashProcessHandle:
     task_id: str
     process: asyncio.subprocess.Process
     timeout: float
+
+
+class _BoundedOutputBuffer:
+    """字节级流式累加器：保头丢尾。
+
+    用于 LocalShellSession._collect_output 实时限制内存占用。
+    超过 max_bytes 后的整行丢弃（不部分截断行），累计 dropped_bytes 供 trailer 使用。
+    """
+
+    __slots__ = ("_lines", "_bytes_used", "_dropped_bytes", "_max_bytes")
+
+    def __init__(self, max_bytes: int) -> None:
+        self._lines: list[str] = []
+        self._bytes_used: int = 0
+        self._dropped_bytes: int = 0
+        self._max_bytes: int = max_bytes
+
+    def append(self, line: str) -> None:
+        # +1 预留 __str__ join 时插入的换行符
+        line_bytes = len(line.encode("utf-8", errors="replace")) + 1
+        if self._bytes_used + line_bytes <= self._max_bytes:
+            self._lines.append(line)
+            self._bytes_used += line_bytes
+        else:
+            self._dropped_bytes += line_bytes
+
+    def __str__(self) -> str:
+        text = "\n".join(self._lines)
+        if self._dropped_bytes > 0:
+            kb = self._dropped_bytes // 1024 or 1
+            text += f"\n... [output truncated - {kb} KB dropped]"
+        return text
 
 
 # ---------------------------------------------------------------------------
@@ -423,15 +456,15 @@ class LocalShellSession:
     ) -> CommandResult:
         """读取进程输出直到遇到哨兵标记或超时。"""
         assert process.stdout is not None
-        output_lines: list[str] = []
+        buffer = _BoundedOutputBuffer(BASH_MAX_OUTPUT_BYTES)
         exit_code = -1
 
         try:
             exit_code = await self._collect_output(
-                process.stdout, sentinel, output_lines, timeout
+                process.stdout, sentinel, buffer, timeout
             )
             return CommandResult(
-                stdout="\n".join(output_lines),
+                stdout=str(buffer),
                 exit_code=exit_code,
                 success=(exit_code == 0),
                 timed_out=False,
@@ -439,7 +472,7 @@ class LocalShellSession:
         except asyncio.TimeoutError:
             await self._handle_timeout(process)
             return CommandResult(
-                stdout="\n".join(output_lines),
+                stdout=str(buffer),
                 exit_code=exit_code,
                 success=False,
                 timed_out=True,
@@ -449,10 +482,13 @@ class LocalShellSession:
     async def _collect_output(
         stdout: asyncio.StreamReader,
         sentinel: str,
-        output_lines: list[str],
+        buffer: _BoundedOutputBuffer,
         timeout: float,
     ) -> int:
-        """从 stdout 逐行收集输出，返回解析到的退出码。
+        """从 stdout 逐行收集输出到 buffer，返回解析到的退出码。
+
+        buffer 超限后续行会被丢弃，但循环会持续读取以消费 pipe
+        直到遇到 sentinel — 避免 shell 因 stdout pipe 未被消费而阻塞。
 
         Raises:
             asyncio.TimeoutError: 读取超时。
@@ -468,10 +504,10 @@ class LocalShellSession:
             )
 
             if sentinel not in line:
-                output_lines.append(line)
+                buffer.append(line)
                 continue
 
-            # 解析退出码
+            # sentinel 行不进 buffer —— 保证 exit code 解析不受截断影响
             parts = line.split(sentinel)
             if len(parts) >= 2:
                 code_str = parts[1].strip()

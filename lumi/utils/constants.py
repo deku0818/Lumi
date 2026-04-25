@@ -30,6 +30,9 @@ CWD_QUERY_TIMEOUT: Final[float] = 5.0
 GRACEFUL_SHUTDOWN_TIMEOUT: Final[float] = 5.0
 """进程优雅关闭等待秒数"""
 
+BASH_MAX_OUTPUT_BYTES: Final[int] = 30 * 1024
+"""bash 前台 execute() 单次 stdout 累积上限（字节）。超限后续输出丢弃，附 trailer 告知。"""
+
 # ── 图片处理 ──
 
 MAX_IMAGE_SIZE: Final[int] = 20 * 1024 * 1024  # 20MB
