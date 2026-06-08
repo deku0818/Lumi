@@ -20,7 +20,7 @@ from lumi.agents.cron.job_store import JobStore
 from lumi.agents.cron.run_log import RunLog
 from lumi.agents.cron.scheduler import Scheduler
 from lumi.agents.tools.providers.cron import init_cron_tool
-from lumi.tui.agent_bridge import AgentBridge, BridgeEvent
+from lumi.agents.bridge import AgentBridge, BridgeEvent
 from lumi.tui.run_state import RunContext, RunPhase
 from lumi.tui.subagent_tracker import SubagentTracker
 from lumi.tui.theme import APP_CSS, LUMI_DARK_THEME, LUMI_LIGHT_THEME, get_color

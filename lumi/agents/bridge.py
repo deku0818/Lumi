@@ -1,6 +1,7 @@
-"""TUI <-> LumiAgent 桥接层
+"""LumiAgent 桥接层（中立层，供 TUI / desktop WS 服务等前端复用）
 
-直接调用 LumiAgent graph（不走 HTTP），镜像 lumi/api/app.py 的初始化模式。
+直接调用 LumiAgent graph（不走 HTTP），将原始 LangGraph 事件封装为干净的
+BridgeEvent 流，并处理子代理追踪、权限审批富化、checkpoint 回退等。
 """
 
 from __future__ import annotations

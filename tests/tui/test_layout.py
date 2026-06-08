@@ -15,7 +15,7 @@ from dataclasses import dataclass
 
 from textual.app import App, ComposeResult
 
-from lumi.tui.agent_bridge import BridgeEvent, EventKind
+from lumi.agents.bridge import BridgeEvent, EventKind
 from lumi.tui.event_router import EventRouter
 from lumi.tui.run_state import RunContext
 from lumi.tui.subagent_tracker import SubagentTracker

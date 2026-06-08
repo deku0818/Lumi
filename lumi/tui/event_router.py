@@ -11,7 +11,7 @@ from __future__ import annotations
 
 from typing import TYPE_CHECKING, Final, Protocol
 
-from lumi.tui.agent_bridge import BridgeEvent, EventKind
+from lumi.agents.bridge import BridgeEvent, EventKind
 from lumi.tui.render_items import (
     AgentEndItem,
     AgentStartItem,

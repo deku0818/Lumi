@@ -111,6 +111,19 @@ def web_server(
     server.serve(debug=debug)
 
 
+@app.command("serve")
+def serve(
+    host: str = typer.Option("127.0.0.1", help="监听地址"),
+    port: int = typer.Option(8765, help="监听端口"),
+) -> None:
+    """启动 desktop WebSocket 服务（供 Electron / web 前端连接）。"""
+    import uvicorn
+
+    from lumi.server.ws import app as ws_app
+
+    uvicorn.run(ws_app, host=host, port=port)
+
+
 def _run_tui(
     *, privileged: bool = False, accept_edits: bool = False, no_mouse: bool = False
 ) -> None:
@@ -143,7 +156,7 @@ def _run_headless(
     """非交互模式：调用 Agent 输出结果后退出。"""
     import asyncio
 
-    from lumi.tui.agent_bridge import AgentBridge, EventKind
+    from lumi.agents.bridge import AgentBridge, EventKind
 
     if privileged:
         tool_mode = "privileged"
