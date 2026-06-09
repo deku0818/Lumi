@@ -1,5 +1,22 @@
 # Changelog
 
+## [0.1.0a11] - 2026-06-09
+
+### Added
+- Desktop 应用（Electron + React/TS）— 经 WebSocket 复用后端 `AgentBridge`，与 TUI 共享同一套 Agent 运行时；聊天流渲染、审批/澄清/计划对话框、每会话一条 WS 连接的多会话并发
+- 会话管理 — 侧栏 `⋮` 菜单（置顶 / 重命名 / 删除），重命名内联编辑、删除二次确认；置顶项稳定排到列表最前
+- AI 消息复制按钮 — 悬停出现，复制 markdown 原文，复制后 1.5s 内显示「已复制」反馈
+- `lumi/tui/session_meta.py` — 会话用户元数据 sidecar（`~/.lumi/checkpoints/session_meta.json`，按 thread_id 存 pinned/title），textual-free 可供 headless 服务直接使用
+- WS 会话管理 RPC — `pin_session` / `rename_session` / `delete_session`
+- `protocol/` — 前后端 WebSocket 协议的语言中立单一事实源（`events.json` + README）
+- `checkpoint.delete_thread_checkpoint()` — 删除单个 thread 文件级 checkpoint 目录的公开 API
+- `docs/architecture/desktop.md` — Desktop 应用架构文档
+
+### Changed
+- 协议单一命名 — `BridgeEvent.EventKind` 成员值直接采用对外 wire 命名（`namespace.verb`），`server/protocol.py` 只做 payload 重组，消除 BridgeEvent→wire 映射层；`tests/server/test_protocol_contract.py` 读 `protocol/events.json` 锁住两端事件名/方法名一致
+- `bridge.delete_thread()` 统一清理两类 checkpoint — LangGraph 会话（`adelete_thread`）+ 文件级 checkpoint（`delete_thread_checkpoint`），用 `asyncio.to_thread` 避免阻塞事件循环
+- `lumi/tui/agent_bridge.py` 下沉为 `lumi/agents/bridge.py` — 桥接层供 TUI / desktop WS 服务共用
+
 ## [0.1.0a10] - 2026-04-26
 
 ### Added

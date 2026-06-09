@@ -672,6 +672,16 @@ def cleanup_stale_threads() -> int:
     return removed
 
 
+def delete_thread_checkpoint(thread_id: str) -> bool:
+    """删除指定 thread 的文件级 checkpoint 目录（会话删除时调用）。"""
+    from lumi.utils.config import GlobalConfigManager
+
+    thread_dir = (
+        GlobalConfigManager.load().get_checkpoint_dir() / "filediff" / thread_id
+    )
+    return _remove_thread_dir(thread_dir) if thread_dir.is_dir() else False
+
+
 def _remove_thread_dir(thread_dir: Path) -> bool:
     """安全删除 thread 目录，失败时仅 warning。"""
     try:

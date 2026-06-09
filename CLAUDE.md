@@ -79,6 +79,16 @@ START → PreprocessMessages → CallModel → is_use_tool() 条件路由:
 - tool_mode 从父状态继承
 - 父 TUI 通过 `parent_run_id` 识别子 Agent 事件，路由到 `AgentGroup` 做轻量统计展示
 
+### Desktop / WS 服务
+
+桌面应用（Electron + TS 前端）经 WebSocket 复用后端 `AgentBridge`，与 TUI 共享同一套 Agent 运行时。详见 `docs/architecture/desktop.md`。
+
+- **`lumi/server/ws.py`**：`lumi serve` 拉起的 FastAPI WS 端点。一条 WS = 一个 `AgentBridge`（可切换 thread），JSON-RPC 帧 `{id, method, params}` ↔ `{id, result|error}`，流式事件用 `{method:"event", params}`。
+- **`AgentBridge`**（`agents/bridge.py`）：TUI 与 desktop **共用**的中立桥接层，把 LangGraph 事件封装为 `BridgeEvent` 流。`EventKind` 成员值直接 = 对外 wire 名（`namespace.verb`），`server/protocol.py` 只做 payload 重组，无映射层。
+- **协议单一事实源**：`protocol/events.json`。TS 端 import derive 类型，Python 端由 `tests/server/test_protocol_contract.py` 锁住事件名/方法名一致——改协议只改这一处。
+- **会话元数据**：列表由 checkpoint 派生（`tui/session_store.py`），但 pin/重命名等用户标记存在 `tui/session_meta.py` 的 JSON sidecar（`~/.lumi/checkpoints/session_meta.json`），`list_sessions` 合并后置顶排序。删除经 `bridge.delete_thread()` 一并清理 LangGraph + 文件级 checkpoint。
+- **前端**（`desktop/src/`）：`gateway.ts` 每会话一条 WS 连接（指数退避重连）；`App.tsx` 会话状态机 + 聊天流渲染；`Sidebar.tsx` 会话列表 + `⋮` 右键菜单（置顶/重命名/删除）。
+
 ### 风格系统（Styles）
 
 `lumi/styles/` 下每个子目录是一种风格，包含 `prompts/` 和 `agents/` 子目录。

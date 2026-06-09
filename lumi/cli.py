@@ -175,7 +175,7 @@ def _run_headless(
         try:
             await bridge.initialize()
             async for evt in bridge.stream_response(prompt, tool_mode=tool_mode):
-                if evt.kind == EventKind.STREAM_TOKEN and evt.text:
+                if evt.kind == EventKind.MESSAGE_DELTA and evt.text:
                     sys.stdout.write(evt.text)
                     sys.stdout.flush()
                 elif evt.kind == EventKind.ERROR:

@@ -1,0 +1,178 @@
+@import "tailwindcss";
+
+/* Lumi 双主题色板，值取自 lumi/tui/theme.py 的 DARK_PALETTE / LIGHT_PALETTE。
+   运行时通过根元素 .light class 切换；@theme inline 让 Tailwind 工具类引用这些变量。 */
+:root {
+  --color-canvas: #121220;
+  --color-surface: #1e1e2e;
+  --color-panel: #1a1a2e;
+  --color-line: #333340;
+  --color-separator: #555566;
+  --color-ink: #e0e0e0;
+  --color-muted: #888899;
+  --color-accent: #ffcc00;
+  --color-accent-dim: #666666;
+  --color-success: #4cd964;
+  --color-error: #d94c4c;
+  --color-info: #42a5f5;
+  color-scheme: dark;
+}
+
+:root.light {
+  /* 暖白系：背景带暖黄底，文本暖褐，边框暖灰（配 Lumi 暗金 accent） */
+  --color-canvas: #f7f4ed;
+  --color-surface: #efebe1;
+  --color-panel: #fdfbf6;
+  --color-line: #ddd6c8;
+  --color-separator: #ccc4b2;
+  --color-ink: #2b2620;
+  --color-muted: #78726a;
+  --color-accent: #b8860b;
+  --color-accent-dim: #a89a78;
+  --color-success: #3ba855;
+  --color-error: #b33a3a;
+  --color-info: #1565c0;
+  color-scheme: light;
+}
+
+@theme inline {
+  --color-canvas: var(--color-canvas);
+  --color-surface: var(--color-surface);
+  --color-panel: var(--color-panel);
+  --color-line: var(--color-line);
+  --color-separator: var(--color-separator);
+  --color-ink: var(--color-ink);
+  --color-muted: var(--color-muted);
+  --color-accent: var(--color-accent);
+  --color-accent-dim: var(--color-accent-dim);
+  --color-success: var(--color-success);
+  --color-error: var(--color-error);
+  --color-info: var(--color-info);
+}
+
+html,
+body,
+#root {
+  height: 100%;
+  margin: 0;
+}
+
+body {
+  background: var(--color-canvas);
+  color: var(--color-ink);
+  font-family: system-ui, -apple-system, "Segoe UI", "PingFang SC", sans-serif;
+  /* 学 Hermes：紧凑 13px 正文，桌面级密度 */
+  font-size: 13px;
+  line-height: 1.55;
+  -webkit-font-smoothing: antialiased;
+  overflow: hidden;
+  /* 桌面应用感：默认不可选，文本区域单独放开 */
+  -webkit-user-select: none;
+  user-select: none;
+}
+
+.md,
+textarea,
+input,
+.selectable,
+pre {
+  -webkit-user-select: text;
+  user-select: text;
+}
+
+::selection {
+  background: rgba(255, 204, 0, 0.2);
+}
+
+/* 标题栏：hiddenInset 下红绿灯浮于内容，顶部留出可拖动条 */
+.app-drag {
+  -webkit-app-region: drag;
+}
+.no-drag {
+  -webkit-app-region: no-drag;
+}
+
+.serif {
+  font-family: ui-serif, Georgia, "Songti SC", "Noto Serif SC", serif;
+  letter-spacing: 0.01em;
+}
+
+/* 滚动条：默认暗、hover 金黄 */
+::-webkit-scrollbar {
+  width: 8px;
+  height: 8px;
+}
+::-webkit-scrollbar-track {
+  background: transparent;
+}
+::-webkit-scrollbar-thumb {
+  background: var(--color-line);
+  border-radius: 4px;
+}
+::-webkit-scrollbar-thumb:hover {
+  background: var(--color-accent);
+}
+
+/* textarea 随内容自增高度 */
+.composer {
+  field-sizing: content;
+}
+
+@keyframes blink {
+  0%, 100% { opacity: 1; }
+  50% { opacity: 0; }
+}
+.cursor {
+  color: var(--color-accent);
+  animation: blink 1s step-end infinite;
+}
+
+/* ── Markdown 渲染（助手回复，紧凑密度） ── */
+.md {
+  line-height: 1.6;
+  word-break: break-word;
+}
+.md > :first-child { margin-top: 0; }
+.md > :last-child { margin-bottom: 0; }
+.md p { margin: 0.5em 0; }
+.md h1, .md h2, .md h3, .md h4 {
+  margin: 0.85em 0 0.4em;
+  font-weight: 600;
+  line-height: 1.3;
+}
+.md h1 { font-size: 1.25em; }
+.md h2 { font-size: 1.12em; }
+.md h3 { font-size: 1.04em; }
+.md ul, .md ol { margin: 0.5em 0; padding-left: 1.4em; }
+.md li { margin: 0.2em 0; }
+.md li::marker { color: var(--color-accent-dim); }
+.md a { color: var(--color-info); text-decoration: underline; }
+.md code {
+  font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+  font-size: 0.9em;
+  background: color-mix(in srgb, var(--color-ink) 10%, transparent);
+  padding: 0.1em 0.35em;
+  border-radius: 4px;
+}
+.md pre {
+  background: color-mix(in srgb, var(--color-ink) 6%, var(--color-canvas));
+  border: 1px solid var(--color-line);
+  border-radius: 10px;
+  padding: 0.8em 1em;
+  overflow-x: auto;
+  margin: 0.6em 0;
+}
+.md pre code {
+  background: transparent;
+  padding: 0;
+  font-size: 0.86em;
+}
+.md blockquote {
+  border-left: 3px solid var(--color-accent-dim);
+  padding-left: 0.8em;
+  color: var(--color-muted);
+  margin: 0.6em 0;
+}
+.md table { border-collapse: collapse; margin: 0.6em 0; }
+.md th, .md td { border: 1px solid var(--color-line); padding: 0.3em 0.6em; }
+.md th { background: color-mix(in srgb, var(--color-ink) 5%, transparent); }

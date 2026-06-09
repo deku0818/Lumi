@@ -1,0 +1,123 @@
+// WS JSON-RPC 客户端：对接 lumi serve 的 /ws。
+// 帧协议见 lumi/server/ws.py。带指数退避自动重连（sidecar 启动需要时间）。
+import type { HistoryItem, SessionMeta, WireEvent } from './types'
+
+export type ConnState = 'connecting' | 'open' | 'closed'
+
+type EventHandler = (ev: WireEvent) => void
+type StateHandler = (s: ConnState) => void
+type Pending = { resolve: (v: unknown) => void; reject: (e: unknown) => void }
+
+export class Gateway {
+  private ws: WebSocket | null = null
+  private nextId = 1
+  private pending = new Map<number, Pending>()
+  private eventHandlers = new Set<EventHandler>()
+  private stateHandlers = new Set<StateHandler>()
+  private retry = 0
+  private closedByUser = false
+
+  constructor(private readonly url: string) {}
+
+  connect(): void {
+    this.closedByUser = false
+    this.setState('connecting')
+    const ws = new WebSocket(this.url)
+    this.ws = ws
+    ws.onopen = () => {
+      this.retry = 0
+      this.setState('open')
+    }
+    ws.onclose = () => {
+      this.setState('closed')
+      if (!this.closedByUser) {
+        const delay = Math.min(8000, 500 * 2 ** Math.min(this.retry++, 4))
+        setTimeout(() => this.connect(), delay)
+      }
+    }
+    ws.onmessage = (e) => this.onMessage(JSON.parse(e.data))
+  }
+
+  private onMessage(frame: any): void {
+    if (frame.method === 'event') {
+      for (const h of this.eventHandlers) h(frame.params)
+    } else if (frame.id != null) {
+      const p = this.pending.get(frame.id)
+      if (p) {
+        this.pending.delete(frame.id)
+        frame.error ? p.reject(frame.error) : p.resolve(frame.result)
+      }
+    }
+  }
+
+  request(method: string, params: Record<string, unknown> = {}): Promise<unknown> {
+    return new Promise((resolve, reject) => {
+      if (!this.ws || this.ws.readyState !== WebSocket.OPEN) {
+        reject(new Error('未连接'))
+        return
+      }
+      const id = this.nextId++
+      this.pending.set(id, { resolve, reject })
+      this.ws.send(JSON.stringify({ id, method, params }))
+    })
+  }
+
+  sendMessage(content: string): Promise<unknown> {
+    return this.request('send_message', { content })
+  }
+
+  resume(value: unknown): Promise<unknown> {
+    return this.request('resume', { value })
+  }
+
+  listSessions(): Promise<{ sessions: SessionMeta[] }> {
+    return this.request('list_sessions', { limit: 50 }) as Promise<{ sessions: SessionMeta[] }>
+  }
+
+  newSession(): Promise<{ thread_id: string }> {
+    return this.request('new_session') as Promise<{ thread_id: string }>
+  }
+
+  switchSession(threadId: string): Promise<{ thread_id: string }> {
+    return this.request('switch_session', { thread_id: threadId }) as Promise<{
+      thread_id: string
+    }>
+  }
+
+  loadHistory(threadId: string): Promise<{ items: HistoryItem[] }> {
+    return this.request('load_history', { thread_id: threadId }) as Promise<{
+      items: HistoryItem[]
+    }>
+  }
+
+  pinSession(threadId: string, pinned: boolean): Promise<unknown> {
+    return this.request('pin_session', { thread_id: threadId, pinned })
+  }
+
+  renameSession(threadId: string, title: string): Promise<unknown> {
+    return this.request('rename_session', { thread_id: threadId, title })
+  }
+
+  deleteSession(threadId: string): Promise<unknown> {
+    return this.request('delete_session', { thread_id: threadId })
+  }
+
+  onEvent(h: EventHandler): () => void {
+    this.eventHandlers.add(h)
+    return () => this.eventHandlers.delete(h)
+  }
+
+  onState(h: StateHandler): () => void {
+    this.stateHandlers.add(h)
+    return () => this.stateHandlers.delete(h)
+  }
+
+  private setState(s: ConnState): void {
+    for (const h of this.stateHandlers) h(s)
+  }
+
+  close(): void {
+    this.closedByUser = true
+    this.ws?.close()
+  }
+}

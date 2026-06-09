@@ -85,11 +85,11 @@ async def test_interleaved_tool_call_chunks_no_split():
         router = EventRouter(run, asm, tracker, _FakeCallbacks())
 
         # 模拟交替的 text 和 tool_call_chunk
-        await router.dispatch(_evt(EventKind.MODEL_START), chat_log)
-        await router.dispatch(_evt(EventKind.STREAM_TOKEN, text="Hello "), chat_log)
-        await router.dispatch(_evt(EventKind.TOOL_CALL_CHUNK), chat_log)
-        await router.dispatch(_evt(EventKind.STREAM_TOKEN, text="world"), chat_log)
-        await router.dispatch(_evt(EventKind.TOOL_CALL_CHUNK), chat_log)
+        await router.dispatch(_evt(EventKind.MESSAGE_START), chat_log)
+        await router.dispatch(_evt(EventKind.MESSAGE_DELTA, text="Hello "), chat_log)
+        await router.dispatch(_evt(EventKind.TOOL_GENERATING), chat_log)
+        await router.dispatch(_evt(EventKind.MESSAGE_DELTA, text="world"), chat_log)
+        await router.dispatch(_evt(EventKind.TOOL_GENERATING), chat_log)
 
         # 应该只有一个 AssistantMessage
         msgs = chat_log.query(AssistantMessage)
@@ -111,9 +111,9 @@ async def test_tool_start_finalizes_message():
         tracker = SubagentTracker()
         router = EventRouter(run, asm, tracker, _FakeCallbacks())
 
-        await router.dispatch(_evt(EventKind.MODEL_START), chat_log)
+        await router.dispatch(_evt(EventKind.MESSAGE_START), chat_log)
         await router.dispatch(
-            _evt(EventKind.STREAM_TOKEN, text="Before tool"), chat_log
+            _evt(EventKind.MESSAGE_DELTA, text="Before tool"), chat_log
         )
         await router.dispatch(
             _evt(EventKind.TOOL_START, name="bash", args={"command": "ls"}),
@@ -139,9 +139,9 @@ async def test_model_end_finalizes_message():
         tracker = SubagentTracker()
         router = EventRouter(run, asm, tracker, _FakeCallbacks())
 
-        await router.dispatch(_evt(EventKind.MODEL_START), chat_log)
-        await router.dispatch(_evt(EventKind.STREAM_TOKEN, text="Complete"), chat_log)
-        await router.dispatch(_evt(EventKind.MODEL_END), chat_log)
+        await router.dispatch(_evt(EventKind.MESSAGE_START), chat_log)
+        await router.dispatch(_evt(EventKind.MESSAGE_DELTA, text="Complete"), chat_log)
+        await router.dispatch(_evt(EventKind.MESSAGE_COMPLETE), chat_log)
 
         # 消息应已终结
         assert asm.assistant_msg is None
@@ -163,10 +163,10 @@ async def test_full_flow_text_tool_text():
         router = EventRouter(run, asm, tracker, _FakeCallbacks())
 
         # 第一轮：文本 + tool_call_chunk + tool
-        await router.dispatch(_evt(EventKind.MODEL_START), chat_log)
-        await router.dispatch(_evt(EventKind.STREAM_TOKEN, text="Part 1"), chat_log)
-        await router.dispatch(_evt(EventKind.TOOL_CALL_CHUNK), chat_log)
-        await router.dispatch(_evt(EventKind.MODEL_END), chat_log)
+        await router.dispatch(_evt(EventKind.MESSAGE_START), chat_log)
+        await router.dispatch(_evt(EventKind.MESSAGE_DELTA, text="Part 1"), chat_log)
+        await router.dispatch(_evt(EventKind.TOOL_GENERATING), chat_log)
+        await router.dispatch(_evt(EventKind.MESSAGE_COMPLETE), chat_log)
         await router.dispatch(
             _evt(
                 EventKind.TOOL_START,
@@ -178,15 +178,18 @@ async def test_full_flow_text_tool_text():
         )
         await router.dispatch(
             _evt(
-                EventKind.TOOL_END, name="bash", output="file.txt", tool_call_id="tc1"
+                EventKind.TOOL_COMPLETE,
+                name="bash",
+                output="file.txt",
+                tool_call_id="tc1",
             ),
             chat_log,
         )
 
         # 第二轮：更多文本
-        await router.dispatch(_evt(EventKind.MODEL_START), chat_log)
-        await router.dispatch(_evt(EventKind.STREAM_TOKEN, text="Part 2"), chat_log)
-        await router.dispatch(_evt(EventKind.MODEL_END), chat_log)
+        await router.dispatch(_evt(EventKind.MESSAGE_START), chat_log)
+        await router.dispatch(_evt(EventKind.MESSAGE_DELTA, text="Part 2"), chat_log)
+        await router.dispatch(_evt(EventKind.MESSAGE_COMPLETE), chat_log)
 
         # 应有两个 AssistantMessage（工具前后各一个）
         msgs = chat_log.query(AssistantMessage)

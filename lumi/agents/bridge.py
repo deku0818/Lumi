@@ -40,18 +40,22 @@ _TOOL_INTERNAL_KEYS = frozenset({"tool_call_id", "runtime"})
 
 
 class EventKind(StrEnum):
-    """Bridge 事件类型"""
+    """Bridge 事件类型。
 
-    MODEL_START = "model_start"
-    STREAM_TOKEN = "stream_token"
-    MODEL_END = "model_end"
-    TOOL_CALL_CHUNK = "tool_call_chunk"  # LLM 正在生成工具调用参数
-    TOOL_START = "tool_start"
-    TOOL_END = "tool_end"
-    ASK = "ask"
-    TOOL_APPROVAL = "tool_approval"
-    EXIT_PLAN_MODE = "ExitPlanMode"
-    DONE = "done"
+    成员值直接采用对外 wire 协议的 namespace.verb 命名（见 protocol/events.json），
+    BridgeEvent.kind 即为前端收到的事件 type，无需额外映射层。
+    """
+
+    MESSAGE_START = "message.start"
+    MESSAGE_DELTA = "message.delta"
+    MESSAGE_COMPLETE = "message.complete"
+    TOOL_GENERATING = "tool.generating"  # LLM 正在生成工具调用参数
+    TOOL_START = "tool.start"
+    TOOL_COMPLETE = "tool.complete"
+    CLARIFY = "clarify.request"
+    APPROVAL = "approval.request"
+    PLAN = "plan.request"
+    TURN_COMPLETE = "turn.complete"
     ERROR = "error"
 
 
@@ -114,6 +118,16 @@ class AgentBridge:
     def graph(self) -> "CompiledStateGraph | None":
         """底层 LangGraph 编译图实例，用于 get_state 等操作"""
         return self._agent.graph if self._agent else None
+
+    async def delete_thread(self, thread_id: str) -> None:
+        """删除指定会话的全部 checkpoint（LangGraph 会话 + 文件级 checkpoint）。"""
+        if not thread_id:
+            return
+        if self._agent is not None:
+            await self._agent.adelete_thread(thread_id)
+        from lumi.agents.runtime.checkpoint import delete_thread_checkpoint
+
+        await asyncio.to_thread(delete_thread_checkpoint, thread_id)
 
     def switch_thread(self, thread_id: str) -> None:
         """切换到指定的会话线程
@@ -250,7 +264,7 @@ class AgentBridge:
 
                             if kind == "on_chat_model_start":
                                 yield BridgeEvent(
-                                    kind=EventKind.MODEL_START,
+                                    kind=EventKind.MESSAGE_START,
                                     parent_run_id=parent_id,
                                 )
 
@@ -261,14 +275,14 @@ class AgentBridge:
                                     text = self._extract_text_from_chunk(chunk)
                                     if text:
                                         yield BridgeEvent(
-                                            kind=EventKind.STREAM_TOKEN,
+                                            kind=EventKind.MESSAGE_DELTA,
                                             text=text,
                                             usage_metadata=usage,
                                             parent_run_id=parent_id,
                                         )
                                     elif self._has_tool_call_chunk(chunk):
                                         yield BridgeEvent(
-                                            kind=EventKind.TOOL_CALL_CHUNK,
+                                            kind=EventKind.TOOL_GENERATING,
                                             usage_metadata=usage,
                                             parent_run_id=parent_id,
                                         )
@@ -277,7 +291,7 @@ class AgentBridge:
                                 output = event.get("data", {}).get("output")
                                 usage = self._extract_usage(output) if output else None
                                 yield BridgeEvent(
-                                    kind=EventKind.MODEL_END,
+                                    kind=EventKind.MESSAGE_COMPLETE,
                                     usage_metadata=usage,
                                     parent_run_id=parent_id,
                                 )
@@ -331,7 +345,7 @@ class AgentBridge:
                                     continue
 
                                 yield BridgeEvent(
-                                    kind=EventKind.TOOL_END,
+                                    kind=EventKind.TOOL_COMPLETE,
                                     name=name,
                                     output=resolved_output,
                                     tool_call_id=tool_call_id,
@@ -358,14 +372,14 @@ class AgentBridge:
                         MAX_STREAM_RETRIES,
                     )
                     # 结束 TUI 中未完成的 assistant message，避免残留碎片
-                    yield BridgeEvent(kind=EventKind.MODEL_END)
+                    yield BridgeEvent(kind=EventKind.MESSAGE_COMPLETE)
                     # 用 STREAM_TOKEN 显示重试提示（不使用 ERROR，因为它会终止 run）
                     retry_msg = (
                         f"\n\n*网络连接中断，{wait}s 后自动重试 "
                         f"({attempt + 1}/{MAX_STREAM_RETRIES})…*\n\n"
                     )
-                    yield BridgeEvent(kind=EventKind.STREAM_TOKEN, text=retry_msg)
-                    yield BridgeEvent(kind=EventKind.MODEL_END)
+                    yield BridgeEvent(kind=EventKind.MESSAGE_DELTA, text=retry_msg)
+                    yield BridgeEvent(kind=EventKind.MESSAGE_COMPLETE)
                     await asyncio.sleep(wait)
 
             # 流结束后检测中断
@@ -410,12 +424,12 @@ class AgentBridge:
                 thread_id,
                 exc_info=True,
             )
-            return BridgeEvent(kind=EventKind.DONE)
+            return BridgeEvent(kind=EventKind.TURN_COMPLETE)
 
         if not state.next:
             # 从 state 的最后一条 AI message 提取完整 usage（含 cache 详情）
             usage = self._extract_last_ai_usage(state)
-            return BridgeEvent(kind=EventKind.DONE, usage_metadata=usage)
+            return BridgeEvent(kind=EventKind.TURN_COMPLETE, usage_metadata=usage)
 
         for task in state.tasks:
             for intr in task.interrupts:
@@ -424,21 +438,21 @@ class AgentBridge:
                     interrupt_type = data.get("type", "")
                     if interrupt_type == "ask":
                         return BridgeEvent(
-                            kind=EventKind.ASK,
+                            kind=EventKind.CLARIFY,
                             data=data,
                             parent_run_id=self._subagent_marker(),
                         )
                     elif interrupt_type == "tool_approval":
                         enriched = self._enrich_tool_approval(data)
                         return BridgeEvent(
-                            kind=EventKind.TOOL_APPROVAL,
+                            kind=EventKind.APPROVAL,
                             data=enriched,
                             parent_run_id=self._subagent_marker(),
                         )
                     elif interrupt_type == "ExitPlanMode":
                         return BridgeEvent(
-                            kind=EventKind.EXIT_PLAN_MODE,
-                            data=data,
+                            kind=EventKind.PLAN,
+                            data=self._enrich_plan(data),
                             parent_run_id=self._subagent_marker(),
                         )
 
@@ -563,6 +577,19 @@ class AgentBridge:
         if boundary_violations:
             data["boundary_violations"] = boundary_violations
 
+        return data
+
+    @staticmethod
+    def _enrich_plan(data: dict) -> dict:
+        """为 ExitPlanMode 中断补充计划文件正文（前端无文件系统访问，需服务端读出）。"""
+        path = data.get("plan_file_path", "")
+        if path:
+            try:
+                from pathlib import Path as _Path
+
+                data["plan_content"] = _Path(path).read_text(encoding="utf-8").strip()
+            except Exception:
+                logger.debug("读取计划文件失败: %s", path, exc_info=True)
         return data
 
     def add_allow_rule(self, tool_expr: str) -> None:

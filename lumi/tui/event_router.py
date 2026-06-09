@@ -42,15 +42,15 @@ _AGENT_CANCEL_OUTPUTS: Final[frozenset[str]] = frozenset(
 # EventKind → RunPhase 的确定性映射（不依赖旧状态）
 # MODEL_END 不在此映射中，保持当前阶段不变
 _PHASE_MAP: Final[dict[EventKind, RunPhase]] = {
-    EventKind.MODEL_START: RunPhase.THINKING,
-    EventKind.STREAM_TOKEN: RunPhase.STREAMING,
-    EventKind.TOOL_CALL_CHUNK: RunPhase.STREAMING,  # chunk 阶段模型仍在流式输出
+    EventKind.MESSAGE_START: RunPhase.THINKING,
+    EventKind.MESSAGE_DELTA: RunPhase.STREAMING,
+    EventKind.TOOL_GENERATING: RunPhase.STREAMING,  # chunk 阶段模型仍在流式输出
     EventKind.TOOL_START: RunPhase.TOOL_RUNNING,
-    EventKind.TOOL_END: RunPhase.TOOL_RUNNING,
-    EventKind.ASK: RunPhase.WAITING_ASK,
-    EventKind.TOOL_APPROVAL: RunPhase.WAITING_APPROVAL,
-    EventKind.EXIT_PLAN_MODE: RunPhase.WAITING_PLAN_APPROVAL,
-    EventKind.DONE: RunPhase.IDLE,
+    EventKind.TOOL_COMPLETE: RunPhase.TOOL_RUNNING,
+    EventKind.CLARIFY: RunPhase.WAITING_ASK,
+    EventKind.APPROVAL: RunPhase.WAITING_APPROVAL,
+    EventKind.PLAN: RunPhase.WAITING_PLAN_APPROVAL,
+    EventKind.TURN_COMPLETE: RunPhase.IDLE,
     EventKind.ERROR: RunPhase.IDLE,
 }
 
@@ -97,9 +97,9 @@ class EventRouter:
         """入口：解析上下文 → 状态转换 → 渲染分发。"""
         # 子代理事件走轻量统计路径（审批/ask 除外，需要 UI 交互）
         if evt.parent_run_id and evt.kind not in (
-            EventKind.TOOL_APPROVAL,
-            EventKind.ASK,
-            EventKind.EXIT_PLAN_MODE,
+            EventKind.APPROVAL,
+            EventKind.CLARIFY,
+            EventKind.PLAN,
         ):
             self._dispatch_subagent(evt)
             return
@@ -130,15 +130,15 @@ class EventRouter:
                 evt.kind,
             )
         match evt.kind:
-            case EventKind.MODEL_START:
+            case EventKind.MESSAGE_START:
                 group.record_model_start(run_id)
-            case EventKind.STREAM_TOKEN:
+            case EventKind.MESSAGE_DELTA:
                 group.record_stream_token(run_id, evt.text)
-            case EventKind.MODEL_END:
+            case EventKind.MESSAGE_COMPLETE:
                 group.record_tokens(run_id, evt.usage_metadata)
             case EventKind.TOOL_START:
                 group.record_tool_start(run_id, evt.name, evt.args or {})
-            case EventKind.TOOL_END:
+            case EventKind.TOOL_COMPLETE:
                 group.record_tool_end(run_id)
             case _:
                 pass
@@ -167,12 +167,12 @@ class EventRouter:
             self._asm.finalize_assistant_msg()
 
         # token 跟踪
-        if evt.kind == EventKind.STREAM_TOKEN:
+        if evt.kind == EventKind.MESSAGE_DELTA:
             self._run.count_stream_token()
         self._run.accumulate_usage(evt.usage_metadata)
 
         # MODEL_END 携带精确 total_tokens，累加到会话计数并刷新状态行
-        if evt.kind == EventKind.MODEL_END:
+        if evt.kind == EventKind.MESSAGE_COMPLETE:
             self._run.commit_model_usage(evt.usage_metadata)
             sl = self._app._query_safe(StatusLine)
             if sl:
@@ -200,24 +200,24 @@ class EventRouter:
         """
         try:
             match evt.kind:
-                case EventKind.STREAM_TOKEN:
+                case EventKind.MESSAGE_DELTA:
                     await self._asm.append_stream_token(evt.text)
                 case EventKind.TOOL_START:
                     await self._handle_tool_start(evt)
-                case EventKind.TOOL_END:
+                case EventKind.TOOL_COMPLETE:
                     await self._handle_tool_end(evt)
-                case EventKind.MODEL_END:
+                case EventKind.MESSAGE_COMPLETE:
                     self._asm.finalize_assistant_msg()
-                case EventKind.ASK:
+                case EventKind.CLARIFY:
                     await self._asm.flush_groups()
                     await self._app._handle_ask(evt, chat_log)
-                case EventKind.TOOL_APPROVAL:
+                case EventKind.APPROVAL:
                     await self._asm.flush_groups()
                     await self._app._handle_tool_approval(evt, chat_log)
-                case EventKind.EXIT_PLAN_MODE:
+                case EventKind.PLAN:
                     await self._asm.flush_groups()
                     await self._app._handle_exit_plan_mode(evt, chat_log)
-                case EventKind.DONE:
+                case EventKind.TURN_COMPLETE:
                     await self._asm.flush_groups()
                     if evt.usage_metadata and not self._run.cache_read_tokens:
                         self._run.commit_model_usage(evt.usage_metadata)
@@ -233,7 +233,7 @@ class EventRouter:
                 exc_info=True,
             )
             # 生命周期事件失败时仍须确保 run 正常结束
-            if evt.kind in (EventKind.DONE, EventKind.ERROR):
+            if evt.kind in (EventKind.TURN_COMPLETE, EventKind.ERROR):
                 try:
                     self._app._finish_run()
                 except Exception:

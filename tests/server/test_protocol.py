@@ -10,7 +10,7 @@ SID = "thread-123"
 
 def test_stream_token_maps_to_message_delta():
     wire = bridge_event_to_wire(
-        BridgeEvent(kind=EventKind.STREAM_TOKEN, text="你好"), SID
+        BridgeEvent(kind=EventKind.MESSAGE_DELTA, text="你好"), SID
     )
     assert wire == {
         "type": "message.delta",
@@ -22,7 +22,7 @@ def test_stream_token_maps_to_message_delta():
 def test_stream_token_carries_usage_when_present():
     wire = bridge_event_to_wire(
         BridgeEvent(
-            kind=EventKind.STREAM_TOKEN, text="x", usage_metadata={"input_tokens": 3}
+            kind=EventKind.MESSAGE_DELTA, text="x", usage_metadata={"input_tokens": 3}
         ),
         SID,
     )
@@ -57,7 +57,10 @@ def test_tool_start_includes_run_id_for_subagent():
 def test_tool_end_maps_to_tool_complete():
     wire = bridge_event_to_wire(
         BridgeEvent(
-            kind=EventKind.TOOL_END, name="bash", output="done", tool_call_id="call_1"
+            kind=EventKind.TOOL_COMPLETE,
+            name="bash",
+            output="done",
+            tool_call_id="call_1",
         ),
         SID,
     )
@@ -67,16 +70,14 @@ def test_tool_end_maps_to_tool_complete():
 
 def test_tool_approval_passes_data_through():
     data = {"tool_calls": [{"name": "bash"}], "options": [{"key": "reject"}]}
-    wire = bridge_event_to_wire(
-        BridgeEvent(kind=EventKind.TOOL_APPROVAL, data=data), SID
-    )
+    wire = bridge_event_to_wire(BridgeEvent(kind=EventKind.APPROVAL, data=data), SID)
     assert wire["type"] == "approval.request"
     assert wire["payload"] == data
 
 
 def test_ask_maps_to_clarify_request():
     wire = bridge_event_to_wire(
-        BridgeEvent(kind=EventKind.ASK, data={"question": "确认?"}), SID
+        BridgeEvent(kind=EventKind.CLARIFY, data={"question": "确认?"}), SID
     )
     assert wire["type"] == "clarify.request"
     assert wire["payload"] == {"question": "确认?"}
@@ -84,20 +85,18 @@ def test_ask_maps_to_clarify_request():
 
 def test_exit_plan_mode_maps_to_plan_request():
     wire = bridge_event_to_wire(
-        BridgeEvent(kind=EventKind.EXIT_PLAN_MODE, data={"plan": "..."}), SID
+        BridgeEvent(kind=EventKind.PLAN, data={"plan": "..."}), SID
     )
     assert wire["type"] == "plan.request"
 
 
 def test_done_maps_to_turn_complete():
-    wire = bridge_event_to_wire(BridgeEvent(kind=EventKind.DONE), SID)
+    wire = bridge_event_to_wire(BridgeEvent(kind=EventKind.TURN_COMPLETE), SID)
     assert wire == {"type": "turn.complete", "session_id": SID, "payload": {}}
 
 
 def test_error_maps_message():
-    wire = bridge_event_to_wire(
-        BridgeEvent(kind=EventKind.ERROR, error="boom"), SID
-    )
+    wire = bridge_event_to_wire(BridgeEvent(kind=EventKind.ERROR, error="boom"), SID)
     assert wire == {
         "type": "error",
         "session_id": SID,
@@ -107,6 +106,6 @@ def test_error_maps_message():
 
 def test_parent_run_id_injected_into_payload():
     wire = bridge_event_to_wire(
-        BridgeEvent(kind=EventKind.STREAM_TOKEN, text="x", parent_run_id="p1"), SID
+        BridgeEvent(kind=EventKind.MESSAGE_DELTA, text="x", parent_run_id="p1"), SID
     )
     assert wire["payload"]["parent_run_id"] == "p1"

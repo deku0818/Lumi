@@ -120,7 +120,7 @@ async def test_single_tool_block_no_group():
         )
         await router.dispatch(
             _evt(
-                EventKind.TOOL_END,
+                EventKind.TOOL_COMPLETE,
                 name="read",
                 tool_call_id="tc1",
                 output="file content",
@@ -128,7 +128,7 @@ async def test_single_tool_block_no_group():
             chat_log,
         )
         # 触发 finalize（模拟流结束）
-        await router.dispatch(_evt(EventKind.DONE), chat_log)
+        await router.dispatch(_evt(EventKind.TURN_COMPLETE), chat_log)
         await pilot.pause()
 
         # ChatLog 中应有 ToolBlock，但没有 ToolGroup
@@ -162,7 +162,7 @@ async def test_single_tool_block_padding():
             ),
             chat_log,
         )
-        await router.dispatch(_evt(EventKind.DONE), chat_log)
+        await router.dispatch(_evt(EventKind.TURN_COMPLETE), chat_log)
         await pilot.pause()
 
         block = chat_log.query(ToolBlock).first()
@@ -206,14 +206,14 @@ async def test_multiple_tools_create_group():
             chat_log,
         )
         await router.dispatch(
-            _evt(EventKind.TOOL_END, name="read", tool_call_id="tc1", output="a"),
+            _evt(EventKind.TOOL_COMPLETE, name="read", tool_call_id="tc1", output="a"),
             chat_log,
         )
         await router.dispatch(
-            _evt(EventKind.TOOL_END, name="read", tool_call_id="tc2", output="b"),
+            _evt(EventKind.TOOL_COMPLETE, name="read", tool_call_id="tc2", output="b"),
             chat_log,
         )
-        await router.dispatch(_evt(EventKind.DONE), chat_log)
+        await router.dispatch(_evt(EventKind.TURN_COMPLETE), chat_log)
         await pilot.pause()
 
         groups = chat_log.query(ToolGroup)
@@ -256,14 +256,14 @@ async def test_tool_group_summary_updates():
         assert not group.is_finalized
 
         await router.dispatch(
-            _evt(EventKind.TOOL_END, name="read", tool_call_id="tc1", output="a"),
+            _evt(EventKind.TOOL_COMPLETE, name="read", tool_call_id="tc1", output="a"),
             chat_log,
         )
         await router.dispatch(
-            _evt(EventKind.TOOL_END, name="read", tool_call_id="tc2", output="b"),
+            _evt(EventKind.TOOL_COMPLETE, name="read", tool_call_id="tc2", output="b"),
             chat_log,
         )
-        await router.dispatch(_evt(EventKind.DONE), chat_log)
+        await router.dispatch(_evt(EventKind.TURN_COMPLETE), chat_log)
         await pilot.pause()
 
         assert group.is_finalized
@@ -291,12 +291,12 @@ async def test_text_between_tools_splits_groups():
             chat_log,
         )
         await router.dispatch(
-            _evt(EventKind.TOOL_END, name="read", tool_call_id="tc1", output="a"),
+            _evt(EventKind.TOOL_COMPLETE, name="read", tool_call_id="tc1", output="a"),
             chat_log,
         )
         # 中间有文本
         await router.dispatch(
-            _evt(EventKind.STREAM_TOKEN, text="hello"),
+            _evt(EventKind.MESSAGE_DELTA, text="hello"),
             chat_log,
         )
         # 第二个工具
@@ -310,10 +310,10 @@ async def test_text_between_tools_splits_groups():
             chat_log,
         )
         await router.dispatch(
-            _evt(EventKind.TOOL_END, name="read", tool_call_id="tc2", output="b"),
+            _evt(EventKind.TOOL_COMPLETE, name="read", tool_call_id="tc2", output="b"),
             chat_log,
         )
-        await router.dispatch(_evt(EventKind.DONE), chat_log)
+        await router.dispatch(_evt(EventKind.TURN_COMPLETE), chat_log)
         await pilot.pause()
 
         # 两个工具被文本打断，不应合并
@@ -381,7 +381,10 @@ async def test_agent_group_finish():
         )
         await router.dispatch(
             _evt(
-                EventKind.TOOL_END, name="agent", run_id="run-1", output="done coding"
+                EventKind.TOOL_COMPLETE,
+                name="agent",
+                run_id="run-1",
+                output="done coding",
             ),
             chat_log,
         )
@@ -416,7 +419,7 @@ async def test_agent_group_error():
         )
         await router.dispatch(
             _evt(
-                EventKind.TOOL_END,
+                EventKind.TOOL_COMPLETE,
                 name="agent",
                 run_id="run-1",
                 output="用户中断了工具调用请求",
@@ -503,7 +506,7 @@ async def test_subagent_events_update_stats():
             chat_log,
         )
         await router.dispatch(
-            _evt(EventKind.TOOL_END, name="bash", parent_run_id="run-1"),
+            _evt(EventKind.TOOL_COMPLETE, name="bash", parent_run_id="run-1"),
             chat_log,
         )
         await pilot.pause()
@@ -604,7 +607,7 @@ async def test_agent_cancel_no_stray_toolblock():
         # agent 被取消
         await router.dispatch(
             _evt(
-                EventKind.TOOL_END,
+                EventKind.TOOL_COMPLETE,
                 name="agent",
                 run_id="run-1",
                 output="用户拒绝了工具执行",
@@ -766,7 +769,7 @@ async def test_two_tools_merged_into_group():
             ),
             chat_log,
         )
-        await router.dispatch(_evt(EventKind.DONE), chat_log)
+        await router.dispatch(_evt(EventKind.TURN_COMPLETE), chat_log)
         await pilot.pause()
 
         blocks = chat_log.query(ToolBlock)
@@ -815,7 +818,10 @@ async def test_agent_detail_toggle():
         )
         await router.dispatch(
             _evt(
-                EventKind.TOOL_END, name="agent", run_id="run-1", output="tests written"
+                EventKind.TOOL_COMPLETE,
+                name="agent",
+                run_id="run-1",
+                output="tests written",
             ),
             chat_log,
         )
@@ -902,7 +908,7 @@ async def test_agent_group_force_finalize_on_interrupt():
         )
         await router.dispatch(
             _evt(
-                EventKind.TOOL_END,
+                EventKind.TOOL_COMPLETE,
                 name="agent",
                 run_id="run-1",
                 output="done coding",
@@ -955,7 +961,7 @@ async def test_agent_group_force_finalize_idempotent():
         )
         await router.dispatch(
             _evt(
-                EventKind.TOOL_END,
+                EventKind.TOOL_COMPLETE,
                 name="agent",
                 run_id="run-1",
                 output="done",
@@ -1000,7 +1006,7 @@ async def test_agent_groups_split_by_text():
         )
         await router.dispatch(
             _evt(
-                EventKind.TOOL_END,
+                EventKind.TOOL_COMPLETE,
                 name="agent",
                 run_id="run-1",
                 output="done coding",
@@ -1010,7 +1016,7 @@ async def test_agent_groups_split_by_text():
 
         # 中间有文本输出
         await router.dispatch(
-            _evt(EventKind.STREAM_TOKEN, text="Now let me review..."),
+            _evt(EventKind.MESSAGE_DELTA, text="Now let me review..."),
             chat_log,
         )
 
@@ -1026,14 +1032,14 @@ async def test_agent_groups_split_by_text():
         )
         await router.dispatch(
             _evt(
-                EventKind.TOOL_END,
+                EventKind.TOOL_COMPLETE,
                 name="agent",
                 run_id="run-2",
                 output="looks good",
             ),
             chat_log,
         )
-        await router.dispatch(_evt(EventKind.DONE), chat_log)
+        await router.dispatch(_evt(EventKind.TURN_COMPLETE), chat_log)
         await pilot.pause()
 
         groups = chat_log.query(AgentGroup)
@@ -1073,13 +1079,13 @@ async def test_parallel_agents_share_group():
 
         # agent 运行中有文本到来 — 不应分离未完成的 AgentGroup
         await router.dispatch(
-            _evt(EventKind.STREAM_TOKEN, text="waiting..."),
+            _evt(EventKind.MESSAGE_DELTA, text="waiting..."),
             chat_log,
         )
 
         await router.dispatch(
             _evt(
-                EventKind.TOOL_END,
+                EventKind.TOOL_COMPLETE,
                 name="agent",
                 run_id="run-1",
                 output="done",
@@ -1088,14 +1094,14 @@ async def test_parallel_agents_share_group():
         )
         await router.dispatch(
             _evt(
-                EventKind.TOOL_END,
+                EventKind.TOOL_COMPLETE,
                 name="agent",
                 run_id="run-2",
                 output="done",
             ),
             chat_log,
         )
-        await router.dispatch(_evt(EventKind.DONE), chat_log)
+        await router.dispatch(_evt(EventKind.TURN_COMPLETE), chat_log)
         await pilot.pause()
 
         groups = chat_log.query(AgentGroup)
@@ -1125,7 +1131,7 @@ async def test_agent_groups_split_by_normal_tool():
         )
         await router.dispatch(
             _evt(
-                EventKind.TOOL_END,
+                EventKind.TOOL_COMPLETE,
                 name="agent",
                 run_id="run-1",
                 output="done",
@@ -1135,7 +1141,7 @@ async def test_agent_groups_split_by_normal_tool():
 
         # 中间有普通工具调用
         await router.dispatch(
-            _evt(EventKind.STREAM_TOKEN, text="Let me check..."),
+            _evt(EventKind.MESSAGE_DELTA, text="Let me check..."),
             chat_log,
         )
         await router.dispatch(
@@ -1148,7 +1154,12 @@ async def test_agent_groups_split_by_normal_tool():
             chat_log,
         )
         await router.dispatch(
-            _evt(EventKind.TOOL_END, name="read", tool_call_id="tc1", output="content"),
+            _evt(
+                EventKind.TOOL_COMPLETE,
+                name="read",
+                tool_call_id="tc1",
+                output="content",
+            ),
             chat_log,
         )
 
@@ -1164,14 +1175,14 @@ async def test_agent_groups_split_by_normal_tool():
         )
         await router.dispatch(
             _evt(
-                EventKind.TOOL_END,
+                EventKind.TOOL_COMPLETE,
                 name="agent",
                 run_id="run-2",
                 output="looks good",
             ),
             chat_log,
         )
-        await router.dispatch(_evt(EventKind.DONE), chat_log)
+        await router.dispatch(_evt(EventKind.TURN_COMPLETE), chat_log)
         await pilot.pause()
 
         groups = chat_log.query(AgentGroup)
@@ -1218,14 +1229,14 @@ async def test_agent_group_split_by_flush_all():
         )
         await router.dispatch(
             _evt(
-                EventKind.TOOL_END,
+                EventKind.TOOL_COMPLETE,
                 name="agent",
                 run_id="run-2",
                 output="done",
             ),
             chat_log,
         )
-        await router.dispatch(_evt(EventKind.DONE), chat_log)
+        await router.dispatch(_evt(EventKind.TURN_COMPLETE), chat_log)
         await pilot.pause()
 
         groups = chat_log.query(AgentGroup)
@@ -1257,7 +1268,7 @@ async def test_agent_group_defensive_detach_back_to_back():
         )
         await router.dispatch(
             _evt(
-                EventKind.TOOL_END,
+                EventKind.TOOL_COMPLETE,
                 name="agent",
                 run_id="run-1",
                 output="done",
@@ -1277,14 +1288,14 @@ async def test_agent_group_defensive_detach_back_to_back():
         )
         await router.dispatch(
             _evt(
-                EventKind.TOOL_END,
+                EventKind.TOOL_COMPLETE,
                 name="agent",
                 run_id="run-2",
                 output="looks good",
             ),
             chat_log,
         )
-        await router.dispatch(_evt(EventKind.DONE), chat_log)
+        await router.dispatch(_evt(EventKind.TURN_COMPLETE), chat_log)
         await pilot.pause()
 
         groups = chat_log.query(AgentGroup)

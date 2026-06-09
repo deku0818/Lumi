@@ -1,0 +1,33 @@
+{
+  "$comment": "Lumi 前端(desktop / 未来 TS TUI) 与后端的 WebSocket 协议契约。语言中立的单一事实来源：TS 端 import 本文件 derive 静态类型，Python 后端用契约测试(tests/server/test_protocol_contract.py)锁住一致性。payload 字段中 '?' 后缀表示可选。新增/改名事件或方法时，只改这里，两端的类型与测试随之收敛。",
+  "version": 1,
+  "events": {
+    "gateway.ready": { "payload": ["model"], "note": "连接握手，由 ws 端点直接发出" },
+    "message.start": { "payload": [] },
+    "message.delta": { "payload": ["text", "usage?"] },
+    "message.complete": { "payload": ["usage?"] },
+    "tool.generating": { "payload": [], "note": "模型正在生成工具调用参数" },
+    "tool.start": { "payload": ["name", "args", "tool_call_id", "run_id?"] },
+    "tool.complete": { "payload": ["name", "output", "tool_call_id"] },
+    "clarify.request": { "payload": ["questions"], "note": "ask 工具，需 resume" },
+    "approval.request": {
+      "payload": ["tool_calls", "decisions?", "options?", "warnings?", "boundary_violations?"],
+      "note": "工具审批，需 resume"
+    },
+    "plan.request": { "payload": ["plan_file_path", "plan_content?"], "note": "退出 plan mode 确认，需 resume" },
+    "turn.complete": { "payload": ["usage?"] },
+    "error": { "payload": ["message"] }
+  },
+  "events_note": "任意事件 payload 都可能附带 parent_run_id（非空时表示属于某个子代理）",
+  "methods": {
+    "send_message": { "params": ["content", "tool_mode?", "execution_mode?"], "streaming": true },
+    "resume": { "params": ["value"], "streaming": true },
+    "list_sessions": { "params": ["limit?"], "result": ["sessions"] },
+    "new_session": { "params": [], "result": ["thread_id"] },
+    "switch_session": { "params": ["thread_id"], "result": ["thread_id"] },
+    "load_history": { "params": ["thread_id"], "result": ["items"] },
+    "pin_session": { "params": ["thread_id", "pinned"], "result": ["thread_id", "pinned"] },
+    "rename_session": { "params": ["thread_id", "title"], "result": ["thread_id", "title"] },
+    "delete_session": { "params": ["thread_id"], "result": ["thread_id"] }
+  }
+}
