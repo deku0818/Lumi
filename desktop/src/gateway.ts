@@ -6,6 +6,7 @@ import type {
   CronRun,
   HistoryItem,
   ProviderProfile,
+  RpcMethod,
   SessionMeta,
   SlashCommand,
   WireEvent,
@@ -25,11 +26,11 @@ export class Gateway {
   private stateHandlers = new Set<StateHandler>()
   private retry = 0
   private closedByUser = false
+  private reconnectTimer: ReturnType<typeof setTimeout> | null = null
 
   constructor(private readonly url: string) {}
 
   connect(): void {
-    this.closedByUser = false
     this.setState('connecting')
     const ws = new WebSocket(this.url)
     this.ws = ws
@@ -45,7 +46,7 @@ export class Gateway {
       this.flushPending(new Error('连接已断开'))
       if (!this.closedByUser) {
         const delay = Math.min(8000, 500 * 2 ** Math.min(this.retry++, 4))
-        setTimeout(() => this.connect(), delay)
+        this.reconnectTimer = setTimeout(() => this.connect(), delay)
       }
     }
     ws.onmessage = (e) => this.onMessage(JSON.parse(e.data))
@@ -63,21 +64,21 @@ export class Gateway {
     }
   }
 
-  request(method: string, params: Record<string, unknown> = {}): Promise<unknown> {
-    return new Promise((resolve, reject) => {
+  request<T = unknown>(method: RpcMethod, params: Record<string, unknown> = {}): Promise<T> {
+    return new Promise<T>((resolve, reject) => {
       if (!this.ws || this.ws.readyState !== WebSocket.OPEN) {
         reject(new Error('未连接'))
         return
       }
       const id = this.nextId++
-      this.pending.set(id, { resolve, reject })
+      this.pending.set(id, { resolve: resolve as (v: unknown) => void, reject })
       this.ws.send(JSON.stringify({ id, method, params }))
     })
   }
 
   // content 为纯文本字符串，或多模态 content blocks 列表（text + image 块）
   sendMessage(content: string | unknown[]): Promise<unknown> {
-    return this.request('send_message', { content })
+    return this.request<{ commands: SlashCommand[] }>('send_message', { content })
   }
 
   resume(value: unknown): Promise<unknown> {
@@ -89,18 +90,18 @@ export class Gateway {
   }
 
   listCommands(): Promise<{ commands: SlashCommand[] }> {
-    return this.request('list_commands') as Promise<{ commands: SlashCommand[] }>
+    return this.request('list_commands')
   }
 
   runCommand(name: string, extraText: string): Promise<unknown> {
-    return this.request('run_command', { name, extra_text: extraText })
+    return this.request<{
+      profiles: ProviderProfile[]
+      active: ActiveModel
+    }>('run_command', { name, extra_text: extraText })
   }
 
   listProviders(): Promise<{ profiles: ProviderProfile[]; active: ActiveModel }> {
-    return this.request('list_providers') as Promise<{
-      profiles: ProviderProfile[]
-      active: ActiveModel
-    }>
+    return this.request('list_providers')
   }
 
   testProvider(
@@ -108,58 +109,54 @@ export class Gateway {
     apiKey: string,
     model: string,
   ): Promise<{ ok: boolean; error?: string; latency_ms?: number }> {
-    return this.request('test_provider', {
+    return this.request<{ ok: boolean; error?: string; latency_ms?: number }>('test_provider', {
       base_url: baseUrl,
       api_key: apiKey,
       model,
-    }) as Promise<{ ok: boolean; error?: string; latency_ms?: number }>
+    })
   }
 
   setProvider(provider: string, model: string): Promise<{ active: ActiveModel; model: string }> {
-    return this.request('set_provider', { provider, model }) as Promise<{
+    return this.request<{
       active: ActiveModel
       model: string
-    }>
+    }>('set_provider', { provider, model })
   }
 
   saveProvider(
     profile: Partial<ProviderProfile>,
   ): Promise<{ profiles: ProviderProfile[]; active: ActiveModel }> {
-    return this.request('save_provider', { profile }) as Promise<{
+    return this.request<{
       profiles: ProviderProfile[]
       active: ActiveModel
-    }>
+    }>('save_provider', { profile })
   }
 
   deleteProvider(id: string): Promise<{ profiles: ProviderProfile[]; active: ActiveModel }> {
-    return this.request('delete_provider', { id }) as Promise<{
+    return this.request<{
       profiles: ProviderProfile[]
       active: ActiveModel
-    }>
+    }>('delete_provider', { id })
   }
 
   listSessions(): Promise<{ sessions: SessionMeta[] }> {
-    return this.request('list_sessions', { limit: 50 }) as Promise<{ sessions: SessionMeta[] }>
-  }
-
-  newSession(): Promise<{ thread_id: string }> {
-    return this.request('new_session') as Promise<{ thread_id: string }>
+    return this.request<{ sessions: SessionMeta[] }>('list_sessions', { limit: 50 })
   }
 
   switchSession(threadId: string): Promise<{ thread_id: string }> {
-    return this.request('switch_session', { thread_id: threadId }) as Promise<{
+    return this.request<{
       thread_id: string
-    }>
+    }>('switch_session', { thread_id: threadId })
   }
 
   loadHistory(threadId: string): Promise<{ items: HistoryItem[] }> {
-    return this.request('load_history', { thread_id: threadId }) as Promise<{
+    return this.request<{
       items: HistoryItem[]
-    }>
+    }>('load_history', { thread_id: threadId })
   }
 
   pinSession(threadId: string, pinned: boolean): Promise<unknown> {
-    return this.request('pin_session', { thread_id: threadId, pinned })
+    return this.request<{ jobs: CronJob[] }>('pin_session', { thread_id: threadId, pinned })
   }
 
   renameSession(threadId: string, title: string): Promise<unknown> {
@@ -171,42 +168,42 @@ export class Gateway {
   }
 
   listCronJobs(): Promise<{ jobs: CronJob[] }> {
-    return this.request('list_cron_jobs') as Promise<{ jobs: CronJob[] }>
+    return this.request('list_cron_jobs')
   }
 
   createCronJob(name: string, schedule: string, prompt: string): Promise<{ job: CronJob }> {
-    return this.request('create_cron_job', { name, schedule, prompt }) as Promise<{
+    return this.request<{
       job: CronJob
-    }>
+    }>('create_cron_job', { name, schedule, prompt })
   }
 
   updateCronJob(
     jobId: string,
     fields: { name?: string; schedule?: string; prompt?: string },
   ): Promise<{ job: CronJob }> {
-    return this.request('update_cron_job', { job_id: jobId, ...fields }) as Promise<{
+    return this.request<{
       job: CronJob
-    }>
+    }>('update_cron_job', { job_id: jobId, ...fields })
   }
 
   deleteCronJob(jobId: string): Promise<{ job_id: string }> {
-    return this.request('delete_cron_job', { job_id: jobId }) as Promise<{ job_id: string }>
+    return this.request<{ job_id: string }>('delete_cron_job', { job_id: jobId })
   }
 
   toggleCronJob(jobId: string, enabled: boolean): Promise<{ job: CronJob }> {
-    return this.request('toggle_cron_job', { job_id: jobId, enabled }) as Promise<{
+    return this.request<{
       job: CronJob
-    }>
+    }>('toggle_cron_job', { job_id: jobId, enabled })
   }
 
   runCronJob(jobId: string): Promise<{ ok: boolean }> {
-    return this.request('run_cron_job', { job_id: jobId }) as Promise<{ ok: boolean }>
+    return this.request<{ ok: boolean }>('run_cron_job', { job_id: jobId })
   }
 
   listCronRuns(jobId: string, limit = 20): Promise<{ runs: CronRun[] }> {
-    return this.request('list_cron_runs', { job_id: jobId, limit }) as Promise<{
+    return this.request<{
       runs: CronRun[]
-    }>
+    }>('list_cron_runs', { job_id: jobId, limit })
   }
 
   onEvent(h: EventHandler): () => void {
@@ -228,8 +225,11 @@ export class Gateway {
     this.pending.clear()
   }
 
+  // 关闭后不可复用：退避中的重连定时器一并取消，否则定时器触发会复活
+  // 一条无人引用的僵尸连接（服务端凭空多一个 bridge，且永久自动重连）
   close(): void {
     this.closedByUser = true
+    if (this.reconnectTimer) clearTimeout(this.reconnectTimer)
     this.ws?.close()
   }
 }

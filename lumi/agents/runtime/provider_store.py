@@ -14,11 +14,11 @@ active 指向「某 profile 下的某个 model」。存储为 ~/.lumi/providers.
 from __future__ import annotations
 
 import json
-import os
 import uuid
 from dataclasses import asdict, dataclass
 from pathlib import Path
 
+from lumi.agents.runtime.checkpoint import _atomic_write_json
 from lumi.utils.config.global_manager import GLOBAL_CONFIG_DIR
 from lumi.utils.logger import logger
 
@@ -92,16 +92,12 @@ def load() -> tuple[list[ProviderProfile], Active]:
 
 
 def _save(profiles: list[ProviderProfile], active: dict) -> None:
-    path = _path()
-    path.parent.mkdir(parents=True, exist_ok=True)
     payload = {
         "active": _normalize_active(profiles, active),
         "profiles": [{**asdict(p), "models": list(p.models)} for p in profiles],
     }
-    tmp = path.with_suffix(".json.tmp")
-    tmp.write_text(json.dumps(payload, ensure_ascii=False, indent=2), encoding="utf-8")
-    os.chmod(tmp, 0o600)  # 含 api_key，限制为仅本人可读写
-    tmp.replace(path)
+    # 含 api_key，限制为仅本人可读写
+    _atomic_write_json(_path(), payload, mode=0o600)
 
 
 def get_active() -> tuple[ProviderProfile, str] | None:

@@ -11,6 +11,7 @@ import json
 from pathlib import Path
 
 from lumi.agents.bridge import EventKind
+from lumi.server.ws import IMPLEMENTED_METHODS
 
 # protocol/ 与 lumi/ 同级，位于仓库根
 _PROTOCOL = json.loads(
@@ -21,34 +22,6 @@ _PROTOCOL = json.loads(
 
 # ws.py 直接发出但不经 EventKind 的事件（握手帧 + cron 广播）
 _DIRECT_EVENTS = {"gateway.ready", "cron.result", "cron.running"}
-
-# ws.py 实现的 RPC 方法（_dispatch 非流式 + endpoint 流式 task，与 lumi/server/ws.py 同步）
-_IMPLEMENTED_METHODS = {
-    "send_message",
-    "resume",
-    "stop",
-    "list_commands",
-    "run_command",
-    "list_providers",
-    "test_provider",
-    "set_provider",
-    "save_provider",
-    "delete_provider",
-    "list_sessions",
-    "new_session",
-    "switch_session",
-    "load_history",
-    "pin_session",
-    "rename_session",
-    "delete_session",
-    "list_cron_jobs",
-    "create_cron_job",
-    "update_cron_job",
-    "delete_cron_job",
-    "toggle_cron_job",
-    "run_cron_job",
-    "list_cron_runs",
-}
 
 
 def test_event_names_match_source_of_truth():
@@ -63,7 +36,7 @@ def test_event_names_match_source_of_truth():
 def test_rpc_methods_match_source_of_truth():
     """ws.py 实现的 RPC 方法 == events.json 声明的集合。"""
     declared = set(_PROTOCOL["methods"])
-    assert _IMPLEMENTED_METHODS == declared, (
-        f"协议漂移：实现独有={_IMPLEMENTED_METHODS - declared}，"
-        f"json 独有={declared - _IMPLEMENTED_METHODS}"
+    assert set(IMPLEMENTED_METHODS) == declared, (
+        f"协议漂移：实现独有={set(IMPLEMENTED_METHODS) - declared}，"
+        f"json 独有={declared - set(IMPLEMENTED_METHODS)}"
     )

@@ -48,16 +48,24 @@ def _payload(evt: BridgeEvent) -> dict:
     return {}
 
 
+def event_frame(event_type: str, session_id: str, payload: dict) -> dict:
+    """构造完整 wire 事件帧 {method:"event", params:{type, session_id, payload}}。
+
+    服务端任何直发事件（gateway.ready、cron.*、合成 turn.complete 等不经
+    BridgeEvent 的）都必须经此构造，信封形状只在这一处定义。
+    """
+    return {
+        "method": "event",
+        "params": {"type": event_type, "session_id": session_id, "payload": payload},
+    }
+
+
 def bridge_event_to_wire(evt: BridgeEvent, session_id: str) -> dict:
-    """把 BridgeEvent 序列化为线缆事件信封 {type, session_id, payload}。
+    """把 BridgeEvent 序列化为完整 wire 事件帧（可直接 send_json）。
 
     type 直接取 EventKind 成员值（已是 namespace.verb wire 名）。
     """
     payload = _payload(evt)
     if evt.parent_run_id:
         payload["parent_run_id"] = evt.parent_run_id
-    return {
-        "type": str(evt.kind),
-        "session_id": session_id,
-        "payload": payload,
-    }
+    return event_frame(str(evt.kind), session_id, payload)

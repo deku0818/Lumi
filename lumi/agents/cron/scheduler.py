@@ -10,8 +10,11 @@
 from __future__ import annotations
 
 import asyncio
+import os
 from collections.abc import Callable
 from datetime import datetime, timedelta
+from pathlib import Path
+from typing import IO
 
 from apscheduler.jobstores.base import JobLookupError
 from apscheduler.schedulers.asyncio import AsyncIOScheduler
@@ -25,6 +28,8 @@ from lumi.agents.cron.delivery import DeliveryManager
 from lumi.agents.cron.job_store import JobStore
 from lumi.agents.cron.models import Job, ScheduleType
 from lumi.agents.cron.run_log import RunLog, RunRecord
+from lumi.agents.runtime.bg_tasks import current_thread_id
+from lumi.agents.runtime.checkpoint import delete_thread_checkpoint
 from lumi.utils.constants import (
     CRON_BACKOFF_INTERVALS,
     MAX_CRON_RETRIES,
@@ -73,12 +78,16 @@ class Scheduler:
         delivery: DeliveryManager,
         execution_timeout: int = 600,
         on_job_status: Callable[[list[str]], None] | None = None,
+        lock_path: Path | None = None,
     ) -> None:
         self._aps = AsyncIOScheduler()
         self._job_store = job_store
         self._run_log = run_log
         self._delivery = delivery
         self._execution_timeout = execution_timeout
+        # 跨进程调度互斥锁文件（None = 不互斥，测试用）
+        self._lock_path = lock_path
+        self._lock_file: IO[str] | None = None
         self._running_tasks: set[asyncio.Task[RunRecord]] = set()
         self._running_job_names: list[str] = []
         self._on_job_status = on_job_status
@@ -102,6 +111,14 @@ class Scheduler:
             logger.warning(
                 "cron checkpointer 初始化失败，执行记录将不带会话", exc_info=True
             )
+
+        # 同一 workspace 的 jobs.json 可能同时被 TUI 与 lumi serve 加载，
+        # 不互斥的话每个任务会在每个进程各执行一次
+        if not self._try_acquire_lock():
+            logger.info(
+                "另一进程正在调度本工作区的定时任务，本进程跳过调度（仍可管理任务）"
+            )
+            return
 
         jobs = await self._job_store.load()
         for job in jobs:
@@ -198,9 +215,8 @@ class Scheduler:
         Args:
             grace_period: 等待执行中任务完成的最大秒数，默认 30。
         """
-        if not self._aps.running:
-            return
-        self._aps.shutdown(wait=False)
+        if self._aps.running:
+            self._aps.shutdown(wait=False)
 
         if self._compensate_task and not self._compensate_task.done():
             self._compensate_task.cancel()
@@ -224,26 +240,57 @@ class Scheduler:
             await close_checkpointer(self._checkpointer)
             self._checkpointer = None
 
+        self._release_lock()
         logger.info("Scheduler 已停止")
+
+    def _try_acquire_lock(self) -> bool:
+        """跨进程调度互斥：同一 workspace 仅一个进程调度，后启动者跳过。"""
+        if self._lock_path is None:
+            return True
+        import fcntl
+
+        f = open(self._lock_path, "w")
+        try:
+            fcntl.flock(f, fcntl.LOCK_EX | fcntl.LOCK_NB)
+        except OSError:
+            f.close()
+            return False
+        f.write(str(os.getpid()))
+        f.flush()
+        self._lock_file = f
+        return True
+
+    def _release_lock(self) -> None:
+        if self._lock_file is not None:
+            self._lock_file.close()  # close 即释放 flock
+            self._lock_file = None
 
     def _register_job(self, job: Job) -> None:
         """将 Job 注册到 APScheduler。
 
         使用 ``job.schedule.to_trigger()`` 创建触发器，
         以 ``job.id`` 作为 APScheduler 任务 ID，已存在则替换。
-        APScheduler 回调指向 ``_run_job_task``，将执行包装为 asyncio.Task。
+        回调指向 ``_fire_job``（只携带 job.id）：触发时从 JobStore 重读最新
+        定义——若携带 Job 对象，注册后对 prompt/name 的更新将永远不生效。
 
         Args:
             job: 要注册的任务。
         """
         trigger = job.schedule.to_trigger()
         self._aps.add_job(
-            self._run_job_task,
+            self._fire_job,
             trigger=trigger,
-            args=[job],
+            args=[job.id],
             id=job.id,
             replace_existing=True,
         )
+
+    async def _fire_job(self, job_id: str) -> None:
+        """APScheduler 触发入口：按 id 重读最新任务定义后执行。"""
+        job = await self._job_store.get(job_id)
+        if job is None or not job.enabled:
+            return
+        await self._run_job_task(job)
 
     async def get_all_jobs(self) -> list[Job]:
         """获取所有持久化任务。
@@ -265,13 +312,14 @@ class Scheduler:
         return await self._job_store.get(job_id)
 
     async def delete_job(self, job_id: str) -> None:
-        """从 APScheduler 和 JobStore 中删除任务。
+        """删除任务并级联清理执行日志与历史会话 checkpoint（避免孤儿数据）。
 
         Args:
             job_id: 要删除的任务 ID。
         """
         self.remove_job(job_id)
         await self._job_store.delete(job_id)
+        await self.purge_job_data(job_id)
 
     def add_job(self, job: Job) -> None:
         """添加新任务到 APScheduler。
@@ -406,6 +454,8 @@ class Scheduler:
         from lumi.agents.core.graph import create_agent
 
         thread_id = generate_thread_id(CRON_THREAD_PREFIX) if self._checkpointer else ""
+        # 执行中产生的后台任务归属本次 run 的 thread，通知不会被无关会话认领
+        current_thread_id.set(thread_id)
         try:
             agent, context = await create_agent(checkpointer=self._checkpointer)
             inputs = {
@@ -505,14 +555,7 @@ class Scheduler:
             else f"[{record.status}] {record.error}"
         )
         try:
-            await self._delivery.broadcast(
-                job.name,
-                broadcast_text,
-                started_at=record.started_at,
-                duration_ms=record.duration_ms,
-                job_id=job.id,
-                status=record.status,
-            )
+            await self._delivery.broadcast(record, broadcast_text)
         except Exception:
             logger.warning("广播结果失败: %s [%s]", job.name, job.id, exc_info=True)
 
@@ -538,7 +581,11 @@ class Scheduler:
         await self._run_log.delete_log(job_id)
 
     async def _delete_thread(self, thread_id: str) -> None:
-        """删除单个会话线程的 checkpoint，失败仅告警不中断。"""
+        """删除单个会话线程的 checkpoint（LangGraph + 文件级），失败仅告警不中断。
+
+        cron 线程在 desktop 中续聊会产生文件级 filediff checkpoint，
+        与 AgentBridge.delete_thread 对齐，一并清理避免孤儿目录。
+        """
         if self._checkpointer is None or not hasattr(
             self._checkpointer, "adelete_thread"
         ):
@@ -547,6 +594,10 @@ class Scheduler:
             await self._checkpointer.adelete_thread(thread_id)
         except Exception:
             logger.warning("删除会话 checkpoint 失败: %s", thread_id, exc_info=True)
+        try:
+            await asyncio.to_thread(delete_thread_checkpoint, thread_id)
+        except Exception:
+            logger.warning("删除文件级 checkpoint 失败: %s", thread_id, exc_info=True)
 
     # ------------------------------------------------------------------
     # Helpers
@@ -569,9 +620,9 @@ class Scheduler:
         retry_id = f"{job.id}-retry-{job.consecutive_errors}"
 
         self._aps.add_job(
-            self._run_job_task,
+            self._fire_job,
             trigger=DateTrigger(run_date=run_at),
-            args=[job],
+            args=[job.id],
             id=retry_id,
             replace_existing=True,
         )

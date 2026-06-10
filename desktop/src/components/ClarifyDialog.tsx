@@ -81,7 +81,7 @@ export function ClarifyDialog({
           return (
             <div key={qi} className="mb-4">
               {q.header && (
-                <div className="text-[11px] uppercase tracking-wide text-muted mb-1">
+                <div className="text-[11px] uppercase tracking-wide text-muted-foreground mb-1">
                   {q.header}
                 </div>
               )}
@@ -99,13 +99,13 @@ export function ClarifyDialog({
                           : 'border-line hover:border-separator'
                       }`}
                     >
-                      <span className={checked ? 'text-primary' : 'text-muted'}>
+                      <span className={checked ? 'text-primary' : 'text-muted-foreground'}>
                         {multi ? (checked ? '◉' : '○') : checked ? '●' : '○'}
                       </span>
                       <span className="flex-1">
                         <span>{o.label}</span>
                         {o.description && (
-                          <span className="block text-xs text-muted mt-0.5">
+                          <span className="block text-xs text-muted-foreground mt-0.5">
                             {o.description}
                           </span>
                         )}
@@ -117,7 +117,7 @@ export function ClarifyDialog({
                   value={custom[qi]}
                   onChange={(e) => setCustom((p) => ({ ...p, [qi]: e.target.value }))}
                   placeholder={t('clarify.customPlaceholder')}
-                  className="w-full bg-canvas border border-line rounded-lg px-3 py-2 text-sm outline-none focus:border-primary/60 placeholder:text-muted/60"
+                  className="w-full bg-canvas border border-line rounded-lg px-3 py-2 text-sm outline-none focus:border-primary/60 placeholder:text-muted-foreground/60"
                 />
               </div>
             </div>

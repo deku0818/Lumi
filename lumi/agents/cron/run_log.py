@@ -150,6 +150,9 @@ class RunLog:
 
     def __init__(self, base_dir: Path) -> None:
         self._base_dir = base_dir
+        # append 与 prune 的读-改-写互斥：同一任务的执行可能重叠
+        # （Run now 撞上定时触发），prune 的全文件重写会吞掉并发 append 的记录
+        self._write_lock = asyncio.Lock()
 
     async def append(self, record: RunRecord) -> None:
         """追加一条执行记录到对应任务的 JSONL 文件。
@@ -161,13 +164,14 @@ class RunLog:
         """
         path = _log_path(self._base_dir, record.job_id)
         line = json.dumps(record.to_dict(), ensure_ascii=False)
-        await asyncio.to_thread(_append_record_sync, path, line)
+        async with self._write_lock:
+            await asyncio.to_thread(_append_record_sync, path, line)
 
-        # 检查并裁剪
-        try:
-            await asyncio.to_thread(_trim_file_sync, path)
-        except OSError:
-            logger.warning("裁剪日志文件失败: %s", path, exc_info=True)
+            # 检查并裁剪
+            try:
+                await asyncio.to_thread(_trim_file_sync, path)
+            except OSError:
+                logger.warning("裁剪日志文件失败: %s", path, exc_info=True)
 
     def get_last_run_sync(self, job_id: str) -> RunRecord | None:
         """同步获取指定任务最近一条执行记录。
@@ -252,21 +256,23 @@ class RunLog:
         Returns:
             被清理的 thread_id 列表（按时间从新到旧）。
         """
-        records = await self.get_all(job_id)
-        pruned = [r.thread_id for r in records[keep:] if r.thread_id]
-        if not pruned:
-            return []
+        async with self._write_lock:
+            records = await self.get_all(job_id)
+            pruned = [r.thread_id for r in records[keep:] if r.thread_id]
+            if not pruned:
+                return []
 
-        kept: list[RunRecord] = records[:keep] + [
-            replace(r, thread_id="") for r in records[keep:]
-        ]
-        # get_recent 是倒序，写回按时间正序（与追加写入的自然顺序一致）
-        content = "".join(
-            json.dumps(r.to_dict(), ensure_ascii=False) + "\n" for r in reversed(kept)
-        )
-        path = _log_path(self._base_dir, job_id)
-        await asyncio.to_thread(_atomic_write, path, content)
-        return pruned
+            kept: list[RunRecord] = records[:keep] + [
+                replace(r, thread_id="") for r in records[keep:]
+            ]
+            # get_recent 是倒序，写回按时间正序（与追加写入的自然顺序一致）
+            content = "".join(
+                json.dumps(r.to_dict(), ensure_ascii=False) + "\n"
+                for r in reversed(kept)
+            )
+            path = _log_path(self._base_dir, job_id)
+            await asyncio.to_thread(_atomic_write, path, content)
+            return pruned
 
     async def delete_log(self, job_id: str) -> None:
         """删除指定任务的整个日志文件（任务级联删除用）。"""

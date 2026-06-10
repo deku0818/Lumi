@@ -37,7 +37,7 @@ export function CommandMenu({
             }`}
           >
             <span className="text-primary font-medium shrink-0">/{cmd.name}</span>
-            <span className="text-sm text-muted truncate">{cmd.description}</span>
+            <span className="text-sm text-muted-foreground truncate">{cmd.description}</span>
           </button>
         ))}
       </div>

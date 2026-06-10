@@ -36,7 +36,7 @@ export function ApprovalDialog({
         {calls.map((c, i) => (
           <div key={i} className="mb-3">
             <div className="font-mono text-sm text-primary">{c.name}</div>
-            <pre className="text-xs bg-canvas border border-line rounded-lg p-2.5 mt-1.5 overflow-auto max-h-40 text-muted">
+            <pre className="text-xs bg-canvas border border-line rounded-lg p-2.5 mt-1.5 overflow-auto max-h-40 text-muted-foreground">
               {JSON.stringify(c.args, null, 2)}
             </pre>
           </div>
@@ -58,7 +58,7 @@ export function ApprovalDialog({
           <Button onClick={() => onDecide('approve')}>{t('approval.allow')}</Button>
         </div>
 
-        <p className="text-[11px] text-muted mt-4">{t('approval.memoryNote')}</p>
+        <p className="text-[11px] text-muted-foreground mt-4">{t('approval.memoryNote')}</p>
     </div>
   )
 }

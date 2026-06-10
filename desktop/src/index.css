@@ -82,7 +82,8 @@
   --color-line: var(--color-line);
   --color-separator: var(--color-separator);
   --color-ink: var(--color-ink);
-  --color-muted: var(--color-muted);
+  /* shadcn 约定：muted = 浅色背景（--muted）；次要文字请用 text-muted-foreground */
+  --color-muted: var(--muted);
   /* Tailwind 的 accent 工具类 = shadcn 悬停浅底（surface），品牌金归 primary */
   --color-accent: var(--accent);
   --color-accent-dim: var(--color-accent-dim);

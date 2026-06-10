@@ -10,11 +10,16 @@ from __future__ import annotations
 
 import asyncio
 import time
+from contextvars import ContextVar
 from dataclasses import dataclass, field
 from enum import StrEnum
 from pathlib import Path
 
 from lumi.utils.logger import logger
+
+# 当前轮所属的 LangGraph thread_id：由 bridge / cron scheduler 在执行前设置，
+# 后台任务注册时捕获为归属标记，使完成通知能路由回正确的会话（多 WS 连接场景）
+current_thread_id: ContextVar[str] = ContextVar("current_thread_id", default="")
 
 # ---------------------------------------------------------------------------
 # Enums
@@ -67,6 +72,9 @@ class BackgroundTaskEntry:
     error: str | None = None
     agent_name: str | None = None
     prompt: str = ""
+    # 任务所属的 LangGraph thread_id（注册时从 current_thread_id 捕获），
+    # 完成通知按此归属投递；空串表示无归属（任一会话可认领）
+    thread_id: str = ""
     async_task: asyncio.Task | None = field(default=None, repr=False)
 
 
@@ -78,29 +86,38 @@ class BackgroundTaskEntry:
 class NotificationQueue:
     """后台任务通知队列。
 
-    后台任务完成时将通知 XML 入队，由运行时框架在 Agent 空闲时统一取出注入。
+    后台任务完成时将通知 XML 入队（附归属 thread_id），由运行时框架在
+    Agent 空闲时取出注入。多前端连接场景按 thread_id 认领，避免通知被
+    无关会话抢走。
     """
 
     def __init__(self) -> None:
-        self._queue: asyncio.Queue[str] = asyncio.Queue()
+        self._items: list[tuple[str, str]] = []  # (thread_id, xml)
 
-    def enqueue(self, notification_xml: str) -> None:
+    def enqueue(self, notification_xml: str, thread_id: str = "") -> None:
         """将通知 XML 放入队列（非阻塞）。"""
-        self._queue.put_nowait(notification_xml)
+        self._items.append((thread_id, notification_xml))
 
     def drain_all(self) -> list[str]:
-        """取出队列中所有待发送通知并清空队列。"""
-        items: list[str] = []
-        while not self._queue.empty():
-            try:
-                items.append(self._queue.get_nowait())
-            except asyncio.QueueEmpty:
-                break
+        """取出全部待发送通知并清空队列（单会话前端，如 TUI）。"""
+        items = [xml for _, xml in self._items]
+        self._items.clear()
         return items
+
+    def drain_for(self, thread_id: str) -> list[str]:
+        """取出归属指定 thread（或无归属）的通知，其余留在队列中等待各自会话认领。"""
+        taken = [xml for owner, xml in self._items if owner in ("", thread_id)]
+        if taken:
+            self._items = [
+                (owner, xml)
+                for owner, xml in self._items
+                if owner not in ("", thread_id)
+            ]
+        return taken
 
     def is_empty(self) -> bool:
         """队列是否为空。"""
-        return self._queue.empty()
+        return not self._items
 
 
 # ---------------------------------------------------------------------------
@@ -176,6 +193,8 @@ class TaskRegistry:
         """注册新的后台任务。重复 task_id 会抛出 ValueError。"""
         if entry.task_id in self._entries:
             raise ValueError(f"重复的 task_id: {entry.task_id}")
+        if not entry.thread_id:
+            entry.thread_id = current_thread_id.get()
         self._entries[entry.task_id] = entry
         logger.info(
             "[TaskRegistry] 注册任务 %s (kind=%s, label=%s)",
@@ -229,7 +248,7 @@ class TaskRegistry:
             return
         try:
             xml = format_notification(entry)
-            self._notification_queue.enqueue(xml)
+            self._notification_queue.enqueue(xml, entry.thread_id)
         except Exception:
             logger.error(
                 "[TaskRegistry] 通知入队异常 (task_id=%s, kind=%s, status=%s)",

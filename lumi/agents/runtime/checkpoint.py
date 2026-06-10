@@ -198,10 +198,11 @@ def _compute_diff_stat(changes: dict[str, FileChange]) -> _DiffStat:
 # ── 原子写入 ──
 
 
-def _atomic_write_json(path: Path, data: object) -> None:
+def _atomic_write_json(path: Path, data: object, mode: int | None = None) -> None:
     """原子写入 JSON 文件（先写临时文件再 rename）。
 
     使用 tempfile + rename 确保写入不会留下半写状态的文件。
+    mode 非 None 时在 rename 前应用文件权限（敏感内容如 api_key 用 0o600）。
     """
     content = json.dumps(data, ensure_ascii=False, indent=2)
     path.parent.mkdir(parents=True, exist_ok=True)
@@ -210,6 +211,8 @@ def _atomic_write_json(path: Path, data: object) -> None:
     tmp = Path(tmp_path)
     try:
         tmp.write_text(content, encoding="utf-8")
+        if mode is not None:
+            os.chmod(tmp, mode)
         tmp.replace(path)
     except BaseException:
         tmp.unlink(missing_ok=True)

@@ -93,9 +93,6 @@ function createWindow() {
 // renderer 经 preload 调用，拿到 sidecar 的 WS 地址（带重连，无需等就绪）
 ipcMain.handle('lumi:connection', () => ({ wsUrl: `ws://127.0.0.1:${wsPort}/ws` }))
 
-// renderer 调试日志透传到 dev 终端（renderer console 默认不进终端）
-ipcMain.on('lumi:log', (_e, msg) => console.log('[renderer]', msg))
-
 // 通知点击：把窗口带回前台（还原最小化 + 跨平台聚焦）
 function focusMainWindow() {
   const win = BrowserWindow.getAllWindows()[0]
@@ -104,7 +101,6 @@ function focusMainWindow() {
   win.show()
   win.focus()
 }
-ipcMain.handle('lumi:focus', focusMainWindow)
 
 // 系统通知走主进程 Notification（renderer 的 HTML5 Notification 在 macOS
 // dev/未签名场景不可靠）。点击时聚焦窗口并把 tag 回传 renderer 切会话。
@@ -133,7 +129,9 @@ app.whenReady().then(async () => {
 })
 
 app.on('window-all-closed', () => {
-  stopSidecar()
+  // macOS 关窗后应用驻留 Dock，sidecar 保持运行（activate 重建窗口后直接复用）；
+  // 在这里杀 sidecar 的话，Dock 唤起的新窗口会对着死端口永久重连。
+  // 其他平台关窗即退出，sidecar 由 before-quit 清理。
   if (process.platform !== 'darwin') app.quit()
 })
 

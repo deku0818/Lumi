@@ -7,6 +7,28 @@ import asyncio
 from datetime import datetime
 
 from lumi.agents.cron.delivery import APIDelivery, DeliveryManager, ResultDelivery
+from lumi.agents.cron.run_log import RunRecord
+
+
+def _rec(
+    job_name: str = "job",
+    *,
+    job_id: str = "",
+    status: str = "success",
+    started_at: datetime | None = None,
+    duration_ms: int = 0,
+) -> RunRecord:
+    """构造测试用 RunRecord。"""
+    started = started_at or datetime(2026, 1, 1, 0, 0, 0)
+    return RunRecord(
+        job_id=job_id,
+        job_name=job_name,
+        started_at=started,
+        finished_at=started,
+        status=status,
+        duration_ms=duration_ms,
+        output_summary="",
+    )
 
 
 class FakeDelivery(ResultDelivery):
@@ -16,22 +38,13 @@ class FakeDelivery(ResultDelivery):
         self.messages: list[dict] = []
         self.closed: bool = False
 
-    async def deliver(
-        self,
-        job_name: str,
-        output: str,
-        *,
-        started_at: datetime | None = None,
-        duration_ms: int | None = None,
-        job_id: str = "",
-        status: str = "success",
-    ) -> None:
+    async def deliver(self, record: RunRecord, text: str) -> None:
         self.messages.append(
             {
-                "job_name": job_name,
-                "output": output,
-                "started_at": started_at,
-                "duration_ms": duration_ms,
+                "job_name": record.job_name,
+                "output": text,
+                "started_at": record.started_at,
+                "duration_ms": record.duration_ms,
             }
         )
 
@@ -42,32 +55,14 @@ class FakeDelivery(ResultDelivery):
 class FailingDelivery(ResultDelivery):
     """测试用的总是失败的投递通道。"""
 
-    async def deliver(
-        self,
-        job_name: str,
-        output: str,
-        *,
-        started_at: datetime | None = None,
-        duration_ms: int | None = None,
-        job_id: str = "",
-        status: str = "success",
-    ) -> None:
+    async def deliver(self, record: RunRecord, text: str) -> None:
         raise RuntimeError("投递失败")
 
 
 class FailingCloseDelivery(ResultDelivery):
     """close 时抛异常的投递通道。"""
 
-    async def deliver(
-        self,
-        job_name: str,
-        output: str,
-        *,
-        started_at: datetime | None = None,
-        duration_ms: int | None = None,
-        job_id: str = "",
-        status: str = "success",
-    ) -> None:
+    async def deliver(self, record: RunRecord, text: str) -> None:
         pass
 
     async def close(self) -> None:
@@ -82,13 +77,11 @@ async def test_register_and_broadcast() -> None:
     ch = FakeDelivery()
     dm.register(ch)
 
-    await dm.broadcast("job1", "hello")
+    await dm.broadcast(_rec("job1"), "hello")
 
     assert len(ch.messages) == 1
     assert ch.messages[0]["job_name"] == "job1"
     assert ch.messages[0]["output"] == "hello"
-    assert ch.messages[0]["started_at"] is None
-    assert ch.messages[0]["duration_ms"] is None
 
 
 async def test_unregister_removes_channel() -> None:
@@ -97,7 +90,7 @@ async def test_unregister_removes_channel() -> None:
     dm.register(ch)
     dm.unregister(ch)
 
-    await dm.broadcast("job1", "hello")
+    await dm.broadcast(_rec("job1"), "hello")
 
     assert len(ch.messages) == 0
 
@@ -116,7 +109,7 @@ async def test_broadcast_isolates_channel_failure() -> None:
     dm.register(fail)
     dm.register(ok2)
 
-    await dm.broadcast("job1", "result")
+    await dm.broadcast(_rec("job1"), "result")
 
     assert len(ok.messages) == 1
     assert ok.messages[0]["job_name"] == "job1"
@@ -139,7 +132,7 @@ async def test_close_all_closes_channels_and_clears() -> None:
     assert ch1.closed
     assert ch2.closed
     # close_all 后广播不再投递
-    await dm.broadcast("job1", "after-close")
+    await dm.broadcast(_rec("job1"), "after-close")
     assert len(ch1.messages) == 0
 
 
@@ -163,8 +156,8 @@ async def test_api_delivery_buffers_when_no_subscribers() -> None:
     """无订阅者时结果被缓存。"""
     ad = APIDelivery(max_buffer=5)
 
-    await ad.deliver("job1", "result1")
-    await ad.deliver("job2", "result2")
+    await ad.deliver(_rec("job1"), "result1")
+    await ad.deliver(_rec("job2"), "result2")
 
     assert len(ad._buffer) == 2
     assert ad._buffer[0]["job_name"] == "job1"
@@ -175,9 +168,9 @@ async def test_api_delivery_buffer_evicts_oldest_when_full() -> None:
     """缓存满时丢弃最旧的结果。"""
     ad = APIDelivery(max_buffer=2)
 
-    await ad.deliver("job1", "r1")
-    await ad.deliver("job2", "r2")
-    await ad.deliver("job3", "r3")
+    await ad.deliver(_rec("job1"), "r1")
+    await ad.deliver(_rec("job2"), "r2")
+    await ad.deliver(_rec("job3"), "r3")
 
     assert len(ad._buffer) == 2
     assert ad._buffer[0]["job_name"] == "job2"
@@ -199,8 +192,8 @@ async def test_api_delivery_pushes_to_subscribers() -> None:
     # 等待订阅者注册
     await asyncio.sleep(0.05)
 
-    await ad.deliver("j1", "o1")
-    await ad.deliver("j2", "o2")
+    await ad.deliver(_rec("j1"), "o1")
+    await ad.deliver(_rec("j2"), "o2")
 
     await asyncio.wait_for(task, timeout=2)
 
@@ -217,8 +210,8 @@ async def test_api_delivery_subscriber_receives_buffered_first() -> None:
     ad = APIDelivery()
 
     # 先投递两条（无订阅者，进入缓存）
-    await ad.deliver("old1", "cached1")
-    await ad.deliver("old2", "cached2")
+    await ad.deliver(_rec("old1"), "cached1")
+    await ad.deliver(_rec("old2"), "cached2")
 
     received: list[dict[str, str]] = []
 
@@ -232,7 +225,7 @@ async def test_api_delivery_subscriber_receives_buffered_first() -> None:
     await asyncio.sleep(0.05)
 
     # 投递一条新的
-    await ad.deliver("new1", "live1")
+    await ad.deliver(_rec("new1"), "live1")
 
     await asyncio.wait_for(task, timeout=2)
 
@@ -282,7 +275,7 @@ async def test_api_delivery_multiple_subscribers() -> None:
     t2 = asyncio.create_task(consume(r2))
     await asyncio.sleep(0.05)
 
-    await ad.deliver("shared", "data")
+    await ad.deliver(_rec("shared"), "data")
 
     await asyncio.wait_for(asyncio.gather(t1, t2), timeout=2)
 
@@ -302,7 +295,7 @@ async def test_broadcast_forwards_timing_metadata() -> None:
     dm.register(ch)
 
     ts = datetime(2026, 3, 7, 12, 0, 0)
-    await dm.broadcast("job1", "result", started_at=ts, duration_ms=1234)
+    await dm.broadcast(_rec("job1", started_at=ts, duration_ms=1234), "result")
 
     assert len(ch.messages) == 1
     assert ch.messages[0]["started_at"] == ts
@@ -317,21 +310,11 @@ async def test_api_delivery_serializes_timing_metadata() -> None:
     ad = APIDelivery()
 
     ts = datetime(2026, 3, 7, 12, 0, 0)
-    await ad.deliver("job1", "out", started_at=ts, duration_ms=500)
+    await ad.deliver(_rec("job1", started_at=ts, duration_ms=500), "out")
 
     assert len(ad._buffer) == 1
     assert ad._buffer[0]["started_at"] == "2026-03-07T12:00:00"
     assert ad._buffer[0]["duration_ms"] == 500
-
-
-async def test_api_delivery_none_timing_metadata() -> None:
-    """不提供 started_at/duration_ms 时，缓存中为 None。"""
-    ad = APIDelivery()
-
-    await ad.deliver("job1", "out")
-
-    assert ad._buffer[0]["started_at"] is None
-    assert ad._buffer[0]["duration_ms"] is None
 
 
 async def test_api_delivery_subscriber_receives_timing_metadata() -> None:
@@ -349,7 +332,7 @@ async def test_api_delivery_subscriber_receives_timing_metadata() -> None:
     await asyncio.sleep(0.05)
 
     ts = datetime(2026, 3, 7, 15, 30, 0)
-    await ad.deliver("j1", "o1", started_at=ts, duration_ms=2000)
+    await ad.deliver(_rec("j1", started_at=ts, duration_ms=2000), "o1")
 
     await asyncio.wait_for(task, timeout=2)
 
@@ -373,7 +356,7 @@ async def test_tui_delivery_calls_add_notification() -> None:
 
     delivery = TUIDelivery(app)
     ts = datetime(2026, 3, 7, 12, 0, 0)
-    await delivery.deliver("job1", "output", started_at=ts, duration_ms=100)
+    await delivery.deliver(_rec("job1", started_at=ts, duration_ms=100), "output")
 
     app.add_notification.assert_called_once_with(
         "job1", "output", started_at=ts, duration_ms=100
@@ -390,4 +373,4 @@ async def test_tui_delivery_logs_warning_when_no_add_notification() -> None:
     delivery = TUIDelivery(app)
 
     # 不应抛异常
-    await delivery.deliver("job1", "output")
+    await delivery.deliver(_rec("job1"), "output")

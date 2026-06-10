@@ -13,6 +13,7 @@ from __future__ import annotations
 import json
 from pathlib import Path
 
+from lumi.agents.runtime.checkpoint import _atomic_write_json
 from lumi.utils.config.global_manager import GlobalConfigManager
 from lumi.utils.logger import logger
 
@@ -34,11 +35,7 @@ def load_all() -> dict[str, dict]:
 
 
 def _save_all(data: dict[str, dict]) -> None:
-    path = _meta_path()
-    path.parent.mkdir(parents=True, exist_ok=True)
-    tmp = path.with_suffix(".json.tmp")
-    tmp.write_text(json.dumps(data, ensure_ascii=False, indent=2), encoding="utf-8")
-    tmp.replace(path)
+    _atomic_write_json(_meta_path(), data)
 
 
 def update_meta(thread_id: str, **fields) -> dict:

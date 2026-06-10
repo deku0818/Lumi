@@ -259,6 +259,8 @@ class TestCallModelIntegration:
             system_prompt = "test"
             model_name = "gpt-4o"  # OpenAI 触发转换
             tools = []
+            base_url = ""
+            api_key = ""
 
         class FakeRuntime:
             context = FakeContext()
@@ -305,6 +307,8 @@ class TestCallModelIntegration:
             system_prompt = "test"
             model_name = "gpt-4o"
             tools = []
+            base_url = ""
+            api_key = ""
 
         class FakeRuntime:
             context = FakeContext()

@@ -61,7 +61,7 @@ export function Composer({
         onScroll={syncScroll}
         disabled={disabled}
         placeholder={placeholder}
-        className="composer-layer composer relative max-h-48 overflow-auto resize-none bg-transparent text-transparent caret-ink outline-none placeholder:text-muted/50 disabled:opacity-50"
+        className="composer-layer composer relative max-h-48 overflow-auto resize-none bg-transparent text-transparent caret-ink outline-none placeholder:text-muted-foreground/50 disabled:opacity-50"
       />
     </div>
   )

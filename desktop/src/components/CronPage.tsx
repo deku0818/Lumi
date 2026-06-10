@@ -87,6 +87,21 @@ function describeSchedule(job: CronJob, t: Translate): string {
   return value
 }
 
+// 调度状态徽章（启用=描述调度规则，停用=「已暂停」），JobCard 与 JobDetail 共用
+function ScheduleBadge({ job }: { job: CronJob }) {
+  const { t } = useI18n()
+  return (
+    <span
+      className={`inline-flex items-center gap-1.5 rounded-lg px-2 py-1 text-xs ${
+        job.enabled ? 'bg-success/10 text-success' : 'bg-line/30 text-muted-foreground'
+      }`}
+    >
+      <Clock size={11} />
+      {job.enabled ? describeSchedule(job, t) : t('cron.paused')}
+    </span>
+  )
+}
+
 export function CronPage({
   api,
   jobs,
@@ -143,7 +158,7 @@ export function CronPage({
           <div className="flex items-start justify-between gap-4">
             <div>
               <h1 className="serif text-2xl">{t('cron.title')}</h1>
-              <p className="text-sm text-muted mt-1">{t('cron.subtitle')}</p>
+              <p className="text-sm text-muted-foreground mt-1">{t('cron.subtitle')}</p>
             </div>
             <Button onClick={() => setDialog({ job: null })} className="shrink-0 rounded-xl gap-1.5">
               <Plus size={15} />
@@ -151,16 +166,16 @@ export function CronPage({
             </Button>
           </div>
 
-          <div className="mt-5 flex items-center gap-2.5 rounded-2xl border border-line/30 bg-surface/60 px-4 py-3 text-sm text-muted">
+          <div className="mt-5 flex items-center gap-2.5 rounded-2xl border border-line/30 bg-surface/60 px-4 py-3 text-sm text-muted-foreground">
             <Info size={15} className="shrink-0 text-info" />
             {t('cron.banner')}
           </div>
 
           {jobs.length === 0 ? (
             <div className="mt-16 flex flex-col items-center text-center select-none">
-              <Clock size={36} className="text-muted/50" />
+              <Clock size={36} className="text-muted-foreground/50" />
               <div className="mt-4 text-ink">{t('cron.empty')}</div>
-              <div className="mt-1 text-sm text-muted">{t('cron.emptyHint')}</div>
+              <div className="mt-1 text-sm text-muted-foreground">{t('cron.emptyHint')}</div>
             </div>
           ) : (
             <div className="mt-5 grid gap-4 grid-cols-[repeat(auto-fill,minmax(230px,1fr))]">
@@ -229,17 +244,10 @@ function JobCard({
         )}
       </div>
 
-      <div className="mt-1.5 text-sm text-muted line-clamp-3 flex-1">{job.prompt}</div>
+      <div className="mt-1.5 text-sm text-muted-foreground line-clamp-3 flex-1">{job.prompt}</div>
 
       <div className="mt-3.5 flex items-center justify-between gap-2">
-        <span
-          className={`inline-flex items-center gap-1.5 rounded-lg px-2 py-1 text-xs ${
-            job.enabled ? 'bg-success/10 text-success' : 'bg-line/30 text-muted'
-          }`}
-        >
-          <Clock size={11} />
-          {job.enabled ? describeSchedule(job, t) : t('cron.paused')}
-        </span>
+        <ScheduleBadge job={job} />
         <span onClick={(e) => e.stopPropagation()} className="shrink-0">
           <Switch checked={job.enabled} onCheckedChange={onToggle} />
         </span>
@@ -277,7 +285,7 @@ function JobDetail({
     <div className="max-w-4xl mx-auto w-full px-8 py-6">
       <button
         onClick={onBack}
-        className="flex items-center gap-1 text-sm text-muted hover:text-ink transition -ml-1"
+        className="flex items-center gap-1 text-sm text-muted-foreground hover:text-ink transition -ml-1"
       >
         <ChevronLeft size={16} />
         {t('cron.back')}
@@ -286,10 +294,10 @@ function JobDetail({
       <div className="mt-5 flex items-start justify-between gap-4">
         <h1 className="serif text-3xl min-w-0 break-words">{job.name}</h1>
         <div className="shrink-0 flex items-center gap-1">
-          <Button variant="ghost" size="icon-sm" onClick={onEdit} aria-label={t('cron.editTitle')} className="text-muted">
+          <Button variant="ghost" size="icon-sm" onClick={onEdit} aria-label={t('cron.editTitle')} className="text-muted-foreground">
             <Pencil />
           </Button>
-          <Button variant="ghost" size="icon-sm" onClick={onDelete} aria-label={t('cron.deleteTitle')} className="text-muted">
+          <Button variant="ghost" size="icon-sm" onClick={onDelete} aria-label={t('cron.deleteTitle')} className="text-muted-foreground">
             <Trash2 />
           </Button>
           <Button onClick={onRunNow} disabled={running} className="ml-2 rounded-xl gap-1.5">
@@ -301,16 +309,9 @@ function JobDetail({
 
       <div className="mt-4 flex items-center gap-3 flex-wrap">
         <Switch checked={job.enabled} onCheckedChange={onToggle} />
-        <span
-          className={`inline-flex items-center gap-1.5 rounded-lg px-2 py-1 text-xs ${
-            job.enabled ? 'bg-success/10 text-success' : 'bg-line/30 text-muted'
-          }`}
-        >
-          <Clock size={11} />
-          {job.enabled ? describeSchedule(job, t) : t('cron.paused')}
-        </span>
+        <ScheduleBadge job={job} />
         {job.enabled && job.next_run && (
-          <span className="text-sm text-muted">{t('cron.nextRun', { time: fmtTime(job.next_run) })}</span>
+          <span className="text-sm text-muted-foreground">{t('cron.nextRun', { time: fmtTime(job.next_run) })}</span>
         )}
       </div>
 
@@ -323,7 +324,7 @@ function JobDetail({
 
       <div className="mt-8 pt-6 border-t border-line/30 grid grid-cols-1 md:grid-cols-[5fr_7fr] gap-10">
         <div>
-          <div className="text-sm text-muted mb-2">{t('cron.tabRuns')}</div>
+          <div className="text-sm text-muted-foreground mb-2">{t('cron.tabRuns')}</div>
           <RunList
             api={api}
             jobId={job.id}
@@ -332,7 +333,7 @@ function JobDetail({
           />
         </div>
         <div>
-          <div className="text-sm text-muted mb-2">{t('cron.prompt')}</div>
+          <div className="text-sm text-muted-foreground mb-2">{t('cron.prompt')}</div>
           <div className="selectable text-[15px] leading-relaxed whitespace-pre-wrap break-words">{job.prompt}</div>
         </div>
       </div>
@@ -445,12 +446,12 @@ function Field({
 }) {
   return (
     <label className="block">
-      <div className="text-xs text-muted mb-1.5">{label}</div>
+      <div className="text-xs text-muted-foreground mb-1.5">{label}</div>
       {children}
       {error ? (
         <div className="text-xs text-error mt-1.5 break-words">{error}</div>
       ) : (
-        hint && <div className="text-[11px] text-muted/70 mt-1.5">{hint}</div>
+        hint && <div className="text-[11px] text-muted-foreground/70 mt-1.5">{hint}</div>
       )}
     </label>
   )
@@ -508,9 +509,9 @@ export function RunsRail({
 
   return (
     <aside className="w-60 shrink-0 border-l border-line/20 overflow-auto px-3 py-4">
-      <div className="px-2 mb-2 text-xs text-muted">{t('cron.tabRuns')}</div>
+      <div className="px-2 mb-2 text-xs text-muted-foreground">{t('cron.tabRuns')}</div>
       {runs?.length === 0 && (
-        <div className="px-2 py-4 text-xs text-muted">{t('cron.noRuns')}</div>
+        <div className="px-2 py-4 text-xs text-muted-foreground">{t('cron.noRuns')}</div>
       )}
       {(runs ?? []).map((r) => (
         <button
@@ -523,7 +524,7 @@ export function RunsRail({
               ? r.thread_id === activeThread
                 ? 'bg-surface text-ink'
                 : 'text-ink/80 hover:bg-surface/60'
-              : 'text-muted/50 cursor-default'
+              : 'text-muted-foreground/50 cursor-default'
           }`}
         >
           <span className="flex-1 truncate">{fmtRunTime(r.started_at, lang)}</span>
@@ -553,7 +554,7 @@ function RunList({
 
   if (runs === null) return null
   if (runs.length === 0) {
-    return <div className="py-6 text-sm text-muted">{t('cron.noRuns')}</div>
+    return <div className="py-6 text-sm text-muted-foreground">{t('cron.noRuns')}</div>
   }
   return (
     <div>
@@ -566,17 +567,17 @@ function RunList({
             className="group w-full py-3 flex items-center gap-2 text-left hover:bg-surface/40 transition rounded-lg px-1 -mx-1"
           >
             <span className="text-sm flex-1">{fmtRunTime(r.started_at, lang)}</span>
-            <span className="text-xs text-muted">{(r.duration_ms / 1000).toFixed(0)}s</span>
+            <span className="text-xs text-muted-foreground">{(r.duration_ms / 1000).toFixed(0)}s</span>
             <RunStatusMark run={r} />
             {r.thread_id && (
               <ChevronRight
                 size={14}
-                className="shrink-0 text-muted opacity-0 group-hover:opacity-100 transition-opacity"
+                className="shrink-0 text-muted-foreground opacity-0 group-hover:opacity-100 transition-opacity"
               />
             )}
           </button>
           {open === i && !r.thread_id && (
-            <div className={`selectable pb-3 px-1 text-xs leading-relaxed whitespace-pre-wrap break-words ${r.error ? 'text-error/90' : 'text-muted'}`}>
+            <div className={`selectable pb-3 px-1 text-xs leading-relaxed whitespace-pre-wrap break-words ${r.error ? 'text-error/90' : 'text-muted-foreground'}`}>
               {r.error || r.output_summary || '—'}
             </div>
           )}

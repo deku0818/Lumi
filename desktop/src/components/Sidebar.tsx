@@ -1,4 +1,4 @@
-import { useEffect, useRef, useState } from 'react'
+import { memo, useEffect, useRef, useState } from 'react'
 import {
   AlertTriangle,
   ChevronRight,
@@ -34,13 +34,14 @@ const CONN_DOT: Record<ConnState, string> = {
   closed: 'bg-error',
 }
 
-export function Sidebar({
+// memo：App 在流式期间每个 token 重渲染，侧栏的 props 全部保持稳定身份
+// （回调 useCallback、activity 内容不变时复用对象），让 400 行侧栏不陪跑。
+export const Sidebar = memo(function Sidebar({
   sessions,
   currentThread,
   conn,
   model,
   activity,
-  disabled,
   scheduledActive,
   cronJobs,
   cronUnread,
@@ -60,7 +61,6 @@ export function Sidebar({
   conn: ConnState
   model: string
   activity: Record<string, 'running' | 'attention'>
-  disabled: boolean
   scheduledActive: boolean
   cronJobs: CronJob[]
   cronUnread: Record<string, number>
@@ -83,7 +83,6 @@ export function Sidebar({
         <Button
           variant="ghost"
           onClick={onNew}
-          disabled={disabled}
           className="no-drag w-full justify-start gap-2 h-auto px-3 py-2 rounded-xl"
         >
           <span className="text-primary text-base leading-none">＋</span>
@@ -92,7 +91,7 @@ export function Sidebar({
         <button
           onClick={onOpenScheduled}
           className={`no-drag relative w-full flex items-center gap-2 px-3 py-2 rounded-xl text-sm transition ${
-            scheduledActive ? 'bg-surface text-ink' : 'text-muted hover:bg-surface/60 hover:text-ink'
+            scheduledActive ? 'bg-surface text-ink' : 'text-muted-foreground hover:bg-surface/60 hover:text-ink'
           }`}
         >
           <Clock size={15} className="shrink-0" />
@@ -124,7 +123,6 @@ export function Sidebar({
                 session={s}
                 active={s.thread_id === currentThread}
                 state={activity[s.thread_id]}
-                disabled={disabled}
                 onSelect={onSelect}
                 onPin={onPin}
                 onRename={onRename}
@@ -140,7 +138,7 @@ export function Sidebar({
       </div>
     </aside>
   )
-}
+})
 
 // 可折叠分组：标题浅色弱化（与条目区分层级），点击收起/展开，状态持久化
 function CollapsibleGroup({
@@ -164,7 +162,7 @@ function CollapsibleGroup({
     <div>
       <button
         onClick={toggle}
-        className="group/header w-full flex items-center gap-1 px-3 pt-2 pb-1.5 text-xs text-muted/60 hover:text-muted transition"
+        className="group/header w-full flex items-center gap-1 px-3 pt-2 pb-1.5 text-xs text-muted-foreground/60 hover:text-muted-foreground transition"
       >
         <span>{label}</span>
         <ChevronRight
@@ -240,10 +238,10 @@ function AccountMenu({
               className={`absolute -right-0.5 -bottom-0.5 size-2 rounded-full ring-2 ring-canvas ${CONN_DOT[conn]}`}
             />
           </span>
-          <span className="flex-1 min-w-0 truncate text-xs text-muted" title={model}>
+          <span className="flex-1 min-w-0 truncate text-xs text-muted-foreground" title={model}>
             {model || t('sidebar.disconnected')}
           </span>
-          <ChevronsUpDown size={14} className="shrink-0 text-muted" />
+          <ChevronsUpDown size={14} className="shrink-0 text-muted-foreground" />
         </button>
       </DropdownMenuTrigger>
       <DropdownMenuContent side="top" align="start" className="w-56">
@@ -274,7 +272,6 @@ function SessionRow({
   session,
   active,
   state,
-  disabled,
   onSelect,
   onPin,
   onRename,
@@ -283,7 +280,6 @@ function SessionRow({
   session: SessionMeta
   active: boolean
   state?: 'running' | 'attention'
-  disabled: boolean
   onSelect: (threadId: string) => void
   onPin: (threadId: string, pinned: boolean) => void
   onRename: (threadId: string, title: string) => void
@@ -309,9 +305,8 @@ function SessionRow({
     <div className="group relative">
       <button
         onClick={() => onSelect(session.thread_id)}
-        disabled={disabled}
         title={session.first_message}
-        className={`block w-full text-left pl-3 pr-8 py-2 rounded-lg truncate text-sm transition disabled:opacity-50 ${
+        className={`block w-full text-left pl-3 pr-8 py-2 rounded-lg truncate text-sm transition ${
           active ? 'bg-surface text-ink' : 'text-ink/80 hover:bg-surface/60 hover:text-ink'
         }`}
       >
@@ -333,7 +328,7 @@ function SessionRow({
         <DropdownMenuTrigger asChild>
           <button
             aria-label={t('sidebar.sessionActions')}
-            className="absolute right-1 top-1/2 -translate-y-1/2 size-6 grid place-items-center rounded-md text-muted hover:bg-line/30 hover:text-ink transition opacity-0 group-hover:opacity-100 data-[state=open]:opacity-100 outline-none"
+            className="absolute right-1 top-1/2 -translate-y-1/2 size-6 grid place-items-center rounded-md text-muted-foreground hover:bg-line/30 hover:text-ink transition opacity-0 group-hover:opacity-100 data-[state=open]:opacity-100 outline-none"
           >
             <MoreVertical size={15} />
           </button>

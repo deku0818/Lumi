@@ -17,7 +17,12 @@ from lumi import __version__
 from lumi.agents.cron.delivery import DeliveryManager, TUIDelivery
 from lumi.agents.cron.runtime import setup_cron
 from lumi.agents.cron.scheduler import Scheduler
-from lumi.agents.bridge import AgentBridge, BridgeEvent, build_skill_command_blocks
+from lumi.agents.bridge import (
+    AgentBridge,
+    BridgeEvent,
+    build_skill_command_blocks,
+    shutdown_shared_runtime,
+)
 from lumi.tui.run_state import RunContext, RunPhase
 from lumi.tui.subagent_tracker import SubagentTracker
 from lumi.tui.theme import APP_CSS, LUMI_DARK_THEME, LUMI_LIGHT_THEME, get_color
@@ -1270,13 +1275,11 @@ class LumiApp(App):
         if self._run.is_running:
             return
 
-        notifications = self._bridge.drain_notifications()
-        if not notifications:
+        hint = self._bridge.drain_notification_hint()
+        if not hint:
             return
 
-        logger.info(f"[LumiApp] 收到 {len(notifications)} 条后台任务通知")
-        combined = "\n".join(notifications)
-        hint = f"{combined}\nRead the output file to retrieve the result."
+        logger.info("[LumiApp] 注入后台任务通知")
 
         # 先设为 THINKING 防止下一次 poll 重入
         self._run.phase = RunPhase.THINKING
@@ -1396,6 +1399,7 @@ class LumiApp(App):
             if self._delivery:
                 await self._delivery.close_all()
             await self._bridge.close()
+            await shutdown_shared_runtime()
         except Exception:
             logger.warning("[LumiApp] 关闭资源时出错", exc_info=True)
         self.exit()

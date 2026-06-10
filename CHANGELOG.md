@@ -1,5 +1,29 @@
 # Changelog
 
+## [0.1.0a14] - 2026-06-11
+
+### Fixed
+- **WS 连接断开不再拆除全局运行时** — 每连接的 `bridge.close()` 只清理自身；MCP 子进程、shell / 后台任务会话改由 `shutdown_shared_runtime()` 在进程退出时统一关闭（此前关任一会话会 SIGKILL 所有会话的 MCP 与 bash）
+- **cron 跨进程调度互斥** — `Scheduler.start()` 经 `scheduler.lock` 文件锁（flock）保证同一 workspace 只有一个进程调度；TUI 与 `lumi serve` 并存时任务不再双跑（后启动者仍可管理任务）
+- **非流式 RPC 不再阻塞 WS 接收循环** — `_dispatch` spawn 成独立 task，需等 `run.lock` 的方法（删会话 / 切模型）不再让 `stop` 帧在整轮结束前读不到
+- **后台任务通知按归属投递** — 任务注册时经 `ContextVar` 捕获所属 thread_id，各连接只认领自己会话的通知；多会话时不再被任意连接抢走注入错误对话
+- **cron 部分更新立即生效** — APScheduler 注册改为只携带 `job.id`，触发时从 JobStore 重读最新定义；仅改 prompt/name 的更新不再继续执行旧 prompt（RPC 与 agent 工具两条路径一并修复）
+- **desktop 子代理事件不再混入主对话** — 带 `parent_run_id` 的流式/工具事件被过滤，子代理 token 不再拼进父气泡（审批/澄清等中断照常弹出）
+- **WS 断开后会话不再永久卡死** — `send`/`resume` 的 RPC 拒绝复位 `running`；`error`/`turn.complete` 统一收尾残留的流式气泡，下一轮回复不再粘进死气泡
+- **Gateway 关闭不再复活僵尸连接** — `close()` 取消退避中的重连定时器；macOS 关窗保留 sidecar，Dock 唤起后直接复用（此前对着死端口永久重连）
+- **RunLog 并发写互斥** — `append` 与 `prune_thread_ids` 加写锁，Run now 撞上定时触发不再丢执行记录；cron 线程删除连带清理文件级 filediff checkpoint
+- **`set_provider` 无效切换显式报错** — provider/model 不存在时抛错而非静默返回旧 active；`cron.running` 广播 task 自持引用防 GC
+
+### Changed
+- **协议层收口** — `protocol.event_frame()` 统一 wire 信封构造（4 处手拼消除）；`ws.py` 改为 `_RPC_HANDLERS` 分发表并导出 `IMPLEMENTED_METHODS`，契约测试直接断言真实实现而非手抄集合
+- **delivery 改为值对象契约** — `deliver(record: RunRecord, text)` 取代 6 个 kwargs 的 5 份平行签名；`cron.result` 广播 output 截断 200 字符（详情走 `list_cron_runs`）
+- **前端类型对齐真正生效** — `WireEventType` 移除 `(string & {})` 逃生口，`Gateway.request` 泛型化并以 `RpcMethod` 约束方法名（17 处 cast 消除）
+- **渲染性能** — `ItemView`/`ToolGroup`/`Sidebar` memo 化 + `activity` 身份稳定化，流式期间不再每 token 重解析全部 markdown / 重渲染侧栏；会话列表只在回合结束时刷新，`list_sessions` 分批并发加载 state
+- **复用收口** — 原子写 JSON 统一到 `_atomic_write_json`（带 `mode` 参数）；通知提示词收口 `bridge.drain_notification_hint()`（TUI/desktop 共用）；cron 删除级联收口 `Scheduler.delete_job`；连接激活握手收口 `activate()`；`clip`/`basename` 移入 `lib/utils.ts`
+- **新增主题契约测试** — `tests/test_theme_contract.py` 锁住 `tui/theme.py` 色板与 `desktop/src/index.css` 逐色一致；修复亮色主题下 `bg-muted` 误指文字色导致弹窗 footer 发黑（`text-muted` 全量更名 `text-muted-foreground`）
+- **依赖全量升级** — langchain-anthropic ≥1.4.0（1.4.4）、langchain-openai ≥1.3.0、langgraph 1.2.2、anthropic 0.109、openai 2.41、fastapi 0.136 / starlette 1.2、textual 8.2.7 等
+- bash 工具图标改为带框的 `SquareTerminal`；移除 debug 日志块与死代码（`Gateway.newSession`、`lumi:log`/`lumi:focus` IPC、Sidebar 恒 false 的 `disabled` prop）
+
 ## [0.1.0a13] - 2026-06-10
 
 ### Added

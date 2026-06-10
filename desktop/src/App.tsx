@@ -1,8 +1,8 @@
-import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
+import { memo, useCallback, useEffect, useMemo, useRef, useState } from 'react'
 import ReactMarkdown from 'react-markdown'
 import remarkGfm from 'remark-gfm'
 import {
-  Terminal,
+  SquareTerminal,
   FileText,
   FilePlus,
   FilePen,
@@ -41,6 +41,7 @@ import { CommandMenu } from './components/CommandMenu'
 import { Composer } from './components/Composer'
 import { isCommandMode, parseCommand, matchCommands } from './slash'
 import { toolDiff, type DiffLine } from './diff'
+import { clip, basename } from '@/lib/utils'
 import { Button } from '@/components/ui/button'
 import { useTheme } from './theme'
 import { useI18n } from './i18n'
@@ -98,6 +99,14 @@ function appendDelta(items: Item[], text: string): Item[] {
   return [...items, { id: nid(), kind: 'assistant', text, streaming: true }]
 }
 
+// 结束所有流式中的 assistant 气泡。轮次边界（complete/error）必须调用：
+// 残留的 streaming 气泡会被下一轮 appendDelta 匹配，新回复拼进旧气泡。
+function finishStreaming(items: Item[]): Item[] {
+  return items.map((it) =>
+    it.kind === 'assistant' && it.streaming ? { ...it, streaming: false } : it,
+  )
+}
+
 // 每个会话的独立状态（多会话并发：A 在跑时可切到 B，互不影响）
 type SessionState = {
   items: Item[]
@@ -127,6 +136,7 @@ export default function App() {
   const [providers, setProviders] = useState<ProviderProfile[]>([])
   const [activeModel, setActiveModel] = useState<ActiveModel>({ provider: '', model: '' })
   const [showSettings, setShowSettings] = useState(false)
+  const openSettings = useCallback(() => setShowSettings(true), [])
   const [pendingDelete, setPendingDelete] = useState<SessionMeta | null>(null)
   const [themePref, setThemePref] = useTheme()
   const { t } = useI18n()
@@ -217,7 +227,9 @@ export default function App() {
     tRef.current = t
   })
 
-  // 每个会话的活动态，喂给侧栏显示圆点：attention=等你处理（审批/澄清/计划），running=处理中
+  // 每个会话的活动态，喂给侧栏显示圆点：attention=等你处理（审批/澄清/计划），running=处理中。
+  // store 每个流式 token 都换新身份，内容不变时复用上一个对象，避免 Sidebar 每 token 重渲染。
+  const activityRef = useRef<Record<string, 'running' | 'attention'>>({})
   const activity = useMemo(() => {
     const m: Record<string, 'running' | 'attention'> = {}
     for (const tid in store) {
@@ -225,16 +237,19 @@ export default function App() {
       if (s.approval || s.clarify || s.plan) m[tid] = 'attention'
       else if (s.running) m[tid] = 'running'
     }
+    const prev = activityRef.current
+    const keys = Object.keys(m)
+    if (keys.length === Object.keys(prev).length && keys.every((k) => prev[k] === m[k])) {
+      return prev
+    }
+    activityRef.current = m
     return m
   }, [store])
 
-  // 按 session_id 路由事件到对应会话（后台会话的事件也能正确归位）
+  // 按 session_id 路由事件到对应会话（后台会话的事件也能正确归位）。
+  // gateway.ready 不会到达这里——openConnection 的 onEvent 已拦截处理。
   const handleEvent = useCallback((ev: WireEvent) => {
     const { type, payload } = ev
-    if (type === 'gateway.ready') {
-      setModel((m) => m || payload.model || '')
-      return
-    }
     // cron 事件是进程级广播（与会话无关），在 session 路由之前单独处理
     if (type === 'cron.running') {
       setCronRunning(payload.names ?? [])
@@ -244,6 +259,10 @@ export default function App() {
       const key = `${payload.job_id}:${payload.started_at}`
       if (seenCronRef.current.has(key)) return
       seenCronRef.current.add(key)
+      // 去重集合封顶（Set 按插入序迭代，砍最旧的），避免长驻进程无限增长
+      if (seenCronRef.current.size > 500) {
+        seenCronRef.current.delete(seenCronRef.current.values().next().value!)
+      }
       setCronVersion((v) => v + 1)
       // 正在看该任务的会话视图时不算未读，其余情况该任务未读 +1
       const viewingThisJob =
@@ -262,17 +281,17 @@ export default function App() {
       return
     }
     const sid = ev.session_id ?? ''
-    // 回复完成且开启通知：仅在该会话非当前活动、或窗口未聚焦时弹系统通知（避免你正盯着时打扰）。
-    // 用 hasFocus 而非 document.hidden（切到别的应用时窗口仍可见，hidden 恒为 false）；
-    // 通知经主进程发出（renderer 的 HTML5 Notification 在 macOS dev 下不可靠），
-    // 点击由 onNotifyClick 回调切会话。
-    if (type === 'turn.complete') {
-      window.lumi.log?.(
-        `turn.complete sid=${sid} active=${activeRef.current} notify=${notifyRef.current} hasFocus=${document.hasFocus()}`,
-      )
+    // 子代理事件（带 parent_run_id 的流式/工具事件）不进主对话流——否则子代理
+    // 的 token 会拼进父气泡、子工具显示为顶层工具行。父级 agent 工具行本身
+    // （无 parent_run_id）照常渲染；中断类（审批/澄清/计划）仍需用户处理，不过滤。
+    if (payload.parent_run_id && (type.startsWith('message.') || type.startsWith('tool.'))) {
+      return
     }
     // 系统通知：回复完成 + 等待用户处理的中断（审批/提问/计划）。
     // 仅在该会话非当前活动、或窗口未聚焦时弹（你正盯着时不打扰）。
+    // 用 hasFocus 而非 document.hidden（切到别的应用时窗口仍可见，hidden 恒为 false）；
+    // 通知经主进程发出（renderer 的 HTML5 Notification 在 macOS dev 下不可靠），
+    // 点击由 onNotifyClick 回调切会话。
     if (notifyRef.current && (sid !== activeRef.current || !document.hasFocus())) {
       const t = tRef.current
       let title = ''
@@ -305,12 +324,7 @@ export default function App() {
           n = { ...s, items: appendDelta(s.items, payload.text ?? '') }
           break
         case 'message.complete':
-          n = {
-            ...s,
-            items: s.items.map((it) =>
-              it.kind === 'assistant' && it.streaming ? { ...it, streaming: false } : it,
-            ),
-          }
+          n = { ...s, items: finishStreaming(s.items) }
           break
         case 'tool.start': {
           const tcid = payload.tool_call_id ?? ''
@@ -353,10 +367,15 @@ export default function App() {
           n = { ...s, plan: payload }
           break
         case 'turn.complete':
-          n = { ...s, running: false }
+          n = { ...s, running: false, items: finishStreaming(s.items) }
           break
         case 'error':
-          n = { ...s, running: false, items: [...s.items, { id: nid(), kind: 'notice', text: payload.message }] }
+          // 出错中断的流（bridge 只发 error、无 message.complete）也要收尾气泡
+          n = {
+            ...s,
+            running: false,
+            items: [...finishStreaming(s.items), { id: nid(), kind: 'notice', text: payload.message }],
+          }
           break
       }
       return n ? { ...store, [sid]: n } : store
@@ -437,27 +456,35 @@ export default function App() {
     if (conn === 'open' && !running) inputRef.current?.focus()
   }, [conn, running, active])
 
+  // 会话管理 / cron RPC 操作全局资源，与连接当前 thread 无关，任一活跃连接皆可。
+  // 稳定引用（useCallback []）：作为 CronPage 的 api prop，避免每次渲染触发其刷新。
+  const anyGw = useCallback(
+    () => connsRef.current[activeRef.current] ?? Object.values(connsRef.current)[0],
+    [],
+  )
+
   const refreshSessions = useCallback(async () => {
-    const gw = connsRef.current[activeRef.current] ?? Object.values(connsRef.current)[0]
     try {
-      const r = await gw?.listSessions()
+      const r = await anyGw()?.listSessions()
       if (r?.sessions) setSessions(r.sessions)
     } catch {
       /* 忽略：连接波动时静默 */
     }
-  }, [])
+  }, [anyGw])
 
+  // 只在回合结束（running 落回 false）和切会话时刷新：发送时刷新没有新信息
+  // （首条消息尚未落 checkpoint），白白多一次全量 checkpoint 扫描。
   useEffect(() => {
-    if (active) void refreshSessions()
+    if (active && !running) void refreshSessions()
   }, [active, running, refreshSessions])
 
   // 拉取斜杠命令（技能命令，按项目动态）。技能目录随项目变化，故进入命令模式时刷新。
   const loadCommands = useCallback(() => {
-    const gw = connsRef.current[activeRef.current] ?? Object.values(connsRef.current)[0]
-    gw?.listCommands()
+    anyGw()
+      ?.listCommands()
       .then((r) => setCommands(r.commands ?? []))
       .catch(() => {})
-  }, [])
+  }, [anyGw])
 
   // provider 列表响应（list / save / delete 同形）统一回写
   const applyProviderResp = useCallback(
@@ -470,9 +497,8 @@ export default function App() {
 
   // 拉取模型供应商 profile 列表 + active
   const loadProviders = useCallback(() => {
-    const gw = connsRef.current[activeRef.current] ?? Object.values(connsRef.current)[0]
-    gw?.listProviders().then(applyProviderResp).catch(() => {})
-  }, [applyProviderResp])
+    anyGw()?.listProviders().then(applyProviderResp).catch(() => {})
+  }, [anyGw, applyProviderResp])
 
   useEffect(() => {
     if (active) loadProviders()
@@ -501,29 +527,38 @@ export default function App() {
     anyGw()?.testProvider(baseUrl, apiKey, model) ??
     Promise.resolve({ ok: false, error: t('sidebar.disconnected') })
 
-  const newSession = async () => {
+  // 激活一个会话：无现成连接时先建立（target=null 为新会话），并同步连接指示灯。
+  // connect→setActive→setConn 的握手只写在这一处，五个入口共用。
+  const activate = useCallback(
+    async (target: string | null) => {
+      let tid = target
+      if (!tid || !connsRef.current[tid]) {
+        // 建立期间以 connecting 示意（sidecar 不可用时指示灯保持黄色而非静默无反应）
+        setConn('connecting')
+        tid = await openConnection(target)
+      }
+      setActive(tid)
+      setConn('open')
+      return tid
+    },
+    [openConnection],
+  )
+
+  const newSession = useCallback(async () => {
     setView('chat')
-    setConn('connecting')
-    const tid = await openConnection(null)
-    setActive(tid)
-    setConn('open')
+    await activate(null)
     void refreshSessions()
-  }
+  }, [activate, refreshSessions])
 
-  const selectSession = async (tid: string) => {
-    setView('chat')
-    if (tid === active) return
-    if (!connsRef.current[tid]) {
-      setConn('connecting')
-      await openConnection(tid)
-    }
-    setActive(tid)
-    setConn('open')
-  }
+  const selectSession = useCallback(
+    async (tid: string) => {
+      setView('chat')
+      if (tid !== activeRef.current) await activate(tid)
+    },
+    [activate],
+  )
 
-  const openScheduled = () => {
-    setView('scheduled')
-  }
+  const openScheduled = useCallback(() => setView('scheduled'), [])
 
   // 拉取任务列表：唯一数据源，侧栏分组与管理页共用（CRUD 后经 onRefresh 刷新）
   const refreshCronJobs = useCallback(() => {
@@ -551,56 +586,55 @@ export default function App() {
 
   // 在任务会话视图内切换到某次执行的会话（不改变 view），并标记该次执行为已读。
   // 已读集合封顶 500 条（对象按插入序，砍最旧的），避免 localStorage 无限增长。
-  const openRunThread = async (tid: string) => {
-    setCronRunThread(tid)
-    setReadRuns((r) => {
-      if (r[tid]) return r
-      const next = { ...r, [tid]: true as const }
-      const keys = Object.keys(next)
-      for (const k of keys.slice(0, Math.max(0, keys.length - 500))) delete next[k]
-      return next
-    })
-    if (!connsRef.current[tid]) {
-      // 连接建立期间以 connecting 状态示意（sidecar 不可用时指示灯保持黄色而非静默无反应）
-      setConn('connecting')
-      await openConnection(tid)
-    }
-    setActive(tid)
-    setConn('open')
-  }
-
-  // 打开某任务的会话视图：默认选中最近一次有会话的执行
-  const openCronJob = async (jobId: string, threadId?: string) => {
-    setView('cronjob')
-    setActiveCronJob(jobId)
-    setCronUnread((u) => (u[jobId] ? { ...u, [jobId]: 0 } : u))
-    let tid = threadId
-    if (!tid) {
-      try {
-        const r = await anyGw()?.listCronRuns(jobId)
-        tid = r?.runs.find((x) => x.thread_id)?.thread_id
-      } catch {
-        /* 列表拉取失败时显示空态 */
-      }
-    }
-    setCronRunThread(tid ?? null)
-    if (tid) await openRunThread(tid)
-  }
-
-  // 会话管理 / cron RPC 操作全局资源，与连接当前 thread 无关，任一活跃连接皆可。
-  // 稳定引用（useCallback []）：作为 CronPage 的 api prop，避免每次渲染触发其刷新。
-  const anyGw = useCallback(
-    () => connsRef.current[activeRef.current] ?? Object.values(connsRef.current)[0],
-    [],
+  const openRunThread = useCallback(
+    async (tid: string) => {
+      setCronRunThread(tid)
+      setReadRuns((r) => {
+        if (r[tid]) return r
+        const next = { ...r, [tid]: true as const }
+        const keys = Object.keys(next)
+        for (const k of keys.slice(0, Math.max(0, keys.length - 500))) delete next[k]
+        return next
+      })
+      await activate(tid)
+    },
+    [activate],
   )
 
-  const pinSession = (tid: string, pinned: boolean) => {
-    anyGw()?.pinSession(tid, pinned).then(refreshSessions).catch(() => {})
-  }
+  // 打开某任务的会话视图：默认选中最近一次有会话的执行
+  const openCronJob = useCallback(
+    async (jobId: string, threadId?: string) => {
+      setView('cronjob')
+      setActiveCronJob(jobId)
+      setCronUnread((u) => (u[jobId] ? { ...u, [jobId]: 0 } : u))
+      let tid = threadId
+      if (!tid) {
+        try {
+          const r = await anyGw()?.listCronRuns(jobId)
+          tid = r?.runs.find((x) => x.thread_id)?.thread_id
+        } catch {
+          /* 列表拉取失败时显示空态 */
+        }
+      }
+      setCronRunThread(tid ?? null)
+      if (tid) await openRunThread(tid)
+    },
+    [anyGw, openRunThread],
+  )
 
-  const renameSession = (tid: string, title: string) => {
-    anyGw()?.renameSession(tid, title).then(refreshSessions).catch(() => {})
-  }
+  const pinSession = useCallback(
+    (tid: string, pinned: boolean) => {
+      anyGw()?.pinSession(tid, pinned).then(refreshSessions).catch(() => {})
+    },
+    [anyGw, refreshSessions],
+  )
+
+  const renameSession = useCallback(
+    (tid: string, title: string) => {
+      anyGw()?.renameSession(tid, title).then(refreshSessions).catch(() => {})
+    },
+    [anyGw, refreshSessions],
+  )
 
   const deleteSession = async (session: SessionMeta) => {
     setPendingDelete(null)
@@ -614,11 +648,7 @@ export default function App() {
       return n
     })
     // 删除的是当前会话：另开一个新会话顶上
-    if (tid === activeRef.current) {
-      const ntid = await openConnection(null)
-      setActive(ntid)
-      setConn('open')
-    }
+    if (tid === activeRef.current) await activate(null)
     void refreshSessions()
   }
 
@@ -662,6 +692,12 @@ export default function App() {
 
   const removeImage = (id: number) => setAttachments((a) => a.filter((x) => x.id !== id))
 
+  // 流式 RPC 被 reject（连接断开时 gateway 会 flush 所有在飞请求）后，
+  // 新连接不会为死掉的 run 补发 turn.complete——必须在此复位 running，
+  // 否则该会话永久卡死（输入框禁用、stop 无效）。
+  const resetRunning = (sid: string) =>
+    setStore((s) => (s[sid] ? { ...s, [sid]: { ...s[sid], running: false } } : s))
+
   const send = () => {
     const text = input.trim()
     const imgs = attachments
@@ -684,7 +720,7 @@ export default function App() {
     if (imgs.length === 0 && text.startsWith('/')) {
       const [name, extra] = parseCommand(text)
       if (commands.some((c) => c.name === name)) {
-        gw.runCommand(name, extra).catch(() => {})
+        gw.runCommand(name, extra).catch(() => resetRunning(active))
         return
       }
     }
@@ -695,9 +731,9 @@ export default function App() {
         const m = /^data:([^;]+);base64,(.*)$/s.exec(a.dataUrl)
         if (m) blocks.push({ type: 'image', source: { type: 'base64', media_type: m[1], data: m[2] } })
       }
-      gw.sendMessage(blocks).catch(() => {})
+      gw.sendMessage(blocks).catch(() => resetRunning(active))
     } else {
-      gw.sendMessage(text).catch(() => {})
+      gw.sendMessage(text).catch(() => resetRunning(active))
     }
   }
 
@@ -706,19 +742,18 @@ export default function App() {
     connsRef.current[active]?.stop().catch(() => {})
   }
 
-  const decide = (decision: 'approve' | 'reject') => {
-    const value =
-      decision === 'approve'
-        ? { decision: 'approve' }
-        : { decision: 'reject', message: '用户拒绝了此工具执行' }
-    connsRef.current[active]?.resume(value).catch(() => {})
-    setStore((s) => ({ ...s, [active]: { ...s[active], approval: null } }))
-  }
-
-  const resumeWith = (value: unknown, clear: 'clarify' | 'plan') => {
-    connsRef.current[active]?.resume(value).catch(() => {})
+  const resumeWith = (value: unknown, clear: 'approval' | 'clarify' | 'plan') => {
+    connsRef.current[active]?.resume(value).catch(() => resetRunning(active))
     setStore((s) => ({ ...s, [active]: { ...s[active], [clear]: null } }))
   }
+
+  const decide = (decision: 'approve' | 'reject') =>
+    resumeWith(
+      decision === 'approve'
+        ? { decision: 'approve' }
+        : { decision: 'reject', message: t('approval.rejectedMessage') },
+      'approval',
+    )
 
   const streaming = items.some((it) => it.kind === 'assistant' && it.streaming)
   const hasMessages = items.length > 0
@@ -818,7 +853,7 @@ export default function App() {
               <button
                 onClick={() => removeImage(a.id)}
                 aria-label={t('composer.removeImage')}
-                className="absolute -top-1.5 -right-1.5 size-5 grid place-items-center rounded-full bg-canvas border border-line text-muted hover:text-ink opacity-0 group-hover/att:opacity-100 transition"
+                className="absolute -top-1.5 -right-1.5 size-5 grid place-items-center rounded-full bg-canvas border border-line text-muted-foreground hover:text-ink opacity-0 group-hover/att:opacity-100 transition"
               >
                 <X size={12} />
               </button>
@@ -843,7 +878,7 @@ export default function App() {
             size="icon-sm"
             onClick={() => fileInputRef.current?.click()}
             aria-label={t('composer.attach')}
-            className="text-muted"
+            className="text-muted-foreground"
           >
             <Plus />
           </Button>
@@ -899,17 +934,16 @@ export default function App() {
         conn={conn}
         model={model}
         activity={activity}
-        disabled={false}
         scheduledActive={view === 'scheduled'}
         cronJobs={cronJobs}
         cronUnread={cronUnread}
         cronRunning={cronRunning}
         activeCronJob={view === 'cronjob' ? activeCronJob : null}
-        onOpenCronJob={(id) => void openCronJob(id)}
+        onOpenCronJob={openCronJob}
         onSelect={selectSession}
         onNew={newSession}
         onOpenScheduled={openScheduled}
-        onOpenSettings={() => setShowSettings(true)}
+        onOpenSettings={openSettings}
         onPin={pinSession}
         onRename={renameSession}
         onDelete={setPendingDelete}
@@ -931,7 +965,7 @@ export default function App() {
             <div className="flex-1 flex flex-col min-w-0">
               {view === 'cronjob' && !cronRunThread ? (
                 // 任务还没有可查看的执行会话：显示空态，避免把消息误发进无关会话
-                <div className="flex-1 grid place-items-center text-sm text-muted select-none">
+                <div className="flex-1 grid place-items-center text-sm text-muted-foreground select-none">
                   {t('cron.noRuns')}
                 </div>
               ) : hasMessages ? (
@@ -1024,14 +1058,16 @@ export default function App() {
 function Thinking() {
   const { t } = useI18n()
   return (
-    <div className="flex items-center gap-2 text-muted text-sm">
+    <div className="flex items-center gap-2 text-muted-foreground text-sm">
       <span className="text-primary animate-pulse">✦</span>
       <span className="animate-pulse">{t('common.thinking')}</span>
     </div>
   )
 }
 
-function ItemView({ item }: { item: Exclude<Item, { kind: 'tool' }> }) {
+// memo：流式期间每个 delta 都重建 items 数组，但未变更项保持对象身份，
+// memo 让历史消息（尤其 ReactMarkdown 解析）不随每个 token 重渲染。
+const ItemView = memo(function ItemView({ item }: { item: Exclude<Item, { kind: 'tool' }> }) {
   if (item.kind === 'user') {
     return (
       <div className="flex flex-col items-end gap-1.5">
@@ -1075,7 +1111,7 @@ function ItemView({ item }: { item: Exclude<Item, { kind: 'tool' }> }) {
       {item.text}
     </div>
   )
-}
+})
 
 // AI 消息下的复制按钮：悬停出现，点击复制 markdown 原文，1.5s 内显示「已复制」反馈。
 function CopyButton({ text }: { text: string }) {
@@ -1097,7 +1133,7 @@ function CopyButton({ text }: { text: string }) {
       onClick={copy}
       title={copied ? t('common.copied') : t('common.copy')}
       aria-label={t('common.copy')}
-      className="text-muted"
+      className="text-muted-foreground"
     >
       {copied ? <Check className="text-success" /> : <Copy />}
     </Button>
@@ -1107,7 +1143,9 @@ function CopyButton({ text }: { text: string }) {
 // 工具（单个或多个）统一渲染为一行自然语言摘要（参考 Claude：
 // "Edited 2 files, ran a command, read a file ›"）。无卡片、低调融入文本流，
 // 点击展开看每个工具的细节。运行中强制展开看进度，完成后默认折叠。
-function ToolGroup({ tools }: { tools: ToolItem[] }) {
+// memo + 自定义比较：groupItems 每次产出新的 tools 数组包装，但元素身份稳定，
+// 逐元素同身份即视为未变，避免流式文本期间所有工具组（含 diff 计算）重渲染。
+const ToolGroup = memo(function ToolGroup({ tools }: { tools: ToolItem[] }) {
   const running = tools.some((t) => !t.done)
   const hasError = tools.some((t) => t.error)
   // override=null 时按 hasError 决定默认展开；出错的工具组默认展开但仍可手动收起
@@ -1121,7 +1159,7 @@ function ToolGroup({ tools }: { tools: ToolItem[] }) {
     <div>
       <button
         onClick={() => setOverride((o) => !(o ?? hasError))}
-        className="flex items-center gap-1.5 text-sm text-muted hover:text-ink transition"
+        className="flex items-center gap-1.5 text-sm text-muted-foreground hover:text-ink transition"
       >
         {running && <span className="text-primary animate-pulse text-[10px]">●</span>}
         {!running && hasError && <span className="text-error text-[10px]">●</span>}
@@ -1140,11 +1178,14 @@ function ToolGroup({ tools }: { tools: ToolItem[] }) {
       )}
     </div>
   )
-}
+},
+(prev, next) =>
+  prev.tools.length === next.tools.length &&
+  prev.tools.every((t, i) => t === next.tools[i]))
 
 // 展开后的工具明细行：图标 + 人类可读标题 + 旋转箭头，点击看输出/diff。
 // 出错的工具行红色高亮并默认展开；edit/write 渲染 +/- diff 而非裸输出。
-function ToolRow({ item }: { item: ToolItem }) {
+const ToolRow = memo(function ToolRow({ item }: { item: ToolItem }) {
   const { t } = useI18n()
   const errored = !!item.error
   // edit/write 展示 diff；出错时优先展示错误输出而非 diff
@@ -1162,7 +1203,7 @@ function ToolRow({ item }: { item: ToolItem }) {
       >
         <Icon
           size={15}
-          className={`shrink-0 ${!item.done ? 'text-primary animate-pulse' : errored ? 'text-error' : 'text-muted'}`}
+          className={`shrink-0 ${!item.done ? 'text-primary animate-pulse' : errored ? 'text-error' : 'text-muted-foreground'}`}
         />
         <span className={`truncate flex-1 ${errored ? 'text-error' : 'text-ink/80'}`}>
           {toolTitle(item.name, item.args)}
@@ -1170,14 +1211,14 @@ function ToolRow({ item }: { item: ToolItem }) {
         {hasDetail && (
           <ChevronRight
             size={13}
-            className={`shrink-0 text-muted transition-transform ${open ? 'rotate-90' : ''}`}
+            className={`shrink-0 text-muted-foreground transition-transform ${open ? 'rotate-90' : ''}`}
           />
         )}
       </button>
       {open && diff && <DiffView lines={diff} />}
       {open && !diff && hasOutput && (
         <pre
-          className={`text-xs ml-[26px] mr-1 mb-1 px-3 py-2 rounded-lg bg-canvas/60 overflow-auto max-h-60 whitespace-pre-wrap ${errored ? 'text-error/90' : 'text-muted/90'}`}
+          className={`text-xs ml-[26px] mr-1 mb-1 px-3 py-2 rounded-lg bg-canvas/60 overflow-auto max-h-60 whitespace-pre-wrap ${errored ? 'text-error/90' : 'text-muted-foreground/90'}`}
         >
           {item.output.slice(0, 4000)}
           {item.output.length > 4000 && '\n' + t('common.truncated')}
@@ -1185,7 +1226,7 @@ function ToolRow({ item }: { item: ToolItem }) {
       )}
     </div>
   )
-}
+})
 
 // edit/write 的行级 diff 视图：新增行绿底、删除行红底、上下文行淡显。
 function DiffView({ lines }: { lines: DiffLine[] }) {
@@ -1197,21 +1238,19 @@ function DiffView({ lines }: { lines: DiffLine[] }) {
           className={l.kind === 'add' ? 'bg-success/10' : l.kind === 'del' ? 'bg-error/10' : ''}
         >
           <span
-            className={`select-none ${l.kind === 'add' ? 'text-success' : l.kind === 'del' ? 'text-error' : 'text-muted/40'}`}
+            className={`select-none ${l.kind === 'add' ? 'text-success' : l.kind === 'del' ? 'text-error' : 'text-muted-foreground/40'}`}
           >
             {l.kind === 'add' ? '+ ' : l.kind === 'del' ? '- ' : '  '}
           </span>
-          <span className={l.kind === 'ctx' ? 'text-muted/70' : 'text-ink/90'}>{l.text || ' '}</span>
+          <span className={l.kind === 'ctx' ? 'text-muted-foreground/70' : 'text-ink/90'}>{l.text || ' '}</span>
         </div>
       ))}
     </pre>
   )
 }
 
-// 文本提取小工具（toolTitle 标题提取共用）
+// 文本提取小工具（toolTitle 标题提取共用；clip/basename 在 lib/utils）
 const argStr = (v: unknown) => (typeof v === 'string' ? v : '')
-const clip = (s: string, n = 72) => (s.length > n ? s.slice(0, n) + '…' : s)
-const basename = (p: string) => p.split('/').filter(Boolean).pop() || p
 
 // 每个工具的展示元数据（图标 + 动作动词/名词 + 人类可读标题提取）集中在一张表，
 // 新增工具只需加一行。icon 驱动 ToolRow 图标，verb/noun 驱动 summarizeTools 聚合，
@@ -1228,7 +1267,7 @@ const searchTitle = (a: Record<string, unknown>) =>
   argStr(a.pattern) ? `Search ${clip(argStr(a.pattern), 48)}` : 'Search'
 
 const TOOL_META: Record<string, ToolMeta> = {
-  bash: { icon: Terminal, verb: 'Ran', noun: 'command', title: (a) => clip(argStr(a.description) || argStr(a.command) || 'Run command') },
+  bash: { icon: SquareTerminal, verb: 'Ran', noun: 'command', title: (a) => clip(argStr(a.description) || argStr(a.command) || 'Run command') },
   read: { icon: FileText, verb: 'Read', noun: 'file', title: fileTitle },
   write: { icon: FilePlus, verb: 'Wrote', noun: 'file', title: fileTitle },
   edit: { icon: FilePen, verb: 'Edited', noun: 'file', title: fileTitle },

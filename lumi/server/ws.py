@@ -33,6 +33,9 @@
 一个 WS 连接 = 一个会话上下文（独立 AgentBridge，可切换 thread）。同一时刻只跑一
 轮用户流式响应，但该轮在独立 task 中执行，主循环持续读帧，故运行期间仍可接收 stop
 将其取消；中断（approval/clarify/plan）后回到接收循环等待 resume。
+
+非流式 RPC 同样 spawn 成独立 task：部分方法需等待 run.lock（与流式轮互斥），
+inline await 会卡住接收循环，使 stop 帧在整轮结束前都读不到。
 """
 
 from __future__ import annotations
@@ -43,12 +46,12 @@ from dataclasses import dataclass, field
 
 from fastapi import FastAPI, WebSocket, WebSocketDisconnect
 
-from lumi.agents.bridge import AgentBridge, EventKind
+from lumi.agents.bridge import AgentBridge, EventKind, shutdown_shared_runtime
 from lumi.agents.cron.delivery import DeliveryManager
 from lumi.agents.cron.runtime import setup_cron
 from lumi.server.cron_rpc import CRON_METHODS, dispatch_cron, set_cron_runtime
 from lumi.server.desktop_delivery import DesktopDelivery
-from lumi.server.protocol import bridge_event_to_wire
+from lumi.server.protocol import bridge_event_to_wire, event_frame
 from lumi.tui.session_meta import delete_meta, load_all, update_meta
 from lumi.utils.constants import NOTIFICATION_POLL_INTERVAL
 from lumi.utils.logger import logger
@@ -63,9 +66,17 @@ _INTERRUPT_KINDS = frozenset({EventKind.CLARIFY, EventKind.APPROVAL, EventKind.P
 _desktop_delivery = DesktopDelivery()
 
 
+# 事件循环只弱引用 task，不自持引用的话广播 task 可能在执行前被 GC
+_broadcast_tasks: set[asyncio.Task] = set()
+
+
 def _on_cron_job_status(names: list[str]) -> None:
     """Scheduler 同步回调：把运行中任务名列表广播为 cron.running 事件。"""
-    asyncio.create_task(_desktop_delivery.send_event("cron.running", {"names": names}))
+    task = asyncio.create_task(
+        _desktop_delivery.send_event("cron.running", {"names": names})
+    )
+    _broadcast_tasks.add(task)
+    task.add_done_callback(_broadcast_tasks.discard)
 
 
 @asynccontextmanager
@@ -92,6 +103,9 @@ async def lifespan(app: FastAPI):
 
     if cron_runtime is not None:
         await cron_runtime.scheduler.stop()
+    # 进程级共享运行时（MCP / shell 会话）只在进程退出时关闭一次，
+    # 不能随单条连接的 bridge.close() 拆除
+    await shutdown_shared_runtime()
 
 
 app = FastAPI(lifespan=lifespan)
@@ -190,12 +204,7 @@ async def _pump(ws: WebSocket, bridge: AgentBridge, run: _RunState, gen) -> dict
     last_kind = None
     async for evt in gen:
         last_kind = evt.kind
-        await ws.send_json(
-            {
-                "method": "event",
-                "params": bridge_event_to_wire(evt, bridge.current_thread_id),
-            }
-        )
+        await ws.send_json(bridge_event_to_wire(evt, bridge.current_thread_id))
     run.awaiting_resume = last_kind in _INTERRUPT_KINDS
     return {"ok": True}
 
@@ -244,14 +253,7 @@ async def _run_streaming_rpc(
         run.awaiting_resume = False
         with suppress(Exception):
             await ws.send_json(
-                {
-                    "method": "event",
-                    "params": {
-                        "type": "turn.complete",
-                        "session_id": bridge.current_thread_id,
-                        "payload": {},
-                    },
-                }
+                event_frame(str(EventKind.TURN_COMPLETE), bridge.current_thread_id, {})
             )
         if rid is not None:
             with suppress(Exception):
@@ -276,18 +278,19 @@ async def _notification_loop(
     """
     while True:
         await asyncio.sleep(NOTIFICATION_POLL_INTERVAL)
-        if run.awaiting_resume:
+        # 队列空（绝大多数 tick）时不去抢 run.lock，避免在流式轮后面排队
+        if run.awaiting_resume or not bridge.has_notifications():
             continue
         async with run.lock:
             # 抢到锁后复检：等锁期间用户轮可能刚以中断收尾
             if run.awaiting_resume:
                 continue
-            notifications = bridge.drain_notifications()
-            if not notifications:
+            # 只认领归属本连接当前 thread 的通知——队列是进程级共享的，
+            # drain_all 会把其他会话的后台任务通知抢到本会话注入
+            hint = bridge.drain_notification_hint(bridge.current_thread_id)
+            if not hint:
                 continue
-            logger.info("[WS] 注入 %d 条后台任务通知", len(notifications))
-            combined = "\n".join(notifications)
-            hint = f"{combined}\nRead the output file to retrieve the result."
+            logger.info("[WS] 注入后台任务通知")
             try:
                 await _pump(
                     ws,
@@ -338,80 +341,146 @@ async def _load_history(bridge: AgentBridge, params: dict) -> dict:
     return {"items": _history_items(messages)}
 
 
+async def _stop(bridge: AgentBridge, run: _RunState, params: dict) -> dict:
+    # 中止当前用户轮：取消 task，其取消处理会补发 turn.complete 收尾
+    task = run.task
+    if task is not None and not task.done():
+        task.cancel()
+        return {"stopped": True}
+    return {"stopped": False}
+
+
+async def _list_commands(bridge: AgentBridge, run: _RunState, params: dict) -> dict:
+    return {"commands": bridge.list_commands()}
+
+
+async def _list_providers(bridge: AgentBridge, run: _RunState, params: dict) -> dict:
+    return bridge.list_providers()
+
+
+async def _test_provider(bridge: AgentBridge, run: _RunState, params: dict) -> dict:
+    return await bridge.test_provider(
+        params.get("base_url", ""),
+        params.get("api_key", ""),
+        params.get("model", ""),
+    )
+
+
+# provider 变更经 _apply_active 改写运行时 context，须与运行中的轮次互斥，
+# 否则会在轮内改掉下一次 call_model 读取的共享 context（中途换模型/连接）。
+async def _set_provider(bridge: AgentBridge, run: _RunState, params: dict) -> dict:
+    async with run.lock:
+        return bridge.set_provider(params.get("provider", ""), params.get("model", ""))
+
+
+async def _save_provider(bridge: AgentBridge, run: _RunState, params: dict) -> dict:
+    async with run.lock:
+        return bridge.save_provider(params.get("profile", {}))
+
+
+async def _delete_provider(bridge: AgentBridge, run: _RunState, params: dict) -> dict:
+    async with run.lock:
+        return bridge.delete_provider(params.get("id", ""))
+
+
+async def _switch_session(bridge: AgentBridge, run: _RunState, params: dict) -> dict:
+    # new_session 不带 thread_id → 生成新的。切 thread 会改写 bridge._config，
+    # 须与运行中的轮次互斥
+    tid = params.get("thread_id") or generate_thread_id()
+    async with run.lock:
+        bridge.switch_thread(tid)
+        run.awaiting_resume = False
+    return {"thread_id": tid}
+
+
+async def _pin_session(bridge: AgentBridge, run: _RunState, params: dict) -> dict:
+    tid = params.get("thread_id", "")
+    pinned = bool(params.get("pinned", False))
+    update_meta(tid, pinned=pinned)
+    return {"thread_id": tid, "pinned": pinned}
+
+
+async def _rename_session(bridge: AgentBridge, run: _RunState, params: dict) -> dict:
+    tid = params.get("thread_id", "")
+    title = params.get("title", "")
+    update_meta(tid, title=title)
+    return {"thread_id": tid, "title": title}
+
+
+async def _delete_session(bridge: AgentBridge, run: _RunState, params: dict) -> dict:
+    tid = params.get("thread_id", "")
+    async with run.lock:
+        await bridge.delete_thread(tid)
+    delete_meta(tid)
+    return {"thread_id": tid}
+
+
+async def _list_sessions_rpc(bridge: AgentBridge, run: _RunState, params: dict) -> dict:
+    return await _list_sessions(bridge, params)
+
+
+async def _load_history_rpc(bridge: AgentBridge, run: _RunState, params: dict) -> dict:
+    return await _load_history(bridge, params)
+
+
+# 非流式 RPC 分发表。契约测试从 IMPLEMENTED_METHODS 读取实现的方法集合，
+# 新增方法只需在此登记 + events.json 声明，漂移会被测试直接抓住。
+_RPC_HANDLERS = {
+    "stop": _stop,
+    "list_commands": _list_commands,
+    "list_providers": _list_providers,
+    "test_provider": _test_provider,
+    "set_provider": _set_provider,
+    "save_provider": _save_provider,
+    "delete_provider": _delete_provider,
+    "list_sessions": _list_sessions_rpc,
+    "new_session": _switch_session,
+    "switch_session": _switch_session,
+    "load_history": _load_history_rpc,
+    "pin_session": _pin_session,
+    "rename_session": _rename_session,
+    "delete_session": _delete_session,
+}
+
+# 本服务实现的全部 RPC 方法（供协议契约测试断言与 events.json 一致）
+IMPLEMENTED_METHODS = frozenset(_RPC_HANDLERS) | _STREAMING_METHODS | CRON_METHODS
+
+
 async def _dispatch(
     ws: WebSocket, bridge: AgentBridge, run: _RunState, method: str, params: dict
 ) -> dict:
-    """执行一个非流式 RPC 方法并直接返回结果。
+    """执行一个非流式 RPC 方法并返回结果（在独立 task 中运行，见 _run_rpc）。
 
     流式方法（send_message / resume / run_command）不走这里，由 endpoint 单独
     spawn 成可取消的 task（见 _run_streaming_rpc）。
     """
-    if method == "stop":
-        # 中止当前用户轮：取消 task，其取消处理会补发 turn.complete 收尾
-        task = run.task
-        if task is not None and not task.done():
-            task.cancel()
-            return {"stopped": True}
-        return {"stopped": False}
-    if method == "list_commands":
-        return {"commands": bridge.list_commands()}
-    if method == "list_providers":
-        return bridge.list_providers()
-    if method == "test_provider":
-        return await bridge.test_provider(
-            params.get("base_url", ""),
-            params.get("api_key", ""),
-            params.get("model", ""),
-        )
-    # provider 切换经 _apply_active 改写运行时 context，须与运行中的轮次互斥，
-    # 否则会在轮内改掉下一次 call_model 读取的共享 context（中途换模型/连接）。
-    if method == "set_provider":
-        async with run.lock:
-            return bridge.set_provider(
-                params.get("provider", ""), params.get("model", "")
-            )
-    if method == "save_provider":
-        async with run.lock:
-            return bridge.save_provider(params.get("profile", {}))
-    if method == "delete_provider":
-        async with run.lock:
-            return bridge.delete_provider(params.get("id", ""))
-    if method == "list_sessions":
-        return await _list_sessions(bridge, params)
-    if method == "new_session":
-        # 切 thread 会改写 bridge._config，须与运行中的轮次互斥；新会话从干净态开始
-        async with run.lock:
-            tid = generate_thread_id()
-            bridge.switch_thread(tid)
-            run.awaiting_resume = False
-        return {"thread_id": tid}
-    if method == "switch_session":
-        tid = params.get("thread_id", "")
-        async with run.lock:
-            bridge.switch_thread(tid)
-            run.awaiting_resume = False
-        return {"thread_id": tid}
-    if method == "load_history":
-        return await _load_history(bridge, params)
-    if method == "pin_session":
-        tid = params.get("thread_id", "")
-        pinned = bool(params.get("pinned", False))
-        update_meta(tid, pinned=pinned)
-        return {"thread_id": tid, "pinned": pinned}
-    if method == "rename_session":
-        tid = params.get("thread_id", "")
-        title = params.get("title", "")
-        update_meta(tid, title=title)
-        return {"thread_id": tid, "title": title}
-    if method == "delete_session":
-        tid = params.get("thread_id", "")
-        async with run.lock:
-            await bridge.delete_thread(tid)
-        delete_meta(tid)
-        return {"thread_id": tid}
+    handler = _RPC_HANDLERS.get(method)
+    if handler is not None:
+        return await handler(bridge, run, params)
     if method in CRON_METHODS:
         return await dispatch_cron(method, params)
     raise ValueError(f"未知方法: {method}")
+
+
+async def _run_rpc(
+    ws: WebSocket, bridge: AgentBridge, run: _RunState, rid, method: str, params: dict
+) -> None:
+    """在独立 task 中执行非流式 RPC 并回发响应帧。
+
+    需要 run.lock 的方法（delete_session / set_provider 等）在流式轮进行中
+    会等锁——若 inline await 在接收循环里，等锁期间连 stop 帧都读不到。
+    """
+    try:
+        result = await _dispatch(ws, bridge, run, method, params)
+        if rid is not None:
+            await ws.send_json({"id": rid, "result": result})
+    except asyncio.CancelledError:
+        raise
+    except Exception as e:
+        logger.error("[WS] 处理 %s 失败: %s", method, e, exc_info=True)
+        if rid is not None:
+            with suppress(Exception):
+                await ws.send_json({"id": rid, "error": {"message": str(e)}})
 
 
 @app.websocket("/ws")
@@ -420,14 +489,9 @@ async def ws_endpoint(ws: WebSocket) -> None:
     bridge = AgentBridge()
     await bridge.initialize()
     await ws.send_json(
-        {
-            "method": "event",
-            "params": {
-                "type": "gateway.ready",
-                "session_id": bridge.current_thread_id,
-                "payload": {"model": bridge.model_name},
-            },
-        }
+        event_frame(
+            "gateway.ready", bridge.current_thread_id, {"model": bridge.model_name}
+        )
     )
 
     run = _RunState()
@@ -435,6 +499,7 @@ async def ws_endpoint(ws: WebSocket) -> None:
     _desktop_delivery.register_ws(ws)
     # 后台任务完成通知轮询：与主接收循环并发，空闲时把队列通知注入新一轮推回前端
     notif_task = asyncio.create_task(_notification_loop(ws, bridge, run))
+    rpc_tasks: set[asyncio.Task] = set()
 
     try:
         while True:
@@ -458,16 +523,9 @@ async def ws_endpoint(ws: WebSocket) -> None:
                 )
                 continue
 
-            try:
-                result = await _dispatch(ws, bridge, run, method, params)
-                if rid is not None:
-                    await ws.send_json({"id": rid, "result": result})
-            except WebSocketDisconnect:
-                raise
-            except Exception as e:
-                logger.error("[WS] 处理 %s 失败: %s", method, e, exc_info=True)
-                if rid is not None:
-                    await ws.send_json({"id": rid, "error": {"message": str(e)}})
+            task = asyncio.create_task(_run_rpc(ws, bridge, run, rid, method, params))
+            rpc_tasks.add(task)
+            task.add_done_callback(rpc_tasks.discard)
     except WebSocketDisconnect:
         logger.info("[WS] 客户端断开: %s", bridge.current_thread_id)
     finally:
@@ -475,8 +533,9 @@ async def ws_endpoint(ws: WebSocket) -> None:
         notif_task.cancel()
         with suppress(asyncio.CancelledError):
             await notif_task
-        if run.task is not None and not run.task.done():
-            run.task.cancel()
-            with suppress(asyncio.CancelledError, Exception):
-                await run.task
+        for task in (*rpc_tasks, run.task):
+            if task is not None and not task.done():
+                task.cancel()
+                with suppress(asyncio.CancelledError, Exception):
+                    await task
         await bridge.close()

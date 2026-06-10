@@ -7,9 +7,9 @@ agents 层只定义 ResultDelivery 抽象。
 
 from __future__ import annotations
 
-from datetime import datetime
-
 from lumi.agents.cron.delivery import ResultDelivery
+from lumi.agents.cron.run_log import RunRecord
+from lumi.server.protocol import event_frame
 from lumi.utils.logger import logger
 
 
@@ -37,10 +37,7 @@ class DesktopDelivery(ResultDelivery):
 
     async def send_event(self, event_type: str, payload: dict) -> None:
         """向所有活跃连接广播一个 wire 事件，单条连接失败不影响其他连接。"""
-        frame = {
-            "method": "event",
-            "params": {"type": event_type, "session_id": "", "payload": payload},
-        }
+        frame = event_frame(event_type, "", payload)
         for ws in list(self._sockets):
             try:
                 await ws.send_json(frame)
@@ -48,35 +45,21 @@ class DesktopDelivery(ResultDelivery):
                 logger.warning("[DesktopDelivery] 推送 %s 失败", event_type)
                 self._sockets.discard(ws)
 
-    async def deliver(
-        self,
-        job_name: str,
-        output: str,
-        *,
-        started_at: datetime | None = None,
-        duration_ms: int | None = None,
-        job_id: str = "",
-        status: str = "success",
-    ) -> None:
+    async def deliver(self, record: RunRecord, text: str) -> None:
         """将任务执行结果广播为 cron.result 事件。
 
-        Args:
-            job_name: 任务名称。
-            output: 任务执行结果文本。
-            started_at: 任务开始执行的时间。
-            duration_ms: 任务执行耗时（毫秒）。
-            job_id: 任务 ID。
-            status: 执行状态（success/failed/timeout）。
+        output 截断到 200 字符：前端只用它做通知摘要，完整结果经
+        list_cron_runs 从 RunLog 读取，没必要向每条连接广播全文。
         """
         await self.send_event(
             "cron.result",
             {
-                "job_id": job_id,
-                "job_name": job_name,
-                "status": status,
-                "output": output,
-                "started_at": started_at.isoformat() if started_at else None,
-                "duration_ms": duration_ms,
+                "job_id": record.job_id,
+                "job_name": record.job_name,
+                "status": record.status,
+                "output": text[:200],
+                "started_at": record.started_at.isoformat(),
+                "duration_ms": record.duration_ms,
             },
         )
 

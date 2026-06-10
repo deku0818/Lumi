@@ -12,6 +12,7 @@ checkpointer 在 SQL 层按 metadata.workspace_dir 过滤。
 
 from __future__ import annotations
 
+import asyncio
 from dataclasses import dataclass
 from datetime import datetime, timezone
 from typing import TYPE_CHECKING, Any
@@ -171,50 +172,48 @@ async def list_sessions(
 
     metadata_filter = {"workspace_dir": workspace} if workspace else None
     thread_ids = await _get_thread_ids(graph, filter=metadata_filter)
+    # cron 执行会话不进会话列表（即使续聊后带上 workspace 元数据也不"转正"），
+    # 只能从定时任务详情的执行记录进入
+    candidates = [
+        tid
+        for tid in thread_ids
+        if tid != current_thread_id and not tid.startswith(f"{CRON_THREAD_PREFIX}-")
+    ]
+
+    # 分批并发加载 state：串行 aget_state 在会话多时是侧栏刷新的延迟瓶颈；
+    # 分批（而非全量 gather）保留 limit 早停，不为远超 limit 的旧会话买单
     sessions: list[SessionSummary] = []
-
-    for tid in thread_ids:
-        if tid == current_thread_id:
-            continue
-        # cron 执行会话不进会话列表（即使续聊后带上 workspace 元数据也不"转正"），
-        # 只能从定时任务详情的执行记录进入
-        if tid.startswith(f"{CRON_THREAD_PREFIX}-"):
-            continue
-
-        try:
-            config = {"configurable": {"thread_id": tid}}
-            snapshot = await graph.aget_state(config)
-
-            # 跳过空状态
+    batch_size = 25
+    for i in range(0, len(candidates), batch_size):
+        batch = candidates[i : i + batch_size]
+        snapshots = await asyncio.gather(
+            *(graph.aget_state({"configurable": {"thread_id": tid}}) for tid in batch),
+            return_exceptions=True,
+        )
+        for tid, snapshot in zip(batch, snapshots):
+            if isinstance(snapshot, BaseException):
+                logger.warning("获取会话 %s 状态失败: %s", tid, snapshot)
+                continue
             if not snapshot or not snapshot.values:
                 continue
-
             messages = snapshot.values.get("messages", [])
             if not messages:
                 continue
-
             first_msg = _extract_first_human_message(messages)
             if not first_msg:
                 continue
-
-            # StateSnapshot.created_at 是 ISO 8601 字符串
-            created_at = _parse_created_at(snapshot.created_at)
 
             sessions.append(
                 SessionSummary(
                     thread_id=tid,
                     first_message=first_msg,
-                    created_at=created_at,
+                    # StateSnapshot.created_at 是 ISO 8601 字符串
+                    created_at=_parse_created_at(snapshot.created_at),
                     message_count=len(messages),
                 )
             )
-
             if len(sessions) >= limit:
-                break
-
-        except Exception as e:
-            logger.warning("获取会话 %s 状态失败: %s", tid, e)
-            continue
+                return sessions
 
     return sessions
 

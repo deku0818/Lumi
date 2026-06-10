@@ -38,7 +38,7 @@ export function SettingsDialog({
 }) {
   const { t } = useI18n()
   const navClass =
-    'justify-start gap-2.5 px-2.5 py-1.5 rounded-lg flex-none h-auto border-transparent text-muted hover:text-ink hover:bg-line/40 after:hidden focus-visible:ring-0 focus-visible:outline-none data-[state=active]:bg-line data-[state=active]:text-ink data-[state=active]:shadow-none'
+    'justify-start gap-2.5 px-2.5 py-1.5 rounded-lg flex-none h-auto border-transparent text-muted-foreground hover:text-ink hover:bg-line/40 after:hidden focus-visible:ring-0 focus-visible:outline-none data-[state=active]:bg-line data-[state=active]:text-ink data-[state=active]:shadow-none'
 
   return (
     <Dialog open onOpenChange={(o) => !o && onClose()}>
@@ -52,7 +52,7 @@ export function SettingsDialog({
             variant="line"
             className="w-48 h-full group-data-vertical/tabs:h-full shrink-0 flex-col items-stretch justify-start gap-0.5 rounded-none bg-canvas border-r border-line/30 p-3"
           >
-            <div className="px-2 pt-1 pb-2 text-xs font-medium text-muted uppercase tracking-wide">
+            <div className="px-2 pt-1 pb-2 text-xs font-medium text-muted-foreground uppercase tracking-wide">
               {t('settings.title')}
             </div>
             <TabsTrigger value="general" className={navClass}>
@@ -137,7 +137,7 @@ function Row({
     <div className="flex items-center justify-between gap-4 py-3 border-b border-line/20">
       <div className="min-w-0">
         <div className="text-sm text-ink/90">{label}</div>
-        {hint && <div className="text-xs text-muted mt-0.5">{hint}</div>}
+        {hint && <div className="text-xs text-muted-foreground mt-0.5">{hint}</div>}
       </div>
       <div className="shrink-0">{children}</div>
     </div>
@@ -165,7 +165,7 @@ function Segmented<T extends string>({
             onClick={() => onChange(o.val)}
             title={o.title}
             className={`flex items-center gap-1.5 px-2.5 py-1 rounded-md text-sm transition ${
-              on ? 'bg-surface text-ink shadow-sm' : 'text-muted hover:text-ink'
+              on ? 'bg-surface text-ink shadow-sm' : 'text-muted-foreground hover:text-ink'
             }`}
           >
             {o.icon && <o.icon size={15} className="shrink-0" />}

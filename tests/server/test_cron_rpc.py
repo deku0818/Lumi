@@ -196,14 +196,16 @@ async def test_desktop_delivery_broadcasts_result():
     ws = FakeWS()
     delivery.register_ws(ws)
 
-    await delivery.deliver(
-        "每日总结",
-        "done",
-        started_at=datetime(2026, 6, 10, 9, 0, 0),
-        duration_ms=1200,
+    record = RunRecord(
         job_id="abc",
+        job_name="每日总结",
+        started_at=datetime(2026, 6, 10, 9, 0, 0),
+        finished_at=datetime(2026, 6, 10, 9, 0, 1),
         status="success",
+        duration_ms=1200,
+        output_summary="done",
     )
+    await delivery.deliver(record, "done")
 
     assert len(ws.frames) == 1
     params = ws.frames[0]["params"]
@@ -233,5 +235,14 @@ async def test_desktop_delivery_unregister():
     delivery.register_ws(ws)
     delivery.unregister_ws(ws)
 
-    await delivery.deliver("job", "out")
+    record = RunRecord(
+        job_id="x",
+        job_name="job",
+        started_at=datetime(2026, 6, 10, 9, 0, 0),
+        finished_at=datetime(2026, 6, 10, 9, 0, 1),
+        status="success",
+        duration_ms=1,
+        output_summary="out",
+    )
+    await delivery.deliver(record, "out")
     assert ws.frames == []

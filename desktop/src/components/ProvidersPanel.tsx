@@ -84,7 +84,7 @@ export function ProvidersPanel({
       </div>
 
       {profiles.length === 0 ? (
-        <div className="py-10 text-center text-sm text-muted/80">{t('providers.none')}</div>
+        <div className="py-10 text-center text-sm text-muted-foreground/80">{t('providers.none')}</div>
       ) : (
         <div className="space-y-2">
           {profiles.map((p) => (
@@ -96,7 +96,7 @@ export function ProvidersPanel({
                   size="icon-sm"
                   onClick={() => setForm(formFrom(p))}
                   aria-label={t('providers.edit')}
-                  className="shrink-0 text-muted"
+                  className="shrink-0 text-muted-foreground"
                 >
                   <Pencil />
                 </Button>
@@ -105,7 +105,7 @@ export function ProvidersPanel({
                   size="icon-sm"
                   onClick={() => onDelete(p.id)}
                   aria-label={t('common.delete')}
-                  className="shrink-0 text-muted hover:text-error"
+                  className="shrink-0 text-muted-foreground hover:text-error"
                 >
                   <Trash2 />
                 </Button>
@@ -120,7 +120,7 @@ export function ProvidersPanel({
                       className={`flex items-center gap-1 px-2 py-0.5 rounded-md text-xs border transition ${
                         on
                           ? 'border-primary/50 bg-primary/10 text-primary'
-                          : 'border-line/40 text-muted hover:text-ink hover:bg-canvas/60'
+                          : 'border-line/40 text-muted-foreground hover:text-ink hover:bg-canvas/60'
                       }`}
                       title={on ? t('providers.inUse') : t('providers.switchHint')}
                     >
@@ -203,7 +203,7 @@ function ProviderForm({
         <Field label={t('providers.apiKey')} value={form.api_key} onChange={(v) => setForm({ ...form, api_key: v })} placeholder="sk-…" password />
 
         <div>
-          <div className="text-xs text-muted mb-1.5">{t('providers.models')}</div>
+          <div className="text-xs text-muted-foreground mb-1.5">{t('providers.models')}</div>
           <div className="space-y-1.5">
             {form.models.map((row) => (
               <ModelRowEditor
@@ -216,7 +216,7 @@ function ProviderForm({
               />
             ))}
           </div>
-          <Button variant="ghost" size="xs" onClick={addModel} className="mt-2 text-muted">
+          <Button variant="ghost" size="xs" onClick={addModel} className="mt-2 text-muted-foreground">
             <Plus />
             {t('providers.addModel')}
           </Button>
@@ -257,11 +257,11 @@ function ModelRowEditor({
         value={row.name}
         onChange={(e) => onChange(e.target.value)}
         placeholder={t('providers.modelPlaceholder')}
-        className="flex-1 min-w-0 px-3 py-1.5 rounded-lg text-sm bg-canvas/60 text-ink border border-line/40 focus:border-primary/50 outline-none placeholder:text-muted/50"
+        className="flex-1 min-w-0 px-3 py-1.5 rounded-lg text-sm bg-canvas/60 text-ink border border-line/40 focus:border-primary/50 outline-none placeholder:text-muted-foreground/50"
       />
 
       {r === 'testing' ? (
-        <span className="shrink-0 flex items-center gap-1 text-xs text-muted">
+        <span className="shrink-0 flex items-center gap-1 text-xs text-muted-foreground">
           <Loader2 size={13} className="animate-spin" />
           {t('providers.testing')}
         </span>
@@ -285,7 +285,7 @@ function ModelRowEditor({
       <Tooltip>
         <TooltipTrigger asChild>
           <span className="shrink-0 grid place-items-center cursor-help">
-            <HelpCircle size={14} className="text-muted/50 hover:text-muted" />
+            <HelpCircle size={14} className="text-muted-foreground/50 hover:text-muted-foreground" />
           </span>
         </TooltipTrigger>
         <TooltipContent className="max-w-56">{t('providers.costHint')}</TooltipContent>
@@ -297,7 +297,7 @@ function ModelRowEditor({
         onClick={onRemove}
         disabled={!canRemove}
         aria-label={t('providers.removeModel')}
-        className="shrink-0 text-muted hover:text-error"
+        className="shrink-0 text-muted-foreground hover:text-error"
       >
         <Trash2 />
       </Button>
@@ -320,13 +320,13 @@ function Field({
 }) {
   return (
     <label className="block">
-      <span className="text-xs text-muted">{label}</span>
+      <span className="text-xs text-muted-foreground">{label}</span>
       <input
         type={password ? 'password' : 'text'}
         value={value}
         onChange={(e) => onChange(e.target.value)}
         placeholder={placeholder}
-        className="mt-1 w-full px-3 py-2 rounded-lg text-sm bg-canvas/60 text-ink border border-line/40 focus:border-primary/50 outline-none placeholder:text-muted/50"
+        className="mt-1 w-full px-3 py-2 rounded-lg text-sm bg-canvas/60 text-ink border border-line/40 focus:border-primary/50 outline-none placeholder:text-muted-foreground/50"
       />
     </label>
   )

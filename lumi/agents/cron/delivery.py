@@ -5,9 +5,9 @@ from __future__ import annotations
 import asyncio
 from abc import ABC, abstractmethod
 from collections.abc import AsyncGenerator
-from datetime import datetime
 from typing import TYPE_CHECKING
 
+from lumi.agents.cron.run_log import RunRecord
 from lumi.utils.logger import logger
 
 if TYPE_CHECKING:
@@ -22,25 +22,12 @@ class ResultDelivery(ABC):
     """
 
     @abstractmethod
-    async def deliver(
-        self,
-        job_name: str,
-        output: str,
-        *,
-        started_at: datetime | None = None,
-        duration_ms: int | None = None,
-        job_id: str = "",
-        status: str = "success",
-    ) -> None:
-        """将任务执行结果投递到目标通道。
+    async def deliver(self, record: RunRecord, text: str) -> None:
+        """将一次任务执行结果投递到目标通道。
 
         Args:
-            job_name: 任务名称。
-            output: 任务执行结果文本。
-            started_at: 任务开始执行的时间。
-            duration_ms: 任务执行耗时（毫秒）。
-            job_id: 任务 ID。
-            status: 执行状态（success/failed/timeout）。
+            record: 本次执行的完整记录（任务名/状态/耗时等元数据）。
+            text: 面向用户的结果文本（成功为输出全文，失败为状态+错误）。
         """
         ...
 
@@ -78,41 +65,21 @@ class DeliveryManager:
         """
         self._channels.remove(channel)
 
-    async def broadcast(
-        self,
-        job_name: str,
-        output: str,
-        *,
-        started_at: datetime | None = None,
-        duration_ms: int | None = None,
-        job_id: str = "",
-        status: str = "success",
-    ) -> None:
+    async def broadcast(self, record: RunRecord, text: str) -> None:
         """向所有已注册通道投递结果，单个通道失败不影响其他通道。
 
         Args:
-            job_name: 任务名称。
-            output: 任务执行结果文本。
-            started_at: 任务开始执行的时间。
-            duration_ms: 任务执行耗时（毫秒）。
-            job_id: 任务 ID。
-            status: 执行状态（success/failed/timeout）。
+            record: 本次执行的完整记录。
+            text: 面向用户的结果文本。
         """
         for ch in self._channels:
             try:
-                await ch.deliver(
-                    job_name,
-                    output,
-                    started_at=started_at,
-                    duration_ms=duration_ms,
-                    job_id=job_id,
-                    status=status,
-                )
+                await ch.deliver(record, text)
             except Exception:
                 logger.warning(
                     "投递到 %s 失败 (job=%s)",
                     type(ch).__name__,
-                    job_name,
+                    record.job_name,
                     exc_info=True,
                 )
 
@@ -136,38 +103,20 @@ class TUIDelivery(ResultDelivery):
     def __init__(self, app: "App") -> None:
         self._app = app
 
-    async def deliver(
-        self,
-        job_name: str,
-        output: str,
-        *,
-        started_at: datetime | None = None,
-        duration_ms: int | None = None,
-        job_id: str = "",
-        status: str = "success",
-    ) -> None:
-        """将任务执行结果持久化到通知面板。
-
-        Args:
-            job_name: 任务名称。
-            output: 任务执行结果文本。
-            started_at: 任务开始执行的时间。
-            duration_ms: 任务执行耗时（毫秒）。
-            job_id: 任务 ID（通知面板未使用）。
-            status: 执行状态（通知面板未使用）。
-        """
+    async def deliver(self, record: RunRecord, text: str) -> None:
+        """将任务执行结果持久化到通知面板。"""
         if not hasattr(self._app, "add_notification"):
             logger.warning(
                 "[TUIDelivery] App 缺少 add_notification 方法，'%s' 的通知将不会展示",
-                job_name,
+                record.job_name,
             )
             return
         self._app.call_later(
             lambda: self._app.add_notification(
-                job_name,
-                output,
-                started_at=started_at,
-                duration_ms=duration_ms,
+                record.job_name,
+                text,
+                started_at=record.started_at,
+                duration_ms=record.duration_ms,
             )
         )
 
@@ -192,31 +141,13 @@ class APIDelivery(ResultDelivery):
             asyncio.Queue[dict[str, str | int | None] | object]
         ] = []
 
-    async def deliver(
-        self,
-        job_name: str,
-        output: str,
-        *,
-        started_at: datetime | None = None,
-        duration_ms: int | None = None,
-        job_id: str = "",
-        status: str = "success",
-    ) -> None:
-        """将任务执行结果投递给所有订阅者，无订阅者时缓存。
-
-        Args:
-            job_name: 任务名称。
-            output: 任务执行结果文本。
-            started_at: 任务开始执行的时间。
-            duration_ms: 任务执行耗时（毫秒）。
-            job_id: 任务 ID。
-            status: 执行状态（success/failed/timeout）。
-        """
+    async def deliver(self, record: RunRecord, text: str) -> None:
+        """将任务执行结果投递给所有订阅者，无订阅者时缓存。"""
         message: dict[str, str | int | None] = {
-            "job_name": job_name,
-            "output": output,
-            "started_at": started_at.isoformat() if started_at else None,
-            "duration_ms": duration_ms,
+            "job_name": record.job_name,
+            "output": text,
+            "started_at": record.started_at.isoformat(),
+            "duration_ms": record.duration_ms,
         }
 
         if not self._subscribers:
@@ -232,7 +163,7 @@ class APIDelivery(ResultDelivery):
             try:
                 queue.put_nowait(message)
             except asyncio.QueueFull:
-                logger.warning("SSE 订阅者队列已满，丢弃消息: %s", job_name)
+                logger.warning("SSE 订阅者队列已满，丢弃消息: %s", record.job_name)
 
     async def subscribe(self) -> AsyncGenerator[dict[str, str | int | None], None]:
         """创建一个 SSE 订阅，返回异步生成器。

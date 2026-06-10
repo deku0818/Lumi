@@ -317,9 +317,10 @@ async def test_execute_job_broadcasts_result(scheduler: Scheduler) -> None:
         await scheduler._execute_job(job)
 
     mock_channel.deliver.assert_awaited_once()
-    call_args = mock_channel.deliver.call_args
-    assert call_args[0][0] == job.name
-    assert "广播内容" in call_args[0][1]
+    record, text = mock_channel.deliver.call_args[0]
+    assert record.job_name == job.name
+    assert record.status == "success"
+    assert "广播内容" in text
 
 
 async def test_execute_job_at_type_deletes_from_store(

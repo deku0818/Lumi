@@ -3,6 +3,7 @@
 import ReactMarkdown from 'react-markdown'
 import remarkGfm from 'remark-gfm'
 import { useI18n } from '../i18n'
+import { basename } from '@/lib/utils'
 import { Button } from '@/components/ui/button'
 
 const PLAN_REJECTED = '__plan_rejected__'
@@ -22,7 +23,7 @@ export function PlanDialog({
   onReject: () => void
 }) {
   const { t } = useI18n()
-  const name = (data.plan_file_path ?? '').split('/').pop()
+  const name = basename(data.plan_file_path ?? '')
   return (
     <div className="border border-line rounded-2xl bg-surface/50 p-4 max-h-[70vh] flex flex-col">
       <h2 className="text-base font-semibold mb-2 flex items-center gap-2">
@@ -35,7 +36,7 @@ export function PlanDialog({
           {data.plan_content ? (
             <ReactMarkdown remarkPlugins={[remarkGfm]}>{data.plan_content}</ReactMarkdown>
           ) : (
-            <span className="text-muted">{t('plan.empty')}</span>
+            <span className="text-muted-foreground">{t('plan.empty')}</span>
           )}
         </div>
 

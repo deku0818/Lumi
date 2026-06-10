@@ -99,10 +99,7 @@ async def dispatch_cron(method: str, params: dict) -> dict:
     if method == "delete_cron_job":
         job_id = params.get("job_id", "")
         await _get_job_or_raise(job_id)
-        rt.scheduler.remove_job(job_id)
-        await rt.job_store.delete(job_id)
-        # 级联清理执行日志与历史会话 checkpoint，避免孤儿数据
-        await rt.scheduler.purge_job_data(job_id)
+        await rt.scheduler.delete_job(job_id)
         return {"job_id": job_id}
 
     if method == "toggle_cron_job":

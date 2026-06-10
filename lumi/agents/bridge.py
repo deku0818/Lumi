@@ -7,8 +7,10 @@ BridgeEvent 流，并处理子代理追踪、权限审批富化、checkpoint 回
 from __future__ import annotations
 
 import asyncio
+import time
 from dataclasses import dataclass
 from enum import StrEnum
+from pathlib import Path
 from typing import TYPE_CHECKING, AsyncGenerator
 
 import httpx
@@ -24,6 +26,8 @@ from lumi.agents.core.state import LumiAgentContext
 from lumi.agents.runtime.checkpoint import CheckpointInfo, FileCheckpointManager
 from lumi.agents.runtime.file_tracker import FileChangeTracker
 from lumi.agents.tools.providers.mcp import get_mcp_session_manager
+from lumi.agents.runtime import provider_store
+from lumi.agents.runtime.bg_tasks import current_thread_id, get_task_registry
 from lumi.agents.runtime.session import get_session_manager
 from lumi.utils.constants import MAX_STREAM_RETRIES, RETRY_BASE_WAIT
 from lumi.utils.logger import logger
@@ -33,7 +37,6 @@ from lumi.utils.thread_id import generate_thread_id
 from lumi.utils.workspace_id import get_workspace_dir
 
 if TYPE_CHECKING:
-    from pathlib import Path
     from langgraph.graph.state import CompiledStateGraph
 
 # LangChain 框架注入的内部字段，不传递给 TUI 渲染
@@ -111,6 +114,15 @@ class BridgeEvent:
     usage_metadata: dict | None = None  # token 用量信息
     parent_run_id: str = ""  # 非空时表示该事件属于某个 agent 工具的子代理
     run_id: str = ""  # agent 工具自身的 run_id，用于并发 agent 场景下的精确映射
+
+
+async def shutdown_shared_runtime() -> None:
+    """关闭进程级共享运行时（MCP 子进程、shell / 后台任务会话）。
+
+    进程退出时调用一次：TUI 在 quit 时、`lumi serve` 在 lifespan shutdown 时。
+    """
+    await get_mcp_session_manager().close()
+    await get_session_manager().close_all()
 
 
 class AgentBridge:
@@ -228,8 +240,6 @@ class AgentBridge:
 
         无 active 时回退默认（model=env 默认、无连接覆盖）。
         """
-        from lumi.agents.runtime import provider_store
-
         if self._context is None:
             return
         pair = provider_store.get_active()
@@ -246,8 +256,6 @@ class AgentBridge:
 
     @staticmethod
     def _provider_list() -> dict:
-        from lumi.agents.runtime import provider_store
-
         profiles, active = provider_store.load()
         return {
             "profiles": [
@@ -273,10 +281,6 @@ class AgentBridge:
         短超时（15s）+ 不缓存 + 不重试，连不上的地址会快速失败而非干等。
         返回 {ok: bool, error?: str, latency_ms?: int}。
         """
-        import time
-
-        from langchain_core.messages import HumanMessage
-
         from lumi.utils.model_manager import create_llm
 
         if not model:
@@ -296,25 +300,25 @@ class AgentBridge:
             return {"ok": False, "error": f"{type(e).__name__}: {e}"}
 
     def set_provider(self, provider_id: str, model: str) -> dict:
-        """切换 active 到 (provider, model)：持久化 + 立即应用（下一轮生效）。"""
-        from lumi.agents.runtime import provider_store
+        """切换 active 到 (provider, model)：持久化 + 立即应用（下一轮生效）。
 
-        provider_store.set_active(provider_id, model)
+        Raises:
+            ValueError: provider 或 model 不存在（如前端列表已过期）——
+                静默返回旧 active 会让调用方误以为切换成功。
+        """
+        if provider_store.set_active(provider_id, model) is None:
+            raise ValueError(f"切换失败：供应商或模型不存在（{provider_id} / {model}）")
         self._apply_active()
         return {"active": provider_store.load()[1], "model": self.model_name}
 
     def save_provider(self, profile: dict) -> dict:
         """新增或更新一个 profile；active 可能因其模型增删失效，故重新应用归位。"""
-        from lumi.agents.runtime import provider_store
-
         provider_store.upsert(profile)
         self._apply_active()
         return self._provider_list()
 
     def delete_provider(self, provider_id: str) -> dict:
         """删除一个 profile；删的是 active 时回退到新的 active（或默认）。"""
-        from lumi.agents.runtime import provider_store
-
         provider_store.delete(provider_id)
         self._apply_active()
         return self._provider_list()
@@ -372,18 +376,41 @@ class AgentBridge:
         async for event in self._stream(input_data):
             yield event
 
-    def drain_notifications(self) -> list[str]:
-        """从 TaskRegistry 的 NotificationQueue 中取出所有待发送通知。"""
-        from lumi.agents.runtime.bg_tasks import get_task_registry
+    def drain_notifications(self, thread_id: str | None = None) -> list[str]:
+        """取出待发送的后台任务完成通知。
 
-        return get_task_registry().notification_queue.drain_all()
+        thread_id 为 None 时取全部（单会话前端，如 TUI）；否则只认领归属该
+        thread（或无归属）的通知——多 WS 连接共享同一进程级队列，按归属
+        认领才不会把别的会话的任务通知抢走。
+        """
+        queue = get_task_registry().notification_queue
+        return queue.drain_all() if thread_id is None else queue.drain_for(thread_id)
+
+    def has_notifications(self) -> bool:
+        """通知队列是否非空（轮询方在取锁前的廉价快速检查）。"""
+        return not get_task_registry().notification_queue.is_empty()
+
+    def drain_notification_hint(self, thread_id: str | None = None) -> str:
+        """取出后台任务完成通知并拼成注入提示文本；无通知返回空串。
+
+        提示词是模型契约（指示其读取输出文件取回结果），TUI 与 desktop
+        共用此单一来源，避免两端措辞漂移。
+        """
+        notifications = self.drain_notifications(thread_id)
+        if not notifications:
+            return ""
+        combined = "\n".join(notifications)
+        return f"{combined}\nRead the output file to retrieve the result."
 
     async def close(self) -> None:
-        """清理资源"""
+        """清理本实例持有的资源（不触碰进程级共享单例）。
+
+        MCP / shell 会话等全局资源由 shutdown_shared_runtime() 在进程退出时
+        统一关闭——desktop 场景一个进程承载多条 WS 连接（每连接一个 bridge），
+        单连接断开不能拆除其他连接还在用的共享运行时。
+        """
         if self._agent is not None:
             await self._agent.aclose()
-        await get_mcp_session_manager().close()
-        await get_session_manager().close_all()
 
     # 网络瞬态错误：流式传输中途断连可自动重试
     _TRANSIENT_NETWORK_ERRORS = (
@@ -398,6 +425,8 @@ class AgentBridge:
         Args:
             input_data: 输入数据（消息或 Command）
         """
+        # 本轮内注册的后台任务归属当前 thread，使完成通知能路由回本会话
+        current_thread_id.set(self.current_thread_id)
         try:
             if self._agent is None or self._config is None:
                 yield BridgeEvent(
@@ -826,9 +855,7 @@ class AgentBridge:
         path = data.get("plan_file_path", "")
         if path:
             try:
-                from pathlib import Path as _Path
-
-                data["plan_content"] = _Path(path).read_text(encoding="utf-8").strip()
+                data["plan_content"] = Path(path).read_text(encoding="utf-8").strip()
             except Exception:
                 logger.debug("读取计划文件失败: %s", path, exc_info=True)
         return data
@@ -952,8 +979,6 @@ class AgentBridge:
         Args:
             project_dir: 项目根目录路径
         """
-        from pathlib import Path as _Path
-
         from lumi.agents.tools.providers.filesystem import get_backend
 
         tid = self.current_thread_id
@@ -961,7 +986,7 @@ class AgentBridge:
             self._tracker = FileChangeTracker()
             self._shadow = FileCheckpointManager(
                 tid,
-                _Path(project_dir),
+                Path(project_dir),
                 self._tracker,
             )
             # 将 tracker 注册到 filesystem backend

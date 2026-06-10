@@ -1,7 +1,8 @@
 import events from '@protocol/events.json'
 
 // 事件名/方法名从协议事实来源 protocol/events.json derive，无需手写同步。
-export type WireEventType = keyof typeof events.events | (string & {})
+// 不留 (string & {}) 逃生口——否则任何字符串都可赋值，tsc 对事件名拼写错误失明。
+export type WireEventType = keyof typeof events.events
 export type RpcMethod = keyof typeof events.methods
 
 export interface WireEvent<P = any> {
@@ -101,10 +102,8 @@ declare global {
   interface Window {
     lumi: {
       getConnection: () => Promise<{ wsUrl: string }>
-      focusWindow?: () => Promise<void>
       notify?: (payload: { title: string; body?: string; tag?: string }) => Promise<void>
       onNotifyClick?: (cb: (tag: string) => void) => void
-      log?: (msg: string) => void
     }
   }
 }

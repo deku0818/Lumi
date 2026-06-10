@@ -54,7 +54,13 @@ def setup_cron(
 
     job_store = JobStore(cron_dir / "jobs.json")
     run_log = RunLog(cron_dir / "runs")
-    scheduler = Scheduler(job_store, run_log, delivery, on_job_status=on_job_status)
+    scheduler = Scheduler(
+        job_store,
+        run_log,
+        delivery,
+        on_job_status=on_job_status,
+        lock_path=cron_dir / "scheduler.lock",
+    )
     init_cron_tool(scheduler, job_store, run_log)
     return CronRuntime(scheduler, job_store, run_log, delivery, cron_dir)
 
