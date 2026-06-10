@@ -1,5 +1,29 @@
 # Changelog
 
+## [0.1.0a12] - 2026-06-10
+
+### Added
+- 模型供应商管理 — 用户自定义「连接（`base_url` / `api_key`）+ 多模型」的 profile，持久化 `~/.lumi/providers.json`（明文 `chmod 600`），TUI 与 desktop 共享同一份配置；协议由模型名自动判定。`lumi/agents/runtime/provider_store.py` 负责读写（兼容旧格式、失效 active 自动归位）
+- WS 模型供应商 RPC — `list_providers` / `test_provider`（连接可达性测试，15s 短超时不重试）/ `set_provider` / `save_provider` / `delete_provider`；`set/save/delete` 持 `run.lock` 与运行轮互斥
+- 运行时连接覆盖 — `LumiAgentContext` 增加 `base_url` / `api_key` 字段，`call_model` 经 `_provider_kwargs()` 仅在非空时透传给 `create_llm`（空则沿用 env / SDK 默认）
+- TUI `/model` 命令 — `ModelScreen` 模型切换弹窗（「供应商 × 模型」拍平为列表，仅切换；增删改在桌面端完成）
+- Desktop 设置页 — `SettingsDialog` + `ProvidersPanel`（供应商增 / 删 / 改 / 测试）+ `ModelPicker` 顶栏快速切换
+- 桌面系统通知 — 回复完成与待处理中断（审批 / 提问 / 计划）在窗口未聚焦或非当前会话时弹系统通知（经主进程 `Notification`），点击带回前台并切到对应会话
+- 国际化（i18n）— `desktop/src/i18n.ts` 提供中文 / English 双语，`useI18n()` hook，偏好存 localStorage
+- Desktop 斜杠命令 — `run_command` / `list_commands` RPC + 前端命令补全（`slash.ts` / `CommandMenu`）；`diff.ts` 工具 diff 视图（edit/write 前端就地算行级 diff）
+- `docs/user-manual.md` — 完整用户手册
+- 测试 — `tests/test_provider_store.py`、`tests/test_skill_command_blocks.py`
+
+### Fixed
+- gateway 断线时 reject 全部 in-flight RPC — 杜绝 `send_message` 等 Promise 永久挂起、会话卡在 running 态、输入框永久禁用
+- gateway 重连不再新建幽灵会话 — 改为 `switchSession` 切回原 thread 恢复后端绑定（服务端每条连接是全新 bridge）
+- 命令补全 `cmdSel` 越界钳制 — `commands` 异步刷新使 `matched` 缩短时不再取到 `undefined` 崩溃
+- `bridge.delete_thread` 用 `try/finally` — `adelete_thread` 抛错也保证清理文件级 checkpoint，避免残留孤儿目录
+
+### Changed
+- Desktop UI 迁移到 shadcn/ui — `Dialog` / `Button` / `DropdownMenu` / `Switch` / `Tabs` / `Tooltip` 等组件，移除自研 `ModalShell`
+- App.tsx provider 响应处理收敛为 `applyProviderResp` helper，消除三处复制粘贴
+
 ## [0.1.0a11] - 2026-06-09
 
 ### Added

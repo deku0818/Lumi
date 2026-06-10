@@ -22,6 +22,10 @@ class LumiAgentContext:
     tools: list = field(default_factory=list)
     system_prompt: str = field(default="")
     model_name: str = field(default="")
+    base_url: str = field(default="")
+    """当前供应商 profile 的 base_url；空则用 env / SDK 默认。"""
+    api_key: str = field(default="")
+    """当前供应商 profile 的 api_key；空则用 env / SDK 默认。"""
     permission_engine: "PermissionEngine | None" = field(default=None)
     """PermissionEngine 实例，用于工具权限评估"""
 

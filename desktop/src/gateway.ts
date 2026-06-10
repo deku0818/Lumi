@@ -1,6 +1,13 @@
 // WS JSON-RPC 客户端：对接 lumi serve 的 /ws。
 // 帧协议见 lumi/server/ws.py。带指数退避自动重连（sidecar 启动需要时间）。
-import type { HistoryItem, SessionMeta, WireEvent } from './types'
+import type {
+  ActiveModel,
+  HistoryItem,
+  ProviderProfile,
+  SessionMeta,
+  SlashCommand,
+  WireEvent,
+} from './types'
 
 export type ConnState = 'connecting' | 'open' | 'closed'
 
@@ -30,6 +37,10 @@ export class Gateway {
     }
     ws.onclose = () => {
       this.setState('closed')
+      // 连接断开：在飞的 RPC 不会再有响应，全部 reject 避免调用方永久挂起。
+      // 关键如 send_message——否则其 Promise 永不 settle，且新连接不补发 turn.complete，
+      // 会话会卡在 running 态、输入框永久禁用。
+      this.flushPending(new Error('连接已断开'))
       if (!this.closedByUser) {
         const delay = Math.min(8000, 500 * 2 ** Math.min(this.retry++, 4))
         setTimeout(() => this.connect(), delay)
@@ -62,12 +73,67 @@ export class Gateway {
     })
   }
 
-  sendMessage(content: string): Promise<unknown> {
+  // content 为纯文本字符串，或多模态 content blocks 列表（text + image 块）
+  sendMessage(content: string | unknown[]): Promise<unknown> {
     return this.request('send_message', { content })
   }
 
   resume(value: unknown): Promise<unknown> {
     return this.request('resume', { value })
+  }
+
+  stop(): Promise<unknown> {
+    return this.request('stop')
+  }
+
+  listCommands(): Promise<{ commands: SlashCommand[] }> {
+    return this.request('list_commands') as Promise<{ commands: SlashCommand[] }>
+  }
+
+  runCommand(name: string, extraText: string): Promise<unknown> {
+    return this.request('run_command', { name, extra_text: extraText })
+  }
+
+  listProviders(): Promise<{ profiles: ProviderProfile[]; active: ActiveModel }> {
+    return this.request('list_providers') as Promise<{
+      profiles: ProviderProfile[]
+      active: ActiveModel
+    }>
+  }
+
+  testProvider(
+    baseUrl: string,
+    apiKey: string,
+    model: string,
+  ): Promise<{ ok: boolean; error?: string; latency_ms?: number }> {
+    return this.request('test_provider', {
+      base_url: baseUrl,
+      api_key: apiKey,
+      model,
+    }) as Promise<{ ok: boolean; error?: string; latency_ms?: number }>
+  }
+
+  setProvider(provider: string, model: string): Promise<{ active: ActiveModel; model: string }> {
+    return this.request('set_provider', { provider, model }) as Promise<{
+      active: ActiveModel
+      model: string
+    }>
+  }
+
+  saveProvider(
+    profile: Partial<ProviderProfile>,
+  ): Promise<{ profiles: ProviderProfile[]; active: ActiveModel }> {
+    return this.request('save_provider', { profile }) as Promise<{
+      profiles: ProviderProfile[]
+      active: ActiveModel
+    }>
+  }
+
+  deleteProvider(id: string): Promise<{ profiles: ProviderProfile[]; active: ActiveModel }> {
+    return this.request('delete_provider', { id }) as Promise<{
+      profiles: ProviderProfile[]
+      active: ActiveModel
+    }>
   }
 
   listSessions(): Promise<{ sessions: SessionMeta[] }> {
@@ -114,6 +180,11 @@ export class Gateway {
 
   private setState(s: ConnState): void {
     for (const h of this.stateHandlers) h(s)
+  }
+
+  private flushPending(err: unknown): void {
+    for (const p of this.pending.values()) p.reject(err)
+    this.pending.clear()
   }
 
   close(): void {

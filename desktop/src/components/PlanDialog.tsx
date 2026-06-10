@@ -2,7 +2,8 @@
 // resume：批准发 'approved'，拒绝发 PLAN_REJECTED。
 import ReactMarkdown from 'react-markdown'
 import remarkGfm from 'remark-gfm'
-import { ModalShell } from './ModalShell'
+import { useI18n } from '../i18n'
+import { Button } from '@/components/ui/button'
 
 const PLAN_REJECTED = '__plan_rejected__'
 
@@ -20,38 +21,33 @@ export function PlanDialog({
   onApprove: () => void
   onReject: () => void
 }) {
+  const { t } = useI18n()
   const name = (data.plan_file_path ?? '').split('/').pop()
   return (
-    <ModalShell maxWidth="max-w-2xl" className="max-h-[85vh] flex flex-col">
+    <div className="border border-line rounded-2xl bg-surface/50 p-4 max-h-[70vh] flex flex-col">
       <h2 className="text-base font-semibold mb-2 flex items-center gap-2">
           <span>📋</span>
-          计划审批
+          {t('plan.title')}
         </h2>
-        {name && <div className="text-accent font-mono text-sm mb-3">● {name}</div>}
+        {name && <div className="text-primary font-mono text-sm mb-3">● {name}</div>}
 
         <div className="md flex-1 overflow-auto border border-line rounded-lg p-3.5 bg-canvas/40">
           {data.plan_content ? (
             <ReactMarkdown remarkPlugins={[remarkGfm]}>{data.plan_content}</ReactMarkdown>
           ) : (
-            <span className="text-muted">（无计划内容）</span>
+            <span className="text-muted">{t('plan.empty')}</span>
           )}
         </div>
 
-        <div className="flex gap-3 justify-end mt-5">
-          <button
-            onClick={onReject}
-            className="px-4 py-2 rounded-lg bg-panel border border-line hover:border-error/50 transition"
-          >
-            拒绝 — 继续修改
-          </button>
-          <button
-            onClick={onApprove}
-            className="px-4 py-2 rounded-lg bg-success text-canvas font-medium hover:brightness-110 transition"
-          >
-            批准 — 开始实施
-          </button>
+        <div className="flex gap-2 justify-end mt-5">
+          <Button variant="outline" onClick={onReject}>
+            {t('plan.reject')}
+          </Button>
+          <Button onClick={onApprove} className="bg-success text-white hover:bg-success/90">
+            {t('plan.approve')}
+          </Button>
         </div>
-    </ModalShell>
+    </div>
   )
 }
 

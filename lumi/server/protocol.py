@@ -33,11 +33,14 @@ def _payload(evt: BridgeEvent) -> dict:
             payload["run_id"] = evt.run_id
         return payload
     if kind == EventKind.TOOL_COMPLETE:
-        return {
+        payload = {
             "name": evt.name,
             "output": evt.output,
             "tool_call_id": evt.tool_call_id,
         }
+        if evt.is_error:
+            payload["is_error"] = True
+        return payload
     if kind in (EventKind.CLARIFY, EventKind.APPROVAL, EventKind.PLAN):
         return evt.data or {}
     if kind == EventKind.ERROR:

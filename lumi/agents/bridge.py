@@ -14,6 +14,7 @@ from typing import TYPE_CHECKING, AsyncGenerator
 import httpx
 from langchain_core.messages import HumanMessage
 from langchain_core.runnables.config import RunnableConfig
+from langgraph.errors import GraphBubbleUp
 from langgraph.types import Command
 
 from lumi.agents.core.graph import LumiAgent, create_agent
@@ -37,6 +38,41 @@ if TYPE_CHECKING:
 
 # LangChain 框架注入的内部字段，不传递给 TUI 渲染
 _TOOL_INTERNAL_KEYS = frozenset({"tool_call_id", "runtime"})
+
+# 用 interrupt() 中断、并在 resume 后整体重跑节点的工具：on_tool_start 会二次触发，
+# 且两次 run_id 不同，注入的 tool_call_id 又不出现在事件 data.input 里。改用跨 resume
+# 稳定的 checkpoint_ns 作为 wire id（中断时节点内仅此一个中断工具在飞，故唯一），
+# 使前端能按 id 去重为单行，否则会渲染出重复的工具行（如两条 ask）。
+_INTERRUPT_TOOLS = frozenset({"ask", "ExitPlanMode"})
+
+
+def build_skill_command_blocks(
+    skill_name: str, content: str, extra_text: str = ""
+) -> list[dict]:
+    """构建技能斜杠命令发给 Agent 的结构化 content blocks（TUI / desktop 共用）。
+
+    与 Agent 侧的命令解析约定保持一致，是该格式的单一事实来源：
+        Block 0: <command-name>/xxx</command-name><command-type>skill</command-type>
+        Block 1: <skill-content>{content}</skill-content>
+        Block 2 (可选): <user-input>{extra_text}</user-input>
+
+    Args:
+        skill_name: 技能名称（不含前导 "/"）。
+        content: 技能正文（通常为 skill.prompt，可能已拼接 extra_text）。
+        extra_text: 用户在斜杠命令后追加的原始文本。
+    """
+    meta = (
+        f"<command-name>/{skill_name}</command-name><command-type>skill</command-type>"
+    )
+    blocks: list[dict] = [
+        {"type": "text", "text": meta},
+        {"type": "text", "text": f"<skill-content>{content}</skill-content>"},
+    ]
+    if extra_text:
+        blocks.append(
+            {"type": "text", "text": f"<user-input>{extra_text}</user-input>"}
+        )
+    return blocks
 
 
 class EventKind(StrEnum):
@@ -71,6 +107,7 @@ class BridgeEvent:
     output: str = ""
     data: dict | None = None
     error: str = ""
+    is_error: bool = False  # TOOL_COMPLETE 专用：工具是否以异常收尾（前端红色高亮）
     usage_metadata: dict | None = None  # token 用量信息
     parent_run_id: str = ""  # 非空时表示该事件属于某个 agent 工具的子代理
     run_id: str = ""  # agent 工具自身的 run_id，用于并发 agent 场景下的精确映射
@@ -96,6 +133,8 @@ class AgentBridge:
             checkpoint=agents_config.checkpoint,
         )
         self.model_name = get_default_model_name()
+        # 应用持久化的 active 供应商 (profile, model)（覆盖 config 默认模型 + 连接）
+        self._apply_active()
         thread_id = generate_thread_id()
         recursion_limit = agents_config.recursion_limit
         self._config = RunnableConfig(
@@ -123,11 +162,14 @@ class AgentBridge:
         """删除指定会话的全部 checkpoint（LangGraph 会话 + 文件级 checkpoint）。"""
         if not thread_id:
             return
-        if self._agent is not None:
-            await self._agent.adelete_thread(thread_id)
         from lumi.agents.runtime.checkpoint import delete_thread_checkpoint
 
-        await asyncio.to_thread(delete_thread_checkpoint, thread_id)
+        # adelete_thread 抛错也要清理文件级 checkpoint，否则残留孤儿目录
+        try:
+            if self._agent is not None:
+                await self._agent.adelete_thread(thread_id)
+        finally:
+            await asyncio.to_thread(delete_thread_checkpoint, thread_id)
 
     def switch_thread(self, thread_id: str) -> None:
         """切换到指定的会话线程
@@ -177,6 +219,146 @@ class AgentBridge:
             "execution_mode": execution_mode,
         }
         async for event in self._stream(input_data):
+            yield event
+
+    # ── 模型供应商 profile ──
+
+    def _apply_active(self) -> None:
+        """把当前 active (profile, model) 应用到运行时 context（下一轮 call_model 生效）。
+
+        无 active 时回退默认（model=env 默认、无连接覆盖）。
+        """
+        from lumi.agents.runtime import provider_store
+
+        if self._context is None:
+            return
+        pair = provider_store.get_active()
+        if pair:
+            profile, model = pair
+            self._context.model_name = model
+            self._context.base_url = profile.base_url
+            self._context.api_key = profile.api_key
+        else:
+            self._context.model_name = get_default_model_name()
+            self._context.base_url = ""
+            self._context.api_key = ""
+        self.model_name = self._context.model_name
+
+    @staticmethod
+    def _provider_list() -> dict:
+        from lumi.agents.runtime import provider_store
+
+        profiles, active = provider_store.load()
+        return {
+            "profiles": [
+                {
+                    "id": p.id,
+                    "name": p.name,
+                    "base_url": p.base_url,
+                    "api_key": p.api_key,
+                    "models": list(p.models),
+                }
+                for p in profiles
+            ],
+            "active": active,
+        }
+
+    def list_providers(self) -> dict:
+        """列出全部供应商 profile（含 models 列表）及 active {provider, model}。"""
+        return self._provider_list()
+
+    async def test_provider(self, base_url: str, api_key: str, model: str) -> dict:
+        """用给定连接对模型发一个最小请求验证可达性。
+
+        短超时（15s）+ 不缓存 + 不重试，连不上的地址会快速失败而非干等。
+        返回 {ok: bool, error?: str, latency_ms?: int}。
+        """
+        import time
+
+        from langchain_core.messages import HumanMessage
+
+        from lumi.utils.model_manager import create_llm
+
+        if not model:
+            return {"ok": False, "error": "未指定模型"}
+
+        kwargs: dict = {"timeout": 15, "max_tokens": 16, "max_retries": 0}
+        if base_url:
+            kwargs["base_url"] = base_url
+        if api_key:
+            kwargs["api_key"] = api_key
+        try:
+            llm = create_llm(model_name=model, use_cache=False, **kwargs)
+            t0 = time.monotonic()
+            await llm.ainvoke([HumanMessage(content="ping")])
+            return {"ok": True, "latency_ms": int((time.monotonic() - t0) * 1000)}
+        except Exception as e:
+            return {"ok": False, "error": f"{type(e).__name__}: {e}"}
+
+    def set_provider(self, provider_id: str, model: str) -> dict:
+        """切换 active 到 (provider, model)：持久化 + 立即应用（下一轮生效）。"""
+        from lumi.agents.runtime import provider_store
+
+        provider_store.set_active(provider_id, model)
+        self._apply_active()
+        return {"active": provider_store.load()[1], "model": self.model_name}
+
+    def save_provider(self, profile: dict) -> dict:
+        """新增或更新一个 profile；active 可能因其模型增删失效，故重新应用归位。"""
+        from lumi.agents.runtime import provider_store
+
+        provider_store.upsert(profile)
+        self._apply_active()
+        return self._provider_list()
+
+    def delete_provider(self, provider_id: str) -> dict:
+        """删除一个 profile；删的是 active 时回退到新的 active（或默认）。"""
+        from lumi.agents.runtime import provider_store
+
+        provider_store.delete(provider_id)
+        self._apply_active()
+        return self._provider_list()
+
+    def list_commands(self) -> list[dict]:
+        """列出当前可用的斜杠命令（技能命令），供前端补全菜单使用。
+
+        数据源为项目技能目录，随项目动态变化——前端不硬编码，始终向后端拉取。
+        """
+        from lumi.agents.core.preprocessing.skill_detector import SkillChangeDetector
+
+        skills = SkillChangeDetector.get_instance().peek()
+        return [
+            {"name": s.name, "description": s.description, "type": "skill"}
+            for s in skills
+        ]
+
+    async def stream_command(
+        self, name: str, extra_text: str = "", tool_mode: str = "default"
+    ) -> AsyncGenerator[BridgeEvent, None]:
+        """执行技能斜杠命令并 yield 事件流。
+
+        查表拿到 skill.prompt，按统一约定构建结构化消息后复用 stream_response。
+
+        Args:
+            name: 技能名称（不含前导 "/"）。
+            extra_text: 用户在命令后追加的文本。
+            tool_mode: 工具审批模式（default / accept_edits / privileged）。
+        """
+        from lumi.agents.core.preprocessing.skill_detector import SkillChangeDetector
+
+        skill = next(
+            (s for s in SkillChangeDetector.get_instance().peek() if s.name == name),
+            None,
+        )
+        if skill is None:
+            yield BridgeEvent(kind=EventKind.ERROR, error=f"未知命令: /{name}")
+            return
+
+        content = skill.prompt
+        if extra_text:
+            content = f"{content}\n\n{extra_text}"
+        blocks = build_skill_command_blocks(name, content, extra_text)
+        async for event in self.stream_response(blocks, tool_mode=tool_mode):
             yield event
 
     async def stream_resume(self, value) -> AsyncGenerator[BridgeEvent, None]:
@@ -258,8 +440,11 @@ class AgentBridge:
                             if kind == "on_tool_start" and event.get("name") == "agent":
                                 self._active_agent_runs.add(run_id)
 
-                            # agent 工具结束时移除 run_id，避免残留影响后续匹配
-                            if kind == "on_tool_end" and event.get("name") == "agent":
+                            # agent 工具结束/出错时移除 run_id，避免残留影响后续匹配
+                            if (
+                                kind in ("on_tool_end", "on_tool_error")
+                                and event.get("name") == "agent"
+                            ):
                                 self._active_agent_runs.discard(run_id)
 
                             if kind == "on_chat_model_start":
@@ -310,6 +495,13 @@ class AgentBridge:
                                 else:
                                     tool_call_id = ""
                                     args = {}
+                                # 未注入 tool_call_id 的工具（如 bash）回退到 run_id：
+                                # run_id 每次执行唯一，且 on_tool_start/end 共享同一个，
+                                # 避免前端按空 id 把多个工具输出匹配混淆。interrupt 工具
+                                # 走 checkpoint_ns 以跨 resume 稳定（见 _resolve_tool_call_id）。
+                                tool_call_id = self._resolve_tool_call_id(
+                                    name, tool_call_id, run_id, event.get("metadata")
+                                )
                                 yield BridgeEvent(
                                     kind=EventKind.TOOL_START,
                                     name=name,
@@ -335,6 +527,11 @@ class AgentBridge:
                                 inp = data.get("input", {})
                                 if isinstance(inp, dict):
                                     tool_call_id = inp.get("tool_call_id", "")
+                                # 与 on_tool_start 对齐：普通工具回退 run_id，
+                                # interrupt 工具用 checkpoint_ns 保持跨 resume 稳定
+                                tool_call_id = self._resolve_tool_call_id(
+                                    name, tool_call_id, run_id, event.get("metadata")
+                                )
 
                                 # ask 等 BYPASS 工具使用 interrupt() 中断，LangGraph 会在
                                 # 中断时提前发出 on_tool_end（output 为空），此时不应标记
@@ -348,6 +545,36 @@ class AgentBridge:
                                     kind=EventKind.TOOL_COMPLETE,
                                     name=name,
                                     output=resolved_output,
+                                    tool_call_id=tool_call_id,
+                                    parent_run_id=parent_id,
+                                    run_id=run_id if name == "agent" else "",
+                                )
+
+                            elif kind == "on_tool_error":
+                                # 工具抛异常时 LangGraph 发 on_tool_error（而非 on_tool_end），
+                                # ToolNode 的 handle_tool_errors 随后生成 error ToolMessage 续跑。
+                                # 不在此收尾的话前端工具行会永远卡在运行态——故补发一个标记
+                                # is_error 的 TOOL_COMPLETE，让前端结束该行并红色高亮。
+                                name = event.get("name", "unknown")
+                                err = event.get("data", {}).get("error", "")
+                                # interrupt() / Command 冒泡（ask、ExitPlanMode 等）不是真失败，
+                                # 由 _check_interrupts 另行处理成 CLARIFY/PLAN 卡片，这里跳过不报错。
+                                if isinstance(err, GraphBubbleUp):
+                                    continue
+                                inp = event.get("data", {}).get("input", {})
+                                args_tcid = (
+                                    inp.get("tool_call_id", "")
+                                    if isinstance(inp, dict)
+                                    else ""
+                                )
+                                tool_call_id = self._resolve_tool_call_id(
+                                    name, args_tcid, run_id, event.get("metadata")
+                                )
+                                yield BridgeEvent(
+                                    kind=EventKind.TOOL_COMPLETE,
+                                    name=name,
+                                    output=f"工具执行失败: {err}",
+                                    is_error=True,
                                     tool_call_id=tool_call_id,
                                     parent_run_id=parent_id,
                                     run_id=run_id if name == "agent" else "",
@@ -402,6 +629,20 @@ class AgentBridge:
                 exc_info=True,
             )
             yield BridgeEvent(kind=EventKind.ERROR, error=f"[{err_type}] {e}")
+
+    @staticmethod
+    def _resolve_tool_call_id(
+        name: str, args_tcid: str, run_id: str, metadata: dict | None
+    ) -> str:
+        """解析工具对外的 wire tool_call_id。
+
+        普通工具用注入的 tool_call_id，缺失时回退到 run_id（每次执行唯一）。
+        interrupt 工具（见 _INTERRUPT_TOOLS）resume 后会带新的 run_id 重发事件，
+        改用跨 resume 稳定的 checkpoint_ns，让前端把中断前后的事件归并为单行。
+        """
+        if name in _INTERRUPT_TOOLS:
+            return (metadata or {}).get("checkpoint_ns", "") or run_id
+        return args_tcid or run_id
 
     def _subagent_marker(self) -> str:
         """如果当前有活跃的 agent 工具运行，返回其 run_id 作为子代理标记。"""

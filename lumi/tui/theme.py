@@ -63,40 +63,40 @@ class ThemePalette:
     scrollbar_default: str
 
 
-# ── 暗色色板（保留当前硬编码值，确保零视觉回归） ──
+# ── 暗色色板（暖中性炭灰：去除旧版蓝紫冷调，配暖金 accent；与 desktop index.css 一致） ──
 
 DARK_PALETTE = ThemePalette(
-    text_primary="#e0e0e0",
-    text_muted="#888899",
-    bg_primary="#121220",
-    bg_surface="#1e1e2e",
-    bg_input="#1a1a2e",
-    border_input="#333340",
-    border_separator="#555566",
+    text_primary="#ececea",
+    text_muted="#8f8d87",
+    bg_primary="#1a1a19",
+    bg_surface="#262624",
+    bg_input="#201f1d",
+    border_input="#383734",
+    border_separator="#565450",
     accent="#ffcc00",
-    accent_dim="#666666",
+    accent_dim="#66645c",
     success="#4CD964",
     error="#D94C4C",
     info="#42a5f5",
-    scrollbar_default="#333340",
+    scrollbar_default="#383734",
 )
 
-# ── 亮色色板 ──
+# ── 亮色色板（暖白系；与 desktop index.css 一致） ──
 
 LIGHT_PALETTE = ThemePalette(
-    text_primary="#1a1a2e",
-    text_muted="#666677",
-    bg_primary="#f5f5fa",
-    bg_surface="#f0f0f5",
-    bg_input="#ffffff",
-    border_input="#bbbbcc",
-    border_separator="#aaaabb",
+    text_primary="#2b2620",
+    text_muted="#78726a",
+    bg_primary="#f7f4ed",
+    bg_surface="#efebe1",
+    bg_input="#fdfbf6",
+    border_input="#ddd6c8",
+    border_separator="#ccc4b2",
     accent="#b8860b",
-    accent_dim="#999999",
+    accent_dim="#a89a78",
     success="#3BA855",
     error="#B33A3A",
     info="#1565c0",
-    scrollbar_default="#cccccc",
+    scrollbar_default="#ddd6c8",
 )
 
 
@@ -197,7 +197,7 @@ Screen {
 /* ── Markdown 内联代码 - 覆盖 Textual 默认的 error 配色 ── */
 MarkdownBlock {
     &:light > .code_inline {
-        background: #e8e8ee;
+        background: #e8e1d3;
         color: $accent;
     }
 }

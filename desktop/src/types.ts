@@ -12,7 +12,7 @@ export interface WireEvent<P = any> {
 
 // 渲染项模型（前端聊天流的最小单元）
 export type Item =
-  | { id: number; kind: 'user'; text: string }
+  | { id: number; kind: 'user'; text: string; images?: string[] }
   | { id: number; kind: 'assistant'; text: string; streaming: boolean }
   | {
       id: number
@@ -22,8 +22,31 @@ export type Item =
       args: unknown
       output: string
       done: boolean
+      error?: boolean
     }
   | { id: number; kind: 'notice'; text: string }
+
+// 斜杠命令（对齐后端 list_commands：当前为技能命令）
+export interface SlashCommand {
+  name: string
+  description: string
+  type: string
+}
+
+// 模型供应商 profile（对齐后端 provider_store.ProviderProfile）：一套连接挂多个模型
+export interface ProviderProfile {
+  id: string
+  name: string
+  base_url: string
+  api_key: string
+  models: string[]
+}
+
+// 当前选中项：某 provider 下的某个 model
+export interface ActiveModel {
+  provider: string
+  model: string
+}
 
 // 会话元数据（对齐后端 list_sessions 的 SessionSummary 序列化）
 export interface SessionMeta {
@@ -40,6 +63,7 @@ export interface SessionMeta {
 export interface HistoryItem {
   kind: 'user' | 'assistant' | 'tool'
   text?: string
+  images?: string[]
   name?: string
   args?: unknown
   output?: string
@@ -49,6 +73,12 @@ export interface HistoryItem {
 
 declare global {
   interface Window {
-    lumi: { getConnection: () => Promise<{ wsUrl: string }> }
+    lumi: {
+      getConnection: () => Promise<{ wsUrl: string }>
+      focusWindow?: () => Promise<void>
+      notify?: (payload: { title: string; body?: string; tag?: string }) => Promise<void>
+      onNotifyClick?: (cb: (tag: string) => void) => void
+      log?: (msg: string) => void
+    }
   }
 }

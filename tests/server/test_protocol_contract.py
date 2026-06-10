@@ -22,10 +22,18 @@ _PROTOCOL = json.loads(
 # ws.py 直接发出但不经 EventKind 的事件（握手帧）
 _DIRECT_EVENTS = {"gateway.ready"}
 
-# ws.py _dispatch 实现的 RPC 方法（与 lumi/server/ws.py 保持同步）
+# ws.py 实现的 RPC 方法（_dispatch 非流式 + endpoint 流式 task，与 lumi/server/ws.py 同步）
 _IMPLEMENTED_METHODS = {
     "send_message",
     "resume",
+    "stop",
+    "list_commands",
+    "run_command",
+    "list_providers",
+    "test_provider",
+    "set_provider",
+    "save_provider",
+    "delete_provider",
     "list_sessions",
     "new_session",
     "switch_session",

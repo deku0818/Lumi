@@ -14,7 +14,8 @@
     "noUnusedLocals": true,
     "noUnusedParameters": true,
     "noFallthroughCasesInSwitch": true,
-    "paths": { "@protocol/*": ["../protocol/*"] }
+    "baseUrl": ".",
+    "paths": { "@protocol/*": ["../protocol/*"], "@/*": ["./src/*"] }
   },
   "include": ["src", "vite.config.ts", "../protocol/events.json"]
 }

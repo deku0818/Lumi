@@ -18,3 +18,4 @@ test
 .hypothesis
 docs/claude-code/
 .DS_store
+.agents

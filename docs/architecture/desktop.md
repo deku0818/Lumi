@@ -41,8 +41,12 @@ server → client   {id, result} | {id, error:{message}}        # RPC 响应
 server → client   {method:"event", params:<wire event>}       # 流式事件
 ```
 
-- **RPC 方法**：`send_message`、`resume`（流式）、`list_sessions`、`new_session`、`switch_session`、`load_history`、`pin_session`、`rename_session`、`delete_session`。
-- **wire 事件**：`message.*`、`tool.*`、`clarify/approval/plan.request`、`turn.complete`、`error`，加握手帧 `gateway.ready`。
+- **RPC 方法**：
+  - 流式：`send_message`、`resume`、`run_command`（运行斜杠命令）。
+  - 会话：`list_sessions`、`new_session`、`switch_session`、`load_history`、`pin_session`、`rename_session`、`delete_session`。
+  - 模型供应商：`list_providers`、`test_provider`、`set_provider`、`save_provider`、`delete_provider`。
+  - 其它：`stop`（中止当前流式轮）、`list_commands`（拉取斜杠命令）。
+- **wire 事件**：`message.*`、`tool.*`（含 `tool.generating`）、`clarify/approval/plan.request`、`turn.complete`、`error`，加握手帧 `gateway.ready`。
 
 事件名与方法名都来自 [`protocol/events.json`](../../protocol/events.json) 单一事实源：TS 端 import derive 类型，Python 端由 `tests/server/test_protocol_contract.py` 锁住一致性。
 
@@ -62,6 +66,24 @@ server → client   {method:"event", params:<wire event>}       # 流式事件
 
 前端 `Sidebar` 每行 hover 出现 `⋮` 菜单（置顶 / 重命名 / 删除）；删除走二次确认弹窗（`ConfirmDialog`），删除当前会话时自动另开新会话顶上。
 
+## 模型供应商管理
+
+用户自定义的「连接 + 模型」持久化在 `~/.lumi/providers.json`（明文，`chmod 600`，含 `api_key`），由 `lumi/agents/runtime/provider_store.py` 读写——textual-free，TUI 与 desktop 共享同一份配置。
+
+- **数据模型**：一个 **profile** = 一套连接（`name` / `base_url` / `api_key`）+ 该连接下的一组 `models`；`active` 指向「某 profile 下的某个 model」。协议（OpenAI / Anthropic 客户端）仍由 model 名经 `model_manager.detect_model_type` 自动判定，无需配置。`provider_store` 兼容旧格式（单 `model` 字段、`active` 为字符串 id），读取时自动迁移并把失效 `active` 归位到首个可用模型。
+- **运行时生效**：`LumiAgentContext` 增加 `base_url` / `api_key` 两个字段（`state.py`）；`call_model` 经 `_provider_kwargs()`（`nodes.py`）仅在非空时透传给 `create_llm`，空则沿用 env / SDK 默认。`AgentBridge._apply_active()` 把当前 `active` 应用到 context，**下一轮** `call_model` 生效。
+- **RPC**：`list_providers`（列全部 profile + active）、`save_provider` / `delete_provider`（增删改，返回刷新后的 `{profiles, active}`）、`set_provider`（切换 active，返回 `{active, model}`）、`test_provider`（用给定连接对模型发最小请求验证可达，15s 短超时、不缓存不重试）。`set/save/delete_provider` 在 `_dispatch` 中持 `run.lock`，与运行中的轮次互斥，避免轮内改掉共享 context。
+- **前端**：`SettingsDialog` + `ProvidersPanel` 完成增 / 删 / 改 / 测试；`ModelPicker`（顶栏）做快速切换。
+- **TUI 对应**：`/model` 命令打开 `ModelScreen`（`lumi/tui/screens/model_screen.py`）——把「供应商 × 模型」拍平成列表，**仅切换**；增删改在桌面端配置页完成，二者共享 `~/.lumi/providers.json`。
+
+## 桌面通知
+
+回复完成与等待用户处理的中断（审批 / 提问 / 计划）会触发系统通知，**仅在该会话非当前活动、或窗口未聚焦时**弹出（你正盯着时不打扰）。通知经主进程 `Notification`（`electron/main.cjs`）发出——renderer 的 HTML5 `Notification` 在 macOS dev 下不可靠；点击通知经 `lumi:focus` IPC 把窗口带回前台并切到对应会话。判定用 `document.hasFocus()` 而非 `document.hidden`（切到别的应用时窗口仍可见，`hidden` 恒为 false）。
+
+## 国际化（i18n）
+
+`desktop/src/i18n.ts` 提供 `useI18n()` hook（`t` / `lang` / `setLang`），支持中文 / English，偏好存 localStorage（`lumi-lang`）。所有 UI 文案经 `t(key)` 取用，不硬编码。
+
 ## 关键文件
 
 | 文件 | 职责 |
@@ -70,8 +92,12 @@ server → client   {method:"event", params:<wire event>}       # 流式事件
 | `desktop/src/gateway.ts` | WS JSON-RPC 客户端（带指数退避重连） |
 | `desktop/src/App.tsx` | 会话状态机、事件路由、聊天流渲染 |
 | `desktop/src/components/Sidebar.tsx` | 会话列表 + 右键菜单 + 内联重命名 |
+| `desktop/src/components/{SettingsDialog,ProvidersPanel,ModelPicker}.tsx` | 模型供应商配置 + 快速切换 |
+| `desktop/src/i18n.ts` | 国际化（中文 / English） |
 | `lumi/server/ws.py` | FastAPI WS 端点 + RPC dispatch |
 | `lumi/server/protocol.py` | BridgeEvent → wire 序列化 |
 | `lumi/agents/bridge.py` | LangGraph ↔ 前端中立桥接层 |
+| `lumi/agents/runtime/provider_store.py` | 模型供应商 profile 持久化（`~/.lumi/providers.json`） |
+| `lumi/tui/screens/model_screen.py` | TUI `/model` 模型切换弹窗 |
 | `lumi/tui/session_meta.py` | 会话用户元数据 sidecar |
 | `protocol/events.json` | 协议单一事实源 |

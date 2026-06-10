@@ -20,7 +20,7 @@ from lumi.agents.cron.job_store import JobStore
 from lumi.agents.cron.run_log import RunLog
 from lumi.agents.cron.scheduler import Scheduler
 from lumi.agents.tools.providers.cron import init_cron_tool
-from lumi.agents.bridge import AgentBridge, BridgeEvent
+from lumi.agents.bridge import AgentBridge, BridgeEvent, build_skill_command_blocks
 from lumi.tui.run_state import RunContext, RunPhase
 from lumi.tui.subagent_tracker import SubagentTracker
 from lumi.tui.theme import APP_CSS, LUMI_DARK_THEME, LUMI_LIGHT_THEME, get_color
@@ -250,24 +250,7 @@ class LumiApp(App):
         asyncio.create_task(self._cleanup_stale_checkpoints())
 
         # 配置 StatusLine（尝试从 OpenRouter 获取 context_length）
-        from lumi.utils.model_info import fetch_model_info
-        from lumi.utils.read_config import get_config as get_yaml_config
-
-        config_context_length = get_yaml_config().config.token.context_length
-        model_name = self._bridge.model_name
-
-        model_info = await fetch_model_info(model_name)
-        context_max = (
-            model_info.context_length
-            if model_info and model_info.context_length > 0
-            else config_context_length
-        )
-
-        self.query_one(StatusLine).configure(
-            run_ctx=self._run,
-            model_name=model_name,
-            context_max=context_max,
-        )
+        await self._refresh_model_status()
 
         # TitleBlock 挂载到 ChatLog 内部，随聊天内容一起滚动
         chat_log = self.query_one(ChatLog)
@@ -432,6 +415,7 @@ class LumiApp(App):
                 lambda _="": self._open_cron_notify_screen(),
             ),
             ("agents", "查看所有可用 Agent", lambda _="": self._open_agents_screen()),
+            ("model", "切换 / 管理模型供应商", lambda _="": self._open_model_screen()),
             ("bg", "查看后台任务", lambda _="": self._open_bg_screen()),
             ("mcp", "查看 MCP 服务器状态", lambda _="": self._open_mcp_screen()),
             (
@@ -470,32 +454,16 @@ class LumiApp(App):
     async def _send_skill_to_agent(
         self, skill_name: str, content: str, extra_text: str = ""
     ) -> None:
-        """技能命令的 send_to_agent 回调：构建结构化消息发送给 Agent。
+        """技能命令的 send_to_agent 回调：构建结构化消息并启动一轮 run。
 
-        消息格式：
-            Block 0: <command-name>/xxx</command-name><command-type>skill</command-type>
-            Block 1: <skill-content>{prompt}</skill-content>
-            Block 2 (可选): <user-input>{extra_text}</user-input>
+        消息格式见 build_skill_command_blocks（TUI / desktop 共用的单一事实来源）。
 
         Args:
             skill_name: 技能名称
             content: skill.prompt（可能拼接了 extra_text）
             extra_text: 用户在斜杠命令后追加的原始文本
         """
-        meta = (
-            f"<command-name>/{skill_name}</command-name>"
-            f"<command-type>skill</command-type>"
-        )
-        skill_block = f"<skill-content>{content}</skill-content>"
-
-        blocks: list[dict[str, str]] = [
-            {"type": "text", "text": meta},
-            {"type": "text", "text": skill_block},
-        ]
-        if extra_text:
-            blocks.append(
-                {"type": "text", "text": f"<user-input>{extra_text}</user-input>"}
-            )
+        blocks = build_skill_command_blocks(skill_name, content, extra_text)
 
         self._run.phase = RunPhase.IDLE
         self._run.start()
@@ -718,6 +686,56 @@ class LumiApp(App):
 
     async def _on_agents_done(self, agent_name: str | None) -> None:
         """Agent 列表界面关闭回调。"""
+
+    # ── 模型供应商 ──
+
+    async def _open_model_screen(self) -> None:
+        """打开模型切换界面（仅切换；增删改在桌面端配置页）。"""
+        data = self._bridge.list_providers()
+        # 把「供应商 × 模型」拍平成可选项
+        entries = [
+            {"provider": p["id"], "name": p["name"], "model": m}
+            for p in data["profiles"]
+            for m in p["models"]
+        ]
+        if not entries:
+            await self.query_one(ChatLog).append_hint(
+                "● ", "暂无模型，请在桌面端「管理供应商」中配置后再切换"
+            )
+            return
+
+        from lumi.tui.screens.model_screen import ModelScreen
+
+        self.push_screen(
+            ModelScreen(entries, data["active"]), callback=self._on_model_done
+        )
+
+    async def _on_model_done(self, value: str | None) -> None:
+        """选中后切换模型（value = "<provider_id>\\t<model>"）并刷新状态显示。"""
+        if not value:
+            return
+        provider, _, model = value.partition("\t")
+        self._bridge.set_provider(provider, model)
+        await self._refresh_model_status()
+
+    async def _refresh_model_status(self) -> None:
+        """按当前 bridge.model_name 刷新 StatusLine（含 context_length 探测）。"""
+        from lumi.utils.model_info import fetch_model_info
+        from lumi.utils.read_config import get_config as get_yaml_config
+
+        model_name = self._bridge.model_name
+        config_context_length = get_yaml_config().config.token.context_length
+        model_info = await fetch_model_info(model_name)
+        context_max = (
+            model_info.context_length
+            if model_info and model_info.context_length > 0
+            else config_context_length
+        )
+        self.query_one(StatusLine).configure(
+            run_ctx=self._run,
+            model_name=model_name,
+            context_max=context_max,
+        )
 
     # ── 后台任务管理 ──
 

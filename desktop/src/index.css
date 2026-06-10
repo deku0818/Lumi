@@ -1,21 +1,61 @@
 @import "tailwindcss";
+@import "tw-animate-css";
+@import "shadcn/tailwind.css";
 
-/* Lumi 双主题色板，值取自 lumi/tui/theme.py 的 DARK_PALETTE / LIGHT_PALETTE。
+@custom-variant dark (&:is(.dark *));
+
+/* Lumi 双主题色板，与 lumi/tui/theme.py 的 DARK_PALETTE / LIGHT_PALETTE 保持一致。
+   暗色为暖中性炭灰（去除旧版的蓝紫冷调，配暖金 accent 与暖白亮色主题）；
    运行时通过根元素 .light class 切换；@theme inline 让 Tailwind 工具类引用这些变量。 */
 :root {
-  --color-canvas: #121220;
-  --color-surface: #1e1e2e;
-  --color-panel: #1a1a2e;
-  --color-line: #333340;
-  --color-separator: #555566;
-  --color-ink: #e0e0e0;
-  --color-muted: #888899;
+  --color-canvas: #1a1a19;
+  --color-surface: #262624;
+  --color-panel: #201f1d;
+  --color-line: #383734;
+  --color-separator: #565450;
+  --color-ink: #ececea;
+  --color-muted: #8f8d87;
   --color-accent: #ffcc00;
-  --color-accent-dim: #666666;
+  --color-accent-dim: #66645c;
   --color-success: #4cd964;
   --color-error: #d94c4c;
   --color-info: #42a5f5;
   color-scheme: dark;
+  /* shadcn 语义令牌映射到我们的暖炭灰+金调色板：引用 --color-* 故随 .light 自动切换，
+     无需 shadcn 的 .dark 约定。primary=品牌金，accent=悬停浅底（非品牌色）。 */
+  --background: var(--color-canvas);
+  --foreground: var(--color-ink);
+  --card: var(--color-surface);
+  --card-foreground: var(--color-ink);
+  --popover: var(--color-surface);
+  --popover-foreground: var(--color-ink);
+  --primary: var(--color-accent);
+  --primary-foreground: var(--color-canvas);
+  --secondary: var(--color-surface);
+  --secondary-foreground: var(--color-ink);
+  --muted: var(--color-panel);
+  --muted-foreground: var(--color-muted);
+  /* accent = 悬停底色，需比 popover/surface 更亮一档才看得见 */
+  --accent: var(--color-line);
+  --accent-foreground: var(--color-ink);
+  --destructive: var(--color-error);
+  --border: var(--color-line);
+  --input: var(--color-line);
+  --ring: var(--color-accent);
+  --chart-1: var(--color-accent);
+  --chart-2: var(--color-info);
+  --chart-3: var(--color-success);
+  --chart-4: var(--color-error);
+  --chart-5: var(--color-muted);
+  --radius: 0.625rem;
+  --sidebar: var(--color-canvas);
+  --sidebar-foreground: var(--color-ink);
+  --sidebar-primary: var(--color-accent);
+  --sidebar-primary-foreground: var(--color-canvas);
+  --sidebar-accent: var(--color-surface);
+  --sidebar-accent-foreground: var(--color-ink);
+  --sidebar-border: var(--color-line);
+  --sidebar-ring: var(--color-accent);
 }
 
 :root.light {
@@ -43,11 +83,50 @@
   --color-separator: var(--color-separator);
   --color-ink: var(--color-ink);
   --color-muted: var(--color-muted);
-  --color-accent: var(--color-accent);
+  /* Tailwind 的 accent 工具类 = shadcn 悬停浅底（surface），品牌金归 primary */
+  --color-accent: var(--accent);
   --color-accent-dim: var(--color-accent-dim);
   --color-success: var(--color-success);
   --color-error: var(--color-error);
   --color-info: var(--color-info);
+  --font-heading: var(--font-sans);
+  --font-sans: system-ui, -apple-system, "Segoe UI", "PingFang SC", sans-serif;
+  --color-sidebar-ring: var(--sidebar-ring);
+  --color-sidebar-border: var(--sidebar-border);
+  --color-sidebar-accent-foreground: var(--sidebar-accent-foreground);
+  --color-sidebar-accent: var(--sidebar-accent);
+  --color-sidebar-primary-foreground: var(--sidebar-primary-foreground);
+  --color-sidebar-primary: var(--sidebar-primary);
+  --color-sidebar-foreground: var(--sidebar-foreground);
+  --color-sidebar: var(--sidebar);
+  --color-chart-5: var(--chart-5);
+  --color-chart-4: var(--chart-4);
+  --color-chart-3: var(--chart-3);
+  --color-chart-2: var(--chart-2);
+  --color-chart-1: var(--chart-1);
+  --color-ring: var(--ring);
+  --color-input: var(--input);
+  --color-border: var(--border);
+  --color-destructive: var(--destructive);
+  --color-accent-foreground: var(--accent-foreground);
+  --color-muted-foreground: var(--muted-foreground);
+  --color-secondary-foreground: var(--secondary-foreground);
+  --color-secondary: var(--secondary);
+  --color-primary-foreground: var(--primary-foreground);
+  --color-primary: var(--primary);
+  --color-popover-foreground: var(--popover-foreground);
+  --color-popover: var(--popover);
+  --color-card-foreground: var(--card-foreground);
+  --color-card: var(--card);
+  --color-foreground: var(--foreground);
+  --color-background: var(--background);
+  --radius-sm: calc(var(--radius) * 0.6);
+  --radius-md: calc(var(--radius) * 0.8);
+  --radius-lg: var(--radius);
+  --radius-xl: calc(var(--radius) * 1.4);
+  --radius-2xl: calc(var(--radius) * 1.8);
+  --radius-3xl: calc(var(--radius) * 2.2);
+  --radius-4xl: calc(var(--radius) * 2.6);
 }
 
 html,
@@ -118,6 +197,21 @@ pre {
   field-sizing: content;
 }
 
+/* 输入框高亮 overlay：textarea 与底层镜像层共用同一排版，保证像素级对齐。
+   textarea 文字透明只留光标，镜像层渲染带颜色的 /命令 token。 */
+.composer-layer {
+  box-sizing: border-box;
+  width: 100%;
+  margin: 0;
+  padding: 14px 16px 6px; /* 对齐 pt-3.5 px-4 pb-1.5 */
+  border: 0;
+  font: inherit;
+  line-height: 1.55; /* 对齐 body */
+  letter-spacing: inherit;
+  white-space: pre-wrap;
+  overflow-wrap: break-word;
+}
+
 @keyframes blink {
   0%, 100% { opacity: 1; }
   50% { opacity: 0; }
@@ -176,3 +270,15 @@ pre {
 .md table { border-collapse: collapse; margin: 0.6em 0; }
 .md th, .md td { border: 1px solid var(--color-line); padding: 0.3em 0.6em; }
 .md th { background: color-mix(in srgb, var(--color-ink) 5%, transparent); }
+
+@layer base {
+  * {
+    @apply border-border outline-ring/50;
+  }
+  body {
+    @apply bg-background text-foreground;
+  }
+  html {
+    @apply font-sans;
+  }
+}

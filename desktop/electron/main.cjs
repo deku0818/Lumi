@@ -1,11 +1,13 @@
 // Electron 主进程：拉起 lumi serve sidecar、创建窗口、经 IPC 把 ws 连接信息给 renderer。
-const { app, BrowserWindow, ipcMain, shell } = require('electron')
+const { app, BrowserWindow, ipcMain, shell, Notification } = require('electron')
 const { spawn } = require('node:child_process')
 const net = require('node:net')
 const path = require('node:path')
 
 // desktop/electron/main.cjs → desktop → Lumi 项目根
 const PROJECT_ROOT = path.resolve(__dirname, '..', '..')
+// 应用图标：dev 下设置 Dock/窗口图标；打包后由打包器的 icns/ico 配置接管
+const APP_ICON = path.join(__dirname, '..', 'assets', 'icon.png')
 
 let serveProc = null
 let wsPort = 0
@@ -58,7 +60,8 @@ function createWindow() {
     height: 760,
     minWidth: 680,
     minHeight: 480,
-    backgroundColor: '#121220',
+    backgroundColor: '#1a1a19',
+    icon: APP_ICON,
     titleBarStyle: 'hiddenInset',
     trafficLightPosition: { x: 16, y: 16 },
     webPreferences: {
@@ -90,7 +93,37 @@ function createWindow() {
 // renderer 经 preload 调用，拿到 sidecar 的 WS 地址（带重连，无需等就绪）
 ipcMain.handle('lumi:connection', () => ({ wsUrl: `ws://127.0.0.1:${wsPort}/ws` }))
 
+// renderer 调试日志透传到 dev 终端（renderer console 默认不进终端）
+ipcMain.on('lumi:log', (_e, msg) => console.log('[renderer]', msg))
+
+// 通知点击：把窗口带回前台（还原最小化 + 跨平台聚焦）
+function focusMainWindow() {
+  const win = BrowserWindow.getAllWindows()[0]
+  if (!win) return
+  if (win.isMinimized()) win.restore()
+  win.show()
+  win.focus()
+}
+ipcMain.handle('lumi:focus', focusMainWindow)
+
+// 系统通知走主进程 Notification（renderer 的 HTML5 Notification 在 macOS
+// dev/未签名场景不可靠）。点击时聚焦窗口并把 tag 回传 renderer 切会话。
+ipcMain.handle('lumi:notify', (event, { title, body, tag }) => {
+  console.log('[notify] 请求:', title, '| supported =', Notification.isSupported())
+  if (!Notification.isSupported()) return
+  const n = new Notification({ title: String(title || 'Lumi'), body: String(body || '') })
+  n.on('show', () => console.log('[notify] 已展示:', title))
+  n.on('failed', (_e, err) => console.log('[notify] 失败:', err))
+  n.on('click', () => {
+    focusMainWindow()
+    if (!event.sender.isDestroyed()) event.sender.send('lumi:notify-click', tag)
+  })
+  n.show()
+})
+
 app.whenReady().then(async () => {
+  // macOS dev：Dock 图标运行时设置（打包后由 bundle 的 icns 接管）
+  if (app.dock) app.dock.setIcon(APP_ICON)
   wsPort = await pickPort()
   startSidecar(wsPort)
   createWindow()

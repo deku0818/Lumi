@@ -1,10 +1,19 @@
-// 通用二次确认弹窗：用于删除等不可逆操作。复用 ModalShell。
-import { ModalShell } from './ModalShell'
+// 通用二次确认弹窗：用于删除等不可逆操作。基于 shadcn Dialog。
+import { useI18n } from '../i18n'
+import {
+  Dialog,
+  DialogContent,
+  DialogDescription,
+  DialogFooter,
+  DialogHeader,
+  DialogTitle,
+} from '@/components/ui/dialog'
+import { Button } from '@/components/ui/button'
 
 export function ConfirmDialog({
   title,
   message,
-  confirmLabel = '删除',
+  confirmLabel,
   onConfirm,
   onCancel,
 }: {
@@ -14,24 +23,23 @@ export function ConfirmDialog({
   onConfirm: () => void
   onCancel: () => void
 }) {
+  const { t } = useI18n()
   return (
-    <ModalShell maxWidth="max-w-sm">
-      <h2 className="text-base font-semibold mb-2">{title}</h2>
-      <p className="text-sm text-muted mb-5 break-words">{message}</p>
-      <div className="flex gap-3 justify-end">
-        <button
-          onClick={onCancel}
-          className="px-4 py-2 rounded-lg bg-panel border border-line hover:border-line/80 transition text-sm"
-        >
-          取消
-        </button>
-        <button
-          onClick={onConfirm}
-          className="px-4 py-2 rounded-lg bg-error text-canvas font-medium hover:brightness-110 transition text-sm"
-        >
-          {confirmLabel}
-        </button>
-      </div>
-    </ModalShell>
+    <Dialog open onOpenChange={(o) => !o && onCancel()}>
+      <DialogContent className="sm:max-w-sm">
+        <DialogHeader>
+          <DialogTitle>{title}</DialogTitle>
+          <DialogDescription className="break-words">{message}</DialogDescription>
+        </DialogHeader>
+        <DialogFooter>
+          <Button variant="outline" onClick={onCancel}>
+            {t('common.cancel')}
+          </Button>
+          <Button variant="destructive" onClick={onConfirm}>
+            {confirmLabel ?? t('common.delete')}
+          </Button>
+        </DialogFooter>
+      </DialogContent>
+    </Dialog>
   )
 }

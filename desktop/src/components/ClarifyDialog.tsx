@@ -1,7 +1,8 @@
 // ask 工具交互：渲染 questions（单/多选 + 自定义输入），按后端 _format_answers
 // 同款格式构造 answer 字符串（每行 `{question} → {labels}`）。取消发 ASK_CANCELLED。
 import { useState } from 'react'
-import { ModalShell } from './ModalShell'
+import { useI18n } from '../i18n'
+import { Button } from '@/components/ui/button'
 
 const ASK_CANCELLED = '__ask_cancelled__'
 
@@ -28,6 +29,7 @@ export function ClarifyDialog({
   onSubmit: (answer: string) => void
   onCancel: () => void
 }) {
+  const { t } = useI18n()
   const questions = data.questions ?? []
   const [sel, setSel] = useState<Record<number, Set<number>>>(() =>
     Object.fromEntries(questions.map((_, i) => [i, new Set<number>()])),
@@ -68,10 +70,10 @@ export function ClarifyDialog({
       .join('\n')
 
   return (
-    <ModalShell maxWidth="max-w-xl" className="max-h-[82vh] overflow-auto">
+    <div className="border border-line rounded-2xl bg-surface/50 p-4 max-h-[70vh] overflow-auto">
       <h2 className="text-base font-semibold mb-4 flex items-center gap-2">
-          <span className="text-accent">✦</span>
-          Lumi 想和你确认一下
+          <span className="text-primary">✦</span>
+          {t('clarify.title')}
         </h2>
 
         {questions.map((q, qi) => {
@@ -93,11 +95,11 @@ export function ClarifyDialog({
                       onClick={() => toggle(qi, oi, multi)}
                       className={`w-full text-left px-3 py-2 rounded-lg border flex items-start gap-2.5 transition ${
                         checked
-                          ? 'border-accent bg-accent/10'
+                          ? 'border-primary bg-primary/10'
                           : 'border-line hover:border-separator'
                       }`}
                     >
-                      <span className={checked ? 'text-accent' : 'text-muted'}>
+                      <span className={checked ? 'text-primary' : 'text-muted'}>
                         {multi ? (checked ? '◉' : '○') : checked ? '●' : '○'}
                       </span>
                       <span className="flex-1">
@@ -114,29 +116,21 @@ export function ClarifyDialog({
                 <input
                   value={custom[qi]}
                   onChange={(e) => setCustom((p) => ({ ...p, [qi]: e.target.value }))}
-                  placeholder="或自定义输入…"
-                  className="w-full bg-canvas border border-line rounded-lg px-3 py-2 text-sm outline-none focus:border-accent/60 placeholder:text-muted/60"
+                  placeholder={t('clarify.customPlaceholder')}
+                  className="w-full bg-canvas border border-line rounded-lg px-3 py-2 text-sm outline-none focus:border-primary/60 placeholder:text-muted/60"
                 />
               </div>
             </div>
           )
         })}
 
-        <div className="flex gap-3 justify-end mt-5">
-          <button
-            onClick={onCancel}
-            className="px-4 py-2 rounded-lg bg-panel border border-line hover:border-separator transition"
-          >
-            取消
-          </button>
-          <button
-            onClick={() => onSubmit(format())}
-            className="px-4 py-2 rounded-lg bg-accent text-canvas font-medium hover:brightness-110 transition"
-          >
-            提交
-          </button>
+        <div className="flex gap-2 justify-end mt-5">
+          <Button variant="outline" onClick={onCancel}>
+            {t('common.cancel')}
+          </Button>
+          <Button onClick={() => onSubmit(format())}>{t('clarify.submit')}</Button>
         </div>
-    </ModalShell>
+    </div>
   )
 }
 

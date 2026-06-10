@@ -8,7 +8,7 @@
     "message.complete": { "payload": ["usage?"] },
     "tool.generating": { "payload": [], "note": "模型正在生成工具调用参数" },
     "tool.start": { "payload": ["name", "args", "tool_call_id", "run_id?"] },
-    "tool.complete": { "payload": ["name", "output", "tool_call_id"] },
+    "tool.complete": { "payload": ["name", "output", "tool_call_id", "is_error?"], "note": "is_error=true 表示工具以异常收尾" },
     "clarify.request": { "payload": ["questions"], "note": "ask 工具，需 resume" },
     "approval.request": {
       "payload": ["tool_calls", "decisions?", "options?", "warnings?", "boundary_violations?"],
@@ -22,6 +22,14 @@
   "methods": {
     "send_message": { "params": ["content", "tool_mode?", "execution_mode?"], "streaming": true },
     "resume": { "params": ["value"], "streaming": true },
+    "stop": { "params": [], "result": ["stopped"], "note": "中止当前流式轮，取消后补发 turn.complete" },
+    "list_commands": { "params": [], "result": ["commands"] },
+    "run_command": { "params": ["name", "extra_text?", "tool_mode?"], "streaming": true },
+    "list_providers": { "params": [], "result": ["profiles", "active"] },
+    "test_provider": { "params": ["base_url", "api_key", "model"], "result": ["ok", "error?", "latency_ms?"] },
+    "set_provider": { "params": ["provider", "model"], "result": ["active", "model"] },
+    "save_provider": { "params": ["profile"], "result": ["profiles", "active"] },
+    "delete_provider": { "params": ["id"], "result": ["profiles", "active"] },
     "list_sessions": { "params": ["limit?"], "result": ["sessions"] },
     "new_session": { "params": [], "result": ["thread_id"] },
     "switch_session": { "params": ["thread_id"], "result": ["thread_id"] },
