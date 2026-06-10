@@ -16,6 +16,9 @@ from uuid import uuid4
 DNS_1035_PATTERN = re.compile(r"^[a-z][a-z0-9-]*[a-z0-9]$|^[a-z]$")
 MAX_LENGTH = 63
 
+# cron 执行会话的 thread 前缀：scheduler 生成、session_store 过滤共用此单一定义
+CRON_THREAD_PREFIX = "cron"
+
 
 class InvalidThreadIdError(ValueError):
     """无效的 thread_id 错误"""

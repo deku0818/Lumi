@@ -59,6 +59,32 @@ export interface SessionMeta {
   display_time: string
 }
 
+// 定时任务（对齐后端 cron_rpc._job_to_wire：Job.to_dict + next_run）
+export interface CronJob {
+  id: string
+  name: string
+  schedule: { type: 'at' | 'interval' | 'cron'; value: string }
+  prompt: string
+  enabled: boolean
+  created_at: string
+  consecutive_errors: number
+  next_run: string | null
+}
+
+// 单次执行记录（对齐后端 RunRecord.to_dict）
+export interface CronRun {
+  job_id: string
+  job_name: string
+  started_at: string
+  finished_at: string
+  status: 'success' | 'failed' | 'timeout'
+  duration_ms: number
+  output_summary: string
+  error: string
+  // 本次执行的会话线程（cron- 前缀），非空时可跳转续聊；空串=无会话（旧记录或已清理）
+  thread_id: string
+}
+
 // load_history 返回的历史项（对齐后端 _history_items）
 export interface HistoryItem {
   kind: 'user' | 'assistant' | 'tool'

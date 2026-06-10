@@ -2,6 +2,8 @@
 // 帧协议见 lumi/server/ws.py。带指数退避自动重连（sidecar 启动需要时间）。
 import type {
   ActiveModel,
+  CronJob,
+  CronRun,
   HistoryItem,
   ProviderProfile,
   SessionMeta,
@@ -166,6 +168,45 @@ export class Gateway {
 
   deleteSession(threadId: string): Promise<unknown> {
     return this.request('delete_session', { thread_id: threadId })
+  }
+
+  listCronJobs(): Promise<{ jobs: CronJob[] }> {
+    return this.request('list_cron_jobs') as Promise<{ jobs: CronJob[] }>
+  }
+
+  createCronJob(name: string, schedule: string, prompt: string): Promise<{ job: CronJob }> {
+    return this.request('create_cron_job', { name, schedule, prompt }) as Promise<{
+      job: CronJob
+    }>
+  }
+
+  updateCronJob(
+    jobId: string,
+    fields: { name?: string; schedule?: string; prompt?: string },
+  ): Promise<{ job: CronJob }> {
+    return this.request('update_cron_job', { job_id: jobId, ...fields }) as Promise<{
+      job: CronJob
+    }>
+  }
+
+  deleteCronJob(jobId: string): Promise<{ job_id: string }> {
+    return this.request('delete_cron_job', { job_id: jobId }) as Promise<{ job_id: string }>
+  }
+
+  toggleCronJob(jobId: string, enabled: boolean): Promise<{ job: CronJob }> {
+    return this.request('toggle_cron_job', { job_id: jobId, enabled }) as Promise<{
+      job: CronJob
+    }>
+  }
+
+  runCronJob(jobId: string): Promise<{ ok: boolean }> {
+    return this.request('run_cron_job', { job_id: jobId }) as Promise<{ ok: boolean }>
+  }
+
+  listCronRuns(jobId: string, limit = 20): Promise<{ runs: CronRun[] }> {
+    return this.request('list_cron_runs', { job_id: jobId, limit }) as Promise<{
+      runs: CronRun[]
+    }>
   }
 
   onEvent(h: EventHandler): () => void {

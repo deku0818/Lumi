@@ -17,6 +17,7 @@ def _make_record(
     duration_ms: int = 5000,
     output_summary: str = "执行完成",
     error: str = "",
+    thread_id: str = "",
 ) -> RunRecord:
     return RunRecord(
         job_id=job_id,
@@ -27,6 +28,7 @@ def _make_record(
         duration_ms=duration_ms,
         output_summary=output_summary,
         error=error,
+        thread_id=thread_id,
     )
 
 
@@ -226,3 +228,61 @@ class TestRunLogEdgeCases:
 
         results = await log.get_recent("blanks")
         assert len(results) == 1
+
+
+class TestPruneThreadIds:
+    """会话保留策略测试。"""
+
+    async def test_prune_beyond_keep(self, tmp_path: Path) -> None:
+        log = RunLog(tmp_path)
+        for i in range(5):
+            await log.append(
+                _make_record(
+                    job_id="prune",
+                    started_at=datetime(2025, 1, 15, 9, i, 0),
+                    thread_id=f"cron-{i}",
+                )
+            )
+
+        pruned = await log.prune_thread_ids("prune", keep=3)
+
+        # 最旧的两条（i=0,1）被清理
+        assert pruned == ["cron-1", "cron-0"]
+        records = await log.get_recent("prune", limit=10)
+        assert len(records) == 5  # 记录本身保留
+        assert [r.thread_id for r in records] == ["cron-4", "cron-3", "cron-2", "", ""]
+
+    async def test_prune_idempotent(self, tmp_path: Path) -> None:
+        log = RunLog(tmp_path)
+        for i in range(4):
+            await log.append(
+                _make_record(
+                    job_id="idem",
+                    started_at=datetime(2025, 1, 15, 9, i, 0),
+                    thread_id=f"cron-{i}",
+                )
+            )
+        first = await log.prune_thread_ids("idem", keep=2)
+        second = await log.prune_thread_ids("idem", keep=2)
+        assert len(first) == 2
+        assert second == []
+
+    async def test_prune_nothing_to_do(self, tmp_path: Path) -> None:
+        log = RunLog(tmp_path)
+        await log.append(_make_record(job_id="few", thread_id="cron-x"))
+        assert await log.prune_thread_ids("few", keep=50) == []
+
+
+class TestDeleteLog:
+    """日志删除测试。"""
+
+    async def test_delete_log_removes_file(self, tmp_path: Path) -> None:
+        log = RunLog(tmp_path)
+        await log.append(_make_record(job_id="gone"))
+        assert (tmp_path / "gone.jsonl").exists()
+        await log.delete_log("gone")
+        assert not (tmp_path / "gone.jsonl").exists()
+
+    async def test_delete_log_missing_file_noop(self, tmp_path: Path) -> None:
+        log = RunLog(tmp_path)
+        await log.delete_log("never-existed")  # 不抛异常

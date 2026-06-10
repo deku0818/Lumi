@@ -19,6 +19,7 @@ from typing import TYPE_CHECKING, Any
 from lumi.tui.message_visibility import should_show_human_message
 from lumi.tui.text_cleaning import extract_display_text
 from lumi.utils.logger import logger
+from lumi.utils.thread_id import CRON_THREAD_PREFIX
 
 if TYPE_CHECKING:
     from langgraph.graph.state import CompiledStateGraph
@@ -174,6 +175,10 @@ async def list_sessions(
 
     for tid in thread_ids:
         if tid == current_thread_id:
+            continue
+        # cron 执行会话不进会话列表（即使续聊后带上 workspace 元数据也不"转正"），
+        # 只能从定时任务详情的执行记录进入
+        if tid.startswith(f"{CRON_THREAD_PREFIX}-"):
             continue
 
         try:

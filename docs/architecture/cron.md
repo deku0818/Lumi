@@ -22,7 +22,8 @@
 │                            │                    │
 │                     DeliveryManager              │
 │                      ├─ TUIDelivery              │
-│                      └─ APIDelivery              │
+│                      ├─ APIDelivery              │
+│                      └─ DesktopDelivery          │
 │                            │                    │
 │                        RunLog                    │
 └─────────────────────────────────────────────────┘
@@ -35,9 +36,15 @@
 | 数据模型 | `lumi/agents/cron/models.py` | Schedule、Job 定义与序列化 |
 | 任务存储 | `lumi/agents/cron/job_store.py` | JSON 文件持久化，原子写入 |
 | 执行日志 | `lumi/agents/cron/run_log.py` | JSONL 追加写入，自动裁剪 |
-| 结果投递 | `lumi/agents/cron/delivery.py` | ABC 基类 + TUI/API 实现 |
+| 结果投递 | `lumi/agents/cron/delivery.py` | ABC 基类 + TUI/API 实现（Desktop 实现在 `lumi/server/desktop_delivery.py`，wire 信封属 server 层） |
 | 调度引擎 | `lumi/agents/cron/scheduler.py` | APScheduler 封装，重试逻辑 |
+| 运行时装配 | `lumi/agents/cron/runtime.py` | `setup_cron()` 工厂，TUI 与 desktop serve 共用 |
 | 对话工具 | `lumi/agents/tools/providers/cron.py` | 7 种操作的 LangChain Tool |
+| Desktop RPC | `lumi/server/cron_rpc.py` | WS 管理方法（list/create/update/delete/toggle/run/runs） |
+
+Desktop 端：`lumi serve` 在 lifespan 中经 `setup_cron()` 启动调度器，`DesktopDelivery`
+把任务结果（`cron.result`）与运行状态（`cron.running`）广播给所有活跃 WS 连接；
+管理界面见 `desktop/src/components/CronPage.tsx`，协议见 `protocol/events.json`。
 
 ---
 
@@ -45,11 +52,24 @@
 
 每个定时任务触发时，Scheduler 会：
 
-1. 创建独立的 Agent 子会话（`checkpoint=None`，与主对话隔离）
+1. 创建独立的 Agent 子会话，落在专属的 `cron-` 前缀 thread 中（共用 Scheduler
+   启动时创建的常驻 checkpointer 连接），像普通会话一样可回看、可续聊
 2. 将任务的 `prompt` 作为输入，`tool_mode` 设为 `privileged`（跳过人工审批）
 3. 使用 `asyncio.wait_for` 限制执行时间，默认超时 10 分钟
 4. 执行完成后通过 DeliveryManager 广播结果到所有已注册的投递通道
-5. 记录执行日志到 RunLog
+5. 记录执行日志到 RunLog（含本次执行的 `thread_id`）
+
+### 执行即会话
+
+- 每次执行一个独立 thread（`cron-{uuid}`），desktop 端在执行记录中点击可跳转
+  该会话并继续对话（续聊走普通审批模式，不再 privileged）
+- cron 线程**不进入会话列表**：执行时不带 `workspace_dir` 元数据天然被过滤，
+  `session_store.list_sessions` 再按 `cron-` 前缀兜底排除（续聊后也不"转正"）
+- **保留策略**：每个任务只保留最近 `MAX_CRON_RUN_THREADS`（50）次执行的会话
+  checkpoint，超出部分在写入新记录时清理（记录本身保留，仅 thread_id 置空）
+- **级联删除**：删除任务时一并清理执行日志与全部历史会话 checkpoint
+  （`Scheduler.purge_job_data`）；一次性（at）任务执行完自删时不级联（保留结果可查）
+- checkpointer 初始化失败时退化为无会话模式（thread_id 为空，仅摘要可见）
 
 ---
 

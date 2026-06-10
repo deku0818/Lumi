@@ -55,6 +55,9 @@ MAX_CRON_RETRIES: Final[int] = 3
 CRON_BACKOFF_INTERVALS: Final[tuple[int, ...]] = (30, 60, 300)
 """Cron 重试退避间隔（秒）"""
 
+MAX_CRON_RUN_THREADS: Final[int] = 50
+"""每个 cron 任务保留会话 checkpoint 的最近执行次数，超出部分清理"""
+
 MAX_NOTIFICATIONS: Final[int] = 100
 """通知历史最大记录数"""
 

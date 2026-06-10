@@ -19,8 +19,8 @@ _PROTOCOL = json.loads(
     )
 )
 
-# ws.py 直接发出但不经 EventKind 的事件（握手帧）
-_DIRECT_EVENTS = {"gateway.ready"}
+# ws.py 直接发出但不经 EventKind 的事件（握手帧 + cron 广播）
+_DIRECT_EVENTS = {"gateway.ready", "cron.result", "cron.running"}
 
 # ws.py 实现的 RPC 方法（_dispatch 非流式 + endpoint 流式 task，与 lumi/server/ws.py 同步）
 _IMPLEMENTED_METHODS = {
@@ -41,6 +41,13 @@ _IMPLEMENTED_METHODS = {
     "pin_session",
     "rename_session",
     "delete_session",
+    "list_cron_jobs",
+    "create_cron_job",
+    "update_cron_job",
+    "delete_cron_job",
+    "toggle_cron_job",
+    "run_cron_job",
+    "list_cron_runs",
 }
 
 

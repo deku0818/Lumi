@@ -16,7 +16,12 @@
     },
     "plan.request": { "payload": ["plan_file_path", "plan_content?"], "note": "退出 plan mode 确认，需 resume" },
     "turn.complete": { "payload": ["usage?"] },
-    "error": { "payload": ["message"] }
+    "error": { "payload": ["message"] },
+    "cron.result": {
+      "payload": ["job_id", "job_name", "status", "output", "started_at", "duration_ms"],
+      "note": "定时任务完成一次执行，由 DesktopDelivery 直接广播（不经 EventKind）"
+    },
+    "cron.running": { "payload": ["names"], "note": "当前正在执行的任务名列表，开始/结束时推送" }
   },
   "events_note": "任意事件 payload 都可能附带 parent_run_id（非空时表示属于某个子代理）",
   "methods": {
@@ -36,6 +41,13 @@
     "load_history": { "params": ["thread_id"], "result": ["items"] },
     "pin_session": { "params": ["thread_id", "pinned"], "result": ["thread_id", "pinned"] },
     "rename_session": { "params": ["thread_id", "title"], "result": ["thread_id", "title"] },
-    "delete_session": { "params": ["thread_id"], "result": ["thread_id"] }
+    "delete_session": { "params": ["thread_id"], "result": ["thread_id"] },
+    "list_cron_jobs": { "params": [], "result": ["jobs"], "note": "job 含 next_run（ISO 时间或 null）" },
+    "create_cron_job": { "params": ["name", "schedule", "prompt"], "result": ["job"] },
+    "update_cron_job": { "params": ["job_id", "name?", "schedule?", "prompt?"], "result": ["job"] },
+    "delete_cron_job": { "params": ["job_id"], "result": ["job_id"] },
+    "toggle_cron_job": { "params": ["job_id", "enabled"], "result": ["job"] },
+    "run_cron_job": { "params": ["job_id"], "result": ["ok"], "note": "异步触发，结果经 cron.result 推送" },
+    "list_cron_runs": { "params": ["job_id", "limit?"], "result": ["runs"], "note": "run 含 thread_id（非空时可经 switch_session 跳转该次执行的会话续聊）" }
   }
 }

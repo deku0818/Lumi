@@ -23,6 +23,8 @@ class FakeDelivery(ResultDelivery):
         *,
         started_at: datetime | None = None,
         duration_ms: int | None = None,
+        job_id: str = "",
+        status: str = "success",
     ) -> None:
         self.messages.append(
             {
@@ -47,6 +49,8 @@ class FailingDelivery(ResultDelivery):
         *,
         started_at: datetime | None = None,
         duration_ms: int | None = None,
+        job_id: str = "",
+        status: str = "success",
     ) -> None:
         raise RuntimeError("投递失败")
 
@@ -61,6 +65,8 @@ class FailingCloseDelivery(ResultDelivery):
         *,
         started_at: datetime | None = None,
         duration_ms: int | None = None,
+        job_id: str = "",
+        status: str = "success",
     ) -> None:
         pass
 

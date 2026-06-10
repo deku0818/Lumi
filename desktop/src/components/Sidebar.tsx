@@ -1,5 +1,8 @@
 import { useEffect, useRef, useState } from 'react'
 import {
+  AlertTriangle,
+  ChevronRight,
+  Clock,
   MoreVertical,
   Pin,
   PinOff,
@@ -11,7 +14,7 @@ import {
   ChevronsUpDown,
 } from 'lucide-react'
 import type { ConnState } from '../gateway'
-import type { SessionMeta } from '../types'
+import type { CronJob, SessionMeta } from '../types'
 import { useI18n, LANGS } from '../i18n'
 import {
   DropdownMenu,
@@ -38,8 +41,15 @@ export function Sidebar({
   model,
   activity,
   disabled,
+  scheduledActive,
+  cronJobs,
+  cronUnread,
+  cronRunning,
+  activeCronJob,
+  onOpenCronJob,
   onSelect,
   onNew,
+  onOpenScheduled,
   onOpenSettings,
   onPin,
   onRename,
@@ -51,8 +61,15 @@ export function Sidebar({
   model: string
   activity: Record<string, 'running' | 'attention'>
   disabled: boolean
+  scheduledActive: boolean
+  cronJobs: CronJob[]
+  cronUnread: Record<string, number>
+  cronRunning: string[]
+  activeCronJob: string | null
+  onOpenCronJob: (jobId: string) => void
   onSelect: (threadId: string) => void
   onNew: () => void
+  onOpenScheduled: () => void
   onOpenSettings: () => void
   onPin: (threadId: string, pinned: boolean) => void
   onRename: (threadId: string, title: string) => void
@@ -72,31 +89,133 @@ export function Sidebar({
           <span className="text-primary text-base leading-none">＋</span>
           {t('sidebar.newChat')}
         </Button>
+        <button
+          onClick={onOpenScheduled}
+          className={`no-drag relative w-full flex items-center gap-2 px-3 py-2 rounded-xl text-sm transition ${
+            scheduledActive ? 'bg-surface text-ink' : 'text-muted hover:bg-surface/60 hover:text-ink'
+          }`}
+        >
+          <Clock size={15} className="shrink-0" />
+          {t('sidebar.scheduled')}
+        </button>
       </div>
 
       <div className="flex-1 overflow-auto px-2">
-        {sessions.length > 0 && (
-          <div className="text-xs text-muted px-3 pt-2 pb-1.5">{t('sidebar.recent')}</div>
+        {/* 定时任务分组：点击进入任务会话视图（最近一次执行的对话 + Runs 侧栏） */}
+        {cronJobs.length > 0 && (
+          <CollapsibleGroup label={t('sidebar.scheduled')} storageKey="scheduled">
+            {cronJobs.map((job) => (
+              <CronJobRow
+                key={job.id}
+                job={job}
+                active={job.id === activeCronJob}
+                unread={cronUnread[job.id] ?? 0}
+                running={cronRunning.includes(job.name)}
+                onOpen={onOpenCronJob}
+              />
+            ))}
+          </CollapsibleGroup>
         )}
-        {sessions.map((s) => (
-          <SessionRow
-            key={s.thread_id}
-            session={s}
-            active={s.thread_id === currentThread}
-            state={activity[s.thread_id]}
-            disabled={disabled}
-            onSelect={onSelect}
-            onPin={onPin}
-            onRename={onRename}
-            onDelete={onDelete}
-          />
-        ))}
+        {sessions.length > 0 && (
+          <CollapsibleGroup label={t('sidebar.recent')} storageKey="recents">
+            {sessions.map((s) => (
+              <SessionRow
+                key={s.thread_id}
+                session={s}
+                active={s.thread_id === currentThread}
+                state={activity[s.thread_id]}
+                disabled={disabled}
+                onSelect={onSelect}
+                onPin={onPin}
+                onRename={onRename}
+                onDelete={onDelete}
+              />
+            ))}
+          </CollapsibleGroup>
+        )}
       </div>
 
       <div className="p-2 border-t border-line/20">
         <AccountMenu conn={conn} model={model} onOpenSettings={onOpenSettings} />
       </div>
     </aside>
+  )
+}
+
+// 可折叠分组：标题浅色弱化（与条目区分层级），点击收起/展开，状态持久化
+function CollapsibleGroup({
+  label,
+  storageKey,
+  children,
+}: {
+  label: string
+  storageKey: string
+  children: React.ReactNode
+}) {
+  const key = `lumi-sidebar-collapsed-${storageKey}`
+  const [collapsed, setCollapsed] = useState(() => localStorage.getItem(key) === '1')
+  const toggle = () => {
+    setCollapsed((c) => {
+      localStorage.setItem(key, c ? '0' : '1')
+      return !c
+    })
+  }
+  return (
+    <div>
+      <button
+        onClick={toggle}
+        className="group/header w-full flex items-center gap-1 px-3 pt-2 pb-1.5 text-xs text-muted/60 hover:text-muted transition"
+      >
+        <span>{label}</span>
+        <ChevronRight
+          size={11}
+          className={`shrink-0 opacity-0 group-hover/header:opacity-100 transition-all ${collapsed ? '' : 'rotate-90'}`}
+        />
+      </button>
+      {!collapsed && children}
+    </div>
+  )
+}
+
+// 定时任务行：失败 ⚠ / 默认 ○ 图标 + 任务名 + 未读角标（或运行中脉冲点）
+function CronJobRow({
+  job,
+  active,
+  unread,
+  running,
+  onOpen,
+}: {
+  job: CronJob
+  active: boolean
+  unread: number
+  running: boolean
+  onOpen: (jobId: string) => void
+}) {
+  const { t } = useI18n()
+  return (
+    <button
+      onClick={() => onOpen(job.id)}
+      className={`w-full flex items-center gap-2 pl-3 pr-2.5 py-2 rounded-lg text-sm transition ${
+        active ? 'bg-surface text-ink' : 'text-ink/80 hover:bg-surface/60 hover:text-ink'
+      } ${job.enabled ? '' : 'opacity-55'}`}
+    >
+      {job.consecutive_errors > 0 && (
+        <AlertTriangle size={13} className="shrink-0 text-primary" />
+      )}
+      <span className="flex-1 min-w-0 truncate text-left">{job.name}</span>
+      {running ? (
+        <span
+          title={t('sidebar.processing')}
+          className="shrink-0 size-1.5 rounded-full bg-primary animate-pulse"
+        />
+      ) : (
+        unread > 0 && (
+          <span className="shrink-0 rounded-md bg-line/40 px-1.5 py-0.5 text-[11px] leading-none text-ink/80">
+            {t('cron.newBadge', { n: unread })}
+          </span>
+        )
+      )}
+    </button>
   )
 }
 
@@ -193,7 +312,7 @@ function SessionRow({
         disabled={disabled}
         title={session.first_message}
         className={`block w-full text-left pl-3 pr-8 py-2 rounded-lg truncate text-sm transition disabled:opacity-50 ${
-          active ? 'bg-surface text-ink' : 'text-muted hover:bg-surface/60 hover:text-ink'
+          active ? 'bg-surface text-ink' : 'text-ink/80 hover:bg-surface/60 hover:text-ink'
         }`}
       >
         {session.pinned && (

@@ -3,7 +3,6 @@
 from __future__ import annotations
 
 import asyncio
-import json
 from collections.abc import Awaitable, Callable, Sequence
 from datetime import datetime
 from pathlib import Path
@@ -16,10 +15,8 @@ from textual.widget import Widget
 
 from lumi import __version__
 from lumi.agents.cron.delivery import DeliveryManager, TUIDelivery
-from lumi.agents.cron.job_store import JobStore
-from lumi.agents.cron.run_log import RunLog
+from lumi.agents.cron.runtime import setup_cron
 from lumi.agents.cron.scheduler import Scheduler
-from lumi.agents.tools.providers.cron import init_cron_tool
 from lumi.agents.bridge import AgentBridge, BridgeEvent, build_skill_command_blocks
 from lumi.tui.run_state import RunContext, RunPhase
 from lumi.tui.subagent_tracker import SubagentTracker
@@ -265,37 +262,11 @@ class LumiApp(App):
 
         # 初始化定时任务子系统（按工作目录隔离）
         try:
-            cron_dir = self._cron_dir
-            cron_dir.mkdir(parents=True, exist_ok=True)
-            # 写入 workspace.meta 便于调试（非关键，失败不影响 cron）
-            try:
-                meta_file = cron_dir / "workspace.meta"
-                if not meta_file.exists():
-                    meta_file.write_text(
-                        json.dumps(
-                            {
-                                "path": self._workspace_dir,
-                                "created_at": datetime.now().isoformat(),
-                            },
-                            ensure_ascii=False,
-                        ),
-                        encoding="utf-8",
-                    )
-            except OSError:
-                logger.debug("workspace.meta 写入失败（非关键）", exc_info=True)
-            job_store = JobStore(cron_dir / "jobs.json")
-            run_log = RunLog(cron_dir / "runs")
             delivery = DeliveryManager()
             delivery.register(TUIDelivery(self))
-            scheduler = Scheduler(
-                job_store,
-                run_log,
-                delivery,
-                on_job_status=self._on_cron_job_status,
-            )
-            init_cron_tool(scheduler, job_store, run_log)
-            await scheduler.start()
-            self._scheduler = scheduler
+            runtime = setup_cron(delivery, on_job_status=self._on_cron_job_status)
+            await runtime.scheduler.start()
+            self._scheduler = runtime.scheduler
             self._delivery = delivery
             logger.info(
                 "[LumiApp] 定时任务子系统已启动 (workspace=%s)", self._workspace_id

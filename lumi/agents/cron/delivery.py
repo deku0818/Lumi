@@ -29,6 +29,8 @@ class ResultDelivery(ABC):
         *,
         started_at: datetime | None = None,
         duration_ms: int | None = None,
+        job_id: str = "",
+        status: str = "success",
     ) -> None:
         """将任务执行结果投递到目标通道。
 
@@ -37,6 +39,8 @@ class ResultDelivery(ABC):
             output: 任务执行结果文本。
             started_at: 任务开始执行的时间。
             duration_ms: 任务执行耗时（毫秒）。
+            job_id: 任务 ID。
+            status: 执行状态（success/failed/timeout）。
         """
         ...
 
@@ -81,6 +85,8 @@ class DeliveryManager:
         *,
         started_at: datetime | None = None,
         duration_ms: int | None = None,
+        job_id: str = "",
+        status: str = "success",
     ) -> None:
         """向所有已注册通道投递结果，单个通道失败不影响其他通道。
 
@@ -89,6 +95,8 @@ class DeliveryManager:
             output: 任务执行结果文本。
             started_at: 任务开始执行的时间。
             duration_ms: 任务执行耗时（毫秒）。
+            job_id: 任务 ID。
+            status: 执行状态（success/failed/timeout）。
         """
         for ch in self._channels:
             try:
@@ -97,6 +105,8 @@ class DeliveryManager:
                     output,
                     started_at=started_at,
                     duration_ms=duration_ms,
+                    job_id=job_id,
+                    status=status,
                 )
             except Exception:
                 logger.warning(
@@ -133,6 +143,8 @@ class TUIDelivery(ResultDelivery):
         *,
         started_at: datetime | None = None,
         duration_ms: int | None = None,
+        job_id: str = "",
+        status: str = "success",
     ) -> None:
         """将任务执行结果持久化到通知面板。
 
@@ -141,6 +153,8 @@ class TUIDelivery(ResultDelivery):
             output: 任务执行结果文本。
             started_at: 任务开始执行的时间。
             duration_ms: 任务执行耗时（毫秒）。
+            job_id: 任务 ID（通知面板未使用）。
+            status: 执行状态（通知面板未使用）。
         """
         if not hasattr(self._app, "add_notification"):
             logger.warning(
@@ -185,6 +199,8 @@ class APIDelivery(ResultDelivery):
         *,
         started_at: datetime | None = None,
         duration_ms: int | None = None,
+        job_id: str = "",
+        status: str = "success",
     ) -> None:
         """将任务执行结果投递给所有订阅者，无订阅者时缓存。
 
@@ -193,6 +209,8 @@ class APIDelivery(ResultDelivery):
             output: 任务执行结果文本。
             started_at: 任务开始执行的时间。
             duration_ms: 任务执行耗时（毫秒）。
+            job_id: 任务 ID。
+            status: 执行状态（success/failed/timeout）。
         """
         message: dict[str, str | int | None] = {
             "job_name": job_name,

@@ -179,14 +179,19 @@ class LumiAgent(BaseGraph):
 
     async def aclose(self) -> None:
         """关闭 checkpointer 连接，释放资源"""
-        if self.checkpointer is None:
-            return
-        conn = getattr(self.checkpointer, "conn", None)
-        if conn is not None and hasattr(conn, "close"):
-            try:
-                await conn.close()
-            except Exception as e:
-                logger.error(f"关闭 checkpointer 连接失败: {e}")
+        await close_checkpointer(self.checkpointer)
+
+
+async def close_checkpointer(checkpointer: BaseCheckpointSaver | None) -> None:
+    """关闭 checkpointer 底层连接，释放资源（LumiAgent 与 cron Scheduler 共用）。"""
+    if checkpointer is None:
+        return
+    conn = getattr(checkpointer, "conn", None)
+    if conn is not None and hasattr(conn, "close"):
+        try:
+            await conn.close()
+        except Exception as e:
+            logger.error(f"关闭 checkpointer 连接失败: {e}")
 
 
 async def create_checkpointer(
@@ -240,6 +245,7 @@ async def create_agent(
     model_name: str | None = None,
     checkpoint: CheckpointMode | None = None,
     permission_engine: PermissionEngine | None = None,
+    checkpointer: BaseCheckpointSaver | None = None,
 ) -> tuple["LumiAgent", LumiAgentContext]:
     """创建 LumiAgent 及其上下文的工厂函数
 
@@ -253,6 +259,8 @@ async def create_agent(
         checkpoint: 检查点模式，None 表示不使用 checkpointer
         permission_engine: 权限引擎实例，传入时复用（子 agent 场景），
                            None 时新建
+        checkpointer: 直接复用已有 checkpointer 实例（如 cron 调度器常驻连接），
+                      优先于 checkpoint 模式；调用方负责其生命周期
 
     Returns:
         (agent, context) 元组
@@ -273,7 +281,8 @@ async def create_agent(
         except Exception:
             logger.error("权限引擎创建失败，将以无权限模式运行", exc_info=True)
 
-    checkpointer = await create_checkpointer(checkpoint)
+    if checkpointer is None:
+        checkpointer = await create_checkpointer(checkpoint)
     agent = LumiAgent(checkpointer=checkpointer)
     context = LumiAgentContext(
         tools=tools,

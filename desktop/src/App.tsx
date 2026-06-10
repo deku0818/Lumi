@@ -21,6 +21,7 @@ import {
 import { Gateway, type ConnState } from './gateway'
 import type {
   ActiveModel,
+  CronJob,
   HistoryItem,
   Item,
   ProviderProfile,
@@ -32,6 +33,7 @@ import { ApprovalDialog } from './components/ApprovalDialog'
 import { ClarifyDialog, ASK_CANCELLED } from './components/ClarifyDialog'
 import { PlanDialog, PLAN_REJECTED } from './components/PlanDialog'
 import { Sidebar } from './components/Sidebar'
+import { CronPage, RunsRail } from './components/CronPage'
 import { ConfirmDialog } from './components/ConfirmDialog'
 import { SettingsDialog } from './components/SettingsDialog'
 import { ModelPicker } from './components/ModelPicker'
@@ -130,6 +132,33 @@ export default function App() {
   const { t } = useI18n()
   const [notify, setNotify] = useState(() => localStorage.getItem('lumi-notify') === '1')
   const [attachments, setAttachments] = useState<{ id: number; dataUrl: string }[]>([])
+  // 主区视图：聊天 / 定时任务管理页 / 任务会话视图（某任务的某次执行对话 + Runs 侧栏）
+  const [view, setView] = useState<'chat' | 'scheduled' | 'cronjob'>('chat')
+  const [cronRunning, setCronRunning] = useState<string[]>([]) // 运行中任务名
+  const [cronVersion, setCronVersion] = useState(0) // 递增触发 cron 数据刷新
+  const [cronJobs, setCronJobs] = useState<CronJob[]>([]) // 侧栏任务分组数据
+  const [activeCronJob, setActiveCronJob] = useState<string | null>(null) // 任务会话视图当前任务
+  const [cronRunThread, setCronRunThread] = useState<string | null>(null) // 当前选中的执行会话
+  // 每任务未读结果计数（任务完成而你不在看它时 +1），持久化到 localStorage
+  const [cronUnread, setCronUnread] = useState<Record<string, number>>(() => {
+    try {
+      return JSON.parse(localStorage.getItem('lumi-cron-unread') || '{}')
+    } catch {
+      return {}
+    }
+  })
+  // 已查看过的执行会话（Runs 栏蓝点 = 未读，点开即消失），持久化
+  const [readRuns, setReadRuns] = useState<Record<string, true>>(() => {
+    try {
+      return JSON.parse(localStorage.getItem('lumi-cron-read-runs') || '{}')
+    } catch {
+      return {}
+    }
+  })
+  const viewRef = useRef(view)
+  const activeCronJobRef = useRef(activeCronJob)
+  // cron 事件经 DesktopDelivery 广播到每条 WS 连接，多会话时同一结果会收到多次，按 key 去重
+  const seenCronRef = useRef(new Set<string>())
   const fileInputRef = useRef<HTMLInputElement>(null)
   const connsRef = useRef<Record<string, Gateway>>({})
   const activeRef = useRef('')
@@ -143,6 +172,18 @@ export default function App() {
   useEffect(() => {
     activeRef.current = active
   }, [active])
+  useEffect(() => {
+    viewRef.current = view
+  }, [view])
+  useEffect(() => {
+    activeCronJobRef.current = activeCronJob
+  }, [activeCronJob])
+  useEffect(() => {
+    localStorage.setItem('lumi-cron-unread', JSON.stringify(cronUnread))
+  }, [cronUnread])
+  useEffect(() => {
+    localStorage.setItem('lumi-cron-read-runs', JSON.stringify(readRuns))
+  }, [readRuns])
 
   // 开启通知：持久化 + 立即发一条测试通知验证（经主进程，见 preload.notify）。
   const toggleNotify = (v: boolean) => {
@@ -192,6 +233,32 @@ export default function App() {
     const { type, payload } = ev
     if (type === 'gateway.ready') {
       setModel((m) => m || payload.model || '')
+      return
+    }
+    // cron 事件是进程级广播（与会话无关），在 session 路由之前单独处理
+    if (type === 'cron.running') {
+      setCronRunning(payload.names ?? [])
+      return
+    }
+    if (type === 'cron.result') {
+      const key = `${payload.job_id}:${payload.started_at}`
+      if (seenCronRef.current.has(key)) return
+      seenCronRef.current.add(key)
+      setCronVersion((v) => v + 1)
+      // 正在看该任务的会话视图时不算未读，其余情况该任务未读 +1
+      const viewingThisJob =
+        viewRef.current === 'cronjob' && activeCronJobRef.current === payload.job_id
+      if (!viewingThisJob) {
+        setCronUnread((u) => ({ ...u, [payload.job_id]: (u[payload.job_id] ?? 0) + 1 }))
+      }
+      // 正在看该任务且窗口聚焦时不打扰，其余情况按通知开关弹系统通知
+      if (notifyRef.current && (!viewingThisJob || !document.hasFocus())) {
+        const t = tRef.current
+        void window.lumi.notify?.({
+          title: payload.status === 'success' ? t('notify.cronDone') : t('notify.cronFailed'),
+          body: `${payload.job_name}: ${String(payload.output ?? '').slice(0, 80)}`,
+        })
+      }
       return
     }
     const sid = ev.session_id ?? ''
@@ -435,6 +502,8 @@ export default function App() {
     Promise.resolve({ ok: false, error: t('sidebar.disconnected') })
 
   const newSession = async () => {
+    setView('chat')
+    setConn('connecting')
     const tid = await openConnection(null)
     setActive(tid)
     setConn('open')
@@ -442,15 +511,88 @@ export default function App() {
   }
 
   const selectSession = async (tid: string) => {
+    setView('chat')
     if (tid === active) return
-    if (!connsRef.current[tid]) await openConnection(tid)
+    if (!connsRef.current[tid]) {
+      setConn('connecting')
+      await openConnection(tid)
+    }
     setActive(tid)
     setConn('open')
   }
 
-  // 会话管理 RPC 操作全局 checkpoint/元数据，与连接当前 thread 无关，任一活跃连接皆可。
-  const anyGw = () =>
-    connsRef.current[activeRef.current] ?? Object.values(connsRef.current)[0]
+  const openScheduled = () => {
+    setView('scheduled')
+  }
+
+  // 拉取任务列表：唯一数据源，侧栏分组与管理页共用（CRUD 后经 onRefresh 刷新）
+  const refreshCronJobs = useCallback(() => {
+    anyGw()
+      ?.listCronJobs()
+      .then((r) => {
+        const jobs = r.jobs ?? []
+        setCronJobs(jobs)
+        // 回收已删任务的未读计数，避免 localStorage 残留
+        setCronUnread((u) => {
+          const ids = new Set(jobs.map((j) => j.id))
+          const stale = Object.keys(u).filter((k) => !ids.has(k))
+          if (stale.length === 0) return u
+          const next = { ...u }
+          for (const k of stale) delete next[k]
+          return next
+        })
+      })
+      .catch(() => {})
+  }, [])
+
+  useEffect(() => {
+    if (conn === 'open') refreshCronJobs()
+  }, [conn, cronVersion, refreshCronJobs])
+
+  // 在任务会话视图内切换到某次执行的会话（不改变 view），并标记该次执行为已读。
+  // 已读集合封顶 500 条（对象按插入序，砍最旧的），避免 localStorage 无限增长。
+  const openRunThread = async (tid: string) => {
+    setCronRunThread(tid)
+    setReadRuns((r) => {
+      if (r[tid]) return r
+      const next = { ...r, [tid]: true as const }
+      const keys = Object.keys(next)
+      for (const k of keys.slice(0, Math.max(0, keys.length - 500))) delete next[k]
+      return next
+    })
+    if (!connsRef.current[tid]) {
+      // 连接建立期间以 connecting 状态示意（sidecar 不可用时指示灯保持黄色而非静默无反应）
+      setConn('connecting')
+      await openConnection(tid)
+    }
+    setActive(tid)
+    setConn('open')
+  }
+
+  // 打开某任务的会话视图：默认选中最近一次有会话的执行
+  const openCronJob = async (jobId: string, threadId?: string) => {
+    setView('cronjob')
+    setActiveCronJob(jobId)
+    setCronUnread((u) => (u[jobId] ? { ...u, [jobId]: 0 } : u))
+    let tid = threadId
+    if (!tid) {
+      try {
+        const r = await anyGw()?.listCronRuns(jobId)
+        tid = r?.runs.find((x) => x.thread_id)?.thread_id
+      } catch {
+        /* 列表拉取失败时显示空态 */
+      }
+    }
+    setCronRunThread(tid ?? null)
+    if (tid) await openRunThread(tid)
+  }
+
+  // 会话管理 / cron RPC 操作全局资源，与连接当前 thread 无关，任一活跃连接皆可。
+  // 稳定引用（useCallback []）：作为 CronPage 的 api prop，避免每次渲染触发其刷新。
+  const anyGw = useCallback(
+    () => connsRef.current[activeRef.current] ?? Object.values(connsRef.current)[0],
+    [],
+  )
 
   const pinSession = (tid: string, pinned: boolean) => {
     anyGw()?.pinSession(tid, pinned).then(refreshSessions).catch(() => {})
@@ -660,7 +802,7 @@ export default function App() {
         />
       )}
       <div
-        className="bg-surface rounded-3xl border border-line/40 focus-within:border-primary/40 transition-colors"
+        className="bg-surface rounded-3xl border border-line/40 focus-within:border-primary/40 transition-colors overflow-hidden"
         onDragOver={(e) => e.preventDefault()}
         onDrop={onDropImages}
       >
@@ -753,13 +895,20 @@ export default function App() {
     <div className="h-full flex">
       <Sidebar
         sessions={sessions}
-        currentThread={active}
+        currentThread={view === 'chat' ? active : ''}
         conn={conn}
         model={model}
         activity={activity}
         disabled={false}
+        scheduledActive={view === 'scheduled'}
+        cronJobs={cronJobs}
+        cronUnread={cronUnread}
+        cronRunning={cronRunning}
+        activeCronJob={view === 'cronjob' ? activeCronJob : null}
+        onOpenCronJob={(id) => void openCronJob(id)}
         onSelect={selectSession}
         onNew={newSession}
+        onOpenScheduled={openScheduled}
         onOpenSettings={() => setShowSettings(true)}
         onPin={pinSession}
         onRename={renameSession}
@@ -768,47 +917,77 @@ export default function App() {
 
       <main className="flex-1 flex flex-col min-w-0">
         <div className="h-9 app-drag shrink-0" />
-        {hasMessages ? (
-          <>
-            <div ref={scrollRef} className="flex-1 overflow-auto">
-              <div className="max-w-3xl mx-auto w-full px-6 py-8 space-y-5">
-                {segments.map((seg) =>
-                  seg.kind === 'tools' ? (
-                    <ToolGroup key={`g${seg.tools[0].id}`} tools={seg.tools} />
-                  ) : (
-                    <ItemView key={seg.item.id} item={seg.item} />
-                  ),
-                )}
-                {/* 审批/澄清/计划：会话内内联渲染，切走时随会话留在原处（不再是全局遮罩） */}
-                {approval && <ApprovalDialog data={approval} onDecide={decide} />}
-                {clarify && (
-                  <ClarifyDialog
-                    data={clarify}
-                    onSubmit={(answer) => resumeWith(answer, 'clarify')}
-                    onCancel={() => resumeWith(ASK_CANCELLED, 'clarify')}
-                  />
-                )}
-                {plan && (
-                  <PlanDialog
-                    data={plan}
-                    onApprove={() => resumeWith('approved', 'plan')}
-                    onReject={() => resumeWith(PLAN_REJECTED, 'plan')}
-                  />
-                )}
-                {running && !streaming && !approval && !clarify && !plan && <Thinking />}
-              </div>
-            </div>
-            <div className="px-6 pb-5">
-              <div className="max-w-3xl mx-auto w-full">{composer(t('composer.reply'))}</div>
-            </div>
-          </>
+        {view === 'scheduled' ? (
+          <CronPage
+            api={anyGw}
+            jobs={cronJobs}
+            runningNames={cronRunning}
+            version={cronVersion}
+            onOpenRun={(tid, jid) => void openCronJob(jid, tid)}
+            onRefresh={refreshCronJobs}
+          />
         ) : (
-          <div className="flex-1 flex flex-col items-center justify-center px-6 -mt-8">
-            <div className="mb-8 flex items-center gap-2.5 select-none">
-              <span className="text-primary text-3xl">✦</span>
-              <span className="serif text-3xl">Lumi</span>
+          <div className="flex-1 flex min-h-0">
+            <div className="flex-1 flex flex-col min-w-0">
+              {view === 'cronjob' && !cronRunThread ? (
+                // 任务还没有可查看的执行会话：显示空态，避免把消息误发进无关会话
+                <div className="flex-1 grid place-items-center text-sm text-muted select-none">
+                  {t('cron.noRuns')}
+                </div>
+              ) : hasMessages ? (
+                <>
+                  <div ref={scrollRef} className="flex-1 overflow-auto">
+                    <div className="max-w-3xl mx-auto w-full px-6 py-8 space-y-5">
+                      {segments.map((seg) =>
+                        seg.kind === 'tools' ? (
+                          <ToolGroup key={`g${seg.tools[0].id}`} tools={seg.tools} />
+                        ) : (
+                          <ItemView key={seg.item.id} item={seg.item} />
+                        ),
+                      )}
+                      {/* 审批/澄清/计划：会话内内联渲染，切走时随会话留在原处（不再是全局遮罩） */}
+                      {approval && <ApprovalDialog data={approval} onDecide={decide} />}
+                      {clarify && (
+                        <ClarifyDialog
+                          data={clarify}
+                          onSubmit={(answer) => resumeWith(answer, 'clarify')}
+                          onCancel={() => resumeWith(ASK_CANCELLED, 'clarify')}
+                        />
+                      )}
+                      {plan && (
+                        <PlanDialog
+                          data={plan}
+                          onApprove={() => resumeWith('approved', 'plan')}
+                          onReject={() => resumeWith(PLAN_REJECTED, 'plan')}
+                        />
+                      )}
+                      {running && !streaming && !approval && !clarify && !plan && <Thinking />}
+                    </div>
+                  </div>
+                  <div className="px-6 pb-5">
+                    <div className="max-w-3xl mx-auto w-full">{composer(t('composer.reply'))}</div>
+                  </div>
+                </>
+              ) : (
+                <div className="flex-1 flex flex-col items-center justify-center px-6 -mt-8">
+                  <div className="mb-8 flex items-center gap-2.5 select-none">
+                    <span className="text-primary text-3xl">✦</span>
+                    <span className="serif text-3xl">Lumi</span>
+                  </div>
+                  <div className="w-full max-w-2xl">{composer(t('composer.empty'))}</div>
+                </div>
+              )}
             </div>
-            <div className="w-full max-w-2xl">{composer(t('composer.empty'))}</div>
+            {view === 'cronjob' && activeCronJob && (
+              <RunsRail
+                api={anyGw}
+                jobId={activeCronJob}
+                activeThread={cronRunThread}
+                readRuns={readRuns}
+                version={cronVersion}
+                onPick={(tid) => void openRunThread(tid)}
+              />
+            )}
           </div>
         )}
       </main>
@@ -869,7 +1048,7 @@ function ItemView({ item }: { item: Exclude<Item, { kind: 'tool' }> }) {
           </div>
         )}
         {item.text && (
-          <div className="bg-surface rounded-3xl rounded-br-lg px-4 py-2.5 max-w-[80%] whitespace-pre-wrap">
+          <div className="selectable bg-surface rounded-3xl rounded-br-lg px-4 py-2.5 max-w-[80%] whitespace-pre-wrap">
             {item.text}
           </div>
         )}
@@ -892,7 +1071,9 @@ function ItemView({ item }: { item: Exclude<Item, { kind: 'tool' }> }) {
     )
   }
   return (
-    <div className="text-sm text-error/80 bg-error/5 rounded-xl px-3.5 py-2.5">{item.text}</div>
+    <div className="selectable text-sm text-error/80 bg-error/5 rounded-xl px-3.5 py-2.5">
+      {item.text}
+    </div>
   )
 }
 

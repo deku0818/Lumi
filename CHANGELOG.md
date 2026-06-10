@@ -1,5 +1,27 @@
 # Changelog
 
+## [0.1.0a13] - 2026-06-10
+
+### Added
+- Desktop 定时任务管理 — 管理页（卡片网格 + 新建 / 编辑 / 删除 / 暂停 / 立即运行 + 详情）+ 侧栏「定时任务」分组（未读结果角标、运行中脉冲点、连续失败 ⚠）；分组与「最近」均可折叠（状态持久化）
+- 任务会话视图 — 点击侧栏任务直接打开最近一次执行的完整对话，右侧 Runs 栏切换历次执行（蓝点 = 未读，点开即消失），composer 直接续聊
+- 执行即会话 — cron 每次执行落在独立 `cron-` thread（Scheduler 常驻 checkpointer，`create_agent` 支持复用实例），超时/失败也保留现场；保留最近 50 次（`MAX_CRON_RUN_THREADS`），删除任务级联清理执行日志与全部会话 checkpoint；cron 线程不进会话列表（按 `CRON_THREAD_PREFIX` 过滤，续聊不"转正"）
+- WS 定时任务 RPC — `list_cron_jobs` / `create_cron_job` / `update_cron_job` / `delete_cron_job` / `toggle_cron_job` / `run_cron_job` / `list_cron_runs`（run 含 `thread_id` 可跳转续聊）+ 进程级广播事件 `cron.result` / `cron.running`
+- serve 接入 cron 子系统 — lifespan 经 `setup_cron()` 工厂（TUI 共用）启动调度器，`lumi/server/desktop_delivery.py` 把任务结果实时推给所有 WS 连接 + 系统通知
+- 测试 — `tests/server/test_cron_rpc.py`（RPC CRUD / 校验 / DesktopDelivery 广播）、RunLog 保留策略与级联删除用例
+
+### Fixed
+- 会话切换 / 任务会话打开期间显示 `connecting` 状态 — sidecar 不可用时指示灯保持黄色而非静默无反应
+- `update_cron_job` 空字符串字段从静默忽略改为显式报错（与 create 校验一致）
+- 用户消息气泡、错误提示、任务内容等补充 `selectable` — 修复全局 `user-select: none` 导致发送内容无法选中复制
+- composer 输入框滚动条不再超出 24px 圆角容器（容器裁剪 + 轨道留白 + 滑块内缩）
+- Button `destructive` variant 改为实底红 — 删除确认弹窗的「删除」不再呈现为类似禁用态的弱化样式
+
+### Changed
+- `tui/app.py` cron 初始化收敛为 `lumi/agents/cron/runtime.setup_cron()` 工厂调用
+- `RunLog` 新增 `get_all()` / `prune_thread_ids()` / `delete_log()`，复用 `job_store._atomic_write`；`close_checkpointer` 抽到 graph.py 共用；线程删除并发化（`asyncio.gather`）
+- 侧栏条目文字加深（`text-ink/80`）、分组标题变浅，层级区分明确
+
 ## [0.1.0a12] - 2026-06-10
 
 ### Added

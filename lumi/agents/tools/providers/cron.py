@@ -152,6 +152,8 @@ async def _handle_delete(job_id: str) -> str:
 
     scheduler.remove_job(job_id)
     await job_store.delete(job_id)
+    # 级联清理执行日志与历史会话 checkpoint，避免孤儿数据
+    await scheduler.purge_job_data(job_id)
     return f"✅ 任务已删除：{job.name}（ID: {job_id}）"
 
 

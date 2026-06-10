@@ -11,11 +11,12 @@ import json
 import logging
 import os
 import tempfile
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from datetime import datetime
 from pathlib import Path
 from typing import Literal
 
+from lumi.agents.cron.job_store import _atomic_write
 from lumi.utils.constants import MAX_RUN_LOG_FILE_SIZE
 
 logger = logging.getLogger("Lumi")
@@ -34,6 +35,8 @@ class RunRecord:
         duration_ms: 执行耗时（毫秒）。
         output_summary: 输出摘要，截取前 500 字符。
         error: 错误信息，成功时为空字符串。
+        thread_id: 本次执行的会话线程 ID（cron- 前缀），可在前端跳转续聊；
+                   空串表示无会话（checkpoint 未启用或已被保留策略清理）。
     """
 
     job_id: str
@@ -44,6 +47,7 @@ class RunRecord:
     duration_ms: int
     output_summary: str
     error: str = ""
+    thread_id: str = ""
 
     def to_dict(self) -> dict[str, object]:
         """序列化为字典，用于 JSON 存储。"""
@@ -56,6 +60,7 @@ class RunRecord:
             "duration_ms": self.duration_ms,
             "output_summary": self.output_summary,
             "error": self.error,
+            "thread_id": self.thread_id,
         }
 
     @staticmethod
@@ -77,6 +82,7 @@ class RunRecord:
             duration_ms=data["duration_ms"],
             output_summary=data["output_summary"],
             error=data.get("error", ""),
+            thread_id=data.get("thread_id", ""),
         )
 
 
@@ -194,15 +200,14 @@ class RunLog:
                 continue
         return None
 
-    async def get_recent(self, job_id: str, limit: int = 20) -> list[RunRecord]:
-        """获取指定任务最近 N 条执行记录，按时间倒序。
+    async def get_all(self, job_id: str) -> list[RunRecord]:
+        """获取指定任务全部执行记录，按 started_at 倒序。
 
         Args:
             job_id: 任务 ID。
-            limit: 返回的最大记录数，默认 20。
 
         Returns:
-            最近的执行记录列表，按 started_at 倒序排列。
+            全部执行记录列表（文件有 2MB 裁剪上限，读取有界）。
         """
         path = _log_path(self._base_dir, job_id)
         lines = await asyncio.to_thread(_read_lines_sync, path)
@@ -219,6 +224,54 @@ class RunLog:
                 logger.warning("跳过无法解析的日志行: %s", line[:100])
                 continue
 
-        # 按 started_at 倒序排列，取最近 limit 条
         records.sort(key=lambda r: r.started_at, reverse=True)
-        return records[:limit]
+        return records
+
+    async def get_recent(self, job_id: str, limit: int = 20) -> list[RunRecord]:
+        """获取指定任务最近 N 条执行记录，按时间倒序。
+
+        Args:
+            job_id: 任务 ID。
+            limit: 返回的最大记录数，默认 20。
+
+        Returns:
+            最近的执行记录列表，按 started_at 倒序排列。
+        """
+        return (await self.get_all(job_id))[:limit]
+
+    async def prune_thread_ids(self, job_id: str, keep: int) -> list[str]:
+        """会话保留策略：只保留最近 keep 条记录的 thread_id，返回被清理的部分。
+
+        记录本身保留（执行历史仍可见），仅清空超出部分的 thread_id 并原子写回，
+        调用方负责删除对应的 checkpoint 线程。重复调用幂等（已清空的不再返回）。
+
+        Args:
+            job_id: 任务 ID。
+            keep: 保留会话的最近记录条数。
+
+        Returns:
+            被清理的 thread_id 列表（按时间从新到旧）。
+        """
+        records = await self.get_all(job_id)
+        pruned = [r.thread_id for r in records[keep:] if r.thread_id]
+        if not pruned:
+            return []
+
+        kept: list[RunRecord] = records[:keep] + [
+            replace(r, thread_id="") for r in records[keep:]
+        ]
+        # get_recent 是倒序，写回按时间正序（与追加写入的自然顺序一致）
+        content = "".join(
+            json.dumps(r.to_dict(), ensure_ascii=False) + "\n" for r in reversed(kept)
+        )
+        path = _log_path(self._base_dir, job_id)
+        await asyncio.to_thread(_atomic_write, path, content)
+        return pruned
+
+    async def delete_log(self, job_id: str) -> None:
+        """删除指定任务的整个日志文件（任务级联删除用）。"""
+        path = _log_path(self._base_dir, job_id)
+        try:
+            await asyncio.to_thread(path.unlink)
+        except FileNotFoundError:
+            pass

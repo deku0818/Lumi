@@ -19,13 +19,20 @@ from apscheduler.triggers.date import DateTrigger
 from langchain_core.messages import HumanMessage
 from langchain_core.runnables.config import RunnableConfig
 
+from langgraph.checkpoint.base import BaseCheckpointSaver
+
 from lumi.agents.cron.delivery import DeliveryManager
 from lumi.agents.cron.job_store import JobStore
 from lumi.agents.cron.models import Job, ScheduleType
 from lumi.agents.cron.run_log import RunLog, RunRecord
-from lumi.utils.constants import CRON_BACKOFF_INTERVALS, MAX_CRON_RETRIES
+from lumi.utils.constants import (
+    CRON_BACKOFF_INTERVALS,
+    MAX_CRON_RETRIES,
+    MAX_CRON_RUN_THREADS,
+)
 from lumi.utils.logger import logger
 from lumi.utils.read_config import get_config
+from lumi.utils.thread_id import CRON_THREAD_PREFIX, generate_thread_id
 
 
 def _is_transient_error(exc: BaseException) -> bool:
@@ -76,12 +83,26 @@ class Scheduler:
         self._running_job_names: list[str] = []
         self._on_job_status = on_job_status
         self._compensate_task: asyncio.Task[None] | None = None
+        # 常驻 checkpointer：所有 run 共用一条连接，每次执行独立 cron- thread，
+        # 使执行过程像普通会话一样可回看、可续聊。初始化失败时退化为无会话模式。
+        self._checkpointer: BaseCheckpointSaver | None = None
 
     async def start(self) -> None:
         """从 JobStore 加载所有启用的任务，注册到 APScheduler 并启动调度器。
 
         启动后检查是否有错过的任务需要补偿执行。
         """
+        try:
+            from lumi.agents.core.graph import create_checkpointer
+
+            self._checkpointer = await create_checkpointer(
+                get_config().config.agents.checkpoint
+            )
+        except Exception:
+            logger.warning(
+                "cron checkpointer 初始化失败，执行记录将不带会话", exc_info=True
+            )
+
         jobs = await self._job_store.load()
         for job in jobs:
             if not job.enabled:
@@ -196,6 +217,13 @@ class Scheduler:
                 logger.warning("任务执行超时，已取消: %s", task.get_name())
 
         self._running_tasks.clear()
+
+        if self._checkpointer is not None:
+            from lumi.agents.core.graph import close_checkpointer
+
+            await close_checkpointer(self._checkpointer)
+            self._checkpointer = None
+
         logger.info("Scheduler 已停止")
 
     def _register_job(self, job: Job) -> None:
@@ -264,6 +292,18 @@ class Scheduler:
         except JobLookupError:
             pass  # job may not be registered (disabled at startup)
 
+    def next_run_time(self, job_id: str) -> datetime | None:
+        """查询任务在 APScheduler 中的下次触发时间。
+
+        Args:
+            job_id: 任务 ID。
+
+        Returns:
+            下次触发时间；任务未注册（如已暂停）时返回 None。
+        """
+        aps_job = self._aps.get_job(job_id)
+        return getattr(aps_job, "next_run_time", None) if aps_job else None
+
     def pause_job(self, job_id: str) -> None:
         """暂停 APScheduler 中的任务。
 
@@ -327,7 +367,7 @@ class Scheduler:
         self._notify_job_status()
 
         try:
-            output, status, error, caught_exc = await self._invoke_agent(job)
+            output, status, error, caught_exc, thread_id = await self._invoke_agent(job)
             await self._handle_retry(job, caught_exc)
 
             finished_at = datetime.now()
@@ -342,6 +382,7 @@ class Scheduler:
                 duration_ms=duration_ms,
                 output_summary=output[:500],
                 error=error,
+                thread_id=thread_id,
             )
             await self._deliver_and_log(job, record, output)
             return record
@@ -352,12 +393,21 @@ class Scheduler:
                 logger.warning("任务 %s [%s] 不在 running 列表中", job.name, job.id)
             self._notify_job_status()
 
-    async def _invoke_agent(self, job: Job) -> tuple[str, str, str, Exception | None]:
-        """创建 Agent 子会话并执行任务 prompt，返回 (output, status, error, exception)。"""
+    async def _invoke_agent(
+        self, job: Job
+    ) -> tuple[str, str, str, Exception | None, str]:
+        """创建 Agent 子会话并执行任务 prompt。
+
+        Returns:
+            (output, status, error, exception, thread_id) 元组。checkpointer 可用时
+            每次执行落在独立的 cron- thread 中（像普通会话一样可回看、可续聊），
+            超时/失败的执行也保留中断前的现场。
+        """
         from lumi.agents.core.graph import create_agent
 
+        thread_id = generate_thread_id(CRON_THREAD_PREFIX) if self._checkpointer else ""
         try:
-            agent, context = await create_agent(checkpoint=None)
+            agent, context = await create_agent(checkpointer=self._checkpointer)
             inputs = {
                 "messages": [HumanMessage(content=job.prompt)],
                 "tool_mode": "privileged",
@@ -365,21 +415,29 @@ class Scheduler:
             config = RunnableConfig(
                 recursion_limit=get_config().config.agents.recursion_limit,
             )
+            if thread_id:
+                config["configurable"] = {"thread_id": thread_id}
             response = await asyncio.wait_for(
                 agent.graph.ainvoke(inputs, config=config, context=context),
                 timeout=self._execution_timeout,
             )
             output = self._extract_output(response)
-            return output, "success", "", None
+            return output, "success", "", None, thread_id
 
         except asyncio.TimeoutError as exc:
             logger.warning("任务执行超时: %s [%s]", job.name, job.id)
-            return "", "timeout", f"任务执行超时（{self._execution_timeout}s）", exc
+            return (
+                "",
+                "timeout",
+                f"任务执行超时（{self._execution_timeout}s）",
+                exc,
+                thread_id,
+            )
         except asyncio.CancelledError:
             raise
         except Exception as exc:
             logger.exception("任务执行失败: %s [%s]", job.name, job.id)
-            return "", "failed", f"{type(exc).__name__}: {exc}", exc
+            return "", "failed", f"{type(exc).__name__}: {exc}", exc, thread_id
 
     @staticmethod
     def _extract_output(response: dict) -> str:
@@ -423,11 +481,23 @@ class Scheduler:
         record: RunRecord,
         output: str,
     ) -> None:
-        """记录执行日志、广播结果、清理一次性任务。"""
+        """记录执行日志、广播结果、应用会话保留策略、清理一次性任务。"""
         try:
             await self._run_log.append(record)
         except Exception:
             logger.warning("记录执行日志失败: %s [%s]", job.name, job.id, exc_info=True)
+
+        # 会话保留策略：只保留最近 N 次执行的 checkpoint，超出部分清掉
+        if self._checkpointer is not None:
+            try:
+                pruned = await self._run_log.prune_thread_ids(
+                    job.id, keep=MAX_CRON_RUN_THREADS
+                )
+                await asyncio.gather(*(self._delete_thread(t) for t in pruned))
+            except Exception:
+                logger.warning(
+                    "清理历史执行会话失败: %s [%s]", job.name, job.id, exc_info=True
+                )
 
         broadcast_text = (
             output
@@ -440,6 +510,8 @@ class Scheduler:
                 broadcast_text,
                 started_at=record.started_at,
                 duration_ms=record.duration_ms,
+                job_id=job.id,
+                status=record.status,
             )
         except Exception:
             logger.warning("广播结果失败: %s [%s]", job.name, job.id, exc_info=True)
@@ -452,6 +524,29 @@ class Scheduler:
                 logger.warning(
                     "删除一次性任务失败: %s [%s]", job.name, job.id, exc_info=True
                 )
+
+    async def purge_job_data(self, job_id: str) -> None:
+        """级联清理任务的执行日志与全部会话 checkpoint（删除任务时调用）。
+
+        Args:
+            job_id: 要清理的任务 ID。
+        """
+        records = await self._run_log.get_all(job_id)
+        await asyncio.gather(
+            *(self._delete_thread(r.thread_id) for r in records if r.thread_id)
+        )
+        await self._run_log.delete_log(job_id)
+
+    async def _delete_thread(self, thread_id: str) -> None:
+        """删除单个会话线程的 checkpoint，失败仅告警不中断。"""
+        if self._checkpointer is None or not hasattr(
+            self._checkpointer, "adelete_thread"
+        ):
+            return
+        try:
+            await self._checkpointer.adelete_thread(thread_id)
+        except Exception:
+            logger.warning("删除会话 checkpoint 失败: %s", thread_id, exc_info=True)
 
     # ------------------------------------------------------------------
     # Helpers

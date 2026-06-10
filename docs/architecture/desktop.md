@@ -45,8 +45,9 @@ server → client   {method:"event", params:<wire event>}       # 流式事件
   - 流式：`send_message`、`resume`、`run_command`（运行斜杠命令）。
   - 会话：`list_sessions`、`new_session`、`switch_session`、`load_history`、`pin_session`、`rename_session`、`delete_session`。
   - 模型供应商：`list_providers`、`test_provider`、`set_provider`、`save_provider`、`delete_provider`。
+  - 定时任务：`list_cron_jobs`、`create/update/delete/toggle_cron_job`、`run_cron_job`、`list_cron_runs`。
   - 其它：`stop`（中止当前流式轮）、`list_commands`（拉取斜杠命令）。
-- **wire 事件**：`message.*`、`tool.*`（含 `tool.generating`）、`clarify/approval/plan.request`、`turn.complete`、`error`，加握手帧 `gateway.ready`。
+- **wire 事件**：`message.*`、`tool.*`（含 `tool.generating`）、`clarify/approval/plan.request`、`turn.complete`、`error`，加握手帧 `gateway.ready` 与 cron 广播 `cron.result` / `cron.running`（进程级，不属于任何会话）。
 
 事件名与方法名都来自 [`protocol/events.json`](../../protocol/events.json) 单一事实源：TS 端 import derive 类型，Python 端由 `tests/server/test_protocol_contract.py` 锁住一致性。
 
@@ -76,6 +77,16 @@ server → client   {method:"event", params:<wire event>}       # 流式事件
 - **前端**：`SettingsDialog` + `ProvidersPanel` 完成增 / 删 / 改 / 测试；`ModelPicker`（顶栏）做快速切换。
 - **TUI 对应**：`/model` 命令打开 `ModelScreen`（`lumi/tui/screens/model_screen.py`）——把「供应商 × 模型」拍平成列表，**仅切换**；增删改在桌面端配置页完成，二者共享 `~/.lumi/providers.json`。
 
+## 定时任务管理
+
+cron 子系统是进程级资源（与会话无关）：serve 在 lifespan 中经 `lumi/agents/cron/runtime.setup_cron()`（TUI 共用的装配工厂）启动调度器，RPC 实现在 `lumi/server/cron_rpc.py`，不经 AgentBridge。内部机制（执行即会话、保留策略、级联删除）见 [`cron.md`](cron.md)。
+
+- **结果广播**：`lumi/server/desktop_delivery.py` 的 `DesktopDelivery` 把任务结果（`cron.result`）与运行状态（`cron.running`）推给所有活跃 WS 连接——wire 信封格式属 server 层，agents 层只定义 `ResultDelivery` 抽象。无连接时不缓存：结果已落 RunLog，重连后经 `list_cron_runs` 查询。
+- **前端结构**（`CronPage.tsx` + `App.tsx`）：
+  - 侧栏「定时任务」分组（任务名 + 未读角标 + 运行中脉冲点）→ 点击进入**任务会话视图**：主区为最近一次执行的完整对话（composer 可续聊），右侧 `RunsRail` 列历次执行，蓝点 = 未读、点开即消失。
+  - 顶部「定时任务」导航入口 → 管理页（卡片网格 + 新建 / 编辑 / 删除 + 详情）。
+  - App 持有 cron 数据单一来源（jobs / 未读计数 / 已读集合，后两者持久化 localStorage）；cron 事件广播到每条 WS 连接，前端按 `job_id:started_at` 去重。
+
 ## 桌面通知
 
 回复完成与等待用户处理的中断（审批 / 提问 / 计划）会触发系统通知，**仅在该会话非当前活动、或窗口未聚焦时**弹出（你正盯着时不打扰）。通知经主进程 `Notification`（`electron/main.cjs`）发出——renderer 的 HTML5 `Notification` 在 macOS dev 下不可靠；点击通知经 `lumi:focus` IPC 把窗口带回前台并切到对应会话。判定用 `document.hasFocus()` 而非 `document.hidden`（切到别的应用时窗口仍可见，`hidden` 恒为 false）。
@@ -93,9 +104,12 @@ server → client   {method:"event", params:<wire event>}       # 流式事件
 | `desktop/src/App.tsx` | 会话状态机、事件路由、聊天流渲染 |
 | `desktop/src/components/Sidebar.tsx` | 会话列表 + 右键菜单 + 内联重命名 |
 | `desktop/src/components/{SettingsDialog,ProvidersPanel,ModelPicker}.tsx` | 模型供应商配置 + 快速切换 |
+| `desktop/src/components/CronPage.tsx` | 定时任务管理页 + 任务会话视图 Runs 栏 |
 | `desktop/src/i18n.ts` | 国际化（中文 / English） |
 | `lumi/server/ws.py` | FastAPI WS 端点 + RPC dispatch |
 | `lumi/server/protocol.py` | BridgeEvent → wire 序列化 |
+| `lumi/server/cron_rpc.py` | 定时任务 RPC 方法实现 |
+| `lumi/server/desktop_delivery.py` | cron 结果 → WS 广播投递通道 |
 | `lumi/agents/bridge.py` | LangGraph ↔ 前端中立桥接层 |
 | `lumi/agents/runtime/provider_store.py` | 模型供应商 profile 持久化（`~/.lumi/providers.json`） |
 | `lumi/tui/screens/model_screen.py` | TUI `/model` 模型切换弹窗 |

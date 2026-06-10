@@ -235,7 +235,7 @@ async def test_execute_job_creates_agent_and_returns_success(
     assert record.duration_ms >= 0
 
     # 验证 create_agent 被正确调用
-    mock_create.assert_awaited_once_with(checkpoint=None)
+    mock_create.assert_awaited_once_with(checkpointer=None)
 
 
 async def test_execute_job_sets_tool_mode_privileged(scheduler: Scheduler) -> None:
@@ -640,7 +640,7 @@ async def test_trigger_executes_job_immediately(
         await asyncio.sleep(0.1)
 
     # 验证 Agent 被调用
-    mock_create.assert_awaited_once_with(checkpoint=None)
+    mock_create.assert_awaited_once_with(checkpointer=None)
 
     # 验证执行记录已写入 RunLog
     records = await scheduler._run_log.get_recent(job.id)

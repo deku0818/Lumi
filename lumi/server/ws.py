@@ -19,6 +19,13 @@
         pin_session     params: {thread_id, pinned}                       → {thread_id, pinned}
         rename_session  params: {thread_id, title}                        → {thread_id, title}
         delete_session  params: {thread_id}                               → {thread_id}
+        list_cron_jobs  params: {}                                        → {jobs:[...]}  # job 含 next_run
+        create_cron_job params: {name, schedule, prompt}                  → {job}
+        update_cron_job params: {job_id, name?, schedule?, prompt?}       → {job}
+        delete_cron_job params: {job_id}                                  → {job_id}
+        toggle_cron_job params: {job_id, enabled}                         → {job}
+        run_cron_job    params: {job_id}                                  → {ok}  # 异步触发，结果经 cron.result
+        list_cron_runs  params: {job_id, limit?}                          → {runs:[...]}
     server → client
         事件帧  {method: "event", params: <wire event>}   # 见 protocol.py
         响应帧  {id, result}  或  {id, error: {message}}
@@ -37,6 +44,10 @@ from dataclasses import dataclass, field
 from fastapi import FastAPI, WebSocket, WebSocketDisconnect
 
 from lumi.agents.bridge import AgentBridge, EventKind
+from lumi.agents.cron.delivery import DeliveryManager
+from lumi.agents.cron.runtime import setup_cron
+from lumi.server.cron_rpc import CRON_METHODS, dispatch_cron, set_cron_runtime
+from lumi.server.desktop_delivery import DesktopDelivery
 from lumi.server.protocol import bridge_event_to_wire
 from lumi.tui.session_meta import delete_meta, load_all, update_meta
 from lumi.utils.constants import NOTIFICATION_POLL_INTERVAL
@@ -48,6 +59,15 @@ from lumi.utils.workspace_id import get_workspace_dir
 _INTERRUPT_KINDS = frozenset({EventKind.CLARIFY, EventKind.APPROVAL, EventKind.PLAN})
 
 
+# 进程级 cron 结果广播通道：连接建立/断开时在 endpoint 注册/注销
+_desktop_delivery = DesktopDelivery()
+
+
+def _on_cron_job_status(names: list[str]) -> None:
+    """Scheduler 同步回调：把运行中任务名列表广播为 cron.running 事件。"""
+    asyncio.create_task(_desktop_delivery.send_event("cron.running", {"names": names}))
+
+
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     from lumi.utils.patches import apply_all
@@ -55,7 +75,23 @@ async def lifespan(app: FastAPI):
 
     apply_all()
     get_config().apply_env()
+
+    # 初始化定时任务子系统（按工作目录隔离，与 TUI 共用 setup_cron）
+    cron_runtime = None
+    try:
+        delivery = DeliveryManager()
+        delivery.register(_desktop_delivery)
+        cron_runtime = setup_cron(delivery, on_job_status=_on_cron_job_status)
+        set_cron_runtime(cron_runtime)
+        await cron_runtime.scheduler.start()
+        logger.info("[WS] 定时任务子系统已启动")
+    except Exception:
+        logger.warning("[WS] 定时任务子系统启动失败，cron 功能不可用", exc_info=True)
+
     yield
+
+    if cron_runtime is not None:
+        await cron_runtime.scheduler.stop()
 
 
 app = FastAPI(lifespan=lifespan)
@@ -373,6 +409,8 @@ async def _dispatch(
             await bridge.delete_thread(tid)
         delete_meta(tid)
         return {"thread_id": tid}
+    if method in CRON_METHODS:
+        return await dispatch_cron(method, params)
     raise ValueError(f"未知方法: {method}")
 
 
@@ -393,6 +431,8 @@ async def ws_endpoint(ws: WebSocket) -> None:
     )
 
     run = _RunState()
+    # 注册到 cron 结果广播通道：任务完成/运行状态变化实时推给本连接
+    _desktop_delivery.register_ws(ws)
     # 后台任务完成通知轮询：与主接收循环并发，空闲时把队列通知注入新一轮推回前端
     notif_task = asyncio.create_task(_notification_loop(ws, bridge, run))
 
@@ -431,6 +471,7 @@ async def ws_endpoint(ws: WebSocket) -> None:
     except WebSocketDisconnect:
         logger.info("[WS] 客户端断开: %s", bridge.current_thread_id)
     finally:
+        _desktop_delivery.unregister_ws(ws)
         notif_task.cancel()
         with suppress(asyncio.CancelledError):
             await notif_task
