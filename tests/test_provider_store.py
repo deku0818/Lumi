@@ -22,9 +22,11 @@ def _p(name="A", base="u", key="k", models=("m1",)):
     return {"name": name, "base_url": base, "api_key": key, "models": list(models)}
 
 
-def test_load_missing_returns_empty(store_path):
+def test_load_missing_returns_empty(store_path, monkeypatch):
+    monkeypatch.setenv("LLM_MODEL_NAME", "env-model")
     assert provider_store.load() == ([], {"provider": "", "model": ""})
-    assert provider_store.get_active() is None
+    # 无任何 profile 时 resolve 回退 env 默认模型、无连接覆盖
+    assert provider_store.resolve() == provider_store.ResolvedModel("env-model", "", "")
 
 
 def test_upsert_first_model_becomes_active(store_path):
@@ -32,8 +34,31 @@ def test_upsert_first_model_becomes_active(store_path):
     profiles, active = provider_store.load()
     assert active == {"provider": saved.id, "model": "claude-opus-4-6"}
     assert len(profiles) == 1 and profiles[0].models == ("claude-opus-4-6", "gpt-4o")
-    prof, model = provider_store.get_active()
-    assert prof.name == "我的代理" and model == "claude-opus-4-6"
+    assert provider_store.resolve() == provider_store.ResolvedModel(
+        "claude-opus-4-6", "u", "k"
+    )
+
+
+def test_resolve_named_model_prefers_active_profile(store_path):
+    a = provider_store.upsert(_p("A", base="ua", key="ka", models=("m1",)))
+    b = provider_store.upsert(_p("B", base="ub", key="kb", models=("m1", "m2")))
+    provider_store.set_active(a.id, "m1")
+    # 同名模型存在于多个 profile：active 优先
+    assert provider_store.resolve("m1") == provider_store.ResolvedModel(
+        "m1", "ua", "ka"
+    )
+    # 不在 active profile 的模型：兜底反查其他 profile
+    assert provider_store.resolve("m2") == provider_store.ResolvedModel(
+        "m2", "ub", "kb"
+    )
+    assert b.id != a.id
+
+
+def test_resolve_unknown_model_has_no_connection(store_path):
+    provider_store.upsert(_p(models=("m1",)))
+    assert provider_store.resolve("other") == provider_store.ResolvedModel(
+        "other", "", ""
+    )
 
 
 def test_upsert_dedupes_and_strips_models(store_path):
@@ -93,6 +118,36 @@ def test_legacy_single_model_format_migrates(store_path):
     profiles, active = provider_store.load()
     assert profiles[0].models == ("claude-x",)
     assert active == {"provider": "old1", "model": "claude-x"}
+
+
+def test_effort_per_model_set_and_resolve(store_path, monkeypatch):
+    # 隔离 models.dev 能力：m1 支持 low/high，m2 仅 auto
+    monkeypatch.setattr(
+        provider_store,
+        "allowed_levels",
+        lambda m: ("auto", "low", "high") if m == "m1" else ("auto",),
+    )
+    s = provider_store.upsert(_p(models=("m1", "m2")))
+    assert provider_store.set_effort(s.id, "m1", "high") == "high"
+    assert provider_store.resolve("m1").effort == "high"
+    assert provider_store.resolve("m2").effort == "auto"
+    # 非法档位 / 不存在的 model / provider → None
+    assert provider_store.set_effort(s.id, "m1", "nope") is None
+    assert provider_store.set_effort(s.id, "m2", "high") is None
+    assert provider_store.set_effort("badid", "m1", "low") is None
+    # auto 即删除记录
+    assert provider_store.set_effort(s.id, "m1", "auto") == "auto"
+    assert provider_store.load()[0][0].effort == {}
+
+
+def test_effort_survives_profile_edit(store_path, monkeypatch):
+    monkeypatch.setattr(provider_store, "allowed_levels", lambda m: ("auto", "max"))
+    s = provider_store.upsert(_p(models=("m1", "m2")))
+    provider_store.set_effort(s.id, "m1", "max")
+    # 编辑 profile（不带 effort 字段）→ 档位记忆保留；删掉的模型记录被清理
+    provider_store.upsert({"id": s.id, **_p(models=("m1",))})
+    prof = provider_store.load()[0][0]
+    assert prof.effort == {"m1": "max"}
 
 
 def test_file_is_chmod_600_and_plaintext(store_path):

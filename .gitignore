@@ -19,3 +19,5 @@ test
 docs/claude-code/
 .DS_store
 .agents
+.demos/
+docs/1.md

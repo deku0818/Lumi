@@ -104,6 +104,10 @@ export class Gateway {
     return this.request('list_providers')
   }
 
+  setEffort(provider: string, model: string, level: string): Promise<{ effort: string }> {
+    return this.request<{ effort: string }>('set_effort', { provider, model, level })
+  }
+
   testProvider(
     baseUrl: string,
     apiKey: string,

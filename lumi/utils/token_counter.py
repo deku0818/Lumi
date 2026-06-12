@@ -1,4 +1,14 @@
 import tiktoken
+from langchain_core.messages import (
+    AIMessage,
+    BaseMessage,
+    HumanMessage,
+    SystemMessage,
+    ToolMessage,
+)
+
+from lumi.utils.constants import IMAGE_TOKEN_ESTIMATE
+from lumi.utils.logger import logger
 
 # 在模块加载时预初始化编码器，避免在异步上下文中触发阻塞调用
 # tiktoken 加载 BPE 文件时会调用 tempfile.gettempdir()，后者内部调用 os.getcwd()
@@ -77,3 +87,79 @@ def truncate_str_to_max_tokens(text, max_tokens: int = 4096) -> str:
 
     # 解码回字符串
     return enc.decode(truncated_tokens)
+
+
+def truncate_docs_to_max_tokens(
+    docs: list[str] | str, max_tokens: int = 10000
+) -> list[str] | str:
+    """截取字符串或字符串列表到指定的最大 token 数量。
+
+    单个字符串按 token 截断；列表只保留能完整放下的项目，不截断单项。
+    """
+    if isinstance(docs, str):
+        return truncate_str_to_max_tokens(docs, max_tokens)
+
+    truncated_items = []
+    current_tokens = 0
+    for item in docs:
+        item_tokens = str_token_counter(item if isinstance(item, str) else str(item))
+        # 单项超限直接跳过；加入当前项会超限则停止
+        if item_tokens > max_tokens:
+            continue
+        if current_tokens + item_tokens > max_tokens:
+            break
+        truncated_items.append(item)
+        current_tokens += item_tokens
+
+    logger.debug(
+        f"内容处理完成 - 原始数量: {len(docs)}, "
+        f"截取后数量: {len(truncated_items)}, "
+        f"总token数: {current_tokens}/{max_tokens}"
+    )
+    return truncated_items
+
+
+def _count_content_tokens(content) -> int:
+    """计算消息 content 的 token 数（图片使用固定估算值，不对 base64 数据进行 tokenize）"""
+    if isinstance(content, str):
+        return str_token_counter(content)
+    if isinstance(content, list):
+        total = 0
+        for item in content:
+            if isinstance(item, dict):
+                if item.get("type") == "text":
+                    total += str_token_counter(item.get("text", ""))
+                elif item.get("type") in ("image", "image_url"):
+                    total += IMAGE_TOKEN_ESTIMATE
+                else:
+                    total += str_token_counter(str(item))
+            else:
+                total += str_token_counter(str(item))
+        return total
+    return str_token_counter(str(content))
+
+
+def tiktoken_counter(messages: list[BaseMessage]) -> int:
+    """估算消息列表的 token 总数
+
+    支持 str 和多模态 list content（图片使用固定估算值 IMAGE_TOKEN_ESTIMATE）。
+    """
+    num_tokens = 3  # every reply is primed with <|start|>assistant<|message|>
+    tokens_per_message = 3
+    tokens_per_name = 1
+    for msg in messages:
+        if isinstance(msg, HumanMessage):
+            role = "user"
+        elif isinstance(msg, AIMessage):
+            role = "assistant"
+        elif isinstance(msg, ToolMessage):
+            role = "tool"
+        elif isinstance(msg, SystemMessage):
+            role = "system"
+        else:
+            raise ValueError(f"Unsupported messages type {msg.__class__}")
+        content_tokens = _count_content_tokens(msg.content)
+        num_tokens += tokens_per_message + str_token_counter(role) + content_tokens
+        if msg.name:
+            num_tokens += tokens_per_name + str_token_counter(msg.name)
+    return num_tokens

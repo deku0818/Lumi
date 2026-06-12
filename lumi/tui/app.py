@@ -251,7 +251,12 @@ class LumiApp(App):
         # 后台清理过期 checkpoint thread 目录
         asyncio.create_task(self._cleanup_stale_checkpoints())
 
-        # 配置 StatusLine（尝试从 OpenRouter 获取 context_length）
+        # 后台刷新 models.dev 模型目录（思考能力 + context_length 数据源）
+        from lumi.utils.model_catalog import refresh as refresh_catalog
+
+        asyncio.create_task(refresh_catalog())
+
+        # 配置 StatusLine（context_length 来自 models.dev 缓存）
         await self._refresh_model_status()
 
         # TitleBlock 挂载到 ChatLog 内部，随聊天内容一起滚动
@@ -392,6 +397,11 @@ class LumiApp(App):
             ),
             ("agents", "查看所有可用 Agent", lambda _="": self._open_agents_screen()),
             ("model", "切换 / 管理模型供应商", lambda _="": self._open_model_screen()),
+            (
+                "effort",
+                "查看 / 设置当前模型的思考档位",
+                lambda arg="": self._set_effort_level(arg),
+            ),
             ("bg", "查看后台任务", lambda _="": self._open_bg_screen()),
             ("mcp", "查看 MCP 服务器状态", lambda _="": self._open_mcp_screen()),
             (
@@ -694,17 +704,55 @@ class LumiApp(App):
         self._bridge.set_provider(provider, model)
         await self._refresh_model_status()
 
+    async def _set_effort_level(self, arg: str = "") -> None:
+        """/effort 命令：作用于当前 active 模型。无参显示档位，带参切换。
+
+        与 ModelScreen 一致经 bridge 操作；可用档位来自 list_providers 的
+        thinking 能力数据（control=none 表示该模型无思考可配）。
+        """
+        chat = self.query_one(ChatLog)
+        data = self._bridge.list_providers()
+        active = data["active"]
+        provider_id, model = active["provider"], active["model"]
+        if not model:
+            await chat.append_hint("● ", "当前无 active 模型，请先用 /model 选择")
+            return
+
+        profile = next(p for p in data["profiles"] if p["id"] == provider_id)
+        thinking = profile["thinking"][model]
+        if thinking["control"] == "none":
+            await chat.append_hint("● ", f"{model} 不支持思考配置")
+            return
+
+        levels = thinking["levels"]
+        level = arg.strip().lower()
+        if not level:
+            await chat.append_hint(
+                "● ",
+                f"{model} 思考档位: {thinking['effort']}"
+                f"（/effort <{'|'.join(levels)}> 切换）",
+            )
+            return
+        try:
+            self._bridge.set_effort(provider_id, model, level)
+        except ValueError:
+            await chat.append_hint(
+                "● ", f"非法档位: {level}（{model} 可选 {'/'.join(levels)}）"
+            )
+            return
+        await chat.append_hint("● ", f"{model} 思考档位已切换为 {level}（下一轮生效）")
+
     async def _refresh_model_status(self) -> None:
         """按当前 bridge.model_name 刷新 StatusLine（含 context_length 探测）。"""
-        from lumi.utils.model_info import fetch_model_info
+        from lumi.utils.model_catalog import lookup
         from lumi.utils.read_config import get_config as get_yaml_config
 
         model_name = self._bridge.model_name
         config_context_length = get_yaml_config().config.token.context_length
-        model_info = await fetch_model_info(model_name)
+        entry = lookup(model_name)
         context_max = (
-            model_info.context_length
-            if model_info and model_info.context_length > 0
+            entry.context_length
+            if entry and entry.context_length > 0
             else config_context_length
         )
         self.query_one(StatusLine).configure(

@@ -1,12 +1,10 @@
-"""
-LLM 模型管理器
+"""LLM 实例创建与缓存。
 
-提供统一的模型创建和缓存功能，支持多种模型类型：
-- ChatOpenAI: OpenAI系列模型
-- ChatAnthropic: Claude系列模型
+协议由模型名自动判定（claude / anthropic / minimax → ChatAnthropic，其余 → ChatOpenAI；
+Bedrock 形如 us.anthropic.claude-* 同样走 ChatAnthropic 客户端）。
+未显式传连接时，由 provider_store 按 active profile 解析 base_url / api_key。
 """
 
-import hashlib
 import json
 import os
 from typing import Any, Literal
@@ -16,144 +14,165 @@ from langchain_openai import ChatOpenAI
 
 from lumi.utils.logger import logger
 
+Protocol = Literal["anthropic", "openai"]
 
-# 默认模型名称
+_cache: dict[str, Any] = {}
+
+
+class DialectChatOpenAI(ChatOpenAI):
+    """保留方言推理字段 reasoning_content 的 ChatOpenAI。
+
+    DeepSeek / Kimi / MiMo / Qwen 等 OpenAI 兼容端点把思考增量放在
+    delta.reasoning_content（非标字段），ChatOpenAI 会静默丢弃——导致
+    思考期间前端收不到任何增量，长思考看起来像卡死。这里在流式转换后
+    把它补进 additional_kwargs；请求构造不读该字段，不会回传给服务端。
+    """
+
+    def _convert_chunk_to_generation_chunk(
+        self, chunk: dict, default_chunk_class: type, base_generation_info: dict | None
+    ):
+        gen = super()._convert_chunk_to_generation_chunk(
+            chunk, default_chunk_class, base_generation_info
+        )
+        if gen is not None and (choices := chunk.get("choices")):
+            reasoning = (choices[0].get("delta") or {}).get("reasoning_content")
+            if reasoning:
+                gen.message.additional_kwargs["reasoning_content"] = reasoning
+        return gen
+
+
 def get_default_model_name() -> str:
     """延迟读取环境变量，确保 config.yaml 的 env 已注入"""
     return os.getenv("LLM_MODEL_NAME", "qwen3-max")
 
 
-class ModelManager:
-    """LLM模型管理器 - 负责创建、缓存和管理各种LLM实例"""
-
-    def __init__(self):
-        """初始化模型管理器"""
-        self._cache: dict[str, Any] = {}
-        self.anthropic_params = {"temperature": 0.6, "timeout": 300}
-        self.openai_params = {
-            "temperature": 0.6,
-            "timeout": 300,
-        }
-
-    def _create_cache_key(self, model_name: str, **params) -> str:
-        """根据模型名称和参数创建缓存键"""
-        cache_data = {"model_name": model_name, **params}
-        cache_str = json.dumps(cache_data, sort_keys=True)
-        return hashlib.md5(cache_str.encode()).hexdigest()
-
-    def _detect_model_type(
-        self, model_name: str
-    ) -> Literal["anthropic", "openai", "bedrock"]:
-        """检测模型类型"""
-        if not model_name:
-            return "openai"
-        name = model_name.lower()
-        # Bedrock 模型名包含 'anthropic.claude'（如 us.anthropic.claude-*）
-        if "anthropic.claude" in name:
-            return "bedrock"
-        # 直连 Anthropic（claude-* 或 minimax）
-        if "claude" in name or "anthropic" in name or "minimax" in name:
-            return "anthropic"
-        return "openai"
-
-    def create_llm(self, model_name: str = None, use_cache: bool = True, **llm_params):
-        """
-        创建LLM实例
-
-        Args:
-            model_name: 模型名称，如果为None则使用环境变量
-            use_cache: 是否使用缓存，默认为True
-            **llm_params: LLM的其他参数
-
-        Returns:
-            LLM实例 (ChatOpenAI, ChatAnthropic 或 ChatDeepSeek)
-        """
-        if model_name is None:
-            model_name = get_default_model_name()
-
-        # 检测模型类型
-        model_type = self._detect_model_type(model_name)
-
-        # 从配置文件读取对应模型类型的参数
-        from lumi.utils.read_config import get_config
-
-        config_params = get_config().config.llm_params.get_params_for_model_type(
-            model_type
-        )
-
-        # 参数优先级: ModelManager默认 < config.yaml < 代码传参
-        match model_type:
-            case "anthropic" | "bedrock":
-                final_params = {
-                    **self.anthropic_params,
-                    **config_params,
-                    "model": model_name,
-                }
-                final_params.update(llm_params)
-
-            case _:
-                final_params = {
-                    **self.openai_params,
-                    **config_params,
-                    "model": model_name,
-                    "stream_usage": True,
-                }
-                final_params.update(llm_params)
-
-        # 检查缓存
-        if use_cache:
-            cache_key = self._create_cache_key(model_name, **final_params)
-            if cache_key in self._cache:
-                logger.debug(f"从缓存中获取LLM实例: {model_name}")
-                return self._cache[cache_key]
-
-        # 创建LLM实例
-        match model_type:
-            case "anthropic" | "bedrock":
-                logger.debug(f"创建 ChatAnthropic 模型: {model_name}")
-                llm = ChatAnthropic(**final_params)
-            case _:
-                logger.debug(f"创建 ChatOpenAI 模型: {model_name}")
-                llm = ChatOpenAI(**final_params)
-
-        # 添加到缓存
-        if use_cache:
-            cache_key = self._create_cache_key(model_name, **final_params)
-            self._cache[cache_key] = llm
-            logger.debug(f"LLM实例已缓存，当前缓存数量: {len(self._cache)}")
-
-        return llm
-
-    def clear_cache(self):
-        """清空LLM缓存"""
-        self._cache.clear()
-        logger.info("LLM缓存已清空")
-
-    def get_cached_count(self) -> int:
-        """获取当前缓存的LLM实例数量"""
-        return len(self._cache)
+def detect_protocol(model_name: str) -> Protocol:
+    """按模型名判定客户端协议"""
+    name = (model_name or "").lower()
+    if "claude" in name or "anthropic" in name or "minimax" in name:
+        return "anthropic"
+    return "openai"
 
 
-# 全局模型管理器实例
-model_manager = ModelManager()
+def allowed_levels(model_name: str) -> tuple[str, ...]:
+    """该模型可设的思考档位集合（UI 下发与校验共用同一份）。
+
+    各形态的 auto 语义不同（见 docs/architecture/thinking.md）：
+    - none 型（无思考/常开/未匹配/无缓存）→ 仅 auto（不传参数）
+    - toggle 型 → 仅 on/off（开关模型只有两种行为；未设置时不传参数）
+    - anthropic effort 型 → auto 即 adaptive（开思考、深度自适应），
+      原生档位指定深度，off 关闭（不传 thinking）
+    - openai effort 型 → auto = 不传（推理模型默认即思考），原生档位
+      （含 none 等关闭值）原样列出
+    """
+    from lumi.utils.model_catalog import lookup
+
+    entry = lookup(model_name)
+    if entry is None or entry.control == "none":
+        return ("auto",)
+    if entry.control == "toggle":
+        return ("on", "off")
+    if detect_protocol(model_name) == "anthropic":
+        return ("auto", *entry.values, "off")
+    extra = ("off",) if entry.has_toggle and "off" not in entry.values else ()
+    return ("auto", *entry.values, *extra)
 
 
-# 导出的函数
-def create_llm(model_name: str = None, use_cache: bool = True, **llm_params):
-    """创建LLM实例（支持缓存）"""
-    return model_manager.create_llm(model_name, use_cache, **llm_params)
+def effort_params(model_name: str, level: str) -> dict:
+    """思考档位 → 协议参数（唯一映射点）。
+
+    档位值来自 models.dev（model_catalog），是各模型原生值，选什么发什么，
+    不存在档位翻译。level 不在该模型 allowed_levels 内（能力数据更新后失效）
+    时静默回退 auto（不传任何参数，零风险）。
+
+    写法按协议 + 控制类型：
+    - anthropic（仅 effort 型）：auto/档位 → adaptive thinking
+      （auto 不指定深度=自适应；档位附 output_config.effort），
+      display=summarized 否则拿不到思考文本；off → 不传（API 默认不思考）
+    - openai effort 型：auto → 不传（模型默认）；档位 → reasoning_effort
+      原样透传（含 none/xhigh），钉死 use_responses_api=False 防隐式路由
+    - toggle 的 on/off：方言写法 thinking enabled/disabled（DeepSeek 系
+      通行，MiMo 实测有效；遇到不同方言再加分支）
+    """
+    allowed = allowed_levels(model_name)
+    if level != "auto" and level not in allowed:
+        return {}
+
+    if detect_protocol(model_name) == "anthropic":
+        if level == "off" or allowed == ("auto",):
+            return {}  # 关闭 = 不传 thinking（API 默认不思考）；无能力模型同
+        adaptive = {"thinking": {"type": "adaptive", "display": "summarized"}}
+        if level in ("auto", "on"):
+            return adaptive  # auto/on 即 adaptive，深度交给 API 默认
+        return {**adaptive, "output_config": {"effort": level}}
+
+    if level == "auto":
+        return {}
+    if level in ("on", "off"):
+        state = "enabled" if level == "on" else "disabled"
+        return {"extra_body": {"thinking": {"type": state}}}
+    return {"reasoning_effort": level, "use_responses_api": False}
 
 
-def clear_llm_cache():
-    """清空LLM缓存"""
-    model_manager.clear_cache()
+def create_llm(
+    model_name: str | None = None,
+    use_cache: bool = True,
+    apply_effort: bool = False,
+    **llm_params,
+) -> ChatAnthropic | ChatOpenAI:
+    """创建 LLM 实例（同参数命中缓存）。
 
+    连接解析：显式传入 base_url / api_key 时原样使用；否则由
+    provider_store.resolve() 按 model_name 反查供应商 profile 注入连接
+    （model_name 为 None 时用 active 模型，无 active 回退 env 默认）。
 
-def get_cached_llm_count() -> int:
-    """获取当前缓存的LLM实例数量"""
-    return model_manager.get_cached_count()
+    思考档位注入是显式 opt-in（apply_effort=True，仅主对话链使用）：
+    默认不注入任何思考参数——摘要、结构化提取、连通性测试等内部链
+    保持干净，无需各自对冲。
+    参数优先级：config.yaml llm_params < effort 档位 < 调用方 llm_params；
+    无内置调参默认，未指定的参数交给 SDK 默认值。
+    """
+    from lumi.agents.runtime import provider_store
+    from lumi.utils.read_config import get_config
 
+    level = "auto"
+    if "base_url" in llm_params or "api_key" in llm_params:
+        model_name = model_name or get_default_model_name()
+    else:
+        resolved = provider_store.resolve(model_name)
+        model_name = resolved.model
+        level = resolved.effort
+        if resolved.base_url:
+            llm_params["base_url"] = resolved.base_url
+        if resolved.api_key:
+            llm_params["api_key"] = resolved.api_key
 
-def detect_model_type(model_name: str) -> Literal["anthropic", "openai", "bedrock"]:
-    """检测模型类型"""
-    return model_manager._detect_model_type(model_name)
+    protocol = detect_protocol(model_name)
+    config_params = get_config().config.llm_params.get_params_for_model_type(protocol)
+    level_params = effort_params(model_name, level) if apply_effort else {}
+    final_params = {
+        **config_params,
+        **level_params,
+        "model": model_name,
+        **llm_params,
+    }
+    if protocol == "openai":
+        # 功能性标志而非调参：流式响应里携带 token 用量统计
+        final_params.setdefault("stream_usage", True)
+    # 思考开启时采样参数互斥（Anthropic 直接 400，OpenAI 推理模型不支持）
+    if final_params.get("thinking") or final_params.get("reasoning_effort"):
+        for key in ("temperature", "top_p", "top_k"):
+            final_params.pop(key, None)
+
+    cache_key = (
+        json.dumps(final_params, sort_keys=True, default=str) if use_cache else None
+    )
+    if cache_key and cache_key in _cache:
+        return _cache[cache_key]
+
+    cls = ChatAnthropic if protocol == "anthropic" else DialectChatOpenAI
+    logger.debug(f"创建 {cls.__name__} 模型: {model_name}")
+    llm = cls(**final_params)
+    if cache_key:
+        _cache[cache_key] = llm
+    return llm

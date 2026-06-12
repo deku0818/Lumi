@@ -290,6 +290,39 @@ pre {
 .md th, .md td { border: 1px solid var(--color-line); padding: 0.3em 0.6em; }
 .md th { background: color-mix(in srgb, var(--color-ink) 5%, transparent); }
 
+/* ── 状态指示器「光」主题（Lumi = 光明）：光点光晕 + 流光文字 ── */
+@keyframes lumi-breathe {
+  50% { transform: scale(0.72); filter: brightness(1.35); }
+}
+@keyframes lumi-ripple {
+  0% { transform: scale(0.5); opacity: 0.9; }
+  80% { transform: scale(1.9); opacity: 0; }
+  100% { opacity: 0; }
+}
+/* 一粒光：光核呼吸（::after）+ 光环向外扩散（::before） */
+.lumi-orb { position: relative; width: 14px; height: 14px; flex: none; }
+.lumi-orb::before {
+  content: ''; position: absolute; inset: 0; border-radius: 50%;
+  border: 1.5px solid color-mix(in srgb, var(--color-accent) 55%, transparent);
+  animation: lumi-ripple 2.2s ease-out infinite;
+}
+.lumi-orb::after {
+  content: ''; position: absolute; inset: 3px; border-radius: 50%;
+  background: radial-gradient(circle,
+    color-mix(in srgb, var(--color-accent) 35%, white) 0%,
+    var(--color-accent) 55%,
+    color-mix(in srgb, var(--color-accent) 40%, transparent) 100%);
+  box-shadow:
+    0 0 8px color-mix(in srgb, var(--color-accent) 90%, transparent),
+    0 0 20px color-mix(in srgb, var(--color-accent) 40%, transparent);
+  animation: lumi-breathe 2.2s ease-in-out infinite;
+}
+/* 完成态：动画全停的静止光点（光环隐藏，光核微光） */
+.lumi-orb-idle { display: inline-block; }
+.lumi-orb-idle::before { animation: none; opacity: 0; }
+.lumi-orb-idle::after { animation: none; opacity: 0.75; }
+
+
 @layer base {
   * {
     @apply border-border outline-ring/50;

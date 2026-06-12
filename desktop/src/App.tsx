@@ -111,6 +111,8 @@ function finishStreaming(items: Item[]): Item[] {
 type SessionState = {
   items: Item[]
   running: boolean
+  // 当前进行中的思考流文本（只在思考期间非空；正文/工具一开始即清空，不留痕迹）
+  thinkingText: string
   approval: Record<string, unknown> | null
   clarify: Record<string, unknown> | null
   plan: Record<string, unknown> | null
@@ -118,6 +120,7 @@ type SessionState = {
 const emptySession = (items: Item[] = []): SessionState => ({
   items,
   running: false,
+  thinkingText: '',
   approval: null,
   clarify: null,
   plan: null,
@@ -213,6 +216,7 @@ export default function App() {
   const cur = store[active]
   const items = cur?.items ?? []
   const running = cur?.running ?? false
+  const thinkingText = cur?.thinkingText ?? ''
   const approval = cur?.approval ?? null
   const clarify = cur?.clarify ?? null
   const plan = cur?.plan ?? null
@@ -284,7 +288,10 @@ export default function App() {
     // 子代理事件（带 parent_run_id 的流式/工具事件）不进主对话流——否则子代理
     // 的 token 会拼进父气泡、子工具显示为顶层工具行。父级 agent 工具行本身
     // （无 parent_run_id）照常渲染；中断类（审批/澄清/计划）仍需用户处理，不过滤。
-    if (payload.parent_run_id && (type.startsWith('message.') || type.startsWith('tool.'))) {
+    if (
+      payload.parent_run_id &&
+      (type.startsWith('message.') || type.startsWith('tool.') || type.startsWith('thinking.'))
+    ) {
       return
     }
     // 系统通知：回复完成 + 等待用户处理的中断（审批/提问/计划）。
@@ -322,6 +329,9 @@ export default function App() {
         // 还会把相邻工具在 groupItems 里隔断。改由首个 message.delta 懒创建气泡。
         case 'message.delta':
           n = { ...s, items: appendDelta(s.items, payload.text ?? '') }
+          break
+        case 'thinking.delta':
+          n = { ...s, thinkingText: s.thinkingText + (payload.text ?? '') }
           break
         case 'message.complete':
           n = { ...s, items: finishStreaming(s.items) }
@@ -377,6 +387,12 @@ export default function App() {
             items: [...finishStreaming(s.items), { id: nid(), kind: 'notice', text: payload.message }],
           }
           break
+      }
+      // 思考的生命周期统一收口：除 thinking.delta 自身外，任何事件到达都意味着
+      // 这段思考已结束（正文/工具/审批/轮次边界），清空累积文本——新增事件类型
+      // 无需再各自记得清理
+      if (n && type !== 'thinking.delta' && n.thinkingText) {
+        n = { ...n, thinkingText: '' }
       }
       return n ? { ...store, [sid]: n } : store
     })
@@ -503,6 +519,15 @@ export default function App() {
   useEffect(() => {
     if (active) loadProviders()
   }, [active, loadProviders])
+
+  // 切换当前 active 模型的思考档位：持久化后刷新列表（thinking 数据随之更新）。
+  // 失败（能力数据更新使档位失效等）也刷新，让 UI 回到后端真实状态而非静默不动。
+  const switchEffort = (level: string) => {
+    anyGw()
+      ?.setEffort(activeModel.provider, activeModel.model, level)
+      .catch((e) => console.error('set_effort 失败:', e))
+      .finally(() => loadProviders())
+  }
 
   // 切换模型：在当前会话的连接上切（该 bridge 下一轮生效），并更新顶部模型显示
   const switchModel = (provider: string, model: string) => {
@@ -887,6 +912,7 @@ export default function App() {
             providers={providers}
             active={activeModel}
             onSwitch={switchModel}
+            onSwitchEffort={switchEffort}
           />
         </div>
         {running && !approval && !clarify && !plan ? (
@@ -979,7 +1005,20 @@ export default function App() {
                           <ItemView key={seg.item.id} item={seg.item} />
                         ),
                       )}
-                      {/* 审批/澄清/计划：会话内内联渲染，切走时随会话留在原处（不再是全局遮罩） */}
+                      {/* 状态指示器常驻：运行中显示阶段文案，中断（审批/澄清/计划）时
+                          保持显示等待态，完成后退化为无文字的静止光点 */}
+                      <StatusIndicator
+                        items={items}
+                        running={running}
+                        waiting={!!(approval || clarify || plan)}
+                        streaming={streaming}
+                        thinkingText={thinkingText}
+                      />
+                    </div>
+                  </div>
+                  <div className="px-6 pb-5">
+                    <div className="max-w-3xl mx-auto w-full">
+                      {/* 审批/澄清/计划：渲染在输入框上方，切走时随会话留在原处 */}
                       {approval && <ApprovalDialog data={approval} onDecide={decide} />}
                       {clarify && (
                         <ClarifyDialog
@@ -995,11 +1034,8 @@ export default function App() {
                           onReject={() => resumeWith(PLAN_REJECTED, 'plan')}
                         />
                       )}
-                      {running && !streaming && !approval && !clarify && !plan && <Thinking />}
+                      {composer(t('composer.reply'))}
                     </div>
-                  </div>
-                  <div className="px-6 pb-5">
-                    <div className="max-w-3xl mx-auto w-full">{composer(t('composer.reply'))}</div>
                   </div>
                 </>
               ) : (
@@ -1055,12 +1091,93 @@ export default function App() {
   )
 }
 
-function Thinking() {
+// 会话底部常驻状态指示器（参考 Claude）：
+// - 运行中：光点 + 当前阶段文案 + 本轮计时；思考阶段右侧箭头点开看流式思考
+// - 中断（审批/澄清/计划）：保持显示「等待确认…」，计时继续
+// - 完成：退化为无文字的静止光点，留在最后一条消息下
+// 阶段优先级：等待确认 > 工具执行中 > 思考中 > 正文输出中 > 兜底「正在处理…」。
+function StatusIndicator({
+  items,
+  running,
+  waiting,
+  streaming,
+  thinkingText,
+}: {
+  items: Item[]
+  running: boolean
+  waiting: boolean
+  streaming: boolean
+  thinkingText: string
+}) {
   const { t } = useI18n()
+  const [open, setOpen] = useState(false)
+  const [sec, setSec] = useState(0)
+  const boxRef = useRef<HTMLPreElement>(null)
+  // 计时跟随 running：开始时归零起跑，结束即停（中断 waiting 期间继续走）
+  useEffect(() => {
+    if (!running) return
+    setSec(0)
+    const id = setInterval(() => setSec((s) => s + 1), 1000)
+    return () => clearInterval(id)
+  }, [running])
+  useEffect(() => {
+    if (open && boxRef.current) boxRef.current.scrollTop = boxRef.current.scrollHeight
+  }, [thinkingText, open])
+
+  if (!running) {
+    // 完成态：无文字的静止光点
+    return (
+      <div className="mt-2">
+        <span className="lumi-orb lumi-orb-idle" />
+      </div>
+    )
+  }
+
+  let runningTool: ToolItem | undefined
+  for (let i = items.length - 1; i >= 0; i--) {
+    const it = items[i]
+    if (it.kind === 'tool' && !it.done) {
+      runningTool = it
+      break
+    }
+  }
+  const thinking = !waiting && !runningTool && !streaming && !!thinkingText
+  const label = waiting
+    ? t('status.waiting')
+    : runningTool
+      ? t(TOOL_META[runningTool.name]?.status ?? 'status.tool')
+      : thinking
+        ? t('common.thinking')
+        : streaming
+          ? t('status.writing')
+          : t('status.working')
+
   return (
-    <div className="flex items-center gap-2 text-muted-foreground text-sm">
-      <span className="text-primary animate-pulse">✦</span>
-      <span className="animate-pulse">{t('common.thinking')}</span>
+    <div className="mt-2">
+      <div className="flex items-center gap-2.5 text-muted-foreground text-sm">
+        <span className="lumi-orb" />
+        <span>{label}</span>
+        {sec > 0 && <span className="text-xs opacity-60">· {sec}s</span>}
+        {thinking && (
+          <button
+            onClick={() => setOpen((o) => !o)}
+            className="px-1.5 text-muted-foreground hover:text-ink transition-colors"
+          >
+            <ChevronRight
+              size={13}
+              className={`transition-transform ${open ? 'rotate-90' : ''}`}
+            />
+          </button>
+        )}
+      </div>
+      {thinking && open && (
+        <pre
+          ref={boxRef}
+          className="text-xs mt-1.5 ml-6 px-3 py-2 rounded-lg bg-surface/60 border border-line/60 overflow-auto max-h-28 whitespace-pre-wrap text-muted-foreground/90 leading-relaxed"
+        >
+          {thinkingText}
+        </pre>
+      )}
     </div>
   )
 }
@@ -1259,6 +1376,7 @@ type ToolMeta = {
   icon: LucideIcon
   verb: string
   noun: string
+  status: string // 运行中的状态指示器文案 i18n key（动作级粒度）
   title: (a: Record<string, unknown>, name: string) => string
 }
 const fileTitle = (a: Record<string, unknown>, name: string) =>
@@ -1267,14 +1385,14 @@ const searchTitle = (a: Record<string, unknown>) =>
   argStr(a.pattern) ? `Search ${clip(argStr(a.pattern), 48)}` : 'Search'
 
 const TOOL_META: Record<string, ToolMeta> = {
-  bash: { icon: SquareTerminal, verb: 'Ran', noun: 'command', title: (a) => clip(argStr(a.description) || argStr(a.command) || 'Run command') },
-  read: { icon: FileText, verb: 'Read', noun: 'file', title: fileTitle },
-  write: { icon: FilePlus, verb: 'Wrote', noun: 'file', title: fileTitle },
-  edit: { icon: FilePen, verb: 'Edited', noun: 'file', title: fileTitle },
-  grep: { icon: Search, verb: 'Searched', noun: '', title: searchTitle },
-  glob: { icon: Search, verb: 'Searched', noun: '', title: searchTitle },
-  agent: { icon: Bot, verb: 'Ran', noun: 'subagent', title: (a) => clip(argStr(a.prompt) || argStr(a.name) || 'Run subagent') },
-  todo: { icon: ListChecks, verb: 'Updated', noun: 'todo', title: () => 'Update todos' },
+  bash: { icon: SquareTerminal, verb: 'Ran', noun: 'command', status: 'status.runCommand', title: (a) => clip(argStr(a.description) || argStr(a.command) || 'Run command') },
+  read: { icon: FileText, verb: 'Read', noun: 'file', status: 'status.readFile', title: fileTitle },
+  write: { icon: FilePlus, verb: 'Wrote', noun: 'file', status: 'status.editFile', title: fileTitle },
+  edit: { icon: FilePen, verb: 'Edited', noun: 'file', status: 'status.editFile', title: fileTitle },
+  grep: { icon: Search, verb: 'Searched', noun: '', status: 'status.searching', title: searchTitle },
+  glob: { icon: Search, verb: 'Searched', noun: '', status: 'status.searching', title: searchTitle },
+  agent: { icon: Bot, verb: 'Ran', noun: 'subagent', status: 'status.subtask', title: (a) => clip(argStr(a.prompt) || argStr(a.name) || 'Run subagent') },
+  todo: { icon: ListChecks, verb: 'Updated', noun: 'todo', status: 'status.tool', title: () => 'Update todos' },
 }
 
 const toolIcon = (name: string): LucideIcon => TOOL_META[name]?.icon ?? Wrench

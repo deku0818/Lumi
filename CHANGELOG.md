@@ -1,6 +1,24 @@
 # Changelog
 
-## [0.1.0a14] - 2026-06-11
+## [0.1.0a15] - 2026-06-12
+
+### Added
+- **思考管理全链路**（`docs/architecture/thinking.md`）— 思考能力由 models.dev 数据驱动（`utils/model_catalog.py`，141 provider / 5000+ 模型，缓存 `~/.lumi/cache/` TTL 24h，损坏自愈）：effort 型模型（Claude/GPT 系）按原生档位枚举渲染、toggle 型（MiMo/Kimi/GLM）仅 On/Off、无思考模型不渲染控制——用户永远选不到会报错的档位。档位按模型记忆（profile 的 `effort` dict），原生值直传无档位翻译；Claude 的 Auto = adaptive（自适应思考），Off 关闭
+- **思考内容流式展示** — 新事件 `thinking.delta`（Anthropic thinking 块 + 方言 `reasoning_content`，`DialectChatOpenAI` 保留 ChatOpenAI 丢弃的非标字段）；desktop 状态指示器思考阶段可展开实时思考流
+- **desktop 底部状态指示器**（参考 Claude）— 光点光晕（`.lumi-orb`，品牌「光」语言、一静一动）+ 阶段文案（思考/输出/动作级工具状态/等待确认）+ 本轮计时；运行全程常驻，完成后退化为无文字静止光点；审批/澄清/计划对话框移至输入框上方且不打断指示器
+- **ModelPicker 重构**（Claude 式）— chip 显示「模型 + 档位」；一级菜单三行（当前模型 ✓ / Effort|Thinking › / More models ›），二级菜单互斥弹出；档位选项完全由后端 `list_providers` 的 thinking 数据（control/levels/effort）驱动，前端零推导
+- **TUI `/effort` 命令** — 跟随当前 active 模型显示/设置思考档位，与 desktop 共享同一份能力数据
+
+### Fixed
+- **4xx 客户端错误不再重试** — 重试范围收窄为限流/5xx/连接超时；此前模型不支持的参数（400）会在指数退避里"卡住"数分钟伪装成思考中，现在秒级报错透传
+- **方言思考模型假卡死** — MiMo 等默认思考的模型，思考增量（`reasoning_content`）被 langchain 静默丢弃导致 UI 长时间无反馈；现在思考流实时可见
+- **供应商连接一致性** — 摘要、结构化提取、子 Agent 此前不携带自定义供应商的 base_url/api_key（providers.json 配置的模型在这些路径会打到 env 默认端点）；`provider_store.resolve()` 收口为「模型+连接+档位」单一事实源后全路径一致
+- providers.json 的 `effort` 字段为非法类型时不再炸掉 `load()`
+
+### Changed
+- **模型模块重构** — `ModelManager` 类拍平为模块函数；`detect_model_type` 三值收为 `detect_protocol` 二值（bedrock 假分支消除）；`llm_chain` 瘦身（token 工具迁入 `token_counter`、retry 配置收口、删除无调用方的 `chat_chain`）；内置调参默认（temperature/timeout 等）移除，交给 SDK 默认值
+- **思考注入翻转为显式 opt-in** — `create_llm(apply_effort=...)` 默认不注入思考参数，仅主对话链开启；摘要/结构化提取/连通性测试等内部链天然干净，原先散落的 thinking 对冲逻辑删除
+- **模型元数据源 OpenRouter → models.dev** — context_length 同源迁移，`model_info.py` 删除
 
 ### Fixed
 - **WS 连接断开不再拆除全局运行时** — 每连接的 `bridge.close()` 只清理自身；MCP 子进程、shell / 后台任务会话改由 `shutdown_shared_runtime()` 在进程退出时统一关闭（此前关任一会话会 SIGKILL 所有会话的 MCP 与 bash）

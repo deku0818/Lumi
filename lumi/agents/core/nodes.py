@@ -33,24 +33,11 @@ from lumi.agents.core.preprocessing.summary import inject_summary_into_message
 from lumi.agents.core.preprocessing.skill_detector import SkillChangeDetector
 from lumi.agents.core.preprocessing.skills import inject_skills_into_message
 from lumi.agents.core.preprocessing.system_info import inject_system_info_into_message
-from lumi.utils.llm_chain import tiktoken_counter, tool_call_chain
+from lumi.utils.llm_chain import tool_call_chain
 from lumi.utils.logger import logger
-from lumi.utils.model_manager import detect_model_type
+from lumi.utils.model_manager import detect_protocol
 from lumi.utils.read_config import get_config
-
-
-def _provider_kwargs(context: LumiAgentContext) -> dict:
-    """把当前供应商 profile 的连接覆盖转成 create_llm 可透传的 kwargs。
-
-    只在非空时传入，避免覆盖 env / SDK 默认；base_url / api_key 经
-    tool_call_chain → create_llm 直接进 ChatOpenAI / ChatAnthropic 构造器。
-    """
-    kwargs: dict = {}
-    if context.base_url:
-        kwargs["base_url"] = context.base_url
-    if context.api_key:
-        kwargs["api_key"] = context.api_key
-    return kwargs
+from lumi.utils.token_counter import tiktoken_counter
 
 
 async def call_model(state: LumiAgentState, runtime: Runtime[LumiAgentContext]) -> dict:
@@ -58,9 +45,6 @@ async def call_model(state: LumiAgentState, runtime: Runtime[LumiAgentContext]) 
     system_prompt = runtime.context.system_prompt
     model_name = runtime.context.model_name
     tools = runtime.context.tools
-
-    # 当前供应商 profile 的连接覆盖（空则不传，沿用 env / SDK 默认）
-    conn = _provider_kwargs(runtime.context)
 
     # ToolStrategy: 当 output_schema 存在时注入结构化输出工具，强制 tool_choice="any"
     actual_tools = list(tools)
@@ -77,13 +61,13 @@ async def call_model(state: LumiAgentState, runtime: Runtime[LumiAgentContext]) 
         model_name=model_name,
         max_tokens=get_config().config.agents.max_tokens,
         tool_choice=tool_choice,
-        **conn,
+        apply_effort=True,  # 思考档位只在主对话链生效
     )
     iterations = state.get("iterations", 1)
 
     # Anthropic 模型：为对话消息注入缓存断点（滑动窗口策略）
     messages = list(state["messages"])
-    if detect_model_type(model_name) in ("anthropic", "bedrock"):
+    if detect_protocol(model_name) == "anthropic":
         inject_message_cache_breakpoints(messages)
 
     # 多模态 block 内部统一 Anthropic 风格,在此按 provider 转换
@@ -555,7 +539,6 @@ async def summarizer(state: LumiAgentState, runtime: Runtime[LumiAgentContext]) 
         runtime.context.tools,
         system_prompt=runtime.context.system_prompt,
         model_name=runtime.context.model_name,
-        temperature=1,
         streaming=False,
     )
     response = await chain.ainvoke({"messages": summary_messages})

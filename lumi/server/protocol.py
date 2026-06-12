@@ -16,7 +16,7 @@ from lumi.agents.bridge import BridgeEvent, EventKind
 def _payload(evt: BridgeEvent) -> dict:
     """按事件类型构造 payload，只保留该类型有意义的字段。"""
     kind = evt.kind
-    if kind == EventKind.MESSAGE_DELTA:
+    if kind in (EventKind.MESSAGE_DELTA, EventKind.THINKING_DELTA):
         payload = {"text": evt.text}
         if evt.usage_metadata:
             payload["usage"] = evt.usage_metadata

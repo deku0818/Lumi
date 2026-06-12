@@ -31,7 +31,6 @@ from lumi.agents.runtime.bg_tasks import current_thread_id, get_task_registry
 from lumi.agents.runtime.session import get_session_manager
 from lumi.utils.constants import MAX_STREAM_RETRIES, RETRY_BASE_WAIT
 from lumi.utils.logger import logger
-from lumi.utils.model_manager import get_default_model_name
 from lumi.utils.read_config import get_config
 from lumi.utils.thread_id import generate_thread_id
 from lumi.utils.workspace_id import get_workspace_dir
@@ -87,6 +86,7 @@ class EventKind(StrEnum):
 
     MESSAGE_START = "message.start"
     MESSAGE_DELTA = "message.delta"
+    THINKING_DELTA = "thinking.delta"  # 模型思考增量（Anthropic thinking 块 / 方言 reasoning_content）
     MESSAGE_COMPLETE = "message.complete"
     TOOL_GENERATING = "tool.generating"  # LLM 正在生成工具调用参数
     TOOL_START = "tool.start"
@@ -144,8 +144,7 @@ class AgentBridge:
         self._agent, self._context = await create_agent(
             checkpoint=agents_config.checkpoint,
         )
-        self.model_name = get_default_model_name()
-        # 应用持久化的 active 供应商 (profile, model)（覆盖 config 默认模型 + 连接）
+        # 应用持久化的 active 供应商 (profile, model)（覆盖 config 默认模型）
         self._apply_active()
         thread_id = generate_thread_id()
         recursion_limit = agents_config.recursion_limit
@@ -236,27 +235,37 @@ class AgentBridge:
     # ── 模型供应商 profile ──
 
     def _apply_active(self) -> None:
-        """把当前 active (profile, model) 应用到运行时 context（下一轮 call_model 生效）。
+        """把当前 active 模型应用到运行时 context（下一轮 call_model 生效）。
 
-        无 active 时回退默认（model=env 默认、无连接覆盖）。
+        连接（base_url / api_key）不进 context，由 create_llm 按模型名解析。
         """
         if self._context is None:
             return
-        pair = provider_store.get_active()
-        if pair:
-            profile, model = pair
-            self._context.model_name = model
-            self._context.base_url = profile.base_url
-            self._context.api_key = profile.api_key
-        else:
-            self._context.model_name = get_default_model_name()
-            self._context.base_url = ""
-            self._context.api_key = ""
+        self._context.model_name = provider_store.resolve().model
         self.model_name = self._context.model_name
 
     @staticmethod
     def _provider_list() -> dict:
+        """供应商列表。每个模型附思考能力（来自 models.dev）与当前档位：
+
+        thinking[model] = {"control": "none|effort|toggle", "levels": [...],
+                           "effort": "<当前档位>"}
+        control 决定前端渲染形态（none 不渲染 / effort 档位列表 / toggle 开关），
+        前端零推导；levels 为可设档位（校验同源）。
+        """
+        from lumi.utils.model_catalog import lookup
+        from lumi.utils.model_manager import allowed_levels
+
         profiles, active = provider_store.load()
+
+        def thinking_of(m: str) -> dict:
+            entry = lookup(m)
+            return {
+                "control": entry.control if entry else "none",
+                "levels": list(allowed_levels(m)),
+                "effort": "auto",  # 占位，下方按 profile 覆盖
+            }
+
         return {
             "profiles": [
                 {
@@ -265,11 +274,25 @@ class AgentBridge:
                     "base_url": p.base_url,
                     "api_key": p.api_key,
                     "models": list(p.models),
+                    "thinking": {
+                        m: {**thinking_of(m), "effort": p.effort.get(m, "auto")}
+                        for m in p.models
+                    },
                 }
                 for p in profiles
             ],
             "active": active,
         }
+
+    def set_effort(self, provider_id: str, model: str, level: str) -> dict:
+        """设置某 (provider, model) 的思考档位（持久化，下一轮 LLM 调用生效）。
+
+        Raises:
+            ValueError: provider/model 不存在或档位不在该模型能力内。
+        """
+        if provider_store.set_effort(provider_id, model, level) is None:
+            raise ValueError(f"无法设置思考档位: {provider_id}/{model} → {level}")
+        return {"effort": level}
 
     def list_providers(self) -> dict:
         """列出全部供应商 profile（含 models 列表）及 active {provider, model}。"""
@@ -486,6 +509,14 @@ class AgentBridge:
                                 chunk = event.get("data", {}).get("chunk")
                                 if chunk:
                                     usage = self._extract_usage(chunk)
+                                    thinking = self._extract_thinking_from_chunk(chunk)
+                                    if thinking:
+                                        yield BridgeEvent(
+                                            kind=EventKind.THINKING_DELTA,
+                                            text=thinking,
+                                            usage_metadata=usage,
+                                            parent_run_id=parent_id,
+                                        )
                                     text = self._extract_text_from_chunk(chunk)
                                     if text:
                                         yield BridgeEvent(
@@ -494,7 +525,9 @@ class AgentBridge:
                                             usage_metadata=usage,
                                             parent_run_id=parent_id,
                                         )
-                                    elif self._has_tool_call_chunk(chunk):
+                                    elif not thinking and self._has_tool_call_chunk(
+                                        chunk
+                                    ):
                                         yield BridgeEvent(
                                             kind=EventKind.TOOL_GENERATING,
                                             usage_metadata=usage,
@@ -969,6 +1002,25 @@ class AgentBridge:
                 for item in content:
                     if isinstance(item, dict) and item.get("type") == "text":
                         return item.get("text", "")
+        return ""
+
+    @staticmethod
+    def _extract_thinking_from_chunk(chunk) -> str:
+        """从 LangChain chunk 中提取思考增量。
+
+        OpenAI 方言模型经 DialectChatOpenAI 保留在 additional_kwargs
+        （reasoning_content）；Anthropic 在 content 的 thinking 块中。
+        """
+        kwargs = getattr(chunk, "additional_kwargs", None) or {}
+        if reasoning := kwargs.get("reasoning_content"):
+            return reasoning
+        content = getattr(chunk, "content", None)
+        if isinstance(content, list):
+            return "".join(
+                item.get("thinking", "")
+                for item in content
+                if isinstance(item, dict) and item.get("type") == "thinking"
+            )
         return ""
 
     # ── File-level Checkpoint ──

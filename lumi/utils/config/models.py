@@ -162,13 +162,10 @@ class LlmParamsConfig(BaseModel):
     openai: ModelTypeParamsConfig = Field(default_factory=ModelTypeParamsConfig)
     anthropic: ModelTypeParamsConfig = Field(default_factory=ModelTypeParamsConfig)
 
-    def get_params_for_model_type(self, model_type: str) -> dict:
-        """根据模型类型获取对应的参数配置"""
-        match model_type:
-            case "anthropic" | "bedrock":
-                return self.anthropic.to_dict()
-            case _:
-                return self.openai.to_dict()
+    def get_params_for_model_type(self, protocol: str) -> dict:
+        """根据协议（anthropic / openai）获取对应的参数配置"""
+        cfg = self.anthropic if protocol == "anthropic" else self.openai
+        return cfg.to_dict()
 
 
 class SkillExecutionConfig(BaseModel):

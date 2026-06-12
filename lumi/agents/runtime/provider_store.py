@@ -1,26 +1,30 @@
 """模型供应商配置（profile）持久化 — 用户自定义的 base_url / api_key / 多个 model。
 
-一个 profile = 一套连接（name、base_url、api_key）+ 该连接下的一组模型 models。
-协议（OpenAI / Anthropic 客户端）仍由 model 名自动判定（见 model_manager.detect_model_type）。
+一个 profile = 一套连接（name、base_url、api_key）+ 该连接下的一组模型 models
++ 按模型的思考档位 effort（model → level，只存非 auto）。
+协议（OpenAI / Anthropic 客户端）仍由 model 名自动判定（见 model_manager.detect_protocol）。
 active 指向「某 profile 下的某个 model」。存储为 ~/.lumi/providers.json（明文，chmod 600）：
 
     {"active": {"provider": "<id>", "model": "<model>"},
-     "profiles": [{"id","name","base_url","api_key","models":["m1","m2"]}, ...]}
+     "profiles": [{"id","name","base_url","api_key",
+                   "models":["m1","m2"], "effort":{"m1":"high"}}, ...]}
 
 无 textual 依赖，可在 headless 服务（lumi serve）中直接使用。
-兼容旧格式（profile 用单个 "model" 字段、active 为字符串 id）。
+兼容旧格式（profile 用单个 "model" 字段、active 为字符串 id；
+顶层全局 "effort" 字段已废弃，读取时忽略）。
 """
 
 from __future__ import annotations
 
 import json
 import uuid
-from dataclasses import asdict, dataclass
+from dataclasses import asdict, dataclass, field, replace
 from pathlib import Path
 
 from lumi.agents.runtime.checkpoint import _atomic_write_json
 from lumi.utils.config.global_manager import GLOBAL_CONFIG_DIR
 from lumi.utils.logger import logger
+from lumi.utils.model_manager import allowed_levels, get_default_model_name
 
 # active 选中项：provider id + 该 provider 下的某个 model
 Active = dict  # {"provider": str, "model": str}
@@ -34,6 +38,8 @@ class ProviderProfile:
     base_url: str
     api_key: str
     models: tuple[str, ...]
+    effort: dict[str, str] = field(default_factory=dict)
+    """按模型的思考档位（model → level），只存非 auto。"""
 
 
 def _path() -> Path:
@@ -50,12 +56,19 @@ def _coerce_profile(x: dict) -> ProviderProfile | None:
     models = tuple(
         m.strip() for m in (raw_models or []) if isinstance(m, str) and m.strip()
     )
+    raw_effort = x.get("effort")
+    if not isinstance(raw_effort, dict):
+        raw_effort = {}
+    effort = {
+        m: lv for m, lv in raw_effort.items() if m in models and isinstance(lv, str)
+    }
     return ProviderProfile(
         id=x["id"],
         name=x.get("name", ""),
         base_url=x.get("base_url", ""),
         api_key=x.get("api_key", ""),
         models=models,
+        effort=effort,
     )
 
 
@@ -100,17 +113,66 @@ def _save(profiles: list[ProviderProfile], active: dict) -> None:
     _atomic_write_json(_path(), payload, mode=0o600)
 
 
-def get_active() -> tuple[ProviderProfile, str] | None:
-    """返回当前 (profile, model)；无可用项时 None。"""
-    profiles, active = load()
-    prof = next((p for p in profiles if p.id == active["provider"]), None)
-    if prof is None or not active["model"]:
+def set_effort(provider_id: str, model: str, level: str) -> str | None:
+    """设置某 (provider, model) 的思考档位并持久化；非法时返回 None。
+
+    合法档位 = model_catalog.allowed_levels(model)；auto 永远合法
+    且即删除记录（恢复"未设置=不传参数"，只存非 auto）。
+    """
+    if level != "auto" and level not in allowed_levels(model):
         return None
-    return prof, active["model"]
+    profiles, active = load()
+    prof = next((p for p in profiles if p.id == provider_id), None)
+    if prof is None or model not in prof.models:
+        return None
+    effort = {m: lv for m, lv in prof.effort.items() if m != model}
+    if level != "auto":
+        effort[model] = level
+    out = [p for p in profiles if p.id != provider_id]
+    out.append(replace(prof, effort=effort))
+    _save(out, active)
+    return level
+
+
+@dataclass(frozen=True)
+class ResolvedModel:
+    """模型 + 连接 + 思考档位的解析结果；base_url / api_key 为空表示用 env / SDK 默认。"""
+
+    model: str
+    base_url: str
+    api_key: str
+    effort: str = "auto"
+
+
+def resolve(model_name: str | None = None) -> ResolvedModel:
+    """解析模型 + 连接 + 档位的单一事实源（一次读盘）。
+
+    model_name 为 None → 用 active (profile, model)，无 active 回退 env 默认模型；
+    指定 model_name → 反查包含它的 profile（active 优先），查不到则无连接覆盖。
+    """
+    profiles, active = load()
+    if model_name is None:
+        prof = next((p for p in profiles if p.id == active["provider"]), None)
+        if prof and active["model"]:
+            model = active["model"]
+            return ResolvedModel(
+                model, prof.base_url, prof.api_key, prof.effort.get(model, "auto")
+            )
+        return ResolvedModel(get_default_model_name(), "", "")
+
+    for p in sorted(profiles, key=lambda p: p.id != active["provider"]):
+        if model_name in p.models:
+            return ResolvedModel(
+                model_name, p.base_url, p.api_key, p.effort.get(model_name, "auto")
+            )
+    return ResolvedModel(model_name, "", "")
 
 
 def upsert(profile: dict) -> ProviderProfile:
-    """新增或按 id 更新一个 profile（models 为列表，去空去重保序）。"""
+    """新增或按 id 更新一个 profile（models 为列表，去空去重保序）。
+
+    思考档位不经此通道（set_effort 专用）：保留旧记录中仍存在的模型的档位。
+    """
     profiles, active = load()
     pid = profile.get("id") or uuid.uuid4().hex[:8]
     seen: set[str] = set()
@@ -119,12 +181,15 @@ def upsert(profile: dict) -> ProviderProfile:
         for m in (s.strip() for s in profile.get("models", []) if isinstance(s, str))
         if m and not (m in seen or seen.add(m))
     )
+    old = next((p for p in profiles if p.id == pid), None)
+    effort = {m: lv for m, lv in old.effort.items() if m in models} if old else {}
     saved = ProviderProfile(
         id=pid,
         name=profile.get("name", ""),
         base_url=profile.get("base_url", ""),
         api_key=profile.get("api_key", ""),
         models=models,
+        effort=effort,
     )
     out = [p for p in profiles if p.id != pid]
     out.append(saved)

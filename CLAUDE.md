@@ -22,6 +22,16 @@ Lumi 并非仅仅面向Coder，也面向所有非技术人员。
 
 - 对于不确定的东西不要"猜"而是"验证"，禁止"可能是这样"的行为
 
+## UI 方案协作方式
+
+涉及 UI 样式 / 动效 / 交互的改动，**先做可视化示例让用户确认，再落地代码**：
+
+1. 写独立 HTML demo 到项目根的 `.demos/` 目录（已 gitignore，不进仓库；取 `desktop/src/index.css` 的主题色值，观感与应用一致），用 `open` 在浏览器打开给用户看。
+2. 动效与多状态流转做成循环播放的动态演示；多个候选方案并列展示供挑选。
+3. 用户确认或微调后再改真实代码。
+
+品牌视觉：Lumi = 光明。动效用"光"的语言（`index.css` 的 `.lumi-orb` 光点光晕），品牌金走 `--color-accent` + `color-mix`（亮暗主题自适应），不写死色值；**一静一动**——图标动、文字静，不给文字加动效。
+
 ## 架构概要
 
 ### Agent Graph（LangGraph）
@@ -88,6 +98,7 @@ START → PreprocessMessages → CallModel → is_use_tool() 条件路由:
 - **协议单一事实源**：`protocol/events.json`。TS 端 import derive 类型，Python 端由 `tests/server/test_protocol_contract.py` 锁住事件名/方法名一致——改协议只改这一处。
 - **会话元数据**：列表由 checkpoint 派生（`tui/session_store.py`），但 pin/重命名等用户标记存在 `tui/session_meta.py` 的 JSON sidecar（`~/.lumi/checkpoints/session_meta.json`），`list_sessions` 合并后置顶排序。删除经 `bridge.delete_thread()` 一并清理 LangGraph + 文件级 checkpoint。
 - **前端**（`desktop/src/`）：`gateway.ts` 每会话一条 WS 连接（指数退避重连）；`App.tsx` 会话状态机 + 聊天流渲染；`Sidebar.tsx` 会话列表 + `⋮` 右键菜单（置顶/重命名/删除）。
+- **模型解析与思考管理**（详见 `docs/architecture/thinking.md`）：`provider_store.resolve()` 是「模型 + 连接 + 思考档位」单一事实源；`create_llm(apply_effort=...)` 默认不注入思考参数（仅主对话链 `call_model` 传 True，内部链天然干净）。思考能力（有无/档位枚举/开关）来自 models.dev（`utils/model_catalog.py`，缓存 `~/.lumi/cache/`，context_length 同源），档位按模型存 profile 的 `effort` dict；`model_manager.effort_params()` 是档位→协议参数的唯一映射点（原生值直传，不存在档位翻译；auto = 不传任何参数）。入口为 desktop ModelPicker（Claude 式三行 + 二级菜单）与 TUI `/effort`。
 
 ### 风格系统（Styles）
 

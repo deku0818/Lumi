@@ -43,6 +43,7 @@ _AGENT_CANCEL_OUTPUTS: Final[frozenset[str]] = frozenset(
 # MODEL_END 不在此映射中，保持当前阶段不变
 _PHASE_MAP: Final[dict[EventKind, RunPhase]] = {
     EventKind.MESSAGE_START: RunPhase.THINKING,
+    EventKind.THINKING_DELTA: RunPhase.THINKING,
     EventKind.MESSAGE_DELTA: RunPhase.STREAMING,
     EventKind.TOOL_GENERATING: RunPhase.STREAMING,  # chunk 阶段模型仍在流式输出
     EventKind.TOOL_START: RunPhase.TOOL_RUNNING,

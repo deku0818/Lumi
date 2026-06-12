@@ -27,7 +27,7 @@ from lumi.agents.tools import get_tools
 from lumi.agents.permissions.engine import PermissionEngine
 from lumi.utils.config import CheckpointMode, GlobalConfigManager
 from lumi.utils.logger import logger
-from lumi.utils.model_manager import get_default_model_name
+from lumi.agents.runtime import provider_store
 from lumi.utils.read_config import get_config
 
 
@@ -255,7 +255,7 @@ async def create_agent(
     Args:
         tools: 工具列表，默认从注册表加载全部工具
         system_prompt: 系统提示词，默认从配置文件加载
-        model_name: 模型名称，默认使用环境变量配置
+        model_name: 模型名称，默认使用 active 供应商模型（无则 env 默认）
         checkpoint: 检查点模式，None 表示不使用 checkpointer
         permission_engine: 权限引擎实例，传入时复用（子 agent 场景），
                            None 时新建
@@ -272,7 +272,7 @@ async def create_agent(
     if system_prompt is None:
         system_prompt = config.load_system_prompt()
     if model_name is None:
-        model_name = get_default_model_name()
+        model_name = provider_store.resolve().model
 
     # 复用或新建权限引擎
     if permission_engine is None:
@@ -291,33 +291,3 @@ async def create_agent(
         permission_engine=permission_engine,
     )
     return agent, context
-
-
-if __name__ == "__main__":
-    import asyncio
-
-    from langchain_core.messages import HumanMessage
-
-    async def main():
-        # 加载所有已注册的工具
-        tools = await get_tools()
-        print(f"已加载 {len(tools)} 个工具: {[t.name for t in tools]}")
-
-        agent = LumiAgent()
-        context = LumiAgentContext(
-            tools=tools,
-            system_prompt="You are a helpful assistant.",
-            model_name="qwen3-max",
-        )
-        inputs = {
-            "messages": [
-                HumanMessage(
-                    content="帮我写一个python脚本呗，只要hello word 即可，在/Users/y-pc/Cocoon 目录下"
-                )
-            ],
-            "tool_mode": "default",
-        }
-        response = await agent.graph.ainvoke(inputs, context=context)
-        print(response)
-
-    asyncio.run(main())

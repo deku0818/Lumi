@@ -12,6 +12,7 @@
         set_provider    params: {provider, model}                         → {active:{provider,model}, model}
         save_provider   params: {profile}  # profile.models:[...]         → {profiles:[...], active}
         delete_provider params: {id}                                      → {profiles:[...], active}
+        set_effort      params: {provider, model, level}                  → {effort}  # 档位 ∈ 该模型能力(models.dev)
         list_sessions   params: {limit?}                                  → {sessions:[...]}
         new_session     params: {}                                        → {thread_id}
         switch_session  params: {thread_id}                               → {thread_id}
@@ -86,6 +87,11 @@ async def lifespan(app: FastAPI):
 
     apply_all()
     get_config().apply_env()
+
+    # 后台刷新 models.dev 模型目录（思考能力 + context_length 数据源）
+    from lumi.utils.model_catalog import refresh as refresh_catalog
+
+    asyncio.create_task(refresh_catalog())
 
     # 初始化定时任务子系统（按工作目录隔离，与 TUI 共用 setup_cron）
     cron_runtime = None
@@ -383,6 +389,12 @@ async def _delete_provider(bridge: AgentBridge, run: _RunState, params: dict) ->
         return bridge.delete_provider(params.get("id", ""))
 
 
+async def _set_effort(bridge: AgentBridge, run: _RunState, params: dict) -> dict:
+    return bridge.set_effort(
+        params.get("provider", ""), params.get("model", ""), params.get("level", "")
+    )
+
+
 async def _switch_session(bridge: AgentBridge, run: _RunState, params: dict) -> dict:
     # new_session 不带 thread_id → 生成新的。切 thread 会改写 bridge._config，
     # 须与运行中的轮次互斥
@@ -433,6 +445,7 @@ _RPC_HANDLERS = {
     "set_provider": _set_provider,
     "save_provider": _save_provider,
     "delete_provider": _delete_provider,
+    "set_effort": _set_effort,
     "list_sessions": _list_sessions_rpc,
     "new_session": _switch_session,
     "switch_session": _switch_session,

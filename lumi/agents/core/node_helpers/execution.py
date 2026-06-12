@@ -15,7 +15,8 @@ from json_repair import repair_json
 from jsonschema import ValidationError, validate
 
 from lumi.agents.core.node_helpers.messages import content_to_str, write_offload_file
-from lumi.utils.llm_chain import structured_output, truncate_docs_to_max_tokens
+from lumi.utils.llm_chain import structured_output
+from lumi.utils.token_counter import truncate_docs_to_max_tokens
 from lumi.utils.logger import logger
 from lumi.utils.read_config import get_config
 from lumi.utils.token_counter import str_token_counter
@@ -232,7 +233,6 @@ async def extract_json_with_llm(
         structure=schema,
         model_name=model_name,
         system_prompt="你是一个精确的数据提取助手，严格按照 JSON Schema 输出结构化数据。",
-        temperature=1,
         max_tokens=16000,
     )
     return await chain.ainvoke({"content": content})

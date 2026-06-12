@@ -41,6 +41,12 @@ export interface ProviderProfile {
   base_url: string
   api_key: string
   models: string[]
+  // 按模型的思考能力与当前档位（list_providers 附带，来自 models.dev）。
+  // control 决定渲染形态：none 不渲染 / effort 档位列表 / toggle 开关。
+  thinking?: Record<
+    string,
+    { control: 'none' | 'effort' | 'toggle'; levels: string[]; effort: string }
+  >
 }
 
 // 当前选中项：某 provider 下的某个 model

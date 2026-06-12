@@ -1,6 +1,5 @@
 import asyncio
 import json
-import os
 
 import httpx
 from langchain_core.load import dumpd
@@ -9,7 +8,7 @@ from langgraph.graph.state import CompiledStateGraph
 
 from lumi.utils.image import download_image_as_base64
 from lumi.utils.logger import logger
-from lumi.utils.model_manager import detect_model_type
+from lumi.utils.model_manager import detect_protocol, get_default_model_name
 from lumi.utils.read_config import get_config
 
 
@@ -100,13 +99,13 @@ async def message_transform(
         return _convert_content_to_tool_mode(question)
 
     if model_name is None:
-        model_name = os.getenv("LLM_MODEL_NAME", "gpt-4.1-mini")
+        model_name = get_default_model_name()
 
-    model_type = detect_model_type(model_name)
-    if model_type == "openai":
-        return _convert_content_to_openai_format(question, model_name)
-    if model_type == "bedrock":
+    # Bedrock（us.anthropic.claude-*）不支持 URL 图片，需下载转 base64
+    if "anthropic.claude" in model_name.lower():
         return await _convert_content_images_for_bedrock(question)
+    if detect_protocol(model_name) == "openai":
+        return _convert_content_to_openai_format(question, model_name)
     # anthropic: 保持原格式
     return question
 
