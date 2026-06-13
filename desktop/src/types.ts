@@ -27,6 +27,13 @@ export type Item =
     }
   | { id: number; kind: 'notice'; text: string }
 
+// 项目：手动登记的工作目录（~/.lumi/projects.json，按 last_used 降序下发）
+export interface Project {
+  name: string
+  path: string
+  last_used: number
+}
+
 // 斜杠命令（对齐后端 list_commands：当前为技能命令）
 export interface SlashCommand {
   name: string
@@ -108,6 +115,7 @@ declare global {
   interface Window {
     lumi: {
       getConnection: () => Promise<{ wsUrl: string }>
+      pickDirectory?: () => Promise<string | null>
       notify?: (payload: { title: string; body?: string; tag?: string }) => Promise<void>
       onNotifyClick?: (cb: (tag: string) => void) => void
     }

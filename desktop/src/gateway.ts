@@ -5,6 +5,7 @@ import type {
   CronJob,
   CronRun,
   HistoryItem,
+  Project,
   ProviderProfile,
   RpcMethod,
   SessionMeta,
@@ -141,6 +142,34 @@ export class Gateway {
       profiles: ProviderProfile[]
       active: ActiveModel
     }>('delete_provider', { id })
+  }
+
+  setWorkspace(path: string): Promise<{ workspace: string }> {
+    return this.request<{ workspace: string }>('set_workspace', { path })
+  }
+
+  listProjects(): Promise<{ projects: Project[]; current: string }> {
+    return this.request<{ projects: Project[]; current: string }>('list_projects')
+  }
+
+  addProject(path: string, name = ''): Promise<{ projects: Project[] }> {
+    return this.request<{ projects: Project[] }>('add_project', { path, name })
+  }
+
+  removeProject(path: string): Promise<{ projects: Project[] }> {
+    return this.request<{ projects: Project[] }>('remove_project', { path })
+  }
+
+  renameProject(path: string, name: string): Promise<{ projects: Project[] }> {
+    return this.request<{ projects: Project[] }>('rename_project', { path, name })
+  }
+
+  addFolder(path: string): Promise<{ folders: string[] }> {
+    return this.request<{ folders: string[] }>('add_folder', { path })
+  }
+
+  removeFolder(path: string): Promise<{ folders: string[] }> {
+    return this.request<{ folders: string[] }>('remove_folder', { path })
   }
 
   listSessions(): Promise<{ sessions: SessionMeta[] }> {

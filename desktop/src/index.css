@@ -322,6 +322,29 @@ pre {
 .lumi-orb-idle::before { animation: none; opacity: 0; }
 .lumi-orb-idle::after { animation: none; opacity: 0.75; }
 
+/* ── 项目卡片：当前项目名旁一粒静止金点；卡片切换/进入页面时光环扩散一次
+   （一静一动：平时全静，变化的一瞬用「光」反馈） ── */
+@keyframes lumi-ripple-once {
+  0% { transform: scale(0.5); opacity: 0.9; }
+  80% { transform: scale(2.4); opacity: 0; }
+  100% { opacity: 0; }
+}
+.proj-dot { position: relative; width: 8px; height: 8px; flex: none; display: inline-block; }
+.proj-dot::after {
+  content: ''; position: absolute; inset: 1.5px; border-radius: 50%;
+  background: radial-gradient(circle,
+    color-mix(in srgb, var(--color-accent) 35%, white) 0%,
+    var(--color-accent) 60%,
+    color-mix(in srgb, var(--color-accent) 40%, transparent) 100%);
+  box-shadow: 0 0 6px color-mix(in srgb, var(--color-accent) 80%, transparent);
+  opacity: 0.85;
+}
+.proj-dot::before {
+  content: ''; position: absolute; inset: -1px; border-radius: 50%;
+  border: 1.5px solid color-mix(in srgb, var(--color-accent) 60%, transparent);
+  opacity: 0; animation: lumi-ripple-once 0.9s ease-out 1;
+}
+
 
 @layer base {
   * {

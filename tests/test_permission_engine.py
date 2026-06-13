@@ -332,6 +332,52 @@ class TestWorkspaceBoundary:
             is True
         )
 
+    def test_rebase_moves_boundary_to_new_dir(self):
+        """rebase 后边界整体迁移：新目录在界内，旧目录出界，filesystem 全局授权目录同步"""
+        from lumi.agents.permissions.workspace import get_authorized_directory
+
+        old_dir = Path(tempfile.mkdtemp())
+        new_dir = Path(tempfile.mkdtemp())
+        engine = PermissionEngine(old_dir)
+
+        engine.rebase(new_dir)
+
+        assert (
+            engine.check_workspace_boundary(
+                "write", {"file_path": str(new_dir / "file.txt")}
+            )
+            is True
+        )
+        assert (
+            engine.check_workspace_boundary(
+                "write", {"file_path": str(old_dir / "file.txt")}
+            )
+            is False
+        )
+        assert get_authorized_directory() == new_dir.resolve()
+
+    def test_ephemeral_workspace_add_remove(self):
+        """临时工作区：加入后界内，移除后出界（不持久化任何配置文件）"""
+        project_dir = Path(tempfile.mkdtemp())
+        extra = Path(tempfile.mkdtemp())
+        engine = PermissionEngine(project_dir)
+
+        engine.add_ephemeral_workspace(str(extra))
+        assert (
+            engine.check_workspace_boundary(
+                "write", {"file_path": str(extra / "f.txt")}
+            )
+            is True
+        )
+
+        engine.remove_ephemeral_workspace(str(extra))
+        assert (
+            engine.check_workspace_boundary(
+                "write", {"file_path": str(extra / "f.txt")}
+            )
+            is False
+        )
+
 
 class TestPersistence:
     """规则持久化测试"""

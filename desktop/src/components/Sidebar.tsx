@@ -3,6 +3,7 @@ import {
   AlertTriangle,
   ChevronRight,
   Clock,
+  Folder,
   MoreVertical,
   Pin,
   PinOff,
@@ -42,6 +43,7 @@ export const Sidebar = memo(function Sidebar({
   conn,
   model,
   activity,
+  projectsActive,
   scheduledActive,
   cronJobs,
   cronUnread,
@@ -50,6 +52,7 @@ export const Sidebar = memo(function Sidebar({
   onOpenCronJob,
   onSelect,
   onNew,
+  onOpenProjects,
   onOpenScheduled,
   onOpenSettings,
   onPin,
@@ -61,6 +64,7 @@ export const Sidebar = memo(function Sidebar({
   conn: ConnState
   model: string
   activity: Record<string, 'running' | 'attention'>
+  projectsActive: boolean
   scheduledActive: boolean
   cronJobs: CronJob[]
   cronUnread: Record<string, number>
@@ -69,6 +73,7 @@ export const Sidebar = memo(function Sidebar({
   onOpenCronJob: (jobId: string) => void
   onSelect: (threadId: string) => void
   onNew: () => void
+  onOpenProjects: () => void
   onOpenScheduled: () => void
   onOpenSettings: () => void
   onPin: (threadId: string, pinned: boolean) => void
@@ -88,6 +93,15 @@ export const Sidebar = memo(function Sidebar({
           <span className="text-primary text-base leading-none">＋</span>
           {t('sidebar.newChat')}
         </Button>
+        <button
+          onClick={onOpenProjects}
+          className={`no-drag relative w-full flex items-center gap-2 px-3 py-2 rounded-xl text-sm transition ${
+            projectsActive ? 'bg-surface text-ink' : 'text-muted-foreground hover:bg-surface/60 hover:text-ink'
+          }`}
+        >
+          <Folder size={15} className="shrink-0" />
+          {t('sidebar.projects')}
+        </button>
         <button
           onClick={onOpenScheduled}
           className={`no-drag relative w-full flex items-center gap-2 px-3 py-2 rounded-xl text-sm transition ${
@@ -354,7 +368,8 @@ function SessionRow({
 }
 
 // 内联重命名输入框：Enter 提交，Escape 取消，失焦提交；单次解析避免重复触发。
-function RenameInput({
+// ProjectsPage 复用。
+export function RenameInput({
   initial,
   onResolve,
 }: {

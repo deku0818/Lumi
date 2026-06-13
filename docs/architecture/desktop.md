@@ -44,6 +44,7 @@ server → client   {method:"event", params:<wire event>}       # 流式事件
 - **RPC 方法**：
   - 流式：`send_message`、`resume`、`run_command`（运行斜杠命令）。
   - 会话：`list_sessions`、`new_session`、`switch_session`、`load_history`、`pin_session`、`rename_session`、`delete_session`。
+  - 项目 / 工作目录：`list_projects`、`add_project`、`remove_project`、`rename_project`、`set_workspace`（切项目，进程级）、`add_folder` / `remove_folder`（本会话临时目录）。
   - 模型供应商：`list_providers`、`test_provider`、`set_provider`、`save_provider`、`delete_provider`。
   - 定时任务：`list_cron_jobs`、`create/update/delete/toggle_cron_job`、`run_cron_job`、`list_cron_runs`。
   - 其它：`stop`（中止当前流式轮）、`list_commands`（拉取斜杠命令）。
@@ -72,6 +73,15 @@ shell / 后台任务会话等全局单例由 `shutdown_shared_runtime()` 在 lif
 - **删除** — `delete_session` 经 `bridge.delete_thread()` 一并清理两类 checkpoint：LangGraph 会话（`LumiAgent.adelete_thread`）+ 文件级 checkpoint（`checkpoint.delete_thread_checkpoint`），再删除 sidecar 元数据条目。
 
 前端 `Sidebar` 每行 hover 出现 `⋮` 菜单（置顶 / 重命名 / 删除）；删除走二次确认弹窗（`ConfirmDialog`），删除当前会话时自动另开新会话顶上。
+
+## 项目与工作目录
+
+**项目 = 工作目录**，是会话隔离单位（会话列表按 checkpoint metadata 的 `workspace_dir` 过滤）。
+
+- **进程级单一工作目录**：工作目录是进程级状态（`os.chdir`），同一时刻整个 app 只有一个；在任一窗口切项目对所有会话生效（与 `set_provider` 的全局性同类）。`set_workspace`（`bridge.py`）`chdir` 后重建权限边界、重置共享 `"default"` shell；为避免其它会话的引擎边界与 cwd 脱节，经进程级弱引用注册表 `_active_bridges` 让**每个**存活 bridge 的权限引擎一并 `rebase` 到新目录（各自保留本会话的临时目录）。前端切项目后另开新会话。`set_workspace` / `add_folder` / `remove_folder` 在 `_dispatch` 中持 `run.lock`，与运行中的轮次互斥。
+- **项目清单**：纯手动登记，持久化在 `~/.lumi/projects.json`（`lumi/server/projects.py`，复用 `_atomic_write_json`），按 `last_used` 降序。`list_projects` 返回 `{projects, current}`；`add_project`（缺省用目录末端名，重复添加保留用户重命名）/ `remove_project`（只删条目，不动磁盘）/ `rename_project`；`set_workspace` 成功后经 `touch_project` 刷新 `last_used`。
+- **添加文件夹（本会话临时）**：`add_folder` / `remove_folder` 把目录临时加进**本连接** bridge 的可访问范围（`engine.add_ephemeral_workspace`，仅内存、不持久化、连接断开即失效），变更经 `<system-reminder>`（`_drain_folder_note` + `prepend_reminder`）在下一条用户消息告知模型。WS 重连得到全新 bridge 后，前端按 `folderStore` 重放 `add_folder` 恢复后端状态。
+- **前端**：侧栏「项目」入口（`onOpenProjects`）打开 `ProjectsPage`（搜索 + 排序 + 卡片，当前项目金描边）；`NewProjectDialog` 选目录 + 命名；composer 底栏 `FolderMenu`（图标 + 数量徽标 + 增减菜单）。原生目录选择器经 Electron `lumi:pick-directory` IPC（`dialog.showOpenDialog`）。
 
 ## 模型供应商管理
 
@@ -113,8 +123,10 @@ macOS 关窗后应用驻留 Dock，sidecar 保持运行，Dock 唤起（activate
 | `desktop/src/components/Sidebar.tsx` | 会话列表 + 右键菜单 + 内联重命名 |
 | `desktop/src/components/{SettingsDialog,ProvidersPanel,ModelPicker}.tsx` | 模型供应商配置 + 快速切换 |
 | `desktop/src/components/CronPage.tsx` | 定时任务管理页 + 任务会话视图 Runs 栏 |
+| `desktop/src/components/{ProjectsPage,NewProjectDialog,FolderMenu}.tsx` | 项目管理页 + 新建项目 + 添加文件夹菜单 |
 | `desktop/src/i18n.ts` | 国际化（中文 / English） |
 | `lumi/server/ws.py` | FastAPI WS 端点 + RPC dispatch |
+| `lumi/server/projects.py` | 项目清单持久化（`~/.lumi/projects.json`） |
 | `lumi/server/protocol.py` | BridgeEvent → wire 序列化 |
 | `lumi/server/cron_rpc.py` | 定时任务 RPC 方法实现 |
 | `lumi/server/desktop_delivery.py` | cron 结果 → WS 广播投递通道 |

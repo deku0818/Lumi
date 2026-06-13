@@ -7,7 +7,9 @@ BridgeEvent 流，并处理子代理追踪、权限审批富化、checkpoint 回
 from __future__ import annotations
 
 import asyncio
+import os
 import time
+import weakref
 from dataclasses import dataclass
 from enum import StrEnum
 from pathlib import Path
@@ -77,6 +79,13 @@ def build_skill_command_blocks(
     return blocks
 
 
+def prepend_reminder(content: str | list, note: str) -> str | list:
+    """把 system-reminder 文本前置到消息 content（兼容 str 与多模态 blocks）。"""
+    if isinstance(content, str):
+        return f"{note}{content}"
+    return [{"type": "text", "text": note}, *content]
+
+
 class EventKind(StrEnum):
     """Bridge 事件类型。
 
@@ -125,6 +134,11 @@ async def shutdown_shared_runtime() -> None:
     await get_session_manager().close_all()
 
 
+# 进程内所有存活的 bridge：工作目录是进程级单一状态（os.chdir），切换时需让
+# 每个 bridge 的权限引擎同步重建边界，否则其它会话的引擎边界会与 cwd 脱节。
+_active_bridges: "weakref.WeakSet[AgentBridge]" = weakref.WeakSet()
+
+
 class AgentBridge:
     """TUI 与 LumiAgent 的桥接层"""
 
@@ -137,6 +151,10 @@ class AgentBridge:
         self._active_agent_runs: set[str] = set()
         self._shadow: FileCheckpointManager | None = None
         self._tracker: FileChangeTracker | None = None
+        # 本会话临时添加的额外可访问目录（不持久化，连接断开即失效）
+        self._extra_folders: list[str] = []
+        # 上次通知模型时的目录快照，用于在下一条用户消息注入增减变更提醒
+        self._notified_folders: set[str] = set()
 
     async def initialize(self) -> None:
         """初始化 Agent"""
@@ -144,6 +162,7 @@ class AgentBridge:
         self._agent, self._context = await create_agent(
             checkpoint=agents_config.checkpoint,
         )
+        _active_bridges.add(self)
         # 应用持久化的 active 供应商 (profile, model)（覆盖 config 默认模型）
         self._apply_active()
         thread_id = generate_thread_id()
@@ -201,6 +220,86 @@ class AgentBridge:
             )
         logger.info("[AgentBridge] 切换到会话: %s", thread_id)
 
+    async def set_workspace(self, path: str) -> dict:
+        """切换进程级工作目录（项目切换的后端入口）。
+
+        chdir 后系统信息注入、新建 checkpoint 的 workspace 元数据、会话列表过滤
+        全部跟随新目录；所有存活 bridge 的权限边界一并重建为新目录，共享 shell
+        会话重置使下一条 bash 命令在新目录启动。前端切项目后会另开新会话。
+        """
+        target = Path(path).expanduser().resolve()
+        if not target.is_dir():
+            raise ValueError(f"目录不存在: {target}")
+        os.chdir(target)
+        # cwd 是进程级单一状态：让每个存活 bridge 的引擎都重建到新目录，
+        # 避免其它会话的引擎边界与 cwd 脱节（split-state）。各自保留本会话的临时目录。
+        for bridge in list(_active_bridges):
+            bridge._rebase_workspace(target)
+        # bash 工具共用 "default" shell 会话，仍驻留旧目录，关闭后惰性重建
+        await get_session_manager().close_session("default")
+        return {"workspace": get_workspace_dir()}
+
+    def _rebase_workspace(self, target: Path) -> None:
+        """把本 bridge 的权限引擎重建到 target，并重新挂上本会话的临时目录。
+
+        rebase 会从新项目重载配置、丢弃内存里的临时目录，故重建后重新加回——
+        既保住本会话的「添加文件夹」，又使 _notified_folders 仍与实际一致（不产生
+        虚假的「已移除」提醒）。
+        """
+        engine = self._context.permission_engine if self._context else None
+        if engine is None:
+            return
+        engine.rebase(target)
+        for folder in self._extra_folders:
+            engine.add_ephemeral_workspace(folder)
+
+    def add_folder(self, path: str) -> dict:
+        """临时把目录加进本会话可访问范围（仅内存，不持久化）。"""
+        target = Path(path).expanduser().resolve()
+        if not target.is_dir():
+            raise ValueError(f"目录不存在: {target}")
+        folder = str(target)
+        if folder not in self._extra_folders:
+            self._extra_folders.append(folder)
+            if (
+                self._context is not None
+                and self._context.permission_engine is not None
+            ):
+                self._context.permission_engine.add_ephemeral_workspace(folder)
+        return {"folders": list(self._extra_folders)}
+
+    def remove_folder(self, path: str) -> dict:
+        """移除临时添加的目录。"""
+        folder = str(Path(path).expanduser().resolve())
+        if folder in self._extra_folders:
+            self._extra_folders.remove(folder)
+            if (
+                self._context is not None
+                and self._context.permission_engine is not None
+            ):
+                self._context.permission_engine.remove_ephemeral_workspace(folder)
+        return {"folders": list(self._extra_folders)}
+
+    def _drain_folder_note(self) -> str:
+        """对比上次通知后的额外目录增减，生成 system-reminder 文本（无变更返回空串）。
+
+        与快照做差集：添加后又移除的目录自然抵消，不产生提醒。
+        """
+        current = set(self._extra_folders)
+        added = [f for f in self._extra_folders if f not in self._notified_folders]
+        removed = sorted(self._notified_folders - current)
+        self._notified_folders = current
+        if not added and not removed:
+            return ""
+        lines: list[str] = []
+        if added:
+            lines.append("用户已将以下目录添加到本会话可访问范围：")
+            lines.extend(f"- {f}" for f in added)
+        if removed:
+            lines.append("用户已将以下目录从本会话可访问范围移除：")
+            lines.extend(f"- {f}" for f in removed)
+        return "<system-reminder>\n" + "\n".join(lines) + "\n</system-reminder>\n"
+
     async def stream_response(
         self,
         content: str | list,
@@ -220,6 +319,11 @@ class AgentBridge:
         # is_meta 消息（如后台任务通知）不创建 checkpoint 条目，避免在 Rewind 中显示
         if not is_meta:
             await self._create_checkpoint_before_turn(content)
+            # 「添加文件夹」的增减变更随下一条真实用户消息告知模型
+            # （meta 轮不消费；在 checkpoint 之后注入，避免污染 Rewind 标签）
+            note = self._drain_folder_note()
+            if note:
+                content = prepend_reminder(content, note)
 
         # 新一轮对话，清理上一轮残留的 agent 追踪状态
         self._active_agent_runs.clear()

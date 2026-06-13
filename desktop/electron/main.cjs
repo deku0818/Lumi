@@ -1,5 +1,5 @@
 // Electron 主进程：拉起 lumi serve sidecar、创建窗口、经 IPC 把 ws 连接信息给 renderer。
-const { app, BrowserWindow, ipcMain, shell, Notification } = require('electron')
+const { app, BrowserWindow, dialog, ipcMain, shell, Notification } = require('electron')
 const { spawn } = require('node:child_process')
 const net = require('node:net')
 const path = require('node:path')
@@ -92,6 +92,12 @@ function createWindow() {
 
 // renderer 经 preload 调用，拿到 sidecar 的 WS 地址（带重连，无需等就绪）
 ipcMain.handle('lumi:connection', () => ({ wsUrl: `ws://127.0.0.1:${wsPort}/ws` }))
+
+// 原生目录选择器（切换工作目录用），取消返回 null
+ipcMain.handle('lumi:pick-directory', async () => {
+  const r = await dialog.showOpenDialog({ properties: ['openDirectory', 'createDirectory'] })
+  return r.canceled ? null : r.filePaths[0]
+})
 
 // 通知点击：把窗口带回前台（还原最小化 + 跨平台聚焦）
 function focusMainWindow() {

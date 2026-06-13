@@ -24,6 +24,7 @@ import type {
   CronJob,
   HistoryItem,
   Item,
+  Project,
   ProviderProfile,
   SessionMeta,
   SlashCommand,
@@ -37,6 +38,9 @@ import { CronPage, RunsRail } from './components/CronPage'
 import { ConfirmDialog } from './components/ConfirmDialog'
 import { SettingsDialog } from './components/SettingsDialog'
 import { ModelPicker } from './components/ModelPicker'
+import { ProjectsPage } from './components/ProjectsPage'
+import { NewProjectDialog } from './components/NewProjectDialog'
+import { FolderMenu } from './components/FolderMenu'
 import { CommandMenu } from './components/CommandMenu'
 import { Composer } from './components/Composer'
 import { isCommandMode, parseCommand, matchCommands } from './slash'
@@ -131,6 +135,13 @@ export default function App() {
   const [active, setActive] = useState('')
   const [conn, setConn] = useState<ConnState>('connecting')
   const [model, setModel] = useState('')
+  // 进程级工作目录 = 当前项目（gateway.ready 下发；切项目对整个 app 生效）
+  const [workspaceDir, setWorkspaceDir] = useState('')
+  const [projects, setProjects] = useState<Project[]>([])
+  const [showNewProject, setShowNewProject] = useState(false)
+  const [pendingRemoveProject, setPendingRemoveProject] = useState<Project | null>(null)
+  // 各会话临时添加的额外可访问目录（连接级状态的前端镜像）
+  const [folderStore, setFolderStore] = useState<Record<string, string[]>>({})
   const [input, setInput] = useState('')
   const [commands, setCommands] = useState<SlashCommand[]>([])
   const [cmdSel, setCmdSel] = useState(0)
@@ -145,8 +156,8 @@ export default function App() {
   const { t } = useI18n()
   const [notify, setNotify] = useState(() => localStorage.getItem('lumi-notify') === '1')
   const [attachments, setAttachments] = useState<{ id: number; dataUrl: string }[]>([])
-  // 主区视图：聊天 / 定时任务管理页 / 任务会话视图（某任务的某次执行对话 + Runs 侧栏）
-  const [view, setView] = useState<'chat' | 'scheduled' | 'cronjob'>('chat')
+  // 主区视图：聊天 / 项目管理页 / 定时任务管理页 / 任务会话视图（某任务的某次执行对话 + Runs 侧栏）
+  const [view, setView] = useState<'chat' | 'projects' | 'scheduled' | 'cronjob'>('chat')
   const [cronRunning, setCronRunning] = useState<string[]>([]) // 运行中任务名
   const [cronVersion, setCronVersion] = useState(0) // 递增触发 cron 数据刷新
   const [cronJobs, setCronJobs] = useState<CronJob[]>([]) // 侧栏任务分组数据
@@ -181,7 +192,12 @@ export default function App() {
   const storeRef = useRef<Record<string, SessionState>>({})
   const notifyRef = useRef(notify)
   const tRef = useRef(t)
+  // 临时目录是连接级（bridge 内存）状态：重连得到全新 bridge 后需重放，故镜像到 ref
+  const folderStoreRef = useRef<Record<string, string[]>>({})
 
+  useEffect(() => {
+    folderStoreRef.current = folderStore
+  }, [folderStore])
   useEffect(() => {
     activeRef.current = active
   }, [active])
@@ -410,10 +426,18 @@ export default function App() {
           gw.onEvent((ev) => {
             if (ev.type === 'gateway.ready') {
               setModel((m) => m || ev.payload.model || '')
+              if (ev.payload.workspace) setWorkspaceDir(ev.payload.workspace)
               if (ready) {
                 // 重连：服务端给的是全新 bridge（新 session_id），切回本连接原 thread
                 // 恢复后端绑定，否则会丢弃原会话、并多出一个幽灵空会话。
-                if (myThread) void gw.switchSession(myThread)
+                // 新 bridge 的临时目录为空，需重放本会话已添加的目录，否则徽标显示
+                // 有目录而后端实际访问不到。
+                if (myThread) {
+                  void gw.switchSession(myThread)
+                  for (const f of folderStoreRef.current[myThread] ?? []) {
+                    void gw.addFolder(f)
+                  }
+                }
                 return
               }
               ready = true
@@ -483,6 +507,18 @@ export default function App() {
     try {
       const r = await anyGw()?.listSessions()
       if (r?.sessions) setSessions(r.sessions)
+    } catch {
+      /* 忽略：连接波动时静默 */
+    }
+  }, [anyGw])
+
+  const refreshProjects = useCallback(async () => {
+    try {
+      const r = await anyGw()?.listProjects()
+      if (r) {
+        setProjects(r.projects)
+        setWorkspaceDir(r.current)
+      }
     } catch {
       /* 忽略：连接波动时静默 */
     }
@@ -585,6 +621,88 @@ export default function App() {
 
   const openScheduled = useCallback(() => setView('scheduled'), [])
 
+  const openProjects = useCallback(() => {
+    setView('projects')
+    void refreshProjects()
+  }, [refreshProjects])
+
+  // 切换项目：set_workspace（进程级）→ 另开新会话回到聊天；点当前项目则直接回聊天
+  const openProject = useCallback(
+    async (path: string) => {
+      if (path === workspaceDir) {
+        setView('chat')
+        return
+      }
+      try {
+        const r = await anyGw()?.setWorkspace(path)
+        if (!r) return
+        setWorkspaceDir(r.workspace)
+        void refreshProjects()
+        void newSession()
+      } catch {
+        /* 忽略：连接波动时静默 */
+      }
+    },
+    [anyGw, workspaceDir, refreshProjects, newSession],
+  )
+
+  // 对话框「创建」：登记（带自定义名）→ 切换为当前项目
+  const createProject = useCallback(
+    async (path: string, name: string) => {
+      setShowNewProject(false)
+      try {
+        const r = await anyGw()?.addProject(path, name)
+        if (r) setProjects(r.projects)
+        await openProject(path)
+      } catch {
+        /* 目录不可用等：保持页面现状 */
+      }
+    },
+    [anyGw, openProject],
+  )
+
+  const removeProjectFromList = useCallback(
+    (path: string) => {
+      anyGw()?.removeProject(path).then((r) => setProjects(r.projects)).catch(() => {})
+    },
+    [anyGw],
+  )
+
+  const renameProjectInList = useCallback(
+    (path: string, name: string) => {
+      anyGw()?.renameProject(path, name).then((r) => setProjects(r.projects)).catch(() => {})
+    },
+    [anyGw],
+  )
+
+  // 临时目录增减都发到当前会话的连接上（连接级/会话级状态），结果回写 folderStore
+  const applyFolderOp = useCallback(
+    async (op: (gw: Gateway) => Promise<{ folders: string[] }>) => {
+      const tid = activeRef.current
+      const gw = connsRef.current[tid]
+      if (!gw) return
+      try {
+        const r = await op(gw)
+        setFolderStore((s) => ({ ...s, [tid]: r.folders }))
+      } catch {
+        /* 忽略：连接波动时静默 */
+      }
+    },
+    [],
+  )
+
+  const addFolder = useCallback(async () => {
+    // 无活跃连接时不弹选择器，避免用户选完目录却被静默丢弃
+    if (!connsRef.current[activeRef.current]) return
+    const dir = await window.lumi.pickDirectory?.()
+    if (dir) void applyFolderOp((gw) => gw.addFolder(dir))
+  }, [applyFolderOp])
+
+  const removeFolder = useCallback(
+    (path: string) => void applyFolderOp((gw) => gw.removeFolder(path)),
+    [applyFolderOp],
+  )
+
   // 拉取任务列表：唯一数据源，侧栏分组与管理页共用（CRUD 后经 onRefresh 刷新）
   const refreshCronJobs = useCallback(() => {
     anyGw()
@@ -668,6 +786,12 @@ export default function App() {
     connsRef.current[tid]?.close()
     delete connsRef.current[tid]
     setStore((s) => {
+      const n = { ...s }
+      delete n[tid]
+      return n
+    })
+    setFolderStore((s) => {
+      if (!(tid in s)) return s
       const n = { ...s }
       delete n[tid]
       return n
@@ -907,6 +1031,11 @@ export default function App() {
           >
             <Plus />
           </Button>
+          <FolderMenu
+            folders={folderStore[active] ?? []}
+            onAdd={() => void addFolder()}
+            onRemove={(p) => void removeFolder(p)}
+          />
           <ModelPicker
             model={model}
             providers={providers}
@@ -960,6 +1089,7 @@ export default function App() {
         conn={conn}
         model={model}
         activity={activity}
+        projectsActive={view === 'projects'}
         scheduledActive={view === 'scheduled'}
         cronJobs={cronJobs}
         cronUnread={cronUnread}
@@ -968,6 +1098,7 @@ export default function App() {
         onOpenCronJob={openCronJob}
         onSelect={selectSession}
         onNew={newSession}
+        onOpenProjects={openProjects}
         onOpenScheduled={openScheduled}
         onOpenSettings={openSettings}
         onPin={pinSession}
@@ -977,7 +1108,18 @@ export default function App() {
 
       <main className="flex-1 flex flex-col min-w-0">
         <div className="h-9 app-drag shrink-0" />
-        {view === 'scheduled' ? (
+        {view === 'projects' ? (
+          <ProjectsPage
+            projects={projects}
+            current={workspaceDir}
+            onOpen={(p) => void openProject(p)}
+            onNew={() => setShowNewProject(true)}
+            onRemove={(path) =>
+              setPendingRemoveProject(projects.find((p) => p.path === path) ?? null)
+            }
+            onRename={renameProjectInList}
+          />
+        ) : view === 'scheduled' ? (
           <CronPage
             api={anyGw}
             jobs={cronJobs}
@@ -1075,6 +1217,24 @@ export default function App() {
           onDelete={deleteProvider}
           onTest={testProvider}
           onClose={() => setShowSettings(false)}
+        />
+      )}
+      {showNewProject && (
+        <NewProjectDialog
+          onCreate={(p, n) => void createProject(p, n)}
+          onCancel={() => setShowNewProject(false)}
+        />
+      )}
+      {pendingRemoveProject && (
+        <ConfirmDialog
+          title={t('projects.removeTitle')}
+          message={t('projects.removeMessage', { name: pendingRemoveProject.name })}
+          confirmLabel={t('projects.remove')}
+          onConfirm={() => {
+            removeProjectFromList(pendingRemoveProject.path)
+            setPendingRemoveProject(null)
+          }}
+          onCancel={() => setPendingRemoveProject(null)}
         />
       )}
       {pendingDelete && (

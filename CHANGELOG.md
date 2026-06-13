@@ -1,5 +1,17 @@
 # Changelog
 
+## [0.1.0a16] - 2026-06-13
+
+### Added
+- **desktop 项目管理**（`docs/architecture/desktop.md`）— **项目 = 工作目录**（会话隔离单位）。侧栏新增「项目」入口打开 `ProjectsPage`（搜索 + 排序 + 卡片，当前项目金描边 + 静止金点）；`NewProjectDialog` 选目录后以末端目录名预填名称（可改）；卡片 `⋮` 菜单重命名 / 移除（二次确认，只删清单不动磁盘）。项目清单纯手动登记、持久化在 `~/.lumi/projects.json`（`lumi/server/projects.py`），按最近使用降序
+- **切换工作目录** — 点项目卡片经 `set_workspace` 切换：进程级 `os.chdir` + 重建权限边界 + 重置共享 shell；经 `_active_bridges` 弱引用注册表让每个存活 bridge 的引擎一并 `rebase`，避免其它会话边界与 cwd 脱节；切换后另开新会话
+- **添加文件夹（本会话临时）** — composer 底栏 `FolderMenu`（文件夹图标 + 数量徽标 + 增减菜单）把目录临时加进本会话可访问范围（`engine.add_ephemeral_workspace`，仅内存、不持久化、连接断开即失效）；增减变更经 `<system-reminder>` 在下一条用户消息告知模型；WS 重连后前端按 `folderStore` 重放恢复后端状态
+- 新增 RPC `list_projects` / `add_project` / `remove_project` / `rename_project` / `set_workspace` / `add_folder` / `remove_folder`；Electron `lumi:pick-directory` IPC 调原生目录选择器
+
+### Changed
+- `lumi/agents/permissions/engine.py` 新增 `rebase`（切项目根重载配置 + 重建边界）与 `add_ephemeral_workspace` / `remove_ephemeral_workspace`（临时目录，区别于持久化的 `add_workspace`）
+- 复用收口 — 相对时间格式化 `timeAgo` 移入 `lib/utils.ts`（按语言缓存 `Intl.RelativeTimeFormat`）；`projects._load` 损坏文件读取对齐 `session_meta` 加日志告警；`projects.json` 走 `_atomic_write_json` 原子写
+
 ## [0.1.0a15] - 2026-06-12
 
 ### Added

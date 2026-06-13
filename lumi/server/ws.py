@@ -13,6 +13,13 @@
         save_provider   params: {profile}  # profile.models:[...]         → {profiles:[...], active}
         delete_provider params: {id}                                      → {profiles:[...], active}
         set_effort      params: {provider, model, level}                  → {effort}  # 档位 ∈ 该模型能力(models.dev)
+        set_workspace   params: {path}                                    → {workspace}  # 进程级（切项目）
+        list_projects   params: {}                                        → {projects:[...], current}
+        add_project     params: {path}                                    → {projects:[...]}
+        remove_project  params: {path}                                    → {projects:[...]}
+        rename_project  params: {path, name}                              → {projects:[...]}
+        add_folder      params: {path}                                    → {folders:[...]}  # 本会话临时
+        remove_folder   params: {path}                                    → {folders:[...]}
         list_sessions   params: {limit?}                                  → {sessions:[...]}
         new_session     params: {}                                        → {thread_id}
         switch_session  params: {thread_id}                               → {thread_id}
@@ -52,6 +59,13 @@ from lumi.agents.cron.delivery import DeliveryManager
 from lumi.agents.cron.runtime import setup_cron
 from lumi.server.cron_rpc import CRON_METHODS, dispatch_cron, set_cron_runtime
 from lumi.server.desktop_delivery import DesktopDelivery
+from lumi.server.projects import (
+    add_project,
+    list_projects,
+    remove_project,
+    rename_project,
+    touch_project,
+)
 from lumi.server.protocol import bridge_event_to_wire, event_frame
 from lumi.tui.session_meta import delete_meta, load_all, update_meta
 from lumi.utils.constants import NOTIFICATION_POLL_INTERVAL
@@ -395,6 +409,41 @@ async def _set_effort(bridge: AgentBridge, run: _RunState, params: dict) -> dict
     )
 
 
+# chdir / 权限边界 / shell 会话都是进程级状态，须与运行中的轮次互斥
+async def _set_workspace(bridge: AgentBridge, run: _RunState, params: dict) -> dict:
+    async with run.lock:
+        result = await bridge.set_workspace(params.get("path", ""))
+    touch_project(result["workspace"])
+    return result
+
+
+async def _list_projects(bridge: AgentBridge, run: _RunState, params: dict) -> dict:
+    return {"projects": list_projects(), "current": get_workspace_dir()}
+
+
+async def _add_project(bridge: AgentBridge, run: _RunState, params: dict) -> dict:
+    return {"projects": add_project(params.get("path", ""), params.get("name", ""))}
+
+
+async def _remove_project(bridge: AgentBridge, run: _RunState, params: dict) -> dict:
+    return {"projects": remove_project(params.get("path", ""))}
+
+
+async def _rename_project(bridge: AgentBridge, run: _RunState, params: dict) -> dict:
+    return {"projects": rename_project(params.get("path", ""), params.get("name", ""))}
+
+
+# 改写本连接 engine 的边界，与运行中的轮次互斥
+async def _add_folder(bridge: AgentBridge, run: _RunState, params: dict) -> dict:
+    async with run.lock:
+        return bridge.add_folder(params.get("path", ""))
+
+
+async def _remove_folder(bridge: AgentBridge, run: _RunState, params: dict) -> dict:
+    async with run.lock:
+        return bridge.remove_folder(params.get("path", ""))
+
+
 async def _switch_session(bridge: AgentBridge, run: _RunState, params: dict) -> dict:
     # new_session 不带 thread_id → 生成新的。切 thread 会改写 bridge._config，
     # 须与运行中的轮次互斥
@@ -446,6 +495,13 @@ _RPC_HANDLERS = {
     "save_provider": _save_provider,
     "delete_provider": _delete_provider,
     "set_effort": _set_effort,
+    "set_workspace": _set_workspace,
+    "list_projects": _list_projects,
+    "add_project": _add_project,
+    "remove_project": _remove_project,
+    "rename_project": _rename_project,
+    "add_folder": _add_folder,
+    "remove_folder": _remove_folder,
     "list_sessions": _list_sessions_rpc,
     "new_session": _switch_session,
     "switch_session": _switch_session,
@@ -503,7 +559,9 @@ async def ws_endpoint(ws: WebSocket) -> None:
     await bridge.initialize()
     await ws.send_json(
         event_frame(
-            "gateway.ready", bridge.current_thread_id, {"model": bridge.model_name}
+            "gateway.ready",
+            bridge.current_thread_id,
+            {"model": bridge.model_name, "workspace": get_workspace_dir()},
         )
     )
 

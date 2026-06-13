@@ -84,6 +84,17 @@ class PermissionEngine:
         for wp in workspace_paths[1:]:
             add_authorized_directory(wp)
 
+    def rebase(self, project_dir: Path) -> None:
+        """切换项目根目录：重载新目录的权限配置并重建工作区边界。"""
+        self._project_dir = project_dir.resolve()
+        try:
+            self._loader = ConfigLoader(self._project_dir)
+            self._config = self._loader.load()
+        except (OSError, json.JSONDecodeError, ValueError, KeyError) as e:
+            logger.error("权限配置加载失败 (%s)，回退到无规则状态", e, exc_info=True)
+            self._config = PermissionConfig()
+        self._rebuild_boundary()
+
     def evaluate(self, tool_name: str, tool_args: dict) -> PermissionDecision:
         """评估单个工具调用的权限决策。
 
@@ -351,6 +362,26 @@ class PermissionEngine:
             self._loader.save_local(updated)
         except Exception:
             logger.error("持久化工作区配置失败: %s", directory, exc_info=True)
+
+    def add_ephemeral_workspace(self, directory: str) -> None:
+        """临时把目录加入工作区（仅内存，不持久化；会话级「添加文件夹」用）。"""
+        if directory in self._config.workspaces:
+            return
+        self._config = PermissionConfig(
+            workspaces=(*self._config.workspaces, directory),
+            permissions=self._config.permissions,
+        )
+        self._rebuild_boundary()
+
+    def remove_ephemeral_workspace(self, directory: str) -> None:
+        """移除临时加入的工作区目录并重建边界。"""
+        if directory not in self._config.workspaces:
+            return
+        self._config = PermissionConfig(
+            workspaces=tuple(w for w in self._config.workspaces if w != directory),
+            permissions=self._config.permissions,
+        )
+        self._rebuild_boundary()
 
     def add_ephemeral_rules(self, allow_exprs: list[str]) -> None:
         """添加临时 allow 规则（仅内存，不持久化）。
