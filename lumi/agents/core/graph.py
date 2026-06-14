@@ -14,14 +14,15 @@ from lumi.agents.core.base_graph import BaseGraph
 from lumi.agents.core.nodes import (
     after_tool_executor,
     call_model,
-    extract_structured_output,
     human_approval,
     is_use_tool,
+    on_agent_stop,
     policy_reject,
     preprocess_messages,
     summarizer,
     tool_executor,
 )
+from lumi.agents.core.hooks import load_hooks
 from lumi.agents.core.state import LumiAgentContext, LumiAgentState
 from lumi.agents.tools import get_tools
 from lumi.agents.permissions.engine import PermissionEngine
@@ -61,7 +62,7 @@ class LumiAgent(BaseGraph):
         self.builder.add_node("ToolExecutor", tool_executor)
         self.builder.add_node("HumanApproval", human_approval)
         self.builder.add_node("PolicyReject", policy_reject)
-        self.builder.add_node("ExtractStructuredOutput", extract_structured_output)
+        self.builder.add_node("OnAgentStop", on_agent_stop)
 
     def _draw_edges(self):
         """添加边"""
@@ -76,7 +77,8 @@ class LumiAgent(BaseGraph):
                 "ToolExecutor": "ToolExecutor",
                 "HumanApproval": "HumanApproval",
                 "PolicyReject": "PolicyReject",
-                "ExtractStructuredOutput": "ExtractStructuredOutput",
+                "OnAgentStop": "OnAgentStop",
+                # END 保留给 is_use_tool 的防御性路径（消息为空/None）
                 "END": END,
             },
         )
@@ -85,7 +87,6 @@ class LumiAgent(BaseGraph):
             after_tool_executor,
             {"CallModel": "CallModel", "END": END},
         )
-        self.builder.add_edge("ExtractStructuredOutput", END)
 
     async def adelete_thread(self, thread_id: str) -> None:
         """
@@ -280,6 +281,12 @@ async def create_agent(
             permission_engine = PermissionEngine(Path.cwd())
         except Exception:
             logger.error("权限引擎创建失败，将以无权限模式运行", exc_info=True)
+
+    # 加载用户配置的 Shell hooks（幂等，进程内首次生效；坏配置 log 跳过不致命）
+    try:
+        load_hooks(Path.cwd())
+    except Exception:
+        logger.error("hooks 配置加载失败，已跳过", exc_info=True)
 
     if checkpointer is None:
         checkpointer = await create_checkpointer(checkpoint)

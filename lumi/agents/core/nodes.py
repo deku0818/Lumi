@@ -1,14 +1,17 @@
 from langchain_core.messages import (
+    AIMessage,
     HumanMessage,
     RemoveMessage,
     SystemMessage,
     ToolMessage,
 )
+from langchain_core.runnables import RunnableConfig
 from langgraph.graph import END
 from langgraph.prebuilt import ToolNode
 from langgraph.types import Command, interrupt
 from langgraph.runtime import Runtime
 
+from lumi.agents.core.hooks import HookContext, dispatch_hooks, has_hooks
 from lumi.agents.core.node_helpers.execution import (
     handle_tool_error,
     truncate_tool_results,
@@ -22,11 +25,13 @@ from lumi.agents.tools.capability import is_file_edit_tool, is_write_tool
 from lumi.agents.permissions.models import PermissionDecision
 from lumi.agents.permissions.safety import is_bypass_immune
 from lumi.agents.core.structured_tool import (
+    MAX_CONSECUTIVE_FAILURES,
     STRUCTURED_OUTPUT_INSTRUCTION,
-    apply_output_enrich,
+    apply_enrich_to_command,
+    count_consecutive_structured_output_failures,
     create_structured_output_tool,
-    extract_structured_args,
-    is_structured_output_call,
+    format_structured_output_abort_message,
+    is_internal_tool,
 )
 from lumi.agents.core.response import extract_ainvoke_content, message_transform
 from lumi.agents.core.preprocessing.summary import inject_summary_into_message
@@ -46,21 +51,21 @@ async def call_model(state: LumiAgentState, runtime: Runtime[LumiAgentContext]) 
     model_name = runtime.context.model_name
     tools = runtime.context.tools
 
-    # ToolStrategy: 当 output_schema 存在时注入结构化输出工具，强制 tool_choice="any"
+    # ToolStrategy: output_schema 存在时注入结构化输出真工具（进 ToolExecutor 执行）
     actual_tools = list(tools)
-    tool_choice = None
     output_schema = state.get("output_schema")
     if output_schema:
         actual_tools.append(create_structured_output_tool(output_schema))
         system_prompt += STRUCTURED_OUTPUT_INSTRUCTION
-        tool_choice = "any"
+        # 不强制 tool_choice：模型自决何时调用，OnAgentStop 的 Stop hook 兜底拉回。
+        # 强制 tool_choice="any" 会与 Anthropic thinking 冲突（400）。
 
     chain = tool_call_chain(
         actual_tools,
         system_prompt=system_prompt,
         model_name=model_name,
         max_tokens=get_config().config.agents.max_tokens,
-        tool_choice=tool_choice,
+        tool_choice=None,
         apply_effort=True,  # 思考档位只在主对话链生效
     )
     iterations = state.get("iterations", 1)
@@ -87,23 +92,106 @@ async def call_model(state: LumiAgentState, runtime: Runtime[LumiAgentContext]) 
     return {"messages": [response], "iterations": iterations + 1}
 
 
-async def tool_executor(
-    state: LumiAgentState, runtime: Runtime[LumiAgentContext]
-) -> dict | Command | list:
-    """工具执行器，负责执行LLM调用的工具"""
-    tools = runtime.context.tools
+def _cmd_messages(cmd: Command) -> list:
+    """从 hook 返回的 Command 取出注入的 messages（无则空列表）。"""
+    return list((cmd.update or {}).get("messages") or [])
 
+
+async def tool_executor(
+    state: LumiAgentState,
+    runtime: Runtime[LumiAgentContext],
+    config: RunnableConfig,
+) -> dict | Command | list:
+    """工具执行器，负责执行LLM调用的工具。
+
+    工具执行前后分发 PreToolUse / PostToolUse hooks（collect 模式）：
+    - PreToolUse：``Block`` 补齐 ToolMessage(status=error) 配对后终止；
+      ``AdditionalContext`` 收集为 reminder，工具仍执行，结果注入 ToolMessage 之后。
+    - PostToolUse：hook 看到截断后的最终 ToolMessage，reminder 追加到末尾。
+    工具自身返回 Command（ask/agent 等控制流）的少见路径保持直返，不接 reminder /
+    PostToolUse——这些工具用 Command 自定义路由，注入会破坏其控制流。
+    """
+    tools = list(runtime.context.tools)
+    output_schema = state.get("output_schema")
+    enrich = state.get("output_enrich") if output_schema else None
+    if output_schema:
+        # 结构化输出真工具进 ToolExecutor 执行（与 call_model 注入同一 lru_cache 实例）
+        tools = tools + [create_structured_output_tool(output_schema)]
+
+    # 1. PreToolUse hooks
+    last_message = state["messages"][-1]
+    pre_tool_calls = list(getattr(last_message, "tool_calls", []) or [])
+    # 内部伪工具 __structured_output__ 不暴露给用户 hook（否则宽 matcher 会误触发，
+    # Block 还会破坏结构化输出流）；但保留在 pre_tool_calls 用于 Block 的 ToolMessage 配对。
+    visible_tool_calls = [
+        tc for tc in pre_tool_calls if not is_internal_tool(tc.get("name", ""))
+    ]
+    extra_msgs: list = []
+    # 无 PreToolUse hook 时跳过整段——避免每个工具轮白白构造 HookContext + tool_names。
+    if has_hooks("PreToolUse"):
+        pre_ctx = HookContext(
+            state=state,
+            config=config,
+            event="PreToolUse",
+            payload={
+                "tool_calls": visible_tool_calls,
+                "tool_names": [t.name for t in tools if not is_internal_tool(t.name)],
+            },
+        )
+        pre_cmd = await dispatch_hooks(
+            "PreToolUse", pre_ctx, default_goto="ToolExecutor", mode="collect"
+        )
+        if pre_cmd is not None:
+            if pre_cmd.goto == END:
+                # Block：补齐 ToolMessage 配对，避免残留 tool_call 致 LangGraph 校验失败
+                existing = _cmd_messages(pre_cmd)
+                reason = next(
+                    (m.content for m in existing if isinstance(m, AIMessage)), "blocked"
+                )
+                tool_msgs = [
+                    ToolMessage(
+                        content=reason,
+                        tool_call_id=tc.get("id", ""),
+                        name=tc["name"],
+                        status="error",
+                    )
+                    for tc in pre_tool_calls
+                ]
+                return Command(
+                    goto=END,
+                    update={
+                        **(pre_cmd.update or {}),
+                        "messages": [*tool_msgs, *existing],
+                    },
+                )
+            if pre_cmd.goto != "ToolExecutor":
+                # hook 显式自定义路由，原样透传
+                return pre_cmd
+            extra_msgs = _cmd_messages(pre_cmd)
+
+    # 2. 执行工具
     tool_node = ToolNode(tools, handle_tool_errors=handle_tool_error)
     tool_messages = await tool_node.ainvoke(state)
 
-    # 3. 处理返回值
-    # 兼容 ToolNode 返回值格式（可能是字典、列表或 Command）
+    # 3. 工具自带 Command 控制流（含 structured_output 成功写入）：保持直返
     if isinstance(tool_messages, Command):
-        return tool_messages
+        # structured_output 成功时 Command.update 含 structured_output，按规则 enrich
+        return apply_enrich_to_command(tool_messages, enrich)
     elif isinstance(tool_messages, list):
-        has_command = any(isinstance(item, Command) for item in tool_messages)
-        if has_command:
-            return tool_messages
+        if any(isinstance(item, Command) for item in tool_messages):
+            # 混合返回（Command 控制流 + 普通 ToolMessage）：仍要截断普通结果防 token
+            # 爆炸，并对 structured_output Command 应用 enrich；PreToolUse reminder 一并
+            # 追加。PostToolUse 在此罕见路径不接（含 goto 的 Command 注入会破坏控制流）。
+            await truncate_tool_results(
+                [m for m in tool_messages if isinstance(m, ToolMessage)]
+            )
+            processed = [
+                apply_enrich_to_command(item, enrich)
+                if isinstance(item, Command)
+                else item
+                for item in tool_messages
+            ]
+            return [*processed, *extra_msgs] if extra_msgs else processed
         messages_list = tool_messages
     else:
         messages_list = tool_messages.get("messages", [])
@@ -111,7 +199,63 @@ async def tool_executor(
     # 4. 截断结果（含卸载）
     await truncate_tool_results(messages_list)
 
-    return {"messages": messages_list}
+    # 5. PreToolUse 收集的 reminder 注入到 ToolMessage 之后
+    final_msgs = [*messages_list, *extra_msgs]
+
+    # 6. PostToolUse hooks（看到截断后的最终 ToolMessage）——无 hook 时跳过构造
+    if has_hooks("PostToolUse"):
+        post_ctx = HookContext(
+            state=state,
+            config=config,
+            event="PostToolUse",
+            payload={
+                "tool_calls": visible_tool_calls,
+                "tool_messages": [
+                    m
+                    for m in messages_list
+                    if isinstance(m, ToolMessage) and not is_internal_tool(m.name)
+                ],
+            },
+        )
+        post_cmd = await dispatch_hooks(
+            "PostToolUse", post_ctx, default_goto="CallModel", mode="collect"
+        )
+        if post_cmd is not None:
+            post_extra = _cmd_messages(post_cmd)
+            if post_cmd.goto == END:
+                return Command(
+                    goto=END, update={"messages": [*final_msgs, *post_extra]}
+                )
+            final_msgs = [*final_msgs, *post_extra]
+
+    # 7. structured_output 连续失败兜底：本轮累计失败 >= 上限时强制结束循环。
+    #    计数用纯净 messages_list（不含注入的 reminder HumanMessage，否则尾扫会被
+    #    HumanMessage 提前 break 导致计数失真）。
+    if output_schema:
+        abort_msg = _structured_output_abort_message(state, messages_list)
+        if abort_msg is not None:
+            return Command(goto=END, update={"messages": [*final_msgs, abort_msg]})
+
+    return {"messages": final_msgs}
+
+
+def _structured_output_abort_message(
+    state: LumiAgentState, tool_messages: list
+) -> AIMessage | None:
+    """本轮 structured_output 连续失败达上限时返回 abort AIMessage，否则 None。
+
+    abort 时末尾追加人话提示而非工具内部错误，且以 assistant 收尾，方便下一轮续聊。
+    """
+    history = list(state.get("messages") or []) + list(tool_messages)
+    fails = count_consecutive_structured_output_failures(history)
+    if fails < MAX_CONSECUTIVE_FAILURES:
+        return None
+    logger.warning(
+        "[tool_executor] structured_output 连续失败 %d 次（>=%d），强制结束循环",
+        fails,
+        MAX_CONSECUTIVE_FAILURES,
+    )
+    return AIMessage(content=format_structured_output_abort_message(fails))
 
 
 def after_tool_executor(state: LumiAgentState) -> str:
@@ -119,6 +263,17 @@ def after_tool_executor(state: LumiAgentState) -> str:
     if state.get("tool_cancelled"):
         return "END"
     return "CallModel"
+
+
+async def on_agent_stop(state: LumiAgentState, config: RunnableConfig) -> Command:
+    """模型未调任何工具想结束循环时的统一入口，分发 Stop hooks。
+
+    first_intercept 语义：第一个返非 None 的 Stop hook 拦截（如结构化输出未完成
+    时注入 reminder 拉回 CallModel）；全部放行则 Command(goto=END) 正常终止。
+    """
+    ctx = HookContext(state=state, config=config, event="Stop", payload={})
+    cmd = await dispatch_hooks("Stop", ctx, default_goto="CallModel")
+    return cmd if cmd is not None else Command(goto=END)
 
 
 def policy_reject(state: LumiAgentState) -> Command:
@@ -161,8 +316,9 @@ def is_use_tool(state: LumiAgentState, runtime: Runtime[LumiAgentContext]) -> st
     """条件路由函数 - 判断下一步执行哪个节点
 
     路由优先级：
-    1. 无 tool_calls → END
-    2. 结构化输出 → ExtractStructuredOutput
+    1. 无 tool_calls → OnAgentStop（分发 Stop hooks）
+    2. 纯内部伪工具（如结构化输出）→ ToolExecutor（闭包内校验，绕过权限审批）；
+       内部工具与其他工具混合的批次不绕过，落到下方正常权限评估
     3. 全部 bypass 类工具 → ToolExecutor
     4. 执行模式策略守卫 → PolicyReject（Layer 2 模式级工具限制）
     5. bypass-immune 检查（所有模式）→ 命中则 HumanApproval
@@ -188,10 +344,16 @@ def is_use_tool(state: LumiAgentState, runtime: Runtime[LumiAgentContext]) -> st
         tool_calls = []
 
     if not tool_calls:
-        return "END"
+        # 模型未调工具想结束 → OnAgentStop 节点分发 Stop hooks（默认 END）
+        return "OnAgentStop"
 
-    if is_structured_output_call(tool_calls):
-        return "ExtractStructuredOutput"
+    if any(is_internal_tool(tc.get("name", "")) for tc in tool_calls):
+        if all(is_internal_tool(tc.get("name", "")) for tc in tool_calls):
+            # 纯内部伪工具：安全的框架控制流，闭包内自校验，绕过权限审批快速进 ToolExecutor
+            return "ToolExecutor"
+        # 混合批次（内部工具 + 其他工具）：不绕过审批，落到下方正常权限评估，
+        # 兄弟工具该 DENY/ASK/审批的照常处理，内部工具随批一起评估（read-only，无害）
+        logger.warning("[is_use_tool] 内部工具与其他工具混合调用，按正常权限评估整批")
 
     # 权限引擎 DENY 检查（优先于 bypass，deny 规则不可绕过）
     engine = runtime.context.permission_engine
@@ -437,36 +599,6 @@ def _build_reject_messages(
         )
         for tc in tool_calls
     ]
-
-
-async def extract_structured_output(state: LumiAgentState) -> dict:
-    """从结构化输出工具调用中提取结构化数据
-
-    从最后一条 AIMessage 的 tool_calls 中找到 __structured_output__ 结构化输出工具，
-    提取其 args 作为 structured_output。
-    """
-    last_msg = state.get("messages", [])[-1]
-    tool_calls = getattr(last_msg, "tool_calls", [])
-    args = extract_structured_args(tool_calls)
-
-    if args is not None:
-        enrich_rules = state.get("output_enrich")
-        if enrich_rules:
-            try:
-                args = apply_output_enrich(args, enrich_rules)
-            except Exception:
-                logger.error(
-                    "[ExtractStructuredOutput] output_enrich 执行失败，"
-                    "返回未注入的原始结构化输出",
-                    exc_info=True,
-                )
-        logger.debug(
-            "[ExtractStructuredOutput] 成功从结构化输出工具调用中提取结构化数据"
-        )
-        return {"structured_output": args}
-
-    logger.warning("[ExtractStructuredOutput] 未找到结构化输出工具调用，返回空结果")
-    return {"structured_output": {}}
 
 
 async def summarizer(state: LumiAgentState, runtime: Runtime[LumiAgentContext]) -> dict:

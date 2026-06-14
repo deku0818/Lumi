@@ -1,5 +1,19 @@
 # Changelog
 
+## [0.1.0a17] - 2026-06-14
+
+### Added
+- **Hook 机制**（`docs/architecture/hooks.md`）— 在 Agent 生命周期事件上注入外部逻辑，无需改内核。事件 Stop / PreToolUse / PostToolUse 已插桩（Stop 走独立 `OnAgentStop` 薄节点，因条件路由函数不能返回 `Command`）；返回值 `AdditionalContext`（注入 `<system-reminder>`）/ `Block`（拦截）/ `Command`（控制路由），dispatch 三模式 first_intercept / collect / side_effect，单 hook 抛错隔离不拖垮主流程
+- **Shell hook + 三级 hooks.json 配置** — 决策协议（stdin/stdout JSON，`decision: allow/deny/passthrough`）；subprocess 5s 超时 + SIGTERM→SIGKILL、env 仅透传 `LUMI_HOOK_*` 前缀防 secrets 泄露、`matcher` 正则按工具名筛；配置走 `~/.lumi/hooks.json` + `.lumi/hooks.json` + `.lumi/hooks.local.json`（与 permissions 同级同模式，JSONC），单条坏配置 log 跳过不致命；desktop 切工作目录时 `reset_hooks` + `load_hooks` 重载
+
+### Changed
+- **结构化输出：伪工具拦截 → 真工具执行** — `__structured_output__` 改为真工具进 `tool_executor` 执行（删除 `ExtractStructuredOutput` 节点）：闭包内 jsonschema 校验，失败 return `ToolMessage(status=error)` 让模型修正重试；成功写 `Command(update={structured_output})` 不带 goto、模型自决 end_turn。新增 JSON Schema 校验、连续失败保护（`MAX_CONSECUTIVE_FAILURES=5` 强制 END 防烧 token）、Stop hook 兜底（`structured_output_stop_hook` 拉回，`MAX_STOP_PULLBACKS=3` 防死循环）；**移除硬编码 `tool_choice="any"`**（消除与 Anthropic thinking 的 400 冲突），改由模型自决 + hook 兜底
+- 混合批次安全 — 内部伪工具与其他工具混合调用时不再绕过权限审批（`is_internal_tool` 收口「内部工具」判定，纯内部批次才走快速路径）；`__structured_output__` 不暴露给用户 hook payload
+- 轮边界判定收口 — hook 注入的 reminder 带 `is_hook_reminder` 标记（区别于后台通知等真实 meta），连续失败计数 / 拉回计数 / accepted 判定复用共享遍历器 `meta_message.iter_current_turn`（跳过 reminder、真实 HumanMessage 为边界），避免跨轮泄漏
+
+### Fixed
+- **desktop 复制按钮位置/时机** — 复制按钮改挂在每轮「最后一个 segment」之后（整段助手输出底部，文字后跟工具如 ask 时落在工具下方），不再夹在文字与工具之间；只复制本轮最终那段助手文字（中间过程段不给）；**历史轮始终可复制**（修复：旧逻辑用会话级 `running` 门控会在跑新一轮时隐藏所有历史轮复制），仅对在飞末轮按 `running` 把关；错误气泡（notice）不占复制锚点
+
 ## [0.1.0a16] - 2026-06-13
 
 ### Added

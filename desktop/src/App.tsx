@@ -74,6 +74,10 @@ function groupItems(items: Item[]): Segment[] {
   return segs
 }
 
+// segment 的稳定 React key / 复制映射 key（不依赖数组下标，切片/虚拟化也不错位）
+const segKey = (seg: Segment): string =>
+  seg.kind === 'tools' ? `g${seg.tools[0].id}` : `i${seg.item.id}`
+
 // load_history 的历史项 → 前端 Item
 function restore(h: HistoryItem): Item {
   if (h.kind === 'user') return { id: nid(), kind: 'user', text: h.text ?? '', images: h.images }
@@ -908,6 +912,39 @@ export default function App() {
   const hasMessages = items.length > 0
   // 连续工具分段只随 items 变化重算，避免每次渲染都扫描
   const segments = useMemo(() => groupItems(items), [items])
+  // 复制按钮挂在每轮「最后一个 segment」之后——即整段助手输出的底部（像 Claude 的动作栏
+  // 在消息末尾），而不是夹在文字与其后工具（如 ask）之间。规则：
+  // - 一轮文字↔工具交错时，中间文字段是过程，不给复制；只复制本轮**最终**那段助手文字。
+  // - 按钮落点 = 本轮最后一个可锚定 segment（文字本身，或其后的工具如 ask）下方；
+  //   错误气泡（notice）不占锚点，避免复制按钮挂到红色错误下面。
+  // - copyMap: segment key → 该轮最终助手文本；activeKey: 末轮（在飞轮）的锚点 key。
+  //   渲染时只对 activeKey 这一条按 running 把关（历史轮始终可复制）；末轮 running=true
+  //   （生成中 / ask 等中断 pending）不出，收尾（完成或 stop→turn.complete）才出。
+  const { copyMap, activeKey } = useMemo(() => {
+    const map = new Map<string, string>()
+    let text: string | null = null // 本轮最终助手文字
+    let lastKey: string | null = null // 本轮最后一个可锚定 segment 的 key
+    for (const seg of segments) {
+      const kind = seg.kind === 'item' ? seg.item.kind : 'tools'
+      if (kind === 'user') {
+        if (text && lastKey) map.set(lastKey, text) // 收尾上一轮
+        text = null
+        lastKey = null
+      } else if (kind !== 'notice') {
+        // 助手文字/工具才能锚定复制按钮；错误气泡(notice)跳过，不占锚点
+        lastKey = segKey(seg)
+        if (seg.kind === 'item' && seg.item.kind === 'assistant' && seg.item.text) {
+          text = seg.item.text
+        }
+      }
+    }
+    let activeKey: string | null = null
+    if (text && lastKey) {
+      map.set(lastKey, text) // 末轮收尾，记锚点供 running 把关
+      activeKey = lastKey
+    }
+    return { copyMap: map, activeKey }
+  }, [segments])
 
   // 斜杠命令补全：命令模式下按前缀过滤，菜单可被 Esc 临时关闭
   const cmdMode = isCommandMode(input)
@@ -1140,13 +1177,28 @@ export default function App() {
                 <>
                   <div ref={scrollRef} className="flex-1 overflow-auto">
                     <div className="max-w-3xl mx-auto w-full px-6 py-8 space-y-5">
-                      {segments.map((seg) =>
-                        seg.kind === 'tools' ? (
-                          <ToolGroup key={`g${seg.tools[0].id}`} tools={seg.tools} />
-                        ) : (
-                          <ItemView key={seg.item.id} item={seg.item} />
-                        ),
-                      )}
+                      {segments.map((seg) => {
+                        const key = segKey(seg)
+                        const node =
+                          seg.kind === 'tools' ? (
+                            <ToolGroup key={key} tools={seg.tools} />
+                          ) : (
+                            <ItemView key={key} item={seg.item} />
+                          )
+                        // 只对在飞的末轮（activeKey）按 running 把关；历史轮始终可复制。
+                        // 非复制段直接渲染裸 node（不套 wrapper），仅复制段才包一层挂按钮。
+                        const copyText =
+                          key === activeKey && running ? undefined : copyMap.get(key)
+                        if (!copyText) return node
+                        return (
+                          <div key={key} className="group/copy">
+                            {node}
+                            <div className="mt-1 -ml-1 opacity-0 group-hover/copy:opacity-100 transition-opacity">
+                              <CopyButton text={copyText} />
+                            </div>
+                          </div>
+                        )
+                      })}
                       {/* 状态指示器常驻：运行中显示阶段文案，中断（审批/澄清/计划）时
                           保持显示等待态，完成后退化为无文字的静止光点 */}
                       <StatusIndicator
@@ -1370,16 +1422,8 @@ const ItemView = memo(function ItemView({ item }: { item: Exclude<Item, { kind: 
   }
   if (item.kind === 'assistant') {
     return (
-      <div className="group">
-        <div className="md">
-          <ReactMarkdown remarkPlugins={[remarkGfm]}>{item.text}</ReactMarkdown>
-          {item.streaming && <span className="cursor">▋</span>}
-        </div>
-        {!item.streaming && item.text && (
-          <div className="mt-1 -ml-1 opacity-0 group-hover:opacity-100 transition-opacity">
-            <CopyButton text={item.text} />
-          </div>
-        )}
+      <div className="md">
+        <ReactMarkdown remarkPlugins={[remarkGfm]}>{item.text}</ReactMarkdown>
       </div>
     )
   }

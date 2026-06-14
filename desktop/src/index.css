@@ -231,15 +231,6 @@ pre {
   overflow-wrap: break-word;
 }
 
-@keyframes blink {
-  0%, 100% { opacity: 1; }
-  50% { opacity: 0; }
-}
-.cursor {
-  color: var(--color-accent);
-  animation: blink 1s step-end infinite;
-}
-
 /* ── Markdown 渲染（助手回复，紧凑密度） ── */
 .md {
   line-height: 1.6;

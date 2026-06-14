@@ -22,6 +22,7 @@ from langgraph.errors import GraphBubbleUp
 from langgraph.types import Command
 
 from lumi.agents.core.graph import LumiAgent, create_agent
+from lumi.agents.core.hooks import load_hooks, reset_hooks
 from lumi.agents.core.meta_message import meta_human_message
 from lumi.agents.permissions.models import BYPASS_TOOLS
 from lumi.agents.core.state import LumiAgentContext
@@ -235,6 +236,10 @@ class AgentBridge:
         # 避免其它会话的引擎边界与 cwd 脱节（split-state）。各自保留本会话的临时目录。
         for bridge in list(_active_bridges):
             bridge._rebase_workspace(target)
+        # hooks 是进程全局且只加载一次（_LOADED 守卫）——切项目时同步重载，
+        # 否则新项目的 .lumi/hooks.json 永不生效、旧项目 hook 继续对新工作区触发。
+        reset_hooks()
+        load_hooks(target)
         # bash 工具共用 "default" shell 会话，仍驻留旧目录，关闭后惰性重建
         await get_session_manager().close_session("default")
         return {"workspace": get_workspace_dir()}
