@@ -70,12 +70,29 @@ def allowed_levels(model_name: str) -> tuple[str, ...]:
     entry = lookup(model_name)
     if entry is None or entry.control == "none":
         return ("auto",)
+    # 各形态的原生档位集合；末尾统一追加 Lumi 合成顶档 ultra（思考拉满 + 解锁 workflow
+    # 编排）。仅对有思考能力的模型提供——none 型上面已返回，不渲染 ultra。
     if entry.control == "toggle":
-        return ("on", "off")
-    if detect_protocol(model_name) == "anthropic":
-        return ("auto", *entry.values, "off")
-    extra = ("off",) if entry.has_toggle and "off" not in entry.values else ()
-    return ("auto", *entry.values, *extra)
+        base = ("on", "off")
+    elif detect_protocol(model_name) == "anthropic":
+        base = ("auto", *entry.values, "off")
+    else:
+        extra = ("off",) if entry.has_toggle and "off" not in entry.values else ()
+        base = ("auto", *entry.values, *extra)
+    return (*base, "ultra")
+
+
+def _native_max_level(model_name: str) -> str:
+    """该模型最高原生思考档（ultra 的委派目标）。effort 型取 ``values`` 末档
+    （models.dev 升序，如 Claude→max / GPT→high），toggle 型为 on，无能力为 auto。"""
+    from lumi.utils.model_catalog import lookup
+
+    entry = lookup(model_name)
+    if entry is None or entry.control == "none":
+        return "auto"
+    if entry.control == "toggle":
+        return "on"
+    return entry.values[-1] if entry.values else "auto"
 
 
 def effort_params(model_name: str, level: str) -> dict:
@@ -97,6 +114,11 @@ def effort_params(model_name: str, level: str) -> dict:
     allowed = allowed_levels(model_name)
     if level != "auto" and level not in allowed:
         return {}
+
+    # ultra 非协议值，是 Lumi 顶档：思考层面 = 委派给该模型最高原生档（唯一别名点，
+    # 下游协议分支无需感知 ultra）。「解锁 workflow」由轮内提醒承载，与思考参数无关。
+    if level == "ultra":
+        return effort_params(model_name, _native_max_level(model_name))
 
     if detect_protocol(model_name) == "anthropic":
         if level == "off" or allowed == ("auto",):

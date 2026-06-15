@@ -22,7 +22,8 @@
       "payload": ["job_id", "job_name", "status", "output", "started_at", "duration_ms"],
       "note": "定时任务完成一次执行，由 DesktopDelivery 直接广播（不经 EventKind）"
     },
-    "cron.running": { "payload": ["names"], "note": "当前正在执行的任务名列表，开始/结束时推送" }
+    "cron.running": { "payload": ["names"], "note": "当前正在执行的任务名列表，开始/结束时推送" },
+    "bg_tasks.update": { "payload": ["tasks"], "note": "后台任务（bash/agent/workflow）状态或进度变更，广播全量快照，前端按 thread_id 过滤；task 含 kind/status/output_file/progress" }
   },
   "events_note": "任意事件 payload 都可能附带 parent_run_id（非空时表示属于某个子代理）",
   "methods": {
@@ -57,6 +58,10 @@
     "delete_cron_job": { "params": ["job_id"], "result": ["job_id"] },
     "toggle_cron_job": { "params": ["job_id", "enabled"], "result": ["job"] },
     "run_cron_job": { "params": ["job_id"], "result": ["ok"], "note": "异步触发，结果经 cron.result 推送" },
-    "list_cron_runs": { "params": ["job_id", "limit?"], "result": ["runs"], "note": "run 含 thread_id（非空时可经 switch_session 跳转该次执行的会话续聊）" }
+    "list_cron_runs": { "params": ["job_id", "limit?"], "result": ["runs"], "note": "run 含 thread_id（非空时可经 switch_session 跳转该次执行的会话续聊）" },
+    "list_bg_tasks": { "params": [], "result": ["tasks"], "note": "后台任务全量快照（bash/agent/workflow），前端按当前 thread_id 过滤；亦经 bg_tasks.update 事件实时推送" },
+    "stop_bg_task": { "params": ["task_id"], "result": ["stopped", "error?"], "note": "停止运行中的后台任务（drawer 详情停止按钮）" },
+    "dismiss_bg_task": { "params": ["task_id"], "result": ["dismissed"], "note": "从列表移除一个终态后台任务；运行中不可移除" },
+    "clear_finished_bg_tasks": { "params": [], "result": ["cleared"], "note": "清除当前会话全部终态后台任务，返回移除数" }
   }
 }

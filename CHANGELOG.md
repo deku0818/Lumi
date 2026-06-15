@@ -1,5 +1,24 @@
 # Changelog
 
+## [0.1.0a18] - 2026-06-15
+
+### Added
+- **Workflow 多代理编排**（`docs/architecture/workflow.md`）— `workflow` 工具用一段确定性 Python 脚本编排子代理（移植自 Claude Code 内置 Workflow）。脚本在受限命名空间执行（禁 `import`/`open`，只防误触非安全边界），注入钩子 `agent()`（派 LLM 子代理，`schema` 强制结构化输出）/ `parallel()`（屏障）/ `pipeline()`（无屏障，默认优先）/ `phase()` / `log()` / `args`；并发上限 `min(16, CPU-2)`，终身上限 1000。子代理复用父 `PermissionEngine`（共享工作区边界，读得到父工作文件，review/audit 编排能跑的前提）、`checkpointer=None`、禁用 `agent/workflow/ask/cron/background_task` 防递归。后台 fire-and-forget：立即返回 task_id，跑完经 `NotificationQueue` 推完成通知。**本版不含 `run`/`sh`**（Lumi 无沙箱，确定性活交子代理 bash）
+- **Ultra 思考档位**（`docs/architecture/thinking.md` Ultra 节）— Lumi 合成顶档（对标 Claude Code ultracode）：选中后**原生思考拉到该模型最高档**（`effort_params` 委派 `_native_max_level`，Claude→max / GPT→high，唯一别名点）+ **解锁 workflow 编排**。缓存安全三层：workflow 工具始终注册（不增删工具，prompt 缓存前缀恒定）+ 工具描述写死「仅 Ultra 或用户明确要求时用」+ Ultra 信号经轮内 `<system-reminder>`（`bridge._ultra_note`，前置当轮消息、不碰系统提示词）传达，toggle Ultra 不废 system+tools 缓存。ModelPicker 金光点 Ultra 行 + chip 金字
+- **后台任务中心 drawer**（`docs/architecture/desktop.md`）— 右侧可开关面板，纳管 **bash / agent / workflow** 三类后台任务（`TaskRegistry` 单一注册中心，desktop 首次有了后台任务实时 UI）。头部 `PanelRight` 开关（运行中带脉动金点）；一摞可独立折叠的任务卡片（kind 分派详情，workflow 画实时聚合进度：phase + 进度条 + 在跑数）；终态卡片 hover 移除 ✕ / 头部「清除已完成」，每会话终态自动保留最近 20 条（`_TERMINAL_CAP`）。`TaskRegistry.on_change` 观察者 → ~100ms 去抖 → 广播 `bg_tasks.update`（全量快照，前端按 thread 过滤）；新增 RPC `list_bg_tasks` / `stop_bg_task` / `dismiss_bg_task` / `clear_finished_bg_tasks`
+
+### Fixed
+- **workflow 进度虚高** — `_dispatched` 计数移到子代理 build 成功之后自增：build 失败的 agent 不再计入 `total`，进度条能正常到 100%（之前 `bad agent_name` 一类失败会让 total 永久大于 done）
+- **TUI 无法停止 workflow** — `bg_screen._stop_task` 只认 AGENT/BASH，workflow 静默 no-op；现统一经 `cancel_background_task` 按 kind 分派，三类都能停
+- **跨会话 stop/dismiss** — `stop_bg_task` / `dismiss_bg_task` 加会话归属校验（`_owns_bg_task`），不再能停/移除其它会话的后台任务（`clear_finished` 本就按 thread 限定）
+- **运行中 Duration 不实时** — drawer 加每秒本地 tick（仅面板打开且有任务在跑时计时），运行中任务的用时实时跳动，不再卡在上次事件的值
+
+### Changed
+- **后台任务停止/生命周期收口** — 三类后台任务的「按 kind 停止」从 ws / TUI / `background_task` 三处重复分派收口到 `session.cancel_background_task`（新增 TaskKind 只改一处）；agent / workflow 后台收尾骨架（写文件 / 状态 / 通知）抽成共用 `bg_tasks.run_background_task` + `make_bg_done_callback`，两个 provider 只剩差异化的 produce 闭包
+- **`serialize_task` 字段派生** — 改为从 `BackgroundTaskEntry` dataclass 字段派生（排除 `async_task` / `prompt`），新增字段默认上线、不再因漏改被静默丢弃；前端 `BgTask` 类型是唯一「该不该收」的闸门
+- **广播去抖** — 后台任务变更广播加 ~100ms 合并窗口（`_bg_flush`），workflow 扇出时的高频 `notify_progress` 不再每次全量序列化+广播；`_spawn_broadcast` 收口 cron / bg_tasks 共用的 fire-and-forget 广播模式
+- **工具 description MD 加载收口** — `resolve_tool_md` / `load_tool_md` / `require_tool_field` 从 `plan.py` 提到 `tools/loader.py`，plan 与 workflow 工具共用；`allowed_levels` 的 ultra 追加从 3 处分支收成末尾一次
+
 ## [0.1.0a17] - 2026-06-14
 
 ### Added

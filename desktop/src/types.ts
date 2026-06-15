@@ -111,6 +111,36 @@ export interface HistoryItem {
   done?: boolean
 }
 
+// 后台任务（bash / agent / workflow），后端 TaskRegistry 的序列化快照
+export type BgTaskKind = 'bash' | 'agent' | 'workflow'
+export type BgTaskStatus = 'running' | 'completed' | 'timed_out' | 'failed'
+
+// workflow 实时聚合进度（B2 填充；B1 为 null）。形状由后端引擎定义，前端宽松消费。
+export interface BgTaskProgress {
+  phase?: string
+  done?: number
+  total?: number
+  running?: number
+  agent_count?: number
+  [k: string]: unknown
+}
+
+export interface BgTask {
+  task_id: string
+  kind: BgTaskKind
+  status: BgTaskStatus
+  label: string
+  agent_name: string | null
+  thread_id: string
+  started_at: number
+  completed_at: number | null
+  exit_code: number | null
+  error: string | null
+  agent_count: number | null
+  output_file: string
+  progress: BgTaskProgress | null
+}
+
 declare global {
   interface Window {
     lumi: {

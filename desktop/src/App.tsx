@@ -16,11 +16,13 @@ import {
   Square,
   Plus,
   X,
+  PanelRight,
   type LucideIcon,
 } from 'lucide-react'
 import { Gateway, type ConnState } from './gateway'
 import type {
   ActiveModel,
+  BgTask,
   CronJob,
   HistoryItem,
   Item,
@@ -34,6 +36,7 @@ import { ApprovalDialog } from './components/ApprovalDialog'
 import { ClarifyDialog, ASK_CANCELLED } from './components/ClarifyDialog'
 import { PlanDialog, PLAN_REJECTED } from './components/PlanDialog'
 import { Sidebar } from './components/Sidebar'
+import { BgTasksDrawer } from './components/BgTasksDrawer'
 import { CronPage, RunsRail } from './components/CronPage'
 import { ConfirmDialog } from './components/ConfirmDialog'
 import { SettingsDialog } from './components/SettingsDialog'
@@ -161,6 +164,8 @@ export default function App() {
   const [notify, setNotify] = useState(() => localStorage.getItem('lumi-notify') === '1')
   const [attachments, setAttachments] = useState<{ id: number; dataUrl: string }[]>([])
   // 主区视图：聊天 / 项目管理页 / 定时任务管理页 / 任务会话视图（某任务的某次执行对话 + Runs 侧栏）
+  const [bgTasks, setBgTasks] = useState<BgTask[]>([]) // 后台任务全量快照（按 thread 过滤展示）
+  const [bgDrawerOpen, setBgDrawerOpen] = useState(false) // 后台任务右栏开关（默认关，有任务时头部出现 PanelRight）
   const [view, setView] = useState<'chat' | 'projects' | 'scheduled' | 'cronjob'>('chat')
   const [cronRunning, setCronRunning] = useState<string[]>([]) // 运行中任务名
   const [cronVersion, setCronVersion] = useState(0) // 递增触发 cron 数据刷新
@@ -277,6 +282,11 @@ export default function App() {
     // cron 事件是进程级广播（与会话无关），在 session 路由之前单独处理
     if (type === 'cron.running') {
       setCronRunning(payload.names ?? [])
+      return
+    }
+    // 后台任务变更：全量快照广播（进程级），整列替换，前端按 thread 过滤展示
+    if (type === 'bg_tasks.update') {
+      setBgTasks(payload.tasks ?? [])
       return
     }
     if (type === 'cron.result') {
@@ -445,6 +455,11 @@ export default function App() {
                 return
               }
               ready = true
+              // 初始拉取后台任务快照（之后变更经 bg_tasks.update 推送）
+              void gw
+                .listBgTasks()
+                .then((r) => setBgTasks(r.tasks))
+                .catch(() => {})
               if (targetThread) {
                 // 已有会话：切到该 thread 并加载历史
                 void (async () => {
@@ -506,6 +521,38 @@ export default function App() {
     () => connsRef.current[activeRef.current] ?? Object.values(connsRef.current)[0],
     [],
   )
+
+  const stopBgTask = useCallback(
+    (taskId: string) => {
+      // 乐观置为 failed，等下一条 bg_tasks.update 校正
+      setBgTasks((ts) =>
+        ts.map((x) => (x.task_id === taskId ? { ...x, status: 'failed' as const } : x)),
+      )
+      void anyGw()?.stopBgTask(taskId).catch(() => {})
+    },
+    [anyGw],
+  )
+
+  const dismissBgTask = useCallback(
+    (taskId: string) => {
+      setBgTasks((ts) => ts.filter((x) => x.task_id !== taskId)) // 乐观移除
+      void anyGw()?.dismissBgTask(taskId).catch(() => {})
+    },
+    [anyGw],
+  )
+
+  const clearFinishedBgTasks = useCallback(() => {
+    // 乐观清除本会话终态任务
+    setBgTasks((ts) => ts.filter((x) => x.status === 'running' || x.thread_id !== activeRef.current))
+    void anyGw()?.clearFinishedBgTasks().catch(() => {})
+  }, [anyGw])
+
+  // 当前会话的后台任务：一次 memo 派生，稳定引用避免 drawer 子树随每次 bg_tasks.update 重渲染
+  const activeBgTasks = useMemo(
+    () => bgTasks.filter((tk) => tk.thread_id === active),
+    [bgTasks, active],
+  )
+  const hasRunningBg = activeBgTasks.some((tk) => tk.status === 'running')
 
   const refreshSessions = useCallback(async () => {
     try {
@@ -1144,7 +1191,24 @@ export default function App() {
       />
 
       <main className="flex-1 flex flex-col min-w-0">
-        <div className="h-9 app-drag shrink-0" />
+        <div className="h-9 app-drag shrink-0 flex items-center justify-end pr-3">
+          {view === 'chat' && activeBgTasks.length > 0 && (
+            <button
+              onClick={() => setBgDrawerOpen((o) => !o)}
+              title={t('bg.title')}
+              className={`no-drag relative grid place-items-center w-7 h-7 rounded-lg transition-colors ${
+                bgDrawerOpen
+                  ? 'text-primary'
+                  : 'text-muted-foreground hover:text-ink hover:bg-white/5'
+              }`}
+            >
+              <PanelRight size={17} />
+              {hasRunningBg && (
+                <span className="absolute top-1 right-1 w-1.5 h-1.5 rounded-full bg-primary animate-pulse" />
+              )}
+            </button>
+          )}
+        </div>
         {view === 'projects' ? (
           <ProjectsPage
             projects={projects}
@@ -1250,6 +1314,15 @@ export default function App() {
                 readRuns={readRuns}
                 version={cronVersion}
                 onPick={(tid) => void openRunThread(tid)}
+              />
+            )}
+            {view === 'chat' && (
+              <BgTasksDrawer
+                tasks={activeBgTasks}
+                onStop={stopBgTask}
+                onDismiss={dismissBgTask}
+                onClearFinished={clearFinishedBgTasks}
+                open={bgDrawerOpen}
               />
             )}
           </div>

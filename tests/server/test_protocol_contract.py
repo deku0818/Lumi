@@ -21,7 +21,7 @@ _PROTOCOL = json.loads(
 )
 
 # ws.py 直接发出但不经 EventKind 的事件（握手帧 + cron 广播）
-_DIRECT_EVENTS = {"gateway.ready", "cron.result", "cron.running"}
+_DIRECT_EVENTS = {"gateway.ready", "cron.result", "cron.running", "bg_tasks.update"}
 
 
 def test_event_names_match_source_of_truth():

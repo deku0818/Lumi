@@ -44,7 +44,7 @@ def test_detect_protocol():
 
 
 def test_allowed_levels(catalog):
-    # anthropic effort 型：auto(=adaptive) + 原生档位 + off
+    # anthropic effort 型：auto(=adaptive) + 原生档位 + off + ultra（Lumi 顶档）
     assert allowed_levels("claude-opus-4-6") == (
         "auto",
         "low",
@@ -52,14 +52,29 @@ def test_allowed_levels(catalog):
         "high",
         "max",
         "off",
+        "ultra",
     )
-    # toggle 型只有 on/off（无 auto：开关模型只有两种行为）
-    assert allowed_levels("mimo-v2.5-pro") == ("on", "off")
-    # openai effort + toggle 并存且无原生关闭值 → 附加 off
-    assert allowed_levels("deepseek-v4-pro") == ("auto", "high", "max", "off")
-    # 无思考 / 未匹配 / 无缓存 → 仅 auto
+    # toggle 型：on/off + ultra
+    assert allowed_levels("mimo-v2.5-pro") == ("on", "off", "ultra")
+    # openai effort + toggle 并存且无原生关闭值 → 附加 off + ultra
+    assert allowed_levels("deepseek-v4-pro") == ("auto", "high", "max", "off", "ultra")
+    # 无思考 / 未匹配 / 无缓存 → 仅 auto（不渲染 ultra，无思考子菜单可挂）
     assert allowed_levels("qwen3-max") == ("auto",)
     assert allowed_levels("unknown-model") == ("auto",)
+
+
+def test_effort_ultra_delegates_to_native_max(catalog):
+    # ultra = Lumi 顶档：思考层面委派给该模型最高原生档（与直接选最高档等价）
+    assert effort_params("claude-opus-4-6", "ultra") == effort_params(
+        "claude-opus-4-6", "max"
+    )
+    assert effort_params("gpt-5.2", "ultra") == effort_params("gpt-5.2", "high")
+    # toggle 型最高 = on
+    assert effort_params("mimo-v2.5-pro", "ultra") == effort_params(
+        "mimo-v2.5-pro", "on"
+    )
+    # 无思考模型不提供 ultra → 失效档位回退空（不传参数）
+    assert effort_params("qwen3-max", "ultra") == {}
 
 
 def test_effort_auto_semantics(catalog):

@@ -9,7 +9,6 @@ from langchain_core.tools import tool
 from pydantic import BaseModel, Field
 
 from lumi.agents.runtime.bg_tasks import (
-    TaskKind,
     TaskStatus,
     get_task_registry,
 )
@@ -121,47 +120,16 @@ def _format_task_status(task_id: str) -> str:
 
 
 async def _handle_stop(task_id: str) -> str:
-    """停止运行中的后台任务。"""
-    registry = get_task_registry()
-    entry = registry.get(task_id)
+    """停止运行中的后台任务（bash/agent/workflow 统一经 cancel_background_task）。"""
+    from lumi.agents.runtime.session import cancel_background_task
 
+    entry = get_task_registry().get(task_id)
     if entry is None:
         return f"任务 {task_id} 不存在"
     if entry.status != TaskStatus.RUNNING:
         return f"任务 {task_id} 状态为 {entry.status}，无法停止"
 
-    if entry.kind == TaskKind.BASH:
-        return await _stop_bash_task(task_id)
-    elif entry.kind == TaskKind.AGENT:
-        return _stop_agent_task(task_id)
-    else:
-        return f"未知任务类型: {entry.kind}"
-
-
-async def _stop_bash_task(task_id: str) -> str:
-    """停止 Bash 后台任务。"""
-    from lumi.agents.runtime.session import get_session_manager
-
-    session_mgr = get_session_manager()
-    if not session_mgr.has_bg_manager:
-        return f"后台任务管理器未初始化，无法停止任务 {task_id}"
-
-    try:
-        await session_mgr.bg_manager.cancel_task(task_id)
-    except Exception as e:
-        logger.error(
-            "[background_task] 停止 Bash 任务失败 %s: %s", task_id, e, exc_info=True
-        )
-        return f"停止 Bash 任务 {task_id} 失败: {e}"
-
-    logger.info("[background_task] 已停止 Bash 任务 %s", task_id)
-    return f"已停止 Bash 任务 {task_id}"
-
-
-def _stop_agent_task(task_id: str) -> str:
-    """停止 Agent 后台任务。"""
-    registry = get_task_registry()
-    if registry.cancel_agent_task(task_id):
-        logger.info("[background_task] 已停止 Agent 任务 %s", task_id)
-        return f"已停止 Agent 任务 {task_id}"
-    return f"无法停止 Agent 任务 {task_id}（可能已完成或无关联的异步任务）"
+    if await cancel_background_task(task_id):
+        logger.info("[background_task] 已请求停止任务 %s", task_id)
+        return f"已停止任务 {task_id}"
+    return f"无法停止任务 {task_id}（可能刚完成或后台管理器不可用）"

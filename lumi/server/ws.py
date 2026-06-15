@@ -85,13 +85,57 @@ _desktop_delivery = DesktopDelivery()
 _broadcast_tasks: set[asyncio.Task] = set()
 
 
-def _on_cron_job_status(names: list[str]) -> None:
-    """Scheduler 同步回调：把运行中任务名列表广播为 cron.running 事件。"""
-    task = asyncio.create_task(
-        _desktop_delivery.send_event("cron.running", {"names": names})
-    )
+def _spawn_broadcast(coro) -> None:
+    """fire-and-forget 一个广播协程，自持引用避免执行前被 GC（cron / bg_tasks 共用）。"""
+    task = asyncio.create_task(coro)
     _broadcast_tasks.add(task)
     task.add_done_callback(_broadcast_tasks.discard)
+
+
+def _on_cron_job_status(names: list[str]) -> None:
+    """Scheduler 同步回调：把运行中任务名列表广播为 cron.running 事件。"""
+    _spawn_broadcast(_desktop_delivery.send_event("cron.running", {"names": names}))
+
+
+def _serialize_bg_tasks() -> list[dict]:
+    from lumi.agents.runtime.bg_tasks import get_task_registry, serialize_task
+
+    return [serialize_task(e) for e in get_task_registry().all_tasks()]
+
+
+# 后台任务广播去抖：workflow 扇出时 notify_progress 高频触发，~100ms 内的多次变更
+# 合并为一次全量快照广播（最终态必发，见 _bg_flush 尾部的脏标志补发）。
+_bg_dirty = False
+_bg_flush_scheduled = False
+
+
+def _on_bg_task_change() -> None:
+    """TaskRegistry 同步回调：标脏并安排一次去抖广播（携带全量快照，前端按 thread 过滤）。"""
+    global _bg_dirty
+    _bg_dirty = True
+    _schedule_bg_flush()
+
+
+def _schedule_bg_flush() -> None:
+    global _bg_flush_scheduled
+    if _bg_flush_scheduled:
+        return
+    _bg_flush_scheduled = True
+    _spawn_broadcast(_bg_flush())
+
+
+async def _bg_flush() -> None:
+    global _bg_dirty, _bg_flush_scheduled
+    try:
+        await asyncio.sleep(0.1)  # 合并窗口
+        _bg_dirty = False
+        await _desktop_delivery.send_event(
+            "bg_tasks.update", {"tasks": _serialize_bg_tasks()}
+        )
+    finally:
+        _bg_flush_scheduled = False
+    if _bg_dirty:  # 窗口内又有新变更 → 补发一次，保证最终态送达
+        _schedule_bg_flush()
 
 
 @asynccontextmanager
@@ -119,8 +163,14 @@ async def lifespan(app: FastAPI):
     except Exception:
         logger.warning("[WS] 定时任务子系统启动失败，cron 功能不可用", exc_info=True)
 
+    # 后台任务变更 → 广播 bg_tasks.update，驱动 desktop drawer 实时刷新
+    from lumi.agents.runtime.bg_tasks import get_task_registry
+
+    get_task_registry().set_on_change(_on_bg_task_change)
+
     yield
 
+    get_task_registry().set_on_change(None)
     if cron_runtime is not None:
         await cron_runtime.scheduler.stop()
     # 进程级共享运行时（MCP / shell 会话）只在进程退出时关闭一次，
@@ -484,6 +534,55 @@ async def _load_history_rpc(bridge: AgentBridge, run: _RunState, params: dict) -
     return await _load_history(bridge, params)
 
 
+async def _list_bg_tasks(bridge: AgentBridge, run: _RunState, params: dict) -> dict:
+    """全部后台任务快照（前端按当前 thread_id 过滤）。"""
+    return {"tasks": _serialize_bg_tasks()}
+
+
+def _owns_bg_task(bridge: AgentBridge, task_id: str) -> bool:
+    """任务是否属于本连接当前会话（防跨会话 stop/dismiss）。
+
+    不存在 → True（交下游返回未停止/未移除）；归属为空 → True（无主任务任一会话可清）。
+    """
+    from lumi.agents.runtime.bg_tasks import get_task_registry
+
+    entry = get_task_registry().get(task_id)
+    return (
+        entry is None
+        or not entry.thread_id
+        or entry.thread_id == bridge.current_thread_id
+    )
+
+
+async def _stop_bg_task(bridge: AgentBridge, run: _RunState, params: dict) -> dict:
+    """停止运行中的后台任务（drawer 停止按钮）；仅限本会话任务。"""
+    from lumi.agents.runtime.session import cancel_background_task
+
+    task_id = params.get("task_id", "")
+    if not _owns_bg_task(bridge, task_id):
+        return {"stopped": False, "error": "任务不属于当前会话"}
+    return {"stopped": await cancel_background_task(task_id)}
+
+
+async def _dismiss_bg_task(bridge: AgentBridge, run: _RunState, params: dict) -> dict:
+    """从列表移除一个终态后台任务（drawer 移除 ✕）；仅限本会话任务。"""
+    from lumi.agents.runtime.bg_tasks import get_task_registry
+
+    task_id = params.get("task_id", "")
+    if not _owns_bg_task(bridge, task_id):
+        return {"dismissed": False}
+    return {"dismissed": get_task_registry().dismiss(task_id)}
+
+
+async def _clear_finished_bg_tasks(
+    bridge: AgentBridge, run: _RunState, params: dict
+) -> dict:
+    """清除当前会话的全部终态后台任务（drawer 头部「清除已完成」）。"""
+    from lumi.agents.runtime.bg_tasks import get_task_registry
+
+    return {"cleared": get_task_registry().clear_finished(bridge.current_thread_id)}
+
+
 # 非流式 RPC 分发表。契约测试从 IMPLEMENTED_METHODS 读取实现的方法集合，
 # 新增方法只需在此登记 + events.json 声明，漂移会被测试直接抓住。
 _RPC_HANDLERS = {
@@ -509,6 +608,10 @@ _RPC_HANDLERS = {
     "pin_session": _pin_session,
     "rename_session": _rename_session,
     "delete_session": _delete_session,
+    "list_bg_tasks": _list_bg_tasks,
+    "stop_bg_task": _stop_bg_task,
+    "dismiss_bg_task": _dismiss_bg_task,
+    "clear_finished_bg_tasks": _clear_finished_bg_tasks,
 }
 
 # 本服务实现的全部 RPC 方法（供协议契约测试断言与 events.json 一致）

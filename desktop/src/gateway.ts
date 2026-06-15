@@ -2,6 +2,7 @@
 // 帧协议见 lumi/server/ws.py。带指数退避自动重连（sidecar 启动需要时间）。
 import type {
   ActiveModel,
+  BgTask,
   CronJob,
   CronRun,
   HistoryItem,
@@ -237,6 +238,24 @@ export class Gateway {
     return this.request<{
       runs: CronRun[]
     }>('list_cron_runs', { job_id: jobId, limit })
+  }
+
+  listBgTasks(): Promise<{ tasks: BgTask[] }> {
+    return this.request<{ tasks: BgTask[] }>('list_bg_tasks')
+  }
+
+  stopBgTask(taskId: string): Promise<{ stopped: boolean; error?: string }> {
+    return this.request<{ stopped: boolean; error?: string }>('stop_bg_task', {
+      task_id: taskId,
+    })
+  }
+
+  dismissBgTask(taskId: string): Promise<{ dismissed: boolean }> {
+    return this.request<{ dismissed: boolean }>('dismiss_bg_task', { task_id: taskId })
+  }
+
+  clearFinishedBgTasks(): Promise<{ cleared: number }> {
+    return this.request<{ cleared: number }>('clear_finished_bg_tasks')
   }
 
   onEvent(h: EventHandler): () => void {

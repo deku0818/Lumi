@@ -19,6 +19,8 @@ from lumi.agents.runtime.bg_tasks import (
     TaskKind,
     TaskStatus,
     get_task_registry,
+    make_bg_done_callback,
+    run_background_task,
 )
 from lumi.utils.logger import logger
 
@@ -192,17 +194,7 @@ def _start_background_agent(
         _run_agent_background(task_id, lumi_agent, context, inputs, output_file)
     )
     entry.async_task = async_task
-
-    def _on_task_done(t: asyncio.Task) -> None:
-        if t.cancelled():
-            return
-        exc = t.exception()
-        if exc is not None:
-            logger.error(
-                "[agent bg] 未处理的异常 task %s: %s", task_id, exc, exc_info=exc
-            )
-
-    async_task.add_done_callback(_on_task_done)
+    async_task.add_done_callback(make_bg_done_callback(task_id, "agent bg"))
 
     return (
         f"后台代理任务已启动\n"
@@ -212,14 +204,6 @@ def _start_background_agent(
     )
 
 
-def _safe_write(output_file: Path, content: str, task_id: str) -> None:
-    """安全写入输出文件，失败时只记录日志不抛异常。"""
-    try:
-        output_file.write_text(content, encoding="utf-8")
-    except OSError as e:
-        logger.warning("[agent bg] 写入输出文件失败 %s: %s", task_id, e)
-
-
 async def _run_agent_background(
     task_id: str,
     lumi_agent,
@@ -227,30 +211,12 @@ async def _run_agent_background(
     inputs: dict,
     output_file: Path,
 ) -> None:
-    """后台执行 Agent 并在完成后更新 TaskRegistry。
-
-    谁完成谁负责：update_status + enqueue_notification。
-    """
+    """后台执行 Agent；收尾（写文件 / 状态 / 通知）走共用 run_background_task。"""
     from lumi.agents.core.response import extract_ainvoke_content
 
-    registry = get_task_registry()
-    try:
+    async def _produce() -> str:
         invoke_result = await lumi_agent.graph.ainvoke(inputs, context=context)
-        content = (
-            invoke_result["messages"][-1].content if invoke_result["messages"] else ""
-        )
-        result_text = extract_ainvoke_content(content)
-        _safe_write(output_file, result_text, task_id)
-        registry.update_status(task_id, TaskStatus.COMPLETED)
-    except asyncio.CancelledError:
-        _safe_write(output_file, "任务被取消", task_id)
-        registry.update_status(task_id, TaskStatus.FAILED, error="任务被取消")
-        logger.info("[agent bg] task %s cancelled", task_id)
-        raise
-    except Exception as e:
-        error_msg = str(e)
-        _safe_write(output_file, f"Error: {error_msg}", task_id)
-        registry.update_status(task_id, TaskStatus.FAILED, error=error_msg)
-        logger.error("[agent bg] task %s failed: %s", task_id, e, exc_info=True)
-    finally:
-        registry.enqueue_notification(task_id)
+        msgs = invoke_result["messages"]
+        return extract_ainvoke_content(msgs[-1].content if msgs else "")
+
+    await run_background_task(task_id, output_file, _produce, cancel_text="任务被取消")

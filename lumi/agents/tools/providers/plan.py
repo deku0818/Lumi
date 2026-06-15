@@ -9,70 +9,13 @@ ExitPlanMode 让 Agent 提交计划供用户审批，用户可批准或拒绝。
 
 from __future__ import annotations
 
-from pathlib import Path
-from typing import Annotated, Any
+from typing import Annotated
 
 from langchain_core.messages import ToolMessage
 from langchain_core.tools import InjectedToolCallId, tool
 from langgraph.types import Command, interrupt
 
-from lumi.agents.tools.loader import _parse_md_file
-from lumi.utils.logger import logger
-from lumi.utils.read_config import get_config
-
-
-# ── 文件加载 ──
-
-
-def _resolve_tool_md(tool_name: str) -> Path | None:
-    """按优先级查找工具配置 MD 文件。
-
-    查找顺序：用户 .lumi/prompts/tools/ -> style 内置 -> None。
-    """
-    config = get_config()
-
-    # 1. 用户 .lumi/prompts/tools/
-    user_path = config.prompts_dir / "tools" / f"{tool_name}.md"
-    if user_path.exists():
-        return user_path
-
-    # 2. style 内置
-    from lumi.styles import get_style_prompts_dir
-
-    try:
-        style_path = (
-            get_style_prompts_dir(config.active_style) / "tools" / f"{tool_name}.md"
-        )
-        if style_path.exists():
-            return style_path
-    except ValueError:
-        pass
-
-    return None
-
-
-def _load_tool_md(tool_name: str) -> dict[str, Any] | None:
-    """加载并解析工具配置 MD 文件，未找到返回 None。"""
-    path = _resolve_tool_md(tool_name)
-    if path is None:
-        return None
-    parsed = _parse_md_file(str(path))
-    if parsed is None:
-        logger.warning("解析 %s 失败", path)
-    return parsed
-
-
-def _require_tool_field(
-    parsed: dict[str, Any], field: str, tool_name: str, *, from_raw: bool = False
-) -> str:
-    """从解析结果中提取必填字段，缺失时抛出 RuntimeError。"""
-    if from_raw:
-        value = (parsed.get("raw_metadata", {}).get(field) or "").strip()
-    else:
-        value = (parsed.get(field) or "").strip()
-    if not value:
-        raise RuntimeError(f"{tool_name}.md 缺少 {field} 字段")
-    return value
+from lumi.agents.tools.loader import load_tool_md, require_tool_field
 
 
 # ── EnterPlanMode ──
@@ -84,15 +27,15 @@ def _load_enter_plan_mode() -> tuple[str, str]:
     Raises:
         RuntimeError: 未找到配置文件或关键字段缺失
     """
-    parsed = _load_tool_md("EnterPlanMode")
+    parsed = load_tool_md("EnterPlanMode")
     if parsed is None:
         raise RuntimeError(
             "未找到 EnterPlanMode.md 配置文件。"
             "请确保 style 目录或 .lumi/prompts/tools/ 下存在该文件。"
         )
 
-    description = _require_tool_field(parsed, "description", "EnterPlanMode")
-    response = _require_tool_field(parsed, "prompt", "EnterPlanMode")
+    description = require_tool_field(parsed, "description", "EnterPlanMode")
+    response = require_tool_field(parsed, "prompt", "EnterPlanMode")
     return description, response
 
 
@@ -119,16 +62,16 @@ def _load_exit_plan_mode() -> tuple[str, str, str]:
     Raises:
         RuntimeError: 未找到配置文件或关键字段缺失
     """
-    parsed = _load_tool_md("ExitPlanMode")
+    parsed = load_tool_md("ExitPlanMode")
     if parsed is None:
         raise RuntimeError(
             "未找到 ExitPlanMode.md 配置文件。"
             "请确保 style 目录或 .lumi/prompts/tools/ 下存在该文件。"
         )
 
-    description = _require_tool_field(parsed, "description", "ExitPlanMode")
-    approved = _require_tool_field(parsed, "approved", "ExitPlanMode", from_raw=True)
-    rejected = _require_tool_field(parsed, "rejected", "ExitPlanMode", from_raw=True)
+    description = require_tool_field(parsed, "description", "ExitPlanMode")
+    approved = require_tool_field(parsed, "approved", "ExitPlanMode", from_raw=True)
+    rejected = require_tool_field(parsed, "rejected", "ExitPlanMode", from_raw=True)
     return description, approved, rejected
 
 

@@ -305,6 +305,22 @@ class AgentBridge:
             lines.extend(f"- {f}" for f in removed)
         return "<system-reminder>\n" + "\n".join(lines) + "\n</system-reminder>\n"
 
+    @staticmethod
+    def _ultra_note() -> str:
+        """Ultra 档位激活时的轮内编排提醒（缓存安全）。
+
+        active 模型档位 = ultra 时返回 system-reminder，鼓励对实质性多步任务用
+        workflow 拆解；否则空串。workflow 工具本身常驻（不增删，缓存前缀恒定）。
+        """
+        if provider_store.resolve().effort != "ultra":
+            return ""
+        return (
+            "<system-reminder>\n"
+            "Ultra 编排模式已开启：对实质性的多步 / 需全面覆盖 / 需多视角交叉验证的任务，"
+            "优先用 workflow 工具拆解并扇出子代理；琐碎或单步任务仍直接处理，不要为其套用 workflow。\n"
+            "</system-reminder>\n"
+        )
+
     async def stream_response(
         self,
         content: str | list,
@@ -329,6 +345,11 @@ class AgentBridge:
             note = self._drain_folder_note()
             if note:
                 content = prepend_reminder(content, note)
+            # Ultra 档位：轮内注入编排提醒（workflow 工具常驻、默认不用，ultra 开启时鼓励用）。
+            # 前置到当轮消息、不碰系统提示词 → 缓存安全（toggle ultra 不废 system+tools 前缀）。
+            ultra_note = self._ultra_note()
+            if ultra_note:
+                content = prepend_reminder(content, ultra_note)
 
         # 新一轮对话，清理上一轮残留的 agent 追踪状态
         self._active_agent_runs.clear()

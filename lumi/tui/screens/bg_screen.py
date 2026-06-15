@@ -19,9 +19,7 @@ from textual.widgets import Rule, Static
 
 from lumi.agents.runtime.bg_tasks import (
     BackgroundTaskEntry,
-    TaskKind,
     TaskStatus,
-    get_task_registry,
 )
 from lumi.tui.screens.list_screen import ListScreen
 from lumi.utils.logger import logger
@@ -189,17 +187,8 @@ class _BgDetailScreen(ModalScreen[None]):
             event.stop()
 
     def _stop_task(self) -> None:
-        """停止当前任务。"""
-        entry = self._entry
-        if entry.kind == TaskKind.AGENT:
-            cancelled = get_task_registry().cancel_agent_task(entry.task_id)
-            if not cancelled:
-                logger.warning(
-                    "[BgScreen] cancel_agent_task 返回 False (task_id=%s)",
-                    entry.task_id,
-                )
-        elif entry.kind == TaskKind.BASH:
-            asyncio.create_task(_stop_bash(entry.task_id))
+        """停止当前任务（bash/agent/workflow 统一经 cancel_background_task）。"""
+        asyncio.create_task(_stop_bg(self._entry.task_id))
 
 
 class BgScreen(ListScreen[BackgroundTaskEntry]):
@@ -250,27 +239,18 @@ class BgScreen(ListScreen[BackgroundTaskEntry]):
         super()._on_key(event)
 
     def _stop_task(self, entry: BackgroundTaskEntry) -> None:
-        """停止选中的任务。"""
+        """停止选中的任务（bash/agent/workflow 统一经 cancel_background_task）。"""
         if entry.status != TaskStatus.RUNNING:
             return
-        if entry.kind == TaskKind.AGENT:
-            get_task_registry().cancel_agent_task(entry.task_id)
-        elif entry.kind == TaskKind.BASH:
-            asyncio.create_task(_stop_bash(entry.task_id))
+        asyncio.create_task(_stop_bg(entry.task_id))
         logger.info("[BgScreen] 已请求停止任务 %s", entry.task_id)
 
 
-async def _stop_bash(task_id: str) -> None:
-    """异步停止 Bash 后台任务。"""
-    from lumi.agents.runtime.session import get_session_manager
+async def _stop_bg(task_id: str) -> None:
+    """异步停止后台任务（统一入口，按 kind 内部分派）。"""
+    from lumi.agents.runtime.session import cancel_background_task
 
-    session_mgr = get_session_manager()
-    if session_mgr.has_bg_manager:
-        try:
-            await session_mgr.bg_manager.cancel_task(task_id)
-        except (OSError, ProcessLookupError) as e:
-            logger.warning("[BgScreen] 停止 Bash 任务失败 %s: %s", task_id, e)
-        except Exception:
-            logger.error(
-                "[BgScreen] 停止 Bash 任务出现意外错误 %s", task_id, exc_info=True
-            )
+    try:
+        await cancel_background_task(task_id)
+    except Exception:
+        logger.error("[BgScreen] 停止任务出现意外错误 %s", task_id, exc_info=True)

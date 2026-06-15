@@ -17,6 +17,7 @@ from .providers import (
     plan,
     skill,
     todo,
+    workflow,
 )
 from .registry import ToolRegistry, get_tool_registry
 
@@ -34,6 +35,7 @@ _registry.register("cron", cron)
 _registry.register("skill", skill)
 _registry.register("plan", plan)
 _registry.register("background_task", background_task)
+_registry.register("workflow", workflow)
 
 # 条件注册: 仅在有 agent 配置时才启用
 try:

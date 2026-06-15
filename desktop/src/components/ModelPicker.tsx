@@ -1,3 +1,4 @@
+import { Fragment } from 'react'
 import { Check, ChevronDown } from 'lucide-react'
 import type { ActiveModel, ProviderProfile } from '../types'
 import { useI18n } from '../i18n'
@@ -54,7 +55,11 @@ export function ModelPicker({
           className="group flex items-center gap-1.5 max-w-60 px-2 py-1 rounded-lg text-xs text-muted-foreground hover:text-ink hover:bg-canvas/60 transition outline-none"
         >
           <span className="truncate">{model || t('model.default')}</span>
-          {stored !== 'auto' && <span className="opacity-70">{levelLabel(stored, t)}</span>}
+          {stored !== 'auto' && (
+            <span className={stored === 'ultra' ? 'text-primary font-medium' : 'opacity-70'}>
+              {levelLabel(stored, t)}
+            </span>
+          )}
           <ChevronDown size={13} className="shrink-0 transition-transform group-data-[state=open]:rotate-180" />
         </button>
       </DropdownMenuTrigger>
@@ -83,12 +88,30 @@ export function ModelPicker({
               <div className="px-2 py-1.5 text-[11px] text-muted-foreground border-b border-line/60 mb-1">
                 {isToggle ? t('effort.toggleDesc') : t('effort.desc')}
               </div>
-              {levels.map((lv) => (
-                <DropdownMenuItem key={lv} onClick={() => onSwitchEffort(lv)}>
-                  <span className="flex-1">{levelLabel(lv, t)}</span>
-                  <Check className={effort === lv ? 'text-primary' : 'opacity-0'} />
-                </DropdownMenuItem>
-              ))}
+              {levels.map((lv) =>
+                lv === 'ultra' ? (
+                  // Ultra = Lumi 顶档（思考拉满 + 解锁 workflow 编排）：分隔线 + 呼吸金光点
+                  // + 副标题，与原生档位区分（一静一动：光点动、文字静）。
+                  <Fragment key="ultra">
+                    <DropdownMenuSeparator />
+                    <DropdownMenuItem onClick={() => onSwitchEffort('ultra')}>
+                      <span className="lumi-orb shrink-0" />
+                      <span className="flex-1">
+                        <span className="text-primary font-medium">{levelLabel('ultra', t)}</span>
+                        <span className="block text-[11px] text-muted-foreground">
+                          {t('effort.ultraDesc')}
+                        </span>
+                      </span>
+                      <Check className={effort === 'ultra' ? 'text-primary' : 'opacity-0'} />
+                    </DropdownMenuItem>
+                  </Fragment>
+                ) : (
+                  <DropdownMenuItem key={lv} onClick={() => onSwitchEffort(lv)}>
+                    <span className="flex-1">{levelLabel(lv, t)}</span>
+                    <Check className={effort === lv ? 'text-primary' : 'opacity-0'} />
+                  </DropdownMenuItem>
+                ),
+              )}
             </DropdownMenuSubContent>
           </DropdownMenuSub>
         )}

@@ -630,3 +630,31 @@ def get_session_manager() -> SessionManager:
     if _session_manager is None:
         _session_manager = SessionManager()
     return _session_manager
+
+
+async def cancel_background_task(task_id: str) -> bool:
+    """按 kind 停止一个运行中的后台任务（统一入口）。
+
+    BASH → 经 ``bg_manager.cancel_task``（杀进程）；AGENT / WORKFLOW → 经
+    ``registry.cancel_agent_task``（取消 asyncio.Task）。非运行中 / 不存在 → False。
+
+    ws / TUI / background_task 工具共用此函数，避免各自重复 kind 分派（新增 TaskKind
+    只改这一处）。返回是否成功发起取消。
+    """
+    registry = get_task_registry()
+    entry = registry.get(task_id)
+    if entry is None or entry.status != TaskStatus.RUNNING:
+        return False
+    if entry.kind == TaskKind.BASH:
+        mgr = get_session_manager()
+        if not mgr.has_bg_manager:
+            return False
+        try:
+            await mgr.bg_manager.cancel_task(task_id)
+        except Exception:
+            logger.error(
+                "[cancel_background_task] 停止 Bash 失败 %s", task_id, exc_info=True
+            )
+            return False
+        return True
+    return registry.cancel_agent_task(task_id)
