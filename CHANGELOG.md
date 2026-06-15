@@ -1,5 +1,20 @@
 # Changelog
 
+## [0.1.0a19] - 2026-06-15
+
+### Added
+- **Desktop 子代理执行反馈 UI**（`docs/architecture/subagent-rendering.md` Desktop 节）— 子代理跑起来时不再只有一个转圈的父工具行，而是把内部活动透出来。前端把带 `parent_run_id` 的子事件（`tool.start`/`tool.complete`/`message.complete`）经 `applyChildEvent` 归属到 `runId` 匹配的父卡片（子工具入 `children`、token 按 max 累计，与 TUI 同口径），逐字流（`message.delta`/`thinking.delta`）丢弃不渲染。`groupItems` 把连续 `agent` 工具合并成段：单个 → `SingleAgent`（头部统计 + 最近 3 个子工具的有限滚动窗口，新行推入/旧行淡出挤掉）；并发多个 → `AgentFleet`（「运行 N 个子 Agent」面板，每行一个 agent：光点 + 名称 + 当前动作 + 工具数）；完成后统一收成 `DoneCard` 单行。新增小光点 / 子工具进出场动画（`index.css`），遵循「光」品牌语言
+
+### Fixed
+- **子代理中断对话框被吞**（回归修复）— 事件路由原先无条件把所有带 `parent_run_id` 的事件转入 `applyChildEvent`，导致子代理的 `approval`/`clarify`/`plan` 中断事件被丢弃、对话框永不弹、会话卡死；现仅 `tool.start`/`tool.complete`/`message.complete` 走归属，中断类 fall-through 到主 switch 正常处理
+- **底栏状态与子代理卡片重复** — 底部状态指示器扫描运行中工具时排除 `agent`，运行态交由专属卡片展示，不再同时显示冗余的「正在执行子任务…」
+- **离场动画僵尸行** — `RunningWindow` 的挤出行除 `onAnimationEnd` 外加一次性 `setTimeout` 兜底，窗口后台化等场景浏览器不派发 `animationend` 时也能移除，避免隐形残留行无界累积
+
+### Changed
+- **`AgentGroup` memo 比较器修复 + 收口** — 原裸 `memo` 对每次 `groupItems` 新建的 `items` 数组浅比较永不命中、主流每个 token delta 全量重渲染；改用与 `ToolGroup` 共用的 `sameItems` 元素身份比较器
+- **子代理事件定位反向扫描** — `applyChildEvent` 定位父卡片由全量正向 `findIndex` 改为从 `s.items` 尾部反扫，长会话 + 高频子工具调用下不再每次全扫主流
+- **前端工具辅助函数去重** — 抽 `fmtTokens`（下沉 `lib/utils.ts`）/ `DoneCard` / `sameItems` / `asRecord`，消除完成态单行、memo 比较器、`args→Record` 解包等多处重复
+
 ## [0.1.0a18] - 2026-06-15
 
 ### Added

@@ -24,8 +24,23 @@ export type Item =
       output: string
       done: boolean
       error?: boolean
+      // 子代理（name==='agent'）专用：自身 run_id（子工具事件经 parent_run_id 归属到此）、
+      // 内部工具调用流、token 累计（来自子代理 message.complete 的 usage）
+      runId?: string
+      children?: SubTool[]
+      inTok?: number
+      outTok?: number
     }
   | { id: number; kind: 'notice'; text: string }
+
+// 子代理内部的一次工具调用（不展开 output/diff，只展示调了什么）
+export interface SubTool {
+  toolCallId: string
+  name: string
+  args: unknown
+  done: boolean
+  error?: boolean
+}
 
 // 项目：手动登记的工作目录（~/.lumi/projects.json，按 last_used 降序下发）
 export interface Project {

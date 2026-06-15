@@ -30,6 +30,7 @@ import type {
   ProviderProfile,
   SessionMeta,
   SlashCommand,
+  SubTool,
   WireEvent,
 } from './types'
 import { ApprovalDialog } from './components/ApprovalDialog'
@@ -48,7 +49,7 @@ import { CommandMenu } from './components/CommandMenu'
 import { Composer } from './components/Composer'
 import { isCommandMode, parseCommand, matchCommands } from './slash'
 import { toolDiff, type DiffLine } from './diff'
-import { clip, basename } from '@/lib/utils'
+import { clip, basename, fmtTokens } from '@/lib/utils'
 import { Button } from '@/components/ui/button'
 import { useTheme } from './theme'
 import { useI18n } from './i18n'
@@ -60,13 +61,20 @@ const nid = () => ++_id
 type ToolItem = Extract<Item, { kind: 'tool' }>
 type Segment =
   | { kind: 'tools'; tools: ToolItem[] }
+  | { kind: 'agent'; items: ToolItem[] }
   | { kind: 'item'; item: Exclude<Item, { kind: 'tool' }> }
 
-// 把连续的 tool item 合并成一段，其余 item 各自独立 —— 用于工具分组渲染
+// 把连续的 tool item 合并成一段，其余 item 各自独立 —— 用于工具分组渲染。
+// 子代理（name==='agent'）也按连续合并成一段：单个渲染成滚动窗口卡片，并发多个
+// 渲染成一张「N 个子 Agent」面板（每行一个 agent）。
 function groupItems(items: Item[]): Segment[] {
   const segs: Segment[] = []
   for (const it of items) {
-    if (it.kind === 'tool') {
+    if (it.kind === 'tool' && it.name === 'agent') {
+      const last = segs[segs.length - 1]
+      if (last?.kind === 'agent') last.items.push(it)
+      else segs.push({ kind: 'agent', items: [it] })
+    } else if (it.kind === 'tool') {
       const last = segs[segs.length - 1]
       if (last?.kind === 'tools') last.tools.push(it)
       else segs.push({ kind: 'tools', tools: [it] })
@@ -79,7 +87,7 @@ function groupItems(items: Item[]): Segment[] {
 
 // segment 的稳定 React key / 复制映射 key（不依赖数组下标，切片/虚拟化也不错位）
 const segKey = (seg: Segment): string =>
-  seg.kind === 'tools' ? `g${seg.tools[0].id}` : `i${seg.item.id}`
+  seg.kind === 'tools' ? `g${seg.tools[0].id}` : seg.kind === 'agent' ? `a${seg.items[0].id}` : `i${seg.item.id}`
 
 // load_history 的历史项 → 前端 Item
 function restore(h: HistoryItem): Item {
@@ -116,6 +124,56 @@ function finishStreaming(items: Item[]): Item[] {
   return items.map((it) =>
     it.kind === 'assistant' && it.streaming ? { ...it, streaming: false } : it,
   )
+}
+
+// 子代理内部事件归属：把 tool.start/complete 与 token 用量写进 runId 匹配的 agent 卡片。
+// 找不到父卡片（嵌套子代理等）则返回 null，由调用方丢弃。
+function applyChildEvent(
+  s: SessionState,
+  parentRun: string,
+  type: string,
+  payload: any,
+): SessionState | null {
+  // 从尾部反向找：agent 卡片几乎总在对话流末尾，长会话下避免每个子事件全量正扫
+  let idx = -1
+  for (let i = s.items.length - 1; i >= 0; i--) {
+    const it = s.items[i]
+    if (it.kind === 'tool' && it.runId === parentRun) {
+      idx = i
+      break
+    }
+  }
+  if (idx < 0) return null
+  const agent = s.items[idx] as ToolItem
+  const children = agent.children ?? []
+  let next: ToolItem
+  if (type === 'tool.start') {
+    const tcid = payload.tool_call_id ?? ''
+    if (tcid && children.some((c) => c.toolCallId === tcid)) return null
+    next = {
+      ...agent,
+      children: [...children, { toolCallId: tcid, name: payload.name ?? '', args: payload.args, done: false }],
+    }
+  } else if (type === 'tool.complete') {
+    next = {
+      ...agent,
+      children: children.map((c) =>
+        c.toolCallId === payload.tool_call_id ? { ...c, done: true, error: !!payload.is_error } : c,
+      ),
+    }
+  } else if (type === 'message.complete' && payload.usage) {
+    // usage 按 max 累计（与 TUI agent_group.record_tokens 同口径）
+    next = {
+      ...agent,
+      inTok: Math.max(agent.inTok ?? 0, payload.usage.input_tokens ?? 0),
+      outTok: Math.max(agent.outTok ?? 0, payload.usage.output_tokens ?? 0),
+    }
+  } else {
+    return null
+  }
+  const items = s.items.slice()
+  items[idx] = next
+  return { ...s, items }
 }
 
 // 每个会话的独立状态（多会话并发：A 在跑时可切到 B，互不影响）
@@ -315,13 +373,11 @@ export default function App() {
       return
     }
     const sid = ev.session_id ?? ''
-    // 子代理事件（带 parent_run_id 的流式/工具事件）不进主对话流——否则子代理
-    // 的 token 会拼进父气泡、子工具显示为顶层工具行。父级 agent 工具行本身
-    // （无 parent_run_id）照常渲染；中断类（审批/澄清/计划）仍需用户处理，不过滤。
-    if (
-      payload.parent_run_id &&
-      (type.startsWith('message.') || type.startsWith('tool.') || type.startsWith('thinking.'))
-    ) {
+    const parentRun: string = payload.parent_run_id ?? ''
+    // 子代理的逐字流（正文/思考）不进 UI——只把子工具调用与 token 用量归属到父
+    // agent 卡片（见下方 applyChildEvent）。中断类（审批/澄清/计划）即便带
+    // parent_run_id 也照常往下走，仍需用户处理。
+    if (parentRun && (type === 'message.delta' || type === 'message.start' || type === 'thinking.delta')) {
       return
     }
     // 系统通知：回复完成 + 等待用户处理的中断（审批/提问/计划）。
@@ -354,6 +410,11 @@ export default function App() {
       const s = store[sid]
       if (!s) return store
       let n: SessionState | null = null
+      // 子代理的工具调用与 token 用量归属到父 agent 卡片，不进主流；其余带 parent_run_id
+      // 的事件（审批/澄清/计划/错误/轮次完成等中断）仍需用户处理，照常走下方 switch。
+      if (parentRun && (type === 'tool.start' || type === 'tool.complete' || type === 'message.complete')) {
+        return { ...store, [sid]: applyChildEvent(s, parentRun, type, payload) ?? s }
+      }
       switch (type) {
         // message.start 不再预建空 assistant：模型直接调工具（无文字）时会留下空气泡，
         // 还会把相邻工具在 groupItems 里隔断。改由首个 message.delta 懒创建气泡。
@@ -382,6 +443,8 @@ export default function App() {
                 args: payload.args,
                 output: '',
                 done: false,
+                // agent 工具自带 run_id：子工具事件经 parent_run_id 归属到此卡片
+                ...(payload.run_id ? { runId: payload.run_id, children: [] } : {}),
               },
             ],
           }
@@ -1246,6 +1309,8 @@ export default function App() {
                         const node =
                           seg.kind === 'tools' ? (
                             <ToolGroup key={key} tools={seg.tools} />
+                          ) : seg.kind === 'agent' ? (
+                            <AgentGroup key={key} items={seg.items} />
                           ) : (
                             <ItemView key={key} item={seg.item} />
                           )
@@ -1421,7 +1486,8 @@ function StatusIndicator({
   let runningTool: ToolItem | undefined
   for (let i = items.length - 1; i >= 0; i--) {
     const it = items[i]
-    if (it.kind === 'tool' && !it.done) {
+    // agent 工具的运行态由其专属卡片（AgentGroup）展示，底栏不再重复「正在执行子任务…」
+    if (it.kind === 'tool' && !it.done && it.name !== 'agent') {
       runningTool = it
       break
     }
@@ -1537,8 +1603,11 @@ function CopyButton({ text }: { text: string }) {
 // 工具（单个或多个）统一渲染为一行自然语言摘要（参考 Claude：
 // "Edited 2 files, ran a command, read a file ›"）。无卡片、低调融入文本流，
 // 点击展开看每个工具的细节。运行中强制展开看进度，完成后默认折叠。
-// memo + 自定义比较：groupItems 每次产出新的 tools 数组包装，但元素身份稳定，
-// 逐元素同身份即视为未变，避免流式文本期间所有工具组（含 diff 计算）重渲染。
+// groupItems 每次产出新的数组包装，但元素身份稳定：逐元素同身份即视为未变。
+// ToolGroup / AgentGroup 的 memo 比较器共用，避免流式文本期间整组（含 diff 计算）重渲染。
+const sameItems = (a: ToolItem[], b: ToolItem[]) =>
+  a.length === b.length && a.every((x, i) => x === b[i])
+
 const ToolGroup = memo(function ToolGroup({ tools }: { tools: ToolItem[] }) {
   const running = tools.some((t) => !t.done)
   const hasError = tools.some((t) => t.error)
@@ -1573,9 +1642,192 @@ const ToolGroup = memo(function ToolGroup({ tools }: { tools: ToolItem[] }) {
     </div>
   )
 },
-(prev, next) =>
-  prev.tools.length === next.tools.length &&
-  prev.tools.every((t, i) => t === next.tools[i]))
+(prev, next) => sameItems(prev.tools, next.tools))
+
+// 运行中卡片里最多同时显示的子工具行（旧的滚出，避免无限堆积撑开主流）
+const SUBAGENT_WINDOW = 3
+
+// 子代理段渲染：单个 → 滚动窗口卡片（SingleAgent）；并发多个 → 合并面板（AgentFleet）。
+const AgentGroup = memo(
+  function AgentGroup({ items }: { items: ToolItem[] }) {
+    return items.length === 1 ? <SingleAgent item={items[0]} /> : <AgentFleet items={items} />
+  },
+  (prev, next) => sameItems(prev.items, next.items),
+)
+
+const agentStats = (children: number, tokens: number, t: ReturnType<typeof useI18n>['t']) =>
+  `${children} ${t('subagent.tool')}${tokens ? ` · ${fmtTokens(tokens)}` : ''}`
+
+// 子代理 args.name（子代理类型名，如 explorer），缺失回退到序号
+const agentName = (args: unknown, i: number): string =>
+  argStr(asRecord(args).name) || `agent ${i + 1}`
+
+// 子代理完成态的纯单行（不可展开）：静止光点 + 标签 + 详情 + 统计。单个与并发共用。
+function DoneCard({ label, detail, stats }: { label: string; detail: string; stats: string }) {
+  return (
+    <div className="rounded-xl border border-line bg-panel flex items-center gap-2.5 px-3 py-2">
+      <span className="lumi-orb lumi-orb-idle" />
+      <span className="font-medium shrink-0">{label}</span>
+      <span className="text-muted-foreground truncate flex-1">{detail}</span>
+      <span className="text-muted-foreground text-xs tabular-nums shrink-0">{stats}</span>
+    </div>
+  )
+}
+
+// 单个子代理卡片：运行中显示头部统计 + 最近 N 个子工具的有限滚动窗口（新行推入、旧行挤出）；
+// 完成后收成纯单行（不可展开）。
+function SingleAgent({ item }: { item: ToolItem }) {
+  const { t } = useI18n()
+  const children = item.children ?? []
+  const tokens = (item.inTok ?? 0) + (item.outTok ?? 0)
+  const title = toolTitle('agent', item.args)
+  const stats = agentStats(children.length, tokens, t)
+
+  if (item.done) {
+    return <DoneCard label={t('subagent.label')} detail={title} stats={stats} />
+  }
+  return (
+    <div className="rounded-xl border border-line bg-panel overflow-hidden">
+      <div className="flex items-center gap-2.5 px-3 py-2">
+        <span className="lumi-orb" />
+        <span className="font-medium flex-1 truncate">{title}</span>
+        <span className="text-muted-foreground text-xs tabular-nums shrink-0">{stats}</span>
+      </div>
+      {children.length > 0 && <RunningWindow children={children} />}
+    </div>
+  )
+}
+
+// 并发子代理面板：卡片头「运行 N 个子 Agent」+ 总统计；每个 agent 一行（光点 · 名称 ·
+// 当前动作 · 工具数）。全部完成后收成纯单行。
+function AgentFleet({ items }: { items: ToolItem[] }) {
+  const { t } = useI18n()
+  const allDone = items.every((it) => it.done)
+  const totalTools = items.reduce((n, it) => n + (it.children?.length ?? 0), 0)
+  const totalTok = items.reduce((n, it) => n + (it.inTok ?? 0) + (it.outTok ?? 0), 0)
+  const stats = agentStats(totalTools, totalTok, t)
+
+  if (allDone) {
+    const names = items.map((it, i) => agentName(it.args, i)).join(', ')
+    return <DoneCard label={t('subagent.agentsDone', { n: items.length })} detail={names} stats={stats} />
+  }
+  return (
+    <div className="rounded-xl border border-line bg-panel overflow-hidden">
+      <div className="flex items-center gap-2.5 px-3 py-2">
+        <span className="lumi-orb" />
+        <span className="font-medium flex-1">{t('subagent.running', { n: items.length })}</span>
+        <span className="text-muted-foreground text-xs tabular-nums shrink-0">{stats}</span>
+      </div>
+      <div className="border-t border-line/70">
+        {items.map((it, i) => (
+          <FleetRow key={it.id} item={it} name={agentName(it.args, i)} />
+        ))}
+      </div>
+    </div>
+  )
+}
+
+// 并发面板单行：光点 + agent 名 + 当前动作（最后一个子工具，运行中金色高亮）+ 工具数。
+function FleetRow({ item, name }: { item: ToolItem; name: string }) {
+  const { t } = useI18n()
+  const children = item.children ?? []
+  const last = children[children.length - 1]
+  const running = !item.done
+  const Icon = item.done ? Check : last ? toolIcon(last.name) : Bot
+  const action = item.done
+    ? t('subagent.done')
+    : last
+      ? toolTitle(last.name, last.args)
+      : t('common.thinking')
+  return (
+    <div className="flex items-center gap-2.5 px-3 py-1.5 border-t border-line/40 first:border-t-0">
+      <span className={`subagent-dot ${running ? 'subagent-dot-run' : 'subagent-dot-done'}`} />
+      <span className="font-medium shrink-0 w-20 truncate">{name}</span>
+      <span className="flex items-center gap-1.5 text-muted-foreground text-xs flex-1 min-w-0">
+        <Icon size={13} className={`shrink-0 ${running ? 'text-primary' : 'text-success/80'}`} />
+        <span className="truncate">{action}</span>
+      </span>
+      <span className="text-muted-foreground text-[11px] tabular-nums shrink-0">
+        {children.length} {t('subagent.tool')}
+      </span>
+    </div>
+  )
+}
+
+// 运行中的有限工具窗口：只保留最近 SUBAGENT_WINDOW 行。新子工具从底部推入（subtool-enter），
+// 超出窗口的最旧行标记 leaving 向上淡出收起（subtool-leave），动画结束后真正移除。
+// seen 记录已入场过的 toolCallId，避免 leaving 行移除后又被重新加回。
+function RunningWindow({ children }: { children: SubTool[] }) {
+  const [rows, setRows] = useState<{ c: SubTool; leaving: boolean }[]>([])
+  const seen = useRef<Set<string>>(new Set())
+
+  useEffect(() => {
+    setRows((rows) => {
+      // 同步已显示行的最新状态（done/error）
+      let next = rows.map((r) => {
+        const fresh = children.find((c) => c.toolCallId === r.c.toolCallId)
+        return fresh ? { ...r, c: fresh } : r
+      })
+      // 追加首次出现的子工具
+      const added = children.filter((c) => !seen.current.has(c.toolCallId))
+      added.forEach((c) => seen.current.add(c.toolCallId))
+      next = [...next, ...added.map((c) => ({ c, leaving: false }))]
+      // 活跃行超出窗口 → 最旧的几条标记离场
+      const active = next.filter((r) => !r.leaving)
+      const overflow = active.length - SUBAGENT_WINDOW
+      if (overflow > 0) {
+        const leave = new Set(active.slice(0, overflow).map((r) => r.c.toolCallId))
+        next = next.map((r) => (leave.has(r.c.toolCallId) ? { ...r, leaving: true } : r))
+      }
+      return next
+    })
+  }, [children])
+
+  const drop = (id: string) => setRows((rows) => rows.filter((r) => r.c.toolCallId !== id))
+
+  // animationend 兜底：窗口后台化等场景下浏览器可能不派发离场动画结束事件，
+  // 每个 leaving 行额外排一个一次性定时器移除，避免隐形僵尸行永久残留。drop 幂等。
+  const scheduled = useRef<Set<string>>(new Set())
+  useEffect(() => {
+    for (const r of rows) {
+      if (r.leaving && !scheduled.current.has(r.c.toolCallId)) {
+        scheduled.current.add(r.c.toolCallId)
+        window.setTimeout(() => drop(r.c.toolCallId), 320)
+      }
+    }
+  }, [rows])
+
+  return (
+    <div className="border-t border-line/70 pl-7 pr-2.5 py-1">
+      {rows.map(({ c, leaving }) => (
+        <div
+          key={c.toolCallId}
+          className={leaving ? 'subtool-leave' : 'subtool-enter'}
+          onAnimationEnd={leaving ? () => drop(c.toolCallId) : undefined}
+        >
+          <SubToolRow child={c} />
+        </div>
+      ))}
+    </div>
+  )
+}
+
+// 子工具行：图标 + 人类可读标题。运行中（!done）金色高亮，完成绿勾，出错红色。
+function SubToolRow({ child }: { child: SubTool }) {
+  const running = !child.done
+  const Icon = child.done && !child.error ? Check : toolIcon(child.name)
+  return (
+    <div className="flex items-center gap-2.5 px-1.5 py-1 text-sm">
+      <Icon
+        size={15}
+        className={`shrink-0 ${running ? 'text-primary' : child.error ? 'text-error' : 'text-success/80'}`}
+      />
+      <span className={`truncate ${running ? 'text-ink' : child.error ? 'text-error' : 'text-muted-foreground'}`}>
+        {toolTitle(child.name, child.args)}
+      </span>
+    </div>
+  )
+}
 
 // 展开后的工具明细行：图标 + 人类可读标题 + 旋转箭头，点击看输出/diff。
 // 出错的工具行红色高亮并默认展开；edit/write 渲染 +/- diff 而非裸输出。
@@ -1645,6 +1897,9 @@ function DiffView({ lines }: { lines: DiffLine[] }) {
 
 // 文本提取小工具（toolTitle 标题提取共用；clip/basename 在 lib/utils）
 const argStr = (v: unknown) => (typeof v === 'string' ? v : '')
+// 把未知的工具 args 安全收成 Record，便于按字段取值（toolTitle / agentName 共用）
+const asRecord = (v: unknown): Record<string, unknown> =>
+  v && typeof v === 'object' ? (v as Record<string, unknown>) : {}
 
 // 每个工具的展示元数据（图标 + 动作动词/名词 + 人类可读标题提取）集中在一张表，
 // 新增工具只需加一行。icon 驱动 ToolRow 图标，verb/noun 驱动 summarizeTools 聚合，
@@ -1707,7 +1962,7 @@ function summarizeTools(tools: ToolItem[]): string {
 // 从工具 args 提取人类可读标题（非技术用户看得懂），而非 dump raw JSON。
 // 提取规则定义在 TOOL_META[name].title；未知工具回退到第一个字符串字段。
 function toolTitle(name: string, args: unknown): string {
-  const a = (args && typeof args === 'object' ? args : {}) as Record<string, unknown>
+  const a = asRecord(args)
   const m = TOOL_META[name]
   if (m) return m.title(a, name)
   const first = Object.values(a).find((v) => typeof v === 'string')

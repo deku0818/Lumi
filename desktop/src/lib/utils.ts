@@ -9,6 +9,9 @@ export function cn(...inputs: ClassValue[]) {
 export const clip = (s: string, n = 72) => (s.length > n ? s.slice(0, n) + '…' : s)
 export const basename = (p: string) => p.split('/').filter(Boolean).pop() || p
 
+// token 数格式化（≥1k 显示 x.xk）。与 TUI lumi/tui/widgets/agent_group.py::_format_tokens 同口径
+export const fmtTokens = (n: number) => (n >= 1000 ? `${(n / 1000).toFixed(1)}k` : String(n))
+
 // 相对时间（"2 小时前"），跟随界面语言。Intl 构造较重，按 lang 缓存复用。
 const _rtfCache = new Map<string, Intl.RelativeTimeFormat>()
 export function timeAgo(seconds: number, lang: string): string {

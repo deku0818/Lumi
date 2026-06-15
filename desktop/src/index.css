@@ -313,6 +313,24 @@ pre {
 .lumi-orb-idle::before { animation: none; opacity: 0; }
 .lumi-orb-idle::after { animation: none; opacity: 0.75; }
 
+/* ── 子代理卡片：运行中的有限工具窗口，新行从底部推入、旧行被挤出时向上淡出收起 ── */
+@keyframes subtool-in { from { opacity: 0; transform: translateY(6px); } to { opacity: 1; transform: none; } }
+@keyframes subtool-out {
+  0% { opacity: 1; max-height: 40px; transform: none; }
+  100% { opacity: 0; max-height: 0; transform: translateY(-6px); }
+}
+.subtool-enter { animation: subtool-in .26s ease-out; }
+.subtool-leave { animation: subtool-out .26s ease-in forwards; overflow: hidden; }
+
+/* 并发面板每行行首小光点：运行=金色呼吸，完成=绿色静止 */
+.subagent-dot { width: 7px; height: 7px; border-radius: 50%; flex: none; }
+.subagent-dot-run {
+  background: var(--color-accent);
+  box-shadow: 0 0 7px color-mix(in srgb, var(--color-accent) 80%, transparent);
+  animation: lumi-breathe 1.8s ease-in-out infinite;
+}
+.subagent-dot-done { background: var(--color-success); opacity: .8; }
+
 /* ── 项目卡片：当前项目名旁一粒静止金点；卡片切换/进入页面时光环扩散一次
    （一静一动：平时全静，变化的一瞬用「光」反馈） ── */
 @keyframes lumi-ripple-once {
