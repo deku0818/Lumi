@@ -33,6 +33,14 @@ GRACEFUL_SHUTDOWN_TIMEOUT: Final[float] = 5.0
 BASH_MAX_OUTPUT_BYTES: Final[int] = 30 * 1024
 """bash 前台 execute() 单次 stdout 累积上限（字节）。超限后续输出丢弃，附 trailer 告知。"""
 
+# ── 消息注入标记 ──
+
+ATTACHED_FILE_TAG: Final[str] = "attached-file"
+"""文件附件路径在消息中的包裹标签 <attached-file>路径</attached-file>。
+
+单一事实源：display 剥离（text_cleaning）与历史还原（server/ws）都从此构建正则。
+desktop 前端发送侧（App.tsx send）的同名字面量须与此保持一致。"""
+
 # ── 图片处理 ──
 
 MAX_IMAGE_SIZE: Final[int] = 20 * 1024 * 1024  # 20MB

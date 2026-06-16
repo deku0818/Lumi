@@ -22,6 +22,7 @@ import {
 import { Gateway, type ConnState } from './gateway'
 import type {
   ActiveModel,
+  AttachedFile,
   BgTask,
   CronJob,
   HistoryItem,
@@ -48,6 +49,7 @@ import { NewProjectDialog } from './components/NewProjectDialog'
 import { FolderMenu } from './components/FolderMenu'
 import { CommandMenu } from './components/CommandMenu'
 import { Composer } from './components/Composer'
+import { toast } from './components/Toast'
 import { isCommandMode, parseCommand, matchCommands } from './slash'
 import { toolDiff, type DiffLine } from './diff'
 import { clip, basename, fmtTokens } from '@/lib/utils'
@@ -58,6 +60,11 @@ import { useI18n } from './i18n'
 // 单 app 实例，模块级自增 id 即可，避免 hook 依赖问题。
 let _id = 0
 const nid = () => ++_id
+
+// 输入栏附件：图片嵌入（base64 data URL），其它文件只引用绝对路径
+type Attachment =
+  | { id: number; kind: 'image'; dataUrl: string; name: string }
+  | { id: number; kind: 'file'; path: string; name: string }
 
 type ToolItem = Extract<Item, { kind: 'tool' }>
 type Segment =
@@ -92,7 +99,7 @@ const segKey = (seg: Segment): string =>
 
 // load_history 的历史项 → 前端 Item
 function restore(h: HistoryItem): Item {
-  if (h.kind === 'user') return { id: nid(), kind: 'user', text: h.text ?? '', images: h.images }
+  if (h.kind === 'user') return { id: nid(), kind: 'user', text: h.text ?? '', images: h.images, files: h.files }
   if (h.kind === 'assistant')
     return { id: nid(), kind: 'assistant', text: h.text ?? '', streaming: false }
   return {
@@ -234,7 +241,9 @@ export default function App() {
   const [themePref, setThemePref] = useTheme()
   const { t } = useI18n()
   const [notify, setNotify] = useState(() => localStorage.getItem('lumi-notify') === '1')
-  const [attachments, setAttachments] = useState<{ id: number; dataUrl: string }[]>([])
+  // 图片嵌入消息（dataUrl→image 块）；其它文件只带绝对路径，发送时写进消息文本，
+  // 由 Agent 用工具读取（不在此预授权，交给现有权限流程）
+  const [attachments, setAttachments] = useState<Attachment[]>([])
   // 主区视图：聊天 / 项目管理页 / 定时任务管理页 / 任务会话视图（某任务的某次执行对话 + Runs 侧栏）
   const [bgTasks, setBgTasks] = useState<BgTask[]>([]) // 后台任务全量快照（按 thread 过滤展示）
   const [bgDrawerOpen, setBgDrawerOpen] = useState(false) // 后台任务右栏开关（默认关，有任务时头部出现 PanelRight）
@@ -941,17 +950,27 @@ export default function App() {
   }
 
   // 读取图片文件为 data URL 加入附件（粘贴 / 拖拽 / ＋ 选择 共用，仅图片类型）
-  const addImages = (files: FileList | File[]) => {
+  // 图片读成 data URL 嵌入；其它文件取绝对路径作引用（拿不到路径则跳过——非 Electron 环境）
+  const addFiles = (files: FileList | File[]) => {
+    const failed: string[] = []
     for (const f of Array.from(files)) {
-      if (!f.type.startsWith('image/')) continue
-      const reader = new FileReader()
-      reader.onload = () => {
-        if (typeof reader.result === 'string') {
-          const url = reader.result
-          setAttachments((a) => [...a, { id: nid(), dataUrl: url }])
+      if (f.type.startsWith('image/')) {
+        const reader = new FileReader()
+        reader.onload = () => {
+          if (typeof reader.result === 'string') {
+            const url = reader.result
+            setAttachments((a) => [...a, { id: nid(), kind: 'image', dataUrl: url, name: f.name }])
+          }
         }
+        reader.readAsDataURL(f)
+        continue
       }
-      reader.readAsDataURL(f)
+      const path = window.lumi.getPathForFile?.(f) || ''
+      if (path) setAttachments((a) => [...a, { id: nid(), kind: 'file', path, name: f.name }])
+      else failed.push(f.name) // 取不到绝对路径（如非文件系统来源的拖拽），别静默吞掉
+    }
+    if (failed.length) {
+      toast.error(`${t('composer.attachFailed')}: ${failed.join('、')}`)
     }
   }
 
@@ -967,18 +986,18 @@ export default function App() {
     }
     if (files.length) {
       e.preventDefault() // 阻止把图片当文件名/文本贴入
-      addImages(files)
+      addFiles(files)
     }
   }
 
-  const onDropImages = (e: React.DragEvent) => {
+  const onDropFiles = (e: React.DragEvent) => {
     if (e.dataTransfer?.files?.length) {
       e.preventDefault()
-      addImages(e.dataTransfer.files)
+      addFiles(e.dataTransfer.files)
     }
   }
 
-  const removeImage = (id: number) => setAttachments((a) => a.filter((x) => x.id !== id))
+  const removeAttachment = (id: number) => setAttachments((a) => a.filter((x) => x.id !== id))
 
   // 流式 RPC 被 reject（连接断开时 gateway 会 flush 所有在飞请求）后，
   // 新连接不会为死掉的 run 补发 turn.complete——必须在此复位 running，
@@ -988,36 +1007,50 @@ export default function App() {
 
   const send = () => {
     const text = input.trim()
-    const imgs = attachments
+    const imgs = attachments.filter((a) => a.kind === 'image')
+    const fileRefs = attachments.filter((a) => a.kind === 'file')
     const gw = connsRef.current[active]
-    if ((!text && imgs.length === 0) || running || !gw) return
+    if ((!text && attachments.length === 0) || running || !gw) return
+    const files: AttachedFile[] = fileRefs.map((a) => ({ path: a.path, name: a.name }))
     setStore((s) => ({
       ...s,
       [active]: {
         ...s[active],
         items: [
           ...s[active].items,
-          { id: nid(), kind: 'user', text, images: imgs.length ? imgs.map((a) => a.dataUrl) : undefined },
+          {
+            id: nid(),
+            kind: 'user',
+            text, // 可见正文只留用户输入；附件路径走 system-reminder，不污染气泡
+            images: imgs.length ? imgs.map((a) => a.dataUrl) : undefined,
+            files: files.length ? files : undefined,
+          },
         ],
         running: true,
       },
     }))
     setInput('')
     setAttachments([])
-    // 纯文本的已知斜杠命令走 run_command；带图片则一律走多模态 send_message
-    if (imgs.length === 0 && text.startsWith('/')) {
+    // 纯文本的已知斜杠命令走 run_command；带附件则一律走 send_message
+    if (attachments.length === 0 && text.startsWith('/')) {
       const [name, extra] = parseCommand(text)
       if (commands.some((c) => c.name === name)) {
         gw.runCommand(name, extra).catch(() => resetRunning(active))
         return
       }
     }
-    if (imgs.length > 0) {
-      // 拆 data URL 为 Anthropic 原生图片块（后端按模型再转 OpenAI/Bedrock 格式）
+    if (imgs.length > 0 || files.length > 0) {
       const blocks: unknown[] = text ? [{ type: 'text', text }] : []
+      // 图片拆为 Anthropic 原生图片块（后端按模型再转 OpenAI/Bedrock 格式）
       for (const a of imgs) {
         const m = /^data:([^;]+);base64,(.*)$/s.exec(a.dataUrl)
         if (m) blocks.push({ type: 'image', source: { type: 'base64', media_type: m[1], data: m[2] } })
+      }
+      // 文件路径以 <attached-file> 注入（display 层会剥离，不进可见正文），Agent 用 read 读取。
+      // 标签名须与后端 constants.ATTACHED_FILE_TAG 一致（display 剥离 + 历史还原的单一事实源）。
+      if (files.length > 0) {
+        const lines = files.map((f) => `<attached-file>${f.path}</attached-file>`).join('\n')
+        blocks.push({ type: 'text', text: lines })
       }
       gw.sendMessage(blocks).catch(() => resetRunning(active))
     } else {
@@ -1160,26 +1193,44 @@ export default function App() {
       <div
         className="bg-surface rounded-3xl border border-line/40 focus-within:border-primary/40 transition-colors overflow-hidden"
         onDragOver={(e) => e.preventDefault()}
-        onDrop={onDropImages}
+        onDrop={onDropFiles}
       >
       {attachments.length > 0 && (
         <div className="flex flex-wrap gap-2 px-3.5 pt-3">
-          {attachments.map((a) => (
-            <div key={a.id} className="relative group/att">
-              <img
-                src={a.dataUrl}
-                alt=""
-                className="size-16 object-cover rounded-xl border border-line/40"
-              />
-              <button
-                onClick={() => removeImage(a.id)}
-                aria-label={t('composer.removeImage')}
-                className="absolute -top-1.5 -right-1.5 size-5 grid place-items-center rounded-full bg-canvas border border-line text-muted-foreground hover:text-ink opacity-0 group-hover/att:opacity-100 transition"
+          {attachments.map((a) =>
+            a.kind === 'image' ? (
+              <div key={a.id} className="relative group/att">
+                <img
+                  src={a.dataUrl}
+                  alt={a.name}
+                  className="size-16 object-cover rounded-xl border border-line/40"
+                />
+                <button
+                  onClick={() => removeAttachment(a.id)}
+                  aria-label={t('composer.removeAttachment')}
+                  className="absolute -top-1.5 -right-1.5 size-5 grid place-items-center rounded-full bg-canvas border border-line text-muted-foreground hover:text-ink opacity-0 group-hover/att:opacity-100 transition"
+                >
+                  <X size={12} />
+                </button>
+              </div>
+            ) : (
+              <div
+                key={a.id}
+                title={a.path}
+                className="relative group/att flex items-center gap-2 max-w-56 h-9 pl-2 pr-2.5 rounded-xl border border-line/40 bg-canvas"
               >
-                <X size={12} />
-              </button>
-            </div>
-          ))}
+                <FileText size={15} className="shrink-0 text-muted-foreground" />
+                <span className="min-w-0 truncate text-xs text-ink">{a.name}</span>
+                <button
+                  onClick={() => removeAttachment(a.id)}
+                  aria-label={t('composer.removeAttachment')}
+                  className="absolute -top-1.5 -right-1.5 size-5 grid place-items-center rounded-full bg-canvas border border-line text-muted-foreground hover:text-ink opacity-0 group-hover/att:opacity-100 transition"
+                >
+                  <X size={12} />
+                </button>
+              </div>
+            ),
+          )}
         </div>
       )}
       <Composer
@@ -1245,11 +1296,10 @@ export default function App() {
       <input
         ref={fileInputRef}
         type="file"
-        accept="image/*"
         multiple
         className="hidden"
         onChange={(e) => {
-          if (e.target.files) addImages(e.target.files)
+          if (e.target.files) addFiles(e.target.files)
           e.target.value = ''
         }}
       />
@@ -1582,6 +1632,20 @@ const ItemView = memo(function ItemView({ item }: { item: Exclude<Item, { kind: 
         {item.text && (
           <div className="selectable bg-surface rounded-3xl rounded-br-lg px-4 py-2.5 max-w-[80%] whitespace-pre-wrap">
             {item.text}
+          </div>
+        )}
+        {item.files && item.files.length > 0 && (
+          <div className="flex flex-wrap gap-1.5 justify-end max-w-[80%]">
+            {item.files.map((f, i) => (
+              <span
+                key={i}
+                title={f.path}
+                className="inline-flex items-center gap-1.5 rounded-full border px-2.5 py-1 text-xs border-primary/30 bg-primary/10 text-ink"
+              >
+                <FileText size={12} className="shrink-0 text-primary" />
+                <span className="max-w-52 truncate">{f.name}</span>
+              </span>
+            ))}
           </div>
         )}
       </div>

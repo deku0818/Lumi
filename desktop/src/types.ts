@@ -12,8 +12,14 @@ export interface WireEvent<P = any> {
 }
 
 // 渲染项模型（前端聊天流的最小单元）
+// 非图片附件：只引用绝对路径，气泡里渲染成文件胶囊
+export interface AttachedFile {
+  path: string
+  name: string
+}
+
 export type Item =
-  | { id: number; kind: 'user'; text: string; images?: string[] }
+  | { id: number; kind: 'user'; text: string; images?: string[]; files?: AttachedFile[] }
   | { id: number; kind: 'assistant'; text: string; streaming: boolean }
   | {
       id: number
@@ -121,6 +127,7 @@ export interface HistoryItem {
   kind: 'user' | 'assistant' | 'tool'
   text?: string
   images?: string[]
+  files?: AttachedFile[]
   name?: string
   args?: unknown
   output?: string
@@ -163,6 +170,7 @@ declare global {
     lumi: {
       getConnection: () => Promise<{ wsUrl: string }>
       pickDirectory?: () => Promise<string | null>
+      getPathForFile?: (file: File) => string
       notify?: (payload: { title: string; body?: string; tag?: string }) => Promise<void>
       onNotifyClick?: (cb: (tag: string) => void) => void
     }

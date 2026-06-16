@@ -1,5 +1,15 @@
 # Changelog
 
+## [0.1.0a21] - 2026-06-16
+
+### Added
+- **Desktop 输入栏文件附件**（`docs/architecture/desktop.md` 输入栏文件附件节）— `+` / 拖拽 / 粘贴现在支持任意文件，不再限于图片。图片仍读成 base64 嵌入 `image` 块；其它文件（PDF / 视频 / docx…）经 Electron `webUtils.getPathForFile`（`preload.cjs` 新暴露，Electron 33 起 `File.path` 已移除）取绝对路径，发送时以 `<attached-file>路径</attached-file>` 注入消息让 Agent 用 `read` 读取——**不预授权**，能否读取交给现有权限引擎。`<attached-file>` 是显示层注入块：`text_cleaning` 从可见正文剥离（不污染气泡），`server/ws._extract_files` 用同一标签还原文件胶囊；标签名 `ATTACHED_FILE_TAG`（`lumi/utils/constants.py`）作单一事实源。气泡内附件渲染成品牌金描边胶囊（仅文件名 + hover 路径），输入栏 pill 为图标 + 文件名
+- **应用内轻量通知通道**（`desktop/src/components/Toast.tsx`）— 模块级 store + 根部 `<ToastHost/>`，任意模块 `toast.error/success/info(msg)` 即可调用，无需 context / prop 透传。顶部居中细条幅，按 kind 上语义色，下拉淡入 + 自动消失，多条堆叠。首个接入点：文件附件取不到路径时提示失败（不再静默吞掉）
+
+### Changed
+- **添加文件夹按钮即时 tooltip** — `FolderMenu` 的 `FolderPlus` 从原生 `title`（约 1.5s 延迟）改用 Radix `Tooltip`（复用根部 `delayDuration=200` 的全局 Provider），悬停即出；菜单展开时不显示，避免与下拉重叠
+- **`<attached-file>` 标签单一事实源** — display 剥离（`text_cleaning`）与历史还原（`server/ws`）的正则均由 `constants.ATTACHED_FILE_TAG` 构建，basename 取用 `Path(p).name`；i18n 键 `composer.removeImage` → `composer.removeAttachment`（图片/文件 pill 共用）
+
 ## [0.1.0a20] - 2026-06-16
 
 ### Added

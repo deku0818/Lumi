@@ -8,6 +8,11 @@ import {
   DropdownMenuTrigger,
   DropdownMenuContent,
 } from '@/components/ui/dropdown-menu'
+import {
+  Tooltip,
+  TooltipTrigger,
+  TooltipContent,
+} from '@/components/ui/tooltip'
 
 // composer 的「添加文件夹」（交互定稿见 .demos/lumi-projects.html）：
 // 图标右上角挂数量徽标；无目录时点击直接弹原生选择器（少一步），
@@ -34,22 +39,28 @@ export function FolderMenu({
         setOpen(o)
       }}
     >
-      <DropdownMenuTrigger asChild>
-        <Button
-          variant="ghost"
-          size="icon-sm"
-          aria-label={t('folders.add')}
-          title={open ? undefined : t('folders.add')}
-          className="relative text-muted-foreground"
-        >
-          <FolderPlus />
-          {folders.length > 0 && (
-            <span className="absolute top-0 right-0 min-w-3.5 h-3.5 rounded-full bg-primary px-1 text-[9.5px] font-bold leading-[14px] text-primary-foreground text-center">
-              {folders.length}
-            </span>
-          )}
-        </Button>
-      </DropdownMenuTrigger>
+      <Tooltip>
+        <TooltipTrigger asChild>
+          <DropdownMenuTrigger asChild>
+            <Button
+              variant="ghost"
+              size="icon-sm"
+              aria-label={t('folders.add')}
+              className="relative text-muted-foreground"
+            >
+              <FolderPlus />
+              {folders.length > 0 && (
+                <span className="absolute top-0 right-0 min-w-3.5 h-3.5 rounded-full bg-primary px-1 text-[9.5px] font-bold leading-[14px] text-primary-foreground text-center">
+                  {folders.length}
+                </span>
+              )}
+            </Button>
+          </DropdownMenuTrigger>
+        </TooltipTrigger>
+        {!open && (
+          <TooltipContent side="top">{t('folders.add')}</TooltipContent>
+        )}
+      </Tooltip>
       <DropdownMenuContent side="top" align="start" className="w-64">
         <div className="flex items-center gap-1 pl-2 pr-0.5 py-0.5">
           <span className="flex-1 text-[11px] text-muted-foreground select-none">

@@ -7,6 +7,8 @@ from __future__ import annotations
 
 import re
 
+from lumi.utils.constants import ATTACHED_FILE_TAG
+
 # 从消息中提取命令名和用户输入的正则
 _COMMAND_NAME_RE: re.Pattern[str] = re.compile(
     r"<command-name>(/[\w-]+)</command-name>"
@@ -18,6 +20,7 @@ _USER_INPUT_RE: re.Pattern[str] = re.compile(
 # 需过滤的注入块标签
 _INJECTED_BLOCK_PATTERNS: list[re.Pattern[str]] = [
     re.compile(r"<system-reminder>.*?</system-reminder>\s*", re.DOTALL),
+    re.compile(rf"<{ATTACHED_FILE_TAG}>.*?</{ATTACHED_FILE_TAG}>\s*", re.DOTALL),
     re.compile(r"<summary>.*?</summary>\s*", re.DOTALL),
     re.compile(r"<command-name>.*?</command-name>\s*", re.DOTALL),
     re.compile(r"<command-type>.*?</command-type>\s*", re.DOTALL),
