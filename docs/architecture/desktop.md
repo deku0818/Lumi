@@ -93,6 +93,13 @@ shell / 后台任务会话等全局单例由 `shutdown_shared_runtime()` 在 lif
 - **前端**：`SettingsDialog` + `ProvidersPanel` 完成增 / 删 / 改 / 测试；`ModelPicker`（顶栏）做快速切换。
 - **TUI 对应**：`/model` 命令打开 `ModelScreen`（`lumi/tui/screens/model_screen.py`）——把「供应商 × 模型」拍平成列表，**仅切换**；增删改在桌面端配置页完成，二者共享 `~/.lumi/providers.json`。
 
+## 上下文用量指示器
+
+composer 右下角（发送键左侧）一粒圆环，实时反映「当前对话占用 / 模型上下文窗口」，落地见 `desktop/src/components/ContextMeter.tsx`。
+
+- **数据**：占用量取最近一次模型调用的 `usage.input_tokens`（含缓存命中部分，即「当前上下文」），由 `App.tsx` 的 `ctxFromUsage` 从 `message.complete` / `turn.complete` 事件提炼写入 `SessionState.ctx`（回合中流式刷新）；窗口取 active 模型的上下文长度——`list_providers` 在每个 profile 附 `context: {model: context_length}`（来自 models.dev catalog，与思考能力 `thinking` 同源 `lookup(m)`），前端按 `activeModel` 派生 `contextWindow`。
+- **形态**：默认仅圆环，颜色即档位（绿 `<60%` / 金 `60–85%` / 红 `>85%`，取主题 `--color-success/accent/error`）；点击经 Radix DropdownMenu 向上弹出明细——大进度条 + 已用/总量 + 分项（输入 / 输出 / 缓存命中，取 `input_token_details` / `output_token_details`）+ 当前模型与窗口。临界态（`>85%`）圆环发光呼吸 + 红色「上下文将满」提示条。数据未就绪（无 usage 或窗口未知 = 0）时静默不渲染。
+
 ## 定时任务管理
 
 cron 子系统是进程级资源（与会话无关）：serve 在 lifespan 中经 `lumi/agents/cron/runtime.setup_cron()`（TUI 共用的装配工厂）启动调度器，RPC 实现在 `lumi/server/cron_rpc.py`，不经 AgentBridge。内部机制（执行即会话、保留策略、级联删除）见 [`cron.md`](cron.md)。
@@ -139,6 +146,7 @@ macOS 关窗后应用驻留 Dock，sidecar 保持运行，Dock 唤起（activate
 | `desktop/src/App.tsx` | 会话状态机、事件路由、聊天流渲染 |
 | `desktop/src/components/Sidebar.tsx` | 会话列表 + 右键菜单 + 内联重命名 |
 | `desktop/src/components/{SettingsDialog,ProvidersPanel,ModelPicker}.tsx` | 模型供应商配置 + 快速切换 |
+| `desktop/src/components/ContextMeter.tsx` | 上下文用量指示器（圆环 + 明细 popover） |
 | `desktop/src/components/CronPage.tsx` | 定时任务管理页 + 任务会话视图 Runs 栏 |
 | `desktop/src/components/BgTasksDrawer.tsx` | 后台任务中心 drawer（折叠卡片 + 实时进度） |
 | `desktop/src/components/{ProjectsPage,NewProjectDialog,FolderMenu}.tsx` | 项目管理页 + 新建项目 + 添加文件夹菜单 |

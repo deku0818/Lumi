@@ -42,6 +42,7 @@ import { CronPage, RunsRail } from './components/CronPage'
 import { ConfirmDialog } from './components/ConfirmDialog'
 import { SettingsDialog } from './components/SettingsDialog'
 import { ModelPicker } from './components/ModelPicker'
+import { ContextMeter, type CtxUsage } from './components/ContextMeter'
 import { ProjectsPage } from './components/ProjectsPage'
 import { NewProjectDialog } from './components/NewProjectDialog'
 import { FolderMenu } from './components/FolderMenu'
@@ -185,6 +186,8 @@ type SessionState = {
   approval: Record<string, unknown> | null
   clarify: Record<string, unknown> | null
   plan: Record<string, unknown> | null
+  // 最近一次模型调用的上下文用量（用于输入栏的上下文进度环）；首轮前为 undefined
+  ctx?: CtxUsage
 }
 const emptySession = (items: Item[] = []): SessionState => ({
   items,
@@ -194,6 +197,17 @@ const emptySession = (items: Item[] = []): SessionState => ({
   clarify: null,
   plan: null,
 })
+
+// 从 LangChain usage_metadata 提炼上下文环所需快照。input_tokens 含缓存命中部分，
+// 直接作为「当前上下文占用」；缺字段（如非流式补发不带 input_tokens）返回 undefined。
+const ctxFromUsage = (u: any): CtxUsage | undefined => {
+  if (!u || typeof u.input_tokens !== 'number') return undefined
+  return {
+    used: u.input_tokens,
+    output: u.output_tokens ?? 0,
+    cacheRead: u.input_token_details?.cache_read ?? 0,
+  }
+}
 
 export default function App() {
   const [store, setStore] = useState<Record<string, SessionState>>({})
@@ -303,6 +317,12 @@ export default function App() {
   const approval = cur?.approval ?? null
   const clarify = cur?.clarify ?? null
   const plan = cur?.plan ?? null
+  // 当前 active 模型的上下文窗口（tokens）；能力未知时为 0，ContextMeter 自会隐藏。
+  // memo 化避免每次流式 token 重渲染都重跑 providers.find。
+  const contextWindow = useMemo(
+    () => providers.find((p) => p.id === activeModel.provider)?.context?.[activeModel.model] ?? 0,
+    [providers, activeModel.provider, activeModel.model],
+  )
 
   useEffect(() => {
     storeRef.current = store
@@ -425,7 +445,7 @@ export default function App() {
           n = { ...s, thinkingText: s.thinkingText + (payload.text ?? '') }
           break
         case 'message.complete':
-          n = { ...s, items: finishStreaming(s.items) }
+          n = { ...s, items: finishStreaming(s.items), ctx: ctxFromUsage(payload.usage) ?? s.ctx }
           break
         case 'tool.start': {
           const tcid = payload.tool_call_id ?? ''
@@ -470,7 +490,12 @@ export default function App() {
           n = { ...s, plan: payload }
           break
         case 'turn.complete':
-          n = { ...s, running: false, items: finishStreaming(s.items) }
+          n = {
+            ...s,
+            running: false,
+            items: finishStreaming(s.items),
+            ctx: ctxFromUsage(payload.usage) ?? s.ctx,
+          }
           break
         case 'error':
           // 出错中断的流（bridge 只发 error、无 message.complete）也要收尾气泡
@@ -1191,27 +1216,30 @@ export default function App() {
             onSwitchEffort={switchEffort}
           />
         </div>
-        {running && !approval && !clarify && !plan ? (
-          <Button
-            size="icon"
-            variant="destructive"
-            onClick={stop}
-            aria-label={t('composer.stop')}
-            className="rounded-full"
-          >
-            <Square fill="currentColor" strokeWidth={0} className="size-3" />
-          </Button>
-        ) : (
-          <Button
-            size="icon"
-            onClick={send}
-            disabled={running || conn !== 'open' || (!input.trim() && attachments.length === 0)}
-            aria-label={t('composer.send')}
-            className="rounded-full"
-          >
-            <span className="text-lg leading-none">↑</span>
-          </Button>
-        )}
+        <div className="flex items-center gap-1.5">
+          <ContextMeter usage={cur?.ctx} window={contextWindow} model={model} />
+          {running && !approval && !clarify && !plan ? (
+            <Button
+              size="icon"
+              variant="destructive"
+              onClick={stop}
+              aria-label={t('composer.stop')}
+              className="rounded-full"
+            >
+              <Square fill="currentColor" strokeWidth={0} className="size-3" />
+            </Button>
+          ) : (
+            <Button
+              size="icon"
+              onClick={send}
+              disabled={running || conn !== 'open' || (!input.trim() && attachments.length === 0)}
+              aria-label={t('composer.send')}
+              className="rounded-full"
+            >
+              <span className="text-lg leading-none">↑</span>
+            </Button>
+          )}
+        </div>
       </div>
       </div>
       <input
@@ -1655,8 +1683,12 @@ const AgentGroup = memo(
   (prev, next) => sameItems(prev.items, next.items),
 )
 
+// 子工具数 + token 摘要。无子工具且无 token 时返回空串——历史恢复的卡片（子代理内部
+// 活动不进 checkpoint）与刚启动尚未调工具的瞬间，都不显示误导性的「0 工具」。
 const agentStats = (children: number, tokens: number, t: ReturnType<typeof useI18n>['t']) =>
-  `${children} ${t('subagent.tool')}${tokens ? ` · ${fmtTokens(tokens)}` : ''}`
+  children || tokens
+    ? `${children} ${t('subagent.tool')}${tokens ? ` · ${fmtTokens(tokens)}` : ''}`
+    : ''
 
 // 子代理 args.name（子代理类型名，如 explorer），缺失回退到序号
 const agentName = (args: unknown, i: number): string =>
@@ -1669,7 +1701,7 @@ function DoneCard({ label, detail, stats }: { label: string; detail: string; sta
       <span className="lumi-orb lumi-orb-idle" />
       <span className="font-medium shrink-0">{label}</span>
       <span className="text-muted-foreground truncate flex-1">{detail}</span>
-      <span className="text-muted-foreground text-xs tabular-nums shrink-0">{stats}</span>
+      {stats && <span className="text-muted-foreground text-xs tabular-nums shrink-0">{stats}</span>}
     </div>
   )
 }
@@ -1691,7 +1723,7 @@ function SingleAgent({ item }: { item: ToolItem }) {
       <div className="flex items-center gap-2.5 px-3 py-2">
         <span className="lumi-orb" />
         <span className="font-medium flex-1 truncate">{title}</span>
-        <span className="text-muted-foreground text-xs tabular-nums shrink-0">{stats}</span>
+        {stats && <span className="text-muted-foreground text-xs tabular-nums shrink-0">{stats}</span>}
       </div>
       {children.length > 0 && <RunningWindow children={children} />}
     </div>
@@ -1716,7 +1748,7 @@ function AgentFleet({ items }: { items: ToolItem[] }) {
       <div className="flex items-center gap-2.5 px-3 py-2">
         <span className="lumi-orb" />
         <span className="font-medium flex-1">{t('subagent.running', { n: items.length })}</span>
-        <span className="text-muted-foreground text-xs tabular-nums shrink-0">{stats}</span>
+        {stats && <span className="text-muted-foreground text-xs tabular-nums shrink-0">{stats}</span>}
       </div>
       <div className="border-t border-line/70">
         {items.map((it, i) => (

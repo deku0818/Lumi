@@ -201,6 +201,9 @@ def _start_background_agent(
         f"Task ID: {task_id}\n"
         f"Agent: {name}\n"
         f"Output File: {output_file.resolve()}\n"
+        f"\n"
+        f"完成时你会自动收到通知（含结果）。在此之前**不要**轮询状态或读取 Output File，"
+        f"等通知即可——期间请继续做别的事。\n"
     )
 
 

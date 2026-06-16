@@ -396,6 +396,10 @@ class AgentBridge:
                 "effort": "auto",  # 占位，下方按 profile 覆盖
             }
 
+        def context_of(m: str) -> int:
+            entry = lookup(m)
+            return entry.context_length if entry else 0
+
         return {
             "profiles": [
                 {
@@ -408,6 +412,7 @@ class AgentBridge:
                         m: {**thinking_of(m), "effort": p.effort.get(m, "auto")}
                         for m in p.models
                     },
+                    "context": {m: context_of(m) for m in p.models},
                 }
                 for p in profiles
             ],

@@ -29,6 +29,11 @@ class BackgroundTaskInput(BaseModel):
 
 BACKGROUND_TASK_DESCRIPTION = """管理后台运行的任务（Bash 命令和 Agent 代理）。
 
+**不要用本工具轮询。** 后台任务完成时你会**自动**收到通知（含结果）。在通知到达前：
+- **不要**反复调 `status` 查进度，**不要**用 Read 偷看 output_file——等通知就是最高效的做法，期间请继续做别的事。
+- 中途偷看只会把任务的中间噪声拉进你的上下文，完全违背后台执行的初衷。
+- **只有**用户明确要求查看进度 / 列出任务 / 停止任务时，才使用本工具。
+
 ## 操作
 
 | action | task_id | 说明 |
@@ -39,7 +44,7 @@ BACKGROUND_TASK_DESCRIPTION = """管理后台运行的任务（Bash 命令和 Ag
 
 ## 读取任务输出
 
-使用 `status` 获取 output_file 路径后，用 Read 工具读取输出内容。
+正常情况下无需手动读取——通知会内联结果。仅当用户明确要求时，用 `status` 获取 output_file 路径后再用 Read 读取。
 """
 
 

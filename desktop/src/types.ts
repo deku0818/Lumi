@@ -69,6 +69,8 @@ export interface ProviderProfile {
     string,
     { control: 'none' | 'effort' | 'toggle'; levels: string[]; effort: string }
   >
+  // 按模型的上下文窗口（tokens，来自 models.dev）。0 = 能力未知。
+  context?: Record<string, number>
 }
 
 // 当前选中项：某 provider 下的某个 model

@@ -1,5 +1,14 @@
 # Changelog
 
+## [0.1.0a20] - 2026-06-16
+
+### Added
+- **Desktop 上下文用量指示器**（`docs/architecture/desktop.md` 上下文用量指示器节）— composer 右下角（发送键左侧）一粒圆环，实时反映「当前对话占用 / 模型上下文窗口」。占用量取最近一次模型调用的 `usage.input_tokens`（含缓存命中，即当前上下文），`App.tsx` 的 `ctxFromUsage` 从 `message.complete` / `turn.complete` 提炼写入 `SessionState.ctx`（回合中流式刷新）；窗口来自 `list_providers` 新增的 per-model `context: {model: context_length}`（models.dev catalog，与 `thinking` 同源 `lookup(m)`），前端按 `activeModel` 派生 `contextWindow`（`useMemo` 化避免流式逐 token 重渲染重跑 `providers.find`）。默认仅圆环，颜色即档位（绿 `<60%` / 金 `60–85%` / 红 `>85%`）；点击向上弹出明细（大进度条 + 已用/总量 + 输入/输出/缓存命中分项 + 当前模型与窗口），临界态发光呼吸 + 红色「上下文将满」提示条。数据未就绪时静默不渲染
+
+### Changed
+- **后台任务提示词收口** — `agent` / `background_task` / `bash` 三处后台任务工具描述统一加上「启动后等通知即可，不要轮询状态或读 output_file」的指引，避免子代理把后台任务的中间噪声拉进上下文、违背后台执行初衷
+- **子代理统计行空态** — `agentStats` 无子工具且无 token 时返回空串，`DoneCard` / `SingleAgent` / `AgentFleet` 条件渲染，历史恢复的卡片与刚启动尚未调工具的瞬间不再显示误导性的「0 工具」
+
 ## [0.1.0a19] - 2026-06-15
 
 ### Added

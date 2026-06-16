@@ -70,7 +70,7 @@ async def bash(
     - 尽量使用绝对路径，避免 `cd`
     - 独立命令可以并行调用多个 Bash 工具
     - 依赖前一个命令结果的用 `&&` 串联
-    - 后台任务用 `run_in_background`，不需要加 `&`
+    - 后台任务用 `run_in_background`，不需要加 `&`；启动后等通知即可，**不要**反复查状态或读输出文件
     - 避免不必要的 `sleep`
     - Git 操作有严格的安全协议（不强制推送、不跳过 hooks、不 amend 除非明确要求等）
     """
@@ -90,6 +90,9 @@ async def bash(
                 f"后台任务已启动\n"
                 f"Task ID: {task.task_id}\n"
                 f"Output File: {task.output_file.resolve()}\n"
+                f"\n"
+                f"完成时你会自动收到通知。在此之前**不要**轮询状态或读取 Output File，"
+                f"等通知即可——期间请继续做别的事。\n"
             )
 
         command_result = await session.execute(command, timeout=timeout)
