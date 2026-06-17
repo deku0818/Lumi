@@ -1,5 +1,10 @@
 # Changelog
 
+## [0.1.0a23] - 2026-06-17
+
+### Added
+- **Desktop 边栏可拖拽调宽**（`docs/architecture/desktop.md` 可调宽边栏节）— 三栏布局（左侧会话栏 + 右侧后台任务栏 / 任务执行记录栏）均可拖动边缘调整宽度，各自宽度存 localStorage（`lumi-sidebar-width` / `lumi-bg-width` / `lumi-runs-width`），越界或脏值回退默认值。统一封装在 `desktop/src/components/ResizeHandle.tsx`：`useResizableWidth(key, def, min, max)` 为单一事实源（lazy-init + 自带边界钳制的 setter + useEffect 持久化，与 `font.ts` / `theme.ts` 同构），`<ResizeHandle>` 作为 flex 兄弟节点的拖拽分隔条（`edge` 决定加宽方向，默认透明 hover 显品牌金细线）。拖拽期间给 `body` 挂 `resizing-col` 类全局停用过渡 + 统一 `col-resize` 光标，让边栏即时跟手并压制 `BgTasksDrawer` 开关动画（松手恢复）。后台任务栏拖拽条与抽屉、toggle 共用 `bgDrawerOpen && activeBgTasks.length > 0` 可见性条件，切到无任务会话时不留悬空拖拽条
+
 ## [0.1.0a22] - 2026-06-17
 
 ### Added

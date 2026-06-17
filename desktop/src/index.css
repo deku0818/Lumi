@@ -176,6 +176,16 @@ pre {
   -webkit-app-region: no-drag;
 }
 
+/* 拖拽调整边栏宽度时：全局 col-resize 光标、禁选、停用过渡（让边栏即时跟手） */
+body.resizing-col {
+  cursor: col-resize;
+}
+body.resizing-col * {
+  cursor: col-resize !important;
+  user-select: none !important;
+  transition: none !important;
+}
+
 .serif {
   font-family: ui-serif, Georgia, "Songti SC", "Noto Serif SC", serif;
   letter-spacing: 0.01em;

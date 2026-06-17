@@ -157,6 +157,10 @@ macOS 关窗后应用驻留 Dock，sidecar 保持运行，Dock 唤起（activate
 - **覆盖机制**：默认字体栈是 `index.css` 的 `--font-fallback`（**唯一真相**）；`@theme` 的 `--font-sans` = `var(--ui-font, var(--font-fallback))`，故选字体只需把 `--ui-font` 设到根元素，`body` 与所有 `font-sans` / `font-heading` 工具类（含 Dialog 标题）一并跟随。字号同理：`body` 用 `font-size: var(--ui-font-size, 13px)`，仅非默认字号才写 `--ui-font-size`，默认时移除让 CSS 回落。`font.ts` 设字体时走 `cssFamily()` 转义族名（防引号/反斜杠破坏声明），并追加 `var(--font-fallback)` 保证西文字体缺中文字形时回退。
 - **本机字体枚举**：经浏览器 `queryLocalFonts()`（Local Font Access API）取族名去重排序。**权限收口**：`electron/main.cjs` 的 `setPermissionRequestHandler` / `setPermissionCheckHandler` **仅放行 `local-fonts`**，其余权限（camera / mic / geolocation / clipboard…）一律拒绝。该 API 需 user activation，故首次枚举在点击打开下拉的处理器内同步触发（非 effect），避免打包版丢激活；不可用 / 被拒时静默返回空并在面板提示「无法访问本机字体」。列表渲染封顶 `MAX_VISIBLE` 行（多出靠搜索收窄），避免上百字体一次性挂载造成开屏卡顿。
 
+## 可调宽边栏
+
+三栏布局（左侧会话栏 + 右侧后台任务栏 / 任务执行记录栏）均可拖拽调宽，各自宽度存 localStorage（`lumi-sidebar-width` / `lumi-bg-width` / `lumi-runs-width`），越界或脏值回退默认值。统一封装在 `desktop/src/components/ResizeHandle.tsx`：`useResizableWidth(key, def, min, max)` 是单一事实源（lazy-init + 自带边界钳制的 setter + useEffect 持久化，与 `font.ts` / `theme.ts` 同构），`<ResizeHandle>` 作为 flex 兄弟节点的拖拽分隔条（`edge` 决定加宽方向）。拖拽期间给 `body` 挂 `resizing-col` 类，全局停用过渡并统一 `col-resize` 光标，让边栏即时跟手（亦压制 `BgTasksDrawer` 的开关动画，松手恢复）。
+
 ## 关键文件
 
 | 文件 | 职责 |
@@ -165,6 +169,7 @@ macOS 关窗后应用驻留 Dock，sidecar 保持运行，Dock 唤起（activate
 | `desktop/src/gateway.ts` | WS JSON-RPC 客户端（带指数退避重连） |
 | `desktop/src/App.tsx` | 会话状态机、事件路由、聊天流渲染 |
 | `desktop/src/components/Sidebar.tsx` | 会话列表 + 右键菜单 + 内联重命名 |
+| `desktop/src/components/ResizeHandle.tsx` | 边栏拖拽调宽（`useResizableWidth` hook + 分隔条，宽度持久化） |
 | `desktop/src/components/{SettingsDialog,ProvidersPanel,ModelPicker}.tsx` | 模型供应商配置 + 快速切换 |
 | `desktop/src/components/ContextMeter.tsx` | 上下文用量指示器（圆环 + 明细 popover） |
 | `desktop/src/components/Toast.tsx` | 可复用应用内轻量通知通道（`toast.error/success/info`） |

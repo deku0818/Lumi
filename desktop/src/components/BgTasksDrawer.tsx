@@ -174,12 +174,14 @@ export function BgTasksDrawer({
   onDismiss,
   onClearFinished,
   open,
+  width,
 }: {
   tasks: BgTask[]
   onStop: (taskId: string) => void
   onDismiss: (taskId: string) => void
   onClearFinished: () => void
   open: boolean
+  width: number
 }) {
   const { t } = useI18n()
   // 用户手动折叠/展开覆盖（无记录则用 defaultCollapsed）
@@ -198,11 +200,15 @@ export function BgTasksDrawer({
 
   return (
     <aside
+      style={{ width: open ? width : 0 }}
       className={`shrink-0 bg-canvas overflow-hidden transition-[width] duration-200 ${
-        open ? 'w-[340px] border-l border-line/55' : 'w-0 opacity-0'
+        open ? 'border-l border-line/55' : 'opacity-0'
       }`}
     >
-      <div className="w-[340px] h-full overflow-auto p-3.5 flex flex-col gap-3">
+      <div
+        style={{ width }}
+        className="h-full overflow-auto p-3.5 flex flex-col gap-3"
+      >
         <div className="flex items-center gap-2 px-0.5 text-[11px] uppercase tracking-wider text-muted-foreground">
           <span>{t('bg.title')}</span>
           {finished > 0 && (

@@ -40,6 +40,7 @@ import { PlanDialog, PLAN_REJECTED } from './components/PlanDialog'
 import { Sidebar } from './components/Sidebar'
 import { BgTasksDrawer } from './components/BgTasksDrawer'
 import { CronPage, RunsRail } from './components/CronPage'
+import { ResizeHandle, useResizableWidth } from './components/ResizeHandle'
 import { ConfirmDialog } from './components/ConfirmDialog'
 import { SettingsDialog } from './components/SettingsDialog'
 import { ModelPicker } from './components/ModelPicker'
@@ -249,6 +250,10 @@ export default function App() {
   // 主区视图：聊天 / 项目管理页 / 定时任务管理页 / 任务会话视图（某任务的某次执行对话 + Runs 侧栏）
   const [bgTasks, setBgTasks] = useState<BgTask[]>([]) // 后台任务全量快照（按 thread 过滤展示）
   const [bgDrawerOpen, setBgDrawerOpen] = useState(false) // 后台任务右栏开关（默认关，有任务时头部出现 PanelRight）
+  // 可拖拽边栏宽度（持久化）：左侧会话栏 + 两个右侧栏（后台任务 / 任务执行记录）
+  const sidebarW = useResizableWidth('lumi-sidebar-width', 256, 200, 420)
+  const bgRailW = useResizableWidth('lumi-bg-width', 340, 280, 560)
+  const runsRailW = useResizableWidth('lumi-runs-width', 240, 180, 400)
   const [view, setView] = useState<'chat' | 'projects' | 'scheduled' | 'cronjob'>('chat')
   const [cronRunning, setCronRunning] = useState<string[]>([]) // 运行中任务名
   const [cronVersion, setCronVersion] = useState(0) // 递增触发 cron 数据刷新
@@ -1311,6 +1316,7 @@ export default function App() {
   return (
     <div className="h-full flex">
       <Sidebar
+        width={sidebarW.width}
         sessions={sessions}
         currentThread={view === 'chat' ? active : ''}
         conn={conn}
@@ -1332,6 +1338,7 @@ export default function App() {
         onRename={renameSession}
         onDelete={setPendingDelete}
       />
+      <ResizeHandle {...sidebarW} edge="right" />
 
       <main className="flex-1 flex flex-col min-w-0">
         <div className="h-9 app-drag shrink-0 flex items-center justify-end pr-3">
@@ -1452,23 +1459,33 @@ export default function App() {
               )}
             </div>
             {view === 'cronjob' && activeCronJob && (
-              <RunsRail
-                api={anyGw}
-                jobId={activeCronJob}
-                activeThread={cronRunThread}
-                readRuns={readRuns}
-                version={cronVersion}
-                onPick={(tid) => void openRunThread(tid)}
-              />
+              <>
+                <ResizeHandle {...runsRailW} edge="left" />
+                <RunsRail
+                  api={anyGw}
+                  jobId={activeCronJob}
+                  activeThread={cronRunThread}
+                  readRuns={readRuns}
+                  version={cronVersion}
+                  onPick={(tid) => void openRunThread(tid)}
+                  width={runsRailW.width}
+                />
+              </>
             )}
             {view === 'chat' && (
-              <BgTasksDrawer
-                tasks={activeBgTasks}
-                onStop={stopBgTask}
-                onDismiss={dismissBgTask}
-                onClearFinished={clearFinishedBgTasks}
-                open={bgDrawerOpen}
-              />
+              <>
+                {bgDrawerOpen && activeBgTasks.length > 0 && (
+                  <ResizeHandle {...bgRailW} edge="left" />
+                )}
+                <BgTasksDrawer
+                  tasks={activeBgTasks}
+                  onStop={stopBgTask}
+                  onDismiss={dismissBgTask}
+                  onClearFinished={clearFinishedBgTasks}
+                  open={bgDrawerOpen}
+                  width={bgRailW.width}
+                />
+              </>
             )}
           </div>
         )}

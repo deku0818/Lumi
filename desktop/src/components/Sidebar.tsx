@@ -38,6 +38,7 @@ const CONN_DOT: Record<ConnState, string> = {
 // memo：App 在流式期间每个 token 重渲染，侧栏的 props 全部保持稳定身份
 // （回调 useCallback、activity 内容不变时复用对象），让 400 行侧栏不陪跑。
 export const Sidebar = memo(function Sidebar({
+  width,
   sessions,
   currentThread,
   conn,
@@ -59,6 +60,7 @@ export const Sidebar = memo(function Sidebar({
   onRename,
   onDelete,
 }: {
+  width: number
   sessions: SessionMeta[]
   currentThread: string
   conn: ConnState
@@ -82,7 +84,10 @@ export const Sidebar = memo(function Sidebar({
 }) {
   const { t } = useI18n()
   return (
-    <aside className="w-64 shrink-0 bg-canvas border-r border-line/20 flex flex-col">
+    <aside
+      style={{ width }}
+      className="shrink-0 bg-canvas border-r border-line/20 flex flex-col"
+    >
       <div className="h-9 app-drag shrink-0" />
       <div className="px-3 pb-3">
         <Button

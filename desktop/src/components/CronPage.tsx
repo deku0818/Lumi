@@ -496,6 +496,7 @@ export function RunsRail({
   readRuns,
   version,
   onPick,
+  width,
 }: {
   api: () => CronApi | undefined
   jobId: string
@@ -503,12 +504,16 @@ export function RunsRail({
   readRuns: Record<string, true>
   version: number
   onPick: (threadId: string) => void
+  width: number
 }) {
   const { t, lang } = useI18n()
   const runs = useCronRuns(api, jobId, version, 50)
 
   return (
-    <aside className="w-60 shrink-0 border-l border-line/20 overflow-auto px-3 py-4">
+    <aside
+      style={{ width }}
+      className="shrink-0 border-l border-line/20 overflow-auto px-3 py-4"
+    >
       <div className="px-2 mb-2 text-xs text-muted-foreground">{t('cron.tabRuns')}</div>
       {runs?.length === 0 && (
         <div className="px-2 py-4 text-xs text-muted-foreground">{t('cron.noRuns')}</div>
