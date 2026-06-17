@@ -1,5 +1,5 @@
 // Electron 主进程：拉起 lumi serve sidecar、创建窗口、经 IPC 把 ws 连接信息给 renderer。
-const { app, BrowserWindow, dialog, ipcMain, shell, Notification } = require('electron')
+const { app, BrowserWindow, dialog, ipcMain, session, shell, Notification } = require('electron')
 const { spawn } = require('node:child_process')
 const net = require('node:net')
 const path = require('node:path')
@@ -124,6 +124,10 @@ ipcMain.handle('lumi:notify', (event, { title, body, tag }) => {
 })
 
 app.whenReady().then(async () => {
+  // 只放行 local-fonts：让 renderer 的 queryLocalFonts() 枚举本机字体（设置→界面字体）。
+  // 其余权限（camera/mic/geolocation/clipboard 等）一律拒绝——本应用不需要。
+  session.defaultSession.setPermissionRequestHandler((_wc, perm, cb) => cb(perm === 'local-fonts'))
+  session.defaultSession.setPermissionCheckHandler((_wc, perm) => perm === 'local-fonts')
   // macOS dev：Dock 图标运行时设置（打包后由 bundle 的 icns 接管）
   if (app.dock) app.dock.setIcon(APP_ICON)
   wsPort = await pickPort()

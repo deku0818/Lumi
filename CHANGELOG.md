@@ -1,5 +1,14 @@
 # Changelog
 
+## [0.1.0a22] - 2026-06-17
+
+### Added
+- **Desktop 界面字体设置**（`docs/architecture/desktop.md` 界面字体节）— 设置→通用页新增「界面字体」与「字号」：从**本机已装字体**里挑界面字体（经 `queryLocalFonts()` 枚举，每个字体名用自身字体预览，带搜索）+ `−/+` 字号步进器（11–20，点数字重置默认 13）。偏好存 localStorage（`lumi-font`，`{family, size}` JSON，自动迁移旧版裸字符串）。落地 `desktop/src/font.ts`（`useUiFont` hook，与 `theme.ts` 同构）+ `desktop/src/components/FontPicker.tsx`。覆盖机制：默认栈 `--font-fallback` 为唯一真相，`--font-sans = var(--ui-font, var(--font-fallback))`，故 `body` 与所有 `font-sans`/`font-heading` 工具类（含 Dialog 标题）一并跟随；字号走 `var(--ui-font-size, 13px)`。选字体经 `cssFamily()` 转义族名并追加回退保证中文不缺字
+
+### Changed
+- **Electron 权限收口** — `main.cjs` 的 `setPermissionRequestHandler`/`setPermissionCheckHandler` **仅放行 `local-fonts`**（字体枚举所需），其余权限（camera/mic/geolocation/clipboard…）一律拒绝，不再使用宽松默认
+- **字体枚举健壮性** — `queryLocalFonts()` 需 user activation，故首次枚举在点击处理器内同步触发（非 effect），避免打包版丢激活；不可用/被拒时面板提示「无法访问本机字体」；列表渲染封顶 `MAX_VISIBLE` 行（多出靠搜索收窄），避免上百字体一次性挂载造成开屏卡顿
+
 ## [0.1.0a21] - 2026-06-16
 
 ### Added

@@ -21,6 +21,8 @@
   --color-error: #d94c4c;
   --color-info: #42a5f5;
   color-scheme: dark;
+  /* 默认界面字体栈的唯一真相（font.ts 选中字体时也引用它做回退） */
+  --font-fallback: system-ui, -apple-system, "Segoe UI", "PingFang SC", sans-serif;
   /* shadcn 语义令牌映射到我们的暖炭灰+金调色板：引用 --color-* 故随 .light 自动切换，
      无需 shadcn 的 .dark 约定。primary=品牌金，accent=悬停浅底（非品牌色）。 */
   --background: var(--color-canvas);
@@ -91,7 +93,9 @@
   --color-error: var(--color-error);
   --color-info: var(--color-info);
   --font-heading: var(--font-sans);
-  --font-sans: system-ui, -apple-system, "Segoe UI", "PingFang SC", sans-serif;
+  /* --ui-font 由设置里的「界面字体」运行时覆写（font.ts）；未设置则回退默认栈。
+     定义在此 → font-sans / font-heading 工具类与 body 一并跟随用户选择。 */
+  --font-sans: var(--ui-font, var(--font-fallback));
   --color-sidebar-ring: var(--sidebar-ring);
   --color-sidebar-border: var(--sidebar-border);
   --color-sidebar-accent-foreground: var(--sidebar-accent-foreground);
@@ -140,9 +144,9 @@ body,
 body {
   background: var(--color-canvas);
   color: var(--color-ink);
-  font-family: system-ui, -apple-system, "Segoe UI", "PingFang SC", sans-serif;
-  /* 学 Hermes：紧凑 13px 正文，桌面级密度 */
-  font-size: 13px;
+  font-family: var(--font-sans);
+  /* 学 Hermes：紧凑 13px 正文，桌面级密度；--ui-font-size 由设置→字号运行时覆写（font.ts） */
+  font-size: var(--ui-font-size, 13px);
   line-height: 1.55;
   -webkit-font-smoothing: antialiased;
   overflow: hidden;

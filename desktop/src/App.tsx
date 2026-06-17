@@ -55,6 +55,7 @@ import { toolDiff, type DiffLine } from './diff'
 import { clip, basename, fmtTokens } from '@/lib/utils'
 import { Button } from '@/components/ui/button'
 import { useTheme } from './theme'
+import { useUiFont } from './font'
 import { useI18n } from './i18n'
 
 // 单 app 实例，模块级自增 id 即可，避免 hook 依赖问题。
@@ -239,6 +240,7 @@ export default function App() {
   const openSettings = useCallback(() => setShowSettings(true), [])
   const [pendingDelete, setPendingDelete] = useState<SessionMeta | null>(null)
   const [themePref, setThemePref] = useTheme()
+  const [uiFont, setUiFont] = useUiFont()
   const { t } = useI18n()
   const [notify, setNotify] = useState(() => localStorage.getItem('lumi-notify') === '1')
   // 图片嵌入消息（dataUrl→image 块）；其它文件只带绝对路径，发送时写进消息文本，
@@ -1476,6 +1478,8 @@ export default function App() {
         <SettingsDialog
           themePref={themePref}
           setThemePref={setThemePref}
+          uiFont={uiFont}
+          setUiFont={setUiFont}
           notify={notify}
           setNotify={toggleNotify}
           profiles={providers}
@@ -1629,11 +1633,6 @@ const ItemView = memo(function ItemView({ item }: { item: Exclude<Item, { kind: 
             ))}
           </div>
         )}
-        {item.text && (
-          <div className="selectable bg-surface rounded-3xl rounded-br-lg px-4 py-2.5 max-w-[80%] whitespace-pre-wrap">
-            {item.text}
-          </div>
-        )}
         {item.files && item.files.length > 0 && (
           <div className="flex flex-wrap gap-1.5 justify-end max-w-[80%]">
             {item.files.map((f, i) => (
@@ -1646,6 +1645,11 @@ const ItemView = memo(function ItemView({ item }: { item: Exclude<Item, { kind: 
                 <span className="max-w-52 truncate">{f.name}</span>
               </span>
             ))}
+          </div>
+        )}
+        {item.text && (
+          <div className="selectable bg-surface rounded-3xl rounded-br-lg px-4 py-2.5 max-w-[80%] whitespace-pre-wrap">
+            {item.text}
           </div>
         )}
       </div>

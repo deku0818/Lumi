@@ -1,8 +1,10 @@
-import { SlidersHorizontal, Boxes, Monitor, Sun, Moon, type LucideIcon } from 'lucide-react'
+import { SlidersHorizontal, Boxes, Monitor, Sun, Moon, Minus, Plus, type LucideIcon } from 'lucide-react'
 import type { ActiveModel, ProviderProfile } from '../types'
 import type { ThemePref } from '../theme'
+import { type FontPref, DEFAULT_SIZE, MIN_SIZE, MAX_SIZE } from '../font'
 import { useI18n } from '../i18n'
 import { ProvidersPanel } from './ProvidersPanel'
+import { FontPicker } from './FontPicker'
 import { Switch } from '@/components/ui/switch'
 import { Dialog, DialogContent, DialogTitle } from '@/components/ui/dialog'
 import { Tabs, TabsList, TabsTrigger, TabsContent } from '@/components/ui/tabs'
@@ -14,6 +16,8 @@ type TestResult = { ok: boolean; error?: string; latency_ms?: number }
 export function SettingsDialog({
   themePref,
   setThemePref,
+  uiFont,
+  setUiFont,
   notify,
   setNotify,
   profiles,
@@ -26,6 +30,8 @@ export function SettingsDialog({
 }: {
   themePref: ThemePref
   setThemePref: (p: ThemePref) => void
+  uiFont: FontPref
+  setUiFont: (p: FontPref) => void
   notify: boolean
   setNotify: (v: boolean) => void
   profiles: ProviderProfile[]
@@ -69,6 +75,8 @@ export function SettingsDialog({
             <GeneralPanel
               themePref={themePref}
               setThemePref={setThemePref}
+              uiFont={uiFont}
+              setUiFont={setUiFont}
               notify={notify}
               setNotify={setNotify}
             />
@@ -92,11 +100,15 @@ export function SettingsDialog({
 function GeneralPanel({
   themePref,
   setThemePref,
+  uiFont,
+  setUiFont,
   notify,
   setNotify,
 }: {
   themePref: ThemePref
   setThemePref: (p: ThemePref) => void
+  uiFont: FontPref
+  setUiFont: (p: FontPref) => void
   notify: boolean
   setNotify: (v: boolean) => void
 }) {
@@ -114,6 +126,12 @@ function GeneralPanel({
             { val: 'dark', icon: Moon, title: t('settings.theme.dark') },
           ]}
         />
+      </Row>
+      <Row label={t('settings.uiFont')} hint={t('settings.uiFontHint')}>
+        <FontPicker value={uiFont.family} onChange={(family) => setUiFont({ ...uiFont, family })} />
+      </Row>
+      <Row label={t('settings.fontSize')} hint={t('settings.fontSizeHint')}>
+        <SizeStepper value={uiFont.size} onChange={(size) => setUiFont({ ...uiFont, size })} />
       </Row>
 
       <h3 className="text-base font-medium mt-7 mb-2">{t('settings.notifications')}</h3>
@@ -145,6 +163,34 @@ function Row({
 }
 
 
+// 内联药丸控件容器（分段控件 / 字号步进器共用）
+const PILL_WRAP = 'flex items-center gap-0.5 p-0.5 rounded-lg bg-canvas/60 border border-line/30'
+const STEP_BTN =
+  'flex items-center justify-center w-7 h-7 rounded-md text-muted-foreground hover:text-ink hover:bg-line/30 transition disabled:opacity-30 disabled:hover:bg-transparent'
+
+const clampSize = (n: number) => Math.min(MAX_SIZE, Math.max(MIN_SIZE, n))
+
+// 字号步进器：− [n] + ，限定 MIN_SIZE..MAX_SIZE；点击数字重置为默认。
+function SizeStepper({ value, onChange }: { value: number; onChange: (n: number) => void }) {
+  return (
+    <div className={PILL_WRAP}>
+      <button className={STEP_BTN} onClick={() => onChange(clampSize(value - 1))} disabled={value <= MIN_SIZE}>
+        <Minus size={14} />
+      </button>
+      <button
+        onClick={() => onChange(DEFAULT_SIZE)}
+        title={`${DEFAULT_SIZE}px`}
+        className="min-w-12 text-center text-sm tabular-nums text-ink hover:text-primary transition"
+      >
+        {value}px
+      </button>
+      <button className={STEP_BTN} onClick={() => onChange(clampSize(value + 1))} disabled={value >= MAX_SIZE}>
+        <Plus size={14} />
+      </button>
+    </div>
+  )
+}
+
 // 分段控件：图标或文字选项，选中态填充 surface。
 function Segmented<T extends string>({
   value,
@@ -156,7 +202,7 @@ function Segmented<T extends string>({
   options: { val: T; icon?: LucideIcon; label?: string; title?: string }[]
 }) {
   return (
-    <div className="flex items-center gap-0.5 p-0.5 rounded-lg bg-canvas/60 border border-line/30">
+    <div className={PILL_WRAP}>
       {options.map((o) => {
         const on = o.val === value
         return (

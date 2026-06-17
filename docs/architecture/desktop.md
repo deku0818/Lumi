@@ -150,6 +150,13 @@ macOS 关窗后应用驻留 Dock，sidecar 保持运行，Dock 唤起（activate
 
 `desktop/src/i18n.ts` 提供 `useI18n()` hook（`t` / `lang` / `setLang`），支持中文 / English，偏好存 localStorage（`lumi-lang`）。所有 UI 文案经 `t(key)` 取用，不硬编码。
 
+## 界面字体
+
+设置→通用页可让用户从**本机已装字体**里挑界面字体并调正文字号，偏好存 localStorage（`lumi-font`，`{family, size}` JSON），落地见 `desktop/src/font.ts`（`useUiFont` hook）+ `desktop/src/components/FontPicker.tsx`。与 `theme.ts` 同构：运行时把覆写写到 `document.documentElement` 的 CSS 变量上。
+
+- **覆盖机制**：默认字体栈是 `index.css` 的 `--font-fallback`（**唯一真相**）；`@theme` 的 `--font-sans` = `var(--ui-font, var(--font-fallback))`，故选字体只需把 `--ui-font` 设到根元素，`body` 与所有 `font-sans` / `font-heading` 工具类（含 Dialog 标题）一并跟随。字号同理：`body` 用 `font-size: var(--ui-font-size, 13px)`，仅非默认字号才写 `--ui-font-size`，默认时移除让 CSS 回落。`font.ts` 设字体时走 `cssFamily()` 转义族名（防引号/反斜杠破坏声明），并追加 `var(--font-fallback)` 保证西文字体缺中文字形时回退。
+- **本机字体枚举**：经浏览器 `queryLocalFonts()`（Local Font Access API）取族名去重排序。**权限收口**：`electron/main.cjs` 的 `setPermissionRequestHandler` / `setPermissionCheckHandler` **仅放行 `local-fonts`**，其余权限（camera / mic / geolocation / clipboard…）一律拒绝。该 API 需 user activation，故首次枚举在点击打开下拉的处理器内同步触发（非 effect），避免打包版丢激活；不可用 / 被拒时静默返回空并在面板提示「无法访问本机字体」。列表渲染封顶 `MAX_VISIBLE` 行（多出靠搜索收窄），避免上百字体一次性挂载造成开屏卡顿。
+
 ## 关键文件
 
 | 文件 | 职责 |
@@ -161,6 +168,7 @@ macOS 关窗后应用驻留 Dock，sidecar 保持运行，Dock 唤起（activate
 | `desktop/src/components/{SettingsDialog,ProvidersPanel,ModelPicker}.tsx` | 模型供应商配置 + 快速切换 |
 | `desktop/src/components/ContextMeter.tsx` | 上下文用量指示器（圆环 + 明细 popover） |
 | `desktop/src/components/Toast.tsx` | 可复用应用内轻量通知通道（`toast.error/success/info`） |
+| `desktop/src/{font.ts,components/FontPicker.tsx}` | 界面字体偏好（本机字体枚举 + 字号）+ CSS 变量覆写 |
 | `desktop/src/components/CronPage.tsx` | 定时任务管理页 + 任务会话视图 Runs 栏 |
 | `desktop/src/components/BgTasksDrawer.tsx` | 后台任务中心 drawer（折叠卡片 + 实时进度） |
 | `desktop/src/components/{ProjectsPage,NewProjectDialog,FolderMenu}.tsx` | 项目管理页 + 新建项目 + 添加文件夹菜单 |
