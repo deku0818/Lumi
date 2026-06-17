@@ -1,6 +1,17 @@
 """工具提供者 — 所有常驻工具 provider 模块。"""
 
-from . import ask, background_task, bash, cron, filesystem, mcp, plan, skill, todo
+from . import (
+    ask,
+    background_task,
+    bash,
+    cron,
+    filesystem,
+    mcp,
+    plan,
+    present_files,
+    skill,
+    todo,
+)
 
 __all__ = [
     "ask",
@@ -10,6 +21,7 @@ __all__ = [
     "filesystem",
     "mcp",
     "plan",
+    "present_files",
     "skill",
     "todo",
 ]

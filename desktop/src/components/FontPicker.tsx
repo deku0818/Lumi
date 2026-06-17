@@ -52,7 +52,7 @@ export function FontPicker({ value, onChange }: { value: string; onChange: (f: s
     <div ref={ref} className="relative">
       <button
         onClick={toggle}
-        className="flex items-center gap-2 px-2.5 py-1.5 rounded-lg text-sm bg-canvas/60 border border-line/30 text-ink hover:bg-line/30 transition min-w-44 justify-between"
+        className="inline-flex items-center gap-2 px-2.5 py-1.5 rounded-lg text-sm bg-canvas/60 border border-line/30 text-ink hover:bg-line/30 transition max-w-56"
       >
         <span className="truncate" style={value ? { fontFamily: cssFamily(value) } : undefined}>
           {value || t('settings.uiFont.default')}

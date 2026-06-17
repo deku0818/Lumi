@@ -1,8 +1,26 @@
 // Electron 主进程：拉起 lumi serve sidecar、创建窗口、经 IPC 把 ws 连接信息给 renderer。
-const { app, BrowserWindow, dialog, ipcMain, session, shell, Notification } = require('electron')
+const { app, BrowserWindow, dialog, ipcMain, protocol, session, shell, Notification } = require('electron')
 const { spawn } = require('node:child_process')
 const net = require('node:net')
+const fs = require('node:fs')
 const path = require('node:path')
+
+// 自定义协议：让 renderer 安全引用本地文件（绕过 http origin 下的 file:// 限制），
+// 用于 present_files 预览面板里 <img>/<iframe> 加载图片/PDF/HTML。必须在 app ready 前登记。
+protocol.registerSchemesAsPrivileged([
+  { scheme: 'lumi-file', privileges: { standard: true, secure: true, supportFetchAPI: true, stream: true, bypassCSP: true } },
+])
+
+// 仅 img/pdf/html 走 src 加载需正确 content-type；文本类经 fetch().text() 读取，类型不敏感。
+const PREVIEW_MIME = {
+  '.pdf': 'application/pdf', '.html': 'text/html', '.htm': 'text/html',
+  '.png': 'image/png', '.jpg': 'image/jpeg', '.jpeg': 'image/jpeg', '.gif': 'image/gif',
+  '.webp': 'image/webp', '.bmp': 'image/bmp', '.svg': 'image/svg+xml',
+}
+
+// 协议层硬上限：防超大文件（如大图缩略）整块读进内存把主进程撑爆。
+// 前端预览另有更低的 UI 阈值（50MB）；这里只是兜底防御。
+const MAX_SERVE_BYTES = 128 * 1024 * 1024
 
 // desktop/electron/main.cjs → desktop → Lumi 项目根
 const PROJECT_ROOT = path.resolve(__dirname, '..', '..')
@@ -77,7 +95,11 @@ function createWindow() {
     return { action: 'deny' }
   })
   win.webContents.on('will-navigate', (e, url) => {
-    if (!url.startsWith('http://127.0.0.1:5173') && !url.startsWith('file://')) {
+    if (
+      !url.startsWith('http://127.0.0.1:5173') &&
+      !url.startsWith('file://') &&
+      !url.startsWith('lumi-file://')
+    ) {
       e.preventDefault()
       shell.openExternal(url)
     }
@@ -92,6 +114,20 @@ function createWindow() {
 
 // renderer 经 preload 调用，拿到 sidecar 的 WS 地址（带重连，无需等就绪）
 ipcMain.handle('lumi:connection', () => ({ wsUrl: `ws://127.0.0.1:${wsPort}/ws` }))
+
+// present_files 预览：用系统默认应用打开 / 在访达中显示该文件
+ipcMain.handle('lumi:open-path', (_e, p) => shell.openPath(String(p)))
+ipcMain.handle('lumi:reveal-path', (_e, p) => shell.showItemInFolder(String(p)))
+// 预览打开时探测文件是否还在（被移动/改名/删除则 false）；渲染卡片时不调，零开销。
+// 用异步 access：避免 existsSync 在离线网络盘上同步阻塞整个主进程。
+ipcMain.handle('lumi:path-exists', async (_e, p) => {
+  try {
+    await fs.promises.access(String(p))
+    return true
+  } catch {
+    return false
+  }
+})
 
 // 原生目录选择器（切换工作目录用），取消返回 null
 ipcMain.handle('lumi:pick-directory', async () => {
@@ -128,6 +164,19 @@ app.whenReady().then(async () => {
   // 其余权限（camera/mic/geolocation/clipboard 等）一律拒绝——本应用不需要。
   session.defaultSession.setPermissionRequestHandler((_wc, perm, cb) => cb(perm === 'local-fonts'))
   session.defaultSession.setPermissionCheckHandler((_wc, perm) => perm === 'local-fonts')
+  // 本地文件协议：lumi-file:///<abs-path>（renderer 端各路径段 encodeURIComponent）
+  protocol.handle('lumi-file', async (request) => {
+    try {
+      const filePath = decodeURIComponent(new URL(request.url).pathname)
+      const st = await fs.promises.stat(filePath)
+      if (st.size > MAX_SERVE_BYTES) return new Response('Too large', { status: 413 })
+      const data = await fs.promises.readFile(filePath)
+      const mime = PREVIEW_MIME[path.extname(filePath).toLowerCase()] || 'application/octet-stream'
+      return new Response(data, { headers: { 'content-type': mime } })
+    } catch {
+      return new Response('Not found', { status: 404 })
+    }
+  })
   // macOS dev：Dock 图标运行时设置（打包后由 bundle 的 icns 接管）
   if (app.dock) app.dock.setIcon(APP_ICON)
   wsPort = await pickPort()

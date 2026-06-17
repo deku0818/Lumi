@@ -27,6 +27,7 @@ import type {
   CronJob,
   HistoryItem,
   Item,
+  PresentedFile,
   Project,
   ProviderProfile,
   SessionMeta,
@@ -38,6 +39,7 @@ import { ApprovalDialog } from './components/ApprovalDialog'
 import { ClarifyDialog, ASK_CANCELLED } from './components/ClarifyDialog'
 import { PlanDialog, PLAN_REJECTED } from './components/PlanDialog'
 import { Sidebar } from './components/Sidebar'
+import { FileCards, PreviewPanel, parsePresentedFiles } from './components/PresentedFiles'
 import { BgTasksDrawer } from './components/BgTasksDrawer'
 import { CronPage, RunsRail } from './components/CronPage'
 import { ResizeHandle, useResizableWidth } from './components/ResizeHandle'
@@ -72,6 +74,7 @@ type ToolItem = Extract<Item, { kind: 'tool' }>
 type Segment =
   | { kind: 'tools'; tools: ToolItem[] }
   | { kind: 'agent'; items: ToolItem[] }
+  | { kind: 'files'; item: ToolItem; files: PresentedFile[] }
   | { kind: 'item'; item: Exclude<Item, { kind: 'tool' }> }
 
 // 把连续的 tool item 合并成一段，其余 item 各自独立 —— 用于工具分组渲染。
@@ -84,6 +87,10 @@ function groupItems(items: Item[]): Segment[] {
       const last = segs[segs.length - 1]
       if (last?.kind === 'agent') last.items.push(it)
       else segs.push({ kind: 'agent', items: [it] })
+    } else if (it.kind === 'tool' && it.name === 'present_files') {
+      // present_files 不并入灰色工具组：单独成段，渲染成文件卡片。
+      // 在此（随 items 记忆化）解析一次 JSON，避免每次渲染都 parse。
+      segs.push({ kind: 'files', item: it, files: parsePresentedFiles(it.output) })
     } else if (it.kind === 'tool') {
       const last = segs[segs.length - 1]
       if (last?.kind === 'tools') last.tools.push(it)
@@ -97,7 +104,13 @@ function groupItems(items: Item[]): Segment[] {
 
 // segment 的稳定 React key / 复制映射 key（不依赖数组下标，切片/虚拟化也不错位）
 const segKey = (seg: Segment): string =>
-  seg.kind === 'tools' ? `g${seg.tools[0].id}` : seg.kind === 'agent' ? `a${seg.items[0].id}` : `i${seg.item.id}`
+  seg.kind === 'tools'
+    ? `g${seg.tools[0].id}`
+    : seg.kind === 'agent'
+      ? `a${seg.items[0].id}`
+      : seg.kind === 'files'
+        ? `f${seg.item.id}`
+        : `i${seg.item.id}`
 
 // load_history 的历史项 → 前端 Item
 function restore(h: HistoryItem): Item {
@@ -250,10 +263,12 @@ export default function App() {
   // 主区视图：聊天 / 项目管理页 / 定时任务管理页 / 任务会话视图（某任务的某次执行对话 + Runs 侧栏）
   const [bgTasks, setBgTasks] = useState<BgTask[]>([]) // 后台任务全量快照（按 thread 过滤展示）
   const [bgDrawerOpen, setBgDrawerOpen] = useState(false) // 后台任务右栏开关（默认关，有任务时头部出现 PanelRight）
-  // 可拖拽边栏宽度（持久化）：左侧会话栏 + 两个右侧栏（后台任务 / 任务执行记录）
+  const [preview, setPreview] = useState<PresentedFile | null>(null) // present_files 右侧预览面板（null=关）
+  // 可拖拽边栏宽度（持久化）：左侧会话栏 + 三个右侧栏（后台任务 / 任务执行记录 / 文件预览）
   const sidebarW = useResizableWidth('lumi-sidebar-width', 256, 200, 420)
   const bgRailW = useResizableWidth('lumi-bg-width', 340, 280, 560)
   const runsRailW = useResizableWidth('lumi-runs-width', 240, 180, 400)
+  const previewW = useResizableWidth('lumi-preview-width', 520, 360, 920)
   const [view, setView] = useState<'chat' | 'projects' | 'scheduled' | 'cronjob'>('chat')
   const [cronRunning, setCronRunning] = useState<string[]>([]) // 运行中任务名
   const [cronVersion, setCronVersion] = useState(0) // 递增触发 cron 数据刷新
@@ -755,6 +770,7 @@ export default function App() {
       }
       setActive(tid)
       setConn('open')
+      setPreview(null) // 切会话关掉预览，避免上个会话的文件残留
       return tid
     },
     [openConnection],
@@ -1398,6 +1414,13 @@ export default function App() {
                             <ToolGroup key={key} tools={seg.tools} />
                           ) : seg.kind === 'agent' ? (
                             <AgentGroup key={key} items={seg.items} />
+                          ) : seg.kind === 'files' ? (
+                            <FileCards
+                              key={key}
+                              files={seg.files}
+                              onOpen={setPreview}
+                              activePath={preview?.path}
+                            />
                           ) : (
                             <ItemView key={key} item={seg.item} />
                           )
@@ -1485,6 +1508,14 @@ export default function App() {
                   open={bgDrawerOpen}
                   width={bgRailW.width}
                 />
+              </>
+            )}
+            {view === 'chat' && preview && (
+              <>
+                <ResizeHandle {...previewW} edge="left" />
+                <div style={{ width: previewW.width }} className="shrink-0 h-full">
+                  <PreviewPanel file={preview} onClose={() => setPreview(null)} />
+                </div>
               </>
             )}
           </div>

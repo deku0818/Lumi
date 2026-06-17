@@ -15,6 +15,7 @@ from .providers import (
     filesystem,
     mcp,
     plan,
+    present_files,
     skill,
     todo,
     workflow,
@@ -36,6 +37,7 @@ _registry.register("skill", skill)
 _registry.register("plan", plan)
 _registry.register("background_task", background_task)
 _registry.register("workflow", workflow)
+_registry.register("present_files", present_files)
 
 # 条件注册: 仅在有 agent 配置时才启用
 try:

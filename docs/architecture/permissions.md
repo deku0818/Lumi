@@ -141,7 +141,7 @@ _STRICTNESS = {Permission.DENY: 0, Permission.ASK: 1, Permission.ALLOW: 2}
 
 `check_workspace_boundary(tool_name, tool_args) -> bool`:
 
-1. `WorkspaceBoundary.extract_paths_from_tool_call()` 从工具参数提取路径
+1. `WorkspaceBoundary.extract_paths_from_tool_call()` 从工具参数提取路径：标量键 `_PATH_ARG_KEYS`（`file_path` / `path`）取字符串值，列表键 `_PATH_LIST_ARG_KEYS`（`filepaths`，如 `present_files`）逐项提取；新增带路径参数的工具时须把对应键名登记进来，否则不参与边界检查
 2. 相对路径基于项目目录解析
 3. 逐个检查是否在任一工作区目录下
 4. 无法提取路径时视为边界内（不阻断）；解析异常时保守拒绝

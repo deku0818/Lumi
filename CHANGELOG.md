@@ -1,5 +1,18 @@
 # Changelog
 
+## [0.1.0a24] - 2026-06-17
+
+### Added
+- **present_files 工具 + Desktop 文件预览**（`docs/architecture/desktop.md` present_files 文件预览节）— Agent 产出文件后调 `present_files` 把它们呈现给用户。后端 `lumi/agents/tools/providers/present_files.py` 只做本地元数据收集（无对象存储，区别于 SaaS 的 MinIO 上传）：单次 `os.stat`（避免 isfile→getsize 的 TOCTOU）+ `mimetypes` + 按扩展名分类 `kind`，返回 `{path,name,mime_type,size,kind}` JSON（不存在/非常规文件返回 `{path,error}`，顺序保留）。常驻工具，走现有 `tool.start/complete` 事件流，**协议无新增事件**。前端 `desktop/src/components/PresentedFiles.tsx`：聊天里渲染成单色类型图标文件卡片（`FileCards`，按 `kind` 选 lucide 字形，不上彩色，卡片层不加载文件字节）+ 「Show in Folder」；点卡片在聊天区右侧滑出停靠预览面板（`PreviewPanel`，可拖宽持久化 `lumi-preview-width`、Esc/✕ 关、切会话自动关）。预览分型：图片/PDF/HTML 经 `lumi-file://` 协议内嵌，文本/Markdown 经 `fetch().text()` 渲染；视频/音频/Office/未知类型 → 统一 `NoPreview`（提示 + 用系统应用打开）
+- **`lumi-file://` 本地文件协议**（`electron/main.cjs`）— `registerSchemesAsPrivileged` + `protocol.handle` 让 renderer 在 http origin 下安全引用本地文件（绕过 `file://` 限制），供预览面板 `<img>`/`<iframe>` 加载。URL 形如 `lumi-file://local/<abs-path>`（固定 host=local，自定义 standard scheme 不允许空 host；各路径段 `encodeURIComponent`）。新增 IPC `lumi:open-path`/`lumi:reveal-path`/`lumi:path-exists`（经 `preload.cjs` 暴露为 `window.lumi.{openPath,revealInFolder,pathExists}`）
+
+### Changed
+- **present_files 受工作区边界约束**（`docs/architecture/permissions.md` 边界检查节）— `boundary.py` 新增 `_PATH_LIST_ARG_KEYS`（`filepaths`），列表型路径参数逐项提取参与边界检查，与 `bash`/`filesystem` 同等受限，堵住经 present_files 绕过边界读任意文件的缺口（含 2 个回归测试）
+- **大文件 / 媒体不内嵌预览** — 预览面板按元数据 `size` 判定 `>50MB`（UI 阈值，不读文件）→ 显示「文件较大」提示 + 用系统应用打开；视频/音频一律走系统应用打开（协议缓冲 + 无 Range，不适合内嵌）。协议层另设 `MAX_SERVE_BYTES`(128MB) 硬上限返 413，兜底防超大文件读进内存撑爆主进程
+- **文件缺失态** — 预览打开时经 `lumi:path-exists`（异步 `fs.promises.access`，避免离线网络盘同步阻塞主进程）探测一次：文件被移动/改名/删除 → `MissingState`（提示 + 重新检查）；卡片渲染不探测，零开销
+- **HTML 预览安全** — iframe `sandbox="allow-scripts"`（不带 `allow-same-origin`）：脚本可运行让交互页正常，但 opaque origin 下对 `lumi-file` 的 fetch 跨域被拦，恶意页读不到本地文件外传
+- **FontPicker 触发器收缩对齐** — 界面字体下拉触发器从 `min-w-44 justify-between`（短字体名时文字被顶到最左、留大空隙）改为 `inline-flex max-w-56`（按内容宽收缩，文字与箭头紧邻）
+
 ## [0.1.0a23] - 2026-06-17
 
 ### Added

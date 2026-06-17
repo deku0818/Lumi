@@ -165,12 +165,26 @@ export interface BgTask {
   progress: BgTaskProgress | null
 }
 
+// present_files 工具返回的单个文件元数据（后端 providers/present_files.py）。
+// kind ∈ image/pdf/video/audio/archive/doc/sheet/text/file；不存在的路径带 error。
+export interface PresentedFile {
+  path: string
+  name?: string
+  mime_type?: string
+  size?: number
+  kind?: string
+  error?: string
+}
+
 declare global {
   interface Window {
     lumi: {
       getConnection: () => Promise<{ wsUrl: string }>
       pickDirectory?: () => Promise<string | null>
       getPathForFile?: (file: File) => string
+      openPath?: (path: string) => Promise<string>
+      revealInFolder?: (path: string) => Promise<void>
+      pathExists?: (path: string) => Promise<boolean>
       notify?: (payload: { title: string; body?: string; tag?: string }) => Promise<void>
       onNotifyClick?: (cb: (tag: string) => void) => void
     }

@@ -5,6 +5,10 @@ contextBridge.exposeInMainWorld('lumi', {
   getConnection: () => ipcRenderer.invoke('lumi:connection'),
   // 原生目录选择器，用于切换工作目录；取消返回 null
   pickDirectory: () => ipcRenderer.invoke('lumi:pick-directory'),
+  // present_files 预览：用系统应用打开 / 在访达中显示 / 探测文件是否还在
+  openPath: (p) => ipcRenderer.invoke('lumi:open-path', p),
+  revealInFolder: (p) => ipcRenderer.invoke('lumi:reveal-path', p),
+  pathExists: (p) => ipcRenderer.invoke('lumi:path-exists', p),
   // Electron 33 起拿文件绝对路径的唯一途径（File.path 已移除）；拿不到返回空串
   getPathForFile: (file) => {
     try {

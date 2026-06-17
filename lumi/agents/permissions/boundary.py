@@ -38,6 +38,8 @@ _COMMAND_SEPARATORS: frozenset[str] = frozenset({"|", "||", "&&", ";", "&"})
 
 # 文件操作工具的路径参数键名（与实际工具定义一致）
 _PATH_ARG_KEYS: tuple[str, ...] = ("file_path", "path")
+# 列表型路径参数键名（如 present_files 的 filepaths），逐项提取参与边界检查
+_PATH_LIST_ARG_KEYS: tuple[str, ...] = ("filepaths",)
 
 
 class WorkspaceBoundary:
@@ -109,6 +111,10 @@ class WorkspaceBoundary:
             value = tool_args.get(key)
             if isinstance(value, str) and value:
                 paths.append(Path(value))
+        for key in _PATH_LIST_ARG_KEYS:
+            value = tool_args.get(key)
+            if isinstance(value, list):
+                paths.extend(Path(v) for v in value if isinstance(v, str) and v)
         return paths
 
     def _extract_bash_paths(self, tool_args: dict[str, Any]) -> list[Path]:
