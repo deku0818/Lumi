@@ -338,39 +338,3 @@ async def test_api_delivery_subscriber_receives_timing_metadata() -> None:
 
     assert received[0]["started_at"] == "2026-03-07T15:30:00"
     assert received[0]["duration_ms"] == 2000
-
-
-# -- TUIDelivery --
-
-
-async def test_tui_delivery_calls_add_notification() -> None:
-    """TUIDelivery 在 app 有 add_notification 时通过 call_later 调用。"""
-    from unittest.mock import MagicMock
-
-    from lumi.agents.cron.delivery import TUIDelivery
-
-    app = MagicMock()
-    app.add_notification = MagicMock()
-    # call_later 接收一个 lambda，立即执行以验证
-    app.call_later = lambda fn: fn()
-
-    delivery = TUIDelivery(app)
-    ts = datetime(2026, 3, 7, 12, 0, 0)
-    await delivery.deliver(_rec("job1", started_at=ts, duration_ms=100), "output")
-
-    app.add_notification.assert_called_once_with(
-        "job1", "output", started_at=ts, duration_ms=100
-    )
-
-
-async def test_tui_delivery_logs_warning_when_no_add_notification() -> None:
-    """TUIDelivery 在 app 缺少 add_notification 时不抛异常。"""
-    from unittest.mock import MagicMock
-
-    from lumi.agents.cron.delivery import TUIDelivery
-
-    app = MagicMock(spec=[])  # 空 spec，无任何属性
-    delivery = TUIDelivery(app)
-
-    # 不应抛异常
-    await delivery.deliver(_rec("job1"), "output")

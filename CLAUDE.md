@@ -4,7 +4,7 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 ## 项目概览
 
-Lumi 是一个基于 LangGraph 的 AI Agent 框架，提供终端 TUI 界面（Textual）和 HTTP API（FastAPI）两种交互方式。支持多模型（OpenAI、Anthropic、Bedrock）、工具调用、权限控制、定时任务、技能扩展和 MCP 协议集成。
+Lumi 是一个基于 LangGraph 的 AI Agent 框架，提供桌面应用（Electron 前端，经 WebSocket 连后端）和 HTTP API（FastAPI）两种交互方式。支持多模型（OpenAI、Anthropic、Bedrock）、工具调用、权限控制、定时任务、技能扩展和 MCP 协议集成。
 Lumi 并非仅仅面向Coder，也面向所有非技术人员。
 
 ## 代码风格
@@ -69,36 +69,23 @@ START → PreprocessMessages → CallModel → is_use_tool() 条件路由:
 - 延迟加载，检查文件 mtime 实现热重载
 - 在 `is_use_tool()` 节点中调用 `engine.evaluate()` + `engine.check_workspace_boundary()`
 
-### TUI 架构
-
-- **LumiApp**（`tui/app.py`）：Textual App 主体，支持 `privileged` 参数（CLI `--privileged-danger`）
-- **AgentBridge**（`tui/agent_bridge.py`）：直接调用 LangGraph（非 HTTP），流式产生 `BridgeEvent`
-- **EventRouter**（`tui/event_router.py`）：状态机 + 事件分发，管理 `RunPhase` 转换
-- **WidgetAssembler**（`tui/widget_assembler.py`）：将 `RenderItem` 转换为 Textual Widget
-- **SubagentTracker**（`tui/subagent_tracker.py`）：跟踪并发子 Agent 执行状态
-- **InputBar**（`tui/widgets/input_bar.py`）：输入栏，管理 plan mode 切换（Shift+Tab）和模式指示器（auto/plan/privileged）
-
-**Tool 渲染器**：Protocol 模式（`ToolRenderer`），通过 `@register_renderer("bash")` 注册自定义渲染，每个渲染器被 `_SafeRenderer` 包装以容错。
-
-**GroupingEngine 同步契约**：`grouping.decide_tool()` 之后必须调用 `grouping.on_tool_started()`；widget flush 后必须调用 `grouping.flush_tools()` / `grouping.flush_agents()`。
-
 ### 子 Agent
 
 - 工具实现在 `agents/tools/providers/agent.py`
 - 创建新 `LumiAgent` 实例，**无 checkpointer**（节省开销），复用父级 `PermissionEngine`
 - tool_mode 从父状态继承
-- 父 TUI 通过 `parent_run_id` 识别子 Agent 事件，路由到 `AgentGroup` 做轻量统计展示
+- 前端通过 `parent_run_id` 识别子 Agent 事件（非空=属于某子 Agent），做轻量统计展示
 
 ### Desktop / WS 服务
 
-桌面应用（Electron + TS 前端）经 WebSocket 复用后端 `AgentBridge`，与 TUI 共享同一套 Agent 运行时。详见 `docs/architecture/desktop.md`。
+桌面应用（Electron + TS 前端）经 WebSocket 调用后端 `AgentBridge` 复用 Agent 运行时。详见 `docs/architecture/desktop.md`。
 
 - **`lumi/server/ws.py`**：`lumi serve` 拉起的 FastAPI WS 端点。一条 WS = 一个 `AgentBridge`（可切换 thread），JSON-RPC 帧 `{id, method, params}` ↔ `{id, result|error}`，流式事件用 `{method:"event", params}`。
-- **`AgentBridge`**（`agents/bridge.py`）：TUI 与 desktop **共用**的中立桥接层，把 LangGraph 事件封装为 `BridgeEvent` 流。`EventKind` 成员值直接 = 对外 wire 名（`namespace.verb`），`server/protocol.py` 只做 payload 重组，无映射层。
+- **`AgentBridge`**（`agents/bridge.py`）：前端（desktop / 未来 TS TUI）经 WS **复用**的中立桥接层，把 LangGraph 事件封装为 `BridgeEvent` 流。`EventKind` 成员值直接 = 对外 wire 名（`namespace.verb`），`server/protocol.py` 只做 payload 重组，无映射层。
 - **协议单一事实源**：`protocol/events.json`。TS 端 import derive 类型，Python 端由 `tests/server/test_protocol_contract.py` 锁住事件名/方法名一致——改协议只改这一处。
-- **会话元数据**：列表由 checkpoint 派生（`tui/session_store.py`），但 pin/重命名等用户标记存在 `tui/session_meta.py` 的 JSON sidecar（`~/.lumi/checkpoints/session_meta.json`），`list_sessions` 合并后置顶排序。删除经 `bridge.delete_thread()` 一并清理 LangGraph + 文件级 checkpoint。
+- **会话元数据**：列表由 checkpoint 派生（`sessions/session_store.py`），但 pin/重命名等用户标记存在 `sessions/session_meta.py` 的 JSON sidecar（`~/.lumi/checkpoints/session_meta.json`），`list_sessions` 合并后置顶排序。消息文本提取/清理/可见性判定在 `lumi/sessions/`（无 textual 依赖，服务端与前端共用同一解析规则）。删除经 `bridge.delete_thread()` 一并清理 LangGraph + 文件级 checkpoint。
 - **前端**（`desktop/src/`）：`gateway.ts` 每会话一条 WS 连接（指数退避重连）；`App.tsx` 会话状态机 + 聊天流渲染；`Sidebar.tsx` 会话列表 + `⋮` 右键菜单（置顶/重命名/删除）。
-- **模型解析与思考管理**（详见 `docs/architecture/thinking.md`）：`provider_store.resolve()` 是「模型 + 连接 + 思考档位」单一事实源；`create_llm(apply_effort=...)` 默认不注入思考参数（仅主对话链 `call_model` 传 True，内部链天然干净）。思考能力（有无/档位枚举/开关）来自 models.dev（`utils/model_catalog.py`，缓存 `~/.lumi/cache/`，context_length 同源），档位按模型存 profile 的 `effort` dict；`model_manager.effort_params()` 是档位→协议参数的唯一映射点（原生值直传，不存在档位翻译；auto = 不传任何参数）。入口为 desktop ModelPicker（Claude 式三行 + 二级菜单）与 TUI `/effort`。
+- **模型解析与思考管理**（详见 `docs/architecture/thinking.md`）：`provider_store.resolve()` 是「模型 + 连接 + 思考档位」单一事实源；`create_llm(apply_effort=...)` 默认不注入思考参数（仅主对话链 `call_model` 传 True，内部链天然干净）。思考能力（有无/档位枚举/开关）来自 models.dev（`utils/model_catalog.py`，缓存 `~/.lumi/cache/`，context_length 同源），档位按模型存 profile 的 `effort` dict；`model_manager.effort_params()` 是档位→协议参数的唯一映射点（原生值直传，不存在档位翻译；auto = 不传任何参数）。入口为 desktop ModelPicker（Claude 式三行 + 二级菜单）。
 
 ### 风格系统（Styles）
 
@@ -114,7 +101,5 @@ START → PreprocessMessages → CallModel → is_use_tool() 条件路由:
 
 - pytest + pytest-asyncio，`asyncio_mode = "auto"`（异步测试直接用 `async def test_*()`）
 - `tests/conftest.py` 中有单例重置 fixtures（`reset_registry`、`reset_filesystem_backend`、`reset_session_manager`）和隔离工作区 fixture（`authorized_tmp_dir`）
-- TUI 测试在 `tests/tui/`
-- TUI 界面开发时应使用 Textual 的 SVG 能力主动验证样式，参考 `test/TUI_VISUAL_TESTING.md`
 
 

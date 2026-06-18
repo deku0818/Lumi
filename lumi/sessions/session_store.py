@@ -17,8 +17,8 @@ from dataclasses import dataclass
 from datetime import datetime, timezone
 from typing import TYPE_CHECKING, Any
 
-from lumi.tui.message_visibility import should_show_human_message
-from lumi.tui.text_cleaning import extract_display_text
+from lumi.sessions.message_visibility import should_show_human_message
+from lumi.sessions.text_cleaning import extract_display_text
 from lumi.utils.logger import logger
 from lumi.utils.thread_id import CRON_THREAD_PREFIX
 

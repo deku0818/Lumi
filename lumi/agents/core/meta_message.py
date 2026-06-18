@@ -5,7 +5,7 @@ meta 消息是 "给模型看的,不是用户说的话" —— 常见来源:
   注入多模态 content block(例如 read 工具读图/读 PDF)
 - 后台任务完成通知由 AgentBridge 注入
 
-TUI 的 should_show_human_message / session_store 会基于 ``META_KEY`` 过滤,
+lumi.sessions 的 should_show_human_message / session_store 会基于 ``META_KEY`` 过滤,
 避免把这类消息当成真实用户气泡渲染。任何新增 meta HumanMessage 的调用点
 都必须经由 ``meta_human_message()`` 或 ``META_KEY`` 常量,
 防止字段名拼写漂移导致过滤静默失效。

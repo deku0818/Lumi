@@ -52,20 +52,17 @@ env:
 ### 3. 启动 Lumi
 
 ```bash
-# TUI 交互模式（默认）
-lumi
-
-# 指定风格启动
-lumi -s code
-
-# Headless 模式（输出到 stdout）
+# Headless 模式（执行 prompt 后输出到 stdout 退出）
 lumi -p "你的问题"
 
-# 特权模式（跳过所有工具审批）
-lumi --privileged-danger
+# 指定风格
+lumi -p "你的问题" -s code
 
-# 浏览器模式
-lumi web-server --port 8000
+# 特权模式（跳过所有工具审批，配合 -p）
+lumi -p "你的问题" --privileged-danger
+
+# WebSocket 服务（供桌面端 / web 前端连接）
+lumi serve
 
 # HTTP API 模式
 uvicorn lumi.api.app:app --port 8090

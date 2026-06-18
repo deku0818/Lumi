@@ -1,6 +1,6 @@
 # Desktop 应用架构
 
-Lumi 桌面应用（Electron + TS 前端）的内部实现。前端通过 WebSocket 复用后端的 `AgentBridge`，与 TUI 共享同一套 Agent 运行时。协议契约见 [`protocol/README.md`](../../protocol/README.md)。
+Lumi 桌面应用（Electron + TS 前端）的内部实现。前端通过 WebSocket 复用后端的 `AgentBridge`。协议契约见 [`protocol/README.md`](../../protocol/README.md)。
 
 > 现状：desktop 处于开发阶段，dev 模式经 `uv run lumi serve` 拉起 sidecar；打包发行（内置可移植 Python 运行时）仍是 TODO。
 
@@ -66,9 +66,9 @@ shell / 后台任务会话等全局单例由 `shutdown_shared_runtime()` 在 lif
 
 ## 会话管理
 
-会话列表由 LangGraph checkpoint 派生（`lumi/tui/session_store.list_sessions`），但「置顶」「自定义标题」是用户施加的、不存在于 checkpoint 中的元数据，单独持久化：
+会话列表由 LangGraph checkpoint 派生（`lumi/sessions/session_store.list_sessions`），但「置顶」「自定义标题」是用户施加的、不存在于 checkpoint 中的元数据，单独持久化：
 
-- **`lumi/tui/session_meta.py`** — JSON sidecar（`~/.lumi/checkpoints/session_meta.json`），按 `thread_id` 存 `pinned`/`title`，仅写非默认值。textual-free，可在 headless 服务直接使用。
+- **`lumi/sessions/session_meta.py`** — JSON sidecar（`~/.lumi/checkpoints/session_meta.json`），按 `thread_id` 存 `pinned`/`title`，仅写非默认值。textual-free，可在 headless 服务直接使用。
 - **`list_sessions` RPC** — 合并 sidecar 元数据后注入 `title`/`pinned`，置顶项稳定排到最前。
 - **删除** — `delete_session` 经 `bridge.delete_thread()` 一并清理两类 checkpoint：LangGraph 会话（`LumiAgent.adelete_thread`）+ 文件级 checkpoint（`checkpoint.delete_thread_checkpoint`），再删除 sidecar 元数据条目。
 
@@ -85,13 +85,12 @@ shell / 后台任务会话等全局单例由 `shutdown_shared_runtime()` 在 lif
 
 ## 模型供应商管理
 
-用户自定义的「连接 + 模型」持久化在 `~/.lumi/providers.json`（明文，`chmod 600`，含 `api_key`），由 `lumi/agents/runtime/provider_store.py` 读写——textual-free，TUI 与 desktop 共享同一份配置。
+用户自定义的「连接 + 模型」持久化在 `~/.lumi/providers.json`（明文，`chmod 600`，含 `api_key`），由 `lumi/agents/runtime/provider_store.py` 读写——textual-free，desktop 前端经 RPC 读写。
 
 - **数据模型**：一个 **profile** = 一套连接（`name` / `base_url` / `api_key`）+ 该连接下的一组 `models`；`active` 指向「某 profile 下的某个 model」。协议（OpenAI / Anthropic 客户端）仍由 model 名经 `model_manager.detect_model_type` 自动判定，无需配置。`provider_store` 兼容旧格式（单 `model` 字段、`active` 为字符串 id），读取时自动迁移并把失效 `active` 归位到首个可用模型。
 - **运行时生效**：`LumiAgentContext` 增加 `base_url` / `api_key` 两个字段（`state.py`）；`call_model` 经 `_provider_kwargs()`（`nodes.py`）仅在非空时透传给 `create_llm`，空则沿用 env / SDK 默认。`AgentBridge._apply_active()` 把当前 `active` 应用到 context，**下一轮** `call_model` 生效。
 - **RPC**：`list_providers`（列全部 profile + active）、`save_provider` / `delete_provider`（增删改，返回刷新后的 `{profiles, active}`）、`set_provider`（切换 active，返回 `{active, model}`）、`test_provider`（用给定连接对模型发最小请求验证可达，15s 短超时、不缓存不重试）。`set/save/delete_provider` 在 `_dispatch` 中持 `run.lock`，与运行中的轮次互斥，避免轮内改掉共享 context。
 - **前端**：`SettingsDialog` + `ProvidersPanel` 完成增 / 删 / 改 / 测试；`ModelPicker`（顶栏）做快速切换。
-- **TUI 对应**：`/model` 命令打开 `ModelScreen`（`lumi/tui/screens/model_screen.py`）——把「供应商 × 模型」拍平成列表，**仅切换**；增删改在桌面端配置页完成，二者共享 `~/.lumi/providers.json`。
 
 ## 上下文用量指示器
 
@@ -198,6 +197,6 @@ macOS 关窗后应用驻留 Dock，sidecar 保持运行，Dock 唤起（activate
 | `lumi/server/desktop_delivery.py` | cron 结果 → WS 广播投递通道 |
 | `lumi/agents/bridge.py` | LangGraph ↔ 前端中立桥接层 |
 | `lumi/agents/runtime/provider_store.py` | 模型供应商 profile 持久化（`~/.lumi/providers.json`） |
-| `lumi/tui/screens/model_screen.py` | TUI `/model` 模型切换弹窗 |
-| `lumi/tui/session_meta.py` | 会话用户元数据 sidecar |
+| `lumi/sessions/session_store.py` | 会话列表从 checkpoint 派生 |
+| `lumi/sessions/session_meta.py` | 会话用户元数据 sidecar |
 | `protocol/events.json` | 协议单一事实源 |

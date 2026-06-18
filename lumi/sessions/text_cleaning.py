@@ -1,6 +1,6 @@
 """消息文本清理 — 统一的 XML 标签过滤和用户输入还原。
 
-session_store 和 message_restore 共用此模块，避免重复的正则和清理逻辑。
+session_store 与 message_text 共用此模块，避免重复的正则和清理逻辑。
 """
 
 from __future__ import annotations

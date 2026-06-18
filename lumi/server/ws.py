@@ -69,7 +69,13 @@ from lumi.server.projects import (
     touch_project,
 )
 from lumi.server.protocol import bridge_event_to_wire, event_frame
-from lumi.tui.session_meta import delete_meta, load_all, update_meta
+from lumi.sessions.message_text import (
+    extract_human_display_text,
+    extract_text_content,
+)
+from lumi.sessions.message_visibility import should_show_human_message
+from lumi.sessions.session_meta import delete_meta, load_all, update_meta
+from lumi.sessions.session_store import list_sessions
 from lumi.utils.constants import ATTACHED_FILE_TAG, NOTIFICATION_POLL_INTERVAL
 from lumi.utils.logger import logger
 from lumi.utils.thread_id import generate_thread_id
@@ -153,7 +159,7 @@ async def lifespan(app: FastAPI):
 
     asyncio.create_task(refresh_catalog())
 
-    # 初始化定时任务子系统（按工作目录隔离，与 TUI 共用 setup_cron）
+    # 初始化定时任务子系统（按工作目录隔离）
     cron_runtime = None
     try:
         delivery = DeliveryManager()
@@ -212,8 +218,6 @@ def _extract_files(content) -> list[dict]:
     发送侧把附件路径包在 <attached-file> 标签内（见 desktop send），
     此处正则取回，name 取 basename。
     """
-    from lumi.tui.message_restore import extract_text_content
-
     raw = extract_text_content(content)
     files: list[dict] = []
     for path in _ATTACHED_FILE_RE.findall(raw):
@@ -226,16 +230,9 @@ def _extract_files(content) -> list[dict]:
 def _history_items(messages: list) -> list[dict]:
     """把 LangGraph state 的历史 messages 转成前端可渲染的 item 列表。
 
-    user / assistant 文本 + 工具调用（按 tool_call_id 配对其输出）。复用 TUI 的
-    消息文本提取与可见性判断（懒加载，避免在 headless 服务启动时引入 textual）。
+    user / assistant 文本 + 工具调用（按 tool_call_id 配对其输出）。消息文本提取与
+    可见性判断复用 lumi.sessions 下的纯逻辑。
     """
-    # message_restore 引入 textual，故延迟到此处导入而非模块顶层
-    from lumi.tui.message_restore import (
-        extract_human_display_text,
-        extract_text_content,
-    )
-    from lumi.tui.message_visibility import should_show_human_message
-
     tool_outputs: dict[str, str] = {}
     for m in messages:
         if getattr(m, "type", None) == "tool":
@@ -367,7 +364,7 @@ async def _run_streaming_rpc(
 async def _notification_loop(
     ws: WebSocket, bridge: AgentBridge, run: _RunState
 ) -> None:
-    """后台任务完成通知轮询（对齐 TUI 的 _poll_notifications）。
+    """后台任务完成通知轮询。
 
     Agent 空闲时取出通知队列，作为不可见 meta 消息注入触发新一轮，让模型读取输出
     文件并把结果主动流式推回 desktop——否则通知只会堆积在队列里无人取用，桌面端
@@ -401,8 +398,6 @@ async def _notification_loop(
 
 
 async def _list_sessions(bridge: AgentBridge, params: dict) -> dict:
-    from lumi.tui.session_store import list_sessions
-
     sessions = await list_sessions(
         bridge.graph,
         current_thread_id="",

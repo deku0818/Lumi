@@ -1,6 +1,6 @@
-"""消息可见性判定 — 集中管理哪些 HumanMessage 应在 TUI 中显示。
+"""消息可见性判定 — 集中管理哪些 HumanMessage 应在会话列表/历史中显示。
 
-restore 和 session_store 统一调用 should_show_human_message()，
+WS 历史恢复与 session_store 统一调用 should_show_human_message()，
 避免可见性逻辑散落在各处。
 """
 

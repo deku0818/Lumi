@@ -24,9 +24,7 @@
 |---|---|---|
 | 工具实现 | `lumi/agents/tools/providers/agent.py` | Agent 工具的核心逻辑，创建子 LumiAgent 实例 |
 | Agent 加载 | `lumi/styles/loader.py` | 扫描和解析 Agent 配置文件 |
-| TUI 渲染 | `lumi/tui/widgets/agent_group.py` | AgentGroup 组件，管理子 Agent 的 TUI 展示 |
-| 状态追踪 | `lumi/tui/subagent_tracker.py` | 跟踪并发子 Agent 的执行状态和 run_id 映射 |
 
-## TUI 集成
+## 前端集成
 
-父 TUI 通过 `parent_run_id` 识别子 Agent 事件，路由到 `AgentGroup` 做轻量统计展示。详见 [`architecture/subagent-rendering.md`](subagent-rendering.md)。
+前端通过 `parent_run_id` 识别子 Agent 事件（非空=属于某子 Agent），做轻量统计展示。详见 [`architecture/subagent-rendering.md`](subagent-rendering.md)。

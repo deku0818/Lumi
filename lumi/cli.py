@@ -1,9 +1,8 @@
 """Lumi CLI 统一入口
 
 用法:
-    lumi                    # 启动 TUI
     lumi -p "query"         # 非交互模式：执行 prompt 后退出
-    lumi web-server         # 在浏览器中运行 TUI
+    lumi serve              # 启动 WebSocket 服务（供 desktop / web 前端连接）
 """
 
 from __future__ import annotations
@@ -52,16 +51,8 @@ def _default(
             is_flag=True,
         ),
     ] = False,
-    no_mouse: Annotated[
-        bool,
-        typer.Option(
-            "--no-mouse",
-            help="禁用鼠标支持（SSH/远程终端推荐）",
-            is_flag=True,
-        ),
-    ] = False,
 ) -> None:
-    """启动 Lumi。无参数时打开 TUI，-p 时非交互执行。"""
+    """运行 Lumi：-p 非交互执行 prompt；无参数显示帮助。前端经 `lumi serve` 连接。"""
     if ctx.invoked_subcommand is not None:
         return
 
@@ -73,42 +64,7 @@ def _default(
     if prompt is not None:
         _run_headless(prompt, privileged=privileged_danger, accept_edits=accept_edits)
     else:
-        _run_tui(
-            privileged=privileged_danger,
-            accept_edits=accept_edits,
-            no_mouse=no_mouse,
-        )
-
-
-@app.command("web-server")
-def web_server(
-    host: str = typer.Option("localhost", help="监听地址"),
-    port: int = typer.Option(8000, help="监听端口"),
-    title: str = typer.Option("Lumi", help="浏览器标签页标题"),
-    debug: bool = typer.Option(False, help="启用 Textual devtools"),
-    privileged_danger: bool = typer.Option(
-        False, "--privileged-danger", help="特权模式：跳过所有工具审批（危险）"
-    ),
-    no_mouse: bool = typer.Option(
-        False, "--no-mouse", help="禁用鼠标支持（SSH/远程终端推荐）"
-    ),
-) -> None:
-    """在浏览器中运行 TUI。"""
-    import os
-
-    from textual_serve.server import Server
-
-    if privileged_danger:
-        os.environ["LUMI_PRIVILEGED"] = "1"
-    else:
-        os.environ.pop("LUMI_PRIVILEGED", None)
-    if no_mouse:
-        os.environ["LUMI_NO_MOUSE"] = "1"
-    else:
-        os.environ.pop("LUMI_NO_MOUSE", None)
-    command = f"{sys.executable} -m lumi.tui"
-    server = Server(command=command, host=host, port=port, title=title)
-    server.serve(debug=debug)
+        typer.echo(ctx.get_help())
 
 
 @app.command("serve")
@@ -122,32 +78,6 @@ def serve(
     from lumi.server.ws import app as ws_app
 
     uvicorn.run(ws_app, host=host, port=port)
-
-
-def _run_tui(
-    *, privileged: bool = False, accept_edits: bool = False, no_mouse: bool = False
-) -> None:
-    """启动终端 TUI。"""
-    import os
-
-    from lumi.tui.app import LumiApp
-    from lumi.utils.patches import apply_all
-
-    apply_all()
-
-    _original = sys.unraisablehook
-
-    def _quiet(args):  # type: ignore[type-arg]
-        if args.exc_type is KeyboardInterrupt:
-            return
-        _original(args)
-
-    sys.unraisablehook = _quiet
-
-    if no_mouse or os.environ.get("LUMI_NO_MOUSE") == "1":
-        no_mouse = True
-
-    LumiApp(privileged=privileged, accept_edits=accept_edits).run(mouse=not no_mouse)
 
 
 def _run_headless(

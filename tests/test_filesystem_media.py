@@ -662,7 +662,7 @@ class TestReadDispatchPDF:
 class TestMetaHumanMessageFlag:
     """工具注入的 HumanMessage 必须带 is_meta=True 标记。
 
-    回归:如果缺少该标记,resume 后 lumi/tui/message_restore.py
+    回归:如果缺少该标记,resume 后历史恢复(lumi/sessions 可见性判定)
     会把它当真实用户输入渲染成气泡(就像 bug 报告里的"--- 第 1 页 ---"
     被当成用户说的话一样)。
     """
@@ -690,7 +690,7 @@ class TestMetaHumanMessageFlag:
 
     def test_should_show_human_message_filters_meta(self):
         """集成检查:TUI 的 should_show_human_message 确实会过滤 is_meta"""
-        from lumi.tui.message_visibility import should_show_human_message
+        from lumi.sessions.message_visibility import should_show_human_message
 
         meta_msg = HumanMessage(
             content=[{"type": "text", "text": "..."}],
@@ -711,7 +711,7 @@ class TestMetaHumanMessageFlag:
             is_meta_message,
             meta_human_message,
         )
-        from lumi.tui.message_visibility import should_show_human_message
+        from lumi.sessions.message_visibility import should_show_human_message
 
         # factory 构造的消息应带 META_KEY 标记
         msg = meta_human_message([{"type": "text", "text": "..."}])

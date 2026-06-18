@@ -1,5 +1,13 @@
 # Changelog
 
+## [0.1.0a25] - 2026-06-18
+
+### Changed
+- **移除 Python TUI（Textual），前端归一到 desktop** — 删除整个 `lumi/tui/` 包（app、event_router、widgets、renderers、screens、slash_commands 等约 70 个文件）及对应 TUI 测试。`lumi` 命令不再启动 TUI：去掉 `web-server` 子命令与 `_run_tui`，裸 `lumi` 改为显示帮助，交互入口归一到 desktop（经 `lumi serve` WebSocket）/ `lumi -p` headless / HTTP API
+- **会话与消息逻辑下沉到 `lumi/sessions/`** — 原住在 `lumi/tui/` 实为后端逻辑的 `session_store` / `session_meta` / `message_visibility` / `text_cleaning` 迁入新包 `lumi/sessions/`（textual-free，由 `lumi/server/ws.py` 消费）；从已删的 `message_restore` 抽出纯文本提取函数到 `lumi/sessions/message_text.py`。`ws.py` 不再依赖 `lumi.tui.*`，相关惰性导入提升为模块级
+- **移除 textual 依赖** — `pyproject` 删除 `textual` / `textual-serve`（连带一批传递依赖），并删去仅服务 TUI 的 `TUIDelivery` cron 投递通道
+- **文档同步** — CLAUDE.md 去掉 TUI 架构段；删除 `docs/architecture/{tui-improvements,slash-commands}.md`（整篇讲已删 TUI）；更新 `agents` / `checkpoint` / `desktop` / `subagent-rendering`.md 及 `user-manual.md` 的陈旧路径与命令引用
+
 ## [0.1.0a24] - 2026-06-17
 
 ### Added

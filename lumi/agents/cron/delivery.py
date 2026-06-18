@@ -5,13 +5,9 @@ from __future__ import annotations
 import asyncio
 from abc import ABC, abstractmethod
 from collections.abc import AsyncGenerator
-from typing import TYPE_CHECKING
 
 from lumi.agents.cron.run_log import RunRecord
 from lumi.utils.logger import logger
-
-if TYPE_CHECKING:
-    from textual.app import App
 
 
 class ResultDelivery(ABC):
@@ -91,34 +87,6 @@ class DeliveryManager:
             except Exception:
                 logger.warning("关闭投递通道失败: %s", type(ch).__name__, exc_info=True)
         self._channels.clear()
-
-
-class TUIDelivery(ResultDelivery):
-    """将定时任务执行结果持久化到 TUI 通知面板。
-
-    Args:
-        app: LumiApp 实例，用于调用 ``add_notification()`` 向通知面板推送通知。
-    """
-
-    def __init__(self, app: "App") -> None:
-        self._app = app
-
-    async def deliver(self, record: RunRecord, text: str) -> None:
-        """将任务执行结果持久化到通知面板。"""
-        if not hasattr(self._app, "add_notification"):
-            logger.warning(
-                "[TUIDelivery] App 缺少 add_notification 方法，'%s' 的通知将不会展示",
-                record.job_name,
-            )
-            return
-        self._app.call_later(
-            lambda: self._app.add_notification(
-                record.job_name,
-                text,
-                started_at=record.started_at,
-                duration_ms=record.duration_ms,
-            )
-        )
 
 
 class APIDelivery(ResultDelivery):
