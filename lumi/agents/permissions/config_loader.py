@@ -6,17 +6,17 @@
 from __future__ import annotations
 
 import json
-import tempfile
 from pathlib import Path
 from typing import Any
 
-from lumi.utils.jsonc import parse_jsonc
 from lumi.agents.permissions.models import (
     DEFAULT_RULES,
     Permission,
     PermissionConfig,
     PermissionRule,
 )
+from lumi.utils.atomic_io import atomic_write_text
+from lumi.utils.jsonc import parse_jsonc
 from lumi.utils.logger import logger
 
 
@@ -240,31 +240,14 @@ class ConfigLoader:
             config: 要写入的配置
         """
         target = self.local_config_path
-        target.parent.mkdir(parents=True, exist_ok=True)
-
         data = _config_to_dict(config)
         content = json.dumps(data, indent=2, ensure_ascii=False) + "\n"
 
-        tmp_path: Path | None = None
+        # 复用 utils.atomic_io 的单一原子写实现（内部建目录 + 失败清理临时文件）
         try:
-            # 原子写入：先写临时文件再 rename
-            with tempfile.NamedTemporaryFile(
-                mode="w",
-                dir=target.parent,
-                suffix=".tmp",
-                delete=False,
-                encoding="utf-8",
-            ) as tmp:
-                tmp.write(content)
-                tmp_path = Path(tmp.name)
-            tmp_path.replace(target)
+            atomic_write_text(target, content)
         except OSError as e:
             logger.error("写入权限配置文件失败 %s: %s", target, e)
-            if tmp_path is not None:
-                try:
-                    tmp_path.unlink(missing_ok=True)
-                except OSError:
-                    pass
             raise
 
     def needs_reload(self) -> bool:

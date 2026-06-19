@@ -8,8 +8,8 @@ from langchain_core.messages import (
 from langchain_core.runnables import RunnableConfig
 from langgraph.graph import END
 from langgraph.prebuilt import ToolNode
-from langgraph.types import Command, interrupt
 from langgraph.runtime import Runtime
+from langgraph.types import Command, interrupt
 
 from lumi.agents.core.hooks import HookContext, dispatch_hooks, has_hooks
 from lumi.agents.core.node_helpers.execution import (
@@ -20,10 +20,12 @@ from lumi.agents.core.node_helpers.messages import (
     cleanup_incomplete_tool_calls,
     inject_message_cache_breakpoints,
 )
+from lumi.agents.core.preprocessing.skill_detector import SkillChangeDetector
+from lumi.agents.core.preprocessing.skills import inject_skills_into_message
+from lumi.agents.core.preprocessing.summary import inject_summary_into_message
+from lumi.agents.core.preprocessing.system_info import inject_system_info_into_message
+from lumi.agents.core.response import extract_ainvoke_content, message_transform
 from lumi.agents.core.state import LumiAgentContext, LumiAgentState
-from lumi.agents.tools.capability import is_file_edit_tool, is_write_tool
-from lumi.agents.permissions.models import PermissionDecision
-from lumi.agents.permissions.safety import is_bypass_immune
 from lumi.agents.core.structured_tool import (
     MAX_CONSECUTIVE_FAILURES,
     STRUCTURED_OUTPUT_INSTRUCTION,
@@ -33,14 +35,11 @@ from lumi.agents.core.structured_tool import (
     format_structured_output_abort_message,
     is_internal_tool,
 )
-from lumi.agents.core.response import extract_ainvoke_content, message_transform
-from lumi.agents.core.preprocessing.summary import inject_summary_into_message
-from lumi.agents.core.preprocessing.skill_detector import SkillChangeDetector
-from lumi.agents.core.preprocessing.skills import inject_skills_into_message
-from lumi.agents.core.preprocessing.system_info import inject_system_info_into_message
-from lumi.utils.llm_chain import tool_call_chain
+from lumi.agents.permissions.models import PermissionDecision
+from lumi.agents.permissions.routing import route_decision
+from lumi.models.chain import tool_call_chain
+from lumi.models.manager import detect_protocol
 from lumi.utils.logger import logger
-from lumi.utils.model_manager import detect_protocol
 from lumi.utils.read_config import get_config
 from lumi.utils.token_counter import tiktoken_counter
 
@@ -87,7 +86,7 @@ async def call_model(state: LumiAgentState, runtime: Runtime[LumiAgentContext]) 
     response = await chain.ainvoke({"messages": transformed_messages})
 
     if response.tool_calls:
-        logger.debug(f"[SimpleAgent]正在进行第「{iterations}」次工具调用迭代")
+        logger.debug(f"[LumiAgent]正在进行第「{iterations}」次工具调用迭代")
 
     return {"messages": [response], "iterations": iterations + 1}
 
@@ -347,152 +346,12 @@ def is_use_tool(state: LumiAgentState, runtime: Runtime[LumiAgentContext]) -> st
         # 模型未调工具想结束 → OnAgentStop 节点分发 Stop hooks（默认 END）
         return "OnAgentStop"
 
-    if any(is_internal_tool(tc.get("name", "")) for tc in tool_calls):
-        if all(is_internal_tool(tc.get("name", "")) for tc in tool_calls):
-            # 纯内部伪工具：安全的框架控制流，闭包内自校验，绕过权限审批快速进 ToolExecutor
-            return "ToolExecutor"
-        # 混合批次（内部工具 + 其他工具）：不绕过审批，落到下方正常权限评估，
-        # 兄弟工具该 DENY/ASK/审批的照常处理，内部工具随批一起评估（read-only，无害）
-        logger.warning("[is_use_tool] 内部工具与其他工具混合调用，按正常权限评估整批")
-
-    # 权限引擎 DENY 检查（优先于 bypass，deny 规则不可绕过）
-    engine = runtime.context.permission_engine
-    tool_mode = state.get("tool_mode", "default")
-
-    if engine is not None:
-        engine.reload()
-        for tc in tool_calls:
-            try:
-                decision = engine.evaluate(tc["name"], tc.get("args", {}))
-                if decision == PermissionDecision.DENY:
-                    return "HumanApproval"
-            except Exception as e:
-                logger.error(
-                    "[PermissionCheck] DENY 前置检查异常 (%s): %s",
-                    tc["name"],
-                    e,
-                    exc_info=True,
-                )
-
-    # 只读工具跳过审批，直接执行
-    if all(
-        not is_write_tool(tc.get("name", ""), tc.get("args", {})) for tc in tool_calls
-    ):
-        return "ToolExecutor"
-
-    # 执行模式策略守卫（Layer 2: 根据当前模式策略拦截不允许的工具调用）
-    execution_mode = state.get("execution_mode", "normal")
-    if execution_mode != "normal":
-        from lumi.agents.permissions.mode_policy import check_policy, get_policy
-
-        policy = get_policy(execution_mode)
-        if policy is not None:
-            for tc in tool_calls:
-                result = check_policy(policy, tc.get("name", ""), tc.get("args", {}))
-                if not result.allowed:
-                    logger.info(
-                        "[PolicyGuard] %s 拒绝: %s - %s",
-                        policy.label,
-                        tc.get("name"),
-                        result.reason,
-                    )
-                    return "PolicyReject"
-
-    # bypass-immune 安全检查（所有模式都执行）
-    for tc in tool_calls:
-        args = tc.get("args", {})
-        try:
-            immune, reason = is_bypass_immune(tc["name"], args)
-        except Exception as e:
-            logger.error(
-                "[SafetyCheck] bypass-immune 检查异常 (%s): %s, 保守要求审批",
-                tc["name"],
-                e,
-                exc_info=True,
-            )
-            return "HumanApproval"
-        if immune:
-            logger.warning("[SafetyCheck] Bypass-immune: %s", reason)
-            return "HumanApproval"
-
-    # accept_edits 模式：文件编辑工具(write/edit)在工作区内自动放行
-    if tool_mode == "accept_edits":
-        all_auto = True
-        for tc in tool_calls:
-            name = tc.get("name", "")
-            if is_file_edit_tool(name):
-                if engine is not None and engine.check_workspace_boundary(
-                    name, tc.get("args", {})
-                ):
-                    continue
-                all_auto = False
-                break
-            else:
-                all_auto = False
-                break
-        if all_auto:
-            return "ToolExecutor"
-        return "HumanApproval"
-
-    # 权限引擎完整评估（deny 已在上方处理，此处处理 allow/ask/unmatched）
-
-    if engine is not None:
-        engine.reload()
-        has_deny = False
-        has_ask = False
-        all_allowed = True
-
-        for tc in tool_calls:
-            name = tc["name"]
-            args = tc.get("args", {})
-            try:
-                decision = engine.evaluate(name, args)
-                boundary_ok = engine.check_workspace_boundary(name, args)
-                logger.debug(
-                    "[PermissionCheck] 工具 %s: decision=%s, boundary_ok=%s",
-                    name,
-                    decision.value,
-                    boundary_ok,
-                )
-                if decision == PermissionDecision.DENY:
-                    has_deny = True
-                    break
-                if decision == PermissionDecision.ASK:
-                    has_ask = True
-                if decision != PermissionDecision.ALLOW or not boundary_ok:
-                    all_allowed = False
-            except Exception as e:
-                logger.error(
-                    "[PermissionCheck] 工具 %s 权限评估异常: %s, 保守要求审批",
-                    name,
-                    e,
-                    exc_info=True,
-                )
-                # 评估异常时保守处理：所有模式都要求人工审批
-                return "HumanApproval"
-
-        # DENY：所有模式下路由到审批节点（节点内自动拒绝）
-        if has_deny:
-            return "HumanApproval"
-
-        # privileged 模式：ASK 仍需审批，其余自动放行
-        if tool_mode == "privileged":
-            if has_ask:
-                return "HumanApproval"
-            return "ToolExecutor"
-
-        # default 模式：全部 ALLOW + 边界 OK 才直接执行
-        if all_allowed:
-            return "ToolExecutor"
-
-        return "HumanApproval"
-
-    # engine is None：privileged 放行，default/accept_edits 审批
-    if tool_mode == "privileged":
-        logger.warning("[is_use_tool] 权限引擎不可用，privileged 模式直接放行")
-        return "ToolExecutor"
-    logger.warning("[is_use_tool] 权限引擎不可用，回退到人工审批")
-    return "HumanApproval"
+    return route_decision(
+        tool_calls,
+        state.get("tool_mode", "default"),
+        state.get("execution_mode", "normal"),
+        runtime.context.permission_engine,
+    )
 
 
 def human_approval(

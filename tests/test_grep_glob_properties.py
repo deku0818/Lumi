@@ -8,7 +8,8 @@ import tempfile
 import time
 from pathlib import Path
 
-from hypothesis import given, settings, strategies as st
+from hypothesis import given, settings
+from hypothesis import strategies as st
 
 import lumi.agents.permissions.workspace as workspace
 from lumi.agents.tools.providers.filesystem import LocalFilesystemBackend

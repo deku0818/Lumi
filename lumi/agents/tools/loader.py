@@ -13,7 +13,6 @@ from pydantic import BaseModel, Field
 from lumi.utils.logger import logger
 from lumi.utils.read_config import get_config
 
-
 # ------------------------------------------------------------------
 # 数据模型
 # ------------------------------------------------------------------

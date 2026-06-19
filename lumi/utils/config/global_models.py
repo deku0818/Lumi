@@ -5,23 +5,8 @@
 """
 
 from pathlib import Path
-from typing import Literal
 
 from pydantic import BaseModel, Field
-
-
-class KeyBindings(BaseModel):
-    """TUI 快捷键配置
-
-    所有字段值为 Textual 格式的按键字符串（如 "ctrl+shift+c"）。
-    """
-
-    model_config = {"extra": "ignore"}
-
-    copy_selection: str = Field(
-        default="ctrl+shift+c",
-        description="复制选中文本到系统剪贴板",
-    )
 
 
 class GlobalConfig(BaseModel):
@@ -32,14 +17,6 @@ class GlobalConfig(BaseModel):
 
     model_config = {"extra": "ignore", "validate_assignment": True}
 
-    initialized: bool = Field(
-        default=False,
-        description="是否已完成首次初始化引导",
-    )
-    theme_mode: Literal["dark", "light", "system"] = Field(
-        default="system",
-        description="TUI 主题模式",
-    )
     checkpoint_dir: str = Field(
         default="",
         description="检查点存储目录，为空时使用默认路径 ~/.lumi/checkpoints/",
@@ -51,10 +28,6 @@ class GlobalConfig(BaseModel):
     stale_thread_days: int = Field(
         default=30,
         description="自动清理超过指定天数未更新的 checkpoint thread 目录，0 表示不清理",
-    )
-    keybindings: KeyBindings = Field(
-        default_factory=KeyBindings,
-        description="TUI 快捷键配置",
     )
 
     def get_checkpoint_dir(self) -> Path:

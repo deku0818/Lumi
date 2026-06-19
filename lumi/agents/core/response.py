@@ -6,9 +6,9 @@ from langchain_core.load import dumpd
 from langchain_core.runnables.config import RunnableConfig
 from langgraph.graph.state import CompiledStateGraph
 
+from lumi.models.manager import detect_protocol, get_default_model_name
 from lumi.utils.image import download_image_as_base64
 from lumi.utils.logger import logger
-from lumi.utils.model_manager import detect_protocol, get_default_model_name
 from lumi.utils.read_config import get_config
 
 

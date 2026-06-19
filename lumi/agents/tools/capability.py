@@ -10,7 +10,6 @@ from __future__ import annotations
 
 import re
 
-
 # ── 复合命令拆分 ──
 
 # 双字符复合分隔符（优先匹配）

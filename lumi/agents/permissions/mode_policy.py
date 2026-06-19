@@ -171,8 +171,8 @@ def check_policy(policy: ModePolicy, tool_name: str, tool_args: dict) -> PolicyR
 
 
 def filter_tools_for_mode(
-    tools: list["StructuredTool"], policy: ModePolicy
-) -> list["StructuredTool"]:
+    tools: list[StructuredTool], policy: ModePolicy
+) -> list[StructuredTool]:
     """根据模式策略过滤工具列表
 
     移除写入工具。bash 保留（其只读性在运行时动态判断）。

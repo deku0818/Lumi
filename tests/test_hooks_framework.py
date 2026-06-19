@@ -7,7 +7,6 @@ from langchain_core.messages import AIMessage, HumanMessage
 from langgraph.graph import END
 from langgraph.types import Command
 
-from lumi.agents.core.hooks import dispatch as dispatch_mod
 from lumi.agents.core.hooks import (
     AdditionalContext,
     Block,
@@ -19,6 +18,7 @@ from lumi.agents.core.hooks import (
     replace_hooks,
     unregister_hook,
 )
+from lumi.agents.core.hooks import dispatch as dispatch_mod
 
 
 @pytest.fixture(autouse=True)

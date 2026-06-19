@@ -5,11 +5,73 @@ import events from '@protocol/events.json'
 export type WireEventType = keyof typeof events.events
 export type RpcMethod = keyof typeof events.methods
 
-export interface WireEvent<P = any> {
-  type: WireEventType
-  session_id?: string
-  payload: P
+// LangChain usage_metadata 快照（事件 payload 里附带）。字段在不同 provider /
+// 流式 vs 非流式补发下可能缺失，故全部可选；索引签名兜底未列出的 provider 私货字段。
+export interface Usage {
+  input_tokens?: number
+  output_tokens?: number
+  total_tokens?: number
+  input_token_details?: { cache_read?: number; [k: string]: number | undefined }
+  [k: string]: unknown
 }
+
+// ask 工具的单个澄清问题（clarify.request）。后端形状宽松，至少含 question。
+export interface Question {
+  question: string
+  [k: string]: unknown
+}
+
+// 审批请求里的单个工具调用摘要（approval.request）。
+export interface ToolCallBrief {
+  id?: string
+  name?: string
+  args?: unknown
+  [k: string]: unknown
+}
+
+// 每个事件名 → payload 形状的单一映射。继承 Record<WireEventType, object> 兜底：
+// 漏写任一事件名 tsc 即报错，保证覆盖全部事件。events.json 承载语言中立的同构契约。
+export interface WireEventPayloads extends Record<WireEventType, object> {
+  'gateway.ready': { model: string; workspace: string }
+  'message.start': Record<string, never>
+  'message.delta': { text: string; usage?: Usage }
+  'thinking.delta': { text: string; usage?: Usage }
+  'message.complete': { usage?: Usage }
+  'tool.generating': Record<string, never>
+  'tool.start': { name: string; args: unknown; tool_call_id: string; run_id?: string }
+  'tool.complete': { name: string; output: string; tool_call_id: string; is_error?: boolean }
+  'clarify.request': { questions: Question[] }
+  'approval.request': {
+    tool_calls: ToolCallBrief[]
+    decisions?: Record<string, unknown>
+    options?: Record<string, unknown>
+    warnings?: string[]
+    boundary_violations?: string[]
+  }
+  'plan.request': { plan_file_path: string; plan_content?: string }
+  'turn.complete': { usage?: Usage }
+  error: { message: string }
+  'cron.result': {
+    job_id: string
+    job_name: string
+    status: string
+    output: string
+    started_at: string
+    duration_ms: number
+  }
+  'cron.running': { names: string[] }
+  'bg_tasks.update': { tasks: BgTask[] }
+}
+
+// 判别联合：按 type 收窄到对应 payload。任意 payload 都可能附带 parent_run_id
+// （非空=属于某子代理，见 events.json events_note）。
+export type WireEvent = {
+  [K in WireEventType]: {
+    type: K
+    session_id?: string
+    payload: WireEventPayloads[K] & { parent_run_id?: string }
+  }
+}[WireEventType]
 
 // 渲染项模型（前端聊天流的最小单元）
 // 非图片附件：只引用绝对路径，气泡里渲染成文件胶囊

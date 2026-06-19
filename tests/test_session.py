@@ -5,9 +5,9 @@ import tempfile
 
 import pytest
 
-from lumi.agents.runtime.session import (
+from lumi.agents.runtime.shell_session import (
     LocalShellSession,
-    SessionManager,
+    ShellSessionManager,
 )
 
 # Windows 下 shell 会话使用 cmd.exe，bash 语法不适用
@@ -105,7 +105,7 @@ async def test_session_close():
 
 
 async def test_session_manager_get_and_reuse():
-    mgr = SessionManager()
+    mgr = ShellSessionManager()
     s1 = mgr.get_session("thread-a", working_dir=tempfile.gettempdir())
     s2 = mgr.get_session("thread-a")
     assert s1 is s2
@@ -113,7 +113,7 @@ async def test_session_manager_get_and_reuse():
 
 
 async def test_session_manager_close_all():
-    mgr = SessionManager()
+    mgr = ShellSessionManager()
     s1 = mgr.get_session("t1")
     s2 = mgr.get_session("t2")
     await s1.execute("echo a")

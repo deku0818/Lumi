@@ -8,7 +8,8 @@ from __future__ import annotations
 
 from unittest.mock import patch
 
-from hypothesis import given, settings, strategies as st
+from hypothesis import given, settings
+from hypothesis import strategies as st
 
 from lumi.agents.tools.providers.skill import skill
 

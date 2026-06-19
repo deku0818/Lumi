@@ -15,7 +15,6 @@ from lumi.agents.core.node_helpers.execution import (
 )
 from lumi.agents.core.node_helpers.messages import content_to_str
 
-
 # ═════════════════════════════════════════════════════════════════════════
 # _has_multimodal_blocks: 识别多模态 content
 # ═════════════════════════════════════════════════════════════════════════

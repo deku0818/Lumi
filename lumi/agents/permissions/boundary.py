@@ -9,6 +9,7 @@ import shlex
 from pathlib import Path
 from typing import Any
 
+from lumi.agents.permissions.models import PATH_ARG_KEYS
 from lumi.utils.logger import logger
 
 # bash 命令中常见的路径操作命令，匹配时提取所有非标志参数作为路径
@@ -36,8 +37,6 @@ _HEREDOC_OPERATORS: frozenset[str] = frozenset({"<<", "<<<"})
 # 命令分隔/管道符号：遇到后停止解析（后续是新命令）
 _COMMAND_SEPARATORS: frozenset[str] = frozenset({"|", "||", "&&", ";", "&"})
 
-# 文件操作工具的路径参数键名（与实际工具定义一致）
-_PATH_ARG_KEYS: tuple[str, ...] = ("file_path", "path")
 # 列表型路径参数键名（如 present_files 的 filepaths），逐项提取参与边界检查
 _PATH_LIST_ARG_KEYS: tuple[str, ...] = ("filepaths",)
 
@@ -107,7 +106,7 @@ class WorkspaceBoundary:
     def _extract_file_tool_paths(self, tool_args: dict[str, Any]) -> list[Path]:
         """从文件操作工具参数中提取路径。"""
         paths: list[Path] = []
-        for key in _PATH_ARG_KEYS:
+        for key in PATH_ARG_KEYS:
             value = tool_args.get(key)
             if isinstance(value, str) and value:
                 paths.append(Path(value))

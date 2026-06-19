@@ -2,28 +2,28 @@
   "$comment": "Lumi 前端(desktop / 未来 TS TUI) 与后端的 WebSocket 协议契约。语言中立的单一事实来源：TS 端 import 本文件 derive 静态类型，Python 后端用契约测试(tests/server/test_protocol_contract.py)锁住一致性。payload 字段中 '?' 后缀表示可选。新增/改名事件或方法时，只改这里，两端的类型与测试随之收敛。",
   "version": 1,
   "events": {
-    "gateway.ready": { "payload": ["model", "workspace"], "note": "连接握手，由 ws 端点直接发出" },
-    "message.start": { "payload": [] },
-    "message.delta": { "payload": ["text", "usage?"] },
-    "thinking.delta": { "payload": ["text", "usage?"], "note": "模型思考增量（Anthropic thinking 块 / 方言 reasoning_content）" },
-    "message.complete": { "payload": ["usage?"] },
-    "tool.generating": { "payload": [], "note": "模型正在生成工具调用参数" },
-    "tool.start": { "payload": ["name", "args", "tool_call_id", "run_id?"] },
-    "tool.complete": { "payload": ["name", "output", "tool_call_id", "is_error?"], "note": "is_error=true 表示工具以异常收尾" },
-    "clarify.request": { "payload": ["questions"], "note": "ask 工具，需 resume" },
+    "gateway.ready": { "payload": { "model": "string", "workspace": "string" }, "note": "连接握手，由 ws 端点直接发出" },
+    "message.start": { "payload": {} },
+    "message.delta": { "payload": { "text": "string", "usage?": "Usage" } },
+    "thinking.delta": { "payload": { "text": "string", "usage?": "Usage" }, "note": "模型思考增量（Anthropic thinking 块 / 方言 reasoning_content）" },
+    "message.complete": { "payload": { "usage?": "Usage" } },
+    "tool.generating": { "payload": {}, "note": "模型正在生成工具调用参数" },
+    "tool.start": { "payload": { "name": "string", "args": "object", "tool_call_id": "string", "run_id?": "string" } },
+    "tool.complete": { "payload": { "name": "string", "output": "string", "tool_call_id": "string", "is_error?": "boolean" }, "note": "is_error=true 表示工具以异常收尾" },
+    "clarify.request": { "payload": { "questions": "Question[]" }, "note": "ask 工具，需 resume" },
     "approval.request": {
-      "payload": ["tool_calls", "decisions?", "options?", "warnings?", "boundary_violations?"],
+      "payload": { "tool_calls": "ToolCallBrief[]", "decisions?": "object", "options?": "object", "warnings?": "string[]", "boundary_violations?": "string[]" },
       "note": "工具审批，需 resume"
     },
-    "plan.request": { "payload": ["plan_file_path", "plan_content?"], "note": "退出 plan mode 确认，需 resume" },
-    "turn.complete": { "payload": ["usage?"] },
-    "error": { "payload": ["message"] },
+    "plan.request": { "payload": { "plan_file_path": "string", "plan_content?": "string" }, "note": "退出 plan mode 确认，需 resume" },
+    "turn.complete": { "payload": { "usage?": "Usage" } },
+    "error": { "payload": { "message": "string" } },
     "cron.result": {
-      "payload": ["job_id", "job_name", "status", "output", "started_at", "duration_ms"],
+      "payload": { "job_id": "string", "job_name": "string", "status": "string", "output": "string", "started_at": "string", "duration_ms": "number" },
       "note": "定时任务完成一次执行，由 DesktopDelivery 直接广播（不经 EventKind）"
     },
-    "cron.running": { "payload": ["names"], "note": "当前正在执行的任务名列表，开始/结束时推送" },
-    "bg_tasks.update": { "payload": ["tasks"], "note": "后台任务（bash/agent/workflow）状态或进度变更，广播全量快照，前端按 thread_id 过滤；task 含 kind/status/output_file/progress" }
+    "cron.running": { "payload": { "names": "string[]" }, "note": "当前正在执行的任务名列表，开始/结束时推送" },
+    "bg_tasks.update": { "payload": { "tasks": "BgTask[]" }, "note": "后台任务（bash/agent/workflow）状态或进度变更，广播全量快照，前端按 thread_id 过滤；task 含 kind/status/output_file/progress" }
   },
   "events_note": "任意事件 payload 都可能附带 parent_run_id（非空时表示属于某个子代理）",
   "methods": {

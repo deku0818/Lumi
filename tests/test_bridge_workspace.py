@@ -5,7 +5,7 @@ from pathlib import Path
 
 import pytest
 
-from lumi.agents.bridge import AgentBridge
+from lumi.gateway.bridge import AgentBridge
 
 
 async def test_set_workspace_switches_cwd(tmp_path):
@@ -92,7 +92,7 @@ def test_folder_note_add_remove_cancels_out(tmp_path):
 
 
 def test_prepend_reminder_handles_both_content_forms():
-    from lumi.agents.bridge import prepend_reminder
+    from lumi.gateway.bridge import prepend_reminder
 
     assert prepend_reminder("你好", "<system-reminder>x</system-reminder>\n") == (
         "<system-reminder>x</system-reminder>\n你好"

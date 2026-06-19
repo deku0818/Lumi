@@ -7,19 +7,13 @@ from __future__ import annotations
 
 import asyncio
 import json
-import re
 from datetime import datetime
 from typing import Any
 
-from json_repair import repair_json
-from jsonschema import ValidationError, validate
-
 from lumi.agents.core.node_helpers.messages import content_to_str, write_offload_file
-from lumi.utils.llm_chain import structured_output
-from lumi.utils.token_counter import truncate_docs_to_max_tokens
 from lumi.utils.logger import logger
 from lumi.utils.read_config import get_config
-from lumi.utils.token_counter import str_token_counter
+from lumi.utils.token_counter import str_token_counter, truncate_docs_to_max_tokens
 
 # 支持 offset/limit 分段读取的工具——截断时附带分段提示而非卸载
 _TRUNCATE_ONLY_TOOLS: frozenset[str] = frozenset({"read"})
@@ -159,83 +153,6 @@ async def truncate_tool_results(messages_list: list[Any]) -> list[Any]:
             )
 
     return messages_list
-
-
-# ---------------------------------------------------------------------------
-# JSON 提取
-# ---------------------------------------------------------------------------
-
-_CODE_BLOCK_RE = re.compile(r"```(?:json)?\s*([\s\S]*?)```")
-_SCHEMA_STRIP_KEYS = frozenset({"title", "description"})
-
-
-def try_extract_json(
-    content: str, schema: dict[str, Any] | None = None
-) -> dict[str, Any] | None:
-    """尝试从 LLM 输出中提取并修复 JSON。
-
-    1. 优先提取 ````` 代码块中的内容
-    2. 使用 json-repair 修复
-    3. 可选 schema 校验
-    """
-    if not content or not isinstance(content, str):
-        return None
-
-    candidates = _CODE_BLOCK_RE.findall(content) + [content]
-
-    for candidate in candidates:
-        candidate = candidate.strip()
-        if not candidate:
-            continue
-
-        try:
-            repaired = repair_json(candidate, return_objects=True)
-        except (ValueError, TypeError):
-            continue
-
-        if not isinstance(repaired, dict):
-            continue
-
-        if schema:
-            stripped = {k: v for k, v in schema.items() if k not in _SCHEMA_STRIP_KEYS}
-            try:
-                validate(instance=repaired, schema=stripped)
-            except ValidationError:
-                continue
-
-        logger.debug("[TryExtractJSON] 成功从模型输出中提取 JSON")
-        return repaired
-
-    return None
-
-
-async def extract_json_with_llm(
-    content: str,
-    schema: dict[str, Any],
-    model_name: str | None = None,
-) -> dict[str, Any]:
-    """使用 LLM 从内容中提取符合 schema 的 JSON。
-
-    当 ``try_extract_json`` 无法直接提取时作为后备。
-    """
-    template = """请根据以下内容，提取出符合指定 JSON Schema 的结构化数据。
-
-## 内容
-{content}
-
-## 要求
-- 仅输出符合 schema 的 JSON 数据
-- 如果某些字段在内容中找不到，根据类型设置合理的默认值（字符串用空字符串，数组用空数组）
-- 确保输出的 JSON 格式正确"""
-
-    chain = structured_output(
-        template=template,
-        structure=schema,
-        model_name=model_name,
-        system_prompt="你是一个精确的数据提取助手，严格按照 JSON Schema 输出结构化数据。",
-        max_tokens=16000,
-    )
-    return await chain.ainvoke({"content": content})
 
 
 # ---------------------------------------------------------------------------

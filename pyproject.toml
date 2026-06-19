@@ -1,6 +1,6 @@
 [project]
 name = "lumi"
-version = "0.1.0a25"
+version = "0.2.0a1"
 description = "基于 LangGraph 的 AI Agent 框架"
 readme = "README.md"
 requires-python = ">=3.12"
@@ -46,3 +46,15 @@ build-backend = "hatchling.build"
 [tool.pytest.ini_options]
 asyncio_mode = "auto"
 testpaths = ["tests"]
+
+[tool.ruff]
+line-length = 88
+target-version = "py312"
+
+[tool.ruff.lint]
+select = ["E", "F", "I", "W", "UP"]
+# E501(行长) 交给 `ruff format` 统一处理，不作为 lint 错误
+ignore = ["E501"]
+
+[tool.ruff.lint.isort]
+known-first-party = ["lumi"]

@@ -5,9 +5,9 @@ from typing import TYPE_CHECKING, Annotated, Any, Literal, NotRequired, TypedDic
 if TYPE_CHECKING:
     from lumi.agents.permissions.engine import PermissionEngine
 
-from langgraph.graph.message import add_messages
-
 from dataclasses import dataclass, field
+
+from langgraph.graph.message import add_messages
 
 
 class SummaryData(TypedDict, total=False):
@@ -23,13 +23,12 @@ class LumiAgentContext:
     system_prompt: str = field(default="")
     model_name: str = field(default="")
     """模型名；连接（base_url / api_key）由 create_llm 按供应商 profile 解析。"""
-    permission_engine: "PermissionEngine | None" = field(default=None)
+    permission_engine: PermissionEngine | None = field(default=None)
     """PermissionEngine 实例，用于工具权限评估"""
 
 
 class LumiAgentState(TypedDict):
     messages: Annotated[list, add_messages]
-    agent_outcome: dict
     iterations: int
     tool_mode: Literal["default", "accept_edits", "privileged"]
     """工具审批模式:

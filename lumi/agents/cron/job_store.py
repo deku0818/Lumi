@@ -8,14 +8,12 @@ from __future__ import annotations
 
 import asyncio
 import json
-import logging
 import os
-import tempfile
 from pathlib import Path
 
 from lumi.agents.cron.models import Job
-
-logger = logging.getLogger("Lumi")
+from lumi.utils.atomic_io import atomic_write_text
+from lumi.utils.logger import logger
 
 # 持久化格式版本号
 _FORMAT_VERSION = 1
@@ -24,23 +22,6 @@ _FORMAT_VERSION = 1
 def _read_file(path: Path) -> str:
     """同步读取文件内容，供 asyncio.to_thread 调用。"""
     return path.read_text(encoding="utf-8")
-
-
-def _atomic_write(path: Path, content: str) -> None:
-    """同步原子写入：先写临时文件，再 rename，供 asyncio.to_thread 调用。"""
-    path.parent.mkdir(parents=True, exist_ok=True)
-
-    fd, tmp_path_str = tempfile.mkstemp(dir=str(path.parent), suffix=".tmp")
-    try:
-        with os.fdopen(fd, "w", encoding="utf-8") as f:
-            f.write(content)
-        os.replace(tmp_path_str, path)
-    except BaseException:
-        try:
-            os.unlink(tmp_path_str)
-        except OSError:
-            pass
-        raise
 
 
 def _backup_corrupt_file(path: Path) -> None:
@@ -118,7 +99,7 @@ class JobStore:
             "jobs": [job.to_dict() for job in jobs],
         }
         content = json.dumps(data, ensure_ascii=False, indent=2)
-        await asyncio.to_thread(_atomic_write, self._path, content)
+        await asyncio.to_thread(atomic_write_text, self._path, content)
 
     async def upsert(self, job: Job) -> None:
         """创建或更新单个任务。

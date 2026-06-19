@@ -21,17 +21,18 @@ from apscheduler.schedulers.asyncio import AsyncIOScheduler
 from apscheduler.triggers.date import DateTrigger
 from langchain_core.messages import HumanMessage
 from langchain_core.runnables.config import RunnableConfig
-
 from langgraph.checkpoint.base import BaseCheckpointSaver
 
+from lumi.agents.cron.compensation import should_compensate
 from lumi.agents.cron.delivery import DeliveryManager
+from lumi.agents.cron.job_runner import extract_output
 from lumi.agents.cron.job_store import JobStore
 from lumi.agents.cron.models import Job, ScheduleType
+from lumi.agents.cron.retry import backoff_delay, is_transient_error
 from lumi.agents.cron.run_log import RunLog, RunRecord
 from lumi.agents.runtime.bg_tasks import current_thread_id
 from lumi.agents.runtime.checkpoint import delete_thread_checkpoint
 from lumi.utils.constants import (
-    CRON_BACKOFF_INTERVALS,
     MAX_CRON_RETRIES,
     MAX_CRON_RUN_THREADS,
 )
@@ -39,29 +40,8 @@ from lumi.utils.logger import logger
 from lumi.utils.read_config import get_config
 from lumi.utils.thread_id import CRON_THREAD_PREFIX, generate_thread_id
 
-
-def _is_transient_error(exc: BaseException) -> bool:
-    """判断异常是否为瞬态错误，瞬态错误可触发重试。
-
-    瞬态错误包括：
-    - asyncio.TimeoutError（网络超时）
-    - httpx.HTTPStatusError 且状态码为 429 或 5xx
-    - ConnectionError、OSError（网络连接问题）
-    """
-    if isinstance(exc, asyncio.TimeoutError):
-        return True
-
-    # httpx 可能未安装，延迟检查
-    try:
-        import httpx
-
-        if isinstance(exc, httpx.HTTPStatusError):
-            code = exc.response.status_code
-            return code == 429 or code >= 500
-    except ImportError:
-        pass
-
-    return isinstance(exc, (ConnectionError, OSError))
+# 向后兼容：历史上 ``_is_transient_error`` 定义在本模块，外部（含测试）经此路径导入。
+_is_transient_error = is_transient_error
 
 
 class Scheduler:
@@ -176,35 +156,7 @@ class Scheduler:
     async def _should_compensate(self, job: Job, now: datetime) -> bool:
         """判断任务是否需要补偿执行。"""
         last_run = await asyncio.to_thread(self._run_log.get_last_run_sync, job.id)
-
-        match job.schedule.type:
-            case ScheduleType.AT:
-                run_date = datetime.fromisoformat(job.schedule.value)
-                if run_date >= now:
-                    return False
-                return last_run is None or last_run.status != "success"
-
-            case ScheduleType.INTERVAL:
-                from lumi.agents.cron.models import parse_interval_to_seconds
-
-                interval_secs = parse_interval_to_seconds(job.schedule.value)
-                if last_run is None:
-                    return (now - job.created_at).total_seconds() >= interval_secs
-                expected_next = last_run.started_at + timedelta(seconds=interval_secs)
-                return expected_next < now
-
-            case ScheduleType.CRON:
-                trigger = job.schedule.to_trigger()
-                ref_time = last_run.started_at if last_run else job.created_at
-                next_fire = trigger.get_next_fire_time(None, ref_time)
-                if next_fire is None:
-                    return False
-                # APScheduler 可能返回 aware datetime，统一转为 naive 比较
-                if next_fire.tzinfo is not None:
-                    next_fire = next_fire.replace(tzinfo=None)
-                return next_fire < now
-
-        return False
+        return should_compensate(job, now, last_run)
 
     async def stop(self, grace_period: int = 30) -> None:
         """优雅停止调度器，等待执行中的任务完成。
@@ -471,10 +423,10 @@ class Scheduler:
                 agent.graph.ainvoke(inputs, config=config, context=context),
                 timeout=self._execution_timeout,
             )
-            output = self._extract_output(response)
+            output = extract_output(response)
             return output, "success", "", None, thread_id
 
-        except asyncio.TimeoutError as exc:
+        except TimeoutError as exc:
             logger.warning("任务执行超时: %s [%s]", job.name, job.id)
             return (
                 "",
@@ -489,26 +441,9 @@ class Scheduler:
             logger.exception("任务执行失败: %s [%s]", job.name, job.id)
             return "", "failed", f"{type(exc).__name__}: {exc}", exc, thread_id
 
-    @staticmethod
-    def _extract_output(response: dict) -> str:
-        """从 Agent 响应中提取纯文本输出。"""
-        messages = response.get("messages", [])
-        if not messages:
-            raise ValueError("Agent 响应中无消息")
-        last_msg = messages[-1]
-        raw_content = (
-            last_msg.content if hasattr(last_msg, "content") else str(last_msg)
-        )
-        if isinstance(raw_content, list):
-            return "\n".join(
-                block.get("text", "") if isinstance(block, dict) else str(block)
-                for block in raw_content
-            ).strip()
-        return str(raw_content)
-
     async def _handle_retry(self, job: Job, caught_exc: Exception | None) -> None:
         """根据执行结果决定是否安排退避重试或重置错误计数。"""
-        if caught_exc is not None and _is_transient_error(caught_exc):
+        if caught_exc is not None and is_transient_error(caught_exc):
             if job.consecutive_errors < MAX_CRON_RETRIES:
                 job.consecutive_errors += 1
                 await self._persist_consecutive_errors(job)
@@ -614,8 +549,7 @@ class Scheduler:
 
     def _schedule_retry(self, job: Job) -> None:
         """通过 APScheduler DateTrigger 安排退避重试。"""
-        idx = min(job.consecutive_errors - 1, len(CRON_BACKOFF_INTERVALS) - 1)
-        delay = CRON_BACKOFF_INTERVALS[idx]
+        delay = backoff_delay(job.consecutive_errors)
         run_at = datetime.now() + timedelta(seconds=delay)
         retry_id = f"{job.id}-retry-{job.consecutive_errors}"
 

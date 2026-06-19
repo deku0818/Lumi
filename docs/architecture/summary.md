@@ -8,10 +8,11 @@ Lumi 的 Summary 机制用于在对话历史过长时自动压缩中间消息，
 
 | 组件 | 文件 | 职责 |
 |------|------|------|
-| `SummaryData` | `lumi/agents/core/scheme.py` | 摘要数据结构（`summarized_ids` + `summary_text`） |
-| `summarizer` 节点 | `lumi/agents/core/node.py` | 判断是否触发摘要、调用 LLM 生成摘要 |
-| `preprocess_messages` 节点 | `lumi/agents/core/node.py` | 下一轮对话时执行实际的消息替换 |
-| `summary_injector` | `lumi/agents/core/summary_injector.py` | 将摘要格式化为 `<summary>` 标签并注入用户消息 |
+| `SummaryData` | `lumi/agents/core/state.py` | 摘要数据结构（`summarized_ids` + `summary_text`，`state["summary"]` 的类型） |
+| `summarizer` 节点 | `lumi/agents/core/nodes.py` | 判断是否触发摘要、调用 LLM 生成摘要 |
+| `preprocess_messages` 节点 | `lumi/agents/core/nodes.py` | 下一轮对话时执行实际的消息替换 |
+| `inject_summary_into_message` | `lumi/agents/core/preprocessing/summary.py` | 将摘要格式化为 `<summary>` 标签块并注入用户消息（`format_summary_block` 负责包裹标签） |
+| `inject_skills_into_message` | `lumi/agents/core/preprocessing/skills.py` | 摘要替换后重新注入当前技能列表 |
 
 ## Graph 拓扑
 

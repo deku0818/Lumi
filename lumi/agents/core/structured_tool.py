@@ -24,8 +24,7 @@ import copy
 import json
 import re
 from functools import lru_cache
-from typing import Annotated, Any
-from typing import Literal as TypingLiteral
+from typing import Annotated, Any, Literal
 
 from jsonschema import Draft202012Validator, SchemaError
 from langchain_core.messages import ToolMessage
@@ -167,7 +166,7 @@ def _json_type_to_python(prop_schema: dict[str, Any]) -> Any:
     enum_values = prop_schema.get("enum")
     if enum_values:
         try:
-            return TypingLiteral[tuple(enum_values)]  # type: ignore[valid-type]
+            return Literal[tuple(enum_values)]  # type: ignore[valid-type]
         except Exception:
             return Any
 

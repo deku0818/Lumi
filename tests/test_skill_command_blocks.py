@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from lumi.agents.bridge import build_skill_command_blocks
+from lumi.gateway.bridge import build_skill_command_blocks
 
 
 def test_blocks_without_extra_text():

@@ -8,7 +8,6 @@
 from __future__ import annotations
 
 import asyncio
-import copy
 import json
 import os
 import signal
@@ -17,21 +16,19 @@ import sys
 import time
 from collections.abc import Awaitable, Callable
 from contextlib import AsyncExitStack
-from dataclasses import dataclass, field
+from dataclasses import dataclass
 from functools import wraps
 from typing import Any
-from urllib.parse import parse_qsl, urlencode, urlparse, urlunparse
 
 from langchain_core.tools.structured import StructuredTool
 from langchain_mcp_adapters.client import MultiServerMCPClient
-from langchain_mcp_adapters.tools import load_mcp_tools
-from mcp import ClientSession
-
 from langchain_mcp_adapters.interceptors import (
     MCPToolCallRequest,
     MCPToolCallResult,
 )
+from langchain_mcp_adapters.tools import load_mcp_tools
 from langgraph.prebuilt import ToolRuntime
+from mcp import ClientSession
 
 from lumi.utils.logger import logger
 from lumi.utils.read_config import get_config
@@ -119,34 +116,6 @@ def _load_base_mcp_config() -> dict[str, Any]:
         return {}
 
     return mcp_config
-
-
-# ── URL 工具 ──
-
-
-def _apply_url_params(
-    connection: dict[str, Any], params: dict[str, Any]
-) -> dict[str, Any]:
-    """为 streamable_http 连接动态添加 URL 查询参数。
-
-    非 streamable_http 或缺少 url/params 时原样返回。
-    """
-    if (
-        connection.get("transport") != "streamable_http"
-        or not params
-        or not connection.get("url")
-    ):
-        return connection
-
-    url_parts = urlparse(connection["url"])
-    merged = dict(parse_qsl(url_parts.query))
-    merged.update(params)
-    new_url = urlunparse(url_parts._replace(query=urlencode(merged)))
-
-    updated = connection.copy()
-    updated["url"] = new_url
-    logger.debug(f"[MCP] 动态URL: {new_url}")
-    return updated
 
 
 def _make_quiet_stdio_client(original_stdio_client: Any) -> Any:
@@ -286,27 +255,6 @@ def _kill_child_processes() -> None:
             pass
 
 
-@dataclass(frozen=True)
-class MCPToolInfo:
-    """MCP 工具信息"""
-
-    name: str
-    description: str = ""
-
-
-@dataclass(frozen=True)
-class MCPServerInfo:
-    """MCP 服务器状态信息"""
-
-    name: str
-    status: str
-    command: str
-    args: list[str] = field(default_factory=list)
-    transport: str = ""
-    tools: list[MCPToolInfo] = field(default_factory=list)
-    config_path: str = ""
-
-
 # ── 会话管理 ──
 
 
@@ -383,17 +331,17 @@ class MCPSessionManager:
         interceptors: list[ToolArgsInterceptor] | None,
     ) -> list[StructuredTool]:
         """在 stdio stderr 被静默的上下文中加载所有服务器工具。"""
-        import langchain_mcp_adapters.sessions as _mcp_sessions
+        from langchain_mcp_adapters import sessions
 
-        original = _mcp_sessions.stdio_client
-        _mcp_sessions.stdio_client = _make_quiet_stdio_client(original)
+        original = sessions.stdio_client
+        sessions.stdio_client = _make_quiet_stdio_client(original)
         try:
             tools: list[StructuredTool] = []
             await self._start_persistent_servers(persistent, interceptors, tools)
             await self._start_stateless_servers(stateless, interceptors, tools)
             return tools
         finally:
-            _mcp_sessions.stdio_client = original
+            sessions.stdio_client = original
 
     async def _start_persistent_servers(
         self,
@@ -484,7 +432,7 @@ class MCPSessionManager:
 
         try:
             await asyncio.wait_for(self._exit_stack.aclose(), timeout=3.0)
-        except asyncio.TimeoutError:
+        except TimeoutError:
             logger.warning("[MCP] 关闭持久会话超时（3s），强制跳过")
         except RuntimeError:
             # anyio cancel scope 不允许跨 task 退出，
@@ -499,46 +447,6 @@ class MCPSessionManager:
             self._tool_server_map.clear()
             self._started = False
             logger.info("[MCP] 所有持久会话已关闭")
-
-    def get_server_info(self) -> list[MCPServerInfo]:
-        """获取所有 MCP 服务器的状态信息"""
-        mcp_config = _load_base_mcp_config()
-        config_path = _get_mcp_config_path()
-
-        if not mcp_config:
-            return []
-
-        # 按服务器名分组已加载的工具
-        tools_by_server: dict[str, list[MCPToolInfo]] = {}
-        for tool in self._tools:
-            server = self._tool_server_map.get(tool.name, "")
-            info = MCPToolInfo(name=tool.name, description=tool.description or "")
-            tools_by_server.setdefault(server, []).append(info)
-
-        return [
-            MCPServerInfo(
-                name=name,
-                status=self._resolve_server_status(name, tools_by_server),
-                command=config.get("command", ""),
-                args=config.get("args", []),
-                transport=config.get("transport", ""),
-                tools=tools_by_server.get(name, []),
-                config_path=config_path,
-            )
-            for name, config in mcp_config.items()
-        ]
-
-    def _resolve_server_status(
-        self,
-        server_name: str,
-        tools_by_server: dict[str, list[MCPToolInfo]],
-    ) -> str:
-        """根据会话状态和已加载工具推断服务器连接状态。"""
-        if not self._started:
-            return "not_started"
-        if server_name in self._sessions or server_name in tools_by_server:
-            return "connected"
-        return "failed"
 
 
 # ── 模块级单例 ──
@@ -584,80 +492,3 @@ async def get_mcp_tools(
             return []
 
     return _filter_tools(manager.get_tools(), filter_names)
-
-
-async def get_mcp_tools_by_server(
-    filter_names: list[str] | None = None,
-) -> dict[str, list[StructuredTool]]:
-    """按服务器分组获取MCP工具"""
-    mcp_config = _load_base_mcp_config()
-    if not mcp_config:
-        return {}
-
-    tools_by_server: dict[str, list[StructuredTool]] = {}
-
-    for server_name, server_config in mcp_config.items():
-        try:
-            client = MultiServerMCPClient({server_name: server_config})
-            server_tools = await client.get_tools()
-            filtered = _filter_tools(server_tools, filter_names)
-            if filtered:
-                tools_by_server[server_name] = filtered
-                logger.debug(
-                    f"[MCP] 从服务器 {server_name} 加载了 {len(filtered)} 个工具"
-                )
-        except (KeyboardInterrupt, SystemExit):
-            raise
-        except Exception as e:
-            logger.warning(
-                f"从服务器 {server_name} 加载工具失败: {_format_exception_details(e)}"
-            )
-
-    return tools_by_server
-
-
-async def get_dynamic_mcp_tools(
-    filter_names: list[str] | None = None,
-    mcp_config: dict[str, dict[str, Any]] | None = None,
-    use_interceptors: bool = True,
-) -> list[StructuredTool]:
-    """获取动态配置的MCP工具。
-
-    支持在运行时通过 mcp_config 参数动态修改MCP服务器的URL参数，
-    用于实现多租户场景下的参数隔离。
-    """
-    base_config = _load_base_mcp_config()
-    if not base_config:
-        return []
-
-    final_config = copy.deepcopy(base_config)
-
-    if mcp_config:
-        for server_name, params in mcp_config.items():
-            if server_name not in final_config:
-                logger.warning(
-                    f"[MCP] 动态配置引用了不存在的服务器 '{server_name}'。"
-                    f"可用的服务器: {list(final_config.keys())}"
-                )
-                continue
-            if params:
-                final_config[server_name] = _apply_url_params(
-                    final_config[server_name], params
-                )
-                logger.debug(f"[MCP] 为服务器 {server_name} 应用动态参数: {params}")
-
-    try:
-        interceptors = [ToolArgsInterceptor()] if use_interceptors else None
-        client = MultiServerMCPClient(final_config, tool_interceptors=interceptors)
-        all_tools = await client.get_tools()
-    except (KeyboardInterrupt, SystemExit):
-        raise
-    except Exception as e:
-        logger.error(
-            f"加载动态MCP工具失败: {_format_exception_details(e)}. "
-            f"基础配置服务器: {list(base_config.keys())}, "
-            f"动态参数: {mcp_config}"
-        )
-        return []
-
-    return _filter_tools(all_tools, filter_names)

@@ -126,7 +126,7 @@ def _format_task_status(task_id: str) -> str:
 
 async def _handle_stop(task_id: str) -> str:
     """停止运行中的后台任务（bash/agent/workflow 统一经 cancel_background_task）。"""
-    from lumi.agents.runtime.session import cancel_background_task
+    from lumi.agents.runtime.bg_process import cancel_background_task
 
     entry = get_task_registry().get(task_id)
     if entry is None:

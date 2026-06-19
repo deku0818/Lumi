@@ -7,7 +7,7 @@ import stat
 
 import pytest
 
-from lumi.agents.runtime import provider_store
+from lumi.models import provider_store
 
 
 @pytest.fixture

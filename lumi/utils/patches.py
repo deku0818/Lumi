@@ -31,13 +31,13 @@ def patch_langchain_anthropic_stream_usage():
     影响版本：langchain-anthropic <= 1.3.5
     """
     try:
-        import langchain_anthropic.chat_models as mod
+        from langchain_anthropic import chat_models
     except ImportError:
         logger.debug("[patch] langchain-anthropic 未安装，跳过 stream usage 补丁")
         return
 
     try:
-        _create_usage_metadata = mod._create_usage_metadata
+        _create_usage_metadata = chat_models._create_usage_metadata
     except AttributeError:
         logger.warning(
             "[patch] langchain-anthropic 内部 API 已变更（_create_usage_metadata 缺失），"
@@ -72,7 +72,7 @@ def patch_langchain_anthropic_stream_usage():
                     message_chunk.usage_metadata = input_meta
 
     # >= 1.3.5: 实例方法在 ChatAnthropic 类上
-    chat_cls = getattr(mod, "ChatAnthropic", None)
+    chat_cls = getattr(chat_models, "ChatAnthropic", None)
     if chat_cls and hasattr(chat_cls, "_make_message_chunk_from_anthropic_event"):
         original_method = chat_cls._make_message_chunk_from_anthropic_event
         if getattr(original_method, "_lumi_patched", False):
@@ -104,7 +104,7 @@ def patch_langchain_anthropic_stream_usage():
         return
 
     # <= 1.3.4: 模块级函数
-    original_fn = getattr(mod, "_make_message_chunk_from_anthropic_event", None)
+    original_fn = getattr(chat_models, "_make_message_chunk_from_anthropic_event", None)
     if original_fn is not None:
         if getattr(original_fn, "_lumi_patched", False):
             return  # 已 patch，跳过
@@ -126,7 +126,7 @@ def patch_langchain_anthropic_stream_usage():
             return message_chunk, block_start_event
 
         _patched_fn._lumi_patched = True
-        mod._make_message_chunk_from_anthropic_event = _patched_fn
+        chat_models._make_message_chunk_from_anthropic_event = _patched_fn
         logger.debug(
             "[patch] langchain-anthropic stream usage_metadata 已修复（模块函数）"
         )

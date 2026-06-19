@@ -8,18 +8,14 @@ from __future__ import annotations
 
 import asyncio
 import json
-import logging
-import os
-import tempfile
 from dataclasses import dataclass, replace
 from datetime import datetime
 from pathlib import Path
 from typing import Literal
 
-from lumi.agents.cron.job_store import _atomic_write
+from lumi.utils.atomic_io import atomic_write_text
 from lumi.utils.constants import MAX_RUN_LOG_FILE_SIZE
-
-logger = logging.getLogger("Lumi")
+from lumi.utils.logger import logger
 
 
 @dataclass(frozen=True)
@@ -116,18 +112,7 @@ def _trim_file_sync(path: Path) -> None:
     keep = len(lines) // 2
     kept_lines = lines[-keep:] if keep > 0 else lines[-1:]
 
-    # 原子写入：先写临时文件，再 rename
-    fd, tmp_path_str = tempfile.mkstemp(dir=str(path.parent), suffix=".tmp")
-    try:
-        with os.fdopen(fd, "w", encoding="utf-8") as f:
-            f.writelines(kept_lines)
-        os.replace(tmp_path_str, path)
-    except BaseException:
-        try:
-            os.unlink(tmp_path_str)
-        except OSError:
-            pass
-        raise
+    atomic_write_text(path, "".join(kept_lines))
 
 
 def _read_lines_sync(path: Path) -> list[str]:
@@ -271,7 +256,7 @@ class RunLog:
                 for r in reversed(kept)
             )
             path = _log_path(self._base_dir, job_id)
-            await asyncio.to_thread(_atomic_write, path, content)
+            await asyncio.to_thread(atomic_write_text, path, content)
             return pruned
 
     async def delete_log(self, job_id: str) -> None:

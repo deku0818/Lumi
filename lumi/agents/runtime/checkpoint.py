@@ -13,210 +13,47 @@
 
 from __future__ import annotations
 
-import difflib
 import json
-import os
 import shutil
-import tempfile
 import time
-import urllib.parse
-import uuid
-from dataclasses import dataclass, replace
+from dataclasses import replace
 from pathlib import Path
 from typing import Any
 
+from lumi.agents.runtime.checkpoint_diff import (
+    _compute_diff_stat,
+    _DiffStat,
+    _read_text_safe,
+)
+from lumi.agents.runtime.checkpoint_serde import (
+    _HASH_SHORT_LENGTH,
+    CheckpointInfo,
+    _deserialize_checkpoint,
+    _generate_checkpoint_hash,
+    _safe_filename,
+    _serialize_checkpoint,
+    _serialize_manifest,
+)
 from lumi.agents.runtime.file_tracker import FileChange, FileChangeTracker
+from lumi.utils.atomic_io import atomic_write_json
 from lumi.utils.logger import logger
+
+# 公共 API 稳定性：以下符号历史上从本模块导出，拆分后保持可从此处导入。
+__all__ = [
+    "CheckpointInfo",
+    "FileCheckpointManager",
+    "cleanup_stale_threads",
+    "delete_thread_checkpoint",
+]
 
 # ── 常量 ──
 
-
-_HASH_SHORT_LENGTH = 8
-"""checkpoint hash 短格式长度"""
 
 _LOG_LABEL_LENGTH = 50
 """日志中 label 截断长度"""
 
 _LOG_CHECKPOINT_ID_LENGTH = 16
 """日志中 langgraph checkpoint_id 截断长度"""
-
-_DiffStat = tuple[int, int, int]
-"""(files_changed, insertions, deletions)"""
-
-
-@dataclass(frozen=True)
-class CheckpointInfo:
-    """Checkpoint 摘要信息（用于 UI 展示）"""
-
-    commit_hash: str  # checkpoint hash (full)
-    timestamp: float
-    label: str  # 用户消息摘要
-    langgraph_checkpoint_id: str  # 关联的 LangGraph checkpoint_id
-    langgraph_parent_checkpoint_id: str | None = None
-    # diff 统计（该轮 agent 执行后产生的文件变更）
-    files_changed: int = 0
-    insertions: int = 0
-    deletions: int = 0
-
-    @property
-    def checkpoint_id(self) -> str:
-        """checkpoint hash (short)"""
-        return self.commit_hash[:_HASH_SHORT_LENGTH]
-
-    @property
-    def display_time(self) -> str:
-        """格式化相对时间"""
-        from datetime import datetime, timezone
-
-        now = datetime.now(tz=timezone.utc)
-        ts = datetime.fromtimestamp(self.timestamp, tz=timezone.utc)
-        delta = now - ts
-        total_seconds = int(delta.total_seconds())
-        if total_seconds < 60:
-            return "just now"
-        minutes = total_seconds // 60
-        if minutes < 60:
-            return f"{minutes}m ago"
-        hours = minutes // 60
-        if hours < 24:
-            return f"{hours}h ago"
-        return ts.strftime("%m-%d %H:%M")
-
-
-def _generate_checkpoint_hash() -> str:
-    """生成 checkpoint hash"""
-    return uuid.uuid4().hex
-
-
-def _safe_filename(file_path: str) -> str:
-    """将绝对路径转为安全的文件名（URL encode）"""
-    return urllib.parse.quote(file_path, safe="")
-
-
-# ── 序列化 ──
-
-
-def _serialize_checkpoint(info: CheckpointInfo) -> dict[str, Any]:
-    """将 CheckpointInfo 序列化为可持久化的 dict。"""
-    return {
-        "checkpoint_id": info.checkpoint_id,
-        "commit_hash": info.commit_hash,
-        "timestamp": info.timestamp,
-        "label": info.label,
-        "langgraph_checkpoint_id": info.langgraph_checkpoint_id,
-        "langgraph_parent_checkpoint_id": info.langgraph_parent_checkpoint_id or "",
-    }
-
-
-def _deserialize_checkpoint(d: dict[str, Any]) -> CheckpointInfo:
-    """从 dict 反序列化为 CheckpointInfo。
-
-    Raises:
-        KeyError: 缺少必要字段
-        TypeError: 字段类型不匹配
-    """
-    parent = d.get("langgraph_parent_checkpoint_id", "") or None
-    return CheckpointInfo(
-        commit_hash=d["commit_hash"],
-        timestamp=d["timestamp"],
-        label=d["label"],
-        langgraph_checkpoint_id=d["langgraph_checkpoint_id"],
-        langgraph_parent_checkpoint_id=parent,
-    )
-
-
-def _serialize_manifest(
-    changes: dict[str, FileChange],
-) -> list[dict[str, str]]:
-    """将文件变更构建为 manifest 条目列表。"""
-    manifest: list[dict[str, str]] = []
-    for path, change in changes.items():
-        manifest.append(
-            {
-                "path": path,
-                "change_type": change.change_type,
-                "safe_name": _safe_filename(path),
-            }
-        )
-    return manifest
-
-
-# ── Diff 计算 ──
-
-
-def _line_diff_stat(old: str, new: str) -> tuple[int, int]:
-    """计算两段文本之间的行级 diff 统计。
-
-    Returns:
-        (insertions, deletions)
-    """
-    old_lines = old.splitlines(keepends=True)
-    new_lines = new.splitlines(keepends=True)
-    insertions = 0
-    deletions = 0
-    for tag, i1, i2, j1, j2 in difflib.SequenceMatcher(
-        None, old_lines, new_lines
-    ).get_opcodes():
-        if tag == "replace":
-            deletions += i2 - i1
-            insertions += j2 - j1
-        elif tag == "delete":
-            deletions += i2 - i1
-        elif tag == "insert":
-            insertions += j2 - j1
-    return insertions, deletions
-
-
-def _read_text_safe(path: Path) -> str | None:
-    """安全读取文本文件，失败返回 None。"""
-    try:
-        return path.read_text(encoding="utf-8")
-    except (OSError, UnicodeDecodeError) as e:
-        logger.debug("[FileCheckpoint] 无法读取文件: %s: %s", path, e)
-        return None
-
-
-def _compute_diff_stat(changes: dict[str, FileChange]) -> _DiffStat:
-    """计算变更的 diff 统计（文件数、插入行数、删除行数）。"""
-    files = len(changes)
-    insertions = 0
-    deletions = 0
-    for change in changes.values():
-        if change.change_type == "created":
-            content = _read_text_safe(Path(change.path))
-            if content is not None:
-                insertions += len(content.splitlines())
-        elif change.change_type == "modified" and change.original_content is not None:
-            current = _read_text_safe(Path(change.path))
-            if current is not None:
-                ins, dels = _line_diff_stat(change.original_content, current)
-                insertions += ins
-                deletions += dels
-    return files, insertions, deletions
-
-
-# ── 原子写入 ──
-
-
-def _atomic_write_json(path: Path, data: object, mode: int | None = None) -> None:
-    """原子写入 JSON 文件（先写临时文件再 rename）。
-
-    使用 tempfile + rename 确保写入不会留下半写状态的文件。
-    mode 非 None 时在 rename 前应用文件权限（敏感内容如 api_key 用 0o600）。
-    """
-    content = json.dumps(data, ensure_ascii=False, indent=2)
-    path.parent.mkdir(parents=True, exist_ok=True)
-    tmp_fd, tmp_path = tempfile.mkstemp(dir=str(path.parent), suffix=".tmp")
-    os.close(tmp_fd)
-    tmp = Path(tmp_path)
-    try:
-        tmp.write_text(content, encoding="utf-8")
-        if mode is not None:
-            os.chmod(tmp, mode)
-        tmp.replace(path)
-    except BaseException:
-        tmp.unlink(missing_ok=True)
-        raise
 
 
 class FileCheckpointManager:
@@ -458,7 +295,7 @@ class FileCheckpointManager:
                 (files_dir / entry["safe_name"]).write_text(
                     change.original_content, encoding="utf-8"
                 )
-        _atomic_write_json(cp_dir / "manifest.json", manifest)
+        atomic_write_json(cp_dir / "manifest.json", manifest)
 
     def _load_changes(self, checkpoint_id: str) -> dict[str, FileChange]:
         """从磁盘加载一轮的文件变更。"""
@@ -590,7 +427,7 @@ class FileCheckpointManager:
     def _save_meta(self, meta: list[dict[str, Any]]) -> None:
         """原子写入 meta.json"""
         self._store_dir.mkdir(parents=True, exist_ok=True)
-        _atomic_write_json(self._meta_path, meta)
+        atomic_write_json(self._meta_path, meta)
 
 
 # ── 文件恢复 ──

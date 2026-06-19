@@ -1,16 +1,16 @@
 from pathlib import Path
 
+import aiosqlite
 from langgraph.checkpoint.base import BaseCheckpointSaver
 from langgraph.checkpoint.memory import InMemorySaver
 from langgraph.checkpoint.postgres.aio import AsyncPostgresSaver
 from langgraph.checkpoint.sqlite.aio import AsyncSqliteSaver
 from langgraph.graph import END, START
-
-import aiosqlite
 from psycopg import AsyncConnection
 from psycopg.rows import dict_row
 
 from lumi.agents.core.base_graph import BaseGraph
+from lumi.agents.core.hooks import load_hooks
 from lumi.agents.core.nodes import (
     after_tool_executor,
     call_model,
@@ -22,13 +22,12 @@ from lumi.agents.core.nodes import (
     summarizer,
     tool_executor,
 )
-from lumi.agents.core.hooks import load_hooks
 from lumi.agents.core.state import LumiAgentContext, LumiAgentState
-from lumi.agents.tools import get_tools
 from lumi.agents.permissions.engine import PermissionEngine
+from lumi.agents.tools import get_tools
+from lumi.models import provider_store
 from lumi.utils.config import CheckpointMode, GlobalConfigManager
 from lumi.utils.logger import logger
-from lumi.agents.runtime import provider_store
 from lumi.utils.read_config import get_config
 
 
@@ -40,7 +39,7 @@ class LumiAgent(BaseGraph):
         checkpointer: BaseCheckpointSaver | None = None,
     ):
         """
-        初始化SimpleAgent
+        初始化 LumiAgent
 
         Args:
             checkpointer: checkpointer 实例，用于状态持久化，默认为 None（不使用）

@@ -4,10 +4,10 @@ import pytest
 
 import lumi.agents.core.hooks.config_loader as hooks_config_loader
 import lumi.agents.permissions.workspace as workspace
-import lumi.agents.runtime.session as session
 import lumi.agents.runtime.bg_tasks as task_registry
-from lumi.agents.tools.providers import filesystem
 import lumi.agents.tools.registry as registry
+from lumi.agents.runtime import shell_session
+from lumi.agents.tools.providers import filesystem
 
 
 @pytest.fixture
@@ -22,17 +22,17 @@ def authorized_tmp_dir(tmp_path):
 @pytest.fixture(autouse=True)
 def reset_filesystem_backend():
     """每次测试重置 filesystem backend 单例"""
-    filesystem._backend = None
+    filesystem.backend._backend = None
     yield
-    filesystem._backend = None
+    filesystem.backend._backend = None
 
 
 @pytest.fixture(autouse=True)
 def reset_session_manager():
     """每次测试重置 session manager 单例"""
-    session._session_manager = None
+    shell_session._session_manager = None
     yield
-    session._session_manager = None
+    shell_session._session_manager = None
 
 
 @pytest.fixture(autouse=True)

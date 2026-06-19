@@ -10,14 +10,15 @@ from __future__ import annotations
 
 import copy
 
-from hypothesis import given, settings, strategies as st
+from hypothesis import given, settings
+from hypothesis import strategies as st
 from langchain_core.messages import HumanMessage
 
-from lumi.agents.tools.loader import SkillConfig
 from lumi.agents.core.preprocessing.skills import (
     format_skill_reminder,
     inject_skills_into_message,
 )
+from lumi.agents.tools.loader import SkillConfig
 
 # --- 共用策略定义 ---
 

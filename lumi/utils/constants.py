@@ -68,14 +68,3 @@ MAX_CRON_RUN_THREADS: Final[int] = 50
 
 MAX_NOTIFICATIONS: Final[int] = 100
 """通知历史最大记录数"""
-
-# ── TUI 显示限制 ──
-
-MAX_LIVE_WIDGETS: Final[int] = 80
-"""ChatLog DOM 中保留的最大 widget 数量"""
-
-KEEP_WIDGETS: Final[int] = 50
-"""DOM 压缩后保留的 widget 数量"""
-
-MAX_RESTORE_MESSAGES: Final[int] = 60
-"""恢复历史消息的最大数量"""

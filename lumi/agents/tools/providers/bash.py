@@ -9,8 +9,8 @@ from __future__ import annotations
 from langchain_core.tools import tool
 from pydantic import BaseModel, Field
 
-from lumi.agents.runtime.session import CommandResult, get_session_manager
 from lumi.agents.permissions.workspace import get_authorized_directory
+from lumi.agents.runtime.shell_session import CommandResult, get_shell_session_manager
 from lumi.utils.logger import logger
 
 
@@ -76,7 +76,7 @@ async def bash(
     """
     try:
         working_dir = str(get_authorized_directory())
-        session_mgr = get_session_manager()
+        session_mgr = get_shell_session_manager()
         session = session_mgr.get_session(thread_id="default", working_dir=working_dir)
 
         if run_in_background:

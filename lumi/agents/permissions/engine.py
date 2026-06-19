@@ -10,7 +10,6 @@ from pathlib import Path
 
 from lumi.agents.permissions.boundary import WorkspaceBoundary
 from lumi.agents.permissions.config_loader import ConfigLoader
-from lumi.agents.tools.capability import split_compound_command
 from lumi.agents.permissions.matcher import (
     COMMAND_ARG_KEYS,
     COMMAND_TOOLS,
@@ -28,6 +27,7 @@ from lumi.agents.permissions.workspace import (
     add_authorized_directory,
     set_authorized_directory,
 )
+from lumi.agents.tools.capability import split_compound_command
 from lumi.utils.logger import logger
 
 

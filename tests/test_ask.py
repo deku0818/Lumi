@@ -3,9 +3,9 @@
 from unittest.mock import patch
 
 import pytest
+from langgraph.types import Command
 from pydantic import ValidationError
 
-from langgraph.types import Command
 from lumi.agents.tools.providers.ask import Question, QuestionOption, ask
 
 

@@ -36,11 +36,11 @@
 | 数据模型 | `lumi/agents/cron/models.py` | Schedule、Job 定义与序列化 |
 | 任务存储 | `lumi/agents/cron/job_store.py` | JSON 文件持久化，原子写入 |
 | 执行日志 | `lumi/agents/cron/run_log.py` | JSONL 追加写入，自动裁剪 |
-| 结果投递 | `lumi/agents/cron/delivery.py` | ABC 基类 + TUI/API 实现（Desktop 实现在 `lumi/server/desktop_delivery.py`，wire 信封属 server 层） |
+| 结果投递 | `lumi/agents/cron/delivery.py` | ABC 基类 + TUI/API 实现（Desktop 实现在 `lumi/gateway/desktop_delivery.py`，wire 信封属 gateway 层） |
 | 调度引擎 | `lumi/agents/cron/scheduler.py` | APScheduler 封装，重试逻辑 |
 | 运行时装配 | `lumi/agents/cron/runtime.py` | `setup_cron()` 工厂，TUI 与 desktop serve 共用 |
 | 对话工具 | `lumi/agents/tools/providers/cron.py` | 7 种操作的 LangChain Tool |
-| Desktop RPC | `lumi/server/cron_rpc.py` | WS 管理方法（list/create/update/delete/toggle/run/runs） |
+| Desktop RPC | `lumi/gateway/cron_rpc.py` | WS 管理方法（list/create/update/delete/toggle/run/runs） |
 
 Desktop 端：`lumi serve` 在 lifespan 中经 `setup_cron()` 启动调度器，`DesktopDelivery`
 把任务结果（`cron.result`）与运行状态（`cron.running`）广播给所有活跃 WS 连接；

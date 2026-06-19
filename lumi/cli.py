@@ -8,7 +8,7 @@
 from __future__ import annotations
 
 import sys
-from typing import Annotated, Optional
+from typing import Annotated
 
 import typer
 
@@ -24,11 +24,11 @@ app = typer.Typer(
 def _default(
     ctx: typer.Context,
     prompt: Annotated[
-        Optional[str],
+        str | None,
         typer.Option("-p", "--prompt", help="非交互模式：执行 prompt 后退出"),
     ] = None,
     style: Annotated[
-        Optional[str],
+        str | None,
         typer.Option(
             "-s",
             "--style",
@@ -75,9 +75,9 @@ def serve(
     """启动 desktop WebSocket 服务（供 Electron / web 前端连接）。"""
     import uvicorn
 
-    from lumi.server.ws import app as ws_app
+    from lumi.gateway.channels import ws
 
-    uvicorn.run(ws_app, host=host, port=port)
+    uvicorn.run(ws.app, host=host, port=port)
 
 
 def _run_headless(
@@ -86,7 +86,7 @@ def _run_headless(
     """非交互模式：调用 Agent 输出结果后退出。"""
     import asyncio
 
-    from lumi.agents.bridge import AgentBridge, EventKind
+    from lumi.gateway.bridge import AgentBridge, EventKind
 
     if privileged:
         tool_mode = "privileged"

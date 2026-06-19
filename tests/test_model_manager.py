@@ -4,9 +4,8 @@ from __future__ import annotations
 
 import pytest
 
-from lumi.utils import model_catalog
-from lumi.utils.model_catalog import ModelEntry
-from lumi.utils.model_manager import allowed_levels, detect_protocol, effort_params
+from lumi.models.catalog import ModelEntry
+from lumi.models.manager import allowed_levels, detect_protocol, effort_params
 
 
 def _entry(mid: str, control: str, values: tuple = (), has_toggle: bool = False):
@@ -31,8 +30,8 @@ def catalog(monkeypatch):
         "deepseek-v4-pro": _entry("deepseek-v4-pro", "effort", ("high", "max"), True),
         "qwen3-max": _entry("qwen3-max", "none"),
     }
-    monkeypatch.setattr(model_catalog, "_index", index)
-    monkeypatch.setattr(model_catalog, "_lookup_memo", {})
+    monkeypatch.setattr("lumi.models.catalog._index", index)
+    monkeypatch.setattr("lumi.models.catalog._lookup_memo", {})
 
 
 def test_detect_protocol():

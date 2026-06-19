@@ -4,7 +4,6 @@ import asyncio
 import time
 from pathlib import Path
 
-
 from lumi.agents.runtime.bg_tasks import (
     BackgroundTaskEntry,
     NotificationQueue,
@@ -14,7 +13,6 @@ from lumi.agents.runtime.bg_tasks import (
     format_notification,
     get_task_registry,
 )
-
 
 # ---------------------------------------------------------------------------
 # NotificationQueue

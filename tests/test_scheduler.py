@@ -389,7 +389,7 @@ class TestIsTransientError:
     """_is_transient_error() 瞬态错误判定测试。"""
 
     def test_timeout_error_is_transient(self) -> None:
-        assert _is_transient_error(asyncio.TimeoutError()) is True
+        assert _is_transient_error(TimeoutError()) is True
 
     def test_connection_error_is_transient(self) -> None:
         assert _is_transient_error(ConnectionError("连接失败")) is True

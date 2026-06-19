@@ -8,7 +8,7 @@ from __future__ import annotations
 import re
 from pathlib import Path
 
-from lumi.agents.permissions.models import PermissionRule
+from lumi.agents.permissions.models import PATH_ARG_KEYS, PermissionRule
 from lumi.utils.logger import logger
 
 # 需要通过命令模式匹配的工具
@@ -19,9 +19,6 @@ PATH_TOOLS: frozenset[str] = frozenset({"read", "write", "edit", "glob", "grep"}
 
 # bash 工具中命令参数的可能键名
 COMMAND_ARG_KEYS: tuple[str, ...] = ("command", "cmd")
-
-# 路径工具中路径参数的可能键名（与实际工具定义一致）
-PATH_ARG_KEYS: tuple[str, ...] = ("file_path", "path")
 
 
 class RuleMatcher:

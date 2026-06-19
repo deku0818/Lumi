@@ -2,9 +2,7 @@
 
 from __future__ import annotations
 
-import asyncio
 from abc import ABC, abstractmethod
-from collections.abc import AsyncGenerator
 
 from lumi.agents.cron.run_log import RunRecord
 from lumi.utils.logger import logger
@@ -87,88 +85,3 @@ class DeliveryManager:
             except Exception:
                 logger.warning("关闭投递通道失败: %s", type(ch).__name__, exc_info=True)
         self._channels.clear()
-
-
-class APIDelivery(ResultDelivery):
-    """通过 SSE 推送任务执行结果，无活跃连接时缓存结果。
-
-    维护一个订阅者列表，每个订阅者对应一个 ``asyncio.Queue``。
-    ``deliver`` 时向所有订阅者的 queue 推送消息；若无订阅者，
-    则将结果放入缓存列表，待新订阅者连接后按顺序推送。
-
-    Args:
-        max_buffer: 无订阅者时缓存结果的最大数量，默认 50。
-    """
-
-    _SENTINEL = object()  # 用于通知订阅者关闭的哨兵值
-
-    def __init__(self, max_buffer: int = 50) -> None:
-        self._max_buffer = max_buffer
-        self._buffer: list[dict[str, str | int | None]] = []
-        self._subscribers: list[
-            asyncio.Queue[dict[str, str | int | None] | object]
-        ] = []
-
-    async def deliver(self, record: RunRecord, text: str) -> None:
-        """将任务执行结果投递给所有订阅者，无订阅者时缓存。"""
-        message: dict[str, str | int | None] = {
-            "job_name": record.job_name,
-            "output": text,
-            "started_at": record.started_at.isoformat(),
-            "duration_ms": record.duration_ms,
-        }
-
-        if not self._subscribers:
-            # 无活跃订阅者，放入缓存
-            if len(self._buffer) >= self._max_buffer:
-                # 缓存已满，丢弃最旧的结果
-                self._buffer.pop(0)
-            self._buffer.append(message)
-            return
-
-        # 向所有订阅者推送
-        for queue in self._subscribers:
-            try:
-                queue.put_nowait(message)
-            except asyncio.QueueFull:
-                logger.warning("SSE 订阅者队列已满，丢弃消息: %s", record.job_name)
-
-    async def subscribe(self) -> AsyncGenerator[dict[str, str | int | None], None]:
-        """创建一个 SSE 订阅，返回异步生成器。
-
-        新订阅者连接后先接收所有缓存结果，然后持续等待新结果。
-        生成器在 ``close()`` 被调用或订阅者断开时终止。
-
-        Yields:
-            包含 ``job_name``、``output``、``started_at``、``duration_ms`` 的字典。
-        """
-        queue: asyncio.Queue[dict[str, str | int | None] | object] = asyncio.Queue()
-        self._subscribers.append(queue)
-
-        try:
-            # 先推送缓存中的结果
-            buffered = list(self._buffer)
-            self._buffer.clear()
-            for msg in buffered:
-                yield msg
-
-            # 持续等待新结果
-            while True:
-                item = await queue.get()
-                if item is self._SENTINEL:
-                    break
-                yield item  # type: ignore[misc]
-        finally:
-            # 清理：从订阅者列表中移除
-            if queue in self._subscribers:
-                self._subscribers.remove(queue)
-
-    async def close(self) -> None:
-        """关闭所有订阅者连接并清理资源。"""
-        for queue in self._subscribers:
-            try:
-                queue.put_nowait(self._SENTINEL)
-            except asyncio.QueueFull:
-                logger.warning("SSE 订阅者队列已满，无法发送关闭信号")
-        self._subscribers.clear()
-        self._buffer.clear()

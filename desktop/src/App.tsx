@@ -33,7 +33,9 @@ import type {
   SessionMeta,
   SlashCommand,
   SubTool,
+  Usage,
   WireEvent,
+  WireEventPayloads,
 } from './types'
 import { ApprovalDialog } from './components/ApprovalDialog'
 import { ClarifyDialog, ASK_CANCELLED } from './components/ClarifyDialog'
@@ -151,11 +153,19 @@ function finishStreaming(items: Item[]): Item[] {
 
 // 子代理内部事件归属：把 tool.start/complete 与 token 用量写进 runId 匹配的 agent 卡片。
 // 找不到父卡片（嵌套子代理等）则返回 null，由调用方丢弃。
+// 子事件 payload：tool.start / tool.complete / message.complete 三者的字段并集（按访问取并、全可选），
+// 由 type 在运行时区分分支，故类型层不需判别——保留宽松形状即可覆盖三种。
+type ChildEventPayload = Partial<
+  WireEventPayloads['tool.start'] &
+    WireEventPayloads['tool.complete'] &
+    WireEventPayloads['message.complete']
+>
+
 function applyChildEvent(
   s: SessionState,
   parentRun: string,
   type: string,
-  payload: any,
+  payload: ChildEventPayload,
 ): SessionState | null {
   // 从尾部反向找：agent 卡片几乎总在对话流末尾，长会话下避免每个子事件全量正扫
   let idx = -1
@@ -222,7 +232,7 @@ const emptySession = (items: Item[] = []): SessionState => ({
 
 // 从 LangChain usage_metadata 提炼上下文环所需快照。input_tokens 含缓存命中部分，
 // 直接作为「当前上下文占用」；缺字段（如非流式补发不带 input_tokens）返回 undefined。
-const ctxFromUsage = (u: any): CtxUsage | undefined => {
+const ctxFromUsage = (u: Usage | undefined): CtxUsage | undefined => {
   if (!u || typeof u.input_tokens !== 'number') return undefined
   return {
     used: u.input_tokens,

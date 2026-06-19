@@ -1,5 +1,24 @@
 # Changelog
 
+## [0.2.0a1] - 2026-06-19
+
+### Changed
+- **`server/` 整体并入 `lumi/gateway/`，确立传输无关的多 channel 抽象** — 新增 `Channel` 协议（仅需 `send(frame)`）+ `GatewaySession`（吸收原 ws 端点的 run.lock 并发协调 / RPC 分发 / 通知轮询 / 中断状态机）+ `gateway/bootstrap.py` 进程级启动上下文；`ws.py` 退化为薄 `WsChannel`（737→约 90 行）。新增 IM channel（飞书 / 企业微信 / Telegram）只需实现传输并调 `session.handle_frame`，不碰 bridge / session / services / protocol。`BroadcastHub` 从 ws 模块全局抽出，cron.running / bg_tasks.update 去抖广播跨 channel 共享
+- **`bridge.py`（1377 行 god object）拆为 `lumi/gateway/bridge/` 包** — 瘦 `AgentBridge`（流式 + 会话生命周期）+ `ProviderService` / `ApprovalEnricher` / `CheckpointService` / `FolderManager` 四个可组合服务，`lumi.gateway.bridge` 导入路径不变
+- **模型层抽出 `lumi/models/`** — `catalog` / `manager` / `chain` / `provider_store` 迁入，`CACHE_CONTROL` 移到 `models/cache`，彻底消除 `utils → agents` 分层倒置（分层归正为 `utils ← models ← agents ← gateway`）
+- **大文件按职责拆分（行为不变）** — `filesystem/__init__`(1073) → backend / ripgrep / tools；`checkpoint`(700) → checkpoint / serde / diff；`scheduler`(648) 抽出 retry / compensation / job_runner；`session`(660) 拆 `shell_session` + `bg_process` 并重命名（与聊天会话 `lumi/sessions/` 区分，`SessionManager` → `ShellSessionManager`）
+- **`is_use_tool` 权限路由下沉为 `permissions/routing.route_decision` 纯函数** — `nodes` 不再依赖 `tools.capability`，减一条 core→tools 耦合；行为逐字保全（46 个表征测试 + 三视角对抗验证锁定，含「DENY 优先于只读短路」安全语义）
+- **公共原语单一来源** — 新增 `utils/atomic_io`（原子写），checkpoint / provider_store / sessions / projects / model_catalog / cron 全部复用；cron CRUD 双实现统一为 `CronService`；统一 logger 获取、`PATH_ARG_KEYS` 单点
+- **死代码清理 + lint 护栏** — 删 `lumi/api/` HTTP 入口、`APIDelivery`、`general_tools` / `clipboard` 等约 900 行死代码与残留；新增 `[tool.ruff]`（E/F/I/W/UP）+ `ruff format` 全仓护栏；消灭全部 `import as` 别名
+- **前端协议类型化** — `protocol/events.json` payload 升级为带类型对象；`WireEvent` 改判别联合，消除 `desktop/src/App.tsx` 的 `payload: any`
+- **文档与代码对齐** — 重写 `permissions.md`（原文档描述的是已重构掉的旧设计）、修正 11 处架构文档的失效路径；新增 `docs/architecture/refactor-plan.md` 记录整理方案与决策
+
+### Fixed
+- **取消运行中 BASH 后台任务时取消通知双重入队** — `cancel_task` 与 monitor 的 finally 都入队，模型在一次注入里被重复告知任务取消；删去多余的一次
+- **AT 类型 cron 任务带时区 ISO 时间补偿判定崩溃** — `should_compensate` 的 AT 分支未 strip tzinfo，与 naive `now` 比较抛 `TypeError`（与 CRON 分支对齐修复）
+- **glob 工具大目录遍历阻塞事件循环** — 同步全树 `rglob` 移入 `asyncio.to_thread`
+- **grep 工具 `head_limit` / `offset` 对 `files_with_matches` / `count` 模式未生效** — 与工具文档承诺的行为对齐
+
 ## [0.1.0a25] - 2026-06-18
 
 ### Changed

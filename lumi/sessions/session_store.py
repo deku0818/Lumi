@@ -14,7 +14,7 @@ from __future__ import annotations
 
 import asyncio
 from dataclasses import dataclass
-from datetime import datetime, timezone
+from datetime import UTC, datetime
 from typing import TYPE_CHECKING, Any
 
 from lumi.sessions.message_visibility import should_show_human_message
@@ -45,12 +45,12 @@ class SessionSummary:
     @property
     def display_time(self) -> str:
         """格式化显示时间（相对时间）"""
-        now = datetime.now(tz=timezone.utc)
+        now = datetime.now(tz=UTC)
         # created_at 可能是 naive datetime，统一处理
         ts = (
             self.created_at
             if self.created_at.tzinfo
-            else self.created_at.replace(tzinfo=timezone.utc)
+            else self.created_at.replace(tzinfo=UTC)
         )
         delta = now - ts
         total_seconds = int(delta.total_seconds())
@@ -232,4 +232,4 @@ def _parse_created_at(created_at: str | None) -> datetime:
             return datetime.fromisoformat(created_at)
         except (ValueError, TypeError):
             pass
-    return datetime.now(tz=timezone.utc)
+    return datetime.now(tz=UTC)

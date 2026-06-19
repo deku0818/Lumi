@@ -6,9 +6,7 @@
 
 from __future__ import annotations
 
-
 from lumi.agents.core.response import message_transform
-
 
 # ═════════════════════════════════════════════════════════════════════════
 # Anthropic:原样透传

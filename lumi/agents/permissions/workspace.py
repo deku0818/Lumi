@@ -10,7 +10,6 @@ from pathlib import Path
 
 from lumi.utils.logger import logger
 
-
 _authorized_directories: list[Path] = []
 
 

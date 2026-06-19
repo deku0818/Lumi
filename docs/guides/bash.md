@@ -23,7 +23,7 @@
 - `cd somedir` 之后后续命令在新目录下执行
 - 别名（如果在启动 profile 里定义）持续可用
 
-会话在线程结束或 `SessionManager.close_all()` 时关闭。Windows 下使用 `cmd.exe`，bash-only 语法不可用。
+会话在线程结束或 `ShellSessionManager.close_all()` 时关闭。Windows 下使用 `cmd.exe`，bash-only 语法不可用。
 
 ---
 

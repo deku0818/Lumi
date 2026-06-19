@@ -5,17 +5,13 @@
 
 from __future__ import annotations
 
-import asyncio
-from datetime import datetime
 from pathlib import Path
 from typing import Any
 
 from langchain_core.messages import AIMessage, HumanMessage, RemoveMessage, ToolMessage
 
+from lumi.models.cache import CACHE_CONTROL
 from lumi.utils.logger import logger
-from lumi.utils.read_config import get_config
-from lumi.utils.token_counter import str_token_counter
-
 
 # ---------------------------------------------------------------------------
 # 共享工具函数（供 executor_tools 等模块复用，避免循环导入）
@@ -90,14 +86,6 @@ def inject_text_into_message(message: HumanMessage, text: str) -> HumanMessage:
     )
 
 
-def get_last_human_message(messages: list[Any]) -> HumanMessage | None:
-    """从消息列表中获取最后一条 HumanMessage。"""
-    for message in reversed(messages):
-        if isinstance(message, HumanMessage):
-            return message
-    return None
-
-
 # ---------------------------------------------------------------------------
 # 清理不完整工具调用
 # ---------------------------------------------------------------------------
@@ -153,73 +141,8 @@ def cleanup_incomplete_tool_calls(messages: list[Any]) -> list[RemoveMessage]:
 
 
 # ---------------------------------------------------------------------------
-# 工具结果卸载（按配置规则）
-# ---------------------------------------------------------------------------
-
-
-async def offload_tool_result(messages: list[Any]) -> list[ToolMessage]:
-    """将配置中指定工具的大型结果卸载到文件系统。"""
-    offload_config = get_config().config.tool_offload
-    if not offload_config.enabled:
-        return []
-
-    updated: list[ToolMessage] = []
-
-    for msg in messages:
-        if not isinstance(msg, ToolMessage):
-            continue
-
-        tool_name = getattr(msg, "name", None)
-        if tool_name not in offload_config.tools or not msg.content:
-            continue
-
-        content_str = content_to_str(msg.content)
-        token_count = str_token_counter(content_str)
-        if token_count < offload_config.token_threshold:
-            continue
-
-        timestamp = datetime.now().strftime("%H%M%S")
-        file_path = (
-            get_config().config_dir / "offload" / f"{tool_name}_result_{timestamp}.txt"
-        )
-
-        try:
-            await asyncio.to_thread(write_offload_file, file_path, content_str)
-        except OSError as exc:
-            logger.error(
-                "[PreprocessMessages] 写入文件失败: %s: %s. 工具: %s, 路径: %s, "
-                "内容大小: %d tokens. 将使用原始内容（可能导致token超限）",
-                type(exc).__name__,
-                exc,
-                tool_name,
-                file_path,
-                token_count,
-            )
-            continue
-
-        updated.append(
-            ToolMessage(
-                content=f"执行结果已保存到:{file_path}",
-                tool_call_id=msg.tool_call_id,
-                name=msg.name,
-                id=msg.id,
-            )
-        )
-        logger.info(
-            "[PreprocessMessages] %s 结果已卸载到 %s (原始 %d tokens)",
-            tool_name,
-            file_path,
-            token_count,
-        )
-
-    return updated
-
-
-# ---------------------------------------------------------------------------
 # Anthropic prompt 缓存
 # ---------------------------------------------------------------------------
-
-CACHE_CONTROL: dict[str, str] = {"type": "ephemeral", "ttl": "5m"}
 
 
 def _add_cache_control(

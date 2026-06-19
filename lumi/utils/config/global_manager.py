@@ -7,9 +7,9 @@
 from __future__ import annotations
 
 import json
-import os
 from pathlib import Path
 
+from lumi.utils.atomic_io import atomic_write_text
 from lumi.utils.logger import logger
 
 from .global_models import GlobalConfig
@@ -62,28 +62,15 @@ class GlobalConfigManager:
 
     @staticmethod
     def save(config: GlobalConfig) -> None:
-        """原子写入全局配置到 ~/.lumi/lumi.json。
-
-        先写入临时文件再用 os.replace() 原子替换，
-        写入失败时清理临时文件并抛出异常，原文件不受影响。
+        """原子写入全局配置到 ~/.lumi/lumi.json（复用 utils.atomic_io 单一原子写实现）。
 
         Args:
             config: 要保存的全局配置实例。
 
         Raises:
-            Exception: 写入或替换失败时抛出原始异常。
+            OSError: 写入或替换失败时抛出。
         """
-        GlobalConfigManager._ensure_dir()
-        tmp_path = GLOBAL_CONFIG_FILE.with_suffix(".json.tmp")
-        try:
-            tmp_path.write_text(
-                config.model_dump_json(indent=2),
-                encoding="utf-8",
-            )
-            os.replace(tmp_path, GLOBAL_CONFIG_FILE)
-        except Exception:
-            tmp_path.unlink(missing_ok=True)
-            raise
+        atomic_write_text(GLOBAL_CONFIG_FILE, config.model_dump_json(indent=2))
 
     @staticmethod
     def _ensure_dir() -> None:

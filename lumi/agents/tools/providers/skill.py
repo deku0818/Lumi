@@ -19,7 +19,6 @@ from lumi.agents.tools.loader import SkillConfig, _parse_md_file, load_skills
 from lumi.utils.logger import logger
 from lumi.utils.read_config import get_config
 
-
 # ============================================================================
 # Skill Command Executor
 # ============================================================================
@@ -73,7 +72,7 @@ class SkillCommandExecutor:
             stdout_bytes, stderr_bytes = await asyncio.wait_for(
                 proc.communicate(), timeout=self.timeout
             )
-        except asyncio.TimeoutError:
+        except TimeoutError:
             logger.warning("技能命令执行超时: %s", command)
             try:
                 proc.kill()  # type: ignore[possibly-undefined]

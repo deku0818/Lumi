@@ -8,6 +8,9 @@ from __future__ import annotations
 from dataclasses import dataclass, field
 from enum import Enum
 
+# 工具参数中表示文件路径的键名（按优先顺序匹配），供 matcher / boundary 共用
+PATH_ARG_KEYS: tuple[str, ...] = ("file_path", "path")
+
 
 class Permission(Enum):
     """权限类型"""

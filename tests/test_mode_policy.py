@@ -6,16 +6,15 @@
 import pytest
 
 from lumi.agents.permissions.mode_policy import (
-    ModePolicy,
     PLAN_POLICY,
     READONLY_POLICY,
+    ModePolicy,
+    _is_under_lumi_plans,
     check_policy,
     filter_tools_for_mode,
     get_policy,
     register_policy,
-    _is_under_lumi_plans,
 )
-
 
 # ── get_policy / register_policy ──
 

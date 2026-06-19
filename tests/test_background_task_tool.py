@@ -7,16 +7,16 @@ from unittest.mock import AsyncMock
 
 import pytest
 
-from lumi.agents.tools.providers.background_task import (
-    _format_task_list,
-    _format_task_status,
-    _handle_stop,
-)
 from lumi.agents.runtime.bg_tasks import (
     BackgroundTaskEntry,
     TaskKind,
     TaskStatus,
     get_task_registry,
+)
+from lumi.agents.tools.providers.background_task import (
+    _format_task_list,
+    _format_task_status,
+    _handle_stop,
 )
 
 
@@ -188,17 +188,17 @@ async def test_stop_bash_task(registry):
             output_file=Path("/tmp/bg_hhh.txt"),
         )
     )
-    import lumi.agents.runtime.session as session_mod
+    from lumi.agents.runtime import shell_session
 
     mock_mgr = AsyncMock()
     mock_mgr.cancel_task = AsyncMock()
     mock_sm = AsyncMock()
     mock_sm.has_bg_manager = True
     mock_sm.bg_manager = mock_mgr
-    session_mod._session_manager = mock_sm
+    shell_session._session_manager = mock_sm
     try:
         result = await _handle_stop("bg_hhh")
         mock_mgr.cancel_task.assert_awaited_once_with("bg_hhh")
         assert "已停止" in result
     finally:
-        session_mod._session_manager = None
+        shell_session._session_manager = None

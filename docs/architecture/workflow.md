@@ -70,7 +70,7 @@
 `TaskRegistry` 是 bash / agent / workflow 三类后台任务的**单一注册中心**（bash 经
 `BackgroundTaskManager.start_task` 也注册于此）。统一收口：
 
-- **停止**：`session.cancel_background_task(task_id)` 按 kind 内部分派（BASH→bg_manager 杀进程，
+- **停止**：`bg_process.cancel_background_task(task_id)` 按 kind 内部分派（BASH→bg_manager 杀进程，
   AGENT/WORKFLOW→`cancel_agent_task` 取消 asyncio.Task）——ws / TUI / `background_task` 工具共用。
 - **生命周期骨架**：`bg_tasks.run_background_task(task_id, output_file, produce, *, cancel_text)`
   + `make_bg_done_callback` — agent / workflow 后台任务共用收尾（写文件 / 状态 / 通知）。
@@ -87,7 +87,7 @@
 
 ## Trap 速查
 
-- **新增后台 `TaskKind`**：register / `cancel_background_task`（session.py）/ `format_notification`
+- **新增后台 `TaskKind`**：register / `cancel_background_task`（bg_process.py）/ `format_notification`
   三处会处理 kind；停止逻辑已收口到 `cancel_background_task`，新增 kind 只改它一处。
 - **威胁模型**：受限 `__builtins__` 只防误触不防对抗（脚本在主进程 `exec`，可经 dunder 遍历逃逸）。
   脚本由受信主 agent 生成（与 bash 工具同信任级），**绝不可喂不可信脚本**；真正隔离边界是子代理工具的权限引擎。

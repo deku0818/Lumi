@@ -4,7 +4,7 @@ import json
 from datetime import datetime
 from pathlib import Path
 
-from lumi.agents.cron.job_store import JobStore, _FORMAT_VERSION
+from lumi.agents.cron.job_store import _FORMAT_VERSION, JobStore
 from lumi.agents.cron.models import Job, Schedule, ScheduleType
 
 

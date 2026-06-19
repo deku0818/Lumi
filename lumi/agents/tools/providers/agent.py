@@ -12,8 +12,6 @@ from langchain_core.messages import HumanMessage
 from langchain_core.tools import tool
 from langgraph.prebuilt.tool_node import ToolRuntime
 
-from lumi.agents.tools.loader import AgentConfig, load_agents
-from lumi.agents.tools.registry import get_tool_registry
 from lumi.agents.runtime.bg_tasks import (
     BackgroundTaskEntry,
     TaskKind,
@@ -22,6 +20,8 @@ from lumi.agents.runtime.bg_tasks import (
     make_bg_done_callback,
     run_background_task,
 )
+from lumi.agents.tools.loader import AgentConfig, load_agents
+from lumi.agents.tools.registry import get_tool_registry
 from lumi.utils.logger import logger
 
 _BG_TASKS_DIR = ".lumi/bg_tasks"
@@ -119,8 +119,8 @@ async def agent(
 ) -> str:
     """Agent工具 - 委托给 LumiAgent 执行"""
     # Lazy import 避免循环依赖
-    from lumi.agents.core.response import extract_ainvoke_content
     from lumi.agents.core.graph import create_agent
+    from lumi.agents.core.response import extract_ainvoke_content
 
     matched_configs = load_agents(name=name)
     if not matched_configs:

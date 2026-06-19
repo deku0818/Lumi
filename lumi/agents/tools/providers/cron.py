@@ -13,9 +13,10 @@ from langchain_core.tools import tool
 from pydantic import BaseModel, Field
 
 from lumi.agents.cron.job_store import JobStore
-from lumi.agents.cron.models import Job, Schedule, ScheduleType
+from lumi.agents.cron.models import ScheduleType
 from lumi.agents.cron.run_log import RunLog
 from lumi.agents.cron.scheduler import Scheduler
+from lumi.agents.cron.service import CronService
 from lumi.utils.logger import logger
 
 # ---------------------------------------------------------------------------
@@ -39,6 +40,12 @@ def _require_deps() -> tuple[Scheduler, JobStore, RunLog]:
     if _scheduler is None or _job_store is None or _run_log is None:
         raise RuntimeError("cron 工具尚未初始化，请先调用 init_cron_tool()")
     return _scheduler, _job_store, _run_log
+
+
+def _service() -> CronService:
+    """由注入的运行时依赖构造 CronService。"""
+    scheduler, job_store, run_log = _require_deps()
+    return CronService(scheduler, job_store, run_log)
 
 
 def _require_job_id(job_id: str | None, operation_name: str) -> str:
@@ -83,11 +90,8 @@ class CronInput(BaseModel):
 
 async def _handle_create(name: str, schedule_raw: str, prompt: str) -> str:
     """创建新任务。"""
-    scheduler, job_store, _ = _require_deps()
-    sched = Schedule.parse(schedule_raw)
-    job = Job(name=name, schedule=sched, prompt=prompt)
-    await job_store.upsert(job)
-    scheduler.add_job(job)
+    job = await _service().create(name, schedule_raw, prompt)
+    sched = job.schedule
 
     if sched.type == ScheduleType.AT:
         run_at = datetime.fromisoformat(sched.value)
@@ -100,8 +104,7 @@ async def _handle_create(name: str, schedule_raw: str, prompt: str) -> str:
 
 async def _handle_list() -> str:
     """列出所有任务。"""
-    _, job_store, _ = _require_deps()
-    jobs = await job_store.get_all()
+    jobs = await _service().get_all()
     if not jobs:
         return "当前没有任何定时任务。"
     lines: list[str] = []
@@ -120,69 +123,38 @@ async def _handle_update(
     name: str | None,
 ) -> str:
     """修改任务。"""
-    scheduler, job_store, _ = _require_deps()
-    job = await job_store.get(job_id)
-    if job is None:
-        return f"❌ 任务 {job_id} 不存在"
-
-    schedule_changed = False
-    if schedule_raw is not None:
-        job.schedule = Schedule.parse(schedule_raw)
-        schedule_changed = True
-    if prompt is not None:
-        job.prompt = prompt
-    if name is not None:
-        job.name = name
-
-    await job_store.upsert(job)
-
-    # 调度规则变更时重新注册到 APScheduler
-    if schedule_changed and job.enabled:
-        scheduler.add_job(job)
-
+    job = await _service().update(
+        job_id, name=name, schedule_raw=schedule_raw, prompt=prompt
+    )
     return f"✅ 任务已更新：{job.name}（ID: {job.id}）"
 
 
 async def _handle_delete(job_id: str) -> str:
     """删除任务。"""
-    scheduler, job_store, _ = _require_deps()
-    job = await job_store.get(job_id)
-    if job is None:
-        return f"❌ 任务 {job_id} 不存在"
-
-    await scheduler.delete_job(job_id)
+    job = await _service().delete(job_id)
     return f"✅ 任务已删除：{job.name}（ID: {job_id}）"
 
 
 async def _handle_run(job_id: str) -> str:
     """立即执行一次任务。"""
-    scheduler, _, _ = _require_deps()
-    await scheduler.trigger(job_id)
+    await _service().trigger(job_id)
     return f"✅ 任务 {job_id} 已触发执行（异步），请稍后使用 runs 查看结果"
 
 
 async def _handle_pause(job_id: str) -> str:
     """切换任务启用状态。"""
-    scheduler, job_store, _ = _require_deps()
-    job = await job_store.get(job_id)
-    if job is None:
-        return f"❌ 任务 {job_id} 不存在"
-
-    job.enabled = not job.enabled
-    await job_store.upsert(job)
+    service = _service()
+    job = await service.get_or_raise(job_id)
+    job = await service.set_enabled(job_id, not job.enabled)
 
     if job.enabled:
-        scheduler.add_job(job)
         return f"▶️ 任务已恢复：{job.name}（ID: {job.id}）"
-
-    scheduler.remove_job(job_id)
     return f"⏸️ 任务已暂停：{job.name}（ID: {job.id}）"
 
 
 async def _handle_runs(job_id: str, limit: int) -> str:
     """查看最近执行记录。"""
-    _, _, run_log = _require_deps()
-    records = await run_log.get_recent(job_id, limit=limit)
+    records = await _service().recent_runs(job_id, limit=limit)
     if not records:
         return f"任务 {job_id} 暂无执行记录。"
     lines: list[str] = []
