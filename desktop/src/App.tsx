@@ -1,6 +1,4 @@
 import { memo, useCallback, useEffect, useMemo, useRef, useState } from 'react'
-import ReactMarkdown from 'react-markdown'
-import remarkGfm from 'remark-gfm'
 import {
   SquareTerminal,
   FileText,
@@ -37,6 +35,7 @@ import type {
   WireEvent,
   WireEventPayloads,
 } from './types'
+import { Markdown } from './components/Markdown'
 import { ApprovalDialog } from './components/ApprovalDialog'
 import { ClarifyDialog, ASK_CANCELLED } from './components/ClarifyDialog'
 import { PlanDialog, PLAN_REJECTED } from './components/PlanDialog'
@@ -1706,7 +1705,7 @@ const ItemView = memo(function ItemView({ item }: { item: Exclude<Item, { kind: 
           </div>
         )}
         {item.text && (
-          <div className="selectable bg-surface rounded-3xl rounded-br-lg px-4 py-2.5 max-w-[80%] whitespace-pre-wrap">
+          <div className="selectable bg-surface rounded-3xl rounded-br-lg px-4 py-2.5 max-w-[80%] whitespace-pre-wrap wrap-anywhere">
             {item.text}
           </div>
         )}
@@ -1716,7 +1715,7 @@ const ItemView = memo(function ItemView({ item }: { item: Exclude<Item, { kind: 
   if (item.kind === 'assistant') {
     return (
       <div className="md">
-        <ReactMarkdown remarkPlugins={[remarkGfm]}>{item.text}</ReactMarkdown>
+        <Markdown>{item.text}</Markdown>
       </div>
     )
   }

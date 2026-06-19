@@ -1,6 +1,5 @@
 import { useEffect, useState } from 'react'
-import ReactMarkdown from 'react-markdown'
-import remarkGfm from 'remark-gfm'
+import { Markdown } from './Markdown'
 import {
   File,
   FileText,
@@ -287,7 +286,7 @@ function TextPreview({ url, markdown }: { url: string; markdown: boolean }) {
   if (markdown)
     return (
       <div className="md p-6 max-w-3xl mx-auto">
-        <ReactMarkdown remarkPlugins={[remarkGfm]}>{text}</ReactMarkdown>
+        <Markdown>{text}</Markdown>
       </div>
     )
   return (

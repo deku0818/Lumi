@@ -1,5 +1,17 @@
 # Changelog
 
+## [0.2.0a2] - 2026-06-20
+
+### Added
+- **desktop markdown 代码块语法高亮** — 接入 `rehype-highlight`（highlight.js），新增「暖砂·高对比」双主题配色：`--hl-*` token 变量按 `:root` / `:root.light` 切换，暖金统一色相、注释最弱、关键字/字符串/函数名拉开、亮色过 AA，diff 增删与链接复用语义色 success/error/info。带语言标记的代码块上色，未注册语言降级为纯文本
+- **行内代码 `xx` 暖金字** — `.md code` 文字改用 `color-mix(accent 80% + ink)` 暖金色（亮暗自适应）呼应代码块高亮；`.md pre code` 锁回 ink，保证块内纯文本不吃这层暖金
+
+### Fixed
+- **用户气泡长 URL / 长文本溢出气泡边界** — 气泡补 `wrap-anywhere`（`overflow-wrap: anywhere`），在 `max-w-[80%]` 约束内断行；`.md a` 同步补断行
+
+### Changed
+- **markdown 渲染收口到 `<Markdown>` 组件** — 三处 `ReactMarkdown` 调用（聊天消息 / 计划弹窗 / 文件预览）统一经 `desktop/src/components/Markdown.tsx`，插件配置（GFM + 代码高亮）集中一处，避免多点漂移
+
 ## [0.2.0a1] - 2026-06-19
 
 ### Changed

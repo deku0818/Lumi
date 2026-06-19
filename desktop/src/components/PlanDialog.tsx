@@ -1,7 +1,6 @@
 // ExitPlanMode 交互：展示计划正文（由服务端读文件富化到 plan_content）+ 批准/拒绝。
 // resume：批准发 'approved'，拒绝发 PLAN_REJECTED。
-import ReactMarkdown from 'react-markdown'
-import remarkGfm from 'remark-gfm'
+import { Markdown } from './Markdown'
 import { useI18n } from '../i18n'
 import { basename } from '@/lib/utils'
 import { Button } from '@/components/ui/button'
@@ -34,7 +33,7 @@ export function PlanDialog({
 
         <div className="md flex-1 overflow-auto border border-line rounded-lg p-3.5 bg-canvas/40">
           {data.plan_content ? (
-            <ReactMarkdown remarkPlugins={[remarkGfm]}>{data.plan_content}</ReactMarkdown>
+            <Markdown>{data.plan_content}</Markdown>
           ) : (
             <span className="text-muted-foreground">{t('plan.empty')}</span>
           )}

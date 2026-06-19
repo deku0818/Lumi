@@ -264,11 +264,13 @@ body.resizing-col * {
 .md ul, .md ol { margin: 0.5em 0; padding-left: 1.4em; }
 .md li { margin: 0.2em 0; }
 .md li::marker { color: var(--color-accent-dim); }
-.md a { color: var(--color-info); text-decoration: underline; }
+.md a { color: var(--color-info); text-decoration: underline; overflow-wrap: anywhere; }
 .md code {
   font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
   font-size: 0.9em;
-  background: color-mix(in srgb, var(--color-ink) 10%, transparent);
+  /* 暖金字：淡灰底 + accent 派生暖金文字（呼应代码块高亮，亮暗自适应） */
+  background: color-mix(in srgb, var(--color-ink) 8%, transparent);
+  color: color-mix(in srgb, var(--color-accent) 80%, var(--color-ink));
   padding: 0.1em 0.35em;
   border-radius: 4px;
 }
@@ -282,6 +284,8 @@ body.resizing-col * {
 }
 .md pre code {
   background: transparent;
+  /* 锁回 ink：代码块纯文本不吃行内代码的暖金，仅 hljs-* token 自带色 */
+  color: var(--color-ink);
   padding: 0;
   font-size: 0.86em;
 }
@@ -294,6 +298,38 @@ body.resizing-col * {
 .md table { border-collapse: collapse; margin: 0.6em 0; }
 .md th, .md td { border: 1px solid var(--color-line); padding: 0.3em 0.6em; }
 .md th { background: color-mix(in srgb, var(--color-ink) 5%, transparent); }
+
+/* ── 代码块语法高亮（暖砂·高对比；rehype-highlight 输出 hljs-* class）──
+   token 色随主题切换（暗为默认、:root.light 覆写），底色/边框沿用上方 .md pre。
+   暖金统一色相、注释最弱、关键字/字符串/函数名三类拉开、亮色已过 AA；
+   diff 增删与超链接复用语义色 success/error/info，不另立色值。 */
+:root {
+  --hl-comment: #827d72; --hl-keyword: #e89a2e; --hl-string: #7fc26b; --hl-number: #e8b86d;
+  --hl-function: #f0d97a; --hl-type: #6fc7c0; --hl-builtin: #e58a52; --hl-variable: #d8c8a8;
+  --hl-operator: #b0aa9c; --hl-meta: #c79bd6;
+}
+:root.light {
+  --hl-comment: #7d776a; --hl-keyword: #a8590a; --hl-string: #3f7a2c; --hl-number: #8a5a16;
+  --hl-function: #946a00; --hl-type: #1a6f68; --hl-builtin: #b0521f; --hl-variable: #5c5036;
+  --hl-operator: #5a544a; --hl-meta: #7a45a0;
+}
+.md .hljs-comment, .md .hljs-quote { color: var(--hl-comment); font-style: italic; }
+.md .hljs-keyword, .md .hljs-selector-tag { color: var(--hl-keyword); }
+.md .hljs-string, .md .hljs-regexp, .md .hljs-char.escape_, .md .hljs-meta .hljs-string { color: var(--hl-string); }
+.md .hljs-number { color: var(--hl-number); }
+.md .hljs-title, .md .hljs-title.function_, .md .hljs-section { color: var(--hl-function); }
+.md .hljs-type, .md .hljs-title.class_, .md .hljs-class .hljs-title, .md .hljs-selector-class { color: var(--hl-type); }
+.md .hljs-built_in, .md .hljs-literal, .md .hljs-symbol, .md .hljs-bullet { color: var(--hl-builtin); }
+.md .hljs-variable, .md .hljs-template-variable, .md .hljs-property, .md .hljs-params { color: var(--hl-variable); }
+.md .hljs-operator, .md .hljs-punctuation { color: var(--hl-operator); }
+/* tag/attr 与 keyword 同色（暖砂方案有意如此），不另立变量 */
+.md .hljs-tag, .md .hljs-name, .md .hljs-attr, .md .hljs-attribute, .md .hljs-selector-attr, .md .hljs-selector-pseudo { color: var(--hl-keyword); }
+.md .hljs-meta, .md .hljs-meta .hljs-keyword, .md .hljs-doctag { color: var(--hl-meta); }
+.md .hljs-deletion { color: var(--color-error); }
+.md .hljs-addition { color: var(--color-success); }
+.md .hljs-link { color: var(--color-info); text-decoration: underline; }
+.md .hljs-emphasis { font-style: italic; }
+.md .hljs-strong { font-weight: 600; }
 
 /* ── 状态指示器「光」主题（Lumi = 光明）：光点光晕 + 流光文字 ── */
 @keyframes lumi-breathe {
