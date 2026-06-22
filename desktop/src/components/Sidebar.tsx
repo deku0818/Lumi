@@ -1,4 +1,4 @@
-import { memo, useEffect, useRef, useState } from 'react'
+import { memo, useEffect, useRef, useState, type ReactNode } from 'react'
 import {
   AlertTriangle,
   ChevronRight,
@@ -13,9 +13,13 @@ import {
   Globe,
   Check,
   ChevronsUpDown,
+  Plus,
+  Search,
+  X,
 } from 'lucide-react'
 import type { ConnState } from '../gateway'
 import type { CronJob, SessionMeta } from '../types'
+import { basename, machineColor, machineName } from '@/lib/utils'
 import { useI18n, LANGS } from '../i18n'
 import {
   DropdownMenu,
@@ -35,11 +39,52 @@ const CONN_DOT: Record<ConnState, string> = {
   closed: 'bg-error',
 }
 
-// memo：App 在流式期间每个 token 重渲染，侧栏的 props 全部保持稳定身份
-// （回调 useCallback、activity 内容不变时复用对象），让 400 行侧栏不陪跑。
+type Machine = { id: string; name: string }
+const CAP = 5 // 每个项目分组默认显示的会话数（置顶/进行中不计入，永远显示）
+
+const projName = (dir: string) => (dir ? basename(dir) : '默认')
+
+// 某台机器的会话按项目（workspace_dir）分组；当前项目排最前。
+function projectGroupsFor(sessions: SessionMeta[], backend: string, currentDir: string) {
+  const mine = sessions.filter((s) => (s.backend || 'local') === backend)
+  const map = new Map<string, SessionMeta[]>()
+  for (const s of mine) {
+    const dir = s.workspace_dir || ''
+    const list = map.get(dir)
+    if (list) list.push(s)
+    else map.set(dir, [s])
+  }
+  return [...map.entries()]
+    .map(([dir, list]) => ({ dir, name: projName(dir), sessions: list }))
+    .sort((a, b) => (a.dir === currentDir ? -1 : b.dir === currentDir ? 1 : 0))
+}
+
+// 置顶优先，再按最近活跃（created_at）倒序 —— 「最近」流与筛选结果共用。
+const byRecency = (a: SessionMeta, b: SessionMeta) =>
+  (b.pinned ? 1 : 0) - (a.pinned ? 1 : 0) ||
+  (Date.parse(b.created_at || '') || 0) - (Date.parse(a.created_at || '') || 0)
+
+// 搜索命中高亮（首个匹配段标金）
+function highlight(text: string, q: string): ReactNode {
+  const i = text.toLowerCase().indexOf(q.toLowerCase())
+  if (i < 0) return text
+  return (
+    <>
+      {text.slice(0, i)}
+      <span className="text-primary font-medium">{text.slice(i, i + q.length)}</span>
+      {text.slice(i + q.length)}
+    </>
+  )
+}
+
+// memo：App 在流式期间每个 token 重渲染，侧栏的 props 全部保持稳定身份，让侧栏不陪跑。
 export const Sidebar = memo(function Sidebar({
   width,
   sessions,
+  machines,
+  machineConn,
+  recentLimit,
+  workspaceDir,
   currentThread,
   conn,
   model,
@@ -53,6 +98,7 @@ export const Sidebar = memo(function Sidebar({
   onOpenCronJob,
   onSelect,
   onNew,
+  onNewChat,
   onOpenProjects,
   onOpenScheduled,
   onOpenSettings,
@@ -62,6 +108,10 @@ export const Sidebar = memo(function Sidebar({
 }: {
   width: number
   sessions: SessionMeta[]
+  machines: Machine[]
+  machineConn: Record<string, ConnState>
+  recentLimit: number
+  workspaceDir: string
   currentThread: string
   conn: ConnState
   model: string
@@ -75,6 +125,7 @@ export const Sidebar = memo(function Sidebar({
   onOpenCronJob: (jobId: string) => void
   onSelect: (threadId: string) => void
   onNew: () => void
+  onNewChat: (backend: string) => void
   onOpenProjects: () => void
   onOpenScheduled: () => void
   onOpenSettings: () => void
@@ -83,13 +134,213 @@ export const Sidebar = memo(function Sidebar({
   onDelete: (session: SessionMeta) => void
 }) {
   const { t } = useI18n()
+  const [tab, setTab] = useState<'recent' | 'all'>(
+    () => (localStorage.getItem('lumi-sidebar-tab') as 'recent' | 'all') || 'recent',
+  )
+  const setTabP = (v: 'recent' | 'all') => {
+    localStorage.setItem('lumi-sidebar-tab', v)
+    setTab(v)
+  }
+  const [query, setQuery] = useState('')
+  const [collapsedM, setCollapsedM] = useState<Record<string, boolean>>(() => {
+    try {
+      return JSON.parse(localStorage.getItem('lumi-sidebar-mcol') || '{}')
+    } catch {
+      return {}
+    }
+  })
+  const [expanded, setExpanded] = useState<Record<string, boolean>>({})
+  const toggleM = (id: string) =>
+    setCollapsedM((c) => {
+      const n = { ...c, [id]: !c[id] }
+      localStorage.setItem('lumi-sidebar-mcol', JSON.stringify(n))
+      return n
+    })
+
+  const multi = machines.length > 1
+  const dispName = (s: SessionMeta) => s.title || s.first_message || t('sidebar.untitled')
+  const q = query.trim()
+  const filtering = !!q
+  // 多机时行尾一粒机器色点（仅用颜色标机器，不再写「机器·项目」文字）
+  const dotOf = (s: SessionMeta) => (multi ? machineColor(s.backend || 'local', machines) : undefined)
+
+  const row = (s: SessionMeta, dotColor?: string) => (
+    <SessionRow
+      key={s.thread_id}
+      session={s}
+      active={s.thread_id === currentThread}
+      state={activity[s.thread_id]}
+      name={dispName(s)}
+      dotColor={dotColor}
+      dotName={dotColor ? machineName(s.backend || 'local', machines) : undefined}
+      query={q}
+      onSelect={onSelect}
+      onPin={onPin}
+      onRename={onRename}
+      onDelete={onDelete}
+    />
+  )
+
+  // 全部 · 某项目分组：标题 + 限量会话 + 「显示全部 / 收起」
+  const renderProject = (backend: string, pg: { dir: string; name: string; sessions: SessionMeta[] }) => {
+    const key = `${backend}::${pg.dir}`
+    const keep = new Set<string>()
+    pg.sessions.forEach((s, i) => {
+      if (s.pinned || activity[s.thread_id] || i < CAP) keep.add(s.thread_id)
+    })
+    const showAll = expanded[key]
+    const shown = showAll ? pg.sessions : pg.sessions.filter((s) => keep.has(s.thread_id))
+    const hidden = pg.sessions.length - shown.length
+    return (
+      <div key={key}>
+        <div className="px-3 pt-1.5 pb-0.5 text-[10.5px] uppercase tracking-wide text-muted-foreground/55 truncate">
+          {pg.name}
+        </div>
+        {shown.map((s) => row(s))}
+        {hidden > 0 && (
+          <button
+            onClick={() => setExpanded((e) => ({ ...e, [key]: true }))}
+            className="w-full text-left px-3 py-1 text-[11.5px] text-muted-foreground hover:text-primary transition"
+          >
+            {t('sidebar.showAll', { n: pg.sessions.length })}
+          </button>
+        )}
+        {showAll && pg.sessions.length > CAP && (
+          <button
+            onClick={() => setExpanded((e) => ({ ...e, [key]: false }))}
+            className="w-full text-left px-3 py-1 text-[11.5px] text-muted-foreground hover:text-primary transition"
+          >
+            {t('sidebar.showLess')}
+          </button>
+        )}
+      </div>
+    )
+  }
+
+  // 全部 · 机器段：可折叠头(状态光点 + 名 + ＋) + 项目分组
+  const renderMachine = (m: Machine) => {
+    const collapsed = !!collapsedM[m.id]
+    const color = machineColor(m.id, machines)
+    const cn = machineConn[m.id]
+    const groups = projectGroupsFor(sessions, m.id, workspaceDir)
+    return (
+      <div key={m.id} className={`mt-0.5 ${cn === 'closed' ? 'opacity-60' : ''}`}>
+        <div className="flex items-center gap-1.5 px-2 pt-2 pb-0.5">
+          <button onClick={() => toggleM(m.id)} className="flex flex-1 min-w-0 items-center gap-1.5 text-left">
+            <ChevronRight
+              size={11}
+              className={`shrink-0 text-muted-foreground transition-transform ${collapsed ? '' : 'rotate-90'}`}
+            />
+            <span
+              className={`shrink-0 size-2 rounded-full ${cn === undefined || cn === 'connecting' ? 'animate-pulse' : ''}`}
+              style={
+                cn === 'closed'
+                  ? { border: '1.5px solid var(--color-separator)', opacity: 0.65 }
+                  : { background: color, boxShadow: `0 0 5px ${color}` }
+              }
+              title={cn ?? 'connecting'}
+            />
+            <span className="flex-1 truncate text-xs font-semibold text-ink/75">{m.name}</span>
+          </button>
+          <button
+            onClick={() => onNewChat(m.id)}
+            title={t('sidebar.newChat')}
+            className="shrink-0 grid size-5 place-items-center rounded text-muted-foreground hover:bg-line/30 hover:text-primary transition"
+          >
+            <Plus size={14} />
+          </button>
+        </div>
+        {!collapsed &&
+          (groups.length ? (
+            groups.map((pg) => renderProject(m.id, pg))
+          ) : (
+            <button
+              onClick={() => onNewChat(m.id)}
+              className="w-full text-left px-3 py-1.5 text-xs text-muted-foreground/60 hover:text-ink transition"
+            >
+              {t('sidebar.noSessionsNew')}
+            </button>
+          ))}
+      </div>
+    )
+  }
+
+  // 内容区：搜索中 → 扁平结果；否则按 tab（最近=扁平时间流 / 全部=分组树）
+  let content: ReactNode
+  if (filtering) {
+    const res = sessions
+      .filter((s) => dispName(s).toLowerCase().includes(q.toLowerCase()))
+      .sort(byRecency)
+    content = res.length ? (
+      <>
+        <div className="px-3 pt-1 pb-1 text-[11px] text-muted-foreground/55">
+          {t('sidebar.results', { n: res.length })}
+        </div>
+        {res.map((s) => row(s, dotOf(s)))}
+      </>
+    ) : (
+      <div className="px-3 py-8 text-center text-xs text-muted-foreground">{t('sidebar.noMatch')}</div>
+    )
+  } else if (tab === 'recent') {
+    const sorted = [...sessions].sort(byRecency)
+    const pinned = sorted.filter((s) => s.pinned)
+    const rest = sorted.filter((s) => !s.pinned)
+    content = sorted.length ? (
+      <>
+        {pinned.length > 0 && (
+          <>
+            <SectionLabel>{t('sidebar.pinned')}</SectionLabel>
+            {pinned.map((s) => row(s, dotOf(s)))}
+          </>
+        )}
+        <SectionLabel>{t('sidebar.recent')}</SectionLabel>
+        {rest.slice(0, recentLimit).map((s) => row(s, dotOf(s)))}
+        {rest.length > recentLimit && (
+          <div className="px-3 pt-2 pb-1 text-center text-[11px] text-muted-foreground/55">
+            {t('sidebar.recentCapped', { n: recentLimit })}
+          </div>
+        )}
+      </>
+    ) : (
+      <div className="px-3 py-8 text-center text-xs text-muted-foreground">{t('sidebar.empty')}</div>
+    )
+  } else {
+    const localGroups = projectGroupsFor(sessions, 'local', workspaceDir)
+    content = (
+      <>
+        {cronJobs.length > 0 && (
+          <CollapsibleGroup label={t('sidebar.scheduled')} storageKey="scheduled">
+            {cronJobs.map((job) => (
+              <CronJobRow
+                key={job.id}
+                job={job}
+                active={job.id === activeCronJob}
+                unread={cronUnread[job.id] ?? 0}
+                running={cronRunning.includes(job.name)}
+                dotColor={multi ? machineColor(job.backend || 'local', machines) : undefined}
+                dotName={multi ? machineName(job.backend || 'local', machines) : undefined}
+                onOpen={onOpenCronJob}
+              />
+            ))}
+          </CollapsibleGroup>
+        )}
+        {multi
+          ? machines.map(renderMachine)
+          : localGroups.length
+            ? localGroups.map((pg) => renderProject('local', pg))
+            : (
+                <div className="px-3 py-8 text-center text-xs text-muted-foreground">
+                  {t('sidebar.empty')}
+                </div>
+              )}
+      </>
+    )
+  }
+
   return (
-    <aside
-      style={{ width }}
-      className="shrink-0 bg-canvas border-r border-line/20 flex flex-col"
-    >
+    <aside style={{ width }} className="shrink-0 bg-canvas border-r border-line/20 flex flex-col">
       <div className="h-9 app-drag shrink-0" />
-      <div className="px-3 pb-3">
+      <div className="px-3 pb-2">
         <Button
           variant="ghost"
           onClick={onNew}
@@ -118,39 +369,38 @@ export const Sidebar = memo(function Sidebar({
         </button>
       </div>
 
-      <div className="flex-1 overflow-auto px-2">
-        {/* 定时任务分组：点击进入任务会话视图（最近一次执行的对话 + Runs 侧栏） */}
-        {cronJobs.length > 0 && (
-          <CollapsibleGroup label={t('sidebar.scheduled')} storageKey="scheduled">
-            {cronJobs.map((job) => (
-              <CronJobRow
-                key={job.id}
-                job={job}
-                active={job.id === activeCronJob}
-                unread={cronUnread[job.id] ?? 0}
-                running={cronRunning.includes(job.name)}
-                onOpen={onOpenCronJob}
-              />
-            ))}
-          </CollapsibleGroup>
-        )}
-        {sessions.length > 0 && (
-          <CollapsibleGroup label={t('sidebar.recent')} storageKey="recents">
-            {sessions.map((s) => (
-              <SessionRow
-                key={s.thread_id}
-                session={s}
-                active={s.thread_id === currentThread}
-                state={activity[s.thread_id]}
-                onSelect={onSelect}
-                onPin={onPin}
-                onRename={onRename}
-                onDelete={onDelete}
-              />
-            ))}
-          </CollapsibleGroup>
+      {/* 最近 / 全部 段式 tab */}
+      <div className="mx-2 flex gap-0.5 p-0.5 rounded-lg bg-surface/70">
+        {(['recent', 'all'] as const).map((v) => (
+          <button
+            key={v}
+            onClick={() => setTabP(v)}
+            className={`flex-1 py-1 rounded-md text-xs transition ${
+              tab === v ? 'bg-canvas text-ink font-medium shadow-sm' : 'text-muted-foreground hover:text-ink'
+            }`}
+          >
+            {t(v === 'recent' ? 'sidebar.recent' : 'sidebar.all')}
+          </button>
+        ))}
+      </div>
+
+      {/* 搜索 */}
+      <div className="mx-2 mt-2 flex items-center gap-2 px-2.5 py-1.5 rounded-lg bg-surface/70 border border-line/50 focus-within:border-primary/40 transition">
+        <Search size={14} className="shrink-0 text-muted-foreground" />
+        <input
+          value={query}
+          onChange={(e) => setQuery(e.target.value)}
+          placeholder={t('sidebar.search')}
+          className="flex-1 min-w-0 bg-transparent outline-none text-sm text-ink placeholder:text-muted-foreground/60"
+        />
+        {query && (
+          <button onClick={() => setQuery('')} className="shrink-0 text-muted-foreground hover:text-ink">
+            <X size={13} />
+          </button>
         )}
       </div>
+
+      <div className="mt-2 flex-1 overflow-y-auto overflow-x-hidden px-2 pb-2">{content}</div>
 
       <div className="p-2 border-t border-line/20">
         <AccountMenu conn={conn} model={model} onOpenSettings={onOpenSettings} />
@@ -159,7 +409,12 @@ export const Sidebar = memo(function Sidebar({
   )
 })
 
-// 可折叠分组：标题浅色弱化（与条目区分层级），点击收起/展开，状态持久化
+// 区段标题（置顶 / 最近）：浅色弱化的非折叠分隔标签
+function SectionLabel({ children }: { children: React.ReactNode }) {
+  return <div className="px-3 pt-2.5 pb-1 text-xs text-muted-foreground/60">{children}</div>
+}
+
+// 可折叠分组（定时任务用）：标题浅色弱化，点击收起/展开，状态持久化
 function CollapsibleGroup({
   label,
   storageKey,
@@ -181,7 +436,7 @@ function CollapsibleGroup({
     <div>
       <button
         onClick={toggle}
-        className="group/header w-full flex items-center gap-1 px-3 pt-2 pb-1.5 text-xs text-muted-foreground/60 hover:text-muted-foreground transition"
+        className="group/header w-full flex items-center gap-1.5 px-3 pt-2 pb-1.5 text-xs text-muted-foreground/60 hover:text-muted-foreground transition"
       >
         <span>{label}</span>
         <ChevronRight
@@ -194,18 +449,22 @@ function CollapsibleGroup({
   )
 }
 
-// 定时任务行：失败 ⚠ / 默认 ○ 图标 + 任务名 + 未读角标（或运行中脉冲点）
+// 定时任务行：失败 ⚠ + 任务名 + 未读角标（或运行中脉冲点）
 function CronJobRow({
   job,
   active,
   unread,
   running,
+  dotColor,
+  dotName,
   onOpen,
 }: {
   job: CronJob
   active: boolean
   unread: number
   running: boolean
+  dotColor?: string // 多机时行尾机器色点
+  dotName?: string // 色点的机器名（tooltip）
   onOpen: (jobId: string) => void
 }) {
   const { t } = useI18n()
@@ -216,10 +475,15 @@ function CronJobRow({
         active ? 'bg-surface text-ink' : 'text-ink/80 hover:bg-surface/60 hover:text-ink'
       } ${job.enabled ? '' : 'opacity-55'}`}
     >
-      {job.consecutive_errors > 0 && (
-        <AlertTriangle size={13} className="shrink-0 text-primary" />
-      )}
+      {job.consecutive_errors > 0 && <AlertTriangle size={13} className="shrink-0 text-primary" />}
       <span className="flex-1 min-w-0 truncate text-left">{job.name}</span>
+      {dotColor && !running && unread === 0 && (
+        <span
+          className="shrink-0 size-1.5 rounded-full"
+          style={{ background: dotColor, boxShadow: `0 0 4px ${dotColor}` }}
+          title={dotName}
+        />
+      )}
       {running ? (
         <span
           title={t('sidebar.processing')}
@@ -236,7 +500,7 @@ function CronJobRow({
   )
 }
 
-// 左下角账户入口：向上弹出菜单（设置 / 语言子菜单悬停右侧飞出）。
+// 左下角账户入口：向上弹出菜单（设置 / 语言子菜单）。
 function AccountMenu({
   conn,
   model,
@@ -287,10 +551,15 @@ function AccountMenu({
   )
 }
 
+// 会话行：进行中/待处理光点（行首左侧）+ 置顶 + 名 +（最近/搜索时）机器·项目标 + ⋮ 菜单
 function SessionRow({
   session,
   active,
   state,
+  name,
+  dotColor,
+  dotName,
+  query,
   onSelect,
   onPin,
   onRename,
@@ -299,6 +568,10 @@ function SessionRow({
   session: SessionMeta
   active: boolean
   state?: 'running' | 'attention'
+  name: string
+  dotColor?: string // 多机时行尾机器色点（仅颜色，无文字）
+  dotName?: string // 色点的机器名（tooltip）
+  query?: string
   onSelect: (threadId: string) => void
   onPin: (threadId: string, pinned: boolean) => void
   onRename: (threadId: string, title: string) => void
@@ -306,7 +579,6 @@ function SessionRow({
 }) {
   const { t } = useI18n()
   const [renaming, setRenaming] = useState(false)
-  const name = session.title || session.first_message || t('sidebar.untitled')
 
   if (renaming) {
     return (
@@ -325,24 +597,26 @@ function SessionRow({
       <button
         onClick={() => onSelect(session.thread_id)}
         title={session.first_message}
-        className={`block w-full text-left pl-3 pr-8 py-2 rounded-lg truncate text-sm transition ${
+        className={`flex w-full items-center gap-1.5 pl-2.5 pr-8 py-2 rounded-lg text-sm transition ${
           active ? 'bg-surface text-ink' : 'text-ink/80 hover:bg-surface/60 hover:text-ink'
         }`}
       >
-        {session.pinned && (
-          <Pin size={11} className="inline-block mr-1.5 -mt-0.5 text-primary/70" />
+        {/* 仅「等你处理」保留提醒点（需你操作）；置顶进段不带 📌、进行中不带脉冲点 */}
+        {state === 'attention' && (
+          <span
+            title={t('sidebar.needsYou')}
+            className="shrink-0 size-1.5 rounded-full bg-primary"
+          />
         )}
-        {name}
+        <span className="flex-1 min-w-0 truncate text-left">{query ? highlight(name, query) : name}</span>
+        {dotColor && (
+          <span
+            className="shrink-0 size-1.5 rounded-full transition-opacity group-hover:opacity-0"
+            style={{ background: dotColor, boxShadow: `0 0 4px ${dotColor}` }}
+            title={dotName}
+          />
+        )}
       </button>
-      {/* 活动圆点：处理中=脉冲，等你处理=常亮。悬停时让位给 ⋮ 菜单按钮 */}
-      {state && (
-        <span
-          title={state === 'attention' ? t('sidebar.needsYou') : t('sidebar.processing')}
-          className={`pointer-events-none absolute right-2.5 top-1/2 -translate-y-1/2 size-1.5 rounded-full bg-primary transition-opacity group-hover:opacity-0 ${
-            state === 'running' ? 'animate-pulse' : ''
-          }`}
-        />
-      )}
       <DropdownMenu>
         <DropdownMenuTrigger asChild>
           <button
@@ -372,8 +646,7 @@ function SessionRow({
   )
 }
 
-// 内联重命名输入框：Enter 提交，Escape 取消，失焦提交；单次解析避免重复触发。
-// ProjectsPage 复用。
+// 内联重命名输入框：Enter 提交，Escape 取消，失焦提交；单次解析避免重复触发。ProjectsPage 复用。
 export function RenameInput({
   initial,
   onResolve,
@@ -402,7 +675,6 @@ export function RenameInput({
       value={value}
       onChange={(e) => setValue(e.target.value)}
       onKeyDown={(e) => {
-        // 输入法选字回车不应提交重命名
         if (e.nativeEvent.isComposing) return
         if (e.key === 'Enter') {
           e.preventDefault()

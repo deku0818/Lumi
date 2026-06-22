@@ -21,3 +21,6 @@ docs/claude-code/
 .agents
 .demos/
 docs/1.md
+
+# 官网/文档站（打磨阶段，暂不入仓库）
+site/

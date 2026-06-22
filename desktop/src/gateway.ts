@@ -40,12 +40,19 @@ export class Gateway {
       this.retry = 0
       this.setState('open')
     }
-    ws.onclose = () => {
+    ws.onclose = (ev) => {
       this.setState('closed')
       // 连接断开：在飞的 RPC 不会再有响应，全部 reject 避免调用方永久挂起。
       // 关键如 send_message——否则其 Promise 永不 settle，且新连接不补发 turn.complete，
       // 会话会卡在 running 态、输入框永久禁用。
       this.flushPending(new Error('连接已断开'))
+      // 1008 = 服务端鉴权拒绝（token 无效）：重连也会再被拒，别陷入无限 accept→1008→重连，
+      // 停在 closed 让用户从机器连接灯看出是配置问题。
+      if (ev.code === 1008) {
+        this.closedByUser = true
+        console.warn('[gateway] 鉴权失败 (1008)，停止重连：', this.url)
+        return
+      }
       if (!this.closedByUser) {
         const delay = Math.min(8000, 500 * 2 ** Math.min(this.retry++, 4))
         this.reconnectTimer = setTimeout(() => this.connect(), delay)
@@ -165,6 +172,15 @@ export class Gateway {
     return this.request<{ projects: Project[] }>('rename_project', { path, name })
   }
 
+  // 远程目录浏览器：在该连接所属机器上浏览/建目录
+  listDir(path = ''): Promise<{ path: string; parent: string | null; dirs: string[] }> {
+    return this.request<{ path: string; parent: string | null; dirs: string[] }>('list_dir', { path })
+  }
+
+  makeDir(path: string): Promise<{ ok: boolean; path?: string; error?: string }> {
+    return this.request<{ ok: boolean; path?: string; error?: string }>('make_dir', { path })
+  }
+
   addFolder(path: string): Promise<{ folders: string[] }> {
     return this.request<{ folders: string[] }>('add_folder', { path })
   }
@@ -177,10 +193,11 @@ export class Gateway {
     return this.request<{ sessions: SessionMeta[] }>('list_sessions', { limit: 50 })
   }
 
-  switchSession(threadId: string): Promise<{ thread_id: string }> {
+  // workspace：会话所属项目目录；切入时让后端把进程 cwd 切过去（方案甲跨项目）
+  switchSession(threadId: string, workspace = ''): Promise<{ thread_id: string }> {
     return this.request<{
       thread_id: string
-    }>('switch_session', { thread_id: threadId })
+    }>('switch_session', { thread_id: threadId, workspace })
   }
 
   loadHistory(threadId: string): Promise<{ items: HistoryItem[] }> {

@@ -57,14 +57,62 @@ env:
 
 ### 启动
 
+**桌面应用**（主要交互方式，Electron 前端经 WebSocket 连后端）：
+
 ```bash
-lumi                                    # TUI 交互模式
-lumi -s code                            # 指定提示词风格启动
-lumi -p "你的问题"                       # Headless 模式，输出到 stdout
-lumi --privileged-danger                # 特权模式，跳过所有工具审批
-lumi web-server --port 8000             # 浏览器模式（textual-serve）
-uvicorn lumi.api.app:app --port 8090    # HTTP API（FastAPI + SSE）
+cd desktop
+npm install
+npm run dev          # 起 vite + Electron + 本地后端 sidecar
 ```
+
+**后端单独启动**（供桌面 client 本地或远程连接；分发见下文「分发 / 部署」）：
+
+```bash
+lumi serve --port 8765 --token <可选口令>
+```
+
+**Headless**（脚本 / 一次性执行，输出到 stdout）：
+
+```bash
+lumi -p "你的问题"                 # 跑一个 prompt 后退出
+lumi -s code -p "你的问题"          # 指定提示词风格
+lumi --privileged-danger -p "..."  # 跳过所有工具审批（危险）
+lumi --accept-edits -p "..."       # 自动放行文件编辑，bash 仍审批
+```
+
+## 分发 / 部署
+
+Lumi 分两个产物:**后端 `lumi`**(`lumi serve`,跑在本地或服务器)+ **桌面 client**(Electron,连本地/远程后端)。
+
+### 后端:本地安装(uv tool)
+
+```bash
+uv build                                  # 生成 dist/*.whl
+uv tool install dist/lumi-*.whl           # 安装为全局命令
+lumi serve --port 8765 --token <口令>     # 启动后端，供桌面 client 连接
+```
+
+### 后端:服务器(Docker)
+
+```bash
+docker build -t lumi .
+docker run -p 8765:8765 \
+  -v ~/.lumi:/root/.lumi \                # 模型 key / 配置
+  -v "$PWD":/workspace \                  # agent 操作的目录
+  lumi --token <口令>
+```
+
+公网部署务必前置 Caddy/nginx 终止 TLS(`wss://`)并设置 `--token`,切勿裸暴露明文 `ws`。
+
+### 桌面 client(Electron 安装包)
+
+```bash
+cd desktop
+npm install
+npm run dist        # 产出 release/ 下的 dmg / exe / AppImage
+```
+
+打包后的 app 是**多机 client**:启动时尝试连本地后端(需先 `uv tool install` 装好 `lumi`),并可在「设置 → 连接」添加远程机器(`wss://…/ws` + token);无本地后端时纯连远程亦可。
 
 ## TUI 快捷键
 

@@ -1,4 +1,4 @@
-import { useState } from 'react'
+import { useCallback, useEffect, useState } from 'react'
 import {
   Check,
   Pencil,
@@ -10,7 +10,9 @@ import {
   X,
 } from 'lucide-react'
 import type { ActiveModel, ProviderProfile } from '../types'
+import type { Gateway } from '../gateway'
 import { useI18n } from '../i18n'
+import { MachineTabs } from './MachineTabs'
 import { Tooltip, TooltipContent, TooltipTrigger } from '@/components/ui/tooltip'
 import { Button } from '@/components/ui/button'
 
@@ -41,22 +43,53 @@ const formFrom = (p: ProviderProfile): Form => ({
 //   列表视图：右上角「添加提供商」，下方提供商卡片（模型 chip 可点切换、编辑、删除）。
 //   表单视图：添加/编辑——一套连接 + 逐行模型（每行带「测试」与费用提示）。
 export function ProvidersPanel({
-  profiles,
-  active,
-  onSwitch,
-  onSave,
-  onDelete,
-  onTest,
+  machines,
+  gwFor,
+  onChanged,
 }: {
-  profiles: ProviderProfile[]
-  active: ActiveModel
-  onSwitch: (provider: string, model: string) => void
-  onSave: (draft: { id?: string; name: string; base_url: string; api_key: string; models: string[] }) => void
-  onDelete: (id: string) => void
-  onTest: (baseUrl: string, apiKey: string, model: string) => Promise<TestResult>
+  machines: { id: string; name: string }[]
+  gwFor: (id: string) => Gateway | undefined
+  onChanged: (machine: string) => void
 }) {
   const { t } = useI18n()
+  // 方案甲「先选机器」：每台机器各自持有 providers（后端 providers.json）；按机器读写。
+  const [machine, setMachine] = useState('local')
+  const [profiles, setProfiles] = useState<ProviderProfile[]>([])
+  const [active, setActive] = useState<ActiveModel>({ provider: '', model: '' })
   const [form, setForm] = useState<Form | null>(null) // null = 列表视图
+
+  const reload = useCallback(() => {
+    gwFor(machine)
+      ?.listProviders()
+      .then((r) => {
+        setProfiles(r.profiles ?? [])
+        setActive(r.active ?? { provider: '', model: '' })
+      })
+      .catch(() => {})
+  }, [gwFor, machine])
+
+  useEffect(() => {
+    reload()
+  }, [reload])
+
+  const gw = gwFor(machine)
+  const apply = (r: { profiles?: ProviderProfile[]; active?: ActiveModel }) => {
+    setProfiles(r.profiles ?? [])
+    setActive(r.active ?? { provider: '', model: '' })
+    onChanged(machine)
+  }
+  const onSwitch = (provider: string, model: string) =>
+    gw?.setProvider(provider, model)
+      .then((r) => {
+        setActive(r.active)
+        onChanged(machine)
+      })
+      .catch(() => {})
+  const onSave = (draft: Partial<ProviderProfile>) => gw?.saveProvider(draft).then(apply).catch(() => {})
+  const onDelete = (id: string) => gw?.deleteProvider(id).then(apply).catch(() => {})
+  const onTest = (baseUrl: string, apiKey: string, model: string): Promise<TestResult> =>
+    gw?.testProvider(baseUrl, apiKey, model) ??
+    Promise.resolve({ ok: false, error: t('sidebar.disconnected') })
 
   if (form) {
     return (
@@ -75,6 +108,7 @@ export function ProvidersPanel({
 
   return (
     <div>
+      <MachineTabs machines={machines} value={machine} onChange={setMachine} />
       <div className="flex items-center justify-between mb-4">
         <h3 className="text-base font-medium">{t('providers.title')}</h3>
         <Button variant="outline" size="sm" onClick={() => setForm(emptyForm())}>

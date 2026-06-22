@@ -11,6 +11,7 @@ import {
 } from 'lucide-react'
 import type { Project } from '../types'
 import { useI18n } from '../i18n'
+import { MachineTabs } from './MachineTabs'
 import { RenameInput } from './Sidebar'
 import { timeAgo } from '@/lib/utils'
 import { Button } from '@/components/ui/button'
@@ -28,6 +29,9 @@ type SortKey = 'recent' | 'name'
 export function ProjectsPage({
   projects,
   current,
+  machines,
+  machine,
+  onSelectMachine,
   onOpen,
   onNew,
   onRemove,
@@ -35,6 +39,9 @@ export function ProjectsPage({
 }: {
   projects: Project[]
   current: string
+  machines: { id: string; name: string }[]
+  machine: string
+  onSelectMachine: (id: string) => void
   onOpen: (path: string) => void
   onNew: () => void
   onRemove: (path: string) => void
@@ -82,6 +89,8 @@ export function ProjectsPage({
             {t('projects.new')}
           </Button>
         </div>
+
+        <MachineTabs machines={machines} value={machine} onChange={onSelectMachine} />
 
         <div className="flex items-center gap-2.5 mb-5 rounded-xl bg-surface border border-line/50 px-3.5 py-2.5 text-muted-foreground focus-within:border-primary/40 transition-colors">
           <Search size={14} className="shrink-0" />

@@ -4,6 +4,11 @@ const { spawn } = require('node:child_process')
 const net = require('node:net')
 const fs = require('node:fs')
 const path = require('node:path')
+const crypto = require('node:crypto')
+
+// 本地 sidecar 的访问令牌：每次启动随机生成，经 `lumi serve --token` 注入；
+// 前端连接时在 ?token= 携带。本地与远程公网部署走同一套鉴权，无本地特例。
+const LOCAL_TOKEN = crypto.randomBytes(24).toString('hex')
 
 // 自定义协议：让 renderer 安全引用本地文件（绕过 http origin 下的 file:// 限制），
 // 用于 present_files 预览面板里 <img>/<iframe> 加载图片/PDF/HTML。必须在 app ready 前登记。
@@ -30,6 +35,7 @@ const APP_ICON = path.join(__dirname, '..', 'assets', 'icon.png')
 let serveProc = null
 let wsPort = 0
 let stopping = false
+let sidecarFailed = false // 打包后未装本地后端时为 true：不再重启，前端退化为纯远程 client
 
 // 让 OS 分配一个空闲端口
 function pickPort() {
@@ -44,20 +50,31 @@ function pickPort() {
   })
 }
 
-// dev：用 uv run lumi serve。打包后应替换为内置可移植 Python 运行时（见 nix/desktop 思路）。
+// dev：源码 `uv run lumi serve`（cwd=仓库）。
+// 打包后（方案 X 瘦客户端）：用 PATH 上的 `lumi`（用户经 uv tool install / pip 安装的本地后端）。
+// 找不到 lumi 不算错——本地后端不可用，用户可在「设置→连接」加远程机器。
 function startSidecar(port) {
-  serveProc = spawn('uv', ['run', 'lumi', 'serve', '--port', String(port)], {
-    cwd: PROJECT_ROOT,
-    env: { ...process.env },
-    stdio: ['ignore', 'pipe', 'pipe'],
-  })
+  const dev = !app.isPackaged
+  const cmd = dev ? 'uv' : 'lumi'
+  const args = dev
+    ? ['run', 'lumi', 'serve', '--port', String(port), '--token', LOCAL_TOKEN]
+    : ['serve', '--port', String(port), '--token', LOCAL_TOKEN]
+  const opts = { env: { ...process.env }, stdio: ['ignore', 'pipe', 'pipe'] }
+  if (dev) opts.cwd = PROJECT_ROOT
+  serveProc = spawn(cmd, args, opts)
   serveProc.stdout.on('data', (d) => process.stdout.write(`[lumi serve] ${d}`))
   serveProc.stderr.on('data', (d) => process.stderr.write(`[lumi serve] ${d}`))
+  serveProc.on('error', (e) => {
+    // 多为 ENOENT：未装本地后端。不崩、不重启，前端连本地会显示离线，用远程即可。
+    console.warn(`[lumi serve] 本地后端启动失败（${e.code || e.message}）；可在设置→连接添加远程机器`)
+    serveProc = null
+    sidecarFailed = true
+  })
   serveProc.on('exit', (code) => {
     console.log(`[lumi serve] 退出，code=${code}`)
     serveProc = null
-    // 非主动停止（崩溃/被外部杀）时同端口自愈重启，renderer 的重连逻辑会自动连上
-    if (!stopping) {
+    // 非主动停止（崩溃/被外部杀）时同端口自愈重启；但 spawn 失败（未装）不重启
+    if (!stopping && !sidecarFailed) {
       console.log('[lumi serve] 非主动退出，2s 后重启…')
       setTimeout(() => startSidecar(port), 2000)
     }
@@ -112,8 +129,67 @@ function createWindow() {
   }
 }
 
-// renderer 经 preload 调用，拿到 sidecar 的 WS 地址（带重连，无需等就绪）
-ipcMain.handle('lumi:connection', () => ({ wsUrl: `ws://127.0.0.1:${wsPort}/ws` }))
+// ── 多机后端注册表（~/Library/.../userData/backends.json）──
+// 形状：{ active: 'local' | <remoteId>, remotes: [{id, name, url, token}] }
+// 本地 sidecar 是隐式后端（id='local'），不入表；远程机器才持久化。
+function backendsFile() {
+  return path.join(app.getPath('userData'), 'backends.json')
+}
+function readBackends() {
+  try {
+    const d = JSON.parse(fs.readFileSync(backendsFile(), 'utf8'))
+    return { active: d.active || 'local', remotes: Array.isArray(d.remotes) ? d.remotes : [] }
+  } catch {
+    return { active: 'local', remotes: [] }
+  }
+}
+function writeBackends(d) {
+  try {
+    fs.writeFileSync(backendsFile(), JSON.stringify(d, null, 2))
+  } catch (e) {
+    console.error('[backends] 写入失败:', e)
+  }
+}
+// 把后端 id 解析为带 token 的 WS 地址。local → 本地 sidecar；远程 → 表里的 url+token。
+function connectionFor(id) {
+  if (id && id !== 'local') {
+    const r = readBackends().remotes.find((x) => x.id === id)
+    if (r) {
+      const sep = r.url.includes('?') ? '&' : '?'
+      return { wsUrl: `${r.url}${sep}token=${encodeURIComponent(r.token || '')}` }
+    }
+  }
+  return { wsUrl: `ws://127.0.0.1:${wsPort}/ws?token=${LOCAL_TOKEN}` }
+}
+
+// renderer 按 backendId 拿对应机器的 WS 地址（带 token）。省略 id 回退到 active（兼容）。
+// 方案甲：前端为每台机器各开连接，不再"切换活动"，故按 id 取而非取单一 active。
+ipcMain.handle('lumi:connection', (_e, id) => connectionFor(id || readBackends().active))
+ipcMain.handle('lumi:backends:list', () => readBackends())
+ipcMain.handle('lumi:backends:save', (_e, b) => {
+  const d = readBackends()
+  if (b.id) {
+    const i = d.remotes.findIndex((x) => x.id === b.id)
+    if (i >= 0) d.remotes[i] = { ...d.remotes[i], ...b }
+  } else {
+    d.remotes.push({ id: crypto.randomBytes(6).toString('hex'), name: b.name, url: b.url, token: b.token || '' })
+  }
+  writeBackends(d)
+  return d
+})
+ipcMain.handle('lumi:backends:remove', (_e, id) => {
+  const d = readBackends()
+  d.remotes = d.remotes.filter((x) => x.id !== id)
+  if (d.active === id) d.active = 'local'
+  writeBackends(d)
+  return d
+})
+ipcMain.handle('lumi:backends:setActive', (_e, id) => {
+  const d = readBackends()
+  d.active = id
+  writeBackends(d)
+  return { active: id }
+})
 
 // present_files 预览：用系统默认应用打开 / 在访达中显示该文件
 ipcMain.handle('lumi:open-path', (_e, p) => shell.openPath(String(p)))

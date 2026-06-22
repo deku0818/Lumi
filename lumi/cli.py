@@ -71,12 +71,16 @@ def _default(
 def serve(
     host: str = typer.Option("127.0.0.1", help="监听地址"),
     port: int = typer.Option(8765, help="监听端口"),
+    token: str = typer.Option(
+        "", help="访问令牌；设置后客户端需在 ?token= 携带（公网部署务必设置）"
+    ),
 ) -> None:
     """启动 desktop WebSocket 服务（供 Electron / web 前端连接）。"""
     import uvicorn
 
     from lumi.gateway.channels import ws
 
+    ws.app.state.token = token
     uvicorn.run(ws.app, host=host, port=port)
 
 

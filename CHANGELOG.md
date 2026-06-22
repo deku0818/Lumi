@@ -1,5 +1,18 @@
 # Changelog
 
+## [0.2.0a3] - 2026-06-22
+
+### Added
+- **多机 / 远程 serve（同一 client 连本地 + N 台远程）** — `lumi serve --token` 鉴权（URL query `?token=`，空 token 放行、非空 hmac 比对，错 token 干净 1008）；桌面端设置→连接管理远程机器（backend 注册表存 userData，本地 sidecar 注入随机 token）；每台机器一条「控制连接」fan-out `list_sessions` / `list_cron_jobs` 合并打机器标，会话列表升级为**机器→项目→会话**树（组头机器色点 + 连接光态，离线置灰）；新对话 / 项目 / 模型 / 定时任务全部 per-机器作用域（顶部「先选机器」）；新增 `list_dir` / `make_dir` RPC 驱动**远程目录浏览器**（在目标机器文件系统上浏览/建目录选项目，取代手填路径）；`switch_session` 接受 `workspace` 切后端进程 cwd（跨项目方案甲），`SessionSummary` 附 `workspace_dir`
+- **分发 / 部署** — 新增 `Dockerfile`（slim + apt 装 `ripgrep` + uv 安装，内置 `style: code` + `agents.checkpoint: sqlite` 默认配置）+ `.dockerignore`；README 增「分发 / 部署」章节（后端 uv tool wheel / Docker，桌面 electron-builder `npm run dist`），并把启动说明从已删除的 TUI 改写为桌面应用 + `lumi serve` + headless
+- **边栏「最近 / 全部」段式 tab** — 最近 = 所有机器会话扁平时间流（置顶优先），默认仅显示最近 N 条（设置可配，默认 20）；全部 = 机器→项目分组树 + 每项目限量「显示全部 / 收起」+ 定时任务组；新增搜索框（命中摊平高亮）
+
+### Changed
+- **`/simplify` 清理（多机前端去重）** — 抽 `MachineTabs` 组件收敛 ProjectsPage / CronPage / ProvidersPanel 三处逐字相同的「先选机器」chip（退化判断下沉组件内）；删 `machineName` 冗余字段，机器显示名改由 `backend + machines` 现算（新增 `machineName()` helper），连带移除失去读者的 `machinesRef` 影子 ref；`RunsRail` / CronPage `boundApi` 改 `useCallback` 稳定引用；`BackendsPanel` 机器色复用 `machineColor` 单一事实源；`projName` 复用 `basename`；删残留死 i18n key
+
+### Fixed
+- **多机重构回归（xhigh code-review 修复）** — 切到失效（被删/改名）项目目录的会话不再卡死（前端 `switchSession` 包裹 + 后端 `set_workspace` 失败降级不中断切会话）；后台任务停/清改走当前会话连接（原误发控制连接致空操作、任务回弹）；某机器瞬时抖动时保留它上一轮的会话 / 定时任务（不整列抹掉闪没），cron 未读仅全机响应才回收；远程会话斜杠命令改走该会话连接（原取本地命令）；错 token 收到 1008 停止无限重连；远程目录浏览器建文件夹失败给出原因（原静默）
+
 ## [0.2.0a2] - 2026-06-20
 
 ### Added

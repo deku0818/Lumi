@@ -1,0 +1,12 @@
+.git
+.venv
+dist
+build
+desktop
+.demos
+.lumi
+**/__pycache__
+*.pyc
+.pytest_cache
+.ruff_cache
+tests

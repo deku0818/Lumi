@@ -45,6 +45,7 @@ GatewaySession（见 session.py）。
 
 from __future__ import annotations
 
+import hmac
 from contextlib import asynccontextmanager
 
 from fastapi import FastAPI, WebSocket, WebSocketDisconnect
@@ -66,6 +67,17 @@ async def lifespan(app: FastAPI):
 app = FastAPI(lifespan=lifespan)
 
 
+def token_ok(configured: str, provided: str | None) -> bool:
+    """鉴权：未配置 token（空串）则放行；配置了则需精确匹配（防时序攻击）。
+
+    token 由 `lumi serve --token` 设到 app.state，客户端经 `?token=` 携带。
+    本地 sidecar 与远程公网部署走同一套，无"本地免鉴权"特例。
+    """
+    if not configured:
+        return True
+    return provided is not None and hmac.compare_digest(configured, provided)
+
+
 class WsChannel:
     """把 fastapi WebSocket 适配为 Channel：send 即 send_json。"""
 
@@ -78,7 +90,12 @@ class WsChannel:
 
 @app.websocket("/ws")
 async def ws_endpoint(ws: WebSocket) -> None:
+    # 先 accept 再校验：accept 前 close 浏览器只见握手失败(1006)，无法区分鉴权/不可达；
+    # accept 后以 1008 关闭，客户端能拿到干净的 close code 来分辨「token 无效」。
     await ws.accept()
+    if not token_ok(getattr(app.state, "token", ""), ws.query_params.get("token")):
+        await ws.close(code=1008)
+        return
     bridge = AgentBridge()
     await bridge.initialize()
     session = GatewaySession(bridge, WsChannel(ws), hub)

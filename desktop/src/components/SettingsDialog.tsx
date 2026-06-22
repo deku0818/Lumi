@@ -1,15 +1,14 @@
-import { SlidersHorizontal, Boxes, Monitor, Sun, Moon, Minus, Plus, type LucideIcon } from 'lucide-react'
-import type { ActiveModel, ProviderProfile } from '../types'
+import { SlidersHorizontal, Boxes, Server, Monitor, Sun, Moon, Minus, Plus, type LucideIcon } from 'lucide-react'
+import type { Gateway } from '../gateway'
 import type { ThemePref } from '../theme'
 import { type FontPref, DEFAULT_SIZE, MIN_SIZE, MAX_SIZE } from '../font'
 import { useI18n } from '../i18n'
 import { ProvidersPanel } from './ProvidersPanel'
+import { BackendsPanel } from './BackendsPanel'
 import { FontPicker } from './FontPicker'
 import { Switch } from '@/components/ui/switch'
 import { Dialog, DialogContent, DialogTitle } from '@/components/ui/dialog'
 import { Tabs, TabsList, TabsTrigger, TabsContent } from '@/components/ui/tabs'
-
-type TestResult = { ok: boolean; error?: string; latency_ms?: number }
 
 // 设置弹窗：左侧导航 + 右侧面板（参考 Claude 桌面设置）。
 // general：外观（主题）+ 语言；models：模型供应商管理（原输入框模型选择器迁移至此）。
@@ -20,12 +19,11 @@ export function SettingsDialog({
   setUiFont,
   notify,
   setNotify,
-  profiles,
-  active,
-  onSwitch,
-  onSave,
-  onDelete,
-  onTest,
+  recentLimit,
+  setRecentLimit,
+  machines,
+  gwFor,
+  onProvidersChanged,
   onClose,
 }: {
   themePref: ThemePref
@@ -34,12 +32,11 @@ export function SettingsDialog({
   setUiFont: (p: FontPref) => void
   notify: boolean
   setNotify: (v: boolean) => void
-  profiles: ProviderProfile[]
-  active: ActiveModel
-  onSwitch: (provider: string, model: string) => void
-  onSave: (draft: { id?: string; name: string; base_url: string; api_key: string; models: string[] }) => void
-  onDelete: (id: string) => void
-  onTest: (baseUrl: string, apiKey: string, model: string) => Promise<TestResult>
+  recentLimit: number
+  setRecentLimit: (n: number) => void
+  machines: { id: string; name: string }[]
+  gwFor: (id: string) => Gateway | undefined
+  onProvidersChanged: (machine: string) => void
   onClose: () => void
 }) {
   const { t } = useI18n()
@@ -69,6 +66,10 @@ export function SettingsDialog({
               <Boxes />
               {t('settings.models')}
             </TabsTrigger>
+            <TabsTrigger value="connections" className={navClass}>
+              <Server />
+              {t('settings.connections')}
+            </TabsTrigger>
           </TabsList>
 
           <TabsContent value="general" className="flex-1 min-w-0 overflow-auto px-6 pb-6 pt-12 mt-0">
@@ -79,17 +80,15 @@ export function SettingsDialog({
               setUiFont={setUiFont}
               notify={notify}
               setNotify={setNotify}
+              recentLimit={recentLimit}
+              setRecentLimit={setRecentLimit}
             />
           </TabsContent>
           <TabsContent value="models" className="flex-1 min-w-0 overflow-auto px-6 pb-6 pt-12 mt-0">
-            <ProvidersPanel
-              profiles={profiles}
-              active={active}
-              onSwitch={onSwitch}
-              onSave={onSave}
-              onDelete={onDelete}
-              onTest={onTest}
-            />
+            <ProvidersPanel machines={machines} gwFor={gwFor} onChanged={onProvidersChanged} />
+          </TabsContent>
+          <TabsContent value="connections" className="flex-1 min-w-0 overflow-auto px-6 pb-6 pt-12 mt-0">
+            <BackendsPanel />
           </TabsContent>
         </Tabs>
       </DialogContent>
@@ -104,6 +103,8 @@ function GeneralPanel({
   setUiFont,
   notify,
   setNotify,
+  recentLimit,
+  setRecentLimit,
 }: {
   themePref: ThemePref
   setThemePref: (p: ThemePref) => void
@@ -111,6 +112,8 @@ function GeneralPanel({
   setUiFont: (p: FontPref) => void
   notify: boolean
   setNotify: (v: boolean) => void
+  recentLimit: number
+  setRecentLimit: (n: number) => void
 }) {
   const { t } = useI18n()
   return (
@@ -132,6 +135,11 @@ function GeneralPanel({
       </Row>
       <Row label={t('settings.fontSize')} hint={t('settings.fontSizeHint')}>
         <SizeStepper value={uiFont.size} onChange={(size) => setUiFont({ ...uiFont, size })} />
+      </Row>
+
+      <h3 className="text-base font-medium mt-7 mb-2">{t('settings.sessions')}</h3>
+      <Row label={t('settings.recentLimit')} hint={t('settings.recentLimitHint')}>
+        <RecentStepper value={recentLimit} onChange={setRecentLimit} />
       </Row>
 
       <h3 className="text-base font-medium mt-7 mb-2">{t('settings.notifications')}</h3>
@@ -185,6 +193,41 @@ function SizeStepper({ value, onChange }: { value: number; onChange: (n: number)
         {value}px
       </button>
       <button className={STEP_BTN} onClick={() => onChange(clampSize(value + 1))} disabled={value >= MAX_SIZE}>
+        <Plus size={14} />
+      </button>
+    </div>
+  )
+}
+
+// 「最近」显示条数步进器：− [n 条] + ，范围 5–100、步进 5；点数字回默认 20。
+const RECENT_MIN = 5
+const RECENT_MAX = 100
+const RECENT_STEP = 5
+const RECENT_DEFAULT = 20
+const clampRecent = (n: number) => Math.min(RECENT_MAX, Math.max(RECENT_MIN, n))
+function RecentStepper({ value, onChange }: { value: number; onChange: (n: number) => void }) {
+  const { t } = useI18n()
+  return (
+    <div className={PILL_WRAP}>
+      <button
+        className={STEP_BTN}
+        onClick={() => onChange(clampRecent(value - RECENT_STEP))}
+        disabled={value <= RECENT_MIN}
+      >
+        <Minus size={14} />
+      </button>
+      <button
+        onClick={() => onChange(RECENT_DEFAULT)}
+        title={String(RECENT_DEFAULT)}
+        className="min-w-12 text-center text-sm tabular-nums text-ink hover:text-primary transition"
+      >
+        {t('settings.recentN', { n: value })}
+      </button>
+      <button
+        className={STEP_BTN}
+        onClick={() => onChange(clampRecent(value + RECENT_STEP))}
+        disabled={value >= RECENT_MAX}
+      >
         <Plus size={14} />
       </button>
     </div>

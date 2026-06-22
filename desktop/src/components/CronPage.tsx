@@ -4,7 +4,7 @@
 //        → 左右两栏「执行记录 | 任务内容」。
 // 数据经 gateway 的 cron RPC 读写；cron.result/cron.running 事件由 App 转为
 // version/runningNames props 驱动刷新，本组件不直接订阅 WS。
-import { useEffect, useState } from 'react'
+import { useCallback, useEffect, useState } from 'react'
 import {
   AlertTriangle,
   ChevronLeft,
@@ -20,6 +20,7 @@ import {
 import type { CronJob, CronRun } from '../types'
 import { useI18n, type Translate } from '../i18n'
 import { ConfirmDialog } from './ConfirmDialog'
+import { MachineTabs } from './MachineTabs'
 import {
   Dialog,
   DialogContent,
@@ -104,45 +105,58 @@ function ScheduleBadge({ job }: { job: CronJob }) {
 
 export function CronPage({
   api,
+  machines,
   jobs,
   runningNames,
   version,
   onOpenRun,
   onRefresh,
 }: {
-  api: () => CronApi | undefined
-  jobs: CronJob[] // 单一数据源：App 持有并下发（侧栏分组共用同一份）
+  api: (backend: string) => CronApi | undefined // 按机器取连接（定时是 per-机器）
+  machines: { id: string; name: string }[]
+  jobs: CronJob[] // App 持有的跨机器合并列表（带 backend 标记）
   runningNames: string[]
   version: number
   onOpenRun: (threadId: string, jobId: string) => void
   onRefresh: () => void
 }) {
   const { t } = useI18n()
+  // 方案甲「先选机器」：定时任务在各自机器的调度器上跑，按机器管理。
+  const [machine, setMachine] = useState('local')
   const [selectedId, setSelectedId] = useState<string | null>(null) // 详情页任务
   const [dialog, setDialog] = useState<{ job: CronJob | null } | null>(null) // 创建/编辑表单
   const [pendingDelete, setPendingDelete] = useState<CronJob | null>(null)
 
+  const gw = api(machine)
+  // 传给子组件：操作落在选中机器。稳定引用——否则每次渲染换新身份会让 useCronRuns 反复重拉。
+  const boundApi = useCallback(() => gw, [gw])
+  const shownJobs = jobs.filter((j) => (j.backend || 'local') === machine)
+  const pickMachine = (m: string) => {
+    setSelectedId(null)
+    setMachine(m)
+  }
+
   const toggle = (job: CronJob, enabled: boolean) => {
-    api()?.toggleCronJob(job.id, enabled).then(onRefresh).catch(onRefresh)
+    gw?.toggleCronJob(job.id, enabled).then(onRefresh).catch(onRefresh)
   }
 
   const runNow = (job: CronJob) => {
-    api()?.runCronJob(job.id).catch(() => {})
+    gw?.runCronJob(job.id).catch(() => {})
   }
 
   const doDelete = (job: CronJob) => {
     setPendingDelete(null)
     if (selectedId === job.id) setSelectedId(null)
-    api()?.deleteCronJob(job.id).then(onRefresh).catch(() => {})
+    gw?.deleteCronJob(job.id).then(onRefresh).catch(() => {})
   }
 
-  const selected = selectedId ? jobs.find((j) => j.id === selectedId) : undefined
+  const selected = selectedId ? shownJobs.find((j) => j.id === selectedId) : undefined
 
   return (
     <div className="flex-1 overflow-auto">
       {selected ? (
         <JobDetail
-          api={api}
+          api={boundApi}
           job={selected}
           running={runningNames.includes(selected.name)}
           version={version}
@@ -166,12 +180,19 @@ export function CronPage({
             </Button>
           </div>
 
+          <MachineTabs
+            machines={machines}
+            value={machine}
+            onChange={pickMachine}
+            className="mt-4 flex flex-wrap gap-2"
+          />
+
           <div className="mt-5 flex items-center gap-2.5 rounded-2xl border border-line/30 bg-surface/60 px-4 py-3 text-sm text-muted-foreground">
             <Info size={15} className="shrink-0 text-info" />
             {t('cron.banner')}
           </div>
 
-          {jobs.length === 0 ? (
+          {shownJobs.length === 0 ? (
             <div className="mt-16 flex flex-col items-center text-center select-none">
               <Clock size={36} className="text-muted-foreground/50" />
               <div className="mt-4 text-ink">{t('cron.empty')}</div>
@@ -179,7 +200,7 @@ export function CronPage({
             </div>
           ) : (
             <div className="mt-5 grid gap-4 grid-cols-[repeat(auto-fill,minmax(230px,1fr))]">
-              {jobs.map((job) => (
+              {shownJobs.map((job) => (
                 <JobCard
                   key={job.id}
                   job={job}
@@ -195,7 +216,7 @@ export function CronPage({
 
       {dialog && (
         <JobFormDialog
-          api={api}
+          api={boundApi}
           job={dialog.job}
           onClose={() => setDialog(null)}
           onSaved={() => {

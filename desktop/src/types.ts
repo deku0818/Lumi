@@ -156,6 +156,9 @@ export interface SessionMeta {
   created_at: string
   message_count: number
   display_time: string
+  workspace_dir: string // 所属项目目录；方案甲按机器→项目分组的 key
+  // 前端 fan-out 合并时打的机器标记（后端不发）；显示名由 backend + machines 现算
+  backend?: string // 所属机器 id（'local' 或远程 id）
 }
 
 // 定时任务（对齐后端 cron_rpc._job_to_wire：Job.to_dict + next_run）
@@ -168,6 +171,8 @@ export interface CronJob {
   created_at: string
   consecutive_errors: number
   next_run: string | null
+  // 前端 fan-out 合并时打的机器标记（后端不发）；显示名由 backend + machines 现算
+  backend?: string
 }
 
 // 单次执行记录（对齐后端 RunRecord.to_dict）
@@ -238,10 +243,20 @@ export interface PresentedFile {
   error?: string
 }
 
+// 远程后端（机器）注册项；本地 sidecar 是隐式后端（id='local'），不入此表。
+export type BackendRemote = { id: string; name: string; url: string; token: string }
+export type BackendsState = { active: string; remotes: BackendRemote[] }
+
 declare global {
   interface Window {
     lumi: {
-      getConnection: () => Promise<{ wsUrl: string }>
+      getConnection: (backendId?: string) => Promise<{ wsUrl: string }>
+      backends?: {
+        list: () => Promise<BackendsState>
+        save: (b: Partial<BackendRemote>) => Promise<BackendsState>
+        remove: (id: string) => Promise<BackendsState>
+        setActive: (id: string) => Promise<{ active: string }>
+      }
       pickDirectory?: () => Promise<string | null>
       getPathForFile?: (file: File) => string
       openPath?: (path: string) => Promise<string>

@@ -35,12 +35,14 @@ class SessionSummary:
         first_message: 首条用户消息摘要
         created_at: 最后 checkpoint 创建时间（UTC）
         message_count: 消息数量
+        workspace_dir: 会话所属项目（工作目录），来自 checkpoint 元数据
     """
 
     thread_id: str
     first_message: str
     created_at: datetime
     message_count: int
+    workspace_dir: str = ""
 
     @property
     def display_time(self) -> str:
@@ -210,6 +212,8 @@ async def list_sessions(
                     # StateSnapshot.created_at 是 ISO 8601 字符串
                     created_at=_parse_created_at(snapshot.created_at),
                     message_count=len(messages),
+                    # checkpoint 元数据里的项目目录；跨项目列表时供前端分组
+                    workspace_dir=(snapshot.metadata or {}).get("workspace_dir", ""),
                 )
             )
             if len(sessions) >= limit:

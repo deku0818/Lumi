@@ -2,7 +2,14 @@
 const { contextBridge, ipcRenderer, webUtils } = require('electron')
 
 contextBridge.exposeInMainWorld('lumi', {
-  getConnection: () => ipcRenderer.invoke('lumi:connection'),
+  getConnection: (backendId) => ipcRenderer.invoke('lumi:connection', backendId),
+  // 多机后端注册表：本地 sidecar 恒在（id=local），远程机器可增删 + 切活动
+  backends: {
+    list: () => ipcRenderer.invoke('lumi:backends:list'),
+    save: (b) => ipcRenderer.invoke('lumi:backends:save', b),
+    remove: (id) => ipcRenderer.invoke('lumi:backends:remove', id),
+    setActive: (id) => ipcRenderer.invoke('lumi:backends:setActive', id),
+  },
   // 原生目录选择器，用于切换工作目录；取消返回 null
   pickDirectory: () => ipcRenderer.invoke('lumi:pick-directory'),
   // present_files 预览：用系统应用打开 / 在访达中显示 / 探测文件是否还在

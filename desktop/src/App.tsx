@@ -49,14 +49,14 @@ import { SettingsDialog } from './components/SettingsDialog'
 import { ModelPicker } from './components/ModelPicker'
 import { ContextMeter, type CtxUsage } from './components/ContextMeter'
 import { ProjectsPage } from './components/ProjectsPage'
-import { NewProjectDialog } from './components/NewProjectDialog'
+import { DirBrowser } from './components/DirBrowser'
 import { FolderMenu } from './components/FolderMenu'
 import { CommandMenu } from './components/CommandMenu'
 import { Composer } from './components/Composer'
 import { toast } from './components/Toast'
 import { isCommandMode, parseCommand, matchCommands } from './slash'
 import { toolDiff, type DiffLine } from './diff'
-import { clip, basename, fmtTokens } from '@/lib/utils'
+import { clip, basename, fmtTokens, machineColor, machineName } from '@/lib/utils'
 import { Button } from '@/components/ui/button'
 import { useTheme } from './theme'
 import { useUiFont } from './font'
@@ -248,7 +248,11 @@ export default function App() {
   // 进程级工作目录 = 当前项目（gateway.ready 下发；切项目对整个 app 生效）
   const [workspaceDir, setWorkspaceDir] = useState('')
   const [projects, setProjects] = useState<Project[]>([])
+  // 项目视图作用的机器（方案甲「先选机器」）+ 该机器当前项目
+  const [projectsMachine, setProjectsMachine] = useState('local')
+  const [projectsCurrent, setProjectsCurrent] = useState('')
   const [showNewProject, setShowNewProject] = useState(false)
+  const [addingFolder, setAddingFolder] = useState(false) // 添加可访问目录的浏览器开关
   const [pendingRemoveProject, setPendingRemoveProject] = useState<Project | null>(null)
   // 各会话临时添加的额外可访问目录（连接级状态的前端镜像）
   const [folderStore, setFolderStore] = useState<Record<string, string[]>>({})
@@ -257,8 +261,15 @@ export default function App() {
   const [cmdSel, setCmdSel] = useState(0)
   const [cmdDismissed, setCmdDismissed] = useState(false)
   const [sessions, setSessions] = useState<SessionMeta[]>([])
+  // 方案甲多机：机器列表（本地恒在 + 远程）与各机控制连接状态
+  const [machines, setMachines] = useState<{ id: string; name: string }[]>([
+    { id: 'local', name: '本地' },
+  ])
+  const [machineConn, setMachineConn] = useState<Record<string, ConnState>>({})
   const [providers, setProviders] = useState<ProviderProfile[]>([])
   const [activeModel, setActiveModel] = useState<ActiveModel>({ provider: '', model: '' })
+  // 活动会话所在机器：ModelPicker 机器标识 + 设置改模型时判断是否需刷新聊天侧
+  const [activeBackend, setActiveBackend] = useState('local')
   const [showSettings, setShowSettings] = useState(false)
   const openSettings = useCallback(() => setShowSettings(true), [])
   const [pendingDelete, setPendingDelete] = useState<SessionMeta | null>(null)
@@ -266,6 +277,15 @@ export default function App() {
   const [uiFont, setUiFont] = useUiFont()
   const { t } = useI18n()
   const [notify, setNotify] = useState(() => localStorage.getItem('lumi-notify') === '1')
+  // 「最近」列表最多显示条数（界面偏好，localStorage 记忆，默认 20）
+  const [recentLimit, setRecentLimit] = useState(() => {
+    const v = parseInt(localStorage.getItem('lumi-recent-limit') || '20', 10)
+    return Number.isFinite(v) ? v : 20
+  })
+  const changeRecentLimit = (n: number) => {
+    localStorage.setItem('lumi-recent-limit', String(n))
+    setRecentLimit(n)
+  }
   // 图片嵌入消息（dataUrl→image 块）；其它文件只带绝对路径，发送时写进消息文本，
   // 由 Agent 用工具读取（不在此预授权，交给现有权限流程）
   const [attachments, setAttachments] = useState<Attachment[]>([])
@@ -307,6 +327,12 @@ export default function App() {
   const fileInputRef = useRef<HTMLInputElement>(null)
   const connsRef = useRef<Record<string, Gateway>>({})
   const activeRef = useRef('')
+  // 会话列表镜像到 ref：切会话时据此查它所属项目（workspace_dir），随 switch 下发让后端切 cwd
+  const sessionsRef = useRef<SessionMeta[]>([])
+  // 每台机器一条「控制连接」：用于跨机器 fan-out list_sessions / 全局 RPC（非 chat 流）
+  const controlConns = useRef<Record<string, Gateway>>({})
+  const activeBackendRef = useRef('local')
+  const cronJobsRef = useRef<CronJob[]>([]) // 据此把定时操作路由到任务所属机器
   const scrollRef = useRef<HTMLDivElement>(null)
   const inputRef = useRef<HTMLTextAreaElement>(null)
   // handleEvent 是 []-依赖的稳定回调，通过 ref 读取最新的 store / 通知开关 / 翻译
@@ -322,6 +348,15 @@ export default function App() {
   useEffect(() => {
     activeRef.current = active
   }, [active])
+  useEffect(() => {
+    sessionsRef.current = sessions
+  }, [sessions])
+  useEffect(() => {
+    activeBackendRef.current = activeBackend
+  }, [activeBackend])
+  useEffect(() => {
+    cronJobsRef.current = cronJobs
+  }, [cronJobs])
   useEffect(() => {
     viewRef.current = view
   }, [view])
@@ -558,12 +593,14 @@ export default function App() {
 
   // 为某会话建立一条独立 WS 连接（每会话一条，互不阻塞）。targetThread=null 为新会话。
   const openConnection = useCallback(
-    (targetThread: string | null): Promise<string> => {
+    (targetThread: string | null, targetWorkspace = '', backendId = 'local'): Promise<string> => {
       return new Promise((resolve) => {
         void (async () => {
-          const { wsUrl } = await window.lumi.getConnection()
+          const { wsUrl } = await window.lumi.getConnection(backendId)
           const gw = new Gateway(wsUrl)
           let myThread = ''
+          // 本连接所属项目；重连得到全新 bridge 后据此把 cwd 切回，否则会落到进程默认目录
+          let myWorkspace = ''
           let ready = false
           gw.onEvent((ev) => {
             if (ev.type === 'gateway.ready') {
@@ -575,7 +612,7 @@ export default function App() {
                 // 新 bridge 的临时目录为空，需重放本会话已添加的目录，否则徽标显示
                 // 有目录而后端实际访问不到。
                 if (myThread) {
-                  void gw.switchSession(myThread)
+                  void gw.switchSession(myThread, myWorkspace)
                   for (const f of folderStoreRef.current[myThread] ?? []) {
                     void gw.addFolder(f)
                   }
@@ -589,18 +626,28 @@ export default function App() {
                 .then((r) => setBgTasks(r.tasks))
                 .catch(() => {})
               if (targetThread) {
-                // 已有会话：切到该 thread 并加载历史
+                // 已有会话：切到该 thread 并加载历史。switchSession 可能因项目目录已被删/改名
+                // 而被后端拒（set_workspace 抛错）；必须吞掉，否则 Promise 永不 resolve、会话卡死。
                 void (async () => {
-                  await gw.switchSession(targetThread)
+                  try {
+                    await gw.switchSession(targetThread, targetWorkspace)
+                  } catch {
+                    /* 目录失效等：仍打开会话（后端已降级，不切 cwd） */
+                  }
                   const r = await gw.loadHistory(targetThread)
                   myThread = targetThread
+                  myWorkspace = targetWorkspace
+                  // 后端 cwd 已切到本会话项目，同步当前项目指示（握手时的 workspace 是切前的）
+                  if (targetWorkspace) setWorkspaceDir(targetWorkspace)
                   connsRef.current[targetThread] = gw
                   setStore((s) => ({ ...s, [targetThread]: emptySession(r.items.map(restore)) }))
                   resolve(targetThread)
                 })()
               } else {
-                // 新会话：用握手分配的 thread
+                // 新会话：用握手分配的 thread；记录其实际所在项目（握手下发的 cwd），
+                // 否则重连时会重放空 workspace，落到进程当时的 cwd（可能是别的项目）。
                 myThread = ev.session_id ?? ''
+                myWorkspace = ev.payload.workspace || ''
                 connsRef.current[myThread] = gw
                 setStore((s) => ({ ...s, [myThread]: emptySession() }))
                 resolve(myThread)
@@ -619,22 +666,6 @@ export default function App() {
     [handleEvent],
   )
 
-  // 初始：开一条新会话连接
-  useEffect(() => {
-    let disposed = false
-    void (async () => {
-      const tid = await openConnection(null)
-      if (!disposed) {
-        setActive(tid)
-        setConn('open')
-      }
-    })()
-    return () => {
-      disposed = true
-      Object.values(connsRef.current).forEach((g) => g.close())
-    }
-  }, [openConnection])
-
   useEffect(() => {
     scrollRef.current?.scrollTo({ top: scrollRef.current.scrollHeight })
   }, [items, running, approval, clarify, plan])
@@ -645,35 +676,40 @@ export default function App() {
 
   // 会话管理 / cron RPC 操作全局资源，与连接当前 thread 无关，任一活跃连接皆可。
   // 稳定引用（useCallback []）：作为 CronPage 的 api prop，避免每次渲染触发其刷新。
+  // 全局 RPC（providers/cron/projects/bg）走本地控制连接（这些当前以本地机器为准；
+  // 远程的同类作用域属层3）。控制连接缺位时回退到任一会话连接。
   const anyGw = useCallback(
-    () => connsRef.current[activeRef.current] ?? Object.values(connsRef.current)[0],
+    () =>
+      controlConns.current['local'] ??
+      Object.values(controlConns.current)[0] ??
+      connsRef.current[activeRef.current] ??
+      Object.values(connsRef.current)[0],
     [],
   )
-
-  const stopBgTask = useCallback(
-    (taskId: string) => {
-      // 乐观置为 failed，等下一条 bg_tasks.update 校正
-      setBgTasks((ts) =>
-        ts.map((x) => (x.task_id === taskId ? { ...x, status: 'failed' as const } : x)),
-      )
-      void anyGw()?.stopBgTask(taskId).catch(() => {})
-    },
+  // 某台机器的控制连接（pin/重命名/删除等按会话所属机器路由）
+  const gwForBackend = useCallback(
+    (backend: string) => controlConns.current[backend] ?? anyGw(),
     [anyGw],
   )
 
-  const dismissBgTask = useCallback(
-    (taskId: string) => {
-      setBgTasks((ts) => ts.filter((x) => x.task_id !== taskId)) // 乐观移除
-      void anyGw()?.dismissBgTask(taskId).catch(() => {})
-    },
-    [anyGw],
-  )
+  // 后台任务属于当前会话的 bridge，必须发到该会话的连接（不是控制连接 anyGw，
+  // 否则后端按控制连接的 thread_id 匹配不到，停/清都是空操作、任务还会回来）。
+  const stopBgTask = useCallback((taskId: string) => {
+    setBgTasks((ts) =>
+      ts.map((x) => (x.task_id === taskId ? { ...x, status: 'failed' as const } : x)),
+    )
+    void connsRef.current[activeRef.current]?.stopBgTask(taskId).catch(() => {})
+  }, [])
+
+  const dismissBgTask = useCallback((taskId: string) => {
+    setBgTasks((ts) => ts.filter((x) => x.task_id !== taskId)) // 乐观移除
+    void connsRef.current[activeRef.current]?.dismissBgTask(taskId).catch(() => {})
+  }, [])
 
   const clearFinishedBgTasks = useCallback(() => {
-    // 乐观清除本会话终态任务
     setBgTasks((ts) => ts.filter((x) => x.status === 'running' || x.thread_id !== activeRef.current))
-    void anyGw()?.clearFinishedBgTasks().catch(() => {})
-  }, [anyGw])
+    void connsRef.current[activeRef.current]?.clearFinishedBgTasks().catch(() => {})
+  }, [])
 
   // 当前会话的后台任务：一次 memo 派生，稳定引用避免 drawer 子树随每次 bg_tasks.update 重渲染
   const activeBgTasks = useMemo(
@@ -682,26 +718,137 @@ export default function App() {
   )
   const hasRunningBg = activeBgTasks.some((tk) => tk.status === 'running')
 
+  // 跨机器 fan-out：对每台机器的控制连接各拉一次 list_sessions，打上机器标记后合并。
+  // 某机器离线只跳过它，不影响其它机器（方案甲多机并存的合并列表）。
   const refreshSessions = useCallback(async () => {
-    try {
-      const r = await anyGw()?.listSessions()
-      if (r?.sessions) setSessions(r.sessions)
-    } catch {
-      /* 忽略：连接波动时静默 */
-    }
-  }, [anyGw])
+    const conns = Object.entries(controlConns.current)
+    if (!conns.length) return
+    const perBackend = await Promise.all(
+      conns.map(async ([backend, gw]) => {
+        try {
+          const r = await gw.listSessions()
+          return r.sessions.map((s) => ({ ...s, backend }))
+        } catch {
+          // 该机器瞬时抖动（重连中）：保留它上一轮的会话，别整列抹掉导致闪没
+          return sessionsRef.current.filter((s) => (s.backend || 'local') === backend)
+        }
+      }),
+    )
+    setSessions(perBackend.flat())
+  }, [])
 
-  const refreshProjects = useCallback(async () => {
-    try {
-      const r = await anyGw()?.listProjects()
-      if (r) {
-        setProjects(r.projects)
-        setWorkspaceDir(r.current)
+  // 跨机器 fan-out 定时任务：每台机器各拉一次 list_cron_jobs，打机器标记后合并。
+  const refreshCronJobs = useCallback(() => {
+    const conns = Object.entries(controlConns.current)
+    if (!conns.length) return
+    void Promise.all(
+      conns.map(async ([backend, gw]) => {
+        try {
+          const r = await gw.listCronJobs()
+          return { jobs: r.jobs.map((j) => ({ ...j, backend })), ok: true }
+        } catch {
+          // 抖动：保留该机器上一轮的任务，别让它从列表消失
+          return { jobs: cronJobsRef.current.filter((j) => (j.backend || 'local') === backend), ok: false }
+        }
+      }),
+    ).then((results) => {
+      const jobs = results.flatMap((r) => r.jobs)
+      setCronJobs(jobs)
+      // 仅当所有机器都成功响应才回收 stale 未读；否则离线机器的 job 缺席会被误判 stale 而误删未读
+      if (results.every((r) => r.ok)) {
+        setCronUnread((u) => {
+          const ids = new Set(jobs.map((j) => j.id))
+          const stale = Object.keys(u).filter((k) => !ids.has(k))
+          if (stale.length === 0) return u
+          const next = { ...u }
+          for (const k of stale) delete next[k]
+          return next
+        })
       }
-    } catch {
-      /* 忽略：连接波动时静默 */
+    })
+  }, [])
+
+  // 为某机器开控制连接（幂等）：ready 后拉它的会话 + 定时任务，连接态记入 machineConn。
+  const openControlConn = useCallback(
+    (backend: string) => {
+      if (controlConns.current[backend]) return
+      void (async () => {
+        const { wsUrl } = await window.lumi.getConnection(backend)
+        const gw = new Gateway(wsUrl)
+        gw.onEvent((ev) => {
+          if (ev.type === 'gateway.ready') {
+            void refreshSessions()
+            refreshCronJobs()
+          }
+        })
+        gw.onState((st) => setMachineConn((m) => ({ ...m, [backend]: st })))
+        controlConns.current[backend] = gw
+        gw.connect()
+      })()
+    },
+    [refreshSessions, refreshCronJobs],
+  )
+
+  // 同步机器表 → 开新机器的控制连接、关掉已删机器的，刷新会话。BackendsPanel 增删后回调此。
+  const syncBackends = useCallback(async () => {
+    const data = await window.lumi.backends?.list()
+    const list = [
+      { id: 'local', name: '本地' },
+      ...(data?.remotes ?? []).map((r) => ({ id: r.id, name: r.name || r.url })),
+    ]
+    setMachines(list)
+    const wanted = new Set(list.map((m) => m.id))
+    for (const [id, gw] of Object.entries(controlConns.current)) {
+      if (!wanted.has(id)) {
+        gw.close()
+        delete controlConns.current[id]
+      }
     }
-  }, [anyGw])
+    for (const m of list) openControlConn(m.id)
+    void refreshSessions()
+  }, [openControlConn, refreshSessions])
+
+  // 初始：起各机器控制连接（合并会话列表）+ 本地一条新会话连接（聊天流）
+  useEffect(() => {
+    let disposed = false
+    void (async () => {
+      await syncBackends()
+      const tid = await openConnection(null, '', 'local')
+      if (!disposed) {
+        setActive(tid)
+        setConn('open')
+      }
+    })()
+    return () => {
+      disposed = true
+      Object.values(connsRef.current).forEach((g) => g.close())
+      Object.values(controlConns.current).forEach((g) => g.close())
+    }
+  }, [openConnection, syncBackends])
+
+  // BackendsPanel 增删远程机器后广播此事件 → 重连各机器、刷新合并列表（无 reload）
+  useEffect(() => {
+    const onChanged = () => void syncBackends()
+    window.addEventListener('lumi:backends-changed', onChanged)
+    return () => window.removeEventListener('lumi:backends-changed', onChanged)
+  }, [syncBackends])
+
+  // 按机器拉项目（方案甲先选机器）：projects + 该机器当前项目（projectsCurrent）。
+  // 活动会话的 workspaceDir 由 activate/gateway.ready 维护，与项目视图分离。
+  const refreshProjects = useCallback(
+    async (backend = 'local') => {
+      try {
+        const r = await gwForBackend(backend)?.listProjects()
+        if (r) {
+          setProjects(r.projects)
+          setProjectsCurrent(r.current)
+        }
+      } catch {
+        /* 忽略：连接波动时静默 */
+      }
+    },
+    [gwForBackend],
+  )
 
   // 只在回合结束（running 落回 false）和切会话时刷新：发送时刷新没有新信息
   // （首条消息尚未落 checkpoint），白白多一次全量 checkpoint 扫描。
@@ -710,43 +857,47 @@ export default function App() {
   }, [active, running, refreshSessions])
 
   // 拉取斜杠命令（技能命令，按项目动态）。技能目录随项目变化，故进入命令模式时刷新。
+  // 斜杠命令来自当前会话所在机器（命令在会话连接上执行）——远程会话用远程的 skills，
+  // 否则菜单/校验是本地命令、发远程独有命令会被判非法。
   const loadCommands = useCallback(() => {
-    anyGw()
+    connsRef.current[activeRef.current]
       ?.listCommands()
       .then((r) => setCommands(r.commands ?? []))
       .catch(() => {})
-  }, [anyGw])
+  }, [])
 
-  // provider 列表响应（list / save / delete 同形）统一回写
+  // 聊天侧 provider 上下文 = 活动会话所在机器的连接（ModelPicker/顶部模型跟随当前会话机器）
+  const chatGw = useCallback(() => connsRef.current[activeRef.current], [])
+
+  // provider 列表响应统一回写；顶部模型显示随活动机器的 active 模型修正
   const applyProviderResp = useCallback(
     (r: { profiles?: ProviderProfile[]; active?: ActiveModel }) => {
       setProviders(r.profiles ?? [])
       setActiveModel(r.active ?? { provider: '', model: '' })
+      setModel(r.active?.model ?? '')
     },
     [],
   )
 
-  // 拉取模型供应商 profile 列表 + active
   const loadProviders = useCallback(() => {
-    anyGw()?.listProviders().then(applyProviderResp).catch(() => {})
-  }, [anyGw, applyProviderResp])
+    chatGw()?.listProviders().then(applyProviderResp).catch(() => {})
+  }, [chatGw, applyProviderResp])
 
+  // 切会话即重载该机器的 providers（修了「切到远程会话仍显示本地模型」的 bug）
   useEffect(() => {
     if (active) loadProviders()
   }, [active, loadProviders])
 
-  // 切换当前 active 模型的思考档位：持久化后刷新列表（thinking 数据随之更新）。
-  // 失败（能力数据更新使档位失效等）也刷新，让 UI 回到后端真实状态而非静默不动。
   const switchEffort = (level: string) => {
-    anyGw()
+    chatGw()
       ?.setEffort(activeModel.provider, activeModel.model, level)
       .catch((e) => console.error('set_effort 失败:', e))
       .finally(() => loadProviders())
   }
 
-  // 切换模型：在当前会话的连接上切（该 bridge 下一轮生效），并更新顶部模型显示
+  // 切模型：在当前会话连接上切（该机器该 bridge 下一轮生效），更新顶部显示
   const switchModel = (provider: string, model: string) => {
-    connsRef.current[active]
+    chatGw()
       ?.setProvider(provider, model)
       .then((r) => {
         setActiveModel(r.active)
@@ -755,28 +906,29 @@ export default function App() {
       .catch(() => {})
   }
 
-  const saveProvider = (draft: Partial<ProviderProfile>) => {
-    anyGw()?.saveProvider(draft).then(applyProviderResp).catch(() => {})
-  }
-
-  const deleteProvider = (id: string) => {
-    anyGw()?.deleteProvider(id).then(applyProviderResp).catch(() => {})
-  }
-
-  const testProvider = (baseUrl: string, apiKey: string, model: string) =>
-    anyGw()?.testProvider(baseUrl, apiKey, model) ??
-    Promise.resolve({ ok: false, error: t('sidebar.disconnected') })
+  // 设置面板改了某机器的 provider 后回调：若改的正是当前会话机器，刷新聊天侧
+  const onProvidersChanged = useCallback(
+    (machine: string) => {
+      if (machine === activeBackendRef.current) loadProviders()
+    },
+    [loadProviders],
+  )
 
   // 激活一个会话：无现成连接时先建立（target=null 为新会话），并同步连接指示灯。
   // connect→setActive→setConn 的握手只写在这一处，五个入口共用。
   const activate = useCallback(
-    async (target: string | null) => {
+    async (target: string | null, workspace = '', backend = 'local') => {
       let tid = target
       if (!tid || !connsRef.current[tid]) {
         // 建立期间以 connecting 示意（sidecar 不可用时指示灯保持黄色而非静默无反应）
         setConn('connecting')
-        tid = await openConnection(target)
+        tid = await openConnection(target, workspace, backend)
+      } else if (workspace) {
+        // 已连会话：进程 cwd 可能被别的会话改过，重发带 workspace 的 switch 切回本会话项目
+        void connsRef.current[tid].switchSession(tid, workspace)
       }
+      if (workspace) setWorkspaceDir(workspace)
+      setActiveBackend(backend) // 记录活动会话所在机器（ModelPicker 跟随它）
       setActive(tid)
       setConn('open')
       setPreview(null) // 切会话关掉预览，避免上个会话的文件残留
@@ -785,16 +937,23 @@ export default function App() {
     [openConnection],
   )
 
-  const newSession = useCallback(async () => {
-    setView('chat')
-    await activate(null)
-    void refreshSessions()
-  }, [activate, refreshSessions])
+  // 在指定机器开新会话（方案甲：边栏每台机器各有「＋新对话」）。空远程也能从此开聊。
+  const newSession = useCallback(
+    async (backend = 'local') => {
+      setView('chat')
+      await activate(null, '', backend)
+      void refreshSessions()
+    },
+    [activate, refreshSessions],
+  )
 
   const selectSession = useCallback(
     async (tid: string) => {
       setView('chat')
-      if (tid !== activeRef.current) await activate(tid)
+      if (tid !== activeRef.current) {
+        const s = sessionsRef.current.find((x) => x.thread_id === tid)
+        await activate(tid, s?.workspace_dir || '', s?.backend || 'local')
+      }
     },
     [activate],
   )
@@ -803,56 +962,59 @@ export default function App() {
 
   const openProjects = useCallback(() => {
     setView('projects')
-    void refreshProjects()
-  }, [refreshProjects])
+    void refreshProjects(projectsMachine)
+  }, [refreshProjects, projectsMachine])
 
-  // 切换项目：set_workspace（进程级）→ 另开新会话回到聊天；点当前项目则直接回聊天
+  // 项目视图切机器（先选机器）
+  const selectProjectsMachine = useCallback(
+    (machine: string) => {
+      setProjectsMachine(machine)
+      void refreshProjects(machine)
+    },
+    [refreshProjects],
+  )
+
+  // 打开项目 = 在该机器把 cwd 切到此目录 → 在该机器开新会话进入聊天
   const openProject = useCallback(
-    async (path: string) => {
-      if (path === workspaceDir) {
-        setView('chat')
-        return
-      }
+    async (path: string, backend = 'local') => {
       try {
-        const r = await anyGw()?.setWorkspace(path)
-        if (!r) return
-        setWorkspaceDir(r.workspace)
-        void refreshProjects()
-        void newSession()
+        await gwForBackend(backend)?.setWorkspace(path)
+        setProjectsCurrent(path)
+        await newSession(backend)
       } catch {
         /* 忽略：连接波动时静默 */
       }
     },
-    [anyGw, workspaceDir, refreshProjects, newSession],
+    [gwForBackend, newSession],
   )
 
-  // 对话框「创建」：登记（带自定义名）→ 切换为当前项目
+  // 新建项目：在该机器登记（带名）→ 进入该项目
   const createProject = useCallback(
-    async (path: string, name: string) => {
+    async (path: string, name: string, backend = 'local') => {
       setShowNewProject(false)
       try {
-        const r = await anyGw()?.addProject(path, name)
+        const r = await gwForBackend(backend)?.addProject(path, name)
         if (r) setProjects(r.projects)
-        await openProject(path)
+        await openProject(path, backend)
       } catch {
         /* 目录不可用等：保持页面现状 */
       }
     },
-    [anyGw, openProject],
+    [gwForBackend, openProject],
   )
 
   const removeProjectFromList = useCallback(
-    (path: string) => {
-      anyGw()?.removeProject(path).then((r) => setProjects(r.projects)).catch(() => {})
+    (path: string, backend = 'local') => {
+      gwForBackend(backend)?.removeProject(path).then((r) => setProjects(r.projects)).catch(() => {})
     },
-    [anyGw],
+    [gwForBackend],
   )
 
   const renameProjectInList = useCallback(
-    (path: string, name: string) => {
-      anyGw()?.renameProject(path, name).then((r) => setProjects(r.projects)).catch(() => {})
+    (path: string, name: string, backend = 'local') => {
+      gwForBackend(backend)?.renameProject(path, name).then((r) => setProjects(r.projects)).catch(() => {})
     },
-    [anyGw],
+    [gwForBackend],
   )
 
   // 临时目录增减都发到当前会话的连接上（连接级/会话级状态），结果回写 folderStore
@@ -871,12 +1033,10 @@ export default function App() {
     [],
   )
 
-  const addFolder = useCallback(async () => {
-    // 无活跃连接时不弹选择器，避免用户选完目录却被静默丢弃
-    if (!connsRef.current[activeRef.current]) return
-    const dir = await window.lumi.pickDirectory?.()
-    if (dir) void applyFolderOp((gw) => gw.addFolder(dir))
-  }, [applyFolderOp])
+  // 打开目录浏览器（浏览的是当前会话所在机器的文件系统，而非本地原生选择器）
+  const addFolder = useCallback(() => {
+    if (connsRef.current[activeRef.current]) setAddingFolder(true)
+  }, [])
 
   const removeFolder = useCallback(
     (path: string) => void applyFolderOp((gw) => gw.removeFolder(path)),
@@ -884,33 +1044,25 @@ export default function App() {
   )
 
   // 拉取任务列表：唯一数据源，侧栏分组与管理页共用（CRUD 后经 onRefresh 刷新）
-  const refreshCronJobs = useCallback(() => {
-    anyGw()
-      ?.listCronJobs()
-      .then((r) => {
-        const jobs = r.jobs ?? []
-        setCronJobs(jobs)
-        // 回收已删任务的未读计数，避免 localStorage 残留
-        setCronUnread((u) => {
-          const ids = new Set(jobs.map((j) => j.id))
-          const stale = Object.keys(u).filter((k) => !ids.has(k))
-          if (stale.length === 0) return u
-          const next = { ...u }
-          for (const k of stale) delete next[k]
-          return next
-        })
-      })
-      .catch(() => {})
-  }, [])
-
   useEffect(() => {
     if (conn === 'open') refreshCronJobs()
   }, [conn, cronVersion, refreshCronJobs])
 
   // 在任务会话视图内切换到某次执行的会话（不改变 view），并标记该次执行为已读。
   // 已读集合封顶 500 条（对象按插入序，砍最旧的），避免 localStorage 无限增长。
+  // 定时任务所属机器（操作/执行会话都路由到它）
+  const cronBackendOf = useCallback(
+    (jobId: string) => cronJobsRef.current.find((j) => j.id === jobId)?.backend || 'local',
+    [],
+  )
+  // RunsRail 的 api 必须稳定引用（仅随当前任务变化）：内联箭头会让 useCronRuns 在主对话
+  // 流式期间每个 token 都重拉 list_cron_runs。
+  const runsRailApi = useCallback(
+    () => gwForBackend(cronBackendOf(activeCronJob ?? '')),
+    [gwForBackend, cronBackendOf, activeCronJob],
+  )
   const openRunThread = useCallback(
-    async (tid: string) => {
+    async (tid: string, backend = 'local') => {
       setCronRunThread(tid)
       setReadRuns((r) => {
         if (r[tid]) return r
@@ -919,50 +1071,56 @@ export default function App() {
         for (const k of keys.slice(0, Math.max(0, keys.length - 500))) delete next[k]
         return next
       })
-      await activate(tid)
+      await activate(tid, '', backend)
     },
     [activate],
   )
 
-  // 打开某任务的会话视图：默认选中最近一次有会话的执行
+  // 打开某任务的会话视图：默认选中最近一次有会话的执行（在任务所属机器上查/开）
   const openCronJob = useCallback(
     async (jobId: string, threadId?: string) => {
       setView('cronjob')
       setActiveCronJob(jobId)
       setCronUnread((u) => (u[jobId] ? { ...u, [jobId]: 0 } : u))
+      const backend = cronBackendOf(jobId)
       let tid = threadId
       if (!tid) {
         try {
-          const r = await anyGw()?.listCronRuns(jobId)
+          const r = await gwForBackend(backend)?.listCronRuns(jobId)
           tid = r?.runs.find((x) => x.thread_id)?.thread_id
         } catch {
           /* 列表拉取失败时显示空态 */
         }
       }
       setCronRunThread(tid ?? null)
-      if (tid) await openRunThread(tid)
+      if (tid) await openRunThread(tid, backend)
     },
-    [anyGw, openRunThread],
+    [cronBackendOf, gwForBackend, openRunThread],
   )
 
+  // 会话标记（pin/重命名/删除）存在各机器自己的 ~/.lumi，故按会话所属机器路由
+  const backendOf = useCallback(
+    (tid: string) => sessionsRef.current.find((s) => s.thread_id === tid)?.backend || 'local',
+    [],
+  )
   const pinSession = useCallback(
     (tid: string, pinned: boolean) => {
-      anyGw()?.pinSession(tid, pinned).then(refreshSessions).catch(() => {})
+      gwForBackend(backendOf(tid))?.pinSession(tid, pinned).then(refreshSessions).catch(() => {})
     },
-    [anyGw, refreshSessions],
+    [gwForBackend, backendOf, refreshSessions],
   )
 
   const renameSession = useCallback(
     (tid: string, title: string) => {
-      anyGw()?.renameSession(tid, title).then(refreshSessions).catch(() => {})
+      gwForBackend(backendOf(tid))?.renameSession(tid, title).then(refreshSessions).catch(() => {})
     },
-    [anyGw, refreshSessions],
+    [gwForBackend, backendOf, refreshSessions],
   )
 
   const deleteSession = async (session: SessionMeta) => {
     setPendingDelete(null)
     const tid = session.thread_id
-    await anyGw()?.deleteSession(tid).catch(() => {})
+    await gwForBackend(session.backend || 'local')?.deleteSession(tid).catch(() => {})
     connsRef.current[tid]?.close()
     delete connsRef.current[tid]
     setStore((s) => {
@@ -1295,6 +1453,11 @@ export default function App() {
             model={model}
             providers={providers}
             active={activeModel}
+            machine={
+              machines.length > 1
+                ? { name: machineName(activeBackend, machines), color: machineColor(activeBackend, machines) }
+                : undefined
+            }
             onSwitch={switchModel}
             onSwitchEffort={switchEffort}
           />
@@ -1343,6 +1506,10 @@ export default function App() {
       <Sidebar
         width={sidebarW.width}
         sessions={sessions}
+        machines={machines}
+        machineConn={machineConn}
+        recentLimit={recentLimit}
+        workspaceDir={workspaceDir}
         currentThread={view === 'chat' ? active : ''}
         conn={conn}
         model={model}
@@ -1355,7 +1522,8 @@ export default function App() {
         activeCronJob={view === 'cronjob' ? activeCronJob : null}
         onOpenCronJob={openCronJob}
         onSelect={selectSession}
-        onNew={newSession}
+        onNew={() => void newSession()}
+        onNewChat={(backend) => void newSession(backend)}
         onOpenProjects={openProjects}
         onOpenScheduled={openScheduled}
         onOpenSettings={openSettings}
@@ -1387,17 +1555,21 @@ export default function App() {
         {view === 'projects' ? (
           <ProjectsPage
             projects={projects}
-            current={workspaceDir}
-            onOpen={(p) => void openProject(p)}
+            current={projectsCurrent}
+            machines={machines}
+            machine={projectsMachine}
+            onSelectMachine={selectProjectsMachine}
+            onOpen={(p) => void openProject(p, projectsMachine)}
             onNew={() => setShowNewProject(true)}
             onRemove={(path) =>
               setPendingRemoveProject(projects.find((p) => p.path === path) ?? null)
             }
-            onRename={renameProjectInList}
+            onRename={(path, name) => renameProjectInList(path, name, projectsMachine)}
           />
         ) : view === 'scheduled' ? (
           <CronPage
-            api={anyGw}
+            api={gwForBackend}
+            machines={machines}
             jobs={cronJobs}
             runningNames={cronRunning}
             version={cronVersion}
@@ -1494,12 +1666,12 @@ export default function App() {
               <>
                 <ResizeHandle {...runsRailW} edge="left" />
                 <RunsRail
-                  api={anyGw}
+                  api={runsRailApi}
                   jobId={activeCronJob}
                   activeThread={cronRunThread}
                   readRuns={readRuns}
                   version={cronVersion}
-                  onPick={(tid) => void openRunThread(tid)}
+                  onPick={(tid) => void openRunThread(tid, cronBackendOf(activeCronJob))}
                   width={runsRailW.width}
                 />
               </>
@@ -1539,19 +1711,35 @@ export default function App() {
           setUiFont={setUiFont}
           notify={notify}
           setNotify={toggleNotify}
-          profiles={providers}
-          active={activeModel}
-          onSwitch={switchModel}
-          onSave={saveProvider}
-          onDelete={deleteProvider}
-          onTest={testProvider}
+          recentLimit={recentLimit}
+          setRecentLimit={changeRecentLimit}
+          machines={machines}
+          gwFor={gwForBackend}
+          onProvidersChanged={onProvidersChanged}
           onClose={() => setShowSettings(false)}
         />
       )}
       {showNewProject && (
-        <NewProjectDialog
-          onCreate={(p, n) => void createProject(p, n)}
+        <DirBrowser
+          gw={gwForBackend(projectsMachine)}
+          title={t('projects.chooseOn', {
+            machine: machines.find((m) => m.id === projectsMachine)?.name ?? projectsMachine,
+          })}
+          onPick={(p) => void createProject(p, basename(p), projectsMachine)}
           onCancel={() => setShowNewProject(false)}
+        />
+      )}
+      {addingFolder && (
+        <DirBrowser
+          gw={chatGw()}
+          title={t('folder.chooseOn', {
+            machine: machines.find((m) => m.id === activeBackend)?.name ?? activeBackend,
+          })}
+          onPick={(p) => {
+            void applyFolderOp((gw) => gw.addFolder(p))
+            setAddingFolder(false)
+          }}
+          onCancel={() => setAddingFolder(false)}
         />
       )}
       {pendingRemoveProject && (
@@ -1560,7 +1748,7 @@ export default function App() {
           message={t('projects.removeMessage', { name: pendingRemoveProject.name })}
           confirmLabel={t('projects.remove')}
           onConfirm={() => {
-            removeProjectFromList(pendingRemoveProject.path)
+            removeProjectFromList(pendingRemoveProject.path, projectsMachine)
             setPendingRemoveProject(null)
           }}
           onCancel={() => setPendingRemoveProject(null)}
