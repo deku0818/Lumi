@@ -43,7 +43,6 @@ from lumi.sessions.session_store import list_sessions
 from lumi.utils.constants import ATTACHED_FILE_TAG, NOTIFICATION_POLL_INTERVAL
 from lumi.utils.logger import logger
 from lumi.utils.thread_id import generate_thread_id
-from lumi.utils.workspace_id import get_workspace_dir
 
 # 流以中断事件收尾 → 该轮尚未结束，正等待客户端 resume，期间不可插入后台通知轮
 _INTERRUPT_KINDS = frozenset({EventKind.CLARIFY, EventKind.APPROVAL, EventKind.PLAN})
@@ -254,7 +253,8 @@ async def _set_workspace(session: GatewaySession, params: dict) -> dict:
 
 
 async def _list_projects(session: GatewaySession, params: dict) -> dict:
-    return {"projects": list_projects(), "current": get_workspace_dir()}
+    # current = 本会话项目（随会话绑定），而非进程 cwd
+    return {"projects": list_projects(), "current": session._bridge.workspace_dir}
 
 
 async def _add_project(session: GatewaySession, params: dict) -> dict:
@@ -309,21 +309,24 @@ async def _remove_folder(session: GatewaySession, params: dict) -> dict:
 async def _switch_session(session: GatewaySession, params: dict) -> dict:
     # new_session 不带 thread_id → 生成新的。切 thread 会改写 bridge._config，
     # 须与运行中的轮次互斥。
-    # workspace（可选）：方案甲下会话跨项目，切到某会话时把进程 cwd 切到它所属项目，
-    # 使后续消息在正确目录执行（cwd 进程级，set_workspace 会重建所有 bridge 边界）。
+    # workspace（可选）：会话跨项目，切到某会话时把本 bridge 的项目绑到它所属项目
+    # （仅本会话引擎/hooks，不动进程 cwd、不影响其它会话）。
     tid = params.get("thread_id") or generate_thread_id()
     workspace = params.get("workspace") or ""
     async with session._run.lock:
-        if workspace and workspace != get_workspace_dir():
-            # 项目目录可能已被删/改名：切 cwd 失败也要继续切会话，否则整个 RPC 报错、
-            # 前端切会话卡死。降级为「不切 cwd，仍打开会话」。
+        # 先切 thread 再绑项目：set_workspace 关的是 current_thread 的 shell，必须等
+        # current_thread 已是切入的 tid，否则会关到切出会话的 shell、而切入会话的陈旧
+        # shell 不被重置（见 review #9）。
+        session._bridge.switch_thread(tid)
+        if workspace and workspace != session._bridge.workspace_dir:
+            # 项目目录可能已被删/改名：绑定失败也要继续切会话，否则整个 RPC 报错、
+            # 前端切会话卡死。降级为「不绑项目，仍打开会话」。
             try:
                 await session._bridge.set_workspace(workspace)
             except (ValueError, OSError) as e:
                 logger.warning(
-                    "switch_session 切项目目录失败(%s)，仅切会话: %s", workspace, e
+                    "switch_session 绑定项目目录失败(%s)，仅切会话: %s", workspace, e
                 )
-        session._bridge.switch_thread(tid)
         session._run.awaiting_resume = False
     return {"thread_id": tid}
 
@@ -467,7 +470,10 @@ class GatewaySession:
             event_frame(
                 "gateway.ready",
                 self._bridge.current_thread_id,
-                {"model": self._bridge.model_name, "workspace": get_workspace_dir()},
+                {
+                    "model": self._bridge.model_name,
+                    "workspace": self._bridge.workspace_dir,
+                },
             )
         )
         # 注册到 cron 结果广播通道：任务完成/运行状态变化实时推给本连接

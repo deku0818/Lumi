@@ -9,7 +9,7 @@ import pytest
 from langchain_core.messages import HumanMessage
 
 import lumi.agents.core.hooks.exec_shell as exec_shell
-from lumi.agents.core.hooks import iter_hooks, load_hooks, reset_hooks
+from lumi.agents.core.hooks import build_config_hooks
 from lumi.agents.core.hooks.exec_shell import make_shell_hook
 from lumi.agents.core.hooks.protocol import (
     matches_tool_filter,
@@ -37,10 +37,9 @@ def _ctx(event="Stop", payload=None, state=None, config=None):
 
 @pytest.fixture(autouse=True)
 def _isolate():
-    reset_hooks()
+    # config hooks 改为返回式 build_config_hooks（无进程全局），仅需清 env 缓存
     exec_shell._env_cache = None
     yield
-    reset_hooks()
     exec_shell._env_cache = None
 
 
@@ -181,40 +180,41 @@ def _write_hooks_json(tmp_path, data: dict):
     (tmp_path / ".lumi" / "hooks.json").write_text(json.dumps(data))
 
 
-def test_load_hooks_registers_shell_hook(tmp_path):
+def test_build_config_hooks_constructs_shell_hook(tmp_path):
     cmd = _write_script(tmp_path, "echo '{}'")
     _write_hooks_json(tmp_path, {"Stop": [{"command": cmd}]})
-    n = load_hooks(tmp_path, user_config_dir=_user_dir_absent(tmp_path))
-    assert n == 1
-    assert any("shell_hook" in h.__name__ for h in iter_hooks("Stop"))
+    hooks = build_config_hooks(tmp_path, user_config_dir=_user_dir_absent(tmp_path))
+    assert len(hooks.get("Stop", [])) == 1
+    assert "shell_hook" in hooks["Stop"][0].__name__
 
 
-def test_load_hooks_idempotent(tmp_path):
+def test_build_config_hooks_is_pure(tmp_path):
+    """返回式构造无进程全局：重复调用结果一致，不累积、不写全局。"""
     cmd = _write_script(tmp_path, "echo '{}'")
     _write_hooks_json(tmp_path, {"Stop": [{"command": cmd}]})
     user = _user_dir_absent(tmp_path)
-    assert load_hooks(tmp_path, user_config_dir=user) == 1
-    assert load_hooks(tmp_path, user_config_dir=user) == 0  # 第二次幂等
+    h1 = build_config_hooks(tmp_path, user_config_dir=user)
+    h2 = build_config_hooks(tmp_path, user_config_dir=user)
+    assert len(h1["Stop"]) == 1 and len(h2["Stop"]) == 1  # 不累积
 
 
-def test_load_hooks_skips_bad_command(tmp_path):
+def test_build_config_hooks_skips_bad_command(tmp_path):
     _write_hooks_json(tmp_path, {"Stop": [{"command": "/nonexistent/x.sh"}]})
-    n = load_hooks(tmp_path, user_config_dir=_user_dir_absent(tmp_path))
-    assert n == 0  # 坏 command 跳过，不抛
+    hooks = build_config_hooks(tmp_path, user_config_dir=_user_dir_absent(tmp_path))
+    assert hooks == {}  # 坏 command 跳过，不抛
 
 
-def test_load_hooks_skips_unknown_event(tmp_path):
+def test_build_config_hooks_skips_unknown_event(tmp_path):
     cmd = _write_script(tmp_path, "echo '{}'")
     _write_hooks_json(tmp_path, {"NotAnEvent": [{"command": cmd}]})
-    n = load_hooks(tmp_path, user_config_dir=_user_dir_absent(tmp_path))
-    assert n == 0
+    hooks = build_config_hooks(tmp_path, user_config_dir=_user_dir_absent(tmp_path))
+    assert hooks == {}
 
 
-def test_load_hooks_preserves_declaration_order(tmp_path):
+def test_build_config_hooks_preserves_declaration_order(tmp_path):
     c1 = _write_script(tmp_path, "echo '{}'", name="a.sh")
     c2 = _write_script(tmp_path, "echo '{}'", name="b.sh")
     _write_hooks_json(tmp_path, {"PreToolUse": [{"command": c1}, {"command": c2}]})
-    load_hooks(tmp_path, user_config_dir=_user_dir_absent(tmp_path))
-    names = [h.__name__ for h in iter_hooks("PreToolUse")]
-    # 声明顺序：a 先于 b（builtin 不在 PreToolUse，故队列就是这两个）
-    assert names == ["shell_hook_a.sh", "shell_hook_b.sh"]
+    hooks = build_config_hooks(tmp_path, user_config_dir=_user_dir_absent(tmp_path))
+    names = [h.__name__ for h in hooks["PreToolUse"]]
+    assert names == ["shell_hook_a.sh", "shell_hook_b.sh"]  # 声明顺序

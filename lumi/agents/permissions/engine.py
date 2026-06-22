@@ -50,6 +50,10 @@ class PermissionEngine:
             user_config_dir: 用户配置目录，默认 ~/.lumi
         """
         self._project_dir = project_dir.resolve()
+        # 会话级临时工作区（「添加文件夹」）。独立于 _config——后者会被
+        # reload()/rebase() 从磁盘整体覆盖，若把 ephemeral 混进去，配置文件一变更
+        # 用户本会话加的目录就被悄悄撤销。单独存字段使其跨 reload/rebase 存活。
+        self._ephemeral_workspaces: list[Path] = []
 
         try:
             self._loader = ConfigLoader(project_dir, user_config_dir)
@@ -68,8 +72,17 @@ class PermissionEngine:
         """当前权限配置。"""
         return self._config
 
+    @property
+    def project_dir(self) -> Path:
+        """本引擎绑定的项目根目录（会话级，随 rebase 变化）。"""
+        return self._project_dir
+
     def _rebuild_boundary(self) -> None:
-        """重建工作区边界检查器并同步到 filesystem 授权目录。"""
+        """重建工作区边界检查器并同步到 filesystem 授权目录。
+
+        边界 = 项目根 + 配置 workspaces + 会话级 ephemeral workspaces。
+        ephemeral 不存在 _config 里，故 reload()/rebase() 重载配置后仍保留。
+        """
         workspace_paths = [self._project_dir]
         for ws in self._config.workspaces:
             p = Path(ws)
@@ -77,12 +90,23 @@ class PermissionEngine:
                 workspace_paths.append(p)
             else:
                 workspace_paths.append(self._project_dir / p)
+        workspace_paths.extend(self._ephemeral_workspaces)
         self._boundary = WorkspaceBoundary(workspace_paths)
 
         # 同步到 filesystem 层的授权目录列表
         set_authorized_directory(self._project_dir)
         for wp in workspace_paths[1:]:
             add_authorized_directory(wp)
+
+    def authorized_directories(self) -> list[Path]:
+        """本引擎当前授权目录（项目根在首位 + 配置 workspaces + 会话级 ephemeral）。
+
+        供 bridge 在每轮 run 起点注入到 filesystem 层的 per-run 授权上下文，
+        使同进程多会话并发时各 run 的工具按本会话边界校验路径，互不串扰。
+
+        boundary.workspaces 属性已返回新列表（保护内部状态），直接返回即可、不再 wrap。
+        """
+        return self._boundary.workspaces
 
     def rebase(self, project_dir: Path) -> None:
         """切换项目根目录：重载新目录的权限配置并重建工作区边界。"""
@@ -364,23 +388,24 @@ class PermissionEngine:
             logger.error("持久化工作区配置失败: %s", directory, exc_info=True)
 
     def add_ephemeral_workspace(self, directory: str) -> None:
-        """临时把目录加入工作区（仅内存，不持久化；会话级「添加文件夹」用）。"""
-        if directory in self._config.workspaces:
+        """临时把目录加入工作区（仅内存，不持久化；会话级「添加文件夹」用）。
+
+        存独立的 _ephemeral_workspaces 而非 _config.workspaces——后者会被
+        reload()/rebase() 从磁盘整体覆盖，导致用户本会话添加的目录在权限配置
+        文件变更（如审批「总是允许」写入 local 配置）后被悄悄撤销。
+        """
+        resolved = Path(directory).resolve()
+        if resolved in self._ephemeral_workspaces:
             return
-        self._config = PermissionConfig(
-            workspaces=(*self._config.workspaces, directory),
-            permissions=self._config.permissions,
-        )
+        self._ephemeral_workspaces.append(resolved)
         self._rebuild_boundary()
 
     def remove_ephemeral_workspace(self, directory: str) -> None:
         """移除临时加入的工作区目录并重建边界。"""
-        if directory not in self._config.workspaces:
+        resolved = Path(directory).resolve()
+        if resolved not in self._ephemeral_workspaces:
             return
-        self._config = PermissionConfig(
-            workspaces=tuple(w for w in self._config.workspaces if w != directory),
-            permissions=self._config.permissions,
-        )
+        self._ephemeral_workspaces.remove(resolved)
         self._rebuild_boundary()
 
     def add_ephemeral_rules(self, allow_exprs: list[str]) -> None:

@@ -14,6 +14,7 @@ import sys
 from langchain_core.messages import HumanMessage
 
 from lumi.agents.core.node_helpers.messages import inject_text_into_message
+from lumi.agents.permissions.workspace import get_authorized_directory
 
 
 def _detect_shell() -> str:
@@ -34,7 +35,8 @@ def collect_system_info() -> dict[str, str]:
         "os": platform.platform(terse=True),
         "python": platform.python_version(),
         "shell": _detect_shell(),
-        "cwd": os.getcwd(),
+        # 本会话授权主目录（per-run）：项目随会话绑定，不再是进程级 os.getcwd()
+        "cwd": str(get_authorized_directory()),
     }
 
 

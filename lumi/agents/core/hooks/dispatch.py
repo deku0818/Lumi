@@ -18,6 +18,7 @@
 from __future__ import annotations
 
 import asyncio
+import contextvars
 from collections.abc import Iterator
 from contextlib import contextmanager
 from typing import Literal
@@ -37,12 +38,34 @@ from lumi.agents.core.hooks.schema import (
 from lumi.agents.core.meta_message import reminder_human_message
 from lumi.utils.logger import logger
 
+# 框架内置 hook（import 时由 builtin.py 注册）。进程全局、与项目无关。
 _HOOKS: dict[HookEvent, list[Hook]] = {}
+
+# 本 run 的项目级 config hook（来自 .lumi/hooks.json）。per-run contextvar：每个
+# 会话各绑各项目、并发互不串；后台子代理继承父 run 的 contextvar。None = 无配置 hook。
+_run_config_hooks: contextvars.ContextVar[dict[HookEvent, list[Hook]] | None] = (
+    contextvars.ContextVar("lumi_run_config_hooks", default=None)
+)
+
+
+def set_run_config_hooks(hooks: dict[HookEvent, list[Hook]] | None) -> None:
+    """注入当前 run 的项目级 config hook（bridge / cron 在 run 起点调用）。"""
+    _run_config_hooks.set(hooks)
+
+
+def _hooks_for(event: HookEvent) -> list[Hook]:
+    """本 run 生效的 hook：项目级 config（优先）+ 框架 builtin（其后）。
+
+    顺序与旧 prepend 实现一致——config hook 整体压在 builtin 之前。
+    """
+    config = _run_config_hooks.get()
+    config_hooks = config.get(event, []) if config else []
+    return [*config_hooks, *_HOOKS.get(event, [])]
 
 
 def has_hooks(event: HookEvent) -> bool:
-    """该事件下是否注册了任何 hook。便宜预判——避免无 hook 时白白构造 payload。"""
-    return bool(_HOOKS.get(event))
+    """该事件下是否有任何 hook（config + builtin）。便宜预判，避免白白构造 payload。"""
+    return bool(_hooks_for(event))
 
 
 def _reminder_message(text: str) -> HumanMessage:
@@ -61,16 +84,6 @@ def register_hook(event: HookEvent, hook: Hook) -> None:
     适合 Python 代码（import side effect / 运行时）注册内置 fallback hook。
     """
     _HOOKS.setdefault(event, []).append(hook)
-
-
-def prepend_hook(event: HookEvent, hook: Hook) -> None:
-    """注册 hook 到事件队列**头部**——比已有 hook 先执行。
-
-    YAML 配置加载用此 API。运维 YAML 挂的 hook 优先于 framework 内置 Python
-    fallback：多条 YAML 之间按声明顺序（依次 prepend 后实际队列就是声明顺序），
-    builtin 排在所有 YAML 之后。
-    """
-    _HOOKS.setdefault(event, []).insert(0, hook)
 
 
 def unregister_hook(event: HookEvent, hook: Hook) -> bool:
@@ -120,7 +133,7 @@ async def dispatch_hooks(
     - ``Command``：调用方应据此路由（一般 ``return cmd``）
     - ``None``：所有 hook 放行，调用方走默认行为
     """
-    hooks = _HOOKS.get(event, [])
+    hooks = _hooks_for(event)
     if not hooks:
         return None
 
@@ -205,5 +218,5 @@ def replace_hooks(event: HookEvent, hooks: list[Hook]) -> Iterator[None]:
 
 
 def iter_hooks(event: HookEvent) -> list[Hook]:
-    """只读暴露某事件下的 hook 列表（返回拷贝，调用方修改不影响内部状态）。"""
-    return list(_HOOKS.get(event, []))
+    """只读暴露某事件下生效的 hook 列表（config + builtin，调用方修改不影响内部状态）。"""
+    return _hooks_for(event)

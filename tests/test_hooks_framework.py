@@ -13,9 +13,9 @@ from lumi.agents.core.hooks import (
     HookContext,
     dispatch_hooks,
     iter_hooks,
-    prepend_hook,
     register_hook,
     replace_hooks,
+    set_run_config_hooks,
     unregister_hook,
 )
 from lumi.agents.core.hooks import dispatch as dispatch_mod
@@ -204,12 +204,21 @@ async def test_hook_exception_isolated():
 # === 注册 API ===
 
 
-async def test_prepend_runs_before_registered():
+async def test_run_config_hooks_run_before_builtin_and_isolated():
+    """per-run config hook（项目级）先于进程全局 builtin 执行；清除后只剩 builtin。
+
+    项目随会话绑定：config hook 经 contextvar 注入，按会话隔离、并发互不串。
+    """
     record: list[str] = []
-    register_hook("Stop", _hook(None, record=record, name="late"))
-    prepend_hook("Stop", _hook(None, record=record, name="early"))
+    register_hook("Stop", _hook(None, record=record, name="builtin"))
+    set_run_config_hooks({"Stop": [_hook(None, record=record, name="config")]})
     await dispatch_hooks("Stop", _ctx())
-    assert record == ["early", "late"]
+    assert record == ["config", "builtin"]  # config 先于 builtin
+
+    record.clear()
+    set_run_config_hooks(None)  # 清除本 run 的 config hook
+    await dispatch_hooks("Stop", _ctx())
+    assert record == ["builtin"]  # 只剩进程全局 builtin
 
 
 def test_unregister_removes_hook():

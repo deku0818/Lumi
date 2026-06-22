@@ -10,7 +10,12 @@ from langchain_core.tools import tool
 from pydantic import BaseModel, Field
 
 from lumi.agents.permissions.workspace import get_authorized_directory
-from lumi.agents.runtime.shell_session import CommandResult, get_shell_session_manager
+from lumi.agents.runtime.bg_tasks import current_thread_id
+from lumi.agents.runtime.shell_session import (
+    CommandResult,
+    current_shell_key,
+    get_shell_session_manager,
+)
 from lumi.utils.logger import logger
 
 
@@ -77,7 +82,11 @@ async def bash(
     try:
         working_dir = str(get_authorized_directory())
         session_mgr = get_shell_session_manager()
-        session = session_mgr.get_session(thread_id="default", working_dir=working_dir)
+        # shell 会话键：子代理用其专属 key（run_with_shell 注入，与父/兄弟隔离、用完回收），
+        # 否则用本会话 thread。共用 "default" 时并发会话/子代理的 cd 会互相污染、相对路径
+        # 跑到别处。
+        shell_key = current_shell_key() or current_thread_id.get() or "default"
+        session = session_mgr.get_session(thread_id=shell_key, working_dir=working_dir)
 
         if run_in_background:
             current_cwd = await session.get_cwd()

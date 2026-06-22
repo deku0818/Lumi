@@ -10,7 +10,6 @@ checkpoint / folder 等职责拆到 service 子模块，AgentBridge 通过瘦委
 from __future__ import annotations
 
 import asyncio
-import weakref
 from collections.abc import AsyncGenerator
 from dataclasses import dataclass
 from enum import StrEnum
@@ -24,9 +23,11 @@ from langgraph.errors import GraphBubbleUp
 from langgraph.types import Command
 
 from lumi.agents.core.graph import LumiAgent, create_agent
+from lumi.agents.core.hooks import build_config_hooks, set_run_config_hooks
 from lumi.agents.core.meta_message import meta_human_message
 from lumi.agents.core.state import LumiAgentContext
 from lumi.agents.permissions.models import BYPASS_TOOLS
+from lumi.agents.permissions.workspace import set_run_authorized_source_for
 from lumi.agents.runtime.bg_tasks import current_thread_id, get_task_registry
 from lumi.agents.runtime.checkpoint import CheckpointInfo, FileCheckpointManager
 from lumi.agents.runtime.file_tracker import FileChangeTracker
@@ -139,11 +140,6 @@ async def shutdown_shared_runtime() -> None:
     await get_shell_session_manager().close_all()
 
 
-# 进程内所有存活的 bridge：工作目录是进程级单一状态（os.chdir），切换时需让
-# 每个 bridge 的权限引擎同步重建边界，否则其它会话的引擎边界会与 cwd 脱节。
-_active_bridges: weakref.WeakSet[AgentBridge] = weakref.WeakSet()
-
-
 class AgentBridge:
     """TUI 与 LumiAgent 的桥接层"""
 
@@ -160,26 +156,42 @@ class AgentBridge:
         self._extra_folders: list[str] = []
         # 上次通知模型时的目录快照，用于在下一条用户消息注入增减变更提醒
         self._notified_folders: set[str] = set()
+        # 本会话项目的 config hooks（.lumi/hooks.json）：随项目绑定，set_workspace 时重载，
+        # 每轮 _stream 注入 per-run contextvar。空 dict = 暂无（initialize 后填充）。
+        self._config_hooks: dict = {}
         # 职责子模块（back-reference 组合）
         self._providers = ProviderService(self)
         self._approval = ApprovalEnricher(self)
         self._checkpoint = CheckpointService(self)
         self._folders = FolderManager(self)
 
-    async def initialize(self) -> None:
-        """初始化 Agent"""
+    async def initialize(self, project_dir: str = "") -> None:
+        """初始化 Agent。
+
+        project_dir：本会话所属项目（open 握手经 ``?workspace=`` 携带）。给定且有效则
+        引擎在创建时直接 pin 到它，无需后续 set_workspace rebase；为空 / 无效退回进程
+        cwd。项目随会话绑定，不动进程级状态。
+        """
         agents_config = get_config().config.agents
+        target = Path(project_dir).expanduser().resolve() if project_dir else None
+        if target is not None and not target.is_dir():
+            logger.warning(
+                "[AgentBridge] open 指定 workspace 无效，退回进程目录: %s", target
+            )
+            target = None
         self._agent, self._context = await create_agent(
             checkpoint=agents_config.checkpoint,
+            project_dir=target,
         )
-        _active_bridges.add(self)
         # 应用持久化的 active 供应商 (profile, model)（覆盖 config 默认模型）
         self._apply_active()
+        # 本会话项目（引擎已绑定 project_dir 或退回 cwd）的 config hooks
+        self._config_hooks = build_config_hooks(Path(self.workspace_dir))
         thread_id = generate_thread_id()
         recursion_limit = agents_config.recursion_limit
         self._config = RunnableConfig(
             configurable={"thread_id": thread_id},
-            metadata={"workspace_dir": get_workspace_dir()},
+            metadata={"workspace_dir": self.workspace_dir},
             recursion_limit=recursion_limit,
         )
         logger.info(
@@ -192,6 +204,18 @@ class AgentBridge:
         if self._config is None:
             return ""
         return self._config.get("configurable", {}).get("thread_id", "")
+
+    @property
+    def workspace_dir(self) -> str:
+        """本会话绑定的项目根目录（取本 bridge 引擎的项目，无引擎时退回进程 cwd）。
+
+        项目随会话绑定后，这是会话项目的单一来源——元数据 / gateway.ready /
+        system_info 都据此，而非进程级 os.getcwd()。
+        """
+        engine = self._context.permission_engine if self._context else None
+        if engine is not None:
+            return str(engine.project_dir)
+        return get_workspace_dir()
 
     @property
     def graph(self) -> CompiledStateGraph | None:
@@ -210,6 +234,8 @@ class AgentBridge:
                 await self._agent.adelete_thread(thread_id)
         finally:
             await asyncio.to_thread(delete_thread_checkpoint, thread_id)
+            # 该会话 thread 的持久 shell 一并回收（按 thread_id 键、会话私有）
+            await get_shell_session_manager().close_session(thread_id)
 
     def switch_thread(self, thread_id: str) -> None:
         """切换到指定的会话线程
@@ -220,7 +246,7 @@ class AgentBridge:
         recursion_limit = get_config().config.agents.recursion_limit
         self._config = RunnableConfig(
             configurable={"thread_id": thread_id},
-            metadata={"workspace_dir": get_workspace_dir()},
+            metadata={"workspace_dir": self.workspace_dir},
             recursion_limit=recursion_limit,
         )
         # 切换 checkpoint manager（复用 tracker）
@@ -234,9 +260,6 @@ class AgentBridge:
 
     async def set_workspace(self, path: str) -> dict:
         return await self._folders.set_workspace(path)
-
-    def _rebase_workspace(self, target: Path) -> None:
-        self._folders.rebase_workspace(target)
 
     def add_folder(self, path: str) -> dict:
         return self._folders.add_folder(path)
@@ -398,14 +421,16 @@ class AgentBridge:
         return f"{combined}\nRead the output file to retrieve the result."
 
     async def close(self) -> None:
-        """清理本实例持有的资源（不触碰进程级共享单例）。
+        """清理本实例持有的资源。
 
-        MCP / shell 会话等全局资源由 shutdown_shared_runtime() 在进程退出时
-        统一关闭——desktop 场景一个进程承载多条 WS 连接（每连接一个 bridge），
-        单连接断开不能拆除其他连接还在用的共享运行时。
+        MCP / 后台任务等真正进程级共享资源由 shutdown_shared_runtime() 在进程退出时
+        统一关闭——一个进程承载多条 WS 连接，单连接断开不能拆除其它连接还在用的它们。
+        但本会话当前 thread 的持久 shell 是会话私有（按 thread_id 键），断连即回收，否则
+        长跑 serve 会按 thread 累积孤儿 bash 进程（shell 改为按会话分后的回收点）。
         """
         if self._agent is not None:
             await self._agent.aclose()
+        await get_shell_session_manager().close_session(self.current_thread_id)
 
     # 网络瞬态错误：流式传输中途断连可自动重试
     _TRANSIENT_NETWORK_ERRORS = (
@@ -429,6 +454,14 @@ class AgentBridge:
                 )
                 return
             graph = self._agent.graph
+
+            # 注入本会话的授权目录来源 + config hooks 到当前 run 上下文：filesystem/bash
+            # 工具按 contextvar 取范围，使同进程多会话并发各 run 互不串扰、不被彼此重建
+            # 进程全局所清洗（见 permissions.workspace 两层来源说明）。降级（无引擎）兜底
+            # 逻辑与 cron 共用 set_run_authorized_source_for。
+            engine = self._context.permission_engine if self._context else None
+            set_run_authorized_source_for(engine, self._extra_folders)
+            set_run_config_hooks(self._config_hooks)
 
             # 检测残留图状态（待执行节点但无中断），自动恢复
             await self._recover_stale_state(graph)

@@ -7,6 +7,7 @@
 from __future__ import annotations
 
 import asyncio
+import contextvars
 import os
 import sys
 import uuid
@@ -428,3 +429,40 @@ def get_shell_session_manager() -> ShellSessionManager:
     if _session_manager is None:
         _session_manager = ShellSessionManager()
     return _session_manager
+
+
+# ---------------------------------------------------------------------------
+# 子代理独立 shell 作用域
+# ---------------------------------------------------------------------------
+
+# 子代理专属 shell 会话键。空串 = 非子代理上下文，bash 退回 thread 级 shell。
+_current_shell_key: contextvars.ContextVar[str] = contextvars.ContextVar(
+    "lumi_current_shell_key", default=""
+)
+
+
+def current_shell_key() -> str:
+    """当前上下文的 shell 会话键：子代理作用域内为其专属键，否则空串。"""
+    return _current_shell_key.get()
+
+
+async def run_with_shell(key: str, coro):
+    """在「独立 shell 作用域」里执行 coro（子代理用），返回其结果。
+
+    在 copy_context 副本里把 shell 键设为 key 再跑——本作用域内的 bash 取到专属 shell，
+    与父 / 兄弟代理的 shell 互不串（cd/env 不外溢）；因在副本上下文执行，并发的兄弟
+    子代理（ToolNode 同批 gather 共用上下文）也各自隔离。结束后回收该 shell（用完即弃，
+    避免按子代理累积孤儿 bash 进程）。
+
+    不继承父 shell 的 cwd/env：子代理 shell 在本会话项目根惰性新建（working_dir 取
+    per-run 授权主目录）——简单且足够。
+    """
+    ctx = contextvars.copy_context()
+    ctx.run(_current_shell_key.set, key)
+    task = asyncio.create_task(coro, context=ctx)
+    try:
+        return await task
+    finally:
+        if not task.done():
+            task.cancel()
+        await get_shell_session_manager().close_session(key)

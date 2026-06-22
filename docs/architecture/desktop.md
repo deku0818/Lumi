@@ -44,7 +44,7 @@ server → client   {method:"event", params:<wire event>}       # 流式事件
 - **RPC 方法**：
   - 流式：`send_message`、`resume`、`run_command`（运行斜杠命令）。
   - 会话：`list_sessions`、`new_session`、`switch_session`、`load_history`、`pin_session`、`rename_session`、`delete_session`。
-  - 项目 / 工作目录：`list_projects`、`add_project`、`remove_project`、`rename_project`、`set_workspace`（切项目，进程级）、`add_folder` / `remove_folder`（本会话临时目录）。
+  - 项目 / 工作目录：`list_projects`、`add_project`、`remove_project`、`rename_project`、`set_workspace`（绑定本会话项目，会话级、不动进程 cwd）、`add_folder` / `remove_folder`（本会话临时目录）。连接 URL 另可带 `?workspace=`，open 握手即把本会话引擎 pin 到该项目。
   - 模型供应商：`list_providers`、`test_provider`、`set_provider`、`save_provider`、`delete_provider`。
   - 定时任务：`list_cron_jobs`、`create/update/delete/toggle_cron_job`、`run_cron_job`、`list_cron_runs`。
   - 其它：`stop`（中止当前流式轮）、`list_commands`（拉取斜杠命令）。
@@ -76,11 +76,14 @@ shell / 后台任务会话等全局单例由 `shutdown_shared_runtime()` 在 lif
 
 ## 项目与工作目录
 
-**项目 = 工作目录**，是会话隔离单位（会话列表按 checkpoint metadata 的 `workspace_dir` 过滤）。
+**项目 = 工作目录，随会话绑定**（不再是进程级单一 cwd）。会话列表按 checkpoint metadata 的 `workspace_dir` 过滤分组。
 
-- **进程级单一工作目录**：工作目录是进程级状态（`os.chdir`），同一时刻整个 app 只有一个；在任一窗口切项目对所有会话生效（与 `set_provider` 的全局性同类）。`set_workspace`（`bridge.py`）`chdir` 后重建权限边界、重置共享 `"default"` shell；为避免其它会话的引擎边界与 cwd 脱节，经进程级弱引用注册表 `_active_bridges` 让**每个**存活 bridge 的权限引擎一并 `rebase` 到新目录（各自保留本会话的临时目录）。前端切项目后另开新会话。`set_workspace` / `add_folder` / `remove_folder` 在 `_dispatch` 中持 `run.lock`，与运行中的轮次互斥。
-- **项目清单**：纯手动登记，持久化在 `~/.lumi/projects.json`（`lumi/gateway/projects.py`，复用 `_atomic_write_json`），按 `last_used` 降序。`list_projects` 返回 `{projects, current}`；`add_project`（缺省用目录末端名，重复添加保留用户重命名）/ `remove_project`（只删条目，不动磁盘）/ `rename_project`；`set_workspace` 成功后经 `touch_project` 刷新 `last_used`。
-- **添加文件夹（本会话临时）**：`add_folder` / `remove_folder` 把目录临时加进**本连接** bridge 的可访问范围（`engine.add_ephemeral_workspace`，仅内存、不持久化、连接断开即失效），变更经 `<system-reminder>`（`_drain_folder_note` + `prepend_reminder`）在下一条用户消息告知模型。WS 重连得到全新 bridge 后，前端按 `folderStore` 重放 `add_folder` 恢复后端状态。
+- **会话级项目绑定**：每条 WS 连接 = 一个 bridge / 引擎，引擎在 `initialize` 时直接 pin 到本会话项目——open 握手经连接 URL 的 `?workspace=` 携带（与 `?token=` 同机制），`bridge.initialize(project_dir=...)` 据此新建权限引擎、构造本项目 config hooks、写 checkpoint 元数据。**不动进程 `os.chdir`**，故同进程多会话各绑各项目、并发互不影响。`bridge.workspace_dir` 取本引擎 `project_dir`（无引擎退回 cwd），是会话项目的单一来源（`gateway.ready` / 元数据 / `system_info` 注入都据此）。
+- **per-run 授权 / hooks 注入**：filesystem/bash 工具不持有引擎，故 bridge 在每轮 `_stream` 起点经 contextvar 注入本会话引擎的授权目录来源（`set_run_authorized_source_for`）与 config hooks（`set_run_config_hooks`），cron 在 `_invoke_agent` 起点同理；各 run 按 contextvar 隔离，不被并发会话重建进程全局所清洗。详见 [permissions.md](permissions.md) / [hooks.md](hooks.md)。
+- **`set_workspace`（会话级改项目）**：只 rebase 本 bridge 引擎、重载本会话 config hooks、更新元数据、重置本会话当前 thread 的持久 shell——**不 chdir、不影响其它会话**。原 `_active_bridges` 进程级 rebase-all 已随 cwd 进程级模型一并移除。前端「打开项目」= 经 open 握手开一条绑定到该项目的新会话（不再先 `set_workspace` 改进程态）；`set_workspace` RPC 主要用于原地改当前会话项目（及未来复用单连接的非 desktop client）。`set_workspace` / `add_folder` / `remove_folder` 在 `_dispatch` 中持 `run.lock`，与运行中的轮次互斥。
+- **项目清单**：纯手动登记，持久化在 `~/.lumi/projects.json`（`lumi/gateway/projects.py`，复用 `_atomic_write_json`），按 `last_used` 降序。`list_projects` 返回 `{projects, current}`（current = 本会话项目）；`add_project`（缺省用目录末端名，重复添加保留用户重命名）/ `remove_project`（只删条目，不动磁盘）/ `rename_project`；`set_workspace` 成功后经 `touch_project` 刷新 `last_used`。
+- **添加文件夹（本会话临时）**：`add_folder` / `remove_folder` 把目录临时加进**本连接**引擎的 `_ephemeral_workspaces`（引擎独立字段、仅内存、与会被 `reload()`/`rebase()` 从磁盘重载的 `_config.workspaces` 分离，故跨配置重载 / 项目切换存活；连接断开即失效），变更经 `<system-reminder>`（`_drain_folder_note` + `prepend_reminder`）在下一条用户消息告知模型。WS 重连复用同一 URL（含 `?workspace=`）使新 bridge 重新 pin，前端再按 `folderStore` 重放 `add_folder`。
+- **持久 shell 按会话 / 子代理隔离**：bash 的持久 shell 不再全进程共用一个，而是按 `current_thread_id` 分（会话私有，`cd`/env 不串别的会话），断连（`bridge.close`）/ 删会话（`delete_thread`）时回收，避免长跑 serve 累积孤儿进程。子代理（`agent` 工具）经 `shell_session.run_with_shell` 在 `copy_context` 副本里用专属 key 跑、拿独立 shell（`cd` 不污染父 / 兄弟、用完即弃），不继承父 shell 状态（在项目根 fresh 起）。
 - **前端**：侧栏「项目」入口（`onOpenProjects`）打开 `ProjectsPage`（搜索 + 排序 + 卡片，当前项目金描边）；`NewProjectDialog` 选目录 + 命名；composer 底栏 `FolderMenu`（图标 + 数量徽标 + 增减菜单）。原生目录选择器经 Electron `lumi:pick-directory` IPC（`dialog.showOpenDialog`）。
 
 ## 模型供应商管理
@@ -176,7 +179,7 @@ macOS 关窗后应用驻留 Dock，sidecar 保持运行，Dock 唤起（activate
 | 文件 | 职责 |
 |---|---|
 | `desktop/electron/main.cjs` | sidecar 生命周期、窗口、端口分配 |
-| `desktop/src/gateway.ts` | WS JSON-RPC 客户端（带指数退避重连） |
+| `desktop/src/gateway.ts` | WS JSON-RPC 客户端（指数退避自动重连，超 `MAX_RETRY` 转 `failed` 态等用户手动重连；`setUrl` 支持改址重连；URL 可带 `?workspace=` open 握手 pin 项目） |
 | `desktop/src/App.tsx` | 会话状态机、事件路由、聊天流渲染 |
 | `desktop/src/components/Sidebar.tsx` | 会话列表 + 右键菜单 + 内联重命名 |
 | `desktop/src/components/ResizeHandle.tsx` | 边栏拖拽调宽（`useResizableWidth` hook + 分隔条，宽度持久化） |

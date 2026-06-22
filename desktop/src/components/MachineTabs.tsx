@@ -6,15 +6,17 @@ export function MachineTabs({
   onChange,
   className = 'flex flex-wrap gap-2 mb-4',
 }: {
-  machines: { id: string; name: string }[]
+  machines: { id: string; name: string; enabled?: boolean }[]
   value: string
   onChange: (id: string) => void
   className?: string
 }) {
-  if (machines.length <= 1) return null
+  // 已关闭（不连接）的机器不出 pill
+  const shown = machines.filter((m) => m.enabled !== false)
+  if (shown.length <= 1) return null
   return (
     <div className={className}>
-      {machines.map((m) => (
+      {shown.map((m) => (
         <button
           key={m.id}
           onClick={() => onChange(m.id)}

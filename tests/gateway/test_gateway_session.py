@@ -52,6 +52,7 @@ class FakeBridge:
     ) -> None:
         self.current_thread_id = "t-1"
         self.model_name = "fake-model"
+        self.workspace_dir = "/fake/project"  # 项目随会话绑定后 gateway.ready 取它
         self._events = events or []
         self._notifications = list(notifications or [])
         self.closed = False

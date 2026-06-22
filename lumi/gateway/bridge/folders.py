@@ -6,14 +6,12 @@ bridge 反向引用，逻辑逐字照搬自原 AgentBridge。
 
 from __future__ import annotations
 
-import os
 from pathlib import Path
 from typing import TYPE_CHECKING
 
-from lumi.agents.core.hooks import load_hooks, reset_hooks
+from lumi.agents.core.hooks import build_config_hooks
 from lumi.agents.runtime.shell_session import get_shell_session_manager
 from lumi.models import provider_store
-from lumi.utils.workspace_id import get_workspace_dir
 
 if TYPE_CHECKING:
     from lumi.gateway.bridge.core import AgentBridge
@@ -26,44 +24,38 @@ class FolderManager:
         self._bridge = bridge
 
     async def set_workspace(self, path: str) -> dict:
-        """切换进程级工作目录（项目切换的后端入口）。
+        """把本会话（bridge）的项目切到 path——项目随会话绑定。
 
-        chdir 后系统信息注入、新建 checkpoint 的 workspace 元数据、会话列表过滤
-        全部跟随新目录；所有存活 bridge 的权限边界一并重建为新目录，共享 shell
-        会话重置使下一条 bash 命令在新目录启动。前端切项目后会另开新会话。
+        只 rebase 本 bridge 的权限引擎、重载本会话项目的 config hooks、更新 checkpoint
+        元数据、重置本会话当前 thread 的持久 shell（原地改项目时它仍驻留旧目录）。
+        **不动进程 cwd、不重建其它会话的边界、不碰进程级 hooks**——多会话各绑各项目，
+        互不影响。
         """
-        from lumi.gateway.bridge.core import _active_bridges
-
+        b = self._bridge
         target = Path(path).expanduser().resolve()
         if not target.is_dir():
             raise ValueError(f"目录不存在: {target}")
-        os.chdir(target)
-        # cwd 是进程级单一状态：让每个存活 bridge 的引擎都重建到新目录，
-        # 避免其它会话的引擎边界与 cwd 脱节（split-state）。各自保留本会话的临时目录。
-        for bridge in list(_active_bridges):
-            bridge._rebase_workspace(target)
-        # hooks 是进程全局且只加载一次（_LOADED 守卫）——切项目时同步重载，
-        # 否则新项目的 .lumi/hooks.json 永不生效、旧项目 hook 继续对新工作区触发。
-        reset_hooks()
-        load_hooks(target)
-        # bash 工具共用 "default" shell 会话，仍驻留旧目录，关闭后惰性重建
-        await get_shell_session_manager().close_session("default")
-        return {"workspace": get_workspace_dir()}
+        self.rebase_workspace(target)
+        # checkpoint 元数据跟随新项目（下一轮 checkpoint 用新目录）
+        if b._config is not None:
+            b._config.setdefault("metadata", {})["workspace_dir"] = b.workspace_dir
+        # 本会话当前 thread 的持久 shell 仍驻留旧目录，关闭后惰性重建到新项目
+        await get_shell_session_manager().close_session(b.current_thread_id)
+        return {"workspace": str(target)}
 
     def rebase_workspace(self, target: Path) -> None:
-        """把本 bridge 的权限引擎重建到 target，并重新挂上本会话的临时目录。
+        """把本 bridge 的权限引擎 + config hooks 重建到 target（会话级，不动进程）。
 
-        rebase 会从新项目重载配置、丢弃内存里的临时目录，故重建后重新加回——
-        既保住本会话的「添加文件夹」，又使 _notified_folders 仍与实际一致（不产生
-        虚假的「已移除」提醒）。
+        engine.rebase 只重载新项目的持久化配置，会话级 ephemeral workspace
+        （「添加文件夹」）存于引擎独立字段、跨 rebase 自动保留，无需重新加回。
+        config hooks 与引擎独立，随项目切换重载（下一轮 _stream 注入 per-run）。
         """
         b = self._bridge
+        b._config_hooks = build_config_hooks(target)
         engine = b._context.permission_engine if b._context else None
         if engine is None:
             return
         engine.rebase(target)
-        for folder in b._extra_folders:
-            engine.add_ephemeral_workspace(folder)
 
     def add_folder(self, path: str) -> dict:
         """临时把目录加进本会话可访问范围（仅内存，不持久化）。"""

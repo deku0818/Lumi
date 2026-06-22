@@ -17,6 +17,9 @@ type Dict = Record<string, string>
 
 const ZH: Dict = {
   'sidebar.newChat': '新对话',
+  'sidebar.reconnect': '重连',
+  'sidebar.offline': '连接已断开，设备可能离线',
+  'sidebar.connecting': '连接中…',
   'sidebar.noSessionsNew': '还没有会话 · 点此新建',
   'sidebar.recent': '最近',
   'sidebar.pinned': '置顶',
@@ -261,6 +264,9 @@ const ZH: Dict = {
 
 const EN: Dict = {
   'sidebar.newChat': 'New chat',
+  'sidebar.reconnect': 'Reconnect',
+  'sidebar.offline': 'Disconnected · device may be offline',
+  'sidebar.connecting': 'Connecting…',
   'sidebar.noSessionsNew': 'No sessions yet · start one',
   'sidebar.recent': 'Recents',
   'sidebar.pinned': 'Pinned',

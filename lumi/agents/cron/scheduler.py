@@ -403,13 +403,25 @@ class Scheduler:
             每次执行落在独立的 cron- thread 中（像普通会话一样可回看、可续聊），
             超时/失败的执行也保留中断前的现场。
         """
+        # 延迟 import：cron 经 bootstrap→cron.runtime→scheduler 在 tools/permissions 完成
+        # 初始化前就被加载，模块顶层引入 core.graph / core.hooks / permissions.workspace
+        # 都会触发 permissions/__init__→engine→tools→cron 的循环导入，故调用时再引入。
         from lumi.agents.core.graph import create_agent
+        from lumi.agents.core.hooks import build_config_hooks, set_run_config_hooks
+        from lumi.agents.permissions.workspace import set_run_authorized_source_for
 
         thread_id = generate_thread_id(CRON_THREAD_PREFIX) if self._checkpointer else ""
         # 执行中产生的后台任务归属本次 run 的 thread，通知不会被无关会话认领
         current_thread_id.set(thread_id)
         try:
             agent, context = await create_agent(checkpointer=self._checkpointer)
+            # cron 直接 ainvoke（不走 bridge._stream），需自行注入本 run 的授权目录来源
+            # 与项目 config hooks，否则 filesystem/bash 工具落回被并发会话清洗的进程全局、
+            # hooks 也读不到本 cron 项目。降级（无引擎）兜底与 bridge 共用同一 helper。
+            eng = context.permission_engine
+            set_run_authorized_source_for(eng)
+            proj = eng.project_dir if eng is not None else Path.cwd().resolve()
+            set_run_config_hooks(build_config_hooks(proj))
             inputs = {
                 "messages": [HumanMessage(content=job.prompt)],
                 "tool_mode": "privileged",

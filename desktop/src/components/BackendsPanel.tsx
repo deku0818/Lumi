@@ -3,6 +3,7 @@ import { Plus, Pencil, Trash2, Server } from 'lucide-react'
 import type { BackendRemote, BackendsState } from '../types'
 import { useI18n } from '../i18n'
 import { machineColor } from '@/lib/utils'
+import { Switch } from '@/components/ui/switch'
 
 // 一次性测试连接：开一条裸 WS（带 ?token=），open=通、1008=鉴权失败、其余=不可达。
 type TestState = { status: 'idle' | 'testing' | 'ok' | 'fail'; msgKey?: string }
@@ -58,10 +59,18 @@ export function BackendsPanel() {
   }, [])
 
   // 方案甲：所有机器同时连接，无"活动/切换"。增删后广播事件，App 据此开/关控制连接并刷新。
-  const notifyChanged = () => window.dispatchEvent(new Event('lumi:backends-changed'))
+  // reconnectId：编辑了某机器地址/token 时带上，App 据此换址重连（仅 syncBackends 不会重建已有连接）。
+  const notifyChanged = (reconnectId?: string) =>
+    window.dispatchEvent(new CustomEvent('lumi:backends-changed', { detail: { reconnectId } }))
   const remove = async (id: string) => {
     if (!api) return
     setState(await api.remove(id))
+    notifyChanged()
+  }
+  // 开关连接：enabled=false 表示已配置但不连接（持久化进 backends.json）
+  const toggle = async (id: string, enabled: boolean) => {
+    if (!api) return
+    setState(await api.save({ id, enabled }))
     notifyChanged()
   }
 
@@ -85,8 +94,10 @@ export function BackendsPanel() {
           name={r.name || r.url}
           sub={r.url}
           color={machineColor(r.id, [{ id: 'local' }, ...state.remotes])}
+          enabled={r.enabled !== false}
           onEdit={() => setEditing(r)}
           onDelete={() => remove(r.id)}
+          onToggle={(v) => toggle(r.id, v)}
         />
       ))}
 
@@ -106,7 +117,8 @@ export function BackendsPanel() {
             const next = await api?.save(draft)
             if (next) setState(next)
             setEditing(null)
-            notifyChanged()
+            // 编辑现有机器（draft.id 存在）→ 换址重连；新增则交给 syncBackends 建连
+            notifyChanged(draft.id)
           }}
         />
       )}
@@ -118,20 +130,28 @@ function MachineRow({
   name,
   sub,
   color,
+  enabled = true,
   onEdit,
   onDelete,
+  onToggle,
 }: {
   name: string
   sub: string
   color: string
+  enabled?: boolean
   onEdit?: () => void
   onDelete?: () => void
+  onToggle?: (enabled: boolean) => void
 }) {
   return (
-    <div className="group flex items-center gap-3 py-2.5 border-b border-line/20">
+    <div className={`group flex items-center gap-3 py-2.5 border-b border-line/20 ${enabled ? '' : 'opacity-50'}`}>
       <span
         className="shrink-0 size-2.5 rounded-full"
-        style={{ background: color, boxShadow: `0 0 6px ${color}` }}
+        style={
+          enabled
+            ? { background: color, boxShadow: `0 0 6px ${color}` }
+            : { border: '1.5px solid var(--color-separator)' }
+        }
       />
       <Server size={15} className="shrink-0 text-muted-foreground" />
       <div className="flex-1 min-w-0">
@@ -153,6 +173,9 @@ function MachineRow({
         >
           <Trash2 size={14} />
         </button>
+      )}
+      {onToggle && (
+        <Switch checked={enabled} onCheckedChange={onToggle} className="shrink-0 ml-1" />
       )}
     </div>
   )

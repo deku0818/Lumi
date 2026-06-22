@@ -1,8 +1,9 @@
 """Graph 节点级事件 hook 框架。
 
 公开 API：
-- ``register_hook(event, fn)``：注册 Python callable hook（FIFO）
-- ``prepend_hook(event, fn)``：注册到队列头部（YAML 配置加载用）
+- ``register_hook(event, fn)``：注册框架内置 Python callable hook（FIFO，进程全局）
+- ``build_config_hooks(project_dir)``：读项目 ``.lumi/hooks.json`` 构造 config hook 字典
+- ``set_run_config_hooks(hooks)``：把项目级 config hook 注入当前 run（per-run 隔离）
 - ``dispatch_hooks(event, ctx, *, default_goto, mode)``：在节点内分发
 - ``replace_hooks(event, hooks)``：测试 ctx manager
 - ``HookContext`` / ``HookEvent`` / ``Hook`` / ``HookResult``
@@ -18,14 +19,14 @@
 
 # import side effect：注册内置 hooks（structured_output_stop_hook）
 from lumi.agents.core.hooks import builtin  # noqa: F401
-from lumi.agents.core.hooks.config_loader import load_hooks, reset_hooks
+from lumi.agents.core.hooks.config_loader import build_config_hooks
 from lumi.agents.core.hooks.dispatch import (
     dispatch_hooks,
     has_hooks,
     iter_hooks,
-    prepend_hook,
     register_hook,
     replace_hooks,
+    set_run_config_hooks,
     unregister_hook,
 )
 from lumi.agents.core.hooks.schema import (
@@ -44,13 +45,12 @@ __all__ = [
     "HookContext",
     "HookEvent",
     "HookResult",
+    "build_config_hooks",
     "dispatch_hooks",
     "has_hooks",
     "iter_hooks",
-    "load_hooks",
-    "prepend_hook",
     "register_hook",
     "replace_hooks",
-    "reset_hooks",
+    "set_run_config_hooks",
     "unregister_hook",
 ]

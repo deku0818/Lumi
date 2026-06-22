@@ -10,7 +10,6 @@ from psycopg import AsyncConnection
 from psycopg.rows import dict_row
 
 from lumi.agents.core.base_graph import BaseGraph
-from lumi.agents.core.hooks import load_hooks
 from lumi.agents.core.nodes import (
     after_tool_executor,
     call_model,
@@ -246,6 +245,7 @@ async def create_agent(
     checkpoint: CheckpointMode | None = None,
     permission_engine: PermissionEngine | None = None,
     checkpointer: BaseCheckpointSaver | None = None,
+    project_dir: Path | None = None,
 ) -> tuple["LumiAgent", LumiAgentContext]:
     """创建 LumiAgent 及其上下文的工厂函数
 
@@ -261,6 +261,9 @@ async def create_agent(
                            None 时新建
         checkpointer: 直接复用已有 checkpointer 实例（如 cron 调度器常驻连接），
                       优先于 checkpoint 模式；调用方负责其生命周期
+        project_dir: 权限引擎绑定的项目根目录（None 时用进程 cwd）。项目随会话
+                     绑定后由调用方显式传入，新建引擎时不再依赖进程 cwd。
+                     hooks 已改为按会话经 contextvar 注入，此处不再加载。
 
     Returns:
         (agent, context) 元组
@@ -274,18 +277,12 @@ async def create_agent(
     if model_name is None:
         model_name = provider_store.resolve().model
 
-    # 复用或新建权限引擎
+    # 复用或新建权限引擎（项目根随会话绑定，调用方未传则退回进程 cwd）
     if permission_engine is None:
         try:
-            permission_engine = PermissionEngine(Path.cwd())
+            permission_engine = PermissionEngine(project_dir or Path.cwd())
         except Exception:
             logger.error("权限引擎创建失败，将以无权限模式运行", exc_info=True)
-
-    # 加载用户配置的 Shell hooks（幂等，进程内首次生效；坏配置 log 跳过不致命）
-    try:
-        load_hooks(Path.cwd())
-    except Exception:
-        logger.error("hooks 配置加载失败，已跳过", exc_info=True)
 
     if checkpointer is None:
         checkpointer = await create_checkpointer(checkpoint)

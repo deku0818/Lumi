@@ -75,6 +75,12 @@ Desktop 端：`lumi serve` 在 lifespan 中经 `setup_cron()` 启动调度器，
 - **级联删除**：删除任务时一并清理执行日志与全部历史会话 checkpoint
   （`Scheduler.purge_job_data`）；一次性（at）任务执行完自删时不级联（保留结果可查）
 - checkpointer 初始化失败时退化为无会话模式（thread_id 为空，仅摘要可见）
+- **per-run 授权 / hooks 注入**：cron 直接 `agent.graph.ainvoke`（不走 bridge `_stream`），
+  故 `_invoke_agent` 起点自行经 `set_run_authorized_source_for(engine)` +
+  `set_run_config_hooks(build_config_hooks(proj))` 把本 cron 项目的授权目录来源与 config
+  hooks 注入 per-run contextvar，否则 filesystem/bash 工具会落回被并发 WS 会话
+  `set_workspace` 清洗过的进程全局（与 bridge 共用同一降级 helper）。详见
+  [permissions.md](permissions.md) / [hooks.md](hooks.md)
 
 ---
 

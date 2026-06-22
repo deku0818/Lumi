@@ -244,7 +244,8 @@ export interface PresentedFile {
 }
 
 // 远程后端（机器）注册项；本地 sidecar 是隐式后端（id='local'），不入此表。
-export type BackendRemote = { id: string; name: string; url: string; token: string }
+// enabled=false：已配置但不连接（不开控制连接、侧栏隐藏）；缺省视为启用。
+export type BackendRemote = { id: string; name: string; url: string; token: string; enabled?: boolean }
 export type BackendsState = { active: string; remotes: BackendRemote[] }
 
 declare global {

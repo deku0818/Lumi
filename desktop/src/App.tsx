@@ -262,7 +262,7 @@ export default function App() {
   const [cmdDismissed, setCmdDismissed] = useState(false)
   const [sessions, setSessions] = useState<SessionMeta[]>([])
   // 方案甲多机：机器列表（本地恒在 + 远程）与各机控制连接状态
-  const [machines, setMachines] = useState<{ id: string; name: string }[]>([
+  const [machines, setMachines] = useState<{ id: string; name: string; enabled?: boolean }[]>([
     { id: 'local', name: '本地' },
   ])
   const [machineConn, setMachineConn] = useState<Record<string, ConnState>>({})
@@ -597,9 +597,22 @@ export default function App() {
       return new Promise((resolve) => {
         void (async () => {
           const { wsUrl } = await window.lumi.getConnection(backendId)
-          const gw = new Gateway(wsUrl)
+          // open 握手携带 workspace：后端据此把本会话引擎直接 pin 到该项目（项目随会话
+          // 绑定，不动进程 cwd），省掉 ready 后再 switch 改项目的来回。重连复用同一 URL，
+          // 故新 bridge 也会被重新 pin。
+          // new URL 对非法地址会抛（远程机器 URL 仅经弱校验入库）；catch 后退回原始串交给
+          // WebSocket 层，其 onclose→failed 优雅降级，避免抛进本 IIFE 致 Promise 永不 resolve。
+          let connectUrl = wsUrl
+          try {
+            const u = new URL(wsUrl)
+            if (targetWorkspace) u.searchParams.set('workspace', targetWorkspace)
+            connectUrl = u.toString()
+          } catch {
+            /* 非法 URL：保留原始串，连接失败由 Gateway 的重连/failed 态呈现 */
+          }
+          const gw = new Gateway(connectUrl)
           let myThread = ''
-          // 本连接所属项目；重连得到全新 bridge 后据此把 cwd 切回，否则会落到进程默认目录
+          // 本连接所属项目；重连得到全新 bridge 后据此切回原 thread + 重放临时目录
           let myWorkspace = ''
           let ready = false
           gw.onEvent((ev) => {
@@ -637,15 +650,15 @@ export default function App() {
                   const r = await gw.loadHistory(targetThread)
                   myThread = targetThread
                   myWorkspace = targetWorkspace
-                  // 后端 cwd 已切到本会话项目，同步当前项目指示（握手时的 workspace 是切前的）
+                  // 引擎已在 open 握手 pin 到本会话项目；同步当前项目指示
                   if (targetWorkspace) setWorkspaceDir(targetWorkspace)
                   connsRef.current[targetThread] = gw
                   setStore((s) => ({ ...s, [targetThread]: emptySession(r.items.map(restore)) }))
                   resolve(targetThread)
                 })()
               } else {
-                // 新会话：用握手分配的 thread；记录其实际所在项目（握手下发的 cwd），
-                // 否则重连时会重放空 workspace，落到进程当时的 cwd（可能是别的项目）。
+                // 新会话：用握手分配的 thread；记录其所在项目（open 已 pin，握手下发的
+                // workspace 即本会话项目），供重连时切回原 thread。
                 myThread = ev.session_id ?? ''
                 myWorkspace = ev.payload.workspace || ''
                 connsRef.current[myThread] = gw
@@ -789,22 +802,35 @@ export default function App() {
     [refreshSessions, refreshCronJobs],
   )
 
+  // 重连某机器：重新从配置取最新地址（设置里可能改过 url/token）再 reconnect，
+  // 否则 Gateway 仍持有构造时的旧地址。启用的机器其连接恒在 controlConns 里（失败态不删），
+  // 走到无连接分支的只有已禁用/已删机器——这些不该建连（建连由 syncBackends 按 enabled 决定）。
+  const reconnectMachine = useCallback(async (backend: string) => {
+    const gw = controlConns.current[backend]
+    if (!gw) return
+    const { wsUrl } = await window.lumi.getConnection(backend)
+    gw.setUrl(wsUrl)
+    gw.reconnect()
+  }, [])
+
   // 同步机器表 → 开新机器的控制连接、关掉已删机器的，刷新会话。BackendsPanel 增删后回调此。
   const syncBackends = useCallback(async () => {
     const data = await window.lumi.backends?.list()
+    // 全量（含已禁用）入 machines：machineColor 按数组下标取色，删项会让其余机器串色
     const list = [
-      { id: 'local', name: '本地' },
-      ...(data?.remotes ?? []).map((r) => ({ id: r.id, name: r.name || r.url })),
+      { id: 'local', name: '本地', enabled: true },
+      ...(data?.remotes ?? []).map((r) => ({ id: r.id, name: r.name || r.url, enabled: r.enabled !== false })),
     ]
     setMachines(list)
-    const wanted = new Set(list.map((m) => m.id))
+    // 仅对启用的机器开控制连接；禁用的（含本次刚关掉的）一并断开
+    const wanted = new Set(list.filter((m) => m.enabled !== false).map((m) => m.id))
     for (const [id, gw] of Object.entries(controlConns.current)) {
       if (!wanted.has(id)) {
         gw.close()
         delete controlConns.current[id]
       }
     }
-    for (const m of list) openControlConn(m.id)
+    for (const id of wanted) openControlConn(id)
     void refreshSessions()
   }, [openControlConn, refreshSessions])
 
@@ -826,12 +852,17 @@ export default function App() {
     }
   }, [openConnection, syncBackends])
 
-  // BackendsPanel 增删远程机器后广播此事件 → 重连各机器、刷新合并列表（无 reload）
+  // BackendsPanel 增删/编辑远程机器后广播此事件 → 重连各机器、刷新合并列表（无 reload）。
+  // detail.reconnectId：编辑了某机器的地址/token，需对该机器换址重连（syncBackends 幂等不会重建）。
   useEffect(() => {
-    const onChanged = () => void syncBackends()
+    const onChanged = (e: Event) => {
+      void syncBackends()
+      const id = (e as CustomEvent<{ reconnectId?: string }>).detail?.reconnectId
+      if (id) void reconnectMachine(id)
+    }
     window.addEventListener('lumi:backends-changed', onChanged)
     return () => window.removeEventListener('lumi:backends-changed', onChanged)
-  }, [syncBackends])
+  }, [syncBackends, reconnectMachine])
 
   // 按机器拉项目（方案甲先选机器）：projects + 该机器当前项目（projectsCurrent）。
   // 活动会话的 workspaceDir 由 activate/gateway.ready 维护，与项目视图分离。
@@ -939,9 +970,9 @@ export default function App() {
 
   // 在指定机器开新会话（方案甲：边栏每台机器各有「＋新对话」）。空远程也能从此开聊。
   const newSession = useCallback(
-    async (backend = 'local') => {
+    async (backend = 'local', workspace = '') => {
       setView('chat')
-      await activate(null, '', backend)
+      await activate(null, workspace, backend)
       void refreshSessions()
     },
     [activate, refreshSessions],
@@ -974,18 +1005,18 @@ export default function App() {
     [refreshProjects],
   )
 
-  // 打开项目 = 在该机器把 cwd 切到此目录 → 在该机器开新会话进入聊天
+  // 打开项目 = 在该机器开一条绑定到此项目的新会话（项目经 open 握手随会话绑定，
+  // 不再先在共享连接上 setWorkspace 改进程态——那对新会话的独立连接无效）
   const openProject = useCallback(
     async (path: string, backend = 'local') => {
       try {
-        await gwForBackend(backend)?.setWorkspace(path)
         setProjectsCurrent(path)
-        await newSession(backend)
+        await newSession(backend, path)
       } catch {
         /* 忽略：连接波动时静默 */
       }
     },
-    [gwForBackend, newSession],
+    [newSession],
   )
 
   // 新建项目：在该机器登记（带名）→ 进入该项目
@@ -1454,7 +1485,7 @@ export default function App() {
             providers={providers}
             active={activeModel}
             machine={
-              machines.length > 1
+              machines.filter((m) => m.enabled !== false).length > 1
                 ? { name: machineName(activeBackend, machines), color: machineColor(activeBackend, machines) }
                 : undefined
             }
@@ -1524,6 +1555,7 @@ export default function App() {
         onSelect={selectSession}
         onNew={() => void newSession()}
         onNewChat={(backend) => void newSession(backend)}
+        onReconnectMachine={(backend) => void reconnectMachine(backend)}
         onOpenProjects={openProjects}
         onOpenScheduled={openScheduled}
         onOpenSettings={openSettings}
@@ -1758,7 +1790,7 @@ export default function App() {
         <ConfirmDialog
           title={t('confirm.deleteTitle')}
           message={t('confirm.deleteMessage', {
-            name: pendingDelete.title || pendingDelete.first_message || t('sidebar.untitled'),
+            name: clip(pendingDelete.title || pendingDelete.first_message || t('sidebar.untitled'), 48),
           })}
           onConfirm={() => deleteSession(pendingDelete)}
           onCancel={() => setPendingDelete(null)}

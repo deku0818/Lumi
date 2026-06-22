@@ -14,7 +14,9 @@ import {
   Check,
   ChevronsUpDown,
   Plus,
+  RotateCw,
   Search,
+  WifiOff,
   X,
 } from 'lucide-react'
 import type { ConnState } from '../gateway'
@@ -37,9 +39,10 @@ const CONN_DOT: Record<ConnState, string> = {
   connecting: 'bg-primary',
   open: 'bg-success',
   closed: 'bg-error',
+  failed: 'bg-error',
 }
 
-type Machine = { id: string; name: string }
+type Machine = { id: string; name: string; enabled?: boolean }
 const CAP = 5 // 每个项目分组默认显示的会话数（置顶/进行中不计入，永远显示）
 
 const projName = (dir: string) => (dir ? basename(dir) : '默认')
@@ -99,6 +102,7 @@ export const Sidebar = memo(function Sidebar({
   onSelect,
   onNew,
   onNewChat,
+  onReconnectMachine,
   onOpenProjects,
   onOpenScheduled,
   onOpenSettings,
@@ -126,6 +130,7 @@ export const Sidebar = memo(function Sidebar({
   onSelect: (threadId: string) => void
   onNew: () => void
   onNewChat: (backend: string) => void
+  onReconnectMachine: (backend: string) => void
   onOpenProjects: () => void
   onOpenScheduled: () => void
   onOpenSettings: () => void
@@ -157,7 +162,9 @@ export const Sidebar = memo(function Sidebar({
       return n
     })
 
-  const multi = machines.length > 1
+  // 禁用（已配置但不连接）的机器从侧栏隐藏；machineColor 仍用全量 machines 保持配色稳定
+  const visibleMachines = machines.filter((m) => m.enabled !== false)
+  const multi = visibleMachines.length > 1
   const dispName = (s: SessionMeta) => s.title || s.first_message || t('sidebar.untitled')
   const q = query.trim()
   const filtering = !!q
@@ -222,9 +229,10 @@ export const Sidebar = memo(function Sidebar({
     const collapsed = !!collapsedM[m.id]
     const color = machineColor(m.id, machines)
     const cn = machineConn[m.id]
+    const offline = cn === 'closed' || cn === 'failed'
     const groups = projectGroupsFor(sessions, m.id, workspaceDir)
     return (
-      <div key={m.id} className={`mt-0.5 ${cn === 'closed' ? 'opacity-60' : ''}`}>
+      <div key={m.id} className={`mt-0.5 ${offline ? 'opacity-60' : ''}`}>
         <div className="flex items-center gap-1.5 px-2 pt-2 pb-0.5">
           <button onClick={() => toggleM(m.id)} className="flex flex-1 min-w-0 items-center gap-1.5 text-left">
             <ChevronRight
@@ -234,7 +242,7 @@ export const Sidebar = memo(function Sidebar({
             <span
               className={`shrink-0 size-2 rounded-full ${cn === undefined || cn === 'connecting' ? 'animate-pulse' : ''}`}
               style={
-                cn === 'closed'
+                offline
                   ? { border: '1.5px solid var(--color-separator)', opacity: 0.65 }
                   : { background: color, boxShadow: `0 0 5px ${color}` }
               }
@@ -253,6 +261,23 @@ export const Sidebar = memo(function Sidebar({
         {!collapsed &&
           (groups.length ? (
             groups.map((pg) => renderProject(m.id, pg))
+          ) : cn === 'connecting' ? (
+            <div className="px-3 py-1.5 text-xs text-muted-foreground/60 animate-pulse">
+              {t('sidebar.connecting')}
+            </div>
+          ) : offline ? (
+            // 离线（重连耗尽/退避中）：建会话无意义，改显示离线占位 + 重连
+            <div className="flex flex-col items-center gap-2 px-3 py-4 text-center">
+              <WifiOff size={22} className="text-separator" />
+              <span className="text-xs text-muted-foreground">{t('sidebar.offline')}</span>
+              <button
+                onClick={() => onReconnectMachine(m.id)}
+                className="inline-flex items-center gap-1.5 rounded-lg border border-line bg-surface px-3 py-1.5 text-xs text-ink transition hover:border-primary hover:text-primary"
+              >
+                <RotateCw size={13} />
+                {t('sidebar.reconnect')}
+              </button>
+            </div>
           ) : (
             <button
               onClick={() => onNewChat(m.id)}
@@ -306,11 +331,14 @@ export const Sidebar = memo(function Sidebar({
     )
   } else {
     const localGroups = projectGroupsFor(sessions, 'local', workspaceDir)
+    // 已关闭机器的定时任务不显示（刷新时序可能残留旧 job，按可见机器过滤兜底）
+    const visibleIds = new Set(visibleMachines.map((m) => m.id))
+    const visibleCron = cronJobs.filter((j) => visibleIds.has(j.backend || 'local'))
     content = (
       <>
-        {cronJobs.length > 0 && (
+        {visibleCron.length > 0 && (
           <CollapsibleGroup label={t('sidebar.scheduled')} storageKey="scheduled">
-            {cronJobs.map((job) => (
+            {visibleCron.map((job) => (
               <CronJobRow
                 key={job.id}
                 job={job}
@@ -325,7 +353,7 @@ export const Sidebar = memo(function Sidebar({
           </CollapsibleGroup>
         )}
         {multi
-          ? machines.map(renderMachine)
+          ? visibleMachines.map(renderMachine)
           : localGroups.length
             ? localGroups.map((pg) => renderProject('local', pg))
             : (

@@ -18,7 +18,7 @@ lumi/agents/permissions/
 ├── safety.py         # Bypass-immune 安全检查：受保护文件/命令检测
 ├── validators.py     # Bash 命令安全警告（非阻断）
 ├── mode_policy.py    # 执行模式策略（plan/readonly）
-└── workspace.py      # 授权路径管理（全局状态，供 filesystem provider 使用）
+└── workspace.py      # 授权路径管理（进程全局兜底 + per-run contextvar 覆盖，供 filesystem provider 使用）
 
 lumi/agents/tools/capability.py  # 只读/写入工具判定 + bash 复合命令拆分
 ```
@@ -175,7 +175,9 @@ _STRICTNESS = {Permission.DENY: 0, Permission.ASK: 1, Permission.ALLOW: 2}
 
 - `add_allow_rule(tool_expr)` — 持久化到 `permissions.local.json`（审批对话框「始终允许」触发），内存与文件均去重
 - `add_workspace(directory)` — 持久化并重建边界检查器
-- `add_ephemeral_workspace(directory)` / `remove_ephemeral_workspace(directory)` — 仅内存（会话级「添加文件夹」用）
+- `add_ephemeral_workspace(directory)` / `remove_ephemeral_workspace(directory)` — 会话级「添加文件夹」，存于引擎独立字段 `_ephemeral_workspaces`（仅内存、不持久化；与会被 `reload()`/`rebase()` 从磁盘覆盖的 `_config.workspaces` 分离，故跨配置重载/项目切换存活）
+- `authorized_directories()` — 返回本引擎当前边界（项目根 + 配置 workspaces + 会话级 ephemeral），即每轮 run 注入给 per-run 授权来源的值
+- `project_dir` — 本引擎绑定的项目根（会话级，随 `rebase` 变化）
 - `add_ephemeral_rules(allow_exprs)` — 仅内存，不持久化（CLI `--allow` 参数）
 - `reload()` — 检查文件 mtime 变更后重新加载，重建边界失败时回滚旧配置
 
@@ -309,14 +311,18 @@ _STRICTNESS = {Permission.DENY: 0, Permission.ASK: 1, Permission.ALLOW: 2}
 
 ## 授权路径管理（workspace.py）
 
-模块级全局授权目录列表，供 filesystem provider 的 `validate_path()` 使用：
+filesystem provider 的 `validate_path()` 与 bash 工作目录都经此读取授权目录。**两层来源，读取时 per-run 覆盖优先于进程全局兜底**：
 
-- `set_authorized_directory(path)` — 重置列表为单个主目录
-- `add_authorized_directory(path)` — 追加额外目录
-- `get_authorized_directory()` / `get_all_authorized_directories()` — 读取
-- `validate_path(path)` — 检查路径是否在任一授权目录下，不在则抛出 `PermissionError`
+- **进程全局兜底** `_authorized_directories`：无 run 上下文时使用（测试、启动期），由 `PermissionEngine._rebuild_boundary()` 在初始化/重载时经 `set_authorized_directory()`（重置为主目录）+ `add_authorized_directory()`（追加）同步。
+- **per-run 覆盖** `_run_authorized_source` contextvar：每次 agent run 由 bridge（`_stream` 起点）/ cron（`_invoke_agent` 起点）经 `set_run_authorized_source_for(engine, extra_folders)` 注入本会话引擎的 `authorized_directories` 方法（**实时回调，非快照**）。设置后覆盖兜底。
 
-`PermissionEngine._rebuild_boundary()` 在初始化和配置重载时自动同步。
+读取 API（`get_authorized_directory()` / `get_all_authorized_directories()` / `validate_path()`）一律走「run 覆盖 → 全局兜底 → cwd」三级。
+
+**为什么用 per-run contextvar 而非纯进程全局**：一个 `lumi serve` 进程承载多条 WS 连接（每连接一个 bridge / engine），项目随会话绑定（见 [desktop.md](desktop.md)）。若各 engine 都只写同一个进程全局，并发会话会互相清洗——A 会话「添加的目录」会被 B 会话重建边界时抹掉。contextvar 按 run 隔离，各读各的引擎边界；存**实时回调**而非快照，使后台子代理（`asyncio.create_task` 拷贝上下文）与跨工具步 `reload()` 都能即时看到引擎边界的变化。
+
+`set_run_authorized_source_for(engine, ...)` 是 bridge / cron 共用封装：有引擎注入其实时回调；无引擎（构造失败的降级态）降级为 `[cwd, *extra_folders]` 的本轮快照。
+
+> 子代理另经 `shell_session.run_with_shell` 在 `copy_context` 副本里隔离各自的 shell 会话（`cd`/env 不串父/兄弟、用完回收），见 [desktop.md](desktop.md)。
 
 ---
 

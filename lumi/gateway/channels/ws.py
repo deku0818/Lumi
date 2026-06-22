@@ -13,7 +13,7 @@
         save_provider   params: {profile}  # profile.models:[...]         → {profiles:[...], active}
         delete_provider params: {id}                                      → {profiles:[...], active}
         set_effort      params: {provider, model, level}                  → {effort}  # 档位 ∈ 该模型能力(models.dev)
-        set_workspace   params: {path}                                    → {workspace}  # 进程级（切项目）
+        set_workspace   params: {path}                                    → {workspace}  # 会话级（绑定本连接项目，不动进程 cwd）
         list_projects   params: {}                                        → {projects:[...], current}
         add_project     params: {path}                                    → {projects:[...]}
         remove_project  params: {path}                                    → {projects:[...]}
@@ -38,7 +38,8 @@
         事件帧  {method: "event", params: <wire event>}   # 见 protocol.py
         响应帧  {id, result}  或  {id, error: {message}}
 
-一个 WS 连接 = 一个 GatewaySession（独立 AgentBridge，可切换 thread）。本模块退化为
+一个 WS 连接 = 一个 GatewaySession（独立 AgentBridge，可切换 thread）。连接 URL 可带
+``?token=``（鉴权）与 ``?workspace=``（本会话项目，open 时直接 pin 引擎）。本模块退化为
 传输适配：把 fastapi WebSocket 包成 Channel（WsChannel），编排/分发/并发全在
 GatewaySession（见 session.py）。
 """
@@ -97,7 +98,9 @@ async def ws_endpoint(ws: WebSocket) -> None:
         await ws.close(code=1008)
         return
     bridge = AgentBridge()
-    await bridge.initialize()
+    # open 握手携带 ?workspace=：直接把本会话引擎 pin 到其项目（项目随会话绑定），
+    # 省掉 ready 后再 switch_session rebase 的来回。缺省 / 无效则退回进程 cwd。
+    await bridge.initialize(project_dir=ws.query_params.get("workspace", ""))
     session = GatewaySession(bridge, WsChannel(ws), hub)
     await session.start()
     try:

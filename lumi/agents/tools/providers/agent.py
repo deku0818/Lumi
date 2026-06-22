@@ -20,6 +20,7 @@ from lumi.agents.runtime.bg_tasks import (
     make_bg_done_callback,
     run_background_task,
 )
+from lumi.agents.runtime.shell_session import run_with_shell
 from lumi.agents.tools.loader import AgentConfig, load_agents
 from lumi.agents.tools.registry import get_tool_registry
 from lumi.utils.logger import logger
@@ -145,11 +146,15 @@ async def agent(
     if run_in_background:
         return _start_background_agent(name, prompt, lumi_agent, context)
 
-    # 前台同步执行路径（不变）
+    # 前台同步执行路径
     tool_mode: str = runtime.state.get("tool_mode", "default")
     logger.debug("[agent tool] resolved tool_mode=%s", tool_mode)
     inputs = {"messages": [HumanMessage(content=prompt)], "tool_mode": tool_mode}
-    invoke_result = await lumi_agent.graph.ainvoke(inputs, context=context)
+    # 子代理独立 shell：cd/env 不污染父与兄弟代理；用完即回收
+    sub_key = f"sub-{uuid.uuid4().hex[:_TASK_ID_HEX_LENGTH]}"
+    invoke_result = await run_with_shell(
+        sub_key, lumi_agent.graph.ainvoke(inputs, context=context)
+    )
 
     content = invoke_result["messages"][-1].content if invoke_result["messages"] else ""
     return extract_ainvoke_content(content)
@@ -218,7 +223,10 @@ async def _run_agent_background(
     from lumi.agents.core.response import extract_ainvoke_content
 
     async def _produce() -> str:
-        invoke_result = await lumi_agent.graph.ainvoke(inputs, context=context)
+        # 后台子代理独立 shell（键用 task_id，已唯一）：与父/兄弟隔离、用完回收
+        invoke_result = await run_with_shell(
+            task_id, lumi_agent.graph.ainvoke(inputs, context=context)
+        )
         msgs = invoke_result["messages"]
         return extract_ainvoke_content(msgs[-1].content if msgs else "")
 

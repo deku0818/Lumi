@@ -14,7 +14,10 @@ import type {
   WireEvent,
 } from './types'
 
-export type ConnState = 'connecting' | 'open' | 'closed'
+// failed = 退避重试耗尽，已放弃自动重连，等用户主动点击重连
+export type ConnState = 'connecting' | 'open' | 'closed' | 'failed'
+
+const MAX_RETRY = 5 // 连续失败这么多次后停止自动重连
 
 type EventHandler = (ev: WireEvent) => void
 type StateHandler = (s: ConnState) => void
@@ -30,9 +33,30 @@ export class Gateway {
   private closedByUser = false
   private reconnectTimer: ReturnType<typeof setTimeout> | null = null
 
-  constructor(private readonly url: string) {}
+  constructor(private url: string) {}
+
+  // 地址可能在设置里被改（编辑远程机器的 url/token）；调用方在重连前更新，下次 connect 生效
+  setUrl(url: string): void {
+    this.url = url
+  }
+
+  // 弃用当前 socket：解绑回调（否则其 onclose 还会再排一次重连）、reject 在飞请求、关闭。
+  // reconnect() 可能在 open/connecting 态调用，不先弃用旧 socket 会泄漏它并引发重连风暴。
+  private teardown(): void {
+    const ws = this.ws
+    if (!ws) return
+    ws.onopen = ws.onclose = ws.onmessage = ws.onerror = null
+    this.ws = null
+    this.flushPending(new Error('连接已断开'))
+    try {
+      ws.close()
+    } catch {
+      /* 已关闭/未建立：忽略 */
+    }
+  }
 
   connect(): void {
+    this.teardown()
     this.setState('connecting')
     const ws = new WebSocket(this.url)
     this.ws = ws
@@ -53,10 +77,15 @@ export class Gateway {
         console.warn('[gateway] 鉴权失败 (1008)，停止重连：', this.url)
         return
       }
-      if (!this.closedByUser) {
-        const delay = Math.min(8000, 500 * 2 ** Math.min(this.retry++, 4))
-        this.reconnectTimer = setTimeout(() => this.connect(), delay)
+      if (this.closedByUser) return
+      // 退避重试耗尽：停在 failed 态，不再自动重连，等用户从连接灯主动点重连
+      if (this.retry >= MAX_RETRY) {
+        this.setState('failed')
+        console.warn(`[gateway] 重连 ${MAX_RETRY} 次失败，停止自动重连：`, this.url)
+        return
       }
+      const delay = Math.min(8000, 500 * 2 ** Math.min(this.retry++, 4))
+      this.reconnectTimer = setTimeout(() => this.connect(), delay)
     }
     ws.onmessage = (e) => this.onMessage(JSON.parse(e.data))
   }
@@ -193,7 +222,8 @@ export class Gateway {
     return this.request<{ sessions: SessionMeta[] }>('list_sessions', { limit: 50 })
   }
 
-  // workspace：会话所属项目目录；切入时让后端把进程 cwd 切过去（方案甲跨项目）
+  // workspace：会话所属项目目录；切入时把本连接引擎绑定到该项目（会话级，不动进程 cwd）。
+  // 新连接已在 open 握手 pin，这里多为切 thread；workspace 一致则后端跳过 rebase。
   switchSession(threadId: string, workspace = ''): Promise<{ thread_id: string }> {
     return this.request<{
       thread_id: string
@@ -292,6 +322,14 @@ export class Gateway {
   private flushPending(err: unknown): void {
     for (const p of this.pending.values()) p.reject(err)
     this.pending.clear()
+  }
+
+  // 用户主动重连：清零退避计数，从 failed/closed 态重新发起连接
+  reconnect(): void {
+    if (this.reconnectTimer) clearTimeout(this.reconnectTimer)
+    this.retry = 0
+    this.closedByUser = false
+    this.connect()
   }
 
   // 关闭后不可复用：退避中的重连定时器一并取消，否则定时器触发会复活

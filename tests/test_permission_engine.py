@@ -402,6 +402,36 @@ class TestWorkspaceBoundary:
             is False
         )
 
+    def test_ephemeral_workspace_survives_reload(self):
+        """回归：会话级临时目录不应被 reload 清洗。
+
+        ephemeral 目录曾被存进 _config.workspaces，任何写权限配置文件的动作
+        （如审批「总是允许」→ add_allow_rule → save_local）会改 mtime，下一次
+        工具批次的 engine.reload() 从磁盘重载配置（不含 ephemeral）即把它撤销，
+        导致用户「明明加了文件夹却仍被拒」。现存独立字段，须跨 reload 存活。
+        """
+        from lumi.agents.permissions.workspace import get_all_authorized_directories
+
+        project_dir = Path(tempfile.mkdtemp()).resolve()
+        extra = Path(tempfile.mkdtemp()).resolve()
+        (project_dir / ".lumi").mkdir(exist_ok=True)
+        engine = PermissionEngine(project_dir)
+        engine.add_ephemeral_workspace(str(extra))
+
+        # 模拟审批「总是允许」：写 local 配置文件 → 触发 needs_reload
+        engine.add_allow_rule("bash(ls *)")
+        assert engine._loader.needs_reload() is True
+        engine.reload()
+
+        assert (
+            engine.check_workspace_boundary(
+                "write", {"file_path": str(extra / "f.txt")}
+            )
+            is True
+        )
+        # filesystem 层全局授权目录（validate_path 用）也须保留 ephemeral
+        assert extra in get_all_authorized_directories()
+
 
 class TestPersistence:
     """规则持久化测试"""

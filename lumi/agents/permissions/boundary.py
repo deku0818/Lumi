@@ -61,6 +61,11 @@ class WorkspaceBoundary:
             except OSError:
                 logger.warning("工作区路径解析失败: %s", ws)
 
+    @property
+    def workspaces(self) -> list[Path]:
+        """已授权工作区列表（解析后绝对路径，项目根 / 主目录在首位）。"""
+        return list(self._workspaces)
+
     def is_within_boundary(self, path: str | Path) -> bool:
         """检查路径是否在任一工作区边界内。
 

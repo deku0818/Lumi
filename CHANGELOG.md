@@ -1,5 +1,23 @@
 # Changelog
 
+## [0.2.0a4] - 2026-06-22
+
+### Added
+- **项目随会话绑定 + open 握手携带 workspace** — 连接 URL 新增 `?workspace=`（与 `?token=` 同机制），`bridge.initialize(project_dir=...)` 据此在建引擎时直接 pin 到本会话项目，省掉 ready 后再 `set_workspace` rebase 的来回；前端「打开项目」改为经 open 握手开一条绑定到该项目的新会话
+- **远程机器连接开关 + 手动重连 / 离线态** — 远程机器可「已配置但不连接」（enable 开关持久化进 backends.json，关闭则不开控制连接、侧栏隐藏）；自动重连超 `MAX_RETRY` 转 `failed` 态停在等用户手动重连（侧栏重连按钮 / 离线提示）；编辑机器地址 / token 经 `setUrl` 换址重连
+
+### Changed
+- **项目从进程级改为会话级绑定** — 工作目录不再是进程级单一 `os.chdir`：每条 WS 连接一个引擎、pin 到本会话项目，`set_workspace` 只 rebase 本 bridge 引擎 + 重载本会话 hooks + 重置本会话 shell，**不动进程 cwd、不影响其它会话**；删除进程级 `_active_bridges` rebase-all。同进程多会话可各绑各项目、并发互不串扰
+- **filesystem / bash 授权目录与 hooks 改 per-run 隔离** — 授权目录来源、config hooks 改为 per-run contextvar（覆盖进程全局兜底），bridge / cron 在 run 起点注入本会话引擎的来源；hooks config 去进程单例（`build_config_hooks` 返回式构造 + per-run 注入，builtin 仍全局）；会话级「添加文件夹」改存引擎独立字段 `_ephemeral_workspaces`（与从磁盘重载的 `_config.workspaces` 分离，跨 reload / 项目切换存活）；`system_info` 的 cwd、bash 工作目录、`workspace_dir` 元数据均改取本会话
+- **bash 持久 shell 按会话 / 子代理隔离** — shell 不再全进程共用一个 `"default"`，按 `current_thread_id` 分（会话私有，`cd`/env 不串），断连 / 删会话时回收；子代理经 `shell_session.run_with_shell` 在 `copy_context` 副本里拿独立 shell（`cd` 不污染父 / 兄弟、用完即弃）
+- **架构文档对齐** — 重写 `desktop.md` / `permissions.md` / `hooks.md` / `cron.md`（原文描述的是已改掉的进程级 cwd / hooks 单例模型）
+
+### Fixed
+- **scheduler 顶层 import 触发循环导入致 `lumi serve` 启动失败 / 本地会话连不上** — `cron.scheduler` 在 tools / permissions 初始化前被加载，顶层 import `permissions.workspace` / `core.hooks` 形成 `permissions → engine → tools → cron → scheduler` 环；改为 `_invoke_agent` 内延迟 import，新增「全新解释器导入 serve 入口」冒烟测试守住此类只在 serve 导入顺序下复现的回归
+- **前端 `new URL(wsUrl)` 对非法远程地址抛错致连接卡死** — 弱校验（`startsWith('ws')`）入库的畸形 URL 会让 `new URL` 抛进 `openConnection` 的 IIFE、Promise 永不 resolve、UI 卡在 connecting；改 try/catch 退回原始串交 WebSocket 层走重连 / failed 优雅降级
+- **cron 直接 ainvoke 不注入 per-run 授权来源** — 降级落回被并发 WS 会话 `set_workspace` 清洗过的进程全局，可能在错项目执行；cron 自注入本项目来源（含 engine-None 降级兜底，与 bridge 对称）
+- **子代理共用父 shell / shell 永不回收 / set_workspace 关错 thread shell** — 子代理 `cd` 互串父与兄弟（改独立 shell）；按 thread 分 shell 后断连 / 删会话不回收致孤儿 bash 进程累积（补回收）；`_switch_session` 中 `set_workspace` 在 `switch_thread` 前跑导致关到切出会话的 shell（调换顺序）
+
 ## [0.2.0a3] - 2026-06-22
 
 ### Added
