@@ -492,8 +492,10 @@ export default function App() {
       let body = ''
       if (type === 'turn.complete') {
         title = t('notify.responseDone')
-        const first = storeRef.current[sid]?.items.find((it) => it.kind === 'user')
-        body = first && first.kind === 'user' ? first.text : ''
+        // 取最后一条 user 消息（本轮触发的 prompt），而非 .find 拿到的会话首条
+        const items = storeRef.current[sid]?.items ?? []
+        const last = [...items].reverse().find((it) => it.kind === 'user')
+        body = last && last.kind === 'user' ? last.text : ''
       } else if (type === 'approval.request') {
         title = t('approval.title')
         body = (payload.tool_calls ?? []).map((c: { name?: string }) => c.name).join(', ')
@@ -864,6 +866,12 @@ export default function App() {
       if (!wanted.has(id)) {
         gw.close()
         delete controlConns.current[id]
+        // 清掉残留连接态：close() 不触发 onState，否则重新启用时会先闪一下旧的「已连接」
+        setMachineConn((m) => {
+          const next = { ...m }
+          delete next[id]
+          return next
+        })
       }
     }
     for (const id of wanted) openControlConn(id)

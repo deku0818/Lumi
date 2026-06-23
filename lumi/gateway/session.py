@@ -553,6 +553,19 @@ class GatewaySession:
         async with self._run.lock:
             return await self._pump(gen)
 
+    async def _finish_cancelled_turn(self) -> None:
+        """被 stop 取消后的统一收尾：清 awaiting_resume + 补发 turn.complete 结束前端
+        running 态。用户流式轮与后台通知轮共用。"""
+        self._run.awaiting_resume = False
+        with suppress(Exception):
+            await self._channel.send(
+                event_frame(
+                    str(EventKind.TURN_COMPLETE),
+                    self._bridge.current_thread_id,
+                    {},
+                )
+            )
+
     async def _run_streaming_rpc(self, rid, gen) -> None:
         """在独立 task 里跑一轮流式响应；被 stop 取消时给前端补发 turn.complete 收尾。
 
@@ -565,15 +578,7 @@ class GatewaySession:
                 await self._channel.send({"id": rid, "result": result})
         except asyncio.CancelledError:
             # 被 stop 取消：本轮作废，通知前端结束 running 态（吞掉取消，已妥善收尾）
-            self._run.awaiting_resume = False
-            with suppress(Exception):
-                await self._channel.send(
-                    event_frame(
-                        str(EventKind.TURN_COMPLETE),
-                        self._bridge.current_thread_id,
-                        {},
-                    )
-                )
+            await self._finish_cancelled_turn()
             if rid is not None:
                 with suppress(Exception):
                     await self._channel.send({"id": rid, "result": {"stopped": True}})
@@ -609,15 +614,26 @@ class GatewaySession:
                 if not hint:
                     continue
                 logger.info("[WS] 注入后台任务通知")
-                try:
-                    await self._pump(
+                # 挂到 _run.task：否则 stop 取消不了这一轮，且新 send_message 会卡在
+                # run.lock 上直到 meta 轮跑完（UI 挂死）。设为 task 后，stop 可取消、
+                # 期间的新消息走 handle_frame 的 busy-check 得到「已有任务在执行」。
+                self._run.task = asyncio.create_task(
+                    self._pump(
                         self._bridge.stream_response(
                             hint, tool_mode="default", is_meta=True
                         )
                     )
+                )
+                try:
+                    await self._run.task
+                except asyncio.CancelledError:
+                    # 被 stop 取消：作废本轮并补发 turn.complete 收尾，通知轮继续
+                    await self._finish_cancelled_turn()
                 except Exception:
                     # 连接断裂等：主循环会随之收尾并取消本任务，这里仅记录不致命
                     logger.error("[WS] 后台通知轮执行失败", exc_info=True)
+                finally:
+                    self._run.task = None
 
     async def _dispatch(self, method: str, params: dict) -> dict:
         """执行一个非流式 RPC 方法并返回结果（在独立 task 中运行，见 _run_rpc）。

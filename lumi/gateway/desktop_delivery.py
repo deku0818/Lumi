@@ -42,8 +42,12 @@ class DesktopDelivery(ResultDelivery):
             try:
                 await channel.send(frame)
             except Exception:
-                logger.warning("[DesktopDelivery] 推送 %s 失败", event_type)
-                self._channels.discard(channel)
+                # 瞬时发送失败不剔除连接——连接生死由 register/unregister
+                # 管理（WS 端点断开时调 unregister），否则一次背压就会把活连接
+                # 永久踢出后续所有广播。
+                logger.warning(
+                    "[DesktopDelivery] 推送 %s 失败", event_type, exc_info=True
+                )
 
     async def deliver(self, record: RunRecord, text: str) -> None:
         """将任务执行结果广播为 cron.result 事件。

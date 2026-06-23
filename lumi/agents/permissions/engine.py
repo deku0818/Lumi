@@ -50,6 +50,9 @@ class PermissionEngine:
             user_config_dir: 用户配置目录，默认 ~/.lumi
         """
         self._project_dir = project_dir.resolve()
+        # 保存用户配置目录：rebase() 切项目时需复用，否则会退回默认 ~/.lumi，
+        # 把自定义目录下的用户级权限规则悄悄丢掉
+        self._user_config_dir = user_config_dir
         # 会话级临时工作区（「添加文件夹」）。独立于 _config——后者会被
         # reload()/rebase() 从磁盘整体覆盖，若把 ephemeral 混进去，配置文件一变更
         # 用户本会话加的目录就被悄悄撤销。单独存字段使其跨 reload/rebase 存活。
@@ -112,7 +115,7 @@ class PermissionEngine:
         """切换项目根目录：重载新目录的权限配置并重建工作区边界。"""
         self._project_dir = project_dir.resolve()
         try:
-            self._loader = ConfigLoader(self._project_dir)
+            self._loader = ConfigLoader(self._project_dir, self._user_config_dir)
             self._config = self._loader.load()
         except (OSError, json.JSONDecodeError, ValueError, KeyError) as e:
             logger.error("权限配置加载失败 (%s)，回退到无规则状态", e, exc_info=True)

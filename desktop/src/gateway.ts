@@ -43,6 +43,12 @@ export class Gateway {
   // 弃用当前 socket：解绑回调（否则其 onclose 还会再排一次重连）、reject 在飞请求、关闭。
   // reconnect() 可能在 open/connecting 态调用，不先弃用旧 socket 会泄漏它并引发重连风暴。
   private teardown(): void {
+    // 清掉待定的退避重连计时器：否则 connect() 后它仍会触发，弃用刚建好的
+    // socket 并另开一条，造成 socket churn（服务端多出一个 bridge）
+    if (this.reconnectTimer) {
+      clearTimeout(this.reconnectTimer)
+      this.reconnectTimer = null
+    }
     const ws = this.ws
     if (!ws) return
     ws.onopen = ws.onclose = ws.onmessage = ws.onerror = null

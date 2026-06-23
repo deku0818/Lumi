@@ -43,6 +43,39 @@ BINARY_CHECK_BYTES = 8192
 # ============================================================================
 
 
+def _glob_matches(file_path: Path, search_dir: Path, file_glob: str) -> bool:
+    """对齐 ripgrep --glob 语义：不含 / 的模式匹配任意层级的文件名，
+    含 / 的模式相对搜索根匹配（支持 **）。仅匹配 basename 会漏掉 '**/*.py'、
+    'src/*.ts' 这类带目录的 glob。"""
+    flags = wcmatch.glob.BRACE | wcmatch.glob.GLOBSTAR
+    if wcmatch.glob.globmatch(file_path.name, file_glob, flags=flags):
+        return True
+    try:
+        rel = file_path.relative_to(search_dir)
+    except ValueError:
+        return False
+    return wcmatch.glob.globmatch(str(rel), file_glob, flags=flags)
+
+
+def _reshape_python_grep(
+    rows: list[dict[str, str | int]], output_mode: str
+) -> list[dict[str, str | int]]:
+    """将 _python_search 的 content 行重塑为 count / files_with_matches 形状，
+    与 ripgrep 解析输出对齐（降级路径，否则非 content 模式会返回逐行内容字典）。"""
+    if output_mode == "files_with_matches":
+        seen: dict[str, None] = {}
+        for r in rows:
+            seen.setdefault(str(r["path"]), None)
+        return [{"path": p} for p in seen]
+    if output_mode == "count":
+        counts: dict[str, int] = {}
+        for r in rows:
+            p = str(r["path"])
+            counts[p] = counts.get(p, 0) + 1
+        return [{"path": p, "count": n} for p, n in counts.items()]
+    return rows
+
+
 def check_empty_content(content: str) -> str | None:
     """检查文件内容是否为空"""
     if not content:
@@ -285,7 +318,10 @@ class LocalFilesystemBackend:
             output_mode=output_mode,
         )
         if results is None:
-            results = await self._python_search(pattern, search_path, file_glob)
+            rows = await self._python_search(
+                pattern, search_path, file_glob, case_insensitive=case_insensitive
+            )
+            results = _reshape_python_grep(rows, output_mode)
 
         # content 模式：返回带分页元信息的 dict
         if isinstance(results, list) and output_mode == "content":
@@ -375,11 +411,15 @@ class LocalFilesystemBackend:
         return stdout_bytes.decode("utf-8", errors="replace")
 
     async def _python_search(
-        self, pattern: str, search_path: str, file_glob: str | None
+        self,
+        pattern: str,
+        search_path: str,
+        file_glob: str | None,
+        case_insensitive: bool = False,
     ) -> list[dict[str, str | int]]:
         """纯 Python 实现的文件搜索（ripgrep 降级方案）"""
         try:
-            regex = re.compile(pattern)
+            regex = re.compile(pattern, re.IGNORECASE if case_insensitive else 0)
         except re.error:
             return []
 
@@ -396,9 +436,7 @@ class LocalFilesystemBackend:
             if not file_path.is_file():
                 continue
 
-            if file_glob and not wcmatch.glob.globmatch(
-                file_path.name, file_glob, flags=wcmatch.glob.BRACE
-            ):
+            if file_glob and not _glob_matches(file_path, search_dir, file_glob):
                 continue
 
             try:

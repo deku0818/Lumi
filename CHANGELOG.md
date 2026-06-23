@@ -1,5 +1,27 @@
 # Changelog
 
+## [0.2.0a6] - 2026-06-23
+
+### Fixed
+- **工作区边界可被 bash `~` 绕过** — `cat > ~/secret.txt` 的 `~` 不被 shlex 展开，边界检查把它当作工作区内相对路径放行，但 shell 执行时展开到家目录外造成越界写入；边界检查改为先 `expanduser()` 再 `resolve()`，与执行语义一致
+- **cron 一次性(AT)任务瞬时失败的重试永远丢失** — 重试已排程但任务被 `_deliver_and_log` 立即删除，重试触发的 `_fire_job` 读到 `None` 静默丢弃；`_handle_retry` 返回是否已排重试，有待定重试时保留任务
+- **单次瞬时发送失败永久踢掉活连接** — `DesktopDelivery` 对任何 `send` 异常都 `discard` 连接，一次背压就让活连接收不到后续所有 cron / bg_tasks 广播；改为仅记录告警，连接生死交 `register`/`unregister` 管理
+- **后台通知轮无法被 stop 取消且会卡死后续发送** — 通知 meta 轮直接在 `run.lock` 下跑、不挂 `_run.task`，stop 取消不到、新 `send_message` 卡在锁上 UI 挂死；改为挂到 `_run.task`，可被取消、运行期间新消息得到「已有任务在执行」而非卡死
+- **删除 / 重命名项目在路径形态不一致时静默失效** — `add_project` 存 `expanduser().resolve()` 后的路径，`remove` / `rename` / `touch` 却用原始入参（`~` / 尾斜杠 / 软链）比较致匹配不到；统一经 `_resolve()` 规范化
+- **权限 DENY 预检对 evaluate 异常 fail-open** — 评估抛错只记录后继续，可能被随后的只读短路跳过完整复检而绕过该工具的 DENY；改 fail-closed（异常即审批）
+- **无 ripgrep 时 Python grep 回退缺陷** — 路径型 glob（`**/*.py`、`src/*.ts`）只比对文件名致匹配不到、`count` / `files_with_matches` 模式返回逐行内容的错误形状、不支持 `case_insensitive`；全部对齐 ripgrep 语义
+- **启动时 models.dev 目录刷新任务可能被 GC** — `create_task` 未持引用，事件循环只弱引用可能在协程挂起前被回收；改为持强引用 + 退出兜底取消
+- **desktop 完成通知显示会话首条消息而非本轮 prompt** — `.find` 取到最早的 user 项；改取最后一条
+- **关闭机器连接残留 `machineConn` 态** — `close()` 不触发 `onState`，重新启用时会先闪一下旧的「已连接」；断开时一并清除残留态
+- **`gateway` `teardown()` 未清待定重连计时器** — 旧退避计时器在 `connect()` 后仍会触发、弃用刚建好的 socket 另开一条造成 churn；`teardown()` 统一清除
+- **权限引擎 `rebase()` 切项目丢失 `user_config_dir`** — 退回默认 `~/.lumi`，丢掉自定义目录的用户级规则；存字段后 rebase 复用
+- **结构化输出用户 schema 含 `tool_call_id` 字段时被注入覆盖** — 该字段被剔出模型可见 schema 致 required 校验永不通过、循环到 abort；注入字段名避开用户已有属性
+- **边栏项目折叠态未持久化** — 与机器折叠不一致、重挂载即丢失；改写入 localStorage
+
+### Changed
+- **边栏项目分组重做** — 项目名与「显示全部」主次配色对调（项目名加深为主、「显示全部」变浅缩小为次）、项目名可点击折叠展开、与机器段同级缩进
+- **simplify 清理** — 提取 `session._finish_cancelled_turn`（用户轮 / 通知轮共用取消收尾）、边栏 `usePersistedToggle`（机器 / 项目折叠样板合一）；完成通知改 `reverse().find`；测试去除 `import X as Y` 别名
+
 ## [0.2.0a5] - 2026-06-23
 
 ### Added

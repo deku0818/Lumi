@@ -11,7 +11,7 @@ from types import SimpleNamespace
 from langchain_core.messages import AIMessage, HumanMessage, ToolMessage
 from langgraph.graph import END
 
-import lumi.agents.core.nodes as nodes_mod
+from lumi.agents.core import nodes
 from lumi.agents.core.hooks import AdditionalContext, Block, replace_hooks
 from lumi.agents.core.nodes import on_agent_stop, tool_executor
 from lumi.agents.core.state import LumiAgentContext
@@ -95,7 +95,7 @@ async def test_pre_tool_use_block_pairs_tool_message_and_ends():
 
 
 async def test_pre_tool_use_reminder_injected_after_tool_result(monkeypatch):
-    monkeypatch.setattr(nodes_mod, "ToolNode", _FakeToolNode)
+    monkeypatch.setattr(nodes, "ToolNode", _FakeToolNode)
     last = _ai_with_tool_call()
     state = {"messages": [last]}
     with replace_hooks("PreToolUse", [_hook(AdditionalContext("注意副作用"))]):
@@ -114,7 +114,7 @@ async def test_pre_tool_use_reminder_injected_after_tool_result(monkeypatch):
 
 
 async def test_post_tool_use_reminder_appended(monkeypatch):
-    monkeypatch.setattr(nodes_mod, "ToolNode", _FakeToolNode)
+    monkeypatch.setattr(nodes, "ToolNode", _FakeToolNode)
     last = _ai_with_tool_call()
     state = {"messages": [last]}
     with replace_hooks("PostToolUse", [_hook(AdditionalContext("记得 git status"))]):
@@ -125,7 +125,7 @@ async def test_post_tool_use_reminder_appended(monkeypatch):
 
 
 async def test_no_hooks_tool_executor_unchanged(monkeypatch):
-    monkeypatch.setattr(nodes_mod, "ToolNode", _FakeToolNode)
+    monkeypatch.setattr(nodes, "ToolNode", _FakeToolNode)
     last = _ai_with_tool_call()
     state = {"messages": [last]}
     result = await tool_executor(state, _runtime([]), {})

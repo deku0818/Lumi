@@ -16,6 +16,11 @@ from lumi.utils.logger import logger
 _PROJECTS_FILE = Path.home() / ".lumi" / "projects.json"
 
 
+def _resolve(path: str) -> str:
+    """规范化为与 add_project 落盘一致的形态（展开 ~、绝对化、解析软链）。"""
+    return str(Path(path).expanduser().resolve())
+
+
 def _by_recent(projects: list[dict]) -> list[dict]:
     return sorted(projects, key=lambda p: p.get("last_used", 0), reverse=True)
 
@@ -71,23 +76,26 @@ def add_project(path: str, name: str = "") -> list[dict]:
 
 def remove_project(path: str) -> list[dict]:
     """从清单移除项目（不动磁盘），返回最新列表。"""
-    return _save([p for p in _load() if p["path"] != path])
+    target = _resolve(path)
+    return _save([p for p in _load() if p["path"] != target])
 
 
 def rename_project(path: str, name: str) -> list[dict]:
     """重命名项目，返回最新列表。"""
+    target = _resolve(path)
     projects = _load()
     for p in projects:
-        if p["path"] == path and name.strip():
+        if p["path"] == target and name.strip():
             p["name"] = name.strip()
     return _save(projects)
 
 
 def touch_project(path: str) -> None:
     """刷新项目的最近使用时间（未登记的路径忽略）。"""
+    target = _resolve(path)
     projects = _load()
     for p in projects:
-        if p["path"] == path:
+        if p["path"] == target:
             p["last_used"] = time.time()
             _save(projects)
             return

@@ -56,15 +56,20 @@ def route_decision(
                     return "HumanApproval"
             except Exception as e:
                 logger.error(
-                    "[PermissionCheck] DENY 前置检查异常 (%s): %s",
+                    "[PermissionCheck] DENY 前置检查异常 (%s): %s, 保守要求审批",
                     tc["name"],
                     e,
                     exc_info=True,
                 )
+                # fail-closed：评估抛错时直接审批，否则该工具可能被下方只读短路
+                # 跳过完整评估而绕过它本应命中的 DENY 规则
+                return "HumanApproval"
 
-    # 只读工具跳过审批，直接执行
+    # 只读工具跳过审批，直接执行（内部伪工具是安全框架控制流，视为只读参与短路）
     if all(
-        not is_write_tool(tc.get("name", ""), tc.get("args", {})) for tc in tool_calls
+        is_internal_tool(tc.get("name", ""))
+        or not is_write_tool(tc.get("name", ""), tc.get("args", {}))
+        for tc in tool_calls
     ):
         return "ToolExecutor"
 

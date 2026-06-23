@@ -195,6 +195,7 @@ def _user_schema_to_pydantic_model(
     user_schema: dict[str, Any],
     *,
     name: str = "StructuredOutput",
+    tcid_key: str = "tool_call_id",
 ) -> type[BaseModel]:
     """JSON Schema → Pydantic model 作为 ``StructuredTool.args_schema``。
 
@@ -216,7 +217,9 @@ def _user_schema_to_pydantic_model(
         )
 
     # LangChain 自动注入 tool_call id 并从模型可见的 input_schema 中剔除该字段。
-    fields["tool_call_id"] = (Annotated[str, InjectedToolCallId], "")
+    # tcid_key 由调用方选定，避开用户 schema 已有属性，否则会覆盖用户同名字段，
+    # 使其在模型可见 schema 中消失而永远无法满足 required 校验（陷入连续失败）。
+    fields[tcid_key] = (Annotated[str, InjectedToolCallId], "")
 
     model = create_model(user_schema.get("title") or name, **fields)
     model.__doc__ = user_schema.get("description") or (
@@ -262,19 +265,22 @@ def _build_structured_output_tool(user_schema: dict[str, Any]) -> StructuredTool
     失败 → return ``ToolMessage(status="error")``，ToolNode 透传给下游让模型修正；
     连续失败超过 ``MAX_CONSECUTIVE_FAILURES`` 时由 ``tool_executor`` 强制 END 兜底。
     """
-    args_model = _user_schema_to_pydantic_model(user_schema)
+    # 注入的 tool_call_id 字段名避开用户 schema 已有属性，防止覆盖同名用户字段
+    tcid_key = "tool_call_id"
+    props = set((user_schema.get("properties") or {}).keys())
+    while tcid_key in props:
+        tcid_key = "_" + tcid_key
+    args_model = _user_schema_to_pydantic_model(user_schema, tcid_key=tcid_key)
     validator = _build_validator(user_schema)
     required_fields = set(user_schema.get("required") or [])
 
-    async def _structured_output_call(
-        tool_call_id: str,
-        **raw_args: Any,
-    ) -> Command | ToolMessage:
+    async def _structured_output_call(**raw_args: Any) -> Command | ToolMessage:
         """schema 校验 + 写 ``state.structured_output``。
 
         失败 → ``ToolMessage(status="error")`` 配对回灌；
         通过 → ``Command(update={structured_output, messages})`` 不带 goto。
         """
+        tool_call_id = raw_args.pop(tcid_key, "")
         # Pydantic 解包后所有 optional 字段都出现在 kwargs（值=None）；剥掉 None 还原
         # "未提供"语义，让 jsonschema 的 required 校验生效。但 required 字段保留其
         # 显式 None——否则可空必填字段（type:[X,"null"]）会被误判为缺失而永久校验失败。

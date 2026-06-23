@@ -76,8 +76,10 @@ class WorkspaceBoundary:
             True 表示在边界内，False 表示超出边界
         """
         try:
-            resolved = Path(path).resolve()
-        except OSError:
+            # 先按 shell 语义展开 ~：bash 命令里的 ~/x 在执行时展开到家目录，
+            # 不展开会被当作工作区内的相对路径而绕过边界检查
+            resolved = Path(path).expanduser().resolve()
+        except (OSError, RuntimeError):
             logger.warning("路径解析异常，视为边界外: %s", path)
             return False
 

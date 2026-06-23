@@ -11,6 +11,7 @@ from lumi.agents.core.hooks import (
     AdditionalContext,
     Block,
     HookContext,
+    dispatch,
     dispatch_hooks,
     iter_hooks,
     register_hook,
@@ -18,17 +19,16 @@ from lumi.agents.core.hooks import (
     set_run_config_hooks,
     unregister_hook,
 )
-from lumi.agents.core.hooks import dispatch as dispatch_mod
 
 
 @pytest.fixture(autouse=True)
 def clean_hooks():
     """每个用例前后清空全局 _HOOKS，避免跨用例污染。"""
-    saved = {k: list(v) for k, v in dispatch_mod._HOOKS.items()}
-    dispatch_mod._HOOKS.clear()
+    saved = {k: list(v) for k, v in dispatch._HOOKS.items()}
+    dispatch._HOOKS.clear()
     yield
-    dispatch_mod._HOOKS.clear()
-    dispatch_mod._HOOKS.update(saved)
+    dispatch._HOOKS.clear()
+    dispatch._HOOKS.update(saved)
 
 
 def _ctx(event="Stop", state=None):

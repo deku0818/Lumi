@@ -9,7 +9,7 @@ from langchain_core.messages import AIMessage, HumanMessage, ToolMessage
 from langgraph.graph import END
 from langgraph.types import Command
 
-import lumi.agents.core.nodes as nodes_mod
+from lumi.agents.core import nodes
 from lumi.agents.core.hooks import AdditionalContext, HookContext, replace_hooks
 from lumi.agents.core.hooks.builtin import (
     MAX_STOP_PULLBACKS,
@@ -229,7 +229,7 @@ async def test_structured_tool_validation_failure_returns_error():
 
 
 async def test_tool_executor_structured_success(monkeypatch):
-    monkeypatch.setattr(nodes_mod, "ToolNode", _StructuredFakeToolNode)
+    monkeypatch.setattr(nodes, "ToolNode", _StructuredFakeToolNode)
     state = {"messages": [_call({"name": "Lumi"})], "output_schema": SCHEMA}
     result = await tool_executor(state, _runtime([]), {})
     assert isinstance(result, Command)
@@ -237,7 +237,7 @@ async def test_tool_executor_structured_success(monkeypatch):
 
 
 async def test_tool_executor_structured_enrich(monkeypatch):
-    monkeypatch.setattr(nodes_mod, "ToolNode", _StructuredFakeToolNode)
+    monkeypatch.setattr(nodes, "ToolNode", _StructuredFakeToolNode)
     state = {
         "messages": [_call({"name": "Lumi"})],
         "output_schema": SCHEMA,
@@ -248,7 +248,7 @@ async def test_tool_executor_structured_enrich(monkeypatch):
 
 
 async def test_tool_executor_structured_failure_goes_normal_path(monkeypatch):
-    monkeypatch.setattr(nodes_mod, "ToolNode", _StructuredFakeToolNode)
+    monkeypatch.setattr(nodes, "ToolNode", _StructuredFakeToolNode)
     state = {"messages": [_call({"age": 1})], "output_schema": SCHEMA}
     result = await tool_executor(state, _runtime([]), {})
     # 校验失败 → 普通路径 dict，含 error ToolMessage
@@ -274,7 +274,7 @@ def test_abort_at_threshold_returns_aimessage():
 
 
 async def test_tool_executor_aborts_after_max_failures(monkeypatch):
-    monkeypatch.setattr(nodes_mod, "ToolNode", _StructuredFakeToolNode)
+    monkeypatch.setattr(nodes, "ToolNode", _StructuredFakeToolNode)
     # state 已累计 MAX-1 次失败，本轮再失败 1 次 → 触达上限强制 END
     history = [HumanMessage("q")] + [
         _err_tm(str(i)) for i in range(MAX_CONSECUTIVE_FAILURES - 1)
@@ -387,7 +387,7 @@ async def test_structured_tool_nullable_required_accepts_null():
 
 
 async def test_tool_executor_mixed_list_applies_enrich(monkeypatch):
-    monkeypatch.setattr(nodes_mod, "ToolNode", _MixedFakeToolNode)
+    monkeypatch.setattr(nodes, "ToolNode", _MixedFakeToolNode)
     state = {
         "messages": [_call({"name": "Lumi"})],
         "output_schema": SCHEMA,
@@ -403,7 +403,7 @@ async def test_tool_executor_mixed_list_applies_enrich(monkeypatch):
 
 
 async def test_pretooluse_excludes_internal_structured_tool(monkeypatch):
-    monkeypatch.setattr(nodes_mod, "ToolNode", _StructuredFakeToolNode)
+    monkeypatch.setattr(nodes, "ToolNode", _StructuredFakeToolNode)
     captured: dict = {}
 
     async def spy(ctx):

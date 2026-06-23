@@ -30,8 +30,9 @@ async def gateway_process():
     apply_all()
     get_config().apply_env()
 
-    # 后台刷新 models.dev 模型目录（思考能力 + context_length 数据源）
-    asyncio.create_task(catalog.refresh())
+    # 后台刷新 models.dev 模型目录（思考能力 + context_length 数据源）。
+    # 必须持强引用：事件循环只弱引用 task，不留引用可能在协程首次挂起前被 GC。
+    catalog_task = asyncio.create_task(catalog.refresh())
 
     # 初始化定时任务子系统（按工作目录隔离）
     cron_runtime = None
@@ -53,6 +54,8 @@ async def gateway_process():
     try:
         yield
     finally:
+        if not catalog_task.done():
+            catalog_task.cancel()
         get_task_registry().set_on_change(None)
         if cron_runtime is not None:
             await cron_runtime.scheduler.stop()

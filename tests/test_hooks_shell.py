@@ -8,8 +8,7 @@ import re
 import pytest
 from langchain_core.messages import HumanMessage
 
-import lumi.agents.core.hooks.exec_shell as exec_shell
-from lumi.agents.core.hooks import build_config_hooks
+from lumi.agents.core.hooks import build_config_hooks, exec_shell
 from lumi.agents.core.hooks.exec_shell import make_shell_hook
 from lumi.agents.core.hooks.protocol import (
     matches_tool_filter,

@@ -201,12 +201,15 @@ class Scheduler:
             return True
         import fcntl
 
-        f = open(self._lock_path, "w")
+        # "a+" 不截断：抢锁失败时不抹掉持有进程已写入的 PID
+        f = open(self._lock_path, "a+")
         try:
             fcntl.flock(f, fcntl.LOCK_EX | fcntl.LOCK_NB)
         except OSError:
             f.close()
             return False
+        f.seek(0)
+        f.truncate()
         f.write(str(os.getpid()))
         f.flush()
         self._lock_file = f
@@ -368,7 +371,7 @@ class Scheduler:
 
         try:
             output, status, error, caught_exc, thread_id = await self._invoke_agent(job)
-            await self._handle_retry(job, caught_exc)
+            retry_scheduled = await self._handle_retry(job, caught_exc)
 
             finished_at = datetime.now()
             duration_ms = int((finished_at - started_at).total_seconds() * 1000)
@@ -384,7 +387,7 @@ class Scheduler:
                 error=error,
                 thread_id=thread_id,
             )
-            await self._deliver_and_log(job, record, output)
+            await self._deliver_and_log(job, record, output, retry_scheduled)
             return record
         finally:
             try:
@@ -453,30 +456,36 @@ class Scheduler:
             logger.exception("任务执行失败: %s [%s]", job.name, job.id)
             return "", "failed", f"{type(exc).__name__}: {exc}", exc, thread_id
 
-    async def _handle_retry(self, job: Job, caught_exc: Exception | None) -> None:
-        """根据执行结果决定是否安排退避重试或重置错误计数。"""
+    async def _handle_retry(self, job: Job, caught_exc: Exception | None) -> bool:
+        """根据执行结果决定是否安排退避重试或重置错误计数。
+
+        返回是否已安排重试——调用方据此决定一次性(AT)任务是否可删除：
+        已安排重试时若立即删除，重试触发的 _fire_job 会读到 None 而静默丢失。
+        """
         if caught_exc is not None and is_transient_error(caught_exc):
             if job.consecutive_errors < MAX_CRON_RETRIES:
                 job.consecutive_errors += 1
                 await self._persist_consecutive_errors(job)
                 self._schedule_retry(job)
-            else:
-                logger.error(
-                    "任务重试次数耗尽（%d/%d），记录最终失败: %s [%s]",
-                    job.consecutive_errors,
-                    MAX_CRON_RETRIES,
-                    job.name,
-                    job.id,
-                )
+                return True
+            logger.error(
+                "任务重试次数耗尽（%d/%d），记录最终失败: %s [%s]",
+                job.consecutive_errors,
+                MAX_CRON_RETRIES,
+                job.name,
+                job.id,
+            )
         elif caught_exc is None and job.consecutive_errors > 0:
             job.consecutive_errors = 0
             await self._persist_consecutive_errors(job)
+        return False
 
     async def _deliver_and_log(
         self,
         job: Job,
         record: RunRecord,
         output: str,
+        retry_scheduled: bool = False,
     ) -> None:
         """记录执行日志、广播结果、应用会话保留策略、清理一次性任务。"""
         try:
@@ -506,7 +515,8 @@ class Scheduler:
         except Exception:
             logger.warning("广播结果失败: %s [%s]", job.name, job.id, exc_info=True)
 
-        if job.schedule.type == ScheduleType.AT:
+        # 已安排重试时保留 AT 任务，否则重试触发的 _fire_job 会读到 None 而丢失
+        if job.schedule.type == ScheduleType.AT and not retry_scheduled:
             try:
                 await self._job_store.delete(job.id)
                 logger.info("一次性任务已完成并删除: %s [%s]", job.name, job.id)
