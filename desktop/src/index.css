@@ -405,6 +405,29 @@ body.resizing-col * {
 }
 
 
+/* ── 回到底部浮钮：聊天流未贴底时浮现；出现一瞬微上浮 + 一圈光环涟漪一次后静止
+   （一静一动：图标静、出现的那一下用「光」反馈）。箭头走品牌金（纯 CSS 的
+   --color-accent = 真金，区别于被映射为悬停底色的 Tailwind accent 工具类）── */
+@keyframes jump-in { from { opacity: 0; transform: translateY(6px) scale(0.96); } to { opacity: 1; transform: none; } }
+.scroll-jump {
+  width: 34px; height: 34px; border-radius: 50%;
+  display: grid; place-items: center;
+  background: var(--color-surface); color: var(--color-accent);
+  border: 1px solid var(--color-line);
+  box-shadow: 0 4px 14px rgba(0, 0, 0, 0.32);
+  animation: jump-in 0.2s ease-out;
+  transition: box-shadow 0.2s ease, border-color 0.2s ease;
+}
+.scroll-jump:hover {
+  border-color: color-mix(in srgb, var(--color-accent) 50%, var(--color-line));
+  box-shadow: 0 4px 16px rgba(0, 0, 0, 0.36), 0 0 16px color-mix(in srgb, var(--color-accent) 35%, transparent);
+}
+.scroll-jump::before {
+  content: ''; position: absolute; inset: -1px; border-radius: 50%;
+  border: 1.5px solid color-mix(in srgb, var(--color-accent) 60%, transparent);
+  opacity: 0; animation: lumi-ripple-once 0.9s ease-out 1; /* 复用 proj-dot 同款光环涟漪 */
+}
+
 @layer base {
   * {
     @apply border-border outline-ring/50;

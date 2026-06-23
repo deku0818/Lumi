@@ -1,4 +1,4 @@
-import { memo, useCallback, useEffect, useMemo, useRef, useState } from 'react'
+import { memo, useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState } from 'react'
 import {
   SquareTerminal,
   FileText,
@@ -9,6 +9,7 @@ import {
   ListChecks,
   Wrench,
   ChevronRight,
+  ChevronDown,
   Copy,
   Check,
   Square,
@@ -334,6 +335,11 @@ export default function App() {
   const activeBackendRef = useRef('local')
   const cronJobsRef = useRef<CronJob[]>([]) // 据此把定时操作路由到任务所属机器
   const scrollRef = useRef<HTMLDivElement>(null)
+  // 聊天流「粘底」：贴底时才跟随流式输出，用户上滚即放手（不再抢界面）。
+  // pinnedRef 供自动滚动 effect 同步判定；showJump 驱动「回到底部」浮钮渲染。
+  const pinnedRef = useRef(true)
+  const [showJump, setShowJump] = useState(false)
+  const lastActiveRef = useRef(active) // 与当前 active 不同即说明刚切了会话
   const inputRef = useRef<HTMLTextAreaElement>(null)
   // handleEvent 是 []-依赖的稳定回调，通过 ref 读取最新的 store / 通知开关 / 翻译
   const storeRef = useRef<Record<string, SessionState>>({})
@@ -679,9 +685,39 @@ export default function App() {
     [handleEvent],
   )
 
-  useEffect(() => {
+  // 贴底状态的唯一写入点：pinnedRef 供 layout effect / handler 同步读，showJump 是其渲染镜像，
+  // 二者恒为反相——集中到一处保证不漂移。稳定引用，可安全进 effect/callback 依赖。
+  const setPinned = useCallback((v: boolean) => {
+    pinnedRef.current = v
+    setShowJump(!v)
+  }, [])
+
+  // 「贴底跟随」+「切会话归位」合一：用 layout effect（绘制前同步滚动，消除切会话/流式时
+  // 内容先在旧位置闪一帧再跳底）。切会话先强制贴底并收起浮钮，随后只要贴底就跟到最新
+  // （含 thinking 流，故依赖 thinkingText）。合一个 effect 也免去两 effect 读 pinnedRef 的顺序依赖。
+  useLayoutEffect(() => {
+    if (lastActiveRef.current !== active) {
+      lastActiveRef.current = active
+      setPinned(true)
+    }
+    const el = scrollRef.current
+    if (el && pinnedRef.current) el.scrollTo({ top: el.scrollHeight })
+  }, [active, items, running, approval, clarify, plan, thinkingText, setPinned])
+
+  // 滚动判定贴底，带滞回：距底 > 80px 才放手并浮出浮钮，回到 < 30px 才重新贴底并收起。
+  // 中间留死区，避免用户停在边界附近时抖动反复 mount/卸载浮钮（光环涟漪重复闪）。
+  const onScroll = useCallback(() => {
+    const el = scrollRef.current
+    if (!el) return
+    const dist = el.scrollHeight - el.scrollTop - el.clientHeight
+    if (dist > 80) setPinned(false)
+    else if (dist < 30) setPinned(true)
+  }, [setPinned])
+
+  const jumpToBottom = useCallback(() => {
+    setPinned(true)
     scrollRef.current?.scrollTo({ top: scrollRef.current.scrollHeight })
-  }, [items, running, approval, clarify, plan])
+  }, [setPinned])
 
   useEffect(() => {
     if (conn === 'open' && !running) inputRef.current?.focus()
@@ -1232,6 +1268,8 @@ export default function App() {
     const fileRefs = attachments.filter((a) => a.kind === 'file')
     const gw = connsRef.current[active]
     if ((!text && attachments.length === 0) || running || !gw) return
+    // 主动发送即视为「回到对话」：强制贴底，确保自己的消息与随后的回复都在视野内
+    setPinned(true)
     const files: AttachedFile[] = fileRefs.map((a) => ({ path: a.path, name: a.name }))
     setStore((s) => ({
       ...s,
@@ -1618,7 +1656,8 @@ export default function App() {
                 </div>
               ) : hasMessages ? (
                 <>
-                  <div ref={scrollRef} className="flex-1 overflow-auto">
+                  <div className="relative flex-1 min-h-0">
+                    <div ref={scrollRef} onScroll={onScroll} className="h-full overflow-auto">
                     <div className="max-w-3xl mx-auto w-full px-6 py-8 space-y-5">
                       {segments.map((seg) => {
                         const key = segKey(seg)
@@ -1661,6 +1700,18 @@ export default function App() {
                         thinkingText={thinkingText}
                       />
                     </div>
+                    </div>
+                    {showJump && (
+                      <button
+                        type="button"
+                        onClick={jumpToBottom}
+                        title={t('chat.toBottom')}
+                        aria-label={t('chat.toBottom')}
+                        className="scroll-jump absolute bottom-4 left-1/2 -ml-[17px]"
+                      >
+                        <ChevronDown className="h-[18px] w-[18px]" />
+                      </button>
+                    )}
                   </div>
                   <div className="px-6 pb-5">
                     <div className="max-w-3xl mx-auto w-full">
