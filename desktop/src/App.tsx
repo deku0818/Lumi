@@ -41,7 +41,6 @@ import type {
 import { Markdown } from './components/Markdown'
 import { ApprovalDialog } from './components/ApprovalDialog'
 import { ClarifyDialog, ASK_CANCELLED } from './components/ClarifyDialog'
-import { PlanDialog, PLAN_REJECTED } from './components/PlanDialog'
 import { Sidebar } from './components/Sidebar'
 import { FileCards, PreviewPanel, parsePresentedFiles } from './components/PresentedFiles'
 import { BgTasksDrawer } from './components/BgTasksDrawer'
@@ -220,7 +219,6 @@ type SessionState = {
   thinkingText: string
   approval: Record<string, unknown> | null
   clarify: Record<string, unknown> | null
-  plan: Record<string, unknown> | null
   // 最近一次模型调用的上下文用量（用于输入栏的上下文进度环）；首轮前为 undefined
   ctx?: CtxUsage
 }
@@ -230,7 +228,6 @@ const emptySession = (items: Item[] = []): SessionState => ({
   thinkingText: '',
   approval: null,
   clarify: null,
-  plan: null,
 })
 
 // 从 LangChain usage_metadata 提炼上下文环所需快照。input_tokens 含缓存命中部分，
@@ -404,7 +401,6 @@ export default function App() {
   const thinkingText = cur?.thinkingText ?? ''
   const approval = cur?.approval ?? null
   const clarify = cur?.clarify ?? null
-  const plan = cur?.plan ?? null
   // 当前 active 模型的上下文窗口（tokens）；能力未知时为 0，ContextMeter 自会隐藏。
   // memo 化避免每次流式 token 重渲染都重跑 providers.find。
   const contextWindow = useMemo(
@@ -422,14 +418,14 @@ export default function App() {
     tRef.current = t
   })
 
-  // 每个会话的活动态，喂给侧栏显示圆点：attention=等你处理（审批/澄清/计划），running=处理中。
+  // 每个会话的活动态，喂给侧栏显示圆点：attention=等你处理（审批/澄清），running=处理中。
   // store 每个流式 token 都换新身份，内容不变时复用上一个对象，避免 Sidebar 每 token 重渲染。
   const activityRef = useRef<Record<string, 'running' | 'attention'>>({})
   const activity = useMemo(() => {
     const m: Record<string, 'running' | 'attention'> = {}
     for (const tid in store) {
       const s = store[tid]
-      if (s.approval || s.clarify || s.plan) m[tid] = 'attention'
+      if (s.approval || s.clarify) m[tid] = 'attention'
       else if (s.running) m[tid] = 'running'
     }
     const prev = activityRef.current
@@ -509,8 +505,6 @@ export default function App() {
       } else if (type === 'clarify.request') {
         title = t('clarify.title')
         body = payload.questions?.[0]?.question ?? ''
-      } else if (type === 'plan.request') {
-        title = t('plan.title')
       }
       if (title) {
         void window.lumi.notify?.({ title, body: String(body).slice(0, 80), tag: sid })
@@ -575,9 +569,6 @@ export default function App() {
           break
         case 'clarify.request':
           n = { ...s, clarify: payload }
-          break
-        case 'plan.request':
-          n = { ...s, plan: payload }
           break
         case 'turn.complete':
           n = {
@@ -711,7 +702,7 @@ export default function App() {
     }
     const el = scrollRef.current
     if (el && pinnedRef.current) el.scrollTo({ top: el.scrollHeight })
-  }, [active, items, running, approval, clarify, plan, thinkingText, setPinned])
+  }, [active, items, running, approval, clarify, thinkingText, setPinned])
 
   // 滚动判定贴底，带滞回：距底 > 80px 才放手并浮出浮钮，回到 < 30px 才重新贴底并收起。
   // 中间留死区，避免用户停在边界附近时抖动反复 mount/卸载浮钮（光环涟漪重复闪）。
@@ -1349,7 +1340,7 @@ export default function App() {
     connsRef.current[active]?.stop().catch(() => {})
   }
 
-  const resumeWith = (value: unknown, clear: 'approval' | 'clarify' | 'plan') => {
+  const resumeWith = (value: unknown, clear: 'approval' | 'clarify') => {
     connsRef.current[active]?.resume(value).catch(() => resetRunning(active))
     setStore((s) => ({ ...s, [active]: { ...s[active], [clear]: null } }))
   }
@@ -1565,7 +1556,7 @@ export default function App() {
         </div>
         <div className="flex items-center gap-1.5">
           <ContextMeter usage={cur?.ctx} window={contextWindow} model={model} />
-          {running && !approval && !clarify && !plan ? (
+          {running && !approval && !clarify ? (
             <Button
               size="icon"
               variant="destructive"
@@ -1722,12 +1713,12 @@ export default function App() {
                           </div>
                         )
                       })}
-                      {/* 状态指示器常驻：运行中显示阶段文案，中断（审批/澄清/计划）时
+                      {/* 状态指示器常驻：运行中显示阶段文案，中断（审批/澄清）时
                           保持显示等待态，完成后退化为无文字的静止光点 */}
                       <StatusIndicator
                         items={items}
                         running={running}
-                        waiting={!!(approval || clarify || plan)}
+                        waiting={!!(approval || clarify)}
                         streaming={streaming}
                         thinkingText={thinkingText}
                       />
@@ -1747,20 +1738,13 @@ export default function App() {
                   </div>
                   <div className="px-6 pb-5">
                     <div className="max-w-3xl mx-auto w-full">
-                      {/* 审批/澄清/计划：渲染在输入框上方，切走时随会话留在原处 */}
+                      {/* 审批/澄清：渲染在输入框上方，切走时随会话留在原处 */}
                       {approval && <ApprovalDialog data={approval} onDecide={decide} />}
                       {clarify && (
                         <ClarifyDialog
                           data={clarify}
                           onSubmit={(answer) => resumeWith(answer, 'clarify')}
                           onCancel={() => resumeWith(ASK_CANCELLED, 'clarify')}
-                        />
-                      )}
-                      {plan && (
-                        <PlanDialog
-                          data={plan}
-                          onApprove={() => resumeWith('approved', 'plan')}
-                          onReject={() => resumeWith(PLAN_REJECTED, 'plan')}
                         />
                       )}
                       {composer(t('composer.reply'))}

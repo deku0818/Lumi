@@ -14,7 +14,6 @@ from .providers import (
     cron,
     filesystem,
     mcp,
-    plan,
     present_files,
     skill,
     todo,
@@ -34,7 +33,6 @@ _registry.register("todo", todo)
 _registry.register("ask", ask)
 _registry.register("cron", cron)
 _registry.register("skill", skill)
-_registry.register("plan", plan)
 _registry.register("background_task", background_task)
 _registry.register("workflow", workflow)
 _registry.register("present_files", present_files)

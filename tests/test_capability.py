@@ -14,7 +14,7 @@ from lumi.agents.tools.capability import (
 class TestIsWriteTool:
     @pytest.mark.parametrize(
         "tool_name",
-        ["read", "glob", "grep", "skill", "EnterPlanMode", "ExitPlanMode", "agent"],
+        ["read", "glob", "grep", "skill", "agent"],
     )
     def test_readonly_tools(self, tool_name):
         assert not is_write_tool(tool_name, {})

@@ -208,7 +208,7 @@ class Config(BaseModel):
     """主配置类"""
 
     style: str = Field(
-        default="default", description="系统提示词风格，'default' 使用 .lumi/ 下的配置"
+        default="code", description="系统提示词风格，对应 lumi/styles/ 下的内置风格"
     )
     token: TokenConfig = Field(default_factory=TokenConfig, description="Token处理配置")
     agents: AgentsConfig = Field(default_factory=AgentsConfig, description="Agents配置")

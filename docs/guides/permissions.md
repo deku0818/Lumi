@@ -156,7 +156,6 @@ bash 复合命令（如 `git add . && git push`）会被拆分为独立子命令
 | `skill` | 读取技能提示词，只读 |
 | `agent` | 子 agent 调度，权限由子 agent 自身独立评估 |
 | `cron` | 定时任务管理（默认 allow 规则） |
-| `EnterPlanMode`、`ExitPlanMode` | 模式切换 |
 
 此外，bash 中的只读命令（如 `ls`、`cat`、`git status`、`grep` 等）也会自动绕过审批。
 
@@ -216,10 +215,9 @@ lumi --privileged-danger -p "执行所有迁移"
 
 | 模式 | 行为 | 切换方式 |
 |---|---|---|
-| `plan` | 仅允许只读操作和写入 `.lumi/plans/*.md` | `Shift+Tab` 或 `EnterPlanMode` 工具 |
 | `readonly` | 仅允许只读操作，完全禁止写入 | 编程接口设置 |
 
-Plan 模式下，Agent 可以阅读代码并制定计划（写入计划文件），但不能修改项目代码或执行有副作用的命令。
+readonly 模式下，Agent 可以阅读代码、检索和分析，但不能修改任何文件或执行有副作用的命令。
 
 ---
 

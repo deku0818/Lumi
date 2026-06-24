@@ -1,12 +1,11 @@
 """权限审批富化（从 AgentBridge 拆出的职责子模块）。
 
-在 Bridge 层为 tool_approval / ExitPlanMode 中断补充权限评估、边界检查、选项与
-计划正文，使 Graph 侧保持纯净的三态契约。逻辑逐字照搬自原 AgentBridge。
+在 Bridge 层为 tool_approval 中断补充权限评估、边界检查与选项，
+使 Graph 侧保持纯净的三态契约。逻辑逐字照搬自原 AgentBridge。
 """
 
 from __future__ import annotations
 
-from pathlib import Path
 from typing import TYPE_CHECKING
 
 from lumi.utils.logger import logger
@@ -16,7 +15,7 @@ if TYPE_CHECKING:
 
 
 class ApprovalEnricher:
-    """tool_approval / plan 中断数据的 Bridge 层富化。"""
+    """tool_approval 中断数据的 Bridge 层富化。"""
 
     def __init__(self, bridge: AgentBridge) -> None:
         self._bridge = bridge
@@ -122,17 +121,6 @@ class ApprovalEnricher:
         if boundary_violations:
             data["boundary_violations"] = boundary_violations
 
-        return data
-
-    @staticmethod
-    def enrich_plan(data: dict) -> dict:
-        """为 ExitPlanMode 中断补充计划文件正文（前端无文件系统访问，需服务端读出）。"""
-        path = data.get("plan_file_path", "")
-        if path:
-            try:
-                data["plan_content"] = Path(path).read_text(encoding="utf-8").strip()
-            except Exception:
-                logger.debug("读取计划文件失败: %s", path, exc_info=True)
         return data
 
     def add_allow_rule(self, tool_expr: str) -> None:

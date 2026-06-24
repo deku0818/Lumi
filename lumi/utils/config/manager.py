@@ -40,7 +40,7 @@ class LumiConfig:
 
     @property
     def active_style(self) -> str:
-        """当前生效的风格名称。优先级：CLI override > config.yaml > "default" """
+        """当前生效的风格名称。优先级：CLI override > config.yaml > "code" """
         if self._style_override is not None:
             return self._style_override
         return self.config.style

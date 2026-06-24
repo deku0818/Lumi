@@ -8,20 +8,11 @@
 
 ```
 lumi/styles/
-├── default/
-│   ├── prompts/
-│   │   └── tools/
-│   │       ├── EnterPlanMode.md
-│   │       └── ExitPlanMode.md
-│   └── agents/
 └── code/
     ├── prompts/
     │   ├── SOUL.md
     │   ├── GUARDRAILS.md
-    │   ├── AGENTS.md
-    │   └── tools/
-    │       ├── EnterPlanMode.md
-    │       └── ExitPlanMode.md
+    │   └── AGENTS.md
     └── agents/
         ├── explore.md
         └── plan.md
@@ -52,12 +43,9 @@ lumi/styles/
 </AGENTS>
 ```
 
-### 工具提示词（prompts/tools/）
+### 工具描述
 
-工具的 description 和 response 从 MD 文件加载，查找顺序：
-
-1. `.lumi/prompts/tools/{ToolName}.md`（用户覆盖）
-2. `lumi/styles/{style}/prompts/tools/{ToolName}.md`（style 内置）
+内置工具的 description 直接写在各工具函数的 docstring 里，由 `registry._collect_tools_from_module` 在加载时统一 `inspect.cleandoc` 抹掉缩进。工具描述不再经 style / `.lumi/` 配置覆盖。
 
 ### 子 Agent 配置（agents/）
 

@@ -33,7 +33,7 @@ Lumi 桌面应用（Electron + TS 前端）的内部实现。前端通过 WebSoc
 
 ## WS / JSON-RPC 帧协议
 
-一条 WS 连接 = 一个会话上下文（独立 `AgentBridge`，可切换 thread）。同一时刻只跑一轮用户流式响应，但所有 RPC（流式与非流式）都 spawn 成独立 task 执行，接收循环持续读帧——流式轮运行期间 `stop` 帧随时可达；需要 `run.lock` 的方法（删会话、切模型等）在后台等锁，不会卡住接收循环。中断（approval/clarify/plan）后等待 `resume`。
+一条 WS 连接 = 一个会话上下文（独立 `AgentBridge`，可切换 thread）。同一时刻只跑一轮用户流式响应，但所有 RPC（流式与非流式）都 spawn 成独立 task 执行，接收循环持续读帧——流式轮运行期间 `stop` 帧随时可达；需要 `run.lock` 的方法（删会话、切模型等）在后台等锁，不会卡住接收循环。中断（approval/clarify）后等待 `resume`。
 
 ```
 client → server   {id, method, params}
@@ -48,7 +48,7 @@ server → client   {method:"event", params:<wire event>}       # 流式事件
   - 模型供应商：`list_providers`、`test_provider`、`set_provider`、`save_provider`、`delete_provider`。
   - 定时任务：`list_cron_jobs`、`create/update/delete/toggle_cron_job`、`run_cron_job`、`list_cron_runs`。
   - 其它：`stop`（中止当前流式轮）、`list_commands`（拉取斜杠命令）。
-- **wire 事件**：`message.*`、`tool.*`（含 `tool.generating`）、`clarify/approval/plan.request`、`turn.complete`、`error`，加握手帧 `gateway.ready` 与 cron 广播 `cron.result` / `cron.running`（进程级，不属于任何会话）。
+- **wire 事件**：`message.*`、`tool.*`（含 `tool.generating`）、`clarify/approval`、`turn.complete`、`error`，加握手帧 `gateway.ready` 与 cron 广播 `cron.result` / `cron.running`（进程级，不属于任何会话）。
 
 事件名与方法名都来自 [`protocol/events.json`](../../protocol/events.json) 单一事实源：TS 端 import derive 类型，Python 端由 `tests/server/test_protocol_contract.py` 锁住一致性。
 
@@ -155,7 +155,7 @@ Agent 产出文件后调 `present_files` 工具把它们呈现给用户。后端
 
 ## 桌面通知
 
-回复完成与等待用户处理的中断（审批 / 提问 / 计划）会触发系统通知，**仅在该会话非当前活动、或窗口未聚焦时**弹出（你正盯着时不打扰）。通知经主进程 `Notification`（`electron/main.cjs`）发出——renderer 的 HTML5 `Notification` 在 macOS dev 下不可靠；点击通知由主进程聚焦窗口并经 `lumi:notify-click` 回传 tag 切到对应会话。判定用 `document.hasFocus()` 而非 `document.hidden`（切到别的应用时窗口仍可见，`hidden` 恒为 false）。
+回复完成与等待用户处理的中断（审批 / 提问）会触发系统通知，**仅在该会话非当前活动、或窗口未聚焦时**弹出（你正盯着时不打扰）。通知经主进程 `Notification`（`electron/main.cjs`）发出——renderer 的 HTML5 `Notification` 在 macOS dev 下不可靠；点击通知由主进程聚焦窗口并经 `lumi:notify-click` 回传 tag 切到对应会话。判定用 `document.hasFocus()` 而非 `document.hidden`（切到别的应用时窗口仍可见，`hidden` 恒为 false）。
 
 macOS 关窗后应用驻留 Dock，sidecar 保持运行，Dock 唤起（activate）重建窗口后直接复用；其他平台关窗即退出，sidecar 由 `before-quit` 清理。
 

@@ -1,6 +1,6 @@
 """执行模式策略 — 基于当前执行模式的工具限制
 
-每种执行模式（plan / readonly / 自定义）对应一个 ModePolicy 实例，声明：
+每种执行模式（readonly / 自定义）对应一个 ModePolicy 实例，声明：
 - allow_write: 是否允许写入操作
 - path_filter: 写入操作的路径白名单（仅 allow_write=False 时生效）
 
@@ -13,7 +13,6 @@ from __future__ import annotations
 
 from collections.abc import Callable
 from dataclasses import dataclass
-from pathlib import Path
 from typing import TYPE_CHECKING
 
 from lumi.agents.tools.capability import is_write_tool
@@ -30,7 +29,7 @@ class ModePolicy:
     """执行模式的工具限制策略
 
     Attributes:
-        name: 模式标识符，如 "plan", "readonly"
+        name: 模式标识符，如 "readonly"
         label: 显示名称，用于拒绝消息（如 "Plan mode"）
         allow_write: 是否允许写入操作。
             True → 不限制写入（等同于无策略）。
@@ -55,29 +54,8 @@ class PolicyResult:
     reason: str = ""
 
 
-# ── 路径检查工具 ──
-
-
-def _is_under_lumi_plans(file_path: str) -> bool:
-    """检查路径是否为 .lumi/plans/ 下的 .md 文件"""
-    if not file_path:
-        return False
-    try:
-        p = Path(file_path).expanduser().resolve()
-    except (RuntimeError, OSError):
-        return False
-    return "/.lumi/plans/" in p.as_posix() and p.suffix == ".md"
-
-
 # ── 内置策略 ──
 
-
-PLAN_POLICY = ModePolicy(
-    name="plan",
-    label="Plan mode",
-    allow_write=False,
-    path_filter=_is_under_lumi_plans,
-)
 
 READONLY_POLICY = ModePolicy(
     name="readonly",
@@ -90,7 +68,6 @@ READONLY_POLICY = ModePolicy(
 
 _POLICIES: dict[str, ModePolicy | None] = {
     "normal": None,
-    "plan": PLAN_POLICY,
     "readonly": READONLY_POLICY,
 }
 

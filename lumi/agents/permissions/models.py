@@ -114,8 +114,6 @@ BYPASS_TOOLS: frozenset[str] = frozenset(
         "todos",
         "skill",
         "agent",
-        "EnterPlanMode",
-        "ExitPlanMode",
     }
 )
 

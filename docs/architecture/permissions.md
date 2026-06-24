@@ -17,7 +17,7 @@ lumi/agents/permissions/
 ├── boundary.py       # 工作区边界检查器：路径提取与边界判定
 ├── safety.py         # Bypass-immune 安全检查：受保护文件/命令检测
 ├── validators.py     # Bash 命令安全警告（非阻断）
-├── mode_policy.py    # 执行模式策略（plan/readonly）
+├── mode_policy.py    # 执行模式策略（readonly）
 └── workspace.py      # 授权路径管理（进程全局兜底 + per-run contextvar 覆盖，供 filesystem provider 使用）
 
 lumi/agents/tools/capability.py  # 只读/写入工具判定 + bash 复合命令拆分
@@ -33,7 +33,7 @@ lumi/agents/tools/capability.py  # 只读/写入工具判定 + bash 复合命令
 Layer 1: 只读/写入判定 (capability.py)
   ↓ 判断工具调用是否写入操作 → 只读则跳过审批直接执行
 Layer 2: 执行模式策略 (mode_policy.py)
-  ↓ plan/readonly 模式下拦截不允许的写入操作
+  ↓ readonly 模式下拦截不允许的写入操作
 Layer 3: 权限引擎 (engine.py)
   ↓ 规则匹配 + 工作区边界 → allow/deny/ask/unmatched
 ```
@@ -48,7 +48,7 @@ Layer 3: 权限引擎 (engine.py)
 # 无论参数如何，始终为只读的工具
 _ALWAYS_READONLY: frozenset[str] = frozenset({
     "read", "glob", "grep", "skill", "agent",
-    "EnterPlanMode", "ExitPlanMode", "ask", "todos",
+    "ask", "todos",
 })
 
 # 无论参数如何，始终为写入的工具
@@ -73,13 +73,13 @@ _CRON_READONLY_OPS: frozenset[str] = frozenset({"list", "runs"})
 
 ### Layer 2: ModePolicy（mode_policy.py）
 
-执行模式策略守卫，根据当前模式（`execution_mode` state 字段：`"normal"` / `"plan"` / `"readonly"` / 自定义）限制工具调用：
+执行模式策略守卫，根据当前模式（`execution_mode` state 字段：`"normal"` / `"readonly"` / 自定义）限制工具调用：
 
 ```python
 @dataclass(frozen=True)
 class ModePolicy:
-    name: str                                  # "plan", "readonly"
-    label: str                                 # 拒绝消息中显示，如 "Plan mode"
+    name: str                                  # "readonly"
+    label: str                                 # 拒绝消息中显示，如 "Readonly mode"
     allow_write: bool = True                   # True → 不限制写入（等同无策略）
     path_filter: Callable[[str], bool] | None = None  # allow_write=False 时的写入路径白名单
 ```
@@ -88,7 +88,6 @@ class ModePolicy:
 
 | 模式 | allow_write | path_filter |
 |---|---|---|
-| `plan` | False | `_is_under_lumi_plans`（仅放行 `.lumi/plans/*.md`） |
 | `readonly` | False | None（禁止所有写入） |
 | `normal` | 无策略（`get_policy("normal")` 返回 None），走后续权限引擎 | — |
 

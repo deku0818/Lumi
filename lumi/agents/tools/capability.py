@@ -100,8 +100,6 @@ _ALWAYS_READONLY: frozenset[str] = frozenset(
         "grep",
         "skill",
         "agent",
-        "EnterPlanMode",
-        "ExitPlanMode",
         "ask",
         "todos",
     }

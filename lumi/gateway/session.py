@@ -45,7 +45,7 @@ from lumi.utils.logger import logger
 from lumi.utils.thread_id import generate_thread_id
 
 # 流以中断事件收尾 → 该轮尚未结束，正等待客户端 resume，期间不可插入后台通知轮
-_INTERRUPT_KINDS = frozenset({EventKind.CLARIFY, EventKind.APPROVAL, EventKind.PLAN})
+_INTERRUPT_KINDS = frozenset({EventKind.CLARIFY, EventKind.APPROVAL})
 
 # 需后台 task 承载、可被 stop 取消的流式方法
 _STREAMING_METHODS = frozenset({"send_message", "resume", "run_command"})

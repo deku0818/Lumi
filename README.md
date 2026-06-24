@@ -22,7 +22,7 @@
 
 **模型与协议** — 多模型支持（OpenAI / Anthropic / Bedrock / OpenAI 兼容 API） · MCP 协议集成 · 图片识别（model / tool 两种模式）
 
-**Agent 能力** — [子 Agent 委托](docs/agents.md) · [计划模式](docs/plan.md)（只读规划 + 审批，Shift+Tab 切换） · [对话摘要](docs/summary-flow.md)（异步压缩，不阻塞主对话） · [会话持久化](docs/checkpoint.md)（Memory / SQLite / PostgreSQL）
+**Agent 能力** — [子 Agent 委托](docs/agents.md) · [对话摘要](docs/summary-flow.md)（异步压缩，不阻塞主对话） · [会话持久化](docs/checkpoint.md)（Memory / SQLite / PostgreSQL）
 
 **工具与扩展** — 11 个内置工具（文件读写、Bash、Glob/Grep、任务管理等） · [技能系统](docs/slash_commands.md)（`.lumi/skills/`） · [定时任务](docs/cron.md)（cron，自然语言创建）
 
@@ -46,7 +46,7 @@ uv pip install -e .
 创建 `.lumi/config.yaml`：
 
 ```yaml
-style: code                                    # 提示词风格（可选，默认 default）
+style: code                                    # 提示词风格（可选，默认 code）
 env:
   LLM_MODEL_NAME: gpt-4o
   OPENAI_API_KEY: sk-xxx
@@ -118,7 +118,6 @@ npm run dist        # 产出 release/ 下的 dmg / exe / AppImage
 
 | 按键 | 功能 |
 |------|------|
-| `Shift+Tab` | 切换 Plan Mode（只读规划模式） |
 | `Escape` | 取消当前生成 |
 | `Escape` x2 | 打开 Rewind 界面（回退到历史 checkpoint） |
 | `Ctrl+C` | 退出应用 |
@@ -179,7 +178,6 @@ npm run dist        # 产出 release/ 下的 dmg / exe / AppImage
 | 斜杠命令 | [docs/slash_commands.md](docs/slash_commands.md) |
 | 对话摘要 | [docs/summary-flow.md](docs/summary-flow.md) |
 | Grep/Glob 工具 | [docs/grep_glob.md](docs/grep_glob.md) |
-| 计划模式 | [docs/plan.md](docs/plan.md) |
 | 风格系统 | [docs/styles.md](docs/styles.md) |
 | 缓存机制 | [docs/cache.md](docs/cache.md) |
 

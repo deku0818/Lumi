@@ -48,7 +48,6 @@ export interface WireEventPayloads extends Record<WireEventType, object> {
     warnings?: string[]
     boundary_violations?: string[]
   }
-  'plan.request': { plan_file_path: string; plan_content?: string }
   'turn.complete': { usage?: Usage }
   error: { message: string }
   'cron.result': {

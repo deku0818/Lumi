@@ -41,7 +41,7 @@ def _payload(evt: BridgeEvent) -> dict:
         if evt.is_error:
             payload["is_error"] = True
         return payload
-    if kind in (EventKind.CLARIFY, EventKind.APPROVAL, EventKind.PLAN):
+    if kind in (EventKind.CLARIFY, EventKind.APPROVAL):
         return evt.data or {}
     if kind == EventKind.ERROR:
         return {"message": evt.error}

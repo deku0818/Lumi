@@ -89,59 +89,6 @@ def _parse_md_file(file_path: str) -> dict[str, object] | None:
 
 
 # ------------------------------------------------------------------
-# 工具配置 MD 加载（description / response 从 style 文件读取，用户可覆盖）
-# ------------------------------------------------------------------
-
-
-def resolve_tool_md(tool_name: str) -> Path | None:
-    """按优先级查找工具配置 MD 文件：用户 .lumi/prompts/tools/ -> style 内置 -> None。"""
-    config = get_config()
-
-    user_path = config.prompts_dir / "tools" / f"{tool_name}.md"
-    if user_path.exists():
-        return user_path
-
-    from lumi.styles import get_style_prompts_dir
-
-    try:
-        style_path = (
-            get_style_prompts_dir(config.active_style) / "tools" / f"{tool_name}.md"
-        )
-        if style_path.exists():
-            return style_path
-    except ValueError:
-        pass
-
-    return None
-
-
-def load_tool_md(tool_name: str) -> dict[str, object] | None:
-    """加载并解析工具配置 MD 文件，未找到返回 None。"""
-    path = resolve_tool_md(tool_name)
-    if path is None:
-        return None
-    parsed = _parse_md_file(str(path))
-    if parsed is None:
-        logger.warning("解析 %s 失败", path)
-    return parsed
-
-
-def require_tool_field(
-    parsed: dict[str, object], field: str, tool_name: str, *, from_raw: bool = False
-) -> str:
-    """从解析结果中提取必填字段，缺失时抛出 RuntimeError。"""
-    if from_raw:
-        raw = parsed.get("raw_metadata", {})
-        value = (raw.get(field) if isinstance(raw, dict) else None) or ""
-    else:
-        value = parsed.get(field) or ""
-    value = str(value).strip()
-    if not value:
-        raise RuntimeError(f"{tool_name}.md 缺少 {field} 字段")
-    return value
-
-
-# ------------------------------------------------------------------
 # Agent 加载
 # ------------------------------------------------------------------
 

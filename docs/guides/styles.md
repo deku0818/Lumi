@@ -8,7 +8,6 @@
 
 | 风格 | 说明 |
 |------|------|
-| `default` | 默认风格。仅包含工具配置模板，不含系统提示词。适合完全自定义的用户 |
 | `code` | 面向软件工程。内置完整的系统提示词（SOUL / GUARDRAILS / AGENTS）和 explore / plan 两个子 Agent |
 
 ---
@@ -40,9 +39,7 @@ lumi -s code -p "重构这个模块"
 .lumi/
 ├── prompts/
 │   ├── SOUL.md                    # 覆盖 style 的 SOUL.md
-│   ├── AGENTS.md                  # 覆盖 style 的 AGENTS.md
-│   └── tools/
-│       └── EnterPlanMode.md       # 覆盖 style 的 EnterPlanMode 工具配置
+│   └── AGENTS.md                  # 覆盖 style 的 AGENTS.md
 └── agents/
     └── explore.md                 # 覆盖 style 的 explore 子 Agent
 ```
@@ -56,7 +53,7 @@ lumi -s code -p "重构这个模块"
 在 `lumi/styles/` 下创建新目录：
 
 ```bash
-mkdir -p lumi/styles/my-style/prompts/tools
+mkdir -p lumi/styles/my-style/prompts
 mkdir -p lumi/styles/my-style/agents
 ```
 

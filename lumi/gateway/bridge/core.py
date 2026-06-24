@@ -53,7 +53,7 @@ _TOOL_INTERNAL_KEYS = frozenset({"tool_call_id", "runtime"})
 # 且两次 run_id 不同，注入的 tool_call_id 又不出现在事件 data.input 里。改用跨 resume
 # 稳定的 checkpoint_ns 作为 wire id（中断时节点内仅此一个中断工具在飞，故唯一），
 # 使前端能按 id 去重为单行，否则会渲染出重复的工具行（如两条 ask）。
-_INTERRUPT_TOOLS = frozenset({"ask", "ExitPlanMode"})
+_INTERRUPT_TOOLS = frozenset({"ask"})
 
 
 def build_skill_command_blocks(
@@ -108,7 +108,6 @@ class EventKind(StrEnum):
     TOOL_COMPLETE = "tool.complete"
     CLARIFY = "clarify.request"
     APPROVAL = "approval.request"
-    PLAN = "plan.request"
     TURN_COMPLETE = "turn.complete"
     ERROR = "error"
 
@@ -627,8 +626,8 @@ class AgentBridge:
                                 # is_error 的 TOOL_COMPLETE，让前端结束该行并红色高亮。
                                 name = event.get("name", "unknown")
                                 err = event.get("data", {}).get("error", "")
-                                # interrupt() / Command 冒泡（ask、ExitPlanMode 等）不是真失败，
-                                # 由 _check_interrupts 另行处理成 CLARIFY/PLAN 卡片，这里跳过不报错。
+                                # interrupt() / Command 冒泡（ask 等）不是真失败，
+                                # 由 _check_interrupts 另行处理成 CLARIFY 卡片，这里跳过不报错。
                                 if isinstance(err, GraphBubbleUp):
                                     continue
                                 inp = event.get("data", {}).get("input", {})
@@ -760,12 +759,6 @@ class AgentBridge:
                             data=enriched,
                             parent_run_id=self._subagent_marker(),
                         )
-                    elif interrupt_type == "ExitPlanMode":
-                        return BridgeEvent(
-                            kind=EventKind.PLAN,
-                            data=self._enrich_plan(data),
-                            parent_run_id=self._subagent_marker(),
-                        )
 
         # 记录详细的中断信息以便排查
         tasks_info = []
@@ -791,10 +784,6 @@ class AgentBridge:
 
     def _enrich_tool_approval(self, data: dict) -> dict:
         return self._approval.enrich_tool_approval(data)
-
-    @staticmethod
-    def _enrich_plan(data: dict) -> dict:
-        return ApprovalEnricher.enrich_plan(data)
 
     def add_allow_rule(self, tool_expr: str) -> None:
         self._approval.add_allow_rule(tool_expr)

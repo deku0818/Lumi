@@ -85,13 +85,6 @@ def test_ask_maps_to_clarify_request():
     assert wire["payload"] == {"question": "确认?"}
 
 
-def test_exit_plan_mode_maps_to_plan_request():
-    wire = bridge_event_to_wire(
-        BridgeEvent(kind=EventKind.PLAN, data={"plan": "..."}), SID
-    )["params"]
-    assert wire["type"] == "plan.request"
-
-
 def test_done_maps_to_turn_complete():
     wire = bridge_event_to_wire(BridgeEvent(kind=EventKind.TURN_COMPLETE), SID)[
         "params"

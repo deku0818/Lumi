@@ -15,7 +15,6 @@
       "payload": { "tool_calls": "ToolCallBrief[]", "decisions?": "object", "options?": "object", "warnings?": "string[]", "boundary_violations?": "string[]" },
       "note": "工具审批，需 resume"
     },
-    "plan.request": { "payload": { "plan_file_path": "string", "plan_content?": "string" }, "note": "退出 plan mode 确认，需 resume" },
     "turn.complete": { "payload": { "usage?": "Usage" } },
     "error": { "payload": { "message": "string" } },
     "cron.result": {

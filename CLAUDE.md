@@ -93,8 +93,8 @@ START → PreprocessMessages → CallModel → is_use_tool() 条件路由:
 
 - **加载优先级**：用户 `.lumi/` 下的同名文件 > style 内置文件
 - **配置方式**：`config.yaml` 的 `style` 字段，或 CLI `-s/--style` 参数（优先级更高）
-- **内置风格**：`default`（仅工具模板）、`code`（完整编程提示词 + 子 Agent）
-- **工具提示词**：`prompts/tools/` 下的 MD 文件定义工具 description 和 response，启动时加载，缺失则 RuntimeError
+- **内置风格**：`code`（完整编程提示词 + 子 Agent）
+- **工具描述**：内置工具的 description 直接写在各工具函数的 docstring 里；`registry._collect_tools_from_module` 加载时统一 `inspect.cleandoc` 抹掉源码缩进（外部 MCP 工具走异步 loader，不经此处）。工具描述不再可经 style/`.lumi` 配置覆盖
 - **`active_style` 属性**（`LumiConfig`）：返回当前生效的风格名，CLI override > config.yaml > "default"
 
 ## 测试

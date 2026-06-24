@@ -96,12 +96,20 @@ class ToolRegistry:
 
 
 def _collect_tools_from_module(module: types.ModuleType) -> list[StructuredTool]:
-    """从模块中收集所有公开的 ``StructuredTool`` 实例。"""
+    """从模块中收集所有公开的 ``StructuredTool`` 实例。
+
+    工具 description 多由函数 docstring 提供，而 docstring 的续行带源码缩进
+    （LangChain 不会 dedent）。此处统一 ``inspect.cleandoc`` 抹掉公共缩进，
+    使写在 docstring 里的 Markdown 描述干净进入模型（idempotent，不影响外部
+    MCP 工具——后者走异步 loader，不经此处）。
+    """
     tools: list[StructuredTool] = []
     for name in dir(module):
         if not name.startswith("_"):
             obj = getattr(module, name)
             if isinstance(obj, StructuredTool):
+                if obj.description:
+                    obj.description = inspect.cleandoc(obj.description)
                 tools.append(obj)
     return tools
 

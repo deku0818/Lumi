@@ -222,23 +222,6 @@ class TestBranch7_PolicyGuard:
         tcs = [_tc("write", {"file_path": str(project_dir / "a.py"), "content": "x"})]
         assert _route(tcs, engine=engine, execution_mode="readonly") == "PolicyReject"
 
-    def test_plan_mode_blocks_write_outside_plans(self):
-        """plan 模式 + 写普通文件（非 .lumi/plans/*.md）→ PolicyReject"""
-        engine, project_dir = _engine_with_project()
-        tcs = [
-            _tc("write", {"file_path": str(project_dir / "main.py"), "content": "x"})
-        ]
-        assert _route(tcs, engine=engine, execution_mode="plan") == "PolicyReject"
-
-    def test_plan_mode_allows_write_under_lumi_plans_md(self):
-        """plan 模式 + 写 .lumi/plans/*.md → 不被策略拦，落到后续评估"""
-        engine, project_dir = _engine_with_project()
-        plan_file = project_dir / ".lumi" / "plans" / "design.md"
-        tcs = [_tc("write", {"file_path": str(plan_file), "content": "# plan"})]
-        # 不是 PolicyReject（继续走 bypass-immune / accept_edits / 完整评估）
-        result = _route(tcs, engine=engine, execution_mode="plan")
-        assert result != "PolicyReject"
-
     def test_readonly_mode_does_not_reach_policy_for_readonly_tool(self):
         """readonly 模式 + 只读工具：在分支6只读短路就返回 ToolExecutor，根本到不了策略守卫"""
         engine, _ = _engine_with_project()

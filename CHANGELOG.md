@@ -1,5 +1,19 @@
 # Changelog
 
+## [0.2.0a7] - 2026-06-24
+
+### Removed
+- **Plan Mode 全栈移除** — EnterPlanMode/ExitPlanMode 工具、`plan` 执行模式策略（`PLAN_POLICY`）、gateway `plan.request` 事件与 desktop 计划审批 UI（PlanDialog）整体删除；通用 `readonly` 模式与 `tool_cancelled` 状态（ask 仍用）保留
+- **工具描述 MD 配置机制移除** — 删除 `prompts/tools/*.md` 与 `load_tool_md`/`require_tool_field`；`default` 风格仅含工具模板、模板内联后已空，随之移除
+
+### Changed
+- **工具描述归位到代码** — 内置工具 description 改为模块常量 / 函数 docstring，`registry._collect_tools_from_module` 加载时统一 `inspect.cleandoc` 去缩进（外部 MCP 工具走异步 loader，不经此处）；不再可经 style/`.lumi` 覆盖
+- **`WORKFLOW_SCHEMA` 裸 dict → `WorkflowInput(BaseModel)`** — 静态工具 schema 全部 BaseModel 化，与其余工具一致
+- **默认风格 `default` → `code`** — `config.style` 默认回退改为 `code`
+
+### Fixed
+- **工具描述源码缩进泄漏** — docstring 形式的工具（bash / filesystem write·edit·glob）续行带 4 空格缩进进入模型描述、破坏 Markdown 渲染；加载时统一 `cleandoc` 修复
+
 ## [0.2.0a6] - 2026-06-23
 
 ### Fixed
