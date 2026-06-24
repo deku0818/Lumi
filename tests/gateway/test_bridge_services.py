@@ -41,7 +41,11 @@ def test_bridge_wires_services():
 def test_list_providers_empty(store_path):
     bridge = AgentBridge()
     result = bridge.list_providers()
-    assert result == {"profiles": [], "active": {"provider": "", "model": ""}}
+    assert result == {
+        "profiles": [],
+        "active": {"provider": "", "model": ""},
+        "classifier": {},
+    }
 
 
 def test_save_provider_persists_and_lists(store_path):
@@ -95,7 +99,11 @@ def test_delete_provider_removes(store_path):
     bridge.save_provider(_profile())
     pid = provider_store.load()[1]["provider"]
     result = bridge.delete_provider(pid)
-    assert result == {"profiles": [], "active": {"provider": "", "model": ""}}
+    assert result == {
+        "profiles": [],
+        "active": {"provider": "", "model": ""},
+        "classifier": {},
+    }
     assert provider_store.load()[0] == []
 
 

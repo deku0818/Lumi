@@ -244,6 +244,14 @@ async def _set_effort(session: GatewaySession, params: dict) -> dict:
         )
 
 
+async def _set_classifier(session: GatewaySession, params: dict) -> dict:
+    # 同样走 provider_store load→改→save，持锁防与并发 provider 写操作 clobber。
+    async with session._run.lock:
+        return session._bridge.set_classifier(
+            params.get("provider", ""), params.get("model", "")
+        )
+
+
 # chdir / 权限边界 / shell 会话都是进程级状态，须与运行中的轮次互斥
 async def _set_workspace(session: GatewaySession, params: dict) -> dict:
     async with session._run.lock:
@@ -421,6 +429,7 @@ _RPC_HANDLERS = {
     "save_provider": _save_provider,
     "delete_provider": _delete_provider,
     "set_effort": _set_effort,
+    "set_classifier": _set_classifier,
     "set_workspace": _set_workspace,
     "list_projects": _list_projects,
     "add_project": _add_project,

@@ -23,6 +23,7 @@ import type {
   ActiveModel,
   AttachedFile,
   BgTask,
+  Classifier,
   CronJob,
   HistoryItem,
   Item,
@@ -32,6 +33,7 @@ import type {
   SessionMeta,
   SlashCommand,
   SubTool,
+  ToolMode,
   Usage,
   WireEvent,
   WireEventPayloads,
@@ -48,6 +50,7 @@ import { ResizeHandle, useResizableWidth } from './components/ResizeHandle'
 import { ConfirmDialog } from './components/ConfirmDialog'
 import { SettingsDialog } from './components/SettingsDialog'
 import { ModelPicker } from './components/ModelPicker'
+import { ApprovalModePicker } from './components/ApprovalModePicker'
 import { ContextMeter, type CtxUsage } from './components/ContextMeter'
 import { ProjectsPage } from './components/ProjectsPage'
 import { DirBrowser } from './components/DirBrowser'
@@ -269,6 +272,10 @@ export default function App() {
   const [machineConn, setMachineConn] = useState<Record<string, ConnState>>({})
   const [providers, setProviders] = useState<ProviderProfile[]>([])
   const [activeModel, setActiveModel] = useState<ActiveModel>({ provider: '', model: '' })
+  // auto 审批分类器指针（providers.json 顶级 classifier，空=跟随会话模型）
+  const [classifier, setClassifier] = useState<Classifier>({})
+  // 工具审批模式：随后续 send/run 透传给后端（auto=AI 审批分类器）
+  const [toolMode, setToolMode] = useState<ToolMode>('default')
   // 活动会话所在机器：ModelPicker 机器标识 + 设置改模型时判断是否需刷新聊天侧
   const [activeBackend, setActiveBackend] = useState('local')
   const [showSettings, setShowSettings] = useState(false)
@@ -819,10 +826,27 @@ export default function App() {
     })
   }, [])
 
+  // 重连某机器：重新从配置取最新地址（设置里可能改过 url/token）再 reconnect，
+  // 否则 Gateway 仍持有构造时的旧地址。启用的机器其连接恒在 controlConns 里（失败态不删），
+  // 走到无连接分支的只有已禁用/已删机器——这些不该建连（建连由 syncBackends 按 enabled 决定）。
+  const reconnectMachine = useCallback(async (backend: string) => {
+    const gw = controlConns.current[backend]
+    if (!gw) return
+    const { wsUrl } = await window.lumi.getConnection(backend)
+    gw.setUrl(wsUrl)
+    gw.reconnect()
+  }, [])
+
   // 为某机器开控制连接（幂等）：ready 后拉它的会话 + 定时任务，连接态记入 machineConn。
   const openControlConn = useCallback(
     (backend: string) => {
-      if (controlConns.current[backend]) return
+      const existing = controlConns.current[backend]
+      if (existing) {
+        // 已有连接：健康则幂等返回；已停摆（failed/被关闭）则换最新地址复活——
+        // 否则远程瞬断进 failed 后会永久滞留，syncBackends 命中本守卫也唤不醒它。
+        if (existing.dead) void reconnectMachine(backend)
+        return
+      }
       void (async () => {
         const { wsUrl } = await window.lumi.getConnection(backend)
         const gw = new Gateway(wsUrl)
@@ -837,19 +861,8 @@ export default function App() {
         gw.connect()
       })()
     },
-    [refreshSessions, refreshCronJobs],
+    [refreshSessions, refreshCronJobs, reconnectMachine],
   )
-
-  // 重连某机器：重新从配置取最新地址（设置里可能改过 url/token）再 reconnect，
-  // 否则 Gateway 仍持有构造时的旧地址。启用的机器其连接恒在 controlConns 里（失败态不删），
-  // 走到无连接分支的只有已禁用/已删机器——这些不该建连（建连由 syncBackends 按 enabled 决定）。
-  const reconnectMachine = useCallback(async (backend: string) => {
-    const gw = controlConns.current[backend]
-    if (!gw) return
-    const { wsUrl } = await window.lumi.getConnection(backend)
-    gw.setUrl(wsUrl)
-    gw.reconnect()
-  }, [])
 
   // 同步机器表 → 开新机器的控制连接、关掉已删机器的，刷新会话。BackendsPanel 增删后回调此。
   const syncBackends = useCallback(async () => {
@@ -893,6 +906,11 @@ export default function App() {
       disposed = true
       Object.values(connsRef.current).forEach((g) => g.close())
       Object.values(controlConns.current).forEach((g) => g.close())
+      // 必须清空 ref：close() 置 closedByUser=true 使其永不重连，若残留在 ref 里，
+      // effect 重跑（HMR / 依赖变更）时 openControlConn 的幂等短路(if conns[id] return)
+      // 会命中这些死连接而跳过重建 → 本地+远程控制连接全断、会话列表灰掉，只能整页重载。
+      connsRef.current = {}
+      controlConns.current = {}
     }
   }, [openConnection, syncBackends])
 
@@ -946,10 +964,11 @@ export default function App() {
 
   // provider 列表响应统一回写；顶部模型显示随活动机器的 active 模型修正
   const applyProviderResp = useCallback(
-    (r: { profiles?: ProviderProfile[]; active?: ActiveModel }) => {
+    (r: { profiles?: ProviderProfile[]; active?: ActiveModel; classifier?: Classifier }) => {
       setProviders(r.profiles ?? [])
       setActiveModel(r.active ?? { provider: '', model: '' })
       setModel(r.active?.model ?? '')
+      setClassifier(r.classifier ?? {})
     },
     [],
   )
@@ -1302,7 +1321,7 @@ export default function App() {
     if (attachments.length === 0 && text.startsWith('/')) {
       const [name, extra] = parseCommand(text)
       if (commands.some((c) => c.name === name)) {
-        gw.runCommand(name, extra).catch(() => resetRunning(active))
+        gw.runCommand(name, extra, toolMode).catch(() => resetRunning(active))
         return
       }
     }
@@ -1319,9 +1338,9 @@ export default function App() {
         const lines = files.map((f) => `<attached-file>${f.path}</attached-file>`).join('\n')
         blocks.push({ type: 'text', text: lines })
       }
-      gw.sendMessage(blocks).catch(() => resetRunning(active))
+      gw.sendMessage(blocks, toolMode).catch(() => resetRunning(active))
     } else {
-      gw.sendMessage(text).catch(() => resetRunning(active))
+      gw.sendMessage(text, toolMode).catch(() => resetRunning(active))
     }
   }
 
@@ -1537,6 +1556,11 @@ export default function App() {
             }
             onSwitch={switchModel}
             onSwitchEffort={switchEffort}
+          />
+          <ApprovalModePicker
+            value={toolMode}
+            onChange={setToolMode}
+            classifierLabel={classifier.provider ? classifier.model : undefined}
           />
         </div>
         <div className="flex items-center gap-1.5">

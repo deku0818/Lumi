@@ -7,9 +7,10 @@ import {
   Loader2,
   ArrowLeft,
   HelpCircle,
+  Shield,
   X,
 } from 'lucide-react'
-import type { ActiveModel, ProviderProfile } from '../types'
+import type { ActiveModel, Classifier, ProviderProfile } from '../types'
 import type { Gateway } from '../gateway'
 import { useI18n } from '../i18n'
 import { MachineTabs } from './MachineTabs'
@@ -56,6 +57,7 @@ export function ProvidersPanel({
   const [machine, setMachine] = useState('local')
   const [profiles, setProfiles] = useState<ProviderProfile[]>([])
   const [active, setActive] = useState<ActiveModel>({ provider: '', model: '' })
+  const [classifier, setClassifier] = useState<Classifier>({})
   const [form, setForm] = useState<Form | null>(null) // null = 列表视图
 
   const reload = useCallback(() => {
@@ -64,6 +66,7 @@ export function ProvidersPanel({
       .then((r) => {
         setProfiles(r.profiles ?? [])
         setActive(r.active ?? { provider: '', model: '' })
+        setClassifier(r.classifier ?? {})
       })
       .catch(() => {})
   }, [gwFor, machine])
@@ -73,9 +76,15 @@ export function ProvidersPanel({
   }, [reload])
 
   const gw = gwFor(machine)
-  const apply = (r: { profiles?: ProviderProfile[]; active?: ActiveModel }) => {
+  const apply = (r: {
+    profiles?: ProviderProfile[]
+    active?: ActiveModel
+    classifier?: Classifier
+  }) => {
     setProfiles(r.profiles ?? [])
     setActive(r.active ?? { provider: '', model: '' })
+    // 删/改 provider 后端会规范化清掉失效的分类器指针，须同步回写避免 UI 陈旧
+    setClassifier(r.classifier ?? {})
     onChanged(machine)
   }
   const onSwitch = (provider: string, model: string) =>
@@ -85,6 +94,13 @@ export function ProvidersPanel({
         onChanged(machine)
       })
       .catch(() => {})
+  // 分类器指针：传相同 (provider, model) 视为取消 → 回退「跟随会话模型」（空）
+  const pickClassifier = (provider: string, model: string) => {
+    const same = classifier.provider === provider && classifier.model === model
+    gw?.setClassifier(same ? '' : provider, same ? '' : model)
+      .then((r) => setClassifier(r.classifier ?? {}))
+      .catch(() => {})
+  }
   const onSave = (draft: Partial<ProviderProfile>) => gw?.saveProvider(draft).then(apply).catch(() => {})
   const onDelete = (id: string) => gw?.deleteProvider(id).then(apply).catch(() => {})
   const onTest = (baseUrl: string, apiKey: string, model: string): Promise<TestResult> =>
@@ -148,19 +164,13 @@ export function ProvidersPanel({
                 {p.models.map((m) => {
                   const on = active.provider === p.id && active.model === m
                   return (
-                    <button
+                    <ModelChip
                       key={m}
-                      onClick={() => onSwitch(p.id, m)}
-                      className={`flex items-center gap-1 px-2 py-0.5 rounded-md text-xs border transition ${
-                        on
-                          ? 'border-primary/50 bg-primary/10 text-primary'
-                          : 'border-line/40 text-muted-foreground hover:text-ink hover:bg-canvas/60'
-                      }`}
+                      label={m}
+                      selected={on}
                       title={on ? t('providers.inUse') : t('providers.switchHint')}
-                    >
-                      {on && <Check size={12} />}
-                      {m}
-                    </button>
+                      onClick={() => onSwitch(p.id, m)}
+                    />
                   )
                 })}
               </div>
@@ -168,7 +178,82 @@ export function ProvidersPanel({
           ))}
         </div>
       )}
+
+      {/* 审批分类器模型（auto 模式专用，独立于会话模型）。无 provider 时不渲染 */}
+      {profiles.length > 0 && (
+        <div className="mt-7">
+          <h3 className="flex items-center gap-2 text-sm font-medium">
+            <Shield size={15} className="text-primary shrink-0" />
+            {t('classifier.title')}
+          </h3>
+          <p className="mt-0.5 mb-3 text-[11.5px] text-muted-foreground">{t('classifier.desc')}</p>
+
+          {/* 跟随会话模型（默认 = classifier 为空） */}
+          <button
+            onClick={() => pickClassifier('', '')}
+            className={`w-full flex items-center gap-2 px-3 py-2 mb-2 rounded-xl border border-dashed transition ${
+              !classifier.provider
+                ? 'border-primary/40 bg-primary/5'
+                : 'border-line/40 hover:bg-canvas/60'
+            }`}
+          >
+            <span className={!classifier.provider ? 'lumi-orb-idle lumi-orb shrink-0' : 'size-2 rounded-full bg-muted-foreground/40 shrink-0'} />
+            <span className="flex-1 min-w-0 text-left">
+              <span className="block text-[13px]">{t('classifier.follow')}</span>
+              <span className="block text-[11px] text-muted-foreground">{t('classifier.followHint')}</span>
+            </span>
+            {!classifier.provider && <Check size={14} className="text-primary shrink-0" />}
+          </button>
+
+          <div className="space-y-2">
+            {profiles.map((p) => (
+              <div key={p.id} className="px-3 py-2 rounded-xl border border-line/40">
+                <div className="text-[13px] font-medium mb-1.5">{p.name}</div>
+                <div className="flex flex-wrap gap-1.5">
+                  {p.models.map((m) => (
+                    <ModelChip
+                      key={m}
+                      label={m}
+                      selected={classifier.provider === p.id && classifier.model === m}
+                      title={t('classifier.use')}
+                      onClick={() => pickClassifier(p.id, m)}
+                    />
+                  ))}
+                </div>
+              </div>
+            ))}
+          </div>
+        </div>
+      )}
     </div>
+  )
+}
+
+// 可点的模型 chip（选中=品牌金描边+Check）。当前模型与分类器两处列表共用。
+function ModelChip({
+  label,
+  selected,
+  title,
+  onClick,
+}: {
+  label: string
+  selected: boolean
+  title: string
+  onClick: () => void
+}) {
+  return (
+    <button
+      onClick={onClick}
+      title={title}
+      className={`flex items-center gap-1 px-2 py-0.5 rounded-md text-xs border transition ${
+        selected
+          ? 'border-primary/50 bg-primary/10 text-primary'
+          : 'border-line/40 text-muted-foreground hover:text-ink hover:bg-canvas/60'
+      }`}
+    >
+      {selected && <Check size={12} />}
+      {label}
+    </button>
   )
 }
 

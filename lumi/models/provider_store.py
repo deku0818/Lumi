@@ -6,8 +6,12 @@
 active 指向「某 profile 下的某个 model」。存储为 ~/.lumi/providers.json（明文，chmod 600）：
 
     {"active": {"provider": "<id>", "model": "<model>"},
+     "classifier": {"provider": "<id>", "model": "<model>"},   # auto 审批分类器模型，可缺省
      "profiles": [{"id","name","base_url","api_key",
                    "models":["m1","m2"], "effort":{"m1":"high"}}, ...]}
+
+顶级 classifier 是 auto 工具审批模式的分类器模型指针（独立于对话 active），
+缺省/失效时回退会话 active 模型。
 
 无 textual 依赖，可在 headless 服务（lumi serve）中直接使用。
 兼容旧格式（profile 用单个 "model" 字段、active 为字符串 id；
@@ -72,43 +76,70 @@ def _coerce_profile(x: dict) -> ProviderProfile | None:
     )
 
 
+def _kept_pointer(profiles: list[ProviderProfile], pointer: object) -> dict:
+    """规范化 (provider, model) 指针：指向真实存在的 profile+model 才保留，否则空 dict。"""
+    ptr = pointer if isinstance(pointer, dict) else {}
+    pid, model = ptr.get("provider", ""), ptr.get("model", "")
+    prof = next((p for p in profiles if p.id == pid), None)
+    return {"provider": pid, "model": model} if prof and model in prof.models else {}
+
+
 def _normalize_active(profiles: list[ProviderProfile], active: dict) -> Active:
     """保证 active 指向真实存在的 (provider, model)；无效时回退到首个可用模型。"""
-    by_id = {p.id: p for p in profiles}
-    pid = active.get("provider", "") if isinstance(active, dict) else ""
-    model = active.get("model", "") if isinstance(active, dict) else ""
-    prof = by_id.get(pid)
-    if prof and model in prof.models:
-        return {"provider": pid, "model": model}
+    kept = _kept_pointer(profiles, active)
+    if kept:
+        return kept
     for p in profiles:  # 回退：第一个有模型的 profile 的第一个模型
         if p.models:
             return {"provider": p.id, "model": p.models[0]}
     return dict(_EMPTY_ACTIVE)
 
 
-def load() -> tuple[list[ProviderProfile], Active]:
-    """读取全部 profile 与规范化后的 active；缺失/损坏返回 ([], 空 active)。"""
+def _read_data() -> dict:
+    """读取并解析 providers.json 一次；缺失/损坏返回空 dict。"""
     path = _path()
     if not path.exists():
-        return [], dict(_EMPTY_ACTIVE)
+        return {}
     try:
-        data = json.loads(path.read_text(encoding="utf-8"))
+        return json.loads(path.read_text(encoding="utf-8"))
     except (json.JSONDecodeError, OSError):
         logger.warning("providers.json 读取失败: %s", path, exc_info=True)
-        return [], dict(_EMPTY_ACTIVE)
+        return {}
 
+
+def _parse(data: dict) -> tuple[list[ProviderProfile], Active, dict]:
+    """从一次读盘的 data 解出 (profiles, 规范化 active, 规范化 classifier)。"""
     profiles = [p for p in map(_coerce_profile, data.get("profiles", [])) if p]
     raw_active = data.get("active", {})
     if isinstance(raw_active, str):  # 旧格式：active 为 provider id
         raw_active = {"provider": raw_active, "model": ""}
-    return profiles, _normalize_active(profiles, raw_active)
+    return (
+        profiles,
+        _normalize_active(profiles, raw_active),
+        _kept_pointer(profiles, data.get("classifier")),
+    )
 
 
-def _save(profiles: list[ProviderProfile], active: dict) -> None:
+def load() -> tuple[list[ProviderProfile], Active]:
+    """读取全部 profile 与规范化后的 active；缺失/损坏返回 ([], 空 active)。"""
+    profiles, active, _ = _parse(_read_data())
+    return profiles, active
+
+
+_KEEP_CLASSIFIER = object()  # _save 默认哨兵：保留盘上现有 classifier
+
+
+def _save(profiles: list[ProviderProfile], active: dict, classifier=_KEEP_CLASSIFIER) -> None:
+    # classifier 缺省 → 沿用盘上现值（让 set_effort/set_active/upsert 等不丢失它）；
+    # 无论哪种来源都按当前 profiles 规范化，profile/model 被删时自动清失效指针。
+    raw = _read_data().get("classifier") if classifier is _KEEP_CLASSIFIER else classifier
     payload = {
         "active": _normalize_active(profiles, active),
         "profiles": [{**asdict(p), "models": list(p.models)} for p in profiles],
     }
+    norm = _kept_pointer(profiles, raw)
+    if norm:
+        payload["classifier"] = norm
     # 含 api_key，限制为仅本人可读写
     atomic_write_json(_path(), payload, mode=0o600)
 
@@ -166,6 +197,37 @@ def resolve(model_name: str | None = None) -> ResolvedModel:
                 model_name, p.base_url, p.api_key, p.effort.get(model_name, "auto")
             )
     return ResolvedModel(model_name, "", "")
+
+
+def get_classifier() -> dict:
+    """返回规范化后的 auto 审批分类器指针 {provider, model}；未配/失效为空 dict。"""
+    _, _, classifier = _parse(_read_data())  # 单次读盘
+    return classifier
+
+
+def resolve_classifier() -> ResolvedModel:
+    """解析 auto 审批分类器模型 + 连接（按 provider id 精确取 base_url/api_key）。
+
+    未配置或指针失效 → 回退会话 active 模型（= 不单独配分类器时的行为）。
+    """
+    profiles, _, c = _parse(_read_data())  # 单次读盘，同时拿 profiles 与规范化指针
+    if not c:
+        return resolve()  # 跟随会话模型
+    # c 已由 _parse 对同一 profiles 规范化，provider 必存在
+    prof = next(p for p in profiles if p.id == c["provider"])
+    return ResolvedModel(c["model"], prof.base_url, prof.api_key, "auto")
+
+
+def set_classifier(provider_id: str, model: str) -> dict:
+    """设置/清除 auto 审批分类器指针并持久化，返回规范化后的指针（清除时为空 dict）。
+
+    provider_id 与 model 均空 → 清除（跟随会话模型）；指向不存在的 (provider, model)
+    → 同样视为清除（规范化丢弃，回退会话模型）。
+    """
+    profiles, active = load()
+    c = {"provider": provider_id, "model": model} if provider_id and model else {}
+    _save(profiles, active, classifier=c)
+    return _kept_pointer(profiles, c)
 
 
 def upsert(profile: dict) -> ProviderProfile:

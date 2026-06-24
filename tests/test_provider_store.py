@@ -150,6 +150,63 @@ def test_effort_survives_profile_edit(store_path, monkeypatch):
     assert prof.effort == {"m1": "max"}
 
 
+def test_classifier_unset_falls_back_to_session_model(store_path):
+    """未配 classifier：get 为空，resolve_classifier 回退会话 active 模型。"""
+    s = provider_store.upsert(_p(base="ua", key="ka", models=("m1",)))
+    assert provider_store.get_classifier() == {}
+    # 回退 = resolve()（会话模型 + 其连接）
+    assert provider_store.resolve_classifier() == provider_store.ResolvedModel(
+        "m1", "ua", "ka"
+    )
+    assert s.models == ("m1",)
+
+
+def test_classifier_set_resolves_exact_connection(store_path):
+    """classifier 指向另一 profile：按 provider id 精确取该 profile 的连接。"""
+    provider_store.upsert(_p("A", base="ua", key="ka", models=("m1",)))
+    b = provider_store.upsert(_p("B", base="ub", key="kb", models=("haiku",)))
+    assert provider_store.set_classifier(b.id, "haiku") == {
+        "provider": b.id,
+        "model": "haiku",
+    }
+    assert provider_store.get_classifier() == {"provider": b.id, "model": "haiku"}
+    # active 仍是 A 的 m1，但分类器解析到 B 的连接
+    assert provider_store.resolve_classifier() == provider_store.ResolvedModel(
+        "haiku", "ub", "kb"
+    )
+
+
+def test_classifier_clear_and_invalid_pointer(store_path):
+    s = provider_store.upsert(_p(models=("m1",)))
+    provider_store.set_classifier(s.id, "m1")
+    # 空参数 → 清除
+    assert provider_store.set_classifier("", "") == {}
+    assert provider_store.get_classifier() == {}
+    # 指向不存在的 model → 规范化丢弃（视为未配，回退会话模型）
+    assert provider_store.set_classifier(s.id, "nope") == {}
+    assert provider_store.get_classifier() == {}
+
+
+def test_classifier_survives_unrelated_writes(store_path, monkeypatch):
+    """set_effort / set_active 等写操作不丢失 classifier 指针。"""
+    monkeypatch.setattr(provider_store, "allowed_levels", lambda m: ("auto", "high"))
+    s = provider_store.upsert(_p(models=("m1", "m2")))
+    provider_store.set_classifier(s.id, "m2")
+    provider_store.set_effort(s.id, "m1", "high")
+    provider_store.set_active(s.id, "m1")
+    assert provider_store.get_classifier() == {"provider": s.id, "model": "m2"}
+
+
+def test_classifier_auto_cleared_when_target_deleted(store_path):
+    a = provider_store.upsert(_p("A", models=("m1",)))
+    b = provider_store.upsert(_p("B", models=("haiku",)))
+    provider_store.set_classifier(b.id, "haiku")
+    # 删除分类器所在 profile → 指针自动失效清空
+    provider_store.delete(b.id)
+    assert provider_store.get_classifier() == {}
+    assert a.id != b.id
+
+
 def test_file_is_chmod_600_and_plaintext(store_path):
     provider_store.upsert(_p(key="sk-secret", models=("m1",)))
     assert stat.S_IMODE(store_path.stat().st_mode) == 0o600

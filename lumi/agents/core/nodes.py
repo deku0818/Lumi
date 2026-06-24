@@ -1,3 +1,5 @@
+from typing import Literal
+
 from langchain_core.messages import (
     AIMessage,
     HumanMessage,
@@ -10,8 +12,10 @@ from langgraph.graph import END
 from langgraph.prebuilt import ToolNode
 from langgraph.runtime import Runtime
 from langgraph.types import Command, interrupt
+from pydantic import BaseModel, Field
 
 from lumi.agents.core.hooks import HookContext, dispatch_hooks, has_hooks
+from lumi.agents.core.meta_message import is_meta_message
 from lumi.agents.core.node_helpers.execution import (
     handle_tool_error,
     truncate_tool_results,
@@ -37,7 +41,8 @@ from lumi.agents.core.structured_tool import (
 )
 from lumi.agents.permissions.models import PermissionDecision
 from lumi.agents.permissions.routing import route_decision
-from lumi.models.chain import tool_call_chain
+from lumi.models.chain import structured_output, tool_call_chain
+from lumi.models.provider_store import resolve_classifier
 from lumi.models.manager import detect_protocol
 from lumi.utils.logger import logger
 from lumi.utils.read_config import get_config
@@ -458,6 +463,107 @@ def _build_reject_messages(
         )
         for tc in tool_calls
     ]
+
+
+class _ClassifierVerdict(BaseModel):
+    """auto 模式分类器的裁决结果。"""
+
+    decision: Literal["approve", "ask", "reject"] = Field(
+        description="approve=自动放行；ask=交用户确认；reject=自动拒绝"
+    )
+    reason: str = Field(description="一句话说明裁决依据，简明")
+
+
+_CLASSIFIER_SYSTEM = """你是 Lumi 的工具调用安全分类器（auto 审批模式）。
+基于安全性判断即将执行的一批工具调用，输出三选一裁决：
+- approve：明显安全、符合用户当前意图的操作，自动放行
+- ask：有一定风险或意图不明确，应让用户确认
+- reject：明显危险、破坏性、越权或与用户意图相悖的操作，自动拒绝
+只依据安全性，不替用户做产品决策。reason 用一句话说明。"""
+
+
+def _latest_user_intent(messages: list) -> str:
+    """取最近一条**真实** HumanMessage 文本，作为分类器判断意图的上下文。
+
+    跳过 meta/注入型 HumanMessage（system-reminder、工具回灌等），否则分类器会把
+    系统注入内容误当成用户意图，污染安全裁决。
+    """
+    for msg in reversed(messages):
+        if isinstance(msg, HumanMessage) and not is_meta_message(msg):
+            content = msg.content
+            if isinstance(content, str):
+                return content
+            # 多模态 content：拼接其中的文本块
+            return " ".join(
+                part.get("text", "")
+                for part in content
+                if isinstance(part, dict) and part.get("type") == "text"
+            )
+    return ""
+
+
+async def auto_classify(
+    state: LumiAgentState, runtime: Runtime[LumiAgentContext]
+) -> Command:
+    """auto 模式：用 AI 分类器替代人工审批裁决一批工具调用。
+
+    仅在 route_decision 判定「本该问人」时进入（DENY / bypass-immune 已在更早
+    的免疫闸短路到 HumanApproval，不会到这里）。裁决：
+    - approve → ToolExecutor（自动放行）
+    - reject  → CallModel（自动拒绝，附原因让模型改用更低风险的方式，复用 DENY 语义）
+    - ask     → HumanApproval（回落人工确认）
+    分类器调用失败 fail-closed → HumanApproval。
+    """
+    last_message = state["messages"][-1]
+    tool_calls = last_message.tool_calls
+    rendered = "\n".join(f"- {tc['name']}({tc.get('args', {})})" for tc in tool_calls)
+
+    # chain 构造一并纳入 try：create_llm/with_structured_output 在构造期也可能抛
+    # （如解析到的分类器模型缺 api_key），fail-closed 须覆盖构造与调用全程。
+    try:
+        # 分类器模型独立可配（providers.json 顶级 classifier 指针）；未配则回退会话模型。
+        clf = resolve_classifier()
+        conn = {
+            k: v for k, v in (("base_url", clf.base_url), ("api_key", clf.api_key)) if v
+        }
+        chain = structured_output(
+            template=(
+                "用户最近的请求：\n{user_intent}\n\n"
+                "待判定的工具调用：\n{tool_calls}\n\n"
+                "请基于安全性输出裁决。"
+            ),
+            structure=_ClassifierVerdict,
+            system_prompt=_CLASSIFIER_SYSTEM,
+            model_name=clf.model,
+            **conn,
+        )
+        verdict: _ClassifierVerdict = await chain.ainvoke(
+            {
+                "user_intent": _latest_user_intent(state["messages"]),
+                "tool_calls": rendered,
+            }
+        )
+    except Exception as e:
+        logger.error(
+            "[AutoClassify] 分类器调用失败，fail-closed 转人工审批: %s", e, exc_info=True
+        )
+        return Command(goto="HumanApproval")
+
+    logger.info("[AutoClassify] 裁决=%s 原因=%s", verdict.decision, verdict.reason)
+    match verdict.decision:
+        case "approve":
+            return Command(goto="ToolExecutor")
+        case "reject":
+            messages = _build_reject_messages(
+                tool_calls,
+                content=(
+                    f"此操作被 auto 模式安全分类器自动拒绝：{verdict.reason}。"
+                    "请评估风险并改用更低风险的方式完成目标。"
+                ),
+            )
+            return Command(goto="CallModel", update={"messages": messages})
+        case _:  # ask
+            return Command(goto="HumanApproval")
 
 
 async def summarizer(state: LumiAgentState, runtime: Runtime[LumiAgentContext]) -> dict:

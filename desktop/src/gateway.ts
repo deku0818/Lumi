@@ -3,6 +3,7 @@
 import type {
   ActiveModel,
   BgTask,
+  Classifier,
   CronJob,
   CronRun,
   HistoryItem,
@@ -19,6 +20,11 @@ export type ConnState = 'connecting' | 'open' | 'closed' | 'failed'
 
 const MAX_RETRY = 5 // 连续失败这么多次后停止自动重连
 
+// 附带工具审批模式：toolMode 省略或 'default' 时不传 tool_mode（后端按默认处理）
+function withToolMode<T extends object>(params: T, toolMode?: string): T {
+  return toolMode && toolMode !== 'default' ? { ...params, tool_mode: toolMode } : params
+}
+
 type EventHandler = (ev: WireEvent) => void
 type StateHandler = (s: ConnState) => void
 type Pending = { resolve: (v: unknown) => void; reject: (e: unknown) => void }
@@ -32,6 +38,7 @@ export class Gateway {
   private retry = 0
   private closedByUser = false
   private reconnectTimer: ReturnType<typeof setTimeout> | null = null
+  private currentState: ConnState = 'connecting'
 
   constructor(private url: string) {}
 
@@ -121,8 +128,11 @@ export class Gateway {
   }
 
   // content 为纯文本字符串，或多模态 content blocks 列表（text + image 块）
-  sendMessage(content: string | unknown[]): Promise<unknown> {
-    return this.request<{ commands: SlashCommand[] }>('send_message', { content })
+  sendMessage(content: string | unknown[], toolMode?: string): Promise<unknown> {
+    return this.request<{ commands: SlashCommand[] }>(
+      'send_message',
+      withToolMode({ content }, toolMode),
+    )
   }
 
   resume(value: unknown): Promise<unknown> {
@@ -137,19 +147,28 @@ export class Gateway {
     return this.request('list_commands')
   }
 
-  runCommand(name: string, extraText: string): Promise<unknown> {
+  runCommand(name: string, extraText: string, toolMode?: string): Promise<unknown> {
     return this.request<{
       profiles: ProviderProfile[]
       active: ActiveModel
-    }>('run_command', { name, extra_text: extraText })
+    }>('run_command', withToolMode({ name, extra_text: extraText }, toolMode))
   }
 
-  listProviders(): Promise<{ profiles: ProviderProfile[]; active: ActiveModel }> {
+  listProviders(): Promise<{
+    profiles: ProviderProfile[]
+    active: ActiveModel
+    classifier: Classifier
+  }> {
     return this.request('list_providers')
   }
 
   setEffort(provider: string, model: string, level: string): Promise<{ effort: string }> {
     return this.request<{ effort: string }>('set_effort', { provider, model, level })
+  }
+
+  // 设置/清除 auto 审批分类器模型（provider/model 均空 = 跟随会话模型）
+  setClassifier(provider: string, model: string): Promise<{ classifier: Classifier }> {
+    return this.request<{ classifier: Classifier }>('set_classifier', { provider, model })
   }
 
   testProvider(
@@ -322,7 +341,14 @@ export class Gateway {
   }
 
   private setState(s: ConnState): void {
+    this.currentState = s
     for (const h of this.stateHandlers) h(s)
+  }
+
+  // 是否已停止自我维持（鉴权拒绝/退避耗尽或被主动关闭）：此态下不会自行重连，
+  // 调用方（如 openControlConn 幂等守卫）应据此判断要不要复活，而非仅看连接是否存在。
+  get dead(): boolean {
+    return this.closedByUser || this.currentState === 'failed'
   }
 
   private flushPending(err: unknown): void {

@@ -36,7 +36,10 @@ def route_decision(
     4. 执行模式策略守卫 → PolicyReject
     8. bypass-immune（所有模式）→ HumanApproval
     7. accept_edits 模式 → 文件编辑工具工作区内放行，其余 HumanApproval
-    9/10. 权限引擎完整评估 → ToolExecutor / HumanApproval
+    9/10. 权限引擎完整评估：
+        - privileged → ASK 审批，其余放行
+        - auto → ALLOW 放行，其余交 AutoClassify（AI 分类器裁决）
+        - default → 全 ALLOW 放行，否则 HumanApproval
     """
     if any(is_internal_tool(tc.get("name", "")) for tc in tool_calls):
         if all(is_internal_tool(tc.get("name", "")) for tc in tool_calls):
@@ -171,15 +174,26 @@ def route_decision(
                 return "HumanApproval"
             return "ToolExecutor"
 
+        # auto 模式：engine 已显式 ALLOW + 边界 OK 直接放行（用户明示信任，
+        # 等价 CC 的 rule-allow 先于分类器）；其余本该问人的批次交分类器裁决。
+        # DENY 与 bypass-immune 已在上方短路到 HumanApproval，对 auto 同样免疫。
+        if tool_mode == "auto":
+            if all_allowed:
+                return "ToolExecutor"
+            return "AutoClassify"
+
         # default 模式：全部 ALLOW + 边界 OK 才直接执行
         if all_allowed:
             return "ToolExecutor"
 
         return "HumanApproval"
 
-    # engine is None：privileged 放行，default/accept_edits 审批
+    # engine is None：privileged 放行，auto 交分类器，default/accept_edits 审批
     if tool_mode == "privileged":
         logger.warning("[is_use_tool] 权限引擎不可用，privileged 模式直接放行")
         return "ToolExecutor"
+    if tool_mode == "auto":
+        logger.warning("[is_use_tool] 权限引擎不可用，auto 模式交分类器裁决")
+        return "AutoClassify"
     logger.warning("[is_use_tool] 权限引擎不可用，回退到人工审批")
     return "HumanApproval"

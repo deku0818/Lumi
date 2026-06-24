@@ -12,6 +12,7 @@ from psycopg.rows import dict_row
 from lumi.agents.core.base_graph import BaseGraph
 from lumi.agents.core.nodes import (
     after_tool_executor,
+    auto_classify,
     call_model,
     human_approval,
     is_use_tool,
@@ -59,6 +60,7 @@ class LumiAgent(BaseGraph):
         self.builder.add_node("CallModel", call_model)
         self.builder.add_node("ToolExecutor", tool_executor)
         self.builder.add_node("HumanApproval", human_approval)
+        self.builder.add_node("AutoClassify", auto_classify)
         self.builder.add_node("PolicyReject", policy_reject)
         self.builder.add_node("OnAgentStop", on_agent_stop)
 
@@ -74,6 +76,7 @@ class LumiAgent(BaseGraph):
             {
                 "ToolExecutor": "ToolExecutor",
                 "HumanApproval": "HumanApproval",
+                "AutoClassify": "AutoClassify",
                 "PolicyReject": "PolicyReject",
                 "OnAgentStop": "OnAgentStop",
                 # END 保留给 is_use_tool 的防御性路径（消息为空/None）

@@ -326,6 +326,9 @@ class AgentBridge:
     def set_effort(self, provider_id: str, model: str, level: str) -> dict:
         return self._providers.set_effort(provider_id, model, level)
 
+    def set_classifier(self, provider_id: str, model: str) -> dict:
+        return self._providers.set_classifier(provider_id, model)
+
     def list_providers(self) -> dict:
         return self._providers.list_providers()
 

@@ -147,6 +147,13 @@ export interface ActiveModel {
   model: string
 }
 
+// auto 审批分类器模型指针（providers.json 顶级 classifier）。
+// provider/model 均空 = 未配置（跟随会话模型）。
+export type Classifier = { provider: string; model: string } | Record<string, never>
+
+// 工具审批模式（对齐后端 LumiAgentState.tool_mode）
+export type ToolMode = 'default' | 'accept_edits' | 'privileged' | 'auto'
+
 // 会话元数据（对齐后端 list_sessions 的 SessionSummary 序列化）
 export interface SessionMeta {
   thread_id: string

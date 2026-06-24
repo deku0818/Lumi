@@ -484,3 +484,67 @@ class TestCombinationMatrix:
         engine = _make_engine([], project_dir=home)
         tcs = [_tc("write", {"file_path": str(home / ".zshrc"), "content": "x"})]
         assert _route(tcs, engine=engine, tool_mode="accept_edits") == "HumanApproval"
+
+
+class TestAutoMode:
+    """auto 模式（AI 审批）：本该问人的批次 → AutoClassify；免疫闸照旧。"""
+
+    def test_auto_allow_in_boundary_routes_to_tool_executor(self):
+        """auto + 全 ALLOW + 边界 OK → ToolExecutor（用户明示信任，不调分类器）"""
+        engine, project_dir = _engine_with_project()
+        engine._config = PermissionConfig(
+            permissions=(PermissionRule(tool="write", permission=Permission.ALLOW),)
+        )
+        tcs = [_tc("write", {"file_path": str(project_dir / "a.py"), "content": "x"})]
+        assert _route(tcs, engine=engine, tool_mode="auto") == "ToolExecutor"
+
+    def test_auto_unmatched_routes_to_classifier(self):
+        """auto + UNMATCHED（无规则）→ AutoClassify（本该问人 → 交分类器）"""
+        engine, project_dir = _engine_with_project()
+        tcs = [_tc("write", {"file_path": str(project_dir / "a.py"), "content": "x"})]
+        assert _route(tcs, engine=engine, tool_mode="auto") == "AutoClassify"
+
+    def test_auto_ask_routes_to_classifier(self):
+        """auto + ASK → AutoClassify（非 ALLOW 即交分类器）"""
+        engine, project_dir = _engine_with_project()
+        engine._config = PermissionConfig(
+            permissions=(PermissionRule(tool="write", permission=Permission.ASK),)
+        )
+        tcs = [_tc("write", {"file_path": str(project_dir / "a.py"), "content": "x"})]
+        assert _route(tcs, engine=engine, tool_mode="auto") == "AutoClassify"
+
+    def test_auto_allow_out_of_boundary_routes_to_classifier(self):
+        """auto + ALLOW 但越界 → AutoClassify（all_allowed 不成立，交分类器裁决）"""
+        engine, _ = _engine_with_project()
+        engine._config = PermissionConfig(
+            permissions=(PermissionRule(tool="write", permission=Permission.ALLOW),)
+        )
+        tcs = [_tc("write", {"file_path": "/etc/passwd", "content": "x"})]
+        assert _route(tcs, engine=engine, tool_mode="auto") == "AutoClassify"
+
+    def test_auto_engine_none_routes_to_classifier(self):
+        """auto + engine=None → AutoClassify（无引擎也交分类器，不裸放行）"""
+        tcs = [_tc("write", {"file_path": "/tmp/a.py", "content": "x"})]
+        assert _route(tcs, engine=None, tool_mode="auto") == "AutoClassify"
+
+    def test_auto_readonly_short_circuits_to_tool_executor(self):
+        """auto + 只读工具 → ToolExecutor（只读短路在 tool_mode 之前，不调分类器）"""
+        engine, project_dir = _engine_with_project()
+        tcs = [_tc("read", {"file_path": str(project_dir / "a.py")})]
+        assert _route(tcs, engine=engine, tool_mode="auto") == "ToolExecutor"
+
+    def test_auto_deny_stays_immune(self):
+        """★免疫：auto + DENY → HumanApproval（DENY 预检在 tool_mode 之前短路）"""
+        engine, project_dir = _engine_with_project()
+        engine._config = PermissionConfig(
+            permissions=(PermissionRule(tool="write", permission=Permission.DENY),)
+        )
+        tcs = [_tc("write", {"file_path": str(project_dir / "a.py"), "content": "x"})]
+        assert _route(tcs, engine=engine, tool_mode="auto") == "HumanApproval"
+
+    def test_auto_bypass_immune_stays_immune(self):
+        """★免疫：auto + 写 ~/.zshrc → HumanApproval（bypass-immune 不交分类器）"""
+        home = Path.home()
+        engine = _make_engine([], project_dir=home)
+        tcs = [_tc("write", {"file_path": str(home / ".zshrc"), "content": "x"})]
+        assert _route(tcs, engine=engine, tool_mode="auto") == "HumanApproval"
