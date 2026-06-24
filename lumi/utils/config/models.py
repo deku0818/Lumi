@@ -29,6 +29,12 @@ class AgentsConfig(BaseModel):
         default=5000,
         description="Agent 递归执行限制，控制 agent 最大执行轮次",
     )
+    max_delegation_depth: int = Field(
+        default=3,
+        ge=0,
+        description="子 agent 委派的最大嵌套层数（主 agent 为第 0 层，每委派一层 +1）；"
+        "达到上限的子 agent 不再下发 agent 工具，无法继续往下委派；0 表示禁止委派",
+    )
     vision_mode: Literal["model", "tool"] = Field(
         default="model",
         description="图片识别模式：'model' - 使用模型多模态能力（默认）；'tool' - 将图片 URL 转为文本，通过工具识别",

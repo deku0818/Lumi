@@ -4,10 +4,9 @@ from __future__ import annotations
 
 from langchain_core.tools.structured import StructuredTool
 
-from lumi.utils.logger import logger
-
 from .loader import AgentConfig, SkillConfig, load_agents, load_skills
 from .providers import (
+    agent,
     ask,
     background_task,
     bash,
@@ -36,19 +35,9 @@ _registry.register("skill", skill)
 _registry.register("background_task", background_task)
 _registry.register("workflow", workflow)
 _registry.register("present_files", present_files)
-
-# 条件注册: 仅在有 agent 配置时才启用
-try:
-    _agents = load_agents()
-    if _agents:
-        from .providers import agent
-
-        agent._init_schema(_agents)
-        _registry.register("agent", agent)
-except (FileNotFoundError, ValueError, OSError) as e:
-    logger.warning("加载 agent 配置失败，'agent' 工具不可用: %s", e)
-except Exception:
-    logger.error("agent 工具初始化出现意外错误", exc_info=True)
+# agent 工具静态注册：可用代理列表经 <system-reminder> 动态注入（见 AgentChangeDetector），
+# 与 skill 一致——新增/删除 .lumi/agents 下的代理无需重建工具 schema。
+_registry.register("agent", agent)
 
 
 # ------------------------------------------------------------------

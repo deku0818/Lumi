@@ -24,6 +24,8 @@ from lumi.agents.core.node_helpers.messages import (
     cleanup_incomplete_tool_calls,
     inject_message_cache_breakpoints,
 )
+from lumi.agents.core.preprocessing.agent_detector import AgentChangeDetector
+from lumi.agents.core.preprocessing.agents import inject_agents_into_message
 from lumi.agents.core.preprocessing.skill_detector import SkillChangeDetector
 from lumi.agents.core.preprocessing.skills import inject_skills_into_message
 from lumi.agents.core.preprocessing.summary import inject_summary_into_message
@@ -42,8 +44,8 @@ from lumi.agents.core.structured_tool import (
 from lumi.agents.permissions.models import PermissionDecision
 from lumi.agents.permissions.routing import route_decision
 from lumi.models.chain import structured_output, tool_call_chain
-from lumi.models.provider_store import resolve_classifier
 from lumi.models.manager import detect_protocol
+from lumi.models.provider_store import resolve_classifier
 from lumi.utils.logger import logger
 from lumi.utils.read_config import get_config
 from lumi.utils.token_counter import tiktoken_counter
@@ -545,7 +547,9 @@ async def auto_classify(
         )
     except Exception as e:
         logger.error(
-            "[AutoClassify] 分类器调用失败，fail-closed 转人工审批: %s", e, exc_info=True
+            "[AutoClassify] 分类器调用失败，fail-closed 转人工审批: %s",
+            e,
+            exc_info=True,
         )
         return Command(goto="HumanApproval")
 
@@ -652,12 +656,24 @@ async def summarizer(state: LumiAgentState, runtime: Runtime[LumiAgentContext]) 
     }
 
 
-async def preprocess_messages(state: LumiAgentState) -> dict:
+def _agent_tool_available(runtime: Runtime[LumiAgentContext]) -> bool:
+    """当前 agent 实际是否持有 agent 工具——决定是否注入「可用 agent 列表」reminder。
+
+    直接看工具集而非 depth 代理：达委派上限被 _child_tools 剔除、或 agent 配置 tools
+    白名单显式排除 agent，都会使工具集不含 agent；此时注入列表会诱导模型调用不存在的
+    工具。以实际工具集为准可同时覆盖这两种情形。
+    """
+    return any(t.name == "agent" for t in runtime.context.tools)
+
+
+async def preprocess_messages(
+    state: LumiAgentState, runtime: Runtime[LumiAgentContext]
+) -> dict:
     """消息预处理节点，在调用模型前执行以下操作:
 
     0. 检查并执行摘要替换（如果 state["summary"] 有值）
     1. 清理不完整的工具调用
-    2. 技能动态注入（检测 .skills/ 变更并将技能列表注入最后一条用户消息）
+    2. 技能/agent 动态注入（变更或首条消息时将列表注入最后一条用户消息）
     """
     messages = state["messages"]
     result_messages = []
@@ -693,6 +709,13 @@ async def preprocess_messages(state: LumiAgentState) -> dict:
             if skills:
                 new_msg = inject_skills_into_message(new_msg, skills)
 
+            # 摘要后注入当前 agent 列表（同理）；仅对实际持有 agent 工具的代理，
+            # 先判工具集再 check() 以免无 agent 工具的子代理白做目录扫描
+            if _agent_tool_available(runtime):
+                agents, _ = AgentChangeDetector.get_instance().check()
+                if agents:
+                    new_msg = inject_agents_into_message(new_msg, agents)
+
             # 注入系统环境信息
             new_msg = inject_system_info_into_message(new_msg)
 
@@ -715,17 +738,27 @@ async def preprocess_messages(state: LumiAgentState) -> dict:
     if last_human is not None:
         new_msg = last_human
         need_replace = False
+        human_count = sum(1 for m in messages if isinstance(m, HumanMessage))
+        first_message = human_count <= 1
 
         # 技能变更时注入技能列表
-        detector = SkillChangeDetector.get_instance()
-        skills, changed = detector.check()
-        if changed and skills:
+        skills, skills_changed = SkillChangeDetector.get_instance().check()
+        if skills_changed and skills:
             new_msg = inject_skills_into_message(new_msg, skills)
             need_replace = True
 
+        # agent 列表注入：首条消息或变更时。子代理是全新 messages、不继承父对话里
+        # 已注入的 reminder（且 detector 单例的 changed 早被主 agent 首轮消费），故必须
+        # 按首条门控而非仅变更，否则可委派的子代理拿不到可用代理名。先判工具集（廉价）
+        # 再 check()（目录扫描），无 agent 工具者直接跳过。
+        if _agent_tool_available(runtime):
+            agents, agents_changed = AgentChangeDetector.get_instance().check()
+            if agents and (agents_changed or first_message):
+                new_msg = inject_agents_into_message(new_msg, agents)
+                need_replace = True
+
         # 首条消息注入系统环境信息
-        human_count = sum(1 for m in messages if isinstance(m, HumanMessage))
-        if human_count <= 1:
+        if first_message:
             new_msg = inject_system_info_into_message(new_msg)
             need_replace = True
 

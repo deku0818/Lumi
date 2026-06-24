@@ -1,5 +1,16 @@
 # Changelog
 
+## [0.2.0a8] - 2026-06-24
+
+### Added
+- **agent 工具动态加载** — agent 工具改为静态恒注册，可用代理列表经 `<system-reminder>` 动态注入（与 skill 一致）；`AgentChangeDetector` 检测 `.lumi/agents` 变更后热刷新，新增/删除代理无需重启或重建工具 schema
+- **子代理可配置多层委派** — 新增 `agents.max_delegation_depth`（默认 3，主 agent 为第 0 层，每委派 +1）；达上限的子代理工具集剔除 `agent` 工具、不能再往下委派（`0` = 禁止委派），`depth` 经 `LumiAgentState` 逐层传播；注入门控以「工具集是否含 agent」为准
+- **多层委派子代理事件归属** — 孙及更深活动按 `parent_ids` 最浅祖先确定性归并到顶层子代理卡片（仅展示用，不参与 interrupt/resume，错挂不影响功能）
+
+### Changed
+- **变更检测器去重** — agent / skill 检测器抽出共享 `FileSetChangeDetector` 基类（digest / 缓存 / 单例）；skill / agent 列表注入共用 `format_reminder`
+- **`_active_agent_runs` set → 插入有序 dict** — 子代理事件归属改为确定性（流式取最浅祖先、中断取最早插入），消除从无序集合任取导致的随机错挂
+
 ## [0.2.0a7] - 2026-06-24
 
 ### Removed

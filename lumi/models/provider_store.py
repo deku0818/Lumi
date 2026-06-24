@@ -129,10 +129,14 @@ def load() -> tuple[list[ProviderProfile], Active]:
 _KEEP_CLASSIFIER = object()  # _save 默认哨兵：保留盘上现有 classifier
 
 
-def _save(profiles: list[ProviderProfile], active: dict, classifier=_KEEP_CLASSIFIER) -> None:
+def _save(
+    profiles: list[ProviderProfile], active: dict, classifier=_KEEP_CLASSIFIER
+) -> None:
     # classifier 缺省 → 沿用盘上现值（让 set_effort/set_active/upsert 等不丢失它）；
     # 无论哪种来源都按当前 profiles 规范化，profile/model 被删时自动清失效指针。
-    raw = _read_data().get("classifier") if classifier is _KEEP_CLASSIFIER else classifier
+    raw = (
+        _read_data().get("classifier") if classifier is _KEEP_CLASSIFIER else classifier
+    )
     payload = {
         "active": _normalize_active(profiles, active),
         "profiles": [{**asdict(p), "models": list(p.models)} for p in profiles],

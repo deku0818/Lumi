@@ -147,8 +147,11 @@ class AgentBridge:
         self._context: LumiAgentContext | None = None
         self._config: RunnableConfig | None = None
         self.model_name: str = ""
-        # 活跃的 agent 工具 run_id 集合，跨 _stream 调用保持追踪（审批恢复场景）
-        self._active_agent_runs: set[str] = set()
+        # 活跃的 agent 工具 run_id，跨 _stream 调用保持追踪（审批恢复场景）。
+        # 流式事件归属（_resolve_subagent_parent）只用其成员判定，顺序由 parent_ids
+        # 决定、不依赖插入序。用 dict（而非 set）仅为给无 parent_ids 的中断路径
+        # （_subagent_marker）提供确定性的「最早插入＝最浅子代理」回退。
+        self._active_agent_runs: dict[str, None] = {}
         self._shadow: FileCheckpointManager | None = None
         self._tracker: FileChangeTracker | None = None
         # 本会话临时添加的额外可访问目录（不持久化，连接断开即失效）
@@ -483,28 +486,21 @@ class AgentBridge:
                             run_id = event.get("run_id", "")
                             parent_ids = event.get("parent_ids", [])
 
-                            # 判断当前事件是否属于子代理：
-                            # 排除当前事件自身的 run_id，避免 agent 工具的
-                            # on_tool_start 把自己误判为子代理事件
-                            parent_id = ""
-                            if self._active_agent_runs and parent_ids:
-                                candidates = self._active_agent_runs & (
-                                    set(parent_ids) - {run_id}
-                                )
-                                if candidates:
-                                    parent_id = next(iter(candidates))
+                            parent_id = self._resolve_subagent_parent(
+                                run_id, parent_ids
+                            )
 
                             # agent 工具开始时记录 run_id（放在匹配之后，
                             # 确保 agent 自身的 on_tool_start 不会自匹配）
                             if kind == "on_tool_start" and event.get("name") == "agent":
-                                self._active_agent_runs.add(run_id)
+                                self._active_agent_runs[run_id] = None
 
                             # agent 工具结束/出错时移除 run_id，避免残留影响后续匹配
                             if (
                                 kind in ("on_tool_end", "on_tool_error")
                                 and event.get("name") == "agent"
                             ):
-                                self._active_agent_runs.discard(run_id)
+                                self._active_agent_runs.pop(run_id, None)
 
                             if kind == "on_chat_model_start":
                                 yield BridgeEvent(
@@ -713,11 +709,31 @@ class AgentBridge:
             return (metadata or {}).get("checkpoint_ns", "") or run_id
         return args_tcid or run_id
 
+    def _resolve_subagent_parent(self, run_id: str, parent_ids: list[str]) -> str:
+        """事件的子代理归属：祖先链中「最浅」的活跃 agent run，无则空串。
+
+        parent_ids 为 root→直接父顺序（见 langchain event_stream._get_parent_ids），
+        故正序首个命中的活跃 run 即主 agent 直接派生的顶层子代理。多层委派时孙及
+        更深活动据此统一归并到该顶层子代理，避免从无序集合任取导致的随机错挂/丢弃。
+        排除自身 run_id，避免 agent 工具的 on_tool_start 把自己误判为子代理事件。
+        """
+        active = self._active_agent_runs
+        # 无活跃子代理（普通对话的绝大多数事件）/ 无祖先链时直接早退，
+        # 避免在 token 级流式热路径上对 parent_ids 空跑生成器。
+        if not active or not parent_ids:
+            return ""
+        return next(
+            (pid for pid in parent_ids if pid != run_id and pid in active),
+            "",
+        )
+
     def _subagent_marker(self) -> str:
-        """如果当前有活跃的 agent 工具运行，返回其 run_id 作为子代理标记。"""
-        if self._active_agent_runs:
-            return next(iter(self._active_agent_runs))
-        return ""
+        """中断（ask/approval）的子代理归属标记。
+
+        无 parent_ids 上下文可用，故取最早插入且仍活跃的 agent run——即主 agent
+        直接派生的顶层子代理，与流式事件路径的「最浅祖先」归并口径一致。
+        """
+        return next(iter(self._active_agent_runs), "")
 
     async def _check_interrupts(self) -> BridgeEvent:
         """检查中断，返回对应事件"""

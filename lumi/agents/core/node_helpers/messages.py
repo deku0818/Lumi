@@ -86,6 +86,12 @@ def inject_text_into_message(message: HumanMessage, text: str) -> HumanMessage:
     )
 
 
+def format_reminder(header: str, lines: list[str]) -> str:
+    """把一行行列表包成 ``<system-reminder>`` 块（skill / agent 列表注入共用）。"""
+    body = "\n".join(lines)
+    return f"<system-reminder>\n{header}\n{body}\n</system-reminder>\n"
+
+
 # ---------------------------------------------------------------------------
 # 清理不完整工具调用
 # ---------------------------------------------------------------------------

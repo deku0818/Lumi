@@ -6,6 +6,7 @@ import lumi.agents.permissions.workspace as workspace
 import lumi.agents.runtime.bg_tasks as task_registry
 import lumi.agents.tools.registry as registry
 from lumi.agents.core.hooks import set_run_config_hooks
+from lumi.agents.core.preprocessing.agent_detector import AgentChangeDetector
 from lumi.agents.runtime import shell_session
 from lumi.agents.tools.providers import filesystem
 
@@ -63,6 +64,14 @@ def reset_task_registry():
     task_registry._registry = None
     yield
     task_registry._registry = None
+
+
+@pytest.fixture(autouse=True)
+def reset_agent_detector():
+    """每次测试重置 AgentChangeDetector 单例，避免缓存 digest 跨测试泄漏。"""
+    AgentChangeDetector.reset()
+    yield
+    AgentChangeDetector.reset()
 
 
 @pytest.fixture(autouse=True)

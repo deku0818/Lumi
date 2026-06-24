@@ -50,6 +50,9 @@ class LumiAgentState(TypedDict):
     """结构化输出结果"""
     tool_cancelled: NotRequired[bool]
     """工具执行被用户取消时置 True，供条件边路由到 END"""
+    depth: NotRequired[int]
+    """子 agent 委派深度：主 agent 为 0，每委派一层 +1。
+    agent 工具据此限制最大委派层数（见 agents.max_delegation_depth）。"""
     execution_mode: NotRequired[str]
     """执行模式: "normal"(默认) | "plan" | "readonly" | 自定义模式
     非 "normal" 时 is_use_tool 路由会根据对应 ModePolicy 拦截不允许的工具调用。

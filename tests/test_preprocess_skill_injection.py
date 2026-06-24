@@ -8,8 +8,10 @@ Requirements: 3.1, 3.2, 3.3
 
 from __future__ import annotations
 
+from types import SimpleNamespace
 from unittest.mock import MagicMock, patch
 
+import pytest
 from langchain_core.messages import AIMessage, HumanMessage, RemoveMessage
 
 from lumi.agents.tools.loader import SkillConfig
@@ -18,6 +20,19 @@ from lumi.agents.tools.loader import SkillConfig
 _TEST_SKILLS = [
     SkillConfig(name="test_skill", description="测试技能", prompt="测试提示词"),
 ]
+
+
+@pytest.fixture(autouse=True)
+def _mute_agent_injection():
+    """本文件只验证 skill 注入；让 agent 检测器返回空，避免其 system-reminder 干扰断言。"""
+    with patch("lumi.agents.core.nodes.AgentChangeDetector") as mock_cls:
+        mock_cls.get_instance.return_value.check.return_value = ([], False)
+        yield
+
+
+def _runtime() -> SimpleNamespace:
+    """假 runtime（preprocess_messages 需要）；本文件 agent 已静默，工具集内容无关。"""
+    return SimpleNamespace(context=SimpleNamespace(tools=[]))
 
 
 def _make_state(
@@ -71,7 +86,7 @@ async def test_skill_injection_after_preprocessing(
         messages=[HumanMessage(content="你好", id="msg1")],
     )
 
-    result = await preprocess_messages(state)
+    result = await preprocess_messages(state, _runtime())
     msgs = result["messages"]
 
     # 应包含 RemoveMessage（删除原消息）和新 HumanMessage（带 system-reminder）
@@ -126,7 +141,7 @@ async def test_only_last_human_message_injected(
         ],
     )
 
-    result = await preprocess_messages(state)
+    result = await preprocess_messages(state, _runtime())
     msgs = result["messages"]
 
     # RemoveMessage 应仅针对最后一条 HumanMessage (msg3)
@@ -177,7 +192,7 @@ async def test_no_injection_when_not_changed(
         ],
     )
 
-    result = await preprocess_messages(state)
+    result = await preprocess_messages(state, _runtime())
     msgs = result["messages"]
 
     remove_msgs = [m for m in msgs if isinstance(m, RemoveMessage)]
@@ -216,7 +231,7 @@ async def test_no_injection_when_skills_empty(
         ],
     )
 
-    result = await preprocess_messages(state)
+    result = await preprocess_messages(state, _runtime())
     msgs = result["messages"]
 
     remove_msgs = [m for m in msgs if isinstance(m, RemoveMessage)]
@@ -256,7 +271,7 @@ async def test_summary_injects_skills_into_summary_message(
         },
     )
 
-    result = await preprocess_messages(state)
+    result = await preprocess_messages(state, _runtime())
     msgs = result["messages"]
 
     # 找到摘要消息（HumanMessage）
