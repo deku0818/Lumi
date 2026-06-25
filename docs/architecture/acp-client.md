@@ -2,6 +2,8 @@
 
 让 `LumiAgent` 作为 [Agent Client Protocol](https://agentclientprotocol.com)（ACP）的 **client**，把外部编程 agent（Claude Code、Codex、Gemini CLI…）当「工人」拉起来派活——Lumi 扮演 ACP 里编辑器/IDE 的角色，外部 agent 作为 ACP server 子进程。
 
+> 📍 **要继续干活 / 快速捡回？看 [acp-progress.md](./acp-progress.md)**（操作性交接：代码地图、PR3/PR4 验证过的实施步骤、风险清单、测试方法）。本文是设计与 rationale。
+
 > 现状：[在途审批改造](./approval-inflight.md) **已落地**；本文 **ACP-PR1（传输层）+ ACP-PR2（委派工具 + 事件回流）已落地**。PR1：`lumi/acp/` + 脱离 Lumi 的子进程握手单测；PR2：`delegate_to_claude` 工具 + bridge custom-event 分支 + 子卡片归属，desktop 可见 Claude Code 流式输出。权限（PR3）/ fs（PR4）待实施。
 >
 > 已定方向：走 **ACP 标准协议**（非裸 CLI/PTY 包装）；首发 worker = **Claude Code**；先做 **单点委派**（打通管道），Council / fan-out 留后。
