@@ -4,6 +4,7 @@ from typing import TYPE_CHECKING, Annotated, Any, Literal, NotRequired, TypedDic
 
 if TYPE_CHECKING:
     from lumi.agents.permissions.engine import PermissionEngine
+    from lumi.gateway.bridge.broker import ApprovalBroker
 
 from dataclasses import dataclass, field
 
@@ -25,6 +26,10 @@ class LumiAgentContext:
     """模型名；连接（base_url / api_key）由 create_llm 按供应商 profile 解析。"""
     permission_engine: PermissionEngine | None = field(default=None)
     """PermissionEngine 实例，用于工具权限评估"""
+    approval_broker: ApprovalBroker | None = field(default=None)
+    """在途审批 Broker，由 bridge 在 create_agent 后注入（与 permission_engine 同源）。
+    节点 / ask 工具经它 await 审批，替代 interrupt() 中断-恢复。子 agent 由 agent 工具
+    从父 context 传播。无 bridge 的纯 graph 调用（headless）保持 None。"""
 
 
 class LumiAgentState(TypedDict):

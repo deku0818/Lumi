@@ -1,5 +1,5 @@
 {
-  "$comment": "Lumi 前端(desktop / 未来 TS TUI) 与后端的 WebSocket 协议契约。语言中立的单一事实来源：TS 端 import 本文件 derive 静态类型，Python 后端用契约测试(tests/server/test_protocol_contract.py)锁住一致性。payload 字段中 '?' 后缀表示可选。新增/改名事件或方法时，只改这里，两端的类型与测试随之收敛。",
+  "$comment": "Lumi 前端(desktop / 未来 TS TUI) 与后端的 WebSocket 协议契约。语言中立的单一事实来源：TS 端 import 本文件 derive 静态类型，Python 后端用契约测试(tests/gateway/test_protocol_contract.py)锁住一致性。payload 字段中 '?' 后缀表示可选。新增/改名事件或方法时，只改这里，两端的类型与测试随之收敛。",
   "version": 1,
   "events": {
     "gateway.ready": { "payload": { "model": "string", "workspace": "string" }, "note": "连接握手，由 ws 端点直接发出" },
@@ -10,10 +10,10 @@
     "tool.generating": { "payload": {}, "note": "模型正在生成工具调用参数" },
     "tool.start": { "payload": { "name": "string", "args": "object", "tool_call_id": "string", "run_id?": "string" } },
     "tool.complete": { "payload": { "name": "string", "output": "string", "tool_call_id": "string", "is_error?": "boolean" }, "note": "is_error=true 表示工具以异常收尾" },
-    "clarify.request": { "payload": { "questions": "Question[]" }, "note": "ask 工具，需 resume" },
+    "clarify.request": { "payload": { "approval_id": "string", "questions": "Question[]" }, "note": "ask 工具，经 resume(approval_id, value) 应答" },
     "approval.request": {
-      "payload": { "tool_calls": "ToolCallBrief[]", "decisions?": "object", "options?": "object", "warnings?": "string[]", "boundary_violations?": "string[]" },
-      "note": "工具审批，需 resume"
+      "payload": { "approval_id": "string", "tool_calls": "ToolCallBrief[]", "decisions?": "object", "options?": "object", "warnings?": "string[]", "boundary_violations?": "string[]" },
+      "note": "工具审批，经 resume(approval_id, value) 应答"
     },
     "turn.complete": { "payload": { "usage?": "Usage" } },
     "error": { "payload": { "message": "string" } },
@@ -27,7 +27,7 @@
   "events_note": "任意事件 payload 都可能附带 parent_run_id（非空时表示属于某个子代理）",
   "methods": {
     "send_message": { "params": ["content", "tool_mode?", "execution_mode?"], "streaming": true },
-    "resume": { "params": ["value"], "streaming": true },
+    "resume": { "params": ["approval_id", "value"], "note": "在途审批应答（非流式控制 RPC）：唤醒挂起的审批/提问 Future；value 形状 = 审批 {decision, message?, set_tool_mode?} 或 clarify 答案字符串/__ask_cancelled__" },
     "stop": { "params": [], "result": ["stopped"], "note": "中止当前流式轮，取消后补发 turn.complete" },
     "list_commands": { "params": [], "result": ["commands"] },
     "run_command": { "params": ["name", "extra_text?", "tool_mode?"], "streaming": true },

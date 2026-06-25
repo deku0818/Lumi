@@ -1,17 +1,36 @@
 """Ask 工具测试"""
 
-from unittest.mock import patch
+from types import SimpleNamespace
 
 import pytest
 from langgraph.types import Command
 from pydantic import ValidationError
 
-from lumi.agents.tools.providers.ask import Question, QuestionOption, ask
+from lumi.agents.tools.providers.ask import (
+    ASK_CANCELLED,
+    Question,
+    QuestionOption,
+    ask,
+)
 
 
-def _make_tool_call(args, tool_call_id="tc_test"):
-    """构造完整的 ToolCall 格式（InjectedToolCallId 要求）"""
-    return {"args": args, "name": "ask", "type": "tool_call", "id": tool_call_id}
+class _FakeBroker:
+    """捕获 ask 经 broker.request 发出的 payload，并回应预设值。"""
+
+    def __init__(self, response):
+        self._response = response
+        self.calls: list[dict] = []
+
+    async def request(self, payload: dict, reject_value):
+        self.calls.append(payload)
+        return self._response
+
+
+def _runtime_with(response):
+    """构造带 fake broker 的注入 runtime（ask 经 runtime.context.approval_broker 审批）。"""
+    return SimpleNamespace(
+        context=SimpleNamespace(approval_broker=_FakeBroker(response))
+    )
 
 
 def test_question_option_model():
@@ -46,37 +65,67 @@ def test_question_model_options_count():
         )
 
 
-def test_ask_builds_interrupt_data():
+async def test_ask_builds_approval_payload():
     opts = [
         QuestionOption(label="A", description="Option A"),
         QuestionOption(label="B", description="Option B"),
     ]
     q = Question(question="Which?", header="Test", options=opts, multiSelect=False)
 
-    with patch("lumi.agents.tools.providers.ask.interrupt") as mock_interrupt:
-        mock_interrupt.return_value = "User chose A"
-        ask.invoke(_make_tool_call({"questions": [q]}, "tc_789"))
+    runtime = _runtime_with("User chose A")
+    await ask.coroutine(questions=[q], tool_call_id="tc_789", runtime=runtime)
 
-    mock_interrupt.assert_called_once()
-    call_data = mock_interrupt.call_args[0][0]
-    assert call_data["type"] == "ask"
-    assert call_data["tool_call_id"] == "tc_789"
-    assert len(call_data["questions"]) == 1
+    calls = runtime.context.approval_broker.calls
+    assert len(calls) == 1
+    payload = calls[0]
+    assert payload["type"] == "ask"
+    assert payload["tool_call_id"] == "tc_789"
+    assert len(payload["questions"]) == 1
     # 选项应包含原始 2 个 + 自定义输入选项
-    assert len(call_data["questions"][0]["options"]) == 3
+    assert len(payload["questions"][0]["options"]) == 3
 
 
-def test_ask_returns_command():
+async def test_ask_returns_command():
     opts = [
         QuestionOption(label="X", description="DX"),
         QuestionOption(label="Y", description="DY"),
     ]
     q = Question(question="Pick?", header="H", options=opts, multiSelect=False)
 
-    with patch("lumi.agents.tools.providers.ask.interrupt") as mock_interrupt:
-        mock_interrupt.return_value = "Selected X"
-        result = ask.invoke(_make_tool_call({"questions": [q]}, "tc_abc"))
+    runtime = _runtime_with("Selected X")
+    result = await ask.coroutine(questions=[q], tool_call_id="tc_abc", runtime=runtime)
 
     assert isinstance(result, Command)
     msg = result.update["messages"][0].content
     assert "Selected X" in msg
+
+
+async def test_ask_no_broker_headless_proceeds():
+    """无审批通道（headless：cron / workflow，approval_broker=None）：返回提示让模型继续，不崩溃。"""
+    opts = [
+        QuestionOption(label="X", description="DX"),
+        QuestionOption(label="Y", description="DY"),
+    ]
+    q = Question(question="Pick?", header="H", options=opts, multiSelect=False)
+
+    runtime = SimpleNamespace(context=SimpleNamespace(approval_broker=None))
+    result = await ask.coroutine(questions=[q], tool_call_id="tc_h", runtime=runtime)
+
+    assert isinstance(result, Command)
+    # 不中断（无 tool_cancelled），让自治 agent 继续
+    assert "tool_cancelled" not in result.update
+    assert result.update["messages"][0].tool_call_id == "tc_h"
+
+
+async def test_ask_cancelled_sets_flag():
+    opts = [
+        QuestionOption(label="X", description="DX"),
+        QuestionOption(label="Y", description="DY"),
+    ]
+    q = Question(question="Pick?", header="H", options=opts, multiSelect=False)
+
+    runtime = _runtime_with(ASK_CANCELLED)
+    result = await ask.coroutine(questions=[q], tool_call_id="tc_x", runtime=runtime)
+
+    assert isinstance(result, Command)
+    assert result.update["tool_cancelled"] is True

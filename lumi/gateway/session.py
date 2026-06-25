@@ -44,11 +44,9 @@ from lumi.utils.constants import ATTACHED_FILE_TAG, NOTIFICATION_POLL_INTERVAL
 from lumi.utils.logger import logger
 from lumi.utils.thread_id import generate_thread_id
 
-# 流以中断事件收尾 → 该轮尚未结束，正等待客户端 resume，期间不可插入后台通知轮
-_INTERRUPT_KINDS = frozenset({EventKind.CLARIFY, EventKind.APPROVAL})
-
-# 需后台 task 承载、可被 stop 取消的流式方法
-_STREAMING_METHODS = frozenset({"send_message", "resume", "run_command"})
+# 需后台 task 承载、可被 stop 取消的流式方法。resume 改非流式控制 RPC（在途审批应答）：
+# 审批挂起期间原 prompt 流仍活、run.lock 仍持，流式方法会被拒成「已有任务在执行」。
+_STREAMING_METHODS = frozenset({"send_message", "run_command"})
 
 
 def _extract_images(content) -> list[str]:
@@ -142,13 +140,12 @@ class _RunState:
     """单条连接的运行协调状态。
 
     lock 串行化所有会改写 bridge 运行态的操作（用户轮 / 后台通知轮 / 切换会话），
-    确保同一时刻 bridge 上只跑一件事。awaiting_resume 标记上一轮以中断收尾、正等待
-    客户端 resume，此期间后台通知轮不得插入（否则会破坏挂起的中断状态）。
-    task 持有当前正在跑的用户流式轮——独立于主接收循环，以便 stop 帧能取消它。
+    确保同一时刻 bridge 上只跑一件事。在途审批期间该轮仍活、持着 lock，后台通知轮抢锁
+    自然被挡，无需额外旗标。task 持有当前正在跑的用户流式轮——独立于主接收循环，以便
+    stop 帧能取消它。
     """
 
     lock: asyncio.Lock = field(default_factory=asyncio.Lock)
-    awaiting_resume: bool = False
     task: asyncio.Task | None = None
 
 
@@ -192,12 +189,23 @@ async def _load_history(bridge: AgentBridge, params: dict) -> dict:
 
 
 async def _stop(session: GatewaySession, params: dict) -> dict:
-    # 中止当前用户轮：取消 task，其取消处理会补发 turn.complete 收尾
-    task = session._run.task
-    if task is not None and not task.done():
-        task.cancel()
-        return {"stopped": True}
-    return {"stopped": False}
+    # 中止当前用户轮：优先把挂起审批以拒绝收尾（保留历史），无挂起审批才硬取消 task。
+    # 不等 task 结束，快速回应（取消处理自会补发 turn.complete 收尾）。
+    return {"stopped": await session._finalize_active_turn(wait=False)}
+
+
+async def _resume(session: GatewaySession, params: dict) -> dict:
+    """在途审批应答（非流式控制 RPC）：唤醒挂起的审批 / 提问 Future。
+
+    原 prompt 流仍活、run.lock 仍持，故应答走轻量 RPC 而非流式——事件继续从原流吐出，
+    不开新流。value 形状沿用原 resume 值：tool_approval 为 {decision, message?,
+    set_tool_mode?}；ask 为答案字符串 / ASK_CANCELLED。resolved=False 表示审批已被
+    stop / 切会话作废（无未决请求命中）。
+    """
+    ok = session._bridge.resolve_approval(
+        params.get("approval_id", ""), params.get("value")
+    )
+    return {"resolved": ok}
 
 
 async def _list_commands(session: GatewaySession, params: dict) -> dict:
@@ -321,6 +329,9 @@ async def _switch_session(session: GatewaySession, params: dict) -> dict:
     # （仅本会话引擎/hooks，不动进程 cwd、不影响其它会话）。
     tid = params.get("thread_id") or generate_thread_id()
     workspace = params.get("workspace") or ""
+    # 切走 = 放弃当前挂起审批：先把活跃轮收尾（以拒绝跑完、保留历史）并等其释放 run.lock，
+    # 否则若该轮正挂在审批上持着锁，下面的 async with 会死等。
+    await session._finalize_active_turn(wait=True)
     async with session._run.lock:
         # 先切 thread 再绑项目：set_workspace 关的是 current_thread 的 shell，必须等
         # current_thread 已是切入的 tid，否则会关到切出会话的 shell、而切入会话的陈旧
@@ -335,7 +346,6 @@ async def _switch_session(session: GatewaySession, params: dict) -> dict:
                 logger.warning(
                     "switch_session 绑定项目目录失败(%s)，仅切会话: %s", workspace, e
                 )
-        session._run.awaiting_resume = False
     return {"thread_id": tid}
 
 
@@ -422,6 +432,7 @@ async def _clear_finished_bg_tasks(session: GatewaySession, params: dict) -> dic
 # 新增方法只需在此登记 + events.json 声明，漂移会被测试直接抓住。
 _RPC_HANDLERS = {
     "stop": _stop,
+    "resume": _resume,
     "list_commands": _list_commands,
     "list_providers": _list_providers,
     "test_provider": _test_provider,
@@ -535,8 +546,6 @@ class GatewaySession:
                 tool_mode=params.get("tool_mode", "default"),
                 execution_mode=params.get("execution_mode", "normal"),
             )
-        if method == "resume":
-            return self._bridge.stream_resume(params.get("value"))
         return self._bridge.stream_command(
             params.get("name", ""),
             extra_text=params.get("extra_text", ""),
@@ -546,26 +555,41 @@ class GatewaySession:
     async def _pump(self, gen) -> dict:
         """迭代 BridgeEvent 流逐条转 wire 推给客户端（假定已持有 run.lock）。
 
-        依据最后一个事件是否为中断更新 awaiting_resume：以中断收尾 → 等待 resume。
+        在途审批不再令流以中断收尾——审批挂起期间该轮仍在 _pump 里活着、持着锁，应答经
+        非流式 resume RPC 解开 Future 后继续吐事件，直到 turn.complete 自然结束。
         """
-        last_kind = None
         async for evt in gen:
-            last_kind = evt.kind
             await self._channel.send(
                 bridge_event_to_wire(evt, self._bridge.current_thread_id)
             )
-        self._run.awaiting_resume = last_kind in _INTERRUPT_KINDS
         return {"ok": True}
 
     async def _run_stream(self, gen) -> dict:
-        """串行化地跑一轮事件流（用户消息 / resume / 命令）。"""
+        """串行化地跑一轮事件流（用户消息 / 命令）。审批挂起期间持锁不放。"""
         async with self._run.lock:
             return await self._pump(gen)
 
+    async def _finalize_active_turn(self, *, wait: bool) -> bool:
+        """收尾当前活跃用户轮，返回是否确有一轮被收尾。
+
+        优先把挂起审批以拒绝收尾，让本轮干净跑到 END、保留历史（同点"拒绝"）；无挂起审批
+        （轮在流生成中途）才硬取消 task。wait=True 时等 task 结束——switch_session 取锁前
+        须等，否则该轮正挂在审批上持着锁会死锁；stop 不等，以便快速回应。
+        """
+        rejected = self._bridge.reject_pending()
+        task = self._run.task
+        if task is None or task.done():
+            return rejected > 0
+        if rejected == 0:
+            task.cancel()
+        if wait:
+            with suppress(asyncio.CancelledError, Exception):
+                await task
+        return True
+
     async def _finish_cancelled_turn(self) -> None:
-        """被 stop 取消后的统一收尾：清 awaiting_resume + 补发 turn.complete 结束前端
-        running 态。用户流式轮与后台通知轮共用。"""
-        self._run.awaiting_resume = False
+        """被 stop 取消后的统一收尾：补发 turn.complete 结束前端 running 态。
+        用户流式轮与后台通知轮共用。"""
         with suppress(Exception):
             await self._channel.send(
                 event_frame(
@@ -608,13 +632,12 @@ class GatewaySession:
         """
         while True:
             await asyncio.sleep(NOTIFICATION_POLL_INTERVAL)
-            # 队列空（绝大多数 tick）时不去抢 run.lock，避免在流式轮后面排队
-            if self._run.awaiting_resume or not self._bridge.has_notifications():
+            # 队列空（绝大多数 tick）时不去抢 run.lock，避免在流式轮后面排队。
+            # 审批挂起期间该轮持着 run.lock，下面 async with 自然被挡到审批结束，
+            # 不会插入到挂起轮中间（无需 awaiting_resume 旗标）。
+            if not self._bridge.has_notifications():
                 continue
             async with self._run.lock:
-                # 抢到锁后复检：等锁期间用户轮可能刚以中断收尾
-                if self._run.awaiting_resume:
-                    continue
                 # 只认领归属本连接当前 thread 的通知——队列是进程级共享的，
                 # drain_all 会把其他会话的后台任务通知抢到本会话注入
                 hint = self._bridge.drain_notification_hint(

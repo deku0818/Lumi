@@ -26,7 +26,6 @@ from lumi.agents.core.graph import LumiAgent, create_agent
 from lumi.agents.core.hooks import build_config_hooks, set_run_config_hooks
 from lumi.agents.core.meta_message import meta_human_message
 from lumi.agents.core.state import LumiAgentContext
-from lumi.agents.permissions.models import BYPASS_TOOLS
 from lumi.agents.permissions.workspace import set_run_authorized_source_for
 from lumi.agents.runtime.bg_tasks import current_thread_id, get_task_registry
 from lumi.agents.runtime.checkpoint import CheckpointInfo, FileCheckpointManager
@@ -34,6 +33,7 @@ from lumi.agents.runtime.file_tracker import FileChangeTracker
 from lumi.agents.runtime.shell_session import get_shell_session_manager
 from lumi.agents.tools.providers.mcp import get_mcp_session_manager
 from lumi.gateway.bridge.approval import ApprovalEnricher
+from lumi.gateway.bridge.broker import LUMI_APPROVAL_EVENT, ApprovalBroker
 from lumi.gateway.bridge.checkpoint import CheckpointService
 from lumi.gateway.bridge.folders import FolderManager
 from lumi.gateway.bridge.providers import ProviderService
@@ -48,12 +48,6 @@ if TYPE_CHECKING:
 
 # LangChain 框架注入的内部字段，不传递给 TUI 渲染
 _TOOL_INTERNAL_KEYS = frozenset({"tool_call_id", "runtime"})
-
-# 用 interrupt() 中断、并在 resume 后整体重跑节点的工具：on_tool_start 会二次触发，
-# 且两次 run_id 不同，注入的 tool_call_id 又不出现在事件 data.input 里。改用跨 resume
-# 稳定的 checkpoint_ns 作为 wire id（中断时节点内仅此一个中断工具在飞，故唯一），
-# 使前端能按 id 去重为单行，否则会渲染出重复的工具行（如两条 ask）。
-_INTERRUPT_TOOLS = frozenset({"ask"})
 
 
 def build_skill_command_blocks(
@@ -147,11 +141,13 @@ class AgentBridge:
         self._context: LumiAgentContext | None = None
         self._config: RunnableConfig | None = None
         self.model_name: str = ""
-        # 活跃 agent 工具 run_id → 其 parent_ids（插入时由事件携带），跨 _stream 调用保持
-        # 追踪（审批恢复场景）。流式归属（_resolve_subagent_parent）只用 key 成员判定；
-        # 中断归属（_subagent_marker，无 parent_ids 上下文）靠存下的 parent_ids 判断活跃
-        # run 间的祖先关系，区分「单链委派」与「并行兄弟」。
-        self._active_agent_runs: dict[str, list[str]] = {}
+        # 在途审批 Broker：本连接唯一实例，注入 context 供节点 / ask 工具 await 审批，
+        # resolve_approval 经非流式 resume RPC 唤醒挂起的 Future（见 docs/architecture/
+        # approval-inflight.md）。
+        self._broker = ApprovalBroker()
+        # 活跃 agent 工具 run_id 集合：流式 / 审批事件的子代理归属（_resolve_subagent_parent）
+        # 据此判定祖先链中是否含活跃 agent run。在途审批后审批卡片也走同一归属机制。
+        self._active_agent_runs: set[str] = set()
         self._shadow: FileCheckpointManager | None = None
         self._tracker: FileChangeTracker | None = None
         # 本会话临时添加的额外可访问目录（不持久化，连接断开即失效）
@@ -185,6 +181,8 @@ class AgentBridge:
             checkpoint=agents_config.checkpoint,
             project_dir=target,
         )
+        # 注入在途审批 Broker（与 permission_engine 同源，事后赋值，零改 create_agent 签名）
+        self._context.approval_broker = self._broker
         # 应用持久化的 active 供应商 (profile, model)（覆盖 config 默认模型）
         self._apply_active()
         # 本会话项目（引擎已绑定 project_dir 或退回 cwd）的 config hooks
@@ -388,17 +386,6 @@ class AgentBridge:
         async for event in self.stream_response(blocks, tool_mode=tool_mode):
             yield event
 
-    async def stream_resume(self, value) -> AsyncGenerator[BridgeEvent, None]:
-        """恢复中断并 yield 事件流
-
-        保留 _active_agent_runs：子代理内部工具审批后 resume 可能不会
-        重新发出 agent 的 on_tool_start，需要保留已有映射才能正确识别
-        后续子代理事件的 parent_run_id。
-        """
-        input_data = Command(resume=value)
-        async for event in self._stream(input_data):
-            yield event
-
     def drain_notifications(self, thread_id: str | None = None) -> list[str]:
         """取出待发送的后台任务完成通知。
 
@@ -481,6 +468,7 @@ class AgentBridge:
                             stream_input,
                             self._config,
                             context=self._context,
+                            version="v2",  # 锁死版本：on_custom_event 浮现 + parent_ids 依赖此契约
                         ):
                             kind = event.get("event", "")
                             run_id = event.get("run_id", "")
@@ -490,17 +478,17 @@ class AgentBridge:
                                 run_id, parent_ids
                             )
 
-                            # agent 工具开始时记录 run_id→parent_ids（放在匹配之后，
+                            # agent 工具开始时记录 run_id（放在匹配之后，
                             # 确保 agent 自身的 on_tool_start 不会自匹配）
                             if kind == "on_tool_start" and event.get("name") == "agent":
-                                self._active_agent_runs[run_id] = parent_ids
+                                self._active_agent_runs.add(run_id)
 
                             # agent 工具结束/出错时移除 run_id，避免残留影响后续匹配
                             if (
                                 kind in ("on_tool_end", "on_tool_error")
                                 and event.get("name") == "agent"
                             ):
-                                self._active_agent_runs.pop(run_id, None)
+                                self._active_agent_runs.discard(run_id)
 
                             if kind == "on_chat_model_start":
                                 yield BridgeEvent(
@@ -562,10 +550,9 @@ class AgentBridge:
                                     args = {}
                                 # 未注入 tool_call_id 的工具（如 bash）回退到 run_id：
                                 # run_id 每次执行唯一，且 on_tool_start/end 共享同一个，
-                                # 避免前端按空 id 把多个工具输出匹配混淆。interrupt 工具
-                                # 走 checkpoint_ns 以跨 resume 稳定（见 _resolve_tool_call_id）。
+                                # 避免前端按空 id 把多个工具输出匹配混淆。
                                 tool_call_id = self._resolve_tool_call_id(
-                                    name, tool_call_id, run_id, event.get("metadata")
+                                    name, tool_call_id, run_id
                                 )
                                 yield BridgeEvent(
                                     kind=EventKind.TOOL_START,
@@ -592,24 +579,15 @@ class AgentBridge:
                                 inp = data.get("input", {})
                                 if isinstance(inp, dict):
                                     tool_call_id = inp.get("tool_call_id", "")
-                                # 与 on_tool_start 对齐：普通工具回退 run_id，
-                                # interrupt 工具用 checkpoint_ns 保持跨 resume 稳定
+                                # 普通工具回退 run_id（与 on_tool_start 对齐）
                                 tool_call_id = self._resolve_tool_call_id(
-                                    name, tool_call_id, run_id, event.get("metadata")
+                                    name, tool_call_id, run_id
                                 )
-
-                                # ask 等 BYPASS 工具使用 interrupt() 中断，LangGraph 会在
-                                # 中断时提前发出 on_tool_end（output 为空），此时不应标记
-                                # ToolBlock 为 Done，否则后续 ASK 事件找不到 block 来挂载对话框。
-                                # 真正的 TOOL_END 在 resume 后才会带有实际 output。
-                                resolved_output = str(output) if output else ""
-                                if name in BYPASS_TOOLS and not resolved_output:
-                                    continue
 
                                 yield BridgeEvent(
                                     kind=EventKind.TOOL_COMPLETE,
                                     name=name,
-                                    output=resolved_output,
+                                    output=str(output) if output else "",
                                     tool_call_id=tool_call_id,
                                     parent_run_id=parent_id,
                                     run_id=run_id if name == "agent" else "",
@@ -622,8 +600,7 @@ class AgentBridge:
                                 # is_error 的 TOOL_COMPLETE，让前端结束该行并红色高亮。
                                 name = event.get("name", "unknown")
                                 err = event.get("data", {}).get("error", "")
-                                # interrupt() / Command 冒泡（ask 等）不是真失败，
-                                # 由 _check_interrupts 另行处理成 CLARIFY 卡片，这里跳过不报错。
+                                # Command 冒泡等控制流不是真失败，跳过不报错。
                                 if isinstance(err, GraphBubbleUp):
                                     continue
                                 inp = event.get("data", {}).get("input", {})
@@ -633,7 +610,7 @@ class AgentBridge:
                                     else ""
                                 )
                                 tool_call_id = self._resolve_tool_call_id(
-                                    name, args_tcid, run_id, event.get("metadata")
+                                    name, args_tcid, run_id
                                 )
                                 yield BridgeEvent(
                                     kind=EventKind.TOOL_COMPLETE,
@@ -644,6 +621,27 @@ class AgentBridge:
                                     parent_run_id=parent_id,
                                     run_id=run_id if name == "agent" else "",
                                 )
+
+                            elif (
+                                kind == "on_custom_event"
+                                and event.get("name") == LUMI_APPROVAL_EVENT
+                            ):
+                                # 在途审批：节点 / ask 工具经 broker 发出的审批请求在此浮现
+                                # 成卡片（内联流出，节点随后才挂起）。parent_run_id 复用流式
+                                # 归属——子 / 外部 agent 的审批白嫖 custom event 自带的 parent_ids。
+                                data = event.get("data", {}) or {}
+                                if data.get("type") == "ask":
+                                    yield BridgeEvent(
+                                        kind=EventKind.CLARIFY,
+                                        data=data,
+                                        parent_run_id=parent_id,
+                                    )
+                                else:  # tool_approval：bridge 层富化权限评估 / 选项
+                                    yield BridgeEvent(
+                                        kind=EventKind.APPROVAL,
+                                        data=self._enrich_tool_approval(data),
+                                        parent_run_id=parent_id,
+                                    )
                     finally:
                         # 清除 rewind 或恢复时设置的 checkpoint_id，
                         # 确保后续 aget_state 获取最新 checkpoint
@@ -674,8 +672,8 @@ class AgentBridge:
                     yield BridgeEvent(kind=EventKind.MESSAGE_COMPLETE)
                     await asyncio.sleep(wait)
 
-            # 流结束后检测中断
-            yield await self._check_interrupts()
+            # 流正常结束（在途审批不再跨流中断）→ 收尾 turn.complete
+            yield await self._turn_complete_event()
 
         except asyncio.CancelledError:
             logger.info("[AgentBridge] 流式任务被取消")
@@ -696,17 +694,12 @@ class AgentBridge:
             yield BridgeEvent(kind=EventKind.ERROR, error=f"[{err_type}] {e}")
 
     @staticmethod
-    def _resolve_tool_call_id(
-        name: str, args_tcid: str, run_id: str, metadata: dict | None
-    ) -> str:
+    def _resolve_tool_call_id(name: str, args_tcid: str, run_id: str) -> str:
         """解析工具对外的 wire tool_call_id。
 
-        普通工具用注入的 tool_call_id，缺失时回退到 run_id（每次执行唯一）。
-        interrupt 工具（见 _INTERRUPT_TOOLS）resume 后会带新的 run_id 重发事件，
-        改用跨 resume 稳定的 checkpoint_ns，让前端把中断前后的事件归并为单行。
+        用注入的 tool_call_id，缺失时回退到 run_id（每次执行唯一，on_tool_start/end
+        共享同一个）。在途审批后工具单次执行、不再跨 resume 重发，无需稳定 id。
         """
-        if name in _INTERRUPT_TOOLS:
-            return (metadata or {}).get("checkpoint_ns", "") or run_id
         return args_tcid or run_id
 
     def _resolve_subagent_parent(self, run_id: str, parent_ids: list[str]) -> str:
@@ -727,81 +720,20 @@ class AgentBridge:
             "",
         )
 
-    def _subagent_marker(self) -> str:
-        """中断（ask/approval）的子代理归属标记——无 parent_ids 上下文，靠活跃集自身判断。
+    async def _turn_complete_event(self) -> BridgeEvent:
+        """流结束后的收尾事件：从 state 末条 AI message 取完整 usage（含 cache 详情）。
 
-        顶层子代理 = parent_ids 中不含任何活跃 agent run 的活跃 run（与流式路径「最浅
-        祖先」同口径）。恰好一个顶层 → 单链委派，明确归属到它；多个 → 并行兄弟无法区分，
-        返回空串挂到主 agent，而非自信地错挂某个兄弟（见 docs/architecture/desktop.md）。
+        在途审批不再跨流中断，故流跑完即一轮结束，无需检测挂起态。
         """
-        active = self._active_agent_runs
-        roots = [
-            run_id
-            for run_id, parent_ids in active.items()
-            if not any(pid in active for pid in parent_ids)
-        ]
-        return roots[0] if len(roots) == 1 else ""
-
-    async def _check_interrupts(self) -> BridgeEvent:
-        """检查中断，返回对应事件"""
         try:
-            graph = self._agent.graph
-            state = await graph.aget_state(self._config)
-        except Exception as e:
-            thread_id = (
-                (self._config or {}).get("configurable", {}).get("thread_id", "unknown")
-            )
-            logger.error(
-                "[AgentBridge] 获取中断状态失败: %s (thread_id=%s)",
-                e,
-                thread_id,
-                exc_info=True,
-            )
-            return BridgeEvent(kind=EventKind.TURN_COMPLETE)
-
-        if not state.next:
-            # 从 state 的最后一条 AI message 提取完整 usage（含 cache 详情）
+            state = await self._agent.graph.aget_state(self._config)
             usage = self._extract_last_ai_usage(state)
-            return BridgeEvent(kind=EventKind.TURN_COMPLETE, usage_metadata=usage)
-
-        for task in state.tasks:
-            for intr in task.interrupts:
-                data = intr.value
-                if isinstance(data, dict):
-                    interrupt_type = data.get("type", "")
-                    if interrupt_type == "ask":
-                        return BridgeEvent(
-                            kind=EventKind.CLARIFY,
-                            data=data,
-                            parent_run_id=self._subagent_marker(),
-                        )
-                    elif interrupt_type == "tool_approval":
-                        enriched = self._enrich_tool_approval(data)
-                        return BridgeEvent(
-                            kind=EventKind.APPROVAL,
-                            data=enriched,
-                            parent_run_id=self._subagent_marker(),
-                        )
-
-        # 记录详细的中断信息以便排查
-        tasks_info = []
-        for task in state.tasks:
-            interrupts_info = [
-                {"type": type(intr.value).__name__, "value": repr(intr.value)[:200]}
-                for intr in (task.interrupts or [])
-            ]
-            tasks_info.append(
-                {"id": task.id, "name": task.name, "interrupts": interrupts_info}
+        except Exception as e:
+            logger.error(
+                "[AgentBridge] 取 turn.complete usage 失败: %s", e, exc_info=True
             )
-        logger.error(
-            "[AgentBridge] 图状态异常: next=%s 但无可识别的中断, tasks=%s",
-            state.next,
-            tasks_info,
-        )
-        return BridgeEvent(
-            kind=EventKind.ERROR,
-            error=f"执行异常：图停滞在 {state.next}，可能是上一轮请求失败导致状态残留，请重试",
-        )
+            usage = None
+        return BridgeEvent(kind=EventKind.TURN_COMPLETE, usage_metadata=usage)
 
     # ── 权限评估（委派 ApprovalEnricher）──
 
@@ -810,6 +742,24 @@ class AgentBridge:
 
     def add_allow_rule(self, tool_expr: str) -> None:
         self._approval.add_allow_rule(tool_expr)
+
+    # ── 在途审批应答（委派 ApprovalBroker）──
+
+    def resolve_approval(self, approval_id: str, value) -> bool:
+        """会话层收到 resume 应答时唤醒挂起的审批 / 提问（非流式控制路径）。
+
+        value 形状沿用原 interrupt resume 值：tool_approval 为 dict
+        {decision, message?, set_tool_mode?}；ask 为答案字符串 / ASK_CANCELLED。
+        返回是否命中一个未决请求（未命中=审批已被 stop/切会话收尾）。
+        """
+        return self._broker.resolve(approval_id, value)
+
+    def reject_pending(self) -> int:
+        """以拒绝收尾当前轮全部挂起审批（stop / 切会话）——本轮干净完成、保留历史。
+
+        返回处理数；为 0 表示当前无挂起审批（轮在流生成中途），调用方据此回退到硬取消。
+        """
+        return self._broker.reject_all()
 
     # ── 残留状态恢复 ──
 

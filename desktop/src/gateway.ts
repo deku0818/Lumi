@@ -135,8 +135,10 @@ export class Gateway {
     )
   }
 
-  resume(value: unknown): Promise<unknown> {
-    return this.request('resume', { value })
+  // 在途审批应答（非流式控制 RPC）：approval_id 来自审批/clarify 事件 payload，
+  // value 形状 = 审批 {decision,...} 或 clarify 答案/__ask_cancelled__。
+  resume(approvalId: string, value: unknown): Promise<unknown> {
+    return this.request('resume', { approval_id: approvalId, value })
   }
 
   stop(): Promise<unknown> {

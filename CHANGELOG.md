@@ -1,5 +1,17 @@
 # Changelog
 
+## [0.2.0] - 2026-06-25
+
+### Changed
+- **在途审批：审批 / ask 从 `interrupt()` 改为 `asyncio.Future` 请求-响应** — 工具审批与 ask 提问不再用 LangGraph `interrupt()` + checkpoint 重放，改为 `ApprovalBroker`（`gateway/bridge/broker.py`）按 `approval_id` 寻址的 Future 注册表：节点 `await broker.request(payload, reject_value)` 原地挂起，请求经 `adispatch_custom_event` 在 `astream_events` 以 `on_custom_event` 浮现成卡片，非流式 `resume(approval_id, value)` RPC 解 Future 续跑。一条用户轮全程一条不断的事件流，删去 `_check_interrupts` / `stream_resume` / `_subagent_marker` / `awaiting_resume` / `_INTERRUPT_TOOLS` 等中断擦屁股代码，`_active_agent_runs` 由 dict 瘦成 set（详见 `docs/architecture/approval-inflight.md`）
+- **stop / 切会话 = 以「拒绝」收尾挂起审批（保留历史）** — 不再取消丢弃：每个 `broker.request` 自带 `reject_value`（tool_approval 拒绝 dict / ask 取消哨兵），stop 或切走时 `reject_all` 让本轮干净跑到 END、checkpoint 状态干净、被中止那一轮的用户消息保留在历史里（与旧 interrupt 行为一致）；仅无挂起审批（轮在流生成中途）才硬取消 task
+
+### Added
+- **子代理 / 并发审批解锁** — 旧 `interrupt()` 依赖 checkpointer、子代理无 checkpointer 故审批不可用；broker 机制下前台子代理传播 broker，其审批经父流 `astream_events` 浮现、白嫖 `parent_ids` 归属到子卡片，并发多审批靠 `approval_id` 区分。审批卡片与流式事件统一走 `_resolve_subagent_parent` 归属，并行兄弟靠各自 parent_ids 精确区分
+
+### Fixed
+- **headless（cron / workflow）碰审批 / ask 崩溃** — 这些路径 `create_agent` 不注入 broker（`approval_broker=None`），privileged 模式下 bypass-immune 工具仍走审批、ask 直执行 → 旧实现会 `AttributeError`；现 human_approval 无 broker 时 fail-closed 自动拒绝并回 `CallModel`，ask 无 broker 时返回提示让自治 agent 自行判断后继续
+
 ## [0.2.0a9] - 2026-06-25
 
 ### Added

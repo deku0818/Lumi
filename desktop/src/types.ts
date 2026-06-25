@@ -40,8 +40,9 @@ export interface WireEventPayloads extends Record<WireEventType, object> {
   'tool.generating': Record<string, never>
   'tool.start': { name: string; args: unknown; tool_call_id: string; run_id?: string }
   'tool.complete': { name: string; output: string; tool_call_id: string; is_error?: boolean }
-  'clarify.request': { questions: Question[] }
+  'clarify.request': { approval_id: string; questions: Question[] }
   'approval.request': {
+    approval_id: string
     tool_calls: ToolCallBrief[]
     decisions?: Record<string, unknown>
     options?: Record<string, unknown>

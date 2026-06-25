@@ -11,7 +11,7 @@ from langchain_core.runnables import RunnableConfig
 from langgraph.graph import END
 from langgraph.prebuilt import ToolNode
 from langgraph.runtime import Runtime
-from langgraph.types import Command, interrupt
+from langgraph.types import Command
 from pydantic import BaseModel, Field
 
 from lumi.agents.core.hooks import HookContext, dispatch_hooks, has_hooks
@@ -361,20 +361,21 @@ def is_use_tool(state: LumiAgentState, runtime: Runtime[LumiAgentContext]) -> st
     )
 
 
-def human_approval(
+async def human_approval(
     state: LumiAgentState, runtime: Runtime[LumiAgentContext]
 ) -> Command:
-    """使用 interrupt 暂停执行，等待用户审批
+    """经在途审批 Broker 原地挂起，等待用户审批
 
     Graph 侧处理：
-    - DENY 命中 → 跳过 interrupt，直接拒绝并路由回 CallModel
-    - 非 DENY → interrupt 等待用户审批：
+    - DENY 命中 → 跳过审批，直接拒绝并路由回 CallModel
+    - 非 DENY → await broker.request 等待用户审批：
       - approve → ToolExecutor
       - reject  → END（附带拒绝原因 ToolMessage）
       - cancel  → END（附带取消原因 ToolMessage）
 
-    权限评估、选项构建、规则持久化由 TUI/Bridge 层负责。
-    resume 值为 dict: {"decision": "approve"/"reject"/"cancel", "message": "..."}
+    权限评估、选项构建、规则持久化由 Bridge 层负责（on_custom_event 分支富化）。
+    decision 为 dict: {"decision": "approve"/"reject"/"cancel", "message": "...",
+    "set_tool_mode": "..."}（stop / 切会话取消挂起轮时 await 抛 CancelledError 向上冒泡）。
     """
     last_message = state["messages"][-1]
     tool_calls_data = [
@@ -408,9 +409,24 @@ def human_approval(
                 )
                 return Command(goto="CallModel", update={"messages": messages})
 
-    result = interrupt({"type": "tool_approval", "tool_calls": tool_calls_data})
+    # 无审批通道（headless：cron / workflow / 后台子代理，context.approval_broker 为 None）：
+    # 无法发起交互审批，fail-closed 自动拒绝并路由回 CallModel，让自治 agent 改用无需审批的方式
+    broker = runtime.context.approval_broker
+    if broker is None:
+        messages = _build_reject_messages(
+            last_message.tool_calls,
+            content="当前运行环境无交互式审批通道，已自动拒绝该操作，请改用无需审批的方式完成目标。",
+        )
+        return Command(goto="CallModel", update={"messages": messages})
 
-    # 解析 resume 值
+    # reject_value：本审批被 stop / 切会话收尾时返回的拒绝决策，使本轮以拒绝干净完成、
+    # 保留历史（而非取消丢弃），等价于用户点了"拒绝"。
+    result = await broker.request(
+        {"type": "tool_approval", "tool_calls": tool_calls_data},
+        {"decision": "reject", "message": "用户停止了本轮，已拒绝该操作"},
+    )
+
+    # 解析 decision 值
     set_tool_mode: str | None = None
     if isinstance(result, dict):
         decision = result.get("decision", "reject")

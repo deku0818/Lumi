@@ -100,7 +100,10 @@ async def agent(
     if run_in_background:
         return _start_background_agent(name, prompt, lumi_agent, context, child_depth)
 
-    # 前台同步执行路径
+    # 前台同步执行路径：传播在途审批 Broker，子代理审批经父流的 astream_events 浮现，
+    # 白嫖 custom event 自带的 parent_ids 归属到本子代理卡片（旧 interrupt 无 checkpointer
+    # 不可用，broker 才解锁子代理审批）。后台子代理 detached、无活流可挂，刻意不传播。
+    context.approval_broker = runtime.context.approval_broker
     tool_mode: str = runtime.state.get("tool_mode", "default")
     logger.debug("[agent tool] resolved tool_mode=%s", tool_mode)
     inputs = {

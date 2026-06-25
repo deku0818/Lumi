@@ -1,18 +1,22 @@
 """Ask User 工具提供者 - 让 Agent 在执行过程中向用户提问
 
-通过 LangGraph 中断机制暂停执行并等待用户回答。
+经在途审批 Broker（``runtime.context.approval_broker``）原地挂起并等待用户回答，
+替代原 LangGraph ``interrupt()`` 中断机制（见 docs/architecture/approval-inflight.md）。
 """
 
-from __future__ import annotations
+# 注意：本模块**不能**加 `from __future__ import annotations`。它会把 `runtime: ToolRuntime`
+# 注解字符串化，导致 langchain 认不出该注入参数、不注入 → "missing runtime"。registry
+# 加载期对此有 fail-fast 守卫（见 tests/test_agent_delegation_depth.py）。
 
 from typing import Annotated, Any
 
 from langchain_core.messages import ToolMessage
 from langchain_core.tools import InjectedToolCallId, tool
-from langgraph.types import Command, interrupt
+from langgraph.prebuilt.tool_node import ToolRuntime
+from langgraph.types import Command
 from pydantic import BaseModel, Field
 
-# 取消信号常量，TUI 和 ask 工具共享
+# 取消信号常量，前端和 ask 工具共享
 ASK_CANCELLED = "__ask_cancelled__"
 
 
@@ -46,6 +50,14 @@ class Question(BaseModel):
     )
 
 
+class AskInput(BaseModel):
+    """Ask 工具输入 —— 显式 args_schema，避免注入参数 runtime / tool_call_id 漏进模型 schema。"""
+
+    questions: list[Question] = Field(
+        description="要向用户提出的问题（1-4 个问题）", min_length=1, max_length=4
+    )
+
+
 ASK_USER_DESCRIPTION = """当你在执行过程中需要向用户提问时，使用此工具。这可以帮助你：
 1. 收集用户偏好或需求
 2. 澄清含糊不清的指令
@@ -60,7 +72,7 @@ ASK_USER_DESCRIPTION = """当你在执行过程中需要向用户提问时，使
 
 
 def _build_question_data(index: int, question: Question) -> dict[str, Any]:
-    """将 Question 模型转换为中断数据所需的字典格式。"""
+    """将 Question 模型转换为审批数据所需的字典格式。"""
     options: list[dict[str, str]] = [
         {"label": opt.label, "description": opt.description} for opt in question.options
     ]
@@ -76,25 +88,39 @@ def _build_question_data(index: int, question: Question) -> dict[str, Any]:
     }
 
 
-@tool(description=ASK_USER_DESCRIPTION)
-def ask(
-    questions: Annotated[
-        list[Question],
-        Field(
-            description="要向用户提出的问题（1-4 个问题）", min_length=1, max_length=4
-        ),
-    ],
+@tool(description=ASK_USER_DESCRIPTION, args_schema=AskInput)
+async def ask(
+    questions: list[Question],
+    runtime: ToolRuntime,
     tool_call_id: Annotated[str, InjectedToolCallId],
 ) -> Command:
-    """向用户提问并等待回答"""
+    """向用户提问并等待回答（经在途审批 Broker 挂起）"""
     questions_data = [_build_question_data(i, q) for i, q in enumerate(questions)]
 
-    user_response = interrupt(
+    # 无审批通道（headless：cron / workflow / 后台子代理，context.approval_broker 为 None）：
+    # 无法向用户提问，返回提示让自治 agent 自行判断后继续，而非崩溃。
+    broker = runtime.context.approval_broker
+    if broker is None:
+        return Command(
+            update={
+                "messages": [
+                    ToolMessage(
+                        content="No interactive channel is available to ask the user in this environment; proceed using your best judgment without asking.",
+                        tool_call_id=tool_call_id,
+                    )
+                ],
+            }
+        )
+
+    # reject_value=ASK_CANCELLED：本提问被 stop / 切会话收尾时按"用户取消作答"处理，
+    # 让本轮干净完成、保留历史。
+    user_response = await broker.request(
         {
             "type": "ask",
             "tool_call_id": tool_call_id,
             "questions": questions_data,
-        }
+        },
+        ASK_CANCELLED,
     )
 
     # 用户取消：设置 tool_cancelled 标记，由条件边路由到 END

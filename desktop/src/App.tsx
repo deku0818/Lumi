@@ -533,7 +533,8 @@ export default function App() {
           break
         case 'tool.start': {
           const tcid = payload.tool_call_id ?? ''
-          // 去重：ask 等 BYPASS 工具中断→resume 后会用同一 tool_call_id 重发 start
+          // 防御性去重：同一 tool_call_id 重复 tool.start 只建一行（在途审批后 ask 单次发出，
+          // 此守卫不再为 ask 必需，仅兜底任何意外重发）
           if (tcid && s.items.some((it) => it.kind === 'tool' && it.toolCallId === tcid)) break
           n = {
             ...s,
@@ -571,18 +572,24 @@ export default function App() {
           n = { ...s, clarify: payload }
           break
         case 'turn.complete':
+          // 轮结束：清掉可能残留的审批/澄清对话框（如 stop/切会话把挂起审批以拒绝收尾，
+          // 此时不经 decide/resume 清理，靠 turn.complete 兜底关闭弹窗）
           n = {
             ...s,
             running: false,
+            approval: null,
+            clarify: null,
             items: finishStreaming(s.items),
             ctx: ctxFromUsage(payload.usage) ?? s.ctx,
           }
           break
         case 'error':
-          // 出错中断的流（bridge 只发 error、无 message.complete）也要收尾气泡
+          // 出错中断的流（bridge 只发 error、无 message.complete）也要收尾气泡 + 关弹窗
           n = {
             ...s,
             running: false,
+            approval: null,
+            clarify: null,
             items: [...finishStreaming(s.items), { id: nid(), kind: 'notice', text: payload.message }],
           }
           break
@@ -1341,7 +1348,9 @@ export default function App() {
   }
 
   const resumeWith = (value: unknown, clear: 'approval' | 'clarify') => {
-    connsRef.current[active]?.resume(value).catch(() => resetRunning(active))
+    // approval_id 取自当前挂起的审批/clarify 事件 payload，回发给在途审批 Broker
+    const pending = storeRef.current[active]?.[clear] as { approval_id?: string } | null
+    connsRef.current[active]?.resume(pending?.approval_id ?? '', value).catch(() => resetRunning(active))
     setStore((s) => ({ ...s, [active]: { ...s[active], [clear]: null } }))
   }
 
