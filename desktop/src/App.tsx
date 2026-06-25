@@ -217,8 +217,10 @@ type SessionState = {
   running: boolean
   // 当前进行中的思考流文本（只在思考期间非空；正文/工具一开始即清空，不留痕迹）
   thinkingText: string
-  approval: Record<string, unknown> | null
-  clarify: Record<string, unknown> | null
+  // 挂起的审批/澄清按 approval_id 排队（后端并发解锁：一条消息多个工具 / 多个前台子代理
+  // 可同时挂起审批）；渲染队首，逐个应答出队，不丢任何挂起的 Future。
+  approval: Record<string, unknown>[]
+  clarify: Record<string, unknown>[]
   // 最近一次模型调用的上下文用量（用于输入栏的上下文进度环）；首轮前为 undefined
   ctx?: CtxUsage
 }
@@ -226,9 +228,20 @@ const emptySession = (items: Item[] = []): SessionState => ({
   items,
   running: false,
   thinkingText: '',
-  approval: null,
-  clarify: null,
+  approval: [],
+  clarify: [],
 })
+
+// 按 approval_id 把挂起的审批/澄清入队；已在队列则原样返回（重连后端会重发，去重保幂等）。
+const enqueuePending = (
+  queue: Record<string, unknown>[],
+  item: Record<string, unknown>,
+): Record<string, unknown>[] => {
+  const id = (item as { approval_id?: string }).approval_id
+  return queue.some((p) => (p as { approval_id?: string }).approval_id === id)
+    ? queue
+    : [...queue, item]
+}
 
 // 从 LangChain usage_metadata 提炼上下文环所需快照。input_tokens 含缓存命中部分，
 // 直接作为「当前上下文占用」；缺字段（如非流式补发不带 input_tokens）返回 undefined。
@@ -399,8 +412,9 @@ export default function App() {
   const items = cur?.items ?? []
   const running = cur?.running ?? false
   const thinkingText = cur?.thinkingText ?? ''
-  const approval = cur?.approval ?? null
-  const clarify = cur?.clarify ?? null
+  // 渲染队首（最早挂起的那条）；应答后出队，下一条自动浮现
+  const approval = cur?.approval?.[0] ?? null
+  const clarify = cur?.clarify?.[0] ?? null
   // 当前 active 模型的上下文窗口（tokens）；能力未知时为 0，ContextMeter 自会隐藏。
   // memo 化避免每次流式 token 重渲染都重跑 providers.find。
   const contextWindow = useMemo(
@@ -425,7 +439,7 @@ export default function App() {
     const m: Record<string, 'running' | 'attention'> = {}
     for (const tid in store) {
       const s = store[tid]
-      if (s.approval || s.clarify) m[tid] = 'attention'
+      if (s.approval.length || s.clarify.length) m[tid] = 'attention'
       else if (s.running) m[tid] = 'running'
     }
     const prev = activityRef.current
@@ -565,20 +579,25 @@ export default function App() {
             ),
           }
           break
-        case 'approval.request':
-          n = { ...s, approval: payload }
+        case 'approval.request': {
+          // 追加而非覆盖：并发审批各自入队、逐个处理，不丢任何挂起的 Future（去重见 enqueuePending）
+          const q = enqueuePending(s.approval, payload)
+          n = q === s.approval ? s : { ...s, approval: q }
           break
-        case 'clarify.request':
-          n = { ...s, clarify: payload }
+        }
+        case 'clarify.request': {
+          const q = enqueuePending(s.clarify, payload)
+          n = q === s.clarify ? s : { ...s, clarify: q }
           break
+        }
         case 'turn.complete':
           // 轮结束：清掉可能残留的审批/澄清对话框（如 stop/切会话把挂起审批以拒绝收尾，
           // 此时不经 decide/resume 清理，靠 turn.complete 兜底关闭弹窗）
           n = {
             ...s,
             running: false,
-            approval: null,
-            clarify: null,
+            approval: [],
+            clarify: [],
             items: finishStreaming(s.items),
             ctx: ctxFromUsage(payload.usage) ?? s.ctx,
           }
@@ -588,8 +607,8 @@ export default function App() {
           n = {
             ...s,
             running: false,
-            approval: null,
-            clarify: null,
+            approval: [],
+            clarify: [],
             items: [...finishStreaming(s.items), { id: nid(), kind: 'notice', text: payload.message }],
           }
           break
@@ -619,6 +638,10 @@ export default function App() {
           try {
             const u = new URL(wsUrl)
             if (targetWorkspace) u.searchParams.set('workspace', targetWorkspace)
+            // 已有会话：初次连接（含 Ctrl+R 重载后点回会话）即携带 ?thread=，让后端在建空
+            // bridge 前先认领回断连期仍挂着的会话（parked 审批/运行轮原样还在）。新会话无
+            // thread（握手分配后由 bindThread 补给后续重连）。
+            if (targetThread) u.searchParams.set('thread', targetThread)
             connectUrl = u.toString()
           } catch {
             /* 非法 URL：保留原始串，连接失败由 Gateway 的重连/failed 态呈现 */
@@ -642,6 +665,13 @@ export default function App() {
                   for (const f of folderStoreRef.current[myThread] ?? []) {
                     void gw.addFolder(f)
                   }
+                  // 复位运行态：断连时 sendMessage 的 catch 已 resetRunning(false)，续接后
+                  // 据后端实际运行态恢复 running（否则挂起轮被当空闲，stop 隐藏/输入栏启用）。
+                  setStore((s) =>
+                    s[myThread]
+                      ? { ...s, [myThread]: { ...s[myThread], running: !!ev.payload.running } }
+                      : s,
+                  )
                 }
                 return
               }
@@ -655,6 +685,10 @@ export default function App() {
                 // 已有会话：切到该 thread 并加载历史。switchSession 可能因项目目录已被删/改名
                 // 而被后端拒（set_workspace 抛错）；必须吞掉，否则 Promise 永不 resolve、会话卡死。
                 void (async () => {
+                  // 先占位 store 并挂好 connsRef：使续接重发的审批卡有处可落（否则在
+                  // loadHistory 完成前到达会被事件处理器的 `if (!s) return` 丢弃）。
+                  connsRef.current[targetThread] = gw
+                  setStore((s) => ({ ...s, [targetThread]: s[targetThread] ?? emptySession() }))
                   try {
                     await gw.switchSession(targetThread, targetWorkspace)
                   } catch {
@@ -663,10 +697,19 @@ export default function App() {
                   const r = await gw.loadHistory(targetThread)
                   myThread = targetThread
                   myWorkspace = targetWorkspace
+                  gw.bindThread(targetThread)
                   // 引擎已在 open 握手 pin 到本会话项目；同步当前项目指示
                   if (targetWorkspace) setWorkspaceDir(targetWorkspace)
-                  connsRef.current[targetThread] = gw
-                  setStore((s) => ({ ...s, [targetThread]: emptySession(r.items.map(restore)) }))
+                  // 合并：填入历史 items，但保留续接期间已落入的审批/澄清队列；running 据
+                  // 后端运行态恢复（续接的挂起轮要显示运行态，否则被当空闲）。
+                  setStore((s) => ({
+                    ...s,
+                    [targetThread]: {
+                      ...(s[targetThread] ?? emptySession()),
+                      items: r.items.map(restore),
+                      running: !!ev.payload.running,
+                    },
+                  }))
                   resolve(targetThread)
                 })()
               } else {
@@ -674,6 +717,7 @@ export default function App() {
                 // workspace 即本会话项目），供重连时切回原 thread。
                 myThread = ev.session_id ?? ''
                 myWorkspace = ev.payload.workspace || ''
+                gw.bindThread(myThread) // 重连携带 ?thread= → 后端断连续接
                 connsRef.current[myThread] = gw
                 setStore((s) => ({ ...s, [myThread]: emptySession() }))
                 resolve(myThread)
@@ -1348,10 +1392,27 @@ export default function App() {
   }
 
   const resumeWith = (value: unknown, clear: 'approval' | 'clarify') => {
-    // approval_id 取自当前挂起的审批/clarify 事件 payload，回发给在途审批 Broker
-    const pending = storeRef.current[active]?.[clear] as { approval_id?: string } | null
-    connsRef.current[active]?.resume(pending?.approval_id ?? '', value).catch(() => resetRunning(active))
-    setStore((s) => ({ ...s, [active]: { ...s[active], [clear]: null } }))
+    // 应答队首：approval_id 取自队首挂起项回发给在途审批 Broker，并乐观出队（下一条浮现）。
+    const queue = storeRef.current[active]?.[clear] ?? []
+    const head = queue[0]
+    if (!head) return
+    const headId = (head as { approval_id?: string }).approval_id ?? ''
+    setStore((s) => ({
+      ...s,
+      [active]: { ...s[active], [clear]: (s[active]?.[clear] ?? []).slice(1) },
+    }))
+    connsRef.current[active]?.resume(headId, value).catch(() => {
+      resetRunning(active)
+      // RPC 未达后端（连接抖动）→ 回滚出队，保留该卡供重连后重试；按 approval_id 去重，
+      // 避免与后端重发的卡片重复。否则队首消失而后端 Future 仍挂、轮卡死。
+      setStore((s) => {
+        if (!s[active]) return s
+        const q = s[active][clear] ?? []
+        return q.some((x) => (x as { approval_id?: string }).approval_id === headId)
+          ? s
+          : { ...s, [active]: { ...s[active], [clear]: [head, ...q] } }
+      })
+    })
   }
 
   const decide = (decision: 'approve' | 'reject') =>

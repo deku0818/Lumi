@@ -55,6 +55,7 @@ from lumi.gateway.bootstrap import gateway_process
 from lumi.gateway.bridge import AgentBridge
 from lumi.gateway.broadcast import hub
 from lumi.gateway.session import GatewaySession
+from lumi.gateway.session_registry import registry
 from lumi.utils.logger import logger
 
 
@@ -97,16 +98,31 @@ async def ws_endpoint(ws: WebSocket) -> None:
     if not token_ok(getattr(app.state, "token", ""), ws.query_params.get("token")):
         await ws.close(code=1008)
         return
-    bridge = AgentBridge()
-    # open 握手携带 ?workspace=：直接把本会话引擎 pin 到其项目（项目随会话绑定），
-    # 省掉 ready 后再 switch_session rebase 的来回。缺省 / 无效则退回进程 cwd。
-    await bridge.initialize(project_dir=ws.query_params.get("workspace", ""))
-    session = GatewaySession(bridge, WsChannel(ws), hub)
-    await session.start()
+    ch = WsChannel(ws)
+    # 断连续接（Case 1）：URL 带 ?thread= 且该 thread 有「断开但仍挂着活跃轮」的 detached
+    # 会话 → 接回复用（parked turn / broker / 挂起审批原样还在），否则照旧新建 bridge。
+    thread = ws.query_params.get("thread", "")
+    session = registry.take(thread) if thread else None
+    if session is not None:
+        await session.reattach(ch)
+    else:
+        bridge = AgentBridge()
+        # open 握手携带 ?workspace=：直接把本会话引擎 pin 到其项目（项目随会话绑定），
+        # 省掉 ready 后再 switch_session rebase 的来回。缺省 / 无效则退回进程 cwd。
+        await bridge.initialize(project_dir=ws.query_params.get("workspace", ""))
+        session = GatewaySession(bridge, ch, hub)
+        await session.start()
     try:
         while True:
             await session.handle_frame(await ws.receive_json())
     except WebSocketDisconnect:
-        logger.info("[WS] 客户端断开: %s", bridge.current_thread_id)
+        logger.info("[WS] 客户端断开: %s", session.current_thread_id)
     finally:
-        await session.aclose()
+        # 值得续接（有活跃用户轮，纯后台 meta 轮除外）→ detach 留存待同 thread 重连；
+        # 否则正常收尾
+        if session.should_detach():
+            displaced = session.detach(registry)
+            if displaced is not None:
+                await displaced.aclose()
+        else:
+            await session.aclose()

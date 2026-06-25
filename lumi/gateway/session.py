@@ -20,6 +20,7 @@ import re
 from contextlib import suppress
 from dataclasses import dataclass, field
 from pathlib import Path
+from typing import TYPE_CHECKING
 
 from lumi.gateway.bridge import AgentBridge, EventKind
 from lumi.gateway.broadcast import BroadcastHub, serialize_bg_tasks
@@ -44,9 +45,23 @@ from lumi.utils.constants import ATTACHED_FILE_TAG, NOTIFICATION_POLL_INTERVAL
 from lumi.utils.logger import logger
 from lumi.utils.thread_id import generate_thread_id
 
+if TYPE_CHECKING:
+    from lumi.gateway.session_registry import SessionRegistry
+
 # 需后台 task 承载、可被 stop 取消的流式方法。resume 改非流式控制 RPC（在途审批应答）：
 # 审批挂起期间原 prompt 流仍活、run.lock 仍持，流式方法会被拒成「已有任务在执行」。
 _STREAMING_METHODS = frozenset({"send_message", "run_command"})
+
+# 断连续接（Case 1）：detached 会话无人接回的兜底回收时长（保底防进程内泄漏）
+_DETACH_TTL_SECONDS = 8 * 3600
+
+
+class _NoopChannel:
+    """detached 期的丢弃式 channel：会话原地挂着但暂无 WS，事件落地即弃——重连靠
+    pending_approval_events 重发挂起卡片 + load_history 对账补回 gap 期消息。"""
+
+    async def send(self, frame: dict) -> None:
+        return
 
 
 def _extract_images(content) -> list[str]:
@@ -329,9 +344,14 @@ async def _switch_session(session: GatewaySession, params: dict) -> dict:
     # （仅本会话引擎/hooks，不动进程 cwd、不影响其它会话）。
     tid = params.get("thread_id") or generate_thread_id()
     workspace = params.get("workspace") or ""
-    # 切走 = 放弃当前挂起审批：先把活跃轮收尾（以拒绝跑完、保留历史）并等其释放 run.lock，
-    # 否则若该轮正挂在审批上持着锁，下面的 async with 会死等。
-    await session._finalize_active_turn(wait=True)
+    # desktop 每会话一条独立连接：切回本会话只是对同一条连接重发「同 thread」的 switch
+    # （重绑 workspace）。此时本会话可能正挂着审批 / 在跑——绝不能收尾它，否则「切走再切回
+    # 审批还在」不成立，且会误杀挂起审批、或在挂起轮仍持着 run.lock 时让下面的 async with
+    # 死等。只有真正切到「不同 thread」才需先收尾当前轮（单 bridge 单 run.task 的限制）。
+    if tid == session._bridge.current_thread_id and session.has_active_turn():
+        return {"thread_id": tid}
+    if tid != session._bridge.current_thread_id:
+        await session._finalize_active_turn(wait=True)
     async with session._run.lock:
         # 先切 thread 再绑项目：set_workspace 关的是 current_thread 的 shell，必须等
         # current_thread 已是切入的 tid，否则会关到切出会话的 shell、而切入会话的陈旧
@@ -483,23 +503,92 @@ class GatewaySession:
         self._run = _RunState()
         self._rpc_tasks: set[asyncio.Task] = set()
         self._notif_task: asyncio.Task | None = None
+        # 断连续接：detached（断开但仍挂着活跃轮）期间的 TTL 兜底回收 task
+        self._ttl_task: asyncio.Task | None = None
+        # 当前 _run.task 是否为后台通知 meta 轮（无用户在等）——断连时不值得 detach 续接
+        self._meta_run: bool = False
+
+    @property
+    def current_thread_id(self) -> str:
+        return self._bridge.current_thread_id
+
+    def _ready_frame(self) -> dict:
+        return event_frame(
+            "gateway.ready",
+            self._bridge.current_thread_id,
+            {
+                "model": self._bridge.model_name,
+                "workspace": self._bridge.workspace_dir,
+                # 续接时本会话可能仍挂着活跃 / 审批轮：带上运行态，让重连 / 重载后的前端恢复
+                # running（否则 stop 隐藏、输入栏当空闲启用、续跑正文以非运行态渲染）。
+                "running": self.has_active_turn(),
+            },
+        )
 
     async def start(self) -> None:
         """握手：发 gateway.ready、注册广播、拉起后台通知轮询。"""
-        await self._channel.send(
-            event_frame(
-                "gateway.ready",
-                self._bridge.current_thread_id,
-                {
-                    "model": self._bridge.model_name,
-                    "workspace": self._bridge.workspace_dir,
-                },
-            )
-        )
+        await self._channel.send(self._ready_frame())
         # 注册到 cron 结果广播通道：任务完成/运行状态变化实时推给本连接
         self._hub.register(self._channel)
         # 后台任务完成通知轮询：与主接收循环并发，空闲时把队列通知注入新一轮推回前端
         self._notif_task = asyncio.create_task(self._notification_loop())
+
+    # ── 断连续接（Case 1）：会话生命周期与 WS 解耦 ──
+
+    def has_active_turn(self) -> bool:
+        """是否有活跃 / 挂起的轮（同 thread 切回守卫、流式互斥、断连续接判定的基础）。"""
+        return self._run.task is not None and not self._run.task.done()
+
+    def should_detach(self) -> bool:
+        """WS 断开时是否值得续接：有活跃轮，且不是纯后台通知 meta 轮（无用户在等，除非它
+        自身正挂着审批）。纯 meta 轮断连应正常 aclose，不占 registry / per-thread shell 满 8h。"""
+        if not self.has_active_turn():
+            return False
+        return not self._meta_run or bool(self._bridge.pending_approval_events())
+
+    def detach(self, registry: SessionRegistry) -> GatewaySession | None:
+        """WS 断开但本会话仍有活跃轮：不 aclose，原地挂着等同 thread 重连续接。
+
+        摘掉死 channel（换 Noop，断开期事件丢弃）、停掉通知轮、登记进 registry、挂 TTL
+        兜底回收；run task 与 parked turn / broker / 挂起 Future 原样存活。返回被顶替的同
+        thread 旧会话（罕见，调用方 aclose 它）。
+        """
+        self._hub.unregister(self._channel)
+        self._channel = _NoopChannel()
+        # 停掉通知轮：无 WS 期间没有可推送的对象，继续跑只会把本 thread 的通知 drain 进
+        # NoopChannel 白白丢弃（reattach 时再起）。
+        if self._notif_task is not None:
+            self._notif_task.cancel()
+            self._notif_task = None
+        displaced = registry.add(self.current_thread_id, self)
+        self._ttl_task = asyncio.create_task(self._ttl_expire(registry))
+        return displaced
+
+    async def _ttl_expire(self, registry: SessionRegistry) -> None:
+        """detached 后无人接回到 TTL → 回收，防进程内泄漏。"""
+        with suppress(asyncio.CancelledError):
+            await asyncio.sleep(_DETACH_TTL_SECONDS)
+            self._ttl_task = None
+            registry.discard(self.current_thread_id, self)
+            await self.aclose()
+
+    async def reattach(self, channel: Channel) -> None:
+        """同 thread 的 WS 重连：接上新 channel 续接挂起的会话。
+
+        取消 TTL、换 channel、重注册广播、重发 gateway.ready，并把挂起的审批/澄清卡片
+        再推一遍（Future 仍在，用户应答即续跑）。notif/run task 与 parked turn 全程未停。
+        """
+        if self._ttl_task is not None:
+            self._ttl_task.cancel()
+            self._ttl_task = None
+        self._channel = channel
+        self._hub.register(channel)
+        # 重起通知轮（detach 时停掉了）：恢复后台任务完成反馈推送
+        if self._notif_task is None:
+            self._notif_task = asyncio.create_task(self._notification_loop())
+        await channel.send(self._ready_frame())
+        for evt in self._bridge.pending_approval_events():
+            await channel.send(bridge_event_to_wire(evt, self.current_thread_id))
 
     async def handle_frame(self, frame: dict) -> None:
         """处理一帧 client → server 请求（流式 spawn 可取消 task，其余 spawn RPC task）。"""
@@ -509,7 +598,7 @@ class GatewaySession:
 
         # 流式方法 spawn 成独立 task：主循环立即回到读帧，使运行期间仍能收到 stop
         if method in _STREAMING_METHODS:
-            if self._run.task is not None and not self._run.task.done():
+            if self.has_active_turn():
                 if rid is not None:
                     await self._channel.send(
                         {"id": rid, "error": {"message": "已有任务在执行"}}
@@ -525,7 +614,10 @@ class GatewaySession:
         task.add_done_callback(self._rpc_tasks.discard)
 
     async def aclose(self) -> None:
-        """连接收尾：注销广播、取消通知/RPC/流式 task、关闭 bridge。"""
+        """连接收尾：注销广播、取消 TTL/通知/RPC/流式 task、关闭 bridge。"""
+        if self._ttl_task is not None:
+            self._ttl_task.cancel()
+            self._ttl_task = None
         self._hub.unregister(self._channel)
         if self._notif_task is not None:
             self._notif_task.cancel()
@@ -649,6 +741,8 @@ class GatewaySession:
                 # 挂到 _run.task：否则 stop 取消不了这一轮，且新 send_message 会卡在
                 # run.lock 上直到 meta 轮跑完（UI 挂死）。设为 task 后，stop 可取消、
                 # 期间的新消息走 handle_frame 的 busy-check 得到「已有任务在执行」。
+                # 标记 meta 轮：断连时它不值得 detach 续接（无用户在等，见 should_detach）
+                self._meta_run = True
                 self._run.task = asyncio.create_task(
                     self._pump(
                         self._bridge.stream_response(
@@ -666,6 +760,7 @@ class GatewaySession:
                     logger.error("[WS] 后台通知轮执行失败", exc_info=True)
                 finally:
                     self._run.task = None
+                    self._meta_run = False
 
     async def _dispatch(self, method: str, params: dict) -> dict:
         """执行一个非流式 RPC 方法并返回结果（在独立 task 中运行，见 _run_rpc）。

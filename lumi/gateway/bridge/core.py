@@ -145,6 +145,9 @@ class AgentBridge:
         # resolve_approval 经非流式 resume RPC 唤醒挂起的 Future（见 docs/architecture/
         # approval-inflight.md）。
         self._broker = ApprovalBroker()
+        # 当前挂起的审批/澄清「已富化的对外事件」按 approval_id 留底，供 WS 重连后重发
+        # （断开期会话原地挂着、Future 仍在，重连只需把卡片再推一遍）。resolve/reject 时清理。
+        self._pending_approval_events: dict[str, BridgeEvent] = {}
         # 活跃 agent 工具 run_id 集合：流式 / 审批事件的子代理归属（_resolve_subagent_parent）
         # 据此判定祖先链中是否含活跃 agent run。在途审批后审批卡片也走同一归属机制。
         self._active_agent_runs: set[str] = set()
@@ -631,17 +634,22 @@ class AgentBridge:
                                 # 归属——子 / 外部 agent 的审批白嫖 custom event 自带的 parent_ids。
                                 data = event.get("data", {}) or {}
                                 if data.get("type") == "ask":
-                                    yield BridgeEvent(
+                                    approval_evt = BridgeEvent(
                                         kind=EventKind.CLARIFY,
                                         data=data,
                                         parent_run_id=parent_id,
                                     )
                                 else:  # tool_approval：bridge 层富化权限评估 / 选项
-                                    yield BridgeEvent(
+                                    approval_evt = BridgeEvent(
                                         kind=EventKind.APPROVAL,
                                         data=self._enrich_tool_approval(data),
                                         parent_run_id=parent_id,
                                     )
+                                # 留底供 WS 重连重发（节点续跑/被拒时由 resolve/reject 清理）
+                                aid = data.get("approval_id", "")
+                                if aid:
+                                    self._pending_approval_events[aid] = approval_evt
+                                yield approval_evt
                     finally:
                         # 清除 rewind 或恢复时设置的 checkpoint_id，
                         # 确保后续 aget_state 获取最新 checkpoint
@@ -752,6 +760,7 @@ class AgentBridge:
         {decision, message?, set_tool_mode?}；ask 为答案字符串 / ASK_CANCELLED。
         返回是否命中一个未决请求（未命中=审批已被 stop/切会话收尾）。
         """
+        self._pending_approval_events.pop(approval_id, None)
         return self._broker.resolve(approval_id, value)
 
     def reject_pending(self) -> int:
@@ -759,7 +768,12 @@ class AgentBridge:
 
         返回处理数；为 0 表示当前无挂起审批（轮在流生成中途），调用方据此回退到硬取消。
         """
+        self._pending_approval_events.clear()
         return self._broker.reject_all()
+
+    def pending_approval_events(self) -> list[BridgeEvent]:
+        """当前挂起审批/澄清的对外事件快照，供 WS 重连后重发卡片（顺序即发出顺序）。"""
+        return list(self._pending_approval_events.values())
 
     # ── 残留状态恢复 ──
 

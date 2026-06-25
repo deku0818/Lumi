@@ -79,6 +79,10 @@ class FakeBridge:
         self.reject_pending_calls += 1
         return 0
 
+    def pending_approval_events(self) -> list:
+        # 断连续接重发用；默认空，测试可注入 _pending_events
+        return list(getattr(self, "_pending_events", []))
+
     def switch_thread(self, tid) -> None:
         self.current_thread_id = tid
 
@@ -151,7 +155,11 @@ async def test_start_emits_gateway_ready():
         assert len(ready) == 1
         params = ready[0]["params"]
         assert params["session_id"] == "t-1"
-        assert params["payload"] == {"model": "fake-model", "workspace": ANY_WORKSPACE}
+        assert params["payload"] == {
+            "model": "fake-model",
+            "workspace": ANY_WORKSPACE,
+            "running": False,  # start 时无活跃轮
+        }
     finally:
         await session.aclose()
     assert bridge.closed is True
@@ -313,6 +321,42 @@ async def test_switch_session_cancels_active_turn():
         await session.aclose()
 
 
+# -- 5c. switch_session 同 thread（desktop 切回本会话）：不收尾、不动挂起轮 --
+
+
+async def test_switch_session_same_thread_preserves_active_turn():
+    """切回本会话（同 thread）：绝不收尾活跃/挂起轮，审批与运行轮原样保留。
+
+    desktop 每会话一条独立连接，切回只是对同一连接重发「同 thread」的 switch；若误把它当
+    「切走」去 reject_pending + 取消，正挂着的审批就被弄丢了（「切走再切回审批还在」不成立）。
+    """
+    bridge = BlockingBridge()  # 流式轮阻塞 = 模拟挂在审批上
+    session, channel = _make_session(bridge)
+    await session.start()
+    try:
+        await session.handle_frame(
+            {"id": 1, "method": "send_message", "params": {"content": "x"}}
+        )
+        await bridge.started.wait()  # 轮已进入阻塞（挂在审批上）
+        await session.handle_frame(
+            {"id": 2, "method": "switch_session", "params": {"thread_id": "t-1"}}
+        )
+        # 只等 RPC task（被保留的流式轮仍阻塞，不能 _drain 它）
+        for tk in list(session._rpc_tasks):
+            with suppress(asyncio.CancelledError, Exception):
+                await tk
+
+        # 同 thread 立即返回，既不收尾也不取消挂起轮
+        assert {"id": 2, "result": {"thread_id": "t-1"}} in channel.responses()
+        assert bridge.reject_pending_calls == 0  # 未试图收尾
+        assert len(channel.events("turn.complete")) == 0  # 轮未结束
+        assert session._run.task is not None and not session._run.task.done()
+        assert bridge.current_thread_id == "t-1"
+    finally:
+        bridge.release.set()
+        await session.aclose()
+
+
 # -- 6. 未知方法 --
 
 
@@ -378,6 +422,121 @@ async def test_resume_resolves_via_broker():
         assert session._run.task is None
     finally:
         await session.aclose()
+
+
+# -- 8. 断连续接（Case 1）：detach 保留挂起轮、reattach 重发审批、TTL 兜底 --
+
+
+def test_session_registry_add_take_discard():
+    """registry 语义：add 顶替返回旧的；take 取出即移除；discard 只删登记的那个。"""
+    from lumi.gateway.session_registry import SessionRegistry
+
+    reg = SessionRegistry()
+    s1, s2 = object(), object()
+    assert reg.add("t", s1) is None
+    assert reg.add("t", s2) is s1  # 顶替返回旧的
+    assert reg.take("t") is s2
+    assert reg.take("t") is None
+    reg.add("t", s1)
+    reg.discard("t", s2)  # 非登记者 → 不删
+    assert reg.take("t") is s1
+
+
+async def test_detach_keeps_parked_turn_and_registers():
+    """断开时仍有活跃轮 → detach（不 aclose）：bridge 未关、run.task 存活、登记进 registry。"""
+    from lumi.gateway.session_registry import SessionRegistry
+
+    reg = SessionRegistry()
+    bridge = BlockingBridge()  # 流式轮阻塞 = 模拟挂在审批上
+    session, _ = _make_session(bridge)
+    await session.start()
+    await session.handle_frame(
+        {"id": 1, "method": "send_message", "params": {"content": "x"}}
+    )
+    await bridge.started.wait()
+    try:
+        assert session.has_active_turn() is True
+        assert session.detach(reg) is None
+        assert reg.take("t-1") is session  # 已登记
+        assert bridge.closed is False  # 未关
+        assert session._run.task is not None and not session._run.task.done()
+        assert session._notif_task is None  # 通知轮已停（无 WS 期不推送）
+    finally:
+        bridge.release.set()
+        await session.aclose()
+
+
+async def test_should_detach_excludes_pure_meta_turn():
+    """纯后台 meta 轮断连不续接（无用户在等），除非它自身正挂着审批。"""
+    bridge = BlockingBridge()
+    session, _ = _make_session(bridge)
+    await session.start()
+    await session.handle_frame(
+        {"id": 1, "method": "send_message", "params": {"content": "x"}}
+    )
+    await bridge.started.wait()
+    try:
+        assert session.should_detach() is True  # 普通用户轮 → 续接
+        session._meta_run = True
+        assert session.should_detach() is False  # 纯 meta 轮 → 不续接
+        bridge._pending_events = [
+            BridgeEvent(kind=EventKind.APPROVAL, data={"approval_id": "a"})
+        ]
+        assert session.should_detach() is True  # meta 轮但自身挂着审批 → 仍续接
+    finally:
+        bridge.release.set()
+        await session.aclose()
+
+
+async def test_reattach_resends_ready_and_pending_approvals():
+    """重连续接：新 channel 收到 gateway.ready + 重发的挂起审批卡，TTL 被取消。"""
+    from lumi.gateway.session_registry import SessionRegistry
+
+    reg = SessionRegistry()
+    approval = BridgeEvent(
+        kind=EventKind.APPROVAL, data={"approval_id": "ap-1", "tool_calls": []}
+    )
+    bridge = BlockingBridge()
+    bridge._pending_events = [approval]
+    session, _ = _make_session(bridge)
+    await session.start()
+    await session.handle_frame(
+        {"id": 1, "method": "send_message", "params": {"content": "x"}}
+    )
+    await bridge.started.wait()
+    session.detach(reg)
+    try:
+        ch2 = FakeChannel()
+        await session.reattach(ch2)
+        assert len(ch2.events("gateway.ready")) == 1
+        approvals = ch2.events("approval.request")
+        assert len(approvals) == 1
+        assert approvals[0]["params"]["payload"]["approval_id"] == "ap-1"
+        assert session._ttl_task is None  # TTL 已取消
+    finally:
+        bridge.release.set()
+        await session.aclose()
+
+
+async def test_detach_ttl_reclaims(monkeypatch):
+    """detached 后无人接回到 TTL → 自动回收（registry 移除 + aclose）。"""
+    import lumi.gateway.session as session_mod
+    from lumi.gateway.session_registry import SessionRegistry
+
+    monkeypatch.setattr(session_mod, "_DETACH_TTL_SECONDS", 0.02)
+    reg = SessionRegistry()
+    bridge = BlockingBridge()
+    session, _ = _make_session(bridge)
+    await session.start()
+    await session.handle_frame(
+        {"id": 1, "method": "send_message", "params": {"content": "x"}}
+    )
+    await bridge.started.wait()
+    session.detach(reg)  # 登记 + 挂 0.02s TTL
+    bridge.release.set()
+    await asyncio.sleep(0.06)  # 等过 TTL
+    assert bridge.closed is True  # 已回收 aclose
+    assert reg.take("t-1") is None  # 已从表移除
 
 
 async def _drain(session: GatewaySession) -> None:

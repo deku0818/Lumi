@@ -58,11 +58,21 @@ server → client   {method:"event", params:<wire event>}       # 流式事件
 
 每条 WS 连接独立持有一个 `AgentBridge` 实例，`current_thread_id` 即该连接当前会话。多会话并发时各连接互不阻塞。
 
-进程级共享资源的边界：连接断开时 `bridge.close()` 只清理该 bridge 自身；MCP 子进程、
+进程级共享资源的边界：连接干净关闭（无活跃轮）时 `bridge.close()` 只清理该 bridge 自身；MCP 子进程、
 shell / 后台任务会话等全局单例由 `shutdown_shared_runtime()` 在 lifespan shutdown
 时统一关闭（TUI 则在 quit 时调用）。后台任务的完成通知按归属认领——任务注册时经
 `ContextVar` 捕获所属 thread_id，各连接的通知轮询只取走归属自己当前 thread（或无归属）
 的通知，不会把别的会话的任务结果注入本会话。
+
+## 断连续接（会话与 WS 解耦）
+
+WS 断开时若会话仍有**活跃 / 挂起轮**（典型：挂在工具审批 / ask 上），不直接 aclose，而是把会话连同其 `AgentBridge` / parked turn / `ApprovalBroker` / 挂起 Future **原地留存**，等同 thread 的 WS 重连接回——renderer 重载（Ctrl+R）、网络抖动、休眠唤醒后，审批仍在、运行轮继续。**无需 checkpoint 重放，Future 一直在内存里**。
+
+- **`lumi/gateway/session_registry.py`**：进程内 `thread_id → 已 detached 的 GatewaySession`。只存 detached 会话；干净关闭 / TTL 到期即移除。
+- **`GatewaySession.detach()`**（断开且 `should_detach()`）：摘掉死 channel（换 `_NoopChannel`，断连期事件丢弃）、停掉通知轮、登记进 registry、挂 `_DETACH_TTL_SECONDS`（8h 兜底回收）。`should_detach()` 排除**纯后台通知 meta 轮**（无用户在等），除非它自身正挂着审批。
+- **`GatewaySession.reattach(channel)`**（同 thread 重连）：取消 TTL、换上新 channel、重注册广播、重起通知轮、重发 `gateway.ready`（带 `running`）并把挂起的审批 / 澄清卡片再推一遍（`bridge.pending_approval_events()`）。
+- **前端配合**（`desktop/src/`）：每会话一条独立 WS（`connsRef[thread_id]`，切到别的会话不碰本会话连接）；连接 URL 带 `?thread=`（含 Ctrl+R 重载后点回会话的初次连接），后端据此在建空 bridge 前先认领回 detached 会话；`approval` / `clarify` 改按 `approval_id` 排队（渲染队首、逐个出队，并发审批不互相覆盖），重连重发按 `approval_id` 去重；`running` 据 `gateway.ready.running` 复位（断连时 `sendMessage` 的 catch 已置 false）。
+- **边界**：仅 sidecar 存活的断连可救（**Case 1**）；**后端进程重启（Case 2）** 不幸存——in-memory Future 随进程消失，刻意不做落盘（见 [approval-inflight.md](./approval-inflight.md)）。`switch_session` 切回**同 thread**且有活跃轮时不收尾本轮（早返回），避免误杀正挂着的审批。
 
 ## 子代理事件归属（多层委派）
 

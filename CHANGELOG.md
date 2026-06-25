@@ -1,5 +1,22 @@
 # Changelog
 
+## [0.2.1] - 2026-06-25
+
+### Added
+- **WS 断连续接(会话与 WS 解耦)** — WS 断开时若会话仍有活跃 / 挂起轮(典型:挂在工具审批 / ask 上),不再 aclose,而是把会话连同 `AgentBridge` / parked turn / `ApprovalBroker` / 挂起 Future 原地留存,等同 thread 的 WS 重连接回——renderer 重载(Ctrl+R)/ 网络抖动 / 休眠唤醒后审批仍在、运行轮继续,**无需 checkpoint 重放(Future 一直在内存里)**。新增 `gateway/session_registry.py`(进程内 detached 会话表)+ `GatewaySession.detach()` / `reattach()`(换 `_NoopChannel`、停 / 起通知轮、8h TTL 兜底回收)+ bridge 留底挂起审批事件供重发;前端连接 URL 带 `?thread=`(含重载后点回会话的初次连接)触发续接,`running` 据 `gateway.ready.running` 复位。仅 sidecar 存活的断连可救(Case 1);后端进程重启(Case 2)不幸存(详见 `docs/architecture/desktop.md`「断连续接」)
+- **前端审批 / 澄清并发队列** — `approval` / `clarify` 由单槽改为按 `approval_id` 排队,渲染队首、逐个应答出队;后端并发解锁后(一条消息多个工具 / 多个前台子代理可同时挂起审批)不再互相覆盖丢失 Future,重连重发按 `approval_id` 去重(`enqueuePending`)
+
+### Fixed
+- **切回同会话误杀挂起审批 / 挂死** — `switch_session` 切回**同 thread**且有活跃轮时不再收尾本轮(早返回守卫):避免把正挂着的审批以「拒绝」收尾(「切走再切回审批还在」成立),并消除切回 re-bind 在子代理审批场景下的挂死
+- **Ctrl+R 重载续接后 `running` 不恢复** — `gateway.ready` 帧带 `running=has_active_turn()`,前端重连 / 重载两路据此复位;否则续接的挂起轮被当空闲(stop 隐藏、输入栏启用、续跑正文以非运行态渲染)
+- **`resume` 应答 RPC 失败丢失队首审批** — `resumeWith` 乐观出队后若 `resume` RPC 因连接抖动失败,回滚出队、保留队首卡片供重连重试(按 `approval_id` 去重);否则队首审批前端消失而后端 Future 仍挂、轮卡死
+- **后台通知 meta 轮断连被误续接** — meta 轮也让 `has_active_turn()` 为真 → 新增 `should_detach()` 排除纯后台 meta 轮(无用户在等,除非它自身挂着审批),避免无人等待的会话占 registry / per-thread shell 满 8h
+- **detach 期通知被丢弃** — `detach()` 取消 `_notification_loop`(`reattach()` 重起),避免无 WS 期间把本 thread 的后台任务通知 drain 进 `_NoopChannel` 白白丢失
+
+### Changed
+- **活跃轮判定收口 + 入队去重抽取** — 散在 3 处的 `_run.task is not None and not done()` 内联表达式统一为 `has_active_turn()`;前端 `approval` / `clarify` 入队去重提取为 `enqueuePending` helper
+- **文档** — `docs/architecture/desktop.md` 新增「断连续接(会话与 WS 解耦)」节;`approval-inflight.md` 决策 #1 更新为「Case 1 已实现、Case 2 仍不救」,并记入「一个 thread 单活会话尚无强制」的多机待办
+
 ## [0.2.0] - 2026-06-25
 
 ### Changed

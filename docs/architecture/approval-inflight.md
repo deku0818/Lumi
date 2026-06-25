@@ -141,7 +141,9 @@ broker 三个方法：`request(payload, reject_value)`、`resolve(approval_id, d
 
 ## 已定决策
 
-1. **重启不幸存**：后端进程重启 → 挂起审批丢失、该轮作废、需重发。不做 sidecar 落盘（本地 sidecar 开发期重启频繁，作废一轮可接受）。
+1. **断连分两种，只救一种**（v0.2.1 更新）：
+   - **Case 1 — WS 断连、sidecar 存活**（renderer 重载 / 网络抖动 / 休眠）：**已实现断连续接**——挂着审批的会话不 aclose 而是 detach 留存、同 thread 重连接回并重发审批卡，Future 一直在内存里，审批不丢（见 [desktop.md「断连续接」](./desktop.md)）。
+   - **Case 2 — 后端进程重启**：挂起审批丢失、该轮作废、需重发。不做 sidecar 落盘（in-memory Future 随进程消失，需 checkpoint 重放才能续，刻意不做；本地 sidecar 作废一轮可接受）。
 2. **锁语义 = stop/切会话以「拒绝」收尾挂起审批（保留历史），而非取消丢弃**。这是 as-built 相对原设计的关键调整：
    - 每个 `broker.request` 自带 `reject_value`（tool_approval 为 `{"decision":"reject",...}`，ask 为 `ASK_CANCELLED`）。
    - `_finalize_active_turn`：若有挂起审批（`reject_pending() > 0`）→ broker 以各请求的 `reject_value` 收尾 → 节点续跑到 reject→END → 本轮**干净完成**、checkpoint `next` 为空、下一轮不被 `_recover_stale_state` 回退 → **用户消息保留在历史里**（与旧 interrupt 行为一致）。若无挂起审批（轮在流生成中途）→ 硬取消 task。
@@ -167,7 +169,9 @@ broker 三个方法：`request(payload, reject_value)`、`resolve(approval_id, d
 
 ## 后续
 
+- **已落地（v0.2.1）**：WS 断连续接（Case 1）——见上「已定决策 1」与 [desktop.md「断连续接」](./desktop.md)。审批的 in-memory Future 现可跨 WS 重连存活。
 - **未落地**：ACP `delegate` 复用 broker（`request_permission` → broker 的 payload 归一化）。整条 ACP 链路是纯设计稿且依赖本在途审批先落地（已落地），归一化的 payload 形状随 broker 契约定稿后再核对。两份文档的 PR 编号曾撞号——后续 ACP 工作建议用 `ACP-PR*` 编号避免与本文档混淆。
+- **未落地**：「一个 thread 同时只能有一个活会话」目前无强制——多客户端 / 同会话双开 + 快重连竞态下，displaced 会话 aclose 会误杀同 thread 共享 shell、新旧会话可能短暂双绑同 thread。单 app 单用户不触发；远程多机时建议补**线程级会话注册表 + 互斥**统一解决。
 
 ---
 

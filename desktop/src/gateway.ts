@@ -47,6 +47,20 @@ export class Gateway {
     this.url = url
   }
 
+  // 绑定本连接的会话 thread：写进 URL，使断线重连自动携带 ?thread=，触发后端「断连续接」
+  // ——接回断开期仍挂着的会话（parked 审批/运行轮原样还在），而非新建 bridge 丢掉它。
+  // 握手拿到 thread 后调用一次即可。
+  bindThread(threadId: string): void {
+    if (!threadId) return
+    try {
+      const u = new URL(this.url)
+      u.searchParams.set('thread', threadId)
+      this.url = u.toString()
+    } catch {
+      /* 非法 URL：忽略，退回无续接（旧行为） */
+    }
+  }
+
   // 弃用当前 socket：解绑回调（否则其 onclose 还会再排一次重连）、reject 在飞请求、关闭。
   // reconnect() 可能在 open/connecting 态调用，不先弃用旧 socket 会泄漏它并引发重连风暴。
   private teardown(): void {
