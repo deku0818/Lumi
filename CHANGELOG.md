@@ -1,5 +1,18 @@
 # Changelog
 
+## [0.2.2] - 2026-06-25
+
+### Changed
+- **Summary 从「并行 + 延迟替换」改为「串行 + 当轮就地压缩」** — `Summarizer` 节点移到 `PreprocessMessages → Summarizer → CallModel` 关键路径上：超阈值时当轮生成摘要并立即 `RemoveMessage` 删历史 + 摘要前置到末条 Human，即将溢出的这次调用立刻受益，不再等下一轮 `preprocess` 替换。移除 `state["summary"]` / `SummaryData` 与 preprocess 的延迟替换分支（详见 `docs/architecture/summary.md`）
+- **Token 限制改字节计量，移除 tiktoken** — 新增 `lumi/utils/sizing.py`：阈值类（工具结果是否过大 / read 超限）用 UTF-8 字节衡量；上下文窗口预算（summary 触发 / trim）优先读真实 `usage_metadata`、退化时按字节粗估（`BYTES_PER_TOKEN=3`）。删除 `lumi/utils/token_counter.py`，`once_tool_max_tokens` → `once_tool_max_bytes`
+
+### Added
+- **Summary 鲁棒性：PTL 截头重试 + per-thread 熔断器 + 图像剥离** — 串行后 summarizer 在关键路径，失败会连带本轮失败；`lumi/agents/core/preprocessing/compact.py` 提供：摘要自身撞 prompt-too-long 时按 API round 从头部丢弃重试（`summary_ptl_retry_max` / `summary_ptl_retry_drop_ratio`）、同 thread 连续失败超阈值后短暂放行 CallModel（`summary_failure_circuit_threshold` / `summary_circuit_reset_seconds`）、摘要前 strip 图像防自身超长
+- **压缩状态事件 `compaction.status`** — gateway 据 `langgraph_node == "Summarizer"` 拦截压缩节点内部的摘要 LLM 调用：`on_chat_model_*` 转成 `compaction.status {active}`、丢弃其 stream，前端显示「正在压缩对话…」而非把摘要全文渲染成助手回答
+
+### Fixed
+- **压缩的流式输出被当成助手回答** — `astream_events` 会把节点内任何 chat model 调用逐字浮现为 `on_chat_model_stream`（与 `streaming=False` 无关），bridge 无节点过滤时摘要全文经 `message.delta` 泄漏成助手输出 + 幽灵气泡 + 污染 token 统计；现按节点拦截隔离
+
 ## [0.2.1] - 2026-06-25
 
 ### Added

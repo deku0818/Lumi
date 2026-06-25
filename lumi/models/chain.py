@@ -17,7 +17,7 @@ from pydantic import BaseModel
 from lumi.models.cache import CACHE_CONTROL
 from lumi.models.manager import create_llm
 from lumi.utils.read_config import get_config
-from lumi.utils.token_counter import tiktoken_counter
+from lumi.utils.sizing import content_size, estimate_tokens
 
 # 仅重试真正瞬态的错误：限流、5xx、连接/超时（APIConnectionError 含 Timeout 子类）。
 # 不能用宽泛的 APIError——它包含 4xx 客户端错误（如模型不支持某参数的 400），
@@ -47,6 +47,19 @@ def _with_retry(chain, retry_errors: tuple):
     )
 
 
+def _estimate_message_tokens(messages: list) -> int:
+    """trim_messages 用的轻量 token 估算（字节 ÷ BYTES_PER_TOKEN）。
+
+    trim 会反复在任意候选子集上调用 token_counter，故不能用只对完整列表成立的
+    usage；这里按字节粗估，多模态 block 走固定字节当量、不对 base64 计长，每条加
+    固定角色/分隔开销。精度不敏感：trim 是带 headroom 的安全阀，偏差后续有 summary 兜底。
+    """
+    num = 3  # 回复 priming
+    for msg in messages:
+        num += 4 + estimate_tokens(content_size(getattr(msg, "content", "")))
+    return num
+
+
 def my_trim_messages(max_tokens: int | None = None):
     """通用工具：创建一个消息修剪器，用于修剪消息。
 
@@ -57,7 +70,7 @@ def my_trim_messages(max_tokens: int | None = None):
         max_tokens = get_config().config.token.trim_messages_max_tokens
 
     return trim_messages(
-        token_counter=tiktoken_counter,
+        token_counter=_estimate_message_tokens,
         strategy="last",
         max_tokens=max_tokens,
         start_on="human",

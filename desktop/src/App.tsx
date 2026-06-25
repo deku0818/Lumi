@@ -223,6 +223,8 @@ type SessionState = {
   clarify: Record<string, unknown>[]
   // 最近一次模型调用的上下文用量（用于输入栏的上下文进度环）；首轮前为 undefined
   ctx?: CtxUsage
+  // 历史压缩进行中（Summarizer 内部摘要调用期间为 true）；展示「正在压缩对话」指示
+  compacting?: boolean
 }
 const emptySession = (items: Item[] = []): SessionState => ({
   items,
@@ -412,6 +414,7 @@ export default function App() {
   const items = cur?.items ?? []
   const running = cur?.running ?? false
   const thinkingText = cur?.thinkingText ?? ''
+  const compacting = cur?.compacting ?? false
   // 渲染队首（最早挂起的那条）；应答后出队，下一条自动浮现
   const approval = cur?.approval?.[0] ?? null
   const clarify = cur?.clarify?.[0] ?? null
@@ -542,6 +545,10 @@ export default function App() {
         case 'thinking.delta':
           n = { ...s, thinkingText: s.thinkingText + (payload.text ?? '') }
           break
+        case 'compaction.status':
+          // 历史压缩进行中：仅切状态，不进消息流（摘要全文由后端拦截，不会泄漏为助手回答）
+          n = { ...s, compacting: !!payload.active }
+          break
         case 'message.complete':
           n = { ...s, items: finishStreaming(s.items), ctx: ctxFromUsage(payload.usage) ?? s.ctx }
           break
@@ -596,6 +603,7 @@ export default function App() {
           n = {
             ...s,
             running: false,
+            compacting: false,
             approval: [],
             clarify: [],
             items: finishStreaming(s.items),
@@ -607,6 +615,7 @@ export default function App() {
           n = {
             ...s,
             running: false,
+            compacting: false,
             approval: [],
             clarify: [],
             items: [...finishStreaming(s.items), { id: nid(), kind: 'notice', text: payload.message }],
@@ -1791,6 +1800,7 @@ export default function App() {
                         waiting={!!(approval || clarify)}
                         streaming={streaming}
                         thinkingText={thinkingText}
+                        compacting={compacting}
                       />
                     </div>
                     </div>
@@ -1948,12 +1958,14 @@ function StatusIndicator({
   waiting,
   streaming,
   thinkingText,
+  compacting,
 }: {
   items: Item[]
   running: boolean
   waiting: boolean
   streaming: boolean
   thinkingText: string
+  compacting: boolean
 }) {
   const { t } = useI18n()
   const [open, setOpen] = useState(false)
@@ -1991,13 +2003,15 @@ function StatusIndicator({
   const thinking = !waiting && !runningTool && !streaming && !!thinkingText
   const label = waiting
     ? t('status.waiting')
-    : runningTool
-      ? t(TOOL_META[runningTool.name]?.status ?? 'status.tool')
-      : thinking
-        ? t('common.thinking')
-        : streaming
-          ? t('status.writing')
-          : t('status.working')
+    : compacting
+      ? t('status.compacting')
+      : runningTool
+        ? t(TOOL_META[runningTool.name]?.status ?? 'status.tool')
+        : thinking
+          ? t('common.thinking')
+          : streaming
+            ? t('status.writing')
+            : t('status.working')
 
   return (
     <div className="mt-2">

@@ -84,3 +84,42 @@ def reset_hooks_state():
     set_run_config_hooks(None)
     yield
     set_run_config_hooks(None)
+
+
+@pytest.fixture
+def run_summarizer():
+    """驱动串行 summarizer：mock 掉 LLM 链 / 配置 / token 计数，强制触发压缩。
+
+    返回 ``await run_summarizer(state, runtime, summary_text, thread_id)``，断言压缩后
+    返回的 messages（RemoveMessage + 注入了摘要/技能/agent 提示的末条 Human）。
+    """
+    from types import SimpleNamespace
+    from unittest.mock import AsyncMock, patch
+
+    from langchain_core.messages import AIMessage
+
+    from lumi.utils.config.models import TokenConfig
+
+    async def _run(state, runtime, summary_text, thread_id):
+        # summarizer 取 context.system_prompt / model_name 传给（已 mock 的）链，需补齐
+        runtime.context.system_prompt = ""
+        runtime.context.model_name = ""
+        fake_chain = SimpleNamespace(
+            ainvoke=AsyncMock(return_value=AIMessage(content=summary_text))
+        )
+        fake_config = SimpleNamespace(
+            config=SimpleNamespace(token=TokenConfig()),
+            load_prompt=lambda name: "SUMMARY PROMPT",
+        )
+        with (
+            patch("lumi.agents.core.nodes.context_window_tokens", return_value=10**9),
+            patch("lumi.agents.core.nodes.tool_call_chain", return_value=fake_chain),
+            patch("lumi.agents.core.nodes.get_config", return_value=fake_config),
+        ):
+            from lumi.agents.core.nodes import summarizer
+
+            return await summarizer(
+                state, runtime, {"configurable": {"thread_id": thread_id}}
+            )
+
+    return _run

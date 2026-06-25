@@ -26,6 +26,13 @@ from lumi.agents.core.node_helpers.messages import (
 )
 from lumi.agents.core.preprocessing.agent_detector import AgentChangeDetector
 from lumi.agents.core.preprocessing.agents import inject_agents_into_message
+from lumi.agents.core.preprocessing.compact import (
+    is_circuit_open,
+    record_circuit_failure,
+    reset_circuit,
+    strip_images_from_messages,
+    summarize_with_ptl_retry,
+)
 from lumi.agents.core.preprocessing.skill_detector import SkillChangeDetector
 from lumi.agents.core.preprocessing.skills import inject_skills_into_message
 from lumi.agents.core.preprocessing.summary import inject_summary_into_message
@@ -48,7 +55,7 @@ from lumi.models.manager import detect_protocol
 from lumi.models.provider_store import resolve_classifier
 from lumi.utils.logger import logger
 from lumi.utils.read_config import get_config
-from lumi.utils.token_counter import tiktoken_counter
+from lumi.utils.sizing import context_window_tokens
 
 
 async def call_model(state: LumiAgentState, runtime: Runtime[LumiAgentContext]) -> dict:
@@ -586,61 +593,64 @@ async def auto_classify(
             return Command(goto="HumanApproval")
 
 
-async def summarizer(state: LumiAgentState, runtime: Runtime[LumiAgentContext]) -> dict:
-    """总结历史聊天消息，记录摘要信息到 state（不直接替换）
+async def summarizer(
+    state: LumiAgentState,
+    runtime: Runtime[LumiAgentContext],
+    config: RunnableConfig,
+) -> dict:
+    """串行压缩历史消息，本轮 CallModel 直接看到压缩后的 messages。
 
-    此函数在后台运行，与 CallModel 并行执行。
-    生成的摘要会在下一轮对话时由 preprocess_messages 执行实际替换。
+    串行拓扑：``PreprocessMessages → Summarizer → CallModel``——超阈值时当轮就地
+    压缩（``RemoveMessage`` 删历史 + 摘要前置到末条 Human），即将溢出的这次调用
+    立刻受益，而非等下一轮。
 
-    缓存安全的分叉：复用主对话的 system_prompt + tools 前缀，
-    只在末尾追加摘要指令，前面全部命中缓存。
+    缓存安全的分叉：复用主对话的 system_prompt + tools 前缀，只在末尾追加摘要指令。
 
-    触发条件：
-    - 消息 token 数 >= context_length * summary_threshold
+    - 不超阈值（``context_length * summary_threshold``，真实 usage）→ 直接放行
+    - 熔断器打开（同 thread 连续失败超阈值且未到 reset）→ 直接放行
+    - 触发压缩 → strip 图像后走 PTL 截头重试；失败记录熔断计数并抛出（让上层感知），
+      成功则清零熔断、写回 ``RemoveMessage`` + 摘要消息
 
-    保留规则：
-    - 头：SystemMessage 不参与摘要
-    - 尾：必须是 HumanMessage，否则报错
-    - 中间：生成摘要并记录 message id，供后续替换
+    保留规则：头 SystemMessage 不参与摘要；尾必须是 HumanMessage（不变量，否则报错）。
     """
-    messages = list(state["messages"])  # 复制原始消息
-
-    # 0. 检查是否已经生成过摘要
-    if state.get("summary", {}).get("summarized_ids") and state.get("summary", {}).get(
-        "summary_text"
-    ):
-        return {"summary": {}}
-
-    # 1. 计算 token，判断是否需要触发摘要
     token_config = get_config().config.token
-    threshold = token_config.context_length * token_config.summary_threshold
-    total_tokens = tiktoken_counter(messages)
+    thread_id = (config.get("configurable") or {}).get("thread_id", "_anon")
 
+    # 熔断打开：同 thread summary 连续失败超阈值，本轮直接放行 CallModel
+    if is_circuit_open(
+        thread_id,
+        token_config.summary_failure_circuit_threshold,
+        token_config.summary_circuit_reset_seconds,
+    ):
+        logger.warning("[Summarizer] 熔断打开 thread=%s，跳过压缩直接放行", thread_id)
+        return {}
+
+    original_messages = list(state["messages"])
+    threshold = token_config.context_length * token_config.summary_threshold
+    total_tokens = context_window_tokens(original_messages)
     if total_tokens < threshold:
         logger.debug(
-            f"[Summarizer] 消息 token ({total_tokens}) < 阈值 ({threshold})，无需摘要"
+            f"[Summarizer] 上下文 token ({total_tokens}) < 阈值 ({threshold})，无需压缩"
         )
-        return {"summary": {}}
+        return {}
 
     logger.info(
-        f"[Summarizer] 消息 token ({total_tokens}) >= 阈值 ({threshold})，开始生成摘要"
+        f"[Summarizer] 上下文 token ({total_tokens}) >= 阈值 ({threshold})，开始压缩"
     )
 
-    # 2. 跳过头部 SystemMessage（不参与摘要）
+    # 跳过头部 SystemMessage（不参与摘要、不删除）；尾必须是 HumanMessage
+    messages = original_messages
     if messages and isinstance(messages[0], SystemMessage):
         messages = messages[1:]
-
-    # 3. 校验尾部（必须是 HumanMessage）
     if not messages or not isinstance(messages[-1], HumanMessage):
         raise ValueError("[Summarizer] 最后一条消息必须是 HumanMessage")
 
-    # 保留尾部消息（不进行摘要）
     messages_to_summarize = messages[:-1]
+    summarized_ids = [msg.id for msg in messages_to_summarize if msg.id]
+    # 可压缩消息过少（≤1 条）时压缩收益甚微，直接放行
+    if len(summarized_ids) < 2:
+        return {}
 
-    # 4. 记录需要总结的 message id
-    summarized_ids = [msg.id for msg in messages_to_summarize]
-
-    # 5. 生成摘要
     prompt = get_config().load_prompt("SUMMARY")
     if not prompt:
         raise ValueError(
@@ -648,27 +658,56 @@ async def summarizer(state: LumiAgentState, runtime: Runtime[LumiAgentContext]) 
             "请在 .lumi/prompts/SUMMARY.md 中配置摘要提示词。"
         )
 
-    # 缓存安全的分叉：使用与主对话相同的 system_prompt + tools 构建 chain，
-    # 确保请求前缀一致，复用 Prompt Caching。
-    # 传入 tools 仅为保持缓存前缀，摘要本身不需要工具调用。
-    summary_messages = messages_to_summarize + [HumanMessage(content=prompt)]
+    # 缓存安全的分叉：与主对话相同的 system_prompt + tools 前缀复用 Prompt Caching；
+    # 传入 tools 仅为保持缓存前缀，摘要本身不需要工具调用。strip 图像防 summary 撞 PTL。
+    cleaned = strip_images_from_messages(messages_to_summarize)
     chain = tool_call_chain(
         runtime.context.tools,
         system_prompt=runtime.context.system_prompt,
         model_name=runtime.context.model_name,
         streaming=False,
     )
-    response = await chain.ainvoke({"messages": summary_messages})
-    summary_text = extract_ainvoke_content(response.content)
+    try:
+        raw_content, ptl_retries = await summarize_with_ptl_retry(
+            cleaned,
+            prompt,
+            chain,
+            max_retry=token_config.summary_ptl_retry_max,
+            drop_ratio=token_config.summary_ptl_retry_drop_ratio,
+        )
+    except Exception as exc:
+        fail_count = record_circuit_failure(
+            thread_id, token_config.summary_circuit_reset_seconds
+        )
+        logger.warning(
+            "[Summarizer] 摘要生成失败 thread=%s err=%s 连续失败=%d",
+            thread_id,
+            type(exc).__name__,
+            fail_count,
+        )
+        raise
+    reset_circuit(thread_id)
+    summary_text = extract_ainvoke_content(raw_content)
+    logger.info(
+        f"[Summarizer] 压缩完成，{len(summarized_ids)} 条消息，PTL 重试 {ptl_retries} 次"
+    )
 
-    logger.info(f"[Summarizer] 摘要生成完成，压缩 {len(summarized_ids)} 条消息")
+    # 摘要前置到末条 Human；压缩抹掉了历史里的 skill/agent/system 提示，须重新注入
+    last_human = original_messages[-1]
+    new_last_human = inject_summary_into_message(last_human, summary_text)
 
-    # 6. 返回摘要信息（dict 格式），供 preprocess_messages 执行实际替换
+    skills, _ = SkillChangeDetector.get_instance().check()
+    if skills:
+        new_last_human = inject_skills_into_message(new_last_human, skills)
+    if _agent_tool_available(runtime):
+        agents, _ = AgentChangeDetector.get_instance().check()
+        if agents:
+            new_last_human = inject_agents_into_message(new_last_human, agents)
+    new_last_human = inject_system_info_into_message(new_last_human)
+
     return {
-        "summary": {
-            "summarized_ids": summarized_ids,
-            "summary_text": summary_text,
-        }
+        "messages": [RemoveMessage(id=mid) for mid in summarized_ids]
+        + [RemoveMessage(id=last_human.id), new_last_human]
     }
 
 
@@ -687,9 +726,11 @@ async def preprocess_messages(
 ) -> dict:
     """消息预处理节点，在调用模型前执行以下操作:
 
-    0. 检查并执行摘要替换（如果 state["summary"] 有值）
     1. 清理不完整的工具调用
     2. 技能/agent 动态注入（变更或首条消息时将列表注入最后一条用户消息）
+
+    历史压缩已搬到下游 ``Summarizer`` 节点（串行 ``Preprocess → Summarizer → CallModel``）
+    当轮就地完成，此处不再处理摘要。
     """
     messages = state["messages"]
     result_messages = []
@@ -698,48 +739,6 @@ async def preprocess_messages(
     # 重置工具取消标记
     if state.get("tool_cancelled"):
         updates["tool_cancelled"] = False
-
-    # 0. 检查并执行摘要替换
-    summary_data = state.get("summary", {})
-    if summary_data and summary_data.get("summarized_ids"):
-        summarized_ids = summary_data["summarized_ids"]
-        summary_text = summary_data["summary_text"]
-
-        # 删除所有被摘要的消息
-        for msg_id in summarized_ids:
-            result_messages.append(RemoveMessage(id=msg_id))
-
-        # 找到最后一条 HumanMessage（用户当前消息）
-        last_human = None
-        for msg in reversed(messages):
-            if isinstance(msg, HumanMessage):
-                last_human = msg
-                break
-
-        if last_human is not None:
-            # 注入摘要到用户消息
-            new_msg = inject_summary_into_message(last_human, summary_text)
-
-            # 摘要后注入当前技能列表，避免 summary 吞掉之前的 system-reminder
-            skills, _ = SkillChangeDetector.get_instance().check()
-            if skills:
-                new_msg = inject_skills_into_message(new_msg, skills)
-
-            # 摘要后注入当前 agent 列表（同理）；仅对实际持有 agent 工具的代理，
-            # 先判工具集再 check() 以免无 agent 工具的子代理白做目录扫描
-            if _agent_tool_available(runtime):
-                agents, _ = AgentChangeDetector.get_instance().check()
-                if agents:
-                    new_msg = inject_agents_into_message(new_msg, agents)
-
-            # 注入系统环境信息
-            new_msg = inject_system_info_into_message(new_msg)
-
-            result_messages.append(RemoveMessage(id=last_human.id))
-            result_messages.append(new_msg)
-
-        logger.info(f"[PreprocessMessages] 已替换 {len(summarized_ids)} 条消息为摘要")
-        return {"messages": result_messages, "summary": {}, **updates}
 
     # 1. 清理不完整的工具调用
     result_messages.extend(cleanup_incomplete_tool_calls(messages))

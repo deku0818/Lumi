@@ -108,3 +108,21 @@ def test_parent_run_id_injected_into_payload():
         BridgeEvent(kind=EventKind.MESSAGE_DELTA, text="x", parent_run_id="p1"), SID
     )["params"]
     assert wire["payload"]["parent_run_id"] == "p1"
+
+
+def test_compacting_maps_active_true():
+    wire = bridge_event_to_wire(
+        BridgeEvent(kind=EventKind.COMPACTING, data={"active": True}), SID
+    )["params"]
+    assert wire == {
+        "type": "compaction.status",
+        "session_id": SID,
+        "payload": {"active": True},
+    }
+
+
+def test_compacting_maps_active_false():
+    wire = bridge_event_to_wire(
+        BridgeEvent(kind=EventKind.COMPACTING, data={"active": False}), SID
+    )["params"]
+    assert wire["payload"] == {"active": False}

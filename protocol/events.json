@@ -8,6 +8,7 @@
     "thinking.delta": { "payload": { "text": "string", "usage?": "Usage" }, "note": "模型思考增量（Anthropic thinking 块 / 方言 reasoning_content）" },
     "message.complete": { "payload": { "usage?": "Usage" } },
     "tool.generating": { "payload": {}, "note": "模型正在生成工具调用参数" },
+    "compaction.status": { "payload": { "active": "boolean" }, "note": "对话历史压缩进行中：active=true 开始、false 结束。压缩节点(Summarizer)内部的摘要 LLM 调用不作为 message.* 流出（否则摘要全文会泄漏成助手回答），改由此事件驱动「正在压缩对话」指示" },
     "tool.start": { "payload": { "name": "string", "args": "object", "tool_call_id": "string", "run_id?": "string" } },
     "tool.complete": { "payload": { "name": "string", "output": "string", "tool_call_id": "string", "is_error?": "boolean" }, "note": "is_error=true 表示工具以异常收尾" },
     "clarify.request": { "payload": { "approval_id": "string", "questions": "Question[]" }, "note": "ask 工具，经 resume(approval_id, value) 应答" },

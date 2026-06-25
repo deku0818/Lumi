@@ -35,15 +35,9 @@ def _runtime() -> SimpleNamespace:
     return SimpleNamespace(context=SimpleNamespace(tools=[]))
 
 
-def _make_state(
-    messages: list,
-    summary: dict | None = None,
-) -> dict:
+def _make_state(messages: list) -> dict:
     """构建最小化的 LumiAgentState 字典。"""
-    return {
-        "messages": messages,
-        "summary": summary or {},
-    }
+    return {"messages": messages}
 
 
 # --- 公共 mock 装饰器 ---
@@ -247,14 +241,13 @@ async def test_no_injection_when_skills_empty(
 @patch("lumi.agents.core.nodes.SkillChangeDetector")
 async def test_summary_injects_skills_into_summary_message(
     mock_detector_cls: MagicMock,
+    run_summarizer,
 ) -> None:
-    """summary 替换后，摘要消息应包含当前技能列表的 system-reminder。
+    """串行压缩后，摘要消息应包含当前技能列表的 system-reminder。
 
     场景：聊天期间修改了 skill，触发 summary 后，
     摘要消息需要带上最新技能列表，否则 LLM 会丢失技能感知。
     """
-    from lumi.agents.core.nodes import preprocess_messages
-
     mock_detector = MagicMock()
     mock_detector.check.return_value = (_TEST_SKILLS, False)
     mock_detector_cls.get_instance.return_value = mock_detector
@@ -264,14 +257,12 @@ async def test_summary_injects_skills_into_summary_message(
             HumanMessage(content="早期消息", id="msg1"),
             AIMessage(content="AI 回复", id="ai1"),
             HumanMessage(content="最新消息", id="msg2"),
-        ],
-        summary={
-            "summarized_ids": ["msg1", "ai1"],
-            "summary_text": "用户和 AI 进行了一段对话",
-        },
+        ]
     )
 
-    result = await preprocess_messages(state, _runtime())
+    result = await run_summarizer(
+        state, _runtime(), "用户和 AI 进行了一段对话", "t-skill"
+    )
     msgs = result["messages"]
 
     # 找到摘要消息（HumanMessage）

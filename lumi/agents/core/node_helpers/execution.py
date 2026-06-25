@@ -13,7 +13,7 @@ from typing import Any
 from lumi.agents.core.node_helpers.messages import content_to_str, write_offload_file
 from lumi.utils.logger import logger
 from lumi.utils.read_config import get_config
-from lumi.utils.token_counter import str_token_counter, truncate_docs_to_max_tokens
+from lumi.utils.sizing import text_size, truncate_docs_to_max_bytes
 
 # 支持 offset/limit 分段读取的工具——截断时附带分段提示而非卸载
 _TRUNCATE_ONLY_TOOLS: frozenset[str] = frozenset({"read"})
@@ -27,30 +27,30 @@ _TRUNCATE_ONLY_TOOLS: frozenset[str] = frozenset({"read"})
 def _build_truncation_summary(
     original_text: str,
     truncated_text: str,
-    max_tokens: int,
+    max_bytes: int,
 ) -> str:
     """构建截断元信息摘要。"""
-    orig_tokens = str_token_counter(original_text)
-    trunc_tokens = str_token_counter(truncated_text)
+    orig_bytes = text_size(original_text)
+    trunc_bytes = text_size(truncated_text)
     orig_lines = original_text.count("\n") + 1
     trunc_lines = truncated_text.count("\n") + 1
 
     return (
         f"... [内容已被截断]\n"
-        f"已显示：{trunc_tokens} tokens, {trunc_lines} 行\n"
-        f"剩余：{orig_tokens - trunc_tokens} tokens, {orig_lines - trunc_lines} 行\n"
-        f"原始：{len(original_text)} 字符, {orig_tokens} tokens, {orig_lines} 行\n"
-        f"单次工具最大 {max_tokens} tokens"
+        f"已显示：{trunc_bytes} 字节, {trunc_lines} 行\n"
+        f"剩余：{orig_bytes - trunc_bytes} 字节, {orig_lines - trunc_lines} 行\n"
+        f"原始：{len(original_text)} 字符, {orig_bytes} 字节, {orig_lines} 行\n"
+        f"单次工具最大 {max_bytes} 字节"
     )
 
 
 async def _try_offload_to_file(
     tool_name: str,
     content_str: str,
-    max_tokens: int,
+    max_bytes: int,
 ) -> str | None:
     """尝试将工具结果卸载到本地文件。成功返回替换文本，失败返回 ``None``。"""
-    token_count = str_token_counter(content_str)
+    byte_count = text_size(content_str)
     line_count = content_str.count("\n") + 1
 
     timestamp = datetime.now().strftime("%H%M%S%f")
@@ -69,16 +69,16 @@ async def _try_offload_to_file(
         return None
 
     logger.info(
-        "[truncate_tool_results] %s 结果已卸载到 %s (原始 %d tokens)",
+        "[truncate_tool_results] %s 结果已卸载到 %s (原始 %d 字节)",
         tool_name,
         file_path,
-        token_count,
+        byte_count,
     )
     return (
         f"工具返回内容过大，已卸载到文件：{file_path}\n"
         f"文件信息：\n"
-        f"{len(content_str)} 字符, {token_count} tokens, {line_count} 行\n"
-        f"单次工具最大 {max_tokens} tokens\n"
+        f"{len(content_str)} 字符, {byte_count} 字节, {line_count} 行\n"
+        f"单次工具最大 {max_bytes} 字节\n"
         f"请使用 read 分段读取或 grep 搜索关键内容。"
     )
 
@@ -93,7 +93,7 @@ def _has_multimodal_blocks(content: Any) -> bool:
     )
 
 
-async def _truncate_single_message(msg: object, max_tokens: int) -> None:
+async def _truncate_single_message(msg: object, max_bytes: int) -> None:
     """对单条消息执行截断/卸载，就地修改 ``msg.content``。"""
     if not hasattr(msg, "content"):
         return
@@ -104,8 +104,8 @@ async def _truncate_single_message(msg: object, max_tokens: int) -> None:
     if _has_multimodal_blocks(original_content):
         return
 
-    truncated_content = truncate_docs_to_max_tokens(
-        original_content, max_tokens=max_tokens
+    truncated_content = truncate_docs_to_max_bytes(
+        original_content, max_bytes=max_bytes
     )
     if truncated_content == original_content:
         return
@@ -116,7 +116,7 @@ async def _truncate_single_message(msg: object, max_tokens: int) -> None:
 
     # read 等工具：截断并附带分段读取提示
     if tool_name in _TRUNCATE_ONLY_TOOLS:
-        summary = _build_truncation_summary(content_str, truncated_str, max_tokens)
+        summary = _build_truncation_summary(content_str, truncated_str, max_bytes)
         msg.content = (
             f"{truncated_str}\n\n{summary}\n"
             f"可使用 offset 和 limit 参数分段读取剩余内容。"
@@ -124,11 +124,11 @@ async def _truncate_single_message(msg: object, max_tokens: int) -> None:
         return
 
     # 其他工具：优先卸载到文件，失败则回退截断
-    offloaded = await _try_offload_to_file(tool_name, content_str, max_tokens)
+    offloaded = await _try_offload_to_file(tool_name, content_str, max_bytes)
     if offloaded:
         msg.content = offloaded
     else:
-        summary = _build_truncation_summary(content_str, truncated_str, max_tokens)
+        summary = _build_truncation_summary(content_str, truncated_str, max_bytes)
         msg.content = f"{truncated_str}\n\n{summary}"
 
 
@@ -139,11 +139,11 @@ async def truncate_tool_results(messages_list: list[Any]) -> list[Any]:
     - ``_TRUNCATE_ONLY_TOOLS``：截断并提示分段读取
     - 其他工具：优先卸载到文件，失败时回退到截断
     """
-    max_tokens: int = get_config().config.token.once_tool_max_tokens
+    max_bytes: int = get_config().config.token.once_tool_max_bytes
 
     for msg in messages_list:
         try:
-            await _truncate_single_message(msg, max_tokens)
+            await _truncate_single_message(msg, max_bytes)
         except json.JSONDecodeError as exc:
             content_preview = str(msg.content)[:200]
             logger.warning(

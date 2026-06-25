@@ -98,6 +98,9 @@ class EventKind(StrEnum):
     THINKING_DELTA = "thinking.delta"  # 模型思考增量（Anthropic thinking 块 / 方言 reasoning_content）
     MESSAGE_COMPLETE = "message.complete"
     TOOL_GENERATING = "tool.generating"  # LLM 正在生成工具调用参数
+    COMPACTING = (
+        "compaction.status"  # 历史压缩进行中（Summarizer 内部摘要调用不外泄为助手消息）
+    )
     TOOL_START = "tool.start"
     TOOL_COMPLETE = "tool.complete"
     CLARIFY = "clarify.request"
@@ -492,6 +495,22 @@ class AgentBridge:
                                 and event.get("name") == "agent"
                             ):
                                 self._active_agent_runs.discard(run_id)
+
+                            # 压缩节点(Summarizer)内部的摘要 LLM 调用：不作为 message.* 流出
+                            # （astream_events 会把它逐字浮现成 on_chat_model_stream，否则摘要
+                            # 全文会泄漏成助手回答），改用 compaction.status 驱动「正在压缩」指示。
+                            # 对齐 claude-code：压缩调用内部消费 + 'compacting' 状态，不进用户流。
+                            if kind.startswith("on_chat_model") and (
+                                event.get("metadata", {}).get("langgraph_node")
+                                == "Summarizer"
+                            ):
+                                # start→压缩开始、end/error→结束；stream 直接丢弃（摘要不外泄）
+                                if kind != "on_chat_model_stream":
+                                    yield BridgeEvent(
+                                        kind=EventKind.COMPACTING,
+                                        data={"active": kind == "on_chat_model_start"},
+                                    )
+                                continue
 
                             if kind == "on_chat_model_start":
                                 yield BridgeEvent(

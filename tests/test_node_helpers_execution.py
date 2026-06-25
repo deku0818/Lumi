@@ -139,7 +139,7 @@ class TestTruncateTextOnly:
             tool_call_id="x",
             name="read",
         )
-        await _truncate_single_message(msg, max_tokens=1000)
+        await _truncate_single_message(msg, max_bytes=1000)
         assert msg.content == "small"
 
     async def test_long_text_truncated(self):
@@ -150,12 +150,12 @@ class TestTruncateTextOnly:
             tool_call_id="x",
             name="read",
         )
-        await _truncate_single_message(msg, max_tokens=100)
+        await _truncate_single_message(msg, max_bytes=100)
         # 截断后应是字符串
         assert isinstance(msg.content, str)
         assert len(msg.content) < len(long)
         # 应包含截断提示
-        assert "截断" in msg.content or "tokens" in msg.content
+        assert "截断" in msg.content or "字节" in msg.content
 
 
 # ═════════════════════════════════════════════════════════════════════════
@@ -178,7 +178,7 @@ class TestTruncateMultimodalSkipped:
             },
         ]
         msg = HumanMessage(content=list(content))
-        await _truncate_single_message(msg, max_tokens=1000)
+        await _truncate_single_message(msg, max_bytes=1000)
         assert msg.content == content
 
     async def test_long_text_with_image_not_truncated(self):
@@ -196,7 +196,7 @@ class TestTruncateMultimodalSkipped:
             },
         ]
         msg = HumanMessage(content=list(content))
-        await _truncate_single_message(msg, max_tokens=200)
+        await _truncate_single_message(msg, max_bytes=200)
         # 整体保留,text 不被截,image 也原样
         assert msg.content == content
 
@@ -215,7 +215,7 @@ class TestTruncateMultimodalSkipped:
             },
         ]
         msg = HumanMessage(content=list(content))
-        await _truncate_single_message(msg, max_tokens=200)
+        await _truncate_single_message(msg, max_bytes=200)
         assert msg.content == content
 
     async def test_multiple_pages_preserved_with_labels(self):
@@ -238,7 +238,7 @@ class TestTruncateMultimodalSkipped:
             },
         ]
         msg = HumanMessage(content=list(content))
-        await _truncate_single_message(msg, max_tokens=10000)
+        await _truncate_single_message(msg, max_bytes=10000)
         # 顺序 + block 结构全部保留
         assert msg.content == content
 
@@ -251,7 +251,7 @@ class TestTruncateMultimodalSkipped:
             }
         ]
         msg = HumanMessage(content=list(content))
-        await _truncate_single_message(msg, max_tokens=100)
+        await _truncate_single_message(msg, max_bytes=100)
         assert msg.content == content
 
     async def test_image_url_block_also_triggers_skip(self):
@@ -261,5 +261,5 @@ class TestTruncateMultimodalSkipped:
             {"type": "image_url", "image_url": {"url": "data:image/png;base64,abc"}},
         ]
         msg = HumanMessage(content=list(content))
-        await _truncate_single_message(msg, max_tokens=100)
+        await _truncate_single_message(msg, max_bytes=100)
         assert msg.content == content

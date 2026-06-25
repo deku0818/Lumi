@@ -11,13 +11,6 @@ from dataclasses import dataclass, field
 from langgraph.graph.message import add_messages
 
 
-class SummaryData(TypedDict, total=False):
-    """摘要数据结构"""
-
-    summarized_ids: list[str]
-    summary_text: str
-
-
 @dataclass
 class LumiAgentContext:
     tools: list = field(default_factory=list)
@@ -45,8 +38,6 @@ class LumiAgentState(TypedDict):
     """
     todos: NotRequired[list]
     """任务列表，用于追踪复杂任务的执行进度"""
-    summary: SummaryData
-    """摘要信息"""
     output_schema: NotRequired[dict[str, Any]]
     """结构化输出的 JSON Schema"""
     output_enrich: NotRequired[list[dict[str, Any]]]

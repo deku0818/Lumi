@@ -38,6 +38,7 @@ export interface WireEventPayloads extends Record<WireEventType, object> {
   'thinking.delta': { text: string; usage?: Usage }
   'message.complete': { usage?: Usage }
   'tool.generating': Record<string, never>
+  'compaction.status': { active: boolean }
   'tool.start': { name: string; args: unknown; tool_call_id: string; run_id?: string }
   'tool.complete': { name: string; output: string; tool_call_id: string; is_error?: boolean }
   'clarify.request': { approval_id: string; questions: Question[] }

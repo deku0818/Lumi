@@ -40,8 +40,8 @@ def _runtime(has_agent: bool = True) -> SimpleNamespace:
     return SimpleNamespace(context=SimpleNamespace(tools=tools))
 
 
-def _make_state(messages: list, summary: dict | None = None) -> dict:
-    return {"messages": messages, "summary": summary or {}}
+def _make_state(messages: list) -> dict:
+    return {"messages": messages}
 
 
 def _has_agent_reminder(message: HumanMessage) -> bool:
@@ -176,10 +176,9 @@ async def test_no_injection_when_agents_empty(
 @patch("lumi.agents.core.nodes.AgentChangeDetector")
 async def test_summary_injects_agents_into_summary_message(
     mock_detector_cls: MagicMock,
+    run_summarizer,
 ) -> None:
-    """summary 替换后，摘要消息应带上当前 agent 列表的 system-reminder。"""
-    from lumi.agents.core.nodes import preprocess_messages
-
+    """串行压缩后，摘要消息应带上当前 agent 列表的 system-reminder。"""
     mock_detector_cls.get_instance.return_value.check.return_value = (
         _TEST_AGENTS,
         False,
@@ -190,14 +189,10 @@ async def test_summary_injects_agents_into_summary_message(
             HumanMessage(content="早期消息", id="msg1"),
             AIMessage(content="回复", id="ai1"),
             HumanMessage(content="最新消息", id="msg2"),
-        ],
-        summary={
-            "summarized_ids": ["msg1", "ai1"],
-            "summary_text": "一段对话摘要",
-        },
+        ]
     )
 
-    result = await preprocess_messages(state, _runtime())
+    result = await run_summarizer(state, _runtime(), "一段对话摘要", "t-agent")
     human_msgs = [m for m in result["messages"] if isinstance(m, HumanMessage)]
 
     assert len(human_msgs) == 1

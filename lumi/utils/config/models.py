@@ -7,6 +7,8 @@ from typing import Literal
 
 from pydantic import BaseModel, Field, model_validator
 
+from lumi.utils.sizing import BYTES_PER_TOKEN
+
 type CheckpointMode = Literal["memory", "sqlite", "postgres"]
 
 
@@ -56,15 +58,17 @@ class AgentsConfig(BaseModel):
 
 
 class TokenConfig(BaseModel):
-    """Token处理配置类
+    """Token / 字节处理配置类
 
     once_tool_ratio / trim_messages_ratio / summary_threshold 均为相对于
-    context_length 的比例（0~1），实际 token 数通过属性方法计算。
+    context_length 的比例（0~1）。阈值类（工具结果大小）以 UTF-8 字节衡量，
+    按 BYTES_PER_TOKEN 把 token 预算换算成字节；上下文窗口预算（trim / summary）
+    保持 token 语义。实际值通过属性方法计算。
     """
 
     once_tool_ratio: float = Field(
         default=0.1,
-        description="单次工具调用返回结果最大 token 占比（相对于 context_length）",
+        description="单次工具调用返回结果最大占比（相对于 context_length），按字节衡量",
     )
     trim_messages_ratio: float = Field(
         default=0.96,
@@ -73,13 +77,29 @@ class TokenConfig(BaseModel):
     context_length: int = Field(default=200000, description="模型上下文窗口最大token数")
     summary_threshold: float = Field(
         default=0.7,
-        description="触发总结的阈值比例，当消息token数 >= context_length * summary_threshold 时触发",
+        description="触发总结的阈值比例，当上下文窗口 token 数（真实 usage，含 system prompt + tools + 历史）>= context_length * summary_threshold 时触发",
+    )
+    summary_ptl_retry_max: int = Field(
+        default=3,
+        description="summary 自身撞 prompt-too-long 时的 PTL 截头重试次数上限",
+    )
+    summary_ptl_retry_drop_ratio: float = Field(
+        default=0.3,
+        description="每次 PTL retry 从头部丢弃的 API round 比例（按 AIMessage 切组）",
+    )
+    summary_failure_circuit_threshold: int = Field(
+        default=3,
+        description="同 thread summary 连续失败 N 次后熔断，下一轮直接放行 CallModel",
+    )
+    summary_circuit_reset_seconds: int = Field(
+        default=600,
+        description="熔断打开后多少秒允许再次尝试压缩",
     )
 
     @property
-    def once_tool_max_tokens(self) -> int:
-        """单次工具调用返回结果最大 token 数"""
-        return int(self.context_length * self.once_tool_ratio)
+    def once_tool_max_bytes(self) -> int:
+        """单次工具调用返回结果最大 UTF-8 字节数"""
+        return int(self.context_length * self.once_tool_ratio * BYTES_PER_TOKEN)
 
     @property
     def trim_messages_max_tokens(self) -> int:
