@@ -1,5 +1,18 @@
 # Changelog
 
+## [0.2.0a9] - 2026-06-25
+
+### Added
+- **设计文档：ACP client 接入** — `docs/architecture/acp-client.md`：让 `LumiAgent` 作为 Agent Client Protocol 的 client，把外部编程 agent（Claude Code 等）当进程外「工人」委派；委派复用现有 sub-agent 工具形状，权限走同一 `PermissionEngine`（设计定稿，待实施）
+- **设计文档：在途审批改造** — `docs/architecture/approval-inflight.md`：把工具审批 / ask 从 `interrupt()` + checkpoint 重放改为 `asyncio.Future` 在途请求-响应，支持「节点原地挂起」与并发多审批，为 ACP 外部子进程审批铺路（设计定稿，待实施）
+
+### Fixed
+- **`ToolRuntime` 注入被 `from __future__ import annotations` 破坏** — 该 import 会把 `runtime: ToolRuntime` 注解字符串化，langchain 调用时认不出注入参数、不注入 → 运行时 "missing runtime"；移除 `agent.py` / `workflow.py` 的该 import，并在 `registry._collect_tools_from_module` 加载期新增 `_assert_runtime_not_stringized` fail-fast 守卫，把「每个文件记得别加 future import」的人工纪律换成统一强校验
+- **并行兄弟子代理的中断归属错挂** — 同轮并行委派 ≥2 个顶层子代理、其一触发 ask / tool_approval 时，旧 `_subagent_marker` 取最早插入会把审批 / 提问卡片错挂到先启动的兄弟名下；改为靠存下的 `parent_ids` 判断祖先关系，仅唯一顶层时归属、并行兄弟无法区分时返回空串挂到主 agent（不自信错挂；仍能正常看到并回答，回答正确生效）。单链委派（祖→孙）不受影响
+
+### Changed
+- **`_active_agent_runs` 改存 parent_ids** — `dict[str, None]` → `dict[str, list[str]]`，活跃 agent run 一并记录其 `parent_ids`；中断归属（无 parent_ids 上下文）据此区分「单链委派」与「并行兄弟」，与流式路径「最浅祖先」同口径
+
 ## [0.2.0a8] - 2026-06-24
 
 ### Added

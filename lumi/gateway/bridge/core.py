@@ -147,11 +147,11 @@ class AgentBridge:
         self._context: LumiAgentContext | None = None
         self._config: RunnableConfig | None = None
         self.model_name: str = ""
-        # 活跃的 agent 工具 run_id，跨 _stream 调用保持追踪（审批恢复场景）。
-        # 流式事件归属（_resolve_subagent_parent）只用其成员判定，顺序由 parent_ids
-        # 决定、不依赖插入序。用 dict（而非 set）仅为给无 parent_ids 的中断路径
-        # （_subagent_marker）提供确定性的「最早插入＝最浅子代理」回退。
-        self._active_agent_runs: dict[str, None] = {}
+        # 活跃 agent 工具 run_id → 其 parent_ids（插入时由事件携带），跨 _stream 调用保持
+        # 追踪（审批恢复场景）。流式归属（_resolve_subagent_parent）只用 key 成员判定；
+        # 中断归属（_subagent_marker，无 parent_ids 上下文）靠存下的 parent_ids 判断活跃
+        # run 间的祖先关系，区分「单链委派」与「并行兄弟」。
+        self._active_agent_runs: dict[str, list[str]] = {}
         self._shadow: FileCheckpointManager | None = None
         self._tracker: FileChangeTracker | None = None
         # 本会话临时添加的额外可访问目录（不持久化，连接断开即失效）
@@ -490,10 +490,10 @@ class AgentBridge:
                                 run_id, parent_ids
                             )
 
-                            # agent 工具开始时记录 run_id（放在匹配之后，
+                            # agent 工具开始时记录 run_id→parent_ids（放在匹配之后，
                             # 确保 agent 自身的 on_tool_start 不会自匹配）
                             if kind == "on_tool_start" and event.get("name") == "agent":
-                                self._active_agent_runs[run_id] = None
+                                self._active_agent_runs[run_id] = parent_ids
 
                             # agent 工具结束/出错时移除 run_id，避免残留影响后续匹配
                             if (
@@ -728,12 +728,19 @@ class AgentBridge:
         )
 
     def _subagent_marker(self) -> str:
-        """中断（ask/approval）的子代理归属标记。
+        """中断（ask/approval）的子代理归属标记——无 parent_ids 上下文，靠活跃集自身判断。
 
-        无 parent_ids 上下文可用，故取最早插入且仍活跃的 agent run——即主 agent
-        直接派生的顶层子代理，与流式事件路径的「最浅祖先」归并口径一致。
+        顶层子代理 = parent_ids 中不含任何活跃 agent run 的活跃 run（与流式路径「最浅
+        祖先」同口径）。恰好一个顶层 → 单链委派，明确归属到它；多个 → 并行兄弟无法区分，
+        返回空串挂到主 agent，而非自信地错挂某个兄弟（见 docs/architecture/desktop.md）。
         """
-        return next(iter(self._active_agent_runs), "")
+        active = self._active_agent_runs
+        roots = [
+            run_id
+            for run_id, parent_ids in active.items()
+            if not any(pid in active for pid in parent_ids)
+        ]
+        return roots[0] if len(roots) == 1 else ""
 
     async def _check_interrupts(self) -> BridgeEvent:
         """检查中断，返回对应事件"""

@@ -1,6 +1,8 @@
 """Agent 工具提供者 - 将复杂任务委托给子代理执行。"""
 
-from __future__ import annotations
+# 注意：本模块**不能**加 `from __future__ import annotations`。它会把 `runtime: ToolRuntime`
+# 注解字符串化，导致 langchain 在工具调用时认不出该注入参数、不注入 → "missing runtime"。
+# 任何声明 `runtime: ToolRuntime` 注入参数的工具模块同理（见回归测试 test_runtime_injected_via_toolnode）。
 
 import asyncio
 import time

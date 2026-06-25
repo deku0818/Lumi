@@ -6,7 +6,9 @@
 执行引擎见 ``lumi/agents/core/workflow/engine.py``。
 """
 
-from __future__ import annotations
+# 注意：本模块**不能**加 `from __future__ import annotations`。它会把 `runtime: ToolRuntime`
+# 注解字符串化，导致 langchain 在工具调用时认不出该注入参数、不注入 → "missing runtime"。
+# 同 agent.py（见回归测试 test_workflow_runtime_injected_via_toolnode）。
 
 import asyncio
 import json

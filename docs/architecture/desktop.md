@@ -66,16 +66,16 @@ shell / 后台任务会话等全局单例由 `shutdown_shared_runtime()` 在 lif
 
 ## 子代理事件归属（多层委派）
 
-子代理（`agent` 工具）可多层委派（`agents.max_delegation_depth` 默认 3，主 agent 为第 0 层）。前端按 `parent_run_id` 把子代理事件聚成轻量分组卡片展示——**该标记仅用于展示，不参与中断的 interrupt/resume，故归属错误不影响功能**。`bridge/core.py` 维护活跃 agent 工具 run_id 的插入有序集合 `_active_agent_runs`（`on_tool_start name=="agent"` 时插入、`on_tool_end`/`on_tool_error` 时移除），两条归属路径：
+子代理（`agent` 工具）可多层委派（`agents.max_delegation_depth` 默认 3，主 agent 为第 0 层）。前端按 `parent_run_id` 把子代理事件聚成轻量分组卡片展示——**该标记仅用于展示，不参与中断的 interrupt/resume，故归属错误不影响功能**。`bridge/core.py` 维护「活跃 agent 工具 run_id → 其 `parent_ids`」的映射 `_active_agent_runs`（`dict[str, list[str]]`，`on_tool_start name=="agent"` 时存入、`on_tool_end`/`on_tool_error` 时移除），两条归属路径：
 
 - **流式事件**（`_resolve_subagent_parent`）：从事件 `parent_ids`（langchain 的 root→直接父序）正序取首个仍活跃的 agent run。深层（孙及更深）活动据此**确定性归并到主 agent 直接派生的顶层子代理**；并行兄弟各自的事件也按各自 `parent_ids` 正确区分。
-- **中断事件**（`_subagent_marker`，ask / tool_approval）：`aget_state` 拿到的是主图状态、payload 无 `parent_ids`，只能取「最早插入」的活跃 run 作回退。
+- **中断事件**（`_subagent_marker`，ask / tool_approval）：`aget_state` 拿到的是主图状态、payload 无 `parent_ids`，故 `_active_agent_runs` 存下每个活跃 run 的 `parent_ids`，据此判断祖先关系——「唯一顶层子代理」（其 `parent_ids` 不含任何活跃 run）即归属目标，与流式路径同口径。
 
 **已知限制（均为展示层、功能零影响）：**
 
 1. **深层嵌套展平**：孙 / 曾孙活动全部挂在顶层子代理卡片下，看不到层级树。属刻意取舍——子代理经 `create_agent(checkpoint=None)` 无 checkpointer，主图不保留其嵌套 task 结构。
-2. **并行兄弟 + 中断错挂**：同一轮并行委派 ≥2 个子代理、且靠后启动者触发 ask / tool_approval 时，`_subagent_marker` 取最早插入 → 审批 / 提问卡片会显示在先启动的兄弟名下（**仍能正常看到并回答，回答也正确生效**，只是分组标错）。根因：子代理 checkpointer-less 跑在 `agent` 工具这个不透明边界内，中断冒泡到主图 `ToolExecutor` 时已丢失「来自哪个并行兄弟」的结构链接。
-   - **廉价兜底**（仅 `bridge/core.py`）：检测到多兄弟同时活跃且无法区分时，中断 `parent_run_id` 返回空串（挂到主 agent，而非自信地错挂兄弟）。
+2. **并行兄弟 + 中断无法精确归属**：同一轮并行委派 ≥2 个顶层子代理、其中之一触发 ask / tool_approval 时，因中断 payload 无 `parent_ids`，无法判断「来自哪个并行兄弟」。根因：子代理 checkpointer-less 跑在 `agent` 工具这个不透明边界内，中断冒泡到主图 `ToolExecutor` 时已丢失结构链接。
+   - **已实现的兜底**（仅 `bridge/core.py`）：`_subagent_marker` 发现 ≥2 个并行顶层子代理同时活跃时，`parent_run_id` 返回空串——审批 / 提问卡片挂到主 agent，而非自信地错挂某个兄弟（**仍能正常看到并回答，回答也正确生效**，只是不归到具体子代理分组）。单链委派（祖→孙）不受影响，仍精确归到唯一顶层。
    - **真正根治**：把子代理身份从 spawn 一路串到中断 payload，再在 bridge 关联回前端的 `run_id` 卡片，跨 `agent.py` / `ask.py` / `nodes.py`（approval）/ `bridge` / 前端，且需对抗「子代理无 checkpointer」的省开销设计——暂留待需。
 
 ## 会话管理

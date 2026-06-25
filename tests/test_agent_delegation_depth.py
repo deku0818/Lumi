@@ -17,6 +17,7 @@ from langchain_core.messages import AIMessage
 
 from lumi.agents.tools.loader import AgentConfig
 from lumi.agents.tools.providers.agent import _child_tools, agent
+from lumi.agents.tools.providers.workflow import workflow
 from lumi.utils.read_config import get_config
 
 
@@ -153,3 +154,69 @@ async def test_strips_agent_tool_for_last_allowed_layer() -> None:
 
     assert captured["inputs"]["depth"] == 3
     assert "agent" not in _names(captured["tools"])
+
+
+async def _invoke_via_toolnode(tool_obj, args: dict) -> str:
+    """经真实 ToolNode 调用单个工具，返回最后一条消息内容（用于验证 runtime 注入）。"""
+    from langgraph.graph import END, START, MessagesState, StateGraph
+    from langgraph.prebuilt import ToolNode
+
+    from lumi.agents.core.state import LumiAgentContext
+
+    g = StateGraph(MessagesState, context_schema=LumiAgentContext)
+    g.add_node("tools", ToolNode([tool_obj]))
+    g.add_edge(START, "tools")
+    g.add_edge("tools", END)
+    tc = {"name": tool_obj.name, "args": args, "id": "c1", "type": "tool_call"}
+    res = await g.compile().ainvoke(
+        {"messages": [AIMessage(content="", tool_calls=[tc])]},
+        context=LumiAgentContext(permission_engine=None),
+    )
+    return res["messages"][-1].content
+
+
+@pytest.mark.parametrize(
+    "tool_obj, args, marker",
+    [
+        (agent, {"name": "__nonexistent__", "prompt": "x"}, "not found"),
+        (workflow, {}, "script"),
+    ],
+)
+async def test_runtime_injected_via_toolnode(tool_obj, args: dict, marker: str) -> None:
+    """回归：声明 `runtime: ToolRuntime` 的工具经真实 ToolNode 调用时 runtime 必须被注入。
+
+    所在模块若加 `from __future__ import annotations`，会把注解字符串化、langchain 认不出
+    该注入参数 → 调用时 "missing runtime"。现有 mock 测试直接传 runtime、绕过 ToolNode 注入，
+    抓不到此问题；本例走真实 ToolNode。注入成功则走到工具自身的校验（marker）。
+    """
+    out = await _invoke_via_toolnode(tool_obj, args)
+    assert marker in out
+    assert "missing" not in out.lower() and "runtime" not in out.lower()
+
+
+def test_collect_tools_rejects_stringized_runtime() -> None:
+    """加载期守卫：ToolRuntime 注解被字符串化的工具应在收集时即 fail-fast。
+
+    把「每个文件记得别加 future import」的人工纪律换成 registry 的统一强校验。
+    """
+    import types
+
+    from langchain_core.tools import tool
+    from langgraph.prebuilt.tool_node import ToolRuntime
+    from pydantic import BaseModel, Field
+
+    from lumi.agents.tools.registry import _collect_tools_from_module
+
+    class _In(BaseModel):
+        x: str = Field(description="x")
+
+    @tool(description="probe", args_schema=_In)
+    async def probe(x: str, runtime: ToolRuntime) -> str:
+        return "ok"
+
+    # 模拟 future import 把注解字符串化
+    probe.coroutine.__annotations__["runtime"] = "ToolRuntime"
+    mod = types.ModuleType("_fake_provider")
+    mod.probe = probe
+    with pytest.raises(RuntimeError, match="字符串化"):
+        _collect_tools_from_module(mod)

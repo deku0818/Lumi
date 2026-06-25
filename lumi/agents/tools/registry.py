@@ -95,13 +95,34 @@ class ToolRegistry:
         )
 
 
+def _assert_runtime_not_stringized(tool: StructuredTool) -> None:
+    """加载期 fail-fast：若工具的 ``ToolRuntime`` 注入参数注解被字符串化，立即报错。
+
+    模块加了 ``from __future__ import annotations`` 会把 ``runtime: ToolRuntime`` 变成
+    字符串注解，langchain 调用时认不出该注入参数、不注入 → 运行时 "missing runtime"。
+    这种失败在运行前不可见，故在此把全体内置工具的注解扫一遍，把「靠每个文件记得别加
+    future import」的人工纪律换成加载期统一强校验。
+    """
+    fn = tool.coroutine or tool.func
+    if fn is None:
+        return
+    for pname, param in inspect.signature(fn).parameters.items():
+        ann = param.annotation
+        if isinstance(ann, str) and ann.split("[")[0].strip().endswith("ToolRuntime"):
+            raise RuntimeError(
+                f"工具 '{tool.name}' 的参数 '{pname}' 注解被字符串化为 {ann!r}——"
+                f"其所在模块不能用 `from __future__ import annotations`"
+                f"（会破坏 ToolRuntime 注入，致调用时 'missing runtime'）"
+            )
+
+
 def _collect_tools_from_module(module: types.ModuleType) -> list[StructuredTool]:
     """从模块中收集所有公开的 ``StructuredTool`` 实例。
 
     工具 description 多由函数 docstring 提供，而 docstring 的续行带源码缩进
     （LangChain 不会 dedent）。此处统一 ``inspect.cleandoc`` 抹掉公共缩进，
     使写在 docstring 里的 Markdown 描述干净进入模型（idempotent，不影响外部
-    MCP 工具——后者走异步 loader，不经此处）。
+    MCP 工具——后者走异步 loader，不经此处）。同时校验 ToolRuntime 注解未被字符串化。
     """
     tools: list[StructuredTool] = []
     for name in dir(module):
@@ -110,6 +131,7 @@ def _collect_tools_from_module(module: types.ModuleType) -> list[StructuredTool]
             if isinstance(obj, StructuredTool):
                 if obj.description:
                     obj.description = inspect.cleandoc(obj.description)
+                _assert_runtime_not_stringized(obj)
                 tools.append(obj)
     return tools
 
