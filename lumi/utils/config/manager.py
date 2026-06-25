@@ -139,6 +139,11 @@ class LumiConfig:
         """获取 MCP 配置文件路径"""
         return self.config_dir / "mcp_server.json"
 
+    @property
+    def acp_config_path(self) -> Path:
+        """获取 ACP 外部 agent 配置文件路径（与 mcp_server.json 对称）"""
+        return self.config_dir / "acp_agents.json"
+
     # === 配置加载方法 ===
 
     def load_mcp_config(self) -> dict:

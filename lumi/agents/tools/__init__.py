@@ -11,6 +11,7 @@ from .providers import (
     background_task,
     bash,
     cron,
+    external_agent,
     filesystem,
     mcp,
     present_files,
@@ -38,6 +39,8 @@ _registry.register("present_files", present_files)
 # agent 工具静态注册：可用代理列表经 <system-reminder> 动态注入（见 AgentChangeDetector），
 # 与 skill 一致——新增/删除 .lumi/agents 下的代理无需重建工具 schema。
 _registry.register("agent", agent)
+# external_agent：经 ACP 委派外部 agent（Claude Code）的工具模块。
+_registry.register("external_agent", external_agent)
 
 
 # ------------------------------------------------------------------

@@ -2,9 +2,11 @@
 
 让 `LumiAgent` 作为 [Agent Client Protocol](https://agentclientprotocol.com)（ACP）的 **client**，把外部编程 agent（Claude Code、Codex、Gemini CLI…）当「工人」拉起来派活——Lumi 扮演 ACP 里编辑器/IDE 的角色，外部 agent 作为 ACP server 子进程。
 
-> 现状：设计已定稿，待实施。**实施顺序：先做 [在途审批改造](./approval-inflight.md)**，再做本文——因为 ACP 的权限回调直接复用在途审批的 `ApprovalBroker`，没有它 ACP 的审批无处落脚。
+> 现状：[在途审批改造](./approval-inflight.md) **已落地**；本文 **ACP-PR1（传输层）+ ACP-PR2（委派工具 + 事件回流）已落地**。PR1：`lumi/acp/` + 脱离 Lumi 的子进程握手单测；PR2：`delegate_to_claude` 工具 + bridge custom-event 分支 + 子卡片归属，desktop 可见 Claude Code 流式输出。权限（PR3）/ fs（PR4）待实施。
 >
 > 已定方向：走 **ACP 标准协议**（非裸 CLI/PTY 包装）；首发 worker = **Claude Code**；先做 **单点委派**（打通管道），Council / fan-out 留后。
+>
+> 已定决策：① `lumi/acp/` 放**运行时根下**（不进 `gateway/`——它是主动外联能力，与 MCP client 同侧；放 gateway 会造出刚拆掉的 `agents→gateway` 反向依赖）。② 委派 `cwd` **每次由 `LumiAgent` 显式指定**（不隐式跟随会话目录）。③ 传输层**直接用官方 `acp` Python SDK**（`agent-client-protocol`，见下），不自写 JSON-RPC。
 
 ---
 
@@ -54,19 +56,17 @@ ACP = JSON-RPC 2.0 over stdio，**双向**：外部 agent 干活时回调 client
 ## 模块划分
 
 ```
-lumi/acp/                        # 新增：纯 ACP client，不依赖 LangGraph
-  client.py     AcpClient        # stdio JSON-RPC 收发 + 握手 + 会话
-  transport.py  StdioTransport   # 子进程 stdin/stdout 帧收发
-  types.py                       # ACP 消息类型（取自官方 schema，或薄 dataclass）
+lumi/acp/                        # 纯 ACP client，不依赖 LangGraph（已落地 PR1）
+  client.py     AcpClient        # 薄封装官方 acp SDK：spawn → initialize → session/new → prompt
+                                 # _BridgeClient(Client) 路由回调；AcpResult(stop_reason, text)
 
 lumi/agents/tools/providers/
-  external_agent.py              # 新 provider：delegate 工具，把 AcpClient 接进运行时
+  external_agent.py              # 新 provider：delegate 工具，把 AcpClient 接进运行时（PR2）
 ```
 
-- `lumi/acp/` 与 MCP client 对称：**MCP 让 Lumi 用外部工具，ACP 让 Lumi 用外部 agent**。纯传输层，可独立单测（起一个子进程跑通握手）。
-- provider 是「桥」，把 ACP 的三类回调接到 Lumi 三大原语（事件 / 权限 / fs）。
-
-> 待拍板（结构归属）：`lumi/acp/` 放运行时根下（推荐——它是 Lumi 主动外联的能力，不属于「对外暴露」那层）还是 `gateway/` 下。落地前确认。
+- 官方 `acp` SDK 已提供 **传输（stdio JSON-RPC）+ 类型（`acp.schema` Pydantic）+ 连接**，故无需自写 `transport.py` / `types.py`——`lumi/acp/` 收敛成一个薄 `client.py`。
+- `lumi/acp/` 与 MCP client 对称：**MCP 让 Lumi 用外部工具，ACP 让 Lumi 用外部 agent**。纯传输层，可独立单测（`tests/acp/` 起 echo agent 子进程跑通握手）。
+- provider 是「桥」，把 ACP 的三类回调接到 Lumi 三大原语（事件 / 权限 / fs）。`AcpClient.run(task, cwd, on_update)` 暴露 `on_update` 流式旁路给 provider 接事件回流。
 
 ---
 
@@ -103,11 +103,13 @@ ACP `fs/read_text_file` / `fs/write_text_file` → `LocalFilesystemBackend.read/
 {
   "claude-code": {
     "command": "npx",
-    "args": ["-y", "@zed-industries/claude-code-acp"],
+    "args": ["-y", "@agentclientprotocol/claude-agent-acp"],
     "env": { "ANTHROPIC_API_KEY": "..." }
   }
 }
 ```
+
+> adapter 包名改过两次：`@zed-industries/claude-code-acp`（弃用）→ `@zed-industries/claude-agent-acp`（弃用）→ 当前维护版 **`@agentclientprotocol/claude-agent-acp`**。前两者 npm 上的 `deprecated` 字段明确指向当前包，务必用当前包（旧版 `new_session` 会回 Internal error）。
 
 认证由 adapter 自己 owns（env 透传），Lumi 不管外部 agent 的 auth。三级合并沿用现有 config 机制。
 
@@ -125,16 +127,16 @@ ACP `fs/read_text_file` / `fs/write_text_file` → `LocalFilesystemBackend.read/
 
 ## PR 切分（M1）
 
-1. **PR1 — ACP client 传输层**：`lumi/acp/`（stdio JSON-RPC + `initialize` / `session/prompt` + `session/update` 解析），脱离 Lumi 单测（起 echo / claude-code 子进程跑通握手）。
-2. **PR2 — 委派工具 + 事件回流**：`providers/external_agent.py` + bridge custom-event 分支，前端看到 Claude Code 子卡片流式输出。先不接权限/fs。
-3. **PR3 — 权限接入**：`request_permission` → `PermissionEngine` + `ApprovalBroker`（需在途审批已落地）。
-4. **PR4 — fs 回调接入**（视下方验证结果决定是否必要）。
+1. **ACP-PR1 — ACP client 传输层** ✅ 已落地：`lumi/acp/client.py`（薄封装 `acp` SDK：`initialize` / `session/new` / `session/prompt` + `session/update` 文本解析 + `AcpResult`），`tests/acp/` 起 echo agent 子进程跑通握手。
+2. **ACP-PR2 — 委派工具 + 事件回流** ✅ 已落地：`providers/external_agent.py`（`delegate_to_claude(task, cwd)` 工具 + `_normalize_acp_update` 把 session/update 归一化 + 经 `adispatch_custom_event(LUMI_ACP_EVENT)` 回流）；`bridge/core.py` 加 `LUMI_ACP_EVENT` 分支（`_acp_event_to_bridge` 映射 message/thought/tool_start/tool_complete）+ `_SUBAGENT_TOOLS` 把 `delegate_to_claude` 纳入子卡片归属；`acp_agents.json` 配置（缺省用 npx adapter）。先不接权限/fs（外部 agent 工具调用当前一律拒绝）。
+3. **ACP-PR3 — 权限接入**：`_BridgeClient.request_permission`（现 fail-safe 拒绝）→ `PermissionEngine` + `ApprovalBroker`（在途审批已落地）。
+4. **ACP-PR4 — fs 回调接入**：`read_text_file` / `write_text_file` → `LocalFilesystemBackend`。**已确认必要**（见下：adapter 确实把 Read/Write mock 成 ACP fs 回调）。
 
 ---
 
-## 待验证（验证 not 猜）
+## 待验证 → 已核实（验证 not 猜，2026-06 上网 + 装包 introspect）
 
-1. **Python ACP SDK 是否成熟**：官方列了 Python SDK，但包名/完成度待确认。若不堪用，自写薄 JSON-RPC stdio client（约 150 行）。
-2. **Claude Code adapter 是否回调 client 的 fs/permission**：还是全自己 owns。这是整个方案价值的关键变量——若它不回调 permission，Lumi 只能在「派活/收结果」粒度管控，管不到它内部每个工具调用。PR1 跑通后第一件事就验它。
-3. **委派默认 `cwd`**：跟随当前会话项目目录，还是每次让 `LumiAgent` 显式指定。
-4. **退路**：若验证发现 Claude Code 不回调 Lumi 权限——接受「只在任务边界管控」，还是切到裸 CLI/PTY 包装以拿回细粒度控制。
+1. **Python ACP SDK 成熟度** → ✅ **可用，已采用**：`agent-client-protocol`（PyPI，introspect 版本 0.10.1），提供 `Client`/`Agent` 基类、`spawn_agent_process` stdio、`acp.schema` Pydantic 类型、helper builders。**省掉自写 ~150 行 JSON-RPC**。`PROTOCOL_VERSION = 1`。
+2. **adapter 是否回调 client 的 fs/permission** → ✅ **会回调**：`claude-agent-acp` 把 Read/Write 工具 mock 成 ACP `fs/*` 回调走 client，权限走 `session/request_permission`（README: "Tool calls (with permission requests)"）。⚠️ 已知它**不尊重 `.claude/settings.json` 的 deny 规则**（[issue #94](https://github.com/zed-industries/claude-agent-acp/issues/94)）——反证「权限必须由 Lumi 侧 `PermissionEngine` 管控」的方案正确性，PR3/PR4 是真护栏而非锦上添花。
+3. **委派默认 `cwd`** → ✅ **已定：每次由 `LumiAgent` 显式指定**（`AcpClient.run(task, cwd)` 必传）。
+4. **退路**：adapter 既然回调 permission/fs，M1 走标准 ACP 即可拿到细粒度控制，无需退回裸 CLI/PTY。

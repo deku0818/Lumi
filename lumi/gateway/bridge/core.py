@@ -31,6 +31,7 @@ from lumi.agents.runtime.bg_tasks import current_thread_id, get_task_registry
 from lumi.agents.runtime.checkpoint import CheckpointInfo, FileCheckpointManager
 from lumi.agents.runtime.file_tracker import FileChangeTracker
 from lumi.agents.runtime.shell_session import get_shell_session_manager
+from lumi.agents.tools.providers.external_agent import LUMI_ACP_EVENT
 from lumi.agents.tools.providers.mcp import get_mcp_session_manager
 from lumi.gateway.bridge.approval import ApprovalEnricher
 from lumi.gateway.bridge.broker import LUMI_APPROVAL_EVENT, ApprovalBroker
@@ -48,6 +49,11 @@ if TYPE_CHECKING:
 
 # LangChain 框架注入的内部字段，不传递给 TUI 渲染
 _TOOL_INTERNAL_KEYS = frozenset({"tool_call_id", "runtime"})
+
+# 「委派型」工具：其执行期间派生的事件（进程内子代理流 / 外部 agent 的 ACP 回流）
+# 归属到该工具的子卡片。它们的 run_id 进 _active_agent_runs，供 _resolve_subagent_parent
+# 据祖先链算 parent_run_id。"agent"=进程内子代理，"delegate_to_claude"=ACP 外部 agent。
+_SUBAGENT_TOOLS = frozenset({"agent", "delegate_to_claude"})
 
 
 def build_skill_command_blocks(
@@ -481,15 +487,18 @@ class AgentBridge:
                                 run_id, parent_ids
                             )
 
-                            # agent 工具开始时记录 run_id（放在匹配之后，
-                            # 确保 agent 自身的 on_tool_start 不会自匹配）
-                            if kind == "on_tool_start" and event.get("name") == "agent":
+                            # 委派型工具开始时记录 run_id（放在匹配之后，
+                            # 确保工具自身的 on_tool_start 不会自匹配）
+                            if (
+                                kind == "on_tool_start"
+                                and event.get("name") in _SUBAGENT_TOOLS
+                            ):
                                 self._active_agent_runs.add(run_id)
 
-                            # agent 工具结束/出错时移除 run_id，避免残留影响后续匹配
+                            # 委派型工具结束/出错时移除 run_id，避免残留影响后续匹配
                             if (
                                 kind in ("on_tool_end", "on_tool_error")
-                                and event.get("name") == "agent"
+                                and event.get("name") in _SUBAGENT_TOOLS
                             ):
                                 self._active_agent_runs.discard(run_id)
 
@@ -563,7 +572,7 @@ class AgentBridge:
                                     args=args,
                                     tool_call_id=tool_call_id,
                                     parent_run_id=parent_id,
-                                    run_id=run_id if name == "agent" else "",
+                                    run_id=run_id if name in _SUBAGENT_TOOLS else "",
                                 )
 
                             elif kind == "on_tool_end":
@@ -593,7 +602,7 @@ class AgentBridge:
                                     output=str(output) if output else "",
                                     tool_call_id=tool_call_id,
                                     parent_run_id=parent_id,
-                                    run_id=run_id if name == "agent" else "",
+                                    run_id=run_id if name in _SUBAGENT_TOOLS else "",
                                 )
 
                             elif kind == "on_tool_error":
@@ -622,7 +631,7 @@ class AgentBridge:
                                     is_error=True,
                                     tool_call_id=tool_call_id,
                                     parent_run_id=parent_id,
-                                    run_id=run_id if name == "agent" else "",
+                                    run_id=run_id if name in _SUBAGENT_TOOLS else "",
                                 )
 
                             elif (
@@ -650,6 +659,19 @@ class AgentBridge:
                                 if aid:
                                     self._pending_approval_events[aid] = approval_evt
                                 yield approval_evt
+
+                            elif (
+                                kind == "on_custom_event"
+                                and event.get("name") == LUMI_ACP_EVENT
+                            ):
+                                # 外部 agent（ACP 委派）的 session/update 回流，映射成
+                                # 子卡片事件。parent_run_id 复用流式归属——白嫖 custom
+                                # event 自带的 parent_ids（delegate 工具 run_id 在活跃窗口内）。
+                                acp_evt = self._acp_event_to_bridge(
+                                    event.get("data", {}) or {}, parent_id
+                                )
+                                if acp_evt is not None:
+                                    yield acp_evt
                     finally:
                         # 清除 rewind 或恢复时设置的 checkpoint_id，
                         # 确保后续 aget_state 获取最新 checkpoint
@@ -727,6 +749,44 @@ class AgentBridge:
             (pid for pid in parent_ids if pid != run_id and pid in active),
             "",
         )
+
+    @staticmethod
+    def _acp_event_to_bridge(data: dict, parent_id: str) -> BridgeEvent | None:
+        """把归一化的 ACP 回流 payload（external_agent._normalize_acp_update）映射成 BridgeEvent。
+
+        kind 已在 agents 层归一化，此处只做 EventKind 映射；未知 kind 返回 None（跳过）。
+        parent_run_id 由调用方算好（delegate 工具的子卡片归属）。
+        """
+        kind = data.get("kind")
+        if kind == "message":
+            return BridgeEvent(
+                kind=EventKind.MESSAGE_DELTA,
+                text=data.get("text", ""),
+                parent_run_id=parent_id,
+            )
+        if kind == "thought":
+            return BridgeEvent(
+                kind=EventKind.THINKING_DELTA,
+                text=data.get("text", ""),
+                parent_run_id=parent_id,
+            )
+        if kind == "tool_start":
+            return BridgeEvent(
+                kind=EventKind.TOOL_START,
+                name=data.get("name", ""),
+                tool_call_id=data.get("tool_call_id", ""),
+                parent_run_id=parent_id,
+            )
+        if kind == "tool_complete":
+            return BridgeEvent(
+                kind=EventKind.TOOL_COMPLETE,
+                name=data.get("name", ""),
+                output=data.get("output", ""),
+                is_error=bool(data.get("is_error")),
+                tool_call_id=data.get("tool_call_id", ""),
+                parent_run_id=parent_id,
+            )
+        return None
 
     async def _turn_complete_event(self) -> BridgeEvent:
         """流结束后的收尾事件：从 state 末条 AI message 取完整 usage（含 cache 详情）。
