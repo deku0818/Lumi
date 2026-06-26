@@ -165,40 +165,66 @@ def load_agents(
 # ------------------------------------------------------------------
 
 
+def _load_skills_from_dir(directory: Path) -> dict[str, SkillConfig]:
+    """从目录中加载所有 ``<skill_name>/SKILL.md`` 为 SkillConfig。"""
+    result: dict[str, SkillConfig] = {}
+    if not directory.exists():
+        return result
+    for skill_dir in directory.iterdir():
+        skill_file = skill_dir / "SKILL.md"
+        if not skill_dir.is_dir() or not skill_file.exists():
+            continue
+        parsed = _parse_md_file(str(skill_file))
+        if parsed is None:
+            continue
+        result[parsed["name"]] = SkillConfig(
+            name=parsed["name"],
+            description=parsed["description"],
+            prompt=parsed["prompt"],
+        )
+    return result
+
+
 def load_skills(
     name: str | None = None,
     directory: str | None = None,
 ) -> list[SkillConfig]:
     """加载 Skill 配置。
 
+    加载优先级: 风格内置 skills → 用户 ``.lumi/skills/`` (同名覆盖)。
     目录结构: ``<skills_dir>/<skill_name>/SKILL.md``
 
     Args:
         name: 只返回指定名称的 skill。
-        directory: skill 根目录，默认从全局配置获取。
+        directory: 用户 skill 目录，默认从全局配置获取。
     """
-    base = Path(directory) if directory else Path(str(get_config().skills_dir))
-    if not base.exists():
-        return []
+    config = get_config()
+    merged: dict[str, SkillConfig] = {}
 
-    skills: list[SkillConfig] = []
-    for skill_dir in base.iterdir():
-        skill_file = skill_dir / "SKILL.md"
-        if not skill_dir.is_dir() or not skill_file.exists():
-            continue
+    # 1) 风格内置 skills（风格无 skills/ 目录时静默跳过）
+    style = config.active_style
+    from lumi.styles import get_style_skills_dir
 
-        parsed = _parse_md_file(str(skill_file))
-        if parsed is None:
-            continue
-
-        skills.append(
-            SkillConfig(
-                name=parsed["name"],
-                description=parsed["description"],
-                prompt=parsed["prompt"],
+    try:
+        merged = _load_skills_from_dir(get_style_skills_dir(style))
+        if merged:
+            logger.info(
+                f"从风格 '{style}' 加载了 {len(merged)} 个内置 skill: "
+                f"{', '.join(merged.keys())}"
             )
-        )
+    except ValueError:
+        pass  # 该风格无 skills/ 目录
 
+    # 2) 用户 skills（同名覆盖风格内置）
+    user_dir = Path(directory) if directory else config.skills_dir
+    for skill_name, skill_cfg in _load_skills_from_dir(user_dir).items():
+        if skill_name in merged:
+            logger.warning(
+                f"用户 skill '{skill_name}' 覆盖了风格 '{style}' 的内置同名 skill"
+            )
+        merged[skill_name] = skill_cfg
+
+    skills = list(merged.values())
     if name is not None:
         skills = [s for s in skills if s.name == name]
     return skills

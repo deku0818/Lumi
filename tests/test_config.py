@@ -100,20 +100,27 @@ def test_load_agents_filter_by_name(tmp_path):
     assert agents[0].name == "alpha"
 
 
-def test_load_skills_directory_format(tmp_path):
+def test_load_skills_directory_format(tmp_path, monkeypatch):
     skill_dir = tmp_path / "my-skill"
     skill_dir.mkdir()
     (skill_dir / "SKILL.md").write_text(
         "---\nname: my-skill\ndescription: A skill\n---\nDo something"
     )
+    # mock 掉风格内置 skills，只测试用户目录加载
+    empty_dir = tmp_path / "_empty_style"
+    empty_dir.mkdir()
+    monkeypatch.setattr("lumi.styles.get_style_skills_dir", lambda _: empty_dir)
     skills = load_skills(directory=str(tmp_path))
     assert len(skills) == 1
     assert skills[0].name == "my-skill"
     assert isinstance(skills[0], SkillConfig)
 
 
-def test_load_skills_missing_skill_md(tmp_path):
+def test_load_skills_missing_skill_md(tmp_path, monkeypatch):
     # 无 SKILL.md 的目录被跳过
     (tmp_path / "empty-skill").mkdir()
+    empty_dir = tmp_path / "_empty_style"
+    empty_dir.mkdir()
+    monkeypatch.setattr("lumi.styles.get_style_skills_dir", lambda _: empty_dir)
     skills = load_skills(directory=str(tmp_path))
     assert len(skills) == 0

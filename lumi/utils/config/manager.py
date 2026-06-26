@@ -40,7 +40,7 @@ class LumiConfig:
 
     @property
     def active_style(self) -> str:
-        """当前生效的风格名称。优先级：CLI override > config.yaml > "code" """
+        """当前生效的风格名称。优先级：CLI override > config.yaml > "default" """
         if self._style_override is not None:
             return self._style_override
         return self.config.style
@@ -157,10 +157,12 @@ class LumiConfig:
 
         加载顺序：先从 style 内置目录读取基础文件，
         再用用户 .lumi/prompts/ 下的同名文件覆盖。
-        每部分用对应的 XML 标签包裹。
+        各部分按顺序直接拼接（不做 XML 包裹）。
+        无内置 prompts 的风格（如 default）提示词全部来自 .lumi/prompts/；
+        若两处都没有，返回空串（以无系统提示词运行），不再 fail-loud。
 
         Raises:
-            ValueError: 未找到任何提示词配置
+            ValueError: 提示词文件存在但读取失败
         """
         from lumi.styles import get_style_prompts_dir
 
@@ -170,15 +172,17 @@ class LumiConfig:
         # 按 name 收集最终路径：style 内置 → 用户覆盖
         resolved: dict[str, Path] = {}
 
-        # 1. style 内置
+        # 1. style 内置（风格无 prompts/ 目录时跳过，提示词全部来自 .lumi/）
         try:
             style_dir = get_style_prompts_dir(style)
             for name in file_names:
                 path = style_dir / f"{name}.md"
                 if path.exists():
                     resolved[name] = path
-        except ValueError as e:
-            logger.warning(f"加载风格 '{style}' prompts 失败: {e}")
+        except ValueError:
+            logger.debug(
+                f"风格 '{style}' 无内置 prompts，提示词全部来自 .lumi/prompts/"
+            )
 
         # 2. 用户 .lumi/prompts/ 覆盖
         for name in file_names:
@@ -186,7 +190,7 @@ class LumiConfig:
             if user_path.exists():
                 resolved[name] = user_path
 
-        # 构建 XML 包裹的提示词
+        # 按 file_names 顺序直接拼接（不做 XML 包裹）
         parts: list[str] = []
         for name in file_names:
             path = resolved.get(name)
@@ -197,17 +201,16 @@ class LumiConfig:
             except (OSError, UnicodeDecodeError) as e:
                 raise ValueError(f"提示词文件读取失败: {path} ({e})") from e
             if content:
-                parts.append(f"<{name}>\n{content}\n</{name}>")
+                parts.append(content)
 
         if parts:
             logger.info(f"使用风格 '{style}' 的系统提示词")
             return "\n\n".join(parts)
 
-        raise ValueError(
-            f"未找到提示词配置（风格: {style}）。\n"
-            f"请在 lumi/styles/{style}/prompts/ 或 .lumi/prompts/ 中配置 "
-            "SOUL.md, GUARDRAILS.md, AGENTS.md。"
-        )
+        # 无内置 prompts 的风格（如 default）且用户未配置 .lumi/prompts/：
+        # 以空系统提示词运行（call_model 的 `if system_prompt:` 会跳过 SystemMessage）。
+        logger.info(f"风格 '{style}' 无提示词配置，以空系统提示词运行")
+        return ""
 
     def load_prompt(self, name: str) -> str | None:
         """加载自定义提示词

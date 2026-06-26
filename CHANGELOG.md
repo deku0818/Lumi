@@ -1,5 +1,15 @@
 # Changelog
 
+## [0.2.4] - 2026-06-26
+
+### Added
+- **新增 `default` 风格并设为默认风格** — `Config.style` 默认值 `code → default`。`default` **不内置提示词**，系统提示词全部来自用户 `.lumi/prompts/`；可内置 skill / agent（当前为空占位）。面向非编程场景，提示词完全由用户掌控
+- **风格统一支持内置 skill** — `load_skills` 重构为「风格内置 skills → 用户 `.lumi/skills/`（同名覆盖）」，与 `load_agents` 对称；新增 `get_style_skills_dir`。至此 prompts / agents / skills 三类资源加载优先级一致（用户覆盖内置）。详见 `docs/architecture/styles.md` / `docs/guides/styles.md`
+
+### Changed
+- **提示词组装去 XML 包裹** — `SOUL` / `GUARDRAILS` / `AGENTS` 三文件由原先的 `<SOUL>…</SOUL>` XML 标签包裹改为按序以 `\n\n` **直接拼接**，任一缺失即跳过该段（对所有风格生效）
+- **`load_system_prompt` 软化为不再 fail-loud** — 风格无内置 prompts 且用户未配置 `.lumi/prompts/` 时返回空串（agent 以无系统提示词运行，`call_model` 的 `if system_prompt:` 自动跳过空 `SystemMessage`），不再抛 `ValueError`；使 `default` 风格开箱即用、不崩
+
 ## [0.2.3] - 2026-06-26
 
 ### Added

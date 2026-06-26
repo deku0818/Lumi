@@ -42,7 +42,7 @@ uv pip install -e .
 创建 `.lumi/config.yaml` 文件：
 
 ```yaml
-style: code  # 内置风格：code
+style: code  # 内置风格：default（默认）/ code
 env:
   LLM_MODEL_NAME: gpt-4o
   OPENAI_API_KEY: sk-xxx
@@ -121,7 +121,7 @@ lumi --version
 
 ```yaml
 # 风格配置
-style: code  # 内置风格：code
+style: code  # 内置风格：default（默认）/ code
 
 # 环境变量
 env:

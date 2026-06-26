@@ -1,6 +1,6 @@
 """内置风格包
 
-每个子目录代表一种风格，包含 prompts/ 和 agents/ 子目录。
+每个子目录代表一种风格，可含 prompts/、agents/、skills/ 三类子目录（均可选）。
 """
 
 from pathlib import Path
@@ -33,6 +33,11 @@ def get_style_prompts_dir(name: str) -> Path:
 def get_style_agents_dir(name: str) -> Path:
     """获取指定风格的 agents 目录路径。"""
     return _get_style_subdir(name, "agents")
+
+
+def get_style_skills_dir(name: str) -> Path:
+    """获取指定风格的 skills 目录路径。"""
+    return _get_style_subdir(name, "skills")
 
 
 def list_styles() -> list[str]:
