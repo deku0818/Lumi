@@ -40,7 +40,7 @@ agents:
   max_tokens: 8192         # 模型输出最大 token 数
   recursion_limit: 5000    # Agent 最大执行轮次
   vision_mode: model       # 图片识别模式：model | tool
-  checkpoint: memory       # 检查点存储模式：memory | sqlite | postgres
+  checkpoint: sqlite       # 检查点存储模式：sqlite | memory | postgres
   postgres_uri: ""         # PostgreSQL 连接 URI（仅 checkpoint=postgres 时需要）
 ```
 
@@ -48,8 +48,8 @@ agents:
 
 | 值 | 说明 | 适用场景 |
 |---|---|---|
-| `memory` | 内存存储（默认），进程退出后丢失 | 开发调试、临时使用 |
-| `sqlite` | SQLite 文件持久化 | 单机部署、需要会话恢复（[`/resume`](slash-commands.md)） |
+| `sqlite` | SQLite 文件持久化（默认），跨重启保留 | 单机部署、需要会话恢复（[`/resume`](slash-commands.md)） |
+| `memory` | 内存存储，进程退出后丢失，且同进程内连接间互相隔离 | 开发调试、临时使用 |
 | `postgres` | PostgreSQL 持久化 | 多实例部署、生产环境 |
 
 ---

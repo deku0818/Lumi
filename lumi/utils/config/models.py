@@ -42,8 +42,8 @@ class AgentsConfig(BaseModel):
         description="图片识别模式：'model' - 使用模型多模态能力（默认）；'tool' - 将图片 URL 转为文本，通过工具识别",
     )
     checkpoint: CheckpointMode = Field(
-        default="memory",
-        description="检查点存储模式：'memory' - 内存存储（默认）；'sqlite' - SQLite 持久化存储；'postgres' - PostgreSQL 持久化存储",
+        default="sqlite",
+        description="检查点存储模式：'sqlite' - SQLite 持久化存储（默认）；'memory' - 内存存储（进程私有，每条连接互相隔离）；'postgres' - PostgreSQL 持久化存储",
     )
     postgres_uri: str = Field(
         default="",

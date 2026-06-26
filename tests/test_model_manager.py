@@ -28,6 +28,7 @@ def catalog(monkeypatch):
         "gpt-5.2": _entry("gpt-5.2", "effort", ("none", "low", "medium", "high")),
         "mimo-v2.5-pro": _entry("mimo-v2.5-pro", "toggle", (), True),
         "deepseek-v4-pro": _entry("deepseek-v4-pro", "effort", ("high", "max"), True),
+        "qwen3.6-plus": _entry("qwen3.6-plus", "toggle", (), True),
         "qwen3-max": _entry("qwen3-max", "none"),
     }
     monkeypatch.setattr("lumi.models.catalog._index", index)
@@ -118,4 +119,11 @@ def test_effort_toggle_on_off(catalog):
     # effort+toggle 并存的 off 同样走 toggle 写法
     assert effort_params("deepseek-v4-pro", "off") == {
         "extra_body": {"thinking": {"type": "disabled"}}
+    }
+    # Qwen（DashScope）方言：扁平 enable_thinking 布尔，而非 thinking.type
+    assert effort_params("qwen3.6-plus", "off") == {
+        "extra_body": {"enable_thinking": False}
+    }
+    assert effort_params("qwen3.6-plus", "on") == {
+        "extra_body": {"enable_thinking": True}
     }

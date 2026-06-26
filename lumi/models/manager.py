@@ -108,8 +108,8 @@ def effort_params(model_name: str, level: str) -> dict:
       display=summarized 否则拿不到思考文本；off → 不传（API 默认不思考）
     - openai effort 型：auto → 不传（模型默认）；档位 → reasoning_effort
       原样透传（含 none/xhigh），钉死 use_responses_api=False 防隐式路由
-    - toggle 的 on/off：方言写法 thinking enabled/disabled（DeepSeek 系
-      通行，MiMo 实测有效；遇到不同方言再加分支）
+    - toggle 的 on/off：按厂商方言分支——Qwen（DashScope/百炼）用扁平
+      enable_thinking 布尔；DeepSeek / MiMo 系用 thinking.type enabled/disabled
     """
     allowed = allowed_levels(model_name)
     if level != "auto" and level not in allowed:
@@ -131,7 +131,12 @@ def effort_params(model_name: str, level: str) -> dict:
     if level == "auto":
         return {}
     if level in ("on", "off"):
-        state = "enabled" if level == "on" else "disabled"
+        enabled = level == "on"
+        # Qwen3（DashScope/百炼）方言：扁平 enable_thinking 布尔；其余（DeepSeek/MiMo）
+        # 走 thinking.type。错误码 InternalError.Algo.* 即 DashScope。
+        if "qwen" in model_name.lower():
+            return {"extra_body": {"enable_thinking": enabled}}
+        state = "enabled" if enabled else "disabled"
         return {"extra_body": {"thinking": {"type": state}}}
     return {"reasoning_effort": level, "use_responses_api": False}
 
@@ -140,6 +145,7 @@ def create_llm(
     model_name: str | None = None,
     use_cache: bool = True,
     apply_effort: bool = False,
+    force_no_thinking: bool = False,
     **llm_params,
 ) -> ChatAnthropic | ChatOpenAI:
     """创建 LLM 实例（同参数命中缓存）。
@@ -151,6 +157,10 @@ def create_llm(
     思考档位注入是显式 opt-in（apply_effort=True，仅主对话链使用）：
     默认不注入任何思考参数——摘要、结构化提取、连通性测试等内部链
     保持干净，无需各自对冲。
+    force_no_thinking=True 则主动**关闭**思考（注入 off 档位）：强制
+    tool_choice 的链（结构化输出 / 受迫工具调用）与思考模式不兼容，对
+    默认常开思考的模型（如 qwen toggle 型）必须显式关闭，仅「不注入」不够。
+    catalog 门控天然安全——无思考能力 / Anthropic 默认不思考的模型 off 即 {}。
     参数优先级：config.yaml llm_params < effort 档位 < 调用方 llm_params；
     无内置调参默认，未指定的参数交给 SDK 默认值。
     """
@@ -171,7 +181,12 @@ def create_llm(
 
     protocol = detect_protocol(model_name)
     config_params = get_config().config.llm_params.get_params_for_model_type(protocol)
-    level_params = effort_params(model_name, level) if apply_effort else {}
+    if apply_effort:
+        level_params = effort_params(model_name, level)
+    elif force_no_thinking:
+        level_params = effort_params(model_name, "off")
+    else:
+        level_params = {}
     final_params = {
         **config_params,
         **level_params,

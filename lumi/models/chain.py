@@ -104,9 +104,14 @@ def structured_output(
     Returns:
         chain: 结构化输出链
     """
-    # 内部链不注入思考档位（create_llm 默认 apply_effort=False），
-    # 与 structured_output 的冲突自然不存在
-    llm = create_llm(model_name=model_name, use_cache=use_cache, **llm_params)
+    # 结构化输出走 with_structured_output（function_calling）会强制 tool_choice，
+    # 与思考模式不兼容（默认常开思考的模型如 qwen toggle 型会 400）——主动关闭思考。
+    llm = create_llm(
+        model_name=model_name,
+        use_cache=use_cache,
+        force_no_thinking=True,
+        **llm_params,
+    )
 
     messages = []
     if system_prompt:
@@ -155,14 +160,18 @@ def tool_call_chain(
     default_llm_params = {"streaming": True}
     default_llm_params.update(llm_params)
 
-    # 强制 tool_choice 与思考不兼容（Anthropic 直接 400），此时不注入档位
-    if tool_choice is not None:
+    # 强制 tool_choice 与思考不兼容：Anthropic 直接 400，默认常开思考的模型
+    # （qwen toggle 型）报「tool_choice 不支持 required/object in thinking mode」。
+    # 仅「不注入档位」对默认常开思考的模型不够，须主动关闭。
+    force_no_thinking = tool_choice is not None
+    if force_no_thinking:
         apply_effort = False
 
     llm = create_llm(
         model_name=model_name,
         use_cache=use_cache,
         apply_effort=apply_effort,
+        force_no_thinking=force_no_thinking,
         **default_llm_params,
     )
 

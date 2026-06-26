@@ -138,7 +138,7 @@ agents:
   max_tokens: 8192
   recursion_limit: 5000
   vision_mode: model  # 图片识别模式：model | tool
-  checkpoint: memory  # 检查点存储：memory | sqlite | postgres
+  checkpoint: sqlite  # 检查点存储：sqlite | memory | postgres
   postgres_uri: ""  # PostgreSQL 连接 URI
 
 # Token 配置
@@ -440,8 +440,8 @@ env:
 
 | 模式 | 说明 | 适用场景 |
 |------|------|----------|
-| `memory` | 内存存储（默认） | 开发调试、临时使用 |
-| `sqlite` | SQLite 文件持久化 | 单机部署、需要会话恢复 |
+| `sqlite` | SQLite 文件持久化（默认） | 单机部署、需要会话恢复 |
+| `memory` | 内存存储（进程私有，连接间隔离） | 开发调试、临时使用 |
 | `postgres` | PostgreSQL 持久化 | 多实例部署、生产环境 |
 
 **SQLite 配置示例：**

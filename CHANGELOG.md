@@ -1,5 +1,16 @@
 # Changelog
 
+## [0.2.6] - 2026-06-26
+
+### Fixed
+- **Qwen 思考模式下强制 tool_choice 报 400 修复** — `auto` 审批分类器及所有结构化内部链（`structured_output` / 受迫 `tool_call_chain`）走 `function_calling` 会强制 `tool_choice`，与「默认常开思考」的模型（Qwen toggle 型经 DashScope/百炼）不兼容，报 `InternalError.Algo.InvalidParameter: tool_choice ... not support ... in thinking mode`，分类器 fail-closed 退回人工审批。修复分两处：① `create_llm` 新增 `force_no_thinking` 入参，对强制 tool_choice 的链主动**关闭**思考（仅「不注入档位」对常开思考模型不够）；② `effort_params` 的 toggle 关思考按厂商分方言——Qwen 用扁平 `enable_thinking` 布尔（DashScope 实测），DeepSeek / MiMo 系沿用 `thinking.type`
+
+### Changed
+- **检查点默认存储 `memory` → `sqlite`** — `AgentsConfig.checkpoint` 默认改为 SQLite 文件持久化，会话跨重启保留、开箱即用 `/resume`；`memory` 保留为进程私有（连接间隔离）的开发调试选项。详见 `docs/guides/config.md`
+
+### Build
+- **新增多架构镜像构建脚本** — `scripts/build-image.sh` 用 buildx 一键构建 amd64 + arm64 Lumi 后端镜像并推送（版本号取自 `pyproject.toml`，可覆盖；`IMAGE` / `BUILDER` / `PLATFORMS` 可环境变量覆盖）
+
 ## [0.2.5] - 2026-06-26
 
 ### Changed
