@@ -1,0 +1,386 @@
+import { useCallback, useEffect, useState } from 'react'
+import { ArrowLeft, Check, Loader2, Plus, Send, Building2, X } from 'lucide-react'
+import type { ChannelInfo, FeishuConfig } from '../types'
+import type { Gateway } from '../gateway'
+import { MachineTabs } from './MachineTabs'
+import { Button } from '@/components/ui/button'
+import { Switch } from '@/components/ui/switch'
+
+type TestState = 'idle' | 'testing' | { ok: boolean; error?: string; bot_name?: string }
+
+const STATUS_LABEL: Record<string, string> = {
+  off: '未启用',
+  stopped: '已停止',
+  connecting: '连接中',
+  connected: '已连接',
+  error: '连接失败',
+}
+
+const emptyFeishu = (): FeishuConfig => ({
+  enabled: false,
+  app_id: '',
+  app_secret: '',
+  allow_from: ['*'],
+  group_policy: 'mention',
+  tool_mode: 'auto',
+  workspace: '',
+})
+
+// 渠道面板（设置 → 渠道）。列表视图：各 IM 渠道卡片（状态灯 + 开关 + 编辑）；
+// 表单视图：飞书配置（凭证 / 审批模式 / 群策略 / 白名单）。配置存后端 ~/.lumi/channels.json，
+// 保存即实时停旧起新。
+export function ChannelsPanel({
+  machines,
+  gwFor,
+}: {
+  machines: { id: string; name: string }[]
+  gwFor: (id: string) => Gateway | undefined
+}) {
+  const [machine, setMachine] = useState('local')
+  const [list, setList] = useState<ChannelInfo[]>([])
+  const [editing, setEditing] = useState<FeishuConfig | null>(null) // null = 列表视图
+
+  const gw = gwFor(machine)
+  const reload = useCallback(() => {
+    gwFor(machine)
+      ?.getChannels()
+      .then((r) => setList(r.channels ?? []))
+      .catch(() => setList([]))
+  }, [gwFor, machine])
+
+  useEffect(() => {
+    reload()
+  }, [reload])
+
+  const feishu = list.find((c) => c.name === 'feishu')
+
+  const save = (config: FeishuConfig) =>
+    gw
+      ?.saveChannel('feishu', config)
+      .then((r) => {
+        setList(r.channels ?? [])
+        setEditing(null)
+      })
+      .catch(() => {})
+
+  // 列表开关：仅翻转 enabled 立即保存（凭证编辑走表单）
+  const toggleEnabled = (on: boolean) => {
+    const cfg = feishu?.config ?? emptyFeishu()
+    save({ ...cfg, enabled: on })
+  }
+
+  if (editing) {
+    return (
+      <FeishuForm
+        initial={editing}
+        onCancel={() => setEditing(null)}
+        onSave={save}
+        onTest={(cfg) =>
+          gw?.testChannel('feishu', cfg) ?? Promise.resolve({ ok: false, error: '未连接' })
+        }
+      />
+    )
+  }
+
+  return (
+    <div>
+      <div className="flex items-center justify-between mb-4">
+        <h3 className="text-base font-medium">渠道</h3>
+        <MachineTabs machines={machines} value={machine} onChange={setMachine} />
+      </div>
+      <p className="text-xs text-muted-foreground mb-5">
+        把 Lumi 接入飞书等 IM。凭证存该机器的 <code>~/.lumi/channels.json</code>（限本人可读），
+        保存后实时重连。全程 AI 审批，仅保留 ask 询问卡片。
+      </p>
+
+      {/* 飞书 */}
+      <ChannelCard
+        icon={<Send size={17} />}
+        title="飞书"
+        status={feishu?.status}
+        enabled={!!feishu?.enabled}
+        subtitle={feishuSubtitle(feishu)}
+        onToggle={toggleEnabled}
+        onEdit={() => setEditing(feishu?.config ?? emptyFeishu())}
+      />
+
+      {/* 企业微信（即将支持） */}
+      <div className="flex items-center gap-3 px-4 py-3.5 rounded-lg border border-line/40 mb-2.5 opacity-55">
+        <div className="grid place-items-center w-9 h-9 rounded-lg bg-surface border border-line text-muted-foreground">
+          <Building2 size={17} />
+        </div>
+        <div className="flex-1 min-w-0">
+          <div className="font-medium">企业微信</div>
+          <div className="text-[11px] text-muted-foreground mt-0.5">即将支持</div>
+        </div>
+        <span className="text-[10.5px] px-2 py-0.5 rounded-full border border-separator text-muted-foreground">
+          即将支持
+        </span>
+      </div>
+    </div>
+  )
+}
+
+function feishuSubtitle(c?: ChannelInfo): string {
+  if (!c?.enabled) return '未启用'
+  const mode = c.config.tool_mode === 'auto' ? 'AI 审批' : '特权放行'
+  const who = c.config.allow_from.includes('*') ? '所有人可用' : `${c.config.allow_from.length} 人白名单`
+  return `${mode} · ${who}`
+}
+
+function ChannelCard({
+  icon,
+  title,
+  status,
+  enabled,
+  subtitle,
+  onToggle,
+  onEdit,
+}: {
+  icon: React.ReactNode
+  title: string
+  status?: { state: string; detail: string }
+  enabled: boolean
+  subtitle: string
+  onToggle: (on: boolean) => void
+  onEdit: () => void
+}) {
+  const state = status?.state ?? 'off'
+  // error 态用后端给的具体原因（缺凭证 / 未装 lark…）替代泛化副标题
+  const sub = state === 'error' && status?.detail ? status.detail : subtitle
+  return (
+    <div className="flex items-center gap-3 px-4 py-3.5 rounded-lg border border-line bg-panel mb-2.5">
+      <div className="grid place-items-center w-9 h-9 rounded-lg bg-surface border border-line text-ink">
+        {icon}
+      </div>
+      <div className="flex-1 min-w-0">
+        <div className="font-medium flex items-center gap-2">
+          {title}
+          <span className={`chan-orb ${state}`} title={STATUS_LABEL[state]} />
+          <span className="text-[11px] text-muted-foreground font-normal">{STATUS_LABEL[state]}</span>
+        </div>
+        <div
+          className={`text-[11px] mt-0.5 truncate ${state === 'error' ? 'text-[var(--color-error)]' : 'text-muted-foreground'}`}
+        >
+          {sub}
+        </div>
+      </div>
+      <Switch checked={enabled} onCheckedChange={onToggle} />
+      <Button variant="ghost" size="sm" onClick={onEdit} className="text-muted-foreground">
+        编辑
+      </Button>
+    </div>
+  )
+}
+
+function FeishuForm({
+  initial,
+  onCancel,
+  onSave,
+  onTest,
+}: {
+  initial: FeishuConfig
+  onCancel: () => void
+  onSave: (cfg: FeishuConfig) => void
+  onTest: (cfg: FeishuConfig) => Promise<{ ok: boolean; error?: string; bot_name?: string }>
+}) {
+  const [cfg, setCfg] = useState<FeishuConfig>(initial)
+  const [test, setTest] = useState<TestState>('idle')
+  const set = (patch: Partial<FeishuConfig>) => setCfg((c) => ({ ...c, ...patch }))
+
+  const runTest = () => {
+    setTest('testing')
+    onTest(cfg)
+      .then((r) => setTest(r))
+      .catch(() => setTest({ ok: false, error: '测试失败' }))
+  }
+
+  const allowAll = cfg.allow_from.includes('*')
+
+  return (
+    <div>
+      <button
+        onClick={onCancel}
+        className="flex items-center gap-2 text-base font-medium text-ink/90 hover:text-ink transition mb-5"
+      >
+        <ArrowLeft size={17} className="shrink-0" />
+        飞书配置
+      </button>
+
+      <div className="space-y-4">
+        <Field label="App ID" value={cfg.app_id} onChange={(v) => set({ app_id: v })} placeholder="cli_…" hint="支持 ${FEISHU_APP_ID} 引用环境变量" />
+        <Field label="App Secret" value={cfg.app_secret} onChange={(v) => set({ app_secret: v })} placeholder="●●●●" password hint="chmod 600 存 ~/.lumi/channels.json，不写入项目目录" />
+
+        <Labeled label="工具审批模式" hint="两种模式下泄漏的人工审批一律自动拒绝；仅保留 ask 询问卡片">
+          <Seg
+            value={cfg.tool_mode}
+            onChange={(v) => set({ tool_mode: v as FeishuConfig['tool_mode'] })}
+            options={[
+              { val: 'auto', label: 'AI 审批' },
+              { val: 'privileged', label: '特权放行' },
+            ]}
+          />
+        </Labeled>
+
+        <Labeled label="群消息策略">
+          <Seg
+            value={cfg.group_policy}
+            onChange={(v) => set({ group_policy: v as FeishuConfig['group_policy'] })}
+            options={[
+              { val: 'mention', label: '@我才回' },
+              { val: 'open', label: '响应全部' },
+            ]}
+          />
+        </Labeled>
+
+        <Labeled label="可用成员（白名单）" hint={allowAll ? '所有人可用' : '仅列表内 open_id 可用；为空 = 全部拒绝'}>
+          <div>
+            <Seg
+              value={allowAll ? 'all' : 'list'}
+              onChange={(v) => set({ allow_from: v === 'all' ? ['*'] : [] })}
+              options={[
+                { val: 'all', label: '所有人' },
+                { val: 'list', label: '指定成员' },
+              ]}
+            />
+            {!allowAll && (
+              <ChipEditor values={cfg.allow_from} onChange={(vals) => set({ allow_from: vals })} />
+            )}
+          </div>
+        </Labeled>
+
+        <Field label="项目目录（可选）" value={cfg.workspace} onChange={(v) => set({ workspace: v })} placeholder="留空 = serve 进程当前目录" />
+      </div>
+
+      <div className="flex items-center gap-3 mt-6 pt-4 border-t border-line/30">
+        <Button onClick={() => onSave(cfg)}>保存并重连</Button>
+        <Button variant="ghost" onClick={runTest} disabled={test === 'testing'}>
+          测试连接
+        </Button>
+        <TestBadge test={test} />
+      </div>
+    </div>
+  )
+}
+
+function TestBadge({ test }: { test: TestState }) {
+  if (test === 'idle') return null
+  if (test === 'testing')
+    return (
+      <span className="flex items-center gap-1.5 text-xs text-muted-foreground">
+        <Loader2 size={13} className="animate-spin" /> 正在验证凭证…
+      </span>
+    )
+  if (test.ok)
+    return (
+      <span className="flex items-center gap-1.5 text-xs text-[var(--color-success)]">
+        <Check size={13} /> 连接成功{test.bot_name ? ` · ${test.bot_name}` : ''}
+      </span>
+    )
+  return (
+    <span className="flex items-center gap-1.5 text-xs text-[var(--color-error)]">
+      <X size={13} /> {test.error || '连接失败'}
+    </span>
+  )
+}
+
+// —— 小控件 ——
+function Labeled({ label, hint, children }: { label: string; hint?: string; children: React.ReactNode }) {
+  return (
+    <div>
+      <div className="text-xs text-muted-foreground mb-1.5">{label}</div>
+      {children}
+      {hint && <div className="text-[11px] text-muted-foreground mt-1.5">{hint}</div>}
+    </div>
+  )
+}
+
+function Field({
+  label,
+  value,
+  onChange,
+  placeholder,
+  password,
+  hint,
+}: {
+  label: string
+  value: string
+  onChange: (v: string) => void
+  placeholder?: string
+  password?: boolean
+  hint?: string
+}) {
+  return (
+    <Labeled label={label} hint={hint}>
+      <input
+        type={password ? 'password' : 'text'}
+        value={value}
+        placeholder={placeholder}
+        onChange={(e) => onChange(e.target.value)}
+        className="w-full bg-surface border border-line rounded-lg px-3 py-2 text-sm text-ink outline-none focus:border-primary focus:ring-2 focus:ring-primary/20 transition"
+      />
+    </Labeled>
+  )
+}
+
+function Seg<T extends string>({
+  value,
+  onChange,
+  options,
+}: {
+  value: string
+  onChange: (v: T) => void
+  options: { val: T; label: string }[]
+}) {
+  return (
+    <div className="inline-flex p-0.5 rounded-lg bg-canvas/60 border border-line/40">
+      {options.map((o) => {
+        const on = o.val === value
+        return (
+          <button
+            key={o.val}
+            onClick={() => onChange(o.val)}
+            className={`px-3 py-1.5 rounded-md text-sm transition ${
+              on ? 'bg-surface text-ink shadow-sm font-medium' : 'text-muted-foreground hover:text-ink'
+            }`}
+          >
+            {o.label}
+          </button>
+        )
+      })}
+    </div>
+  )
+}
+
+function ChipEditor({ values, onChange }: { values: string[]; onChange: (v: string[]) => void }) {
+  const [draft, setDraft] = useState('')
+  const add = () => {
+    const v = draft.trim()
+    if (v && !values.includes(v)) onChange([...values, v])
+    setDraft('')
+  }
+  return (
+    <div className="flex flex-wrap items-center gap-1.5 mt-2">
+      {values.map((v) => (
+        <span key={v} className="inline-flex items-center gap-1.5 bg-surface border border-line rounded-full px-2.5 py-1 text-xs">
+          {v}
+          <button onClick={() => onChange(values.filter((x) => x !== v))} className="text-muted-foreground hover:text-ink">
+            <X size={11} />
+          </button>
+        </span>
+      ))}
+      <span className="inline-flex items-center gap-1 bg-surface border border-dashed border-line rounded-full px-2 py-1">
+        <input
+          value={draft}
+          onChange={(e) => setDraft(e.target.value)}
+          onKeyDown={(e) => e.key === 'Enter' && add()}
+          placeholder="open_id"
+          className="bg-transparent outline-none text-xs w-24 text-ink"
+        />
+        <button onClick={add} className="text-muted-foreground hover:text-ink">
+          <Plus size={12} />
+        </button>
+      </span>
+    </div>
+  )
+}

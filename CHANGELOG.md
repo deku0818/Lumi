@@ -1,5 +1,15 @@
 # Changelog
 
+## [0.2.3] - 2026-06-26
+
+### Added
+- **飞书（Lark）IM channel——首个 IM 接入** — 把 Lumi Agent 接到飞书机器人，私聊 / 群 @ 即可对话，复用与 desktop 完全相同的 Agent 运行时（`bridge.stream_response` 产 `BridgeEvent` 流）。lark-oapi **长连接**（无需公网 webhook），跑在独立 daemon 线程 + 独立 event loop（`patch lark_oapi.ws.client.loop` 与 uvicorn 主 loop 隔离），入站经 `run_coroutine_threadsafe` 投回主 loop。每个 chat → 一个常驻会话 thread（`feishu-{chat_id}`）+ `AgentBridge` + 运行锁（`BridgePool`）。回复用 **CardKit 打字机卡片**（`Throttle` 双阈值 250ms/64字 + `UpdateQueue` 合并 + 失效换卡 + 工具忙碌 spinner）。作为可选依赖 `uv sync --extra feishu`。详见 `docs/architecture/feishu.md` / `docs/guides/feishu.md`
+- **桌面端「设置 → 渠道」UI 配置** — `ChannelsPanel` 渠道卡片列表 + 飞书表单（凭证 / 审批模式 / 群策略 / 白名单 / 工作区 + 测试连接 + 保存并重连）。配置存 serve 机器的 `~/.lumi/channels.json`（含密钥 chmod 600，照抄 `provider_store` 范式），`${ENV}` 注入；保存经 `save_channel` RPC 实时停旧起新，无需重启。状态灯走品牌「光」语言（`.chan-orb`，error 态显示具体失败原因）。新增 RPC `get_channels` / `save_channel` / `test_channel`（照抄 `cron_rpc` 进程级分发 + 协议契约）
+- **进程级 `ChannelManager`** — `lumi serve` lifespan 经 `channels_runtime()` 起它；拥有跨「传输重连」存活的会话池（改凭证/拨开关只重启 WS、不清空进行中的会话），`reload()` 由 `_reload_lock` 串行化、停旧起新
+- **入站媒体支持** — 图片（含被回复消息的图、post 内嵌图）→ 走仓库统一压缩管线（5MB/2000px + token 预算）→ base64 多模态 block，与 desktop 发图同构；文件 → 下载到 `/tmp/lumi-feishu/<thread>/` + `add_folder` 授权 + `<attached-file>` 注入供 `read`（PDF 渲染）
+- **忙时排队 + 多条合并** — 同会话上一轮在跑时新消息排队（上限 10，满则丢弃提示），跑完把积压的合并成一轮（`<system-reminder>` + 编号列表，告知 agent 这是连发的几条、后面的可能更正前面），媒体并发下载
+- **`AgentBridge.initialize(disabled_tools=…)`** — 透传到 `create_agent(tools=get_tools(disabled_tools=…))`，飞书会话默认禁用 `ask` 工具（IM 不弹询问卡片，遇需澄清时模型自行判断而非挂起）
+
 ## [0.2.2] - 2026-06-25
 
 ### Changed

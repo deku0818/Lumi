@@ -65,6 +65,9 @@
     "list_bg_tasks": { "params": [], "result": ["tasks"], "note": "后台任务全量快照（bash/agent/workflow），前端按当前 thread_id 过滤；亦经 bg_tasks.update 事件实时推送" },
     "stop_bg_task": { "params": ["task_id"], "result": ["stopped", "error?"], "note": "停止运行中的后台任务（drawer 详情停止按钮）" },
     "dismiss_bg_task": { "params": ["task_id"], "result": ["dismissed"], "note": "从列表移除一个终态后台任务；运行中不可移除" },
-    "clear_finished_bg_tasks": { "params": [], "result": ["cleared"], "note": "清除当前会话全部终态后台任务，返回移除数" }
+    "clear_finished_bg_tasks": { "params": [], "result": ["cleared"], "note": "清除当前会话全部终态后台任务，返回移除数" },
+    "get_channels": { "params": [], "result": ["channels"], "note": "IM channel（飞书等）配置 + 运行状态列表；channel 含 name/enabled/config/status，status.state ∈ off|stopped|connecting|connected|error" },
+    "save_channel": { "params": ["name", "config"], "result": ["channels"], "note": "保存 channel 配置到 ~/.lumi/channels.json（密钥 chmod 600）并实时停旧起新，返回更新后的列表" },
+    "test_channel": { "params": ["name", "config"], "result": ["ok", "error?", "bot_name?"], "note": "用给定凭证临时验证连通性，不影响运行中的 channel" }
   }
 }

@@ -363,6 +363,30 @@ body.resizing-col * {
 .lumi-orb-idle::before { animation: none; opacity: 0; }
 .lumi-orb-idle::after { animation: none; opacity: 0.75; }
 
+/* ── 渠道连接状态灯（设置→渠道）：小号光点，复用「光」语言；图标动、文字静 ── */
+.chan-orb { width: 9px; height: 9px; border-radius: 50%; flex: none; position: relative; }
+.chan-orb.off { background: var(--color-accent-dim); }
+.chan-orb.stopped { background: var(--color-muted); }
+.chan-orb.connecting {
+  background: var(--color-accent);
+  box-shadow: 0 0 7px color-mix(in srgb, var(--color-accent) 60%, transparent);
+  animation: lumi-breathe 1.5s ease-in-out infinite;
+}
+.chan-orb.connected {
+  background: var(--color-accent);
+  box-shadow: 0 0 8px color-mix(in srgb, var(--color-accent) 70%, transparent),
+    0 0 16px color-mix(in srgb, var(--color-accent) 35%, transparent);
+}
+.chan-orb.connected::after {
+  content: ''; position: absolute; inset: -4px; border-radius: 50%;
+  box-shadow: 0 0 12px 2px color-mix(in srgb, var(--color-accent) 30%, transparent);
+  animation: lumi-breathe 3.2s ease-in-out infinite;
+}
+.chan-orb.error {
+  background: var(--color-error);
+  box-shadow: 0 0 8px color-mix(in srgb, var(--color-error) 55%, transparent);
+}
+
 /* ── 子代理卡片：运行中的有限工具窗口，新行从底部推入、旧行被挤出时向上淡出收起 ── */
 @keyframes subtool-in { from { opacity: 0; transform: translateY(6px); } to { opacity: 1; transform: none; } }
 @keyframes subtool-out {

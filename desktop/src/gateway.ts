@@ -3,9 +3,11 @@
 import type {
   ActiveModel,
   BgTask,
+  ChannelInfo,
   Classifier,
   CronJob,
   CronRun,
+  FeishuConfig,
   HistoryItem,
   Project,
   ProviderProfile,
@@ -220,6 +222,25 @@ export class Gateway {
       profiles: ProviderProfile[]
       active: ActiveModel
     }>('delete_provider', { id })
+  }
+
+  // —— IM 渠道（飞书等）：配置存后端 ~/.lumi/channels.json，保存即实时重连 ——
+  getChannels(): Promise<{ channels: ChannelInfo[] }> {
+    return this.request<{ channels: ChannelInfo[] }>('get_channels')
+  }
+
+  saveChannel(name: string, config: Partial<FeishuConfig>): Promise<{ channels: ChannelInfo[] }> {
+    return this.request<{ channels: ChannelInfo[] }>('save_channel', { name, config })
+  }
+
+  testChannel(
+    name: string,
+    config: Partial<FeishuConfig>,
+  ): Promise<{ ok: boolean; error?: string; bot_name?: string }> {
+    return this.request<{ ok: boolean; error?: string; bot_name?: string }>('test_channel', {
+      name,
+      config,
+    })
   }
 
   setWorkspace(path: string): Promise<{ workspace: string }> {

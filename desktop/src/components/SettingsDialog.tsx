@@ -1,9 +1,10 @@
-import { SlidersHorizontal, Boxes, Server, Monitor, Sun, Moon, Minus, Plus, type LucideIcon } from 'lucide-react'
+import { SlidersHorizontal, Boxes, Server, Send, Monitor, Sun, Moon, Minus, Plus, type LucideIcon } from 'lucide-react'
 import type { Gateway } from '../gateway'
 import type { ThemePref } from '../theme'
 import { type FontPref, DEFAULT_SIZE, MIN_SIZE, MAX_SIZE } from '../font'
 import { useI18n } from '../i18n'
 import { ProvidersPanel } from './ProvidersPanel'
+import { ChannelsPanel } from './ChannelsPanel'
 import { BackendsPanel } from './BackendsPanel'
 import { FontPicker } from './FontPicker'
 import { Switch } from '@/components/ui/switch'
@@ -66,6 +67,10 @@ export function SettingsDialog({
               <Boxes />
               {t('settings.models')}
             </TabsTrigger>
+            <TabsTrigger value="channels" className={navClass}>
+              <Send />
+              {t('settings.channels')}
+            </TabsTrigger>
             <TabsTrigger value="connections" className={navClass}>
               <Server />
               {t('settings.connections')}
@@ -86,6 +91,9 @@ export function SettingsDialog({
           </TabsContent>
           <TabsContent value="models" className="flex-1 min-w-0 overflow-auto px-6 pb-6 pt-12 mt-0">
             <ProvidersPanel machines={machines} gwFor={gwFor} onChanged={onProvidersChanged} />
+          </TabsContent>
+          <TabsContent value="channels" className="flex-1 min-w-0 overflow-auto px-6 pb-6 pt-12 mt-0">
+            <ChannelsPanel machines={machines} gwFor={gwFor} />
           </TabsContent>
           <TabsContent value="connections" className="flex-1 min-w-0 overflow-auto px-6 pb-6 pt-12 mt-0">
             <BackendsPanel />

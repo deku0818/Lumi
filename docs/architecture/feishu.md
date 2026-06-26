@@ -1,0 +1,143 @@
+# 飞书 Channel 架构
+
+飞书（Lark）IM channel 的内部实现——把 Lumi Agent 接到飞书机器人，私聊 / 群 @ 即可对话。
+用户使用指南见 [`docs/guides/feishu.md`](../guides/feishu.md)。是首个 IM channel，设计可延伸到
+企业微信等（gateway 层的 channel 中立化见 [`refactor-plan.md`](./refactor-plan.md)）。
+
+---
+
+## 架构总览
+
+```
+飞书开放平台
+   │  wss://msg-frontier.feishu.cn/ws/v2  (lark-oapi 长连接，无需公网 webhook)
+   ▼
+┌──────────────────────── lumi serve 进程 ────────────────────────┐
+│  FeishuChannel (channel.py)                                     │
+│   ├─ lark ws.Client.start()  ← 独立 daemon 线程 + 独立 event loop │
+│   │    入站事件 ──run_coroutine_threadsafe──▶ 主事件循环         │
+│   ├─ FeishuInbound (inbound.py)   解析/去重/白名单/群策略/媒体/排队 │
+│   ├─ FeishuStreaming (streaming.py)  CardKit 打字机卡片           │
+│   └─ BridgePool (bridge_pool.py)  每 chat 一个常驻 AgentBridge    │
+│                                                                 │
+│  ChannelManager (manager.py)  进程级单例：起停 channel、拥有会话池 │
+│  channel_rpc.py  get/save/test_channel ← desktop 经 WS RPC 调   │
+│  store.py  ~/.lumi/channels.json (chmod 600)                    │
+└─────────────────────────────────────────────────────────────────┘
+```
+
+每个飞书 chat（私聊 / 群）→ 一个常驻会话 `thread_id = sanitize_thread_id(f"feishu-{chat_id}")`
+→ 一个 `AgentBridge`，复用与 desktop 完全相同的 Agent 运行时（`stream_response` 产 `BridgeEvent`
+流）。飞书侧只做「传输适配 + 事件折叠成卡片」，不碰 bridge / graph。
+
+## 传输层（lark WS）
+
+lark `ws.Client.start()` **阻塞**在 `run_until_complete(_select())`，且模块级抓
+`asyncio.get_event_loop()`。故跑在**独立 daemon 线程 + 独立 event loop**，并 `patch
+lark_oapi.ws.client.loop`，与 uvicorn 主 loop 隔离。入站回调在 WS 线程触发，经
+`run_coroutine_threadsafe(on_message, main_loop)` 投回主 loop 喂 bridge。
+
+**停止**：lark 无公开 stop（`auto_reconnect` 默认开，仅置 `_running=False` 它永不返回 →
+每次 reload 泄漏线程+连接）。`stop()` 置 `_auto_reconnect=False` + 从主线程
+`ws_loop.call_soon_threadsafe(ws_loop.stop)` 打断 `start()`，daemon 线程退出；并给
+`_on_message_sync` 加 `_running` 守卫，旧实例丢弃入站。
+
+> **部署坑**：环境有 SOCKS 代理（`ALL_PROXY`/`https_proxy=socks5://…`）时 lark WS 需
+> `python-socks`，否则报 `connect failed, requires python-socks` 长连不上。已随
+> `feishu` extra 装。`open.feishu.cn` 通常直连可达，WS 端点是 `msg-frontier.feishu.cn`。
+
+## 入站（inbound.py）
+
+`on_message` 流水线：去重（LRU by message_id）→ 跳过机器人自身 → 白名单（`is_allowed`）→
+群策略（`group_policy=mention` 时仅 `@_all` 或精确匹配 `bot_open_id` 才响应；**不做** ou_
+启发式以免把真人误判为机器人）→ 解析文本（text / post）→ 收集媒体引用 → 派生 thread + 取
+bridge + 运行锁 → 排队或处理。
+
+**媒体**：
+- 图片（image / post 内嵌 / 被回复消息的图）→ 下载 → 走仓库统一压缩管线
+  （`media.maybe_resize_and_downsample_image` + `compress_image_with_token_budget`，满足
+  5MB/2000px 硬约束 + token 预算）→ base64 Anthropic content block，与 desktop 发图同构。
+- 文件 → 下载到 `/tmp/lumi-feishu/<thread>/` → `bridge.add_folder()` 授权该目录给会话权限
+  引擎 → `<attached-file>路径</attached-file>` 注入正文，agent 用 `read` 读（PDF 渲染、文本直读）。
+- 回复某条消息时，一并拉取**被回复消息**里的图片/文件（用父消息 id 下载）。
+
+**忙时排队 + 合并**（同会话同一时刻只跑一轮）：
+- 上一轮在跑（运行锁被占）时，新消息存入 `_queues[thread]`（上限 `_MAX_QUEUE=10`，满则丢弃
+  并提示）；忙判与 `async with lock` 相邻、其间无 `await`，事件循环上原子，避免 TOCTOU。
+- 持锁者跑完后 `_drain`：把期间积压的消息**合并成一轮**（`merge_messages`：单条裸文本；
+  多条加 `<system-reminder>` + 编号列表，媒体-only 占位保序），循环直到队空。
+- 媒体下载在持锁后用 `asyncio.gather` 并发。
+
+## 出站事件泵（outbound.py）
+
+`run_turn` 消费 `bridge.stream_response` 的 `BridgeEvent` 流，折叠成飞书消息（只处理主 agent
+事件，子代理 `parent_run_id` 非空的内部活动不外显）：
+
+| EventKind | 处理 |
+|---|---|
+| `message.delta` | 喂打字机流式卡片 |
+| `tool.start` / `tool.complete` | 驱动「正在…」忙碌状态行 |
+| `clarify.request` | ask 已禁用，正常不出现；防御性 `resolve_approval(ASK_CANCELLED)` |
+| `approval.request` | 泄漏的工具审批 → 一律自动 `resolve_approval(reject)`，永不弹审批卡 |
+| `turn.complete` / `error` / 异常 / 取消 | 收尾流式卡（`ended` 标志保证只收尾一次） |
+
+**审批语义**：`tool_mode` 取配置（`auto` AI 审批 / `privileged` 自动放行），两档下「泄漏的人工
+审批触点」（DENY / bypass-immune / 分类器 ask）一律自动拒绝。**ask 工具已禁用**——`BridgePool`
+默认 `disabled_tools=["ask"]`（经 `AgentBridge.initialize → create_agent(tools=…)`），模型无从
+调用，遇需澄清时自行判断而非弹卡片。
+
+## 流式卡片（streaming.py + throttle.py + update_queue.py）
+
+CardKit「编辑同一张卡片」打字机：
+- `Throttle`：双阈值（250ms / 64 字符）+ `loop.call_later` 主动定时，静默期也刷尾部。
+- `UpdateQueue`：至多 1 in-flight + 1 pending 合并，压低 HTTP QPS 防限流。
+- 失效换卡（`is_card_invalid` 错误码 → 换 card_id 重建，epoch 作废旧卡更新）。
+- 超长截断（`_render_card_text` 取尾部 `STREAM_MAX_CHARS=20000`）；CardKit 全程不可用时
+  `_fallback_send` 降级到普通 markdown 卡（同样截断）。
+- 工具忙碌期 spinner 动画；纯工具轮（无正文）收尾落「✅ 已完成」而非空白卡。
+- 孤儿 buf 由 `_cleanup_loop` 按 `STREAM_BUF_TTL=300s` 驱逐。
+
+## 会话池（bridge_pool.py）
+
+`thread_id → (AgentBridge, asyncio.Lock)`。运行锁串行化同会话的轮次。每 chat 一个常驻
+bridge（含 graph / 权限引擎 / checkpoint），**刻意不做 TTL 回收**——进程存活期一直驻留、复用
+checkpoint。`close_all` 回收前先 `reject_pending` + 等锁（5s 上限）避免 use-after-close。
+
+## 配置与生命周期
+
+- **存储**：`~/.lumi/channels.json`（含密钥，chmod 600 原子写，照抄 `provider_store` 范式），
+  与 config.yaml 解耦。凭证支持 `${ENV_VAR}`，启动时 `os.path.expandvars` 解析。
+- **ChannelManager**（进程级单例）：`lumi serve` 的 lifespan 经 `channels_runtime()` 起它；
+  desktop 经 `save_channel` RPC 改配置后 `reload()` **停旧起新**（`_reload_lock` 串行化）。
+  **BridgePool 由 manager 拥有、跨传输重连存活**——改凭证/拨开关只重启 WS 连接，不清空进行中
+  的会话；只在禁用 / workspace 变更 / 进程退出时回收会话池。
+- **状态灯**：`status()` 返回 `off | stopped | connecting | connected | error`。connected 以
+  lark WS 实际连接（`_ws_client._conn` 非空）+ bot_open_id 为准，掉线/重连期间如实回落
+  connecting；启动失败（未装 lark / 缺凭证 / 异常）→ `error` 带原因，UI 直接显示。
+
+## RPC（channel_rpc.py，照抄 cron_rpc 进程级分发）
+
+`CHANNEL_METHODS = {get_channels, save_channel, test_channel}`，接 `session.py` 的 `_dispatch`
++ `IMPLEMENTED_METHODS` + `protocol/events.json`（契约测试锁一致）。`save_channel` 复用
+`save_feishu` 返回的 cfg 传给 `reload(cfg)` 省一次读盘。`test_channel` 用给定凭证临时建 client
+拉机器人信息验证连通性，不动运行中的 channel。
+
+## 前端
+
+desktop `设置 → 渠道`（`ChannelsPanel.tsx`，进 `SettingsDialog`）：渠道卡片列表（飞书状态灯 +
+开关 + 编辑、企业微信「即将支持」）→ 飞书表单（凭证 / 审批模式 / 群策略 / 白名单 / 工作区 +
+测试连接 + 保存并重连）。状态灯走品牌「光」语言（`.chan-orb` 复用 `lumi-breathe` 光晕，error
+态红光 + 显示具体原因）。
+
+## 关键文件
+
+| 文件 | 职责 |
+|---|---|
+| `channels/feishu/channel.py` | lark WS 连接 + 收发 + 生命周期 + 状态 |
+| `channels/feishu/inbound.py` | 入站解析 / 媒体 / 排队合并 / 驱动 run |
+| `channels/feishu/outbound.py` | BridgeEvent 事件泵 |
+| `channels/feishu/streaming.py` `throttle.py` `update_queue.py` | CardKit 打字机卡片 |
+| `channels/feishu/bridge_pool.py` | 每 thread 常驻 bridge + 运行锁 |
+| `channels/feishu/lark_call.py` | lark SDK 同步调用错误样板 |
+| `channels/{config,store,manager}.py` | 配置模型 / sidecar 存储 / 进程级管理器 |
+| `channel_rpc.py` | get/save/test_channel RPC |

@@ -256,6 +256,28 @@ export interface PresentedFile {
 export type BackendRemote = { id: string; name: string; url: string; token: string; enabled?: boolean }
 export type BackendsState = { active: string; remotes: BackendRemote[] }
 
+// —— IM 渠道（飞书等）——
+export type ChannelStatusState = 'off' | 'stopped' | 'connecting' | 'connected' | 'error'
+export interface ChannelStatus {
+  state: ChannelStatusState
+  detail: string
+}
+export interface FeishuConfig {
+  enabled: boolean
+  app_id: string
+  app_secret: string
+  allow_from: string[]
+  group_policy: 'mention' | 'open'
+  tool_mode: 'auto' | 'privileged'
+  workspace: string
+}
+export interface ChannelInfo {
+  name: string
+  enabled: boolean
+  config: FeishuConfig
+  status: ChannelStatus
+}
+
 declare global {
   interface Window {
     lumi: {

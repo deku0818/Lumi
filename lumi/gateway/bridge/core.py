@@ -169,12 +169,15 @@ class AgentBridge:
         self._checkpoint = CheckpointService(self)
         self._folders = FolderManager(self)
 
-    async def initialize(self, project_dir: str = "") -> None:
+    async def initialize(
+        self, project_dir: str = "", disabled_tools: list[str] | None = None
+    ) -> None:
         """初始化 Agent。
 
         project_dir：本会话所属项目（open 握手经 ``?workspace=`` 携带）。给定且有效则
         引擎在创建时直接 pin 到它，无需后续 set_workspace rebase；为空 / 无效退回进程
         cwd。项目随会话绑定，不动进程级状态。
+        disabled_tools：本会话禁用的工具黑名单（如飞书 channel 禁用 ``ask``）；None 时全量。
         """
         agents_config = get_config().config.agents
         target = Path(project_dir).expanduser().resolve() if project_dir else None
@@ -183,9 +186,15 @@ class AgentBridge:
                 "[AgentBridge] open 指定 workspace 无效，退回进程目录: %s", target
             )
             target = None
+        tools = None
+        if disabled_tools:
+            from lumi.agents.tools import get_tools
+
+            tools = await get_tools(disabled_tools=disabled_tools)
         self._agent, self._context = await create_agent(
             checkpoint=agents_config.checkpoint,
             project_dir=target,
+            tools=tools,
         )
         # 注入在途审批 Broker（与 permission_engine 同源，事后赋值，零改 create_agent 签名）
         self._context.approval_broker = self._broker
