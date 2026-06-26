@@ -754,7 +754,7 @@ wheels = [
 
 [[package]]
 name = "lumi"
-version = "0.2.4"
+version = "0.2.5"
 source = { editable = "." }
 dependencies = [
     { name = "apscheduler" },
@@ -780,6 +780,10 @@ dependencies = [
 ]
 
 [package.optional-dependencies]
+all = [
+    { name = "lark-oapi" },
+    { name = "python-socks" },
+]
 feishu = [
     { name = "lark-oapi" },
     { name = "python-socks" },
@@ -807,6 +811,7 @@ requires-dist = [
     { name = "langgraph-checkpoint-postgres", specifier = ">=3.0.4" },
     { name = "langgraph-checkpoint-sqlite", specifier = ">=3.0.3" },
     { name = "lark-oapi", marker = "extra == 'feishu'", specifier = ">=1.4.0" },
+    { name = "lumi", extras = ["feishu"], marker = "extra == 'all'", editable = "." },
     { name = "pillow", specifier = ">=12.1.1" },
     { name = "psycopg", extras = ["binary"], specifier = ">=3.3.3" },
     { name = "pymupdf", specifier = ">=1.24.0" },
@@ -818,7 +823,7 @@ requires-dist = [
     { name = "wcmatch", specifier = ">=10.1" },
     { name = "websockets", specifier = ">=16.0" },
 ]
-provides-extras = ["feishu"]
+provides-extras = ["feishu", "all"]
 
 [package.metadata.requires-dev]
 dev = [

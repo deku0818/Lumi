@@ -56,7 +56,8 @@ class BashProcessHandle:
 
     task_id: str
     process: asyncio.subprocess.Process
-    timeout: float
+    timeout: float | None
+    """墙钟超时秒数；None 表示不限时（后台任务默认）。"""
 
 
 # ---------------------------------------------------------------------------
@@ -82,7 +83,7 @@ class BackgroundTaskManager:
         return self._registry.notification_queue
 
     async def start_task(
-        self, command: str, timeout: float, working_dir: str
+        self, command: str, timeout: float | None, working_dir: str
     ) -> BackgroundTaskEntry:
         """启动后台 Bash 任务。
 

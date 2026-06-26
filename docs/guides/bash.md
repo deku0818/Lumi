@@ -10,7 +10,7 @@
 |---|---|---|---|
 | `command` | `str` | （必填） | 要执行的 shell 命令 |
 | `description` | `str` | （必填） | 命令用途描述（用于审批 UI 与日志） |
-| `timeout` | `float` | `120.0` | 超时秒数，范围 `[1, 600]` |
+| `timeout` | `float \| None` | `None` | 超时秒数，范围 `[0, 600]`；省略时**前台**回落 `120`、**后台**不限时；`0`=不限时（仅后台，前台传 `0` 报错） |
 | `run_in_background` | `bool` | `False` | 是否后台执行 |
 
 ---
@@ -59,17 +59,20 @@ Output File: /path/to/output.log
 
 后台任务完成后会通过通知队列推送结果。后台任务的 stdout 写入文件，不受 30 KB 限制。
 
+后台默认**不限时**（起常驻服务/长跑不会被墙钟砍掉）；需要上限再显式传 `timeout`。
+
 参考 [background-execution.md](../claude-code/background-execution.md) 了解后台任务管理界面（`Ctrl+B`）。
 
 ---
 
 ## 超时
 
-- 默认 120 秒，最大 600 秒
+- **前台**：省略时默认 120 秒，最大 600 秒；传 `0`（不限时）会报错——前台无界阻塞会永久挂死当前回合且无 task_id 可取消
+- **后台**：省略或传 `0` 即不限时；传正数则按上限
 - 超时后进程会被 `terminate()` 优雅关闭，5 秒后仍存活则 `kill()`
 - 超时返回 `Error: Timeout`（不带 stdout）
 
-需要长时间运行的任务请用 `run_in_background=True`。
+需要长时间运行的任务请用 `run_in_background=True`（默认不限时）。
 
 ---
 

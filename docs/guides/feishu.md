@@ -16,6 +16,8 @@ uv sync --extra feishu
 > 若你的网络走 SOCKS 代理（`ALL_PROXY` / `https_proxy=socks5://…`），lark 的 WebSocket 需要
 > `python-socks`——已包含在 `feishu` extra 里，无需额外装。
 
+> Docker 部署无需额外操作：镜像已默认装 `.[all]`（含飞书全部依赖），开箱即用。
+
 ## 二、飞书开放平台建机器人
 
 1. 打开 [飞书开放平台](https://open.feishu.cn/) → **创建企业自建应用**。

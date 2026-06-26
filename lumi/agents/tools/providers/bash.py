@@ -36,7 +36,12 @@ class BashInput(BaseModel):
 
     command: str = Field(description="要执行的 shell 命令")
     description: str = Field(description="命令用途描述，帮助理解命令意图")
-    timeout: float = Field(default=120.0, ge=1, le=600, description="超时秒数")
+    timeout: float | None = Field(
+        default=None,
+        ge=0,
+        le=600,
+        description="超时秒数；0 表示不限时（仅后台可用，前台传 0 报错）。省略时前台默认 120s、后台不限时",
+    )
     run_in_background: bool = Field(default=False, description="是否后台执行")
 
 
@@ -64,7 +69,7 @@ Instead, use the appropriate dedicated tool:
 |------|------|------|------|
 | `command` | string | 是 | 要执行的命令 |
 | `description` | string | 是 | 命令的简明描述 |
-| `timeout` | number | 否 | 超时时间（秒），最大 600（10分钟），默认 120（2分钟） |
+| `timeout` | number | 否 | 超时秒数，最大 600（10分钟）；`0`=不限时（仅后台，前台传 0 报错）。省略时前台默认 120（2分钟）、后台不限时 |
 | `run_in_background` | boolean | 否 | 设为 true 可在后台运行，完成后会收到通知 |
 
 ## 关键规则
@@ -77,6 +82,7 @@ Instead, use the appropriate dedicated tool:
 
 ## 后台任务
 长耗时命令（构建 / 测试 / 下载 / 起服务）用 `run_in_background=True`：
+- 后台默认**不限时**；需要墙钟上限再传 `timeout`（起常驻服务保持默认即可，不会被砍）
 - 在后台执行后会立即返回 `task_id` 和输出文件路径
 - 命令完成时**自动**收到 `<task-notification>` 消息提示
 - **不要轮询** `background_task(action="status")`；**不要主动 read output_file**。等通知，期间继续做别的
@@ -90,10 +96,14 @@ Instead, use the appropriate dedicated tool:
 async def bash(
     command: str,
     description: str,
-    timeout: float = 120.0,
+    timeout: float | None = None,
     run_in_background: bool = False,
 ) -> str:
-    """执行 shell 命令并返回输出（持久化 shell 会话 / 超时 / 后台执行）。"""
+    """执行 shell 命令并返回输出（持久化 shell 会话 / 超时 / 后台执行）。
+
+    timeout 语义：0 表示不限时，仅后台可用（前台传 0 报错）。前台省略回落默认
+    120s；后台省略即不限时（后台常用于起服务/长跑，默认有界会被误杀）。
+    """
     try:
         working_dir = str(get_authorized_directory())
         session_mgr = get_shell_session_manager()
@@ -105,9 +115,11 @@ async def bash(
 
         if run_in_background:
             current_cwd = await session.get_cwd()
+            # 后台省略(None)或显式 0 → 不限时；否则用给定上限
+            bg_timeout = timeout if timeout else None
             task = await session_mgr.bg_manager.start_task(
                 command=command,
-                timeout=timeout,
+                timeout=bg_timeout,
                 working_dir=current_cwd,
             )
             return (
@@ -119,7 +131,12 @@ async def bash(
                 f"等通知即可——期间请继续做别的事。\n"
             )
 
-        command_result = await session.execute(command, timeout=timeout)
+        # 前台不开放无界阻塞（会永久挂死当前回合且无 task_id 可取消）：
+        # 显式 0 报错，省略(None)回落默认 120s
+        if timeout == 0:
+            return "Error: timeout=0（不限时）仅后台可用；前台请省略或给正数超时"
+        fg_timeout = timeout if timeout is not None else 120.0
+        command_result = await session.execute(command, timeout=fg_timeout)
         return _format_result(command_result)
 
     except OSError as e:

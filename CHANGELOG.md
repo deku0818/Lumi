@@ -1,5 +1,13 @@
 # Changelog
 
+## [0.2.5] - 2026-06-26
+
+### Changed
+- **bash 后台任务默认不限时** — `timeout` 改为 `float | None`，语义重定义：**前台**省略回落 `120s`、**后台**省略即不限时（起常驻服务/长跑不再被墙钟误杀）；`timeout=0` 显式表示「不限时」**仅后台可用**，前台传 `0` 报错（无界阻塞会永久挂死当前回合且无 task_id 可取消）。`BashProcessHandle.timeout` / `start_task` 同步放宽为可空。详见 `docs/guides/bash.md`
+
+### Build
+- **Docker 镜像默认装全部可选依赖** — 新增聚合 extra `all`（含 `feishu`），`Dockerfile` 改 `uv pip install ".[all]"`，飞书等 channel 在容器内开箱即用；以后新增 extra 只需并入 `all` 即随镜像分发。本地 `uv sync` 仍按需，不受影响
+
 ## [0.2.4] - 2026-06-26
 
 ### Added

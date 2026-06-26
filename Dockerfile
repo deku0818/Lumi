@@ -12,7 +12,7 @@ WORKDIR /app
 # 仅复制安装所需，利用层缓存（改代码不必重装依赖）
 COPY pyproject.toml README.md ./
 COPY lumi ./lumi
-RUN uv pip install --system --no-cache .
+RUN uv pip install --system --no-cache ".[all]"
 
 # 默认 config：style=code（default 风格无提示词会启动即崩）+ checkpoint=sqlite
 # （默认 memory 不落盘、会话聊完即消失、list_sessions 看不到）。用户挂 .lumi 时以挂载为准。
