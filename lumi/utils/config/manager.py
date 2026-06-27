@@ -153,7 +153,7 @@ class LumiConfig:
             return json.load(f)
 
     def load_system_prompt(self) -> str:
-        """加载三文件组合提示词 (SOUL.md + GUARDRAILS.md + AGENTS.md)
+        """加载双文件组合提示词 (SOUL.md + AGENTS.md)
 
         加载顺序：先从 style 内置目录读取基础文件，
         再用用户 .lumi/prompts/ 下的同名文件覆盖。
@@ -167,7 +167,7 @@ class LumiConfig:
         from lumi.styles import get_style_prompts_dir
 
         style = self.active_style
-        file_names = ["SOUL", "GUARDRAILS", "AGENTS"]
+        file_names = ["SOUL", "AGENTS"]
 
         # 按 name 收集最终路径：style 内置 → 用户覆盖
         resolved: dict[str, Path] = {}

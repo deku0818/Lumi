@@ -9,13 +9,13 @@
 | 风格 | 说明 |
 |------|------|
 | `default` | 默认风格。**不内置提示词**——系统提示词全部来自用户 `.lumi/prompts/`；可内置 skill / agent（当前为空） |
-| `code` | 面向软件工程。内置完整的系统提示词（SOUL / GUARDRAILS / AGENTS）和 explore / plan 两个子 Agent |
+| `code` | 面向软件工程。内置完整的系统提示词（SOUL / AGENTS）和 explore / plan 两个子 Agent |
 
 每种风格可内置三类资源：`prompts/`（系统提示词）、`agents/`（子 Agent）、`skills/`（技能），三者均为可选。`default` 不带 `prompts/`，提示词全部来自用户 `.lumi/prompts/`；两处都没有时以空系统提示词运行（不报错）。
 
 ### 提示词组装
 
-系统提示词由 `SOUL.md`、`GUARDRAILS.md`、`AGENTS.md` 三个文件按此顺序**直接拼接**（不做 XML 包裹），任一文件缺失则跳过该段。
+系统提示词由 `SOUL.md`、`AGENTS.md` 两个文件按此顺序**直接拼接**（不做 XML 包裹），任一文件缺失则跳过该段。
 
 ---
 
@@ -67,4 +67,4 @@ mkdir -p lumi/styles/my-style/agents
 mkdir -p lumi/styles/my-style/skills
 ```
 
-在 `prompts/` 下放置 SOUL.md、GUARDRAILS.md、AGENTS.md，在 `agents/` 下放置子 Agent 配置，在 `skills/<name>/SKILL.md` 下放置技能。不提供 `prompts/` 的风格（如 `default`）提示词全部由用户 `.lumi/prompts/` 提供。
+在 `prompts/` 下放置 SOUL.md、AGENTS.md，在 `agents/` 下放置子 Agent 配置，在 `skills/<name>/SKILL.md` 下放置技能。不提供 `prompts/` 的风格（如 `default`）提示词全部由用户 `.lumi/prompts/` 提供。

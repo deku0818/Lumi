@@ -16,7 +16,6 @@ lumi/styles/
 └── code/
     ├── prompts/
     │   ├── SOUL.md
-    │   ├── GUARDRAILS.md
     │   └── AGENTS.md
     └── agents/
         ├── explore.md
@@ -27,12 +26,12 @@ lumi/styles/
 
 ## 加载机制
 
-### 系统提示词（SOUL.md / GUARDRAILS.md / AGENTS.md）
+### 系统提示词（SOUL.md / AGENTS.md）
 
 1. 从 `lumi/styles/{style}/prompts/` 读取基础文件（风格无 `prompts/` 目录时跳过）
 2. 用 `.lumi/prompts/` 下的同名文件覆盖
 
-三个文件按 `SOUL → GUARDRAILS → AGENTS` 顺序、以 `\n\n` **直接拼接**（不做 XML 包裹），任一缺失则跳过该段。`default` 风格不带内置 `prompts/`，提示词全部来自 `.lumi/prompts/`；两处都没有时 `load_system_prompt` 返回空串，agent 以无系统提示词运行（不再 fail-loud）。
+两个文件按 `SOUL → AGENTS` 顺序、以 `\n\n` **直接拼接**（不做 XML 包裹），任一缺失则跳过该段。`default` 风格不带内置 `prompts/`，提示词全部来自 `.lumi/prompts/`；两处都没有时 `load_system_prompt` 返回空串，agent 以无系统提示词运行（不再 fail-loud）。
 
 ### 工具描述
 
