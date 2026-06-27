@@ -1248,27 +1248,56 @@ export default function App() {
     (tid: string) => sessionsRef.current.find((s) => s.thread_id === tid)?.backend || 'local',
     [],
   )
+  // 乐观局部更新某会话字段（pin/重命名共用）
+  const patchSession = useCallback(
+    (tid: string, patch: Partial<SessionMeta>) =>
+      setSessions((prev) => prev.map((s) => (s.thread_id === tid ? { ...s, ...patch } : s))),
+    [],
+  )
   const pinSession = useCallback(
     (tid: string, pinned: boolean) => {
-      gwForBackend(backendOf(tid))?.pinSession(tid, pinned).then(refreshSessions).catch(() => {})
+      // 乐观更新（Sidebar 按 pinned 重新分组）；成功后再断言一次，纠正 RPC 在途时
+      // 并发刷新读到旧值的回退；失败则全量刷新回滚
+      patchSession(tid, { pinned })
+      gwForBackend(backendOf(tid))
+        ?.pinSession(tid, pinned)
+        .then(() => patchSession(tid, { pinned }))
+        .catch(() => { void refreshSessions() })
     },
-    [gwForBackend, backendOf, refreshSessions],
+    [gwForBackend, backendOf, refreshSessions, patchSession],
   )
 
   const renameSession = useCallback(
     (tid: string, title: string) => {
-      gwForBackend(backendOf(tid))?.renameSession(tid, title).then(refreshSessions).catch(() => {})
+      // 乐观更新；成功后再断言一次，纠正并发刷新回退；失败则刷新回滚
+      patchSession(tid, { title })
+      gwForBackend(backendOf(tid))
+        ?.renameSession(tid, title)
+        .then(() => patchSession(tid, { title }))
+        .catch(() => { void refreshSessions() })
     },
-    [gwForBackend, backendOf, refreshSessions],
+    [gwForBackend, backendOf, refreshSessions, patchSession],
   )
 
   const deleteSession = async (session: SessionMeta) => {
     setPendingDelete(null)
     const tid = session.thread_id
-    await gwForBackend(session.backend || 'local')?.deleteSession(tid).catch(() => {})
+    // 乐观更新：立即从列表移除，UI 不等后端删除完成
+    const removeRow = () => setSessions((prev) => prev.filter((s) => s.thread_id !== tid))
+    removeRow()
+    try {
+      // 等后端删除提交后再清理本地 / 切会话——否则 activate(null) 触发的刷新
+      // 会读到尚未删除的 checkpoint，把会话又加回列表
+      await gwForBackend(session.backend || 'local')?.deleteSession(tid)
+    } catch {
+      void refreshSessions() // 删除失败：把会话找回来（此时本地连接 / 缓存尚未清理）
+      return
+    }
+    removeRow() // 再断言一次，纠正删除期间并发刷新读回的行
     connsRef.current[tid]?.close()
     delete connsRef.current[tid]
     setStore((s) => {
+      if (!(tid in s)) return s
       const n = { ...s }
       delete n[tid]
       return n
@@ -1281,7 +1310,6 @@ export default function App() {
     })
     // 删除的是当前会话：另开一个新会话顶上
     if (tid === activeRef.current) await activate(null)
-    void refreshSessions()
   }
 
   // 读取图片文件为 data URL 加入附件（粘贴 / 拖拽 / ＋ 选择 共用，仅图片类型）

@@ -113,39 +113,42 @@ async def _get_thread_ids(
     graph: CompiledStateGraph,
     *,
     filter: dict[str, Any] | None = None,  # noqa: A002
-) -> list[str]:
-    """从 checkpointer 获取所有 thread_id 列表
+) -> list[tuple[str, str]]:
+    """从 checkpointer 获取所有 (thread_id, latest_checkpoint_id)
 
     使用 checkpointer 的 alist 接口获取所有 checkpoint，
-    按 checkpoint_id 降序排列（最新优先），去重提取 thread_id。
+    按 checkpoint_id 降序排列（最新优先），去重提取每个 thread
+    的最新 checkpoint_id。checkpoint_id 用于缓存失效判断——
+    内容未变则 id 不变，可跳过完整反序列化。
 
     Args:
         graph: 已编译的 LangGraph 状态图
         filter: metadata 过滤条件，传递给 checkpointer.alist()
 
     Returns:
-        按最近活跃时间降序排列的 thread_id 列表
+        按最近活跃时间降序排列的 (thread_id, checkpoint_id) 列表
     """
     checkpointer = graph.checkpointer
     if checkpointer is None:
         return []
 
     seen: set[str] = set()
-    thread_ids: list[str] = []
+    pairs: list[tuple[str, str]] = []
 
     # alist(config=None) 返回所有 checkpoint，按 checkpoint_id DESC
     # 只取每个 thread 的第一条（最新的）
     async for cp_tuple in checkpointer.alist(None, filter=filter):
-        tid = cp_tuple.config["configurable"]["thread_id"]
-        ns = cp_tuple.config["configurable"].get("checkpoint_ns", "")
+        cfg = cp_tuple.config["configurable"]
+        tid = cfg["thread_id"]
+        ns = cfg.get("checkpoint_ns", "")
         # 只取根命名空间的 checkpoint
         if ns != "":
             continue
         if tid not in seen:
             seen.add(tid)
-            thread_ids.append(tid)
+            pairs.append((tid, cfg.get("checkpoint_id", "")))
 
-    return thread_ids
+    return pairs
 
 
 async def list_sessions(
@@ -173,53 +176,84 @@ async def list_sessions(
         return []
 
     metadata_filter = {"workspace_dir": workspace} if workspace else None
-    thread_ids = await _get_thread_ids(graph, filter=metadata_filter)
+    pairs = await _get_thread_ids(graph, filter=metadata_filter)
     # cron 执行会话不进会话列表（即使续聊后带上 workspace 元数据也不"转正"），
     # 只能从定时任务详情的执行记录进入
     candidates = [
-        tid
-        for tid in thread_ids
+        (tid, cid)
+        for tid, cid in pairs
         if tid != current_thread_id and not tid.startswith(f"{CRON_THREAD_PREFIX}-")
     ]
 
     # 分批并发加载 state：串行 aget_state 在会话多时是侧栏刷新的延迟瓶颈；
-    # 分批（而非全量 gather）保留 limit 早停，不为远超 limit 的旧会话买单
+    # 分批（而非全量 gather）保留 limit 早停，不为远超 limit 的旧会话买单。
+    # 缓存命中（checkpoint_id 未变）的会话直接复用，跳过完整反序列化——
+    # 删除/置顶/重命名后的刷新几乎全部命中，是侧栏卡顿的主要来源。
     sessions: list[SessionSummary] = []
     batch_size = 25
     for i in range(0, len(candidates), batch_size):
         batch = candidates[i : i + batch_size]
-        snapshots = await asyncio.gather(
-            *(graph.aget_state({"configurable": {"thread_id": tid}}) for tid in batch),
-            return_exceptions=True,
-        )
-        for tid, snapshot in zip(batch, snapshots):
-            if isinstance(snapshot, BaseException):
-                logger.warning("获取会话 %s 状态失败: %s", tid, snapshot)
-                continue
-            if not snapshot or not snapshot.values:
-                continue
-            messages = snapshot.values.get("messages", [])
-            if not messages:
-                continue
-            first_msg = _extract_first_human_message(messages)
-            if not first_msg:
-                continue
-
-            sessions.append(
-                SessionSummary(
-                    thread_id=tid,
-                    first_message=first_msg,
-                    # StateSnapshot.created_at 是 ISO 8601 字符串
-                    created_at=_parse_created_at(snapshot.created_at),
-                    message_count=len(messages),
-                    # checkpoint 元数据里的项目目录；跨项目列表时供前端分组
-                    workspace_dir=(snapshot.metadata or {}).get("workspace_dir", ""),
-                )
+        miss = [(tid, cid) for tid, cid in batch if _cache_get(tid, cid) is None]
+        if miss:
+            snapshots = await asyncio.gather(
+                *(
+                    graph.aget_state({"configurable": {"thread_id": tid}})
+                    for tid, _ in miss
+                ),
+                return_exceptions=True,
             )
+            for (tid, cid), snapshot in zip(miss, snapshots):
+                if isinstance(snapshot, BaseException):
+                    logger.warning("获取会话 %s 状态失败: %s", tid, snapshot)
+                    continue
+                summary = _summary_from_snapshot(tid, snapshot)
+                if summary is not None:
+                    _summary_cache[tid] = (cid, summary)
+
+        for tid, cid in batch:
+            cached = _cache_get(tid, cid)
+            if cached is None:
+                continue
+            sessions.append(cached)
             if len(sessions) >= limit:
                 return sessions
 
     return sessions
+
+
+# thread_id -> (checkpoint_id, summary)。按 checkpoint_id 失效：
+# 会话内容变化必产生新 checkpoint_id，id 一致即可安全复用。
+# 删除的会话不再出现在 candidates，残留条目永不命中（数量有界，不主动清理）。
+_summary_cache: dict[str, tuple[str, SessionSummary]] = {}
+
+
+def _cache_get(thread_id: str, checkpoint_id: str) -> SessionSummary | None:
+    """缓存命中（checkpoint_id 一致）返回 summary，否则 None"""
+    entry = _summary_cache.get(thread_id)
+    if entry is not None and entry[0] == checkpoint_id and checkpoint_id:
+        return entry[1]
+    return None
+
+
+def _summary_from_snapshot(thread_id: str, snapshot: Any) -> SessionSummary | None:
+    """从 StateSnapshot 构造 SessionSummary；无有效用户消息时返回 None"""
+    if not snapshot or not snapshot.values:
+        return None
+    messages = snapshot.values.get("messages", [])
+    if not messages:
+        return None
+    first_msg = _extract_first_human_message(messages)
+    if not first_msg:
+        return None
+    return SessionSummary(
+        thread_id=thread_id,
+        first_message=first_msg,
+        # StateSnapshot.created_at 是 ISO 8601 字符串
+        created_at=_parse_created_at(snapshot.created_at),
+        message_count=len(messages),
+        # checkpoint 元数据里的项目目录；跨项目列表时供前端分组
+        workspace_dir=(snapshot.metadata or {}).get("workspace_dir", ""),
+    )
 
 
 def _parse_created_at(created_at: str | None) -> datetime:

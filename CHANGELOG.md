@@ -1,5 +1,13 @@
 # Changelog
 
+## [0.2.7] - 2026-06-27
+
+### Fixed
+- **会话侧栏删除/置顶/重命名「到前端显示」卡顿 + 并发竞态** — 三个操作改为乐观更新：删除立即移列、pin/rename 立即改字段（Sidebar 按 `pinned` 即时重排），不再阻塞等后端往返。修掉两处竞态：① 删除当前会话时 `activate(null)` 触发的 `refreshSessions` 会与未提交的删除 RPC 抢跑、把会话读回——改为先 `await` 删除提交再清理本地/切会话，并在成功后再断言一次；② pin/rename 用 `.then` 成功后重新断言，纠正 RPC 在途时并发刷新读到旧值的回退；失败统一 `refreshSessions` 回滚。删除失败时本地连接/缓存保持不动，状态一致
+
+### Performance
+- **`list_sessions` 按 checkpoint_id 缓存，跳过重复反序列化** — 侧栏刷新原本每次都对最多 50 个会话完整反序列化（含图片/文档 base64），删除/置顶/重命名后的刷新尤其浪费。新增模块级 `_summary_cache`（`thread_id → (checkpoint_id, summary)`），内容未变（checkpoint_id 不变）即复用，仅真正变化的会话才重新加载——常规刷新降至接近零反序列化
+
 ## [0.2.6] - 2026-06-26
 
 ### Fixed

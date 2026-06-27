@@ -98,7 +98,10 @@ export function ProvidersPanel({
   const pickClassifier = (provider: string, model: string) => {
     const same = classifier.provider === provider && classifier.model === model
     gw?.setClassifier(same ? '' : provider, same ? '' : model)
-      .then((r) => setClassifier(r.classifier ?? {}))
+      .then((r) => {
+        setClassifier(r.classifier ?? {})
+        onChanged(machine)
+      })
       .catch(() => {})
   }
   const onSave = (draft: Partial<ProviderProfile>) => gw?.saveProvider(draft).then(apply).catch(() => {})
