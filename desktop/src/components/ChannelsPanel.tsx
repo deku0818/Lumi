@@ -1,10 +1,39 @@
 import { useCallback, useEffect, useState } from 'react'
-import { ArrowLeft, Check, Loader2, Plus, Send, Building2, X } from 'lucide-react'
-import type { ChannelInfo, FeishuConfig } from '../types'
+import {
+  ArrowLeft,
+  Check,
+  ChevronDown,
+  Loader2,
+  Plus,
+  Send,
+  Building2,
+  X,
+  Folder,
+  FolderPlus,
+  AlertTriangle,
+} from 'lucide-react'
+import type { ChannelInfo, FeishuConfig, Project } from '../types'
 import type { Gateway } from '../gateway'
 import { MachineTabs } from './MachineTabs'
+import { DirBrowser } from './DirBrowser'
+import { basename } from '@/lib/utils'
 import { Button } from '@/components/ui/button'
 import { Switch } from '@/components/ui/switch'
+import {
+  Dialog,
+  DialogContent,
+  DialogDescription,
+  DialogFooter,
+  DialogHeader,
+  DialogTitle,
+} from '@/components/ui/dialog'
+import {
+  DropdownMenu,
+  DropdownMenuContent,
+  DropdownMenuItem,
+  DropdownMenuSeparator,
+  DropdownMenuTrigger,
+} from '@/components/ui/dropdown-menu'
 
 type TestState = 'idle' | 'testing' | { ok: boolean; error?: string; bot_name?: string }
 
@@ -73,6 +102,7 @@ export function ChannelsPanel({
     return (
       <FeishuForm
         initial={editing}
+        gw={gw}
         onCancel={() => setEditing(null)}
         onSave={save}
         onTest={(cfg) =>
@@ -175,11 +205,13 @@ function ChannelCard({
 
 function FeishuForm({
   initial,
+  gw,
   onCancel,
   onSave,
   onTest,
 }: {
   initial: FeishuConfig
+  gw?: Gateway
   onCancel: () => void
   onSave: (cfg: FeishuConfig) => void
   onTest: (cfg: FeishuConfig) => Promise<{ ok: boolean; error?: string; bot_name?: string }>
@@ -249,7 +281,7 @@ function FeishuForm({
           </div>
         </Labeled>
 
-        <Field label="项目目录（可选）" value={cfg.workspace} onChange={(v) => set({ workspace: v })} placeholder="留空 = serve 进程当前目录" />
+        <WorkspacePicker gw={gw} value={cfg.workspace} onChange={(v) => set({ workspace: v })} />
       </div>
 
       <div className="flex items-center gap-3 mt-6 pt-4 border-t border-line/30">
@@ -320,6 +352,167 @@ function Field({
         className="w-full bg-surface border border-line rounded-lg px-3 py-2 text-sm text-ink outline-none focus:border-primary focus:ring-2 focus:ring-primary/20 transition"
       />
     </Labeled>
+  )
+}
+
+// 绑定项目：从该机器已登记的项目里挑一个作为飞书工作目录（参考 .demos/feishu-project-select.html A）。
+// 不再让用户手填路径——先在「项目」页建项目，渠道里只选已有项目；切换已绑定项目会弹重置提醒。
+// 空 = serve 进程当前目录（兜底，不推荐）。
+function WorkspacePicker({
+  gw,
+  value,
+  onChange,
+}: {
+  gw?: Gateway
+  value: string
+  onChange: (v: string) => void
+}) {
+  const [projects, setProjects] = useState<Project[]>([])
+  const [creating, setCreating] = useState(false) // DirBrowser 新建项目中
+  const [pending, setPending] = useState<string | null>(null) // 待确认切换的目标路径
+
+  useEffect(() => {
+    gw
+      ?.listProjects()
+      .then((r) => setProjects(r.projects ?? []))
+      .catch(() => setProjects([]))
+  }, [gw])
+
+  const current = projects.find((p) => p.path === value)
+  // 触发器展示：已登记取项目名 / 仅有路径取 basename / 未绑定走兜底
+  const shown = current
+    ? { name: current.name, path: value }
+    : value
+      ? { name: basename(value), path: value }
+      : { name: 'serve 进程当前目录', path: '兜底，不推荐' }
+
+  // 选中项目：与当前不同且已有绑定 → 弹确认；否则直接生效
+  const choose = (path: string) => {
+    if (path === value) return
+    if (value) setPending(path)
+    else onChange(path)
+  }
+
+  // 新建项目：浏览目录 → 登记 → 刷新列表 → 直接绑定
+  const onCreated = (path: string) => {
+    setCreating(false)
+    gw
+      ?.addProject(path)
+      .then((r) => {
+        setProjects(r.projects ?? [])
+        choose(path)
+      })
+      .catch(() => {})
+  }
+
+  return (
+    <Labeled
+      label="绑定项目"
+      hint={value ? '飞书所有会话以此项目为工作目录' : '留空 = serve 进程当前目录（兜底，不推荐）'}
+    >
+      {projects.length === 0 && !value ? (
+        <EmptyProjects onCreate={() => setCreating(true)} />
+      ) : (
+        <DropdownMenu>
+          <DropdownMenuTrigger asChild>
+            <button
+              type="button"
+              className="group flex w-full items-center gap-2.5 rounded-lg border border-line bg-surface px-3 py-2 text-left outline-none transition data-[state=open]:border-primary"
+            >
+              <Folder size={16} className="shrink-0 text-primary" />
+              <div className="min-w-0 flex-1">
+                <div className="truncate text-sm text-ink">{shown.name}</div>
+                <div className="truncate font-mono text-[10.5px] text-muted-foreground">
+                  {shown.path}
+                </div>
+              </div>
+              <ChevronDown
+                size={14}
+                className="shrink-0 text-muted-foreground transition-transform group-data-[state=open]:rotate-180"
+              />
+            </button>
+          </DropdownMenuTrigger>
+          <DropdownMenuContent align="start">
+            {projects.map((p) => (
+              <DropdownMenuItem key={p.path} onClick={() => choose(p.path)}>
+                <Check
+                  className={`text-primary ${p.path === value ? 'opacity-100' : 'opacity-0'}`}
+                />
+                <div className="min-w-0 flex-1">
+                  <div className="truncate text-sm text-ink">{p.name}</div>
+                  <div className="truncate font-mono text-[10px] text-muted-foreground">{p.path}</div>
+                </div>
+              </DropdownMenuItem>
+            ))}
+            <DropdownMenuSeparator />
+            <DropdownMenuItem onClick={() => setCreating(true)} className="text-muted-foreground">
+              <FolderPlus />
+              新建项目
+            </DropdownMenuItem>
+          </DropdownMenuContent>
+        </DropdownMenu>
+      )}
+
+      {creating && (
+        <DirBrowser
+          gw={gw}
+          title="新建项目"
+          onPick={onCreated}
+          onCancel={() => setCreating(false)}
+        />
+      )}
+
+      {/* 切换项目提醒（参考 demo A）：保存后会回收进行中的飞书会话，历史不丢 */}
+      <Dialog open={pending !== null} onOpenChange={(o) => !o && setPending(null)}>
+        <DialogContent className="sm:max-w-sm">
+          <DialogHeader>
+            <DialogTitle className="flex items-center gap-2">
+              <AlertTriangle size={17} className="text-primary" />
+              切换项目会重置飞书会话
+            </DialogTitle>
+            <DialogDescription className="leading-relaxed">
+              保存后将<b className="text-ink">回收当前所有进行中的飞书会话</b>（群聊 / 私聊各自的常驻会话池会被重建）。正在执行的任务会被中断，但
+              <b className="text-ink">历史不会丢失</b>，下条消息会在新项目目录下接着聊。
+            </DialogDescription>
+          </DialogHeader>
+          <div className="flex items-center gap-2 rounded-lg border border-line bg-canvas px-3 py-2 font-mono text-[11px]">
+            <span className="truncate text-muted-foreground line-through">{value}</span>
+            <span className="shrink-0 text-primary">→</span>
+            <span className="truncate text-ink">{pending}</span>
+          </div>
+          <DialogFooter>
+            <Button variant="ghost" onClick={() => setPending(null)}>
+              取消
+            </Button>
+            <Button
+              onClick={() => {
+                onChange(pending!)
+                setPending(null)
+              }}
+            >
+              确认切换
+            </Button>
+          </DialogFooter>
+        </DialogContent>
+      </Dialog>
+    </Labeled>
+  )
+}
+
+// 空态：该机器还没有项目，引导新建（而非手填路径）。
+function EmptyProjects({ onCreate }: { onCreate: () => void }) {
+  return (
+    <div className="flex flex-col items-center gap-2 rounded-lg border border-dashed border-separator px-4 py-6 text-center">
+      <Folder size={28} className="text-muted-foreground/60" />
+      <div className="text-sm text-ink">还没有项目</div>
+      <div className="max-w-[230px] text-[11px] text-muted-foreground">
+        飞书会话需要绑定一个项目作为工作目录。新建一个，或先去「项目」页登记。
+      </div>
+      <Button variant="outline" size="sm" onClick={onCreate} className="mt-1">
+        <FolderPlus size={14} className="mr-1" />
+        新建项目
+      </Button>
+    </div>
   )
 }
 

@@ -1,5 +1,14 @@
 # Changelog
 
+## [0.2.9] - 2026-06-27
+
+### Added
+- **飞书渠道工作目录改为「绑定已有项目」** — 飞书表单不再手填路径：`WorkspacePicker` 从该机器已登记的项目（`list_projects`）里下拉选择（项目名 + 路径），可内联「新建项目」（`DirBrowser` + `add_project` 登记后直接绑定）；无项目时空态引导新建，而非让用户填路径。切换已绑定项目会弹确认提醒（保存后回收进行中的飞书会话、历史不丢，下条消息在新项目目录接着聊）。空 = serve 进程当前目录（兜底）
+- **`dev.sh` 桌面开发一键启动脚本** — 自检 uv/node、幂等装依赖（`uv sync` + 按需 `npm install`），再 `npm run dev` 起 vite + Electron（后端 sidecar 由 Electron 自行拉起）
+
+### Fixed
+- **已绑定项目在列表空/未连接/加载失败时被误显示为「未绑定」** — 空态判断由 `projects.length === 0` 收紧为 `&& !value`：已绑定 `value` 时始终走下拉分支显示当前绑定，断线（`gw` 为空 → `listProjects` 不触发）或请求失败不再把已有配置藏成空态
+
 ## [0.2.8] - 2026-06-27
 
 ### Changed
