@@ -18,6 +18,7 @@ from lumi.agents.runtime.bg_tasks import (
     BackgroundTaskEntry,
     TaskKind,
     TaskStatus,
+    bg_tasks_dir,
     get_task_registry,
     make_bg_done_callback,
     run_background_task,
@@ -28,7 +29,6 @@ from lumi.agents.tools.registry import get_tool_registry
 from lumi.utils.logger import logger
 from lumi.utils.read_config import get_config
 
-_BG_TASKS_DIR = ".lumi/bg_tasks"
 _TASK_ID_HEX_LENGTH = 12
 
 _AGENT_DESCRIPTION = """启动一个专门的子代理（独立上下文）来自主完成复杂任务。每种代理类型都具备特定的能力和可用工具。
@@ -136,11 +136,7 @@ def _start_background_agent(
     """注册后台 Agent 任务并 fire-and-forget 启动。"""
     task_id = f"bg_{uuid.uuid4().hex[:_TASK_ID_HEX_LENGTH]}"
 
-    from lumi.agents.permissions.workspace import get_authorized_directory
-
-    output_dir = Path(str(get_authorized_directory())) / _BG_TASKS_DIR
-    output_dir.mkdir(parents=True, exist_ok=True)
-    output_file = output_dir / f"{task_id}.txt"
+    output_file = bg_tasks_dir() / f"{task_id}.txt"
 
     entry = BackgroundTaskEntry(
         task_id=task_id,

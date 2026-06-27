@@ -1,6 +1,6 @@
 """RunLog：执行日志，JSONL 格式存储。
 
-每个任务的执行记录存储在独立的 JSONL 文件中（`.lumi/cron/runs/{job_id}.jsonl`），
+每个任务的执行记录存储在独立的 JSONL 文件中（`~/.lumi/cron/<workspace>/runs/{job_id}.jsonl`），
 每行一条 JSON 记录。超过 2MB 时自动裁剪旧记录。
 """
 
@@ -130,7 +130,7 @@ class RunLog:
     每行一条 JSON 记录。超过 2MB 时自动裁剪旧记录。
 
     Args:
-        base_dir: 日志存储目录，如 `.lumi/cron/runs/`。
+        base_dir: 日志存储目录，如 `~/.lumi/cron/<workspace>/runs/`。
     """
 
     def __init__(self, base_dir: Path) -> None:

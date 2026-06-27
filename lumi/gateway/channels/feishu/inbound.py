@@ -1,6 +1,6 @@
 """飞书入站消息处理：解析事件 → 派生 thread → 忙时排队合并 → 驱动一次 agent run。
 
-支持纯文本 / post 富文本 / 图片（多模态内联）/ 文件（下载到 /tmp 经 <attached-file> 供
+支持纯文本 / post 富文本 / 图片（多模态内联）/ 文件（下载到 /tmp/lumi 经 <attached-file> 供
 read 读）；回复某条消息时一并带上被回复消息里的图片/文件。身份目录（显示名解析）暂不移植。
 """
 
@@ -18,10 +18,8 @@ from typing import TYPE_CHECKING, Any
 from lumi.gateway.channels.feishu.outbound import run_turn
 from lumi.utils.constants import ATTACHED_FILE_TAG
 from lumi.utils.logger import logger
+from lumi.utils.paths import lumi_tmp_dir
 from lumi.utils.thread_id import sanitize_thread_id
-
-# 飞书入站文件落地根目录：/tmp 下（系统临时区，自动清理，不污染 ~/.lumi 与项目）
-_INBOUND_ROOT = Path("/tmp/lumi-feishu")
 
 if TYPE_CHECKING:
     from lumi.gateway.channels.feishu.channel import FeishuChannel
@@ -164,10 +162,8 @@ def file_ref_of(msg_type: str, content_json: dict) -> tuple[str, str] | None:
 
 
 def inbound_dir(thread_id: str) -> Path:
-    """本会话飞书入站文件落地目录（/tmp/lumi-feishu/<thread>/），下载文件存这里。"""
-    d = _INBOUND_ROOT / thread_id
-    d.mkdir(parents=True, exist_ok=True)
-    return d
+    """本会话飞书入站文件落地目录（/tmp/lumi/feishu/<thread>/），下载文件存这里。"""
+    return lumi_tmp_dir("feishu", thread_id)
 
 
 def safe_filename(file_key: str, name: str) -> str:

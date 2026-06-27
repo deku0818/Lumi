@@ -57,7 +57,7 @@ bridge + 运行锁 → 排队或处理。
 - 图片（image / post 内嵌 / 被回复消息的图）→ 下载 → 走仓库统一压缩管线
   （`media.maybe_resize_and_downsample_image` + `compress_image_with_token_budget`，满足
   5MB/2000px 硬约束 + token 预算）→ base64 Anthropic content block，与 desktop 发图同构。
-- 文件 → 下载到 `/tmp/lumi-feishu/<thread>/` → `bridge.add_folder()` 授权该目录给会话权限
+- 文件 → 下载到 `<系统临时区>/lumi/feishu/<thread>/`（如 Linux `/tmp/lumi/feishu/<thread>/`）→ `bridge.add_folder()` 授权该目录给会话权限
   引擎 → `<attached-file>路径</attached-file>` 注入正文，agent 用 `read` 读（PDF 渲染、文本直读）。
 - 回复某条消息时，一并拉取**被回复消息**里的图片/文件（用父消息 id 下载）。
 

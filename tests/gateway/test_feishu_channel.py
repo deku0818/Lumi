@@ -109,8 +109,8 @@ def test_safe_filename_prevents_traversal():
 
 
 def test_attach_files_to_text():
-    out = attach_files_to_text("看下", ["/tmp/lumi-feishu/x/a.pdf"])
-    assert out == "看下\n<attached-file>/tmp/lumi-feishu/x/a.pdf</attached-file>"
+    out = attach_files_to_text("看下", ["/tmp/lumi/feishu/x/a.pdf"])
+    assert out == "看下\n<attached-file>/tmp/lumi/feishu/x/a.pdf</attached-file>"
     # 无文件 → 原样
     assert attach_files_to_text("看下", []) == "看下"
     # 无正文 → 只标签

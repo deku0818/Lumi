@@ -30,12 +30,12 @@ from lumi.agents.runtime.bg_tasks import (
     BackgroundTaskEntry,
     TaskKind,
     TaskStatus,
+    bg_tasks_dir,
     get_task_registry,
     make_bg_done_callback,
     run_background_task,
 )
 
-_BG_TASKS_DIR = ".lumi/bg_tasks"
 _TASK_ID_HEX_LENGTH = 12
 
 
@@ -190,12 +190,8 @@ async def workflow(
 
 def _start_workflow_task(name: str, engine: WorkflowEngine) -> BackgroundTaskEntry:
     """注册后台 Workflow 任务并 fire-and-forget 启动。"""
-    from lumi.agents.permissions.workspace import get_authorized_directory
-
     task_id = f"wf_{uuid.uuid4().hex[:_TASK_ID_HEX_LENGTH]}"
-    output_dir = Path(str(get_authorized_directory())) / _BG_TASKS_DIR
-    output_dir.mkdir(parents=True, exist_ok=True)
-    output_file = output_dir / f"{task_id}.json"
+    output_file = bg_tasks_dir() / f"{task_id}.json"
 
     entry = BackgroundTaskEntry(
         task_id=task_id,

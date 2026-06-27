@@ -14,7 +14,6 @@ import asyncio
 import time
 import uuid
 from dataclasses import dataclass
-from pathlib import Path
 from typing import IO
 
 from lumi.agents.runtime.bg_tasks import (
@@ -22,6 +21,7 @@ from lumi.agents.runtime.bg_tasks import (
     NotificationQueue,
     TaskKind,
     TaskStatus,
+    bg_tasks_dir,
     get_task_registry,
 )
 from lumi.agents.runtime.shell_session import (
@@ -33,9 +33,6 @@ from lumi.utils.logger import logger
 # ---------------------------------------------------------------------------
 # Constants
 # ---------------------------------------------------------------------------
-
-_BG_TASKS_DIR = ".lumi/bg_tasks"
-"""后台任务输出文件相对目录。"""
 
 _TASK_ID_HEX_LENGTH = 12
 """任务 ID 中 UUID hex 截取长度。"""
@@ -95,9 +92,7 @@ class BackgroundTaskManager:
         """
         task_id = f"bg_{uuid.uuid4().hex[:_TASK_ID_HEX_LENGTH]}"
 
-        output_dir = Path(working_dir) / _BG_TASKS_DIR
-        output_dir.mkdir(parents=True, exist_ok=True)
-        output_file = output_dir / f"{task_id}.txt"
+        output_file = bg_tasks_dir() / f"{task_id}.txt"
 
         output_fd = output_file.open("w")
         try:

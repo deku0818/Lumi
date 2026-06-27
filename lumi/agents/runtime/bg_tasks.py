@@ -17,10 +17,17 @@ from enum import StrEnum
 from pathlib import Path
 
 from lumi.utils.logger import logger
+from lumi.utils.paths import lumi_tmp_dir
 
 # 当前轮所属的 LangGraph thread_id：由 bridge / cron scheduler 在执行前设置，
 # 后台任务注册时捕获为归属标记，使完成通知能路由回正确的会话（多 WS 连接场景）
 current_thread_id: ContextVar[str] = ContextVar("current_thread_id", default="")
+
+
+def bg_tasks_dir() -> Path:
+    """后台任务输出文件落地目录（task_id 全局唯一不冲突，不污染工作区）。"""
+    return lumi_tmp_dir("bg_tasks")
+
 
 # ---------------------------------------------------------------------------
 # Enums

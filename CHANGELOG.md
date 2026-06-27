@@ -1,5 +1,13 @@
 # Changelog
 
+## [0.2.8] - 2026-06-27
+
+### Changed
+- **临时产物统一落到系统临时区单一事实源** — 新增 `lumi/utils/paths.py`（`LUMI_TMP_ROOT` + `lumi_tmp_dir(*parts)`）作为唯一入口，后台任务输出（bash / agent / workflow）从原本写进**工作区** `.lumi/bg_tasks` 改到 `<系统临时区>/lumi/bg_tasks`，飞书入站文件从 `/tmp/lumi-feishu/<thread>` 归位到 `<系统临时区>/lumi/feishu/<thread>`，不再污染项目目录与 `~/.lumi`。删除三处重复的 `_BG_TASKS_DIR` + `mkdir` 样板，收敛为 `bg_tasks_dir()`
+
+### Fixed
+- **临时根目录按 OS 用户隔离** — 根目录取 `tempfile.gettempdir()`（尊重 `$TMPDIR`）而非写死 `/tmp`：多用户共享主机上不再撞到他人创建的、本用户无写权限的 `/tmp/lumi`（避免后台任务/飞书下载因 `PermissionError` 全线失败），含用户数据的产物也不暴露在全局固定可读路径；macOS 上落在每用户私有的 `/var/folders/.../lumi`
+
 ## [0.2.7] - 2026-06-27
 
 ### Fixed
