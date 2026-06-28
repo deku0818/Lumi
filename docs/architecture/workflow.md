@@ -12,8 +12,9 @@
 
 **门控（缓存安全）**：workflow 工具**始终注册**（永不增删，缓存前缀恒定）；它用不用
 靠**行为门控**——工具描述里写死「仅 Ultra 档位开启、或用户明确要求时使用」。Ultra 信号
-经**轮内 system-reminder** 传达（`bridge._ultra_note`，前置到当轮消息、不碰系统提示词），
-故 toggle Ultra 不废 system+tools 缓存前缀。详见 [thinking.md](thinking.md) 的 Ultra 一节。
+经**边沿触发 system-reminder** 传达（`bridge._drain_ultra_note`，仅在开/关切换那轮前置到当轮
+消息、不碰系统提示词；reminder 一旦进历史即长驻，无需每轮重复），故 toggle Ultra 不废
+system+tools 缓存前缀。详见 [thinking.md](thinking.md) 的 Ultra 一节。
 
 ## 组成
 

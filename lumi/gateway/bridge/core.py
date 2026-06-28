@@ -160,6 +160,8 @@ class AgentBridge:
         self._extra_folders: list[str] = []
         # 上次通知模型时的目录快照，用于在下一条用户消息注入增减变更提醒
         self._notified_folders: set[str] = set()
+        # 上次通知模型时的 ultra 档位状态，仅在开/关切换的那一轮注入边沿提醒
+        self._notified_ultra: bool = False
         # 本会话项目的 config hooks（.lumi/hooks.json）：随项目绑定，set_workspace 时重载，
         # 每轮 _stream 注入 per-run contextvar。空 dict = 暂无（initialize 后填充）。
         self._config_hooks: dict = {}
@@ -288,9 +290,8 @@ class AgentBridge:
     def _drain_folder_note(self) -> str:
         return self._folders.drain_folder_note()
 
-    @staticmethod
-    def _ultra_note() -> str:
-        return FolderManager.ultra_note()
+    def _drain_ultra_note(self) -> str:
+        return self._folders.drain_ultra_note()
 
     def add_workspace(self, directory: str) -> None:
         self._folders.add_workspace(directory)
@@ -319,9 +320,9 @@ class AgentBridge:
             note = self._drain_folder_note()
             if note:
                 content = prepend_reminder(content, note)
-            # Ultra 档位：轮内注入编排提醒（workflow 工具常驻、默认不用，ultra 开启时鼓励用）。
-            # 前置到当轮消息、不碰系统提示词 → 缓存安全（toggle ultra 不废 system+tools 前缀）。
-            ultra_note = self._ultra_note()
+            # Ultra 档位：仅在开/关切换的那一轮注入边沿提醒（reminder 一旦前置进历史即长驻，
+            # 无需每轮重复）。前置到当轮消息、不碰系统提示词 → 缓存安全（toggle 不废 system+tools 前缀）。
+            ultra_note = self._drain_ultra_note()
             if ultra_note:
                 content = prepend_reminder(content, ultra_note)
 

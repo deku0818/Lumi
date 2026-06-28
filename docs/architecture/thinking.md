@@ -121,10 +121,11 @@ ultracode。选中后做两件事：**原生思考拉到该模型最高档** + *
   （`_native_max_level`：effort 型取 `values[-1]` 如 Claude→max / GPT→high；toggle→on）。
   下游协议分支无需感知 ultra。
 - **编排解锁（缓存安全）**：workflow 工具**始终注册**，不随档位增删（增删工具会废 prompt
-  缓存前缀）。Ultra 信号经**轮内 system-reminder** 传达——`bridge._ultra_note()` 在
-  `stream_response` 里前置到当轮真实消息（非 meta 轮），**不碰系统提示词**，故 toggle Ultra
-  只动最便宜的每轮消息尾、不废 system+tools 缓存前缀。workflow 工具描述里写死「仅 Ultra
-  或用户明确要求时使用」。详见 [workflow.md](workflow.md)。
+  缓存前缀）。Ultra 信号经**边沿触发 system-reminder** 传达——`bridge._drain_ultra_note()`
+  与上次通知的档位做差，仅在 off↔ultra 切换那轮前置到当轮真实消息（非 meta 轮），开注入
+  「已开启」、关注入「已关闭」，无变化不注入（reminder 进历史即长驻，多次抖动收敛为净差）。
+  **不碰系统提示词**，故 toggle Ultra 只动最便宜的每轮消息尾、不废 system+tools 缓存前缀。
+  workflow 工具描述里写死「仅 Ultra 或用户明确要求时使用」。详见 [workflow.md](workflow.md)。
 - **UI**：Effort 子菜单底部分隔线 + 呼吸金光点 + 副标题（ModelPicker.tsx）；chip 上金字。
   demo `.demos/lumi-ultra-tier.html`。
 

@@ -101,21 +101,25 @@ class FolderManager:
             lines.extend(f"- {f}" for f in removed)
         return "<system-reminder>\n" + "\n".join(lines) + "\n</system-reminder>\n"
 
-    @staticmethod
-    def ultra_note() -> str:
-        """Ultra 档位激活时的轮内编排提醒（缓存安全）。
+    def drain_ultra_note(self) -> str:
+        """Ultra 档位开/关切换时的边沿编排提醒（缓存安全）。
 
-        active 模型档位 = ultra 时返回 system-reminder，鼓励对实质性多步任务用
-        workflow 拆解；否则空串。workflow 工具本身常驻（不增删，缓存前缀恒定）。
+        与上次通知的档位状态做差：off→ultra 注入「已开启」，ultra→off 注入「已关闭」，
+        无变化返回空串——reminder 一旦前置进某轮用户消息即长驻历史，无需每轮重复。
+        workflow 工具本身常驻（不增删，缓存前缀恒定）。
         """
-        if provider_store.resolve().effort != "ultra":
+        b = self._bridge
+        current = provider_store.resolve().effort == "ultra"
+        if current == b._notified_ultra:
             return ""
-        return (
-            "<system-reminder>\n"
+        b._notified_ultra = current
+        body = (
             "Ultra 编排模式已开启：对实质性的多步 / 需全面覆盖 / 需多视角交叉验证的任务，"
-            "优先用 workflow 工具拆解并扇出子代理；琐碎或单步任务仍直接处理，不要为其套用 workflow。\n"
-            "</system-reminder>\n"
+            "优先用 workflow 工具拆解并扇出子代理；琐碎或单步任务仍直接处理，不要为其套用 workflow。"
+            if current
+            else "Ultra 编排模式已关闭：回到常规处理，不再主动用 workflow 编排。"
         )
+        return "<system-reminder>\n" + body + "\n</system-reminder>\n"
 
     def add_workspace(self, directory: str) -> None:
         """持久化工作区目录到权限引擎"""
