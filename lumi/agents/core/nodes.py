@@ -24,8 +24,6 @@ from lumi.agents.core.node_helpers.messages import (
     cleanup_incomplete_tool_calls,
     inject_message_cache_breakpoints,
 )
-from lumi.agents.core.preprocessing.agent_detector import AgentChangeDetector
-from lumi.agents.core.preprocessing.agents import inject_agents_into_message
 from lumi.agents.core.preprocessing.compact import (
     is_circuit_open,
     record_circuit_failure,
@@ -33,11 +31,8 @@ from lumi.agents.core.preprocessing.compact import (
     strip_images_from_messages,
     summarize_with_ptl_retry,
 )
-from lumi.agents.core.preprocessing.memory import inject_memory_context_into_message
-from lumi.agents.core.preprocessing.skill_detector import SkillChangeDetector
-from lumi.agents.core.preprocessing.skills import inject_skills_into_message
 from lumi.agents.core.preprocessing.summary import inject_summary_into_message
-from lumi.agents.core.preprocessing.system_info import inject_system_info_into_message
+from lumi.agents.core.preprocessing.turn_context import build_turn_context
 from lumi.agents.core.response import extract_ainvoke_content, message_transform
 from lumi.agents.core.state import LumiAgentContext, LumiAgentState
 from lumi.agents.core.structured_tool import (
@@ -51,7 +46,6 @@ from lumi.agents.core.structured_tool import (
 )
 from lumi.agents.permissions.models import PermissionDecision
 from lumi.agents.permissions.routing import route_decision
-from lumi.agents.permissions.workspace import get_authorized_directory
 from lumi.models.chain import structured_output, tool_call_chain
 from lumi.models.manager import detect_protocol
 from lumi.models.provider_store import resolve_classifier
@@ -75,9 +69,13 @@ async def call_model(state: LumiAgentState, runtime: Runtime[LumiAgentContext]) 
         # 不强制 tool_choice：模型自决何时调用，OnAgentStop 的 Stop hook 兜底拉回。
         # 强制 tool_choice="any" 会与 Anthropic thinking 冲突（400）。
 
+    # 每轮上下文块（env/agent/skill/记忆/LUMI.md）经 tool_call_chain 作为一条 HumanMessage
+    # 插在静态 system 之后（trim 之后插入 → 免截断；CC 同构，见 turn_context / _turn_context_inserter）。
+    turn_context = build_turn_context(runtime)
     chain = tool_call_chain(
         actual_tools,
         system_prompt=system_prompt,
+        turn_context=turn_context,
         model_name=model_name,
         max_tokens=get_config().config.agents.max_tokens,
         tool_choice=None,
@@ -85,8 +83,9 @@ async def call_model(state: LumiAgentState, runtime: Runtime[LumiAgentContext]) 
     )
     iterations = state.get("iterations", 1)
 
-    # Anthropic 模型：为对话消息注入缓存断点（滑动窗口策略）
     messages = list(state["messages"])
+
+    # Anthropic 模型：为对话消息注入缓存断点（滑动窗口策略）
     if detect_protocol(model_name) == "anthropic":
         inject_message_cache_breakpoints(messages)
 
@@ -694,18 +693,11 @@ async def summarizer(
         f"[Summarizer] 压缩完成，{len(summarized_ids)} 条消息，PTL 重试 {ptl_retries} 次"
     )
 
-    # 摘要前置到末条 Human；压缩抹掉了历史里的 skill/agent/system 提示，须重新注入
+    # 摘要前置到末条 Human。env/skill/agent/记忆 等 reminder 不在此重注入——它们由下游
+    # CallModel 每轮 prepend 的瞬态上下文消息承载（见 turn_context），压缩后的下一次
+    # CallModel 自带最新上下文，无需在持久历史里重建。
     last_human = original_messages[-1]
     new_last_human = inject_summary_into_message(last_human, summary_text)
-
-    skills, _ = SkillChangeDetector.get_instance().check()
-    if skills:
-        new_last_human = inject_skills_into_message(new_last_human, skills)
-    if _agent_tool_available(runtime):
-        agents, _ = AgentChangeDetector.get_instance().check()
-        if agents:
-            new_last_human = inject_agents_into_message(new_last_human, agents)
-    new_last_human = inject_system_info_into_message(new_last_human)
 
     return {
         "messages": [RemoveMessage(id=mid) for mid in summarized_ids]
@@ -713,80 +705,23 @@ async def summarizer(
     }
 
 
-def _agent_tool_available(runtime: Runtime[LumiAgentContext]) -> bool:
-    """当前 agent 实际是否持有 agent 工具——决定是否注入「可用 agent 列表」reminder。
-
-    直接看工具集而非 depth 代理：达委派上限被 _child_tools 剔除、或 agent 配置 tools
-    白名单显式排除 agent，都会使工具集不含 agent；此时注入列表会诱导模型调用不存在的
-    工具。以实际工具集为准可同时覆盖这两种情形。
-    """
-    return any(t.name == "agent" for t in runtime.context.tools)
-
-
 async def preprocess_messages(
     state: LumiAgentState, runtime: Runtime[LumiAgentContext]
 ) -> dict:
-    """消息预处理节点，在调用模型前执行以下操作:
+    """消息预处理节点：清理不完整的工具调用、重置工具取消标记。
 
-    1. 清理不完整的工具调用
-    2. 技能/agent 动态注入（变更或首条消息时将列表注入最后一条用户消息）
-
-    历史压缩已搬到下游 ``Summarizer`` 节点（串行 ``Preprocess → Summarizer → CallModel``）
-    当轮就地完成，此处不再处理摘要。
+    env / agent / skill / 记忆 / LUMI.md 等 reminder 已改由 ``call_model`` 每轮 prepend
+    一条瞬态上下文消息承载（见 :mod:`turn_context`），此处不再注入。历史压缩在下游
+    ``Summarizer`` 节点完成。
     """
     messages = state["messages"]
-    result_messages = []
     updates: dict = {}
 
     # 重置工具取消标记
     if state.get("tool_cancelled"):
         updates["tool_cancelled"] = False
 
-    # 1. 清理不完整的工具调用
-    result_messages.extend(cleanup_incomplete_tool_calls(messages))
-
-    # 2. 技能动态注入 + 系统信息注入
-    last_human = None
-    for msg in reversed(messages):
-        if isinstance(msg, HumanMessage):
-            last_human = msg
-            break
-
-    if last_human is not None:
-        new_msg = last_human
-        need_replace = False
-        human_count = sum(1 for m in messages if isinstance(m, HumanMessage))
-        first_message = human_count <= 1
-
-        # 技能变更时注入技能列表
-        skills, skills_changed = SkillChangeDetector.get_instance().check()
-        if skills_changed and skills:
-            new_msg = inject_skills_into_message(new_msg, skills)
-            need_replace = True
-
-        # agent 列表注入：首条消息或变更时。子代理是全新 messages、不继承父对话里
-        # 已注入的 reminder（且 detector 单例的 changed 早被主 agent 首轮消费），故必须
-        # 按首条门控而非仅变更，否则可委派的子代理拿不到可用代理名。先判工具集（廉价）
-        # 再 check()（目录扫描），无 agent 工具者直接跳过。
-        if _agent_tool_available(runtime):
-            agents, agents_changed = AgentChangeDetector.get_instance().check()
-            if agents and (agents_changed or first_message):
-                new_msg = inject_agents_into_message(new_msg, agents)
-                need_replace = True
-
-        # 首条消息注入系统环境信息 + 记忆索引/项目说明
-        if first_message:
-            new_msg = inject_system_info_into_message(new_msg)
-            new_msg = inject_memory_context_into_message(
-                new_msg,
-                get_authorized_directory(),
-                include_memory=runtime.context.memory_enabled,
-            )
-            need_replace = True
-
-        if need_replace:
-            result_messages.append(RemoveMessage(id=last_human.id))
-            result_messages.append(new_msg)
+    result_messages = cleanup_incomplete_tool_calls(messages)
 
     if result_messages or updates:
         return {"messages": result_messages, **updates}

@@ -14,10 +14,8 @@ from hypothesis import given, settings
 from hypothesis import strategies as st
 from langchain_core.messages import HumanMessage
 
-from lumi.agents.core.preprocessing.skills import (
-    format_skill_reminder,
-    inject_skills_into_message,
-)
+from lumi.agents.core.node_helpers.messages import inject_text_into_message
+from lumi.agents.core.preprocessing.skills import format_skill_reminder
 from lumi.agents.tools.loader import SkillConfig
 
 # --- 共用策略定义 ---
@@ -153,8 +151,9 @@ def test_inject_prepends_reminder_and_preserves_original(
     # 深拷贝原始消息用于后续比较
     original_content = copy.deepcopy(message.content)
 
-    # 执行注入
-    new_message = inject_skills_into_message(message, skills)
+    # 执行注入（turn_context 已不再用 inject_*_into_message，此处直接验证底层
+    # inject_text_into_message 的 prepend + 不可变契约——它仍由 summary 注入在用）
+    new_message = inject_text_into_message(message, format_skill_reminder(skills))
 
     # 1. 原始消息 content 未被修改
     assert message.content == original_content, "原始消息的 content 不应被修改"

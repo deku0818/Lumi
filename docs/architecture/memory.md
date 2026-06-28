@@ -42,10 +42,19 @@
 
 1. **行为说明 → 系统提示词**：`create_agent(enable_memory=True)` 时把 `build_memory_instructions`
    追加到系统提示词尾部，并 `ensure_memory_dir`。
-2. **`MEMORY.md` 索引 + `LUMI.md` → 首条 user 消息**：`preprocessing/memory.py` 的
-   `inject_memory_context_into_message`，挂在 `preprocess_messages` 的 `first_message` 分支
-   （与 `system_info` 并列，复用 `format_reminder` 包 `<system-reminder>`）。`MEMORY.md` 受
-   `context.memory_enabled` 门控，`LUMI.md` 不受。
+2. **`MEMORY.md` 索引 + `LUMI.md`（+ env/agent/skill）→ 每轮上下文块**：`preprocessing/turn_context.py`
+   的 `build_turn_context(runtime)` 把这几样组装成一段确定性文本，`call_model` 每轮经
+   `tool_call_chain(turn_context=...)` 注入——**作为一条 `HumanMessage` 插在静态 system 之后**
+   （`chain._turn_context_inserter`，在 `my_trim_messages` **之后**插入）。Claude Code 同构
+   （system prompt + 上下文作 user 消息）。三点考量：① 在 trim 之后插入 → 不被 `strategy="last"`
+   截掉（重负载 tool loop 也保得住）；② 是 `HumanMessage` 而非第二条 `SystemMessage` → 避开
+   OpenAI 兼容 provider 不支持连续 system 的问题；③ 静态 system 保持纯净（Anthropic 带 `cache_control`）
+   → 成为所有 provider 都能命中的独立缓存单元，改 `MEMORY.md`/`LUMI.md` 不冲掉它。
+   内容**确定性构建**（agent/skill 按名排序、无时间字段），不变则逐字节一致 → 稳定缓存前缀。
+   `MEMORY.md` 受 `context.memory_enabled` 门控，`LUMI.md` 不受。
+
+   > 取代了最初「`preprocess_messages` 首条注入 + `summarizer` 压缩重注入 + detector changed 门控」
+   > 三处分散逻辑——「注入时机」维度被消除，skill 漏首条 / 记忆丢压缩 / 单例 changed 失真一并不存在。
 3. **写入免审批 carve-out**：`routing.route_decision` 在 bypass-immune 之后短路——写记忆目录的
    `write`/`edit` 所有 tool_mode 直接 `ToolExecutor`（项目根取 `get_authorized_directory()`，
    与注入同源）；同时 `engine._rebuild_boundary` 把记忆目录并入工作区边界，使 `validate_path` 放行。

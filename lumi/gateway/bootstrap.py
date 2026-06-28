@@ -24,10 +24,8 @@ from lumi.utils.logger import logger
 async def gateway_process():
     """进程级运行时上下文：进入时启动共享子系统，退出时收尾。任何 channel 复用。"""
     from lumi.models import catalog
-    from lumi.utils.patches import apply_all
     from lumi.utils.read_config import get_config
 
-    apply_all()
     get_config().apply_env()
 
     # 后台刷新 models.dev 模型目录（思考能力 + context_length 数据源）。

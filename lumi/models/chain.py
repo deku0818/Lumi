@@ -6,12 +6,13 @@ import anthropic
 import httpx
 import openai
 from langchain_anthropic import ChatAnthropic
-from langchain_core.messages import SystemMessage, trim_messages
+from langchain_core.messages import HumanMessage, SystemMessage, trim_messages
 from langchain_core.prompts import (
     ChatPromptTemplate,
     HumanMessagePromptTemplate,
     MessagesPlaceholder,
 )
+from langchain_core.runnables import RunnableLambda
 from pydantic import BaseModel
 
 from lumi.models.cache import CACHE_CONTROL
@@ -138,6 +139,7 @@ def tool_call_chain(
     use_cache: bool = True,
     tool_choice: str | dict | None = None,
     apply_effort: bool = False,
+    turn_context: str | None = None,
     **llm_params,
 ):
     """
@@ -180,6 +182,8 @@ def tool_call_chain(
     else:
         llm_with_tools = llm.bind_tools(tools)
 
+    # 系统消息 = **纯静态** system_prompt（Anthropic 带 cache_control 断点）。保持纯净、字节恒定，
+    # 使其成为所有 provider（含消息级缓存的兼容 provider）都能可靠命中的独立缓存单元。
     messages = []
     if system_prompt:
         if isinstance(llm, ChatAnthropic):
@@ -200,5 +204,26 @@ def tool_call_chain(
     messages.append(MessagesPlaceholder(variable_name="messages"))
 
     prompt = ChatPromptTemplate.from_messages(messages)
-    chain = prompt | my_trim_messages() | llm_with_tools
+    chain = prompt | my_trim_messages()
+    # 每轮上下文块（env/agent/skill/记忆/LUMI.md）作为一条 HumanMessage 插在 system 之后——
+    # **在 trim 之后插入**，故永不被 strategy="last" 截掉（修 finding #1）；是 human 而非第二条
+    # system，避开兼容 provider 不支持连续 system 的问题；静态 system 保持纯净独立缓存。CC 同构。
+    if turn_context:
+        chain = chain | _turn_context_inserter(turn_context)
+    chain = chain | llm_with_tools
     return _with_retry(chain, _API_ERRORS)
+
+
+def _turn_context_inserter(turn_context: str) -> RunnableLambda:
+    """返回一个 Runnable：把 turn_context 作为 HumanMessage 插到所有 system 之后、历史之前。
+
+    放在 ``| my_trim_messages()`` 之后，故 turn_context 不参与截断、永不丢失。
+    """
+
+    def _insert(messages: list) -> list:
+        i = 0
+        while i < len(messages) and isinstance(messages[i], SystemMessage):
+            i += 1
+        return [*messages[:i], HumanMessage(content=turn_context), *messages[i:]]
+
+    return RunnableLambda(_insert)

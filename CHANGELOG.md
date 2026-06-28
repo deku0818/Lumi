@@ -3,8 +3,8 @@
 ## [0.2.10] - 2026-06-28
 
 ### Added
-- **持久记忆系统（仅主动写入）** — 新增 `lumi/agents/memory/`：模型在对话中自己 write/edit 记忆文件，按项目隔离落在 `~/.lumi/memory/projects/<项目>/`（`MEMORY.md` 索引 + 各 topic `.md`，frontmatter 分四类 user/feedback/project/reference）。记忆「行为说明」追加到主 agent 系统提示词，`MEMORY.md` 索引随首条消息以 `<system-reminder>` 注入上下文（管线同 `system_info`）。写记忆目录的 `write`/`edit` 所有模式自动放行不打断对话（DENY / bypass-immune / 执行模式策略仍在其之前生效），记忆目录并入工作区边界使 `validate_path` 放行。移植自 Claude Code memdir 的精简版，**刻意不做**后台提取 / autoDream / 召回旁路
-- **`LUMI.md` 项目根说明注入** — 类比 CLAUDE.md：读项目根的 `LUMI.md` 随首条消息注入上下文（主 + 子 agent 均注入，与「是否启用记忆」解耦），承载「这个项目要什么」。`LUMI.md` 已加入 `.gitignore`（内容随项目/开发者而异，本地维护）
+- **持久记忆系统（仅主动写入）** — 新增 `lumi/agents/memory/`：模型在对话中自己 write/edit 记忆文件，按项目隔离落在 `~/.lumi/memory/projects/<项目>/`（`MEMORY.md` 索引 + 各 topic `.md`，frontmatter 分四类 user/feedback/project/reference）。记忆「行为说明」追加到主 agent 系统提示词，`MEMORY.md` 索引 + `LUMI.md` + env/agent/skill 列表每轮经 `turn_context` 作为一条 `HumanMessage` 注入（插在静态 system 之后、`trim` 之后；Claude Code 同构，免截断 + 静态 system 独立缓存）。写记忆目录的 `write`/`edit` 所有模式自动放行不打断对话（DENY / bypass-immune / 执行模式策略仍在其之前生效），记忆目录并入工作区边界使 `validate_path` 放行。移植自 Claude Code memdir 的精简版，**刻意不做**后台提取 / autoDream / 召回旁路
+- **`LUMI.md` 项目根说明注入** — 类比 CLAUDE.md：读项目根的 `LUMI.md`，随上述 `turn_context` 块注入上下文（主 + 子 agent 均注入，与「是否启用记忆」解耦），承载「这个项目要什么」。`LUMI.md` 已加入 `.gitignore`（内容随项目/开发者而异，本地维护）
 
 ### Changed
 - **`create_agent(enable_memory=...)` 默认 False（opt-in）** — 持久记忆有副作用（写盘 / 改 prompt / 注入上下文 / 写入免审批），只有面向用户的对话入口 `bridge` 显式 `enable_memory=True`；子 agent / workflow / cron 走默认 False 天然干净，新增调用方也默认安全

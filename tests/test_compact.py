@@ -183,3 +183,70 @@ def test_circuit_expires_after_reset_seconds(monkeypatch):
     assert is_circuit_open(tid, 3, 600)
     clock["now"] += 601  # 超过 reset 窗口
     assert not is_circuit_open(tid, 3, 600)
+
+
+# ─────────────────────── summarizer 只注入摘要 ───────────────────────
+
+
+def _human_text(msg) -> str:
+    """取 HumanMessage 的全部文本（content 可能是 str 或 block 列表）。"""
+    if isinstance(msg.content, str):
+        return msg.content
+    return "".join(b.get("text", "") for b in msg.content if isinstance(b, dict))
+
+
+async def test_summarizer_injects_summary_not_context(monkeypatch):
+    """压缩只把摘要塞进末条 Human；env/skill/agent/记忆等 reminder 不在此重注入——
+    它们由下游 call_model 每轮 prepend 的瞬态上下文消息承载（见 turn_context）。"""
+    from types import SimpleNamespace
+    from unittest.mock import patch
+
+    from langchain_core.messages import AIMessage, HumanMessage
+
+    from lumi.agents.core import nodes
+
+    messages = [
+        HumanMessage(content="m1", id="h1"),
+        AIMessage(content="a1", id="a1"),
+        HumanMessage(content="m2", id="h2"),
+        AIMessage(content="a2", id="a2"),
+        HumanMessage(content="现在的问题", id="h3"),
+    ]
+    runtime = SimpleNamespace(
+        context=SimpleNamespace(
+            tools=[], system_prompt="SYS", model_name="x", memory_enabled=True
+        )
+    )
+    fake_config = SimpleNamespace(
+        config=SimpleNamespace(
+            token=SimpleNamespace(
+                context_length=1000,
+                summary_threshold=0.5,
+                summary_failure_circuit_threshold=3,
+                summary_circuit_reset_seconds=60,
+                summary_ptl_retry_max=2,
+                summary_ptl_retry_drop_ratio=0.3,
+            )
+        ),
+        load_prompt=lambda name: "SUMMARY PROMPT",
+    )
+    with (
+        patch.object(nodes, "get_config", return_value=fake_config),
+        patch.object(nodes, "context_window_tokens", return_value=10**9),
+        patch.object(nodes, "tool_call_chain", return_value=object()),
+        patch.object(
+            nodes,
+            "summarize_with_ptl_retry",
+            new=AsyncMock(return_value=("SUMMARY_TEXT", 0)),
+        ),
+    ):
+        result = await nodes.summarizer(
+            {"messages": messages}, runtime, {"configurable": {"thread_id": "tm"}}
+        )
+
+    new_human = [m for m in result["messages"] if isinstance(m, HumanMessage)][-1]
+    text = _human_text(new_human)
+    assert "<summary>" in text and "SUMMARY_TEXT" in text  # 摘要已注入
+    assert (
+        "system-reminder" not in text
+    )  # 上下文 reminder 不在压缩消息里（交给 call_model）

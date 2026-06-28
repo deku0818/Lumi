@@ -11,9 +11,6 @@ import platform
 import shutil
 import sys
 
-from langchain_core.messages import HumanMessage
-
-from lumi.agents.core.node_helpers.messages import inject_text_into_message
 from lumi.agents.permissions.workspace import get_authorized_directory
 
 
@@ -47,11 +44,3 @@ def format_system_reminder(info: dict[str, str] | None = None) -> str:
 
     body = "\n".join(f"- {k}: {v}" for k, v in info.items() if v)
     return f"<system-reminder>\n用户当前系统环境信息\n{body}\n</system-reminder>\n"
-
-
-def inject_system_info_into_message(
-    message: HumanMessage,
-    info: dict[str, str] | None = None,
-) -> HumanMessage:
-    """将系统信息 ``<system-reminder>`` 块注入到用户消息 content 最前面，返回新消息。"""
-    return inject_text_into_message(message, format_system_reminder(info))
