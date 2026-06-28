@@ -90,11 +90,14 @@ async def agent(
     available_tools = _child_tools(all_tools, child_depth, max_depth)
 
     # 创建并执行 agent（子 agent 不使用 checkpointer，复用主 agent 权限引擎）
+    # enable_memory=False：子 agent 是临时执行单元，不注入持久记忆（MEMORY.md +
+    # 行为说明），保持上下文干净；项目说明 LUMI.md 仍由 preprocess 注入。
     lumi_agent, context = await create_agent(
         tools=available_tools,
         system_prompt=agent_config.system_prompt,
         model_name=agent_config.model or None,
         permission_engine=runtime.context.permission_engine,
+        enable_memory=False,
     )
 
     if run_in_background:

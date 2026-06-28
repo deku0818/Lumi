@@ -24,15 +24,22 @@ _TEST_SKILLS = [
 
 @pytest.fixture(autouse=True)
 def _mute_agent_injection():
-    """本文件只验证 skill 注入；让 agent 检测器返回空，避免其 system-reminder 干扰断言。"""
-    with patch("lumi.agents.core.nodes.AgentChangeDetector") as mock_cls:
+    """本文件只验证 skill 注入；让 agent 检测器返回空、记忆注入 no-op，
+    避免其 system-reminder 干扰断言（记忆注入会读真实 LUMI.md / ~/.lumi）。"""
+    with (
+        patch("lumi.agents.core.nodes.AgentChangeDetector") as mock_cls,
+        patch(
+            "lumi.agents.core.nodes.inject_memory_context_into_message",
+            side_effect=lambda msg, *a, **k: msg,
+        ),
+    ):
         mock_cls.get_instance.return_value.check.return_value = ([], False)
         yield
 
 
 def _runtime() -> SimpleNamespace:
     """假 runtime（preprocess_messages 需要）；本文件 agent 已静默，工具集内容无关。"""
-    return SimpleNamespace(context=SimpleNamespace(tools=[]))
+    return SimpleNamespace(context=SimpleNamespace(tools=[], memory_enabled=False))
 
 
 def _make_state(messages: list) -> dict:

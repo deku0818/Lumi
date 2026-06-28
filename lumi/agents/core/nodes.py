@@ -33,6 +33,7 @@ from lumi.agents.core.preprocessing.compact import (
     strip_images_from_messages,
     summarize_with_ptl_retry,
 )
+from lumi.agents.core.preprocessing.memory import inject_memory_context_into_message
 from lumi.agents.core.preprocessing.skill_detector import SkillChangeDetector
 from lumi.agents.core.preprocessing.skills import inject_skills_into_message
 from lumi.agents.core.preprocessing.summary import inject_summary_into_message
@@ -50,6 +51,7 @@ from lumi.agents.core.structured_tool import (
 )
 from lumi.agents.permissions.models import PermissionDecision
 from lumi.agents.permissions.routing import route_decision
+from lumi.agents.permissions.workspace import get_authorized_directory
 from lumi.models.chain import structured_output, tool_call_chain
 from lumi.models.manager import detect_protocol
 from lumi.models.provider_store import resolve_classifier
@@ -772,9 +774,14 @@ async def preprocess_messages(
                 new_msg = inject_agents_into_message(new_msg, agents)
                 need_replace = True
 
-        # 首条消息注入系统环境信息
+        # 首条消息注入系统环境信息 + 记忆索引/项目说明
         if first_message:
             new_msg = inject_system_info_into_message(new_msg)
+            new_msg = inject_memory_context_into_message(
+                new_msg,
+                get_authorized_directory(),
+                include_memory=runtime.context.memory_enabled,
+            )
             need_replace = True
 
         if need_replace:

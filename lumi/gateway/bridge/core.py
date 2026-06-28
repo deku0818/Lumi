@@ -191,10 +191,13 @@ class AgentBridge:
             from lumi.agents.tools import get_tools
 
             tools = await get_tools(disabled_tools=disabled_tools)
+        # enable_memory=True：bridge 是唯一面向用户的对话入口，持久记忆只在此处 opt-in
+        # （子 agent / workflow / cron 走 create_agent 默认 False，天然不带记忆）。
         self._agent, self._context = await create_agent(
             checkpoint=agents_config.checkpoint,
             project_dir=target,
             tools=tools,
+            enable_memory=True,
         )
         # 注入在途审批 Broker（与 permission_engine 同源，事后赋值，零改 create_agent 签名）
         self._context.approval_broker = self._broker

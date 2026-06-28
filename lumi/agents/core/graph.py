@@ -250,6 +250,7 @@ async def create_agent(
     permission_engine: PermissionEngine | None = None,
     checkpointer: BaseCheckpointSaver | None = None,
     project_dir: Path | None = None,
+    enable_memory: bool = False,
 ) -> tuple["LumiAgent", LumiAgentContext]:
     """创建 LumiAgent 及其上下文的工厂函数
 
@@ -268,6 +269,9 @@ async def create_agent(
         project_dir: 权限引擎绑定的项目根目录（None 时用进程 cwd）。项目随会话
                      绑定后由调用方显式传入，新建引擎时不再依赖进程 cwd。
                      hooks 已改为按会话经 contextvar 注入，此处不再加载。
+        enable_memory: 是否为本 agent 启用持久记忆（默认 False，opt-in）。持久记忆有副作用
+                       （写磁盘 / 改系统提示词 / 注入上下文 / 写入免审批），故只有面向用户的
+                       对话入口（bridge）显式传 True；子 agent、workflow、cron 等天然不带记忆。
 
     Returns:
         (agent, context) 元组
@@ -280,6 +284,18 @@ async def create_agent(
         system_prompt = config.load_system_prompt()
     if model_name is None:
         model_name = provider_store.resolve().model
+
+    # 启用记忆：确保记忆目录存在，并把记忆行为说明追加到主 agent 系统提示词尾部。
+    # 记忆目录按会话项目根（project_dir，未传则进程 cwd）隔离，与权限引擎同源。
+    if enable_memory:
+        from lumi.agents.memory import build_memory_instructions, ensure_memory_dir
+
+        # 记忆目录 key 由 memory_dir 内部 resolve，此处不必重复 resolve。
+        mem_dir = ensure_memory_dir(project_dir or Path.cwd())
+        instructions = build_memory_instructions(mem_dir)
+        system_prompt = (
+            f"{system_prompt}\n\n{instructions}" if system_prompt else instructions
+        )
 
     # 复用或新建权限引擎（项目根随会话绑定，调用方未传则退回进程 cwd）
     if permission_engine is None:
@@ -296,5 +312,6 @@ async def create_agent(
         system_prompt=system_prompt,
         model_name=model_name,
         permission_engine=permission_engine,
+        memory_enabled=enable_memory,
     )
     return agent, context

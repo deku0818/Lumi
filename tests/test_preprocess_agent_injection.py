@@ -26,8 +26,15 @@ _TEST_AGENTS = [
 
 @pytest.fixture(autouse=True)
 def _mute_skill_injection():
-    """本文件只验证 agent 注入；让 skill 检测器返回空，避免其 system-reminder 干扰断言。"""
-    with patch("lumi.agents.core.nodes.SkillChangeDetector") as mock_cls:
+    """本文件只验证 agent 注入；让 skill 检测器返回空、记忆注入 no-op，
+    避免其 system-reminder 干扰断言（记忆注入会读真实 LUMI.md / ~/.lumi）。"""
+    with (
+        patch("lumi.agents.core.nodes.SkillChangeDetector") as mock_cls,
+        patch(
+            "lumi.agents.core.nodes.inject_memory_context_into_message",
+            side_effect=lambda msg, *a, **k: msg,
+        ),
+    ):
         mock_cls.get_instance.return_value.check.return_value = ([], False)
         yield
 
@@ -37,7 +44,7 @@ def _runtime(has_agent: bool = True) -> SimpleNamespace:
     tools = [SimpleNamespace(name="bash"), SimpleNamespace(name="read")]
     if has_agent:
         tools.append(SimpleNamespace(name="agent"))
-    return SimpleNamespace(context=SimpleNamespace(tools=tools))
+    return SimpleNamespace(context=SimpleNamespace(tools=tools, memory_enabled=False))
 
 
 def _make_state(messages: list) -> dict:

@@ -23,6 +23,10 @@ class LumiAgentContext:
     """在途审批 Broker，由 bridge 在 create_agent 后注入（与 permission_engine 同源）。
     节点 / ask 工具经它 await 审批，替代 interrupt() 中断-恢复。子 agent 由 agent 工具
     从父 context 传播。无 bridge 的纯 graph 调用（headless）保持 None。"""
+    memory_enabled: bool = field(default=False)
+    """是否为本 agent 注入持久记忆（MEMORY.md 索引 + 系统提示词行为说明）。
+    默认 False（opt-in），与 create_agent 一致；仅 bridge 的主对话 agent 置 True。
+    项目说明 LUMI.md 不受此开关影响，主/子 agent 均注入。"""
 
 
 class LumiAgentState(TypedDict):

@@ -94,6 +94,11 @@ class PermissionEngine:
             else:
                 workspace_paths.append(self._project_dir / p)
         workspace_paths.extend(self._ephemeral_workspaces)
+        # 持久记忆目录（~/.lumi/memory/projects/<本项目>/）纳入边界：使 write/edit 能
+        # 写到项目外的记忆目录（validate_path 与边界检查同时放行）。免审批另由 routing 短路。
+        from lumi.agents.memory import memory_dir
+
+        workspace_paths.append(memory_dir(self._project_dir))
         self._boundary = WorkspaceBoundary(workspace_paths)
 
         # 同步到 filesystem 层的授权目录列表

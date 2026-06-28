@@ -9,6 +9,8 @@ wheels/
 # Virtual environments
 .venv
 .lumi
+# 项目根说明文件（持久记忆功能注入上下文）：内容随项目/开发者而异，本地维护不进仓库
+LUMI.md
 logs
 .claude
 test

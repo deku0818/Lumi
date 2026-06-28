@@ -8,17 +8,29 @@
 
 from __future__ import annotations
 
+from pathlib import Path
 from typing import TYPE_CHECKING
 
 from lumi.agents.core.structured_tool import is_internal_tool
+from lumi.agents.memory import is_memory_path
 from lumi.agents.permissions.mode_policy import check_policy, get_policy
 from lumi.agents.permissions.models import PermissionDecision
 from lumi.agents.permissions.safety import is_bypass_immune
+from lumi.agents.permissions.workspace import get_authorized_directory
 from lumi.agents.tools.capability import is_file_edit_tool, is_write_tool
 from lumi.utils.logger import logger
 
 if TYPE_CHECKING:
     from lumi.agents.permissions.engine import PermissionEngine
+
+
+def _is_memory_write(tc: dict, project_dir: Path) -> bool:
+    """该 tool_call 是否为写入本项目记忆目录的 write/edit。"""
+    name = tc.get("name", "")
+    if not is_file_edit_tool(name):
+        return False
+    file_path = tc.get("args", {}).get("file_path")
+    return isinstance(file_path, str) and is_memory_path(file_path, project_dir)
 
 
 def route_decision(
@@ -107,6 +119,13 @@ def route_decision(
         if immune:
             logger.warning("[SafetyCheck] Bypass-immune: %s", reason)
             return "HumanApproval"
+
+    # 持久记忆目录写入：所有模式自动放行（DENY / bypass-immune 已在上方短路，安全）。
+    # 记忆系统的价值在于不打断对话，故 write/edit 到 ~/.lumi/memory/<本项目>/ 不弹审批。
+    # 项目根取本 run 授权目录（与记忆注入同源），不依赖 engine 内部状态。
+    mem_project = get_authorized_directory()
+    if all(_is_memory_write(tc, mem_project) for tc in tool_calls):
+        return "ToolExecutor"
 
     # accept_edits 模式：文件编辑工具(write/edit)在工作区内自动放行
     if tool_mode == "accept_edits":
