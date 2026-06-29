@@ -1,7 +1,8 @@
 """飞书入站消息处理：解析事件 → 派生 thread → 忙时排队合并 → 驱动一次 agent run。
 
 支持纯文本 / post 富文本 / 图片（多模态内联）/ 文件（下载到 /tmp/lumi 经 <attached-file> 供
-read 读）；回复某条消息时一并带上被回复消息里的图片/文件。身份目录（显示名解析）暂不移植。
+read 读）；回复某条消息时一并带上被回复消息里的图片/文件。每条消息经身份目录解析发送者显示名
+（``channel.directory``），合并时以「姓名：」前缀标注，让 agent 在群聊里分得清谁说的。
 """
 
 from __future__ import annotations
@@ -52,6 +53,7 @@ class _Pending:
         default_factory=list
     )  # (owner_mid, key, name)
     reply_to: str = ""
+    sender_name: str = ""  # 发送者显示名（身份目录解析），合并渲染时作「姓名：」前缀
 
 
 def feishu_thread_id(chat_id: str) -> str:
@@ -187,15 +189,21 @@ def _media_placeholder(m: _Pending) -> str:
     return ""
 
 
+def _render(m: _Pending) -> str:
+    """单条消息渲染：有发送者则前缀「姓名：」；媒体-only 用占位保住存在感。"""
+    body = m.text or _media_placeholder(m)
+    return f"{m.sender_name}：{body}" if m.sender_name else body
+
+
 def merge_messages(batch: list[_Pending]) -> str:
-    """合并一批消息的文本：单条直接返回原文（不加任何东西）；多条加 reminder + 编号列表。
+    """合并一批消息的文本：单条直接返回原文（仅前缀发送者）；多条加 reminder + 编号列表。
 
     编号列表让 agent 看清每条边界与先后（单条本身含换行也不糊在一起）；媒体-only 的消息
-    用占位行保住顺序，图片/文件实体仍另行附带。
+    用占位行保住顺序，图片/文件实体仍另行附带。群聊里逐条带发送者，agent 才分得清谁说的。
     """
     if len(batch) == 1:
-        return batch[0].text
-    lines = [f"{i}. {m.text or _media_placeholder(m)}" for i, m in enumerate(batch, 1)]
+        return _render(batch[0])
+    lines = [f"{i}. {_render(m)}" for i, m in enumerate(batch, 1)]
     return _MERGE_REMINDER.format(n=len(batch)) + "\n".join(lines)
 
 
@@ -311,10 +319,26 @@ class FeishuInbound:
             if not text and not image_refs and not file_refs:
                 return
 
+            # 解析发送者显示名：群聊走群成员源、私聊走通讯录源；失败/取不到退兜底名。
+            sender_name = ""
+            try:
+                name_map = await ch.directory.resolve_senders_in_chat(
+                    chat_id if chat_type == "group" else None, [open_id]
+                )
+                sender_name = name_map.get(open_id, "")
+            except Exception:
+                logger.warning(f"Feishu: 解析发送者姓名失败 {open_id}", exc_info=True)
+
             thread_id = feishu_thread_id(chat_id)
             bridge = await ch.bridge_pool.get(thread_id)
             lock = ch.bridge_pool.lock(thread_id)
-            pending = _Pending(text, image_refs, file_refs, reply_to=message_id)
+            pending = _Pending(
+                text,
+                image_refs,
+                file_refs,
+                reply_to=message_id,
+                sender_name=sender_name,
+            )
 
             # 忙判与上锁相邻、其间无 await：事件循环上原子。忙时入队（上限 _MAX_QUEUE，
             # 满则丢弃并提示），由当前持锁者跑完后合并处理；空闲则当场上锁处理。

@@ -22,6 +22,7 @@ from typing import Any
 
 from lumi.gateway.channels.config import FeishuChannelConfig
 from lumi.gateway.channels.feishu.bridge_pool import BridgePool
+from lumi.gateway.channels.feishu.directory import FeishuDirectory
 from lumi.gateway.channels.feishu.inbound import FeishuInbound
 from lumi.gateway.channels.feishu.lark_call import lark_call
 from lumi.gateway.channels.feishu.streaming import FeishuStreaming
@@ -61,6 +62,7 @@ class FeishuChannel:
         )
         self._loop: asyncio.AbstractEventLoop | None = None
         self._bot_open_id: str | None = None
+        self._warmup_task: asyncio.Task | None = None  # 持引用防 GC，stop() 取消
         self._running = False
         self._error: str | None = (
             None  # 启动失败原因（未装 lark / 缺凭证 / 异常）→ UI 状态灯
@@ -69,6 +71,8 @@ class FeishuChannel:
         self.bridge_pool = bridge_pool or BridgePool(config.workspace)
         self.inbound = FeishuInbound(self)
         self.streaming = FeishuStreaming(self)
+        # 成员/群名解析（open_id → 显示名）：client 在 start() 注入，发送者前缀靠它解析。
+        self._directory = FeishuDirectory()
 
     # ── 暴露给子模块的只读句柄 ──
     @property
@@ -82,6 +86,10 @@ class FeishuChannel:
     @property
     def bot_open_id(self) -> str | None:
         return self._bot_open_id
+
+    @property
+    def directory(self) -> FeishuDirectory:
+        return self._directory
 
     def status(self) -> dict:
         """运行状态，供 UI 状态灯：error（启动失败）/ connecting / connected / stopped。
@@ -131,6 +139,7 @@ class FeishuChannel:
                 .log_level(lark.LogLevel.INFO)
                 .build()
             )
+            self._directory.set_client(self._client)
             event_handler = self._build_event_handler(lark)
             self._ws_client = lark.ws.Client(
                 app_id,
@@ -149,6 +158,9 @@ class FeishuChannel:
             if self._bot_open_id:
                 logger.info(f"Feishu bot open_id: {self._bot_open_id}")
             self.streaming.start_cleanup()
+            # 后台预热成员/群名缓存：best-effort、不阻断启动（失败只记 warning）。
+            # 存引用防止被 GC 中途销毁（事件循环只持弱引用），stop() 时取消。
+            self._warmup_task = asyncio.create_task(self._directory.warmup())
         except Exception as e:
             self._error = f"启动失败: {e}"
             self._running = False
@@ -209,6 +221,9 @@ class FeishuChannel:
         故关掉自动重连 + 从主线程停掉它的专属 loop，打断 start()，daemon 线程随之退出。
         """
         self._running = False
+        if self._warmup_task is not None:
+            self._warmup_task.cancel()  # 预热未完则中止，避免孤儿任务在将停的 loop 上跑
+            self._warmup_task = None
         if self._ws_client is not None:
             with suppress(Exception):
                 self._ws_client._auto_reconnect = False  # 断连后不再自动重连

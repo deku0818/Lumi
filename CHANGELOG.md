@@ -1,5 +1,14 @@
 # Changelog
 
+## [0.2.11] - 2026-06-30
+
+### Added
+- **飞书消息标注发送者姓名** — 新增 `channels/feishu/directory.py`（`FeishuDirectory`）+ `caching.py`（通用线程安全缓存 `CachingDirectory[K, V]`）：把 `open_id → 显示名`、`chat_id → 群名` 解析收敛到一处，群聊走群成员接口（`im.v1.chat_members.get`，不受通讯录可见范围限制、覆盖新人）、私聊走通讯录接口（`contact.v3.users.batch`），共享同一缓存。每条入站消息解析发送者挂到 `_Pending.sender_name`，合并渲染时以「姓名：」前缀标注（群聊与私聊都注入），让 agent 分得清谁说的。`channel.start()` 后台 `warmup()` 预热 bot 所在所有群 + 群成员（best-effort、不阻断启动），群成员补刷带 per-chat 冷却 + 空结果指数退避防狂刷。需应用权限 `im:chat` / `contact:user.base:readonly`，未授权则退化成兜底名 `用户_xxxxxx`
+
+### Fixed
+- **SOUL/AGENTS 提示词残留 frontmatter** — `load_system_prompt` 之前只 `.strip()` 不剥离 frontmatter，导致用户给 `SOUL.md`/`AGENTS.md` 加的 `---\nname/description\n---` 元数据被原样拼进系统提示词。抽出 `strip_frontmatter()`（`load_system_prompt` 与 `load_prompt` 共用），且把闭合 `---` 锚定到**独立整行**才剥离——正文里作分隔线用的 `---` 不再被误判截断
+- **飞书 warmup 后台任务可能被 GC / reload 后成孤儿** — `create_task` 结果存入 `self._warmup_task` 持引用（事件循环只持弱引用），`stop()` 取消之，避免预热任务中途被回收或在将停的 loop 上残留
+
 ## [0.2.10] - 2026-06-28
 
 ### Added

@@ -15,6 +15,21 @@ from lumi.utils.config.models import Config
 from lumi.utils.logger import logger
 
 
+def strip_frontmatter(content: str) -> str:
+    """剥离 Markdown 文件开头的 frontmatter（``---`` 包裹的元数据），返回正文。
+
+    frontmatter 仅用于标识/给人看（name、description 等），不应进入提示词。
+    要求首行恰为 ``---`` 且后续有一行**独立成行**的 ``---`` 作闭合才剥离；正文里
+    作分隔线用的 ``---`` 不会被误判。无 frontmatter 时原样返回。
+    """
+    lines = content.splitlines()
+    if lines and lines[0].strip() == "---":
+        for i in range(1, len(lines)):
+            if lines[i].strip() == "---":
+                return "\n".join(lines[i + 1 :]).strip()
+    return content.strip()
+
+
 class LumiConfig:
     """Lumi 配置管理器
 
@@ -197,7 +212,7 @@ class LumiConfig:
             if path is None:
                 continue
             try:
-                content = path.read_text(encoding="utf-8").strip()
+                content = strip_frontmatter(path.read_text(encoding="utf-8"))
             except (OSError, UnicodeDecodeError) as e:
                 raise ValueError(f"提示词文件读取失败: {path} ({e})") from e
             if content:
@@ -225,16 +240,7 @@ class LumiConfig:
         if not prompt_file.exists():
             return None
 
-        content = prompt_file.read_text(encoding="utf-8")
-
-        # 解析 Markdown frontmatter
-        if content.startswith("---"):
-            parts = content.split("---", 2)
-            if len(parts) >= 3:
-                # 返回 frontmatter 之后的内容
-                return parts[2].strip()
-
-        return content
+        return strip_frontmatter(prompt_file.read_text(encoding="utf-8"))
 
     def ensure_dirs(self):
         """确保所有配置目录存在"""
