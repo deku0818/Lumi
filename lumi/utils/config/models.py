@@ -230,6 +230,22 @@ class FilesystemConfig(BaseModel):
     )
 
 
+class AutoDreamConfig(BaseModel):
+    """后台 Dream（离线记忆综合）配置
+
+    会话结束（Stop hook）时按门控触发：把近期会话的零散记忆综合成连贯记忆。
+    仅 desktop 短会话；per-project 隔离。默认关闭（opt-in）。
+    """
+
+    enabled: bool = Field(default=False, description="是否启用后台 Dream 综合")
+    min_hours: float = Field(
+        default=24.0, description="距上次 dream 的最小间隔（小时，可小数，便于测试）"
+    )
+    min_sessions: int = Field(
+        default=5, description="自上次以来需积累的最小会话数（排除当前会话）"
+    )
+
+
 class Config(BaseModel):
     """主配置类"""
 
@@ -255,6 +271,9 @@ class Config(BaseModel):
     )
     filesystem: FilesystemConfig = Field(
         default_factory=FilesystemConfig, description="文件系统工具配置"
+    )
+    auto_dream: AutoDreamConfig = Field(
+        default_factory=AutoDreamConfig, description="后台 Dream（离线记忆综合）配置"
     )
     env: dict[str, str] = Field(
         default_factory=dict,

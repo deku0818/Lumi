@@ -7,9 +7,9 @@ from __future__ import annotations
 
 from pathlib import Path
 
-import yaml
 from pydantic import BaseModel, Field
 
+from lumi.utils.config.manager import parse_frontmatter
 from lumi.utils.logger import logger
 from lumi.utils.read_config import get_config
 
@@ -54,20 +54,10 @@ def _parse_md_file(file_path: str) -> dict[str, object] | None:
         logger.error(f"读取文件失败 {file_path}: {e}")
         return None
 
-    # 分离 YAML frontmatter 和正文
-    if not content.startswith("---"):
-        logger.warning(f"文件缺少 YAML frontmatter: {file_path}")
-        return None
-
-    parts = content.split("---", 2)
-    if len(parts) < 3:
-        logger.warning(f"文件格式不正确: {file_path}")
-        return None
-
-    try:
-        metadata: dict = yaml.safe_load(parts[1].strip()) or {}
-    except yaml.YAMLError as e:
-        logger.error(f"解析 YAML 失败 {file_path}: {e}")
+    # 分离 YAML frontmatter 和正文（与记忆索引规范化共用 parse_frontmatter）
+    metadata, body = parse_frontmatter(content)
+    if not metadata:
+        logger.warning(f"文件缺少有效 YAML frontmatter: {file_path}")
         return None
 
     # tools 支持 CSV 字符串和列表两种写法
@@ -83,7 +73,7 @@ def _parse_md_file(file_path: str) -> dict[str, object] | None:
         "description": metadata.get("description", ""),
         "model": metadata.get("model"),
         "tools": tools,
-        "prompt": parts[2].strip(),
+        "prompt": body,
         "raw_metadata": metadata,
     }
 

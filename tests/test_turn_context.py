@@ -95,7 +95,10 @@ def test_byte_stability_same_inputs(tmp_path, monkeypatch):
     proj = tmp_path / "proj"
     proj.mkdir()
     ensure_memory_dir(proj)
-    memory_entrypoint(proj).write_text("- [a](a.md) — x\n", encoding="utf-8")
+    # 带 [type · 绝对日期] 的新索引行格式：绝对日期是静态值，build 两次仍逐字节相同
+    memory_entrypoint(proj).write_text(
+        "- [a](a.md) [feedback · 2026-06-20] — x\n", encoding="utf-8"
+    )
     (proj / "LUMI.md").write_text("项目约定", encoding="utf-8")
 
     agents = [_cfg("b", "B"), _cfg("a", "A")]

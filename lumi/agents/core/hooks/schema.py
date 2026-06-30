@@ -45,6 +45,9 @@ class HookContext:
     config: RunnableConfig
     event: HookEvent
     payload: dict[str, Any] = field(default_factory=dict)
+    runtime: Any = None
+    """LangGraph ``Runtime[LumiAgentContext]``，由 ``on_agent_stop`` 传入；Stop hook 经它取
+    ``context``（system_prompt / permission_engine / memory_enabled）。其余事件可为 None。"""
 
 
 @dataclass(frozen=True)

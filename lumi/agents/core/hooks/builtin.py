@@ -79,3 +79,11 @@ async def structured_output_stop_hook(ctx: HookContext) -> HookResult:
 
 
 register_hook("Stop", structured_output_stop_hook)
+
+
+# 后台记忆综合（auto dream）：会话结束按门控触发离线综合。dream 模块顶层仅轻量依赖
+# （schema / dream_lock / normalize），不引入 core.graph / tools（均延迟 import），故此处
+# import 不致循环。门控阶梯保证默认（config 关 / 子 agent / 非记忆会话）零成本放行。
+from lumi.agents.memory.dream import auto_dream_stop_hook  # noqa: E402
+
+register_hook("Stop", auto_dream_stop_hook)

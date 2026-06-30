@@ -55,14 +55,14 @@ def _hook(result):
 
 async def test_on_agent_stop_defaults_to_end():
     state = {"messages": [AIMessage(content="done")]}
-    cmd = await on_agent_stop(state, {})
+    cmd = await on_agent_stop(state, _runtime([]), {})
     assert cmd.goto == END
 
 
 async def test_on_agent_stop_hook_pulls_back_to_callmodel():
     state = {"messages": [AIMessage(content="想结束")]}
     with replace_hooks("Stop", [_hook(AdditionalContext("还没填结构化输出"))]):
-        cmd = await on_agent_stop(state, {})
+        cmd = await on_agent_stop(state, _runtime([]), {})
     assert cmd.goto == "CallModel"
     text = cmd.update["messages"][0].content[0]["text"]
     assert "还没填结构化输出" in text
@@ -71,7 +71,7 @@ async def test_on_agent_stop_hook_pulls_back_to_callmodel():
 async def test_on_agent_stop_hook_block_ends():
     state = {"messages": [AIMessage(content="x")]}
     with replace_hooks("Stop", [_hook(Block("策略终止"))]):
-        cmd = await on_agent_stop(state, {})
+        cmd = await on_agent_stop(state, _runtime([]), {})
     assert cmd.goto == END
     assert cmd.update["messages"][0].content == "策略终止"
 

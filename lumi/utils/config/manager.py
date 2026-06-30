@@ -15,19 +15,33 @@ from lumi.utils.config.models import Config
 from lumi.utils.logger import logger
 
 
-def strip_frontmatter(content: str) -> str:
-    """剥离 Markdown 文件开头的 frontmatter（``---`` 包裹的元数据），返回正文。
+def parse_frontmatter(content: str) -> tuple[dict, str]:
+    """解析 Markdown frontmatter → ``(metadata dict, 正文)``。
 
-    frontmatter 仅用于标识/给人看（name、description 等），不应进入提示词。
-    要求首行恰为 ``---`` 且后续有一行**独立成行**的 ``---`` 作闭合才剥离；正文里
-    作分隔线用的 ``---`` 不会被误判。无 frontmatter 时原样返回。
+    要求首行恰为 ``---`` 且后续有一行**独立成行**的 ``---`` 作闭合；正文里作分隔线用的
+    ``---`` 不会被误判。无 frontmatter 时返回 ``({}, 正文strip)``；YAML 解析失败或非
+    dict 也返回空 metadata，不抛。Agent/Skill 加载与记忆索引规范化共用同一套解析。
     """
     lines = content.splitlines()
     if lines and lines[0].strip() == "---":
         for i in range(1, len(lines)):
             if lines[i].strip() == "---":
-                return "\n".join(lines[i + 1 :]).strip()
-    return content.strip()
+                try:
+                    meta = yaml.safe_load("\n".join(lines[1:i])) or {}
+                except yaml.YAMLError:
+                    meta = {}
+                if not isinstance(meta, dict):
+                    meta = {}
+                return meta, "\n".join(lines[i + 1 :]).strip()
+    return {}, content.strip()
+
+
+def strip_frontmatter(content: str) -> str:
+    """剥离 Markdown 文件开头的 frontmatter，返回正文（见 :func:`parse_frontmatter`）。
+
+    frontmatter 仅用于标识/给人看（name、description 等），不应进入提示词。
+    """
+    return parse_frontmatter(content)[1]
 
 
 class LumiConfig:

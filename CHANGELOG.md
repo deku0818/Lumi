@@ -1,5 +1,16 @@
 # Changelog
 
+## [0.2.12] - 2026-06-30
+
+### Added
+- **后台 Dream（离线记忆综合）** — 会话结束的 Stop hook 按门控阶梯触发后台综合，把近期会话的零散记忆揉成连贯记忆（合并近重复、相对日期转绝对、规范化索引）。新增 `lumi/agents/memory/dream.py`（`auto_dream_stop_hook` 门控 + `_run_dream` runner）、`dream_lock.py`（per-project 锁文件 mtime=lastAt + 进程内 `_in_flight` 防并发 + 扫描节流）、`normalize.py`（`MEMORY.md` 索引行兜底补全 `[type · 日期]`）。综合方式：fork 主 agent（复用同一份 `system_prompt` + `enable_memory=True`，与主 agent 同构），喂入**当前会话完整 message** + 其他近期会话导出的扁平 text 供 grep。防自递归靠 `depth` 门（dream agent inputs 带 `depth=1`，其 stop 经首门放行）；全程 per-project 隔离（锁/会话门/导出/写入），reader checkpoint 与 bridge 同源（`agents.checkpoint`）。配置 `auto_dream`（`enabled` 默认 False / `min_hours` 24 / `min_sessions` 5）
+- **召回端裁决** — `MEMORY.md` 索引行带 `[type · 写入日期]`，同主题多条记忆并排、日期不同则矛盾在索引层就可见；`build_memory_instructions` 加「面对矛盾记忆的裁决」「记忆新鲜度（不对称）」两段指引（user/feedback 取写入日期最新、project/reference 行动前验证现状）。把冲突裁决从离线整理挪到召回时手握当前 query 的活模型，dream 只管综合不做自由判决
+
+### Changed
+- **`on_agent_stop` 透传 runtime** — 签名加 `runtime: Runtime[LumiAgentContext]` 并塞进新增的 `HookContext.runtime` 字段，作为 Stop hook 取运行时 context（`system_prompt` / `permission_engine` / `memory_enabled`）的唯一通道；现有 `structured_output_stop_hook` 不受影响
+- **提取 `parse_frontmatter` 共用** — `utils/config/manager.py` 新增 `parse_frontmatter(content) -> (metadata, 正文)`，统一 frontmatter 解析；`strip_frontmatter`、agent/skill 加载（`tools/loader.py`）、记忆索引规范化（`normalize.py`）三处共用，消除 `split("---")` + `yaml.safe_load` 的重复。`loader` 顺带升级为「独立成行 `---` 闭合」逻辑，正文里的分隔线 `---` 不再被误判
+- **`extract_messages_as_text`** — `sessions/message_text.py` 新增，把消息列表导出为扁平一行一消息文本（`[user]/[assistant]/[tool:X]`，换行折叠为 `⏎`）供 dream 的窄关键词 grep；比 `messages_to_dict` 的嵌套 JSON 对 grep 友好
+
 ## [0.2.11] - 2026-06-30
 
 ### Added

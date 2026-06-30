@@ -279,13 +279,22 @@ def after_tool_executor(state: LumiAgentState) -> str:
     return "CallModel"
 
 
-async def on_agent_stop(state: LumiAgentState, config: RunnableConfig) -> Command:
+async def on_agent_stop(
+    state: LumiAgentState,
+    runtime: Runtime[LumiAgentContext],
+    config: RunnableConfig,
+) -> Command:
     """模型未调任何工具想结束循环时的统一入口，分发 Stop hooks。
 
     first_intercept 语义：第一个返非 None 的 Stop hook 拦截（如结构化输出未完成
     时注入 reminder 拉回 CallModel）；全部放行则 Command(goto=END) 正常终止。
+
+    ``runtime`` 透传进 HookContext，供 auto_dream_stop_hook 取 context（system_prompt /
+    permission_engine / memory_enabled）——它是 dream hook 拿运行时上下文的唯一通道。
     """
-    ctx = HookContext(state=state, config=config, event="Stop", payload={})
+    ctx = HookContext(
+        state=state, config=config, event="Stop", payload={}, runtime=runtime
+    )
     cmd = await dispatch_hooks("Stop", ctx, default_goto="CallModel")
     return cmd if cmd is not None else Command(goto=END)
 
