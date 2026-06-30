@@ -75,19 +75,51 @@ async def auto_dream_stop_hook(ctx: HookContext) -> HookResult:
         return None
 
     # 全过 → fire-and-forget。会话门 + 导出 + 综合都在 task 内，不阻塞 stop 返回 END。
-    dream_lock.mark_in_flight(project_dir)
     workspace = (ctx.config.get("metadata") or {}).get("workspace_dir", "")
     current_thread = (ctx.config.get("configurable") or {}).get("thread_id", "")
+    _spawn_dream(
+        context, list(state.get("messages", [])), workspace, current_thread, force=False
+    )
+    return None
+
+
+def _spawn_dream(
+    context, current_messages, workspace: str, current_thread: str, *, force: bool
+) -> None:
+    """落 in_flight + fire-and-forget 启动后台 dream task（auto hook 与 /dream 共用）。"""
+    project_dir = context.permission_engine.project_dir
+    dream_lock.mark_in_flight(project_dir)
     task = asyncio.create_task(
-        _run_dream(context, list(state.get("messages", [])), workspace, current_thread)
+        _run_dream(context, current_messages, workspace, current_thread, force=force)
     )
     _DREAM_TASKS.add(task)
     task.add_done_callback(_DREAM_TASKS.discard)
     task.add_done_callback(lambda _t: dream_lock.clear_in_flight(project_dir))
-    return None
 
 
-async def _run_dream(context, current_messages, workspace: str, current_thread: str):
+async def start_dream(
+    context, current_messages, workspace: str, current_thread: str
+) -> str:
+    """主动触发 dream（/dream 命令）：绕过时间 / 会话 / 节流门，仅 in_flight 防重复。
+
+    返回给用户看的提示文本。force 跑：即便近期没有其他会话，也综合当前会话进记忆。
+    """
+    if not workspace or context.permission_engine is None:
+        return "当前会话未绑定项目，无法整理记忆。"
+    if dream_lock.is_in_flight(context.permission_engine.project_dir):
+        return "🌙 已有一次记忆整理在进行中，请稍候。"
+    _spawn_dream(context, current_messages, workspace, current_thread, force=True)
+    return "🌙 已在后台开始整理记忆（综合近期会话）——完成后会通知你。"
+
+
+async def _run_dream(
+    context,
+    current_messages,
+    workspace: str,
+    current_thread: str,
+    *,
+    force: bool = False,
+):
     """后台主体：会话门 → 导出其他会话 → 建 dream agent → 综合（bg-task 收尾）。"""
     # 延迟 import，避免 hook 模块顶层与 core.graph / tools 循环依赖
     from lumi.agents.core.graph import create_agent
@@ -117,7 +149,7 @@ async def _run_dream(context, current_messages, workspace: str, current_thread: 
             for s in sessions
             if s.thread_id != current_thread and s.created_at.timestamp() > last_at
         ]
-        if len(recent) < cfg.min_sessions:
+        if not force and len(recent) < cfg.min_sessions:
             logger.debug(
                 "[dream] 会话门未过：%d < %d，跳过", len(recent), cfg.min_sessions
             )

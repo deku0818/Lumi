@@ -1,5 +1,10 @@
 # Changelog
 
+## [0.2.13] - 2026-06-30
+
+### Added
+- **`/dream` 斜杠命令（主动触发记忆综合）** — 记忆会话里输 `/dream` 立即在后台跑一次 dream（force 绕过时间 / 会话 / 节流门，仅 `_in_flight` 防重复），不阻塞对话、完成走 bg-task 通知。复用自动 dream 的同一 runner（抽出 `_spawn_dream` 供 auto hook 与 /dream 共用、`_run_dream` 加 `force` 参数跳过会话门），即便近期无其他会话也综合当前会话。命令仅在启用记忆的会话经 `list_commands` 下发（`type:"system"`，前端零改动自动补全）；`stream_command` 入口统一设 `current_thread_id`，保证内置命令的后台任务完成通知归属本会话
+
 ## [0.2.12] - 2026-06-30
 
 ### Added

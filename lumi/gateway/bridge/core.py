@@ -242,6 +242,11 @@ class AgentBridge:
         """底层 LangGraph 编译图实例，用于 get_state 等操作"""
         return self._agent.graph if self._agent else None
 
+    @property
+    def _memory_enabled(self) -> bool:
+        """本会话是否启用持久记忆（决定 /dream 是否为内置命令）。"""
+        return self._context is not None and self._context.memory_enabled
+
     async def delete_thread(self, thread_id: str) -> None:
         """删除指定会话的全部 checkpoint（LangGraph 会话 + 文件级 checkpoint）。"""
         if not thread_id:
@@ -371,10 +376,20 @@ class AgentBridge:
         from lumi.agents.core.preprocessing.skill_detector import SkillChangeDetector
 
         skills = SkillChangeDetector.get_instance().peek()
-        return [
+        commands = [
             {"name": s.name, "description": s.description, "type": "skill"}
             for s in skills
         ]
+        # 主动整理记忆（/dream）：仅本会话启用记忆（主对话入口）时提供
+        if self._memory_enabled:
+            commands.append(
+                {
+                    "name": "dream",
+                    "description": "立即整理记忆（后台综合近期会话）",
+                    "type": "system",
+                }
+            )
+        return commands
 
     async def stream_command(
         self, name: str, extra_text: str = "", tool_mode: str = "default"
@@ -388,6 +403,17 @@ class AgentBridge:
             extra_text: 用户在命令后追加的文本。
             tool_mode: 工具审批模式（default / accept_edits / privileged）。
         """
+        # 命令路径统一设 thread 归属：内置命令分支（dream）不经 stream_response（current_thread_id
+        # 在那里才 set），缺了它后台 task 的完成通知会失归属（entry.thread_id=""）。skill 分支
+        # 随后又走 stream_response 重复设、同值无害。
+        current_thread_id.set(self.current_thread_id)
+        # /dream 仅在启用记忆的会话里是内置命令（与 list_commands 同条件）；非记忆会话
+        # 落到下方 skill 分发。同名 skill 被内置 /dream 屏蔽是期望行为（内置优先）。
+        if name == "dream" and self._memory_enabled:
+            async for event in self._stream_dream_command():
+                yield event
+            return
+
         from lumi.agents.core.preprocessing.skill_detector import SkillChangeDetector
 
         skill = next(
@@ -404,6 +430,26 @@ class AgentBridge:
         blocks = build_skill_command_blocks(name, content, extra_text)
         async for event in self.stream_response(blocks, tool_mode=tool_mode):
             yield event
+
+    async def _stream_dream_command(self) -> AsyncGenerator[BridgeEvent, None]:
+        """/dream：取当前会话完整历史，force 触发后台 dream，回一条提示消息。
+
+        dream 综合「当前会话完整 message + 其他近期会话 grep」——当前会话历史从 checkpoint
+        取（/dream 命令本身尚未入 state，正好不污染）；后台跑、完成走 bg-task 通知。
+        """
+        from lumi.agents.memory.dream import start_dream
+
+        messages: list = []
+        if self.graph is not None and self._config is not None:
+            snap = await self.graph.aget_state(self._config)
+            messages = list((snap.values or {}).get("messages", [])) if snap else []
+        text = await start_dream(
+            self._context, messages, self.workspace_dir, self.current_thread_id
+        )
+        yield BridgeEvent(kind=EventKind.MESSAGE_START)
+        yield BridgeEvent(kind=EventKind.MESSAGE_DELTA, text=text)
+        yield BridgeEvent(kind=EventKind.MESSAGE_COMPLETE)
+        yield BridgeEvent(kind=EventKind.TURN_COMPLETE)
 
     def drain_notifications(self, thread_id: str | None = None) -> list[str]:
         """取出待发送的后台任务完成通知。

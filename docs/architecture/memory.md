@@ -146,6 +146,10 @@
 
 > 导出格式选 text 而非 `messages_to_dict` 的 JSON：实测一条消息展开 8+ 行嵌套 JSON（`additional_kwargs:{}`/`response_metadata:{}`/`*:null` 等噪音），dream 的 gather 是「grep 窄关键词」，一行一消息的 text 对 `grep -A/-B` 友好得多；JSON 的保真（`tool_calls.args`）对综合偏好无价值反成噪音。`messages_to_dict` 留给需要保真序列化的场景（调试/回放）。
 
+## 主动触发（`/dream`）
+
+记忆会话里输 `/dream` 立即触发一次综合（`gateway/bridge/core.py` 的 `stream_command` 内置命令分支 → `dream.start_dream`）：**force** 绕过时间/会话/节流门，仅 `_in_flight` 防重复，后台跑、不阻塞对话、完成走 bg-task 通知。与自动 dream 共用同一 runner（抽出的 `_spawn_dream`），区别只在手动触发、且即便近期没有其他会话也综合当前会话。命令仅在 `memory_enabled` 会话由 `list_commands` 下发（`type:"system"`，前端零改动自动补全）；`stream_command` 入口统一 `current_thread_id.set` 保证内置命令的后台任务完成通知归属本会话。
+
 ## 配置（`auto_dream`）
 
 `enabled`（默认 **False**，opt-in）/ `min_hours`（24）/ `min_sessions`（5）。均可配置。
