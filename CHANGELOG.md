@@ -1,5 +1,11 @@
 # Changelog
 
+## [0.2.14] - 2026-07-01
+
+### Changed
+- **Dream 触发门：会话个数 → 新增 human message 数（per-会话游标）** — 会话门（`min_sessions`）反映不了真实内容量（5 个空会话也触发；一个老会话新加一句就用它全部旧消息撑过门 → 内容门形同虚设）。换成「自上次 dream 以来新增的真实 human message 数」`min_human_messages`（默认 10），用 **per-会话游标**算增量（`_human_delta` = Σ max(0, 当前−游标)），只数游标之后的新增、老会话旧消息不再污染。`SessionSummary` 加 `human_count`（搭 `list_sessions` 已有遍历便车、零额外 IO），`count_human_messages` 复用 `should_show_human_message` 排除注入、兼容 dict 格式消息。时间门（`min_hours`）+ 10 分钟扫描节流保留，把 human 门挡在每次 stop 的 hot path 之外
+- **Dream 持久状态迁独立 sqlite** — `last_at` + 游标从记忆目录的 `.dream-lock` 文件（清理 `.md` 记忆时易误删）迁到 `~/.lumi/checkpoints/dream_state.db`（`dream_meta`/`dream_cursor` 两表，同步 `sqlite3`）：不误删、原子写、`last_at` 从「文件 mtime 隐式」变显式列。`record_dream` 一个事务原子更新 last_at + 游标（`INSERT OR REPLACE` upsert，**保留 dormant 会话游标**——不再覆盖式 DELETE 误删没参与本轮的老会话游标）
+
 ## [0.2.13] - 2026-06-30
 
 ### Added

@@ -8,10 +8,14 @@ from __future__ import annotations
 from pathlib import Path
 from types import SimpleNamespace
 
+from langchain_core.messages import AIMessage, HumanMessage
+
 from lumi.agents.core.hooks.schema import HookContext
+from lumi.agents.core.meta_message import meta_human_message
 from lumi.agents.memory import dream as dream_mod
 from lumi.agents.memory import dream_lock
-from lumi.agents.memory.dream import auto_dream_stop_hook, start_dream
+from lumi.agents.memory.dream import _human_delta, auto_dream_stop_hook, start_dream
+from lumi.sessions.message_visibility import count_human_messages
 
 
 def _runtime(memory_enabled=True, engine=None):
@@ -86,3 +90,50 @@ async def test_start_dream_spawns_force(monkeypatch, tmp_path):
     r = await start_dream(_engine_ctx(tmp_path / "proj2"), [], "/proj", "t")
     assert spawned and spawned[0].get("force") is True
     assert "已在后台" in r
+
+
+# --- human 门 delta（_human_delta）---
+
+
+def test_delta_new_session():
+    """新会话无游标 → 全部真实 human 算新增。"""
+    assert _human_delta({"t": 3}, {}) == 3
+
+
+def test_delta_old_messages_not_polluting():
+    """老会话游标 50、当前 51 → 只算新增 1（旧消息不撑门，这是换 human 门的核心）。"""
+    assert _human_delta({"t": 51}, {"t": 50}) == 1
+
+
+def test_delta_max0_on_compact():
+    """compact 删消息致当前 < 游标 → max(0) 防负。"""
+    assert _human_delta({"t": 5}, {"t": 20}) == 0
+
+
+def test_delta_sum_multi():
+    """多会话求和：新会话 3 + 老会话新增 1 = 4（老会话的 50 条旧消息不计）。"""
+    assert _human_delta({"a": 3, "b": 51}, {"b": 50}) == 4
+
+
+# --- count_human_messages ---
+
+
+def test_count_human_excludes_meta():
+    """只数真实 HumanMessage，排除 meta/reminder 注入与 ai 消息。"""
+    msgs = [
+        HumanMessage("hi"),
+        AIMessage("ok"),
+        meta_human_message("reminder"),
+        HumanMessage("bye"),
+    ]
+    assert count_human_messages(msgs) == 2
+
+
+def test_count_human_dict_format():
+    """兼容 dict 格式消息（checkpoint 恢复路径可能是 dict，与 _extract_first_human_message 一致）。"""
+    msgs = [
+        {"type": "human", "content": "hi"},
+        {"type": "ai", "content": "ok"},
+        HumanMessage("bye"),
+    ]
+    assert count_human_messages(msgs) == 2

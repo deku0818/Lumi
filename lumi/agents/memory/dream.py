@@ -42,6 +42,15 @@ _SCAN_THROTTLE_SECONDS = 600
 _DREAM_TASKS: set[asyncio.Task] = set()
 
 
+def _human_delta(cur_human: dict[str, int], cursors: dict[str, int]) -> int:
+    """自上次游标以来新增的真实 human 总数。
+
+    per-会话取 ``max(0, 当前 - 游标)``：只数游标之后的新增（老会话旧消息不污染），
+    ``max(0)`` 防 compact 删消息致当前数小于游标。新会话游标缺省 0 → 全部算新增。
+    """
+    return sum(max(0, n - cursors.get(t, 0)) for t, n in cur_human.items())
+
+
 async def auto_dream_stop_hook(ctx: HookContext) -> HookResult:
     """Stop 时按门控阶梯触发后台 dream；廉价先判，任一不过 ``return None``（放行 END）。"""
     state = ctx.state
@@ -123,6 +132,7 @@ async def _run_dream(
     """后台主体：会话门 → 导出其他会话 → 建 dream agent → 综合（bg-task 收尾）。"""
     # 延迟 import，避免 hook 模块顶层与 core.graph / tools 循环依赖
     from lumi.agents.core.graph import create_agent
+    from lumi.sessions.message_visibility import count_human_messages
     from lumi.sessions.session_store import list_sessions
 
     engine = context.permission_engine
@@ -149,9 +159,19 @@ async def _run_dream(
             for s in sessions
             if s.thread_id != current_thread and s.created_at.timestamp() > last_at
         ]
-        if not force and len(recent) < cfg.min_sessions:
+        # human 门：数「自上次 dream 以来新增的真实 human message」。per-会话游标算 delta，
+        # 只数游标之后的新增——老会话的旧消息不再撑过门（否则内容门形同虚设）。当前会话从
+        # state 数，其他会话搭 list_sessions 便车的 human_count。
+        cursors = dream_lock.load_cursors(project_dir)
+        cur_human = {current_thread: count_human_messages(current_messages)} | {
+            s.thread_id: s.human_count for s in recent
+        }
+        total_new = _human_delta(cur_human, cursors)
+        if not force and total_new < cfg.min_human_messages:
             logger.debug(
-                "[dream] 会话门未过：%d < %d，跳过", len(recent), cfg.min_sessions
+                "[dream] human 门未过：新增 %d < %d，跳过",
+                total_new,
+                cfg.min_human_messages,
             )
             return
         transcript_dir = await _export_sessions(reader, recent, project_dir)
@@ -159,7 +179,9 @@ async def _run_dream(
         await reader.aclose()  # 复用 LumiAgent.aclose（= close_checkpointer）
 
     try:
-        await _consolidate(context, project_dir, current_messages, transcript_dir)
+        await _consolidate(
+            context, project_dir, current_messages, transcript_dir, cur_human
+        )
     finally:
         shutil.rmtree(transcript_dir, ignore_errors=True)
 
@@ -188,9 +210,12 @@ async def _export_sessions(reader, sessions, project_dir: Path) -> Path:
 
 
 async def _consolidate(
-    context, project_dir: Path, current_messages, transcript_dir: Path
+    context, project_dir: Path, current_messages, transcript_dir: Path, cur_human: dict
 ):
-    """建 dream agent（含记忆指令、只读+写记忆工具），fire-and-forget 经 bg-task 收尾。"""
+    """建 dream agent（含记忆指令、只读+写记忆工具），fire-and-forget 经 bg-task 收尾。
+
+    ``cur_human``：本次参与门控的各会话当前真实 human 数，dream 成功后写回游标。
+    """
     from lumi.agents.core.graph import create_agent
     from lumi.agents.core.hooks.dispatch import set_run_config_hooks
     from lumi.agents.core.response import extract_ainvoke_content
@@ -242,8 +267,8 @@ async def _consolidate(
         set_run_config_hooks(None)
         result = await agent.graph.ainvoke(inputs, context=ctx)
         normalize_memory_index(project_dir)  # 兜底规范化索引行的 [type · 日期]
-        # 综合成功才更新 lastAt：中途崩溃则不老化，下个周期重试（并发期间靠 _in_flight 挡）
-        dream_lock.touch_lock(project_dir)
+        # 综合成功才推进：一个事务原子更新 lastAt + 游标（失败则都不动，下个周期按旧游标重数）
+        dream_lock.record_dream(project_dir, cur_human)
         msgs = result.get("messages") or []
         return extract_ainvoke_content(msgs[-1].content) if msgs else "dream 完成"
 

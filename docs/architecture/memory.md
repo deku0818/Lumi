@@ -104,10 +104,11 @@
 
 1. **Stop hook** → 注册 `auto_dream_stop_hook` 进 `dispatch_hooks("Stop")`。廉价前置门：`memory_enabled` + 跳过 `output_schema` 轮 + config `auto_dream.enabled`。
 2. **低成本门控**（return 早，全在导出/fork 之前，per-project）：
-   - 时间门：距上次 dream（锁文件 mtime）≥ `min_hours`
-   - 会话门：`list_sessions(workspace=project)` 过滤后，`created_at > lastAt` 且非当前会话 ≥ `min_sessions`
-   - 并发锁：进程内 `_in_flight`（per-project key）+ 锁文件
-3. **达标落锁**：锁文件 mtime = now（即下次 lastAt），失败不回滚。
+   - 时间门：距上次 dream（sqlite `dream_meta.last_at`）≥ `min_hours`（挡住绝大多数 stop，把下面的 DB 查挡在 hot path 之外）
+   - 扫描节流：进程内 `_last_scan`，时间门长期满足时 10 分钟内不重复查 DB
+   - **human 门**（替代旧的会话个数门）：`list_sessions(workspace=project)` 筛 `created_at > lastAt` 的 recent，按 **per-会话游标**算「自上次 dream 以来新增的真实 human 数」`Σ max(0, 当前human − 游标)` ≥ `min_human_messages`。只数游标之后的新增——老会话旧消息不再撑过门（`SessionSummary.human_count` 搭 `list_sessions` 遍历便车、零额外 IO；`count_human_messages` 排除 meta/reminder）
+   - 并发锁：进程内 `_in_flight`（per-project key）
+3. **达标 → 跑 dream；成功后 `record_dream`**：一个事务原子更新 `dream_meta.last_at` + `dream_cursor` 游标（`INSERT OR REPLACE` upsert，保留 dormant 会话游标——不覆盖式误删）。
 4. **导出其他近期会话为 text** → 临时 `transcriptDir`。扁平一行一消息（`[user]/[assistant]/[tool:X]`，换行折叠），**复用 `lumi/sessions/message_text`**。**当前会话不导**（靠完整 message 进 dream）。
 5. **fork 当前主 agent → dream agent**：
    - system prompt = 主 agent **同一份**（`enable_memory=True`，记忆指令照常注入）—— **切病根①**
@@ -119,8 +120,8 @@
 7. **dream 四阶段**：orient → gather → consolidate → prune。重心 **synthesis**，**不做自由判决** —— **切病根③**。
 8. **收尾**：写/更新记忆 + 规范化 `MEMORY.md`（顺手补全索引行的 `type`+日期，见召回端）；清 `transcriptDir`。
 
-**Dream 全程 per-project**：锁、lastAt、会话门、导出、写入全部按当前 project 隔离，与记忆目录同构。
-- 锁/lastAt **必须** per-project（放 project 记忆目录下）：否则 project A 跑完 dream 更新全局 lastAt，B 的时间门永远跨不过去。
+**Dream 全程 per-project**：lastAt、游标、human 门、导出、写入全部按当前 project（sqlite 按 `project_key` 列隔离）。
+- lastAt/游标存独立 `~/.lumi/checkpoints/dream_state.db`（`dream_meta`/`dream_cursor` 两表，同步 `sqlite3`）：**不放记忆目录**避免清理 `.md` 时误删；原子写；`last_at` 从「文件 mtime 隐式」变显式列。丢失是软失败（退化重数、最坏多跑一次幂等 dream）。
 - 传 `list_sessions(workspace=...)` 用**原始 workspace 串**（config metadata 的 `workspace_dir`），**不 `resolve()`**——SQL 按存储串精确匹配，resolve 改写路径会一个会话都捞不到（旧版 code-review 踩过）。
 
 ## 读取侧 · 召回端裁决
@@ -152,9 +153,9 @@
 
 ## 配置（`auto_dream`）
 
-`enabled`（默认 **False**，opt-in）/ `min_hours`（24）/ `min_sessions`（5）。均可配置。
+`enabled`（默认 **False**，opt-in）/ `min_hours`（24）/ `min_human_messages`（10，自上次 dream 以来按 per-会话游标算的新增真实 human 数）。均可配置。
 
 ## 旧基建复用清单
 
-- **回来（可更简）**：transcript 导出（改 text、只导其他会话、复用 `message_text`）、门控阶梯、锁文件、bg-task 注册、记忆写入 carve-out。
+- **回来（可更简）**：transcript 导出（改 text、只导其他会话、复用 `message_text`）、门控阶梯、dream 状态持久化（sqlite `dream_state.db`）、bg-task 注册、记忆写入 carve-out。
 - **不回来**：内联 taxonomy（改复用 system prompt）、`enable_memory=False` 防递归（改 hook 隔离）、四阶段里的「自由判决」部分。

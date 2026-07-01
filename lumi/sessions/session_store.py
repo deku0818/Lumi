@@ -17,7 +17,10 @@ from dataclasses import dataclass
 from datetime import UTC, datetime
 from typing import TYPE_CHECKING, Any
 
-from lumi.sessions.message_visibility import should_show_human_message
+from lumi.sessions.message_visibility import (
+    count_human_messages,
+    should_show_human_message,
+)
 from lumi.sessions.text_cleaning import extract_display_text
 from lumi.utils.logger import logger
 from lumi.utils.thread_id import CRON_THREAD_PREFIX
@@ -43,6 +46,8 @@ class SessionSummary:
     created_at: datetime
     message_count: int
     workspace_dir: str = ""
+    human_count: int = 0
+    """真实用户消息数（排除 meta/reminder 注入）——dream 的 human 门据此算增量。"""
 
     @property
     def display_time(self) -> str:
@@ -251,6 +256,8 @@ def _summary_from_snapshot(thread_id: str, snapshot: Any) -> SessionSummary | No
         # StateSnapshot.created_at 是 ISO 8601 字符串
         created_at=_parse_created_at(snapshot.created_at),
         message_count=len(messages),
+        # 搭这趟遍历的便车数真实 human（dream human 门用），零额外 aget_state
+        human_count=count_human_messages(messages),
         # checkpoint 元数据里的项目目录；跨项目列表时供前端分组
         workspace_dir=(snapshot.metadata or {}).get("workspace_dir", ""),
     )
