@@ -16,7 +16,7 @@
 - **无 checkpointer**：子 Agent 不持久化状态，节省开销
 - **动态加载**：`agent` 工具描述/schema 静态，可用代理列表经 `<system-reminder>` 注入（与 skill 同款机制，见 `preprocessing/change_detector.py`），随 `.lumi/agents` 热更新；注入门控以「工具集是否含 `agent`」为准
 - **多层委派**：子 Agent 可继续委派下层子 Agent，深度由 `agents.max_delegation_depth` 限制（默认 3，主 Agent 为第 0 层，每委派 +1）；达上限的子 Agent 工具集中剔除 `agent` 工具、不能再往下委派（`0` = 禁止委派）。`depth` 经 `LumiAgentState` 逐层 +1 传播
-- **权限继承**：复用父级 `PermissionEngine`，`tool_mode` 从父状态继承
+- **权限继承**：复用父级 `PermissionEngine`，`tool_mode` 从父 context 继承（`context.tool_mode`，随父运行中的实时切换传播）
 - **模式策略**：readonly 模式下，子 Agent 创建时通过 `filter_tools_for_mode()` 静态过滤工具列表
 
 ## 模块

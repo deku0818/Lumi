@@ -70,7 +70,18 @@ async def test_url_image_references_url_without_saving(_tmp_uploads):
     assert not _tmp_uploads.exists()  # url 不落盘
 
 
-async def test_invalid_base64_skipped_keeps_block():
+def _has_raw_image(out):
+    return any(isinstance(b, dict) and b.get("type") == "image" for b in out)
+
+
+def _first_text(out):
+    return next(
+        b["text"] for b in out if isinstance(b, dict) and b.get("type") == "text"
+    )
+
+
+async def test_invalid_base64_dropped_with_placeholder():
+    # base64 解码失败：丢弃原始块、留文本占位，绝不把 raw base64 内联转发给模型
     bad = [
         {
             "type": "image",
@@ -82,11 +93,12 @@ async def test_invalid_base64_skipped_keeps_block():
         }
     ]
     out = await umod.persist_image_blocks(bad)
-    assert out == bad  # 无有效引用 → 原样返回
+    assert not _has_raw_image(out)
+    assert "已跳过" in _first_text(out)
 
 
-async def test_oversized_image_skipped(_tmp_uploads):
-    # 超过 _MAX_IMAGE_BYTES 上限的图片被跳过、不落盘、原 block 保留（无有效引用→原样返回）
+async def test_oversized_image_dropped_with_placeholder(_tmp_uploads):
+    # 超过 _MAX_IMAGE_BYTES 上限：不落盘、丢弃原始块、留文本占位（不 raw 转发触发 API 400）
     huge = "A" * (
         (umod._MAX_IMAGE_BYTES + 1) * 4 // 3 + 8
     )  # base64 长度 → 解码后 > 上限
@@ -97,5 +109,6 @@ async def test_oversized_image_skipped(_tmp_uploads):
         }
     ]
     out = await umod.persist_image_blocks(content)
-    assert out == content
+    assert not _has_raw_image(out)  # 原始 base64 块被丢弃，不泄漏给模型
+    assert "已跳过" in _first_text(out)
     assert not _tmp_uploads.exists()

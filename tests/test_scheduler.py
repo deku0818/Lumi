@@ -246,10 +246,9 @@ async def test_execute_job_sets_tool_mode_privileged(scheduler: Scheduler) -> No
     with patch(_PATCH_CREATE_AGENT, mock_create):
         await scheduler._execute_job(job)
 
-    # 验证 ainvoke 的 inputs 包含 tool_mode="privileged"
-    call_args = mock_create.return_value[0].graph.ainvoke.call_args
-    inputs = call_args[0][0]
-    assert inputs["tool_mode"] == "privileged"
+    # tool_mode 已移家 context：验证 create_agent 返回的 context.tool_mode="privileged"
+    context = mock_create.return_value[1]
+    assert context.tool_mode == "privileged"
 
 
 async def test_execute_job_timeout(scheduler: Scheduler, run_log: RunLog) -> None:

@@ -1,5 +1,16 @@
 # Changelog
 
+## [0.2.17] - 2026-07-02
+
+### Added
+- **运行中实时切换工具审批模式** — 顶部审批模式选择器（default/accept_edits/privileged/auto）现在改一下就立即推后端（新增 `set_tool_mode` RPC + `Gateway.setToolMode`），对**当前运行轮的后续工具**即时生效，不必等下一条消息。新 RPC 刻意不持 `_run.lock`、不持久化——单字段幂等赋值只影响后续 `is_use_tool` 路由，实时切换正是需求本身
+
+### Changed
+- **`tool_mode` 从 state 迁到共享 `LumiAgentContext`** — state 是每个 super-step 的快照，运行中改不动；context 是所有节点共享的可变引用，bridge 改它后下一个节点立即读到，这才让上面的「运行中实时切换」成立。`human_approval` 的 `set_tool_mode` 直接改 context（不再走 `Command.update`）；子 agent / workflow / cron / dream / 后台 agent 一律从/向 `context.tool_mode` 继承设值，不再经 `inputs["tool_mode"]`
+
+### Fixed
+- **超大/无法解析的上传图片不再 raw 内联转发** — 图片存盘失败（超 50MB 或 base64 解码失败）时，旧逻辑保留原始 image block、把未压缩 raw base64 直发模型，会超上游图片大小上限触发 API 400；改为丢弃原始块、留文本占位「[图片过大或无法解析，已跳过]」
+
 ## [0.2.16] - 2026-07-01
 
 ### Fixed

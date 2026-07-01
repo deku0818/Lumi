@@ -425,9 +425,10 @@ class Scheduler:
             set_run_authorized_source_for(eng)
             proj = eng.project_dir if eng is not None else Path.cwd().resolve()
             set_run_config_hooks(build_config_hooks(proj))
+            # cron 无交互审批通道，固定 privileged（tool_mode 是 context 属性）
+            context.tool_mode = "privileged"
             inputs = {
                 "messages": [HumanMessage(content=job.prompt)],
-                "tool_mode": "privileged",
             }
             config = RunnableConfig(
                 recursion_limit=get_config().config.agents.recursion_limit,

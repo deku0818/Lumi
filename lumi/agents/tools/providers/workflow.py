@@ -160,7 +160,7 @@ async def workflow(
     engine = WorkflowEngine(
         script,
         permission_engine=runtime.context.permission_engine,
-        tool_mode=runtime.state.get("tool_mode", "default"),
+        tool_mode=runtime.context.tool_mode,
         args=args,
         name=name,
     )

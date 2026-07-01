@@ -339,14 +339,25 @@ class AgentBridge:
 
         # 新一轮对话，清理上一轮残留的 agent 追踪状态
         self._active_agent_runs.clear()
+        # tool_mode 是 context（运行时共享、可变）真相源：本轮 UI 选择写入，运行中经
+        # set_tool_mode 改它即对后续工具实时生效。不进 input_data（state 快照改不动）。
+        self._context.tool_mode = tool_mode
         msg = meta_human_message(content) if is_meta else HumanMessage(content=content)
         input_data = {
             "messages": [msg],
-            "tool_mode": tool_mode,
             "execution_mode": execution_mode,
         }
         async for event in self._stream(input_data):
             yield event
+
+    def set_tool_mode(self, mode: str) -> dict:
+        """运行中实时切换工具审批模式（用户仅切顶部选择器、不发消息时经此路径）。
+
+        直接改共享 context 的 tool_mode，对当前运行轮的**后续**工具调用立即生效；
+        已挂起的那一个审批仍由用户手动决定（不追溯）。
+        """
+        self._context.tool_mode = mode
+        return {"tool_mode": mode}
 
     # ── 模型供应商 profile（委派 ProviderService）──
 

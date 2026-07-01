@@ -89,9 +89,10 @@ async def persist_image_blocks(content: str | list) -> str | list:
                     src.get("media_type", "image/png"),
                     src.get("data", ""),
                 )
-                if path:
-                    refs.append(_ref(path))
-                    continue
+                # 存盘失败（超 50MB / 解码失败）：丢弃原始块并留文本占位，绝不把未压缩的
+                # raw base64 内联转发给模型（会超上游图片大小上限触发 API 400）。
+                refs.append(_ref(path) if path else "[图片过大或无法解析，已跳过]")
+                continue
             elif src.get("type") == "url" and src.get("url"):
                 refs.append(_ref(src["url"]))
                 continue

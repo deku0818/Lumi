@@ -39,7 +39,9 @@ def _state(tool_calls):
 def _runtime(decision=None, engine=None):
     return SimpleNamespace(
         context=SimpleNamespace(
-            permission_engine=engine, approval_broker=_FakeBroker(decision)
+            permission_engine=engine,
+            approval_broker=_FakeBroker(decision),
+            tool_mode="default",
         )
     )
 
@@ -59,11 +61,12 @@ async def test_approve_routes_to_tool_executor():
     ]
 
 
-async def test_approve_with_set_tool_mode_updates_state():
+async def test_approve_with_set_tool_mode_switches_context():
     rt = _runtime(decision={"decision": "approve", "set_tool_mode": "privileged"})
     cmd = await human_approval(_state(_TCS), rt)
     assert cmd.goto == "ToolExecutor"
-    assert cmd.update == {"tool_mode": "privileged"}
+    # set_tool_mode 现在改共享 context（运行时真相源），不再走 Command.update
+    assert rt.context.tool_mode == "privileged"
 
 
 async def test_reject_routes_to_end_with_message():

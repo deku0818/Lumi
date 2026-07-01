@@ -189,6 +189,11 @@ export class Gateway {
     return this.request<{ classifier: Classifier }>('set_classifier', { provider, model })
   }
 
+  // 运行中实时切换工具审批模式：改后端共享 context，对当前轮后续工具立即生效
+  setToolMode(toolMode: string): Promise<{ tool_mode: string }> {
+    return this.request<{ tool_mode: string }>('set_tool_mode', { tool_mode: toolMode })
+  }
+
   testProvider(
     baseUrl: string,
     apiKey: string,

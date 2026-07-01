@@ -82,8 +82,11 @@ def test_default_max_delegation_depth_is_three() -> None:
 
 def _make_runtime(depth: int) -> SimpleNamespace:
     return SimpleNamespace(
-        state={"depth": depth, "tool_mode": "default"},
-        context=SimpleNamespace(permission_engine=None, approval_broker=None),
+        state={"depth": depth},
+        # tool_mode 已移家 context（子 agent 从父 context.tool_mode 继承）
+        context=SimpleNamespace(
+            permission_engine=None, approval_broker=None, tool_mode="default"
+        ),
     )
 
 

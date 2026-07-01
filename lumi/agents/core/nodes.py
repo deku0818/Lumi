@@ -372,7 +372,7 @@ def is_use_tool(state: LumiAgentState, runtime: Runtime[LumiAgentContext]) -> st
 
     return route_decision(
         tool_calls,
-        state.get("tool_mode", "default"),
+        runtime.context.tool_mode,
         state.get("execution_mode", "normal"),
         runtime.context.permission_engine,
     )
@@ -456,14 +456,11 @@ async def human_approval(
 
     match decision:
         case "approve":
-            update: dict = {}
+            # tool_mode 是 context（运行时共享）属性，直接改即对后续工具生效——
+            # 无需经 Command.update 写 state（state 已无此字段）。
             if set_tool_mode:
-                update["tool_mode"] = set_tool_mode
-            return (
-                Command(goto="ToolExecutor", update=update)
-                if update
-                else Command(goto="ToolExecutor")
-            )
+                runtime.context.tool_mode = set_tool_mode
+            return Command(goto="ToolExecutor")
         case "cancel":
             messages = _build_reject_messages(
                 last_message.tool_calls,

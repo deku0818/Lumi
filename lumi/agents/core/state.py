@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from typing import TYPE_CHECKING, Annotated, Any, Literal, NotRequired, TypedDict
+from typing import TYPE_CHECKING, Annotated, Any, NotRequired, TypedDict
 
 if TYPE_CHECKING:
     from lumi.agents.permissions.engine import PermissionEngine
@@ -19,6 +19,15 @@ class LumiAgentContext:
     """模型名；连接（base_url / api_key）由 create_llm 按供应商 profile 解析。"""
     permission_engine: PermissionEngine | None = field(default=None)
     """PermissionEngine 实例，用于工具权限评估"""
+    tool_mode: str = field(default="default")
+    """工具审批模式（运行时真相源，所有节点共享同一 context 实例，bridge 侧可随时改）:
+    - "default": 权限引擎评估，未通过则由 TUI 询问用户审批
+    - "accept_edits": 文件编辑工具(write/edit)在工作区内自动放行，bash 等仍需审批
+    - "privileged": 权限引擎评估但自动放行，仅 bypass-immune 仍需审批
+    - "auto": AI 审批模式——本该问人的批次交分类器(AutoClassify 节点)裁决
+      approve/ask/reject；DENY 与 bypass-immune 仍免疫，强制走人工审批
+    放在 context（而非 state）：state 是每个 super-step 的快照，运行中改不动；context
+    是共享可变引用，bridge 改它后下一个节点 runtime.context 立即读到 → 支持运行中实时切换。"""
     approval_broker: ApprovalBroker | None = field(default=None)
     """在途审批 Broker，由 bridge 在 create_agent 后注入（与 permission_engine 同源）。
     节点 / ask 工具经它 await 审批，替代 interrupt() 中断-恢复。子 agent 由 agent 工具
@@ -32,14 +41,6 @@ class LumiAgentContext:
 class LumiAgentState(TypedDict):
     messages: Annotated[list, add_messages]
     iterations: int
-    tool_mode: Literal["default", "accept_edits", "privileged", "auto"]
-    """工具审批模式:
-    - "default": 权限引擎评估，未通过则由 TUI 询问用户审批
-    - "accept_edits": 文件编辑工具(write/edit)在工作区内自动放行，bash 等仍需审批
-    - "privileged": 权限引擎评估但自动放行，仅 bypass-immune 仍需审批
-    - "auto": AI 审批模式——本该问人的批次交分类器(AutoClassify 节点)裁决
-      approve/ask/reject；DENY 与 bypass-immune 仍免疫，强制走人工审批
-    """
     todos: NotRequired[list]
     """任务列表，用于追踪复杂任务的执行进度"""
     output_schema: NotRequired[dict[str, Any]]

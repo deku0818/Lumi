@@ -267,9 +267,10 @@ class WorkflowEngine:
             self._emit_progress()  # 进入运行（running++）
 
             try:
+                # tool_mode 是 context 属性（继承自父 workflow 调用时的父 context 值）
+                context.tool_mode = self._tool_mode
                 inputs: dict[str, Any] = {
                     "messages": [HumanMessage(content=prompt)],
-                    "tool_mode": self._tool_mode,
                 }
                 if schema:
                     inputs["output_schema"] = schema

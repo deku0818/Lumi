@@ -296,8 +296,10 @@ export default function App() {
   const [classifier, setClassifier] = useState<Classifier>({})
   // 工具审批模式：随后续 send/run 透传给后端（auto=AI 审批分类器）
   const [toolMode, setToolMode] = useState<ToolMode>('default')
-  // 活动会话所在机器：ModelPicker 机器标识 + 设置改模型时判断是否需刷新聊天侧
-  const [activeBackend, setActiveBackend] = useState('local')
+  // 活动会话所在机器：ModelPicker 机器标识 + 设置改模型时判断是否需刷新聊天侧。
+  // 从复合 active key 派生（机器 id 已编码其中），杜绝与 active 脱同步——任何切换路径
+  // （activate / 通知点击等）只要 setActive 就自动带对机器。空/无分隔符归一到 'local'。
+  const activeBackend = keyBackend(active) || 'local'
   const [showSettings, setShowSettings] = useState(false)
   const openSettings = useCallback(() => setShowSettings(true), [])
   const [pendingDelete, setPendingDelete] = useState<SessionMeta | null>(null)
@@ -359,7 +361,6 @@ export default function App() {
   const sessionsRef = useRef<SessionMeta[]>([])
   // 每台机器一条「控制连接」：用于跨机器 fan-out list_sessions / 全局 RPC（非 chat 流）
   const controlConns = useRef<Record<string, Gateway>>({})
-  const activeBackendRef = useRef('local')
   const cronJobsRef = useRef<CronJob[]>([]) // 据此把定时操作路由到任务所属机器
   const scrollRef = useRef<HTMLDivElement>(null)
   // 聊天流「粘底」：贴底时才跟随流式输出，用户上滚即放手（不再抢界面）。
@@ -384,9 +385,6 @@ export default function App() {
   useEffect(() => {
     sessionsRef.current = sessions
   }, [sessions])
-  useEffect(() => {
-    activeBackendRef.current = activeBackend
-  }, [activeBackend])
   useEffect(() => {
     cronJobsRef.current = cronJobs
   }, [cronJobs])
@@ -1077,7 +1075,7 @@ export default function App() {
   // 设置面板改了某机器的 provider 后回调：若改的正是当前会话机器，刷新聊天侧
   const onProvidersChanged = useCallback(
     (machine: string) => {
-      if (machine === activeBackendRef.current) loadProviders()
+      if (machine === (keyBackend(activeRef.current) || 'local')) loadProviders()
     },
     [loadProviders],
   )
@@ -1097,8 +1095,7 @@ export default function App() {
         void connsRef.current[key].switchSession(target!, workspace)
       }
       if (workspace) setWorkspaceDir(workspace)
-      setActiveBackend(backend) // 记录活动会话所在机器（ModelPicker 跟随它）
-      setActive(key)
+      setActive(key) // activeBackend 从 active 派生，无需单独设
       setConn('open')
       setPreview(null) // 切会话关掉预览，避免上个会话的文件残留
       return key
@@ -1684,7 +1681,12 @@ export default function App() {
           />
           <ApprovalModePicker
             value={toolMode}
-            onChange={setToolMode}
+            onChange={(m) => {
+              setToolMode(m)
+              // 实时推后端：改运行中会话的共享 context，对当前轮后续工具立即生效。
+              // 未连接时静默失败——下一条消息自带 tool_mode 会重设 context。
+              connsRef.current[active]?.setToolMode(m).catch(() => {})
+            }}
             classifierLabel={classifier.provider ? classifier.model : undefined}
           />
         </div>

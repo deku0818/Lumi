@@ -34,10 +34,10 @@ def _make_engine(rules=None, project_dir: Path | None = None) -> PermissionEngin
     return engine
 
 
-def _runtime(engine):
-    """最小 runtime stub：只需 runtime.context.permission_engine。"""
+def _runtime(engine, tool_mode="default"):
+    """最小 runtime stub：is_use_tool 读 context.permission_engine + context.tool_mode。"""
     return types.SimpleNamespace(
-        context=types.SimpleNamespace(permission_engine=engine)
+        context=types.SimpleNamespace(permission_engine=engine, tool_mode=tool_mode)
     )
 
 
@@ -45,20 +45,22 @@ def _tc(name: str, args: dict | None = None, tc_id: str = "call_1") -> dict:
     return {"name": name, "args": args or {}, "id": tc_id}
 
 
-def _state(tool_calls, tool_mode="default", execution_mode="normal", messages=None):
-    """构造 state dict，messages 末尾是一条带 tool_calls 的 AIMessage。"""
+def _state(tool_calls, execution_mode="normal", messages=None):
+    """构造 state dict，messages 末尾是一条带 tool_calls 的 AIMessage。
+
+    tool_mode 已移家 context（见 _runtime），不再进 state。
+    """
     if messages is None:
         messages = [AIMessage(content="", tool_calls=tool_calls or [])]
     return {
         "messages": messages,
-        "tool_mode": tool_mode,
         "execution_mode": execution_mode,
     }
 
 
 def _route(tool_calls, *, engine=None, tool_mode="default", execution_mode="normal"):
-    state = _state(tool_calls, tool_mode=tool_mode, execution_mode=execution_mode)
-    return is_use_tool(state, _runtime(engine))
+    state = _state(tool_calls, execution_mode=execution_mode)
+    return is_use_tool(state, _runtime(engine, tool_mode))
 
 
 # 项目目录内的合法写入路径（供 accept_edits / 边界用例复用）

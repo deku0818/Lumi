@@ -276,6 +276,12 @@ async def _set_classifier(session: GatewaySession, params: dict) -> dict:
         )
 
 
+# 刻意不持 _run.lock：与 set_provider 相反，这里就是要在运行中改共享 context 的
+# tool_mode——单字段幂等赋值，只影响后续 is_use_tool 路由判决，实时切换正是需求本身。
+async def _set_tool_mode(session: GatewaySession, params: dict) -> dict:
+    return session._bridge.set_tool_mode(params.get("tool_mode", "default"))
+
+
 # chdir / 权限边界 / shell 会话都是进程级状态，须与运行中的轮次互斥
 async def _set_workspace(session: GatewaySession, params: dict) -> dict:
     async with session._run.lock:
@@ -462,6 +468,7 @@ _RPC_HANDLERS = {
     "delete_provider": _delete_provider,
     "set_effort": _set_effort,
     "set_classifier": _set_classifier,
+    "set_tool_mode": _set_tool_mode,
     "set_workspace": _set_workspace,
     "list_projects": _list_projects,
     "add_project": _add_project,

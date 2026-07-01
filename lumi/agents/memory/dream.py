@@ -239,12 +239,13 @@ async def _consolidate(
         checkpoint=None,
         project_dir=project_dir,
     )
+    # dream agent 无交互审批通道，固定 privileged（tool_mode 是 context 属性）
+    ctx.tool_mode = "privileged"
     inputs = {
         "messages": [
             *current_messages,
             HumanMessage(content=_consolidation_prompt(transcript_dir)),
         ],
-        "tool_mode": "privileged",
         "depth": 1,  # 防自递归：dream agent 的 stop 经 depth 门直接放行
     }
 

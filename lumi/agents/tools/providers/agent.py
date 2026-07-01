@@ -107,11 +107,11 @@ async def agent(
     # 白嫖 custom event 自带的 parent_ids 归属到本子代理卡片（旧 interrupt 无 checkpointer
     # 不可用，broker 才解锁子代理审批）。后台子代理 detached、无活流可挂，刻意不传播。
     context.approval_broker = runtime.context.approval_broker
-    tool_mode: str = runtime.state.get("tool_mode", "default")
-    logger.debug("[agent tool] resolved tool_mode=%s", tool_mode)
+    # tool_mode 是 context 属性：从父 context 继承实时值（父运行中切换的模式随之传播）
+    context.tool_mode = runtime.context.tool_mode
+    logger.debug("[agent tool] resolved tool_mode=%s", context.tool_mode)
     inputs = {
         "messages": [HumanMessage(content=prompt)],
-        "tool_mode": tool_mode,
         "depth": child_depth,
     }
     # 子代理独立 shell：cd/env 不污染父与兄弟代理；用完即回收
@@ -155,9 +155,10 @@ def _start_background_agent(
     registry = get_task_registry()
     registry.register(entry)
 
+    # 后台子 agent 无交互审批通道，固定 privileged（tool_mode 是 context 属性）
+    context.tool_mode = "privileged"
     inputs = {
         "messages": [HumanMessage(content=prompt)],
-        "tool_mode": "privileged",
         "depth": depth,
     }
     async_task = asyncio.create_task(
