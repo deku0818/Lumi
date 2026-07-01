@@ -21,7 +21,7 @@ import {
 } from 'lucide-react'
 import type { ConnState } from '../gateway'
 import type { CronJob, SessionMeta } from '../types'
-import { basename, machineColor, machineName } from '@/lib/utils'
+import { basename, machineColor, machineName, sessionKey, beOf } from '@/lib/utils'
 import { useI18n, LANGS } from '../i18n'
 import {
   DropdownMenu,
@@ -44,6 +44,10 @@ const CONN_DOT: Record<ConnState, string> = {
 
 type Machine = { id: string; name: string; enabled?: boolean }
 const CAP = 5 // 每个项目分组默认显示的会话数（置顶/进行中不计入，永远显示）
+
+// 会话前端身份 = backend + thread_id（与 App 的 store/activity key 同源）；飞书群在
+// 本地/远程 thread 同名，只用 thread_id 会串号，故一律取复合 key。
+const keyOf = (s: SessionMeta) => sessionKey(beOf(s), s.thread_id)
 
 const projName = (dir: string) => (dir ? basename(dir) : '默认')
 
@@ -106,7 +110,7 @@ export const Sidebar = memo(function Sidebar({
   machineConn,
   recentLimit,
   workspaceDir,
-  currentThread,
+  currentKey,
   conn,
   model,
   activity,
@@ -134,7 +138,7 @@ export const Sidebar = memo(function Sidebar({
   machineConn: Record<string, ConnState>
   recentLimit: number
   workspaceDir: string
-  currentThread: string
+  currentKey: string
   conn: ConnState
   model: string
   activity: Record<string, 'running' | 'attention'>
@@ -145,15 +149,15 @@ export const Sidebar = memo(function Sidebar({
   cronRunning: string[]
   activeCronJob: string | null
   onOpenCronJob: (jobId: string) => void
-  onSelect: (threadId: string) => void
+  onSelect: (threadId: string, backend: string) => void
   onNew: () => void
   onNewChat: (backend: string) => void
   onReconnectMachine: (backend: string) => void
   onOpenProjects: () => void
   onOpenScheduled: () => void
   onOpenSettings: () => void
-  onPin: (threadId: string, pinned: boolean) => void
-  onRename: (threadId: string, title: string) => void
+  onPin: (threadId: string, backend: string, pinned: boolean) => void
+  onRename: (threadId: string, backend: string, title: string) => void
   onDelete: (session: SessionMeta) => void
 }) {
   const { t } = useI18n()
@@ -180,10 +184,10 @@ export const Sidebar = memo(function Sidebar({
 
   const row = (s: SessionMeta, dotColor?: string) => (
     <SessionRow
-      key={s.thread_id}
+      key={keyOf(s)}
       session={s}
-      active={s.thread_id === currentThread}
-      state={activity[s.thread_id]}
+      active={keyOf(s) === currentKey}
+      state={activity[keyOf(s)]}
       name={dispName(s)}
       dotColor={dotColor}
       dotName={dotColor ? machineName(s.backend || 'local', machines) : undefined}
@@ -201,10 +205,10 @@ export const Sidebar = memo(function Sidebar({
     const collapsed = !!collapsedP[key]
     const keep = new Set<string>()
     pg.sessions.forEach((s, i) => {
-      if (s.pinned || activity[s.thread_id] || i < CAP) keep.add(s.thread_id)
+      if (s.pinned || activity[keyOf(s)] || i < CAP) keep.add(keyOf(s))
     })
     const showAll = expanded[key]
-    const shown = showAll ? pg.sessions : pg.sessions.filter((s) => keep.has(s.thread_id))
+    const shown = showAll ? pg.sessions : pg.sessions.filter((s) => keep.has(keyOf(s)))
     const hidden = pg.sessions.length - shown.length
     return (
       <div key={key}>
@@ -615,13 +619,14 @@ function SessionRow({
   dotColor?: string // 多机时行尾机器色点（仅颜色，无文字）
   dotName?: string // 色点的机器名（tooltip）
   query?: string
-  onSelect: (threadId: string) => void
-  onPin: (threadId: string, pinned: boolean) => void
-  onRename: (threadId: string, title: string) => void
+  onSelect: (threadId: string, backend: string) => void
+  onPin: (threadId: string, backend: string, pinned: boolean) => void
+  onRename: (threadId: string, backend: string, title: string) => void
   onDelete: (session: SessionMeta) => void
 }) {
   const { t } = useI18n()
   const [renaming, setRenaming] = useState(false)
+  const backend = session.backend || 'local'
 
   if (renaming) {
     return (
@@ -629,7 +634,7 @@ function SessionRow({
         initial={name}
         onResolve={(title) => {
           setRenaming(false)
-          if (title !== null) onRename(session.thread_id, title)
+          if (title !== null) onRename(session.thread_id, backend, title)
         }}
       />
     )
@@ -638,7 +643,7 @@ function SessionRow({
   return (
     <div className="group relative">
       <button
-        onClick={() => onSelect(session.thread_id)}
+        onClick={() => onSelect(session.thread_id, backend)}
         title={session.first_message}
         className={`flex w-full items-center gap-1.5 pl-2.5 pr-8 py-2 rounded-lg text-sm transition ${
           active ? 'bg-surface text-ink' : 'text-ink/80 hover:bg-surface/60 hover:text-ink'
@@ -670,7 +675,7 @@ function SessionRow({
           </button>
         </DropdownMenuTrigger>
         <DropdownMenuContent align="start" className="w-44">
-          <DropdownMenuItem onClick={() => onPin(session.thread_id, !session.pinned)}>
+          <DropdownMenuItem onClick={() => onPin(session.thread_id, backend, !session.pinned)}>
             {session.pinned ? <PinOff /> : <Pin />}
             {session.pinned ? t('sidebar.unpin') : t('sidebar.pin')}
           </DropdownMenuItem>

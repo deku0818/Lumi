@@ -1,5 +1,11 @@
 # Changelog
 
+## [0.2.16] - 2026-07-01
+
+### Fixed
+- **多 server 同名飞书群会话在 client 里塌缩成一条** — 本地 + 远程两台 server 都配飞书渠道并进了同一个群时，desktop client 把两台机器上「群 A 的会话」当成同一条（状态互相污染、发消息路由到错的 server、React key 冲突）。根因：IM channel 的 thread_id 按 `feishu-{chat_id}` **确定性派生**，同一个群在两台 server 上得到相同 thread_id，而前端一切（`store`/`connsRef`/`folderStore`/`active`/侧栏渲染/`activity`）都以裸 thread_id 为键。改为**前端会话身份 = `backend + thread_id` 复合键**（`sessionKey`/`keyThread`/`keyBackend`/`beOf` in `desktop/src/lib/utils.ts`），发给后端的 wire 仍是裸 thread_id；`handleEvent` 按连接所属机器归位事件，pin/重命名/删除/选中一律按 thread + backend 精确匹配，不再连带误伤另一台机器的同名会话
+- **后台任务多机串号** — `bg_tasks.update` / `list_bg_tasks` 是各机器进程级快照，旧代码整列 `setBgTasks` 会互相覆盖；改为 `replaceBackendTasks` **按机器分段替换**（`BgTask` 前端加 `backend` 标记），`activeBgTasks` 按 thread + backend 双重过滤，stop/dismiss/clear 按当前机器圈定
+
 ## [0.2.15] - 2026-07-01
 
 ### Added

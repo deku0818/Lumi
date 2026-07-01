@@ -238,6 +238,9 @@ export interface BgTask {
   agent_count: number | null
   output_file: string
   progress: BgTaskProgress | null
+  // 前端收到 bg_tasks.update / list_bg_tasks 时打的机器标记（后端不发）：bg 任务是各机器
+  // 进程级快照，同一飞书群 thread 在多台机器上会重名，靠 backend 区分归属。
+  backend?: string
 }
 
 // present_files 工具返回的单个文件元数据（后端 providers/present_files.py）。

@@ -59,7 +59,7 @@ import { Composer } from './components/Composer'
 import { toast } from './components/Toast'
 import { isCommandMode, parseCommand, matchCommands } from './slash'
 import { toolDiff, type DiffLine } from './diff'
-import { clip, basename, fmtTokens, machineColor, machineName } from '@/lib/utils'
+import { clip, basename, fmtTokens, machineColor, machineName, sessionKey, keyThread, keyBackend, beOf } from '@/lib/utils'
 import { Button } from '@/components/ui/button'
 import { useTheme } from './theme'
 import { useUiFont } from './font'
@@ -233,6 +233,14 @@ const emptySession = (items: Item[] = []): SessionState => ({
   approval: [],
   clarify: [],
 })
+
+// 用某机器的最新 bg 任务快照替换该机器那一段（保留其它机器的），并给每条打上 backend 标记。
+// bg_tasks.update / list_bg_tasks 是各机器进程级快照（仅含本机任务），直接整列 setBgTasks 会
+// 抹掉别机的任务，故按机器分段替换——同一飞书群 thread 在多台机器上会重名，靠 backend 区分。
+const replaceBackendTasks = (prev: BgTask[], backend: string, tasks: BgTask[]): BgTask[] => [
+  ...prev.filter((t) => beOf(t) !== backend),
+  ...tasks.map((t) => ({ ...t, backend })),
+]
 
 // 按 approval_id 把挂起的审批/澄清入队；已在队列则原样返回（重连后端会重发，去重保幂等）。
 const enqueuePending = (
@@ -456,16 +464,18 @@ export default function App() {
 
   // 按 session_id 路由事件到对应会话（后台会话的事件也能正确归位）。
   // gateway.ready 不会到达这里——openConnection 的 onEvent 已拦截处理。
-  const handleEvent = useCallback((ev: WireEvent) => {
+  // backend：本连接所属机器 id。会话身份 = sessionKey(backend, thread)，故事件也按此归位——
+  // 否则本地/远程同名 thread（飞书群）的事件会串进同一条会话。
+  const handleEvent = useCallback((ev: WireEvent, backend: string) => {
     const { type, payload } = ev
     // cron 事件是进程级广播（与会话无关），在 session 路由之前单独处理
     if (type === 'cron.running') {
       setCronRunning(payload.names ?? [])
       return
     }
-    // 后台任务变更：全量快照广播（进程级），整列替换，前端按 thread 过滤展示
+    // 后台任务变更：本机进程级快照广播，只替换本机那一段（保留别机的），前端按 thread + backend 过滤展示
     if (type === 'bg_tasks.update') {
-      setBgTasks(payload.tasks ?? [])
+      setBgTasks((prev) => replaceBackendTasks(prev, backend, payload.tasks ?? []))
       return
     }
     if (type === 'cron.result') {
@@ -493,7 +503,7 @@ export default function App() {
       }
       return
     }
-    const sid = ev.session_id ?? ''
+    const sid = sessionKey(backend, ev.session_id ?? '')
     const parentRun: string = payload.parent_run_id ?? ''
     // 子代理的逐字流（正文/思考）不进 UI——只把子工具调用与 token 用量归属到父
     // agent 卡片（见下方 applyChildEvent）。中断类（审批/澄清/计划）即便带
@@ -656,7 +666,11 @@ export default function App() {
             /* 非法 URL：保留原始串，连接失败由 Gateway 的重连/failed 态呈现 */
           }
           const gw = new Gateway(connectUrl)
+          // 本连接所属会话的复合 key（backend+thread）——store/connsRef/folderStore 皆以此为键；
+          // 发给后端的 wire 仍用裸 thread（myThread）。
+          const targetKey = targetThread ? sessionKey(backendId, targetThread) : ''
           let myThread = ''
+          let myKey = ''
           // 本连接所属项目；重连得到全新 bridge 后据此切回原 thread + 重放临时目录
           let myWorkspace = ''
           let ready = false
@@ -671,24 +685,24 @@ export default function App() {
                 // 有目录而后端实际访问不到。
                 if (myThread) {
                   void gw.switchSession(myThread, myWorkspace)
-                  for (const f of folderStoreRef.current[myThread] ?? []) {
+                  for (const f of folderStoreRef.current[myKey] ?? []) {
                     void gw.addFolder(f)
                   }
                   // 复位运行态：断连时 sendMessage 的 catch 已 resetRunning(false)，续接后
                   // 据后端实际运行态恢复 running（否则挂起轮被当空闲，stop 隐藏/输入栏启用）。
                   setStore((s) =>
-                    s[myThread]
-                      ? { ...s, [myThread]: { ...s[myThread], running: !!ev.payload.running } }
+                    s[myKey]
+                      ? { ...s, [myKey]: { ...s[myKey], running: !!ev.payload.running } }
                       : s,
                   )
                 }
                 return
               }
               ready = true
-              // 初始拉取后台任务快照（之后变更经 bg_tasks.update 推送）
+              // 初始拉取后台任务快照（之后变更经 bg_tasks.update 推送）；按本机分段替换
               void gw
                 .listBgTasks()
-                .then((r) => setBgTasks(r.tasks))
+                .then((r) => setBgTasks((prev) => replaceBackendTasks(prev, backendId, r.tasks)))
                 .catch(() => {})
               if (targetThread) {
                 // 已有会话：切到该 thread 并加载历史。switchSession 可能因项目目录已被删/改名
@@ -696,8 +710,8 @@ export default function App() {
                 void (async () => {
                   // 先占位 store 并挂好 connsRef：使续接重发的审批卡有处可落（否则在
                   // loadHistory 完成前到达会被事件处理器的 `if (!s) return` 丢弃）。
-                  connsRef.current[targetThread] = gw
-                  setStore((s) => ({ ...s, [targetThread]: s[targetThread] ?? emptySession() }))
+                  connsRef.current[targetKey] = gw
+                  setStore((s) => ({ ...s, [targetKey]: s[targetKey] ?? emptySession() }))
                   try {
                     await gw.switchSession(targetThread, targetWorkspace)
                   } catch {
@@ -705,6 +719,7 @@ export default function App() {
                   }
                   const r = await gw.loadHistory(targetThread)
                   myThread = targetThread
+                  myKey = targetKey
                   myWorkspace = targetWorkspace
                   gw.bindThread(targetThread)
                   // 引擎已在 open 握手 pin 到本会话项目；同步当前项目指示
@@ -713,30 +728,31 @@ export default function App() {
                   // 后端运行态恢复（续接的挂起轮要显示运行态，否则被当空闲）。
                   setStore((s) => ({
                     ...s,
-                    [targetThread]: {
-                      ...(s[targetThread] ?? emptySession()),
+                    [targetKey]: {
+                      ...(s[targetKey] ?? emptySession()),
                       items: r.items.map(restore),
                       running: !!ev.payload.running,
                     },
                   }))
-                  resolve(targetThread)
+                  resolve(targetKey)
                 })()
               } else {
                 // 新会话：用握手分配的 thread；记录其所在项目（open 已 pin，握手下发的
                 // workspace 即本会话项目），供重连时切回原 thread。
                 myThread = ev.session_id ?? ''
+                myKey = sessionKey(backendId, myThread)
                 myWorkspace = ev.payload.workspace || ''
                 gw.bindThread(myThread) // 重连携带 ?thread= → 后端断连续接
-                connsRef.current[myThread] = gw
-                setStore((s) => ({ ...s, [myThread]: emptySession() }))
-                resolve(myThread)
+                connsRef.current[myKey] = gw
+                setStore((s) => ({ ...s, [myKey]: emptySession() }))
+                resolve(myKey)
               }
             } else {
-              handleEvent(ev)
+              handleEvent(ev, backendId)
             }
           })
           gw.onState((st) => {
-            if (myThread && myThread === activeRef.current) setConn(st)
+            if (myKey && myKey === activeRef.current) setConn(st)
           })
           gw.connect()
         })()
@@ -803,28 +819,35 @@ export default function App() {
 
   // 后台任务属于当前会话的 bridge，必须发到该会话的连接（不是控制连接 anyGw，
   // 否则后端按控制连接的 thread_id 匹配不到，停/清都是空操作、任务还会回来）。
+  // 乐观更新只作用于当前会话所在机器的任务：task_id 可能跨机重名，按 active 的 backend 圈定
   const stopBgTask = useCallback((taskId: string) => {
+    const be = keyBackend(activeRef.current)
     setBgTasks((ts) =>
-      ts.map((x) => (x.task_id === taskId ? { ...x, status: 'failed' as const } : x)),
+      ts.map((x) => (x.task_id === taskId && beOf(x) === be ? { ...x, status: 'failed' as const } : x)),
     )
     void connsRef.current[activeRef.current]?.stopBgTask(taskId).catch(() => {})
   }, [])
 
   const dismissBgTask = useCallback((taskId: string) => {
-    setBgTasks((ts) => ts.filter((x) => x.task_id !== taskId)) // 乐观移除
+    const be = keyBackend(activeRef.current)
+    setBgTasks((ts) => ts.filter((x) => !(x.task_id === taskId && beOf(x) === be))) // 乐观移除
     void connsRef.current[activeRef.current]?.dismissBgTask(taskId).catch(() => {})
   }, [])
 
   const clearFinishedBgTasks = useCallback(() => {
-    setBgTasks((ts) => ts.filter((x) => x.status === 'running' || x.thread_id !== activeRef.current))
+    const be = keyBackend(activeRef.current)
+    const tid = keyThread(activeRef.current)
+    setBgTasks((ts) => ts.filter((x) => x.status === 'running' || !(x.thread_id === tid && beOf(x) === be)))
     void connsRef.current[activeRef.current]?.clearFinishedBgTasks().catch(() => {})
   }, [])
 
-  // 当前会话的后台任务：一次 memo 派生，稳定引用避免 drawer 子树随每次 bg_tasks.update 重渲染
-  const activeBgTasks = useMemo(
-    () => bgTasks.filter((tk) => tk.thread_id === active),
-    [bgTasks, active],
-  )
+  // 当前会话的后台任务：一次 memo 派生，稳定引用避免 drawer 子树随每次 bg_tasks.update 重渲染。
+  // bg 任务的 thread_id 是裸 thread，故按 active 的 thread + backend 双重过滤（同名飞书群跨机不串）。
+  const activeBgTasks = useMemo(() => {
+    const tid = keyThread(active)
+    const be = keyBackend(active)
+    return bgTasks.filter((tk) => tk.thread_id === tid && beOf(tk) === be)
+  }, [bgTasks, active])
   const hasRunningBg = activeBgTasks.some((tk) => tk.status === 'running')
 
   // 跨机器 fan-out：对每台机器的控制连接各拉一次 list_sessions，打上机器标记后合并。
@@ -1063,21 +1086,22 @@ export default function App() {
   // connect→setActive→setConn 的握手只写在这一处，五个入口共用。
   const activate = useCallback(
     async (target: string | null, workspace = '', backend = 'local') => {
-      let tid = target
-      if (!tid || !connsRef.current[tid]) {
+      // key = 会话前端身份（backend+thread）；target 为裸 thread（新会话时 null）
+      let key = target ? sessionKey(backend, target) : ''
+      if (!key || !connsRef.current[key]) {
         // 建立期间以 connecting 示意（sidecar 不可用时指示灯保持黄色而非静默无反应）
         setConn('connecting')
-        tid = await openConnection(target, workspace, backend)
+        key = await openConnection(target, workspace, backend)
       } else if (workspace) {
         // 已连会话：进程 cwd 可能被别的会话改过，重发带 workspace 的 switch 切回本会话项目
-        void connsRef.current[tid].switchSession(tid, workspace)
+        void connsRef.current[key].switchSession(target!, workspace)
       }
       if (workspace) setWorkspaceDir(workspace)
       setActiveBackend(backend) // 记录活动会话所在机器（ModelPicker 跟随它）
-      setActive(tid)
+      setActive(key)
       setConn('open')
       setPreview(null) // 切会话关掉预览，避免上个会话的文件残留
-      return tid
+      return key
     },
     [openConnection],
   )
@@ -1093,11 +1117,12 @@ export default function App() {
   )
 
   const selectSession = useCallback(
-    async (tid: string) => {
+    async (tid: string, backend = 'local') => {
       setView('chat')
-      if (tid !== activeRef.current) {
-        const s = sessionsRef.current.find((x) => x.thread_id === tid)
-        await activate(tid, s?.workspace_dir || '', s?.backend || 'local')
+      // 按 thread + backend 精确定位：飞书群在本地/远程 thread 同名，只按 thread 会选错机器
+      if (sessionKey(backend, tid) !== activeRef.current) {
+        const s = sessionsRef.current.find((x) => x.thread_id === tid && beOf(x) === backend)
+        await activate(tid, s?.workspace_dir || '', backend)
       }
     },
     [activate],
@@ -1243,73 +1268,75 @@ export default function App() {
     [cronBackendOf, gwForBackend, openRunThread],
   )
 
-  // 会话标记（pin/重命名/删除）存在各机器自己的 ~/.lumi，故按会话所属机器路由
-  const backendOf = useCallback(
-    (tid: string) => sessionsRef.current.find((s) => s.thread_id === tid)?.backend || 'local',
-    [],
-  )
-  // 乐观局部更新某会话字段（pin/重命名共用）
+  // 乐观局部更新某会话字段（pin/重命名共用）。按 thread + backend 精确匹配：飞书群在
+  // 本地/远程 thread 同名，只按 thread 会把另一台机器的同名会话一起改了。
   const patchSession = useCallback(
-    (tid: string, patch: Partial<SessionMeta>) =>
-      setSessions((prev) => prev.map((s) => (s.thread_id === tid ? { ...s, ...patch } : s))),
+    (tid: string, backend: string, patch: Partial<SessionMeta>) =>
+      setSessions((prev) =>
+        prev.map((s) => (s.thread_id === tid && beOf(s) === backend ? { ...s, ...patch } : s)),
+      ),
     [],
   )
+  // 会话标记（pin/重命名/删除）存在各机器自己的 ~/.lumi，故按会话所属机器路由（backend 由行透传）
   const pinSession = useCallback(
-    (tid: string, pinned: boolean) => {
+    (tid: string, backend: string, pinned: boolean) => {
       // 乐观更新（Sidebar 按 pinned 重新分组）；成功后再断言一次，纠正 RPC 在途时
       // 并发刷新读到旧值的回退；失败则全量刷新回滚
-      patchSession(tid, { pinned })
-      gwForBackend(backendOf(tid))
+      patchSession(tid, backend, { pinned })
+      gwForBackend(backend)
         ?.pinSession(tid, pinned)
-        .then(() => patchSession(tid, { pinned }))
+        .then(() => patchSession(tid, backend, { pinned }))
         .catch(() => { void refreshSessions() })
     },
-    [gwForBackend, backendOf, refreshSessions, patchSession],
+    [gwForBackend, refreshSessions, patchSession],
   )
 
   const renameSession = useCallback(
-    (tid: string, title: string) => {
+    (tid: string, backend: string, title: string) => {
       // 乐观更新；成功后再断言一次，纠正并发刷新回退；失败则刷新回滚
-      patchSession(tid, { title })
-      gwForBackend(backendOf(tid))
+      patchSession(tid, backend, { title })
+      gwForBackend(backend)
         ?.renameSession(tid, title)
-        .then(() => patchSession(tid, { title }))
+        .then(() => patchSession(tid, backend, { title }))
         .catch(() => { void refreshSessions() })
     },
-    [gwForBackend, backendOf, refreshSessions, patchSession],
+    [gwForBackend, refreshSessions, patchSession],
   )
 
   const deleteSession = async (session: SessionMeta) => {
     setPendingDelete(null)
     const tid = session.thread_id
-    // 乐观更新：立即从列表移除，UI 不等后端删除完成
-    const removeRow = () => setSessions((prev) => prev.filter((s) => s.thread_id !== tid))
+    const backend = beOf(session)
+    const key = sessionKey(backend, tid)
+    // 乐观更新：立即从列表移除（按 thread + backend，避免连带删掉另一台机器的同名会话）
+    const removeRow = () =>
+      setSessions((prev) => prev.filter((s) => !(s.thread_id === tid && beOf(s) === backend)))
     removeRow()
     try {
       // 等后端删除提交后再清理本地 / 切会话——否则 activate(null) 触发的刷新
       // 会读到尚未删除的 checkpoint，把会话又加回列表
-      await gwForBackend(session.backend || 'local')?.deleteSession(tid)
+      await gwForBackend(backend)?.deleteSession(tid)
     } catch {
       void refreshSessions() // 删除失败：把会话找回来（此时本地连接 / 缓存尚未清理）
       return
     }
     removeRow() // 再断言一次，纠正删除期间并发刷新读回的行
-    connsRef.current[tid]?.close()
-    delete connsRef.current[tid]
+    connsRef.current[key]?.close()
+    delete connsRef.current[key]
     setStore((s) => {
-      if (!(tid in s)) return s
+      if (!(key in s)) return s
       const n = { ...s }
-      delete n[tid]
+      delete n[key]
       return n
     })
     setFolderStore((s) => {
-      if (!(tid in s)) return s
+      if (!(key in s)) return s
       const n = { ...s }
-      delete n[tid]
+      delete n[key]
       return n
     })
     // 删除的是当前会话：另开一个新会话顶上
-    if (tid === activeRef.current) await activate(null)
+    if (key === activeRef.current) await activate(null)
   }
 
   // 读取图片文件为 data URL 加入附件（粘贴 / 拖拽 / ＋ 选择 共用，仅图片类型）
@@ -1709,7 +1736,7 @@ export default function App() {
         machineConn={machineConn}
         recentLimit={recentLimit}
         workspaceDir={workspaceDir}
-        currentThread={view === 'chat' ? active : ''}
+        currentKey={view === 'chat' ? active : ''}
         conn={conn}
         model={model}
         activity={activity}

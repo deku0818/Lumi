@@ -12,6 +12,22 @@ export const basename = (p: string) => p.split('/').filter(Boolean).pop() || p
 // token 数格式化（≥1k 显示 x.xk）。与 TUI lumi/tui/widgets/agent_group.py::_format_tokens 同口径
 export const fmtTokens = (n: number) => (n >= 1000 ? `${(n / 1000).toFixed(1)}k` : String(n))
 
+// 会话在 client 里的唯一身份 = 机器 id + thread_id。IM channel（飞书等）按 chat_id 派生
+// 确定性 thread_id，同一个群在本地/远程两台 server 上会得到相同 thread_id；只用 thread_id
+// 当 key 会让两台机器的同名会话在 client 里塌缩成一条（状态/连接/渲染全撞）。故一律用复合 key。
+// 分隔符用 NUL：thread_id / backend id 都不含它，切分无歧义。发给后端的 wire 仍用裸 thread_id。
+const KEY_SEP = '\u0000'
+// backend id 归一：空/缺省即本地。会话、cron、bg 任务都用它认「哪台机器」，默认值收敛在这一处。
+export const beOf = (x: { backend?: string | null }) => x.backend || 'local'
+export const sessionKey = (backend: string, threadId: string) => `${backend}${KEY_SEP}${threadId}`
+// 从复合 key 取回裸 thread_id（空串 / 无分隔符时原样返回）。
+export const keyThread = (key: string) => key.slice(key.indexOf(KEY_SEP) + 1)
+// 从复合 key 取回 backend id（无分隔符 / 空串时返回空串）。
+export const keyBackend = (key: string) => {
+  const i = key.indexOf(KEY_SEP)
+  return i < 0 ? '' : key.slice(0, i)
+}
+
 // 机器识别色：本地走品牌金，远程从语法高亮调色板取（Sidebar / ModelPicker / 设置统一）
 export const MACHINE_COLORS = ['#6fc7c0', '#e58a52', '#c79bd6', '#7fb3e0']
 export function machineColor(id: string, machines: { id: string }[]): string {
