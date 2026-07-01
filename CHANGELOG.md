@@ -1,5 +1,16 @@
 # Changelog
 
+## [0.2.15] - 2026-07-01
+
+### Added
+- **vision 视觉辅助工具（无视觉主模型也能看图/PDF）** — 主模型不具备视觉能力时，`read` 直接注入 image block 它看不懂；新增独立 `vision(file_path, question)` 工具（`lumi/agents/tools/providers/vision.py`），主模型带着自己的具体问题调用（如「这张发票总金额多少」），可对同一文件反复追问。`file_path` 支持本地路径与 http(s) URL（按 `%PDF-` magic 嗅探 PDF/图片），复用 `filesystem/media.py` 压缩管线转 base64、按视觉模型 provider 转格式后单次问答返回文字。**仅当 config.yaml 配了 `vision.model` 时才注册**（`get_vision_tools` 条件加载，`provider_store.resolve_vision` 解析模型+连接，`base_url`/`api_key` 留空复用 providers.json 该模型 profile 连接）
+- **上传图片统一持久化** — 桌面/飞书上传的图片经 `gateway/uploads.py` 的 `persist_image_blocks` 统一存到 `~/.lumi/uploads/`（`global_manager.uploads_dir`）并换成 `<attached-file>` 路径引用（与普通文件一致，交 read/vision 消费）。`stream_response` 入口最前处理，裸 base64 不再直发模型。飞书入站图片改为只下载不压缩（压缩下沉到读取端 `media.py`，避免重复压缩）
+
+### Changed
+- **只读工具免工作区边界限制** — `read`/`vision`/`glob`/`grep` 等只读工具不受工作区边界约束（可跨项目、读 URL），混合批次（只读+写）里只读部分同样免边界；DENY 规则仍先于此拦截。新增 `capability.is_read_only`，routing 只读快路径与混合批次逻辑对齐
+- **飞书依赖改为默认安装** — `lark-oapi` / `python-socks` 从可选 extra 移入主依赖，`uv sync` / `uv pip install .` 即装齐，不再需要 `uv sync --extra feishu`；删除 `feishu` / `all` optional extra，`Dockerfile` 改 `uv pip install "."`
+- **移除 `vision_mode` 配置** — 旧的 `agents.vision_mode: model|tool`（把图片转占位文本）由更实用的 `vision` 工具取代，配置项与 `_convert_content_to_tool_mode` 一并删除
+
 ## [0.2.14] - 2026-07-01
 
 ### Changed

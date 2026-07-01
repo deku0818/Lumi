@@ -5,18 +5,16 @@
 
 ---
 
-## 一、安装（带飞书依赖）
+## 一、安装
 
-飞书 channel 用 lark-oapi 长连接，作为可选依赖：
+飞书 channel 用 lark-oapi 长连接。相关依赖已随主依赖默认安装，`uv sync` 即可：
 
 ```bash
-uv sync --extra feishu
+uv sync
 ```
 
 > 若你的网络走 SOCKS 代理（`ALL_PROXY` / `https_proxy=socks5://…`），lark 的 WebSocket 需要
-> `python-socks`——已包含在 `feishu` extra 里，无需额外装。
-
-> Docker 部署无需额外操作：镜像已默认装 `.[all]`（含飞书全部依赖），开箱即用。
+> `python-socks`——已随主依赖安装，无需额外装。
 
 ## 二、飞书开放平台建机器人
 
@@ -68,7 +66,7 @@ uv sync --extra feishu
 - **机器人不回**：①状态灯是否「已连接」（红光看原因）；②飞书后台事件订阅是否选了**长连接**模式
   并订阅了 `im.message.receive_v1`；③群里是否 @ 了机器人（默认 @我才回）；④白名单是否把你排除了。
 - **日志报 `connect failed, requires python-socks`**：环境有 SOCKS 代理但缺 `python-socks`，
-  重新 `uv sync --extra feishu`。
+  重新 `uv sync`。
 - **看不懂图**：确认你在「设置 → 模型」选的是**支持视觉**的多模态模型。
 - **多机/远程**：飞书 channel 跑在 serve 所在的机器，配置和凭证也在那台机器；desktop 经 WS 远程
   编辑即可。

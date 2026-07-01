@@ -316,6 +316,12 @@ class AgentBridge:
             execution_mode: 执行模式（normal / plan / readonly / 自定义）。
             is_meta: 标记为系统生成的不可见消息（restore 时不显示）。
         """
+        # 上传图片统一存盘并换成 <attached-file> 路径引用（与普通文件一致，交 read/vision 消费）。
+        # 放在最前：后续 checkpoint 标签 / reminder 前置都基于已归一的 content。
+        from lumi.gateway.uploads import persist_image_blocks
+
+        content = await persist_image_blocks(content)
+
         # 在 agent 执行前创建 checkpoint（快照当前文件状态）
         # is_meta 消息（如后台任务通知）不创建 checkpoint 条目，避免在 Rewind 中显示
         if not is_meta:

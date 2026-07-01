@@ -39,9 +39,20 @@ agents:
   disabled_tools: []       # 禁用的工具黑名单，优先级高于 tools
   max_tokens: 8192         # 模型输出最大 token 数
   recursion_limit: 5000    # Agent 最大执行轮次
-  vision_mode: model       # 图片识别模式：model | tool
   checkpoint: sqlite       # 检查点存储模式：sqlite | memory | postgres
   postgres_uri: ""         # PostgreSQL 连接 URI（仅 checkpoint=postgres 时需要）
+```
+
+### vision — 视觉辅助模型
+
+主模型不具备视觉能力时，配一个视觉辅助模型；配置后模型多出一个 `vision(file_path, question)`
+工具，可带具体问题识别图片 / PDF（支持本地路径与 http(s) URL）。顶层配置，重启生效。
+
+```yaml
+vision:
+  model: "qwen-vl-max"   # 视觉辅助模型名；空 = 不启用 vision 工具
+  base_url: ""            # 留空则复用 providers.json 里含该模型的 profile 连接
+  api_key: ""             # 留空则复用 providers.json 里含该模型的 profile 连接
 ```
 
 ### checkpoint 检查点持久化

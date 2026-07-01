@@ -754,7 +754,7 @@ wheels = [
 
 [[package]]
 name = "lumi"
-version = "0.2.14"
+version = "0.2.15"
 source = { editable = "." }
 dependencies = [
     { name = "apscheduler" },
@@ -768,25 +768,17 @@ dependencies = [
     { name = "langgraph" },
     { name = "langgraph-checkpoint-postgres" },
     { name = "langgraph-checkpoint-sqlite" },
+    { name = "lark-oapi" },
     { name = "pillow" },
     { name = "psycopg", extra = ["binary"] },
     { name = "pymupdf" },
+    { name = "python-socks" },
     { name = "pyyaml" },
     { name = "rapidfuzz" },
     { name = "typer" },
     { name = "uvicorn" },
     { name = "wcmatch" },
     { name = "websockets" },
-]
-
-[package.optional-dependencies]
-all = [
-    { name = "lark-oapi" },
-    { name = "python-socks" },
-]
-feishu = [
-    { name = "lark-oapi" },
-    { name = "python-socks" },
 ]
 
 [package.dev-dependencies]
@@ -810,12 +802,11 @@ requires-dist = [
     { name = "langgraph", specifier = ">=1.0.9" },
     { name = "langgraph-checkpoint-postgres", specifier = ">=3.0.4" },
     { name = "langgraph-checkpoint-sqlite", specifier = ">=3.0.3" },
-    { name = "lark-oapi", marker = "extra == 'feishu'", specifier = ">=1.4.0" },
-    { name = "lumi", extras = ["feishu"], marker = "extra == 'all'", editable = "." },
+    { name = "lark-oapi", specifier = ">=1.4.0" },
     { name = "pillow", specifier = ">=12.1.1" },
     { name = "psycopg", extras = ["binary"], specifier = ">=3.3.3" },
     { name = "pymupdf", specifier = ">=1.24.0" },
-    { name = "python-socks", marker = "extra == 'feishu'", specifier = ">=2.8.2" },
+    { name = "python-socks", specifier = ">=2.8.2" },
     { name = "pyyaml", specifier = ">=6.0.3" },
     { name = "rapidfuzz", specifier = ">=3.14.3" },
     { name = "typer", specifier = ">=0.24.1" },
@@ -823,7 +814,6 @@ requires-dist = [
     { name = "wcmatch", specifier = ">=10.1" },
     { name = "websockets", specifier = ">=16.0" },
 ]
-provides-extras = ["feishu", "all"]
 
 [package.metadata.requires-dev]
 dev = [

@@ -17,7 +17,11 @@ from lumi.agents.permissions.mode_policy import check_policy, get_policy
 from lumi.agents.permissions.models import PermissionDecision
 from lumi.agents.permissions.safety import is_bypass_immune
 from lumi.agents.permissions.workspace import get_authorized_directory
-from lumi.agents.tools.capability import is_file_edit_tool, is_write_tool
+from lumi.agents.tools.capability import (
+    is_file_edit_tool,
+    is_read_only,
+    is_write_tool,
+)
 from lumi.utils.logger import logger
 
 if TYPE_CHECKING:
@@ -159,7 +163,12 @@ def route_decision(
             args = tc.get("args", {})
             try:
                 decision = engine.evaluate(name, args)
-                boundary_ok = engine.check_workspace_boundary(name, args)
+                # 只读工具（read/vision/glob/grep 等）不受工作区边界限制：只读无破坏性，
+                # 可跨项目/读 URL；DENY 规则仍先于此拦截（上方 has_deny）。与 line 83 的
+                # 只读快路径一致（纯只读批次本就免边界，此处覆盖只读+写的混合批次）。
+                boundary_ok = is_read_only(
+                    name, args
+                ) or engine.check_workspace_boundary(name, args)
                 logger.debug(
                     "[PermissionCheck] 工具 %s: decision=%s, boundary_ok=%s",
                     name,

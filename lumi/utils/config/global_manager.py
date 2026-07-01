@@ -19,6 +19,15 @@ GLOBAL_CONFIG_DIR: Path = Path.home() / ".lumi"
 GLOBAL_CONFIG_FILE: Path = GLOBAL_CONFIG_DIR / "lumi.json"
 
 
+def uploads_dir() -> Path:
+    """上传图片的集中存放目录（``~/.lumi/uploads/``）。
+
+    集中存放、不污染用户项目。read / vision 为只读工具、不受工作区边界限制
+    （见 permissions.routing 的只读免边界规则），故能直接读取此目录。
+    """
+    return GLOBAL_CONFIG_DIR / "uploads"
+
+
 class GlobalConfigManager:
     """全局配置管理器
 

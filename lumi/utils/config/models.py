@@ -37,10 +37,6 @@ class AgentsConfig(BaseModel):
         description="子 agent 委派的最大嵌套层数（主 agent 为第 0 层，每委派一层 +1）；"
         "达到上限的子 agent 不再下发 agent 工具，无法继续往下委派；0 表示禁止委派",
     )
-    vision_mode: Literal["model", "tool"] = Field(
-        default="model",
-        description="图片识别模式：'model' - 使用模型多模态能力（默认）；'tool' - 将图片 URL 转为文本，通过工具识别",
-    )
     checkpoint: CheckpointMode = Field(
         default="sqlite",
         description="检查点存储模式：'sqlite' - SQLite 持久化存储（默认）；'memory' - 内存存储（进程私有，每条连接互相隔离）；'postgres' - PostgreSQL 持久化存储",
@@ -247,6 +243,28 @@ class AutoDreamConfig(BaseModel):
     )
 
 
+class VisionConfig(BaseModel):
+    """视觉辅助模型配置（供无视觉主模型识别图片/PDF 的 vision 工具）。
+
+    填了 ``model`` 即注册 vision 工具；``base_url`` / ``api_key`` 留空则复用 providers.json
+    里含该模型的 profile 连接（provider_store 反查），仍查不到则用环境变量 / SDK 默认。
+    config.yaml 配置，重启生效。
+    """
+
+    model: str = Field(
+        default="",
+        description="视觉辅助模型名（如 qwen-vl-max / gpt-4o）；空 = 不启用 vision 工具",
+    )
+    base_url: str = Field(
+        default="",
+        description="视觉模型 API base_url；留空复用 providers.json 中该模型的连接",
+    )
+    api_key: str = Field(
+        default="",
+        description="视觉模型 API key；留空复用 providers.json 中该模型的连接",
+    )
+
+
 class Config(BaseModel):
     """主配置类"""
 
@@ -275,6 +293,9 @@ class Config(BaseModel):
     )
     auto_dream: AutoDreamConfig = Field(
         default_factory=AutoDreamConfig, description="后台 Dream（离线记忆综合）配置"
+    )
+    vision: VisionConfig = Field(
+        default_factory=VisionConfig, description="视觉辅助模型配置（vision 工具）"
     )
     env: dict[str, str] = Field(
         default_factory=dict,

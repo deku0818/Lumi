@@ -446,6 +446,18 @@ def _ultra_compressed_fallback(
 # ─────────────────────────────────────────────────────────────────────────
 
 
+def compress_image_bytes(
+    raw: bytes,
+    max_tokens: int = DEFAULT_IMAGE_MAX_TOKENS,
+) -> CompressedImage:
+    """原始图片字节 → 两阶段压缩（阶段1 满足 API 硬约束 + 阶段2 满足 token 预算）。
+
+    同步 CPU 密集，调用方应在 asyncio.to_thread 内跑。格式由 magic bytes 内部嗅探。
+    """
+    stage1 = maybe_resize_and_downsample_image(raw)
+    return compress_image_with_token_budget(stage1, max_tokens)
+
+
 async def read_image_with_token_budget(
     path: Path,
     max_tokens: int = DEFAULT_IMAGE_MAX_TOKENS,
@@ -467,13 +479,7 @@ async def read_image_with_token_budget(
             hint="请检查文件路径与权限",
         ) from e
 
-    media_type = detect_image_format(raw)
-
-    def _process() -> CompressedImage:
-        stage1 = maybe_resize_and_downsample_image(raw, media_type)
-        return compress_image_with_token_budget(stage1, max_tokens)
-
-    return await asyncio.to_thread(_process)
+    return await asyncio.to_thread(compress_image_bytes, raw, max_tokens)
 
 
 # ─────────────────────────────────────────────────────────────────────────

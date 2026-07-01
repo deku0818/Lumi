@@ -10,6 +10,7 @@ from . import (
     present_files,
     skill,
     todo,
+    vision,
 )
 
 __all__ = [
@@ -22,4 +23,5 @@ __all__ = [
     "present_files",
     "skill",
     "todo",
+    "vision",
 ]

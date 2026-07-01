@@ -96,6 +96,7 @@ def split_compound_command(command: str) -> list[str]:
 _ALWAYS_READONLY: frozenset[str] = frozenset(
     {
         "read",
+        "vision",
         "glob",
         "grep",
         "skill",

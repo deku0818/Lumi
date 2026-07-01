@@ -137,22 +137,21 @@ class TestBranch4_InternalTools:
         tcs = [_tc(STRUCTURED_OUTPUT_TOOL_NAME, {})]
         assert _route(tcs, engine=engine) == "ToolExecutor"
 
-    def test_mixed_internal_and_readonly_falls_to_normal_eval(self):
-        """混合批次（内部 + read 只读）不绕过：落到正常评估。
+    def test_mixed_internal_and_readonly_routes_to_tool_executor(self):
+        """混合批次（内部伪工具 + read 只读）→ 只读短路直达 ToolExecutor。
 
-        ★ 反直觉：__structured_output__ 在 is_write_tool 里属「未知工具」→ fail-closed
-        被当作写入工具，因此分支6的「全只读」检查失败。engine=None + default → 落到
-        最末尾的 engine-None 回退 → HumanApproval（不是 ToolExecutor）。
-        锁住这个 fail-closed 语义。"""
+        快路径条件是 ``is_internal_tool(name) or not is_write_tool(...)``（取或）：
+        __structured_output__ 经 is_internal_tool 通过、read 经 not is_write_tool 通过，
+        故整批 all() 成立 → ToolExecutor，无需审批（内部控制流 + 只读均无破坏性）。
+        与 tool_mode 无关（见下方 privileged 版本同结果）。"""
         tcs = [
             _tc(STRUCTURED_OUTPUT_TOOL_NAME, {}),
             _tc("read", {"file_path": "/some/path"}),
         ]
-        assert _route(tcs, engine=None, tool_mode="default") == "HumanApproval"
+        assert _route(tcs, engine=None, tool_mode="default") == "ToolExecutor"
 
     def test_mixed_internal_and_readonly_privileged_routes_to_tool_executor(self):
-        """同上混合批次，但 privileged + engine=None → ToolExecutor（privileged 放行）。
-        进一步坐实：__structured_output__ 被当作写入工具走完整路径，而非只读短路。"""
+        """同上混合批次在 privileged 下同样 ToolExecutor：坐实快路径与 tool_mode 无关。"""
         tcs = [
             _tc(STRUCTURED_OUTPUT_TOOL_NAME, {}),
             _tc("read", {"file_path": "/some/path"}),
@@ -210,6 +209,21 @@ class TestBranch5And6_DenyBeforeReadonly:
         """engine=None 时跳过 DENY 预检：全只读仍 → ToolExecutor"""
         tcs = [_tc("read", {"file_path": "/x"})]
         assert _route(tcs, engine=None) == "ToolExecutor"
+
+    def test_vision_is_readonly_bypasses_boundary(self):
+        """vision 是只读工具：读 URL / 项目外路径 → 只读快路径 → ToolExecutor（免审批+免边界）。"""
+        tcs = [
+            _tc("vision", {"file_path": "https://example.com/x.png", "question": "?"})
+        ]
+        assert _route(tcs, engine=None) == "ToolExecutor"
+
+    def test_deny_on_vision_routes_to_human_approval(self):
+        """命中 DENY 的 vision 仍在 DENY 预检被拦 → HumanApproval（DENY 优先于只读）。"""
+        engine = _make_engine(
+            [PermissionRule(tool="vision", permission=Permission.DENY)]
+        )
+        tcs = [_tc("vision", {"file_path": "/x.png", "question": "?"})]
+        assert _route(tcs, engine=engine) == "HumanApproval"
 
 
 # ── 分支 7：execution_mode 策略守卫 → PolicyReject ──

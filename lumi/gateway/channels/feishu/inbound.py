@@ -1,7 +1,8 @@
 """飞书入站消息处理：解析事件 → 派生 thread → 忙时排队合并 → 驱动一次 agent run。
 
-支持纯文本 / post 富文本 / 图片（多模态内联）/ 文件（下载到 /tmp/lumi 经 <attached-file> 供
-read 读）；回复某条消息时一并带上被回复消息里的图片/文件。每条消息经身份目录解析发送者显示名
+支持纯文本 / post 富文本 / 图片（下载为原始 base64 块，经 stream_response 的
+persist_image_blocks 统一存盘转 <attached-file>，模型用 read/vision 读）/ 文件（下载到
+/tmp/lumi 经 <attached-file> 供 read 读）；回复某条消息时一并带上被回复消息里的图片/文件。每条消息经身份目录解析发送者显示名
 （``channel.directory``），合并时以「姓名：」前缀标注，让 agent 在群聊里分得清谁说的。
 """
 
@@ -138,20 +139,6 @@ def image_keys_of(msg_type: str, content_json: dict) -> list[str]:
     if msg_type == "post":
         return extract_post_images(content_json)
     return []
-
-
-def _compress_image(raw: bytes):
-    """复用 read 工具的图片压缩管线（阶段1 满足 API 硬约束 + 阶段2 满足 token 预算）。
-
-    返回 CompressedImage（含 ``media_type`` / ``base64_data``）。CPU 阻塞，调用方应在
-    executor 内跑。
-    """
-    from lumi.agents.tools.providers.filesystem.media import (
-        compress_image_with_token_budget,
-        maybe_resize_and_downsample_image,
-    )
-
-    return compress_image_with_token_budget(maybe_resize_and_downsample_image(raw))
 
 
 def file_ref_of(msg_type: str, content_json: dict) -> tuple[str, str] | None:
@@ -432,31 +419,30 @@ class FeishuInbound:
                 return True
         return False
 
-    # ── 媒体（图片）下载 → 多模态 content block ──
+    # ── 媒体（图片）下载 → 原始 base64 image block（不在此压缩）──
     async def _image_block(self, message_id: str, image_key: str) -> dict | None:
-        """下载飞书图片 → 走仓库统一压缩管线 → base64 Anthropic image block。
+        """下载飞书图片 → 原始 base64 Anthropic image block（不在此压缩）。
 
-        飞书是任意用户可传任意大图的开放入口，裸 base64 直传大图会触发上游模型 API 400；
-        复用 read 工具同一套压缩管线满足 5MB/2000px 硬约束 + token 预算。PIL 处理是 CPU
-        阻塞，整个下载+压缩都在 executor 跑。
+        图片经 stream_response 的 persist_image_blocks 统一存盘并转成 <attached-file> 路径
+        引用，模型用 read/vision 按需读取（压缩在读取端由 media.py 完成一次）；故此处只下载不
+        压缩，避免与读取端重复压缩。裸 base64 不会直发模型（persist 会先剥离），无 API 400 风险。
         """
+        import base64
+
+        from lumi.agents.tools.providers.filesystem.media import detect_image_format
+
         loop = asyncio.get_running_loop()
         data = await loop.run_in_executor(
             None, self._download_resource_sync, message_id, image_key, "image"
         )
         if not data:
             return None
-        try:
-            img = await loop.run_in_executor(None, _compress_image, data)
-        except Exception as e:
-            logger.warning(f"Feishu 图片压缩失败，跳过该图: {e}")
-            return None
         return {
             "type": "image",
             "source": {
                 "type": "base64",
-                "media_type": img.media_type,
-                "data": img.base64_data,
+                "media_type": detect_image_format(data),
+                "data": base64.b64encode(data).decode("ascii"),
             },
         }
 

@@ -137,7 +137,6 @@ agents:
   disabled_tools: []  # 工具黑名单
   max_tokens: 8192
   recursion_limit: 5000
-  vision_mode: model  # 图片识别模式：model | tool
   checkpoint: sqlite  # 检查点存储：sqlite | memory | postgres
   postgres_uri: ""  # PostgreSQL 连接 URI
 
@@ -783,7 +782,6 @@ agents:
   disabled_tools: []
   max_tokens: 8192
   recursion_limit: 5000
-  vision_mode: model
   checkpoint: sqlite
   postgres_uri: ""
 

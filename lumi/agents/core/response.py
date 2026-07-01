@@ -9,7 +9,6 @@ from langgraph.graph.state import CompiledStateGraph
 from lumi.models.manager import detect_protocol, get_default_model_name
 from lumi.utils.image import download_image_as_base64
 from lumi.utils.logger import logger
-from lumi.utils.read_config import get_config
 
 
 def extract_ainvoke_content(content) -> str:
@@ -76,14 +75,13 @@ async def message_transform(
     question: str | list[dict],
     model_name: str = None,
 ) -> str | list[dict]:
-    """转换用户问题的 content 内容
+    """转换用户问题的 content 内容（按目标模型 provider 归一化多模态图片块）
 
     处理流程：
     1. 字符串直接返回
-    2. vision_mode == "tool" → 所有多模态内容转为纯文本（短路后续图片处理）
-    3. 非 Anthropic 模型 → 转换为 OpenAI 图片格式
-    4. Anthropic + Bedrock 模型 → URL 图片异步下载转 base64
-    5. 直连 Anthropic 模型 → 保持原格式
+    2. 非 Anthropic 模型 → 转换为 OpenAI 图片格式
+    3. Anthropic + Bedrock 模型 → URL 图片异步下载转 base64
+    4. 直连 Anthropic 模型 → 保持原格式
 
     Args:
         question: 用户问题内容，支持 str 或 list[dict] (Anthropic content blocks)
@@ -95,9 +93,6 @@ async def message_transform(
     if isinstance(question, str):
         return question
 
-    if get_config().config.agents.vision_mode == "tool":
-        return _convert_content_to_tool_mode(question)
-
     if model_name is None:
         model_name = get_default_model_name()
 
@@ -108,33 +103,6 @@ async def message_transform(
         return _convert_content_to_openai_format(question, model_name)
     # anthropic: 保持原格式
     return question
-
-
-def _convert_content_to_tool_mode(content: list[dict]) -> str:
-    """将多模态 content blocks 转为纯文本（tool 模式）
-
-    图片 URL 用 <image_url> 标签包裹后拼入文本，base64 图片跳过并记录警告。
-    """
-    parts: list[str] = []
-    for item in content:
-        if not isinstance(item, dict):
-            continue
-        item_type = item.get("type")
-        if item_type == "text":
-            text = item.get("text", "")
-            if text:
-                parts.append(text)
-        elif item_type == "image":
-            source = item.get("source", {})
-            if isinstance(source, dict) and source.get("type") == "url":
-                url = source.get("url", "")
-                if url:
-                    parts.append(f"<image_url>{url}</image_url>")
-            else:
-                logger.warning(
-                    f"tool 模式不支持 base64 图片，已跳过: source type={source.get('type') if isinstance(source, dict) else 'unknown'}"
-                )
-    return "\n\n".join(parts)
 
 
 def _convert_content_to_openai_format(

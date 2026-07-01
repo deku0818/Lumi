@@ -203,6 +203,22 @@ def resolve(model_name: str | None = None) -> ResolvedModel:
     return ResolvedModel(model_name, "", "")
 
 
+def resolve_vision() -> ResolvedModel | None:
+    """解析视觉辅助模型 + 连接（来自 config.yaml 的 vision 配置）；未配 model → None。
+
+    base_url / api_key 留空则反查 providers.json 里含该模型的 profile 连接（resolve）；
+    仍查不到则连接为空（create_llm 用 env / SDK 默认）。档位恒 auto。
+    """
+    from lumi.utils.read_config import get_config
+
+    cfg = get_config().config.vision
+    if not cfg.model:
+        return None
+    if cfg.base_url or cfg.api_key:
+        return ResolvedModel(cfg.model, cfg.base_url, cfg.api_key, "auto")
+    return replace(resolve(cfg.model), effort="auto")
+
+
 def get_classifier() -> dict:
     """返回规范化后的 auto 审批分类器指针 {provider, model}；未配/失效为空 dict。"""
     _, _, classifier = _parse(_read_data())  # 单次读盘

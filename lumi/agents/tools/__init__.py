@@ -16,6 +16,7 @@ from .providers import (
     present_files,
     skill,
     todo,
+    vision,
     workflow,
 )
 from .registry import ToolRegistry, get_tool_registry
@@ -35,6 +36,9 @@ _registry.register("skill", skill)
 _registry.register("background_task", background_task)
 _registry.register("workflow", workflow)
 _registry.register("present_files", present_files)
+# vision 工具条件注册：仅当配置了视觉辅助模型（providers.json 顶级 vision）时才出现，
+# 供无视觉主模型带具体问题识别图片/PDF（本地路径或 http(s) URL）。
+_registry.register("vision", vision.get_vision_tools)
 # agent 工具静态注册：可用代理列表经 <system-reminder> 动态注入（见 AgentChangeDetector），
 # 与 skill 一致——新增/删除 .lumi/agents 下的代理无需重建工具 schema。
 _registry.register("agent", agent)

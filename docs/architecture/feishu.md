@@ -44,7 +44,7 @@ lark_oapi.ws.client.loop`，与 uvicorn 主 loop 隔离。入站回调在 WS 线
 
 > **部署坑**：环境有 SOCKS 代理（`ALL_PROXY`/`https_proxy=socks5://…`）时 lark WS 需
 > `python-socks`，否则报 `connect failed, requires python-socks` 长连不上。已随
-> `feishu` extra 装。`open.feishu.cn` 通常直连可达，WS 端点是 `msg-frontier.feishu.cn`。
+> 主依赖装。`open.feishu.cn` 通常直连可达，WS 端点是 `msg-frontier.feishu.cn`。
 
 ## 入站（inbound.py）
 

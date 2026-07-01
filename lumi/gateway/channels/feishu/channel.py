@@ -116,7 +116,7 @@ class FeishuChannel:
         """
         self._error = None
         if not FEISHU_AVAILABLE:
-            self._error = "未安装 lark-oapi（请 uv sync --extra feishu）"
+            self._error = "未安装 lark-oapi（请 uv sync）"
             logger.error(self._error)
             return
 
@@ -358,7 +358,7 @@ async def test_credentials(config: FeishuChannelConfig) -> dict:
     返回 {ok, error?, bot_name?}。不影响正在运行的 channel——独立 client、只读调用。
     """
     if not FEISHU_AVAILABLE:
-        return {"ok": False, "error": "未安装 lark-oapi，请 uv sync --extra feishu"}
+        return {"ok": False, "error": "未安装 lark-oapi，请 uv sync"}
     app_id = os.path.expandvars(config.app_id)
     app_secret = os.path.expandvars(config.app_secret)
     if not app_id or not app_secret:
