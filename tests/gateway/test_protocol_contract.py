@@ -20,8 +20,14 @@ _PROTOCOL = json.loads(
     )
 )
 
-# 服务端直接发出但不经 EventKind 的事件（握手帧 + cron/bg 广播）
-_DIRECT_EVENTS = {"gateway.ready", "cron.result", "cron.running", "bg_tasks.update"}
+# 服务端直接发出但不经 EventKind 的事件（握手帧 + cron/bg/渠道广播）
+_DIRECT_EVENTS = {
+    "gateway.ready",
+    "cron.result",
+    "cron.running",
+    "bg_tasks.update",
+    "channel.activity",
+}
 
 
 def test_event_names_match_source_of_truth():

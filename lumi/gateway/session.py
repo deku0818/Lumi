@@ -26,6 +26,7 @@ from lumi.gateway.bridge import AgentBridge, EventKind
 from lumi.gateway.broadcast import BroadcastHub, serialize_bg_tasks
 from lumi.gateway.channel import Channel
 from lumi.gateway.channel_rpc import CHANNEL_METHODS, dispatch_channel
+from lumi.gateway.channels.manager import manager
 from lumi.gateway.cron_rpc import CRON_METHODS, dispatch_cron
 from lumi.gateway.projects import (
     add_project,
@@ -35,14 +36,17 @@ from lumi.gateway.projects import (
     touch_project,
 )
 from lumi.gateway.protocol import bridge_event_to_wire, event_frame
-from lumi.sessions.message_text import (
-    extract_human_display_text,
-    extract_text_content,
-)
+from lumi.sessions.message_text import extract_text_content
 from lumi.sessions.message_visibility import should_show_human_message
 from lumi.sessions.session_meta import delete_meta, load_all, update_meta
 from lumi.sessions.session_store import list_sessions
-from lumi.utils.constants import ATTACHED_FILE_TAG, NOTIFICATION_POLL_INTERVAL
+from lumi.sessions.text_cleaning import extract_display_text
+from lumi.utils.constants import (
+    ATTACHED_FILE_TAG,
+    FEISHU_THREAD_PREFIX,
+    LUMI_META_KEY,
+    NOTIFICATION_POLL_INTERVAL,
+)
 from lumi.utils.logger import logger
 from lumi.utils.thread_id import generate_thread_id
 
@@ -55,6 +59,14 @@ _STREAMING_METHODS = frozenset({"send_message", "run_command"})
 
 # 断连续接（Case 1）：detached 会话无人接回的兜底回收时长（保底防进程内泄漏）
 _DETACH_TTL_SECONDS = 8 * 3600
+
+
+def _channel_of(thread_id: str) -> str:
+    """thread → 所属 IM 渠道（thread 前缀是渠道的确定性派生，见 feishu_thread_id）。
+
+    会话列表标注与只读守卫共用此单一判定；desktop 端只消费 wire 的 channel 字段。
+    """
+    return "feishu" if thread_id.startswith(FEISHU_THREAD_PREFIX) else ""
 
 
 class _NoopChannel:
@@ -103,6 +115,43 @@ def _extract_files(content) -> list[dict]:
     return files
 
 
+def _user_items(m) -> list[dict]:
+    """一条 HumanMessage → 前端 user item 列表。
+
+    IM 渠道消息的渲染数据走 additional_kwargs["lumi"]["items"]（每条原始消息的
+    sender/ts/text，入站时结构化写入）：渲染不反解析正文，正文里的 <sender> 标签
+    纯给模型看。无 items（desktop 消息）按原单气泡逻辑渲染，文本管线不受影响，
+    消息级 ts（stream_response 统一落库的到达时刻）原样透传，前端按需展示。
+    图片/文件在单气泡时归它，多段时媒体归属未知，单独成一条无名 item。
+    """
+    meta = (getattr(m, "additional_kwargs", None) or {}).get(LUMI_META_KEY) or {}
+    out: list[dict] = []
+    for it in meta.get("items") or []:
+        item = {"kind": "user", "text": it.get("text", "")}
+        if it.get("sender"):
+            item["sender"] = it["sender"]
+        if it.get("ts"):
+            item["ts"] = it["ts"]
+        out.append(item)
+    if not out:
+        text = extract_display_text(extract_text_content(m.content))
+        if text:
+            item = {"kind": "user", "text": text}
+            if meta.get("ts"):
+                item["ts"] = meta["ts"]
+            out.append(item)
+    images = _extract_images(m.content)
+    files = _extract_files(m.content)
+    if images or files:
+        if len(out) != 1:
+            out.append({"kind": "user", "text": ""})
+        if images:
+            out[-1]["images"] = images
+        if files:
+            out[-1]["files"] = files
+    return out
+
+
 def _history_items(messages: list) -> list[dict]:
     """把 LangGraph state 的历史 messages 转成前端可渲染的 item 列表。
 
@@ -120,18 +169,8 @@ def _history_items(messages: list) -> list[dict]:
     for m in messages:
         kind = getattr(m, "type", None)
         if kind == "human":
-            if not should_show_human_message(m):
-                continue
-            text = extract_human_display_text(m.content)
-            images = _extract_images(m.content)
-            files = _extract_files(m.content)
-            if text or images or files:
-                item = {"kind": "user", "text": text}
-                if images:
-                    item["images"] = images
-                if files:
-                    item["files"] = files
-                items.append(item)
+            if should_show_human_message(m):
+                items.extend(_user_items(m))
         elif kind == "ai":
             text = extract_text_content(m.content)
             if text:
@@ -182,12 +221,16 @@ async def _list_sessions(bridge: AgentBridge, params: dict) -> dict:
             {
                 "thread_id": s.thread_id,
                 "first_message": s.first_message,
-                "title": entry.get("title", ""),
+                # 手动重命名 > 渠道自动名（飞书群名/私聊对方姓名，入站时写 sidecar）
+                "title": entry.get("title") or entry.get("channel_title", ""),
                 "pinned": bool(entry.get("pinned", False)),
                 "created_at": s.created_at.isoformat(),
                 "message_count": s.message_count,
                 "display_time": s.display_time,
                 "workspace_dir": s.workspace_dir,
+                # IM 渠道会话标识：前端据此分组/挂徽标；kind 区分群聊与私聊图标
+                "channel": _channel_of(s.thread_id),
+                "channel_kind": entry.get("channel_kind", ""),
             }
         )
     # 置顶项排到最前；list_sessions 已按时间降序，sort 稳定保留组内顺序
@@ -393,7 +436,21 @@ async def _rename_session(session: GatewaySession, params: dict) -> dict:
 async def _delete_session(session: GatewaySession, params: dict) -> dict:
     tid = params.get("thread_id", "")
     async with session._run.lock:
-        await session._bridge.delete_thread(tid)
+        # 渠道会话（清空会话）：持渠道侧运行锁再删，避开在途轮把删掉的历史写回；
+        # 非渠道 thread 不在任何池里，thread_lock 恒返回 None。
+        # 轮可能跑数分钟，等 5s 仍占用则如实报错让用户稍后再试，不无限挂 RPC。
+        chan_lock = manager.thread_lock(tid)
+        if chan_lock is not None:
+            try:
+                await asyncio.wait_for(chan_lock.acquire(), timeout=5.0)
+            except TimeoutError:
+                raise ValueError("渠道会话正在执行，请稍后再试") from None
+            try:
+                await session._bridge.delete_thread(tid)
+            finally:
+                chan_lock.release()
+        else:
+            await session._bridge.delete_thread(tid)
     delete_meta(tid)
     return {"thread_id": tid}
 
@@ -608,6 +665,14 @@ class GatewaySession:
 
         # 流式方法 spawn 成独立 task：主循环立即回到读帧，使运行期间仍能收到 stop
         if method in _STREAMING_METHODS:
+            # 渠道会话只读旁观（服务端兜底，非仅 UI）：desktop 与 IM 侧各持独立
+            # bridge/锁，从这里发消息会绕过渠道的会话串行化、并发写坏同一 thread
+            if _channel_of(self.current_thread_id):
+                if rid is not None:
+                    await self._channel.send(
+                        {"id": rid, "error": {"message": "渠道会话为只读旁观"}}
+                    )
+                return
             if self.has_active_turn():
                 if rid is not None:
                     await self._channel.send(
@@ -738,6 +803,10 @@ class GatewaySession:
             # 审批挂起期间该轮持着 run.lock，下面 async with 自然被挡到审批结束，
             # 不会插入到挂起轮中间（无需 awaiting_resume 旗标）。
             if not self._bridge.has_notifications():
+                continue
+            # 渠道会话旁观连接不消费通知：注入 meta 轮 = 绕过渠道会话锁并发写共享
+            # thread（与 handle_frame 只读守卫同因）。通知留在队列，宁滞留不写坏。
+            if _channel_of(self._bridge.current_thread_id):
                 continue
             async with self._run.lock:
                 # 只认领归属本连接当前 thread 的通知——队列是进程级共享的，

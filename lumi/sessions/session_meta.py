@@ -39,10 +39,17 @@ def _save_all(data: dict[str, dict]) -> None:
 
 
 def update_meta(thread_id: str, **fields) -> dict:
-    """更新某会话的元数据字段；清理空值（False/""/None）以保持精简。"""
+    """更新某会话的元数据字段；清理空值（False/""/None）以保持精简。
+
+    合并后与现状一致则跳过写盘——高频调用方（飞书入站每条消息同步群名）
+    据此免每消息一次全文件写，且删除后的重建能如实重写（无内存缓存可失效）。
+    """
     data = load_all()
-    entry = {**data.get(thread_id, {}), **fields}
+    old = data.get(thread_id, {})
+    entry = {**old, **fields}
     entry = {k: v for k, v in entry.items() if v not in (None, "", False)}
+    if entry == old:
+        return entry
     if entry:
         data[thread_id] = entry
     else:

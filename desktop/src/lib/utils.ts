@@ -40,6 +40,17 @@ export function machineColor(id: string, machines: { id: string }[]): string {
 export const machineName = (id: string, machines: { id: string; name: string }[]): string =>
   machines.find((m) => m.id === id)?.name ?? id
 
+// 消息发送时刻（气泡头「李雷 · 14:02」）：当天只显时间，跨天补日期，跟随系统 locale。
+// 每个用户气泡都要格式化一次（渠道会话重载还会整表重跑），Intl 构造较重，模块级缓存复用。
+const _hmFmt = new Intl.DateTimeFormat([], { hour: '2-digit', minute: '2-digit' })
+const _mdFmt = new Intl.DateTimeFormat([], { month: 'numeric', day: 'numeric' })
+export function msgTime(ts: number): string {
+  const d = new Date(ts)
+  const hm = _hmFmt.format(d)
+  if (d.toDateString() === new Date().toDateString()) return hm
+  return `${_mdFmt.format(d)} ${hm}`
+}
+
 // 相对时间（"2 小时前"），跟随界面语言。Intl 构造较重，按 lang 缓存复用。
 const _rtfCache = new Map<string, Intl.RelativeTimeFormat>()
 export function timeAgo(seconds: number, lang: string): string {

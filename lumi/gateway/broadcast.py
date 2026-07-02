@@ -56,6 +56,14 @@ class BroadcastHub:
         """Scheduler 同步回调：把运行中任务名列表广播为 cron.running 事件。"""
         self._spawn(self._delivery.send_event("cron.running", {"names": names}))
 
+    def on_channel_activity(self, thread_id: str, channel: str) -> None:
+        """IM channel 跑完一轮：广播给所有连接（desktop 刷会话列表 / 旁观视图重载）。"""
+        self._spawn(
+            self._delivery.send_event(
+                "channel.activity", {"thread_id": thread_id, "channel": channel}
+            )
+        )
+
     def on_bg_task_change(self) -> None:
         """TaskRegistry 同步回调：标脏并安排一次去抖广播（全量快照，前端按 thread 过滤）。"""
         self._bg_dirty = True

@@ -62,6 +62,7 @@ export interface WireEventPayloads extends Record<WireEventType, object> {
   }
   'cron.running': { names: string[] }
   'bg_tasks.update': { tasks: BgTask[] }
+  'channel.activity': { thread_id: string; channel: string }
 }
 
 // 判别联合：按 type 收窄到对应 payload。任意 payload 都可能附带 parent_run_id
@@ -82,7 +83,9 @@ export interface AttachedFile {
 }
 
 export type Item =
-  | { id: number; kind: 'user'; text: string; images?: string[]; files?: AttachedFile[] }
+  // sender：IM 渠道消息的发送者（desktop 消息无）；ts：所有用户消息的发送时刻（毫秒，
+  // 底层统一落库）。气泡头渲染「李雷 · 14:02」或仅时间
+  | { id: number; kind: 'user'; text: string; images?: string[]; files?: AttachedFile[]; sender?: string; ts?: number }
   | { id: number; kind: 'assistant'; text: string; streaming: boolean }
   | {
       id: number
@@ -165,6 +168,8 @@ export interface SessionMeta {
   message_count: number
   display_time: string
   workspace_dir: string // 所属项目目录；方案甲按机器→项目分组的 key
+  channel?: string // IM 渠道会话标识（'feishu'），空/缺省 = desktop 会话
+  channel_kind?: string // 渠道会话类型：'group' 群聊 / 'p2p' 私聊（图标区分）
   // 前端 fan-out 合并时打的机器标记（后端不发）；显示名由 backend + machines 现算
   backend?: string // 所属机器 id（'local' 或远程 id）
 }
@@ -201,6 +206,8 @@ export interface CronRun {
 export interface HistoryItem {
   kind: 'user' | 'assistant' | 'tool'
   text?: string
+  sender?: string // IM 渠道消息发送者（additional_kwargs 结构化透传，非解析正文）
+  ts?: number // 消息发送时刻（毫秒）
   images?: string[]
   files?: AttachedFile[]
   name?: string

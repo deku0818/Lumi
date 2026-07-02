@@ -52,7 +52,12 @@ lark_oapi.ws.client.loop`，与 uvicorn 主 loop 隔离。入站回调在 WS 线
 群策略（`group_policy=mention` 时仅 `@_all` 或精确匹配 `bot_open_id` 才响应；**不做** ou_
 启发式以免把真人误判为机器人）→ 解析文本（text / post）→ 收集媒体引用 → 解析发送者显示名
 （`channel.directory`，群聊走群成员源、私聊走通讯录源）→ 派生 thread + 取 bridge + 运行锁 →
-排队或处理。发送者名挂在 `_Pending.sender_name` 上，合并渲染时作「姓名：」前缀。
+排队或处理。发送者名挂在 `_Pending.sender_name` 上（解析失败恒退兜底名），渲染为
+`<sender>姓名</sender>` 标签行（`constants.SENDER_TAG`，纯给模型看）；每条原始消息的
+`{sender, ts, text}` 另经 `message_meta` 结构化写进 `additional_kwargs["lumi"]["items"]`，
+desktop 气泡只读它、不反解析正文。群名/私聊人名同时同步进 session sidecar
+（`channel_title`/`channel_kind`，desktop 会话列表显示名；兜底名不写盘，解析失败有 5 分钟
+重试冷却）。每轮跑完广播 `channel.activity`（desktop 刷列表/旁观重载，见 desktop.md）。
 
 **媒体**：
 - 图片（image / post 内嵌 / 被回复消息的图）→ 下载 → 走仓库统一压缩管线
@@ -72,7 +77,7 @@ lark_oapi.ws.client.loop`，与 uvicorn 主 loop 隔离。入站回调在 WS 线
 ## 身份目录（directory.py + caching.py）
 
 `FeishuDirectory`：`open_id → 显示名` / `chat_id → 群名` 的唯一出口，让 agent 在群聊里分得清谁
-说的（每条消息前缀「姓名：」）。两个数据源：群成员接口 `im.v1.chat_members.get`（群内显示名，
+说的（每条消息带 `<sender>姓名</sender>` 标签）。两个数据源：群成员接口 `im.v1.chat_members.get`（群内显示名，
 **不受**通讯录可见范围限制，群场景首选且覆盖新人）、通讯录接口 `contact.v3.users.batch`（私聊
 等无群上下文时的退路），共享同一 `open_id → 名` 缓存。
 

@@ -42,6 +42,7 @@ async def run_turn(
     reply_to: str,
     content: str | list,
     tool_mode: str,
+    message_meta: dict | None = None,
 ) -> None:
     """驱动一轮 agent run，把事件流渲染到飞书。"""
     streaming = channel.streaming
@@ -60,7 +61,9 @@ async def run_turn(
         )
 
     try:
-        async for evt in bridge.stream_response(content, tool_mode=tool_mode):
+        async for evt in bridge.stream_response(
+            content, tool_mode=tool_mode, message_meta=message_meta
+        ):
             if evt.parent_run_id:
                 continue  # 子代理内部活动不外显
             kind = evt.kind

@@ -92,11 +92,13 @@ WS 断开时若会话仍有**活跃 / 挂起轮**（典型：挂在工具审批 
 
 会话列表由 LangGraph checkpoint 派生（`lumi/sessions/session_store.list_sessions`），但「置顶」「自定义标题」是用户施加的、不存在于 checkpoint 中的元数据，单独持久化：
 
-- **`lumi/sessions/session_meta.py`** — JSON sidecar（`~/.lumi/checkpoints/session_meta.json`），按 `thread_id` 存 `pinned`/`title`，仅写非默认值。textual-free，可在 headless 服务直接使用。
-- **`list_sessions` RPC** — 合并 sidecar 元数据后注入 `title`/`pinned`，置顶项稳定排到最前。
-- **删除** — `delete_session` 经 `bridge.delete_thread()` 一并清理两类 checkpoint：LangGraph 会话（`LumiAgent.adelete_thread`）+ 文件级 checkpoint（`checkpoint.delete_thread_checkpoint`），再删除 sidecar 元数据条目。
+- **`lumi/sessions/session_meta.py`** — JSON sidecar（`~/.lumi/checkpoints/session_meta.json`），按 `thread_id` 存 `pinned`/`title`，以及 IM 渠道会话的 `channel_title`（群名/私聊对方姓名，入站时自动同步）/`channel_kind`（group/p2p），仅写非默认值且内容不变不写盘。textual-free，可在 headless 服务直接使用。
+- **`list_sessions` RPC** — 合并 sidecar 元数据后注入 `title`（手动重命名 > 渠道自动名）/`pinned`，并按 thread 前缀标注 `channel`/`channel_kind`（`gateway/session._channel_of` 是渠道判定单点，前端只消费 wire 字段），置顶项稳定排到最前。
+- **删除** — `delete_session` 经 `bridge.delete_thread()` 一并清理两类 checkpoint：LangGraph 会话（`LumiAgent.adelete_thread`）+ 文件级 checkpoint（`checkpoint.delete_thread_checkpoint`），再删除 sidecar 元数据条目。渠道会话删除前持渠道侧运行锁（`ChannelManager.thread_lock`），避开在途轮把删掉的历史写回。
 
 前端 `Sidebar` 每行 hover 出现 `⋮` 菜单（置顶 / 重命名 / 删除）；删除走二次确认弹窗（`ConfirmDialog`），删除当前会话时自动另开新会话顶上。
+
+**IM 渠道会话在 desktop 只读旁观**：飞书等渠道会话在「全部」树里按机器级「飞书 · 绑定项目」分组（A2 方案，`channel` 字段驱动，不进项目组）；打开后顶部渠道横幅（群名 / 审批模式 / 绑定项目 / 直达渠道设置），输入区替换为只读提示。只读在服务端兜底（流式方法对渠道 thread 直接拒绝；后台通知轮对渠道 thread 不消费）——desktop 与渠道 `BridgePool` 各持独立 bridge/锁，写入会绕过渠道的会话串行化。渠道跑完一轮广播 `channel.activity`，desktop 只刷该机器会话列表、正在旁观则重载历史（切回旁观会话也强制重拉）。消息级时间戳在 `bridge.stream_response` 统一落库（`additional_kwargs["lumi"].ts`，渠道另带 per-消息 `items`），气泡头渲染「发送者 · 时刻」。
 
 ## 项目与工作目录
 

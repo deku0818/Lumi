@@ -7,7 +7,7 @@ from __future__ import annotations
 
 import re
 
-from lumi.utils.constants import ATTACHED_FILE_TAG
+from lumi.utils.constants import ATTACHED_FILE_TAG, SENDER_TAG
 
 # 从消息中提取命令名和用户输入的正则
 _COMMAND_NAME_RE: re.Pattern[str] = re.compile(
@@ -21,6 +21,9 @@ _USER_INPUT_RE: re.Pattern[str] = re.compile(
 _INJECTED_BLOCK_PATTERNS: list[re.Pattern[str]] = [
     re.compile(r"<system-reminder>.*?</system-reminder>\s*", re.DOTALL),
     re.compile(rf"<{ATTACHED_FILE_TAG}>.*?</{ATTACHED_FILE_TAG}>\s*", re.DOTALL),
+    # IM 渠道发送者标注：整段显示（会话列表 first_message 等）时剥掉名字只留正文。
+    # 气泡级的发送者渲染不解析此标签，走 additional_kwargs（见 _user_items）
+    re.compile(rf"<{SENDER_TAG}>.*?</{SENDER_TAG}>\s*", re.DOTALL),
     re.compile(r"<summary>.*?</summary>\s*", re.DOTALL),
     re.compile(r"<command-name>.*?</command-name>\s*", re.DOTALL),
     re.compile(r"<command-type>.*?</command-type>\s*", re.DOTALL),

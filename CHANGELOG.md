@@ -1,5 +1,18 @@
 # Changelog
 
+## [0.2.19] - 2026-07-02
+
+### Added
+- **飞书渠道会话在 desktop 区分呈现** — 侧栏「全部」树每台机器多一个「飞书 · 绑定项目」分组（A2 方案，带 `chan-orb` 渠道状态灯，群/私聊图标区分），渠道会话不再混进项目分组；「最近」流与搜索结果行首带渠道图标。会话名自动取**群名 / 私聊对方姓名**（入站同步进 session sidecar 的 `channel_title`/`channel_kind`，手动重命名永久优先、群改名自动跟随；解析失败的兜底名不落盘且有 5 分钟重试冷却）
+- **只读旁观视图** — desktop 打开飞书会话顶部渠道横幅（群名 · 审批模式 · 绑定项目 · 直达渠道设置），输入区替换为只读提示。只读在服务端兜底：流式方法对渠道 thread 直接拒绝、后台通知轮对渠道 thread 不消费——desktop 与渠道 `BridgePool` 各持独立 bridge/锁，写入会绕过渠道的会话串行化并发写坏 thread
+- **`channel.activity` 广播** — 飞书每跑完一轮通知所有 desktop：只刷该机器会话列表，正在旁观则重载历史（切回旁观会话也强制重拉，不再显示旧账）；`list_sessions` wire 新增 `channel`/`channel_kind` 字段（服务端 `_channel_of` 按 thread 前缀判定是唯一判定点，前端只消费 wire 字段）
+- **`<sender>` 标签 + 消息时间统一落库** — IM 入站消息正文改为 `<sender>姓名</sender>\n正文`（渠道无关约定，纯给模型看，替代旧「姓名：」前缀与合并轮编号列表）；渲染数据（每条原始消息的 `{sender, ts, text}`）结构化存 `additional_kwargs["lumi"]["items"]`，desktop 气泡只读它、不反解析正文（字面标签无法伪造气泡）。消息级到达时刻在 `bridge.stream_response` 统一落库（渠道无关，desktop 消息也有），气泡头渲染「发送者 · 时刻」
+- **渠道会话「清空会话」** — 替代「删除」文案（thread 按群确定性派生、删后下条消息原地重建，实际效果是抹掉对话历史）；删除前持渠道侧运行锁（`ChannelManager.thread_lock`，5s 超时如实报错），避开在途轮把删掉的历史写回
+
+### Changed
+- **`update_meta` 内置变更检测** — 合并结果与现状一致不写盘（飞书每条消息同步群名免高频整文件写，且「清空会话」删 sidecar 后能如实重建，不再有可失效的内存缓存）
+- **`SettingsDialog` 支持 `initialTab`** — 旁观横幅「渠道设置」直达 channels tab；`refreshSessions`/`refreshChannels` 支持按机器刷新（`channel.activity` 只刷来源机器，多机 ready 不再 N² 扇出）
+
 ## [0.2.18] - 2026-07-02
 
 ### Changed

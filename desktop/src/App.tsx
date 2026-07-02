@@ -14,6 +14,7 @@ import {
   Check,
   Square,
   Plus,
+  Send,
   X,
   PanelRight,
   type LucideIcon,
@@ -23,6 +24,7 @@ import type {
   ActiveModel,
   AttachedFile,
   BgTask,
+  ChannelInfo,
   Classifier,
   CronJob,
   HistoryItem,
@@ -59,7 +61,7 @@ import { Composer } from './components/Composer'
 import { toast } from './components/Toast'
 import { isCommandMode, parseCommand, matchCommands } from './slash'
 import { toolDiff, type DiffLine } from './diff'
-import { clip, basename, fmtTokens, machineColor, machineName, sessionKey, keyThread, keyBackend, beOf } from '@/lib/utils'
+import { clip, basename, fmtTokens, machineColor, machineName, msgTime, sessionKey, keyThread, keyBackend, beOf } from '@/lib/utils'
 import { Button } from '@/components/ui/button'
 import { useTheme } from './theme'
 import { useUiFont } from './font'
@@ -118,7 +120,8 @@ const segKey = (seg: Segment): string =>
 
 // load_history 的历史项 → 前端 Item
 function restore(h: HistoryItem): Item {
-  if (h.kind === 'user') return { id: nid(), kind: 'user', text: h.text ?? '', images: h.images, files: h.files }
+  if (h.kind === 'user')
+    return { id: nid(), kind: 'user', text: h.text ?? '', images: h.images, files: h.files, sender: h.sender, ts: h.ts }
   if (h.kind === 'assistant')
     return { id: nid(), kind: 'assistant', text: h.text ?? '', streaming: false }
   return {
@@ -301,7 +304,19 @@ export default function App() {
   // （activate / 通知点击等）只要 setActive 就自动带对机器。空/无分隔符归一到 'local'。
   const activeBackend = keyBackend(active) || 'local'
   const [showSettings, setShowSettings] = useState(false)
-  const openSettings = useCallback(() => setShowSettings(true), [])
+  // 当前会话的列表元数据（memo：App 每个流式 token 都重渲染，别每次 O(sessions) 扫）。
+  // channel 只消费 wire 字段（服务端 _channel_of 是唯一判定点），非空 = 只读旁观。
+  const activeSession = useMemo(
+    () => sessions.find((s) => beOf(s) === activeBackend && s.thread_id === keyThread(active)),
+    [sessions, activeBackend, active],
+  )
+  const activeChannel = activeSession?.channel || ''
+  // 打开设置时的初始 tab：旁观横幅「渠道设置」直达 channels，常规入口走默认
+  const [settingsTab, setSettingsTab] = useState<'channels' | undefined>()
+  const openSettings = useCallback(() => {
+    setSettingsTab(undefined)
+    setShowSettings(true)
+  }, [])
   const [pendingDelete, setPendingDelete] = useState<SessionMeta | null>(null)
   const [themePref, setThemePref] = useTheme()
   const [uiFont, setUiFont] = useUiFont()
@@ -850,8 +865,11 @@ export default function App() {
 
   // 跨机器 fan-out：对每台机器的控制连接各拉一次 list_sessions，打上机器标记后合并。
   // 某机器离线只跳过它，不影响其它机器（方案甲多机并存的合并列表）。
-  const refreshSessions = useCallback(async () => {
-    const conns = Object.entries(controlConns.current)
+  // only：只刷某台机器（channel.activity 已知发生在哪台，不必打扰其它机器）。
+  const refreshSessions = useCallback(async (only?: string) => {
+    const conns = Object.entries(controlConns.current).filter(
+      ([backend]) => !only || backend === only,
+    )
     if (!conns.length) return
     const perBackend = await Promise.all(
       conns.map(async ([backend, gw]) => {
@@ -864,7 +882,44 @@ export default function App() {
         }
       }),
     )
-    setSessions(perBackend.flat())
+    // 全量刷新整表替换（含回收已删机器的会话）；单机刷新只换该机器分段
+    setSessions((prev) =>
+      only ? [...prev.filter((s) => beOf(s) !== only), ...perBackend.flat()] : perBackend.flat(),
+    )
+  }, [])
+
+  // 重拉某会话历史并整表替换其 items（渠道会话旁观刷新 / 切回对账共用）
+  const reloadHistory = useCallback((key: string, threadId: string) => {
+    connsRef.current[key]
+      ?.loadHistory(threadId)
+      .then((r) =>
+        setStore((s) =>
+          s[key] ? { ...s, [key]: { ...s[key], items: r.items.map(restore) } } : s,
+        ),
+      )
+      .catch(() => {})
+  }, [])
+
+  // 各机器 IM 渠道快照（飞书组头状态灯 / 旁观横幅的审批模式与绑定项目）。
+  // 各机器 ready 时只刷本机（only），设置面板关闭时全量（渠道配置在设置里改）；
+  // 一次性合并写入，避免 N 台机器触发 N 次 Sidebar 重渲染。
+  const [channels, setChannels] = useState<Record<string, ChannelInfo[]>>({})
+  const refreshChannels = useCallback((only?: string) => {
+    const conns = Object.entries(controlConns.current).filter(
+      ([backend]) => !only || backend === only,
+    )
+    void Promise.all(
+      conns.map(async ([backend, gw]) => {
+        try {
+          return [backend, (await gw.getChannels()).channels ?? []] as const
+        } catch {
+          return null
+        }
+      }),
+    ).then((entries) => {
+      const ok = entries.filter((e): e is readonly [string, ChannelInfo[]] => e !== null)
+      if (ok.length) setChannels((c) => ({ ...c, ...Object.fromEntries(ok) }))
+    })
   }, [])
 
   // 跨机器 fan-out 定时任务：每台机器各拉一次 list_cron_jobs，打机器标记后合并。
@@ -926,6 +981,14 @@ export default function App() {
           if (ev.type === 'gateway.ready') {
             void refreshSessions()
             refreshCronJobs()
+            refreshChannels(backend)
+          }
+          // IM 渠道会话跑完一轮（进程级广播，仅在控制连接消费——每机器恰好一条，天然去重）：
+          // 只刷本机会话列表；正在旁观该会话则重载历史（旁观视图无自己的流式事件）
+          if (ev.type === 'channel.activity') {
+            void refreshSessions(backend)
+            const key = sessionKey(backend, ev.payload.thread_id)
+            if (key === activeRef.current) reloadHistory(key, ev.payload.thread_id)
           }
         })
         gw.onState((st) => setMachineConn((m) => ({ ...m, [backend]: st })))
@@ -933,7 +996,7 @@ export default function App() {
         gw.connect()
       })()
     },
-    [refreshSessions, refreshCronJobs, reconnectMachine],
+    [refreshSessions, refreshCronJobs, refreshChannels, reloadHistory, reconnectMachine],
   )
 
   // 同步机器表 → 开新机器的控制连接、关掉已删机器的，刷新会话。BackendsPanel 增删后回调此。
@@ -1090,9 +1153,17 @@ export default function App() {
         // 建立期间以 connecting 示意（sidecar 不可用时指示灯保持黄色而非静默无反应）
         setConn('connecting')
         key = await openConnection(target, workspace, backend)
-      } else if (workspace) {
-        // 已连会话：进程 cwd 可能被别的会话改过，重发带 workspace 的 switch 切回本会话项目
-        void connsRef.current[key].switchSession(target!, workspace)
+      } else {
+        if (workspace) {
+          // 已连会话：进程 cwd 可能被别的会话改过，重发带 workspace 的 switch 切回本会话项目
+          void connsRef.current[key].switchSession(target!, workspace)
+        }
+        // 渠道会话没有自己的流式事件，后台期间的轮次不会写入缓存 store；
+        // channel.activity 又只在「正在旁观」时重载——切回时必须重拉历史，否则永远是旧账
+        const meta = sessionsRef.current.find(
+          (s) => s.thread_id === target && beOf(s) === backend,
+        )
+        if (meta?.channel) reloadHistory(key, target!)
       }
       if (workspace) setWorkspaceDir(workspace)
       setActive(key) // activeBackend 从 active 派生，无需单独设
@@ -1100,7 +1171,7 @@ export default function App() {
       setPreview(null) // 切会话关掉预览，避免上个会话的文件残留
       return key
     },
-    [openConnection],
+    [openConnection, reloadHistory],
   )
 
   // 在指定机器开新会话（方案甲：边栏每台机器各有「＋新对话」）。空远程也能从此开聊。
@@ -1413,6 +1484,7 @@ export default function App() {
             text, // 可见正文只留用户输入；附件路径走 system-reminder，不污染气泡
             images: imgs.length ? imgs.map((a) => a.dataUrl) : undefined,
             files: files.length ? files : undefined,
+            ts: Date.now(), // 与服务端落库的到达时刻近似一致，重载前后时间头不跳变
           },
         ],
         running: true,
@@ -1588,6 +1660,45 @@ export default function App() {
     }
   }
 
+  // 飞书渠道会话：desktop 只读旁观。
+  // 横幅数据：群名取会话列表 title（入站写的 channel_title），审批模式/绑定项目取渠道快照。
+  const feishuInfo = (channels[activeBackend] ?? []).find((c) => c.name === activeChannel)
+  const channelBanner = () => {
+    const proj = feishuInfo?.config.workspace ? basename(feishuInfo.config.workspace) : ''
+    return (
+      <div className="mx-auto w-full max-w-3xl px-6 pt-3">
+        <div className="flex items-center gap-2.5 rounded-xl border border-info/25 bg-info/10 px-3.5 py-2 text-xs">
+          <Send size={14} className="shrink-0 text-info" />
+          <div className="min-w-0 flex-1 truncate">
+            <span className="font-medium text-ink">
+              {t('sidebar.feishu')}
+              {activeSession?.title ? ` · ${activeSession.title}` : ''}
+            </span>
+            <span className="ml-2 text-muted-foreground">
+              {feishuInfo && t(`chan.mode.${feishuInfo.config.tool_mode}`)}
+              {proj ? ` · ${t('chan.boundProject', { name: proj })}` : ''}
+            </span>
+          </div>
+          <button
+            onClick={() => {
+              setSettingsTab('channels')
+              setShowSettings(true)
+            }}
+            className="shrink-0 text-info hover:underline"
+          >
+            {t('chan.settings')} ›
+          </button>
+        </div>
+      </div>
+    )
+  }
+  // 只读提示条：替换渠道会话的输入框（send 已封禁，这里是视觉层）
+  const readonlyBar = (
+    <div className="rounded-3xl border border-dashed border-line bg-surface/50 px-4 py-3 text-center text-xs text-muted-foreground">
+      {t('chan.readonly')}
+    </div>
+  )
+
   const composer = (placeholder: string) => (
     <div>
       {menuOpen && (
@@ -1736,6 +1847,7 @@ export default function App() {
         sessions={sessions}
         machines={machines}
         machineConn={machineConn}
+        channels={channels}
         recentLimit={recentLimit}
         workspaceDir={workspaceDir}
         currentKey={view === 'chat' ? active : ''}
@@ -1815,6 +1927,7 @@ export default function App() {
                 </div>
               ) : hasMessages ? (
                 <>
+                  {activeChannel && channelBanner()}
                   <div className="relative flex-1 min-h-0">
                     <div ref={scrollRef} onScroll={onScroll} className="h-full overflow-auto">
                     <div className="max-w-3xl mx-auto w-full px-6 py-8 space-y-5">
@@ -1884,7 +1997,7 @@ export default function App() {
                           onCancel={() => resumeWith(ASK_CANCELLED, 'clarify')}
                         />
                       )}
-                      {composer(t('composer.reply'))}
+                      {activeChannel ? readonlyBar : composer(t('composer.reply'))}
                     </div>
                   </div>
                 </>
@@ -1894,7 +2007,9 @@ export default function App() {
                     <span className="text-primary text-3xl">✦</span>
                     <span className="serif text-3xl">Lumi</span>
                   </div>
-                  <div className="w-full max-w-2xl">{composer(t('composer.empty'))}</div>
+                  <div className="w-full max-w-2xl">
+                    {activeChannel ? readonlyBar : composer(t('composer.empty'))}
+                  </div>
                 </div>
               )}
             </div>
@@ -1941,6 +2056,7 @@ export default function App() {
 
       {showSettings && (
         <SettingsDialog
+          initialTab={settingsTab}
           themePref={themePref}
           setThemePref={setThemePref}
           uiFont={uiFont}
@@ -1952,7 +2068,10 @@ export default function App() {
           machines={machines}
           gwFor={gwForBackend}
           onProvidersChanged={onProvidersChanged}
-          onClose={() => setShowSettings(false)}
+          onClose={() => {
+            setShowSettings(false)
+            refreshChannels() // 渠道配置可能在设置里改过：同步侧栏状态灯与旁观横幅
+          }}
         />
       )}
       {showNewProject && (
@@ -1992,8 +2111,8 @@ export default function App() {
       )}
       {pendingDelete && (
         <ConfirmDialog
-          title={t('confirm.deleteTitle')}
-          message={t('confirm.deleteMessage', {
+          title={t(pendingDelete.channel ? 'confirm.clearSessionTitle' : 'confirm.deleteTitle')}
+          message={t(pendingDelete.channel ? 'confirm.clearSessionMessage' : 'confirm.deleteMessage', {
             name: clip(pendingDelete.title || pendingDelete.first_message || t('sidebar.untitled'), 48),
           })}
           onConfirm={() => deleteSession(pendingDelete)}
@@ -2106,6 +2225,14 @@ const ItemView = memo(function ItemView({ item }: { item: Exclude<Item, { kind: 
   if (item.kind === 'user') {
     return (
       <div className="flex flex-col items-end gap-1.5">
+        {/* 消息头：发送者 · 发送时刻。渠道消息两者都有；desktop 消息只有 ts
+            （stream_response 统一落库的到达时刻），只显示时间 */}
+        {(item.sender || item.ts) && (
+          <div className="pr-1.5 text-[10.5px] text-muted-foreground/75">
+            {item.sender}
+            {item.ts ? `${item.sender ? ' · ' : ''}${msgTime(item.ts)}` : ''}
+          </div>
+        )}
         {item.images && item.images.length > 0 && (
           <div className="flex flex-wrap gap-1.5 justify-end max-w-[80%]">
             {item.images.map((src, i) => (

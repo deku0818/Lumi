@@ -76,6 +76,18 @@ class ChannelManager:
         for name in list(self._pools):
             await self._drop_pool(name)
 
+    def thread_lock(self, thread_id: str) -> asyncio.Lock | None:
+        """渠道会话的运行锁（该 thread 已建桥时）。
+
+        desktop「清空记忆」删渠道 thread 的 checkpoint 前持它，避开渠道在途轮——
+        否则跑到一半的轮会把删掉的历史写回，清空静默失效。
+        """
+        for pool in self._pools.values():
+            lock = pool.try_lock(thread_id)
+            if lock is not None:
+                return lock
+        return None
+
     def list_channels(self) -> list[dict]:
         """供 ``get_channels`` RPC：每个 channel 的 name / enabled / config / status。"""
         cfg = load_feishu()

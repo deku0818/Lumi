@@ -58,6 +58,10 @@ class BridgePool:
         """该 thread 的运行锁；建桥时一并创建，故此处必然存在。"""
         return self._locks[thread_id]
 
+    def try_lock(self, thread_id: str) -> asyncio.Lock | None:
+        """该 thread 的运行锁；未建桥（无此 thread）返回 None。"""
+        return self._locks.get(thread_id)
+
     async def close_all(self) -> None:
         """回收全部 bridge（禁用 / workspace 变更 / 进程退出）。
 

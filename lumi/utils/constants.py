@@ -41,6 +41,26 @@ ATTACHED_FILE_TAG: Final[str] = "attached-file"
 单一事实源：display 剥离（text_cleaning）与历史还原（server/ws）都从此构建正则。
 desktop 前端发送侧（App.tsx send）的同名字面量须与此保持一致。"""
 
+FEISHU_THREAD_PREFIX: Final[str] = "feishu-"
+"""飞书渠道会话的 thread 前缀（每 chat 确定性派生 feishu-{chat_id}）。
+
+单一事实源：inbound.feishu_thread_id 的派生与 gateway.session._channel_of 的
+判定（会话列表标注 / 只读守卫 / 通知轮跳过）共用此常量。"""
+
+LUMI_META_KEY: Final[str] = "lumi"
+"""HumanMessage.additional_kwargs 里 Lumi 渲染元数据的命名空间键。
+
+写入（bridge.stream_response：消息级 ts + IM 渠道的 items）与读取
+（gateway.session._user_items）共用，防写读两端字段名漂移。"""
+
+SENDER_TAG: Final[str] = "sender"
+"""IM 渠道消息的发送者标注 <sender>姓名</sender>\\n正文。
+
+渠道无关约定（飞书首用）：纯给模型看（群聊里分清谁说的）。desktop 渲染不解析
+此标签——每条原始消息的 {sender, ts, text} 结构化存于
+HumanMessage.additional_kwargs["lumi"]["items"]（见 _user_items），两条链路分离。
+text_cleaning 在整段显示（会话列表 first_message 等）时剥掉它。"""
+
 # ── 图片处理 ──
 
 MAX_IMAGE_SIZE: Final[int] = 20 * 1024 * 1024  # 20MB

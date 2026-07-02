@@ -3,7 +3,8 @@
 支持纯文本 / post 富文本 / 图片（下载为原始 base64 块，经 stream_response 的
 persist_image_blocks 统一存盘转 <attached-file>，模型用 read/vision 读）/ 文件（下载到
 /tmp/lumi 经 <attached-file> 供 read 读）；回复某条消息时一并带上被回复消息里的图片/文件。每条消息经身份目录解析发送者显示名
-（``channel.directory``），合并时以「姓名：」前缀标注，让 agent 在群聊里分得清谁说的。
+（``channel.directory``），正文加 ``<sender>姓名</sender>`` 标签（模型分清群聊里谁说的），
+并把 {sender, ts, text} 结构化写进 additional_kwargs 供 desktop 气泡渲染。
 """
 
 from __future__ import annotations
@@ -12,13 +13,17 @@ import asyncio
 import json
 import os
 import re
+import time
 from collections import OrderedDict
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import TYPE_CHECKING, Any
 
+from lumi.gateway.broadcast import hub
+from lumi.gateway.channels.feishu.directory import fallback_chat_name, fallback_name
 from lumi.gateway.channels.feishu.outbound import run_turn
-from lumi.utils.constants import ATTACHED_FILE_TAG
+from lumi.sessions.session_meta import update_meta
+from lumi.utils.constants import ATTACHED_FILE_TAG, FEISHU_THREAD_PREFIX, SENDER_TAG
 from lumi.utils.logger import logger
 from lumi.utils.paths import lumi_tmp_dir
 from lumi.utils.thread_id import sanitize_thread_id
@@ -31,6 +36,9 @@ _DEDUP_CACHE_SIZE = 1000
 
 # 同会话忙时的消息排队上限：跑完合并成一轮处理，超出此数的丢弃并提示
 _MAX_QUEUE = 10
+
+# 群名解析失败后的重试冷却（秒）：无名群/无权限的群不必每条消息都打一次 im.chat.get
+_TITLE_RETRY_COOLDOWN = 300.0
 
 # 多条消息合并成一轮时前置的提示：告知 agent 这本是连发的几条、后面的可能更正前面，
 # 只告知不写死规则（有时是补充而非覆盖）。单条不加。
@@ -54,12 +62,13 @@ class _Pending:
         default_factory=list
     )  # (owner_mid, key, name)
     reply_to: str = ""
-    sender_name: str = ""  # 发送者显示名（身份目录解析），合并渲染时作「姓名：」前缀
+    sender_name: str = ""  # 发送者显示名（身份目录解析），渲染为 <sender> 标签
+    ts: int = 0  # 飞书 message.create_time（毫秒），经 additional_kwargs 供 UI 渲染
 
 
 def feishu_thread_id(chat_id: str) -> str:
     """飞书 chat_id → Lumi 会话 thread_id（每 chat 一个常驻 thread）。"""
-    return sanitize_thread_id(f"feishu-{chat_id}")
+    return sanitize_thread_id(f"{FEISHU_THREAD_PREFIX}{chat_id}")
 
 
 def extract_post_text(content_json: dict) -> str:
@@ -164,7 +173,7 @@ def safe_filename(file_key: str, name: str) -> str:
 
 
 def _media_placeholder(m: _Pending) -> str:
-    """媒体-only 消息在编号列表里的占位（保住顺序），有文本则不用它。"""
+    """媒体-only 消息在合并文本里的占位（保住顺序与存在感），有文本则不用它。"""
     if m.image_refs and m.file_refs:
         return "［图片 + 文件］"
     if m.image_refs:
@@ -176,22 +185,31 @@ def _media_placeholder(m: _Pending) -> str:
     return ""
 
 
+def _body(m: _Pending) -> str:
+    """消息正文（媒体-only 用占位）：模型文本与 desktop 气泡 items 共用同一推导。"""
+    return m.text or _media_placeholder(m)
+
+
 def _render(m: _Pending) -> str:
-    """单条消息渲染：有发送者则前缀「姓名：」；媒体-only 用占位保住存在感。"""
-    body = m.text or _media_placeholder(m)
-    return f"{m.sender_name}：{body}" if m.sender_name else body
+    """单条消息渲染：有发送者则加 <sender> 标签行；媒体-only 用占位保住存在感。
+
+    标签是渠道无关约定（见 constants.SENDER_TAG）：纯给模型看（分清群聊里谁说的）；
+    desktop 气泡从 additional_kwargs 的结构化 items 渲染，不解析此文本。
+    """
+    if m.sender_name:
+        return f"<{SENDER_TAG}>{m.sender_name}</{SENDER_TAG}>\n{_body(m)}"
+    return _body(m)
 
 
 def merge_messages(batch: list[_Pending]) -> str:
-    """合并一批消息的文本：单条直接返回原文（仅前缀发送者）；多条加 reminder + 编号列表。
+    """合并一批消息的文本：单条直接返回原文（仅加发送者标签）；多条加 reminder 顺次拼接。
 
-    编号列表让 agent 看清每条边界与先后（单条本身含换行也不糊在一起）；媒体-only 的消息
-    用占位行保住顺序，图片/文件实体仍另行附带。群聊里逐条带发送者，agent 才分得清谁说的。
+    <sender> 标签本身就是消息边界（每条渲染必带，发送者解析恒有兜底名），无需编号；
+    媒体-only 的消息用占位保住顺序，图片/文件实体仍另行附带。
     """
     if len(batch) == 1:
         return _render(batch[0])
-    lines = [f"{i}. {_render(m)}" for i, m in enumerate(batch, 1)]
-    return _MERGE_REMINDER.format(n=len(batch)) + "\n".join(lines)
+    return _MERGE_REMINDER.format(n=len(batch)) + "\n\n".join(_render(m) for m in batch)
 
 
 def attach_files_to_text(text: str, paths: list[str]) -> str:
@@ -221,6 +239,40 @@ class FeishuInbound:
         self._seen: OrderedDict[str, None] = OrderedDict()
         # thread_id → 忙时积压的消息；由当前持锁者跑完后合并处理
         self._queues: dict[str, list[_Pending]] = {}
+        # chat_id → 群名解析失败（无名群/无权限，缓存不收兜底名）后的下次重试时刻，
+        # 免得这类群每条消息都白打一次 im.chat.get
+        self._title_retry_at: dict[str, float] = {}
+
+    async def _sync_session_title(
+        self,
+        thread_id: str,
+        chat_id: str,
+        chat_type: str,
+        sender_name: str,
+        open_id: str,
+    ) -> None:
+        """把群名 / 私聊对方姓名写进 session sidecar，供 desktop 会话列表显示。
+
+        channel_title 与手动重命名的 title 分开存：手动名永久优先，群改名自动跟随。
+        update_meta 内置变更检测（无变化不写盘），故可每消息无脑调用；desktop
+        「清空会话」删掉 sidecar 后，下条消息也能如实重写。解析失败的兜底名
+        （群_xxx / 用户_xxx）不写盘——API 抖动不该覆盖已存的真实名字。
+        """
+        if chat_type == "group":
+            if time.monotonic() < self._title_retry_at.get(chat_id, 0.0):
+                return
+            title, kind = (
+                await self.channel.directory.resolve_chat_name(chat_id),
+                "group",
+            )
+            if title == fallback_chat_name(chat_id):
+                self._title_retry_at[chat_id] = time.monotonic() + _TITLE_RETRY_COOLDOWN
+                return
+        else:
+            title, kind = sender_name, "p2p"
+            if title == fallback_name(open_id):
+                return
+        update_meta(thread_id, channel_title=title, channel_kind=kind)
 
     def _is_duplicate(self, msg_id: str) -> bool:
         if msg_id in self._seen:
@@ -307,16 +359,20 @@ class FeishuInbound:
                 return
 
             # 解析发送者显示名：群聊走群成员源、私聊走通讯录源；失败/取不到退兜底名。
-            sender_name = ""
+            # 恒有名字 → _render 的 <sender> 标签每条必带（模型的消息边界依赖它）。
             try:
                 name_map = await ch.directory.resolve_senders_in_chat(
                     chat_id if chat_type == "group" else None, [open_id]
                 )
-                sender_name = name_map.get(open_id, "")
+                sender_name = name_map.get(open_id) or fallback_name(open_id)
             except Exception:
                 logger.warning(f"Feishu: 解析发送者姓名失败 {open_id}", exc_info=True)
+                sender_name = fallback_name(open_id)
 
             thread_id = feishu_thread_id(chat_id)
+            await self._sync_session_title(
+                thread_id, chat_id, chat_type, sender_name, open_id
+            )
             bridge = await ch.bridge_pool.get(thread_id)
             lock = ch.bridge_pool.lock(thread_id)
             pending = _Pending(
@@ -325,6 +381,7 @@ class FeishuInbound:
                 file_refs,
                 reply_to=message_id,
                 sender_name=sender_name,
+                ts=int(getattr(message, "create_time", 0) or 0),
             )
 
             # 忙判与上锁相邻、其间无 await：事件循环上原子。忙时入队（上限 _MAX_QUEUE，
@@ -399,7 +456,19 @@ class FeishuInbound:
             reply_to=reply_to,
             content=build_content(merged_text, image_blocks),
             tool_mode=ch.config.tool_mode,
+            # 渲染数据与模型文本分离：每条原始消息的 {sender, ts, text} 结构化存进
+            # additional_kwargs，desktop 气泡只读它、不反解析正文——正文里的
+            # <sender> 标签纯给模型看，字面标签无法伪造气泡、也无对齐问题。
+            # 媒体-only 消息同样给占位文本，避免渲染出只有人名没有内容的悬空气泡
+            message_meta={
+                "items": [
+                    {"sender": m.sender_name, "ts": m.ts, "text": _body(m)}
+                    for m in batch
+                ]
+            },
         )
+        # 本轮已入 checkpoint：通知所有 desktop 连接刷新会话列表 / 旁观视图
+        hub.on_channel_activity(thread_id, "feishu")
 
     def _is_bot_mentioned(self, message: Any) -> bool:
         """检查群消息是否 @ 了本机器人（@_all 或精确匹配 bot open_id）。

@@ -16,11 +16,14 @@ import {
   Plus,
   RotateCw,
   Search,
+  Send,
+  User,
+  Users,
   WifiOff,
   X,
 } from 'lucide-react'
 import type { ConnState } from '../gateway'
-import type { CronJob, SessionMeta } from '../types'
+import type { ChannelInfo, CronJob, SessionMeta } from '../types'
 import { basename, machineColor, machineName, sessionKey, beOf } from '@/lib/utils'
 import { useI18n, LANGS } from '../i18n'
 import {
@@ -69,9 +72,10 @@ function usePersistedToggle(key: string): [Record<string, boolean>, (k: string) 
   return [map, toggle]
 }
 
-// 某台机器的会话按项目（workspace_dir）分组；当前项目排最前。
+// 某台机器的会话按项目（workspace_dir）分组；当前项目排最前。渠道会话不进项目组
+// （A2：渠道身份优先于项目身份，另起机器级「飞书」分组）。
 function projectGroupsFor(sessions: SessionMeta[], backend: string, currentDir: string) {
-  const mine = sessions.filter((s) => (s.backend || 'local') === backend)
+  const mine = sessions.filter((s) => (s.backend || 'local') === backend && !s.channel)
   const map = new Map<string, SessionMeta[]>()
   for (const s of mine) {
     const dir = s.workspace_dir || ''
@@ -108,6 +112,7 @@ export const Sidebar = memo(function Sidebar({
   sessions,
   machines,
   machineConn,
+  channels,
   recentLimit,
   workspaceDir,
   currentKey,
@@ -136,6 +141,7 @@ export const Sidebar = memo(function Sidebar({
   sessions: SessionMeta[]
   machines: Machine[]
   machineConn: Record<string, ConnState>
+  channels: Record<string, ChannelInfo[]> // 机器 id → IM 渠道列表（飞书组头状态灯/绑定项目）
   recentLimit: number
   workspaceDir: string
   currentKey: string
@@ -243,6 +249,39 @@ export const Sidebar = memo(function Sidebar({
     )
   }
 
+  // 全部 · IM 渠道分组（A2：机器级，组头「飞书 · 绑定项目」+ 渠道状态灯，
+  // 状态灯复用 ChannelsPanel 的 .chan-orb 样式）。该机器无渠道会话则整组不渲染；
+  // 渠道会话不进项目组（projectGroupsFor 已剔除）。目前仅飞书一个渠道。
+  const renderChannelGroup = (backend: string) => {
+    const mine = sessions.filter((s) => beOf(s) === backend && s.channel)
+    if (!mine.length) return null
+    const key = `${backend}::__channel__`
+    const collapsed = !!collapsedP[key]
+    const info = (channels[backend] ?? []).find((c) => c.name === mine[0].channel)
+    const proj = info?.config.workspace ? basename(info.config.workspace) : ''
+    return (
+      <div key={key}>
+        <button
+          onClick={() => toggleP(key)}
+          className="w-full flex items-center gap-1.5 px-2 pt-1.5 pb-0.5 text-left text-[10.5px] text-muted-foreground hover:text-ink transition"
+        >
+          <Send size={11} className="shrink-0 opacity-70" />
+          <span className="min-w-0 truncate">
+            {t('sidebar.feishu')}
+            {proj && <span className="opacity-60"> · {proj}</span>}
+          </span>
+          {info && (
+            <span
+              className={`chan-orb ${info.status.state} scale-[0.67]`}
+              title={info.status.detail}
+            />
+          )}
+        </button>
+        {!collapsed && mine.sort(byRecency).map((s) => row(s))}
+      </div>
+    )
+  }
+
   // 全部 · 机器段：可折叠头(状态光点 + 名 + ＋) + 项目分组
   const renderMachine = (m: Machine) => {
     const collapsed = !!collapsedM[m.id]
@@ -277,6 +316,7 @@ export const Sidebar = memo(function Sidebar({
             <Plus size={14} />
           </button>
         </div>
+        {!collapsed && renderChannelGroup(m.id)}
         {!collapsed &&
           (groups.length ? (
             groups.map((pg) => renderProject(m.id, pg))
@@ -371,15 +411,20 @@ export const Sidebar = memo(function Sidebar({
             ))}
           </CollapsibleGroup>
         )}
-        {multi
-          ? visibleMachines.map(renderMachine)
-          : localGroups.length
-            ? localGroups.map((pg) => renderProject('local', pg))
-            : (
-                <div className="px-3 py-8 text-center text-xs text-muted-foreground">
-                  {t('sidebar.empty')}
-                </div>
-              )}
+        {multi ? (
+          visibleMachines.map(renderMachine)
+        ) : (
+          <>
+            {renderChannelGroup('local')}
+            {localGroups.length
+              ? localGroups.map((pg) => renderProject('local', pg))
+              : !sessions.length && (
+                  <div className="px-3 py-8 text-center text-xs text-muted-foreground">
+                    {t('sidebar.empty')}
+                  </div>
+                )}
+          </>
+        )}
       </>
     )
   }
@@ -656,6 +701,13 @@ function SessionRow({
             className="shrink-0 size-1.5 rounded-full bg-primary"
           />
         )}
+        {/* 渠道会话：群/私聊图标（最近流、搜索结果、飞书分组内统一） */}
+        {session.channel &&
+          (session.channel_kind === 'p2p' ? (
+            <User size={13} className="shrink-0 text-info/80" />
+          ) : (
+            <Users size={13} className="shrink-0 text-info/80" />
+          ))}
         <span className="flex-1 min-w-0 truncate text-left">{query ? highlight(name, query) : name}</span>
         {dotColor && (
           <span
@@ -684,9 +736,10 @@ function SessionRow({
             {t('sidebar.rename')}
           </DropdownMenuItem>
           <DropdownMenuSeparator />
+          {/* 渠道会话删的是共享 checkpoint（群里下条消息会「失忆」重开），文案如实 */}
           <DropdownMenuItem variant="destructive" onClick={() => onDelete(session)}>
             <Trash2 />
-            {t('sidebar.delete')}
+            {session.channel ? t('sidebar.clearSession') : t('sidebar.delete')}
           </DropdownMenuItem>
         </DropdownMenuContent>
       </DropdownMenu>

@@ -212,7 +212,15 @@ async def test_run_batch_merges_text_and_replies_to_latest(monkeypatch):
     captured = {}
 
     async def fake_run_turn(
-        ch, bridge, *, chat_id, thread_id, reply_to, content, tool_mode
+        ch,
+        bridge,
+        *,
+        chat_id,
+        thread_id,
+        reply_to,
+        content,
+        tool_mode,
+        message_meta=None,
     ):
         captured["content"] = content
         captured["reply_to"] = reply_to
@@ -226,9 +234,7 @@ async def test_run_batch_merges_text_and_replies_to_latest(monkeypatch):
     await fi._run_batch(fi.channel, None, "oc_x", "t", batch)
     content = captured["content"]
     assert (
-        "<system-reminder>" in content
-        and "1. 第一条" in content
-        and "2. 第二条" in content
+        "<system-reminder>" in content and "第一条" in content and "第二条" in content
     )
     assert captured["reply_to"] == "m2"  # 回复批次里最近一条
 
@@ -237,9 +243,18 @@ async def test_run_batch_merges_media(monkeypatch):
     captured = {}
 
     async def fake_run_turn(
-        ch, bridge, *, chat_id, thread_id, reply_to, content, tool_mode
+        ch,
+        bridge,
+        *,
+        chat_id,
+        thread_id,
+        reply_to,
+        content,
+        tool_mode,
+        message_meta=None,
     ):
         captured["content"] = content
+        captured["message_meta"] = message_meta
 
     monkeypatch.setattr(inb, "run_turn", fake_run_turn)
     fi = FeishuChannel(FeishuChannelConfig()).inbound
@@ -249,34 +264,47 @@ async def test_run_batch_merges_media(monkeypatch):
 
     monkeypatch.setattr(fi, "_image_block", fake_img)
     batch = [
-        inb._Pending("看图", image_refs=[("m1", "ik1")], reply_to="m1"),
-        inb._Pending("还有这张", image_refs=[("m2", "ik2")], reply_to="m2"),
+        inb._Pending("看图", image_refs=[("m1", "ik1")], reply_to="m1", ts=1000),
+        inb._Pending("", image_refs=[("m2", "ik2")], reply_to="m2", ts=2000),
     ]
     await fi._run_batch(fi.channel, None, "oc", "t", batch)
     content = captured["content"]
     assert content[0]["type"] == "text"
-    assert "1. 看图" in content[0]["text"] and "2. 还有这张" in content[0]["text"]
+    assert "看图" in content[0]["text"]
     assert sum(1 for b in content if b.get("type") == "image") == 2
+    # 渲染数据结构化透传：每条原始消息的 sender/ts/text（desktop 气泡只读它）；
+    # 媒体-only 消息给占位文本，避免渲染出只有人名没有内容的悬空气泡
+    assert captured["message_meta"] == {
+        "items": [
+            {"sender": "", "ts": 1000, "text": "看图"},
+            {"sender": "", "ts": 2000, "text": "［图片］"},
+        ]
+    }
 
 
 def test_merge_messages_single_is_plain_text():
-    # 单条：原样返回，不加 reminder / 编号
+    # 单条无发送者：原样返回，不加 reminder / 标签
     assert inb.merge_messages([inb._Pending("帮我看下这个")]) == "帮我看下这个"
 
 
-def test_merge_messages_multi_has_reminder_and_numbering():
+def test_render_single_with_sender_tag():
+    out = inb.merge_messages([inb._Pending("帮我看下这个", sender_name="李雷")])
+    assert out == "<sender>李雷</sender>\n帮我看下这个"
+
+
+def test_merge_messages_multi_has_reminder_and_sender_tags():
     out = inb.merge_messages(
         [
-            inb._Pending("等等，先别删那个文件"),
-            inb._Pending("改成用 SQLite"),
-            inb._Pending("", image_refs=[("m3", "ik")]),
+            inb._Pending("等等，先别删那个文件", sender_name="李雷"),
+            inb._Pending("改成用 SQLite", sender_name="韩梅梅"),
+            inb._Pending("", image_refs=[("m3", "ik")], sender_name="李雷"),
         ]
     )
     assert "<system-reminder>" in out
     assert "连发的 3 条消息" in out
-    assert "1. 等等，先别删那个文件" in out
-    assert "2. 改成用 SQLite" in out
-    assert "3. ［图片］" in out  # 媒体-only 消息占位保序
+    assert "<sender>李雷</sender>\n等等，先别删那个文件" in out
+    assert "<sender>韩梅梅</sender>\n改成用 SQLite" in out
+    assert "<sender>李雷</sender>\n［图片］" in out  # 媒体-only 消息占位保序
 
 
 def test_merge_messages_media_placeholders():
@@ -287,9 +315,9 @@ def test_merge_messages_media_placeholders():
             inb._Pending("", image_refs=[("a", "1"), ("b", "2")]),
         ]
     )
-    assert "1. 看下这两个" in out
-    assert "2. ［文件：报告.pdf］" in out
-    assert "3. ［图片×2］" in out
+    assert "看下这两个" in out
+    assert "［文件：报告.pdf］" in out
+    assert "［图片×2］" in out
 
 
 async def test_drain_processes_first_then_merges_queued(monkeypatch):

@@ -10,6 +10,7 @@ checkpoint / folder 等职责拆到 service 子模块，AgentBridge 通过瘦委
 from __future__ import annotations
 
 import asyncio
+import time
 from collections.abc import AsyncGenerator
 from dataclasses import dataclass
 from enum import StrEnum
@@ -37,7 +38,7 @@ from lumi.gateway.bridge.broker import LUMI_APPROVAL_EVENT, ApprovalBroker
 from lumi.gateway.bridge.checkpoint import CheckpointService
 from lumi.gateway.bridge.folders import FolderManager
 from lumi.gateway.bridge.providers import ProviderService
-from lumi.utils.constants import MAX_STREAM_RETRIES, RETRY_BASE_WAIT
+from lumi.utils.constants import LUMI_META_KEY, MAX_STREAM_RETRIES, RETRY_BASE_WAIT
 from lumi.utils.logger import logger
 from lumi.utils.read_config import get_config
 from lumi.utils.thread_id import generate_thread_id
@@ -307,6 +308,7 @@ class AgentBridge:
         tool_mode: str = "default",
         execution_mode: str = "normal",
         is_meta: bool = False,
+        message_meta: dict | None = None,
     ) -> AsyncGenerator[BridgeEvent, None]:
         """发送消息并 yield 事件流
 
@@ -315,6 +317,9 @@ class AgentBridge:
             tool_mode: 工具审批模式（default / accept_edits / privileged）。
             execution_mode: 执行模式（normal / plan / readonly / 自定义）。
             is_meta: 标记为系统生成的不可见消息（restore 时不显示）。
+            message_meta: UI 侧渲染元数据（IM 渠道的消息时间戳等），挂到
+                HumanMessage.additional_kwargs["lumi"] 随 checkpoint 持久化，
+                不进模型可见文本。
         """
         # 上传图片统一存盘并换成 <attached-file> 路径引用（与普通文件一致，交 read/vision 消费）。
         # 放在最前：后续 checkpoint 标签 / reminder 前置都基于已归一的 content。
@@ -342,7 +347,14 @@ class AgentBridge:
         # tool_mode 是 context（运行时共享、可变）真相源：本轮 UI 选择写入，运行中经
         # set_tool_mode 改它即对后续工具实时生效。不进 input_data（state 快照改不动）。
         self._context.tool_mode = tool_mode
-        msg = meta_human_message(content) if is_meta else HumanMessage(content=content)
+        if is_meta:
+            msg = meta_human_message(content)
+        else:
+            # 消息时间在此统一落库（渠道无关）：所有用户消息记录到达时刻（毫秒），
+            # 随 checkpoint 持久化；IM 渠道经 message_meta 另带 per-消息 items
+            # （各自的发送时刻，合并轮多条），比到达时刻更精确。UI 按需消费。
+            meta = {"ts": int(time.time() * 1000), **(message_meta or {})}
+            msg = HumanMessage(content=content, additional_kwargs={LUMI_META_KEY: meta})
         input_data = {
             "messages": [msg],
             "execution_mode": execution_mode,

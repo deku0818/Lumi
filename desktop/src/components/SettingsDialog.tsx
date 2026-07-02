@@ -14,6 +14,7 @@ import { Tabs, TabsList, TabsTrigger, TabsContent } from '@/components/ui/tabs'
 // 设置弹窗：左侧导航 + 右侧面板（参考 Claude 桌面设置）。
 // general：外观（主题）+ 语言；models：模型供应商管理（原输入框模型选择器迁移至此）。
 export function SettingsDialog({
+  initialTab,
   themePref,
   setThemePref,
   uiFont,
@@ -27,6 +28,7 @@ export function SettingsDialog({
   onProvidersChanged,
   onClose,
 }: {
+  initialTab?: 'general' | 'models' | 'channels' | 'connections' // 打开时定位的 tab
   themePref: ThemePref
   setThemePref: (p: ThemePref) => void
   uiFont: FontPref
@@ -51,7 +53,7 @@ export function SettingsDialog({
         className="sm:max-w-3xl w-full h-[34rem] p-0 gap-0 overflow-hidden flex"
       >
         <DialogTitle className="sr-only">{t('settings.title')}</DialogTitle>
-        <Tabs defaultValue="general" orientation="vertical" className="flex h-full w-full gap-0">
+        <Tabs defaultValue={initialTab ?? 'general'} orientation="vertical" className="flex h-full w-full gap-0">
           <TabsList
             variant="line"
             className="w-48 h-full group-data-vertical/tabs:h-full shrink-0 flex-col items-stretch justify-start gap-0.5 rounded-none bg-canvas border-r border-line/30 p-3"
