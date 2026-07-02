@@ -1,6 +1,6 @@
 """进程级 IM channel 管理器（单例）。
 
-``lumi serve`` 的 lifespan 经 :func:`channels_runtime` 起它，按 ``~/.lumi/channels.json``
+``lumi serve`` 的 lifespan 经 :func:`channels_runtime` 起它，按 ``lumi.json`` 的 "channels" 分区
 拉起已启用的 channel；desktop UI 经 WS RPC（``save_channel``）改配置后调 :meth:`reload`
 停旧起新——channel 是进程级长连接，一个 serve 一条飞书连接，所有连上来的 UI 共享同一状态。
 """

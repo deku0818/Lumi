@@ -53,6 +53,6 @@ lumi/styles/
 
 ## 关键实现
 
-- **`active_style` 属性**（`LumiConfig`）：返回当前生效的风格名，CLI override > config.yaml > "default"
+- **`active_style` 属性**（`LumiConfig`）：返回当前生效的风格名，CLI override > config.json > "default"
 - **`list_styles()`**（`lumi/styles/__init__.py`）：扫描 `lumi/styles/` 子目录，列出所有可用风格
 - **缓存友好**：工具定义在启动时一次性加载，运行时不变，保持 Prompt Caching 前缀稳定

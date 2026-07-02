@@ -1,22 +1,20 @@
 """全局配置管理器
 
-负责 ~/.lumi/lumi.json 的读取、写入和初始化。
+负责 ~/.lumi/lumi.json 中 "settings" 分区的读取与写入（经 user_store）。
 所有方法为静态方法，无实例状态。
 """
 
 from __future__ import annotations
 
-import json
 from pathlib import Path
 
-from lumi.utils.atomic_io import atomic_write_text
 from lumi.utils.logger import logger
 
+from . import user_store
 from .global_models import GlobalConfig
 
-# 路径常量：固定为 ~/.lumi/，不受命令行参数影响
+# 路径常量：固定为 ~/.lumi/，不受命令行参数影响（cron / catalog / uploads 共用）
 GLOBAL_CONFIG_DIR: Path = Path.home() / ".lumi"
-GLOBAL_CONFIG_FILE: Path = GLOBAL_CONFIG_DIR / "lumi.json"
 
 
 def uploads_dir() -> Path:
@@ -31,61 +29,25 @@ def uploads_dir() -> Path:
 class GlobalConfigManager:
     """全局配置管理器
 
-    负责 ~/.lumi/lumi.json 的读取、写入和初始化。
+    负责 ~/.lumi/lumi.json 中 "settings" 分区的读写（委托 user_store）。
     所有方法为静态方法，无实例状态。
     """
 
     @staticmethod
     def load() -> GlobalConfig:
-        """加载全局配置，文件不存在时自动创建。
-
-        Returns:
-            GlobalConfig 实例。读取失败时返回默认配置。
-        """
+        """加载全局配置（lumi.json 的 "settings" 分区）；缺失/损坏返回默认配置。"""
+        data = user_store.read_section("settings", {})  # read_section 已保证 dict 类型
         try:
-            GlobalConfigManager._ensure_dir()
-        except OSError as e:
-            logger.error(f"无法创建 ~/.lumi/ 目录: {e}")
-            return GlobalConfig()
-
-        if not GLOBAL_CONFIG_FILE.exists():
-            config = GlobalConfig()
-            try:
-                GlobalConfigManager.save(config)
-            except Exception as e:
-                logger.error(f"无法写入默认配置文件: {e}")
-            return config
-
-        try:
-            data = json.loads(GLOBAL_CONFIG_FILE.read_text("utf-8"))
             return GlobalConfig(**data)
-        except json.JSONDecodeError as e:
-            logger.warning(f"lumi.json 解析失败，使用默认配置: {e}")
-            return GlobalConfig()
-        except (OSError, UnicodeDecodeError) as e:
-            logger.error(f"lumi.json 读取失败，使用默认配置: {e}")
-            return GlobalConfig()
         except ValueError as e:
-            logger.warning(f"lumi.json 字段校验失败，使用默认配置: {e}")
+            logger.warning(f"settings 字段校验失败，使用默认配置: {e}")
             return GlobalConfig()
 
     @staticmethod
     def save(config: GlobalConfig) -> None:
-        """原子写入全局配置到 ~/.lumi/lumi.json（复用 utils.atomic_io 单一原子写实现）。
-
-        Args:
-            config: 要保存的全局配置实例。
+        """写入全局配置到 lumi.json 的 "settings" 分区（经 user_store 原子写）。
 
         Raises:
             OSError: 写入或替换失败时抛出。
         """
-        atomic_write_text(GLOBAL_CONFIG_FILE, config.model_dump_json(indent=2))
-
-    @staticmethod
-    def _ensure_dir() -> None:
-        """确保 ~/.lumi/ 目录存在。
-
-        Raises:
-            PermissionError: 目录创建权限不足时抛出。
-        """
-        GLOBAL_CONFIG_DIR.mkdir(parents=True, exist_ok=True)
+        user_store.write_section("settings", config.model_dump())

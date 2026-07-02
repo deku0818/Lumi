@@ -41,7 +41,7 @@ class ToolArgsInterceptor:
     """MCP 工具参数注入拦截器
 
     从 runtime.config["configurable"]["tool_args"] 读取参数，
-    根据 config.yaml 中的 tool_args 映射关系注入到对应工具。
+    根据 config.json 中的 tool_args 映射关系注入到对应工具。
     """
 
     async def __call__(

@@ -3,7 +3,7 @@
 一个 profile = 一套连接（name、base_url、api_key）+ 该连接下的一组模型 models
 + 按模型的思考档位 effort（model → level，只存非 auto）。
 协议（OpenAI / Anthropic 客户端）仍由 model 名自动判定（见 manager.detect_protocol）。
-active 指向「某 profile 下的某个 model」。存储为 ~/.lumi/providers.json（明文，chmod 600）：
+active 指向「某 profile 下的某个 model」。存储为 ~/.lumi/lumi.json 的 "providers" 分区（含密钥，整体 chmod 600）：
 
     {"active": {"provider": "<id>", "model": "<model>"},
      "classifier": {"provider": "<id>", "model": "<model>"},   # auto 审批分类器模型，可缺省
@@ -20,15 +20,11 @@ active 指向「某 profile 下的某个 model」。存储为 ~/.lumi/providers.
 
 from __future__ import annotations
 
-import json
 import uuid
 from dataclasses import asdict, dataclass, field, replace
-from pathlib import Path
 
 from lumi.models.manager import allowed_levels, get_default_model_name
-from lumi.utils.atomic_io import atomic_write_json
-from lumi.utils.config.global_manager import GLOBAL_CONFIG_DIR
-from lumi.utils.logger import logger
+from lumi.utils.config import user_store
 
 # active 选中项：provider id + 该 provider 下的某个 model
 Active = dict  # {"provider": str, "model": str}
@@ -44,10 +40,6 @@ class ProviderProfile:
     models: tuple[str, ...]
     effort: dict[str, str] = field(default_factory=dict)
     """按模型的思考档位（model → level），只存非 auto。"""
-
-
-def _path() -> Path:
-    return GLOBAL_CONFIG_DIR / "providers.json"
 
 
 def _coerce_profile(x: dict) -> ProviderProfile | None:
@@ -96,15 +88,8 @@ def _normalize_active(profiles: list[ProviderProfile], active: dict) -> Active:
 
 
 def _read_data() -> dict:
-    """读取并解析 providers.json 一次；缺失/损坏返回空 dict。"""
-    path = _path()
-    if not path.exists():
-        return {}
-    try:
-        return json.loads(path.read_text(encoding="utf-8"))
-    except (json.JSONDecodeError, OSError):
-        logger.warning("providers.json 读取失败: %s", path, exc_info=True)
-        return {}
+    """读取 lumi.json 的 "providers" 分区一次；缺失/损坏返回空 dict。"""
+    return user_store.read_section("providers", {})
 
 
 def _parse(data: dict) -> tuple[list[ProviderProfile], Active, dict]:
@@ -120,32 +105,28 @@ def _parse(data: dict) -> tuple[list[ProviderProfile], Active, dict]:
     )
 
 
+def _load_all() -> tuple[list[ProviderProfile], Active, dict]:
+    """一次读盘解出 (profiles, active, classifier)——mutator 用它避免为 classifier 再读一次。"""
+    return _parse(_read_data())
+
+
 def load() -> tuple[list[ProviderProfile], Active]:
     """读取全部 profile 与规范化后的 active；缺失/损坏返回 ([], 空 active)。"""
-    profiles, active, _ = _parse(_read_data())
+    profiles, active, _ = _load_all()
     return profiles, active
 
 
-_KEEP_CLASSIFIER = object()  # _save 默认哨兵：保留盘上现有 classifier
-
-
-def _save(
-    profiles: list[ProviderProfile], active: dict, classifier=_KEEP_CLASSIFIER
-) -> None:
-    # classifier 缺省 → 沿用盘上现值（让 set_effort/set_active/upsert 等不丢失它）；
-    # 无论哪种来源都按当前 profiles 规范化，profile/model 被删时自动清失效指针。
-    raw = (
-        _read_data().get("classifier") if classifier is _KEEP_CLASSIFIER else classifier
-    )
+def _save(profiles: list[ProviderProfile], active: dict, classifier: dict) -> None:
+    # classifier 由调用方传入（写操作前已随 _load_all 一并读出，无需 _save 再读盘）；
+    # 按当前 profiles 规范化，profile/model 被删时自动清失效指针。
     payload = {
         "active": _normalize_active(profiles, active),
         "profiles": [{**asdict(p), "models": list(p.models)} for p in profiles],
     }
-    norm = _kept_pointer(profiles, raw)
+    norm = _kept_pointer(profiles, classifier)
     if norm:
         payload["classifier"] = norm
-    # 含 api_key，限制为仅本人可读写
-    atomic_write_json(_path(), payload, mode=0o600)
+    user_store.write_section("providers", payload)
 
 
 def set_effort(provider_id: str, model: str, level: str) -> str | None:
@@ -156,7 +137,7 @@ def set_effort(provider_id: str, model: str, level: str) -> str | None:
     """
     if level != "auto" and level not in allowed_levels(model):
         return None
-    profiles, active = load()
+    profiles, active, classifier = _load_all()
     prof = next((p for p in profiles if p.id == provider_id), None)
     if prof is None or model not in prof.models:
         return None
@@ -165,7 +146,7 @@ def set_effort(provider_id: str, model: str, level: str) -> str | None:
         effort[model] = level
     out = [p for p in profiles if p.id != provider_id]
     out.append(replace(prof, effort=effort))
-    _save(out, active)
+    _save(out, active, classifier)
     return level
 
 
@@ -204,9 +185,9 @@ def resolve(model_name: str | None = None) -> ResolvedModel:
 
 
 def resolve_vision() -> ResolvedModel | None:
-    """解析视觉辅助模型 + 连接（来自 config.yaml 的 vision 配置）；未配 model → None。
+    """解析视觉辅助模型 + 连接（来自 config.json 的 vision 配置）；未配 model → None。
 
-    base_url / api_key 留空则反查 providers.json 里含该模型的 profile 连接（resolve）；
+    base_url / api_key 留空则反查 providers 分区里含该模型的 profile 连接（resolve）；
     仍查不到则连接为空（create_llm 用 env / SDK 默认）。档位恒 auto。
     """
     from lumi.utils.read_config import get_config
@@ -246,7 +227,7 @@ def set_classifier(provider_id: str, model: str) -> dict:
     """
     profiles, active = load()
     c = {"provider": provider_id, "model": model} if provider_id and model else {}
-    _save(profiles, active, classifier=c)
+    _save(profiles, active, c)
     return _kept_pointer(profiles, c)
 
 
@@ -255,7 +236,7 @@ def upsert(profile: dict) -> ProviderProfile:
 
     思考档位不经此通道（set_effort 专用）：保留旧记录中仍存在的模型的档位。
     """
-    profiles, active = load()
+    profiles, active, classifier = _load_all()
     pid = profile.get("id") or uuid.uuid4().hex[:8]
     seen: set[str] = set()
     models = tuple(
@@ -275,21 +256,21 @@ def upsert(profile: dict) -> ProviderProfile:
     )
     out = [p for p in profiles if p.id != pid]
     out.append(saved)
-    _save(out, active)  # active 由 _save 规范化（首条/失效自动归位）
+    _save(out, active, classifier)  # active 由 _save 规范化（首条/失效自动归位）
     return saved
 
 
 def delete(pid: str) -> None:
-    profiles, active = load()
-    _save([p for p in profiles if p.id != pid], active)
+    profiles, active, classifier = _load_all()
+    _save([p for p in profiles if p.id != pid], active, classifier)
 
 
 def set_active(provider_id: str, model: str) -> Active | None:
     """切换 active 到 (provider, model)；provider 或 model 不存在返回 None。"""
-    profiles, _ = load()
+    profiles, _, classifier = _load_all()
     prof = next((p for p in profiles if p.id == provider_id), None)
     if prof is None or model not in prof.models:
         return None
     active = {"provider": provider_id, "model": model}
-    _save(profiles, active)
+    _save(profiles, active, classifier)
     return active

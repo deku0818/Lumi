@@ -32,7 +32,7 @@ def _default(
         typer.Option(
             "-s",
             "--style",
-            help="系统提示词风格（如 code），覆盖 config.yaml 中的 style 配置",
+            help="系统提示词风格（如 code），覆盖 config.json 中的 style 配置",
         ),
     ] = None,
     privileged_danger: Annotated[
@@ -100,7 +100,7 @@ def _run_headless(
         tool_mode = "default"
 
     async def _execute() -> None:
-        # 注入 config.yaml 中的环境变量（API key 等）
+        # 注入 config.json 中的环境变量（API key 等）
         from lumi.utils.read_config import get_config
 
         get_config().apply_env()

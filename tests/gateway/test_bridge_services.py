@@ -13,13 +13,14 @@ from lumi.gateway.bridge import AgentBridge
 from lumi.gateway.bridge.checkpoint import CheckpointService
 from lumi.gateway.bridge.providers import ProviderService
 from lumi.models import provider_store
+from lumi.utils.config import user_store
 
 
 @pytest.fixture
 def store_path(tmp_path, monkeypatch):
-    """把 providers.json 指向 tmp 目录，隔离真实 ~/.lumi。"""
-    target = tmp_path / "providers.json"
-    monkeypatch.setattr(provider_store, "_path", lambda: target)
+    """把 lumi.json 指向 tmp 目录，隔离真实 ~/.lumi。"""
+    target = tmp_path / "lumi.json"
+    monkeypatch.setattr(user_store, "CONFIG_FILE", target)
     return target
 
 

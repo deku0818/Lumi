@@ -39,14 +39,17 @@ uv pip install -e .
 
 ### 2. 配置环境
 
-创建 `.lumi/config.yaml` 文件：
+创建 `.lumi/config.json` 文件（`style` 为内置风格：`default`（默认）/ `code`）：
 
-```yaml
-style: code  # 内置风格：default（默认）/ code
-env:
-  LLM_MODEL_NAME: gpt-4o
-  OPENAI_API_KEY: sk-xxx
-  OPENAI_API_BASE: https://api.openai.com/v1
+```json
+{
+  "style": "code",
+  "env": {
+    "LLM_MODEL_NAME": "gpt-4o",
+    "OPENAI_API_KEY": "sk-xxx",
+    "OPENAI_API_BASE": "https://api.openai.com/v1"
+  }
+}
 ```
 
 ### 3. 启动 Lumi
@@ -117,58 +120,56 @@ lumi --version
 
 ### 配置文件详解
 
-#### 主配置文件：`.lumi/config.yaml`
+#### 主配置文件：`.lumi/config.json`
 
-```yaml
-# 风格配置
-style: code  # 内置风格：default（默认）/ code
+各字段说明：`style` 为内置风格（`default` 默认 / `code`）；`agents.tools` 为工具白名单（空列表 = 全部启用），`disabled_tools` 为工具黑名单，`checkpoint` 为检查点存储（`sqlite` | `memory` | `postgres`），`postgres_uri` 为 PostgreSQL 连接 URI。
 
-# 环境变量
-env:
-  LLM_MODEL_NAME: gpt-4o
-  OPENAI_API_KEY: sk-xxx
-  OPENAI_API_BASE: https://api.openai.com/v1
-  ANTHROPIC_API_KEY: sk-xxx
-  ANTHROPIC_API_URL: https://api.example.com
-
-# Agent 配置
-agents:
-  tools: []  # 工具白名单，空列表 = 全部启用
-  disabled_tools: []  # 工具黑名单
-  max_tokens: 8192
-  recursion_limit: 5000
-  checkpoint: sqlite  # 检查点存储：sqlite | memory | postgres
-  postgres_uri: ""  # PostgreSQL 连接 URI
-
-# Token 配置
-token:
-  once_tool_ratio: 0.1
-  trim_messages_ratio: 0.96
-  context_length: 200000
-  summary_threshold: 0.7
-
-# LLM 参数
-llm_params:
-  openai:
-    temperature: 0.7
-  anthropic:
-    temperature: 0.7
-
-# 技能执行配置
-skill_execution:
-  enabled: true
-  command_timeout: 10.0
-  max_output_bytes: 10000
-
-# MCP 工具配置
-ptc:
-  enabled: true
-  tools: []
-  disabled_tools: []
-
-# 文件系统配置
-filesystem:
-  grep_max_file_size_mb: 10
+```json
+{
+  "style": "code",
+  "env": {
+    "LLM_MODEL_NAME": "gpt-4o",
+    "OPENAI_API_KEY": "sk-xxx",
+    "OPENAI_API_BASE": "https://api.openai.com/v1",
+    "ANTHROPIC_API_KEY": "sk-xxx",
+    "ANTHROPIC_API_URL": "https://api.example.com"
+  },
+  "agents": {
+    "tools": [],
+    "disabled_tools": [],
+    "max_tokens": 8192,
+    "recursion_limit": 5000,
+    "checkpoint": "sqlite",
+    "postgres_uri": ""
+  },
+  "token": {
+    "once_tool_ratio": 0.1,
+    "trim_messages_ratio": 0.96,
+    "context_length": 200000,
+    "summary_threshold": 0.7
+  },
+  "llm_params": {
+    "openai": {
+      "temperature": 0.7
+    },
+    "anthropic": {
+      "temperature": 0.7
+    }
+  },
+  "skill_execution": {
+    "enabled": true,
+    "command_timeout": 10.0,
+    "max_output_bytes": 10000
+  },
+  "ptc": {
+    "enabled": true,
+    "tools": [],
+    "disabled_tools": []
+  },
+  "filesystem": {
+    "grep_max_file_size_mb": 10
+  }
+}
 ```
 
 #### 权限配置文件：`.lumi/permissions.json`
@@ -263,7 +264,7 @@ npm run dev
 
 ## 模型供应商管理
 
-Lumi 支持自定义模型供应商（OpenAI / Anthropic 兼容连接），配置持久化在 `~/.lumi/providers.json`（明文，权限 `600`，含 API Key），**TUI 与桌面端共享同一份配置**。
+Lumi 支持自定义模型供应商（OpenAI / Anthropic 兼容连接），配置持久化在 `~/.lumi/lumi.json` 的 `providers` 分区（明文，权限 `600`，含 API Key），**TUI 与桌面端共享同一份配置**。
 
 **概念：**
 - 一个 **供应商 profile** = 一套连接（名称 / `base_url` / `api_key`）+ 该连接下的一组模型。
@@ -418,21 +419,39 @@ export ANTHROPIC_API_KEY=sk-xxx
 
 支持多种模型提供商：
 
-```yaml
-env:
-  # OpenAI
-  LLM_MODEL_NAME: gpt-4o
-  OPENAI_API_KEY: sk-xxx
-  OPENAI_API_BASE: https://api.openai.com/v1
-  
-  # Anthropic
-  LLM_MODEL_NAME: claude-sonnet-4-20250514
-  ANTHROPIC_API_KEY: sk-xxx
-  
-  # OpenAI 兼容 API
-  LLM_MODEL_NAME: qwen3-max
-  OPENAI_API_KEY: sk-xxx
-  OPENAI_API_BASE: https://api.example.com/v1
+OpenAI：
+
+```json
+{
+  "env": {
+    "LLM_MODEL_NAME": "gpt-4o",
+    "OPENAI_API_KEY": "sk-xxx",
+    "OPENAI_API_BASE": "https://api.openai.com/v1"
+  }
+}
+```
+
+Anthropic：
+
+```json
+{
+  "env": {
+    "LLM_MODEL_NAME": "claude-sonnet-4-20250514",
+    "ANTHROPIC_API_KEY": "sk-xxx"
+  }
+}
+```
+
+OpenAI 兼容 API：
+
+```json
+{
+  "env": {
+    "LLM_MODEL_NAME": "qwen3-max",
+    "OPENAI_API_KEY": "sk-xxx",
+    "OPENAI_API_BASE": "https://api.example.com/v1"
+  }
+}
 ```
 
 ### 检查点配置
@@ -444,16 +463,22 @@ env:
 | `postgres` | PostgreSQL 持久化 | 多实例部署、生产环境 |
 
 **SQLite 配置示例：**
-```yaml
-agents:
-  checkpoint: sqlite
+```json
+{
+  "agents": {
+    "checkpoint": "sqlite"
+  }
+}
 ```
 
 **PostgreSQL 配置示例：**
-```yaml
-agents:
-  checkpoint: postgres
-  postgres_uri: postgresql://user:password@localhost:5432/lumi
+```json
+{
+  "agents": {
+    "checkpoint": "postgres",
+    "postgres_uri": "postgresql://user:password@localhost:5432/lumi"
+  }
+}
 ```
 
 ---
@@ -608,10 +633,13 @@ Model Context Protocol 支持外部工具集成。
 
 当对话过长时，自动触发摘要压缩。
 
-**配置阈值：**
-```yaml
-token:
-  summary_threshold: 0.7  # 70% 上下文时触发
+**配置阈值**（`summary_threshold: 0.7` 表示 70% 上下文时触发）：
+```json
+{
+  "token": {
+    "summary_threshold": 0.7
+  }
+}
 ```
 
 ### 子 Agent 委托
@@ -697,23 +725,30 @@ lumi
 ### 性能优化
 
 1. **减少上下文长度：**
-   ```yaml
-   token:
-     context_length: 100000
+   ```json
+   {
+     "token": {
+       "context_length": 100000
+     }
+   }
    ```
 
 2. **禁用不必要的工具：**
-   ```yaml
-   agents:
-     disabled_tools:
-       - bash
-       - write
+   ```json
+   {
+     "agents": {
+       "disabled_tools": ["bash", "write"]
+     }
+   }
    ```
 
 3. **使用检查点持久化：**
-   ```yaml
-   agents:
-     checkpoint: sqlite
+   ```json
+   {
+     "agents": {
+       "checkpoint": "sqlite"
+     }
+   }
    ```
 
 ---
@@ -725,7 +760,7 @@ lumi
 ```
 your-project/
 ├── .lumi/
-│   ├── config.yaml          # 主配置
+│   ├── config.json          # 主配置
 │   ├── permissions.json     # 权限配置
 │   ├── skills/              # 自定义技能
 │   └── agents/              # 自定义 Agent
@@ -750,7 +785,7 @@ your-project/
 
 ### 4. 团队协作
 
-- **共享配置：** 将 `.lumi/config.yaml` 提交到 Git
+- **共享配置：** 将 `.lumi/config.json` 提交到 Git
 - **本地配置：** 使用 `.lumi/permissions.local.json`
 - **文档同步：** 更新技能和 Agent 文档
 
@@ -766,54 +801,50 @@ your-project/
 
 ### A. 完整配置参考
 
-```yaml
-# 风格配置
-style: code
-
-# 环境变量
-env:
-  LLM_MODEL_NAME: gpt-4o
-  OPENAI_API_KEY: sk-xxx
-  OPENAI_API_BASE: https://api.openai.com/v1
-
-# Agent 配置
-agents:
-  tools: []
-  disabled_tools: []
-  max_tokens: 8192
-  recursion_limit: 5000
-  checkpoint: sqlite
-  postgres_uri: ""
-
-# Token 配置
-token:
-  once_tool_ratio: 0.1
-  trim_messages_ratio: 0.96
-  context_length: 200000
-  summary_threshold: 0.7
-
-# LLM 参数
-llm_params:
-  openai:
-    temperature: 0.7
-  anthropic:
-    temperature: 0.7
-
-# 技能执行
-skill_execution:
-  enabled: true
-  command_timeout: 10.0
-  max_output_bytes: 10000
-
-# MCP 工具
-ptc:
-  enabled: true
-  tools: []
-  disabled_tools: []
-
-# 文件系统
-filesystem:
-  grep_max_file_size_mb: 10
+```json
+{
+  "style": "code",
+  "env": {
+    "LLM_MODEL_NAME": "gpt-4o",
+    "OPENAI_API_KEY": "sk-xxx",
+    "OPENAI_API_BASE": "https://api.openai.com/v1"
+  },
+  "agents": {
+    "tools": [],
+    "disabled_tools": [],
+    "max_tokens": 8192,
+    "recursion_limit": 5000,
+    "checkpoint": "sqlite",
+    "postgres_uri": ""
+  },
+  "token": {
+    "once_tool_ratio": 0.1,
+    "trim_messages_ratio": 0.96,
+    "context_length": 200000,
+    "summary_threshold": 0.7
+  },
+  "llm_params": {
+    "openai": {
+      "temperature": 0.7
+    },
+    "anthropic": {
+      "temperature": 0.7
+    }
+  },
+  "skill_execution": {
+    "enabled": true,
+    "command_timeout": 10.0,
+    "max_output_bytes": 10000
+  },
+  "ptc": {
+    "enabled": true,
+    "tools": [],
+    "disabled_tools": []
+  },
+  "filesystem": {
+    "grep_max_file_size_mb": 10
+  }
+}
 ```
 
 ### B. 快捷键速查表
@@ -834,7 +865,7 @@ filesystem:
 | `/clear` | 清空对话 |
 | `/resume` | 恢复历史会话 |
 | `/rewind` | 回退到历史 checkpoint |
-| `/model` | 切换模型供应商（共享 `~/.lumi/providers.json`） |
+| `/model` | 切换模型供应商（共享 `~/.lumi/lumi.json` 的 `providers` 分区） |
 | `/skills` | 查看可用技能 |
 | `/agents` | 查看可用 Agent |
 | `/bg` | 查看后台任务 |

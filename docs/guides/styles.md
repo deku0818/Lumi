@@ -21,10 +21,12 @@
 
 ## 配置方式
 
-### config.yaml
+### config.json
 
-```yaml
-style: code
+```json
+{
+  "style": "code"
+}
 ```
 
 ### CLI 参数（优先级更高）
@@ -34,7 +36,7 @@ lumi -s code
 lumi -s code -p "重构这个模块"
 ```
 
-优先级：CLI `--style` > config.yaml `style` > 默认值 `"default"`
+优先级：CLI `--style` > config.json `style` > 默认值 `"default"`
 
 ---
 

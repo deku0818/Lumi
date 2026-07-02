@@ -1,4 +1,4 @@
-"""项目清单：手动登记的工作目录列表（~/.lumi/projects.json）。
+"""项目清单：手动登记的工作目录列表（~/.lumi/lumi.json 的 "projects" 分区）。
 
 纯手动语义：只有显式添加过的目录才出现在列表里；移除只删条目、不动磁盘。
 切换工作目录时经 touch_project 更新 last_used，列表按最近使用降序。
@@ -6,14 +6,10 @@
 
 from __future__ import annotations
 
-import json
 import time
 from pathlib import Path
 
-from lumi.utils.atomic_io import atomic_write_json
-from lumi.utils.logger import logger
-
-_PROJECTS_FILE = Path.home() / ".lumi" / "projects.json"
+from lumi.utils.config import user_store
 
 
 def _resolve(path: str) -> str:
@@ -26,19 +22,13 @@ def _by_recent(projects: list[dict]) -> list[dict]:
 
 
 def _load() -> list[dict]:
-    if not _PROJECTS_FILE.exists():
-        return []
-    try:
-        return json.loads(_PROJECTS_FILE.read_text(encoding="utf-8"))
-    except (OSError, json.JSONDecodeError):
-        logger.warning("项目清单读取失败: %s", _PROJECTS_FILE, exc_info=True)
-        return []
+    return user_store.read_section("projects", [])
 
 
 def _save(projects: list[dict]) -> list[dict]:
     """按最近使用排序后原子写盘，返回排序结果（落盘与返回值一致）。"""
     ordered = _by_recent(projects)
-    atomic_write_json(_PROJECTS_FILE, ordered)
+    user_store.write_section("projects", ordered)
     return ordered
 
 

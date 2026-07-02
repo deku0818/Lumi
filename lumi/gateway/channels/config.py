@@ -1,7 +1,7 @@
 """对外 IM channel 的配置模型。
 
-不放在 ``lumi/utils/config/models.py``（config.yaml 的 schema）——channel 配置由 UI 经
-WS RPC 管理、持久化到 ``~/.lumi/channels.json``（见 ``channels/store.py``），与 config.yaml
+不放在 ``lumi/utils/config/models.py``（config.json 的 schema）——channel 配置由 UI 经
+WS RPC 管理、持久化到 ``lumi.json`` 的 "channels" 分区（见 ``channels/store.py``），与 config.json
 解耦。模型仍用 pydantic，供 store 校验与 channel 构造共用。
 """
 

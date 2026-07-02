@@ -1,7 +1,7 @@
 """Channel RPC：desktop WS 的 IM channel 管理方法实现。
 
 进程级 ChannelManager 单例（``channels/manager.py``）由 serve lifespan 起；这些方法读写
-``~/.lumi/channels.json`` 并触发实时停旧起新。照抄 ``cron_rpc`` 的进程级分发范式。
+``lumi.json`` 的 "channels" 分区并触发实时停旧起新。照抄 ``cron_rpc`` 的进程级分发范式。
 """
 
 from __future__ import annotations

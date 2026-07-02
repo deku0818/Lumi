@@ -1,6 +1,6 @@
 """配置模型类
 
-定义所有 Pydantic 配置模型，用于解析和验证 config.yaml 配置文件。
+定义所有 Pydantic 配置模型，用于解析和验证 config.json 配置文件。
 """
 
 from typing import Literal
@@ -246,9 +246,9 @@ class AutoDreamConfig(BaseModel):
 class VisionConfig(BaseModel):
     """视觉辅助模型配置（供无视觉主模型识别图片/PDF 的 vision 工具）。
 
-    填了 ``model`` 即注册 vision 工具；``base_url`` / ``api_key`` 留空则复用 providers.json
+    填了 ``model`` 即注册 vision 工具；``base_url`` / ``api_key`` 留空则复用 providers 分区
     里含该模型的 profile 连接（provider_store 反查），仍查不到则用环境变量 / SDK 默认。
-    config.yaml 配置，重启生效。
+    config.json 配置，重启生效。
     """
 
     model: str = Field(
@@ -257,11 +257,11 @@ class VisionConfig(BaseModel):
     )
     base_url: str = Field(
         default="",
-        description="视觉模型 API base_url；留空复用 providers.json 中该模型的连接",
+        description="视觉模型 API base_url；留空复用 providers 分区中该模型的连接",
     )
     api_key: str = Field(
         default="",
-        description="视觉模型 API key；留空复用 providers.json 中该模型的连接",
+        description="视觉模型 API key；留空复用 providers 分区中该模型的连接",
     )
 
 

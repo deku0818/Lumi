@@ -1,6 +1,6 @@
 """全局配置数据模型
 
-定义 ~/.lumi/lumi.json 的 Pydantic 数据模型，
+定义 ~/.lumi/lumi.json 中 "settings" 分区的 Pydantic 数据模型，
 仅包含终端/全局层面的设置，不包含模型配置或助理配置。
 """
 

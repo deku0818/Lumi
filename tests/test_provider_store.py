@@ -8,13 +8,14 @@ import stat
 import pytest
 
 from lumi.models import provider_store
+from lumi.utils.config import user_store
 
 
 @pytest.fixture
 def store_path(tmp_path, monkeypatch):
-    """把 providers.json 指向 tmp 目录。"""
-    target = tmp_path / "providers.json"
-    monkeypatch.setattr(provider_store, "_path", lambda: target)
+    """把 lumi.json 指向 tmp 目录（provider 数据落在 "providers" 分区）。"""
+    target = tmp_path / "lumi.json"
+    monkeypatch.setattr(user_store, "CONFIG_FILE", target)
     return target
 
 
@@ -101,16 +102,18 @@ def test_legacy_single_model_format_migrates(store_path):
     store_path.write_text(
         json.dumps(
             {
-                "active": "old1",
-                "profiles": [
-                    {
-                        "id": "old1",
-                        "name": "旧",
-                        "base_url": "u",
-                        "api_key": "k",
-                        "model": "claude-x",
-                    }
-                ],
+                "providers": {
+                    "active": "old1",
+                    "profiles": [
+                        {
+                            "id": "old1",
+                            "name": "旧",
+                            "base_url": "u",
+                            "api_key": "k",
+                            "model": "claude-x",
+                        }
+                    ],
+                }
             }
         ),
         encoding="utf-8",
@@ -210,6 +213,6 @@ def test_classifier_auto_cleared_when_target_deleted(store_path):
 def test_file_is_chmod_600_and_plaintext(store_path):
     provider_store.upsert(_p(key="sk-secret", models=("m1",)))
     assert stat.S_IMODE(store_path.stat().st_mode) == 0o600
-    data = json.loads(store_path.read_text(encoding="utf-8"))
-    assert data["profiles"][0]["api_key"] == "sk-secret"
-    assert data["profiles"][0]["models"] == ["m1"]
+    providers = json.loads(store_path.read_text(encoding="utf-8"))["providers"]
+    assert providers["profiles"][0]["api_key"] == "sk-secret"
+    assert providers["profiles"][0]["models"] == ["m1"]

@@ -3,11 +3,12 @@
 import pytest
 
 from lumi.gateway import projects
+from lumi.utils.config import user_store
 
 
 @pytest.fixture(autouse=True)
 def tmp_store(tmp_path, monkeypatch):
-    monkeypatch.setattr(projects, "_PROJECTS_FILE", tmp_path / "projects.json")
+    monkeypatch.setattr(user_store, "CONFIG_FILE", tmp_path / "lumi.json")
 
 
 def test_add_and_sort_by_recent(tmp_path):

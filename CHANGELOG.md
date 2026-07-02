@@ -1,5 +1,15 @@
 # Changelog
 
+## [0.2.18] - 2026-07-02
+
+### Changed
+- **用户级配置合并为单文件 `~/.lumi/lumi.json`** — 原先分散的 `lumi.json`（全局设置）/ `projects.json` / `providers.json` / `channels.json` 四个文件，合并成 `~/.lumi/lumi.json` 的四个分区（`settings` / `projects` / `providers` / `channels`），由新增的 `lumi/utils/config/user_store.py` 统一读写（一次读盘 / section-patch 原子写 / 整体 chmod 600 / 值类型损坏时回落 default）。各领域模块（`global_manager` / `projects` / `provider_store` / `channels.store`）对外 API 不变，内部委托 user_store 读写自己的分区
+- **项目配置改用 JSON** — `.lumi/config.yaml` → `.lumi/config.json`，运行时不再读取 YAML（`yaml` 依赖仅保留给 Markdown frontmatter 解析）
+- **`provider_store` 写路径少读一次盘** — mutator 经 `_load_all()` 一次读出 `(profiles, active, classifier)` 并传给 `_save`，删除 `_KEEP_CLASSIFIER` 哨兵与 `_save` 内部为取 classifier 的重复读盘（单次 mutation 对合并文件的整文件解析 3 次→2 次）
+
+### Added
+- **一次性配置迁移脚本 `scripts/migrate_config.py`** — 把旧格式（四个独立文件 + `config.yaml`）迁到新布局；幂等可重跑，解析失败的旧文件不并入也不删除（保留供手动修复）。迁移逻辑刻意不常驻运行时代码
+
 ## [0.2.17] - 2026-07-02
 
 ### Added

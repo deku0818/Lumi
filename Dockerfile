@@ -16,7 +16,7 @@ RUN uv pip install --system --no-cache "."
 
 # 默认 config：style=code（default 风格无提示词会启动即崩）+ checkpoint=sqlite
 # （默认 memory 不落盘、会话聊完即消失、list_sessions 看不到）。用户挂 .lumi 时以挂载为准。
-RUN mkdir -p /root/.lumi && printf 'style: code\nagents:\n  checkpoint: sqlite\n' > /root/.lumi/config.yaml
+RUN mkdir -p /root/.lumi && printf '{"style": "code", "agents": {"checkpoint": "sqlite"}}\n' > /root/.lumi/config.json
 
 # agent 的文件/bash 操作发生在工作目录；挂载你要让它操作的目录到这里
 VOLUME ["/workspace"]

@@ -62,7 +62,7 @@ from lumi.utils.logger import logger
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     # 进程级 bootstrap 与所有 channel 共享，见 gateway/bootstrap.py；
-    # channels_runtime 按 ~/.lumi/channels.json 拉起已启用的 IM channel（飞书等），
+    # channels_runtime 按 lumi.json 的 "channels" 分区拉起已启用的 IM channel（飞书等），
     # 与 WS 同进程；UI 经 save_channel RPC 改配置后 manager.reload() 实时停旧起新。
     from lumi.gateway.channels.manager import channels_runtime
 

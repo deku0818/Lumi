@@ -64,12 +64,12 @@ class LumiConfig:
         self._style_override: str | None = None
 
     def set_style_override(self, style: str) -> None:
-        """设置风格覆盖（CLI --style 参数优先于 config.yaml）"""
+        """设置风格覆盖（CLI --style 参数优先于 config.json）"""
         self._style_override = style
 
     @property
     def active_style(self) -> str:
-        """当前生效的风格名称。优先级：CLI override > config.yaml > "default" """
+        """当前生效的风格名称。优先级：CLI override > config.json > "default" """
         if self._style_override is not None:
             return self._style_override
         return self.config.style
@@ -116,31 +116,30 @@ class LumiConfig:
         Returns:
             Config: 配置对象，如果配置文件不存在则返回默认配置
         """
-        config_file = self.config_dir / "config.yaml"
+        config_file = self.config_dir / "config.json"
 
         if not config_file.exists():
             return Config()
 
         try:
-            with open(config_file, encoding="utf-8") as f:
-                config_dict = yaml.safe_load(f) or {}
-        except yaml.YAMLError as e:
-            logger.error(f"config.yaml 格式错误，使用默认配置: {e}")
+            config_dict = json.loads(config_file.read_text(encoding="utf-8")) or {}
+        except json.JSONDecodeError as e:
+            logger.error(f"config.json 格式错误，使用默认配置: {e}")
             return Config()
         except (OSError, UnicodeDecodeError) as e:
-            logger.error(f"config.yaml 读取失败，使用默认配置: {e}")
+            logger.error(f"config.json 读取失败，使用默认配置: {e}")
             return Config()
 
         try:
             return Config(**config_dict)
         except ValueError as e:
-            logger.error(f"config.yaml 字段校验失败，使用默认配置: {e}")
+            logger.error(f"config.json 字段校验失败，使用默认配置: {e}")
             return Config()
 
     def apply_env(self) -> None:
         """将配置中的 env 字段注入到 os.environ
 
-        config.yaml 中的 env 优先级高于系统环境变量，始终覆盖。
+        config.json 中的 env 优先级高于系统环境变量，始终覆盖。
         """
         for key, value in self.config.env.items():
             os.environ[key] = str(value)

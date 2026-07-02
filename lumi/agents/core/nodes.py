@@ -553,7 +553,7 @@ async def auto_classify(
     # chain 构造一并纳入 try：create_llm/with_structured_output 在构造期也可能抛
     # （如解析到的分类器模型缺 api_key），fail-closed 须覆盖构造与调用全程。
     try:
-        # 分类器模型独立可配（providers.json 顶级 classifier 指针）；未配则回退会话模型。
+        # 分类器模型独立可配（lumi.json providers 分区的 classifier 指针）；未配则回退会话模型。
         clf = resolve_classifier()
         conn = {
             k: v for k, v in (("base_url", clf.base_url), ("api_key", clf.api_key)) if v

@@ -21,6 +21,18 @@ def authorized_tmp_dir(tmp_path):
 
 
 @pytest.fixture(autouse=True)
+def isolate_user_store(tmp_path, monkeypatch):
+    """所有测试的用户级配置（~/.lumi/lumi.json）重定向到 tmp，杜绝读写真实 ~/.lumi。
+
+    需要具体路径的测试可再显式 monkeypatch user_store.CONFIG_FILE（同一 tmp_path、同名文件，
+    值一致、无冲突）。
+    """
+    from lumi.utils.config import user_store
+
+    monkeypatch.setattr(user_store, "CONFIG_FILE", tmp_path / "lumi.json")
+
+
+@pytest.fixture(autouse=True)
 def reset_run_authorized():
     """每次测试清空 per-run 授权目录来源 contextvar + 进程全局兜底，避免跨测试泄漏。
 

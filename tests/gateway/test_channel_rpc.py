@@ -6,13 +6,14 @@ import pytest
 
 from lumi.gateway import channel_rpc
 from lumi.gateway.channels import store
+from lumi.utils.config import user_store
 
 
 @pytest.fixture
 def sidecar(tmp_path, monkeypatch):
-    """把 channels.json 重定向到临时文件，隔离 ~/.lumi。"""
-    path = tmp_path / "channels.json"
-    monkeypatch.setattr(store, "_path", lambda: path)
+    """把 lumi.json 重定向到临时文件，隔离 ~/.lumi（channel 数据落 "channels" 分区）。"""
+    path = tmp_path / "lumi.json"
+    monkeypatch.setattr(user_store, "CONFIG_FILE", path)
     return path
 
 

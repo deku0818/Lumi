@@ -42,7 +42,7 @@ class DialectChatOpenAI(ChatOpenAI):
 
 
 def get_default_model_name() -> str:
-    """延迟读取环境变量，确保 config.yaml 的 env 已注入"""
+    """延迟读取环境变量，确保 config.json 的 env 已注入"""
     return os.getenv("LLM_MODEL_NAME", "qwen3-max")
 
 
@@ -161,7 +161,7 @@ def create_llm(
     tool_choice 的链（结构化输出 / 受迫工具调用）与思考模式不兼容，对
     默认常开思考的模型（如 qwen toggle 型）必须显式关闭，仅「不注入」不够。
     catalog 门控天然安全——无思考能力 / Anthropic 默认不思考的模型 off 即 {}。
-    参数优先级：config.yaml llm_params < effort 档位 < 调用方 llm_params；
+    参数优先级：config.json llm_params < effort 档位 < 调用方 llm_params；
     无内置调参默认，未指定的参数交给 SDK 默认值。
     """
     from lumi.models import provider_store

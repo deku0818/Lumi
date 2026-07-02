@@ -1,11 +1,11 @@
 """Vision 工具 — 让无视觉能力的主模型识别图片 / PDF。
 
-主模型不具备多模态时，在 config.yaml 的 ``vision`` 配置一个视觉辅助模型（model +
-可选 base_url/api_key，连接留空则反查 providers.json 里含该模型的 profile；见
+主模型不具备多模态时，在 config.json 的 ``vision`` 配置一个视觉辅助模型（model +
+可选 base_url/api_key，连接留空则反查 providers 分区里含该模型的 profile；见
 provider_store.resolve_vision）。本工具把图片 / PDF（本地路径或 http(s) URL）连同
 主模型的**具体问题**交给该模型识别，返回文字答案 —— 主模型据此作答、亦可反复追问。
 
-仅在 config.yaml 配了 ``vision.model`` 时注册（get_vision_tools 条件加载；未配则不出现）。
+仅在 config.json 配了 ``vision.model`` 时注册（get_vision_tools 条件加载；未配则不出现）。
 本模块可安全使用 `from __future__ import annotations`：无 ToolRuntime 注入参数。
 """
 
@@ -148,7 +148,7 @@ async def vision(
 
     resolved = provider_store.resolve_vision()
     if resolved is None:
-        return "错误: 未配置视觉辅助模型。请在 config.yaml 的 vision.model 中配置一个具备视觉能力的模型（重启生效）。"
+        return "错误: 未配置视觉辅助模型。请在 config.json 的 vision.model 中配置一个具备视觉能力的模型（重启生效）。"
 
     try:
         blocks = await _load_blocks(file_path)
@@ -190,10 +190,10 @@ async def vision(
 
 
 async def get_vision_tools(names: list[str] | None = None) -> list:
-    """条件加载：config.yaml 配置了视觉辅助模型（``vision.model``）时才提供 vision 工具。
+    """条件加载：config.json 配置了视觉辅助模型（``vision.model``）时才提供 vision 工具。
 
     async loader 每次 get_tools 调用都重新求值；registry 不对 loader 结果按 names 后置过滤，
-    故此处自行处理白名单。config.yaml 改动需重启 sidecar 生效。
+    故此处自行处理白名单。config.json 改动需重启 sidecar 生效。
     """
     from lumi.utils.read_config import get_config
 

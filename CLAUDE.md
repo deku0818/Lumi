@@ -92,11 +92,11 @@ START → PreprocessMessages → CallModel → is_use_tool() 条件路由:
 `lumi/styles/` 下每个子目录是一种风格，可含 `prompts/`、`agents/`、`skills/` 三类子目录（均可选）。
 
 - **加载优先级**：用户 `.lumi/` 下的同名文件 > style 内置文件（prompts / agents / skills 三类一致）
-- **配置方式**：`config.yaml` 的 `style` 字段，或 CLI `-s/--style` 参数（优先级更高）
+- **配置方式**：`config.json` 的 `style` 字段，或 CLI `-s/--style` 参数（优先级更高）
 - **内置风格**：`default`（默认，**不带内置 prompts**，提示词全部来自 `.lumi/prompts/`；可内置 skill/agent）、`code`（完整编程提示词 + explore/plan 子 Agent）
 - **提示词组装**：`SOUL/AGENTS` 两文件按序**直接拼接**（不做 XML 包裹），缺失即跳过；`default` 无内置 prompts 时全靠 `.lumi/prompts/`，两处都没有则 `load_system_prompt` 返回空串（以无系统提示词运行）
 - **工具描述**：内置工具的 description 直接写在各工具函数的 docstring 里；`registry._collect_tools_from_module` 加载时统一 `inspect.cleandoc` 抹掉源码缩进（外部 MCP 工具走异步 loader，不经此处）。工具描述不再可经 style/`.lumi` 配置覆盖
-- **`active_style` 属性**（`LumiConfig`）：返回当前生效的风格名，CLI override > config.yaml > "default"
+- **`active_style` 属性**（`LumiConfig`）：返回当前生效的风格名，CLI override > config.json > "default"
 
 ## 测试
 

@@ -43,14 +43,17 @@ uv pip install -e .
 
 ### 配置
 
-创建 `.lumi/config.yaml`：
+创建 `.lumi/config.json`：
 
-```yaml
-style: code                                    # 提示词风格（可选，默认 code）
-env:
-  LLM_MODEL_NAME: gpt-4o
-  OPENAI_API_KEY: sk-xxx
-  OPENAI_API_BASE: https://api.openai.com/v1   # 可选
+```json
+{
+  "style": "code",
+  "env": {
+    "LLM_MODEL_NAME": "gpt-4o",
+    "OPENAI_API_KEY": "sk-xxx",
+    "OPENAI_API_BASE": "https://api.openai.com/v1"
+  }
+}
 ```
 
 也可直接设置环境变量（优先级高于配置文件）。完整配置说明见 [docs/config.md](docs/config.md)。
@@ -160,7 +163,7 @@ npm run dist        # 产出 release/ 下的 dmg / exe / AppImage
 
 所有配置位于项目根目录的 `.lumi/` 下：
 
-- `config.yaml` — 模型、Agent、Token、风格等主配置（[完整说明](docs/config.md)）
+- `config.json` — 模型、Agent、Token、风格等主配置（[完整说明](docs/config.md)）
 - `mcp_server.json` — MCP 工具服务器
 - `permissions.json` — 工具权限规则（[详情](docs/permissions.md)）
 - `prompts/` — Agent 系统提示词，可覆盖 style 默认值（[风格系统](docs/styles.md)）

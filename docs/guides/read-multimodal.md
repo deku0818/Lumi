@@ -103,16 +103,21 @@ vision(file_path, question)
 - 主模型带着**自己的具体问题**调用（如「这张发票的总金额是多少」），可对同一文件反复追问
 - `file_path` 支持**本地路径**与 **http(s) URL**；URL 按内容嗅探（`%PDF-` magic → PDF，否则图片）
 - 图片/PDF 复用 `filesystem/media.py` 的压缩管线转 base64，按视觉模型 provider 转格式后单次问答，返回文字
-- **仅当 config.yaml 配置了 `vision.model` 时才注册**（`get_vision_tools` 条件加载）；未配则工具不出现
+- **仅当 config.json 配置了 `vision.model` 时才注册**（`get_vision_tools` 条件加载）；未配则工具不出现
 
-视觉辅助模型在 **config.yaml** 中配置（重启生效）：
+视觉辅助模型在 **config.json** 中配置（重启生效）：
 
-```yaml
-vision:
-  model: "qwen-vl-max"   # 视觉辅助模型名；空 = 不启用 vision 工具
-  base_url: ""            # 留空则复用 providers.json 里含该模型的 profile 连接
-  api_key: ""             # 留空则复用 providers.json 里含该模型的 profile 连接
+```json
+{
+  "vision": {
+    "model": "qwen-vl-max",
+    "base_url": "",
+    "api_key": ""
+  }
+}
 ```
+
+字段说明：`model` 为视觉辅助模型名（空 = 不启用 vision 工具）；`base_url` / `api_key` 留空则复用 `providers` 分区里含该模型的 profile 连接。
 
 > 桌面上传的图片本身也会经 `persist_image_blocks` 存到 `~/.lumi/uploads/` 并以
 > `<attached-file>` 路径引用交给模型（与普通文件一致）；read/vision 为只读工具、不受工作区

@@ -69,9 +69,9 @@ class ConfigDiscovery:
         """获取配置文件路径
 
         Returns:
-            config.yaml 的路径
+            config.json 的路径
         """
-        return self.discover() / "config.yaml"
+        return self.discover() / "config.json"
 
     def exists(self) -> bool:
         """检查配置目录是否存在
