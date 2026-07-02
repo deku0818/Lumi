@@ -19,11 +19,17 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import TYPE_CHECKING, Any
 
+from lumi.agents.runtime.bg_tasks import compose_notification_hint, get_task_registry
 from lumi.gateway.broadcast import hub
 from lumi.gateway.channels.feishu.directory import fallback_chat_name, fallback_name
 from lumi.gateway.channels.feishu.outbound import run_turn
 from lumi.sessions.session_meta import update_meta
-from lumi.utils.constants import ATTACHED_FILE_TAG, FEISHU_THREAD_PREFIX, SENDER_TAG
+from lumi.utils.constants import (
+    ATTACHED_FILE_TAG,
+    FEISHU_THREAD_PREFIX,
+    NOTIFICATION_POLL_INTERVAL,
+    SENDER_TAG,
+)
 from lumi.utils.logger import logger
 from lumi.utils.paths import lumi_tmp_dir
 from lumi.utils.thread_id import sanitize_thread_id
@@ -370,6 +376,8 @@ class FeishuInbound:
                 sender_name = fallback_name(open_id)
 
             thread_id = feishu_thread_id(chat_id)
+            # 映射记在池上：热重载保留池但重建 inbound，通知 poller 靠它回投
+            ch.bridge_pool.chat_ids[thread_id] = chat_id
             await self._sync_session_title(
                 thread_id, chat_id, chat_type, sender_name, open_id
             )
@@ -399,22 +407,102 @@ class FeishuInbound:
                 return
 
             async with lock:
-                await self._drain(ch, bridge, chat_id, thread_id, pending)
+                await self._drain(ch, bridge, chat_id, thread_id, [pending])
         except Exception as e:
             logger.error(f"Feishu 消息处理失败: {e}", exc_info=True)
 
     async def _drain(
-        self, ch: FeishuChannel, bridge, chat_id: str, thread_id: str, first: _Pending
+        self,
+        ch: FeishuChannel,
+        bridge,
+        chat_id: str,
+        thread_id: str,
+        batch: list[_Pending],
     ) -> None:
-        """处理 first + 期间排队的全部消息：每轮把积压的合并成一次 agent run，直到队空。
+        """处理 batch + 期间排队的全部消息：每轮把积压的合并成一次 agent run，直到队空。
 
         调用方已持本会话运行锁；期间到达的新消息因锁被占走入队，由本循环兜底取走，
-        故起手与每轮跑完都重新 pop 队列直至为空。
+        故每轮跑完都重新 pop 队列直至为空。batch 为空时直接空转（通知轮的兜底调用）。
         """
-        batch = [first]
         while batch:
             await self._run_batch(ch, bridge, chat_id, thread_id, batch)
             batch = self._queues.pop(thread_id, [])
+
+    # ── 后台任务完成通知 ──
+
+    async def notification_loop(self) -> None:
+        """后台任务完成通知轮询（生命周期由 channel.start/stop 管理）。
+
+        desktop 的 _notification_loop 对渠道会话刻意不消费（旁观连接不写共享
+        thread），飞书会话的通知由本循环认领：会话空闲时持锁注入 meta 轮，让模型
+        读取输出文件并把结果经流式卡片推回群里。单个 thread 失败只记日志，
+        不杀轮询（否则一次网络/磁盘抖动会永久断掉所有会话的通知）。
+        """
+        pool = self.channel.bridge_pool
+        while True:
+            await asyncio.sleep(NOTIFICATION_POLL_INTERVAL)
+            queue = get_task_registry().notification_queue
+            if queue.is_empty():
+                continue
+            for thread_id, chat_id in list(pool.chat_ids.items()):
+                if not queue.has_for(thread_id):
+                    continue
+                lock = pool.try_lock(thread_id)
+                if lock is None or lock.locked():
+                    continue  # 在跑的轮次持锁，下个 tick 再认领
+                async with lock:
+                    try:
+                        bridge = await pool.get(thread_id)
+                        await self._run_notification_turn(bridge, thread_id, chat_id)
+                        # 持锁期间排队的入站消息由持锁者兜底取走
+                        await self._drain(
+                            self.channel,
+                            bridge,
+                            chat_id,
+                            thread_id,
+                            self._queues.pop(thread_id, []),
+                        )
+                    except Exception:
+                        # CancelledError 是 BaseException，不会被吞，自然传播停掉轮询
+                        logger.error(
+                            f"Feishu 通知轮失败 thread={thread_id}", exc_info=True
+                        )
+
+    async def _run_notification_turn(
+        self, bridge, thread_id: str, chat_id: str
+    ) -> None:
+        """认领本 thread 的完成通知并跑一轮 meta run（调用方已持本会话运行锁）。
+
+        流式卡片必须回复某条消息才能创建（streaming._ensure_card），通知轮没有
+        入站消息：先发一张"已完成"锚点卡，结果卡回复它。锚点发送失败时不 drain，
+        通知留队下个 tick 重试；drain 后被取消（channel 停止/重载）则重新入队，
+        等新 poller 认领，不丢结果。
+        """
+        ch = self.channel
+        anchor_id = await ch.send_markdown(chat_id, "✅ 后台任务已完成，正在整理结果…")
+        if not anchor_id:
+            return
+        notifications = bridge.drain_notifications(thread_id)
+        if not notifications:
+            return
+        try:
+            await run_turn(
+                ch,
+                bridge,
+                chat_id=chat_id,
+                thread_id=thread_id,
+                reply_to=anchor_id,
+                content=compose_notification_hint(notifications),
+                tool_mode=ch.config.tool_mode,
+                is_meta=True,
+            )
+        except asyncio.CancelledError:
+            queue = get_task_registry().notification_queue
+            for xml in notifications:
+                queue.enqueue(xml, thread_id)
+            raise
+        # 本轮已入 checkpoint：通知 desktop 旁观刷新
+        hub.on_channel_activity(thread_id, "feishu")
 
     async def _run_batch(
         self,

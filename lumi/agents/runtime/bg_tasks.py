@@ -123,15 +123,21 @@ class NotificationQueue:
         return items
 
     def drain_for(self, thread_id: str) -> list[str]:
-        """取出归属指定 thread（或无归属）的通知，其余留在队列中等待各自会话认领。"""
-        taken = [xml for owner, xml in self._items if owner in ("", thread_id)]
+        """取出精确归属指定 thread 的通知，其余留在队列中等待各自会话认领。
+
+        所有生产注册路径都在设置 current_thread_id 的入口之内，通知恒有归属；
+        精确匹配使 desktop 与渠道 poller 多方轮询互不抢。
+        """
+        taken = [xml for owner, xml in self._items if owner == thread_id]
         if taken:
             self._items = [
-                (owner, xml)
-                for owner, xml in self._items
-                if owner not in ("", thread_id)
+                (owner, xml) for owner, xml in self._items if owner != thread_id
             ]
         return taken
+
+    def has_for(self, thread_id: str) -> bool:
+        """是否存在归属指定 thread 的通知（轮询方取锁前的廉价快查）。"""
+        return any(owner == thread_id for owner, _ in self._items)
 
     def is_empty(self) -> bool:
         """队列是否为空。"""
@@ -165,6 +171,16 @@ def format_notification(entry: BackgroundTaskEntry) -> str:
         f"  <summary>{summary}</summary>\n"
         "</task-notification>"
     )
+
+
+def compose_notification_hint(notifications: list[str]) -> str:
+    """通知 XML 列表 → 注入提示文本（模型契约：读输出文件取回结果）。
+
+    与 format_notification 同居一处：通知的生成与注入措辞是同一契约，
+    desktop 与飞书 poller 共用此单一来源。
+    """
+    combined = "\n".join(notifications)
+    return f"{combined}\nRead the output file to retrieve the result."
 
 
 def _format_bash_summary(entry: BackgroundTaskEntry) -> str:

@@ -799,10 +799,11 @@ class GatewaySession:
         """
         while True:
             await asyncio.sleep(NOTIFICATION_POLL_INTERVAL)
-            # 队列空（绝大多数 tick）时不去抢 run.lock，避免在流式轮后面排队。
-            # 审批挂起期间该轮持着 run.lock，下面 async with 自然被挡到审批结束，
-            # 不会插入到挂起轮中间（无需 awaiting_resume 旗标）。
-            if not self._bridge.has_notifications():
+            # 无归属本 thread 的通知（绝大多数 tick）时不去抢 run.lock，避免在流式轮
+            # 后面排队——渠道会话的通知会在队列里合法滞留（等渠道 poller 认领），
+            # 全局非空不代表本会话有活干。审批挂起期间该轮持着 run.lock，下面
+            # async with 自然被挡到审批结束，不会插入到挂起轮中间。
+            if not self._bridge.has_notifications(self._bridge.current_thread_id):
                 continue
             # 渠道会话旁观连接不消费通知：注入 meta 轮 = 绕过渠道会话锁并发写共享
             # thread（与 handle_frame 只读守卫同因）。通知留在队列，宁滞留不写坏。
@@ -810,7 +811,7 @@ class GatewaySession:
                 continue
             async with self._run.lock:
                 # 只认领归属本连接当前 thread 的通知——队列是进程级共享的，
-                # drain_all 会把其他会话的后台任务通知抢到本会话注入
+                # 按归属认领才不会把其他会话的后台任务通知抢到本会话注入
                 hint = self._bridge.drain_notification_hint(
                     self._bridge.current_thread_id
                 )

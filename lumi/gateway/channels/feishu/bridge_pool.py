@@ -31,6 +31,10 @@ class BridgePool:
         )
         self._bridges: dict[str, AgentBridge] = {}
         self._locks: dict[str, asyncio.Lock] = {}
+        # thread_id → chat_id：通知 poller 回投用。放池上（而非 FeishuInbound）
+        # 是因为配置热重载保留池但重建 channel/inbound——映射跟着任务归属走，
+        # 不能随传输层重建而丢。
+        self.chat_ids: dict[str, str] = {}
         # 串行化"建桥"本身：首条消息并发到达同一新 thread 时只建一次
         self._init_lock = asyncio.Lock()
 
@@ -88,3 +92,4 @@ class BridgePool:
                 logger.warning(f"[BridgePool] 关闭 bridge thread={thread_id} 异常: {e}")
         self._bridges.clear()
         self._locks.clear()
+        self.chat_ids.clear()

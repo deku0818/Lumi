@@ -63,6 +63,7 @@ class FeishuChannel:
         self._loop: asyncio.AbstractEventLoop | None = None
         self._bot_open_id: str | None = None
         self._warmup_task: asyncio.Task | None = None  # 持引用防 GC，stop() 取消
+        self._notify_task: asyncio.Task | None = None  # 后台任务完成通知轮询
         self._running = False
         self._error: str | None = (
             None  # 启动失败原因（未装 lark / 缺凭证 / 异常）→ UI 状态灯
@@ -158,6 +159,7 @@ class FeishuChannel:
             if self._bot_open_id:
                 logger.info(f"Feishu bot open_id: {self._bot_open_id}")
             self.streaming.start_cleanup()
+            self._notify_task = asyncio.create_task(self.inbound.notification_loop())
             # 后台预热成员/群名缓存：best-effort、不阻断启动（失败只记 warning）。
             # 存引用防止被 GC 中途销毁（事件循环只持弱引用），stop() 时取消。
             self._warmup_task = asyncio.create_task(self._directory.warmup())
@@ -238,6 +240,13 @@ class FeishuChannel:
         故关掉自动重连 + 从主线程停掉它的专属 loop，打断 start()，daemon 线程随之退出。
         """
         self._running = False
+        if self._notify_task is not None:
+            # cancel 后等它收尾：poller 可能正持锁跑通知 meta 轮，run_turn 的 finally
+            # 要在 streaming 停掉之前把卡片关掉（否则卡片冻在"生成中"+ 关停噪音）
+            self._notify_task.cancel()
+            with suppress(asyncio.CancelledError):
+                await self._notify_task
+            self._notify_task = None
         if self._warmup_task is not None:
             self._warmup_task.cancel()  # 预热未完则中止，避免孤儿任务在将停的 loop 上跑
             self._warmup_task = None
@@ -295,26 +304,28 @@ class FeishuChannel:
     # ── 发送 ──
     async def send_markdown(
         self, chat_id: str, content: str, *, reply_to: str | None = None
-    ) -> None:
-        """发一条 markdown 卡片消息（错误提示 / 流式降级）。有 reply_to 走 Reply API。"""
+    ) -> str | None:
+        """发一条 markdown 卡片消息，返回新消息 message_id（失败为 None）。
+
+        有 reply_to 走 Reply API。通知 poller 用返回的 message_id 作流式卡片锚点。
+        """
         if not self._client or not content.strip():
-            return
+            return None
         body = _markdown_card(content)
         loop = asyncio.get_running_loop()
         if reply_to:
-            await loop.run_in_executor(
+            return await loop.run_in_executor(
                 None, self.reply_message_sync, reply_to, "interactive", body
             )
-        else:
-            receive_id_type = "chat_id" if chat_id.startswith("oc_") else "open_id"
-            await loop.run_in_executor(
-                None,
-                self.send_message_sync,
-                receive_id_type,
-                chat_id,
-                "interactive",
-                body,
-            )
+        receive_id_type = "chat_id" if chat_id.startswith("oc_") else "open_id"
+        return await loop.run_in_executor(
+            None,
+            self.send_message_sync,
+            receive_id_type,
+            chat_id,
+            "interactive",
+            body,
+        )
 
     def reply_message_sync(
         self, parent_message_id: str, msg_type: str, content: str

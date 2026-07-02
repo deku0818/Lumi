@@ -90,6 +90,112 @@ def split_compound_command(command: str) -> list[str]:
     return segments
 
 
+def has_background_operator(command: str) -> bool:
+    """检测命令中是否含 shell 后台操作符 ``&``。
+
+    引号 / 转义 / heredoc 感知：排除 ``&&``（逻辑与）、``&>``（重定向）、``>&`` / ``<&``
+    （fd 复制，如 ``2>&1``）、引号内与 ``\\&`` 转义的字面量、heredoc 正文。命令替换
+    ``$(...)`` 内的 ``&`` 会命中——其中的后台符同样使进程脱离追踪，保守报告。
+    """
+    i = 0
+    n = len(command)
+    in_single_quote = False
+    in_double_quote = False
+    # 本行已声明、正文尚未开始的 heredoc 定界词（遇换行后按序越过各段正文）
+    pending_heredocs: list[str] = []
+
+    while i < n:
+        c = command[i]
+        if c == "'" and not in_double_quote:
+            in_single_quote = not in_single_quote
+            i += 1
+        elif c == '"' and not in_single_quote:
+            in_double_quote = not in_double_quote
+            i += 1
+        elif c == "\\" and not in_single_quote and i + 1 < n:
+            i += 2  # 转义（双引号内或裸露区）：\& 是字面量
+        elif in_single_quote or in_double_quote:
+            i += 1
+        elif c == "\n" and pending_heredocs:
+            i = _skip_heredoc_bodies(command, i + 1, pending_heredocs)
+            pending_heredocs = []
+        elif command.startswith("$((", i):
+            i = _skip_arithmetic(command, i)  # 算术扩展：& 是位与、<< 是位移
+        elif command.startswith("<<<", i):
+            i += 3  # herestring，无正文可跳
+        elif command.startswith("<<", i):
+            delimiter, i = _parse_heredoc_delimiter(command, i)
+            if delimiter:
+                pending_heredocs.append(delimiter)
+        elif c == "&":
+            nxt = command[i + 1] if i + 1 < n else ""
+            prev = command[i - 1] if i > 0 else ""
+            if nxt == "&":
+                i += 2  # && 逻辑与
+            elif nxt == ">" or prev in (">", "<", "|", ";"):
+                # &> 重定向 / N>&M、<&N fd 复制 / |&（管道 stdout+stderr）/
+                # case 终结符 ;& 与 ;;&——prev 为 | 或 ; 时裸 & 反而是语法错误，豁免不漏检
+                i += 1
+            else:
+                return True
+        else:
+            i += 1
+    return False
+
+
+def _skip_arithmetic(command: str, start: int) -> int:
+    """越过 ``$((...))`` 算术扩展（``start`` 指向 ``$``），返回闭合 ``))`` 之后的下标。
+
+    括号计数配平（支持嵌套 ``( )``）；未闭合视为延伸到串尾。
+    """
+    depth = 2
+    i = start + 3
+    while i < len(command) and depth:
+        if command[i] == "(":
+            depth += 1
+        elif command[i] == ")":
+            depth -= 1
+        i += 1
+    return i
+
+
+# heredoc 定界词：<<（可带 -）后可空格，定界词可被引号包裹或为裸词（排除 shell 元字符）
+_HEREDOC_DELIMITER_PATTERN = re.compile(
+    r"<<-?\s*(?:'([^']+)'|\"([^\"]+)\"|([^\s<>&|;()\"']+))"
+)
+
+
+def _parse_heredoc_delimiter(command: str, start: int) -> tuple[str, int]:
+    """解析 ``start`` 处（指向 ``<<``）的 heredoc 定界词。
+
+    返回 (定界词, 越过定界词后的下标)；解析不出（``<<`` 悬在行尾等）返回空串并只越过
+    ``<<`` 本身，交回主扫描保守处理。
+    """
+    match = _HEREDOC_DELIMITER_PATTERN.match(command, start)
+    if not match:
+        return "", start + 2
+    delimiter = match.group(1) or match.group(2) or match.group(3)
+    return delimiter, match.end()
+
+
+def _skip_heredoc_bodies(command: str, start: int, delimiters: list[str]) -> int:
+    """从 ``start``（heredoc 正文首行行首）起按序越过各段正文。
+
+    返回最后一个终止行之后的下标。终止行允许前后空白（覆盖 ``<<-`` 的制表符缩进）；
+    找不到终止行视为正文延伸到串尾。
+    """
+    i = start
+    for delimiter in delimiters:
+        while i < len(command):
+            end = command.find("\n", i)
+            line_end = end if end != -1 else len(command)
+            line = command[i:line_end]
+            i = line_end + 1
+            if line.strip() == delimiter:
+                break
+    return i
+
+
 # ── 只读工具集合 ──
 
 # 无论参数如何，始终为只读的工具

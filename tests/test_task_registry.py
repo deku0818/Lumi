@@ -33,6 +33,18 @@ def test_notification_queue_drain_empty():
     assert q.drain_all() == []
 
 
+def test_notification_queue_drain_for_exact_owner_only():
+    """按精确归属认领：别的会话的通知留队，多方轮询（desktop / 渠道 poller）互不抢。"""
+    q = NotificationQueue()
+    q.enqueue("<xml>mine</xml>", "thread-A")
+    q.enqueue("<xml>other</xml>", "thread-B")
+    assert q.has_for("thread-A")
+    assert q.drain_for("thread-A") == ["<xml>mine</xml>"]
+    assert not q.has_for("thread-A")
+    assert q.drain_for("thread-B") == ["<xml>other</xml>"]
+    assert q.is_empty()
+
+
 # ---------------------------------------------------------------------------
 # format_notification
 # ---------------------------------------------------------------------------

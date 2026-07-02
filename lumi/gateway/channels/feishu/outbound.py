@@ -43,8 +43,12 @@ async def run_turn(
     content: str | list,
     tool_mode: str,
     message_meta: dict | None = None,
+    is_meta: bool = False,
 ) -> None:
-    """驱动一轮 agent run，把事件流渲染到飞书。"""
+    """驱动一轮 agent run，把事件流渲染到飞书。
+
+    is_meta=True 标记系统注入轮（后台任务通知），注入文本不作为用户消息呈现。
+    """
     streaming = channel.streaming
     ended = False
 
@@ -62,7 +66,7 @@ async def run_turn(
 
     try:
         async for evt in bridge.stream_response(
-            content, tool_mode=tool_mode, message_meta=message_meta
+            content, tool_mode=tool_mode, message_meta=message_meta, is_meta=is_meta
         ):
             if evt.parent_run_id:
                 continue  # 子代理内部活动不外显

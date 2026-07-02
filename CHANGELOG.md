@@ -1,5 +1,19 @@
 # Changelog
 
+## [0.2.21] - 2026-07-02
+
+### Added
+- **飞书会话的后台任务完成通知** — 此前通知按归属 thread 入队后无人认领（desktop 通知轮对渠道会话刻意跳过、飞书侧无消费者），永久滞留。新增 `FeishuInbound.notification_loop`：会话空闲时持锁认领，先发「✅ 已完成」锚点卡（流式卡片必须回复某条消息才能创建；锚点失败不 drain 留队重试），再注入 meta 轮让模型读输出文件、结果经流式卡片推回群里。thread→chat 映射放 `BridgePool.chat_ids`（随配置热重载存活）；被取消（channel 停止/重载）时已 drain 的通知重新入队不丢结果；单 thread 异常只记日志不杀轮询；持锁期间排队的入站消息由 poller 兜底接手
+- **bash 后台任务拒绝 shell 后台符 `&`** — `run_in_background=True` 且命令自带 `&` 时直接报错让模型改写（双后台机制叠加会让被追踪的 wrapper shell 瞬间退出、真实进程脱管：任务误报完成、真完成时无通知、取消杀不到）。检测器 `capability.has_background_operator` 做引号/转义/heredoc/herestring/`$((...))` 算术扩展感知，`&&`、`2>&1`、`&>`、`|&`、case `;;&`、位与等合法形态不误伤
+
+### Fixed
+- **后台任务按进程组终止** — `bg_process` 以 `start_new_session=True` 起独立进程组，取消/超时/清理走 `killpg` 连同命令内 fork 的后代一起终止（此前只杀 wrapper shell，管道子进程/自守护程序成孤儿）；`cleanup_all` 并发收尾（原串行最坏 5s×N）
+- **desktop 通知轮不再空抢 run 锁** — `has_notifications` 快查改按 thread（与按归属认领配套）：渠道归属的通知在队列合法滞留期间，desktop 连接不再每 2s 白拿一次运行锁
+- **飞书 channel stop 等待通知轮收尾** — cancel `_notify_task` 后 await 它，通知 meta 轮的流式卡片在 streaming 停掉前关闭（不再冻在「生成中」/ 产生关停噪音）
+
+### Changed
+- **通知队列按精确归属认领** — `drain_for`/`has_for` 精确匹配 thread（生产路径通知恒有归属，删除无归属兜底与 `include_unowned` 参数）；`compose_notification_hint` 归位 `bg_tasks.py` 与 `format_notification` 同居（通知生成与注入措辞单一契约）；bridge 三个通知方法 `thread_id` 改必填（TUI 已删，None 分支是死路径）
+
 ## [0.2.20] - 2026-07-02
 
 ### Fixed

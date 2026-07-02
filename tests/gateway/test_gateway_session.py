@@ -93,10 +93,10 @@ class FakeBridge:
     def list_commands(self) -> list[dict]:
         return [{"name": "compact"}]
 
-    def has_notifications(self) -> bool:
+    def has_notifications(self, thread_id: str) -> bool:
         return bool(self._notifications)
 
-    def drain_notification_hint(self, thread_id=None) -> str:
+    def drain_notification_hint(self, thread_id: str) -> str:
         return self._notifications.pop(0) if self._notifications else ""
 
     async def close(self) -> None:

@@ -28,7 +28,11 @@ from lumi.agents.core.hooks import build_config_hooks, set_run_config_hooks
 from lumi.agents.core.meta_message import meta_human_message
 from lumi.agents.core.state import LumiAgentContext
 from lumi.agents.permissions.workspace import set_run_authorized_source_for
-from lumi.agents.runtime.bg_tasks import current_thread_id, get_task_registry
+from lumi.agents.runtime.bg_tasks import (
+    compose_notification_hint,
+    current_thread_id,
+    get_task_registry,
+)
 from lumi.agents.runtime.checkpoint import CheckpointInfo, FileCheckpointManager
 from lumi.agents.runtime.file_tracker import FileChangeTracker
 from lumi.agents.runtime.shell_session import get_shell_session_manager
@@ -480,31 +484,28 @@ class AgentBridge:
         yield BridgeEvent(kind=EventKind.MESSAGE_COMPLETE)
         yield BridgeEvent(kind=EventKind.TURN_COMPLETE)
 
-    def drain_notifications(self, thread_id: str | None = None) -> list[str]:
-        """取出待发送的后台任务完成通知。
+    def drain_notifications(self, thread_id: str) -> list[str]:
+        """取出精确归属该 thread 的后台任务完成通知。
 
-        thread_id 为 None 时取全部（单会话前端，如 TUI）；否则只认领归属该
-        thread（或无归属）的通知——多 WS 连接共享同一进程级队列，按归属
-        认领才不会把别的会话的任务通知抢走。
+        多 WS 连接与渠道 poller 共享同一进程级队列，按归属认领才不会把
+        别的会话的任务通知抢走。
         """
-        queue = get_task_registry().notification_queue
-        return queue.drain_all() if thread_id is None else queue.drain_for(thread_id)
+        return get_task_registry().notification_queue.drain_for(thread_id)
 
-    def has_notifications(self) -> bool:
-        """通知队列是否非空（轮询方在取锁前的廉价快速检查）。"""
-        return not get_task_registry().notification_queue.is_empty()
+    def has_notifications(self, thread_id: str) -> bool:
+        """是否有归属该 thread 的待发送通知——轮询方取锁前的廉价快查。
 
-    def drain_notification_hint(self, thread_id: str | None = None) -> str:
-        """取出后台任务完成通知并拼成注入提示文本；无通知返回空串。
-
-        提示词是模型契约（指示其读取输出文件取回结果），TUI 与 desktop
-        共用此单一来源，避免两端措辞漂移。
+        按 thread 快查与按 thread 认领配套：全局非空但都归属别的会话时，
+        轮询方不该为此空抢一次 run 锁。
         """
+        return get_task_registry().notification_queue.has_for(thread_id)
+
+    def drain_notification_hint(self, thread_id: str) -> str:
+        """取出后台任务完成通知并拼成注入提示文本；无通知返回空串。"""
         notifications = self.drain_notifications(thread_id)
         if not notifications:
             return ""
-        combined = "\n".join(notifications)
-        return f"{combined}\nRead the output file to retrieve the result."
+        return compose_notification_hint(notifications)
 
     async def close(self) -> None:
         """清理本实例持有的资源。

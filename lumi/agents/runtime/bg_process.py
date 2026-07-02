@@ -5,14 +5,17 @@
 与监控协程。
 
 与 ``bg_tasks``（进程无关的元数据注册中心）的分工：注册中心负责"是什么状态"，
-本模块负责"怎么跑/怎么停"这些 Bash 进程，复用 ``shell_session`` 的进程生命周期原语。
+本模块负责"怎么跑/怎么停"这些 Bash 进程（独立进程组，按组终止）。
 """
 
 from __future__ import annotations
 
 import asyncio
+import os
+import signal
 import time
 import uuid
+from contextlib import suppress
 from dataclasses import dataclass
 from typing import IO
 
@@ -24,10 +27,8 @@ from lumi.agents.runtime.bg_tasks import (
     bg_tasks_dir,
     get_task_registry,
 )
-from lumi.agents.runtime.shell_session import (
-    _terminate_process,
-    get_shell_session_manager,
-)
+from lumi.agents.runtime.shell_session import get_shell_session_manager
+from lumi.utils.constants import GRACEFUL_SHUTDOWN_TIMEOUT
 from lumi.utils.logger import logger
 
 # ---------------------------------------------------------------------------
@@ -36,6 +37,27 @@ from lumi.utils.logger import logger
 
 _TASK_ID_HEX_LENGTH = 12
 """任务 ID 中 UUID hex 截取长度。"""
+
+
+async def _terminate_group(process: asyncio.subprocess.Process) -> None:
+    """终止后台任务的整个进程组：先组 SIGTERM，超时后组 SIGKILL。
+
+    start_new_session 使 wrapper shell 为组长，killpg 连同命令内 fork 的后代一起
+    终止。仅在 wrapper 尚存活时按组终止（组长存活即锚定 pgid，不会误杀被复用的
+    id）；wrapper 已退出则无从安全定位组，维持不动。
+    """
+    if process.returncode is not None:
+        return
+    try:
+        os.killpg(process.pid, signal.SIGTERM)
+    except ProcessLookupError:
+        return
+    try:
+        await asyncio.wait_for(process.wait(), timeout=GRACEFUL_SHUTDOWN_TIMEOUT)
+    except TimeoutError:
+        with suppress(ProcessLookupError):
+            os.killpg(process.pid, signal.SIGKILL)
+        await process.wait()
 
 
 # ---------------------------------------------------------------------------
@@ -96,11 +118,14 @@ class BackgroundTaskManager:
 
         output_fd = output_file.open("w")
         try:
+            # 独立进程组（wrapper shell 为组长）：命令内 fork 的后代（管道子进程、
+            # 自守护程序）能随组终止，否则取消/清理只杀 wrapper、留下脱管孤儿
             process = await asyncio.create_subprocess_shell(
                 command,
                 stdout=output_fd,
                 stderr=asyncio.subprocess.STDOUT,
                 cwd=working_dir,
+                start_new_session=True,
             )
         except OSError:
             output_fd.close()
@@ -147,7 +172,7 @@ class BackgroundTaskManager:
         # （见 _monitor_task），此处不再重复入队，否则同一取消通知会进队两次。
         self._registry.update_status(task_id, TaskStatus.FAILED, error="任务被取消")
         await self._cancel_monitor(task_id)
-        await _terminate_process(handle.process)
+        await _terminate_group(handle.process)
 
         logger.info("[BackgroundTask] 已取消任务 %s", task_id)
 
@@ -155,8 +180,11 @@ class BackgroundTaskManager:
         """终止所有运行中的任务并清理进程资源。"""
         await self._cancel_all_monitors()
 
-        for handle in self._handles.values():
-            await _terminate_process(handle.process)
+        if self._handles:
+            # 各组终止相互独立，并发收尾：串行时 N 个顽固任务要等 5s×N
+            await asyncio.gather(
+                *(_terminate_group(h.process) for h in self._handles.values())
+            )
 
         self._handles.clear()
         self._monitors.clear()
@@ -209,7 +237,7 @@ class BackgroundTaskManager:
                     error=f"进程退出码: {exit_code}",
                 )
         except TimeoutError:
-            await _terminate_process(handle.process)
+            await _terminate_group(handle.process)
             self._registry.update_status(
                 handle.task_id, TaskStatus.TIMED_OUT, error="超时"
             )

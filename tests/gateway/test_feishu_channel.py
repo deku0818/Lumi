@@ -333,7 +333,7 @@ async def test_drain_processes_first_then_merges_queued(monkeypatch):
             ]
 
     monkeypatch.setattr(fi, "_run_batch", fake_run_batch)
-    await fi._drain(fi.channel, None, "oc", "t", inb._Pending("首条", reply_to="m1"))
+    await fi._drain(fi.channel, None, "oc", "t", [inb._Pending("首条", reply_to="m1")])
     # 第一轮单独跑首条；第二轮把期间积压的两条合并成一轮
     assert calls == [["首条"], ["追加1", "追加2"]]
     assert "t" not in fi._queues  # 队列已清空

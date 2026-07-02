@@ -37,6 +37,21 @@ async def test_bash_tool_executes_command(authorized_tmp_dir):
     assert "integration_test" in result
 
 
+async def test_background_rejects_shell_ampersand(authorized_tmp_dir):
+    """后台任务命令自带 & 时不执行、直接报错（守卫在 start_task 之前，不会真起任务）。"""
+    from lumi.agents.tools.providers.bash import bash
+
+    result = await bash.ainvoke(
+        {
+            "command": 'sleep 5 2>&1 &\necho "PID: $!"',
+            "description": "双后台机制叠加",
+            "run_in_background": True,
+        }
+    )
+    assert result.startswith("Error:")
+    assert "&" in result
+
+
 async def test_shell_sessions_isolated_per_thread():
     """ShellSessionManager 按 thread_id 维护独立持久 shell；close_session 关闭后惰性重建。"""
     from lumi.agents.runtime.shell_session import get_shell_session_manager

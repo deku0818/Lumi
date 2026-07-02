@@ -16,6 +16,7 @@ from lumi.agents.runtime.shell_session import (
     current_shell_key,
     get_shell_session_manager,
 )
+from lumi.agents.tools.capability import has_background_operator
 from lumi.utils.logger import logger
 
 
@@ -114,6 +115,16 @@ async def bash(
         session = session_mgr.get_session(thread_id=shell_key, working_dir=working_dir)
 
         if run_in_background:
+            # 命令自带 & 时，被追踪的 wrapper shell 会 fork 后立即退出（任务瞬间被误报
+            # 完成），真实进程脱管——完成时收不到通知、也无法取消。不静默剥掉，报错让
+            # 模型改写命令。
+            if has_background_operator(command):
+                return (
+                    "Error: 命令包含 shell 后台符 `&`，与 run_in_background 叠加时"
+                    "被追踪的进程会立即退出、真实进程脱管（完成时收不到通知，也无法"
+                    "取消）。请去掉 `&`（及配套的 `echo $!` 等），由 run_in_background "
+                    "追踪完整生命周期。"
+                )
             current_cwd = await session.get_cwd()
             # 后台省略(None)或显式 0 → 不限时；否则用给定上限
             bg_timeout = timeout if timeout else None
