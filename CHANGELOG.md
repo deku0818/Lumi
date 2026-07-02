@@ -1,5 +1,10 @@
 # Changelog
 
+## [0.2.20] - 2026-07-02
+
+### Fixed
+- **飞书 WS 线程退出时优雅收尾** — `lumi serve` 关停 / 渠道 reload 时不再喷 `Task was destroyed but it is pending` / `Event loop is closed` / SSL fatal write 日志：WS 线程 finally 里先 cancel 并收完 lark 专属 loop 上的悬空协程（receive/ping/keepalive），再优雅关闭 WS 连接（3s 超时），最后才 close loop。任务收割对 `stop()` 排队的 `ws_loop.stop` 回调免疫（落在重连 sleep 窗口时重进驱动直至收完，异常不会逃出 finally 弄死线程）；`stop()` 打断 `start()` 的预期 `RuntimeError` 不再记为 WebSocket 异常
+
 ## [0.2.19] - 2026-07-02
 
 ### Added

@@ -207,10 +207,27 @@ class FeishuChannel:
                 try:
                     self._ws_client.start()
                 except Exception as e:
-                    logger.warning(f"Feishu WebSocket 异常: {e}")
+                    if self._running:  # stop() 停 loop 打断 start() 也走到这，不算异常
+                        logger.warning(f"Feishu WebSocket 异常: {e}")
                 if self._running:
                     time.sleep(5)
         finally:
+            # start() 被打断后 lark 内部协程（receive/ping/keepalive）仍挂在本 loop 上，
+            # 直接 close 会留下悬空任务 + 在已关闭 loop 上写 socket 的报错，先收尾再关。
+            pending = asyncio.all_tasks(ws_loop)
+            for task in pending:
+                task.cancel()
+            if pending:
+                reap = asyncio.gather(*pending, return_exceptions=True)
+                while not reap.done():
+                    # stop() 经 call_soon_threadsafe 排入的 ws_loop.stop 回调可能
+                    # 恰好打断驱动（落在重连 sleep 窗口时），重进直至收完
+                    with suppress(RuntimeError):
+                        ws_loop.run_until_complete(reap)
+            conn = getattr(self._ws_client, "_conn", None)
+            if conn is not None:
+                with suppress(Exception):
+                    ws_loop.run_until_complete(asyncio.wait_for(conn.close(), 3))
             ws_loop.close()
 
     async def stop(self) -> None:
