@@ -50,16 +50,27 @@ function pickPort() {
   })
 }
 
-// dev：源码 `uv run lumi serve`（cwd=仓库）。
-// 打包后（方案 X 瘦客户端）：用 PATH 上的 `lumi`（用户经 uv tool install / pip 安装的本地后端）。
-// 找不到 lumi 不算错——本地后端不可用，用户可在「设置→连接」加远程机器。
+// 打包后的后端命令：优先内嵌后端（extraResources 里的 PyInstaller 产物，随 app 分发），
+// 无则退回 PATH 上的 `lumi`（用户经 uv tool install / pip 自装）。都没有也不算错——
+// 本地后端不可用，用户可在「设置→连接」加远程机器。
+function packagedBackend() {
+  const bundled = path.join(
+    process.resourcesPath,
+    'lumi-backend',
+    process.platform === 'win32' ? 'lumi-backend.exe' : 'lumi-backend'
+  )
+  return fs.existsSync(bundled) ? bundled : 'lumi'
+}
+
+// dev：源码 `uv run lumi serve`（cwd=仓库）；打包后：packagedBackend()。
 function startSidecar(port) {
   const dev = !app.isPackaged
-  const cmd = dev ? 'uv' : 'lumi'
+  const cmd = dev ? 'uv' : packagedBackend()
   const args = dev
     ? ['run', 'lumi', 'serve', '--port', String(port), '--token', LOCAL_TOKEN]
     : ['serve', '--port', String(port), '--token', LOCAL_TOKEN]
-  const opts = { env: { ...process.env }, stdio: ['ignore', 'pipe', 'pipe'] }
+  // PYTHONUNBUFFERED：PyInstaller 产物 stdout 接管道时块缓冲，日志会滞留到进程退出才刷出
+  const opts = { env: { ...process.env, PYTHONUNBUFFERED: '1' }, stdio: ['ignore', 'pipe', 'pipe'] }
   if (dev) opts.cwd = PROJECT_ROOT
   serveProc = spawn(cmd, args, opts)
   serveProc.stdout.on('data', (d) => process.stdout.write(`[lumi serve] ${d}`))

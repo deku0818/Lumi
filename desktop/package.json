@@ -1,7 +1,7 @@
 {
   "name": "lumi-desktop",
   "private": true,
-  "version": "0.1.0",
+  "version": "0.2.22",
   "type": "module",
   "main": "electron/main.cjs",
   "scripts": {
@@ -14,15 +14,41 @@
   "build": {
     "appId": "com.lumi.desktop",
     "productName": "Lumi",
-    "directories": { "output": "release" },
-    "files": ["electron/**/*", "dist/**/*", "assets/**/*"],
+    "directories": {
+      "output": "release"
+    },
+    "files": [
+      "electron/**/*",
+      "dist/**/*",
+      "assets/**/*"
+    ],
+    "extraResources": [
+      {
+        "from": "../dist/lumi-backend",
+        "to": "lumi-backend"
+      }
+    ],
+    "electronDist": "node_modules/electron/dist",
     "mac": {
-      "target": ["dmg"],
+      "target": [
+        "dmg"
+      ],
       "category": "public.app-category.developer-tools",
       "icon": "assets/icon.png"
     },
-    "win": { "target": ["nsis"], "icon": "assets/icon.png" },
-    "linux": { "target": ["AppImage"], "category": "Development", "icon": "assets/icon.png" }
+    "win": {
+      "target": [
+        "nsis"
+      ],
+      "icon": "assets/icon.png"
+    },
+    "linux": {
+      "target": [
+        "AppImage"
+      ],
+      "category": "Development",
+      "icon": "assets/icon.png"
+    }
   },
   "dependencies": {
     "@fontsource-variable/geist": "^5.2.9",

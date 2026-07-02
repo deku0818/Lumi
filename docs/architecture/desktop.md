@@ -2,7 +2,7 @@
 
 Lumi 桌面应用（Electron + TS 前端）的内部实现。前端通过 WebSocket 复用后端的 `AgentBridge`。协议契约见 [`protocol/README.md`](../../protocol/README.md)。
 
-> 现状：desktop 处于开发阶段，dev 模式经 `uv run lumi serve` 拉起 sidecar；打包发行（内置可移植 Python 运行时）仍是 TODO。
+> 现状：dev 模式经 `uv run lumi serve` 拉起 sidecar；打包发行走 `scripts/build-desktop.sh`——PyInstaller 打后端（onedir）经 electron-builder `extraResources` 内嵌进 app，打包版优先用内嵌后端，无则退回 PATH 上的 `lumi`（uv tool install 自装），都没有则作纯远程 client 使用。
 
 ---
 

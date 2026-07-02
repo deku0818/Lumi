@@ -1,12 +1,7 @@
-.git
-.venv
-dist
-build
-desktop
-.demos
-.lumi
-**/__pycache__
-*.pyc
-.pytest_cache
-.ruff_cache
-tests
+# 白名单式：默认全排除，只放行 Dockerfile COPY 需要的三样。
+# 以后仓库里新增任何目录都不会意外进 build context。
+*
+!pyproject.toml
+!README.md
+!lumi
+lumi/**/__pycache__

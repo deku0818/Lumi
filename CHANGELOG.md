@@ -1,5 +1,14 @@
 # Changelog
 
+## [0.2.23] - 2026-07-02
+
+### Added
+- **桌面安装包内嵌后端** — `scripts/build-desktop.sh` 一条命令出完整安装包（dmg/nsis/AppImage）：PyInstaller 打后端 onedir（`--collect-data lumi --copy-metadata lumi`，依赖严格来自 `uv.lock` 的一次性构建环境）→ 经 electron-builder `extraResources` 内嵌进 app → 版本号自动同步 pyproject。用户拖进 Applications 即用，无需装 Python/uv。打包版 sidecar 优先用内嵌后端（`Resources/lumi-backend/`），无则退回 PATH 上的 `lumi`（瘦客户端模式保留作兜底）；sidecar 注入 `PYTHONUNBUFFERED=1`，PyInstaller 产物接管道时日志不再滞留到退出才刷出
+
+### Changed
+- **`.dockerignore` 改白名单式** — 默认全排除、只放行 Dockerfile COPY 的三样（pyproject/README/lumi），build context 从 300M+ 降到 <1M；以后仓库新增目录不会再意外进 context
+- **electron-builder 用本地 Electron dist** — `electronDist` 指向 `node_modules/electron/dist`，构建不再从网络下载 100M zip（曾被代理重置导致构建失败），可离线构建；前端依赖装配改 `npm ci`（清光 node_modules 按 lockfile 精确重装），保证打包环境干净
+
 ## [0.2.22] - 2026-07-02
 
 ### Changed

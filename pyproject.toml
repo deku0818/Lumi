@@ -1,6 +1,6 @@
 [project]
 name = "lumi"
-version = "0.2.22"
+version = "0.2.23"
 description = "基于 LangGraph 的 AI Agent 框架"
 readme = "README.md"
 requires-python = ">=3.12"
