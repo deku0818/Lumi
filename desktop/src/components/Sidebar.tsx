@@ -704,7 +704,7 @@ function SessionRow({
         {/* 渠道会话：群/私聊图标（最近流、搜索结果、飞书分组内统一） */}
         {session.channel &&
           (session.channel_kind === 'p2p' ? (
-            <User size={13} className="shrink-0 text-info/80" />
+            <User size={13} className="shrink-0 text-success/80" />
           ) : (
             <Users size={13} className="shrink-0 text-info/80" />
           ))}
