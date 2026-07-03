@@ -1,6 +1,10 @@
 # Changelog
 
-## [0.2.24] - 2026-07-03
+## [0.2.25] - 2026-07-03
+
+### Changed
+- **agent 工具默认后台执行** — `run_in_background` 默认值 False → True：子代理默认后台并行、完成时通知带回结果，多个独立子任务一次性并行派出成为自然路径；仅当单个子任务结果是继续推进的唯一前提时才传 `false` 同步等待。注意后台子代理无交互审批通道、固定 privileged
+- **工具描述本地化与单源化** — bash/grep 描述里残留的 Claude Code 大写工具名（Glob/Read/Edit…）改为 Lumi 实际注册的小写名；skill 描述的系统命令例子从不存在的 `/skills /mcp` 纠正为 `/stop /clear /help`；bash 悬空引用的"git 安全协议"落实为具体规则；删掉 bash 描述内嵌参数表与 cron 调度格式的双源维护（参数细节归 Field description 单源）；ask 增加"何时不要问"节制条款（有默认按默认做、能验证的去验证）；agent 描述补"何时使用/不用"与并行派发策略；grep/skill 描述统一为中文；顺带修 edit docstring 断词、todos 措辞矛盾、glob 描述过简
 
 ### Added
 - **IM 渠道斜杠命令** — 飞书消息以 `/命令` 开头即触发（群里 `@机器人 /命令` 亦可，显示名含空格也能正确识别）。命令按类别天然定可用范围：skill 命令（含 `/dream`）与 desktop 同一套，走 `bridge.stream_command`（仅单条成批 + 纯文本时识别，未知 `/xxx` 按普通文本喂模型）；渠道系统命令仅 IM 提供（desktop 有对应按钮）：`/stop` 停当前轮 + 并发停掉本会话全部后台任务 + 清积压队列，`/clear` 清空会话历史（与 desktop 删除同口径 + 广播），`/help` 直答彩色 header 命令卡片（不为此隐式建常驻 bridge）。解析在渠道无关的 `channels/commands.py`，第二个 IM 渠道可直接复用

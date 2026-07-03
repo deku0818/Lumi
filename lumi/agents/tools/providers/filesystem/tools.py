@@ -125,8 +125,7 @@ async def edit(
     用法：
     - 在进行编辑之前，你必须在当前对话中至少使用一次`read`工具。如果在未读取文件的情况下尝试编辑，此工具将返回错误。
     - 当基于 read 工具的输出编辑文本时，务必保留与其一致的缩进（制表符/空格），以 read 输出中"行号前缀"之后的内容为准。行号前缀的格式为：行号（右对齐，前导空格填充）+ 制表符。制表符之后的所有内容才是需要匹配的实际文件内容。绝不要在 old_string 或 new_string 中包含任何行号前缀的部分。
-    - 始终优先编辑代码库中已有的文件。除非明确要求，否则绝不要创建新文
-    件。
+    - 始终优先编辑代码库中已有的文件。除非明确要求，否则绝不要创建新文件。
     - 仅在用户明确要求时才使用表情符号。除非被要求，否则避免在文件中添加表情符号。
     - 如果`old_string`在文件中不是唯一的，此次编辑将失败。请提供包含更多上下文的更大字符串以确保其唯一性，或使用`replace_all`来替换文件中所有出现的`old_string`。
     - 使用 `replace_all` 可在整个文件中批量替换或重命名字符串。例如，当你需要重命名变量时，这个参数非常有用。"""
@@ -139,7 +138,8 @@ async def edit(
 
 @tool(args_schema=GlobInput)
 async def glob(pattern: str, path: str = ".") -> str:
-    """使用glob模式递归查找文件。如 *.py 或 **/*.json"""
+    """按文件名的 glob 模式递归查找文件（如 *.py、**/*.json），返回路径及大小、修改日期。
+    按名字找文件用本工具；按内容找用 grep 工具。"""
     backend = get_backend()
     items = await backend.glob_info(pattern, path)
 
@@ -156,16 +156,16 @@ async def glob(pattern: str, path: str = ".") -> str:
     return "\n".join(lines)
 
 
-_GREP_DESCRIPTION = """A powerful search tool built on ripgrep
+_GREP_DESCRIPTION = """基于 ripgrep 的文件内容搜索工具。
 
-  Usage:
-  - ALWAYS use Grep for search tasks. NEVER invoke `grep` or `rg` as a Bash command. The Grep tool has been optimized for correct permissions and access.
-  - Supports full regex syntax (e.g., "log.*Error", "function\\s+\\w+")
-  - Filter files with glob parameter (e.g., "*.js", "**/*.tsx") or type parameter (e.g., "js", "py", "rust")
-  - Output modes: "content" shows matching lines, "files_with_matches" shows only file paths (default), "count" shows match counts
-  - Use Agent tool for open-ended searches requiring multiple rounds
-  - Pattern syntax: Uses ripgrep (not grep) - literal braces need escaping (use `interface\\{\\}` to find `interface{}` in Go code)
-  - Multiline matching: By default patterns match within single lines only. For cross-line patterns like `struct \\{[\\s\\S]*?field`, use `multiline: true`
+用法：
+- 搜索任务**始终**用本工具，**绝不**在 bash 里调 `grep` / `rg` 命令——本工具已按权限与访问范围优化
+- 支持完整正则语法（如 "log.*Error"、"function\\s+\\w+"）
+- 用 glob 参数（如 "*.js"、"**/*.tsx"）或 type 参数（如 "js"、"py"、"rust"）过滤文件
+- 输出模式："content" 显示匹配行，"files_with_matches" 只显示文件路径（默认），"count" 显示匹配计数
+- 需要多轮探索的开放式搜索，改派 `agent` 工具
+- 模式语法遵循 ripgrep（而非 grep）：字面花括号需转义（搜 Go 的 `interface{}` 用 `interface\\{\\}`）
+- 多行匹配：默认只在单行内匹配；跨行模式（如 `struct \\{[\\s\\S]*?field`）需要 `multiline: true`
 """
 
 

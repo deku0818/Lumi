@@ -71,7 +71,7 @@ class CronInput(BaseModel):
     )
     schedule: str | None = Field(
         default=None,
-        description="调度规则：相对时间（+10m/+2h）、ISO 8601 时间点、间隔简写（30s/5m/2h/1d）或 cron 表达式",
+        description="调度规则，四种格式：相对时间 +10m/+2h/+1d（从现在起，一次性）；ISO 8601 时间点如 2025-01-15T09:00:00（一次性）；固定间隔 30s/5m/2h/1d；5 字段 cron 表达式如 */5 * * * *",
     )
     prompt: str | None = Field(
         default=None,
@@ -181,13 +181,7 @@ CRON_DESCRIPTION = """管理主动行为定时任务，支持以下操作：
 - **delete**: 删除任务（需要 job_id）
 - **run**: 立即执行一次任务（需要 job_id）
 - **pause**: 暂停/恢复任务（需要 job_id）
-- **runs**: 查看最近执行记录（需要 job_id，可选 limit）
-
-调度规则支持四种格式：
-- 相对时间：如 +10m、+2h、+1d（从现在起）
-- ISO 8601 时间点：如 2025-01-15T09:00:00（一次性执行）
-- 固定间隔：如 30s、5m、2h、1d
-- cron 表达式（5 字段）：如 */5 * * * *"""
+- **runs**: 查看最近执行记录（需要 job_id，可选 limit）"""
 
 
 @tool(description=CRON_DESCRIPTION, args_schema=CronInput)

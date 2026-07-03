@@ -33,12 +33,23 @@ _TASK_ID_HEX_LENGTH = 12
 
 _AGENT_DESCRIPTION = """启动一个专门的子代理（独立上下文）来自主完成复杂任务。每种代理类型都具备特定的能力和可用工具。
 
-如何调用：
+## 如何调用：
 - 用本工具并指定 name（代理名称）与 prompt（交给它的任务描述）
 
-注意事项：
+## 何时使用：
+- 当任务匹配可用的代理类型、有可并行运行的独立工作，或回答问题需要跨多个文件查阅时，请使用此功能
+- 委托处理后，你将获得结论，而非原始文件内容。若只需查找单一事实且已知具体文件、符号或值，请直接搜索
+- 一旦委托就不要再自行执行，请等待结果返回
+- 多个互不依赖的任务应在同一条消息里一次性并行派出，不要派一个等一个
+
+## 何时不用：
+- 单点查询或你自己两三步就能完成的事——直接做比派代理更快
+
+## 注意事项：
 - 可用代理列表会在对话中的 `<system-reminder>` 里给出，且随项目动态变化——始终以最新列表为准，列表之外的代理无法调用
-- 子代理可继续委派下层子代理，但嵌套层数有上限；达到上限后将无法再委派"""
+- 子代理默认在后台运行，完成时会通知你
+- 仅当单个子任务的结果是继续推进的唯一前提，才传 run_in_background=false 以同步方式运行
+- 子代理的最终消息将作为工具结果返回给你，不会展示给用户——请转达关键信息"""
 
 
 def _child_tools(all_tools: list, child_depth: int, max_depth: int) -> list:
@@ -54,7 +65,8 @@ class AgentInput(BaseModel):
     name: str = Field(description="用于此任务的 agent 名称")
     prompt: str = Field(description="交给 agent 执行的任务的描述")
     run_in_background: bool = Field(
-        default=False, description="设为 true 可在后台运行，完成后会收到通知"
+        default=True,
+        description="默认后台运行，完成后自动收到含结果的通知；仅当该结果是继续推进的唯一前提且期间无事可做时，才设为 false 以同步方式运行",
     )
 
 
@@ -63,7 +75,7 @@ async def agent(
     name: str,
     prompt: str,
     runtime: ToolRuntime,
-    run_in_background: bool = False,
+    run_in_background: bool = True,
 ) -> str:
     """Agent工具 - 委托给 LumiAgent 执行"""
     # Lazy import 避免循环依赖

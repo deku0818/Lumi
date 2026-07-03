@@ -139,7 +139,10 @@ async def test_propagates_incremented_depth_and_keeps_agent_tool() -> None:
     p1, p2, p3, p4 = _patch_agent_internals(captured)
     with p1, p2, p3, p4:
         await agent.coroutine(
-            name="worker", prompt="干活", runtime=_make_runtime(depth=1)
+            name="worker",
+            prompt="干活",
+            runtime=_make_runtime(depth=1),
+            run_in_background=False,
         )
 
     assert captured["inputs"]["depth"] == 2
@@ -152,11 +155,36 @@ async def test_strips_agent_tool_for_last_allowed_layer() -> None:
     p1, p2, p3, p4 = _patch_agent_internals(captured)
     with p1, p2, p3, p4:
         await agent.coroutine(
-            name="worker", prompt="干活", runtime=_make_runtime(depth=2)
+            name="worker",
+            prompt="干活",
+            runtime=_make_runtime(depth=2),
+            run_in_background=False,
         )
 
     assert captured["inputs"]["depth"] == 3
     assert "agent" not in _names(captured["tools"])
+
+
+async def test_defaults_to_background() -> None:
+    """不传 run_in_background 时默认走后台路径。"""
+    captured: dict = {}
+    p1, p2, p3, p4 = _patch_agent_internals(captured)
+    with (
+        p1,
+        p2,
+        p3,
+        p4,
+        patch(
+            "lumi.agents.tools.providers.agent._start_background_agent",
+            return_value="bg started",
+        ) as bg,
+    ):
+        result = await agent.coroutine(
+            name="worker", prompt="干活", runtime=_make_runtime(depth=0)
+        )
+
+    bg.assert_called_once()
+    assert result == "bg started"
 
 
 async def _invoke_via_toolnode(tool_obj, args: dict) -> str:

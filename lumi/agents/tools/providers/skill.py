@@ -182,24 +182,21 @@ async def _execute_embedded_commands(
     return await executor.execute_commands(prompt_content)
 
 
-_SKILL_DESCRIPTION = """Execute skills in the main conversation
+_SKILL_DESCRIPTION = """在主对话中执行技能（skill）。
 
-When a user asks you to perform a task, check if any available skills match it. Skills provide specialized functionality and domain knowledge.
+当用户要求执行某项任务时，先检查可用技能里有没有匹配的。技能提供专门的能力与领域知识。
 
-When a user mentions a "slash command" or "/<something>" (e.g., "/commit", "/review-pr"), they are referring to a skill. Please use this tool to invoke that skill.
+当用户提到"斜杠命令"或 "/<某命令>"（如 "/commit"、"/review-pr"）时，指的就是技能，请用本工具调用它。
 
-How to invoke:
+如何调用：
+- 用本工具并指定技能名称，如 `name: "pdf"` 调用 pdf 技能
 
-- Use this tool and specify the skill name
-- Example: `skill: "pdf"` — invokes the pdf skill
-
-Important notes:
-
-- Available skills are listed in the `<system-reminder>` within the conversation
-- When a user's request matches a skill, it is mandatory: you must call the relevant skill tool before generating any other response for that task
-- Do not call a skill that is already running
-- Do not use this tool for built-in CLI system commands of type `<command-type>:system` (e.g., /skills, /mcp, /clear, etc.)
-- If you see a `<command-name>` tag in the current conversation turn, it means the skill is already loaded — follow the `<skill-content>` instructions directly and do not call this tool again"""
+注意事项：
+- 可用技能列表在对话中的 `<system-reminder>` 里给出
+- 用户请求与某技能匹配时，这是强制要求：必须先调用该技能，再生成关于此任务的其它回应
+- 不要调用已在运行中的技能
+- 不要用本工具执行系统命令（如 /stop、/clear、/help）——它们由渠道层直接处理，不是技能
+- 若当前对话回合已出现 `<command-name>` 标签，说明技能已加载——直接按 `<skill-content>` 的指示执行，不要再调用本工具"""
 
 
 class SkillInput(BaseModel):

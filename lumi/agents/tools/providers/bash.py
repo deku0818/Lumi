@@ -43,53 +43,40 @@ class BashInput(BaseModel):
         le=600,
         description="超时秒数；0 表示不限时（仅后台可用，前台传 0 报错）。省略时前台默认 120s、后台不限时",
     )
-    run_in_background: bool = Field(default=False, description="是否后台执行")
+    run_in_background: bool = Field(
+        default=False, description="设为 true 可在后台运行，完成后会自动收到通知"
+    )
 
 
-# 工具描述。长行用行尾反斜杠续行拆开（模块级常量，续行顶格自然）：源码每行都短、
-# 好编辑，拼接后逐字等于一整行，不插入额外换行或空格。
-BASH_DESCRIPTION = """**Executes a given bash command and returns its output.**
+BASH_DESCRIPTION = """执行 bash 命令并返回输出。
 
-The working directory persists between commands, but shell state does not. The shell environment is initialized from the user's profile (bash or zsh).
+工作目录在命令之间持久保持；shell 环境从用户的 profile（bash 或 zsh）初始化。
 
-**IMPORTANT**: Avoid using this tool to run `find`, `grep`, `cat`, `head`, `tail`, `sed`, `awk`, \
-or `echo` commands, unless explicitly instructed or after \
-you have verified that a dedicated tool cannot accomplish your task. \
-Instead, use the appropriate dedicated tool:
+**重要**：除非明确被要求、或已确认专用工具无法完成任务，避免用本工具跑 `find`、`grep`、`cat`、`head`、`tail`、`sed`、`awk`、`echo` 命令，改用对应的专用工具：
 
-- File search: Use **Glob** (NOT find or ls)
-- Content search: Use **Grep** (NOT grep or rg)
-- Read files: Use **Read** (NOT cat/head/tail)
-- Edit files: Use **Edit** (NOT sed/awk)
-- Write files: Use **Write** (NOT echo >/cat <<EOF)
-- Communication: Output text directly (NOT echo/printf)
-
-## Parameters
-
-| 参数 | 类型 | 必填 | 说明 |
-|------|------|------|------|
-| `command` | string | 是 | 要执行的命令 |
-| `description` | string | 是 | 命令的简明描述 |
-| `timeout` | number | 否 | 超时秒数，最大 600（10分钟）；`0`=不限时（仅后台，前台传 0 报错）。省略时前台默认 120（2分钟）、后台不限时 |
-| `run_in_background` | boolean | 否 | 设为 true 可在后台运行，完成后会收到通知 |
+- 找文件：用 `glob` 工具（而非 find / ls）
+- 搜内容：用 `grep` 工具（而非 grep / rg 命令）
+- 读文件：用 `read` 工具（而非 cat/head/tail）
+- 改文件：用 `edit` 工具（而非 sed/awk）
+- 写文件：用 `write` 工具（而非 echo > / cat <<EOF）
+- 与用户交流：直接输出文本（而非 echo/printf）
 
 ## 关键规则
 
 - 文件路径包含空格时用双引号括起来
 - 尽量使用绝对路径，避免 `cd`
-- 独立命令可以并行调用多个 Bash 工具
-- 依赖前一个命令结果的用 `&&` 串联
-- Git 操作有严格的安全协议（不强制推送、不跳过 hooks、不 amend 除非明确要求等）
+- 独立命令可以并行调用多个 bash 工具；依赖前一个命令结果的用 `&&` 串联
+- Git 安全规则：不 force push；不跳过 hooks（--no-verify）；不 amend、不 rebase 已推送的提交；仅在用户明确要求时才 commit / push
+- 避免不必要的 `sleep`
 
 ## 后台任务
-长耗时命令（构建 / 测试 / 下载 / 起服务）用 `run_in_background=True`：
+长耗时命令（构建 / 测试 / 下载 / 起服务）用 `run_in_background=true`：
 - 后台默认**不限时**；需要墙钟上限再传 `timeout`（起常驻服务保持默认即可，不会被砍）
 - 在后台执行后会立即返回 `task_id` 和输出文件路径
 - 命令完成时**自动**收到 `<task-notification>` 消息提示
 - **不要轮询** `background_task(action="status")`；**不要主动 read output_file**。等通知，期间继续做别的
 - 用户明确问进度才查 status；通知到达前**不要编造结果**，如实说任务还在跑
 - **前台 vs 后台**：需要结果继续推进 → 前台；有独立工作可并行 → 后台
-- 避免不必要的 `sleep`
 """
 
 
