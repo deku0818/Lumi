@@ -91,6 +91,29 @@ def prepend_reminder(content: str | list, note: str) -> str | list:
     return [{"type": "text", "text": note}, *content]
 
 
+def available_commands(memory_enabled: bool) -> list[dict]:
+    """当前可用的斜杠命令（技能 + 记忆会话的 /dream）。
+
+    模块级函数：IM 渠道的 /help 对从未对话的 chat 也要能列命令，不必为此
+    隐式构建常驻 AgentBridge；bridge.list_commands 是其绑定实例状态的薄封装。
+    """
+    from lumi.agents.core.preprocessing.skill_detector import SkillChangeDetector
+
+    skills = SkillChangeDetector.get_instance().peek()
+    commands = [
+        {"name": s.name, "description": s.description, "type": "skill"} for s in skills
+    ]
+    if memory_enabled:
+        commands.append(
+            {
+                "name": "dream",
+                "description": "立即整理记忆（后台综合近期会话）",
+                "type": "system",
+            }
+        )
+    return commands
+
+
 class EventKind(StrEnum):
     """Bridge 事件类型。
 
@@ -405,27 +428,16 @@ class AgentBridge:
         """列出当前可用的斜杠命令（技能命令），供前端补全菜单使用。
 
         数据源为项目技能目录，随项目动态变化——前端不硬编码，始终向后端拉取。
+        /dream 仅本会话启用记忆（主对话入口）时提供。
         """
-        from lumi.agents.core.preprocessing.skill_detector import SkillChangeDetector
-
-        skills = SkillChangeDetector.get_instance().peek()
-        commands = [
-            {"name": s.name, "description": s.description, "type": "skill"}
-            for s in skills
-        ]
-        # 主动整理记忆（/dream）：仅本会话启用记忆（主对话入口）时提供
-        if self._memory_enabled:
-            commands.append(
-                {
-                    "name": "dream",
-                    "description": "立即整理记忆（后台综合近期会话）",
-                    "type": "system",
-                }
-            )
-        return commands
+        return available_commands(self._memory_enabled)
 
     async def stream_command(
-        self, name: str, extra_text: str = "", tool_mode: str = "default"
+        self,
+        name: str,
+        extra_text: str = "",
+        tool_mode: str = "default",
+        message_meta: dict | None = None,
     ) -> AsyncGenerator[BridgeEvent, None]:
         """执行技能斜杠命令并 yield 事件流。
 
@@ -435,6 +447,7 @@ class AgentBridge:
             name: 技能名称（不含前导 "/"）。
             extra_text: 用户在命令后追加的文本。
             tool_mode: 工具审批模式（default / accept_edits / privileged）。
+            message_meta: UI 侧渲染元数据（IM 渠道的发送者/时间戳），随 checkpoint 持久化。
         """
         # 命令路径统一设 thread 归属：内置命令分支（dream）不经 stream_response（current_thread_id
         # 在那里才 set），缺了它后台 task 的完成通知会失归属（entry.thread_id=""）。skill 分支
@@ -461,7 +474,9 @@ class AgentBridge:
         if extra_text:
             content = f"{content}\n\n{extra_text}"
         blocks = build_skill_command_blocks(name, content, extra_text)
-        async for event in self.stream_response(blocks, tool_mode=tool_mode):
+        async for event in self.stream_response(
+            blocks, tool_mode=tool_mode, message_meta=message_meta
+        ):
             yield event
 
     async def _stream_dream_command(self) -> AsyncGenerator[BridgeEvent, None]:

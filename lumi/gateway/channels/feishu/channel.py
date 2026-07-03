@@ -31,13 +31,22 @@ from lumi.utils.logger import logger
 FEISHU_AVAILABLE = importlib.util.find_spec("lark_oapi") is not None
 
 
-def _markdown_card(content: str) -> str:
-    """一次性 markdown 卡片 JSON（非流式，用于错误提示 / 流式降级）。"""
-    card = {
+def _markdown_card(content: str, title: str = "") -> str:
+    """一次性 markdown 卡片 JSON（非流式，用于错误提示 / 流式降级 / /help）。
+
+    title 非空时加彩色 header（orange 为飞书原生枚举色，最接近品牌金）；
+    一句话提示不上横幅，保持无 header 的轻卡片。
+    """
+    card: dict = {
         "schema": "2.0",
         "config": {"wide_screen_mode": True, "update_multi": True},
         "body": {"elements": [{"tag": "markdown", "content": content}]},
     }
+    if title:
+        card["header"] = {
+            "title": {"tag": "plain_text", "content": title},
+            "template": "orange",
+        }
     return json.dumps(card, ensure_ascii=False)
 
 
@@ -303,15 +312,21 @@ class FeishuChannel:
 
     # ── 发送 ──
     async def send_markdown(
-        self, chat_id: str, content: str, *, reply_to: str | None = None
+        self,
+        chat_id: str,
+        content: str,
+        *,
+        reply_to: str | None = None,
+        title: str = "",
     ) -> str | None:
         """发一条 markdown 卡片消息，返回新消息 message_id（失败为 None）。
 
         有 reply_to 走 Reply API。通知 poller 用返回的 message_id 作流式卡片锚点。
+        title 非空时卡片带彩色 header（/help 等列表型内容用）。
         """
         if not self._client or not content.strip():
             return None
-        body = _markdown_card(content)
+        body = _markdown_card(content, title=title)
         loop = asyncio.get_running_loop()
         if reply_to:
             return await loop.run_in_executor(

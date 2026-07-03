@@ -6,6 +6,10 @@
 
 from __future__ import annotations
 
+import asyncio
+
+import pytest
+
 from lumi.gateway.channels.config import FeishuChannelConfig
 from lumi.gateway.channels.feishu import inbound as inb
 from lumi.gateway.channels.feishu.channel import FeishuChannel
@@ -210,22 +214,7 @@ def test_bot_mentioned_all():
 # ── 忙时排队 + 合并 ──
 async def test_run_batch_merges_text_and_replies_to_latest(monkeypatch):
     captured = {}
-
-    async def fake_run_turn(
-        ch,
-        bridge,
-        *,
-        chat_id,
-        thread_id,
-        reply_to,
-        content,
-        tool_mode,
-        message_meta=None,
-    ):
-        captured["content"] = content
-        captured["reply_to"] = reply_to
-
-    monkeypatch.setattr(inb, "run_turn", fake_run_turn)
+    monkeypatch.setattr(inb, "run_turn", _capture_run_turn(captured))
     fi = FeishuChannel(FeishuChannelConfig()).inbound
     batch = [
         inb._Pending("第一条", reply_to="m1"),
@@ -241,22 +230,7 @@ async def test_run_batch_merges_text_and_replies_to_latest(monkeypatch):
 
 async def test_run_batch_merges_media(monkeypatch):
     captured = {}
-
-    async def fake_run_turn(
-        ch,
-        bridge,
-        *,
-        chat_id,
-        thread_id,
-        reply_to,
-        content,
-        tool_mode,
-        message_meta=None,
-    ):
-        captured["content"] = content
-        captured["message_meta"] = message_meta
-
-    monkeypatch.setattr(inb, "run_turn", fake_run_turn)
+    monkeypatch.setattr(inb, "run_turn", _capture_run_turn(captured))
     fi = FeishuChannel(FeishuChannelConfig()).inbound
 
     async def fake_img(mid, ik):
@@ -280,6 +254,233 @@ async def test_run_batch_merges_media(monkeypatch):
             {"sender": "", "ts": 2000, "text": "［图片］"},
         ]
     }
+
+
+# ── 渠道系统命令 ──
+def _sent_collector(ch, monkeypatch):
+    sent = []
+
+    async def fake_send(chat_id, text, reply_to=None, title=""):
+        sent.append((text, title))
+        return "mid"
+
+    monkeypatch.setattr(ch, "send_markdown", fake_send)
+    return sent
+
+
+async def test_stop_cancels_run_and_clears_queue(monkeypatch):
+    ch = FeishuChannel(FeishuChannelConfig())
+    fi = ch.inbound
+    sent = _sent_collector(ch, monkeypatch)
+
+    async def hang():
+        await asyncio.sleep(30)
+
+    task = asyncio.create_task(hang())
+    await asyncio.sleep(0)
+    ch.bridge_pool.run_tasks["t"] = task
+    fi._queues["t"] = [inb._Pending("排队中")]
+    await fi._run_system_command("stop", "oc", "t", "m1")
+    assert "t" not in fi._queues  # 积压一并清空，否则马上又触发新一轮
+    assert "已停止" in sent[0][0]
+    with pytest.raises(asyncio.CancelledError):
+        await task
+
+
+async def test_stop_idle_replies_nothing_running(monkeypatch):
+    ch = FeishuChannel(FeishuChannelConfig())
+    sent = _sent_collector(ch, monkeypatch)
+    await ch.inbound._run_system_command("stop", "oc", "t", "m1")
+    assert "没有正在执行" in sent[0][0]
+
+
+async def test_stop_idle_still_stops_bg_tasks(monkeypatch):
+    # 空闲但有后台任务在跑：/stop 也要能停（IM 没有任务抽屉，这是唯一手段）
+    ch = FeishuChannel(FeishuChannelConfig())
+    fi = ch.inbound
+    sent = _sent_collector(ch, monkeypatch)
+
+    async def fake_cancel(thread_id):
+        return 2
+
+    monkeypatch.setattr(inb, "cancel_thread_bg_tasks", fake_cancel)
+    await fi._run_system_command("stop", "oc", "t", "m1")
+    assert "已停止 2 个后台任务" in sent[0][0]
+    assert "当前任务" not in sent[0][0]  # 没有在跑的轮，不虚报
+
+
+async def test_stop_reports_run_and_bg_together(monkeypatch):
+    ch = FeishuChannel(FeishuChannelConfig())
+    fi = ch.inbound
+    sent = _sent_collector(ch, monkeypatch)
+
+    async def hang():
+        await asyncio.sleep(30)
+
+    task = asyncio.create_task(hang())
+    await asyncio.sleep(0)
+    ch.bridge_pool.run_tasks["t"] = task
+
+    async def fake_cancel(thread_id):
+        return 1
+
+    monkeypatch.setattr(inb, "cancel_thread_bg_tasks", fake_cancel)
+    await fi._run_system_command("stop", "oc", "t", "m1")
+    assert "已停止当前任务" in sent[0][0] and "1 个后台任务" in sent[0][0]
+    with pytest.raises(asyncio.CancelledError):
+        await task
+
+
+async def test_stop_during_notification_turn_keeps_queue(monkeypatch):
+    # 通知 poller 持锁的轮不可取消：如实告知、不误报"没有任务"、不丢排队消息
+    ch = FeishuChannel(FeishuChannelConfig())
+    fi = ch.inbound
+    sent = _sent_collector(ch, monkeypatch)
+    lock = asyncio.Lock()
+    await lock.acquire()
+    ch.bridge_pool._locks["t"] = lock  # 锁被占但 run_tasks 无条目 = poller 轮
+    fi._queues["t"] = [inb._Pending("排队中")]
+    await fi._run_system_command("stop", "oc", "t", "m1")
+    assert "无法中断" in sent[0][0]
+    assert fi._queues["t"]  # 没停到任何东西，排队消息不能被丢
+
+
+class _ClearBridge:
+    def __init__(self):
+        self.deleted = []
+
+    async def delete_thread(self, tid):
+        self.deleted.append(tid)
+
+
+def _patch_pool_get(ch, monkeypatch, bridge):
+    async def fake_get(tid):
+        ch.bridge_pool._locks.setdefault(tid, asyncio.Lock())
+        return bridge
+
+    monkeypatch.setattr(ch.bridge_pool, "get", fake_get)
+
+
+async def test_clear_deletes_thread_and_meta(monkeypatch):
+    ch = FeishuChannel(FeishuChannelConfig())
+    sent = _sent_collector(ch, monkeypatch)
+    bridge = _ClearBridge()
+    _patch_pool_get(ch, monkeypatch, bridge)
+    meta_deleted = []
+    monkeypatch.setattr(inb, "delete_meta", meta_deleted.append)
+    await ch.inbound._run_system_command("clear", "oc", "t", "m1")
+    assert bridge.deleted == ["t"] and meta_deleted == ["t"]
+    assert "已清空" in sent[0][0]
+
+
+async def test_clear_busy_prompts_stop_first(monkeypatch):
+    ch = FeishuChannel(FeishuChannelConfig())
+    sent = _sent_collector(ch, monkeypatch)
+    bridge = _ClearBridge()
+    _patch_pool_get(ch, monkeypatch, bridge)
+    lock = asyncio.Lock()
+    await lock.acquire()
+    ch.bridge_pool._locks["t"] = lock
+    await ch.inbound._run_system_command("clear", "oc", "t", "m1")
+    assert bridge.deleted == []
+    assert "/stop" in sent[0][0]
+
+
+def test_help_markdown_groups_and_empty_skills():
+    out = inb.help_markdown(
+        [{"name": "commit", "description": "提交", "type": "skill"}]
+    )
+    assert "技能命令" in out and "`/commit` 提交" in out
+    # 分割线前后必须有空行：紧贴上一行的 --- 会把整段变成 setext 大字标题
+    assert "\n\n---\n\n" in out
+    # 无 skill：跳过技能组，无悬空分割线
+    out2 = inb.help_markdown([])
+    assert "技能命令" not in out2 and "---" not in out2 and "`/stop`" in out2
+
+
+def test_help_line_truncates_long_and_multiline_description():
+    assert inb._help_line("x", "第一行\n第二行") == "`/x` 第一行"
+    long = inb._help_line("y", "很" * 80)
+    assert long.endswith("…") and len(long) < 80
+
+
+async def test_help_lists_skill_and_system_commands(monkeypatch):
+    # /help 不跑 agent、不为此建桥：恒走 available_commands（渠道桥记忆恒开，口径等价）
+    ch = FeishuChannel(FeishuChannelConfig())
+    sent = _sent_collector(ch, monkeypatch)
+    monkeypatch.setattr(
+        inb,
+        "available_commands",
+        lambda memory_enabled: [{"name": "commit", "description": "", "type": "skill"}],
+    )
+    await ch.inbound._run_system_command("help", "oc", "t", "m1")
+    text, title = sent[0]
+    assert "/commit" in text and "/stop" in text and "/help" in text
+    assert "Lumi" in title  # /help 带彩色 header 卡片
+    assert ch.bridge_pool._bridges == {}  # 没有因 /help 建桥
+
+
+async def test_clear_drains_messages_queued_during_clear(monkeypatch):
+    # /clear 持锁窗口内入队的消息：清空完成后当场接手，不搁浅到下条消息
+    captured = {}
+    monkeypatch.setattr(inb, "run_turn", _capture_run_turn(captured))
+    ch = FeishuChannel(FeishuChannelConfig())
+    fi = ch.inbound
+    _sent_collector(ch, monkeypatch)
+    bridge = _ClearBridge()
+    _patch_pool_get(ch, monkeypatch, bridge)
+    monkeypatch.setattr(inb, "delete_meta", lambda tid: None)
+    fi._queues["t"] = [inb._Pending("清空期间到达", reply_to="m2")]
+    await fi._run_system_command("clear", "oc", "t", "m1")
+    assert "t" not in fi._queues
+    assert "清空期间到达" in captured["content"]
+
+
+# ── 斜杠命令路由 ──
+class _CmdBridge:
+    def list_commands(self):
+        return [{"name": "commit", "description": "", "type": "skill"}]
+
+
+def _capture_run_turn(captured):
+    """run_turn 的统一 fake：记录全部关键字实参（各测试按需断言）。"""
+
+    async def fake_run_turn(ch, bridge, **kwargs):
+        captured.update(kwargs)
+
+    return fake_run_turn
+
+
+async def test_run_batch_known_slash_command_routes_to_command(monkeypatch):
+    captured = {}
+    monkeypatch.setattr(inb, "run_turn", _capture_run_turn(captured))
+    fi = FeishuChannel(FeishuChannelConfig()).inbound
+    batch = [inb._Pending("/commit fix bug", reply_to="m1", sender_name="李雷")]
+    await fi._run_batch(fi.channel, _CmdBridge(), "oc", "t", batch)
+    assert captured["command"] == ("commit", "fix bug")
+
+
+async def test_run_batch_unknown_slash_is_plain_text(monkeypatch):
+    captured = {}
+    monkeypatch.setattr(inb, "run_turn", _capture_run_turn(captured))
+    fi = FeishuChannel(FeishuChannelConfig()).inbound
+    batch = [inb._Pending("/nope 你好", reply_to="m1")]
+    await fi._run_batch(fi.channel, _CmdBridge(), "oc", "t", batch)
+    assert captured["command"] is None
+    assert "/nope 你好" in captured["content"]
+
+
+async def test_run_batch_merged_batch_command_not_recognized(monkeypatch):
+    # 混批（≥2 条）里的命令当普通文本，不触发命令路由
+    captured = {}
+    monkeypatch.setattr(inb, "run_turn", _capture_run_turn(captured))
+    fi = FeishuChannel(FeishuChannelConfig()).inbound
+    batch = [
+        inb._Pending("先看这个", reply_to="m1"),
+        inb._Pending("/commit", reply_to="m2"),
+    ]
+    await fi._run_batch(fi.channel, _CmdBridge(), "oc", "t", batch)
+    assert captured["command"] is None
 
 
 def test_merge_messages_single_is_plain_text():

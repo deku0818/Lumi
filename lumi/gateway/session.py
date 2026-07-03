@@ -452,6 +452,9 @@ async def _delete_session(session: GatewaySession, params: dict) -> dict:
         else:
             await session._bridge.delete_thread(tid)
     delete_meta(tid)
+    # 渠道会话：广播给其他连接/旁观视图刷新（与渠道侧 /clear 同口径）
+    if channel_name := _channel_of(tid):
+        session._hub.on_channel_activity(tid, channel_name)
     return {"thread_id": tid}
 
 

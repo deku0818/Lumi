@@ -41,7 +41,3 @@ class SkillChangeDetector(FileSetChangeDetector[SkillConfig]):
 
     def _load(self) -> list[SkillConfig]:
         return load_skills(directory=str(self._skills_dir))
-
-    def peek(self) -> list[SkillConfig]:
-        """获取当前技能列表（只读，不影响 ``check()`` 的变更判断）。"""
-        return self._load()

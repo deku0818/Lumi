@@ -1,5 +1,16 @@
 # Changelog
 
+## [0.2.24] - 2026-07-03
+
+### Added
+- **IM 渠道斜杠命令** — 飞书消息以 `/命令` 开头即触发（群里 `@机器人 /命令` 亦可，显示名含空格也能正确识别）。命令按类别天然定可用范围：skill 命令（含 `/dream`）与 desktop 同一套，走 `bridge.stream_command`（仅单条成批 + 纯文本时识别，未知 `/xxx` 按普通文本喂模型）；渠道系统命令仅 IM 提供（desktop 有对应按钮）：`/stop` 停当前轮 + 并发停掉本会话全部后台任务 + 清积压队列，`/clear` 清空会话历史（与 desktop 删除同口径 + 广播），`/help` 直答彩色 header 命令卡片（不为此隐式建常驻 bridge）。解析在渠道无关的 `channels/commands.py`，第二个 IM 渠道可直接复用
+- **`cancel_thread_bg_tasks` 共享原语**（`bg_process.py`）— 按 thread 并发停掉全部运行中后台任务，IM /stop 与未来"停止本会话全部任务"共用
+
+### Fixed
+- **`peek()` 绕过 digest 缓存** — `SkillChangeDetector.peek()` 此前每次全量重扫解析 SKILL.md；加载缓存下沉 `FileSetChangeDetector` 基类，peek/check 共享 digest 缓存且不影响 check 的变更注入语义（desktop 命令菜单同样受益）
+- **desktop 删除渠道会话不广播** — 补 `channel.activity` 广播（复用 `_channel_of` 单点判定），其他连接/旁观视图即时刷新，与渠道侧 /clear 同口径
+- **忙时队列消息搁浅** — /stop 取消窗口与 /clear 持锁窗口内入队的消息此前无人接手；所有"拿锁跑用户轮"入口统一 `_locked_drain`（登记 run_tasks 供 /stop 取消），命令收尾各自接手残留队列
+
 ## [0.2.23] - 2026-07-02
 
 ### Added

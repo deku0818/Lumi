@@ -19,11 +19,14 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import TYPE_CHECKING, Any
 
+from lumi.agents.runtime.bg_process import cancel_thread_bg_tasks
 from lumi.agents.runtime.bg_tasks import compose_notification_hint, get_task_registry
+from lumi.gateway.bridge.core import available_commands
 from lumi.gateway.broadcast import hub
+from lumi.gateway.channels.commands import SYSTEM_COMMANDS, parse_slash_command
 from lumi.gateway.channels.feishu.directory import fallback_chat_name, fallback_name
 from lumi.gateway.channels.feishu.outbound import run_turn
-from lumi.sessions.session_meta import update_meta
+from lumi.sessions.session_meta import delete_meta, update_meta
 from lumi.utils.constants import (
     ATTACHED_FILE_TAG,
     FEISHU_THREAD_PREFIX,
@@ -75,6 +78,30 @@ class _Pending:
 def feishu_thread_id(chat_id: str) -> str:
     """飞书 chat_id → Lumi 会话 thread_id（每 chat 一个常驻 thread）。"""
     return sanitize_thread_id(f"{FEISHU_THREAD_PREFIX}{chat_id}")
+
+
+def _help_line(name: str, description: str) -> str:
+    """单条命令行：`/名字` + 描述首行（超长截断，保住每行一条的可读性）。"""
+    desc = description.splitlines()[0] if description else ""
+    if len(desc) > 60:
+        desc = desc[:60] + "…"
+    return f"`/{name}` {desc}".rstrip()
+
+
+def help_markdown(commands: list[dict]) -> str:
+    """/help 卡片正文：技能命令 / 会话控制两组，`/名字` code 高亮 + 灰字组标题。
+
+    分割线前后必须留空行：--- 紧贴上一行会按 markdown setext 规则把前面整段
+    渲染成大字标题（飞书真机如此），换行也一并被吞。
+    """
+    lines: list[str] = []
+    if commands:
+        lines.append("<font color='grey'>技能命令</font>")
+        lines += [_help_line(c["name"], c["description"]) for c in commands]
+        lines += ["", "---", ""]
+    lines.append("<font color='grey'>会话控制</font>")
+    lines += [_help_line(n, d) for n, d in SYSTEM_COMMANDS.items()]
+    return "\n".join(lines)
 
 
 def extract_post_text(content_json: dict) -> str:
@@ -337,6 +364,15 @@ class FeishuInbound:
             else:
                 text = ""  # image / file 等：正文为空，靠媒体承载
 
+            # 渠道系统命令（/stop /clear /help）：渠道层即时执行，不进 agent、不排队
+            # ——/stop 恰是忙时才有意义，进队列等锁就荒谬了。
+            parsed = parse_slash_command(text) if text else None
+            if parsed and parsed[0] in SYSTEM_COMMANDS:
+                await self._run_system_command(
+                    parsed[0], chat_id, feishu_thread_id(chat_id), message_id
+                )
+                return
+
             # 媒体源 = 当前消息 +（若是回复）被回复的父消息。从每个源抽图片与文件。
             sources = [(message_id, msg_type, content_json)]
             parent_id = getattr(message, "parent_id", None)
@@ -406,8 +442,7 @@ class FeishuInbound:
                 queue.append(pending)
                 return
 
-            async with lock:
-                await self._drain(ch, bridge, chat_id, thread_id, [pending])
+            await self._locked_drain(bridge, chat_id, thread_id, [pending])
         except Exception as e:
             logger.error(f"Feishu 消息处理失败: {e}", exc_info=True)
 
@@ -427,6 +462,133 @@ class FeishuInbound:
         while batch:
             await self._run_batch(ch, bridge, chat_id, thread_id, batch)
             batch = self._queues.pop(thread_id, [])
+
+    async def _locked_drain(
+        self, bridge, chat_id: str, thread_id: str, batch: list[_Pending]
+    ) -> None:
+        """持锁跑一轮 drain，并登记 run_tasks 供 /stop 取消。
+
+        所有"拿锁跑用户轮"的入口统一走这里，登记不可能被漏掉（每条消息经
+        run_coroutine_threadsafe 独立成 task，cancel 只杀本轮，不伤接收循环）。
+        调用方判完锁空闲后到本调用的 acquire 之间不得有 await（保持忙判原子）。
+        """
+        pool = self.channel.bridge_pool
+        async with pool.lock(thread_id):
+            pool.run_tasks[thread_id] = asyncio.current_task()
+            try:
+                await self._drain(self.channel, bridge, chat_id, thread_id, batch)
+            finally:
+                pool.run_tasks.pop(thread_id, None)
+
+    # ── 渠道系统命令 ──
+
+    async def _run_system_command(
+        self, name: str, chat_id: str, thread_id: str, message_id: str
+    ) -> None:
+        """执行渠道系统命令（调用方已确认 name ∈ SYSTEM_COMMANDS）。"""
+        if name == "stop":
+            await self._cmd_stop(chat_id, thread_id, message_id)
+        elif name == "clear":
+            await self._cmd_clear(chat_id, thread_id, message_id)
+        elif name == "help":
+            await self._cmd_help(chat_id, thread_id, message_id)
+        else:
+            # SYSTEM_COMMANDS 新增条目但忘写 handler：响亮失败，别静默误发 help
+            logger.error(f"系统命令 /{name} 无 handler")
+
+    async def _cmd_stop(self, chat_id: str, thread_id: str, message_id: str) -> None:
+        """停止当前轮 + 本会话全部后台任务（IM 没有 desktop 的任务抽屉，这是唯一手段）。
+
+        停到轮才清积压队列——没停到任何东西时不能丢用户排队的消息。通知 poller
+        持锁跑的轮不登记 run_tasks（cancel 会杀掉整个轮询），不可中断，如实告知
+        而非误报"没有任务"。被停的后台任务仍走既有收尾链（FAILED + 通知入队）。
+        """
+        ch = self.channel
+        pool = ch.bridge_pool
+        task = pool.run_tasks.get(thread_id)
+        run_stopped = task is not None and not task.done()
+        if run_stopped:
+            # 清积压再取消：只停当前轮的话，积压消息会立刻触发新一轮
+            self._queues.pop(thread_id, None)
+            bridge = pool.peek(thread_id)
+            if bridge is not None:
+                bridge.reject_pending()  # 停轮惯用法：挂起审批先拒绝收尾，再硬取消
+            task.cancel()
+        bg_stopped = await cancel_thread_bg_tasks(thread_id)
+        if not run_stopped and not bg_stopped:
+            lock = pool.try_lock(thread_id)
+            if lock is not None and lock.locked():
+                await ch.send_markdown(
+                    chat_id,
+                    "正在处理后台任务通知，这一轮无法中断，请稍候。",
+                    reply_to=message_id,
+                )
+            else:
+                await ch.send_markdown(
+                    chat_id, "当前没有正在执行的任务。", reply_to=message_id
+                )
+            return
+        parts = []
+        if run_stopped:
+            parts.append("已停止当前任务")
+        if bg_stopped:
+            parts.append(f"已停止 {bg_stopped} 个后台任务")
+        await ch.send_markdown(
+            chat_id, "⏹ " + "，".join(parts) + "。", reply_to=message_id
+        )
+        if run_stopped:
+            await self._drain_after_cancel(task, thread_id, chat_id)
+
+    async def _drain_after_cancel(
+        self, task: asyncio.Task, thread_id: str, chat_id: str
+    ) -> None:
+        """等被取消的轮释放锁后，接手取消窗口内入队的消息。
+
+        cancel 只是调度 CancelledError，被取消轮的 finally 还要 await 网络收尾，
+        期间到达的消息见锁忙入队——被取消的 _drain 不会再 pop 队列，不接手就
+        搁浅到下条消息才被捎带。锁已被新轮占用则不管：持锁者的 _drain 会兜底。
+        """
+        await asyncio.wait({task}, timeout=15)
+        pool = self.channel.bridge_pool
+        lock = pool.try_lock(thread_id)
+        bridge = pool.peek(thread_id)  # 本路径刚 cancel 过该 thread 的轮，桥必已建
+        if lock is None or bridge is None or lock.locked():
+            return
+        if batch := self._queues.pop(thread_id, []):
+            await self._locked_drain(bridge, chat_id, thread_id, batch)
+
+    async def _cmd_clear(self, chat_id: str, thread_id: str, message_id: str) -> None:
+        """清空会话（与 desktop「清空会话」同路径：delete_thread + delete_meta + 广播）。"""
+        ch = self.channel
+        pool = ch.bridge_pool
+        bridge = await pool.get(thread_id)
+        lock = pool.lock(thread_id)
+        if lock.locked():
+            await ch.send_markdown(
+                chat_id, "正在执行任务，请先发送 /stop。", reply_to=message_id
+            )
+            return
+        async with lock:
+            await bridge.delete_thread(thread_id)
+        delete_meta(thread_id)
+        hub.on_channel_activity(thread_id, "feishu")
+        await ch.send_markdown(chat_id, "会话已清空。", reply_to=message_id)
+        # 清空期间（持锁窗口）入队的消息在此接手，不留到下条消息才被捎带
+        if not lock.locked() and (batch := self._queues.pop(thread_id, [])):
+            await self._locked_drain(bridge, chat_id, thread_id, batch)
+
+    async def _cmd_help(self, chat_id: str, thread_id: str, message_id: str) -> None:
+        """渠道直答命令列表卡片，不跑 agent、不为此建桥（建桥重且常驻）。
+
+        渠道桥记忆恒开，available_commands(memory_enabled=True) 与
+        bridge.list_commands() 恒等价，无需按有桥无桥分化。
+        """
+        await self.channel.send_markdown(
+            chat_id,
+            help_markdown(available_commands(memory_enabled=True)),
+            reply_to=message_id,
+            title="✨ Lumi · 可用命令",
+        )
 
     # ── 后台任务完成通知 ──
 
@@ -518,6 +680,14 @@ class FeishuInbound:
         file_refs = [r for m in batch for r in m.file_refs]
         reply_to = batch[-1].reply_to  # 回复批次里最近一条
 
+        # 斜杠命令：仅单条成批且纯文本时识别（混批/带媒体当普通文本）；语法命中后
+        # 再对照已知命令表，未知的 /xxx 照常喂模型。
+        command = None
+        if len(batch) == 1 and not image_refs and not file_refs:
+            parsed = parse_slash_command(batch[0].text)
+            if parsed and any(c["name"] == parsed[0] for c in bridge.list_commands()):
+                command = parsed
+
         # 图片/文件各自独立、相互无依赖 → 并发下载（gather 保序），多媒体不再 N 倍延迟
         image_blocks: list[dict] = []
         if image_refs:
@@ -544,6 +714,7 @@ class FeishuInbound:
             reply_to=reply_to,
             content=build_content(merged_text, image_blocks),
             tool_mode=ch.config.tool_mode,
+            command=command,
             # 渲染数据与模型文本分离：每条原始消息的 {sender, ts, text} 结构化存进
             # additional_kwargs，desktop 气泡只读它、不反解析正文——正文里的
             # <sender> 标签纯给模型看，字面标签无法伪造气泡、也无对齐问题。

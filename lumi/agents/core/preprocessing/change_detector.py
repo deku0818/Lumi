@@ -26,8 +26,11 @@ class FileSetChangeDetector[T]:
     _instance: FileSetChangeDetector | None = None
 
     def __init__(self) -> None:
-        self._cached_digest: str | None = self._INITIAL_DIGEST
-        self._cached: list[T] = []
+        # _seen_digest：check() 上次报告过的 digest（变更注入语义）；
+        # _data_digest/_data：加载结果缓存（peek/check 共享，避免每次全量重解析）。
+        self._seen_digest: str | None = self._INITIAL_DIGEST
+        self._data_digest: str | None = None
+        self._data: list[T] = []
 
     # ------------------------------------------------------------------
     # 子类实现
@@ -69,15 +72,24 @@ class FileSetChangeDetector[T]:
             hasher.update(repr(entry).encode())
         return hasher.hexdigest()
 
+    def _current(self) -> tuple[list[T], str]:
+        """当前列表 + digest：digest 未变直接用缓存，变了才重新加载。"""
+        digest = self._compute_digest()
+        if digest != self._data_digest:
+            self._data = self._load()
+            self._data_digest = digest
+        return self._data, digest
+
     def check(self) -> tuple[list[T], bool]:
         """检查是否变更，返回 ``(列表, 是否变更)``。"""
-        current_digest = self._compute_digest()
-        if current_digest == self._cached_digest:
-            return list(self._cached), False
+        data, digest = self._current()
+        changed = digest != self._seen_digest
+        self._seen_digest = digest
+        return list(data), changed
 
-        self._cached = self._load()
-        self._cached_digest = current_digest
-        return list(self._cached), True
+    def peek(self) -> list[T]:
+        """获取当前列表（只读，不影响 ``check()`` 的变更判断）。"""
+        return list(self._current()[0])
 
     # ------------------------------------------------------------------
     # 单例管理（按子类隔离）

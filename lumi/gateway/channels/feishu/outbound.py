@@ -44,10 +44,12 @@ async def run_turn(
     tool_mode: str,
     message_meta: dict | None = None,
     is_meta: bool = False,
+    command: tuple[str, str] | None = None,
 ) -> None:
     """驱动一轮 agent run，把事件流渲染到飞书。
 
     is_meta=True 标记系统注入轮（后台任务通知），注入文本不作为用户消息呈现。
+    command=(name, extra_text) 时走 bridge.stream_command（斜杠命令轮，content 不使用）。
     """
     streaming = channel.streaming
     ended = False
@@ -64,10 +66,16 @@ async def run_turn(
             {"_stream_end": True, "_aborted": aborted, "message_id": reply_to},
         )
 
-    try:
-        async for evt in bridge.stream_response(
+    if command:
+        stream = bridge.stream_command(
+            command[0], command[1], tool_mode=tool_mode, message_meta=message_meta
+        )
+    else:
+        stream = bridge.stream_response(
             content, tool_mode=tool_mode, message_meta=message_meta, is_meta=is_meta
-        ):
+        )
+    try:
+        async for evt in stream:
             if evt.parent_run_id:
                 continue  # 子代理内部活动不外显
             kind = evt.kind

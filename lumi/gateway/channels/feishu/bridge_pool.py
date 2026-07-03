@@ -35,6 +35,9 @@ class BridgePool:
         # 是因为配置热重载保留池但重建 channel/inbound——映射跟着任务归属走，
         # 不能随传输层重建而丢。
         self.chat_ids: dict[str, str] = {}
+        # thread_id → 当前用户轮的 run task（/stop 取消用），与 chat_ids 同理放池上。
+        # 只登记用户轮：通知 poller 的轮跑在 poller task 自身里，cancel 会杀掉整个轮询。
+        self.run_tasks: dict[str, asyncio.Task] = {}
         # 串行化"建桥"本身：首条消息并发到达同一新 thread 时只建一次
         self._init_lock = asyncio.Lock()
 
@@ -57,6 +60,10 @@ class BridgePool:
                 self._locks[thread_id] = asyncio.Lock()
                 logger.info(f"[BridgePool] 新建 AgentBridge thread={thread_id}")
             return bridge
+
+    def peek(self, thread_id: str) -> AgentBridge | None:
+        """已建桥则返回，否则 None（不隐式建桥——建桥重且常驻，只在真要跑轮时建）。"""
+        return self._bridges.get(thread_id)
 
     def lock(self, thread_id: str) -> asyncio.Lock:
         """该 thread 的运行锁；建桥时一并创建，故此处必然存在。"""
@@ -93,3 +100,4 @@ class BridgePool:
         self._bridges.clear()
         self._locks.clear()
         self.chat_ids.clear()
+        self.run_tasks.clear()

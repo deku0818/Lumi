@@ -301,3 +301,20 @@ async def cancel_background_task(task_id: str) -> bool:
             return False
         return True
     return registry.cancel_agent_task(task_id)
+
+
+async def cancel_thread_bg_tasks(thread_id: str) -> int:
+    """停止归属某 thread 的全部运行中后台任务，返回成功发起取消的个数。
+
+    并发取消（串行时 N 个顽固任务要等 5s×N 优雅关停超时）；IM 渠道 /stop 与
+    未来的"停止本会话全部任务"共用。被停任务仍走既有收尾链（FAILED + 通知入队）。
+    """
+    running = [
+        e
+        for e in get_task_registry().all_tasks()
+        if e.thread_id == thread_id and e.status == TaskStatus.RUNNING
+    ]
+    results = await asyncio.gather(
+        *(cancel_background_task(e.task_id) for e in running)
+    )
+    return sum(results)
