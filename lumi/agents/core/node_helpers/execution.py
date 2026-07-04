@@ -12,6 +12,7 @@ from typing import Any
 
 from lumi.agents.core.node_helpers.messages import content_to_str, write_offload_file
 from lumi.utils.logger import logger
+from lumi.utils.paths import lumi_tmp_dir
 from lumi.utils.read_config import get_config
 from lumi.utils.sizing import text_size, truncate_docs_to_max_bytes
 
@@ -54,9 +55,7 @@ async def _try_offload_to_file(
     line_count = content_str.count("\n") + 1
 
     timestamp = datetime.now().strftime("%H%M%S%f")
-    file_path = (
-        get_config().config_dir / "offload" / f"{tool_name}_result_{timestamp}.txt"
-    )
+    file_path = lumi_tmp_dir("offload") / f"{tool_name}_result_{timestamp}.txt"
 
     try:
         await asyncio.to_thread(write_offload_file, file_path, content_str)

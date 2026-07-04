@@ -1,5 +1,10 @@
 # Changelog
 
+## [0.2.28] - 2026-07-04
+
+### Changed
+- **工具结果 offload 落盘改到临时目录** — 卸载文件路径由 `<config_dir>/offload/` 改为 `lumi_tmp_dir("offload")`（POSIX 下 `/tmp/lumi-<uid>/offload/`），复用 `lumi/utils/paths.py` 的每用户私有临时目录约定（0700 + 属主校验，OS 自动清理），不再污染项目 `.lumi` 目录；回喂模型的仍是完整绝对路径，read/grep 命中不受影响
+
 ## [0.2.27] - 2026-07-04
 
 ### Changed
