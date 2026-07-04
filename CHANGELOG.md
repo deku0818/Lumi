@@ -1,5 +1,11 @@
 # Changelog
 
+## [0.2.27] - 2026-07-04
+
+### Changed
+- **auto 审批分类器补反绕过条款**（参考 Claude Code 的 deny-rule circumvention guidance）— 分类器 prompt 新增：识别「换工具绕过限制」——被禁/被拦工具的活儿改用 bash `sed -i`/`cat >`/`tee`/重定向/`python -c`/heredoc 去做同一件事（如写/改一个 write/edit 被拦的文件）即属绕过，reject 并在 reason 点明；补上此前仅 `safety.py` 硬编码「bash 写保护文件」覆盖不到的通用绕过面
+- **reject 回喂文案收紧** — auto 分类器拒绝后回喂模型的引导由「改用更低风险的方式完成目标」（易反向诱导模型找绕过路径）改为三段式：可改用自然完成同一目标的其他工具、但不得换工具绕过这条拦截、该能力确有必要则停下向用户说明并请求授权
+
 ## [0.2.26] - 2026-07-04
 
 ### Changed

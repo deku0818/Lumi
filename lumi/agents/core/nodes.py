@@ -512,6 +512,7 @@ _CLASSIFIER_SYSTEM = """你是 Lumi 的工具调用安全分类器（auto 审批
 - reject：危险、破坏性、越权或与用户意图相悖的操作，自动拒绝
 
 判断重心放在会**修改真实环境**的操作上——写入/编辑/删除文件、有副作用或改动系统状态的命令、网络提交等；这类须核对是否符合用户当前意图且无破坏性，安全则 approve，危险或越权则 reject。只读、查询、无副作用的操作直接 approve。
+警惕**换工具绕过限制**：若某工具已被禁用/拦截，用 bash 的 `sed -i`、`cat >`、`tee`、重定向、`python -c`、heredoc 等去完成本该由被禁工具做的同一件事（如写/改一个 write/edit 被拦的文件），即属绕过，reject 并在 reason 点明。
 注意：bash 后台运行应使用 run_in_background 参数，而非在命令里加 `&`；遇到用 `&` 后台化的命令，reject 并在 reason 提示改用参数。
 只依据安全性，不替用户做产品决策。reason 用一句话说明。"""
 
@@ -593,7 +594,9 @@ async def auto_classify(
                 tool_calls,
                 content=(
                     f"此操作被 auto 模式安全分类器自动拒绝：{verdict.reason}。"
-                    "请评估风险并改用更低风险的方式完成目标。"
+                    "你可以改用自然完成同一目标的其他工具，但**不得**用换工具的方式"
+                    "绕过这条拦截（如借 bash 重定向/sed/python 去做被拦的写操作）。"
+                    "若该能力确有必要，请停下并向用户说明你要做什么、为何需要授权。"
                 ),
             )
             return Command(goto="CallModel", update={"messages": messages})
