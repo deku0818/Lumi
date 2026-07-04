@@ -500,17 +500,19 @@ def _build_reject_messages(
 class _ClassifierVerdict(BaseModel):
     """auto 模式分类器的裁决结果。"""
 
-    decision: Literal["approve", "ask", "reject"] = Field(
-        description="approve=自动放行；ask=交用户确认；reject=自动拒绝"
+    decision: Literal["approve", "reject"] = Field(
+        description="approve=自动放行；reject=自动拒绝"
     )
     reason: str = Field(description="一句话说明裁决依据，简明")
 
 
 _CLASSIFIER_SYSTEM = """你是 Lumi 的工具调用安全分类器（auto 审批模式）。
-基于安全性判断即将执行的一批工具调用，输出三选一裁决：
-- approve：明显安全、符合用户当前意图的操作，自动放行
-- ask：有一定风险或意图不明确，应让用户确认
-- reject：明显危险、破坏性、越权或与用户意图相悖的操作，自动拒绝
+基于安全性判断即将执行的一批工具调用，输出二选一裁决：
+- approve：安全、符合用户当前意图的操作，自动放行
+- reject：危险、破坏性、越权或与用户意图相悖的操作，自动拒绝
+
+判断重心放在会**修改真实环境**的操作上——写入/编辑/删除文件、有副作用或改动系统状态的命令、网络提交等；这类须核对是否符合用户当前意图且无破坏性，安全则 approve，危险或越权则 reject。只读、查询、无副作用的操作直接 approve。
+注意：bash 后台运行应使用 run_in_background 参数，而非在命令里加 `&`；遇到用 `&` 后台化的命令，reject 并在 reason 提示改用参数。
 只依据安全性，不替用户做产品决策。reason 用一句话说明。"""
 
 
@@ -543,7 +545,6 @@ async def auto_classify(
     的免疫闸短路到 HumanApproval，不会到这里）。裁决：
     - approve → ToolExecutor（自动放行）
     - reject  → CallModel（自动拒绝，附原因让模型改用更低风险的方式，复用 DENY 语义）
-    - ask     → HumanApproval（回落人工确认）
     分类器调用失败 fail-closed → HumanApproval。
     """
     last_message = state["messages"][-1]
@@ -587,7 +588,7 @@ async def auto_classify(
     match verdict.decision:
         case "approve":
             return Command(goto="ToolExecutor")
-        case "reject":
+        case _:  # reject（及任何非 approve 值）：自动拒绝，附原因回喂模型
             messages = _build_reject_messages(
                 tool_calls,
                 content=(
@@ -596,8 +597,6 @@ async def auto_classify(
                 ),
             )
             return Command(goto="CallModel", update={"messages": messages})
-        case _:  # ask
-            return Command(goto="HumanApproval")
 
 
 async def summarizer(

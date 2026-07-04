@@ -1,5 +1,14 @@
 # Changelog
 
+## [0.2.26] - 2026-07-04
+
+### Changed
+- **auto 审批分类器由三档简化为二档** — 裁决从 `approve/ask/reject` 收敛为 `approve/reject`，去掉「回落人工确认」的 ask 档：可疑或意图不明确的操作由 AI 直接在 approve/reject 间裁决，不再打断用户。prompt 同步强化——判断重心放在会**修改真实环境**的操作上（写入/编辑/删除文件、有副作用的命令、网络提交等），只读/查询类直接放行；并新增 bash 后台运行须用 `run_in_background` 参数而非 `&` 的引导（命中即 reject 并在 reason 提示改用参数）。分类器调用失败仍 fail-closed 回落人工审批
+- **`project_slug` 复用哈希单一事实源** — dream 导出目录名从 ad-hoc `str(project_dir).replace("/", "-")` 改用新增的 `project_slug()`（`<basename>-<哈希6位>`），哈希段复用 `workspace_id.get_workspace_id()`，消除并行的路径→id 方案
+
+### Fixed
+- **临时目录根创建的竞态与安全加固**（`lumi/utils/paths.py`）— 三处修复：① 根目录并发首建缺 `exist_ok` 导致 `FileExistsError`（bg_tasks / feishu inbound / dream 跨线程并发触发）；② POSIX 下 `/tmp/lumi-<uid>` 路径可预测，预建劫持时属主非本用户即 fail-closed 拒用、已存在目录显式收紧 `0700`，避免把含用户数据的产物写进他人目录；③ POSIX 分支硬编码 `/tmp`，改为仅 `/tmp` 可写时用短路径、否则回落 `gettempdir()`（尊重 `$TMPDIR`），覆盖只读 `/tmp` 的受限容器/沙箱
+
 ## [0.2.25] - 2026-07-03
 
 ### Changed

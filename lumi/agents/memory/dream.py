@@ -189,9 +189,9 @@ async def _run_dream(
 async def _export_sessions(reader, sessions, project_dir: Path) -> Path:
     """把其他近期会话各导出为扁平 text（一行一消息）到 per-project 临时目录。"""
     from lumi.sessions.message_text import extract_messages_as_text
-    from lumi.utils.paths import lumi_tmp_dir
+    from lumi.utils.paths import lumi_tmp_dir, project_slug
 
-    out_dir = lumi_tmp_dir("dream_transcripts", str(project_dir).replace("/", "-"))
+    out_dir = lumi_tmp_dir("dream_transcripts", project_slug(project_dir))
     for stale in out_dir.glob("*.txt"):
         stale.unlink(missing_ok=True)
 
