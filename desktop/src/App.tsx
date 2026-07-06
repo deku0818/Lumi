@@ -288,6 +288,8 @@ export default function App() {
   const [cmdSel, setCmdSel] = useState(0)
   const [cmdDismissed, setCmdDismissed] = useState(false)
   const [sessions, setSessions] = useState<SessionMeta[]>([])
+  // 首次全量 list_sessions 是否已返回：加载窗口内别把 sessions=[] 误判成「暂无会话」
+  const [sessionsLoaded, setSessionsLoaded] = useState(false)
   // 方案甲多机：机器列表（本地恒在 + 远程）与各机控制连接状态
   const [machines, setMachines] = useState<{ id: string; name: string; enabled?: boolean }[]>([
     { id: 'local', name: '本地' },
@@ -906,6 +908,8 @@ export default function App() {
       })
       return [...keep, ...next]
     })
+    // 全量刷新完成一轮即算「已加载」（某机器失败也已 catch 兜底，Promise.all 必 resolve）
+    if (!only) setSessionsLoaded(true)
   }, [])
 
   // 重拉某会话历史并整表替换其 items（渠道会话旁观刷新 / 切回对账共用）
@@ -1913,6 +1917,7 @@ export default function App() {
       <Sidebar
         width={sidebarW.width}
         sessions={sessions}
+        sessionsLoaded={sessionsLoaded}
         machines={machines}
         machineConn={machineConn}
         channels={channels}

@@ -110,6 +110,7 @@ function highlight(text: string, q: string): ReactNode {
 export const Sidebar = memo(function Sidebar({
   width,
   sessions,
+  sessionsLoaded,
   machines,
   machineConn,
   channels,
@@ -139,9 +140,10 @@ export const Sidebar = memo(function Sidebar({
 }: {
   width: number
   sessions: SessionMeta[]
+  sessionsLoaded: boolean // 首次 list_sessions 是否已返回；未加载完成前不显示「暂无会话」
   machines: Machine[]
   machineConn: Record<string, ConnState>
-  channels: Record<string, ChannelInfo[]> // 机器 id → IM 渠道列表（飞书组头状态灯/绑定项目）
+  channels: Record<string, ChannelInfo[]> // 机器 id → IM 渠道列表（飞书组头绑定项目）
   recentLimit: number
   workspaceDir: string
   currentKey: string
@@ -249,9 +251,9 @@ export const Sidebar = memo(function Sidebar({
     )
   }
 
-  // 全部 · IM 渠道分组（A2：机器级，组头「飞书 · 绑定项目」+ 渠道状态灯，
-  // 状态灯复用 ChannelsPanel 的 .chan-orb 样式）。该机器无渠道会话则整组不渲染；
-  // 渠道会话不进项目组（projectGroupsFor 已剔除）。目前仅飞书一个渠道。
+  // 全部 · IM 渠道分组（A2：机器级，组头「飞书 · 绑定项目」）。
+  // 该机器无渠道会话则整组不渲染；渠道会话不进项目组（projectGroupsFor 已剔除）。
+  // 目前仅飞书一个渠道。（渠道连接状态灯仍在设置面板 ChannelsPanel 里展示）
   const renderChannelGroup = (backend: string) => {
     const mine = sessions.filter((s) => beOf(s) === backend && s.channel)
     if (!mine.length) return null
@@ -270,12 +272,6 @@ export const Sidebar = memo(function Sidebar({
             {t('sidebar.feishu')}
             {proj && <span className="opacity-60"> · {proj}</span>}
           </span>
-          {info && (
-            <span
-              className={`chan-orb ${info.status.state} scale-[0.67]`}
-              title={info.status.detail}
-            />
-          )}
         </button>
         {!collapsed && mine.sort(byRecency).map((s) => row(s))}
       </div>
@@ -385,9 +381,9 @@ export const Sidebar = memo(function Sidebar({
           </div>
         )}
       </>
-    ) : (
+    ) : sessionsLoaded ? (
       <div className="px-3 py-8 text-center text-xs text-muted-foreground">{t('sidebar.empty')}</div>
-    )
+    ) : null
   } else {
     const localGroups = projectGroupsFor(sessions, 'local', workspaceDir)
     // 已关闭机器的定时任务不显示（刷新时序可能残留旧 job，按可见机器过滤兜底）
@@ -418,7 +414,7 @@ export const Sidebar = memo(function Sidebar({
             {renderChannelGroup('local')}
             {localGroups.length
               ? localGroups.map((pg) => renderProject('local', pg))
-              : !sessions.length && (
+              : !sessions.length && sessionsLoaded && (
                   <div className="px-3 py-8 text-center text-xs text-muted-foreground">
                     {t('sidebar.empty')}
                   </div>
