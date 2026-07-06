@@ -1,8 +1,10 @@
-"""Summary 压缩的辅助：PTL retry / 熔断器 / 图像剥离 / API round 分组。
+"""Summary 压缩的辅助：PTL retry / 熔断器 / 图像剥离 / API round 分组 + 离线强制压缩。
 
-仅服务于 ``lumi.agents.core.nodes.summarizer`` 节点（串行拓扑
+主体服务于 ``lumi.agents.core.nodes.summarizer`` 节点（串行拓扑
 ``PreprocessMessages → Summarizer → CallModel``，summary 在关键路径上，故失败需熔断
-兜底、自身超长需 PTL 截头重试）；不暴露给业务代码。
+兜底、自身超长需 PTL 截头重试）。文件末尾另有**离线强制压缩**入口
+（``select_for_compaction`` / ``build_compacted_update``），供 ``AgentBridge.compact_thread``
+/ ``/compact`` 命令 / IM 每日整理对空闲会话主动压缩，绕开节点专属的阈值门与熔断器。
 """
 
 from __future__ import annotations
@@ -12,7 +14,15 @@ from dataclasses import dataclass
 
 import anthropic
 import openai
-from langchain_core.messages import AIMessage, BaseMessage, HumanMessage
+from langchain_core.messages import (
+    AIMessage,
+    BaseMessage,
+    HumanMessage,
+    RemoveMessage,
+    SystemMessage,
+)
+
+from lumi.agents.core.preprocessing.summary import format_summary_block
 
 _PTL_SUBSTRINGS = (
     "prompt is too long",
@@ -140,6 +150,36 @@ async def summarize_with_ptl_retry(
             attempt += 1
 
 
+async def run_summary(
+    messages: list,
+    prompt: str,
+    *,
+    tools,
+    system_prompt: str,
+    model_name: str,
+    max_retry: int,
+    drop_ratio: float,
+) -> tuple[str, int]:
+    """跑一次摘要：strip 图 → 缓存安全的 tool_call_chain → PTL 截头重试 → 提取文本。
+
+    summarizer 节点与离线 ``AgentBridge.compact_thread`` 共用这段（缓存安全的分叉：与主对话
+    相同的 system_prompt + tools 前缀复用 Prompt Caching，摘要本身不调工具）。**不含**节点专属
+    的熔断 / 阈值——调用方按需包裹。返回 ``(summary_text, ptl_retries)``。
+    """
+    # 函数级 import 避开 compact（早被 nodes import）→ chain/response 的潜在环
+    from lumi.agents.core.response import extract_ainvoke_content
+    from lumi.models.chain import tool_call_chain
+
+    cleaned = strip_images_from_messages(messages)
+    chain = tool_call_chain(
+        tools, system_prompt=system_prompt, model_name=model_name, streaming=False
+    )
+    raw_content, ptl_retries = await summarize_with_ptl_retry(
+        cleaned, prompt, chain, max_retry=max_retry, drop_ratio=drop_ratio
+    )
+    return extract_ainvoke_content(raw_content), ptl_retries
+
+
 # ---------------------------------------------------------------------------
 # 熔断器：同一 thread summary 连续失败超阈值后短暂放行 CallModel，不再重试
 # ---------------------------------------------------------------------------
@@ -220,3 +260,47 @@ def reset_circuit(thread_id: str) -> None:
 def clear_all_circuits() -> None:
     """清空所有熔断状态（仅供测试 / 运维使用）。"""
     _circuits.clear_all()
+
+
+# ---------------------------------------------------------------------------
+# 离线强制压缩：对空闲会话的完整历史做一次压缩（供 AgentBridge.compact_thread /
+# /compact 命令 / IM 每日整理调用）。与上面的 summarizer 节点共用压缩核，但绕开节点专属的
+# 阈值门 / "末条必须 HumanMessage" / 熔断器——那些只在即将溢出的当轮调用里才有意义。
+# ---------------------------------------------------------------------------
+
+
+def select_for_compaction(messages: list) -> tuple[list, AIMessage] | None:
+    """判定是否可压缩，返回 ``(to_summarize, last_ai)`` 或 ``None``。
+
+    不设大小门——有历史就压。仅保留两条**结构性**前提（非阈值）：
+    - 头部 SystemMessage 不参与、保留不动；
+    - 末条须是**无 tool_calls 的干净 AIMessage**（= 已完成一轮的空闲会话），规避半截
+      工具轮与压缩后的连续同角色；
+    - 末条之外须至少有一条带 id 的消息可压（否则无可压缩、白跑一次摘要）。
+    """
+    if not messages:
+        return None
+    body = messages[1:] if isinstance(messages[0], SystemMessage) else messages
+    if not body:
+        return None
+    last = body[-1]
+    if not isinstance(last, AIMessage) or last.tool_calls:
+        return None
+    to_summarize = body[:-1]
+    if not any(m.id for m in to_summarize):
+        return None
+    return to_summarize, last
+
+
+def build_compacted_update(
+    to_summarize: list, last: AIMessage, summary_text: str
+) -> dict:
+    """构造 ``aupdate_state`` 的 ``messages`` 更新：删除整段 body、重建为摘要 + 末条 AI。
+
+    删除 ``to_summarize + last`` 全部（含末条 AI），再按序追加 ``[Human(<summary>), AI(末条副本)]``——
+    ``add_messages`` 按列表顺序追加，故最终末条恒为 AI。头部 SystemMessage 未被删、留在原位。
+    """
+    carrier = HumanMessage(content=format_summary_block(summary_text))
+    tail = AIMessage(content=last.content)
+    removes = [RemoveMessage(id=m.id) for m in [*to_summarize, last] if m.id]
+    return {"messages": [*removes, carrier, tail]}

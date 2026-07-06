@@ -280,6 +280,9 @@ export interface FeishuConfig {
   group_policy: 'mention' | 'open'
   tool_mode: 'auto' | 'privileged'
   workspace: string
+  daily_dream_enabled: boolean
+  daily_dream_time: string
+  summary_max_concurrency: number
 }
 export interface ChannelInfo {
   name: string

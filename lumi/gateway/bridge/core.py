@@ -45,7 +45,7 @@ from lumi.gateway.bridge.providers import ProviderService
 from lumi.utils.constants import LUMI_META_KEY, MAX_STREAM_RETRIES, RETRY_BASE_WAIT
 from lumi.utils.logger import logger
 from lumi.utils.read_config import get_config
-from lumi.utils.thread_id import generate_thread_id
+from lumi.utils.thread_id import generate_thread_id, is_channel_thread
 from lumi.utils.workspace_id import get_workspace_dir
 
 if TYPE_CHECKING:
@@ -91,11 +91,14 @@ def prepend_reminder(content: str | list, note: str) -> str | list:
     return [{"type": "text", "text": note}, *content]
 
 
-def available_commands(memory_enabled: bool) -> list[dict]:
-    """当前可用的斜杠命令（技能 + 记忆会话的 /dream）。
+def available_commands(memory_enabled: bool, *, channel: bool = False) -> list[dict]:
+    """当前可用的斜杠命令（技能 + 记忆会话的 dream 系）。
 
     模块级函数：IM 渠道的 /help 对从未对话的 chat 也要能列命令，不必为此
     隐式构建常驻 AgentBridge；bridge.list_commands 是其绑定实例状态的薄封装。
+
+    dream 系按载体分流（``channel`` = IM 长会话）：/dream 综合其他近期会话，只对
+    desktop 短会话有意义；/dream-session 只吃当前永久会话，是 IM 的形态——两端各见其一。
     """
     from lumi.agents.core.preprocessing.skill_detector import SkillChangeDetector
 
@@ -104,13 +107,21 @@ def available_commands(memory_enabled: bool) -> list[dict]:
         {"name": s.name, "description": s.description, "type": "skill"} for s in skills
     ]
     if memory_enabled:
-        commands.append(
-            {
-                "name": "dream",
-                "description": "立即整理记忆（后台综合近期会话）",
-                "type": "system",
-            }
+        # dream 系按载体分流：IM 长会话只见 /dream-session，desktop 短会话只见 /dream
+        name, desc = (
+            ("dream-session", "整理本会话记忆（后台）")
+            if channel
+            else ("dream", "立即整理记忆（后台综合近期会话）")
         )
+        commands.append({"name": name, "description": desc, "type": "system"})
+    # /compact 与记忆无关，任何会话都可手动压缩历史
+    commands.append(
+        {
+            "name": "compact",
+            "description": "压缩当前会话历史（保留摘要）",
+            "type": "system",
+        }
+    )
     return commands
 
 
@@ -428,9 +439,12 @@ class AgentBridge:
         """列出当前可用的斜杠命令（技能命令），供前端补全菜单使用。
 
         数据源为项目技能目录，随项目动态变化——前端不硬编码，始终向后端拉取。
-        /dream 仅本会话启用记忆（主对话入口）时提供。
+        dream 系仅本会话启用记忆（主对话入口）时提供，且按载体分流（IM 长会话
+        只见 /dream-session，desktop 短会话只见 /dream）。
         """
-        return available_commands(self._memory_enabled)
+        return available_commands(
+            self._memory_enabled, channel=is_channel_thread(self.current_thread_id)
+        )
 
     async def stream_command(
         self,
@@ -453,10 +467,20 @@ class AgentBridge:
         # 在那里才 set），缺了它后台 task 的完成通知会失归属（entry.thread_id=""）。skill 分支
         # 随后又走 stream_response 重复设、同值无害。
         current_thread_id.set(self.current_thread_id)
-        # /dream 仅在启用记忆的会话里是内置命令（与 list_commands 同条件）；非记忆会话
-        # 落到下方 skill 分发。同名 skill 被内置 /dream 屏蔽是期望行为（内置优先）。
-        if name == "dream" and self._memory_enabled:
+        # dream 系仅在启用记忆的会话里是内置命令，且与 list_commands 同一载体分流
+        # （/dream 仅 desktop 短会话、/dream-session 仅 IM 长会话）；条件不满足落到
+        # 下方 skill 分发。同名 skill 被内置命令屏蔽是期望行为（内置优先）。
+        is_channel = is_channel_thread(self.current_thread_id)
+        if name == "dream" and self._memory_enabled and not is_channel:
             async for event in self._stream_dream_command():
+                yield event
+            return
+        if name == "dream-session" and self._memory_enabled and is_channel:
+            async for event in self._stream_dream_command(session_only=True):
+                yield event
+            return
+        if name == "compact":
+            async for event in self._stream_compact_command():
                 yield event
             return
 
@@ -479,25 +503,104 @@ class AgentBridge:
         ):
             yield event
 
-    async def _stream_dream_command(self) -> AsyncGenerator[BridgeEvent, None]:
-        """/dream：取当前会话完整历史，force 触发后台 dream，回一条提示消息。
+    async def _stream_dream_command(
+        self, *, session_only: bool = False
+    ) -> AsyncGenerator[BridgeEvent, None]:
+        """/dream 与 /dream-session：取当前会话完整历史，触发后台 dream，回一条提示消息。
 
-        dream 综合「当前会话完整 message + 其他近期会话 grep」——当前会话历史从 checkpoint
-        取（/dream 命令本身尚未入 state，正好不污染）；后台跑、完成走 bg-task 通知。
+        ``session_only=False``（/dream）综合「当前会话完整 message + 其他近期会话 grep」；
+        ``session_only=True``（/dream-session）只综合当前会话。当前会话历史从 checkpoint
+        取（命令本身尚未入 state，正好不污染）；后台跑、完成走 bg-task 通知。
         """
-        from lumi.agents.memory.dream import start_dream
+        from lumi.agents.memory.dream import start_dream, start_dream_session
 
-        messages: list = []
-        if self.graph is not None and self._config is not None:
-            snap = await self.graph.aget_state(self._config)
-            messages = list((snap.values or {}).get("messages", [])) if snap else []
-        text = await start_dream(
+        messages = await self.snapshot_messages()
+        starter = start_dream_session if session_only else start_dream
+        text = await starter(
             self._context, messages, self.workspace_dir, self.current_thread_id
         )
+        async for event in self._emit_text_message(text):
+            yield event
+
+    async def snapshot_messages(self) -> list:
+        """读当前 thread checkpoint 的消息快照（无图 / 无 config 时空列表）。"""
+        if self.graph is None or self._config is None:
+            return []
+        snap = await self.graph.aget_state(self._config)
+        return list((snap.values or {}).get("messages", [])) if snap else []
+
+    async def compact_thread(self) -> bool:
+        """对当前 thread 的空闲历史强制压缩一次（不流式、不触发模型对话）。
+
+        供 IM 渠道每日 dream 后的 summary 阶段调用：读 checkpoint 快照 → 复用 summarizer
+        的压缩核（``run_summary``）→ 经 ``aupdate_state`` 把「摘要 + 末条 AI」写回 checkpoint
+        （走 add_messages reducer，语义与 summarizer 节点一致），全程不经 astream_events 故不
+        外泄到渠道。
+
+        返回是否真的压缩了（会话太短 / 末条非干净 AI 回复 / 无摘要提示词时跳过并返回 False）。
+        """
+        from lumi.agents.core.preprocessing.compact import (
+            build_compacted_update,
+            run_summary,
+            select_for_compaction,
+        )
+
+        if self._context is None:
+            return False
+        selected = select_for_compaction(await self.snapshot_messages())
+        if selected is None:
+            return False
+        to_summarize, last = selected
+
+        prompt = get_config().load_prompt("SUMMARY")
+        if not prompt:
+            logger.warning("[compact_thread] 未配置 SUMMARY.md，跳过压缩")
+            return False
+
+        token_config = get_config().config.token
+        summary_text, _ = await run_summary(
+            to_summarize,
+            prompt,
+            tools=self._context.tools,
+            system_prompt=self._context.system_prompt,
+            model_name=self._context.model_name,
+            max_retry=token_config.summary_ptl_retry_max,
+            drop_ratio=token_config.summary_ptl_retry_drop_ratio,
+        )
+        update = build_compacted_update(to_summarize, last, summary_text)
+        # as_node 显式指定：不依赖 LangGraph 从末次 checkpoint 推断写入者；
+        # CallModel 的条件边在「末条无 tool_calls 的 AI」上路由 END，不派生后续任务
+        await self.graph.aupdate_state(self._config, update, as_node="CallModel")
+        logger.info(
+            "[compact_thread] 已压缩 thread=%s（%d 条历史 → 摘要）",
+            self.current_thread_id,
+            len(to_summarize),
+        )
+        return True
+
+    async def _emit_text_message(self, text: str) -> AsyncGenerator[BridgeEvent, None]:
+        """把一段文本作为一条完整助手消息 yield（命令回执共用的四事件收尾）。"""
         yield BridgeEvent(kind=EventKind.MESSAGE_START)
         yield BridgeEvent(kind=EventKind.MESSAGE_DELTA, text=text)
         yield BridgeEvent(kind=EventKind.MESSAGE_COMPLETE)
         yield BridgeEvent(kind=EventKind.TURN_COMPLETE)
+
+    async def _stream_compact_command(self) -> AsyncGenerator[BridgeEvent, None]:
+        """/compact：强制压缩当前会话历史（保留摘要），回一条结果消息。"""
+        try:
+            compacted = await self.compact_thread()
+            text = (
+                "✨ 对话已压缩"
+                if compacted
+                else "本会话暂不需要压缩（历史较短，或末条不是完整回复）。"
+            )
+        except Exception:
+            logger.error(
+                "[/compact] 压缩失败 thread=%s", self.current_thread_id, exc_info=True
+            )
+            text = "压缩本会话历史时出错，请稍后再试。"
+        async for event in self._emit_text_message(text):
+            yield event
 
     def drain_notifications(self, thread_id: str) -> list[str]:
         """取出精确归属该 thread 的后台任务完成通知。

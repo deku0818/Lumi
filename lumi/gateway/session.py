@@ -244,7 +244,12 @@ async def _load_history(bridge: AgentBridge, params: dict) -> dict:
         return {"items": []}
     snap = await bridge.graph.aget_state({"configurable": {"thread_id": thread_id}})
     messages = (snap.values or {}).get("messages", [])
-    return {"items": _history_items(messages)}
+    # usage 随 items 回给前端还原上下文用量指示器（仅存前端内存，重启/切会话后本是空的）；
+    # 复用 bridge 末条 AI usage 提取，口径与流式一致。
+    return {
+        "items": _history_items(messages),
+        "usage": AgentBridge._extract_last_ai_usage(snap),
+    }
 
 
 async def _stop(session: GatewaySession, params: dict) -> dict:

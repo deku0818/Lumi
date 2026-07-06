@@ -40,3 +40,18 @@ class FeishuChannelConfig(BaseModel):
     workspace: str = Field(
         default="", description="飞书会话绑定的项目根目录；空则用进程 cwd"
     )
+    daily_dream_enabled: bool = Field(
+        default=False,
+        description="每日定时记忆整理：到点对有新消息的会话先串行 dream（沉淀记忆）、"
+        "再并发 summary（压缩历史），让常驻会话不无限膨胀",
+    )
+    daily_dream_time: str = Field(
+        default="03:00",
+        description='每日整理时间，本地时区 "HH:MM"（建议低峰时段）',
+    )
+    summary_max_concurrency: int = Field(
+        default=3,
+        ge=1,
+        le=8,
+        description="summary 阶段最大并发数（限流防接口 429）；dream 恒串行不受此值影响",
+    )

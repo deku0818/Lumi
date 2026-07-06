@@ -18,6 +18,7 @@ import asyncio
 import shutil
 import time
 import uuid
+from collections.abc import Callable
 from pathlib import Path
 from typing import TYPE_CHECKING
 
@@ -27,6 +28,7 @@ from lumi.agents.memory import dream_lock
 from lumi.agents.memory.normalize import normalize_memory_index
 from lumi.utils.logger import logger
 from lumi.utils.read_config import get_config
+from lumi.utils.thread_id import is_channel_thread
 
 if TYPE_CHECKING:
     # 仅类型注解（本模块有 `from __future__ import annotations`，注解为字符串、运行时不求值）。
@@ -42,20 +44,16 @@ _SCAN_THROTTLE_SECONDS = 600
 _DREAM_TASKS: set[asyncio.Task] = set()
 
 
-def _human_delta(cur_human: dict[str, int], cursors: dict[str, int]) -> int:
-    """自上次游标以来新增的真实 human 总数。
-
-    per-会话取 ``max(0, 当前 - 游标)``：只数游标之后的新增（老会话旧消息不污染），
-    ``max(0)`` 防 compact 删消息致当前数小于游标。新会话游标缺省 0 → 全部算新增。
-    """
-    return sum(max(0, n - cursors.get(t, 0)) for t, n in cur_human.items())
-
-
 async def auto_dream_stop_hook(ctx: HookContext) -> HookResult:
     """Stop 时按门控阶梯触发后台 dream；廉价先判，任一不过 ``return None``（放行 END）。"""
     state = ctx.state
     # 1. depth 门（防自递归，首要）：dream agent 自身 stop 在此直接放行
     if state.get("depth", 0) > 0:
+        return None
+    # 长会话（IM 渠道）不走 Stop 触发的增量 dream——一群/一人是单个永久会话，凑不出
+    # 「N 个新会话」的增量门语义；改由渠道每日定时统一 dream + summary（见 feishu channel）。
+    thread_id = (ctx.config.get("configurable") or {}).get("thread_id", "")
+    if is_channel_thread(thread_id):
         return None
     runtime = ctx.runtime
     if runtime is None:
@@ -121,6 +119,32 @@ async def start_dream(
     return "🌙 已在后台开始整理记忆（综合近期会话）——完成后会通知你。"
 
 
+async def start_dream_session(
+    context, current_messages, workspace: str, current_thread: str
+) -> str:
+    """主动触发**长会话 dream**（/dream-session 命令）：只综合当前会话，后台 fire-and-forget。
+
+    与 /dream 的差别：不导出/综合其他会话，只吃当前这段永久会话的历史——供 IM（一群/一人
+    一个常驻 thread）手动整理用。返回给用户看的提示文本。
+    """
+    if not workspace or context.permission_engine is None:
+        return "当前会话未绑定项目，无法整理记忆。"
+    project_dir = context.permission_engine.project_dir
+    if dream_lock.is_in_flight(project_dir):
+        return "🌙 已有一次记忆整理在进行中，请稍候。"
+
+    dream_lock.mark_in_flight(project_dir)
+    task = asyncio.create_task(
+        consolidate_session_dream(
+            project_dir, current_messages, current_thread, time.time(), notify=True
+        )
+    )
+    _DREAM_TASKS.add(task)
+    task.add_done_callback(_DREAM_TASKS.discard)
+    task.add_done_callback(lambda _t: dream_lock.clear_in_flight(project_dir))
+    return "🌙 已在后台开始整理本会话记忆——完成后会通知你。"
+
+
 async def _run_dream(
     context,
     current_messages,
@@ -132,7 +156,6 @@ async def _run_dream(
     """后台主体：会话门 → 导出其他会话 → 建 dream agent → 综合（bg-task 收尾）。"""
     # 延迟 import，避免 hook 模块顶层与 core.graph / tools 循环依赖
     from lumi.agents.core.graph import create_agent
-    from lumi.sessions.message_visibility import count_human_messages
     from lumi.sessions.session_store import list_sessions
 
     engine = context.permission_engine
@@ -144,6 +167,7 @@ async def _run_dream(
         return
     cfg = get_config().config.auto_dream
     last_at = dream_lock.read_last_at(project_dir)
+    snapshot_ts = time.time()  # 本次综合的内容边界，成功后写回作下次门控基准
 
     # 只读 graph 读其他会话 checkpoint。checkpoint 模式须与 bridge **同源**（agents.checkpoint）：
     # 硬编码 sqlite 会让 postgres 用户的会话（存于 postgres）读不到 → dream 静默永不触发。
@@ -154,24 +178,16 @@ async def _run_dream(
     )
     try:
         sessions = await list_sessions(reader.graph, workspace=workspace, limit=50)
+        # 会话门：自上次 dream 以来活跃（最新 checkpoint 晚于 last_at）的其他会话数。
+        # created_at 取自最新 checkpoint = 最后活动时间，老会话有新活动同样计入。
         recent = [
             s
             for s in sessions
             if s.thread_id != current_thread and s.created_at.timestamp() > last_at
         ]
-        # human 门：数「自上次 dream 以来新增的真实 human message」。per-会话游标算 delta，
-        # 只数游标之后的新增——老会话的旧消息不再撑过门（否则内容门形同虚设）。当前会话从
-        # state 数，其他会话搭 list_sessions 便车的 human_count。
-        cursors = dream_lock.load_cursors(project_dir)
-        cur_human = {current_thread: count_human_messages(current_messages)} | {
-            s.thread_id: s.human_count for s in recent
-        }
-        total_new = _human_delta(cur_human, cursors)
-        if not force and total_new < cfg.min_human_messages:
+        if not force and len(recent) < cfg.min_sessions:
             logger.debug(
-                "[dream] human 门未过：新增 %d < %d，跳过",
-                total_new,
-                cfg.min_human_messages,
+                "[dream] 会话门未过：活跃 %d < %d，跳过", len(recent), cfg.min_sessions
             )
             return
         transcript_dir = await _export_sessions(reader, recent, project_dir)
@@ -179,8 +195,9 @@ async def _run_dream(
         await reader.aclose()  # 复用 LumiAgent.aclose（= close_checkpointer）
 
     try:
+        # 手动 /dream（force）完成后往会话汇报；Stop 钩子自动触发静默（无人发起不打扰）
         await _consolidate(
-            context, project_dir, current_messages, transcript_dir, cur_human
+            project_dir, current_messages, transcript_dir, snapshot_ts, notify=force
         )
     finally:
         shutil.rmtree(transcript_dir, ignore_errors=True)
@@ -210,11 +227,63 @@ async def _export_sessions(reader, sessions, project_dir: Path) -> Path:
 
 
 async def _consolidate(
-    context, project_dir: Path, current_messages, transcript_dir: Path, cur_human: dict
+    project_dir: Path,
+    current_messages,
+    transcript_dir: Path,
+    snapshot_ts: float,
+    *,
+    notify: bool,
 ):
-    """建 dream agent（含记忆指令、只读+写记忆工具），fire-and-forget 经 bg-task 收尾。
+    """短会话 dream：当前会话完整 message + 其他近期会话 grep，综合进记忆。"""
+    await _run_dream_fork(
+        project_dir,
+        current_messages,
+        _consolidation_prompt(transcript_dir),
+        label=f"dream:{project_dir.name}",
+        notify=notify,
+        record=lambda: dream_lock.record_dream(project_dir, snapshot_ts),
+    )
 
-    ``cur_human``：本次参与门控的各会话当前真实 human 数，dream 成功后写回游标。
+
+async def consolidate_session_dream(
+    project_dir: Path,
+    current_messages,
+    thread_id: str,
+    snapshot_ts: float,
+    *,
+    notify: bool,
+):
+    """长会话 dream：**只**综合当前会话（无其他会话导出），供 IM 渠道每日定时与
+    ``/dream-session`` 手动命令共用。可 await（渠道每日循环据此串行 + 屏障）。"""
+    await _run_dream_fork(
+        project_dir,
+        current_messages,
+        _consolidation_prompt_session(),
+        label=f"dream-session:{project_dir.name}",
+        notify=notify,
+        record=lambda: dream_lock.record_thread_dream(
+            project_dir, thread_id, snapshot_ts
+        ),
+    )
+
+
+async def _run_dream_fork(
+    project_dir: Path,
+    current_messages,
+    prompt_text: str,
+    *,
+    label: str,
+    notify: bool,
+    record: Callable[[], None],
+):
+    """共享底座：fork 主 agent（含记忆指令、只读+写记忆工具），经 bg-task 收尾。
+
+    两种 dream（短/长会话）唯一差别是 ``prompt_text`` 与是否导出其他会话——导出与门控
+    在调用方，本函数只管「fork + 注入提示 + 综合 + 收尾记账」。全程持 per-project
+    ``dream_lock.project_lock``：MEMORY.md 恒只有一个写者，任何入口都绕不开（迟到者
+    原地排队，写完再上）。``record``：综合成功后的记账（写回快照时刻，短/长会话各记
+    各的表）。``notify``：完成后是否往会话汇报——手动命令给回音，自动触发（Stop 钩子 /
+    每日定时）静默。
     """
     from lumi.agents.core.graph import create_agent
     from lumi.agents.core.hooks.dispatch import set_run_config_hooks
@@ -230,52 +299,54 @@ async def _consolidate(
     )
     from lumi.agents.tools import get_tools
 
-    dream_tools = await get_tools(tools=list(_DREAM_TOOL_NAMES))
-    # enable_memory=True：create_agent 自行组装含记忆指令的 system_prompt（与主 agent 同构，
-    # 不重复追加）。独立 PermissionEngine（permission_engine=None 时按 project_dir 新建）。
-    agent, ctx = await create_agent(
-        tools=dream_tools,
-        enable_memory=True,
-        checkpoint=None,
-        project_dir=project_dir,
-    )
-    # dream agent 无交互审批通道，固定 privileged（tool_mode 是 context 属性）
-    ctx.tool_mode = "privileged"
-    inputs = {
-        "messages": [
-            *current_messages,
-            HumanMessage(content=_consolidation_prompt(transcript_dir)),
-        ],
-        "depth": 1,  # 防自递归：dream agent 的 stop 经 depth 门直接放行
-    }
+    async with dream_lock.project_lock(project_dir):
+        dream_tools = await get_tools(tools=list(_DREAM_TOOL_NAMES))
+        # enable_memory=True：create_agent 自行组装含记忆指令的 system_prompt（与主 agent
+        # 同构，不重复追加）。独立 PermissionEngine（None 时按 project_dir 新建）。
+        agent, ctx = await create_agent(
+            tools=dream_tools,
+            enable_memory=True,
+            checkpoint=None,
+            project_dir=project_dir,
+        )
+        # dream agent 无交互审批通道，固定 privileged（tool_mode 是 context 属性）
+        ctx.tool_mode = "privileged"
+        inputs = {
+            "messages": [*current_messages, HumanMessage(content=prompt_text)],
+            "depth": 1,  # 防自递归：dream agent 的 stop 经 depth 门直接放行
+        }
 
-    task_id = f"dream_{uuid.uuid4().hex[:12]}"
-    output_file = bg_tasks_dir() / f"{task_id}.txt"
-    entry = BackgroundTaskEntry(
-        task_id=task_id,
-        kind=TaskKind.AGENT,
-        status=TaskStatus.RUNNING,
-        label=f"dream:{project_dir.name}",
-        started_at=time.time(),
-        output_file=output_file,
-    )
-    get_task_registry().register(entry)
-    entry.async_task = asyncio.current_task()  # 使面板取消生效
+        task_id = f"dream_{uuid.uuid4().hex[:12]}"
+        output_file = bg_tasks_dir() / f"{task_id}.txt"
+        entry = BackgroundTaskEntry(
+            task_id=task_id,
+            kind=TaskKind.AGENT,
+            status=TaskStatus.RUNNING,
+            label=label,
+            started_at=time.time(),
+            output_file=output_file,
+        )
+        get_task_registry().register(entry)
+        entry.async_task = asyncio.current_task()  # 使面板取消生效
 
-    async def _produce() -> str:
-        # 授权指向 dream 自己 engine（非 bridge 活引用，切项目不失配）+ 清项目 config hooks
-        set_run_authorized_source_for(ctx.permission_engine)
-        set_run_config_hooks(None)
-        result = await agent.graph.ainvoke(inputs, context=ctx)
-        normalize_memory_index(project_dir)  # 兜底规范化索引行的 [type · 日期]
-        # 综合成功才推进：一个事务原子更新 lastAt + 游标（失败则都不动，下个周期按旧游标重数）
-        dream_lock.record_dream(project_dir, cur_human)
-        msgs = result.get("messages") or []
-        return extract_ainvoke_content(msgs[-1].content) if msgs else "dream 完成"
+        async def _produce() -> str:
+            # 授权指向 dream 自己 engine（非 bridge 活引用，切项目不失配）+ 清 config hooks
+            set_run_authorized_source_for(ctx.permission_engine)
+            set_run_config_hooks(None)
+            result = await agent.graph.ainvoke(inputs, context=ctx)
+            normalize_memory_index(project_dir)  # 兜底规范化索引行的 [type · 日期]
+            # 综合成功才推进快照时刻（失败则不动，下次仍按旧边界判活）
+            record()
+            msgs = result.get("messages") or []
+            return extract_ainvoke_content(msgs[-1].content) if msgs else "dream 完成"
 
-    await run_background_task(
-        task_id, output_file, _produce, cancel_text="dream 综合已取消"
-    )
+        await run_background_task(
+            task_id,
+            output_file,
+            _produce,
+            cancel_text="dream 综合已取消",
+            notify=notify,
+        )
 
 
 def _consolidation_prompt(transcript_dir: Path) -> str:
@@ -308,3 +379,38 @@ def _consolidation_prompt(transcript_dir: Path) -> str:
 （删除已失效的指针、为新记忆补指针）。
 
 最后用一两句话总结你综合 / 更新 / 删除了什么；若记忆已经很紧凑、无事可做，直说即可。"""
+
+
+def _consolidation_prompt_session() -> str:
+    """长会话 dream 指令：只面向**当前这一段永久会话**，无其他会话、无 transcript。
+
+    与 ``_consolidation_prompt`` 是两种任务框架——这里是"回顾与某个群/某个人的同一段
+    对话，把耐久信号沉淀进记忆"，且这段会话**紧接会被 summary 压掉细节**，所以先把值得
+    留的写进记忆再压缩。"""
+    return """# Dream：本会话记忆沉淀
+
+现在做一次 dream——回顾上文这段对话，把其中值得长期记住的东西沉淀进持久记忆。记忆的
+格式、类型、该存什么 / 不该存什么，**以你系统提示里的「持久记忆」段为准**（唯一事实源）。
+
+⚠️ 这段会话**紧接就会被摘要压缩、丢弃细节**——所以现在就要把值得留的先写进记忆，过后无法
+再从原始对话里捞。
+
+## 阶段 1 — 定位
+- 列出记忆目录、读 MEMORY.md 索引，浏览已有 topic 文件，以便**改进而非新建重复**。
+
+## 阶段 2 — 收集信号
+从上文这段对话里找出值得长期记住的新信号（用户 / 群的偏好、工作方式、项目背景、达成的
+决定、在办事项等），只看你已经怀疑重要的东西。
+
+## 阶段 3 — 综合（synthesis）
+把新信号写入或并入记忆文件，重点：
+- **合并近重复**：并入已有 topic 文件，别造几乎一样的新文件。
+- 相对日期（「昨天」「上周」）转成绝对日期。
+- **不要在这里做冲突的自由裁决**——「哪条现在作数」交给召回时手握当前 query 的活模型；
+  你只负责把碎片综合成连贯记忆。若发现明显被现状推翻的过时事实，就地更正。
+
+## 阶段 4 — 收尾索引
+更新 MEMORY.md：每条指针一行 `- [标题](文件.md) [type · 写入日期] — 钩子`，保持精简
+（删除已失效的指针、为新记忆补指针）。
+
+最后用一两句话总结你综合 / 更新 / 删除了什么；若无事可做，直说即可。"""

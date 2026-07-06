@@ -91,15 +91,22 @@ def _help_line(name: str, description: str) -> str:
 def help_markdown(commands: list[dict]) -> str:
     """/help 卡片正文：技能命令 / 会话控制两组，`/名字` code 高亮 + 灰字组标题。
 
+    ``commands``（来自 ``list_commands``）按 ``type`` 分流：``skill`` 进「技能命令」，
+    ``system``（dream / compact 等 agent 层命令）与渠道 ``SYSTEM_COMMANDS``（/stop /clear
+    /help）同归「会话控制」——system 命令不是技能，不该混进技能分组。
+
     分割线前后必须留空行：--- 紧贴上一行会按 markdown setext 规则把前面整段
     渲染成大字标题（飞书真机如此），换行也一并被吞。
     """
+    skills = [c for c in commands if c.get("type") == "skill"]
+    systems = [c for c in commands if c.get("type") != "skill"]
     lines: list[str] = []
-    if commands:
+    if skills:
         lines.append("<font color='grey'>技能命令</font>")
-        lines += [_help_line(c["name"], c["description"]) for c in commands]
+        lines += [_help_line(c["name"], c["description"]) for c in skills]
         lines += ["", "---", ""]
     lines.append("<font color='grey'>会话控制</font>")
+    lines += [_help_line(c["name"], c["description"]) for c in systems]
     lines += [_help_line(n, d) for n, d in SYSTEM_COMMANDS.items()]
     return "\n".join(lines)
 
@@ -580,12 +587,12 @@ class FeishuInbound:
     async def _cmd_help(self, chat_id: str, thread_id: str, message_id: str) -> None:
         """渠道直答命令列表卡片，不跑 agent、不为此建桥（建桥重且常驻）。
 
-        渠道桥记忆恒开，available_commands(memory_enabled=True) 与
-        bridge.list_commands() 恒等价，无需按有桥无桥分化。
+        渠道桥记忆恒开且 thread 恒为渠道前缀，available_commands(memory_enabled=True,
+        channel=True) 与 bridge.list_commands() 恒等价，无需按有桥无桥分化。
         """
         await self.channel.send_markdown(
             chat_id,
-            help_markdown(available_commands(memory_enabled=True)),
+            help_markdown(available_commands(memory_enabled=True, channel=True)),
             reply_to=message_id,
             title="✨ Lumi · 可用命令",
         )

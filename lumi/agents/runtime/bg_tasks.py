@@ -236,12 +236,14 @@ async def run_background_task(
     produce: Callable[[], Awaitable[str]],
     *,
     cancel_text: str,
+    notify: bool = True,
 ) -> None:
     """后台任务收尾骨架（agent / workflow 共用）：``produce()`` 跑出成功文本 → 写文件 +
     置 COMPLETED；取消 / 异常写占位文本 + 置 FAILED；finally 入队完成通知。
 
     谁完成谁负责（update_status + enqueue_notification）。各调用方只提供 ``produce``
-    协程与 ``cancel_text``，差异化只剩成功路径。
+    协程与 ``cancel_text``，差异化只剩成功路径。``notify=False`` 完成后不入队通知——
+    自动 dream 等静默维护任务用（抽屉仍可见，只是不往会话里汇报）。
     """
     registry = get_task_registry()
     try:
@@ -256,7 +258,8 @@ async def run_background_task(
         registry.update_status(task_id, TaskStatus.FAILED, error=str(e))
         logger.error("[bg_task] task %s failed: %s", task_id, e, exc_info=True)
     finally:
-        registry.enqueue_notification(task_id)
+        if notify:
+            registry.enqueue_notification(task_id)
 
 
 # serialize_task 不外发的内部字段：async_task 不可 JSON 化、prompt 可能很大且前端不用。

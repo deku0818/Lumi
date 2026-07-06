@@ -19,35 +19,38 @@ def _tmp_db(tmp_path, monkeypatch):
     dream_lock._conn = None
     dream_lock._in_flight.clear()
     dream_lock._last_scan.clear()
+    dream_lock._project_locks.clear()
     yield
     if dream_lock._conn is not None:
         dream_lock._conn.close()
         dream_lock._conn = None
 
 
-def test_last_at(tmp_path):
+def test_last_at_records_snapshot_ts(tmp_path):
     proj = tmp_path / "proj"
     assert dream_lock.read_last_at(proj) == 0.0  # 空库
-    dream_lock.record_dream(proj, {})
-    assert dream_lock.read_last_at(proj) > 0
+    dream_lock.record_dream(proj, 1234.5)
+    assert dream_lock.read_last_at(proj) == 1234.5  # 写入的是快照时刻，原值取回
 
 
-def test_cursors_upsert_preserves_dormant(tmp_path):
-    """upsert：更新参与的会话游标，保留没参与的（核心 bug 修复——不再覆盖式误删）。"""
+def test_thread_dreamed_at_roundtrip(tmp_path):
     proj = tmp_path / "proj"
-    assert dream_lock.load_cursors(proj) == {}  # 空库
-    dream_lock.record_dream(proj, {"t1": 5, "t2": 3})
-    assert dream_lock.load_cursors(proj) == {"t1": 5, "t2": 3}
-    # 这轮只 t1 参与 → 只更新 t1；t2（dormant 会话）游标必须保留，否则它下次活动时旧消息污染
-    dream_lock.record_dream(proj, {"t1": 7})
-    assert dream_lock.load_cursors(proj) == {"t1": 7, "t2": 3}
+    assert dream_lock.read_thread_dreamed_at(proj, "feishu-a") == 0.0  # 空库
+    dream_lock.record_thread_dream(proj, "feishu-a", 100.0)
+    dream_lock.record_thread_dream(proj, "feishu-b", 200.0)
+    assert dream_lock.read_thread_dreamed_at(proj, "feishu-a") == 100.0
+    assert dream_lock.read_thread_dreamed_at(proj, "feishu-b") == 200.0
+    # 同 thread 重写覆盖
+    dream_lock.record_thread_dream(proj, "feishu-a", 300.0)
+    assert dream_lock.read_thread_dreamed_at(proj, "feishu-a") == 300.0
 
 
 def test_per_project_isolation(tmp_path):
     a, b = tmp_path / "a", tmp_path / "b"
-    dream_lock.record_dream(a, {"t": 1})
-    assert dream_lock.load_cursors(b) == {}  # 别的 project 互不影响
-    assert dream_lock.read_last_at(b) == 0.0
+    dream_lock.record_dream(a, 1.0)
+    dream_lock.record_thread_dream(a, "t", 2.0)
+    assert dream_lock.read_last_at(b) == 0.0  # 别的 project 互不影响
+    assert dream_lock.read_thread_dreamed_at(b, "t") == 0.0
 
 
 def test_in_flight():
@@ -56,6 +59,16 @@ def test_in_flight():
     dream_lock.mark_in_flight(proj)
     assert dream_lock.is_in_flight(proj)
     dream_lock.clear_in_flight(proj)
+    assert not dream_lock.is_in_flight(proj)
+
+
+async def test_in_flight_reflects_project_lock():
+    """project_lock 被持有时 is_in_flight 也为真——门控/快返对「正在跑」同样生效。"""
+    proj = Path("/proj-y")
+    lock = dream_lock.project_lock(proj)
+    assert dream_lock.project_lock(proj) is lock  # 同 project 恒同一把锁
+    async with lock:
+        assert dream_lock.is_in_flight(proj)
     assert not dream_lock.is_in_flight(proj)
 
 

@@ -237,9 +237,9 @@ class AutoDreamConfig(BaseModel):
     min_hours: float = Field(
         default=24.0, description="距上次 dream 的最小间隔（小时，可小数，便于测试）"
     )
-    min_human_messages: int = Field(
-        default=10,
-        description="自上次 dream 以来需积累的最小真实 human message 数（按 per-会话游标算增量，排除注入）",
+    min_sessions: int = Field(
+        default=3,
+        description="自上次 dream 以来需活跃的最小会话数（不含当前会话）",
     )
 
 

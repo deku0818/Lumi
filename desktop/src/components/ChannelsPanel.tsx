@@ -53,6 +53,9 @@ const emptyFeishu = (): FeishuConfig => ({
   group_policy: 'mention',
   tool_mode: 'auto',
   workspace: '',
+  daily_dream_enabled: false,
+  daily_dream_time: '03:00',
+  summary_max_concurrency: 3,
 })
 
 // 渠道面板（设置 → 渠道）。列表视图：各 IM 渠道卡片（状态灯 + 开关 + 编辑）；
@@ -282,6 +285,8 @@ function FeishuForm({
         </Labeled>
 
         <WorkspacePicker gw={gw} value={cfg.workspace} onChange={(v) => set({ workspace: v })} />
+
+        <DailyDreamSection cfg={cfg} set={set} />
       </div>
 
       <div className="flex items-center gap-3 mt-6 pt-4 border-t border-line/30">
@@ -291,6 +296,70 @@ function FeishuForm({
         </Button>
         <TestBadge test={test} />
       </div>
+    </div>
+  )
+}
+
+// 每日记忆整理（Dream）：开关 + 时间 + summary 最大并发。关时只留标题行（时间/并发隐藏）。
+function DailyDreamSection({
+  cfg,
+  set,
+}: {
+  cfg: FeishuConfig
+  set: (patch: Partial<FeishuConfig>) => void
+}) {
+  return (
+    <div className="rounded-lg border border-primary/30 bg-primary/5 overflow-hidden">
+      <div className="flex items-center gap-3 px-4 py-3.5">
+        <div className="grid place-items-center w-8 h-8 rounded-lg bg-surface border border-line text-base">
+          🌙
+        </div>
+        <div className="flex-1 min-w-0">
+          <div className="font-medium">每日记忆整理（Dream）</div>
+          <div className="text-[11px] text-muted-foreground mt-0.5">
+            到点自动沉淀记忆 + 压缩会话，长会话不再无限膨胀
+          </div>
+        </div>
+        <Switch
+          checked={cfg.daily_dream_enabled}
+          onCheckedChange={(on) => set({ daily_dream_enabled: on })}
+        />
+      </div>
+      {cfg.daily_dream_enabled && (
+        <div className="flex flex-wrap gap-6 px-4 pb-4 pt-1">
+          <div>
+            <div className="text-xs text-muted-foreground mb-1.5">执行时间（每天）</div>
+            <input
+              type="time"
+              value={cfg.daily_dream_time}
+              onChange={(e) => set({ daily_dream_time: e.target.value })}
+              className="bg-surface border border-line rounded-lg px-3 py-2 text-sm text-ink outline-none focus:border-primary focus:ring-2 focus:ring-primary/20 transition"
+            />
+            <div className="text-[11px] text-muted-foreground mt-1.5">建议选低峰时段</div>
+          </div>
+          <div>
+            <div className="text-xs text-muted-foreground mb-1.5">Summary 最大并发</div>
+            <input
+              type="number"
+              min={1}
+              max={8}
+              value={cfg.summary_max_concurrency}
+              onChange={(e) =>
+                set({
+                  summary_max_concurrency: Math.min(
+                    8,
+                    Math.max(1, Number(e.target.value) || 1),
+                  ),
+                })
+              }
+              className="w-20 bg-surface border border-line rounded-lg px-3 py-2 text-sm text-ink outline-none focus:border-primary focus:ring-2 focus:ring-primary/20 transition"
+            />
+            <div className="text-[11px] text-muted-foreground mt-1.5">
+              限流防接口 429；dream 恒串行
+            </div>
+          </div>
+        </div>
+      )}
     </div>
   )
 }

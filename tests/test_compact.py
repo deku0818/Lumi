@@ -8,15 +8,23 @@ from __future__ import annotations
 from unittest.mock import AsyncMock
 
 import pytest
-from langchain_core.messages import AIMessage, HumanMessage, ToolMessage
+from langchain_core.messages import (
+    AIMessage,
+    HumanMessage,
+    RemoveMessage,
+    SystemMessage,
+    ToolMessage,
+)
 
 from lumi.agents.core.preprocessing import compact
 from lumi.agents.core.preprocessing.compact import (
+    build_compacted_update,
     clear_all_circuits,
     is_circuit_open,
     is_ptl_error,
     record_circuit_failure,
     reset_circuit,
+    select_for_compaction,
     split_into_rounds,
     strip_images_from_messages,
     summarize_with_ptl_retry,
@@ -233,10 +241,9 @@ async def test_summarizer_injects_summary_not_context(monkeypatch):
     with (
         patch.object(nodes, "get_config", return_value=fake_config),
         patch.object(nodes, "context_window_tokens", return_value=10**9),
-        patch.object(nodes, "tool_call_chain", return_value=object()),
         patch.object(
             nodes,
-            "summarize_with_ptl_retry",
+            "run_summary",
             new=AsyncMock(return_value=("SUMMARY_TEXT", 0)),
         ),
     ):
@@ -250,3 +257,83 @@ async def test_summarizer_injects_summary_not_context(monkeypatch):
     assert (
         "system-reminder" not in text
     )  # 上下文 reminder 不在压缩消息里（交给 call_model）
+
+
+# ---------------------------------------------------------------------------
+# 离线强制压缩：消息重写纯函数（不跑摘要链、不碰 checkpoint）
+# ---------------------------------------------------------------------------
+
+
+def _conversation(pairs: int) -> list:
+    """[System, H0, A0, H1, A1, …]，末条恒为干净 AIMessage。"""
+    msgs: list = [SystemMessage(content="sys", id="s")]
+    for i in range(pairs):
+        msgs.append(HumanMessage(content=f"h{i}", id=f"h{i}"))
+        msgs.append(AIMessage(content=f"a{i}", id=f"a{i}"))
+    return msgs
+
+
+def test_select_compacts_small_conversation():
+    # 无大小门：哪怕只有一轮（body=[Human, AI]）也压
+    selected = select_for_compaction(_conversation(1))
+    assert selected is not None
+    to_summarize, last = selected
+    assert [m.content for m in to_summarize] == ["h0"]
+    assert last.content == "a0"
+
+
+def test_select_skips_when_nothing_to_summarize():
+    # body 仅剩末条 AI（无可压消息）→ 不白跑摘要
+    assert (
+        select_for_compaction(
+            [SystemMessage(content="s", id="s"), AIMessage(content="a", id="a")]
+        )
+        is None
+    )
+
+
+def test_select_skips_when_last_is_human():
+    msgs = _conversation(5)
+    msgs.append(HumanMessage(content="pending", id="pending"))
+    assert select_for_compaction(msgs) is None
+
+
+def test_select_skips_when_last_ai_has_tool_calls():
+    msgs = _conversation(5)
+    msgs[-1] = AIMessage(
+        content="calling",
+        id="a4",
+        tool_calls=[{"name": "read", "args": {}, "id": "t1"}],
+    )
+    assert select_for_compaction(msgs) is None
+
+
+def test_select_returns_body_and_last_ai():
+    msgs = _conversation(5)  # 1 system + 10 body
+    selected = select_for_compaction(msgs)
+    assert selected is not None
+    to_summarize, last = selected
+    assert len(to_summarize) == 9  # body[:-1]
+    assert isinstance(last, AIMessage) and last.content == "a4"
+
+
+def test_build_update_removes_body_keeps_head_and_ends_on_ai():
+    msgs = _conversation(5)
+    to_summarize, last = select_for_compaction(msgs)
+    update = build_compacted_update(to_summarize, last, "浓缩摘要")
+
+    out = update["messages"]
+    removes = [m for m in out if isinstance(m, RemoveMessage)]
+    additions = [m for m in out if not isinstance(m, RemoveMessage)]
+
+    # 整段 body（含末条 AI）都被删；头部 System 未被删
+    removed_ids = {m.id for m in removes}
+    assert removed_ids == {f"h{i}" for i in range(5)} | {f"a{i}" for i in range(5)}
+    assert "s" not in removed_ids
+
+    # 追加恰为 [Human(<summary>), AI(末条副本)]——末条恒为 AI，绝不产生尾部相邻 Human
+    assert len(additions) == 2
+    assert isinstance(additions[0], HumanMessage)
+    assert "浓缩摘要" in additions[0].content
+    assert isinstance(additions[1], AIMessage)
+    assert additions[1].content == "a4"

@@ -12,12 +12,27 @@ DNS-1035 规范要求:
 import re
 from uuid import uuid4
 
+from lumi.utils.constants import FEISHU_THREAD_PREFIX
+
 # DNS-1035 正则表达式
 DNS_1035_PATTERN = re.compile(r"^[a-z][a-z0-9-]*[a-z0-9]$|^[a-z]$")
 MAX_LENGTH = 63
 
 # cron 执行会话的 thread 前缀：scheduler 生成、session_store 过滤共用此单一定义
 CRON_THREAD_PREFIX = "cron"
+
+# IM 渠道常驻会话的 thread 前缀（未来新增渠道在此登记）
+_CHANNEL_THREAD_PREFIXES = (FEISHU_THREAD_PREFIX,)
+
+
+def is_channel_thread(thread_id: str) -> bool:
+    """是否是 IM 渠道的常驻长会话 thread（feishu 等，未来企微）。
+
+    渠道会话是「一群 / 一人一个永久 thread」，与 desktop 短会话本质不同——增量式门控
+    （N 个新会话等）对它无意义，dream / 维护逻辑据此分流。新增渠道只需在
+    ``_CHANNEL_THREAD_PREFIXES`` 登记前缀，各处判定自动跟上。
+    """
+    return thread_id.startswith(_CHANNEL_THREAD_PREFIXES)
 
 
 class InvalidThreadIdError(ValueError):

@@ -17,10 +17,7 @@ from dataclasses import dataclass
 from datetime import UTC, datetime
 from typing import TYPE_CHECKING, Any
 
-from lumi.sessions.message_visibility import (
-    count_human_messages,
-    should_show_human_message,
-)
+from lumi.sessions.message_visibility import should_show_human_message
 from lumi.sessions.text_cleaning import extract_display_text
 from lumi.utils.logger import logger
 from lumi.utils.thread_id import CRON_THREAD_PREFIX
@@ -46,8 +43,6 @@ class SessionSummary:
     created_at: datetime
     message_count: int
     workspace_dir: str = ""
-    human_count: int = 0
-    """真实用户消息数（排除 meta/reminder 注入）——dream 的 human 门据此算增量。"""
 
     @property
     def display_time(self) -> str:
@@ -241,23 +236,23 @@ def _cache_get(thread_id: str, checkpoint_id: str) -> SessionSummary | None:
 
 
 def _summary_from_snapshot(thread_id: str, snapshot: Any) -> SessionSummary | None:
-    """从 StateSnapshot 构造 SessionSummary；无有效用户消息时返回 None"""
+    """从 StateSnapshot 构造 SessionSummary；无任何消息时返回 None。
+
+    取不到首条用户消息**不再**丢弃会话（``first_message`` 留空）——压缩后的会话首条
+    真实 human 可能已被并入摘要，此时仍是一个有内容的会话，标题由上层 meta（手动
+    title / IM channel_title / 生成标题）兜住，不应从列表消失。
+    """
     if not snapshot or not snapshot.values:
         return None
     messages = snapshot.values.get("messages", [])
     if not messages:
         return None
-    first_msg = _extract_first_human_message(messages)
-    if not first_msg:
-        return None
     return SessionSummary(
         thread_id=thread_id,
-        first_message=first_msg,
+        first_message=_extract_first_human_message(messages),
         # StateSnapshot.created_at 是 ISO 8601 字符串
         created_at=_parse_created_at(snapshot.created_at),
         message_count=len(messages),
-        # 搭这趟遍历的便车数真实 human（dream human 门用），零额外 aget_state
-        human_count=count_human_messages(messages),
         # checkpoint 元数据里的项目目录；跨项目列表时供前端分组
         workspace_dir=(snapshot.metadata or {}).get("workspace_dir", ""),
     )

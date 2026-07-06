@@ -745,6 +745,8 @@ export default function App() {
                       ...(s[targetKey] ?? emptySession()),
                       items: r.items.map(restore),
                       running: !!ev.payload.running,
+                      // 还原上下文用量指示器：usage 仅存前端内存，切会话/重启后靠历史末条补回
+                      ctx: ctxFromUsage(r.usage) ?? s[targetKey]?.ctx,
                     },
                   }))
                   resolve(targetKey)
@@ -894,7 +896,16 @@ export default function App() {
       ?.loadHistory(threadId)
       .then((r) =>
         setStore((s) =>
-          s[key] ? { ...s, [key]: { ...s[key], items: r.items.map(restore) } } : s,
+          s[key]
+            ? {
+                ...s,
+                [key]: {
+                  ...s[key],
+                  items: r.items.map(restore),
+                  ctx: ctxFromUsage(r.usage) ?? s[key].ctx,
+                },
+              }
+            : s,
         ),
       )
       .catch(() => {})

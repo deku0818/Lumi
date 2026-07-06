@@ -28,12 +28,11 @@ from lumi.agents.core.preprocessing.compact import (
     is_circuit_open,
     record_circuit_failure,
     reset_circuit,
-    strip_images_from_messages,
-    summarize_with_ptl_retry,
+    run_summary,
 )
 from lumi.agents.core.preprocessing.summary import inject_summary_into_message
 from lumi.agents.core.preprocessing.turn_context import build_turn_context
-from lumi.agents.core.response import extract_ainvoke_content, message_transform
+from lumi.agents.core.response import message_transform
 from lumi.agents.core.state import LumiAgentContext, LumiAgentState
 from lumi.agents.core.structured_tool import (
     MAX_CONSECUTIVE_FAILURES,
@@ -667,20 +666,13 @@ async def summarizer(
             "请在 .lumi/prompts/SUMMARY.md 中配置摘要提示词。"
         )
 
-    # 缓存安全的分叉：与主对话相同的 system_prompt + tools 前缀复用 Prompt Caching；
-    # 传入 tools 仅为保持缓存前缀，摘要本身不需要工具调用。strip 图像防 summary 撞 PTL。
-    cleaned = strip_images_from_messages(messages_to_summarize)
-    chain = tool_call_chain(
-        runtime.context.tools,
-        system_prompt=runtime.context.system_prompt,
-        model_name=runtime.context.model_name,
-        streaming=False,
-    )
     try:
-        raw_content, ptl_retries = await summarize_with_ptl_retry(
-            cleaned,
+        summary_text, ptl_retries = await run_summary(
+            messages_to_summarize,
             prompt,
-            chain,
+            tools=runtime.context.tools,
+            system_prompt=runtime.context.system_prompt,
+            model_name=runtime.context.model_name,
             max_retry=token_config.summary_ptl_retry_max,
             drop_ratio=token_config.summary_ptl_retry_drop_ratio,
         )
@@ -696,7 +688,6 @@ async def summarizer(
         )
         raise
     reset_circuit(thread_id)
-    summary_text = extract_ainvoke_content(raw_content)
     logger.info(
         f"[Summarizer] 压缩完成，{len(summarized_ids)} 条消息，PTL 重试 {ptl_retries} 次"
     )

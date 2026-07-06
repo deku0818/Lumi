@@ -14,6 +14,7 @@ import type {
   RpcMethod,
   SessionMeta,
   SlashCommand,
+  Usage,
   WireEvent,
 } from './types'
 
@@ -297,9 +298,10 @@ export class Gateway {
     }>('switch_session', { thread_id: threadId, workspace })
   }
 
-  loadHistory(threadId: string): Promise<{ items: HistoryItem[] }> {
+  loadHistory(threadId: string): Promise<{ items: HistoryItem[]; usage?: Usage }> {
     return this.request<{
       items: HistoryItem[]
+      usage?: Usage
     }>('load_history', { thread_id: threadId })
   }
 

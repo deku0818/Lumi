@@ -22,6 +22,7 @@ from typing import Any
 
 from lumi.gateway.channels.config import FeishuChannelConfig
 from lumi.gateway.channels.feishu.bridge_pool import BridgePool
+from lumi.gateway.channels.feishu.daily_dream import daily_dream_loop
 from lumi.gateway.channels.feishu.directory import FeishuDirectory
 from lumi.gateway.channels.feishu.inbound import FeishuInbound
 from lumi.gateway.channels.feishu.lark_call import lark_call
@@ -73,6 +74,7 @@ class FeishuChannel:
         self._bot_open_id: str | None = None
         self._warmup_task: asyncio.Task | None = None  # 持引用防 GC，stop() 取消
         self._notify_task: asyncio.Task | None = None  # 后台任务完成通知轮询
+        self._dream_task: asyncio.Task | None = None  # 每日记忆整理循环
         self._running = False
         self._error: str | None = (
             None  # 启动失败原因（未装 lark / 缺凭证 / 异常）→ UI 状态灯
@@ -169,6 +171,9 @@ class FeishuChannel:
                 logger.info(f"Feishu bot open_id: {self._bot_open_id}")
             self.streaming.start_cleanup()
             self._notify_task = asyncio.create_task(self.inbound.notification_loop())
+            self._dream_task = asyncio.create_task(
+                daily_dream_loop(self.bridge_pool, self.config, self.name)
+            )
             # 后台预热成员/群名缓存：best-effort、不阻断启动（失败只记 warning）。
             # 存引用防止被 GC 中途销毁（事件循环只持弱引用），stop() 时取消。
             self._warmup_task = asyncio.create_task(self._directory.warmup())
@@ -259,6 +264,9 @@ class FeishuChannel:
         if self._warmup_task is not None:
             self._warmup_task.cancel()  # 预热未完则中止，避免孤儿任务在将停的 loop 上跑
             self._warmup_task = None
+        if self._dream_task is not None:
+            self._dream_task.cancel()  # 每日整理循环随传输停止而中止
+            self._dream_task = None
         if self._ws_client is not None:
             with suppress(Exception):
                 self._ws_client._auto_reconnect = False  # 断连后不再自动重连

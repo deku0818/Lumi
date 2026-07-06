@@ -1,5 +1,18 @@
 # Changelog
 
+## [0.2.29] - 2026-07-06
+
+### Added
+- **IM 长会话每日记忆整理**（`channels/feishu/daily_dream.py`）— 渠道到点对有新消息的常驻会话两阶段维护：先串行 dream 沉淀记忆（per-thread 运行锁 + 忙线程整批重试 3×180s），再并发限流 summary 压缩历史（`Semaphore` 防 429），让一群/一人一个的永久会话不无限膨胀。**次序不变量：dream 失败绝不压缩**——成功与否以快照时刻是否推进为准（bg-task 吞异常，返回值不可信），失败留到明天重试，未沉淀的历史不会被压掉。渠道 thread（`is_channel_thread` 前缀判定）同时退出 Stop 钩子的增量 dream。desktop 渠道设置新增 Dream 开关 / 执行时间 / Summary 并发配置
+- **离线强制压缩 + `/compact` 命令** — `AgentBridge.compact_thread` 复用 summarizer 压缩核（`run_summary`）对空闲会话主动压缩：删除整段历史、重建为「摘要载体 + 末条 AI 副本」，经 `aupdate_state(as_node="CallModel")` 写回、全程不外泄到前端流。`/compact` 两端可用；末条副本刻意不带 usage（防压缩后误判仍超阈值）、摘要载体刻意不带 ts（防判活误报）
+- **`/dream-session` 命令（仅 IM）** — 只综合当前永久会话的手动 dream；dream 系按载体分流：desktop 只见 `/dream`、IM 只见 `/dream-session`。飞书 `/help` 卡片将 system 类命令归入「会话控制」组不再混进技能组
+- **desktop 上下文用量指示器还原** — `load_history` 随 items 返回末条 AI 的 usage，切会话/重启后指示器不再等下一轮才恢复
+
+### Changed
+- **dream 门控重构：计数游标 → 时间戳/会话数** — 旧「human 计数游标」与离线压缩互相打架（压缩后计数低于游标，dream 永不再触发）。现 desktop 短会话门 = 自上次 dream 以来活跃的其他会话数 ≥ `auto_dream.min_sessions`（新配置，默认 3；`min_human_messages` 删除）；IM 长会话判活 = 存在落库 ts 晚于该 thread 上次 dream 快照时刻的真实 human（`latest_human_ts`，压缩免疫）。成功后写回**快照时刻**而非完成时刻（dream 后台跑时新到的消息不被误判为已综合）；`dream_cursor` 表退役、`SessionSummary.human_count` / `count_human_messages` 删除
+- **dream 互斥下沉到共享底座** — per-project `asyncio.Lock`（`dream_lock.project_lock`）移进 `_run_dream_fork` 内部，四个入口（Stop 钩子 / `/dream` / `/dream-session` / 每日定时）都绕不开，MEMORY.md 恒单写者；`_in_flight` 集合降级为手动命令入口的同步快返 UX
+- **压缩后会话不再从列表消失** — `_summary_from_snapshot` 取不到首条 human（已并入摘要）时不再丢弃会话，`first_message` 留空、标题由上层 meta 兜住
+
 ## [0.2.28] - 2026-07-04
 
 ### Changed

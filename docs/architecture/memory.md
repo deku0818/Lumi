@@ -106,9 +106,9 @@
 2. **低成本门控**（return 早，全在导出/fork 之前，per-project）：
    - 时间门：距上次 dream（sqlite `dream_meta.last_at`）≥ `min_hours`（挡住绝大多数 stop，把下面的 DB 查挡在 hot path 之外）
    - 扫描节流：进程内 `_last_scan`，时间门长期满足时 10 分钟内不重复查 DB
-   - **human 门**（替代旧的会话个数门）：`list_sessions(workspace=project)` 筛 `created_at > lastAt` 的 recent，按 **per-会话游标**算「自上次 dream 以来新增的真实 human 数」`Σ max(0, 当前human − 游标)` ≥ `min_human_messages`。只数游标之后的新增——老会话旧消息不再撑过门（`SessionSummary.human_count` 搭 `list_sessions` 遍历便车、零额外 IO；`count_human_messages` 排除 meta/reminder）
-   - 并发锁：进程内 `_in_flight`（per-project key）
-3. **达标 → 跑 dream；成功后 `record_dream`**：一个事务原子更新 `dream_meta.last_at` + `dream_cursor` 游标（`INSERT OR REPLACE` upsert，保留 dormant 会话游标——不覆盖式误删）。
+   - **会话门**：`list_sessions(workspace=project)` 筛 `created_at > lastAt`（最新 checkpoint 时间 = 最后活动时间）的 recent，`len(recent) ≥ min_sessions`。老会话有新活动同样计入；不数消息、无游标——compact 增删历史不影响判定
+   - 并发锁：进程内 `_in_flight`（入口同步快返）+ per-project `asyncio.Lock`（`project_lock`，正确性互斥，见下）
+3. **达标 → 跑 dream；成功后 `record_dream`** 写回本次**快照时刻**（dream 后台跑时新到的消息不在快照内，记快照时刻才不会误判为已综合）。IM 长会话另有 per-thread 的 `dream_thread.dreamed_at`（`record_thread_dream`），判活 = 存在落库 ts（`additional_kwargs["lumi"]["ts"]`）晚于它的真实 human。
 4. **导出其他近期会话为 text** → 临时 `transcriptDir`。扁平一行一消息（`[user]/[assistant]/[tool:X]`，换行折叠），**复用 `lumi/sessions/message_text`**。**当前会话不导**（靠完整 message 进 dream）。
 5. **fork 当前主 agent → dream agent**：
    - system prompt = 主 agent **同一份**（`enable_memory=True`，记忆指令照常注入）—— **切病根①**
@@ -153,7 +153,13 @@
 
 ## 配置（`auto_dream`）
 
-`enabled`（默认 **False**，opt-in）/ `min_hours`（24）/ `min_human_messages`（10，自上次 dream 以来按 per-会话游标算的新增真实 human 数）。均可配置。
+`enabled`（默认 **False**，opt-in）/ `min_hours`（24）/ `min_sessions`（3，自上次 dream 以来活跃的其他会话数）。均可配置。
+
+## Dream 互斥
+
+所有 dream（Stop 钩子 / `/dream` / `/dream-session` / IM 每日定时）都经唯一底座 `_run_dream_fork`，其内部持 per-project `dream_lock.project_lock`（`asyncio.Lock`）跑完整个综合——同一份 MEMORY.md 恒只有一个写者，**任何入口都绕不开**；迟到者原地排队。`_in_flight` 集合降级为入口层 UX：手动命令的同步快返（"已有一次整理在进行中"），堵 fire-and-forget 的 create_task 与任务实际拿锁之间的空窗。
+
+IM 每日整理另有「先沉淀再压缩、dream 失败绝不压缩」的次序不变量与摘要载体不带 ts 的设计权衡，见 `feishu.md`《每日记忆整理》。
 
 ## 旧基建复用清单
 

@@ -61,6 +61,29 @@ bridge 据 `event.metadata.langgraph_node == "Summarizer"` 拦截该节点的 `o
 
 前端（`desktop/src/App.tsx`）据此把会话切到 `compacting` 状态，`StatusIndicator` 显示「正在压缩对话…」，并在 `turn.complete` / `error` 兜底清除。事件名 `compaction.status` 由 `protocol/events.json` 单一事实源定义。
 
+## 离线强制压缩（/compact · IM 每日整理）
+
+Summarizer 节点只在「即将溢出的当轮」工作；对**空闲会话**的主动压缩走另一条离线入口
+（`compact.py` 文件末尾 + `AgentBridge.compact_thread`），供 `/compact` 命令（两端可用）与
+IM 每日整理的 summary 阶段调用：
+
+- **共用压缩核**：`run_summary`（strip 图 → 缓存安全 tool_call_chain → PTL 截头重试 → 提取
+  文本）被节点与离线入口共用；离线绕开节点专属的阈值门 / 熔断器 / 「末条必须 Human」不变量。
+- **判定**（`select_for_compaction`）：不设大小门，仅两条结构性前提——末条须是无 tool_calls
+  的干净 AIMessage（= 已完成一轮的空闲会话），且末条之外至少有一条可删消息。
+- **写回**（`build_compacted_update` → `aupdate_state(..., as_node="CallModel")`）：删除整段
+  body（含末条 AI），按序追加 `[Human(<summary>), AI(末条副本)]`——`add_messages` 按序追加，
+  末条恒为 AI。头部 SystemMessage 不动。`as_node` 显式指定，不依赖 LangGraph 从末次
+  checkpoint 推断写入者。
+- **两个刻意的"不带"**：末条 AI 副本**不带 usage_metadata**——`context_window_tokens` 无
+  usage 锚点时退化为字节估算，压缩后不会因旧 usage 误判仍超阈值；摘要载体 Human **不带
+  lumi ts**——IM 每日整理的判活（`latest_human_ts`）不会把"压缩过但无人说话"的会话误判为
+  有新内容（连带要求 dream 失败必须挡住压缩，见 `feishu.md`《每日记忆整理》）。
+- **不外泄**：全程不经 `astream_events`，不会流到渠道/前端；`/compact` 只回一条结果消息。
+
+压缩后首条真实 human 可能已并入摘要，`session_store._summary_from_snapshot` 不再因取不到
+首条 human 丢弃会话（`first_message` 留空，标题由上层 meta 兜住）。
+
 ## 设计要点
 
 - **当轮受益**：压缩在关键路径上、即将溢出的这次调用就用上压缩结果，不滞后一轮。

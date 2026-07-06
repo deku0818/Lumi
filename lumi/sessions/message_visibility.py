@@ -9,6 +9,7 @@ from __future__ import annotations
 from langchain_core.messages import HumanMessage
 
 from lumi.agents.core.meta_message import is_meta_message
+from lumi.utils.constants import LUMI_META_KEY
 
 
 def should_show_human_message(msg: object) -> bool:
@@ -34,11 +35,20 @@ def _is_human_message(m: object) -> bool:
     return isinstance(m, dict) and m.get("type") == "human"
 
 
-def count_human_messages(messages: list) -> int:
-    """数真实用户消息数（human 类型且非 meta/reminder 注入）。
+def latest_human_ts(messages: list) -> float:
+    """真实用户消息（非 meta 注入）的最新落库时刻，epoch 秒；一条带 ts 的都没有返 0.0。
 
-    供 dream 的 human 门度量「内容量」——排除工具/系统生成的 meta HumanMessage。
+    ts 由 ``stream_response`` 落库时写入 ``additional_kwargs["lumi"]["ts"]``（本机时钟、
+    毫秒）。供 dream 判定「自上次综合以来有无新内容」——基于时间戳而非消息计数，
+    compact 增删历史不影响判定（压缩载体无 ts，天然不计）。
     """
-    return sum(
-        1 for m in messages if _is_human_message(m) and should_show_human_message(m)
-    )
+    latest = 0
+    for m in messages:
+        if not (_is_human_message(m) and should_show_human_message(m)):
+            continue
+        if isinstance(m, dict):
+            kwargs = m.get("additional_kwargs") or {}
+        else:
+            kwargs = getattr(m, "additional_kwargs", None) or {}
+        latest = max(latest, (kwargs.get(LUMI_META_KEY) or {}).get("ts", 0))
+    return latest / 1000

@@ -398,10 +398,42 @@ def test_help_markdown_groups_and_empty_skills():
     assert "技能命令" not in out2 and "---" not in out2 and "`/stop`" in out2
 
 
+def test_help_markdown_system_commands_not_under_skills():
+    # system 类命令（dream/compact 等）归「会话控制」，不混进「技能命令」
+    out = inb.help_markdown(
+        [
+            {"name": "commit", "description": "提交", "type": "skill"},
+            {"name": "dream", "description": "整理记忆", "type": "system"},
+            {"name": "compact", "description": "压缩历史", "type": "system"},
+        ]
+    )
+    skills_part, control_part = out.split("会话控制", 1)
+    assert "`/commit`" in skills_part
+    assert "`/dream`" not in skills_part and "`/compact`" not in skills_part
+    assert "`/dream`" in control_part and "`/compact`" in control_part
+    assert "`/stop`" in control_part  # 与渠道系统命令同组
+
+
 def test_help_line_truncates_long_and_multiline_description():
     assert inb._help_line("x", "第一行\n第二行") == "`/x` 第一行"
     long = inb._help_line("y", "很" * 80)
     assert long.endswith("…") and len(long) < 80
+
+
+def test_available_commands_split_by_surface():
+    # dream 系按载体分流：desktop 短会话只见 /dream，IM 长会话只见 /dream-session；
+    # /compact 两端恒有
+    from lumi.gateway.bridge.core import available_commands
+
+    desktop = {c["name"] for c in available_commands(True, channel=False)}
+    channel = {c["name"] for c in available_commands(True, channel=True)}
+    assert "dream" in desktop and "dream-session" not in desktop
+    assert "dream-session" in channel and "dream" not in channel
+    assert "compact" in desktop and "compact" in channel
+    # 无记忆会话两端都无 dream 系，/compact 仍在
+    plain = {c["name"] for c in available_commands(False)}
+    assert "dream" not in plain and "dream-session" not in plain
+    assert "compact" in plain
 
 
 async def test_help_lists_skill_and_system_commands(monkeypatch):
@@ -411,7 +443,9 @@ async def test_help_lists_skill_and_system_commands(monkeypatch):
     monkeypatch.setattr(
         inb,
         "available_commands",
-        lambda memory_enabled: [{"name": "commit", "description": "", "type": "skill"}],
+        lambda memory_enabled, channel=False: [
+            {"name": "commit", "description": "", "type": "skill"}
+        ],
     )
     await ch.inbound._run_system_command("help", "oc", "t", "m1")
     text, title = sent[0]
