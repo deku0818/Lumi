@@ -1,5 +1,21 @@
 # Changelog
 
+## [0.2.32] - 2026-07-06
+
+### Changed
+- **设置页整体重构，统一排版规范** — 新增 `desktop/src/components/SettingsKit.tsx` 共享排版原语（`Section`/`SectionGroup`/`Row`/`Field`/`TextInput`/`Card`/`SegmentedControl`/`FormModal`），四个面板（通用 / 模型 / 渠道 / 连接）统一标题字号、卡片、输入框、分段控件与段间距；删除各面板各自造的 `Row`/`Field`/`Labeled`/`Seg`/`Segmented`/`ModelChip` 等重复实现。手写按钮改走 `Button` 组件
+- **表单皆弹窗** — Provider / 飞书 / 远程机器的编辑与添加从「整页切换视图」改为次级 modal（`FormModal`），主面板只保留干净列表
+- **模型页去平铺** — Provider 列表只显示「名 · Base URL · 模型数」不再铺开模型 chip 墙；会话模型 / 会话标题模型 / 审批分类器模型三处用途收为「当前值 + 更改」行，共用一个模型选择弹窗（搜索 + 按 provider 分组 + 指针类含「跟随会话模型」）
+- **移除渠道连接状态灯** — 侧栏渠道组头与设置卡片上的 `.chan-orb` 黄点删除（含其 CSS），连接状态改用文字标签呈现（失败态文字转红并显示具体原因）
+
+### Fixed
+- **共享原语的样式覆盖失效** — `TextInput`/`Card`/`SegmentedControl`/`FormModal` 的 className 拼接改用 `cn`（clsx + tailwind-merge），调用方覆盖类（如模型行 `h-8` 覆盖 `inputClass` 的 `h-9`）正确生效
+- **段间距在部分面板错位** — `Section` 不再依赖 CSS `:first-child`（模型/渠道页 `MachineTabs` 在前时首段顶距不一致），段间距统一由 `SectionGroup` 的 `space-y-7` 提供
+- **同名模型未去重** — 保存 provider 时按名 `Set` 去重，杜绝模型选择弹窗里的重复 key 与双高亮
+
+### Performance
+- **ProviderForm 草稿改本地 state** — 编辑 provider 时键入不再 `setState` 到父级触发整个模型面板重渲染（与飞书 / 远程表单一致）
+
 ## [0.2.31] - 2026-07-06
 
 ### Fixed

@@ -1,6 +1,5 @@
 import { useCallback, useEffect, useState } from 'react'
 import {
-  ArrowLeft,
   Check,
   ChevronDown,
   Loader2,
@@ -17,6 +16,7 @@ import type { Gateway } from '../gateway'
 import { MachineTabs } from './MachineTabs'
 import { DirBrowser } from './DirBrowser'
 import { basename } from '@/lib/utils'
+import { Section, Card, Field, TextInput, SegmentedControl, FormModal } from './SettingsKit'
 import { Button } from '@/components/ui/button'
 import { Switch } from '@/components/ui/switch'
 import {
@@ -101,55 +101,57 @@ export function ChannelsPanel({
     save({ ...cfg, enabled: on })
   }
 
-  if (editing) {
-    return (
-      <FeishuForm
-        initial={editing}
-        gw={gw}
-        onCancel={() => setEditing(null)}
-        onSave={save}
-        onTest={(cfg) =>
-          gw?.testChannel('feishu', cfg) ?? Promise.resolve({ ok: false, error: '未连接' })
-        }
-      />
-    )
-  }
-
   return (
     <div>
-      <div className="flex items-center justify-between mb-4">
-        <h3 className="text-base font-medium">渠道</h3>
-        <MachineTabs machines={machines} value={machine} onChange={setMachine} />
-      </div>
-      <p className="text-xs text-muted-foreground mb-5">
-        把 Lumi 接入飞书等 IM。凭证存该机器的 <code>~/.lumi/channels.json</code>（限本人可读），
-        保存后实时重连。全程 AI 审批，仅保留 ask 询问卡片。
-      </p>
+      <MachineTabs machines={machines} value={machine} onChange={setMachine} />
+      <Section
+        title="渠道"
+        desc={
+          <>
+            把 Lumi 接入飞书等 IM。凭证存该机器的 <code>~/.lumi/channels.json</code>（限本人可读），
+            保存后实时重连。全程 AI 审批，仅保留 ask 询问卡片。
+          </>
+        }
+      >
+        <div className="space-y-2">
+          {/* 飞书 */}
+          <ChannelCard
+            icon={<Send size={17} />}
+            title="飞书"
+            status={feishu?.status}
+            enabled={!!feishu?.enabled}
+            subtitle={feishuSubtitle(feishu)}
+            onToggle={toggleEnabled}
+            onEdit={() => setEditing(feishu?.config ?? emptyFeishu())}
+          />
 
-      {/* 飞书 */}
-      <ChannelCard
-        icon={<Send size={17} />}
-        title="飞书"
-        status={feishu?.status}
-        enabled={!!feishu?.enabled}
-        subtitle={feishuSubtitle(feishu)}
-        onToggle={toggleEnabled}
-        onEdit={() => setEditing(feishu?.config ?? emptyFeishu())}
-      />
+          {/* 企业微信（即将支持） */}
+          <Card className="flex items-center gap-3 opacity-55">
+            <div className="grid place-items-center w-9 h-9 rounded-lg bg-surface border border-line text-muted-foreground">
+              <Building2 size={17} />
+            </div>
+            <div className="flex-1 min-w-0">
+              <div className="font-medium">企业微信</div>
+              <div className="text-[11px] text-muted-foreground mt-0.5">即将支持</div>
+            </div>
+            <span className="text-[10.5px] px-2 py-0.5 rounded-full border border-separator text-muted-foreground">
+              即将支持
+            </span>
+          </Card>
+        </div>
+      </Section>
 
-      {/* 企业微信（即将支持） */}
-      <div className="flex items-center gap-3 px-4 py-3.5 rounded-lg border border-line/40 mb-2.5 opacity-55">
-        <div className="grid place-items-center w-9 h-9 rounded-lg bg-surface border border-line text-muted-foreground">
-          <Building2 size={17} />
-        </div>
-        <div className="flex-1 min-w-0">
-          <div className="font-medium">企业微信</div>
-          <div className="text-[11px] text-muted-foreground mt-0.5">即将支持</div>
-        </div>
-        <span className="text-[10.5px] px-2 py-0.5 rounded-full border border-separator text-muted-foreground">
-          即将支持
-        </span>
-      </div>
+      {editing && (
+        <FeishuForm
+          initial={editing}
+          gw={gw}
+          onCancel={() => setEditing(null)}
+          onSave={save}
+          onTest={(cfg) =>
+            gw?.testChannel('feishu', cfg) ?? Promise.resolve({ ok: false, error: '未连接' })
+          }
+        />
+      )}
     </div>
   )
 }
@@ -182,15 +184,18 @@ function ChannelCard({
   // error 态用后端给的具体原因（缺凭证 / 未装 lark…）替代泛化副标题
   const sub = state === 'error' && status?.detail ? status.detail : subtitle
   return (
-    <div className="flex items-center gap-3 px-4 py-3.5 rounded-lg border border-line bg-panel mb-2.5">
+    <Card className="flex items-center gap-3">
       <div className="grid place-items-center w-9 h-9 rounded-lg bg-surface border border-line text-ink">
         {icon}
       </div>
       <div className="flex-1 min-w-0">
         <div className="font-medium flex items-center gap-2">
           {title}
-          <span className={`chan-orb ${state}`} title={STATUS_LABEL[state]} />
-          <span className="text-[11px] text-muted-foreground font-normal">{STATUS_LABEL[state]}</span>
+          <span
+            className={`text-[11px] font-normal ${state === 'error' ? 'text-error' : 'text-muted-foreground'}`}
+          >
+            {STATUS_LABEL[state]}
+          </span>
         </div>
         <div
           className={`text-[11px] mt-0.5 truncate ${state === 'error' ? 'text-[var(--color-error)]' : 'text-muted-foreground'}`}
@@ -202,7 +207,7 @@ function ChannelCard({
       <Button variant="ghost" size="sm" onClick={onEdit} className="text-muted-foreground">
         编辑
       </Button>
-    </div>
+    </Card>
   )
 }
 
@@ -232,22 +237,32 @@ function FeishuForm({
 
   const allowAll = cfg.allow_from.includes('*')
 
+  const footer = (
+    <>
+      <Button variant="outline" onClick={runTest} disabled={test === 'testing'}>
+        测试连接
+      </Button>
+      <TestBadge test={test} />
+      <div className="flex-1" />
+      <Button variant="ghost" onClick={onCancel}>
+        取消
+      </Button>
+      <Button onClick={() => onSave(cfg)}>保存并重连</Button>
+    </>
+  )
+
   return (
-    <div>
-      <button
-        onClick={onCancel}
-        className="flex items-center gap-2 text-base font-medium text-ink/90 hover:text-ink transition mb-5"
-      >
-        <ArrowLeft size={17} className="shrink-0" />
-        飞书配置
-      </button>
-
+    <FormModal onClose={onCancel} title="飞书配置" footer={footer}>
       <div className="space-y-4">
-        <Field label="App ID" value={cfg.app_id} onChange={(v) => set({ app_id: v })} placeholder="cli_…" hint="支持 ${FEISHU_APP_ID} 引用环境变量" />
-        <Field label="App Secret" value={cfg.app_secret} onChange={(v) => set({ app_secret: v })} placeholder="●●●●" password hint="chmod 600 存 ~/.lumi/channels.json，不写入项目目录" />
+        <Field label="App ID" hint="支持 ${FEISHU_APP_ID} 引用环境变量">
+          <TextInput value={cfg.app_id} onChange={(e) => set({ app_id: e.target.value })} placeholder="cli_…" />
+        </Field>
+        <Field label="App Secret" hint="chmod 600 存 ~/.lumi/channels.json，不写入项目目录">
+          <TextInput password value={cfg.app_secret} onChange={(e) => set({ app_secret: e.target.value })} placeholder="●●●●" />
+        </Field>
 
-        <Labeled label="工具审批模式" hint="两种模式下泄漏的人工审批一律自动拒绝；仅保留 ask 询问卡片">
-          <Seg
+        <Field label="工具审批模式" hint="两种模式下泄漏的人工审批一律自动拒绝；仅保留 ask 询问卡片">
+          <SegmentedControl
             value={cfg.tool_mode}
             onChange={(v) => set({ tool_mode: v as FeishuConfig['tool_mode'] })}
             options={[
@@ -255,10 +270,10 @@ function FeishuForm({
               { val: 'privileged', label: '特权放行' },
             ]}
           />
-        </Labeled>
+        </Field>
 
-        <Labeled label="群消息策略">
-          <Seg
+        <Field label="群消息策略">
+          <SegmentedControl
             value={cfg.group_policy}
             onChange={(v) => set({ group_policy: v as FeishuConfig['group_policy'] })}
             options={[
@@ -266,37 +281,27 @@ function FeishuForm({
               { val: 'open', label: '响应全部' },
             ]}
           />
-        </Labeled>
+        </Field>
 
-        <Labeled label="可用成员（白名单）" hint={allowAll ? '所有人可用' : '仅列表内 open_id 可用；为空 = 全部拒绝'}>
-          <div>
-            <Seg
-              value={allowAll ? 'all' : 'list'}
-              onChange={(v) => set({ allow_from: v === 'all' ? ['*'] : [] })}
-              options={[
-                { val: 'all', label: '所有人' },
-                { val: 'list', label: '指定成员' },
-              ]}
-            />
-            {!allowAll && (
-              <ChipEditor values={cfg.allow_from} onChange={(vals) => set({ allow_from: vals })} />
-            )}
-          </div>
-        </Labeled>
+        <Field label="可用成员（白名单）" hint={allowAll ? '所有人可用' : '仅列表内 open_id 可用；为空 = 全部拒绝'}>
+          <SegmentedControl
+            value={allowAll ? 'all' : 'list'}
+            onChange={(v) => set({ allow_from: v === 'all' ? ['*'] : [] })}
+            options={[
+              { val: 'all', label: '所有人' },
+              { val: 'list', label: '指定成员' },
+            ]}
+          />
+          {!allowAll && (
+            <ChipEditor values={cfg.allow_from} onChange={(vals) => set({ allow_from: vals })} />
+          )}
+        </Field>
 
         <WorkspacePicker gw={gw} value={cfg.workspace} onChange={(v) => set({ workspace: v })} />
 
         <DailyDreamSection cfg={cfg} set={set} />
       </div>
-
-      <div className="flex items-center gap-3 mt-6 pt-4 border-t border-line/30">
-        <Button onClick={() => onSave(cfg)}>保存并重连</Button>
-        <Button variant="ghost" onClick={runTest} disabled={test === 'testing'}>
-          测试连接
-        </Button>
-        <TestBadge test={test} />
-      </div>
-    </div>
+    </FormModal>
   )
 }
 
@@ -309,7 +314,7 @@ function DailyDreamSection({
   set: (patch: Partial<FeishuConfig>) => void
 }) {
   return (
-    <div className="rounded-lg border border-primary/30 bg-primary/5 overflow-hidden">
+    <div className="rounded-xl border border-primary/30 bg-primary/5 overflow-hidden">
       <div className="flex items-center gap-3 px-4 py-3.5">
         <div className="grid place-items-center w-8 h-8 rounded-lg bg-surface border border-line text-base">
           🌙
@@ -326,20 +331,16 @@ function DailyDreamSection({
         />
       </div>
       {cfg.daily_dream_enabled && (
-        <div className="flex flex-wrap gap-6 px-4 pb-4 pt-1">
-          <div>
-            <div className="text-xs text-muted-foreground mb-1.5">执行时间（每天）</div>
-            <input
+        <div className="grid grid-cols-2 gap-4 px-4 pb-4 pt-1">
+          <Field label="执行时间（每天）" hint="建议选低峰时段">
+            <TextInput
               type="time"
               value={cfg.daily_dream_time}
               onChange={(e) => set({ daily_dream_time: e.target.value })}
-              className="bg-surface border border-line rounded-lg px-3 py-2 text-sm text-ink outline-none focus:border-primary focus:ring-2 focus:ring-primary/20 transition"
             />
-            <div className="text-[11px] text-muted-foreground mt-1.5">建议选低峰时段</div>
-          </div>
-          <div>
-            <div className="text-xs text-muted-foreground mb-1.5">Summary 最大并发</div>
-            <input
+          </Field>
+          <Field label="Summary 最大并发" hint="限流防接口 429；dream 恒串行">
+            <TextInput
               type="number"
               min={1}
               max={8}
@@ -352,12 +353,8 @@ function DailyDreamSection({
                   ),
                 })
               }
-              className="w-20 bg-surface border border-line rounded-lg px-3 py-2 text-sm text-ink outline-none focus:border-primary focus:ring-2 focus:ring-primary/20 transition"
             />
-            <div className="text-[11px] text-muted-foreground mt-1.5">
-              限流防接口 429；dream 恒串行
-            </div>
-          </div>
+          </Field>
         </div>
       )}
     </div>
@@ -382,45 +379,6 @@ function TestBadge({ test }: { test: TestState }) {
     <span className="flex items-center gap-1.5 text-xs text-[var(--color-error)]">
       <X size={13} /> {test.error || '连接失败'}
     </span>
-  )
-}
-
-// —— 小控件 ——
-function Labeled({ label, hint, children }: { label: string; hint?: string; children: React.ReactNode }) {
-  return (
-    <div>
-      <div className="text-xs text-muted-foreground mb-1.5">{label}</div>
-      {children}
-      {hint && <div className="text-[11px] text-muted-foreground mt-1.5">{hint}</div>}
-    </div>
-  )
-}
-
-function Field({
-  label,
-  value,
-  onChange,
-  placeholder,
-  password,
-  hint,
-}: {
-  label: string
-  value: string
-  onChange: (v: string) => void
-  placeholder?: string
-  password?: boolean
-  hint?: string
-}) {
-  return (
-    <Labeled label={label} hint={hint}>
-      <input
-        type={password ? 'password' : 'text'}
-        value={value}
-        placeholder={placeholder}
-        onChange={(e) => onChange(e.target.value)}
-        className="w-full bg-surface border border-line rounded-lg px-3 py-2 text-sm text-ink outline-none focus:border-primary focus:ring-2 focus:ring-primary/20 transition"
-      />
-    </Labeled>
   )
 }
 
@@ -475,7 +433,7 @@ function WorkspacePicker({
   }
 
   return (
-    <Labeled
+    <Field
       label="绑定项目"
       hint={value ? '飞书所有会话以此项目为工作目录' : '留空 = serve 进程当前目录（兜底，不推荐）'}
     >
@@ -564,7 +522,7 @@ function WorkspacePicker({
           </DialogFooter>
         </DialogContent>
       </Dialog>
-    </Labeled>
+    </Field>
   )
 }
 
@@ -581,35 +539,6 @@ function EmptyProjects({ onCreate }: { onCreate: () => void }) {
         <FolderPlus size={14} className="mr-1" />
         新建项目
       </Button>
-    </div>
-  )
-}
-
-function Seg<T extends string>({
-  value,
-  onChange,
-  options,
-}: {
-  value: string
-  onChange: (v: T) => void
-  options: { val: T; label: string }[]
-}) {
-  return (
-    <div className="inline-flex p-0.5 rounded-lg bg-canvas/60 border border-line/40">
-      {options.map((o) => {
-        const on = o.val === value
-        return (
-          <button
-            key={o.val}
-            onClick={() => onChange(o.val)}
-            className={`px-3 py-1.5 rounded-md text-sm transition ${
-              on ? 'bg-surface text-ink shadow-sm font-medium' : 'text-muted-foreground hover:text-ink'
-            }`}
-          >
-            {o.label}
-          </button>
-        )
-      })}
     </div>
   )
 }

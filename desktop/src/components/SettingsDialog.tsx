@@ -1,4 +1,4 @@
-import { SlidersHorizontal, Boxes, Server, Send, Monitor, Sun, Moon, Minus, Plus, type LucideIcon } from 'lucide-react'
+import { SlidersHorizontal, Boxes, Server, Send, Monitor, Sun, Moon, Minus, Plus } from 'lucide-react'
 import type { Gateway } from '../gateway'
 import type { ThemePref } from '../theme'
 import { type FontPref, DEFAULT_SIZE, MIN_SIZE, MAX_SIZE } from '../font'
@@ -7,6 +7,7 @@ import { ProvidersPanel } from './ProvidersPanel'
 import { ChannelsPanel } from './ChannelsPanel'
 import { BackendsPanel } from './BackendsPanel'
 import { FontPicker } from './FontPicker'
+import { Section, SectionGroup, Row, SegmentedControl, segmentShell } from './SettingsKit'
 import { Switch } from '@/components/ui/switch'
 import { Dialog, DialogContent, DialogTitle } from '@/components/ui/dialog'
 import { Tabs, TabsList, TabsTrigger, TabsContent } from '@/components/ui/tabs'
@@ -127,62 +128,44 @@ function GeneralPanel({
 }) {
   const { t } = useI18n()
   return (
-    <div>
-      <h3 className="text-base font-medium mb-2">{t('settings.preferences')}</h3>
-      <Row label={t('settings.appearance')}>
-        <Segmented
-          value={themePref}
-          onChange={setThemePref}
-          options={[
-            { val: 'system', icon: Monitor, title: t('settings.theme.system') },
-            { val: 'light', icon: Sun, title: t('settings.theme.light') },
-            { val: 'dark', icon: Moon, title: t('settings.theme.dark') },
-          ]}
-        />
-      </Row>
-      <Row label={t('settings.uiFont')} hint={t('settings.uiFontHint')}>
-        <FontPicker value={uiFont.family} onChange={(family) => setUiFont({ ...uiFont, family })} />
-      </Row>
-      <Row label={t('settings.fontSize')} hint={t('settings.fontSizeHint')}>
-        <SizeStepper value={uiFont.size} onChange={(size) => setUiFont({ ...uiFont, size })} />
-      </Row>
+    <SectionGroup>
+      <Section title={t('settings.preferences')}>
+        <Row label={t('settings.appearance')}>
+          <SegmentedControl
+            value={themePref}
+            onChange={setThemePref}
+            options={[
+              { val: 'system', icon: Monitor, title: t('settings.theme.system') },
+              { val: 'light', icon: Sun, title: t('settings.theme.light') },
+              { val: 'dark', icon: Moon, title: t('settings.theme.dark') },
+            ]}
+          />
+        </Row>
+        <Row label={t('settings.uiFont')} hint={t('settings.uiFontHint')}>
+          <FontPicker value={uiFont.family} onChange={(family) => setUiFont({ ...uiFont, family })} />
+        </Row>
+        <Row label={t('settings.fontSize')} hint={t('settings.fontSizeHint')}>
+          <SizeStepper value={uiFont.size} onChange={(size) => setUiFont({ ...uiFont, size })} />
+        </Row>
+      </Section>
 
-      <h3 className="text-base font-medium mt-7 mb-2">{t('settings.sessions')}</h3>
-      <Row label={t('settings.recentLimit')} hint={t('settings.recentLimitHint')}>
-        <RecentStepper value={recentLimit} onChange={setRecentLimit} />
-      </Row>
+      <Section title={t('settings.sessions')}>
+        <Row label={t('settings.recentLimit')} hint={t('settings.recentLimitHint')}>
+          <RecentStepper value={recentLimit} onChange={setRecentLimit} />
+        </Row>
+      </Section>
 
-      <h3 className="text-base font-medium mt-7 mb-2">{t('settings.notifications')}</h3>
-      <Row label={t('settings.respDone')} hint={t('settings.respDoneHint')}>
-        <Switch checked={notify} onCheckedChange={setNotify} />
-      </Row>
-    </div>
+      <Section title={t('settings.notifications')}>
+        <Row label={t('settings.respDone')} hint={t('settings.respDoneHint')}>
+          <Switch checked={notify} onCheckedChange={setNotify} />
+        </Row>
+      </Section>
+    </SectionGroup>
   )
 }
 
-function Row({
-  label,
-  hint,
-  children,
-}: {
-  label: string
-  hint?: string
-  children: React.ReactNode
-}) {
-  return (
-    <div className="flex items-center justify-between gap-4 py-3 border-b border-line/20">
-      <div className="min-w-0">
-        <div className="text-sm text-ink/90">{label}</div>
-        {hint && <div className="text-xs text-muted-foreground mt-0.5">{hint}</div>}
-      </div>
-      <div className="shrink-0">{children}</div>
-    </div>
-  )
-}
-
-
-// 内联药丸控件容器（分段控件 / 字号步进器共用）
-const PILL_WRAP = 'flex items-center gap-0.5 p-0.5 rounded-lg bg-canvas/60 border border-line/30'
+// 字号 / 条数步进器容器：复用 SegmentedControl 的药丸外壳（segmentShell），只加垂直居中，避免边框漂移
+const PILL_WRAP = `${segmentShell} items-center`
 const STEP_BTN =
   'flex items-center justify-center w-7 h-7 rounded-md text-muted-foreground hover:text-ink hover:bg-line/30 transition disabled:opacity-30 disabled:hover:bg-transparent'
 
@@ -240,38 +223,6 @@ function RecentStepper({ value, onChange }: { value: number; onChange: (n: numbe
       >
         <Plus size={14} />
       </button>
-    </div>
-  )
-}
-
-// 分段控件：图标或文字选项，选中态填充 surface。
-function Segmented<T extends string>({
-  value,
-  onChange,
-  options,
-}: {
-  value: T
-  onChange: (v: T) => void
-  options: { val: T; icon?: LucideIcon; label?: string; title?: string }[]
-}) {
-  return (
-    <div className={PILL_WRAP}>
-      {options.map((o) => {
-        const on = o.val === value
-        return (
-          <button
-            key={o.val}
-            onClick={() => onChange(o.val)}
-            title={o.title}
-            className={`flex items-center gap-1.5 px-2.5 py-1 rounded-md text-sm transition ${
-              on ? 'bg-surface text-ink shadow-sm' : 'text-muted-foreground hover:text-ink'
-            }`}
-          >
-            {o.icon && <o.icon size={15} className="shrink-0" />}
-            {o.label}
-          </button>
-        )
-      })}
     </div>
   )
 }

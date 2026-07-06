@@ -1,20 +1,18 @@
-import { useCallback, useEffect, useState, type ReactNode } from 'react'
+import { useCallback, useEffect, useState } from 'react'
 import {
   Check,
   Pencil,
   Trash2,
   Plus,
   Loader2,
-  ArrowLeft,
   HelpCircle,
-  Shield,
-  Type,
   X,
 } from 'lucide-react'
 import type { ActiveModel, ModelPointer, ProviderProfile } from '../types'
 import type { Gateway } from '../gateway'
 import { useI18n } from '../i18n'
 import { MachineTabs } from './MachineTabs'
+import { Section, SectionGroup, Card, Row, Field, TextInput, FormModal } from './SettingsKit'
 import { Tooltip, TooltipContent, TooltipTrigger } from '@/components/ui/tooltip'
 import { Button } from '@/components/ui/button'
 
@@ -60,7 +58,8 @@ export function ProvidersPanel({
   const [active, setActive] = useState<ActiveModel>({ provider: '', model: '' })
   const [classifier, setClassifier] = useState<ModelPointer>({})
   const [titler, setTitler] = useState<ModelPointer>({})
-  const [form, setForm] = useState<Form | null>(null) // null = 列表视图
+  const [form, setForm] = useState<Form | null>(null) // null = 关闭 provider 表单
+  const [picking, setPicking] = useState<PickTarget | null>(null) // 打开模型选择弹窗的用途
 
   const reload = useCallback(() => {
     gwFor(machine)
@@ -92,248 +91,281 @@ export function ProvidersPanel({
     setTitler(r.titler ?? {})
     onChanged(machine)
   }
-  const onSwitch = (provider: string, model: string) =>
-    gw?.setProvider(provider, model)
-      .then((r) => {
-        setActive(r.active)
-        onChanged(machine)
-      })
-      .catch(() => {})
-  // 用途指针：传相同 (provider, model) 视为取消 → 回退「跟随会话模型」（空）
-  const pickClassifier = (provider: string, model: string) => {
-    const same = classifier.provider === provider && classifier.model === model
-    gw?.setClassifier(same ? '' : provider, same ? '' : model)
-      .then((r) => {
-        setClassifier(r.classifier ?? {})
-        onChanged(machine)
-      })
-      .catch(() => {})
-  }
-  const pickTitler = (provider: string, model: string) => {
-    const same = titler.provider === provider && titler.model === model
-    gw?.setTitler(same ? '' : provider, same ? '' : model)
-      .then((r) => {
-        setTitler(r.titler ?? {})
-        onChanged(machine)
-      })
-      .catch(() => {})
-  }
+  // 三处「模型用途」的直接设值（空 provider/model = 会话模型 / 跟随会话模型）。
+  // 三处「模型用途」的设值只差 gw 方法与回写目标，工厂消掉 .then/onChanged/.catch 三连的重复。
+  type PickResp = { active?: ActiveModel; classifier?: ModelPointer; titler?: ModelPointer }
+  const makePick =
+    (run: (p: string, m: string) => Promise<PickResp> | undefined, apply: (r: PickResp) => void) =>
+    (provider: string, model: string) =>
+      run(provider, model)
+        ?.then((r) => {
+          apply(r)
+          onChanged(machine)
+        })
+        .catch(() => {})
+  const pickSession = makePick((p, m) => gw?.setProvider(p, m), (r) => setActive(r.active ?? { provider: '', model: '' }))
+  const pickClassifier = makePick((p, m) => gw?.setClassifier(p, m), (r) => setClassifier(r.classifier ?? {}))
+  const pickTitler = makePick((p, m) => gw?.setTitler(p, m), (r) => setTitler(r.titler ?? {}))
   const onSave = (draft: Partial<ProviderProfile>) => gw?.saveProvider(draft).then(apply).catch(() => {})
   const onDelete = (id: string) => gw?.deleteProvider(id).then(apply).catch(() => {})
   const onTest = (baseUrl: string, apiKey: string, model: string): Promise<TestResult> =>
     gw?.testProvider(baseUrl, apiKey, model) ??
     Promise.resolve({ ok: false, error: t('sidebar.disconnected') })
 
-  if (form) {
-    return (
-      <ProviderForm
-        form={form}
-        setForm={setForm}
-        onTest={onTest}
-        onSubmit={(draft) => {
-          onSave(draft)
-          setForm(null)
-        }}
-        onCancel={() => setForm(null)}
-      />
-    )
+  // 用途行悬停提示：跨 provider 同名模型时用「provider · model」区分（无指向则不提示）
+  const pointerTitle = (p: ModelPointer) => {
+    if (!p.provider) return undefined
+    const name = profiles.find((x) => x.id === p.provider)?.name ?? p.provider
+    return `${name} · ${p.model}`
   }
+
+  // 三行「模型用途」的数据表：会话模型无「跟随」项（allowFollow=false），标题/分类器有。
+  const usages: Array<{
+    label: string
+    hint: string
+    pointer: ModelPointer
+    fallback: string
+    allowFollow: boolean
+    onPick: (provider: string, model: string) => void
+  }> = [
+    { label: t('providers.sessionModel'), hint: t('providers.sessionModelHint'), pointer: active, fallback: t('providers.pickNone'), allowFollow: false, onPick: pickSession },
+    { label: t('titler.title'), hint: t('titler.desc'), pointer: titler, fallback: t('pointer.follow'), allowFollow: true, onPick: pickTitler },
+    { label: t('classifier.title'), hint: t('classifier.desc'), pointer: classifier, fallback: t('pointer.follow'), allowFollow: true, onPick: pickClassifier },
+  ]
 
   return (
     <div>
       <MachineTabs machines={machines} value={machine} onChange={setMachine} />
-      <div className="flex items-center justify-between mb-4">
-        <h3 className="text-base font-medium">{t('providers.title')}</h3>
-        <Button variant="outline" size="sm" onClick={() => setForm(emptyForm())}>
-          <Plus />
-          {t('common.add')}
-        </Button>
-      </div>
+      <SectionGroup>
+      <Section
+        title={t('providers.title')}
+        action={
+          <Button variant="outline" size="sm" onClick={() => setForm(emptyForm())}>
+            <Plus />
+            {t('common.add')}
+          </Button>
+        }
+      >
+        {profiles.length === 0 ? (
+          <div className="py-10 text-center text-sm text-muted-foreground/80">{t('providers.none')}</div>
+        ) : (
+          <div className="space-y-2">
+            {profiles.map((p) => (
+              <Card key={p.id}>
+                <div className="flex items-center gap-2">
+                  <div className="flex-1 min-w-0">
+                    <div className="truncate text-sm font-medium">{p.name}</div>
+                    <div className="mt-0.5 truncate text-[11px] text-muted-foreground">
+                      {p.base_url} · {t('providers.modelCount', { n: p.models.length })}
+                    </div>
+                  </div>
+                  <Button
+                    variant="ghost"
+                    size="icon-sm"
+                    onClick={() => setForm(formFrom(p))}
+                    aria-label={t('providers.edit')}
+                    className="shrink-0 text-muted-foreground"
+                  >
+                    <Pencil />
+                  </Button>
+                  <Button
+                    variant="ghost"
+                    size="icon-sm"
+                    onClick={() => onDelete(p.id)}
+                    aria-label={t('common.delete')}
+                    className="shrink-0 text-muted-foreground hover:text-error"
+                  >
+                    <Trash2 />
+                  </Button>
+                </div>
+              </Card>
+            ))}
+          </div>
+        )}
+      </Section>
 
-      {profiles.length === 0 ? (
-        <div className="py-10 text-center text-sm text-muted-foreground/80">{t('providers.none')}</div>
-      ) : (
-        <div className="space-y-2">
-          {profiles.map((p) => (
-            <div key={p.id} className="px-3 py-2 rounded-xl border border-line/40">
-              <div className="flex items-center gap-2">
-                <span className="flex-1 min-w-0 truncate text-sm font-medium">{p.name}</span>
-                <Button
-                  variant="ghost"
-                  size="icon-sm"
-                  onClick={() => setForm(formFrom(p))}
-                  aria-label={t('providers.edit')}
-                  className="shrink-0 text-muted-foreground"
-                >
-                  <Pencil />
-                </Button>
-                <Button
-                  variant="ghost"
-                  size="icon-sm"
-                  onClick={() => onDelete(p.id)}
-                  aria-label={t('common.delete')}
-                  className="shrink-0 text-muted-foreground hover:text-error"
-                >
-                  <Trash2 />
-                </Button>
-              </div>
-              <div className="mt-1.5 flex flex-wrap gap-1.5">
-                {p.models.map((m) => {
-                  const on = active.provider === p.id && active.model === m
-                  return (
-                    <ModelChip
-                      key={m}
-                      label={m}
-                      selected={on}
-                      title={on ? t('providers.inUse') : t('providers.switchHint')}
-                      onClick={() => onSwitch(p.id, m)}
-                    />
-                  )
-                })}
-              </div>
-            </div>
+      {/* 模型用途：会话模型 / 标题 / 分类器三处都是「当前值 + 更改」，点更改弹出选择框。无 provider 不渲染 */}
+      {profiles.length > 0 && (
+        <Section title={t('providers.usage')}>
+          {usages.map((u) => (
+            <UsageRow
+              key={u.label}
+              label={u.label}
+              hint={u.hint}
+              value={u.pointer.model || u.fallback}
+              valueTitle={pointerTitle(u.pointer)}
+              muted={!u.pointer.model}
+              onChange={() =>
+                setPicking({ title: u.label, current: u.pointer, allowFollow: u.allowFollow, onPick: u.onPick })
+              }
+            />
           ))}
-        </div>
+        </Section>
+      )}
+      </SectionGroup>
+
+      {form && (
+        <ProviderForm
+          initial={form}
+          onTest={onTest}
+          onSubmit={(draft) => {
+            onSave(draft)
+            setForm(null)
+          }}
+          onCancel={() => setForm(null)}
+        />
       )}
 
-      {/* 用途模型指针（独立于会话模型）：审批分类器 / 会话标题生成。无 provider 时不渲染 */}
-      {profiles.length > 0 && (
-        <>
-          <PointerSection
-            icon={<Shield size={15} className="text-primary shrink-0" />}
-            title={t('classifier.title')}
-            desc={t('classifier.desc')}
-            useHint={t('classifier.use')}
-            pointer={classifier}
-            profiles={profiles}
-            onPick={pickClassifier}
-          />
-          <PointerSection
-            icon={<Type size={15} className="text-primary shrink-0" />}
-            title={t('titler.title')}
-            desc={t('titler.desc')}
-            useHint={t('titler.use')}
-            pointer={titler}
-            profiles={profiles}
-            onPick={pickTitler}
-          />
-        </>
+      {picking && (
+        <ModelPickerModal
+          target={picking}
+          profiles={profiles}
+          onPick={(provider, model) => {
+            picking.onPick(provider, model)
+            setPicking(null)
+          }}
+          onClose={() => setPicking(null)}
+        />
       )}
     </div>
   )
 }
 
-// 用途模型指针的选择区块：「跟随会话模型」+ 按 provider 分组的模型 chip。
-// 审批分类器与会话标题生成两处共用；再点已选中的 chip 视为取消（回退跟随）。
-function PointerSection({
-  icon,
-  title,
-  desc,
-  useHint,
-  pointer,
-  profiles,
-  onPick,
-}: {
-  icon: ReactNode
+// 一处「模型用途」的当前值 + 状态；点「更改」打开 ModelPickerModal。
+type PickTarget = {
   title: string
-  desc: string
-  useHint: string
-  pointer: ModelPointer
-  profiles: ProviderProfile[]
+  current: ModelPointer
+  allowFollow: boolean
   onPick: (provider: string, model: string) => void
+}
+
+// 一行「模型用途」：label/说明在左，当前值 + 更改在右。
+// valueTitle：悬停显示「provider · model」，用于区分跨 provider 的同名模型。
+function UsageRow({
+  label,
+  hint,
+  value,
+  valueTitle,
+  muted,
+  onChange,
+}: {
+  label: string
+  hint: string
+  value: string
+  valueTitle?: string
+  muted: boolean
+  onChange: () => void
 }) {
   const { t } = useI18n()
   return (
-    <div className="mt-7">
-      <h3 className="flex items-center gap-2 text-sm font-medium">
-        {icon}
-        {title}
-      </h3>
-      <p className="mt-0.5 mb-3 text-[11.5px] text-muted-foreground">{desc}</p>
-
-      {/* 跟随会话模型（默认 = 指针为空） */}
-      <button
-        onClick={() => onPick('', '')}
-        className={`w-full flex items-center gap-2 px-3 py-2 mb-2 rounded-xl border border-dashed transition ${
-          !pointer.provider
-            ? 'border-primary/40 bg-primary/5'
-            : 'border-line/40 hover:bg-canvas/60'
-        }`}
-      >
-        <span className={!pointer.provider ? 'lumi-orb-idle lumi-orb shrink-0' : 'size-2 rounded-full bg-muted-foreground/40 shrink-0'} />
-        <span className="flex-1 min-w-0 text-left">
-          <span className="block text-[13px]">{t('pointer.follow')}</span>
-          <span className="block text-[11px] text-muted-foreground">{t('pointer.followHint')}</span>
+    <Row label={label} hint={hint}>
+      <div className="flex items-center gap-2.5">
+        <span
+          title={valueTitle}
+          className={`max-w-40 truncate text-xs ${muted ? 'text-muted-foreground' : 'text-ink'}`}
+        >
+          {value}
         </span>
-        {!pointer.provider && <Check size={14} className="text-primary shrink-0" />}
-      </button>
-
-      <div className="space-y-2">
-        {profiles.map((p) => (
-          <div key={p.id} className="px-3 py-2 rounded-xl border border-line/40">
-            <div className="text-[13px] font-medium mb-1.5">{p.name}</div>
-            <div className="flex flex-wrap gap-1.5">
-              {p.models.map((m) => (
-                <ModelChip
-                  key={m}
-                  label={m}
-                  selected={pointer.provider === p.id && pointer.model === m}
-                  title={useHint}
-                  onClick={() => onPick(p.id, m)}
-                />
-              ))}
-            </div>
-          </div>
-        ))}
+        <Button variant="outline" size="sm" onClick={onChange}>
+          {t('common.change')}
+        </Button>
       </div>
-    </div>
+    </Row>
   )
 }
 
-// 可点的模型 chip（选中=品牌金描边+Check）。当前模型与分类器两处列表共用。
-function ModelChip({
-  label,
-  selected,
-  title,
-  onClick,
+// 模型选择弹窗：搜索 + 按 provider 分组的模型列表；用途指针（标题/分类器）含「跟随会话模型」。
+// 选中即回调并关闭；会话模型无「跟随」项（allowFollow=false）。
+function ModelPickerModal({
+  target,
+  profiles,
+  onPick,
+  onClose,
 }: {
-  label: string
-  selected: boolean
-  title: string
-  onClick: () => void
+  target: PickTarget
+  profiles: ProviderProfile[]
+  onPick: (provider: string, model: string) => void
+  onClose: () => void
 }) {
+  const { t } = useI18n()
+  const [q, setQ] = useState('')
+  const ql = q.trim().toLowerCase()
+  const following = !target.current.provider
+
   return (
-    <button
-      onClick={onClick}
-      title={title}
-      className={`flex items-center gap-1 px-2 py-0.5 rounded-md text-xs border transition ${
-        selected
-          ? 'border-primary/50 bg-primary/10 text-primary'
-          : 'border-line/40 text-muted-foreground hover:text-ink hover:bg-canvas/60'
-      }`}
-    >
-      {selected && <Check size={12} />}
-      {label}
-    </button>
+    <FormModal onClose={onClose} title={target.title} className="sm:max-w-sm">
+      <TextInput
+        value={q}
+        onChange={(e) => setQ(e.target.value)}
+        placeholder={t('providers.searchModel')}
+        className="mb-2.5"
+      />
+
+      {target.allowFollow && (
+        <button
+          onClick={() => onPick('', '')}
+          className={`mb-1.5 flex w-full items-center gap-2 rounded-xl border border-dashed px-3 py-2.5 text-left transition ${
+            following ? 'border-primary/40 bg-primary/5' : 'border-line/50 hover:bg-canvas/60'
+          }`}
+        >
+          <span className={following ? 'lumi-orb lumi-orb-idle shrink-0' : 'size-2 shrink-0 rounded-full bg-muted-foreground/40'} />
+          <span className="min-w-0 flex-1">
+            <span className="block text-[13px]">{t('pointer.follow')}</span>
+            <span className="block text-[11px] text-muted-foreground">{t('pointer.followHint')}</span>
+          </span>
+          {following && <Check size={14} className="shrink-0 text-primary" />}
+        </button>
+      )}
+
+      <div className="space-y-0.5">
+        {profiles.map((p) => {
+          const models = p.models.filter((m) => m.toLowerCase().includes(ql))
+          if (!models.length) return null
+          return (
+            <div key={p.id}>
+              <div className="px-1 pt-2.5 pb-1 text-[10.5px] font-semibold uppercase tracking-wide text-muted-foreground">
+                {p.name}
+              </div>
+              {models.map((m) => {
+                const on = target.current.provider === p.id && target.current.model === m
+                return (
+                  <button
+                    key={m}
+                    onClick={() => onPick(p.id, m)}
+                    className={`flex w-full items-center gap-2 rounded-lg px-3 py-2 text-left text-[13px] transition hover:bg-line/30 ${
+                      on ? 'text-primary' : 'text-ink'
+                    }`}
+                  >
+                    <Check size={14} className={`shrink-0 ${on ? 'text-primary' : 'opacity-0'}`} />
+                    <span className="min-w-0 truncate">{m}</span>
+                  </button>
+                )
+              })}
+            </div>
+          )
+        })}
+      </div>
+    </FormModal>
   )
 }
 
 function ProviderForm({
-  form,
-  setForm,
+  initial,
   onTest,
   onSubmit,
   onCancel,
 }: {
-  form: Form
-  setForm: (f: Form) => void
+  initial: Form
   onTest: (baseUrl: string, apiKey: string, model: string) => Promise<TestResult>
   onSubmit: (draft: { id?: string; name: string; base_url: string; api_key: string; models: string[] }) => void
   onCancel: () => void
 }) {
   const { t } = useI18n()
+  // 草稿存本组件本地（与 FeishuForm/RemoteForm 一致）：键入不再 setState 到父级、避免整页重渲染。
+  const [form, setForm] = useState<Form>(initial)
   const editing = form.id != null
-  const validModels = form.models.map((m) => m.name.trim()).filter(Boolean)
+  // 去重：同名模型会在选择弹窗里造成重复 key + 双高亮，保存时按名去重
+  const validModels = [...new Set(form.models.map((m) => m.name.trim()).filter(Boolean))]
   // 提供商名称、Base URL（必填）、至少一个模型
   const canSave = !!form.name.trim() && !!form.base_url.trim() && validModels.length > 0
 
@@ -367,20 +399,34 @@ function ProviderForm({
     })
   }
 
-  return (
-    <div>
-      <button
-        onClick={onCancel}
-        className="flex items-center gap-2 text-base font-medium text-ink/90 hover:text-ink transition mb-5"
-      >
-        <ArrowLeft size={17} className="shrink-0" />
-        {editing ? t('providers.editTitle') : t('providers.addTitle')}
-      </button>
+  const footer = (
+    <>
+      <div className="flex-1" />
+      <Button variant="ghost" onClick={onCancel}>
+        {t('common.cancel')}
+      </Button>
+      <Button onClick={submit} disabled={!canSave}>
+        {editing ? t('common.save') : t('common.add')}
+      </Button>
+    </>
+  )
 
+  return (
+    <FormModal
+      onClose={onCancel}
+      title={editing ? t('providers.editTitle') : t('providers.addTitle')}
+      footer={footer}
+    >
       <div className="space-y-4">
-        <Field label={t('providers.name')} value={form.name} onChange={(v) => setForm({ ...form, name: v })} placeholder={t('providers.namePlaceholder')} />
-        <Field label={t('providers.baseUrl')} value={form.base_url} onChange={(v) => setForm({ ...form, base_url: v })} placeholder={t('providers.baseUrlPlaceholder')} />
-        <Field label={t('providers.apiKey')} value={form.api_key} onChange={(v) => setForm({ ...form, api_key: v })} placeholder="sk-…" password />
+        <Field label={t('providers.name')}>
+          <TextInput value={form.name} onChange={(e) => setForm({ ...form, name: e.target.value })} placeholder={t('providers.namePlaceholder')} />
+        </Field>
+        <Field label={t('providers.baseUrl')}>
+          <TextInput value={form.base_url} onChange={(e) => setForm({ ...form, base_url: e.target.value })} placeholder={t('providers.baseUrlPlaceholder')} />
+        </Field>
+        <Field label={t('providers.apiKey')}>
+          <TextInput password value={form.api_key} onChange={(e) => setForm({ ...form, api_key: e.target.value })} placeholder="sk-…" />
+        </Field>
 
         <div>
           <div className="text-xs text-muted-foreground mb-1.5">{t('providers.models')}</div>
@@ -402,16 +448,7 @@ function ProviderForm({
           </Button>
         </div>
       </div>
-
-      <div className="flex justify-end gap-2 mt-6">
-        <Button variant="ghost" onClick={onCancel}>
-          {t('common.cancel')}
-        </Button>
-        <Button onClick={submit} disabled={!canSave}>
-          {editing ? t('common.save') : t('common.add')}
-        </Button>
-      </div>
-    </div>
+    </FormModal>
   )
 }
 
@@ -433,11 +470,11 @@ function ModelRowEditor({
   const r = row.test
   return (
     <div className="flex items-center gap-2">
-      <input
+      <TextInput
         value={row.name}
         onChange={(e) => onChange(e.target.value)}
         placeholder={t('providers.modelPlaceholder')}
-        className="flex-1 min-w-0 px-3 py-1.5 rounded-lg text-sm bg-canvas/60 text-ink border border-line/40 focus:border-primary/50 outline-none placeholder:text-muted-foreground/50"
+        className="flex-1 min-w-0 h-8"
       />
 
       {r === 'testing' ? (
@@ -482,32 +519,5 @@ function ModelRowEditor({
         <Trash2 />
       </Button>
     </div>
-  )
-}
-
-function Field({
-  label,
-  value,
-  onChange,
-  placeholder,
-  password,
-}: {
-  label: string
-  value: string
-  onChange: (v: string) => void
-  placeholder?: string
-  password?: boolean
-}) {
-  return (
-    <label className="block">
-      <span className="text-xs text-muted-foreground">{label}</span>
-      <input
-        type={password ? 'password' : 'text'}
-        value={value}
-        onChange={(e) => onChange(e.target.value)}
-        placeholder={placeholder}
-        className="mt-1 w-full px-3 py-2 rounded-lg text-sm bg-canvas/60 text-ink border border-line/40 focus:border-primary/50 outline-none placeholder:text-muted-foreground/50"
-      />
-    </label>
   )
 }

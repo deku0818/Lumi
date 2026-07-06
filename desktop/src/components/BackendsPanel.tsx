@@ -3,6 +3,8 @@ import { Plus, Pencil, Trash2, Server } from 'lucide-react'
 import type { BackendRemote, BackendsState } from '../types'
 import { useI18n } from '../i18n'
 import { machineColor } from '@/lib/utils'
+import { Section, SectionGroup, Field, TextInput, FormModal } from './SettingsKit'
+import { Button } from '@/components/ui/button'
 import { Switch } from '@/components/ui/switch'
 
 // 一次性测试连接：开一条裸 WS（带 ?token=），open=通、1008=鉴权失败、其余=不可达。
@@ -78,38 +80,36 @@ export function BackendsPanel() {
 
   return (
     <div>
-      <h3 className="text-base font-medium mb-1">{t('settings.connections')}</h3>
-      <p className="text-xs text-muted-foreground mb-3">{t('backends.desc')}</p>
+      <SectionGroup>
+        <Section title={t('settings.connections')} desc={t('backends.desc')}>
+          {/* 本地 sidecar：恒在、不可删 */}
+          <MachineRow name={t('backends.local')} sub={t('backends.localHint')} color="var(--color-accent)" />
+        </Section>
 
-      {/* 本地 sidecar：恒在、不可删 */}
-      <MachineRow name={t('backends.local')} sub={t('backends.localHint')} color="var(--color-accent)" />
-
-      <div className="mt-5 mb-1.5 text-xs text-muted-foreground">{t('backends.remotes')}</div>
-      {state.remotes.length === 0 && editing === null && (
-        <div className="text-sm text-muted-foreground/70 py-3">{t('backends.empty')}</div>
-      )}
-      {state.remotes.map((r) => (
-        <MachineRow
-          key={r.id}
-          name={r.name || r.url}
-          sub={r.url}
-          color={machineColor(r.id, [{ id: 'local' }, ...state.remotes])}
-          enabled={r.enabled !== false}
-          onEdit={() => setEditing(r)}
-          onDelete={() => remove(r.id)}
-          onToggle={(v) => toggle(r.id, v)}
-        />
-      ))}
-
-      {editing === null ? (
-        <button
-          onClick={() => setEditing({})}
-          className="mt-3 flex items-center gap-2 px-3 py-2 rounded-lg text-sm text-muted-foreground hover:text-ink hover:bg-line/30 transition"
-        >
-          <Plus size={15} />
+        <Section title={t('backends.remotes')}>
+        {state.remotes.length === 0 && (
+          <div className="text-sm text-muted-foreground/70 py-2">{t('backends.empty')}</div>
+        )}
+        {state.remotes.map((r) => (
+          <MachineRow
+            key={r.id}
+            name={r.name || r.url}
+            sub={r.url}
+            color={machineColor(r.id, [{ id: 'local' }, ...state.remotes])}
+            enabled={r.enabled !== false}
+            onEdit={() => setEditing(r)}
+            onDelete={() => remove(r.id)}
+            onToggle={(v) => toggle(r.id, v)}
+          />
+        ))}
+        <Button variant="ghost" size="sm" onClick={() => setEditing({})} className="mt-2 text-muted-foreground">
+          <Plus />
           {t('backends.add')}
-        </button>
-      ) : (
+        </Button>
+        </Section>
+      </SectionGroup>
+
+      {editing !== null && (
         <RemoteForm
           initial={editing}
           onCancel={() => setEditing(null)}
@@ -159,20 +159,24 @@ function MachineRow({
         <div className="text-xs text-muted-foreground truncate">{sub}</div>
       </div>
       {onEdit && (
-        <button
+        <Button
+          variant="ghost"
+          size="icon-sm"
           onClick={onEdit}
-          className="shrink-0 size-7 grid place-items-center rounded-md text-muted-foreground hover:text-ink hover:bg-line/30 transition opacity-0 group-hover:opacity-100"
+          className="shrink-0 text-muted-foreground opacity-0 group-hover:opacity-100"
         >
-          <Pencil size={14} />
-        </button>
+          <Pencil />
+        </Button>
       )}
       {onDelete && (
-        <button
+        <Button
+          variant="ghost"
+          size="icon-sm"
           onClick={onDelete}
-          className="shrink-0 size-7 grid place-items-center rounded-md text-muted-foreground hover:text-error hover:bg-line/30 transition opacity-0 group-hover:opacity-100"
+          className="shrink-0 text-muted-foreground hover:text-error opacity-0 group-hover:opacity-100"
         >
-          <Trash2 size={14} />
-        </button>
+          <Trash2 />
+        </Button>
       )}
       {onToggle && (
         <Switch checked={enabled} onCheckedChange={onToggle} className="shrink-0 ml-1" />
@@ -202,54 +206,49 @@ function RemoteForm({
     setTest(await testConnection(url.trim(), token))
   }
 
-  const inputCls =
-    'w-full px-3 py-2 rounded-lg text-sm bg-canvas border border-line focus:border-primary/50 outline-none'
-
-  return (
-    <div className="mt-3 p-3.5 rounded-xl bg-surface/50 border border-line/40 flex flex-col gap-2.5">
-      <Field label={t('backends.name')}>
-        <input className={inputCls} value={name} placeholder={t('backends.namePh')} onChange={(e) => setName(e.target.value)} />
-      </Field>
-      <Field label={t('backends.url')}>
-        <input className={inputCls} value={url} placeholder="wss://dev.example.com/ws" onChange={(e) => setUrl(e.target.value)} />
-      </Field>
-      <Field label={t('backends.token')}>
-        <input className={inputCls} type="password" value={token} placeholder={t('backends.tokenPh')} onChange={(e) => setToken(e.target.value)} />
-      </Field>
-
-      <div className="flex items-center gap-3 pt-1">
-        <button
-          onClick={runTest}
-          disabled={!valid || test.status === 'testing'}
-          className="flex items-center gap-2 px-3 py-1.5 rounded-lg text-sm bg-canvas border border-line hover:border-primary disabled:opacity-40 transition"
-        >
-          <span className={`lumi-orb ${test.status === 'testing' ? '' : 'lumi-orb-idle'}`} style={{ width: 11, height: 11 }} />
-          {test.status === 'testing' ? t('backends.testing') : t('backends.test')}
-        </button>
-        {test.status === 'ok' && <span className="text-xs text-success">{t(test.msgKey!)}</span>}
-        {test.status === 'fail' && <span className="text-xs text-error">{t(test.msgKey!)}</span>}
-
-        <div className="flex-1" />
-        <button onClick={onCancel} className="px-3 py-1.5 rounded-lg text-sm text-muted-foreground hover:text-ink transition">
-          {t('backends.cancel')}
-        </button>
-        <button
-          onClick={() => onSaved({ id: initial.id, name: name.trim() || url.trim(), url: url.trim(), token })}
-          disabled={!valid}
-          className="px-3.5 py-1.5 rounded-lg text-sm font-medium bg-primary text-canvas disabled:opacity-40 transition"
-        >
-          {t('backends.save')}
-        </button>
-      </div>
-    </div>
+  const footer = (
+    <>
+      <Button
+        variant="outline"
+        size="sm"
+        onClick={runTest}
+        disabled={!valid || test.status === 'testing'}
+      >
+        <span className={`lumi-orb ${test.status === 'testing' ? '' : 'lumi-orb-idle'}`} style={{ width: 11, height: 11 }} />
+        {test.status === 'testing' ? t('backends.testing') : t('backends.test')}
+      </Button>
+      {test.status === 'ok' && <span className="text-xs text-success">{t(test.msgKey!)}</span>}
+      {test.status === 'fail' && <span className="text-xs text-error">{t(test.msgKey!)}</span>}
+      <div className="flex-1" />
+      <Button variant="ghost" onClick={onCancel}>
+        {t('backends.cancel')}
+      </Button>
+      <Button
+        onClick={() => onSaved({ id: initial.id, name: name.trim() || url.trim(), url: url.trim(), token })}
+        disabled={!valid}
+      >
+        {t('backends.save')}
+      </Button>
+    </>
   )
-}
 
-function Field({ label, children }: { label: string; children: React.ReactNode }) {
   return (
-    <label className="block">
-      <div className="text-xs text-muted-foreground mb-1">{label}</div>
-      {children}
-    </label>
+    <FormModal
+      onClose={onCancel}
+      title={initial.id ? t('backends.edit') : t('backends.add')}
+      footer={footer}
+    >
+      <div className="space-y-3.5">
+        <Field label={t('backends.name')}>
+          <TextInput value={name} placeholder={t('backends.namePh')} onChange={(e) => setName(e.target.value)} />
+        </Field>
+        <Field label={t('backends.url')}>
+          <TextInput value={url} placeholder="wss://dev.example.com/ws" onChange={(e) => setUrl(e.target.value)} />
+        </Field>
+        <Field label={t('backends.token')}>
+          <TextInput password value={token} placeholder={t('backends.tokenPh')} onChange={(e) => setToken(e.target.value)} />
+        </Field>
+      </div>
+    </FormModal>
   )
 }
