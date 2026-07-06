@@ -169,13 +169,8 @@ async def vision(
     content = await message_transform(
         [{"type": "text", "text": question}, *blocks], model_name=resolved.model
     )
-    llm_params: dict = {}
-    if resolved.base_url:
-        llm_params["base_url"] = resolved.base_url
-    if resolved.api_key:
-        llm_params["api_key"] = resolved.api_key
     try:
-        llm = create_llm(resolved.model, **llm_params)
+        llm = create_llm(resolved.model, **resolved.conn_kwargs())
         resp = await llm.ainvoke([HumanMessage(content=content)])
     except Exception as e:  # noqa: BLE001
         logger.error(

@@ -58,6 +58,7 @@ class ProviderService:
             entry = lookup(m)
             return entry.context_length if entry else 0
 
+        pointers = provider_store.get_pointers()
         return {
             "profiles": [
                 {
@@ -75,7 +76,8 @@ class ProviderService:
                 for p in profiles
             ],
             "active": active,
-            "classifier": provider_store.get_classifier(),
+            "classifier": pointers["classifier"],
+            "titler": pointers["titler"],
         }
 
     def set_effort(self, provider_id: str, model: str, level: str) -> dict:
@@ -89,7 +91,7 @@ class ProviderService:
         return {"effort": level}
 
     def list_providers(self) -> dict:
-        """列出全部供应商 profile（含 models 列表）及 active / classifier 指针。"""
+        """列出全部供应商 profile（含 models 列表）及 active / classifier / titler 指针。"""
         return self.provider_list()
 
     def set_classifier(self, provider_id: str, model: str) -> dict:
@@ -98,7 +100,13 @@ class ProviderService:
         provider/model 均空或指向不存在 → 清除（回退会话模型）。无需重启运行时：
         auto_classify 每次裁决时按指针即时解析连接。
         """
-        return {"classifier": provider_store.set_classifier(provider_id, model)}
+        return {
+            "classifier": provider_store.set_pointer("classifier", provider_id, model)
+        }
+
+    def set_titler(self, provider_id: str, model: str) -> dict:
+        """设置/清除会话标题生成模型指针（持久化，下一次标题生成生效）。"""
+        return {"titler": provider_store.set_pointer("titler", provider_id, model)}
 
     async def test_provider(self, base_url: str, api_key: str, model: str) -> dict:
         """用给定连接对模型发一个最小请求验证可达性。

@@ -27,6 +27,7 @@ _DIRECT_EVENTS = {
     "cron.running",
     "bg_tasks.update",
     "channel.activity",
+    "session.title",
 }
 
 

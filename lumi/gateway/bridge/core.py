@@ -420,6 +420,9 @@ class AgentBridge:
     def set_classifier(self, provider_id: str, model: str) -> dict:
         return self._providers.set_classifier(provider_id, model)
 
+    def set_titler(self, provider_id: str, model: str) -> dict:
+        return self._providers.set_titler(provider_id, model)
+
     def list_providers(self) -> dict:
         return self._providers.list_providers()
 
@@ -522,11 +525,18 @@ class AgentBridge:
         async for event in self._emit_text_message(text):
             yield event
 
-    async def snapshot_messages(self) -> list:
-        """读当前 thread checkpoint 的消息快照（无图 / 无 config 时空列表）。"""
+    async def snapshot_messages(self, thread_id: str = "") -> list:
+        """读某 thread checkpoint 的消息快照（缺省当前 thread；无图 / 无 config 时空列表）。
+
+        thread_id 显式给定时不依赖 bridge 当前指向——后台任务（标题生成）捕获
+        发送时的 tid，用户随后切换会话也读得到正确的 thread。
+        """
         if self.graph is None or self._config is None:
             return []
-        snap = await self.graph.aget_state(self._config)
+        config = (
+            {"configurable": {"thread_id": thread_id}} if thread_id else self._config
+        )
+        snap = await self.graph.aget_state(config)
         return list((snap.values or {}).get("messages", [])) if snap else []
 
     async def compact_thread(self) -> bool:

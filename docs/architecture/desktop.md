@@ -92,8 +92,9 @@ WS 断开时若会话仍有**活跃 / 挂起轮**（典型：挂在工具审批 
 
 会话列表由 LangGraph checkpoint 派生（`lumi/sessions/session_store.list_sessions`），但「置顶」「自定义标题」是用户施加的、不存在于 checkpoint 中的元数据，单独持久化：
 
-- **`lumi/sessions/session_meta.py`** — JSON sidecar（`~/.lumi/checkpoints/session_meta.json`），按 `thread_id` 存 `pinned`/`title`，以及 IM 渠道会话的 `channel_title`（群名/私聊对方姓名，入站时自动同步）/`channel_kind`（group/p2p），仅写非默认值且内容不变不写盘。textual-free，可在 headless 服务直接使用。
-- **`list_sessions` RPC** — 合并 sidecar 元数据后注入 `title`（手动重命名 > 渠道自动名）/`pinned`，并按 thread 前缀标注 `channel`/`channel_kind`（`gateway/session._channel_of` 是渠道判定单点，前端只消费 wire 字段），置顶项稳定排到最前。
+- **`lumi/sessions/session_meta.py`** — JSON sidecar（`~/.lumi/checkpoints/session_meta.json`），按 `thread_id` 存 `pinned`/`title`，IM 渠道会话的 `channel_title`（群名/私聊对方姓名，入站时自动同步）/`channel_kind`（group/p2p），以及模型生成的 `auto_title`（+定稿标记 `auto_title_final`），仅写非默认值且内容不变不写盘。textual-free，可在 headless 服务直接使用。
+- **`list_sessions` RPC** — 合并 sidecar 元数据后注入 `title`（手动重命名 > 渠道自动名 > 自动生成标题）/`pinned`，并按 thread 前缀标注 `channel`/`channel_kind`（`gateway/session._channel_of` 是渠道判定单点，前端只消费 wire 字段），置顶项稳定排到最前。
+- **标题自动生成**（`lumi/gateway/titler.py`，对齐 claude-code 的 sessionTitle 机制）— desktop 会话第 1 条可见用户消息发出时即后台生成（不等本轮跑完），第 3 条时用对话尾部 1000 字符再生成一次纠偏后定稿；模型来自 providers 分区的 `titler` 指针（`set_titler` RPC / 设置→模型面板配置，未配则跟随会话 active 模型）。完成经 `session.title` 事件广播，前端就地更新侧栏；手动重命名永远优先（触发与写入前双重检查）。IM 渠道会话有 `channel_title`，不生成。
 - **删除** — `delete_session` 经 `bridge.delete_thread()` 一并清理两类 checkpoint：LangGraph 会话（`LumiAgent.adelete_thread`）+ 文件级 checkpoint（`checkpoint.delete_thread_checkpoint`），再删除 sidecar 元数据条目。渠道会话删除前持渠道侧运行锁（`ChannelManager.thread_lock`），避开在途轮把删掉的历史写回。
 
 前端 `Sidebar` 每行 hover 出现 `⋮` 菜单（置顶 / 重命名 / 删除）；删除走二次确认弹窗（`ConfirmDialog`），删除当前会话时自动另开新会话顶上。

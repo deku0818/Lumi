@@ -4,7 +4,7 @@ import type {
   ActiveModel,
   BgTask,
   ChannelInfo,
-  Classifier,
+  ModelPointer,
   CronJob,
   CronRun,
   FeishuConfig,
@@ -176,7 +176,8 @@ export class Gateway {
   listProviders(): Promise<{
     profiles: ProviderProfile[]
     active: ActiveModel
-    classifier: Classifier
+    classifier: ModelPointer
+    titler: ModelPointer
   }> {
     return this.request('list_providers')
   }
@@ -186,8 +187,13 @@ export class Gateway {
   }
 
   // 设置/清除 auto 审批分类器模型（provider/model 均空 = 跟随会话模型）
-  setClassifier(provider: string, model: string): Promise<{ classifier: Classifier }> {
-    return this.request<{ classifier: Classifier }>('set_classifier', { provider, model })
+  setClassifier(provider: string, model: string): Promise<{ classifier: ModelPointer }> {
+    return this.request<{ classifier: ModelPointer }>('set_classifier', { provider, model })
+  }
+
+  // 设置/清除会话标题生成模型（provider/model 均空 = 跟随会话模型）
+  setTitler(provider: string, model: string): Promise<{ titler: ModelPointer }> {
+    return this.request<{ titler: ModelPointer }>('set_titler', { provider, model })
   }
 
   // 运行中实时切换工具审批模式：改后端共享 context，对当前轮后续工具立即生效

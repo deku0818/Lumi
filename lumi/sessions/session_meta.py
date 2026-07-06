@@ -5,7 +5,9 @@
 持久化这些标记，与 checkpoints.db 同目录（共享生命周期）。
 
 存储形如 {"<thread_id>": {"pinned": true, "title": "自定义名"}}；仅写入非默认值，
-保持文件精简。无 textual 依赖，可在 headless 服务中直接使用。
+保持文件精简。除用户标记外也承载派生标题（channel_title 渠道自动名、auto_title
+模型生成标题及其定稿标记 auto_title_final，展示优先级 title > channel_title >
+auto_title）。无 textual 依赖，可在 headless 服务中直接使用。
 """
 
 from __future__ import annotations

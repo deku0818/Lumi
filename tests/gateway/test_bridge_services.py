@@ -46,6 +46,7 @@ def test_list_providers_empty(store_path):
         "profiles": [],
         "active": {"provider": "", "model": ""},
         "classifier": {},
+        "titler": {},
     }
 
 
@@ -104,6 +105,7 @@ def test_delete_provider_removes(store_path):
         "profiles": [],
         "active": {"provider": "", "model": ""},
         "classifier": {},
+        "titler": {},
     }
     assert provider_store.load()[0] == []
 

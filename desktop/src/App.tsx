@@ -25,7 +25,7 @@ import type {
   AttachedFile,
   BgTask,
   ChannelInfo,
-  Classifier,
+  ModelPointer,
   CronJob,
   HistoryItem,
   Item,
@@ -296,7 +296,7 @@ export default function App() {
   const [providers, setProviders] = useState<ProviderProfile[]>([])
   const [activeModel, setActiveModel] = useState<ActiveModel>({ provider: '', model: '' })
   // auto 审批分类器指针（providers.json 顶级 classifier，空=跟随会话模型）
-  const [classifier, setClassifier] = useState<Classifier>({})
+  const [classifier, setClassifier] = useState<ModelPointer>({})
   // 工具审批模式：随后续 send/run 透传给后端（auto=AI 审批分类器）
   const [toolMode, setToolMode] = useState<ToolMode>('default')
   // 活动会话所在机器：ModelPicker 机器标识 + 设置改模型时判断是否需刷新聊天侧。
@@ -374,6 +374,10 @@ export default function App() {
   const activeRef = useRef('')
   // 会话列表镜像到 ref：切会话时据此查它所属项目（workspace_dir），随 switch 下发让后端切 cwd
   const sessionsRef = useRef<SessionMeta[]>([])
+  // 本窗口手动命名过的会话 key：session.title 广播与手动重命名竞态时，
+  // 自动标题不得覆盖用户敲的名字（后端侧手动名本就优先，只是事件可能晚到）。
+  // 按数据标记而非 RPC 在途时序——广播与 rename 响应帧之间没有顺序保证。
+  const renamedRef = useRef<Set<string>>(new Set())
   // 每台机器一条「控制连接」：用于跨机器 fan-out list_sessions / 全局 RPC（非 chat 流）
   const controlConns = useRef<Record<string, Gateway>>({})
   const cronJobsRef = useRef<CronJob[]>([]) // 据此把定时操作路由到任务所属机器
@@ -885,9 +889,23 @@ export default function App() {
       }),
     )
     // 全量刷新整表替换（含回收已删机器的会话）；单机刷新只换该机器分段
-    setSessions((prev) =>
-      only ? [...prev.filter((s) => beOf(s) !== only), ...perBackend.flat()] : perBackend.flat(),
-    )
+    setSessions((prev) => {
+      const next = only
+        ? [...prev.filter((s) => beOf(s) !== only), ...perBackend.flat()]
+        : perBackend.flat()
+      // 后端还列不出的会话（新会话首轮 checkpoint 未落盘）：保留现有条目
+      // （send 时的乐观插入），否则整表替换会让它从侧栏闪没、也无法切回。
+      // 运行中之外也保住「当前活动」的：首条消息发送失败（running 已复位）时
+      // 用户还在这个会话里，条目消失会让他切走后回不来；切走后自然回收。
+      const keep = prev.filter((s) => {
+        const key = sessionKey(beOf(s), s.thread_id)
+        return (
+          (storeRef.current[key]?.running || key === activeRef.current) &&
+          !next.some((n) => n.thread_id === s.thread_id && beOf(n) === beOf(s))
+        )
+      })
+      return [...keep, ...next]
+    })
   }, [])
 
   // 重拉某会话历史并整表替换其 items（渠道会话旁观刷新 / 切回对账共用）
@@ -975,6 +993,16 @@ export default function App() {
     gw.reconnect()
   }, [])
 
+  // 乐观局部更新某会话字段（pin/重命名/自动标题共用）。按 thread + backend 精确匹配：
+  // 飞书群在本地/远程 thread 同名，只按 thread 会把另一台机器的同名会话一起改了。
+  const patchSession = useCallback(
+    (tid: string, backend: string, patch: Partial<SessionMeta>) =>
+      setSessions((prev) =>
+        prev.map((s) => (s.thread_id === tid && beOf(s) === backend ? { ...s, ...patch } : s)),
+      ),
+    [],
+  )
+
   // 为某机器开控制连接（幂等）：ready 后拉它的会话 + 定时任务，连接态记入 machineConn。
   const openControlConn = useCallback(
     (backend: string) => {
@@ -1001,13 +1029,21 @@ export default function App() {
             const key = sessionKey(backend, ev.payload.thread_id)
             if (key === activeRef.current) reloadHistory(key, ev.payload.thread_id)
           }
+          // 会话标题自动生成完成：就地更新该机器该会话的显示名，无需整表刷新。
+          // 用户手动命名过的会话跳过——晚到的自动标题不得顶掉用户敲的名字。
+          if (ev.type === 'session.title') {
+            const { thread_id, title } = ev.payload
+            if (!renamedRef.current.has(sessionKey(backend, thread_id))) {
+              patchSession(thread_id, backend, { title })
+            }
+          }
         })
         gw.onState((st) => setMachineConn((m) => ({ ...m, [backend]: st })))
         controlConns.current[backend] = gw
         gw.connect()
       })()
     },
-    [refreshSessions, refreshCronJobs, refreshChannels, reloadHistory, reconnectMachine],
+    [refreshSessions, refreshCronJobs, refreshChannels, reloadHistory, reconnectMachine, patchSession],
   )
 
   // 同步机器表 → 开新机器的控制连接、关掉已删机器的，刷新会话。BackendsPanel 增删后回调此。
@@ -1110,7 +1146,7 @@ export default function App() {
 
   // provider 列表响应统一回写；顶部模型显示随活动机器的 active 模型修正
   const applyProviderResp = useCallback(
-    (r: { profiles?: ProviderProfile[]; active?: ActiveModel; classifier?: Classifier }) => {
+    (r: { profiles?: ProviderProfile[]; active?: ActiveModel; classifier?: ModelPointer }) => {
       setProviders(r.profiles ?? [])
       setActiveModel(r.active ?? { provider: '', model: '' })
       setModel(r.active?.model ?? '')
@@ -1347,15 +1383,6 @@ export default function App() {
     [cronBackendOf, gwForBackend, openRunThread],
   )
 
-  // 乐观局部更新某会话字段（pin/重命名共用）。按 thread + backend 精确匹配：飞书群在
-  // 本地/远程 thread 同名，只按 thread 会把另一台机器的同名会话一起改了。
-  const patchSession = useCallback(
-    (tid: string, backend: string, patch: Partial<SessionMeta>) =>
-      setSessions((prev) =>
-        prev.map((s) => (s.thread_id === tid && beOf(s) === backend ? { ...s, ...patch } : s)),
-      ),
-    [],
-  )
   // 会话标记（pin/重命名/删除）存在各机器自己的 ~/.lumi，故按会话所属机器路由（backend 由行透传）
   const pinSession = useCallback(
     (tid: string, backend: string, pinned: boolean) => {
@@ -1372,12 +1399,19 @@ export default function App() {
 
   const renameSession = useCallback(
     (tid: string, backend: string, title: string) => {
-      // 乐观更新；成功后再断言一次，纠正并发刷新回退；失败则刷新回滚
+      // 乐观更新；成功后再断言一次，纠正并发刷新回退；失败则刷新回滚。
+      // 手动命名标记（清空命名即撤销）挡住晚到的 session.title 自动标题广播。
+      const key = sessionKey(backend, tid)
+      if (title) renamedRef.current.add(key)
+      else renamedRef.current.delete(key)
       patchSession(tid, backend, { title })
       gwForBackend(backend)
         ?.renameSession(tid, title)
         .then(() => patchSession(tid, backend, { title }))
-        .catch(() => { void refreshSessions() })
+        .catch(() => {
+          renamedRef.current.delete(key) // 后端未写入，标记随之回滚
+          void refreshSessions()
+        })
     },
     [gwForBackend, refreshSessions, patchSession],
   )
@@ -1503,13 +1537,36 @@ export default function App() {
     }))
     setInput('')
     setAttachments([])
-    // 纯文本的已知斜杠命令走 run_command；带附件则一律走 send_message
+    // 纯文本的已知斜杠命令走 run_command；带附件则一律走 send_message。
+    // 注意此分支在乐观插入之前：/compact、/dream 这类不产生 checkpoint 的命令
+    // 不该插条目（后端永远列不出，回合结束刷新时会当着用户的面消失）。
     if (attachments.length === 0 && text.startsWith('/')) {
       const [name, extra] = parseCommand(text)
       if (commands.some((c) => c.name === name)) {
         gw.runCommand(name, extra, toolMode).catch(() => resetRunning(active))
         return
       }
+    }
+    // 新会话首条消息：checkpoint 未落盘前后端列不出来，先乐观插入侧栏条目——
+    // 否则首轮期间会话在侧栏缺席、切出去就回不来。回合结束的整表刷新会以
+    // 后端真实数据替换（display_time 沿用后端的相对时间文案格式）。
+    const tid = keyThread(active)
+    const be = keyBackend(active)
+    if (!sessionsRef.current.some((s) => s.thread_id === tid && beOf(s) === be)) {
+      setSessions((prev) => [
+        {
+          thread_id: tid,
+          first_message: text,
+          title: '',
+          pinned: false,
+          created_at: new Date().toISOString(),
+          message_count: 1,
+          display_time: 'just now',
+          workspace_dir: workspaceDir,
+          backend: be,
+        },
+        ...prev,
+      ])
     }
     if (imgs.length > 0 || files.length > 0) {
       const blocks: unknown[] = text ? [{ type: 'text', text }] : []

@@ -24,7 +24,8 @@
     },
     "cron.running": { "payload": { "names": "string[]" }, "note": "当前正在执行的任务名列表，开始/结束时推送" },
     "bg_tasks.update": { "payload": { "tasks": "BgTask[]" }, "note": "后台任务（bash/agent/workflow）状态或进度变更，广播全量快照，前端按 thread_id 过滤；task 含 kind/status/output_file/progress" },
-    "channel.activity": { "payload": { "thread_id": "string", "channel": "string" }, "note": "IM 渠道会话跑完一轮，由 BroadcastHub 直接广播（不经 EventKind）；desktop 据此刷新会话列表，正在旁观该会话时重载历史" }
+    "channel.activity": { "payload": { "thread_id": "string", "channel": "string" }, "note": "IM 渠道会话跑完一轮，由 BroadcastHub 直接广播（不经 EventKind）；desktop 据此刷新会话列表，正在旁观该会话时重载历史" },
+    "session.title": { "payload": { "thread_id": "string", "title": "string" }, "note": "desktop 会话首轮结束后自动生成标题完成，由 BroadcastHub 直接广播；前端就地更新侧栏该会话的显示名" }
   },
   "events_note": "任意事件 payload 都可能附带 parent_run_id（非空时表示属于某个子代理）",
   "methods": {
@@ -33,13 +34,14 @@
     "stop": { "params": [], "result": ["stopped"], "note": "中止当前流式轮，取消后补发 turn.complete" },
     "list_commands": { "params": [], "result": ["commands"] },
     "run_command": { "params": ["name", "extra_text?", "tool_mode?"], "streaming": true },
-    "list_providers": { "params": [], "result": ["profiles", "active", "classifier"], "note": "profile.thinking[model] = {control: none|effort|toggle, levels, effort}；control 决定渲染形态，前端零推导。classifier = {provider, model}（auto 审批分类器模型，空=跟随会话模型）" },
+    "list_providers": { "params": [], "result": ["profiles", "active", "classifier", "titler"], "note": "profile.thinking[model] = {control: none|effort|toggle, levels, effort}；control 决定渲染形态，前端零推导。classifier / titler = {provider, model}（auto 审批分类器 / 会话标题生成模型，空=跟随会话模型）" },
     "test_provider": { "params": ["base_url", "api_key", "model"], "result": ["ok", "error?", "latency_ms?"] },
     "set_provider": { "params": ["provider", "model"], "result": ["active", "model"] },
     "save_provider": { "params": ["profile"], "result": ["profiles", "active"] },
     "delete_provider": { "params": ["id"], "result": ["profiles", "active"] },
     "set_effort": { "params": ["provider", "model", "level"], "result": ["effort"], "note": "按模型设置思考档位（合法值=该模型 thinking.levels），持久化、下一轮生效" },
     "set_classifier": { "params": ["provider", "model"], "result": ["classifier"], "note": "设置 auto 审批模式的分类器模型指针，持久化、下一轮生效；provider/model 均空=清除(跟随会话模型)" },
+    "set_titler": { "params": ["provider", "model"], "result": ["titler"], "note": "设置会话标题生成模型指针，持久化、下一次标题生成生效；provider/model 均空=清除(跟随会话模型)" },
     "set_tool_mode": { "params": ["tool_mode"], "result": ["tool_mode"], "note": "运行中实时切换工具审批模式（改共享 context.tool_mode，对当前轮后续工具立即生效）；不持锁、不持久化" },
     "set_workspace": { "params": ["path"], "result": ["workspace"], "note": "切换进程级工作目录（项目切换）：权限边界、bash 会话、会话列表过滤随之切换，已有会话不迁移" },
     "list_projects": { "params": [], "result": ["projects", "current"], "note": "手动登记的项目清单（~/.lumi/projects.json），按最近使用降序" },

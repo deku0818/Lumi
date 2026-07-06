@@ -221,8 +221,10 @@ async def _list_sessions(bridge: AgentBridge, params: dict) -> dict:
             {
                 "thread_id": s.thread_id,
                 "first_message": s.first_message,
-                # 手动重命名 > 渠道自动名（飞书群名/私聊对方姓名，入站时写 sidecar）
-                "title": entry.get("title") or entry.get("channel_title", ""),
+                # 手动重命名 > 渠道自动名（飞书群名/私聊对方姓名）> 自动生成标题
+                "title": entry.get("title")
+                or entry.get("channel_title")
+                or entry.get("auto_title", ""),
                 "pinned": bool(entry.get("pinned", False)),
                 "created_at": s.created_at.isoformat(),
                 "message_count": s.message_count,
@@ -320,6 +322,13 @@ async def _set_classifier(session: GatewaySession, params: dict) -> dict:
     # 同样走 provider_store load→改→save，持锁防与并发 provider 写操作 clobber。
     async with session._run.lock:
         return session._bridge.set_classifier(
+            params.get("provider", ""), params.get("model", "")
+        )
+
+
+async def _set_titler(session: GatewaySession, params: dict) -> dict:
+    async with session._run.lock:
+        return session._bridge.set_titler(
             params.get("provider", ""), params.get("model", "")
         )
 
@@ -533,6 +542,7 @@ _RPC_HANDLERS = {
     "delete_provider": _delete_provider,
     "set_effort": _set_effort,
     "set_classifier": _set_classifier,
+    "set_titler": _set_titler,
     "set_tool_mode": _set_tool_mode,
     "set_workspace": _set_workspace,
     "list_projects": _list_projects,
@@ -582,6 +592,11 @@ class GatewaySession:
         self._ttl_task: asyncio.Task | None = None
         # 当前 _run.task 是否为后台通知 meta 轮（无用户在等）——断连时不值得 detach 续接
         self._meta_run: bool = False
+        # 标题生成状态（按 thread）：pending 防同线程并发生成（后发的会抢在
+        # 首条话题消息前定标题）；done 是本连接已知不必再试的 thread（已定稿 /
+        # 手动名 / 生成失败放弃），使帧路径免于每条消息读盘
+        self._title_pending: set[str] = set()
+        self._title_done: set[str] = set()
 
     @property
     def current_thread_id(self) -> str:
@@ -690,6 +705,10 @@ class GatewaySession:
             self._run.task = asyncio.create_task(
                 self._run_streaming_rpc(rid, self._stream_gen(method, params))
             )
+            # 标题在消息发出时就机会性生成（不等本轮跑完，几秒内上屏，对齐
+            # claude-code）；斜杠命令是合成消息、不是用户话题，不触发。
+            if method == "send_message":
+                self._maybe_generate_title(params.get("content", ""))
             return
 
         task = asyncio.create_task(self._run_rpc(rid, method, params))
@@ -797,6 +816,74 @@ class GatewaySession:
                     await self._channel.send({"id": rid, "error": {"message": str(e)}})
         finally:
             self._run.task = None
+
+    def _maybe_generate_title(self, content: str | list) -> None:
+        """用户消息发出时机会性生成会话标题（后台跑，不等本轮完成）。
+
+        第 1 条可见用户消息：直接从消息文本生成；已有 auto_title 则到第 3 条时
+        用对话尾部再生成一次（纠正话题漂移）后定稿（auto_title_final）。手动
+        title / 渠道会话不生成。帧路径只做内存判断，读盘与状态检查全在后台任务里。
+        """
+        tid = self._bridge.current_thread_id
+        if (
+            not tid
+            or tid in self._title_done
+            or tid in self._title_pending
+            or _channel_of(tid)
+        ):
+            return
+        text = extract_display_text(extract_text_content(content))
+        if not text:
+            return
+        # pending 并发闩：首条消息的生成还在跑时，后续消息不再另起生成任务
+        # （否则后发的会用跟进语单独定标题、抢掉真正带话题的首条）
+        self._title_pending.add(tid)
+        task = asyncio.create_task(self._generate_title(tid, text))
+        self._rpc_tasks.add(task)
+        task.add_done_callback(self._rpc_tasks.discard)
+
+    async def _generate_title(self, tid: str, text: str) -> None:
+        from lumi.gateway.titler import generate_title, refresh_digest
+
+        try:
+            entry = load_all().get(tid, {})
+            if (
+                entry.get("title")
+                or entry.get("channel_title")
+                or entry.get("auto_title_final")
+            ):
+                self._title_done.add(tid)
+                return
+            refresh = bool(entry.get("auto_title"))
+            digest = text
+            if refresh:
+                digest = refresh_digest(await self._bridge.snapshot_messages(tid), text)
+                if not digest:  # 还没到第 3 条可见用户消息
+                    return
+            title = await generate_title(digest)
+            if not title:
+                return
+            # 生成期间会话可能已被删除（delete_meta 已清）：无 checkpoint 即不写，
+            # 否则会往 sidecar 复活一条永久幽灵条目
+            if not await self._bridge.snapshot_messages(tid):
+                return
+            # 生成期间用户可能已手动重命名：写入前重查（到写盘无 await，无竞态窗），
+            # 手动名永远优先
+            entry = load_all().get(tid, {})
+            if entry.get("title") or entry.get("channel_title"):
+                self._title_done.add(tid)
+                return
+            update_meta(tid, auto_title=title, auto_title_final=refresh)
+            if refresh:
+                self._title_done.add(tid)
+            self._hub.on_session_title(tid, title)
+        except Exception:
+            logger.warning("[titler] 生成会话标题失败 thread=%s", tid, exc_info=True)
+            # 现实中的失败（titler 指针密钥失效等）是持久性的：本连接内直接放弃，
+            # 不为每条消息白付一次注定失败的 LLM 调用
+            self._title_done.add(tid)
+        finally:
+            self._title_pending.discard(tid)
 
     async def _notification_loop(self) -> None:
         """后台任务完成通知轮询。

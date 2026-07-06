@@ -47,7 +47,7 @@ from lumi.agents.permissions.models import PermissionDecision
 from lumi.agents.permissions.routing import route_decision
 from lumi.models.chain import structured_output, tool_call_chain
 from lumi.models.manager import detect_protocol
-from lumi.models.provider_store import resolve_classifier
+from lumi.models.provider_store import resolve_pointer
 from lumi.utils.logger import logger
 from lumi.utils.read_config import get_config
 from lumi.utils.sizing import context_window_tokens
@@ -555,10 +555,7 @@ async def auto_classify(
     # （如解析到的分类器模型缺 api_key），fail-closed 须覆盖构造与调用全程。
     try:
         # 分类器模型独立可配（lumi.json providers 分区的 classifier 指针）；未配则回退会话模型。
-        clf = resolve_classifier()
-        conn = {
-            k: v for k, v in (("base_url", clf.base_url), ("api_key", clf.api_key)) if v
-        }
+        clf = resolve_pointer("classifier")
         chain = structured_output(
             template=(
                 "用户最近的请求：\n{user_intent}\n\n"
@@ -568,7 +565,7 @@ async def auto_classify(
             structure=_ClassifierVerdict,
             system_prompt=_CLASSIFIER_SYSTEM,
             model_name=clf.model,
-            **conn,
+            **clf.conn_kwargs(),
         )
         verdict: _ClassifierVerdict = await chain.ainvoke(
             {

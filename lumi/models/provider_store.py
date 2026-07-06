@@ -7,11 +7,12 @@ active 指向「某 profile 下的某个 model」。存储为 ~/.lumi/lumi.json 
 
     {"active": {"provider": "<id>", "model": "<model>"},
      "classifier": {"provider": "<id>", "model": "<model>"},   # auto 审批分类器模型，可缺省
+     "titler": {"provider": "<id>", "model": "<model>"},       # 会话标题生成模型，可缺省
      "profiles": [{"id","name","base_url","api_key",
                    "models":["m1","m2"], "effort":{"m1":"high"}}, ...]}
 
-顶级 classifier 是 auto 工具审批模式的分类器模型指针（独立于对话 active），
-缺省/失效时回退会话 active 模型。
+classifier / titler 是独立于对话 active 的「用途指针」（auto 审批裁决 / 会话标题生成），
+缺省/失效时回退会话 active 模型；经 get_pointer / resolve_pointer / set_pointer 读写。
 
 无 textual 依赖，可在 headless 服务（lumi serve）中直接使用。
 兼容旧格式（profile 用单个 "model" 字段、active 为字符串 id；
@@ -29,6 +30,9 @@ from lumi.utils.config import user_store
 # active 选中项：provider id + 该 provider 下的某个 model
 Active = dict  # {"provider": str, "model": str}
 _EMPTY_ACTIVE: Active = {"provider": "", "model": ""}
+
+# 用途指针：独立于对话 active 的按用途模型选择（存储键 = 指针名）
+_POINTER_KINDS = ("classifier", "titler")
 
 
 @dataclass(frozen=True)
@@ -92,21 +96,18 @@ def _read_data() -> dict:
     return user_store.read_section("providers", {})
 
 
-def _parse(data: dict) -> tuple[list[ProviderProfile], Active, dict]:
-    """从一次读盘的 data 解出 (profiles, 规范化 active, 规范化 classifier)。"""
+def _parse(data: dict) -> tuple[list[ProviderProfile], Active, dict[str, dict]]:
+    """从一次读盘的 data 解出 (profiles, 规范化 active, 规范化用途指针表)。"""
     profiles = [p for p in map(_coerce_profile, data.get("profiles", [])) if p]
     raw_active = data.get("active", {})
     if isinstance(raw_active, str):  # 旧格式：active 为 provider id
         raw_active = {"provider": raw_active, "model": ""}
-    return (
-        profiles,
-        _normalize_active(profiles, raw_active),
-        _kept_pointer(profiles, data.get("classifier")),
-    )
+    pointers = {k: _kept_pointer(profiles, data.get(k)) for k in _POINTER_KINDS}
+    return profiles, _normalize_active(profiles, raw_active), pointers
 
 
-def _load_all() -> tuple[list[ProviderProfile], Active, dict]:
-    """一次读盘解出 (profiles, active, classifier)——mutator 用它避免为 classifier 再读一次。"""
+def _load_all() -> tuple[list[ProviderProfile], Active, dict[str, dict]]:
+    """一次读盘解出 (profiles, active, pointers)——mutator 用它避免为指针再读一次。"""
     return _parse(_read_data())
 
 
@@ -116,16 +117,19 @@ def load() -> tuple[list[ProviderProfile], Active]:
     return profiles, active
 
 
-def _save(profiles: list[ProviderProfile], active: dict, classifier: dict) -> None:
-    # classifier 由调用方传入（写操作前已随 _load_all 一并读出，无需 _save 再读盘）；
+def _save(
+    profiles: list[ProviderProfile], active: dict, pointers: dict[str, dict]
+) -> None:
+    # pointers 由调用方传入（写操作前已随 _load_all 一并读出，无需 _save 再读盘）；
     # 按当前 profiles 规范化，profile/model 被删时自动清失效指针。
     payload = {
         "active": _normalize_active(profiles, active),
         "profiles": [{**asdict(p), "models": list(p.models)} for p in profiles],
     }
-    norm = _kept_pointer(profiles, classifier)
-    if norm:
-        payload["classifier"] = norm
+    for kind, ptr in pointers.items():
+        norm = _kept_pointer(profiles, ptr)
+        if norm:
+            payload[kind] = norm
     user_store.write_section("providers", payload)
 
 
@@ -137,7 +141,7 @@ def set_effort(provider_id: str, model: str, level: str) -> str | None:
     """
     if level != "auto" and level not in allowed_levels(model):
         return None
-    profiles, active, classifier = _load_all()
+    profiles, active, pointers = _load_all()
     prof = next((p for p in profiles if p.id == provider_id), None)
     if prof is None or model not in prof.models:
         return None
@@ -146,7 +150,7 @@ def set_effort(provider_id: str, model: str, level: str) -> str | None:
         effort[model] = level
     out = [p for p in profiles if p.id != provider_id]
     out.append(replace(prof, effort=effort))
-    _save(out, active, classifier)
+    _save(out, active, pointers)
     return level
 
 
@@ -158,6 +162,14 @@ class ResolvedModel:
     base_url: str
     api_key: str
     effort: str = "auto"
+
+    def conn_kwargs(self) -> dict:
+        """非空的 base_url / api_key 连接参数，直接 ** 进 create_llm / chain 工厂。"""
+        return {
+            k: v
+            for k, v in (("base_url", self.base_url), ("api_key", self.api_key))
+            if v
+        }
 
 
 def resolve(model_name: str | None = None) -> ResolvedModel:
@@ -200,35 +212,43 @@ def resolve_vision() -> ResolvedModel | None:
     return replace(resolve(cfg.model), effort="auto")
 
 
-def get_classifier() -> dict:
-    """返回规范化后的 auto 审批分类器指针 {provider, model}；未配/失效为空 dict。"""
-    _, _, classifier = _parse(_read_data())  # 单次读盘
-    return classifier
+def get_pointer(kind: str) -> dict:
+    """返回规范化后的用途指针 {provider, model}；未配/失效为空 dict。"""
+    return get_pointers()[kind]
 
 
-def resolve_classifier() -> ResolvedModel:
-    """解析 auto 审批分类器模型 + 连接（按 provider id 精确取 base_url/api_key）。
+def get_pointers() -> dict[str, dict]:
+    """一次读盘返回全部用途指针表（list_providers 一并下发两个指针时免重复读）。"""
+    _, _, pointers = _parse(_read_data())
+    return pointers
 
-    未配置或指针失效 → 回退会话 active 模型（= 不单独配分类器时的行为）。
+
+def resolve_pointer(kind: str) -> ResolvedModel:
+    """解析某用途指针的模型 + 连接（按 provider id 精确取 base_url/api_key）。
+
+    未配置或指针失效 → 回退会话 active 模型（= 不单独配置时的行为）。
     """
-    profiles, _, c = _parse(_read_data())  # 单次读盘，同时拿 profiles 与规范化指针
-    if not c:
+    profiles, _, pointers = _parse(
+        _read_data()
+    )  # 单次读盘，同时拿 profiles 与规范化指针
+    ptr = pointers[kind]
+    if not ptr:
         return resolve()  # 跟随会话模型
-    # c 已由 _parse 对同一 profiles 规范化，provider 必存在
-    prof = next(p for p in profiles if p.id == c["provider"])
-    return ResolvedModel(c["model"], prof.base_url, prof.api_key, "auto")
+    # ptr 已由 _parse 对同一 profiles 规范化，provider 必存在
+    prof = next(p for p in profiles if p.id == ptr["provider"])
+    return ResolvedModel(ptr["model"], prof.base_url, prof.api_key, "auto")
 
 
-def set_classifier(provider_id: str, model: str) -> dict:
-    """设置/清除 auto 审批分类器指针并持久化，返回规范化后的指针（清除时为空 dict）。
+def set_pointer(kind: str, provider_id: str, model: str) -> dict:
+    """设置/清除某用途指针并持久化，返回规范化后的指针（清除时为空 dict）。
 
     provider_id 与 model 均空 → 清除（跟随会话模型）；指向不存在的 (provider, model)
-    → 同样视为清除（规范化丢弃，回退会话模型）。
+    → 同样视为清除（规范化丢弃，回退会话模型）。其余指针原样保留。
     """
-    profiles, active = load()
-    c = {"provider": provider_id, "model": model} if provider_id and model else {}
-    _save(profiles, active, c)
-    return _kept_pointer(profiles, c)
+    profiles, active, pointers = _load_all()
+    ptr = {"provider": provider_id, "model": model} if provider_id and model else {}
+    _save(profiles, active, {**pointers, kind: ptr})
+    return _kept_pointer(profiles, ptr)
 
 
 def upsert(profile: dict) -> ProviderProfile:
@@ -236,7 +256,7 @@ def upsert(profile: dict) -> ProviderProfile:
 
     思考档位不经此通道（set_effort 专用）：保留旧记录中仍存在的模型的档位。
     """
-    profiles, active, classifier = _load_all()
+    profiles, active, pointers = _load_all()
     pid = profile.get("id") or uuid.uuid4().hex[:8]
     seen: set[str] = set()
     models = tuple(
@@ -256,21 +276,21 @@ def upsert(profile: dict) -> ProviderProfile:
     )
     out = [p for p in profiles if p.id != pid]
     out.append(saved)
-    _save(out, active, classifier)  # active 由 _save 规范化（首条/失效自动归位）
+    _save(out, active, pointers)  # active 由 _save 规范化（首条/失效自动归位）
     return saved
 
 
 def delete(pid: str) -> None:
-    profiles, active, classifier = _load_all()
-    _save([p for p in profiles if p.id != pid], active, classifier)
+    profiles, active, pointers = _load_all()
+    _save([p for p in profiles if p.id != pid], active, pointers)
 
 
 def set_active(provider_id: str, model: str) -> Active | None:
     """切换 active 到 (provider, model)；provider 或 model 不存在返回 None。"""
-    profiles, _, classifier = _load_all()
+    profiles, _, pointers = _load_all()
     prof = next((p for p in profiles if p.id == provider_id), None)
     if prof is None or model not in prof.models:
         return None
     active = {"provider": provider_id, "model": model}
-    _save(profiles, active, classifier)
+    _save(profiles, active, pointers)
     return active

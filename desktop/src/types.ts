@@ -63,6 +63,7 @@ export interface WireEventPayloads extends Record<WireEventType, object> {
   'cron.running': { names: string[] }
   'bg_tasks.update': { tasks: BgTask[] }
   'channel.activity': { thread_id: string; channel: string }
+  'session.title': { thread_id: string; title: string }
 }
 
 // 判别联合：按 type 收窄到对应 payload。任意 payload 都可能附带 parent_run_id
@@ -151,9 +152,9 @@ export interface ActiveModel {
   model: string
 }
 
-// auto 审批分类器模型指针（providers.json 顶级 classifier）。
+// 用途模型指针（providers 分区顶级 classifier / titler：auto 审批分类器、会话标题生成）。
 // provider/model 均空 = 未配置（跟随会话模型）。
-export type Classifier = { provider: string; model: string } | Record<string, never>
+export type ModelPointer = { provider: string; model: string } | Record<string, never>
 
 // 工具审批模式（对齐后端 LumiAgentState.tool_mode）
 export type ToolMode = 'default' | 'accept_edits' | 'privileged' | 'auto'

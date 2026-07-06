@@ -64,6 +64,14 @@ class BroadcastHub:
             )
         )
 
+    def on_session_title(self, thread_id: str, title: str) -> None:
+        """会话标题自动生成完成：广播给所有连接更新侧栏该会话的显示名。"""
+        self._spawn(
+            self._delivery.send_event(
+                "session.title", {"thread_id": thread_id, "title": title}
+            )
+        )
+
     def on_bg_task_change(self) -> None:
         """TaskRegistry 同步回调：标脏并安排一次去抖广播（全量快照，前端按 thread 过滤）。"""
         self._bg_dirty = True

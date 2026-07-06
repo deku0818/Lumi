@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useState } from 'react'
+import { useCallback, useEffect, useState, type ReactNode } from 'react'
 import {
   Check,
   Pencil,
@@ -8,9 +8,10 @@ import {
   ArrowLeft,
   HelpCircle,
   Shield,
+  Type,
   X,
 } from 'lucide-react'
-import type { ActiveModel, Classifier, ProviderProfile } from '../types'
+import type { ActiveModel, ModelPointer, ProviderProfile } from '../types'
 import type { Gateway } from '../gateway'
 import { useI18n } from '../i18n'
 import { MachineTabs } from './MachineTabs'
@@ -57,7 +58,8 @@ export function ProvidersPanel({
   const [machine, setMachine] = useState('local')
   const [profiles, setProfiles] = useState<ProviderProfile[]>([])
   const [active, setActive] = useState<ActiveModel>({ provider: '', model: '' })
-  const [classifier, setClassifier] = useState<Classifier>({})
+  const [classifier, setClassifier] = useState<ModelPointer>({})
+  const [titler, setTitler] = useState<ModelPointer>({})
   const [form, setForm] = useState<Form | null>(null) // null = 列表视图
 
   const reload = useCallback(() => {
@@ -67,6 +69,7 @@ export function ProvidersPanel({
         setProfiles(r.profiles ?? [])
         setActive(r.active ?? { provider: '', model: '' })
         setClassifier(r.classifier ?? {})
+        setTitler(r.titler ?? {})
       })
       .catch(() => {})
   }, [gwFor, machine])
@@ -79,12 +82,14 @@ export function ProvidersPanel({
   const apply = (r: {
     profiles?: ProviderProfile[]
     active?: ActiveModel
-    classifier?: Classifier
+    classifier?: ModelPointer
+    titler?: ModelPointer
   }) => {
     setProfiles(r.profiles ?? [])
     setActive(r.active ?? { provider: '', model: '' })
-    // 删/改 provider 后端会规范化清掉失效的分类器指针，须同步回写避免 UI 陈旧
+    // 删/改 provider 后端会规范化清掉失效的用途指针，须同步回写避免 UI 陈旧
     setClassifier(r.classifier ?? {})
+    setTitler(r.titler ?? {})
     onChanged(machine)
   }
   const onSwitch = (provider: string, model: string) =>
@@ -94,12 +99,21 @@ export function ProvidersPanel({
         onChanged(machine)
       })
       .catch(() => {})
-  // 分类器指针：传相同 (provider, model) 视为取消 → 回退「跟随会话模型」（空）
+  // 用途指针：传相同 (provider, model) 视为取消 → 回退「跟随会话模型」（空）
   const pickClassifier = (provider: string, model: string) => {
     const same = classifier.provider === provider && classifier.model === model
     gw?.setClassifier(same ? '' : provider, same ? '' : model)
       .then((r) => {
         setClassifier(r.classifier ?? {})
+        onChanged(machine)
+      })
+      .catch(() => {})
+  }
+  const pickTitler = (provider: string, model: string) => {
+    const same = titler.provider === provider && titler.model === model
+    gw?.setTitler(same ? '' : provider, same ? '' : model)
+      .then((r) => {
+        setTitler(r.titler ?? {})
         onChanged(machine)
       })
       .catch(() => {})
@@ -182,52 +196,96 @@ export function ProvidersPanel({
         </div>
       )}
 
-      {/* 审批分类器模型（auto 模式专用，独立于会话模型）。无 provider 时不渲染 */}
+      {/* 用途模型指针（独立于会话模型）：审批分类器 / 会话标题生成。无 provider 时不渲染 */}
       {profiles.length > 0 && (
-        <div className="mt-7">
-          <h3 className="flex items-center gap-2 text-sm font-medium">
-            <Shield size={15} className="text-primary shrink-0" />
-            {t('classifier.title')}
-          </h3>
-          <p className="mt-0.5 mb-3 text-[11.5px] text-muted-foreground">{t('classifier.desc')}</p>
-
-          {/* 跟随会话模型（默认 = classifier 为空） */}
-          <button
-            onClick={() => pickClassifier('', '')}
-            className={`w-full flex items-center gap-2 px-3 py-2 mb-2 rounded-xl border border-dashed transition ${
-              !classifier.provider
-                ? 'border-primary/40 bg-primary/5'
-                : 'border-line/40 hover:bg-canvas/60'
-            }`}
-          >
-            <span className={!classifier.provider ? 'lumi-orb-idle lumi-orb shrink-0' : 'size-2 rounded-full bg-muted-foreground/40 shrink-0'} />
-            <span className="flex-1 min-w-0 text-left">
-              <span className="block text-[13px]">{t('classifier.follow')}</span>
-              <span className="block text-[11px] text-muted-foreground">{t('classifier.followHint')}</span>
-            </span>
-            {!classifier.provider && <Check size={14} className="text-primary shrink-0" />}
-          </button>
-
-          <div className="space-y-2">
-            {profiles.map((p) => (
-              <div key={p.id} className="px-3 py-2 rounded-xl border border-line/40">
-                <div className="text-[13px] font-medium mb-1.5">{p.name}</div>
-                <div className="flex flex-wrap gap-1.5">
-                  {p.models.map((m) => (
-                    <ModelChip
-                      key={m}
-                      label={m}
-                      selected={classifier.provider === p.id && classifier.model === m}
-                      title={t('classifier.use')}
-                      onClick={() => pickClassifier(p.id, m)}
-                    />
-                  ))}
-                </div>
-              </div>
-            ))}
-          </div>
-        </div>
+        <>
+          <PointerSection
+            icon={<Shield size={15} className="text-primary shrink-0" />}
+            title={t('classifier.title')}
+            desc={t('classifier.desc')}
+            useHint={t('classifier.use')}
+            pointer={classifier}
+            profiles={profiles}
+            onPick={pickClassifier}
+          />
+          <PointerSection
+            icon={<Type size={15} className="text-primary shrink-0" />}
+            title={t('titler.title')}
+            desc={t('titler.desc')}
+            useHint={t('titler.use')}
+            pointer={titler}
+            profiles={profiles}
+            onPick={pickTitler}
+          />
+        </>
       )}
+    </div>
+  )
+}
+
+// 用途模型指针的选择区块：「跟随会话模型」+ 按 provider 分组的模型 chip。
+// 审批分类器与会话标题生成两处共用；再点已选中的 chip 视为取消（回退跟随）。
+function PointerSection({
+  icon,
+  title,
+  desc,
+  useHint,
+  pointer,
+  profiles,
+  onPick,
+}: {
+  icon: ReactNode
+  title: string
+  desc: string
+  useHint: string
+  pointer: ModelPointer
+  profiles: ProviderProfile[]
+  onPick: (provider: string, model: string) => void
+}) {
+  const { t } = useI18n()
+  return (
+    <div className="mt-7">
+      <h3 className="flex items-center gap-2 text-sm font-medium">
+        {icon}
+        {title}
+      </h3>
+      <p className="mt-0.5 mb-3 text-[11.5px] text-muted-foreground">{desc}</p>
+
+      {/* 跟随会话模型（默认 = 指针为空） */}
+      <button
+        onClick={() => onPick('', '')}
+        className={`w-full flex items-center gap-2 px-3 py-2 mb-2 rounded-xl border border-dashed transition ${
+          !pointer.provider
+            ? 'border-primary/40 bg-primary/5'
+            : 'border-line/40 hover:bg-canvas/60'
+        }`}
+      >
+        <span className={!pointer.provider ? 'lumi-orb-idle lumi-orb shrink-0' : 'size-2 rounded-full bg-muted-foreground/40 shrink-0'} />
+        <span className="flex-1 min-w-0 text-left">
+          <span className="block text-[13px]">{t('pointer.follow')}</span>
+          <span className="block text-[11px] text-muted-foreground">{t('pointer.followHint')}</span>
+        </span>
+        {!pointer.provider && <Check size={14} className="text-primary shrink-0" />}
+      </button>
+
+      <div className="space-y-2">
+        {profiles.map((p) => (
+          <div key={p.id} className="px-3 py-2 rounded-xl border border-line/40">
+            <div className="text-[13px] font-medium mb-1.5">{p.name}</div>
+            <div className="flex flex-wrap gap-1.5">
+              {p.models.map((m) => (
+                <ModelChip
+                  key={m}
+                  label={m}
+                  selected={pointer.provider === p.id && pointer.model === m}
+                  title={useHint}
+                  onClick={() => onPick(p.id, m)}
+                />
+              ))}
+            </div>
+          </div>
+        ))}
+      </div>
     </div>
   )
 }

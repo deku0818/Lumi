@@ -1,6 +1,15 @@
 # Changelog
 
-## [0.2.29] - 2026-07-06
+## [0.2.30] - 2026-07-06
+
+### Added
+- **会话标题自动生成**（`gateway/titler.py`，对齐 claude-code sessionTitle 机制）— desktop 会话第 1 条可见用户消息发出时即后台生成标题（不等本轮跑完，几秒内上屏），第 3 条消息时用对话尾部 1000 字符再生成一次纠正话题漂移后定稿；结果存 session_meta sidecar 的 `auto_title`（展示优先级 手动 title > 渠道 channel_title > auto_title > 首条消息），经新事件 `session.title` 广播、前端就地更新侧栏。斜杠命令等合成消息不触发；IM 渠道会话有 `channel_title` 不生成；生成失败本连接内放弃不重试；写入前重查会话存在性（防删除竞态复活幽灵 meta 条目）与手动重命名（手动名永远优先，前端另有本窗口手动命名标记挡晚到广播）
+- **titler 模型指针** — providers 分区新增顶级 `titler` 指针（`set_titler` RPC + 设置→模型面板「会话标题模型」区块，与分类器共用 `PointerSection` 选择 UI），未配置时跟随会话 active 模型；provider_store 的 classifier 专属存取泛化为命名指针（`get_pointer`/`get_pointers`/`resolve_pointer`/`set_pointer`，`_POINTER_KINDS`），互不丢失、删 profile 自动清失效指针
+- **新会话侧栏即时可见** — 首条消息发出时前端乐观插入会话条目（此前首轮跑完前会话在侧栏缺席、切出去回不来）；`refreshSessions` 整表替换时保留「运行中或当前活动、但后端尚列不出」的条目，发送失败自然回收
+
+### Changed
+- **`ResolvedModel.conn_kwargs()`** — auto 分类器（nodes.py）、标题生成（titler.py）、视觉工具（vision.py）三处手写的 base_url/api_key 连接拼装收敛为一个访问器
+- **`list_providers` 读盘 3 次 → 1 次** — 指针表经 `get_pointers()` 一次读盘取全；`AgentBridge.snapshot_messages` 支持显式 `thread_id`（后台任务不依赖 bridge 当前指向）
 
 ### Added
 - **IM 长会话每日记忆整理**（`channels/feishu/daily_dream.py`）— 渠道到点对有新消息的常驻会话两阶段维护：先串行 dream 沉淀记忆（per-thread 运行锁 + 忙线程整批重试 3×180s），再并发限流 summary 压缩历史（`Semaphore` 防 429），让一群/一人一个的永久会话不无限膨胀。**次序不变量：dream 失败绝不压缩**——成功与否以快照时刻是否推进为准（bg-task 吞异常，返回值不可信），失败留到明天重试，未沉淀的历史不会被压掉。渠道 thread（`is_channel_thread` 前缀判定）同时退出 Stop 钩子的增量 dream。desktop 渠道设置新增 Dream 开关 / 执行时间 / Summary 并发配置
