@@ -3,10 +3,11 @@
 提供 LumiConfig 配置管理类和 get_config 便捷函数。
 """
 
+from __future__ import annotations
+
 import json
 import os
 from pathlib import Path
-from typing import Optional
 
 import yaml
 
@@ -18,17 +19,19 @@ from lumi.utils.logger import logger
 def parse_frontmatter(content: str) -> tuple[dict, str]:
     """解析 Markdown frontmatter → ``(metadata dict, 正文)``。
 
-    要求首行恰为 ``---`` 且后续有一行**独立成行**的 ``---`` 作闭合；正文里作分隔线用的
-    ``---`` 不会被误判。无 frontmatter 时返回 ``({}, 正文strip)``；YAML 解析失败或非
-    dict 也返回空 metadata，不抛。Agent/Skill 加载与记忆索引规范化共用同一套解析。
+    要求首行恰为 ``---``（容忍 BOM 和开头空白）且后续有一行**独立成行**的 ``---``
+    作闭合；正文里作分隔线用的 ``---`` 不会被误判。无 frontmatter 时返回
+    ``({}, 正文strip)``；YAML 解析失败或非 dict 也返回空 metadata，不抛。
+    Agent/Skill 加载与记忆索引规范化共用同一套解析。
     """
-    lines = content.splitlines()
+    lines = content.lstrip("﻿ \t\r\n").splitlines()
     if lines and lines[0].strip() == "---":
         for i in range(1, len(lines)):
             if lines[i].strip() == "---":
                 try:
                     meta = yaml.safe_load("\n".join(lines[1:i])) or {}
-                except yaml.YAMLError:
+                except yaml.YAMLError as e:
+                    logger.warning(f"frontmatter YAML 解析失败: {e}")
                     meta = {}
                 if not isinstance(meta, dict):
                     meta = {}
@@ -50,7 +53,7 @@ class LumiConfig:
     支持从动态发现的配置目录加载配置，提供各种配置路径的访问方法。
     """
 
-    _instance: Optional["LumiConfig"] = None
+    _instance: LumiConfig | None = None
 
     def __init__(self, config_dir: str | None = None):
         """初始化配置管理器
@@ -77,7 +80,7 @@ class LumiConfig:
     @classmethod
     def get_instance(
         cls, config_dir: str | None = None, reset: bool = False
-    ) -> "LumiConfig":
+    ) -> LumiConfig:
         """获取全局单例实例
 
         Args:

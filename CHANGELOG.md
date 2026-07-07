@@ -1,5 +1,13 @@
 # Changelog
 
+## [0.2.33] - 2026-07-07
+
+### Fixed
+- **frontmatter 解析容忍 BOM 与开头空白** — Windows 编辑器写入的 UTF-8 BOM（不可见字节 `﻿`）或文件开头空行会导致 agent/skill 文件被误报「缺少有效 YAML frontmatter」而跳过加载（用户实际反馈），`parse_frontmatter` 解析前先剥离；YAML 语法错误不再静默吞掉，warning 带出真实错误原因便于定位
+
+### Changed
+- **清理最后一处旧式 `Optional` 注解** — `LumiConfig` 改用 `X | None` 写法（补 `from __future__ import annotations` 支持类体自引用），全仓库 ruff UP 规则零残留
+
 ## [0.2.32] - 2026-07-06
 
 ### Changed
