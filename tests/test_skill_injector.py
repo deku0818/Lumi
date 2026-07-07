@@ -2,8 +2,8 @@
 # Feature: dynamic-skill-loading, Property 4: 消息注入保持原始内容不变
 """SkillInjector 属性测试
 
-Property 3: 验证 format_skill_reminder() 的输出格式完整性
-Property 4: 验证 inject_skills_into_message() 注入后原始内容不变
+Property 3: 验证技能全量块（skill_lines + format_reminder）的输出格式完整性
+Property 4: 验证 inject_text_into_message() 注入后原始内容不变
 """
 
 from __future__ import annotations
@@ -14,9 +14,18 @@ from hypothesis import given, settings
 from hypothesis import strategies as st
 from langchain_core.messages import HumanMessage
 
-from lumi.agents.core.node_helpers.messages import inject_text_into_message
-from lumi.agents.core.preprocessing.skills import format_skill_reminder
+from lumi.agents.core.node_helpers.messages import (
+    format_reminder,
+    inject_text_into_message,
+)
+from lumi.agents.core.preprocessing.skills import SKILL_HEADER, skill_lines
 from lumi.agents.tools.loader import SkillConfig
+
+
+def format_skill_reminder(skills: list[SkillConfig]) -> str:
+    """全量技能块（context_inject 的组装方式：条目行 + format_reminder）。"""
+    return format_reminder(SKILL_HEADER, list(skill_lines(skills).values()))
+
 
 # --- 共用策略定义 ---
 

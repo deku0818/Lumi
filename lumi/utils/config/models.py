@@ -56,19 +56,14 @@ class AgentsConfig(BaseModel):
 class TokenConfig(BaseModel):
     """Token / 字节处理配置类
 
-    once_tool_ratio / trim_messages_ratio / summary_threshold 均为相对于
-    context_length 的比例（0~1）。阈值类（工具结果大小）以 UTF-8 字节衡量，
-    按 BYTES_PER_TOKEN 把 token 预算换算成字节；上下文窗口预算（trim / summary）
-    保持 token 语义。实际值通过属性方法计算。
+    once_tool_ratio / summary_threshold 均为相对于 context_length 的比例（0~1）。
+    阈值类（工具结果大小）以 UTF-8 字节衡量，按 BYTES_PER_TOKEN 把 token 预算换算
+    成字节；上下文窗口预算（summary）保持 token 语义。实际值通过属性方法计算。
     """
 
     once_tool_ratio: float = Field(
         default=0.1,
         description="单次工具调用返回结果最大占比（相对于 context_length），按字节衡量",
-    )
-    trim_messages_ratio: float = Field(
-        default=0.96,
-        description="消息修剪器最大 token 占比（相对于 context_length）",
     )
     context_length: int = Field(default=200000, description="模型上下文窗口最大token数")
     summary_threshold: float = Field(
@@ -96,11 +91,6 @@ class TokenConfig(BaseModel):
     def once_tool_max_bytes(self) -> int:
         """单次工具调用返回结果最大 UTF-8 字节数"""
         return int(self.context_length * self.once_tool_ratio * BYTES_PER_TOKEN)
-
-    @property
-    def trim_messages_max_tokens(self) -> int:
-        """消息修剪器最大 token 数"""
-        return int(self.context_length * self.trim_messages_ratio)
 
 
 class ToolArgsConfig(BaseModel):

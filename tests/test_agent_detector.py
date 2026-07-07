@@ -2,8 +2,7 @@
 """AgentChangeDetector 属性测试
 
 镜像 SkillChangeDetector：验证 _compute_digest() 的确定性与敏感性，
-以及 check() 的缓存语义；并覆盖 agent 特有的 None 哨兵行为
-（首次 check 必触发，使风格内置 agent 也能被注入）。
+以及 peek() 的缓存语义（变更注入语义已由 context_inject 的消息级 marker 承担）。
 """
 
 from __future__ import annotations
@@ -109,40 +108,18 @@ def test_digest_sensitivity_on_mtime_change(agents: list[tuple[str, str]]) -> No
         )
 
 
-# --- 缓存语义 + None 哨兵 ---
-
-
-def test_first_check_always_triggers_even_when_empty() -> None:
-    """空目录（无用户 agent）首次 check() 仍应返回 changed=True，
-    随后未变更返回 changed=False —— 保证风格内置 agent 至少被注入一次。
-    """
-    with tempfile.TemporaryDirectory() as tmp:
-        detector = AgentChangeDetector(agents_dir=Path(tmp))
-
-        _, changed_first = detector.check()
-        assert changed_first is True, "首次 check() 应触发（None 哨兵）"
-
-        _, changed_second = detector.check()
-        assert changed_second is False, "目录未变更时第二次 check() 应返回 False"
+# --- 缓存语义 ---
 
 
 def test_cache_correctness_after_modification() -> None:
-    """新增/修改用户 agent 文件后 check() 应返回 changed=True，且列表含新 agent。"""
+    """新增用户 agent 文件后 peek() 应反映最新列表。"""
     with tempfile.TemporaryDirectory() as tmp:
         tmp_dir = Path(tmp)
         _create_agent_file(tmp_dir, "alpha", "alpha 提示词")
 
         detector = AgentChangeDetector(agents_dir=tmp_dir)
-        agents_first, changed_first = detector.check()
-        assert changed_first is True
-        assert "alpha" in {a.name for a in agents_first}
-
-        # 未变更
-        _, changed_same = detector.check()
-        assert changed_same is False
+        assert "alpha" in {a.name for a in detector.peek()}
 
         # 新增一个 agent 文件
         _create_agent_file(tmp_dir, "beta", "beta 提示词")
-        agents_after, changed_after = detector.check()
-        assert changed_after is True, "新增 agent 文件后应返回 changed=True"
-        assert {"alpha", "beta"} <= {a.name for a in agents_after}
+        assert {"alpha", "beta"} <= {a.name for a in detector.peek()}

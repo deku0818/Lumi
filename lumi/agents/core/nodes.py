@@ -1,4 +1,5 @@
 from typing import Literal
+from uuid import uuid4
 
 from langchain_core.messages import (
     AIMessage,
@@ -30,8 +31,7 @@ from lumi.agents.core.preprocessing.compact import (
     reset_circuit,
     run_summary,
 )
-from lumi.agents.core.preprocessing.summary import inject_summary_into_message
-from lumi.agents.core.preprocessing.turn_context import build_turn_context
+from lumi.agents.core.preprocessing.summary import build_summary_carrier
 from lumi.agents.core.response import message_transform
 from lumi.agents.core.state import LumiAgentContext, LumiAgentState
 from lumi.agents.core.structured_tool import (
@@ -68,13 +68,9 @@ async def call_model(state: LumiAgentState, runtime: Runtime[LumiAgentContext]) 
         # 不强制 tool_choice：模型自决何时调用，OnAgentStop 的 Stop hook 兜底拉回。
         # 强制 tool_choice="any" 会与 Anthropic thinking 冲突（400）。
 
-    # 每轮上下文块（env/agent/skill/记忆/LUMI.md）经 tool_call_chain 作为一条 HumanMessage
-    # 插在静态 system 之后（trim 之后插入 → 免截断；CC 同构，见 turn_context / _turn_context_inserter）。
-    turn_context = build_turn_context(runtime)
     chain = tool_call_chain(
         actual_tools,
         system_prompt=system_prompt,
-        turn_context=turn_context,
         model_name=model_name,
         max_tokens=get_config().config.agents.max_tokens,
         tool_choice=None,
@@ -522,16 +518,21 @@ def _latest_user_intent(messages: list) -> str:
     跳过 meta/注入型 HumanMessage（system-reminder、工具回灌等），否则分类器会把
     系统注入内容误当成用户意图，污染安全裁决。
     """
+    from lumi.sessions.text_cleaning import strip_injected_blocks
+
     for msg in reversed(messages):
         if isinstance(msg, HumanMessage) and not is_meta_message(msg):
             content = msg.content
             if isinstance(content, str):
-                return content
-            # 多模态 content：拼接其中的文本块
-            return " ".join(
-                part.get("text", "")
-                for part in content
-                if isinstance(part, dict) and part.get("type") == "text"
+                return strip_injected_blocks(content)
+            # 多模态 content：拼接其中的文本块；剥掉持久注入的上下文块，
+            # 免得系统注入内容稀释用户意图
+            return strip_injected_blocks(
+                " ".join(
+                    part.get("text", "")
+                    for part in content
+                    if isinstance(part, dict) and part.get("type") == "text"
+                )
             )
     return ""
 
@@ -605,9 +606,12 @@ async def summarizer(
 ) -> dict:
     """串行压缩历史消息，本轮 CallModel 直接看到压缩后的 messages。
 
-    串行拓扑：``PreprocessMessages → Summarizer → CallModel``——超阈值时当轮就地
-    压缩（``RemoveMessage`` 删历史 + 摘要前置到末条 Human），即将溢出的这次调用
-    立刻受益，而非等下一轮。
+    串行拓扑：``Summarizer → PreprocessMessages → CallModel``——超阈值时当轮就地
+    压缩（``RemoveMessage`` 删历史 + 摘要作独立 carrier 消息插在末条 Human 之前），
+    即将溢出的这次调用立刻受益。压缩先于 PreprocessMessages 的 UserPromptSubmit
+    hook：上下文注入永远发生在压缩后的世界里（旧注入块与 marker 随历史一并删除，
+    hook 扫不到 marker 即注入全量），在线/离线压缩后的形态同构：
+    ``[System?, Human(<summary>), Human(ctx全量+用户消息)]``。
 
     缓存安全的分叉：复用主对话的 system_prompt + tools 前缀，只在末尾追加摘要指令。
 
@@ -656,6 +660,12 @@ async def summarizer(
     if len(summarized_ids) < 2:
         return {}
 
+    # Summarizer 先于 Preprocess 的 cleanup 运行——中断残留的悬空 AIMessage(tool_use)
+    # 直发摘要模型会被 Anthropic 400 拒绝（非 PTL、不重试）。喂给摘要链前从副本剔除；
+    # state 里的悬空消息本就在 summarized_ids 删除集合内，随压缩一并清掉。
+    dangling = {rm.id for rm in cleanup_incomplete_tool_calls(messages_to_summarize)}
+    summary_input = [m for m in messages_to_summarize if m.id not in dangling]
+
     prompt = get_config().load_prompt("SUMMARY")
     if not prompt:
         raise ValueError(
@@ -665,7 +675,7 @@ async def summarizer(
 
     try:
         summary_text, ptl_retries = await run_summary(
-            messages_to_summarize,
+            summary_input,
             prompt,
             tools=runtime.context.tools,
             system_prompt=runtime.context.system_prompt,
@@ -689,26 +699,33 @@ async def summarizer(
         f"[Summarizer] 压缩完成，{len(summarized_ids)} 条消息，PTL 重试 {ptl_retries} 次"
     )
 
-    # 摘要前置到末条 Human。env/skill/agent/记忆 等 reminder 不在此重注入——它们由下游
-    # CallModel 每轮 prepend 的瞬态上下文消息承载（见 turn_context），压缩后的下一次
-    # CallModel 自带最新上下文，无需在持久历史里重建。
+    # 摘要作独立 carrier 插在末条 Human 之前（与离线 build_compacted_update 同构）。
+    # add_messages 对「Remove + 同 id 重加」是原地更新回原位置（不改变顺序），故
+    # 重加的末条必须换新 id 才能成为真正的 append、排到 carrier 之后（content 与
+    # ts 等 additional_kwargs 原样保留）。上下文块不在此处理——下游
+    # PreprocessMessages 的 context_inject hook 在压缩后的历史上扫不到 marker，
+    # 自动向末条注入全量（见 context_inject）。
     last_human = original_messages[-1]
-    new_last_human = inject_summary_into_message(last_human, summary_text)
+    carrier = build_summary_carrier(summary_text)
+    reappended = last_human.model_copy(update={"id": str(uuid4())})
 
     return {
         "messages": [RemoveMessage(id=mid) for mid in summarized_ids]
-        + [RemoveMessage(id=last_human.id), new_last_human]
+        + [RemoveMessage(id=last_human.id), carrier, reappended]
     }
 
 
 async def preprocess_messages(
-    state: LumiAgentState, runtime: Runtime[LumiAgentContext]
+    state: LumiAgentState,
+    runtime: Runtime[LumiAgentContext],
+    config: RunnableConfig,
 ) -> dict:
-    """消息预处理节点：清理不完整的工具调用、重置工具取消标记。
+    """消息预处理节点：清理不完整的工具调用、重置工具取消标记，并分发
+    UserPromptSubmit hooks（内置的上下文注入 hook 在此把 env / agent / skill /
+    记忆索引 / LUMI.md 按 marker 比对注入末条用户消息，见 :mod:`context_inject`）。
 
-    env / agent / skill / 记忆 / LUMI.md 等 reminder 已改由 ``call_model`` 每轮 prepend
-    一条瞬态上下文消息承载（见 :mod:`turn_context`），此处不再注入。历史压缩在下游
-    ``Summarizer`` 节点完成。
+    hook 返回的消息 update（同 id 替换末条 / 追加 reminder）合并进本节点返回值；
+    goto 忽略——本节点固定边 → Summarizer。历史压缩在下游 ``Summarizer`` 完成。
     """
     messages = state["messages"]
     updates: dict = {}
@@ -718,6 +735,18 @@ async def preprocess_messages(
         updates["tool_cancelled"] = False
 
     result_messages = cleanup_incomplete_tool_calls(messages)
+
+    if has_hooks("UserPromptSubmit"):
+        ctx = HookContext(
+            state=state, config=config, event="UserPromptSubmit", runtime=runtime
+        )
+        # collect：config hook 的 AdditionalContext 与内置 context_inject 的消息
+        # update 合并共存。已知取舍：config hook 若返回 Command/Block 会短路、
+        # 跳过其后的 context_inject（该轮不注入不写 marker，下轮按旧 marker 自愈）
+        # ——视为用户显式配置的接管语义。
+        cmd = await dispatch_hooks("UserPromptSubmit", ctx, mode="collect")
+        if cmd is not None:
+            result_messages = [*result_messages, *_cmd_messages(cmd)]
 
     if result_messages or updates:
         return {"messages": result_messages, **updates}

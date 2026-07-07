@@ -543,8 +543,9 @@ class AgentBridge:
         """对当前 thread 的空闲历史强制压缩一次（不流式、不触发模型对话）。
 
         供 IM 渠道每日 dream 后的 summary 阶段调用：读 checkpoint 快照 → 复用 summarizer
-        的压缩核（``run_summary``）→ 经 ``aupdate_state`` 把「摘要 + 末条 AI」写回 checkpoint
-        （走 add_messages reducer，语义与 summarizer 节点一致），全程不经 astream_events 故不
+        的压缩核（``run_summary``）→ 经 ``aupdate_state`` 把单条摘要 carrier 写回 checkpoint
+        （走 add_messages reducer，压缩后历史 = ``[System?, Human(<summary>)]``，下条真实
+        用户消息到来时由 context_inject 全量重建上下文），全程不经 astream_events 故不
         外泄到渠道。
 
         返回是否真的压缩了（会话太短 / 末条非干净 AI 回复 / 无摘要提示词时跳过并返回 False）。
@@ -579,7 +580,8 @@ class AgentBridge:
         )
         update = build_compacted_update(to_summarize, last, summary_text)
         # as_node 显式指定：不依赖 LangGraph 从末次 checkpoint 推断写入者；
-        # CallModel 的条件边在「末条无 tool_calls 的 AI」上路由 END，不派生后续任务
+        # CallModel 的条件边对无 tool_calls 的末条（压缩后为摘要 carrier）路由
+        # OnAgentStop，不派生工具任务
         await self.graph.aupdate_state(self._config, update, as_node="CallModel")
         logger.info(
             "[compact_thread] 已压缩 thread=%s（%d 条历史 → 摘要）",

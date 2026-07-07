@@ -5,8 +5,9 @@
 
 from __future__ import annotations
 
-import hashlib
 from pathlib import Path
+
+from lumi.utils.hashing import short_hash
 
 
 def get_workspace_dir(cwd: Path | None = None) -> str:
@@ -31,5 +32,4 @@ def get_workspace_id(cwd: Path | None = None) -> str:
     Returns:
         12 位 hex 字符串。
     """
-    workspace_dir = get_workspace_dir(cwd)
-    return hashlib.sha256(workspace_dir.encode()).hexdigest()[:12]
+    return short_hash(get_workspace_dir(cwd), 12)

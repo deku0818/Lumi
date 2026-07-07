@@ -86,14 +86,13 @@ CLI 参数可覆盖：`lumi -s code`。优先级：CLI > config.json > 默认值
 {
   "token": {
     "once_tool_ratio": 0.1,
-    "trim_messages_ratio": 0.96,
     "context_length": 200000,
     "summary_threshold": 0.7
   }
 }
 ```
 
-字段说明：`once_tool_ratio` 为单次工具调用返回结果最大 token 占比；`trim_messages_ratio` 为消息修剪器最大 token 占比；`context_length` 为模型上下文窗口最大 token 数；`summary_threshold` 为触发总结的阈值比例。
+字段说明：`once_tool_ratio` 为单次工具调用返回结果最大 token 占比；`context_length` 为模型上下文窗口最大 token 数；`summary_threshold` 为触发总结的阈值比例。
 
 ---
 

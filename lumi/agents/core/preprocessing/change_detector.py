@@ -1,13 +1,9 @@
-"""文件集变更检测器基类
+"""文件集加载缓存基类
 
 基于每个文件的 (key, mtime_ns, size) 算 SHA-256 digest 判断目录是否变更，
 避免每轮都重新解析文件内容。子类只需提供「扫哪些文件 / 用什么 key / 如何加载」；
-本类负责 digest 比对、缓存与单例管理。
-
-``_INITIAL_DIGEST`` 控制首次 ``check()`` 的触发语义：
-- ``""``（默认，skill）：空目录 digest 也是 ``""`` → 首次即 ``changed=False``，无内容不注入。
-- ``None``（agent 覆盖）：哨兵，确保首次 ``check()`` 必触发一次加载——即便用户目录为空，
-  也让依赖内置来源的加载（风格内置 agent）至少注入一次。
+本类负责 digest 缓存与单例管理。「是否需要重新通知模型」的变更语义不在此处——
+由 context_inject 的消息级 marker 承担（per-thread、随 checkpoint 持久）。
 """
 
 from __future__ import annotations
@@ -20,15 +16,12 @@ from lumi.utils.logger import logger
 
 
 class FileSetChangeDetector[T]:
-    """文件集变更检测器基类（单例，每个子类各自持有 ``_instance``）。"""
+    """文件集加载缓存基类（单例，每个子类各自持有 ``_instance``）。"""
 
-    _INITIAL_DIGEST: str | None = ""
     _instance: FileSetChangeDetector | None = None
 
     def __init__(self) -> None:
-        # _seen_digest：check() 上次报告过的 digest（变更注入语义）；
-        # _data_digest/_data：加载结果缓存（peek/check 共享，避免每次全量重解析）。
-        self._seen_digest: str | None = self._INITIAL_DIGEST
+        # _data_digest/_data：加载结果缓存，digest 未变不重解析。
         self._data_digest: str | None = None
         self._data: list[T] = []
 
@@ -80,15 +73,8 @@ class FileSetChangeDetector[T]:
             self._data_digest = digest
         return self._data, digest
 
-    def check(self) -> tuple[list[T], bool]:
-        """检查是否变更，返回 ``(列表, 是否变更)``。"""
-        data, digest = self._current()
-        changed = digest != self._seen_digest
-        self._seen_digest = digest
-        return list(data), changed
-
     def peek(self) -> list[T]:
-        """获取当前列表（只读，不影响 ``check()`` 的变更判断）。"""
+        """获取当前列表（digest 未变时走缓存）。"""
         return list(self._current()[0])
 
     # ------------------------------------------------------------------

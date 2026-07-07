@@ -21,6 +21,7 @@ import contextvars
 from collections.abc import Callable
 from pathlib import Path
 
+from lumi.agents.memory.paths import resolve_under_project
 from lumi.utils.logger import logger
 
 # 全局兜底授权目录列表（无 run 上下文时使用）
@@ -143,14 +144,8 @@ def validate_path(path: str) -> Path:
         PermissionError: 路径超出所有授权目录范围
     """
     all_dirs = get_all_authorized_directories()
-    primary = all_dirs[0]
-    target = Path(path)
-
-    # 相对路径基于主授权目录解析
-    if not target.is_absolute():
-        target = primary / target
-
-    resolved = target.resolve()
+    # 相对路径基于主授权目录解析（与 is_memory_path / context_inject 同口径）
+    resolved = resolve_under_project(path, all_dirs[0])
 
     for authorized in all_dirs:
         if resolved.is_relative_to(authorized):

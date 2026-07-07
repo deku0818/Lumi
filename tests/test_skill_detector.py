@@ -128,9 +128,9 @@ def test_digest_sensitivity_on_mtime_change(skills: list[tuple[str, str]]) -> No
 
 # Feature: dynamic-skill-loading, Property 2: 缓存正确性
 """
-验证 SkillChangeDetector.check() 的缓存行为：
-- 连续两次 check() 且未修改文件时，第二次返回 changed=False
-- 修改文件后 check() 返回 changed=True
+验证 SkillChangeDetector.peek() 的缓存行为：
+- 未修改文件时重复 peek() 结果一致（走缓存不重解析）
+- 修改文件后 peek() 反映最新状态
 """
 
 
@@ -172,7 +172,7 @@ def _create_skill_file_full(
 def test_cache_correctness_no_change(
     skills: list[tuple[str, str, str]],
 ) -> None:
-    """连续两次 check() 且未修改文件时，第二次应返回 changed=False，技能列表一致。"""
+    """未修改文件时重复 peek() 结果一致，且走缓存（同一列表对象副本）。"""
     with tempfile.TemporaryDirectory() as tmp:
         tmp_dir = Path(tmp)
         for name, desc, content in skills:
@@ -180,24 +180,16 @@ def test_cache_correctness_no_change(
 
         detector = SkillChangeDetector(skills_dir=tmp_dir)
 
-        # 第一次 check：初始缓存为空，应返回 changed=True
-        skills_first, changed_first = detector.check()
-        assert changed_first is True, "首次 check() 应返回 changed=True"
+        skills_first = detector.peek()
         assert len(skills_first) == len(skills), (
-            f"首次 check() 返回的技能数量不匹配: {len(skills_first)} != {len(skills)}"
+            f"peek() 返回的技能数量不匹配: {len(skills_first)} != {len(skills)}"
         )
 
-        # 第二次 check：未修改文件，应返回 changed=False
-        skills_second, changed_second = detector.check()
-        assert changed_second is False, (
-            "未修改文件时第二次 check() 应返回 changed=False"
-        )
-
-        # 技能列表内容应一致
+        skills_second = detector.peek()
         first_names = sorted(s.name for s in skills_first)
         second_names = sorted(s.name for s in skills_second)
         assert first_names == second_names, (
-            f"两次 check() 返回的技能名称不一致: {first_names} != {second_names}"
+            f"两次 peek() 返回的技能名称不一致: {first_names} != {second_names}"
         )
 
 
@@ -207,7 +199,7 @@ def test_cache_correctness_no_change(
 def test_cache_correctness_after_modification(
     skills: list[tuple[str, str, str]],
 ) -> None:
-    """修改文件后 check() 应返回 changed=True，技能列表反映最新状态。"""
+    """修改文件后 peek() 应反映最新状态（digest 变化触发重加载）。"""
     with tempfile.TemporaryDirectory() as tmp:
         tmp_dir = Path(tmp)
         paths: list[Path] = []
@@ -216,18 +208,14 @@ def test_cache_correctness_after_modification(
             paths.append(p)
 
         detector = SkillChangeDetector(skills_dir=tmp_dir)
-
-        # 第一次 check：建立缓存
-        detector.check()
+        detector.peek()  # 建立缓存
 
         # 修改第一个文件的内容（改变 size 和 mtime）
         target = paths[0]
         original = target.read_text(encoding="utf-8")
         target.write_text(original + "\n额外内容改变文件大小", encoding="utf-8")
 
-        # 第二次 check：文件已修改，应返回 changed=True
-        skills_after, changed_after = detector.check()
-        assert changed_after is True, "修改文件后 check() 应返回 changed=True"
+        skills_after = detector.peek()
         assert len(skills_after) == len(skills), (
             f"修改后技能数量不应变化: {len(skills_after)} != {len(skills)}"
         )

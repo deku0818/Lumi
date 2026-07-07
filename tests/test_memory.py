@@ -8,7 +8,10 @@ from __future__ import annotations
 
 from pathlib import Path
 
-from lumi.agents.core.preprocessing.memory import format_memory_reminder
+from lumi.agents.core.preprocessing.memory import (
+    memory_index_lines,
+    project_doc_lines,
+)
 from lumi.agents.memory import (
     build_memory_instructions,
     is_memory_path,
@@ -148,16 +151,25 @@ def test_route_non_memory_write_still_evaluated(monkeypatch):
 # === 首条消息注入块 ===
 
 
-def test_reminder_none_when_empty(tmp_path, monkeypatch):
-    """无 LUMI.md 且不含记忆 → 不注入（返回 None）。"""
+def test_reminder_empty_when_no_sources(tmp_path, monkeypatch):
+    """无 LUMI.md、无记忆索引 → 两块条目皆空（context_inject 不产生注入文本）。"""
     _point_memory_root(monkeypatch, tmp_path)
-    assert format_memory_reminder(tmp_path, include_memory=False) is None
+    assert project_doc_lines(tmp_path) == []
+    assert memory_index_lines(tmp_path) == {}
 
 
-def test_reminder_includes_project_doc_for_subagent(tmp_path, monkeypatch):
-    """子 agent（include_memory=False）仍注入 LUMI.md，但不含记忆索引。"""
+def test_project_doc_lines_and_index_keys(tmp_path, monkeypatch):
+    """LUMI.md 按行输出；MEMORY.md 索引行以行内文件名为条目 key。"""
     _point_memory_root(monkeypatch, tmp_path)
-    (tmp_path / "LUMI.md").write_text("项目约定", encoding="utf-8")
-    out = format_memory_reminder(tmp_path, include_memory=False)
-    assert "项目约定" in out
-    assert "持久记忆索引" not in out
+    (tmp_path / "LUMI.md").write_text("项目约定\n第二行", encoding="utf-8")
+    assert project_doc_lines(tmp_path) == ["项目约定", "第二行"]
+
+    from lumi.agents.memory import ensure_memory_dir, memory_entrypoint
+
+    ensure_memory_dir(tmp_path)
+    memory_entrypoint(tmp_path).write_text(
+        "- [角色](u.md) — 后端工程师\n无文件名的行\n", encoding="utf-8"
+    )
+    entries = memory_index_lines(tmp_path)
+    assert entries["u.md"] == "- [角色](u.md) — 后端工程师"
+    assert len(entries) == 2  # 无文件名的行以行 hash 为 key

@@ -1,13 +1,14 @@
-"""摘要注入模块
+"""摘要 carrier 构造。
 
-将对话摘要格式化为 ``<summary>`` 标签块并注入到用户消息中。
+在线（summarizer 节点）与离线（build_compacted_update）压缩共用：摘要作为一条
+独立的 carrier 消息存在，不注入进用户消息。
 """
 
 from __future__ import annotations
 
 from langchain_core.messages import HumanMessage
 
-from lumi.agents.core.node_helpers.messages import inject_text_into_message
+from lumi.agents.core.meta_message import meta_human_message
 
 
 def format_summary_block(summary_text: str) -> str:
@@ -15,8 +16,7 @@ def format_summary_block(summary_text: str) -> str:
     return f"<summary>\n{summary_text}\n</summary>\n"
 
 
-def inject_summary_into_message(
-    message: HumanMessage, summary_text: str
-) -> HumanMessage:
-    """将格式化的摘要块注入到用户消息 content 最前面，返回新消息。"""
-    return inject_text_into_message(message, format_summary_block(summary_text))
+def build_summary_carrier(summary_text: str) -> HumanMessage:
+    """摘要 carrier：带 is_meta 标记的合成消息（不渲染为用户气泡），
+    在线/离线压缩共用——carrier 形态的单一真源。"""
+    return meta_human_message(format_summary_block(summary_text))

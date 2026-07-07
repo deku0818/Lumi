@@ -42,13 +42,21 @@ def ensure_memory_dir(project_dir: Path) -> Path:
     return target
 
 
+def resolve_under_project(path: str | Path, project_dir: Path) -> Path:
+    """相对路径基于项目根解析并 resolve——工具写入路径归一化的单一口径
+    （is_memory_path 的免审批判定与 context_inject 的自改静默比对共用）。"""
+    target = Path(path)
+    if not target.is_absolute():
+        target = project_dir / target
+    return target.resolve()
+
+
 def is_memory_path(path: str | Path, project_dir: Path) -> bool:
     """判断 ``path`` 是否落在该项目记忆目录内（相对路径基于项目根解析）。"""
     try:
-        target = Path(path)
-        if not target.is_absolute():
-            target = project_dir / target
-        return target.resolve().is_relative_to(memory_dir(project_dir).resolve())
+        return resolve_under_project(path, project_dir).is_relative_to(
+            memory_dir(project_dir).resolve()
+        )
     except (OSError, ValueError):
         return False
 

@@ -22,7 +22,7 @@ from langchain_core.messages import (
     SystemMessage,
 )
 
-from lumi.agents.core.preprocessing.summary import format_summary_block
+from lumi.agents.core.preprocessing.summary import build_summary_carrier
 
 _PTL_SUBSTRINGS = (
     "prompt is too long",
@@ -295,12 +295,13 @@ def select_for_compaction(messages: list) -> tuple[list, AIMessage] | None:
 def build_compacted_update(
     to_summarize: list, last: AIMessage, summary_text: str
 ) -> dict:
-    """构造 ``aupdate_state`` 的 ``messages`` 更新：删除整段 body、重建为摘要 + 末条 AI。
+    """构造 ``aupdate_state`` 的 ``messages`` 更新：删除整段 body、重建为单条摘要 carrier。
 
-    删除 ``to_summarize + last`` 全部（含末条 AI），再按序追加 ``[Human(<summary>), AI(末条副本)]``——
-    ``add_messages`` 按列表顺序追加，故最终末条恒为 AI。头部 SystemMessage 未被删、留在原位。
+    删除 ``to_summarize + last`` 全部（含末条 AI），只留 ``Human(<summary>)``。
+    下一条真实用户消息到来时序列为 ``[Human(<summary>), Human(用户)]``（连续
+    human 各 provider 均接受），context_inject hook 扫不到 marker 即注入全量——
+    与在线 summarizer 压缩后的形态同构。头部 SystemMessage 未被删、留在原位。
     """
-    carrier = HumanMessage(content=format_summary_block(summary_text))
-    tail = AIMessage(content=last.content)
+    carrier = build_summary_carrier(summary_text)
     removes = [RemoveMessage(id=m.id) for m in [*to_summarize, last] if m.id]
-    return {"messages": [*removes, carrier, tail]}
+    return {"messages": [*removes, carrier]}

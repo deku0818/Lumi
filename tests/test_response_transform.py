@@ -231,8 +231,6 @@ class TestCallModelIntegration:
         import lumi.agents.core.nodes as nodes_mod
 
         monkeypatch.setattr(nodes_mod, "tool_call_chain", fake_tool_call_chain)
-        # 本测试只验证多模态 transform，关掉每轮上下文 prepend 以免干扰 messages[0]
-        monkeypatch.setattr(nodes_mod, "build_turn_context", lambda runtime: "")
 
         # 构造一个带 Anthropic 风格 image block 的 HumanMessage
         human_msg = HumanMessage(
@@ -295,7 +293,6 @@ class TestCallModelIntegration:
         import lumi.agents.core.nodes as nodes_mod
 
         monkeypatch.setattr(nodes_mod, "tool_call_chain", fake_tool_call_chain)
-        monkeypatch.setattr(nodes_mod, "build_turn_context", lambda runtime: "")
 
         tool_msg = ToolMessage(content="read OK", tool_call_id="x", name="read")
         state = {

@@ -1,6 +1,6 @@
-"""技能变更检测器模块
+"""技能加载缓存模块
 
-基于 ``.skills/`` 目录下各 ``SKILL.md`` 的 mtime + size digest 判断是否变更。
+基于 ``.skills/`` 目录下各 ``SKILL.md`` 的 mtime + size digest 缓存加载结果。
 通用 digest/缓存/单例逻辑见 [[change_detector]] 的 FileSetChangeDetector。
 """
 
@@ -15,7 +15,7 @@ from lumi.utils.read_config import get_config
 
 
 class SkillChangeDetector(FileSetChangeDetector[SkillConfig]):
-    """技能变更检测器（单例）。"""
+    """技能加载缓存（单例）。"""
 
     _instance: SkillChangeDetector | None = None
 

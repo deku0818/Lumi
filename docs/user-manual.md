@@ -144,7 +144,6 @@ lumi --version
   },
   "token": {
     "once_tool_ratio": 0.1,
-    "trim_messages_ratio": 0.96,
     "context_length": 200000,
     "summary_threshold": 0.7
   },
@@ -819,7 +818,6 @@ your-project/
   },
   "token": {
     "once_tool_ratio": 0.1,
-    "trim_messages_ratio": 0.96,
     "context_length": 200000,
     "summary_threshold": 0.7
   },

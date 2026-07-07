@@ -42,19 +42,20 @@
 
 1. **行为说明 → 系统提示词**：`create_agent(enable_memory=True)` 时把 `build_memory_instructions`
    追加到系统提示词尾部，并 `ensure_memory_dir`。
-2. **`MEMORY.md` 索引 + `LUMI.md`（+ env/agent/skill）→ 每轮上下文块**：`preprocessing/turn_context.py`
-   的 `build_turn_context(runtime)` 把这几样组装成一段确定性文本，`call_model` 每轮经
-   `tool_call_chain(turn_context=...)` 注入——**作为一条 `HumanMessage` 插在静态 system 之后**
-   （`chain._turn_context_inserter`，在 `my_trim_messages` **之后**插入）。Claude Code 同构
-   （system prompt + 上下文作 user 消息）。三点考量：① 在 trim 之后插入 → 不被 `strategy="last"`
-   截掉（重负载 tool loop 也保得住）；② 是 `HumanMessage` 而非第二条 `SystemMessage` → 避开
-   OpenAI 兼容 provider 不支持连续 system 的问题；③ 静态 system 保持纯净（Anthropic 带 `cache_control`）
-   → 成为所有 provider 都能命中的独立缓存单元，改 `MEMORY.md`/`LUMI.md` 不冲掉它。
-   内容**确定性构建**（agent/skill 按名排序、无时间字段），不变则逐字节一致 → 稳定缓存前缀。
+2. **`MEMORY.md` 索引 + `LUMI.md`（+ env/agent/skill）→ 持久注入 + 增量 diff**：
+   `preprocessing/context_inject.py` 的 `context_inject_hook`（UserPromptSubmit 内置 hook，
+   `preprocess_messages` 分发）把上下文块**注入进末条用户消息**（进历史、进 checkpoint），
+   `additional_kwargs["ctx_digest"]` marker 记录「模型已知状态」的条目级 digest。无 marker
+   （首轮 / 压缩后——marker 随旧消息删除）全量注入；条目变更只注**增量 diff**（相对上一个
+   marker）、diff 比全量长退化整块；变更源文件被本会话 write/edit 过则**静默结算**（marker
+   更新不注文本）；全无变化零注入、仅 marker 前移到末条。正确性不变量：历史只被压缩改写，
+   且压缩恒在本 hook 之前（图拓扑 `Summarizer → PreprocessMessages → CallModel`）——hook
+   永远在压缩后的世界运行，扫不到 marker 即全量重建，marker 存在 ⟺ 完整 diff 链可见。
+   缓存收益：变更只动消息尾部，写记忆 / 改 skill 不再冲掉前缀历史缓存。
    `MEMORY.md` 受 `context.memory_enabled` 门控，`LUMI.md` 不受。
 
-   > 取代了最初「`preprocess_messages` 首条注入 + `summarizer` 压缩重注入 + detector changed 门控」
-   > 三处分散逻辑——「注入时机」维度被消除，skill 漏首条 / 记忆丢压缩 / 单例 changed 失真一并不存在。
+   > 变更判定的状态在**消息 marker 里**（per-thread、随 checkpoint 持久），不在进程单例——
+   > detector（`FileSetChangeDetector`）退化为纯加载缓存，旧的单例 changed 失真问题不存在。
 3. **写入免审批 carve-out**：`routing.route_decision` 在 bypass-immune 之后短路——写记忆目录的
    `write`/`edit` 所有 tool_mode 直接 `ToolExecutor`（项目根取 `get_authorized_directory()`，
    与注入同源）；同时 `engine._rebuild_boundary` 把记忆目录并入工作区边界，使 `validate_path` 放行。
@@ -72,7 +73,7 @@
 
 - **Dream（离线综合）+ 召回端裁决** — 见下方设计方案章节。
 - **后台提取（extractMemories）** — 暂**搁置**。它是长会话（如飞书，一 chat 一长 thread）防 compact 遗忘的逐轮兜底；desktop 短会话由「主动写入 + Dream」两条腿覆盖，不需要。
-- **召回旁路（side-LLM 选文件）** — **不采用**。turn_context 是字节稳定的缓存前缀，按 query 动态选文件会破坏缓存；改走「全量索引常驻 + 索引带信号 + 活模型裁决」（见召回端设计）。
+- **召回旁路（side-LLM 选文件）** — **不采用**。索引注入按 marker 比对确定性结算，按 query 动态选文件会让注入内容每轮漂移；改走「全量索引常驻 + 索引带信号 + 活模型裁决」（见召回端设计）。
 
 参考实现见 Claude Code 的 `src/memdir/` 与 `src/services/autoDream/`（`findRelevantMemories` / `extractMemories` / `autoDream` / `consolidationPrompt`）。
 
@@ -128,7 +129,7 @@
 
 把「记忆会过时/会矛盾」从整理端挪到召回端，让活模型就着当前 query 当场裁决：
 
-- **索引行带 `type` + 写入日期**：`- [标题](文件.md) [feedback · 2026-06-20] — 钩子`。同主题多条并排、日期不同 → 矛盾在索引层就**自动可见**。用**绝对日期**（非「N 天前」）保证 turn_context 字节稳定、不破缓存。
+- **索引行带 `type` + 写入日期**：`- [标题](文件.md) [feedback · 2026-06-20] — 钩子`。同主题多条并排、日期不同 → 矛盾在索引层就**自动可见**。用**绝对日期**（非「N 天前」）保证索引行内容确定、不触发无谓的 diff 重注入。
   - 填法：**主 agent 手写为主 + dream 兜底规范化**（dream prune 阶段本就重写 `MEMORY.md`，顺手统一/补全格式；手写出错由 dream 兜底修）。
 - **判断指引进系统提示**（`build_memory_instructions`）：同情境多条 → 取写入日期最新；据 project/reference 行动前先验证现状。
 - **不对称衰减**（落召回，不落 dream）：

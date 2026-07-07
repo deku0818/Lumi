@@ -66,11 +66,12 @@ class LumiAgent(BaseGraph):
 
     def _draw_edges(self):
         """添加边"""
-        self.builder.add_edge(START, "PreprocessMessages")
-        # 串行：Preprocess → Summarizer（当轮就地压缩）→ CallModel，
-        # 让即将溢出的这次调用立刻受益于压缩，而非等下一轮
-        self.builder.add_edge("PreprocessMessages", "Summarizer")
-        self.builder.add_edge("Summarizer", "CallModel")
+        # 串行：Summarizer（当轮就地压缩）→ Preprocess（UserPromptSubmit hook 注入
+        # 上下文）→ CallModel。压缩在前，注入永远发生在压缩后的世界里——旧注入块
+        # 与 marker 随历史删除，hook 自动全量重建；hook 注入的消息也不会被当轮压掉。
+        self.builder.add_edge(START, "Summarizer")
+        self.builder.add_edge("Summarizer", "PreprocessMessages")
+        self.builder.add_edge("PreprocessMessages", "CallModel")
         self.builder.add_conditional_edges(
             "CallModel",
             is_use_tool,

@@ -87,3 +87,12 @@ register_hook("Stop", structured_output_stop_hook)
 from lumi.agents.memory.dream import auto_dream_stop_hook  # noqa: E402
 
 register_hook("Stop", auto_dream_stop_hook)
+
+
+# 上下文注入（env / agent / skill / 记忆索引 / LUMI.md）：marker 比对 + 条目级 diff，
+# 详见 context_inject 模块 docstring。
+from lumi.agents.core.preprocessing.context_inject import (  # noqa: E402
+    context_inject_hook,
+)
+
+register_hook("UserPromptSubmit", context_inject_hook)

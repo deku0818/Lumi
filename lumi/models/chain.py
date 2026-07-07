@@ -6,19 +6,16 @@ import anthropic
 import httpx
 import openai
 from langchain_anthropic import ChatAnthropic
-from langchain_core.messages import HumanMessage, SystemMessage, trim_messages
+from langchain_core.messages import SystemMessage
 from langchain_core.prompts import (
     ChatPromptTemplate,
     HumanMessagePromptTemplate,
     MessagesPlaceholder,
 )
-from langchain_core.runnables import RunnableLambda
 from pydantic import BaseModel
 
 from lumi.models.cache import CACHE_CONTROL
 from lumi.models.manager import create_llm
-from lumi.utils.read_config import get_config
-from lumi.utils.sizing import content_size, estimate_tokens
 
 # 仅重试真正瞬态的错误：限流、5xx、连接/超时（APIConnectionError 含 Timeout 子类）。
 # 不能用宽泛的 APIError——它包含 4xx 客户端错误（如模型不支持某参数的 400），
@@ -45,38 +42,6 @@ def _with_retry(chain, retry_errors: tuple):
         retry_if_exception_type=retry_errors,
         wait_exponential_jitter=True,
         exponential_jitter_params={"initial": 15, "max": 300},
-    )
-
-
-def _estimate_message_tokens(messages: list) -> int:
-    """trim_messages 用的轻量 token 估算（字节 ÷ BYTES_PER_TOKEN）。
-
-    trim 会反复在任意候选子集上调用 token_counter，故不能用只对完整列表成立的
-    usage；这里按字节粗估，多模态 block 走固定字节当量、不对 base64 计长，每条加
-    固定角色/分隔开销。精度不敏感：trim 是带 headroom 的安全阀，偏差后续有 summary 兜底。
-    """
-    num = 3  # 回复 priming
-    for msg in messages:
-        num += 4 + estimate_tokens(content_size(getattr(msg, "content", "")))
-    return num
-
-
-def my_trim_messages(max_tokens: int | None = None):
-    """通用工具：创建一个消息修剪器，用于修剪消息。
-
-    Args:
-        max_tokens: 最大允许的token数量，如果为None则使用配置文件中的默认值
-    """
-    if max_tokens is None:
-        max_tokens = get_config().config.token.trim_messages_max_tokens
-
-    return trim_messages(
-        token_counter=_estimate_message_tokens,
-        strategy="last",
-        max_tokens=max_tokens,
-        start_on="human",
-        end_on=("human", "tool"),
-        include_system=True,
     )
 
 
@@ -128,7 +93,7 @@ def structured_output(
     prompt = ChatPromptTemplate.from_messages(messages)
 
     structured_llm = llm.with_structured_output(structure, method=structure_method)
-    chain = prompt | my_trim_messages() | structured_llm
+    chain = prompt | structured_llm
     return _with_retry(chain, _API_AND_NETWORK_ERRORS)
 
 
@@ -139,7 +104,6 @@ def tool_call_chain(
     use_cache: bool = True,
     tool_choice: str | dict | None = None,
     apply_effort: bool = False,
-    turn_context: str | None = None,
     **llm_params,
 ):
     """
@@ -204,26 +168,5 @@ def tool_call_chain(
     messages.append(MessagesPlaceholder(variable_name="messages"))
 
     prompt = ChatPromptTemplate.from_messages(messages)
-    chain = prompt | my_trim_messages()
-    # 每轮上下文块（env/agent/skill/记忆/LUMI.md）作为一条 HumanMessage 插在 system 之后——
-    # **在 trim 之后插入**，故永不被 strategy="last" 截掉（修 finding #1）；是 human 而非第二条
-    # system，避开兼容 provider 不支持连续 system 的问题；静态 system 保持纯净独立缓存。CC 同构。
-    if turn_context:
-        chain = chain | _turn_context_inserter(turn_context)
-    chain = chain | llm_with_tools
+    chain = prompt | llm_with_tools
     return _with_retry(chain, _API_ERRORS)
-
-
-def _turn_context_inserter(turn_context: str) -> RunnableLambda:
-    """返回一个 Runnable：把 turn_context 作为 HumanMessage 插到所有 system 之后、历史之前。
-
-    放在 ``| my_trim_messages()`` 之后，故 turn_context 不参与截断、永不丢失。
-    """
-
-    def _insert(messages: list) -> list:
-        i = 0
-        while i < len(messages) and isinstance(messages[i], SystemMessage):
-            i += 1
-        return [*messages[:i], HumanMessage(content=turn_context), *messages[i:]]
-
-    return RunnableLambda(_insert)

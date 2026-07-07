@@ -5,6 +5,8 @@
 
 from __future__ import annotations
 
+from lumi.sessions.text_cleaning import strip_injected_blocks
+
 
 def extract_text_content(content: str | list) -> str:
     """从消息 content 中提取纯文本。
@@ -43,9 +45,12 @@ def extract_messages_as_text(messages: list) -> str:
         role = getattr(m, "type", "")
         if role == "system":
             continue
-        text = (
-            extract_text_content(getattr(m, "content", "")).replace("\n", "⏎").strip()
-        )
+        raw = extract_text_content(getattr(m, "content", ""))
+        if role == "human":
+            # 上下文注入块（system-reminder/summary 等）持久在用户消息 content 里，
+            # 不剥会淹没 grep 语料里的真实用户输入
+            raw = strip_injected_blocks(raw)
+        text = raw.replace("\n", "⏎").strip()
         if role == "human":
             tag = "user"
         elif role == "ai":

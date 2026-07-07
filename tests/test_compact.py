@@ -203,9 +203,10 @@ def _human_text(msg) -> str:
     return "".join(b.get("text", "") for b in msg.content if isinstance(b, dict))
 
 
-async def test_summarizer_injects_summary_not_context(monkeypatch):
-    """压缩只把摘要塞进末条 Human；env/skill/agent/记忆等 reminder 不在此重注入——
-    它们由下游 call_model 每轮 prepend 的瞬态上下文消息承载（见 turn_context）。"""
+async def test_summarizer_emits_carrier_before_last_human(monkeypatch):
+    """压缩产出独立摘要 carrier + 末条 Human 原样重排到 carrier 之后；
+    上下文块不在此重注入——下游 PreprocessMessages 的 context_inject hook
+    在压缩后的历史上全量重建。"""
     from types import SimpleNamespace
     from unittest.mock import patch
 
@@ -251,12 +252,18 @@ async def test_summarizer_injects_summary_not_context(monkeypatch):
             {"messages": messages}, runtime, {"configurable": {"thread_id": "tm"}}
         )
 
-    new_human = [m for m in result["messages"] if isinstance(m, HumanMessage)][-1]
-    text = _human_text(new_human)
-    assert "<summary>" in text and "SUMMARY_TEXT" in text  # 摘要已注入
-    assert (
-        "system-reminder" not in text
-    )  # 上下文 reminder 不在压缩消息里（交给 call_model）
+    # 必须过真实 add_messages 断言合并后顺序：reducer 对「Remove + 同 id 重加」
+    # 是原地更新回原位置，只看 update 列表顺序会漏掉 carrier 落到末尾的回归
+    from langgraph.graph.message import add_messages
+
+    merged = add_messages(messages, result["messages"])
+    assert [type(m).__name__ for m in merged] == ["HumanMessage", "HumanMessage"]
+    carrier, last = merged
+    carrier_text = _human_text(carrier)
+    assert "<summary>" in carrier_text and "SUMMARY_TEXT" in carrier_text
+    assert "system-reminder" not in carrier_text  # 上下文块交给下游 hook 全量重建
+    assert _human_text(last) == "现在的问题"  # 用户消息在 carrier 之后、内容原样
+    assert last.id != "h3"  # 换新 id 才能真正 append 到 carrier 之后
 
 
 # ---------------------------------------------------------------------------
@@ -317,7 +324,7 @@ def test_select_returns_body_and_last_ai():
     assert isinstance(last, AIMessage) and last.content == "a4"
 
 
-def test_build_update_removes_body_keeps_head_and_ends_on_ai():
+def test_build_update_removes_body_keeps_head_leaves_carrier():
     msgs = _conversation(5)
     to_summarize, last = select_for_compaction(msgs)
     update = build_compacted_update(to_summarize, last, "浓缩摘要")
@@ -331,9 +338,7 @@ def test_build_update_removes_body_keeps_head_and_ends_on_ai():
     assert removed_ids == {f"h{i}" for i in range(5)} | {f"a{i}" for i in range(5)}
     assert "s" not in removed_ids
 
-    # 追加恰为 [Human(<summary>), AI(末条副本)]——末条恒为 AI，绝不产生尾部相邻 Human
-    assert len(additions) == 2
+    # 只追加单条摘要 carrier；下条用户消息到来时由 context_inject 全量重建上下文
+    assert len(additions) == 1
     assert isinstance(additions[0], HumanMessage)
     assert "浓缩摘要" in additions[0].content
-    assert isinstance(additions[1], AIMessage)
-    assert additions[1].content == "a4"

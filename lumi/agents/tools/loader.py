@@ -7,7 +7,7 @@ from __future__ import annotations
 
 from pathlib import Path
 
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, Field, ValidationError
 
 from lumi.utils.config.manager import parse_frontmatter
 from lumi.utils.logger import logger
@@ -26,6 +26,7 @@ class AgentConfig(BaseModel):
     model: str | None = Field(default=None, description="指定使用的模型名称")
     tools: list[str] = Field(default_factory=list, description="代理使用的工具列表")
     system_prompt: str = Field(description="代理的系统提示词")
+    path: str | None = Field(default=None, description="定义文件路径（自改静默判定用）")
 
 
 class SkillConfig(BaseModel):
@@ -34,6 +35,7 @@ class SkillConfig(BaseModel):
     name: str = Field(description="技能名称")
     description: str = Field(description="技能描述")
     prompt: str = Field(description="技能的提示词")
+    path: str | None = Field(default=None, description="定义文件路径（自改静默判定用）")
 
 
 # ------------------------------------------------------------------
@@ -97,8 +99,9 @@ def _load_agents_from_dir(directory: Path) -> dict[str, AgentConfig]:
                 model=parsed.get("model"),
                 tools=parsed["tools"],
                 system_prompt=parsed["prompt"],
+                path=str(md_file),
             )
-        except (KeyError, TypeError) as e:
+        except (KeyError, TypeError, ValidationError) as e:
             logger.error(f"Agent 配置不完整，跳过 {md_file}: {e}")
             continue
         result[cfg.name] = cfg
@@ -167,11 +170,17 @@ def _load_skills_from_dir(directory: Path) -> dict[str, SkillConfig]:
         parsed = _parse_md_file(str(skill_file))
         if parsed is None:
             continue
-        result[parsed["name"]] = SkillConfig(
-            name=parsed["name"],
-            description=parsed["description"],
-            prompt=parsed["prompt"],
-        )
+        try:
+            cfg = SkillConfig(
+                name=parsed["name"],
+                description=parsed["description"],
+                prompt=parsed["prompt"],
+                path=str(skill_file),
+            )
+        except (KeyError, ValidationError) as e:
+            logger.error(f"Skill 配置不完整，跳过 {skill_file}: {e}")
+            continue
+        result[cfg.name] = cfg
     return result
 
 

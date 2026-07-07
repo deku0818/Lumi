@@ -1,5 +1,22 @@
 # Changelog
 
+## [0.2.34] - 2026-07-08
+
+### Changed
+- **上下文注入重构：turn_context → UserPromptSubmit hook + marker + 条目级增量 diff** — env / agent 列表 / skill 列表 / 记忆索引 / LUMI.md 从「每轮重建的瞬态前缀消息」改为**持久注入进末条用户消息**（新增 `preprocessing/context_inject.py`，注册为 UserPromptSubmit 内置 hook，`preprocess_messages` 新增该事件分发点）。`additional_kwargs["ctx_digest"]` marker 记录「模型已知状态」的条目级 digest：首轮全量注入；条目变更只注增量 diff（相对上一个 marker），diff 比全量长退化整块；变更源文件被本会话 write/edit 过则静默结算（marker 更新、不注通知文本）；全无变化零 update。收益：写记忆 / 改 skill 只动消息尾部，**前缀历史缓存不再整条作废**
+- **删除 `my_trim_messages` 消息修剪** — 主对话链与 structured_output 链的 trim 全部移除（连带 config `token.trim_messages_ratio` 字段），上下文溢出控制全责交 Summarizer；`tool_call_chain` 的 `turn_context` 参数与 `_turn_context_inserter` 一并删除
+- **detector 退化为纯加载缓存** — 变更判定状态移入消息 marker（per-thread、随 checkpoint 持久），`FileSetChangeDetector` 删除 `check()` 消费型 changed 语义与 `_INITIAL_DIGEST` 哨兵，只留 `peek()` + digest 缓存；`AgentConfig`/`SkillConfig` 新增 `path` 字段（自改静默判定的源文件映射）
+- **压缩先于注入，在线/离线形态同构** — 图拓扑调整为 `Summarizer → PreprocessMessages → CallModel`：上下文注入永远发生在压缩后的世界里（旧注入块与 marker 随历史删除，hook 自动全量重建），根除压缩轮增量 diff 悬空与 orphan 残留；在线摘要改为独立 carrier 消息（`[Human(<summary>), 用户消息]`，`inject_summary_into_message` 删除），离线 `/compact` 去掉 AI tail 副本只留 carrier——两端压缩后同为 `[System?, Human(<summary>), Human(ctx+用户)]`
+- **marker 每轮前移** — 无变化轮也把 marker 写到末条消息（content 字节不动、缓存无损）：自改静默的"写过"名单窗口每轮收口（防不改 digest 的写入永久滞留窗口、误静默后续外部变更），倒扫恒在上一条用户消息停下（消除长会话 O(n²)）
+
+### Fixed
+- **坏 skill/agent 配置文件不再炸穿上下文注入** — `SkillConfig`/`AgentConfig` 构造捕获 pydantic `ValidationError`（如 frontmatter 里 `name: 2024` 被 yaml 解析为 int），跳过该文件并告警；此前异常经 detector 穿透 UserPromptSubmit hook 被 dispatch 静默吞掉，导致整轮 env/skill/记忆等全部不注入且每轮复现
+- **在线压缩的摘要 carrier 排序修正** — `add_messages` 对「Remove + 同 id 重加」是原地更新不改顺序，carrier 实际落到末条（全量注入和 marker 会打在摘要上而非用户消息）；重加的用户消息换新 id 成为真正的 append，测试改为过真实 reducer 断言合并后顺序
+- **非法工具路径不再炸穿注入扫描** — `_scan_history` 对模型生成的 `file_path` resolve 加防护（null 字节等抛 ValueError/OSError 时跳过该条）；此前异常被 dispatch 吞掉且坏消息永留扫描窗口，该 thread 余下所有轮注入永久失效
+- **悬空 tool_use 不再打挂摘要** — 拓扑调换后 Summarizer 先于 cleanup 运行，中断残留的 AIMessage(tool_calls) 直发摘要模型会被 Anthropic 400 拒绝并触发熔断；现喂给摘要链前从副本剔除（state 里的残留仍由压缩删除）
+- **dream 语料与审批分类器不再被注入块污染** — 注入块持久进历史后，`extract_messages_as_text`（dream transcript 导出）与 `_latest_user_intent`（auto 审批意图提取）对用户消息剥 `system-reminder` 等注入块，真实用户输入不被系统注入文本淹没
+- **摘要 carrier 显式 meta 化** — `build_summary_carrier`（summary.py，在线/离线共用的单一构造点）用 `meta_human_message` 打 is_meta 标记，不再依赖显示侧正则剥空的隐式路径；`short_hash`/`resolve_under_project` 收编 `workspace_id`/`validate_path` 的同构实现
+
 ## [0.2.33] - 2026-07-07
 
 ### Fixed

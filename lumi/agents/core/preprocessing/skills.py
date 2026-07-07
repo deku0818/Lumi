@@ -1,16 +1,14 @@
-"""技能列表的 ``<system-reminder>`` 块格式化。
+"""技能列表的条目行格式化。
 
-将技能列表格式化为 ``<system-reminder>`` 块（供 skill 工具调用），由
-:mod:`turn_context` 组进每轮 prepend 的上下文消息。``<system-reminder>`` 包装
-逻辑与 agent 列表共用 [[messages]] 的 format_reminder。
+输出 ``{name: 行文本}``，由 :mod:`context_inject` 组装为全量块或条目级 diff。
+``<system-reminder>`` 包装逻辑与 agent 列表共用 [[messages]] 的 format_reminder。
 """
 
 from __future__ import annotations
 
-from lumi.agents.core.node_helpers.messages import format_reminder
 from lumi.agents.tools.loader import SkillConfig
 
-_SKILL_HEADER = "以下技能可用于 skill 工具:"
+SKILL_HEADER = "以下技能可用于 skill 工具:"
 
 
 def _format_skill_line(skill: SkillConfig) -> str:
@@ -21,6 +19,6 @@ def _format_skill_line(skill: SkillConfig) -> str:
     return f"- {skill.name}: {skill.description}"
 
 
-def format_skill_reminder(skills: list[SkillConfig]) -> str:
-    """将技能列表格式化为 ``<system-reminder>`` 块。"""
-    return format_reminder(_SKILL_HEADER, [_format_skill_line(s) for s in skills])
+def skill_lines(skills: list[SkillConfig]) -> dict[str, str]:
+    """技能列表 → ``{name: 条目行}``（按名排序，确定性）。"""
+    return {s.name: _format_skill_line(s) for s in sorted(skills, key=lambda s: s.name)}
