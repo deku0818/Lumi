@@ -29,6 +29,7 @@ export function DirBrowser({
   const [cwd, setCwd] = useState('')
   const [parent, setParent] = useState<string | null>(null)
   const [dirs, setDirs] = useState<string[]>([])
+  const [selectable, setSelectable] = useState(true)
   const [creating, setCreating] = useState(false)
   const [newName, setNewName] = useState('')
   const [mkErr, setMkErr] = useState('')
@@ -41,6 +42,7 @@ export function DirBrowser({
         setCwd(r.path)
         setParent(r.parent)
         setDirs(r.dirs)
+        setSelectable(r.selectable ?? true)
       } catch {
         /* 连接波动：保持现状 */
       }
@@ -52,11 +54,14 @@ export function DirBrowser({
     void load('') // 初始 = home
   }, [load])
 
-  const join = (d: string) => (cwd.endsWith('/') ? cwd + d : cwd + '/' + d)
+  const join = (d: string) => {
+    if (!cwd) return d
+    return cwd.endsWith('/') || cwd.endsWith('\\') ? cwd + d : cwd + '/' + d
+  }
 
   const doMkdir = async () => {
     const name = newName.trim()
-    if (!name || !gw) return
+    if (!name || !gw || !selectable) return
     setMkErr('')
     const r = await gw.makeDir(join(name)).catch(() => ({ ok: false, error: '请求失败' }))
     if (!r.ok) {
@@ -88,8 +93,8 @@ export function DirBrowser({
           >
             <CornerLeftUp size={15} />
           </button>
-          <span className="truncate font-mono text-muted-foreground" title={cwd}>
-            {cwd || '…'}
+          <span className="truncate font-mono text-muted-foreground" title={cwd || t('projects.computer')}>
+            {cwd || t('projects.computer')}
           </span>
         </div>
 
@@ -110,7 +115,7 @@ export function DirBrowser({
           )}
         </div>
 
-        {creating ? (
+        {selectable && creating ? (
           <div>
             <div className="flex items-center gap-2">
               <input
@@ -133,7 +138,7 @@ export function DirBrowser({
             </div>
             {mkErr && <div className="mt-1 text-xs text-error">{mkErr}</div>}
           </div>
-        ) : (
+        ) : selectable ? (
           <button
             onClick={() => setCreating(true)}
             className="flex items-center gap-1.5 text-xs text-muted-foreground hover:text-ink transition w-fit"
@@ -141,13 +146,13 @@ export function DirBrowser({
             <FolderPlus size={14} />
             {t('projects.newFolder')}
           </button>
-        )}
+        ) : null}
 
         <DialogFooter>
           <Button variant="outline" onClick={onCancel}>
             {t('common.cancel')}
           </Button>
-          <Button disabled={!cwd} onClick={() => onPick(cwd)}>
+          <Button disabled={!cwd || !selectable} onClick={() => onPick(cwd)}>
             {t('projects.useThisDir')}
           </Button>
         </DialogFooter>

@@ -283,8 +283,18 @@ export class Gateway {
   }
 
   // 远程目录浏览器：在该连接所属机器上浏览/建目录
-  listDir(path = ''): Promise<{ path: string; parent: string | null; dirs: string[] }> {
-    return this.request<{ path: string; parent: string | null; dirs: string[] }>('list_dir', { path })
+  listDir(path = ''): Promise<{
+    path: string
+    parent: string | null
+    dirs: string[]
+    selectable?: boolean
+  }> {
+    return this.request<{
+      path: string
+      parent: string | null
+      dirs: string[]
+      selectable?: boolean
+    }>('list_dir', { path })
   }
 
   makeDir(path: string): Promise<{ ok: boolean; path?: string; error?: string }> {
