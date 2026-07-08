@@ -40,6 +40,7 @@ export function DirBrowser({
       try {
         const r = await gw.listDir(path)
         setCwd(r.path)
+        // parent 是后端不透明 token（Windows 盘符根的上级是虚拟「此电脑」哨兵），原样回传给 load，勿规范化
         setParent(r.parent)
         setDirs(r.dirs)
         setSelectable(r.selectable ?? true)
@@ -115,7 +116,7 @@ export function DirBrowser({
           )}
         </div>
 
-        {selectable && creating ? (
+        {!selectable ? null : creating ? (
           <div>
             <div className="flex items-center gap-2">
               <input
@@ -138,7 +139,7 @@ export function DirBrowser({
             </div>
             {mkErr && <div className="mt-1 text-xs text-error">{mkErr}</div>}
           </div>
-        ) : selectable ? (
+        ) : (
           <button
             onClick={() => setCreating(true)}
             className="flex items-center gap-1.5 text-xs text-muted-foreground hover:text-ink transition w-fit"
@@ -146,7 +147,7 @@ export function DirBrowser({
             <FolderPlus size={14} />
             {t('projects.newFolder')}
           </button>
-        ) : null}
+        )}
 
         <DialogFooter>
           <Button variant="outline" onClick={onCancel}>

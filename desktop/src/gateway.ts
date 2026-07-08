@@ -289,12 +289,7 @@ export class Gateway {
     dirs: string[]
     selectable?: boolean
   }> {
-    return this.request<{
-      path: string
-      parent: string | null
-      dirs: string[]
-      selectable?: boolean
-    }>('list_dir', { path })
+    return this.request('list_dir', { path })
   }
 
   makeDir(path: string): Promise<{ ok: boolean; path?: string; error?: string }> {

@@ -60,35 +60,17 @@ _WINDOWS_ROOTS_PATH = "__lumi_windows_roots__"
 
 
 def _windows_drive_roots() -> list[str]:
-    if os.name != "nt":
-        return []
-    if hasattr(os, "listdrives"):
-        return sorted(d for d in os.listdrives() if os.path.isdir(d))
-    roots = []
-    for code in range(ord("A"), ord("Z") + 1):
-        root = f"{chr(code)}:\\"
-        if os.path.isdir(root):
-            roots.append(root)
-    return roots
-
-
-def _is_windows_drive_root(path: str) -> bool:
-    drive, _tail = ntpath.splitdrive(path)
-    if len(drive) != 2 or drive[1] != ":":
-        return False
-    return ntpath.normcase(ntpath.normpath(path)) == ntpath.normcase(
-        ntpath.normpath(drive + ntpath.sep)
-    )
+    return sorted(d for d in os.listdrives() if os.path.isdir(d))
 
 
 def _parent_for_list_dir(path: str) -> str | None:
-    if os.name == "nt":
-        if _is_windows_drive_root(path):
-            return _WINDOWS_ROOTS_PATH
-        parent = ntpath.dirname(path)
-    else:
-        parent = os.path.dirname(path)
-    return None if parent == path else parent
+    parent = ntpath.dirname(path) if os.name == "nt" else os.path.dirname(path)
+    if parent != path:
+        return parent
+    # 已在某个根：Windows 盘符根 → 虚拟「此电脑」；UNC 根 / POSIX / 无上级
+    if os.name == "nt" and len(ntpath.splitdrive(path)[0]) == 2:
+        return _WINDOWS_ROOTS_PATH
+    return None
 
 
 def _channel_of(thread_id: str) -> str:
@@ -343,7 +325,7 @@ async def _rename_project(session: GatewaySession, params: dict) -> dict:
 # 远程目录浏览器：在「本后端」文件系统上浏览/建目录。前端按机器经各自控制连接调用，
 # 故对远程机器即浏览远程文件系统（创建远程项目时选/建目录用）。
 async def _list_dir(session: GatewaySession, params: dict) -> dict:
-    raw = params.get("path") or ""
+    raw = params.get("path")
     if os.name == "nt" and raw == _WINDOWS_ROOTS_PATH:
         return {
             "path": "",

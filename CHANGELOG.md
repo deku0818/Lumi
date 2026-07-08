@@ -1,5 +1,13 @@
 # Changelog
 
+## [0.2.37] - 2026-07-09
+
+### Fixed
+- **Windows 目录选择器支持切换盘符**（#1）— 盘符根（如 `C:\`）的上级导航到虚拟「此电脑」节点，列出所有可用盘符（`os.listdrives()` 过滤已挂载卷），可从 C 盘切到 D/E 盘；`list_dir` 返回 `selectable` 标志，虚拟根不可选作项目目录、不显示新建文件夹。macOS/Linux 路径处理不受影响
+
+### Changed
+- **盘符根判定并入 `_parent_for_list_dir`** — 盘符根即 `ntpath.dirname(path) == path` 且有盘符，复用已算的 parent 比较，删掉独立的 `_is_windows_drive_root` 与 normcase/normpath 比对；`_windows_drive_roots` 删去 `requires-python>=3.12` 下恒为真的 `hasattr` 守卫与 A–Z 手写 fallback。前端条件渲染扁平化、`listDir` 返回类型去重复声明
+
 ## [0.2.36] - 2026-07-08
 
 ### Added
