@@ -38,8 +38,8 @@ BASH_MAX_OUTPUT_BYTES: Final[int] = 30 * 1024
 ATTACHED_FILE_TAG: Final[str] = "attached-file"
 """文件附件路径在消息中的包裹标签 <attached-file>路径</attached-file>。
 
-单一事实源：display 剥离（text_cleaning）与历史还原（server/ws）都从此构建正则。
-desktop 前端发送侧（App.tsx send）的同名字面量须与此保持一致。"""
+纯模型侧约定（agent 用 read 读取路径）：bridge.stream_response 把附件路径拼成
+标签块注入 content；显示侧不解析——附件胶囊数据走 lumi.items 的 files 字段。"""
 
 FEISHU_THREAD_PREFIX: Final[str] = "feishu-"
 """飞书渠道会话的 thread 前缀（每 chat 确定性派生 feishu-{chat_id}）。
@@ -56,10 +56,9 @@ LUMI_META_KEY: Final[str] = "lumi"
 SENDER_TAG: Final[str] = "sender"
 """IM 渠道消息的发送者标注 <sender>姓名</sender>\\n正文。
 
-渠道无关约定（飞书首用）：纯给模型看（群聊里分清谁说的）。desktop 渲染不解析
+渠道无关约定（飞书首用）：纯给模型看（群聊里分清谁说的）。显示侧不解析
 此标签——每条原始消息的 {sender, ts, text} 结构化存于
-HumanMessage.additional_kwargs["lumi"]["items"]（见 _user_items），两条链路分离。
-text_cleaning 在整段显示（会话列表 first_message 等）时剥掉它。"""
+HumanMessage.additional_kwargs["lumi"]["items"]（见 _user_items），两条链路分离。"""
 
 # ── 图片处理 ──
 

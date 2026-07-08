@@ -167,9 +167,12 @@ def test_inject_prepends_reminder_and_preserves_original(
     # 1. 原始消息 content 未被修改
     assert message.content == original_content, "原始消息的 content 不应被修改"
 
-    # 将原始 content 统一为 block 列表形式以便比较
+    # 将原始 content 统一为 block 列表形式以便比较（空串不产生空 text 块——
+    # 空块会永驻 checkpoint 且被 Bedrock/严格端拒绝，见 inject_text_into_message）
     if isinstance(original_content, str):
-        expected_suffix = [{"type": "text", "text": original_content}]
+        expected_suffix = (
+            [{"type": "text", "text": original_content}] if original_content else []
+        )
     else:
         expected_suffix = list(original_content)
 

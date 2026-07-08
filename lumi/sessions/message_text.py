@@ -5,7 +5,27 @@
 
 from __future__ import annotations
 
-from lumi.sessions.text_cleaning import strip_injected_blocks
+from lumi.agents.core.meta_message import declared_items, injected_prefix
+
+
+def visible_user_text(msg: object) -> str:
+    """用户消息（对象或 dict）的可读文本——所有"这条消息给用户看什么"的单一入口。
+
+    显示声明优先：``lumi.items`` 已声明 → join 各条目 text（``[]`` = 合成消息，
+    返回空串）。未声明（cron / 子 agent 等不经 bridge 的构造点，content 本就
+    无标签）→ fallback：按 ``injected_prefix`` 计数掉注入前缀块后取文本。
+    """
+    items = declared_items(msg)
+    if items is not None:
+        return "\n".join(it.get("text", "") for it in items if it.get("text"))
+    if isinstance(msg, dict):
+        content = msg.get("content", "")
+    else:
+        content = getattr(msg, "content", "")
+    skip = injected_prefix(msg)
+    if skip and isinstance(content, list):
+        content = content[skip:]
+    return extract_text_content(content).strip()
 
 
 def extract_text_content(content: str | list) -> str:
@@ -45,11 +65,13 @@ def extract_messages_as_text(messages: list) -> str:
         role = getattr(m, "type", "")
         if role == "system":
             continue
-        raw = extract_text_content(getattr(m, "content", ""))
         if role == "human":
-            # 上下文注入块（system-reminder/summary 等）持久在用户消息 content 里，
-            # 不剥会淹没 grep 语料里的真实用户输入
-            raw = strip_injected_blocks(raw)
+            # visible_user_text 对合成 human（摘要 carrier / hook reminder /
+            # 后台通知，items 声明为空）返回空串 → 该行天然被丢弃；真实用户
+            # 消息取声明文本或 fallback，注入块不会淹没 grep 语料里的真实输入
+            raw = visible_user_text(m)
+        else:
+            raw = extract_text_content(getattr(m, "content", ""))
         text = raw.replace("\n", "⏎").strip()
         if role == "human":
             tag = "user"

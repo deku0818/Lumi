@@ -43,12 +43,14 @@ async def run_turn(
     content: str | list,
     tool_mode: str,
     message_meta: dict | None = None,
-    is_meta: bool = False,
+    synthetic: bool = False,
+    attachments: list[str] | None = None,
     command: tuple[str, str] | None = None,
 ) -> None:
     """驱动一轮 agent run，把事件流渲染到飞书。
 
-    is_meta=True 标记系统注入轮（后台任务通知），注入文本不作为用户消息呈现。
+    synthetic=True 标记系统合成轮（后台任务通知），注入文本不作为用户消息呈现。
+    attachments 为下载好的文件路径，交 bridge 统一注入标签块 + 写 items.files。
     command=(name, extra_text) 时走 bridge.stream_command（斜杠命令轮，content 不使用）。
     """
     streaming = channel.streaming
@@ -72,7 +74,11 @@ async def run_turn(
         )
     else:
         stream = bridge.stream_response(
-            content, tool_mode=tool_mode, message_meta=message_meta, is_meta=is_meta
+            content,
+            tool_mode=tool_mode,
+            message_meta=message_meta,
+            synthetic=synthetic,
+            attachments=attachments,
         )
     try:
         async for evt in stream:

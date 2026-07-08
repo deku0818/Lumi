@@ -378,7 +378,7 @@ async def test_unknown_method_returns_error():
 
 
 async def test_notification_loop_injects_and_pumps():
-    """直接测 _notification_loop 的注入路径：有通知 → drain → stream_response(is_meta)。"""
+    """直接测 _notification_loop 的注入路径：有通知 → drain → stream_response(synthetic)。"""
     events = [BridgeEvent(kind=EventKind.MESSAGE_DELTA, text="bg done")]
     bridge = FakeBridge(events=events, notifications=["后台任务已完成"])
     session, channel = _make_session(bridge)
@@ -387,13 +387,13 @@ async def test_notification_loop_injects_and_pumps():
     async with session._run.lock:
         hint = bridge.drain_notification_hint(bridge.current_thread_id)
         await session._pump(
-            bridge.stream_response(hint, tool_mode="default", is_meta=True)
+            bridge.stream_response(hint, tool_mode="default", synthetic=True)
         )
 
-    # 注入作为不可见 meta 轮，事件被 pump 出
+    # 注入作为不可见合成轮，事件被 pump 出
     assert [e["params"]["type"] for e in channel.events()] == ["message.delta"]
-    # is_meta 标记透传
-    assert bridge.stream_response_calls[0]["is_meta"] is True
+    # synthetic 标记透传
+    assert bridge.stream_response_calls[0]["synthetic"] is True
     assert bridge.stream_response_calls[0]["content"] == "后台任务已完成"
     # 注：完整 _notification_loop（含 NOTIFICATION_POLL_INTERVAL 轮询、与挂起审批轮
     # 持锁的竞争）只能靠真实 desktop 联调验证。
@@ -466,8 +466,8 @@ async def test_detach_keeps_parked_turn_and_registers():
         await session.aclose()
 
 
-async def test_should_detach_excludes_pure_meta_turn():
-    """纯后台 meta 轮断连不续接（无用户在等），除非它自身正挂着审批。"""
+async def test_should_detach_excludes_pure_synthetic_turn():
+    """纯后台合成轮断连不续接（无用户在等），除非它自身正挂着审批。"""
     bridge = BlockingBridge()
     session, _ = _make_session(bridge)
     await session.start()
@@ -477,12 +477,12 @@ async def test_should_detach_excludes_pure_meta_turn():
     await bridge.started.wait()
     try:
         assert session.should_detach() is True  # 普通用户轮 → 续接
-        session._meta_run = True
-        assert session.should_detach() is False  # 纯 meta 轮 → 不续接
+        session._synthetic_run = True
+        assert session.should_detach() is False  # 纯合成轮 → 不续接
         bridge._pending_events = [
             BridgeEvent(kind=EventKind.APPROVAL, data={"approval_id": "a"})
         ]
-        assert session.should_detach() is True  # meta 轮但自身挂着审批 → 仍续接
+        assert session.should_detach() is True  # 合成轮但自身挂着审批 → 仍续接
     finally:
         bridge.release.set()
         await session.aclose()

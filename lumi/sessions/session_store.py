@@ -17,8 +17,11 @@ from dataclasses import dataclass
 from datetime import UTC, datetime
 from typing import TYPE_CHECKING, Any
 
-from lumi.sessions.message_visibility import should_show_human_message
-from lumi.sessions.text_cleaning import extract_display_text
+from lumi.sessions.message_text import visible_user_text
+from lumi.sessions.message_visibility import (
+    is_human_message,
+    should_show_human_message,
+)
 from lumi.utils.logger import logger
 from lumi.utils.thread_id import CRON_THREAD_PREFIX
 
@@ -85,27 +88,11 @@ def _extract_first_human_message(messages: list) -> str:
         首条用户消息文本（截断至 100 字符），提取失败返回空字符串
     """
     for msg in messages:
-        # LangChain Message 对象
-        if hasattr(msg, "type") and msg.type == "human":
-            content = msg.content
-        # 字典格式
-        elif isinstance(msg, dict) and msg.get("type") == "human":
-            content = msg.get("content", "")
-        else:
+        if not (is_human_message(msg) and should_show_human_message(msg)):
             continue
-
-        if not should_show_human_message(msg):
-            continue
-
-        if isinstance(content, str):
-            return extract_display_text(content)[:100]
-        # 多模态消息：遍历所有 text block，跳过 system-reminder
-        if isinstance(content, list):
-            for block in content:
-                if isinstance(block, dict) and block.get("type") == "text":
-                    cleaned = extract_display_text(block.get("text", ""))
-                    if cleaned:
-                        return cleaned[:100]
+        cleaned = visible_user_text(msg)
+        if cleaned:
+            return cleaned[:100]
     return ""
 
 

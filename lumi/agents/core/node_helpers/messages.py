@@ -10,6 +10,7 @@ from typing import Any
 
 from langchain_core.messages import AIMessage, HumanMessage, RemoveMessage, ToolMessage
 
+from lumi.agents.core.meta_message import INJECTED_PREFIX_KEY, injected_prefix
 from lumi.models.cache import CACHE_CONTROL
 from lumi.utils.logger import logger
 
@@ -70,18 +71,28 @@ def write_offload_file(file_path: Path, content: str) -> None:
 
 
 def inject_text_into_message(message: HumanMessage, text: str) -> HumanMessage:
-    """将文本块插入到 HumanMessage content 最前面，返回新消息（不可变原则）。"""
+    """将注入文本作为独立 block 前置到 HumanMessage，返回新消息（不可变原则）。
+
+    同时累加 ``INJECTED_PREFIX_KEY`` 计数——显示侧按计数整块丢弃注入前缀，
+    不再正则识别正文。所有向用户消息注入文本的调用点都必须经由本函数。
+
+    空串 content（纯附件消息）不生成空 text 块——空 text 块会随 checkpoint
+    永驻历史，Bedrock / 严格 OpenAI 兼容端拒绝空白 text 块导致该会话每轮 400。
+    """
     if isinstance(message.content, str):
-        content_blocks: list[dict[str, str]] = [
-            {"type": "text", "text": message.content}
-        ]
+        content_blocks: list[dict[str, str]] = (
+            [{"type": "text", "text": message.content}] if message.content else []
+        )
     else:
         content_blocks = list(message.content)
 
     content_blocks.insert(0, {"type": "text", "text": text})
     return HumanMessage(
         content=content_blocks,
-        additional_kwargs=message.additional_kwargs,
+        additional_kwargs={
+            **message.additional_kwargs,
+            INJECTED_PREFIX_KEY: injected_prefix(message) + 1,
+        },
         id=message.id,
     )
 

@@ -99,12 +99,18 @@ def test_folder_note_add_remove_cancels_out(tmp_path):
     assert bridge._drain_folder_note() == ""
 
 
-def test_prepend_reminder_handles_both_content_forms():
-    from lumi.gateway.bridge import prepend_reminder
+def test_injected_note_marked_structurally():
+    """注入块打 injected_prefix 计数，显示侧按结构掉块——不依赖正则识别正文。"""
+    from langchain_core.messages import HumanMessage
 
-    assert prepend_reminder("你好", "<system-reminder>x</system-reminder>\n") == (
-        "<system-reminder>x</system-reminder>\n你好"
-    )
-    blocks = prepend_reminder([{"type": "text", "text": "你好"}], "note\n")
-    assert blocks[0] == {"type": "text", "text": "note\n"}
-    assert blocks[1] == {"type": "text", "text": "你好"}
+    from lumi.agents.core.node_helpers.messages import inject_text_into_message
+    from lumi.sessions.message_text import visible_user_text
+
+    msg = HumanMessage(content="你好")
+    # 注入两条 note（folder + ultra 场景），且刻意不带 <system-reminder> 标签，
+    # 证明显示侧走的是计数掉块而非正则
+    msg = inject_text_into_message(msg, "note-a\n")
+    msg = inject_text_into_message(msg, "note-b\n")
+    assert msg.additional_kwargs["injected_prefix"] == 2
+    assert msg.content[0] == {"type": "text", "text": "note-b\n"}
+    assert visible_user_text(msg) == "你好"

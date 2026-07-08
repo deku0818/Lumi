@@ -1,7 +1,7 @@
 """Summary 压缩的辅助：PTL retry / 熔断器 / 图像剥离 / API round 分组 + 离线强制压缩。
 
 主体服务于 ``lumi.agents.core.nodes.summarizer`` 节点（串行拓扑
-``PreprocessMessages → Summarizer → CallModel``，summary 在关键路径上，故失败需熔断
+``Summarizer → PreprocessMessages → CallModel``，summary 在关键路径上，故失败需熔断
 兜底、自身超长需 PTL 截头重试）。文件末尾另有**离线强制压缩**入口
 （``select_for_compaction`` / ``build_compacted_update``），供 ``AgentBridge.compact_thread``
 / ``/compact`` 命令 / IM 每日整理对空闲会话主动压缩，绕开节点专属的阈值门与熔断器。

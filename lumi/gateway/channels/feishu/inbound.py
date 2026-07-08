@@ -1,8 +1,8 @@
 """飞书入站消息处理：解析事件 → 派生 thread → 忙时排队合并 → 驱动一次 agent run。
 
 支持纯文本 / post 富文本 / 图片（下载为原始 base64 块，经 stream_response 的
-persist_image_blocks 统一存盘转 <attached-file>，模型用 read/vision 读）/ 文件（下载到
-/tmp/lumi 经 <attached-file> 供 read 读）；回复某条消息时一并带上被回复消息里的图片/文件。每条消息经身份目录解析发送者显示名
+persist_image_blocks 统一存盘取路径，与文件附件一并由 bridge 拼 <attached-file>
+标签块注入，模型用 read/vision 读）/ 文件（下载到 /tmp/lumi 经 attachments 参数传入）；回复某条消息时一并带上被回复消息里的图片/文件。每条消息经身份目录解析发送者显示名
 （``channel.directory``），正文加 ``<sender>姓名</sender>`` 标签（模型分清群聊里谁说的），
 并把 {sender, ts, text} 结构化写进 additional_kwargs 供 desktop 气泡渲染。
 """
@@ -28,7 +28,6 @@ from lumi.gateway.channels.feishu.directory import fallback_chat_name, fallback_
 from lumi.gateway.channels.feishu.outbound import run_turn
 from lumi.sessions.session_meta import delete_meta, update_meta
 from lumi.utils.constants import (
-    ATTACHED_FILE_TAG,
     FEISHU_THREAD_PREFIX,
     NOTIFICATION_POLL_INTERVAL,
     SENDER_TAG,
@@ -250,14 +249,6 @@ def merge_messages(batch: list[_Pending]) -> str:
     if len(batch) == 1:
         return _render(batch[0])
     return _MERGE_REMINDER.format(n=len(batch)) + "\n\n".join(_render(m) for m in batch)
-
-
-def attach_files_to_text(text: str, paths: list[str]) -> str:
-    """把下载好的文件路径以 <attached-file> 标签拼到正文（agent 用 read 读取）。"""
-    if not paths:
-        return text
-    tags = "\n".join(f"<{ATTACHED_FILE_TAG}>{p}</{ATTACHED_FILE_TAG}>" for p in paths)
-    return f"{text}\n{tags}" if text else tags
 
 
 def build_content(text: str, image_blocks: list[dict]) -> str | list[dict]:
@@ -663,7 +654,7 @@ class FeishuInbound:
                 reply_to=anchor_id,
                 content=compose_notification_hint(notifications),
                 tool_mode=ch.config.tool_mode,
-                is_meta=True,
+                synthetic=True,
             )
         except asyncio.CancelledError:
             queue = get_task_registry().notification_queue
@@ -702,6 +693,7 @@ class FeishuInbound:
                 *(self._image_block(mid, ik) for mid, ik in image_refs)
             )
             image_blocks = [b for b in results if b]
+        file_paths: list[str] = []
         if file_refs:
             target = inbound_dir(thread_id)
             bridge.add_folder(str(target))  # 授权该目录给本会话权限引擎
@@ -711,7 +703,7 @@ class FeishuInbound:
                     for mid, fk, fname in file_refs
                 )
             )
-            merged_text = attach_files_to_text(merged_text, [p for p in results if p])
+            file_paths = [p for p in results if p]
 
         await run_turn(
             ch,
@@ -722,6 +714,7 @@ class FeishuInbound:
             content=build_content(merged_text, image_blocks),
             tool_mode=ch.config.tool_mode,
             command=command,
+            attachments=file_paths,
             # 渲染数据与模型文本分离：每条原始消息的 {sender, ts, text} 结构化存进
             # additional_kwargs，desktop 气泡只读它、不反解析正文——正文里的
             # <sender> 标签纯给模型看，字面标签无法伪造气泡、也无对齐问题。

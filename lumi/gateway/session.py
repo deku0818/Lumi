@@ -16,12 +16,11 @@ from __future__ import annotations
 
 import asyncio
 import os
-import re
 from contextlib import suppress
 from dataclasses import dataclass, field
-from pathlib import Path
 from typing import TYPE_CHECKING
 
+from lumi.agents.core.meta_message import declared_items
 from lumi.gateway.bridge import AgentBridge, EventKind
 from lumi.gateway.broadcast import BroadcastHub, serialize_bg_tasks
 from lumi.gateway.channel import Channel
@@ -36,15 +35,12 @@ from lumi.gateway.projects import (
     touch_project,
 )
 from lumi.gateway.protocol import bridge_event_to_wire, event_frame
-from lumi.sessions.message_text import extract_text_content
+from lumi.sessions.message_text import extract_text_content, visible_user_text
 from lumi.sessions.message_visibility import should_show_human_message
 from lumi.sessions.session_meta import delete_meta, load_all, update_meta
 from lumi.sessions.session_store import list_sessions
-from lumi.sessions.text_cleaning import extract_display_text
 from lumi.utils.constants import (
-    ATTACHED_FILE_TAG,
     FEISHU_THREAD_PREFIX,
-    LUMI_META_KEY,
     NOTIFICATION_POLL_INTERVAL,
 )
 from lumi.utils.logger import logger
@@ -77,78 +73,24 @@ class _NoopChannel:
         return
 
 
-def _extract_images(content) -> list[str]:
-    """从 HumanMessage 的 list content 提取图片块，转回前端可渲染的 data URL。
-
-    后端图片块为 Anthropic 原生格式 {type:image, source:{type:base64, media_type, data}}，
-    前端 <img> 需要 data URL，故拼回 data:{media_type};base64,{data}。
-    """
-    if not isinstance(content, list):
-        return []
-    urls: list[str] = []
-    for block in content:
-        if isinstance(block, dict) and block.get("type") == "image":
-            src = block.get("source", {})
-            if src.get("type") == "base64" and src.get("data"):
-                media = src.get("media_type", "image/png")
-                urls.append(f"data:{media};base64,{src['data']}")
-    return urls
-
-
-_ATTACHED_FILE_RE = re.compile(
-    rf"<{ATTACHED_FILE_TAG}>(.*?)</{ATTACHED_FILE_TAG}>", re.DOTALL
-)
-
-
-def _extract_files(content) -> list[dict]:
-    """从 HumanMessage 提取注入的文件附件，还原前端文件胶囊。
-
-    发送侧把附件路径包在 <attached-file> 标签内（见 desktop send），
-    此处正则取回，name 取 basename。
-    """
-    raw = extract_text_content(content)
-    files: list[dict] = []
-    for path in _ATTACHED_FILE_RE.findall(raw):
-        p = path.strip()
-        if p:
-            files.append({"path": p, "name": Path(p).name})
-    return files
-
-
 def _user_items(m) -> list[dict]:
-    """一条 HumanMessage → 前端 user item 列表。
+    """一条 HumanMessage → 前端 user item 列表（声明的纯投影）。
 
-    IM 渠道消息的渲染数据走 additional_kwargs["lumi"]["items"]（每条原始消息的
-    sender/ts/text，入站时结构化写入）：渲染不反解析正文，正文里的 <sender> 标签
-    纯给模型看。无 items（desktop 消息）按原单气泡逻辑渲染，文本管线不受影响，
-    消息级 ts（stream_response 统一落库的到达时刻）原样透传，前端按需展示。
-    图片/文件在单气泡时归它，多段时媒体归属未知，单独成一条无名 item。
+    渲染数据全部来自显示声明（构造时写好的 sender/ts/text/files，含消息级 ts
+    的单条下沉——规则在写侧 _build_user_message），不解析正文——正文里的标签
+    纯给模型看。未声明（cron 等不经 bridge 的消息）fallback 到 visible_user_text。
     """
-    meta = (getattr(m, "additional_kwargs", None) or {}).get(LUMI_META_KEY) or {}
     out: list[dict] = []
-    for it in meta.get("items") or []:
+    for it in declared_items(m) or []:
         item = {"kind": "user", "text": it.get("text", "")}
-        if it.get("sender"):
-            item["sender"] = it["sender"]
-        if it.get("ts"):
-            item["ts"] = it["ts"]
+        for key in ("sender", "ts", "files"):
+            if it.get(key):
+                item[key] = it[key]
         out.append(item)
     if not out:
-        text = extract_display_text(extract_text_content(m.content))
+        text = visible_user_text(m)
         if text:
-            item = {"kind": "user", "text": text}
-            if meta.get("ts"):
-                item["ts"] = meta["ts"]
-            out.append(item)
-    images = _extract_images(m.content)
-    files = _extract_files(m.content)
-    if images or files:
-        if len(out) != 1:
-            out.append({"kind": "user", "text": ""})
-        if images:
-            out[-1]["images"] = images
-        if files:
-            out[-1]["files"] = files
+            out.append({"kind": "user", "text": text})
     return out
 
 
@@ -590,8 +532,8 @@ class GatewaySession:
         self._notif_task: asyncio.Task | None = None
         # 断连续接：detached（断开但仍挂着活跃轮）期间的 TTL 兜底回收 task
         self._ttl_task: asyncio.Task | None = None
-        # 当前 _run.task 是否为后台通知 meta 轮（无用户在等）——断连时不值得 detach 续接
-        self._meta_run: bool = False
+        # 当前 _run.task 是否为后台通知合成轮（无用户在等）——断连时不值得 detach 续接
+        self._synthetic_run: bool = False
         # 标题生成状态（按 thread）：pending 防同线程并发生成（后发的会抢在
         # 首条话题消息前定标题）；done 是本连接已知不必再试的 thread（已定稿 /
         # 手动名 / 生成失败放弃），使帧路径免于每条消息读盘
@@ -630,11 +572,11 @@ class GatewaySession:
         return self._run.task is not None and not self._run.task.done()
 
     def should_detach(self) -> bool:
-        """WS 断开时是否值得续接：有活跃轮，且不是纯后台通知 meta 轮（无用户在等，除非它
-        自身正挂着审批）。纯 meta 轮断连应正常 aclose，不占 registry / per-thread shell 满 8h。"""
+        """WS 断开时是否值得续接：有活跃轮，且不是纯后台通知合成轮（无用户在等，除非它
+        自身正挂着审批）。纯合成轮断连应正常 aclose，不占 registry / per-thread shell 满 8h。"""
         if not self.has_active_turn():
             return False
-        return not self._meta_run or bool(self._bridge.pending_approval_events())
+        return not self._synthetic_run or bool(self._bridge.pending_approval_events())
 
     def detach(self, registry: SessionRegistry) -> GatewaySession | None:
         """WS 断开但本会话仍有活跃轮：不 aclose，原地挂着等同 thread 重连续接。
@@ -739,6 +681,7 @@ class GatewaySession:
                 params.get("content", ""),
                 tool_mode=params.get("tool_mode", "default"),
                 execution_mode=params.get("execution_mode", "normal"),
+                attachments=params.get("files"),
             )
         return self._bridge.stream_command(
             params.get("name", ""),
@@ -832,7 +775,7 @@ class GatewaySession:
             or _channel_of(tid)
         ):
             return
-        text = extract_display_text(extract_text_content(content))
+        text = extract_text_content(content).strip()
         if not text:
             return
         # pending 并发闩：首条消息的生成还在跑时，后续消息不再另起生成任务
@@ -917,11 +860,11 @@ class GatewaySession:
                 # run.lock 上直到 meta 轮跑完（UI 挂死）。设为 task 后，stop 可取消、
                 # 期间的新消息走 handle_frame 的 busy-check 得到「已有任务在执行」。
                 # 标记 meta 轮：断连时它不值得 detach 续接（无用户在等，见 should_detach）
-                self._meta_run = True
+                self._synthetic_run = True
                 self._run.task = asyncio.create_task(
                     self._pump(
                         self._bridge.stream_response(
-                            hint, tool_mode="default", is_meta=True
+                            hint, tool_mode="default", synthetic=True
                         )
                     )
                 )
@@ -935,7 +878,7 @@ class GatewaySession:
                     logger.error("[WS] 后台通知轮执行失败", exc_info=True)
                 finally:
                     self._run.task = None
-                    self._meta_run = False
+                    self._synthetic_run = False
 
     async def _dispatch(self, method: str, params: dict) -> dict:
         """执行一个非流式 RPC 方法并返回结果（在独立 task 中运行，见 _run_rpc）。

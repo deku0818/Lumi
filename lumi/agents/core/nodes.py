@@ -16,7 +16,6 @@ from langgraph.types import Command
 from pydantic import BaseModel, Field
 
 from lumi.agents.core.hooks import HookContext, dispatch_hooks, has_hooks
-from lumi.agents.core.meta_message import is_meta_message
 from lumi.agents.core.node_helpers.execution import (
     handle_tool_error,
     truncate_tool_results,
@@ -513,27 +512,18 @@ _CLASSIFIER_SYSTEM = """你是 Lumi 的工具调用安全分类器（auto 审批
 
 
 def _latest_user_intent(messages: list) -> str:
-    """取最近一条**真实** HumanMessage 文本，作为分类器判断意图的上下文。
+    """取最近一条**真实**（应显示的）HumanMessage 文本，作为分类器判断意图的上下文。
 
-    跳过 meta/注入型 HumanMessage（system-reminder、工具回灌等），否则分类器会把
-    系统注入内容误当成用户意图，污染安全裁决。
+    合成消息（工具回灌 / 通知 / carrier，items 声明为空）跳过；纯附件消息是
+    真实用户输入，**停在这里**返回空串（本轮无文本意图，分类器保守裁决）——
+    不上溯到更早轮次，否则会把上一轮的陈旧意图当本轮意图误导安全裁决。
     """
-    from lumi.sessions.text_cleaning import strip_injected_blocks
+    from lumi.sessions.message_text import visible_user_text
+    from lumi.sessions.message_visibility import should_show_human_message
 
     for msg in reversed(messages):
-        if isinstance(msg, HumanMessage) and not is_meta_message(msg):
-            content = msg.content
-            if isinstance(content, str):
-                return strip_injected_blocks(content)
-            # 多模态 content：拼接其中的文本块；剥掉持久注入的上下文块，
-            # 免得系统注入内容稀释用户意图
-            return strip_injected_blocks(
-                " ".join(
-                    part.get("text", "")
-                    for part in content
-                    if isinstance(part, dict) and part.get("type") == "text"
-                )
-            )
+        if isinstance(msg, HumanMessage) and should_show_human_message(msg):
+            return visible_user_text(msg)
     return ""
 
 
@@ -725,7 +715,8 @@ async def preprocess_messages(
     记忆索引 / LUMI.md 按 marker 比对注入末条用户消息，见 :mod:`context_inject`）。
 
     hook 返回的消息 update（同 id 替换末条 / 追加 reminder）合并进本节点返回值；
-    goto 忽略——本节点固定边 → Summarizer。历史压缩在下游 ``Summarizer`` 完成。
+    goto 忽略——本节点固定边 → CallModel。历史压缩在上游 ``Summarizer`` 已完成，
+    本节点恒在压缩后的世界里运行。
     """
     messages = state["messages"]
     updates: dict = {}

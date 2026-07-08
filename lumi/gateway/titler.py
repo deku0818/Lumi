@@ -15,9 +15,8 @@ from pydantic import BaseModel, Field
 
 from lumi.models.chain import structured_output
 from lumi.models.provider_store import resolve_pointer
-from lumi.sessions.message_text import extract_text_content
+from lumi.sessions.message_text import extract_text_content, visible_user_text
 from lumi.sessions.message_visibility import should_show_human_message
-from lumi.sessions.text_cleaning import extract_display_text
 
 # 对话素材取末尾 1000 字符：话题漂移时近期内容优先（对齐 CC extractConversationText）
 _TAIL_CHARS = 1000
@@ -55,7 +54,7 @@ def refresh_digest(messages: list, current_text: str) -> str:
     for m in messages:
         kind = getattr(m, "type", None)
         if kind == "human" and should_show_human_message(m):
-            text = extract_display_text(extract_text_content(m.content))
+            text = visible_user_text(m)
             users += bool(text)
         elif kind == "ai":
             text = extract_text_content(m.content)

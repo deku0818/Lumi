@@ -11,7 +11,6 @@ from lumi.gateway.bridge.core import (
     BridgeEvent,
     EventKind,
     build_skill_command_blocks,
-    prepend_reminder,
     shutdown_shared_runtime,
 )
 
@@ -20,6 +19,5 @@ __all__ = [
     "BridgeEvent",
     "EventKind",
     "build_skill_command_blocks",
-    "prepend_reminder",
     "shutdown_shared_runtime",
 ]

@@ -1,8 +1,7 @@
 """文件级 Checkpoint / rewind（从 AgentBridge 拆出的职责子模块）。
 
-逻辑逐字照搬自原 AgentBridge；持 bridge 反向引用以读 _agent / _config / _shadow，
-并复用 bridge 上的 checkpoint helper（_extract_label / _extract_cp_ids /
-_find_clean_checkpoint_id）。
+逻辑照搬自原 AgentBridge；持 bridge 反向引用以读 _agent / _config / _shadow，
+并复用 bridge 上的 checkpoint helper（_extract_cp_ids / _find_clean_checkpoint_id）。
 """
 
 from __future__ import annotations
@@ -11,8 +10,11 @@ import asyncio
 from pathlib import Path
 from typing import TYPE_CHECKING
 
+from langchain_core.messages import HumanMessage
+
 from lumi.agents.runtime.checkpoint import CheckpointInfo, FileCheckpointManager
 from lumi.agents.runtime.file_tracker import FileChangeTracker
+from lumi.sessions.message_text import visible_user_text
 from lumi.utils.logger import logger
 
 if TYPE_CHECKING:
@@ -45,10 +47,11 @@ class CheckpointService:
             # 将 tracker 注册到 filesystem backend
             get_backend().set_tracker(b._tracker)
 
-    async def create_checkpoint_before_turn(self, content: str | list) -> None:
+    async def create_checkpoint_before_turn(self, msg: HumanMessage) -> None:
         """在每轮 agent 执行前创建 checkpoint。
 
-        从 content 提取用户消息摘要作为 label，
+        label 直接取消息的显示声明（visible_user_text，与气泡同源——命令轮即
+        "/name input"、IM 轮即用户原文，不再嗅探 content 里的模型侧标记），
         从 LangGraph state 获取当前 **clean** checkpoint_id。
         若最新 checkpoint 处于 stale 状态（上一轮被中断，state.next 非空），
         则沿 parent 链回退到 clean checkpoint，确保回滚时不包含中断轮次的消息。
@@ -58,7 +61,7 @@ class CheckpointService:
             return
 
         try:
-            label = b._extract_label(content)
+            label = visible_user_text(msg) or "checkpoint"
 
             # 获取当前 LangGraph checkpoint_id（必须是 clean 状态）
             lg_cp_id = ""

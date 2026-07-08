@@ -40,13 +40,16 @@ Lumi 并非仅仅面向Coder，也面向所有非技术人员。
 
 **Graph 流程：**
 ```
-START → PreprocessMessages → CallModel → is_use_tool() 条件路由:
-  ├─ ToolExecutor（工具已授权或 BYPASS_TOOLS）→ after_tool_executor → CallModel（循环）
-  ├─ HumanApproval（需要用户审批）→ ToolExecutor
-  ├─ ExtractStructuredOutput（结构化输出）→ END
-  └─ END（无工具调用）
-并行分支: Summarizer（对话摘要）→ END
+START → Summarizer（超阈值当轮就地压缩）→ PreprocessMessages（UserPromptSubmit hook 注入上下文）
+  → CallModel → is_use_tool() 条件路由:
+  ├─ ToolExecutor（已授权或 BYPASS_TOOLS）→ after_tool_executor → CallModel（循环）
+  ├─ HumanApproval（需用户审批）→ approve: ToolExecutor / reject·cancel: END / DENY·无审批通道: CallModel
+  ├─ AutoClassify（auto 模式安全分类器）→ approve: ToolExecutor / reject: CallModel
+  ├─ PolicyReject（执行模式策略阻止）→ CallModel
+  ├─ OnAgentStop（无工具调用，分发 Stop hooks）→ END（hook 可拉回 CallModel）
+  └─ END（防御性路径）
 ```
+压缩恒在上下文注入之前：hook 永远在压缩后的世界运行，旧注入块与 marker 随历史删除后自动全量重建（见 `preprocessing/context_inject.py`）。
 
 **关键状态 `LumiAgentState`：** messages（LangGraph add_messages reducer）、tool_mode（auto/privileged）、summary、todos、output_schema 等。
 
@@ -83,7 +86,8 @@ START → PreprocessMessages → CallModel → is_use_tool() 条件路由:
 - **`lumi/server/ws.py`**：`lumi serve` 拉起的 FastAPI WS 端点。一条 WS = 一个 `AgentBridge`（可切换 thread），JSON-RPC 帧 `{id, method, params}` ↔ `{id, result|error}`，流式事件用 `{method:"event", params}`。
 - **`AgentBridge`**（`agents/bridge.py`）：前端（desktop / 未来 TS TUI）经 WS **复用**的中立桥接层，把 LangGraph 事件封装为 `BridgeEvent` 流。`EventKind` 成员值直接 = 对外 wire 名（`namespace.verb`），`server/protocol.py` 只做 payload 重组，无映射层。
 - **协议单一事实源**：`protocol/events.json`。TS 端 import derive 类型，Python 端由 `tests/server/test_protocol_contract.py` 锁住事件名/方法名一致——改协议只改这一处。
-- **会话元数据**：列表由 checkpoint 派生（`sessions/session_store.py`），但 pin/重命名等用户标记存在 `sessions/session_meta.py` 的 JSON sidecar（`~/.lumi/checkpoints/session_meta.json`），`list_sessions` 合并后置顶排序。消息文本提取/清理/可见性判定在 `lumi/sessions/`（无 textual 依赖，服务端与前端共用同一解析规则）。删除经 `bridge.delete_thread()` 一并清理 LangGraph + 文件级 checkpoint。
+- **会话元数据**：列表由 checkpoint 派生（`sessions/session_store.py`），但 pin/重命名等用户标记存在 `sessions/session_meta.py` 的 JSON sidecar（`~/.lumi/checkpoints/session_meta.json`），`list_sessions` 合并后置顶排序。删除经 `bridge.delete_thread()` 一并清理 LangGraph + 文件级 checkpoint。
+- **消息显示声明制**：每条 HumanMessage 构造时在 `additional_kwargs["lumi"]["items"]` 声明显示内容（气泡条目：text/sender/ts/files），content 只给模型（`<sender>`/`<attached-file>`/command 标签均为纯模型侧约定）——显示侧（`lumi/sessions/message_text.py` 的 `visible_user_text`）零正则。`items: []` = 合成消息不可见（摘要 carrier/后台通知/工具回灌，经 `synthetic_human_message` 构造）；未声明（cron/子 agent 直接构造）fallback 到 content 掉 `injected_prefix` 前缀块。上下文注入块经 `inject_text_into_message` 前置并计数（见 `preprocessing/context_inject.py`）。
 - **前端**（`desktop/src/`）：`gateway.ts` 每会话一条 WS 连接（指数退避重连）；`App.tsx` 会话状态机 + 聊天流渲染；`Sidebar.tsx` 会话列表 + `⋮` 右键菜单（置顶/重命名/删除）。
 - **模型解析与思考管理**（详见 `docs/architecture/thinking.md`）：`provider_store.resolve()` 是「模型 + 连接 + 思考档位」单一事实源；`create_llm(apply_effort=...)` 默认不注入思考参数（仅主对话链 `call_model` 传 True，内部链天然干净）。思考能力（有无/档位枚举/开关）来自 models.dev（`utils/model_catalog.py`，缓存 `~/.lumi/cache/`，context_length 同源），档位按模型存 profile 的 `effort` dict；`model_manager.effort_params()` 是档位→协议参数的唯一映射点（原生值直传，不存在档位翻译；auto = 不传任何参数）。入口为 desktop ModelPicker（Claude 式三行 + 二级菜单）。
 

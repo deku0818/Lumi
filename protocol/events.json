@@ -29,7 +29,7 @@
   },
   "events_note": "任意事件 payload 都可能附带 parent_run_id（非空时表示属于某个子代理）",
   "methods": {
-    "send_message": { "params": ["content", "tool_mode?", "execution_mode?"], "streaming": true },
+    "send_message": { "params": ["content", "tool_mode?", "execution_mode?", "files?"], "streaming": true, "note": "files 为文件附件路径数组：后端统一拼 <attached-file> 标签块给模型 + 写进显示声明 items 的 files，前端不再拼标签" },
     "resume": { "params": ["approval_id", "value"], "note": "在途审批应答（非流式控制 RPC）：唤醒挂起的审批/提问 Future；value 形状 = 审批 {decision, message?, set_tool_mode?} 或 clarify 答案字符串/__ask_cancelled__" },
     "stop": { "params": [], "result": ["stopped"], "note": "中止当前流式轮，取消后补发 turn.complete" },
     "list_commands": { "params": [], "result": ["commands"] },

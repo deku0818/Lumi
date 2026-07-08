@@ -658,63 +658,60 @@ class TestReadDispatchPDF:
         assert tool_msg.tool_call_id == "test_call_dispatch"
 
 
-class TestMetaHumanMessageFlag:
-    """工具注入的 HumanMessage 必须带 is_meta=True 标记。
+class TestSyntheticHumanMessageDeclaration:
+    """工具注入的 HumanMessage 必须声明无可显示（lumi.items = []）。
 
-    回归:如果缺少该标记,resume 后历史恢复(lumi/sessions 可见性判定)
+    回归:如果缺少该声明,resume 后历史恢复(lumi/sessions 可见性判定)
     会把它当真实用户输入渲染成气泡(就像 bug 报告里的"--- 第 1 页 ---"
     被当成用户说的话一样)。
     """
 
-    async def test_image_human_message_is_meta(self, authorized_tmp_dir: Path):
+    async def test_image_human_message_declares_empty(self, authorized_tmp_dir: Path):
         f = authorized_tmp_dir / "x.png"
         f.write_bytes(make_png_bytes())
         result = await _call_read(str(f))
         human_msg = result.update["messages"][1]
-        assert human_msg.additional_kwargs.get("is_meta") is True
+        assert human_msg.additional_kwargs["lumi"]["items"] == []
 
-    async def test_pdf_small_human_message_is_meta(self, authorized_tmp_dir: Path):
+    async def test_pdf_small_human_message_declares_empty(
+        self, authorized_tmp_dir: Path
+    ):
         f = authorized_tmp_dir / "x.pdf"
         f.write_bytes(make_pdf_bytes(2))
         result = await _call_read(str(f))
         human_msg = result.update["messages"][1]
-        assert human_msg.additional_kwargs.get("is_meta") is True
+        assert human_msg.additional_kwargs["lumi"]["items"] == []
 
-    async def test_pdf_with_pages_human_message_is_meta(self, authorized_tmp_dir: Path):
+    async def test_pdf_with_pages_human_message_declares_empty(
+        self, authorized_tmp_dir: Path
+    ):
         f = authorized_tmp_dir / "x.pdf"
         f.write_bytes(make_pdf_bytes(3))
         result = await _call_read(str(f), pages="1-2")
         human_msg = result.update["messages"][1]
-        assert human_msg.additional_kwargs.get("is_meta") is True
+        assert human_msg.additional_kwargs["lumi"]["items"] == []
 
-    def test_should_show_human_message_filters_meta(self):
-        """集成检查:TUI 的 should_show_human_message 确实会过滤 is_meta"""
+    def test_should_show_human_message_filters_synthetic(self):
+        """集成检查:should_show_human_message 确实会过滤空声明消息"""
         from lumi.sessions.message_visibility import should_show_human_message
 
-        meta_msg = HumanMessage(
+        synthetic_msg = HumanMessage(
             content=[{"type": "text", "text": "..."}],
-            additional_kwargs={"is_meta": True},
+            additional_kwargs={"lumi": {"items": []}},
         )
         normal_msg = HumanMessage(content="用户真实输入")
-        assert should_show_human_message(meta_msg) is False
+        assert should_show_human_message(synthetic_msg) is False
         assert should_show_human_message(normal_msg) is True
 
-    def test_meta_factory_uses_shared_key(self):
-        """回归:meta_human_message / META_KEY / should_show_human_message 跨层契约
-
-        三个调用点(filesystem、agent_bridge、message_visibility)必须共用同一
-        META_KEY 常量。若有人把 key 改名(如 "ismeta"),这个测试会因为过滤失败而挂。
-        """
+    def test_synthetic_factory_declares_empty_items(self):
+        """回归:synthetic_human_message / declared_items / should_show_human_message
+        跨层契约——三个调用点必须共用同一 lumi.items 声明。"""
         from lumi.agents.core.meta_message import (
-            META_KEY,
-            is_meta_message,
-            meta_human_message,
+            declared_items,
+            synthetic_human_message,
         )
         from lumi.sessions.message_visibility import should_show_human_message
 
-        # factory 构造的消息应带 META_KEY 标记
-        msg = meta_human_message([{"type": "text", "text": "..."}])
-        assert msg.additional_kwargs.get(META_KEY) is True
-        assert is_meta_message(msg) is True
-        # 与 should_show_human_message 形成完整跨层契约
+        msg = synthetic_human_message([{"type": "text", "text": "..."}])
+        assert declared_items(msg) == []
         assert should_show_human_message(msg) is False

@@ -8,28 +8,28 @@ from __future__ import annotations
 
 from langchain_core.messages import HumanMessage
 
-from lumi.agents.core.meta_message import is_meta_message
+from lumi.agents.core.meta_message import declared_items
 from lumi.utils.constants import LUMI_META_KEY
 
 
 def should_show_human_message(msg: object) -> bool:
     """判断 HumanMessage 是否应在 restore / session 列表中显示。
 
-    通过 ``META_KEY`` 标记判定(见 ``lumi.agents.core.meta_message``)。
-    发送侧应通过 ``meta_human_message()`` 或 ``META_KEY`` 常量设置此标记。
+    按显示声明判定（见 ``lumi.agents.core.meta_message``）：``items`` 已声明 →
+    非空即显示（``[]`` = 合成消息，不显示）；未声明（cron / 子 agent 等
+    不经 bridge 的构造点）→ 显示，文本走 fallback。
 
     Args:
         msg: LangChain Message 对象或等效字典。
     """
-    return not is_meta_message(msg)
+    items = declared_items(msg)
+    return bool(items) if items is not None else True
 
 
-def _is_human_message(m: object) -> bool:
-    """human 消息类型判定，兼容 LangChain 对象与 dict 格式。
-
-    与 ``session_store._extract_first_human_message`` 一致——checkpoint 恢复路径的 messages
-    可能是对象或 ``{"type": "human", ...}`` dict。
-    """
+def is_human_message(m: object) -> bool:
+    """human 消息类型判定，兼容 LangChain 对象与 dict 格式——checkpoint 恢复
+    路径的 messages 可能是对象或 ``{"type": "human", ...}`` dict。
+    session_store 与 latest_human_ts 共用，双形态判定的单一实现。"""
     if isinstance(m, HumanMessage):
         return True
     return isinstance(m, dict) and m.get("type") == "human"
@@ -44,7 +44,7 @@ def latest_human_ts(messages: list) -> float:
     """
     latest = 0
     for m in messages:
-        if not (_is_human_message(m) and should_show_human_message(m)):
+        if not (is_human_message(m) and should_show_human_message(m)):
             continue
         if isinstance(m, dict):
             kwargs = m.get("additional_kwargs") or {}

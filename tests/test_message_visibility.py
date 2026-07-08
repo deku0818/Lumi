@@ -1,4 +1,4 @@
-"""消息可见性判定测试。"""
+"""消息可见性判定测试：按 lumi.items 显示声明。"""
 
 from __future__ import annotations
 
@@ -16,21 +16,31 @@ class FakeMessage:
     additional_kwargs: dict = field(default_factory=dict)
 
 
-def test_normal_message_visible():
+def test_undeclared_message_visible():
+    # 无声明（cron / 子 agent 等不经 bridge 的构造点）→ 显示，文本走 fallback
     msg = FakeMessage(content="你好")
     assert should_show_human_message(msg) is True
 
 
-def test_is_meta_hidden():
+def test_declared_empty_hidden():
+    # items: [] = 合成消息声明"无可显示"（后台通知 / 摘要 carrier / 工具回灌）
     msg = FakeMessage(
         content="<task-notification>...</task-notification>",
-        additional_kwargs={"is_meta": True},
+        additional_kwargs={"lumi": {"items": []}},
     )
     assert should_show_human_message(msg) is False
 
 
-def test_is_meta_false_visible():
-    msg = FakeMessage(content="普通消息", additional_kwargs={"is_meta": False})
+def test_declared_nonempty_visible():
+    msg = FakeMessage(
+        content="你好", additional_kwargs={"lumi": {"items": [{"text": "你好"}]}}
+    )
+    assert should_show_human_message(msg) is True
+
+
+def test_meta_without_items_visible():
+    # lumi 元数据存在但未声明 items（仅消息级 ts）→ 视同未声明，显示
+    msg = FakeMessage(content="普通消息", additional_kwargs={"lumi": {"ts": 123}})
     assert should_show_human_message(msg) is True
 
 
@@ -39,11 +49,11 @@ def test_empty_additional_kwargs_visible():
     assert should_show_human_message(msg) is True
 
 
-def test_dict_message_with_is_meta():
+def test_dict_message_declared_empty_hidden():
     msg = {
         "type": "human",
         "content": "notification xml",
-        "additional_kwargs": {"is_meta": True},
+        "additional_kwargs": {"lumi": {"items": []}},
     }
     assert should_show_human_message(msg) is False
 

@@ -69,10 +69,10 @@ def has_hooks(event: HookEvent) -> bool:
 
 
 def _reminder_message(text: str) -> HumanMessage:
-    """hook 注入的 reminder：带 ``is_meta`` + ``is_hook_reminder`` 标记的合成消息
-    （"给模型看的，不是用户说的话"）。TUI 不渲染为用户气泡；失败计数 / 轮边界判断
-    据 ``is_hook_reminder`` 精确跳过它（而非泛跳过所有 is_meta，否则会误跳后台通知
-    等真实轮边界）——对齐 Claude Code 的 ``isMeta`` 结构化标记做法。
+    """hook 注入的 reminder：声明无可显示 + ``is_hook_reminder`` 标记的合成消息
+    （"给模型看的，不是用户说的话"）。不渲染为用户气泡；失败计数 / 轮边界判断
+    据 ``is_hook_reminder`` 精确跳过它（而非泛跳过所有合成消息，否则会误跳后台
+    通知等真实轮边界）——对齐 Claude Code 的结构化标记做法。
     """
     block = f"<system-reminder>\n{text}\n</system-reminder>\n"
     return reminder_human_message([{"type": "text", "text": block}])

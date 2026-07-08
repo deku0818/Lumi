@@ -1,5 +1,19 @@
 # Changelog
 
+## [0.2.35] - 2026-07-08
+
+### Changed
+- **消息显示声明制：`lumi.items` 单一显示真源，content 只给模型** — 每条 HumanMessage 构造时声明显示（气泡条目 text/sender/ts/files，消息级 ts 单条下沉规则一并收在写侧 `_build_user_message`），显示侧零正则：`text_cleaning.py` 整个删除，`is_meta` 契约删除（`items: []` = 合成消息声明不可见，`synthetic_human_message` 构造；摘要 carrier / 后台通知 / read 工具回灌 / hook reminder 全部改声明）；未声明消息（cron / 子 agent / workflow / dream 直接构造）fallback 到 content 掉 `injected_prefix` 前缀块。**不兼容旧数据**：既有会话的内联注入块 / 旧 is_meta 消息会裸显
+- **注入块结构化标记** — `inject_text_into_message` 成为唯一注入原语（`prepend_reminder` 删除）：注入文本作独立 block 前置并累加 `additional_kwargs["injected_prefix"]` 计数，显示按计数掉块不再嗅探文本；计数放 kwargs 不放 block 自定义字段（langchain_openai 对 text block 原样透传，多余字段会直达 provider API）
+- **附件全链路结构化** — wire `send_message` 新增 `files` 路径数组参数（desktop 前端不再拼 `<attached-file>` 标签），`persist_image_blocks` 改返回 `(content, paths)` 与文件附件合流，bridge 统一拼标签块注入（模型侧）+ 写 `items.files`（chip 显示侧）；feishu 删 `attach_files_to_text` 改经 `run_turn(attachments=...)` 透传；`stream_response` 的 `is_meta` 参数改名 `synthetic`
+- **checkpoint label 与气泡同源** — `_extract_label` 的 content 文本嗅探（command 标签正则 + `startswith("<")` 跳过）整个删除，Rewind 标签直接取 `visible_user_text`（命令轮即 `/name input`、IM 轮即用户原文）；`_user_items` 纯投影化（改用 `declared_items`，dict 形态消息 items 不再漏读），human 双形态判定收编为 `message_visibility.is_human_message` 单一实现
+
+### Fixed
+- **纯附件消息不再产生空 text 块** — 拖文件不打字发送时空串 content 被包成空 text block 永驻 checkpoint，Bedrock Converse / 严格 OpenAI 兼容端拒空白 text 块导致该会话每轮 400；`inject_text_into_message` 对空串 content 不再生成空块
+- **auto 审批分类器不再拿陈旧意图** — `_latest_user_intent` 停在最近一条应显示的用户消息（纯附件轮返回空意图保守裁决），不再上溯把上一轮的旧指令当本轮意图喂给安全分类器
+- **空消息不再渲染空气泡** — 空文本无附件的 wire 消息声明 `items: []` 不可见，不再产生 `[{}]` 的永久空用户气泡
+- **图拓扑过时注释修正** — `compact.py` / `nodes.py` docstring 与 CLAUDE.md 流程图统一为实际拓扑 `Summarizer → PreprocessMessages → CallModel`（原注释写反会误导出「注入块被当轮压掉」的错误实现）；`format_system_reminder` 并入 `format_reminder` 消除同构 wrapper
+
 ## [0.2.34] - 2026-07-08
 
 ### Changed

@@ -25,7 +25,8 @@ from langgraph.types import Command
 
 from lumi.agents.core.graph import LumiAgent, create_agent
 from lumi.agents.core.hooks import build_config_hooks, set_run_config_hooks
-from lumi.agents.core.meta_message import meta_human_message
+from lumi.agents.core.meta_message import synthetic_human_message
+from lumi.agents.core.node_helpers.messages import inject_text_into_message
 from lumi.agents.core.state import LumiAgentContext
 from lumi.agents.permissions.workspace import set_run_authorized_source_for
 from lumi.agents.runtime.bg_tasks import (
@@ -42,7 +43,13 @@ from lumi.gateway.bridge.broker import LUMI_APPROVAL_EVENT, ApprovalBroker
 from lumi.gateway.bridge.checkpoint import CheckpointService
 from lumi.gateway.bridge.folders import FolderManager
 from lumi.gateway.bridge.providers import ProviderService
-from lumi.utils.constants import LUMI_META_KEY, MAX_STREAM_RETRIES, RETRY_BASE_WAIT
+from lumi.sessions.message_text import extract_text_content
+from lumi.utils.constants import (
+    ATTACHED_FILE_TAG,
+    LUMI_META_KEY,
+    MAX_STREAM_RETRIES,
+    RETRY_BASE_WAIT,
+)
 from lumi.utils.logger import logger
 from lumi.utils.read_config import get_config
 from lumi.utils.thread_id import generate_thread_id, is_channel_thread
@@ -82,13 +89,6 @@ def build_skill_command_blocks(
             {"type": "text", "text": f"<user-input>{extra_text}</user-input>"}
         )
     return blocks
-
-
-def prepend_reminder(content: str | list, note: str) -> str | list:
-    """把 system-reminder 文本前置到消息 content（兼容 str 与多模态 blocks）。"""
-    if isinstance(content, str):
-        return f"{note}{content}"
-    return [{"type": "text", "text": note}, *content]
 
 
 def available_commands(memory_enabled: bool, *, channel: bool = False) -> list[dict]:
@@ -345,8 +345,9 @@ class AgentBridge:
         content: str | list,
         tool_mode: str = "default",
         execution_mode: str = "normal",
-        is_meta: bool = False,
+        synthetic: bool = False,
         message_meta: dict | None = None,
+        attachments: list[str] | None = None,
     ) -> AsyncGenerator[BridgeEvent, None]:
         """发送消息并 yield 事件流
 
@@ -354,51 +355,86 @@ class AgentBridge:
             content: 纯文本字符串或多模态 content blocks 列表。
             tool_mode: 工具审批模式（default / accept_edits / privileged）。
             execution_mode: 执行模式（normal / plan / readonly / 自定义）。
-            is_meta: 标记为系统生成的不可见消息（restore 时不显示）。
-            message_meta: UI 侧渲染元数据（IM 渠道的消息时间戳等），挂到
+            synthetic: 系统合成轮（后台任务通知等）：声明无可显示（items: []）、
+                不建 Rewind checkpoint、不注入 folder/ultra 提醒。
+            message_meta: UI 侧渲染元数据（IM 渠道的 per-消息 items 等），挂到
                 HumanMessage.additional_kwargs["lumi"] 随 checkpoint 持久化，
                 不进模型可见文本。
+            attachments: 文件附件的后端本机路径（desktop 经 wire files 参数 /
+                飞书下载后传入）。与上传图片存盘路径合并：模型侧拼
+                <attached-file> 标签块注入，显示侧写进 items 的 files。
         """
-        # 上传图片统一存盘并换成 <attached-file> 路径引用（与普通文件一致，交 read/vision 消费）。
-        # 放在最前：后续 checkpoint 标签 / reminder 前置都基于已归一的 content。
+        # 上传图片统一存盘（与普通文件附件合流，交 read/vision 按路径消费）。
+        # 放在最前：checkpoint 标签 / items 文本都基于已归一的 content。
         from lumi.gateway.uploads import persist_image_blocks
 
-        content = await persist_image_blocks(content)
-
-        # 在 agent 执行前创建 checkpoint（快照当前文件状态）
-        # is_meta 消息（如后台任务通知）不创建 checkpoint 条目，避免在 Rewind 中显示
-        if not is_meta:
-            await self._create_checkpoint_before_turn(content)
-            # 「添加文件夹」的增减变更随下一条真实用户消息告知模型
-            # （meta 轮不消费；在 checkpoint 之后注入，避免污染 Rewind 标签）
-            note = self._drain_folder_note()
-            if note:
-                content = prepend_reminder(content, note)
-            # Ultra 档位：仅在开/关切换的那一轮注入边沿提醒（reminder 一旦前置进历史即长驻，
-            # 无需每轮重复）。前置到当轮消息、不碰系统提示词 → 缓存安全（toggle 不废 system+tools 前缀）。
-            ultra_note = self._drain_ultra_note()
-            if ultra_note:
-                content = prepend_reminder(content, ultra_note)
+        content, image_paths = await persist_image_blocks(content)
 
         # 新一轮对话，清理上一轮残留的 agent 追踪状态
         self._active_agent_runs.clear()
         # tool_mode 是 context（运行时共享、可变）真相源：本轮 UI 选择写入，运行中经
         # set_tool_mode 改它即对后续工具实时生效。不进 input_data（state 快照改不动）。
         self._context.tool_mode = tool_mode
-        if is_meta:
-            msg = meta_human_message(content)
+        if synthetic:
+            msg = synthetic_human_message(content)
         else:
-            # 消息时间在此统一落库（渠道无关）：所有用户消息记录到达时刻（毫秒），
-            # 随 checkpoint 持久化；IM 渠道经 message_meta 另带 per-消息 items
-            # （各自的发送时刻，合并轮多条），比到达时刻更精确。UI 按需消费。
-            meta = {"ts": int(time.time() * 1000), **(message_meta or {})}
-            msg = HumanMessage(content=content, additional_kwargs={LUMI_META_KEY: meta})
+            msg = self._build_user_message(
+                content, message_meta, (attachments or []) + image_paths
+            )
+            # 在 agent 执行前创建 checkpoint（快照当前文件状态）；label 取消息的
+            # 显示声明。合成轮（如后台任务通知）不创建条目，避免在 Rewind 中显示
+            await self._create_checkpoint_before_turn(msg)
+            # 「添加文件夹」增减与 Ultra 档位切换的边沿提醒随下一条真实用户消息注入
+            # （合成轮不消费；label 来自 items 声明，注入不碰 items 故不污染 Rewind
+            # 标签；reminder 一旦前置进历史即长驻且不碰系统提示词，缓存安全）。
+            for note in (self._drain_folder_note(), self._drain_ultra_note()):
+                if note:
+                    msg = inject_text_into_message(msg, note)
         input_data = {
             "messages": [msg],
             "execution_mode": execution_mode,
         }
         async for event in self._stream(input_data):
             yield event
+
+    @staticmethod
+    def _build_user_message(
+        content: str | list, message_meta: dict | None, paths: list[str]
+    ) -> HumanMessage:
+        """构造真实用户消息：显示声明（lumi.items）+ 附件标签块注入。
+
+        显示规则全部在此写侧定死，读侧 _user_items 只做纯投影：
+        - items：IM 渠道经 message_meta 自带（per-消息 sender/ts/text）；否则从
+          content 提文本声明单条（**契约**：bridge 入口若显示 ≠ content 文本，
+          必须经 message_meta["items"] 显式声明，如 stream_command——此 fallback
+          只服务 content 即显示文本的常规消息）。
+        - 附件挂载：单条挂该条；多条（合并轮媒体归属未知）追加无名条目。
+        - ts：消息级到达时刻（毫秒）落 meta；单条且自身无 ts 时下沉到该条目
+          （IM per-item ts 更精确，不覆盖）。
+        - 附件路径拼 <attached-file> 标签块经 inject_text_into_message 前置——
+          纯模型侧约定（agent 用 read 读取），显示侧只认 items。
+        """
+        meta = {"ts": int(time.time() * 1000), **(message_meta or {})}
+        items = meta.get("items")
+        if items is None:
+            text = extract_text_content(content).strip()
+            items = [{"text": text}] if text else []
+        if paths:
+            files = [{"path": p, "name": Path(p).name} for p in paths]
+            if len(items) == 1:
+                items = [{**items[0], "files": files}]
+            else:
+                items = [*items, {"files": files}]
+        if len(items) == 1 and "ts" not in items[0]:
+            items = [{**items[0], "ts": meta["ts"]}]
+        meta["items"] = items
+        msg = HumanMessage(content=content, additional_kwargs={LUMI_META_KEY: meta})
+        if paths:
+            tags = "\n".join(
+                f"<{ATTACHED_FILE_TAG}>{p}</{ATTACHED_FILE_TAG}>" for p in paths
+            )
+            msg = inject_text_into_message(msg, tags + "\n")
+        return msg
 
     def set_tool_mode(self, mode: str) -> dict:
         """运行中实时切换工具审批模式（用户仅切顶部选择器、不发消息时经此路径）。
@@ -501,6 +537,11 @@ class AgentBridge:
         if extra_text:
             content = f"{content}\n\n{extra_text}"
         blocks = build_skill_command_blocks(name, content, extra_text)
+        # 显示声明：desktop 无 message_meta 时声明「/名 输入」单条（content 是
+        # 命令 wire 格式，纯给模型看）；IM 渠道自带 items（用户敲的原文）原样用
+        message_meta = dict(message_meta or {})
+        if "items" not in message_meta:
+            message_meta["items"] = [{"text": f"/{name} {extra_text}".strip()}]
         async for event in self.stream_response(
             blocks, tool_mode=tool_mode, message_meta=message_meta
         ):
@@ -1130,8 +1171,8 @@ class AgentBridge:
     def init_checkpoint(self, project_dir: Path) -> None:
         self._checkpoint.init_checkpoint(project_dir)
 
-    async def _create_checkpoint_before_turn(self, content: str | list) -> None:
-        await self._checkpoint.create_checkpoint_before_turn(content)
+    async def _create_checkpoint_before_turn(self, msg: HumanMessage) -> None:
+        await self._checkpoint.create_checkpoint_before_turn(msg)
 
     async def list_checkpoints(self) -> list[CheckpointInfo]:
         return await self._checkpoint.list_checkpoints()
@@ -1140,33 +1181,6 @@ class AgentBridge:
         self, checkpoint: CheckpointInfo
     ) -> tuple[bool, str]:
         return await self._checkpoint.rewind_to_checkpoint(checkpoint)
-
-    @staticmethod
-    def _extract_label(content: str | list) -> str:
-        """从用户消息中提取完整文本作为 label（保留换行）。"""
-        if isinstance(content, str):
-            return content.strip()
-        if isinstance(content, list):
-            command_label = ""
-            for block in content:
-                if isinstance(block, dict) and block.get("type") == "text":
-                    text = block.get("text", "")
-                    # 从 <command-name> 标签中提取命令名作为备选 label
-                    if text.startswith("<command-name>"):
-                        import re
-
-                        m = re.search(r"<command-name>(.*?)</command-name>", text)
-                        if m and not command_label:
-                            command_label = m.group(1).strip()
-                        continue
-                    # 跳过其他系统注入的 XML 块
-                    if text.startswith("<"):
-                        continue
-                    return text.strip()
-            # 所有 text block 都是系统注入的，使用命令名作为 label
-            if command_label:
-                return command_label
-        return "checkpoint"
 
     @staticmethod
     def _extract_usage(obj) -> dict | None:

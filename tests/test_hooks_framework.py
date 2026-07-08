@@ -163,15 +163,15 @@ async def test_additional_context_wraps_system_reminder():
     assert text.rstrip().endswith("</system-reminder>")
 
 
-async def test_additional_context_is_marked_meta_and_reminder():
-    # 注入的 reminder 既是 is_meta（TUI 不渲染为用户气泡）又是 is_hook_reminder
-    # （轮边界扫描精确跳过它，区别于后台通知等真实 meta）。
-    from lumi.agents.core.meta_message import is_meta_message, is_reminder_message
+async def test_additional_context_declares_empty_and_reminder():
+    # 注入的 reminder 既声明无可显示（items: []，不渲染为用户气泡）又是
+    # is_hook_reminder（轮边界扫描精确跳过它，区别于后台通知等真实合成消息）。
+    from lumi.agents.core.meta_message import declared_items, is_reminder_message
 
     register_hook("Stop", _hook(AdditionalContext("继续干")))
     cmd = await dispatch_hooks("Stop", _ctx())
     msg = cmd.update["messages"][0]
-    assert is_meta_message(msg)
+    assert declared_items(msg) == []
     assert is_reminder_message(msg)
 
 

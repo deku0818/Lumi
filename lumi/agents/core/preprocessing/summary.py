@@ -8,7 +8,7 @@ from __future__ import annotations
 
 from langchain_core.messages import HumanMessage
 
-from lumi.agents.core.meta_message import meta_human_message
+from lumi.agents.core.meta_message import synthetic_human_message
 
 
 def format_summary_block(summary_text: str) -> str:
@@ -17,6 +17,6 @@ def format_summary_block(summary_text: str) -> str:
 
 
 def build_summary_carrier(summary_text: str) -> HumanMessage:
-    """摘要 carrier：带 is_meta 标记的合成消息（不渲染为用户气泡），
+    """摘要 carrier：声明无可显示的合成消息（不渲染为用户气泡），
     在线/离线压缩共用——carrier 形态的单一真源。"""
-    return meta_human_message(format_summary_block(summary_text))
+    return synthetic_human_message(format_summary_block(summary_text))

@@ -24,7 +24,7 @@
 Hook 签名 `async (HookContext) -> HookResult`，`HookResult = None | Command | AdditionalContext | Block`：
 
 - `None` — 放行
-- `AdditionalContext(text)` — 软扩展：注入 `<system-reminder>` 让模型继续（带 `is_meta`
+- `AdditionalContext(text)` — 软扩展：注入 `<system-reminder>` 让模型继续（声明 `items: []`
   + `is_hook_reminder` 标记，TUI 不渲染为用户气泡、轮边界扫描据此跳过，见下）
 - `Block(reason)` — 硬终止：拒绝执行 + 以 reason 收尾
 - `Command(...)` — 完全控制 graph 路由 + state
@@ -103,7 +103,7 @@ Hook 签名 `async (HookContext) -> HookResult`，`HookResult = None | Command |
 ### 轮边界判定：reminder 不是边界
 
 连续失败计数 / 拉回计数 / accepted 判定都要界定「本轮窗口」。hook 注入的 reminder 是
-**轮内合成插话、不是轮边界**；后台任务通知等真实 meta（`is_meta` 但非 `is_hook_reminder`）
+**轮内合成插话、不是轮边界**；后台任务通知等真实合成消息（声明不可见但非 `is_hook_reminder`）
 是模型要响应的新输入、**构成轮边界**。共享遍历器 `meta_message.iter_current_turn` 收口
 这一判定（跳过 reminder、在真实 HumanMessage 处停），三个扫描器复用，避免各自重复且漏判。
 

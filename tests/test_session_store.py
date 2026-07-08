@@ -6,6 +6,7 @@ from types import SimpleNamespace
 
 from langchain_core.messages import AIMessage, HumanMessage
 
+from lumi.agents.core.preprocessing.summary import build_summary_carrier
 from lumi.sessions.session_store import _summary_from_snapshot
 
 
@@ -18,11 +19,11 @@ def _snap(messages: list):
 
 
 def test_compacted_session_without_first_human_still_listed():
-    # 压缩后只剩摘要载体 + 末条 AI（首条真实 human 已并入摘要）——仍是有内容的会话
-    msgs = [
-        HumanMessage(content="<summary>\n往期摘要\n</summary>\n", id="sum"),
-        AIMessage(content="最近的回复", id="a"),
-    ]
+    # 压缩后只剩摘要载体 + 末条 AI（首条真实 human 已并入摘要）——仍是有内容的会话。
+    # carrier 用真实构造器（声明 items: []），靠显示声明过滤
+    carrier = build_summary_carrier("往期摘要")
+    carrier.id = "sum"
+    msgs = [carrier, AIMessage(content="最近的回复", id="a")]
     summary = _summary_from_snapshot("t1", _snap(msgs))
     assert summary is not None  # 不再被丢弃
     assert summary.first_message == ""  # 取不到首条 human → 留空，标题交上层 meta 兜

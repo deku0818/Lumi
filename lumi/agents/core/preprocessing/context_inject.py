@@ -47,10 +47,7 @@ from lumi.agents.core.preprocessing.memory import (
 )
 from lumi.agents.core.preprocessing.skill_detector import SkillChangeDetector
 from lumi.agents.core.preprocessing.skills import SKILL_HEADER, skill_lines
-from lumi.agents.core.preprocessing.system_info import (
-    format_system_reminder,
-    system_info_body,
-)
+from lumi.agents.core.preprocessing.system_info import system_info_body
 from lumi.agents.memory.paths import memory_entrypoint, resolve_under_project
 from lumi.agents.memory.project_doc import PROJECT_DOC_NAME
 from lumi.agents.permissions.workspace import get_authorized_directory
@@ -215,10 +212,13 @@ async def context_inject_hook(ctx: HookContext) -> HookResult:
 
     env_body = system_info_body()
     marker["env"] = short_hash(env_body)
-    if "env" not in old:
-        parts.append(format_system_reminder())
-    elif old["env"] != marker["env"]:
-        parts.append(format_reminder("环境信息已变更，以下为最新:", [env_body]))
+    if old.get("env") != marker["env"]:
+        header = (
+            "用户当前系统环境信息"
+            if "env" not in old
+            else "环境信息已变更，以下为最新:"
+        )
+        parts.append(format_reminder(header, [env_body]))
 
     if _has_agent_tool(runtime.context.tools):
         agents = AgentChangeDetector.get_instance().peek()

@@ -20,7 +20,7 @@ from langchain_core.tools import InjectedToolCallId, tool
 from langgraph.types import Command
 from pydantic import Field
 
-from lumi.agents.core.meta_message import meta_human_message
+from lumi.agents.core.meta_message import synthetic_human_message
 from lumi.agents.tools.providers.filesystem.backend import (
     BINARY_CHECK_BYTES,
     DEFAULT_CONTENT_HEAD_LIMIT,
@@ -162,7 +162,7 @@ async def _read_image_command(path: Path, tool_call_id: str) -> Command:
                     tool_call_id=tool_call_id,
                     name="read",
                 ),
-                meta_human_message(
+                synthetic_human_message(
                     [
                         {"type": "text", "text": reminder},
                         {
@@ -286,7 +286,7 @@ async def _read_pdf_rendered_command(
                     tool_call_id=tool_call_id,
                     name="read",
                 ),
-                meta_human_message(blocks),
+                synthetic_human_message(blocks),
             ]
         }
     )

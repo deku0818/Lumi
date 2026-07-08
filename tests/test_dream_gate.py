@@ -11,7 +11,7 @@ from types import SimpleNamespace
 from langchain_core.messages import AIMessage, HumanMessage
 
 from lumi.agents.core.hooks.schema import HookContext
-from lumi.agents.core.meta_message import meta_human_message
+from lumi.agents.core.meta_message import synthetic_human_message
 from lumi.agents.memory import dream as dream_mod
 from lumi.agents.memory import dream_lock
 from lumi.agents.memory.dream import auto_dream_stop_hook, start_dream
@@ -105,7 +105,7 @@ def test_latest_ts_takes_newest_real_human():
     msgs = [
         _human_with_ts("hi", 1_000_000),
         AIMessage("ok", additional_kwargs={LUMI_META_KEY: {"ts": 9_999_999}}),
-        meta_human_message("reminder"),
+        synthetic_human_message("reminder"),
         _human_with_ts("bye", 2_000_000),
     ]
     assert latest_human_ts(msgs) == 2000.0

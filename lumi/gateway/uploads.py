@@ -1,8 +1,9 @@
-"""上传图片持久化：把消息里的内联 image block 存盘并换成 ``<attached-file>`` 路径引用。
+"""上传图片持久化：把消息里的内联 image block 存盘、路径交还调用方。
 
 所有 channel（desktop / 飞书 / 未来 TUI）上传的图片以 base64 image block 到达 bridge。
-本模块在 ``stream_response`` 入口把它们存到 ``~/.lumi/uploads/`` 下、替换为
-``<attached-file>`` 文本引用 —— 与普通文件附件完全一致，让 read / vision 工具按路径消费。
+本模块在 ``stream_response`` 入口把它们存到 ``~/.lumi/uploads/`` 下并返回路径列表，
+由 bridge 与普通文件附件统一拼 ``<attached-file>`` 标签块（模型侧）+ 写进
+``lumi.items`` 的 files（显示侧），让 read / vision 工具按路径消费。
 
 为何在后端存盘（而非前端发路径）：图片走 base64 传输，落盘到「后端本机」，本地与远程
 后端都能读到（前端本地路径在远程后端上不存在）。集中存 ~/.lumi/uploads 不污染用户项目；
@@ -17,7 +18,6 @@ import binascii
 import uuid
 
 from lumi.utils.config.global_manager import uploads_dir
-from lumi.utils.constants import ATTACHED_FILE_TAG
 from lumi.utils.logger import logger
 
 _MEDIA_EXT = {
@@ -57,25 +57,23 @@ def _save_base64_image(media_type: str, data: str) -> str | None:
     return str(dest)
 
 
-def _ref(path_or_url: str) -> str:
-    return f"<{ATTACHED_FILE_TAG}>{path_or_url}</{ATTACHED_FILE_TAG}>"
+async def persist_image_blocks(content: str | list) -> tuple[str | list, list[str]]:
+    """把 content 里的内联 image block 存盘，返回 ``(去图后的 content, 路径列表)``。
 
-
-async def persist_image_blocks(content: str | list) -> str | list:
-    """把 content 里的内联 image block 存盘并替换为 ``<attached-file>`` 引用。
-
-    - base64 图片 → 存到 ``~/.lumi/uploads/``，引用其后端本机路径
-    - url 图片 → 直接引用 url（vision 工具支持 http(s)）
-    - 非 list / 无图片 → 原样返回（不建目录、零副作用）
+    - base64 图片 → 存到 ``~/.lumi/uploads/``，返回其后端本机路径
+    - url 图片 → 直接返回 url（vision 工具支持 http(s)）
+    - 非 list / 无图片 → content 原样返回、路径为空（不建目录、零副作用）
 
     decode/写盘经 ``asyncio.to_thread`` 卸载，避免阻塞事件循环（消息热路径）。
-    所有图片引用合并为一个文本块追加到末尾，与普通文件附件同构。
+    存盘失败（超 50MB / 解码失败）：丢弃原始块并留文本占位块——模型需要知道
+    有图被跳过，且绝不把未压缩的 raw base64 内联转发给模型（会超上游图片
+    大小上限触发 API 400）。
     """
     if not isinstance(content, list):
-        return content
+        return content, []
 
     kept: list = []
-    refs: list[str] = []
+    paths: list[str] = []
     for block in content:
         src = (
             block.get("source")
@@ -89,16 +87,16 @@ async def persist_image_blocks(content: str | list) -> str | list:
                     src.get("media_type", "image/png"),
                     src.get("data", ""),
                 )
-                # 存盘失败（超 50MB / 解码失败）：丢弃原始块并留文本占位，绝不把未压缩的
-                # raw base64 内联转发给模型（会超上游图片大小上限触发 API 400）。
-                refs.append(_ref(path) if path else "[图片过大或无法解析，已跳过]")
+                if path:
+                    paths.append(path)
+                else:
+                    kept.append(
+                        {"type": "text", "text": "[图片过大或无法解析，已跳过]"}
+                    )
                 continue
             elif src.get("type") == "url" and src.get("url"):
-                refs.append(_ref(src["url"]))
+                paths.append(src["url"])
                 continue
         kept.append(block)
 
-    if not refs:
-        return content
-    kept.append({"type": "text", "text": "\n".join(refs)})
-    return kept
+    return kept, paths

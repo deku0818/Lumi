@@ -1572,23 +1572,19 @@ export default function App() {
         ...prev,
       ])
     }
-    if (imgs.length > 0 || files.length > 0) {
+    // 文件附件只发路径数组：后端统一拼 <attached-file> 标签块给模型 + 写显示声明 items
+    const filePaths = files.map((f) => f.path)
+    let payload: string | unknown[] = text
+    if (imgs.length > 0) {
       const blocks: unknown[] = text ? [{ type: 'text', text }] : []
       // 图片拆为 Anthropic 原生图片块（后端按模型再转 OpenAI/Bedrock 格式）
       for (const a of imgs) {
         const m = /^data:([^;]+);base64,(.*)$/s.exec(a.dataUrl)
         if (m) blocks.push({ type: 'image', source: { type: 'base64', media_type: m[1], data: m[2] } })
       }
-      // 文件路径以 <attached-file> 注入（display 层会剥离，不进可见正文），Agent 用 read 读取。
-      // 标签名须与后端 constants.ATTACHED_FILE_TAG 一致（display 剥离 + 历史还原的单一事实源）。
-      if (files.length > 0) {
-        const lines = files.map((f) => `<attached-file>${f.path}</attached-file>`).join('\n')
-        blocks.push({ type: 'text', text: lines })
-      }
-      gw.sendMessage(blocks, toolMode).catch(() => resetRunning(active))
-    } else {
-      gw.sendMessage(text, toolMode).catch(() => resetRunning(active))
+      payload = blocks
     }
+    gw.sendMessage(payload, toolMode, filePaths).catch(() => resetRunning(active))
   }
 
   // 中止当前流式轮：后端取消 task 并补发 turn.complete，running 随之复位

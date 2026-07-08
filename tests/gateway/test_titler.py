@@ -2,7 +2,7 @@
 
 from langchain_core.messages import AIMessage, HumanMessage
 
-from lumi.agents.core.meta_message import meta_human_message
+from lumi.agents.core.meta_message import synthetic_human_message
 from lumi.gateway.titler import _TAIL_CHARS, refresh_digest
 
 
@@ -40,8 +40,8 @@ def test_refresh_digest_meta_not_counted():
     # meta 注入消息不计入可见用户消息：1 条真实 + 2 条 meta + 当前 = 2 条，不刷新
     msgs = [
         HumanMessage(content="第一问"),
-        meta_human_message("后台任务通知"),
-        meta_human_message("又一条通知"),
+        synthetic_human_message("后台任务通知"),
+        synthetic_human_message("又一条通知"),
     ]
     assert refresh_digest(msgs, "第二问") == ""
 
@@ -50,7 +50,7 @@ def test_refresh_digest_tail_slices_and_excludes_meta_text():
     # 素材只保留末尾 _TAIL_CHARS 字符（近期话题优先），meta 文本不进素材
     msgs = [
         HumanMessage(content="早" * 3000),
-        meta_human_message("后台任务通知"),
+        synthetic_human_message("后台任务通知"),
         HumanMessage(content="中"),
         AIMessage(content="答" * 500),
     ]

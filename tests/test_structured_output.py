@@ -151,11 +151,11 @@ def test_count_skips_injected_hook_reminder():
 
 
 def test_count_stops_at_meta_non_reminder_boundary():
-    # 回归（review 发现）：后台任务通知是 is_meta 但**非 reminder**——它是模型要响应
+    # 回归（review 发现）：后台任务通知是合成消息但**非 reminder**——它是模型要响应
     # 的新输入、构成轮边界，计数必须在此 break，不能把上一轮失败泄漏进新一轮。
-    from lumi.agents.core.meta_message import meta_human_message
+    from lumi.agents.core.meta_message import synthetic_human_message
 
-    bg = meta_human_message("background task done")
+    bg = synthetic_human_message("background task done")
     msgs = [_err_tm("old1"), _err_tm("old2"), bg, _err_tm("new1")]
     assert count_consecutive_structured_output_failures(msgs) == 1
 
@@ -187,9 +187,9 @@ def test_iter_current_turn_skips_reminder_stops_at_real_human():
 
 
 def test_iter_current_turn_stops_at_meta_non_reminder():
-    from lumi.agents.core.meta_message import iter_current_turn, meta_human_message
+    from lumi.agents.core.meta_message import iter_current_turn, synthetic_human_message
 
-    bg = meta_human_message("bg done")  # meta 但非 reminder = 轮边界
+    bg = synthetic_human_message("bg done")  # 合成但非 reminder = 轮边界
     tm = _err_tm("1")
     assert list(iter_current_turn([_err_tm("old"), bg, tm])) == [tm]
 

@@ -1,7 +1,7 @@
 """系统信息注入模块
 
-收集操作系统、Shell 等环境信息，格式化为 ``<system-reminder>`` 块注入到用户消息中，
-使 LLM 能感知运行环境以提供更精准的建议。
+收集操作系统、Shell 等环境信息，由 :mod:`context_inject` 包装为 ``<system-reminder>``
+块注入到用户消息中，使 LLM 能感知运行环境以提供更精准的建议。
 """
 
 from __future__ import annotations
@@ -42,11 +42,3 @@ def system_info_body(info: dict[str, str] | None = None) -> str:
     if info is None:
         info = collect_system_info()
     return "\n".join(f"- {k}: {v}" for k, v in info.items() if v)
-
-
-def format_system_reminder(info: dict[str, str] | None = None) -> str:
-    """将系统信息格式化为 ``<system-reminder>`` 块。"""
-    return (
-        "<system-reminder>\n用户当前系统环境信息\n"
-        f"{system_info_body(info)}\n</system-reminder>\n"
-    )

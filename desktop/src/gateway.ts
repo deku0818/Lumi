@@ -144,11 +144,18 @@ export class Gateway {
     })
   }
 
-  // content 为纯文本字符串，或多模态 content blocks 列表（text + image 块）
-  sendMessage(content: string | unknown[], toolMode?: string): Promise<unknown> {
+  // content 为纯文本字符串，或多模态 content blocks 列表（text + image 块）；
+  // files 为文件附件路径数组——后端统一拼标签给模型 + 写显示声明，前端不拼标签
+  sendMessage(
+    content: string | unknown[],
+    toolMode?: string,
+    files?: string[],
+  ): Promise<unknown> {
+    const params: Record<string, unknown> = { content }
+    if (files && files.length > 0) params.files = files
     return this.request<{ commands: SlashCommand[] }>(
       'send_message',
-      withToolMode({ content }, toolMode),
+      withToolMode(params, toolMode),
     )
   }
 

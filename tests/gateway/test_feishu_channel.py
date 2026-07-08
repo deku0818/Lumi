@@ -14,7 +14,6 @@ from lumi.gateway.channels.config import FeishuChannelConfig
 from lumi.gateway.channels.feishu import inbound as inb
 from lumi.gateway.channels.feishu.channel import FeishuChannel
 from lumi.gateway.channels.feishu.inbound import (
-    attach_files_to_text,
     build_content,
     extract_post_images,
     extract_post_text,
@@ -110,17 +109,6 @@ def test_safe_filename_prevents_traversal():
     assert out.startswith("file_v3abcd")
     # 无名 → .bin
     assert safe_filename("file_keyabc123", "").endswith(".bin")
-
-
-def test_attach_files_to_text():
-    out = attach_files_to_text("看下", ["/tmp/lumi/feishu/x/a.pdf"])
-    assert out == "看下\n<attached-file>/tmp/lumi/feishu/x/a.pdf</attached-file>"
-    # 无文件 → 原样
-    assert attach_files_to_text("看下", []) == "看下"
-    # 无正文 → 只标签
-    assert (
-        attach_files_to_text("", ["/tmp/a"]) == "<attached-file>/tmp/a</attached-file>"
-    )
 
 
 # ── @mention 占位符清理 ──

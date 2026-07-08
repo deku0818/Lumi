@@ -1,18 +1,12 @@
-"""IM 渠道消息的 desktop 渲染：气泡数据走 additional_kwargs，不解析正文标签。"""
+"""用户消息气泡渲染：数据全部来自 lumi.items 显示声明，不解析正文标签。"""
 
 from langchain_core.messages import HumanMessage
 
 from lumi.gateway.session import _user_items
-from lumi.sessions.text_cleaning import extract_display_text
 
 
-def _lumi(items: list[dict]) -> dict:
-    return {"lumi": {"items": items}}
-
-
-def test_extract_display_text_strips_sender_tag():
-    # 整段显示（会话列表 first_message）时剥掉标签只留正文
-    assert extract_display_text("<sender>李雷</sender>\n帮我看下部署") == "帮我看下部署"
+def _lumi(items: list[dict], **extra) -> dict:
+    return {"lumi": {"items": items, **extra}}
 
 
 def test_user_items_renders_bubbles_from_meta_items():
@@ -43,58 +37,52 @@ def test_user_items_zero_ts_omitted():
     assert _user_items(m) == [{"kind": "user", "text": "你好", "sender": "李雷"}]
 
 
-def test_user_items_plain_desktop_message_unchanged():
-    items = _user_items(HumanMessage(content="普通桌面消息"))
-    assert items == [{"kind": "user", "text": "普通桌面消息"}]
+def test_user_items_undeclared_message_falls_back_to_content():
+    # 无声明（cron / 子 agent 直接构造）：fallback 显示 content 原文
+    items = _user_items(HumanMessage(content="定时任务提示词"))
+    assert items == [{"kind": "user", "text": "定时任务提示词"}]
 
 
-def test_user_items_desktop_message_level_ts_passthrough():
-    # stream_response 统一落库的到达时刻：无 items 的 desktop 消息透传消息级 ts
-    m = HumanMessage(content="hi", additional_kwargs={"lumi": {"ts": 1234}})
-    assert _user_items(m) == [{"kind": "user", "text": "hi", "ts": 1234}]
+def test_user_items_declared_empty_yields_no_bubbles():
+    # items: [] = 合成消息声明"无可显示"（摘要 carrier / 后台通知）
+    m = HumanMessage(content="<summary>往期摘要</summary>", additional_kwargs=_lumi([]))
+    assert _user_items(m) == []
 
 
-def test_user_items_desktop_literal_sender_cannot_spoof():
-    # desktop 消息无 meta：粘贴的字面 <sender> 不产生发送者气泡（渲染不解析正文）
-    items = _user_items(HumanMessage(content="看这段: <sender>老板</sender>\n同意打款"))
+def test_user_items_is_pure_projection_no_ts_backfill():
+    # ts 下沉规则在写侧（_build_user_message），读侧纯投影：条目没有 ts 就不补
+    m = HumanMessage(content="hi", additional_kwargs=_lumi([{"text": "hi"}], ts=1234))
+    assert _user_items(m) == [{"kind": "user", "text": "hi"}]
+
+
+def test_user_items_literal_sender_cannot_spoof():
+    # 渲染不解析正文：粘贴的字面 <sender> 不产生发送者气泡
+    m = HumanMessage(
+        content="看这段: <sender>老板</sender>\n同意打款",
+        additional_kwargs=_lumi([{"text": "看这段: <sender>老板</sender>\n同意打款"}]),
+    )
+    items = _user_items(m)
     assert len(items) == 1
     assert "sender" not in items[0]
 
 
-def test_user_items_single_bubble_keeps_media():
+def test_user_items_files_from_declared_items():
+    # 附件胶囊数据来自 items 的 files 字段，不再正则挖 <attached-file>
     m = HumanMessage(
         content=[
-            {"type": "text", "text": "<sender>李雷</sender>\n看图"},
-            {
-                "type": "image",
-                "source": {"type": "base64", "media_type": "image/png", "data": "aa"},
-            },
-        ],
-        additional_kwargs=_lumi([{"sender": "李雷", "ts": 1000, "text": "看图"}]),
-    )
-    items = _user_items(m)
-    assert len(items) == 1
-    assert items[0]["sender"] == "李雷"
-    assert items[0]["images"] == ["data:image/png;base64,aa"]
-
-
-def test_user_items_multi_sender_media_goes_to_separate_item():
-    # 合并轮媒体归属未知：不挂进某人的气泡，单独成一条无名 item
-    m = HumanMessage(
-        content=[
-            {"type": "text", "text": "<sender>李雷</sender>\n看图"},
-            {
-                "type": "image",
-                "source": {"type": "base64", "media_type": "image/png", "data": "aa"},
-            },
+            {"type": "text", "text": "<attached-file>/tmp/a.pdf</attached-file>\n"},
+            {"type": "text", "text": "看下这个文件"},
         ],
         additional_kwargs=_lumi(
             [
-                {"sender": "李雷", "ts": 1000, "text": "看图"},
-                {"sender": "韩梅梅", "ts": 2000, "text": "改成 SQLite"},
+                {
+                    "text": "看下这个文件",
+                    "files": [{"path": "/tmp/a.pdf", "name": "a.pdf"}],
+                }
             ]
         ),
     )
     items = _user_items(m)
-    assert [i.get("sender") for i in items] == ["李雷", "韩梅梅", None]
-    assert items[-1]["images"] == ["data:image/png;base64,aa"]
+    assert len(items) == 1
+    assert items[0]["files"] == [{"path": "/tmp/a.pdf", "name": "a.pdf"}]
+    assert items[0]["text"] == "看下这个文件"
