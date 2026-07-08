@@ -1,0 +1,67 @@
+name: Build Desktop
+
+# 云端出 Windows(.exe) + macOS(.dmg) 桌面安装包。
+# PyInstaller 不能交叉编译，故每个平台在各自 runner 上原生构建（复用 scripts/build-desktop.sh）。
+# 触发：推 v* tag 自动构建并附到 Release；也可在 Actions 页手动 Run。
+on:
+  push:
+    tags:
+      - "v*"
+  workflow_dispatch:
+
+permissions:
+  contents: write # 附加产物到 Release 需要写权限
+
+jobs:
+  build:
+    strategy:
+      fail-fast: false # 一个平台失败不牵连另一个
+      matrix:
+        # 架构由 runner 决定，PyInstaller/electron-builder 各出 host 架构：
+        os:
+          - windows-latest # Windows x64（.exe / nsis）
+          - macos-latest # macOS Apple Silicon arm64（.dmg）
+          - macos-13 # macOS Intel x64（.dmg）
+          - ubuntu-latest # Linux x64（.AppImage）
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@v4
+
+      # uv 按 pyproject 的 requires-python 自动下 Python，无需 setup-python
+      - uses: astral-sh/setup-uv@v6
+        with:
+          enable-cache: true
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 20
+          cache: npm
+          cache-dependency-path: desktop/package-lock.json
+
+      # 复用本地同一套打包脚本：PyInstaller 打后端 → electron-builder 出安装包。
+      # bash 在 Windows runner 上走自带 Git Bash，与本地一致。
+      # CSC_IDENTITY_AUTO_DISCOVERY=false：macOS 上明确跳过代码签名（CI 无证书，否则会失败）。
+      - name: Build desktop bundle
+        shell: bash
+        env:
+          CSC_IDENTITY_AUTO_DISCOVERY: "false"
+        run: bash scripts/build-desktop.sh
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: lumi-${{ matrix.os }}
+          path: |
+            desktop/release/*.exe
+            desktop/release/*.dmg
+            desktop/release/*.AppImage
+          if-no-files-found: error
+
+      # 仅 tag 触发时附到 Release；同一 tag 的两个平台 job 各自 append 产物
+      - name: Attach to Release
+        if: startsWith(github.ref, 'refs/tags/')
+        uses: softprops/action-gh-release@v2
+        with:
+          files: |
+            desktop/release/*.exe
+            desktop/release/*.dmg
+            desktop/release/*.AppImage

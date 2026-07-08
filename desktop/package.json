@@ -29,6 +29,7 @@
       }
     ],
     "electronDist": "node_modules/electron/dist",
+    "artifactName": "${productName}-${version}-${arch}.${ext}",
     "mac": {
       "target": [
         "dmg"
