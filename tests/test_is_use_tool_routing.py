@@ -70,6 +70,24 @@ def _engine_with_project():
     return engine, project_dir
 
 
+# ── 分支 0：PTL 路由步守卫 ──
+
+
+class TestBranch0_PtlRetryGuard:
+    def test_ptl_retry_returns_end_regardless_of_tail(self):
+        """CallModel 返回 Command(goto=Summarizer) 的同一步条件边仍被求值：
+        ptl_retry 置位时必须走 END 空分支，不得把 OnAgentStop 拉进 superstep"""
+        state = {
+            "messages": [
+                HumanMessage(content="q")
+            ],  # 无 tool_calls，常规会 OnAgentStop
+            "tool_mode": "default",
+            "execution_mode": "normal",
+            "ptl_retry": True,
+        }
+        assert is_use_tool(state, _runtime(None)) == "END"
+
+
 # ── 分支 1 / 2：消息列表异常回退 ──
 
 

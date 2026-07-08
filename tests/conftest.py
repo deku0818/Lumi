@@ -98,6 +98,47 @@ def reset_hooks_state():
     set_run_config_hooks(None)
 
 
+@pytest.fixture(autouse=True)
+def reset_summary_circuits():
+    """每次测试清空 summary / PTL 压缩共享的进程级熔断器状态，避免跨测试串染。"""
+    from lumi.agents.core.preprocessing.compact import clear_all_circuits
+
+    clear_all_circuits()
+    yield
+    clear_all_circuits()
+
+
+class PTLError(Exception):
+    """prompt-too-long 异常桩：满足 is_ptl_error 的 substring + status_code 判定。"""
+
+    status_code = 400
+
+
+def tool_loop_history() -> list:
+    """[System, Human, (AI+Tool)×4]，模拟工具循环中段（末条 ToolMessage）。"""
+    from langchain_core.messages import (
+        AIMessage,
+        HumanMessage,
+        SystemMessage,
+        ToolMessage,
+    )
+
+    msgs: list = [
+        SystemMessage(content="sys", id="s"),
+        HumanMessage(content="q", id="h"),
+    ]
+    for i in range(4):
+        msgs.append(
+            AIMessage(
+                content=f"a{i}",
+                id=f"a{i}",
+                tool_calls=[{"name": "read", "args": {}, "id": f"tc{i}"}],
+            )
+        )
+        msgs.append(ToolMessage(content=f"t{i}", tool_call_id=f"tc{i}", id=f"t{i}"))
+    return msgs
+
+
 @pytest.fixture
 def run_summarizer():
     """驱动串行 summarizer：mock 掉 LLM 链 / 配置 / token 计数，强制触发压缩。

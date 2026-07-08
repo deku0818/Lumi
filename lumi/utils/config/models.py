@@ -65,6 +65,10 @@ class TokenConfig(BaseModel):
         default=0.1,
         description="单次工具调用返回结果最大占比（相对于 context_length），按字节衡量",
     )
+    round_tool_ratio: float = Field(
+        default=0.3,
+        description="单轮全部工具结果合计最大占比（相对于 context_length），按字节衡量；超出时单条上限收紧为公平份额（budget//候选数），超份额的结果被截断或卸载",
+    )
     context_length: int = Field(default=200000, description="模型上下文窗口最大token数")
     summary_threshold: float = Field(
         default=0.7,
@@ -91,6 +95,11 @@ class TokenConfig(BaseModel):
     def once_tool_max_bytes(self) -> int:
         """单次工具调用返回结果最大 UTF-8 字节数"""
         return int(self.context_length * self.once_tool_ratio * BYTES_PER_TOKEN)
+
+    @property
+    def round_tool_max_bytes(self) -> int:
+        """单轮全部工具结果合计最大 UTF-8 字节数"""
+        return int(self.context_length * self.round_tool_ratio * BYTES_PER_TOKEN)
 
 
 class ToolArgsConfig(BaseModel):

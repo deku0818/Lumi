@@ -8,6 +8,7 @@ from __future__ import annotations
 from unittest.mock import AsyncMock
 
 import pytest
+from conftest import PTLError, tool_loop_history
 from langchain_core.messages import (
     AIMessage,
     HumanMessage,
@@ -19,29 +20,17 @@ from langchain_core.messages import (
 from lumi.agents.core.preprocessing import compact
 from lumi.agents.core.preprocessing.compact import (
     build_compacted_update,
-    clear_all_circuits,
     is_circuit_open,
     is_ptl_error,
     record_circuit_failure,
     reset_circuit,
     select_for_compaction,
+    select_for_ptl_compaction,
     split_into_rounds,
     strip_images_from_messages,
     summarize_with_ptl_retry,
     truncate_head_for_ptl_retry,
 )
-
-
-@pytest.fixture(autouse=True)
-def _clean_circuits():
-    clear_all_circuits()
-    yield
-    clear_all_circuits()
-
-
-class _PTLError(Exception):
-    status_code = 400
-
 
 # ─────────────────────────── round 分组 / 截头 ───────────────────────────
 
@@ -76,6 +65,47 @@ def test_truncate_head_returns_none_when_single_round():
     assert truncate_head_for_ptl_retry([HumanMessage(content="h")], 0.3) is None
 
 
+# ─────────────────────────── PTL 反应式压缩选材 ───────────────────────────
+
+
+def test_select_for_ptl_keeps_tail_rounds_excludes_system():
+    msgs = tool_loop_history()  # rounds: [Human], [a0,t0], [a1,t1], [a2,t2], [a3,t3]
+    selected = select_for_ptl_compaction(msgs, keep_rounds=2)
+    assert selected is not None
+    to_summarize, tail = selected
+    assert [m.id for m in to_summarize] == ["h", "a0", "t0", "a1", "t1"]
+    assert [m.id for m in tail] == ["a2", "t2", "a3", "t3"]
+    # System 不在任何一侧（调用方原位保留）
+    assert not any(isinstance(m, SystemMessage) for m in [*to_summarize, *tail])
+
+
+def test_select_for_ptl_none_when_rounds_insufficient():
+    # rounds = [Human], [AI+Tool] → 2 组 ≤ keep_rounds+1，无可压
+    msgs = [
+        HumanMessage(content="q", id="h"),
+        AIMessage(content="a", id="a"),
+        ToolMessage(content="t", tool_call_id="x", id="t"),
+    ]
+    assert select_for_ptl_compaction(msgs, keep_rounds=2) is None
+    assert select_for_ptl_compaction([], keep_rounds=2) is None
+
+
+def test_select_for_ptl_trailing_human_stays_in_tail():
+    """本轮首个 CallModel 即 PTL：末条 Human 归入尾部最后一个 round"""
+    msgs = [
+        HumanMessage(content="q0", id="h0"),
+        AIMessage(content="a0", id="a0"),
+        AIMessage(content="a1", id="a1"),
+        AIMessage(content="a2", id="a2"),
+        HumanMessage(content="现在的问题", id="h1"),
+    ]  # rounds: [h0], [a0], [a1], [a2,h1]
+    selected = select_for_ptl_compaction(msgs, keep_rounds=2)
+    assert selected is not None
+    to_summarize, tail = selected
+    assert [m.id for m in tail] == ["a1", "a2", "h1"]
+    assert [m.id for m in to_summarize] == ["h0", "a0"]
+
+
 # ─────────────────────────── 图像剥离 ───────────────────────────
 
 
@@ -105,11 +135,16 @@ def test_strip_images_leaves_text_only_untouched():
 
 
 def test_is_ptl_error_matches_substring_and_status():
-    assert is_ptl_error(_PTLError("Prompt is too long: 250000 tokens"))
+    assert is_ptl_error(PTLError("Prompt is too long: 250000 tokens"))
+
+
+def test_is_ptl_error_matches_bedrock_variant():
+    """Bedrock 撞窗口的错误串经网关透传时也要能识别"""
+    assert is_ptl_error(PTLError("Input is too long for requested model"))
 
 
 def test_is_ptl_error_rejects_non_ptl():
-    assert not is_ptl_error(_PTLError("some unrelated 400"))  # 无 PTL 子串
+    assert not is_ptl_error(PTLError("some unrelated 400"))  # 无 PTL 子串
     assert not is_ptl_error(ValueError("prompt is too long"))  # 有子串但非 4xx 类型
 
 
@@ -127,7 +162,7 @@ async def test_summarize_retries_on_ptl_then_succeeds():
     chain = AsyncMock()
     chain.ainvoke = AsyncMock(
         side_effect=[
-            _PTLError("prompt is too long"),
+            PTLError("prompt is too long"),
             AIMessage(content="摘要"),
         ]
     )
@@ -152,8 +187,8 @@ async def test_summarize_non_ptl_error_raises_immediately():
 async def test_summarize_raises_when_cannot_truncate_further():
     # 单 round 截不动 → PTL 直接抛出，不无限重试
     chain = AsyncMock()
-    chain.ainvoke = AsyncMock(side_effect=_PTLError("prompt is too long"))
-    with pytest.raises(_PTLError):
+    chain.ainvoke = AsyncMock(side_effect=PTLError("prompt is too long"))
+    with pytest.raises(PTLError):
         await summarize_with_ptl_retry(
             [HumanMessage(content="h")], "P", chain, max_retry=3, drop_ratio=0.3
         )

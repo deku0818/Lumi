@@ -51,6 +51,9 @@ class LumiAgentState(TypedDict):
     """结构化输出结果"""
     tool_cancelled: NotRequired[bool]
     """工具执行被用户取消时置 True，供条件边路由到 END"""
+    ptl_retry: NotRequired[bool]
+    """CallModel 撞 prompt-too-long 后置 True 并路由回 Summarizer 强制压缩，
+    成功响应后清 False。置位期间再撞 PTL 直接抛原错误——每次 PTL 只换一次压缩机会。"""
     depth: NotRequired[int]
     """子 agent 委派深度：主 agent 为 0，每委派一层 +1。
     agent 工具据此限制最大委派层数（见 agents.max_delegation_depth）。"""

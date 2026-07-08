@@ -1,5 +1,16 @@
 # Changelog
 
+## [0.2.36] - 2026-07-08
+
+### Added
+- **消息过长兜底：CallModel 撞 PTL 的反应式压缩回路** — 主对话链撞 `prompt-too-long`（400）不再直接抛给用户：`call_model` 返回 `Command(goto="Summarizer", update={"ptl_retry": True})` 折返 `Summarizer` 的 `_ptl_forced_compact` 绕阈值门强制压缩（`select_for_ptl_compaction` 按 API round 保留尾部 2 组、保住进行中的工具轮），经正常拓扑重试；成功清 `ptl_retry`，置位期间再撞直接抛原 PTL（每次 PTL 只换一次压缩机会，收敛不死循环）。摘要调用在 `Summarizer` 节点名下运行——gateway 的 `compaction.status` 拦截天然生效，摘要不外泄为助手消息。识别串补 Bedrock 的 `input is too long` 变体
+- **单轮工具结果聚合上限** — 除单条 `once_tool_max_bytes` 外新增 `round_tool_ratio`（默认 0.3）：N 个并行工具各自合规但合计超预算时，单条上限收紧为公平份额（budget // 候选数，下限 `_MIN_PER_MSG_CAP`），只处理超份额的候选，每条至多处理一次（截断元信息恒描述真实原始输出、不产生指针套指针的二级卸载）
+- **工具结果落盘附头部预览** — 卸载替换文本除路径 + 统计外附前 2000 字节内容预览（换行边界收口），多数场景模型看预览即可、省一次 read 往返
+
+### Changed
+- **`is_use_tool` PTL 路由守卫** — LangGraph 中节点返回 `Command(goto)` 与其条件边取并集，PTL 路由步的条件边仍被求值：`ptl_retry` 置位时返回 `END` 空分支，避免末条 `ToolMessage` 把 `OnAgentStop` 拉进同一 superstep 分发 Stop hooks
+- **摘要核收敛为 `_summarize`** — `summarizer` 正常路径与 `_ptl_forced_compact` 共用「剔悬空 tool_use + `run_summary`」核，消除逐字重复；熔断包裹因失败语义不同（正常 raise、PTL 放行）留在各调用方
+
 ## [0.2.35] - 2026-07-08
 
 ### Changed

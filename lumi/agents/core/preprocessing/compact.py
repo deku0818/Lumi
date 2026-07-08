@@ -26,6 +26,7 @@ from lumi.agents.core.preprocessing.summary import build_summary_carrier
 
 _PTL_SUBSTRINGS = (
     "prompt is too long",
+    "input is too long",  # Bedrock: "Input is too long for requested model"
     "context_length_exceeded",
     "maximum context length",
     "context window",
@@ -81,6 +82,35 @@ def truncate_head_for_ptl_retry(
     n_drop = max(1, int(len(rounds) * drop_ratio))
     n_drop = min(n_drop, len(rounds) - 1)
     return [m for r in rounds[n_drop:] for m in r]
+
+
+# CallModel 撞 PTL 反应式压缩时保留的尾部 round 数：保住进行中的工具轮。
+# 配合单轮工具结果聚合上限（round_tool_max_bytes ≈ 60K token），2 个尾 round +
+# system/tools + 摘要 carrier 仍在 200K 窗口内。
+_PTL_KEEP_TAIL_ROUNDS = 2
+
+
+def select_for_ptl_compaction(
+    messages: list[BaseMessage], keep_rounds: int = _PTL_KEEP_TAIL_ROUNDS
+) -> tuple[list[BaseMessage], list[BaseMessage]] | None:
+    """PTL 反应式压缩选材：返回 ``(to_summarize, tail)``，不可压返回 ``None``。
+
+    与 summarizer 节点不同，此路径可发生在工具循环中段（末条是 ToolMessage），
+    故按 API round 切组、保留尾部 ``keep_rounds`` 组，其余进摘要。头部
+    SystemMessage 不参与（调用方原位保留不删）。rounds ≤ keep_rounds + 1 时
+    头部只剩前导组（往往就是当前用户消息），压缩有害无益，返回 None。
+    """
+    body = (
+        messages[1:]
+        if messages and isinstance(messages[0], SystemMessage)
+        else list(messages)
+    )
+    rounds = split_into_rounds(body)
+    if len(rounds) <= keep_rounds + 1:
+        return None
+    to_summarize = [m for r in rounds[:-keep_rounds] for m in r]
+    tail = [m for r in rounds[-keep_rounds:] for m in r]
+    return to_summarize, tail
 
 
 _MEDIA_REPLACEMENTS = {

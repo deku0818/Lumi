@@ -26,9 +26,11 @@ from lumi.agents.core.node_helpers.messages import (
 )
 from lumi.agents.core.preprocessing.compact import (
     is_circuit_open,
+    is_ptl_error,
     record_circuit_failure,
     reset_circuit,
     run_summary,
+    select_for_ptl_compaction,
 )
 from lumi.agents.core.preprocessing.summary import build_summary_carrier
 from lumi.agents.core.response import message_transform
@@ -52,7 +54,9 @@ from lumi.utils.read_config import get_config
 from lumi.utils.sizing import context_window_tokens
 
 
-async def call_model(state: LumiAgentState, runtime: Runtime[LumiAgentContext]) -> dict:
+async def call_model(
+    state: LumiAgentState, runtime: Runtime[LumiAgentContext]
+) -> dict | Command:
 
     system_prompt = runtime.context.system_prompt
     model_name = runtime.context.model_name
@@ -92,12 +96,24 @@ async def call_model(state: LumiAgentState, runtime: Runtime[LumiAgentContext]) 
         else:
             transformed_messages.append(m)
 
-    response = await chain.ainvoke({"messages": transformed_messages})
+    try:
+        response = await chain.ainvoke({"messages": transformed_messages})
+    except Exception as exc:
+        # PTL 兜底：路由回 Summarizer 强制压缩后经正常拓扑重试（摘要调用在
+        # Summarizer 节点名下运行，bridge 的压缩事件过滤天然生效）。ptl_retry
+        # 已置位说明刚压缩过仍超长（或压缩被放行跳过），直接抛原错误。
+        if not is_ptl_error(exc) or state.get("ptl_retry"):
+            raise
+        logger.warning("[CallModel] prompt-too-long，路由回 Summarizer 强制压缩重试")
+        return Command(goto="Summarizer", update={"ptl_retry": True})
 
     if response.tool_calls:
         logger.debug(f"[LumiAgent]正在进行第「{iterations}」次工具调用迭代")
 
-    return {"messages": [response], "iterations": iterations + 1}
+    update: dict = {"messages": [response], "iterations": iterations + 1}
+    if state.get("ptl_retry"):
+        update["ptl_retry"] = False  # 压缩重试成功，恢复下一次 PTL 的压缩机会
+    return update
 
 
 def _cmd_messages(cmd: Command) -> list:
@@ -345,6 +361,13 @@ def is_use_tool(state: LumiAgentState, runtime: Runtime[LumiAgentContext]) -> st
     9. default 模式：全部 ALLOW + 边界 OK → ToolExecutor（快速路径）
     10. 其他 → HumanApproval
     """
+    # CallModel 撞 PTL 返回 Command(goto="Summarizer") 时本条件边仍会被求值
+    # （LangGraph 对 Command 路由与条件边取并集）。此步没有新 AIMessage，必须
+    # 走 END 空分支，免得末条 ToolMessage 把 OnAgentStop 拉进同一 superstep
+    # 分发 Stop hooks。CallModel 成功时恒清 ptl_retry，正常路由不受影响。
+    if state.get("ptl_retry"):
+        return "END"
+
     messages = state.get("messages", [])
     if not messages:
         logger.warning("[is_use_tool] 消息列表为空，无法判断工具调用")
@@ -589,6 +612,29 @@ async def auto_classify(
             return Command(goto="CallModel", update={"messages": messages})
 
 
+async def _summarize(
+    body: list, prompt: str, runtime: Runtime[LumiAgentContext], token_config
+) -> tuple[str, int]:
+    """摘要正常路径与 PTL 强制压缩的共用核：剔除悬空 tool_use 后调 run_summary。
+
+    Summarizer 先于 Preprocess 的 cleanup 运行——中断残留的悬空 AIMessage(tool_use)
+    直发摘要模型会被 Anthropic 400 拒绝（非 PTL、不重试），喂给摘要链前从副本剔除；
+    state 里的悬空消息随压缩一并删除，不受此剔除影响。熔断记账留在各调用方
+    （失败语义不同：正常路径 raise、PTL 路径返回 {} 放行）。
+    """
+    dangling = {rm.id for rm in cleanup_incomplete_tool_calls(body)}
+    summary_input = [m for m in body if m.id not in dangling]
+    return await run_summary(
+        summary_input,
+        prompt,
+        tools=runtime.context.tools,
+        system_prompt=runtime.context.system_prompt,
+        model_name=runtime.context.model_name,
+        max_retry=token_config.summary_ptl_retry_max,
+        drop_ratio=token_config.summary_ptl_retry_drop_ratio,
+    )
+
+
 async def summarizer(
     state: LumiAgentState,
     runtime: Runtime[LumiAgentContext],
@@ -607,6 +653,8 @@ async def summarizer(
 
     - 不超阈值（``context_length * summary_threshold``，真实 usage）→ 直接放行
     - 熔断器打开（同 thread 连续失败超阈值且未到 reset）→ 直接放行
+    - ``ptl_retry`` 置位（CallModel 撞 PTL 路由回来）→ 绕过阈值门走
+      :func:`_ptl_forced_compact` 强制压缩
     - 触发压缩 → strip 图像后走 PTL 截头重试；失败记录熔断计数并抛出（让上层感知），
       成功则清零熔断、写回 ``RemoveMessage`` + 摘要消息
 
@@ -623,6 +671,12 @@ async def summarizer(
     ):
         logger.warning("[Summarizer] 熔断打开 thread=%s，跳过压缩直接放行", thread_id)
         return {}
+
+    # PTL 反应式压缩：CallModel 撞 prompt-too-long 后路由回本节点，绕过阈值门强制压缩
+    if state.get("ptl_retry"):
+        return await _ptl_forced_compact(
+            list(state["messages"]), runtime, thread_id, token_config
+        )
 
     original_messages = list(state["messages"])
     threshold = token_config.context_length * token_config.summary_threshold
@@ -650,12 +704,6 @@ async def summarizer(
     if len(summarized_ids) < 2:
         return {}
 
-    # Summarizer 先于 Preprocess 的 cleanup 运行——中断残留的悬空 AIMessage(tool_use)
-    # 直发摘要模型会被 Anthropic 400 拒绝（非 PTL、不重试）。喂给摘要链前从副本剔除；
-    # state 里的悬空消息本就在 summarized_ids 删除集合内，随压缩一并清掉。
-    dangling = {rm.id for rm in cleanup_incomplete_tool_calls(messages_to_summarize)}
-    summary_input = [m for m in messages_to_summarize if m.id not in dangling]
-
     prompt = get_config().load_prompt("SUMMARY")
     if not prompt:
         raise ValueError(
@@ -664,14 +712,8 @@ async def summarizer(
         )
 
     try:
-        summary_text, ptl_retries = await run_summary(
-            summary_input,
-            prompt,
-            tools=runtime.context.tools,
-            system_prompt=runtime.context.system_prompt,
-            model_name=runtime.context.model_name,
-            max_retry=token_config.summary_ptl_retry_max,
-            drop_ratio=token_config.summary_ptl_retry_drop_ratio,
+        summary_text, ptl_retries = await _summarize(
+            messages_to_summarize, prompt, runtime, token_config
         )
     except Exception as exc:
         fail_count = record_circuit_failure(
@@ -703,6 +745,58 @@ async def summarizer(
         "messages": [RemoveMessage(id=mid) for mid in summarized_ids]
         + [RemoveMessage(id=last_human.id), carrier, reappended]
     }
+
+
+async def _ptl_forced_compact(
+    messages: list, runtime: Runtime[LumiAgentContext], thread_id: str, token_config
+) -> dict:
+    """CallModel 撞 PTL 后路由回 Summarizer 的强制压缩：绕过阈值门与「尾必须
+    Human」不变量（PTL 多发生在工具循环中段，末条是 ToolMessage），按 API round
+    保尾选材。任何原因不可压 / 摘要失败都返回 ``{}`` 放行——CallModel 重试再撞
+    PTL 时 ``ptl_retry`` 已置位、直接抛原错误（用户看到的恒是 PTL 而非内部错误）。
+
+    尾部 round 删旧 id + 换新 id 重加：add_messages 只能 append，同 id 是原地
+    更新排不到 carrier 之后；tool_call_id 配对在 content 里，不受消息 id 影响。
+    ``ptl_retry`` 不在此清除（CallModel 成功后才清），压缩后仍超长时守卫生效。
+    """
+    selected = select_for_ptl_compaction(messages)
+    if selected is None:
+        logger.warning("[Summarizer] PTL 强制压缩：可压缩 round 不足，放行")
+        return {}
+    to_summarize, tail = selected
+
+    prompt = get_config().load_prompt("SUMMARY")
+    if not prompt:
+        logger.warning("[Summarizer] PTL 强制压缩：未配置 SUMMARY 提示词，放行")
+        return {}
+
+    try:
+        summary_text, ptl_retries = await _summarize(
+            to_summarize, prompt, runtime, token_config
+        )
+    except Exception as exc:
+        fail_count = record_circuit_failure(
+            thread_id, token_config.summary_circuit_reset_seconds
+        )
+        logger.warning(
+            "[Summarizer] PTL 强制压缩失败 thread=%s err=%s 连续失败=%d，放行",
+            thread_id,
+            type(exc).__name__,
+            fail_count,
+        )
+        return {}
+    reset_circuit(thread_id)
+    logger.info(
+        "[Summarizer] PTL 强制压缩完成，%d 条进摘要、尾部保留 %d 条，PTL 重试 %d 次",
+        len(to_summarize),
+        len(tail),
+        ptl_retries,
+    )
+
+    carrier = build_summary_carrier(summary_text)
+    removes = [RemoveMessage(id=m.id) for m in [*to_summarize, *tail] if m.id]
+    tail_copies = [m.model_copy(update={"id": str(uuid4())}) for m in tail]
+    return {"messages": [*removes, carrier, *tail_copies]}
 
 
 async def preprocess_messages(

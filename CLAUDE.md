@@ -40,16 +40,19 @@ Lumi 并非仅仅面向Coder，也面向所有非技术人员。
 
 **Graph 流程：**
 ```
-START → Summarizer（超阈值当轮就地压缩）→ PreprocessMessages（UserPromptSubmit hook 注入上下文）
+START → Summarizer（超阈值当轮就地压缩 / ptl_retry 置位则绕阈值强制压缩）
+  → PreprocessMessages（UserPromptSubmit hook 注入上下文）
   → CallModel → is_use_tool() 条件路由:
   ├─ ToolExecutor（已授权或 BYPASS_TOOLS）→ after_tool_executor → CallModel（循环）
   ├─ HumanApproval（需用户审批）→ approve: ToolExecutor / reject·cancel: END / DENY·无审批通道: CallModel
   ├─ AutoClassify（auto 模式安全分类器）→ approve: ToolExecutor / reject: CallModel
   ├─ PolicyReject（执行模式策略阻止）→ CallModel
   ├─ OnAgentStop（无工具调用，分发 Stop hooks）→ END（hook 可拉回 CallModel）
-  └─ END（防御性路径）
+  └─ END（防御性路径 / ptl_retry 置位的压缩路由步）
 ```
 压缩恒在上下文注入之前：hook 永远在压缩后的世界运行，旧注入块与 marker 随历史删除后自动全量重建（见 `preprocessing/context_inject.py`）。
+
+**PTL 兜底回路：** CallModel 撞 prompt-too-long 时返回 `Command(goto="Summarizer", update={"ptl_retry": True})`，经 Summarizer 的 `_ptl_forced_compact`（绕阈值门、按 API round 保尾）压缩后走正常拓扑重试；成功清 `ptl_retry`，置位期间再撞直接抛原错误（每次 PTL 只换一次压缩机会）。注意 LangGraph 中节点返回 `Command(goto)` 与其条件边取并集——`is_use_tool` 对 `ptl_retry` 置位返回 END，避免该路由步误分发 Stop hooks。
 
 **关键状态 `LumiAgentState`：** messages（LangGraph add_messages reducer）、tool_mode（auto/privileged）、summary、todos、output_schema 等。
 
