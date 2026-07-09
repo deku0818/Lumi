@@ -176,6 +176,23 @@ pre {
   -webkit-app-region: no-drag;
 }
 
+.titlebar-native-font,
+.titlebar-native-font button,
+.titlebar-native-menu,
+.titlebar-native-menu button {
+  font-family: var(--font-fallback);
+  font-size: 12px;
+}
+
+.titlebar-native-menu [data-slot="dropdown-menu-item"],
+.titlebar-native-menu [data-slot="dropdown-menu-radio-item"],
+.titlebar-native-menu [data-slot="dropdown-menu-sub-trigger"],
+.titlebar-native-menu [data-slot="dropdown-menu-label"] {
+  font-family: var(--font-fallback);
+  font-size: 12px;
+  line-height: 1.35;
+}
+
 /* 拖拽调整边栏宽度时：全局 col-resize 光标、禁选、停用过渡（让边栏即时跟手） */
 body.resizing-col {
   cursor: col-resize;

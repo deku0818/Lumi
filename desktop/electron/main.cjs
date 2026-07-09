@@ -1,5 +1,5 @@
 // Electron 主进程：拉起 lumi serve sidecar、创建窗口、经 IPC 把 ws 连接信息给 renderer。
-const { app, BrowserWindow, dialog, ipcMain, protocol, session, shell, Notification } = require('electron')
+const { app, BrowserWindow, dialog, ipcMain, protocol, session, shell, Notification, Menu } = require('electron')
 const { spawn } = require('node:child_process')
 const net = require('node:net')
 const fs = require('node:fs')
@@ -100,7 +100,95 @@ function stopSidecar() {
   }
 }
 
+function windowFromEvent(event) {
+  return BrowserWindow.fromWebContents(event.sender) || BrowserWindow.getFocusedWindow()
+}
+
+function sendWindowState(win) {
+  if (!win || win.webContents.isDestroyed()) return
+  win.webContents.send('lumi:window:maximized', win.isMaximized())
+}
+
+function sendMenuAction(win, action) {
+  if (!win || win.webContents.isDestroyed()) return
+  win.webContents.send('lumi:menu-action', action)
+}
+
+const REPO_URL = 'https://github.com/deku0818/Lumi'
+
+// 标题栏「视图/帮助」菜单动作的单一实现——隐藏原生菜单与自定义标题栏的 IPC 共用同一套逻辑。
+// 编辑类命令（撤销/剪切/粘贴等）不在此处：它们依赖聚焦的可编辑元素，只经隐藏原生菜单的 role 走键盘快捷键。
+function runMenuCommand(wc, command) {
+  switch (String(command)) {
+    case 'reload':
+      wc.reload()
+      break
+    case 'reset-zoom':
+      wc.setZoomLevel(0)
+      break
+    case 'zoom-in':
+      wc.setZoomLevel(Math.min(wc.getZoomLevel() + 0.5, 9))
+      break
+    case 'zoom-out':
+      wc.setZoomLevel(Math.max(wc.getZoomLevel() - 0.5, -8))
+      break
+    case 'toggle-devtools':
+      wc.isDevToolsOpened() ? wc.closeDevTools() : wc.openDevTools()
+      break
+    case 'open-repo':
+      shell.openExternal(REPO_URL)
+      break
+  }
+}
+
+function installHiddenMenu(win) {
+  const wc = win.webContents
+  const menu = Menu.buildFromTemplate([
+    {
+      label: 'File',
+      submenu: [
+        { label: 'New Chat', accelerator: 'CommandOrControl+N', click: () => sendMenuAction(win, 'new-chat') },
+        { label: 'Settings', accelerator: 'CommandOrControl+,', click: () => sendMenuAction(win, 'settings') },
+        { type: 'separator' },
+        { label: 'Close Window', accelerator: 'Alt+F4', click: () => win.close() },
+      ],
+    },
+    {
+      label: 'Edit',
+      submenu: [
+        { role: 'undo' },
+        { role: 'redo' },
+        { type: 'separator' },
+        { role: 'cut' },
+        { role: 'copy' },
+        { role: 'paste' },
+        { role: 'selectAll' },
+      ],
+    },
+    {
+      label: 'View',
+      submenu: [
+        { label: 'Reload', accelerator: 'CommandOrControl+R', click: () => runMenuCommand(wc, 'reload') },
+        { label: 'Reset Zoom', accelerator: 'CommandOrControl+0', click: () => runMenuCommand(wc, 'reset-zoom') },
+        { label: 'Zoom In', accelerator: 'CommandOrControl+=', click: () => runMenuCommand(wc, 'zoom-in') },
+        { label: 'Zoom Out', accelerator: 'CommandOrControl+-', click: () => runMenuCommand(wc, 'zoom-out') },
+        { type: 'separator' },
+        { label: 'Toggle Developer Tools', accelerator: 'CommandOrControl+Shift+I', click: () => runMenuCommand(wc, 'toggle-devtools') },
+      ],
+    },
+    {
+      label: 'Help',
+      submenu: [
+        { label: 'Project Home', click: () => runMenuCommand(wc, 'open-repo') },
+      ],
+    },
+  ])
+  Menu.setApplicationMenu(menu)
+  win.setMenuBarVisibility(false)
+}
+
 function createWindow() {
+  const isMac = process.platform === 'darwin'
   const win = new BrowserWindow({
     width: 1100,
     height: 760,
@@ -108,14 +196,26 @@ function createWindow() {
     minHeight: 480,
     backgroundColor: '#1a1a19',
     icon: APP_ICON,
-    titleBarStyle: 'hiddenInset',
-    trafficLightPosition: { x: 16, y: 16 },
+    autoHideMenuBar: !isMac,
+    ...(isMac
+      ? {
+          titleBarStyle: 'hiddenInset',
+          trafficLightPosition: { x: 16, y: 16 },
+        }
+      : {
+          frame: false,
+        }),
     webPreferences: {
       preload: path.join(__dirname, 'preload.cjs'),
       contextIsolation: true,
       nodeIntegration: false,
     },
   })
+
+  if (!isMac) installHiddenMenu(win)
+
+  win.on('maximize', () => sendWindowState(win))
+  win.on('unmaximize', () => sendWindowState(win))
 
   // 外链（markdown 里的链接、window.open）一律走系统浏览器，避免应用窗口被导航走。
   win.webContents.setWindowOpenHandler(({ url }) => {
@@ -244,6 +344,27 @@ ipcMain.handle('lumi:notify', (event, { title, body, tag }) => {
     if (!event.sender.isDestroyed()) event.sender.send('lumi:notify-click', tag)
   })
   n.show()
+})
+
+ipcMain.handle('lumi:window:minimize', (event) => {
+  windowFromEvent(event)?.minimize()
+})
+ipcMain.handle('lumi:window:toggle-maximize', (event) => {
+  const win = windowFromEvent(event)
+  if (!win) return false
+  if (win.isMaximized()) win.unmaximize()
+  else win.maximize()
+  return win.isMaximized()
+})
+ipcMain.handle('lumi:window:close', (event) => {
+  windowFromEvent(event)?.close()
+})
+ipcMain.handle('lumi:window:is-maximized', (event) => {
+  return !!windowFromEvent(event)?.isMaximized()
+})
+
+ipcMain.handle('lumi:menu-command', (event, command) => {
+  runMenuCommand(event.sender, command)
 })
 
 app.whenReady().then(async () => {

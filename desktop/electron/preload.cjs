@@ -2,6 +2,24 @@
 const { contextBridge, ipcRenderer, webUtils } = require('electron')
 
 contextBridge.exposeInMainWorld('lumi', {
+  platform: process.platform,
+  windowControls: {
+    minimize: () => ipcRenderer.invoke('lumi:window:minimize'),
+    toggleMaximize: () => ipcRenderer.invoke('lumi:window:toggle-maximize'),
+    close: () => ipcRenderer.invoke('lumi:window:close'),
+    isMaximized: () => ipcRenderer.invoke('lumi:window:is-maximized'),
+    onMaximizedChange: (cb) => {
+      const listener = (_e, maximized) => cb(!!maximized)
+      ipcRenderer.on('lumi:window:maximized', listener)
+      return () => ipcRenderer.removeListener('lumi:window:maximized', listener)
+    },
+  },
+  menuCommand: (command) => ipcRenderer.invoke('lumi:menu-command', command),
+  onMenuAction: (cb) => {
+    const listener = (_e, action) => cb(String(action))
+    ipcRenderer.on('lumi:menu-action', listener)
+    return () => ipcRenderer.removeListener('lumi:menu-action', listener)
+  },
   getConnection: (backendId) => ipcRenderer.invoke('lumi:connection', backendId),
   // 多机后端注册表：本地 sidecar 恒在（id=local），远程机器可增删 + 切活动
   backends: {

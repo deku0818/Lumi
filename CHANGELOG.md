@@ -1,5 +1,15 @@
 # Changelog
 
+## [0.2.39] - 2026-07-09
+
+### Added
+- **Windows/Linux 自绘窗口标题栏** — 替换原生两行 chrome 为一体化标题栏：Lumi 图标 + 文件/视图/帮助下拉菜单（视图内含语言子菜单）+ 最小化/最大化/关闭按钮，整条为 `-webkit-app-region: drag` 拖拽区、按钮/菜单标 `no-drag`；mac 保持原生 `hiddenInset` 交通灯不变。窗口控制经 `lumi:window:*` IPC，最大化状态由主进程 `maximize`/`unmaximize` 事件单一推送（`onMaximizedChange`）。另保留一个**隐藏的原生菜单**专供键盘快捷键（Ctrl+N 新对话、Ctrl+, 设置、Ctrl+R 重载、缩放、Ctrl+Shift+I 开发者工具、Alt+F4 关闭），展示与快捷键分离
+- 标题栏/菜单用系统 UI 字体栈（`titlebar-native-font`），观感贴近原生
+
+### Changed
+- **视图/帮助菜单动作单一实现** — 隐藏原生菜单的 click 与 `lumi:menu-command` IPC 共用 `runMenuCommand`，缩放/重载/devtools 逻辑不再两份
+- **标题栏 memo 化** — `AppTitleBar` 用 `memo` 包裹 + 传入稳定 `startNewChat` 回调，流式 token 期间不再让标题栏子树陪跑重渲染（对齐 Sidebar 策略）；View 菜单重复项收敛为数据驱动表
+
 ## [0.2.38] - 2026-07-09
 
 ### Added
