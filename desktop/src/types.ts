@@ -295,6 +295,16 @@ export interface ChannelInfo {
 declare global {
   interface Window {
     lumi: {
+      platform?: string
+      windowControls?: {
+        minimize: () => Promise<void>
+        toggleMaximize: () => Promise<boolean>
+        close: () => Promise<void>
+        isMaximized: () => Promise<boolean>
+        onMaximizedChange: (cb: (maximized: boolean) => void) => () => void
+      }
+      menuCommand?: (command: string) => Promise<void>
+      onMenuAction?: (cb: (action: string) => void) => () => void
       getConnection: (backendId?: string) => Promise<{ wsUrl: string }>
       backends?: {
         list: () => Promise<BackendsState>

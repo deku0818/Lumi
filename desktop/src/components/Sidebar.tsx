@@ -109,6 +109,7 @@ function highlight(text: string, q: string): ReactNode {
 // memo：App 在流式期间每个 token 重渲染，侧栏的 props 全部保持稳定身份，让侧栏不陪跑。
 export const Sidebar = memo(function Sidebar({
   width,
+  showTitleDrag,
   sessions,
   sessionsLoaded,
   machines,
@@ -139,6 +140,7 @@ export const Sidebar = memo(function Sidebar({
   onDelete,
 }: {
   width: number
+  showTitleDrag: boolean
   sessions: SessionMeta[]
   sessionsLoaded: boolean // 首次 list_sessions 是否已返回；未加载完成前不显示「暂无会话」
   machines: Machine[]
@@ -427,7 +429,7 @@ export const Sidebar = memo(function Sidebar({
 
   return (
     <aside style={{ width }} className="shrink-0 bg-canvas border-r border-line/20 flex flex-col">
-      <div className="h-9 app-drag shrink-0" />
+      {showTitleDrag && <div className="h-9 app-drag shrink-0" />}
       <div className="px-3 pb-2">
         <Button
           variant="ghost"

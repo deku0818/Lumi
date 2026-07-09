@@ -58,6 +58,7 @@ import { DirBrowser } from './components/DirBrowser'
 import { FolderMenu } from './components/FolderMenu'
 import { CommandMenu } from './components/CommandMenu'
 import { Composer } from './components/Composer'
+import { AppTitleBar } from './components/AppTitleBar'
 import { toast } from './components/Toast'
 import { isCommandMode, parseCommand, matchCommands } from './slash'
 import { toolDiff, type DiffLine } from './diff'
@@ -870,6 +871,11 @@ export default function App() {
     return bgTasks.filter((tk) => tk.thread_id === tid && beOf(tk) === be)
   }, [bgTasks, active])
   const hasRunningBg = activeBgTasks.some((tk) => tk.status === 'running')
+  const platform = window.lumi.platform ?? 'win32'
+  const isMacTitleBar = platform === 'darwin'
+  const showCustomTitleBar = !isMacTitleBar
+  const showBgTaskToggle = view === 'chat' && activeBgTasks.length > 0
+  const showTopStrip = isMacTitleBar || showBgTaskToggle
 
   // 跨机器 fan-out：对每台机器的控制连接各拉一次 list_sessions，打上机器标记后合并。
   // 某机器离线只跳过它，不影响其它机器（方案甲多机并存的合并列表）。
@@ -1234,6 +1240,13 @@ export default function App() {
     },
     [activate, refreshSessions],
   )
+
+  useEffect(() => {
+    return window.lumi.onMenuAction?.((action) => {
+      if (action === 'new-chat') void newSession()
+      if (action === 'settings') openSettings()
+    })
+  }, [newSession, openSettings])
 
   const selectSession = useCallback(
     async (tid: string, backend = 'local') => {
@@ -1909,9 +1922,14 @@ export default function App() {
   )
 
   return (
-    <div className="h-full flex">
+    <div className="h-full flex flex-col bg-canvas">
+      {showCustomTitleBar && (
+        <AppTitleBar onNewChat={() => void newSession()} onOpenSettings={openSettings} />
+      )}
+      <div className="min-h-0 flex-1 flex">
       <Sidebar
         width={sidebarW.width}
+        showTitleDrag={isMacTitleBar}
         sessions={sessions}
         sessionsLoaded={sessionsLoaded}
         machines={machines}
@@ -1944,24 +1962,26 @@ export default function App() {
       <ResizeHandle {...sidebarW} edge="right" />
 
       <main className="flex-1 flex flex-col min-w-0">
-        <div className="h-9 app-drag shrink-0 flex items-center justify-end pr-3">
-          {view === 'chat' && activeBgTasks.length > 0 && (
-            <button
-              onClick={() => setBgDrawerOpen((o) => !o)}
-              title={t('bg.title')}
-              className={`no-drag relative grid place-items-center w-7 h-7 rounded-lg transition-colors ${
-                bgDrawerOpen
-                  ? 'text-primary'
-                  : 'text-muted-foreground hover:text-ink hover:bg-white/5'
-              }`}
-            >
-              <PanelRight size={17} />
-              {hasRunningBg && (
-                <span className="absolute top-1 right-1 w-1.5 h-1.5 rounded-full bg-primary animate-pulse" />
-              )}
-            </button>
-          )}
-        </div>
+        {showTopStrip && (
+          <div className={`${isMacTitleBar ? 'h-9 app-drag' : 'h-10'} shrink-0 flex items-center justify-end pr-3`}>
+            {showBgTaskToggle && (
+              <button
+                onClick={() => setBgDrawerOpen((o) => !o)}
+                title={t('bg.title')}
+                className={`no-drag relative grid place-items-center w-7 h-7 rounded-lg transition-colors ${
+                  bgDrawerOpen
+                    ? 'text-primary'
+                    : 'text-muted-foreground hover:text-ink hover:bg-white/5'
+                }`}
+              >
+                <PanelRight size={17} />
+                {hasRunningBg && (
+                  <span className="absolute top-1 right-1 w-1.5 h-1.5 rounded-full bg-primary animate-pulse" />
+                )}
+              </button>
+            )}
+          </div>
+        )}
         {view === 'projects' ? (
           <ProjectsPage
             projects={projects}
@@ -2188,6 +2208,7 @@ export default function App() {
           onCancel={() => setPendingDelete(null)}
         />
       )}
+      </div>
     </div>
   )
 }
