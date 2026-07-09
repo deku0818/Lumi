@@ -871,9 +871,7 @@ export default function App() {
     return bgTasks.filter((tk) => tk.thread_id === tid && beOf(tk) === be)
   }, [bgTasks, active])
   const hasRunningBg = activeBgTasks.some((tk) => tk.status === 'running')
-  const platform = window.lumi.platform ?? 'win32'
-  const isMacTitleBar = platform === 'darwin'
-  const showCustomTitleBar = !isMacTitleBar
+  const isMacTitleBar = (window.lumi.platform ?? 'win32') === 'darwin'
   const showBgTaskToggle = view === 'chat' && activeBgTasks.length > 0
   const showTopStrip = isMacTitleBar || showBgTaskToggle
 
@@ -1240,6 +1238,8 @@ export default function App() {
     },
     [activate, refreshSessions],
   )
+  // 稳定引用，让 memo 化的 AppTitleBar 在流式 token 重渲染时不陪跑。
+  const startNewChat = useCallback(() => void newSession(), [newSession])
 
   useEffect(() => {
     return window.lumi.onMenuAction?.((action) => {
@@ -1923,8 +1923,8 @@ export default function App() {
 
   return (
     <div className="h-full flex flex-col bg-canvas">
-      {showCustomTitleBar && (
-        <AppTitleBar onNewChat={() => void newSession()} onOpenSettings={openSettings} />
+      {!isMacTitleBar && (
+        <AppTitleBar onNewChat={startNewChat} onOpenSettings={openSettings} />
       )}
       <div className="min-h-0 flex-1 flex">
       <Sidebar

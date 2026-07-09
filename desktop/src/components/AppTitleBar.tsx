@@ -1,4 +1,4 @@
-import { useEffect, useState, type ReactNode } from 'react'
+import { memo, useEffect, useState, type ReactNode } from 'react'
 import { Minus, Minimize2, Square, X } from 'lucide-react'
 import { LANGS, useI18n, type Lang } from '../i18n'
 import appIcon from '../../assets/icon.png'
@@ -21,7 +21,15 @@ type Props = {
   onOpenSettings: () => void
 }
 
-export function AppTitleBar({ onNewChat, onOpenSettings }: Props) {
+// 视图菜单里的命令项——命令名 + 文案 key + 展示的快捷键，逐条 map 渲染。
+const VIEW_COMMANDS = [
+  { cmd: 'reload', label: 'titlebar.reload', shortcut: 'Ctrl+R' },
+  { cmd: 'reset-zoom', label: 'titlebar.resetZoom', shortcut: 'Ctrl+0' },
+  { cmd: 'zoom-in', label: 'titlebar.zoomIn', shortcut: 'Ctrl++' },
+  { cmd: 'zoom-out', label: 'titlebar.zoomOut', shortcut: 'Ctrl+-' },
+] as const
+
+export const AppTitleBar = memo(function AppTitleBar({ onNewChat, onOpenSettings }: Props) {
   const { t, lang, setLang } = useI18n()
   const [maximized, setMaximized] = useState(false)
 
@@ -72,22 +80,12 @@ export function AppTitleBar({ onNewChat, onOpenSettings }: Props) {
             </DropdownMenuSubContent>
           </DropdownMenuSub>
           <DropdownMenuSeparator />
-          <DropdownMenuItem onClick={() => run('reload')}>
-            {t('titlebar.reload')}
-            <DropdownMenuShortcut>Ctrl+R</DropdownMenuShortcut>
-          </DropdownMenuItem>
-          <DropdownMenuItem onClick={() => run('reset-zoom')}>
-            {t('titlebar.resetZoom')}
-            <DropdownMenuShortcut>Ctrl+0</DropdownMenuShortcut>
-          </DropdownMenuItem>
-          <DropdownMenuItem onClick={() => run('zoom-in')}>
-            {t('titlebar.zoomIn')}
-            <DropdownMenuShortcut>Ctrl++</DropdownMenuShortcut>
-          </DropdownMenuItem>
-          <DropdownMenuItem onClick={() => run('zoom-out')}>
-            {t('titlebar.zoomOut')}
-            <DropdownMenuShortcut>Ctrl+-</DropdownMenuShortcut>
-          </DropdownMenuItem>
+          {VIEW_COMMANDS.map((item) => (
+            <DropdownMenuItem key={item.cmd} onClick={() => run(item.cmd)}>
+              {t(item.label)}
+              <DropdownMenuShortcut>{item.shortcut}</DropdownMenuShortcut>
+            </DropdownMenuItem>
+          ))}
           <DropdownMenuSeparator />
           <DropdownMenuItem onClick={() => run('toggle-devtools')}>
             {t('titlebar.devtools')}
@@ -115,7 +113,7 @@ export function AppTitleBar({ onNewChat, onOpenSettings }: Props) {
           type="button"
           title={maximized ? t('titlebar.restore') : t('titlebar.maximize')}
           className="grid h-8 w-11 place-items-center text-muted-foreground transition-colors hover:bg-ink/10 hover:text-ink"
-          onClick={() => void window.lumi.windowControls?.toggleMaximize().then(setMaximized)}
+          onClick={() => void window.lumi.windowControls?.toggleMaximize()}
         >
           {maximized ? <Minimize2 size={14} /> : <Square size={13} />}
         </button>
@@ -130,7 +128,7 @@ export function AppTitleBar({ onNewChat, onOpenSettings }: Props) {
       </div>
     </div>
   )
-}
+})
 
 function MenuButton({ label, children }: { label: string; children: ReactNode }) {
   return (
