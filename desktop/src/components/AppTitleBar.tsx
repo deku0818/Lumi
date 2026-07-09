@@ -58,33 +58,6 @@ export function AppTitleBar({ onNewChat, onOpenSettings }: Props) {
             <DropdownMenuShortcut>Alt+F4</DropdownMenuShortcut>
           </DropdownMenuItem>
         </MenuButton>
-        <MenuButton label={t('titlebar.edit')}>
-          <DropdownMenuItem onClick={() => run('undo')}>
-            {t('titlebar.undo')}
-            <DropdownMenuShortcut>Ctrl+Z</DropdownMenuShortcut>
-          </DropdownMenuItem>
-          <DropdownMenuItem onClick={() => run('redo')}>
-            {t('titlebar.redo')}
-            <DropdownMenuShortcut>Ctrl+Y</DropdownMenuShortcut>
-          </DropdownMenuItem>
-          <DropdownMenuSeparator />
-          <DropdownMenuItem onClick={() => run('cut')}>
-            {t('titlebar.cut')}
-            <DropdownMenuShortcut>Ctrl+X</DropdownMenuShortcut>
-          </DropdownMenuItem>
-          <DropdownMenuItem onClick={() => run('copy')}>
-            {t('common.copy')}
-            <DropdownMenuShortcut>Ctrl+C</DropdownMenuShortcut>
-          </DropdownMenuItem>
-          <DropdownMenuItem onClick={() => run('paste')}>
-            {t('titlebar.paste')}
-            <DropdownMenuShortcut>Ctrl+V</DropdownMenuShortcut>
-          </DropdownMenuItem>
-          <DropdownMenuItem onClick={() => run('select-all')}>
-            {t('titlebar.selectAll')}
-            <DropdownMenuShortcut>Ctrl+A</DropdownMenuShortcut>
-          </DropdownMenuItem>
-        </MenuButton>
         <MenuButton label={t('titlebar.view')}>
           <DropdownMenuSub>
             <DropdownMenuSubTrigger>{t('menu.language')}</DropdownMenuSubTrigger>

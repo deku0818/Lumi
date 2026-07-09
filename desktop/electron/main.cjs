@@ -116,27 +116,10 @@ function sendMenuAction(win, action) {
 
 const REPO_URL = 'https://github.com/deku0818/Lumi'
 
-// 标题栏「编辑/视图/帮助」菜单动作的单一实现——隐藏原生菜单与自定义标题栏的 IPC 共用同一套逻辑。
+// 标题栏「视图/帮助」菜单动作的单一实现——隐藏原生菜单与自定义标题栏的 IPC 共用同一套逻辑。
+// 编辑类命令（撤销/剪切/粘贴等）不在此处：它们依赖聚焦的可编辑元素，只经隐藏原生菜单的 role 走键盘快捷键。
 function runMenuCommand(wc, command) {
   switch (String(command)) {
-    case 'undo':
-      wc.undo()
-      break
-    case 'redo':
-      wc.redo()
-      break
-    case 'cut':
-      wc.cut()
-      break
-    case 'copy':
-      wc.copy()
-      break
-    case 'paste':
-      wc.paste()
-      break
-    case 'select-all':
-      wc.selectAll()
-      break
     case 'reload':
       wc.reload()
       break
