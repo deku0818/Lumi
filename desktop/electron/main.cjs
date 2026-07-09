@@ -114,6 +114,50 @@ function sendMenuAction(win, action) {
   win.webContents.send('lumi:menu-action', action)
 }
 
+const REPO_URL = 'https://github.com/deku0818/Lumi'
+
+// 标题栏「编辑/视图/帮助」菜单动作的单一实现——隐藏原生菜单与自定义标题栏的 IPC 共用同一套逻辑。
+function runMenuCommand(wc, command) {
+  switch (String(command)) {
+    case 'undo':
+      wc.undo()
+      break
+    case 'redo':
+      wc.redo()
+      break
+    case 'cut':
+      wc.cut()
+      break
+    case 'copy':
+      wc.copy()
+      break
+    case 'paste':
+      wc.paste()
+      break
+    case 'select-all':
+      wc.selectAll()
+      break
+    case 'reload':
+      wc.reload()
+      break
+    case 'reset-zoom':
+      wc.setZoomLevel(0)
+      break
+    case 'zoom-in':
+      wc.setZoomLevel(Math.min(wc.getZoomLevel() + 0.5, 9))
+      break
+    case 'zoom-out':
+      wc.setZoomLevel(Math.max(wc.getZoomLevel() - 0.5, -8))
+      break
+    case 'toggle-devtools':
+      wc.isDevToolsOpened() ? wc.closeDevTools() : wc.openDevTools()
+      break
+    case 'open-repo':
+      shell.openExternal(REPO_URL)
+      break
+  }
+}
+
 function installHiddenMenu(win) {
   const wc = win.webContents
   const menu = Menu.buildFromTemplate([
@@ -141,18 +185,18 @@ function installHiddenMenu(win) {
     {
       label: 'View',
       submenu: [
-        { label: 'Reload', accelerator: 'CommandOrControl+R', click: () => wc.reload() },
-        { label: 'Reset Zoom', accelerator: 'CommandOrControl+0', click: () => wc.setZoomLevel(0) },
-        { label: 'Zoom In', accelerator: 'CommandOrControl+=', click: () => wc.setZoomLevel(Math.min(wc.getZoomLevel() + 0.5, 9)) },
-        { label: 'Zoom Out', accelerator: 'CommandOrControl+-', click: () => wc.setZoomLevel(Math.max(wc.getZoomLevel() - 0.5, -8)) },
+        { label: 'Reload', accelerator: 'CommandOrControl+R', click: () => runMenuCommand(wc, 'reload') },
+        { label: 'Reset Zoom', accelerator: 'CommandOrControl+0', click: () => runMenuCommand(wc, 'reset-zoom') },
+        { label: 'Zoom In', accelerator: 'CommandOrControl+=', click: () => runMenuCommand(wc, 'zoom-in') },
+        { label: 'Zoom Out', accelerator: 'CommandOrControl+-', click: () => runMenuCommand(wc, 'zoom-out') },
         { type: 'separator' },
-        { label: 'Toggle Developer Tools', accelerator: 'CommandOrControl+Shift+I', click: () => (wc.isDevToolsOpened() ? wc.closeDevTools() : wc.openDevTools()) },
+        { label: 'Toggle Developer Tools', accelerator: 'CommandOrControl+Shift+I', click: () => runMenuCommand(wc, 'toggle-devtools') },
       ],
     },
     {
       label: 'Help',
       submenu: [
-        { label: 'Project Home', click: () => shell.openExternal('https://github.com/BreezeQi/Lumi') },
+        { label: 'Project Home', click: () => runMenuCommand(wc, 'open-repo') },
       ],
     },
   ])
@@ -337,45 +381,7 @@ ipcMain.handle('lumi:window:is-maximized', (event) => {
 })
 
 ipcMain.handle('lumi:menu-command', (event, command) => {
-  const wc = event.sender
-  switch (String(command)) {
-    case 'undo':
-      wc.undo()
-      break
-    case 'redo':
-      wc.redo()
-      break
-    case 'cut':
-      wc.cut()
-      break
-    case 'copy':
-      wc.copy()
-      break
-    case 'paste':
-      wc.paste()
-      break
-    case 'select-all':
-      wc.selectAll()
-      break
-    case 'reload':
-      wc.reload()
-      break
-    case 'reset-zoom':
-      wc.setZoomLevel(0)
-      break
-    case 'zoom-in':
-      wc.setZoomLevel(Math.min(wc.getZoomLevel() + 0.5, 9))
-      break
-    case 'zoom-out':
-      wc.setZoomLevel(Math.max(wc.getZoomLevel() - 0.5, -8))
-      break
-    case 'toggle-devtools':
-      wc.isDevToolsOpened() ? wc.closeDevTools() : wc.openDevTools()
-      break
-    case 'open-repo':
-      shell.openExternal('https://github.com/BreezeQi/Lumi')
-      break
-  }
+  runMenuCommand(event.sender, command)
 })
 
 app.whenReady().then(async () => {
