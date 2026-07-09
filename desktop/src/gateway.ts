@@ -9,6 +9,9 @@ import type {
   CronRun,
   FeishuConfig,
   HistoryItem,
+  McpScope,
+  McpServerConfig,
+  McpServers,
   Project,
   ProviderProfile,
   RpcMethod,
@@ -260,6 +263,24 @@ export class Gateway {
       name,
       config,
     })
+  }
+
+  // —— MCP 服务器：读写该机器的 ~/.lumi 或 <project>/.lumi 下 mcp_server.json，下次新会话加载生效 ——
+  listMcpServers(scope: McpScope, project = ''): Promise<{ servers: McpServers }> {
+    return this.request<{ servers: McpServers }>('list_mcp_servers', { scope, project })
+  }
+
+  saveMcpServer(
+    scope: McpScope,
+    project: string,
+    name: string,
+    config: McpServerConfig,
+  ): Promise<{ servers: McpServers }> {
+    return this.request<{ servers: McpServers }>('save_mcp_server', { scope, project, name, config })
+  }
+
+  deleteMcpServer(scope: McpScope, project: string, name: string): Promise<{ servers: McpServers }> {
+    return this.request<{ servers: McpServers }>('delete_mcp_server', { scope, project, name })
   }
 
   setWorkspace(path: string): Promise<{ workspace: string }> {

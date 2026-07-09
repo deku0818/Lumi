@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+from pathlib import Path
+
 from langchain_core.tools.structured import StructuredTool
 
 from .loader import AgentConfig, SkillConfig, load_agents, load_skills
@@ -52,14 +54,21 @@ _registry.register("agent", agent)
 async def get_tools(
     tools: list[str] | None = None,
     disabled_tools: list[str] | None = None,
+    project_dir: Path | None = None,
 ) -> list[StructuredTool]:
     """获取工具列表，支持白名单 + 黑名单过滤。
 
     Args:
         tools: 白名单 — 只保留这些工具。``None`` 表示全部。
         disabled_tools: 黑名单 — 从结果中移除（优先级高于白名单）。
+        project_dir: 本会话项目根。经 contextvar 传给 MCP provider，用于分层加载
+            全局 ∪ 项目的 MCP server（``None`` 时 MCP 只看全局层）。
     """
-    result = await get_tool_registry().get_tools()
+    token = mcp._current_project_dir.set(project_dir)
+    try:
+        result = await get_tool_registry().get_tools()
+    finally:
+        mcp._current_project_dir.reset(token)
 
     if tools:
         allowed = set(tools)

@@ -1,5 +1,23 @@
 # Changelog
 
+## [0.2.38] - 2026-07-09
+
+### Added
+- **MCP 管理面板（desktop 设置 → MCP）** — 可视化增删改、启用/禁用 MCP server，覆盖 stdio / streamable_http / sse 三种传输，「表单 / JSON」双模式编辑。作用范围分**全局 + 项目两层**：全局层写该机器 `~/.lumi/mcp_server.json`（跨项目共享，尊重 `--config-dir` / `LUMI_CONFIG_DIR` 覆盖），项目层写 `<项目>/.lumi/mcp_server.json`（叠加/覆盖全局同名 server，仅绑定该项目的会话加载）。开关禁用 = 存 `disabled:true`，加载侧剥离该元字段（绝不下传 langchain adapter）；改动下次新会话加载生效
+- **MCP 配置分层加载 + 按项目分池** — `_load_merged_mcp_config` 合并「全局 ∪ 项目」、项目同名覆盖；`MCPSessionManager` 单例改为按 `project_dir` 分池（`_pools`），不同项目各自一批持久会话；`project_dir` 经 `_current_project_dir` contextvar 从 `get_tools` 传到 MCP provider，`AgentBridge.initialize` 无条件预算工具并带上会话项目根（否则常见路径落到 `create_agent` 内部无 project_dir 的加载，项目级 MCP 加载不到）。子 agent / workflow / cron 不传 → 默认只看全局层
+- **gateway RPC + 协议** — `list_mcp_servers` / `save_mcp_server` / `delete_mcp_server`（`lumi/gateway/mcp_rpc.py`），`protocol/events.json` 单一事实源锁一致
+
+### Fixed
+- **作废一个池不再误杀其它池的 MCP 子进程** — 旧 `close()` 用 `_kill_child_processes()` 扫杀整个进程后代，分池后作废一个池会连带 SIGKILL 别的活跃会话的子进程。改为每个 manager 只 SIGKILL 自己 start 期间记录的 PID（前后快照 diff 精确归属），优雅 `aclose()` 只拆本池；全进程 SIGKILL 兜底降级为仅进程退出（`close_all_pools`）
+- **作废路径 resolve 口径对齐** — `mcp_rpc` 的 `project_dir` 与 `AgentBridge` 建池 key 同样 `expanduser().resolve()`，否则 symlink 路径（如 macOS `/tmp`→`/private/tmp`）下作废 pop 不中、面板改动对该项目静默不生效
+- **损坏配置文件不再被 save 静默抹除** — save/delete 写前用 `_read_for_write` 区分「文件缺失=空」与「JSON 损坏=抛错中止」，绝不用 `{}` 覆盖已有配置；list 仍宽松（损坏显示为空，不阻断面板）
+- **JSON 模式校验必须是对象** — 前端提交非对象（数组/标量/null）时报错拦截，避免加载侧静默丢弃
+- **server 改名容错 + 密钥权限** — 改名的删旧键失败落 `reload` 回真实态、不误报成功；`mcp_server.json` 以 `0o600` 落盘（env/headers 可含密钥，与 channels 一致）；切机器不再多打一次错配的 `listMcpServers`
+
+### Changed
+- **配置变更精准作废（借鉴 Claude Code 的 config-hash diff）** — `invalidate_mcp_pools` 只关 merged 配置 hash 真变了的池，没变的（如某项目自己覆盖了被改的全局 server）原样保留、完全不打断；池数超上限（`_MAX_POOLS=16`）时优雅淘汰最久未用池，bound 住长跑 serve 多项目切换的子进程增长
+- **清理** — 复用 `short_hash` 取代自造 sha256 截断；删死转发 `_load_base_mcp_config` 与 `start` 不可达的 `mcp_config is None` 分支；`close_all_pools` 去掉从未走过的 `kill_children=False` 默认参数
+
 ## [0.2.37] - 2026-07-09
 
 ### Fixed

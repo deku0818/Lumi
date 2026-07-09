@@ -1,10 +1,11 @@
-import { SlidersHorizontal, Boxes, Server, Send, Monitor, Sun, Moon, Minus, Plus } from 'lucide-react'
+import { SlidersHorizontal, Boxes, Server, Send, Plug, Monitor, Sun, Moon, Minus, Plus } from 'lucide-react'
 import type { Gateway } from '../gateway'
 import type { ThemePref } from '../theme'
 import { type FontPref, DEFAULT_SIZE, MIN_SIZE, MAX_SIZE } from '../font'
 import { useI18n } from '../i18n'
 import { ProvidersPanel } from './ProvidersPanel'
 import { ChannelsPanel } from './ChannelsPanel'
+import { McpPanel } from './McpPanel'
 import { BackendsPanel } from './BackendsPanel'
 import { FontPicker } from './FontPicker'
 import { Section, SectionGroup, Row, SegmentedControl, segmentShell } from './SettingsKit'
@@ -29,7 +30,7 @@ export function SettingsDialog({
   onProvidersChanged,
   onClose,
 }: {
-  initialTab?: 'general' | 'models' | 'channels' | 'connections' // 打开时定位的 tab
+  initialTab?: 'general' | 'models' | 'channels' | 'connections' | 'mcp' // 打开时定位的 tab
   themePref: ThemePref
   setThemePref: (p: ThemePref) => void
   uiFont: FontPref
@@ -74,6 +75,10 @@ export function SettingsDialog({
               <Send />
               {t('settings.channels')}
             </TabsTrigger>
+            <TabsTrigger value="mcp" className={navClass}>
+              <Plug />
+              {t('settings.mcp')}
+            </TabsTrigger>
             <TabsTrigger value="connections" className={navClass}>
               <Server />
               {t('settings.connections')}
@@ -97,6 +102,9 @@ export function SettingsDialog({
           </TabsContent>
           <TabsContent value="channels" className="flex-1 min-w-0 overflow-auto px-6 pb-6 pt-12 mt-0">
             <ChannelsPanel machines={machines} gwFor={gwFor} />
+          </TabsContent>
+          <TabsContent value="mcp" className="flex-1 min-w-0 overflow-auto px-6 pb-6 pt-12 mt-0">
+            <McpPanel machines={machines} gwFor={gwFor} />
           </TabsContent>
           <TabsContent value="connections" className="flex-1 min-w-0 overflow-auto px-6 pb-6 pt-12 mt-0">
             <BackendsPanel />

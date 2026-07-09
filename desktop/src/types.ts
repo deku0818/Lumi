@@ -292,6 +292,25 @@ export interface ChannelInfo {
   status: ChannelStatus
 }
 
+// —— MCP 服务器（设置 → MCP）——
+export type McpScope = 'global' | 'project'
+export type McpTransport = 'stdio' | 'streamable_http' | 'sse'
+// 单个 server 的原始配置（含 Lumi 元字段 disabled）。加载侧剥离 disabled 后下传 adapter。
+export interface McpServerConfig {
+  transport?: McpTransport
+  command?: string
+  args?: string[]
+  env?: Record<string, string>
+  cwd?: string
+  url?: string
+  headers?: Record<string, string>
+  timeout?: number
+  sse_read_timeout?: number
+  disabled?: boolean
+}
+// 一个 scope 下的全量 server 表：{ name: config }
+export type McpServers = Record<string, McpServerConfig>
+
 declare global {
   interface Window {
     lumi: {

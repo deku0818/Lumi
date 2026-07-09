@@ -72,6 +72,9 @@
     "clear_finished_bg_tasks": { "params": [], "result": ["cleared"], "note": "清除当前会话全部终态后台任务，返回移除数" },
     "get_channels": { "params": [], "result": ["channels"], "note": "IM channel（飞书等）配置 + 运行状态列表；channel 含 name/enabled/config/status，status.state ∈ off|stopped|connecting|connected|error" },
     "save_channel": { "params": ["name", "config"], "result": ["channels"], "note": "保存 channel 配置到 ~/.lumi/channels.json（密钥 chmod 600）并实时停旧起新，返回更新后的列表" },
-    "test_channel": { "params": ["name", "config"], "result": ["ok", "error?", "bot_name?"], "note": "用给定凭证临时验证连通性，不影响运行中的 channel" }
+    "test_channel": { "params": ["name", "config"], "result": ["ok", "error?", "bot_name?"], "note": "用给定凭证临时验证连通性，不影响运行中的 channel" },
+    "list_mcp_servers": { "params": ["scope", "project?"], "result": ["servers"], "note": "scope ∈ global|project；global 读该机器 ~/.lumi/mcp_server.json，project 读 <project>/.lumi/mcp_server.json。返回原始全量 dict（含 disabled 标记供 UI 置灰）" },
+    "save_mcp_server": { "params": ["scope", "project?", "name", "config"], "result": ["servers"], "note": "写入该 scope 的 mcp_server.json（disabled:true = 禁用但保留），作废受影响会话池，下次新会话加载生效；返回更新后的原始 dict" },
+    "delete_mcp_server": { "params": ["scope", "project?", "name"], "result": ["servers"], "note": "从该 scope 移除一个 server，作废受影响会话池；返回更新后的原始 dict" }
   }
 }

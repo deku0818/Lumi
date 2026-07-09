@@ -28,6 +28,7 @@ from lumi.gateway.channel import Channel
 from lumi.gateway.channel_rpc import CHANNEL_METHODS, dispatch_channel
 from lumi.gateway.channels.manager import manager
 from lumi.gateway.cron_rpc import CRON_METHODS, dispatch_cron
+from lumi.gateway.mcp_rpc import MCP_METHODS, dispatch_mcp
 from lumi.gateway.projects import (
     add_project,
     list_projects,
@@ -538,7 +539,11 @@ _RPC_HANDLERS = {
 
 # 本服务实现的全部 RPC 方法（供协议契约测试断言与 events.json 一致）
 IMPLEMENTED_METHODS = (
-    frozenset(_RPC_HANDLERS) | _STREAMING_METHODS | CRON_METHODS | CHANNEL_METHODS
+    frozenset(_RPC_HANDLERS)
+    | _STREAMING_METHODS
+    | CRON_METHODS
+    | CHANNEL_METHODS
+    | MCP_METHODS
 )
 
 
@@ -921,6 +926,8 @@ class GatewaySession:
             return await dispatch_cron(method, params)
         if method in CHANNEL_METHODS:
             return await dispatch_channel(method, params)
+        if method in MCP_METHODS:
+            return await dispatch_mcp(method, params)
         raise ValueError(f"未知方法: {method}")
 
     async def _run_rpc(self, rid, method: str, params: dict) -> None:

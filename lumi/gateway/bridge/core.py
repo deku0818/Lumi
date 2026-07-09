@@ -37,7 +37,7 @@ from lumi.agents.runtime.bg_tasks import (
 from lumi.agents.runtime.checkpoint import CheckpointInfo, FileCheckpointManager
 from lumi.agents.runtime.file_tracker import FileChangeTracker
 from lumi.agents.runtime.shell_session import get_shell_session_manager
-from lumi.agents.tools.providers.mcp import get_mcp_session_manager
+from lumi.agents.tools.providers.mcp import close_all_pools
 from lumi.gateway.bridge.approval import ApprovalEnricher
 from lumi.gateway.bridge.broker import LUMI_APPROVAL_EVENT, ApprovalBroker
 from lumi.gateway.bridge.checkpoint import CheckpointService
@@ -171,7 +171,7 @@ async def shutdown_shared_runtime() -> None:
 
     进程退出时调用一次：TUI 在 quit 时、`lumi serve` 在 lifespan shutdown 时。
     """
-    await get_mcp_session_manager().close()
+    await close_all_pools()
     await get_shell_session_manager().close_all()
 
 
@@ -227,11 +227,12 @@ class AgentBridge:
                 "[AgentBridge] open 指定 workspace 无效，退回进程目录: %s", target
             )
             target = None
-        tools = None
-        if disabled_tools:
-            from lumi.agents.tools import get_tools
+        # 无条件预算工具，把会话项目根 target 带进 MCP 分层加载（全局 ∪ 项目）；
+        # 若只在 disabled_tools 非空时才 get_tools，则常见路径落到 create_agent 内部
+        # 无 project_dir 的加载，项目级 MCP 会加载不到。
+        from lumi.agents.tools import get_tools
 
-            tools = await get_tools(disabled_tools=disabled_tools)
+        tools = await get_tools(disabled_tools=disabled_tools, project_dir=target)
         # enable_memory=True：bridge 是唯一面向用户的对话入口，持久记忆只在此处 opt-in
         # （子 agent / workflow / cron 走 create_agent 默认 False，天然不带记忆）。
         self._agent, self._context = await create_agent(
