@@ -64,6 +64,8 @@ class DesktopDelivery(ResultDelivery):
                 "output": text[:200],
                 "started_at": record.started_at.isoformat(),
                 "duration_ms": record.duration_ms,
+                # 前端据此按 run 追踪未读（看一条消一条）；空串=本次执行无可跳转会话
+                "thread_id": record.thread_id,
             },
         )
 

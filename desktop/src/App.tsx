@@ -27,6 +27,7 @@ import type {
   ChannelInfo,
   ModelPointer,
   CronJob,
+  CronRun,
   HistoryItem,
   Item,
   PresentedFile,
@@ -268,6 +269,23 @@ const ctxFromUsage = (u: Usage | undefined): CtxUsage | undefined => {
   }
 }
 
+// 未读集合（Record<jobId, thread_id[]>）的不可变更新：按 keep 谓词过滤某任务的 tid，
+// 消到空则删键、无变化则原样返回。openRunThread/openCronJob 共用。
+const pruneJobUnread = (
+  u: Record<string, string[]>,
+  jid: string,
+  keep: (tid: string) => boolean,
+): Record<string, string[]> => {
+  const cur = u[jid]
+  if (!cur) return u
+  const kept = cur.filter(keep)
+  if (kept.length === cur.length) return u
+  const next = { ...u }
+  if (kept.length) next[jid] = kept
+  else delete next[jid]
+  return next
+}
+
 export default function App() {
   const [store, setStore] = useState<Record<string, SessionState>>({})
   const [active, setActive] = useState('')
@@ -352,10 +370,15 @@ export default function App() {
   const [cronJobs, setCronJobs] = useState<CronJob[]>([]) // 侧栏任务分组数据
   const [activeCronJob, setActiveCronJob] = useState<string | null>(null) // 任务会话视图当前任务
   const [cronRunThread, setCronRunThread] = useState<string | null>(null) // 当前选中的执行会话
-  // 每任务未读结果计数（任务完成而你不在看它时 +1），持久化到 localStorage
-  const [cronUnread, setCronUnread] = useState<Record<string, number>>(() => {
+  // 每任务的未读执行（按 run 的 thread_id 记，看一条消一条），持久化到 localStorage。
+  // 侧栏「N new」= 该任务未读 run 数；点开某条 run 即从集合移除，全部看完才归零。
+  const [cronUnread, setCronUnread] = useState<Record<string, string[]>>(() => {
     try {
-      return JSON.parse(localStorage.getItem('lumi-cron-unread') || '{}')
+      const raw = JSON.parse(localStorage.getItem('lumi-cron-unread') || '{}')
+      // 旧版本存的是 Record<jobId, number> 计数，无法还原成 thread_id 集合——升级即丢弃
+      const clean: Record<string, string[]> = {}
+      for (const [k, v] of Object.entries(raw)) if (Array.isArray(v)) clean[k] = v
+      return clean
     } catch {
       return {}
     }
@@ -507,11 +530,17 @@ export default function App() {
         seenCronRef.current.delete(seenCronRef.current.values().next().value!)
       }
       setCronVersion((v) => v + 1)
-      // 正在看该任务的会话视图时不算未读，其余情况该任务未读 +1
+      // 正在看该任务的会话视图时不算未读；否则把本次执行的 run 记为未读（按 thread_id）。
+      // 空 thread_id（无 checkpointer / 已清理）不可跳转、无从「看一条」，故不计入。
       const viewingThisJob =
         viewRef.current === 'cronjob' && activeCronJobRef.current === payload.job_id
-      if (!viewingThisJob) {
-        setCronUnread((u) => ({ ...u, [payload.job_id]: (u[payload.job_id] ?? 0) + 1 }))
+      const tid = payload.thread_id
+      if (!viewingThisJob && tid) {
+        setCronUnread((u) => {
+          const cur = u[payload.job_id] ?? []
+          // 封顶 500（对齐 readRuns）：高频任务长期不看也不会无界膨胀 localStorage
+          return cur.includes(tid) ? u : { ...u, [payload.job_id]: [...cur, tid].slice(-500) }
+        })
       }
       // 正在看该任务且窗口聚焦时不打扰，其余情况按通知开关弹系统通知
       if (notifyRef.current && (!viewingThisJob || !document.hasFocus())) {
@@ -1030,6 +1059,13 @@ export default function App() {
             refreshCronJobs()
             refreshChannels(backend)
           }
+          // 定时任务结果是进程级广播。远程机器通常无活跃会话连接，只有这条控制连接，
+          // cron.result 只能在此消费——否则远程任务的未读角标永远不 +1（本地靠会话连接兜住）。
+          // seenCronRef 去重保证本地即便会话连接 + 控制连接都收到也只算一次。
+          if (ev.type === 'cron.result') {
+            handleEvent(ev, backend)
+            return
+          }
           // IM 渠道会话跑完一轮（进程级广播，仅在控制连接消费——每机器恰好一条，天然去重）：
           // 只刷本机会话列表；正在旁观该会话则重载历史（旁观视图无自己的流式事件）
           if (ev.type === 'channel.activity') {
@@ -1051,7 +1087,7 @@ export default function App() {
         gw.connect()
       })()
     },
-    [refreshSessions, refreshCronJobs, refreshChannels, reloadHistory, reconnectMachine, patchSession],
+    [refreshSessions, refreshCronJobs, refreshChannels, reloadHistory, reconnectMachine, patchSession, handleEvent],
   )
 
   // 同步机器表 → 开新机器的控制连接、关掉已删机器的，刷新会话。BackendsPanel 增删后回调此。
@@ -1373,6 +1409,11 @@ export default function App() {
         for (const k of keys.slice(0, Math.max(0, keys.length - 500))) delete next[k]
         return next
       })
+      // 看一条消一条：tid 全局唯一、只归属一个任务，定位到它并移除（消到空则删键）
+      setCronUnread((u) => {
+        const jid = Object.keys(u).find((k) => u[k].includes(tid))
+        return jid ? pruneJobUnread(u, jid, (t) => t !== tid) : u
+      })
       await activate(tid, '', backend)
     },
     [activate],
@@ -1383,17 +1424,22 @@ export default function App() {
     async (jobId: string, threadId?: string) => {
       setView('cronjob')
       setActiveCronJob(jobId)
-      setCronUnread((u) => (u[jobId] ? { ...u, [jobId]: 0 } : u))
       const backend = cronBackendOf(jobId)
-      let tid = threadId
-      if (!tid) {
-        try {
-          const r = await gwForBackend(backend)?.listCronRuns(jobId)
-          tid = r?.runs.find((x) => x.thread_id)?.thread_id
-        } catch {
-          /* 列表拉取失败时显示空态 */
-        }
+      // 拉当前可见执行（与 RunsRail 同窗口 50）用于对账未读 + 挑 auto-open。null=拉取失败。
+      let runs: CronRun[] | null = null
+      try {
+        runs = (await gwForBackend(backend)?.listCronRuns(jobId, 50))?.runs ?? []
+      } catch {
+        /* 列表拉取失败：不动未读、显示空态 */
       }
+      // 未读按 run 消：auto-open 的那条经 openRunThread 递减，其余可点未读留待逐条点开。
+      // 对账：只保留仍可点开的 run，被保留策略清理/超窗口而够不着的 tid 一律剔除（否则永远消
+      // 不掉、徽标卡死），空则删键。拉取失败（runs=null）时跳过，避免把未读误清空。
+      if (runs) {
+        const openable = new Set(runs.filter((x) => x.thread_id).map((x) => x.thread_id))
+        setCronUnread((u) => pruneJobUnread(u, jobId, (t) => openable.has(t)))
+      }
+      const tid = threadId ?? runs?.find((x) => x.thread_id)?.thread_id
       setCronRunThread(tid ?? null)
       if (tid) await openRunThread(tid, backend)
     },

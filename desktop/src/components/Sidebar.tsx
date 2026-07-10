@@ -155,7 +155,7 @@ export const Sidebar = memo(function Sidebar({
   projectsActive: boolean
   scheduledActive: boolean
   cronJobs: CronJob[]
-  cronUnread: Record<string, number>
+  cronUnread: Record<string, string[]> // 每任务未读 run 的 thread_id 集合，角标取其长度
   cronRunning: string[]
   activeCronJob: string | null
   onOpenCronJob: (jobId: string) => void
@@ -400,7 +400,7 @@ export const Sidebar = memo(function Sidebar({
                 key={job.id}
                 job={job}
                 active={job.id === activeCronJob}
-                unread={cronUnread[job.id] ?? 0}
+                unread={cronUnread[job.id]?.length ?? 0}
                 running={cronRunning.includes(job.name)}
                 dotColor={multi ? machineColor(job.backend || 'local', machines) : undefined}
                 dotName={multi ? machineName(job.backend || 'local', machines) : undefined}
@@ -539,6 +539,17 @@ function CollapsibleGroup({
   )
 }
 
+// 多机时的机器色点（仅颜色，无文字）：CronJobRow / SessionRow 行首共用
+function MachineDot({ color, name }: { color: string; name?: string }) {
+  return (
+    <span
+      className="shrink-0 size-1.5 rounded-full"
+      style={{ background: color, boxShadow: `0 0 4px ${color}` }}
+      title={name}
+    />
+  )
+}
+
 // 定时任务行：失败 ⚠ + 任务名 + 未读角标（或运行中脉冲点）
 function CronJobRow({
   job,
@@ -553,7 +564,7 @@ function CronJobRow({
   active: boolean
   unread: number
   running: boolean
-  dotColor?: string // 多机时行尾机器色点
+  dotColor?: string // 多机时行首机器色点
   dotName?: string // 色点的机器名（tooltip）
   onOpen: (jobId: string) => void
 }) {
@@ -566,14 +577,8 @@ function CronJobRow({
       } ${job.enabled ? '' : 'opacity-55'}`}
     >
       {job.consecutive_errors > 0 && <AlertTriangle size={13} className="shrink-0 text-primary" />}
+      {dotColor && <MachineDot color={dotColor} name={dotName} />}
       <span className="flex-1 min-w-0 truncate text-left">{job.name}</span>
-      {dotColor && !running && unread === 0 && (
-        <span
-          className="shrink-0 size-1.5 rounded-full"
-          style={{ background: dotColor, boxShadow: `0 0 4px ${dotColor}` }}
-          title={dotName}
-        />
-      )}
       {running ? (
         <span
           title={t('sidebar.processing')}
@@ -659,7 +664,7 @@ function SessionRow({
   active: boolean
   state?: 'running' | 'attention'
   name: string
-  dotColor?: string // 多机时行尾机器色点（仅颜色，无文字）
+  dotColor?: string // 多机时行首机器色点（仅颜色，无文字）
   dotName?: string // 色点的机器名（tooltip）
   query?: string
   onSelect: (threadId: string, backend: string) => void
@@ -692,6 +697,7 @@ function SessionRow({
           active ? 'bg-surface text-ink' : 'text-ink/80 hover:bg-surface/60 hover:text-ink'
         }`}
       >
+        {dotColor && <MachineDot color={dotColor} name={dotName} />}
         {/* 仅「等你处理」保留提醒点（需你操作）；置顶进段不带 📌、进行中不带脉冲点 */}
         {state === 'attention' && (
           <span
@@ -707,13 +713,6 @@ function SessionRow({
             <Users size={13} className="shrink-0 text-info/80" />
           ))}
         <span className="flex-1 min-w-0 truncate text-left">{query ? highlight(name, query) : name}</span>
-        {dotColor && (
-          <span
-            className="shrink-0 size-1.5 rounded-full transition-opacity group-hover:opacity-0"
-            style={{ background: dotColor, boxShadow: `0 0 4px ${dotColor}` }}
-            title={dotName}
-          />
-        )}
       </button>
       <DropdownMenu>
         <DropdownMenuTrigger asChild>

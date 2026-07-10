@@ -204,6 +204,7 @@ async def test_desktop_delivery_broadcasts_result():
         status="success",
         duration_ms=1200,
         output_summary="done",
+        thread_id="cron-xyz",
     )
     await delivery.deliver(record, "done")
 
@@ -213,6 +214,8 @@ async def test_desktop_delivery_broadcasts_result():
     assert params["payload"]["job_id"] == "abc"
     assert params["payload"]["status"] == "success"
     assert params["payload"]["duration_ms"] == 1200
+    # 前端据 thread_id 按 run 追踪未读（看一条消一条）
+    assert params["payload"]["thread_id"] == "cron-xyz"
 
 
 async def test_desktop_delivery_drops_broken_ws():

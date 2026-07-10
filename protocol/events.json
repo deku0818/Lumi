@@ -19,8 +19,8 @@
     "turn.complete": { "payload": { "usage?": "Usage" } },
     "error": { "payload": { "message": "string" } },
     "cron.result": {
-      "payload": { "job_id": "string", "job_name": "string", "status": "string", "output": "string", "started_at": "string", "duration_ms": "number" },
-      "note": "定时任务完成一次执行，由 DesktopDelivery 直接广播（不经 EventKind）"
+      "payload": { "job_id": "string", "job_name": "string", "status": "string", "output": "string", "started_at": "string", "duration_ms": "number", "thread_id": "string" },
+      "note": "定时任务完成一次执行，由 DesktopDelivery 直接广播（不经 EventKind）。thread_id 为空表示本次执行无可跳转会话（无 checkpointer / 已被保留策略清理）"
     },
     "cron.running": { "payload": { "names": "string[]" }, "note": "当前正在执行的任务名列表，开始/结束时推送" },
     "bg_tasks.update": { "payload": { "tasks": "BgTask[]" }, "note": "后台任务（bash/agent/workflow）状态或进度变更，广播全量快照，前端按 thread_id 过滤；task 含 kind/status/output_file/progress" },
