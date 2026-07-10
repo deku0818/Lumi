@@ -149,12 +149,14 @@ export function FormModal({
   footer,
   children,
   className = 'sm:max-w-md',
+  bodyClassName = 'max-h-[62vh]',
 }: {
   onClose: () => void
   title: ReactNode
   footer?: ReactNode
   children: ReactNode
   className?: string
+  bodyClassName?: string
 }) {
   return (
     <Dialog open onOpenChange={(o) => !o && onClose()}>
@@ -162,7 +164,7 @@ export function FormModal({
         <DialogHeader className="px-5 pt-5 pb-3 border-b border-line/40">
           <DialogTitle className="text-sm">{title}</DialogTitle>
         </DialogHeader>
-        <div className="px-5 py-4 max-h-[62vh] overflow-auto">{children}</div>
+        <div className={cn('px-5 py-4 overflow-auto', bodyClassName)}>{children}</div>
         {footer && (
           <div className="px-5 py-3.5 border-t border-line/40 flex items-center gap-3">{footer}</div>
         )}

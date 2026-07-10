@@ -12,6 +12,7 @@ import type {
   McpScope,
   McpServerConfig,
   McpServers,
+  McpTestResult,
   Project,
   ProviderProfile,
   RpcMethod,
@@ -281,6 +282,11 @@ export class Gateway {
 
   deleteMcpServer(scope: McpScope, project: string, name: string): Promise<{ servers: McpServers }> {
     return this.request<{ servers: McpServers }>('delete_mcp_server', { scope, project, name })
+  }
+
+  // 用给定配置临时连一次验证连通性并枚举工具/提示/资源，不动常驻会话池
+  testMcpServer(config: McpServerConfig): Promise<McpTestResult> {
+    return this.request<McpTestResult>('test_mcp_server', { config })
   }
 
   setWorkspace(path: string): Promise<{ workspace: string }> {

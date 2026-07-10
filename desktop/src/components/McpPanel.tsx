@@ -2,16 +2,27 @@ import { useCallback, useEffect, useMemo, useState } from 'react'
 import {
   Check,
   ChevronDown,
+  ChevronRight,
   Folder,
   FolderPlus,
   Globe,
   Pencil,
   Plus,
+  Radar,
   Terminal,
   Trash2,
   X,
 } from 'lucide-react'
-import type { McpScope, McpServerConfig, McpServers, McpTransport, Project } from '../types'
+import type {
+  McpPromptInfo,
+  McpResourceInfo,
+  McpScope,
+  McpServerConfig,
+  McpServers,
+  McpTestResult,
+  McpTransport,
+  Project,
+} from '../types'
 import type { Gateway } from '../gateway'
 import { MachineTabs } from './MachineTabs'
 import { DirBrowser } from './DirBrowser'
@@ -35,8 +46,17 @@ const tagLabel = (t: McpTransport) => (isStdio(t) ? 'stdio' : t === 'sse' ? 'SSE
 const subOf = (s: McpServerConfig) =>
   isStdio(transportOf(s)) ? [s.command, ...(s.args ?? [])].filter(Boolean).join(' ') : (s.url ?? '')
 
+// 传输类型胶囊（server 卡片 / 测试弹窗标题共用）
+function TransportTag({ config }: { config: McpServerConfig }) {
+  return (
+    <span className="text-[10px] font-medium uppercase tracking-wide px-1.5 py-px rounded-full border border-separator text-muted-foreground">
+      {tagLabel(transportOf(config))}
+    </span>
+  )
+}
+
 // MCP 管理面板（设置 → MCP）。两个维度：机器（MachineTabs）· 作用范围（全局/项目）。
-// 列表：server 卡片（传输 tag + 命令/URL 摘要 + 启用开关 + 编辑/删除）。
+// 列表：server 卡片（传输 tag + 命令/URL 摘要 + 启用开关 + 测试/编辑/删除）。
 // 编辑：表单 / JSON 双模式。禁用 = 存 disabled:true（加载侧剥离，不下传 adapter）。
 export function McpPanel({
   machines,
@@ -50,6 +70,7 @@ export function McpPanel({
   const [project, setProject] = useState('') // 项目作用范围下选中的项目路径
   const [servers, setServers] = useState<McpServers>({})
   const [editing, setEditing] = useState<string | null | undefined>(undefined) // undefined=列表；null=新增；string=编辑该 server
+  const [testing, setTesting] = useState<string | null>(null) // 连接测试弹窗打开的 server 名
 
   const gw = gwFor(machine)
   const inProject = scope === 'project'
@@ -167,6 +188,7 @@ export function McpPanel({
                 name={name}
                 config={servers[name]}
                 onToggle={(on) => toggle(name, on)}
+                onTest={() => setTesting(name)}
                 onEdit={() => setEditing(name)}
                 onDelete={() => remove(name)}
               />
@@ -174,6 +196,15 @@ export function McpPanel({
           </div>
         )}
       </Section>
+
+      {testing !== null && servers[testing] && (
+        <TestDialog
+          gw={gw}
+          name={testing}
+          config={servers[testing]}
+          onClose={() => setTesting(null)}
+        />
+      )}
 
       {editing !== undefined && (
         <ServerForm
@@ -201,12 +232,14 @@ function ServerCard({
   name,
   config,
   onToggle,
+  onTest,
   onEdit,
   onDelete,
 }: {
   name: string
   config: McpServerConfig
   onToggle: (on: boolean) => void
+  onTest: () => void
   onEdit: () => void
   onDelete: () => void
 }) {
@@ -220,16 +253,28 @@ function ServerCard({
       <div className="flex-1 min-w-0">
         <div className="font-medium flex items-center gap-2">
           {name}
-          <span className="text-[10px] font-medium uppercase tracking-wide px-1.5 py-px rounded-full border border-separator text-muted-foreground">
-            {tagLabel(t)}
-          </span>
+          <TransportTag config={config} />
         </div>
         <div className="text-[11px] mt-0.5 truncate font-mono text-muted-foreground">
           {subOf(config)}
         </div>
       </div>
       <Switch checked={!off} onCheckedChange={onToggle} />
-      <Button variant="ghost" size="icon" onClick={onEdit} className="text-muted-foreground h-8 w-8">
+      <Button
+        variant="ghost"
+        size="icon"
+        onClick={onTest}
+        title="测试连接"
+        className="text-muted-foreground h-8 w-8"
+      >
+        <Radar size={15} />
+      </Button>
+      <Button
+        variant="ghost"
+        size="icon"
+        onClick={onEdit}
+        className="text-muted-foreground h-8 w-8"
+      >
         <Pencil size={15} />
       </Button>
       <Button
@@ -241,6 +286,353 @@ function ServerCard({
         <Trash2 size={15} />
       </Button>
     </Card>
+  )
+}
+
+// —— 连接测试弹窗：用当前配置临时连一次 server，握手成功后浏览工具/提示/资源 ——
+
+// 参数树节点：嵌套 object 的子字段挂在 children 上，UI 里点「N 个字段」下钻
+type ParamNode = {
+  name: string
+  type: string
+  required: boolean
+  description: string
+  children: ParamNode[]
+}
+
+type Schema = Record<string, unknown>
+
+// 解包 $ref（#/$defs/X，Pydantic 嵌套模型的标准形态）与单元素 allOf 包装；
+// $ref 同级字段（如 description）覆盖目标 schema 的同名字段
+function deref(p: Schema, root: Schema): Schema {
+  if (typeof p.$ref === 'string' && p.$ref.startsWith('#/')) {
+    let node: unknown = root
+    for (const seg of p.$ref.slice(2).split('/')) node = (node as Schema | undefined)?.[seg]
+    if (node && typeof node === 'object') {
+      const { $ref: _drop, ...rest } = p
+      return { ...(node as Schema), ...rest }
+    }
+  }
+  const allOf = p.allOf as Schema[] | undefined
+  if (allOf?.length === 1) {
+    const { allOf: _drop, ...rest } = p
+    return { ...deref(allOf[0], root), ...rest }
+  }
+  return p
+}
+
+// 递归深度封顶：既是 UI 下钻层数上限，也拦住递归模型（$ref 自引用环）的无限遍历
+const MAX_DEPTH = 5
+
+// JSON Schema 属性 → 展示用类型名（anyOf/oneOf 拍平为 a | b，数组显示为 T[]）
+function schemaType(p: Schema, root: Schema, depth = 0): string {
+  if (depth >= MAX_DEPTH) return ''
+  if (p.type === 'array') {
+    const item = p.items ? schemaType(deref(p.items as Schema, root), root, depth + 1) : ''
+    return item ? `${item}[]` : 'array'
+  }
+  if (typeof p.type === 'string') return p.type
+  if (Array.isArray(p.type)) return p.type.join(' | ')
+  const variants = (p.anyOf ?? p.oneOf) as Schema[] | undefined
+  if (variants)
+    return [
+      ...new Set(variants.map((v) => schemaType(deref(v, root), root, depth + 1)).filter(Boolean)),
+    ].join(' | ')
+  if (p.properties) return 'object'
+  return ''
+}
+
+// 属性里可继续下钻的子对象 schema：自身是 object / 数组元素是 object / anyOf 变体里藏着 object
+function nestedSchema(p: Schema, root: Schema, depth = 0): Schema | null {
+  if (depth >= MAX_DEPTH) return null
+  if (p.properties) return p
+  const items = p.items as Schema | undefined
+  if (items) {
+    const d = deref(items, root)
+    if (d.properties) return d
+  }
+  const variants = (p.anyOf ?? p.oneOf) as Schema[] | undefined
+  for (const v of variants ?? []) {
+    const n = nestedSchema(deref(v, root), root, depth + 1)
+    if (n) return n
+  }
+  return null
+}
+
+// 递归构建参数树（如 repair_plan → context / language）
+function toolParams(schema?: Schema, root: Schema = schema ?? {}, depth = 0): ParamNode[] {
+  const props = (schema?.properties ?? {}) as Record<string, Schema>
+  const required = new Set((schema?.required as string[]) ?? [])
+  return Object.entries(props).map(([n, raw]) => {
+    const p = deref(raw, root)
+    const child = depth < MAX_DEPTH ? nestedSchema(p, root) : null
+    return {
+      name: n,
+      type: schemaType(p, root),
+      required: required.has(n),
+      description: typeof p.description === 'string' ? p.description : '',
+      children: child ? toolParams(child, root, depth + 1) : [],
+    }
+  })
+}
+
+// 单个参数：名称 + 类型胶囊 + 必填/可选；嵌套 object 带「N 个字段」胶囊，点开下钻子框
+function ParamItem({ p }: { p: ParamNode }) {
+  const [open, setOpen] = useState(false)
+  return (
+    <div className="py-2">
+      <div className="flex items-baseline gap-2">
+        <span className="font-mono text-xs font-medium text-ink">{p.name}</span>
+        {p.type && (
+          <span className="rounded-[5px] bg-info/10 px-1.5 py-px font-mono text-[10.5px] text-info">
+            {p.type}
+          </span>
+        )}
+        <span className={`text-[10px] ${p.required ? 'text-primary' : 'text-muted-foreground'}`}>
+          {p.required ? '必填' : '可选'}
+        </span>
+        {p.children.length > 0 && (
+          <button
+            type="button"
+            onClick={() => setOpen((o) => !o)}
+            className="inline-flex items-center gap-1 rounded-full border border-line bg-panel px-2 py-px text-[10.5px] text-muted-foreground hover:border-separator hover:text-ink"
+          >
+            <ChevronRight size={9} className={`transition-transform ${open ? 'rotate-90' : ''}`} />
+            {p.children.length} 个字段
+          </button>
+        )}
+      </div>
+      {p.description && (
+        <div className="mt-0.5 text-[11.5px] leading-relaxed text-muted-foreground">
+          {p.description}
+        </div>
+      )}
+      {open && (
+        <div className="mt-2 divide-y divide-line/40 rounded-lg border border-line/70 bg-surface/55 px-3">
+          {p.children.map((c) => (
+            <ParamItem key={c.name} p={c} />
+          ))}
+        </div>
+      )}
+    </div>
+  )
+}
+
+// 能力条目（工具/提示共用）：名称行 + 描述恒在第二行（收起单行截断、展开放开全文），
+// 点击行仅展开/收起参数框；收起时每条高度一致
+function CapItem({
+  name,
+  description,
+  params,
+}: {
+  name: string
+  description: string
+  params: ParamNode[]
+}) {
+  const [open, setOpen] = useState(false)
+  return (
+    <div className={`rounded-lg ${open ? 'border border-line/60 bg-surface/40' : ''}`}>
+      <button
+        type="button"
+        onClick={() => setOpen((o) => !o)}
+        className="w-full rounded-lg px-2 py-1.5 text-left hover:bg-surface/60"
+      >
+        <div className="flex items-center gap-2">
+          <ChevronRight
+            size={12}
+            className={`shrink-0 text-muted-foreground transition-transform ${open ? 'rotate-90' : ''}`}
+          />
+          <span className="min-w-0 truncate font-mono text-xs text-ink">{name}</span>
+          <span className="ml-auto shrink-0 text-[10px] text-muted-foreground">
+            {params.length > 0 ? `${params.length} 个参数` : '无参数'}
+          </span>
+        </div>
+        <div
+          className={`mt-0.5 ml-5 min-h-[1.6em] text-[11.5px] leading-relaxed text-muted-foreground ${open ? '' : 'truncate'}`}
+        >
+          {description}
+        </div>
+      </button>
+      {open && params.length > 0 && (
+        <div className="mx-2.5 mb-2.5 ml-[30px] divide-y divide-line/50 rounded-lg border border-line/80 bg-panel/90 px-3">
+          {params.map((p) => (
+            <ParamItem key={p.name} p={p} />
+          ))}
+        </div>
+      )}
+    </div>
+  )
+}
+
+type TestTab = 'tools' | 'prompts' | 'resources'
+
+function TestDialog({
+  gw,
+  name,
+  config,
+  onClose,
+}: {
+  gw?: Gateway
+  name: string
+  config: McpServerConfig
+  onClose: () => void
+}) {
+  const [result, setResult] = useState<McpTestResult | null>(null) // null=连接中
+  const [tab, setTab] = useState<TestTab>('tools')
+  const [query, setQuery] = useState('')
+
+  useEffect(() => {
+    if (!gw) {
+      setResult({ ok: false, error: '未连接到该机器' })
+      return
+    }
+    let alive = true
+    gw.testMcpServer(config)
+      .then((r) => alive && setResult(r))
+      // RPC 错误帧 reject 的是裸 {message} 对象，String() 会成 [object Object]
+      .catch((e) => alive && setResult({ ok: false, error: String((e as Error)?.message ?? e) }))
+    return () => {
+      alive = false
+    }
+  }, [gw, config])
+
+  // 参数树在结果到达时解析一次；过滤时不再逐键重算
+  const toolItems = useMemo(
+    () => (result?.tools ?? []).map((t) => ({ ...t, params: toolParams(t.input_schema) })),
+    [result],
+  )
+
+  const q = query.trim().toLowerCase()
+  const match = (s: string) => s.toLowerCase().includes(q)
+  const tools = toolItems.filter((t) => match(t.name + t.description))
+  const prompts = (result?.prompts ?? []).filter((p) => match(p.name + p.description))
+  const resources = (result?.resources ?? []).filter((r) => match(r.uri + r.name + r.description))
+
+  const tabs: { val: TestTab; label: string; count: number }[] = [
+    { val: 'tools', label: '工具', count: result?.tools?.length ?? 0 },
+    { val: 'prompts', label: '提示', count: result?.prompts?.length ?? 0 },
+    { val: 'resources', label: '资源', count: result?.resources?.length ?? 0 },
+  ]
+  const active = { tools, prompts, resources }[tab] // 当前 tab 的过滤后列表（空态判断用）
+
+  return (
+    <FormModal
+      onClose={onClose}
+      className="sm:max-w-3xl"
+      // 固定高度：切 tab / 展开条目时弹窗尺寸不变，仅列表区内部滚动
+      bodyClassName="flex h-[72vh] flex-col"
+      title={
+        <span className="inline-flex items-center gap-2">
+          {name}
+          <TransportTag config={config} />
+        </span>
+      }
+    >
+      {/* 状态行：连接中（lumi-orb）→ 成功（server 信息 + 耗时）/ 失败（错误详情） */}
+      <div className="flex min-h-5 shrink-0 items-center gap-2 text-xs">
+        {result === null ? (
+          <>
+            <span className="lumi-orb" style={{ width: 11, height: 11 }} />
+            <span className="text-muted-foreground">正在连接…</span>
+          </>
+        ) : result.ok ? (
+          <>
+            <span className="size-2 rounded-full bg-success shadow-[0_0_6px_var(--color-success)]" />
+            <span className="text-success">已连接</span>
+            <span className="font-mono text-[11px] text-muted-foreground">
+              {result.server?.name} v{result.server?.version} · {result.latency_ms}ms
+            </span>
+          </>
+        ) : (
+          <>
+            <span className="size-2 rounded-full bg-error" />
+            <span className="text-error">连接失败</span>
+          </>
+        )}
+      </div>
+
+      {result !== null && !result.ok && (
+        <div className="mt-3 max-h-40 overflow-auto rounded-lg border border-error/25 bg-error/10 px-3 py-2 font-mono text-[11px] leading-relaxed text-error">
+          {result.error}
+        </div>
+      )}
+
+      {result?.ok && (
+        <>
+          <div className="mt-3 flex shrink-0 gap-0.5 border-b border-line">
+            {tabs.map((t) => (
+              <button
+                key={t.val}
+                type="button"
+                onClick={() => setTab(t.val)}
+                className={`-mb-px inline-flex items-center gap-1.5 border-b-2 px-3 py-1.5 text-xs font-medium ${
+                  tab === t.val
+                    ? 'border-primary text-ink'
+                    : 'border-transparent text-muted-foreground hover:text-ink'
+                }`}
+              >
+                {t.label}
+                <span
+                  className={`rounded-full border px-1.5 text-[10.5px] ${
+                    tab === t.val ? 'border-primary/50 text-primary' : 'border-line'
+                  }`}
+                >
+                  {t.count}
+                </span>
+              </button>
+            ))}
+          </div>
+
+          <TextInput
+            className="mt-3 h-8 shrink-0 text-xs"
+            value={query}
+            onChange={(e) => setQuery(e.target.value)}
+            placeholder="过滤…"
+          />
+
+          <div className="mt-2 min-h-0 flex-1 space-y-0.5 overflow-y-auto">
+            {tab === 'tools' &&
+              tools.map((t) => (
+                <CapItem key={t.name} name={t.name} description={t.description} params={t.params} />
+              ))}
+            {tab === 'prompts' &&
+              prompts.map((p: McpPromptInfo) => (
+                <CapItem
+                  key={p.name}
+                  name={p.name}
+                  description={p.description}
+                  params={p.arguments.map((a) => ({
+                    name: a.name,
+                    type: '',
+                    required: a.required,
+                    description: a.description,
+                    children: [],
+                  }))}
+                />
+              ))}
+            {tab === 'resources' &&
+              resources.map((r: McpResourceInfo) => (
+                <div key={r.uri} className="flex items-baseline gap-2 px-2 py-1.5">
+                  <span className="font-mono text-[11.5px] text-ink">{r.uri}</span>
+                  {r.mime_type && (
+                    <span className="rounded-full border border-line px-1.5 text-[10px] text-muted-foreground">
+                      {r.mime_type}
+                    </span>
+                  )}
+                  <span className="min-w-0 flex-1 truncate text-[11px] text-muted-foreground">
+                    {r.description || r.name}
+                  </span>
+                </div>
+              ))}
+            {active.length === 0 && (
+              <div className="py-6 text-center text-[11.5px] text-muted-foreground">
+                {query ? '没有匹配的条目' : '该 server 未提供此类能力'}
+              </div>
+            )}
+          </div>
+        </>
+      )}
+    </FormModal>
   )
 }
 
@@ -463,7 +855,10 @@ function ServerForm({
               onClick={() => setAdvOpen((o) => !o)}
               className="flex items-center gap-1.5 text-xs text-muted-foreground hover:text-ink"
             >
-              <ChevronDown size={13} className={`transition-transform ${advOpen ? '' : '-rotate-90'}`} />
+              <ChevronDown
+                size={13}
+                className={`transition-transform ${advOpen ? '' : '-rotate-90'}`}
+              />
               高级选项
             </button>
             {advOpen && (
@@ -511,7 +906,10 @@ function ServerForm({
             />
             {dup && <div className="text-[11px] text-error mt-1">已存在同名 server</div>}
           </Field>
-          <Field label="服务器配置（JSON）" hint="直接编辑该 server 的 JSON 片段；切回「表单」时解析回填">
+          <Field
+            label="服务器配置（JSON）"
+            hint="直接编辑该 server 的 JSON 片段；切回「表单」时解析回填"
+          >
             <textarea
               spellCheck={false}
               value={json}
@@ -627,8 +1025,7 @@ function ProjectSelect({
   const [creating, setCreating] = useState(false)
 
   const load = useCallback(() => {
-    gw
-      ?.listProjects()
+    gw?.listProjects()
       .then((r) => setProjects(r.projects ?? []))
       .catch(() => setProjects([]))
   }, [gw])
@@ -641,8 +1038,7 @@ function ProjectSelect({
 
   const onCreated = (path: string) => {
     setCreating(false)
-    gw
-      ?.addProject(path)
+    gw?.addProject(path)
       .then((r) => {
         setProjects(r.projects ?? [])
         onChange(path)
@@ -669,9 +1065,7 @@ function ProjectSelect({
         <DropdownMenuContent align="start">
           {projects.map((p) => (
             <DropdownMenuItem key={p.path} onClick={() => onChange(p.path)}>
-              <Check
-                className={`text-primary ${p.path === value ? 'opacity-100' : 'opacity-0'}`}
-              />
+              <Check className={`text-primary ${p.path === value ? 'opacity-100' : 'opacity-0'}`} />
               <div className="min-w-0 flex-1">
                 <div className="truncate text-sm text-ink">{p.name}</div>
                 <div className="truncate font-mono text-[10px] text-muted-foreground">{p.path}</div>

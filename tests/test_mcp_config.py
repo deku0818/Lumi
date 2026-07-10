@@ -31,6 +31,25 @@ def test_global_only_strips_disabled(tmp_path, monkeypatch):
     assert merged["a"] == {"command": "npx", "args": ["a"], "transport": "stdio"}
 
 
+def test_missing_transport_inferred(tmp_path, monkeypatch):
+    """缺 transport 的配置（Claude Desktop 风格）加载侧补推：有 url → HTTP，否则 stdio。
+    与连接测试同源（_normalize_server_config），杜绝「测试绿灯、加载报错」分歧。"""
+    global_path = tmp_path / "home" / ".lumi" / "mcp_server.json"
+    _write(
+        global_path,
+        {
+            "cmd": {"command": "npx", "args": ["-y", "some-server"]},
+            "web": {"url": "https://example.com/mcp"},
+        },
+    )
+    monkeypatch.setattr(mcp, "_global_mcp_config_path", lambda: global_path)
+
+    merged = mcp._load_merged_mcp_config(None)
+
+    assert merged["cmd"]["transport"] == "stdio"
+    assert merged["web"]["transport"] == "streamable_http"
+
+
 def test_project_overrides_global(tmp_path, monkeypatch):
     global_path = tmp_path / "home" / ".lumi" / "mcp_server.json"
     _write(

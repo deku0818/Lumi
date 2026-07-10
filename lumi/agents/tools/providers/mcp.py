@@ -15,7 +15,7 @@ import subprocess
 import sys
 import time
 from collections.abc import Awaitable, Callable
-from contextlib import AsyncExitStack
+from contextlib import AsyncExitStack, nullcontext
 from contextvars import ContextVar
 from dataclasses import dataclass
 from functools import wraps
@@ -23,6 +23,7 @@ from pathlib import Path
 from typing import Any
 
 from langchain_core.tools.structured import StructuredTool
+from langchain_mcp_adapters import sessions
 from langchain_mcp_adapters.client import MultiServerMCPClient
 from langchain_mcp_adapters.interceptors import (
     MCPToolCallRequest,
@@ -124,18 +125,26 @@ def _read_json_dict(path: Path) -> dict[str, Any]:
     return data if isinstance(data, dict) else {}
 
 
-def _strip_disabled(config: dict[str, Any]) -> dict[str, Any]:
-    """剥离 Lumi 元字段 ``disabled``：丢弃被禁用的 server，其余 pop 掉该键。
+def _normalize_server_config(cfg: dict[str, Any]) -> dict[str, Any]:
+    """单个 server 配置归一化：剥离 Lumi 元字段 ``disabled``、补推缺省 ``transport``。
 
-    ``disabled`` 是 Lumi 侧标记，绝不能下传给 langchain adapter（它 ``**params``
-    全透传，混入未知键会 TypeError）。
+    ``disabled`` 绝不能下传给 langchain adapter（它 ``**params`` 全透传，混入未知键会
+    TypeError）；``transport`` 缺省按有无 url 推断（Claude Desktop 风格配置不写该键，
+    而 adapter 的 create_session 强制要求）。会话池与连接测试共用，两路行为恒一致。
     """
-    result: dict[str, Any] = {}
-    for name, cfg in config.items():
-        if not isinstance(cfg, dict) or cfg.get("disabled") is True:
-            continue
-        result[name] = {k: v for k, v in cfg.items() if k != "disabled"}
-    return result
+    out = {k: v for k, v in cfg.items() if k != "disabled"}
+    if "transport" not in out:
+        out["transport"] = "streamable_http" if out.get("url") else "stdio"
+    return out
+
+
+def _strip_disabled(config: dict[str, Any]) -> dict[str, Any]:
+    """丢弃被禁用的 server，其余逐个归一化（见 :func:`_normalize_server_config`）。"""
+    return {
+        name: _normalize_server_config(cfg)
+        for name, cfg in config.items()
+        if isinstance(cfg, dict) and cfg.get("disabled") is not True
+    }
 
 
 def _load_merged_mcp_config(project_dir: Path | None) -> dict[str, Any]:
@@ -167,6 +176,11 @@ def _make_quiet_stdio_client(original_stdio_client: Any) -> Any:
         return original_stdio_client(server, errlog=_DEVNULL)
 
     return wrapper
+
+
+# import 时一次性包装 adapter 的 stdio_client：所有调用方（会话池 / 连接测试）都要静默，
+# 且临时 patch/restore 在并发下会互相恢复错原值，永久包装最简单也无竞态。
+sessions.stdio_client = _make_quiet_stdio_client(sessions.stdio_client)
 
 
 def _filter_tools(
@@ -367,35 +381,15 @@ class MCPSessionManager:
         # start，故快照期间不会有别的池并发 spawn，diff 精确归属本池）。
         before = set(_collect_descendant_pids(os.getpid()))
 
-        # Patch stdio_client 以抑制 MCP 子进程 stderr 输出（避免污染 TUI）
-        all_tools = await self._load_tools_with_quiet_stdio(
-            persistent, stateless, interceptors
-        )
+        all_tools: list[StructuredTool] = []
+        await self._start_persistent_servers(persistent, interceptors, all_tools)
+        await self._start_stateless_servers(stateless, interceptors, all_tools)
 
         self._child_pids = set(_collect_descendant_pids(os.getpid())) - before
         self._config_hash = _config_hash(mcp_config)
         self._tools = all_tools
         self._started = True
         return all_tools
-
-    async def _load_tools_with_quiet_stdio(
-        self,
-        persistent: dict[str, Any],
-        stateless: dict[str, Any],
-        interceptors: list[ToolArgsInterceptor] | None,
-    ) -> list[StructuredTool]:
-        """在 stdio stderr 被静默的上下文中加载所有服务器工具。"""
-        from langchain_mcp_adapters import sessions
-
-        original = sessions.stdio_client
-        sessions.stdio_client = _make_quiet_stdio_client(original)
-        try:
-            tools: list[StructuredTool] = []
-            await self._start_persistent_servers(persistent, interceptors, tools)
-            await self._start_stateless_servers(stateless, interceptors, tools)
-            return tools
-        finally:
-            sessions.stdio_client = original
 
     async def _start_persistent_servers(
         self,
@@ -592,6 +586,107 @@ async def invalidate_mcp_pools(scope: str, project_dir: Path | None = None) -> N
 
 
 # ── 公共 API ──
+
+
+async def _list_all_pages(
+    list_page: Callable[..., Awaitable[Any]], attr: str
+) -> list[Any]:
+    """按 MCP 分页协议取全量：循环 cursor 直到 nextCursor 为空。"""
+    items: list[Any] = []
+    cursor: str | None = None
+    while True:
+        page = await list_page(cursor=cursor)
+        items.extend(getattr(page, attr))
+        if not page.nextCursor:
+            return items
+        cursor = page.nextCursor
+
+
+async def _probe_mcp_server(config: dict[str, Any]) -> dict[str, Any]:
+    """建一次会话完成握手并枚举能力（tools/prompts/resources 按声明的 capability 取）。"""
+    start = time.monotonic()
+    async with AsyncExitStack() as stack:
+        # stdio spawn 子进程须与池 start 的 PID 快照互斥（diff 归属正确性依赖快照期间
+        # 无别处 spawn），只锁 spawn 一瞬；HTTP/SSE 无子进程不加锁
+        guard = _pool_lock if config.get("transport") == "stdio" else nullcontext()
+        async with guard:
+            session = await stack.enter_async_context(sessions.create_session(config))
+        init = await session.initialize()
+        latency_ms = int((time.monotonic() - start) * 1000)
+        caps = init.capabilities
+
+        tools = (
+            [
+                {
+                    "name": t.name,
+                    "description": t.description or "",
+                    "input_schema": t.inputSchema,
+                }
+                for t in await _list_all_pages(session.list_tools, "tools")
+            ]
+            if caps.tools is not None
+            else []
+        )
+        prompts = (
+            [
+                {
+                    "name": p.name,
+                    "description": p.description or "",
+                    "arguments": [
+                        {
+                            "name": a.name,
+                            "description": a.description or "",
+                            "required": bool(a.required),
+                        }
+                        for a in (p.arguments or [])
+                    ],
+                }
+                for p in await _list_all_pages(session.list_prompts, "prompts")
+            ]
+            if caps.prompts is not None
+            else []
+        )
+        resources = (
+            [
+                {
+                    "uri": str(r.uri),
+                    "name": r.name or "",
+                    "description": r.description or "",
+                    "mime_type": r.mimeType or "",
+                }
+                for r in await _list_all_pages(session.list_resources, "resources")
+            ]
+            if caps.resources is not None
+            else []
+        )
+
+    return {
+        "ok": True,
+        "server": {"name": init.serverInfo.name, "version": init.serverInfo.version},
+        "latency_ms": latency_ms,
+        "tools": tools,
+        "prompts": prompts,
+        "resources": resources,
+    }
+
+
+async def test_mcp_server(
+    server_config: dict[str, Any], timeout: float = 15.0
+) -> dict[str, Any]:
+    """连接测试：用给定配置临时建一次会话，握手后枚举能力，随即断开。
+
+    与常驻会话池完全独立——验证的是「这份配置能不能连上、有什么能力」，
+    不动任何已建立的池。配置归一化与加载侧同源（:func:`_normalize_server_config`），
+    测试通过 = 会话加载也认。成功返回 ``{ok, server, latency_ms, tools, prompts,
+    resources}``，失败返回 ``{ok: False, error}``。
+    """
+    config = _normalize_server_config(server_config)
+    try:
+        return await asyncio.wait_for(_probe_mcp_server(config), timeout)
+    except TimeoutError:
+        return {"ok": False, "error": f"连接超时（{timeout:g}s）"}
+    except Exception as e:
+        return {"ok": False, "error": _format_exception_details(e)}
 
 
 async def get_mcp_tools(

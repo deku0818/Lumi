@@ -1,5 +1,18 @@
 # Changelog
 
+## [0.2.41] - 2026-07-10
+
+### Added
+- **MCP 连接测试** — 设置 → MCP 的 server 卡片新增雷达图标：点击实际连一次 server（临时会话，不动常驻会话池），弹窗展示握手信息（server 名/版本/耗时）与「工具 / 提示 / 资源」三类能力清单（tab 计数 + 过滤）；工具/提示条目点开看参数——名称、类型、必填/可选、描述，嵌套 object 经「N 个字段」胶囊逐层下钻（解析 `$ref`/`allOf`/`anyOf`，深度封顶 5 层防递归 schema 打转）。新增 `test_mcp_server` RPC（`protocol/events.json` 单一事实源同步）
+
+### Fixed
+- **缺 `transport` 的配置「测试绿灯、加载失败」分歧** — transport 推断（有 url → HTTP，否则 stdio）下沉到加载侧归一化点 `_normalize_server_config`，会话池与连接测试共用：Claude Desktop 风格配置（不写 transport）两路行为恒一致，顺带修正其被误判为无状态会话的问题
+- **stdio 静默补丁并发竞态** — `sessions.stdio_client` 的临时 patch/restore（会话池 start 与连接测试并发时互相恢复错原值）改为模块 import 时一次性永久包装
+- **连接测试子进程可能被误杀** — 探测的 stdio spawn 与会话池 start 的 PID 快照互斥（只锁 spawn 一瞬），避免探测进程被误归入某池的 `_child_pids` 后遭清理误杀
+
+### Changed
+- **FormModal 支持 `bodyClassName`** — 内容区高度可按弹窗覆盖（默认仍 `max-h-[62vh]`），测试弹窗以固定高度呈现，切 tab / 展开条目时窗口尺寸不再跳动
+
 ## [0.2.40] - 2026-07-10
 
 ### Fixed

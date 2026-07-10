@@ -21,6 +21,7 @@ from pathlib import Path
 from lumi.agents.tools.providers.mcp import (
     _global_mcp_config_path,
     invalidate_mcp_pools,
+    test_mcp_server,
 )
 from lumi.utils.atomic_io import atomic_write_json
 
@@ -29,6 +30,7 @@ MCP_METHODS = frozenset(
         "list_mcp_servers",
         "save_mcp_server",
         "delete_mcp_server",
+        "test_mcp_server",
     }
 )
 
@@ -65,6 +67,10 @@ def _read_for_write(path: Path) -> dict:
 
 async def dispatch_mcp(method: str, params: dict) -> dict:
     """执行一个 MCP RPC 方法（method 已确认属于 MCP_METHODS）。"""
+    if method == "test_mcp_server":
+        # 连接测试：直接用前端传来的配置临时连一次，与 scope/写盘无关
+        return await test_mcp_server(params.get("config") or {})
+
     scope = params.get("scope") or "global"
     project = params.get("project") or ""
     project_dir = _project_dir(scope, project)

@@ -312,6 +312,33 @@ export interface McpServerConfig {
 // 一个 scope 下的全量 server 表：{ name: config }
 export type McpServers = Record<string, McpServerConfig>
 
+// —— MCP 连接测试（test_mcp_server）——
+export interface McpToolInfo {
+  name: string
+  description: string
+  input_schema?: Record<string, unknown> // 工具的 JSON Schema（properties/required）
+}
+export interface McpPromptInfo {
+  name: string
+  description: string
+  arguments: { name: string; description: string; required: boolean }[]
+}
+export interface McpResourceInfo {
+  uri: string
+  name: string
+  description: string
+  mime_type: string
+}
+export interface McpTestResult {
+  ok: boolean
+  error?: string
+  server?: { name: string; version: string }
+  latency_ms?: number
+  tools?: McpToolInfo[]
+  prompts?: McpPromptInfo[]
+  resources?: McpResourceInfo[]
+}
+
 declare global {
   interface Window {
     lumi: {

@@ -75,6 +75,7 @@
     "test_channel": { "params": ["name", "config"], "result": ["ok", "error?", "bot_name?"], "note": "用给定凭证临时验证连通性，不影响运行中的 channel" },
     "list_mcp_servers": { "params": ["scope", "project?"], "result": ["servers"], "note": "scope ∈ global|project；global 读该机器 ~/.lumi/mcp_server.json，project 读 <project>/.lumi/mcp_server.json。返回原始全量 dict（含 disabled 标记供 UI 置灰）" },
     "save_mcp_server": { "params": ["scope", "project?", "name", "config"], "result": ["servers"], "note": "写入该 scope 的 mcp_server.json（disabled:true = 禁用但保留），作废受影响会话池，下次新会话加载生效；返回更新后的原始 dict" },
-    "delete_mcp_server": { "params": ["scope", "project?", "name"], "result": ["servers"], "note": "从该 scope 移除一个 server，作废受影响会话池；返回更新后的原始 dict" }
+    "delete_mcp_server": { "params": ["scope", "project?", "name"], "result": ["servers"], "note": "从该 scope 移除一个 server，作废受影响会话池；返回更新后的原始 dict" },
+    "test_mcp_server": { "params": ["config"], "result": ["ok", "error?", "server?", "latency_ms?", "tools?", "prompts?", "resources?"], "note": "用给定配置临时建一次会话验证连通性（不动常驻会话池）：成功返回 server{name,version}、握手耗时与 tools/prompts/resources 能力清单（工具含 input_schema、提示含 arguments）；失败返回 error 文本" }
   }
 }
