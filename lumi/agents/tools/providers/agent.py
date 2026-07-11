@@ -25,6 +25,7 @@ from lumi.agents.runtime.bg_tasks import (
 )
 from lumi.agents.runtime.shell_session import run_with_shell
 from lumi.agents.tools.loader import load_agents
+from lumi.agents.tools.providers.mcp import await_pool_ready
 from lumi.agents.tools.registry import get_tool_registry
 from lumi.utils.logger import logger
 from lumi.utils.read_config import get_config
@@ -94,6 +95,9 @@ async def agent(
         return f"Agent '{name}' not found"
 
     agent_config = matched_configs[0]
+
+    # 子代理无轮首刷新可自愈：冷池时等 MCP 工具就位再装配（project 随父 run contextvar）
+    await await_pool_ready()
 
     # 子代理工具：未达上限保留 agent 工具（可继续委派），到顶则剔除
     all_tools = await get_tool_registry().get_tools(

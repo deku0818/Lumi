@@ -64,6 +64,10 @@ class BroadcastHub:
             )
         )
 
+    def on_mcp_status(self, payload: dict) -> None:
+        """MCP 池后台加载完成：广播各 server 结果（前端对失败项 toast / 面板刷徽标）。"""
+        self._spawn(self._delivery.send_event("mcp.status", payload))
+
     def on_session_title(self, thread_id: str, title: str) -> None:
         """会话标题自动生成完成：广播给所有连接更新侧栏该会话的显示名。"""
         self._spawn(

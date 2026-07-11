@@ -442,6 +442,7 @@ export default function App() {
   const storeRef = useRef<Record<string, SessionState>>({})
   const notifyRef = useRef(notify)
   const tRef = useRef(t)
+  const workspaceDirRef = useRef('')
   // 临时目录是连接级（bridge 内存）状态：重连得到全新 bridge 后需重放，故镜像到 ref
   const folderStoreRef = useRef<Record<string, string[]>>({})
 
@@ -509,6 +510,9 @@ export default function App() {
   useEffect(() => {
     tRef.current = t
   })
+  useEffect(() => {
+    workspaceDirRef.current = workspaceDir
+  }, [workspaceDir])
 
   // 每个会话的活动态，喂给侧栏显示圆点：attention=等你处理（审批/澄清），running=处理中。
   // store 每个流式 token 都换新身份，内容不变时复用上一个对象，避免 Sidebar 每 token 重渲染。
@@ -1122,6 +1126,22 @@ export default function App() {
             if (!renamedRef.current.has(sessionKey(backend, thread_id))) {
               patchSession(thread_id, backend, { title })
             }
+          }
+          // MCP 池后台加载完成（进程级广播，控制连接消费天然去重）：
+          // 只对当前工作区（或全局池）的失败 toast——别的项目/会话加热的池与用户无关，
+          // 跨项目弹红是纯噪音。面板经 window 信号即时刷徽标（打开时才挂监听）。
+          if (ev.type === 'mcp.status') {
+            const mine = !ev.payload.project || ev.payload.project === workspaceDirRef.current
+            if (mine) {
+              for (const s of ev.payload.servers) {
+                if (!s.ok) {
+                  toast.error(
+                    tRef.current('mcp.serverFailed', { name: s.name, error: s.error ?? '' }),
+                  )
+                }
+              }
+            }
+            window.dispatchEvent(new CustomEvent('lumi:mcp-status'))
           }
         })
         gw.onState((st) => setMachineConn((m) => ({ ...m, [backend]: st })))

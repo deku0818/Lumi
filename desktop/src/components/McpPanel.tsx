@@ -19,6 +19,7 @@ import type {
   McpScope,
   McpServerConfig,
   McpServers,
+  McpServerStatus,
   McpTestResult,
   McpTransport,
   Project,
@@ -69,6 +70,8 @@ export function McpPanel({
   const [scope, setScope] = useState<McpScope>('global')
   const [project, setProject] = useState('') // 项目作用范围下选中的项目路径
   const [servers, setServers] = useState<McpServers>({})
+  const [status, setStatus] = useState<Record<string, McpServerStatus>>({})
+  const [poolLoading, setPoolLoading] = useState(false)
   const [editing, setEditing] = useState<string | null | undefined>(undefined) // undefined=列表；null=新增；string=编辑该 server
   const [testing, setTesting] = useState<string | null>(null) // 连接测试弹窗打开的 server 名
 
@@ -86,6 +89,17 @@ export function McpPanel({
       ?.listMcpServers(scope, inProject ? project : '')
       .then((r) => setServers(r.servers ?? {}))
       .catch(() => setServers({}))
+    // 会话池最近加载状态（徽标数据源）：项目 scope 查该项目池，global 查全局池
+    gwFor(machine)
+      ?.getMcpStatus(inProject ? project : '')
+      .then((r) => {
+        setStatus(Object.fromEntries(r.servers.map((s) => [s.name, s])))
+        setPoolLoading(r.loading)
+      })
+      .catch(() => {
+        setStatus({})
+        setPoolLoading(false)
+      })
   }, [gwFor, machine, scope, project, inProject])
 
   // 切机器时重置项目选择（各机器项目集不同）。在渲染中调整而非 effect：
@@ -98,6 +112,13 @@ export function McpPanel({
 
   useEffect(() => {
     reload()
+  }, [reload])
+
+  // 池后台加载完成的进程级广播（App 转发为 window 信号）：面板开着时即时刷徽标
+  useEffect(() => {
+    const h = () => reload()
+    window.addEventListener('lumi:mcp-status', h)
+    return () => window.removeEventListener('lumi:mcp-status', h)
   }, [reload])
 
   const save = (name: string, config: McpServerConfig, originalName?: string) =>
@@ -187,6 +208,8 @@ export function McpPanel({
                 key={name}
                 name={name}
                 config={servers[name]}
+                status={status[name]}
+                poolLoading={poolLoading}
                 onToggle={(on) => toggle(name, on)}
                 onTest={() => setTesting(name)}
                 onEdit={() => setEditing(name)}
@@ -231,6 +254,8 @@ function Empty({ children }: { children: React.ReactNode }) {
 function ServerCard({
   name,
   config,
+  status,
+  poolLoading,
   onToggle,
   onTest,
   onEdit,
@@ -238,6 +263,8 @@ function ServerCard({
 }: {
   name: string
   config: McpServerConfig
+  status?: McpServerStatus // 会话池最近一次加载该 server 的结果（无记录 = 池未加载/未含它）
+  poolLoading?: boolean
   onToggle: (on: boolean) => void
   onTest: () => void
   onEdit: () => void
@@ -245,6 +272,16 @@ function ServerCard({
 }) {
   const t = transportOf(config)
   const off = config.disabled === true
+  // 状态徽标：绿=已连接（title 显示工具数）、红=失败（title 显示原因）、
+  // 灰呼吸=池后台加载中；池未加载过则不显示（避免误导为"离线"）
+  const dot = status ? (
+    <span
+      title={status.ok ? `已连接 · ${status.tools ?? 0} 个工具` : status.error}
+      className={`size-1.5 rounded-full shrink-0 ${status.ok ? 'bg-success' : 'bg-error'}`}
+    />
+  ) : poolLoading && !off ? (
+    <span title="正在后台连接…" className="size-1.5 rounded-full shrink-0 bg-separator animate-pulse" />
+  ) : null
   return (
     <Card className={`flex items-center gap-3 ${off ? 'opacity-55' : ''}`}>
       <div className="grid place-items-center w-9 h-9 rounded-lg bg-surface border border-line text-ink shrink-0">
@@ -254,6 +291,7 @@ function ServerCard({
         <div className="font-medium flex items-center gap-2">
           {name}
           <TransportTag config={config} />
+          {dot}
         </div>
         <div className="text-[11px] mt-0.5 truncate font-mono text-muted-foreground">
           {subOf(config)}

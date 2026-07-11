@@ -1,5 +1,16 @@
 # Changelog
 
+## [0.2.43] - 2026-07-11
+
+### Added
+- **MCP 后台加载（对齐 Claude Code 的 pending 语义）** — MCP 池加载彻底移出会话就绪关键路径：`gateway.ready` 不再等任何 server（实测毒配置下就绪 73ms，原为无限挂/15s），工具在池就位后的下一轮对话自动可用（bridge 轮首按 `pool_generation` 感知换代重建 `context.tools`，配置作废/`set_workspace` 切项目同样触发）。单发路径（cron / headless CLI / workflow / 子代理）无下一轮可自愈，经新增 `await_pool_ready()` 在建 agent 前等池就位（暖池零 I/O 早退）。单 server 连接超时对齐 CC 默认 30s，连接测试共用同一常量
+- **MCP 状态可见性** — 新增 `mcp.status` 进程级广播 + `get_mcp_status` RPC（`protocol/events.json` 单一事实源）：失败的 server 按当前工作区过滤后 toast 轻提示（跨项目不打扰、全部成功保持安静）；设置 → MCP 的 server 卡片新增状态徽标（绿=已连接·悬停看工具数 / 红=失败·悬停看原因 / 灰呼吸=后台连接中），面板开着时经 window 信号即时刷新
+
+### Fixed
+- **配置作废与在途加载竞态** — `_load_pool` 进锁后校验 manager 身份，被作废的孤儿 manager 不再被 start（其子进程曾脱离一切清理追踪）；作废与进程退出均取消在途加载任务
+- **轮首刷新基线竞态** — `_mcp_gen` 基线改在触发加载前采样：快 server 在 initialize 期间加载完成不再导致会话永远拿不到 MCP 工具
+- **两个 server 启动循环合并** — 超时/异常/状态记录脚手架单份（`_start_servers(persistent=...)`），状态投影 `_server_status_list` 为 RPC 与广播共用形状；顺带修掉 scheduler→tools→cron provider 的循环导入
+
 ## [0.2.42] - 2026-07-11
 
 ### Added

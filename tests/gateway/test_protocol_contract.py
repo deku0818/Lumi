@@ -20,7 +20,7 @@ _PROTOCOL = json.loads(
     )
 )
 
-# 服务端直接发出但不经 EventKind 的事件（握手帧 + cron/bg/渠道广播）
+# 服务端直接发出但不经 EventKind 的事件（握手帧 + cron/bg/渠道/MCP 广播）
 _DIRECT_EVENTS = {
     "gateway.ready",
     "cron.result",
@@ -28,6 +28,7 @@ _DIRECT_EVENTS = {
     "bg_tasks.update",
     "channel.activity",
     "session.title",
+    "mcp.status",
 }
 
 

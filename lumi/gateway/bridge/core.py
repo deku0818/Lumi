@@ -37,7 +37,7 @@ from lumi.agents.runtime.bg_tasks import (
 from lumi.agents.runtime.checkpoint import CheckpointInfo, FileCheckpointManager
 from lumi.agents.runtime.file_tracker import FileChangeTracker
 from lumi.agents.runtime.shell_session import get_shell_session_manager
-from lumi.agents.tools.providers.mcp import close_all_pools
+from lumi.agents.tools.providers.mcp import close_all_pools, pool_generation
 from lumi.gateway.bridge.approval import ApprovalEnricher
 from lumi.gateway.bridge.broker import LUMI_APPROVAL_EVENT, ApprovalBroker
 from lumi.gateway.bridge.checkpoint import CheckpointService
@@ -204,6 +204,10 @@ class AgentBridge:
         # 本会话项目的 config hooks（.lumi/hooks.json）：随项目绑定，set_workspace 时重载，
         # 每轮 _stream 注入 per-run contextvar。空 dict = 暂无（initialize 后填充）。
         self._config_hooks: dict = {}
+        # MCP 后台加载配套：工具构建时的项目与池版本（轮首比对，换代即重建 context.tools）
+        self._mcp_project: Path | None = None
+        self._disabled_tools: list[str] | None = None
+        self._mcp_gen: int = 0
         # 职责子模块（back-reference 组合）
         self._providers = ProviderService(self)
         self._approval = ApprovalEnricher(self)
@@ -232,6 +236,13 @@ class AgentBridge:
         # 无 project_dir 的加载，项目级 MCP 会加载不到。
         from lumi.agents.tools import get_tools
 
+        # MCP 池后台加载（get_tools 不等它）：记下项目与池版本，轮首据此感知
+        # 「工具已就位/已换代」并重建 context.tools（见 stream_response 的刷新点）。
+        # 基线必须在 get_tools（触发加载）**之前**采样：快 server 可能在 initialize
+        # 剩余耗时内加载完成，事后采样会把基线记成"已加载"，会话就永远不重建了
+        self._mcp_project = target
+        self._disabled_tools = disabled_tools
+        self._mcp_gen = pool_generation(target)
         tools = await get_tools(disabled_tools=disabled_tools, project_dir=target)
         # enable_memory=True：bridge 是唯一面向用户的对话入口，持久记忆只在此处 opt-in
         # （子 agent / workflow / cron 走 create_agent 默认 False，天然不带记忆）。
@@ -721,6 +732,22 @@ class AgentBridge:
             engine = self._context.permission_engine if self._context else None
             set_run_authorized_source_for(engine, self._extra_folders)
             set_run_config_hooks(self._config_hooks)
+
+            # MCP 池后台就位/换代后，轮首重建工具列表（后台加载不阻塞就绪的配套拼图：
+            # 会话秒开，工具在池加载完成后的下一轮自然可用；配置作废换代同理）
+            mcp_gen = pool_generation(self._mcp_project)
+            if self._context is not None and mcp_gen != self._mcp_gen:
+                from lumi.agents.tools import get_tools
+
+                self._mcp_gen = mcp_gen
+                self._context.tools = await get_tools(
+                    disabled_tools=self._disabled_tools,
+                    project_dir=self._mcp_project,
+                )
+                logger.info(
+                    "[AgentBridge] MCP 池换代，工具列表已重建（%d 个工具）",
+                    len(self._context.tools),
+                )
 
             # 检测残留图状态（待执行节点但无中断），自动恢复
             await self._recover_stale_state(graph)

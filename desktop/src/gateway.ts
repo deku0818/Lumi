@@ -12,6 +12,7 @@ import type {
   McpScope,
   McpServerConfig,
   McpServers,
+  McpServerStatus,
   McpTestResult,
   Project,
   ProviderProfile,
@@ -269,6 +270,11 @@ export class Gateway {
   // —— MCP 服务器：读写该机器的 ~/.lumi 或 <project>/.lumi 下 mcp_server.json，下次新会话加载生效 ——
   listMcpServers(scope: McpScope, project = ''): Promise<{ servers: McpServers }> {
     return this.request<{ servers: McpServers }>('list_mcp_servers', { scope, project })
+  }
+
+  // 项目会话池的最近加载状态（面板徽标）：project 空 = 全局池
+  getMcpStatus(project = ''): Promise<{ loading: boolean; servers: McpServerStatus[] }> {
+    return this.request<{ loading: boolean; servers: McpServerStatus[] }>('get_mcp_status', { project })
   }
 
   saveMcpServer(

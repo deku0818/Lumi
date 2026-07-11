@@ -417,6 +417,11 @@ class Scheduler:
         # 执行中产生的后台任务归属本次 run 的 thread，通知不会被无关会话认领
         current_thread_id.set(thread_id)
         try:
+            # 单发执行无下一轮自愈：冷池需等 MCP 工具就位（交互路径才走非阻塞+轮首刷新）。
+            # 延迟导入：tools 包经 providers/cron.py 反向依赖本模块，模块级导入成环
+            from lumi.agents.tools.providers.mcp import await_pool_ready
+
+            await await_pool_ready(None)
             agent, context = await create_agent(checkpointer=self._checkpointer)
             # cron 直接 ainvoke（不走 bridge._stream），需自行注入本 run 的授权目录来源
             # 与项目 config hooks，否则 filesystem/bash 工具落回被并发会话清洗的进程全局、

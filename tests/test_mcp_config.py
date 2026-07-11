@@ -158,3 +158,66 @@ async def test_invalidate_only_closes_changed_pools(tmp_path, monkeypatch):
 
     assert closed == ["OLD-X"]  # 只关了变了的 X
     assert "/p/X" not in mcp._pools and "/p/Y" in mcp._pools  # Y 原样保留
+
+
+# ── 后台加载（不阻塞会话就绪）──
+
+
+async def test_get_mcp_tools_nonblocking_returns_empty_and_spawns_load(
+    tmp_path, monkeypatch
+):
+    """未加载的池：get_mcp_tools 立即返回空集并触发后台加载，绝不 await start。"""
+    project = tmp_path / "proj"
+    _write(
+        project / ".lumi" / "mcp_server.json",
+        {"slow": {"transport": "streamable_http", "url": "http://x/mcp"}},
+    )
+    monkeypatch.setattr(mcp, "_global_mcp_config_path", lambda: tmp_path / "none.json")
+    monkeypatch.setattr(mcp, "_pools", {})
+    monkeypatch.setattr(mcp, "_pool_load_tasks", {})
+
+    started: list[str] = []
+
+    async def fake_load(key, project_dir, use_interceptors):
+        started.append(key)
+
+    monkeypatch.setattr(mcp, "_load_pool", fake_load)
+
+    tools = await mcp.get_mcp_tools(project_dir=project)
+
+    assert tools == []  # 立即空集，不等池
+    assert started == []  # 加载在后台 task 中，尚未被本协程 await
+    task = mcp._pool_load_tasks[mcp._project_key(project)]
+    await task  # 后台任务确实在跑
+    assert started == [mcp._project_key(project)]
+
+
+async def test_ensure_pool_loading_idempotent(tmp_path, monkeypatch):
+    """在途加载未完成时重复 ensure 不再起新任务（按池单飞）。"""
+    monkeypatch.setattr(mcp, "_pools", {})
+    monkeypatch.setattr(mcp, "_pool_load_tasks", {})
+    import asyncio
+
+    release = asyncio.Event()
+    calls: list[int] = []
+
+    async def fake_load(key, project_dir, use_interceptors):
+        calls.append(1)
+        await release.wait()
+
+    monkeypatch.setattr(mcp, "_load_pool", fake_load)
+
+    mcp.ensure_pool_loading(None)
+    await asyncio.sleep(0)  # 让任务启动
+    mcp.ensure_pool_loading(None)  # 在途中：不应再起
+    release.set()
+    await mcp._pool_load_tasks[mcp._GLOBAL_POOL_KEY]
+    assert calls == [1]
+
+
+def test_pool_generation_bumps_on_invalidate(monkeypatch):
+    """配置作废递增版本号：存活会话在轮首据此重建工具列表。"""
+    monkeypatch.setattr(mcp, "_pool_generation", {})
+    assert mcp.pool_generation(None) == 0
+    mcp._pool_generation[mcp._GLOBAL_POOL_KEY] = 3
+    assert mcp.pool_generation(None) == 3

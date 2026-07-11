@@ -315,6 +315,11 @@ class WorkflowEngine:
     async def _create_agent(self, agent_name: str | None) -> tuple[Any, Any]:
         from lumi.agents.core.graph import create_agent
         from lumi.agents.tools import get_tools, load_agents
+        from lumi.agents.tools.providers.mcp import await_pool_ready
+
+        # 工作流 agent 按名缓存、整个工作流生命周期不重建：冷池时必须等 MCP 工具
+        # 就位，否则空工具集被缓存后本次工作流永远缺 MCP（project 随父 run contextvar）
+        await await_pool_ready()
 
         if agent_name:
             configs = load_agents(name=agent_name)

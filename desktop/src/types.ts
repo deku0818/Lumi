@@ -65,7 +65,11 @@ export interface WireEventPayloads extends Record<WireEventType, object> {
   'bg_tasks.update': { tasks: BgTask[] }
   'channel.activity': { thread_id: string; channel: string }
   'session.title': { thread_id: string; title: string }
+  'mcp.status': { project: string; servers: McpServerStatus[] }
 }
+
+// MCP 池加载结果（mcp.status 事件 / get_mcp_status RPC 共用形状）
+export type McpServerStatus = { name: string; ok: boolean; tools?: number; error?: string }
 
 // 判别联合：按 type 收窄到对应 payload。任意 payload 都可能附带 parent_run_id
 // （非空=属于某子代理，见 events.json events_note）。

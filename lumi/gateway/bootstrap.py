@@ -49,12 +49,18 @@ async def gateway_process():
     # 后台任务变更 → 广播 bg_tasks.update，驱动前端实时刷新
     get_task_registry().set_on_change(hub.on_bg_task_change)
 
+    # MCP 池后台加载完成 → 广播 mcp.status（失败项前端 toast / 面板徽标数据源）
+    from lumi.agents.tools.providers.mcp import set_on_pool_loaded
+
+    set_on_pool_loaded(hub.on_mcp_status)
+
     try:
         yield
     finally:
         if not catalog_task.done():
             catalog_task.cancel()
         get_task_registry().set_on_change(None)
+        set_on_pool_loaded(None)
         if cron_runtime is not None:
             await cron_runtime.scheduler.stop()
         # 进程级共享运行时（MCP / shell 会话）只在进程退出时关闭一次，

@@ -20,6 +20,7 @@ from pathlib import Path
 
 from lumi.agents.tools.providers.mcp import (
     _global_mcp_config_path,
+    get_pool_status,
     invalidate_mcp_pools,
     test_mcp_server,
 )
@@ -31,6 +32,7 @@ MCP_METHODS = frozenset(
         "save_mcp_server",
         "delete_mcp_server",
         "test_mcp_server",
+        "get_mcp_status",
     }
 )
 
@@ -70,6 +72,11 @@ async def dispatch_mcp(method: str, params: dict) -> dict:
     if method == "test_mcp_server":
         # 连接测试：直接用前端传来的配置临时连一次，与 scope/写盘无关
         return await test_mcp_server(params.get("config") or {})
+
+    if method == "get_mcp_status":
+        # 项目池的最近加载状态（面板徽标）：project 空 = 全局池。
+        # 复用 _project_dir 保证路径归一化与建池/作废一个口径
+        return get_pool_status(_project_dir("project", params.get("project") or ""))
 
     scope = params.get("scope") or "global"
     project = params.get("project") or ""

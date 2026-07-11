@@ -89,10 +89,9 @@ class ToolArgsInterceptor:
 _PERSISTENT_TRANSPORTS: frozenset[str] = frozenset({"stdio"})
 
 # 单个服务器连接+加载工具的超时上限。必须有界：端口被其它程序占用（TCP 可连但
-# 永不响应）或服务假死时，连接会无限挂起，而 MCP 池加载阻塞在 bridge.initialize
-# 里——挂一个服务器就挂掉整个会话就绪（gateway.ready 发不出、前端空白）。
-# 取 15s 容忍 npx 冷启动拉包；池按项目+配置哈希缓存，代价只付一次。
-_SERVER_START_TIMEOUT = 15.0
+# 永不响应）或服务假死时，连接会无限挂起。池加载已后台化（不阻塞会话就绪），
+# 超时对齐 Claude Code 的默认 30s，npx 冷启动拉包也从容。
+_SERVER_START_TIMEOUT = 30.0
 
 # stdio 子进程 stderr 默认输出到 sys.stderr，会污染 TUI 界面。
 # 用 devnull 替代，将 MCP 子进程的 stderr 静默丢弃。
@@ -348,6 +347,8 @@ class MCPSessionManager:
         self._child_pids: set[int] = set()
         # 构建本池所用配置的稳定 hash（供 invalidate 精准判断「是否真变了」）
         self._config_hash: str = ""
+        # 各 server 最近一次加载结果：name → {ok, tools?|error?}（mcp.status 广播 / 面板徽标）
+        self.server_status: dict[str, dict] = {}
 
     @property
     def is_started(self) -> bool:
@@ -388,8 +389,8 @@ class MCPSessionManager:
         before = set(_collect_descendant_pids(os.getpid()))
 
         all_tools: list[StructuredTool] = []
-        await self._start_persistent_servers(persistent, interceptors, all_tools)
-        await self._start_stateless_servers(stateless, interceptors, all_tools)
+        await self._start_servers(persistent, interceptors, all_tools, persistent=True)
+        await self._start_servers(stateless, interceptors, all_tools, persistent=False)
 
         self._child_pids = set(_collect_descendant_pids(os.getpid())) - before
         self._config_hash = _config_hash(mcp_config)
@@ -397,55 +398,18 @@ class MCPSessionManager:
         self._started = True
         return all_tools
 
-    async def _start_persistent_servers(
+    async def _start_servers(
         self,
         servers: dict[str, Any],
         interceptors: list[ToolArgsInterceptor] | None,
         out_tools: list[StructuredTool],
+        persistent: bool,
     ) -> None:
-        """为需要持久会话的服务器创建长连接并加载工具。"""
-        for server_name, server_config in servers.items():
-            try:
-                client = MultiServerMCPClient(
-                    {server_name: server_config},
-                    tool_interceptors=interceptors,
-                )
-                async with asyncio.timeout(_SERVER_START_TIMEOUT):
-                    session = await self._exit_stack.enter_async_context(
-                        client.session(server_name)
-                    )
-                    self._sessions[server_name] = session
-                    tools = await load_mcp_tools(
-                        session,
-                        server_name=server_name,
-                        tool_interceptors=interceptors,
-                    )
-                self._register_tools(server_name, tools, out_tools)
-                logger.info(
-                    f"[MCP] 服务器 {server_name} 持久会话已建立，"
-                    f"加载了 {len(tools)} 个工具"
-                )
-            except (KeyboardInterrupt, SystemExit):
-                raise
-            except TimeoutError:
-                logger.error(
-                    f"[MCP] 服务器 {server_name} 连接超时（{_SERVER_START_TIMEOUT}s），"
-                    "已跳过：端口被其它程序占用/服务无响应时连接会无限挂起，"
-                    "并拖死会话就绪（gateway.ready 发不出、前端一直空白）"
-                )
-            except Exception as e:
-                logger.error(
-                    f"[MCP] 服务器 {server_name} 持久会话创建失败: "
-                    f"{_format_exception_details(e)}"
-                )
+        """逐个连接 server 并加载工具（persistent=True 建持久会话，否则无状态）。
 
-    async def _start_stateless_servers(
-        self,
-        servers: dict[str, Any],
-        interceptors: list[ToolArgsInterceptor] | None,
-        out_tools: list[StructuredTool],
-    ) -> None:
-        """逐个加载无状态服务器工具。"""
+        超时/异常/状态记录脚手架两类共用——server_status 的形状与文案只此一份。
+        """
+        kind = "服务器" if persistent else "无状态服务器"
         for server_name, server_config in servers.items():
             try:
                 client = MultiServerMCPClient(
@@ -453,22 +417,41 @@ class MCPSessionManager:
                     tool_interceptors=interceptors,
                 )
                 async with asyncio.timeout(_SERVER_START_TIMEOUT):
-                    tools = await client.get_tools()
+                    if persistent:
+                        session = await self._exit_stack.enter_async_context(
+                            client.session(server_name)
+                        )
+                        self._sessions[server_name] = session
+                        tools = await load_mcp_tools(
+                            session,
+                            server_name=server_name,
+                            tool_interceptors=interceptors,
+                        )
+                    else:
+                        tools = await client.get_tools()
                 self._register_tools(server_name, tools, out_tools)
+                self.server_status[server_name] = {"ok": True, "tools": len(tools)}
                 logger.info(
-                    f"[MCP] 无状态服务器 {server_name} 加载了 {len(tools)} 个工具"
+                    f"[MCP] {kind} {server_name} 已连接，加载了 {len(tools)} 个工具"
                 )
             except (KeyboardInterrupt, SystemExit):
                 raise
             except TimeoutError:
+                self.server_status[server_name] = {
+                    "ok": False,
+                    "error": f"连接超时（{_SERVER_START_TIMEOUT:.0f}s）",
+                }
                 logger.error(
-                    f"[MCP] 无状态服务器 {server_name} 连接超时（{_SERVER_START_TIMEOUT}s），"
-                    "已跳过：端口被其它程序占用/服务无响应时连接会无限挂起，"
-                    "并拖死会话就绪（gateway.ready 发不出、前端一直空白）"
+                    f"[MCP] {kind} {server_name} 连接超时（{_SERVER_START_TIMEOUT}s），"
+                    "已跳过：端口被其它程序占用/服务无响应时连接会无限挂起"
                 )
             except Exception as e:
+                self.server_status[server_name] = {
+                    "ok": False,
+                    "error": _format_exception_details(e)[:200],
+                }
                 logger.error(
-                    f"[MCP] 无状态服务器 {server_name} 工具加载失败: "
+                    f"[MCP] {kind} {server_name} 加载失败: "
                     f"{_format_exception_details(e)}"
                 )
 
@@ -533,6 +516,122 @@ _pool_lock = asyncio.Lock()
 # 与 Claude Code「连接持进程生命周期」同思路，只是加一个宽松上限防病态无界增长。
 _MAX_POOLS = 16
 
+# 池加载版本号：某项目池 start 完成后 +1。会话在轮首据此感知「工具已就位/已换代」
+# 并重建 context.tools——后台加载不阻塞会话就绪的另一半拼图（对齐 Claude Code：
+# 会话从不等 MCP，工具随连接就位动态出现）。
+_pool_generation: dict[str, int] = {}
+# 在途后台加载任务（按池单飞，幂等）
+_pool_load_tasks: dict[str, asyncio.Task] = {}
+# 池加载完成回调（gateway 注册，广播 mcp.status 给所有连接）
+_on_pool_loaded: Callable[[dict], None] | None = None
+
+
+def set_on_pool_loaded(cb: Callable[[dict], None] | None) -> None:
+    """注册池加载完成回调（进程级单一订阅者：BroadcastHub）。"""
+    global _on_pool_loaded
+    _on_pool_loaded = cb
+
+
+def pool_generation(project_dir: Path | None) -> int:
+    """项目池的加载版本号（未加载过为 0）。"""
+    return _pool_generation.get(_project_key(project_dir), 0)
+
+
+def _server_status_list(manager: MCPSessionManager | None) -> list[dict]:
+    """server_status → wire 形状（McpServerStatus[]）：RPC 与 mcp.status 广播共用。"""
+    if manager is None:
+        return []
+    return [{"name": n, **st} for n, st in manager.server_status.items()]
+
+
+def get_pool_status(project_dir: Path | None) -> dict:
+    """项目池当前状态（面板徽标 / get_mcp_status RPC）。"""
+    key = _project_key(project_dir)
+    task = _pool_load_tasks.get(key)
+    return {
+        "loading": task is not None and not task.done(),
+        "servers": _server_status_list(_pools.get(key)),
+    }
+
+
+async def await_pool_ready(project_dir: Path | None = None) -> None:
+    """等待项目池就绪（未触发过则先触发后台加载，再等它完成）。
+
+    供单发/非交互调用方（cron、headless CLI、workflow、子代理）在建 agent 前调用：
+    它们没有下一轮可自愈，冷池时必须等工具就位才不会整轮缺 MCP 工具。
+    交互路径（bridge）保持非阻塞 + 轮首刷新，不要调本函数。
+    project_dir 缺省读 contextvar（与 get_mcp_tools 同源），随父 run 的项目走。
+    """
+    if project_dir is None:
+        project_dir = _current_project_dir.get()
+    # 热路径零 I/O：先无副作用窥视已就绪的池（get_mcp_session_manager 会隐式建池，
+    # 不能用它做只读检查），暖池直接返回，不读配置文件
+    existing = _pools.get(_project_key(project_dir))
+    if existing is not None and existing.is_started:
+        return
+    if not _load_merged_mcp_config(project_dir):
+        return
+    ensure_pool_loading(project_dir)
+    task = _pool_load_tasks.get(_project_key(project_dir))
+    if task is not None:
+        # wait 而非 await：任务被取消（配置作废）时不向调用方抛 CancelledError
+        await asyncio.wait([task])
+
+
+def ensure_pool_loading(
+    project_dir: Path | None, use_interceptors: bool = True
+) -> None:
+    """确保项目池在后台加载（幂等、不阻塞调用方）。"""
+    key = _project_key(project_dir)
+    manager = get_mcp_session_manager(project_dir)
+    if manager.is_started:
+        return
+    task = _pool_load_tasks.get(key)
+    if task is not None and not task.done():
+        return
+    _pool_load_tasks[key] = asyncio.create_task(
+        _load_pool(key, project_dir, use_interceptors)
+    )
+
+
+async def _load_pool(
+    key: str, project_dir: Path | None, use_interceptors: bool
+) -> None:
+    """后台加载一个项目池；完成后递增版本号并通知订阅者（含失败的 server 明细）。"""
+    mcp_config = _load_merged_mcp_config(project_dir)
+    if not mcp_config:
+        _pool_load_tasks.pop(key, None)
+        return
+    manager = get_mcp_session_manager(project_dir)
+    try:
+        # 串行化 start：快照 PID 精确归属 + 同项目并发首次初始化只 start 一次（双重检查）
+        async with _pool_lock:
+            # 等锁期间池可能被 invalidate（manager 已 close 并移出 _pools）：
+            # 对孤儿 manager start 会 spawn 无人追踪的子进程，必须放弃本次加载
+            if _pools.get(key) is not manager:
+                return
+            if not manager.is_started:
+                await manager.start(mcp_config, use_interceptors=use_interceptors)
+            await _evict_lru_pools(keep_key=key)
+    except (KeyboardInterrupt, SystemExit):
+        raise
+    except Exception as e:
+        logger.error(
+            f"加载MCP工具失败: {_format_exception_details(e)}. "
+            f"配置的服务器: {list(mcp_config.keys())}"
+        )
+        return
+    finally:
+        _pool_load_tasks.pop(key, None)
+    _pool_generation[key] = _pool_generation.get(key, 0) + 1
+    if _on_pool_loaded is not None:
+        _on_pool_loaded(
+            {
+                "project": "" if key == _GLOBAL_POOL_KEY else key,
+                "servers": _server_status_list(manager),
+            }
+        )
+
 
 async def _evict_lru_pools(keep_key: str) -> None:
     """池数超上限时，优雅关闭最久未用的池（keep_key 除外）。在 _pool_lock 内调用。"""
@@ -573,6 +672,10 @@ async def close_all_pools() -> None:
     """进程退出时关闭所有会话池：先 SIGKILL 全部后代兜底（应对优雅关闭挂起的 server），
     再逐池优雅关。仅 shutdown_shared_runtime 调用；日常作废走 invalidate_mcp_pools。
     """
+    # 先取消在途后台加载：否则它可能在清理后继续 spawn 子进程 / 报 pending task 噪音
+    for task in _pool_load_tasks.values():
+        task.cancel()
+    _pool_load_tasks.clear()
     _kill_child_processes()
     for manager in list(_pools.values()):
         await manager.close()
@@ -600,9 +703,17 @@ async def invalidate_mcp_pools(scope: str, project_dir: Path | None = None) -> N
             continue
         new_hash = _config_hash(_load_merged_mcp_config(_key_project_dir(key)))
         if new_hash != manager._config_hash:
+            # 先取消该池的在途后台加载：它进锁后会经 identity 校验放弃，
+            # 但尽早取消可避免它继续连剩余 server 白做功
+            task = _pool_load_tasks.pop(key, None)
+            if task is not None:
+                task.cancel()
             del _pools[key]
             _pool_used.pop(key, None)
             await manager.close()
+            # 版本号递增：已存活会话在轮首感知到换代，重建工具列表（旧池会话已关，
+            # 继续持有旧工具只会调用失败）；重建会触发新池后台加载
+            _pool_generation[key] = _pool_generation.get(key, 0) + 1
 
 
 # ── 公共 API ──
@@ -691,7 +802,7 @@ async def _probe_mcp_server(config: dict[str, Any]) -> dict[str, Any]:
 
 
 async def test_mcp_server(
-    server_config: dict[str, Any], timeout: float = 15.0
+    server_config: dict[str, Any], timeout: float = _SERVER_START_TIMEOUT
 ) -> dict[str, Any]:
     """连接测试：用给定配置临时建一次会话，握手后枚举能力，随即断开。
 
@@ -731,19 +842,9 @@ async def get_mcp_tools(
     _pool_used[key] = time.monotonic()  # LRU 记账
 
     if not manager.is_started:
-        # 串行化 start：快照 PID 精确归属 + 同项目并发首次初始化只 start 一次（双重检查）。
-        async with _pool_lock:
-            if not manager.is_started:
-                try:
-                    await manager.start(mcp_config, use_interceptors=use_interceptors)
-                except (KeyboardInterrupt, SystemExit):
-                    raise
-                except Exception as e:
-                    logger.error(
-                        f"加载MCP工具失败: {_format_exception_details(e)}. "
-                        f"配置的服务器: {list(mcp_config.keys())}"
-                    )
-                    return []
-                await _evict_lru_pools(keep_key=key)
+        # 后台加载、立即返回空集：MCP 从不阻塞会话就绪/轮次（对齐 Claude Code 的
+        # pending 语义）。就位后 pool_generation 变化，会话在轮首重建工具列表。
+        ensure_pool_loading(project_dir, use_interceptors)
+        return []
 
     return _filter_tools(manager.get_tools(), filter_names)
