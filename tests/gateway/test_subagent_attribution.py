@@ -55,6 +55,24 @@ def test_deterministic_regardless_of_insertion_order():
     assert b._resolve_subagent_parent("evt", chain) == SUB
 
 
+def test_agent_run_stays_active_after_tool_end():
+    """后台子代理：agent 工具立即返回（on_tool_end）后其事件仍须归属到卡片。
+
+    回归锁：若 on_tool_end 移除 run_id，后台子代理的后续事件会以 parent_id=""
+    泄漏进主流（截断主回复气泡、散落工具卡）。
+    """
+    bridge = _bridge()
+    bridge._track_agent_run("on_tool_start", "agent", SUB)
+    bridge._track_agent_run("on_tool_end", "agent", SUB)
+    assert bridge._resolve_subagent_parent("evt", [ROOT, MAIN, SUB]) == SUB
+
+
+def test_track_ignores_non_agent_tools():
+    bridge = _bridge()
+    bridge._track_agent_run("on_tool_start", "bash", "run-x")
+    assert bridge._resolve_subagent_parent("evt", [ROOT, MAIN, "run-x"]) == ""
+
+
 def test_parallel_siblings_each_attribute_by_own_parent_ids():
     """并行兄弟同时活跃：审批/事件自带各自 parent_ids，能精确归属到各自顶层子代理。
 

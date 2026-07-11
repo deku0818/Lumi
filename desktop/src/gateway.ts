@@ -434,6 +434,10 @@ export class Gateway {
     for (const h of this.stateHandlers) h(s)
   }
 
+  get state(): ConnState {
+    return this.currentState
+  }
+
   // 是否已停止自我维持（鉴权拒绝/退避耗尽或被主动关闭）：此态下不会自行重连，
   // 调用方（如 openControlConn 幂等守卫）应据此判断要不要复活，而非仅看连接是否存在。
   get dead(): boolean {

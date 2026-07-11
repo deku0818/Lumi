@@ -27,7 +27,7 @@ export function ApprovalDialog({
   const boundary = data.boundary_violations ?? []
 
   return (
-    <div className="border border-line rounded-2xl bg-surface/50 p-4">
+    <div className="border border-line/60 rounded-lg bg-surface/50 p-4">
       <h2 className="text-base font-semibold mb-4 flex items-center gap-2">
           <span className="text-primary">✦</span>
           {t('approval.title')}

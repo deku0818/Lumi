@@ -745,17 +745,9 @@ class AgentBridge:
                                 run_id, parent_ids
                             )
 
-                            # agent 工具开始时记录 run_id（放在匹配之后，
+                            # agent 工具 run 登记（放在匹配之后，
                             # 确保 agent 自身的 on_tool_start 不会自匹配）
-                            if kind == "on_tool_start" and event.get("name") == "agent":
-                                self._active_agent_runs.add(run_id)
-
-                            # agent 工具结束/出错时移除 run_id，避免残留影响后续匹配
-                            if (
-                                kind in ("on_tool_end", "on_tool_error")
-                                and event.get("name") == "agent"
-                            ):
-                                self._active_agent_runs.discard(run_id)
+                            self._track_agent_run(kind, event.get("name", ""), run_id)
 
                             # 压缩节点(Summarizer)内部的摘要 LLM 调用：不作为 message.* 流出
                             # （astream_events 会把它逐字浮现成 on_chat_model_stream，否则摘要
@@ -989,6 +981,17 @@ class AgentBridge:
         共享同一个）。在途审批后工具单次执行、不再跨 resume 重发，无需稳定 id。
         """
         return args_tcid or run_id
+
+    def _track_agent_run(self, kind: str, name: str, run_id: str) -> None:
+        """agent 工具开始时登记 run_id，供子代理事件归属（_resolve_subagent_parent）。
+
+        工具结束时刻意不移除：后台子代理在 agent 工具立即返回后仍继续产生事件
+        （asyncio.create_task 继承父 run 上下文），移除会令其祖先匹配落空、事件以
+        parent_id="" 泄漏进主流（截断主回复气泡、散落工具卡）。归属按祖先链匹配，
+        保留已结束的 run_id 不会误挂无关事件；集合每轮开始时清空。
+        """
+        if kind == "on_tool_start" and name == "agent":
+            self._active_agent_runs.add(run_id)
 
     def _resolve_subagent_parent(self, run_id: str, parent_ids: list[str]) -> str:
         """事件的子代理归属：祖先链中「最浅」的活跃 agent run，无则空串。

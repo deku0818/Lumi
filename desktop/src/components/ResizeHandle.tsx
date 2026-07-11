@@ -22,10 +22,12 @@ export function ResizeHandle({
   width,
   setWidth,
   edge,
+  shift = 0,
 }: {
   width: number
   setWidth: (w: number) => void
   edge: 'left' | 'right'
+  shift?: number // 视觉平移（px）：悬浮面板场景把把手从占位容器边缘贴回面板可见边缘
 }) {
   const onMouseDown = (e: ReactMouseEvent) => {
     e.preventDefault()
@@ -47,6 +49,7 @@ export function ResizeHandle({
   return (
     <div
       onMouseDown={onMouseDown}
+      style={shift ? { transform: `translateX(${shift}px)` } : undefined}
       className="group shrink-0 w-1.5 -mx-0.5 z-10 cursor-col-resize flex justify-center"
     >
       <div className="w-px h-full bg-transparent group-hover:bg-primary/50 transition-colors" />

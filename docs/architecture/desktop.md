@@ -27,7 +27,7 @@ Lumi 桌面应用（Electron + TS 前端）的内部实现。前端通过 WebSoc
                           └───────────────────────────────────────────────┘
 ```
 
-- **main 进程**：唯一持有 sidecar 生命周期。sidecar 非主动退出（崩溃/被杀）时同端口自愈重启，renderer 的重连逻辑自动连上。
+- **main 进程**：唯一持有 sidecar 生命周期。sidecar 非主动退出（崩溃/被杀）时同端口自愈重启，renderer 的重连逻辑自动连上。单实例锁（双开时聚焦已有窗口）；sidecar 以 stdin 管道拉起并传 `--exit-with-parent`——主进程无论如何死亡（含崩溃/强杀），sidecar 读到 stdin EOF 数秒内自退，杜绝孤儿进程与新实例抢同一 checkpoint 数据库（读写悬挂表现为「会话打不开」）。
 - **renderer**：纯前端，无 Node 访问（`contextIsolation`）。只通过 preload 暴露的 `getConnection()` 拿到 `ws://127.0.0.1:<port>/ws`。
 - **sidecar**：headless FastAPI，启动时不引入 textual（TUI 专属模块在用到时才懒加载）。
 

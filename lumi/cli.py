@@ -74,14 +74,42 @@ def serve(
     token: str = typer.Option(
         "", help="访问令牌；设置后客户端需在 ?token= 携带（公网部署务必设置）"
     ),
+    exit_with_parent: bool = typer.Option(
+        False,
+        "--exit-with-parent",
+        help="stdin 关闭（父进程退出）时自动退出；供 Electron sidecar 使用，防孤儿进程",
+    ),
 ) -> None:
     """启动 desktop WebSocket 服务（供 Electron / web 前端连接）。"""
     import uvicorn
 
     from lumi.gateway.channels import ws
 
+    if exit_with_parent:
+        _watch_parent_exit()
     ws.app.state.token = token
     uvicorn.run(ws.app, host=host, port=port)
+
+
+def _watch_parent_exit() -> None:
+    """守望 stdin：读到 EOF（父进程死亡、管道被 OS 关闭）即整体退出。
+
+    孤儿 sidecar 会与新实例抢同一 checkpoint 数据库，把会话读写悬挂成
+    「会话打不开」。stdin 管道是跨平台最可靠的父进程死亡信号（Electron 侧以
+    stdio pipe 启动，崩溃/强杀同样触发管道关闭）。os._exit 而非优雅关停：
+    父进程已死无人在乎，checkpoint 写入是 SQLite 事务、中断也原子。
+    """
+    import os
+    import threading
+
+    def _watch() -> None:
+        try:
+            sys.stdin.buffer.read()
+        except Exception:
+            pass
+        os._exit(0)
+
+    threading.Thread(target=_watch, daemon=True, name="parent-watch").start()
 
 
 def _run_headless(

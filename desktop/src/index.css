@@ -132,6 +132,8 @@
   --radius-2xl: calc(var(--radius) * 1.8);
   --radius-3xl: calc(var(--radius) * 2.2);
   --radius-4xl: calc(var(--radius) * 2.6);
+  /* 悬浮面板 / 弹窗专用圆角（rounded-panel）：与 macOS 窗口外框弧度一致 */
+  --radius-panel: 12px;
 }
 
 html,
@@ -175,6 +177,14 @@ pre {
 .no-drag {
   -webkit-app-region: no-drag;
 }
+/* 顶条（原生标题栏高度带）内的可交互区必须用本类，而非裸 no-drag：
+   macOS 26 下根合成层内容在该带内的鼠标命中区整体上移 ~14px（画得对、点不准），
+   translateZ 强制独立合成层后命中恢复正常（侧栏内按钮不受影响正是因为面板自带合成层）。
+   往顶条新增按钮时务必套用本类，否则按钮下半部分静默不可点。 */
+.titlebar-interactive {
+  -webkit-app-region: no-drag;
+  transform: translateZ(0);
+}
 
 .titlebar-native-font,
 .titlebar-native-font button,
@@ -191,6 +201,36 @@ pre {
   font-family: var(--font-fallback);
   font-size: 12px;
   line-height: 1.35;
+}
+
+/* ── 悬浮面板材质（macOS 天气式）：左侧栏 / 右后台任务栏 / Composer 输入岛共用。
+   半透明底 + 细描边 + 弥散影；不用 backdrop-filter——当前布局下面板背后只有平色
+   canvas，模糊无视觉差却逐帧吃 GPU（若未来面板改为真 overlay 叠在内容上再加回）── */
+.sidebar-float,
+.composer-glass {
+  background: color-mix(in srgb, var(--color-panel) 72%, transparent);
+  border: 1px solid color-mix(in srgb, var(--color-ink) 9%, transparent);
+  box-shadow:
+    0 8px 32px rgba(0, 0, 0, 0.35),
+    inset 0 1px 0 color-mix(in srgb, var(--color-ink) 6%, transparent);
+}
+/* 输入岛底色更实一档，保证输入内容可读性 */
+.composer-glass {
+  background: color-mix(in srgb, var(--color-panel) 78%, transparent);
+}
+:root.light .sidebar-float,
+:root.light .composer-glass {
+  box-shadow:
+    0 8px 32px rgba(0, 0, 0, 0.14),
+    inset 0 1px 0 rgba(255, 255, 255, 0.5);
+}
+/* 亮色底只调面板，输入岛两主题恒 78% */
+:root.light .sidebar-float {
+  background: color-mix(in srgb, var(--color-panel) 66%, transparent);
+}
+/* 聚焦高亮写在此处：本类非分层，@layer utilities 里的 focus-within:border-* 压不过它 */
+.composer-glass:focus-within {
+  border-color: color-mix(in srgb, var(--color-accent) 40%, transparent);
 }
 
 /* 拖拽调整边栏宽度时：全局 col-resize 光标、禁选、停用过渡（让边栏即时跟手） */

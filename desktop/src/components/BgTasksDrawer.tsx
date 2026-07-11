@@ -3,6 +3,7 @@ import { Bot, Boxes, Check, ChevronDown, Square, SquareTerminal, X } from 'lucid
 import type { LucideIcon } from 'lucide-react'
 import type { BgTask, BgTaskKind, BgTaskProgress } from '../types'
 import { useI18n } from '../i18n'
+import { FLOAT_GAP } from '@/lib/utils'
 
 const isTerminal = (t: BgTask): boolean => t.status !== 'running'
 
@@ -92,7 +93,7 @@ function TaskCard({
   const running = task.status === 'running'
   const terminal = isTerminal(task)
   return (
-    <div className="group border border-line rounded-xl bg-panel overflow-hidden">
+    <div className="group border border-line/60 rounded-lg bg-surface/50 overflow-hidden">
       {/* 卡头是可点的折叠开关（div 而非 button，以容纳内部的移除 button） */}
       <div
         onClick={onToggle}
@@ -200,14 +201,16 @@ export function BgTasksDrawer({
 
   return (
     <aside
-      style={{ width: open ? width : 0 }}
-      className={`shrink-0 bg-canvas overflow-hidden transition-[width] duration-200 ${
-        open ? 'border-l border-line/55' : 'opacity-0'
-      }`}
+      style={{ width: open ? width + FLOAT_GAP * 2 : 0 }}
+      className={`relative shrink-0 transition-[width] duration-200 ${open ? '' : 'pointer-events-none'}`}
     >
+      {/* 悬浮玻璃面板：与左侧栏对称。开合时面板向右滑出/滑入（transform+opacity），
+          与外层宽度动画同步——面板绝对定位不受宽度裁剪，缺了这层过渡会整块瞬间弹出 */}
       <div
-        style={{ width }}
-        className="h-full overflow-auto p-3.5 flex flex-col gap-3"
+        style={{ width, right: FLOAT_GAP, top: FLOAT_GAP, bottom: FLOAT_GAP }}
+        className={`absolute sidebar-float rounded-panel overflow-auto p-3.5 flex flex-col gap-3 transition-[transform,opacity] duration-200 ease-out ${
+          open ? '' : 'translate-x-[110%] opacity-0'
+        }`}
       >
         <div className="flex items-center gap-2 px-0.5 text-[11px] uppercase tracking-wider text-muted-foreground">
           <span>{t('bg.title')}</span>

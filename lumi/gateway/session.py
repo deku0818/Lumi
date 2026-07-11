@@ -95,7 +95,8 @@ def _user_items(m) -> list[dict]:
 
     渲染数据全部来自显示声明（构造时写好的 sender/ts/text/files，含消息级 ts
     的单条下沉——规则在写侧 _build_user_message），不解析正文——正文里的标签
-    纯给模型看。未声明（cron 等不经 bridge 的消息）fallback 到 visible_user_text。
+    纯给模型看。未声明的消息 fallback 到 visible_user_text；cron 的任务 prompt
+    经 synthetic_human_message 声明 items:[]（刻意不显示，prompt 见任务详情页）。
     """
     out: list[dict] = []
     for it in declared_items(m) or []:

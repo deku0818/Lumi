@@ -5,6 +5,11 @@ export function cn(...inputs: ClassValue[]) {
   return twMerge(clsx(inputs))
 }
 
+// 悬浮面板（左侧栏 / 右后台任务栏）与窗口边缘的间距。占位容器宽 = 面板宽 + 两倍间距，
+// ResizeHandle 需回移一个间距贴到面板可见边缘。mac 红绿灯坐标以 electron/main.cjs 的
+// trafficLightPosition 为唯一事实源（x 由本间距派生、y 含用户目感微调），改这里要同步那边。
+export const FLOAT_GAP = 10
+
 // 文本截断与路径文件名提取（工具标题 / 计划对话框等共用）
 export const clip = (s: string, n = 72) => (s.length > n ? s.slice(0, n) + '…' : s)
 export const basename = (p: string) => p.split('/').filter(Boolean).pop() || p

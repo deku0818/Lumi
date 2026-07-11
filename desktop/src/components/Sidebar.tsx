@@ -5,6 +5,7 @@ import {
   Clock,
   Folder,
   MoreVertical,
+  PanelLeft,
   Pin,
   PinOff,
   Pencil,
@@ -24,7 +25,7 @@ import {
 } from 'lucide-react'
 import type { ConnState } from '../gateway'
 import type { ChannelInfo, CronJob, SessionMeta } from '../types'
-import { basename, machineColor, machineName, sessionKey, beOf } from '@/lib/utils'
+import { basename, machineColor, machineName, sessionKey, beOf, FLOAT_GAP } from '@/lib/utils'
 import { useI18n, LANGS } from '../i18n'
 import {
   DropdownMenu,
@@ -109,6 +110,8 @@ function highlight(text: string, q: string): ReactNode {
 // memo：App 在流式期间每个 token 重渲染，侧栏的 props 全部保持稳定身份，让侧栏不陪跑。
 export const Sidebar = memo(function Sidebar({
   width,
+  open,
+  onToggle,
   showTitleDrag,
   sessions,
   sessionsLoaded,
@@ -140,6 +143,8 @@ export const Sidebar = memo(function Sidebar({
   onDelete,
 }: {
   width: number
+  open: boolean
+  onToggle: () => void
   showTitleDrag: boolean
   sessions: SessionMeta[]
   sessionsLoaded: boolean // 首次 list_sessions 是否已返回；未加载完成前不显示「暂无会话」
@@ -296,7 +301,7 @@ export const Sidebar = memo(function Sidebar({
               className={`shrink-0 text-muted-foreground transition-transform ${collapsed ? '' : 'rotate-90'}`}
             />
             <span
-              className={`shrink-0 size-2 rounded-full ${cn === undefined || cn === 'connecting' ? 'animate-pulse' : ''}`}
+              className={`shrink-0 size-1.5 rounded-full ${cn === undefined || cn === 'connecting' ? 'animate-pulse' : ''}`}
               style={
                 offline
                   ? { border: '1.5px solid var(--color-separator)', opacity: 0.65 }
@@ -428,8 +433,29 @@ export const Sidebar = memo(function Sidebar({
   }
 
   return (
-    <aside style={{ width }} className="shrink-0 bg-canvas border-r border-line/20 flex flex-col">
-      {showTitleDrag && <div className="h-9 app-drag shrink-0" />}
+    <aside
+      style={{ width, left: FLOAT_GAP, top: FLOAT_GAP, bottom: FLOAT_GAP }}
+      className={`absolute z-10 sidebar-float rounded-panel flex flex-col overflow-hidden transition-[transform,opacity] duration-300 ease-out ${
+        open ? '' : '-translate-x-[110%] opacity-0 pointer-events-none'
+      }`}
+    >
+      {/* 顶行：mac 红绿灯占左侧（drag 区、h-9 中心线对齐灯位 y=28），收起按钮靠右。
+          -mt-px 抵消面板 1px 描边，使按钮与红绿灯中心线像素级对齐。
+          app-drag 仅展开时生效：拖拽区域按布局盒计算、无视 transform/opacity，收起的
+          侧栏布局盒仍在原位（aside z-10 绘制在后），残留 drag 矩形会盖回收起态展开钮的挖洞 */}
+      <div className={`h-9 -mt-px shrink-0 flex items-center justify-end pr-1.5 ${showTitleDrag && open ? 'app-drag' : ''}`}>
+        {/* icon-sm(28px) 与收起态展开钮 / 右侧后台任务钮同尺寸同中心线（y=28），
+            切换时按钮只水平移动不跳动 */}
+        <Button
+          variant="ghost"
+          size="icon-sm"
+          onClick={onToggle}
+          title={t('sidebar.collapse')}
+          className="no-drag -translate-y-px text-muted-foreground hover:text-ink"
+        >
+          <PanelLeft />
+        </Button>
+      </div>
       <div className="px-3 pb-2">
         <Button
           variant="ghost"
@@ -586,7 +612,7 @@ function CronJobRow({
         />
       ) : (
         unread > 0 && (
-          <span className="shrink-0 rounded-md bg-line/40 px-1.5 py-0.5 text-[11px] leading-none text-ink/80">
+          <span className="shrink-0 rounded-full bg-primary/15 px-[7px] py-0.5 text-[11px] leading-none font-medium text-primary">
             {t('cron.newBadge', { n: unread })}
           </span>
         )

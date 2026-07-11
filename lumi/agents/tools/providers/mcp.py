@@ -88,6 +88,12 @@ class ToolArgsInterceptor:
 # 需要持久会话的传输类型（stdio 子进程启停开销大，必须保持连接）
 _PERSISTENT_TRANSPORTS: frozenset[str] = frozenset({"stdio"})
 
+# 单个服务器连接+加载工具的超时上限。必须有界：端口被其它程序占用（TCP 可连但
+# 永不响应）或服务假死时，连接会无限挂起，而 MCP 池加载阻塞在 bridge.initialize
+# 里——挂一个服务器就挂掉整个会话就绪（gateway.ready 发不出、前端空白）。
+# 取 15s 容忍 npx 冷启动拉包；池按项目+配置哈希缓存，代价只付一次。
+_SERVER_START_TIMEOUT = 15.0
+
 # stdio 子进程 stderr 默认输出到 sys.stderr，会污染 TUI 界面。
 # 用 devnull 替代，将 MCP 子进程的 stderr 静默丢弃。
 _DEVNULL = open(os.devnull, "w")  # noqa: SIM115  # 模块级单例，避免每次调用泄漏 fd
@@ -404,15 +410,16 @@ class MCPSessionManager:
                     {server_name: server_config},
                     tool_interceptors=interceptors,
                 )
-                session = await self._exit_stack.enter_async_context(
-                    client.session(server_name)
-                )
-                self._sessions[server_name] = session
-                tools = await load_mcp_tools(
-                    session,
-                    server_name=server_name,
-                    tool_interceptors=interceptors,
-                )
+                async with asyncio.timeout(_SERVER_START_TIMEOUT):
+                    session = await self._exit_stack.enter_async_context(
+                        client.session(server_name)
+                    )
+                    self._sessions[server_name] = session
+                    tools = await load_mcp_tools(
+                        session,
+                        server_name=server_name,
+                        tool_interceptors=interceptors,
+                    )
                 self._register_tools(server_name, tools, out_tools)
                 logger.info(
                     f"[MCP] 服务器 {server_name} 持久会话已建立，"
@@ -420,6 +427,12 @@ class MCPSessionManager:
                 )
             except (KeyboardInterrupt, SystemExit):
                 raise
+            except TimeoutError:
+                logger.error(
+                    f"[MCP] 服务器 {server_name} 连接超时（{_SERVER_START_TIMEOUT}s），"
+                    "已跳过：端口被其它程序占用/服务无响应时连接会无限挂起，"
+                    "并拖死会话就绪（gateway.ready 发不出、前端一直空白）"
+                )
             except Exception as e:
                 logger.error(
                     f"[MCP] 服务器 {server_name} 持久会话创建失败: "
@@ -439,13 +452,20 @@ class MCPSessionManager:
                     {server_name: server_config},
                     tool_interceptors=interceptors,
                 )
-                tools = await client.get_tools()
+                async with asyncio.timeout(_SERVER_START_TIMEOUT):
+                    tools = await client.get_tools()
                 self._register_tools(server_name, tools, out_tools)
                 logger.info(
                     f"[MCP] 无状态服务器 {server_name} 加载了 {len(tools)} 个工具"
                 )
             except (KeyboardInterrupt, SystemExit):
                 raise
+            except TimeoutError:
+                logger.error(
+                    f"[MCP] 无状态服务器 {server_name} 连接超时（{_SERVER_START_TIMEOUT}s），"
+                    "已跳过：端口被其它程序占用/服务无响应时连接会无限挂起，"
+                    "并拖死会话就绪（gateway.ready 发不出、前端一直空白）"
+                )
             except Exception as e:
                 logger.error(
                     f"[MCP] 无状态服务器 {server_name} 工具加载失败: "

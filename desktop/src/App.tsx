@@ -16,6 +16,7 @@ import {
   Plus,
   Send,
   X,
+  PanelLeft,
   PanelRight,
   type LucideIcon,
 } from 'lucide-react'
@@ -63,7 +64,7 @@ import { AppTitleBar } from './components/AppTitleBar'
 import { toast } from './components/Toast'
 import { isCommandMode, parseCommand, matchCommands } from './slash'
 import { toolDiff, type DiffLine } from './diff'
-import { clip, basename, fmtTokens, machineColor, machineName, msgTime, sessionKey, keyThread, keyBackend, beOf } from '@/lib/utils'
+import { clip, basename, fmtTokens, machineColor, machineName, msgTime, sessionKey, keyThread, keyBackend, beOf, FLOAT_GAP } from '@/lib/utils'
 import { Button } from '@/components/ui/button'
 import { useTheme } from './theme'
 import { useUiFont } from './font'
@@ -269,6 +270,21 @@ const ctxFromUsage = (u: Usage | undefined): CtxUsage | undefined => {
   }
 }
 
+// loadHistory 结果 → 会话槽位的统一水合（初次加载 / 重连补拉 / 渠道切回三处共用）。
+// 已有流式在途内容时保留现有 items 不覆盖：checkpoint 快照比正在流出的直播轮旧，
+// 整体替换会截断刚流入的助手内容/工具卡。
+function hydrateHistory(
+  s: SessionState,
+  r: { items: HistoryItem[]; usage?: Usage },
+): SessionState {
+  const streaming = s.items.some((it) => it.kind === 'assistant' && it.streaming)
+  return {
+    ...s,
+    items: streaming ? s.items : r.items.map(restore),
+    ctx: ctxFromUsage(r.usage) ?? s.ctx,
+  }
+}
+
 // 未读集合（Record<jobId, thread_id[]>）的不可变更新：按 keep 谓词过滤某任务的 tid，
 // 消到空则删键、无变化则原样返回。openRunThread/openCronJob 共用。
 const pruneJobUnread = (
@@ -361,6 +377,12 @@ export default function App() {
   const [preview, setPreview] = useState<PresentedFile | null>(null) // present_files 右侧预览面板（null=关）
   // 可拖拽边栏宽度（持久化）：左侧会话栏 + 三个右侧栏（后台任务 / 任务执行记录 / 文件预览）
   const sidebarW = useResizableWidth('lumi-sidebar-width', 256, 200, 420)
+  // 悬浮侧栏展开/收起（持久化）；onToggle 身份稳定，配合 Sidebar 的 memo
+  const [sidebarOpen, setSidebarOpen] = useState(() => localStorage.getItem('lumi-sidebar-open') !== '0')
+  const toggleSidebar = useCallback(() => setSidebarOpen((o) => !o), [])
+  useEffect(() => {
+    localStorage.setItem('lumi-sidebar-open', sidebarOpen ? '1' : '0')
+  }, [sidebarOpen])
   const bgRailW = useResizableWidth('lumi-bg-width', 340, 280, 560)
   const runsRailW = useResizableWidth('lumi-runs-width', 240, 180, 400)
   const previewW = useResizableWidth('lumi-preview-width', 520, 360, 920)
@@ -398,6 +420,8 @@ export default function App() {
   const fileInputRef = useRef<HTMLInputElement>(null)
   const connsRef = useRef<Record<string, Gateway>>({})
   const activeRef = useRef('')
+  // activate 调用序号：判废晚到的建连结果（openConnection 悬置期间用户切走后不回拽）
+  const activationSeqRef = useRef(0)
   // 会话列表镜像到 ref：切会话时据此查它所属项目（workspace_dir），随 switch 下发让后端切 cwd
   const sessionsRef = useRef<SessionMeta[]>([])
   // 本窗口手动命名过的会话 key：session.title 广播与手动重命名竞态时，
@@ -694,7 +718,7 @@ export default function App() {
   // 为某会话建立一条独立 WS 连接（每会话一条，互不阻塞）。targetThread=null 为新会话。
   const openConnection = useCallback(
     (targetThread: string | null, targetWorkspace = '', backendId = 'local'): Promise<string> => {
-      return new Promise((resolve) => {
+      return new Promise<string>((resolve) => {
         void (async () => {
           const { wsUrl } = await window.lumi.getConnection(backendId)
           // open 握手携带 workspace：后端据此把本会话引擎直接 pin 到该项目（项目随会话
@@ -718,11 +742,18 @@ export default function App() {
           // 本连接所属会话的复合 key（backend+thread）——store/connsRef/folderStore 皆以此为键；
           // 发给后端的 wire 仍用裸 thread（myThread）。
           const targetKey = targetThread ? sessionKey(backendId, targetThread) : ''
+          // 创建即登记（不等 ready）：快速连点同一会话时 activate 的复用分支能立即命中，
+          // 不会开出重复连接；boot 清理也能收殓在途连接。死连接由 activate 驱逐后重建。
+          if (targetKey) connsRef.current[targetKey] = gw
           let myThread = ''
           let myKey = ''
           // 本连接所属项目；重连得到全新 bridge 后据此切回原 thread + 重放临时目录
           let myWorkspace = ''
           let ready = false
+          // 历史是否已成功加载：初次加载被瞬断打断时保持 false，重连后补拉
+          let loaded = false
+          // 补拉在途标记：防抖动连接下多个 ready 并发重复 loadHistory
+          let loadingHistory = false
           gw.onEvent((ev) => {
             if (ev.type === 'gateway.ready') {
               setModel((m) => m || ev.payload.model || '')
@@ -736,6 +767,21 @@ export default function App() {
                   void gw.switchSession(myThread, myWorkspace)
                   for (const f of folderStoreRef.current[myKey] ?? []) {
                     void gw.addFolder(f)
+                  }
+                  // 初次历史加载被瞬断打断：重连后补拉（成功才置 loaded，失败留给下次重连；
+                  // loading 挡抖动连接下的并发重复补拉）
+                  if (!loaded && !loadingHistory) {
+                    loadingHistory = true
+                    void gw
+                      .loadHistory(myThread)
+                      .then((r) => {
+                        loaded = true
+                        setStore((s) => (s[myKey] ? { ...s, [myKey]: hydrateHistory(s[myKey], r) } : s))
+                      })
+                      .catch(() => {})
+                      .finally(() => {
+                        loadingHistory = false
+                      })
                   }
                   // 复位运行态：断连时 sendMessage 的 catch 已 resetRunning(false)，续接后
                   // 据后端实际运行态恢复 running（否则挂起轮被当空闲，stop 隐藏/输入栏启用）。
@@ -757,34 +803,39 @@ export default function App() {
                 // 已有会话：切到该 thread 并加载历史。switchSession 可能因项目目录已被删/改名
                 // 而被后端拒（set_workspace 抛错）；必须吞掉，否则 Promise 永不 resolve、会话卡死。
                 void (async () => {
-                  // 先占位 store 并挂好 connsRef：使续接重发的审批卡有处可落（否则在
-                  // loadHistory 完成前到达会被事件处理器的 `if (!s) return` 丢弃）。
-                  connsRef.current[targetKey] = gw
+                  // 先占位 store：使续接重发的审批卡有处可落（否则在 loadHistory
+                  // 完成前到达会被事件处理器的 `if (!s) return` 丢弃）。
                   setStore((s) => ({ ...s, [targetKey]: s[targetKey] ?? emptySession() }))
+                  // 身份先行：下方 await 可能因瞬断 reject（sidecar 重启窗口），若身份
+                  // 未落，重连分支认不回本会话、resolve 永不调用，会话将永久空白。
+                  myThread = targetThread
+                  myKey = targetKey
+                  myWorkspace = targetWorkspace
+                  gw.bindThread(targetThread)
                   try {
                     await gw.switchSession(targetThread, targetWorkspace)
                   } catch {
                     /* 目录失效等：仍打开会话（后端已降级，不切 cwd） */
                   }
-                  const r = await gw.loadHistory(targetThread)
-                  myThread = targetThread
-                  myKey = targetKey
-                  myWorkspace = targetWorkspace
-                  gw.bindThread(targetThread)
-                  // 引擎已在 open 握手 pin 到本会话项目；同步当前项目指示
-                  if (targetWorkspace) setWorkspaceDir(targetWorkspace)
-                  // 合并：填入历史 items，但保留续接期间已落入的审批/澄清队列；running 据
-                  // 后端运行态恢复（续接的挂起轮要显示运行态，否则被当空闲）。
-                  setStore((s) => ({
-                    ...s,
-                    [targetKey]: {
-                      ...(s[targetKey] ?? emptySession()),
-                      items: r.items.map(restore),
-                      running: !!ev.payload.running,
-                      // 还原上下文用量指示器：usage 仅存前端内存，切会话/重启后靠历史末条补回
-                      ctx: ctxFromUsage(r.usage) ?? s[targetKey]?.ctx,
-                    },
-                  }))
+                  try {
+                    const r = await gw.loadHistory(targetThread)
+                    loaded = true
+                    // 引擎已在 open 握手 pin 到本会话项目；同步当前项目指示
+                    if (targetWorkspace) setWorkspaceDir(targetWorkspace)
+                    // 水合历史（保留续接期间已落入的审批/澄清队列与流式在途内容）；
+                    // running 据后端运行态恢复（续接的挂起轮要显示运行态，否则被当空闲）。
+                    setStore((s) => ({
+                      ...s,
+                      [targetKey]: {
+                        ...hydrateHistory(s[targetKey] ?? emptySession(), r),
+                        running: !!ev.payload.running,
+                      },
+                    }))
+                  } catch {
+                    /* 瞬断等：历史未加载（loaded=false），重连 ready 分支补拉 */
+                  }
+                  // UI 已乐观切到本会话，连接问题由指示灯呈现；无论成败都 resolve，
+                  // 不让 activate 悬置
                   resolve(targetKey)
                 })()
               } else {
@@ -793,6 +844,7 @@ export default function App() {
                 myThread = ev.session_id ?? ''
                 myKey = sessionKey(backendId, myThread)
                 myWorkspace = ev.payload.workspace || ''
+                loaded = true // 新会话无历史可拉，重连分支不做补拉覆盖
                 gw.bindThread(myThread) // 重连携带 ?thread= → 后端断连续接
                 connsRef.current[myKey] = gw
                 setStore((s) => ({ ...s, [myKey]: emptySession() }))
@@ -902,7 +954,8 @@ export default function App() {
   const hasRunningBg = activeBgTasks.some((tk) => tk.status === 'running')
   const isMacTitleBar = (window.lumi.platform ?? 'win32') === 'darwin'
   const showBgTaskToggle = view === 'chat' && activeBgTasks.length > 0
-  const showTopStrip = isMacTitleBar || showBgTaskToggle
+  // 侧栏收起时也保留顶条：给浮钮组（展开/新对话）让出高度，避免盖住页面内容
+  const showTopStrip = isMacTitleBar || showBgTaskToggle || !sidebarOpen
 
   // 跨机器 fan-out：对每台机器的控制连接各拉一次 list_sessions，打上机器标记后合并。
   // 某机器离线只跳过它，不影响其它机器（方案甲多机并存的合并列表）。
@@ -950,18 +1003,7 @@ export default function App() {
     connsRef.current[key]
       ?.loadHistory(threadId)
       .then((r) =>
-        setStore((s) =>
-          s[key]
-            ? {
-                ...s,
-                [key]: {
-                  ...s[key],
-                  items: r.items.map(restore),
-                  ctx: ctxFromUsage(r.usage) ?? s[key].ctx,
-                },
-              }
-            : s,
-        ),
+        setStore((s) => (s[key] ? { ...s, [key]: hydrateHistory(s[key], r) } : s)),
       )
       .catch(() => {})
   }, [])
@@ -1240,25 +1282,41 @@ export default function App() {
     async (target: string | null, workspace = '', backend = 'local') => {
       // key = 会话前端身份（backend+thread）；target 为裸 thread（新会话时 null）
       let key = target ? sessionKey(backend, target) : ''
+      // 乐观切换：建连可能长时间悬置（openConnection 只在 ready 时 resolve——
+      // sidecar 重启/离线期间既不成功也不失败），先把 UI 落到目标会话（空内容 +
+      // 黄灯示意），避免 view 已切、active 未动的脱节（如 cron 视图残留渲染成普通聊天）。
+      // 晚到的建连结果经 seq 判废弃：用户已切走时不回拽视图。
+      const seq = ++activationSeqRef.current
+      if (key) {
+        setActive(key)
+        setPreview(null)
+      }
+      // 死连接驱逐：failed / 主动关闭的连接不再自愈，占着 key 会让复用分支永远拿到死连接
+      if (key && connsRef.current[key]?.dead) delete connsRef.current[key]
       if (!key || !connsRef.current[key]) {
         // 建立期间以 connecting 示意（sidecar 不可用时指示灯保持黄色而非静默无反应）
         setConn('connecting')
         key = await openConnection(target, workspace, backend)
+        if (activationSeqRef.current !== seq) return key
       } else {
         if (workspace) {
           // 已连会话：进程 cwd 可能被别的会话改过，重发带 workspace 的 switch 切回本会话项目
           void connsRef.current[key].switchSession(target!, workspace)
         }
         // 渠道会话没有自己的流式事件，后台期间的轮次不会写入缓存 store；
-        // channel.activity 又只在「正在旁观」时重载——切回时必须重拉历史，否则永远是旧账
+        // channel.activity 又只在「正在旁观」时重载——切回时必须重拉历史，否则永远是旧账。
+        // store 为空也重拉（自愈）：初次加载若被后端悬挂吞掉（无 reject、连接未断，
+        // loaded 补拉不会触发），旧逻辑下再点多少次都停在空白，只能重载应用
         const meta = sessionsRef.current.find(
           (s) => s.thread_id === target && beOf(s) === backend,
         )
-        if (meta?.channel) reloadHistory(key, target!)
+        if (meta?.channel || !storeRef.current[key]?.items.length) reloadHistory(key, target!)
       }
       if (workspace) setWorkspaceDir(workspace)
       setActive(key) // activeBackend 从 active 派生，无需单独设
-      setConn('open')
+      // 按连接真实状态点灯：openConnection 失败路径也会 resolve（乐观切换契约），
+      // 硬编码 'open' 会在连接实际已断时点亮假绿灯
+      setConn(connsRef.current[key]?.state ?? 'open')
       setPreview(null) // 切会话关掉预览，避免上个会话的文件残留
       return key
     },
@@ -1836,8 +1894,10 @@ export default function App() {
           onHover={setCmdSel}
         />
       )}
+      {/* 聚焦描边在 index.css 的 .composer-glass:focus-within（非分层规则），
+          在此加 focus-within: 工具类会被它压过、不生效 */}
       <div
-        className="bg-surface rounded-3xl border border-line/40 focus-within:border-primary/40 transition-colors overflow-hidden"
+        className="composer-glass rounded-3xl transition-colors overflow-hidden"
         onDragOver={(e) => e.preventDefault()}
         onDrop={onDropFiles}
       >
@@ -1972,9 +2032,16 @@ export default function App() {
       {!isMacTitleBar && (
         <AppTitleBar onNewChat={startNewChat} onOpenSettings={openSettings} />
       )}
-      <div className="min-h-0 flex-1 flex">
+      <div className="relative min-h-0 flex-1 flex">
+      {/* 悬浮侧栏占位：宽度动画（侧栏本体绝对定位于其中，收起时向左滑出） */}
+      <div
+        className="relative shrink-0 transition-[width] duration-300 ease-out"
+        style={{ width: sidebarOpen ? sidebarW.width + FLOAT_GAP * 2 : 0 }}
+      >
       <Sidebar
         width={sidebarW.width}
+        open={sidebarOpen}
+        onToggle={toggleSidebar}
         showTitleDrag={isMacTitleBar}
         sessions={sessions}
         sessionsLoaded={sessionsLoaded}
@@ -2005,26 +2072,53 @@ export default function App() {
         onRename={renameSession}
         onDelete={setPendingDelete}
       />
-      <ResizeHandle {...sidebarW} edge="right" />
+      </div>
+      {/* shift 把把手从占位容器边缘贴回悬浮面板的可见右缘 */}
+      {sidebarOpen && <ResizeHandle {...sidebarW} edge="right" shift={-FLOAT_GAP} />}
 
       <main className="flex-1 flex flex-col min-w-0">
         {showTopStrip && (
-          <div className={`${isMacTitleBar ? 'h-9 app-drag' : 'h-10'} shrink-0 flex items-center justify-end pr-3`}>
+          // 拖拽区与按钮区并排分离（互不重叠的矩形）：不在 drag 大条上给按钮挖洞——
+          // 洞依赖 Chromium 的区域重采样，实测会因动画/布局时序失效导致按钮下半不可点。
+          // 高度不做过渡，同为让区域采样一步到位。
+          // mac 红绿灯固定在 (26,20)，钮与其中心线（y=28）对齐。
+          <div
+            className={`${isMacTitleBar ? (sidebarOpen ? 'h-9' : 'h-14') : 'h-10'} shrink-0 flex items-stretch`}
+          >
+            {!sidebarOpen && (
+              // titlebar-interactive 见 index.css（macOS 26 命中偏移的合成层修复）；
+              // pl-[100px] 让开红绿灯（坐标见 main.cjs trafficLightPosition，改灯位需同步）
+              <div className={`titlebar-interactive flex items-center ${isMacTitleBar ? 'pl-[100px]' : 'pl-3'}`}>
+                <Button
+                  variant="ghost"
+                  size="icon-sm"
+                  onClick={toggleSidebar}
+                  title={t('sidebar.expand')}
+                  className="-translate-y-px text-muted-foreground hover:text-ink"
+                >
+                  <PanelLeft />
+                </Button>
+              </div>
+            )}
+            {/* 中段纯拖拽条：独立矩形，与按钮区互不重叠，无需挖洞 */}
+            <div className={`flex-1 ${isMacTitleBar ? 'app-drag' : ''}`} />
             {showBgTaskToggle && (
-              <button
+              <div className="titlebar-interactive flex items-center pr-3">
+              <Button
+                variant="ghost"
+                size="icon-sm"
                 onClick={() => setBgDrawerOpen((o) => !o)}
                 title={t('bg.title')}
-                className={`no-drag relative grid place-items-center w-7 h-7 rounded-lg transition-colors ${
-                  bgDrawerOpen
-                    ? 'text-primary'
-                    : 'text-muted-foreground hover:text-ink hover:bg-white/5'
+                className={`relative ${
+                  bgDrawerOpen ? 'text-primary' : 'text-muted-foreground hover:text-ink'
                 }`}
               >
-                <PanelRight size={17} />
+                <PanelRight />
                 {hasRunningBg && (
                   <span className="absolute top-1 right-1 w-1.5 h-1.5 rounded-full bg-primary animate-pulse" />
                 )}
-              </button>
+              </Button>
+              </div>
             )}
           </div>
         )}
@@ -2059,6 +2153,12 @@ export default function App() {
                 // 任务还没有可查看的执行会话：显示空态，避免把消息误发进无关会话
                 <div className="flex-1 grid place-items-center text-sm text-muted-foreground select-none">
                   {t('cron.noRuns')}
+                </div>
+              ) : view === 'cronjob' && !hasMessages ? (
+                // 乐观切换后历史尚未加载：占位而非欢迎页——欢迎页带可编辑输入框，
+                // 手快会把消息误发进定时任务执行线程
+                <div className="flex-1 grid place-items-center text-sm text-muted-foreground select-none">
+                  {t('chat.loading')}
                 </div>
               ) : hasMessages ? (
                 <>
@@ -2165,7 +2265,7 @@ export default function App() {
             {view === 'chat' && (
               <>
                 {bgDrawerOpen && activeBgTasks.length > 0 && (
-                  <ResizeHandle {...bgRailW} edge="left" />
+                  <ResizeHandle {...bgRailW} edge="left" shift={FLOAT_GAP} />
                 )}
                 <BgTasksDrawer
                   tasks={activeBgTasks}

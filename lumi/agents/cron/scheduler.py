@@ -19,10 +19,10 @@ from typing import IO
 from apscheduler.jobstores.base import JobLookupError
 from apscheduler.schedulers.asyncio import AsyncIOScheduler
 from apscheduler.triggers.date import DateTrigger
-from langchain_core.messages import HumanMessage
 from langchain_core.runnables.config import RunnableConfig
 from langgraph.checkpoint.base import BaseCheckpointSaver
 
+from lumi.agents.core.meta_message import synthetic_human_message
 from lumi.agents.cron.compensation import should_compensate
 from lumi.agents.cron.delivery import DeliveryManager
 from lumi.agents.cron.job_runner import extract_output
@@ -428,7 +428,9 @@ class Scheduler:
             # cron 无交互审批通道，固定 privileged（tool_mode 是 context 属性）
             context.tool_mode = "privileged"
             inputs = {
-                "messages": [HumanMessage(content=job.prompt)],
+                # 合成消息（items: []）：任务 prompt 是机器注入的指令而非用户发言，
+                # run 视图不显示；prompt 本体在任务详情页可见
+                "messages": [synthetic_human_message(job.prompt)],
             }
             config = RunnableConfig(
                 recursion_limit=get_config().config.agents.recursion_limit,

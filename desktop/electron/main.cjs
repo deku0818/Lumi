@@ -66,11 +66,13 @@ function packagedBackend() {
 function startSidecar(port) {
   const dev = !app.isPackaged
   const cmd = dev ? 'uv' : packagedBackend()
-  const args = dev
-    ? ['run', 'lumi', 'serve', '--port', String(port), '--token', LOCAL_TOKEN]
-    : ['serve', '--port', String(port), '--token', LOCAL_TOKEN]
+  // --exit-with-parent + stdin 管道：本进程死亡（含崩溃/强杀）时 OS 关闭管道，
+  // sidecar 读到 stdin EOF 自退——否则孤儿 sidecar 会与新实例抢同一 checkpoint
+  // 数据库，会话读写悬挂表现为「会话打不开」
+  const serveArgs = ['serve', '--port', String(port), '--token', LOCAL_TOKEN, '--exit-with-parent']
+  const args = dev ? ['run', 'lumi', ...serveArgs] : serveArgs
   // PYTHONUNBUFFERED：PyInstaller 产物 stdout 接管道时块缓冲，日志会滞留到进程退出才刷出
-  const opts = { env: { ...process.env, PYTHONUNBUFFERED: '1' }, stdio: ['ignore', 'pipe', 'pipe'] }
+  const opts = { env: { ...process.env, PYTHONUNBUFFERED: '1' }, stdio: ['pipe', 'pipe', 'pipe'] }
   if (dev) opts.cwd = PROJECT_ROOT
   serveProc = spawn(cmd, args, opts)
   serveProc.stdout.on('data', (d) => process.stdout.write(`[lumi serve] ${d}`))
@@ -199,8 +201,15 @@ function createWindow() {
     autoHideMenuBar: !isMac,
     ...(isMac
       ? {
-          titleBarStyle: 'hiddenInset',
-          trafficLightPosition: { x: 16, y: 16 },
+          // hidden / hiddenInset 视觉一致（红绿灯位置由下方显式坐标控制）。
+          // 注意：标题栏高度带内 ~14px 的鼠标命中错位（electron#40874/#21632 家族）
+          // 与本选项无关——真正的修复是前端 .titlebar-interactive 的合成层提升，
+          // 换回 hiddenInset 也不会复发
+          titleBarStyle: 'hidden',
+          // 固定位置（学 macOS 天气不随侧栏展开/收起迁移）：展开时落在悬浮侧栏内部
+          // （面板内缩 10px、避开圆角）。y 比按钮中心线（28）偏上取 20：原生灯珠的
+          // 视觉重心低于几何中心，数学对齐反而显矮，按用户目感上提 2px
+          trafficLightPosition: { x: 26, y: 20 },
         }
       : {
           frame: false,
@@ -366,6 +375,14 @@ ipcMain.handle('lumi:window:is-maximized', (event) => {
 ipcMain.handle('lumi:menu-command', (event, command) => {
   runMenuCommand(event.sender, command)
 })
+
+// 单实例锁：双开（Windows 双击两次 / mac open -n）会各拉一个 sidecar 抢同一
+// checkpoint 数据库，读写悬挂表现为「会话打不开」。抢锁失败 = 已有实例在跑，
+// 立即退出；已有实例收到 second-instance 事件把自己带回前台。
+if (!app.requestSingleInstanceLock()) {
+  app.exit(0)
+}
+app.on('second-instance', focusMainWindow)
 
 app.whenReady().then(async () => {
   // 只放行 local-fonts：让 renderer 的 queryLocalFonts() 枚举本机字体（设置→界面字体）。

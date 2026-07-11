@@ -17,6 +17,8 @@ type Dict = Record<string, string>
 
 const ZH: Dict = {
   'sidebar.newChat': '新对话',
+  'sidebar.collapse': '收起侧栏',
+  'sidebar.expand': '展开侧栏',
   'sidebar.reconnect': '重连',
   'sidebar.offline': '连接已断开，设备可能离线',
   'sidebar.connecting': '连接中…',
@@ -71,6 +73,7 @@ const ZH: Dict = {
   'composer.removeAttachment': '移除附件',
   'composer.attachFailed': '无法附加文件（取不到路径）',
   'chat.toBottom': '回到底部',
+  'chat.loading': '加载中…',
   'ctx.title': '上下文用量',
   'ctx.input': '输入',
   'ctx.output': '输出',
@@ -310,6 +313,8 @@ const ZH: Dict = {
 
 const EN: Dict = {
   'sidebar.newChat': 'New chat',
+  'sidebar.collapse': 'Collapse sidebar',
+  'sidebar.expand': 'Expand sidebar',
   'sidebar.reconnect': 'Reconnect',
   'sidebar.offline': 'Disconnected · device may be offline',
   'sidebar.connecting': 'Connecting…',
@@ -364,6 +369,7 @@ const EN: Dict = {
   'composer.removeAttachment': 'Remove attachment',
   'composer.attachFailed': "Couldn't attach file (no path available)",
   'chat.toBottom': 'Scroll to bottom',
+  'chat.loading': 'Loading…',
   'ctx.title': 'Context usage',
   'ctx.input': 'Input',
   'ctx.output': 'Output',
