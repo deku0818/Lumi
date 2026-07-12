@@ -75,3 +75,20 @@ async def test_unregister_stops_delivery():
     await asyncio.sleep(0.01)
 
     assert ch.frames == []
+
+
+async def test_mcp_status_only_reaches_bound_channels():
+    """mcp.status 定向广播：注册时声明 mcp_key 的连接按池 key 匹配投递，
+    未声明（如未来 IM channel）或绑定别的池的连接一律收不到。"""
+    hub = BroadcastHub()
+    bound, other, unbound = _FakeChannel(), _FakeChannel(), _FakeChannel()
+    hub.register(bound, mcp_key=lambda: "/p/X")
+    hub.register(other, mcp_key=lambda: "/p/Y")
+    hub.register(unbound)
+
+    hub.on_mcp_status({"project": "/p/X", "servers": []})
+    await asyncio.sleep(0.01)
+
+    assert len(_events_of(bound, "mcp.status")) == 1
+    assert _events_of(other, "mcp.status") == []
+    assert _events_of(unbound, "mcp.status") == []

@@ -85,7 +85,10 @@ def _make_runtime(depth: int) -> SimpleNamespace:
         state={"depth": depth},
         # tool_mode 已移家 context（子 agent 从父 context.tool_mode 继承）
         context=SimpleNamespace(
-            permission_engine=None, approval_broker=None, tool_mode="default"
+            permission_engine=None,
+            approval_broker=None,
+            tool_mode="default",
+            project_dir=None,
         ),
     )
 
@@ -98,9 +101,9 @@ async def test_refuses_when_at_depth_limit() -> None:
 
 
 def _patch_agent_internals(captured: dict):
-    """patch agent 工具的重依赖：load_agents / registry / create_agent / run_with_shell。"""
+    """patch agent 工具的重依赖：load_agents / get_tools / create_agent / run_with_shell。"""
 
-    async def fake_get_tools(names=None):
+    async def fake_get_tools(tools=None, project_dir=None, **kwargs):
         return [_FakeTool("agent"), _FakeTool("bash")]
 
     async def fake_ainvoke(inputs, context=None):
@@ -122,8 +125,8 @@ def _patch_agent_internals(captured: dict):
             return_value=[cfg],
         ),
         patch(
-            "lumi.agents.tools.providers.agent.get_tool_registry",
-            return_value=SimpleNamespace(get_tools=fake_get_tools),
+            "lumi.agents.tools.get_tools",
+            side_effect=fake_get_tools,
         ),
         patch("lumi.agents.core.graph.create_agent", side_effect=fake_create_agent),
         patch(

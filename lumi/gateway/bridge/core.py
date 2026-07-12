@@ -37,7 +37,12 @@ from lumi.agents.runtime.bg_tasks import (
 from lumi.agents.runtime.checkpoint import CheckpointInfo, FileCheckpointManager
 from lumi.agents.runtime.file_tracker import FileChangeTracker
 from lumi.agents.runtime.shell_session import get_shell_session_manager
-from lumi.agents.tools.providers.mcp import close_all_pools, pool_generation
+from lumi.agents.tools.providers.mcp import (
+    close_all_pools,
+    get_pool_status,
+    pool_generation,
+    project_wire_key,
+)
 from lumi.gateway.bridge.approval import ApprovalEnricher
 from lumi.gateway.bridge.broker import LUMI_APPROVAL_EVENT, ApprovalBroker
 from lumi.gateway.bridge.checkpoint import CheckpointService
@@ -215,7 +220,10 @@ class AgentBridge:
         self._folders = FolderManager(self)
 
     async def initialize(
-        self, project_dir: str = "", disabled_tools: list[str] | None = None
+        self,
+        project_dir: str = "",
+        disabled_tools: list[str] | None = None,
+        wait_mcp: bool = False,
     ) -> None:
         """初始化 Agent。
 
@@ -223,6 +231,8 @@ class AgentBridge:
         引擎在创建时直接 pin 到它，无需后续 set_workspace rebase；为空 / 无效退回进程
         cwd。项目随会话绑定，不动进程级状态。
         disabled_tools：本会话禁用的工具黑名单（如飞书 channel 禁用 ``ask``）；None 时全量。
+        wait_mcp：冷 MCP 池时是否等它就绪。交互会话默认 False（非阻塞 + 轮首刷新
+        自愈）；headless CLI 单轮即退无自愈，传 True。
         """
         agents_config = get_config().config.agents
         target = Path(project_dir).expanduser().resolve() if project_dir else None
@@ -234,16 +244,9 @@ class AgentBridge:
         # 无条件预算工具，把会话项目根 target 带进 MCP 分层加载（全局 ∪ 项目）；
         # 若只在 disabled_tools 非空时才 get_tools，则常见路径落到 create_agent 内部
         # 无 project_dir 的加载，项目级 MCP 会加载不到。
-        from lumi.agents.tools import get_tools
-
-        # MCP 池后台加载（get_tools 不等它）：记下项目与池版本，轮首据此感知
-        # 「工具已就位/已换代」并重建 context.tools（见 stream_response 的刷新点）。
-        # 基线必须在 get_tools（触发加载）**之前**采样：快 server 可能在 initialize
-        # 剩余耗时内加载完成，事后采样会把基线记成"已加载"，会话就永远不重建了
         self._mcp_project = target
         self._disabled_tools = disabled_tools
-        self._mcp_gen = pool_generation(target)
-        tools = await get_tools(disabled_tools=disabled_tools, project_dir=target)
+        tools = await self._build_tools(wait_mcp=wait_mcp)
         # enable_memory=True：bridge 是唯一面向用户的对话入口，持久记忆只在此处 opt-in
         # （子 agent / workflow / cron 走 create_agent 默认 False，天然不带记忆）。
         self._agent, self._context = await create_agent(
@@ -268,6 +271,51 @@ class AgentBridge:
         logger.info(
             f"[AgentBridge] 初始化完成, model={self.model_name}, thread={thread_id}"
         )
+
+    async def _build_tools(self, wait_mcp: bool = False) -> list:
+        """构建工具列表并记录所建于的 MCP 池版本（initialize 与轮首刷新共用）。
+
+        基线采样固定先于构建、次序封装在本方法内：快 server 可能在构建期间完成
+        加载，事后采样会把基线误记成「已就位」，会话就永远不重建了。
+        """
+        from lumi.agents.tools import get_tools
+
+        self._mcp_gen = pool_generation(self._mcp_project)
+        tools = await get_tools(
+            disabled_tools=self._disabled_tools,
+            project_dir=self._mcp_project,
+            wait_mcp=wait_mcp,
+        )
+        if wait_mcp:
+            # 阻塞路径等池完成时版本号已递增：构建后重采样，否则首轮必误判
+            # 「换代」把刚建好的列表原样重建一遍（采样先行只为非阻塞路径而设）
+            self._mcp_gen = pool_generation(self._mcp_project)
+        return tools
+
+    def retarget_mcp(self, target: Path | None) -> None:
+        """MCP 跟踪随项目切换：改指新项目的池并强制下一轮重建工具列表（重建经
+        get_tools 触发新池后台加载；不改则轮首刷新一直盯着旧项目的池）。"""
+        self._mcp_project = target
+        self._mcp_gen = -1
+        # 子代理/workflow 经 context.project_dir 取父项目——项目状态三份一起切
+        # （bridge 池跟踪 / 权限引擎在 set_workspace 已 rebase / context 快照）
+        if self._context is not None:
+            self._context.project_dir = target
+
+    def mcp_pool_key(self) -> str:
+        """本会话 MCP 池的 wire 标识：mcp.status 按连接过滤的匹配键（与 payload 同源投影）。"""
+        return project_wire_key(self._mcp_project)
+
+    def mcp_status_payload(self) -> dict | None:
+        """本池已完成加载的状态（mcp.status 事件形状）；加载中/无结果返回 None。
+
+        连接注册进广播通道晚于 initialize 触发的后台加载：快速完成的加载（如
+        server 命令拼错毫秒级失败）会在注册前广播、无人接收，注册后据此补发。
+        """
+        status = get_pool_status(self._mcp_project)
+        if status["loading"] or not status["servers"]:
+            return None
+        return {"project": self.mcp_pool_key(), "servers": status["servers"]}
 
     @property
     def current_thread_id(self) -> str:
@@ -735,15 +783,11 @@ class AgentBridge:
 
             # MCP 池后台就位/换代后，轮首重建工具列表（后台加载不阻塞就绪的配套拼图：
             # 会话秒开，工具在池加载完成后的下一轮自然可用；配置作废换代同理）
-            mcp_gen = pool_generation(self._mcp_project)
-            if self._context is not None and mcp_gen != self._mcp_gen:
-                from lumi.agents.tools import get_tools
-
-                self._mcp_gen = mcp_gen
-                self._context.tools = await get_tools(
-                    disabled_tools=self._disabled_tools,
-                    project_dir=self._mcp_project,
-                )
+            if (
+                self._context is not None
+                and pool_generation(self._mcp_project) != self._mcp_gen
+            ):
+                self._context.tools = await self._build_tools()
                 logger.info(
                     "[AgentBridge] MCP 池换代，工具列表已重建（%d 个工具）",
                     len(self._context.tools),

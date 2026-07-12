@@ -156,11 +156,12 @@ async def workflow(
         return "workflow 需要提供 script（内联脚本）或 path（脚本文件路径）之一。"
     name = name or "workflow"
 
-    # 子代理复用父 PermissionEngine（共享工作区边界）、继承父 tool_mode。
+    # 子代理复用父 PermissionEngine（共享工作区边界）、继承父 tool_mode 与项目根。
     engine = WorkflowEngine(
         script,
         permission_engine=runtime.context.permission_engine,
         tool_mode=runtime.context.tool_mode,
+        project_dir=runtime.context.project_dir,
         args=args,
         name=name,
     )

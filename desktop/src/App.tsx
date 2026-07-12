@@ -270,17 +270,21 @@ const ctxFromUsage = (u: Usage | undefined): CtxUsage | undefined => {
   }
 }
 
+// 会话是否有流式在途的 assistant 气泡：历史快照能否整表替换的判据。
+const hasStreaming = (s: SessionState): boolean =>
+  s.items.some((it) => it.kind === 'assistant' && it.streaming)
+
 // loadHistory 结果 → 会话槽位的统一水合（初次加载 / 重连补拉 / 渠道切回三处共用）。
 // 已有流式在途内容时保留现有 items 不覆盖：checkpoint 快照比正在流出的直播轮旧，
-// 整体替换会截断刚流入的助手内容/工具卡。
+// 整体替换会截断刚流入的助手内容/工具卡。调用方置 loaded 前须自查 hasStreaming——
+// 快照被丢弃时置 loaded 会把掉线前的历史永久关在补拉门外。
 function hydrateHistory(
   s: SessionState,
   r: { items: HistoryItem[]; usage?: Usage },
 ): SessionState {
-  const streaming = s.items.some((it) => it.kind === 'assistant' && it.streaming)
   return {
     ...s,
-    items: streaming ? s.items : r.items.map(restore),
+    items: hasStreaming(s) ? s.items : r.items.map(restore),
     ctx: ctxFromUsage(r.usage) ?? s.ctx,
   }
 }
@@ -309,6 +313,11 @@ export default function App() {
   const [model, setModel] = useState('')
   // 进程级工作目录 = 当前项目（gateway.ready 下发；切项目对整个 app 生效）
   const [workspaceDir, setWorkspaceDir] = useState('')
+  // handleEvent（稳定 useCallback）里做 mcp.status 的当前工作区过滤，须经 ref 读最新值
+  const workspaceDirRef = useRef('')
+  useEffect(() => {
+    workspaceDirRef.current = workspaceDir
+  }, [workspaceDir])
   const [projects, setProjects] = useState<Project[]>([])
   // 项目视图作用的机器（方案甲「先选机器」）+ 该机器当前项目
   const [projectsMachine, setProjectsMachine] = useState('local')
@@ -442,7 +451,11 @@ export default function App() {
   const storeRef = useRef<Record<string, SessionState>>({})
   const notifyRef = useRef(notify)
   const tRef = useRef(t)
-  const workspaceDirRef = useRef('')
+  // MCP 失败 toast 去重（`backend:server:error` → 上次弹出时刻）：配置保存→作废→
+  // 重载的连环加载会重播同一失败，60s 内不重复弹
+  const mcpToastAtRef = useRef(new Map<string, number>())
+  // 面板刷新信号合并：同一池的广播每条绑定连接各收一帧，微任务尾只发一次
+  const mcpSignalQueuedRef = useRef(false)
   // 临时目录是连接级（bridge 内存）状态：重连得到全新 bridge 后需重放，故镜像到 ref
   const folderStoreRef = useRef<Record<string, string[]>>({})
 
@@ -510,9 +523,6 @@ export default function App() {
   useEffect(() => {
     tRef.current = t
   })
-  useEffect(() => {
-    workspaceDirRef.current = workspaceDir
-  }, [workspaceDir])
 
   // 每个会话的活动态，喂给侧栏显示圆点：attention=等你处理（审批/澄清），running=处理中。
   // store 每个流式 token 都换新身份，内容不变时复用上一个对象，避免 Sidebar 每 token 重渲染。
@@ -542,6 +552,30 @@ export default function App() {
     // cron 事件是进程级广播（与会话无关），在 session 路由之前单独处理
     if (type === 'cron.running') {
       setCronRunning(payload.names ?? [])
+      return
+    }
+    // MCP 池后台加载完成：服务端已按连接过滤（只有绑定该池的连接收到），但后台项目
+    // 会话的常驻连接仍会收到自己池的失败——失败 toast 只对当前工作区弹（"" = 全局池
+    // 恒相关；别的项目的失败在 MCP 面板可见，跨项目弹红是纯噪音），60s 去重；
+    // 面板刷新的 window 信号则无条件发（面板可能正浏览任意项目）
+    if (type === 'mcp.status') {
+      if (!payload.project || payload.project === workspaceDirRef.current) {
+        const now = Date.now()
+        for (const s of payload.servers ?? []) {
+          if (s.ok) continue
+          const k = `${backend}:${s.name}:${s.error ?? ''}`
+          if (now - (mcpToastAtRef.current.get(k) ?? 0) < 60_000) continue
+          mcpToastAtRef.current.set(k, now)
+          toast.error(tRef.current('mcp.serverFailed', { name: s.name, error: s.error ?? '' }))
+        }
+      }
+      if (!mcpSignalQueuedRef.current) {
+        mcpSignalQueuedRef.current = true
+        queueMicrotask(() => {
+          mcpSignalQueuedRef.current = false
+          window.dispatchEvent(new CustomEvent('lumi:mcp-status'))
+        })
+      }
       return
     }
     // 后台任务变更：本机进程级快照广播，只替换本机那一段（保留别机的），前端按 thread + backend 过滤展示
@@ -754,10 +788,37 @@ export default function App() {
           // 本连接所属项目；重连得到全新 bridge 后据此切回原 thread + 重放临时目录
           let myWorkspace = ''
           let ready = false
-          // 历史是否已成功加载：初次加载被瞬断打断时保持 false，重连后补拉
+          // 历史是否已成功加载并应用：初次加载被瞬断打断、或快照因流式在途被
+          // hydrateHistory 丢弃时保持 false，重连 ready / 轮次收尾时补拉
           let loaded = false
           // 补拉在途标记：防抖动连接下多个 ready 并发重复 loadHistory
           let loadingHistory = false
+          // 历史快照统一落位（初次加载 / 补拉共用）：无流式在途 = hydrateHistory
+          // 会真正应用快照，此时才算加载完成——被丢弃时置 loaded 会把掉线前的
+          // 历史永久关在补拉门外
+          const applySnapshot = (
+            key: string,
+            r: { items: HistoryItem[]; usage?: Usage },
+            patch: Partial<SessionState> = {},
+          ) => {
+            setStore((s) => {
+              const cur = s[key]
+              if (!cur) return s
+              if (!hasStreaming(cur)) loaded = true
+              return { ...s, [key]: { ...hydrateHistory(cur, r), ...patch } }
+            })
+          }
+          const backfillHistory = () => {
+            if (loaded || loadingHistory || !myThread) return
+            loadingHistory = true
+            void gw
+              .loadHistory(myThread)
+              .then((r) => applySnapshot(myKey, r))
+              .catch(() => {})
+              .finally(() => {
+                loadingHistory = false
+              })
+          }
           gw.onEvent((ev) => {
             if (ev.type === 'gateway.ready') {
               setModel((m) => m || ev.payload.model || '')
@@ -772,21 +833,8 @@ export default function App() {
                   for (const f of folderStoreRef.current[myKey] ?? []) {
                     void gw.addFolder(f)
                   }
-                  // 初次历史加载被瞬断打断：重连后补拉（成功才置 loaded，失败留给下次重连；
-                  // loading 挡抖动连接下的并发重复补拉）
-                  if (!loaded && !loadingHistory) {
-                    loadingHistory = true
-                    void gw
-                      .loadHistory(myThread)
-                      .then((r) => {
-                        loaded = true
-                        setStore((s) => (s[myKey] ? { ...s, [myKey]: hydrateHistory(s[myKey], r) } : s))
-                      })
-                      .catch(() => {})
-                      .finally(() => {
-                        loadingHistory = false
-                      })
-                  }
+                  // 初次历史加载被瞬断打断：重连后补拉（真正应用才置 loaded，失败留给下次触发）
+                  backfillHistory()
                   // 复位运行态：断连时 sendMessage 的 catch 已 resetRunning(false)，续接后
                   // 据后端实际运行态恢复 running（否则挂起轮被当空闲，stop 隐藏/输入栏启用）。
                   setStore((s) =>
@@ -823,18 +871,11 @@ export default function App() {
                   }
                   try {
                     const r = await gw.loadHistory(targetThread)
-                    loaded = true
                     // 引擎已在 open 握手 pin 到本会话项目；同步当前项目指示
                     if (targetWorkspace) setWorkspaceDir(targetWorkspace)
                     // 水合历史（保留续接期间已落入的审批/澄清队列与流式在途内容）；
                     // running 据后端运行态恢复（续接的挂起轮要显示运行态，否则被当空闲）。
-                    setStore((s) => ({
-                      ...s,
-                      [targetKey]: {
-                        ...hydrateHistory(s[targetKey] ?? emptySession(), r),
-                        running: !!ev.payload.running,
-                      },
-                    }))
+                    applySnapshot(targetKey, r, { running: !!ev.payload.running })
                   } catch {
                     /* 瞬断等：历史未加载（loaded=false），重连 ready 分支补拉 */
                   }
@@ -856,6 +897,11 @@ export default function App() {
               }
             } else {
               handleEvent(ev, backendId)
+              // 补拉曾因流式在途被丢弃（loaded 仍 false）：轮次收尾后流式气泡已收，
+              // 快照可安全整表替换，此时重试把掉线前的历史找回来
+              if ((ev.type === 'turn.complete' || ev.type === 'error') && !loaded) {
+                backfillHistory()
+              }
             }
           })
           gw.onState((st) => {
@@ -1127,21 +1173,9 @@ export default function App() {
               patchSession(thread_id, backend, { title })
             }
           }
-          // MCP 池后台加载完成（进程级广播，控制连接消费天然去重）：
-          // 只对当前工作区（或全局池）的失败 toast——别的项目/会话加热的池与用户无关，
-          // 跨项目弹红是纯噪音。面板经 window 信号即时刷徽标（打开时才挂监听）。
+          // MCP 池加载完成（服务端已按连接过滤，控制连接只收全局池的）：与会话连接共用处理
           if (ev.type === 'mcp.status') {
-            const mine = !ev.payload.project || ev.payload.project === workspaceDirRef.current
-            if (mine) {
-              for (const s of ev.payload.servers) {
-                if (!s.ok) {
-                  toast.error(
-                    tRef.current('mcp.serverFailed', { name: s.name, error: s.error ?? '' }),
-                  )
-                }
-              }
-            }
-            window.dispatchEvent(new CustomEvent('lumi:mcp-status'))
+            handleEvent(ev, backend)
           }
         })
         gw.onState((st) => setMachineConn((m) => ({ ...m, [backend]: st })))

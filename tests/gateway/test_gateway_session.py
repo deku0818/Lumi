@@ -53,6 +53,8 @@ class FakeBridge:
         self.current_thread_id = "t-1"
         self.model_name = "fake-model"
         self.workspace_dir = "/fake/project"  # 项目随会话绑定后 gateway.ready 取它
+        self.mcp_pool_key = lambda: "/fake/project"  # mcp.status 按连接过滤的匹配键
+        self.mcp_status_payload = lambda: None  # 无已完成的池加载：注册后不补发
         self._events = events or []
         self._notifications = list(notifications or [])
         self.closed = False

@@ -3,7 +3,7 @@ import { Bot, Boxes, Check, ChevronDown, Square, SquareTerminal, X } from 'lucid
 import type { LucideIcon } from 'lucide-react'
 import type { BgTask, BgTaskKind, BgTaskProgress } from '../types'
 import { useI18n } from '../i18n'
-import { FLOAT_GAP } from '@/lib/utils'
+import { CARD_L2, FLOAT_GAP } from '@/lib/utils'
 
 const isTerminal = (t: BgTask): boolean => t.status !== 'running'
 
@@ -93,7 +93,7 @@ function TaskCard({
   const running = task.status === 'running'
   const terminal = isTerminal(task)
   return (
-    <div className="group border border-line/60 rounded-lg bg-surface/50 overflow-hidden">
+    <div className={`group ${CARD_L2} overflow-hidden`}>
       {/* 卡头是可点的折叠开关（div 而非 button，以容纳内部的移除 button） */}
       <div
         onClick={onToggle}

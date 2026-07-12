@@ -300,6 +300,7 @@ async def _run_dream_fork(
     from lumi.agents.tools import get_tools
 
     async with dream_lock.project_lock(project_dir):
+        # dream 白名单全是内建工具：get_tools 的覆盖检查自动免等 MCP 冷池
         dream_tools = await get_tools(tools=list(_DREAM_TOOL_NAMES))
         # enable_memory=True：create_agent 自行组装含记忆指令的 system_prompt（与主 agent
         # 同构，不重复追加）。独立 PermissionEngine（None 时按 project_dir 新建）。

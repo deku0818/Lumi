@@ -7,6 +7,8 @@ agents 层只定义 ResultDelivery 抽象。
 
 from __future__ import annotations
 
+from collections.abc import Callable
+
 from lumi.agents.cron.delivery import ResultDelivery
 from lumi.agents.cron.run_log import RunRecord
 from lumi.gateway.protocol import event_frame
@@ -24,21 +26,38 @@ class DesktopDelivery(ResultDelivery):
     """
 
     def __init__(self) -> None:
-        # 任何带 async send(dict) 的传输对象（Channel，如 WsChannel）
-        self._channels: set = set()
+        # channel（任何带 async send(dict) 的传输对象，如 WsChannel）→ 其绑定的
+        # MCP 池 key 回调（None = 未声明绑定，收不到 mcp.status 定向广播）
+        self._channels: dict[object, Callable[[], str] | None] = {}
 
-    def register(self, channel) -> None:
-        """注册一条活跃连接（Channel）。"""
-        self._channels.add(channel)
+    def register(self, channel, mcp_key: Callable[[], str] | None = None) -> None:
+        """注册一条活跃连接（Channel）。
+
+        mcp_key 声明该连接绑定的 MCP 池（live 回调，随 set_workspace 跟随）——
+        注册即声明，路由元数据与连接同进同出，不靠事后贴属性。
+        """
+        self._channels[channel] = mcp_key
 
     def unregister(self, channel) -> None:
         """注销一条连接（连接断开时调用）。"""
-        self._channels.discard(channel)
+        self._channels.pop(channel, None)
 
-    async def send_event(self, event_type: str, payload: dict) -> None:
-        """向所有活跃连接广播一个 wire 事件，单条连接失败不影响其他连接。"""
+    def mcp_key_of(self, channel) -> Callable[[], str] | None:
+        """channel 注册时声明的池 key 回调（未声明返回 None）。"""
+        return self._channels.get(channel)
+
+    async def send_event(
+        self,
+        event_type: str,
+        payload: dict,
+        match: Callable[[object], bool] | None = None,
+    ) -> None:
+        """向活跃连接广播一个 wire 事件（match 给定时只发匹配的连接），
+        单条连接失败不影响其他连接。"""
         frame = event_frame(event_type, "", payload)
         for channel in list(self._channels):
+            if match is not None and not match(channel):
+                continue
             try:
                 await channel.send(frame)
             except Exception:

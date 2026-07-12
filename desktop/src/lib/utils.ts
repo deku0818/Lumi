@@ -10,6 +10,10 @@ export function cn(...inputs: ClassValue[]) {
 // trafficLightPosition 为唯一事实源（x 由本间距派生、y 含用户目感微调），改这里要同步那边。
 export const FLOAT_GAP = 10
 
+// L2 卡片配方（审批卡 / 后台任务卡共用）：与 SettingsKit 的 Card（L1，设置页容器）
+// 是不同层级的材质——值只此一份，别在组件里手写字面量
+export const CARD_L2 = 'border border-line/60 rounded-lg bg-surface/50'
+
 // 文本截断与路径文件名提取（工具标题 / 计划对话框等共用）
 export const clip = (s: string, n = 72) => (s.length > n ? s.slice(0, n) + '…' : s)
 export const basename = (p: string) => p.split('/').filter(Boolean).pop() || p

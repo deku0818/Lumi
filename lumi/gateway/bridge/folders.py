@@ -36,10 +36,7 @@ class FolderManager:
         if not target.is_dir():
             raise ValueError(f"目录不存在: {target}")
         self.rebase_workspace(target)
-        # MCP 跟踪随项目切换：改指新项目的池，并强制下一轮重建工具列表
-        # （重建经 get_tools 触发新项目池的后台加载；不改则刷新循环一直盯着旧项目）
-        b._mcp_project = target
-        b._mcp_gen = -1
+        b.retarget_mcp(target)
         # checkpoint 元数据跟随新项目（下一轮 checkpoint 用新目录）
         if b._config is not None:
             b._config.setdefault("metadata", {})["workspace_dir"] = b.workspace_dir

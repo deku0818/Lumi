@@ -80,16 +80,9 @@ export function McpPanel({
   // 项目范围但未选项目时不请求（无目标文件）
   const ready = !inProject || !!project
 
-  const reload = useCallback(() => {
-    if (inProject && !project) {
-      setServers({})
-      return
-    }
-    gwFor(machine)
-      ?.listMcpServers(scope, inProject ? project : '')
-      .then((r) => setServers(r.servers ?? {}))
-      .catch(() => setServers({}))
-    // 会话池最近加载状态（徽标数据源）：项目 scope 查该项目池，global 查全局池
+  // 会话池最近加载状态（徽标数据源）：项目 scope 查该项目池，global 查全局池。
+  // 独立于 reload——loading 轮询只需对账状态，不必重拉配置列表
+  const fetchStatus = useCallback(() => {
     gwFor(machine)
       ?.getMcpStatus(inProject ? project : '')
       .then((r) => {
@@ -100,7 +93,19 @@ export function McpPanel({
         setStatus({})
         setPoolLoading(false)
       })
-  }, [gwFor, machine, scope, project, inProject])
+  }, [gwFor, machine, project, inProject])
+
+  const reload = useCallback(() => {
+    if (inProject && !project) {
+      setServers({})
+      return
+    }
+    gwFor(machine)
+      ?.listMcpServers(scope, inProject ? project : '')
+      .then((r) => setServers(r.servers ?? {}))
+      .catch(() => setServers({}))
+    fetchStatus()
+  }, [gwFor, machine, scope, project, inProject, fetchStatus])
 
   // 切机器时重置项目选择（各机器项目集不同）。在渲染中调整而非 effect：
   // 否则 reload 会先用「新机器 + 旧机器的项目路径」错配打一次请求，再被重置触发第二次。
@@ -120,6 +125,15 @@ export function McpPanel({
     window.addEventListener('lumi:mcp-status', h)
     return () => window.removeEventListener('lumi:mcp-status', h)
   }, [reload])
+
+  // 加载中轮询兜底：mcp.status 只发给绑定该池的连接，面板浏览的项目可能没有
+  // 绑定连接（会话已关/从未打开），完成事件送达不了——loading 期间每 3s 对账状态，
+  // 否则徽标会永远停在「正在后台连接…」
+  useEffect(() => {
+    if (!poolLoading) return
+    const t = setInterval(fetchStatus, 3000)
+    return () => clearInterval(t)
+  }, [poolLoading, fetchStatus])
 
   const save = (name: string, config: McpServerConfig, originalName?: string) =>
     gw

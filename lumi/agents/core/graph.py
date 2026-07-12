@@ -280,7 +280,8 @@ async def create_agent(
     config = get_config()
 
     if tools is None:
-        tools = await get_tools()
+        # 默认等冷池就位（cron 等单发调用方没有下一轮可自愈）；分层加载该项目的 MCP
+        tools = await get_tools(project_dir=project_dir)
     if system_prompt is None:
         system_prompt = config.load_system_prompt()
     if model_name is None:
@@ -310,6 +311,7 @@ async def create_agent(
     agent = LumiAgent(checkpointer=checkpointer)
     context = LumiAgentContext(
         tools=tools,
+        project_dir=project_dir,
         system_prompt=system_prompt,
         model_name=model_name,
         permission_engine=permission_engine,

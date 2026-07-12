@@ -594,10 +594,21 @@ class GatewaySession:
     async def start(self) -> None:
         """握手：发 gateway.ready、注册广播、拉起后台通知轮询。"""
         await self._channel.send(self._ready_frame())
-        # 注册到 cron 结果广播通道：任务完成/运行状态变化实时推给本连接
-        self._hub.register(self._channel)
+        await self._attach_channel()
         # 后台任务完成通知轮询：与主接收循环并发，空闲时把队列通知注入新一轮推回前端
         self._notif_task = asyncio.create_task(self._notification_loop())
+
+    async def _attach_channel(self) -> None:
+        """把当前 channel 挂进广播通道（start / reattach 共用）。
+
+        注册即声明其 MCP 池绑定（mcp_key 为 live 回调，随 set_workspace 跟随）；
+        随后补发已完成加载的池状态——initialize 触发的后台加载可能在注册前就
+        完成并广播（无人接收），detach 期间完成的广播同样落空，补发兜底这两个
+        窗口，前端失败 toast 60s 去重天然消化重复。"""
+        self._hub.register(self._channel, mcp_key=self._bridge.mcp_pool_key)
+        payload = self._bridge.mcp_status_payload()
+        if payload is not None:
+            await self._channel.send(event_frame("mcp.status", "", payload))
 
     # ── 断连续接（Case 1）：会话生命周期与 WS 解耦 ──
 
@@ -648,7 +659,7 @@ class GatewaySession:
             self._ttl_task.cancel()
             self._ttl_task = None
         self._channel = channel
-        self._hub.register(channel)
+        await self._attach_channel()
         # 重起通知轮（detach 时停掉了）：恢复后台任务完成反馈推送
         if self._notif_task is None:
             self._notif_task = asyncio.create_task(self._notification_loop())

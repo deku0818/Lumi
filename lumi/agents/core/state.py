@@ -7,6 +7,7 @@ if TYPE_CHECKING:
     from lumi.gateway.bridge.broker import ApprovalBroker
 
 from dataclasses import dataclass, field
+from pathlib import Path
 
 from langgraph.graph.message import add_messages
 
@@ -14,6 +15,9 @@ from langgraph.graph.message import add_messages
 @dataclass
 class LumiAgentContext:
     tools: list = field(default_factory=list)
+    project_dir: Path | None = field(default=None)
+    """本 agent 所属项目根（None = 无项目/全局）。子代理、workflow 建下级 agent 时
+    据此显式传递父级项目（MCP 分层加载 + 冷池等待），不依赖 contextvar。"""
     system_prompt: str = field(default="")
     model_name: str = field(default="")
     """模型名；连接（base_url / api_key）由 create_llm 按供应商 profile 解析。"""

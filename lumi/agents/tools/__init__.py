@@ -55,6 +55,7 @@ async def get_tools(
     tools: list[str] | None = None,
     disabled_tools: list[str] | None = None,
     project_dir: Path | None = None,
+    wait_mcp: bool = True,
 ) -> list[StructuredTool]:
     """获取工具列表，支持白名单 + 黑名单过滤。
 
@@ -63,10 +64,23 @@ async def get_tools(
         disabled_tools: 黑名单 — 从结果中移除（优先级高于白名单）。
         project_dir: 本会话项目根。经 contextvar 传给 MCP provider，用于分层加载
             全局 ∪ 项目的 MCP server（``None`` 时 MCP 只看全局层）。
+        wait_mcp: 冷 MCP 池时是否等它就绪（暖池零开销，无配置零阻塞即回）。
+            默认 True——cron/子代理/workflow/headless 等单发路径没有下一轮可
+            自愈，必须等工具就位。白名单已被现有工具全覆盖时自动免等（等池只可能
+            补充新名字，纯属白付）。交互式 bridge 传 False：非阻塞 + 轮首刷新自愈。
     """
     token = mcp._current_project_dir.set(project_dir)
     try:
         result = await get_tool_registry().get_tools()
+        if wait_mcp:
+            pool = mcp.pool_for(project_dir)
+            generation = pool.generation
+            covered = tools and set(tools) <= {t.name for t in result}
+            if not covered:
+                await pool.wait_ready()
+                # 版本号没动 = 等待期间没有新工具落地（暖池/无配置），不必重载
+                if pool.generation != generation:
+                    result = await get_tool_registry().get_tools()
     finally:
         mcp._current_project_dir.reset(token)
 

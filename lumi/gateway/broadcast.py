@@ -8,6 +8,7 @@
 from __future__ import annotations
 
 import asyncio
+from collections.abc import Callable
 
 from lumi.agents.runtime.bg_tasks import get_task_registry, serialize_task
 from lumi.gateway.desktop_delivery import DesktopDelivery
@@ -38,9 +39,9 @@ class BroadcastHub:
         """供 DeliveryManager 注册的结果投递 sink。"""
         return self._delivery
 
-    def register(self, channel) -> None:
-        """连接建立时注册到广播通道。"""
-        self._delivery.register(channel)
+    def register(self, channel, mcp_key: Callable[[], str] | None = None) -> None:
+        """连接建立时注册到广播通道；mcp_key 声明该连接绑定的 MCP 池（见 DesktopDelivery）。"""
+        self._delivery.register(channel, mcp_key)
 
     def unregister(self, channel) -> None:
         """连接断开时注销。"""
@@ -65,8 +66,17 @@ class BroadcastHub:
         )
 
     def on_mcp_status(self, payload: dict) -> None:
-        """MCP 池后台加载完成：广播各 server 结果（前端对失败项 toast / 面板刷徽标）。"""
-        self._spawn(self._delivery.send_event("mcp.status", payload))
+        """MCP 池后台加载完成：只发给绑定该池的连接（"" = 全局池 ↔ 无项目连接）。
+
+        池 key 与连接 workspace 是后端 resolve 过的同源路径，服务端过滤后前端
+        收到即与本连接相关——无需再比路径，也收不到别的机器/项目池的噪音。
+        """
+
+        def _mine(channel: object) -> bool:
+            key_fn = self._delivery.mcp_key_of(channel)
+            return key_fn is not None and key_fn() == payload["project"]
+
+        self._spawn(self._delivery.send_event("mcp.status", payload, match=_mine))
 
     def on_session_title(self, thread_id: str, title: str) -> None:
         """会话标题自动生成完成：广播给所有连接更新侧栏该会话的显示名。"""

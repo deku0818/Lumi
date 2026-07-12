@@ -133,13 +133,10 @@ def _run_headless(
 
         get_config().apply_env()
 
-        from lumi.agents.tools.providers.mcp import await_pool_ready
-
         bridge = AgentBridge()
         try:
-            await bridge.initialize()
-            # 单轮即退、无下一轮自愈：冷池需等 MCP 工具就位（轮首刷新随后重建列表）
-            await await_pool_ready(None)
+            # 单轮即退、无下一轮自愈：冷池等 MCP 工具就位后再建 agent
+            await bridge.initialize(wait_mcp=True)
             async for evt in bridge.stream_response(prompt, tool_mode=tool_mode):
                 if evt.kind == EventKind.MESSAGE_DELTA and evt.text:
                     sys.stdout.write(evt.text)

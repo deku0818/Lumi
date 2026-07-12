@@ -1,5 +1,26 @@
 # Changelog
 
+## [0.2.44] - 2026-07-12
+
+### Changed
+- **MCP 池对象化重构** — 五个平行的模块级 dict（`_pools`/`_pool_load_tasks`/`_pool_generation`/`_pool_used` + 全局锁语义）收拢为 `McpPool` 对象，生命周期不变量集中到方法里：`close()` 恒取消在途加载、换新一代 manager 并递增 generation——配置作废与 LRU 淘汰共用此路径，结构上杜绝漏 bump；加载任务的 finally 只清自己的登记，被取消的旧任务不再误删同池后继注册的新任务
+- **单发路径等池语义下沉** — 删除 `await_pool_ready` 及其 4 个调用点（cron / workflow / 子代理 / headless CLI，含 cron 的循环导入 workaround）：`get_tools(wait_mcp=True)` 默认等冷池就位，交互 bridge 是唯一 opt-out（headless CLI 经 `initialize(wait_mcp=True)` 复用）；未来任何单发入口不必再记得等池的仪式。父级项目根改经 `LumiAgentContext.project_dir` 显式传递——原 contextvar 方案在子代理/workflow 调用点恒为 None，实际只会等错全局池并重复冷启一套 stdio 子进程，项目级 MCP 工具从未到达子代理
+- **mcp.status 服务端按连接过滤** — 广播只发给绑定该池的连接（`""` = 全局池 ↔ 无项目连接），失败 toast 同内容 60s 去重且只对当前工作区弹（后台项目会话的常驻连接仍收到自己池的失败，跨项目弹红是纯噪音；面板刷新信号无条件发），bridge 轮首刷新与基线采样次序收进 `_build_tools()` 单点（`folders` 不再跨模块捅私有字段）。池绑定改为注册时声明（`hub.register(channel, mcp_key=...)`，DesktopDelivery 持 channel→key_fn 映射），不再事后往 channel 上贴属性；wire 投影 `project_wire_key`（`""` = 全局池）单点导出，payload 侧与连接侧同源
+- **mcp.status 投递兜底** — 连接注册晚于 initialize 触发的后台加载：毫秒级快速失败（如 server 命令拼错）会在注册前广播、无人接收——注册/续接时补发已完成的池状态（detach 期间完成的广播同样由此找回）；MCP 面板浏览无绑定连接的项目时，loading 期间每 3s 轮询对账，徽标不再永远停在「正在后台连接…」
+- **get_tools 白名单覆盖免等** — 白名单被现有工具全覆盖时自动跳过等冷池（MCP 只可能补充新名字，等池纯属白付），等池后仅在池版本号变化时重载一次；autoDream 的 `wait_mcp=False` 手工特例随之删除，机制泛化到所有内建白名单子代理。merged MCP 配置按两文件 mtime 缓存（同权限引擎热重载思路），每次建 agent 的重复读盘解析归零
+
+### Fixed
+- **孤儿子进程窗口** — 子进程 PID 改为逐 server 在 finally 内快照 diff：保存配置打断慢 server（如 npx 冷启）连接时，已 spawn 的子进程不再逃过 `close()` 的 SIGKILL 兜底（原快照在整个启动循环之后，取消即全部漏杀）；`close()` 取消在途加载后等其退出再关 manager（取消异步送达，不等则 finally 尚未记完 PID 就杀），快照复用上一轮 after 为下一轮 before（S+1 次进程树遍历而非 2S 次），快照下放线程（每个存活后代同步 spawn 一个 pgrep，原在持锁的后台加载里阻塞整个事件循环、拖停所有会话的流式输出）
+- **切项目后子代理绑旧池** — `retarget_mcp` 同步更新 `context.project_dir`（项目状态三份一起切）：`set_workspace` 切项目后 spawn 的子代理/workflow 不再等待并冷启旧项目的 MCP 池
+- **等池期间配置作废的静默降级** — `wait_ready` 感知池换代后对新一代重试，单发路径的「工具就位」承诺在配置保存竞态下不再静默失效（加载失败终态仍不重试）。`close()` 的换 manager 提前到首个 await 之前：停驻等待者按 done-callback FIFO 先于 close 被唤醒，换代滞后会让它把旧 manager 误判为现任、按终态静默返回零工具；排水窗口混进来的 `ensure_loading` 同理会对着将被关闭的旧 manager start（并发 start/close + 无人追踪的子进程），换代先行使两条竞态的 identity 校验都立即生效
+- **shutdown 期间的加载逃逸** — `close_all_pools` 逐池改走 `close()`（换代使 identity 校验生效），并新增关停闩：闩落下后 `ensure_loading` 一律不再受理，清理期间/之后残存后台任务（detached run、迟到 cron tick）再触发也不会在 SIGKILL 扫尾后拉起无人回收的 MCP 子进程
+- **首个 MCP server 添加后不生效** — `invalidate_mcp_pools` 原样跳过未启动的冷池（「空池无可作废」），从无到有添加首个 server 时 generation 恒 0，存活会话轮首版本号比对（0==0）永不触发重建，新 server 到应用重启前都不可用：现对配置非空的冷池直接换代，`get_mcp_tools` 把池对象登记提前到空配置早退之前（无配置的项目也在 `_pools` 挂名，invalidate 找得到）
+- **连接测试假超时** — 探测计时从拿到 spawn 锁才起表（`asyncio.timeout(None)` + 拿锁后 reschedule）：后台池加载整程持锁（30s/server 串行），原来 15s 预算全部耗在排队等锁上，健康 server 被误报「连接超时」；`test_mcp_server` 恢复独立默认超时 15s，不再随后台加载常量翻倍到 30s
+- **掉线期间的历史永久丢失** — 回合进行中 WS 闪断重连：历史快照因流式在途被 `hydrateHistory` 丢弃时不再置 loaded（原 RPC 成功即置，补拉的门永久关闭，掉线前所有消息直到应用重启都不可见），轮次收尾（turn.complete/error）后自动补拉找回
+- **LRU 驱逐死工具** — 被淘汰池的 generation 现随 `close()` 递增，绑着它的存活会话轮首感知换代重建工具列表（原永不重建，此后每次 MCP 调用都打在已关闭的会话上直到重启）
+- headless 冷启动首轮不再冗余重建一遍刚构建的工具列表（阻塞路径构建后重采样基线）
+- 冷池非阻塞轮次落 warning 日志（IM channel / desktop 首轮无 MCP 工具可从日志追溯）；`test_pool_generation_bumps_on_invalidate` 假测试（只测 dict 读写）重写为真调 invalidate / evict 断言版本号递增，新增取消竞态回归测试
+
 ## [0.2.43] - 2026-07-11
 
 ### Added

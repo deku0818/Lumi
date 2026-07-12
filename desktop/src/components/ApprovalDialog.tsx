@@ -2,6 +2,7 @@
 // always_allow / accept_edits 等需服务端持久化的记忆选项留待后续。
 import { useI18n } from '../i18n'
 import { Button } from '@/components/ui/button'
+import { CARD_L2 } from '@/lib/utils'
 
 interface ToolCall {
   name: string
@@ -27,7 +28,7 @@ export function ApprovalDialog({
   const boundary = data.boundary_violations ?? []
 
   return (
-    <div className="border border-line/60 rounded-lg bg-surface/50 p-4">
+    <div className={`${CARD_L2} p-4`}>
       <h2 className="text-base font-semibold mb-4 flex items-center gap-2">
           <span className="text-primary">✦</span>
           {t('approval.title')}
