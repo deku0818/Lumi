@@ -5,6 +5,8 @@
 
 from __future__ import annotations
 
+import json
+
 from lumi.agents.core.meta_message import declared_items, injected_prefix
 
 
@@ -53,10 +55,20 @@ def _tool_call_name(tc) -> str:
     return getattr(tc, "name", None) or "?"
 
 
-def extract_messages_as_text(messages: list) -> str:
-    """把消息列表导出成扁平文本，一行一消息，供 dream 的 grep 语料。
+def _tool_call_desc(tc) -> str:
+    """工具调用的 ``name(args)`` 描述。args 经 json.dumps 天然单行（换行被转义）。"""
+    name = _tool_call_name(tc)
+    args = tc.get("args") if isinstance(tc, dict) else getattr(tc, "args", None)
+    if not args:
+        return name
+    return f"{name}({json.dumps(args, ensure_ascii=False, default=str)})"
 
-    格式：``[user] …`` / ``[assistant] …`` / ``[assistant→tool:NAME] …``（带工具调用）/
+
+def extract_messages_as_text(messages: list) -> str:
+    """把消息列表导出成扁平文本，一行一消息，供 dream 语料与 goal 判官转录。
+
+    格式：``[user] …`` / ``[assistant] …`` / ``[assistant→tool:NAME] name({args}) …``
+    （带工具调用，参数完整保留——写了哪个文件、跑了什么命令是动作记录的核心）/
     ``[tool:NAME] …``（工具结果）。消息内换行折叠为 ``⏎`` 保证每条恰好一行（grep 友好）；
     system 消息跳过。比 ``messages_to_dict`` 的嵌套 JSON 对窄关键词 grep 友好得多。
     """
@@ -80,6 +92,8 @@ def extract_messages_as_text(messages: list) -> str:
             if tool_calls:
                 names = ",".join(_tool_call_name(tc) for tc in tool_calls)
                 tag = f"assistant→tool:{names}"
+                calls = " ".join(_tool_call_desc(tc) for tc in tool_calls)
+                text = f"{calls} {text}".strip()
             else:
                 tag = "assistant"
         elif role == "tool":

@@ -199,11 +199,16 @@ def _user_schema_to_pydantic_model(
 ) -> type[BaseModel]:
     """JSON Schema → Pydantic model 作为 ``StructuredTool.args_schema``。
 
-    所有字段 optional（宽松解包）；``required`` / ``pattern`` 等严格性由服务端
-    ``validate_structured_output`` 用原 user_schema 担保，校验错误统一走 jsonschema
-    的友好路径，而非 Pydantic 的拒绝。
+    ``required`` 字段保持必填非空——模型可见 schema 如实呈现（不出现误导性的
+    ``| null``），Pydantic 校验失败经 ToolNode 的 ``handle_tool_errors`` 生成
+    可读的 error ToolMessage（实测与 jsonschema 路径同等友好）。optional 字段
+    ``py_type | None`` 宽松解包。``pattern`` / 嵌套约束等其余严格性仍由服务端
+    ``validate_structured_output`` 用原 user_schema 担保。可空必填字段
+    （``type: [X, "null"]``）经 ``_json_type_to_python`` 降级为 ``Any``，
+    显式 null 照常放行给 jsonschema 裁决。
     """
     properties = user_schema.get("properties") or {}
+    required_fields = set(user_schema.get("required") or [])
 
     fields: dict[str, Any] = {}
     for prop_name, prop_schema in properties.items():
@@ -211,10 +216,13 @@ def _user_schema_to_pydantic_model(
         description = (
             prop_schema.get("description", "") if isinstance(prop_schema, dict) else ""
         )
-        fields[prop_name] = (
-            py_type | None,
-            Field(default=None, description=description),
-        )
+        if prop_name in required_fields:
+            fields[prop_name] = (py_type, Field(description=description))
+        else:
+            fields[prop_name] = (
+                py_type | None,
+                Field(default=None, description=description),
+            )
 
     # LangChain 自动注入 tool_call id 并从模型可见的 input_schema 中剔除该字段。
     # tcid_key 由调用方选定，避开用户 schema 已有属性，否则会覆盖用户同名字段，

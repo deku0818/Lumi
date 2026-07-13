@@ -44,17 +44,28 @@ def _runtime(tools):
 class _StructuredFakeToolNode:
     """绕过真实 ToolNode 的 graph-runtime 注入，但调用**真实** structured 闭包。
 
-    保留真实校验逻辑（闭包内 jsonschema），只替换 ToolNode 这层基础设施——
-    真实 ToolNode 在 graph 外执行需 LangGraph runtime context。
+    保留真实校验逻辑（Pydantic args_schema + 闭包内 jsonschema），只替换 ToolNode
+    这层基础设施——真实 ToolNode 在 graph 外执行需 LangGraph runtime context。
+    与真实 ToolNode 一致：工具抛异常（如 Pydantic required 校验失败）经
+    handle_tool_errors 转为 error ToolMessage。
     """
 
     def __init__(self, tools, handle_tool_errors=None):
         self._tools = {t.name: t for t in tools}
+        self._handle = handle_tool_errors or str
 
     async def ainvoke(self, state):
         tc = state["messages"][-1].tool_calls[0]
         tool = self._tools[tc["name"]]
-        result = await tool.ainvoke({**tc, "type": "tool_call"})
+        try:
+            result = await tool.ainvoke({**tc, "type": "tool_call"})
+        except Exception as e:
+            result = ToolMessage(
+                content=self._handle(e),
+                tool_call_id=tc["id"],
+                name=tc["name"],
+                status="error",
+            )
         if isinstance(result, Command):
             return result
         return {"messages": [result]}
@@ -214,11 +225,44 @@ async def test_structured_tool_success_returns_command():
     assert isinstance(accepted, ToolMessage) and accepted.status != "error"
 
 
-async def test_structured_tool_validation_failure_returns_error():
+def test_visible_schema_required_field_not_nullable():
+    """模型可见 schema：required 字段必填且非空（不出现误导性的 | null），
+    optional 字段保持可空宽松解包。"""
     tool = create_structured_output_tool(SCHEMA)
-    # 缺 required name（字段 optional，Pydantic 放行 None，jsonschema 拦截）
+    visible = tool.tool_call_schema.model_json_schema()
+    assert visible["properties"]["name"] == {
+        "description": "",
+        "title": "Name",
+        "type": "string",
+    }
+    assert visible["required"] == ["name"]
+    assert {"type": "null"} in visible["properties"]["age"]["anyOf"]
+
+
+async def test_structured_tool_missing_required_rejected_by_pydantic():
+    """缺 required 字段在 Pydantic 层即拒（模型可见 schema 如实必填非空），
+    异常信息含字段名——生产路径由 ToolNode 的 handle_tool_errors 转为可读
+    error ToolMessage。"""
+    import pytest
+
+    tool = create_structured_output_tool(SCHEMA)
+    with pytest.raises(Exception, match="name"):
+        await tool.ainvoke(
+            {"name": TOOL, "args": {"age": 1}, "id": "9", "type": "tool_call"}
+        )
+
+
+async def test_structured_tool_jsonschema_failure_returns_error():
+    """Pydantic 看不见的约束（pattern 等）由服务端 jsonschema 拦截，
+    返回配对的 error ToolMessage。"""
+    schema = {
+        "type": "object",
+        "properties": {"name": {"type": "string", "pattern": "^L"}},
+        "required": ["name"],
+    }
+    tool = create_structured_output_tool(schema)
     result = await tool.ainvoke(
-        {"name": TOOL, "args": {"age": 1}, "id": "9", "type": "tool_call"}
+        {"name": TOOL, "args": {"name": "abc"}, "id": "9", "type": "tool_call"}
     )
     assert isinstance(result, ToolMessage)
     assert result.status == "error"
@@ -318,16 +362,10 @@ async def test_stop_hook_pulls_back_when_unfinished():
 
 
 def _reminder_msg():
-    from lumi.agents.core.meta_message import reminder_human_message
+    """与生产侧同源的拉回 reminder（包裹格式改了此处不漂移）。"""
+    from lumi.agents.core.hooks.dispatch import _reminder_message
 
-    return reminder_human_message(
-        [
-            {
-                "type": "text",
-                "text": f"<system-reminder>\n{STRUCTURED_OUTPUT_REMINDER}\n</system-reminder>\n",
-            }
-        ]
-    )
+    return _reminder_message(STRUCTURED_OUTPUT_REMINDER)
 
 
 async def test_stop_hook_gives_up_after_max_pullbacks():
