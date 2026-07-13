@@ -20,6 +20,10 @@ echo "── 桌面安装包 (electron-builder) ──"
 cd desktop
 # npm ci：清光 node_modules 按 lockfile 精确重装（electron 二进制走 ~/Library/Caches/electron 缓存，不依赖网络）
 npm ci
+# electron@43.1.0 的 npm 包上游漏发了 postinstall（`node install.js`），npm ci 不会
+# 自动下载 electron 二进制、node_modules/electron/dist 恒空，electron-builder 随即报
+# "electronDist does not exist"。显式补跑 install.js 下载二进制（幂等，已缓存则秒过）。
+node node_modules/electron/install.js
 npm pkg set version="${VERSION}"
 npm run dist
 
