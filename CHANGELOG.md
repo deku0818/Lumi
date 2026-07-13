@@ -1,5 +1,16 @@
 # Changelog
 
+## [0.2.46] - 2026-07-13
+
+### Added
+- **`/goal <条件>` 目标驱动命令（移植自 Claude Code）** — 输入一个**可判定的条件**后，agent 被目标驱动持续工作：本质是给 Stop 事件挂一个 session 级 LLM 条件评估 hook。每次模型想结束时，独立无状态的判官（把对话转录渲染成纯文本、复用会话模型、`structured_output` 三态 `{ok, reason, impossible}`——全新 prompt 与主对话缓存零交集）判定条件是否成立：未成立注入 `<system-reminder>` 拉回继续、成立自动解除、永远达不成（impossible）放行结束。跨轮持续、跨重启存活（条件存 `session_meta` sidecar，非 LangGraph state——达成时清条件+返 None 不短路后续 `auto_dream`）。`/goal <条件>` 激活即跑一整轮、`/goal clear` 提前解除、裸 `/goal` 回显当前目标；desktop + IM 两端可用。子 agent（depth>0）免疫，不参与目标驱动。无拉回上限（靠 impossible + `/goal clear` + 中断兜底）
+
+### Fixed
+- **effort 型 qwen 关思考失效致结构化输出 400** — effort 型 qwen 思考模型（如 qwen3.7-plus，有 low/medium/high 档位但 catalog 无 toggle）的 `allowed_levels` 不含 `off`，`force_no_thinking` 被门控挡掉、返 `{}`，思考没关成——强制 `tool_choice` 的结构化输出链（判官 / 分类器 / titler）在 DashScope thinking mode 下即 `tool_choice=required` 400。现对**有思考能力**的 qwen（`allowed != ("auto",)`）在门控前直通 `enable_thinking=false`；无思考能力的 qwen（如 qwen3-max）仍返 `{}`，不注入它可能不认的参数
+
+### Changed
+- **转录导出换行转义** — `extract_messages_as_text`（dream 语料 + goal 判官共用）消息内换行由 `⏎` 折叠改为字面 `\n` 转义：仍保证一行一消息（grep 友好），但对 LLM 通读更自然易读
+
 ## [0.2.44] - 2026-07-12
 
 ### Changed

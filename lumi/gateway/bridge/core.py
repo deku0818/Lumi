@@ -127,6 +127,14 @@ def available_commands(memory_enabled: bool, *, channel: bool = False) -> list[d
             "type": "system",
         }
     )
+    # /goal：设定会话目标，由 Stop hook 驱动直到达成（跨轮持续，达成自动解除）
+    commands.append(
+        {
+            "name": "goal",
+            "description": "设定会话目标，持续驱动直到达成（/goal clear 解除）",
+            "type": "system",
+        }
+    )
     return commands
 
 
@@ -582,6 +590,12 @@ class AgentBridge:
             async for event in self._stream_compact_command():
                 yield event
             return
+        if name == "goal":
+            async for event in self._stream_goal_command(
+                extra_text, tool_mode, message_meta
+            ):
+                yield event
+            return
 
         from lumi.agents.core.preprocessing.skill_detector import SkillChangeDetector
 
@@ -712,6 +726,48 @@ class AgentBridge:
                 "[/compact] 压缩失败 thread=%s", self.current_thread_id, exc_info=True
             )
             text = "压缩本会话历史时出错，请稍后再试。"
+        async for event in self._emit_text_message(text):
+            yield event
+
+    async def _stream_goal_command(
+        self, extra_text: str, tool_mode: str, message_meta: dict | None
+    ) -> AsyncGenerator[BridgeEvent, None]:
+        """/goal：设定 / 解除 / 回显会话目标。三形态由 extra_text 区分。
+
+        - ``clear`` → 清 sidecar goal（用空值 update_meta 保留 pin/rename），回执。
+        - 空 → 回显当前目标（无目标时提示用法），纯 UI 消息不进历史。
+        - 条件 → 写 sidecar + 激活轮：注入激活 reminder 作驱动消息跑一整轮，前端显示
+          ``/goal <条件>``。该轮结束触发 OnAgentStop → goal_stop_hook 立即评估。
+        """
+        from lumi.agents.core.hooks.goal import ACTIVATION_REMINDER
+        from lumi.sessions.session_meta import get_goal, update_meta
+
+        thread_id = self.current_thread_id
+
+        # 条件 → 激活轮（走 stream_response 跑一整轮，自成一路提前返回）
+        if extra_text and extra_text != "clear":
+            update_meta(thread_id, goal=extra_text)
+            message_meta = dict(message_meta or {})
+            message_meta.setdefault("items", [{"text": f"/goal {extra_text}".strip()}])
+            async for event in self.stream_response(
+                ACTIVATION_REMINDER.format(condition=extra_text),
+                tool_mode=tool_mode,
+                message_meta=message_meta,
+            ):
+                yield event
+            return
+
+        # clear / 裸回显 → 纯 UI 回执，共用同一 emit 尾部
+        if extra_text == "clear":
+            update_meta(thread_id, goal="")
+            text = "🎯 已解除目标。"
+        else:
+            current = get_goal(thread_id)
+            text = (
+                f"🎯 当前目标：{current}\n运行 `/goal clear` 解除。"
+                if current
+                else "当前没有设定目标。用 `/goal <条件>` 设定一个会话目标。"
+            )
         async for event in self._emit_text_message(text):
             yield event
 

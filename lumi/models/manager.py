@@ -112,6 +112,16 @@ def effort_params(model_name: str, level: str) -> dict:
       enable_thinking 布尔；DeepSeek / MiMo 系用 thinking.type enabled/disabled
     """
     allowed = allowed_levels(model_name)
+
+    # qwen（DashScope）关思考：enable_thinking=false 对有思考能力的 qwen 思考模型有效，
+    # 与该模型被 catalog 归为 effort 型还是 toggle 型无关。effort 型 qwen（如 qwen3.7-plus）
+    # 的 allowed_levels 无 "off"，会被下面的门控挡掉——但强制 tool_choice 的结构化输出链
+    # （force_no_thinking）必须真能关掉思考，否则 DashScope 在 thinking mode 下拒绝
+    # tool_choice=required/object → 400。故在门控前提前直通（下方 on/off 分支同款方言）。
+    # 仅限有思考能力者（allowed 非纯 ("auto",)）：无思考的 qwen 无需关、也可能不认该参数。
+    if level == "off" and "qwen" in model_name.lower() and allowed != ("auto",):
+        return {"extra_body": {"enable_thinking": False}}
+
     if level != "auto" and level not in allowed:
         return {}
 

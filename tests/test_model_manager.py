@@ -29,6 +29,9 @@ def catalog(monkeypatch):
         "mimo-v2.5-pro": _entry("mimo-v2.5-pro", "toggle", (), True),
         "deepseek-v4-pro": _entry("deepseek-v4-pro", "effort", ("high", "max"), True),
         "qwen3.6-plus": _entry("qwen3.6-plus", "toggle", (), True),
+        # effort 型 qwen（如 qwen3.7-plus）：有 low/medium/high 档位但无 toggle，
+        # 故 allowed_levels 不含 off——回归 force_no_thinking 关思考需特殊直通
+        "qwen3.7-plus": _entry("qwen3.7-plus", "effort", ("low", "medium", "high")),
         "qwen3-max": _entry("qwen3-max", "none"),
     }
     monkeypatch.setattr("lumi.models.catalog._index", index)
@@ -127,3 +130,22 @@ def test_effort_toggle_on_off(catalog):
     assert effort_params("qwen3.6-plus", "on") == {
         "extra_body": {"enable_thinking": True}
     }
+
+
+def test_effort_qwen_effort_type_off_still_disables_thinking(catalog):
+    # 回归：effort 型 qwen（off 不在 allowed_levels）的 force_no_thinking 必须真关思考，
+    # 否则强制 tool_choice 的结构化输出链在 DashScope thinking mode 下 400。
+    assert "off" not in allowed_levels("qwen3.7-plus")  # 门控会挡掉 off
+    assert effort_params("qwen3.7-plus", "off") == {
+        "extra_body": {"enable_thinking": False}
+    }
+    # 非 off 档位不受影响：high 仍走 reasoning_effort 透传
+    assert effort_params("qwen3.7-plus", "high") == {
+        "reasoning_effort": "high",
+        "use_responses_api": False,
+    }
+    # 非 qwen 的 effort 型 off 仍返 {}（不误伤 o3/gpt 等）
+    assert effort_params("gpt-5.2", "off") == {}
+    # 无思考能力的 qwen（control=none）off 仍返 {}——不注入它可能不认的 enable_thinking
+    assert allowed_levels("qwen3-max") == ("auto",)
+    assert effort_params("qwen3-max", "off") == {}

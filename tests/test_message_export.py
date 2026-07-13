@@ -46,7 +46,7 @@ def test_tool_call_args_preserved():
 
 def test_newline_folded():
     out = extract_messages_as_text([HumanMessage("第一行\n第二行")])
-    assert out == "[user] 第一行⏎第二行"  # 换行折叠为 ⏎，保证一行一消息
+    assert out == "[user] 第一行\\n第二行"  # 换行转义为字面 \n，保证一行一消息
 
 
 def test_empty():

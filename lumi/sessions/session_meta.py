@@ -65,3 +65,14 @@ def delete_meta(thread_id: str) -> None:
     data = load_all()
     if data.pop(thread_id, None) is not None:
         _save_all(data)
+
+
+def get_goal(thread_id: str) -> str:
+    """读某会话当前生效的 goal 条件（/goal 命令设定）；未设定返回空串。
+
+    goal 是 session 级 Stop hook 条件（见 hooks/goal.py），跨轮跨重启存活。存
+    sidecar 而非 LangGraph state，是为让 goal_stop_hook 达成时能"清条件 + 返回
+    None"、不短路后续的 auto_dream_stop_hook。清除用 ``update_meta(tid, goal="")``
+    （空值自动过滤，保留 pin/rename），不用 delete_meta（会连带清掉用户标记）。
+    """
+    return load_all().get(thread_id, {}).get("goal", "")

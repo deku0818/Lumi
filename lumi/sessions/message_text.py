@@ -69,8 +69,9 @@ def extract_messages_as_text(messages: list) -> str:
 
     格式：``[user] …`` / ``[assistant] …`` / ``[assistant→tool:NAME] name({args}) …``
     （带工具调用，参数完整保留——写了哪个文件、跑了什么命令是动作记录的核心）/
-    ``[tool:NAME] …``（工具结果）。消息内换行折叠为 ``⏎`` 保证每条恰好一行（grep 友好）；
-    system 消息跳过。比 ``messages_to_dict`` 的嵌套 JSON 对窄关键词 grep 友好得多。
+    ``[tool:NAME] …``（工具结果）。消息内换行转义为字面 ``\\n`` 保证每条恰好一行
+    （grep 友好）；system 消息跳过。比 ``messages_to_dict`` 的嵌套 JSON 对窄关键词
+    grep 友好得多。
     """
     lines: list[str] = []
     for m in messages:
@@ -84,7 +85,7 @@ def extract_messages_as_text(messages: list) -> str:
             raw = visible_user_text(m)
         else:
             raw = extract_text_content(getattr(m, "content", ""))
-        text = raw.replace("\n", "⏎").strip()
+        text = raw.replace("\n", "\\n").strip()
         if role == "human":
             tag = "user"
         elif role == "ai":

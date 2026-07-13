@@ -81,6 +81,15 @@ async def structured_output_stop_hook(ctx: HookContext) -> HookResult:
 register_hook("Stop", structured_output_stop_hook)
 
 
+# 目标驱动（/goal）：会话有活跃 goal 时，模型想结束前判定条件是否成立——未成立注入
+# reminder 拉回、成立/impossible 清 goal 放行。注册在 structured_output 之后、auto_dream
+# 之前：未达成时 goal 返 AdditionalContext short-circuit 掉 dream（会话没结束，正确）；
+# 达成/impossible 时 goal 返 None，dispatch 继续到 dream（会话结束，dream 正常触发）。
+from lumi.agents.core.hooks.goal import goal_stop_hook  # noqa: E402
+
+register_hook("Stop", goal_stop_hook)
+
+
 # 后台记忆综合（auto dream）：会话结束按门控触发离线综合。dream 模块顶层仅轻量依赖
 # （schema / dream_lock / normalize），不引入 core.graph / tools（均延迟 import），故此处
 # import 不致循环。门控阶梯保证默认（config 关 / 子 agent / 非记忆会话）零成本放行。
