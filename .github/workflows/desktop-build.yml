@@ -35,7 +35,10 @@ jobs:
 
       - uses: actions/setup-node@v4
         with:
-          node-version: 20
+          # electron 43 及其工具链（@electron/get / @electron/rebuild）要求 Node ≥ 22.12：
+          # Node 20 下 @electron/get 跑不起来、electron 二进制不落 node_modules/electron/dist，
+          # electron-builder 随即报 "electronDist does not exist"。跟随 electron 版本走 22。
+          node-version: 22
           cache: npm
           cache-dependency-path: desktop/package-lock.json
 
