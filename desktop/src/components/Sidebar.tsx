@@ -75,7 +75,11 @@ function usePersistedToggle(key: string): [Record<string, boolean>, (k: string) 
 
 // 某台机器的会话按项目（workspace_dir）分组；当前项目排最前。渠道会话不进项目组
 // （A2：渠道身份优先于项目身份，另起机器级「飞书」分组）。
-function projectGroupsFor(sessions: SessionMeta[], backend: string, currentDir: string) {
+// 组内最近会话时间 —— 作为分组排序键，仅在有新会话时变化，点击选中不影响，故侧栏不跳动。
+const groupRecency = (list: SessionMeta[]) =>
+  Math.max(...list.map((s) => Date.parse(s.created_at || '') || 0))
+
+function projectGroupsFor(sessions: SessionMeta[], backend: string) {
   const mine = sessions.filter((s) => (s.backend || 'local') === backend && !s.channel)
   const map = new Map<string, SessionMeta[]>()
   for (const s of mine) {
@@ -86,7 +90,7 @@ function projectGroupsFor(sessions: SessionMeta[], backend: string, currentDir: 
   }
   return [...map.entries()]
     .map(([dir, list]) => ({ dir, name: projName(dir), sessions: list }))
-    .sort((a, b) => (a.dir === currentDir ? -1 : b.dir === currentDir ? 1 : 0))
+    .sort((a, b) => groupRecency(b.sessions) - groupRecency(a.sessions))
 }
 
 // 置顶优先，再按最近活跃（created_at）倒序 —— 「最近」流与筛选结果共用。
@@ -119,7 +123,6 @@ export const Sidebar = memo(function Sidebar({
   machineConn,
   channels,
   recentLimit,
-  workspaceDir,
   currentKey,
   conn,
   model,
@@ -152,7 +155,6 @@ export const Sidebar = memo(function Sidebar({
   machineConn: Record<string, ConnState>
   channels: Record<string, ChannelInfo[]> // 机器 id → IM 渠道列表（飞书组头绑定项目）
   recentLimit: number
-  workspaceDir: string
   currentKey: string
   conn: ConnState
   model: string
@@ -291,7 +293,7 @@ export const Sidebar = memo(function Sidebar({
     const color = machineColor(m.id, machines)
     const cn = machineConn[m.id]
     const offline = cn === 'closed' || cn === 'failed'
-    const groups = projectGroupsFor(sessions, m.id, workspaceDir)
+    const groups = projectGroupsFor(sessions, m.id)
     return (
       <div key={m.id} className={`mt-0.5 ${offline ? 'opacity-60' : ''}`}>
         <div className="flex items-center gap-1.5 px-2 pt-2 pb-0.5">
@@ -392,7 +394,7 @@ export const Sidebar = memo(function Sidebar({
       <div className="px-3 py-8 text-center text-xs text-muted-foreground">{t('sidebar.empty')}</div>
     ) : null
   } else {
-    const localGroups = projectGroupsFor(sessions, 'local', workspaceDir)
+    const localGroups = projectGroupsFor(sessions, 'local')
     // 已关闭机器的定时任务不显示（刷新时序可能残留旧 job，按可见机器过滤兜底）
     const visibleIds = new Set(visibleMachines.map((m) => m.id))
     const visibleCron = cronJobs.filter((j) => visibleIds.has(j.backend || 'local'))

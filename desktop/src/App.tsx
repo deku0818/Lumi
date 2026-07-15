@@ -2197,7 +2197,6 @@ export default function App() {
         machineConn={machineConn}
         channels={channels}
         recentLimit={recentLimit}
-        workspaceDir={workspaceDir}
         currentKey={view === 'chat' ? active : ''}
         conn={conn}
         model={model}
