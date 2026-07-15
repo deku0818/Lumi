@@ -315,6 +315,10 @@ export class Gateway {
     return this.request<{ projects: Project[] }>('rename_project', { path, name })
   }
 
+  setDefaultProject(path: string, isDefault: boolean): Promise<{ projects: Project[] }> {
+    return this.request<{ projects: Project[] }>('set_default_project', { path, default: isDefault })
+  }
+
   // 远程目录浏览器：在该连接所属机器上浏览/建目录
   listDir(path = ''): Promise<{
     path: string

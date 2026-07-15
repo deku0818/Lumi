@@ -32,7 +32,7 @@ export interface ToolCallBrief {
 // 每个事件名 → payload 形状的单一映射。继承 Record<WireEventType, object> 兜底：
 // 漏写任一事件名 tsc 即报错，保证覆盖全部事件。events.json 承载语言中立的同构契约。
 export interface WireEventPayloads extends Record<WireEventType, object> {
-  'gateway.ready': { model: string; workspace: string; running?: boolean }
+  'gateway.ready': { model: string; workspace: string; workspace_bound: boolean; running?: boolean }
   'message.start': Record<string, never>
   'message.delta': { text: string; usage?: Usage }
   'thinking.delta': { text: string; usage?: Usage }
@@ -125,6 +125,7 @@ export interface Project {
   name: string
   path: string
   last_used: number
+  default?: boolean
 }
 
 // 斜杠命令（对齐后端 list_commands：当前为技能命令）

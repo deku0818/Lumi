@@ -80,6 +80,24 @@ def rename_project(path: str, name: str) -> list[dict]:
     return _save(projects)
 
 
+def set_default_project(path: str, default: bool) -> list[dict]:
+    """设为/取消默认项目（「新建会话」直接落地的项目）。至多一个默认，设新的自动顶掉旧的。
+
+    取消默认（default=False）只清目标自身，不碰其它条目——否则一次针对陈旧/无关
+    路径的取消调用会把真正的默认项目也一并清空（多窗口/多端并发操作时可复现）。
+    """
+    target = _resolve(path)
+    projects = _load()
+    if default and not any(p["path"] == target for p in projects):
+        raise ValueError(f"项目不存在: {target}")
+    for p in projects:
+        if p["path"] == target:
+            p["default"] = default
+        elif default:
+            p["default"] = False
+    return _save(projects)
+
+
 def touch_project(path: str) -> None:
     """刷新项目的最近使用时间（未登记的路径忽略）。"""
     target = _resolve(path)

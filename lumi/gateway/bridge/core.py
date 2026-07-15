@@ -221,6 +221,10 @@ class AgentBridge:
         self._mcp_project: Path | None = None
         self._disabled_tools: list[str] | None = None
         self._mcp_gen: int = 0
+        # 本会话是否已绑定真实项目目录（initialize 传有效 project_dir 或 set_workspace 成功后置真）。
+        # 假时 workspace_dir 仍会退回进程 cwd 兜底可用，但 send_message/run_command 须拒绝——
+        # 聊天必须绑定项目，不允许静默落在不可控的进程 cwd 上（见 session.py handle_frame）。
+        self._workspace_bound: bool = False
         # 职责子模块（back-reference 组合）
         self._providers = ProviderService(self)
         self._approval = ApprovalEnricher(self)
@@ -249,6 +253,7 @@ class AgentBridge:
                 "[AgentBridge] open 指定 workspace 无效，退回进程目录: %s", target
             )
             target = None
+        self._workspace_bound = target is not None
         # 无条件预算工具，把会话项目根 target 带进 MCP 分层加载（全局 ∪ 项目）；
         # 若只在 disabled_tools 非空时才 get_tools，则常见路径落到 create_agent 内部
         # 无 project_dir 的加载，项目级 MCP 会加载不到。
@@ -345,6 +350,20 @@ class AgentBridge:
         return get_workspace_dir()
 
     @property
+    def workspace_bound(self) -> bool:
+        """本会话是否已绑定真实项目（而非静默退回进程 cwd）。
+
+        **本属性不在 `stream_response`/`stream_command` 内部强制**——桌面 desktop WS 聊天
+        要求"未绑定就拒绝"，但 cron（不走 AgentBridge）与飞书 channel（`ChannelConfig.workspace`
+        可显式配成空串、故意退回进程 cwd，见 `lumi/gateway/channels/config.py`）合法地依赖退回
+        cwd 的兜底语义，不能在这里统一收紧。桌面聊天的强制关卡在
+        `GatewaySession.handle_frame`（`lumi/gateway/session.py`）。**新增任何直接调用
+        `stream_response`/`stream_command` 的入口（新 channel、REST 接口、测试工具等），若该
+        入口和桌面聊天一样要求"必须绑定真实项目"，必须自己检查这个属性——本方法不会替你把关。**
+        """
+        return self._workspace_bound
+
+    @property
     def graph(self) -> CompiledStateGraph | None:
         """底层 LangGraph 编译图实例，用于 get_state 等操作"""
         return self._agent.graph if self._agent else None
@@ -387,6 +406,21 @@ class AgentBridge:
                 thread_id, self._shadow.project_dir, self._tracker
             )
         logger.info("[AgentBridge] 切换到会话: %s", thread_id)
+
+    def mark_workspace_bound(self) -> None:
+        """把绑定态标记为已绑定（供 FolderManager 等外部子模块调用，不直接戳私有字段）。"""
+        self._workspace_bound = True
+
+    def mark_workspace_unbound(self) -> None:
+        """把绑定态清回未绑定。
+
+        `switch_thread` 本身不碰 `_workspace_bound`——它只挪 `_config`，引擎/项目状态原样
+        留在 bridge 上。调用方切到不同 thread 又没能在同一调用里重新 `set_workspace` 时
+        （没带 workspace 参数，或绑定失败降级为「仅切会话」），必须显式调用本方法：否则
+        `_workspace_bound` 会原样带着上一个 thread 的绑定态过到新 thread，让新 thread 的
+        `send_message` 误判为"已绑定"而放行。
+        """
+        self._workspace_bound = False
 
     # ── Folder / workspace（委派 FolderManager；folder 状态留 AgentBridge）──
 

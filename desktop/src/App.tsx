@@ -322,6 +322,8 @@ export default function App() {
   // 项目视图作用的机器（方案甲「先选机器」）+ 该机器当前项目
   const [projectsMachine, setProjectsMachine] = useState('local')
   const [projectsCurrent, setProjectsCurrent] = useState('')
+  // 项目页是被「新建会话」阻断跳转到的（而非用户主动点「项目」标签）时，顶部提示为什么在这里
+  const [needProjectHint, setNeedProjectHint] = useState(false)
   const [showNewProject, setShowNewProject] = useState(false)
   const [addingFolder, setAddingFolder] = useState(false) // 添加可访问目录的浏览器开关
   const [pendingRemoveProject, setPendingRemoveProject] = useState<Project | null>(null)
@@ -822,7 +824,11 @@ export default function App() {
           gw.onEvent((ev) => {
             if (ev.type === 'gateway.ready') {
               setModel((m) => m || ev.payload.model || '')
-              if (ev.payload.workspace) setWorkspaceDir(ev.payload.workspace)
+              // workspace_bound=false 时 payload.workspace 只是进程 cwd 兜底展示值，不是真
+              // 绑定的项目——写进 workspaceDir 会污染侧栏项目分组等展示，未绑定就不写。
+              if (ev.payload.workspace_bound && ev.payload.workspace) {
+                setWorkspaceDir(ev.payload.workspace)
+              }
               if (ready) {
                 // 重连：服务端给的是全新 bridge（新 session_id），切回本连接原 thread
                 // 恢复后端绑定，否则会丢弃原会话、并多出一个幽灵空会话。
@@ -1213,15 +1219,41 @@ export default function App() {
     void refreshSessions()
   }, [openControlConn, refreshSessions])
 
-  // 初始：起各机器控制连接（合并会话列表）+ 本地一条新会话连接（聊天流）
+  // 查该机器登记的默认项目路径，顺带把 projects/projectsCurrent 同步成最新——boot effect
+  // 与下方 goNewChat 共用同一份查找逻辑，避免各自倒腾一遍 listProjects。
+  // 返回 null = 没查到（连接波动等），空串 = 查到了但确实没有默认项目，两者调用方处理不同
+  // （前者该重试，后者不用）。声明在 boot effect 之前，纯是为了这条 useEffect 能引用它。
+  const fetchDefaultProject = useCallback(
+    async (backend: string): Promise<string | null> => {
+      try {
+        const r = await gwForBackend(backend)?.listProjects()
+        if (!r) return null
+        setProjects(r.projects)
+        setProjectsCurrent(r.current)
+        return r.projects.find((p) => p.default)?.path ?? ''
+      } catch {
+        return null
+      }
+    },
+    [gwForBackend],
+  )
+
+  // 初始：起各机器控制连接（合并会话列表）+ 本地一条新会话连接（聊天流）。
+  // 聊天必须绑定项目——开局不能像从前那样无条件开一条 workspace='' 的空会话：
+  // 有默认项目就直接绑上，没有则打开后立刻转去项目选择器提示，不放行未绑定输入。
   useEffect(() => {
     let disposed = false
     void (async () => {
       await syncBackends()
-      const tid = await openConnection(null, '', 'local')
+      const workspace = (await fetchDefaultProject('local')) || ''
+      const tid = await openConnection(null, workspace, 'local')
       if (!disposed) {
         setActive(tid)
         setConn('open')
+        if (!workspace) {
+          setNeedProjectHint(true)
+          setView('projects')
+        }
       }
     })()
     return () => {
@@ -1234,7 +1266,7 @@ export default function App() {
       connsRef.current = {}
       controlConns.current = {}
     }
-  }, [openConnection, syncBackends])
+  }, [openConnection, syncBackends, fetchDefaultProject])
 
   // BackendsPanel 增删/编辑远程机器后广播此事件 → 重连各机器、刷新合并列表（无 reload）。
   // detail.reconnectId：编辑了某机器的地址/token，需对该机器换址重连（syncBackends 幂等不会重建）。
@@ -1377,7 +1409,41 @@ export default function App() {
     [openConnection, reloadHistory],
   )
 
-  // 在指定机器开新会话（方案甲：边栏每台机器各有「＋新对话」）。空远程也能从此开聊。
+  const openProjects = useCallback(() => {
+    setNeedProjectHint(false) // 用户主动点「项目」标签，不是被新建会话逼过来的，不提示
+    setView('projects')
+    void refreshProjects(projectsMachine)
+  }, [refreshProjects, projectsMachine])
+
+  // 项目视图切机器（先选机器）
+  const selectProjectsMachine = useCallback(
+    (machine: string) => {
+      setProjectsMachine(machine)
+      void refreshProjects(machine)
+    },
+    [refreshProjects],
+  )
+
+  // 聊天必须绑定项目：无默认项目时阻断式跳去项目选择器，不放行空 workspace 会话。
+  // 不做"有活跃项目就复用"的图方便捷径——workspaceDir 只是镜像当前会话绑的目录，
+  // 可能是旧版本 cwd 兜底遗留、从未登记进项目列表，拿它当"合法当前项目"复用等于
+  // 复活刚堵掉的口子。真正安全的复用信号是后端书签列表里显式登记的 default 项目。
+  const requireProject = useCallback(
+    (backend?: string, opts?: { skipRefresh?: boolean }) => {
+      if (backend && backend !== projectsMachine) {
+        // skipRefresh：调用方（goNewChat）已经手头有本 backend 的最新列表，
+        // 不用 selectProjectsMachine 再重新拉一遍 listProjects
+        if (opts?.skipRefresh) setProjectsMachine(backend)
+        else selectProjectsMachine(backend)
+      }
+      setNeedProjectHint(true)
+      setView('projects')
+    },
+    [projectsMachine, selectProjectsMachine],
+  )
+
+  // 在指定机器开新会话（方案甲：边栏每台机器各有「＋新对话」）。workspace 须非空——
+  // 调用方（openProject 等）已保证，不再兜底放行空 workspace。
   const newSession = useCallback(
     async (backend = 'local', workspace = '') => {
       setView('chat')
@@ -1386,15 +1452,35 @@ export default function App() {
     },
     [activate, refreshSessions],
   )
+
+  // 指定机器「新建会话」：有登记过的默认项目就直接进，否则阻断去选择器。每次都问
+  // 后端要最新列表（而非信任本地缓存的 projects state）——default 标记可能刚在另一
+  // 台设备/另一个窗口改过。
+  const goNewChat = useCallback(
+    async (backend: string) => {
+      const workspace = await fetchDefaultProject(backend)
+      if (workspace) {
+        await newSession(backend, workspace)
+      } else if (workspace === null) {
+        // 拉取失败（连接波动）：走 requireProject 的 selectProjectsMachine 重新拉取重试
+        requireProject(backend)
+      } else {
+        // 已拿到本机器最新列表（fetchDefaultProject 内已同步 projects state）、确认
+        // 没有默认项目：跳选择器但不用再重新拉一遍刚拿到手的结果
+        requireProject(backend, { skipRefresh: true })
+      }
+    },
+    [fetchDefaultProject, newSession, requireProject],
+  )
   // 稳定引用，让 memo 化的 AppTitleBar 在流式 token 重渲染时不陪跑。
-  const startNewChat = useCallback(() => void newSession(), [newSession])
+  const startNewChat = useCallback(() => void goNewChat(activeBackend), [activeBackend, goNewChat])
 
   useEffect(() => {
     return window.lumi.onMenuAction?.((action) => {
-      if (action === 'new-chat') void newSession()
+      if (action === 'new-chat') startNewChat()
       if (action === 'settings') openSettings()
     })
-  }, [newSession, openSettings])
+  }, [startNewChat, openSettings])
 
   const selectSession = useCallback(
     async (tid: string, backend = 'local') => {
@@ -1409,20 +1495,6 @@ export default function App() {
   )
 
   const openScheduled = useCallback(() => setView('scheduled'), [])
-
-  const openProjects = useCallback(() => {
-    setView('projects')
-    void refreshProjects(projectsMachine)
-  }, [refreshProjects, projectsMachine])
-
-  // 项目视图切机器（先选机器）
-  const selectProjectsMachine = useCallback(
-    (machine: string) => {
-      setProjectsMachine(machine)
-      void refreshProjects(machine)
-    },
-    [refreshProjects],
-  )
 
   // 打开项目 = 在该机器开一条绑定到此项目的新会话（项目经 open 握手随会话绑定，
   // 不再先在共享连接上 setWorkspace 改进程态——那对新会话的独立连接无效）
@@ -1453,6 +1525,10 @@ export default function App() {
     [gwForBackend, openProject],
   )
 
+  // 只删书签列表条目：移除的项目若正是当前会话绑定的目录，该会话本身仍在正常工作
+  // （移除书签不解绑会话），workspaceDir 应继续如实反映它，不能清空——之前在这里
+  // 清空过，结果 workspaceDirRef 和后端仍在上报的 mcp.status.project 对不上，
+  // 该会话真实的 MCP 故障 toast 被误判为"跨项目噪音"而静默吞掉。
   const removeProjectFromList = useCallback(
     (path: string, backend = 'local') => {
       gwForBackend(backend)?.removeProject(path).then((r) => setProjects(r.projects)).catch(() => {})
@@ -1463,6 +1539,16 @@ export default function App() {
   const renameProjectInList = useCallback(
     (path: string, name: string, backend = 'local') => {
       gwForBackend(backend)?.renameProject(path, name).then((r) => setProjects(r.projects)).catch(() => {})
+    },
+    [gwForBackend],
+  )
+
+  const setProjectDefault = useCallback(
+    (path: string, isDefault: boolean, backend = 'local') => {
+      gwForBackend(backend)
+        ?.setDefaultProject(path, isDefault)
+        .then((r) => setProjects(r.projects))
+        .catch(() => {})
     },
     [gwForBackend],
   )
@@ -1683,6 +1769,14 @@ export default function App() {
   const resetRunning = (sid: string) =>
     setStore((s) => (s[sid] ? { ...s, [sid]: { ...s[sid], running: false } } : s))
 
+  // send/runCommand 的统一失败兜底：复位 running 之外必须把后端拒绝原因亮出来——
+  // 之前只 resetRunning 会让「未绑定项目」这类拒绝表现成消息发了没反应，无声消失
+  const reportSendFailure = (sid: string, err: unknown) => {
+    resetRunning(sid)
+    const message = err && typeof err === 'object' && 'message' in err ? String(err.message) : ''
+    if (message) toast.error(message)
+  }
+
   const send = () => {
     const text = input.trim()
     const imgs = attachments.filter((a) => a.kind === 'image')
@@ -1718,7 +1812,7 @@ export default function App() {
     if (attachments.length === 0 && text.startsWith('/')) {
       const [name, extra] = parseCommand(text)
       if (commands.some((c) => c.name === name)) {
-        gw.runCommand(name, extra, toolMode).catch(() => resetRunning(active))
+        gw.runCommand(name, extra, toolMode).catch((err) => reportSendFailure(active, err))
         return
       }
     }
@@ -1755,7 +1849,7 @@ export default function App() {
       }
       payload = blocks
     }
-    gw.sendMessage(payload, toolMode, filePaths).catch(() => resetRunning(active))
+    gw.sendMessage(payload, toolMode, filePaths).catch((err) => reportSendFailure(active, err))
   }
 
   // 中止当前流式轮：后端取消 task 并补发 turn.complete，running 随之复位
@@ -2116,8 +2210,8 @@ export default function App() {
         activeCronJob={view === 'cronjob' ? activeCronJob : null}
         onOpenCronJob={openCronJob}
         onSelect={selectSession}
-        onNew={() => void newSession()}
-        onNewChat={(backend) => void newSession(backend)}
+        onNew={() => startNewChat()}
+        onNewChat={(backend) => void goNewChat(backend)}
         onReconnectMachine={(backend) => void reconnectMachine(backend)}
         onOpenProjects={openProjects}
         onOpenScheduled={openScheduled}
@@ -2182,6 +2276,7 @@ export default function App() {
             current={projectsCurrent}
             machines={machines}
             machine={projectsMachine}
+            needProjectHint={needProjectHint}
             onSelectMachine={selectProjectsMachine}
             onOpen={(p) => void openProject(p, projectsMachine)}
             onNew={() => setShowNewProject(true)}
@@ -2189,6 +2284,7 @@ export default function App() {
               setPendingRemoveProject(projects.find((p) => p.path === path) ?? null)
             }
             onRename={(path, name) => renameProjectInList(path, name, projectsMachine)}
+            onSetDefault={(path, isDefault) => setProjectDefault(path, isDefault, projectsMachine)}
           />
         ) : view === 'scheduled' ? (
           <CronPage

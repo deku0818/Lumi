@@ -55,3 +55,45 @@ def test_remove_and_rename(tmp_path):
 def test_touch_unknown_path_ignored():
     projects.touch_project("/nonexistent")
     assert projects.list_projects() == []
+
+
+def test_set_default_switches_exclusively(tmp_path):
+    (tmp_path / "a").mkdir()
+    (tmp_path / "b").mkdir()
+    a = projects.add_project(str(tmp_path / "a"))[0]["path"]
+    b = projects.add_project(str(tmp_path / "b"))[0]["path"]
+    result = projects.set_default_project(a, True)
+    by_path = {p["path"]: p for p in result}
+    assert by_path[a]["default"] is True
+    assert by_path[b]["default"] is False
+    # 设新的默认自动顶掉旧的
+    result = projects.set_default_project(b, True)
+    by_path = {p["path"]: p for p in result}
+    assert by_path[a]["default"] is False
+    assert by_path[b]["default"] is True
+
+
+def test_unset_default(tmp_path):
+    (tmp_path / "a").mkdir()
+    path = projects.add_project(str(tmp_path / "a"))[0]["path"]
+    projects.set_default_project(path, True)
+    result = projects.set_default_project(path, False)
+    assert result[0]["default"] is False
+
+
+def test_unset_unrelated_path_does_not_clear_real_default(tmp_path):
+    (tmp_path / "a").mkdir()
+    (tmp_path / "b").mkdir()
+    a = projects.add_project(str(tmp_path / "a"))[0]["path"]
+    b = projects.add_project(str(tmp_path / "b"))[0]["path"]
+    projects.set_default_project(b, True)
+    # 对 a（本来就不是默认）取消默认，不该连带清掉 b 的默认
+    result = projects.set_default_project(a, False)
+    by_path = {p["path"]: p for p in result}
+    assert by_path[a]["default"] is False
+    assert by_path[b]["default"] is True
+
+
+def test_set_default_missing_path_raises(tmp_path):
+    with pytest.raises(ValueError):
+        projects.set_default_project(str(tmp_path / "nope"), True)

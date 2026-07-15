@@ -53,6 +53,7 @@ class FakeBridge:
         self.current_thread_id = "t-1"
         self.model_name = "fake-model"
         self.workspace_dir = "/fake/project"  # 项目随会话绑定后 gateway.ready 取它
+        self.workspace_bound = True  # 已绑定项目：send_message/run_command 关卡放行
         self.mcp_pool_key = lambda: "/fake/project"  # mcp.status 按连接过滤的匹配键
         self.mcp_status_payload = lambda: None  # 无已完成的池加载：注册后不补发
         self._events = events or []
@@ -87,6 +88,12 @@ class FakeBridge:
 
     def switch_thread(self, tid) -> None:
         self.current_thread_id = tid
+
+    def mark_workspace_bound(self) -> None:
+        self.workspace_bound = True
+
+    def mark_workspace_unbound(self) -> None:
+        self.workspace_bound = False
 
     async def stream_command(self, name, *, extra_text="", tool_mode="default"):
         for evt in self._events:
@@ -160,6 +167,7 @@ async def test_start_emits_gateway_ready():
         assert params["payload"] == {
             "model": "fake-model",
             "workspace": ANY_WORKSPACE,
+            "workspace_bound": True,
             "running": False,  # start 时无活跃轮
         }
     finally:
@@ -207,6 +215,23 @@ async def test_streaming_send_message_pumps_events_then_result():
         # 末尾响应帧
         assert {"id": 1, "result": {"ok": True}} in channel.responses()
         assert bridge.stream_response_calls[0]["content"] == "hello"
+    finally:
+        await session.aclose()
+
+
+async def test_send_message_rejected_when_workspace_unbound():
+    bridge = FakeBridge()
+    bridge.workspace_bound = False
+    session, channel = _make_session(bridge)
+    await session.start()
+    try:
+        await session.handle_frame(
+            {"id": 1, "method": "send_message", "params": {"content": "hello"}}
+        )
+        assert channel.responses() == [
+            {"id": 1, "error": {"message": "请先选择项目再开始对话"}}
+        ]
+        assert bridge.stream_response_calls == []
     finally:
         await session.aclose()
 

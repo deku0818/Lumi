@@ -34,6 +34,7 @@ from lumi.gateway.projects import (
     list_projects,
     remove_project,
     rename_project,
+    set_default_project,
     touch_project,
 )
 from lumi.gateway.protocol import bridge_event_to_wire, event_frame
@@ -324,6 +325,14 @@ async def _rename_project(session: GatewaySession, params: dict) -> dict:
     return {"projects": rename_project(params.get("path", ""), params.get("name", ""))}
 
 
+async def _set_default_project(session: GatewaySession, params: dict) -> dict:
+    return {
+        "projects": set_default_project(
+            params.get("path", ""), bool(params.get("default"))
+        )
+    }
+
+
 # 远程目录浏览器：在「本后端」文件系统上浏览/建目录。前端按机器经各自控制连接调用，
 # 故对远程机器即浏览远程文件系统（创建远程项目时选/建目录用）。
 async def _list_dir(session: GatewaySession, params: dict) -> dict:
@@ -386,22 +395,37 @@ async def _switch_session(session: GatewaySession, params: dict) -> dict:
     # 死等。只有真正切到「不同 thread」才需先收尾当前轮（单 bridge 单 run.task 的限制）。
     if tid == session._bridge.current_thread_id and session.has_active_turn():
         return {"thread_id": tid}
-    if tid != session._bridge.current_thread_id:
+    changing_thread = tid != session._bridge.current_thread_id
+    if changing_thread:
         await session._finalize_active_turn(wait=True)
     async with session._run.lock:
         # 先切 thread 再绑项目：set_workspace 关的是 current_thread 的 shell，必须等
         # current_thread 已是切入的 tid，否则会关到切出会话的 shell、而切入会话的陈旧
         # shell 不被重置（见 review #9）。
         session._bridge.switch_thread(tid)
+        # 绑定态不跟着 thread 走（switch_thread 不碰它）：本轮是否重新确认过绑定，
+        # 统一在这三个分支后判定，换了新 thread 又没确认过就清绑定态——不留分支缝隙
+        # 沿用上一个 thread 的绑定态（旧写法按「失败」「未带 workspace」各写一次
+        # mark_workspace_unbound，漏了「workspace 已等于当前引擎目录，跳过 set_workspace」
+        # 这个分支，此时绑定态本该确认为真却原样留着换 thread 前的旧值）。
+        bound_this_call = False
         if workspace and workspace != session._bridge.workspace_dir:
             # 项目目录可能已被删/改名：绑定失败也要继续切会话，否则整个 RPC 报错、
             # 前端切会话卡死。降级为「不绑项目，仍打开会话」。
             try:
                 await session._bridge.set_workspace(workspace)
+                bound_this_call = True
             except (ValueError, OSError) as e:
                 logger.warning(
                     "switch_session 绑定项目目录失败(%s)，仅切会话: %s", workspace, e
                 )
+        elif workspace:
+            # 请求的 workspace 已经就是引擎当前指向的目录：等效于已确认绑定，
+            # 不必再走一次 set_workspace
+            session._bridge.mark_workspace_bound()
+            bound_this_call = True
+        if changing_thread and not bound_this_call:
+            session._bridge.mark_workspace_unbound()
     return {"thread_id": tid}
 
 
@@ -521,6 +545,7 @@ _RPC_HANDLERS = {
     "add_project": _add_project,
     "remove_project": _remove_project,
     "rename_project": _rename_project,
+    "set_default_project": _set_default_project,
     "list_dir": _list_dir,
     "make_dir": _make_dir,
     "add_folder": _add_folder,
@@ -585,6 +610,10 @@ class GatewaySession:
             {
                 "model": self._bridge.model_name,
                 "workspace": self._bridge.workspace_dir,
+                # workspace 未绑定时仍会给出进程 cwd 兜底值（仅供展示），前端须据此区分
+                # "真绑定的项目" 与 "兜底路径"——否则未绑定会话会把兜底 cwd 误当项目存进
+                # workspaceDir，污染侧栏分组等展示。
+                "workspace_bound": self._bridge.workspace_bound,
                 # 续接时本会话可能仍挂着活跃 / 审批轮：带上运行态，让重连 / 重载后的前端恢复
                 # running（否则 stop 隐藏、输入栏当空闲启用、续跑正文以非运行态渲染）。
                 "running": self.has_active_turn(),
@@ -687,6 +716,16 @@ class GatewaySession:
                 if rid is not None:
                     await self._channel.send(
                         {"id": rid, "error": {"message": "已有任务在执行"}}
+                    )
+                return
+            # 权威关卡（send_message + run_command 均覆盖，见上方 _STREAMING_METHODS）：
+            # 未绑定项目（open 未带 workspace 且未调过 set_workspace）一律拒绝——否则会静默
+            # 落在 workspace_dir 兜底的进程 cwd 上，工作区边界形同虚设。前端已引导先选项目，
+            # 这里兜底防绕过（见 desktop App.tsx 的 requireProject/goNewChat）。
+            if not self._bridge.workspace_bound:
+                if rid is not None:
+                    await self._channel.send(
+                        {"id": rid, "error": {"message": "请先选择项目再开始对话"}}
                     )
                 return
             self._run.task = asyncio.create_task(

@@ -18,6 +18,7 @@
         add_project     params: {path}                                    → {projects:[...]}
         remove_project  params: {path}                                    → {projects:[...]}
         rename_project  params: {path, name}                              → {projects:[...]}
+        set_default_project params: {path, default}  # 「新建会话」直接落地的项目，至多一个 → {projects:[...]}
         add_folder      params: {path}                                    → {folders:[...]}  # 本会话临时
         remove_folder   params: {path}                                    → {folders:[...]}
         list_sessions   params: {limit?}                                  → {sessions:[...]}

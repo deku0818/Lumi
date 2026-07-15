@@ -36,6 +36,7 @@ class FolderManager:
         if not target.is_dir():
             raise ValueError(f"目录不存在: {target}")
         self.rebase_workspace(target)
+        b.mark_workspace_bound()
         b.retarget_mcp(target)
         # checkpoint 元数据跟随新项目（下一轮 checkpoint 用新目录）
         if b._config is not None:

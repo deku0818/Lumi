@@ -438,27 +438,20 @@ body.resizing-col * {
 }
 .subagent-dot-done { background: var(--color-success); opacity: .8; }
 
-/* ── 项目卡片：当前项目名旁一粒静止金点；卡片切换/进入页面时光环扩散一次
-   （一静一动：平时全静，变化的一瞬用「光」反馈） ── */
+/* ── 项目卡片：默认项目（新建会话直接落地的项目）名旁一颗静止金星；挂载/设为默认
+   那一刻光环扩散一次（一静一动：平时全静，变化的一瞬用「光」反馈） ── */
 @keyframes lumi-ripple-once {
   0% { transform: scale(0.5); opacity: 0.9; }
   80% { transform: scale(2.4); opacity: 0; }
   100% { opacity: 0; }
 }
-.proj-dot { position: relative; width: 8px; height: 8px; flex: none; display: inline-block; }
-.proj-dot::after {
-  content: ''; position: absolute; inset: 1.5px; border-radius: 50%;
-  background: radial-gradient(circle,
-    color-mix(in srgb, var(--color-accent) 35%, white) 0%,
-    var(--color-accent) 60%,
-    color-mix(in srgb, var(--color-accent) 40%, transparent) 100%);
-  box-shadow: 0 0 6px color-mix(in srgb, var(--color-accent) 80%, transparent);
-  opacity: 0.85;
-}
-.proj-dot::before {
-  content: ''; position: absolute; inset: -1px; border-radius: 50%;
+.proj-star { color: var(--color-accent); filter: drop-shadow(0 0 4px color-mix(in srgb, var(--color-accent) 70%, transparent)); }
+/* 光环挂在图标外层 wrapper 的 ::after 上（同 .proj-dot/.scroll-jump 的一贯做法），
+   不必为它专开一个 sibling span */
+.proj-star-wrap::after {
+  content: ''; position: absolute; inset: -3px; border-radius: 50%;
   border: 1.5px solid color-mix(in srgb, var(--color-accent) 60%, transparent);
-  opacity: 0; animation: lumi-ripple-once 0.9s ease-out 1;
+  opacity: 0; animation: lumi-ripple-once 0.8s ease-out 1;
 }
 
 

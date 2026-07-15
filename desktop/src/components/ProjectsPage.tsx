@@ -3,10 +3,12 @@ import {
   Check,
   ChevronDown,
   Folder,
+  Info,
   MoreVertical,
   Pencil,
   Plus,
   Search,
+  Star,
   Trash2,
 } from 'lucide-react'
 import type { Project } from '../types'
@@ -24,28 +26,33 @@ import {
 
 type SortKey = 'recent' | 'name'
 
-// 项目管理页（交互定稿见 .demos/lumi-projects.html）：搜索 + 排序 + 卡片网格。
-// 当前项目卡片金描边 + 名旁静止金点（挂载时光环一闪）；点击卡片切换项目。
+// 项目管理页（交互定稿见 .demos/lumi-projects.html、.demos/default-project.html）：
+// 搜索 + 排序 + 卡片网格。当前项目卡片金描边；默认项目（新建会话直接落地的项目）
+// 名旁挂静止金星（挂载/设为默认那一刻光环一闪，方案 A）；点击卡片切换项目。
 export function ProjectsPage({
   projects,
   current,
   machines,
   machine,
+  needProjectHint,
   onSelectMachine,
   onOpen,
   onNew,
   onRemove,
   onRename,
+  onSetDefault,
 }: {
   projects: Project[]
   current: string
   machines: { id: string; name: string }[]
   machine: string
+  needProjectHint?: boolean
   onSelectMachine: (id: string) => void
   onOpen: (path: string) => void
   onNew: () => void
   onRemove: (path: string) => void
   onRename: (path: string, name: string) => void
+  onSetDefault: (path: string, isDefault: boolean) => void
 }) {
   const { t } = useI18n()
   const [query, setQuery] = useState('')
@@ -92,6 +99,13 @@ export function ProjectsPage({
 
         <MachineTabs machines={machines} value={machine} onChange={onSelectMachine} />
 
+        {needProjectHint && (
+          <div className="mb-5 flex items-center gap-2.5 rounded-xl border border-info/25 bg-info/10 px-3.5 py-2.5 text-xs text-ink">
+            <Info size={14} className="shrink-0 text-info" />
+            {t('projects.needProjectHint')}
+          </div>
+        )}
+
         <div className="flex items-center gap-2.5 mb-5 rounded-xl bg-surface border border-line/50 px-3.5 py-2.5 text-muted-foreground focus-within:border-primary/40 transition-colors">
           <Search size={14} className="shrink-0" />
           <input
@@ -121,6 +135,7 @@ export function ProjectsPage({
                   setRenaming(null)
                   if (name !== null) onRename(p.path, name)
                 }}
+                onSetDefault={(isDefault) => onSetDefault(p.path, isDefault)}
               />
             ))}
           </div>
@@ -138,6 +153,7 @@ function ProjectCard({
   onRemove,
   onRenameStart,
   onRenameDone,
+  onSetDefault,
 }: {
   project: Project
   active: boolean
@@ -146,6 +162,7 @@ function ProjectCard({
   onRemove: (path: string) => void
   onRenameStart: () => void
   onRenameDone: (name: string | null) => void
+  onSetDefault: (isDefault: boolean) => void
 }) {
   const { t, lang } = useI18n()
   return (
@@ -165,7 +182,11 @@ function ProjectCard({
           ) : (
             <span className="truncate text-[13.5px] font-semibold">{project.name}</span>
           )}
-          {active && !renaming && <span className="proj-dot" />}
+          {project.default && !renaming && (
+            <span className="relative inline-flex shrink-0 proj-star-wrap" title={t('projects.default')}>
+              <Star size={13} className="proj-star" fill="currentColor" />
+            </span>
+          )}
         </div>
         <div
           className="mt-2 truncate text-[11.5px] text-muted-foreground font-mono"
@@ -190,6 +211,13 @@ function ProjectCard({
           <DropdownMenuItem onClick={onRenameStart}>
             <Pencil />
             {t('projects.rename')}
+          </DropdownMenuItem>
+          <DropdownMenuItem
+            className={project.default ? 'text-primary [&_svg]:text-primary' : ''}
+            onClick={() => onSetDefault(!project.default)}
+          >
+            <Star fill={project.default ? 'currentColor' : 'none'} />
+            {t(project.default ? 'projects.unsetDefault' : 'projects.setDefault')}
           </DropdownMenuItem>
           <DropdownMenuItem variant="destructive" onClick={() => onRemove(project.path)}>
             <Trash2 />
