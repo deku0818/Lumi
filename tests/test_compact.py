@@ -22,6 +22,7 @@ from lumi.agents.core.preprocessing.compact import (
     build_compacted_update,
     is_circuit_open,
     is_ptl_error,
+    messages_have_media,
     record_circuit_failure,
     reset_circuit,
     select_for_compaction,
@@ -172,6 +173,82 @@ async def test_summarize_retries_on_ptl_then_succeeds():
     assert content == "摘要"
     assert attempts == 1
     assert chain.ainvoke.await_count == 2
+
+
+async def test_summarize_strips_images_before_truncating_on_ptl():
+    # 首次带原图撞 PTL → 第一档缓解剥图（不截头），剥图后成功
+    img_human = HumanMessage(
+        content=[
+            {"type": "text", "text": "看图"},
+            {"type": "image", "source": {"data": "BIGBASE64"}},
+        ]
+    )
+    msgs = [img_human, AIMessage(content="a1"), HumanMessage(content="h1")]
+    seen: list = []
+
+    async def _invoke(payload):
+        work = payload["messages"]
+        seen.append(work)
+        if messages_have_media(work):  # 首次仍带图 → PTL
+            raise PTLError("prompt is too long")
+        return AIMessage(content="摘要")
+
+    chain = AsyncMock()
+    chain.ainvoke = AsyncMock(side_effect=_invoke)
+    content, attempts = await summarize_with_ptl_retry(
+        msgs, "PROMPT", chain, max_retry=3, drop_ratio=0.3
+    )
+    assert content == "摘要"
+    assert attempts == 1  # 剥图算一次重试
+    assert chain.ainvoke.await_count == 2
+    # 第一次带原图（含 image block），第二次图已被剥为 [image] 文本占位
+    assert messages_have_media(seen[0])
+    assert not messages_have_media(seen[1])
+
+
+async def test_run_summary_transforms_media_for_non_anthropic():
+    # OpenAI 协议模型：摘要首次调用须把 image block 转成 image_url，不漏发 Anthropic 原生格式
+    from unittest.mock import patch
+
+    img_human = HumanMessage(
+        content=[
+            {"type": "text", "text": "看图"},
+            {
+                "type": "image",
+                "source": {"type": "base64", "media_type": "image/png", "data": "B64"},
+            },
+        ]
+    )
+    captured: dict = {}
+
+    class _Chain:
+        async def ainvoke(self, payload):
+            captured["messages"] = payload["messages"]
+            return AIMessage(content="摘要")
+
+    with (
+        patch("lumi.models.chain.tool_call_chain", return_value=_Chain()),
+        patch(
+            "lumi.agents.core.response.get_default_model_name",
+            return_value="gpt-4o",
+        ),
+    ):
+        text, _ = await compact.run_summary(
+            [img_human],
+            "PROMPT",
+            tools=[],
+            system_prompt="SYS",
+            model_name="gpt-4o",
+            max_retry=2,
+            drop_ratio=0.3,
+        )
+    assert text == "摘要"
+    sent = captured["messages"][0].content
+    assert {
+        "type": "image",
+        "source": {"type": "base64", "media_type": "image/png", "data": "B64"},
+    } not in sent
+    assert any(isinstance(b, dict) and b.get("type") == "image_url" for b in sent)
 
 
 async def test_summarize_non_ptl_error_raises_immediately():

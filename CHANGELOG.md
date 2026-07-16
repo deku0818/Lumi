@@ -1,5 +1,11 @@
 # Changelog
 
+## [0.2.49] - 2026-07-16
+
+### Fixed
+- **summary 无条件剥图击穿热缓存** — `run_summary` 原先每次都先 `strip_images_from_messages` 把图替换为 `[image]`，导致送进摘要模型的 messages 从第一张图起偏离主循环写下的滚动缓存断点、砸掉在线 summarizer 本可命中的热缓存读（整段历史被迫全量重算）。现改为**首次带原图**（与主循环缓存字节一致、近乎免费），剥图降级为撞 PTL 时的**第一档缓解**（保全文字、只丢图、仅一次），仍 PTL 再按 round 截头
+- **非 Anthropic 模型 summary 图片格式漏转** — 摘要路径此前靠无条件剥图顺带回避了多模态格式问题；去掉预剥后补上与 `call_model` 同法的 `message_transform`（对直连 Anthropic 恒等、缓存字节不变，对 OpenAI/Bedrock 归一化为各自图片格式），避免以 Anthropic 原生 `image` block 直发 OpenAI 触发 400
+
 ## [0.2.48] - 2026-07-15
 
 ### Fixed

@@ -126,10 +126,19 @@ def _has_media_block(content: list) -> bool:
     )
 
 
+def messages_have_media(msgs: list[BaseMessage]) -> bool:
+    """列表中是否有任一消息含 image / document block。"""
+    return any(
+        isinstance(m.content, list) and _has_media_block(m.content) for m in msgs
+    )
+
+
 def strip_images_from_messages(msgs: list[BaseMessage]) -> list[BaseMessage]:
     """把 image / document block 替换为 ``[image]`` / ``[document]`` 文本占位。
 
-    summary 不需要看图，剥掉防 summary 调用本身撞 PTL（图片单 block ~2K token）。
+    仅在 summary 调用撞 PTL 时作为**第一档缓解**（保全文字、只丢图，比截头损失小），
+    不再无条件预剥——预剥会让 messages 偏离主循环写下的滚动缓存断点、砸掉在线
+    summarizer 本可命中的热缓存读（见 :func:`summarize_with_ptl_retry`）。
     无图消息原样放行不复制；只对真有图/文档的消息做 model_copy。
     """
     result: list[BaseMessage] = []
@@ -157,13 +166,17 @@ async def summarize_with_ptl_retry(
     max_retry: int,
     drop_ratio: float,
 ) -> tuple[object, int]:
-    """主入口：调 chain → PTL → 截头 → 再调，直到成功或超 ``max_retry``。
+    """主入口：调 chain → PTL →（先剥图，再截头）→ 再调，直到成功或超 ``max_retry``。
+
+    首次尝试带原图，让在线 summarizer 命中主循环的热消息缓存；仅当撞 PTL 时才逐档
+    缓解：第一档剥图（保全文字、只丢图，仅一次），仍 PTL 再按 round 截头。
 
     返回 ``(response_content, ptl_retry_count)``；``response_content`` 是 raw
     AIMessage.content，调用方负责 ``extract_ainvoke_content``。
     """
     work = list(messages_to_summarize)
     attempt = 0
+    stripped = False
     while True:
         try:
             response = await chain.ainvoke(
@@ -173,6 +186,11 @@ async def summarize_with_ptl_retry(
         except Exception as e:
             if attempt >= max_retry or not is_ptl_error(e):
                 raise
+            if not stripped and messages_have_media(work):
+                work = strip_images_from_messages(work)
+                stripped = True
+                attempt += 1
+                continue
             truncated = truncate_head_for_ptl_retry(work, drop_ratio)
             if truncated is None:
                 raise
@@ -190,22 +208,35 @@ async def run_summary(
     max_retry: int,
     drop_ratio: float,
 ) -> tuple[str, int]:
-    """跑一次摘要：strip 图 → 缓存安全的 tool_call_chain → PTL 截头重试 → 提取文本。
+    """跑一次摘要：缓存安全的 tool_call_chain → 带原图调用 → PTL 时先剥图再截头 → 提取文本。
 
     summarizer 节点与离线 ``AgentBridge.compact_thread`` 共用这段（缓存安全的分叉：与主对话
-    相同的 system_prompt + tools 前缀复用 Prompt Caching，摘要本身不调工具）。**不含**节点专属
-    的熔断 / 阈值——调用方按需包裹。返回 ``(summary_text, ptl_retries)``。
+    相同的 system_prompt + tools 前缀复用 Prompt Caching，摘要本身不调工具）。首次带原图，
+    使在线 summarizer 命中主循环写下的滚动消息缓存（字节一致才读得到）；图仅在撞 PTL 时才由
+    ``summarize_with_ptl_retry`` 剥除。**不含**节点专属的熔断 / 阈值——调用方按需包裹。
+    返回 ``(summary_text, ptl_retries)``。
+
+    多模态 block 与 ``call_model`` 同法 ``message_transform``（按 provider 归一化图片
+    格式）：对直连 Anthropic 是恒等（内容不变、缓存字节不受影响），对 OpenAI/Bedrock
+    转成各自格式——既发得对，又与主循环发出的字节一致、同样命中缓存。
     """
     # 函数级 import 避开 compact（早被 nodes import）→ chain/response 的潜在环
-    from lumi.agents.core.response import extract_ainvoke_content
+    from lumi.agents.core.response import extract_ainvoke_content, message_transform
     from lumi.models.chain import tool_call_chain
 
-    cleaned = strip_images_from_messages(messages)
+    transformed: list = []
+    for m in messages:
+        if isinstance(m, HumanMessage) and isinstance(m.content, list):
+            new_content = await message_transform(m.content, model_name=model_name)
+            transformed.append(m.model_copy(update={"content": new_content}))
+        else:
+            transformed.append(m)
+
     chain = tool_call_chain(
         tools, system_prompt=system_prompt, model_name=model_name, streaming=False
     )
     raw_content, ptl_retries = await summarize_with_ptl_retry(
-        cleaned, prompt, chain, max_retry=max_retry, drop_ratio=drop_ratio
+        transformed, prompt, chain, max_retry=max_retry, drop_ratio=drop_ratio
     )
     return extract_ainvoke_content(raw_content), ptl_retries
 
