@@ -335,7 +335,9 @@ async def _run_dream_fork(
             set_run_authorized_source_for(ctx.permission_engine)
             set_run_config_hooks(None)
             result = await agent.graph.ainvoke(inputs, context=ctx)
-            normalize_memory_index(project_dir)  # 兜底规范化索引行的 [type · 日期]
+            normalize_memory_index(
+                project_dir
+            )  # 兜底剥索引行旧 [tag]、日期回填 frontmatter
             # 综合成功才推进快照时刻（失败则不动，下次仍按旧边界判活）
             record()
             msgs = result.get("messages") or []
@@ -376,8 +378,8 @@ def _consolidation_prompt(transcript_dir: Path) -> str:
   碎片综合成连贯记忆。若发现明显被现状推翻的过时事实，就地更正。
 
 ## 阶段 4 — 收尾索引
-更新 MEMORY.md：每条指针一行 `- [标题](文件.md) [type · 写入日期] — 钩子`，保持精简
-（删除已失效的指针、为新记忆补指针）。
+更新 MEMORY.md（索引行写法按系统提示「持久记忆」段，不另立标准）：删除已失效的指针、
+为新记忆补指针，顺手把只写了主题词的旧索引行改写成结论，保持精简。
 
 最后用一两句话总结你综合 / 更新 / 删除了什么；若记忆已经很紧凑、无事可做，直说即可。"""
 
@@ -411,7 +413,7 @@ def _consolidation_prompt_session() -> str:
   你只负责把碎片综合成连贯记忆。若发现明显被现状推翻的过时事实，就地更正。
 
 ## 阶段 4 — 收尾索引
-更新 MEMORY.md：每条指针一行 `- [标题](文件.md) [type · 写入日期] — 钩子`，保持精简
-（删除已失效的指针、为新记忆补指针）。
+更新 MEMORY.md（索引行写法按系统提示「持久记忆」段，不另立标准）：删除已失效的指针、
+为新记忆补指针，顺手把只写了主题词的旧索引行改写成结论，保持精简。
 
 最后用一两句话总结你综合 / 更新 / 删除了什么；若无事可做，直说即可。"""

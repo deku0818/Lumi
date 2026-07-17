@@ -1,5 +1,11 @@
 # Changelog
 
+## [0.2.50] - 2026-07-17
+
+### Changed
+- **MEMORY.md 索引行即结论** — 索引行从「主题词钩子」改为「一句结论」（`- [标题](文件.md) — 该怎么做`），只看索引就知道怎么做，topic 文件只留细节；`type` 与写入日期移出索引、归位 topic frontmatter（新增 `date` 字段），矛盾裁决改按 frontmatter 的 `date` 比新旧。dream 提示词阶段 4 不再复述格式、回指系统提示「持久记忆」段（唯一事实源）
+- **`normalize_memory_index` 职责翻转** — 从「补全索引行 `[type · 日期]`」改为迁移收敛：严格匹配的 legacy tag 才剥（正文方括号不碰），剥前把日期回填 topic frontmatter、**回填成功才剥**（文件缺失/无 frontmatter 则原行保留，信息不丢）；插入点与 `parse_frontmatter` 同套边界规则（容忍 BOM/前置空白，不会把 `date` 插到 frontmatter 外）；新格式行缺 `date` 时以 mtime 补近似值，闭合「date 仅提示词约束」的空窗
+
 ## [0.2.49] - 2026-07-16
 
 ### Fixed

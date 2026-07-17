@@ -64,15 +64,19 @@ def build_memory_instructions(memory_dir: Path) -> str:
 name: {{记忆名}}
 description: {{一行描述——未来对话靠它判断相关性，要具体}}
 type: {{user, feedback, project, reference}}
+date: {{写入日期，YYYY-MM-DD，从环境信息里的当前日期取；更新记忆时同步刷新}}
 ---
 
 {{记忆正文；feedback/project 类型在正文后接 **Why:** 与 **How to apply:** 行}}
 ```
 
-2. 在 `{ENTRYPOINT_NAME}` 里加一行指针：`- [标题](文件名.md) [type · 写入日期] — 一行钩子`
-   （如 `- [偏好用 pnpm](feedback_pkg.md) [feedback · 2026-06-20] — 包管理器`）。`type` 取
-   frontmatter 的类型；写入日期用**今天的绝对日期**（YYYY-MM-DD，从环境信息里的当前日期取）。
-   有了 type 与日期，同主题的多条记忆在索引里就能并排比对、一眼看出谁更新。
+2. 在 `{ENTRYPOINT_NAME}` 里加一行指针：`- [标题](文件名.md) — 一句结论`。
+   破折号后写的是**结论本身**（规则 / 决定 / 该怎么做），不是这条记忆的主题词——目标是
+   只看 `{ENTRYPOINT_NAME}` 就知道该怎么做，topic 文件只留细节与来龙去脉。
+   - 正确： `- [偏好用 pnpm](feedback_pkg.md) — 装依赖一律 pnpm，别用 npm/yarn`
+   - 错误： `- [偏好用 pnpm](feedback_pkg.md) — 包管理器偏好`（只说了主题，看完仍不知道该做什么）
+
+   type 与写入日期不进索引，都在 topic 文件的 frontmatter 里。
    `{ENTRYPOINT_NAME}` 是索引不是记忆，每行一条、无 frontmatter，绝不把记忆正文写进去。
 
 - `{ENTRYPOINT_NAME}` 始终注入你的上下文；超过 {MAX_INDEX_LINES} 行会被截断，保持精简。
@@ -97,7 +101,7 @@ type: {{user, feedback, project, reference}}
 同一主题出现多条记忆、结论不一致时，先按情境分组——只有「同一情境下结论相反」才算真冲突
 （如「commit 用中文」与「PR 用英文」是分情境、并不矛盾）。同情境内确有冲突时：
 
-- **user / feedback 类**：取**写入日期最新**的那条，旧的视为已被覆盖，按新的来。
+- **user / feedback 类**：取**写入日期（frontmatter 的 date）最新**的那条，旧的视为已被覆盖，按新的来。
 - **project / reference 类**：可能是状态演化而非对错，结合 **Why:** 行判断；据此行动前先验证现状。
 
 ## 记忆的新鲜度（不对称）

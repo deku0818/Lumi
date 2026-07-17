@@ -24,7 +24,7 @@
 - **project** — 进行中的工作 / 事故 / 决策（相对日期转绝对日期）
 - **reference** — 外部系统指针（Linear、监控看板等）
 
-`MEMORY.md` 是**索引不是记忆**：每行一个指针 `- [标题](文件.md) — 钩子`，无 frontmatter；
+`MEMORY.md` 是**索引不是记忆**：每行一个指针 `- [标题](文件.md) — 一句结论`（破折号后写结论本身而非主题词，只看索引就知道该怎么做），无 frontmatter；
 注入上下文时截断到 200 行。各条记忆正文不随会话注入，只有模型主动 grep/read 时才进上下文。
 
 `~/.lumi/memory/projects/<项目>/` 的项目 key = 项目根绝对路径 sanitize（`/` → `-`，保留可读性，
@@ -119,7 +119,7 @@
    - 不共享 prompt 缓存（LangGraph 无 CC 的 fork-cache 机制；低频任务无所谓）
 6. **后台任务** fire-and-forget，注册 bg-task（面板可取消）；stop hook 不阻塞，照常 `goto END`。
 7. **dream 四阶段**：orient → gather → consolidate → prune。重心 **synthesis**，**不做自由判决** —— **切病根③**。
-8. **收尾**：写/更新记忆 + 规范化 `MEMORY.md`（顺手补全索引行的 `type`+日期，见召回端）；清 `transcriptDir`。
+8. **收尾**：写/更新记忆 + 规范化 `MEMORY.md`（剥 legacy `[type · 日期]` tag、把日期归位到 frontmatter，见召回端）；清 `transcriptDir`。
 
 **Dream 全程 per-project**：lastAt、游标、human 门、导出、写入全部按当前 project（sqlite 按 `project_key` 列隔离）。
 - lastAt/游标存独立 `~/.lumi/checkpoints/dream_state.db`（`dream_meta`/`dream_cursor` 两表，同步 `sqlite3`）：**不放记忆目录**避免清理 `.md` 时误删；原子写；`last_at` 从「文件 mtime 隐式」变显式列。丢失是软失败（退化重数、最坏多跑一次幂等 dream）。
@@ -129,9 +129,9 @@
 
 把「记忆会过时/会矛盾」从整理端挪到召回端，让活模型就着当前 query 当场裁决：
 
-- **索引行带 `type` + 写入日期**：`- [标题](文件.md) [feedback · 2026-06-20] — 钩子`。同主题多条并排、日期不同 → 矛盾在索引层就**自动可见**。用**绝对日期**（非「N 天前」）保证索引行内容确定、不触发无谓的 diff 重注入。
-  - 填法：**主 agent 手写为主 + dream 兜底规范化**（dream prune 阶段本就重写 `MEMORY.md`，顺手统一/补全格式；手写出错由 dream 兜底修）。
-- **判断指引进系统提示**（`build_memory_instructions`）：同情境多条 → 取写入日期最新；据 project/reference 行动前先验证现状。
+- **`type` + 写入日期住 topic 文件 frontmatter**（`date` 字段，绝对日期），索引行只留结论——索引每行都是「该怎么做」，比对新旧才需要打开 topic 文件。
+  - 填法：**主 agent 手写为主 + dream 兜底规范化**（`normalize_memory_index`：剥 legacy `[type · 日期]` tag 并把日期回填 frontmatter——回填成功才剥、信息不丢；新格式行缺 `date` 时以 mtime 补近似值）。
+- **判断指引进系统提示**（`build_memory_instructions`）：同情境多条 → 取写入日期（frontmatter 的 `date`）最新；据 project/reference 行动前先验证现状。
 - **不对称衰减**（落召回，不落 dream）：
   - `user`/`feedback`：**不衰减**，靠「取最新日期」自然覆盖，纯时间流逝不触发任何处理。
   - `project`/`reference`：召回时才提示「验证现状」（CC `memoryAge` 式新鲜度，但只对这两类）。
