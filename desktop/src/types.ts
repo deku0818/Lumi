@@ -285,6 +285,9 @@ export interface FeishuConfig {
   app_secret: string
   allow_from: string[]
   group_policy: 'mention' | 'open'
+  // 运行时配置（对齐后端 ChannelRuntimeConfig，各渠道 config 继承）：模型 / 思考 / 审批 / 项目
+  model: string // 空 = 跟随 desktop 全局 active 模型
+  effort: string // 思考档位（依附 model，仅 model 非空时生效）；auto/low/high/xhigh/ultra…
   tool_mode: 'auto' | 'privileged'
   workspace: string
   daily_dream_enabled: boolean

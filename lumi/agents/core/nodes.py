@@ -78,6 +78,7 @@ async def call_model(
         max_tokens=get_config().config.agents.max_tokens,
         tool_choice=None,
         apply_effort=True,  # 思考档位只在主对话链生效
+        effort=runtime.context.effort,  # 渠道会话的档位覆盖（None=跟随 profile）
     )
     iterations = state.get("iterations", 1)
 

@@ -201,6 +201,23 @@ async def _list_sessions(bridge: AgentBridge, params: dict) -> dict:
     return {"sessions": out}
 
 
+def _snapshot_model_window(messages: list) -> tuple[str, int]:
+    """从末条带模型标记的 AI message 取会话真实模型名及其上下文窗口。
+
+    渠道（飞书等）旁观会话在 desktop 无对应 activeModel，上下文环的分母不能用
+    desktop 当前选中模型的窗口（会算错百分比），须取会话实际所跑模型——response_metadata
+    的 model_name 是权威来源，再经 catalog 查目录得窗口。未知模型返回窗口 0（前端自会隐藏环）。
+    """
+    from lumi.models.catalog import lookup
+
+    for msg in reversed(messages):
+        model = (getattr(msg, "response_metadata", None) or {}).get("model_name")
+        if model:
+            entry = lookup(model)
+            return model, (entry.context_length if entry else 0)
+    return "", 0
+
+
 async def _load_history(bridge: AgentBridge, params: dict) -> dict:
     thread_id = params.get("thread_id", "")
     if bridge.graph is None or not thread_id:
@@ -208,10 +225,14 @@ async def _load_history(bridge: AgentBridge, params: dict) -> dict:
     snap = await bridge.graph.aget_state({"configurable": {"thread_id": thread_id}})
     messages = (snap.values or {}).get("messages", [])
     # usage 随 items 回给前端还原上下文用量指示器（仅存前端内存，重启/切会话后本是空的）；
-    # 复用 bridge 末条 AI usage 提取，口径与流式一致。
+    # 复用 bridge 末条 AI usage 提取，口径与流式一致。model/context_window 供渠道旁观会话
+    # 画上下文环——旁观视图无本地 activeModel，分母须由会话真实模型决定。
+    model, context_window = _snapshot_model_window(messages)
     return {
         "items": _history_items(messages),
         "usage": AgentBridge._extract_last_ai_usage(snap),
+        "model": model,
+        "context_window": context_window,
     }
 
 

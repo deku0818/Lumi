@@ -52,7 +52,11 @@ def _fake_config(summary_prompt: str = "SUMMARY PROMPT"):
 
 _RUNTIME = SimpleNamespace(
     context=SimpleNamespace(
-        tools=[], system_prompt="SYS", model_name="fake-model", memory_enabled=True
+        tools=[],
+        system_prompt="SYS",
+        model_name="fake-model",
+        effort=None,
+        memory_enabled=True,
     )
 )
 _CONFIG = {"configurable": {"thread_id": "ptl-test"}}

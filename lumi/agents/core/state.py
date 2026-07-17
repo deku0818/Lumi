@@ -21,6 +21,10 @@ class LumiAgentContext:
     system_prompt: str = field(default="")
     model_name: str = field(default="")
     """模型名；连接（base_url / api_key）由 create_llm 按供应商 profile 解析。"""
+    effort: str | None = field(default=None)
+    """思考档位覆盖：None = 跟随该模型 profile 的档位（desktop 会话走这条，由 ModelPicker
+    存进 provider_store）；非 None = 强制用此档位、绕过 profile（IM 渠道会话用它独立配置
+    思考模式而不改全局）。auto 表示不注入思考参数，ultra 为 Lumi 顶档。"""
     permission_engine: PermissionEngine | None = field(default=None)
     """PermissionEngine 实例，用于工具权限评估"""
     tool_mode: str = field(default="default")

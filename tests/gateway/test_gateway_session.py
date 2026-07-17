@@ -13,10 +13,11 @@ from __future__ import annotations
 
 import asyncio
 from contextlib import suppress
+from types import SimpleNamespace
 
 from lumi.gateway.bridge import BridgeEvent, EventKind
 from lumi.gateway.broadcast import BroadcastHub
-from lumi.gateway.session import GatewaySession
+from lumi.gateway.session import GatewaySession, _snapshot_model_window
 
 
 class FakeChannel:
@@ -572,3 +573,34 @@ async def _drain(session: GatewaySession) -> None:
     for t in pending:
         with suppress(asyncio.CancelledError, Exception):
             await t
+
+
+# ── _snapshot_model_window：渠道旁观会话上下文环的分母来源 ──────────────
+
+
+def _msg(model: str | None):
+    """构造带/不带 model_name 标记的鸭子类型消息。"""
+    meta = {"model_name": model} if model is not None else {}
+    return SimpleNamespace(response_metadata=meta)
+
+
+def test_snapshot_model_window_takes_last_labeled_model(monkeypatch):
+    """回溯取末条带 model_name 的消息，并经 catalog 得其窗口。"""
+    monkeypatch.setattr(
+        "lumi.models.catalog.lookup",
+        lambda name: SimpleNamespace(context_length=1_000_000) if name == "qwen3.7-plus" else None,
+    )
+    messages = [_msg("old-model"), _msg("qwen3.7-plus"), _msg(None)]
+    assert _snapshot_model_window(messages) == ("qwen3.7-plus", 1_000_000)
+
+
+def test_snapshot_model_window_unknown_model_yields_zero(monkeypatch):
+    """模型不在目录（catalog 返回 None）→ 窗口 0，前端据此隐藏环。"""
+    monkeypatch.setattr("lumi.models.catalog.lookup", lambda name: None)
+    assert _snapshot_model_window([_msg("mystery-llm")]) == ("mystery-llm", 0)
+
+
+def test_snapshot_model_window_no_labeled_message():
+    """无任何带 model_name 的消息 → ("", 0)，不触碰 catalog。"""
+    assert _snapshot_model_window([_msg(None), _msg(None)]) == ("", 0)
+    assert _snapshot_model_window([]) == ("", 0)

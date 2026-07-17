@@ -80,7 +80,9 @@ class FeishuChannel:
             None  # 启动失败原因（未装 lark / 缺凭证 / 异常）→ UI 状态灯
         )
         # 会话池由 ChannelManager 注入并跨传输重连复用；独立构造（如测试）时自建一个。
-        self.bridge_pool = bridge_pool or BridgePool(config.workspace)
+        self.bridge_pool = bridge_pool or BridgePool(
+            config.workspace, model=config.model, effort=config.effort
+        )
         self.inbound = FeishuInbound(self)
         self.streaming = FeishuStreaming(self)
         # 成员/群名解析（open_id → 显示名）：client 在 start() 注入，发送者前缀靠它解析。

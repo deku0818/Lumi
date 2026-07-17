@@ -57,7 +57,7 @@
     "list_sessions": { "params": ["limit?"], "result": ["sessions"], "note": "跨所有项目返回（不按当前 cwd 过滤）；每条 session 含 workspace_dir（前端按机器→项目分组）、channel（IM 渠道标识，空=desktop 会话）、channel_kind（group/p2p，图标区分）" },
     "new_session": { "params": ["workspace?"], "result": ["thread_id"], "note": "workspace 指定新会话所属项目目录，省略=当前 cwd" },
     "switch_session": { "params": ["thread_id", "workspace?"], "result": ["thread_id"], "note": "workspace=该会话所属项目，切入时把进程 cwd 切过去" },
-    "load_history": { "params": ["thread_id"], "result": ["items"] },
+    "load_history": { "params": ["thread_id"], "result": ["items", "usage?", "model?", "context_window?"], "note": "usage/model/context_window 用于还原上下文用量环；渠道旁观会话分母取会话真实模型窗口（context_window）" },
     "pin_session": { "params": ["thread_id", "pinned"], "result": ["thread_id", "pinned"] },
     "rename_session": { "params": ["thread_id", "title"], "result": ["thread_id", "title"] },
     "delete_session": { "params": ["thread_id"], "result": ["thread_id"] },

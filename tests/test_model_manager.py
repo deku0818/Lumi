@@ -149,3 +149,35 @@ def test_effort_qwen_effort_type_off_still_disables_thinking(catalog):
     # 无思考能力的 qwen（control=none）off 仍返 {}——不注入它可能不认的 enable_thinking
     assert allowed_levels("qwen3-max") == ("auto",)
     assert effort_params("qwen3-max", "off") == {}
+
+
+def test_create_llm_effort_override(catalog, monkeypatch):
+    """create_llm(effort=X) 覆盖 profile 档位；effort=None 沿用 resolve() 解析出的档位。
+
+    这是 IM 渠道独立配置思考档位的机制：绕过 provider_store 的 profile.effort，
+    不改全局。这里拦截 effort_params 记录实际生效的 level，并把 LLM 构造桩掉。
+    """
+    from lumi.models import manager
+    from lumi.models.provider_store import ResolvedModel
+
+    # profile 档位为 low（resolve 返回）；连接留空走 resolve 分支
+    monkeypatch.setattr(
+        "lumi.models.provider_store.resolve",
+        lambda name=None: ResolvedModel("claude-opus-4-6", "", "", "low"),
+    )
+    seen: list[str] = []
+    monkeypatch.setattr(
+        manager, "effort_params", lambda model, level: seen.append(level) or {}
+    )
+    monkeypatch.setattr(manager, "ChatAnthropic", lambda **kw: kw)
+    monkeypatch.setattr(manager, "DialectChatOpenAI", lambda **kw: kw)
+
+    manager.create_llm(
+        "claude-opus-4-6", use_cache=False, apply_effort=True, effort="high"
+    )
+    assert seen[-1] == "high"  # 覆盖盖过 profile 的 low
+
+    manager.create_llm(
+        "claude-opus-4-6", use_cache=False, apply_effort=True, effort=None
+    )
+    assert seen[-1] == "low"  # 不覆盖 → 沿用 resolve() 的 low

@@ -229,6 +229,10 @@ type SessionState = {
   clarify: Record<string, unknown>[]
   // 最近一次模型调用的上下文用量（用于输入栏的上下文进度环）；首轮前为 undefined
   ctx?: CtxUsage
+  // 渠道旁观会话的上下文环分母：会话真实模型名与其窗口（desktop 无本地 activeModel 可依，
+  // 由 load_history 快照带出）；desktop 自己的会话不用（直接取 activeModel）
+  ctxModel?: string
+  ctxWindow?: number
   // 历史压缩进行中（Summarizer 内部摘要调用期间为 true）；展示「正在压缩对话」指示
   compacting?: boolean
 }
@@ -280,12 +284,16 @@ const hasStreaming = (s: SessionState): boolean =>
 // 快照被丢弃时置 loaded 会把掉线前的历史永久关在补拉门外。
 function hydrateHistory(
   s: SessionState,
-  r: { items: HistoryItem[]; usage?: Usage },
+  r: { items: HistoryItem[]; usage?: Usage; model?: string; context_window?: number },
 ): SessionState {
   return {
     ...s,
     items: hasStreaming(s) ? s.items : r.items.map(restore),
     ctx: ctxFromUsage(r.usage) ?? s.ctx,
+    // 渠道旁观会话的上下文环分母来源（会话真实模型窗口）；desktop 自己的会话此值虽也回填但不消费。
+    // 模型名与窗口成对更新：窗口未知（0，如目录查不到的模型）时整对保旧，避免明细弹窗
+    // 出现「新模型名 · 旧模型窗口」的错配。
+    ...(r.context_window ? { ctxModel: r.model, ctxWindow: r.context_window } : {}),
   }
 }
 
@@ -800,7 +808,7 @@ export default function App() {
           // 历史永久关在补拉门外
           const applySnapshot = (
             key: string,
-            r: { items: HistoryItem[]; usage?: Usage },
+            r: { items: HistoryItem[]; usage?: Usage; model?: string; context_window?: number },
             patch: Partial<SessionState> = {},
           ) => {
             setStore((s) => {
@@ -2025,10 +2033,13 @@ export default function App() {
       </div>
     )
   }
-  // 只读提示条：替换渠道会话的输入框（send 已封禁，这里是视觉层）
+  // 只读提示条：替换渠道会话的输入框（send 已封禁，这里是视觉层）。
+  // 右侧挂上下文环——旁观会话看不到实时流，但每轮结束重拉的快照带 usage/窗口，
+  // 分母取会话真实模型（cur.ctxWindow）而非 desktop activeModel。无数据时环自隐藏、文字仍居中。
   const readonlyBar = (
-    <div className="rounded-3xl border border-dashed border-line bg-surface/50 px-4 py-3 text-center text-xs text-muted-foreground">
-      {t('chan.readonly')}
+    <div className="flex items-center gap-2 rounded-3xl border border-dashed border-line bg-surface/50 py-2 pl-4 pr-2.5 text-xs text-muted-foreground">
+      <span className="flex-1 text-center">{t('chan.readonly')}</span>
+      <ContextMeter usage={cur?.ctx} window={cur?.ctxWindow ?? 0} model={cur?.ctxModel ?? ''} />
     </div>
   )
 

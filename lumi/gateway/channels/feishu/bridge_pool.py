@@ -22,13 +22,20 @@ class BridgePool:
     """thread_id → 常驻 AgentBridge + 运行锁。"""
 
     def __init__(
-        self, workspace: str = "", disabled_tools: list[str] | None = None
+        self,
+        workspace: str = "",
+        disabled_tools: list[str] | None = None,
+        model: str = "",
+        effort: str = "auto",
     ) -> None:
         self._workspace = workspace
         # 默认禁用 ask（IM 不弹询问卡片）；显式传入则覆盖
         self._disabled_tools = (
             disabled_tools if disabled_tools is not None else IM_DISABLED_TOOLS
         )
+        # 渠道独立的模型 + 思考档位（空 model = 跟随全局 active）；建桥时透传给 initialize
+        self._model = model
+        self._effort = effort
         self._bridges: dict[str, AgentBridge] = {}
         self._locks: dict[str, asyncio.Lock] = {}
         # thread_id → chat_id：通知 poller 回投用。放池上（而非 FeishuInbound）
@@ -46,6 +53,16 @@ class BridgePool:
         """本池所有 bridge 绑定的项目根（manager 据此判断 workspace 是否变更）。"""
         return self._workspace
 
+    @property
+    def model(self) -> str:
+        """本池所有 bridge 使用的模型（空=跟随全局）；manager 据此判断是否需重建池。"""
+        return self._model
+
+    @property
+    def effort(self) -> str:
+        """本池所有 bridge 的思考档位；manager 据此判断是否需重建池。"""
+        return self._effort
+
     async def get(self, thread_id: str) -> AgentBridge:
         """取该 thread 的 AgentBridge，不存在则初始化一个并切到该 thread。"""
         async with self._init_lock:
@@ -53,7 +70,10 @@ class BridgePool:
             if bridge is None:
                 bridge = AgentBridge()
                 await bridge.initialize(
-                    self._workspace, disabled_tools=self._disabled_tools
+                    self._workspace,
+                    disabled_tools=self._disabled_tools,
+                    model=self._model,
+                    effort=self._effort,
                 )
                 bridge.switch_thread(thread_id)
                 self._bridges[thread_id] = bridge

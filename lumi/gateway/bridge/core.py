@@ -236,6 +236,8 @@ class AgentBridge:
         project_dir: str = "",
         disabled_tools: list[str] | None = None,
         wait_mcp: bool = False,
+        model: str = "",
+        effort: str = "auto",
     ) -> None:
         """初始化 Agent。
 
@@ -245,6 +247,9 @@ class AgentBridge:
         disabled_tools：本会话禁用的工具黑名单（如飞书 channel 禁用 ``ask``）；None 时全量。
         wait_mcp：冷 MCP 池时是否等它就绪。交互会话默认 False（非阻塞 + 轮首刷新
         自愈）；headless CLI 单轮即退无自愈，传 True。
+        model / effort：渠道会话独立指定的模型与思考档位（IM channel 用）。model 非空时
+        覆盖全局 active、并把 effort 写进 context.effort（绕过 profile）；空则跟随全局
+        active（desktop 常规路径），effort 参数忽略。
         """
         agents_config = get_config().config.agents
         target = Path(project_dir).expanduser().resolve() if project_dir else None
@@ -272,6 +277,13 @@ class AgentBridge:
         self._context.approval_broker = self._broker
         # 应用持久化的 active 供应商 (profile, model)（覆盖 config 默认模型）
         self._apply_active()
+        # 渠道会话可指定独立模型 + 思考档位：覆盖上面的全局 active（连接由 resolve(model)
+        # 反查 profile，不改 provider_store）。仅在指定了 model 时覆盖档位——跟随全局时
+        # context.effort 保持 None，call_model 走 profile 解析。
+        if model:
+            self._context.model_name = model
+            self.model_name = model
+            self._context.effort = effort
         # 本会话项目（引擎已绑定 project_dir 或退回 cwd）的 config hooks
         self._config_hooks = build_config_hooks(Path(self.workspace_dir))
         thread_id = generate_thread_id()

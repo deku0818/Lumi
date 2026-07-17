@@ -104,6 +104,7 @@ def tool_call_chain(
     use_cache: bool = True,
     tool_choice: str | dict | None = None,
     apply_effort: bool = False,
+    effort: str | None = None,
     **llm_params,
 ):
     """
@@ -120,6 +121,7 @@ def tool_call_chain(
             OpenAI 用 {"type": "function", "function": {"name": "xxx"}}
             但是langchain自行做了适配，所以传入的值会自动转换为适合的值
         apply_effort: 注入当前模型的思考档位（仅主对话链传 True）
+        effort: 显式覆盖思考档位（None=跟随 profile；渠道会话用它独立配置）
         **llm_params: LLM的其他参数
     """
     # streaming 是功能性标志：TUI / desktop 的逐 token 输出依赖它
@@ -138,6 +140,7 @@ def tool_call_chain(
         use_cache=use_cache,
         apply_effort=apply_effort,
         force_no_thinking=force_no_thinking,
+        effort=effort,
         **default_llm_params,
     )
 

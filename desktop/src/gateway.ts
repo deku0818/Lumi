@@ -353,10 +353,15 @@ export class Gateway {
     }>('switch_session', { thread_id: threadId, workspace })
   }
 
-  loadHistory(threadId: string): Promise<{ items: HistoryItem[]; usage?: Usage }> {
+  loadHistory(
+    threadId: string,
+  ): Promise<{ items: HistoryItem[]; usage?: Usage; model?: string; context_window?: number }> {
     return this.request<{
       items: HistoryItem[]
       usage?: Usage
+      // 会话真实模型名与其上下文窗口：渠道旁观会话画上下文环的分母来源
+      model?: string
+      context_window?: number
     }>('load_history', { thread_id: threadId })
   }
 

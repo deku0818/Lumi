@@ -560,3 +560,56 @@ async def test_drain_processes_first_then_merges_queued(monkeypatch):
     # 第一轮单独跑首条；第二轮把期间积压的两条合并成一轮
     assert calls == [["首条"], ["追加1", "追加2"]]
     assert "t" not in fi._queues  # 队列已清空
+
+
+# ── 渠道运行时配置：ChannelRuntimeConfig 基类 + effort 覆盖机制 ──────────
+
+
+def test_channel_runtime_config_inherited():
+    """FeishuChannelConfig 继承 ChannelRuntimeConfig：model/effort/tool_mode/workspace
+    四项运行时字段都在，默认值正确（新渠道继承同一组即免费获得）。"""
+    from lumi.gateway.channels.config import ChannelRuntimeConfig
+
+    assert issubclass(FeishuChannelConfig, ChannelRuntimeConfig)
+    base = ChannelRuntimeConfig()
+    assert (base.model, base.effort, base.tool_mode, base.workspace) == ("", "auto", "auto", "")
+
+    cfg = FeishuChannelConfig(model="claude-opus-4-8", effort="high")
+    assert cfg.model == "claude-opus-4-8" and cfg.effort == "high"
+    # 序列化含全部运行时字段（前端 config.model_dump 消费）
+    keys = cfg.model_dump().keys()
+    assert {"model", "effort", "tool_mode", "workspace"} <= set(keys)
+
+
+def test_drain_ultra_note_prefers_channel_override(monkeypatch):
+    """drain_ultra_note：渠道 context.effort 覆盖优先于全局 resolve()。
+
+    - override='ultra' → 触发 workflow 编排提醒（即便全局非 ultra）
+    - override='low' 但全局 ultra → 不触发（渠道档位说了算）
+    - override=None（desktop 会话）→ 回退全局 resolve().effort
+    """
+    from types import SimpleNamespace
+
+    from lumi.gateway.bridge.folders import FolderManager
+
+    # 全局 profile 为 ultra，用来验证 override 能盖过它
+    monkeypatch.setattr(
+        "lumi.models.provider_store.resolve",
+        lambda name=None: SimpleNamespace(effort="ultra"),
+    )
+
+    def fm(effort):
+        bridge = SimpleNamespace(_context=SimpleNamespace(effort=effort), _notified_ultra=False)
+        return FolderManager(bridge), bridge
+
+    # override='ultra' → 开启提醒
+    m, b = fm("ultra")
+    assert "已开启" in m.drain_ultra_note() and b._notified_ultra is True
+
+    # override='low' 压过全局 ultra → 不进 ultra 态（无提醒、状态保持 False）
+    m, b = fm("low")
+    assert m.drain_ultra_note() == "" and b._notified_ultra is False
+
+    # override=None → 回退全局 resolve()（ultra）→ 开启提醒
+    m, b = fm(None)
+    assert "已开启" in m.drain_ultra_note() and b._notified_ultra is True

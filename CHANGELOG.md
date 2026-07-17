@@ -1,5 +1,11 @@
 # Changelog
 
+## [0.2.51] - 2026-07-17
+
+### Added
+- **飞书等渠道旁观会话显示上下文用量环** — desktop 旁观 IM 渠道会话时右下角也能看到上下文用量环。原先 `ContextMeter` 嵌在 composer 里、被只读提示条替换故完全不可见，现挂到只读条右侧（无数据自隐藏、提示文字仍居中）；分母**不取** desktop 当前 activeModel（旁观会话跑的模型往往与 desktop 选中的不同，会算错百分比），改由 `_load_history` 快照新增的 `model`/`context_window` 提供——取会话末条 AI message 的真实 `model_name` 经 models.dev catalog 查窗口。每轮结束经 `channel.activity` 重拉快照刷新（旁观不订阅逐 token 流，故非实时）
+- **IM 渠道可独立配置模型 / 思考档位 / 工具审批 / 绑定项目** — 抽 `ChannelRuntimeConfig` 基类（model/effort/tool_mode/workspace）供各渠道 config 继承，飞书不再被迫共用 desktop 全局 active 模型与思考档位；企微等新渠道接入直接继承同一组能力。新增 effort 覆盖链：`LumiAgentContext.effort`（None=跟随 profile，desktop 走这条）→ `call_model` → `tool_call_chain` → `create_llm(effort=)` 绕过全局 `provider_store`；`AgentBridge.initialize` 接收 model/effort 覆盖（连接由 `resolve(model)` 反查 profile，不改全局），`BridgePool` 透传、`ChannelManager` 按运行时三元组变更重建会话池；`ultra` 顶档的 workflow 编排提醒（`drain_ultra_note`）同步读该覆盖。desktop 渠道设置新增「会话运行时」通用组件 `ChannelRuntimeFields`（模型来源 + 模型下拉 + 思考控制 + 审批 + 项目），随模型能力变形（Effort 分段含 Ultra / Thinking 开关 / 无思考）
+
 ## [0.2.50] - 2026-07-17
 
 ### Changed

@@ -156,6 +156,7 @@ def create_llm(
     use_cache: bool = True,
     apply_effort: bool = False,
     force_no_thinking: bool = False,
+    effort: str | None = None,
     **llm_params,
 ) -> ChatAnthropic | ChatOpenAI:
     """创建 LLM 实例（同参数命中缓存）。
@@ -171,6 +172,8 @@ def create_llm(
     tool_choice 的链（结构化输出 / 受迫工具调用）与思考模式不兼容，对
     默认常开思考的模型（如 qwen toggle 型）必须显式关闭，仅「不注入」不够。
     catalog 门控天然安全——无思考能力 / Anthropic 默认不思考的模型 off 即 {}。
+    effort（非 None）显式覆盖档位、绕过 profile：IM 渠道会话据此独立配置思考模式，
+    而不改动全局 provider_store 的 profile；None 时沿用 resolve() 解析出的 profile 档位。
     参数优先级：config.json llm_params < effort 档位 < 调用方 llm_params；
     无内置调参默认，未指定的参数交给 SDK 默认值。
     """
@@ -188,6 +191,9 @@ def create_llm(
             llm_params["base_url"] = resolved.base_url
         if resolved.api_key:
             llm_params["api_key"] = resolved.api_key
+    # 渠道等显式档位覆盖 profile（绕过全局，不改 provider_store）
+    if effort is not None:
+        level = effort
 
     protocol = detect_protocol(model_name)
     config_params = get_config().config.llm_params.get_params_for_model_type(protocol)

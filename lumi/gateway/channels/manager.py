@@ -41,9 +41,15 @@ class ChannelManager:
             await self._drop_pool("feishu")  # 禁用 → 连进行中的会话一并回收
             return
         pool = self._pools.get("feishu")
-        if pool is None or pool.workspace != cfg.workspace:
-            await self._drop_pool("feishu")  # 项目目录变了 → 换一套会话池
-            pool = BridgePool(cfg.workspace)
+        # 运行时三元组（项目 / 模型 / 档位）任一变更 → 换一套会话池：已驻留的 bridge 在
+        # 建桥时读定这些值，不会自更新，必须重建才能让新配置对进行中的会话生效。
+        if pool is None or (pool.workspace, pool.model, pool.effort) != (
+            cfg.workspace,
+            cfg.model,
+            cfg.effort,
+        ):
+            await self._drop_pool("feishu")
+            pool = BridgePool(cfg.workspace, model=cfg.model, effort=cfg.effort)
             self._pools["feishu"] = pool
         from lumi.gateway.channels.feishu import FeishuChannel
 
