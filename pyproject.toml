@@ -23,9 +23,9 @@ dependencies = [
     "rapidfuzz>=3.14.3",
     "typer>=0.24.1",
     "pymupdf>=1.24.0",
-    "websockets>=16.0",
+    "websockets>=11,<16",
     "jsonschema>=4.26.0",
-    "lark-oapi>=1.4.0",
+    "lark-oapi>=1.7.1",
     "python-socks>=2.8.2",
 ]
 
