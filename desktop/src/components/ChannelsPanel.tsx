@@ -52,6 +52,15 @@ const STATUS_LABEL: Record<string, string> = {
   error: '连接失败',
 }
 
+// 状态光点（demo 方案 A）：绿=已连接、金=连接中（呼吸）、红=失败，未启用/停止为无光晕灰点
+const STATUS_DOT: Record<string, string> = {
+  connected: 'bg-success shadow-[0_0_6px_var(--color-success)]',
+  connecting: 'bg-primary shadow-[0_0_6px_var(--color-accent)] animate-pulse',
+  error: 'bg-error shadow-[0_0_6px_var(--color-error)]',
+  off: 'bg-separator',
+  stopped: 'bg-separator',
+}
+
 const emptyFeishu = (): FeishuConfig => ({
   enabled: false,
   app_id: '',
@@ -91,8 +100,12 @@ export function ChannelsPanel({
       .catch(() => setList([]))
   }, [gwFor, machine])
 
+  // 渠道连接是异步的（enable 后先 connecting 再 connected/error），挂载期间轮询
+  // 保持状态新鲜；get_channels 只读内存状态，开销可忽略
   useEffect(() => {
     reload()
+    const timer = setInterval(reload, 3000)
+    return () => clearInterval(timer)
   }, [reload])
 
   // 该机器的供应商 profiles（渠道「模型 + 思考」配置的模型清单与思考能力来源）
@@ -211,6 +224,7 @@ function ChannelCard({
       <div className="flex-1 min-w-0">
         <div className="font-medium flex items-center gap-2">
           {title}
+          <span className={`size-2 rounded-full shrink-0 ${STATUS_DOT[state] ?? STATUS_DOT.off}`} />
           <span
             className={`text-[11px] font-normal ${state === 'error' ? 'text-error' : 'text-muted-foreground'}`}
           >

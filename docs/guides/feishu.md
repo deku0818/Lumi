@@ -82,8 +82,8 @@ uv sync
 | 检查项 | 没通过怎么办 |
 |---|---|
 | lark-cli 已安装 | 终端跑 `npm i -g @larksuite/cli` |
-| 用户已授权 | 终端跑 `lark-cli auth login` 扫码（读妙记内容必须**用户身份**，应用身份会被拒） |
-| 妙记权限已开通 | 点面板给出的开放平台链接，开通 `minutes:minutes.basic:read` 与 `minutes:minutes.transcript:export`，开通后需重新 `auth login` 使新权限生效 |
+| 用户已授权 | 终端跑 `lark-cli auth login --recommend --scope "minutes:minutes.basic:read,minutes:minutes.transcript:export"` 扫码（读妙记内容必须**用户身份**，应用身份会被拒；login 只请求命令里指定的 scope，应用开通了也不会自动带上，所以必须显式 `--scope`） |
+| 妙记权限已开通 | 点面板给出的开放平台链接，在「**用户身份权限**」tab 下开通 `minutes:minutes.basic:read` 与 `minutes:minutes.transcript:export`（应用身份不生效）并**发布版本**，然后重跑上面的 login 命令使新权限进 token |
 | 事件订阅生效 | 开放平台「事件与回调」添加 `minutes.minute.generated_v1`（添加后需发布版本）。Lumi 每次启动会自动重建订阅 |
 
 > ⚠️ 授权有效期 **7 天**（refresh_token），超期需重新 `lark-cli auth login`。

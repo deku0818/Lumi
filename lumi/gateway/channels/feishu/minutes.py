@@ -26,6 +26,10 @@ REQUIRED_SCOPES = ("minutes:minutes.basic:read", "minutes:minutes.transcript:exp
 _CLI = "lark-cli"
 _TIMEOUT = 20
 
+# login 只请求勾选/参数指定的 scope（应用开通了也不会自动带上），必须显式列出所需项；
+# --scope 与 --recommend 叠加，不会丢掉其他常用权限
+_LOGIN_CMD = f'{_CLI} auth login --recommend --scope "{",".join(REQUIRED_SCOPES)}"'
+
 # 四项检查的固定顺序与显示名。前一项不通时其后各项统一标记为「需先完成上一步」，
 # 由 _with_blocked_tail 按本表补齐——各失败分支不再手写剩余项，免得步骤表漂移。
 _STEPS: tuple[tuple[str, str], ...] = (
@@ -145,7 +149,9 @@ def diagnose(app_id: str) -> list[dict]:
     app_id = os.path.expandvars(app_id)
     auth_url = (
         f"https://open.feishu.cn/app/{app_id}/auth"
-        f"?q={','.join(REQUIRED_SCOPES)}&op_from=openapi&token_type=tenant"
+        # token_type=user：lark-cli 以 --as user 取数，scope 必须加在「用户身份权限」
+        # tab 下；tenant 侧开通不会进 user_access_token，且页面默认停在 tenant tab
+        f"?q={','.join(REQUIRED_SCOPES)}&op_from=openapi&token_type=user"
     )
     event_url = f"https://open.feishu.cn/app/{app_id}/event"
     checks: list[MinuteCheck] = []
@@ -173,7 +179,7 @@ def diagnose(app_id: str) -> list[dict]:
                 ok=False,
                 name="尚未授权或授权已失效",
                 detail=user.get("message") or "读取妙记内容需以用户身份登录",
-                fix_cmd=f"{_CLI} auth login",
+                fix_cmd=_LOGIN_CMD,
                 fix_note="终端执行后扫码授权；refresh_token 有效期 7 天，届时需重新登录",
             )
         )
@@ -195,7 +201,8 @@ def diagnose(app_id: str) -> list[dict]:
                 name="缺少妙记权限",
                 detail="应用未开通：" + "、".join(missing),
                 fix_url=auth_url,
-                fix_note="开通后需重新授权（lark-cli auth login）使新 scope 生效",
+                fix_cmd=_LOGIN_CMD,
+                fix_note="需开通在「用户身份权限」下（应用身份不生效），开通并发布版本后执行上述命令重新授权",
             )
         )
         return _with_blocked_tail(checks, "需先开通权限")
