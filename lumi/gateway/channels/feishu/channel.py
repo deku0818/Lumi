@@ -26,6 +26,7 @@ from lumi.gateway.channels.feishu.daily_dream import daily_dream_loop
 from lumi.gateway.channels.feishu.directory import FeishuDirectory
 from lumi.gateway.channels.feishu.inbound import FeishuInbound
 from lumi.gateway.channels.feishu.lark_call import lark_call
+from lumi.gateway.channels.feishu.minutes import ensure_subscription
 from lumi.gateway.channels.feishu.streaming import FeishuStreaming
 from lumi.utils.logger import logger
 
@@ -75,6 +76,7 @@ class FeishuChannel:
         self._warmup_task: asyncio.Task | None = None  # 持引用防 GC，stop() 取消
         self._notify_task: asyncio.Task | None = None  # 后台任务完成通知轮询
         self._dream_task: asyncio.Task | None = None  # 每日记忆整理循环
+        self._subscribe_task: asyncio.Task | None = None  # 妙记订阅自愈（best-effort）
         self._running = False
         self._error: str | None = (
             None  # 启动失败原因（未装 lark / 缺凭证 / 异常）→ UI 状态灯
@@ -171,6 +173,11 @@ class FeishuChannel:
             )
             if self._bot_open_id:
                 logger.info(f"Feishu bot open_id: {self._bot_open_id}")
+            # 妙记订阅自愈：best-effort 且无人读结果，故不 await——它是子进程 + 网络
+            # 调用（最坏 20s 超时），阻塞会连带推迟 notification_loop 起跑，而事件此刻
+            # 已可能在进队。失败只记日志：IM 收发不依赖订阅，只是妙记纪要不可用。
+            if self.config.minutes_enabled:
+                self._subscribe_task = asyncio.create_task(self._ensure_subscription())
             self.streaming.start_cleanup()
             self._notify_task = asyncio.create_task(self.inbound.notification_loop())
             self._dream_task = asyncio.create_task(
@@ -190,11 +197,14 @@ class FeishuChannel:
             await asyncio.sleep(1)
 
     def _build_event_handler(self, lark: Any) -> Any:
-        """装配事件分发器：只消费消息接收，其余高频事件静默吸收。"""
+        """装配事件分发器：消费消息接收 + 妙记生成，其余高频事件静默吸收。"""
         # WS 长连接模式无需 encrypt_key / verification_token，传空串即可。
+        # 妙记事件复用本条长连接：飞书一个 app 只允许一条事件连接，另起 bus 会被平台
+        # 拒绝且静默收不到事件（详见 docs/architecture/feishu-minutes.md）。
         builder = (
             lark.EventDispatcherHandler.builder("", "")
             .register_p2_im_message_receive_v1(self._on_message_sync)
+            .register_p2_minutes_minute_generated_v1(self._on_minute_sync)
             .register_p1_customized_event("message", lambda _e: None)
         )
         # 已读回执 / 撤回 / 表情回复增删：飞书会推但我们不消费，不注册会被 SDK 反复刷
@@ -269,6 +279,9 @@ class FeishuChannel:
         if self._dream_task is not None:
             self._dream_task.cancel()  # 每日整理循环随传输停止而中止
             self._dream_task = None
+        if self._subscribe_task is not None:
+            self._subscribe_task.cancel()  # 订阅在途则中止，避免孤儿任务
+            self._subscribe_task = None
         if self._ws_client is not None:
             with suppress(Exception):
                 self._ws_client._auto_reconnect = False  # 断连后不再自动重连
@@ -287,6 +300,25 @@ class FeishuChannel:
             return
         if self._loop and self._loop.is_running():
             asyncio.run_coroutine_threadsafe(self.inbound.on_message(data), self._loop)
+
+    async def _ensure_subscription(self) -> None:
+        """后台重建妙记事件订阅并把结果落进日志（失效是静默的，日志是唯一线索）。"""
+        error = await asyncio.get_running_loop().run_in_executor(
+            None, ensure_subscription
+        )
+        if error:
+            logger.warning(f"妙记事件订阅失败，妙记纪要将不可用: {error}")
+        else:
+            logger.info("妙记事件订阅已确认")
+
+    def _on_minute_sync(self, data: Any) -> None:
+        """WS 线程同步回调：妙记生成事件调度回主事件循环。"""
+        if not self._running or not self.config.minutes_enabled:
+            return
+        if self._loop and self._loop.is_running():
+            asyncio.run_coroutine_threadsafe(
+                self.inbound.on_minute_generated(data), self._loop
+            )
 
     def _fetch_bot_open_id(self) -> str | None:
         """调 /open-apis/bot/v3/info 获取机器人自身 open_id。"""
@@ -342,11 +374,9 @@ class FeishuChannel:
             return await loop.run_in_executor(
                 None, self.reply_message_sync, reply_to, "interactive", body
             )
-        receive_id_type = "chat_id" if chat_id.startswith("oc_") else "open_id"
         return await loop.run_in_executor(
             None,
             self.send_message_sync,
-            receive_id_type,
             chat_id,
             "interactive",
             body,
@@ -378,11 +408,16 @@ class FeishuChannel:
         return getattr(data, "message_id", None) if data is not None else None
 
     def send_message_sync(
-        self, receive_id_type: str, receive_id: str, msg_type: str, content: str
+        self, receive_id: str, msg_type: str, content: str
     ) -> str | None:
-        """同步：Create API 直接发送一条消息，返回 message_id。"""
+        """同步：Create API 直接发送一条消息，返回 message_id。
+
+        receive_id 是群 ``oc_`` 还是用户 ``ou_`` 由前缀自行判定——这条 ID 格式规则
+        只此一处，调用方（群消息 / 私聊直投 / 流式卡片）不必各自重复推断。
+        """
         from lark_oapi.api.im.v1 import CreateMessageRequest, CreateMessageRequestBody
 
+        receive_id_type = "chat_id" if receive_id.startswith("oc_") else "open_id"
         request = (
             CreateMessageRequest.builder()
             .receive_id_type(receive_id_type)

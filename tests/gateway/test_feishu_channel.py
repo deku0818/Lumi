@@ -7,6 +7,8 @@
 from __future__ import annotations
 
 import asyncio
+import json
+from types import SimpleNamespace
 
 import pytest
 
@@ -620,3 +622,409 @@ def test_drain_ultra_note_prefers_channel_override(monkeypatch):
     # override=None → 回退全局 resolve()（ultra）→ 开启提醒
     m, b = fm(None)
     assert "已开启" in m.drain_ultra_note() and b._notified_ultra is True
+
+
+# ── 妙记生成事件 ──
+class _Sub:
+    def __init__(self, open_id: str):
+        self.open_id = open_id
+
+
+class _MinuteData:
+    """模拟 lark SDK 的 P2MinutesMinuteGeneratedV1 结构。"""
+
+    def __init__(self, token: str, open_ids: list[str], event_id: str = "evt-1"):
+        self.header = SimpleNamespace(event_id=event_id)
+        self.event = SimpleNamespace(
+            minute_token=token,
+            minute_source=None,
+            subscriber_ids=[_Sub(o) for o in open_ids],
+        )
+
+
+async def test_minute_event_enqueues_token_and_subscriber():
+    fi = FeishuChannel(FeishuChannelConfig()).inbound
+    await fi.on_minute_generated(_MinuteData("obcnTOK", ["ou_me"]))
+    assert fi._minute_events == [("obcnTOK", "ou_me")]
+
+
+async def test_minute_event_deduped_by_event_id():
+    fi = FeishuChannel(FeishuChannelConfig()).inbound
+    await fi.on_minute_generated(_MinuteData("obcnTOK", ["ou_me"], event_id="e1"))
+    await fi.on_minute_generated(_MinuteData("obcnTOK", ["ou_me"], event_id="e1"))
+    assert len(fi._minute_events) == 1  # 飞书重推同一事件只处理一次
+
+
+async def test_minute_event_without_subscribers_skipped():
+    """payload 无 owner 字段，subscriber_ids 为空则无法定位推送对象，跳过而非猜。"""
+    fi = FeishuChannel(FeishuChannelConfig()).inbound
+    await fi.on_minute_generated(_MinuteData("obcnTOK", []))
+    assert fi._minute_events == []
+
+
+async def test_minute_event_without_token_skipped():
+    fi = FeishuChannel(FeishuChannelConfig()).inbound
+    await fi.on_minute_generated(_MinuteData("", ["ou_me"]))
+    assert fi._minute_events == []
+
+
+async def test_minute_turn_targets_open_id_and_injects_token(monkeypatch):
+    """私聊直投 open_id（send_markdown 按前缀选 receive_id_type），提示带 token。"""
+    captured = {}
+    monkeypatch.setattr(inb, "run_turn", _capture_run_turn(captured))
+    ch = FeishuChannel(FeishuChannelConfig())
+    fi = ch.inbound
+    _sent_collector(ch, monkeypatch)
+
+    await fi._run_minute_turn(None, "feishu-ou-me", "ou_me", "obcnTOK")
+
+    assert captured["chat_id"] == "ou_me"
+    assert captured["thread_id"] == "feishu-ou-me"
+    assert "obcnTOK" in captured["content"]
+    assert captured["synthetic"] is True  # 合成轮：用户侧不显示注入文本
+
+    content = captured["content"]
+    assert content.startswith("<system-reminder>")  # 与 hook 注入同一约定
+    # 直接给出取数命令：省掉 list skill → 读 skill → 试参数的探索开销
+    assert "lark-cli minutes +detail" in content
+    # 先 cd 到临时区：工具默认写 ./minutes/ 会把会议记录留在工作区，而 --output-dir
+    # 只收当前目录内的相对路径（传绝对路径报 invalid_argument），故只能靠 cd
+    assert f"cd {inb.lumi_tmp_dir()} &&" in content
+    assert "--output-dir" not in content
+
+
+async def test_minute_turn_sends_no_anchor_message(monkeypatch):
+    """不发"正在整理…"占位消息：流式卡片经 Create API 直投，首条即内容本身。"""
+    captured = {}
+    monkeypatch.setattr(inb, "run_turn", _capture_run_turn(captured))
+    ch = FeishuChannel(FeishuChannelConfig())
+    fi = ch.inbound
+    sent = _sent_collector(ch, monkeypatch)
+
+    await fi._run_minute_turn(None, "feishu-ou-me", "ou_me", "obcnTOK")
+
+    assert sent == []  # 一条占位消息都没发
+    assert captured["reply_to"] == ""  # 无锚点，交由 streaming 走 Create 直投
+
+
+async def test_drain_minute_events_skips_busy_session(monkeypatch):
+    """已建桥的会话正在跑时不抢锁，事件留队下个 tick 再认领。"""
+    ch = FeishuChannel(FeishuChannelConfig())
+    fi = ch.inbound
+    fi._minute_events = [("obcnTOK", "ou_me")]
+    ran = []
+
+    async def spy(*a):
+        ran.append(a)
+
+    monkeypatch.setattr(fi, "_run_minute_turn", spy)
+
+    # 模拟"已建桥"：bridge 与锁在 pool.get 里一并创建
+    tid = feishu_thread_id("ou_me")
+    ch.bridge_pool._bridges[tid] = object()
+    ch.bridge_pool._locks[tid] = asyncio.Lock()
+    async with ch.bridge_pool._locks[tid]:  # 该会话正在跑一轮
+        await fi._drain_minute_events()
+
+    assert ran == [] and fi._minute_events == [("obcnTOK", "ou_me")]
+
+
+async def test_drain_minute_events_bridges_unseen_session(monkeypatch):
+    """未建桥的全新会话必须建桥并跑，不能因「无锁」被跳过。
+
+    回归：锁随建桥创建，妙记会话常是用户从未私聊过的全新 thread，
+    早期实现对 try_lock 返回 None 直接 continue，导致首个妙记事件永远不被处理。
+    """
+    ch = FeishuChannel(FeishuChannelConfig())
+    fi = ch.inbound
+    fi._minute_events = [("obcnTOK", "ou_new")]
+    ran = []
+
+    async def spy(bridge, thread_id, open_id, token):
+        ran.append((thread_id, open_id, token))
+
+    monkeypatch.setattr(fi, "_run_minute_turn", spy)
+
+    async def fake_get(thread_id):
+        ch.bridge_pool._locks.setdefault(thread_id, asyncio.Lock())
+        return None
+
+    monkeypatch.setattr(ch.bridge_pool, "get", fake_get)
+
+    await fi._drain_minute_events()
+
+    tid = feishu_thread_id("ou_new")
+    assert ran == [(tid, "ou_new", "obcnTOK")]
+    assert fi._minute_events == []
+    assert ch.bridge_pool.chat_ids[tid] == "ou_new"  # 回填供后台通知认领
+
+
+# ── 妙记订阅自愈 + 链路诊断 ──
+def _fake_run(stdout: str = "", stderr: str = "", exc: Exception | None = None):
+    def run(cmd, capture_output=False, text=False, timeout=None):
+        if exc is not None:
+            raise exc
+        return SimpleNamespace(stdout=stdout, stderr=stderr, returncode=0)
+
+    return run
+
+
+def _patch_subprocess(monkeypatch, run):
+    import subprocess
+
+    monkeypatch.setattr(subprocess, "run", run)
+
+
+def test_ensure_subscription_ok(monkeypatch):
+    from lumi.gateway.channels.feishu.minutes import ensure_subscription
+
+    _patch_subprocess(monkeypatch, _fake_run(stdout='{"ok": true, "data": {}}'))
+    assert ensure_subscription() == ""  # 空串 = 成功
+
+
+def test_ensure_subscription_reports_api_error(monkeypatch):
+    from lumi.gateway.channels.feishu.minutes import ensure_subscription
+
+    _patch_subprocess(
+        monkeypatch,
+        _fake_run(stdout='{"ok": false, "error": {"message": "token expired"}}'),
+    )
+    assert "token expired" in ensure_subscription()
+
+
+def test_ensure_subscription_handles_missing_binary(monkeypatch):
+    """lark-cli 不在 PATH 时给出可辨认的原因，而非抛异常打断 channel 启动。"""
+    from lumi.gateway.channels.feishu.minutes import ensure_subscription
+
+    _patch_subprocess(monkeypatch, _fake_run(exc=FileNotFoundError()))
+    assert "lark-cli" in ensure_subscription()
+
+
+def test_ensure_subscription_handles_non_json(monkeypatch):
+    """未登录等情况下 lark-cli 可能输出非 JSON，不能让解析异常冒泡。"""
+    from lumi.gateway.channels.feishu.minutes import ensure_subscription
+
+    _patch_subprocess(monkeypatch, _fake_run(stdout="panic: not logged in"))
+    assert "not logged in" in ensure_subscription()
+
+
+def test_ensure_subscription_handles_timeout(monkeypatch):
+    from lumi.gateway.channels.feishu.minutes import ensure_subscription
+
+    _patch_subprocess(monkeypatch, _fake_run(exc=TimeoutError("timed out")))
+    assert "timed out" in ensure_subscription()
+
+
+def _patch_which(monkeypatch, found: bool):
+    import shutil
+
+    monkeypatch.setattr(
+        shutil, "which", lambda name: "/usr/local/bin/lark-cli" if found else None
+    )
+
+
+def test_diagnose_reports_missing_cli_and_blocks_rest(monkeypatch):
+    """lark-cli 缺失时给安装命令，后续三项标记为「需先安装」而不重复探测。"""
+    from lumi.gateway.channels.feishu.minutes import diagnose
+
+    _patch_which(monkeypatch, False)
+    checks = diagnose("cli_x")
+    assert [c["key"] for c in checks] == ["cli", "auth", "scope", "subscription"]
+    assert all(not c["ok"] for c in checks)
+    assert "npm i -g @larksuite/cli" in checks[0]["fix_cmd"]
+
+
+def test_diagnose_reports_unauthorized(monkeypatch):
+    """未登录：给 auth login 命令，权限/订阅不再探测（必然失败）。"""
+    from lumi.gateway.channels.feishu.minutes import diagnose
+
+    _patch_which(monkeypatch, True)
+    _patch_subprocess(
+        monkeypatch,
+        _fake_run(stdout='{"identities": {"user": {"tokenStatus": "none"}}}'),
+    )
+    checks = diagnose("cli_x")
+    assert checks[0]["ok"] and not checks[1]["ok"]
+    assert "auth login" in checks[1]["fix_cmd"]
+
+
+def test_diagnose_reports_missing_scope_with_link(monkeypatch):
+    """权限缺失：列出缺哪个 scope，并给开放平台直达链接。"""
+    from lumi.gateway.channels.feishu.minutes import diagnose
+
+    _patch_which(monkeypatch, True)
+    _patch_subprocess(
+        monkeypatch,
+        _fake_run(
+            stdout=json.dumps(
+                {
+                    "identities": {
+                        "user": {
+                            "tokenStatus": "valid",
+                            "userName": "鄢楚威",
+                            "scope": "minutes:minutes.basic:read",  # 缺 transcript:export
+                        }
+                    }
+                }
+            )
+        ),
+    )
+    checks = diagnose("cli_x")
+    scope = next(c for c in checks if c["key"] == "scope")
+    assert not scope["ok"]
+    assert "transcript:export" in scope["detail"]
+    assert "cli_x" in scope["fix_url"]  # 链接指向该 app 的权限页
+
+
+def test_diagnose_all_green(monkeypatch):
+    from lumi.gateway.channels.feishu.minutes import REQUIRED_SCOPES, diagnose
+
+    _patch_which(monkeypatch, True)
+    calls = []
+
+    def run(cmd, capture_output=False, text=False, timeout=None):
+        calls.append(cmd)
+        if "auth" in cmd:
+            body = {
+                "identities": {
+                    "user": {
+                        "tokenStatus": "valid",
+                        "userName": "鄢楚威",
+                        "scope": " ".join(REQUIRED_SCOPES),
+                    }
+                }
+            }
+        else:  # 订阅调用
+            body = {"ok": True}
+        return SimpleNamespace(stdout=json.dumps(body), stderr="", returncode=0)
+
+    _patch_subprocess(monkeypatch, run)
+    checks = diagnose("cli_x")
+    assert all(c["ok"] for c in checks)
+    # 诊断即修复：全绿路径必然调过一次订阅接口
+    assert any("subscription" in " ".join(c) for c in calls)
+
+
+# ── 流式卡片投递：有锚点走 Reply，无锚点走 Create ──
+def test_streaming_card_delivery_picks_api_by_anchor(monkeypatch):
+    """有 reply 锚点走 Reply API，无锚点走 Create API 直投。
+
+    后者是去掉"正在整理…"占位消息的前提：早期实现因流式卡只能 reply，
+    通知轮/纪要轮不得不先发一条占位消息当锚点，那条纯噪音。
+    """
+    from lumi.gateway.channels.feishu import lark_call as lc_mod
+
+    ch = FeishuChannel(FeishuChannelConfig())
+    calls = {"reply": [], "create": []}
+    monkeypatch.setattr(
+        ch, "reply_message_sync", lambda mid, t, c: calls["reply"].append(mid) or "r"
+    )
+    monkeypatch.setattr(
+        ch,
+        "send_message_sync",
+        lambda rid, t, c: calls["create"].append(rid) or "c",
+    )
+    # 建卡走 cardkit：桩掉 lark_call（streaming 内是局部 import，patch 源模块即可），
+    # 返回带 card_id 的响应；传入的 lambda 不会被求值，故无需真实 client
+    fake_resp = SimpleNamespace(data=SimpleNamespace(card_id="card_1"))
+    monkeypatch.setattr(lc_mod, "lark_call", lambda op, fn, level="warning": fake_resp)
+
+    # 无锚点 → Create 直投（receive_id_type 由 send_message_sync 按前缀自行判定）
+    assert ch.streaming._create_streaming_card_sync("ou_me", None) == "card_1"
+    assert calls["create"] == ["ou_me"]
+    assert calls["reply"] == []
+
+    # 有锚点 → Reply，不碰 Create
+    assert ch.streaming._create_streaming_card_sync("oc_room", "m1") == "card_1"
+    assert calls["reply"] == ["m1"]
+    assert len(calls["create"]) == 1
+
+
+def test_stream_buf_carries_chat_id():
+    """buf 必须带 chat_id：_rebuild_card 只拿得到 buf，无锚点重建全靠它。"""
+    ch = FeishuChannel(FeishuChannelConfig())
+    buf = ch.streaming._new_buf("oc_room")
+    assert buf.chat_id == "oc_room"
+
+
+async def test_drain_minute_events_bridges_before_lock_check(monkeypatch):
+    """回归：建桥必须早于「取锁判忙」。
+
+    建桥是 await 点。若把它夹在 try_lock 与 async with 之间，锁会被入站消息抢走，
+    而 async with 是阻塞等待（非跳过），整个 notification_loop 会卡到那一轮跑完，
+    连带后台任务通知一起停摆。
+    """
+    ch = FeishuChannel(FeishuChannelConfig())
+    fi = ch.inbound
+    fi._minute_events = [("obcnTOK", "ou_new")]
+    order: list[str] = []
+    pool = ch.bridge_pool
+
+    def spy_peek(tid):
+        order.append("peek")
+        return pool._bridges.get(tid)
+
+    def spy_try_lock(tid):
+        order.append("try_lock")
+        return pool._locks.get(tid)
+
+    async def spy_get(tid):
+        order.append("get")
+        pool._locks.setdefault(tid, asyncio.Lock())
+        return object()
+
+    monkeypatch.setattr(pool, "peek", spy_peek)
+    monkeypatch.setattr(pool, "try_lock", spy_try_lock)
+    monkeypatch.setattr(pool, "get", spy_get)
+
+    async def noop(*a):
+        pass
+
+    monkeypatch.setattr(fi, "_run_minute_turn", noop)
+
+    await fi._drain_minute_events()
+
+    # 先探「是否已建桥」→ 建桥 → 再取锁判忙（try_lock 必须晚于 get）
+    assert order[:2] == ["peek", "get"]
+    assert "try_lock" in order[2:], f"建桥后必须重新判忙，实际顺序: {order}"
+    # 且 get 只调一次——第一次的 bridge 直接复用，不再重复建
+    assert order.count("get") == 1
+
+
+async def test_drain_minute_events_keeps_event_when_bridging_fails(monkeypatch):
+    """建桥失败时事件留在队列等下轮，不能已出队又丢掉。"""
+    ch = FeishuChannel(FeishuChannelConfig())
+    fi = ch.inbound
+    fi._minute_events = [("obcnTOK", "ou_new")]
+
+    async def boom(tid):
+        raise RuntimeError("initialize failed")
+
+    monkeypatch.setattr(ch.bridge_pool, "get", boom)
+    await fi._drain_minute_events()
+    assert fi._minute_events == [("obcnTOK", "ou_new")]
+
+
+def test_diagnose_expands_env_var_app_id(monkeypatch):
+    """app_id 支持 ${ENV} 引用；不展开会拼出点不开的修复链接。"""
+    from lumi.gateway.channels.feishu.minutes import diagnose
+
+    monkeypatch.setenv("DEMO_FEISHU_APP", "cli_real123")
+    _patch_which(monkeypatch, True)
+    _patch_subprocess(
+        monkeypatch,
+        _fake_run(stdout='{"identities": {"user": {"tokenStatus": "none"}}}'),
+    )
+    # 未授权分支不含链接，故用缺 scope 分支验证 URL
+    _patch_subprocess(
+        monkeypatch,
+        _fake_run(
+            stdout=json.dumps(
+                {"identities": {"user": {"tokenStatus": "valid", "scope": ""}}}
+            )
+        ),
+    )
+    checks = diagnose("${DEMO_FEISHU_APP}")
+    scope = next(c for c in checks if c["key"] == "scope")
+    assert "cli_real123" in scope["fix_url"]
+    assert "${" not in scope["fix_url"]

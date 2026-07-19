@@ -134,6 +134,7 @@ class FeishuStreamBuf:
     """
 
     text: str = ""
+    chat_id: str = ""  # 无 reply 锚点时用它经 Create API 直投卡片
     card_id: str | None = None
     sequence: int = 0
     last_edit: float = 0.0
@@ -223,6 +224,7 @@ class FeishuStreaming:
     def _new_buf(self, chat_id: str) -> FeishuStreamBuf:
         """装配一个带节流器 / 合并队列的空 buf（正文与工具状态两条路径共用）。"""
         return FeishuStreamBuf(
+            chat_id=chat_id,
             queue=UpdateQueue(),
             throttle=Throttle(
                 min_ms=STREAM_MIN_MS,
@@ -286,13 +288,8 @@ class FeishuStreaming:
                 self._enqueue_render(buf)
 
         if buf.card_id is None:
-            reply_to_id = meta.get("message_id")
-            if not reply_to_id:
-                logger.warning(
-                    f"Feishu 流式卡片缺少 reply_to message_id，跳过创建: chat_id={chat_id}"
-                )
-                return
-            if not await self._ensure_card(buf, reply_to_id):
+            # message_id 可为空：无锚点时 _ensure_card 会经 Create API 直投 chat_id
+            if not await self._ensure_card(buf, meta.get("message_id")):
                 # 创建失败：buf.text 继续累积，下一次 delta 会再次尝试创建
                 return
             # 首帧立即渲染一次，不等节流——让用户尽快看到第一段文字
@@ -303,14 +300,15 @@ class FeishuStreaming:
         buf.throttle.note(len(delta))
 
     async def _ensure_card(self, buf: FeishuStreamBuf, message_id: str | None) -> bool:
-        """buf 尚无 card 时用 message_id 兜底建一张 streaming 卡（reply 到原消息）。"""
+        """buf 尚无 card 时建一张 streaming 卡。
+
+        有 message_id 则 reply 到它，没有则直投 buf.chat_id（通知 / 妙记纪要轮）。
+        """
         if buf.card_id is not None:
             return True
-        if not message_id:
-            return False
         buf.reply_to_id = message_id
         card_id = await asyncio.get_running_loop().run_in_executor(
-            None, self._create_streaming_card_sync, message_id
+            None, self._create_streaming_card_sync, buf.chat_id, message_id
         )
         if not card_id:
             return False
@@ -426,7 +424,8 @@ class FeishuStreaming:
 
         epoch 自增使旧卡的在途 / 后续更新作废；rebuilds 上限防重建风暴。
         """
-        if buf.reply_to_id is None or buf.rebuilds >= STREAM_MAX_REBUILDS:
+        # 无需 reply_to_id 也能重建：无锚点（通知 / 纪要轮）时靠 buf.chat_id 直投
+        if buf.rebuilds >= STREAM_MAX_REBUILDS:
             return
         buf.rebuilds += 1
         buf.epoch += 1
@@ -435,7 +434,7 @@ class FeishuStreaming:
         )
         loop = asyncio.get_running_loop()
         new_card = await loop.run_in_executor(
-            None, self._create_streaming_card_sync, buf.reply_to_id
+            None, self._create_streaming_card_sync, buf.chat_id, buf.reply_to_id
         )
         if not new_card:
             return
@@ -510,8 +509,15 @@ class FeishuStreaming:
                 f"Feishu 流式卡片降级 send 失败 chat_id={chat_id}: {e}", exc_info=True
             )
 
-    def _create_streaming_card_sync(self, reply_to_id: str) -> str | None:
-        """创建一张 streaming_mode 卡片并 reply 到入站消息，返回 card_id。"""
+    def _create_streaming_card_sync(
+        self, chat_id: str, reply_to_id: str | None
+    ) -> str | None:
+        """创建一张 streaming_mode 卡片并投递，返回 card_id。
+
+        有 reply_to_id 走 Reply API（回复触发本轮的入站消息）；没有则经 Create API
+        直投 chat_id——通知轮 / 妙记纪要轮没有可回复的入站消息，早期靠先发一条
+        "正在整理…" 占位消息当锚点，那条纯噪音，现已去掉。
+        """
         try:
             from lark_oapi.api.cardkit.v1 import (
                 CreateCardRequest,
@@ -556,12 +562,18 @@ class FeishuStreaming:
         if not card_id:
             return None
         card_payload = json.dumps({"type": "card", "data": {"card_id": card_id}})
-        reply_mid = self.channel.reply_message_sync(
-            reply_to_id, "interactive", card_payload
-        )
-        if reply_mid is None:
+        if reply_to_id:
+            sent_mid = self.channel.reply_message_sync(
+                reply_to_id, "interactive", card_payload
+            )
+        else:
+            sent_mid = self.channel.send_message_sync(
+                chat_id, "interactive", card_payload
+            )
+        if sent_mid is None:
             logger.warning(
-                f"已创建 streaming card {card_id} 但 reply 失败: reply_to={reply_to_id}"
+                f"已创建 streaming card {card_id} 但投递失败: "
+                f"reply_to={reply_to_id} chat_id={chat_id}"
             )
             return None
         return card_id

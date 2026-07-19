@@ -61,6 +61,11 @@ class FeishuChannelConfig(ChannelRuntimeConfig):
         default="mention",
         description="群聊策略：mention=仅 @机器人 时响应（默认）；open=响应所有群消息",
     )
+    minutes_enabled: bool = Field(
+        default=False,
+        description="妙记纪要：录音 / 会议生成妙记后自动取逐字稿、整理纪要并推送私聊。"
+        "依赖 lark-cli 已安装并完成用户授权（读妙记必须 user 身份）",
+    )
     daily_dream_enabled: bool = Field(
         default=False,
         description="每日定时记忆整理：到点对有新消息的会话先串行 dream（沉淀记忆）、"

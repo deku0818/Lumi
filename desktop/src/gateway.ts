@@ -14,6 +14,7 @@ import type {
   McpServers,
   McpServerStatus,
   McpTestResult,
+  MinuteCheck,
   Project,
   ProviderProfile,
   RpcMethod,
@@ -265,6 +266,11 @@ export class Gateway {
       name,
       config,
     })
+  }
+
+  // 妙记链路体检（打开配置弹窗时调）：走子进程 + 网络，后端已丢线程池，可能耗时 1-2s
+  diagnoseMinutes(name: string, config: Partial<FeishuConfig>): Promise<{ checks: MinuteCheck[] }> {
+    return this.request<{ checks: MinuteCheck[] }>('diagnose_minutes', { name, config })
   }
 
   // —— MCP 服务器：读写该机器的 ~/.lumi 或 <project>/.lumi 下 mcp_server.json，下次新会话加载生效 ——

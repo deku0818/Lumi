@@ -6,12 +6,17 @@
 
 from __future__ import annotations
 
+import asyncio
+
 from lumi.gateway.channels.config import FeishuChannelConfig
 from lumi.gateway.channels.feishu.channel import test_credentials
+from lumi.gateway.channels.feishu.minutes import diagnose
 from lumi.gateway.channels.manager import manager
 from lumi.gateway.channels.store import save_feishu
 
-CHANNEL_METHODS = frozenset({"get_channels", "save_channel", "test_channel"})
+CHANNEL_METHODS = frozenset(
+    {"get_channels", "save_channel", "test_channel", "diagnose_minutes"}
+)
 
 
 async def dispatch_channel(method: str, params: dict) -> dict:
@@ -23,6 +28,12 @@ async def dispatch_channel(method: str, params: dict) -> dict:
     if name != "feishu":
         raise ValueError(f"暂不支持的 channel: {name}")
     config = params.get("config") or {}
+
+    if method == "diagnose_minutes":
+        # 子进程 + 网络调用，丢线程池免得阻塞 WS 事件循环
+        app_id = config.get("app_id") or ""
+        checks = await asyncio.to_thread(diagnose, app_id)
+        return {"checks": checks}
 
     if method == "save_channel":
         cfg = save_feishu(config)  # 校验 + 持久化（密钥 chmod 600）

@@ -290,9 +290,21 @@ export interface FeishuConfig {
   effort: string // 思考档位（依附 model，仅 model 非空时生效）；auto/low/high/xhigh/ultra…
   tool_mode: 'auto' | 'privileged'
   workspace: string
+  minutes_enabled: boolean // 妙记纪要：录音/会议生成妙记后自动整理纪要推私聊
   daily_dream_enabled: boolean
   daily_dream_time: string
   summary_max_concurrency: number
+}
+// 妙记链路体检：四项前置条件（lark-cli / 授权 / 权限 / 订阅）逐项结果。
+// 任一断裂的表现都是「静默收不到事件」，故必须逐项展示卡在哪一步。
+export interface MinuteCheck {
+  key: 'cli' | 'auth' | 'scope' | 'subscription'
+  ok: boolean
+  name: string
+  detail: string
+  fix_cmd: string
+  fix_url: string
+  fix_note: string
 }
 export interface ChannelInfo {
   name: string

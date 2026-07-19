@@ -2,6 +2,7 @@ import { useCallback, useEffect, useState } from 'react'
 import {
   Check,
   ChevronDown,
+  ChevronRight,
   Loader2,
   Plus,
   Send,
@@ -11,7 +12,13 @@ import {
   FolderPlus,
   AlertTriangle,
 } from 'lucide-react'
-import type { ChannelInfo, FeishuConfig, Project, ProviderProfile } from '../types'
+import type {
+  ChannelInfo,
+  FeishuConfig,
+  MinuteCheck,
+  Project,
+  ProviderProfile,
+} from '../types'
 import type { Gateway } from '../gateway'
 import { MachineTabs } from './MachineTabs'
 import { DirBrowser } from './DirBrowser'
@@ -55,6 +62,7 @@ const emptyFeishu = (): FeishuConfig => ({
   effort: 'auto',
   tool_mode: 'auto',
   workspace: '',
+  minutes_enabled: false,
   daily_dream_enabled: false,
   daily_dream_time: '03:00',
   summary_max_concurrency: 3,
@@ -242,6 +250,23 @@ function FeishuForm({
   const [test, setTest] = useState<TestState>('idle')
   const set = (patch: Partial<FeishuConfig>) => setCfg((c) => ({ ...c, ...patch }))
 
+  // 妙记体检：打开弹窗时自动查一次。走 lark-cli 子进程 + 网络，耗时 1-2s，故异步。
+  const [checks, setChecks] = useState<MinuteCheck[] | null>(null)
+  const [checking, setChecking] = useState(false)
+  const runDiagnose = () => {
+    if (!gw) return
+    setChecking(true)
+    gw.diagnoseMinutes('feishu', { app_id: cfg.app_id })
+      .then((r) => setChecks(r.checks))
+      .catch(() => setChecks(null))
+      .finally(() => setChecking(false))
+  }
+  useEffect(() => {
+    if (initial.minutes_enabled) runDiagnose()
+    // 只在弹窗打开时查一次；app_id 改动后靠「重新检查」手动触发，输入途中不打扰
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [])
+
   const runTest = () => {
     setTest('testing')
     onTest(cfg)
@@ -308,6 +333,18 @@ function FeishuForm({
 
         <ChannelRuntimeFields cfg={cfg} set={set} providers={providers} gw={gw} />
 
+        <MinutesSection
+          cfg={cfg}
+          set={(patch) => {
+            set(patch)
+            // 刚打开开关时立刻体检，省得用户还要手点一次「检查」
+            if (patch.minutes_enabled && !checks) runDiagnose()
+          }}
+          checks={checks}
+          loading={checking}
+          onRecheck={runDiagnose}
+        />
+
         <DailyDreamSection cfg={cfg} set={set} />
       </div>
     </FormModal>
@@ -315,6 +352,199 @@ function FeishuForm({
 }
 
 // 每日记忆整理（Dream）：开关 + 时间 + summary 最大并发。关时只留标题行（时间/并发隐藏）。
+// 妙记纪要分组。链路有四个彼此独立的前置条件（lark-cli / 授权 / 权限 / 订阅），
+// 任一断裂的表现完全相同——静默收不到事件、零报错——故做成逐项诊断，把「不工作」
+// 变成「卡在第几步」。正常态只显示一行绿，异常时自动展开定位问题。
+function MinutesSection({
+  cfg,
+  set,
+  checks,
+  loading,
+  onRecheck,
+}: {
+  cfg: FeishuConfig
+  set: (patch: Partial<FeishuConfig>) => void
+  checks: MinuteCheck[] | null
+  loading: boolean
+  onRecheck: () => void
+}) {
+  return (
+    <ToggleCard
+      icon="🎙️"
+      title="妙记纪要"
+      desc="录音 / 会议结束后自动整理纪要，推送到私聊"
+      tone="info"
+      checked={cfg.minutes_enabled}
+      onCheckedChange={(on) => set({ minutes_enabled: on })}
+    >
+      <MinutesBody
+        // 每轮新结果重新挂载：展开态回到「异常自动展开」，无需 effect 重置
+        key={checks ? checks.map((c) => `${c.key}${c.ok}`).join() : 'none'}
+        checks={checks}
+        loading={loading}
+        onRecheck={onRecheck}
+      />
+    </ToggleCard>
+  )
+}
+
+function MinutesBody({
+  checks,
+  loading,
+  onRecheck,
+}: {
+  checks: MinuteCheck[] | null
+  loading: boolean
+  onRecheck: () => void
+}) {
+  const bad = checks?.filter((c) => !c.ok) ?? []
+  // 有问题就默认展开——用户不该为了知道哪里坏了还多点一次；之后随用户手动开合
+  const [open, setOpen] = useState(bad.length > 0)
+
+  if (loading)
+    return (
+      <div className="flex items-center gap-2.5 rounded-lg border border-line bg-surface/60 px-3 py-2.5 text-xs text-muted-foreground">
+        <span className="lumi-orb" style={{ width: 11, height: 11 }} />
+        正在检查妙记链路…
+      </div>
+    )
+
+  if (!checks)
+    return (
+      <button
+        onClick={onRecheck}
+        className="rounded-lg border border-line bg-surface px-3 py-2 text-xs text-muted-foreground hover:text-ink"
+      >
+        检查妙记链路
+      </button>
+    )
+
+  const allOk = bad.length === 0
+  return (
+    <>
+      <div
+        className={
+          allOk
+            ? 'flex items-center gap-2.5 rounded-lg border border-success/25 bg-success/10 px-3 py-2.5 text-xs text-success'
+            : 'flex items-center gap-2.5 rounded-lg border border-primary/40 bg-primary/10 px-3 py-2.5 text-xs'
+        }
+      >
+        <StatusDot ok={allOk} />
+        <span className="flex-1">
+          {allOk ? '已就绪 · 妙记生成后自动推送纪要' : `${bad.length} 项未就绪：${bad[0].name}`}
+        </span>
+        <button onClick={onRecheck} className="text-[11px] text-muted-foreground hover:text-ink">
+          重新检查
+        </button>
+      </div>
+
+      <button
+        onClick={() => setOpen((v) => !v)}
+        className="mt-2 inline-flex items-center gap-1 text-[11px] text-muted-foreground hover:text-ink"
+      >
+        {open ? <ChevronDown size={12} /> : <ChevronRight size={12} />}
+        {open ? '收起检查详情' : '查看检查详情'}
+      </button>
+
+      {open && (
+        <div className="mt-2">
+          {checks.map((c) => (
+            <MinuteCheckRow key={c.key} check={c} />
+          ))}
+        </div>
+      )}
+    </>
+  )
+}
+
+function StatusDot({ ok }: { ok: boolean }) {
+  return (
+    <span
+      className={
+        ok
+          ? 'size-2 rounded-full bg-success shadow-[0_0_6px_var(--color-success)] shrink-0'
+          : 'size-2 rounded-full bg-error shrink-0'
+      }
+    />
+  )
+}
+
+function MinuteCheckRow({ check }: { check: MinuteCheck }) {
+  return (
+    <div className="flex items-start gap-2.5 py-1.5 border-t border-line/55 first:border-t-0">
+      <span className="mt-1.5">
+        <StatusDot ok={check.ok} />
+      </span>
+      <div className="flex-1 min-w-0">
+        <div className={check.ok ? 'text-xs' : 'text-xs text-error'}>{check.name}</div>
+        {check.detail && (
+          <div className="text-[11px] text-muted-foreground mt-0.5 break-words">
+            {check.detail}
+          </div>
+        )}
+        {check.fix_cmd && (
+          <div className="mt-1.5 rounded-lg border border-line bg-surface px-2.5 py-1.5 font-mono text-[11px] select-all overflow-x-auto whitespace-nowrap">
+            {check.fix_cmd}
+          </div>
+        )}
+        {check.fix_url && (
+          <a
+            href={check.fix_url}
+            target="_blank"
+            rel="noreferrer"
+            className="mt-1.5 inline-flex items-center gap-1 rounded-lg border border-primary/40 bg-primary/10 px-2.5 py-1 text-[11px] text-primary hover:bg-primary/20"
+          >
+            去开放平台配置 ↗
+          </a>
+        )}
+        {check.fix_note && (
+          <div className="text-[11px] text-muted-foreground mt-1">{check.fix_note}</div>
+        )}
+      </div>
+    </div>
+  )
+}
+
+// 带开关的分组卡：图标 + 标题 + 副标题 + Switch，开启时展开 children。
+// Dream / 妙记两个分组共用，免得同一套卡壳在同一文件里各写一遍后各自漂移。
+function ToggleCard({
+  icon,
+  title,
+  desc,
+  tone,
+  checked,
+  onCheckedChange,
+  bodyClass = 'px-4 pb-4 pt-1',
+  children,
+}: {
+  icon: string
+  title: string
+  desc: string
+  tone: 'primary' | 'info'
+  checked: boolean
+  onCheckedChange: (on: boolean) => void
+  bodyClass?: string
+  children?: React.ReactNode
+}) {
+  const ring =
+    tone === 'primary' ? 'border-primary/30 bg-primary/5' : 'border-info/25 bg-info/5'
+  return (
+    <div className={`rounded-xl border overflow-hidden ${ring}`}>
+      <div className="flex items-center gap-3 px-4 py-3.5">
+        <div className="grid place-items-center w-8 h-8 rounded-lg bg-surface border border-line text-base">
+          {icon}
+        </div>
+        <div className="flex-1 min-w-0">
+          <div className="font-medium">{title}</div>
+          <div className="text-[11px] text-muted-foreground mt-0.5">{desc}</div>
+        </div>
+        <Switch checked={checked} onCheckedChange={onCheckedChange} />
+      </div>
+      {checked && children && <div className={bodyClass}>{children}</div>}
+    </div>
+  )
+}
+
 function DailyDreamSection({
   cfg,
   set,
@@ -323,50 +553,39 @@ function DailyDreamSection({
   set: (patch: Partial<FeishuConfig>) => void
 }) {
   return (
-    <div className="rounded-xl border border-primary/30 bg-primary/5 overflow-hidden">
-      <div className="flex items-center gap-3 px-4 py-3.5">
-        <div className="grid place-items-center w-8 h-8 rounded-lg bg-surface border border-line text-base">
-          🌙
-        </div>
-        <div className="flex-1 min-w-0">
-          <div className="font-medium">每日记忆整理（Dream）</div>
-          <div className="text-[11px] text-muted-foreground mt-0.5">
-            到点自动沉淀记忆 + 压缩会话，长会话不再无限膨胀
-          </div>
-        </div>
-        <Switch
-          checked={cfg.daily_dream_enabled}
-          onCheckedChange={(on) => set({ daily_dream_enabled: on })}
+    <ToggleCard
+      icon="🌙"
+      title="每日记忆整理（Dream）"
+      desc="到点自动沉淀记忆 + 压缩会话，长会话不再无限膨胀"
+      tone="primary"
+      checked={cfg.daily_dream_enabled}
+      onCheckedChange={(on) => set({ daily_dream_enabled: on })}
+      bodyClass="grid grid-cols-2 gap-4 px-4 pb-4 pt-1"
+    >
+      <Field label="执行时间（每天）" hint="建议选低峰时段">
+        <TextInput
+          type="time"
+          value={cfg.daily_dream_time}
+          onChange={(e) => set({ daily_dream_time: e.target.value })}
         />
-      </div>
-      {cfg.daily_dream_enabled && (
-        <div className="grid grid-cols-2 gap-4 px-4 pb-4 pt-1">
-          <Field label="执行时间（每天）" hint="建议选低峰时段">
-            <TextInput
-              type="time"
-              value={cfg.daily_dream_time}
-              onChange={(e) => set({ daily_dream_time: e.target.value })}
-            />
-          </Field>
-          <Field label="Summary 最大并发" hint="限流防接口 429；dream 恒串行">
-            <TextInput
-              type="number"
-              min={1}
-              max={8}
-              value={cfg.summary_max_concurrency}
-              onChange={(e) =>
-                set({
-                  summary_max_concurrency: Math.min(
-                    8,
-                    Math.max(1, Number(e.target.value) || 1),
-                  ),
-                })
-              }
-            />
-          </Field>
-        </div>
-      )}
-    </div>
+      </Field>
+      <Field label="Summary 最大并发" hint="限流防接口 429；dream 恒串行">
+        <TextInput
+          type="number"
+          min={1}
+          max={8}
+          value={cfg.summary_max_concurrency}
+          onChange={(e) =>
+            set({
+              summary_max_concurrency: Math.min(
+                8,
+                Math.max(1, Number(e.target.value) || 1),
+              ),
+            })
+          }
+        />
+      </Field>
+    </ToggleCard>
   )
 }
 

@@ -15,6 +15,7 @@ import os
 import re
 import time
 from collections import OrderedDict
+from collections.abc import Callable
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import TYPE_CHECKING, Any
@@ -25,6 +26,7 @@ from lumi.gateway.bridge.core import available_commands
 from lumi.gateway.broadcast import hub
 from lumi.gateway.channels.commands import SYSTEM_COMMANDS, parse_slash_command
 from lumi.gateway.channels.feishu.directory import fallback_chat_name, fallback_name
+from lumi.gateway.channels.feishu.minutes import transcript_hint
 from lumi.gateway.channels.feishu.outbound import run_turn
 from lumi.sessions.session_meta import delete_meta, update_meta
 from lumi.utils.constants import (
@@ -273,6 +275,8 @@ class FeishuInbound:
         # chat_id → 群名解析失败（无名群/无权限，缓存不收兜底名）后的下次重试时刻，
         # 免得这类群每条消息都白打一次 im.chat.get
         self._title_retry_at: dict[str, float] = {}
+        # 待处理的妙记事件 (minute_token, open_id)；由通知轮询在会话空闲时认领
+        self._minute_events: list[tuple[str, str]] = []
 
     async def _sync_session_title(
         self,
@@ -588,19 +592,135 @@ class FeishuInbound:
             title="✨ Lumi · 可用命令",
         )
 
+    # ── 妙记生成 ──
+
+    async def on_minute_generated(self, data: Any) -> None:
+        """妙记生成事件入队，交通知轮询在会话空闲时跑纪要轮。
+
+        payload 无 owner 字段，推送对象取 ``subscriber_ids``（订阅者即本人）。
+        飞书可能重推同一事件，按 event_id 去重（与消息共用 LRU，id 空间不冲突）。
+        """
+        event = getattr(data, "event", None)
+        token = getattr(event, "minute_token", "") if event is not None else ""
+        if not token:
+            return
+        header = getattr(data, "header", None)
+        event_id = getattr(header, "event_id", "") if header is not None else ""
+        if self._is_duplicate(f"minute:{event_id or token}"):
+            return
+        open_ids = [
+            open_id
+            for sub in (getattr(event, "subscriber_ids", None) or [])
+            if (open_id := getattr(sub, "open_id", ""))
+        ]
+        if not open_ids:
+            logger.warning(f"妙记事件无 subscriber_ids，无法定位推送对象 token={token}")
+            return
+        for open_id in open_ids:
+            self._minute_events.append((token, open_id))
+
+    async def _drain_minute_events(self) -> None:
+        """认领待处理的妙记事件（与后台通知共用轮询节拍）。
+
+        会话忙则跳过留到下个 tick，与通知轮同一套空闲加锁策略。单条失败只记日志，
+        不影响其余事件。
+        """
+        if not self._minute_events:
+            return
+        pool = self.channel.bridge_pool
+        for item in list(self._minute_events):
+            token, open_id = item
+            thread_id = feishu_thread_id(open_id)
+            # 妙记会话常是全新 thread（用户未必私聊过 bot），需先建桥；而建桥是
+            # await 点，必须在取锁判忙**之前**做完：否则 try_lock 与 acquire 之间
+            # 夹着 await，锁会被入站消息抢走，而 async with 是阻塞等待（非跳过），
+            # 会把整个 notification_loop 卡到那一轮跑完。
+            bridge = pool.peek(thread_id)
+            if bridge is None:
+                try:
+                    bridge = await pool.get(thread_id)
+                except Exception:
+                    # 建桥失败：事件留在队列，下个 tick 重试，不吞
+                    logger.error(f"妙记会话建桥失败 token={token}", exc_info=True)
+                    continue
+            # 自此到 async with 之间无 await 点，锁不会被抢（与通知轮同一范式）
+            lock = pool.try_lock(thread_id)
+            if lock is None or lock.locked():
+                continue  # 在跑的轮次持锁，下个 tick 再认领
+            self._minute_events.remove(item)
+            async with lock:
+                try:
+                    # 私聊经 open_id 直投（send_markdown 按前缀选 receive_id_type），
+                    # 回填映射让后台任务通知也能认领到这个会话
+                    pool.chat_ids[thread_id] = open_id
+                    await self._run_minute_turn(bridge, thread_id, open_id, token)
+                except Exception:
+                    logger.error(f"妙记纪要轮失败 token={token}", exc_info=True)
+
+    async def _run_synthetic_turn(
+        self,
+        bridge,
+        thread_id: str,
+        chat_id: str,
+        content: str,
+        on_cancel: Callable[[], None],
+    ) -> None:
+        """跑一轮用户不可见的合成轮并把结果推回（调用方已持本会话运行锁）。
+
+        妙记纪要与后台任务通知共用：两者都没有可回复的入站消息，流式卡片经 Create API
+        直投 chat_id，用户看到的第一条就是内容本身（不再发"正在整理…"占位消息）。
+        被取消（channel 停止 / 重载）时交 on_cancel 回滚待办，等新 poller 认领，不丢结果。
+        """
+        ch = self.channel
+        try:
+            await run_turn(
+                ch,
+                bridge,
+                chat_id=chat_id,
+                thread_id=thread_id,
+                reply_to="",
+                content=content,
+                tool_mode=ch.config.tool_mode,
+                synthetic=True,
+            )
+        except asyncio.CancelledError:
+            on_cancel()
+            raise
+        # 本轮已入 checkpoint：通知 desktop 旁观刷新
+        hub.on_channel_activity(thread_id, "feishu")
+
+    async def _run_minute_turn(
+        self, bridge, thread_id: str, open_id: str, token: str
+    ) -> None:
+        """生成纪要并推送到私聊（调用方已持本会话运行锁）。"""
+        await self._run_synthetic_turn(
+            bridge,
+            thread_id,
+            open_id,
+            transcript_hint(token, str(lumi_tmp_dir())),
+            lambda: self._minute_events.append((token, open_id)),
+        )
+
     # ── 后台任务完成通知 ──
 
     async def notification_loop(self) -> None:
-        """后台任务完成通知轮询（生命周期由 channel.start/stop 管理）。
+        """后台任务完成通知 + 妙记生成事件的轮询（生命周期由 channel.start/stop 管理）。
 
         desktop 的 _notification_loop 对渠道会话刻意不消费（旁观连接不写共享
         thread），飞书会话的通知由本循环认领：会话空闲时持锁注入 meta 轮，让模型
         读取输出文件并把结果经流式卡片推回群里。单个 thread 失败只记日志，
         不杀轮询（否则一次网络/磁盘抖动会永久断掉所有会话的通知）。
+
+        妙记事件复用同一节拍与同一套空闲加锁策略，但走独立队列——两者注入的提示
+        与目标会话都不同，混进同一队列会串味（后台任务的措辞会带到纪要轮上）。
         """
         pool = self.channel.bridge_pool
         while True:
             await asyncio.sleep(NOTIFICATION_POLL_INTERVAL)
+            try:
+                await self._drain_minute_events()
+            except Exception:
+                logger.error("妙记事件轮询失败", exc_info=True)
             queue = get_task_registry().notification_queue
             if queue.is_empty():
                 continue
@@ -631,38 +751,23 @@ class FeishuInbound:
     async def _run_notification_turn(
         self, bridge, thread_id: str, chat_id: str
     ) -> None:
-        """认领本 thread 的完成通知并跑一轮 meta run（调用方已持本会话运行锁）。
-
-        流式卡片必须回复某条消息才能创建（streaming._ensure_card），通知轮没有
-        入站消息：先发一张"已完成"锚点卡，结果卡回复它。锚点发送失败时不 drain，
-        通知留队下个 tick 重试；drain 后被取消（channel 停止/重载）则重新入队，
-        等新 poller 认领，不丢结果。
-        """
-        ch = self.channel
-        anchor_id = await ch.send_markdown(chat_id, "✅ 后台任务已完成，正在整理结果…")
-        if not anchor_id:
-            return
+        """认领本 thread 的完成通知并跑一轮 meta run（调用方已持本会话运行锁）。"""
         notifications = bridge.drain_notifications(thread_id)
         if not notifications:
             return
-        try:
-            await run_turn(
-                ch,
-                bridge,
-                chat_id=chat_id,
-                thread_id=thread_id,
-                reply_to=anchor_id,
-                content=compose_notification_hint(notifications),
-                tool_mode=ch.config.tool_mode,
-                synthetic=True,
-            )
-        except asyncio.CancelledError:
+
+        def requeue() -> None:
             queue = get_task_registry().notification_queue
             for xml in notifications:
                 queue.enqueue(xml, thread_id)
-            raise
-        # 本轮已入 checkpoint：通知 desktop 旁观刷新
-        hub.on_channel_activity(thread_id, "feishu")
+
+        await self._run_synthetic_turn(
+            bridge,
+            thread_id,
+            chat_id,
+            compose_notification_hint(notifications),
+            requeue,
+        )
 
     async def _run_batch(
         self,
