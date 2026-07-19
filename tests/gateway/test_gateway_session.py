@@ -595,16 +595,55 @@ def test_snapshot_model_window_takes_last_labeled_model(monkeypatch):
         ),
     )
     messages = [_msg("old-model"), _msg("qwen3.7-plus"), _msg(None)]
-    assert _snapshot_model_window(messages) == ("qwen3.7-plus", 1_000_000)
+    assert _snapshot_model_window(messages, "t1") == ("qwen3.7-plus", 1_000_000)
 
 
 def test_snapshot_model_window_unknown_model_yields_zero(monkeypatch):
-    """模型不在目录（catalog 返回 None）→ 窗口 0，前端据此隐藏环。"""
+    """非渠道会话模型不在目录（catalog 返回 None）→ 窗口 0，前端据此隐藏环。"""
     monkeypatch.setattr("lumi.models.catalog.lookup", lambda name: None)
-    assert _snapshot_model_window([_msg("mystery-llm")]) == ("mystery-llm", 0)
+    assert _snapshot_model_window([_msg("mystery-llm")], "t1") == ("mystery-llm", 0)
 
 
 def test_snapshot_model_window_no_labeled_message():
     """无任何带 model_name 的消息 → ("", 0)，不触碰 catalog。"""
-    assert _snapshot_model_window([_msg(None), _msg(None)]) == ("", 0)
-    assert _snapshot_model_window([]) == ("", 0)
+    assert _snapshot_model_window([_msg(None), _msg(None)], "t1") == ("", 0)
+    assert _snapshot_model_window([], "t1") == ("", 0)
+
+
+def test_snapshot_model_window_channel_falls_back_to_configured_alias(monkeypatch):
+    """渠道会话 wire 名查不到目录（如 LiteLLM 回传 Bedrock ARN）→ 回退渠道配置别名再查。"""
+    monkeypatch.setattr(
+        "lumi.models.catalog.lookup",
+        lambda name: (
+            SimpleNamespace(context_length=1_000_000) if name == "jv-claude" else None
+        ),
+    )
+    monkeypatch.setattr(
+        "lumi.gateway.channels.store.load_feishu",
+        lambda: SimpleNamespace(model="jv-claude"),
+    )
+    messages = [
+        _msg("converse/arn:aws:bedrock:us-east-1:1:application-inference-profile/x")
+    ]
+    assert _snapshot_model_window(messages, "feishu-oc-1") == ("jv-claude", 1_000_000)
+
+
+def test_snapshot_model_window_channel_alias_follows_active(monkeypatch):
+    """渠道未指定模型（空 = 跟随 active profile）→ 用 provider_store.resolve 的模型名。"""
+    monkeypatch.setattr(
+        "lumi.models.catalog.lookup",
+        lambda name: (
+            SimpleNamespace(context_length=128_000) if name == "active-model" else None
+        ),
+    )
+    monkeypatch.setattr(
+        "lumi.gateway.channels.store.load_feishu", lambda: SimpleNamespace(model="")
+    )
+    monkeypatch.setattr(
+        "lumi.models.provider_store.resolve",
+        lambda: SimpleNamespace(model="active-model"),
+    )
+    assert _snapshot_model_window([_msg("arn:opaque")], "feishu-oc-1") == (
+        "active-model",
+        128_000,
+    )

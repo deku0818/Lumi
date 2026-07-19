@@ -201,21 +201,36 @@ async def _list_sessions(bridge: AgentBridge, params: dict) -> dict:
     return {"sessions": out}
 
 
-def _snapshot_model_window(messages: list) -> tuple[str, int]:
+def _snapshot_model_window(messages: list, thread_id: str) -> tuple[str, int]:
     """从末条带模型标记的 AI message 取会话真实模型名及其上下文窗口。
 
     渠道（飞书等）旁观会话在 desktop 无对应 activeModel，上下文环的分母不能用
     desktop 当前选中模型的窗口（会算错百分比），须取会话实际所跑模型——response_metadata
     的 model_name 是权威来源，再经 catalog 查目录得窗口。未知模型返回窗口 0（前端自会隐藏环）。
+
+    wire 名查不到目录时（LiteLLM 等代理回传上游真名，如 Bedrock inference-profile
+    ARN），渠道会话回退到渠道配置的模型别名（空 = 跟随 active profile）再查——
+    desktop 环的窗口本就走别名查目录这条路径。
     """
     from lumi.models.catalog import lookup
 
+    wire = ""
     for msg in reversed(messages):
-        model = (getattr(msg, "response_metadata", None) or {}).get("model_name")
-        if model:
-            entry = lookup(model)
-            return model, (entry.context_length if entry else 0)
-    return "", 0
+        wire = (getattr(msg, "response_metadata", None) or {}).get("model_name") or ""
+        if wire:
+            break
+    if not wire:
+        return "", 0
+    if entry := lookup(wire):
+        return wire, entry.context_length
+    if _channel_of(thread_id):
+        from lumi.gateway.channels.store import load_feishu
+        from lumi.models import provider_store
+
+        alias = load_feishu().model or provider_store.resolve().model
+        if alias and (entry := lookup(alias)):
+            return alias, entry.context_length
+    return wire, 0
 
 
 async def _load_history(bridge: AgentBridge, params: dict) -> dict:
@@ -227,7 +242,7 @@ async def _load_history(bridge: AgentBridge, params: dict) -> dict:
     # usage 随 items 回给前端还原上下文用量指示器（仅存前端内存，重启/切会话后本是空的）；
     # 复用 bridge 末条 AI usage 提取，口径与流式一致。model/context_window 供渠道旁观会话
     # 画上下文环——旁观视图无本地 activeModel，分母须由会话真实模型决定。
-    model, context_window = _snapshot_model_window(messages)
+    model, context_window = _snapshot_model_window(messages, thread_id)
     return {
         "items": _history_items(messages),
         "usage": AgentBridge._extract_last_ai_usage(snap),

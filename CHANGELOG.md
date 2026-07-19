@@ -1,5 +1,10 @@
 # Changelog
 
+## [0.2.55] - 2026-07-19
+
+### Fixed
+- **渠道会话上下文用量环在代理模型下不显示** — 经 LiteLLM 等代理跑模型时，`response_metadata.model_name` 回传的是上游真名（如 Bedrock application-inference-profile 的 ARN），models.dev 目录查不到 → 窗口 0 → 前端隐藏环。`_snapshot_model_window` 现于 wire 名查不到目录时回退到渠道配置的模型别名（空 = 跟随 active profile）再查——与 desktop 环的别名查目录同一路径。回退顺位：wire 真名（权威）→ 渠道配置别名 → 仍未知才隐藏
+
 ## [0.2.54] - 2026-07-19
 
 ### Added
