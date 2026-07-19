@@ -1,5 +1,20 @@
 # Changelog
 
+## [0.2.52] - 2026-07-19
+
+### Added
+- **执行记录栏可折叠** — 标题行整行可点，`grid-rows` `1fr↔0fr` 过渡出内容自适应高度的收拢动效，折叠后面板收成一条（不设 `bottom`，高度由标题行撑出）；折叠态挂 `inert`，避免内容只是被裁到 0 高、仍能 Tab 进去回车切走会话。`RunsRail` 以 `key={jobId}` 重挂，折叠态不跨任务残留
+
+### Changed
+- **三条悬浮栏顶边对齐** — 执行记录栏与后台任务栏从 `<main>` 内提到与左侧栏同级的 flex 行：留在 `<main>` 内会被其中的 topStrip 压低一截（侧栏展开时 36px），顶边对不上左侧栏。非悬浮的 `PreviewPanel` 仍留在 `<main>` 内，该归位规则已写入 `docs/architecture/desktop.md`
+- **两栏标题样式统一** — 去掉 `uppercase tracking-wider` 的 11px 小字与条目计数，改 13.5px 加粗；chevron 平时隐身、hover 才现；滚动容器从整个面板收进列表区，标题行不再跟着滚。后台任务栏的收起只由右侧 chevron 触发（标题保持纯文本，避免整条空白成为误触关闭的热区），运行中计数仅在非零时显示
+- **拖拽分隔条去掉 hover 金线** — 只保留不可见热区与 `col-resize` 光标；原细线按 flex 行全高绘制，会在悬浮面板的圆角外上下各多出 `FLOAT_GAP`
+- **模型回复正文走衬线** — `.md-serif`（New York / 中文回退宋体），代码与行内代码因 `.md code` 自带等宽栈不受影响
+
+### Refactored
+- **`ResizeHandle` 的 `shift?: number` 收敛为 `floating?: boolean`** — 三个悬浮调用点原本各自传 `±FLOAT_GAP`，而符号完全由 `edge` 决定；改由组件自行推导，调用方无从传错（把手不可见，错位了也看不出来）
+- **执行记录卡片复用 `CARD_L2`** — 原手写的 `border border-line/60 rounded-lg bg-surface/50` 与常量逐字符相同，改 `cn(CARD_L2, …)` 后状态分支只剩各自的覆盖项
+
 ## [0.2.51] - 2026-07-17
 
 ### Added

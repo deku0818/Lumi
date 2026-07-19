@@ -572,7 +572,12 @@ def test_channel_runtime_config_inherited():
 
     assert issubclass(FeishuChannelConfig, ChannelRuntimeConfig)
     base = ChannelRuntimeConfig()
-    assert (base.model, base.effort, base.tool_mode, base.workspace) == ("", "auto", "auto", "")
+    assert (base.model, base.effort, base.tool_mode, base.workspace) == (
+        "",
+        "auto",
+        "auto",
+        "",
+    )
 
     cfg = FeishuChannelConfig(model="claude-opus-4-8", effort="high")
     assert cfg.model == "claude-opus-4-8" and cfg.effort == "high"
@@ -599,7 +604,9 @@ def test_drain_ultra_note_prefers_channel_override(monkeypatch):
     )
 
     def fm(effort):
-        bridge = SimpleNamespace(_context=SimpleNamespace(effort=effort), _notified_ultra=False)
+        bridge = SimpleNamespace(
+            _context=SimpleNamespace(effort=effort), _notified_ultra=False
+        )
         return FolderManager(bridge), bridge
 
     # override='ultra' → 开启提醒

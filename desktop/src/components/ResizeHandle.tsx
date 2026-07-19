@@ -1,5 +1,6 @@
 import { useEffect, useState } from 'react'
 import type { MouseEvent as ReactMouseEvent } from 'react'
+import { FLOAT_GAP } from '@/lib/utils'
 
 // 边栏宽度：持久化到 localStorage，越界（含历史脏值）回退默认值。
 export function useResizableWidth(key: string, def: number, min: number, max: number) {
@@ -17,18 +18,21 @@ export function useResizableWidth(key: string, def: number, min: number, max: nu
 
 // 栏与主区之间的拖拽分隔条（作为 flex 兄弟节点）。
 // edge='right'：把手在左侧栏右缘，右拖变宽；edge='left'：把手在右侧栏左缘，左拖变宽。
-// 默认透明，hover 显示品牌金细线；拖拽期间 body.resizing-col 全局停用过渡，保证即时跟手。
+// 把手全程不可见（只靠 col-resize 光标提示）；拖拽期间 body.resizing-col 全局停用过渡，保证即时跟手。
 export function ResizeHandle({
   width,
   setWidth,
   edge,
-  shift = 0,
+  floating = false,
 }: {
   width: number
   setWidth: (w: number) => void
   edge: 'left' | 'right'
-  shift?: number // 视觉平移（px）：悬浮面板场景把把手从占位容器边缘贴回面板可见边缘
+  // 悬浮面板场景：占位容器比面板宽 FLOAT_GAP，热区据此平移贴回面板可见边缘。
+  // 方向由 edge 定，调用方无从传错（把手不可见，错位了也看不出来）
+  floating?: boolean
 }) {
+  const shift = floating ? (edge === 'left' ? FLOAT_GAP : -FLOAT_GAP) : 0
   const onMouseDown = (e: ReactMouseEvent) => {
     e.preventDefault()
     const startX = e.clientX
@@ -50,9 +54,7 @@ export function ResizeHandle({
     <div
       onMouseDown={onMouseDown}
       style={shift ? { transform: `translateX(${shift}px)` } : undefined}
-      className="group shrink-0 w-1.5 -mx-0.5 z-10 cursor-col-resize flex justify-center"
-    >
-      <div className="w-px h-full bg-transparent group-hover:bg-primary/50 transition-colors" />
-    </div>
+      className="shrink-0 w-1.5 -mx-0.5 z-10 cursor-col-resize"
+    />
   )
 }

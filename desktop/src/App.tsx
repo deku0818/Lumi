@@ -2231,8 +2231,8 @@ export default function App() {
         onDelete={setPendingDelete}
       />
       </div>
-      {/* shift 把把手从占位容器边缘贴回悬浮面板的可见右缘 */}
-      {sidebarOpen && <ResizeHandle {...sidebarW} edge="right" shift={-FLOAT_GAP} />}
+      {/* floating：把手从占位容器边缘贴回悬浮面板的可见右缘 */}
+      {sidebarOpen && <ResizeHandle {...sidebarW} edge="right" floating />}
 
       <main className="flex-1 flex flex-col min-w-0">
         {showTopStrip && (
@@ -2408,35 +2408,6 @@ export default function App() {
                 </div>
               )}
             </div>
-            {view === 'cronjob' && activeCronJob && (
-              <>
-                <ResizeHandle {...runsRailW} edge="left" />
-                <RunsRail
-                  api={runsRailApi}
-                  jobId={activeCronJob}
-                  activeThread={cronRunThread}
-                  readRuns={readRuns}
-                  version={cronVersion}
-                  onPick={(tid) => void openRunThread(tid, cronBackendOf(activeCronJob))}
-                  width={runsRailW.width}
-                />
-              </>
-            )}
-            {view === 'chat' && (
-              <>
-                {bgDrawerOpen && activeBgTasks.length > 0 && (
-                  <ResizeHandle {...bgRailW} edge="left" shift={FLOAT_GAP} />
-                )}
-                <BgTasksDrawer
-                  tasks={activeBgTasks}
-                  onStop={stopBgTask}
-                  onDismiss={dismissBgTask}
-                  onClearFinished={clearFinishedBgTasks}
-                  open={bgDrawerOpen}
-                  width={bgRailW.width}
-                />
-              </>
-            )}
             {view === 'chat' && preview && (
               <>
                 <ResizeHandle {...previewW} edge="left" />
@@ -2448,6 +2419,40 @@ export default function App() {
           </div>
         )}
       </main>
+      {/* 右侧两栏与左侧栏同级（不放进 main）：否则会被 main 内的 topStrip 压低一截，
+          顶边对不上左侧栏。代价是它们上方那段不再是窗口拖拽区——本就被面板占满。 */}
+      {view === 'chat' && (
+        <>
+          {bgDrawerOpen && activeBgTasks.length > 0 && (
+            <ResizeHandle {...bgRailW} edge="left" floating />
+          )}
+          <BgTasksDrawer
+            tasks={activeBgTasks}
+            onStop={stopBgTask}
+            onDismiss={dismissBgTask}
+            onClearFinished={clearFinishedBgTasks}
+            onClose={() => setBgDrawerOpen(false)}
+            open={bgDrawerOpen}
+            width={bgRailW.width}
+          />
+        </>
+      )}
+      {view === 'cronjob' && activeCronJob && (
+        <>
+          <ResizeHandle {...runsRailW} edge="left" floating />
+          {/* key=任务 id：换任务即重挂，折叠态不跨任务残留（否则新任务的记录看着像空的） */}
+          <RunsRail
+            key={activeCronJob}
+            api={runsRailApi}
+            jobId={activeCronJob}
+            activeThread={cronRunThread}
+            readRuns={readRuns}
+            version={cronVersion}
+            onPick={(tid) => void openRunThread(tid, cronBackendOf(activeCronJob))}
+            width={runsRailW.width}
+          />
+        </>
+      )}
 
       {showSettings && (
         <SettingsDialog
@@ -2665,7 +2670,7 @@ const ItemView = memo(function ItemView({ item }: { item: Exclude<Item, { kind: 
   }
   if (item.kind === 'assistant') {
     return (
-      <div className="md">
+      <div className="md md-serif">
         <Markdown>{item.text}</Markdown>
       </div>
     )

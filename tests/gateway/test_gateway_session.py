@@ -588,7 +588,11 @@ def test_snapshot_model_window_takes_last_labeled_model(monkeypatch):
     """回溯取末条带 model_name 的消息，并经 catalog 得其窗口。"""
     monkeypatch.setattr(
         "lumi.models.catalog.lookup",
-        lambda name: SimpleNamespace(context_length=1_000_000) if name == "qwen3.7-plus" else None,
+        lambda name: (
+            SimpleNamespace(context_length=1_000_000)
+            if name == "qwen3.7-plus"
+            else None
+        ),
     )
     messages = [_msg("old-model"), _msg("qwen3.7-plus"), _msg(None)]
     assert _snapshot_model_window(messages) == ("qwen3.7-plus", 1_000_000)

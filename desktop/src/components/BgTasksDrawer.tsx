@@ -1,5 +1,5 @@
 import { useEffect, useState } from 'react'
-import { Bot, Boxes, Check, ChevronDown, Square, SquareTerminal, X } from 'lucide-react'
+import { Bot, Boxes, Check, ChevronDown, ChevronRight, Square, SquareTerminal, X } from 'lucide-react'
 import type { LucideIcon } from 'lucide-react'
 import type { BgTask, BgTaskKind, BgTaskProgress } from '../types'
 import { useI18n } from '../i18n'
@@ -174,6 +174,7 @@ export function BgTasksDrawer({
   onStop,
   onDismiss,
   onClearFinished,
+  onClose,
   open,
   width,
 }: {
@@ -181,6 +182,7 @@ export function BgTasksDrawer({
   onStop: (taskId: string) => void
   onDismiss: (taskId: string) => void
   onClearFinished: () => void
+  onClose: () => void
   open: boolean
   width: number
 }) {
@@ -189,14 +191,13 @@ export function BgTasksDrawer({
   const [override, setOverride] = useState<Record<string, boolean>>({})
   // 每秒 tick：运行中任务的 duration 实时跳动（仅面板打开且有任务在跑时计时，省开销）
   const [, setTick] = useState(0)
-  const hasRunning = tasks.some((x) => x.status === 'running')
+  const running = tasks.filter((x) => x.status === 'running').length
   useEffect(() => {
-    if (!open || !hasRunning) return
+    if (!open || running === 0) return
     const id = setInterval(() => setTick((x) => x + 1), 1000)
     return () => clearInterval(id)
-  }, [open, hasRunning])
+  }, [open, running])
   if (tasks.length === 0) return null
-  const running = tasks.filter((x) => x.status === 'running').length
   const finished = tasks.length - running
 
   return (
@@ -208,37 +209,51 @@ export function BgTasksDrawer({
           与外层宽度动画同步——面板绝对定位不受宽度裁剪，缺了这层过渡会整块瞬间弹出 */}
       <div
         style={{ width, right: FLOAT_GAP, top: FLOAT_GAP, bottom: FLOAT_GAP }}
-        className={`absolute sidebar-float rounded-panel overflow-auto p-3.5 flex flex-col gap-3 transition-[transform,opacity] duration-200 ease-out ${
+        className={`absolute sidebar-float rounded-panel overflow-hidden flex flex-col transition-[transform,opacity] duration-200 ease-out ${
           open ? '' : 'translate-x-[110%] opacity-0'
         }`}
       >
-        <div className="flex items-center gap-2 px-0.5 text-[11px] uppercase tracking-wider text-muted-foreground">
-          <span>{t('bg.title')}</span>
+        {/* 标题行与执行记录栏同款字号；收起只由右侧 chevron 触发（标题是纯文本，
+            避免整条空白都成了误触关闭的热区），chevron 平时隐身、hover 才现 */}
+        <div className="group shrink-0 flex items-center gap-2 pl-3 pr-2 py-2.5">
+          <span className="text-[13.5px] font-semibold">{t('bg.title')}</span>
+          {running > 0 && (
+            <span className="text-[11px] text-muted-foreground tabular-nums">
+              {running} {t('bg.running')}
+            </span>
+          )}
           {finished > 0 && (
             <button
               onClick={onClearFinished}
-              className="normal-case tracking-normal text-muted-foreground hover:text-ink hover:bg-white/5 rounded px-1.5 py-0.5"
+              className="text-[11px] text-muted-foreground hover:text-ink hover:bg-ink/5 rounded px-1.5 py-0.5"
             >
               {t('bg.clearFinished')} {finished}
             </button>
           )}
-          <span className="ml-auto normal-case tracking-normal">
-            {tasks.length} · {running} {t('bg.running')}
-          </span>
+          <button
+            onClick={onClose}
+            title={t('common.close')}
+            aria-label={t('common.close')}
+            className="ml-auto shrink-0 text-muted-foreground opacity-0 transition-opacity duration-200 group-hover:opacity-100 hover:text-ink"
+          >
+            <ChevronRight className="size-4" />
+          </button>
         </div>
-        {tasks.map((task) => {
-          const collapsed = override[task.task_id] ?? defaultCollapsed(task)
-          return (
-            <TaskCard
-              key={task.task_id}
-              task={task}
-              onStop={onStop}
-              onDismiss={onDismiss}
-              collapsed={collapsed}
-              onToggle={() => setOverride((o) => ({ ...o, [task.task_id]: !collapsed }))}
-            />
-          )
-        })}
+        <div className="min-h-0 flex-1 overflow-auto px-2.5 pb-2.5 flex flex-col gap-3">
+          {tasks.map((task) => {
+            const collapsed = override[task.task_id] ?? defaultCollapsed(task)
+            return (
+              <TaskCard
+                key={task.task_id}
+                task={task}
+                onStop={onStop}
+                onDismiss={onDismiss}
+                collapsed={collapsed}
+                onToggle={() => setOverride((o) => ({ ...o, [task.task_id]: !collapsed }))}
+              />
+            )
+          })}
+        </div>
       </div>
     </aside>
   )

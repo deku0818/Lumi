@@ -114,7 +114,9 @@ class FolderManager:
         # 渠道会话有档位覆盖（context.effort 非 None）时以它为准；desktop 会话为 None，
         # 回退到全局 active 的 profile 档位——保证 ultra 的 workflow 提醒与实际生效档位一致。
         override = b._context.effort
-        effective = override if override is not None else provider_store.resolve().effort
+        effective = (
+            override if override is not None else provider_store.resolve().effort
+        )
         current = effective == "ultra"
         if current == b._notified_ultra:
             return ""

@@ -201,7 +201,9 @@ macOS 关窗后应用驻留 Dock，sidecar 保持运行，Dock 唤起（activate
 
 ## 可调宽边栏
 
-三栏布局（左侧会话栏 + 右侧后台任务栏 / 任务执行记录栏）均可拖拽调宽，各自宽度存 localStorage（`lumi-sidebar-width` / `lumi-bg-width` / `lumi-runs-width`），越界或脏值回退默认值。统一封装在 `desktop/src/components/ResizeHandle.tsx`：`useResizableWidth(key, def, min, max)` 是单一事实源（lazy-init + 自带边界钳制的 setter + useEffect 持久化，与 `font.ts` / `theme.ts` 同构），`<ResizeHandle>` 作为 flex 兄弟节点的拖拽分隔条（`edge` 决定加宽方向）。拖拽期间给 `body` 挂 `resizing-col` 类，全局停用过渡并统一 `col-resize` 光标，让边栏即时跟手（亦压制 `BgTasksDrawer` 的开关动画，松手恢复）。
+三栏布局（左侧会话栏 + 右侧后台任务栏 / 任务执行记录栏）均可拖拽调宽，各自宽度存 localStorage（`lumi-sidebar-width` / `lumi-bg-width` / `lumi-runs-width`），越界或脏值回退默认值。统一封装在 `desktop/src/components/ResizeHandle.tsx`：`useResizableWidth(key, def, min, max)` 是单一事实源（lazy-init + 自带边界钳制的 setter + useEffect 持久化，与 `font.ts` / `theme.ts` 同构），`<ResizeHandle>` 作为 flex 兄弟节点的拖拽分隔条（`edge` 决定加宽方向）。把手全程不可见，只以 `col-resize` 光标提示；`floating` 标记悬浮面板场景，据 `edge` 自动把热区平移 `FLOAT_GAP` 贴回面板可见边缘。拖拽期间给 `body` 挂 `resizing-col` 类，全局停用过渡并统一 `col-resize` 光标，让边栏即时跟手（亦压制 `BgTasksDrawer` 的开关动画，松手恢复）。
+
+**悬浮栏的层级约定**：三条悬浮玻璃栏（左侧会话栏 / 后台任务栏 / 执行记录栏）在 `App.tsx` 里都挂在 `<main>` **之外**、与左侧栏同级的 flex 行上——放进 `<main>` 会被其内的 topStrip 压低一截，顶边对不齐。反之像 `PreviewPanel` 这类贴合内容的**非悬浮**面板留在 `<main>` 内。新增右栏时按此归位。
 
 ## 关键文件
 

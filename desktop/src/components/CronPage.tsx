@@ -7,6 +7,7 @@
 import { useCallback, useEffect, useState } from 'react'
 import {
   AlertTriangle,
+  ChevronDown,
   ChevronLeft,
   ChevronRight,
   Clock,
@@ -29,6 +30,7 @@ import {
 } from '@/components/ui/dialog'
 import { Switch } from '@/components/ui/switch'
 import { Button } from '@/components/ui/button'
+import { CARD_L2, FLOAT_GAP, cn } from '@/lib/utils'
 
 // 后端能力句柄：App 注入 anyGw() 返回的 Gateway 子集，便于解耦与测试
 export interface CronApi {
@@ -51,8 +53,8 @@ const fmtTime = (iso: string) => {
   return `${d.getFullYear()}-${pad(d.getMonth() + 1)}-${pad(d.getDate())} ${pad(d.getHours())}:${pad(d.getMinutes())}`
 }
 
-// 同年省略年份的短格式：6月8日 22:05 / Jun 8, 22:05（执行记录列表用）
-const fmtRunTime = (iso: string, lang: string) => {
+// 执行记录卡片用：时刻为主、日期为次，分开返回。同年省略年份（6月8日 / Jun 8）。
+const runParts = (iso: string, lang: string) => {
   const d = new Date(iso)
   const time = `${pad(d.getHours())}:${pad(d.getMinutes())}`
   const sameYear = d.getFullYear() === new Date().getFullYear()
@@ -61,7 +63,7 @@ const fmtRunTime = (iso: string, lang: string) => {
     month: 'short',
     day: 'numeric',
   })
-  return `${date} ${time}`
+  return { date, time }
 }
 
 // 调度规则人类可读化：覆盖常见形态（间隔简写、每天/每周 cron、一次性），
@@ -508,7 +510,25 @@ function RunStatusMark({ run, unread }: { run: CronRun; unread?: boolean }) {
   return unread ? <span className="size-1.5 rounded-full bg-info shrink-0" /> : null
 }
 
-// 任务会话视图的右侧 Runs 栏（参考 Cowork）：列出历次执行，点击切换主区会话。
+// 执行记录卡片的行内容（时刻为主 + 日期为次 + 耗时 + 状态标记），RunsRail / RunList 共用。
+function RunRowInner({ run, lang, unread }: { run: CronRun; lang: string; unread?: boolean }) {
+  const { date, time } = runParts(run.started_at, lang)
+  return (
+    <>
+      <div className="flex-1 min-w-0">
+        <div className="text-sm font-semibold tabular-nums leading-tight">{time}</div>
+        <div className="text-[11px] text-muted-foreground truncate mt-0.5">{date}</div>
+      </div>
+      <span className="text-[11px] text-muted-foreground tabular-nums shrink-0">
+        {(run.duration_ms / 1000).toFixed(0)}s
+      </span>
+      <RunStatusMark run={run} unread={unread} />
+    </>
+  )
+}
+
+// 任务会话视图的右侧 Runs 栏（悬浮玻璃，与左侧栏 / 后台任务栏同一材质）：列出历次执行，
+// 每次一张卡片，点击切换主区会话；当前查看的那次高亮描边。
 // 蓝点 = 未读（点开即消失）；无会话的旧记录灰显不可点。
 export function RunsRail({
   api,
@@ -529,34 +549,70 @@ export function RunsRail({
 }) {
   const { t, lang } = useI18n()
   const runs = useCronRuns(api, jobId, version, 50)
+  const [collapsed, setCollapsed] = useState(false)
 
   return (
-    <aside
-      style={{ width }}
-      className="shrink-0 border-l border-line/20 overflow-auto px-3 py-4"
-    >
-      <div className="px-2 mb-2 text-xs text-muted-foreground">{t('cron.tabRuns')}</div>
-      {runs?.length === 0 && (
-        <div className="px-2 py-4 text-xs text-muted-foreground">{t('cron.noRuns')}</div>
-      )}
-      {(runs ?? []).map((r) => (
+    <aside style={{ width: width + FLOAT_GAP * 2 }} className="relative shrink-0">
+      {/* 悬浮玻璃面板：右侧内缩 FLOAT_GAP，与后台任务栏对称。
+          折叠时不设 bottom，高度由标题行撑出——面板收成一条。 */}
+      <div
+        style={{ width, right: FLOAT_GAP, top: FLOAT_GAP, bottom: collapsed ? undefined : FLOAT_GAP }}
+        className="absolute sidebar-float rounded-panel overflow-hidden flex flex-col"
+      >
         <button
-          key={r.thread_id || r.started_at}
-          disabled={!r.thread_id}
-          onClick={() => r.thread_id && onPick(r.thread_id)}
-          title={r.error || r.output_summary}
-          className={`w-full flex items-center gap-2 px-2 py-2 rounded-lg text-left text-sm transition ${
-            r.thread_id
-              ? r.thread_id === activeThread
-                ? 'bg-surface text-ink'
-                : 'text-ink/80 hover:bg-surface/60'
-              : 'text-muted-foreground/50 cursor-default'
+          onClick={() => setCollapsed((c) => !c)}
+          aria-expanded={!collapsed}
+          className="group shrink-0 flex items-center gap-2 px-3 py-2.5 text-left transition hover:bg-ink/[0.04]"
+        >
+          <span className="text-[13.5px] font-semibold">{t('cron.tabRuns')}</span>
+          {/* chevron 平时隐身，hover 或折叠态才现（折叠时转 -90°，指向"展开"） */}
+          <ChevronDown
+            className={`ml-auto size-4 shrink-0 text-muted-foreground transition-[transform,opacity] duration-300 ease-[cubic-bezier(.32,.72,0,1)] group-hover:opacity-100 ${
+              collapsed ? 'opacity-100 -rotate-90' : 'opacity-0'
+            }`}
+          />
+        </button>
+        {/* grid-rows 0fr↔1fr：能给"内容自适应高度"做过渡的唯一干净写法。
+            inert：折叠后内容只是被裁到 0 高，不加这个仍能 Tab 进去并回车切走会话 */}
+        <div
+          inert={collapsed}
+          className={`grid min-h-0 transition-[grid-template-rows,opacity] duration-300 ease-[cubic-bezier(.32,.72,0,1)] ${
+            collapsed ? 'grid-rows-[0fr] opacity-0' : 'flex-1 grid-rows-[1fr]'
           }`}
         >
-          <span className="flex-1 truncate">{fmtRunTime(r.started_at, lang)}</span>
-          <RunStatusMark run={r} unread={!!r.thread_id && !readRuns[r.thread_id]} />
-        </button>
-      ))}
+          {/* 外层只负责裁剪（0fr 时把内层的 padding 一起收掉，否则折叠后残留一条空底），
+              滚动与内边距归内层 */}
+          <div className="overflow-hidden">
+            <div className="h-full overflow-auto px-2.5 pb-2.5 flex flex-col gap-2.5">
+              {runs?.length === 0 && (
+                <div className="px-0.5 py-3 text-xs text-muted-foreground">{t('cron.noRuns')}</div>
+              )}
+              {(runs ?? []).map((r) => {
+                const active = !!r.thread_id && r.thread_id === activeThread
+                return (
+                  <button
+                    key={r.thread_id || r.started_at}
+                    disabled={!r.thread_id}
+                    onClick={() => r.thread_id && onPick(r.thread_id)}
+                    title={r.error || r.output_summary}
+                    className={cn(
+                      CARD_L2,
+                      'w-full flex items-center gap-2.5 px-3 py-2.5 text-left transition',
+                      !r.thread_id
+                        ? 'bg-surface/30 opacity-60 cursor-default'
+                        : active
+                          ? 'border-primary/45 bg-primary/[0.08]'
+                          : 'hover:bg-surface/70 hover:border-primary/30',
+                    )}
+                  >
+                    <RunRowInner run={r} lang={lang} unread={!!r.thread_id && !readRuns[r.thread_id]} />
+                  </button>
+                )
+              })}
+            </div>
+          </div>
+        </div>
+      </div>
     </aside>
   )
 }
@@ -583,18 +639,16 @@ function RunList({
     return <div className="py-6 text-sm text-muted-foreground">{t('cron.noRuns')}</div>
   }
   return (
-    <div>
+    <div className="flex flex-col gap-2">
       {runs.map((r, i) => (
-        <div key={r.thread_id || r.started_at} className="border-b border-line/30 last:border-0">
+        <div key={r.thread_id || r.started_at} className={`${CARD_L2} overflow-hidden`}>
           <button
             onClick={() =>
               r.thread_id ? onOpenRun(r.thread_id) : setOpen(open === i ? null : i)
             }
-            className="group w-full py-3 flex items-center gap-2 text-left hover:bg-surface/40 transition rounded-lg px-1 -mx-1"
+            className="group w-full flex items-center gap-2.5 px-3 py-2.5 text-left hover:bg-surface/70 transition"
           >
-            <span className="text-sm flex-1">{fmtRunTime(r.started_at, lang)}</span>
-            <span className="text-xs text-muted-foreground">{(r.duration_ms / 1000).toFixed(0)}s</span>
-            <RunStatusMark run={r} />
+            <RunRowInner run={r} lang={lang} />
             {r.thread_id && (
               <ChevronRight
                 size={14}
@@ -603,7 +657,7 @@ function RunList({
             )}
           </button>
           {open === i && !r.thread_id && (
-            <div className={`selectable pb-3 px-1 text-xs leading-relaxed whitespace-pre-wrap break-words ${r.error ? 'text-error/90' : 'text-muted-foreground'}`}>
+            <div className={`selectable px-3 pb-3 -mt-0.5 text-xs leading-relaxed whitespace-pre-wrap break-words ${r.error ? 'text-error/90' : 'text-muted-foreground'}`}>
               {r.error || r.output_summary || '—'}
             </div>
           )}
