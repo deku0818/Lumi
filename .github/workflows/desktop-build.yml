@@ -21,9 +21,10 @@ jobs:
         os:
           - windows-latest # Windows x64（.exe / nsis）
           - macos-latest # macOS Apple Silicon arm64（.dmg）
+          - macos-15-intel # macOS Intel x64（.dmg）
           - ubuntu-latest # Linux x64（.AppImage）
-        # 不含 macos-13(Intel)：GitHub 正淘汰 Intel Mac runner、公开仓库排不上队。
-        # Intel Mac 用户走兜底：uv tool install lumi + 桌面壳，或连远程后端。
+        # macos-15-intel 是 GitHub 最后一个 x86_64 镜像（macos-13 已于 2025-12 下线），
+        # 供应到 2027-08 为止，届时 Intel Mac 用户需回退到 uv tool install lumi 或连远程后端。
     runs-on: ${{ matrix.os }}
     steps:
       - uses: actions/checkout@v4
