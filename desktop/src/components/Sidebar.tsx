@@ -118,7 +118,7 @@ export const Sidebar = memo(function Sidebar({
   onToggle,
   showTitleDrag,
   sessions,
-  sessionsLoaded,
+  loadedBackends,
   machines,
   machineConn,
   channels,
@@ -150,7 +150,7 @@ export const Sidebar = memo(function Sidebar({
   onToggle: () => void
   showTitleDrag: boolean
   sessions: SessionMeta[]
-  sessionsLoaded: boolean // 首次 list_sessions 是否已返回；未加载完成前不显示「暂无会话」
+  loadedBackends: Record<string, true> // 该机器 list_sessions 成功返回过才允许显示「暂无会话」
   machines: Machine[]
   machineConn: Record<string, ConnState>
   channels: Record<string, ChannelInfo[]> // 机器 id → IM 渠道列表（飞书组头绑定项目）
@@ -325,10 +325,6 @@ export const Sidebar = memo(function Sidebar({
         {!collapsed &&
           (groups.length ? (
             groups.map((pg) => renderProject(m.id, pg))
-          ) : cn === 'connecting' ? (
-            <div className="px-3 py-1.5 text-xs text-muted-foreground/60 animate-pulse">
-              {t('sidebar.connecting')}
-            </div>
           ) : offline ? (
             // 离线（重连耗尽/退避中）：建会话无意义，改显示离线占位 + 重连
             <div className="flex flex-col items-center gap-2 px-3 py-4 text-center">
@@ -342,13 +338,19 @@ export const Sidebar = memo(function Sidebar({
                 {t('sidebar.reconnect')}
               </button>
             </div>
-          ) : (
+          ) : cn === 'open' && loadedBackends[m.id] ? (
+            // 确凿的空态：连接就绪且该机器的列表成功返回过（未返回前显示连接中，
+            // 别把「首拉还没到手/失败」渲染成「没有会话」）
             <button
               onClick={() => onNewChat(m.id)}
               className="w-full text-left px-3 py-1.5 text-xs text-muted-foreground/60 hover:text-ink transition"
             >
               {t('sidebar.noSessionsNew')}
             </button>
+          ) : (
+            <div className="px-3 py-1.5 text-xs text-muted-foreground/60 animate-pulse">
+              {t('sidebar.connecting')}
+            </div>
           ))}
       </div>
     )
@@ -390,7 +392,7 @@ export const Sidebar = memo(function Sidebar({
           </div>
         )}
       </>
-    ) : sessionsLoaded ? (
+    ) : Object.keys(loadedBackends).length > 0 ? (
       <div className="px-3 py-8 text-center text-xs text-muted-foreground">{t('sidebar.empty')}</div>
     ) : null
   } else {
@@ -423,7 +425,7 @@ export const Sidebar = memo(function Sidebar({
             {renderChannelGroup('local')}
             {localGroups.length
               ? localGroups.map((pg) => renderProject('local', pg))
-              : !sessions.length && sessionsLoaded && (
+              : !sessions.length && loadedBackends['local'] && (
                   <div className="px-3 py-8 text-center text-xs text-muted-foreground">
                     {t('sidebar.empty')}
                   </div>

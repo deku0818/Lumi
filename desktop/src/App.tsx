@@ -342,8 +342,10 @@ export default function App() {
   const [cmdSel, setCmdSel] = useState(0)
   const [cmdDismissed, setCmdDismissed] = useState(false)
   const [sessions, setSessions] = useState<SessionMeta[]>([])
-  // 首次全量 list_sessions 是否已返回：加载窗口内别把 sessions=[] 误判成「暂无会话」
-  const [sessionsLoaded, setSessionsLoaded] = useState(false)
+  // 各机器 list_sessions 是否成功返回过：成功前该机器的空列表显示「连接中」而非
+  // 「暂无会话」——ready 时的首拉可能遇瞬时抖动（重连中 / 服务端尚未就绪），
+  // 失败不能被渲染成确凿的空态
+  const [loadedBackends, setLoadedBackends] = useState<Record<string, true>>({})
   // 方案甲多机：机器列表（本地恒在 + 远程）与各机控制连接状态
   const [machines, setMachines] = useState<{ id: string; name: string; enabled?: boolean }[]>([
     { id: 'local', name: '本地' },
@@ -1029,10 +1031,12 @@ export default function App() {
       ([backend]) => !only || backend === only,
     )
     if (!conns.length) return
+    const okBackends: string[] = []
     const perBackend = await Promise.all(
       conns.map(async ([backend, gw]) => {
         try {
           const r = await gw.listSessions()
+          okBackends.push(backend)
           return r.sessions.map((s) => ({ ...s, backend }))
         } catch {
           // 该机器瞬时抖动（重连中）：保留它上一轮的会话，别整列抹掉导致闪没
@@ -1058,8 +1062,14 @@ export default function App() {
       })
       return [...keep, ...next]
     })
-    // 全量刷新完成一轮即算「已加载」（某机器失败也已 catch 兜底，Promise.all 必 resolve）
-    if (!only) setSessionsLoaded(true)
+    // 只有真正成功的机器才算「已加载」（保持对象身份稳定，Sidebar 是 memo 的）
+    setLoadedBackends((m) => {
+      const fresh = okBackends.filter((b) => !m[b])
+      if (!fresh.length) return m
+      const next = { ...m }
+      for (const b of fresh) next[b] = true
+      return next
+    })
   }, [])
 
   // 重拉某会话历史并整表替换其 items（渠道会话旁观刷新 / 切回对账共用）
@@ -1275,6 +1285,14 @@ export default function App() {
       controlConns.current = {}
     }
   }, [openConnection, syncBackends, fetchDefaultProject])
+
+  // 兜底自愈：窗口重获焦点时全量刷新会话列表。ready 首拉失败后没有别的自动重试路径，
+  // 没有这条，空列表会一直定格到手动重载（服务端有 checkpoint_id 缓存，刷新很便宜）。
+  useEffect(() => {
+    const onFocus = () => void refreshSessions()
+    window.addEventListener('focus', onFocus)
+    return () => window.removeEventListener('focus', onFocus)
+  }, [refreshSessions])
 
   // BackendsPanel 增删/编辑远程机器后广播此事件 → 重连各机器、刷新合并列表（无 reload）。
   // detail.reconnectId：编辑了某机器的地址/token，需对该机器换址重连（syncBackends 幂等不会重建）。
@@ -2203,7 +2221,7 @@ export default function App() {
         onToggle={toggleSidebar}
         showTitleDrag={isMacTitleBar}
         sessions={sessions}
-        sessionsLoaded={sessionsLoaded}
+        loadedBackends={loadedBackends}
         machines={machines}
         machineConn={machineConn}
         channels={channels}

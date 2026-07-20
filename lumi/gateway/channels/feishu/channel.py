@@ -197,28 +197,35 @@ class FeishuChannel:
             await asyncio.sleep(1)
 
     def _build_event_handler(self, lark: Any) -> Any:
-        """装配事件分发器：消费消息接收 + 妙记生成，其余高频事件静默吸收。"""
+        """装配事件分发器：消费消息接收 + 妙记生成，未注册的事件类型整类静默吸收。"""
+        from lark_oapi.core.exception import EventException
+
         # WS 长连接模式无需 encrypt_key / verification_token，传空串即可。
         # 妙记事件复用本条长连接：飞书一个 app 只允许一条事件连接，另起 bus 会被平台
         # 拒绝且静默收不到事件（详见 docs/architecture/feishu-minutes.md）。
-        builder = (
+        handler = (
             lark.EventDispatcherHandler.builder("", "")
             .register_p2_im_message_receive_v1(self._on_message_sync)
             .register_p2_minutes_minute_generated_v1(self._on_minute_sync)
-            .register_p1_customized_event("message", lambda _e: None)
+            .build()
         )
-        # 已读回执 / 撤回 / 表情回复增删：飞书会推但我们不消费，不注册会被 SDK 反复刷
-        # "processor not found" ERROR，统一静默吸收。getattr 守护兼容旧版 SDK。
-        for reg in (
-            "register_p2_im_message_message_read_v1",
-            "register_p2_im_message_recalled_v1",
-            "register_p2_im_message_reaction_created_v1",
-            "register_p2_im_message_reaction_deleted_v1",
-        ):
-            noop = getattr(builder, reg, None)
-            if callable(noop):
-                noop(lambda _e: None)
-        return builder.build()
+        # 通用兜底：后台订阅了但我们不消费的事件（已读回执 / 撤回 / 会议开始等，随
+        # 后台勾选而变），SDK 查不到 processor 即抛异常 → WS client 反复刷 ERROR
+        # 且回 500 触发平台重推。包住分发入口把「未注册」吸收掉，其余异常照常外抛，
+        # 免去每冒出一种新事件就补一个 noop 注册。
+        dispatch = handler._do_without_validation
+
+        def absorb_unregistered(payload: bytes) -> Any:
+            try:
+                return dispatch(payload)
+            except EventException as e:
+                if "processor not found" in str(e):
+                    logger.debug("忽略未消费的飞书事件: %s", e)
+                    return None
+                raise
+
+        handler._do_without_validation = absorb_unregistered
+        return handler
 
     def _run_ws_in_thread(self) -> None:
         """独立线程跑 WebSocket 客户端；自动重连，异常只记日志不外抛。"""
