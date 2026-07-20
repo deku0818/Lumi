@@ -1,6 +1,6 @@
 // Electron 主进程：拉起 lumi serve sidecar、创建窗口、经 IPC 把 ws 连接信息给 renderer。
 const { app, BrowserWindow, dialog, ipcMain, protocol, session, shell, Notification, Menu } = require('electron')
-const { spawn } = require('node:child_process')
+const { spawn, execFileSync } = require('node:child_process')
 const net = require('node:net')
 const fs = require('node:fs')
 const path = require('node:path')
@@ -62,6 +62,31 @@ function packagedBackend() {
   return fs.existsSync(bundled) ? bundled : 'lumi'
 }
 
+// 从 Dock/Finder 启动时，进程只继承 launchd 的默认 PATH（/usr/bin:/bin:/usr/sbin:/sbin）——
+// 中间没有 shell，~/.zshrc 里 nvm、~/.local/bin 的注入全都没机会跑。受害的不止后端自己
+// （dev 的 `uv`、打包 fallback 的 `lumi`），还有它 shell out 调的外部命令：lark-cli 的
+// shutil.which 会判定「未安装」，gh / rg 同理。故拉起 sidecar 前借一次登录 shell 取回真实
+// PATH。从终端启动时本就完整，取到的是同一份，不必分支判断。
+let cachedPath = null
+function loginShellPath() {
+  if (cachedPath !== null) return cachedPath
+  // Windows 无 launchd 那套，GUI 进程本就继承系统 PATH
+  if (process.platform === 'win32') return (cachedPath = process.env.PATH)
+  try {
+    // -i 才会读 rc（nvm 通常写在 .zshrc 而非 .zprofile）；rc 里的欢迎语会混进 stdout，
+    // 故打 marker 再挑行。stderr 丢弃：rc 的告警不该污染判断。
+    const out = execFileSync(process.env.SHELL || '/bin/zsh', ['-ilc', 'echo __LUMI_PATH__$PATH'], {
+      encoding: 'utf8', timeout: 5000, stdio: ['ignore', 'pipe', 'ignore'],
+    })
+    const hit = out.split('\n').find((l) => l.startsWith('__LUMI_PATH__'))
+    cachedPath = hit ? hit.slice('__LUMI_PATH__'.length).trim() : process.env.PATH
+  } catch {
+    // shell 缺失 / rc 卡死超时：退回原 PATH，宁可少几条路径也不能阻塞启动
+    cachedPath = process.env.PATH
+  }
+  return cachedPath
+}
+
 // dev：源码 `uv run lumi serve`（cwd=仓库）；打包后：packagedBackend()。
 function startSidecar(port) {
   const dev = !app.isPackaged
@@ -72,7 +97,10 @@ function startSidecar(port) {
   const serveArgs = ['serve', '--port', String(port), '--token', LOCAL_TOKEN, '--exit-with-parent']
   const args = dev ? ['run', 'lumi', ...serveArgs] : serveArgs
   // PYTHONUNBUFFERED：PyInstaller 产物 stdout 接管道时块缓冲，日志会滞留到进程退出才刷出
-  const opts = { env: { ...process.env, PYTHONUNBUFFERED: '1' }, stdio: ['pipe', 'pipe', 'pipe'] }
+  const opts = {
+    env: { ...process.env, PATH: loginShellPath(), PYTHONUNBUFFERED: '1' },
+    stdio: ['pipe', 'pipe', 'pipe'],
+  }
   if (dev) opts.cwd = PROJECT_ROOT
   serveProc = spawn(cmd, args, opts)
   serveProc.stdout.on('data', (d) => process.stdout.write(`[lumi serve] ${d}`))

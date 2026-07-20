@@ -938,13 +938,50 @@ def test_diagnose_reports_unauthorized(monkeypatch):
     from lumi.gateway.channels.feishu.minutes import diagnose
 
     _patch_which(monkeypatch, True)
+    # 未授权时 CLI 的真实形态：available=false，且不带 tokenStatus 字段
     _patch_subprocess(
         monkeypatch,
-        _fake_run(stdout='{"identities": {"user": {"tokenStatus": "none"}}}'),
+        _fake_run(
+            stdout='{"identities": {"user": {"status": "missing", "available": false}}}'
+        ),
     )
     checks = diagnose("cli_x")
     assert checks[0]["ok"] and not checks[1]["ok"]
     assert "auth login" in checks[1]["fix_cmd"]
+
+
+def test_diagnose_accepts_needs_refresh(monkeypatch):
+    """needs_refresh 是可用状态（下次 user API 调用自动刷新），不得误报未授权。
+
+    access_token 约 2 小时到期即转此状态，认死 tokenStatus == "valid" 会让每次闲置
+    超时后的诊断都谎报「授权已失效」，把用户支去重新扫码。
+    """
+    from lumi.gateway.channels.feishu.minutes import REQUIRED_SCOPES, diagnose
+
+    _patch_which(monkeypatch, True)
+    _patch_subprocess(
+        monkeypatch,
+        _fake_run(
+            stdout=json.dumps(
+                {
+                    "identities": {
+                        "user": {
+                            "status": "needs_refresh",
+                            "available": True,
+                            "tokenStatus": "needs_refresh",
+                            "userName": "鄢楚威",
+                            "scope": " ".join(REQUIRED_SCOPES),
+                        }
+                    }
+                }
+            )
+        ),
+    )
+    checks = diagnose("cli_x")
+    auth = next(c for c in checks if c["key"] == "auth")
+    assert auth["ok"]
+    # 未被 _with_blocked_tail 截断：后续项是真探测出来的
+    assert next(c for c in checks if c["key"] == "scope")["ok"]
 
 
 def test_diagnose_reports_missing_scope_with_link(monkeypatch):
@@ -959,7 +996,7 @@ def test_diagnose_reports_missing_scope_with_link(monkeypatch):
                 {
                     "identities": {
                         "user": {
-                            "tokenStatus": "valid",
+                            "available": True,
                             "userName": "鄢楚威",
                             "scope": "minutes:minutes.basic:read",  # 缺 transcript:export
                         }
@@ -987,7 +1024,7 @@ def test_diagnose_all_green(monkeypatch):
             body = {
                 "identities": {
                     "user": {
-                        "tokenStatus": "valid",
+                        "available": True,
                         "userName": "鄢楚威",
                         "scope": " ".join(REQUIRED_SCOPES),
                     }
@@ -1110,16 +1147,12 @@ def test_diagnose_expands_env_var_app_id(monkeypatch):
 
     monkeypatch.setenv("DEMO_FEISHU_APP", "cli_real123")
     _patch_which(monkeypatch, True)
-    _patch_subprocess(
-        monkeypatch,
-        _fake_run(stdout='{"identities": {"user": {"tokenStatus": "none"}}}'),
-    )
     # 未授权分支不含链接，故用缺 scope 分支验证 URL
     _patch_subprocess(
         monkeypatch,
         _fake_run(
             stdout=json.dumps(
-                {"identities": {"user": {"tokenStatus": "valid", "scope": ""}}}
+                {"identities": {"user": {"available": True, "scope": ""}}}
             )
         ),
     )

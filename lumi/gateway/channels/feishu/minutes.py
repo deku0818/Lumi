@@ -171,8 +171,12 @@ def diagnose(app_id: str) -> list[dict]:
     checks.append(MinuteCheck(key="cli", ok=True, name="lark-cli 已安装"))
 
     # ② 用户授权（订阅与读逐字稿都必须 user 身份，app 身份读会被拒 2091005）
+    # 判 available 而非 tokenStatus == "valid"：access_token 约 2 小时到期后状态转
+    # needs_refresh，此时 token 仍可用（下次 user API 调用自动刷新），认死 valid 会在
+    # 每次闲置超时后误报「未授权」并引导重新扫码。真未授权时 CLI 给 available=false
+    # （且不带 tokenStatus 字段）。刷新万一失败也漏不掉——第④步是真 API 调用，会暴露。
     user = (_auth_status() or {}).get("identities", {}).get("user") or {}
-    if user.get("tokenStatus") != "valid":
+    if not user.get("available"):
         checks.append(
             MinuteCheck(
                 key="auth",

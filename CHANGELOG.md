@@ -1,5 +1,14 @@
 # Changelog
 
+## [0.2.58] - 2026-07-20
+
+### Fixed
+- **从 Dock 启动时妙记诊断谎报「lark-cli 未安装」** — GUI 启动的 Electron 只继承 launchd 的默认 `PATH`（`/usr/bin:/bin:/usr/sbin:/sbin`），链路中间没有 shell，`~/.zshrc` 里 nvm、`~/.local/bin` 的注入全都没机会跑，`shutil.which("lark-cli")` 必然落空（终端启动则一切正常——PATH 继承自 zsh，故表现为「时好时坏」）。受害的不止 lark-cli：dev 模式的 `uv`、打包版 fallback 的 `lumi` 本身也在 PATH 上查找（已验证 `spawn` 用的是传入 `env` 的 PATH，非父进程的），从 Dock 起的 dev 版本连后端都拉不起来。现于拉起 sidecar 前借一次登录 shell（`$SHELL -ilc`）取回真实 PATH，结果缓存（自愈重启不重复付开销）；5s 超时或失败退回原 PATH，不阻塞启动。`gh` / `rg` 等外部命令一并受益
+- **闲置超过 2 小时后妙记诊断谎报「授权已失效」** — 授权检查原本认死 `tokenStatus == "valid"`，但 access_token 到期（约 2h）后状态转 `needs_refresh`，此时 token 仍然可用：下次 user API 调用会自动刷新（已实测验证）。误判还会经 `_with_blocked_tail` 把权限/订阅两项一并标成「需先完成授权」，整条链看起来全断，并引导用户去做没必要的重新扫码。改判 `available` 字段——真未授权时 CLI 给 `available: false` 且不带 `tokenStatus` 字段，原条件靠 `.get()` 返回 `None` 才碰巧拦住，属巧合而非契约。刷新万一失败也漏不掉：第④步订阅是真 API 调用，会暴露
+
+### Changed
+- 妙记诊断测试的 fixture 改用两台机器实测的真实 CLI 输出形态（未授权态含 `status`/`available`、不含 `tokenStatus`），并新增 `needs_refresh` 回归测试锁住本次修复
+
 ## [0.2.57] - 2026-07-20
 
 ### Fixed
