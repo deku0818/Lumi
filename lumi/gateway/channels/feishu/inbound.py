@@ -76,9 +76,37 @@ class _Pending:
     ts: int = 0  # 飞书 message.create_time（毫秒），经 additional_kwargs 供 UI 渲染
 
 
-def feishu_thread_id(chat_id: str) -> str:
-    """飞书 chat_id → Lumi 会话 thread_id（每 chat 一个常驻 thread）。"""
-    return sanitize_thread_id(f"{FEISHU_THREAD_PREFIX}{chat_id}")
+@dataclass(frozen=True)
+class _MinuteEvent:
+    """待处理的一条妙记生成事件（open_id = 订阅者，即推送对象）。"""
+
+    token: str
+    open_id: str
+
+
+def feishu_thread_id(session_key: str) -> str:
+    """飞书会话 key → Lumi thread_id（key 由 session_key_of 定）。"""
+    return sanitize_thread_id(f"{FEISHU_THREAD_PREFIX}{session_key}")
+
+
+def feishu_p2p_thread_id(open_id: str) -> str:
+    """某人私聊会话的 thread —— 主动推送（妙记）只有 open_id 时的入口。
+
+    与入站私聊同源：都以 open_id 为 key。别退回裸的 ``feishu_thread_id(open_id)``，
+    那样传进去的是什么 id 在调用点无从分辨，正是两端不同源裂出两个会话的老路。
+    """
+    return feishu_thread_id(open_id)
+
+
+def session_key_of(chat_type: str | None, chat_id: str, open_id: str) -> str:
+    """一条入站消息归属的会话 key：私聊按发送者 open_id，其余一律按 chat_id。
+
+    只有精确的 ``"p2p"`` 用 open_id——未知 chat_type（lark 声明为 Optional[str]）
+    按 chat_id 保住「一 chat 一 thread」，最坏只是没合并。别和群策略的
+    ``chat_type == "group"`` 并成一个谓词：那里未知类型应当响应，方向相反。
+    完整取舍见 docs/architecture/feishu.md。
+    """
+    return open_id if chat_type == "p2p" else chat_id
 
 
 def _help_line(name: str, description: str) -> str:
@@ -275,8 +303,8 @@ class FeishuInbound:
         # chat_id → 群名解析失败（无名群/无权限，缓存不收兜底名）后的下次重试时刻，
         # 免得这类群每条消息都白打一次 im.chat.get
         self._title_retry_at: dict[str, float] = {}
-        # 待处理的妙记事件 (minute_token, open_id)；由通知轮询在会话空闲时认领
-        self._minute_events: list[tuple[str, str]] = []
+        # 待处理的妙记事件；由通知轮询在会话空闲时认领
+        self._minute_events: list[_MinuteEvent] = []
 
     async def _sync_session_title(
         self,
@@ -368,10 +396,11 @@ class FeishuInbound:
 
             # 渠道系统命令（/stop /clear /help）：渠道层即时执行，不进 agent、不排队
             # ——/stop 恰是忙时才有意义，进队列等锁就荒谬了。
+            session_key = session_key_of(chat_type, chat_id, open_id)
             parsed = parse_slash_command(text) if text else None
             if parsed and parsed[0] in SYSTEM_COMMANDS:
                 await self._run_system_command(
-                    parsed[0], chat_id, feishu_thread_id(chat_id), message_id
+                    parsed[0], chat_id, feishu_thread_id(session_key), message_id
                 )
                 return
 
@@ -413,8 +442,9 @@ class FeishuInbound:
                 logger.warning(f"Feishu: 解析发送者姓名失败 {open_id}", exc_info=True)
                 sender_name = fallback_name(open_id)
 
-            thread_id = feishu_thread_id(chat_id)
-            # 映射记在池上：热重载保留池但重建 inbound，通知 poller 靠它回投
+            thread_id = feishu_thread_id(session_key)
+            # 映射记在池上：热重载保留池但重建 inbound，通知 poller 靠它回投。
+            # 存真实 chat_id（私聊的 thread key 是 open_id，但投递走 chat_id 更直接）
             ch.bridge_pool.chat_ids[thread_id] = chat_id
             await self._sync_session_title(
                 thread_id, chat_id, chat_type, sender_name, open_id
@@ -617,7 +647,7 @@ class FeishuInbound:
             logger.warning(f"妙记事件无 subscriber_ids，无法定位推送对象 token={token}")
             return
         for open_id in open_ids:
-            self._minute_events.append((token, open_id))
+            self._minute_events.append(_MinuteEvent(token, open_id))
 
     async def _drain_minute_events(self) -> None:
         """认领待处理的妙记事件（与后台通知共用轮询节拍）。
@@ -629,8 +659,8 @@ class FeishuInbound:
             return
         pool = self.channel.bridge_pool
         for item in list(self._minute_events):
-            token, open_id = item
-            thread_id = feishu_thread_id(open_id)
+            token = item.token
+            thread_id = feishu_p2p_thread_id(item.open_id)
             # 妙记会话常是全新 thread（用户未必私聊过 bot），需先建桥；而建桥是
             # await 点，必须在取锁判忙**之前**做完：否则 try_lock 与 acquire 之间
             # 夹着 await，锁会被入站消息抢走，而 async with 是阻塞等待（非跳过），
@@ -650,10 +680,9 @@ class FeishuInbound:
             self._minute_events.remove(item)
             async with lock:
                 try:
-                    # 私聊经 open_id 直投（send_markdown 按前缀选 receive_id_type），
-                    # 回填映射让后台任务通知也能认领到这个会话
-                    pool.chat_ids[thread_id] = open_id
-                    await self._run_minute_turn(bridge, thread_id, open_id, token)
+                    # 有真实 chat_id 就用，没有则 open_id 直投并回填（供通知轮认领）
+                    target = pool.chat_ids.setdefault(thread_id, item.open_id)
+                    await self._run_minute_turn(bridge, thread_id, target, item)
                 except Exception:
                     logger.error(f"妙记纪要轮失败 token={token}", exc_info=True)
 
@@ -690,15 +719,19 @@ class FeishuInbound:
         hub.on_channel_activity(thread_id, "feishu")
 
     async def _run_minute_turn(
-        self, bridge, thread_id: str, open_id: str, token: str
+        self, bridge, thread_id: str, target: str, event: _MinuteEvent
     ) -> None:
-        """生成纪要并推送到私聊（调用方已持本会话运行锁）。"""
+        """生成纪要并推送到 target（调用方已持本会话运行锁）。
+
+        target 是投递地址（入站回填的真实 chat_id，没有则 open_id 直投），取消时
+        把 event 原样塞回队列。
+        """
         await self._run_synthetic_turn(
             bridge,
             thread_id,
-            open_id,
-            transcript_hint(token, str(lumi_tmp_dir())),
-            lambda: self._minute_events.append((token, open_id)),
+            target,
+            transcript_hint(event.token, str(lumi_tmp_dir())),
+            lambda: self._minute_events.append(event),
         )
 
     # ── 后台任务完成通知 ──

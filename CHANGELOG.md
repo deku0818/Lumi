@@ -1,5 +1,16 @@
 # Changelog
 
+## [0.2.57] - 2026-07-20
+
+### Fixed
+- **妙记主动推送另起一个新会话** — 此前入站私聊按 `chat_id`（`oc_`）派生 thread，而妙记推送事件只带订阅者 `open_id`（`ou_`）、按它派生，同一个私聊裂成两条互不相干的会话（表现为「agent 一主动推送就开新对话」）。飞书没有 open_id → p2p chat_id 的查询 API（`im.v1` 只有建群/查群），故改为**私聊直接以 open_id 为会话 key**（群聊仍用 chat_id），入站与推送从第一条起就同源，与先后顺序、有无历史都无关。投递地址仍走 `pool.chat_ids` 里回填的真实 `chat_id`，缺失时 open_id 直投也能到同一私聊。注意：已有的私聊会话历史会一次性断代（旧 `feishu-oc_*` thread 变孤儿），群聊不受影响
+- **未知 `chat_type` 会把群消息按发送者拆散** — lark 把 `chat_type` 声明为 `Optional[str]`，会话 key 的判定改为「仅精确 `"p2p"` 用 open_id，群与任何未知值一律用 chat_id」。反过来默认按 open_id 时，一条 `chat_type` 缺失的群消息会让群里每人各得一条独立会话、回复却仍发回同一个群，且不会报错
+
+### Changed
+- 妙记待办队列从裸元组 `(token, open_id)` 改为 frozen dataclass `_MinuteEvent`；主动推送新增显式入口 `feishu_p2p_thread_id`，避免调用点分不清传进去的是哪种 id
+- `BridgePool.chat_ids` 补明契约：值是 receive_id（`oc_`/`ou_` 均可，发送侧按前缀选 `receive_id_type`），不可当 chat_id 使用
+- 飞书入站首次有了直接驱动 `on_message` 的测试，覆盖私聊/群两种 key 派生
+
 ## [0.2.56] - 2026-07-20
 
 ### Fixed

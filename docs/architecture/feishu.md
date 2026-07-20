@@ -26,9 +26,14 @@
 └─────────────────────────────────────────────────────────────────┘
 ```
 
-每个飞书 chat（私聊 / 群）→ 一个常驻会话 `thread_id = sanitize_thread_id(f"feishu-{chat_id}")`
+每个飞书 chat（私聊 / 群）→ 一个常驻会话 `thread_id = sanitize_thread_id(f"feishu-{key}")`
 → 一个 `AgentBridge`，复用与 desktop 完全相同的 Agent 运行时（`stream_response` 产 `BridgeEvent`
 流）。飞书侧只做「传输适配 + 事件折叠成卡片」，不碰 bridge / graph。
+
+`key` 由 `inbound.session_key_of` 定：**私聊是对方 `open_id`，其余（群及未知 chat_type）
+是 `chat_id`**。私聊刻意不用 chat_id——主动推送（妙记）的事件只带 open_id，而飞书没有
+open_id → p2p chat_id 的查询 API，两端不同源就会把同一私聊裂成两个会话（详见
+[feishu-minutes.md](feishu-minutes.md)）。
 
 ## 传输层（lark WS）
 

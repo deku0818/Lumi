@@ -38,9 +38,11 @@ class BridgePool:
         self._effort = effort
         self._bridges: dict[str, AgentBridge] = {}
         self._locks: dict[str, asyncio.Lock] = {}
-        # thread_id → chat_id：通知 poller 回投用。放池上（而非 FeishuInbound）
-        # 是因为配置热重载保留池但重建 channel/inbound——映射跟着任务归属走，
-        # 不能随传输层重建而丢。
+        # thread_id → 投递地址：通知 poller 回投用。值是 receive_id，群/私聊入站
+        # 回填真实 chat_id（oc_），妙记推送到从未私聊过的人时回填 open_id（ou_）
+        # ——两者都能投递，发送侧按前缀选 receive_id_type，故别拿它当 chat_id 用
+        # （如传给 im.chat.get 查群名）。放池上（而非 FeishuInbound）是因为配置
+        # 热重载保留池但重建 channel/inbound——映射跟着任务归属走，不随传输层重建而丢。
         self.chat_ids: dict[str, str] = {}
         # thread_id → 当前用户轮的 run task（/stop 取消用），与 chat_ids 同理放池上。
         # 只登记用户轮：通知 poller 的轮跑在 poller task 自身里，cancel 会杀掉整个轮询。

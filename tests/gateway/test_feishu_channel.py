@@ -645,7 +645,7 @@ class _MinuteData:
 async def test_minute_event_enqueues_token_and_subscriber():
     fi = FeishuChannel(FeishuChannelConfig()).inbound
     await fi.on_minute_generated(_MinuteData("obcnTOK", ["ou_me"]))
-    assert fi._minute_events == [("obcnTOK", "ou_me")]
+    assert fi._minute_events == [inb._MinuteEvent("obcnTOK", "ou_me")]
 
 
 async def test_minute_event_deduped_by_event_id():
@@ -676,7 +676,9 @@ async def test_minute_turn_targets_open_id_and_injects_token(monkeypatch):
     fi = ch.inbound
     _sent_collector(ch, monkeypatch)
 
-    await fi._run_minute_turn(None, "feishu-ou-me", "ou_me", "obcnTOK")
+    await fi._run_minute_turn(
+        None, "feishu-ou-me", "ou_me", inb._MinuteEvent("obcnTOK", "ou_me")
+    )
 
     assert captured["chat_id"] == "ou_me"
     assert captured["thread_id"] == "feishu-ou-me"
@@ -701,7 +703,9 @@ async def test_minute_turn_sends_no_anchor_message(monkeypatch):
     fi = ch.inbound
     sent = _sent_collector(ch, monkeypatch)
 
-    await fi._run_minute_turn(None, "feishu-ou-me", "ou_me", "obcnTOK")
+    await fi._run_minute_turn(
+        None, "feishu-ou-me", "ou_me", inb._MinuteEvent("obcnTOK", "ou_me")
+    )
 
     assert sent == []  # 一条占位消息都没发
     assert captured["reply_to"] == ""  # 无锚点，交由 streaming 走 Create 直投
@@ -711,7 +715,7 @@ async def test_drain_minute_events_skips_busy_session(monkeypatch):
     """已建桥的会话正在跑时不抢锁，事件留队下个 tick 再认领。"""
     ch = FeishuChannel(FeishuChannelConfig())
     fi = ch.inbound
-    fi._minute_events = [("obcnTOK", "ou_me")]
+    fi._minute_events = [inb._MinuteEvent("obcnTOK", "ou_me")]
     ran = []
 
     async def spy(*a):
@@ -726,7 +730,7 @@ async def test_drain_minute_events_skips_busy_session(monkeypatch):
     async with ch.bridge_pool._locks[tid]:  # 该会话正在跑一轮
         await fi._drain_minute_events()
 
-    assert ran == [] and fi._minute_events == [("obcnTOK", "ou_me")]
+    assert ran == [] and fi._minute_events == [inb._MinuteEvent("obcnTOK", "ou_me")]
 
 
 async def test_drain_minute_events_bridges_unseen_session(monkeypatch):
@@ -737,19 +741,14 @@ async def test_drain_minute_events_bridges_unseen_session(monkeypatch):
     """
     ch = FeishuChannel(FeishuChannelConfig())
     fi = ch.inbound
-    fi._minute_events = [("obcnTOK", "ou_new")]
+    fi._minute_events = [inb._MinuteEvent("obcnTOK", "ou_new")]
     ran = []
 
-    async def spy(bridge, thread_id, open_id, token):
-        ran.append((thread_id, open_id, token))
+    async def spy(bridge, thread_id, target, event):
+        ran.append((thread_id, target, event.token))
 
     monkeypatch.setattr(fi, "_run_minute_turn", spy)
-
-    async def fake_get(thread_id):
-        ch.bridge_pool._locks.setdefault(thread_id, asyncio.Lock())
-        return None
-
-    monkeypatch.setattr(ch.bridge_pool, "get", fake_get)
+    _patch_pool_get(ch, monkeypatch, None)
 
     await fi._drain_minute_events()
 
@@ -757,6 +756,106 @@ async def test_drain_minute_events_bridges_unseen_session(monkeypatch):
     assert ran == [(tid, "ou_new", "obcnTOK")]
     assert fi._minute_events == []
     assert ch.bridge_pool.chat_ids[tid] == "ou_new"  # 回填供后台通知认领
+
+
+def test_session_key_only_exact_p2p_uses_open_id():
+    """仅精确 "p2p" 用 open_id；群与任何未知 chat_type 一律 chat_id（宁可不裂）。"""
+    assert inb.session_key_of("p2p", "oc_dm", "ou_me") == "ou_me"
+    assert inb.session_key_of("group", "oc_team", "ou_me") == "oc_team"
+    assert inb.session_key_of(None, "oc_team", "ou_me") == "oc_team"
+    assert inb.session_key_of("topic", "oc_team", "ou_me") == "oc_team"
+
+
+def _inbound_event(chat_type: str, chat_id: str, open_id: str):
+    """一条最简文本入站消息事件（字段名与 lark EventMessage 对齐）。
+
+    message_id 随发送者变：同一测试里连发两条时不能被去重 LRU 吃掉。
+    """
+    return SimpleNamespace(
+        event=SimpleNamespace(
+            message=SimpleNamespace(
+                message_id=f"om_{open_id}",
+                chat_id=chat_id,
+                chat_type=chat_type,
+                message_type="text",
+                content=json.dumps({"text": "你好"}),
+                mentions=None,
+                parent_id=None,
+                create_time=1000,
+            ),
+            sender=SimpleNamespace(sender_type="user", sender_id=_Mid(open_id)),
+        )
+    )
+
+
+async def _inbound_thread_of(ch, monkeypatch, chat_type, chat_id, open_id) -> str:
+    """跑一遍真实 on_message，返回它派生出的 thread_id。
+
+    只挡住网络（发送者姓名）、落盘（sidecar）与真正建桥/跑轮，派生逻辑本身不挡
+    ——测试的全部意义就在于验证那一段。已打桩 bridge_pool.get，调用方无需重复。
+    """
+    fi = ch.inbound
+    captured = []
+
+    async def fake_resolve(chat, ids):
+        return {open_id: "张三"}
+
+    async def fake_sync(*a, **k):
+        return None
+
+    async def fake_drain(bridge, cid, thread_id, batch):
+        captured.append(thread_id)
+
+    monkeypatch.setattr(ch.directory, "resolve_senders_in_chat", fake_resolve)
+    monkeypatch.setattr(fi, "_sync_session_title", fake_sync)
+    monkeypatch.setattr(fi, "_locked_drain", fake_drain)
+    _patch_pool_get(ch, monkeypatch, None)
+
+    await fi.on_message(_inbound_event(chat_type, chat_id, open_id))
+
+    assert captured, "on_message 未跑到派生 thread 这一步（异常被 try/except 吞了）"
+    return captured[0]
+
+
+async def test_inbound_p2p_thread_keyed_by_open_id(monkeypatch):
+    """入站私聊必须按 open_id 派生 thread —— 与妙记推送同源的前提。"""
+    ch = FeishuChannel(FeishuChannelConfig())
+    thread = await _inbound_thread_of(ch, monkeypatch, "p2p", "oc_dm", "ou_me")
+    assert thread == feishu_thread_id("ou_me")
+    # 投递地址仍回填真实 chat_id（thread key 是 open_id，两者刻意不同）
+    assert ch.bridge_pool.chat_ids[thread] == "oc_dm"
+
+
+async def test_inbound_group_thread_keyed_by_chat_id(monkeypatch):
+    """群聊仍按 chat_id 派生：同群不同发言人必须落在同一条 thread。"""
+    ch = FeishuChannel(FeishuChannelConfig(group_policy="open"))
+    a = await _inbound_thread_of(ch, monkeypatch, "group", "oc_team", "ou_a")
+    b = await _inbound_thread_of(ch, monkeypatch, "group", "oc_team", "ou_b")
+    assert a == b == feishu_thread_id("oc_team")
+
+
+async def test_minute_push_lands_on_the_inbound_p2p_thread(monkeypatch):
+    """回归：妙记推送与入站私聊必须落在同一条 thread 上。
+
+    入站侧的 thread 由真实 on_message 跑出来（不是用被测函数自己算的），否则
+    这条断言会退化成同义反复——入站改回按 chat_id 派生也照样通过。
+    """
+    ch = FeishuChannel(FeishuChannelConfig())
+    inbound_thread = await _inbound_thread_of(ch, monkeypatch, "p2p", "oc_dm", "ou_me")
+
+    ran = []
+
+    async def spy(bridge, thread_id, target, event):
+        ran.append((thread_id, target))
+
+    fi = ch.inbound
+    fi._minute_events = [inb._MinuteEvent("obcnTOK", "ou_me")]
+    monkeypatch.setattr(fi, "_run_minute_turn", spy)  # 桥已由 _inbound_thread_of 打桩
+
+    await fi._drain_minute_events()
+
+    # 落在入站那条 thread 上，且投递走入站回填的真实 chat_id（而非 open_id 直投）
+    assert ran == [(inbound_thread, "oc_dm")]
 
 
 # ── 妙记订阅自愈 + 链路诊断 ──
@@ -956,7 +1055,7 @@ async def test_drain_minute_events_bridges_before_lock_check(monkeypatch):
     """
     ch = FeishuChannel(FeishuChannelConfig())
     fi = ch.inbound
-    fi._minute_events = [("obcnTOK", "ou_new")]
+    fi._minute_events = [inb._MinuteEvent("obcnTOK", "ou_new")]
     order: list[str] = []
     pool = ch.bridge_pool
 
@@ -995,14 +1094,14 @@ async def test_drain_minute_events_keeps_event_when_bridging_fails(monkeypatch):
     """建桥失败时事件留在队列等下轮，不能已出队又丢掉。"""
     ch = FeishuChannel(FeishuChannelConfig())
     fi = ch.inbound
-    fi._minute_events = [("obcnTOK", "ou_new")]
+    fi._minute_events = [inb._MinuteEvent("obcnTOK", "ou_new")]
 
     async def boom(tid):
         raise RuntimeError("initialize failed")
 
     monkeypatch.setattr(ch.bridge_pool, "get", boom)
     await fi._drain_minute_events()
-    assert fi._minute_events == [("obcnTOK", "ou_new")]
+    assert fi._minute_events == [inb._MinuteEvent("obcnTOK", "ou_new")]
 
 
 def test_diagnose_expands_env_var_app_id(monkeypatch):
