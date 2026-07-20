@@ -7,6 +7,7 @@
 
 from __future__ import annotations
 
+import os
 import sys
 from typing import Annotated
 
@@ -152,8 +153,32 @@ def _run_headless(
     asyncio.run(_execute())
 
 
+def _ensure_ca_bundle() -> None:
+    """OpenSSL 默认 CA 路径失效时回退到 certifi。
+
+    PyInstaller 冻结产物里这个路径是**构建机**上的位置（CI runner），装到用户机上必然
+    不存在，`ssl.create_default_context()` 于是一张 CA 都加载不到，任何证书链都被判成
+    不可信。表现极具迷惑性：requests/httpx 显式用 certifi 故 HTTP 调用全部正常，只有
+    走 ssl 默认上下文的连接失败——飞书 WS（lark SDK 不传 ssl 参数）就一直卡在「连接中」，
+    而同一份代码 dev 模式跑完全正常（系统 Python 的路径在本机真实存在）。
+
+    只在路径确实不存在时兜底，dev 与容器环境取值不变；显式设过 SSL_CERT_FILE 则尊重。
+    """
+    import ssl
+
+    if os.environ.get("SSL_CERT_FILE"):
+        return
+    cafile = ssl.get_default_verify_paths().openssl_cafile
+    if cafile and os.path.exists(cafile):
+        return
+    import certifi
+
+    os.environ["SSL_CERT_FILE"] = certifi.where()
+
+
 def main() -> None:
     """CLI 主入口。"""
+    _ensure_ca_bundle()
     app()
 
 

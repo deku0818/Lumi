@@ -1,5 +1,10 @@
 # Changelog
 
+## [0.2.59] - 2026-07-20
+
+### Fixed
+- **打包版飞书渠道永远停在「连接中」（dev 模式正常）** — PyInstaller 冻结产物里 OpenSSL 的默认 CA 路径是**构建机**上的位置（CI runner），装到用户机上必然不存在，`ssl.create_default_context()` 于是一张 CA 都加载不到，任何证书链都被判成自签不可信。故障面极具迷惑性：requests/httpx 显式用 certifi，HTTP 调用（bot 身份获取、通讯录预热）全部正常且照打成功日志，只有走 ssl 默认上下文的连接失败——飞书 WS（lark SDK 的 `_ws_connect_kwargs()` 不传 ssl 参数）握手即挂，而真实报错 `CERTIFICATE_VERIFY_FAILED` 走 lark 自己的 logger 进 stderr、被 Electron 吞掉，Lumi 日志里一个字都没有。前端显示的「连接中」是如实反映（进程内确无到飞书的外网连接），非状态上报 bug。现于 `main()` 最前兜底：默认 CA 路径不存在时回退 `certifi.where()`，dev 与容器环境取值不变，显式设过 `SSL_CERT_FILE`（企业内网自签 CA）则尊重用户的
+
 ## [0.2.58] - 2026-07-20
 
 ### Fixed

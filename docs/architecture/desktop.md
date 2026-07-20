@@ -4,6 +4,10 @@ Lumi 桌面应用（Electron + TS 前端）的内部实现。前端通过 WebSoc
 
 > 现状：dev 模式经 `uv run lumi serve` 拉起 sidecar；打包发行走 `scripts/build-desktop.sh`——PyInstaller 打后端（onedir）经 electron-builder `extraResources` 内嵌进 app，打包版优先用内嵌后端，无则退回 PATH 上的 `lumi`（uv tool install 自装），都没有则作纯远程 client 使用。
 
+> ⚠️ **打包版与 dev 的两处环境差异**（都只在打包 + GUI 启动时暴露，dev 模式一切正常，故极难复现）：
+> 1. **PATH** — GUI 启动的进程只继承 launchd 默认 PATH，读不到 shell rc 里的 nvm / `~/.local/bin`。`main.cjs` 的 `loginShellPath()` 借登录 shell 取回真实值再拉 sidecar，否则外部命令（`lark-cli` / `gh` / dev 的 `uv`）一律 ENOENT。
+> 2. **CA 证书** — 冻结产物里 OpenSSL 的默认 CA 路径指向构建机，本机不存在 → ssl 默认上下文零 CA。`cli._ensure_ca_bundle()` 回退 certifi。注意故障是**局部**的：requests/httpx 显式用 certifi 不受影响，只有走默认上下文的连接（如飞书 WS）失败，症状是渠道永远「连接中」而日志无异常。
+
 ---
 
 ## 进程结构
