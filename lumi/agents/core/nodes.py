@@ -706,12 +706,6 @@ async def summarizer(
         return {}
 
     prompt = get_config().load_prompt("SUMMARY")
-    if not prompt:
-        raise ValueError(
-            "未找到摘要提示词配置 'SUMMARY.md'。\n"
-            "请在 .lumi/prompts/SUMMARY.md 中配置摘要提示词。"
-        )
-
     try:
         summary_text, ptl_retries = await _summarize(
             messages_to_summarize, prompt, runtime, token_config
@@ -767,10 +761,6 @@ async def _ptl_forced_compact(
     to_summarize, tail = selected
 
     prompt = get_config().load_prompt("SUMMARY")
-    if not prompt:
-        logger.warning("[Summarizer] PTL 强制压缩：未配置 SUMMARY 提示词，放行")
-        return {}
-
     try:
         summary_text, ptl_retries = await _summarize(
             to_summarize, prompt, runtime, token_config

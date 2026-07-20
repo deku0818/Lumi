@@ -93,15 +93,19 @@ def ensure_subscription() -> str:
     return str(error.get("message") or payload)[:200]
 
 
-def _auth_status() -> dict | None:
-    """lark-cli auth status --json 的解析结果；不可用时 None。"""
+def _auth_status() -> tuple[dict | None, str]:
+    """lark-cli auth status --json 的解析结果，失败时 ``(None, 原因)``。
+
+    原因要带出来：超时、CLI 崩溃、旧版本不认 --json 三种故障在诊断 UI 上必须可区分，
+    否则用户只能被支回终端自己跑一遍看报错（与 ensure_subscription 同一范式）。
+    """
     ok, out = _run_cli("auth", "status", "--json")
     if not ok:
-        return None
+        return None, out
     try:
-        return json.loads(out)
+        return json.loads(out), ""
     except ValueError:
-        return None
+        return None, f"输出非 JSON：{(out or '无输出').strip()[:200]}"
 
 
 def transcript_hint(token: str, tmp_dir: str) -> str:
@@ -175,7 +179,23 @@ def diagnose(app_id: str) -> list[dict]:
     # needs_refresh，此时 token 仍可用（下次 user API 调用自动刷新），认死 valid 会在
     # 每次闲置超时后误报「未授权」并引导重新扫码。真未授权时 CLI 给 available=false
     # （且不带 tokenStatus 字段）。刷新万一失败也漏不掉——第④步是真 API 调用，会暴露。
-    user = (_auth_status() or {}).get("identities", {}).get("user") or {}
+    # CLI 调用失败（超时 / 非零退出 / 输出非 JSON）单独成一支：与「未授权」混在一起会
+    # 让用户去扫码，而扫码解决不了 CLI 本身跑不通。
+    status, reason = _auth_status()
+    if status is None:
+        checks.append(
+            MinuteCheck(
+                key="auth",
+                ok=False,
+                name="lark-cli 状态读取失败",
+                detail=reason,
+                fix_cmd=f"{_CLI} auth status",
+                fix_note="版本过旧可 npm i -g @larksuite/cli 升级",
+            )
+        )
+        return _with_blocked_tail(checks, "需先排除 lark-cli 故障")
+
+    user = status.get("identities", {}).get("user") or {}
     if not user.get("available"):
         checks.append(
             MinuteCheck(

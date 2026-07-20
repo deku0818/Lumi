@@ -47,6 +47,10 @@ def strip_frontmatter(content: str) -> str:
     return parse_frontmatter(content)[1]
 
 
+# 框架内置提示词（lumi/prompts/）：load_prompt 解析链的最后一层兜底
+BUILTIN_PROMPTS_DIR = Path(__file__).parents[2] / "prompts"
+
+
 class LumiConfig:
     """Lumi 配置管理器
 
@@ -184,79 +188,45 @@ class LumiConfig:
             return json.load(f)
 
     def load_system_prompt(self) -> str:
-        """加载双文件组合提示词 (SOUL.md + AGENTS.md)
+        """SOUL.md + AGENTS.md 按序直接拼接（不做 XML 包裹），逐个走 load_prompt 的解析链。
 
-        加载顺序：先从 style 内置目录读取基础文件，
-        再用用户 .lumi/prompts/ 下的同名文件覆盖。
-        各部分按顺序直接拼接（不做 XML 包裹）。
-        无内置 prompts 的风格（如 default）提示词全部来自 .lumi/prompts/；
-        若两处都没有，返回空串（以无系统提示词运行），不再 fail-loud。
-
-        Raises:
-            ValueError: 提示词文件存在但读取失败
+        两文件都没有时返回空串（以无系统提示词运行，call_model 的 ``if system_prompt:``
+        会跳过 SystemMessage），不 fail-loud。
         """
-        from lumi.styles import get_style_prompts_dir
-
-        style = self.active_style
-        file_names = ["SOUL", "AGENTS"]
-
-        # 按 name 收集最终路径：style 内置 → 用户覆盖
-        resolved: dict[str, Path] = {}
-
-        # 1. style 内置（风格无 prompts/ 目录时跳过，提示词全部来自 .lumi/）
-        try:
-            style_dir = get_style_prompts_dir(style)
-            for name in file_names:
-                path = style_dir / f"{name}.md"
-                if path.exists():
-                    resolved[name] = path
-        except ValueError:
-            logger.debug(
-                f"风格 '{style}' 无内置 prompts，提示词全部来自 .lumi/prompts/"
-            )
-
-        # 2. 用户 .lumi/prompts/ 覆盖
-        for name in file_names:
-            user_path = self.prompts_dir / f"{name}.md"
-            if user_path.exists():
-                resolved[name] = user_path
-
-        # 按 file_names 顺序直接拼接（不做 XML 包裹）
-        parts: list[str] = []
-        for name in file_names:
-            path = resolved.get(name)
-            if path is None:
-                continue
-            try:
-                content = strip_frontmatter(path.read_text(encoding="utf-8"))
-            except (OSError, UnicodeDecodeError) as e:
-                raise ValueError(f"提示词文件读取失败: {path} ({e})") from e
-            if content:
-                parts.append(content)
-
-        if parts:
-            logger.info(f"使用风格 '{style}' 的系统提示词")
-            return "\n\n".join(parts)
-
-        # 无内置 prompts 的风格（如 default）且用户未配置 .lumi/prompts/：
-        # 以空系统提示词运行（call_model 的 `if system_prompt:` 会跳过 SystemMessage）。
-        logger.info(f"风格 '{style}' 无提示词配置，以空系统提示词运行")
-        return ""
+        parts = [
+            text for name in ("SOUL", "AGENTS") if (text := self.load_prompt(name))
+        ]
+        if not parts:
+            logger.info(f"风格 '{self.active_style}' 无提示词配置，以空系统提示词运行")
+            return ""
+        logger.info(f"使用风格 '{self.active_style}' 的系统提示词")
+        return "\n\n".join(parts)
 
     def load_prompt(self, name: str) -> str | None:
-        """加载自定义提示词
+        """加载单个提示词：用户 ``.lumi/prompts/`` > 风格内置 > 框架内置。
+
+        框架内置（``lumi/prompts/``）是最后一层兜底，只放「缺了就跑不起来」的提示词
+        （目前仅 SUMMARY——未配置时压缩会直接失败）。空文件（或只有 frontmatter）等同
+        于没有、继续往下找：否则一个误清空的 SUMMARY.md 会让摘要在无指令下生成。
 
         Args:
             name: 提示词文件名（不包含后缀）
 
         Returns:
-            提示词内容，如果文件不存在返回 None
+            提示词内容，三处都没有有效内容则返回 None
         """
-        prompt_file = self.prompts_dir / f"{name}.md"
-        if not prompt_file.exists():
-            return None
+        from lumi.styles import STYLES_ROOT
 
-        return strip_frontmatter(prompt_file.read_text(encoding="utf-8"))
+        # 直接拼而不用 get_style_prompts_dir：风格没有 prompts/ 是常态（default 即如此），
+        # 那个函数为此抛 ValueError，异常消息还要 iterdir 整个 styles 目录
+        style_dir = STYLES_ROOT / self.active_style / "prompts"
+        for prompt_dir in (self.prompts_dir, style_dir, BUILTIN_PROMPTS_DIR):
+            prompt_file = prompt_dir / f"{name}.md"
+            if prompt_file.exists() and (
+                text := strip_frontmatter(prompt_file.read_text(encoding="utf-8"))
+            ):
+                return text
+        return None
 
     def ensure_dirs(self):
         """确保所有配置目录存在"""

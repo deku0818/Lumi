@@ -4,22 +4,49 @@ import os
 import ssl
 from unittest.mock import patch
 
+import pytest
+
 from lumi.cli import _ensure_ca_bundle
 
 
-def _paths(cafile: str | None) -> ssl.DefaultVerifyPaths:
-    return ssl.DefaultVerifyPaths(None, None, None, cafile, None, None)
+def _paths(cafile: str | None, capath: str | None = None) -> ssl.DefaultVerifyPaths:
+    return ssl.DefaultVerifyPaths(None, None, None, cafile, None, capath)
 
 
-def test_keeps_env_when_default_ca_exists(monkeypatch):
+@pytest.fixture(autouse=True)
+def isolated_env(monkeypatch):
+    """整份 os.environ 换成副本再跑。
+
+    _ensure_ca_bundle 是直接写 os.environ 的，而 monkeypatch.delenv 对「原本不存在」的
+    变量不做记录、也就无从回滚——certifi 路径会泄漏给同会话的后续测试，让依赖系统默认
+    CA 的用例随执行顺序漂移。
+    """
+    monkeypatch.setattr(os, "environ", dict(os.environ))
+    os.environ.pop("SSL_CERT_FILE", None)
+
+
+def test_keeps_env_when_default_ca_exists():
     """dev / 容器：默认路径真实存在，一律不动（避免覆盖系统信任库）。"""
-    monkeypatch.delenv("SSL_CERT_FILE", raising=False)
     with patch("ssl.get_default_verify_paths", return_value=_paths(__file__)):
         _ensure_ca_bundle()
     assert "SSL_CERT_FILE" not in os.environ
 
 
-def test_falls_back_to_certifi_when_default_ca_missing(monkeypatch):
+def test_keeps_env_when_only_capath_exists():
+    """仅靠 capath 建立信任的系统：同样不得覆盖。
+
+    cafile 不存在而 capath 目录真实（且可能已被 update-ca-certificates 灌入企业自签
+    CA）时若改判 certifi，内网 HTTPS 端点会突然不可信。
+    """
+    with patch(
+        "ssl.get_default_verify_paths",
+        return_value=_paths("/nonexistent/ci", os.path.dirname(__file__)),
+    ):
+        _ensure_ca_bundle()
+    assert "SSL_CERT_FILE" not in os.environ
+
+
+def test_falls_back_to_certifi_when_default_ca_missing():
     """冻结产物：路径指向构建机、本机不存在 → 回退 certifi。
 
     不兜底则 ssl 默认上下文加载到 0 张 CA，任何证书链都被判成自签不可信；HTTP 侧因
@@ -27,8 +54,10 @@ def test_falls_back_to_certifi_when_default_ca_missing(monkeypatch):
     """
     import certifi
 
-    monkeypatch.delenv("SSL_CERT_FILE", raising=False)
-    with patch("ssl.get_default_verify_paths", return_value=_paths("/nonexistent/ci")):
+    with patch(
+        "ssl.get_default_verify_paths",
+        return_value=_paths("/nonexistent/ci", "/nonexistent/certs"),
+    ):
         _ensure_ca_bundle()
     assert os.environ["SSL_CERT_FILE"] == certifi.where()
 

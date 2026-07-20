@@ -40,13 +40,13 @@ _TOKEN_CONFIG = SimpleNamespace(
 )
 
 
-def _fake_config(summary_prompt: str = "SUMMARY PROMPT"):
+def _fake_config():
     return SimpleNamespace(
         config=SimpleNamespace(
             agents=SimpleNamespace(max_tokens=None),
             token=_TOKEN_CONFIG,
         ),
-        load_prompt=lambda name: summary_prompt,
+        load_prompt=lambda name: "SUMMARY PROMPT",
     )
 
 
@@ -125,11 +125,9 @@ async def test_success_without_flag_no_flag_update():
 # ─────────────────────────── summarizer PTL 强制压缩分支 ───────────────────────────
 
 
-async def _run_summarizer_ptl(
-    messages, run_summary=None, summary_prompt="SUMMARY PROMPT"
-):
+async def _run_summarizer_ptl(messages, run_summary=None):
     with (
-        patch.object(nodes, "get_config", return_value=_fake_config(summary_prompt)),
+        patch.object(nodes, "get_config", return_value=_fake_config()),
         patch.object(
             nodes,
             "run_summary",
@@ -174,15 +172,6 @@ async def test_forced_compact_circuit_open_passes_through():
         record_circuit_failure("ptl-test", reset_sec=60)
     run_summary = AsyncMock()
     result = await _run_summarizer_ptl(tool_loop_history(), run_summary=run_summary)
-    assert result == {}
-    run_summary.assert_not_awaited()
-
-
-async def test_forced_compact_missing_prompt_passes_through():
-    run_summary = AsyncMock()
-    result = await _run_summarizer_ptl(
-        tool_loop_history(), run_summary=run_summary, summary_prompt=""
-    )
     assert result == {}
     run_summary.assert_not_awaited()
 

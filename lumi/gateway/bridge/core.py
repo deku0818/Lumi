@@ -725,10 +725,6 @@ class AgentBridge:
         to_summarize, last = selected
 
         prompt = get_config().load_prompt("SUMMARY")
-        if not prompt:
-            logger.warning("[compact_thread] 未配置 SUMMARY.md，跳过压缩")
-            return False
-
         token_config = get_config().config.token
         summary_text, _ = await run_summary(
             to_summarize,

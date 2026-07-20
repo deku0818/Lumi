@@ -1,5 +1,20 @@
 # Changelog
 
+## [0.2.60] - 2026-07-21
+
+### Added
+- **框架内置默认 SUMMARY 提示词** — 压缩用的摘要提示词此前只从 `.lumi/prompts/SUMMARY.md` 读，用户没配就直接抛「未找到摘要提示词配置」，客户侧频繁撞到。现于 `lumi/prompts/SUMMARY.md` 内置一份（续接导向：用户意图 / 已完成工作含工具调用与失败尝试 / 关键事实与决策 / 当前状态 / 下一步，并强调「摘要是后续唯一可见的历史，具体标识原样保留」），随 wheel 与 PyInstaller 产物一并分发（已验证 `collect_data_files('lumi')` 递归收集到）
+
+### Changed
+- **提示词解析统一为三层链**：用户 `.lumi/prompts/` > 风格内置 > 框架内置，**空文件（或只剩 frontmatter）视同不存在、继续往下找**——否则一个被误清空的提示词会静默生效。`load_system_prompt` 改为逐个复用 `load_prompt`，删去原先那套并行的 resolved-dict 解析（净减 45 行），两条链再不会漂移。因内置兜底后「未配置 SUMMARY」不再可能，`nodes.py`（×2）与 `bridge/core.py` 的三处错误分支一并删除
+- **妙记诊断：lark-cli 故障不再谎报未授权** — `_auth_status()` 此前把 `(ok, reason)` 塌成 `None`，CLI 超时 / 崩溃 / 旧版本不认 `--json` 三种故障全都走到「尚未授权」分支、引导用户去扫码，而扫码解决不了 CLI 跑不通。现签名改为 `tuple[dict | None, str]` 把真实原因带到 UI（与 `ensure_subscription` 同一范式），并单列成「lark-cli 状态读取失败」一步
+- **CA bundle 兜底判据补上 capath** — 原本只看 `openssl_cafile`，在仅靠证书目录建立信任的系统上（capath 已被 `update-ca-certificates` 灌入企业自签 CA）会误判失效、用 certifi 把系统信任库整个换掉，内网 HTTPS 端点随之不可信。改为 cafile 与 capath 双双失效才回退
+
+### Fixed
+- **桌面端冷启动卡顿：登录 shell 求值不再阻塞主进程** — v0.2.58 引入的 `execFileSync($SHELL -ilc)` 排在建窗之前，rc 带 nvm/conda 初始化时常要 0.5~2s（卡死则吃满 5s timeout），期间点了图标没有任何窗口。现改为异步（`promisify(execFile)`）且缓存的是 Promise，`whenReady` 一开始即 kick off，与 `pickPort`/建窗/Electron 自身启动重叠，实际等待基本归零；`app.on('activate')` 的注册也提到拉 sidecar 之前。等待期间用户已退出时不再拉起孤儿 sidecar（`stopping` 守卫）
+- **登录 shell PATH 改为合并而非替换** — rc 是「从头求值」的结果，取不到终端启动时已激活的 venv / direnv 注入，整体替换会让原本能解析的命令消失（dev 下 `uv` 可能 ENOENT）。现与当前 PATH 合并、登录 shell 的值在前、去重保序
+- **测试环境变量泄漏** — `tests/test_cli_ca_bundle.py` 让 `_ensure_ca_bundle` 直接写 `os.environ`，而 `monkeypatch.delenv` 对「原本不存在」的变量不做记录、无从回滚，certifi 路径会泄漏给同会话后续测试。现用 autouse fixture 把整份 `os.environ` 换成副本
+
 ## [0.2.59] - 2026-07-20
 
 ### Fixed

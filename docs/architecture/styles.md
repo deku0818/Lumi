@@ -26,12 +26,19 @@ lumi/styles/
 
 ## 加载机制
 
-### 系统提示词（SOUL.md / AGENTS.md）
+### 提示词解析链（load_prompt）
 
-1. 从 `lumi/styles/{style}/prompts/` 读取基础文件（风格无 `prompts/` 目录时跳过）
-2. 用 `.lumi/prompts/` 下的同名文件覆盖
+所有提示词按名字逐层查找，命中即返回：
 
-两个文件按 `SOUL → AGENTS` 顺序、以 `\n\n` **直接拼接**（不做 XML 包裹），任一缺失则跳过该段。`default` 风格不带内置 `prompts/`，提示词全部来自 `.lumi/prompts/`；两处都没有时 `load_system_prompt` 返回空串，agent 以无系统提示词运行（不再 fail-loud）。
+1. `.lumi/prompts/{name}.md` —— 用户自定义，优先级最高
+2. `lumi/styles/{style}/prompts/{name}.md` —— 风格内置（风格无 `prompts/` 目录即跳过）
+3. `lumi/prompts/{name}.md` —— 框架内置兜底
+
+**空文件（或只剩 frontmatter）视同不存在**，继续往下找——否则一个被误清空的提示词会静默生效。三层都没有有效内容才返回 `None`。
+
+**系统提示词（SOUL.md / AGENTS.md）**：两文件各走一次上述解析链，按 `SOUL → AGENTS` 顺序以 `\n\n` **直接拼接**（不做 XML 包裹），任一缺失则跳过该段。`default` 风格不带内置 `prompts/`，提示词全部来自 `.lumi/prompts/`；都没有时 `load_system_prompt` 返回空串，agent 以无系统提示词运行（不 fail-loud）。
+
+**SUMMARY.md（压缩用）**：框架内置了兜底（`lumi/prompts/SUMMARY.md`），故未配置也能正常压缩，各调用点不再有「未配置 SUMMARY」的错误分支。第三层目前只放这一份——它是运行时基础设施而非风格表达，放进某个 style 会让其它 style 拿不到（style 互斥选一，不叠加）。
 
 ### 工具描述
 

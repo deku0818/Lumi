@@ -950,6 +950,19 @@ def test_diagnose_reports_unauthorized(monkeypatch):
     assert "auth login" in checks[1]["fix_cmd"]
 
 
+def test_diagnose_separates_cli_failure_from_unauthorized(monkeypatch):
+    """CLI 跑不通 ≠ 未授权：混为一谈会把用户支去扫码，而扫码解决不了 CLI 故障。"""
+    from lumi.gateway.channels.feishu.minutes import diagnose
+
+    _patch_which(monkeypatch, True)
+    _patch_subprocess(monkeypatch, _fake_run(stdout="Segmentation fault"))
+    checks = diagnose("cli_x")
+    auth = next(c for c in checks if c["key"] == "auth")
+    assert not auth["ok"]
+    assert "auth login" not in auth["fix_cmd"]  # 不引导扫码
+    assert "Segmentation fault" in auth["detail"]  # 真实原因带到 UI，而非泛泛一句
+
+
 def test_diagnose_accepts_needs_refresh(monkeypatch):
     """needs_refresh 是可用状态（下次 user API 调用自动刷新），不得误报未授权。
 

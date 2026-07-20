@@ -5,7 +5,8 @@
 
 from pathlib import Path
 
-_STYLES_ROOT = Path(__file__).parent
+# 各 get_style_*_dir 的基准；「缺某个子目录属正常」的调用方直接拼路径，不走会抛的访问器
+STYLES_ROOT = Path(__file__).parent
 _IGNORE_DIRS = {"__pycache__"}
 
 
@@ -15,7 +16,7 @@ def _get_style_subdir(name: str, subdir: str) -> Path:
     Raises:
         ValueError: 风格不存在或子目录缺失
     """
-    style_dir = _STYLES_ROOT / name
+    style_dir = STYLES_ROOT / name
     if not style_dir.is_dir():
         available = ", ".join(list_styles()) or "(无)"
         raise ValueError(f"风格 '{name}' 不存在。可用风格: {available}")
@@ -44,6 +45,6 @@ def list_styles() -> list[str]:
     """列出所有可用的内置风格名称。"""
     return sorted(
         d.name
-        for d in _STYLES_ROOT.iterdir()
+        for d in STYLES_ROOT.iterdir()
         if d.is_dir() and d.name not in _IGNORE_DIRS and not d.name.startswith("_")
     )

@@ -1,6 +1,8 @@
 // Electron 主进程：拉起 lumi serve sidecar、创建窗口、经 IPC 把 ws 连接信息给 renderer。
 const { app, BrowserWindow, dialog, ipcMain, protocol, session, shell, Notification, Menu } = require('electron')
-const { spawn, execFileSync } = require('node:child_process')
+const { spawn, execFile } = require('node:child_process')
+const { promisify } = require('node:util')
+const execFileAsync = promisify(execFile)
 const net = require('node:net')
 const fs = require('node:fs')
 const path = require('node:path')
@@ -66,29 +68,46 @@ function packagedBackend() {
 // 中间没有 shell，~/.zshrc 里 nvm、~/.local/bin 的注入全都没机会跑。受害的不止后端自己
 // （dev 的 `uv`、打包 fallback 的 `lumi`），还有它 shell out 调的外部命令：lark-cli 的
 // shutil.which 会判定「未安装」，gh / rg 同理。故拉起 sidecar 前借一次登录 shell 取回真实
-// PATH。从终端启动时本就完整，取到的是同一份，不必分支判断。
-let cachedPath = null
-function loginShellPath() {
-  if (cachedPath !== null) return cachedPath
-  // Windows 无 launchd 那套，GUI 进程本就继承系统 PATH
-  if (process.platform === 'win32') return (cachedPath = process.env.PATH)
+// PATH，与当前 PATH 合并——rc 是「从头求值」的结果，取不到终端启动时已激活的 venv /
+// direnv 注入，直接替换会让原本能解析的命令消失。登录 shell 的值在前（Dock 启动时它才是
+// 完整的那份），去重保序。
+//
+// 异步：rc 带 nvm/conda 初始化时这次求值常要 0.5~2s，同步做会连主进程一起冻住（窗口画得
+// 出来但 IPC 全部排队）。缓存的是 Promise 而非结果，故 whenReady 一开始就能 kick off，
+// 与 pickPort/建窗/Electron 自身启动重叠，实际等待基本归零。
+let pathPromise = null
+function sidecarPath() {
+  if (pathPromise === null) {
+    pathPromise = loginShellPath().then((shellPath) =>
+      [...new Set([...shellPath.split(path.delimiter), ...(process.env.PATH || '').split(path.delimiter)])]
+        .filter(Boolean)
+        .join(path.delimiter)
+    )
+  }
+  return pathPromise
+}
+
+async function loginShellPath() {
+  // Windows 无 launchd 那套，GUI 进程本就继承系统 PATH，合并时自会带上
+  if (process.platform === 'win32') return ''
   try {
     // -i 才会读 rc（nvm 通常写在 .zshrc 而非 .zprofile）；rc 里的欢迎语会混进 stdout，
-    // 故打 marker 再挑行。stderr 丢弃：rc 的告警不该污染判断。
-    const out = execFileSync(process.env.SHELL || '/bin/zsh', ['-ilc', 'echo __LUMI_PATH__$PATH'], {
-      encoding: 'utf8', timeout: 5000, stdio: ['ignore', 'pipe', 'ignore'],
-    })
-    const hit = out.split('\n').find((l) => l.startsWith('__LUMI_PATH__'))
-    cachedPath = hit ? hit.slice('__LUMI_PATH__'.length).trim() : process.env.PATH
+    // 故打 marker 再挑行。stderr 一并丢弃：rc 的告警不该污染判断。
+    const { stdout } = await execFileAsync(
+      process.env.SHELL || '/bin/zsh',
+      ['-ilc', 'echo __LUMI_PATH__$PATH'],
+      { encoding: 'utf8', timeout: 5000 }
+    )
+    const hit = stdout.split('\n').find((l) => l.startsWith('__LUMI_PATH__'))
+    return hit ? hit.slice('__LUMI_PATH__'.length).trim() : ''
   } catch {
-    // shell 缺失 / rc 卡死超时：退回原 PATH，宁可少几条路径也不能阻塞启动
-    cachedPath = process.env.PATH
+    // shell 缺失 / rc 卡死超时：只用原 PATH，宁可少几条路径也不能拖住启动
+    return ''
   }
-  return cachedPath
 }
 
 // dev：源码 `uv run lumi serve`（cwd=仓库）；打包后：packagedBackend()。
-function startSidecar(port) {
+async function startSidecar(port) {
   const dev = !app.isPackaged
   const cmd = dev ? 'uv' : packagedBackend()
   // --exit-with-parent + stdin 管道：本进程死亡（含崩溃/强杀）时 OS 关闭管道，
@@ -96,9 +115,11 @@ function startSidecar(port) {
   // 数据库，会话读写悬挂表现为「会话打不开」
   const serveArgs = ['serve', '--port', String(port), '--token', LOCAL_TOKEN, '--exit-with-parent']
   const args = dev ? ['run', 'lumi', ...serveArgs] : serveArgs
+  const resolvedPath = await sidecarPath()
+  if (stopping) return // 等 PATH 期间用户已退出：别再拉起孤儿进程
   // PYTHONUNBUFFERED：PyInstaller 产物 stdout 接管道时块缓冲，日志会滞留到进程退出才刷出
   const opts = {
-    env: { ...process.env, PATH: loginShellPath(), PYTHONUNBUFFERED: '1' },
+    env: { ...process.env, PATH: resolvedPath, PYTHONUNBUFFERED: '1' },
     stdio: ['pipe', 'pipe', 'pipe'],
   }
   if (dev) opts.cwd = PROJECT_ROOT
@@ -432,12 +453,13 @@ app.whenReady().then(async () => {
   })
   // macOS dev：Dock 图标运行时设置（打包后由 bundle 的 icns 接管）
   if (app.dock) app.dock.setIcon(APP_ICON)
+  sidecarPath() // 尽早 kick off 登录 shell 求值，与下面几步重叠
   wsPort = await pickPort()
-  startSidecar(wsPort)
   createWindow()
   app.on('activate', () => {
     if (BrowserWindow.getAllWindows().length === 0) createWindow()
   })
+  startSidecar(wsPort)
 })
 
 app.on('window-all-closed', () => {

@@ -162,14 +162,18 @@ def _ensure_ca_bundle() -> None:
     走 ssl 默认上下文的连接失败——飞书 WS（lark SDK 不传 ssl 参数）就一直卡在「连接中」，
     而同一份代码 dev 模式跑完全正常（系统 Python 的路径在本机真实存在）。
 
-    只在路径确实不存在时兜底，dev 与容器环境取值不变；显式设过 SSL_CERT_FILE 则尊重。
+    只在 cafile 与 capath 双双失效时兜底，dev 与容器环境取值不变；显式设过 SSL_CERT_FILE
+    则尊重。capath 也要看——有的系统只靠证书目录建立信任（且可能已被灌入企业自签 CA），
+    仅凭 cafile 缺失就改判 certifi 会把系统信任库整个换掉。
     """
     import ssl
 
     if os.environ.get("SSL_CERT_FILE"):
         return
-    cafile = ssl.get_default_verify_paths().openssl_cafile
-    if cafile and os.path.exists(cafile):
+    paths = ssl.get_default_verify_paths()
+    if os.path.exists(paths.openssl_cafile or "") or os.path.isdir(
+        paths.openssl_capath or ""
+    ):
         return
     import certifi
 
