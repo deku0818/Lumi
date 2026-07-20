@@ -104,6 +104,32 @@ class TestRunLogAppendAndGetRecent:
         # 最近的 3 条
         assert results[0].started_at == datetime(2025, 1, 15, 9, 0, 0)
 
+    async def test_recent_thread_ids_newest_first_skips_empty(
+        self, tmp_path: Path
+    ) -> None:
+        """只回可跳转的 run（thread_id 非空），从新到旧。"""
+        log = RunLog(tmp_path)
+        for i, tid in enumerate(["t-a", "", "t-b"]):
+            await log.append(
+                _make_record(started_at=datetime(2025, 1, 15, i, 0, 0), thread_id=tid)
+            )
+        assert await log.recent_thread_ids("test123456ab", 50) == ["t-b", "t-a"]
+
+    async def test_recent_thread_ids_respects_window(self, tmp_path: Path) -> None:
+        """只回看最近 keep 条记录——更早的 thread_id 已被保留策略清空，够不着。"""
+        log = RunLog(tmp_path)
+        for i in range(10):
+            await log.append(
+                _make_record(
+                    started_at=datetime(2025, 1, 15, i, 0, 0), thread_id=f"t-{i}"
+                )
+            )
+        assert await log.recent_thread_ids("test123456ab", 3) == ["t-9", "t-8", "t-7"]
+
+    async def test_recent_thread_ids_empty_when_no_log(self, tmp_path: Path) -> None:
+        log = RunLog(tmp_path)
+        assert await log.recent_thread_ids("nonexistent", 50) == []
+
     async def test_get_recent_isolates_by_job_id(self, tmp_path: Path) -> None:
         log = RunLog(tmp_path)
         await log.append(_make_record(job_id="aaa"))

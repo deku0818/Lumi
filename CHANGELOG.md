@@ -1,5 +1,18 @@
 # Changelog
 
+## [0.2.61] - 2026-07-21
+
+### Fixed
+- **定时任务未读角标不显示** — 未读此前是**事件累积**的：只有 `cron.result` 到达那一刻才 +1，桌面端没开着（或那台机器的控制连接还没建立）时跑的执行永远不计，事后刷新也补不回来，`openCronJob` 的对账逻辑只会删不会补。现改为**派生**：后端 `list_cron_jobs` 带回 `run_threads`（近期可跳转的 run，窗口同 `MAX_CRON_RUN_THREADS`），侧栏角标 = 它减去本地已读集合 `readRuns`，与 Runs 栏蓝点同源。离线期间的执行重连后照样算未读。连带删掉整套 `cronUnread` 状态 / localStorage 持久化 / 事件累积 / 两处对账 / stale 回收 / `pruneJobUnread` 辅助（净减约 55 行），实时性靠原有的 `cronVersion` effect 拿到
+- **远程机器的定时任务运行脉冲点从不亮、后台任务面板一直空着** — 控制连接的事件转发是逐个 `||` 枚举的，`cron.running` 与 `bg_tasks.update` 都漏在外面；而远程机器通常没有活跃会话连接、只有控制连接。后台任务的缺口更深：初始快照 `listBgTasks` 只挂在**会话连接**的 ready 上，所以远程机器的任务从初始拉取就没有。现把「进程级广播事件」显式化为 `PROCESS_EVENTS` 集合（`cron.result` / `cron.running` / `bg_tasks.update` / `mcp.status`），两条连接共用同一分发；控制连接的 `gateway.ready` 也拉一次后台任务快照
+- **机器断连后任务永远显示「运行中」** — 这类按机器分段的进程级快照只在连接活着时被推送更新，连接一断就再也等不到「结束」那一帧。定时任务尤其致命：`CronJobRow` 是「运行脉冲点」与「未读角标」二选一渲染，卡住的运行态会永久顶掉未读角标（与上面那条是同一个症状的两个成因）。现由 `clearMachineSnapshots` 统一清理（`cronRunning` + `bgTasks`），断连与移除机器两条路径共用；移除机器时一并清掉此前遗漏的 `channels`（禁用后飞书渠道分组会残留在侧栏）
+- **多机同名定时任务的运行态串号** — 运行态此前按 `job.name` 跟踪且是全局单一数组，A 机的广播会覆盖 B 机的运行态，同名任务还会互相点亮。改按 `job.id`（全局唯一），前端按机器分段存放
+
+### Changed
+- **协议**：`cron.running` 的 payload 由 `names`（任务名）改为 `job_ids`；`list_cron_jobs` 返回的任务新增 `run_threads` 字段（仅列表带，单个任务的增删改响应不带——前端用不到，不必为它读一遍日志）。**新前端配旧后端时运行脉冲点不亮、未读角标为 0**（不会崩，消费点有兜底），远程机器需同步更新后端
+- **性能**：新增 `RunLog.recent_thread_ids()`，只反序列化日志文件尾部 N 行、不构造 `RunRecord` 也不排序——`list_cron_jobs` 位于每条 `cron.result` 都触发的热路径上，而日志文件上限 2MB、可达数千条记录；多任务改 `asyncio.gather` 并发读取
+- **前端**：`openCronJob` 删掉一次 `listCronRuns` RPC 往返——未读对账代码移除后它只剩「找第一条有会话的 run」一个用途，而那按定义就是 `run_threads[0]`；`cron.running` 处理加等值短路（本机同一份快照经两条连接各来一次，不再每次都造新对象拖着 memo 化的 Sidebar 重渲染）；三处手写的 `backend || 'local'` 改用既有的 `beOf`
+
 ## [0.2.60] - 2026-07-21
 
 ### Added

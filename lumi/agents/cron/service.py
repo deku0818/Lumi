@@ -102,3 +102,7 @@ class CronService:
     async def recent_runs(self, job_id: str, limit: int) -> list[RunRecord]:
         """获取最近 limit 条执行记录。"""
         return await self._run_log.get_recent(job_id, limit=limit)
+
+    async def recent_thread_ids(self, job_id: str, keep: int) -> list[str]:
+        """最近 keep 条执行里可跳转的会话 thread_id（从新到旧）。"""
+        return await self._run_log.recent_thread_ids(job_id, keep)

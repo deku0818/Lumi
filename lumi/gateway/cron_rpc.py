@@ -7,10 +7,13 @@
 
 from __future__ import annotations
 
+import asyncio
+
 from lumi.agents.cron.models import Job
 from lumi.agents.cron.runtime import CronRuntime
 from lumi.agents.cron.scheduler import Scheduler
 from lumi.agents.cron.service import CronService
+from lumi.utils.constants import MAX_CRON_RUN_THREADS
 
 CRON_METHODS = frozenset(
     {
@@ -47,6 +50,22 @@ def _job_to_wire(job: Job, scheduler: Scheduler) -> dict:
     return data
 
 
+async def _job_to_wire_with_runs(
+    job: Job, scheduler: Scheduler, service: CronService
+) -> dict:
+    """列表用的 wire 字典，额外附上近期可跳转的 run。
+
+    run_threads 是前端未读角标的唯一数据源（减去本地已读集合即未读数）——派生而非
+    累积，故桌面端离线期间执行的 run 重连后照样算未读。取 MAX_CRON_RUN_THREADS 条：
+    超出保留窗口的记录 thread_id 已被 prune 清空，本就不可跳转。
+
+    只有列表带这个字段：单个任务的增删改响应里前端用不到，不必为它读一遍日志。
+    """
+    data = _job_to_wire(job, scheduler)
+    data["run_threads"] = await service.recent_thread_ids(job.id, MAX_CRON_RUN_THREADS)
+    return data
+
+
 async def dispatch_cron(method: str, params: dict) -> dict:
     """执行一个 cron RPC 方法（method 已确认属于 CRON_METHODS）。"""
     rt = _require_runtime()
@@ -54,7 +73,11 @@ async def dispatch_cron(method: str, params: dict) -> dict:
 
     if method == "list_cron_jobs":
         jobs = await service.get_all()
-        return {"jobs": [_job_to_wire(j, rt.scheduler) for j in jobs]}
+        # 每个任务各读一次日志尾部，并发取（任务数可观时省掉逐个 await 的串行等待）
+        wire = await asyncio.gather(
+            *(_job_to_wire_with_runs(j, rt.scheduler, service) for j in jobs)
+        )
+        return {"jobs": wire}
 
     if method == "create_cron_job":
         job = await service.create(

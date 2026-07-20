@@ -28,7 +28,6 @@ import type {
   ChannelInfo,
   ModelPointer,
   CronJob,
-  CronRun,
   HistoryItem,
   Item,
   PresentedFile,
@@ -252,6 +251,12 @@ const replaceBackendTasks = (prev: BgTask[], backend: string, tasks: BgTask[]): 
   ...tasks.map((t) => ({ ...t, backend })),
 ]
 
+// 进程级广播事件：与具体会话无关，handleEvent 在 session 路由之前统一处理。
+// 远程机器通常没有活跃会话连接、只有一条控制连接，故控制连接也要把这些转给
+// handleEvent——否则远程的定时任务/后台任务在界面上永远是静止的。本机会经两条
+// 连接各收一次，这些处理器都按机器整段覆盖或自带去重，重复到达幂等。
+const PROCESS_EVENTS = new Set(['cron.result', 'cron.running', 'bg_tasks.update', 'mcp.status'])
+
 // 按 approval_id 把挂起的审批/澄清入队；已在队列则原样返回（重连后端会重发，去重保幂等）。
 const enqueuePending = (
   queue: Record<string, unknown>[],
@@ -295,23 +300,6 @@ function hydrateHistory(
     // 出现「新模型名 · 旧模型窗口」的错配。
     ...(r.context_window ? { ctxModel: r.model, ctxWindow: r.context_window } : {}),
   }
-}
-
-// 未读集合（Record<jobId, thread_id[]>）的不可变更新：按 keep 谓词过滤某任务的 tid，
-// 消到空则删键、无变化则原样返回。openRunThread/openCronJob 共用。
-const pruneJobUnread = (
-  u: Record<string, string[]>,
-  jid: string,
-  keep: (tid: string) => boolean,
-): Record<string, string[]> => {
-  const cur = u[jid]
-  if (!cur) return u
-  const kept = cur.filter(keep)
-  if (kept.length === cur.length) return u
-  const next = { ...u }
-  if (kept.length) next[jid] = kept
-  else delete next[jid]
-  return next
 }
 
 export default function App() {
@@ -408,26 +396,17 @@ export default function App() {
   const runsRailW = useResizableWidth('lumi-runs-width', 240, 180, 400)
   const previewW = useResizableWidth('lumi-preview-width', 520, 360, 920)
   const [view, setView] = useState<'chat' | 'projects' | 'scheduled' | 'cronjob'>('chat')
-  const [cronRunning, setCronRunning] = useState<string[]>([]) // 运行中任务名
+  // 运行中任务：机器 → 该机器正在执行的 job id。按机器分段——每台机器各发各的进程级快照
+  const [cronRunning, setCronRunning] = useState<Record<string, string[]>>({})
   const [cronVersion, setCronVersion] = useState(0) // 递增触发 cron 数据刷新
   const [cronJobs, setCronJobs] = useState<CronJob[]>([]) // 侧栏任务分组数据
   const [activeCronJob, setActiveCronJob] = useState<string | null>(null) // 任务会话视图当前任务
   const [cronRunThread, setCronRunThread] = useState<string | null>(null) // 当前选中的执行会话
-  // 每任务的未读执行（按 run 的 thread_id 记，看一条消一条），持久化到 localStorage。
-  // 侧栏「N new」= 该任务未读 run 数；点开某条 run 即从集合移除，全部看完才归零。
-  const [cronUnread, setCronUnread] = useState<Record<string, string[]>>(() => {
-    try {
-      const raw = JSON.parse(localStorage.getItem('lumi-cron-unread') || '{}')
-      // 旧版本存的是 Record<jobId, number> 计数，无法还原成 thread_id 集合——升级即丢弃
-      const clean: Record<string, string[]> = {}
-      for (const [k, v] of Object.entries(raw)) if (Array.isArray(v)) clean[k] = v
-      return clean
-    } catch {
-      return {}
-    }
-  })
-  // 已查看过的执行会话（Runs 栏蓝点 = 未读，点开即消失），持久化
+  // 已查看过的执行会话，持久化。侧栏「N new」与 Runs 栏蓝点同源派生自它：
+  // 未读 = 任务的 run_threads 减去本集合，故桌面端离线期间的执行重连后照样算未读
   const [readRuns, setReadRuns] = useState<Record<string, true>>(() => {
+    // 未读改为派生后 lumi-cron-unread 不再被读写，顺手清掉老用户的残留
+    localStorage.removeItem('lumi-cron-unread')
     try {
       return JSON.parse(localStorage.getItem('lumi-cron-read-runs') || '{}')
     } catch {
@@ -489,9 +468,6 @@ export default function App() {
   useEffect(() => {
     activeCronJobRef.current = activeCronJob
   }, [activeCronJob])
-  useEffect(() => {
-    localStorage.setItem('lumi-cron-unread', JSON.stringify(cronUnread))
-  }, [cronUnread])
   useEffect(() => {
     localStorage.setItem('lumi-cron-read-runs', JSON.stringify(readRuns))
   }, [readRuns])
@@ -563,7 +539,15 @@ export default function App() {
     const { type, payload } = ev
     // cron 事件是进程级广播（与会话无关），在 session 路由之前单独处理
     if (type === 'cron.running') {
-      setCronRunning(payload.names ?? [])
+      // 进程级快照，只替换发来那台机器的那一段（别把其他机器的运行态抹了）。
+      // 本机同一份快照会经会话连接 + 控制连接各来一次，内容没变就保持引用不动，
+      // 否则每次都换新对象、把 memo 化的 Sidebar 白拖着重渲染一遍
+      setCronRunning((prev) => {
+        const next = payload.job_ids ?? []
+        const cur = prev[backend]
+        const same = cur?.length === next.length && cur.every((v, i) => v === next[i])
+        return same ? prev : { ...prev, [backend]: next }
+      })
       return
     }
     // MCP 池后台加载完成：服务端已按连接过滤（只有绑定该池的连接收到），但后台项目
@@ -603,18 +587,14 @@ export default function App() {
       if (seenCronRef.current.size > 500) {
         seenCronRef.current.delete(seenCronRef.current.values().next().value!)
       }
+      // 未读不在此累积：重拉任务列表即带回最新 run_threads，角标随之派生（见 cronVersion effect）
       setCronVersion((v) => v + 1)
-      // 正在看该任务的会话视图时不算未读；否则把本次执行的 run 记为未读（按 thread_id）。
-      // 空 thread_id（无 checkpointer / 已清理）不可跳转、无从「看一条」，故不计入。
       const viewingThisJob =
         viewRef.current === 'cronjob' && activeCronJobRef.current === payload.job_id
-      const tid = payload.thread_id
-      if (!viewingThisJob && tid) {
-        setCronUnread((u) => {
-          const cur = u[payload.job_id] ?? []
-          // 封顶 500（对齐 readRuns）：高频任务长期不看也不会无界膨胀 localStorage
-          return cur.includes(tid) ? u : { ...u, [payload.job_id]: [...cur, tid].slice(-500) }
-        })
+      // 正在看该任务的会话视图时，新执行直接记为已读——否则角标会在用户眼皮底下
+      // 跳出「1 new」。派生模式下「不算未读」的等价表达就是标已读
+      if (viewingThisJob && payload.thread_id) {
+        setReadRuns((r) => (r[payload.thread_id] ? r : { ...r, [payload.thread_id]: true }))
       }
       // 正在看该任务且窗口聚焦时不打扰，其余情况按通知开关弹系统通知
       if (notifyRef.current && (!viewingThisJob || !document.hasFocus())) {
@@ -1118,21 +1098,7 @@ export default function App() {
           return { jobs: cronJobsRef.current.filter((j) => (j.backend || 'local') === backend), ok: false }
         }
       }),
-    ).then((results) => {
-      const jobs = results.flatMap((r) => r.jobs)
-      setCronJobs(jobs)
-      // 仅当所有机器都成功响应才回收 stale 未读；否则离线机器的 job 缺席会被误判 stale 而误删未读
-      if (results.every((r) => r.ok)) {
-        setCronUnread((u) => {
-          const ids = new Set(jobs.map((j) => j.id))
-          const stale = Object.keys(u).filter((k) => !ids.has(k))
-          if (stale.length === 0) return u
-          const next = { ...u }
-          for (const k of stale) delete next[k]
-          return next
-        })
-      }
-    })
+    ).then((results) => setCronJobs(results.flatMap((r) => r.jobs)))
   }, [])
 
   // 重连某机器：重新从配置取最新地址（设置里可能改过 url/token）再 reconnect，
@@ -1156,6 +1122,17 @@ export default function App() {
     [],
   )
 
+  // 机器断连/被移除：清掉它那份「进程级快照」状态（运行中的定时任务、后台任务）。
+  // 这类状态只在连接活着时被推送更新，连接一断就再也等不到「结束」那一帧——留着会让
+  // 任务永远显示运行中（定时任务的运行脉冲点还会顶掉未读角标）。重连后 gateway.ready
+  // 各自重新拉一份，故清空是安全的。
+  const clearMachineSnapshots = useCallback((backend: string) => {
+    setCronRunning((r) => (r[backend]?.length ? { ...r, [backend]: [] } : r))
+    setBgTasks((prev) =>
+      prev.some((t) => beOf(t) === backend) ? replaceBackendTasks(prev, backend, []) : prev,
+    )
+  }, [])
+
   // 为某机器开控制连接（幂等）：ready 后拉它的会话 + 定时任务，连接态记入 machineConn。
   const openControlConn = useCallback(
     (backend: string) => {
@@ -1174,11 +1151,14 @@ export default function App() {
             void refreshSessions()
             refreshCronJobs()
             refreshChannels(backend)
+            // 后台任务初始快照：之后的变更经 bg_tasks.update 推送。没有这一拉，
+            // 无会话连接的远程机器（其任务不由本端发起）任务面板会一直空着
+            void gw
+              .listBgTasks()
+              .then((r) => setBgTasks((prev) => replaceBackendTasks(prev, backend, r.tasks)))
+              .catch(() => {})
           }
-          // 定时任务结果是进程级广播。远程机器通常无活跃会话连接，只有这条控制连接，
-          // cron.result 只能在此消费——否则远程任务的未读角标永远不 +1（本地靠会话连接兜住）。
-          // seenCronRef 去重保证本地即便会话连接 + 控制连接都收到也只算一次。
-          if (ev.type === 'cron.result') {
+          if (PROCESS_EVENTS.has(ev.type)) {
             handleEvent(ev, backend)
             return
           }
@@ -1197,17 +1177,16 @@ export default function App() {
               patchSession(thread_id, backend, { title })
             }
           }
-          // MCP 池加载完成（服务端已按连接过滤，控制连接只收全局池的）：与会话连接共用处理
-          if (ev.type === 'mcp.status') {
-            handleEvent(ev, backend)
-          }
         })
-        gw.onState((st) => setMachineConn((m) => ({ ...m, [backend]: st })))
+        gw.onState((st) => {
+          setMachineConn((m) => ({ ...m, [backend]: st }))
+          if (st !== 'open') clearMachineSnapshots(backend)
+        })
         controlConns.current[backend] = gw
         gw.connect()
       })()
     },
-    [refreshSessions, refreshCronJobs, refreshChannels, reloadHistory, reconnectMachine, patchSession, handleEvent],
+    [refreshSessions, refreshCronJobs, refreshChannels, reloadHistory, reconnectMachine, patchSession, handleEvent, clearMachineSnapshots],
   )
 
   // 同步机器表 → 开新机器的控制连接、关掉已删机器的，刷新会话。BackendsPanel 增删后回调此。
@@ -1225,17 +1204,24 @@ export default function App() {
       if (!wanted.has(id)) {
         gw.close()
         delete controlConns.current[id]
-        // 清掉残留连接态：close() 不触发 onState，否则重新启用时会先闪一下旧的「已连接」
+        // close() 不触发 onState，故连接态与各类快照都得在此手清，否则重新启用时会先
+        // 闪一下旧的「已连接」、任务也会卡在旧的运行态上
         setMachineConn((m) => {
           const next = { ...m }
           delete next[id]
           return next
         })
+        setChannels((c) => {
+          const next = { ...c }
+          delete next[id]
+          return next
+        })
+        clearMachineSnapshots(id)
       }
     }
     for (const id of wanted) openControlConn(id)
     void refreshSessions()
-  }, [openControlConn, refreshSessions])
+  }, [openControlConn, refreshSessions, clearMachineSnapshots])
 
   // 查该机器登记的默认项目路径，顺带把 projects/projectsCurrent 同步成最新——boot effect
   // 与下方 goNewChat 共用同一份查找逻辑，避免各自倒腾一遍 listProjects。
@@ -1629,14 +1615,11 @@ export default function App() {
       setReadRuns((r) => {
         if (r[tid]) return r
         const next = { ...r, [tid]: true as const }
+        // 封顶 5000：它是未读的唯一事实源，裁早了老 run 会回潮成未读。每任务
+        // run_threads 窗口 50，5000 够 100 个任务全部已读仍不越界（约 250KB）
         const keys = Object.keys(next)
-        for (const k of keys.slice(0, Math.max(0, keys.length - 500))) delete next[k]
+        for (const k of keys.slice(0, Math.max(0, keys.length - 5000))) delete next[k]
         return next
-      })
-      // 看一条消一条：tid 全局唯一、只归属一个任务，定位到它并移除（消到空则删键）
-      setCronUnread((u) => {
-        const jid = Object.keys(u).find((k) => u[k].includes(tid))
-        return jid ? pruneJobUnread(u, jid, (t) => t !== tid) : u
       })
       await activate(tid, '', backend)
     },
@@ -1648,26 +1631,15 @@ export default function App() {
     async (jobId: string, threadId?: string) => {
       setView('cronjob')
       setActiveCronJob(jobId)
-      const backend = cronBackendOf(jobId)
-      // 拉当前可见执行（与 RunsRail 同窗口 50）用于对账未读 + 挑 auto-open。null=拉取失败。
-      let runs: CronRun[] | null = null
-      try {
-        runs = (await gwForBackend(backend)?.listCronRuns(jobId, 50))?.runs ?? []
-      } catch {
-        /* 列表拉取失败：不动未读、显示空态 */
-      }
-      // 未读按 run 消：auto-open 的那条经 openRunThread 递减，其余可点未读留待逐条点开。
-      // 对账：只保留仍可点开的 run，被保留策略清理/超窗口而够不着的 tid 一律剔除（否则永远消
-      // 不掉、徽标卡死），空则删键。拉取失败（runs=null）时跳过，避免把未读误清空。
-      if (runs) {
-        const openable = new Set(runs.filter((x) => x.thread_id).map((x) => x.thread_id))
-        setCronUnread((u) => pruneJobUnread(u, jobId, (t) => openable.has(t)))
-      }
-      const tid = threadId ?? runs?.find((x) => x.thread_id)?.thread_id
+      // auto-open 最近一次有会话的执行：run_threads 已是倒序的可跳转 run，取头即可
+      // （RunsRail 自己拉完整列表，这里不必再走一趟 listCronRuns）。
+      // 未读随「点开即标已读」自然消：这条经 openRunThread 标记，其余留待逐条点开
+      const job = cronJobsRef.current.find((j) => j.id === jobId)
+      const tid = threadId ?? job?.run_threads?.[0]
       setCronRunThread(tid ?? null)
-      if (tid) await openRunThread(tid, backend)
+      if (tid) await openRunThread(tid, beOf(job ?? {}))
     },
-    [cronBackendOf, gwForBackend, openRunThread],
+    [openRunThread],
   )
 
   // 会话标记（pin/重命名/删除）存在各机器自己的 ~/.lumi，故按会话所属机器路由（backend 由行透传）
@@ -2233,7 +2205,7 @@ export default function App() {
         projectsActive={view === 'projects'}
         scheduledActive={view === 'scheduled'}
         cronJobs={cronJobs}
-        cronUnread={cronUnread}
+        readRuns={readRuns}
         cronRunning={cronRunning}
         activeCronJob={view === 'cronjob' ? activeCronJob : null}
         onOpenCronJob={openCronJob}
@@ -2319,7 +2291,7 @@ export default function App() {
             api={gwForBackend}
             machines={machines}
             jobs={cronJobs}
-            runningNames={cronRunning}
+            runningJobs={cronRunning}
             version={cronVersion}
             onOpenRun={(tid, jid) => void openCronJob(jid, tid)}
             onRefresh={refreshCronJobs}

@@ -146,6 +146,28 @@ async def test_list_cron_runs(cron_runtime):
     assert result["runs"][0]["thread_id"] == "cron-abc123"
 
 
+async def test_list_jobs_carries_run_threads(cron_runtime):
+    """任务 wire 带回近期可跳转的 run（前端未读角标的唯一数据源），无会话的 run 不计入。"""
+    job = await _create()
+    for i, tid in enumerate(["cron-a", "", "cron-b"]):
+        await cron_runtime.run_log.append(
+            RunRecord(
+                job_id=job["id"],
+                job_name=job["name"],
+                started_at=datetime(2026, 6, 10, 9, i, 0),
+                finished_at=datetime(2026, 6, 10, 9, i, 5),
+                status="success",
+                duration_ms=5000,
+                output_summary="ok",
+                thread_id=tid,
+            )
+        )
+
+    jobs = (await dispatch_cron("list_cron_jobs", {}))["jobs"]
+    # 时间倒序，空 thread_id（无 checkpointer / 已被保留策略清理）不可跳转故剔除
+    assert jobs[0]["run_threads"] == ["cron-b", "cron-a"]
+
+
 async def test_run_record_thread_id_backward_compat():
     """旧格式记录（无 thread_id 字段）反序列化为默认空串。"""
     record = RunRecord.from_dict(

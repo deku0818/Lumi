@@ -69,7 +69,7 @@ class Scheduler:
         self._lock_path = lock_path
         self._lock_file: IO[str] | None = None
         self._running_tasks: set[asyncio.Task[RunRecord]] = set()
-        self._running_job_names: list[str] = []
+        self._running_job_ids: list[str] = []
         self._on_job_status = on_job_status
         self._compensate_task: asyncio.Task[None] | None = None
         # 常驻 checkpointer：所有 run 共用一条连接，每次执行独立 cron- thread，
@@ -366,7 +366,7 @@ class Scheduler:
         """执行单个任务：Agent 调用、重试判定、结果投递与日志记录。"""
         started_at = datetime.now()
 
-        self._running_job_names.append(job.name)
+        self._running_job_ids.append(job.id)
         self._notify_job_status()
 
         try:
@@ -391,7 +391,7 @@ class Scheduler:
             return record
         finally:
             try:
-                self._running_job_names.remove(job.name)
+                self._running_job_ids.remove(job.id)
             except ValueError:
                 logger.warning("任务 %s [%s] 不在 running 列表中", job.name, job.id)
             self._notify_job_status()
@@ -565,13 +565,16 @@ class Scheduler:
     # ------------------------------------------------------------------
 
     def _notify_job_status(self) -> None:
-        """将当前正在执行的任务名列表通知给 TUI。"""
+        """将当前正在执行的任务 id 列表广播出去。
+
+        用 id 而非 name：多机场景下同名任务会串号，id 全局唯一。
+        """
         if not self._on_job_status:
             return
         try:
-            self._on_job_status(list(self._running_job_names))
+            self._on_job_status(list(self._running_job_ids))
         except Exception:
-            logger.error("通知 TUI 任务状态失败", exc_info=True)
+            logger.error("广播任务运行状态失败", exc_info=True)
 
     def _schedule_retry(self, job: Job) -> None:
         """通过 APScheduler DateTrigger 安排退避重试。"""

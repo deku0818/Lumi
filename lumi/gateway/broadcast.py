@@ -53,9 +53,9 @@ class BroadcastHub:
         self._tasks.add(task)
         task.add_done_callback(self._tasks.discard)
 
-    def on_cron_job_status(self, names: list[str]) -> None:
-        """Scheduler 同步回调：把运行中任务名列表广播为 cron.running 事件。"""
-        self._spawn(self._delivery.send_event("cron.running", {"names": names}))
+    def on_cron_job_status(self, job_ids: list[str]) -> None:
+        """Scheduler 同步回调：把运行中任务 id 列表广播为 cron.running 事件。"""
+        self._spawn(self._delivery.send_event("cron.running", {"job_ids": job_ids}))
 
     def on_channel_activity(self, thread_id: str, channel: str) -> None:
         """IM channel 跑完一轮：广播给所有连接（desktop 刷会话列表 / 旁观视图重载）。"""

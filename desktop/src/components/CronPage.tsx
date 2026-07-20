@@ -3,7 +3,7 @@
 // 详情页：返回链接 → 大标题 + 编辑/删除/立即运行 → 开关 + 状态 + 下次运行
 //        → 左右两栏「执行记录 | 任务内容」。
 // 数据经 gateway 的 cron RPC 读写；cron.result/cron.running 事件由 App 转为
-// version/runningNames props 驱动刷新，本组件不直接订阅 WS。
+// version/runningJobs props 驱动刷新，本组件不直接订阅 WS。
 import { useCallback, useEffect, useState } from 'react'
 import {
   AlertTriangle,
@@ -30,7 +30,7 @@ import {
 } from '@/components/ui/dialog'
 import { Switch } from '@/components/ui/switch'
 import { Button } from '@/components/ui/button'
-import { CARD_L2, FLOAT_GAP, cn } from '@/lib/utils'
+import { CARD_L2, FLOAT_GAP, beOf, cn } from '@/lib/utils'
 
 // 后端能力句柄：App 注入 anyGw() 返回的 Gateway 子集，便于解耦与测试
 export interface CronApi {
@@ -109,7 +109,7 @@ export function CronPage({
   api,
   machines,
   jobs,
-  runningNames,
+  runningJobs,
   version,
   onOpenRun,
   onRefresh,
@@ -117,7 +117,7 @@ export function CronPage({
   api: (backend: string) => CronApi | undefined // 按机器取连接（定时是 per-机器）
   machines: { id: string; name: string }[]
   jobs: CronJob[] // App 持有的跨机器合并列表（带 backend 标记）
-  runningNames: string[]
+  runningJobs: Record<string, string[]> // 机器 → 该机器运行中的 job id
   version: number
   onOpenRun: (threadId: string, jobId: string) => void
   onRefresh: () => void
@@ -160,7 +160,7 @@ export function CronPage({
         <JobDetail
           api={boundApi}
           job={selected}
-          running={runningNames.includes(selected.name)}
+          running={(runningJobs[beOf(selected)] ?? []).includes(selected.id)}
           version={version}
           onBack={() => setSelectedId(null)}
           onEdit={() => setDialog({ job: selected })}
@@ -206,7 +206,7 @@ export function CronPage({
                 <JobCard
                   key={job.id}
                   job={job}
-                  running={runningNames.includes(job.name)}
+                  running={(runningJobs[beOf(job)] ?? []).includes(job.id)}
                   onOpen={() => setSelectedId(job.id)}
                   onToggle={(v) => toggle(job, v)}
                 />

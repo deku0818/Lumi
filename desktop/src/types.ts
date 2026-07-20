@@ -61,7 +61,7 @@ export interface WireEventPayloads extends Record<WireEventType, object> {
     duration_ms: number
     thread_id: string // 空串=本次执行无可跳转会话（无 checkpointer / 已被清理）
   }
-  'cron.running': { names: string[] }
+  'cron.running': { job_ids: string[] }
   'bg_tasks.update': { tasks: BgTask[] }
   'channel.activity': { thread_id: string; channel: string }
   'session.title': { thread_id: string; title: string }
@@ -191,6 +191,10 @@ export interface CronJob {
   created_at: string
   consecutive_errors: number
   next_run: string | null
+  // 近期可跳转的 run（最近 50 条里 thread_id 非空的），时间倒序。
+  // 侧栏未读数 = 它减去本地已读集合 readRuns，故离线期间的执行也算未读。
+  // 可选：只有 list_cron_jobs 带回它，且旧版本后端的机器不发——消费点一律兜底
+  run_threads?: string[]
   // 前端 fan-out 合并时打的机器标记（后端不发）；显示名由 backend + machines 现算
   backend?: string
 }

@@ -228,6 +228,42 @@ class RunLog:
         """
         return (await self.get_all(job_id))[:limit]
 
+    async def recent_thread_ids(self, job_id: str, keep: int) -> list[str]:
+        """最近 keep 条记录里非空的 thread_id，从新到旧。
+
+        与 get_recent 的区别只在开销：同样读整个文件，但只反序列化尾部 keep 行，
+        不构造 RunRecord 也不排序。本方法在 list_cron_jobs 热路径上（每条 cron.result
+        都会触发一次列表刷新），而日志文件上限有 2MB、可达数千条记录。
+
+        代价是窗口按文件物理顺序取（追加序 = 完成序），并发执行重叠时与 get_recent
+        的 started_at 排序可能差一两条——对「有哪些 run 可跳转」这个用途无影响。
+
+        Args:
+            job_id: 任务 ID。
+            keep: 回看的最近记录条数。
+
+        Returns:
+            可跳转会话的 thread_id 列表（从新到旧）。
+        """
+        path = _log_path(self._base_dir, job_id)
+        lines = await asyncio.to_thread(_read_lines_sync, path)
+
+        tids: list[str] = []
+        for line in reversed(lines[-keep:]):
+            line = line.strip()
+            if not line:
+                continue
+            try:
+                tid = json.loads(line).get("thread_id") or ""
+            except (json.JSONDecodeError, AttributeError):
+                logger.warning(
+                    "跳过无法解析的日志行: %s (job_id=%s)", line[:100], job_id
+                )
+                continue
+            if tid:
+                tids.append(tid)
+        return tids
+
     async def prune_thread_ids(self, job_id: str, keep: int) -> list[str]:
         """会话保留策略：只保留最近 keep 条记录的 thread_id，返回被清理的部分。
 

@@ -130,7 +130,7 @@ export const Sidebar = memo(function Sidebar({
   projectsActive,
   scheduledActive,
   cronJobs,
-  cronUnread,
+  readRuns,
   cronRunning,
   activeCronJob,
   onOpenCronJob,
@@ -162,8 +162,8 @@ export const Sidebar = memo(function Sidebar({
   projectsActive: boolean
   scheduledActive: boolean
   cronJobs: CronJob[]
-  cronUnread: Record<string, string[]> // 每任务未读 run 的 thread_id 集合，角标取其长度
-  cronRunning: string[]
+  readRuns: Record<string, true> // 已查看过的 run（thread_id → true），与 Runs 栏蓝点同源
+  cronRunning: Record<string, string[]> // 机器 → 该机器运行中的 job id
   activeCronJob: string | null
   onOpenCronJob: (jobId: string) => void
   onSelect: (threadId: string, backend: string) => void
@@ -409,8 +409,9 @@ export const Sidebar = memo(function Sidebar({
                 key={job.id}
                 job={job}
                 active={job.id === activeCronJob}
-                unread={cronUnread[job.id]?.length ?? 0}
-                running={cronRunning.includes(job.name)}
+                // ?? []：远程机器可能跑着不带 run_threads 的旧后端，缺字段按无未读处理而非崩侧栏
+                unread={(job.run_threads ?? []).filter((t) => !readRuns[t]).length}
+                running={(cronRunning[beOf(job)] ?? []).includes(job.id)}
                 dotColor={multi ? machineColor(job.backend || 'local', machines) : undefined}
                 dotName={multi ? machineName(job.backend || 'local', machines) : undefined}
                 onOpen={onOpenCronJob}

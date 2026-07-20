@@ -32,7 +32,7 @@ async def test_cron_job_status_broadcasts_running():
 
     events = _events_of(ch, "cron.running")
     assert len(events) == 1
-    assert events[0]["params"]["payload"]["names"] == ["job-a", "job-b"]
+    assert events[0]["params"]["payload"]["job_ids"] == ["job-a", "job-b"]
 
 
 async def test_bg_task_change_is_debounced():
