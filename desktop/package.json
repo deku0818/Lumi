@@ -9,7 +9,7 @@
     "build": "tsc && vite build",
     "start": "electron .",
     "pack": "npm run build && electron-builder --dir",
-    "dist": "npm run build && electron-builder"
+    "dist": "npm run build && electron-builder --publish never"
   },
   "build": {
     "appId": "com.lumi.desktop",

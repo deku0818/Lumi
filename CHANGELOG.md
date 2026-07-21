@@ -4,7 +4,7 @@
 
 ### Added
 - **应用内自动更新**（`electron-updater` + GitHub Releases）— 状态机全在主进程（`desktop/electron/updater.cjs`），renderer 只订阅 `UpdateState` 并触发检查/安装；入口为「设置 → 关于」与侧栏底部提示条（仅在**此刻装得上**时出现，检查中/下载中一律静默）。启动 15s 后首检、此后每 6h 一次。**Windows / Linux 全自动**（后台下载 → 就绪 → 用户点重启安装）；**macOS 停在「发现新版」把下载交给浏览器** —— CI 未做代码签名，而 Squirrel.Mac 校验新旧版本签名同源，未签名的包一定装不上，故 mac 设 `autoDownload = false`，只调 `checkForUpdates()`（该阶段纯读 `latest-mac.yml`，不启动 Squirrel 代理）。拿到 Developer ID 证书后把 `MANUAL_DOWNLOAD` 改 `false` 即转全自动，CI 无需再动
-- **三平台双架构构建** — 新增 `windows-11-arm` 与 `ubuntu-24.04-arm`，六个 build job 覆盖 Windows / macOS / Linux 各自的 x64 + arm64。**注意：两个 ARM runner 上的构建尚未实跑验证过**（PyInstaller 能否取到对应架构的 Python、NSIS 与 AppImage 工具链在 ARM 上的可用性），本版发布即是它们的首次真实验证；`fail-fast: false`，某个架构挂掉不影响其余产物
+- **Linux arm64 构建** — 新增 `ubuntu-24.04-arm`，五个 build job 覆盖 Windows x64 / macOS x64+arm64 / Linux x64+arm64。**Windows arm64 试过但走不通**：后端依赖链上的 `sqlite-vec`（`langgraph-checkpoint-sqlite` 的传递依赖）既无 `win_arm64` wheel 也无源码分发包，uv 在建 venv 阶段即失败；Windows on ARM 的 x64 模拟层足以跑本应用，ARM 用户装 x64 包即可，待上游发 wheel 再加回
 
 ### Changed
 - **产物命名加入平台标识**：`${productName}-${version}-${os}-${arch}.${ext}`（如 `Lumi-0.2.63-mac-arm64.zip`）。平台原先全靠扩展名隐式区分，而 mac 更新通道用的 `.zip` 是通用扩展名，与其他平台的 zip 必然撞名；`${arch}` 则是硬要求 —— **electron-updater 靠文件名里的架构串选包**（`Provider.findFile` 优先匹配含 `process.arch` 的文件，mac 另有 `MacUpdater.filterFilesForArch`）。**一次性代价**：差量下载靠在新文件名上替换版本号推导旧包的 blockmap 地址，跨越本次改名的这一版推出的是从未存在过的旧文件名 → 404 → 回退全量下载，升级到 0.2.63 的用户需重下完整包

@@ -18,7 +18,12 @@ jobs:
       fail-fast: false # 一个平台失败不牵连另一个
       matrix:
         # 架构由 runner 决定，PyInstaller/electron-builder 各出 host 架构（不交叉编译）。
-        # 三平台各出 x64 + arm64 两份，产物名经 artifactName 带上 ${os}-${arch} 自然区分。
+        # 产物名经 artifactName 带上 ${os}-${arch} 自然区分。
+        #
+        # 没有 Windows arm64：后端依赖链上的 sqlite-vec（langgraph-checkpoint-sqlite 的传递
+        # 依赖）没有 win_arm64 wheel 也没有源码分发包，uv 在建 venv 阶段就失败。Windows on ARM
+        # 的 x64 模拟层足以跑本应用，ARM 用户装 x64 包即可。上游发了 wheel 再把 windows-11-arm
+        # 加回来（届时 Windows 就变成双架构共用 latest.yml，需要下面的 merge job 生效）。
         #
         # 一律钉死具体 OS 版本，不用 -latest：GitHub 的 -latest 迁移是 1~2 个月内静默完成的，
         # 我们分发的是安装包，构建必须可复现（官方亦建议 pin 具体版本）。代价是 OS 弃用时要手动
@@ -26,8 +31,6 @@ jobs:
         # ubuntu-latest=ubuntu-24.04(x64) / windows-latest=windows-2025 / macos-latest=macos-15(arm64)。
         os:
           - windows-2025 # Windows x64（.exe / nsis）
-          - windows-11-arm # Windows arm64。GitHub 的 Windows ARM 只有客户端版镜像，
-            # 故与 x64 那行的 Server 版号不成对，属正常
           - macos-15 # macOS Apple Silicon arm64（.dmg / .zip）
           - macos-15-intel # macOS Intel x64
           - ubuntu-24.04 # Linux x64（.AppImage）
@@ -90,14 +93,15 @@ jobs:
             desktop/release/*.blockmap
             desktop/release/latest*.yml
 
-  # 双架构的更新元数据合并（三平台通用）。
+  # 双架构的更新元数据合并。
   #
-  # 每个平台的 x64 与 arm64 两个 job 各产一份同名元数据（latest.yml / latest-mac.yml /
-  # latest-linux.yml），各自只列自己那一个包。附到 Release 时后者覆盖前者 —— 直接后果是
-  # 一半用户的应用内更新指向错误架构的包。electron-updater 按 files[].url 里有没有
-  # "arm64" 挑架构（如 MacUpdater.filterFilesForArch），只要两条都在同一份 files 里，
-  # 两种机器就各取所需。故本 job 在全部 build job 结束后把同名元数据的 files 并成一份，
-  # 最后覆盖 Release 上的对应文件（softprops 的 overwrite_files 默认 true）。
+  # 当一个平台的 x64 与 arm64 两个 job 产出同名元数据时（当前只有 macOS 的 latest-mac.yml，
+  # Windows 加回 arm64 后其 latest.yml 亦然），各自只列自己那一个包，附到 Release 时后者
+  # 覆盖前者 —— 直接后果是一半用户的应用内更新指向错误架构的包。electron-updater 按
+  # files[].url 里有没有 "arm64" 挑架构（如 MacUpdater.filterFilesForArch），只要两条都在
+  # 同一份 files 里，两种机器就各取所需。故本 job 在全部 build job 结束后把同名元数据的
+  # files 并成一份，最后覆盖 Release 上的对应文件（softprops 的 overwrite_files 默认 true）。
+  # 对只有一份来源的平台，合并是恒等操作，留着即可 —— 加回架构时无需改这里。
   merge-update-metadata:
     needs: build
     if: startsWith(github.ref, 'refs/tags/')
@@ -144,12 +148,14 @@ jobs:
               fallback = next((d for d in docs if 'arm64' not in d['path']), docs[0])
               merged = {**docs[0], 'files': files, 'path': fallback['path'], 'sha512': fallback['sha512']}
               yaml.safe_dump(merged, open(name, 'w'), default_flow_style=False, sort_keys=False)
-              # 三平台在这里行为不同，日志里的「份来源」要照此解读：
-              #   Windows(latest.yml) / macOS(latest-mac.yml) —— 两个架构共用同一文件名，
-              #     正常恒为 2 份；只有 1 份说明另一架构的 job 挂了（fail-fast: false 允许部分成功）。
+              # 日志里的「份来源」按平台解读：
+              #   macOS(latest-mac.yml) —— 两个架构共用同一文件名，正常恒为 2 份；只有 1 份
+              #     说明另一架构的 job 挂了（fail-fast: false 允许部分成功）。
+              #   Windows(latest.yml) —— 当前只有 x64 一个 job（arm64 缺 sqlite-vec wheel，见矩阵
+              #     注释），恒为 1 份；加回 arm64 后会变成 2 份并真正需要合并。
               #   Linux —— electron-builder 只给非 x64 的 linux 加架构后缀（updateInfoBuilder 的
               #     getArchPrefixForUpdateFile，与 electron-updater 读取端的 getChannelFilePrefix 对应），
-              #     latest-linux.yml 与 latest-linux-arm64.yml 本就是两个文件，恒为 1 份，此处是恒等操作。
+              #     latest-linux.yml 与 latest-linux-arm64.yml 本就是两个文件，恒为 1 份。
               print(f'=== {name}: {len(paths)} 份来源 → {len(files)} 个包 ===')
               print(open(name).read())
           PY
