@@ -299,16 +299,23 @@ export interface FeishuConfig {
   daily_dream_time: string
   summary_max_concurrency: number
 }
-// 妙记链路体检：四项前置条件（lark-cli / 授权 / 权限 / 订阅）逐项结果。
-// 任一断裂的表现都是「静默收不到事件」，故必须逐项展示卡在哪一步。
-export interface MinuteCheck {
-  key: 'cli' | 'auth' | 'scope' | 'subscription'
-  ok: boolean
+// 逐项体检结果，机器人接入与妙记链路共用（后端 feishu/checks.py 的 Check）。
+// 两条链路的前置条件都彼此独立，且任一断裂的表现都是「静默不工作、零报错」，
+// 故必须逐项展示卡在哪一步，而不是给一个总的成功/失败。
+// 一项检查的三态。warn = 通过但有功能降级（如缺可选权限）：仍算就绪，
+// 但汇总条不得宣称「全部生效」，否则与详情里的「暂不可用」自相矛盾。
+export type CheckTone = 'ok' | 'warn' | 'error'
+export interface DiagnoseCheck {
+  // 接入：credentials/scopes/events/version；妙记：cli/auth/scope/subscription
+  key: string
   name: string
+  tone: CheckTone
   detail: string
   fix_cmd: string
   fix_url: string
   fix_note: string
+  // 接在 detail 之后加粗显示（如「哪些功能不可用」），由后端给定
+  emphasis: string
 }
 export interface ChannelInfo {
   name: string

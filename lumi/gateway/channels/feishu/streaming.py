@@ -605,7 +605,7 @@ class FeishuStreaming:
             )
             .build()
         )
-        resp, code = lark_call_classified(
+        resp, code, _reason = lark_call_classified(
             f"CardKit content 更新 card_id={card_id}",
             lambda: self.channel.client.cardkit.v1.card_element.content(request),
         )

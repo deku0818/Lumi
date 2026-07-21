@@ -14,43 +14,32 @@ import json
 import os
 import shutil
 import subprocess
-from dataclasses import asdict, dataclass
+from dataclasses import asdict
 
+from lumi.gateway.channels.feishu.checks import Check, blocked_tail
+from lumi.gateway.channels.feishu.scopes import (
+    MINUTE_EVENT,
+    MINUTES_SCOPES,
+    auth_url,
+    event_url,
+)
 from lumi.utils.logger import logger
-
-MINUTE_EVENT = "minutes.minute.generated_v1"
-
-# 读妙记内容 + 订阅事件所需 scope；缺任一都会静默失效
-REQUIRED_SCOPES = ("minutes:minutes.basic:read", "minutes:minutes.transcript:export")
 
 _CLI = "lark-cli"
 _TIMEOUT = 20
 
 # login 只请求勾选/参数指定的 scope（应用开通了也不会自动带上），必须显式列出所需项；
 # --scope 与 --recommend 叠加，不会丢掉其他常用权限
-_LOGIN_CMD = f'{_CLI} auth login --recommend --scope "{",".join(REQUIRED_SCOPES)}"'
+_LOGIN_CMD = f'{_CLI} auth login --recommend --scope "{",".join(MINUTES_SCOPES)}"'
 
 # 四项检查的固定顺序与显示名。前一项不通时其后各项统一标记为「需先完成上一步」，
-# 由 _with_blocked_tail 按本表补齐——各失败分支不再手写剩余项，免得步骤表漂移。
+# 由 blocked_tail 按本表补齐——各失败分支不再手写剩余项，免得步骤表漂移。
 _STEPS: tuple[tuple[str, str], ...] = (
     ("cli", "lark-cli"),
     ("auth", "用户授权"),
     ("scope", "妙记权限"),
     ("subscription", "事件订阅"),
 )
-
-
-@dataclass(frozen=True)
-class MinuteCheck:
-    """一项诊断结果。fix_* 为空表示该项无需修复引导。"""
-
-    key: str  # cli / auth / scope / subscription
-    ok: bool
-    name: str
-    detail: str = ""
-    fix_cmd: str = ""  # 可复制的终端命令
-    fix_url: str = ""  # 开放平台直达链接
-    fix_note: str = ""  # 补充说明
 
 
 def _run_cli(*args: str) -> tuple[bool, str]:
@@ -132,47 +121,30 @@ def transcript_hint(token: str, tmp_dir: str) -> str:
     )
 
 
-def _with_blocked_tail(checks: list[MinuteCheck], why: str) -> list[dict]:
-    """已完成的检查 + 其余各步统一标记 blocked，一次转成 wire 格式。"""
-    done = {c.key for c in checks}
-    return [asdict(c) for c in checks] + [
-        asdict(MinuteCheck(key=key, ok=False, name=name, detail=why))
-        for key, name in _STEPS
-        if key not in done
-    ]
-
-
 def diagnose(app_id: str) -> list[dict]:
     """逐项体检妙记链路，返回可直接下发给 desktop 的 dict 列表。
 
     同步实现（子进程 + 网络），调用方需丢线程池。前一项不通即短路返回，后续项由
-    _with_blocked_tail 补成「需先完成上一步」——省掉必然失败的探测调用。
+    blocked_tail 补成「需先完成上一步」——省掉必然失败的探测调用。
     """
     # app_id 支持 ${ENV_VAR} 引用（见 FeishuChannelConfig），不展开会拼出
     # https://open.feishu.cn/app/${FEISHU_APP_ID}/auth 这种点不开的修复链接
     app_id = os.path.expandvars(app_id)
-    auth_url = (
-        f"https://open.feishu.cn/app/{app_id}/auth"
-        # token_type=user：lark-cli 以 --as user 取数，scope 必须加在「用户身份权限」
-        # tab 下；tenant 侧开通不会进 user_access_token，且页面默认停在 tenant tab
-        f"?q={','.join(REQUIRED_SCOPES)}&op_from=openapi&token_type=user"
-    )
-    event_url = f"https://open.feishu.cn/app/{app_id}/event"
-    checks: list[MinuteCheck] = []
+    checks: list[Check] = []
 
     # ① lark-cli 可用性
     if shutil.which(_CLI) is None:
         checks.append(
-            MinuteCheck(
+            Check(
                 key="cli",
-                ok=False,
+                tone="error",
                 name="lark-cli 未安装",
                 detail="妙记取数与事件订阅依赖该命令行工具",
                 fix_cmd="npm i -g @larksuite/cli",
             )
         )
-        return _with_blocked_tail(checks, "需先安装 lark-cli")
-    checks.append(MinuteCheck(key="cli", ok=True, name="lark-cli 已安装"))
+        return blocked_tail(checks, _STEPS, "需先安装 lark-cli")
+    checks.append(Check(key="cli", name="lark-cli 已安装"))
 
     # ② 用户授权（订阅与读逐字稿都必须 user 身份，app 身份读会被拒 2091005）
     # 判 available 而非 tokenStatus == "valid"：access_token 约 2 小时到期后状态转
@@ -184,74 +156,68 @@ def diagnose(app_id: str) -> list[dict]:
     status, reason = _auth_status()
     if status is None:
         checks.append(
-            MinuteCheck(
+            Check(
                 key="auth",
-                ok=False,
+                tone="error",
                 name="lark-cli 状态读取失败",
                 detail=reason,
                 fix_cmd=f"{_CLI} auth status",
                 fix_note="版本过旧可 npm i -g @larksuite/cli 升级",
             )
         )
-        return _with_blocked_tail(checks, "需先排除 lark-cli 故障")
+        return blocked_tail(checks, _STEPS, "需先排除 lark-cli 故障")
 
     user = status.get("identities", {}).get("user") or {}
     if not user.get("available"):
         checks.append(
-            MinuteCheck(
+            Check(
                 key="auth",
-                ok=False,
+                tone="error",
                 name="尚未授权或授权已失效",
                 detail=user.get("message") or "读取妙记内容需以用户身份登录",
                 fix_cmd=_LOGIN_CMD,
                 fix_note="终端执行后扫码授权；refresh_token 有效期 7 天，届时需重新登录",
             )
         )
-        return _with_blocked_tail(checks, "需先完成授权")
-    checks.append(
-        MinuteCheck(
-            key="auth", ok=True, name="用户已授权", detail=user.get("userName", "")
-        )
-    )
+        return blocked_tail(checks, _STEPS, "需先完成授权")
+    checks.append(Check(key="auth", name="用户已授权", detail=user.get("userName", "")))
 
     # ③ 应用是否开通妙记 scope
     granted = set((user.get("scope") or "").split())
-    missing = [s for s in REQUIRED_SCOPES if s not in granted]
+    missing = [s for s in MINUTES_SCOPES if s not in granted]
     if missing:
         checks.append(
-            MinuteCheck(
+            Check(
                 key="scope",
-                ok=False,
+                tone="error",
                 name="缺少妙记权限",
                 detail="应用未开通：" + "、".join(missing),
-                fix_url=auth_url,
+                # token_type=user：lark-cli 以 --as user 取数，scope 必须加在「用户身份
+                # 权限」tab 下；tenant 侧开通不会进 user_access_token
+                fix_url=auth_url(app_id, MINUTES_SCOPES, token_type="user"),
                 fix_cmd=_LOGIN_CMD,
                 fix_note="需开通在「用户身份权限」下（应用身份不生效），开通并发布版本后执行上述命令重新授权",
             )
         )
-        return _with_blocked_tail(checks, "需先开通权限")
-    checks.append(
-        MinuteCheck(key="scope", ok=True, name="妙记权限已开通", detail="读取 + 订阅")
-    )
+        return blocked_tail(checks, _STEPS, "需先开通权限")
+    checks.append(Check(key="scope", name="妙记权限已开通", detail="读取 + 订阅"))
 
     # ④ 服务端订阅（顺带把它重建好——诊断即修复）
     error = ensure_subscription()
     if error:
         logger.warning(f"妙记订阅诊断失败: {error}")
         checks.append(
-            MinuteCheck(
+            Check(
                 key="subscription",
-                ok=False,
+                tone="error",
                 name="事件订阅未生效",
                 detail=error,
-                fix_url=event_url,
+                fix_url=event_url(app_id),
                 fix_note=f"确认开放平台「事件与回调」已添加 {MINUTE_EVENT}，添加后需发布版本",
             )
         )
     else:
         checks.append(
-            MinuteCheck(
-                key="subscription", ok=True, name="事件订阅生效", detail=MINUTE_EVENT
-            )
+            Check(key="subscription", name="事件订阅生效", detail=MINUTE_EVENT)
         )
     return [asdict(c) for c in checks]

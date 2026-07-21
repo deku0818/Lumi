@@ -14,7 +14,7 @@ import type {
   McpServers,
   McpServerStatus,
   McpTestResult,
-  MinuteCheck,
+  DiagnoseCheck,
   Project,
   ProviderProfile,
   RpcMethod,
@@ -249,7 +249,7 @@ export class Gateway {
     }>('delete_provider', { id })
   }
 
-  // —— IM 渠道（飞书等）：配置存后端 ~/.lumi/channels.json，保存即实时重连 ——
+  // —— IM 渠道（飞书等）：配置存后端 ~/.lumi/lumi.json，保存即实时重连 ——
   getChannels(): Promise<{ channels: ChannelInfo[] }> {
     return this.request<{ channels: ChannelInfo[] }>('get_channels')
   }
@@ -258,19 +258,17 @@ export class Gateway {
     return this.request<{ channels: ChannelInfo[] }>('save_channel', { name, config })
   }
 
-  testChannel(
+  // 机器人接入体检（凭证 / 权限 / 事件 / 发布）：一次「应用版本信息」查询即可判全部四项
+  diagnoseFeishuSetup(
     name: string,
     config: Partial<FeishuConfig>,
-  ): Promise<{ ok: boolean; error?: string; bot_name?: string }> {
-    return this.request<{ ok: boolean; error?: string; bot_name?: string }>('test_channel', {
-      name,
-      config,
-    })
+  ): Promise<{ checks: DiagnoseCheck[] }> {
+    return this.request<{ checks: DiagnoseCheck[] }>('diagnose_feishu_setup', { name, config })
   }
 
   // 妙记链路体检（打开配置弹窗时调）：走子进程 + 网络，后端已丢线程池，可能耗时 1-2s
-  diagnoseMinutes(name: string, config: Partial<FeishuConfig>): Promise<{ checks: MinuteCheck[] }> {
-    return this.request<{ checks: MinuteCheck[] }>('diagnose_minutes', { name, config })
+  diagnoseMinutes(name: string, config: Partial<FeishuConfig>): Promise<{ checks: DiagnoseCheck[] }> {
+    return this.request<{ checks: DiagnoseCheck[] }>('diagnose_minutes', { name, config })
   }
 
   // —— MCP 服务器：读写该机器的 ~/.lumi 或 <project>/.lumi 下 mcp_server.json，下次新会话加载生效 ——

@@ -70,12 +70,19 @@ async def test_rpc_save_persists_and_reflects(sidecar):
     assert sidecar.exists()
 
 
-async def test_rpc_test_channel_missing_creds(sidecar):
+async def test_rpc_setup_diagnose_missing_creds(sidecar):
+    """凭证为空时不发网络请求，直接给出四项结果（原 test_channel 的空凭证用例移到这里）。"""
     r = await channel_rpc.dispatch_channel(
-        "test_channel", {"name": "feishu", "config": {"app_id": "", "app_secret": ""}}
+        "diagnose_feishu_setup",
+        {"name": "feishu", "config": {"app_id": "", "app_secret": ""}},
     )
-    assert r["ok"] is False
-    assert "error" in r
+    assert [c["key"] for c in r["checks"]] == [
+        "credentials",
+        "scopes",
+        "events",
+        "version",
+    ]
+    assert all(c["tone"] == "error" for c in r["checks"])
 
 
 async def test_rpc_unknown_channel_rejected(sidecar):

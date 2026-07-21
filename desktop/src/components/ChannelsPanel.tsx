@@ -3,7 +3,6 @@ import {
   Check,
   ChevronDown,
   ChevronRight,
-  Loader2,
   Plus,
   Send,
   Building2,
@@ -15,7 +14,8 @@ import {
 import type {
   ChannelInfo,
   FeishuConfig,
-  MinuteCheck,
+  CheckTone,
+  DiagnoseCheck,
   Project,
   ProviderProfile,
 } from '../types'
@@ -41,8 +41,6 @@ import {
   DropdownMenuSeparator,
   DropdownMenuTrigger,
 } from '@/components/ui/dropdown-menu'
-
-type TestState = 'idle' | 'testing' | { ok: boolean; error?: string; bot_name?: string }
 
 const STATUS_LABEL: Record<string, string> = {
   off: '未启用',
@@ -78,7 +76,7 @@ const emptyFeishu = (): FeishuConfig => ({
 })
 
 // 渠道面板（设置 → 渠道）。列表视图：各 IM 渠道卡片（状态灯 + 开关 + 编辑）；
-// 表单视图：飞书配置（凭证 / 审批模式 / 群策略 / 白名单）。配置存后端 ~/.lumi/channels.json，
+// 表单视图：飞书配置（凭证 / 审批模式 / 群策略 / 白名单）。配置存后端 ~/.lumi/lumi.json，
 // 保存即实时停旧起新。
 export function ChannelsPanel({
   machines,
@@ -140,7 +138,7 @@ export function ChannelsPanel({
         title="渠道"
         desc={
           <>
-            把 Lumi 接入飞书等 IM。凭证存该机器的 <code>~/.lumi/channels.json</code>（限本人可读），
+            把 Lumi 接入飞书等 IM。凭证存该机器的 <code>~/.lumi/lumi.json</code>（限本人可读），
             保存后实时重连。全程 AI 审批，仅保留 ask 询问卡片。
           </>
         }
@@ -180,9 +178,6 @@ export function ChannelsPanel({
           providers={providers}
           onCancel={() => setEditing(null)}
           onSave={save}
-          onTest={(cfg) =>
-            gw?.testChannel('feishu', cfg) ?? Promise.resolve({ ok: false, error: '未连接' })
-          }
         />
       )}
     </div>
@@ -245,57 +240,62 @@ function ChannelCard({
   )
 }
 
+// 一次体检的完整状态机。两条链路（接入 / 妙记）逐字同构，合一份免得能力只接一半
+// ——error 态就曾只接了接入侧，妙记仍把失败折叠成 null（与「从未检查过」无从区分）。
+function useDiagnose(call: () => Promise<{ checks: DiagnoseCheck[] }> | undefined) {
+  const [checks, setChecks] = useState<DiagnoseCheck[] | null>(null)
+  const [loading, setLoading] = useState(false)
+  const [error, setError] = useState('')
+  const run = () => {
+    const p = call()
+    if (!p) return // 未连接
+    setLoading(true)
+    setError('')
+    p.then((r) => setChecks(r.checks))
+      .catch((e) => setError(String(e?.message || e) || '体检请求失败'))
+      .finally(() => setLoading(false))
+  }
+  return { checks, loading, error, run }
+}
+
 function FeishuForm({
   initial,
   gw,
   providers,
   onCancel,
   onSave,
-  onTest,
 }: {
   initial: FeishuConfig
   gw?: Gateway
   providers: ProviderProfile[]
   onCancel: () => void
   onSave: (cfg: FeishuConfig) => void
-  onTest: (cfg: FeishuConfig) => Promise<{ ok: boolean; error?: string; bot_name?: string }>
 }) {
   const [cfg, setCfg] = useState<FeishuConfig>(initial)
-  const [test, setTest] = useState<TestState>('idle')
   const set = (patch: Partial<FeishuConfig>) => setCfg((c) => ({ ...c, ...patch }))
 
-  // 妙记体检：打开弹窗时自动查一次。走 lark-cli 子进程 + 网络，耗时 1-2s，故异步。
-  const [checks, setChecks] = useState<MinuteCheck[] | null>(null)
-  const [checking, setChecking] = useState(false)
-  const runDiagnose = () => {
-    if (!gw) return
-    setChecking(true)
-    gw.diagnoseMinutes('feishu', { app_id: cfg.app_id })
-      .then((r) => setChecks(r.checks))
-      .catch(() => setChecks(null))
-      .finally(() => setChecking(false))
-  }
+  // 接入体检：权限 / 事件订阅 / 版本发布任缺其一，机器人都是「连上了但不回消息」，
+  // 且开放平台不报任何错。四项由一次「应用版本信息」查询判定。
+  const setup = useDiagnose(() =>
+    gw?.diagnoseFeishuSetup('feishu', { app_id: cfg.app_id, app_secret: cfg.app_secret }),
+  )
+  // 妙记体检：走 lark-cli 子进程 + 网络，耗时 1-2s
+  const minutes = useDiagnose(() => gw?.diagnoseMinutes('feishu', { app_id: cfg.app_id }))
+
   useEffect(() => {
-    if (initial.minutes_enabled) runDiagnose()
-    // 只在弹窗打开时查一次；app_id 改动后靠「重新检查」手动触发，输入途中不打扰
+    // 没凭证就别查——四项必然全红，属于噪音而非信息
+    if (initial.app_id && initial.app_secret) setup.run()
+    if (initial.minutes_enabled) minutes.run()
+    // 只在弹窗打开时查一次；凭证改动后靠「重新检查」手动触发，输入途中不打扰
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [])
 
-  const runTest = () => {
-    setTest('testing')
-    onTest(cfg)
-      .then((r) => setTest(r))
-      .catch(() => setTest({ ok: false, error: '测试失败' }))
-  }
-
   const allowAll = cfg.allow_from.includes('*')
 
+  // 没有独立的「测试连接」：接入体检第①项已验凭证，且信息更全。两者并存会矛盾
+  // ——凭证对但缺 app_version 权限时，bot/v3/info 报成功而体检报失败
   const footer = (
     <>
-      <Button variant="outline" onClick={runTest} disabled={test === 'testing'}>
-        测试连接
-      </Button>
-      <TestBadge test={test} />
       <div className="flex-1" />
       <Button variant="ghost" onClick={onCancel}>
         取消
@@ -316,8 +316,20 @@ function FeishuForm({
         <Field label="App ID" hint="支持 ${FEISHU_APP_ID} 引用环境变量">
           <TextInput value={cfg.app_id} onChange={(e) => set({ app_id: e.target.value })} placeholder="cli_…" />
         </Field>
-        <Field label="App Secret" hint="chmod 600 存 ~/.lumi/channels.json，不写入项目目录">
+        <Field label="App Secret" hint="chmod 600 存 ~/.lumi/lumi.json，不写入项目目录">
           <TextInput password value={cfg.app_secret} onChange={(e) => set({ app_secret: e.target.value })} placeholder="●●●●" />
+        </Field>
+
+        <Field
+          label="接入体检"
+          hint="权限 / 事件订阅 / 版本发布，缺任一机器人都收不到消息且开放平台不报错"
+        >
+          <CheckPanel
+            key={panelKey(setup.checks)}
+            {...setup}
+            subject="机器人接入"
+            ready="已就绪 · 可正常收发消息"
+          />
         </Field>
 
         <Field label="群消息策略">
@@ -352,11 +364,9 @@ function FeishuForm({
           set={(patch) => {
             set(patch)
             // 刚打开开关时立刻体检，省得用户还要手点一次「检查」
-            if (patch.minutes_enabled && !checks) runDiagnose()
+            if (patch.minutes_enabled && !minutes.checks) minutes.run()
           }}
-          checks={checks}
-          loading={checking}
-          onRecheck={runDiagnose}
+          diagnose={minutes}
         />
 
         <DailyDreamSection cfg={cfg} set={set} />
@@ -372,15 +382,11 @@ function FeishuForm({
 function MinutesSection({
   cfg,
   set,
-  checks,
-  loading,
-  onRecheck,
+  diagnose,
 }: {
   cfg: FeishuConfig
   set: (patch: Partial<FeishuConfig>) => void
-  checks: MinuteCheck[] | null
-  loading: boolean
-  onRecheck: () => void
+  diagnose: ReturnType<typeof useDiagnose>
 }) {
   return (
     <ToggleCard
@@ -391,27 +397,32 @@ function MinutesSection({
       checked={cfg.minutes_enabled}
       onCheckedChange={(on) => set({ minutes_enabled: on })}
     >
-      <MinutesBody
-        // 每轮新结果重新挂载：展开态回到「异常自动展开」，无需 effect 重置
-        key={checks ? checks.map((c) => `${c.key}${c.ok}`).join() : 'none'}
-        checks={checks}
-        loading={loading}
-        onRecheck={onRecheck}
+      <CheckPanel
+        key={panelKey(diagnose.checks)}
+        {...diagnose}
+        subject="妙记链路"
+        ready="已就绪 · 妙记生成后自动推送纪要"
       />
     </ToggleCard>
   )
 }
 
-function MinutesBody({
+// 每轮新结果重新挂载：展开态回到「异常自动展开」，无需 effect 重置
+const panelKey = (checks: DiagnoseCheck[] | null) =>
+  checks?.map((c) => `${c.key}${c.tone}`).join() ?? 'none'
+
+// 逐项体检面板：机器人接入与妙记链路共用。正常态收成一行，异常时自动展开定位到具体步骤。
+// subject 派生出「正在检查 X…」「检查 X」，只有就绪语（ready）各链路不同
+function CheckPanel({
   checks,
   loading,
-  onRecheck,
-}: {
-  checks: MinuteCheck[] | null
-  loading: boolean
-  onRecheck: () => void
-}) {
-  const bad = checks?.filter((c) => !c.ok) ?? []
+  error,
+  run,
+  subject,
+  ready,
+}: ReturnType<typeof useDiagnose> & { subject: string; ready: string }) {
+  const bad = checks?.filter((c) => c.tone === 'error') ?? []
+  const warned = checks?.filter((c) => c.tone === 'warn') ?? []
   // 有问题就默认展开——用户不该为了知道哪里坏了还多点一次；之后随用户手动开合
   const [open, setOpen] = useState(bad.length > 0)
 
@@ -419,35 +430,45 @@ function MinutesBody({
     return (
       <div className="flex items-center gap-2.5 rounded-lg border border-line bg-surface/60 px-3 py-2.5 text-xs text-muted-foreground">
         <span className="lumi-orb" style={{ width: 11, height: 11 }} />
-        正在检查妙记链路…
+        正在检查{subject}…
+      </div>
+    )
+
+  // 体检没跑成时说清楚为什么，而不是退回「没检查过」的样子让用户空点
+  if (error)
+    return (
+      <div className={`flex items-center gap-2.5 rounded-lg px-3 py-2.5 text-xs ${TONE_BANNER.error}`}>
+        <StatusDot tone="error" />
+        <span className="flex-1">体检未能执行：{error}</span>
+        <button onClick={run} className="text-[11px] text-muted-foreground hover:text-ink">
+          重试
+        </button>
       </div>
     )
 
   if (!checks)
     return (
       <button
-        onClick={onRecheck}
+        onClick={run}
         className="rounded-lg border border-line bg-surface px-3 py-2 text-xs text-muted-foreground hover:text-ink"
       >
-        检查妙记链路
+        检查{subject}
       </button>
     )
 
-  const allOk = bad.length === 0
+  const tone: CheckTone = bad.length ? 'error' : warned.length ? 'warn' : 'ok'
   return (
     <>
-      <div
-        className={
-          allOk
-            ? 'flex items-center gap-2.5 rounded-lg border border-success/25 bg-success/10 px-3 py-2.5 text-xs text-success'
-            : 'flex items-center gap-2.5 rounded-lg border border-primary/40 bg-primary/10 px-3 py-2.5 text-xs'
-        }
-      >
-        <StatusDot ok={allOk} />
+      <div className={`flex items-center gap-2.5 rounded-lg px-3 py-2.5 text-xs ${TONE_BANNER[tone]}`}>
+        <StatusDot tone={tone} />
         <span className="flex-1">
-          {allOk ? '已就绪 · 妙记生成后自动推送纪要' : `${bad.length} 项未就绪：${bad[0].name}`}
+          {tone === 'error'
+            ? `${bad.length} 项未就绪：${bad[0].name}`
+            : tone === 'warn'
+              ? `${ready}，${warned.length} 项功能降级`
+              : ready}
         </span>
-        <button onClick={onRecheck} className="text-[11px] text-muted-foreground hover:text-ink">
+        <button onClick={run} className="text-[11px] text-muted-foreground hover:text-ink">
           重新检查
         </button>
       </div>
@@ -463,7 +484,7 @@ function MinutesBody({
       {open && (
         <div className="mt-2">
           {checks.map((c) => (
-            <MinuteCheckRow key={c.key} check={c} />
+            <CheckRow key={c.key} check={c} />
           ))}
         </div>
       )}
@@ -471,29 +492,36 @@ function MinutesBody({
   )
 }
 
-function StatusDot({ ok }: { ok: boolean }) {
-  return (
-    <span
-      className={
-        ok
-          ? 'size-2 rounded-full bg-success shadow-[0_0_6px_var(--color-success)] shrink-0'
-          : 'size-2 rounded-full bg-error shrink-0'
-      }
-    />
-  )
+// 三色语义的配色表；语义本身由后端定（DiagnoseCheck.tone），前端只管配色
+const TONE_BANNER: Record<CheckTone, string> = {
+  ok: 'border border-success/25 bg-success/10 text-success',
+  warn: 'border border-primary/40 bg-primary/10 text-primary',
+  error: 'border border-error/30 bg-error/10 text-error',
 }
 
-function MinuteCheckRow({ check }: { check: MinuteCheck }) {
+const TONE_DOT: Record<CheckTone, string> = {
+  ok: 'bg-success shadow-[0_0_6px_var(--color-success)]',
+  warn: 'bg-primary shadow-[0_0_6px_var(--color-accent)]',
+  error: 'bg-error shadow-[0_0_6px_var(--color-error)]',
+}
+
+function StatusDot({ tone }: { tone: CheckTone }) {
+  return <span className={`size-2 rounded-full shrink-0 ${TONE_DOT[tone]}`} />
+}
+
+function CheckRow({ check }: { check: DiagnoseCheck }) {
   return (
     <div className="flex items-start gap-2.5 py-1.5 border-t border-line/55 first:border-t-0">
       <span className="mt-1.5">
-        <StatusDot ok={check.ok} />
+        <StatusDot tone={check.tone} />
       </span>
       <div className="flex-1 min-w-0">
-        <div className={check.ok ? 'text-xs' : 'text-xs text-error'}>{check.name}</div>
-        {check.detail && (
+        <div className={check.tone === 'error' ? 'text-xs text-error' : 'text-xs'}>{check.name}</div>
+        {(check.detail || check.emphasis) && (
           <div className="text-[11px] text-muted-foreground mt-0.5 break-words">
             {check.detail}
+            {/* 加粗项是这行里用户唯一需要据以决策的信息（如哪些功能不可用） */}
+            {check.emphasis && <strong className="text-ink">{check.emphasis}</strong>}
           </div>
         )}
         {check.fix_cmd && (
@@ -600,27 +628,6 @@ function DailyDreamSection({
         />
       </Field>
     </ToggleCard>
-  )
-}
-
-function TestBadge({ test }: { test: TestState }) {
-  if (test === 'idle') return null
-  if (test === 'testing')
-    return (
-      <span className="flex items-center gap-1.5 text-xs text-muted-foreground">
-        <Loader2 size={13} className="animate-spin" /> 正在验证凭证…
-      </span>
-    )
-  if (test.ok)
-    return (
-      <span className="flex items-center gap-1.5 text-xs text-[var(--color-success)]">
-        <Check size={13} /> 连接成功{test.bot_name ? ` · ${test.bot_name}` : ''}
-      </span>
-    )
-  return (
-    <span className="flex items-center gap-1.5 text-xs text-[var(--color-error)]">
-      <X size={13} /> {test.error || '连接失败'}
-    </span>
   )
 }
 

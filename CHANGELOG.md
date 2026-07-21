@@ -1,5 +1,19 @@
 # Changelog
 
+## [0.2.62] - 2026-07-21
+
+### Added
+- **飞书机器人接入体检** — 权限没开、事件没订、版本没发布，三者的表现完全一样：长连接照常连上、一条消息都收不到、开放平台不报任何错。现于「设置 → 渠道 → 飞书」凭证下方逐项体检（凭证 / 机器人权限 / 事件订阅 / 版本发布），失败项带**预填全部所需 scope 的开放平台直达链接**，点过去确认即可，不必自己对照清单勾。四项数据由一次 `application/v6/applications/me/app_versions` 查询给全（`scopes` / `event_infos[].event_type` / `status`）——注意 `events` 字段返回的是中文显示名，事件 code 只在 `event_infos` 里
+- **权限与事件清单单一事实源**（`feishu/scopes.py`）：`BOT_SCOPES`（缺任一收发不了）/ `OPTIONAL_SCOPES`（缺了只丢一项体验，带「缺了会怎样」的说明）/ `SETUP_SCOPES` / `MINUTES_SCOPES`，诊断比对、修复链接、文档三者同源。事件常量无法与 `channel.py` 共用定义（lark SDK 只认 `register_p2_xxx` 方法名），改由 `test_event_constants_match_registered_handlers` 断言 `handler._processorMap` 锁住——改了注册点没同步常量，测试即红
+
+### Changed
+- **删除「测试连接」按钮**（RPC `test_channel` + `test_credentials` 一并移除）— 接入体检第①项验的是同一件事且信息更全，两者并存还会互相矛盾：凭证正确但未开 `app_version:readonly` 时，`test_channel` 走 `bot/v3/info` 报成功而体检报失败，用户不知该信哪个
+- **`lark_call_classified` 返回 `(resp, code, reason)`** — 原先异常与「未知」都压成 code 0 且异常信息只进日志不回传，这正是体检一度自写 try/except 绕开底座的原因。现补上 `NETWORK_ERROR` 哨兵与给用户看的 `reason`，`setup.py` 退化成一次调用。**破坏性**：`lark_call_classified` 的解包由二元组改三元组（`lark_call` 不受影响）
+- **诊断结果的三态由后端定**：`Check.tone ∈ ok|warn|error` 取代 `ok` + `warn` 两个布尔——两布尔能拼出 `ok=False,warn=True` 这种非法组合，且前端拿到后第一件事就是拼回三态。`warn`（能用但有功能降级，如缺 `cardkit:card:write` 只是失去打字机效果）汇总条显示「N 项功能降级」而非谎报「全部生效」
+- **诊断结构与面板由接入体检、妙记链路共用**：后端 `feishu/checks.py` 的 `Check` + `blocked_tail`，前端 `CheckPanel` / `CheckRow` / `useDiagnose`。合并顺带补上妙记侧缺失的 error 态——它此前把失败折叠成 `null`，与「从未检查过」无从区分，用户只会反复空点按钮
+- **体检的四种失败分开报**（请求未送达 / 缺体检权限 99991672 / 无任何版本 / 凭证真的无效）— 都归成「凭证无效」会把断网或缺权限的用户支去重抄 App Secret，而那对前三种毫无用处；断网时不给开放平台链接
+- **文档修正**：配置实际存 `~/.lumi/lumi.json` 的 `channels` 分区而非 `~/.lumi/channels.json`（前端文案、`gateway.ts`、`events.json`、guides 共 5 处）；`docs/` 里重复列举的 scope 名改为指向 `scopes.py`，消除漂移源
+
 ## [0.2.61] - 2026-07-21
 
 ### Fixed

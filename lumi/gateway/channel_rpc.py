@@ -8,14 +8,17 @@ from __future__ import annotations
 
 import asyncio
 
-from lumi.gateway.channels.config import FeishuChannelConfig
-from lumi.gateway.channels.feishu.channel import test_credentials
-from lumi.gateway.channels.feishu.minutes import diagnose
+from lumi.gateway.channels.feishu import minutes, setup
 from lumi.gateway.channels.manager import manager
 from lumi.gateway.channels.store import save_feishu
 
 CHANNEL_METHODS = frozenset(
-    {"get_channels", "save_channel", "test_channel", "diagnose_minutes"}
+    {
+        "get_channels",
+        "save_channel",
+        "diagnose_minutes",
+        "diagnose_feishu_setup",
+    }
 )
 
 
@@ -29,16 +32,20 @@ async def dispatch_channel(method: str, params: dict) -> dict:
         raise ValueError(f"暂不支持的 channel: {name}")
     config = params.get("config") or {}
 
+    # 两个诊断都是同步的子进程 / 网络调用，丢线程池免得阻塞 WS 事件循环
     if method == "diagnose_minutes":
-        # 子进程 + 网络调用，丢线程池免得阻塞 WS 事件循环
-        app_id = config.get("app_id") or ""
-        checks = await asyncio.to_thread(diagnose, app_id)
+        checks = await asyncio.to_thread(minutes.diagnose, config.get("app_id") or "")
         return {"checks": checks}
 
-    if method == "save_channel":
-        cfg = save_feishu(config)  # 校验 + 持久化（密钥 chmod 600）
-        await manager.reload(cfg)  # 复用刚存的 cfg 停旧起新，省一次读盘
-        return {"channels": manager.list_channels()}
+    if method == "diagnose_feishu_setup":
+        checks = await asyncio.to_thread(
+            setup.diagnose,
+            config.get("app_id") or "",
+            config.get("app_secret") or "",
+        )
+        return {"checks": checks}
 
-    # test_channel：用给定凭证临时验证连通性，不动正在运行的 channel
-    return await test_credentials(FeishuChannelConfig.model_validate(config))
+    # save_channel：校验 + 持久化（密钥 chmod 600），复用刚存的 cfg 停旧起新省一次读盘
+    cfg = save_feishu(config)
+    await manager.reload(cfg)
+    return {"channels": manager.list_channels()}
