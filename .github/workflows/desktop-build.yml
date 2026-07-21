@@ -17,12 +17,21 @@ jobs:
     strategy:
       fail-fast: false # 一个平台失败不牵连另一个
       matrix:
-        # 架构由 runner 决定，PyInstaller/electron-builder 各出 host 架构：
+        # 架构由 runner 决定，PyInstaller/electron-builder 各出 host 架构（不交叉编译）。
+        # 三平台各出 x64 + arm64 两份，产物名经 artifactName 带上 ${os}-${arch} 自然区分。
+        #
+        # 一律钉死具体 OS 版本，不用 -latest：GitHub 的 -latest 迁移是 1~2 个月内静默完成的，
+        # 我们分发的是安装包，构建必须可复现（官方亦建议 pin 具体版本）。代价是 OS 弃用时要手动
+        # 升这份清单——GitHub 会提前在 Actions 日志里告警。当前各 -latest 的指向：
+        # ubuntu-latest=ubuntu-24.04(x64) / windows-latest=windows-2025 / macos-latest=macos-15(arm64)。
         os:
-          - windows-latest # Windows x64（.exe / nsis）
-          - macos-latest # macOS Apple Silicon arm64（.dmg）
-          - macos-15-intel # macOS Intel x64（.dmg）
-          - ubuntu-latest # Linux x64（.AppImage）
+          - windows-2025 # Windows x64（.exe / nsis）
+          - windows-11-arm # Windows arm64。GitHub 的 Windows ARM 只有客户端版镜像，
+            # 故与 x64 那行的 Server 版号不成对，属正常
+          - macos-15 # macOS Apple Silicon arm64（.dmg / .zip）
+          - macos-15-intel # macOS Intel x64
+          - ubuntu-24.04 # Linux x64（.AppImage）
+          - ubuntu-24.04-arm # Linux arm64
         # macos-15-intel 是 GitHub 最后一个 x86_64 镜像（macos-13 已于 2025-12 下线），
         # 供应到 2027-08 为止，届时 Intel Mac 用户需回退到 uv tool install lumi 或连远程后端。
     runs-on: ${{ matrix.os }}
@@ -58,10 +67,17 @@ jobs:
           path: |
             desktop/release/*.exe
             desktop/release/*.dmg
+            desktop/release/*.zip
             desktop/release/*.AppImage
+            desktop/release/*.blockmap
+            desktop/release/latest*.yml
           if-no-files-found: error
 
-      # 仅 tag 触发时附到 Release；同一 tag 的两个平台 job 各自 append 产物
+      # 仅 tag 触发时附到 Release；同一 tag 的两个平台 job 各自 append 产物。
+      # latest*.yml 与 .blockmap 是 electron-updater 的更新元数据：前者供客户端比对版本，
+      # 后者供差量下载。少传任一，应用内更新就查不到新版本 —— 不是可选项。
+      # macOS 的 .zip 同理：Squirrel.Mac 只认 zip，dmg 仅供人工首次安装。
+      # 两个 mac job 的 latest-mac.yml 会在这里互相覆盖，由后置的 merge-mac-metadata 修正。
       - name: Attach to Release
         if: startsWith(github.ref, 'refs/tags/')
         uses: softprops/action-gh-release@v2
@@ -69,4 +85,75 @@ jobs:
           files: |
             desktop/release/*.exe
             desktop/release/*.dmg
+            desktop/release/*.zip
             desktop/release/*.AppImage
+            desktop/release/*.blockmap
+            desktop/release/latest*.yml
+
+  # 双架构的更新元数据合并（三平台通用）。
+  #
+  # 每个平台的 x64 与 arm64 两个 job 各产一份同名元数据（latest.yml / latest-mac.yml /
+  # latest-linux.yml），各自只列自己那一个包。附到 Release 时后者覆盖前者 —— 直接后果是
+  # 一半用户的应用内更新指向错误架构的包。electron-updater 按 files[].url 里有没有
+  # "arm64" 挑架构（如 MacUpdater.filterFilesForArch），只要两条都在同一份 files 里，
+  # 两种机器就各取所需。故本 job 在全部 build job 结束后把同名元数据的 files 并成一份，
+  # 最后覆盖 Release 上的对应文件（softprops 的 overwrite_files 默认 true）。
+  merge-update-metadata:
+    needs: build
+    if: startsWith(github.ref, 'refs/tags/')
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          pattern: lumi-*
+          path: dist
+
+      # 显式装 Python：runner 的系统 Python 受 PEP 668 保护，直接 pip install 会报
+      # externally-managed-environment；且不经本 action 时只有 python3 保证在 PATH。
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Merge update metadata
+        run: |
+          pip install pyyaml
+          python - << 'PY'
+          import glob, os, yaml
+          from collections import defaultdict
+
+          groups = defaultdict(list)
+          for p in sorted(glob.glob('dist/*/latest*.yml')):
+              groups[os.path.basename(p)].append(p)
+          assert groups, '没找到任何 latest*.yml，build job 的产物上传可能已损坏'
+
+          for name, paths in sorted(groups.items()):
+              docs = [yaml.safe_load(open(p)) for p in paths]
+              versions = {d['version'] for d in docs}
+              assert len(versions) == 1, f'{name}: 各 job 版本不一致 {versions}'
+              files, seen = [], set()
+              for d in docs:
+                  for f in d['files']:
+                      if f['url'] not in seen:
+                          seen.add(f['url'])
+                          files.append(f)
+              # 顶层 path/sha512 是不认架构的旧客户端的回退目标，优先指向 x64：
+              # x64 包能在 arm 上经模拟层跑（Rosetta / Windows on ARM），反之不行。
+              # 直接取那一份文档自己的 path，而不是从 files 里挑——mac 的 files 同时含 zip 与
+              # dmg（Squirrel 只认 zip），从 files 挑就得赌 zip 排在 dmg 前面；path 是
+              # electron-builder 自己选定的主产物，无需猜扩展名。
+              fallback = next((d for d in docs if 'arm64' not in d['path']), docs[0])
+              merged = {**docs[0], 'files': files, 'path': fallback['path'], 'sha512': fallback['sha512']}
+              yaml.safe_dump(merged, open(name, 'w'), default_flow_style=False, sort_keys=False)
+              # 三平台在这里行为不同，日志里的「份来源」要照此解读：
+              #   Windows(latest.yml) / macOS(latest-mac.yml) —— 两个架构共用同一文件名，
+              #     正常恒为 2 份；只有 1 份说明另一架构的 job 挂了（fail-fast: false 允许部分成功）。
+              #   Linux —— electron-builder 只给非 x64 的 linux 加架构后缀（updateInfoBuilder 的
+              #     getArchPrefixForUpdateFile，与 electron-updater 读取端的 getChannelFilePrefix 对应），
+              #     latest-linux.yml 与 latest-linux-arm64.yml 本就是两个文件，恒为 1 份，此处是恒等操作。
+              print(f'=== {name}: {len(paths)} 份来源 → {len(files)} 个包 ===')
+              print(open(name).read())
+          PY
+
+      - uses: softprops/action-gh-release@v2
+        with:
+          files: latest*.yml

@@ -1,5 +1,22 @@
 # Changelog
 
+## [0.2.63] - 2026-07-21
+
+### Added
+- **应用内自动更新**（`electron-updater` + GitHub Releases）— 状态机全在主进程（`desktop/electron/updater.cjs`），renderer 只订阅 `UpdateState` 并触发检查/安装；入口为「设置 → 关于」与侧栏底部提示条（仅在**此刻装得上**时出现，检查中/下载中一律静默）。启动 15s 后首检、此后每 6h 一次。**Windows / Linux 全自动**（后台下载 → 就绪 → 用户点重启安装）；**macOS 停在「发现新版」把下载交给浏览器** —— CI 未做代码签名，而 Squirrel.Mac 校验新旧版本签名同源，未签名的包一定装不上，故 mac 设 `autoDownload = false`，只调 `checkForUpdates()`（该阶段纯读 `latest-mac.yml`，不启动 Squirrel 代理）。拿到 Developer ID 证书后把 `MANUAL_DOWNLOAD` 改 `false` 即转全自动，CI 无需再动
+- **三平台双架构构建** — 新增 `windows-11-arm` 与 `ubuntu-24.04-arm`，六个 build job 覆盖 Windows / macOS / Linux 各自的 x64 + arm64。**注意：两个 ARM runner 上的构建尚未实跑验证过**（PyInstaller 能否取到对应架构的 Python、NSIS 与 AppImage 工具链在 ARM 上的可用性），本版发布即是它们的首次真实验证；`fail-fast: false`，某个架构挂掉不影响其余产物
+
+### Changed
+- **产物命名加入平台标识**：`${productName}-${version}-${os}-${arch}.${ext}`（如 `Lumi-0.2.63-mac-arm64.zip`）。平台原先全靠扩展名隐式区分，而 mac 更新通道用的 `.zip` 是通用扩展名，与其他平台的 zip 必然撞名；`${arch}` 则是硬要求 —— **electron-updater 靠文件名里的架构串选包**（`Provider.findFile` 优先匹配含 `process.arch` 的文件，mac 另有 `MacUpdater.filterFilesForArch`）。**一次性代价**：差量下载靠在新文件名上替换版本号推导旧包的 blockmap 地址，跨越本次改名的这一版推出的是从未存在过的旧文件名 → 404 → 回退全量下载，升级到 0.2.63 的用户需重下完整包
+- **Release 补齐更新元数据**：`latest*.yml`（客户端比对版本）、`.blockmap`（差量下载）、macOS 的 `.zip`（Squirrel 只认 zip，dmg 仅供人工首次安装）。少传任一，应用内更新就查不到新版本。**故本版之前的所有 Release 都不含元数据，自动更新要到下一个版本发布后才真正开始工作**
+- **新增 `merge-update-metadata` job 合并双架构元数据** — Windows（`latest.yml`）与 macOS（`latest-mac.yml`）的两个架构共用同一文件名，附到 Release 时后者覆盖前者，留下的那份只列一种架构，直接后果是一半用户的更新指向错误架构的包。该 job 在全部 build 结束后把同名元数据的 `files` 并成一份，两种机器各取所需。Linux 不在此列 —— `electron-builder` 只给非 x64 的 linux 加架构后缀（`updateInfoBuilder.getArchPrefixForUpdateFile`，与读取端 `Provider.getChannelFilePrefix` 对应），`latest-linux.yml` 与 `latest-linux-arm64.yml` 本就是两个文件
+- **CI runner 一律钉死具体 OS 版本**，不再用 `-latest`：`-latest` 的迁移是 1~2 个月内静默完成的，而我们分发的是安装包，构建必须可复现（官方亦建议 pin）。代价是 OS 弃用时需手动升这份清单
+
+### Fixed
+- **安装失败会让后端永久死亡**（本版新代码的自查修复）— `quitAndInstall` 之前必须先收走 sidecar（防新旧实例抢同一 checkpoint 库），可一旦它没能让进程退出，就停在「窗口还在、后端已死」的状态里，而 `stopping` 标志恰好锁死了 exit 回调里的自愈重启。现由 `resumeSidecar()` 显式回滚，同步抛异常与异步 `emit error` 两条失败路径都覆盖，状态退回 `ready` 保留重启入口
+- **已下载完成的更新会被一次网络错误冲掉** — `error` 事件无条件覆写状态，包已在本地（`ready`）时若周期检查撞上断网，侧栏提示条与「重启更新」入口一并消失；连锁后果是 `install` 的 `status !== 'ready'` 前置检查随之提前返回，用户连安装都触发不了。守卫从触发端补到了处理端
+- **过期错误信息渗入成功状态** — `setState` 的 patch 式合并不会清除上一次的 `error`，导致「已是最新版本」下面挂着一条上次的网络失败提示
+
 ## [0.2.62] - 2026-07-21
 
 ### Added

@@ -7,6 +7,7 @@ const net = require('node:net')
 const fs = require('node:fs')
 const path = require('node:path')
 const crypto = require('node:crypto')
+const { setupUpdater } = require('./updater.cjs')
 
 // 本地 sidecar 的访问令牌：每次启动随机生成，经 `lumi serve --token` 注入；
 // 前端连接时在 ?token= 携带。本地与远程公网部署走同一套鉴权，无本地特例。
@@ -149,6 +150,14 @@ function stopSidecar() {
     serveProc.kill()
     serveProc = null
   }
+}
+
+// 安装更新失败时的回滚。quitAndInstall 之前必须先收走 sidecar（防新旧实例抢同一
+// checkpoint 库），可一旦它没能让进程退出，我们就停在一个「窗口还在、后端已死」的
+// 状态里——而 stopping 恰好锁死了 exit 回调里的自愈重启。故显式复位并拉起。
+function resumeSidecar() {
+  stopping = false
+  if (!serveProc && !sidecarFailed) startSidecar(wsPort)
 }
 
 function windowFromEvent(event) {
@@ -460,6 +469,7 @@ app.whenReady().then(async () => {
     if (BrowserWindow.getAllWindows().length === 0) createWindow()
   })
   startSidecar(wsPort)
+  setupUpdater({ repoUrl: REPO_URL, beforeQuit: stopSidecar, onInstallFailed: resumeSidecar })
 })
 
 app.on('window-all-closed', () => {

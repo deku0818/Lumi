@@ -211,11 +211,27 @@ macOS 关窗后应用驻留 Dock，sidecar 保持运行，Dock 唤起（activate
 
 **悬浮栏的层级约定**：三条悬浮玻璃栏（左侧会话栏 / 后台任务栏 / 执行记录栏）在 `App.tsx` 里都挂在 `<main>` **之外**、与左侧栏同级的 flex 行上——放进 `<main>` 会被其内的 topStrip 压低一截，顶边对不齐。反之像 `PreviewPanel` 这类贴合内容的**非悬浮**面板留在 `<main>` 内。新增右栏时按此归位。
 
+## 应用内更新
+
+`electron-updater` + GitHub Releases。状态机全在主进程（`desktop/electron/updater.cjs`），renderer 只订阅 `UpdateState`（`idle / checking / latest / available / downloading / ready / error`）并触发检查与安装，入口是设置→关于（`AboutPanel.tsx`）与侧栏底部的提示条（`Sidebar.tsx` 的 `UpdateBar`，仅在此刻能装时才出现）。启动 15s 后首检，此后每 6h 一次；dev 下 `isUpdaterActive()` 恒 false，检查是空操作。
+
+- **平台差异**：Win / Linux 全自动（后台下载 → `ready` → 用户点重启安装）。**macOS 停在 `available`，把下载交给浏览器**——CI 未做代码签名（`desktop-build.yml` 的 `CSC_IDENTITY_AUTO_DISCOVERY=false`），而 Squirrel.Mac 校验新旧版本签名同源，未签名的包装不上。故 mac 设 `autoDownload = false`，只调 `checkForUpdates()`（该阶段纯读 `latest-mac.yml`，不启动 Squirrel 代理）。拿到 Developer ID 证书并在 CI 配好 `CSC_LINK` 后，把 `MANUAL_DOWNLOAD` 改 `false` 即转全自动，无需改 CI。
+- **安装前必须收 sidecar**：`quitAndInstall()` 之前先 `stopSidecar()`，否则更新后的新实例会与残留的旧 sidecar 抢同一 checkpoint 数据库（表现为「会话打不开」，与单实例锁防的是同一类事故）。代价是正在跑的 agent 任务会被打断——会话历史存在文件级 checkpoint 里不会丢，但**未完成的任务不会续跑**，UI 文案不要暗示相反的事。
+- **Release 必须带元数据**：`latest*.yml`（客户端比对版本）与 `.blockmap`（差量下载）少传任一，应用内更新就查不到新版本。macOS 另需 `.zip`——Squirrel.Mac 只认 zip，dmg 仅供人工首次安装。
+- **产物命名**：`${productName}-${version}-${os}-${arch}.${ext}`（`${os}` = `mac`/`win`/`linux`，注意 `${platform}` 是**构建机**的 `process.platform`，不是目标平台）。带 `${os}` 是必需的——平台原先全靠扩展名隐式区分，而 `.zip` 是通用扩展名，mac 的更新包一旦与其他平台的 zip 同名就会撞车。带 `${arch}` 更是硬要求：**electron-updater 靠文件名里的架构串选包**（`Provider.findFile` 优先匹配含 `process.arch` 的文件，mac 另有 `MacUpdater.filterFilesForArch`），命名里丢掉 arch 会让用户下到错架构的包。改名有一次性代价：差量下载靠 `Provider.getBlockMapFiles` 在**新**文件名上替换版本号来推导旧包的 blockmap 地址，跨越改名的那一次更新推出的是从未存在过的旧文件名 → 404 → 回退全量下载。安全，但那一版每个用户都要重下完整包。
+- **三平台双架构**：六个 build job（每平台 x64 + arm64）。更新元数据的文件名规则三平台**不一致**，`merge-update-metadata` job 据此收尾：
+  - **Windows**（`latest.yml`）与 **macOS**（`latest-mac.yml`）：两个架构共用同一文件名，附到 Release 时互相覆盖，留下的那份只列一种架构 → 必须把两份的 `files` 并成一份，两种机器才各取所需。
+  - **Linux**：`electron-builder` 只给非 x64 的 linux 加架构后缀（`updateInfoBuilder.getArchPrefixForUpdateFile`，与读取端 `Provider.getChannelFilePrefix` 对应），`latest-linux.yml` 与 `latest-linux-arm64.yml` 本就是两个文件 → 无需合并，脚本对它是恒等操作。
+  - 合并后顶层 `path` 回退指向 x64（x64 包能在 arm 上经 Rosetta / Windows on ARM 模拟层跑，反之不行）；该字段只服务不认架构的旧客户端。
+- **版本**：`app.getVersion()` 读 `desktop/package.json`，该值由 `build-desktop.sh` 打包时从 `pyproject.toml`（版本事实源）`npm pkg set` 写入，故**打包产物的版本恒准**，更新比对不受影响。dev 下显示的则是仓库里那个值，只在有人手动同步时才是最新的——无功能影响，不必为它加特例。绕过 `build-desktop.sh` 直接 `npm run dist` 会出版本号停留在仓库值的包。
+
 ## 关键文件
 
 | 文件 | 职责 |
 |---|---|
 | `desktop/electron/main.cjs` | sidecar 生命周期、窗口、端口分配 |
+| `desktop/electron/updater.cjs` | 应用内更新状态机（Win/Linux 全自动、macOS 半自动） |
+| `desktop/src/{update.ts,components/AboutPanel.tsx}` | 更新状态订阅 hook + 设置→关于面板 |
 | `desktop/src/gateway.ts` | WS JSON-RPC 客户端（指数退避自动重连，超 `MAX_RETRY` 转 `failed` 态等用户手动重连；`setUrl` 支持改址重连；URL 可带 `?workspace=` open 握手 pin 项目） |
 | `desktop/src/App.tsx` | 会话状态机、事件路由、聊天流渲染 |
 | `desktop/src/components/Sidebar.tsx` | 会话列表 + 右键菜单 + 内联重命名 |

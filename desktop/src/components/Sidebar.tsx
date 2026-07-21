@@ -22,7 +22,9 @@ import {
   Users,
   WifiOff,
   X,
+  ArrowUpCircle,
 } from 'lucide-react'
+import { useUpdateState } from '../update'
 import type { ConnState } from '../gateway'
 import type { ChannelInfo, CronJob, SessionMeta } from '../types'
 import { basename, machineColor, machineName, sessionKey, beOf, FLOAT_GAP } from '@/lib/utils'
@@ -523,12 +525,53 @@ export const Sidebar = memo(function Sidebar({
 
       <div className="mt-2 flex-1 overflow-y-auto overflow-x-hidden px-2 pb-2">{content}</div>
 
-      <div className="p-2 border-t border-line/20">
+      <div className="p-2 border-t border-line/20 space-y-1.5">
+        <UpdateBar />
         <AccountMenu conn={conn} model={model} onOpenSettings={onOpenSettings} />
       </div>
     </aside>
   )
 })
+
+// 更新提示条：只在「此刻能装」时出现——Win/Linux 下载完成（ready），或 macOS 检测到新版
+// （available + manual，点击把下载转交浏览器）。检查中/下载中一律静默，不打扰当前操作；
+// 想看进度的用户去设置→关于。一静一动：图标呼吸，文字不动。
+//
+// 必须能忽略：macOS 的 autoDownload=false 让状态永远停在 available，没有任何路径能让这
+// 条提示自然消失——不给关闭入口的话，不想升级的用户每次开应用 15 秒后都会再被它占住侧栏。
+// 按版本号记忆忽略，下一个版本照常提示；忽略后仍可从设置→关于进入。
+const UPDATE_DISMISS_KEY = 'lumi-update-dismissed'
+
+function UpdateBar() {
+  const { t } = useI18n()
+  const update = useUpdateState()
+  const [dismissed, setDismissed] = useState(() => localStorage.getItem(UPDATE_DISMISS_KEY) || '')
+  if (!update) return null
+  const actionable = update.status === 'ready' || (update.status === 'available' && update.manual)
+  if (!actionable || (update.version && update.version === dismissed)) return null
+  const dismiss = () => {
+    if (!update.version) return
+    localStorage.setItem(UPDATE_DISMISS_KEY, update.version)
+    setDismissed(update.version)
+  }
+  return (
+    <div className="w-full flex items-center gap-2 px-2.5 py-2 rounded-lg text-xs text-ink transition bg-primary/10 border border-primary/25 hover:bg-primary/15">
+      <button
+        onClick={() => window.lumi?.update?.install()}
+        className="flex-1 min-w-0 flex items-center gap-2 text-left"
+      >
+        <ArrowUpCircle size={14} className="shrink-0 text-primary update-breathe" />
+        <span className="truncate">{t('update.newVersion', { v: update.version ?? '' })}</span>
+        <span className="ml-auto shrink-0 font-semibold text-primary">
+          {t(update.status === 'ready' ? 'about.restart' : 'about.download')}
+        </span>
+      </button>
+      <button onClick={dismiss} title={t('common.close')} className="shrink-0 text-muted-foreground hover:text-ink">
+        <X size={12} />
+      </button>
+    </div>
+  )
+}
 
 // 区段标题（置顶 / 最近）：浅色弱化的非折叠分隔标签
 function SectionLabel({ children }: { children: React.ReactNode }) {

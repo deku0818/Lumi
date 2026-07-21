@@ -1,7 +1,7 @@
 {
   "name": "lumi-desktop",
   "private": true,
-  "version": "0.2.22",
+  "version": "0.2.63",
   "type": "module",
   "main": "electron/main.cjs",
   "scripts": {
@@ -29,10 +29,18 @@
       }
     ],
     "electronDist": "node_modules/electron/dist",
-    "artifactName": "${productName}-${version}-${arch}.${ext}",
+    "artifactName": "${productName}-${version}-${os}-${arch}.${ext}",
+    "publish": [
+      {
+        "provider": "github",
+        "owner": "deku0818",
+        "repo": "Lumi"
+      }
+    ],
     "mac": {
       "target": [
-        "dmg"
+        "dmg",
+        "zip"
       ],
       "category": "public.app-category.developer-tools",
       "icon": "assets/icon.png"
@@ -55,6 +63,7 @@
     "@fontsource-variable/geist": "^5.2.9",
     "class-variance-authority": "^0.7.1",
     "clsx": "^2.1.1",
+    "electron-updater": "^6.8.9",
     "lucide-react": "^1.17.0",
     "radix-ui": "^1.5.0",
     "react": "^19.0.0",

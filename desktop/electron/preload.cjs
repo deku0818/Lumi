@@ -42,6 +42,17 @@ contextBridge.exposeInMainWorld('lumi', {
       return ''
     }
   },
+  // 应用内更新：状态由主进程单向推送，renderer 只读 + 触发检查/安装
+  update: {
+    state: () => ipcRenderer.invoke('lumi:update:state'),
+    check: () => ipcRenderer.invoke('lumi:update:check'),
+    install: () => ipcRenderer.invoke('lumi:update:install'),
+    onState: (cb) => {
+      const listener = (_e, s) => cb(s)
+      ipcRenderer.on('lumi:update:state', listener)
+      return () => ipcRenderer.removeListener('lumi:update:state', listener)
+    },
+  },
   // 系统通知经主进程发（renderer 的 HTML5 Notification 在 macOS dev 下不可靠），
   // 点击时主进程自行聚焦窗口并回传 tag
   notify: (payload) => ipcRenderer.invoke('lumi:notify', payload),

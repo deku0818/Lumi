@@ -1,4 +1,4 @@
-import { SlidersHorizontal, Boxes, Server, Send, Plug, Monitor, Sun, Moon, Minus, Plus } from 'lucide-react'
+import { SlidersHorizontal, Boxes, Server, Send, Plug, Info, Monitor, Sun, Moon, Minus, Plus } from 'lucide-react'
 import type { Gateway } from '../gateway'
 import type { ThemePref } from '../theme'
 import { type FontPref, DEFAULT_SIZE, MIN_SIZE, MAX_SIZE } from '../font'
@@ -7,6 +7,7 @@ import { ProvidersPanel } from './ProvidersPanel'
 import { ChannelsPanel } from './ChannelsPanel'
 import { McpPanel } from './McpPanel'
 import { BackendsPanel } from './BackendsPanel'
+import { AboutPanel } from './AboutPanel'
 import { FontPicker } from './FontPicker'
 import { Section, SectionGroup, Row, SegmentedControl, segmentShell } from './SettingsKit'
 import { Switch } from '@/components/ui/switch'
@@ -30,7 +31,7 @@ export function SettingsDialog({
   onProvidersChanged,
   onClose,
 }: {
-  initialTab?: 'general' | 'models' | 'channels' | 'connections' | 'mcp' // 打开时定位的 tab
+  initialTab?: 'general' | 'models' | 'channels' | 'connections' | 'mcp' | 'about' // 打开时定位的 tab
   themePref: ThemePref
   setThemePref: (p: ThemePref) => void
   uiFont: FontPref
@@ -83,6 +84,10 @@ export function SettingsDialog({
               <Server />
               {t('settings.connections')}
             </TabsTrigger>
+            <TabsTrigger value="about" className={navClass}>
+              <Info />
+              {t('settings.about')}
+            </TabsTrigger>
           </TabsList>
 
           <TabsContent value="general" className="flex-1 min-w-0 overflow-auto px-6 pb-6 pt-12 mt-0">
@@ -108,6 +113,9 @@ export function SettingsDialog({
           </TabsContent>
           <TabsContent value="connections" className="flex-1 min-w-0 overflow-auto px-6 pb-6 pt-12 mt-0">
             <BackendsPanel />
+          </TabsContent>
+          <TabsContent value="about" className="flex-1 min-w-0 overflow-auto px-6 pb-6 pt-12 mt-0">
+            <AboutPanel />
           </TabsContent>
         </Tabs>
       </DialogContent>

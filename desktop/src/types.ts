@@ -370,6 +370,19 @@ export interface McpTestResult {
   resources?: McpResourceInfo[]
 }
 
+// 应用内更新状态（主进程 electron/updater.cjs 是唯一事实源，renderer 只订阅）。
+// manual=true 时（macOS 未签名）不会有 downloading/ready，停在 available 由浏览器接手下载。
+export type UpdateStatus = 'idle' | 'checking' | 'latest' | 'available' | 'downloading' | 'ready' | 'error'
+
+export type UpdateState = {
+  status: UpdateStatus
+  manual: boolean
+  current: string
+  version?: string
+  percent?: number
+  error?: string
+}
+
 declare global {
   interface Window {
     lumi: {
@@ -397,6 +410,12 @@ declare global {
       pathExists?: (path: string) => Promise<boolean>
       notify?: (payload: { title: string; body?: string; tag?: string }) => Promise<void>
       onNotifyClick?: (cb: (tag: string) => void) => void
+      update?: {
+        state: () => Promise<UpdateState>
+        check: () => Promise<UpdateState>
+        install: () => Promise<void>
+        onState: (cb: (s: UpdateState) => void) => () => void
+      }
     }
   }
 }
