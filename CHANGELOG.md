@@ -1,6 +1,9 @@
 # Changelog
 
-## [0.2.63] - 2026-07-21
+## [0.2.64] - 2026-07-21
+
+### Fixed
+- **Windows 安装时无法选择安装盘** — `win` 只声明了 `"target": ["nsis"]`，而 electron-builder 的 NSIS **默认 `oneClick: true`**：双击后没有任何向导，直接静默装进 `%LOCALAPPDATA%\Programs\Lumi`，用户既选不了盘也看不到进度。现显式配 `oneClick: false` + `allowToChangeInstallationDirectory: true`，走完整安装向导（模板链路：`ONE_CLICK` 未定义 → `assistedInstaller.nsh` → `MUI_PAGE_DIRECTORY`）。**已发布的 0.2.63 及更早的 Windows 包仍是一键版**，本修复要到用户升级至本版后才可见。另：`perMachine` 保持 `false`（当前用户安装）—— 置 `true` 会让每次自动更新都弹 UAC，与后台静默更新冲突；选定目录会被 `instFilesPre` 自动补上 `Lumi` 子目录，更新时则由 `skipPageIfUpdated` 跳过目录页，不会反复追问
 
 ### Added
 - **应用内自动更新**（`electron-updater` + GitHub Releases）— 状态机全在主进程（`desktop/electron/updater.cjs`），renderer 只订阅 `UpdateState` 并触发检查/安装；入口为「设置 → 关于」与侧栏底部提示条（仅在**此刻装得上**时出现，检查中/下载中一律静默）。启动 15s 后首检、此后每 6h 一次。**Windows / Linux 全自动**（后台下载 → 就绪 → 用户点重启安装）；**macOS 停在「发现新版」把下载交给浏览器** —— CI 未做代码签名，而 Squirrel.Mac 校验新旧版本签名同源，未签名的包一定装不上，故 mac 设 `autoDownload = false`，只调 `checkForUpdates()`（该阶段纯读 `latest-mac.yml`，不启动 Squirrel 代理）。拿到 Developer ID 证书后把 `MANUAL_DOWNLOAD` 改 `false` 即转全自动，CI 无需再动

@@ -1,7 +1,7 @@
 {
   "name": "lumi-desktop",
   "private": true,
-  "version": "0.2.63",
+  "version": "0.2.64",
   "type": "module",
   "main": "electron/main.cjs",
   "scripts": {
@@ -50,6 +50,13 @@
         "nsis"
       ],
       "icon": "assets/icon.png"
+    },
+    "nsis": {
+      "oneClick": false,
+      "allowToChangeInstallationDirectory": true,
+      "perMachine": false,
+      "createDesktopShortcut": true,
+      "createStartMenuShortcut": true
     },
     "linux": {
       "target": [
