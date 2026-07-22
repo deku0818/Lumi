@@ -1,5 +1,10 @@
 # Changelog
 
+## [0.2.67] - 2026-07-22
+
+### Fixed
+- **技能详情浮层查看 references 文件时编辑/删除按钮消失** — 弹窗（grid 布局）的 track 被正文里超长的不可断行 token（无空格的行内代码）按 min-content 撑到比弹窗还宽，头部按钮随行尾被推出 `overflow-hidden` 裁剪区，看起来像「莫名没了」。正文行加 `min-w-0` 阻断 track 膨胀；`.md code` 加 `overflow-wrap: anywhere`，超长行内代码在窄容器里可断行（阅读视图与聊天流通用）
+
 ## [0.2.66] - 2026-07-22
 
 ### Fixed

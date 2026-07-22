@@ -337,6 +337,8 @@ body.resizing-col * {
   color: color-mix(in srgb, var(--color-accent) 80%, var(--color-ink));
   padding: 0.1em 0.35em;
   border-radius: 4px;
+  /* 超长无空格 token（URL/JSON 等）可任意断行：否则其 min-content 会撑宽容器 */
+  overflow-wrap: anywhere;
 }
 .md pre {
   background: color-mix(in srgb, var(--color-ink) 6%, var(--color-canvas));

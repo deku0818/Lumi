@@ -649,8 +649,9 @@ function ResourceSheet({
           </div>
         )}
 
-        {/* 正文：skill 多文件时左侧文件栏 */}
-        <div className="flex min-h-0 h-[26rem]">
+        {/* 正文：skill 多文件时左侧文件栏。min-w-0 阻断 grid track 被长内容撑宽
+            （DialogContent 是 grid，track 变宽会把头部按钮推出 overflow-hidden 裁剪区） */}
+        <div className="flex min-h-0 min-w-0 h-[26rem]">
           {kind === 'skill' && (res?.files?.length ?? 0) > 1 && !creating && (
             <div className="w-44 shrink-0 overflow-y-auto border-r border-line/60 p-2">
               {res!.files!.map((f) => (
