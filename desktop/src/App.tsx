@@ -1531,18 +1531,31 @@ export default function App() {
     setProjectHome({ backend, path })
     setProjectsCurrent(path) // 与旧「点卡片即当前项目」的高亮语义保持一致
     setView('project')
+    // 输入栏在项目页与聊天页共用同一份 input/attachments：进项目页先清空，
+    // 免得上个会话的草稿/附件串到「在此项目开新会话」里
+    setInput('')
+    setAttachments([])
   }, [])
 
-  // 项目主页输入岛：新建会话并携带首条消息。send 的 override 显式给定文本与目标会话，
-  // 不借道主输入框/附件状态（别的会话暂存的附件不会被顺带发出），也无渲染时序依赖。
-  const startProjectChat = useCallback(
-    async (text: string) => {
-      if (!projectHome) return
-      const key = await newSession(projectHome.backend, projectHome.path)
-      sendRef.current({ text, key, workspace: projectHome.path })
-    },
-    [projectHome, newSession],
-  )
+  // 项目主页输入岛：复用主输入栏（input/attachments/斜杠命令全共用），发送即在此项目
+  // 新建会话并携带首条消息。新会话此刻还没进 active，override 自带目标与附件，规避渲染时序依赖。
+  const startProjectChat = useCallback(async () => {
+    if (!projectHome) return
+    const text = input.trim()
+    const atts = attachments
+    if (!text && atts.length === 0) return
+    // 机器离线时建连接会一直悬挂（既不成功也不失败）：先拦下并提示，别让下面清空后把
+    // 用户输入吞掉。
+    if (controlConns.current[projectHome.backend]?.state !== 'open') {
+      toast.error(t('projhome.offline'))
+      return
+    }
+    const key = await newSession(projectHome.backend, projectHome.path)
+    sendRef.current({ text, key, workspace: projectHome.path, atts })
+    // 清空放在发送派发之后：建会话若中途失败/悬挂，输入仍留在框里可重试，不丢字。
+    setInput('')
+    setAttachments([])
+  }, [projectHome, newSession, input, attachments, t])
 
   // 项目主页专用 API：只认目标机器的控制连接，缺位返回 undefined——文件写操作
   // 绝不回退到别的机器（gwForBackend 的 anyGw 兜底对注册表类操作无害，对写文件有害）。
@@ -1592,10 +1605,6 @@ export default function App() {
         .then(refreshCronJobs)
         .catch(() => {}),
     [gwForBackend, projectHome, refreshCronJobs],
-  )
-  const startHomeChat = useCallback(
-    (txt: string) => void startProjectChat(txt),
-    [startProjectChat],
   )
 
   // 新建项目：在该机器登记（带名）→ 进入该项目
@@ -1851,15 +1860,17 @@ export default function App() {
     if (message) toast.error(message)
   }
 
-  // override：项目主页输入岛用——显式指定文本与目标会话，不借道主输入框状态
-  // （附件/草稿都不掺和进来），也就没有「等 React 把新 state 渲染进闭包」的时序依赖
-  type SendOverride = { text: string; key: string; workspace: string }
+  // override：项目主页输入岛用——显式指定文本/附件与目标会话（新建的会话此刻还没
+  // 进 active），绕开「等 React 把新 state 渲染进闭包」的时序依赖。附件随 override 显式
+  // 传入（调用方发送后自行清空），不再默默丢弃。
+  type SendOverride = { text: string; key: string; workspace: string; atts: Attachment[] }
   const sendRef = useRef<(o?: SendOverride) => void>(() => {})
   const send = (o?: SendOverride) => {
     const sid = o?.key ?? active
     const text = (o ? o.text : input).trim()
-    const imgs = o ? [] : attachments.filter((a) => a.kind === 'image')
-    const fileRefs = o ? [] : attachments.filter((a) => a.kind === 'file')
+    const atts = o ? o.atts : attachments
+    const imgs = atts.filter((a) => a.kind === 'image')
+    const fileRefs = atts.filter((a) => a.kind === 'file')
     const attCount = imgs.length + fileRefs.length
     const gw = connsRef.current[sid]
     // 两种入口等价：非 override 时 sid=active，而 running 本就是 store[active]?.running
@@ -2046,6 +2057,10 @@ export default function App() {
     setInput(v)
   }
 
+  // 输入栏发送路由：项目主页复用同一输入栏，发送即在此项目新建会话并携带首条消息；
+  // 其余视图（聊天/欢迎页）发往当前会话。回车与发送键共用。
+  const submitCurrent = () => (view === 'project' ? void startProjectChat() : send())
+
   const onComposerKey = (e: React.KeyboardEvent<HTMLTextAreaElement>) => {
     // 输入法组合中（拼音选字等）的按键全部交给 IME：选字回车不应触发发送/菜单确认
     if (e.nativeEvent.isComposing) return
@@ -2074,7 +2089,7 @@ export default function App() {
     }
     if (e.key === 'Enter' && !e.shiftKey) {
       e.preventDefault()
-      send()
+      submitCurrent()
     }
   }
 
@@ -2120,7 +2135,11 @@ export default function App() {
     </div>
   )
 
-  const composer = (placeholder: string) => (
+  // project=true：项目主页复用本输入栏。此刻无「活动会话」，故把三处与当前会话绑定的
+  // 部件解耦——不显示上下文用量环（不读 cur.ctx，免后台流式 token 触发项目页重渲染）、
+  // 永远显示发送键（不读活动会话 running）、隐藏文件夹菜单（会话级授权，发送前无会话可挂）。
+  // 其余（斜杠命令/附件/模型选择/审批模式）与聊天页完全一致。
+  const composer = (placeholder: string, project = false) => (
     <div>
       {menuOpen && (
         <CommandMenu
@@ -2196,11 +2215,15 @@ export default function App() {
           >
             <Plus />
           </Button>
-          <FolderMenu
-            folders={folderStore[active] ?? []}
-            onAdd={() => void addFolder()}
-            onRemove={(p) => void removeFolder(p)}
-          />
+          {/* 文件夹是会话级授权：项目主页发送前尚无会话可挂（active 是上个会话，
+              显示/改它都是错的），发送后可在聊天页添加。故项目模式下隐藏。 */}
+          {!project && (
+            <FolderMenu
+              folders={folderStore[active] ?? []}
+              onAdd={() => void addFolder()}
+              onRemove={(p) => void removeFolder(p)}
+            />
+          )}
           <ModelPicker
             model={model}
             providers={providers}
@@ -2219,14 +2242,16 @@ export default function App() {
               setToolMode(m)
               // 实时推后端：改运行中会话的共享 context，对当前轮后续工具立即生效。
               // 未连接时静默失败——下一条消息自带 tool_mode 会重设 context。
-              connsRef.current[active]?.setToolMode(m).catch(() => {})
+              // 项目模式无活动会话，不推 active（它是上个会话）；toolMode 发送时随新会话生效。
+              if (!project) connsRef.current[active]?.setToolMode(m).catch(() => {})
             }}
             classifierLabel={classifier.provider ? classifier.model : undefined}
           />
         </div>
         <div className="flex items-center gap-1.5">
-          <ContextMeter usage={cur?.ctx} window={contextWindow} model={model} />
-          {running && !approval && !clarify ? (
+          {/* 项目模式无活动会话：不读 cur.ctx（免后台流式 token 触发项目页重渲染），整块不渲染 */}
+          {!project && <ContextMeter usage={cur?.ctx} window={contextWindow} model={model} />}
+          {!project && running && !approval && !clarify ? (
             <Button
               size="icon"
               variant="destructive"
@@ -2239,8 +2264,11 @@ export default function App() {
           ) : (
             <Button
               size="icon"
-              onClick={() => send()}
-              disabled={running || conn !== 'open' || (!input.trim() && attachments.length === 0)}
+              onClick={submitCurrent}
+              disabled={
+                (!input.trim() && attachments.length === 0) ||
+                (!project && (running || conn !== 'open'))
+              }
               aria-label={t('composer.send')}
               className="rounded-full"
             >
@@ -2261,6 +2289,18 @@ export default function App() {
         }}
       />
     </div>
+  )
+
+  // 项目主页输入岛 = 同一套输入栏（project=true）。ProjectHomePage 是 memo 的，slot 若每次
+  // App 渲染都换新元素会击穿 memo（后台流式 token 触发整页 reconcile），故 useMemo 稳定住。
+  // deps 列全 project 模式 composer 读到的交互态——独不含流式 store，后台 token 便不重算此 slot。
+  const projectComposer = useMemo(
+    () => composer(t('projhome.composerPlaceholder', { name: homeProjectInfo?.name ?? '' }), true),
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+    [
+      input, attachments, conn, model, providers, activeModel, machines, activeBackend,
+      toolMode, classifier, menuOpen, matched, cmdSel, cmdToken, homeProjectInfo?.name,
+    ],
   )
 
   return (
@@ -2365,11 +2405,9 @@ export default function App() {
             machine={projectsMachine}
             needProjectHint={needProjectHint}
             onSelectMachine={selectProjectsMachine}
-            // 被「新建会话」阻断跳来的场景直接开会话（用户此刻要的是聊天）；
-            // 主动浏览项目则进项目主页
-            onOpen={(p) =>
-              needProjectHint ? void openProject(p, projectsMachine) : openProjectHome(p, projectsMachine)
-            }
+            // 点项目一律进项目主页——主页输入岛本身就能在此项目开聊，故无论是主动浏览
+            // 还是被「新建会话」阻断跳来（needProjectHint），落点一致，不再偶发跳到欢迎页。
+            onOpen={(p) => openProjectHome(p, projectsMachine)}
             onNew={() => setShowNewProject(true)}
             onRemove={(path) =>
               setPendingRemoveProject(projects.find((p) => p.path === path) ?? null)
@@ -2384,8 +2422,8 @@ export default function App() {
             api={projectHomeApi}
             sessions={homeSessions}
             cronJobs={homeCronJobs}
+            composerSlot={projectComposer}
             onBack={openProjects}
-            onStartChat={startHomeChat}
             onOpenSession={openHomeSession}
             onOpenScheduled={openScheduled}
             onToggleCron={toggleHomeCron}

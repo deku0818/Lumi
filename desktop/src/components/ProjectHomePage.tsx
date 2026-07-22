@@ -1,4 +1,4 @@
-import { memo, useCallback, useEffect, useState } from 'react'
+import { memo, useCallback, useEffect, useState, type ReactNode } from 'react'
 import {
   Bot,
   Brain,
@@ -9,7 +9,6 @@ import {
   Pencil,
   Pin,
   Plus,
-  Send,
   Star,
   Trash2,
   Zap,
@@ -46,8 +45,8 @@ export const ProjectHomePage = memo(function ProjectHomePage({
   api,
   sessions,
   cronJobs,
+  composerSlot,
   onBack,
-  onStartChat,
   onOpenSession,
   onOpenScheduled,
   onToggleCron,
@@ -57,15 +56,15 @@ export const ProjectHomePage = memo(function ProjectHomePage({
   api: () => Gateway | undefined
   sessions: SessionMeta[]
   cronJobs: CronJob[]
+  // 输入岛 = App 传入的标准输入栏（project 模式），与聊天页完全一致
+  composerSlot: ReactNode
   onBack: () => void
-  onStartChat: (text: string) => void
   onOpenSession: (tid: string) => void
   onOpenScheduled: () => void
   onToggleCron: (jobId: string, enabled: boolean) => void
 }) {
   const { t } = useI18n()
   const [overview, setOverview] = useState<ProjectOverview | null>(null)
-  const [draft, setDraft] = useState('')
   const [sheet, setSheet] = useState<Sheet | null>(null)
   const [promptTab, setPromptTab] = useState<'SOUL' | 'AGENTS'>('SOUL')
 
@@ -84,10 +83,6 @@ export const ProjectHomePage = memo(function ProjectHomePage({
       stale = true
     }
   }, [api, project.path, ovTick])
-
-  const submit = () => {
-    if (draft.trim()) onStartChat(draft.trim())
-  }
 
   const prompt = overview?.prompts.find((p) => p.name === promptTab)
   const pinned = sessions.filter((s) => s.pinned)
@@ -117,31 +112,8 @@ export const ProjectHomePage = memo(function ProjectHomePage({
               </div>
             </div>
 
-            {/* 输入岛：发送即在此项目新建会话并携带首条消息 */}
-            <div className="composer-glass rounded-2xl px-4 pt-3 pb-2.5">
-              <textarea
-                value={draft}
-                onChange={(e) => setDraft(e.target.value)}
-                onKeyDown={(e) => {
-                  if (e.key === 'Enter' && !e.shiftKey && !e.nativeEvent.isComposing) {
-                    e.preventDefault()
-                    submit()
-                  }
-                }}
-                placeholder={t('projhome.composerPlaceholder', { name: project.name })}
-                rows={2}
-                className="w-full bg-transparent outline-none resize-none text-[13.5px] selectable"
-              />
-              <div className="flex justify-end">
-                <button
-                  onClick={submit}
-                  disabled={!draft.trim()}
-                  className="size-7 grid place-items-center rounded-full bg-primary text-primary-foreground disabled:opacity-40 transition"
-                >
-                  <Send size={13} />
-                </button>
-              </div>
-            </div>
+            {/* 输入岛：与聊天页同一套输入栏（发送即在此项目新建会话并携带首条消息） */}
+            <div className="mb-1">{composerSlot}</div>
 
             {pinned.length > 0 && (
               <>
