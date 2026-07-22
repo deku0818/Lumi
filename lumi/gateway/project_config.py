@@ -66,13 +66,14 @@ def _prompt_info(project: Path, name: str) -> dict:
     """命中层解析走 manager.resolve_prompt（与运行时 load_prompt 同一份判定）。"""
     resolved = get_config().resolve_prompt(name, project)
     if resolved is None:
-        return {"name": name, "source": "", "path": "", "content": ""}
+        return {"name": name, "source": "", "path": "", "content": "", "body": ""}
     source, path, content = resolved
     return {
         "name": name,
         "source": source,
         "path": _display_path(path, project),
         "content": content,
+        "body": strip_frontmatter(content),
     }
 
 
@@ -190,8 +191,7 @@ def read_resource(project: Path, kind: str, name: str, file: str = "") -> dict:
     if kind == "prompt":
         if name not in PROMPT_NAMES:
             raise ValueError(f"未知提示词: {name}")
-        info = _prompt_info(project, name)
-        return {**info, "body": strip_frontmatter(info["content"])}
+        return _prompt_info(project, name)
     if kind == "memory":
         _check_name(name)
         content = (memory_dir(project) / name).read_text("utf-8")

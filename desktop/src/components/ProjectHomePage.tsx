@@ -197,7 +197,7 @@ export const ProjectHomePage = memo(function ProjectHomePage({
                     onClick={() => setSheet({ mode: 'view', kind: 'prompt', name: promptTab })}
                     className="text-[11.5px] leading-relaxed text-ink/85 line-clamp-5 cursor-pointer hover:text-ink whitespace-pre-wrap"
                   >
-                    {prompt.content.trim()}
+                    {prompt.body.trim()}
                   </div>
                   <div className="mt-2 text-[10.5px] text-muted-foreground/70 font-mono truncate">{prompt.path}</div>
                 </>
@@ -534,8 +534,7 @@ function ResourceSheet({
       } else {
         await gw.projectResourceWrite(path, kind, sheet.name, text, kind === 'skill' ? file : '')
         onChanged()
-        setEditing(false)
-        setTick((n) => n + 1)
+        onClose()
       }
     } catch (e) {
       toast.error(errorMessage(e))

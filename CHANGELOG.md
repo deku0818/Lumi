@@ -1,5 +1,14 @@
 # Changelog
 
+## [0.2.66] - 2026-07-22
+
+### Fixed
+- **项目主页提示词卡片预览露出 frontmatter 原文** — 给 SOUL/AGENTS 写了 frontmatter 时，卡片预览直接把 `---` 围栏当正文显示。`overview` 的 prompts 现随带后端剥好的 `body`（`read_resource` 的 prompt 分支顺势与 `_prompt_info` 合一），预览与详情浮层同源，frontmatter 不再渲染、不再展示；编辑视图仍操作含 frontmatter 的原文
+- **`test_project_config` 未隔离进程配置目录** — 本机 `~/.lumi/prompts` 存在时层序断言误红（global 盖过 style）。测试文件加 autouse fixture 把 `LUMI_CONFIG_DIR` 钉到空临时目录并重置配置单例
+
+### Changed
+- 项目主页资源浮层：编辑保存成功后直接关闭浮层（原先留在浮层内切回阅读态）；提示词空态文案精简为「未配置（将以无系统提示词运行）」，去掉「点铅笔为此项目撰写」尾巴（该行仍可点击进入撰写）
+
 ## [0.2.65] - 2026-07-22
 
 ### Added

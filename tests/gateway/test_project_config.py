@@ -6,6 +6,16 @@ import pytest
 
 from lumi.gateway import project_config
 from lumi.styles import STYLES_ROOT
+from lumi.utils.config.manager import LumiConfig
+
+
+@pytest.fixture(autouse=True)
+def isolated_config_dir(tmp_path_factory, monkeypatch):
+    """全局层钉到空目录：本机 ~/.lumi 的 prompts/skills 不得泄漏进层序断言。"""
+    monkeypatch.setenv("LUMI_CONFIG_DIR", str(tmp_path_factory.mktemp("lumi-home")))
+    LumiConfig.reset_instance()
+    yield
+    LumiConfig.reset_instance()
 
 
 @pytest.fixture
@@ -172,6 +182,18 @@ def test_read_returns_stripped_body(project: Path):
     result = project_config.read_resource(project, "skill", "my-skill")
     assert result["body"] == "正文"
     assert result["content"].startswith("---")
+
+
+def test_prompt_overview_body_strips_frontmatter(project: Path):
+    # 卡片预览用 body：用户习惯给 SOUL/AGENTS 加 frontmatter，不应渲染进预览
+    project_config.write_resource(
+        project, "prompt", "SOUL", "---\ntitle: 灵魂\n---\n正文"
+    )
+    soul = next(
+        p for p in project_config.overview(project)["prompts"] if p["name"] == "SOUL"
+    )
+    assert soul["body"] == "正文"
+    assert soul["content"].startswith("---")
 
 
 def test_prompt_chain_project_over_style(project: Path):
