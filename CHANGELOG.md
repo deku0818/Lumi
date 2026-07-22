@@ -1,5 +1,19 @@
 # Changelog
 
+## [0.2.65] - 2026-07-22
+
+### Added
+- **桌面「项目主页」** — 点项目卡片不再直接开聊天，而是进入项目落地页：输入岛（发送即在此项目新建会话并携带首条消息，不借道主输入框——别的会话暂存的附件不会被顺带发出）+ 该项目的置顶/最近会话流 + 右列五卡（提示词 SOUL/AGENTS、记忆、定时任务、技能、子 Agent）。技能/Agent 支持项目内**新建、编辑、删除**；内置与全局层资源只读，可「复制到项目以自定义」（同名覆盖随即生效）。详情浮层阅读视图渲染后端剥好 frontmatter 的正文，编辑视图操作原文；被「新建会话」阻断跳到项目页的场景仍直接开会话不多绕一步。新增 5 个 WS 方法：`project_overview` / `project_resource_read|write|delete` / `project_copy_builtin`
+- **配置三层加载（style 内置 < 全局 `~/.lumi` < 项目 `.lumi/`，逐层同名覆盖）** — 此前 skills/agents/prompts 全部锚定 serve 启动时发现的单一配置目录，会话切到哪个项目都加载同一份：项目自己 `.lumi/` 里的技能/Agent/提示词**从不生效**（项目主页若照此展示即形同虚设）。现在会话按绑定项目走三层链：`loader.config_layers`（skills/agents）与 `manager.prompt_layers`（prompts）是层序单源，变更检测器按 子类×项目 一实例，skill/agent 工具经 `runtime.context.project_dir` 取层并走 detector 缓存（文件未变只 stat 不重解析，顺带删掉了 skill 工具每次调用的第二遍全量目录扫描）；风格判定支持项目 `.lumi/config.json` 的 `style` 声明（`active_style_for`）。无项目场景与 `lumi -p` 行为不变
+
+### Fixed
+- **serve 的全局配置层随启动目录漂移** — dev sidecar 从 Lumi 仓库拉起时，仓库自己的 `.lumi/`（30 个 lark 技能）被发现链当成全局层，泄漏进所有项目的会话与项目主页（Rabbit Hole 里看到一整排 lark 技能即此因）。`lumi serve` 现恒把进程配置层钉在用户级 `~/.lumi`（显式 `LUMI_CONFIG_DIR` 仍最高优先）；各项目专属配置归项目层。附带效果：项目自带的 `.lumi/skills` 首次真正被其会话加载
+- **技能/Agent 写入不校验 frontmatter 产生幽灵文件** — 加载侧对缺 frontmatter/缺 name 的定义文件静默跳过，此前写入成功的坏文件会「列表里消失、无删除入口」。现落盘前校验（须含 name/description 且 name 与文件身份一致，`loader.validate_definition`），坏格式当场报错；同时堵住「UI 按目录名、运行时按 frontmatter name」两套身份背离的口子
+- **项目主页若干实现层问题**（code-review 10 项全修）— `api` 引用不稳定导致后台流式期间每 token 重发 overview RPC 且覆盖编辑中的文本；名字合法性前后端规则不一致 + 写操作失败静默（现同一正则把关 + toast 报错）；`copytree` 撞残留目录抛 FileExistsError（`dirs_exist_ok`）；symlink 项目路径下保存「写成功却报错」（入口统一 `resolve()`）；CRLF 文件前端剥不掉 frontmatter（改由后端下发 `body`，前端删掉自备正则）；远程机器控制连接缺位时文件写操作回退到错误机器（项目主页 API 只认目标机器，缺位明确报错）
+
+### Changed
+- 加载响应判废（切项目时旧响应不再倒灌）、会话行相对时间走 `timeAgo` 本地化、侧栏「项目」高亮覆盖项目主页视图、`ProjectHomePage` memo 化（后台流式期间不再整页 reconcile）
+
 ## [0.2.64] - 2026-07-21
 
 ### Fixed

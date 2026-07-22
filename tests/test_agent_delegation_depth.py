@@ -17,6 +17,7 @@ from langchain_core.messages import AIMessage
 
 from lumi.agents.tools.loader import AgentConfig
 from lumi.agents.tools.providers.agent import _child_tools, agent
+from lumi.agents.tools.providers.skill import skill
 from lumi.agents.tools.providers.workflow import workflow
 from lumi.utils.read_config import get_config
 
@@ -120,9 +121,10 @@ def _patch_agent_internals(captured: dict):
 
     cfg = AgentConfig(name="worker", description="d", system_prompt="p")
     return (
+        # agent 工具经按项目缓存的 detector 取配置（lazy import），stub 掉实例获取
         patch(
-            "lumi.agents.tools.providers.agent.load_agents",
-            return_value=[cfg],
+            "lumi.agents.core.preprocessing.agent_detector.AgentChangeDetector.get_instance",
+            return_value=SimpleNamespace(peek=lambda: [cfg]),
         ),
         patch(
             "lumi.agents.tools.get_tools",
@@ -214,6 +216,7 @@ async def _invoke_via_toolnode(tool_obj, args: dict) -> str:
     [
         (agent, {"name": "__nonexistent__", "prompt": "x"}, "not found"),
         (workflow, {}, "script"),
+        (skill, {"name": "__nonexistent__"}, "不存在"),
     ],
 )
 async def test_runtime_injected_via_toolnode(tool_obj, args: dict, marker: str) -> None:

@@ -433,7 +433,7 @@ async def test_help_lists_skill_and_system_commands(monkeypatch):
     monkeypatch.setattr(
         inb,
         "available_commands",
-        lambda memory_enabled, channel=False: [
+        lambda memory_enabled, channel=False, workspace="": [
             {"name": "commit", "description": "", "type": "skill"}
         ],
     )

@@ -82,6 +82,17 @@ def serve(
     ),
 ) -> None:
     """启动 desktop WebSocket 服务（供 Electron / web 前端连接）。"""
+    # serve 是多项目网关：进程级配置层（全局层）恒钉在用户级 ~/.lumi，不随启动目录
+    # 漂移——否则 dev sidecar 从 Lumi 仓库拉起时，仓库自己的 .lumi 会被发现链当成
+    # 全局层，泄漏进所有项目的会话与项目主页。项目专属配置走会话级 project 层
+    # （config_layers），显式 LUMI_CONFIG_DIR 仍最高优先（容器/测试用）。
+    if not os.environ.get("LUMI_CONFIG_DIR"):
+        from pathlib import Path
+
+        from lumi.utils.read_config import get_config
+
+        get_config(str(Path.home() / ".lumi"))
+
     import uvicorn
 
     from lumi.gateway.channels import ws

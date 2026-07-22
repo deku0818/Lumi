@@ -36,3 +36,35 @@ def test_invalid_agent_skipped_not_raised(tmp_path):
     )
     result = _load_agents_from_dir(tmp_path)
     assert set(result) == {"good"}
+
+
+def test_project_layer_merges_and_overrides(tmp_path):
+    """项目 .lumi/ 是最高层：新增并入、同名覆盖；不传 project_dir 则不加载。"""
+    from lumi.agents.tools.loader import load_agents, load_skills
+
+    agents_dir = tmp_path / ".lumi" / "agents"
+    agents_dir.mkdir(parents=True)
+    (agents_dir / "proj-agent.md").write_text(
+        "---\nname: proj-agent\ndescription: 项目层\n---\n提示词", encoding="utf-8"
+    )
+    _write_skill(
+        tmp_path / ".lumi" / "skills",
+        "proj-skill",
+        "name: proj-skill\ndescription: 项目层",
+    )
+
+    assert any(a.name == "proj-agent" for a in load_agents(project_dir=tmp_path))
+    assert any(s.name == "proj-skill" for s in load_skills(project_dir=tmp_path))
+    # 无项目层时不可见（进程级两层行为不变）
+    assert not any(a.name == "proj-agent" for a in load_agents())
+    assert not any(s.name == "proj-skill" for s in load_skills())
+
+
+def test_load_prompt_project_layer(tmp_path):
+    """load_prompt 的项目层优先于其余各层。"""
+    from lumi.utils.read_config import get_config
+
+    prompts_dir = tmp_path / ".lumi" / "prompts"
+    prompts_dir.mkdir(parents=True)
+    (prompts_dir / "SOUL.md").write_text("项目灵魂", encoding="utf-8")
+    assert get_config().load_prompt("SOUL", tmp_path) == "项目灵魂"

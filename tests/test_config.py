@@ -82,7 +82,7 @@ def test_load_agents_from_directory(tmp_path, monkeypatch):
     # mock 掉风格内置 agents，只测试用户目录加载
     empty_dir = tmp_path / "_empty_style"
     empty_dir.mkdir()
-    monkeypatch.setattr("lumi.styles.get_style_agents_dir", lambda _: empty_dir)
+    monkeypatch.setattr("lumi.styles.STYLES_ROOT", empty_dir)
     agents = load_agents(directory=str(tmp_path))
     assert len(agents) == 2
     names = {a.name for a in agents}
@@ -109,7 +109,7 @@ def test_load_skills_directory_format(tmp_path, monkeypatch):
     # mock 掉风格内置 skills，只测试用户目录加载
     empty_dir = tmp_path / "_empty_style"
     empty_dir.mkdir()
-    monkeypatch.setattr("lumi.styles.get_style_skills_dir", lambda _: empty_dir)
+    monkeypatch.setattr("lumi.styles.STYLES_ROOT", empty_dir)
     skills = load_skills(directory=str(tmp_path))
     assert len(skills) == 1
     assert skills[0].name == "my-skill"
@@ -121,6 +121,6 @@ def test_load_skills_missing_skill_md(tmp_path, monkeypatch):
     (tmp_path / "empty-skill").mkdir()
     empty_dir = tmp_path / "_empty_style"
     empty_dir.mkdir()
-    monkeypatch.setattr("lumi.styles.get_style_skills_dir", lambda _: empty_dir)
+    monkeypatch.setattr("lumi.styles.STYLES_ROOT", empty_dir)
     skills = load_skills(directory=str(tmp_path))
     assert len(skills) == 0

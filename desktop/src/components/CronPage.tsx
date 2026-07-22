@@ -30,7 +30,7 @@ import {
 } from '@/components/ui/dialog'
 import { Switch } from '@/components/ui/switch'
 import { Button } from '@/components/ui/button'
-import { CARD_L2, FLOAT_GAP, beOf, cn } from '@/lib/utils'
+import { CARD_L2, FLOAT_GAP, beOf, cn, errorMessage } from '@/lib/utils'
 
 // 后端能力句柄：App 注入 anyGw() 返回的 Gateway 子集，便于解耦与测试
 export interface CronApi {
@@ -399,8 +399,7 @@ function JobFormDialog({
       }
       onSaved()
     } catch (e) {
-      // 后端校验错误直接回显；gateway 的 reject 值是 {message} 普通对象，Error 同样有 .message
-      setError(String((e as { message?: unknown })?.message ?? e))
+      setError(errorMessage(e)) // 后端校验错误直接回显
       setSaving(false)
     }
   }

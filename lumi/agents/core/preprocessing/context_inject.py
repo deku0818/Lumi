@@ -221,7 +221,7 @@ async def context_inject_hook(ctx: HookContext) -> HookResult:
         parts.append(format_reminder(header, [env_body]))
 
     if _has_agent_tool(runtime.context.tools):
-        agents = AgentChangeDetector.get_instance().peek()
+        agents = AgentChangeDetector.get_instance(project_dir).peek()
         text, marker["agents"] = _emit_keyed(
             "agent 列表",
             AGENT_HEADER,
@@ -232,7 +232,7 @@ async def context_inject_hook(ctx: HookContext) -> HookResult:
         )
         parts.append(text)
 
-    skills = SkillChangeDetector.get_instance().peek()
+    skills = SkillChangeDetector.get_instance(project_dir).peek()
     text, marker["skills"] = _emit_keyed(
         "技能列表",
         SKILL_HEADER,

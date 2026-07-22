@@ -324,7 +324,7 @@ class WorkflowEngine:
         # 就位，否则空工具集被缓存后本次工作流永远缺 MCP（project 随父显式传递）
 
         if agent_name:
-            configs = load_agents(name=agent_name)
+            configs = load_agents(name=agent_name, project_dir=self._project_dir)
             if not configs:
                 raise WorkflowRuntimeError(f"子代理 '{agent_name}' 未找到")
             cfg = configs[0]

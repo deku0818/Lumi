@@ -96,7 +96,9 @@ def build_skill_command_blocks(
     return blocks
 
 
-def available_commands(memory_enabled: bool, *, channel: bool = False) -> list[dict]:
+def available_commands(
+    memory_enabled: bool, *, channel: bool = False, workspace: str = ""
+) -> list[dict]:
     """当前可用的斜杠命令（技能 + 记忆会话的 dream 系）。
 
     模块级函数：IM 渠道的 /help 对从未对话的 chat 也要能列命令，不必为此
@@ -107,7 +109,7 @@ def available_commands(memory_enabled: bool, *, channel: bool = False) -> list[d
     """
     from lumi.agents.core.preprocessing.skill_detector import SkillChangeDetector
 
-    skills = SkillChangeDetector.get_instance().peek()
+    skills = SkillChangeDetector.get_instance(workspace or None).peek()
     commands = [
         {"name": s.name, "description": s.description, "type": "skill"} for s in skills
     ]
@@ -596,7 +598,9 @@ class AgentBridge:
         只见 /dream-session，desktop 短会话只见 /dream）。
         """
         return available_commands(
-            self._memory_enabled, channel=is_channel_thread(self.current_thread_id)
+            self._memory_enabled,
+            channel=is_channel_thread(self.current_thread_id),
+            workspace=self.workspace_dir,
         )
 
     async def stream_command(
@@ -646,7 +650,11 @@ class AgentBridge:
         from lumi.agents.core.preprocessing.skill_detector import SkillChangeDetector
 
         skill = next(
-            (s for s in SkillChangeDetector.get_instance().peek() if s.name == name),
+            (
+                s
+                for s in SkillChangeDetector.get_instance(self.workspace_dir).peek()
+                if s.name == name
+            ),
             None,
         )
         if skill is None:

@@ -128,6 +128,38 @@ export interface Project {
   default?: boolean
 }
 
+// ── 项目主页（对齐后端 gateway/project_config.py）──
+// 资源类别：技能（目录）/ 子 Agent（单 md）/ 提示词（SOUL|AGENTS）/ 记忆（只读）
+export type ProjectResourceKind = 'skill' | 'agent' | 'prompt' | 'memory'
+
+// 提示词解析结果：source 标注命中层（''=三层都没有）
+export interface ProjectPromptInfo {
+  name: 'SOUL' | 'AGENTS'
+  source: '' | 'project' | 'style' | 'builtin'
+  path: string
+  content: string
+}
+
+// source：builtin=style 内置 / global=进程配置层 / project=项目 .lumi（仅此层可编辑）
+export interface ProjectOverview {
+  style: string
+  prompts: ProjectPromptInfo[]
+  skills: { name: string; description: string; source: string; builtin: boolean }[]
+  agents: { name: string; description: string; tools: string[]; source: string; builtin: boolean }[]
+  memory: { name: string; size: number }[]
+}
+
+// project_resource_read 返回：content=原文（编辑用），body=剥好 frontmatter 的正文
+// （阅读视图用，剥离单点在后端）；skill 额外带目录内 md 文件清单
+export interface ProjectResource {
+  content: string
+  body: string
+  files?: string[]
+  builtin?: boolean
+  source?: string
+  path?: string
+}
+
 // 斜杠命令（对齐后端 list_commands：当前为技能命令）
 export interface SlashCommand {
   name: string

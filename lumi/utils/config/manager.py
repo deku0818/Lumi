@@ -51,6 +51,20 @@ def strip_frontmatter(content: str) -> str:
 BUILTIN_PROMPTS_DIR = Path(__file__).parents[2] / "prompts"
 
 
+def project_style_override(project_dir: Path) -> str | None:
+    """项目 .lumi/config.json 声明的 style（缺失/无效返回 None）。
+
+    只挑 style 字段、不走 Config 全量校验：项目层 config.json 可能只为声明 style
+    或 MCP 而存在，其余字段坏掉不应连带 style 失效。
+    """
+    try:
+        data = json.loads((project_dir / ".lumi" / "config.json").read_text("utf-8"))
+    except (OSError, json.JSONDecodeError):
+        return None
+    style = data.get("style")
+    return str(style) if style else None
+
+
 class LumiConfig:
     """Lumi 配置管理器
 
@@ -187,14 +201,54 @@ class LumiConfig:
         with open(self.mcp_config_path, encoding="utf-8") as f:
             return json.load(f)
 
-    def load_system_prompt(self) -> str:
+    def active_style_for(self, project_dir: str | Path | None) -> str:
+        """某项目会话生效的风格：CLI override > 项目 .lumi/config.json > 进程配置 > default。
+
+        项目声明的 style 只影响绑定到该项目的会话；未声明时跟随进程级 active_style。
+        项目主页（gateway/project_config）与运行时加载共用本判定，两边永不背离。
+        """
+        if self._style_override:
+            return self._style_override
+        if project_dir and (style := project_style_override(Path(project_dir))):
+            return style
+        return self.active_style
+
+    def prompt_layers(
+        self, name: str, project_dir: str | Path | None = None
+    ) -> list[tuple[str, Path]]:
+        """单个提示词的解析层序：(来源标签, 文件路径)，优先级从高到低。
+
+        项目 ``.lumi/prompts/`` > 进程配置 ``prompts_dir`` > 风格内置 > 框架内置。
+        load_prompt 取第一个非空层；项目主页用标签展示「生效于哪一层」——链只写在这里。
+        """
+        from lumi.styles import STYLES_ROOT
+
+        layers: list[tuple[str, Path]] = []
+        if project_dir:
+            layers.append(
+                ("project", Path(project_dir) / ".lumi" / "prompts" / f"{name}.md")
+            )
+        # 直接拼而不用 get_style_prompts_dir：风格没有 prompts/ 是常态（default 即如此），
+        # 那个函数为此抛 ValueError，异常消息还要 iterdir 整个 styles 目录
+        style_dir = STYLES_ROOT / self.active_style_for(project_dir) / "prompts"
+        layers.append(("global", self.prompts_dir / f"{name}.md"))
+        layers.append(("style", style_dir / f"{name}.md"))
+        layers.append(("builtin", BUILTIN_PROMPTS_DIR / f"{name}.md"))
+        return layers
+
+    def load_system_prompt(self, project_dir: str | Path | None = None) -> str:
         """SOUL.md + AGENTS.md 按序直接拼接（不做 XML 包裹），逐个走 load_prompt 的解析链。
 
         两文件都没有时返回空串（以无系统提示词运行，call_model 的 ``if system_prompt:``
         会跳过 SystemMessage），不 fail-loud。
+
+        Args:
+            project_dir: 会话绑定的项目根；给定时项目 ``.lumi/prompts/`` 为最高层。
         """
         parts = [
-            text for name in ("SOUL", "AGENTS") if (text := self.load_prompt(name))
+            text
+            for name in ("SOUL", "AGENTS")
+            if (text := self.load_prompt(name, project_dir))
         ]
         if not parts:
             logger.info(f"风格 '{self.active_style}' 无提示词配置，以空系统提示词运行")
@@ -202,31 +256,41 @@ class LumiConfig:
         logger.info(f"使用风格 '{self.active_style}' 的系统提示词")
         return "\n\n".join(parts)
 
-    def load_prompt(self, name: str) -> str | None:
-        """加载单个提示词：用户 ``.lumi/prompts/`` > 风格内置 > 框架内置。
+    def resolve_prompt(
+        self, name: str, project_dir: str | Path | None = None
+    ) -> tuple[str, Path, str] | None:
+        """按层序取第一个非空提示词：(来源标签, 路径, 原文)，各层皆空返回 None。
+
+        「空文件（或只有 frontmatter）等同于没有、继续往下找」的判定只写在这里
+        ——load_prompt 与项目主页（gateway/project_config）共用，两边永不背离：
+        否则一个误清空的 SUMMARY.md 会让摘要在无指令下生成。
+        """
+        for source, path in self.prompt_layers(name, project_dir):
+            try:
+                content = path.read_text(encoding="utf-8")
+            except OSError:
+                continue
+            if strip_frontmatter(content).strip():
+                return source, path, content
+        return None
+
+    def load_prompt(
+        self, name: str, project_dir: str | Path | None = None
+    ) -> str | None:
+        """加载单个提示词正文：项目 > 进程配置 > 风格内置 > 框架内置。
 
         框架内置（``lumi/prompts/``）是最后一层兜底，只放「缺了就跑不起来」的提示词
-        （目前仅 SUMMARY——未配置时压缩会直接失败）。空文件（或只有 frontmatter）等同
-        于没有、继续往下找：否则一个误清空的 SUMMARY.md 会让摘要在无指令下生成。
+        （目前仅 SUMMARY——未配置时压缩会直接失败）。
 
         Args:
             name: 提示词文件名（不包含后缀）
+            project_dir: 会话绑定的项目根（None = 无项目层）
 
         Returns:
-            提示词内容，三处都没有有效内容则返回 None
+            提示词内容，各层都没有有效内容则返回 None
         """
-        from lumi.styles import STYLES_ROOT
-
-        # 直接拼而不用 get_style_prompts_dir：风格没有 prompts/ 是常态（default 即如此），
-        # 那个函数为此抛 ValueError，异常消息还要 iterdir 整个 styles 目录
-        style_dir = STYLES_ROOT / self.active_style / "prompts"
-        for prompt_dir in (self.prompts_dir, style_dir, BUILTIN_PROMPTS_DIR):
-            prompt_file = prompt_dir / f"{name}.md"
-            if prompt_file.exists() and (
-                text := strip_frontmatter(prompt_file.read_text(encoding="utf-8"))
-            ):
-                return text
-        return None
+        resolved = self.resolve_prompt(name, project_dir)
+        return strip_frontmatter(resolved[2]) if resolved else None
 
     def ensure_dirs(self):
         """确保所有配置目录存在"""

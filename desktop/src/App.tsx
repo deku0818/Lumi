@@ -54,6 +54,7 @@ import { SettingsDialog } from './components/SettingsDialog'
 import { ModelPicker } from './components/ModelPicker'
 import { ApprovalModePicker } from './components/ApprovalModePicker'
 import { ContextMeter, type CtxUsage } from './components/ContextMeter'
+import { ProjectHomePage } from './components/ProjectHomePage'
 import { ProjectsPage } from './components/ProjectsPage'
 import { DirBrowser } from './components/DirBrowser'
 import { FolderMenu } from './components/FolderMenu'
@@ -395,7 +396,9 @@ export default function App() {
   const bgRailW = useResizableWidth('lumi-bg-width', 340, 280, 560)
   const runsRailW = useResizableWidth('lumi-runs-width', 240, 180, 400)
   const previewW = useResizableWidth('lumi-preview-width', 520, 360, 920)
-  const [view, setView] = useState<'chat' | 'projects' | 'scheduled' | 'cronjob'>('chat')
+  const [view, setView] = useState<'chat' | 'projects' | 'project' | 'scheduled' | 'cronjob'>('chat')
+  // 项目主页当前查看的项目（view='project' 时有效）
+  const [projectHome, setProjectHome] = useState<{ backend: string; path: string } | null>(null)
   // 运行中任务：机器 → 该机器正在执行的 job id。按机器分段——每台机器各发各的进程级快照
   const [cronRunning, setCronRunning] = useState<Record<string, string[]>>({})
   const [cronVersion, setCronVersion] = useState(0) // 递增触发 cron 数据刷新
@@ -1459,8 +1462,9 @@ export default function App() {
   const newSession = useCallback(
     async (backend = 'local', workspace = '') => {
       setView('chat')
-      await activate(null, workspace, backend)
+      const key = await activate(null, workspace, backend)
       void refreshSessions()
+      return key
     },
     [activate, refreshSessions],
   )
@@ -1520,6 +1524,78 @@ export default function App() {
       }
     },
     [newSession],
+  )
+
+  // 项目主页：点项目卡片进入落地页（会话流 + 提示词/记忆/定时/技能/Agent 五卡）
+  const openProjectHome = useCallback((path: string, backend = 'local') => {
+    setProjectHome({ backend, path })
+    setProjectsCurrent(path) // 与旧「点卡片即当前项目」的高亮语义保持一致
+    setView('project')
+  }, [])
+
+  // 项目主页输入岛：新建会话并携带首条消息。send 的 override 显式给定文本与目标会话，
+  // 不借道主输入框/附件状态（别的会话暂存的附件不会被顺带发出），也无渲染时序依赖。
+  const startProjectChat = useCallback(
+    async (text: string) => {
+      if (!projectHome) return
+      const key = await newSession(projectHome.backend, projectHome.path)
+      sendRef.current({ text, key, workspace: projectHome.path })
+    },
+    [projectHome, newSession],
+  )
+
+  // 项目主页专用 API：只认目标机器的控制连接，缺位返回 undefined——文件写操作
+  // 绝不回退到别的机器（gwForBackend 的 anyGw 兜底对注册表类操作无害，对写文件有害）。
+  // useCallback 稳定引用：ProjectHomePage 的加载 effect 依赖它，不稳会随 App 重渲染风暴重发
+  const projectHomeApi = useCallback(
+    () => (projectHome ? controlConns.current[projectHome.backend] : undefined),
+    [projectHome],
+  )
+
+  // 项目主页 props 全部稳定引用：App 是流式事件的重渲染热点（后台会话每个 token 都
+  // 触发 setStore），配合 ProjectHomePage 的 memo()，停在项目页时不再整页 reconcile
+  // 当前项目的登记条目（name/default 都从这一次 find 取）
+  const homeProject = projectHome
+    ? projects.find((p) => p.path === projectHome.path)
+    : undefined
+  const homeProjectInfo = useMemo(
+    () =>
+      projectHome
+        ? { name: homeProject?.name ?? basename(projectHome.path), path: projectHome.path }
+        : null,
+    [projectHome, homeProject?.name],
+  )
+  const homeSessions = useMemo(
+    () =>
+      projectHome
+        ? sessions.filter(
+            (s) =>
+              beOf(s) === projectHome.backend &&
+              s.workspace_dir === projectHome.path &&
+              !s.channel,
+          )
+        : [],
+    [sessions, projectHome],
+  )
+  const homeCronJobs = useMemo(
+    () => (projectHome ? cronJobs.filter((j) => beOf(j) === projectHome.backend) : []),
+    [cronJobs, projectHome],
+  )
+  const openHomeSession = useCallback(
+    (tid: string) => void selectSession(tid, projectHome?.backend ?? 'local'),
+    [selectSession, projectHome],
+  )
+  const toggleHomeCron = useCallback(
+    (id: string, enabled: boolean) =>
+      void gwForBackend(projectHome?.backend ?? 'local')
+        ?.toggleCronJob(id, enabled)
+        .then(refreshCronJobs)
+        .catch(() => {}),
+    [gwForBackend, projectHome, refreshCronJobs],
+  )
+  const startHomeChat = useCallback(
+    (txt: string) => void startProjectChat(txt),
+    [startProjectChat],
   )
 
   // 新建项目：在该机器登记（带名）→ 进入该项目
@@ -1775,21 +1851,29 @@ export default function App() {
     if (message) toast.error(message)
   }
 
-  const send = () => {
-    const text = input.trim()
-    const imgs = attachments.filter((a) => a.kind === 'image')
-    const fileRefs = attachments.filter((a) => a.kind === 'file')
-    const gw = connsRef.current[active]
-    if ((!text && attachments.length === 0) || running || !gw) return
+  // override：项目主页输入岛用——显式指定文本与目标会话，不借道主输入框状态
+  // （附件/草稿都不掺和进来），也就没有「等 React 把新 state 渲染进闭包」的时序依赖
+  type SendOverride = { text: string; key: string; workspace: string }
+  const sendRef = useRef<(o?: SendOverride) => void>(() => {})
+  const send = (o?: SendOverride) => {
+    const sid = o?.key ?? active
+    const text = (o ? o.text : input).trim()
+    const imgs = o ? [] : attachments.filter((a) => a.kind === 'image')
+    const fileRefs = o ? [] : attachments.filter((a) => a.kind === 'file')
+    const attCount = imgs.length + fileRefs.length
+    const gw = connsRef.current[sid]
+    // 两种入口等价：非 override 时 sid=active，而 running 本就是 store[active]?.running
+    const busy = storeRef.current[sid]?.running ?? false
+    if ((!text && attCount === 0) || busy || !gw) return
     // 主动发送即视为「回到对话」：强制贴底，确保自己的消息与随后的回复都在视野内
     setPinned(true)
     const files: AttachedFile[] = fileRefs.map((a) => ({ path: a.path, name: a.name }))
     setStore((s) => ({
       ...s,
-      [active]: {
-        ...s[active],
+      [sid]: {
+        ...s[sid],
         items: [
-          ...s[active].items,
+          ...s[sid].items,
           {
             id: nid(),
             kind: 'user',
@@ -1802,23 +1886,25 @@ export default function App() {
         running: true,
       },
     }))
-    setInput('')
-    setAttachments([])
+    if (!o) {
+      setInput('')
+      setAttachments([])
+    }
     // 纯文本的已知斜杠命令走 run_command；带附件则一律走 send_message。
     // 注意此分支在乐观插入之前：/compact、/dream 这类不产生 checkpoint 的命令
     // 不该插条目（后端永远列不出，回合结束刷新时会当着用户的面消失）。
-    if (attachments.length === 0 && text.startsWith('/')) {
+    if (attCount === 0 && text.startsWith('/')) {
       const [name, extra] = parseCommand(text)
       if (commands.some((c) => c.name === name)) {
-        gw.runCommand(name, extra, toolMode).catch((err) => reportSendFailure(active, err))
+        gw.runCommand(name, extra, toolMode).catch((err) => reportSendFailure(sid, err))
         return
       }
     }
     // 新会话首条消息：checkpoint 未落盘前后端列不出来，先乐观插入侧栏条目——
     // 否则首轮期间会话在侧栏缺席、切出去就回不来。回合结束的整表刷新会以
     // 后端真实数据替换（display_time 沿用后端的相对时间文案格式）。
-    const tid = keyThread(active)
-    const be = keyBackend(active)
+    const tid = keyThread(sid)
+    const be = keyBackend(sid)
     if (!sessionsRef.current.some((s) => s.thread_id === tid && beOf(s) === be)) {
       setSessions((prev) => [
         {
@@ -1829,7 +1915,7 @@ export default function App() {
           created_at: new Date().toISOString(),
           message_count: 1,
           display_time: 'just now',
-          workspace_dir: workspaceDir,
+          workspace_dir: o?.workspace ?? workspaceDir,
           backend: be,
         },
         ...prev,
@@ -1847,8 +1933,9 @@ export default function App() {
       }
       payload = blocks
     }
-    gw.sendMessage(payload, toolMode, filePaths).catch((err) => reportSendFailure(active, err))
+    gw.sendMessage(payload, toolMode, filePaths).catch((err) => reportSendFailure(sid, err))
   }
+  sendRef.current = send // 供项目主页输入岛在 newSession 后调用（override 自带目标，无时序依赖）
 
   // 中止当前流式轮：后端取消 task 并补发 turn.complete，running 随之复位
   const stop = () => {
@@ -2152,7 +2239,7 @@ export default function App() {
           ) : (
             <Button
               size="icon"
-              onClick={send}
+              onClick={() => send()}
               disabled={running || conn !== 'open' || (!input.trim() && attachments.length === 0)}
               aria-label={t('composer.send')}
               className="rounded-full"
@@ -2202,7 +2289,7 @@ export default function App() {
         conn={conn}
         model={model}
         activity={activity}
-        projectsActive={view === 'projects'}
+        projectsActive={view === 'projects' || view === 'project'}
         scheduledActive={view === 'scheduled'}
         cronJobs={cronJobs}
         readRuns={readRuns}
@@ -2278,13 +2365,30 @@ export default function App() {
             machine={projectsMachine}
             needProjectHint={needProjectHint}
             onSelectMachine={selectProjectsMachine}
-            onOpen={(p) => void openProject(p, projectsMachine)}
+            // 被「新建会话」阻断跳来的场景直接开会话（用户此刻要的是聊天）；
+            // 主动浏览项目则进项目主页
+            onOpen={(p) =>
+              needProjectHint ? void openProject(p, projectsMachine) : openProjectHome(p, projectsMachine)
+            }
             onNew={() => setShowNewProject(true)}
             onRemove={(path) =>
               setPendingRemoveProject(projects.find((p) => p.path === path) ?? null)
             }
             onRename={(path, name) => renameProjectInList(path, name, projectsMachine)}
             onSetDefault={(path, isDefault) => setProjectDefault(path, isDefault, projectsMachine)}
+          />
+        ) : view === 'project' && homeProjectInfo ? (
+          <ProjectHomePage
+            project={homeProjectInfo}
+            isDefault={!!homeProject?.default}
+            api={projectHomeApi}
+            sessions={homeSessions}
+            cronJobs={homeCronJobs}
+            onBack={openProjects}
+            onStartChat={startHomeChat}
+            onOpenSession={openHomeSession}
+            onOpenScheduled={openScheduled}
+            onToggleCron={toggleHomeCron}
           />
         ) : view === 'scheduled' ? (
           <CronPage

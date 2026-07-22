@@ -755,7 +755,7 @@ wheels = [
 
 [[package]]
 name = "lumi"
-version = "0.2.64"
+version = "0.2.65"
 source = { editable = "." }
 dependencies = [
     { name = "apscheduler" },

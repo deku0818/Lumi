@@ -6,6 +6,7 @@ Property 8: 验证技能不存在时，错误信息包含传入的技能名称
 
 from __future__ import annotations
 
+from types import SimpleNamespace
 from unittest.mock import patch
 
 from hypothesis import given, settings
@@ -26,6 +27,11 @@ async def test_skill_error_contains_name(name: str) -> None:
     对任意字符串作为不存在的技能名：
     1. 调用 skill 工具应返回包含该名称的错误提示
     """
-    with patch("lumi.agents.tools.providers.skill.load_skills", return_value=[]):
-        result = await skill.ainvoke({"name": name})
+    runtime = SimpleNamespace(context=SimpleNamespace(project_dir=None))
+    # skill 工具经按项目缓存的 detector 取配置（lazy import），stub 掉实例获取
+    with patch(
+        "lumi.agents.core.preprocessing.skill_detector.SkillChangeDetector.get_instance",
+        return_value=SimpleNamespace(peek=list),
+    ):
+        result = await skill.coroutine(name=name, runtime=runtime)
         assert name in result, f"错误信息应包含技能名称 {name!r}，实际返回: {result!r}"

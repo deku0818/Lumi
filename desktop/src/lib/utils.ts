@@ -74,3 +74,10 @@ export function timeAgo(seconds: number, lang: string): string {
   if (Math.abs(hours) < 24) return rtf.format(hours, 'hour')
   return rtf.format(Math.round(hours / 24), 'day')
 }
+
+// gateway 对 error 帧 reject 的是 {message} 普通对象（Error 同样有 .message）——
+// 各处 catch 回显错误文本统一走这里
+export function errorMessage(e: unknown): string {
+  const m = (e as { message?: unknown })?.message
+  return typeof m === 'string' && m ? m : String(e)
+}

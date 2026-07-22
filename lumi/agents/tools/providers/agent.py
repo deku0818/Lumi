@@ -24,7 +24,6 @@ from lumi.agents.runtime.bg_tasks import (
     run_background_task,
 )
 from lumi.agents.runtime.shell_session import run_with_shell
-from lumi.agents.tools.loader import load_agents
 from lumi.utils.logger import logger
 from lumi.utils.read_config import get_config
 
@@ -88,11 +87,13 @@ async def agent(
         return f"已达到最大委派层数（{max_depth}），无法再委派子代理"
     child_depth = current_depth + 1
 
-    matched_configs = load_agents(name=name)
-    if not matched_configs:
-        return f"Agent '{name}' not found"
+    # 走按项目缓存的 detector（与上下文注入的 agent 列表同源），文件未变不重解析
+    from lumi.agents.core.preprocessing.agent_detector import AgentChangeDetector
 
-    agent_config = matched_configs[0]
+    agent_configs = AgentChangeDetector.get_instance(runtime.context.project_dir).peek()
+    agent_config = next((a for a in agent_configs if a.name == name), None)
+    if agent_config is None:
+        return f"Agent '{name}' not found"
 
     # 子代理工具：未达上限保留 agent 工具（可继续委派），到顶则剔除。
     # 项目随父 context 显式传递；get_tools 默认等冷池就位（子代理无轮首刷新可自愈）。

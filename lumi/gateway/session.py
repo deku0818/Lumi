@@ -19,9 +19,11 @@ import ntpath
 import os
 from contextlib import suppress
 from dataclasses import dataclass, field
+from pathlib import Path
 from typing import TYPE_CHECKING
 
 from lumi.agents.core.meta_message import declared_items
+from lumi.gateway import project_config
 from lumi.gateway.bridge import AgentBridge, EventKind
 from lumi.gateway.broadcast import BroadcastHub, serialize_bg_tasks
 from lumi.gateway.channel import Channel
@@ -407,6 +409,47 @@ async def _make_dir(session: GatewaySession, params: dict) -> dict:
         return {"ok": False, "error": str(e)}
 
 
+# 项目主页资源（prompts/skills/agents/memory）：纯文件操作，不经 bridge、不持锁。
+# 文件 IO 很小（配置级 md），直接同步执行（同 _list_dir 的做法）。
+async def _project_overview(session: GatewaySession, params: dict) -> dict:
+    return project_config.overview(Path(params.get("path", "")))
+
+
+async def _project_resource_read(session: GatewaySession, params: dict) -> dict:
+    return project_config.read_resource(
+        Path(params.get("path", "")),
+        params.get("kind", ""),
+        params.get("name", ""),
+        params.get("file", ""),
+    )
+
+
+async def _project_resource_write(session: GatewaySession, params: dict) -> dict:
+    return project_config.write_resource(
+        Path(params.get("path", "")),
+        params.get("kind", ""),
+        params.get("name", ""),
+        params.get("content", ""),
+        params.get("file", ""),
+    )
+
+
+async def _project_resource_delete(session: GatewaySession, params: dict) -> dict:
+    return project_config.delete_resource(
+        Path(params.get("path", "")),
+        params.get("kind", ""),
+        params.get("name", ""),
+    )
+
+
+async def _project_copy_builtin(session: GatewaySession, params: dict) -> dict:
+    return project_config.copy_builtin(
+        Path(params.get("path", "")),
+        params.get("kind", ""),
+        params.get("name", ""),
+    )
+
+
 # 改写本连接 engine 的边界，与运行中的轮次互斥
 async def _add_folder(session: GatewaySession, params: dict) -> dict:
     async with session._run.lock:
@@ -584,6 +627,11 @@ _RPC_HANDLERS = {
     "set_default_project": _set_default_project,
     "list_dir": _list_dir,
     "make_dir": _make_dir,
+    "project_overview": _project_overview,
+    "project_resource_read": _project_resource_read,
+    "project_resource_write": _project_resource_write,
+    "project_resource_delete": _project_resource_delete,
+    "project_copy_builtin": _project_copy_builtin,
     "add_folder": _add_folder,
     "remove_folder": _remove_folder,
     "list_sessions": _list_sessions_rpc,

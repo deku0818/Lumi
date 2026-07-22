@@ -6,16 +6,18 @@
 - .skills/skill_name/scripts/    可执行脚本
 """
 
-from __future__ import annotations
-
+# 注意：本模块**不能**加 `from __future__ import annotations`——它会把
+# `runtime: ToolRuntime` 变成字符串注解，LangGraph 的注入识别失效（同 agent.py 的约定，
+# 见回归测试 test_runtime_injected_via_toolnode）。
 import asyncio
 import re
 from pathlib import Path
 
 from langchain_core.tools import tool
+from langgraph.prebuilt.tool_node import ToolRuntime
 from pydantic import BaseModel, Field
 
-from lumi.agents.tools.loader import SkillConfig, _parse_md_file, load_skills
+from lumi.agents.tools.loader import SkillConfig
 from lumi.utils.logger import logger
 from lumi.utils.read_config import get_config
 
@@ -107,34 +109,6 @@ class SkillCommandExecutor:
 # ============================================================================
 
 
-def _get_skills_root() -> Path:
-    """获取 skills 根目录。"""
-    return get_config().skills_dir
-
-
-def _find_skill_source_dir(skill_name: str) -> Path | None:
-    """根据 skill 名称在 skills 根目录下查找对应的源目录。
-
-    遍历每个子目录的 SKILL.md，匹配 name 字段。
-    未找到返回 None。
-    """
-    skills_root = _get_skills_root()
-    if not skills_root.exists():
-        return None
-
-    for skill_dir in skills_root.iterdir():
-        if not skill_dir.is_dir():
-            continue
-        skill_file = skill_dir / "SKILL.md"
-        if not skill_file.exists():
-            continue
-        config = _parse_md_file(str(skill_file))
-        if config and config.get("name") == skill_name:
-            return skill_dir
-
-    return None
-
-
 def _get_skill_execution_config() -> dict[str, bool | float | int]:
     """获取技能嵌入式命令的执行配置。
 
@@ -206,17 +180,21 @@ class SkillInput(BaseModel):
 
 
 @tool(description=_SKILL_DESCRIPTION, args_schema=SkillInput)
-async def skill(name: str) -> str:
+async def skill(name: str, runtime: ToolRuntime) -> str:
     """根据名称查找并返回对应的技能提示词。"""
-    matched_skills: list[SkillConfig] = load_skills(name=name)
-    if not matched_skills:
+    # 走按项目缓存的 detector（与 bridge 的 /命令路径同源），文件未变不重解析
+    from lumi.agents.core.preprocessing.skill_detector import SkillChangeDetector
+
+    project_dir = runtime.context.project_dir
+    skills = SkillChangeDetector.get_instance(project_dir).peek()
+    skill_config: SkillConfig | None = next((s for s in skills if s.name == name), None)
+    if skill_config is None:
         return f"技能 '{name}' 不存在，请检查技能名称是否正确"
 
-    skill_config = matched_skills[0]
     prompt_content = skill_config.prompt
 
-    # 查找源目录并尝试执行嵌入式命令
-    source_dir = _find_skill_source_dir(skill_config.name)
+    # 源目录即胜出层 SKILL.md 所在目录（path 由 loader 落好，无需再扫）
+    source_dir = Path(skill_config.path).parent if skill_config.path else None
     if source_dir:
         try:
             prompt_content = await _execute_embedded_commands(

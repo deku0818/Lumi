@@ -54,7 +54,7 @@ def test_digest_determinism(agents: list[tuple[str, str]]) -> None:
         for name, content in agents:
             _create_agent_file(tmp_dir, name, content)
 
-        detector = AgentChangeDetector(agents_dir=tmp_dir)
+        detector = AgentChangeDetector(explicit_dir=tmp_dir)
         digest_a = detector._compute_digest()
         digest_b = detector._compute_digest()
 
@@ -74,7 +74,7 @@ def test_digest_sensitivity_on_size_change(agents: list[tuple[str, str]]) -> Non
         for name, content in agents:
             paths.append(_create_agent_file(tmp_dir, name, content))
 
-        detector = AgentChangeDetector(agents_dir=tmp_dir)
+        detector = AgentChangeDetector(explicit_dir=tmp_dir)
         digest_before = detector._compute_digest()
 
         target = paths[0]
@@ -96,7 +96,7 @@ def test_digest_sensitivity_on_mtime_change(agents: list[tuple[str, str]]) -> No
         for name, content in agents:
             paths.append(_create_agent_file(tmp_dir, name, content))
 
-        detector = AgentChangeDetector(agents_dir=tmp_dir)
+        detector = AgentChangeDetector(explicit_dir=tmp_dir)
         digest_before = detector._compute_digest()
 
         target = paths[0]
@@ -117,7 +117,7 @@ def test_cache_correctness_after_modification() -> None:
         tmp_dir = Path(tmp)
         _create_agent_file(tmp_dir, "alpha", "alpha 提示词")
 
-        detector = AgentChangeDetector(agents_dir=tmp_dir)
+        detector = AgentChangeDetector(explicit_dir=tmp_dir)
         assert "alpha" in {a.name for a in detector.peek()}
 
         # 新增一个 agent 文件

@@ -617,7 +617,13 @@ class FeishuInbound:
         """
         await self.channel.send_markdown(
             chat_id,
-            help_markdown(available_commands(memory_enabled=True, channel=True)),
+            help_markdown(
+                available_commands(
+                    memory_enabled=True,
+                    channel=True,
+                    workspace=self.channel.config.workspace,
+                )
+            ),
             reply_to=message_id,
             title="✨ Lumi · 可用命令",
         )

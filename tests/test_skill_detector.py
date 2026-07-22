@@ -64,7 +64,7 @@ def test_digest_determinism(skills: list[tuple[str, str]]) -> None:
         for name, content in skills:
             _create_skill_file(tmp_dir, name, content)
 
-        detector = SkillChangeDetector(skills_dir=tmp_dir)
+        detector = SkillChangeDetector(explicit_dir=tmp_dir)
         digest_a = detector._compute_digest()
         digest_b = detector._compute_digest()
 
@@ -87,7 +87,7 @@ def test_digest_sensitivity_on_size_change(skills: list[tuple[str, str]]) -> Non
             p = _create_skill_file(tmp_dir, name, content)
             paths.append(p)
 
-        detector = SkillChangeDetector(skills_dir=tmp_dir)
+        detector = SkillChangeDetector(explicit_dir=tmp_dir)
         digest_before = detector._compute_digest()
 
         # 修改第一个文件的内容（改变 size）
@@ -112,7 +112,7 @@ def test_digest_sensitivity_on_mtime_change(skills: list[tuple[str, str]]) -> No
             p = _create_skill_file(tmp_dir, name, content)
             paths.append(p)
 
-        detector = SkillChangeDetector(skills_dir=tmp_dir)
+        detector = SkillChangeDetector(explicit_dir=tmp_dir)
         digest_before = detector._compute_digest()
 
         # 修改第一个文件的 mtime（向过去偏移 10 秒）
@@ -178,7 +178,7 @@ def test_cache_correctness_no_change(
         for name, desc, content in skills:
             _create_skill_file_full(tmp_dir, name, desc, content)
 
-        detector = SkillChangeDetector(skills_dir=tmp_dir)
+        detector = SkillChangeDetector(explicit_dir=tmp_dir)
 
         skills_first = detector.peek()
         assert len(skills_first) == len(skills), (
@@ -207,7 +207,7 @@ def test_cache_correctness_after_modification(
             p = _create_skill_file_full(tmp_dir, name, desc, content)
             paths.append(p)
 
-        detector = SkillChangeDetector(skills_dir=tmp_dir)
+        detector = SkillChangeDetector(explicit_dir=tmp_dir)
         detector.peek()  # 建立缓存
 
         # 修改第一个文件的内容（改变 size 和 mtime）

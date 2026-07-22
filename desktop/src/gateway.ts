@@ -16,6 +16,9 @@ import type {
   McpTestResult,
   DiagnoseCheck,
   Project,
+  ProjectOverview,
+  ProjectResource,
+  ProjectResourceKind,
   ProviderProfile,
   RpcMethod,
   SessionMeta,
@@ -321,6 +324,46 @@ export class Gateway {
 
   setDefaultProject(path: string, isDefault: boolean): Promise<{ projects: Project[] }> {
     return this.request<{ projects: Project[] }>('set_default_project', { path, default: isDefault })
+  }
+
+  // ── 项目主页：按项目路径读写 prompts/skills/agents/memory（见 gateway/project_config.py）──
+  projectOverview(path: string): Promise<ProjectOverview> {
+    return this.request<ProjectOverview>('project_overview', { path })
+  }
+
+  projectResourceRead(
+    path: string,
+    kind: ProjectResourceKind,
+    name: string,
+    file = '',
+  ): Promise<ProjectResource> {
+    return this.request<ProjectResource>('project_resource_read', { path, kind, name, file })
+  }
+
+  projectResourceWrite(
+    path: string,
+    kind: ProjectResourceKind,
+    name: string,
+    content: string,
+    file = '',
+  ): Promise<{ ok: boolean; path: string }> {
+    return this.request('project_resource_write', { path, kind, name, content, file })
+  }
+
+  projectResourceDelete(
+    path: string,
+    kind: ProjectResourceKind,
+    name: string,
+  ): Promise<{ ok: boolean; restored_builtin: boolean }> {
+    return this.request('project_resource_delete', { path, kind, name })
+  }
+
+  projectCopyBuiltin(
+    path: string,
+    kind: ProjectResourceKind,
+    name: string,
+  ): Promise<{ ok: boolean; path: string }> {
+    return this.request('project_copy_builtin', { path, kind, name })
   }
 
   // 远程目录浏览器：在该连接所属机器上浏览/建目录

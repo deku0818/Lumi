@@ -283,7 +283,7 @@ async def create_agent(
         # 默认等冷池就位（cron 等单发调用方没有下一轮可自愈）；分层加载该项目的 MCP
         tools = await get_tools(project_dir=project_dir)
     if system_prompt is None:
-        system_prompt = config.load_system_prompt()
+        system_prompt = config.load_system_prompt(project_dir)
     if model_name is None:
         model_name = provider_store.resolve().model
 
