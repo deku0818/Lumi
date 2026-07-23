@@ -289,6 +289,115 @@ async def test_execute_job_timeout(scheduler: Scheduler, run_log: RunLog) -> Non
     assert record.output_summary == ""
 
 
+async def test_cancel_job_records_stopped(
+    scheduler: Scheduler, run_log: RunLog
+) -> None:
+    """用户中断运行中的任务：记为 stopped，且 record 照常出（uncancel 后投递不被打断）。"""
+    scheduler._execution_timeout = 10  # 够长，确保是 cancel 而非 timeout
+    job = _make_interval_job("stop-test")
+
+    started = asyncio.Event()
+
+    async def slow_invoke(*args, **kwargs):
+        started.set()
+        await asyncio.sleep(10)  # 会被 cancel 掐断
+        return {"messages": [MagicMock(content="不应到达")]}
+
+    mock_create = _mock_create_agent()
+    mock_create.return_value[0].graph.ainvoke = slow_invoke
+
+    with patch(_PATCH_CREATE_AGENT, mock_create):
+        await scheduler._run_job_task(job)
+        task = scheduler._running_tasks[job.id]
+        await started.wait()
+        assert scheduler.cancel_job(job.id) is True
+        record = await task
+
+    assert record.status == "stopped"
+    assert "中断" in record.error
+    # 中断落进执行日志（record 照常投递，未被残留取消打断）
+    runs = await run_log.get_recent(job.id, limit=1)
+    assert runs and runs[0].status == "stopped"
+    # 标记已清理，不残留
+    assert job.id not in scheduler._user_stopped_jobs
+
+
+async def test_cancel_job_not_running_returns_false(scheduler: Scheduler) -> None:
+    """没有运行中的该任务时，cancel_job 返回 False。"""
+    assert scheduler.cancel_job("nonexistent") is False
+
+
+async def test_stream_runner_used_and_thread_in_status(
+    job_store: JobStore, run_log: RunLog, delivery: DeliveryManager
+) -> None:
+    """注入 stream_runner 时走 runner（不走 ainvoke）；运行态广播带 cron- thread_id。"""
+    captured: list[list[dict]] = []
+    scheduler = Scheduler(
+        job_store=job_store,
+        run_log=run_log,
+        delivery=delivery,
+        on_job_status=captured.append,
+    )
+
+    async def fake_runner(prompt: str, thread_id: str) -> str:
+        assert thread_id.startswith("cron")
+        return f"ran:{prompt}"
+
+    scheduler.set_stream_runner(fake_runner)
+    job = _make_interval_job("stream-test")
+
+    record = await scheduler._execute_job(job)
+
+    assert record.status == "success"
+    assert record.output_summary == "ran:执行 stream-test"
+    assert record.thread_id.startswith("cron")
+    # 起始那次广播带着该 run 的 thread_id（前端据此显示活条目）
+    assert any(runs and runs[0]["thread_id"].startswith("cron") for runs in captured)
+    # 结束时清空
+    assert captured[-1] == []
+
+
+async def test_stream_runner_error_records_failed(
+    job_store: JobStore, run_log: RunLog, delivery: DeliveryManager
+) -> None:
+    """流式 runner 抛错（cron_stream 检测到 ERROR 事件后补抛）→ 如实记 failed。"""
+    scheduler = Scheduler(job_store=job_store, run_log=run_log, delivery=delivery)
+
+    async def failing_runner(prompt: str, thread_id: str) -> str:
+        raise RuntimeError("boom")
+
+    scheduler.set_stream_runner(failing_runner)
+    record = await scheduler._execute_job(_make_interval_job("fail-stream"))
+
+    assert record.status == "failed"
+    assert "boom" in record.error
+
+
+async def test_run_job_task_skips_concurrent_same_job(scheduler: Scheduler) -> None:
+    """同 job 已在跑时再触发（如 run_cron_job 撞调度）应跳过，不新建并发 task。"""
+    started = asyncio.Event()
+
+    async def slow_runner(prompt: str, thread_id: str) -> str:
+        started.set()
+        await asyncio.sleep(10)
+        return "x"
+
+    scheduler.set_stream_runner(slow_runner)
+    job = _make_interval_job("concurrent")
+
+    await scheduler._run_job_task(job)
+    await started.wait()
+    assert len(scheduler._running_tasks) == 1
+
+    await scheduler._run_job_task(job)  # 同 job 再触发 → 跳过
+    assert len(scheduler._running_tasks) == 1
+
+    for task in list(scheduler._running_tasks.values()):
+        task.cancel()
+        with pytest.raises(asyncio.CancelledError):
+            await task
+
+
 async def test_execute_job_failure(scheduler: Scheduler) -> None:
     """_execute_job() Agent 执行异常应返回 failed 状态。"""
     job = _make_interval_job("fail-test")

@@ -22,7 +22,7 @@
       "payload": { "job_id": "string", "job_name": "string", "status": "string", "output": "string", "started_at": "string", "duration_ms": "number", "thread_id": "string" },
       "note": "定时任务完成一次执行，由 DesktopDelivery 直接广播（不经 EventKind）。thread_id 为空表示本次执行无可跳转会话（无 checkpointer / 已被保留策略清理）"
     },
-    "cron.running": { "payload": { "job_ids": "string[]" }, "note": "当前正在执行的任务 id 列表（进程级快照），开始/结束时推送；前端按机器分段存放" },
+    "cron.running": { "payload": { "runs": "{job_id,thread_id,started_at}[]" }, "note": "当前正在执行的 run 快照（进程级），开始/结束时推送；每条含 thread_id（非空可点进观测直播）+ started_at。前端按机器分段存放，派生运行中 job_ids 标指示、并在执行记录顶部显示活条目" },
     "cron.jobs": { "payload": {}, "note": "任务增删改（agent 工具或 desktop UI）后由 JobStore 广播的信号，前端据此重拉 list_cron_jobs（跨机器 fan-out），无需手动刷新" },
     "bg_tasks.update": { "payload": { "tasks": "BgTask[]" }, "note": "后台任务（bash/agent/workflow）状态或进度变更，广播全量快照，前端按 thread_id 过滤；task 含 kind/status/output_file/progress" },
     "channel.activity": { "payload": { "thread_id": "string", "channel": "string" }, "note": "IM 渠道会话跑完一轮，由 BroadcastHub 直接广播（不经 EventKind）；desktop 据此刷新会话列表，正在旁观该会话时重载历史" },
@@ -73,6 +73,7 @@
     "delete_cron_job": { "params": ["job_id"], "result": ["job_id"] },
     "toggle_cron_job": { "params": ["job_id", "enabled"], "result": ["job"] },
     "run_cron_job": { "params": ["job_id"], "result": ["ok"], "note": "异步触发，结果经 cron.result 推送" },
+    "stop_cron_run": { "params": ["job_id"], "result": ["stopped"], "note": "中断该任务正在进行的执行；stopped=是否确有一次运行被取消。取消后现场经 checkpoint 保留可续聊，run 记为 status=stopped" },
     "list_cron_runs": { "params": ["job_id", "limit?"], "result": ["runs"], "note": "run 含 thread_id（非空时可经 switch_session 跳转该次执行的会话续聊）" },
     "list_bg_tasks": { "params": [], "result": ["tasks"], "note": "后台任务全量快照（bash/agent/workflow），前端按当前 thread_id 过滤；亦经 bg_tasks.update 事件实时推送" },
     "stop_bg_task": { "params": ["task_id"], "result": ["stopped", "error?"], "note": "停止运行中的后台任务（drawer 详情停止按钮）" },

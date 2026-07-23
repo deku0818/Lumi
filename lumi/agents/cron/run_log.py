@@ -27,7 +27,7 @@ class RunRecord:
         job_name: 任务名称。
         started_at: 执行开始时间。
         finished_at: 执行结束时间。
-        status: 执行状态（success/failed/timeout）。
+        status: 执行状态（success/failed/timeout/stopped）。
         duration_ms: 执行耗时（毫秒）。
         output_summary: 输出摘要，截取前 500 字符。
         error: 错误信息，成功时为空字符串。
@@ -39,7 +39,7 @@ class RunRecord:
     job_name: str
     started_at: datetime
     finished_at: datetime
-    status: Literal["success", "failed", "timeout"]
+    status: Literal["success", "failed", "timeout", "stopped"]
     duration_ms: int
     output_summary: str
     error: str = ""

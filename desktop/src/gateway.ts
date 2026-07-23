@@ -457,6 +457,10 @@ export class Gateway {
     return this.request<{ ok: boolean }>('run_cron_job', { job_id: jobId })
   }
 
+  stopCronRun(jobId: string): Promise<{ stopped: boolean }> {
+    return this.request<{ stopped: boolean }>('stop_cron_run', { job_id: jobId })
+  }
+
   listCronRuns(jobId: string, limit = 20): Promise<{ runs: CronRun[] }> {
     return this.request<{
       runs: CronRun[]

@@ -509,15 +509,22 @@ function RunStatusMark({ run, unread }: { run: CronRun; unread?: boolean }) {
   return unread ? <span className="size-1.5 rounded-full bg-info shrink-0" /> : null
 }
 
+// 执行记录卡片左侧的时刻（主）+ 日期（次）列，完成条目与运行中活条目共用。
+function RunTimeCol({ startedAt, lang }: { startedAt: string; lang: string }) {
+  const { date, time } = runParts(startedAt, lang)
+  return (
+    <div className="flex-1 min-w-0">
+      <div className="text-sm font-semibold tabular-nums leading-tight">{time}</div>
+      <div className="text-[11px] text-muted-foreground truncate mt-0.5">{date}</div>
+    </div>
+  )
+}
+
 // 执行记录卡片的行内容（时刻为主 + 日期为次 + 耗时 + 状态标记），RunsRail / RunList 共用。
 function RunRowInner({ run, lang, unread }: { run: CronRun; lang: string; unread?: boolean }) {
-  const { date, time } = runParts(run.started_at, lang)
   return (
     <>
-      <div className="flex-1 min-w-0">
-        <div className="text-sm font-semibold tabular-nums leading-tight">{time}</div>
-        <div className="text-[11px] text-muted-foreground truncate mt-0.5">{date}</div>
-      </div>
+      <RunTimeCol startedAt={run.started_at} lang={lang} />
       <span className="text-[11px] text-muted-foreground tabular-nums shrink-0">
         {(run.duration_ms / 1000).toFixed(0)}s
       </span>
@@ -535,6 +542,7 @@ export function RunsRail({
   activeThread,
   readRuns,
   version,
+  liveRuns = [],
   onPick,
   width,
 }: {
@@ -543,12 +551,17 @@ export function RunsRail({
   activeThread: string | null
   readRuns: Record<string, true>
   version: number
+  liveRuns?: { thread_id: string; started_at: string }[]
   onPick: (threadId: string) => void
   width: number
 }) {
   const { t, lang } = useI18n()
   const runs = useCronRuns(api, jobId, version, 50)
   const [collapsed, setCollapsed] = useState(false)
+  // 运行中的 run 已完成日志尚未落，故从 liveRuns 单独在顶部渲染活条目；一旦该次跑完
+  // 进入 runs（同 thread_id），就从活条目里去掉，避免与完成条目重复。
+  const doneThreads = new Set((runs ?? []).map((r) => r.thread_id))
+  const live = liveRuns.filter((r) => !doneThreads.has(r.thread_id))
 
   return (
     <aside style={{ width: width + FLOAT_GAP * 2 }} className="relative shrink-0">
@@ -583,7 +596,27 @@ export function RunsRail({
               滚动与内边距归内层 */}
           <div className="overflow-hidden">
             <div className="h-full overflow-auto px-2.5 pb-2.5 flex flex-col gap-2.5">
-              {runs?.length === 0 && (
+              {/* 运行中的活条目：置顶、转圈、可点进观测直播；跑完后转为下方的完成条目 */}
+              {live.map((r) => {
+                const active = r.thread_id === activeThread
+                return (
+                  <button
+                    key={r.thread_id}
+                    onClick={() => onPick(r.thread_id)}
+                    className={cn(
+                      CARD_L2,
+                      'w-full flex items-center gap-2.5 px-3 py-2.5 text-left transition',
+                      active
+                        ? 'border-primary/45 bg-primary/[0.08]'
+                        : 'hover:bg-surface/70 hover:border-primary/30',
+                    )}
+                  >
+                    <RunTimeCol startedAt={r.started_at} lang={lang} />
+                    <Loader2 size={13} className="shrink-0 animate-spin text-primary" />
+                  </button>
+                )
+              })}
+              {runs?.length === 0 && live.length === 0 && (
                 <div className="px-0.5 py-3 text-xs text-muted-foreground">{t('cron.noRuns')}</div>
               )}
               {(runs ?? []).map((r) => {

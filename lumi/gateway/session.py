@@ -49,7 +49,7 @@ from lumi.utils.constants import (
     NOTIFICATION_POLL_INTERVAL,
 )
 from lumi.utils.logger import logger
-from lumi.utils.thread_id import generate_thread_id
+from lumi.utils.thread_id import generate_thread_id, is_cron_thread
 
 if TYPE_CHECKING:
     from lumi.gateway.session_registry import SessionRegistry
@@ -510,6 +510,13 @@ async def _switch_session(session: GatewaySession, params: dict) -> dict:
             bound_this_call = True
         if changing_thread and not bound_this_call:
             session._bridge.mark_workspace_unbound()
+    # cron 执行直播：切到 cron 线程即登记为其观测者，运行中则实时收到事件流。非 cron
+    # 线程不登记（避免给每条普通会话空起 drain task）；已完成的 cron 线程也会登记一个空转
+    # 观测者（成本 = 一个 await queue.get 阻塞的协程，可忽略），切走/关闭即注销。
+    if changing_thread:
+        session._hub.remove_observer_channel(session._channel)
+        if is_cron_thread(tid):
+            session._hub.add_observer(tid, session._channel)
     return {"thread_id": tid}
 
 
@@ -836,6 +843,7 @@ class GatewaySession:
             self._ttl_task.cancel()
             self._ttl_task = None
         self._hub.unregister(self._channel)
+        self._hub.remove_observer_channel(self._channel)  # cron 直播观测者注销
         if self._notif_task is not None:
             self._notif_task.cancel()
             with suppress(asyncio.CancelledError):

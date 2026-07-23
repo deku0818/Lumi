@@ -61,7 +61,7 @@ export interface WireEventPayloads extends Record<WireEventType, object> {
     duration_ms: number
     thread_id: string // 空串=本次执行无可跳转会话（无 checkpointer / 已被清理）
   }
-  'cron.running': { job_ids: string[] }
+  'cron.running': { runs: { job_id: string; thread_id: string; started_at: string }[] }
   'bg_tasks.update': { tasks: BgTask[] }
   'channel.activity': { thread_id: string; channel: string }
   'session.title': { thread_id: string; title: string }

@@ -23,6 +23,7 @@ CRON_METHODS = frozenset(
         "delete_cron_job",
         "toggle_cron_job",
         "run_cron_job",
+        "stop_cron_run",
         "list_cron_runs",
     }
 )
@@ -110,6 +111,10 @@ async def dispatch_cron(method: str, params: dict) -> dict:
     if method == "run_cron_job":
         await service.trigger(params.get("job_id", ""))
         return {"ok": True}
+
+    if method == "stop_cron_run":
+        stopped = service.stop(params.get("job_id", ""))
+        return {"stopped": stopped}
 
     # list_cron_runs
     records = await service.recent_runs(

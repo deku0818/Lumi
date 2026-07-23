@@ -27,12 +27,16 @@ async def test_cron_job_status_broadcasts_running():
     ch = _FakeChannel()
     hub.register(ch)
 
-    hub.on_cron_job_status(["job-a", "job-b"])
+    runs = [
+        {"job_id": "job-a", "thread_id": "cron-a", "started_at": "2026-07-23T00:00:00"},
+        {"job_id": "job-b", "thread_id": "cron-b", "started_at": "2026-07-23T00:01:00"},
+    ]
+    hub.on_cron_job_status(runs)
     await asyncio.sleep(0.01)  # 让 fire-and-forget 广播 task 执行
 
     events = _events_of(ch, "cron.running")
     assert len(events) == 1
-    assert events[0]["params"]["payload"]["job_ids"] == ["job-a", "job-b"]
+    assert events[0]["params"]["payload"]["runs"] == runs
 
 
 async def test_bg_task_change_is_debounced():

@@ -88,6 +88,10 @@ class CronService:
         await self._scheduler.trigger(job.id)
         return job
 
+    def stop(self, job_id: str) -> bool:
+        """中断该任务正在进行的执行。返回是否确有一次运行被中断。"""
+        return self._scheduler.cancel_job(job_id)
+
     async def get_all(self) -> list[Job]:
         """获取所有任务。"""
         return await self._job_store.get_all()

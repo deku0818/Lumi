@@ -12,6 +12,7 @@ from collections.abc import Callable
 
 from lumi.agents.runtime.bg_tasks import get_task_registry, serialize_task
 from lumi.gateway.desktop_delivery import DesktopDelivery
+from lumi.gateway.observers import ThreadObserverHub
 
 
 def serialize_bg_tasks() -> list[dict]:
@@ -33,6 +34,9 @@ class BroadcastHub:
         self._tasks: set[asyncio.Task] = set()
         self._bg_dirty = False
         self._bg_flush_scheduled = False
+        # cron 执行直播：thread_id → 观测者。cron runner 经 publish_thread_event 扇事件，
+        # 桌面打开运行中的 cron 线程时经 add_observer 订阅（见 GatewaySession）。
+        self._observers = ThreadObserverHub()
 
     @property
     def delivery(self) -> DesktopDelivery:
@@ -53,9 +57,31 @@ class BroadcastHub:
         self._tasks.add(task)
         task.add_done_callback(self._tasks.discard)
 
-    def on_cron_job_status(self, job_ids: list[str]) -> None:
-        """Scheduler 同步回调：把运行中任务 id 列表广播为 cron.running 事件。"""
-        self._spawn(self._delivery.send_event("cron.running", {"job_ids": job_ids}))
+    def on_cron_job_status(self, runs: list[dict]) -> None:
+        """Scheduler 同步回调：广播运行中任务快照为 cron.running。
+
+        每条含 ``{job_id, thread_id, started_at}``——前端据此既标「运行中」job，也在
+        执行记录顶部显示可点进观测的活条目（thread_id 非空时）。
+        """
+        self._spawn(self._delivery.send_event("cron.running", {"runs": runs}))
+
+    # -- cron 执行直播：观测者登记 + 事件发布 --
+
+    def add_observer(self, thread_id: str, channel) -> None:
+        """桌面打开运行中的 cron 线程时登记为观测者。"""
+        self._observers.add(thread_id, channel)
+
+    def remove_observer_channel(self, channel) -> None:
+        """连接关闭：从所有 thread 注销该 channel。"""
+        self._observers.remove_channel(channel)
+
+    def has_observers(self, thread_id: str) -> bool:
+        """该 thread 是否有观测者——runner 据此短路 bridge_event_to_wire，零观测者不白建帧。"""
+        return self._observers.has_observers(thread_id)
+
+    def publish_thread_event(self, thread_id: str, frame: dict) -> None:
+        """cron runner 逐事件发布到该 thread 的观测者（非阻塞、满即丢）。"""
+        self._observers.publish(thread_id, frame)
 
     def on_cron_jobs_changed(self) -> None:
         """JobStore 同步回调：任务增删改后广播 cron.jobs，前端据此重拉任务列表。

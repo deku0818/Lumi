@@ -28,7 +28,7 @@ from lumi.agents.memory import dream_lock
 from lumi.agents.memory.normalize import normalize_memory_index
 from lumi.utils.logger import logger
 from lumi.utils.read_config import get_config
-from lumi.utils.thread_id import is_channel_thread
+from lumi.utils.thread_id import is_channel_thread, is_cron_thread
 
 if TYPE_CHECKING:
     # 仅类型注解（本模块有 `from __future__ import annotations`，注解为字符串、运行时不求值）。
@@ -54,6 +54,10 @@ async def auto_dream_stop_hook(ctx: HookContext) -> HookResult:
     # 「N 个新会话」的增量门语义；改由渠道每日定时统一 dream + summary（见 feishu channel）。
     thread_id = (ctx.config.get("configurable") or {}).get("thread_id", "")
     if is_channel_thread(thread_id):
+        return None
+    # cron 执行线程不自主触发 Stop dream（自动任务不复盘自己；人类聊天触发的 dream 仍会
+    # 连带综合近期 cron 会话，见方案 A）。与 channel 线程同构的类型闸。
+    if is_cron_thread(thread_id):
         return None
     runtime = ctx.runtime
     if runtime is None:

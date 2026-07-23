@@ -41,6 +41,11 @@ async def gateway_process():
         # 任务增删改（agent 工具 / desktop UI 两条路都经此 store）→ 广播 cron.jobs，
         # 驱动前端实时刷新列表，无需手动 Ctrl+R
         cron_runtime.job_store.set_on_change(hub.on_cron_jobs_changed)
+        # cron 执行走 AgentBridge 流式 runner：产出事件 publish 给观测者（桌面打开运行中的
+        # cron 线程即实时看到流）。未注入时 Scheduler fallback 到 ainvoke（TUI / 测试）。
+        from lumi.gateway.cron_stream import build_cron_stream_runner
+
+        cron_runtime.scheduler.set_stream_runner(build_cron_stream_runner(hub))
         set_cron_runtime(cron_runtime)
         await cron_runtime.scheduler.start()
         logger.info("[gateway] 定时任务子系统已启动")

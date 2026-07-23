@@ -1,5 +1,15 @@
 # Changelog
 
+## [0.2.70] - 2026-07-23
+
+### Added
+- **定时任务执行实时观测 + 中断** — cron 执行现在改走 AgentBridge 流式：一开跑，「执行记录」顶部就冒出一条转圈的活条目，点进去像普通聊天一样**实时看到流**（思考/工具/正文逐步渲染，与聊天同一套渲染）；观测期间只读（输入禁用），输入框显示**停止键**可随时中断（`stop_cron_run` 按 job_id 取消，现场经 checkpoint 保留、可续聊），跑完转 idle 即可续聊。观测走新的按 thread 的 pub/sub（有界队列满即丢，**慢观测者绝不背压 run**、零观测者照常跑）。
+- 新增 WS 方法 `stop_cron_run` + 事件 `cron.running` 携带 `{job_id, thread_id, started_at}`（前端据此显示活条目）。
+
+### Changed
+- **cron 执行一等会话化** — 由裸 `ainvoke` 改为经 AgentBridge（网关经依赖注入提供 runner，`agents/cron` 不反向依赖 `gateway`）：自动获得 `workspace_dir` metadata、持久记忆（`enable_memory=True`，共享项目记忆、运行中主动写）。cron 线程**不自主触发 autoDream**（人类聊天触发时仍连带综合），与 IM 渠道线程同构的类型闸。
+- 定时任务失败判定修正：流式路径下 graph 出错如实记 `failed`（此前被 `stream_response` 吞成 ERROR 事件而误记 success、且不重试）；中断改按 `job_id` 引用取消（不再靠 task 名字符串匹配）。
+
 ## [0.2.69] - 2026-07-23
 
 ### Fixed

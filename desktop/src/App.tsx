@@ -401,6 +401,11 @@ export default function App() {
   const [projectHome, setProjectHome] = useState<{ backend: string; path: string } | null>(null)
   // 运行中任务：机器 → 该机器正在执行的 job id。按机器分段——每台机器各发各的进程级快照
   const [cronRunning, setCronRunning] = useState<Record<string, string[]>>({})
+  // 运行中的 run（含 thread_id）：机器 → 活条目。cronRunning 从这里派生，另供执行记录
+  // 顶部显示可点进观测的活条目、以及观测视图的运行态门控
+  const [cronActiveRuns, setCronActiveRuns] = useState<
+    Record<string, { job_id: string; thread_id: string; started_at: string }[]>
+  >({})
   const [cronVersion, setCronVersion] = useState(0) // 递增触发 cron 数据刷新
   const [cronJobs, setCronJobs] = useState<CronJob[]>([]) // 侧栏任务分组数据
   const [activeCronJob, setActiveCronJob] = useState<string | null>(null) // 任务会话视图当前任务
@@ -497,6 +502,14 @@ export default function App() {
   const running = cur?.running ?? false
   const thinkingText = cur?.thinkingText ?? ''
   const compacting = cur?.compacting ?? false
+  // 观测中的运行中 cron run：当前视图正看着一条仍在执行的 cron 线程（cron.running 为
+  // 权威来源）。观测期间只读（输入禁用）+ 显示停止键；停止调 stopCronRun（run 在调度器
+  // 里、不在本会话 bridge，普通 stop 掐不到）。跑完从 cron.running 移除 → 转 idle 可续聊。
+  const liveRun =
+    view === 'cronjob' && cronRunThread
+      ? (cronActiveRuns[activeBackend] ?? []).find((r) => r.thread_id === cronRunThread)
+      : undefined
+  const observingCronRun = !!liveRun
   // 渲染队首（最早挂起的那条）；应答后出队，下一条自动浮现
   const approval = cur?.approval?.[0] ?? null
   const clarify = cur?.clarify?.[0] ?? null
@@ -547,8 +560,18 @@ export default function App() {
       // 进程级快照，只替换发来那台机器的那一段（别把其他机器的运行态抹了）。
       // 本机同一份快照会经会话连接 + 控制连接各来一次，内容没变就保持引用不动，
       // 否则每次都换新对象、把 memo 化的 Sidebar 白拖着重渲染一遍
+      const runs = payload.runs ?? []
+      // 本机同一份快照经会话连接 + 控制连接各来一次，内容没变就保持引用不动，
+      // 避免白触发 RunsRail / observingCronRun 消费方重渲染（同 cronRunning 的去重）
+      setCronActiveRuns((prev) => {
+        const cur = prev[backend]
+        const same =
+          cur?.length === runs.length &&
+          cur.every((r, i) => r.thread_id === runs[i].thread_id && r.job_id === runs[i].job_id)
+        return same ? prev : { ...prev, [backend]: runs }
+      })
       setCronRunning((prev) => {
-        const next = payload.job_ids ?? []
+        const next = runs.map((r) => r.job_id)
         const cur = prev[backend]
         const same = cur?.length === next.length && cur.every((v, i) => v === next[i])
         return same ? prev : { ...prev, [backend]: next }
@@ -1154,6 +1177,7 @@ export default function App() {
   // 各自重新拉一份，故清空是安全的。
   const clearMachineSnapshots = useCallback((backend: string) => {
     setCronRunning((r) => (r[backend]?.length ? { ...r, [backend]: [] } : r))
+    setCronActiveRuns((r) => (r[backend]?.length ? { ...r, [backend]: [] } : r))
     setBgTasks((prev) =>
       prev.some((t) => beOf(t) === backend) ? replaceBackendTasks(prev, backend, []) : prev,
     )
@@ -1976,6 +2000,12 @@ export default function App() {
     connsRef.current[active]?.stop().catch(() => {})
   }
 
+  // 观测视图中断运行中的 cron run：调 stopCronRun（按 job_id 取消调度器里的执行），
+  // 而非普通会话 stop（run 不在本会话 bridge 里）。
+  const stopObservedRun = () => {
+    if (liveRun) gwForBackend(activeBackend)?.stopCronRun(liveRun.job_id).catch(() => {})
+  }
+
   const resumeWith = (value: unknown, clear: 'approval' | 'clarify') => {
     // 应答队首：approval_id 取自队首挂起项回发给在途审批 Broker，并乐观出队（下一条浮现）。
     const queue = storeRef.current[active]?.[clear] ?? []
@@ -2222,7 +2252,7 @@ export default function App() {
         onChange={onComposerChange}
         onKeyDown={onComposerKey}
         onPaste={onPasteImages}
-        disabled={conn !== 'open'}
+        disabled={conn !== 'open' || observingCronRun}
         placeholder={placeholder}
         highlightLen={cmdToken.length}
         inputRef={inputRef}
@@ -2274,11 +2304,11 @@ export default function App() {
         <div className="flex items-center gap-1.5">
           {/* 项目模式无活动会话：不读 cur.ctx（免后台流式 token 触发项目页重渲染），整块不渲染 */}
           {!project && <ContextMeter usage={cur?.ctx} window={contextWindow} model={model} />}
-          {!project && running && !approval && !clarify ? (
+          {!project && (running || observingCronRun) && !approval && !clarify ? (
             <Button
               size="icon"
               variant="destructive"
-              onClick={stop}
+              onClick={observingCronRun ? stopObservedRun : stop}
               aria-label={t('composer.stop')}
               className="rounded-full"
             >
@@ -2516,7 +2546,7 @@ export default function App() {
                           保持显示等待态，完成后退化为无文字的静止光点 */}
                       <StatusIndicator
                         items={items}
-                        running={running}
+                        running={running || observingCronRun}
                         waiting={!!(approval || clarify)}
                         streaming={streaming}
                         thinkingText={thinkingText}
@@ -2603,6 +2633,9 @@ export default function App() {
             activeThread={cronRunThread}
             readRuns={readRuns}
             version={cronVersion}
+            liveRuns={(cronActiveRuns[cronBackendOf(activeCronJob)] ?? []).filter(
+              (r) => r.job_id === activeCronJob && r.thread_id,
+            )}
             onPick={(tid) => void openRunThread(tid, cronBackendOf(activeCronJob))}
             width={runsRailW.width}
           />

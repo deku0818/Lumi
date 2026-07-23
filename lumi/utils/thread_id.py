@@ -35,6 +35,11 @@ def is_channel_thread(thread_id: str) -> bool:
     return thread_id.startswith(_CHANNEL_THREAD_PREFIXES)
 
 
+def is_cron_thread(thread_id: str) -> bool:
+    """是否是 cron 执行线程（``cron-`` 前缀）。观测直播 / dream 分流据此判定。"""
+    return thread_id.startswith(CRON_THREAD_PREFIX)
+
+
 class InvalidThreadIdError(ValueError):
     """无效的 thread_id 错误"""
 
