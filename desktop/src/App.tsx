@@ -17,7 +17,6 @@ import {
   Send,
   X,
   PanelLeft,
-  PanelRight,
   type LucideIcon,
 } from 'lucide-react'
 import { Gateway, type ConnState } from './gateway'
@@ -46,9 +45,10 @@ import { ApprovalDialog } from './components/ApprovalDialog'
 import { ClarifyDialog, ASK_CANCELLED } from './components/ClarifyDialog'
 import { Sidebar } from './components/Sidebar'
 import { FileCards, PreviewPanel, parsePresentedFiles } from './components/PresentedFiles'
-import { BgTasksDrawer } from './components/BgTasksDrawer'
-import { CronPage, RunsRail } from './components/CronPage'
-import { ResizeHandle, useResizableWidth } from './components/ResizeHandle'
+import { BgTasksSection } from './components/BgTasksDrawer'
+import { CronPage, RunsSection } from './components/CronPage'
+import { RightRail } from './components/RightRail'
+import { ResizeHandle, usePersistedFlag, useResizableWidth } from './components/ResizeHandle'
 import { ConfirmDialog } from './components/ConfirmDialog'
 import { SettingsDialog } from './components/SettingsDialog'
 import { ModelPicker } from './components/ModelPicker'
@@ -383,18 +383,17 @@ export default function App() {
   const [attachments, setAttachments] = useState<Attachment[]>([])
   // 主区视图：聊天 / 项目管理页 / 定时任务管理页 / 任务会话视图（某任务的某次执行对话 + Runs 侧栏）
   const [bgTasks, setBgTasks] = useState<BgTask[]>([]) // 后台任务全量快照（按 thread 过滤展示）
-  const [bgDrawerOpen, setBgDrawerOpen] = useState(false) // 后台任务右栏开关（默认关，有任务时头部出现 PanelRight）
   const [preview, setPreview] = useState<PresentedFile | null>(null) // present_files 右侧预览面板（null=关）
-  // 可拖拽边栏宽度（持久化）：左侧会话栏 + 三个右侧栏（后台任务 / 任务执行记录 / 文件预览）
+  // 可拖拽边栏宽度（持久化）：左侧会话栏 + 统一右栏 + 文件预览
   const sidebarW = useResizableWidth('lumi-sidebar-width', 256, 200, 420)
-  // 悬浮侧栏展开/收起（持久化）；onToggle 身份稳定，配合 Sidebar 的 memo
-  const [sidebarOpen, setSidebarOpen] = useState(() => localStorage.getItem('lumi-sidebar-open') !== '0')
-  const toggleSidebar = useCallback(() => setSidebarOpen((o) => !o), [])
-  useEffect(() => {
-    localStorage.setItem('lumi-sidebar-open', sidebarOpen ? '1' : '0')
-  }, [sidebarOpen])
-  const bgRailW = useResizableWidth('lumi-bg-width', 340, 280, 560)
-  const runsRailW = useResizableWidth('lumi-runs-width', 240, 180, 400)
+  // 悬浮侧栏展开/收起（持久化）
+  const [sidebarOpen, toggleSidebar] = usePersistedFlag('lumi-sidebar-open')
+  // 统一右栏（执行记录/后台任务模块）开合：chat 与 cronjob 视图共用一份状态与宽度，
+  // 收起在哪个视图都保持收起——对用户而言它是同一个部件
+  const [railOpen, toggleRail] = usePersistedFlag('lumi-rail-open')
+  // 与左侧栏同参（默认 256、拖拽 200-420），左右观感对称；键名带 v2 让早期 320 的
+  // 旧存值失效回默认（旧键 lumi-rail-width 未发布过，只存在于开发机）
+  const railW = useResizableWidth('lumi-rail-width-v2', 256, 200, 420)
   const previewW = useResizableWidth('lumi-preview-width', 520, 360, 920)
   const [view, setView] = useState<'chat' | 'projects' | 'project' | 'scheduled' | 'cronjob'>('chat')
   // 项目主页当前查看的项目（view='project' 时有效）
@@ -562,7 +561,7 @@ export default function App() {
       // 否则每次都换新对象、把 memo 化的 Sidebar 白拖着重渲染一遍
       const runs = payload.runs ?? []
       // 本机同一份快照经会话连接 + 控制连接各来一次，内容没变就保持引用不动，
-      // 避免白触发 RunsRail / observingCronRun 消费方重渲染（同 cronRunning 的去重）
+      // 避免白触发 RunsSection / observingCronRun 消费方重渲染（同 cronRunning 的去重）
       setCronActiveRuns((prev) => {
         const cur = prev[backend]
         const same =
@@ -1038,9 +1037,8 @@ export default function App() {
   }, [bgTasks, active])
   const hasRunningBg = activeBgTasks.some((tk) => tk.status === 'running')
   const isMacTitleBar = (window.lumi.platform ?? 'win32') === 'darwin'
-  const showBgTaskToggle = view === 'chat' && activeBgTasks.length > 0
   // 侧栏收起时也保留顶条：给浮钮组（展开/新对话）让出高度，避免盖住页面内容
-  const showTopStrip = isMacTitleBar || showBgTaskToggle || !sidebarOpen
+  const showTopStrip = isMacTitleBar || !sidebarOpen
 
   // 跨机器 fan-out：对每台机器的控制连接各拉一次 list_sessions，打上机器标记后合并。
   // 某机器离线只跳过它，不影响其它机器（方案甲多机并存的合并列表）。
@@ -1735,7 +1733,7 @@ export default function App() {
     (jobId: string) => cronJobsRef.current.find((j) => j.id === jobId)?.backend || 'local',
     [],
   )
-  // RunsRail 的 api 必须稳定引用（仅随当前任务变化）：内联箭头会让 useCronRuns 在主对话
+  // RunsSection 的 api 必须稳定引用（仅随当前任务变化）：内联箭头会让 useCronRuns 在主对话
   // 流式期间每个 token 都重拉 list_cron_runs。
   const runsRailApi = useCallback(
     () => gwForBackend(cronBackendOf(activeCronJob ?? '')),
@@ -1764,7 +1762,7 @@ export default function App() {
       setView('cronjob')
       setActiveCronJob(jobId)
       // auto-open 最近一次有会话的执行：run_threads 已是倒序的可跳转 run，取头即可
-      // （RunsRail 自己拉完整列表，这里不必再走一趟 listCronRuns）。
+      // （RunsSection 自己拉完整列表，这里不必再走一趟 listCronRuns）。
       // 未读随「点开即标已读」自然消：这条经 openRunThread 标记，其余留待逐条点开
       const job = cronJobsRef.current.find((j) => j.id === jobId)
       const tid = threadId ?? job?.run_threads?.[0]
@@ -2356,6 +2354,31 @@ export default function App() {
     ],
   )
 
+  // ── 统一右栏派生量（布尔量廉价，每渲染重算即可；数组 memo 是为 RunsSection 的 memo 不被击穿）──
+  // 当前定时任务的直播执行：喂 RunsSection 活条目 + 收起态脉冲点
+  const cronLiveRuns = useMemo(
+    () =>
+      view === 'cronjob' && activeCronJob
+        ? (cronActiveRuns[cronBackendOf(activeCronJob)] ?? []).filter(
+            (r) => r.job_id === activeCronJob && r.thread_id,
+          )
+        : [],
+    [view, activeCronJob, cronActiveRuns, cronBackendOf],
+  )
+  const pickRun = useCallback(
+    (tid: string) => void openRunThread(tid, cronBackendOf(activeCronJob ?? '')),
+    [openRunThread, cronBackendOf, activeCronJob],
+  )
+  // cron 视图里后台任务模块只在「当前会话确实是本任务的某次执行」时显示：任务还没跑过
+  // （run_threads 空）时 active 仍指向先前的聊天会话，不加此闸会把无关会话的后台任务
+  // 挂进 cron 右栏，停止/移除还真能杀错任务
+  const railBg =
+    (view === 'chat' || (!!cronRunThread && keyThread(active) === cronRunThread)) &&
+    activeBgTasks.length > 0
+  const showRail = view === 'cronjob' ? !!activeCronJob : view === 'chat' && railBg
+  // 脉冲点 = 可见模块里确有东西在跑：隐藏的 bg 模块不算，直播中的 cron 执行算
+  const railDot = (railBg && hasRunningBg) || cronLiveRuns.length > 0
+
   return (
     <div className="h-full flex flex-col bg-canvas">
       {!isMacTitleBar && (
@@ -2408,21 +2431,29 @@ export default function App() {
         {showTopStrip && (
           // 拖拽区与按钮区并排分离（互不重叠的矩形）：不在 drag 大条上给按钮挖洞——
           // 洞依赖 Chromium 的区域重采样，实测会因动画/布局时序失效导致按钮下半不可点。
-          // 高度不做过渡，同为让区域采样一步到位。
-          // mac 红绿灯固定在 (26,20)，钮与其中心线（y=28）对齐。
+          // 高度恒定不随 sidebarOpen 变（曾 h-9↔h-14 切换，收放侧栏时主区内容整体上下跳）。
           <div
-            className={`${isMacTitleBar ? (sidebarOpen ? 'h-9' : 'h-14') : 'h-10'} shrink-0 flex items-stretch`}
+            className={`${isMacTitleBar ? 'h-9' : 'h-10'} shrink-0 flex items-stretch`}
           >
             {!sidebarOpen && (
               // titlebar-interactive 见 index.css（macOS 26 命中偏移的合成层修复）；
-              // pl-[100px] 让开红绿灯（坐标见 main.cjs trafficLightPosition，改灯位需同步）
-              <div className={`titlebar-interactive flex items-center ${isMacTitleBar ? 'pl-[100px]' : 'pl-3'}`}>
+              // pl-[100px] 让开红绿灯（坐标见 main.cjs trafficLightPosition，改灯位需同步）。
+              // mac 红绿灯固定在 (26,20)：条带恒 h-9 后，由本容器 translate 下移让按钮对齐
+              // 灯的中心线（y≈27）。位移必须在容器而非按钮上——Button 基类的 active:
+              // translate-y-px 会在按下瞬间覆盖按钮自身的 translate-y，导致按下跳 8px。
+              // 容器下移后底部 10px 压在主区内容上且合成层命中序在前：pointer-events-none
+              // 让点击穿透容器（含 100px 纯 padding 区），按钮自己 auto 恢复命中
+              <div
+                className={`titlebar-interactive pointer-events-none flex items-center ${
+                  isMacTitleBar ? 'pl-[100px] translate-y-[10px]' : 'pl-3'
+                }`}
+              >
                 <Button
                   variant="ghost"
                   size="icon-sm"
                   onClick={toggleSidebar}
                   title={t('sidebar.expand')}
-                  className="-translate-y-px text-muted-foreground hover:text-ink"
+                  className="toggle-fade-in pointer-events-auto -translate-y-px text-muted-foreground hover:text-ink"
                 >
                   <PanelLeft />
                 </Button>
@@ -2430,24 +2461,6 @@ export default function App() {
             )}
             {/* 中段纯拖拽条：独立矩形，与按钮区互不重叠，无需挖洞 */}
             <div className={`flex-1 ${isMacTitleBar ? 'app-drag' : ''}`} />
-            {showBgTaskToggle && (
-              <div className="titlebar-interactive flex items-center pr-3">
-              <Button
-                variant="ghost"
-                size="icon-sm"
-                onClick={() => setBgDrawerOpen((o) => !o)}
-                title={t('bg.title')}
-                className={`relative ${
-                  bgDrawerOpen ? 'text-primary' : 'text-muted-foreground hover:text-ink'
-                }`}
-              >
-                <PanelRight />
-                {hasRunningBg && (
-                  <span className="absolute top-1 right-1 w-1.5 h-1.5 rounded-full bg-primary animate-pulse" />
-                )}
-              </Button>
-              </div>
-            )}
           </div>
         )}
         {view === 'projects' ? (
@@ -2606,39 +2619,44 @@ export default function App() {
       </main>
       {/* 右侧两栏与左侧栏同级（不放进 main）：否则会被 main 内的 topStrip 压低一截，
           顶边对不上左侧栏。代价是它们上方那段不再是窗口拖拽区——本就被面板占满。 */}
-      {view === 'chat' && (
+      {/* 统一右栏：chat / cronjob 共用一个实例（同一开合状态、同一宽度）。
+          cron 会话置顶「执行记录」，后台任务等通用模块只声明一次、两视图同构往下叠。
+          enter 仅聊天视图：首个后台任务出现时整栏动画入场，不猛挤聊天栏；
+          切视图时组件保持挂载，不会重放。 */}
+      {showRail && (
         <>
-          {bgDrawerOpen && activeBgTasks.length > 0 && (
-            <ResizeHandle {...bgRailW} edge="left" floating />
-          )}
-          <BgTasksDrawer
-            tasks={activeBgTasks}
-            onStop={stopBgTask}
-            onDismiss={dismissBgTask}
-            onClearFinished={clearFinishedBgTasks}
-            onClose={() => setBgDrawerOpen(false)}
-            open={bgDrawerOpen}
-            width={bgRailW.width}
-          />
-        </>
-      )}
-      {view === 'cronjob' && activeCronJob && (
-        <>
-          <ResizeHandle {...runsRailW} edge="left" floating />
-          {/* key=任务 id：换任务即重挂，折叠态不跨任务残留（否则新任务的记录看着像空的） */}
-          <RunsRail
-            key={activeCronJob}
-            api={runsRailApi}
-            jobId={activeCronJob}
-            activeThread={cronRunThread}
-            readRuns={readRuns}
-            version={cronVersion}
-            liveRuns={(cronActiveRuns[cronBackendOf(activeCronJob)] ?? []).filter(
-              (r) => r.job_id === activeCronJob && r.thread_id,
+          {railOpen && <ResizeHandle {...railW} edge="left" />}
+          <RightRail
+            width={railW.width}
+            open={railOpen}
+            onToggle={toggleRail}
+            dot={railDot}
+            enter={view === 'chat'}
+          >
+            {view === 'cronjob' && activeCronJob && (
+              // key=任务 id：换任务即重挂，节折叠态不跨任务残留（整栏开合在 App，不受影响）
+              <RunsSection
+                key={activeCronJob}
+                api={runsRailApi}
+                jobId={activeCronJob}
+                open={railOpen}
+                activeThread={cronRunThread}
+                readRuns={readRuns}
+                version={cronVersion}
+                liveRuns={cronLiveRuns}
+                onPick={pickRun}
+              />
             )}
-            onPick={(tid) => void openRunThread(tid, cronBackendOf(activeCronJob))}
-            width={runsRailW.width}
-          />
+            {railBg && (
+              <BgTasksSection
+                tasks={activeBgTasks}
+                open={railOpen}
+                onStop={stopBgTask}
+                onDismiss={dismissBgTask}
+                onClearFinished={clearFinishedBgTasks}
+              />
+            )}
+          </RightRail>
         </>
       )}
 

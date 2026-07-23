@@ -442,8 +442,8 @@ export const Sidebar = memo(function Sidebar({
   return (
     <aside
       style={{ width, left: FLOAT_GAP, top: FLOAT_GAP, bottom: FLOAT_GAP }}
-      className={`absolute z-10 sidebar-float rounded-panel flex flex-col overflow-hidden transition-[transform,opacity] duration-300 ease-out ${
-        open ? '' : '-translate-x-[110%] opacity-0 pointer-events-none'
+      className={`absolute z-10 sidebar-float rounded-panel flex flex-col overflow-hidden transition-[translate,opacity,visibility] duration-300 ease-out ${
+        open ? '' : '-translate-x-[110%] opacity-0 invisible pointer-events-none'
       }`}
     >
       {/* 顶行：mac 红绿灯占左侧（drag 区、h-9 中心线对齐灯位 y=28），收起按钮靠右。
@@ -451,14 +451,16 @@ export const Sidebar = memo(function Sidebar({
           app-drag 仅展开时生效：拖拽区域按布局盒计算、无视 transform/opacity，收起的
           侧栏布局盒仍在原位（aside z-10 绘制在后），残留 drag 矩形会盖回收起态展开钮的挖洞 */}
       <div className={`h-9 -mt-px shrink-0 flex items-center justify-end pr-1.5 ${showTitleDrag && open ? 'app-drag' : ''}`}>
-        {/* icon-sm(28px) 与收起态展开钮 / 右侧后台任务钮同尺寸同中心线（y=28），
-            切换时按钮只水平移动不跳动 */}
+        {/* icon-sm(28px) 与收起态展开钮 / 右栏收放钮同尺寸同中心线（y≈27）。
+            open 翻转时交替 toggle-fade-in 变体重触发动画（换 animation-name 即重放，
+            不重挂 DOM 不丢焦点）：250ms 隐身期让按钮不跟着面板滑动横穿红绿灯区，
+            面板到位（或淡没）后才原地现身——与右栏收放钮同节奏 */}
         <Button
           variant="ghost"
           size="icon-sm"
           onClick={onToggle}
           title={t('sidebar.collapse')}
-          className="no-drag -translate-y-px text-muted-foreground hover:text-ink"
+          className={`${open ? 'toggle-fade-in' : 'toggle-fade-in-alt'} no-drag -translate-y-px text-muted-foreground hover:text-ink`}
         >
           <PanelLeft />
         </Button>

@@ -233,6 +233,40 @@ pre {
   border-color: color-mix(in srgb, var(--color-accent) 40%, transparent);
 }
 
+/* 侧栏收放钮入场（左顶条展开钮 / 左侧栏收起钮 / 右栏收放钮共用）：在最终位置淡入，
+   delay 0.25s = 面板 300ms 滑动的尾段 50ms 起身（刻意重叠，衔接更顺）——改面板
+   duration-300 时此处 delay 需一并调。与开合状态同帧挂载/切换会跟着布局动画
+   滑进来——视觉像先弹出去再收回来。两个同体 keyframes 是刻意的：常驻按钮在 open
+   翻转时交替 -alt 变体，换 animation-name 即重放动画，不重挂 DOM、不丢键盘焦点；
+   条件挂载的按钮（顶条展开钮）用任一变体皆可。 */
+@keyframes toggle-fade-in {
+  from { opacity: 0; }
+}
+@keyframes toggle-fade-in-alt {
+  from { opacity: 0; }
+}
+.toggle-fade-in {
+  animation: toggle-fade-in 0.15s ease-out 0.25s backwards;
+}
+.toggle-fade-in-alt {
+  animation: toggle-fade-in-alt 0.15s ease-out 0.25s backwards;
+}
+
+/* 聊天视图首个后台任务出现时右栏的入场：宽度从 0 展开、面板随之滑入——
+   条件挂载的组件初始即终态，transition 不播，缺这段会以最终宽度瞬间挤窄聊天栏 */
+@keyframes rail-w-in {
+  from { width: 0; }
+}
+@keyframes rail-panel-in {
+  from { translate: 110% 0; opacity: 0; }
+}
+.rail-enter {
+  animation: rail-w-in 0.3s ease-out;
+}
+.rail-enter .rail-panel {
+  animation: rail-panel-in 0.3s ease-out;
+}
+
 /* 拖拽调整边栏宽度时：全局 col-resize 光标、禁选、停用过渡（让边栏即时跟手） */
 body.resizing-col {
   cursor: col-resize;

@@ -4,10 +4,9 @@
 //        → 左右两栏「执行记录 | 任务内容」。
 // 数据经 gateway 的 cron RPC 读写；cron.result/cron.running 事件由 App 转为
 // version/runningJobs props 驱动刷新，本组件不直接订阅 WS。
-import { useCallback, useEffect, useState } from 'react'
+import { memo, useCallback, useEffect, useState } from 'react'
 import {
   AlertTriangle,
-  ChevronDown,
   ChevronLeft,
   ChevronRight,
   Clock,
@@ -22,6 +21,7 @@ import type { CronJob, CronRun } from '../types'
 import { useI18n, type Translate } from '../i18n'
 import { ConfirmDialog } from './ConfirmDialog'
 import { MachineTabs } from './MachineTabs'
+import { RailSection } from './RightRail'
 import {
   Dialog,
   DialogContent,
@@ -30,7 +30,7 @@ import {
 } from '@/components/ui/dialog'
 import { Switch } from '@/components/ui/switch'
 import { Button } from '@/components/ui/button'
-import { CARD_L2, FLOAT_GAP, beOf, cn, errorMessage } from '@/lib/utils'
+import { CARD_L2, beOf, cn, errorMessage } from '@/lib/utils'
 
 // 后端能力句柄：App 注入 anyGw() 返回的 Gateway 子集，便于解耦与测试
 export interface CronApi {
@@ -479,20 +479,23 @@ function Field({
   )
 }
 
-// RunsRail / RunList 共用的数据拉取：version 变化（有任务完成执行）时重新拉取
+// RunsSection / RunList 共用的数据拉取：version 变化（有任务完成执行）时重新拉取；
+// enabled=false（右栏收起）时不拉——完全不可见还随 cron 事件白拉 50 条，重新可见时依赖变化自动补拉
 function useCronRuns(
   api: () => CronApi | undefined,
   jobId: string,
   version: number,
   limit = 20,
+  enabled = true,
 ): CronRun[] | null {
   const [runs, setRuns] = useState<CronRun[] | null>(null)
   useEffect(() => {
+    if (!enabled) return
     api()
       ?.listCronRuns(jobId, limit)
       .then((r) => setRuns(r.runs ?? []))
       .catch(() => setRuns([]))
-  }, [api, jobId, version, limit])
+  }, [api, jobId, version, limit, enabled])
   return runs
 }
 
@@ -520,7 +523,7 @@ function RunTimeCol({ startedAt, lang }: { startedAt: string; lang: string }) {
   )
 }
 
-// 执行记录卡片的行内容（时刻为主 + 日期为次 + 耗时 + 状态标记），RunsRail / RunList 共用。
+// 执行记录卡片的行内容（时刻为主 + 日期为次 + 耗时 + 状态标记），RunsSection / RunList 共用。
 function RunRowInner({ run, lang, unread }: { run: CronRun; lang: string; unread?: boolean }) {
   return (
     <>
@@ -533,121 +536,86 @@ function RunRowInner({ run, lang, unread }: { run: CronRun; lang: string; unread
   )
 }
 
-// 任务会话视图的右侧 Runs 栏（悬浮玻璃，与左侧栏 / 后台任务栏同一材质）：列出历次执行，
-// 每次一张卡片，点击切换主区会话；当前查看的那次高亮描边。
-// 蓝点 = 未读（点开即消失）；无会话的旧记录灰显不可点。
-export function RunsRail({
+// 任务会话右栏的「执行记录」模块（挂在 RightRail 里，定时任务会话置顶）：
+// 活条目置顶转圈、点进观测直播；当前查看高亮描边；蓝点=未读；无会话旧记录灰显。
+// run 卡外壳：活条目/完成条目/详情页 RunList 行共用基串；高亮与 hover 配方只此一份
+const RUN_CARD = 'w-full flex items-center gap-2.5 px-3 py-2.5 text-left transition'
+const runCardCls = (active: boolean) =>
+  cn(
+    CARD_L2,
+    RUN_CARD,
+    active ? 'border-primary/45 bg-primary/[0.08]' : 'hover:bg-surface/70 hover:border-primary/30',
+  )
+
+// memo：观测直播时 App 每 token 重渲染，50 条记录卡不该陪跑（props 经 App 侧
+// useMemo/useCallback 稳定：api/onPick/liveRuns）
+export const RunsSection = memo(function RunsSection({
   api,
   jobId,
+  open,
   activeThread,
   readRuns,
   version,
-  liveRuns = [],
+  liveRuns,
   onPick,
-  width,
 }: {
   api: () => CronApi | undefined
   jobId: string
+  open: boolean // 右栏开合：收起时暂停拉取
   activeThread: string | null
   readRuns: Record<string, true>
   version: number
-  liveRuns?: { thread_id: string; started_at: string }[]
+  liveRuns: { thread_id: string; started_at: string }[]
   onPick: (threadId: string) => void
-  width: number
 }) {
   const { t, lang } = useI18n()
-  const runs = useCronRuns(api, jobId, version, 50)
-  const [collapsed, setCollapsed] = useState(false)
+  const runs = useCronRuns(api, jobId, version, 50, open)
   // 运行中的 run 已完成日志尚未落，故从 liveRuns 单独在顶部渲染活条目；一旦该次跑完
   // 进入 runs（同 thread_id），就从活条目里去掉，避免与完成条目重复。
   const doneThreads = new Set((runs ?? []).map((r) => r.thread_id))
   const live = liveRuns.filter((r) => !doneThreads.has(r.thread_id))
 
   return (
-    <aside style={{ width: width + FLOAT_GAP * 2 }} className="relative shrink-0">
-      {/* 悬浮玻璃面板：右侧内缩 FLOAT_GAP，与后台任务栏对称。
-          折叠时不设 bottom，高度由标题行撑出——面板收成一条。 */}
-      <div
-        style={{ width, right: FLOAT_GAP, top: FLOAT_GAP, bottom: collapsed ? undefined : FLOAT_GAP }}
-        className="absolute sidebar-float rounded-panel overflow-hidden flex flex-col"
-      >
-        <button
-          onClick={() => setCollapsed((c) => !c)}
-          aria-expanded={!collapsed}
-          className="group shrink-0 flex items-center gap-2 px-3 py-2.5 text-left transition hover:bg-ink/[0.04]"
-        >
-          <span className="text-[13.5px] font-semibold">{t('cron.tabRuns')}</span>
-          {/* chevron 平时隐身，hover 或折叠态才现（折叠时转 -90°，指向"展开"） */}
-          <ChevronDown
-            className={`ml-auto size-4 shrink-0 text-muted-foreground transition-[transform,opacity] duration-300 ease-[cubic-bezier(.32,.72,0,1)] group-hover:opacity-100 ${
-              collapsed ? 'opacity-100 -rotate-90' : 'opacity-0'
-            }`}
-          />
-        </button>
-        {/* grid-rows 0fr↔1fr：能给"内容自适应高度"做过渡的唯一干净写法。
-            inert：折叠后内容只是被裁到 0 高，不加这个仍能 Tab 进去并回车切走会话 */}
-        <div
-          inert={collapsed}
-          className={`grid min-h-0 transition-[grid-template-rows,opacity] duration-300 ease-[cubic-bezier(.32,.72,0,1)] ${
-            collapsed ? 'grid-rows-[0fr] opacity-0' : 'flex-1 grid-rows-[1fr]'
-          }`}
-        >
-          {/* 外层只负责裁剪（0fr 时把内层的 padding 一起收掉，否则折叠后残留一条空底），
-              滚动与内边距归内层 */}
-          <div className="overflow-hidden">
-            <div className="h-full overflow-auto px-2.5 pb-2.5 flex flex-col gap-2.5">
-              {/* 运行中的活条目：置顶、转圈、可点进观测直播；跑完后转为下方的完成条目 */}
-              {live.map((r) => {
-                const active = r.thread_id === activeThread
-                return (
-                  <button
-                    key={r.thread_id}
-                    onClick={() => onPick(r.thread_id)}
-                    className={cn(
-                      CARD_L2,
-                      'w-full flex items-center gap-2.5 px-3 py-2.5 text-left transition',
-                      active
-                        ? 'border-primary/45 bg-primary/[0.08]'
-                        : 'hover:bg-surface/70 hover:border-primary/30',
-                    )}
-                  >
-                    <RunTimeCol startedAt={r.started_at} lang={lang} />
-                    <Loader2 size={13} className="shrink-0 animate-spin text-primary" />
-                  </button>
-                )
-              })}
-              {runs?.length === 0 && live.length === 0 && (
-                <div className="px-0.5 py-3 text-xs text-muted-foreground">{t('cron.noRuns')}</div>
-              )}
-              {(runs ?? []).map((r) => {
-                const active = !!r.thread_id && r.thread_id === activeThread
-                return (
-                  <button
-                    key={r.thread_id || r.started_at}
-                    disabled={!r.thread_id}
-                    onClick={() => r.thread_id && onPick(r.thread_id)}
-                    title={r.error || r.output_summary}
-                    className={cn(
-                      CARD_L2,
-                      'w-full flex items-center gap-2.5 px-3 py-2.5 text-left transition',
-                      !r.thread_id
-                        ? 'bg-surface/30 opacity-60 cursor-default'
-                        : active
-                          ? 'border-primary/45 bg-primary/[0.08]'
-                          : 'hover:bg-surface/70 hover:border-primary/30',
-                    )}
-                  >
-                    <RunRowInner run={r} lang={lang} unread={!!r.thread_id && !readRuns[r.thread_id]} />
-                  </button>
-                )
-              })}
-            </div>
-          </div>
-        </div>
+    <RailSection
+      title={t('cron.tabRuns')}
+      count={runs === null ? undefined : runs.length + live.length}
+    >
+      <div className="flex flex-col gap-2.5">
+        {/* 运行中的活条目：置顶、转圈、可点进观测直播；跑完后转为下方的完成条目 */}
+        {live.map((r) => {
+          const active = r.thread_id === activeThread
+          return (
+            <button key={r.thread_id} onClick={() => onPick(r.thread_id)} className={runCardCls(active)}>
+              <RunTimeCol startedAt={r.started_at} lang={lang} />
+              <Loader2 size={13} className="shrink-0 animate-spin text-primary" />
+            </button>
+          )
+        })}
+        {runs?.length === 0 && live.length === 0 && (
+          <div className="px-0.5 py-1 text-xs text-muted-foreground">{t('cron.noRuns')}</div>
+        )}
+        {(runs ?? []).map((r) => {
+          const active = !!r.thread_id && r.thread_id === activeThread
+          return (
+            <button
+              key={r.thread_id || r.started_at}
+              disabled={!r.thread_id}
+              onClick={() => r.thread_id && onPick(r.thread_id)}
+              title={r.error || r.output_summary}
+              className={
+                !r.thread_id
+                  ? cn(CARD_L2, RUN_CARD, 'bg-surface/30 opacity-60 cursor-default')
+                  : runCardCls(active)
+              }
+            >
+              <RunRowInner run={r} lang={lang} unread={!!r.thread_id && !readRuns[r.thread_id]} />
+            </button>
+          )
+        })}
       </div>
-    </aside>
+    </RailSection>
   )
-}
+})
 
 // 执行记录列表（详情页左栏）：时间 + 耗时 + 状态标记。
 // 有会话的记录点击跳转到该次执行的会话（可续聊）；无会话的旧记录点击展开摘要。
@@ -678,7 +646,7 @@ function RunList({
             onClick={() =>
               r.thread_id ? onOpenRun(r.thread_id) : setOpen(open === i ? null : i)
             }
-            className="group w-full flex items-center gap-2.5 px-3 py-2.5 text-left hover:bg-surface/70 transition"
+            className={cn('group', RUN_CARD, 'hover:bg-surface/70')}
           >
             <RunRowInner run={r} lang={lang} />
             {r.thread_id && (

@@ -1,6 +1,16 @@
-import { useEffect, useState } from 'react'
+import { useCallback, useEffect, useState } from 'react'
 import type { MouseEvent as ReactMouseEvent } from 'react'
 import { FLOAT_GAP } from '@/lib/utils'
+
+// 持久化开关（'1'/'0'，默认开）：侧栏/右栏开合用。toggle 身份稳定，配合消费方 memo。
+export function usePersistedFlag(key: string): [boolean, () => void] {
+  const [on, setOn] = useState(() => localStorage.getItem(key) !== '0')
+  const toggle = useCallback(() => setOn((o) => !o), [])
+  useEffect(() => {
+    localStorage.setItem(key, on ? '1' : '0')
+  }, [key, on])
+  return [on, toggle]
+}
 
 // 边栏宽度：持久化到 localStorage，越界（含历史脏值）回退默认值。
 export function useResizableWidth(key: string, def: number, min: number, max: number) {

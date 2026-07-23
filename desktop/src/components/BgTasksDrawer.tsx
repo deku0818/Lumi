@@ -1,13 +1,15 @@
-import { useEffect, useState } from 'react'
-import { Bot, Boxes, Check, ChevronDown, ChevronRight, Square, SquareTerminal, X } from 'lucide-react'
+import { memo, useEffect, useState } from 'react'
+import { Bot, Boxes, Check, ChevronDown, Square, SquareTerminal, X } from 'lucide-react'
 import type { LucideIcon } from 'lucide-react'
 import type { BgTask, BgTaskKind, BgTaskProgress } from '../types'
 import { useI18n } from '../i18n'
-import { CARD_L2, FLOAT_GAP } from '@/lib/utils'
+import { RailSection } from './RightRail'
+import { Button } from '@/components/ui/button'
+import { CARD_L2 } from '@/lib/utils'
 
 const isTerminal = (t: BgTask): boolean => t.status !== 'running'
 
-// 后台任务右栏（Cowork 式）：一摞可独立折叠的任务卡片；开关在头部 PanelRight 图标（由 App 管）。
+// 后台任务模块（挂在统一右栏 RightRail 里）：一摞可独立折叠的任务卡片。
 // 后端数据见 TaskRegistry（serialize_task）；实时刷新经 bg_tasks.update 事件。
 
 const KIND_ICON: Record<BgTaskKind, LucideIcon> = {
@@ -169,27 +171,25 @@ function TaskCard({
   )
 }
 
-export function BgTasksDrawer({
+// memo：App 流式期间每 token 重渲染，props 全稳定（tasks 是 useMemo、回调是 useCallback），
+// 有任务在跑时这里是常驻子树，不 memo 就白陪跑
+export const BgTasksSection = memo(function BgTasksSection({
   tasks,
+  open,
   onStop,
   onDismiss,
   onClearFinished,
-  onClose,
-  open,
-  width,
 }: {
   tasks: BgTask[]
+  open: boolean // 右栏开合：收起时停表，省掉隐藏子树的每秒重渲染
   onStop: (taskId: string) => void
   onDismiss: (taskId: string) => void
   onClearFinished: () => void
-  onClose: () => void
-  open: boolean
-  width: number
 }) {
   const { t } = useI18n()
   // 用户手动折叠/展开覆盖（无记录则用 defaultCollapsed）
   const [override, setOverride] = useState<Record<string, boolean>>({})
-  // 每秒 tick：运行中任务的 duration 实时跳动（仅面板打开且有任务在跑时计时，省开销）
+  // 每秒 tick：运行中任务的 duration 实时跳动（仅右栏展开且有任务在跑时计时，省开销）
   const [, setTick] = useState(0)
   const running = tasks.filter((x) => x.status === 'running').length
   useEffect(() => {
@@ -197,64 +197,44 @@ export function BgTasksDrawer({
     const id = setInterval(() => setTick((x) => x + 1), 1000)
     return () => clearInterval(id)
   }, [open, running])
-  if (tasks.length === 0) return null
   const finished = tasks.length - running
 
   return (
-    <aside
-      style={{ width: open ? width + FLOAT_GAP * 2 : 0 }}
-      className={`relative shrink-0 transition-[width] duration-200 ${open ? '' : 'pointer-events-none'}`}
-    >
-      {/* 悬浮玻璃面板：与左侧栏对称。开合时面板向右滑出/滑入（transform+opacity），
-          与外层宽度动画同步——面板绝对定位不受宽度裁剪，缺了这层过渡会整块瞬间弹出 */}
-      <div
-        style={{ width, right: FLOAT_GAP, top: FLOAT_GAP, bottom: FLOAT_GAP }}
-        className={`absolute sidebar-float rounded-panel overflow-hidden flex flex-col transition-[transform,opacity] duration-200 ease-out ${
-          open ? '' : 'translate-x-[110%] opacity-0'
-        }`}
-      >
-        {/* 标题行与执行记录栏同款字号；收起只由右侧 chevron 触发（标题是纯文本，
-            避免整条空白都成了误触关闭的热区），chevron 平时隐身、hover 才现 */}
-        <div className="group shrink-0 flex items-center gap-2 pl-3 pr-2 py-2.5">
-          <span className="text-[13.5px] font-semibold">{t('bg.title')}</span>
-          {running > 0 && (
-            <span className="text-[11px] text-muted-foreground tabular-nums">
-              {running} {t('bg.running')}
-            </span>
-          )}
-          {finished > 0 && (
-            <button
-              onClick={onClearFinished}
-              className="text-[11px] text-muted-foreground hover:text-ink hover:bg-ink/5 rounded px-1.5 py-0.5"
-            >
-              {t('bg.clearFinished')} {finished}
-            </button>
-          )}
-          <button
-            onClick={onClose}
-            title={t('common.close')}
-            aria-label={t('common.close')}
-            className="ml-auto shrink-0 text-muted-foreground opacity-0 transition-opacity duration-200 group-hover:opacity-100 hover:text-ink"
+    <RailSection
+      title={t('bg.title')}
+      // 总数之外保留旧头部的「N 运行中」：运行/完成占比一眼可见，不必逐卡辨认转圈
+      count={running > 0 ? `${tasks.length} · ${running} ${t('bg.running')}` : tasks.length}
+      headerExtra={
+        finished > 0 ? (
+          <Button
+            variant="ghost"
+            size="xs"
+            onClick={(e) => {
+              e.stopPropagation() // 节头是折叠开关，别让清除顺手把节折了
+              onClearFinished()
+            }}
+            className="text-[11px] font-normal text-muted-foreground hover:text-ink"
           >
-            <ChevronRight className="size-4" />
-          </button>
-        </div>
-        <div className="min-h-0 flex-1 overflow-auto px-2.5 pb-2.5 flex flex-col gap-3">
-          {tasks.map((task) => {
-            const collapsed = override[task.task_id] ?? defaultCollapsed(task)
-            return (
-              <TaskCard
-                key={task.task_id}
-                task={task}
-                onStop={onStop}
-                onDismiss={onDismiss}
-                collapsed={collapsed}
-                onToggle={() => setOverride((o) => ({ ...o, [task.task_id]: !collapsed }))}
-              />
-            )
-          })}
-        </div>
+            {t('bg.clearFinished')} {finished}
+          </Button>
+        ) : undefined
+      }
+    >
+      <div className="flex flex-col gap-2.5">
+        {tasks.map((task) => {
+          const collapsed = override[task.task_id] ?? defaultCollapsed(task)
+          return (
+            <TaskCard
+              key={task.task_id}
+              task={task}
+              onStop={onStop}
+              onDismiss={onDismiss}
+              collapsed={collapsed}
+              onToggle={() => setOverride((o) => ({ ...o, [task.task_id]: !collapsed }))}
+            />
+          )
+        })}
       </div>
-    </aside>
+    </RailSection>
   )
-}
+})

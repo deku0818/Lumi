@@ -266,7 +266,9 @@ function createWindow() {
           titleBarStyle: 'hidden',
           // 固定位置（学 macOS 天气不随侧栏展开/收起迁移）：展开时落在悬浮侧栏内部
           // （面板内缩 10px、避开圆角）。y 比按钮中心线（28）偏上取 20：原生灯珠的
-          // 视觉重心低于几何中心，数学对齐反而显矮，按用户目感上提 2px
+          // 视觉重心低于几何中心，数学对齐反而显矮，按用户目感上提 2px。
+          // 改此值需同步前端各「y≈27 对齐红绿灯」的按钮偏移（grep 红绿灯：
+          // App.tsx 顶条展开钮 / Sidebar.tsx 收起钮 / RightRail.tsx 收放钮）
           trafficLightPosition: { x: 26, y: 20 },
         }
       : {
