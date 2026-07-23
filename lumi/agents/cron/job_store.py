@@ -9,6 +9,7 @@ from __future__ import annotations
 import asyncio
 import json
 import os
+from collections.abc import Callable
 from pathlib import Path
 
 from lumi.agents.cron.models import Job
@@ -48,6 +49,22 @@ class JobStore:
     def __init__(self, path: Path) -> None:
         self._path = path
         self._lock = asyncio.Lock()
+        # 任务增删改变更观察者：gateway 层注册，把变更广播给 desktop 刷新任务列表
+        # （同 bg_tasks 的 TaskRegistry.set_on_change 模式）。tool 与 UI 两条路都经
+        # 本 store 落盘，故这里是唯一 choke point。TUI / 测试不设 → 不广播。
+        self._on_change: Callable[[], None] | None = None
+
+    def set_on_change(self, callback: Callable[[], None] | None) -> None:
+        """注册任务变更观察者（upsert / delete 落盘后触发）。"""
+        self._on_change = callback
+
+    def _fire_change(self) -> None:
+        if self._on_change is None:
+            return
+        try:
+            self._on_change()
+        except Exception:
+            logger.error("[JobStore] on_change 回调异常", exc_info=True)
 
     async def load(self) -> list[Job]:
         """从磁盘加载任务列表。
@@ -101,7 +118,7 @@ class JobStore:
         content = json.dumps(data, ensure_ascii=False, indent=2)
         await asyncio.to_thread(atomic_write_text, self._path, content)
 
-    async def upsert(self, job: Job) -> None:
+    async def upsert(self, job: Job, *, notify: bool = True) -> None:
         """创建或更新单个任务。
 
         如果已存在相同 ID 的任务则替换，否则追加。
@@ -109,6 +126,9 @@ class JobStore:
 
         Args:
             job: 要创建或更新的任务。
+            notify: 是否触发变更观察者。用户增删改用默认 True；内部记账（如
+                consecutive_errors 退避计数持久化）传 False，避免非用户可见的
+                字段变更也触发前端全量刷新。
         """
         async with self._lock:
             jobs = await self.load()
@@ -119,6 +139,8 @@ class JobStore:
             else:
                 jobs.append(job)
             await self.save(jobs)
+        if notify:
+            self._fire_change()
 
     async def delete(self, job_id: str) -> bool:
         """删除指定 ID 的任务。
@@ -137,7 +159,8 @@ class JobStore:
             if len(new_jobs) == len(jobs):
                 return False
             await self.save(new_jobs)
-            return True
+        self._fire_change()
+        return True
 
     async def get_all(self) -> list[Job]:
         """获取所有任务。

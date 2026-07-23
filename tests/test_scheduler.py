@@ -251,6 +251,23 @@ async def test_execute_job_sets_tool_mode_privileged(scheduler: Scheduler) -> No
     assert context.tool_mode == "privileged"
 
 
+async def test_execute_job_records_workspace_dir_metadata(scheduler: Scheduler) -> None:
+    """_execute_job() 应把项目写进 checkpoint metadata。
+
+    cron 线程在 desktop 续聊时据此恢复 workspace 绑定；漏写则工作区边界关卡拒发
+    「请先选择项目」。
+    """
+    job = _make_interval_job("ws-meta")
+    mock_create = _mock_create_agent()
+    mock_create.return_value[1].permission_engine.project_dir = Path("/proj/x")
+
+    with patch(_PATCH_CREATE_AGENT, mock_create):
+        await scheduler._execute_job(job)
+
+    config = mock_create.return_value[0].graph.ainvoke.call_args.kwargs["config"]
+    assert config["metadata"]["workspace_dir"] == "/proj/x"
+
+
 async def test_execute_job_timeout(scheduler: Scheduler, run_log: RunLog) -> None:
     """_execute_job() 超时应返回 timeout 状态。"""
     # 使用极短超时

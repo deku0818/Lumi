@@ -90,6 +90,10 @@ class FakeBridge:
     def switch_thread(self, tid) -> None:
         self.current_thread_id = tid
 
+    async def recorded_workspace_dir(self, thread_id: str) -> str:
+        # 线程 checkpoint 记录的项目；测试可注入 _recorded_workspace 覆盖
+        return getattr(self, "_recorded_workspace", "")
+
     def mark_workspace_bound(self) -> None:
         self.workspace_bound = True
 
@@ -382,6 +386,47 @@ async def test_switch_session_same_thread_preserves_active_turn():
         assert bridge.current_thread_id == "t-1"
     finally:
         bridge.release.set()
+        await session.aclose()
+
+
+# -- 5d. switch_session 恢复线程项目（cron 执行线程续聊）--
+
+
+async def test_switch_session_recovers_workspace_from_thread():
+    """打开无 workspace 的既有线程（cron 执行线程）时，从其 checkpoint 记录恢复项目绑定。
+
+    前端对 cron 线程 activate(tid, '', backend) 不带 workspace；不恢复则切到新 thread 后
+    mark_workspace_unbound，工作区边界关卡拒发「请先选择项目」。
+    """
+    bridge = FakeBridge()
+    bridge.workspace_bound = False  # 起始未绑定，凸显恢复效果
+    bridge._recorded_workspace = "/fake/project"  # 线程记录项目 == 引擎当前目录
+    session, channel = _make_session(bridge)
+    await session.start()
+    try:
+        await session.handle_frame(
+            {"id": 1, "method": "switch_session", "params": {"thread_id": "cron-x"}}
+        )
+        await _drain(session)
+        assert {"id": 1, "result": {"thread_id": "cron-x"}} in channel.responses()
+        assert bridge.workspace_bound is True
+    finally:
+        await session.aclose()
+
+
+async def test_switch_session_no_recorded_workspace_stays_unbound():
+    """线程无记录项目时，切换后保持未绑定（不误绑）。"""
+    bridge = FakeBridge()
+    bridge._recorded_workspace = ""
+    session, channel = _make_session(bridge)
+    await session.start()
+    try:
+        await session.handle_frame(
+            {"id": 1, "method": "switch_session", "params": {"thread_id": "t-new"}}
+        )
+        await _drain(session)
+        assert bridge.workspace_bound is False
+    finally:
         await session.aclose()
 
 

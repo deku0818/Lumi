@@ -28,7 +28,7 @@
 
 **Agent 能力** — [子 Agent 委托](docs/guides/agents.md) · [多 Agent Workflow](docs/architecture/workflow.md)（后台并行编排）· [对话摘要压缩](docs/architecture/summary.md) · [持久记忆](docs/guides/memory.md)（主动写入 + 后台整理）
 
-**工具与扩展** — 内置工具（读写、编辑、Glob/Grep、Bash、任务、定时、技能、子 Agent、计划）· [技能系统](docs/guides/slash-commands.md)（`.lumi/skills/`）· [定时任务](docs/guides/cron.md)（自然语言创建）· MCP 外部工具
+**工具与扩展** — 内置工具（读写、编辑、Glob/Grep、Bash、任务、定时、技能、子 Agent、Workflow、后台任务、图像识别）· [技能系统](docs/guides/slash-commands.md)（`.lumi/skills/`）· [定时任务](docs/guides/cron.md)（自然语言创建）· MCP 外部工具
 
 **交互与安全** — 桌面应用（Electron）· [风格系统](docs/guides/styles.md)（可切换提示词预设）· [权限控制](docs/guides/permissions.md)（allow/deny + 工作区边界）· 四档审批模式（Default / Accept Edits / Privileged / Auto AI 分类器）· IM 渠道（[飞书](docs/guides/feishu.md)）
 
@@ -82,6 +82,8 @@ cd Lumi
 `config.json` 的 `style` 或 CLI `-s/--style` 选择风格。桌面「项目主页」所见即会话所加载——五张卡（提示词 / 记忆 / 定时 / 技能 / 子 Agent）与运行时同源，项目层可增删改，内置 / 全局层只读可「复制到项目」。详见 [风格系统](docs/guides/styles.md)。
 
 ### 权限与审批
+
+> ⚠️ **无沙箱**：Lumi 不做隔离，agent 的工具（`bash`、文件读写等）**直接作用于你本地真实环境**。权限规则 + 审批模式 + 工作区边界是唯一的安全边界——建议保持默认审批，谨慎使用 `Privileged`（一律放行）。
 
 - **权限规则**（[permissions.md](docs/guides/permissions.md)）：`~/.lumi/permissions.json`（用户级）、`.lumi/permissions.json`（项目共享）、`.lumi/permissions.local.json`（项目本地）三处加载，Deny → Allow → Unmatched 求值 + 工作区边界检查。
 - **审批模式**：`Default`（权限引擎判定）· `Accept Edits`（工作区内编辑自动放行）· `Privileged`（一律放行，危险操作仍拦）· `Auto`（交 AI 分类器裁决 approve / ask / reject）。
@@ -138,7 +140,10 @@ npm run dist        # 产出 release/ 下的 dmg / exe / AppImage
 | `cron` | 定时任务（创建 / 删除 / 暂停 / 执行） |
 | `skill` | 调用自定义技能 |
 | `agent` | 委托任务给子 Agent |
-| `plan` | 生成实现计划 |
+| `workflow` | 多 Agent 编排（一段确定性 Python 脚本调度一群子代理） |
+| `background_task` | 管理后台运行的任务（Bash 命令 / 子 Agent） |
+| `present_files` | 把文件呈现到桌面界面供查看 / 打开 |
+| `vision` | 图像识别（tool 模式） |
 
 工具描述写在各工具函数 docstring 里；外部工具经 MCP 接入。
 

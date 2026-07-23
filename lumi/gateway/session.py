@@ -477,6 +477,11 @@ async def _switch_session(session: GatewaySession, params: dict) -> dict:
     changing_thread = tid != session._bridge.current_thread_id
     if changing_thread:
         await session._finalize_active_turn(wait=True)
+        # 前端未带 workspace（如打开 cron 执行线程续聊）：从线程自身 checkpoint 恢复其
+        # 记录的项目，否则下方绑定分支会 mark_workspace_unbound，工作区边界关卡拒发消息。
+        # 仅对既有 thread（显式传了 thread_id）恢复——新会话的 tid 是刚生成的、必然无 checkpoint。
+        if not workspace and params.get("thread_id"):
+            workspace = await session._bridge.recorded_workspace_dir(tid)
     async with session._run.lock:
         # 先切 thread 再绑项目：set_workspace 关的是 current_thread 的 shell，必须等
         # current_thread 已是切入的 tid，否则会关到切出会话的 shell、而切入会话的陈旧

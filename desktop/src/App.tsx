@@ -256,7 +256,7 @@ const replaceBackendTasks = (prev: BgTask[], backend: string, tasks: BgTask[]): 
 // 远程机器通常没有活跃会话连接、只有一条控制连接，故控制连接也要把这些转给
 // handleEvent——否则远程的定时任务/后台任务在界面上永远是静止的。本机会经两条
 // 连接各收一次，这些处理器都按机器整段覆盖或自带去重，重复到达幂等。
-const PROCESS_EVENTS = new Set(['cron.result', 'cron.running', 'bg_tasks.update', 'mcp.status'])
+const PROCESS_EVENTS = new Set(['cron.result', 'cron.running', 'cron.jobs', 'bg_tasks.update', 'mcp.status'])
 
 // 按 approval_id 把挂起的审批/澄清入队；已在队列则原样返回（重连后端会重发，去重保幂等）。
 const enqueuePending = (
@@ -434,6 +434,7 @@ export default function App() {
   // 每台机器一条「控制连接」：用于跨机器 fan-out list_sessions / 全局 RPC（非 chat 流）
   const controlConns = useRef<Record<string, Gateway>>({})
   const cronJobsRef = useRef<CronJob[]>([]) // 据此把定时操作路由到任务所属机器
+  const refreshCronJobsRef = useRef<((only?: string) => void) | null>(null) // handleEvent 经此按机器刷新
   const scrollRef = useRef<HTMLDivElement>(null)
   // 聊天流「粘底」：贴底时才跟随流式输出，用户上滚即放手（不再抢界面）。
   // pinnedRef 供自动滚动 effect 同步判定；showJump 驱动「回到底部」浮钮渲染。
@@ -448,6 +449,7 @@ export default function App() {
   // MCP 失败 toast 去重（`backend:server:error` → 上次弹出时刻）：配置保存→作废→
   // 重载的连环加载会重播同一失败，60s 内不重复弹
   const mcpToastAtRef = useRef(new Map<string, number>())
+  const cronRefreshAtRef = useRef(new Map<string, number>()) // cron.jobs 本机经两条连接各来一次，按机器去重
   // 面板刷新信号合并：同一池的广播每条绑定连接各收一帧，微任务尾只发一次
   const mcpSignalQueuedRef = useRef(false)
   // 临时目录是连接级（bridge 内存）状态：重连得到全新 bridge 后需重放，故镜像到 ref
@@ -551,6 +553,17 @@ export default function App() {
         const same = cur?.length === next.length && cur.every((v, i) => v === next[i])
         return same ? prev : { ...prev, [backend]: next }
       })
+      return
+    }
+    // 任务增删改（agent 工具在会话里建/改/删定时任务）：只重拉来源机器的任务列表
+    // （事件带 backend），无需手动 Ctrl+R，也不白拉其他机器。本机同一变更经会话连接 +
+    // 控制连接各来一次，200ms 内按机器去重，避免重复 list_cron_jobs（同 mcp.status 去重）。
+    if (type === 'cron.jobs') {
+      const now = Date.now()
+      if (now - (cronRefreshAtRef.current.get(backend) ?? 0) >= 200) {
+        cronRefreshAtRef.current.set(backend, now)
+        refreshCronJobsRef.current?.(backend)
+      }
       return
     }
     // MCP 池后台加载完成：服务端已按连接过滤（只有绑定该池的连接收到），但后台项目
@@ -1088,8 +1101,10 @@ export default function App() {
   }, [])
 
   // 跨机器 fan-out 定时任务：每台机器各拉一次 list_cron_jobs，打机器标记后合并。
-  const refreshCronJobs = useCallback(() => {
-    const conns = Object.entries(controlConns.current)
+  // 传 only 时只刷该机器（cron.jobs 事件带来源机器 → 别把其他机器也白拉一遍），
+  // 合并时保留其他机器上一轮的段。
+  const refreshCronJobs = useCallback((only?: string) => {
+    const conns = Object.entries(controlConns.current).filter(([b]) => !only || b === only)
     if (!conns.length) return
     void Promise.all(
       conns.map(async ([backend, gw]) => {
@@ -1098,11 +1113,19 @@ export default function App() {
           return { jobs: r.jobs.map((j) => ({ ...j, backend })), ok: true }
         } catch {
           // 抖动：保留该机器上一轮的任务，别让它从列表消失
-          return { jobs: cronJobsRef.current.filter((j) => (j.backend || 'local') === backend), ok: false }
+          return { jobs: cronJobsRef.current.filter((j) => beOf(j) === backend), ok: false }
         }
       }),
-    ).then((results) => setCronJobs(results.flatMap((r) => r.jobs)))
+    ).then((results) => {
+      const fetched = results.flatMap((r) => r.jobs)
+      setCronJobs((prev) =>
+        only ? [...prev.filter((j) => beOf(j) !== only), ...fetched] : fetched,
+      )
+    })
   }, [])
+  useEffect(() => {
+    refreshCronJobsRef.current = refreshCronJobs
+  }, [refreshCronJobs])
 
   // 重连某机器：重新从配置取最新地址（设置里可能改过 url/token）再 reconnect，
   // 否则 Gateway 仍持有构造时的旧地址。启用的机器其连接恒在 controlConns 里（失败态不删），
@@ -1602,7 +1625,7 @@ export default function App() {
     (id: string, enabled: boolean) =>
       void gwForBackend(projectHome?.backend ?? 'local')
         ?.toggleCronJob(id, enabled)
-        .then(refreshCronJobs)
+        .then(() => refreshCronJobs())
         .catch(() => {}),
     [gwForBackend, projectHome, refreshCronJobs],
   )

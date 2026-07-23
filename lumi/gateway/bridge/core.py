@@ -382,6 +382,17 @@ class AgentBridge:
         """底层 LangGraph 编译图实例，用于 get_state 等操作"""
         return self._agent.graph if self._agent else None
 
+    async def recorded_workspace_dir(self, thread_id: str) -> str:
+        """读取某 thread 最近 checkpoint 记录的项目目录（``metadata.workspace_dir``）。
+
+        用于打开一个「非本连接创建、前端未随手带 workspace」的既有线程（如 cron 执行
+        线程）时恢复其项目绑定；无 checkpoint / 未记录则返回空串。
+        """
+        if self.graph is None:
+            return ""
+        snap = await self.graph.aget_state({"configurable": {"thread_id": thread_id}})
+        return (snap.metadata or {}).get("workspace_dir", "")
+
     @property
     def _memory_enabled(self) -> bool:
         """本会话是否启用持久记忆（决定 /dream 是否为内置命令）。"""

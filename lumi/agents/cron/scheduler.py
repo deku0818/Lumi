@@ -56,7 +56,7 @@ class Scheduler:
         job_store: JobStore,
         run_log: RunLog,
         delivery: DeliveryManager,
-        execution_timeout: int = 600,
+        execution_timeout: int = 6000,
         on_job_status: Callable[[list[str]], None] | None = None,
         lock_path: Path | None = None,
     ) -> None:
@@ -435,6 +435,9 @@ class Scheduler:
             }
             config = RunnableConfig(
                 recursion_limit=get_config().config.agents.recursion_limit,
+                # 记录本 run 所属项目（对齐 AgentBridge）：cron 线程在 desktop 续聊时
+                # 据此恢复 workspace 绑定，否则工作区边界关卡拒发「请先选择项目」。
+                metadata={"workspace_dir": str(proj)},
             )
             if thread_id:
                 config["configurable"] = {"thread_id": thread_id}
@@ -599,9 +602,13 @@ class Scheduler:
         )
 
     async def _persist_consecutive_errors(self, job: Job) -> None:
-        """将 Job 的 consecutive_errors 持久化到 JobStore。"""
+        """将 Job 的 consecutive_errors 持久化到 JobStore。
+
+        notify=False：错误计数是重试退避的内部状态、前端不展示，无需触发 cron.jobs
+        广播（否则 flapping 任务每次重试都让所有 desktop 全量重拉任务列表）。
+        """
         try:
-            await self._job_store.upsert(job)
+            await self._job_store.upsert(job, notify=False)
         except Exception:
             logger.warning(
                 "更新 consecutive_errors 失败: %s [%s]",

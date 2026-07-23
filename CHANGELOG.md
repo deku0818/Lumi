@@ -1,5 +1,14 @@
 # Changelog
 
+## [0.2.69] - 2026-07-23
+
+### Fixed
+- **定时任务执行线程在桌面续聊被拒「请先选择项目」** — cron 直接 `ainvoke` 运行（不走 AgentBridge），从不给 checkpoint 写 `metadata.workspace_dir`，于是 desktop 打开该线程续聊时工作区未绑定、被边界关卡拦下。现 cron 运行时对齐 AgentBridge 记录项目元数据；`switch_session` 在前端未带 workspace 时从线程自身 checkpoint 恢复项目绑定（通用机制、仅对显式传了 thread_id 的既有线程生效）
+- **会话里让 agent 创建定时任务后桌面列表不刷新（需手动 Ctrl+R）** — 任务增删改只落盘、无事件通知前端。现 `JobStore` 增删改经观察者广播 `cron.jobs` 信号（tool / desktop UI 两条路唯一的落盘 choke point），前端据此只重拉来源机器的任务列表（本机双投递按机器去重）；退避错误计数等内部记账 `notify=False` 不触发刷新
+
+### Changed
+- 定时任务单次执行超时上限由 600s 提高到 6000s（长耗时的开发型任务需要更宽的执行窗口）
+
 ## [0.2.68] - 2026-07-22
 
 ### Changed

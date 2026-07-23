@@ -206,3 +206,41 @@ class TestJobStoreGet:
         assert len(result) == 3
         ids = {j.id for j in result}
         assert ids == {"aaa", "bbb", "ccc"}
+
+
+class TestJobStoreOnChange:
+    """set_on_change：任务增删改后触发观察者（gateway 据此广播 cron.jobs 刷新前端）。"""
+
+    async def test_upsert_fires_change(self, tmp_path: Path) -> None:
+        store = JobStore(tmp_path / "jobs.json")
+        calls = []
+        store.set_on_change(lambda: calls.append(1))
+        await store.upsert(_make_job())
+        assert calls == [1]
+
+    async def test_delete_fires_change_when_removed(self, tmp_path: Path) -> None:
+        store = JobStore(tmp_path / "jobs.json")
+        await store.upsert(_make_job(job_id="x"))
+        calls = []
+        store.set_on_change(lambda: calls.append(1))
+        await store.delete("x")
+        assert calls == [1]
+
+    async def test_delete_no_change_when_absent(self, tmp_path: Path) -> None:
+        store = JobStore(tmp_path / "jobs.json")
+        calls = []
+        store.set_on_change(lambda: calls.append(1))
+        assert await store.delete("nonexistent") is False
+        assert calls == []  # 未真正删除 → 不误触发刷新
+
+    async def test_no_callback_is_safe(self, tmp_path: Path) -> None:
+        store = JobStore(tmp_path / "jobs.json")
+        await store.upsert(_make_job())  # 未设 on_change 也不报错
+
+    async def test_upsert_notify_false_suppresses(self, tmp_path: Path) -> None:
+        # 内部记账（consecutive_errors 持久化）传 notify=False，不触发前端刷新
+        store = JobStore(tmp_path / "jobs.json")
+        calls = []
+        store.set_on_change(lambda: calls.append(1))
+        await store.upsert(_make_job(), notify=False)
+        assert calls == []

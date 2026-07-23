@@ -25,6 +25,7 @@ _DIRECT_EVENTS = {
     "gateway.ready",
     "cron.result",
     "cron.running",
+    "cron.jobs",
     "bg_tasks.update",
     "channel.activity",
     "session.title",

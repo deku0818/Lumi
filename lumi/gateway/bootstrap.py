@@ -38,6 +38,9 @@ async def gateway_process():
         delivery = DeliveryManager()
         delivery.register(hub.delivery)
         cron_runtime = setup_cron(delivery, on_job_status=hub.on_cron_job_status)
+        # 任务增删改（agent 工具 / desktop UI 两条路都经此 store）→ 广播 cron.jobs，
+        # 驱动前端实时刷新列表，无需手动 Ctrl+R
+        cron_runtime.job_store.set_on_change(hub.on_cron_jobs_changed)
         set_cron_runtime(cron_runtime)
         await cron_runtime.scheduler.start()
         logger.info("[gateway] 定时任务子系统已启动")

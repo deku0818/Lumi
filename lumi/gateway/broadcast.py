@@ -57,6 +57,13 @@ class BroadcastHub:
         """Scheduler 同步回调：把运行中任务 id 列表广播为 cron.running 事件。"""
         self._spawn(self._delivery.send_event("cron.running", {"job_ids": job_ids}))
 
+    def on_cron_jobs_changed(self) -> None:
+        """JobStore 同步回调：任务增删改后广播 cron.jobs，前端据此重拉任务列表。
+
+        信号式（不带列表）：任务是跨机器 fan-out 的，前端收到即各机器重拉一次。
+        """
+        self._spawn(self._delivery.send_event("cron.jobs", {}))
+
     def on_channel_activity(self, thread_id: str, channel: str) -> None:
         """IM channel 跑完一轮：广播给所有连接（desktop 刷会话列表 / 旁观视图重载）。"""
         self._spawn(
