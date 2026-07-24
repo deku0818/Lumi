@@ -1,5 +1,6 @@
 import { memo, useCallback, useEffect, useState, type ReactNode } from 'react'
 import {
+  ArrowLeft,
   Bot,
   Brain,
   Clock,
@@ -300,14 +301,12 @@ export const ProjectHomePage = memo(function ProjectHomePage({
 
       {sheet && (
         <ResourceSheet
-          // 按资源身份 remount：换资源打开时重置 file/editing/text 等内部状态
-          key={sheet.mode === 'view' ? `${sheet.kind}:${sheet.name}` : `new:${sheet.kind}`}
           api={api}
           path={project.path}
           sheet={sheet}
           onClose={() => setSheet(null)}
           onChanged={refresh}
-          onSwitch={(s) => setSheet(s)}
+          onSwitch={setSheet}
         />
       )}
     </div>
@@ -424,21 +423,32 @@ description: 一句话说明这个 Agent 负责什么
 // 与后端 _NAME_RE 一致：首字符字母数字，其余允许 ._-（不一致会被后端拒绝）
 const NAME_RE = /^[A-Za-z0-9][A-Za-z0-9._-]*$/
 
-function ResourceSheet({
-  api,
-  path,
-  sheet,
-  onClose,
-  onChanged,
-  onSwitch,
-}: {
+type SheetProps = {
   api: () => Gateway | undefined
   path: string
   sheet: Sheet
   onClose: () => void
   onChanged: () => void
   onSwitch: (s: Sheet) => void
-}) {
+}
+
+function ResourceSheet(props: SheetProps) {
+  const { sheet, onClose } = props
+  return (
+    <Dialog open onOpenChange={(o) => !o && onClose()}>
+      <DialogContent className="sm:max-w-2xl w-full p-0 gap-0 overflow-hidden" showCloseButton>
+        {/* 内层按资源身份 keyed：浮层内切换资源（记忆 wiki 互链 / 创建后转查看）时
+            per-resource 状态自动重置，Dialog 骨架保持挂载不重放开场动画 */}
+        <SheetBody
+          key={sheet.mode === 'view' ? `${sheet.kind}:${sheet.name}` : `new:${sheet.kind}`}
+          {...props}
+        />
+      </DialogContent>
+    </Dialog>
+  )
+}
+
+function SheetBody({ api, path, sheet, onClose, onChanged, onSwitch }: SheetProps) {
   const { t } = useI18n()
   const creating = sheet.mode === 'create'
   const kind = sheet.kind
@@ -452,6 +462,8 @@ function ResourceSheet({
   // create 模式：用户动过正文前，模板的 name 行跟随名字输入框实例化——
   // 前端不做 frontmatter 手术（解析权威在后端），动过就原样提交、交给后端校验报错
   const [textDirty, setTextDirty] = useState(false)
+  // 读取失败（含离线）：与「加载中」区分，避免光点永转
+  const [failed, setFailed] = useState(false)
 
   useEffect(() => {
     if (sheet.mode === 'create') {
@@ -465,9 +477,14 @@ function ResourceSheet({
       }
       return
     }
+    setFailed(false)
+    const gw = api()
+    if (!gw) {
+      setFailed(true)
+      return
+    }
     let stale = false
-    api()
-      ?.projectResourceRead(path, sheet.kind, sheet.name, file)
+    gw.projectResourceRead(path, sheet.kind, sheet.name, file)
       .then((r) => {
         if (stale) return
         setRes(r)
@@ -476,7 +493,9 @@ function ResourceSheet({
         if (sheet.kind === 'prompt' && !r.content) setEditing(true)
       })
       .catch((e) => {
-        if (!stale) toast.error(errorMessage(e))
+        if (stale) return
+        setFailed(true)
+        toast.error(errorMessage(e))
       })
     return () => {
       stale = true
@@ -493,6 +512,12 @@ function ResourceSheet({
     if (!gw) toast.error(t('projhome.offline'))
     return gw
   }
+
+  // 稳定引用：否则每次渲染都换新 onFileLink，击穿 Markdown 内的 components useMemo
+  const openMemoryFile = useCallback(
+    (name: string) => onSwitch({ mode: 'view', kind: 'memory', name }),
+    [onSwitch],
+  )
 
   const save = async () => {
     const gw = requireGw()
@@ -543,137 +568,160 @@ function ResourceSheet({
   const kindLabel = t(kind === 'skill' ? 'projhome.skillKind' : 'projhome.agentKind')
 
   return (
-    <Dialog open onOpenChange={(o) => !o && onClose()}>
-      <DialogContent className="sm:max-w-2xl w-full p-0 gap-0 overflow-hidden" showCloseButton>
-        {/* 头部 */}
-        <div className="flex items-center gap-2.5 px-5 py-3.5 border-b border-line/60 pr-12">
-          {creating ? (
-            <input
-              autoFocus
-              value={newName}
-              onChange={(e) => setNewName(e.target.value)}
-              placeholder={t('projhome.namePlaceholder')}
-              className={`bg-canvas/60 border rounded-lg px-2.5 py-1 text-[13px] font-mono outline-none w-64 ${
-                newName.trim() && !validNewName
-                  ? 'border-destructive/60'
-                  : 'border-line focus:border-primary/40'
-              }`}
-            />
-          ) : (
+    <>
+      {/* 头部 */}
+      <div className="flex items-center gap-2.5 px-5 py-3.5 border-b border-line/60 pr-12">
+        {creating ? (
+          <input
+            autoFocus
+            value={newName}
+            onChange={(e) => setNewName(e.target.value)}
+            placeholder={t('projhome.namePlaceholder')}
+            className={`bg-canvas/60 border rounded-lg px-2.5 py-1 text-[13px] font-mono outline-none w-64 ${
+              newName.trim() && !validNewName
+                ? 'border-destructive/60'
+                : 'border-line focus:border-primary/40'
+            }`}
+          />
+        ) : (
+          <>
+            {kind === 'memory' && sheet.name !== 'MEMORY.md' && (
+              <SheetBtn
+                title={t('projhome.backToIndex')}
+                onClick={() => onSwitch({ mode: 'view', kind: 'memory', name: 'MEMORY.md' })}
+              >
+                <ArrowLeft size={13} />
+              </SheetBtn>
+            )}
             <DialogTitle className="text-[13.5px] font-mono font-semibold">{sheet.name}</DialogTitle>
-          )}
-          {builtin && (
-            <span className="inline-flex items-center gap-1 px-2 py-0.5 rounded-full bg-muted-foreground/12 text-[10px] text-muted-foreground">
-              <Lock size={9} />
-              {t(res?.source === 'global' ? 'projhome.globalBadge' : 'projhome.builtin')}
-            </span>
-          )}
-          {res?.path && !creating && (
-            <span className="text-[10.5px] text-muted-foreground/70 font-mono truncate">{res.path}</span>
-          )}
-          {creating && (
-            <span className="text-[10.5px] text-muted-foreground/70 font-mono">
-              {kind === 'skill' ? '.lumi/skills/…/SKILL.md' : '.lumi/agents/….md'}
-            </span>
-          )}
-          <span className="ml-auto flex items-center gap-0.5">
-            {editable && !editing && (
-              <SheetBtn title={t('projhome.edit')} onClick={() => setEditing(true)}>
-                <Pencil size={13} />
-              </SheetBtn>
-            )}
-            {!creating && !builtin && (kind === 'skill' || kind === 'agent') && (
-              <SheetBtn danger title={t('projhome.delete')} onClick={() => setConfirming(true)}>
-                <Trash2 size={13} />
-              </SheetBtn>
-            )}
+          </>
+        )}
+        {builtin && (
+          <span className="inline-flex items-center gap-1 px-2 py-0.5 rounded-full bg-muted-foreground/12 text-[10px] text-muted-foreground">
+            <Lock size={9} />
+            {t(res?.source === 'global' ? 'projhome.globalBadge' : 'projhome.builtin')}
           </span>
+        )}
+        {res?.path && !creating && (
+          <span className="text-[10.5px] text-muted-foreground/70 font-mono truncate">{res.path}</span>
+        )}
+        {creating && (
+          <span className="text-[10.5px] text-muted-foreground/70 font-mono">
+            {kind === 'skill' ? '.lumi/skills/…/SKILL.md' : '.lumi/agents/….md'}
+          </span>
+        )}
+        <span className="ml-auto flex items-center gap-0.5">
+          {editable && !editing && (
+            <SheetBtn title={t('projhome.edit')} onClick={() => setEditing(true)}>
+              <Pencil size={13} />
+            </SheetBtn>
+          )}
+          {!creating && !builtin && (kind === 'skill' || kind === 'agent') && (
+            <SheetBtn danger title={t('projhome.delete')} onClick={() => setConfirming(true)}>
+              <Trash2 size={13} />
+            </SheetBtn>
+          )}
+        </span>
+      </div>
+
+      {/* 删除确认条 */}
+      {confirming && (
+        <div className="flex items-center gap-2.5 px-5 py-2.5 text-xs bg-destructive/10 border-b border-destructive/30">
+          <span className="flex-1">
+            {t('projhome.deleteConfirm', { name: sheet.mode === 'view' ? sheet.name : '' })}
+          </span>
+          <Button variant="outline" size="sm" onClick={() => setConfirming(false)}>
+            {t('common.cancel')}
+          </Button>
+          <Button variant="destructive" size="sm" onClick={doDelete}>
+            {t('projhome.delete')}
+          </Button>
         </div>
+      )}
 
-        {/* 删除确认条 */}
-        {confirming && (
-          <div className="flex items-center gap-2.5 px-5 py-2.5 text-xs bg-destructive/10 border-b border-destructive/30">
-            <span className="flex-1">
-              {t('projhome.deleteConfirm', { name: sheet.mode === 'view' ? sheet.name : '' })}
-            </span>
-            <Button variant="outline" size="sm" onClick={() => setConfirming(false)}>
-              {t('common.cancel')}
-            </Button>
-            <Button variant="destructive" size="sm" onClick={doDelete}>
-              {t('projhome.delete')}
-            </Button>
+      {/* 内置提示条 */}
+      {builtin && !confirming && (kind === 'skill' || kind === 'agent') && (
+        <div className="flex items-center gap-2.5 px-5 py-2.5 text-[11.5px] text-muted-foreground border-b border-line/60">
+          {t(res?.source === 'global' ? 'projhome.globalTip' : 'projhome.builtinTip', {
+            kind: kindLabel,
+          })}
+          <button
+            onClick={copyToProject}
+            className="px-2.5 py-1 rounded-full border border-dashed border-primary/45 text-primary/90 hover:bg-primary/10 transition"
+          >
+            {t('projhome.copyToProject')}
+          </button>
+          <span className="text-muted-foreground/60">{t('projhome.copyNote')}</span>
+        </div>
+      )}
+
+      {/* 正文：skill 多文件时左侧文件栏。min-w-0 阻断 grid track 被长内容撑宽
+          （DialogContent 是 grid，track 变宽会把头部按钮推出 overflow-hidden 裁剪区） */}
+      <div className="flex min-h-0 min-w-0 h-[26rem]">
+        {kind === 'skill' && (res?.files?.length ?? 0) > 1 && !creating && (
+          <div className="w-44 shrink-0 overflow-y-auto border-r border-line/60 p-2">
+            {res!.files!.map((f) => (
+              <button
+                key={f}
+                onClick={() => {
+                  setFile(f === 'SKILL.md' ? '' : f)
+                  setEditing(false)
+                }}
+                className={`block w-full text-left px-2 py-1 rounded-md text-[11px] font-mono truncate transition ${
+                  (file || 'SKILL.md') === f
+                    ? 'bg-primary/12 text-primary'
+                    : 'text-muted-foreground hover:bg-surface hover:text-ink'
+                }`}
+              >
+                {f}
+              </button>
+            ))}
           </div>
         )}
-
-        {/* 内置提示条 */}
-        {builtin && !confirming && (kind === 'skill' || kind === 'agent') && (
-          <div className="flex items-center gap-2.5 px-5 py-2.5 text-[11.5px] text-muted-foreground border-b border-line/60">
-            {t(res?.source === 'global' ? 'projhome.globalTip' : 'projhome.builtinTip', {
-              kind: kindLabel,
-            })}
-            <button
-              onClick={copyToProject}
-              className="px-2.5 py-1 rounded-full border border-dashed border-primary/45 text-primary/90 hover:bg-primary/10 transition"
-            >
-              {t('projhome.copyToProject')}
-            </button>
-            <span className="text-muted-foreground/60">{t('projhome.copyNote')}</span>
-          </div>
-        )}
-
-        {/* 正文：skill 多文件时左侧文件栏。min-w-0 阻断 grid track 被长内容撑宽
-            （DialogContent 是 grid，track 变宽会把头部按钮推出 overflow-hidden 裁剪区） */}
-        <div className="flex min-h-0 min-w-0 h-[26rem]">
-          {kind === 'skill' && (res?.files?.length ?? 0) > 1 && !creating && (
-            <div className="w-44 shrink-0 overflow-y-auto border-r border-line/60 p-2">
-              {res!.files!.map((f) => (
-                <button
-                  key={f}
-                  onClick={() => {
-                    setFile(f === 'SKILL.md' ? '' : f)
-                    setEditing(false)
-                  }}
-                  className={`block w-full text-left px-2 py-1 rounded-md text-[11px] font-mono truncate transition ${
-                    (file || 'SKILL.md') === f
-                      ? 'bg-primary/12 text-primary'
-                      : 'text-muted-foreground hover:bg-surface hover:text-ink'
-                  }`}
-                >
-                  {f}
-                </button>
-              ))}
+        <div className="flex-1 min-w-0 flex flex-col">
+          {editing ? (
+            <>
+              <textarea
+                value={text}
+                onChange={(e) => {
+                  setText(e.target.value)
+                  if (creating) setTextDirty(true) // 动过正文后模板不再跟随名字
+                }}
+                spellCheck={false}
+                className="flex-1 resize-none outline-none bg-canvas/50 px-4 py-3 font-mono text-[11.5px] leading-relaxed selectable"
+              />
+              <div className="flex justify-end gap-2 px-4 py-2.5 border-t border-line/60">
+                <Button variant="outline" size="sm" onClick={() => (creating ? onClose() : setEditing(false))}>
+                  {t('common.cancel')}
+                </Button>
+                <Button size="sm" disabled={creating && !validNewName} onClick={save}>
+                  {t(creating ? 'projhome.create' : 'projhome.save')}
+                </Button>
+              </div>
+            </>
+          ) : failed ? (
+            <div className="flex-1 grid place-items-center">
+              <Empty>{t('projhome.loadFailed')}</Empty>
+            </div>
+          ) : res === null ? (
+            // 读取中：光点延迟出现，本地毫秒级读取不闪，远程往返时可见
+            <div className="flex-1 grid place-items-center animate-in fade-in fill-mode-both delay-[180ms]">
+              <span className="lumi-orb" />
+            </div>
+          ) : res.missing ? (
+            <div className="flex-1 grid place-items-center">
+              <Empty>{t('projhome.memoryMissing')}</Empty>
+            </div>
+          ) : (
+            <div className="flex-1 overflow-y-auto px-5 py-4 md text-[12.5px] selectable animate-in fade-in">
+              <Markdown onFileLink={kind === 'memory' ? openMemoryFile : undefined}>
+                {res.body}
+              </Markdown>
             </div>
           )}
-          <div className="flex-1 min-w-0 flex flex-col">
-            {editing ? (
-              <>
-                <textarea
-                  value={text}
-                  onChange={(e) => {
-                    setText(e.target.value)
-                    if (creating) setTextDirty(true) // 动过正文后模板不再跟随名字
-                  }}
-                  spellCheck={false}
-                  className="flex-1 resize-none outline-none bg-canvas/50 px-4 py-3 font-mono text-[11.5px] leading-relaxed selectable"
-                />
-                <div className="flex justify-end gap-2 px-4 py-2.5 border-t border-line/60">
-                  <Button variant="outline" size="sm" onClick={() => (creating ? onClose() : setEditing(false))}>
-                    {t('common.cancel')}
-                  </Button>
-                  <Button size="sm" disabled={creating && !validNewName} onClick={save}>
-                    {t(creating ? 'projhome.create' : 'projhome.save')}
-                  </Button>
-                </div>
-              </>
-            ) : (
-              <div className="flex-1 overflow-y-auto px-5 py-4 md text-[12.5px] selectable">
-                <Markdown>{res?.body ?? ''}</Markdown>
-              </div>
-            )}
-          </div>
         </div>
-      </DialogContent>
-    </Dialog>
+        </div>
+    </>
   )
 }
 

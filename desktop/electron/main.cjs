@@ -13,6 +13,9 @@ const { setupUpdater } = require('./updater.cjs')
 // 前端连接时在 ?token= 携带。本地与远程公网部署走同一套鉴权，无本地特例。
 const LOCAL_TOKEN = crypto.randomBytes(24).toString('hex')
 
+// dev 服务器源的唯一事实：导航放行 / 同源判断 / loadURL 三处共用（改端口只动 env）
+const DEV_ORIGIN = new URL(process.env.VITE_DEV_SERVER_URL || 'http://127.0.0.1:5173').origin
+
 // 自定义协议：让 renderer 安全引用本地文件（绕过 http origin 下的 file:// 限制），
 // 用于 present_files 预览面板里 <img>/<iframe> 加载图片/PDF/HTML。必须在 app ready 前登记。
 protocol.registerSchemesAsPrivileged([
@@ -291,19 +294,23 @@ function createWindow() {
     shell.openExternal(url)
     return { action: 'deny' }
   })
+  // SPA 里任何整页导航都不合法：只放行应用入口自身（刷新 / vite 全量重载），
+  // 其余同源或 file 路径一律拦下（防相对 href 把窗口导航走），外部协议转系统打开。
   win.webContents.on('will-navigate', (e, url) => {
+    const target = url.split(/[?#]/)[0]
+    if (target === DEV_ORIGIN + '/' || target.endsWith('/dist/index.html')) return
+    e.preventDefault()
     if (
-      !url.startsWith('http://127.0.0.1:5173') &&
+      !url.startsWith(DEV_ORIGIN) &&
       !url.startsWith('file://') &&
       !url.startsWith('lumi-file://')
     ) {
-      e.preventDefault()
       shell.openExternal(url)
     }
   })
 
   if (!app.isPackaged) {
-    win.loadURL(process.env.VITE_DEV_SERVER_URL || 'http://127.0.0.1:5173')
+    win.loadURL(DEV_ORIGIN)
   } else {
     win.loadFile(path.join(__dirname, '..', 'dist', 'index.html'))
   }

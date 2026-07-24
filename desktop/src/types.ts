@@ -159,6 +159,7 @@ export interface ProjectResource {
   builtin?: boolean
   source?: string
   path?: string
+  missing?: boolean // memory：索引里还有链接但文件已被删
 }
 
 // 斜杠命令（对齐后端 list_commands：当前为技能命令）

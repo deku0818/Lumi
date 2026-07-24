@@ -14,7 +14,7 @@ import re
 import shutil
 from pathlib import Path
 
-from lumi.agents.memory.paths import memory_dir
+from lumi.agents.memory.paths import memory_dir, read_text_or_none
 from lumi.agents.tools.loader import (
     _load_agents_from_dir,
     _load_skills_from_dir,
@@ -193,8 +193,13 @@ def read_resource(project: Path, kind: str, name: str, file: str = "") -> dict:
             raise ValueError(f"未知提示词: {name}")
         return _prompt_info(project, name)
     if kind == "memory":
-        _check_name(name)
-        content = (memory_dir(project) / name).read_text("utf-8")
+        # 记忆文件名由 agent 自由起（可含 CJK），只做路径安全检查，不套资源命名规则
+        if "/" in name or "\\" in name or name.startswith("."):
+            raise ValueError(f"非法名称: {name}")
+        content = read_text_or_none(memory_dir(project) / name)
+        if content is None:
+            # MEMORY.md 索引里的链接可能指向已删除的文件，前端据此显示空态而非报错
+            return {"content": "", "body": "", "missing": True}
         return {"content": content, "body": strip_frontmatter(content)}
     raise ValueError(f"未知资源类型: {kind}")
 
