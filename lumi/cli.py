@@ -93,6 +93,11 @@ def serve(
 
         get_config(str(Path.home() / ".lumi"))
 
+    # 工具箱 bin 追加到 PATH 末尾：agent 子进程可见 uv/rg/node/lark-cli，系统同名优先
+    from lumi.gateway.toolbox import inject_path
+
+    inject_path()
+
     import uvicorn
 
     from lumi.gateway.channels import ws
@@ -144,6 +149,10 @@ def _run_headless(
         from lumi.utils.read_config import get_config
 
         get_config().apply_env()
+        # 与 serve 同源：工具箱 bin 追加到 PATH 末尾，agent 子进程可见 uv/rg/lark-cli
+        from lumi.gateway.toolbox import inject_path
+
+        inject_path()
 
         bridge = AgentBridge()
         try:

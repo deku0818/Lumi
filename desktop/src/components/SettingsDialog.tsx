@@ -1,4 +1,4 @@
-import { SlidersHorizontal, Boxes, Server, Send, Plug, Info, Monitor, Sun, Moon, Minus, Plus } from 'lucide-react'
+import { SlidersHorizontal, Boxes, Server, Send, Plug, Wrench, Info, Monitor, Sun, Moon, Minus, Plus } from 'lucide-react'
 import type { Gateway } from '../gateway'
 import type { ThemePref } from '../theme'
 import { type FontPref, DEFAULT_SIZE, MIN_SIZE, MAX_SIZE } from '../font'
@@ -7,6 +7,7 @@ import { ProvidersPanel } from './ProvidersPanel'
 import { ChannelsPanel } from './ChannelsPanel'
 import { McpPanel } from './McpPanel'
 import { BackendsPanel } from './BackendsPanel'
+import { EnvPanel } from './EnvPanel'
 import { AboutPanel } from './AboutPanel'
 import { FontPicker } from './FontPicker'
 import { Section, SectionGroup, Row, SegmentedControl, segmentShell } from './SettingsKit'
@@ -31,7 +32,7 @@ export function SettingsDialog({
   onProvidersChanged,
   onClose,
 }: {
-  initialTab?: 'general' | 'models' | 'channels' | 'connections' | 'mcp' | 'about' // 打开时定位的 tab
+  initialTab?: 'general' | 'models' | 'channels' | 'connections' | 'mcp' | 'env' | 'about' // 打开时定位的 tab
   themePref: ThemePref
   setThemePref: (p: ThemePref) => void
   uiFont: FontPref
@@ -80,6 +81,10 @@ export function SettingsDialog({
               <Plug />
               {t('settings.mcp')}
             </TabsTrigger>
+            <TabsTrigger value="env" className={navClass}>
+              <Wrench />
+              {t('settings.env')}
+            </TabsTrigger>
             <TabsTrigger value="connections" className={navClass}>
               <Server />
               {t('settings.connections')}
@@ -110,6 +115,9 @@ export function SettingsDialog({
           </TabsContent>
           <TabsContent value="mcp" className="flex-1 min-w-0 overflow-auto px-6 pb-6 pt-12 mt-0">
             <McpPanel machines={machines} gwFor={gwFor} />
+          </TabsContent>
+          <TabsContent value="env" className="flex-1 min-w-0 overflow-auto px-6 pb-6 pt-12 mt-0">
+            <EnvPanel machines={machines} gwFor={gwFor} />
           </TabsContent>
           <TabsContent value="connections" className="flex-1 min-w-0 overflow-auto px-6 pb-6 pt-12 mt-0">
             <BackendsPanel />

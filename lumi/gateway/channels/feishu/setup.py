@@ -14,6 +14,7 @@ import json
 import os
 from dataclasses import asdict
 
+from lumi.gateway import toolbox
 from lumi.gateway.channels.feishu.checks import Check, blocked_tail
 from lumi.gateway.channels.feishu.lark_call import NETWORK_ERROR, lark_call_classified
 from lumi.gateway.channels.feishu.scopes import (
@@ -78,6 +79,103 @@ def _fail(name: str, why: str, **kw) -> list[dict]:
     return blocked_tail(
         [Check(key="credentials", name=name, tone="error", **kw)], _STEPS, why
     )
+
+
+def local_env_checks(workspace: str) -> list[dict]:
+    """本地环境两项：lark-cli（机器级）与飞书技能包（按渠道绑定项目检测）。
+
+    与远程四项拼成一张「接入体检」清单（见 channel_rpc），缺失项带 fix_action
+    供前端就地一键安装——cli 装机器级，技能包装到绑定项目的 .lumi/skills/。
+    """
+    group = "本地环境"
+    checks: list[Check] = []
+
+    cli = toolbox.detect("lark-cli")
+    if cli.source == "missing":
+        checks.append(
+            Check(
+                key="cli",
+                tone="error",
+                name="lark-cli 未安装",
+                detail="飞书 API 调用与妙记取数依赖该命令行工具",
+                fix_action="lark-cli",
+                fix_note="未安装 Node.js 时会先自动装入工具箱",
+                group=group,
+            )
+        )
+        checks.append(
+            Check(
+                key="skills",
+                tone="error",
+                name="飞书技能包",
+                detail="需先安装 lark-cli",
+                group=group,
+            )
+        )
+        return [asdict(c) for c in checks]
+
+    source = "系统" if cli.source == "system" else "工具箱"
+    version = f" v{cli.version}" if cli.version else ""
+    checks.append(
+        Check(
+            key="cli", name="lark-cli 已安装", detail=f"{source}{version}", group=group
+        )
+    )
+
+    embedded = toolbox.lark_skill_versions(cli.path)
+    if embedded is None:
+        # 清单读不到 ≠ 0 个技能待装：此时安装是空操作，给 fix_action 会造成
+        # 「一键安装 → 仍然报错」的死循环，正确出路是升级 cli
+        checks.append(
+            Check(
+                key="skills",
+                tone="error",
+                name="无法读取飞书技能清单",
+                detail="lark-cli 不支持 skills 子命令或输出异常，请先升级",
+                fix_cmd="npm update -g @larksuite/cli",
+                group=group,
+            )
+        )
+        return [asdict(c) for c in checks]
+
+    status = toolbox.skills_status(embedded, workspace)
+    dest = (
+        "绑定项目的 .lumi/skills/"
+        if workspace
+        else "~/.lumi/skills/（未绑定项目，全局兜底）"
+    )
+    if not status["installed"]:
+        checks.append(
+            Check(
+                key="skills",
+                tone="error",
+                name="飞书技能包未安装",
+                detail=f"{status['total']} 个飞书技能（消息 / 妙记 / 文档…）→ {dest}",
+                fix_action="feishu-skills",
+                group=group,
+            )
+        )
+    elif status["outdated"]:
+        checks.append(
+            Check(
+                key="skills",
+                tone="warn",
+                name="飞书技能包可更新",
+                detail=f"已装 {status['installed']}/{status['total']} 个，{status['outdated']} 个缺失或落后于 lark-cli 内嵌版本",
+                fix_action="feishu-skills",
+                group=group,
+            )
+        )
+    else:
+        checks.append(
+            Check(
+                key="skills",
+                name="飞书技能包已安装",
+                detail=f"{status['installed']} 个技能 · 与 lark-cli 同步",
+                group=group,
+            )
+        )
+    return [asdict(c) for c in checks]
 
 
 def diagnose(app_id: str, app_secret: str) -> list[dict]:

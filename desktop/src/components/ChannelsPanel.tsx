@@ -13,17 +13,20 @@ import {
 } from 'lucide-react'
 import type {
   ChannelInfo,
+  EnvInstallTarget,
+  EnvProgress,
   FeishuConfig,
   CheckTone,
   DiagnoseCheck,
   Project,
   ProviderProfile,
 } from '../types'
+import { useEnvInstall } from './useEnvInstall'
 import type { Gateway } from '../gateway'
 import { MachineTabs } from './MachineTabs'
 import { DirBrowser } from './DirBrowser'
 import { basename } from '@/lib/utils'
-import { Section, Card, Field, TextInput, SegmentedControl, FormModal } from './SettingsKit'
+import { Section, Card, Field, TextInput, SegmentedControl, FormModal, ProgressBar } from './SettingsKit'
 import { Button } from '@/components/ui/button'
 import { Switch } from '@/components/ui/switch'
 import {
@@ -277,18 +280,38 @@ function FeishuForm({
   // 接入体检：权限 / 事件订阅 / 版本发布任缺其一，机器人都是「连上了但不回消息」，
   // 且开放平台不报任何错。四项由一次「应用版本信息」查询判定。
   const setup = useDiagnose(() =>
-    gw?.diagnoseFeishuSetup('feishu', { app_id: cfg.app_id, app_secret: cfg.app_secret }),
+    gw?.diagnoseFeishuSetup('feishu', {
+      app_id: cfg.app_id,
+      app_secret: cfg.app_secret,
+      workspace: cfg.workspace,
+    }),
   )
   // 妙记体检：走 lark-cli 子进程 + 网络，耗时 1-2s
   const minutes = useDiagnose(() => gw?.diagnoseMinutes('feishu', { app_id: cfg.app_id }))
 
+  // 就地修复（一键安装）：进度显示在对应检查行，本渠道相关安装结束后重跑体检
+  const { progress: fixProgress, install: fixInstall, seed } = useEnvInstall(gw, {
+    targets: ['lark-cli', 'feishu-skills'],
+    onState: () => setup.run(),
+  })
+  const onFix = (action: EnvInstallTarget) => fixInstall(action, cfg.workspace)
+
   useEffect(() => {
-    // 没凭证就别查——四项必然全红，属于噪音而非信息
-    if (initial.app_id && initial.app_secret) setup.run()
     if (initial.minutes_enabled) minutes.run()
+    // 打开时若已有本渠道相关的安装在跑（弹窗关过重开），恢复进行中态
+    gw?.envStatus().then((s) => {
+      if (s.installing === 'lark-cli' || s.installing === 'feishu-skills') seed(s.installing)
+    }).catch(() => {})
     // 只在弹窗打开时查一次；凭证改动后靠「重新检查」手动触发，输入途中不打扰
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [])
+
+  // 换绑定项目即换技能包检测/安装落点，体检跟着刷新。打开时也经此跑首查
+  // （本地环境两项不依赖凭证；无凭证时远程侧报「缺少凭证」同样是信息）
+  useEffect(() => {
+    setup.run()
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [cfg.workspace])
 
   const allowAll = cfg.allow_from.includes('*')
 
@@ -320,15 +343,20 @@ function FeishuForm({
           <TextInput password value={cfg.app_secret} onChange={(e) => set({ app_secret: e.target.value })} placeholder="●●●●" />
         </Field>
 
+        {/* 绑定项目前置：它是体检的输入——技能包按此项目检测与安装，所见即所得 */}
+        <WorkspacePicker gw={gw} value={cfg.workspace} onChange={(v) => set({ workspace: v })} />
+
         <Field
           label="接入体检"
-          hint="权限 / 事件订阅 / 版本发布，缺任一机器人都收不到消息且开放平台不报错"
+          hint="本地环境 / 权限 / 事件订阅 / 版本发布，缺任一机器人都收不到消息且开放平台不报错"
         >
           <CheckPanel
             key={panelKey(setup.checks)}
             {...setup}
             subject="机器人接入"
             ready="已就绪 · 可正常收发消息"
+            onFix={onFix}
+            fixProgress={fixProgress}
           />
         </Field>
 
@@ -357,7 +385,7 @@ function FeishuForm({
           )}
         </Field>
 
-        <ChannelRuntimeFields cfg={cfg} set={set} providers={providers} gw={gw} />
+        <ChannelRuntimeFields cfg={cfg} set={set} providers={providers} />
 
         <MinutesSection
           cfg={cfg}
@@ -420,7 +448,15 @@ function CheckPanel({
   run,
   subject,
   ready,
-}: ReturnType<typeof useDiagnose> & { subject: string; ready: string }) {
+  onFix,
+  fixProgress,
+}: ReturnType<typeof useDiagnose> & {
+  subject: string
+  ready: string
+  // 就地修复：check.fix_action 非空时渲染一键安装按钮 / 进行中的行内进度
+  onFix?: (action: EnvInstallTarget) => void
+  fixProgress?: Record<string, EnvProgress>
+}) {
   const bad = checks?.filter((c) => c.tone === 'error') ?? []
   const warned = checks?.filter((c) => c.tone === 'warn') ?? []
   // 有问题就默认展开——用户不该为了知道哪里坏了还多点一次；之后随用户手动开合
@@ -483,8 +519,17 @@ function CheckPanel({
 
       {open && (
         <div className="mt-2">
-          {checks.map((c) => (
-            <CheckRow key={c.key} check={c} />
+          {checks.map((c, i) => (
+            <div key={c.key}>
+              {/* 分组标签：仅在组名与上一项不同处插入（本地环境 / 机器人接入） */}
+              {c.group && c.group !== checks[i - 1]?.group && (
+                <div className="flex items-center gap-2 pt-2 pb-0.5 text-[10.5px] tracking-wide text-muted-foreground">
+                  {c.group}
+                  <span className="h-px flex-1 bg-line/45" />
+                </div>
+              )}
+              <CheckRow check={c} onFix={onFix} progress={fixProgress?.[c.fix_action]} />
+            </div>
           ))}
         </div>
       )}
@@ -509,14 +554,25 @@ function StatusDot({ tone }: { tone: CheckTone }) {
   return <span className={`size-2 rounded-full shrink-0 ${TONE_DOT[tone]}`} />
 }
 
-function CheckRow({ check }: { check: DiagnoseCheck }) {
+function CheckRow({
+  check,
+  onFix,
+  progress,
+}: {
+  check: DiagnoseCheck
+  onFix?: (action: EnvInstallTarget) => void
+  progress?: EnvProgress
+}) {
+  // const 收窄让闭包里也保持 EnvInstallTarget 类型（直接用 check.fix_action 在回调内不收窄）
+  const fixAction = check.fix_action || null
   return (
     <div className="flex items-start gap-2.5 py-1.5 border-t border-line/55 first:border-t-0">
       <span className="mt-1.5">
-        <StatusDot tone={check.tone} />
+        <StatusDot tone={progress ? 'warn' : check.tone} />
       </span>
       <div className="flex-1 min-w-0">
-        <div className={check.tone === 'error' ? 'text-xs text-error' : 'text-xs'}>{check.name}</div>
+        <div className={check.tone === 'error' && !progress ? 'text-xs text-error' : 'text-xs'}>{check.name}</div>
+        {progress && <ProgressBar progress={progress} className="mt-1" />}
         {(check.detail || check.emphasis) && (
           <div className="text-[11px] text-muted-foreground mt-0.5 break-words">
             {check.detail}
@@ -543,6 +599,12 @@ function CheckRow({ check }: { check: DiagnoseCheck }) {
           <div className="text-[11px] text-muted-foreground mt-1">{check.fix_note}</div>
         )}
       </div>
+      {/* 就地修复按钮：一键安装（cli / 技能包），进行中由上方进度条替代 */}
+      {fixAction && check.tone !== 'ok' && !progress && onFix && (
+        <Button size="sm" className="mt-0.5 h-6 px-2.5 text-[11px]" onClick={() => onFix(fixAction)}>
+          一键安装
+        </Button>
+      )}
     </div>
   )
 }
@@ -635,18 +697,17 @@ function DailyDreamSection({
 const levelLabel = (lv: string) =>
   lv === 'auto' ? '自动' : lv === 'on' ? 'On' : lv.charAt(0).toUpperCase() + lv.slice(1)
 
-// 渠道「会话运行时」通用块：模型 + 思考档位 + 工具审批 + 绑定项目。各 IM 渠道复用同一块
+// 渠道「会话运行时」通用块：模型 + 思考档位 + 工具审批。各 IM 渠道复用同一块
 // （对齐后端 ChannelRuntimeConfig），值各渠道各存一份。model 空 = 跟随 desktop 全局。
+// 绑定项目已前置到表单主体（它是接入体检的输入），不在此块。
 function ChannelRuntimeFields({
   cfg,
   set,
   providers,
-  gw,
 }: {
   cfg: FeishuConfig
   set: (patch: Partial<FeishuConfig>) => void
   providers: ProviderProfile[]
-  gw?: Gateway
 }) {
   // source 用本地状态表达用户意图（而非纯派生 !!cfg.model）：providers 尚未加载完时
   // 也能切到「指定」进入选择视图（下拉负责选模型），不再因 firstModel='' 静默无反应
@@ -730,8 +791,6 @@ function ChannelRuntimeFields({
             ]}
           />
         </Field>
-
-        <WorkspacePicker gw={gw} value={cfg.workspace} onChange={(v) => set({ workspace: v })} />
       </div>
     </div>
   )
@@ -889,7 +948,11 @@ function WorkspacePicker({
   return (
     <Field
       label="绑定项目"
-      hint={value ? '飞书所有会话以此项目为工作目录' : '留空 = serve 进程当前目录（兜底，不推荐）'}
+      hint={
+        value
+          ? '飞书所有会话以此项目为工作目录；飞书技能包也安装到它的 .lumi/skills/'
+          : '留空 = serve 进程当前目录（兜底，不推荐）'
+      }
     >
       {projects.length === 0 && !value ? (
         <EmptyProjects onCreate={() => setCreating(true)} />

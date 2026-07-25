@@ -70,19 +70,40 @@ async def test_rpc_save_persists_and_reflects(sidecar):
     assert sidecar.exists()
 
 
-async def test_rpc_setup_diagnose_missing_creds(sidecar):
-    """凭证为空时不发网络请求，直接给出四项结果（原 test_channel 的空凭证用例移到这里）。"""
+async def test_rpc_setup_diagnose_missing_creds(sidecar, monkeypatch):
+    """凭证为空时远程侧不发网络请求直接四项 error；本地环境两项（cli/技能包）恒在清单前。
+
+    local_env_checks 会真跑 lark-cli 子进程并读真实 ~/.lumi，必须 mock——
+    否则结果随开发机装没装 lark-cli 漂移（违反测试密闭性约定）。
+    """
+    from dataclasses import asdict
+
+    from lumi.gateway.channels.feishu import setup
+    from lumi.gateway.channels.feishu.checks import Check
+
+    fake_local = [
+        asdict(
+            Check(key="cli", name="lark-cli 未安装", tone="error", group="本地环境")
+        ),
+        asdict(Check(key="skills", name="飞书技能包", tone="error", group="本地环境")),
+    ]
+    monkeypatch.setattr(setup, "local_env_checks", lambda workspace: fake_local)
     r = await channel_rpc.dispatch_channel(
         "diagnose_feishu_setup",
         {"name": "feishu", "config": {"app_id": "", "app_secret": ""}},
     )
     assert [c["key"] for c in r["checks"]] == [
+        "cli",
+        "skills",
         "credentials",
         "scopes",
         "events",
         "version",
     ]
-    assert all(c["tone"] == "error" for c in r["checks"])
+    local, remote = r["checks"][:2], r["checks"][2:]
+    assert all(c["group"] == "本地环境" for c in local)
+    assert all(c["group"] == "机器人接入" for c in remote)
+    assert all(c["tone"] == "error" for c in remote)
 
 
 async def test_rpc_unknown_channel_rejected(sidecar):

@@ -38,12 +38,19 @@ async def dispatch_channel(method: str, params: dict) -> dict:
         return {"checks": checks}
 
     if method == "diagnose_feishu_setup":
-        checks = await asyncio.to_thread(
-            setup.diagnose,
-            config.get("app_id") or "",
-            config.get("app_secret") or "",
+        # 一站式清单：本地环境（cli / 技能包，按绑定项目）在前，远程四项在后。
+        # 本地是子进程、远程是网络，彼此无依赖，并行省下整个本地段的墙钟时间
+        local, remote = await asyncio.gather(
+            asyncio.to_thread(setup.local_env_checks, config.get("workspace") or ""),
+            asyncio.to_thread(
+                setup.diagnose,
+                config.get("app_id") or "",
+                config.get("app_secret") or "",
+            ),
         )
-        return {"checks": checks}
+        for check in remote:
+            check["group"] = "机器人接入"
+        return {"checks": local + remote}
 
     # save_channel：校验 + 持久化（密钥 chmod 600），复用刚存的 cfg 停旧起新省一次读盘
     cfg = save_feishu(config)

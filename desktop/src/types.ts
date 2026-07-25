@@ -66,10 +66,36 @@ export interface WireEventPayloads extends Record<WireEventType, object> {
   'channel.activity': { thread_id: string; channel: string }
   'session.title': { thread_id: string; title: string }
   'mcp.status': { project: string; servers: McpServerStatus[] }
+  'env.progress': { target: string; phase: string; percent: number }
+  'env.state': {
+    tools: EnvToolStatus[]
+    target: string
+    error?: { target: string; message: string }
+  }
 }
+
+// env_install 的安装目标：核心工具为机器级；feishu-skills 装到 project 的 .lumi/skills/
+export type EnvInstallTarget = 'all' | 'uv' | 'rg' | 'node' | 'lark-cli' | 'feishu-skills'
 
 // MCP 池加载结果（mcp.status 事件 / get_mcp_status RPC 共用形状）
 export type McpServerStatus = { name: string; ok: boolean; tools?: number; error?: string }
+
+// 环境工具箱（env_status RPC / env.state 事件共用形状，后端 gateway/toolbox.py）。
+// source：system=用户自装（永不覆盖）、toolbox=Lumi 托管（<配置目录>/bin）
+export type EnvToolSource = 'system' | 'toolbox' | 'missing'
+export interface EnvToolStatus {
+  name: string
+  source: EnvToolSource
+  version: string
+  path: string
+}
+export interface EnvStatus {
+  tools: EnvToolStatus[]
+  // 进行中的安装 target（空 = 空闲），面板打开时据此恢复进行中态
+  installing: string
+}
+// env.progress payload 去掉 target 的形状，进度状态机与进度条组件共用
+export type EnvProgress = { phase: string; percent: number }
 
 // 判别联合：按 type 收窄到对应 payload。任意 payload 都可能附带 parent_run_id
 // （非空=属于某子代理，见 events.json events_note）。
@@ -350,6 +376,10 @@ export interface DiagnoseCheck {
   fix_note: string
   // 接在 detail 之后加粗显示（如「哪些功能不可用」），由后端给定
   emphasis: string
+  // 可就地执行的修复动作（env_install 的 target）；空 = 无
+  fix_action: EnvInstallTarget | ''
+  // 详情列表里的分组标签（如「本地环境」）；空 = 不分组
+  group: string
 }
 export interface ChannelInfo {
   name: string

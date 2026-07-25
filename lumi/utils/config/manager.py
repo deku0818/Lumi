@@ -174,6 +174,11 @@ class LumiConfig:
         return self.config_dir / "skills"
 
     @property
+    def bin_dir(self) -> Path:
+        """获取工具箱 bin 目录路径（toolbox 安装的工具统一入口）"""
+        return self.config_dir / "bin"
+
+    @property
     def agents_dir(self) -> Path:
         """获取 agents 目录路径"""
         return self.config_dir / "agents"

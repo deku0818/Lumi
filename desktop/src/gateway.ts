@@ -15,6 +15,8 @@ import type {
   McpServerStatus,
   McpTestResult,
   DiagnoseCheck,
+  EnvInstallTarget,
+  EnvStatus,
   Project,
   ProjectOverview,
   ProjectResource,
@@ -272,6 +274,17 @@ export class Gateway {
   // 妙记链路体检（打开配置弹窗时调）：走子进程 + 网络，后端已丢线程池，可能耗时 1-2s
   diagnoseMinutes(name: string, config: Partial<FeishuConfig>): Promise<{ checks: DiagnoseCheck[] }> {
     return this.request<{ checks: DiagnoseCheck[] }>('diagnose_minutes', { name, config })
+  }
+
+  // —— 环境工具箱：agent 任务工具链（uv/rg/node + 飞书组件）的探测与安装 ——
+  envStatus(): Promise<EnvStatus> {
+    return this.request<EnvStatus>('env_status')
+  }
+
+  // 立即返回 started；进度走 env.progress 事件，结束广播 env.state 全量状态。
+  // feishu-skills 需带 project（装到该项目 .lumi/skills/）
+  envInstall(target: EnvInstallTarget = 'all', project = ''): Promise<{ started: boolean }> {
+    return this.request<{ started: boolean }>('env_install', { target, project })
   }
 
   // —— MCP 服务器：读写该机器的 ~/.lumi 或 <project>/.lumi 下 mcp_server.json，下次新会话加载生效 ——

@@ -1,5 +1,6 @@
 import { type ComponentProps, type ReactNode } from 'react'
 import type { LucideIcon } from 'lucide-react'
+import type { EnvProgress } from '../types'
 import { cn } from '@/lib/utils'
 import { Dialog, DialogContent, DialogHeader, DialogTitle } from '@/components/ui/dialog'
 
@@ -136,6 +137,24 @@ export function SegmentedControl<T extends string>({
           </button>
         )
       })}
+    </div>
+  )
+}
+
+// 安装进度光带（品牌金光晕语言）：percent 为 -1 时不可知（解压/npm 阶段），整条脉冲。
+// 环境面板与渠道体检行共用——光效样式只此一份。
+export function ProgressBar({ progress, className }: { progress: EnvProgress; className?: string }) {
+  const known = progress.percent >= 0
+  return (
+    <div className={cn('flex items-center gap-2 text-[11px] text-muted-foreground', className)}>
+      <span className="truncate">{progress.phase}</span>
+      <span className="h-1 w-24 shrink-0 overflow-hidden rounded-full bg-separator/45">
+        <i
+          className={`block h-full rounded-full bg-primary shadow-[0_0_8px_var(--color-accent)] ${known ? 'transition-[width]' : 'w-full animate-pulse opacity-60'}`}
+          style={known ? { width: `${progress.percent}%` } : undefined}
+        />
+      </span>
+      {known && <span className="tabular-nums">{progress.percent}%</span>}
     </div>
   )
 }

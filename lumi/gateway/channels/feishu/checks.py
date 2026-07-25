@@ -29,6 +29,10 @@ class Check:
     fix_note: str = ""  # 补充说明
     # 接在 detail 之后加粗显示的内容（如「哪些功能不可用」）
     emphasis: str = ""
+    # 前端可就地执行的修复动作（env_install 的 target，如 "lark-cli" / "feishu-skills"）
+    fix_action: str = ""
+    # 详情列表里的分组标签（如「本地环境」/「机器人接入」），空 = 不分组
+    group: str = ""
 
 
 def blocked_tail(

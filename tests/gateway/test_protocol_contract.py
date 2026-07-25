@@ -30,6 +30,8 @@ _DIRECT_EVENTS = {
     "channel.activity",
     "session.title",
     "mcp.status",
+    "env.progress",
+    "env.state",
 }
 
 
