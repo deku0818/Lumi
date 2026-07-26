@@ -134,6 +134,10 @@
   --radius-4xl: calc(var(--radius) * 2.6);
   /* 悬浮面板 / 弹窗专用圆角（rounded-panel）：与 macOS 窗口外框弧度一致 */
   --radius-panel: 12px;
+  /* 右栏模块卡专用（rounded-card）：卡只有 ~260 宽、90~290 高，套 panel 的 12px
+     弧太短，观感接近直角——单开一档 18px（macOS 控制中心卡片手感）。
+     左侧栏那种整块高面板仍走 12px：大面板上 12px 已看得清，跟着加大会显胖 */
+  --radius-card: 18px;
 }
 
 html,
