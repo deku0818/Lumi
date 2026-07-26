@@ -50,6 +50,26 @@ def test_missing_transport_inferred(tmp_path, monkeypatch):
     assert merged["web"]["transport"] == "streamable_http"
 
 
+def test_missing_args_filled_for_stdio_only(tmp_path, monkeypatch):
+    """命令自足（无参数可传）时配置里没有 ``args``，但 adapter 硬性要求 stdio 必须带
+    （缺则抛「'args' parameter is required for stdio connection」）——加载侧补空列表。
+    HTTP 条目不补：adapter 的 ``**params`` 全透传，混入未知键会 TypeError。"""
+    global_path = tmp_path / "home" / ".lumi" / "mcp_server.json"
+    _write(
+        global_path,
+        {
+            "cmd": {"command": "npx", "transport": "stdio"},
+            "web": {"url": "https://example.com/mcp"},
+        },
+    )
+    monkeypatch.setattr(mcp, "_global_mcp_config_path", lambda: global_path)
+
+    merged = mcp._load_merged_mcp_config(None)
+
+    assert merged["cmd"]["args"] == []
+    assert "args" not in merged["web"]
+
+
 def test_project_overrides_global(tmp_path, monkeypatch):
     global_path = tmp_path / "home" / ".lumi" / "mcp_server.json"
     _write(
@@ -77,7 +97,11 @@ def test_project_overrides_global(tmp_path, monkeypatch):
 
 
 def test_disabled_key_popped_from_kept_entry(tmp_path, monkeypatch):
-    """保留项若显式带 disabled=false，也须 pop 掉（绝不下传 adapter）。"""
+    """保留项若显式带 disabled=false，也须 pop 掉（绝不下传 adapter）。
+
+    ``args: []`` 是归一化补的——adapter 对缺 args 的 stdio 直接抛
+    「'args' parameter is required for stdio connection」。
+    """
     global_path = tmp_path / "home" / ".lumi" / "mcp_server.json"
     _write(
         global_path,
@@ -87,7 +111,7 @@ def test_disabled_key_popped_from_kept_entry(tmp_path, monkeypatch):
 
     merged = mcp._load_merged_mcp_config(None)
 
-    assert merged == {"a": {"command": "npx", "transport": "stdio"}}
+    assert merged == {"a": {"command": "npx", "transport": "stdio", "args": []}}
 
 
 def test_project_equal_to_global_not_double_read(tmp_path, monkeypatch):
@@ -100,7 +124,7 @@ def test_project_equal_to_global_not_double_read(tmp_path, monkeypatch):
     # project_dir 的 .lumi/mcp_server.json 与全局同路径
     merged = mcp._load_merged_mcp_config(home)
 
-    assert merged == {"a": {"command": "npx", "transport": "stdio"}}
+    assert merged == {"a": {"command": "npx", "transport": "stdio", "args": []}}
 
 
 def test_missing_files_return_empty(tmp_path, monkeypatch):

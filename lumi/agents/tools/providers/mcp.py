@@ -131,15 +131,19 @@ def _read_json_dict(path: Path) -> dict[str, Any]:
 
 
 def _normalize_server_config(cfg: dict[str, Any]) -> dict[str, Any]:
-    """单个 server 配置归一化：剥离 Lumi 元字段 ``disabled``、补推缺省 ``transport``。
+    """单个 server 配置归一化：剥离 Lumi 元字段 ``disabled``、补推缺省 ``transport``/``args``。
 
     ``disabled`` 绝不能下传给 langchain adapter（它 ``**params`` 全透传，混入未知键会
     TypeError）；``transport`` 缺省按有无 url 推断（Claude Desktop 风格配置不写该键，
-    而 adapter 的 create_session 强制要求）。会话池与连接测试共用，两路行为恒一致。
+    而 adapter 的 create_session 强制要求）；``args`` 同理——命令本身自足（无参数可传）
+    时配置里没有该键，但 adapter 硬性要求 stdio 必须带 args，补空列表即可。
+    会话池与连接测试共用，两路行为恒一致。
     """
     out = {k: v for k, v in cfg.items() if k != "disabled"}
     if "transport" not in out:
         out["transport"] = "streamable_http" if out.get("url") else "stdio"
+    if out["transport"] == "stdio":
+        out.setdefault("args", [])
     return out
 
 

@@ -1,5 +1,10 @@
 # Changelog
 
+## [0.2.76] - 2026-07-26
+
+### Fixed
+- **命令自足的 stdio MCP server 连不上** — 配置里没写 `args`（命令本身无参数可传）时，langchain adapter 的 `create_session` 直接抛「'args' parameter is required for stdio connection」。加载侧归一化补空列表，与既有的 `transport` 缺省推断同处一函数（会话池与连接测试共用，两路行为恒一致）；HTTP 条目不补，adapter 的 `**params` 全透传、混入未知键会 TypeError。
+
 ## [0.2.75] - 2026-07-26
 
 ### Fixed
