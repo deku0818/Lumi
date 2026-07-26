@@ -15,7 +15,7 @@ from __future__ import annotations
 
 import json
 import time
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from pathlib import Path
 
 import httpx
@@ -38,7 +38,8 @@ class ModelEntry:
     context_length: int
     control: str  # "none" | "effort" | "toggle"
     values: tuple[str, ...]  # control="effort" 时的原生档位枚举
-    has_toggle: bool  # effort 与 toggle 并存（UI 附加 Off 项）
+    has_toggle: bool  # 择优条目自身 effort 与 toggle 并存（UI 附加 Off 项）
+    toggle_anywhere: bool  # 任一 provider 报过 toggle = 该模型存在关思考的通道
 
 
 def _cache_path() -> Path:
@@ -65,8 +66,14 @@ def _entry_score(e: ModelEntry) -> int:
 
 
 def _build_index(raw: dict) -> dict[str, ModelEntry]:
-    """全 provider 扁平化为 {model_id_lower: ModelEntry}，同名择优。"""
+    """全 provider 扁平化为 {model_id_lower: ModelEntry}，同名择优。
+
+    择优只取**单个** provider 的条目：档位写法按 provider 而异，跨 provider 混搭
+    会造出没有端点实现的档位组合。唯一跨 provider 汇总的是 ``toggle_anywhere``
+    （见 docs/architecture/thinking.md「数据源」节）。
+    """
     index: dict[str, ModelEntry] = {}
+    toggle_keys: set[str] = set()
     for prov in raw.values():
         for mid, m in (prov.get("models") or {}).items():
             if not isinstance(m, dict):
@@ -79,10 +86,16 @@ def _build_index(raw: dict) -> dict[str, ModelEntry]:
                 control=control,
                 values=values,
                 has_toggle=has_toggle,
+                toggle_anywhere=has_toggle,  # 单 provider 视角，下面按 key 汇总
             )
             key = mid.lower()
+            if has_toggle:
+                toggle_keys.add(key)
             if key not in index or _entry_score(entry) > _entry_score(index[key]):
                 index[key] = entry
+    for key in toggle_keys:  # 择优条目自己没报 toggle 的才需要回填
+        if not index[key].toggle_anywhere:
+            index[key] = replace(index[key], toggle_anywhere=True)
     return index
 
 

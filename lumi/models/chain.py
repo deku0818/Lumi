@@ -12,10 +12,11 @@ from langchain_core.prompts import (
     HumanMessagePromptTemplate,
     MessagesPlaceholder,
 )
+from langchain_core.runnables import RunnableLambda
 from pydantic import BaseModel
 
 from lumi.models.cache import CACHE_CONTROL
-from lumi.models.manager import create_llm
+from lumi.models.manager import create_llm, rejects_forced_tool_choice
 
 # 仅重试真正瞬态的错误：限流、5xx、连接/超时（APIConnectionError 含 Timeout 子类）。
 # 不能用宽泛的 APIError——它包含 4xx 客户端错误（如模型不支持某参数的 400），
@@ -34,6 +35,19 @@ _API_AND_NETWORK_ERRORS = _API_ERRORS + (
     httpx.ConnectError,
     httpx.ReadError,
 )
+
+
+def _require_structured_result(result):
+    """软引导（tool_choice=auto）下模型可以改用散文回答，解析器就返回 ``None``——
+    显式抛错，不把 ``None`` 交给调用方（分类器据此 fail-closed 转人工审批，判官 /
+    titler 照常上抛，都比 ``AttributeError`` 可诊断）。
+
+    刻意不进 ``_with_retry`` 的重试类型：换一次调用也许能骗到工具调用，但那会掩盖
+    「该 prompt 不适配软引导」这个真问题，而三个调用点的 fail-closed / 上抛都已安全。
+    """
+    if result is None:
+        raise ValueError("模型未调用结构化输出工具（软引导下返回了散文）")
+    return result
 
 
 def _with_retry(chain, retry_errors: tuple):
@@ -92,7 +106,18 @@ def structured_output(
 
     prompt = ChatPromptTemplate.from_messages(messages)
 
-    structured_llm = llm.with_structured_output(structure, method=structure_method)
+    # 强制 tool_choice 不被接受的模型（见 rejects_forced_tool_choice）：覆盖
+    # with_structured_output 默认注入的 tool_choice 降级软引导，链尾兜住散文回答。
+    # 模型名取自已构造的客户端（ChatOpenAI 用 model_name / ChatAnthropic 用 model），
+    # 与真正发给端点的那个名字同源。
+    if structure_method == "function_calling" and rejects_forced_tool_choice(
+        getattr(llm, "model_name", None) or llm.model
+    ):
+        structured_llm = llm.with_structured_output(
+            structure, method=structure_method, tool_choice="auto"
+        ) | RunnableLambda(_require_structured_result)
+    else:
+        structured_llm = llm.with_structured_output(structure, method=structure_method)
     chain = prompt | structured_llm
     return _with_retry(chain, _API_AND_NETWORK_ERRORS)
 
@@ -119,7 +144,8 @@ def tool_call_chain(
             强制调用任意工具: Anthropic 用 "any"，OpenAI 用 "required"；
             强制调用指定工具: Anthropic 用 {"type": "tool", "name": "xxx"}，
             OpenAI 用 {"type": "function", "function": {"name": "xxx"}}
-            但是langchain自行做了适配，所以传入的值会自动转换为适合的值
+            但是langchain自行做了适配，所以传入的值会自动转换为适合的值。
+            注意有的端点不接受强制值（见 manager.rejects_forced_tool_choice）
         apply_effort: 注入当前模型的思考档位（仅主对话链传 True）
         effort: 显式覆盖思考档位（None=跟随 profile；渠道会话用它独立配置）
         **llm_params: LLM的其他参数

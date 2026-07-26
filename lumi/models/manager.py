@@ -3,6 +3,10 @@
 协议由模型名自动判定（claude / anthropic / minimax → ChatAnthropic，其余 → ChatOpenAI；
 Bedrock 形如 us.anthropic.claude-* 同样走 ChatAnthropic 客户端）。
 未显式传连接时，由 provider_store 按 active profile 解析 base_url / api_key。
+
+也是**厂商方言与端点怪癖**的落点（名字 → 厂商的判定、档位 → 协议参数的映射、
+「该端点不吃什么」的判定）：catalog 只放 models.dev 的能力数据，端点写法与怪癖一律
+在这里，不要下沉到 catalog、也不要就近散进 chain。
 """
 
 import json
@@ -54,6 +58,11 @@ def detect_protocol(model_name: str) -> Protocol:
     return "openai"
 
 
+def _is_qwen_dialect(model_name: str) -> bool:
+    """按模型名判定 DashScope/百炼方言（与 detect_protocol 同类：名字 → 厂商）。"""
+    return "qwen" in (model_name or "").lower()
+
+
 def allowed_levels(model_name: str) -> tuple[str, ...]:
     """该模型可设的思考档位集合（UI 下发与校验共用同一份）。
 
@@ -95,6 +104,14 @@ def _native_max_level(model_name: str) -> str:
     return entry.values[-1] if entry.values else "auto"
 
 
+def _thinking_toggle(model_name: str) -> bool:
+    """该模型是否存在关思考的通道（见 catalog 的 ``toggle_anywhere``）。"""
+    from lumi.models.catalog import lookup
+
+    entry = lookup(model_name)
+    return entry is not None and entry.toggle_anywhere
+
+
 def effort_params(model_name: str, level: str) -> dict:
     """思考档位 → 协议参数（唯一映射点）。
 
@@ -113,13 +130,10 @@ def effort_params(model_name: str, level: str) -> dict:
     """
     allowed = allowed_levels(model_name)
 
-    # qwen（DashScope）关思考：enable_thinking=false 对有思考能力的 qwen 思考模型有效，
-    # 与该模型被 catalog 归为 effort 型还是 toggle 型无关。effort 型 qwen（如 qwen3.7-plus）
-    # 的 allowed_levels 无 "off"，会被下面的门控挡掉——但强制 tool_choice 的结构化输出链
-    # （force_no_thinking）必须真能关掉思考，否则 DashScope 在 thinking mode 下拒绝
-    # tool_choice=required/object → 400。故在门控前提前直通（下方 on/off 分支同款方言）。
-    # 仅限有思考能力者（allowed 非纯 ("auto",)）：无思考的 qwen 无需关、也可能不认该参数。
-    if level == "off" and "qwen" in model_name.lower() and allowed != ("auto",):
+    # effort 型 qwen 的 allowed_levels 无 "off"（UI 不给 Off），会被下面的门控挡掉——但
+    # force_no_thinking 的内部链必须真能关掉思考，故在门控前直通，且仅限确有关思考通道
+    # 者（thinking-only 的 qwen 传 false 会被 API 拒绝）。原因见 thinking.md 的方言节。
+    if level == "off" and _is_qwen_dialect(model_name) and _thinking_toggle(model_name):
         return {"extra_body": {"enable_thinking": False}}
 
     if level != "auto" and level not in allowed:
@@ -144,11 +158,26 @@ def effort_params(model_name: str, level: str) -> dict:
         enabled = level == "on"
         # Qwen3（DashScope/百炼）方言：扁平 enable_thinking 布尔；其余（DeepSeek/MiMo）
         # 走 thinking.type。错误码 InternalError.Algo.* 即 DashScope。
-        if "qwen" in model_name.lower():
+        if _is_qwen_dialect(model_name):
             return {"extra_body": {"enable_thinking": enabled}}
         state = "enabled" if enabled else "disabled"
         return {"extra_body": {"thinking": {"type": state}}}
     return {"reasoning_effort": level, "use_responses_api": False}
+
+
+def rejects_forced_tool_choice(model_name: str) -> bool:
+    """该模型是否无法承受强制 tool_choice（required / 指定工具）。
+
+    DashScope（qwen）在思考模式下一律拒绝强制 tool_choice（实测 400）；而 thinking-only
+    的 qwen 思考模型——有思考能力却无任何 toggle 通道，如 qwen3.8-max-preview 的
+    enable_thinking 被 API 限定为 True——永远处在思考模式里，强制必然撞上。无思考能力的
+    qwen 不在此列（它压根不进思考模式）。消费方是 chain.structured_output 的软引导降级。
+    """
+    return (
+        _is_qwen_dialect(model_name)
+        and allowed_levels(model_name) != ("auto",)  # 有思考能力
+        and not _thinking_toggle(model_name)  # 且关不掉
+    )
 
 
 def create_llm(

@@ -46,12 +46,26 @@ models.dev 描述能力，不描述直连端点的参数写法。写法按协议
 | 控制类型 | anthropic 协议 | openai 协议 |
 |---|---|---|
 | effort 档位 | `thinking: {type: adaptive, display: summarized}` + `output_config: {effort: <值>}` | `reasoning_effort: <值>` + `use_responses_api=False` |
-| toggle On/Off | （Anthropic 无 toggle 型） | `extra_body: {thinking: {type: enabled/disabled}}`（DeepSeek 系方言，MiMo 实测有效） |
+| toggle On/Off | （Anthropic 无 toggle 型） | `extra_body: {thinking: {type: enabled/disabled}}`（DeepSeek 系方言，MiMo 实测有效）；Qwen（DashScope/百炼）方言为扁平 `extra_body: {enable_thinking: <bool>}` |
 | Auto | 不传任何参数 | 不传任何参数 |
 
 思考开启时剔除 `temperature/top_p/top_k`（互斥）。遇到不吃 DeepSeek 系
-toggle 写法的方言（如 Qwen 的 `enable_thinking`）再加一行特例——
-失败模式安全：报错即时透传，用户切回 Auto 即恢复。
+toggle 写法的方言再加一行特例——失败模式安全：报错即时透传，用户切回
+Auto 即恢复。
+
+Qwen 的 Off 走**门控前直通**（`effort_params` 顶部）：effort 型 qwen 的 Off 不进
+`allowed_levels`（UI 不给 Off），但 `force_no_thinking` 的内部链必须真能关掉思考，
+否则 DashScope 在思考模式下拒绝强制 `tool_choice` → 400。直通只对确有 `toggle_anywhere`
+通道者生效。
+
+**thinking-only 模型（任何 provider 都无 toggle）**：思考关不掉，`effort_params(..., "off")`
+返 `{}`——绝不注入端点会拒的参数（DashScope 对 `qwen3.8-max-preview` 把
+`enable_thinking` 限定为 True，传 false 即 400）。这类模型连**强制 `tool_choice`** 也
+不接受（思考模式下拒绝 `required`/指定工具），故 `manager.rejects_forced_tool_choice()`
+判定后，`structured_output` 覆盖 `with_structured_output` 默认注入的 `tool_choice` 为
+`auto` 降级软引导——照旧绑定同一 schema 工具，只是不强制。软引导下模型可以改用散文
+回答（解析器给 `None`），链尾 `_require_structured_result` 显式抛错：分类器据此
+fail-closed 转人工审批，判官 / titler 照常上抛。
 
 ## 数据模型
 
@@ -106,8 +120,12 @@ create_llm(..., apply_effort=False)               ← 翻转默认：注入显�
 - 缓存 `~/.lumi/cache/models_dev.json`（含 fetched_at，TTL 24h），
   `lumi serve` / TUI 启动后台刷新；无网络沿用旧缓存；无缓存时
   所有模型按「无思考控制」处理（安全降级，仅 Auto）。
-- 匹配：全 provider 扁平化后按模型名 精确 → fuzzy；多 provider 同名时
-  取 reasoning_options 最完整的条目。
+- 匹配：全 provider 扁平化后按模型名 精确 → fuzzy；多 provider 同名时取
+  reasoning_options 最完整的**单个**条目（档位写法按 provider 而异，跨 provider 混搭
+  会造出没有端点实现的档位组合）。唯一跨 provider 汇总的是 `toggle_anywhere`——「该模型
+  存在关思考的通道」：provider 各报各自暴露的控制项，择优条目没报 toggle 不代表关不掉
+  （`qwen3.7-plus` 在一处只报 effort、另一处只报 toggle）。`toggle_anywhere` **只**服务关思考
+  判定，不参与 `allowed_levels`（否则几十个 openai 协议 effort 模型会凭空多出 Off 档）。
 - `model_info.py` 的 context_length 一并迁来（`limit.context`），OpenRouter 退役。
 
 ## Ultra：Lumi 合成顶档（思考 + 编排能力）

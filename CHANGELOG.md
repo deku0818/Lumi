@@ -1,5 +1,15 @@
 # Changelog
 
+## [0.2.75] - 2026-07-26
+
+### Fixed
+- **thinking-only 模型（如 `qwen3.8-max-preview`）下 auto 审批分类器必然 400** — 症状是 `[AutoClassify] 分类器调用失败，fail-closed 转人工审批: The value of the enable_thinking parameter is restricted to True`，即 auto 模式实际退化成人工审批。实测该模型两条路全堵：思考关不掉（DashScope 限定 `enable_thinking=True`），而思考模式下又拒绝强制 `tool_choice`（`required`/指定工具一律 400）——`structured_output` 恒走 `force_no_thinking` + `with_structured_output(function_calling)` 默认注入强制 `tool_choice`，两个前提同时踩中。现在这类模型的 `effort_params(..., "off")` 返 `{}`（不再注入端点会拒的参数），且 `structured_output` 覆盖 `tool_choice` 为 `auto` 降级软引导（照旧绑定同一 schema 工具、只是不强制，实测模型仍会调用）；软引导下模型若改用散文回答，链尾显式抛错而不是把 `None` 交给调用方（分类器据此 fail-closed，titler / 判官照常上抛）。同链的 titler 与 goal 判官一并修好。
+- **models.dev 同名条目择优丢掉了 toggle 能力** — 各 provider 只上报自己暴露的控制项，`qwen3.7-plus` 在一处只报 effort 档位、另一处只报 toggle，择优取了前者即误判为「思考关不掉」——这正是上一版不得不写「qwen 的 off 一律硬注入 `enable_thinking=false`」的原因，而该硬注入在真正关不掉思考的模型上就是 400。
+
+### Changed
+- `ModelEntry` 新增 `toggle_anywhere`（任一 provider 报过 toggle = 该模型存在关思考的通道），是「能否关思考」的唯一判定依据。刻意**不**并入 `has_toggle`：并集若参与 `allowed_levels`，61 个 openai 协议 effort 模型（`o4-mini` / `gemini-2.5-flash` / `grok-4.3` 等，某些聚合 provider 报了 toggle）会凭空多出 Off 档，且内部链会对它们注入 DeepSeek 系的 `thinking.type` → 端点不认即 400。档位枚举仍只看择优条目自身，跨 provider 混搭档位也一并排除（否则 `claude-opus-4.6` 会丢 `xhigh` 又混入 `none`）。全量 2751 个模型逐一比对：`allowed_levels` 零变化，仅 12 个 qwen 的 off 行为变化且方向正确。
+- 新增 `manager.rejects_forced_tool_choice()`（端点怪癖 → 链构造策略）与 `_is_qwen_dialect()`，收掉散在三处的 `"qwen" in model_name.lower()`；`manager` 模块 docstring 写下边界规则——端点方言与怪癖归 `manager`，`catalog` 只放 models.dev 的能力数据。
+
 ## [0.2.74] - 2026-07-26
 
 ### Added
