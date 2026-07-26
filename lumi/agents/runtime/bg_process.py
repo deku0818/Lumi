@@ -148,6 +148,8 @@ class BackgroundTaskManager:
             label=command,
             started_at=time.time(),
             output_file=output_file,
+            # stdout 直接重定向进 output_file（见上），执行期就能实时 tail
+            streams_output=True,
         )
         self._registry.register(entry)
 

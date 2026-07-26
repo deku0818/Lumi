@@ -18,6 +18,7 @@ import {
 } from 'lucide-react'
 import type { PresentedFile } from '../types'
 import { useI18n } from '../i18n'
+import { fmtSize } from '@/lib/utils'
 
 // lumi-file://local/<abs path>：固定 host=local（自定义 standard scheme 不允许空 host，
 // 否则 Chromium 会把路径首段当 host 吃掉）；各路径段 encodeURIComponent，空格/中文/#/? 都安全。
@@ -48,12 +49,6 @@ const KIND_ICON: Record<string, LucideIcon> = {
 }
 const fileIcon = (f: PresentedFile): LucideIcon => KIND_ICON[f.kind || ''] || File
 
-const fmtSize = (n?: number) => {
-  if (n == null) return ''
-  if (n < 1024) return `${n} B`
-  if (n < 1024 * 1024) return `${Math.round(n / 1024)} KB`
-  return `${(n / 1024 / 1024).toFixed(1)} MB`
-}
 const typeText = (f: PresentedFile) => (ext(f) || f.kind || 'file').toUpperCase()
 
 // 文本类扩展名：这些走 fetch().text() 在面板里直接展示

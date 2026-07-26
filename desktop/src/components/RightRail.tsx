@@ -102,8 +102,11 @@ export function RailSection({
         aria-expanded={!collapsed}
         className="flex items-center gap-1.5 px-3 py-2.5 cursor-pointer select-none transition hover:bg-ink/[0.04]"
       >
-        <span className="text-[13.5px] font-semibold">{title}</span>
-        {count !== undefined && <span className="text-xs text-muted-foreground">{count}</span>}
+        {/* 不换行：标题与计数都是短串，栏窄时宁可让计数被 truncate，也别把「后台任务」折成两行 */}
+        <span className="text-[13.5px] font-semibold shrink-0">{title}</span>
+        {count !== undefined && (
+          <span className="text-xs text-muted-foreground truncate">{count}</span>
+        )}
         <span className="ml-auto flex items-center gap-1">
           {headerExtra}
           <ChevronDown

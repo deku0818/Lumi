@@ -154,17 +154,33 @@ cron 子系统是进程级资源（与会话无关）：serve 在 lifespan 中�
 
 - **实时推送**：`TaskRegistry.set_on_change` 观察者（server 层注册）→ `_on_bg_task_change`
   **~100ms 去抖合并** → 复用 `DesktopDelivery` 广播 `bg_tasks.update`（本机进程级快照，前端
-  按机器分段替换合并、按 thread + backend 过滤展示——同名飞书群跨机不串）。RPC：`list_bg_tasks`（初始拉取）/ `stop_bg_task` / `dismiss_bg_task` /
-  `clear_finished_bg_tasks`，stop / dismiss 带会话归属校验。
+  按机器分段替换合并、按 thread + backend 过滤展示——同名飞书群跨机不串）。RPC：`list_bg_tasks`（初始拉取）/ `read_bg_task_output`（输出预览）/ `stop_bg_task` / `dismiss_bg_task` /
+  `clear_finished_bg_tasks`，读 / stop / dismiss 带会话归属校验。
+- **广播是全量快照**，故凡随快照走的字段都必须有界：`prompt` 截 1000 字、workflow 的
+  `last_log` 截 300 字；`notify_progress` 对**相同快照直接返回**（后台 agent 逐超步上报时
+  首尾几步是重复的），workflow 脚本 `log()` 驱动的推送另有 500ms 节流（`log` 是脚本里
+  `print` 的别名，循环打印会把广播顶在去抖上限）。前端 `replaceBackendTasks` 逐条按值比对
+  复用旧对象、整段未变返回原引用，否则每次广播都让整列卡片重渲染。
+- **卡片信息量**：卡片要回答「它在做什么」和「它跑出了什么」——
+  - *任务内容*：agent 用 prompt、workflow 用工具的 `description`、bash 用完整命令（`label`，
+    不另存一份免得每次快照多带一遍）。统一 clamp 三行，超出才出现「展开全部」。
+  - *运行中的活动*：agent 逐超步上报 `{tool, tools_done}`（`tools_done` 取 `max` 单调递增，
+    否则压缩删历史时计数会当场回退）；workflow 上报 `phase / done / total / last_log`。
+  - *输出*：`streams_output` 标记该任务是否边跑边写输出文件（仅 bash——它的 stdout 直接
+    重定向进去；agent / workflow 完成时才一次性写）。据此，只有 bash 在运行中每 2s 续拉
+    尾部（末 8KB，截断时标注完整体积），其余只在转终态时拉一次，避免对必空的文件空转。
+    运行中贴底流最近三行，终态收成「查看输出」按需展开。
 - **前端结构**（`BgTasksDrawer.tsx` 的 `BgTasksSection` + `RightRail.tsx` + `App.tsx`）：
   - 挂在**统一右栏**（`RightRail`，见「可调宽边栏」）的模块卡里：chat / 定时任务会话两视图
     通用，有任务整卡出现、无任务隐藏；节头带总数与「N 运行中」及「清除已完成」；
     收放钮收起态亮脉动金点（含直播中的定时执行）。
   - 模块内容 = 一摞**可独立折叠的任务卡片**（kind 图标 + 名称 + 状态光点/勾/叉 + chevron）；
-    运行中默认展开、终态默认折叠。workflow 卡片画实时聚合进度（phase + 进度条 + 在跑数）。
+    运行中默认展开、终态默认折叠。
   - 清理：终态卡片 hover 出现灰色移除 ✕，或节头「清除已完成」；运行中只能停止。
-  - 运行中任务的 Duration 由本地每秒 tick 实时跳（仅右栏展开且有任务在跑时计时）。
-  - demo `.demos/lumi-bg-drawer-detail.html`、`.demos/unified-rail.html`。
+  - 运行中任务的 Duration 由本地每秒 tick 实时跳；**秒表与输出轮询都以右栏展开为前提**
+    ——栏收起时卡片只是被移出视口、组件仍挂着，不设门就会在没人看的时候持续拉取。
+  - demo `.demos/lumi-bg-drawer-detail.html`、`.demos/bg-task-card.html`、
+    `.demos/bg-task-long-text.html`、`.demos/unified-rail.html`。
 
 ## 输入栏文件附件
 

@@ -3,6 +3,7 @@
 import type {
   ActiveModel,
   BgTask,
+  BgTaskOutput,
   ChannelInfo,
   ModelPointer,
   CronJob,
@@ -482,6 +483,10 @@ export class Gateway {
 
   listBgTasks(): Promise<{ tasks: BgTask[] }> {
     return this.request<{ tasks: BgTask[] }>('list_bg_tasks')
+  }
+
+  readBgTaskOutput(taskId: string): Promise<BgTaskOutput> {
+    return this.request<BgTaskOutput>('read_bg_task_output', { task_id: taskId })
   }
 
   stopBgTask(taskId: string): Promise<{ stopped: boolean; error?: string }> {

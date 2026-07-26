@@ -24,6 +24,7 @@ import type {
   ActiveModel,
   AttachedFile,
   BgTask,
+  BgTaskOutput,
   ChannelInfo,
   ModelPointer,
   CronJob,
@@ -40,6 +41,7 @@ import type {
   WireEvent,
   WireEventPayloads,
 } from './types'
+import { EMPTY_BG_OUTPUT } from './types'
 import { Markdown } from './components/Markdown'
 import { ApprovalDialog } from './components/ApprovalDialog'
 import { ClarifyDialog, ASK_CANCELLED } from './components/ClarifyDialog'
@@ -247,10 +249,19 @@ const emptySession = (items: Item[] = []): SessionState => ({
 // 用某机器的最新 bg 任务快照替换该机器那一段（保留其它机器的），并给每条打上 backend 标记。
 // bg_tasks.update / list_bg_tasks 是各机器进程级快照（仅含本机任务），直接整列 setBgTasks 会
 // 抹掉别机的任务，故按机器分段替换——同一飞书群 thread 在多台机器上会重名，靠 backend 区分。
-const replaceBackendTasks = (prev: BgTask[], backend: string, tasks: BgTask[]): BgTask[] => [
-  ...prev.filter((t) => beOf(t) !== backend),
-  ...tasks.map((t) => ({ ...t, backend })),
-]
+// 每次变更都广播一份全量快照，无差别重建对象会让下游 memo 全线失效（别的机器 / 别的会话的
+// 任务一动，本会话整列卡片跟着重渲染，而后台 agent 逐超步上报时这很频繁）：故逐条按值比对，
+// 没变的沿用旧对象；整段都没变就把 prev 原样返回，连一次 setState 的新引用都不产生。
+const replaceBackendTasks = (prev: BgTask[], backend: string, tasks: BgTask[]): BgTask[] => {
+  const mine = prev.filter((t) => beOf(t) === backend)
+  const next = tasks.map((t) => {
+    const tagged = { ...t, backend }
+    const old = mine.find((x) => x.task_id === t.task_id)
+    return old && JSON.stringify(old) === JSON.stringify(tagged) ? old : tagged
+  })
+  if (next.length === mine.length && next.every((t, i) => t === mine[i])) return prev
+  return [...prev.filter((t) => beOf(t) !== backend), ...next]
+}
 
 // 进程级广播事件：与具体会话无关，handleEvent 在 session 路由之前统一处理。
 // 远程机器通常没有活跃会话连接、只有一条控制连接，故控制连接也要把这些转给
@@ -1014,6 +1025,14 @@ export default function App() {
     )
     void connsRef.current[activeRef.current]?.stopBgTask(taskId).catch(() => {})
   }, [])
+
+  // 卡片输出预览：同样必须走本会话的连接（后端按 thread_id 校验归属）。
+  // truncated/size 一并交给卡片——只回末 8KB，不标出来会被当成完整输出
+  const readBgTaskOutput = useCallback(
+    async (taskId: string): Promise<BgTaskOutput> =>
+      (await connsRef.current[activeRef.current]?.readBgTaskOutput(taskId)) ?? EMPTY_BG_OUTPUT,
+    [],
+  )
 
   const dismissBgTask = useCallback((taskId: string) => {
     const be = keyBackend(activeRef.current)
@@ -2653,6 +2672,7 @@ export default function App() {
                 open={railOpen}
                 onStop={stopBgTask}
                 onDismiss={dismissBgTask}
+                onReadOutput={readBgTaskOutput}
                 onClearFinished={clearFinishedBgTasks}
               />
             )}

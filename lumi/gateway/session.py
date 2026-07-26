@@ -588,6 +588,22 @@ def _owns_bg_task(bridge: AgentBridge, task_id: str) -> bool:
     )
 
 
+async def _read_bg_task_output(session: GatewaySession, params: dict) -> dict:
+    """读后台任务输出文件尾部（drawer 卡片的输出预览）；仅限本会话任务。
+
+    bash 任务的 stdout 直写该文件，运行中即可实时 tail；agent / workflow 完成时才写，
+    运行中返回空文本（前端按「结果在任务完成时写入」呈现）。
+    """
+    from lumi.agents.runtime.bg_tasks import get_task_registry, read_output_tail
+
+    task_id = params.get("task_id", "")
+    entry = get_task_registry().get(task_id)
+    if entry is None or not _owns_bg_task(session._bridge, task_id):
+        return {"text": "", "size": 0, "truncated": False}
+    text, size, truncated = read_output_tail(entry.output_file)
+    return {"text": text, "size": size, "truncated": truncated}
+
+
 async def _stop_bg_task(session: GatewaySession, params: dict) -> dict:
     """停止运行中的后台任务（drawer 停止按钮）；仅限本会话任务。"""
     from lumi.agents.runtime.bg_process import cancel_background_task
@@ -655,6 +671,7 @@ _RPC_HANDLERS = {
     "rename_session": _rename_session,
     "delete_session": _delete_session,
     "list_bg_tasks": _list_bg_tasks,
+    "read_bg_task_output": _read_bg_task_output,
     "stop_bg_task": _stop_bg_task,
     "dismiss_bg_task": _dismiss_bg_task,
     "clear_finished_bg_tasks": _clear_finished_bg_tasks,

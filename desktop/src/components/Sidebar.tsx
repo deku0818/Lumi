@@ -253,7 +253,7 @@ export const Sidebar = memo(function Sidebar({
                 onClick={() => setExpanded((e) => ({ ...e, [key]: false }))}
                 className="w-full text-left px-3 py-1 text-[10.5px] text-muted-foreground/55 hover:text-primary transition"
               >
-                {t('sidebar.showLess')}
+                {t('common.showLess')}
               </button>
             )}
           </>

@@ -9,7 +9,7 @@ import time
 import uuid
 from pathlib import Path
 
-from langchain_core.messages import HumanMessage
+from langchain_core.messages import HumanMessage, ToolMessage
 from langchain_core.tools import tool
 from langgraph.prebuilt.tool_node import ToolRuntime
 from pydantic import BaseModel, Field
@@ -196,6 +196,26 @@ def _start_background_agent(
     )
 
 
+def _agent_activity(state: dict, tools_done: int = 0) -> dict:
+    """从状态快照抽后台代理的活动摘要（drawer 卡片的「它正在做什么」）。
+
+    后台代理的 output_file 完成时才写，运行中唯一能看的就是这个：``tool`` 为当前发起
+    的工具调用（模型思考中 / 刚收完工具结果时为 None），``tools_done`` 为已完成的工具数。
+
+    计数取 ``max(已知值, 本快照所见)``：Summarizer 压缩会 RemoveMessage 删掉历史，
+    只数当前快照的话，长任务压缩后计数会当着用户的面往回跳。
+    """
+    messages = state.get("messages") or []
+    last = messages[-1] if messages else None
+    calls = getattr(last, "tool_calls", None) or []
+    return {
+        "tool": ", ".join(c["name"] for c in calls) or None,
+        "tools_done": max(
+            tools_done, sum(1 for m in messages if isinstance(m, ToolMessage))
+        ),
+    }
+
+
 async def _run_agent_background(
     task_id: str,
     lumi_agent,
@@ -206,12 +226,26 @@ async def _run_agent_background(
     """后台执行 Agent；收尾（写文件 / 状态 / 通知）走共用 run_background_task。"""
     from lumi.agents.core.response import extract_ainvoke_content
 
-    async def _produce() -> str:
-        # 后台子代理独立 shell（键用 task_id，已唯一）：与父/兄弟隔离、用完回收
-        invoke_result = await run_with_shell(
-            task_id, lumi_agent.graph.ainvoke(inputs, context=context)
-        )
-        msgs = invoke_result["messages"]
+    registry = get_task_registry()
+
+    async def _stream() -> str:
+        # values 模式每个超步 yield 全量 state：既能逐步汇报活动，最后一个快照即最终
+        # 状态（无 checkpointer，跑完就取不回来了，只能边跑边留）
+        final: dict = {}
+        activity: dict = {}
+        async for state in lumi_agent.graph.astream(
+            inputs, context=context, stream_mode="values"
+        ):
+            final = state
+            activity = _agent_activity(state, activity.get("tools_done", 0))
+            registry.notify_progress(task_id, activity)
+        msgs = final.get("messages") or []
         return extract_ainvoke_content(msgs[-1].content if msgs else "")
 
-    await run_background_task(task_id, output_file, _produce, cancel_text="任务被取消")
+    await run_background_task(
+        task_id,
+        output_file,
+        # 后台子代理独立 shell（键用 task_id，已唯一）：与父/兄弟隔离、用完回收
+        lambda: run_with_shell(task_id, _stream()),
+        cancel_text="任务被取消",
+    )

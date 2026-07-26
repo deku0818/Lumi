@@ -292,13 +292,17 @@ export interface HistoryItem {
 export type BgTaskKind = 'bash' | 'agent' | 'workflow'
 export type BgTaskStatus = 'running' | 'completed' | 'timed_out' | 'failed'
 
-// workflow 实时聚合进度（B2 填充；B1 为 null）。形状由后端引擎定义，前端宽松消费。
+// 运行中的实时活动快照（后端 notify_progress 透传，形状按 kind 分两族，前端宽松消费）：
+// workflow → phase/计数/last_log；agent → 当前工具 + 已完成工具数。bash 无（输出即进度）。
 export interface BgTaskProgress {
   phase?: string
   done?: number
   total?: number
   running?: number
   agent_count?: number
+  last_log?: string | null
+  tool?: string | null
+  tools_done?: number
   [k: string]: unknown
 }
 
@@ -307,6 +311,9 @@ export interface BgTask {
   kind: BgTaskKind
   status: BgTaskStatus
   label: string
+  // 任务在做什么：agent 是交给它的 prompt，workflow 是工具的 description（后端截断 1000 字）；
+  // bash 为空——命令本身就是 label，再存一份只会让每次全量快照都多带一遍
+  prompt: string
   agent_name: string | null
   thread_id: string
   started_at: number
@@ -314,12 +321,21 @@ export interface BgTask {
   exit_code: number | null
   error: string | null
   agent_count: number | null
-  output_file: string
+  // 执行期是否持续写输出文件（仅 bash）：决定卡片要不要实时轮询 read_bg_task_output
+  streams_output: boolean
   progress: BgTaskProgress | null
   // 前端收到 bg_tasks.update / list_bg_tasks 时打的机器标记（后端不发）：bg 任务是各机器
   // 进程级快照，同一飞书群 thread 在多台机器上会重名，靠 backend 区分归属。
   backend?: string
 }
+
+// read_bg_task_output 的返回：输出文件末 8KB + 文件总字节 + 是否被截断
+export interface BgTaskOutput {
+  text: string
+  size: number
+  truncated: boolean
+}
+export const EMPTY_BG_OUTPUT: BgTaskOutput = { text: '', size: 0, truncated: false }
 
 // present_files 工具返回的单个文件元数据（后端 providers/present_files.py）。
 // kind ∈ image/pdf/video/audio/archive/doc/sheet/text/file；不存在的路径带 error。

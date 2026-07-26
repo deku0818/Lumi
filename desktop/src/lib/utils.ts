@@ -21,6 +21,14 @@ export const basename = (p: string) => p.split('/').filter(Boolean).pop() || p
 // token 数格式化（≥1k 显示 x.xk）。与 TUI lumi/tui/widgets/agent_group.py::_format_tokens 同口径
 export const fmtTokens = (n: number) => (n >= 1000 ? `${(n / 1000).toFixed(1)}k` : String(n))
 
+// 字节数格式化（附件卡片 / 后台任务输出体积共用）
+export const fmtSize = (n?: number) => {
+  if (n == null) return ''
+  if (n < 1024) return `${n} B`
+  if (n < 1024 * 1024) return `${Math.round(n / 1024)} KB`
+  return `${(n / 1024 / 1024).toFixed(1)} MB`
+}
+
 // 会话在 client 里的唯一身份 = 机器 id + thread_id。IM channel（飞书等）按 chat_id 派生
 // 确定性 thread_id，同一个群在本地/远程两台 server 上会得到相同 thread_id；只用 thread_id
 // 当 key 会让两台机器的同名会话在 client 里塌缩成一条（状态/连接/渲染全撞）。故一律用复合 key。

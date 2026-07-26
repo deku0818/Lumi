@@ -170,7 +170,7 @@ async def workflow(
     except WorkflowScriptError as e:
         return f"workflow 脚本编译失败:\n{e}\n请修正脚本后重试。"
 
-    entry = _start_workflow_task(name, engine)
+    entry = _start_workflow_task(name, engine, description)
     desc_line = f"说明: {description}\n" if description else ""
     return (
         f"workflow 已在后台启动\n"
@@ -189,7 +189,9 @@ async def workflow(
 # ---------------------------------------------------------------------------
 
 
-def _start_workflow_task(name: str, engine: WorkflowEngine) -> BackgroundTaskEntry:
+def _start_workflow_task(
+    name: str, engine: WorkflowEngine, description: str = ""
+) -> BackgroundTaskEntry:
     """注册后台 Workflow 任务并 fire-and-forget 启动。"""
     task_id = f"wf_{uuid.uuid4().hex[:_TASK_ID_HEX_LENGTH]}"
     output_file = bg_tasks_dir() / f"{task_id}.json"
@@ -202,6 +204,9 @@ def _start_workflow_task(name: str, engine: WorkflowEngine) -> BackgroundTaskEnt
         started_at=time.time(),
         output_file=output_file,
         agent_name=name,
+        # 与 agent 任务的 prompt 同位：drawer 卡片的「任务内容」。名字只是 slug，
+        # 这句描述才说明这个工作流在干什么
+        prompt=description,
     )
 
     registry = get_task_registry()

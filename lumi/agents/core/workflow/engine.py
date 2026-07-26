@@ -21,6 +21,7 @@ import builtins
 import inspect
 import os
 import textwrap
+import time
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
@@ -32,6 +33,12 @@ _MAX_AGENTS = 1000
 
 _HARD_CONCURRENCY_CAP = 16
 """并发上限硬顶；实际取 ``min(此值, cpu-2)``。"""
+
+_LAST_LOG_LIMIT = 300
+"""进度快照里 last_log 的截断长度（卡片只显示一行；日志全文在 output_file 里）。"""
+
+_LOG_EMIT_INTERVAL = 0.5
+"""脚本 log() 驱动进度广播的最小间隔（秒）。"""
 
 # Workflow 子代理禁用的工具：agent / workflow 防递归扇出；ask 在后台 graph 无法 interrupt
 # 会挂；cron / background_task 是编排层专属，子代理不该碰。
@@ -163,6 +170,7 @@ class WorkflowEngine:
         self._progress_sink: Any = None
         self._current_phase: str | None = None
         self._logs: list[str] = []
+        self._last_log_emit = 0.0
         # 子代理实例按 agent_name 缓存复用——同一具名/默认子代理在扇出里只建一次
         # （工具表 + graph 编译 + MCP 发现都不重复）；lock 保证并发首次每键只建一次。
         self._agent_cache: dict[str | None, tuple[Any, Any]] = {}
@@ -215,6 +223,13 @@ class WorkflowEngine:
                     "total": self._dispatched,
                     "running": max(0, self._agent_count - self._done),
                     "agent_count": self._agent_count,
+                    # 脚本 log() 的最新一条：workflow 的 output_file 完成时才写，运行中
+                    # 唯一能让人看懂「跑到哪了」的就是它。截断是必须的——log 同时是脚本里
+                    # print 的别名，print(整个文件内容) 会把这团东西塞进每次全量快照广播；
+                    # 卡片本来也只显示一行。
+                    "last_log": self._logs[-1][:_LAST_LOG_LIMIT]
+                    if self._logs
+                    else None,
                 }
             )
         except Exception:
@@ -397,3 +412,10 @@ class WorkflowEngine:
         msg = " ".join(str(m) for m in messages)
         self._logs.append(msg)
         logger.info("[workflow:%s] %s", self._name, msg)
+        # 新日志推给 drawer，但按 _LOG_EMIT_INTERVAL 节流：log 同时是脚本里 print 的
+        # 别名，循环打印会让每一行都触发一次全量快照广播，而卡片只显示最新那一行。
+        # phase / agent 起止仍是无条件 emit，末条日志随它们补上。
+        now = time.monotonic()
+        if now - self._last_log_emit >= _LOG_EMIT_INTERVAL:
+            self._last_log_emit = now
+            self._emit_progress()

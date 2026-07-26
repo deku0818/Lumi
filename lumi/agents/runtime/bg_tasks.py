@@ -87,6 +87,9 @@ class BackgroundTaskEntry:
     prompt: str = ""
     # Workflow 任务跑完的子代理扇出数（仅 WORKFLOW 类型有意义，用于通知摘要）
     agent_count: int | None = None
+    # 执行期是否持续写 output_file：bash 把 stdout 直接重定向进去，可实时 tail；
+    # agent / workflow 跑完才一次性写入，运行中读它恒为空。前端据此决定要不要轮询。
+    streams_output: bool = False
     # Workflow 实时进度快照（phase / 计数 / 在跑窗口），由引擎经 notify_progress 更新；
     # 其余 kind 为 None。形状由前端 drawer 详情消费，后端只透传不解释。
     progress: dict | None = None
@@ -262,8 +265,16 @@ async def run_background_task(
             registry.enqueue_notification(task_id)
 
 
-# serialize_task 不外发的内部字段：async_task 不可 JSON 化、prompt 可能很大且前端不用。
-_WIRE_EXCLUDE = frozenset({"async_task", "prompt"})
+# serialize_task 不外发的内部字段：async_task 不可 JSON 化。
+_WIRE_EXCLUDE = frozenset({"async_task"})
+
+# prompt 上 wire 的截断长度：卡片默认只显示三行，但可展开看全文，故上限要够容下一段完整
+# 任务描述；仍设上限是因为子代理 prompt 偶尔会挟带整段上下文，而 bg_tasks.update 是
+# 全量快照广播（每个任务 × 每次变更 × 每条连接），单条越大乘得越狠。
+_PROMPT_WIRE_LIMIT = 1000
+
+# 输出文件预览默认读取的尾部字节数：卡片只显示末几行，整读大日志既慢又无意义。
+_OUTPUT_TAIL_BYTES = 8192
 
 
 def serialize_task(entry: BackgroundTaskEntry) -> dict:
@@ -280,7 +291,32 @@ def serialize_task(entry: BackgroundTaskEntry) -> dict:
     data["kind"] = str(data["kind"])
     data["status"] = str(data["status"])
     data["output_file"] = str(data["output_file"])
+    if len(entry.prompt) > _PROMPT_WIRE_LIMIT:
+        data["prompt"] = entry.prompt[:_PROMPT_WIRE_LIMIT] + "…"
     return data
+
+
+def read_output_tail(
+    output_file: Path, limit: int = _OUTPUT_TAIL_BYTES
+) -> tuple[str, int, bool]:
+    """读输出文件末尾至多 ``limit`` 字节，返回 ``(文本, 文件总字节, 是否被截断)``。
+
+    截断时掐掉首个残行（seek 落点多半在某行中间）。文件不存在（bash 任务刚起 / agent
+    任务尚未写入）返回空文本——调用方按「暂无输出」呈现，不是错误。
+    """
+    try:
+        size = output_file.stat().st_size
+        with output_file.open("rb") as f:
+            if size > limit:
+                f.seek(size - limit)
+            raw = f.read()
+    except OSError:
+        return "", 0, False
+    text = raw.decode("utf-8", errors="replace")
+    truncated = size > limit
+    if truncated:
+        text = text.split("\n", 1)[-1]
+    return text, size, truncated
 
 
 def _format_workflow_summary(entry: BackgroundTaskEntry) -> str:
@@ -336,9 +372,13 @@ class TaskRegistry:
             logger.error("[TaskRegistry] on_change 回调异常", exc_info=True)
 
     def notify_progress(self, task_id: str, progress: dict) -> None:
-        """更新任务实时进度快照并通知观察者（Workflow 引擎用）。"""
+        """更新任务实时进度快照并通知观察者（Workflow 引擎 / 后台 agent 用）。
+
+        快照没变就不惊动观察者：每次 _fire_change 都是一次全量快照广播，而后台 agent
+        逐超步上报时，开头几步与收尾几步的活动是重复的。
+        """
         entry = self._entries.get(task_id)
-        if entry is None:
+        if entry is None or entry.progress == progress:
             return
         entry.progress = progress
         self._fire_change()
