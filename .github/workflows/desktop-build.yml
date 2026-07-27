@@ -29,12 +29,21 @@ jobs:
         # 我们分发的是安装包，构建必须可复现（官方亦建议 pin 具体版本）。代价是 OS 弃用时要手动
         # 升这份清单——GitHub 会提前在 Actions 日志里告警。当前各 -latest 的指向：
         # ubuntu-latest=ubuntu-24.04(x64) / windows-latest=windows-2025 / macos-latest=macos-15(arm64)。
+        #
+        # Linux 刻意停在 22.04 而非跟随 -latest：PyInstaller 除了 libpython 还会把后端依赖到的
+        # 系统共享库（libssl / libcrypto / liblzma …）从构建机复制进 onedir，那些库链的就是构建
+        # 机的 glibc。于是 Linux 产物的 libc 下限 = 构建机的 glibc，在 24.04(2.39) 上打的包在
+        # Ubuntu 22.04(2.35) 直接 "GLIBC_2.38 not found" 起不来。换句话说这里必须钉在「承诺支持
+        # 的最旧发行版」上，升它等于弃用旧系统用户，不是例行维护。
+        # 该 label 供应到 2027-04-17（brownout 自 2027-03-23 起，deprecation 自 2026-09-17 起排队
+        # 变慢）。届时不能简单升到 24.04，得改为在 host 上用 container: ubuntu:22.04 之类的低基线
+        # 容器里打后端——那才是不受 runner 镜像生命周期摆布的长久解。
         os:
           - windows-2025 # Windows x64（.exe / nsis）
           - macos-15 # macOS Apple Silicon arm64（.dmg / .zip）
           - macos-15-intel # macOS Intel x64
-          - ubuntu-24.04 # Linux x64（.AppImage）
-          - ubuntu-24.04-arm # Linux arm64
+          - ubuntu-22.04 # Linux x64（.AppImage）—— 版本决定产物 glibc 下限，见上
+          - ubuntu-22.04-arm # Linux arm64
         # macos-15-intel 是 GitHub 最后一个 x86_64 镜像（macos-13 已于 2025-12 下线），
         # 供应到 2027-08 为止，届时 Intel Mac 用户需回退到 uv tool install lumi 或连远程后端。
     runs-on: ${{ matrix.os }}
@@ -64,12 +73,11 @@ jobs:
           CSC_IDENTITY_AUTO_DISCOVERY: "false"
         run: bash scripts/build-desktop.sh
 
-      # 防 glibc 基线静默漂移。产物能跑的最低 glibc = 打进包里所有 ELF 中最高的那个 GLIBC 版本
-      # 需求，而构建机的 glibc 恒比目标系统新 —— 抬高下限时 CI 只会全绿，用户那边直接
-      # "GLIBC_x.y not found" 起不来。v0.2.77 的 AppImage 就这样被钉在 glibc 2.38 上
-      # （PyInstaller 捡了 ubuntu-24.04 的系统 Python，见 build-desktop.sh 的 --managed-python）。
-      # 2.35 = Ubuntu 22.04，当前承诺支持的最旧发行版；实测水位 2.28，由 tiktoken 的
-      # manylinux_2_28 wheel 决定。此步红了说明某依赖或工具链抬了下限，先确认是否真要弃旧发行版。
+      # 守住 Linux 产物的 glibc 下限。这类回归在云端毫无症状——构建机 glibc 恒比目标系统新，CI
+      # 全绿，只有旧发行版用户会撞上 "GLIBC_x.y not found"。v0.2.77 的 AppImage 就这样被钉在
+      # 2.38 上（在 ubuntu-24.04 上构建）。2.35 = Ubuntu 22.04 = 承诺支持的最旧发行版。
+      # 会让此步变红的两件事：runner 被升到更新的 Ubuntu（产物基线随之抬高），或某个依赖换上了
+      # 更高 manylinux 基线的 wheel。两者都需要先决定是否真要弃用旧系统，而不是顺手放宽阈值。
       - name: Assert glibc baseline
         if: runner.os == 'Linux'
         shell: bash
@@ -77,7 +85,12 @@ jobs:
           worst=$(grep -rhoa 'GLIBC_2\.[0-9]\+' dist/lumi-backend | sort -t. -k2 -n | tail -1)
           echo "产物 glibc 下限: ${worst:-未扫到}"
           [ -n "$worst" ] || { echo "::error::没扫到 GLIBC 符号，产物路径或结构已变，此检查失效"; exit 1; }
-          [ "${worst##*.}" -le 35 ] || { echo "::error::${worst} 高于 Ubuntu 22.04 的 glibc 2.35"; exit 1; }
+          if [ "${worst##*.}" -gt 35 ]; then
+            echo "::error::${worst} 高于 Ubuntu 22.04 的 glibc 2.35"
+            echo "触及该水位的文件："
+            grep -rla "$worst" dist/lumi-backend | head -20
+            exit 1
+          fi
 
       - uses: actions/upload-artifact@v4
         with:

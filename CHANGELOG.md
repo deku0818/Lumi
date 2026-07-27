@@ -1,12 +1,17 @@
 # Changelog
 
-## [0.2.78] - 2026-07-27
+## [0.2.79] - 2026-07-27
 
 ### Fixed
-- **Linux 包在 Ubuntu 22.04 等旧发行版上起不来** — 症状是 AppImage 里后端秒退、日志刷 `Failed to load Python shared library ... libpython3.12.so.1.0: /lib/x86_64-linux-gnu/libm.so.6: version 'GLIBC_2.38' not found`，Electron 那半正常起来，只有后端反复重启。根因是 PyInstaller 会把**它所用解释器的 libpython 打进产物**，而 uv 的默认 `python-preference = managed` 语义是「已装的 managed > 系统 > 下载新的 managed」——ubuntu-24.04 runner 自带满足 `requires-python>=3.12` 的 `/usr/bin/python3.12`（deb 包，链 glibc 2.38），uv 就直接捡了它，于是构建机的 libc 基线被焊进包里。打包命令改为 `--managed-python --python 3.12`，强制走 python-build-standalone（实测 libpython 最高只引用 GLIBC_2.17）。三平台原本各捡各的（deb / python.org framework / hostedtoolcache），一并改掉——产物不再随 runner 镜像预装什么而漂移。
+- **Linux 包在 Ubuntu 22.04 等旧发行版上起不来** — 症状是 AppImage 里后端秒退循环重启、Electron 那半正常：`Failed to load Python shared library ... libpython3.12.so.1.0: /lib/x86_64-linux-gnu/libm.so.6: version 'GLIBC_2.38' not found`。Linux 构建机从 `ubuntu-24.04`（glibc 2.39）退回 `ubuntu-22.04`（2.35），x64 与 arm64 同改。
+
+  病灶有两层，只堵一层不够：**一是 libpython**——PyInstaller 会把它所用解释器的 libpython 打进产物，而 uv 的默认 `python-preference = managed` 实际语义是「已装的 managed > 系统 > 下载新的 managed」，ubuntu-24.04 自带满足 `requires-python>=3.12` 的 `/usr/bin/python3.12`（deb 包，链 glibc 2.38），uv 就直接捡了它；打包命令加 `--managed-python --python 3.12` 强制走 python-build-standalone（实测其 libpython 最高只引用 GLIBC_2.17），顺带让三平台不再各捡各的（deb / python.org framework / hostedtoolcache），产物不随 runner 预装什么而漂移。**二是系统共享库**——后端依赖到的 libssl / liblzma 等同样是从构建机复制进 onedir 的，换掉 libpython 后水位仍停在 2.38（v0.2.78 实测），故 Linux 只能在承诺支持的最旧发行版上构建。该 label 供应到 2027-04-17，届时需改为在低基线容器（`container: ubuntu:22.04`）里打后端，而不是简单升 runner。
 
 ### Added
-- **构建期 glibc 基线断言**（`Assert glibc baseline`）— 扫产物内全部 ELF 的 GLIBC 版本符号，最高值超过 2.35（Ubuntu 22.04）即让构建失败。此类回归的要害是 CI 恒绿：构建机 glibc 永远比目标系统新，抬高下限在云端毫无症状，只有旧发行版用户会撞。扫不到符号（产物结构变动导致检查失效）同样判失败，不静默放过。当前实测水位 2.28，由 tiktoken 的 manylinux_2_28 wheel 决定，故整包覆盖 Ubuntu 20.04+ / Debian 10+ / RHEL 8+。
+- **构建期 glibc 基线断言**（`Assert glibc baseline`）— 扫 Linux 产物内全部 ELF 的 GLIBC 版本符号，最高值超过 2.35（Ubuntu 22.04）即让构建失败，并列出触及该水位的文件。这类回归的要害是 CI 恒绿：构建机 glibc 永远比目标系统新，抬高下限在云端毫无症状，只有旧发行版用户会撞——v0.2.78 就是被这道断言拦住才没再发一个装不上的包。扫不到符号（产物结构变动导致检查失效）同样判失败，不静默放过。
+
+### Note
+- v0.2.78 的 Release 已撤：Linux job 被上述断言拦下 → 无 Linux 产物，且 `merge-update-metadata`（needs: build）随之 skipped，导致 `latest-mac.yml` 停在两个 mac job 互相覆盖后的状态、只列 x64，Apple Silicon 的应用内更新会降级到 x64 包。
 
 ## [0.2.77] - 2026-07-26
 

@@ -16,6 +16,9 @@ echo "── 后端 lumi-backend v${VERSION} (PyInstaller onedir) ──"
 # 22.04(glibc 2.35) 上直接 "GLIBC_2.38 not found" 起不来。managed 版基线是 glibc 2.17。
 # 顺带让构建不再随 runner 镜像预装什么而漂移（三平台原本各捡各的：deb / python.org
 # framework / hostedtoolcache）。
+# 注意这只管住 libpython 那一份：依赖到的系统共享库（libssl / liblzma …）仍是从构建机复制
+# 的，Linux 产物的 glibc 下限终究等于构建机的 glibc —— 故 CI 把 Linux 钉在最旧目标发行版上
+# 构建（见 .github/workflows/desktop-build.yml 的矩阵注释与 Assert glibc baseline）。
 # --python 3.12：钉住大版本，否则 requires-python>=3.12 会让 uv 取最新 managed 版本。
 uv run --managed-python --python 3.12 --with pyinstaller pyinstaller \
   --name lumi-backend --onedir --noconfirm --clean \
