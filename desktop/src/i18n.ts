@@ -50,6 +50,13 @@ const ZH: Dict = {
   'sidebar.needsYou': '等待你处理',
   'menu.settings': '设置',
   'menu.language': '语言',
+  // 原生右键菜单（主进程构建，复制项复用 common.copy）
+  'menu.undo': '撤销',
+  'menu.redo': '重做',
+  'menu.cut': '剪切',
+  'menu.paste': '粘贴',
+  'menu.selectAll': '全选',
+  'menu.copyLink': '复制链接',
   'titlebar.file': '文件',
   'titlebar.view': '视图',
   'titlebar.help': '帮助',
@@ -411,6 +418,12 @@ const EN: Dict = {
   'sidebar.needsYou': 'Waiting for you',
   'menu.settings': 'Settings',
   'menu.language': 'Language',
+  'menu.undo': 'Undo',
+  'menu.redo': 'Redo',
+  'menu.cut': 'Cut',
+  'menu.paste': 'Paste',
+  'menu.selectAll': 'Select All',
+  'menu.copyLink': 'Copy Link',
   'titlebar.file': 'File',
   'titlebar.view': 'View',
   'titlebar.help': 'Help',
@@ -754,16 +767,26 @@ const Ctx = createContext<I18nCtx | null>(null)
 export function I18nProvider({ children }: { children: ReactNode }) {
   const [lang, setLang] = useState<Lang>(initialLang)
 
-  useEffect(() => {
-    localStorage.setItem(KEY, lang)
-    document.documentElement.lang = lang
-  }, [lang])
-
   const t: Translate = (key, vars) => {
     let s = DICT[lang][key] ?? DICT.en[key] ?? key
     if (vars) for (const k in vars) s = s.replaceAll(`{${k}}`, String(vars[k]))
     return s
   }
+
+  useEffect(() => {
+    localStorage.setItem(KEY, lang)
+    document.documentElement.lang = lang
+    // 原生右键菜单由主进程构建，文案在这边翻好推过去
+    void window.lumi.setMenuLabels?.({
+      undo: t('menu.undo'),
+      redo: t('menu.redo'),
+      cut: t('menu.cut'),
+      copy: t('common.copy'),
+      paste: t('menu.paste'),
+      selectAll: t('menu.selectAll'),
+      copyLink: t('menu.copyLink'),
+    })
+  }, [lang])
 
   return createElement(Ctx.Provider, { value: { lang, setLang, t } }, children)
 }

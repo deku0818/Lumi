@@ -1,5 +1,5 @@
 // Electron 主进程：拉起 lumi serve sidecar、创建窗口、经 IPC 把 ws 连接信息给 renderer。
-const { app, BrowserWindow, dialog, ipcMain, protocol, session, shell, Notification, Menu } = require('electron')
+const { app, BrowserWindow, clipboard, dialog, ipcMain, protocol, session, shell, Notification, Menu } = require('electron')
 const { spawn, execFile } = require('node:child_process')
 const { promisify } = require('node:util')
 const execFileAsync = promisify(execFile)
@@ -250,6 +250,39 @@ function installHiddenMenu(win) {
   win.setMenuBarVisibility(false)
 }
 
+// 右键菜单：Electron 不自带，不装则右键全程无反应。文案由 renderer 按应用内语言翻好推来
+// （i18n.ts 是全应用文案的单一事实源，主进程不留平行词表；推来之前 label 为 undefined，
+// Electron 回落到 role 自带的英文文案，只有无 role 的 copyLink 要自带兜底）。
+let menuLabels = {}
+
+function installContextMenu(win) {
+  win.webContents.on('context-menu', (_e, params) => {
+    const flags = params.editFlags
+    const items = []
+    if (params.isEditable) {
+      items.push(
+        { label: menuLabels.undo, role: 'undo', enabled: flags.canUndo },
+        { label: menuLabels.redo, role: 'redo', enabled: flags.canRedo },
+        { type: 'separator' },
+        { label: menuLabels.cut, role: 'cut', enabled: flags.canCut },
+        { label: menuLabels.copy, role: 'copy', enabled: flags.canCopy },
+        { label: menuLabels.paste, role: 'paste', enabled: flags.canPaste },
+        { type: 'separator' },
+        { label: menuLabels.selectAll, role: 'selectAll', enabled: flags.canSelectAll },
+      )
+    } else if (params.selectionText) {
+      items.push({ label: menuLabels.copy, role: 'copy' })
+    }
+    if (params.linkURL) {
+      if (items.length) items.push({ type: 'separator' })
+      const linkURL = params.linkURL
+      items.push({ label: menuLabels.copyLink ?? 'Copy Link', click: () => clipboard.writeText(linkURL) })
+    }
+    // 没有可做的事就别弹空菜单（如空白区域右键）
+    if (items.length) Menu.buildFromTemplate(items).popup({ window: win })
+  })
+}
+
 function createWindow() {
   const isMac = process.platform === 'darwin'
   const win = new BrowserWindow({
@@ -285,6 +318,7 @@ function createWindow() {
   })
 
   if (!isMac) installHiddenMenu(win)
+  installContextMenu(win)
 
   win.on('maximize', () => sendWindowState(win))
   win.on('unmaximize', () => sendWindowState(win))
@@ -441,6 +475,10 @@ ipcMain.handle('lumi:window:is-maximized', (event) => {
 
 ipcMain.handle('lumi:menu-command', (event, command) => {
   runMenuCommand(event.sender, command)
+})
+
+ipcMain.handle('lumi:menu-labels', (_e, labels) => {
+  menuLabels = labels
 })
 
 // 单实例锁：双开（Windows 双击两次 / mac open -n）会各拉一个 sidecar 抢同一

@@ -1,5 +1,13 @@
 # Changelog
 
+## [0.2.80] - 2026-07-27
+
+### Fixed
+- **桌面端右键全程无反应** — 输入框与回复正文右键都弹不出菜单，复制粘贴只能靠键盘。根因是 Electron 默认不提供右键菜单，而 `electron/main.cjs` 从未监听 `context-menu` 事件（编辑类命令此前只经隐藏原生菜单的 role 走键盘快捷键）。现按右键位置构建原生菜单：可编辑区给撤销 / 重做 / 剪切 / 复制 / 粘贴 / 全选（禁用态跟随 `params.editFlags`，无可撤销时 Undo 自动置灰），只读正文选中后给复制，链接给复制链接；什么都做不了就不弹空菜单。装在 `createWindow` 内 per-window——全仓只有一处 `new BrowserWindow`、无 webview，改 `app.on('web-contents-created')` 是为不存在的第二窗口买单。
+
+### Added
+- **原生菜单文案纳入 i18n**（`menu.undo` / `redo` / `cut` / `paste` / `selectAll` / `copyLink`，复制项复用既有 `common.copy`）。菜单在主进程构建但**主进程不留平行词表**：renderer 在语言 effect 里把翻好的 label 对象经 `lumi:menu-labels` 推过去，新增语言只改 `i18n.ts` 一处。方向只能是 renderer → main：真相源是 renderer 的 localStorage（主进程读不到），且实测 Electron 43 的 role 自带 label 是硬编码英文、不随系统语言变（`menu-item-roles` 里无 locale 查表），"不给 label 让它自己本地化"这条路不存在。
+
 ## [0.2.79] - 2026-07-27
 
 ### Fixed

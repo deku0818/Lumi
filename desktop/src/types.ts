@@ -476,6 +476,7 @@ declare global {
       }
       menuCommand?: (command: string) => Promise<void>
       onMenuAction?: (cb: (action: string) => void) => () => void
+      setMenuLabels?: (labels: Record<string, string>) => Promise<void>
       getConnection: (backendId?: string) => Promise<{ wsUrl: string }>
       backends?: {
         list: () => Promise<BackendsState>

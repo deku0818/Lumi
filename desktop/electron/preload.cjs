@@ -15,6 +15,8 @@ contextBridge.exposeInMainWorld('lumi', {
     },
   },
   menuCommand: (command) => ipcRenderer.invoke('lumi:menu-command', command),
+  // 原生右键菜单在主进程构建，文案由 renderer 按当前语言翻好推过去
+  setMenuLabels: (labels) => ipcRenderer.invoke('lumi:menu-labels', labels),
   onMenuAction: (cb) => {
     const listener = (_e, action) => cb(String(action))
     ipcRenderer.on('lumi:menu-action', listener)

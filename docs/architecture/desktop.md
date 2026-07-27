@@ -216,6 +216,8 @@ macOS 关窗后应用驻留 Dock，sidecar 保持运行，Dock 唤起（activate
 
 `desktop/src/i18n.ts` 提供 `useI18n()` hook（`t` / `lang` / `setLang`），支持中文 / English，偏好存 localStorage（`lumi-lang`）。所有 UI 文案经 `t(key)` 取用，不硬编码。
 
+**原生菜单的文案同样以 `i18n.ts` 为单一事实源**：右键菜单在主进程构建（`electron/main.cjs::installContextMenu`，Electron 不自带右键菜单，不装则右键全程无反应），但主进程不留平行词表——renderer 在语言 effect 里把翻好的 label 对象经 `lumi:menu-labels` 推过去，故新增语言只改 `i18n.ts` 一处即可。真相源是 renderer 的 localStorage（主进程读不到），且 Electron 的 role 自带 label 是硬编码英文、不随系统语言变，所以方向只能是 renderer → main。推来之前 label 为 `undefined`，Electron 回落到 role 自带英文，只有无 role 的「复制链接」自带兜底。
+
 ## 界面字体
 
 设置→通用页可让用户从**本机已装字体**里挑界面字体并调正文字号，偏好存 localStorage（`lumi-font`，`{family, size}` JSON），落地见 `desktop/src/font.ts`（`useUiFont` hook）+ `desktop/src/components/FontPicker.tsx`。与 `theme.ts` 同构：运行时把覆写写到 `document.documentElement` 的 CSS 变量上。
