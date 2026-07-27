@@ -42,6 +42,8 @@ Agent 任务工具链的探测与安装。实现在 `lumi/gateway/toolbox.py`（
 
 用裸名走 `shutil.which`（Windows 自动遍历 PATHEXT，`npm`/`npx`/`lark-cli` 实为 `.cmd`，硬拼 `.exe` 会漏检）；判定来源时**只 resolve 目录不 resolve 文件**——`node`/`lark-cli` 在 `bin/` 里是指向 `node/` 树的 symlink，resolve 文件会把它们误判成 system。
 
+**执行也必须用 which 解析出的完整路径**：`subprocess` 只会给裸名补 `.exe`，不遍历 PATHEXT，裸名跑 `lark-cli` 在 Windows 上必然 `FileNotFoundError`（表现为「已安装」与「不在 PATH」同时出现）。同理，收子进程输出恒显式 `encoding="utf-8"`——`text=True` 走系统 locale，中文 Windows 的 cp936 撞上 CLI 的中文输出即抛 `UnicodeDecodeError`。
+
 **不做最低版本强制**：系统版本旧也如实展示、照常沿用，不判「过旧」、不用工具箱副本遮蔽（PATH 末尾追加下系统版本永远赢，并存只会困惑）。
 
 ## PATH 注入（单点）
@@ -53,7 +55,7 @@ Agent 任务工具链的探测与安装。实现在 `lumi/gateway/toolbox.py`（
 ## 下载与校验
 
 - 版本 **pin 在代码里**（`UV_VERSION` / `RG_VERSION` / `NODE_VERSION`），升级 Lumi 时更新 pin——不依赖 GitHub API 可达性，行为可复现。lark-cli 例外：npm 路径天然 latest；直下路径查 releases latest API。
-- checksum 取产物同源文件（uv/rg 的 `<asset>.sha256`、Node 的 `SHASUMS256.txt`），与下载并发取；**拿不到就跳过校验**——它只防传输损坏，不值得为它让安装失败。
+- checksum 取产物同源文件（uv/rg 的 `<asset>.sha256`、Node 的 `SHASUMS256.txt`），与下载并发取；**拿不到就跳过校验**——它只防传输损坏，不值得为它让安装失败（这一支恒留 warning，否则「校验形同虚设」无人知晓）。排版按发布方各不相同（`<hash>  <file>`、`<hash> *<file>`、rg 的 Windows 产物是 CertUtil 三行版、哈希在第二行），故取首个 64 位十六进制串而非按空白切首段。
 - 下载走 urllib 默认代理行为（尊重 `https_proxy`）；解压全用标准库（tarfile `filter="data"` / zipfile），无 shell out。压缩包落临时目录，装完即随目录删除。
 
 ## 安装路径

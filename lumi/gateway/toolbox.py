@@ -42,6 +42,7 @@ CORE_TOOLS = ("uv", "rg", "node")
 ProgressFn = Callable[[str, float | None], None]
 
 _VERSION_RE = re.compile(r"(\d+\.\d+\.\d+)")
+_SHA256_RE = re.compile(r"\b[0-9a-fA-F]{64}\b")
 _CLI_TIMEOUT = 30
 
 
@@ -105,17 +106,34 @@ def _exe(name: str) -> str:
     return f"{name}.exe" if _plat()[0] == "win" else name
 
 
-def _version_of(path: str, name: str) -> str:
-    """跑 --version 解析版本号；失败返回空串（存在但版本未知）。"""
+def _run(cmd: list[str], timeout: int = _CLI_TIMEOUT) -> tuple[bool, str]:
+    """跑一次子命令，返回 (成功, stdout 或 stderr)。
+
+    显式按 UTF-8 解码：``text=True`` 走的是系统 locale 编码，中文 Windows 上
+    是 cp936，lark-cli 的中文 JSON 一到那儿就 UnicodeDecodeError（体检误报
+    「不支持 skills 子命令」）。
+    """
     try:
         proc = subprocess.run(
-            [path, "--version"], capture_output=True, text=True, timeout=10
+            cmd,
+            capture_output=True,
+            encoding="utf-8",
+            errors="replace",
+            timeout=timeout,
         )
-        match = _VERSION_RE.search(proc.stdout or proc.stderr)
-        return match.group(1) if match else ""
+        return proc.returncode == 0, proc.stdout or proc.stderr
     except Exception as e:
-        logger.debug(f"取 {name} 版本失败: {e}")
-        return ""
+        return False, str(e)
+
+
+def _version_of(path: str, name: str) -> str:
+    """跑 --version 解析版本号；失败返回空串（存在但版本未知）。"""
+    ok, out = _run([path, "--version"], timeout=10)
+    if not ok:
+        logger.debug(f"取 {name} 版本失败: {out[:200]}")
+    # 非零退出也照样解析：有的工具把版本打在 stderr 且退出码不为 0
+    match = _VERSION_RE.search(out)
+    return match.group(1) if match else ""
 
 
 def detect(name: str) -> ToolStatus:
@@ -155,6 +173,18 @@ def status_all() -> dict:
 # ── 下载与解压 ──
 
 
+def _pick_sha256(text: str) -> str:
+    """从 checksum 文件里挑出那串哈希，容忍各家的排版。
+
+    ``<hash>  <file>``（uv / rg 的 POSIX 产物、node 的 SHASUMS256.txt）之外还有
+    第三种：rg 的 Windows 产物由 CertUtil 生成，哈希在第二行，首行是
+    ``SHA256 hash of xxx.zip:``——按空白切首段会取到 "SHA256"，校验必然不匹配，
+    Windows 装 rg 从来没成功过。取首个 64 位十六进制串则三种排版通吃。
+    """
+    match = _SHA256_RE.search(text)
+    return match.group(0).lower() if match else ""
+
+
 def _fetch_checksum(url: str) -> str:
     """取产物的官方 sha256（uv/rg 为 <asset>.sha256，node 为 SHASUMS256.txt）。
 
@@ -164,20 +194,25 @@ def _fetch_checksum(url: str) -> str:
     try:
         if "nodejs.org" in url:
             base, filename = url.rsplit("/", 1)
-            text = (
+            body = (
                 urllib.request.urlopen(f"{base}/SHASUMS256.txt", timeout=30)
                 .read()
                 .decode()
             )
-            for line in text.splitlines():
-                if line.endswith(filename):
-                    return line.split()[0]
-            return ""
-        text = urllib.request.urlopen(f"{url}.sha256", timeout=30).read().decode()
-        return text.split()[0]
+            text = next(
+                (line for line in body.splitlines() if line.endswith(filename)), ""
+            )
+        else:
+            text = urllib.request.urlopen(f"{url}.sha256", timeout=30).read().decode()
     except Exception as e:
         logger.warning(f"checksum 获取失败，跳过校验: {e}")
         return ""
+    digest = _pick_sha256(text)
+    if not digest:
+        # 取到了响应却挑不出哈希（代理拦截页 / 发布方改排版），静默跳过校验就成了
+        # 「校验形同虚设而无人知晓」——这一支必须留痕
+        logger.warning(f"checksum 内容无可识别哈希，跳过校验: {url}")
+    return digest
 
 
 def _download(url: str, dest: Path, progress: ProgressFn | None, phase: str) -> None:
@@ -307,14 +342,6 @@ _LARK_PKG = "@larksuite/cli"
 _LARK_RELEASES = "https://api.github.com/repos/larksuite/cli/releases/latest"
 
 
-def _run(cmd: list[str], timeout: int = _CLI_TIMEOUT) -> tuple[bool, str]:
-    try:
-        proc = subprocess.run(cmd, capture_output=True, text=True, timeout=timeout)
-        return proc.returncode == 0, proc.stdout or proc.stderr
-    except Exception as e:
-        return False, str(e)
-
-
 def lark_skill_versions(cli_path: str) -> dict[str, str] | None:
     """lark-cli 内嵌技能清单 {name: version}；命令失败/输出不可解析返回 None。
 
@@ -323,11 +350,15 @@ def lark_skill_versions(cli_path: str) -> dict[str, str] | None:
     """
     ok, out = _run([cli_path, "skills", "list"])
     if not ok:
+        logger.warning(f"lark-cli skills list 执行失败: {out[:200]}")
         return None
     try:
         skills = json.loads(out).get("skills") or []
         return {s["name"]: s.get("version", "") for s in skills}
     except ValueError:
+        # 体检 UI 只能给出「请先升级」的猜测，真实原因（崩溃栈 / 乱码 / 更新提示
+        # 混进 stdout）唯有日志留得下
+        logger.warning(f"lark-cli skills list 输出不可解析: {out[:200]}")
         return None
 
 

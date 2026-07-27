@@ -860,7 +860,7 @@ async def test_minute_push_lands_on_the_inbound_p2p_thread(monkeypatch):
 
 # ── 妙记订阅自愈 + 链路诊断 ──
 def _fake_run(stdout: str = "", stderr: str = "", exc: Exception | None = None):
-    def run(cmd, capture_output=False, text=False, timeout=None):
+    def run(cmd, **kwargs):
         if exc is not None:
             raise exc
         return SimpleNamespace(stdout=stdout, stderr=stderr, returncode=0)
@@ -871,6 +871,8 @@ def _fake_run(stdout: str = "", stderr: str = "", exc: Exception | None = None):
 def _patch_subprocess(monkeypatch, run):
     import subprocess
 
+    # which 一并 mock：_run_cli 执行的是解析后的完整路径（Windows 上裸名找不到 .cmd）
+    _patch_which(monkeypatch, True)
     monkeypatch.setattr(subprocess, "run", run)
 
 
@@ -893,10 +895,34 @@ def test_ensure_subscription_reports_api_error(monkeypatch):
 
 def test_ensure_subscription_handles_missing_binary(monkeypatch):
     """lark-cli 不在 PATH 时给出可辨认的原因，而非抛异常打断 channel 启动。"""
+    import shutil
+
     from lumi.gateway.channels.feishu.minutes import ensure_subscription
 
-    _patch_subprocess(monkeypatch, _fake_run(exc=FileNotFoundError()))
+    monkeypatch.setattr(shutil, "which", lambda name: None)
     assert "lark-cli" in ensure_subscription()
+
+
+def test_run_cli_decodes_utf8_under_non_utf8_locale(monkeypatch):
+    """中文 Windows 现场：locale 是 cp936，lark-cli 的中文输出（用户名等）仍须解得出。
+
+    唯一跑真子进程的用例——解码在 subprocess 内部发生，mock 掉 run 就测不到。
+    把 which 指向 python 本身，顺带钉住「执行 which 解析出的完整路径」这条：
+    Windows 上 npm 装出的是 lark-cli.cmd，subprocess 拿裸名只会补 .exe。
+    """
+    import locale
+    import shutil
+    import sys
+
+    from lumi.gateway.channels.feishu import minutes
+
+    monkeypatch.setattr(locale, "getencoding", lambda: "gbk")
+    monkeypatch.setattr(shutil, "which", lambda name: sys.executable)
+    payload = '{"identities": {"user": {"available": true, "userName": "鄢楚威"}}}'
+    code = f"import sys; sys.stdout.buffer.write({ascii(payload)}.encode('utf-8'))"
+    ok, out = minutes._run_cli("-c", code)
+    assert ok
+    assert json.loads(out)["identities"]["user"]["userName"] == "鄢楚威"
 
 
 def test_ensure_subscription_handles_non_json(monkeypatch):
@@ -1033,7 +1059,7 @@ def test_diagnose_all_green(monkeypatch):
     _patch_which(monkeypatch, True)
     calls = []
 
-    def run(cmd, capture_output=False, text=False, timeout=None):
+    def run(cmd, **kwargs):
         calls.append(cmd)
         if "auth" in cmd:
             body = {

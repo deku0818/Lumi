@@ -1,5 +1,16 @@
 # Changelog
 
+## [0.2.83] - 2026-07-27
+
+### Fixed
+- **中文 Windows 上飞书体检误报「lark-cli 不支持 skills 子命令，请先升级」** — `subprocess.run(text=True)` 按**系统 locale** 解码子进程输出，中文 Windows 是 cp936，而 `lark-cli skills list` 吐的是大段中文 UTF-8 JSON，一撞就 `UnicodeDecodeError`，被 `except` 吞掉后与「旧版 cli 不认这个子命令」不可区分。客户机上 cli 是好的（v1.0.77），`npm update` 修不掉。同卡上「已安装 v1.0.77」是绿的正是佐证：`--version` 输出纯 ASCII 解得开。收子进程输出改为显式 `encoding="utf-8", errors="replace"`；技能包导出（`skills read` 拿的是中文 SKILL.md）此前即便侥幸不报错也会写成乱码，一并修好。
+- **同机妙记体检「lark-cli 已安装」与「不在 PATH」同时出现** — 检测走 `shutil.which`（遍历 PATHEXT，命中 npm 装出的 `lark-cli.cmd`），执行却传裸名 `"lark-cli"`，而 Windows 的 `CreateProcess` 对裸名只补 `.exe`，于是必然 `FileNotFoundError`。改为执行 which 解析出的完整路径。
+- **Windows 装 rg 从来没成功过（checksum 恒不匹配）** — ripgrep 的 Windows 产物 checksum 由 CertUtil 生成，是三行格式、哈希在第二行，而解析用的是 `text.split()[0]`，取到的是字符串 `"SHA256"`。报错还引向「可重试 / 可设 https_proxy」，而这两条都无济于事。改取首个 64 位十六进制串，三种发布方排版通吃（另两种为 `<hash>  <file>` 与 uv Windows 的 `<hash> *<file>`）。
+
+### Changed
+- `lark_skill_versions` 与 `_fetch_checksum` 的失败分支补 warning 日志：前者此前把真实原因整个丢弃，体检 UI 只剩「请先升级」这句猜测；后者在「拿到响应却挑不出哈希」时会静默跳过完整性校验（旧代码此路径是报错中止），不留痕等于校验形同虚设。
+- `toolbox._version_of` 改走 `_run`，模块内同一段 UTF-8 子进程调用由三份收敛为两份。
+
 ## [0.2.82] - 2026-07-27
 
 ### Fixed

@@ -60,9 +60,6 @@ START → Summarizer（超阈值当轮就地压缩 / ptl_retry 置位则绕阈�
 
 ### 工具系统
 
-- **ToolRegistry**（`agents/tools/registry.py`）：单例，支持两种 provider 注册方式——异步函数或模块（自动收集模块内所有 `StructuredTool`）
-- **Provider 目录**（`agents/tools/providers/`）：每个文件对应一类工具（bash、filesystem、ask、todo、cron、skill、agent、plan）
-- **工具加载**：`get_tools()` 通过 `asyncio.gather()` 并发加载所有 provider
 - **结构化输出**：伪工具 `__structured_output__` 机制，模型直接通过 tool args 输出结构化数据，无需额外 LLM 调用
 - **BYPASS_TOOLS**：`ask` 等工具跳过审批逻辑直接执行
 
@@ -104,10 +101,5 @@ START → Summarizer（超阈值当轮就地压缩 / ptl_retry 置位则绕阈�
 - **提示词组装**：`SOUL/AGENTS` 两文件按序**直接拼接**（不做 XML 包裹），缺失即跳过；`default` 无内置 prompts 时全靠 `.lumi/prompts/`，都没有则 `load_system_prompt` 返回空串（以无系统提示词运行）。`SUMMARY`（压缩用）走同一条 `load_prompt` 解析链，但框架内置了兜底（`lumi/prompts/SUMMARY.md`）——未配置也能压缩，故各调用点不再有「未配置 SUMMARY」的错误分支
 - **工具描述**：内置工具的 description 直接写在各工具函数的 docstring 里；`registry._collect_tools_from_module` 加载时统一 `inspect.cleandoc` 抹掉源码缩进（外部 MCP 工具走异步 loader，不经此处）。工具描述不再可经 style/`.lumi` 配置覆盖
 - **`active_style` 属性**（`LumiConfig`）：返回当前生效的风格名，CLI override > config.json > "default"
-
-## 测试
-
-- pytest + pytest-asyncio，`asyncio_mode = "auto"`（异步测试直接用 `async def test_*()`）
-- `tests/conftest.py` 中有单例重置 fixtures（`reset_registry`、`reset_filesystem_backend`、`reset_session_manager`）和隔离工作区 fixture（`authorized_tmp_dir`）
 
 

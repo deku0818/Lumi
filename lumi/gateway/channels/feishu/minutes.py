@@ -43,13 +43,23 @@ _STEPS: tuple[tuple[str, str], ...] = (
 
 
 def _run_cli(*args: str) -> tuple[bool, str]:
-    """跑一次 lark-cli，返回 (成功, stdout 或错误原因)。"""
+    """跑一次 lark-cli，返回 (成功, stdout 或错误原因)。
+
+    两处 Windows 讲究：走 which 解析出的完整路径（npm 装出的是 lark-cli.cmd，
+    subprocess 只会给裸名补 .exe，不像 which 那样遍历 PATHEXT）；显式 UTF-8 解码
+    （text=True 用系统 locale，中文 Windows 的 cp936 撞上 CLI 的中文输出即报错）。
+    """
+    exe = shutil.which(_CLI)
+    if exe is None:
+        return False, f"{_CLI} 不在 PATH"
     try:
         proc = subprocess.run(
-            [_CLI, *args], capture_output=True, text=True, timeout=_TIMEOUT
+            [exe, *args],
+            capture_output=True,
+            encoding="utf-8",
+            errors="replace",
+            timeout=_TIMEOUT,
         )
-    except FileNotFoundError:
-        return False, f"{_CLI} 不在 PATH"
     except Exception as e:  # 超时 / 其他执行失败
         return False, str(e)
     return True, proc.stdout or proc.stderr

@@ -206,6 +206,27 @@ def test_checksum_mismatch_rejects(toolbox_env, tmp_path, monkeypatch):
     assert not dest.exists()
 
 
+@pytest.mark.parametrize(
+    "text",
+    [
+        # uv / rg 的 POSIX 产物、node 的 SHASUMS256.txt 行
+        "9f2c1c0f1e4d9b7a3c5e8f0a1b2c3d4e5f60718293a4b5c6d7e8f90a1b2c3d4e  rg.tar.gz",
+        # uv 的 Windows 产物（二进制标记 *）
+        "9F2C1C0F1E4D9B7A3C5E8F0A1B2C3D4E5F60718293A4B5C6D7E8F90A1B2C3D4E *uv.zip",
+        # rg 的 Windows 产物：CertUtil 排版，哈希在第二行
+        "SHA256 hash of ripgrep-15.2.0-x86_64-pc-windows-msvc.zip:\r\n"
+        "9f2c1c0f1e4d9b7a3c5e8f0a1b2c3d4e5f60718293a4b5c6d7e8f90a1b2c3d4e\r\n"
+        "CertUtil: -hashfile command completed successfully.\r\n",
+    ],
+)
+def test_pick_sha256_across_publisher_formats(text):
+    """三种官方排版都要挑得出哈希——按空白切首段会在 CertUtil 版上取到 "SHA256"。"""
+    assert (
+        toolbox._pick_sha256(text)
+        == "9f2c1c0f1e4d9b7a3c5e8f0a1b2c3d4e5f60718293a4b5c6d7e8f90a1b2c3d4e"
+    )
+
+
 # ── 飞书组件 ──
 
 _EMBEDDED = {
@@ -297,6 +318,29 @@ def test_lark_skill_versions_unreadable_returns_none(toolbox_env, monkeypatch):
     assert lark_skill_versions("/usr/bin/lark-cli") is None
     monkeypatch.setattr(toolbox, "_run", lambda cmd, timeout=30: (True, "not json"))
     assert lark_skill_versions("/usr/bin/lark-cli") is None
+
+
+def test_run_decodes_utf8_under_non_utf8_locale(monkeypatch):
+    """中文 Windows 现场：locale 是 cp936，lark-cli 的中文 JSON 仍须解得出来。
+
+    本文件唯一跑真子进程的用例——解码发生在 subprocess 内部，mock 掉就测不到。
+    把 locale 强改成 gbk 复现客户机：不显式指定 UTF-8 时这里会解码失败，
+    体检遂误报「lark-cli 不支持 skills 子命令，请先升级」。
+
+    子进程直接写 UTF-8 字节、命令行全 ASCII（ascii() 转义），这样本用例在真 Windows
+    上也成立——否则子进程的 print 会按当地 ANSI 代码页编码，测的就不是被测行为了。
+    """
+    import locale
+    import sys
+
+    monkeypatch.setattr(locale, "getencoding", lambda: "gbk")
+    payload = (
+        '{"ok": true, "skills": [{"name": "lark-approval", "version": "飞书审批"}]}'
+    )
+    code = f"import sys; sys.stdout.buffer.write({ascii(payload)}.encode('utf-8'))"
+    ok, out = toolbox._run([sys.executable, "-c", code])
+    assert ok
+    assert json.loads(out)["skills"][0]["version"] == "飞书审批"
 
 
 def test_sync_with_unreadable_manifest_raises(toolbox_env, monkeypatch):
