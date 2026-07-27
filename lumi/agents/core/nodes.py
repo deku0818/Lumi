@@ -1,10 +1,8 @@
 from typing import Literal
-from uuid import uuid4
 
 from langchain_core.messages import (
     AIMessage,
     HumanMessage,
-    RemoveMessage,
     SystemMessage,
     ToolMessage,
 )
@@ -25,6 +23,7 @@ from lumi.agents.core.node_helpers.messages import (
     inject_message_cache_breakpoints,
 )
 from lumi.agents.core.preprocessing.compact import (
+    build_compacted_update,
     is_circuit_open,
     is_ptl_error,
     record_circuit_failure,
@@ -32,7 +31,6 @@ from lumi.agents.core.preprocessing.compact import (
     run_summary,
     select_for_ptl_compaction,
 )
-from lumi.agents.core.preprocessing.summary import build_summary_carrier
 from lumi.agents.core.response import message_transform
 from lumi.agents.core.state import LumiAgentContext, LumiAgentState
 from lumi.agents.core.structured_tool import (
@@ -616,17 +614,13 @@ async def auto_classify(
 async def _summarize(
     body: list, prompt: str, runtime: Runtime[LumiAgentContext], token_config
 ) -> tuple[str, int]:
-    """摘要正常路径与 PTL 强制压缩的共用核：剔除悬空 tool_use 后调 run_summary。
+    """摘要正常路径与 PTL 强制压缩的共用核：绑 runtime / token_config 调 run_summary。
 
-    Summarizer 先于 Preprocess 的 cleanup 运行——中断残留的悬空 AIMessage(tool_use)
-    直发摘要模型会被 Anthropic 400 拒绝（非 PTL、不重试），喂给摘要链前从副本剔除；
-    state 里的悬空消息随压缩一并删除，不受此剔除影响。熔断记账留在各调用方
-    （失败语义不同：正常路径 raise、PTL 路径返回 {} 放行）。
+    悬空 tool_use 的剔除在 ``run_summary`` 里（三条压缩路径同一个入口）。熔断记账留在
+    各调用方（失败语义不同：正常路径 raise、PTL 路径返回 {} 放行）。
     """
-    dangling = {rm.id for rm in cleanup_incomplete_tool_calls(body)}
-    summary_input = [m for m in body if m.id not in dangling]
     return await run_summary(
-        summary_input,
+        body,
         prompt,
         tools=runtime.context.tools,
         system_prompt=runtime.context.system_prompt,
@@ -644,10 +638,10 @@ async def summarizer(
     """串行压缩历史消息，本轮 CallModel 直接看到压缩后的 messages。
 
     串行拓扑：``Summarizer → PreprocessMessages → CallModel``——超阈值时当轮就地
-    压缩（``RemoveMessage`` 删历史 + 摘要作独立 carrier 消息插在末条 Human 之前），
-    即将溢出的这次调用立刻受益。压缩先于 PreprocessMessages 的 UserPromptSubmit
-    hook：上下文注入永远发生在压缩后的世界里（旧注入块与 marker 随历史一并删除，
-    hook 扫不到 marker 即注入全量），在线/离线压缩后的形态同构：
+    压缩（删历史 + 摘要作独立 carrier 消息插在重挂的用户消息之前），即将溢出的这次
+    调用立刻受益。压缩先于 PreprocessMessages 的 UserPromptSubmit hook：上下文注入
+    永远发生在压缩后的世界里（marker 由 ``build_compacted_update`` 恒剥，hook 扫不到
+    即注入全量），在线/离线压缩后的形态同构：
     ``[System?, Human(<summary>), Human(ctx全量+用户消息)]``。
 
     缓存安全的分叉：复用主对话的 system_prompt + tools 前缀，只在末尾追加摘要指令。
@@ -657,7 +651,7 @@ async def summarizer(
     - ``ptl_retry`` 置位（CallModel 撞 PTL 路由回来）→ 绕过阈值门走
       :func:`_ptl_forced_compact` 强制压缩
     - 触发压缩 → strip 图像后走 PTL 截头重试；失败记录熔断计数并抛出（让上层感知），
-      成功则清零熔断、写回 ``RemoveMessage`` + 摘要消息
+      成功则清零熔断、经 ``build_compacted_update`` 写回删除 + 摘要 + 重挂
 
     保留规则：头 SystemMessage 不参与摘要；尾必须是 HumanMessage（不变量，否则报错）。
     """
@@ -700,9 +694,9 @@ async def summarizer(
         raise ValueError("[Summarizer] 最后一条消息必须是 HumanMessage")
 
     messages_to_summarize = messages[:-1]
-    summarized_ids = [msg.id for msg in messages_to_summarize if msg.id]
+    summarizable = sum(1 for msg in messages_to_summarize if msg.id)
     # 可压缩消息过少（≤1 条）时压缩收益甚微，直接放行
-    if len(summarized_ids) < 2:
+    if summarizable < 2:
         return {}
 
     prompt = get_config().load_prompt("SUMMARY")
@@ -723,23 +717,12 @@ async def summarizer(
         raise
     reset_circuit(thread_id)
     logger.info(
-        f"[Summarizer] 压缩完成，{len(summarized_ids)} 条消息，PTL 重试 {ptl_retries} 次"
+        f"[Summarizer] 压缩完成，{summarizable} 条消息，PTL 重试 {ptl_retries} 次"
     )
 
-    # 摘要作独立 carrier 插在末条 Human 之前（与离线 build_compacted_update 同构）。
-    # add_messages 对「Remove + 同 id 重加」是原地更新回原位置（不改变顺序），故
-    # 重加的末条必须换新 id 才能成为真正的 append、排到 carrier 之后（content 与
-    # ts 等 additional_kwargs 原样保留）。上下文块不在此处理——下游
-    # PreprocessMessages 的 context_inject hook 在压缩后的历史上扫不到 marker，
-    # 自动向末条注入全量（见 context_inject）。
-    last_human = original_messages[-1]
-    carrier = build_summary_carrier(summary_text)
-    reappended = last_human.model_copy(update={"id": str(uuid4())})
-
-    return {
-        "messages": [RemoveMessage(id=mid) for mid in summarized_ids]
-        + [RemoveMessage(id=last_human.id), carrier, reappended]
-    }
+    # 摘要作独立 carrier 插在重挂的消息之前（三条压缩路径共用 build_compacted_update：
+    # 末条原样重挂，正在被回答的真人消息由它自己认出来一并保住）
+    return build_compacted_update(messages, [messages[-1]], summary_text)
 
 
 async def _ptl_forced_compact(
@@ -750,8 +733,9 @@ async def _ptl_forced_compact(
     保尾选材。任何原因不可压 / 摘要失败都返回 ``{}`` 放行——CallModel 重试再撞
     PTL 时 ``ptl_retry`` 已置位、直接抛原错误（用户看到的恒是 PTL 而非内部错误）。
 
-    尾部 round 删旧 id + 换新 id 重加：add_messages 只能 append，同 id 是原地
-    更新排不到 carrier 之后；tool_call_id 配对在 content 里，不受消息 id 影响。
+    正在被回答的那条真人 Human 与尾部 round 一并原样重挂（``build_compacted_update``
+    的 ``keep``）——PTL 多发生在工具循环中段，那条 Human 早被 round 分组卷进
+    to_summarize，删掉模型就只剩摘要转述、答不准用户真正要什么。
     ``ptl_retry`` 不在此清除（CallModel 成功后才清），压缩后仍超长时守卫生效。
     """
     selected = select_for_ptl_compaction(messages)
@@ -784,10 +768,7 @@ async def _ptl_forced_compact(
         ptl_retries,
     )
 
-    carrier = build_summary_carrier(summary_text)
-    removes = [RemoveMessage(id=m.id) for m in [*to_summarize, *tail] if m.id]
-    tail_copies = [m.model_copy(update={"id": str(uuid4())}) for m in tail]
-    return {"messages": [*removes, carrier, *tail_copies]}
+    return build_compacted_update([*to_summarize, *tail], tail, summary_text)
 
 
 async def preprocess_messages(

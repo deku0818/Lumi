@@ -723,12 +723,12 @@ class AgentBridge:
         """对当前 thread 的空闲历史强制压缩一次（不流式、不触发模型对话）。
 
         供 IM 渠道每日 dream 后的 summary 阶段调用：读 checkpoint 快照 → 复用 summarizer
-        的压缩核（``run_summary``）→ 经 ``aupdate_state`` 把单条摘要 carrier 写回 checkpoint
-        （走 add_messages reducer，压缩后历史 = ``[System?, Human(<summary>)]``，下条真实
-        用户消息到来时由 context_inject 全量重建上下文），全程不经 astream_events 故不
-        外泄到渠道。
+        的压缩核（``run_summary``）→ 经 ``aupdate_state`` 把摘要 carrier 写回 checkpoint
+        （走 add_messages reducer，压缩后历史 = ``[System?, Human(<summary>)]``，另有一条
+        尚未被回答的用户消息时原样重挂在 carrier 之后；下条真实用户消息到来时由
+        context_inject 全量重建上下文），全程不经 astream_events 故不外泄到渠道。
 
-        返回是否真的压缩了（会话太短 / 末条非干净 AI 回复 / 无摘要提示词时跳过并返回 False）。
+        返回是否真的压缩了（会话太短 / 末条是半截工具轮 / 无摘要提示词时跳过并返回 False）。
         """
         from lumi.agents.core.preprocessing.compact import (
             build_compacted_update,
@@ -738,15 +738,16 @@ class AgentBridge:
 
         if self._context is None:
             return False
-        selected = select_for_compaction(await self.snapshot_messages())
-        if selected is None:
+        # 整段 body 进摘要（含末条 AI 回复，否则最后一句既不在历史也不在摘要里）；
+        # 末条若是没等到回答的用户消息，其原话由 build_compacted_update 保住
+        body = select_for_compaction(await self.snapshot_messages())
+        if body is None:
             return False
-        to_summarize, last = selected
 
         prompt = get_config().load_prompt("SUMMARY")
         token_config = get_config().config.token
         summary_text, _ = await run_summary(
-            to_summarize,
+            body,
             prompt,
             tools=self._context.tools,
             system_prompt=self._context.system_prompt,
@@ -754,15 +755,15 @@ class AgentBridge:
             max_retry=token_config.summary_ptl_retry_max,
             drop_ratio=token_config.summary_ptl_retry_drop_ratio,
         )
-        update = build_compacted_update(to_summarize, last, summary_text)
+        update = build_compacted_update(body, [], summary_text)
         # as_node 显式指定：不依赖 LangGraph 从末次 checkpoint 推断写入者；
-        # CallModel 的条件边对无 tool_calls 的末条（压缩后为摘要 carrier）路由
-        # OnAgentStop，不派生工具任务
+        # CallModel 的条件边对无 tool_calls 的末条（压缩后为摘要 carrier / 重挂的
+        # 用户消息）路由 OnAgentStop，不派生工具任务
         await self.graph.aupdate_state(self._config, update, as_node="CallModel")
         logger.info(
             "[compact_thread] 已压缩 thread=%s（%d 条历史 → 摘要）",
             self.current_thread_id,
-            len(to_summarize),
+            len(body),
         )
         return True
 

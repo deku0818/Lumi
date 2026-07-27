@@ -1,5 +1,21 @@
 # Changelog
 
+## [0.2.82] - 2026-07-27
+
+### Fixed
+- **历史压缩会删掉「模型正在回答的那句提问」** — CallModel 撞 prompt-too-long 触发的强制压缩多发生在工具循环中段，而 `split_into_rounds` 把 Human 并入**前一个** AI 的 round，工具循环长于保尾的 2 个 round 时那条提问必然落在待摘要一侧、被无差别删除。压缩后模型看到的是 `[System, Human(<summary>), AI(tool_use), Tool, …]`——还要跑完这个工具循环并作答，却已经看不到原始诉求，只剩摘要模型的转述。现在三条压缩路径都经 `find_pending_human` 认出「已发出、还没被回答完」的真人消息并原样重挂在摘要 carrier 之后（换新 id 才排得过去：`add_messages` 对「Remove + 同 id 重加」是原地更新）。内置 `SUMMARY.md` 并没有「原文列出所有 user message」这类要求，此前唯一的缓解是摘要模型自觉，不是结构性保证。
+- **「已答完」的判定被 reminder 拉回骗过** — 结构化输出未按格式 / Stop hook remind 会在无 `tool_calls` 的 AI 之后追加 reminder 再回 CallModel，此时那条 AI 并非终态、用户诉求仍未被回答。倒扫若在它处停下就会返回「无待答提问」，提问照样被压掉——正是上一条要防的失败。`find_pending_human` 据 `is_hook_reminder` 图语义标记识别拉回。
+- **压缩后会话对 dream 隐身** — dream 判活是「存在落库 ts 晚于 `dreamed_at` 的真实 human」，而压缩把真人消息全删、摘要 carrier 不带 ts，于是 `latest_human_ts` 恒返回 `0.0`、`0.0 <= dreamed_at` 恒真，该 thread 从此不再被整理进记忆，直到有新的真人消息进来。定时链路上因「先全部 dream → 屏障 → 再压缩」而无害，但手动 `/compact`（IM 亦可用）与 PTL 强制压缩都不在这个次序里：用户当天最后一条消息撞了 PTL，当晚 dream 就跳过，那天的对话不进记忆。现在 carrier 继承被删真人消息的最新 ts 作水位——那条消息确实在该时刻存在过；`latest_human_ts` 的判据随之收成「human 且带 ts」（ts 只由 bridge 构造真实用户消息时写，其余合成消息一律不带）。
+- **`ctx_digest` marker 可能在压缩后幸存** — 不变量是「marker 存在 ⟺ 从上次全量注入起的完整 diff 链在上下文中可见」，此前靠「压缩把带 marker 的消息整体删除」维持。但 PTL 保尾的 round 里若含带 marker 的 Human（`select_for_ptl_compaction` 的既有形态之一），旧代码 `model_copy(update={"id": ...})` 原样保留 `additional_kwargs`，marker 活着而基线块已被删——模型此后拿不到全量重建，环境 / 技能 / 记忆索引停在一个自己看不见的状态上。规则收紧为「压缩后不得有 marker 幸存」（`compact._reattach`）。对应的旧注入块刻意留在 content 里：`injected_prefix` 计数与 `<attached-file>` 标签块共用，按计数剥会连用户附件路径一起丢，多留一个陈旧块只是噪音。
+- **离线 `/compact` 漏掉最后一句助手回复** — `select_for_compaction` 把末条干净 AIMessage 排除在 `to_summarize` 之外却照样删除，那句回复既不在历史也不在摘要里。现在整段 body 进摘要。
+- **末条是「发了没等到回答」的用户消息时压不动** — turn 中途崩掉 / 进程被杀 / 用户发完就断连留下的形态被结构性守卫挡在门外，这类会话可能已经很大却压不了，IM 每日整理静默跳过。放行该形态（它同样不会留下半截工具轮），原话由上面的重挂机制保住。
+- **残留 tool_use 让离线压缩的摘要调用 400** — 上一轮工具执行中途被取消后用户又发了新消息时，历史里的 `AIMessage(tool_use)` 没有配对 `ToolMessage`，直发 provider 即 400（`/compact` 报错、IM 每日整理每轮复现）。剔除移进 `run_summary`——三条压缩路径的唯一入口，此前只有走 `nodes._summarize` 的在线 / PTL 两条有此保护。
+- **删掉默认项目后永久没有默认** — `remove_project` 不重新指派，剩余条目都带着 `default: False`，`list_projects` 的回填哨兵（无任何条目带该键）不认，于是每次新建会话都退回阻断式项目选择器且无从察觉。现在删掉的若正是默认项目，把剩下最近使用的顶上来。
+- **老数据回填哨兵会被一次 `add_project` 熄灭** — 非首个项目此前写 `default: False`，老用户（条目全无该键）只要先加一个项目就把哨兵灭了，从此再也等不到 v0.2.81 的回填。该键的语义是「此条目对默认表过态」，顺手写 `False` 等于替用户表了态——非首个项目不再写该键，`list_projects` 与 `add_project` 并发交错时也能自愈。
+
+### Changed
+- 在线 / PTL / 离线三条压缩路径的消息重写收敛到 `compact.build_compacted_update(removed, keep_tail, summary)`：删整段 → 摘要 carrier → 重挂原文，「待答提问必须保住」「重挂换新 id 并剥 marker」「carrier 继承 ts」三条规则各只写一处，调用点只声明要保留的尾部。`AgentBridge.compact_thread` 随之不再判断消息形态。
+
 ## [0.2.81] - 2026-07-27
 
 ### Added

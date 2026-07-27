@@ -32,6 +32,12 @@ content 前缀。未声明 items 的消息（cron / 子 agent）显示侧按此�
 计数放 additional_kwargs 而非 block 自定义字段：langchain_openai 对 text block
 原样透传，多余字段会直达 provider API。"""
 
+CTX_DIGEST_KEY = "ctx_digest"
+"""记录「模型已知上下文状态」的 marker 键名（写侧见 ``preprocessing.context_inject``）。
+
+与 items / injected_prefix 同放：消息元数据键的单一真源。注入侧写 marker、压缩侧
+（``preprocessing.compact``）剥 marker，两侧都从这里取键名、不互相 import。"""
+
 REMINDER_KEY = "is_hook_reminder"
 """标记"hook 注入的 system-reminder"的键名。
 
@@ -41,11 +47,18 @@ accepted 判定都靠 ``is_reminder_message`` 精确跳过 reminder，否则后�
 误当成 reminder 跳过、导致跨轮泄漏计数。"""
 
 
-def synthetic_human_message(content: str | list[dict[str, Any]]) -> HumanMessage:
-    """构造合成 HumanMessage：声明 ``items: []``（给模型看、无可显示）。"""
-    return HumanMessage(
-        content=content, additional_kwargs={LUMI_META_KEY: {"items": []}}
-    )
+def synthetic_human_message(
+    content: str | list[dict[str, Any]], *, ts: int = 0
+) -> HumanMessage:
+    """构造合成 HumanMessage：声明 ``items: []``（给模型看、无可显示）。
+
+    ``ts``（毫秒）仅摘要 carrier 传：压缩把真人消息删光时由它继承那条消息的落库时刻，
+    见 ``build_summary_carrier``。0 = 不写该键（``message_ts`` 缺键即 0，语义一致）。
+    """
+    meta: dict[str, Any] = {"items": []}
+    if ts:
+        meta["ts"] = ts
+    return HumanMessage(content=content, additional_kwargs={LUMI_META_KEY: meta})
 
 
 def reminder_human_message(content: str | list[dict[str, Any]]) -> HumanMessage:
@@ -68,6 +81,16 @@ def declared_items(msg: object) -> list[dict] | None:
     if isinstance(meta, dict) and "items" in meta:
         return meta["items"]
     return None
+
+
+def message_ts(msg: object) -> int:
+    """消息的落库时刻（毫秒），未标记返回 0。
+
+    只有真实用户消息（bridge 的 ``_build_user_message``）与继承其时刻的摘要
+    carrier 带 ts，其余合成消息一律没有——故「带 ts」即「此处有过真人输入」。
+    """
+    meta = _additional_kwargs(msg).get(LUMI_META_KEY)
+    return meta.get("ts", 0) if isinstance(meta, dict) else 0
 
 
 def injected_prefix(msg: object) -> int:

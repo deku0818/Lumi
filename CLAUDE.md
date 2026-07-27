@@ -50,7 +50,7 @@ START → Summarizer（超阈值当轮就地压缩 / ptl_retry 置位则绕阈�
   ├─ OnAgentStop（无工具调用，分发 Stop hooks）→ END（hook 可拉回 CallModel）
   └─ END（防御性路径 / ptl_retry 置位的压缩路由步）
 ```
-压缩恒在上下文注入之前：hook 永远在压缩后的世界运行，旧注入块与 marker 随历史删除后自动全量重建（见 `preprocessing/context_inject.py`）。
+压缩恒在上下文注入之前：hook 永远在压缩后的世界运行，marker 由压缩侧恒剥（`compact._reattach`）后自动全量重建（见 `preprocessing/context_inject.py`）。在线 / PTL / 离线三条压缩路径共用 `compact.build_compacted_update`：删整段 → 摘要 carrier → 重挂 `keep`；**正在被回答的那条真人消息（`find_pending_human`）恒原样保住**，不让摘要转述取代用户原话；carrier 继承被删真人消息的 `ts`，使 dream 判活基线（`latest_human_ts`）不随压缩归零。
 
 **PTL 兜底回路：** CallModel 撞 prompt-too-long 时返回 `Command(goto="Summarizer", update={"ptl_retry": True})`，经 Summarizer 的 `_ptl_forced_compact`（绕阈值门、按 API round 保尾）压缩后走正常拓扑重试；成功清 `ptl_retry`，置位期间再撞直接抛原错误（每次 PTL 只换一次压缩机会）。注意 LangGraph 中节点返回 `Command(goto)` 与其条件边取并集——`is_use_tool` 对 `ptl_retry` 置位返回 END，避免该路由步误分发 Stop hooks。
 

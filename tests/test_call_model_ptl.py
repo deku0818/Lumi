@@ -29,6 +29,28 @@ from lumi.agents.core.preprocessing.compact import (
     is_circuit_open,
     record_circuit_failure,
 )
+from lumi.sessions.message_visibility import latest_human_ts
+from lumi.utils.constants import LUMI_META_KEY
+
+
+def _user_message(text: str, mid: str, *, ts: int) -> HumanMessage:
+    """带 ts 的真实用户消息（bridge 的 _build_user_message 同形态）。"""
+    return HumanMessage(
+        content=text,
+        id=mid,
+        additional_kwargs={LUMI_META_KEY: {"items": [{"text": text}], "ts": ts}},
+    )
+
+
+def _tool_round(tag: str) -> list:
+    """一个完整工具轮：AI(tool_use) + 配对 ToolMessage。"""
+    return [
+        AIMessage(
+            content=tag, id=tag, tool_calls=[{"name": "r", "args": {}, "id": f"c{tag}"}]
+        ),
+        ToolMessage(content=f"t{tag}", tool_call_id=f"c{tag}", id=f"t{tag}"),
+    ]
+
 
 _TOKEN_CONFIG = SimpleNamespace(
     context_length=1000,
@@ -143,16 +165,40 @@ async def test_forced_compact_mid_tool_loop():
     messages = tool_loop_history()
     result = await _run_summarizer_ptl(messages)
 
-    # 过真实 add_messages 断言合并后形态：[System, carrier, 尾部 2 round 新 id 副本]
+    # 过真实 add_messages 断言合并后形态：
+    # [System, carrier, 正在被回答的提问, 尾部 2 round 新 id 副本]
     merged = add_messages(messages, result["messages"])
     assert isinstance(merged[0], SystemMessage)
     assert isinstance(merged[1], HumanMessage) and "<summary>" in merged[1].content
-    assert [m.content for m in merged[2:]] == ["a2", "t2", "a3", "t3"]
+    # "q" 是模型正在回答的诉求，压缩不能把它删成摘要转述
+    assert [m.content for m in merged[2:]] == ["q", "a2", "t2", "a3", "t3"]
+    assert merged[2].id != "h"  # 换新 id 才排得到 carrier 之后
     # 尾部换了新 id、tool_call_id 配对原样
-    assert merged[2].id != "a2" and merged[2].tool_calls[0]["id"] == "tc2"
-    assert merged[3].tool_call_id == "tc2"
+    assert merged[3].id != "a2" and merged[3].tool_calls[0]["id"] == "tc2"
+    assert merged[4].tool_call_id == "tc2"
     # ptl_retry 不在此清除（CallModel 成功后才清）
     assert "ptl_retry" not in result
+
+
+async def test_forced_compact_keeps_pending_human_mid_history():
+    """当前提问不在历史开头时同样要保住：round 分组把它并进前一个 AI 的 round，
+    工具循环长于 keep_rounds 就会被卷进 to_summarize。"""
+    messages = [
+        SystemMessage(content="sys", id="s"),
+        _user_message("很早的问题", "h0", ts=1000),
+        *_tool_round("a0"),
+        _user_message("现在的问题", "h1", ts=2000),
+        *_tool_round("a1"),
+        *_tool_round("a2"),
+        *_tool_round("a3"),
+    ]
+    result = await _run_summarizer_ptl(messages)
+
+    merged = add_messages(messages, result["messages"])
+    texts = [m.content for m in merged if isinstance(m, HumanMessage)]
+    assert "现在的问题" in texts  # 原话仍在上下文里
+    assert "很早的问题" not in texts  # 已答完的旧问题照常压掉
+    assert latest_human_ts(merged) == 2.0  # dream 判活基线保住
 
 
 async def test_forced_compact_insufficient_rounds_passes_through():
@@ -220,7 +266,7 @@ async def test_full_graph_ptl_roundtrip():
     assert chain.ainvoke.await_count == 2
     assert result["ptl_retry"] is False
     contents = [m.content for m in result["messages"]]
-    # [System, carrier, 尾部 2 round, 重试响应]；头部历史已压缩
+    # [System, carrier, 当前提问, 尾部 2 round, 重试响应]；头部历史已压缩
     assert contents[0] == "sys"
     assert "<summary>" in contents[1] and "SUMMARY_TEXT" in contents[1]
-    assert contents[2:] == ["a2", "t2", "a3", "t3", "ok"]
+    assert contents[2:] == ["q", "a2", "t2", "a3", "t3", "ok"]

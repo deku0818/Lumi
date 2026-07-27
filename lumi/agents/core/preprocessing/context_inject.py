@@ -19,8 +19,9 @@ LUMI.md），会一并被静默且不补发。触发需两个写方挤进同一�
 
 正确性不变量：历史只被压缩改写，且压缩恒在本 hook **之前**发生（在线 Summarizer
 是图首节点、先于 PreprocessMessages；离线 build_compacted_update 在轮外）——压缩
-把带 marker 与注入块的消息整体删除，本 hook 永远在压缩后的世界运行，扫不到 marker
-即全量重建。故 marker 存在 ⟺ 从上次全量起的完整 diff 链在模型上下文中可见。
+删掉基线块的同时**恒剥掉所有 marker**（``compact._reattach``，含原样保留的用户
+消息与保尾的工具轮），本 hook 永远在压缩后的世界运行，扫不到 marker 即全量重建。
+故 marker 存在 ⟺ 从上次全量起的完整 diff 链在模型上下文中可见。
 缓存收益：变更只动消息尾部，前缀历史缓存不再因写记忆 / 改 skill 而整条作废。
 """
 
@@ -33,6 +34,7 @@ from langchain_core.messages import AIMessage, HumanMessage
 from langgraph.types import Command
 
 from lumi.agents.core.hooks.schema import HookContext, HookResult
+from lumi.agents.core.meta_message import CTX_DIGEST_KEY
 from lumi.agents.core.node_helpers.messages import (
     format_reminder,
     inject_text_into_message,
@@ -52,9 +54,6 @@ from lumi.agents.memory.paths import memory_entrypoint, resolve_under_project
 from lumi.agents.memory.project_doc import PROJECT_DOC_NAME
 from lumi.agents.permissions.workspace import get_authorized_directory
 from lumi.utils.hashing import short_hash
-
-CTX_DIGEST_KEY = "ctx_digest"
-"""末条消息 additional_kwargs 中记录「模型已知上下文状态」的 marker 键名。"""
 
 _SELF_EDIT_TOOLS = frozenset({"write", "edit"})
 

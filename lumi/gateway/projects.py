@@ -51,6 +51,10 @@ def add_project(path: str, name: str = "") -> list[dict]:
 
     name 缺省用目录末端名；重复添加刷新 last_used，仅显式给名时才覆盖旧名
     （保护用户此前的重命名）。清单原本为空时，首个项目自动成为默认项目。
+
+    非首个项目**不写** default 键：该键的语义是「此条目对默认表过态」，也是
+    ``list_projects`` 回填的哨兵——若这里写个 `default: False`，老用户（条目全无该键）
+    只要先加一个项目就把哨兵熄灭，从此再也等不到回填。
     """
     target = Path(path).expanduser().resolve()
     if not target.is_dir():
@@ -63,23 +67,32 @@ def add_project(path: str, name: str = "") -> list[dict]:
             if name.strip():
                 p["name"] = name.strip()
             return _save(projects)
+    entry = {
+        "name": name.strip() or target.name,
+        "path": resolved,
+        "last_used": time.time(),
+    }
     # 首个项目即默认：建完就能直接开聊，不必再去卡片菜单里指定一次
-    is_first = not projects
-    projects.append(
-        {
-            "name": name.strip() or target.name,
-            "path": resolved,
-            "last_used": time.time(),
-            "default": is_first,
-        }
-    )
+    if not projects:
+        entry["default"] = True
+    projects.append(entry)
     return _save(projects)
 
 
 def remove_project(path: str) -> list[dict]:
-    """从清单移除项目（不动磁盘），返回最新列表。"""
+    """从清单移除项目（不动磁盘），返回最新列表。
+
+    删掉的若正是默认项目，把剩下最近使用的顶上来：否则「一个默认都没有」会让每次
+    新建会话都退回阻塞式项目选择器，而这个状态自愈不了——剩余条目都带着 default 键，
+    ``list_projects`` 的回填哨兵不认。
+    """
     target = _resolve(path)
-    return _save([p for p in _load() if p["path"] != target])
+    projects = _load()
+    was_default = any(p["path"] == target and p.get("default") for p in projects)
+    rest = _by_recent([p for p in projects if p["path"] != target])
+    if was_default and rest:
+        rest[0]["default"] = True
+    return _save(rest)
 
 
 def rename_project(path: str, name: str) -> list[dict]:

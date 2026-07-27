@@ -112,9 +112,18 @@ def test_latest_ts_takes_newest_real_human():
 
 
 def test_latest_ts_zero_when_no_ts():
-    """无 ts 的 human（压缩载体 / 旧消息）不计；一条带 ts 的都没有 → 0.0。"""
+    """无 ts 的 human（reminder / 旧消息）不计；一条带 ts 的都没有 → 0.0。"""
     assert latest_human_ts([HumanMessage("旧"), AIMessage("答")]) == 0.0
     assert latest_human_ts([]) == 0.0
+
+
+def test_latest_ts_counts_summary_carrier_watermark():
+    """压缩把真人消息删光后，摘要 carrier 继承的 ts 就是判活基线——否则
+    该 thread 从此对 dream 隐身（0.0 恒 ≤ dreamed_at）。"""
+    from lumi.agents.core.preprocessing.summary import build_summary_carrier
+
+    assert latest_human_ts([build_summary_carrier("摘要", ts=3_000_000)]) == 3000.0
+    assert latest_human_ts([build_summary_carrier("摘要")]) == 0.0
 
 
 def test_latest_ts_dict_format():

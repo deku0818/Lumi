@@ -8,8 +8,7 @@ from __future__ import annotations
 
 from langchain_core.messages import HumanMessage
 
-from lumi.agents.core.meta_message import declared_items
-from lumi.utils.constants import LUMI_META_KEY
+from lumi.agents.core.meta_message import declared_items, message_ts
 
 
 def should_show_human_message(msg: object) -> bool:
@@ -36,19 +35,14 @@ def is_human_message(m: object) -> bool:
 
 
 def latest_human_ts(messages: list) -> float:
-    """真实用户消息（非 meta 注入）的最新落库时刻，epoch 秒；一条带 ts 的都没有返 0.0。
+    """真实用户消息的最新落库时刻，epoch 秒；一条带 ts 的都没有返 0.0。
 
-    ts 由 ``stream_response`` 落库时写入 ``additional_kwargs["lumi"]["ts"]``（本机时钟、
-    毫秒）。供 dream 判定「自上次综合以来有无新内容」——基于时间戳而非消息计数，
-    compact 增删历史不影响判定（压缩载体无 ts，天然不计）。
+    ts 由 bridge 构造真实用户消息时写入 ``additional_kwargs["lumi"]["ts"]``（本机时钟、
+    毫秒），其余合成消息（reminder / 后台通知 / 工具回灌）一律不带——故判据即「human
+    且带 ts」。供 dream 判定「自上次综合以来有无新内容」：基于时间戳而非消息计数，且
+    压缩把真人消息删光时由摘要 carrier 继承该时刻（见 ``build_summary_carrier``），
+    判活基线不随压缩归零。
     """
-    latest = 0
-    for m in messages:
-        if not (is_human_message(m) and should_show_human_message(m)):
-            continue
-        if isinstance(m, dict):
-            kwargs = m.get("additional_kwargs") or {}
-        else:
-            kwargs = getattr(m, "additional_kwargs", None) or {}
-        latest = max(latest, (kwargs.get(LUMI_META_KEY) or {}).get("ts", 0))
-    return latest / 1000
+    return (
+        max((message_ts(m) for m in messages if is_human_message(m)), default=0) / 1000
+    )

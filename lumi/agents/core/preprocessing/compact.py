@@ -11,6 +11,7 @@ from __future__ import annotations
 
 import time
 from dataclasses import dataclass
+from uuid import uuid4
 
 import anthropic
 import openai
@@ -22,7 +23,14 @@ from langchain_core.messages import (
     SystemMessage,
 )
 
+from lumi.agents.core.meta_message import (
+    CTX_DIGEST_KEY,
+    is_reminder_message,
+    message_ts,
+)
+from lumi.agents.core.node_helpers.messages import drop_incomplete_tool_calls
 from lumi.agents.core.preprocessing.summary import build_summary_carrier
+from lumi.sessions.message_visibility import should_show_human_message
 
 _PTL_SUBSTRINGS = (
     "prompt is too long",
@@ -46,6 +54,31 @@ def is_ptl_error(exc: BaseException) -> bool:
         return True
     status = getattr(exc, "status_code", None)
     return status in (400, 413)
+
+
+def find_pending_human(messages: list[BaseMessage]) -> HumanMessage | None:
+    """末条「已发出、还没被回答完」的真实用户消息；没有则 ``None``。
+
+    倒扫：先遇到不带 tool_calls 的**终态** AIMessage 即说明上一问已答完（返回 None），
+    先遇到真实用户消息即是它。压缩据此原样保住这条（``build_compacted_update``）——它
+    是模型正在回答的诉求，删掉就只剩摘要模型的转述。合成消息（声明 ``items: []`` 的
+    摘要 carrier / reminder / 后台通知）不算诉求。
+
+    「终态」要排掉被拉回的那种：结构化输出未按格式 / Stop hook remind 会在无 tool_calls
+    的 AI 之后追加 reminder 再回 CallModel，此时那条 AI 不是终态、用户诉求仍未被回答
+    （见 ``meta_message.is_reminder_message`` 的图语义标记）。
+    """
+    pulled_back = False
+    for msg in reversed(messages):
+        if isinstance(msg, HumanMessage):
+            if is_reminder_message(msg):
+                pulled_back = True
+                continue
+            if should_show_human_message(msg):
+                return msg
+        elif isinstance(msg, AIMessage) and not msg.tool_calls and not pulled_back:
+            return None
+    return None
 
 
 def split_into_rounds(msgs: list[BaseMessage]) -> list[list[BaseMessage]]:
@@ -208,7 +241,7 @@ async def run_summary(
     max_retry: int,
     drop_ratio: float,
 ) -> tuple[str, int]:
-    """跑一次摘要：缓存安全的 tool_call_chain → 带原图调用 → PTL 时先剥图再截头 → 提取文本。
+    """跑一次摘要：剔残留 tool_use → 缓存安全的 tool_call_chain → 带原图调用 → PTL 时先剥图再截头 → 提取文本。
 
     summarizer 节点与离线 ``AgentBridge.compact_thread`` 共用这段（缓存安全的分叉：与主对话
     相同的 system_prompt + tools 前缀复用 Prompt Caching，摘要本身不调工具）。首次带原图，
@@ -219,13 +252,17 @@ async def run_summary(
     多模态 block 与 ``call_model`` 同法 ``message_transform``（按 provider 归一化图片
     格式）：对直连 Anthropic 是恒等（内容不变、缓存字节不受影响），对 OpenAI/Bedrock
     转成各自格式——既发得对，又与主循环发出的字节一致、同样命中缓存。
+
+    残留 tool_use 的剔除（``drop_incomplete_tool_calls``）放在本函数而非各调用点：
+    三条压缩路径都不经 PreprocessMessages 的清理，而中途被取消的工具轮是各路径共通的
+    输入形态（在线 summarizer 是图首节点、先于清理；离线压缩在轮外）。
     """
     # 函数级 import 避开 compact（早被 nodes import）→ chain/response 的潜在环
     from lumi.agents.core.response import extract_ainvoke_content, message_transform
     from lumi.models.chain import tool_call_chain
 
     transformed: list = []
-    for m in messages:
+    for m in drop_incomplete_tool_calls(messages):
         if isinstance(m, HumanMessage) and isinstance(m.content, list):
             new_content = await message_transform(m.content, model_name=model_name)
             transformed.append(m.model_copy(update={"content": new_content}))
@@ -330,39 +367,60 @@ def clear_all_circuits() -> None:
 # ---------------------------------------------------------------------------
 
 
-def select_for_compaction(messages: list) -> tuple[list, AIMessage] | None:
-    """判定是否可压缩，返回 ``(to_summarize, last_ai)`` 或 ``None``。
+def select_for_compaction(messages: list) -> list[BaseMessage] | None:
+    """判定是否可压缩，返回**待删除的整段 body**或 ``None``。
 
-    不设大小门——有历史就压。仅保留两条**结构性**前提（非阈值）：
+    不设大小门——有历史就压。仅保留三条**结构性**前提（非阈值）：
     - 头部 SystemMessage 不参与、保留不动；
-    - 末条须是**无 tool_calls 的干净 AIMessage**（= 已完成一轮的空闲会话），规避半截
-      工具轮与压缩后的连续同角色；
+    - 末条须是**无 tool_calls 的干净 AIMessage**（= 已完成一轮的空闲会话）或**尚未
+      被回答的真实用户消息**（turn 中途崩掉 / 进程被杀 / 用户发完就断连）——两者都不
+      会在压缩后留下半截工具轮，后者的原话由 ``build_compacted_update`` 保住；
     - 末条之外须至少有一条带 id 的消息可压（否则无可压缩、白跑一次摘要）。
     """
     if not messages:
         return None
-    body = messages[1:] if isinstance(messages[0], SystemMessage) else messages
-    if not body:
+    body = messages[1:] if isinstance(messages[0], SystemMessage) else list(messages)
+    if not body or not any(m.id for m in body[:-1]):
         return None
     last = body[-1]
-    if not isinstance(last, AIMessage) or last.tool_calls:
-        return None
-    to_summarize = body[:-1]
-    if not any(m.id for m in to_summarize):
-        return None
-    return to_summarize, last
+    clean_ai = isinstance(last, AIMessage) and not last.tool_calls
+    return body if clean_ai or find_pending_human(body) is last else None
+
+
+def _reattach(msg: BaseMessage) -> BaseMessage:
+    """压缩后重挂一条消息：换新 id + 剥 ctx_digest marker。
+
+    换新 id：``add_messages`` 对「Remove + 同 id 重加」是原地更新、排不到 carrier
+    之后（tool_call_id 配对在 content 里，不受消息 id 影响）。
+    剥 marker：不变量是「marker 存在 ⟺ 从上次全量起的完整 diff 链可见」，而压缩删掉
+    了基线块，marker 必须随之消失、下轮由 context_inject 重注全量。对应的旧注入块留
+    在 content 里不动——``injected_prefix`` 计数与 ``<attached-file>`` 标签块共用，
+    按计数剥会连附件路径一起丢；多留一个陈旧块只是噪音，丢路径是损失。
+    """
+    kwargs = {k: v for k, v in msg.additional_kwargs.items() if k != CTX_DIGEST_KEY}
+    return msg.model_copy(update={"id": str(uuid4()), "additional_kwargs": kwargs})
 
 
 def build_compacted_update(
-    to_summarize: list, last: AIMessage, summary_text: str
+    removed: list[BaseMessage], keep_tail: list[BaseMessage], summary_text: str
 ) -> dict:
-    """构造 ``aupdate_state`` 的 ``messages`` 更新：删除整段 body、重建为单条摘要 carrier。
+    """压缩写回：删 ``removed`` 全部 → 摘要 carrier → 按序重挂保留的原文。
 
-    删除 ``to_summarize + last`` 全部（含末条 AI），只留 ``Human(<summary>)``。
-    下一条真实用户消息到来时序列为 ``[Human(<summary>), Human(用户)]``（连续
-    human 各 provider 均接受），context_inject hook 扫不到 marker 即注入全量——
-    与在线 summarizer 压缩后的形态同构。头部 SystemMessage 未被删、留在原位。
+    在线 / PTL / 离线三条压缩路径共用的重写形态
+    ``[System?, Human(<summary>), 待回答的真人消息?, *keep_tail]``（头部 SystemMessage
+    未被删、留在原位；连续 human 各 provider 均接受）。
+
+    ``keep_tail`` 是调用方指定要留的尾部（PTL 保尾的工具轮 / 在线路径的末条）；正在
+    被回答的那条真人消息由本函数从 ``removed`` 里认出来（``find_pending_human``），不
+    在 ``keep_tail`` 里就补在它前面——三条路径同一条规则，各自不再判一次。留下的都
+    换新 id 并剥 marker，见 :func:`_reattach`。carrier 继承 ``removed`` 里最后一条真人
+    消息的 ts，使 dream 判活基线不随压缩归零。
     """
-    carrier = build_summary_carrier(summary_text)
-    removes = [RemoveMessage(id=m.id) for m in [*to_summarize, last] if m.id]
-    return {"messages": [*removes, carrier]}
+    pending = find_pending_human(removed)
+    if pending is not None and not any(m is pending for m in keep_tail):
+        keep_tail = [pending, *keep_tail]
+    carrier = build_summary_carrier(
+        summary_text, ts=max((message_ts(m) for m in removed), default=0)
+    )
+    removes = [RemoveMessage(id=m.id) for m in removed if m.id]
+    return {"messages": [*removes, carrier, *(_reattach(m) for m in keep_tail)]}

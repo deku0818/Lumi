@@ -5,7 +5,7 @@
 
 from __future__ import annotations
 
-from unittest.mock import AsyncMock
+from unittest.mock import AsyncMock, patch
 
 import pytest
 from conftest import PTLError, tool_loop_history
@@ -16,10 +16,13 @@ from langchain_core.messages import (
     SystemMessage,
     ToolMessage,
 )
+from langgraph.graph.message import add_messages
 
+from lumi.agents.core.meta_message import CTX_DIGEST_KEY, reminder_human_message
 from lumi.agents.core.preprocessing import compact
 from lumi.agents.core.preprocessing.compact import (
     build_compacted_update,
+    find_pending_human,
     is_circuit_open,
     is_ptl_error,
     messages_have_media,
@@ -32,6 +35,9 @@ from lumi.agents.core.preprocessing.compact import (
     summarize_with_ptl_retry,
     truncate_head_for_ptl_retry,
 )
+from lumi.agents.core.preprocessing.summary import build_summary_carrier
+from lumi.sessions.message_visibility import latest_human_ts
+from lumi.utils.constants import LUMI_META_KEY
 
 # ─────────────────────────── round 分组 / 截头 ───────────────────────────
 
@@ -206,10 +212,52 @@ async def test_summarize_strips_images_before_truncating_on_ptl():
     assert not messages_have_media(seen[1])
 
 
+def _capture_chain() -> tuple[object, dict]:
+    """摘要链替身：把发出去的 messages 收进 captured，回一条固定摘要。"""
+    captured: dict = {}
+
+    class _Chain:
+        async def ainvoke(self, payload):
+            captured["messages"] = payload["messages"]
+            return AIMessage(content="摘要")
+
+    return _Chain(), captured
+
+
+async def _run_summary(history: list, model_name: str = "claude-x") -> str:
+    """跑一次 run_summary，固定住与本组测试无关的那些参数。"""
+    text, _ = await compact.run_summary(
+        history,
+        "PROMPT",
+        tools=[],
+        system_prompt="SYS",
+        model_name=model_name,
+        max_retry=2,
+        drop_ratio=0.3,
+    )
+    return text
+
+
+async def test_run_summary_drops_dangling_tool_use():
+    """上一轮工具执行中途被取消 → 落库的 AIMessage(tool_use) 没有配对结果，
+    摘要链不经 PreprocessMessages 的清理，原样发出去会被 provider 400。"""
+    chain, captured = _capture_chain()
+    history = [
+        HumanMessage(content="上一问", id="h0"),
+        AIMessage(
+            content="",
+            id="dangling",
+            tool_calls=[{"name": "bash", "args": {}, "id": "tc-orphan"}],
+        ),
+        HumanMessage(content="新问题", id="h1"),
+    ]
+    with patch("lumi.models.chain.tool_call_chain", return_value=chain):
+        await _run_summary(history)
+    assert [m.id for m in captured["messages"] if m.id] == ["h0", "h1"]
+
+
 async def test_run_summary_transforms_media_for_non_anthropic():
     # OpenAI 协议模型：摘要首次调用须把 image block 转成 image_url，不漏发 Anthropic 原生格式
-    from unittest.mock import patch
-
     img_human = HumanMessage(
         content=[
             {"type": "text", "text": "看图"},
@@ -219,29 +267,15 @@ async def test_run_summary_transforms_media_for_non_anthropic():
             },
         ]
     )
-    captured: dict = {}
-
-    class _Chain:
-        async def ainvoke(self, payload):
-            captured["messages"] = payload["messages"]
-            return AIMessage(content="摘要")
-
+    chain, captured = _capture_chain()
     with (
-        patch("lumi.models.chain.tool_call_chain", return_value=_Chain()),
+        patch("lumi.models.chain.tool_call_chain", return_value=chain),
         patch(
             "lumi.agents.core.response.get_default_model_name",
             return_value="gpt-4o",
         ),
     ):
-        text, _ = await compact.run_summary(
-            [img_human],
-            "PROMPT",
-            tools=[],
-            system_prompt="SYS",
-            model_name="gpt-4o",
-            max_retry=2,
-            drop_ratio=0.3,
-        )
+        text = await _run_summary([img_human], model_name="gpt-4o")
     assert text == "摘要"
     sent = captured["messages"][0].content
     assert {
@@ -320,9 +354,6 @@ async def test_summarizer_emits_carrier_before_last_human(monkeypatch):
     上下文块不在此重注入——下游 PreprocessMessages 的 context_inject hook
     在压缩后的历史上全量重建。"""
     from types import SimpleNamespace
-    from unittest.mock import patch
-
-    from langchain_core.messages import AIMessage, HumanMessage
 
     from lumi.agents.core import nodes
 
@@ -392,13 +423,19 @@ def _conversation(pairs: int) -> list:
     return msgs
 
 
+def _user(text: str, mid: str, ts: int) -> HumanMessage:
+    """带 ts 的真实用户消息（bridge 的 _build_user_message 同形态）。"""
+    return HumanMessage(
+        content=text,
+        id=mid,
+        additional_kwargs={LUMI_META_KEY: {"items": [{"text": text}], "ts": ts}},
+    )
+
+
 def test_select_compacts_small_conversation():
     # 无大小门：哪怕只有一轮（body=[Human, AI]）也压
-    selected = select_for_compaction(_conversation(1))
-    assert selected is not None
-    to_summarize, last = selected
-    assert [m.content for m in to_summarize] == ["h0"]
-    assert last.content == "a0"
+    body = select_for_compaction(_conversation(1))
+    assert [m.content for m in body] == ["h0", "a0"]
 
 
 def test_select_skips_when_nothing_to_summarize():
@@ -411,9 +448,19 @@ def test_select_skips_when_nothing_to_summarize():
     )
 
 
-def test_select_skips_when_last_is_human():
+def test_select_accepts_trailing_pending_human():
+    """末条是「发了没等到回答」的用户消息（turn 中途崩掉）：可压，原话由 keep 保住。"""
     msgs = _conversation(5)
     msgs.append(HumanMessage(content="pending", id="pending"))
+    body = select_for_compaction(msgs)
+    assert body is not None and body[-1].id == "pending"
+    assert find_pending_human(body) is body[-1]
+
+
+def test_select_skips_when_last_is_synthetic_human():
+    # 摘要 carrier / 后台通知（items: []）不是用户诉求，不构成可压末条
+    msgs = _conversation(5)
+    msgs.append(build_summary_carrier("往期摘要"))
     assert select_for_compaction(msgs) is None
 
 
@@ -427,19 +474,16 @@ def test_select_skips_when_last_ai_has_tool_calls():
     assert select_for_compaction(msgs) is None
 
 
-def test_select_returns_body_and_last_ai():
+def test_select_returns_full_body():
     msgs = _conversation(5)  # 1 system + 10 body
-    selected = select_for_compaction(msgs)
-    assert selected is not None
-    to_summarize, last = selected
-    assert len(to_summarize) == 9  # body[:-1]
-    assert isinstance(last, AIMessage) and last.content == "a4"
+    body = select_for_compaction(msgs)
+    assert len(body) == 10  # 含末条 AI——调用方整段进摘要，不再漏掉最后一句回复
+    assert isinstance(body[-1], AIMessage) and body[-1].content == "a4"
 
 
 def test_build_update_removes_body_keeps_head_leaves_carrier():
-    msgs = _conversation(5)
-    to_summarize, last = select_for_compaction(msgs)
-    update = build_compacted_update(to_summarize, last, "浓缩摘要")
+    body = select_for_compaction(_conversation(5))
+    update = build_compacted_update(body, [], "浓缩摘要")
 
     out = update["messages"]
     removes = [m for m in out if isinstance(m, RemoveMessage)]
@@ -454,3 +498,80 @@ def test_build_update_removes_body_keeps_head_leaves_carrier():
     assert len(additions) == 1
     assert isinstance(additions[0], HumanMessage)
     assert "浓缩摘要" in additions[0].content
+
+
+def test_build_update_reattaches_pending_human_verbatim():
+    """末条是未被回答的用户消息 → 原话重挂在 carrier 之后（换新 id 才排得过去）。"""
+    msgs = [*_conversation(2), _user("我的问题", "pending", ts=9000)]
+    body = select_for_compaction(msgs)
+    update = build_compacted_update(body, [find_pending_human(body)], "浓缩摘要")
+
+    merged = add_messages(msgs, update["messages"])
+    assert [_human_text(m) for m in merged if isinstance(m, HumanMessage)][-2:] == [
+        "<summary>\n浓缩摘要\n</summary>\n",
+        "我的问题",
+    ]
+    assert merged[-1].id != "pending"
+
+
+def test_carrier_inherits_ts_so_dream_liveness_survives_compaction():
+    """压缩删光真人消息后 dream 判活基线不能归零（否则该会话对 dream 隐身）。"""
+    msgs = [
+        SystemMessage(content="sys", id="s"),
+        _user("早上问的", "h0", ts=5000),
+        AIMessage(content="a0", id="a0"),
+        _user("下午问的", "h1", ts=9000),
+        AIMessage(content="a1", id="a1"),
+    ]
+    assert latest_human_ts(msgs) == 9.0
+
+    body = select_for_compaction(msgs)
+    merged = add_messages(
+        msgs, build_compacted_update(body, [], "浓缩摘要")["messages"]
+    )
+    assert [m.id for m in merged] == ["s", merged[-1].id]  # 只剩 System + carrier
+    assert latest_human_ts(merged) == 9.0
+
+
+def test_reattached_messages_drop_ctx_marker():
+    """重挂的消息必须剥 ctx_digest：基线块随压缩删掉了，marker 幸存会让
+    context_inject 以为「模型已知」而不再重建全量上下文。"""
+    marked = HumanMessage(
+        content="带 marker 的提问",
+        id="h1",
+        additional_kwargs={CTX_DIGEST_KEY: {"env": "abc"}, LUMI_META_KEY: {"ts": 7000}},
+    )
+    update = build_compacted_update(
+        [HumanMessage(content="旧", id="h0"), marked], [marked], "摘要"
+    )
+    reattached = update["messages"][-1]
+    assert CTX_DIGEST_KEY not in reattached.additional_kwargs
+    assert reattached.additional_kwargs[LUMI_META_KEY] == {"ts": 7000}  # 其余原样
+
+
+# ─────────────────── PTL 强制压缩：保住正在被回答的诉求 ───────────────────
+
+
+def test_find_pending_human_stops_at_answered_turn():
+    answered = [
+        HumanMessage(content="q", id="h"),
+        AIMessage(content="答完了", id="a"),
+    ]
+    assert find_pending_human(answered) is None
+    # 工具循环中段：末条 Tool，上一问还没答完
+    assert find_pending_human(tool_loop_history()).id == "h"
+    # 合成消息不算诉求
+    assert find_pending_human([build_summary_carrier("摘要")]) is None
+
+
+def test_find_pending_human_sees_through_reminder_pullback():
+    """结构化输出未按格式 / Stop hook remind：无 tool_calls 的 AI 之后追加 reminder
+    再回 CallModel——那条 AI 不是终态，用户诉求仍未被回答。"""
+    pulled_back = [
+        HumanMessage(content="上一问", id="h0"),
+        AIMessage(content="上一答", id="a0"),
+        HumanMessage(content="现在的问题", id="h1"),
+        AIMessage(content="没按格式输出", id="a1"),
+        reminder_human_message("<system-reminder>请调用工具</system-reminder>"),
+    ]
+    assert find_pending_human(pulled_back).id == "h1"

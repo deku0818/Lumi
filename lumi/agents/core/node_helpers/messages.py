@@ -131,29 +131,43 @@ def _has_matching_tool_result(
     return getattr(next_msg, "tool_call_id", None) in tool_call_ids
 
 
-def cleanup_incomplete_tool_calls(messages: list[Any]) -> list[RemoveMessage]:
-    """清理没有对应 ToolMessage 的 AIMessage(tool_use)。
+def _is_dangling_tool_call(messages: list[Any], index: int) -> bool:
+    """``messages[index]`` 是否为无结果的 AIMessage(tool_use)——两个清理入口的共用判据。
 
     遗留的无结果工具调用会导致 Anthropic API 400 错误。
     """
+    msg = messages[index]
+    if not isinstance(msg, AIMessage) or not getattr(msg, "tool_calls", None):
+        return False
+    return not _has_matching_tool_result(
+        messages, index, _extract_tool_call_ids(msg.tool_calls)
+    )
+
+
+def drop_incomplete_tool_calls(messages: list[Any]) -> list[Any]:
+    """滤掉无结果的 AIMessage(tool_use)，返回可安全发送的投影。
+
+    与 :func:`cleanup_incomplete_tool_calls` 的区别是不改 state、只做一次性投影：
+    摘要调用（``run_summary``）走自己的 chain、不经 PreprocessMessages 的清理，而它拿
+    到的历史可能带残留 tool_use——上一轮工具执行中途被取消 / 进程被杀后用户又发了新
+    消息，落库的 AIMessage(tool_use) 就没有配对结果。
+    """
+    return [
+        msg for i, msg in enumerate(messages) if not _is_dangling_tool_call(messages, i)
+    ]
+
+
+def cleanup_incomplete_tool_calls(messages: list[Any]) -> list[RemoveMessage]:
+    """清理没有对应 ToolMessage 的 AIMessage(tool_use)（PreprocessMessages 节点的 state 改写）。"""
     to_remove: list[RemoveMessage] = []
-
     for i, msg in enumerate(messages):
-        if not isinstance(msg, AIMessage):
+        if not _is_dangling_tool_call(messages, i):
             continue
-        if not getattr(msg, "tool_calls", None):
-            continue
-
-        tool_call_ids = _extract_tool_call_ids(msg.tool_calls)
-        if _has_matching_tool_result(messages, i, tool_call_ids):
-            continue
-
         logger.warning(
             "[PreprocessMessages] 发现不完整的工具调用消息 (id: %s), 将其删除以避免 API 错误",
             msg.id,
         )
         to_remove.append(RemoveMessage(id=msg.id))
-
     return to_remove
 
 

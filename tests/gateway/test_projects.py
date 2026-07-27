@@ -42,9 +42,9 @@ def test_first_project_becomes_default(tmp_path):
     (tmp_path / "a").mkdir()
     (tmp_path / "b").mkdir()
     assert projects.add_project(str(tmp_path / "a"))[0]["default"] is True
-    # 后续项目不抢默认
+    # 后续项目不抢默认，且不写该键——键即「表过态」，也是老数据回填的哨兵
     by_path = {p["path"]: p for p in projects.add_project(str(tmp_path / "b"))}
-    assert by_path[str(tmp_path / "b")]["default"] is False
+    assert "default" not in by_path[str(tmp_path / "b")]
     assert by_path[str(tmp_path / "a")]["default"] is True
 
 
@@ -55,7 +55,18 @@ def test_first_project_default_only_when_list_empty(tmp_path):
     a = projects.add_project(str(tmp_path / "a"))[0]["path"]
     projects.set_default_project(a, False)
     by_path = {p["path"]: p for p in projects.add_project(str(tmp_path / "b"))}
-    assert by_path[str(tmp_path / "b")]["default"] is False
+    assert not by_path[str(tmp_path / "b")].get("default")
+
+
+def test_add_does_not_extinguish_backfill_sentinel(tmp_path):
+    """老用户先加了个项目再打开项目页：哨兵（无任何条目带 default 键）不能被熄灭，
+    否则这批人从此再也等不到回填、每次新建会话都要过项目选择器。"""
+    (tmp_path / "fresh").mkdir()
+    user_store.write_section(
+        "projects", [{"name": "old", "path": str(tmp_path / "old"), "last_used": 1.0}]
+    )
+    projects.add_project(str(tmp_path / "fresh"))
+    assert any(p.get("default") for p in projects.list_projects())
 
 
 def test_list_backfills_default_for_legacy_entries(tmp_path):
@@ -96,6 +107,30 @@ def test_remove_and_rename(tmp_path):
     renamed = projects.rename_project(path, "我的项目")
     assert renamed[0]["name"] == "我的项目"
     assert projects.remove_project(path) == []
+
+
+def test_remove_default_promotes_most_recent(tmp_path):
+    """删掉默认项目后必须有新默认：否则每次新建会话都退回项目选择器，且回填哨兵
+    已失效（剩余条目带键）自愈不了。"""
+    # last_used 显式写死：顶上来的必须是最近使用的那个，不能靠 add_project 的墙上时钟
+    user_store.write_section(
+        "projects",
+        [
+            {"name": n, "path": str(tmp_path / n), "last_used": ts, "default": n == "a"}
+            for n, ts in (("a", 3.0), ("b", 1.0), ("c", 2.0))
+        ],
+    )
+    result = projects.remove_project(str(tmp_path / "a"))
+    assert [p["path"] for p in result if p.get("default")] == [str(tmp_path / "c")]
+
+
+def test_remove_non_default_keeps_default(tmp_path):
+    (tmp_path / "a").mkdir()
+    (tmp_path / "b").mkdir()
+    a = projects.add_project(str(tmp_path / "a"))[0]["path"]
+    b = projects.add_project(str(tmp_path / "b"))[0]["path"]
+    result = projects.remove_project(b)
+    assert [p["path"] for p in result if p.get("default")] == [a]
 
 
 def test_touch_unknown_path_ignored():
