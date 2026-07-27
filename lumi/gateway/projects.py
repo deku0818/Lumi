@@ -33,15 +33,24 @@ def _save(projects: list[dict]) -> list[dict]:
 
 
 def list_projects() -> list[dict]:
-    """按最近使用降序返回项目列表。"""
-    return _by_recent(_load())
+    """按最近使用降序返回项目列表。
+
+    顺带一次性回填默认项目：默认项目机制上线前登记的条目不含 default 键，这批用户
+    每次新建会话都要过一趟项目选择器。清单非空且无任何条目带该键（= 从没碰过这个
+    机制）时，把最近使用的标为默认；主动取消过的人条目上是 `default: False`——带键
+    即不回填，意愿不会被覆盖。
+    """
+    projects = _by_recent(_load())
+    if projects and not any("default" in p for p in projects):
+        return set_default_project(projects[0]["path"], True)
+    return projects
 
 
 def add_project(path: str, name: str = "") -> list[dict]:
     """登记项目（按 path 去重），返回最新列表。
 
     name 缺省用目录末端名；重复添加刷新 last_used，仅显式给名时才覆盖旧名
-    （保护用户此前的重命名）。
+    （保护用户此前的重命名）。清单原本为空时，首个项目自动成为默认项目。
     """
     target = Path(path).expanduser().resolve()
     if not target.is_dir():
@@ -54,11 +63,14 @@ def add_project(path: str, name: str = "") -> list[dict]:
             if name.strip():
                 p["name"] = name.strip()
             return _save(projects)
+    # 首个项目即默认：建完就能直接开聊，不必再去卡片菜单里指定一次
+    is_first = not projects
     projects.append(
         {
             "name": name.strip() or target.name,
             "path": resolved,
             "last_used": time.time(),
+            "default": is_first,
         }
     )
     return _save(projects)

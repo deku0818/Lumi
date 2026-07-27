@@ -38,6 +38,52 @@ def test_add_with_custom_name_and_rename_preserved(tmp_path):
     assert result[0]["name"] == "我的项目"
 
 
+def test_first_project_becomes_default(tmp_path):
+    (tmp_path / "a").mkdir()
+    (tmp_path / "b").mkdir()
+    assert projects.add_project(str(tmp_path / "a"))[0]["default"] is True
+    # 后续项目不抢默认
+    by_path = {p["path"]: p for p in projects.add_project(str(tmp_path / "b"))}
+    assert by_path[str(tmp_path / "b")]["default"] is False
+    assert by_path[str(tmp_path / "a")]["default"] is True
+
+
+def test_first_project_default_only_when_list_empty(tmp_path):
+    """清单非空但无默认（用户取消过 / 老数据无该字段）时，新项目不该自动顶上。"""
+    (tmp_path / "a").mkdir()
+    (tmp_path / "b").mkdir()
+    a = projects.add_project(str(tmp_path / "a"))[0]["path"]
+    projects.set_default_project(a, False)
+    by_path = {p["path"]: p for p in projects.add_project(str(tmp_path / "b"))}
+    assert by_path[str(tmp_path / "b")]["default"] is False
+
+
+def test_list_backfills_default_for_legacy_entries(tmp_path):
+    """老数据（条目无 default 键）读取时把最近使用的补成默认，并落盘。"""
+    user_store.write_section(
+        "projects",
+        [
+            {"name": "old", "path": str(tmp_path / "old"), "last_used": 1.0},
+            {"name": "new", "path": str(tmp_path / "new"), "last_used": 2.0},
+        ],
+    )
+    result = projects.list_projects()
+    assert [(p["name"], p.get("default")) for p in result] == [
+        ("new", True),
+        ("old", False),
+    ]
+    # 已落盘：再读一次不再改动
+    assert projects.list_projects() == result
+
+
+def test_list_does_not_backfill_after_user_unset(tmp_path):
+    """主动取消过默认（条目带 default: False）不算老数据，不该被回填。"""
+    (tmp_path / "a").mkdir()
+    path = projects.add_project(str(tmp_path / "a"))[0]["path"]
+    projects.set_default_project(path, False)
+    assert projects.list_projects()[0]["default"] is False
+
+
 def test_add_missing_dir_raises(tmp_path):
     with pytest.raises(ValueError):
         projects.add_project(str(tmp_path / "nope"))
