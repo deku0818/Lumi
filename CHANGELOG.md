@@ -1,5 +1,13 @@
 # Changelog
 
+## [0.2.78] - 2026-07-27
+
+### Fixed
+- **Linux 包在 Ubuntu 22.04 等旧发行版上起不来** — 症状是 AppImage 里后端秒退、日志刷 `Failed to load Python shared library ... libpython3.12.so.1.0: /lib/x86_64-linux-gnu/libm.so.6: version 'GLIBC_2.38' not found`，Electron 那半正常起来，只有后端反复重启。根因是 PyInstaller 会把**它所用解释器的 libpython 打进产物**，而 uv 的默认 `python-preference = managed` 语义是「已装的 managed > 系统 > 下载新的 managed」——ubuntu-24.04 runner 自带满足 `requires-python>=3.12` 的 `/usr/bin/python3.12`（deb 包，链 glibc 2.38），uv 就直接捡了它，于是构建机的 libc 基线被焊进包里。打包命令改为 `--managed-python --python 3.12`，强制走 python-build-standalone（实测 libpython 最高只引用 GLIBC_2.17）。三平台原本各捡各的（deb / python.org framework / hostedtoolcache），一并改掉——产物不再随 runner 镜像预装什么而漂移。
+
+### Added
+- **构建期 glibc 基线断言**（`Assert glibc baseline`）— 扫产物内全部 ELF 的 GLIBC 版本符号，最高值超过 2.35（Ubuntu 22.04）即让构建失败。此类回归的要害是 CI 恒绿：构建机 glibc 永远比目标系统新，抬高下限在云端毫无症状，只有旧发行版用户会撞。扫不到符号（产物结构变动导致检查失效）同样判失败，不静默放过。当前实测水位 2.28，由 tiktoken 的 manylinux_2_28 wheel 决定，故整包覆盖 Ubuntu 20.04+ / Debian 10+ / RHEL 8+。
+
 ## [0.2.77] - 2026-07-26
 
 ### Changed

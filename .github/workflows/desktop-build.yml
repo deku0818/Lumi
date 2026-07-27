@@ -64,6 +64,21 @@ jobs:
           CSC_IDENTITY_AUTO_DISCOVERY: "false"
         run: bash scripts/build-desktop.sh
 
+      # 防 glibc 基线静默漂移。产物能跑的最低 glibc = 打进包里所有 ELF 中最高的那个 GLIBC 版本
+      # 需求，而构建机的 glibc 恒比目标系统新 —— 抬高下限时 CI 只会全绿，用户那边直接
+      # "GLIBC_x.y not found" 起不来。v0.2.77 的 AppImage 就这样被钉在 glibc 2.38 上
+      # （PyInstaller 捡了 ubuntu-24.04 的系统 Python，见 build-desktop.sh 的 --managed-python）。
+      # 2.35 = Ubuntu 22.04，当前承诺支持的最旧发行版；实测水位 2.28，由 tiktoken 的
+      # manylinux_2_28 wheel 决定。此步红了说明某依赖或工具链抬了下限，先确认是否真要弃旧发行版。
+      - name: Assert glibc baseline
+        if: runner.os == 'Linux'
+        shell: bash
+        run: |
+          worst=$(grep -rhoa 'GLIBC_2\.[0-9]\+' dist/lumi-backend | sort -t. -k2 -n | tail -1)
+          echo "产物 glibc 下限: ${worst:-未扫到}"
+          [ -n "$worst" ] || { echo "::error::没扫到 GLIBC 符号，产物路径或结构已变，此检查失效"; exit 1; }
+          [ "${worst##*.}" -le 35 ] || { echo "::error::${worst} 高于 Ubuntu 22.04 的 glibc 2.35"; exit 1; }
+
       - uses: actions/upload-artifact@v4
         with:
           name: lumi-${{ matrix.os }}

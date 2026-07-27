@@ -10,7 +10,14 @@ cd "$(dirname "$0")/.."
 VERSION=$(grep -m1 '^version = ' pyproject.toml | cut -d'"' -f2)
 
 echo "── 后端 lumi-backend v${VERSION} (PyInstaller onedir) ──"
-uv run --with pyinstaller pyinstaller \
+# --managed-python：强制用 uv 下载的 python-build-standalone，禁止捡 runner/本机预装的
+# Python。PyInstaller 会把所用解释器的 libpython 打进产物，捡系统 Python 就等于把宿主的
+# libc 基线焊进包里 —— ubuntu-24.04 的 /usr/bin/python3.12 链 glibc 2.38，产物在 Ubuntu
+# 22.04(glibc 2.35) 上直接 "GLIBC_2.38 not found" 起不来。managed 版基线是 glibc 2.17。
+# 顺带让构建不再随 runner 镜像预装什么而漂移（三平台原本各捡各的：deb / python.org
+# framework / hostedtoolcache）。
+# --python 3.12：钉住大版本，否则 requires-python>=3.12 会让 uv 取最新 managed 版本。
+uv run --managed-python --python 3.12 --with pyinstaller pyinstaller \
   --name lumi-backend --onedir --noconfirm --clean \
   --distpath dist --workpath build/pyinstaller --specpath build/pyinstaller \
   --collect-data lumi --copy-metadata lumi \
