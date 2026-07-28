@@ -1,5 +1,20 @@
 # Changelog
 
+## [0.2.84] - 2026-07-28
+
+### Fixed
+- **自动压缩来得太早：1M 窗口的模型用量刚过 14% 就被压掉** — 压缩阈值的分母写死成 `token.context_length`（默认 200000），而界面上「上下文用量」环的分母走的是 models.dev 目录里该模型的真实窗口（如 `qwen3.8-max-preview` = 1000000）。两者不同源，于是阈值恒为 `200000 × 0.7 = 140000`，在 1M 模型上只相当于 14%——用户看到用量 6%~14% 就莫名触发压缩、丢历史。改为分母取会话**实际所跑模型**的窗口（`catalog.context_window(model_name)`，与上下文环同源），目录未收录的模型才退回 `token.context_length` 兜底。同一个模型下阈值从 140K 提到 700K。
+- 顺带把两处重复的窗口查目录代码（`bridge/providers.py` 的私有 `context_of`、`gateway/session.py` 的两处 `lookup(...).context_length`）收敛到新增的 `catalog.context_window()`：压缩阈值、桌面上下文环、渠道旁观会话快照三个消费者现在读同一个函数。
+
+### Changed
+- `token.context_length` 的语义收窄并在 `Field.description` 与文档中写明：**工具结果大小上限恒以它为基准**（`once_tool_max_bytes` / `round_tool_max_bytes` 不随模型窗口放大——`_PTL_KEEP_TAIL_ROUNDS=2` 的保尾估算依赖它是绝对界），压缩阈值只在目录查不到模型时才退回它。`docs/architecture/summary.md`、`docs/user-manual.md` 中「减少上下文长度」的调优建议一并纠正。
+- dream 整理提示词措辞微调（「顺手把」→「同时将」）。
+
+### Tests
+- 新增 3 个参数化用例锁住阈值分母来源（1M 模型用量 30% 不压 / 过 70% 才压 / 目录未收录退回 200K 分母）；两个变异体（分母退回静态配置、砍掉 `or` 兜底分支）均能被杀掉。
+- `test_compact.py` 两个 summarizer 用例的 fixture 收敛为 `_pending_human_history()` / `_summarizer_env()`，token 段改用真实 `TokenConfig` 而非手搓 `SimpleNamespace`——以后给 `TokenConfig` 加字段不会因 stub 缺字段而假绿。
+- `test_full_graph_ptl_roundtrip` 钉住 `context_window`，消除该用例对本机 `~/.lumi/cache` 目录内容的隐性依赖。
+
 ## [0.2.83] - 2026-07-27
 
 ### Fixed

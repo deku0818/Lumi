@@ -56,7 +56,8 @@ class AgentsConfig(BaseModel):
 class TokenConfig(BaseModel):
     """Token / 字节处理配置类
 
-    once_tool_ratio / summary_threshold 均为相对于 context_length 的比例（0~1）。
+    once_tool_ratio / round_tool_ratio / summary_threshold 均为比例（0~1），分母见各自
+    description（前两者是 context_length，summary_threshold 是模型真实窗口）。
     阈值类（工具结果大小）以 UTF-8 字节衡量，按 BYTES_PER_TOKEN 把 token 预算换算
     成字节；上下文窗口预算（summary）保持 token 语义。实际值通过属性方法计算。
     """
@@ -69,10 +70,13 @@ class TokenConfig(BaseModel):
         default=0.3,
         description="单轮全部工具结果合计最大占比（相对于 context_length），按字节衡量；超出时单条上限收紧为公平份额（budget//候选数），超份额的结果被截断或卸载",
     )
-    context_length: int = Field(default=200000, description="模型上下文窗口最大token数")
+    context_length: int = Field(
+        default=200000,
+        description="上下文窗口 token 数兜底值：工具结果大小上限恒以此为基准；压缩阈值优先用 models.dev 目录里该模型的真实窗口，仅目录未收录时退到此值",
+    )
     summary_threshold: float = Field(
         default=0.7,
-        description="触发总结的阈值比例，当上下文窗口 token 数（真实 usage，含 system prompt + tools + 历史）>= context_length * summary_threshold 时触发",
+        description="触发总结的阈值比例，当上下文窗口 token 数（真实 usage，含 system prompt + tools + 历史）>= 模型真实窗口 * summary_threshold 时触发",
     )
     summary_ptl_retry_max: int = Field(
         default=3,

@@ -253,6 +253,9 @@ async def test_full_graph_ptl_roundtrip():
         patch.object(nodes, "tool_call_chain", return_value=chain),
         patch.object(nodes, "get_config", return_value=_fake_config()),
         patch.object(nodes, "detect_protocol", return_value="openai"),
+        # 阈值门的分母要查 models.dev 目录：钉 0 走 _TOKEN_CONFIG 兜底，不让本用例
+        # 依赖本机 ~/.lumi/cache 里恰好没有条目模糊匹配上 "fake-model"
+        patch.object(nodes, "context_window", return_value=0),
         patch.object(
             nodes, "run_summary", new=AsyncMock(return_value=("SUMMARY_TEXT", 0))
         ),

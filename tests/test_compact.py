@@ -5,6 +5,7 @@
 
 from __future__ import annotations
 
+from types import SimpleNamespace
 from unittest.mock import AsyncMock, patch
 
 import pytest
@@ -18,6 +19,7 @@ from langchain_core.messages import (
 )
 from langgraph.graph.message import add_messages
 
+from lumi.agents.core import nodes
 from lumi.agents.core.meta_message import CTX_DIGEST_KEY, reminder_human_message
 from lumi.agents.core.preprocessing import compact
 from lumi.agents.core.preprocessing.compact import (
@@ -37,6 +39,7 @@ from lumi.agents.core.preprocessing.compact import (
 )
 from lumi.agents.core.preprocessing.summary import build_summary_carrier
 from lumi.sessions.message_visibility import latest_human_ts
+from lumi.utils.config.models import TokenConfig
 from lumi.utils.constants import LUMI_META_KEY
 
 # ─────────────────────────── round 分组 / 截头 ───────────────────────────
@@ -349,42 +352,47 @@ def _human_text(msg) -> str:
     return "".join(b.get("text", "") for b in msg.content if isinstance(b, dict))
 
 
-async def test_summarizer_emits_carrier_before_last_human(monkeypatch):
-    """压缩产出独立摘要 carrier + 末条 Human 原样重排到 carrier 之后；
-    上下文块不在此重注入——下游 PreprocessMessages 的 context_inject hook
-    在压缩后的历史上全量重建。"""
-    from types import SimpleNamespace
-
-    from lumi.agents.core import nodes
-
-    messages = [
+def _pending_human_history() -> list:
+    """[H, A, H, A, H]：末条真人消息尚未被回答（压缩须原样保住它）。"""
+    return [
         HumanMessage(content="m1", id="h1"),
         AIMessage(content="a1", id="a1"),
         HumanMessage(content="m2", id="h2"),
         AIMessage(content="a2", id="a2"),
         HumanMessage(content="现在的问题", id="h3"),
     ]
+
+
+def _summarizer_env(*, context_length: int, summary_threshold: float) -> tuple:
+    """summarizer 的最小运行环境 ``(runtime, fake get_config)``。
+
+    token 段用真实 ``TokenConfig``（只覆盖本用例关心的两个值）：新增字段时测试跟着
+    生产默认走，不会因手搓 SimpleNamespace 缺字段而假绿。
+    """
     runtime = SimpleNamespace(
-        context=SimpleNamespace(
-            tools=[], system_prompt="SYS", model_name="x", memory_enabled=True
-        )
+        context=SimpleNamespace(tools=[], system_prompt="SYS", model_name="x")
     )
     fake_config = SimpleNamespace(
         config=SimpleNamespace(
-            token=SimpleNamespace(
-                context_length=1000,
-                summary_threshold=0.5,
-                summary_failure_circuit_threshold=3,
-                summary_circuit_reset_seconds=60,
-                summary_ptl_retry_max=2,
-                summary_ptl_retry_drop_ratio=0.3,
+            token=TokenConfig(
+                context_length=context_length, summary_threshold=summary_threshold
             )
         ),
         load_prompt=lambda name: "SUMMARY PROMPT",
     )
+    return runtime, fake_config
+
+
+async def test_summarizer_emits_carrier_before_last_human():
+    """压缩产出独立摘要 carrier + 末条 Human 原样重排到 carrier 之后；
+    上下文块不在此重注入——下游 PreprocessMessages 的 context_inject hook
+    在压缩后的历史上全量重建。"""
+    messages = _pending_human_history()
+    runtime, fake_config = _summarizer_env(context_length=1000, summary_threshold=0.5)
     with (
         patch.object(nodes, "get_config", return_value=fake_config),
         patch.object(nodes, "context_window_tokens", return_value=10**9),
+        patch.object(nodes, "context_window", return_value=0),  # 不查真实目录
         patch.object(
             nodes,
             "run_summary",
@@ -407,6 +415,40 @@ async def test_summarizer_emits_carrier_before_last_human(monkeypatch):
     assert "system-reminder" not in carrier_text  # 上下文块交给下游 hook 全量重建
     assert _human_text(last) == "现在的问题"  # 用户消息在 carrier 之后、内容原样
     assert last.id != "h3"  # 换新 id 才能真正 append 到 carrier 之后
+
+
+# ─────────────── 压缩阈值的分母 = 模型真实窗口，不是静态配置 ───────────────
+
+
+@pytest.mark.parametrize(
+    "model_window,usage,should_compact",
+    [
+        (1_000_000, 300_000, False),  # 1M 模型用了 30%：静态 200K 分母下会误压
+        (1_000_000, 800_000, True),  # 过 70% 才压
+        (0, 100_000, False),  # 目录未收录 → 退回 200K 分母，100K < 140K 不压
+    ],
+)
+async def test_summary_threshold_follows_real_model_window(
+    model_window, usage, should_compact
+):
+    """阈值分母取会话实际模型的窗口；目录查不到才用 token.context_length 兜底。"""
+    messages = _pending_human_history()
+    runtime, fake_config = _summarizer_env(
+        context_length=200_000, summary_threshold=0.7
+    )
+    run_summary = AsyncMock(return_value=("SUMMARY_TEXT", 0))
+    with (
+        patch.object(nodes, "get_config", return_value=fake_config),
+        patch.object(nodes, "context_window_tokens", return_value=usage),
+        patch.object(nodes, "context_window", return_value=model_window),
+        patch.object(nodes, "run_summary", new=run_summary),
+    ):
+        result = await nodes.summarizer(
+            {"messages": messages}, runtime, {"configurable": {"thread_id": "tw"}}
+        )
+
+    assert run_summary.await_count == (1 if should_compact else 0)
+    assert bool(result) is should_compact
 
 
 # ---------------------------------------------------------------------------

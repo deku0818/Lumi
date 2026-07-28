@@ -42,7 +42,7 @@ class ProviderService:
         control 决定前端渲染形态（none 不渲染 / effort 档位列表 / toggle 开关），
         前端零推导；levels 为可设档位（校验同源）。
         """
-        from lumi.models.catalog import lookup
+        from lumi.models.catalog import context_window, lookup
         from lumi.models.manager import allowed_levels
 
         profiles, active = provider_store.load()
@@ -53,10 +53,6 @@ class ProviderService:
                 "control": entry.control if entry else "none",
                 "levels": list(allowed_levels(m)),
             }
-
-        def context_of(m: str) -> int:
-            entry = lookup(m)
-            return entry.context_length if entry else 0
 
         pointers = provider_store.get_pointers()
         return {
@@ -71,7 +67,7 @@ class ProviderService:
                         m: {**thinking_of(m), "effort": p.effort.get(m, "auto")}
                         for m in p.models
                     },
-                    "context": {m: context_of(m) for m in p.models},
+                    "context": {m: context_window(m) for m in p.models},
                 }
                 for p in profiles
             ],

@@ -151,6 +151,15 @@ def lookup(model_name: str) -> ModelEntry | None:
     return entry
 
 
+def context_window(model_name: str) -> int:
+    """模型上下文窗口 token 数；目录未收录 / 无缓存返回 0（= 未知，调用方自行兜底）。
+
+    压缩阈值（``nodes.summarizer``）与桌面上下文环共用这一个分母，前后端口径一致。
+    """
+    entry = lookup(model_name)
+    return entry.context_length if entry else 0
+
+
 async def refresh(force: bool = False) -> None:
     """拉取 models.dev 数据写入磁盘缓存（TTL 内跳过）；失败静默沿用旧缓存。"""
     path = _cache_path()

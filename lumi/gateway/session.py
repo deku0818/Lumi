@@ -215,7 +215,7 @@ def _snapshot_model_window(messages: list, thread_id: str) -> tuple[str, int]:
     ARN），渠道会话回退到渠道配置的模型别名（空 = 跟随 active profile）再查——
     desktop 环的窗口本就走别名查目录这条路径。
     """
-    from lumi.models.catalog import lookup
+    from lumi.models.catalog import context_window
 
     wire = ""
     for msg in reversed(messages):
@@ -224,15 +224,15 @@ def _snapshot_model_window(messages: list, thread_id: str) -> tuple[str, int]:
             break
     if not wire:
         return "", 0
-    if entry := lookup(wire):
-        return wire, entry.context_length
+    if win := context_window(wire):
+        return wire, win
     if _channel_of(thread_id):
         from lumi.gateway.channels.store import load_feishu
         from lumi.models import provider_store
 
         alias = load_feishu().model or provider_store.resolve().model
-        if alias and (entry := lookup(alias)):
-            return alias, entry.context_length
+        if alias and (win := context_window(alias)):
+            return alias, win
     return wire, 0
 
 

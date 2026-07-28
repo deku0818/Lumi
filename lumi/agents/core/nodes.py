@@ -44,6 +44,7 @@ from lumi.agents.core.structured_tool import (
 )
 from lumi.agents.permissions.models import PermissionDecision
 from lumi.agents.permissions.routing import route_decision
+from lumi.models.catalog import context_window
 from lumi.models.chain import structured_output, tool_call_chain
 from lumi.models.manager import detect_protocol
 from lumi.models.provider_store import resolve_pointer
@@ -646,7 +647,7 @@ async def summarizer(
 
     缓存安全的分叉：复用主对话的 system_prompt + tools 前缀，只在末尾追加摘要指令。
 
-    - 不超阈值（``context_length * summary_threshold``，真实 usage）→ 直接放行
+    - 不超阈值（``模型窗口 * summary_threshold``，真实 usage）→ 直接放行
     - 熔断器打开（同 thread 连续失败超阈值且未到 reset）→ 直接放行
     - ``ptl_retry`` 置位（CallModel 撞 PTL 路由回来）→ 绕过阈值门走
       :func:`_ptl_forced_compact` 强制压缩
@@ -674,17 +675,17 @@ async def summarizer(
         )
 
     original_messages = list(state["messages"])
-    threshold = token_config.context_length * token_config.summary_threshold
+    # 分母必须是会话实际所跑模型的窗口：静态 context_length 会把 1M 窗口的模型按 200K
+    # 压——用量刚过 14% 就触发压缩。
+    window = context_window(runtime.context.model_name) or token_config.context_length
+    threshold = window * token_config.summary_threshold
     total_tokens = context_window_tokens(original_messages)
+    stat = f"上下文 token {total_tokens} / 阈值 {threshold:.0f}（窗口 {window}）"
     if total_tokens < threshold:
-        logger.debug(
-            f"[Summarizer] 上下文 token ({total_tokens}) < 阈值 ({threshold})，无需压缩"
-        )
+        logger.debug(f"[Summarizer] {stat}，无需压缩")
         return {}
 
-    logger.info(
-        f"[Summarizer] 上下文 token ({total_tokens}) >= 阈值 ({threshold})，开始压缩"
-    )
+    logger.info(f"[Summarizer] {stat}，开始压缩")
 
     # 跳过头部 SystemMessage（不参与摘要、不删除）；尾必须是 HumanMessage
     messages = original_messages
