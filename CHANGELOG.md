@@ -1,5 +1,13 @@
 # Changelog
 
+## [0.2.85] - 2026-07-28
+
+### Fixed
+- **`/goal` 判官在 1M 模型上只看得到尾部约 160K 转录** — 与 0.2.84 压缩阈值同类：判官转录预算的分母写死 `token.context_length`（默认 200000），而判官实际跑的是会话 active 模型（`resolve()`）。1M 窗口下预算恒为 `200000 × 0.8`，长会话里较早的证据被截头丢掉——判官按 default-deny 判「证据不足」，目标明明已达成仍反复拦截结束。改为分母取判官所跑模型的真实窗口（`catalog.context_window(resolve().model)`，与压缩阈值/上下文环同源），目录未收录才退回 `token.context_length` 兜底。
+
+### Tests
+- 新增用例锁住判官预算分母来源（1M 窗口下静态预算本会截断的转录不再截断）；截断类用例收敛到 `_pin_budget()` 帮手，同时钉住 `resolve`/`context_window`，消除对本机 `~/.lumi`（providers.json / catalog 缓存）的隐性依赖。两个变异体（分母退回静态配置、砍掉 `or` 兜底）均验证可被杀掉。
+
 ## [0.2.84] - 2026-07-28
 
 ### Fixed

@@ -19,7 +19,9 @@ from __future__ import annotations
 from pydantic import BaseModel, Field
 
 from lumi.agents.core.hooks.schema import AdditionalContext, HookContext, HookResult
+from lumi.models.catalog import context_window
 from lumi.models.chain import structured_output
+from lumi.models.provider_store import resolve
 from lumi.sessions.message_text import extract_messages_as_text
 from lumi.sessions.session_meta import get_goal, update_meta
 from lumi.utils.logger import logger
@@ -86,11 +88,11 @@ def _render_transcript(messages: list) -> str:
     渲染文本衡量（含工具调用 ``name({args})``），不用 content 字节——tool_calls 的
     AI 消息 content 常为空，只算 content 会把工具密集尾部严重低估。
     """
-    budget = int(
-        get_config().config.token.context_length
-        * TRANSCRIPT_BUDGET_RATIO
-        * BYTES_PER_TOKEN
-    )
+    # 窗口取判官实际所跑模型的（判官不显式传模型 = resolve() 的 active 模型）：
+    # 静态 context_length 会把 1M 窗口的判官按 200K 截转录，证据被截掉 → default-deny
+    # 误判未完成、反复拉回。目录未收录才退回 token.context_length 兜底。
+    window = context_window(resolve().model) or get_config().config.token.context_length
+    budget = int(window * TRANSCRIPT_BUDGET_RATIO * BYTES_PER_TOKEN)
     full = extract_messages_as_text(messages or [])
     if text_size(full) <= budget:
         return full

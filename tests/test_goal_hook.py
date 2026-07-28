@@ -104,7 +104,28 @@ async def test_clear_preserves_other_marks(meta_file, monkeypatch):
 # === 转录截断 ===
 
 
-def test_render_transcript_no_truncation():
+def _pin_budget(monkeypatch, *, window=0, context_length=20):
+    """钉住预算三来源：判官模型（resolve）、目录窗口（context_window）、静态兜底。
+
+    window=0 = 目录未收录 → 走 context_length 兜底；同时消除对本机
+    ``~/.lumi``（providers.json / catalog 缓存）的隐性依赖。
+    """
+    monkeypatch.setattr(goal_hook, "resolve", lambda: type("R", (), {"model": "m"})())
+    monkeypatch.setattr(goal_hook, "context_window", lambda m: window)
+    fake_cfg = type(
+        "C",
+        (),
+        {
+            "config": type(
+                "D", (), {"token": type("T", (), {"context_length": context_length})()}
+            )()
+        },
+    )()
+    monkeypatch.setattr(goal_hook, "get_config", lambda: fake_cfg)
+
+
+def test_render_transcript_no_truncation(monkeypatch):
+    _pin_budget(monkeypatch, context_length=200000)
     msgs = [HumanMessage(content="hi"), AIMessage(content="hello")]
     text = goal_hook._render_transcript(msgs)
     assert "较早的对话已被截断" not in text
@@ -113,12 +134,7 @@ def test_render_transcript_no_truncation():
 
 def test_render_transcript_truncates_head_and_counts(monkeypatch):
     # 把 context_length 调到极小逼出截断；预算 = 20 * 0.8 * 3 = 48 字节
-    fake_cfg = type(
-        "C",
-        (),
-        {"config": type("D", (), {"token": type("T", (), {"context_length": 20})()})()},
-    )()
-    monkeypatch.setattr(goal_hook, "get_config", lambda: fake_cfg)
+    _pin_budget(monkeypatch)
 
     msgs = [AIMessage(content=f"message-number-{i:03d}-padding") for i in range(10)]
     text = goal_hook._render_transcript(msgs)
@@ -130,21 +146,22 @@ def test_render_transcript_truncates_head_and_counts(monkeypatch):
     assert "message-number-000" not in text
 
 
+def test_render_transcript_budget_uses_model_window(monkeypatch):
+    # 分母 = 判官实际所跑模型的窗口：静态 context_length=20（预算 48B）本会截断，
+    # 目录窗口 1000（预算 2400B）装得下 → 不截断。杀「分母退回静态配置」变异体。
+    _pin_budget(monkeypatch, window=1000)
+
+    msgs = [AIMessage(content=f"message-number-{i:03d}-padding") for i in range(10)]
+    text = goal_hook._render_transcript(msgs)
+
+    assert "较早的对话已被截断" not in text
+    assert "message-number-000" in text
+
+
 def test_render_transcript_counts_tool_call_bytes(monkeypatch):
     # #5 回归：tool_calls 的 AI 消息 content 为空，但渲染出大 name({args})——预算须按
     # 实际渲染字节算，否则工具密集尾部被低估、突破窗口。
-    fake_cfg = type(
-        "C",
-        (),
-        {
-            "config": type(
-                "D", (), {"token": type("T", (), {"context_length": 100})()}
-            )()
-        },
-    )()
-    monkeypatch.setattr(
-        goal_hook, "get_config", lambda: fake_cfg
-    )  # budget = 100*0.8*3 = 240B
+    _pin_budget(monkeypatch, context_length=100)  # budget = 100*0.8*3 = 240B
 
     big = AIMessage(
         content="",
@@ -163,12 +180,7 @@ def test_render_transcript_omitted_excludes_system(monkeypatch):
     # #6 回归：被丢的 system 消息不渲染，不该计入 N
     from langchain_core.messages import SystemMessage
 
-    fake_cfg = type(
-        "C",
-        (),
-        {"config": type("D", (), {"token": type("T", (), {"context_length": 20})()})()},
-    )()
-    monkeypatch.setattr(goal_hook, "get_config", lambda: fake_cfg)  # budget = 48B
+    _pin_budget(monkeypatch)  # budget = 48B
 
     msgs = [
         SystemMessage(content="系统提示"),
