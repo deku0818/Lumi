@@ -1,5 +1,14 @@
 # Changelog
 
+## [0.2.87] - 2026-07-28
+
+### Fixed
+- **Windows 右上角三键间歇性点不动（重启才恢复）** — Windows 客户反馈最小化/最大化/关闭偶发失灵但应用内部一切正常。根因：无边框窗口的自绘三键靠 `-webkit-app-region` 的 no-drag 命中矩形工作，页面缩放（Ctrl+±，且缩放级别会被持久化）或 DPI 变化后矩形过期失效（上游 electron#41695 家族），点击被当成标题拖拽、根本进不了页面。治本：Windows 改用系统原生 WCO overlay（`titleBarStyle: 'hidden'` + `titleBarOverlay`），三键由 OS 直接绘制与命中，天然免疫，顺带拿回 Win11 snap layouts 悬浮菜单。原生按钮底色/图标色随亮暗主题实时同步（theme.ts 在主题生效点推色值）；标题栏高度改 `env(titlebar-area-height)` 与 overlay 恒等，任何缩放下不错位。Linux 维持原自绘按钮不变。
+- **在非激活供应商连接上填的限额覆盖被静默忽略** — 同名模型存在于多个 profile（如同一模型走两个代理）时，运行时只按模型名反查且恒偏向激活连接：在另一个连接的表单里填的上下文/输出覆盖，界面回显「已覆盖」但压缩阈值与 max_tokens 实际取的是激活连接的值，无任何报错。修复：(连接, 模型) 作为完整身份贯通运行时——`resolve()`/`create_llm`/`tool_call_chain`/`run_summary` 均可带 provider 精确定位 profile（连接/思考档位/限额三者一并归位，渠道会话早已存在的连接与档位串味同样治愈）；`LumiAgentContext` 携带 provider（desktop 从 active 指针带出，渠道会话存进 `ChannelRuntimeConfig.provider`，换 profile 也会触发会话池重建）；渠道设置的模型下拉选中态与保存改按 (连接, 模型) 判定，同名模型不再两处打勾。老渠道配置（无 provider）行为不变，重选一次模型自动补上归属。
+
+### Tests
+- 新增 `test_resolve_with_provider_pins_profile` 锁住：旧按名反查路径丢覆盖（bug 现场）、带 provider 时连接+覆盖+归属全部来自指定 profile、provider 失效回退按名反查不炸。
+
 ## [0.2.86] - 2026-07-28
 
 ### Added

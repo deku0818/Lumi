@@ -69,6 +69,7 @@ const emptyFeishu = (): FeishuConfig => ({
   allow_from: ['*'],
   group_policy: 'mention',
   model: '',
+  provider: '',
   effort: 'auto',
   tool_mode: 'auto',
   workspace: '',
@@ -727,7 +728,8 @@ function ChannelRuntimeFields({
     if (!cap || cap.control === 'none') return 'auto'
     return (cap.levels ?? ['auto']).includes(eff) ? eff : 'auto'
   }
-  const firstModel = providers.find((p) => p.models.length)?.models[0] ?? ''
+  const firstProv = providers.find((p) => p.models.length)
+  const firstModel = firstProv?.models[0] ?? ''
   const cap = custom ? capOf(cfg.model) : undefined
   const control = cap?.control ?? 'none'
 
@@ -753,10 +755,11 @@ function ChannelRuntimeFields({
             value={custom ? 'custom' : 'global'}
             onChange={(v) => {
               setSource(v as 'global' | 'custom')
-              if (v === 'global') set({ model: '', effort: 'auto' })
+              if (v === 'global') set({ model: '', provider: '', effort: 'auto' })
               // 切「指定」时有可用模型就补第一个；providers 未加载完（firstModel=''）则
               // 先进 custom 视图，由模型下拉待选，加载后即可选
-              else if (!cfg.model && firstModel) set({ model: firstModel, effort: 'auto' })
+              else if (!cfg.model && firstModel)
+                set({ model: firstModel, provider: firstProv?.id ?? '', effort: 'auto' })
             }}
             options={[
               { val: 'global', label: '跟随 desktop 全局' },
@@ -770,7 +773,8 @@ function ChannelRuntimeFields({
             <ModelDropdown
               providers={providers}
               value={cfg.model}
-              onPick={(m) => set({ model: m, effort: coerce(m, cfg.effort) })}
+              provider={cfg.provider}
+              onPick={(m, pid) => set({ model: m, provider: pid, effort: coerce(m, cfg.effort) })}
             />
             <ThinkingControl
               control={control}
@@ -797,16 +801,21 @@ function ChannelRuntimeFields({
 }
 
 // 模型下拉：按 provider 分组列出所有模型（对齐 ModelPicker 的 More models 子菜单）。
+// 选中态按 (provider, model) 判定——同名模型可存在于多个连接，只按名会两处都打勾。
 function ModelDropdown({
   providers,
   value,
+  provider,
   onPick,
 }: {
   providers: ProviderProfile[]
   value: string
-  onPick: (m: string) => void
+  provider: string // 空 = 老配置未记录归属，回退按名找第一处
+  onPick: (m: string, providerId: string) => void
 }) {
-  const prov = providers.find((p) => p.models.includes(value))
+  const prov =
+    providers.find((p) => p.id === provider && p.models.includes(value)) ??
+    providers.find((p) => p.models.includes(value))
   return (
     <DropdownMenu>
       <DropdownMenuTrigger asChild>
@@ -835,8 +844,10 @@ function ModelDropdown({
               {p.name}
             </div>
             {p.models.map((m) => (
-              <DropdownMenuItem key={m} onClick={() => onPick(m)}>
-                <Check className={`text-primary ${m === value ? 'opacity-100' : 'opacity-0'}`} />
+              <DropdownMenuItem key={m} onClick={() => onPick(m, p.id)}>
+                <Check
+                  className={`text-primary ${m === value && p.id === prov?.id ? 'opacity-100' : 'opacity-0'}`}
+                />
                 <span className="truncate">{m}</span>
               </DropdownMenuItem>
             ))}

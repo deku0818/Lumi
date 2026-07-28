@@ -21,6 +21,10 @@ class LumiAgentContext:
     system_prompt: str = field(default="")
     model_name: str = field(default="")
     """模型名；连接（base_url / api_key）由 create_llm 按供应商 profile 解析。"""
+    provider: str = field(default="")
+    """model_name 所属的供应商 profile id；(连接, 模型) 才是完整身份——同名模型
+    存在于多个 profile 时，仅按名反查会把连接/档位/限额取到别家（active 优先）。
+    空 = 未知来源（老渠道配置 / headless），resolve 退回按名反查，行为同旧版。"""
     effort: str | None = field(default=None)
     """思考档位覆盖：None = 跟随该模型 profile 的档位（desktop 会话走这条，由 ModelPicker
     存进 provider_store）；非 None = 强制用此档位、绕过 profile（IM 渠道会话用它独立配置

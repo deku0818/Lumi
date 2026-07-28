@@ -82,11 +82,19 @@ fail-closed 转人工审批，判官 / titler 照常上抛。
 `"on"` / `"off"`），校验规则：值 ∈ 该模型 models.dev options ∪ {auto,on,off}，
 不合法（数据更新后失效）静默回退 auto。
 
+`resolve(model_name, provider="")`：(连接, 模型) 才是完整身份——同名模型存在于
+多个 profile 时仅按名反查会把连接 / 档位 / 限额取到别家（active 优先）。provider
+非空时精确取该 profile，失效（profile 已删 / 模型被移出）退回按名反查。provider
+的来源：desktop 主路径从 active 指针带出（`apply_active`）、渠道会话存在
+`ChannelRuntimeConfig.provider`（老配置为空 = 按名反查，重选一次模型自动补上）、
+用途指针（titler / classifier）本就按 (provider, model) 存取。
+
 ## 注入链路（含已定的地基重构）
 
 ```
 ResolvedModel(model, base_url, api_key, effort,   ← resolve() 一次读盘全返回
-              context_window, max_tokens)         ← 限制：用户覆盖 > models.dev 探测 > 0(未知)
+              context_window, max_tokens,         ← 限制：用户覆盖 > models.dev 探测 > 0(未知)
+              provider)                           ← 解析落在的 profile id（回填 context 用）
         │
 create_llm(..., apply_effort=False)               ← 翻转默认：注入显式 opt-in
         │   仅 call_model 的 tool_call_chain 传 True；

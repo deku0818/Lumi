@@ -665,7 +665,7 @@ def test_snapshot_model_window_channel_falls_back_to_configured_alias(monkeypatc
     )
     monkeypatch.setattr(
         "lumi.gateway.channels.store.load_feishu",
-        lambda: SimpleNamespace(model="jv-claude"),
+        lambda: SimpleNamespace(model="jv-claude", provider=""),
     )
     messages = [
         _msg("converse/arn:aws:bedrock:us-east-1:1:application-inference-profile/x")
@@ -687,7 +687,7 @@ def test_snapshot_model_window_channel_alias_follows_active(monkeypatch):
     # resolve 现在既解析模型名也带出限制：无参 = active 模型，带参 = 查该模型的窗口
     monkeypatch.setattr(
         "lumi.models.provider_store.resolve",
-        lambda name=None: SimpleNamespace(
+        lambda name=None, provider="": SimpleNamespace(
             model=name or "active-model",
             context_window=128_000 if (name or "active-model") == "active-model" else 0,
         ),

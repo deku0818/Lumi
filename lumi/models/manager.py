@@ -186,12 +186,14 @@ def create_llm(
     apply_effort: bool = False,
     force_no_thinking: bool = False,
     effort: str | None = None,
+    provider: str = "",
     **llm_params,
 ) -> ChatAnthropic | ChatOpenAI:
     """创建 LLM 实例（同参数命中缓存）。
 
     连接解析：显式传入 base_url / api_key 时原样使用；否则由
-    provider_store.resolve() 按 model_name 反查供应商 profile 注入连接
+    provider_store.resolve() 解析供应商 profile 注入连接——provider 非空时
+    精确取该 profile（同名模型跨 profile 不串味），否则按 model_name 反查
     （model_name 为 None 时用 active 模型，无 active 回退 env 默认）。
 
     思考档位注入是显式 opt-in（apply_effort=True，仅主对话链使用）：
@@ -213,7 +215,7 @@ def create_llm(
     if "base_url" in llm_params or "api_key" in llm_params:
         model_name = model_name or get_default_model_name()
     else:
-        resolved = provider_store.resolve(model_name)
+        resolved = provider_store.resolve(model_name, provider)
         model_name = resolved.model
         level = resolved.effort
         if resolved.base_url:

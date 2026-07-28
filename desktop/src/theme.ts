@@ -25,6 +25,18 @@ function apply(theme: Theme): void {
   const root = document.documentElement
   root.classList.toggle('light', theme === 'light')
   root.classList.toggle('dark', theme === 'dark')
+  syncTitleBarOverlay()
+}
+
+// Windows 三键是原生 WCO overlay（main.cjs），不认 CSS 变量——
+// class 切换后同步读生效色值推给主进程，让原生按钮底色/图标色跟随主题
+function syncTitleBarOverlay(): void {
+  if (window.lumi?.platform !== 'win32') return
+  const s = getComputedStyle(document.documentElement)
+  void window.lumi.windowControls?.setTitleBarOverlay({
+    color: s.getPropertyValue('--color-canvas').trim(),
+    symbolColor: s.getPropertyValue('--color-ink').trim(),
+  })
 }
 
 // 返回 [偏好, 设置偏好, 实际生效的明/暗]

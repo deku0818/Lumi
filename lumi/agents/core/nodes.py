@@ -76,11 +76,12 @@ async def call_model(
         actual_tools,
         system_prompt=system_prompt,
         model_name=model_name,
-        max_tokens=resolve(model_name).max_tokens
+        max_tokens=resolve(model_name, runtime.context.provider).max_tokens
         or get_config().config.agents.max_tokens,
         tool_choice=None,
         apply_effort=True,  # 思考档位只在主对话链生效
         effort=runtime.context.effort,  # 渠道会话的档位覆盖（None=跟随 profile）
+        provider=runtime.context.provider,  # 同名模型跨 profile 不串味
     )
     iterations = state.get("iterations", 1)
 
@@ -629,6 +630,7 @@ async def _summarize(
         tools=runtime.context.tools,
         system_prompt=runtime.context.system_prompt,
         model_name=runtime.context.model_name,
+        provider=runtime.context.provider,
         max_retry=token_config.summary_ptl_retry_max,
         drop_ratio=token_config.summary_ptl_retry_drop_ratio,
     )
@@ -681,7 +683,7 @@ async def summarizer(
     # 分母必须是会话实际所跑模型的窗口：静态 context_length 会把 1M 窗口的模型按 200K
     # 压——用量刚过 14% 就触发压缩。
     window = (
-        resolve(runtime.context.model_name).context_window
+        resolve(runtime.context.model_name, runtime.context.provider).context_window
         or token_config.context_length
     )
     threshold = window * token_config.summary_threshold

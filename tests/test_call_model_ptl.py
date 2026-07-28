@@ -77,6 +77,7 @@ _RUNTIME = SimpleNamespace(
         tools=[],
         system_prompt="SYS",
         model_name="fake-model",
+        provider="",
         effort=None,
         memory_enabled=True,
     )

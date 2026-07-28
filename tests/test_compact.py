@@ -370,7 +370,9 @@ def _summarizer_env(*, context_length: int, summary_threshold: float) -> tuple:
     生产默认走，不会因手搓 SimpleNamespace 缺字段而假绿。
     """
     runtime = SimpleNamespace(
-        context=SimpleNamespace(tools=[], system_prompt="SYS", model_name="x")
+        context=SimpleNamespace(
+            tools=[], system_prompt="SYS", model_name="x", provider=""
+        )
     )
     fake_config = SimpleNamespace(
         config=SimpleNamespace(

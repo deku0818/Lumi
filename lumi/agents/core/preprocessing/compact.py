@@ -238,6 +238,7 @@ async def run_summary(
     tools,
     system_prompt: str,
     model_name: str,
+    provider: str = "",
     max_retry: int,
     drop_ratio: float,
 ) -> tuple[str, int]:
@@ -270,7 +271,11 @@ async def run_summary(
             transformed.append(m)
 
     chain = tool_call_chain(
-        tools, system_prompt=system_prompt, model_name=model_name, streaming=False
+        tools,
+        system_prompt=system_prompt,
+        model_name=model_name,
+        provider=provider,
+        streaming=False,
     )
     raw_content, ptl_retries = await summarize_with_ptl_retry(
         transformed, prompt, chain, max_retry=max_retry, drop_ratio=drop_ratio

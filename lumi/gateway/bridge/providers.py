@@ -30,8 +30,10 @@ class ProviderService:
         b = self._bridge
         if b._context is None:
             return
-        b._context.model_name = provider_store.resolve().model
-        b.model_name = b._context.model_name
+        resolved = provider_store.resolve()
+        b._context.model_name = resolved.model
+        b._context.provider = resolved.provider
+        b.model_name = resolved.model
 
     @staticmethod
     def provider_list() -> dict:

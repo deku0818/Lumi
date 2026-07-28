@@ -192,6 +192,9 @@ class ResolvedModel:
     """生效上下文窗口：用户覆盖 > catalog 探测；0 = 两者都没有，调用方自行兜底。"""
     max_tokens: int = 0
     """生效单次输出上限：用户覆盖 > catalog 探测；0 = 两者都没有，调用方自行兜底。"""
+    provider: str = ""
+    """解析落在的 profile id；空 = 无连接覆盖（未匹配到任何 profile）。
+    调用方回填 context.provider 时用它，后续 resolve 得以精确定位同一 profile。"""
 
     def conn_kwargs(self) -> dict:
         """非空的 base_url / api_key 连接参数，直接 ** 进 create_llm / chain 工厂。"""
@@ -202,11 +205,14 @@ class ResolvedModel:
         }
 
 
-def resolve(model_name: str | None = None) -> ResolvedModel:
+def resolve(model_name: str | None = None, provider: str = "") -> ResolvedModel:
     """解析模型 + 连接 + 档位的单一事实源（一次读盘）。
 
     model_name 为 None → 用 active (profile, model)，无 active 回退 env 默认模型；
-    指定 model_name → 反查包含它的 profile（active 优先），查不到则无连接覆盖。
+    指定 model_name → provider 非空时精确取该 profile（(连接, 模型) 才是完整身份，
+    同名模型存在于多个 profile 时按名反查会张冠李戴——连接/档位/限额取错家）；
+    provider 为空或已失效（profile 被删 / 模型被移出）时退回按名反查
+    （active 优先），查不到则无连接覆盖。
     """
     profiles, active = load()
     if model_name is None:
@@ -216,6 +222,10 @@ def resolve(model_name: str | None = None) -> ResolvedModel:
             return _resolved(model, prof, prof.effort.get(model, "auto"))
         return _resolved(get_default_model_name(), None)
 
+    if provider:
+        prof = next((p for p in profiles if p.id == provider), None)
+        if prof and model_name in prof.models:
+            return _resolved(model_name, prof, prof.effort.get(model_name, "auto"))
     for p in sorted(profiles, key=lambda p: p.id != active["provider"]):
         if model_name in p.models:
             return _resolved(model_name, p, p.effort.get(model_name, "auto"))
@@ -253,6 +263,7 @@ def _resolved(
         prof.api_key if prof else "",
         effort,
         *limits(prof, model),
+        provider=prof.id if prof else "",
     )
 
 

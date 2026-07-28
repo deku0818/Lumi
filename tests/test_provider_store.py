@@ -92,13 +92,36 @@ def test_resolve_named_model_prefers_active_profile(store_path):
     provider_store.set_active(a.id, "m1")
     # 同名模型存在于多个 profile：active 优先
     assert provider_store.resolve("m1") == provider_store.ResolvedModel(
-        "m1", "ua", "ka"
+        "m1", "ua", "ka", provider=a.id
     )
     # 不在 active profile 的模型：兜底反查其他 profile
     assert provider_store.resolve("m2") == provider_store.ResolvedModel(
-        "m2", "ub", "kb"
+        "m2", "ub", "kb", provider=b.id
     )
     assert b.id != a.id
+
+
+def test_resolve_with_provider_pins_profile(store_path):
+    """(连接, 模型) 是完整身份：带 provider 时精确取该 profile 的连接与限额覆盖，
+    不再被 active 上的同名模型张冠李戴；provider 失效则回退按名反查。"""
+    a = provider_store.upsert(_p("A", base="ua", key="ka", models=("m1",)))
+    b = provider_store.upsert(
+        {
+            "name": "B",
+            "base_url": "ub",
+            "api_key": "kb",
+            "models": ["m1"],
+            "context": {"m1": 32768},
+        }
+    )
+    provider_store.set_active(a.id, "m1")
+    # 老路径（无 provider）：按名反查偏向 active，B 上的覆盖静默丢失——正是要修的 bug
+    assert provider_store.resolve("m1").context_window == 0
+    # 带 provider：连接、覆盖、归属全部来自 B
+    r = provider_store.resolve("m1", b.id)
+    assert (r.base_url, r.context_window, r.provider) == ("ub", 32768, b.id)
+    # provider 失效（profile 已删）→ 回退按名反查（active 优先），不炸
+    assert provider_store.resolve("m1", "ghost").base_url == "ua"
 
 
 def test_resolve_unknown_model_has_no_connection(store_path):
@@ -209,7 +232,7 @@ def test_pointer_unset_falls_back_to_session_model(store_path, kind):
     assert provider_store.get_pointer(kind) == {}
     # 回退 = resolve()（会话模型 + 其连接）
     assert provider_store.resolve_pointer(kind) == provider_store.ResolvedModel(
-        "m1", "ua", "ka"
+        "m1", "ua", "ka", provider=s.id
     )
     assert s.models == ("m1",)
 
@@ -226,7 +249,7 @@ def test_pointer_set_resolves_exact_connection(store_path, kind):
     assert provider_store.get_pointer(kind) == {"provider": b.id, "model": "haiku"}
     # active 仍是 A 的 m1，但指针解析到 B 的连接
     assert provider_store.resolve_pointer(kind) == provider_store.ResolvedModel(
-        "haiku", "ub", "kb"
+        "haiku", "ub", "kb", provider=b.id
     )
 
 

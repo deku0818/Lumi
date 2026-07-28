@@ -130,6 +130,7 @@ def tool_call_chain(
     tool_choice: str | dict | None = None,
     apply_effort: bool = False,
     effort: str | None = None,
+    provider: str = "",
     **llm_params,
 ):
     """
@@ -148,6 +149,7 @@ def tool_call_chain(
             注意有的端点不接受强制值（见 manager.rejects_forced_tool_choice）
         apply_effort: 注入当前模型的思考档位（仅主对话链传 True）
         effort: 显式覆盖思考档位（None=跟随 profile；渠道会话用它独立配置）
+        provider: model_name 所属 profile id（空=按名反查）；同名模型跨 profile 不串味
         **llm_params: LLM的其他参数
     """
     # streaming 是功能性标志：TUI / desktop 的逐 token 输出依赖它
@@ -167,6 +169,7 @@ def tool_call_chain(
         apply_effort=apply_effort,
         force_no_thinking=force_no_thinking,
         effort=effort,
+        provider=provider,
         **default_llm_params,
     )
 

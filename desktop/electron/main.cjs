@@ -38,6 +38,12 @@ const PROJECT_ROOT = path.resolve(__dirname, '..', '..')
 // 应用图标：dev 下设置 Dock/窗口图标；打包后由打包器的 icns/ico 配置接管
 const APP_ICON = path.join(__dirname, '..', 'assets', 'icon.png')
 
+// 启动期窗口配色 = 暗色主题（index.css :root 的 canvas/ink），renderer 起来后按生效主题
+// 推真实色值（theme.ts）。overlay 高度是唯一事实：前端 env(titlebar-area-height) 直接
+// 读它，32px 仅作 Linux（无 WCO）回退。
+const BOOT_BG = '#1a1a19'
+const WCO_OVERLAY = { color: BOOT_BG, symbolColor: '#ececea', height: 32 }
+
 let serveProc = null
 let wsPort = 0
 let stopping = false
@@ -290,7 +296,7 @@ function createWindow() {
     height: 760,
     minWidth: 680,
     minHeight: 480,
-    backgroundColor: '#1a1a19',
+    backgroundColor: BOOT_BG,
     icon: APP_ICON,
     autoHideMenuBar: !isMac,
     ...(isMac
@@ -307,9 +313,18 @@ function createWindow() {
           // App.tsx 顶条展开钮 / Sidebar.tsx 收起钮 / RightRail.tsx 收放钮）
           trafficLightPosition: { x: 26, y: 20 },
         }
-      : {
-          frame: false,
-        }),
+      : process.platform === 'win32'
+        ? {
+            // Windows：三键交给系统原生 overlay（WCO）。自绘按钮靠 -webkit-app-region
+            // 的 no-drag 命中矩形工作，该矩形在缩放/DPI 变化后会过期失效（上游
+            // electron#41695 家族），表现为「三键点不动、重启才恢复」；原生 overlay
+            // 由 OS 直接命中，天然免疫，且拿回 Win11 snap layouts 悬浮菜单。
+            titleBarStyle: 'hidden',
+            titleBarOverlay: WCO_OVERLAY,
+          }
+        : {
+            frame: false,
+          }),
     webPreferences: {
       preload: path.join(__dirname, 'preload.cjs'),
       contextIsolation: true,
@@ -471,6 +486,11 @@ ipcMain.handle('lumi:window:close', (event) => {
 })
 ipcMain.handle('lumi:window:is-maximized', (event) => {
   return !!windowFromEvent(event)?.isMaximized()
+})
+// Windows WCO 原生三键不认 CSS 变量，主题切换时 renderer（theme.ts，仅 win32 调用）
+// 把生效色值推过来
+ipcMain.handle('lumi:window:set-titlebar-overlay', (event, opts) => {
+  windowFromEvent(event)?.setTitleBarOverlay({ ...opts, height: WCO_OVERLAY.height })
 })
 
 ipcMain.handle('lumi:menu-command', (event, command) => {

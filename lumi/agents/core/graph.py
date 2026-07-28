@@ -284,8 +284,13 @@ async def create_agent(
         tools = await get_tools(project_dir=project_dir)
     if system_prompt is None:
         system_prompt = config.load_system_prompt(project_dir)
+    # provider 随 model_name 同源：跟随 active 时取 active profile id；显式传名
+    # （子 agent 配置的裸模型名）无从得知归属，留空走按名反查
+    provider = ""
     if model_name is None:
-        model_name = provider_store.resolve().model
+        resolved = provider_store.resolve()
+        model_name = resolved.model
+        provider = resolved.provider
 
     # 启用记忆：确保记忆目录存在，并把记忆行为说明追加到主 agent 系统提示词尾部。
     # 记忆目录按会话项目根（project_dir，未传则进程 cwd）隔离，与权限引擎同源。
@@ -314,6 +319,7 @@ async def create_agent(
         project_dir=project_dir,
         system_prompt=system_prompt,
         model_name=model_name,
+        provider=provider,
         permission_engine=permission_engine,
         memory_enabled=enable_memory,
     )

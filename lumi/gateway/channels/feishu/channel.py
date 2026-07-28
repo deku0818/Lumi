@@ -83,7 +83,10 @@ class FeishuChannel:
         )
         # 会话池由 ChannelManager 注入并跨传输重连复用；独立构造（如测试）时自建一个。
         self.bridge_pool = bridge_pool or BridgePool(
-            config.workspace, model=config.model, effort=config.effort
+            config.workspace,
+            model=config.model,
+            effort=config.effort,
+            provider=config.provider,
         )
         self.inbound = FeishuInbound(self)
         self.streaming = FeishuStreaming(self)

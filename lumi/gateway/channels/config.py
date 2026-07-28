@@ -24,6 +24,11 @@ class ChannelRuntimeConfig(BaseModel):
         default="",
         description="该渠道固定使用的模型；空 = 跟随 desktop 全局 active 模型",
     )
+    provider: str = Field(
+        default="",
+        description="model 所属供应商 profile id；(连接, 模型) 才是完整身份，同名模型"
+        "存在于多个 profile 时按名反查会取错家。空 = 老配置，按名反查兜底（active 优先）",
+    )
     effort: str = Field(
         default="auto",
         description="思考档位（依附 model）：auto=不注入思考参数（跟随模型默认）；"

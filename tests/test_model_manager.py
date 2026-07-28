@@ -255,7 +255,7 @@ def test_create_llm_effort_override(catalog, monkeypatch):
     # profile 档位为 low（resolve 返回）；连接留空走 resolve 分支
     monkeypatch.setattr(
         "lumi.models.provider_store.resolve",
-        lambda name=None: ResolvedModel("claude-opus-4-6", "", "", "low"),
+        lambda name=None, provider="": ResolvedModel("claude-opus-4-6", "", "", "low"),
     )
     seen: list[str] = []
     monkeypatch.setattr(

@@ -32,11 +32,15 @@ const VIEW_COMMANDS = [
 export const AppTitleBar = memo(function AppTitleBar({ onNewChat, onOpenSettings }: Props) {
   const { t, lang, setLang } = useI18n()
   const [maximized, setMaximized] = useState(false)
+  // Windows 三键走系统原生 overlay（WCO，见 main.cjs），自绘的只给 Linux；
+  // 自绘按钮依赖 no-drag 命中矩形，缩放/DPI 变化后会失效成「点不动」
+  const nativeControls = window.lumi.platform === 'win32'
 
   useEffect(() => {
+    if (nativeControls) return
     void window.lumi.windowControls?.isMaximized().then(setMaximized)
     return window.lumi.windowControls?.onMaximizedChange(setMaximized)
-  }, [])
+  }, [nativeControls])
 
   const run = (command: string) => {
     void window.lumi.menuCommand?.(command)
@@ -44,7 +48,11 @@ export const AppTitleBar = memo(function AppTitleBar({ onNewChat, onOpenSettings
 
   return (
     <div
-      className="titlebar-native-font app-drag h-8 shrink-0 flex items-center border-b border-line/30 bg-canvas select-none"
+      className="titlebar-native-font app-drag shrink-0 flex items-center border-b border-line/30 bg-canvas select-none"
+      // Windows WCO 下原生三键恒为 32 DIP，而 CSS px 随页面缩放漂移——
+      // 用 env 取 overlay 实际高度（Chromium 已按缩放换算），任何缩放下都与原生按钮齐平；
+      // Linux 无 WCO 时 env 未定义，回退 32px 即原 h-8
+      style={{ height: 'env(titlebar-area-height, 32px)' }}
     >
       <div className="flex h-full items-center gap-2 pl-2">
         <div className="flex items-center gap-2 pr-1">
@@ -100,32 +108,34 @@ export const AppTitleBar = memo(function AppTitleBar({ onNewChat, onOpenSettings
 
       <div className="flex-1" />
 
-      <div className="no-drag flex h-full">
-        <button
-          type="button"
-          title={t('titlebar.minimize')}
-          className="grid h-8 w-11 place-items-center text-muted-foreground transition-colors hover:bg-ink/10 hover:text-ink"
-          onClick={() => void window.lumi.windowControls?.minimize()}
-        >
-          <Minus size={15} />
-        </button>
-        <button
-          type="button"
-          title={maximized ? t('titlebar.restore') : t('titlebar.maximize')}
-          className="grid h-8 w-11 place-items-center text-muted-foreground transition-colors hover:bg-ink/10 hover:text-ink"
-          onClick={() => void window.lumi.windowControls?.toggleMaximize()}
-        >
-          {maximized ? <Minimize2 size={14} /> : <Square size={13} />}
-        </button>
-        <button
-          type="button"
-          title={t('common.close')}
-          className="grid h-8 w-11 place-items-center text-muted-foreground transition-colors hover:bg-error hover:text-white"
-          onClick={() => void window.lumi.windowControls?.close()}
-        >
-          <X size={15} />
-        </button>
-      </div>
+      {!nativeControls && (
+        <div className="no-drag flex h-full">
+          <button
+            type="button"
+            title={t('titlebar.minimize')}
+            className="grid h-8 w-11 place-items-center text-muted-foreground transition-colors hover:bg-ink/10 hover:text-ink"
+            onClick={() => void window.lumi.windowControls?.minimize()}
+          >
+            <Minus size={15} />
+          </button>
+          <button
+            type="button"
+            title={maximized ? t('titlebar.restore') : t('titlebar.maximize')}
+            className="grid h-8 w-11 place-items-center text-muted-foreground transition-colors hover:bg-ink/10 hover:text-ink"
+            onClick={() => void window.lumi.windowControls?.toggleMaximize()}
+          >
+            {maximized ? <Minimize2 size={14} /> : <Square size={13} />}
+          </button>
+          <button
+            type="button"
+            title={t('common.close')}
+            className="grid h-8 w-11 place-items-center text-muted-foreground transition-colors hover:bg-error hover:text-white"
+            onClick={() => void window.lumi.windowControls?.close()}
+          >
+            <X size={15} />
+          </button>
+        </div>
+      )}
     </div>
   )
 })

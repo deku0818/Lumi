@@ -8,6 +8,7 @@ contextBridge.exposeInMainWorld('lumi', {
     toggleMaximize: () => ipcRenderer.invoke('lumi:window:toggle-maximize'),
     close: () => ipcRenderer.invoke('lumi:window:close'),
     isMaximized: () => ipcRenderer.invoke('lumi:window:is-maximized'),
+    setTitleBarOverlay: (opts) => ipcRenderer.invoke('lumi:window:set-titlebar-overlay', opts),
     onMaximizedChange: (cb) => {
       const listener = (_e, maximized) => cb(!!maximized)
       ipcRenderer.on('lumi:window:maximized', listener)

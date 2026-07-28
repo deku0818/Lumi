@@ -258,6 +258,7 @@ class TestCallModelIntegration:
             model_name = "gpt-4o"  # OpenAI 触发转换
             tools = []
             effort = None
+            provider = ""
             base_url = ""
             api_key = ""
 
@@ -307,6 +308,7 @@ class TestCallModelIntegration:
             model_name = "gpt-4o"
             tools = []
             effort = None
+            provider = ""
             base_url = ""
             api_key = ""
 

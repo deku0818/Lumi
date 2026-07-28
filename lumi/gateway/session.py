@@ -230,8 +230,15 @@ def _snapshot_model_window(messages: list, thread_id: str) -> tuple[str, int]:
     if _channel_of(thread_id):
         from lumi.gateway.channels.store import load_feishu
 
-        alias = load_feishu().model or provider_store.resolve().model
-        if alias and (win := provider_store.resolve(alias).context_window):
+        cfg = load_feishu()
+        # 渠道配了模型就连 provider 一起带上（同名模型跨 profile 不串味）；
+        # 未配则跟随 active（resolve() 天然精确）
+        alias, prov = (
+            (cfg.model, cfg.provider)
+            if cfg.model
+            else (provider_store.resolve().model, "")
+        )
+        if alias and (win := provider_store.resolve(alias, prov).context_window):
             return alias, win
     return wire, 0
 

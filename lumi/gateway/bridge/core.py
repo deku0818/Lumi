@@ -240,6 +240,7 @@ class AgentBridge:
         wait_mcp: bool = False,
         model: str = "",
         effort: str = "auto",
+        provider: str = "",
     ) -> None:
         """初始化 Agent。
 
@@ -249,9 +250,10 @@ class AgentBridge:
         disabled_tools：本会话禁用的工具黑名单（如飞书 channel 禁用 ``ask``）；None 时全量。
         wait_mcp：冷 MCP 池时是否等它就绪。交互会话默认 False（非阻塞 + 轮首刷新
         自愈）；headless CLI 单轮即退无自愈，传 True。
-        model / effort：渠道会话独立指定的模型与思考档位（IM channel 用）。model 非空时
-        覆盖全局 active、并把 effort 写进 context.effort（绕过 profile）；空则跟随全局
-        active（desktop 常规路径），effort 参数忽略。
+        model / effort / provider：渠道会话独立指定的模型、思考档位与所属 profile
+        （IM channel 用）。model 非空时覆盖全局 active、把 effort 写进 context.effort
+        （绕过 profile）、provider 一并进 context（空 = 老配置，按名反查兜底）；
+        model 为空则跟随全局 active（desktop 常规路径），effort / provider 参数忽略。
         """
         agents_config = get_config().config.agents
         target = Path(project_dir).expanduser().resolve() if project_dir else None
@@ -284,6 +286,7 @@ class AgentBridge:
         # context.effort 保持 None，call_model 走 profile 解析。
         if model:
             self._context.model_name = model
+            self._context.provider = provider
             self.model_name = model
             self._context.effort = effort
         # 本会话项目（引擎已绑定 project_dir 或退回 cwd）的 config hooks
@@ -752,6 +755,7 @@ class AgentBridge:
             tools=self._context.tools,
             system_prompt=self._context.system_prompt,
             model_name=self._context.model_name,
+            provider=self._context.provider,
             max_retry=token_config.summary_ptl_retry_max,
             drop_ratio=token_config.summary_ptl_retry_drop_ratio,
         )
