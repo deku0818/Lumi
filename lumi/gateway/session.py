@@ -209,13 +209,14 @@ def _snapshot_model_window(messages: list, thread_id: str) -> tuple[str, int]:
 
     渠道（飞书等）旁观会话在 desktop 无对应 activeModel，上下文环的分母不能用
     desktop 当前选中模型的窗口（会算错百分比），须取会话实际所跑模型——response_metadata
-    的 model_name 是权威来源，再经 catalog 查目录得窗口。未知模型返回窗口 0（前端自会隐藏环）。
+    的 model_name 是权威来源，再经 provider_store.resolve 得窗口（用户按模型配的覆盖值
+    优先于 catalog 探测）。未知模型返回窗口 0（前端自会隐藏环）。
 
     wire 名查不到目录时（LiteLLM 等代理回传上游真名，如 Bedrock inference-profile
     ARN），渠道会话回退到渠道配置的模型别名（空 = 跟随 active profile）再查——
     desktop 环的窗口本就走别名查目录这条路径。
     """
-    from lumi.models.catalog import context_window
+    from lumi.models import provider_store
 
     wire = ""
     for msg in reversed(messages):
@@ -224,14 +225,13 @@ def _snapshot_model_window(messages: list, thread_id: str) -> tuple[str, int]:
             break
     if not wire:
         return "", 0
-    if win := context_window(wire):
+    if win := provider_store.resolve(wire).context_window:
         return wire, win
     if _channel_of(thread_id):
         from lumi.gateway.channels.store import load_feishu
-        from lumi.models import provider_store
 
         alias = load_feishu().model or provider_store.resolve().model
-        if alias and (win := context_window(alias)):
+        if alias and (win := provider_store.resolve(alias).context_window):
             return alias, win
     return wire, 0
 

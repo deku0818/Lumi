@@ -9,7 +9,7 @@ from types import SimpleNamespace
 from unittest.mock import AsyncMock, patch
 
 import pytest
-from conftest import PTLError, tool_loop_history
+from conftest import PTLError, resolved, tool_loop_history
 from langchain_core.messages import (
     AIMessage,
     HumanMessage,
@@ -392,7 +392,7 @@ async def test_summarizer_emits_carrier_before_last_human():
     with (
         patch.object(nodes, "get_config", return_value=fake_config),
         patch.object(nodes, "context_window_tokens", return_value=10**9),
-        patch.object(nodes, "context_window", return_value=0),  # 不查真实目录
+        patch.object(nodes, "resolve", return_value=resolved(0)),  # 不查真实目录
         patch.object(
             nodes,
             "run_summary",
@@ -440,7 +440,7 @@ async def test_summary_threshold_follows_real_model_window(
     with (
         patch.object(nodes, "get_config", return_value=fake_config),
         patch.object(nodes, "context_window_tokens", return_value=usage),
-        patch.object(nodes, "context_window", return_value=model_window),
+        patch.object(nodes, "resolve", return_value=resolved(model_window)),
         patch.object(nodes, "run_summary", new=run_summary),
     ):
         result = await nodes.summarizer(

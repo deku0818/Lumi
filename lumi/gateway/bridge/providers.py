@@ -41,9 +41,17 @@ class ProviderService:
                            "effort": "<当前档位>"}
         control 决定前端渲染形态（none 不渲染 / effort 档位列表 / toggle 开关），
         前端零推导；levels 为可设档位（校验同源）。
+
+        另附三组限制数据。context / max_tokens 与 save_provider 的输入**同名同义**
+        （都是用户覆盖表），故列表结果可原样回传不会串味：
+        - context_window[model] = **生效**上下文窗口（覆盖 > 探测），上下文环的分母；
+        - context[model] / max_tokens[model] = 用户填的覆盖值（0 = 没填 = 跟随探测）；
+        - probe[model] = {context, max_tokens} models.dev 探测值（0 = 未探测到）。
+        顶层 fallback = 两者皆无时后端真正会用的兜底值，让 UI 显示的数与实跑一致。
         """
-        from lumi.models.catalog import context_window, lookup
+        from lumi.models.catalog import context_window, lookup, max_output_tokens
         from lumi.models.manager import allowed_levels
+        from lumi.utils.read_config import get_config
 
         profiles, active = provider_store.load()
 
@@ -54,26 +62,42 @@ class ProviderService:
                 "levels": list(allowed_levels(m)),
             }
 
+        def profile_payload(p: provider_store.ProviderProfile) -> dict:
+            # 生效值走 provider_store.limits（取值链的唯一实现），而非 resolve()：
+            # resolve 按模型名反查会偏向 active profile，同名模型存在于多个 profile
+            # 时会把别人的覆盖值贴到这一行，且每个模型多一次 lumi.json 读盘。
+            probe = {
+                m: {"context": context_window(m), "max_tokens": max_output_tokens(m)}
+                for m in p.models
+            }
+            eff = {m: provider_store.limits(p, m) for m in p.models}
+            return {
+                "id": p.id,
+                "name": p.name,
+                "base_url": p.base_url,
+                "api_key": p.api_key,
+                "models": list(p.models),
+                "thinking": {
+                    m: {**thinking_of(m), "effort": p.effort.get(m, "auto")}
+                    for m in p.models
+                },
+                "context_window": {m: eff[m][0] for m in p.models},
+                "context": {m: p.context.get(m, 0) for m in p.models},
+                "max_tokens": {m: p.max_tokens.get(m, 0) for m in p.models},
+                "probe": probe,
+            }
+
+        cfg = get_config().config
         pointers = provider_store.get_pointers()
         return {
-            "profiles": [
-                {
-                    "id": p.id,
-                    "name": p.name,
-                    "base_url": p.base_url,
-                    "api_key": p.api_key,
-                    "models": list(p.models),
-                    "thinking": {
-                        m: {**thinking_of(m), "effort": p.effort.get(m, "auto")}
-                        for m in p.models
-                    },
-                    "context": {m: context_window(m) for m in p.models},
-                }
-                for p in profiles
-            ],
+            "profiles": [profile_payload(p) for p in profiles],
             "active": active,
             "classifier": pointers["classifier"],
             "titler": pointers["titler"],
+            "fallback": {
+                "context": cfg.token.context_length,
+                "max_tokens": cfg.agents.max_tokens,
+            },
         }
 
     def set_effort(self, provider_id: str, model: str, level: str) -> dict:

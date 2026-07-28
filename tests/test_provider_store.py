@@ -6,8 +6,9 @@ import json
 import stat
 
 import pytest
+from conftest import catalog_entry
 
-from lumi.models import provider_store
+from lumi.models import catalog, provider_store
 from lumi.utils.config import user_store
 
 
@@ -23,21 +24,66 @@ def _p(name="A", base="u", key="k", models=("m1",)):
     return {"name": name, "base_url": base, "api_key": key, "models": list(models)}
 
 
-def test_load_missing_returns_empty(store_path, monkeypatch):
+@pytest.fixture
+def pinned_catalog(monkeypatch):
+    """钉住目录探测值：断言限制取值链的测试不能依赖本机 ~/.lumi/cache 是否存在。
+
+    catalog 缓存在 home 下，store_path 只重定向了 lumi.json——不钉住的话，换台机器
+    （CI / 全新环境 / docker）目录查不到，探测值全 0，测试静默失去意义或直接红。
+    """
+    entry = catalog_entry(
+        context_length=1_000_000, max_output=64_000, model_id="claude-opus-4-6"
+    )
+    monkeypatch.setattr(
+        catalog, "lookup", lambda name: entry if name == "claude-opus-4-6" else None
+    )
+
+
+def test_load_missing_returns_empty(store_path, monkeypatch, pinned_catalog):
     monkeypatch.setenv("LLM_MODEL_NAME", "env-model")
     assert provider_store.load() == ([], {"provider": "", "model": ""})
     # 无任何 profile 时 resolve 回退 env 默认模型、无连接覆盖
     assert provider_store.resolve() == provider_store.ResolvedModel("env-model", "", "")
 
 
-def test_upsert_first_model_becomes_active(store_path):
+def test_upsert_first_model_becomes_active(store_path, pinned_catalog):
     saved = provider_store.upsert(_p("我的代理", models=("claude-opus-4-6", "gpt-4o")))
     profiles, active = provider_store.load()
     assert active == {"provider": saved.id, "model": "claude-opus-4-6"}
     assert len(profiles) == 1 and profiles[0].models == ("claude-opus-4-6", "gpt-4o")
-    assert provider_store.resolve() == provider_store.ResolvedModel(
-        "claude-opus-4-6", "u", "k"
+    r = provider_store.resolve()
+    assert (r.model, r.base_url, r.api_key, r.effort) == (
+        "claude-opus-4-6",
+        "u",
+        "k",
+        "auto",
     )
+    # 限制随解析一并带出；无用户覆盖时恒等于目录探测值（不写死数字，免受目录更新影响）
+    assert (r.context_window, r.max_tokens) == (
+        catalog.context_window("claude-opus-4-6"),
+        catalog.max_output_tokens("claude-opus-4-6"),
+    )
+
+
+def test_resolve_limits_prefer_user_override(store_path, pinned_catalog):
+    """按模型配的覆盖值压过目录探测值——这是「模型换了名字/目录不准」时的唯一出路。"""
+    saved = provider_store.upsert(_p("代理", models=("claude-opus-4-6",)))
+    probe = provider_store.resolve("claude-opus-4-6")
+    assert (probe.context_window, probe.max_tokens) == (1_000_000, 64_000)  # 目录探测值
+
+    provider_store.upsert(
+        {
+            "id": saved.id,
+            "name": "代理",
+            "base_url": "u",
+            "api_key": "k",
+            "models": ["claude-opus-4-6"],
+            "context": {"claude-opus-4-6": 262144},
+            "max_tokens": {"claude-opus-4-6": 4096},
+        }
+    )
+    r = provider_store.resolve("claude-opus-4-6")
+    assert (r.context_window, r.max_tokens) == (262144, 4096)
 
 
 def test_resolve_named_model_prefers_active_profile(store_path):

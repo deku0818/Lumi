@@ -32,7 +32,7 @@ START
 
 ## 触发与阈值
 
-- 阈值：`模型真实窗口 × summary_threshold`（默认比例 0.7，见 `TokenConfig`，`lumi/utils/config/models.py`）。窗口取会话**实际所跑模型**的上下文长度——`catalog.context_window(model_name)` 查 models.dev 目录，与桌面上下文环的分母同源；目录未收录该模型时才退到 `token.context_length`（默认 200000）。用静态配置当分母会把 1M 窗口的模型按 200K 压，用量刚过 14% 就触发压缩。
+- 阈值：`模型真实窗口 × summary_threshold`（默认比例 0.7，见 `TokenConfig`，`lumi/utils/config/models.py`）。窗口取会话**实际所跑模型**的上下文长度——`provider_store.resolve(model_name).context_window`，即「用户在设置→模型里按模型配的覆盖值 > models.dev 目录探测值」，与桌面上下文环的分母同源；两者皆无时才退到 `token.context_length`（默认 200000）。用静态配置当分母会把 1M 窗口的模型按 200K 压，用量刚过 14% 就触发压缩。
 - 度量：`context_window_tokens` 取最近一条带 `usage_metadata` 的消息的真实整窗 token（含 system prompt + tools + 历史 + cache），加其后新增消息的字节估算；完全无 usage 时（首轮 / 子代理首调）整体退化为字节估算。
 
 ## 详细流程（当轮就地压缩）

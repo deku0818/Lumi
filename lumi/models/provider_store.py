@@ -44,6 +44,10 @@ class ProviderProfile:
     models: tuple[str, ...]
     effort: dict[str, str] = field(default_factory=dict)
     """按模型的思考档位（model → level），只存非 auto。"""
+    context: dict[str, int] = field(default_factory=dict)
+    """按模型的上下文窗口覆盖（model → tokens），只存用户显式配置的。"""
+    max_tokens: dict[str, int] = field(default_factory=dict)
+    """按模型的单次输出上限覆盖（model → tokens），只存用户显式配置的。"""
 
 
 def _coerce_profile(x: dict) -> ProviderProfile | None:
@@ -69,7 +73,29 @@ def _coerce_profile(x: dict) -> ProviderProfile | None:
         api_key=x.get("api_key", ""),
         models=models,
         effort=effort,
+        context=_coerce_limits(x.get("context"), models),
+        max_tokens=_coerce_limits(x.get("max_tokens"), models),
     )
+
+
+def _coerce_limits(raw: object, models: tuple[str, ...]) -> dict[str, int]:
+    """限制覆盖表（model → tokens）：只留仍存在的模型 + 正整数，其余丢弃。
+
+    0 / 负数 / 非数字一律视同没配（回落 catalog 探测值），使「清空输入框」= 恢复自动。
+    """
+    if not isinstance(raw, dict):
+        return {}
+    out: dict[str, int] = {}
+    for m, v in raw.items():
+        if m not in models or isinstance(v, bool):
+            continue
+        try:
+            n = int(v)
+        except (TypeError, ValueError):
+            continue
+        if n > 0:
+            out[m] = n
+    return out
 
 
 def _kept_pointer(profiles: list[ProviderProfile], pointer: object) -> dict:
@@ -156,12 +182,16 @@ def set_effort(provider_id: str, model: str, level: str) -> str | None:
 
 @dataclass(frozen=True)
 class ResolvedModel:
-    """模型 + 连接 + 思考档位的解析结果；base_url / api_key 为空表示用 env / SDK 默认。"""
+    """模型 + 连接 + 思考档位 + 限制的解析结果；base_url / api_key 为空表示用 env / SDK 默认。"""
 
     model: str
     base_url: str
     api_key: str
     effort: str = "auto"
+    context_window: int = 0
+    """生效上下文窗口：用户覆盖 > catalog 探测；0 = 两者都没有，调用方自行兜底。"""
+    max_tokens: int = 0
+    """生效单次输出上限：用户覆盖 > catalog 探测；0 = 两者都没有，调用方自行兜底。"""
 
     def conn_kwargs(self) -> dict:
         """非空的 base_url / api_key 连接参数，直接 ** 进 create_llm / chain 工厂。"""
@@ -183,17 +213,47 @@ def resolve(model_name: str | None = None) -> ResolvedModel:
         prof = next((p for p in profiles if p.id == active["provider"]), None)
         if prof and active["model"]:
             model = active["model"]
-            return ResolvedModel(
-                model, prof.base_url, prof.api_key, prof.effort.get(model, "auto")
-            )
-        return ResolvedModel(get_default_model_name(), "", "")
+            return _resolved(model, prof, prof.effort.get(model, "auto"))
+        return _resolved(get_default_model_name(), None)
 
     for p in sorted(profiles, key=lambda p: p.id != active["provider"]):
         if model_name in p.models:
-            return ResolvedModel(
-                model_name, p.base_url, p.api_key, p.effort.get(model_name, "auto")
-            )
-    return ResolvedModel(model_name, "", "")
+            return _resolved(model_name, p, p.effort.get(model_name, "auto"))
+    return _resolved(model_name, None)
+
+
+def limits(prof: ProviderProfile | None, model: str) -> tuple[int, int]:
+    """(上下文窗口, 输出上限) 的取值链：用户覆盖 > catalog 探测 > 0（未知）。
+
+    兜底常量刻意不在这里兑现：0 必须原样透出，「未探测到」与「探测到恰好等于
+    兜底值」是两件事——``session`` 靠 0 触发渠道别名回查、前端靠 0 隐藏上下文环、
+    设置页靠 0 显示「未探测到 · 兜底 N」。消费侧各自 ``or`` 上自己那个常量。
+
+    收 profile 而非模型名：``resolve()`` 按名反查时恒偏向 active profile，
+    同名模型存在于多个 profile 时会张冠李戴——wire 层按 profile 列限制，必须走这里。
+    """
+    from lumi.models.catalog import context_window, max_output_tokens
+
+    ctx = (prof.context.get(model) if prof else 0) or context_window(model)
+    out = (prof.max_tokens.get(model) if prof else 0) or max_output_tokens(model)
+    return ctx, out
+
+
+def _resolved(
+    model: str, prof: ProviderProfile | None, effort: str = "auto"
+) -> ResolvedModel:
+    """按 profile（可为 None = 无连接覆盖）组装 ResolvedModel，限制一并解析。
+
+    存在的意义是位置参数只写一处：``ResolvedModel`` 往后再加字段时，五个解析
+    出口不必各自跟着调整顺序。
+    """
+    return ResolvedModel(
+        model,
+        prof.base_url if prof else "",
+        prof.api_key if prof else "",
+        effort,
+        *limits(prof, model),
+    )
 
 
 def resolve_vision() -> ResolvedModel | None:
@@ -208,7 +268,10 @@ def resolve_vision() -> ResolvedModel | None:
     if not cfg.model:
         return None
     if cfg.base_url or cfg.api_key:
-        return ResolvedModel(cfg.model, cfg.base_url, cfg.api_key, "auto")
+        # 连接来自 config.vision 而非 profile，故不走 _resolved
+        return ResolvedModel(
+            cfg.model, cfg.base_url, cfg.api_key, "auto", *limits(None, cfg.model)
+        )
     return replace(resolve(cfg.model), effort="auto")
 
 
@@ -236,7 +299,7 @@ def resolve_pointer(kind: str) -> ResolvedModel:
         return resolve()  # 跟随会话模型
     # ptr 已由 _parse 对同一 profiles 规范化，provider 必存在
     prof = next(p for p in profiles if p.id == ptr["provider"])
-    return ResolvedModel(ptr["model"], prof.base_url, prof.api_key, "auto")
+    return _resolved(ptr["model"], prof)
 
 
 def set_pointer(kind: str, provider_id: str, model: str) -> dict:
@@ -255,6 +318,8 @@ def upsert(profile: dict) -> ProviderProfile:
     """新增或按 id 更新一个 profile（models 为列表，去空去重保序）。
 
     思考档位不经此通道（set_effort 专用）：保留旧记录中仍存在的模型的档位。
+    上下文窗口 / 输出上限的覆盖相反——编辑供应商的表单就是它们的唯一入口，
+    故以传入值为准（表单里清空 = 该模型恢复跟随 catalog 探测）。
     """
     profiles, active, pointers = _load_all()
     pid = profile.get("id") or uuid.uuid4().hex[:8]
@@ -273,6 +338,8 @@ def upsert(profile: dict) -> ProviderProfile:
         api_key=profile.get("api_key", ""),
         models=models,
         effort=effort,
+        context=_coerce_limits(profile.get("context"), models),
+        max_tokens=_coerce_limits(profile.get("max_tokens"), models),
     )
     out = [p for p in profiles if p.id != pid]
     out.append(saved)

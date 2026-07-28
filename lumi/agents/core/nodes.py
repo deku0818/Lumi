@@ -44,10 +44,9 @@ from lumi.agents.core.structured_tool import (
 )
 from lumi.agents.permissions.models import PermissionDecision
 from lumi.agents.permissions.routing import route_decision
-from lumi.models.catalog import context_window
 from lumi.models.chain import structured_output, tool_call_chain
 from lumi.models.manager import detect_protocol
-from lumi.models.provider_store import resolve_pointer
+from lumi.models.provider_store import resolve, resolve_pointer
 from lumi.utils.logger import logger
 from lumi.utils.read_config import get_config
 from lumi.utils.sizing import context_window_tokens
@@ -70,11 +69,15 @@ async def call_model(
         # 不强制 tool_choice：模型自决何时调用，OnAgentStop 的 Stop hook 兜底拉回。
         # 强制 tool_choice="any" 会与 Anthropic thinking 冲突（400）。
 
+    # 输出上限按模型取（用户覆盖 > models.dev 探测），全局 agents.max_tokens 仅作兜底。
+    # 给小了不是"省钱"而是把模型的 tool_call 参数从中间切断——截断的 JSON 被
+    # 补全解析后会变成缺字段（报错）或半截字符串（静默写坏文件）。
     chain = tool_call_chain(
         actual_tools,
         system_prompt=system_prompt,
         model_name=model_name,
-        max_tokens=get_config().config.agents.max_tokens,
+        max_tokens=resolve(model_name).max_tokens
+        or get_config().config.agents.max_tokens,
         tool_choice=None,
         apply_effort=True,  # 思考档位只在主对话链生效
         effort=runtime.context.effort,  # 渠道会话的档位覆盖（None=跟随 profile）
@@ -677,7 +680,10 @@ async def summarizer(
     original_messages = list(state["messages"])
     # 分母必须是会话实际所跑模型的窗口：静态 context_length 会把 1M 窗口的模型按 200K
     # 压——用量刚过 14% 就触发压缩。
-    window = context_window(runtime.context.model_name) or token_config.context_length
+    window = (
+        resolve(runtime.context.model_name).context_window
+        or token_config.context_length
+    )
     threshold = window * token_config.summary_threshold
     total_tokens = context_window_tokens(original_messages)
     stat = f"上下文 token {total_tokens} / 阈值 {threshold:.0f}（窗口 {window}）"

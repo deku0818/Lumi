@@ -208,8 +208,21 @@ export interface ProviderProfile {
     string,
     { control: 'none' | 'effort' | 'toggle'; levels: string[]; effort: string }
   >
-  // 按模型的上下文窗口（tokens，来自 models.dev）。0 = 能力未知。
+  // 按模型的**生效**上下文窗口（tokens）：用户覆盖 > models.dev 探测。0 = 两者皆无。
+  context_window?: Record<string, number>
+  // 按模型的用户覆盖值（0 / 缺省 = 没填，跟随探测）。与 save_provider 的入参同名同义，
+  // 故 list 结果可原样回传。
   context?: Record<string, number>
+  max_tokens?: Record<string, number>
+  // 按模型的 models.dev 探测值（0 = 未探测到），做编辑表单的占位符与说明。
+  probe?: Record<string, ModelLimits>
+}
+
+// 一对限制值。三处同形：models.dev 探测值、用户覆盖值、后端兜底值
+// （fallback 由 list_providers 顶层下发，免得前端硬编码「没探测到时用多少」）。
+export interface ModelLimits {
+  context: number
+  max_tokens: number
 }
 
 // 当前选中项：某 provider 下的某个 model

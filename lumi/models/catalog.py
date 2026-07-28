@@ -40,6 +40,7 @@ class ModelEntry:
     values: tuple[str, ...]  # control="effort" 时的原生档位枚举
     has_toggle: bool  # 择优条目自身 effort 与 toggle 并存（UI 附加 Off 项）
     toggle_anywhere: bool  # 任一 provider 报过 toggle = 该模型存在关思考的通道
+    max_output: int = 0  # 单次输出 token 上限（0 = 目录未标注）
 
 
 def _cache_path() -> Path:
@@ -87,6 +88,7 @@ def _build_index(raw: dict) -> dict[str, ModelEntry]:
                 values=values,
                 has_toggle=has_toggle,
                 toggle_anywhere=has_toggle,  # 单 provider 视角，下面按 key 汇总
+                max_output=int(limit.get("output") or 0),
             )
             key = mid.lower()
             if has_toggle:
@@ -154,10 +156,20 @@ def lookup(model_name: str) -> ModelEntry | None:
 def context_window(model_name: str) -> int:
     """模型上下文窗口 token 数；目录未收录 / 无缓存返回 0（= 未知，调用方自行兜底）。
 
-    压缩阈值（``nodes.summarizer``）与桌面上下文环共用这一个分母，前后端口径一致。
+    这是限制取值链的**探测端**：消费方一律走 ``provider_store.limits``（用户覆盖
+    优先于本函数），压缩阈值与桌面上下文环由它保证前后端同一口径。
     """
     entry = lookup(model_name)
     return entry.context_length if entry else 0
+
+
+def max_output_tokens(model_name: str) -> int:
+    """模型单次输出 token 上限；目录未收录 / 未标注返回 0（= 未知，调用方自行兜底）。
+
+    探测到多少就是多少，不做封顶：低于真实上限会白白截断长文档输出。
+    """
+    entry = lookup(model_name)
+    return entry.max_output if entry else 0
 
 
 async def refresh(force: bool = False) -> None:

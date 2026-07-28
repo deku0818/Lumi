@@ -85,7 +85,8 @@ fail-closed 转人工审批，判官 / titler 照常上抛。
 ## 注入链路（含已定的地基重构）
 
 ```
-ResolvedModel(model, base_url, api_key, effort)   ← resolve() 一次读盘全返回
+ResolvedModel(model, base_url, api_key, effort,   ← resolve() 一次读盘全返回
+              context_window, max_tokens)         ← 限制：用户覆盖 > models.dev 探测 > 0(未知)
         │
 create_llm(..., apply_effort=False)               ← 翻转默认：注入显式 opt-in
         │   仅 call_model 的 tool_call_chain 传 True；

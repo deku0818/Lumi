@@ -25,7 +25,8 @@ class AgentsConfig(BaseModel):
     )
     max_tokens: int = Field(
         default=8192,
-        description="模型输出最大token数",
+        description="模型单次输出 token 数的**兜底**值：优先用按模型配置的覆盖值，"
+        "其次 models.dev 探测到的该模型输出上限，两者都没有才退到此值",
     )
     recursion_limit: int = Field(
         default=5000,

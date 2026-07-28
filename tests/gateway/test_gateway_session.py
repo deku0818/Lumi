@@ -15,6 +15,8 @@ import asyncio
 from contextlib import suppress
 from types import SimpleNamespace
 
+from conftest import catalog_entry
+
 from lumi.gateway.bridge import BridgeEvent, EventKind
 from lumi.gateway.broadcast import BroadcastHub
 from lumi.gateway.session import GatewaySession, _snapshot_model_window
@@ -634,9 +636,7 @@ def test_snapshot_model_window_takes_last_labeled_model(monkeypatch):
     monkeypatch.setattr(
         "lumi.models.catalog.lookup",
         lambda name: (
-            SimpleNamespace(context_length=1_000_000)
-            if name == "qwen3.7-plus"
-            else None
+            catalog_entry(context_length=1_000_000) if name == "qwen3.7-plus" else None
         ),
     )
     messages = [_msg("old-model"), _msg("qwen3.7-plus"), _msg(None)]
@@ -660,7 +660,7 @@ def test_snapshot_model_window_channel_falls_back_to_configured_alias(monkeypatc
     monkeypatch.setattr(
         "lumi.models.catalog.lookup",
         lambda name: (
-            SimpleNamespace(context_length=1_000_000) if name == "jv-claude" else None
+            catalog_entry(context_length=1_000_000) if name == "jv-claude" else None
         ),
     )
     monkeypatch.setattr(
@@ -678,15 +678,19 @@ def test_snapshot_model_window_channel_alias_follows_active(monkeypatch):
     monkeypatch.setattr(
         "lumi.models.catalog.lookup",
         lambda name: (
-            SimpleNamespace(context_length=128_000) if name == "active-model" else None
+            catalog_entry(context_length=128_000) if name == "active-model" else None
         ),
     )
     monkeypatch.setattr(
         "lumi.gateway.channels.store.load_feishu", lambda: SimpleNamespace(model="")
     )
+    # resolve 现在既解析模型名也带出限制：无参 = active 模型，带参 = 查该模型的窗口
     monkeypatch.setattr(
         "lumi.models.provider_store.resolve",
-        lambda: SimpleNamespace(model="active-model"),
+        lambda name=None: SimpleNamespace(
+            model=name or "active-model",
+            context_window=128_000 if (name or "active-model") == "active-model" else 0,
+        ),
     )
     assert _snapshot_model_window([_msg("arn:opaque")], "feishu-oc-1") == (
         "active-model",

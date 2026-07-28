@@ -11,6 +11,36 @@ from lumi.agents.runtime import shell_session
 from lumi.agents.tools.providers import filesystem
 
 
+def resolved(context_window: int = 0, max_tokens: int = 0):
+    """构造一个只关心限制的 ResolvedModel，用于 patch 掉 resolve 的读盘 + 查目录。
+
+    压缩阈值与输出上限都从 provider_store.resolve 取（用户覆盖 > catalog 探测），
+    单测在这里给定值，避免依赖本机 ~/.lumi 配置与 models.dev 缓存。
+    """
+    from lumi.models.provider_store import ResolvedModel
+
+    return ResolvedModel("m", "", "", "auto", context_window, max_tokens)
+
+
+def catalog_entry(context_length: int = 0, max_output: int = 0, model_id: str = "m"):
+    """构造 models.dev 目录条目。
+
+    用真实 ``ModelEntry`` 而非 ``SimpleNamespace``：鸭子类型的假条目在目录新增字段
+    时会静默通过，直到某个消费方读到不存在的属性才炸（本仓库已经这么炸过一次）。
+    """
+    from lumi.models.catalog import ModelEntry
+
+    return ModelEntry(
+        id=model_id,
+        context_length=context_length,
+        control="none",
+        values=(),
+        has_toggle=False,
+        toggle_anywhere=False,
+        max_output=max_output,
+    )
+
+
 @pytest.fixture
 def authorized_tmp_dir(tmp_path):
     """设置 authorized_directory 为 tmp_path，teardown 恢复"""

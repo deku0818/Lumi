@@ -21,6 +21,9 @@ export const basename = (p: string) => p.split('/').filter(Boolean).pop() || p
 // token 数格式化（≥1k 显示 x.xk）。与 TUI lumi/tui/widgets/agent_group.py::_format_tokens 同口径
 export const fmtTokens = (n: number) => (n >= 1000 ? `${(n / 1000).toFixed(1)}k` : String(n))
 
+// token 数完整写法（千分位）：窗口 / 上限这类"要看准确数字"的场合，配合 fmtTokens 的缩写用
+export const fmtTokensFull = (n: number) => n.toLocaleString('en-US')
+
 // 字节数格式化（附件卡片 / 后台任务输出体积共用）
 export const fmtSize = (n?: number) => {
   if (n == null) return ''

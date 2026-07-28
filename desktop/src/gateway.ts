@@ -5,6 +5,7 @@ import type {
   BgTask,
   BgTaskOutput,
   ChannelInfo,
+  ModelLimits,
   ModelPointer,
   CronJob,
   CronRun,
@@ -197,6 +198,7 @@ export class Gateway {
     active: ActiveModel
     classifier: ModelPointer
     titler: ModelPointer
+    fallback: ModelLimits
   }> {
     return this.request('list_providers')
   }

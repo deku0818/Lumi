@@ -6,6 +6,7 @@
 from __future__ import annotations
 
 import pytest
+from conftest import resolved
 from langchain_core.messages import AIMessage, HumanMessage
 
 from lumi.agents.core.hooks import AdditionalContext, HookContext, iter_hooks
@@ -105,13 +106,12 @@ async def test_clear_preserves_other_marks(meta_file, monkeypatch):
 
 
 def _pin_budget(monkeypatch, *, window=0, context_length=20):
-    """钉住预算三来源：判官模型（resolve）、目录窗口（context_window）、静态兜底。
+    """钉住预算两来源：判官模型的生效窗口（resolve，含用户覆盖）、静态兜底。
 
-    window=0 = 目录未收录 → 走 context_length 兜底；同时消除对本机
+    window=0 = 用户没配且目录也未收录 → 走 context_length 兜底；同时消除对本机
     ``~/.lumi``（providers.json / catalog 缓存）的隐性依赖。
     """
-    monkeypatch.setattr(goal_hook, "resolve", lambda: type("R", (), {"model": "m"})())
-    monkeypatch.setattr(goal_hook, "context_window", lambda m: window)
+    monkeypatch.setattr(goal_hook, "resolve", lambda: resolved(window))
     fake_cfg = type(
         "C",
         (),

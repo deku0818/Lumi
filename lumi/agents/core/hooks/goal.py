@@ -19,7 +19,6 @@ from __future__ import annotations
 from pydantic import BaseModel, Field
 
 from lumi.agents.core.hooks.schema import AdditionalContext, HookContext, HookResult
-from lumi.models.catalog import context_window
 from lumi.models.chain import structured_output
 from lumi.models.provider_store import resolve
 from lumi.sessions.message_text import extract_messages_as_text
@@ -91,7 +90,7 @@ def _render_transcript(messages: list) -> str:
     # 窗口取判官实际所跑模型的（判官不显式传模型 = resolve() 的 active 模型）：
     # 静态 context_length 会把 1M 窗口的判官按 200K 截转录，证据被截掉 → default-deny
     # 误判未完成、反复拉回。目录未收录才退回 token.context_length 兜底。
-    window = context_window(resolve().model) or get_config().config.token.context_length
+    window = resolve().context_window or get_config().config.token.context_length
     budget = int(window * TRANSCRIPT_BUDGET_RATIO * BYTES_PER_TOKEN)
     full = extract_messages_as_text(messages or [])
     if text_size(full) <= budget:

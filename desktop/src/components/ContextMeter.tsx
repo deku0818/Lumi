@@ -1,5 +1,5 @@
 import { useI18n } from '../i18n'
-import { fmtTokens } from '@/lib/utils'
+import { fmtTokens, fmtTokensFull } from '@/lib/utils'
 import {
   DropdownMenu,
   DropdownMenuTrigger,
@@ -24,8 +24,6 @@ const METER: Record<Level, string> = {
   warn: 'var(--color-accent)',
   crit: 'var(--color-error)',
 }
-
-const fmt = (n: number) => n.toLocaleString('en-US')
 
 // 上下文用量指示器：默认一粒圆环（颜色即档位），点击向上弹出明细。
 // 数据未就绪（无 usage 或窗口未知）时静默不渲染。
@@ -52,7 +50,7 @@ export function ContextMeter({
         <span className="size-2 rounded-[2px]" style={{ background: color }} />
         {label}
       </span>
-      <span className="text-ink tabular-nums">{fmt(value)}</span>
+      <span className="text-ink tabular-nums">{fmtTokensFull(value)}</span>
     </div>
   )
 

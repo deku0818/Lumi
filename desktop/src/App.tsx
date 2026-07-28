@@ -526,7 +526,8 @@ export default function App() {
   // 当前 active 模型的上下文窗口（tokens）；能力未知时为 0，ContextMeter 自会隐藏。
   // memo 化避免每次流式 token 重渲染都重跑 providers.find。
   const contextWindow = useMemo(
-    () => providers.find((p) => p.id === activeModel.provider)?.context?.[activeModel.model] ?? 0,
+    () =>
+      providers.find((p) => p.id === activeModel.provider)?.context_window?.[activeModel.model] ?? 0,
     [providers, activeModel.provider, activeModel.model],
   )
 

@@ -51,7 +51,7 @@ CLI 参数可覆盖：`lumi -s code`。优先级：CLI > config.json > 默认值
 }
 ```
 
-字段说明：`tools` 为启用的工具白名单（空列表 = 全部启用）；`disabled_tools` 为禁用的工具黑名单（优先级高于 `tools`）；`max_tokens` 为模型输出最大 token 数；`recursion_limit` 为 Agent 最大执行轮次；`checkpoint` 为检查点存储模式（`sqlite` | `memory` | `postgres`）；`postgres_uri` 为 PostgreSQL 连接 URI（仅 `checkpoint=postgres` 时需要）。
+字段说明：`tools` 为启用的工具白名单（空列表 = 全部启用）；`disabled_tools` 为禁用的工具黑名单（优先级高于 `tools`）；`max_tokens` 为模型单次输出 token 数的**兜底**值（优先用设置→模型里按模型配的覆盖值，其次 models.dev 探测到的该模型输出上限，两者都没有才用它）；`recursion_limit` 为 Agent 最大执行轮次；`checkpoint` 为检查点存储模式（`sqlite` | `memory` | `postgres`）；`postgres_uri` 为 PostgreSQL 连接 URI（仅 `checkpoint=postgres` 时需要）。
 
 ### vision — 视觉辅助模型
 

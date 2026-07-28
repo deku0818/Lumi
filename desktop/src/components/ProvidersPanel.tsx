@@ -6,29 +6,36 @@ import {
   Plus,
   Loader2,
   HelpCircle,
+  SlidersHorizontal,
   X,
 } from 'lucide-react'
-import type { ActiveModel, ModelPointer, ProviderProfile } from '../types'
+import type { ActiveModel, ModelLimits, ModelPointer, ProviderProfile } from '../types'
 import type { Gateway } from '../gateway'
 import { useI18n } from '../i18n'
 import { MachineTabs } from './MachineTabs'
 import { Section, SectionGroup, Card, Row, Field, TextInput, FormModal } from './SettingsKit'
 import { Tooltip, TooltipContent, TooltipTrigger } from '@/components/ui/tooltip'
 import { Button } from '@/components/ui/button'
+import { fmtTokensFull } from '@/lib/utils'
 
 type TestResult = { ok: boolean; error?: string; latency_ms?: number }
 type RowTest = 'testing' | TestResult | undefined
-type ModelRow = { id: number; name: string; test: RowTest }
+// ctx / out = 用户填的上下文窗口 / 单次输出上限覆盖，空串 = 不覆盖（跟随探测值）。
+// 存字符串而非数字：输入框清空态与「填了 0」必须可区分，且不必在每次击键时解析。
+type ModelRow = { id: number; name: string; test: RowTest; ctx: string; out: string }
 type Form = { id?: string; name: string; base_url: string; api_key: string; models: ModelRow[] }
 
 let _rid = 0
 const newId = () => ++_rid
+const newRow = (name = ''): ModelRow => ({ id: newId(), name, test: undefined, ctx: '', out: '' })
+// 0 = 后端表示「没配 / 没探测到」，UI 一律呈现为空
+const numText = (n: number | undefined) => (n ? String(n) : '')
 
 const emptyForm = (): Form => ({
   name: '',
   base_url: '',
   api_key: '',
-  models: [{ id: newId(), name: '', test: undefined }],
+  models: [newRow()],
 })
 
 const formFrom = (p: ProviderProfile): Form => ({
@@ -36,7 +43,11 @@ const formFrom = (p: ProviderProfile): Form => ({
   name: p.name,
   base_url: p.base_url,
   api_key: p.api_key,
-  models: (p.models.length ? p.models : ['']).map((m) => ({ id: newId(), name: m, test: undefined })),
+  models: (p.models.length ? p.models : ['']).map((m) => ({
+    ...newRow(m),
+    ctx: numText(p.context?.[m]),
+    out: numText(p.max_tokens?.[m]),
+  })),
 })
 
 // 模型提供商面板（设置 → 模型）。两个视图：
@@ -58,6 +69,8 @@ export function ProvidersPanel({
   const [active, setActive] = useState<ActiveModel>({ provider: '', model: '' })
   const [classifier, setClassifier] = useState<ModelPointer>({})
   const [titler, setTitler] = useState<ModelPointer>({})
+  // 后端兜底值（模型既无用户覆盖也没探测到时实际会用的数）；UI 显示它以免与实跑口径不一致
+  const [fallback, setFallback] = useState<ModelLimits>({ context: 0, max_tokens: 0 })
   const [form, setForm] = useState<Form | null>(null) // null = 关闭 provider 表单
   const [picking, setPicking] = useState<PickTarget | null>(null) // 打开模型选择弹窗的用途
 
@@ -69,6 +82,7 @@ export function ProvidersPanel({
         setActive(r.active ?? { provider: '', model: '' })
         setClassifier(r.classifier ?? {})
         setTitler(r.titler ?? {})
+        setFallback(r.fallback ?? { context: 0, max_tokens: 0 })
       })
       .catch(() => {})
   }, [gwFor, machine])
@@ -207,6 +221,8 @@ export function ProvidersPanel({
       {form && (
         <ProviderForm
           initial={form}
+          probe={profiles.find((p) => p.id === form.id)?.probe ?? {}}
+          fallback={fallback}
           onTest={onTest}
           onSubmit={(draft) => {
             onSave(draft)
@@ -351,13 +367,25 @@ function ModelPickerModal({
 
 function ProviderForm({
   initial,
+  probe,
+  fallback,
   onTest,
   onSubmit,
   onCancel,
 }: {
   initial: Form
+  probe: Record<string, ModelLimits>
+  fallback: ModelLimits
   onTest: (baseUrl: string, apiKey: string, model: string) => Promise<TestResult>
-  onSubmit: (draft: { id?: string; name: string; base_url: string; api_key: string; models: string[] }) => void
+  onSubmit: (draft: {
+    id?: string
+    name: string
+    base_url: string
+    api_key: string
+    models: string[]
+    context: Record<string, number>
+    max_tokens: Record<string, number>
+  }) => void
   onCancel: () => void
 }) {
   const { t } = useI18n()
@@ -371,8 +399,7 @@ function ProviderForm({
 
   const patchModel = (id: number, patch: Partial<ModelRow>) =>
     setForm({ ...form, models: form.models.map((m) => (m.id === id ? { ...m, ...patch } : m)) })
-  const addModel = () =>
-    setForm({ ...form, models: [...form.models, { id: newId(), name: '', test: undefined }] })
+  const addModel = () => setForm({ ...form, models: [...form.models, newRow()] })
   const removeModel = (id: number) =>
     setForm({ ...form, models: form.models.length > 1 ? form.models.filter((m) => m.id !== id) : form.models })
 
@@ -388,6 +415,15 @@ function ProviderForm({
     }
   }
 
+  // 限制覆盖表：只收正整数，其余（空 / 0 / 乱填）一律不进表 = 该模型跟随探测值。
+  // 必须就地取整：后端 int() 会把 128.9 截成 128，一个 128 token 的窗口能让压缩每轮触发
+  const limitMap = (pick: (r: ModelRow) => string) =>
+    Object.fromEntries(
+      form.models
+        .map((r) => [r.name.trim(), Math.round(Number(pick(r).trim()))] as const)
+        .filter(([name, n]) => name && Number.isFinite(n) && n > 0),
+    )
+
   const submit = () => {
     if (!canSave) return
     onSubmit({
@@ -396,6 +432,8 @@ function ProviderForm({
       base_url: form.base_url.trim(),
       api_key: form.api_key.trim(),
       models: validModels,
+      context: limitMap((r) => r.ctx),
+      max_tokens: limitMap((r) => r.out),
     })
   }
 
@@ -436,7 +474,10 @@ function ProviderForm({
                 key={row.id}
                 row={row}
                 canRemove={form.models.length > 1}
+                probe={probe[row.name.trim()]}
+                fallback={fallback}
                 onChange={(v) => patchModel(row.id, { name: v, test: undefined })}
+                onPatch={(patch) => patchModel(row.id, patch)}
                 onTest={() => testModel(row)}
                 onRemove={() => removeModel(row.id)}
               />
@@ -452,72 +493,167 @@ function ProviderForm({
   )
 }
 
-// 单个模型行：名称输入 + 测试（就地显示结果，可重测）+ (?) 费用提示 + 删除
+// 单个模型行：名称输入 + 测试（就地显示结果，可重测）+ (?) 费用提示 + 限制展开 + 删除
 function ModelRowEditor({
   row,
   canRemove,
+  probe,
+  fallback,
   onChange,
+  onPatch,
   onTest,
   onRemove,
 }: {
   row: ModelRow
   canRemove: boolean
+  probe?: ModelLimits
+  fallback: ModelLimits
   onChange: (v: string) => void
+  onPatch: (patch: Partial<ModelRow>) => void
   onTest: () => void
   onRemove: () => void
 }) {
   const { t } = useI18n()
   const r = row.test
+  const overridden = !!row.ctx.trim() || !!row.out.trim()
+  // 有覆盖值时默认展开：藏起用户自己配过的数值比省一行空间更糟
+  const [open, setOpen] = useState(overridden)
   return (
-    <div className="flex items-center gap-2">
-      <TextInput
-        value={row.name}
-        onChange={(e) => onChange(e.target.value)}
-        placeholder={t('providers.modelPlaceholder')}
-        className="flex-1 min-w-0 h-8"
-      />
+    <div>
+      <div className="flex items-center gap-2">
+        <TextInput
+          value={row.name}
+          onChange={(e) => onChange(e.target.value)}
+          placeholder={t('providers.modelPlaceholder')}
+          className="flex-1 min-w-0 h-8"
+        />
 
-      {r === 'testing' ? (
-        <span className="shrink-0 flex items-center gap-1 text-xs text-muted-foreground">
-          <Loader2 size={13} className="animate-spin" />
-          {t('providers.testing')}
-        </span>
-      ) : r && r.ok ? (
-        <button onClick={onTest} className="shrink-0 flex items-center gap-1 text-xs text-success" title={t('providers.test')}>
-          <Check size={13} />
-          {t('providers.ok')}
-        </button>
-      ) : r && !r.ok ? (
-        <button onClick={onTest} className="shrink-0 flex items-center gap-1 max-w-28 text-xs text-error" title={r.error}>
-          <X size={13} className="shrink-0" />
-          <span className="truncate">{r.error}</span>
-        </button>
-      ) : (
-        <Button variant="outline" size="xs" onClick={onTest} disabled={!row.name.trim()} className="shrink-0">
-          {t('providers.test')}
-        </Button>
-      )}
-
-      {/* 费用提示：悬停 (?) 展开（Radix Tooltip，Portal 渲染不被裁剪） */}
-      <Tooltip>
-        <TooltipTrigger asChild>
-          <span className="shrink-0 grid place-items-center cursor-help">
-            <HelpCircle size={14} className="text-muted-foreground/50 hover:text-muted-foreground" />
+        {r === 'testing' ? (
+          <span className="shrink-0 flex items-center gap-1 text-xs text-muted-foreground">
+            <Loader2 size={13} className="animate-spin" />
+            {t('providers.testing')}
           </span>
-        </TooltipTrigger>
-        <TooltipContent className="max-w-56">{t('providers.costHint')}</TooltipContent>
-      </Tooltip>
+        ) : r && r.ok ? (
+          <button onClick={onTest} className="shrink-0 flex items-center gap-1 text-xs text-success" title={t('providers.test')}>
+            <Check size={13} />
+            {t('providers.ok')}
+          </button>
+        ) : r && !r.ok ? (
+          <button onClick={onTest} className="shrink-0 flex items-center gap-1 max-w-28 text-xs text-error" title={r.error}>
+            <X size={13} className="shrink-0" />
+            <span className="truncate">{r.error}</span>
+          </button>
+        ) : (
+          <Button variant="outline" size="xs" onClick={onTest} disabled={!row.name.trim()} className="shrink-0">
+            {t('providers.test')}
+          </Button>
+        )}
 
-      <Button
-        variant="ghost"
-        size="icon-xs"
-        onClick={onRemove}
-        disabled={!canRemove}
-        aria-label={t('providers.removeModel')}
-        className="shrink-0 text-muted-foreground hover:text-error"
-      >
-        <Trash2 />
-      </Button>
+        {/* 费用提示：悬停 (?) 展开（Radix Tooltip，Portal 渲染不被裁剪） */}
+        <Tooltip>
+          <TooltipTrigger asChild>
+            <span className="shrink-0 grid place-items-center cursor-help">
+              <HelpCircle size={14} className="text-muted-foreground/50 hover:text-muted-foreground" />
+            </span>
+          </TooltipTrigger>
+          <TooltipContent className="max-w-56">{t('providers.costHint')}</TooltipContent>
+        </Tooltip>
+
+        <Button
+          variant="ghost"
+          size="icon-xs"
+          onClick={() => setOpen(!open)}
+          aria-label={t('providers.limitsTitle')}
+          title={t('providers.limitsTitle')}
+          className={`shrink-0 ${open || overridden ? 'text-primary' : 'text-muted-foreground'}`}
+        >
+          <SlidersHorizontal />
+        </Button>
+
+        <Button
+          variant="ghost"
+          size="icon-xs"
+          onClick={onRemove}
+          disabled={!canRemove}
+          aria-label={t('providers.removeModel')}
+          className="shrink-0 text-muted-foreground hover:text-error"
+        >
+          <Trash2 />
+        </Button>
+      </div>
+      {open && (
+        <div className="mt-1 grid grid-cols-2 gap-2.5 rounded-lg border border-line/40 bg-canvas/30 px-3 py-2.5">
+          <LimitField
+            label={t('providers.contextWindow')}
+            value={row.ctx}
+            probe={probe?.context}
+            fallback={fallback.context}
+            warn={t('providers.contextWarn')}
+            onChange={(v) => onPatch({ ctx: v })}
+          />
+          <LimitField
+            label={t('providers.maxTokens')}
+            value={row.out}
+            probe={probe?.max_tokens}
+            fallback={fallback.max_tokens}
+            warn={t('providers.maxTokensWarn')}
+            onChange={(v) => onPatch({ out: v })}
+          />
+        </div>
+      )}
     </div>
+  )
+}
+
+// 单个限制输入：占位符即探测值（未探测到则显示兜底值），下方一行说明当前取的是谁的值。
+// 填得比探测值大时就地警示——猜高了上下文会该压不压撞 PTL、输出上限会被服务端 400。
+// probe 语义三态：undefined = 模型还没保存过（后端未探测）、0 = 探测过但目录里没有、>0 = 探测值。
+function LimitField({
+  label,
+  value,
+  probe,
+  fallback,
+  warn,
+  onChange,
+}: {
+  label: string
+  value: string
+  probe?: number
+  fallback: number
+  warn: string
+  onChange: (v: string) => void
+}) {
+  const { t } = useI18n()
+  const n = Number(value.trim())
+  const set = !!value.trim() && Number.isFinite(n) && n > 0
+  const over = set && !!probe && n > probe
+  // 状态行的文案与色调同源：分开写会在新增状态时漏改其中一半。按 已填 → 未保存 →
+  // 探测到 → 探测不到 的顺序，与 probe 的三态声明顺序一致。
+  const hint = set
+    ? { text: t('providers.limitSet'), missing: false }
+    : probe === undefined
+      ? { text: t('providers.limitPending'), missing: false }
+      : probe
+        ? { text: t('providers.limitProbe', { n: fmtTokensFull(probe) }), missing: false }
+        : { text: t('providers.limitFallback', { n: fmtTokensFull(fallback) }), missing: true }
+  return (
+    <Field
+      label={label}
+      hint={
+        <>
+          <span className={hint.missing ? 'text-error/85' : undefined}>{hint.text}</span>
+          {over && <div className="mt-1 text-primary">{warn}</div>}
+        </>
+      }
+    >
+      <TextInput
+        type="number"
+        min={1}
+        value={value}
+        onChange={(e) => onChange(e.target.value)}
+        placeholder={fmtTokensFull(probe || fallback)}
+        className={`h-8 text-right tabular-nums ${set ? 'border-primary/45' : ''}`}
+      />
+    </Field>
   )
 }

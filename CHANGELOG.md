@@ -1,5 +1,21 @@
 # Changelog
 
+## [0.2.86] - 2026-07-28
+
+### Added
+- **按模型配置上下文窗口与单次输出上限**（设置 → 模型 → 编辑供应商 → 模型行的滑杆图标展开）。留空 = 跟随 models.dev 探测值（占位符即探测到的数），只有模型被代理改了名、或目录里查不到时才需要手填。输入框下方一行说明当前取的是哪一层的值（`自动探测：N` / `已覆盖 · 清空恢复自动` / `未探测到 · 兜底 N`）；填得比探测值大会就地警示——上下文填大了会该压不压直接撞超长，输出上限填超模型真实上限会被服务端拒绝。
+- 取值链收口在 `provider_store.limits()` 单一实现：**用户覆盖 > models.dev 探测 > 兜底常量**。`ResolvedModel` 随之带出 `context_window` / `max_tokens`，四个消费者（主对话链输出上限、压缩阈值分母、`/goal` 判官转录预算、桌面上下文环）共用同一口径——界面上显示的窗口就是后台实际压缩用的分母。
+
+### Changed
+- **模型单次输出上限不再是全局 8192，改为按模型取真实上限**（`models.dev` 的 `limit.output`，如 claude-sonnet-4-6 = 64000、qwen3.7-plus = 65536）。`agents.max_tokens` 降级为**兜底**值，仅在既无用户覆盖、目录也未收录该模型时生效。此前所有模型一律 8192，写长文档（合同、报告、Word 文稿）时模型的 tool_call 参数会在中途被服务端截断：截断点落在参数名之前表现为 `content: Field required` 报错，落在字符串中间则更糟——半截 JSON 被 LangChain 的 `parse_partial_json` 补全成合法参数，`write` 照常执行并回报「成功」，**静默写出残缺文件**。
+  - 已知代价：`catalog.lookup` 为支持代理改名的模型（`aidong-claude-sonnet-4-6` 这类）用了模糊匹配，可能命中输出上限更大的另一个模型，此时请求会被服务端以 400 拒绝（4xx 不在重试白名单内）。出路是在设置里给该模型手填一个正确的上限。
+- `agents.max_tokens` 的 `Field.description` 与 `docs/guides/config.md`、`docs/user-manual.md`（「内存不足」调优建议）一并改写，不再把它描述为「模型输出最大 token 数」。
+- wire 协议 `list_providers`：`profile.context` 的含义由「生效窗口」改为「用户覆盖值」，生效值移到新增的 `profile.context_window`，另加 `profile.probe`（探测值）与顶层 `fallback`（后端真正使用的兜底值，避免前端硬编码）。改名的动机是 `context` 此前在读/写两个方向上含义不同，`save_provider` 回传会串味；现在读写同名同义，列表结果可原样回填表单。
+
+### Tests
+- 锁住覆盖值生效、清空即恢复自动、非法值（0 / 负数 / 字符串 / `None` / 不存在的模型 / 非 dict）一律不落盘、wire 往返与 `fallback` 下发。
+- 新增 `conftest.catalog_entry()` / `resolved()` 两个共享构造器，替换掉 `test_gateway_session` 里三个 `SimpleNamespace` 假目录条目——鸭子类型的假条目在 `ModelEntry` 新增字段时会静默通过，直到消费方读到不存在的属性才炸。`test_provider_store` 的限制用例改用钉住的目录条目，消除对本机 `~/.lumi/cache` 是否存在的依赖（此前在空 HOME 下会红）。
+
 ## [0.2.85] - 2026-07-28
 
 ### Fixed
