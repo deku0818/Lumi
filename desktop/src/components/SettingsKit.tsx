@@ -1,6 +1,6 @@
 import { type ComponentProps, type ReactNode } from 'react'
 import type { LucideIcon } from 'lucide-react'
-import type { EnvProgress } from '../types'
+import type { CheckTone, EnvProgress } from '../types'
 import { cn } from '@/lib/utils'
 import { Dialog, DialogContent, DialogHeader, DialogTitle } from '@/components/ui/dialog'
 
@@ -102,9 +102,12 @@ export function TextInput({
   return <input type={password ? 'password' : (type ?? 'text')} className={cn(inputClass, className)} {...props} />
 }
 
+// 玻璃卡壳单一 token：Card / EntityCard / GroupCard / 渠道体检卡共用（描边与填充 alpha 只此一份）。
+export const cardShell = 'rounded-xl border border-line/60 bg-surface/50'
+
 // 统一卡片：透明描边 + 极淡填充 + 统一圆角/内边距。
 export function Card({ className, children }: { className?: string; children: ReactNode }) {
-  return <div className={cn('rounded-xl border border-line/50 bg-surface/40 px-4 py-3', className)}>{children}</div>
+  return <div className={cn(cardShell, 'px-4 py-3', className)}>{children}</div>
 }
 
 // 统一分段控件（合并 SettingsDialog 的 Segmented 与 ChannelsPanel 的 Seg 两份实现）。
@@ -155,6 +158,183 @@ export function ProgressBar({ progress, className }: { progress: EnvProgress; cl
         />
       </span>
       {known && <span className="tabular-nums">{progress.percent}%</span>}
+    </div>
+  )
+}
+
+// ── 实体列表统一语法（.demos/settings-unify.html 定稿）──
+
+// 状态点：全设置页统一 6px。连接/诊断语义带光晕，idle/hollow 为静态灰。
+// title 用于悬停看详情（如 MCP「已连接 · N 个工具」）。语义色走 tone；机器色这类
+// 动态色走 color（自带同色光晕）；pulse 独立叠加（连接中的金点/灰点呼吸都由它表达）。
+export type StatusTone = CheckTone | 'idle' | 'hollow'
+const DOT_TONE: Record<StatusTone, string> = {
+  ok: 'bg-success shadow-[0_0_6px_var(--color-success)]',
+  warn: 'bg-primary shadow-[0_0_6px_var(--color-accent)]',
+  error: 'bg-error shadow-[0_0_6px_var(--color-error)]',
+  idle: 'bg-separator',
+  hollow: 'border-[1.5px] border-separator opacity-70',
+}
+export function StatusDot({
+  tone,
+  color,
+  pulse,
+  title,
+  className,
+}: {
+  tone?: StatusTone
+  color?: string // CSS 颜色值，优先于 tone
+  pulse?: boolean
+  title?: string
+  className?: string
+}) {
+  return (
+    <span
+      title={title}
+      className={cn(
+        'size-1.5 rounded-full shrink-0',
+        !color && tone && DOT_TONE[tone],
+        pulse && 'animate-pulse',
+        className,
+      )}
+      style={color ? { background: color, boxShadow: `0 0 6px ${color}` } : undefined}
+    />
+  )
+}
+
+// 胶囊徽章一族：transport tag / 工具来源 / 「即将支持」共用。
+// dot 金点=Lumi 托管、蓝点=系统来源；dashed=缺失/未来时；tag=大写小标签（stdio/HTTP/IM）。
+export function Pill({
+  dot,
+  dashed,
+  tag,
+  children,
+}: {
+  dot?: 'gold' | 'info'
+  dashed?: boolean
+  tag?: boolean
+  children: ReactNode
+}) {
+  return (
+    <span
+      className={cn(
+        'inline-flex items-center gap-1.5 rounded-full border px-2 py-px text-[10.5px] text-muted-foreground shrink-0',
+        dashed ? 'border-dashed border-separator' : dot === 'gold' ? 'border-primary/45 text-ink' : 'border-separator',
+        tag && 'px-1.5 text-[10px] font-medium uppercase tracking-wide',
+      )}
+    >
+      {/* 私有小点（5px/5px 光晕）：比 StatusDot 小一号是刻意的胶囊内比例，不共用 */}
+      {dot && (
+        <i
+          className={cn(
+            'size-[5px] rounded-full shrink-0',
+            dot === 'gold' ? 'bg-primary shadow-[0_0_5px_var(--color-accent)]' : 'bg-info',
+          )}
+        />
+      )}
+      {children}
+    </span>
+  )
+}
+
+// 实体行卡：渠道 / MCP server / 模型供应商 / 远程机器共用的一套解剖，次序恒定：
+// chip 36px → 标题行(名称 + meta：Pill/状态点/状态字) → 副题 → 徽章常显
+// → 操作图标 hover 浮现 → Switch 恒最右（竖向对齐成列，扫一眼全局开关状态）。
+// 截断由本组件恒管：title 是名称本体（自动 truncate），meta 放不参与截断的附属件；
+// subtitleTitle 给被截断的副题（地址/命令）一个悬停看全文的出口。
+export function EntityCard({
+  icon,
+  title,
+  meta,
+  subtitle,
+  subtitleTitle,
+  badge,
+  actions,
+  trailing,
+  dim,
+}: {
+  icon: ReactNode
+  title: ReactNode
+  meta?: ReactNode
+  subtitle?: ReactNode
+  subtitleTitle?: string
+  badge?: ReactNode
+  actions?: ReactNode
+  trailing?: ReactNode
+  dim?: boolean
+}) {
+  return (
+    <div className={cn(cardShell, 'group flex items-center gap-3 px-3.5 py-2.5', dim && 'opacity-55')}>
+      <div className="grid place-items-center w-9 h-9 rounded-lg bg-surface border border-line text-ink shrink-0">
+        {icon}
+      </div>
+      <div className="flex-1 min-w-0">
+        <div className="flex min-w-0 items-center gap-2 font-medium">
+          <span className="truncate">{title}</span>
+          {meta}
+        </div>
+        {subtitle && (
+          <div title={subtitleTitle} className="text-[11px] text-muted-foreground mt-0.5 truncate">
+            {subtitle}
+          </div>
+        )}
+      </div>
+      {badge}
+      {/* 未悬停时不仅隐形还要不可命中：opacity-0 仍可点会让卡片右缘藏一颗隐形删除键 */}
+      {actions && (
+        <div className="flex items-center opacity-0 pointer-events-none transition-opacity group-hover:opacity-100 group-hover:pointer-events-auto focus-within:opacity-100 focus-within:pointer-events-auto">
+          {actions}
+        </div>
+      )}
+      {trailing}
+    </div>
+  )
+}
+
+// 表单分组卡：头行(图标 chip + 标题 + 副题 + 尾控件) + hairline + 内容。
+// 开关型分组把 Switch 传 action、open 随开关——开合语言与体检卡一致。
+export function GroupCard({
+  icon: Icon,
+  title,
+  desc,
+  action,
+  open = true,
+  bodyClassName,
+  children,
+}: {
+  icon: LucideIcon
+  title: ReactNode
+  desc?: ReactNode
+  action?: ReactNode
+  open?: boolean
+  bodyClassName?: string
+  children?: ReactNode
+}) {
+  return (
+    <div className={cn(cardShell, 'overflow-hidden')}>
+      <div className="flex items-center gap-3 px-4 py-3">
+        <div className="grid place-items-center w-7 h-7 rounded-lg bg-surface border border-line/60 text-muted-foreground shrink-0">
+          <Icon size={15} />
+        </div>
+        <div className="flex-1 min-w-0">
+          <div className="text-[12.5px] font-semibold">{title}</div>
+          {desc && <div className="text-[11px] text-muted-foreground mt-0.5">{desc}</div>}
+        </div>
+        {action}
+      </div>
+      {/* bodyClassName 替换布局默认（space-y-4）而非叠加——网格布局的调用方不必写 space-y-0 反削 */}
+      {open && children && (
+        <div className={cn('px-4 pb-4 pt-3 border-t border-line/40', bodyClassName ?? 'space-y-4')}>{children}</div>
+      )}
+    </div>
+  )
+}
+
+// 空态统一虚线框：一句现状 + 一句去处。
+export function Empty({ children }: { children: ReactNode }) {
+  return (
+    <div className="rounded-xl border border-dashed border-separator px-5 py-7 text-center text-[12px] leading-relaxed text-muted-foreground">
+      {children}
     </div>
   )
 }

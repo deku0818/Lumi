@@ -4,7 +4,7 @@ import type { BackendRemote, BackendsState } from '../types'
 import { useI18n } from '../i18n'
 import { machineColor } from '@/lib/utils'
 import { useMachine } from './MachineTabs'
-import { Section, SectionGroup, Field, TextInput, FormModal } from './SettingsKit'
+import { Empty, EntityCard, Field, FormModal, Section, SectionGroup, StatusDot, TextInput } from './SettingsKit'
 import { Button } from '@/components/ui/button'
 import { Switch } from '@/components/ui/switch'
 
@@ -91,27 +91,35 @@ export function BackendsPanel() {
           <MachineRow id="local" name={t('backends.local')} sub={t('backends.localHint')} color="var(--color-accent)" />
         </Section>
 
-        <Section title={t('backends.remotes')}>
-        {state.remotes.length === 0 && (
-          <div className="text-sm text-muted-foreground/70 py-2">{t('backends.empty')}</div>
-        )}
-        {state.remotes.map((r) => (
-          <MachineRow
-            key={r.id}
-            id={r.id}
-            name={r.name || r.url}
-            sub={r.url}
-            color={machineColor(r.id, [{ id: 'local' }, ...state.remotes])}
-            enabled={r.enabled !== false}
-            onEdit={() => setEditing(r)}
-            onDelete={() => remove(r.id)}
-            onToggle={(v) => toggle(r.id, v)}
-          />
-        ))}
-        <Button variant="ghost" size="sm" onClick={() => setEditing({})} className="mt-2 text-muted-foreground">
-          <Plus />
-          {t('backends.add')}
-        </Button>
+        <Section
+          title={t('backends.remotes')}
+          action={
+            <Button variant="outline" size="sm" onClick={() => setEditing({})}>
+              <Plus />
+              {t('backends.add')}
+            </Button>
+          }
+        >
+          {state.remotes.length === 0 ? (
+            <Empty>{t('backends.empty')}</Empty>
+          ) : (
+            <div className="space-y-2">
+              {state.remotes.map((r) => (
+                <MachineRow
+                  key={r.id}
+                  id={r.id}
+                  name={r.name || r.url}
+                  sub={r.url}
+                  mono
+                  color={machineColor(r.id, [{ id: 'local' }, ...state.remotes])}
+                  enabled={r.enabled !== false}
+                  onEdit={() => setEditing(r)}
+                  onDelete={() => remove(r.id)}
+                  onToggle={(v) => toggle(r.id, v)}
+                />
+              ))}
+            </div>
+          )}
         </Section>
       </SectionGroup>
 
@@ -132,13 +140,14 @@ export function BackendsPanel() {
   )
 }
 
-// 一行 = 一台机器。副标题平时是地址，连不上时**就地换成失败原因**（地址退到 title 悬停）：
-// 出错时最该看的是原因，地址点「编辑」随时能看。显示的是实时连接态而非保存那一刻的快照，
-// 机器自行恢复后红字自己消失，故不需要「重试」按钮。
+// 一张卡 = 一台机器（统一实体卡语法）。副标题平时是地址，连不上时**就地换成失败原因**
+// （地址退到 title 悬停）：出错时最该看的是原因，地址点「编辑」随时能看。显示的是实时
+// 连接态而非保存那一刻的快照，机器自行恢复后红字自己消失，故不需要「重试」按钮。
 function MachineRow({
   id,
   name,
   sub,
+  mono,
   color,
   enabled = true,
   onEdit,
@@ -148,6 +157,7 @@ function MachineRow({
   id: string
   name: string
   sub: string
+  mono?: boolean // 副标题是地址（mono 排版）；本机的说明文案则否
   color: string
   enabled?: boolean
   onEdit?: () => void
@@ -160,52 +170,51 @@ function MachineRow({
   const live = enabled ? scope : undefined
   const failed = live === 'stopped'
   const reason = failed ? t(error === 'auth' ? 'backends.authFail' : 'backends.unreachable') : ''
+  // 状态点：机器色实心=已连接（各机器一色，与侧栏一致）、红=失败、空心=停用
+  const dot = !enabled ? (
+    <StatusDot tone="hollow" />
+  ) : failed ? (
+    <StatusDot tone="error" />
+  ) : (
+    <StatusDot color={color} pulse={live === 'retrying'} />
+  )
+  // 地址被截断/被失败原因或「连接中」顶掉时，悬停恒能看到全文（subtitleTitle）
   return (
-    <div className={`group flex items-center gap-3 py-2.5 border-b border-line/20 ${enabled ? '' : 'opacity-50'}`}>
-      <span
-        className={`shrink-0 size-2.5 rounded-full ${live === 'retrying' ? 'animate-pulse' : ''}`}
-        style={
-          !enabled
-            ? { border: '1.5px solid var(--color-separator)' }
-            : failed
-              ? {
-                  background: 'var(--color-error)',
-                  boxShadow: '0 0 6px color-mix(in srgb, var(--color-error) 70%, transparent)',
-                }
-              : { background: color, boxShadow: `0 0 6px ${color}` }
-        }
-      />
-      <Server size={15} className="shrink-0 text-muted-foreground" />
-      <div className="flex-1 min-w-0">
-        <div className="text-sm text-ink/90 truncate">{name}</div>
-        <div className={`text-xs truncate ${reason ? 'text-error/90' : 'text-muted-foreground'}`} title={sub}>
+    <EntityCard
+      dim={!enabled}
+      icon={<Server size={16} />}
+      title={name}
+      meta={dot}
+      subtitle={
+        // mono 只作用于真在展示地址的分支；失败原因/「连接中」是普通文案
+        <span className={reason ? 'text-error' : mono && live !== 'retrying' ? 'font-mono' : undefined}>
           {reason || (live === 'retrying' ? t('common.connecting') : sub)}
-        </div>
-      </div>
-      {onEdit && (
-        <Button
-          variant="ghost"
-          size="icon-sm"
-          onClick={onEdit}
-          className="shrink-0 text-muted-foreground opacity-0 group-hover:opacity-100"
-        >
-          <Pencil />
-        </Button>
-      )}
-      {onDelete && (
-        <Button
-          variant="ghost"
-          size="icon-sm"
-          onClick={onDelete}
-          className="shrink-0 text-muted-foreground hover:text-error opacity-0 group-hover:opacity-100"
-        >
-          <Trash2 />
-        </Button>
-      )}
-      {onToggle && (
-        <Switch checked={enabled} onCheckedChange={onToggle} className="shrink-0 ml-1" />
-      )}
-    </div>
+        </span>
+      }
+      subtitleTitle={sub}
+      actions={
+        (onEdit || onDelete) && (
+          <>
+            {onEdit && (
+              <Button variant="ghost" size="icon-sm" onClick={onEdit} className="text-muted-foreground">
+                <Pencil />
+              </Button>
+            )}
+            {onDelete && (
+              <Button
+                variant="ghost"
+                size="icon-sm"
+                onClick={onDelete}
+                className="text-muted-foreground hover:text-error"
+              >
+                <Trash2 />
+              </Button>
+            )}
+          </>
+        )
+      }
+      trailing={onToggle && <Switch checked={enabled} onCheckedChange={onToggle} />}
+    />
   )
 }
 

@@ -187,7 +187,7 @@ export const ProjectHomePage = memo(function ProjectHomePage({
             {/* 记忆 */}
             <Card icon={<Brain size={13} />} title={t('projhome.memory')} count={overview?.memory.length}>
               {!overview?.memory.length ? (
-                <Empty>{t('projhome.memoryEmpty')}</Empty>
+                <EmptyHint>{t('projhome.memoryEmpty')}</EmptyHint>
               ) : (
                 overview.memory.map((m) => (
                   <button
@@ -216,7 +216,7 @@ export const ProjectHomePage = memo(function ProjectHomePage({
               }
             >
               {cronJobs.length === 0 ? (
-                <Empty>{t('projhome.scheduledEmpty')}</Empty>
+                <EmptyHint>{t('projhome.scheduledEmpty')}</EmptyHint>
               ) : (
                 cronJobs.map((j) => (
                   <div key={j.id} className="flex items-center gap-2 py-1.5 border-t border-line/40 first:border-0">
@@ -244,7 +244,7 @@ export const ProjectHomePage = memo(function ProjectHomePage({
               }
             >
               {!overview?.skills.length ? (
-                <Empty>{t('projhome.skillsEmpty')}</Empty>
+                <EmptyHint>{t('projhome.skillsEmpty')}</EmptyHint>
               ) : (
                 <div className="flex flex-wrap gap-1.5">
                   {overview.skills.map((s) => (
@@ -274,7 +274,7 @@ export const ProjectHomePage = memo(function ProjectHomePage({
               }
             >
               {!overview?.agents.length ? (
-                <Empty>{t('projhome.agentsEmpty')}</Empty>
+                <EmptyHint>{t('projhome.agentsEmpty')}</EmptyHint>
               ) : (
                 overview.agents.map((a) => (
                   <button
@@ -396,7 +396,7 @@ function CardAction({
   )
 }
 
-function Empty({ children }: { children: React.ReactNode }) {
+function EmptyHint({ children }: { children: React.ReactNode }) {
   return <div className="text-[11.5px] text-muted-foreground/80 italic select-none">{children}</div>
 }
 
@@ -701,7 +701,7 @@ function SheetBody({ api, path, sheet, onClose, onChanged, onSwitch }: SheetProp
             </>
           ) : failed ? (
             <div className="flex-1 grid place-items-center">
-              <Empty>{t('projhome.loadFailed')}</Empty>
+              <EmptyHint>{t('projhome.loadFailed')}</EmptyHint>
             </div>
           ) : res === null ? (
             // 读取中：光点延迟出现，本地毫秒级读取不闪，远程往返时可见
@@ -710,7 +710,7 @@ function SheetBody({ api, path, sheet, onClose, onChanged, onSwitch }: SheetProp
             </div>
           ) : res.missing ? (
             <div className="flex-1 grid place-items-center">
-              <Empty>{t('projhome.memoryMissing')}</Empty>
+              <EmptyHint>{t('projhome.memoryMissing')}</EmptyHint>
             </div>
           ) : (
             <div className="flex-1 overflow-y-auto px-5 py-4 md text-[12.5px] selectable animate-in fade-in">

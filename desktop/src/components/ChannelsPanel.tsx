@@ -1,15 +1,22 @@
 import { useCallback, useEffect, useState } from 'react'
 import {
+  AlertTriangle,
+  Building2,
   Check,
   ChevronDown,
   ChevronRight,
-  Plus,
-  Send,
-  Building2,
-  X,
+  Cpu,
   Folder,
   FolderPlus,
-  AlertTriangle,
+  KeyRound,
+  MessageCircle,
+  Mic,
+  Moon,
+  Pencil,
+  Plus,
+  Send,
+  ShieldCheck,
+  X,
 } from 'lucide-react'
 import type {
   ChannelInfo,
@@ -25,8 +32,22 @@ import { useEnvInstall } from './useEnvInstall'
 import type { Gateway } from '../gateway'
 import { MachineScope, useMachine } from './MachineTabs'
 import { DirBrowser } from './DirBrowser'
-import { basename } from '@/lib/utils'
-import { Section, Card, Field, TextInput, SegmentedControl, FormModal, ProgressBar } from './SettingsKit'
+import { basename, cn } from '@/lib/utils'
+import {
+  cardShell,
+  Empty,
+  EntityCard,
+  Field,
+  FormModal,
+  GroupCard,
+  Pill,
+  ProgressBar,
+  Section,
+  SegmentedControl,
+  StatusDot,
+  TextInput,
+  type StatusTone,
+} from './SettingsKit'
 import { Button } from '@/components/ui/button'
 import { Switch } from '@/components/ui/switch'
 import {
@@ -53,13 +74,14 @@ const STATUS_LABEL: Record<string, string> = {
   error: '连接失败',
 }
 
-// 状态光点（demo 方案 A）：绿=已连接、金=连接中（呼吸）、红=失败，未启用/停止为无光晕灰点
-const STATUS_DOT: Record<string, string> = {
-  connected: 'bg-success shadow-[0_0_6px_var(--color-success)]',
-  connecting: 'bg-primary shadow-[0_0_6px_var(--color-accent)] animate-pulse',
-  error: 'bg-error shadow-[0_0_6px_var(--color-error)]',
-  off: 'bg-separator',
-  stopped: 'bg-separator',
+// 渠道连接态 → 统一状态点语义：绿=已连接、金呼吸=连接中（warn+pulse）、红=失败，
+// 未启用/停止为静态灰
+const STATE_TONE: Record<string, StatusTone> = {
+  connected: 'ok',
+  connecting: 'warn',
+  error: 'error',
+  off: 'idle',
+  stopped: 'idle',
 }
 
 const emptyFeishu = (): FeishuConfig => ({
@@ -189,18 +211,7 @@ export function ChannelsPanel({
           />
 
           {/* 企业微信（即将支持） */}
-          <Card className="flex items-center gap-3 opacity-55">
-            <div className="grid place-items-center w-9 h-9 rounded-lg bg-surface border border-line text-muted-foreground">
-              <Building2 size={17} />
-            </div>
-            <div className="flex-1 min-w-0">
-              <div className="font-medium">企业微信</div>
-              <div className="text-[11px] text-muted-foreground mt-0.5">即将支持</div>
-            </div>
-            <span className="text-[10.5px] px-2 py-0.5 rounded-full border border-separator text-muted-foreground">
-              即将支持
-            </span>
-          </Card>
+          {WECOM_CARD}
         </div>
       </Section>
 
@@ -222,6 +233,17 @@ export function ChannelsPanel({
     </div>
   )
 }
+
+// 纯静态占位卡提为模块常量：本面板可见期间每 3s 轮询重渲，恒等引用让 React 跳过该子树
+const WECOM_CARD = (
+  <EntityCard
+    dim
+    icon={<Building2 size={17} />}
+    title="企业微信"
+    subtitle="即将支持"
+    badge={<Pill dashed>即将支持</Pill>}
+  />
+)
 
 function feishuSubtitle(c?: ChannelInfo): string {
   if (!c?.enabled) return '未启用'
@@ -251,31 +273,33 @@ function ChannelCard({
   // error 态用后端给的具体原因（缺凭证 / 未装 lark…）替代泛化副标题
   const sub = state === 'error' && status?.detail ? status.detail : subtitle
   return (
-    <Card className="flex items-center gap-3">
-      <div className="grid place-items-center w-9 h-9 rounded-lg bg-surface border border-line text-ink">
-        {icon}
-      </div>
-      <div className="flex-1 min-w-0">
-        <div className="font-medium flex items-center gap-2">
-          {title}
-          <span className={`size-2 rounded-full shrink-0 ${STATUS_DOT[state] ?? STATUS_DOT.off}`} />
+    <EntityCard
+      icon={icon}
+      title={title}
+      meta={
+        <>
+          <StatusDot tone={STATE_TONE[state] ?? 'idle'} pulse={state === 'connecting'} />
           <span
-            className={`text-[11px] font-normal ${state === 'error' ? 'text-error' : 'text-muted-foreground'}`}
+            className={`shrink-0 text-[11px] font-normal ${state === 'error' ? 'text-error' : 'text-muted-foreground'}`}
           >
             {STATUS_LABEL[state]}
           </span>
-        </div>
-        <div
-          className={`text-[11px] mt-0.5 truncate ${state === 'error' ? 'text-[var(--color-error)]' : 'text-muted-foreground'}`}
+        </>
+      }
+      subtitle={state === 'error' ? <span className="text-error">{sub}</span> : sub}
+      actions={
+        <Button
+          variant="ghost"
+          size="icon-sm"
+          onClick={onEdit}
+          aria-label="编辑"
+          className="text-muted-foreground"
         >
-          {sub}
-        </div>
-      </div>
-      <Switch checked={enabled} onCheckedChange={onToggle} />
-      <Button variant="ghost" size="sm" onClick={onEdit} className="text-muted-foreground">
-        编辑
-      </Button>
-    </Card>
+          <Pencil />
+        </Button>
+      }
+      trailing={<Switch checked={enabled} onCheckedChange={onToggle} />}
+    />
   )
 }
 
@@ -380,29 +404,33 @@ function FeishuForm({
       className="sm:max-w-2xl"
       bodyClassName="max-h-[66vh]"
     >
-      <div className="space-y-4">
-        <Field label="App ID" hint="支持 ${FEISHU_APP_ID} 引用环境变量">
-          <TextInput value={cfg.app_id} onChange={(e) => set({ app_id: e.target.value })} placeholder="cli_…" />
-        </Field>
-        <Field
-          label="App Secret"
-          hint={
+      <div className="space-y-3">
+        <GroupCard
+          icon={KeyRound}
+          title="应用凭证"
+          desc={
             <>
-              chmod 600 存{' '}
-              <ConfigPath path={configPath} />
+              chmod 600 存 <ConfigPath path={configPath} />
               ，不写入项目目录
             </>
           }
         >
-          <TextInput password value={cfg.app_secret} onChange={(e) => set({ app_secret: e.target.value })} placeholder="●●●●" />
-        </Field>
+          <div className="grid grid-cols-2 gap-4">
+            <Field label="App ID" hint="支持 ${FEISHU_APP_ID} 引用环境变量">
+              <TextInput value={cfg.app_id} onChange={(e) => set({ app_id: e.target.value })} placeholder="cli_…" />
+            </Field>
+            <Field label="App Secret">
+              <TextInput password value={cfg.app_secret} onChange={(e) => set({ app_secret: e.target.value })} placeholder="●●●●" />
+            </Field>
+          </div>
+          {/* 绑定项目归凭证组：它是体检的输入——技能包按此项目检测与安装，所见即所得 */}
+          <WorkspacePicker gw={gw} value={cfg.workspace} onChange={(v) => set({ workspace: v })} />
+        </GroupCard>
 
-        {/* 绑定项目前置：它是体检的输入——技能包按此项目检测与安装，所见即所得 */}
-        <WorkspacePicker gw={gw} value={cfg.workspace} onChange={(v) => set({ workspace: v })} />
-
-        <Field
-          label="接入体检"
-          hint="本地环境 / 权限 / 事件订阅 / 版本发布，缺任一机器人都收不到消息且开放平台不报错"
+        <GroupCard
+          icon={ShieldCheck}
+          title="接入体检"
+          desc="本地环境 / 权限 / 事件订阅 / 版本发布，缺任一机器人都收不到消息且开放平台不报错"
         >
           <CheckPanel
             key={panelKey(setup.checks)}
@@ -413,80 +441,103 @@ function FeishuForm({
             onNavigate={onNavigate}
             fixProgress={fixProgress}
           />
-        </Field>
+        </GroupCard>
 
-        <Field label="群消息策略">
-          <SegmentedControl
-            value={cfg.group_policy}
-            onChange={(v) => set({ group_policy: v as FeishuConfig['group_policy'] })}
-            options={[
-              { val: 'mention', label: '@我才回' },
-              { val: 'open', label: '响应全部' },
-            ]}
-          />
-        </Field>
-
-        <Field label="可用成员（白名单）" hint={allowAll ? '所有人可用' : '仅列表内 open_id 可用；为空 = 全部拒绝'}>
-          <SegmentedControl
-            value={allowAll ? 'all' : 'list'}
-            onChange={(v) => set({ allow_from: v === 'all' ? ['*'] : [] })}
-            options={[
-              { val: 'all', label: '所有人' },
-              { val: 'list', label: '指定成员' },
-            ]}
-          />
+        <GroupCard icon={MessageCircle} title="消息行为" desc="谁能唤起 Lumi、在群里何时回应">
+          <div className="grid grid-cols-2 gap-4">
+            <Field label="群消息策略">
+              <SegmentedControl
+                value={cfg.group_policy}
+                onChange={(v) => set({ group_policy: v as FeishuConfig['group_policy'] })}
+                options={[
+                  { val: 'mention', label: '@我才回' },
+                  { val: 'open', label: '响应全部' },
+                ]}
+              />
+            </Field>
+            <Field label="可用成员（白名单）" hint={allowAll ? '所有人可用' : '仅列表内 open_id 可用；为空 = 全部拒绝'}>
+              <SegmentedControl
+                value={allowAll ? 'all' : 'list'}
+                onChange={(v) => set({ allow_from: v === 'all' ? ['*'] : [] })}
+                options={[
+                  { val: 'all', label: '所有人' },
+                  { val: 'list', label: '指定成员' },
+                ]}
+              />
+            </Field>
+          </div>
           {!allowAll && (
             <ChipEditor values={cfg.allow_from} onChange={(vals) => set({ allow_from: vals })} />
           )}
-        </Field>
+        </GroupCard>
 
-        <ChannelRuntimeFields cfg={cfg} set={set} providers={providers} />
+        <GroupCard icon={Cpu} title="会话运行时" desc="这个渠道的 Agent 用什么模型、怎么思考、怎么审批">
+          <ChannelRuntimeFields cfg={cfg} set={set} providers={providers} />
+        </GroupCard>
 
-        <MinutesSection
-          cfg={cfg}
-          set={(patch) => {
-            set(patch)
-            // 刚打开开关时立刻体检，省得用户还要手点一次「检查」
-            if (patch.minutes_enabled && !minutes.checks) minutes.run()
-          }}
-          diagnose={minutes}
-        />
+        <GroupCard
+          icon={Mic}
+          title="妙记纪要"
+          desc="录音 / 会议结束后自动整理纪要，推送到私聊"
+          open={cfg.minutes_enabled}
+          action={
+            <Switch
+              checked={cfg.minutes_enabled}
+              onCheckedChange={(on) => {
+                set({ minutes_enabled: on })
+                // 刚打开开关时立刻体检，省得用户还要手点一次「检查」
+                if (on && !minutes.checks) minutes.run()
+              }}
+            />
+          }
+        >
+          <CheckPanel
+            key={panelKey(minutes.checks)}
+            {...minutes}
+            subject="妙记链路"
+            ready="已就绪 · 妙记生成后自动推送纪要"
+          />
+        </GroupCard>
 
-        <DailyDreamSection cfg={cfg} set={set} />
+        <GroupCard
+          icon={Moon}
+          title="每日记忆整理（Dream）"
+          desc="到点自动沉淀记忆 + 压缩会话，长会话不再无限膨胀"
+          open={cfg.daily_dream_enabled}
+          action={
+            <Switch
+              checked={cfg.daily_dream_enabled}
+              onCheckedChange={(on) => set({ daily_dream_enabled: on })}
+            />
+          }
+          bodyClassName="grid grid-cols-2 gap-4"
+        >
+          <Field label="执行时间（每天）" hint="建议选低峰时段">
+            <TextInput
+              type="time"
+              value={cfg.daily_dream_time}
+              onChange={(e) => set({ daily_dream_time: e.target.value })}
+            />
+          </Field>
+          <Field label="Summary 最大并发" hint="限流防接口 429；dream 恒串行">
+            <TextInput
+              type="number"
+              min={1}
+              max={8}
+              value={cfg.summary_max_concurrency}
+              onChange={(e) =>
+                set({
+                  summary_max_concurrency: Math.min(
+                    8,
+                    Math.max(1, Number(e.target.value) || 1),
+                  ),
+                })
+              }
+            />
+          </Field>
+        </GroupCard>
       </div>
     </FormModal>
-  )
-}
-
-// 每日记忆整理（Dream）：开关 + 时间 + summary 最大并发。关时只留标题行（时间/并发隐藏）。
-// 妙记纪要分组。链路有四个彼此独立的前置条件（lark-cli / 授权 / 权限 / 订阅），
-// 任一断裂的表现完全相同——静默收不到事件、零报错——故做成逐项诊断，把「不工作」
-// 变成「卡在第几步」。正常态只显示一行绿，异常时自动展开定位问题。
-function MinutesSection({
-  cfg,
-  set,
-  diagnose,
-}: {
-  cfg: FeishuConfig
-  set: (patch: Partial<FeishuConfig>) => void
-  diagnose: ReturnType<typeof useDiagnose>
-}) {
-  return (
-    <ToggleCard
-      icon="🎙️"
-      title="妙记纪要"
-      desc="录音 / 会议结束后自动整理纪要，推送到私聊"
-      tone="info"
-      checked={cfg.minutes_enabled}
-      onCheckedChange={(on) => set({ minutes_enabled: on })}
-    >
-      <CheckPanel
-        key={panelKey(diagnose.checks)}
-        {...diagnose}
-        subject="妙记链路"
-        ready="已就绪 · 妙记生成后自动推送纪要"
-      />
-    </ToggleCard>
   )
 }
 
@@ -503,7 +554,10 @@ function ConfigPath({ path }: { path: string }) {
 // Check.fix_nav 的取值 → 设置面板名。检查行是各链路共用的，标签只认 tab、不认具体检查
 const TAB_LABEL: Record<string, string> = { env: '环境' }
 
-// 逐项体检面板：机器人接入与妙记链路共用。正常态收成一行，异常时自动展开定位到具体步骤。
+// 逐项体检面板（demo 方案 A「整卡开合」）：机器人接入与妙记链路共用。详情装在卡内
+// ——头行整行可点、chevron 指示开合，卡顶 2px 色线 + 头行状态点表达三色语义（tint 只
+// 表达状态，不再当容器底色）。收起时缩略点阵（每项一粒）保留全貌；异常自动展开
+// （panelKey 重挂实现），之后随用户手动开合。
 // subject 派生出「正在检查 X…」「检查 X」，只有就绪语（ready）各链路不同
 function CheckPanel({
   checks,
@@ -531,22 +585,26 @@ function CheckPanel({
 
   if (loading)
     return (
-      <div className="flex items-center gap-2.5 rounded-lg border border-line bg-surface/60 px-3 py-2.5 text-xs text-muted-foreground">
-        <span className="lumi-orb" style={{ width: 11, height: 11 }} />
-        正在检查{subject}…
-      </div>
+      <DiagShell bar="bg-primary/30">
+        <div className={`${diagRow} text-muted-foreground`}>
+          <span className="lumi-orb" style={{ width: 11, height: 11 }} />
+          正在检查{subject}…
+        </div>
+      </DiagShell>
     )
 
   // 体检没跑成时说清楚为什么，而不是退回「没检查过」的样子让用户空点
   if (error)
     return (
-      <div className={`flex items-center gap-2.5 rounded-lg px-3 py-2.5 text-xs ${TONE_BANNER.error}`}>
-        <StatusDot tone="error" />
-        <span className="flex-1">体检未能执行：{error}</span>
-        <button onClick={run} className="text-[11px] text-muted-foreground hover:text-ink">
-          重试
-        </button>
-      </div>
+      <DiagShell bar="bg-error/60">
+        <div className={diagRow}>
+          <StatusDot tone="error" />
+          <span className="flex-1 text-error">体检未能执行：{error}</span>
+          <button onClick={run} className="text-[11px] text-muted-foreground hover:text-ink">
+            重试
+          </button>
+        </div>
+      </DiagShell>
     )
 
   if (!checks)
@@ -561,69 +619,101 @@ function CheckPanel({
 
   const tone: CheckTone = bad.length ? 'error' : warned.length ? 'warn' : 'ok'
   return (
-    <>
-      <div className={`flex items-center gap-2.5 rounded-lg px-3 py-2.5 text-xs ${TONE_BANNER[tone]}`}>
+    <DiagShell bar={TONE[tone].bar}>
+      {/* 头行是 div 而非 button：内含「重新检查」与 chevron 两个真按钮（button 嵌套非法）。
+          鼠标点行内任意空白也能开合；键盘走 chevron 按钮（带 aria-expanded） */}
+      <div
+        onClick={() => setOpen((v) => !v)}
+        className={`${diagRow} w-full cursor-pointer transition hover:bg-line/20`}
+      >
         <StatusDot tone={tone} />
-        <span className="flex-1">
+        <span className={`flex-1 min-w-0 truncate ${TONE[tone].text}`}>
           {tone === 'error'
             ? `${bad.length} 项未就绪：${bad[0].name}`
             : tone === 'warn'
               ? `${ready}，${warned.length} 项功能降级`
               : ready}
         </span>
-        <button onClick={run} className="text-[11px] text-muted-foreground hover:text-ink">
+        {/* 缩略点阵：收起时也能一眼看到每项检查各自的红绿 */}
+        <span className="flex gap-1 shrink-0">
+          {checks.map((c) => (
+            <i key={c.key} className={`size-[5px] rounded-full ${TONE[c.tone].mini}`} />
+          ))}
+        </span>
+        <button
+          onClick={(e) => {
+            e.stopPropagation()
+            run()
+          }}
+          className="shrink-0 text-[11px] text-muted-foreground hover:text-ink"
+        >
           重新检查
         </button>
+        <button
+          aria-expanded={open}
+          aria-label={open ? '收起检查详情' : '查看检查详情'}
+          onClick={(e) => {
+            e.stopPropagation()
+            setOpen((v) => !v)
+          }}
+          className="shrink-0 grid place-items-center text-muted-foreground hover:text-ink"
+        >
+          <ChevronRight
+            size={13}
+            className={`transition-transform ${open ? 'rotate-90' : ''}`}
+          />
+        </button>
       </div>
-
-      <button
-        onClick={() => setOpen((v) => !v)}
-        className="mt-2 inline-flex items-center gap-1 text-[11px] text-muted-foreground hover:text-ink"
+      {/* grid-rows 0fr→1fr：不量高度的展开动画。收起时 inert：内容保持挂载以便动画，
+          但隐形的修复按钮/链接不能留在 Tab 序与命中区里 */}
+      <div
+        inert={!open}
+        className={`grid transition-[grid-template-rows] duration-200 ${open ? '[grid-template-rows:1fr]' : '[grid-template-rows:0fr]'}`}
       >
-        {open ? <ChevronDown size={12} /> : <ChevronRight size={12} />}
-        {open ? '收起检查详情' : '查看检查详情'}
-      </button>
-
-      {open && (
-        <div className="mt-2">
-          {checks.map((c, i) => (
-            <div key={c.key}>
-              {/* 分组标签：仅在组名与上一项不同处插入（本地环境 / 机器人接入） */}
-              {c.group && c.group !== checks[i - 1]?.group && (
-                <div className="flex items-center gap-2 pt-2 pb-0.5 text-[10.5px] tracking-wide text-muted-foreground">
-                  {c.group}
-                  <span className="h-px flex-1 bg-line/45" />
-                </div>
-              )}
-              <CheckRow
-                check={c}
-                onFix={onFix}
-                onNavigate={onNavigate}
-                progress={fixProgress?.[c.fix_action]}
-              />
-            </div>
-          ))}
+        <div className="min-h-0 overflow-hidden">
+          <div className="border-t border-line/50 px-3 pb-2.5">
+            {checks.map((c, i) => (
+              <div key={c.key}>
+                {/* 分组标签：仅在组名与上一项不同处插入（本地环境 / 机器人接入） */}
+                {c.group && c.group !== checks[i - 1]?.group && (
+                  <div className="flex items-center gap-2 pt-2 pb-0.5 text-[10.5px] tracking-wide text-muted-foreground">
+                    {c.group}
+                    <span className="h-px flex-1 bg-line/45" />
+                  </div>
+                )}
+                <CheckRow
+                  check={c}
+                  onFix={onFix}
+                  onNavigate={onNavigate}
+                  progress={fixProgress?.[c.fix_action]}
+                />
+              </div>
+            ))}
+          </div>
         </div>
-      )}
-    </>
+      </div>
+    </DiagShell>
   )
 }
 
-// 三色语义的配色表；语义本身由后端定（DiagnoseCheck.tone），前端只管配色
-const TONE_BANNER: Record<CheckTone, string> = {
-  ok: 'border border-success/25 bg-success/10 text-success',
-  warn: 'border border-primary/40 bg-primary/10 text-primary',
-  error: 'border border-error/30 bg-error/10 text-error',
+// 体检卡外壳：三个状态（检查中 / 未能执行 / 结果）共用「卡壳 + 2px 状态色顶条」，
+// 头行行高与内边距由 diagRow 统一——免得三处 chrome 各自漂移
+function DiagShell({ bar, children }: { bar: string; children: React.ReactNode }) {
+  return (
+    <div className={cn(cardShell, 'overflow-hidden')}>
+      <div className={`h-0.5 ${bar}`} />
+      {children}
+    </div>
+  )
 }
+const diagRow = 'flex items-center gap-2.5 px-3 py-2.5 text-xs'
 
-const TONE_DOT: Record<CheckTone, string> = {
-  ok: 'bg-success shadow-[0_0_6px_var(--color-success)]',
-  warn: 'bg-primary shadow-[0_0_6px_var(--color-accent)]',
-  error: 'bg-error shadow-[0_0_6px_var(--color-error)]',
-}
-
-function StatusDot({ tone }: { tone: CheckTone }) {
-  return <span className={`size-2 rounded-full shrink-0 ${TONE_DOT[tone]}`} />
+// 三色语义的成套配色（顶条 / 头行文字 / 缩略小点）；语义本身由后端定（DiagnoseCheck.tone）。
+// warn 文字刻意用 ink 而非金：头行是整句话，金字大段可读性差。点本体恒走 kit 的 StatusDot
+const TONE: Record<CheckTone, { bar: string; text: string; mini: string }> = {
+  ok: { bar: 'bg-success/55', text: 'text-success', mini: 'bg-success' },
+  warn: { bar: 'bg-primary/60', text: 'text-ink', mini: 'bg-primary' },
+  error: { bar: 'bg-error/60', text: 'text-error', mini: 'bg-error' },
 }
 
 function CheckRow({
@@ -694,97 +784,13 @@ function CheckRow({
   )
 }
 
-// 带开关的分组卡：图标 + 标题 + 副标题 + Switch，开启时展开 children。
-// Dream / 妙记两个分组共用，免得同一套卡壳在同一文件里各写一遍后各自漂移。
-function ToggleCard({
-  icon,
-  title,
-  desc,
-  tone,
-  checked,
-  onCheckedChange,
-  bodyClass = 'px-4 pb-4 pt-1',
-  children,
-}: {
-  icon: string
-  title: string
-  desc: string
-  tone: 'primary' | 'info'
-  checked: boolean
-  onCheckedChange: (on: boolean) => void
-  bodyClass?: string
-  children?: React.ReactNode
-}) {
-  const ring =
-    tone === 'primary' ? 'border-primary/30 bg-primary/5' : 'border-info/25 bg-info/5'
-  return (
-    <div className={`rounded-xl border overflow-hidden ${ring}`}>
-      <div className="flex items-center gap-3 px-4 py-3.5">
-        <div className="grid place-items-center w-8 h-8 rounded-lg bg-surface border border-line text-base">
-          {icon}
-        </div>
-        <div className="flex-1 min-w-0">
-          <div className="font-medium">{title}</div>
-          <div className="text-[11px] text-muted-foreground mt-0.5">{desc}</div>
-        </div>
-        <Switch checked={checked} onCheckedChange={onCheckedChange} />
-      </div>
-      {checked && children && <div className={bodyClass}>{children}</div>}
-    </div>
-  )
-}
-
-function DailyDreamSection({
-  cfg,
-  set,
-}: {
-  cfg: FeishuConfig
-  set: (patch: Partial<FeishuConfig>) => void
-}) {
-  return (
-    <ToggleCard
-      icon="🌙"
-      title="每日记忆整理（Dream）"
-      desc="到点自动沉淀记忆 + 压缩会话，长会话不再无限膨胀"
-      tone="primary"
-      checked={cfg.daily_dream_enabled}
-      onCheckedChange={(on) => set({ daily_dream_enabled: on })}
-      bodyClass="grid grid-cols-2 gap-4 px-4 pb-4 pt-1"
-    >
-      <Field label="执行时间（每天）" hint="建议选低峰时段">
-        <TextInput
-          type="time"
-          value={cfg.daily_dream_time}
-          onChange={(e) => set({ daily_dream_time: e.target.value })}
-        />
-      </Field>
-      <Field label="Summary 最大并发" hint="限流防接口 429；dream 恒串行">
-        <TextInput
-          type="number"
-          min={1}
-          max={8}
-          value={cfg.summary_max_concurrency}
-          onChange={(e) =>
-            set({
-              summary_max_concurrency: Math.min(
-                8,
-                Math.max(1, Number(e.target.value) || 1),
-              ),
-            })
-          }
-        />
-      </Field>
-    </ToggleCard>
-  )
-}
-
 // 档位显示名（对齐 ModelPicker）：auto→自动 / on→On / 其余首字母大写
 const levelLabel = (lv: string) =>
   lv === 'auto' ? '自动' : lv === 'on' ? 'On' : lv.charAt(0).toUpperCase() + lv.slice(1)
 
 // 渠道「会话运行时」通用块：模型 + 思考档位 + 工具审批。各 IM 渠道复用同一块
 // （对齐后端 ChannelRuntimeConfig），值各渠道各存一份。model 空 = 跟随 desktop 全局。
-// 绑定项目已前置到表单主体（它是接入体检的输入），不在此块。
+// 绑定项目已前置到凭证组（它是接入体检的输入），不在此块；卡壳由调用方的 GroupCard 提供。
 function ChannelRuntimeFields({
   cfg,
   set,
@@ -818,69 +824,56 @@ function ChannelRuntimeFields({
   const control = cap?.control ?? 'none'
 
   return (
-    <div className="rounded-xl border border-info/25 bg-info/5 overflow-hidden">
-      <div className="flex items-center gap-3 px-4 py-3.5">
-        <div className="grid place-items-center w-8 h-8 rounded-lg bg-surface border border-line text-base">
-          ⚙
-        </div>
-        <div className="flex-1 min-w-0">
-          <div className="font-medium">会话运行时</div>
-          <div className="text-[11px] text-muted-foreground mt-0.5">
-            这个渠道的 Agent 用什么模型、怎么思考、怎么审批、在哪个项目跑
-          </div>
-        </div>
-      </div>
-      <div className="space-y-4 px-4 pb-4 pt-1">
-        <Field
-          label="模型来源"
-          hint="跟随全局＝用 desktop 当前模型；指定＝本渠道独立，与 desktop 互不影响"
-        >
-          <SegmentedControl
-            value={custom ? 'custom' : 'global'}
-            onChange={(v) => {
-              setSource(v as 'global' | 'custom')
-              if (v === 'global') set({ model: '', provider: '', effort: 'auto' })
-              // 切「指定」时有可用模型就补第一个；providers 未加载完（firstModel=''）则
-              // 先进 custom 视图，由模型下拉待选，加载后即可选
-              else if (!cfg.model && firstModel)
-                set({ model: firstModel, provider: firstProv?.id ?? '', effort: 'auto' })
-            }}
-            options={[
-              { val: 'global', label: '跟随 desktop 全局' },
-              { val: 'custom', label: '为本渠道指定' },
-            ]}
+    <>
+      <Field
+        label="模型来源"
+        hint="跟随全局＝用 desktop 当前模型；指定＝本渠道独立，与 desktop 互不影响"
+      >
+        <SegmentedControl
+          value={custom ? 'custom' : 'global'}
+          onChange={(v) => {
+            setSource(v as 'global' | 'custom')
+            if (v === 'global') set({ model: '', provider: '', effort: 'auto' })
+            // 切「指定」时有可用模型就补第一个；providers 未加载完（firstModel=''）则
+            // 先进 custom 视图，由模型下拉待选，加载后即可选
+            else if (!cfg.model && firstModel)
+              set({ model: firstModel, provider: firstProv?.id ?? '', effort: 'auto' })
+          }}
+          options={[
+            { val: 'global', label: '跟随 desktop 全局' },
+            { val: 'custom', label: '为本渠道指定' },
+          ]}
+        />
+      </Field>
+
+      {custom && (
+        <Field label="模型">
+          <ModelDropdown
+            providers={providers}
+            value={cfg.model}
+            provider={cfg.provider}
+            onPick={(m, pid) => set({ model: m, provider: pid, effort: coerce(m, cfg.effort) })}
+          />
+          <ThinkingControl
+            control={control}
+            levels={cap?.levels ?? ['auto']}
+            effort={cfg.effort}
+            onPick={(e) => set({ effort: e })}
           />
         </Field>
+      )}
 
-        {custom && (
-          <Field label="模型">
-            <ModelDropdown
-              providers={providers}
-              value={cfg.model}
-              provider={cfg.provider}
-              onPick={(m, pid) => set({ model: m, provider: pid, effort: coerce(m, cfg.effort) })}
-            />
-            <ThinkingControl
-              control={control}
-              levels={cap?.levels ?? ['auto']}
-              effort={cfg.effort}
-              onPick={(e) => set({ effort: e })}
-            />
-          </Field>
-        )}
-
-        <Field label="工具审批模式" hint="两种模式下泄漏的人工审批一律自动拒绝；仅保留 ask 询问卡片">
-          <SegmentedControl
-            value={cfg.tool_mode}
-            onChange={(v) => set({ tool_mode: v as FeishuConfig['tool_mode'] })}
-            options={[
-              { val: 'auto', label: 'AI 审批' },
-              { val: 'privileged', label: '特权放行' },
-            ]}
-          />
-        </Field>
-      </div>
-    </div>
+      <Field label="工具审批模式" hint="两种模式下泄漏的人工审批一律自动拒绝；仅保留 ask 询问卡片">
+        <SegmentedControl
+          value={cfg.tool_mode}
+          onChange={(v) => set({ tool_mode: v as FeishuConfig['tool_mode'] })}
+          options={[
+            { val: 'auto', label: 'AI 审批' },
+            { val: 'privileged', label: '特权放行' },
+          ]}
+        />
+      </Field>
+    </>
   )
 }
 
@@ -1144,20 +1137,22 @@ function WorkspacePicker({
   )
 }
 
-// 空态：该机器还没有项目，引导新建（而非手填路径）。
+// 空态：该机器还没有项目，引导新建（而非手填路径）。外壳走统一 Empty（虚线框）。
 function EmptyProjects({ onCreate }: { onCreate: () => void }) {
   return (
-    <div className="flex flex-col items-center gap-2 rounded-lg border border-dashed border-separator px-4 py-6 text-center">
-      <Folder size={28} className="text-muted-foreground/60" />
-      <div className="text-sm text-ink">还没有项目</div>
-      <div className="max-w-[230px] text-[11px] text-muted-foreground">
-        飞书会话需要绑定一个项目作为工作目录。新建一个，或先去「项目」页登记。
+    <Empty>
+      <div className="flex flex-col items-center gap-2">
+        <Folder size={28} className="text-muted-foreground/60" />
+        <div className="text-sm text-ink">还没有项目</div>
+        <div className="max-w-[230px] text-[11px] text-muted-foreground">
+          飞书会话需要绑定一个项目作为工作目录。新建一个，或先去「项目」页登记。
+        </div>
+        <Button variant="outline" size="sm" onClick={onCreate} className="mt-1">
+          <FolderPlus size={14} className="mr-1" />
+          新建项目
+        </Button>
       </div>
-      <Button variant="outline" size="sm" onClick={onCreate} className="mt-1">
-        <FolderPlus size={14} className="mr-1" />
-        新建项目
-      </Button>
-    </div>
+    </Empty>
   )
 }
 

@@ -4,6 +4,7 @@ import { WifiOff, RotateCw } from 'lucide-react'
 import type { ConnState, ConnError, Machine } from '../types'
 import { machineColor } from '@/lib/utils'
 import { useI18n } from '../i18n'
+import { StatusDot } from './SettingsKit'
 
 // 机器表 + 各机器的实时连接态 + 重连入口。侧栏、设置各面板、项目/定时页都要按它决定
 // 「这台机器现在能不能读写」，逐层透传要穿过五六个组件，故走 context（App 在根部一次性提供）。
@@ -41,20 +42,16 @@ export function useMachine(id: string): { scope: ScopeState; error: ConnError } 
 }
 
 // 机器状态点：金/机器色实心=已连接、呼吸=连接中、空心=离线。侧栏机器分组头与
-// 选择条 pill 共用一份（两处曾各写一遍，样式一改就得改两处）。
+// 选择条 pill 共用一份；点本体走 SettingsKit 的 StatusDot（color/hollow/pulse 三路全覆盖）。
 export function MachineDot({ id }: { id: string }) {
   const { machines, conn } = useContext(Ctx)
   const state = conn[id]
   const offline = state === 'closed' || state === 'failed'
-  const color = machineColor(id, machines)
   return (
-    <span
-      className={`shrink-0 size-1.5 rounded-full ${state === undefined || state === 'connecting' ? 'animate-pulse' : ''}`}
-      style={
-        offline
-          ? { border: '1.5px solid var(--color-separator)', opacity: 0.65 }
-          : { background: color, boxShadow: `0 0 5px ${color}` }
-      }
+    <StatusDot
+      tone={offline ? 'hollow' : undefined}
+      color={offline ? undefined : machineColor(id, machines)}
+      pulse={state === undefined || state === 'connecting'}
       title={state ?? 'connecting'}
     />
   )

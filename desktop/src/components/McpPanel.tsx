@@ -27,8 +27,19 @@ import type {
 import type { Gateway } from '../gateway'
 import { MachineScope } from './MachineTabs'
 import { DirBrowser } from './DirBrowser'
-import { basename } from '@/lib/utils'
-import { Section, Card, Field, TextInput, SegmentedControl, FormModal } from './SettingsKit'
+import { basename, cn } from '@/lib/utils'
+import {
+  cardShell,
+  Empty,
+  EntityCard,
+  Field,
+  FormModal,
+  Pill,
+  Section,
+  SegmentedControl,
+  StatusDot,
+  TextInput,
+} from './SettingsKit'
 import { Button } from '@/components/ui/button'
 import { Switch } from '@/components/ui/switch'
 import {
@@ -49,11 +60,7 @@ const subOf = (s: McpServerConfig) =>
 
 // 传输类型胶囊（server 卡片 / 测试弹窗标题共用）
 function TransportTag({ config }: { config: McpServerConfig }) {
-  return (
-    <span className="text-[10px] font-medium uppercase tracking-wide px-1.5 py-px rounded-full border border-separator text-muted-foreground">
-      {tagLabel(transportOf(config))}
-    </span>
-  )
+  return <Pill tag>{tagLabel(transportOf(config))}</Pill>
 }
 
 // MCP 管理面板（设置 → MCP）。两个维度：机器（MachineTabs）· 作用范围（全局/项目）。
@@ -176,8 +183,8 @@ export function McpPanel({
     <div>
       <MachineScope value={machine} onChange={setMachine}>
 
-      {/* 作用范围行 */}
-      <div className="flex items-center gap-3 mb-4 px-3 py-2.5 rounded-xl border border-line/50 bg-surface/40">
+      {/* 作用范围行：与实体卡同一张卡壳 token，免得透明度组合独自漂移 */}
+      <div className={cn(cardShell, 'flex items-center gap-3 mb-4 px-3 py-2.5')}>
         <span className="text-xs text-muted-foreground shrink-0">作用范围</span>
         <SegmentedControl
           className="shrink-0"
@@ -268,14 +275,6 @@ export function McpPanel({
   )
 }
 
-function Empty({ children }: { children: React.ReactNode }) {
-  return (
-    <div className="rounded-xl border border-dashed border-separator px-5 py-7 text-center text-[12px] leading-relaxed text-muted-foreground">
-      {children}
-    </div>
-  )
-}
-
 function ServerCard({
   name,
   config,
@@ -297,58 +296,55 @@ function ServerCard({
 }) {
   const t = transportOf(config)
   const off = config.disabled === true
-  // 状态徽标：绿=已连接（title 显示工具数）、红=失败（title 显示原因）、
+  // 状态点：绿=已连接（title 显示工具数）、红=失败（title 显示原因）、
   // 灰呼吸=池后台加载中；池未加载过则不显示（避免误导为"离线"）
   const dot = status ? (
-    <span
+    <StatusDot
+      tone={status.ok ? 'ok' : 'error'}
       title={status.ok ? `已连接 · ${status.tools ?? 0} 个工具` : status.error}
-      className={`size-1.5 rounded-full shrink-0 ${status.ok ? 'bg-success' : 'bg-error'}`}
     />
   ) : poolLoading && !off ? (
-    <span title="正在后台连接…" className="size-1.5 rounded-full shrink-0 bg-separator animate-pulse" />
+    <StatusDot tone="idle" pulse title="正在后台连接…" />
   ) : null
   return (
-    <Card className={`flex items-center gap-3 ${off ? 'opacity-55' : ''}`}>
-      <div className="grid place-items-center w-9 h-9 rounded-lg bg-surface border border-line text-ink shrink-0">
-        {isStdio(t) ? <Terminal size={17} /> : <Globe size={17} />}
-      </div>
-      <div className="flex-1 min-w-0">
-        <div className="font-medium flex items-center gap-2">
-          {name}
+    <EntityCard
+      dim={off}
+      icon={isStdio(t) ? <Terminal size={17} /> : <Globe size={17} />}
+      title={name}
+      meta={
+        <>
           <TransportTag config={config} />
           {dot}
-        </div>
-        <div className="text-[11px] mt-0.5 truncate font-mono text-muted-foreground">
-          {subOf(config)}
-        </div>
-      </div>
-      <Switch checked={!off} onCheckedChange={onToggle} />
-      <Button
-        variant="ghost"
-        size="icon"
-        onClick={onTest}
-        title="测试连接"
-        className="text-muted-foreground h-8 w-8"
-      >
-        <Radar size={15} />
-      </Button>
-      <Button
-        variant="ghost"
-        size="icon"
-        onClick={onEdit}
-        className="text-muted-foreground h-8 w-8"
-      >
-        <Pencil size={15} />
-      </Button>
-      <Button
-        variant="ghost"
-        size="icon"
-        onClick={onDelete}
-        className="text-muted-foreground hover:text-error h-8 w-8"
-      >
-        <Trash2 size={15} />
-      </Button>
-    </Card>
+        </>
+      }
+      subtitle={<span className="font-mono">{subOf(config)}</span>}
+      subtitleTitle={subOf(config)}
+      actions={
+        <>
+          <Button
+            variant="ghost"
+            size="icon-sm"
+            onClick={onTest}
+            title="测试连接"
+            className="text-muted-foreground"
+          >
+            <Radar />
+          </Button>
+          <Button variant="ghost" size="icon-sm" onClick={onEdit} className="text-muted-foreground">
+            <Pencil />
+          </Button>
+          <Button
+            variant="ghost"
+            size="icon-sm"
+            onClick={onDelete}
+            className="text-muted-foreground hover:text-error"
+          >
+            <Trash2 />
+          </Button>
+        </>
+      }
+      trailing={<Switch checked={!off} onCheckedChange={onToggle} />}
+    />
   )
 }
 
@@ -600,7 +596,7 @@ function TestDialog({
           </>
         ) : result.ok ? (
           <>
-            <span className="size-2 rounded-full bg-success shadow-[0_0_6px_var(--color-success)]" />
+            <StatusDot tone="ok" className="size-2" />
             <span className="text-success">已连接</span>
             <span className="font-mono text-[11px] text-muted-foreground">
               {result.server?.name} v{result.server?.version} · {result.latency_ms}ms
@@ -608,7 +604,7 @@ function TestDialog({
           </>
         ) : (
           <>
-            <span className="size-2 rounded-full bg-error" />
+            <StatusDot tone="error" className="size-2" />
             <span className="text-error">连接失败</span>
           </>
         )}
@@ -677,11 +673,7 @@ function TestDialog({
               resources.map((r: McpResourceInfo) => (
                 <div key={r.uri} className="flex items-baseline gap-2 px-2 py-1.5">
                   <span className="font-mono text-[11.5px] text-ink">{r.uri}</span>
-                  {r.mime_type && (
-                    <span className="rounded-full border border-line px-1.5 text-[10px] text-muted-foreground">
-                      {r.mime_type}
-                    </span>
-                  )}
+                  {r.mime_type && <Pill tag>{r.mime_type}</Pill>}
                   <span className="min-w-0 flex-1 truncate text-[11px] text-muted-foreground">
                     {r.description || r.name}
                   </span>

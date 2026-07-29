@@ -1,5 +1,6 @@
 import { useCallback, useEffect, useState } from 'react'
 import {
+  Boxes,
   Check,
   Pencil,
   Trash2,
@@ -13,7 +14,7 @@ import type { ActiveModel, ModelLimits, ModelPointer, ProviderProfile } from '..
 import type { Gateway } from '../gateway'
 import { useI18n } from '../i18n'
 import { MachineScope } from './MachineTabs'
-import { Section, SectionGroup, Card, Row, Field, TextInput, FormModal } from './SettingsKit'
+import { Empty, EntityCard, Field, FormModal, Row, Section, SectionGroup, TextInput } from './SettingsKit'
 import { Tooltip, TooltipContent, TooltipTrigger } from '@/components/ui/tooltip'
 import { Button } from '@/components/ui/button'
 import { fmtTokensFull } from '@/lib/utils'
@@ -159,38 +160,43 @@ export function ProvidersPanel({
         }
       >
         {profiles.length === 0 ? (
-          <div className="py-10 text-center text-sm text-muted-foreground/80">{t('providers.none')}</div>
+          <Empty>{t('providers.none')}</Empty>
         ) : (
           <div className="space-y-2">
             {profiles.map((p) => (
-              <Card key={p.id}>
-                <div className="flex items-center gap-2">
-                  <div className="flex-1 min-w-0">
-                    <div className="truncate text-sm font-medium">{p.name}</div>
-                    <div className="mt-0.5 truncate text-[11px] text-muted-foreground">
-                      {p.base_url} · {t('providers.modelCount', { n: p.models.length })}
-                    </div>
-                  </div>
-                  <Button
-                    variant="ghost"
-                    size="icon-sm"
-                    onClick={() => setForm(formFrom(p))}
-                    aria-label={t('providers.edit')}
-                    className="shrink-0 text-muted-foreground"
-                  >
-                    <Pencil />
-                  </Button>
-                  <Button
-                    variant="ghost"
-                    size="icon-sm"
-                    onClick={() => onDelete(p.id)}
-                    aria-label={t('common.delete')}
-                    className="shrink-0 text-muted-foreground hover:text-error"
-                  >
-                    <Trash2 />
-                  </Button>
-                </div>
-              </Card>
+              <EntityCard
+                key={p.id}
+                icon={<Boxes size={17} />}
+                title={p.name}
+                subtitle={
+                  <span className="font-mono">
+                    {p.base_url} · {t('providers.modelCount', { n: p.models.length })}
+                  </span>
+                }
+                subtitleTitle={p.base_url}
+                actions={
+                  <>
+                    <Button
+                      variant="ghost"
+                      size="icon-sm"
+                      onClick={() => setForm(formFrom(p))}
+                      aria-label={t('providers.edit')}
+                      className="text-muted-foreground"
+                    >
+                      <Pencil />
+                    </Button>
+                    <Button
+                      variant="ghost"
+                      size="icon-sm"
+                      onClick={() => onDelete(p.id)}
+                      aria-label={t('common.delete')}
+                      className="text-muted-foreground hover:text-error"
+                    >
+                      <Trash2 />
+                    </Button>
+                  </>
+                }
+              />
             ))}
           </div>
         )}
