@@ -307,6 +307,18 @@ def test_install_lark_cli_surfaces_npm_error(toolbox_env, monkeypatch):
         toolbox.install_lark_cli()
 
 
+def test_install_lark_cli_translates_missing_curl(toolbox_env, monkeypatch):
+    """缺 curl 时包打印的是「配代理/公司镜像」的误导文案，须翻译成装 curl 的指引。"""
+    _fake_exe(toolbox_env["system_bin"], "npm")
+    npm_out = (
+        "npm error Failed to install lark-cli: spawnSync curl ENOENT\n"
+        "npm error   # 2. Point to a corporate npm mirror ..."
+    )
+    monkeypatch.setattr(toolbox, "_run", lambda cmd, timeout=30: (False, npm_out))
+    with pytest.raises(RuntimeError, match="缺 curl"):
+        toolbox.install_lark_cli()
+
+
 def test_install_lark_cli_links_from_npm_prefix(toolbox_env, monkeypatch):
     """装出的 cli 不在 PATH 上时，链接目标问 `npm prefix -g`，不按 node 树硬拼。
 

@@ -1,5 +1,15 @@
 # Changelog
 
+## [0.2.90] - 2026-07-29
+
+### Added
+- **`lumi feishu` CLI**：`config`（key=value 读写渠道配置，`app_secret=-` 走 stdin 不留 shell 历史，显示与写入语法可往返）、`diagnose`（接入体检三组并行跑：本地环境 / 凭证权限事件发布 / 妙记四项——妙记启用时才追加；任一 error 退出码非零）、`sync-skills`（飞书技能包导出到绑定项目）。与 desktop 渠道页读写同一份数据，供 agent 在对话里代劳接入。
+- **channels 配置热重载**：`lumi feishu config` 等进程外写入没有 RPC 通道，serve 侧新增 `watch_store` 轮询（3 秒查 mtime + 与最后应用的配置比对，内容真变了才 reload）——CLI 写完几秒内生效不用重启；lumi.json 其他分区的写入不会误弹飞书长连接；单轮失败不退出、不吞变更。
+- **setup-env 技能**（default 风格内置）：面向零基础用户的环境安装引导（uv / node / rg 体检-征得同意-逐个安装-复检），渐进式披露 `references/feishu.md` 承载飞书全程接入剧本——用户只做代劳不了的三件事（粘凭证 / 开放平台点批准发布 / 妙记设备码授权），其余 agent 跑命令；含 lark-cli 双侧配置（Lumi + `lark-cli config init`）、体检循环（可选权限也引导开通）、妙记设备码两段式（恒发 `verification_url` 链接不发二维码，明确压制 lark-cli 输出里要求展示二维码的 `hint` 指令）。
+
+### Fixed
+- **Docker 容器里装不上 lark-cli**：`@larksuite/cli` 的 postinstall 用系统 `curl` 下载真实二进制（无 wget/Node 兜底），而镜像基于 `python:3.12-slim` 没有 curl——失败时包打印的还是「配代理/公司镜像」的网络受限文案，把人引去查网络。Dockerfile 补装 curl；toolbox 安装失败命中 `curl ENOENT` 时直接报「系统缺 curl」，不再透传误导原文。
+
 ## [0.2.89] - 2026-07-29
 
 ### Added

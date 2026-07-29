@@ -9,9 +9,10 @@ from __future__ import annotations
 
 import asyncio
 from contextlib import asynccontextmanager
+from pathlib import Path
 
 from lumi.gateway.channels.feishu.bridge_pool import BridgePool
-from lumi.gateway.channels.store import load_feishu
+from lumi.gateway.channels.store import config_path, load_feishu
 from lumi.utils.logger import logger
 
 
@@ -26,6 +27,10 @@ class ChannelManager:
         self._pools: dict[str, BridgePool] = {}
         # 串行化 reload，挡住并发 save_channel 在主 loop 交错建出重复 channel。
         self._reload_lock = asyncio.Lock()
+        # 最后应用的飞书配置：watch_store 靠它判断磁盘变更是否真的动了本渠道——
+        # lumi.json 还有别的分区（providers 等），光看 mtime 会把无关写入
+        # 当成配置变更，白白弹一次飞书长连接。
+        self._applied = None
 
     async def reload(self, cfg=None) -> None:
         """按配置对齐运行态：飞书启用则重启传输、禁用则停并回收会话。
@@ -36,6 +41,7 @@ class ChannelManager:
             await self._apply_feishu(cfg if cfg is not None else load_feishu())
 
     async def _apply_feishu(self, cfg) -> None:
+        self._applied = cfg
         await self._stop_transport("feishu")  # 只停旧 WS 传输，不动会话池
         if not cfg.enabled:
             await self._drop_pool("feishu")  # 禁用 → 连进行中的会话一并回收
@@ -78,6 +84,32 @@ class ChannelManager:
         pool = self._pools.pop(name, None)
         if pool is not None:
             await pool.close_all()
+
+    async def watch_store(self, interval: float = 3.0) -> None:
+        """轮询 lumi.json，配置真变了才 reload——CLI（`lumi feishu config`）等
+        进程外写入没有 RPC 通道可通知，靠这里在几秒内热生效，不用重启 serve。
+        """
+        last_mtime = None
+        while True:
+            await asyncio.sleep(interval)
+            # 单轮失败不退出：这是 fire-and-forget 任务，异常逃逸会无声杀掉监视器，
+            # 之后所有 CLI 写入都静默不生效直到重启 serve
+            try:
+                mtime = Path(config_path()).stat().st_mtime_ns
+                if mtime == last_mtime:
+                    continue
+                cfg = load_feishu()
+                if cfg != self._applied:
+                    logger.info("[ChannelManager] 检测到 channels 配置变更，热重载")
+                    await self.reload(cfg)
+                # 成功处理完才推进：中途失败时保持旧值，下轮对同一次变更重试
+                last_mtime = mtime
+            except FileNotFoundError:
+                continue
+            except Exception:
+                logger.warning(
+                    "[ChannelManager] 配置监视一轮失败，下轮重试", exc_info=True
+                )
 
     async def stop_all(self) -> None:
         for name in list(self._channels):
@@ -123,9 +155,11 @@ manager = ChannelManager()
 
 @asynccontextmanager
 async def channels_runtime():
-    """serve lifespan 复用：进入时按配置起 channel，退出时全停。"""
+    """serve lifespan 复用：进入时按配置起 channel 并起配置监视，退出时全停。"""
     await manager.reload()
+    watcher = asyncio.create_task(manager.watch_store(), name="im-config-watch")
     try:
         yield
     finally:
+        watcher.cancel()
         await manager.stop_all()

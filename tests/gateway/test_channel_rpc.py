@@ -228,3 +228,80 @@ async def test_manager_concurrent_reload_serialized(monkeypatch, fake_channel):
     not_alive = [c for c in fake_channel.instances if c is not alive]
     assert all(c.stopped for c in not_alive)
     await m.stop_all()
+
+
+async def test_watch_store_hot_reloads_cli_write(fake_channel):
+    """进程外写入（`lumi feishu config`）没有 RPC 通道，watch_store 兜底热生效。"""
+    import asyncio
+
+    from lumi.gateway.channels.manager import ChannelManager
+
+    m = ChannelManager()
+    store.save_feishu(
+        {"enabled": True, "app_id": "x", "app_secret": "y", "workspace": "/w"}
+    )
+    await m.reload()
+    assert len(fake_channel.instances) == 1
+
+    watcher = asyncio.create_task(m.watch_store(interval=0.01))
+    store.save_feishu(
+        {"enabled": True, "app_id": "x2", "app_secret": "y", "workspace": "/w"}
+    )
+    await asyncio.sleep(0.1)
+    watcher.cancel()
+    assert fake_channel.instances[-1].config.app_id == "x2"
+    await m.stop_all()
+
+
+async def test_watch_store_survives_transient_error(fake_channel, monkeypatch):
+    """单轮失败不杀监视器、不吞变更：下轮对同一次 mtime 变更重试成功。"""
+    import asyncio
+
+    from lumi.gateway.channels import manager as mgr_mod
+    from lumi.gateway.channels.manager import ChannelManager
+
+    m = ChannelManager()
+    store.save_feishu(
+        {"enabled": True, "app_id": "x", "app_secret": "y", "workspace": "/w"}
+    )
+    await m.reload()
+
+    real_load = mgr_mod.load_feishu
+    calls = {"n": 0}
+
+    def flaky_load():
+        calls["n"] += 1
+        if calls["n"] == 1:
+            raise RuntimeError("transient")
+        return real_load()
+
+    monkeypatch.setattr(mgr_mod, "load_feishu", flaky_load)
+    watcher = asyncio.create_task(m.watch_store(interval=0.01))
+    store.save_feishu(
+        {"enabled": True, "app_id": "x2", "app_secret": "y", "workspace": "/w"}
+    )
+    await asyncio.sleep(0.15)
+    watcher.cancel()
+    assert calls["n"] >= 2  # 第一轮抛错后仍在跑
+    assert fake_channel.instances[-1].config.app_id == "x2"  # 变更没被吞
+    await m.stop_all()
+
+
+async def test_watch_store_ignores_unrelated_section_write(fake_channel):
+    """lumi.json 其他分区的写入只动 mtime 不动 channels——不该弹飞书长连接。"""
+    import asyncio
+
+    from lumi.gateway.channels.manager import ChannelManager
+
+    m = ChannelManager()
+    store.save_feishu(
+        {"enabled": True, "app_id": "x", "app_secret": "y", "workspace": "/w"}
+    )
+    await m.reload()
+
+    watcher = asyncio.create_task(m.watch_store(interval=0.01))
+    user_store.write_section("providers", {"acme": {}})
+    await asyncio.sleep(0.1)
+    watcher.cancel()
+    assert len(fake_channel.instances) == 1  # 未重启传输
+    await m.stop_all()

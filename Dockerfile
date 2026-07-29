@@ -3,7 +3,9 @@ FROM python:3.12-slim
 
 # rg 二进制：lumi 的内容搜索 shell out 调 `rg`（无则自动降级纯 Python）。
 # 用 Debian 预编译包，避免 ripgrep PyPI 包的 Rust 源码编译（已从依赖移除）；各架构自动选。
-RUN apt-get update && apt-get install -y --no-install-recommends ripgrep \
+# curl：@larksuite/cli 的 postinstall 用系统 curl 下载真实二进制（无 wget/Node 兜底），
+# 缺它时报出来的是包自己那段误导性的「配代理/公司镜像」文案。
+RUN apt-get update && apt-get install -y --no-install-recommends ripgrep curl \
     && rm -rf /var/lib/apt/lists/*
 
 RUN pip install --no-cache-dir uv

@@ -5,6 +5,9 @@
     lumi serve              # 启动 WebSocket 服务（供 desktop / web 前端连接）
     lumi env status         # 核心工具链（uv / node / rg）状态
     lumi env install [tool] # 装齐缺失项 / 装指定工具到工具箱
+    lumi feishu config      # 飞书渠道配置读写（key=value；app_secret=- 走 stdin）
+    lumi feishu diagnose    # 飞书接入体检（本地环境 + 凭证/权限/事件/发布）
+    lumi feishu sync-skills # 飞书技能包 → 渠道绑定项目的 .lumi/skills/
 """
 
 from __future__ import annotations
@@ -170,6 +173,129 @@ def env_install(
         raise typer.Exit(1) from e
     for status in results:
         _echo_tool(asdict(status))
+
+
+feishu_app = typer.Typer(
+    help="飞书渠道：配置读写与接入体检（与 desktop 渠道页同一份数据）"
+)
+app.add_typer(feishu_app, name="feishu")
+
+
+def _parse_channel_field(name: str, raw: str) -> object:
+    """key=value 预处理：只做 pydantic 做不了的两件事——未知字段当场拦（模型默认
+    忽略多余 key，拼错会静默丢配置）、list[str] 逗号拆分。标量强转与校验交给
+    save_feishu 的 model_validate（非法值走「保存失败」出口）。
+    """
+    from lumi.gateway.channels.config import FeishuChannelConfig
+
+    field = FeishuChannelConfig.model_fields.get(name)
+    if field is None:
+        known = ", ".join(FeishuChannelConfig.model_fields)
+        raise typer.BadParameter(f"未知字段: {name}（可用：{known}）")
+    if field.annotation == list[str]:
+        return [item for item in raw.split(",") if item]
+    return raw
+
+
+@feishu_app.command("config")
+def feishu_config(
+    pairs: Annotated[
+        list[str] | None,
+        typer.Argument(
+            help="key=value 逐个设置（如 app_id=cli_xxx enabled=true "
+            "allow_from=ou_1,ou_2）；不传则显示当前配置。app_secret=- 从 stdin 读入"
+        ),
+    ] = None,
+) -> None:
+    """读写飞书渠道配置（lumi.json 的 channels 分区，运行中的后端会自动应用）。"""
+    from lumi.gateway.channels import store
+
+    data = store.load_feishu().model_dump()
+    if not pairs:
+        secret = data["app_secret"]
+        # ${ENV} 引用不是密文，打码反而藏掉唯一有用的信息；短密文露前缀等于全露
+        if secret and not secret.startswith("${"):
+            data["app_secret"] = secret[:6] + "…" if len(secret) > 10 else "（已设置）"
+        for key, value in data.items():
+            # 与写入语法往返一致：bool 显示 true/false、列表逗号连接，照抄即可改回去
+            if isinstance(value, bool):
+                value = "true" if value else "false"
+            elif isinstance(value, list):
+                value = ",".join(value)
+            typer.echo(f"{key}: {value}")
+        typer.echo(f"配置文件: {store.config_path()}")
+        return
+
+    for pair in pairs:
+        key, sep, value = pair.partition("=")
+        if not sep:
+            raise typer.BadParameter(f"应为 key=value 形式: {pair}")
+        if key == "app_secret" and value == "-":
+            value = sys.stdin.readline().strip()
+        data[key] = _parse_channel_field(key, value)
+    try:
+        store.save_feishu(data)
+    except Exception as e:
+        # ValueError（启用未绑项目）带的是人话；ValidationError 取首条即可定位
+        typer.echo(f"保存失败: {e}", err=True)
+        raise typer.Exit(1) from e
+    typer.echo("已保存；运行中的 Lumi 后端会在几秒内自动应用")
+
+
+@feishu_app.command("sync-skills")
+def feishu_sync_skills() -> None:
+    """把 lark-cli 内嵌的飞书技能包导出到渠道绑定项目的 .lumi/skills/（按版本增量）。"""
+    from lumi.gateway.channels import store
+    from lumi.gateway.toolbox import sync_lark_skills
+
+    workspace = store.load_feishu().workspace
+    if not workspace:
+        typer.echo("尚未绑定项目：先 lumi feishu config workspace=/项目路径", err=True)
+        raise typer.Exit(1)
+    try:
+        updated = sync_lark_skills(None, workspace)
+    except RuntimeError as e:
+        typer.echo(str(e), err=True)
+        raise typer.Exit(1) from e
+    typer.echo(f"已同步 {updated} 个技能到 {workspace}/.lumi/skills")
+
+
+@feishu_app.command("diagnose")
+def feishu_diagnose() -> None:
+    """接入体检：本地环境 + 凭证 / 权限 / 事件 / 发布，任一 error 则退出码非零。
+
+    妙记已启用时追加妙记四项（lark-cli 配置 / 用户授权 / 妙记权限 / 事件订阅）。
+    """
+    from concurrent.futures import ThreadPoolExecutor
+
+    from lumi.gateway.channels import store
+    from lumi.gateway.channels.feishu import minutes
+    from lumi.gateway.channels.feishu.setup import diagnose, local_env_checks
+
+    cfg = store.load_feishu()
+    # 三组体检互相独立（各自 spawn lark-cli 子进程 / 走开放平台网络），串行要
+    # 2-6s；desktop RPC 同源路径已是并行（channel_rpc），CLI 不该是退化版
+    with ThreadPoolExecutor(max_workers=3) as pool:
+        local = pool.submit(local_env_checks, cfg.workspace)
+        remote = pool.submit(diagnose, cfg.app_id, cfg.app_secret)
+        extra = (
+            pool.submit(minutes.diagnose, cfg.app_id) if cfg.minutes_enabled else None
+        )
+        checks = local.result() + remote.result() + (extra.result() if extra else [])
+    marks = {"ok": "✓", "warn": "!", "error": "✗"}
+    for check in checks:
+        detail = " ".join(filter(None, [check["detail"], check["emphasis"]]))
+        mark = marks[check["tone"]]
+        typer.echo(f"[{mark}] {check['name']}" + (f"  {detail}" if detail else ""))
+        for label, key in (
+            ("链接", "fix_url"),
+            ("提示", "fix_note"),
+            ("命令", "fix_cmd"),
+        ):
+            if check[key]:
+                typer.echo(f"    {label}: {check[key]}")
+    if any(c["tone"] == "error" for c in checks):
+        raise typer.Exit(1)
 
 
 def _export_lumi_bin() -> None:

@@ -443,6 +443,13 @@ def install_lark_cli(progress: ProgressFn | None = None) -> ToolStatus:
         progress("安装 lark-cli", None)
     ok, out = _run([npm.path, "install", "-g", _LARK_PKG], timeout=600)
     if not ok:
+        # 包的 postinstall 用系统 curl 下载真实二进制，缺 curl 时它打印的却是
+        # 「配代理/公司镜像」的网络受限文案——按原文透传会把人引去查网络
+        if "curl ENOENT" in out:
+            raise RuntimeError(
+                "npm 安装 lark-cli 失败：系统缺 curl（安装脚本靠它下载二进制），"
+                "请先安装 curl 后重试"
+            )
         # 原文带出来：权限、代理、registry 不可达各有各的下一步，笼统一句「安装失败」
         # 只会让用户反复点同一个按钮
         raise RuntimeError(f"npm 安装 lark-cli 失败: {out.strip()[-300:]}")
