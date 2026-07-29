@@ -3,12 +3,15 @@
 用法:
     lumi -p "query"         # 非交互模式：执行 prompt 后退出
     lumi serve              # 启动 WebSocket 服务（供 desktop / web 前端连接）
+    lumi env status         # 核心工具链（uv / node / rg）状态
+    lumi env install [tool] # 装齐缺失项 / 装指定工具到工具箱
 """
 
 from __future__ import annotations
 
 import os
 import sys
+from dataclasses import asdict
 from typing import Annotated
 
 import typer
@@ -86,6 +89,7 @@ def serve(
     # 漂移——否则 dev sidecar 从 Lumi 仓库拉起时，仓库自己的 .lumi 会被发现链当成
     # 全局层，泄漏进所有项目的会话与项目主页。项目专属配置走会话级 project 层
     # （config_layers），显式 LUMI_CONFIG_DIR 仍最高优先（容器/测试用）。
+    # 工具箱位置无需在此操心：bin_dir 自己就是机器级的（LumiConfig.toolbox_dir）。
     if not os.environ.get("LUMI_CONFIG_DIR"):
         from pathlib import Path
 
@@ -97,6 +101,7 @@ def serve(
     from lumi.gateway.toolbox import inject_path
 
     inject_path()
+    _export_lumi_bin()
 
     import uvicorn
 
@@ -106,6 +111,81 @@ def serve(
         _watch_parent_exit()
     ws.app.state.token = token
     uvicorn.run(ws.app, host=host, port=port)
+
+
+# ------------------------------------------------------------------
+# 环境工具箱：与 desktop「设置 → 环境」同一套 toolbox 实现的命令行入口。
+# agent 在会话里自助装环境（经 LUMI_BIN 回调）与无 GUI 的 serve 机器都走这里。
+# ------------------------------------------------------------------
+
+env_app = typer.Typer(help="环境工具箱：核心工具链（uv / node / rg）的探测与安装")
+app.add_typer(env_app, name="env")
+
+_SOURCE_TEXT = {"system": "系统", "toolbox": "工具箱", "missing": "缺失"}
+
+
+def _echo_tool(tool: dict) -> None:
+    version = f" v{tool['version']}" if tool["version"] else ""
+    line = f"{tool['name']}: {_SOURCE_TEXT[tool['source']]}{version} {tool['path']}"
+    typer.echo(line.rstrip())
+
+
+@env_app.command("status")
+def env_status() -> None:
+    """列出核心工具链状态（系统已有的永远优先，工具箱不产生影子副本）。"""
+    from lumi.gateway.toolbox import status_all
+
+    state = status_all()
+    for tool in state["tools"]:
+        _echo_tool(tool)
+    typer.echo(f"工具箱目录: {state['bin_dir']}")
+
+
+@env_app.command("install")
+def env_install(
+    tool: Annotated[
+        str, typer.Argument(help="uv / node / rg；留空则装齐全部缺失项")
+    ] = "",
+) -> None:
+    """下载安装核心工具到工具箱目录（免 sudo、不碰系统全局；已装的跳过）。"""
+    from lumi.gateway.toolbox import CORE_TOOLS, install_missing
+
+    if tool and tool not in CORE_TOOLS:
+        raise typer.BadParameter(f"未知工具: {tool}（可选：{' / '.join(CORE_TOOLS)}）")
+
+    last_phase = ""
+
+    def progress(phase: str, pct: float | None) -> None:
+        # 只在阶段切换时打一行：百分比回调按 64KB 块触发，逐条打出来会淹没调用方
+        nonlocal last_phase
+        if phase != last_phase:
+            last_phase = phase
+            typer.echo(f"… {phase}")
+
+    try:
+        results = install_missing(progress, (tool,) if tool else CORE_TOOLS)
+    except Exception as e:
+        # 下载失败（断网 / 代理 / GitHub 不可达）是常态，栈回溯对调用方没有信息量
+        typer.echo(f"安装失败: {e}", err=True)
+        raise typer.Exit(1) from e
+    for status in results:
+        _echo_tool(asdict(status))
+
+
+def _export_lumi_bin() -> None:
+    """把本 CLI 的可执行入口暴露为 ``LUMI_BIN``，供 agent 子进程回调（与 inject_path 同处调用）。
+
+    打包版后端躺在 app 的 resources 目录里、不在 PATH 上，agent 的 shell 无从定位它；
+    dev 下则是 venv 里的 lumi 脚本。
+
+    子进程的**配置目录**不在这里传：显式 ``LUMI_CONFIG_DIR``（容器/测试）本就随环境
+    继承下去，没设时父子各自 ``_pin_user_config_dir`` 钉到同一个 ``~/.lumi``。硬导出
+    反而会波及所有子进程——嵌套的 ``lumi -p`` 会被钉在 ``~/.lumi``，丢掉它本该发现的
+    项目 ``.lumi/``（prompts / skills / agents）。
+    """
+    os.environ["LUMI_BIN"] = os.path.abspath(
+        sys.executable if getattr(sys, "frozen", False) else sys.argv[0]
+    )
 
 
 def _watch_parent_exit() -> None:
@@ -153,6 +233,7 @@ def _run_headless(
         from lumi.gateway.toolbox import inject_path
 
         inject_path()
+        _export_lumi_bin()
 
         bridge = AgentBridge()
         try:

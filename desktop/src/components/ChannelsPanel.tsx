@@ -80,43 +80,66 @@ const emptyFeishu = (): FeishuConfig => ({
 })
 
 // 渠道面板（设置 → 渠道）。列表视图：各 IM 渠道卡片（状态灯 + 开关 + 编辑）；
-// 表单视图：飞书配置（凭证 / 审批模式 / 群策略 / 白名单）。配置存后端 ~/.lumi/lumi.json，
-// 保存即实时停旧起新。
+// 表单视图：飞书配置（凭证 / 审批模式 / 群策略 / 白名单）。配置存后端 lumi.json
+// （绝对路径由 get_channels 下发），保存即实时停旧起新。
 export function ChannelsPanel({
   machines,
   gwFor,
+  active = true,
+  onNavigate,
 }: {
   machines: { id: string; name: string }[]
   gwFor: (id: string) => Gateway | undefined
+  // 本 tab 是否可见。面板常驻挂载（保住编辑中的凭证），取数与轮询只在可见时跑
+  active?: boolean
+  // 体检项的修复动作不在本页时的跳转（如缺 Node.js → 设置 → 环境）。带上当前机器：
+  // 体检跑在哪台机器上，就该去哪台机器的环境页装，否则装到本机而红灯照旧
+  onNavigate?: (tab: string, machine: string) => void
 }) {
   const [machine, setMachine] = useState('local')
   const [list, setList] = useState<ChannelInfo[]>([])
   const [providers, setProviders] = useState<ProviderProfile[]>([])
   const [editing, setEditing] = useState<FeishuConfig | null>(null) // null = 列表视图
+  // 凭证落盘的绝对路径，由 get_channels 下发（渲染见 ConfigPath）
+  const [configPath, setConfigPath] = useState('')
 
   const gw = gwFor(machine)
   const reload = useCallback(() => {
-    gwFor(machine)
-      ?.getChannels()
-      .then((r) => setList(r.channels ?? []))
-      .catch(() => setList([]))
+    // 路径与列表恒同生共死：机器不可达（无 gateway / 请求失败）时只清列表的话，
+    // 文案会变成「凭证存该机器的 <上一台机器的路径>」
+    const clear = () => {
+      setList([])
+      setConfigPath('')
+    }
+    const target = gwFor(machine)
+    if (!target) return clear()
+    target
+      .getChannels()
+      .then((r) => {
+        setList(r.channels ?? [])
+        setConfigPath(r.config_path ?? '')
+      })
+      .catch(clear)
   }, [gwFor, machine])
 
-  // 渠道连接是异步的（enable 后先 connecting 再 connected/error），挂载期间轮询
-  // 保持状态新鲜；get_channels 只读内存状态，开销可忽略
+  // 渠道连接是异步的（enable 后先 connecting 再 connected/error），可见期间轮询
+  // 保持状态新鲜。本面板在别的 tab 下仍挂着（forceMount 保住编辑中的凭证），故取数
+  // 一律以 active 为门——否则用户在「外观」页停留时，这里照样每 3 秒发一次 RPC
   useEffect(() => {
+    if (!active) return
     reload()
     const timer = setInterval(reload, 3000)
     return () => clearInterval(timer)
-  }, [reload])
+  }, [active, reload])
 
   // 该机器的供应商 profiles（渠道「模型 + 思考」配置的模型清单与思考能力来源）
   useEffect(() => {
+    if (!active) return
     gwFor(machine)
       ?.listProviders()
       .then((r) => setProviders(r.profiles ?? []))
       .catch(() => setProviders([]))
-  }, [gwFor, machine])
+  }, [active, gwFor, machine])
 
   const feishu = list.find((c) => c.name === 'feishu')
 
@@ -142,8 +165,9 @@ export function ChannelsPanel({
         title="渠道"
         desc={
           <>
-            把 Lumi 接入飞书等 IM。凭证存该机器的 <code>~/.lumi/lumi.json</code>（限本人可读），
-            保存后实时重连。全程 AI 审批，仅保留 ask 询问卡片。
+            把 Lumi 接入飞书等 IM。凭证存该机器的{' '}
+            <ConfigPath path={configPath} />
+            （限本人可读），保存后实时重连。全程 AI 审批，仅保留 ask 询问卡片。
           </>
         }
       >
@@ -180,6 +204,8 @@ export function ChannelsPanel({
           initial={editing}
           gw={gw}
           providers={providers}
+          configPath={configPath}
+          onNavigate={onNavigate && ((tab: string) => onNavigate(tab, machine))}
           onCancel={() => setEditing(null)}
           onSave={save}
         />
@@ -266,12 +292,16 @@ function FeishuForm({
   initial,
   gw,
   providers,
+  configPath,
+  onNavigate,
   onCancel,
   onSave,
 }: {
   initial: FeishuConfig
   gw?: Gateway
   providers: ProviderProfile[]
+  configPath: string // 凭证落盘的绝对路径（空 = 尚未取到，文案退回不带路径的说法）
+  onNavigate?: (tab: string) => void
   onCancel: () => void
   onSave: (cfg: FeishuConfig) => void
 }) {
@@ -340,7 +370,16 @@ function FeishuForm({
         <Field label="App ID" hint="支持 ${FEISHU_APP_ID} 引用环境变量">
           <TextInput value={cfg.app_id} onChange={(e) => set({ app_id: e.target.value })} placeholder="cli_…" />
         </Field>
-        <Field label="App Secret" hint="chmod 600 存 ~/.lumi/lumi.json，不写入项目目录">
+        <Field
+          label="App Secret"
+          hint={
+            <>
+              chmod 600 存{' '}
+              <ConfigPath path={configPath} />
+              ，不写入项目目录
+            </>
+          }
+        >
           <TextInput password value={cfg.app_secret} onChange={(e) => set({ app_secret: e.target.value })} placeholder="●●●●" />
         </Field>
 
@@ -357,6 +396,7 @@ function FeishuForm({
             subject="机器人接入"
             ready="已就绪 · 可正常收发消息"
             onFix={onFix}
+            onNavigate={onNavigate}
             fixProgress={fixProgress}
           />
         </Field>
@@ -440,6 +480,15 @@ function MinutesSection({
 const panelKey = (checks: DiagnoseCheck[] | null) =>
   checks?.map((c) => `${c.key}${c.tone}`).join() ?? 'none'
 
+// 凭证落盘路径：后端给绝对路径（前端拼 ~/.lumi 既看不懂，--config-dir 时还会说谎），
+// 尚未取到时退回一句不带路径的说法。两处文案共用一份，免得各写各的措辞
+function ConfigPath({ path }: { path: string }) {
+  return path ? <code className="break-all">{path}</code> : <>本机配置文件</>
+}
+
+// Check.fix_nav 的取值 → 设置面板名。检查行是各链路共用的，标签只认 tab、不认具体检查
+const TAB_LABEL: Record<string, string> = { env: '环境' }
+
 // 逐项体检面板：机器人接入与妙记链路共用。正常态收成一行，异常时自动展开定位到具体步骤。
 // subject 派生出「正在检查 X…」「检查 X」，只有就绪语（ready）各链路不同
 function CheckPanel({
@@ -450,12 +499,15 @@ function CheckPanel({
   subject,
   ready,
   onFix,
+  onNavigate,
   fixProgress,
 }: ReturnType<typeof useDiagnose> & {
   subject: string
   ready: string
   // 就地修复：check.fix_action 非空时渲染一键安装按钮 / 进行中的行内进度
   onFix?: (action: EnvInstallTarget) => void
+  // 跳转修复：check.fix_nav 非空时渲染「去那个面板」的按钮
+  onNavigate?: (tab: string) => void
   fixProgress?: Record<string, EnvProgress>
 }) {
   const bad = checks?.filter((c) => c.tone === 'error') ?? []
@@ -529,7 +581,12 @@ function CheckPanel({
                   <span className="h-px flex-1 bg-line/45" />
                 </div>
               )}
-              <CheckRow check={c} onFix={onFix} progress={fixProgress?.[c.fix_action]} />
+              <CheckRow
+                check={c}
+                onFix={onFix}
+                onNavigate={onNavigate}
+                progress={fixProgress?.[c.fix_action]}
+              />
             </div>
           ))}
         </div>
@@ -558,10 +615,12 @@ function StatusDot({ tone }: { tone: CheckTone }) {
 function CheckRow({
   check,
   onFix,
+  onNavigate,
   progress,
 }: {
   check: DiagnoseCheck
   onFix?: (action: EnvInstallTarget) => void
+  onNavigate?: (tab: string) => void
   progress?: EnvProgress
 }) {
   // const 收窄让闭包里也保持 EnvInstallTarget 类型（直接用 check.fix_action 在回调内不收窄）
@@ -598,6 +657,17 @@ function CheckRow({
         )}
         {check.fix_note && (
           <div className="text-[11px] text-muted-foreground mt-1">{check.fix_note}</div>
+        )}
+        {/* 修复入口不在本页（如缺 Node.js）：送到唯一的那个入口，不在此复制一份安装按钮。
+            标签取自 tab 名而非某一条检查的内容——这行是各条链路共用的，具体做什么由
+            后端写在 detail / fix_note 里（同 fix_url 的「去开放平台配置」） */}
+        {check.fix_nav && onNavigate && TAB_LABEL[check.fix_nav] && (
+          <button
+            onClick={() => onNavigate(check.fix_nav)}
+            className="mt-1.5 inline-flex items-center gap-1 rounded-lg border border-primary/40 bg-primary/10 px-2.5 py-1 text-[11px] text-primary hover:bg-primary/20"
+          >
+            去「{TAB_LABEL[check.fix_nav]}」→
+          </button>
         )}
       </div>
       {/* 就地修复按钮：一键安装（cli / 技能包），进行中由上方进度条替代 */}

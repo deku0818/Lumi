@@ -164,10 +164,16 @@ def status_all() -> dict:
 
     飞书组件不在此列——它的检测有项目维度（技能包按项目装），归渠道体检
     （diagnose_feishu_setup 的本地环境组），环境页保持纯机器级视图。
+
+    bin_dir 下发本机绝对路径（Windows 上带盘符与反斜杠）：``~/.lumi/bin`` 这种
+    写法非技术用户看不懂，路径该由知道真值的一侧给出，而非前端硬编码。
     """
     # 每个 detect 一次 --version 子进程，并行探测把墙钟压到单次
     with ThreadPoolExecutor(max_workers=len(CORE_TOOLS)) as pool:
-        return {"tools": [asdict(s) for s in pool.map(detect, CORE_TOOLS)]}
+        return {
+            "tools": [asdict(s) for s in pool.map(detect, CORE_TOOLS)],
+            "bin_dir": str(get_config().bin_dir),
+        }
 
 
 # ── 下载与解压 ──
@@ -305,7 +311,7 @@ def install(name: str, progress: ProgressFn | None = None) -> ToolStatus:
         if progress:
             progress(f"安装 {name}", None)
         if name == "node":
-            node_root = get_config().config_dir / "node"
+            node_root = get_config().toolbox_dir / "node"
             _extract_tree(archive, node_root)
             for cmd in ("node", "npm", "npx"):
                 _link(_node_tool_path(node_root, cmd), cmd)
@@ -325,21 +331,24 @@ def _node_tool_path(node_root: Path, name: str) -> Path:
     return node_root / "bin" / name
 
 
-def install_missing(progress: ProgressFn | None = None) -> list[ToolStatus]:
-    """「一键装齐」：只装 missing 的核心工具，system / toolbox 项跳过。"""
-    results = []
-    for name in CORE_TOOLS:
-        status = detect(name)
-        results.append(
-            install(name, progress) if status.source == "missing" else status
-        )
-    return results
+def install_missing(
+    progress: ProgressFn | None = None, names: tuple[str, ...] = CORE_TOOLS
+) -> list[ToolStatus]:
+    """只装 missing 的工具，system / toolbox 项原样返回。
+
+    「跳过已有的」这条规矩只此一处：``install`` 本身是无条件覆盖，各调用方各写一遍
+    的话，漏写的那一个就会给系统已装的工具在工具箱里留一份 PATH 上永远轮不到的
+    影子副本。names 收窄到单个工具即「装这一个」（CLI 与桌面的逐项安装走同一条路）。
+    """
+    # 探测各是一次 --version 子进程，并行把这段墙钟压到单次（同 status_all）
+    with ThreadPoolExecutor(max_workers=len(names)) as pool:
+        statuses = list(pool.map(detect, names))
+    return [install(s.name, progress) if s.source == "missing" else s for s in statuses]
 
 
 # ── 飞书组件（lark-cli + 技能包） ──
 
 _LARK_PKG = "@larksuite/cli"
-_LARK_RELEASES = "https://api.github.com/repos/larksuite/cli/releases/latest"
 
 
 def lark_skill_versions(cli_path: str) -> dict[str, str] | None:
@@ -402,39 +411,46 @@ def skills_status(embedded: dict[str, str], project_dir: str = "") -> dict:
     return {"total": len(embedded), "installed": installed, "outdated": outdated}
 
 
-def _install_lark_cli_binary(progress: ProgressFn | None) -> None:
-    """npm 不可用时的降级：GitHub Releases 直下单二进制。"""
-    with urllib.request.urlopen(_LARK_RELEASES, timeout=30) as resp:
-        release = json.load(resp)
-    os_name, arch = _plat()
-    goarch = "arm64" if arch == "arm64" else "amd64"
-    goos = {"darwin": "darwin", "linux": "linux", "win": "windows"}[os_name]
-    suffix = f"{goos}-{goarch}.{_archive_ext(os_name)}"
-    asset = next(a for a in release["assets"] if a["name"].endswith(suffix))
-    with tempfile.TemporaryDirectory() as tmp:
-        archive = Path(tmp) / asset["name"]
-        _download(asset["browser_download_url"], archive, progress, "下载 lark-cli")
-        _extract_binary(archive, "lark-cli")
+def _npm_global_bin(npm_path: str, name: str) -> Path:
+    """npm 全局装出的可执行文件路径——**问 npm 要 prefix，不按 node 树硬拼**。
+
+    prefix 可被用户级 `.npmrc` 改掉（Windows 上指到 `%APPDATA%\\npm` 很常见），
+    猜错会链出一个探测得到、一跑就报「找不到路径」的幽灵 shim：体检显示 lark-cli
+    已安装，而技能包同步、妙记取数全部静默失败。
+    """
+    ok, out = _run([npm_path, "prefix", "-g"])
+    if not ok:
+        raise RuntimeError(f"读取 npm 全局目录失败: {out.strip()[-200:]}")
+    target = _node_tool_path(Path(out.strip()), name)
+    if not target.exists():
+        raise RuntimeError(f"npm 报告安装成功，但 {target} 不存在")
+    return target
 
 
 def install_lark_cli(progress: ProgressFn | None = None) -> ToolStatus:
-    """安装 lark-cli（机器级）：ensure npm → npm 装（失败降级 GitHub 直下二进制）。"""
+    """安装 lark-cli（机器级），只走 npm —— 它的官方分发渠道就是 npm 包。
+
+    缺 npm 不在此处代装：核心工具链的安装入口是「设置 → 环境」，在渠道页偷偷拉一个
+    几十 MB 的 Node 下载，用户既没点过也不知道在等什么。故抛错，由体检把人引过去。
+    """
     cli = detect("lark-cli")
     if cli.source != "missing":
         return cli
     npm = detect("npm")
     if npm.source == "missing":
-        install("node", progress)
-        npm = detect("npm")
+        raise RuntimeError("未检测到 npm，请先在「设置 → 环境」安装 Node.js")
     if progress:
         progress("安装 lark-cli", None)
     ok, out = _run([npm.path, "install", "-g", _LARK_PKG], timeout=600)
     if not ok:
-        logger.warning(f"npm 安装 lark-cli 失败，降级直下二进制: {out[:200]}")
-        _install_lark_cli_binary(progress)
-    elif npm.source == "toolbox":
-        # 工具箱 npm 的全局 prefix 即 node/ 树，装出的 cli 需接入 bin_dir
-        _link(_node_tool_path(get_config().config_dir / "node", "lark-cli"), "lark-cli")
+        # 原文带出来：权限、代理、registry 不可达各有各的下一步，笼统一句「安装失败」
+        # 只会让用户反复点同一个按钮
+        raise RuntimeError(f"npm 安装 lark-cli 失败: {out.strip()[-300:]}")
+    cli = detect("lark-cli")
+    if cli.source != "missing":
+        return cli
+    # 装成功却探测不到 = npm 的全局 bin 不在 PATH 上（工具箱 npm 恒如此），接入 bin_dir
+    _link(_npm_global_bin(npm.path, "lark-cli"), "lark-cli")
     return detect("lark-cli")
 
 
@@ -446,7 +462,7 @@ def sync_lark_skills(progress: ProgressFn | None = None, project_dir: str = "") 
     embedded = lark_skill_versions(cli.path)
     if embedded is None:
         raise RuntimeError(
-            "无法读取 lark-cli 内嵌技能清单（版本过旧？请先升级 lark-cli）"
+            "无法读取 lark-cli 内嵌技能清单：版本过旧或安装不完整，请重装 lark-cli"
         )
     skills_dir = resolve_skills_dir(project_dir)
     updated = 0

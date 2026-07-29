@@ -70,6 +70,9 @@ export function McpPanel({
   const [scope, setScope] = useState<McpScope>('global')
   const [project, setProject] = useState('') // 项目作用范围下选中的项目路径
   const [servers, setServers] = useState<McpServers>({})
+  // 当前 scope 的配置文件绝对路径，由 list_mcp_servers 下发（前端拼 ~/.lumi 既
+  // 看不懂又在 --config-dir 时说谎）。未选项目时无目标文件，故为空
+  const [path, setPath] = useState('')
   const [status, setStatus] = useState<Record<string, McpServerStatus>>({})
   const [poolLoading, setPoolLoading] = useState(false)
   const [editing, setEditing] = useState<string | null | undefined>(undefined) // undefined=列表；null=新增；string=编辑该 server
@@ -96,14 +99,20 @@ export function McpPanel({
   }, [gwFor, machine, project, inProject])
 
   const reload = useCallback(() => {
-    if (inProject && !project) {
+    // 路径与列表恒同生共死：只清列表的话，头部会继续显示上一个 scope / 机器的
+    // 绝对路径，正是这次要消灭的「路径说谎」
+    const clear = () => {
       setServers({})
-      return
+      setPath('')
     }
+    if (inProject && !project) return clear()
     gwFor(machine)
       ?.listMcpServers(scope, inProject ? project : '')
-      .then((r) => setServers(r.servers ?? {}))
-      .catch(() => setServers({}))
+      .then((r) => {
+        setServers(r.servers ?? {})
+        setPath(r.path ?? '')
+      })
+      .catch(clear)
     fetchStatus()
   }, [gwFor, machine, scope, project, inProject, fetchStatus])
 
@@ -163,9 +172,6 @@ export function McpPanel({
     save(name, on ? rest : { ...rest, disabled: true })
   }
 
-  const path = inProject
-    ? `${project || '<项目>'}/.lumi/mcp_server.json`
-    : '~/.lumi/mcp_server.json'
   const names = Object.keys(servers)
 
   return (
@@ -185,7 +191,11 @@ export function McpPanel({
           ]}
         />
         {inProject && <ProjectSelect gw={gw} value={project} onChange={setProject} />}
-        <span className="ml-auto min-w-0 truncate font-mono text-[10.5px] text-muted-foreground">
+        {/* 绝对路径可能很长（Windows 尤甚），行内截断 + title 悬停看全 */}
+        <span
+          title={path}
+          className="ml-auto min-w-0 truncate font-mono text-[10.5px] text-muted-foreground"
+        >
           {path}
         </span>
       </div>

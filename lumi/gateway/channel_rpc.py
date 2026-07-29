@@ -10,7 +10,7 @@ import asyncio
 
 from lumi.gateway.channels.feishu import minutes, setup
 from lumi.gateway.channels.manager import manager
-from lumi.gateway.channels.store import save_feishu
+from lumi.gateway.channels.store import config_path, save_feishu
 
 CHANNEL_METHODS = frozenset(
     {
@@ -25,7 +25,12 @@ CHANNEL_METHODS = frozenset(
 async def dispatch_channel(method: str, params: dict) -> dict:
     """执行一个 channel RPC 方法（method 已确认属于 CHANNEL_METHODS）。"""
     if method == "get_channels":
-        return {"channels": manager.list_channels()}
+        # config_path：凭证落盘的绝对路径，面板原样展示（`~/.lumi/lumi.json` 这种
+        # 写法非技术用户看不懂，Windows 上尤甚）
+        return {
+            "channels": manager.list_channels(),
+            "config_path": config_path(),
+        }
 
     name = params.get("name") or "feishu"
     if name != "feishu":

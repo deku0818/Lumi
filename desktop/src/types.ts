@@ -70,6 +70,7 @@ export interface WireEventPayloads extends Record<WireEventType, object> {
   'env.state': {
     tools: EnvToolStatus[]
     target: string
+    bin_dir: string
     error?: { target: string; message: string }
   }
 }
@@ -93,6 +94,8 @@ export interface EnvStatus {
   tools: EnvToolStatus[]
   // 进行中的安装 target（空 = 空闲），面板打开时据此恢复进行中态
   installing: string
+  // 该机器工具箱安装目录的绝对路径（后端给真值，前端不拼 ~/.lumi）
+  bin_dir: string
 }
 // env.progress payload 去掉 target 的形状，进度状态机与进度条组件共用
 export type EnvProgress = { phase: string; percent: number }
@@ -408,6 +411,8 @@ export interface DiagnoseCheck {
   emphasis: string
   // 可就地执行的修复动作（env_install 的 target）；空 = 无
   fix_action: EnvInstallTarget | ''
+  // 修复动作不在本页时，引导跳转到设置的另一个面板（目前只有 'env'）；空 = 无
+  fix_nav: string
   // 详情列表里的分组标签（如「本地环境」）；空 = 不分组
   group: string
 }

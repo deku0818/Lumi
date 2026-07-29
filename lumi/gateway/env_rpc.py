@@ -19,8 +19,8 @@ ENV_METHODS = frozenset({"env_status", "env_install"})
 _TARGETS = frozenset({"all", "lark-cli", "feishu-skills", *toolbox.CORE_TOOLS})
 
 # 进行中的安装目标（空串 = 空闲）。任一安装进行中即拒绝新安装（全局互斥）：
-# target 之间有重叠（all ⊃ uv/rg/node，lark-cli 内部装 node），并行会让两条线程
-# 写同一二进制/rmtree 同一棵树。单值即互斥不变量本身，也直接下发给 env_status
+# target 之间有重叠（all ⊃ uv/rg/node，lark-cli 经 npm 写进 node 树），并行会让
+# 两条线程写同一二进制/rmtree 同一棵树。单值即互斥不变量本身，也直接下发给 env_status
 # 供前端恢复进行中态（对齐 get_mcp_status 的 loading 范式）。
 _installing = ""
 # 事件循环只弱引用 task，自持引用避免分钟级安装任务在执行中被 GC（同 BroadcastHub._spawn）
@@ -69,14 +69,14 @@ async def _run_install(target: str, project: str = "") -> None:
 
     error = ""
     try:
-        if target == "all":
-            await asyncio.to_thread(toolbox.install_missing, progress)
-        elif target == "lark-cli":
+        if target == "lark-cli":
             await asyncio.to_thread(toolbox.install_lark_cli, progress)
         elif target == "feishu-skills":
             await asyncio.to_thread(toolbox.sync_lark_skills, progress, project)
         else:
-            await asyncio.to_thread(toolbox.install, target, progress)
+            # all = 全部核心工具，其余 = 指定的那一个；「已装的跳过」在 install_missing 里
+            names = toolbox.CORE_TOOLS if target == "all" else (target,)
+            await asyncio.to_thread(toolbox.install_missing, progress, names)
     except Exception as e:
         logger.warning(f"安装 {target} 失败: {e}")
         error = str(e)

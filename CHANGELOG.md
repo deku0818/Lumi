@@ -1,5 +1,27 @@
 # Changelog
 
+## [0.2.88] - 2026-07-29
+
+### Added
+- **`lumi env` 命令行入口**：`lumi env status` 列出核心工具链（uv / node / rg）各自来源与版本，`lumi env install [uv|node|rg]` 装缺失项。与桌面「设置 → 环境」同一套 toolbox 实现，供无 GUI 的 serve 机器使用，也让 agent 能在会话里自助把环境装齐——打包版后端不在 PATH 上，故 serve/headless 启动时把自身可执行入口导出为 `LUMI_BIN` 供子进程回调。
+
+### Fixed
+- **工具箱位置会跟着启动目录漂移**：桌面端装好的工具，在带 `.lumi/` 的项目里跑命令行却报「缺失」。根因是 `bin_dir` 由配置目录派生，而配置目录走 cwd 发现链——同一台机器于是有了好几个工具箱，用户重装第二份到谁也不用的地方。工具箱改为**机器级**（`LumiConfig.toolbox_dir`：显式 `--config-dir` / `LUMI_CONFIG_DIR` 优先，否则恒 `~/.lumi`），配置层本身仍按发现链走。此前 headless 运行（`lumi -p`）从未做过任何兜底，是这条链上最先受害的入口。
+- **lark-cli 装不上且看不出原因**（Windows 尤甚）：npm 安装成功后，接入工具箱的链接目标是按「npm 全局 prefix = 工具箱 node 树」硬拼的，而 prefix 可被用户级 `.npmrc` 改掉（Windows 常指到 `%APPDATA%\npm`）——于是建出一个探测得到、一跑就报「找不到路径」的幽灵 shim：体检显示 lark-cli 已安装，技能包同步与妙记取数却全部静默失败。改为向 `npm prefix -g` 问真实位置并在链接前校验存在。
+- 同一处的失败原因也一直被吞：npm 失败后静默降级去 GitHub 直下二进制，而降级分支的 `next(...)` 抛的是 `StopIteration`，UI 上只剩一句「安装失败:」后面空白。现在只走 npm（它本就是 lark-cli 的官方分发渠道），失败带出 npm 原文。
+- **单项安装不跳过已装的工具**：`install()` 是无条件覆盖，系统已有 Node 时逐项安装会白下几十 MB，并在工具箱留一份 PATH 上永远轮不到的影子副本。「已装的跳过」下沉到 `install_missing`，命令行与桌面按钮共用，探测阶段顺带改为并行。
+- **面板显示的路径可能说谎**：机器不可达或请求失败时只清了列表、没清路径，文案会变成「凭证存该机器的 <上一台机器的路径>」。
+- `load_skills/load_agents(directory=...)` 的语义与 `change_detector` 的 `explicit_dir`（「只扫这一个目录」）不符——它只覆盖全局层，风格内置层照样合并进来。
+
+### Changed
+- **缺 npm 时不再在渠道页代装 Node.js**：接入体检那一行改为把用户引到「设置 → 环境」（新增 `Check.fix_nav`，跳转带上体检所在的机器）。核心工具链的安装入口只保留环境页一个，不在渠道页复制第二份。
+- **配置文件路径由后端下发真值**（`get_channels.config_path` / `list_mcp_servers.path` / `env_status.bin_dir` / `env.state.bin_dir`），面板不再前端硬拼 `~/.lumi/…`——非技术用户看不懂，且 `--config-dir` 时会说谎。
+- 设置弹窗的渠道面板改为常驻挂载（跳去环境页装 Node 再回来，编辑中的飞书凭证不会丢），取数与 3 秒轮询以「本 tab 是否可见」为门。
+
+### Tests
+- 新增 `lumi env` 命令行用例（状态呈现 / 未知工具 / 失败退出码 / 已装跳过 / 只导出 `LUMI_BIN`）与配置层的「工具箱是机器级」两条；lark-cli 安装补齐缺 npm、npm 报错、链接目标取自 `npm prefix -g`、产物不存在四种情形。
+- `LumiConfig` 单例重置移入 `tests/conftest.py` 的 autouse 家族——此前任何用例取过某个配置目录，实例就留在进程里，后续用例的 `config_dir` / `bin_dir` / `config_layers` 全跟着它漂。
+
 ## [0.2.87] - 2026-07-28
 
 ### Fixed

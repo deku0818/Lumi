@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+from pathlib import Path
 
 from lumi.utils.config.manager import LumiConfig
 
@@ -66,3 +67,26 @@ def test_system_prompt_concats_soul_and_agents(tmp_path):
     _write_prompt(cfg, "SOUL", "灵魂")
     _write_prompt(cfg, "AGENTS", "规则")
     assert cfg.load_system_prompt() == "灵魂\n\n规则"
+
+
+def test_toolbox_is_machine_level(tmp_path, monkeypatch):
+    """没显式指定配置目录时，工具箱恒落 ~/.lumi——它是机器级的，不随 cwd 漂移。
+
+    漂了的话，在任何带 `.lumi/` 的项目里启动的 serve / headless / CLI 各看到一个空
+    工具箱，桌面端刚装好的工具在那儿显示成「缺失」，用户只会重装第二份到没人用的地方。
+    配置层本身仍按发现链走（项目的 config.json / prompts 该被发现）。
+    """
+    project = tmp_path / "proj"
+    (project / ".lumi").mkdir(parents=True)
+    monkeypatch.setattr(Path, "home", lambda: tmp_path / "home")
+    monkeypatch.delenv("LUMI_CONFIG_DIR", raising=False)
+    monkeypatch.chdir(project)
+
+    cfg = LumiConfig()
+    assert cfg.config_dir == project / ".lumi"
+    assert cfg.bin_dir == tmp_path / "home" / ".lumi" / "bin"
+
+
+def test_explicit_config_dir_owns_toolbox(tmp_path):
+    """显式指定（--config-dir / LUMI_CONFIG_DIR）时工具箱跟着它——容器与测试靠这条隔离。"""
+    assert LumiConfig(str(tmp_path)).bin_dir == tmp_path / "bin"

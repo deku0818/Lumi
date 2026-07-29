@@ -12,6 +12,7 @@ from __future__ import annotations
 
 import json
 import os
+import shutil
 from dataclasses import asdict
 
 from lumi.gateway import toolbox
@@ -92,14 +93,20 @@ def local_env_checks(workspace: str) -> list[dict]:
 
     cli = toolbox.detect("lark-cli")
     if cli.source == "missing":
+        # lark-cli 是 npm 包，缺 npm 就装不了。此时不给「一键安装」——按下去只会
+        # 报同一句缺 npm；核心工具链的安装入口只有环境页一个，把人送过去。
+        # 这里只要一个「有没有」，用 which 而非 detect：后者还会 spawn 一次
+        # `npm --version`（Node 冷启动 200-500ms），而版本号在这条分支上没人看
+        npm_missing = shutil.which("npm") is None
         checks.append(
             Check(
                 key="cli",
                 tone="error",
                 name="lark-cli 未安装",
-                detail="飞书 API 调用与妙记取数依赖该命令行工具",
-                fix_action="lark-cli",
-                fix_note="未安装 Node.js 时会先自动装入工具箱",
+                detail="飞书 API 调用与妙记取数依赖该命令行工具"
+                + ("；它经 npm 安装，需先装 Node.js" if npm_missing else ""),
+                fix_action="" if npm_missing else "lark-cli",
+                fix_nav="env" if npm_missing else "",
                 group=group,
             )
         )

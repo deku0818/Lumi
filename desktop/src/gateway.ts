@@ -257,9 +257,10 @@ export class Gateway {
     }>('delete_provider', { id })
   }
 
-  // —— IM 渠道（飞书等）：配置存后端 ~/.lumi/lumi.json，保存即实时重连 ——
-  getChannels(): Promise<{ channels: ChannelInfo[] }> {
-    return this.request<{ channels: ChannelInfo[] }>('get_channels')
+  // —— IM 渠道（飞书等）：配置存后端 lumi.json（config_path 为其绝对路径，面板
+  // 原样展示），保存即实时重连 ——
+  getChannels(): Promise<{ channels: ChannelInfo[]; config_path: string }> {
+    return this.request<{ channels: ChannelInfo[]; config_path: string }>('get_channels')
   }
 
   saveChannel(name: string, config: Partial<FeishuConfig>): Promise<{ channels: ChannelInfo[] }> {
@@ -290,9 +291,13 @@ export class Gateway {
     return this.request<{ started: boolean }>('env_install', { target, project })
   }
 
-  // —— MCP 服务器：读写该机器的 ~/.lumi 或 <project>/.lumi 下 mcp_server.json，下次新会话加载生效 ——
-  listMcpServers(scope: McpScope, project = ''): Promise<{ servers: McpServers }> {
-    return this.request<{ servers: McpServers }>('list_mcp_servers', { scope, project })
+  // —— MCP 服务器：读写该机器的全局层或 <project>/.lumi 下 mcp_server.json，下次新会话加载生效。
+  // path = 该 scope 目标文件的绝对路径（面板原样展示）——
+  listMcpServers(scope: McpScope, project = ''): Promise<{ servers: McpServers; path: string }> {
+    return this.request<{ servers: McpServers; path: string }>('list_mcp_servers', {
+      scope,
+      project,
+    })
   }
 
   // 项目会话池的最近加载状态（面板徽标）：project 空 = 全局池

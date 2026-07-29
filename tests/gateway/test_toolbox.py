@@ -288,6 +288,61 @@ def test_sync_without_cli_raises(toolbox_env):
         sync_lark_skills()
 
 
+# ── lark-cli 安装（只走 npm） ──
+
+
+def test_install_lark_cli_without_npm_points_to_env_page(toolbox_env):
+    """缺 npm 不在渠道页代装 Node：抛错把人引到「设置 → 环境」这唯一的安装入口。"""
+    with pytest.raises(RuntimeError, match="环境"):
+        toolbox.install_lark_cli()
+
+
+def test_install_lark_cli_surfaces_npm_error(toolbox_env, monkeypatch):
+    """npm 失败要带出原文——权限 / 代理 / registry 不可达各有各的下一步。"""
+    _fake_exe(toolbox_env["system_bin"], "npm")
+    monkeypatch.setattr(
+        toolbox, "_run", lambda cmd, timeout=30: (False, "EACCES: permission denied")
+    )
+    with pytest.raises(RuntimeError, match="EACCES"):
+        toolbox.install_lark_cli()
+
+
+def test_install_lark_cli_links_from_npm_prefix(toolbox_env, monkeypatch):
+    """装出的 cli 不在 PATH 上时，链接目标问 `npm prefix -g`，不按 node 树硬拼。
+
+    用户级 .npmrc 改过 prefix（Windows 上指到 %APPDATA%\\npm 很常见）时硬拼会链出
+    一个探测得到、一跑就报「找不到路径」的幽灵 shim：体检显示 lark-cli 已安装，
+    而技能包同步与妙记取数全部静默失败。
+    """
+    _fake_exe(toolbox_env["system_bin"], "npm")
+    prefix = toolbox_env["config"] / "elsewhere"  # 与工具箱 node 树无关的目录
+    (prefix / "bin").mkdir(parents=True)
+    _fake_exe(prefix / "bin", "lark-cli", "1.0.78")
+
+    def fake_run(cmd, timeout=30):
+        if cmd[1:] == ["prefix", "-g"]:
+            return True, f"{prefix}\n"
+        return True, ""  # npm install -g
+
+    monkeypatch.setattr(toolbox, "_run", fake_run)
+    status = toolbox.install_lark_cli()
+    assert status.source == "toolbox"
+    link = toolbox_env["config"] / "bin" / "lark-cli"
+    assert link.resolve() == (prefix / "bin" / "lark-cli").resolve()
+
+
+def test_install_lark_cli_rejects_missing_binary(toolbox_env, monkeypatch):
+    """npm 说装好了却找不到产物：报错，而不是链一个指向空气的 shim。"""
+    _fake_exe(toolbox_env["system_bin"], "npm")
+    monkeypatch.setattr(
+        toolbox,
+        "_run",
+        lambda cmd, timeout=30: (True, str(toolbox_env["config"] / "nowhere")),
+    )
+    with pytest.raises(RuntimeError, match="不存在"):
+        toolbox.install_lark_cli()
+
+
 def test_skills_status_reports_outdated(toolbox_env, monkeypatch):
     _mock_lark_cli(monkeypatch, toolbox_env)
     sync_lark_skills()
@@ -382,9 +437,16 @@ def test_local_env_checks_states(toolbox_env, monkeypatch, tmp_path):
     """渠道体检本地环境组：cli 缺失 → 两项 error；已装未同步 → 技能包 error 带 fix_action。"""
     from lumi.gateway.channels.feishu.setup import local_env_checks
 
+    # 连 npm 都没有：不给「一键安装」（按下去只会报同一句缺 npm），改为引导去环境页
     checks = local_env_checks("")
     assert [c["key"] for c in checks] == ["cli", "skills"]
-    assert checks[0]["tone"] == "error" and checks[0]["fix_action"] == "lark-cli"
+    assert checks[0]["tone"] == "error"
+    assert checks[0]["fix_action"] == "" and checks[0]["fix_nav"] == "env"
+
+    # 有 npm：cli 可以就地一键装
+    _fake_exe(toolbox_env["system_bin"], "npm")
+    checks = local_env_checks("")
+    assert checks[0]["fix_action"] == "lark-cli" and checks[0]["fix_nav"] == ""
 
     _mock_lark_cli(monkeypatch, toolbox_env)
     project = tmp_path / "p"

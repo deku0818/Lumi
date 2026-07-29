@@ -163,13 +163,17 @@ def load_agents(
 
     Args:
         name: 只返回指定名称的 agent。
-        directory: 覆盖进程配置层目录（测试用），默认从全局配置获取。
+        directory: 只加载该目录、不叠任何层（测试用），与 change_detector 的
+            ``explicit_dir`` 同义——叠上内置层的话，风格自带的定义会混进结果。
         project_dir: 会话绑定的项目根，其 ``.lumi/agents/`` 为最高层。
     """
+    layers = (
+        [Path(directory)]
+        if directory
+        else [layer for _, layer in config_layers("agents", project_dir)]
+    )
     merged: dict[str, AgentConfig] = {}
-    for label, layer_dir in config_layers("agents", project_dir):
-        if label == "global" and directory:
-            layer_dir = Path(directory)
+    for layer_dir in layers:
         merged |= _load_agents_from_dir(layer_dir)
 
     agents = list(merged.values())
@@ -221,13 +225,16 @@ def load_skills(
 
     Args:
         name: 只返回指定名称的 skill。
-        directory: 覆盖进程配置层目录（测试用），默认从全局配置获取。
+        directory: 只加载该目录、不叠任何层（测试用），同 load_agents。
         project_dir: 会话绑定的项目根，其 ``.lumi/skills/`` 为最高层。
     """
+    layers = (
+        [Path(directory)]
+        if directory
+        else [layer for _, layer in config_layers("skills", project_dir)]
+    )
     merged: dict[str, SkillConfig] = {}
-    for label, layer_dir in config_layers("skills", project_dir):
-        if label == "global" and directory:
-            layer_dir = Path(directory)
+    for layer_dir in layers:
         merged |= _load_skills_from_dir(layer_dir)
 
     skills = list(merged.values())

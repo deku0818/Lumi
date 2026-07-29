@@ -63,6 +63,21 @@ def isolate_user_store(tmp_path, monkeypatch):
 
 
 @pytest.fixture(autouse=True)
+def reset_lumi_config():
+    """每次测试重置 LumiConfig 单例。
+
+    它是唯一带「记住上次传入的目录」的配置单例：任何一个用例显式取过某个配置目录
+    （`lumi env` 会钉住 ~/.lumi、fixture 会钉住 tmp），实例就留在进程里，后续用例的
+    config_dir / bin_dir / config_layers 全跟着它走，测试随执行顺序与机器漂移。
+    """
+    from lumi.utils.config import LumiConfig
+
+    LumiConfig.reset_instance()
+    yield
+    LumiConfig.reset_instance()
+
+
+@pytest.fixture(autouse=True)
 def reset_run_authorized():
     """每次测试清空 per-run 授权目录来源 contextvar + 进程全局兜底，避免跨测试泄漏。
 

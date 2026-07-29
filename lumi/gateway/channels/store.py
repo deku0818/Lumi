@@ -20,6 +20,15 @@ def _read() -> dict:
     return user_store.read_section("channels", {})
 
 
+def config_path() -> str:
+    """配置（含密钥）落盘的绝对路径，供面板原样展示。
+
+    「存在哪」这件事归本模块管：调用方各自去问 user_store 的话，日后换存储位置
+    就得同时改好几处，而面板显示的路径与真实写入位置分家是最不该发生的一种谎。
+    """
+    return str(user_store.CONFIG_FILE)
+
+
 def load_feishu() -> FeishuChannelConfig:
     """读取飞书配置；缺失/非法字段回落各自默认。"""
     raw = _read().get("feishu")

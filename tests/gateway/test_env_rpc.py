@@ -62,6 +62,8 @@ async def test_install_progress_throttled_and_state_broadcast(fake_hub, monkeypa
         progress("安装 uv", None)
 
     monkeypatch.setattr(toolbox, "install", fake_install)
+    # 「已装的跳过」归 install_missing 管（CLI 与本 RPC 共用），故装的那条路要先装作缺失
+    monkeypatch.setattr(toolbox, "detect", lambda n: toolbox.ToolStatus(n, "missing"))
     monkeypatch.setattr(toolbox, "status_all", lambda: {"tools": ["x"]})
     assert await dispatch_env("env_install", {"target": "uv"}) == {"started": True}
     await _wait_install_done()
@@ -82,6 +84,7 @@ async def test_install_failure_reports_error_state(fake_hub, monkeypatch):
         raise RuntimeError("网络不可达")
 
     monkeypatch.setattr(toolbox, "install", boom)
+    monkeypatch.setattr(toolbox, "detect", lambda n: toolbox.ToolStatus(n, "missing"))
     monkeypatch.setattr(toolbox, "status_all", lambda: {"tools": []})
     await dispatch_env("env_install", {"target": "rg"})
     await _wait_install_done()
@@ -91,14 +94,33 @@ async def test_install_failure_reports_error_state(fake_hub, monkeypatch):
 
 
 async def test_install_duplicate_returns_not_started(fake_hub, monkeypatch):
-    """安装全局互斥：target 之间有重叠（all ⊃ uv，lark-cli 内装 node），
+    """安装全局互斥：target 之间有重叠（all ⊃ uv，lark-cli 经 npm 写进 node 树），
     任一进行中都拒绝新安装——否则两线程并发写同一二进制。"""
     release = threading.Event()
-    monkeypatch.setattr(toolbox, "install_missing", lambda p=None: release.wait(5))
+    monkeypatch.setattr(
+        toolbox, "install_missing", lambda p=None, names=(): release.wait(5)
+    )
     monkeypatch.setattr(toolbox, "status_all", lambda: {"tools": []})
     assert (await dispatch_env("env_install", {}))["started"] is True
     assert (await dispatch_env("env_install", {"target": "all"}))["started"] is False
     # 不同 target 也被拒：all 正在装 uv 时单独触发 uv 会并发写 bin_dir/uv
     assert (await dispatch_env("env_install", {"target": "uv"}))["started"] is False
     release.set()
+    await _wait_install_done()
+
+
+async def test_install_skips_present_tool(fake_hub, monkeypatch):
+    """已装的不重装：桌面按钮与 CLI 共用 install_missing 这一条规矩。
+
+    各写各的话，漏写的那一侧会给系统已装的工具在工具箱里留一份 PATH 上永远轮不到的
+    影子副本——白下几十 MB，且此后再也不显示。
+    """
+    monkeypatch.setattr(
+        toolbox, "detect", lambda n: toolbox.ToolStatus(n, "system", "1.0", "/usr/bin")
+    )
+    monkeypatch.setattr(
+        toolbox, "install", lambda *a, **kw: pytest.fail("已装的工具不该重装")
+    )
+    monkeypatch.setattr(toolbox, "status_all", lambda: {"tools": []})
+    await dispatch_env("env_install", {"target": "node"})
     await _wait_install_done()

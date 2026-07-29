@@ -20,18 +20,21 @@ const TOOL_META: Record<string, { icon: string; label: string; hint: string }> =
 export function EnvPanel({
   machines,
   gwFor,
+  initialMachine,
 }: {
   machines: { id: string; name: string; enabled?: boolean }[]
   gwFor: (id: string) => Gateway | undefined
+  // 由跳转来源指定（渠道体检在哪台机器上跑就装哪台）；空 = 默认第一台
+  initialMachine?: string
 }) {
-  const [machine, setMachine] = useState(machines[0]?.id ?? 'local')
+  const [machine, setMachine] = useState(initialMachine ?? machines[0]?.id ?? 'local')
   const gw = gwFor(machine)
   const [status, setStatus] = useState<EnvStatus | null>(null)
   const [error, setError] = useState<{ target: string; message: string } | null>(null)
 
   const { progress, install, seed } = useEnvInstall(gw, {
     onState: (payload) => {
-      setStatus({ tools: payload.tools, installing: '' })
+      setStatus({ tools: payload.tools, bin_dir: payload.bin_dir, installing: '' })
       setError(payload.error ?? null)
     },
   })
@@ -71,7 +74,19 @@ export function EnvPanel({
 
       <Section
         title="核心工具链"
-        desc="agent 执行 Python / JS / 代码搜索任务所需，缺失时对应能力受限。安装到 ~/.lumi/bin，系统已有的不重复安装。"
+        desc={
+          <>
+            agent 执行 Python / JS / 代码搜索任务所需，缺失时对应能力受限。系统已有的不重复安装
+            {/* 路径由后端下发（各平台真值不同），未拿到前整句略去免得跳字 */}
+            {status?.bin_dir ? (
+              <>
+                ，其余装到 <code className="break-all">{status.bin_dir}</code>
+              </>
+            ) : (
+              '。'
+            )}
+          </>
+        }
         action={
           <Button size="sm" onClick={() => onInstall('all')} disabled={!status || installing || !hasMissing}>
             {installing ? '安装中…' : hasMissing ? '一键装齐' : '已就绪 ✓'}

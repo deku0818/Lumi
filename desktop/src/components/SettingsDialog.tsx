@@ -1,3 +1,4 @@
+import { useState } from 'react'
 import { SlidersHorizontal, Boxes, Server, Send, Plug, Wrench, Info, Monitor, Sun, Moon, Minus, Plus } from 'lucide-react'
 import type { Gateway } from '../gateway'
 import type { ThemePref } from '../theme'
@@ -14,6 +15,15 @@ import { Section, SectionGroup, Row, SegmentedControl, segmentShell } from './Se
 import { Switch } from '@/components/ui/switch'
 import { Dialog, DialogContent, DialogTitle } from '@/components/ui/dialog'
 import { Tabs, TabsList, TabsTrigger, TabsContent } from '@/components/ui/tabs'
+
+export type SettingsTab =
+  | 'general'
+  | 'models'
+  | 'channels'
+  | 'connections'
+  | 'mcp'
+  | 'env'
+  | 'about'
 
 // 设置弹窗：左侧导航 + 右侧面板（参考 Claude 桌面设置）。
 // general：外观（主题）+ 语言；models：模型供应商管理（原输入框模型选择器迁移至此）。
@@ -32,7 +42,7 @@ export function SettingsDialog({
   onProvidersChanged,
   onClose,
 }: {
-  initialTab?: 'general' | 'models' | 'channels' | 'connections' | 'mcp' | 'env' | 'about' // 打开时定位的 tab
+  initialTab?: SettingsTab // 打开时定位的 tab
   themePref: ThemePref
   setThemePref: (p: ThemePref) => void
   uiFont: FontPref
@@ -47,6 +57,10 @@ export function SettingsDialog({
   onClose: () => void
 }) {
   const { t } = useI18n()
+  // 受控 tab：面板之间要能互相跳（渠道页体检发现缺 Node.js → 送到环境页安装）
+  const [tab, setTab] = useState<SettingsTab>(initialTab ?? 'general')
+  // 跳转来源指定的机器：体检跑在哪台机器上，就装到哪台机器（默认跟 EnvPanel 自己的）
+  const [envMachine, setEnvMachine] = useState<string | undefined>(undefined)
   const navClass =
     'justify-start gap-2.5 px-2.5 py-1.5 rounded-lg flex-none h-auto border-transparent text-muted-foreground hover:text-ink hover:bg-line/40 after:hidden focus-visible:ring-0 focus-visible:outline-none data-[state=active]:bg-line data-[state=active]:text-ink data-[state=active]:shadow-none'
 
@@ -57,7 +71,7 @@ export function SettingsDialog({
         className="sm:max-w-3xl w-full h-[34rem] p-0 gap-0 overflow-hidden flex"
       >
         <DialogTitle className="sr-only">{t('settings.title')}</DialogTitle>
-        <Tabs defaultValue={initialTab ?? 'general'} orientation="vertical" className="flex h-full w-full gap-0">
+        <Tabs value={tab} onValueChange={(v) => setTab(v as SettingsTab)} orientation="vertical" className="flex h-full w-full gap-0">
           <TabsList
             variant="line"
             className="w-48 h-full group-data-vertical/tabs:h-full shrink-0 flex-col items-stretch justify-start gap-0.5 rounded-none bg-canvas border-r border-line/30 p-3"
@@ -110,14 +124,37 @@ export function SettingsDialog({
           <TabsContent value="models" className="flex-1 min-w-0 overflow-auto px-6 pb-6 pt-12 mt-0">
             <ProvidersPanel machines={machines} gwFor={gwFor} onChanged={onProvidersChanged} />
           </TabsContent>
-          <TabsContent value="channels" className="flex-1 min-w-0 overflow-auto px-6 pb-6 pt-12 mt-0">
-            <ChannelsPanel machines={machines} gwFor={gwFor} />
+          {/* forceMount：跳去环境页装 Node 再回来时，编辑中的飞书凭证不能没了——
+              不常驻的话整棵子树会被卸载，用户刚粘贴的 App Secret 随之丢失。
+              data-[state=inactive]:hidden 是承重的，不能删：forceMount 下 Radix 的
+              hidden={!present} 恒为 false，它自己不隐藏，非激活时全靠这个 class */}
+          <TabsContent
+            value="channels"
+            forceMount
+            className="flex-1 min-w-0 overflow-auto px-6 pb-6 pt-12 mt-0 data-[state=inactive]:hidden"
+          >
+            <ChannelsPanel
+              machines={machines}
+              gwFor={gwFor}
+              active={tab === 'channels'}
+              onNavigate={(nextTab, machine) => {
+                setEnvMachine(machine)
+                setTab(nextTab as SettingsTab)
+              }}
+            />
           </TabsContent>
           <TabsContent value="mcp" className="flex-1 min-w-0 overflow-auto px-6 pb-6 pt-12 mt-0">
             <McpPanel machines={machines} gwFor={gwFor} />
           </TabsContent>
           <TabsContent value="env" className="flex-1 min-w-0 overflow-auto px-6 pb-6 pt-12 mt-0">
-            <EnvPanel machines={machines} gwFor={gwFor} />
+            {/* key：换了来源机器就重挂一次，让 initialMachine 重新生效——
+                否则「跳转指定机器」会隐式依赖「env tab 恰好没被 forceMount」 */}
+            <EnvPanel
+              key={envMachine ?? 'default'}
+              machines={machines}
+              gwFor={gwFor}
+              initialMachine={envMachine}
+            />
           </TabsContent>
           <TabsContent value="connections" className="flex-1 min-w-0 overflow-auto px-6 pb-6 pt-12 mt-0">
             <BackendsPanel />

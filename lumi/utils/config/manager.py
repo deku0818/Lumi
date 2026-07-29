@@ -174,9 +174,22 @@ class LumiConfig:
         return self.config_dir / "skills"
 
     @property
+    def toolbox_dir(self) -> Path:
+        """工具箱根目录：显式指定过配置目录就跟着它，否则恒为 ``~/.lumi``。
+
+        工具箱是**机器级**的（一台机器一份 uv / node / rg），不随「在哪个目录启动」
+        漂移——跟着 cwd 发现链走的话，在任何带 ``.lumi/`` 的项目里启动的 serve /
+        headless / CLI 各自看到一个空工具箱，桌面端刚装好的工具在那儿显示成「缺失」，
+        用户只会重装第二份到谁也不用的地方。显式覆盖（``--config-dir`` /
+        ``LUMI_CONFIG_DIR``）仍然优先：容器与测试靠它隔离。
+        """
+        explicit = self.discovery.cli_config_dir or os.getenv(ConfigDiscovery.ENV_VAR)
+        return self.config_dir if explicit else Path.home() / ".lumi"
+
+    @property
     def bin_dir(self) -> Path:
         """获取工具箱 bin 目录路径（toolbox 安装的工具统一入口）"""
-        return self.config_dir / "bin"
+        return self.toolbox_dir / "bin"
 
     @property
     def agents_dir(self) -> Path:

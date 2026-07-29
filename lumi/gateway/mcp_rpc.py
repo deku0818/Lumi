@@ -85,10 +85,13 @@ async def dispatch_mcp(method: str, params: dict) -> dict:
 
     if method == "list_mcp_servers":
         # 列表宽松读：损坏文件显示为空、不阻断面板（写路径才严格防抹除）。
+        # 附带该 scope 配置文件的绝对路径供面板原样展示——前端拼 ~/.lumi 既
+        # 看不懂又会在 --config-dir 时说谎
         try:
-            return {"servers": _read_for_write(path)}
+            servers = _read_for_write(path)
         except ValueError:
-            return {"servers": {}}
+            servers = {}
+        return {"servers": servers, "path": str(path)}
 
     servers = _read_for_write(path)  # 损坏则抛错，避免 save/delete 抹掉全部配置
 

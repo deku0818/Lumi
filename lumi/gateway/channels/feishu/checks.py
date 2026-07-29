@@ -31,6 +31,9 @@ class Check:
     emphasis: str = ""
     # 前端可就地执行的修复动作（env_install 的 target，如 "lark-cli" / "feishu-skills"）
     fix_action: str = ""
+    # 引导跳转到设置的另一个面板（目前只有 "env"）。修复动作不在本页时用它——
+    # 把安装入口复制一份到渠道页会造出第二个真相，不如把人送到唯一的那个入口
+    fix_nav: str = ""
     # 详情列表里的分组标签（如「本地环境」/「机器人接入」），空 = 不分组
     group: str = ""
 
