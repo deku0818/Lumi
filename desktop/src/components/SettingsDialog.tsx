@@ -37,7 +37,6 @@ export function SettingsDialog({
   setNotify,
   recentLimit,
   setRecentLimit,
-  machines,
   gwFor,
   onProvidersChanged,
   onClose,
@@ -51,7 +50,6 @@ export function SettingsDialog({
   setNotify: (v: boolean) => void
   recentLimit: number
   setRecentLimit: (n: number) => void
-  machines: { id: string; name: string }[]
   gwFor: (id: string) => Gateway | undefined
   onProvidersChanged: (machine: string) => void
   onClose: () => void
@@ -122,7 +120,7 @@ export function SettingsDialog({
             />
           </TabsContent>
           <TabsContent value="models" className="flex-1 min-w-0 overflow-auto px-6 pb-6 pt-12 mt-0">
-            <ProvidersPanel machines={machines} gwFor={gwFor} onChanged={onProvidersChanged} />
+            <ProvidersPanel gwFor={gwFor} onChanged={onProvidersChanged} />
           </TabsContent>
           {/* forceMount：跳去环境页装 Node 再回来时，编辑中的飞书凭证不能没了——
               不常驻的话整棵子树会被卸载，用户刚粘贴的 App Secret 随之丢失。
@@ -134,7 +132,6 @@ export function SettingsDialog({
             className="flex-1 min-w-0 overflow-auto px-6 pb-6 pt-12 mt-0 data-[state=inactive]:hidden"
           >
             <ChannelsPanel
-              machines={machines}
               gwFor={gwFor}
               active={tab === 'channels'}
               onNavigate={(nextTab, machine) => {
@@ -144,14 +141,13 @@ export function SettingsDialog({
             />
           </TabsContent>
           <TabsContent value="mcp" className="flex-1 min-w-0 overflow-auto px-6 pb-6 pt-12 mt-0">
-            <McpPanel machines={machines} gwFor={gwFor} />
+            <McpPanel gwFor={gwFor} />
           </TabsContent>
           <TabsContent value="env" className="flex-1 min-w-0 overflow-auto px-6 pb-6 pt-12 mt-0">
             {/* key：换了来源机器就重挂一次，让 initialMachine 重新生效——
                 否则「跳转指定机器」会隐式依赖「env tab 恰好没被 forceMount」 */}
             <EnvPanel
               key={envMachine ?? 'default'}
-              machines={machines}
               gwFor={gwFor}
               initialMachine={envMachine}
             />

@@ -1,7 +1,7 @@
 import { useCallback, useEffect, useState } from 'react'
 import type { Gateway } from '../gateway'
 import type { EnvInstallTarget, EnvProgress, EnvStatus, EnvToolStatus } from '../types'
-import { MachineTabs } from './MachineTabs'
+import { MachineScope, useMachines } from './MachineTabs'
 import { Section, SectionGroup, Card, ProgressBar } from './SettingsKit'
 import { useEnvInstall } from './useEnvInstall'
 import { Button } from '@/components/ui/button'
@@ -18,15 +18,14 @@ const TOOL_META: Record<string, { icon: string; label: string; hint: string }> =
 }
 
 export function EnvPanel({
-  machines,
   gwFor,
   initialMachine,
 }: {
-  machines: { id: string; name: string; enabled?: boolean }[]
   gwFor: (id: string) => Gateway | undefined
   // 由跳转来源指定（渠道体检在哪台机器上跑就装哪台）；空 = 默认第一台
   initialMachine?: string
 }) {
+  const machines = useMachines()
   const [machine, setMachine] = useState(initialMachine ?? machines[0]?.id ?? 'local')
   const gw = gwFor(machine)
   const [status, setStatus] = useState<EnvStatus | null>(null)
@@ -70,7 +69,7 @@ export function EnvPanel({
 
   return (
     <SectionGroup>
-      <MachineTabs machines={machines} value={machine} onChange={setMachine} />
+      <MachineScope value={machine} onChange={setMachine}>
 
       <Section
         title="核心工具链"
@@ -116,6 +115,7 @@ export function EnvPanel({
           <span className="text-muted-foreground">（可重试；如网络受限可设置 https_proxy 后重启）</span>
         </p>
       )}
+      </MachineScope>
     </SectionGroup>
   )
 }

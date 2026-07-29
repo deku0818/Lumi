@@ -19,13 +19,16 @@ import {
   PanelLeft,
   type LucideIcon,
 } from 'lucide-react'
-import { Gateway, type ConnState } from './gateway'
+import { Gateway } from './gateway'
 import type {
   ActiveModel,
   AttachedFile,
   BgTask,
   BgTaskOutput,
   ChannelInfo,
+  ConnError,
+  ConnState,
+  Machine,
   ModelPointer,
   CronJob,
   HistoryItem,
@@ -46,6 +49,7 @@ import { Markdown } from './components/Markdown'
 import { ApprovalDialog } from './components/ApprovalDialog'
 import { ClarifyDialog, ASK_CANCELLED } from './components/ClarifyDialog'
 import { Sidebar } from './components/Sidebar'
+import { MachinesProvider } from './components/MachineTabs'
 import { FileCards, PreviewPanel, parsePresentedFiles } from './components/PresentedFiles'
 import { BgTasksSection } from './components/BgTasksDrawer'
 import { CronPage, RunsSection } from './components/CronPage'
@@ -347,10 +351,11 @@ export default function App() {
   // 失败不能被渲染成确凿的空态
   const [loadedBackends, setLoadedBackends] = useState<Record<string, true>>({})
   // 方案甲多机：机器列表（本地恒在 + 远程）与各机控制连接状态
-  const [machines, setMachines] = useState<{ id: string; name: string; enabled?: boolean }[]>([
+  const [machines, setMachines] = useState<Machine[]>([
     { id: 'local', name: '本地' },
   ])
   const [machineConn, setMachineConn] = useState<Record<string, ConnState>>({})
+  const [machineErr, setMachineErr] = useState<Record<string, ConnError>>({})
   const [providers, setProviders] = useState<ProviderProfile[]>([])
   const [activeModel, setActiveModel] = useState<ActiveModel>({ provider: '', model: '' })
   // auto 审批分类器指针（providers.json 顶级 classifier，空=跟随会话模型）
@@ -1247,7 +1252,11 @@ export default function App() {
           }
         })
         gw.onState((st) => {
-          setMachineConn((m) => ({ ...m, [backend]: st }))
+          setMachineConn((m) => (m[backend] === st ? m : { ...m, [backend]: st }))
+          // 失败原因与状态同步取（gw 在通知前已记好），「连接」列表据此把该机器行的
+          // 副标题换成人话；连上即为空串，红字自动消失。退避重试期间原因不变，
+          // 同值直接返回原对象，省掉一轮无意义的下游重渲
+          setMachineErr((m) => (m[backend] === gw.error ? m : { ...m, [backend]: gw.error }))
           if (st !== 'open') clearMachineSnapshots(backend)
         })
         controlConns.current[backend] = gw
@@ -1275,6 +1284,11 @@ export default function App() {
         // close() 不触发 onState，故连接态与各类快照都得在此手清，否则重新启用时会先
         // 闪一下旧的「已连接」、任务也会卡在旧的运行态上
         setMachineConn((m) => {
+          const next = { ...m }
+          delete next[id]
+          return next
+        })
+        setMachineErr((m) => {
           const next = { ...m }
           delete next[id]
           return next
@@ -2399,7 +2413,16 @@ export default function App() {
   // 脉冲点 = 可见模块里确有东西在跑：隐藏的 bg 模块不算，直播中的 cron 执行算
   const railDot = (railBg && hasRunningBg) || cronLiveRuns.length > 0
 
+  const machinesCtx = useMemo(
+    () => ({ machines, conn: machineConn, err: machineErr, reconnect: reconnectMachine }),
+    [machines, machineConn, machineErr, reconnectMachine],
+  )
+
   return (
+    // 机器连接态 + 重连入口下发给所有「先选机器」的界面（设置各面板 / 项目页 / 定时页），
+    // 它们据此在机器离线时停掉配置读写入口（见 MachineScope）。memo 化：App 每个流式
+    // token 都重渲染，裸对象会让所有消费者跟着一起重渲
+    <MachinesProvider value={machinesCtx}>
     <div className="h-full flex flex-col bg-canvas">
       {!isMacTitleBar && (
         <AppTitleBar onNewChat={startNewChat} onOpenSettings={openSettings} />
@@ -2418,7 +2441,6 @@ export default function App() {
         sessions={sessions}
         loadedBackends={loadedBackends}
         machines={machines}
-        machineConn={machineConn}
         channels={channels}
         recentLimit={recentLimit}
         currentKey={view === 'chat' ? active : ''}
@@ -2435,7 +2457,6 @@ export default function App() {
         onSelect={selectSession}
         onNew={() => startNewChat()}
         onNewChat={(backend) => void goNewChat(backend)}
-        onReconnectMachine={(backend) => void reconnectMachine(backend)}
         onOpenProjects={openProjects}
         onOpenScheduled={openScheduled}
         onOpenSettings={openSettings}
@@ -2487,8 +2508,7 @@ export default function App() {
           <ProjectsPage
             projects={projects}
             current={projectsCurrent}
-            machines={machines}
-            machine={projectsMachine}
+              machine={projectsMachine}
             needProjectHint={needProjectHint}
             onSelectMachine={selectProjectsMachine}
             // 点项目一律进项目主页——主页输入岛本身就能在此项目开聊，故无论是主动浏览
@@ -2517,8 +2537,7 @@ export default function App() {
         ) : view === 'scheduled' ? (
           <CronPage
             api={gwForBackend}
-            machines={machines}
-            jobs={cronJobs}
+              jobs={cronJobs}
             runningJobs={cronRunning}
             version={cronVersion}
             onOpenRun={(tid, jid) => void openCronJob(jid, tid)}
@@ -2692,7 +2711,6 @@ export default function App() {
           setNotify={toggleNotify}
           recentLimit={recentLimit}
           setRecentLimit={changeRecentLimit}
-          machines={machines}
           gwFor={gwForBackend}
           onProvidersChanged={onProvidersChanged}
           onClose={() => {
@@ -2748,6 +2766,7 @@ export default function App() {
       )}
       </div>
     </div>
+    </MachinesProvider>
   )
 }
 

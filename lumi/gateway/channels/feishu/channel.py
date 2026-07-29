@@ -146,6 +146,13 @@ class FeishuChannel:
             logger.error("Feishu channel %s", self._error)
             return
 
+        # 绑定项目是必填项，没有兜底：拿 serve 进程 cwd 当工作目录会让飞书会话在一个
+        # 谁也没选过的目录里读写文件、装技能包，故未绑定就不连——状态灯直接报原因。
+        if not self.config.workspace:
+            self._error = "未绑定项目（设置 → 渠道 → 飞书 → 绑定项目）"
+            logger.error("Feishu channel %s", self._error)
+            return
+
         try:
             import lark_oapi as lark
 

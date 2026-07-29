@@ -34,6 +34,10 @@ import type {
 // failed = 退避重试耗尽，已放弃自动重连，等用户主动点击重连
 export type ConnState = 'connecting' | 'open' | 'closed' | 'failed'
 
+// 连不上时的原因，供「连接」列表把机器行的副标题换成人话（'' = 没出过错）。
+// 只分两类：服务端明确拒绝（1008 令牌无效）与其余一切连不通，多分也给不出不同的下一步
+export type ConnError = '' | 'auth' | 'unreachable'
+
 const MAX_RETRY = 5 // 连续失败这么多次后停止自动重连
 
 // 附带工具审批模式：toolMode 省略或 'default' 时不传 tool_mode（后端按默认处理）
@@ -55,6 +59,7 @@ export class Gateway {
   private closedByUser = false
   private reconnectTimer: ReturnType<typeof setTimeout> | null = null
   private currentState: ConnState = 'connecting'
+  private lastError: ConnError = ''
 
   constructor(private url: string) {}
 
@@ -105,9 +110,12 @@ export class Gateway {
     this.ws = ws
     ws.onopen = () => {
       this.retry = 0
+      this.lastError = ''
       this.setState('open')
     }
     ws.onclose = (ev) => {
+      // 原因先于状态记录：状态变更会同步通知订阅者，它们读的就是这里的值
+      this.lastError = ev.code === 1008 ? 'auth' : 'unreachable'
       this.setState('closed')
       // 连接断开：在飞的 RPC 不会再有响应，全部 reject 避免调用方永久挂起。
       // 关键如 send_message——否则其 Promise 永不 settle，且新连接不补发 turn.complete，
@@ -527,6 +535,11 @@ export class Gateway {
 
   get state(): ConnState {
     return this.currentState
+  }
+
+  // 最近一次连接失败的原因；连上后清空
+  get error(): ConnError {
+    return this.lastError
   }
 
   // 是否已停止自我维持（鉴权拒绝/退避耗尽或被主动关闭）：此态下不会自行重连，

@@ -1,7 +1,8 @@
-# 白名单式：默认全排除，只放行 Dockerfile COPY 需要的三样。
+# 白名单式：默认全排除，只放行 Dockerfile COPY 需要的四样。
 # 以后仓库里新增任何目录都不会意外进 build context。
 *
 !pyproject.toml
+!uv.lock
 !README.md
 !lumi
 lumi/**/__pycache__

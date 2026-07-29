@@ -111,7 +111,7 @@ WS 断开时若会话仍有**活跃 / 挂起轮**（典型：挂在工具审批 
 **项目 = 工作目录，随会话绑定**（不再是进程级单一 cwd）。会话列表按 checkpoint metadata 的 `workspace_dir` 过滤分组。
 
 - **会话级项目绑定**：每条 WS 连接 = 一个 bridge / 引擎，引擎在 `initialize` 时直接 pin 到本会话项目——open 握手经连接 URL 的 `?workspace=` 携带（与 `?token=` 同机制），`bridge.initialize(project_dir=...)` 据此新建权限引擎、构造本项目 config hooks、写 checkpoint 元数据。**不动进程 `os.chdir`**，故同进程多会话各绑各项目、并发互不影响。`bridge.workspace_dir` 取本引擎 `project_dir`（无引擎退回进程 cwd 兜底展示值），是会话项目的单一来源（`gateway.ready` / 元数据 / `system_info` 注入都据此）；`bridge.workspace_bound` 是与之独立的布尔态——`workspace_dir` 在未绑定时仍会给出 cwd 兜底值（仅供展示），只有 `workspace_bound` 才代表"真绑定了项目"。
-- **聊天必须绑定项目**：`GatewaySession.handle_frame` 对 `send_message` / `run_command` 在 `workspace_bound=False` 时直接拒绝（`{"error":{"message":"请先选择项目再开始对话"}}`），不放行静默退回进程 cwd 的未绑定会话——堵住"不选项目直接聊天"落在不可控 cwd、`PermissionEngine` 边界检查形同虚设的口子。关卡刻意只加在 desktop WS 聊天入口：cron（不走 `AgentBridge`）、飞书 channel（`ChannelConfig.workspace` 可显式配成空串、依赖 cwd 兜底）都不受影响，两者都不经过 `handle_frame`。前端配合：`gateway.ready` 的 `workspace_bound` 字段告诉前端是否该把 `payload.workspace` 当真项目写进本地状态（未绑定时只是兜底展示值，写进去会污染侧栏项目分组）；app 冷启动、切会话、"新建会话" 均已改为绑定失败/无默认项目时主动跳转项目选择器，不再放行空 `workspace=''` 的会话。
+- **聊天必须绑定项目**：`GatewaySession.handle_frame` 对 `send_message` / `run_command` 在 `workspace_bound=False` 时直接拒绝（`{"error":{"message":"请先选择项目再开始对话"}}`），不放行静默退回进程 cwd 的未绑定会话——堵住"不选项目直接聊天"落在不可控 cwd、`PermissionEngine` 边界检查形同虚设的口子。关卡刻意只加在 desktop WS 聊天入口：cron（不走 `AgentBridge`）、飞书 channel（自有一道更严的关卡：`workspace` 必填，未绑定项目直接拒绝启动，见 [feishu.md](feishu.md)）都不受影响，两者都不经过 `handle_frame`。前端配合：`gateway.ready` 的 `workspace_bound` 字段告诉前端是否该把 `payload.workspace` 当真项目写进本地状态（未绑定时只是兜底展示值，写进去会污染侧栏项目分组）；app 冷启动、切会话、"新建会话" 均已改为绑定失败/无默认项目时主动跳转项目选择器，不再放行空 `workspace=''` 的会话。
 - **per-run 授权 / hooks 注入**：filesystem/bash 工具不持有引擎，故 bridge 在每轮 `_stream` 起点经 contextvar 注入本会话引擎的授权目录来源（`set_run_authorized_source_for`）与 config hooks（`set_run_config_hooks`），cron 在 `_invoke_agent` 起点同理；各 run 按 contextvar 隔离，不被并发会话重建进程全局所清洗。详见 [permissions.md](permissions.md) / [hooks.md](hooks.md)。
 - **`set_workspace`（会话级改项目）**：只 rebase 本 bridge 引擎、重载本会话 config hooks、更新元数据、重置本会话当前 thread 的持久 shell——**不 chdir、不影响其它会话**。原 `_active_bridges` 进程级 rebase-all 已随 cwd 进程级模型一并移除。前端「打开项目」= 经 open 握手开一条绑定到该项目的新会话（不再先 `set_workspace` 改进程态）；`set_workspace` RPC 主要用于原地改当前会话项目（及未来复用单连接的非 desktop client）。`set_workspace` / `add_folder` / `remove_folder` 在 `_dispatch` 中持 `run.lock`，与运行中的轮次互斥。
 - **项目清单**：纯手动登记，持久化在 `~/.lumi/lumi.json` 的 `projects` 分区（`lumi/gateway/projects.py`，复用 `_atomic_write_json`），按 `last_used` 降序。`list_projects` 返回 `{projects, current}`（current = 本会话项目）；`add_project`（缺省用目录末端名，重复添加保留用户重命名）/ `remove_project`（只删条目，不动磁盘）/ `rename_project`；`set_workspace` 成功后经 `touch_project` 刷新 `last_used`。
@@ -120,6 +120,30 @@ WS 断开时若会话仍有**活跃 / 挂起轮**（典型：挂在工具审批 
 - **添加文件夹（本会话临时）**：`add_folder` / `remove_folder` 把目录临时加进**本连接**引擎的 `_ephemeral_workspaces`（引擎独立字段、仅内存、与会被 `reload()`/`rebase()` 从磁盘重载的 `_config.workspaces` 分离，故跨配置重载 / 项目切换存活；连接断开即失效），变更经 `<system-reminder>`（`_drain_folder_note` + `inject_text_into_message` 前置注入块，带 `injected_prefix` 计数）在下一条用户消息告知模型。WS 重连复用同一 URL（含 `?workspace=`）使新 bridge 重新 pin，前端再按 `folderStore` 重放 `add_folder`。
 - **持久 shell 按会话 / 子代理隔离**：bash 的持久 shell 不再全进程共用一个，而是按 `current_thread_id` 分（会话私有，`cd`/env 不串别的会话），断连（`bridge.close`）/ 删会话（`delete_thread`）时回收，避免长跑 serve 累积孤儿进程。子代理（`agent` 工具）经 `shell_session.run_with_shell` 在 `copy_context` 副本里用专属 key 跑、拿独立 shell（`cd` 不污染父 / 兄弟、用完即弃），不继承父 shell 状态（在项目根 fresh 起）。
 - **前端**：侧栏「项目」入口（`onOpenProjects`）打开 `ProjectsPage`（搜索 + 排序 + 卡片，当前项目金描边）；`NewProjectDialog` 选目录 + 命名；composer 底栏 `FolderMenu`（图标 + 数量徽标 + 增减菜单）。原生目录选择器经 Electron `lumi:pick-directory` IPC（`dialog.showOpenDialog`）。
+
+## 多机界面：连接态即可用性
+
+「先选机器」的界面（设置的 供应商 / 渠道 / MCP / 环境 四页 + 项目页 + 定时页）共用
+`MachineTabs.tsx`：`MachinesProvider` 在 App 根部一次性下发 `{machines, conn, err, reconnect}`
+（逐层透传要穿过五六个组件），消费方用 `useMachine(id)` 拿三态。
+
+- **三态而非两态**：`connected`（`open`）/ `retrying`（`connecting`，以及 `closed` 但 Gateway 仍在
+  退避重连）/ `stopped`（`failed` 退避耗尽，或 1008 令牌无效——这两种 Gateway 不再自行重试）。
+  把 `closed` 当"已放弃"会让退避期间的界面跟着 `connecting↔closed` 来回跳；把 `connecting` 当
+  "已连上"则会把空面板闪出来（点一次重连闪五次，退避 5 轮各一次）。
+- **`MachineScope`**：选择条 + 内容。内容只在 `connected` 时渲染，否则换成同尺寸占位（`retrying`
+  = 光点呼吸 +「正在连接…」无按钮；`stopped` = WifiOff + 原因 +「重新连接」）——配置读不到也写不进去，
+  与其显示一份空表单让人白填（保存请求发不出去且被 `.catch` 静默吞掉），不如只留重连入口。占位
+  容器尺寸两态一致，故切换时不闪不跳。选中的机器被删/停用时自动落回第一台可用机器（否则 pill 被
+  过滤掉、只剩一台时选择条整个不渲染，页面卡在一个再也切不回来的空选中态）。
+- **弹窗必须放在 `MachineScope` 之外**（飞书配置、MCP 服务器表单）：瞬断会卸载作用域内容，正在
+  输入的凭证会跟着没——这正是 `SettingsDialog` 给渠道页加 `forceMount` 要防的事。作用域外的
+  新建入口（项目页/定时页的「新建」按钮）则各自 `disabled`。
+- **失败原因**：`Gateway.lastError`（1008 → `auth`，其余 → `unreachable`，连上即清空）经 App 的
+  `machineErr` 随 context 下发。「连接」列表的机器行平时显示地址，连不上时**就地换成人话**
+  （令牌无效，连接被拒绝 / 连不上，请检查地址与网络），地址退到悬停 title；显示的是实时连接态而非
+  某次测试的快照，机器自愈后红字自己消失，故不需要「重试」按钮。新增机器的「保存」也不再自跑一次
+  检测：保存后立刻建立的控制连接本身就是检测，结论长期挂在行上。
 
 ## 模型供应商管理
 

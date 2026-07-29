@@ -520,3 +520,7 @@ declare global {
     }
   }
 }
+
+// 一台机器（本地 sidecar + 各远程 serve）。id 是后端标识，enabled=false = 已配置但不连接。
+export type { ConnState, ConnError } from './gateway'
+export type Machine = { id: string; name: string; enabled?: boolean }

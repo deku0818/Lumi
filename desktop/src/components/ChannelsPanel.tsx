@@ -23,7 +23,7 @@ import type {
 } from '../types'
 import { useEnvInstall } from './useEnvInstall'
 import type { Gateway } from '../gateway'
-import { MachineTabs } from './MachineTabs'
+import { MachineScope, useMachine } from './MachineTabs'
 import { DirBrowser } from './DirBrowser'
 import { basename } from '@/lib/utils'
 import { Section, Card, Field, TextInput, SegmentedControl, FormModal, ProgressBar } from './SettingsKit'
@@ -83,12 +83,10 @@ const emptyFeishu = (): FeishuConfig => ({
 // 表单视图：飞书配置（凭证 / 审批模式 / 群策略 / 白名单）。配置存后端 lumi.json
 // （绝对路径由 get_channels 下发），保存即实时停旧起新。
 export function ChannelsPanel({
-  machines,
   gwFor,
   active = true,
   onNavigate,
 }: {
-  machines: { id: string; name: string }[]
   gwFor: (id: string) => Gateway | undefined
   // 本 tab 是否可见。面板常驻挂载（保住编辑中的凭证），取数与轮询只在可见时跑
   active?: boolean
@@ -104,6 +102,7 @@ export function ChannelsPanel({
   const [configPath, setConfigPath] = useState('')
 
   const gw = gwFor(machine)
+  const offline = useMachine(machine).scope !== 'connected'
   const reload = useCallback(() => {
     // 路径与列表恒同生共死：机器不可达（无 gateway / 请求失败）时只清列表的话，
     // 文案会变成「凭证存该机器的 <上一台机器的路径>」
@@ -124,13 +123,14 @@ export function ChannelsPanel({
 
   // 渠道连接是异步的（enable 后先 connecting 再 connected/error），可见期间轮询
   // 保持状态新鲜。本面板在别的 tab 下仍挂着（forceMount 保住编辑中的凭证），故取数
-  // 一律以 active 为门——否则用户在「外观」页停留时，这里照样每 3 秒发一次 RPC
+  // 一律以 active 为门——否则用户在「外观」页停留时，这里照样每 3 秒发一次 RPC。
+  // 机器没连上时同样不轮：请求必然失败，只是每 3 秒把面板重渲一遍
   useEffect(() => {
-    if (!active) return
+    if (!active || offline) return
     reload()
     const timer = setInterval(reload, 3000)
     return () => clearInterval(timer)
-  }, [active, reload])
+  }, [active, offline, reload])
 
   // 该机器的供应商 profiles（渠道「模型 + 思考」配置的模型清单与思考能力来源）
   useEffect(() => {
@@ -152,15 +152,20 @@ export function ChannelsPanel({
       })
       .catch(() => {})
 
-  // 列表开关：仅翻转 enabled 立即保存（凭证编辑走表单）
+  // 列表开关：仅翻转 enabled 立即保存（凭证编辑走表单）。绑定项目是启用前置条件，
+  // 未绑定时开关改为打开配置弹窗引导绑定——后端也会拒绝这种保存，别在这里先存一份跑不起来的启用态
   const toggleEnabled = (on: boolean) => {
     const cfg = feishu?.config ?? emptyFeishu()
+    if (on && !cfg.workspace) {
+      setEditing({ ...cfg, enabled: true })
+      return
+    }
     save({ ...cfg, enabled: on })
   }
 
   return (
     <div>
-      <MachineTabs machines={machines} value={machine} onChange={setMachine} />
+      <MachineScope value={machine} onChange={setMachine}>
       <Section
         title="渠道"
         desc={
@@ -199,6 +204,10 @@ export function ChannelsPanel({
         </div>
       </Section>
 
+      </MachineScope>
+
+      {/* 弹窗放在作用域之外：机器瞬断（服务端重启 / 笔记本唤醒）会让作用域内的内容卸载，
+          正在编辑的凭证会随之丢失——这正是 SettingsDialog 加 forceMount 要防的事 */}
       {editing && (
         <FeishuForm
           initial={editing}
@@ -348,13 +357,18 @@ function FeishuForm({
 
   // 没有独立的「测试连接」：接入体检第①项已验凭证，且信息更全。两者并存会矛盾
   // ——凭证对但缺 app_version 权限时，bot/v3/info 报成功而体检报失败
+  //
+  // 未绑定项目不给保存：飞书会话必须有明确的工作目录，没有「用 serve 进程目录」这条退路
   const footer = (
     <>
+      {!cfg.workspace && <div className="text-[11px] text-error">请先绑定项目</div>}
       <div className="flex-1" />
       <Button variant="ghost" onClick={onCancel}>
         取消
       </Button>
-      <Button onClick={() => onSave(cfg)}>保存并重连</Button>
+      <Button disabled={!cfg.workspace} onClick={() => onSave(cfg)}>
+        保存并重连
+      </Button>
     </>
   )
 
@@ -978,7 +992,7 @@ function ThinkingControl({
 
 // 绑定项目：从该机器已登记的项目里挑一个作为飞书工作目录（参考 .demos/feishu-project-select.html A）。
 // 不再让用户手填路径——先在「项目」页建项目，渠道里只选已有项目；切换已绑定项目会弹重置提醒。
-// 空 = serve 进程当前目录（兜底，不推荐）。
+// 必选、无兜底：未绑定则保存按钮禁用，后端也拒绝启用（不退回 serve 进程目录）。
 function WorkspacePicker({
   gw,
   value,
@@ -991,6 +1005,7 @@ function WorkspacePicker({
   const [projects, setProjects] = useState<Project[]>([])
   const [creating, setCreating] = useState(false) // DirBrowser 新建项目中
   const [pending, setPending] = useState<string | null>(null) // 待确认切换的目标路径
+  const [addErr, setAddErr] = useState('') // 新建项目登记失败原因（否则失败无声，看着像没反应）
 
   useEffect(() => {
     gw
@@ -1000,12 +1015,13 @@ function WorkspacePicker({
   }, [gw])
 
   const current = projects.find((p) => p.path === value)
-  // 触发器展示：已登记取项目名 / 仅有路径取 basename / 未绑定走兜底
+  const bound = !!value
+  // 触发器展示：已登记取项目名 / 仅有路径取 basename / 未绑定 = 红字催选（不是某个兜底目录）
   const shown = current
     ? { name: current.name, path: value }
-    : value
+    : bound
       ? { name: basename(value), path: value }
-      : { name: 'serve 进程当前目录', path: '兜底，不推荐' }
+      : { name: '未绑定项目', path: '点此选择一个项目作为飞书工作目录' }
 
   // 选中项目：与当前不同且已有绑定 → 弹确认；否则直接生效
   const choose = (path: string) => {
@@ -1014,25 +1030,27 @@ function WorkspacePicker({
     else onChange(path)
   }
 
-  // 新建项目：浏览目录 → 登记 → 刷新列表 → 直接绑定
+  // 新建项目：浏览目录 → 登记 → 刷新列表 → 直接绑定。登记失败要说出来——
+  // 否则弹窗一关什么都没变，用户以为已经绑上了
   const onCreated = (path: string) => {
     setCreating(false)
+    setAddErr('')
     gw
       ?.addProject(path)
       .then((r) => {
         setProjects(r.projects ?? [])
         choose(path)
       })
-      .catch(() => {})
+      .catch((e) => setAddErr(String(e?.message || e) || '登记项目失败'))
   }
 
   return (
     <Field
-      label="绑定项目"
+      label="绑定项目（必选）"
       hint={
         value
           ? '飞书所有会话以此项目为工作目录；飞书技能包也安装到它的 .lumi/skills/'
-          : '留空 = serve 进程当前目录（兜底，不推荐）'
+          : '必选：未绑定项目的飞书渠道不会启动，也没有「用 serve 进程目录」的兜底'
       }
     >
       {projects.length === 0 && !value ? (
@@ -1042,12 +1060,12 @@ function WorkspacePicker({
           <DropdownMenuTrigger asChild>
             <button
               type="button"
-              className="group flex w-full items-center gap-2.5 rounded-lg border border-line bg-surface px-3 py-2 text-left outline-none transition data-[state=open]:border-primary"
+              className={`group flex w-full items-center gap-2.5 rounded-lg border bg-surface px-3 py-2 text-left outline-none transition data-[state=open]:border-primary ${bound ? 'border-line' : 'border-error/60'}`}
             >
-              <Folder size={16} className="shrink-0 text-primary" />
+              <Folder size={16} className={`shrink-0 ${bound ? 'text-primary' : 'text-error'}`} />
               <div className="min-w-0 flex-1">
-                <div className="truncate text-sm text-ink">{shown.name}</div>
-                <div className="truncate font-mono text-[10.5px] text-muted-foreground">
+                <div className={`truncate text-sm ${bound ? 'text-ink' : 'text-error'}`}>{shown.name}</div>
+                <div className={`truncate text-[10.5px] text-muted-foreground ${bound ? 'font-mono' : ''}`}>
                   {shown.path}
                 </div>
               </div>
@@ -1077,6 +1095,8 @@ function WorkspacePicker({
           </DropdownMenuContent>
         </DropdownMenu>
       )}
+
+      {addErr && <div className="mt-1.5 text-[11px] text-error">{addErr}</div>}
 
       {creating && (
         <DirBrowser

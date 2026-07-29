@@ -588,6 +588,62 @@ def test_channel_runtime_config_inherited():
     assert {"model", "effort", "tool_mode", "workspace"} <= set(keys)
 
 
+# ── 绑定项目必选、无兜底 ───────────────────────────────────────────────
+
+
+async def test_start_refuses_without_workspace():
+    """未绑定项目 → 不连（不退回 serve 进程 cwd），状态灯给出原因。
+
+    wait_for 是断言的一部分：start() 连上后会进常驻循环，守卫失效时这里会超时而非
+    静默通过。
+    """
+    ch = FeishuChannel(FeishuChannelConfig(app_id="cli_x", app_secret="s"))
+    await asyncio.wait_for(ch.start(), timeout=2)
+    status = ch.status()
+    assert status["state"] == "error" and "未绑定项目" in status["detail"]
+
+
+def test_save_feishu_requires_workspace_when_enabled(monkeypatch, tmp_path):
+    """启用态必须带 workspace；停用态（含关掉老配置）不受此限。"""
+    from lumi.gateway.channels import store
+
+    written: dict = {}
+    monkeypatch.setattr(store, "_read", lambda: {})
+    monkeypatch.setattr(
+        store.user_store, "write_section", lambda k, v: written.update({k: v})
+    )
+
+    with pytest.raises(ValueError, match="绑定项目"):
+        store.save_feishu({"enabled": True, "app_id": "cli_x", "app_secret": "s"})
+    assert not written  # 非法配置不落盘
+
+    cfg = store.save_feishu({"enabled": False, "app_id": "cli_x", "app_secret": "s"})
+    assert cfg.enabled is False and written  # 关掉无项目的老配置仍可保存
+
+    cfg = store.save_feishu(
+        {"enabled": True, "app_id": "cli_x", "app_secret": "s", "workspace": "/w"}
+    )
+    assert cfg.workspace == "/w"
+
+
+def test_local_env_checks_without_workspace_blocks_skills(monkeypatch):
+    """技能包无全局兜底：未绑定项目时报「未绑定项目」且不给一键安装。"""
+    from lumi.gateway import toolbox
+    from lumi.gateway.channels.feishu import setup
+
+    monkeypatch.setattr(
+        setup.toolbox,
+        "detect",
+        lambda name: toolbox.ToolStatus(
+            name=name, source="system", path="/usr/bin/lark-cli", version="1.0.0"
+        ),
+    )
+    checks = setup.local_env_checks("")
+    skills = next(c for c in checks if c["key"] == "skills")
+    assert skills["tone"] == "error"
+    assert "未绑定项目" in skills["name"] and not skills["fix_action"]
+
+
 def test_drain_ultra_note_prefers_channel_override(monkeypatch):
     """drain_ultra_note：渠道 context.effort 覆盖优先于全局 resolve()。
 

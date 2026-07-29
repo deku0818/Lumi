@@ -3,26 +3,32 @@ import { Plus, Pencil, Trash2, Server } from 'lucide-react'
 import type { BackendRemote, BackendsState } from '../types'
 import { useI18n } from '../i18n'
 import { machineColor } from '@/lib/utils'
+import { useMachine } from './MachineTabs'
 import { Section, SectionGroup, Field, TextInput, FormModal } from './SettingsKit'
 import { Button } from '@/components/ui/button'
 import { Switch } from '@/components/ui/switch'
 
-// 一次性测试连接：开一条裸 WS（带 ?token=），open=通、1008=鉴权失败、其余=不可达。
+// 一次性测试连接：开一条裸 WS（带 ?token=），收到首帧=通、1008=鉴权失败、其余=不可达。
 type TestState = { status: 'idle' | 'testing' | 'ok' | 'fail'; msgKey?: string }
 
 function testConnection(url: string, token: string): Promise<TestState> {
   return new Promise((resolve) => {
     let ws: WebSocket
+    let timer: ReturnType<typeof setTimeout>
+    let grace: ReturnType<typeof setTimeout>
     let done = false
-    const finish = (s: TestState) => {
+    // 唯一出口：定时器与 socket 都在这里收尾，各分支只管给结论
+    const finish = (msgKey: string, ok = false) => {
       if (done) return
       done = true
+      clearTimeout(timer)
+      clearTimeout(grace)
       try {
         ws.close()
       } catch {
-        /* noop */
+        /* 已关闭/未建立：忽略 */
       }
-      resolve(s)
+      resolve({ status: ok ? 'ok' : 'fail', msgKey })
     }
     const sep = url.includes('?') ? '&' : '?'
     try {
@@ -31,19 +37,18 @@ function testConnection(url: string, token: string): Promise<TestState> {
       resolve({ status: 'fail', msgKey: 'backends.unreachable' })
       return
     }
-    const timer = setTimeout(() => finish({ status: 'fail', msgKey: 'backends.timeout' }), 6000)
+    timer = setTimeout(() => finish('backends.timeout'), 6000)
+    // onopen 不能直接判成功：服务端「先 accept 再校验 token」（accept 前 close 客户端只见
+    // 1006，分不清鉴权失败与不可达），open 必然先于鉴权结论到达——拿它判成功的话 token
+    // 填错也报「连接成功」。但也不能只等首帧：首帧 gateway.ready 要等整个 bridge 初始化
+    // （工具装配 / MCP / checkpointer），冷启动的机器可能十几秒，会被误报成超时。
+    // 故取两者之先：收到首帧，或 open 后 1.5 秒没被 close（1008 是紧随 accept 的毫秒级事件）。
     ws.onopen = () => {
-      clearTimeout(timer)
-      finish({ status: 'ok', msgKey: 'backends.ok' })
+      grace = setTimeout(() => finish('backends.ok', true), 1500)
     }
-    ws.onclose = (ev) => {
-      clearTimeout(timer)
-      finish({ status: 'fail', msgKey: ev.code === 1008 ? 'backends.authFail' : 'backends.unreachable' })
-    }
-    ws.onerror = () => {
-      clearTimeout(timer)
-      finish({ status: 'fail', msgKey: 'backends.unreachable' })
-    }
+    ws.onmessage = () => finish('backends.ok', true)
+    ws.onclose = (ev) => finish(ev.code === 1008 ? 'backends.authFail' : 'backends.unreachable')
+    ws.onerror = () => finish('backends.unreachable')
   })
 }
 
@@ -83,7 +88,7 @@ export function BackendsPanel() {
       <SectionGroup>
         <Section title={t('settings.connections')} desc={t('backends.desc')}>
           {/* 本地 sidecar：恒在、不可删 */}
-          <MachineRow name={t('backends.local')} sub={t('backends.localHint')} color="var(--color-accent)" />
+          <MachineRow id="local" name={t('backends.local')} sub={t('backends.localHint')} color="var(--color-accent)" />
         </Section>
 
         <Section title={t('backends.remotes')}>
@@ -93,6 +98,7 @@ export function BackendsPanel() {
         {state.remotes.map((r) => (
           <MachineRow
             key={r.id}
+            id={r.id}
             name={r.name || r.url}
             sub={r.url}
             color={machineColor(r.id, [{ id: 'local' }, ...state.remotes])}
@@ -126,7 +132,11 @@ export function BackendsPanel() {
   )
 }
 
+// 一行 = 一台机器。副标题平时是地址，连不上时**就地换成失败原因**（地址退到 title 悬停）：
+// 出错时最该看的是原因，地址点「编辑」随时能看。显示的是实时连接态而非保存那一刻的快照，
+// 机器自行恢复后红字自己消失，故不需要「重试」按钮。
 function MachineRow({
+  id,
   name,
   sub,
   color,
@@ -135,6 +145,7 @@ function MachineRow({
   onDelete,
   onToggle,
 }: {
+  id: string
   name: string
   sub: string
   color: string
@@ -143,20 +154,33 @@ function MachineRow({
   onDelete?: () => void
   onToggle?: (enabled: boolean) => void
 }) {
+  const { t } = useI18n()
+  const { scope, error } = useMachine(id)
+  // 已关掉连接的机器不谈连接态（它本来就没连），只按「停用」淡化
+  const live = enabled ? scope : undefined
+  const failed = live === 'stopped'
+  const reason = failed ? t(error === 'auth' ? 'backends.authFail' : 'backends.unreachable') : ''
   return (
     <div className={`group flex items-center gap-3 py-2.5 border-b border-line/20 ${enabled ? '' : 'opacity-50'}`}>
       <span
-        className="shrink-0 size-2.5 rounded-full"
+        className={`shrink-0 size-2.5 rounded-full ${live === 'retrying' ? 'animate-pulse' : ''}`}
         style={
-          enabled
-            ? { background: color, boxShadow: `0 0 6px ${color}` }
-            : { border: '1.5px solid var(--color-separator)' }
+          !enabled
+            ? { border: '1.5px solid var(--color-separator)' }
+            : failed
+              ? {
+                  background: 'var(--color-error)',
+                  boxShadow: '0 0 6px color-mix(in srgb, var(--color-error) 70%, transparent)',
+                }
+              : { background: color, boxShadow: `0 0 6px ${color}` }
         }
       />
       <Server size={15} className="shrink-0 text-muted-foreground" />
       <div className="flex-1 min-w-0">
         <div className="text-sm text-ink/90 truncate">{name}</div>
-        <div className="text-xs text-muted-foreground truncate">{sub}</div>
+        <div className={`text-xs truncate ${reason ? 'text-error/90' : 'text-muted-foreground'}`} title={sub}>
+          {reason || (live === 'retrying' ? t('common.connecting') : sub)}
+        </div>
       </div>
       {onEdit && (
         <Button
@@ -206,6 +230,7 @@ function RemoteForm({
     setTest(await testConnection(url.trim(), token))
   }
 
+
   const footer = (
     <>
       <Button
@@ -223,6 +248,9 @@ function RemoteForm({
       <Button variant="ghost" onClick={onCancel}>
         {t('backends.cancel')}
       </Button>
+      {/* 保存不额外跑一次检测：保存后立刻会为这台机器建控制连接，那本身就是一次真检测，
+          结论（连接中 / 已连接 / 失败原因）长期显示在列表行上。在这里再连一次只会让按钮
+          空转最多 6 秒，且结果随弹窗关闭一起丢掉——没人看得到 */}
       <Button
         onClick={() => onSaved({ id: initial.id, name: name.trim() || url.trim(), url: url.trim(), token })}
         disabled={!valid}

@@ -25,7 +25,7 @@ import type {
   Project,
 } from '../types'
 import type { Gateway } from '../gateway'
-import { MachineTabs } from './MachineTabs'
+import { MachineScope } from './MachineTabs'
 import { DirBrowser } from './DirBrowser'
 import { basename } from '@/lib/utils'
 import { Section, Card, Field, TextInput, SegmentedControl, FormModal } from './SettingsKit'
@@ -60,10 +60,8 @@ function TransportTag({ config }: { config: McpServerConfig }) {
 // 列表：server 卡片（传输 tag + 命令/URL 摘要 + 启用开关 + 测试/编辑/删除）。
 // 编辑：表单 / JSON 双模式。禁用 = 存 disabled:true（加载侧剥离，不下传 adapter）。
 export function McpPanel({
-  machines,
   gwFor,
 }: {
-  machines: { id: string; name: string }[]
   gwFor: (id: string) => Gateway | undefined
 }) {
   const [machine, setMachine] = useState('local')
@@ -176,7 +174,7 @@ export function McpPanel({
 
   return (
     <div>
-      <MachineTabs machines={machines} value={machine} onChange={setMachine} />
+      <MachineScope value={machine} onChange={setMachine}>
 
       {/* 作用范围行 */}
       <div className="flex items-center gap-3 mb-4 px-3 py-2.5 rounded-xl border border-line/50 bg-surface/40">
@@ -253,6 +251,9 @@ export function McpPanel({
         />
       )}
 
+      </MachineScope>
+
+      {/* 弹窗放在作用域之外：瞬断会卸载作用域内容，正在编辑的服务器配置不该跟着没 */}
       {editing !== undefined && (
         <ServerForm
           name={editing}

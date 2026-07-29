@@ -13,7 +13,7 @@ import {
 } from 'lucide-react'
 import type { Project } from '../types'
 import { useI18n } from '../i18n'
-import { MachineTabs } from './MachineTabs'
+import { MachineScope, useMachine } from './MachineTabs'
 import { RenameInput } from './Sidebar'
 import { timeAgo } from '@/lib/utils'
 import { Button } from '@/components/ui/button'
@@ -32,7 +32,6 @@ type SortKey = 'recent' | 'name'
 export function ProjectsPage({
   projects,
   current,
-  machines,
   machine,
   needProjectHint,
   onSelectMachine,
@@ -44,7 +43,6 @@ export function ProjectsPage({
 }: {
   projects: Project[]
   current: string
-  machines: { id: string; name: string }[]
   machine: string
   needProjectHint?: boolean
   onSelectMachine: (id: string) => void
@@ -58,6 +56,8 @@ export function ProjectsPage({
   const [query, setQuery] = useState('')
   const [sort, setSort] = useState<SortKey>('recent')
   const [renaming, setRenaming] = useState<string | null>(null)
+
+  const offline = useMachine(machine).scope !== 'connected'
 
   // 后端已按最近使用降序下发，名称排序在前端做
   const shown = useMemo(() => {
@@ -91,13 +91,15 @@ export function ProjectsPage({
               ))}
             </DropdownMenuContent>
           </DropdownMenu>
-          <Button onClick={onNew} className="rounded-xl gap-1.5">
+          {/* 新建按钮在选择条上方（不在 MachineScope 里），离线时得自己禁用——
+              否则会往一台连不上的机器登记项目，请求发不出去且无声 */}
+          <Button onClick={onNew} disabled={offline} className="rounded-xl gap-1.5">
             <Plus className="size-3.5" />
             {t('projects.new')}
           </Button>
         </div>
 
-        <MachineTabs machines={machines} value={machine} onChange={onSelectMachine} />
+        <MachineScope value={machine} onChange={onSelectMachine}>
 
         {needProjectHint && (
           <div className="mb-5 flex items-center gap-2.5 rounded-xl border border-info/25 bg-info/10 px-3.5 py-2.5 text-xs text-ink">
@@ -140,6 +142,7 @@ export function ProjectsPage({
             ))}
           </div>
         )}
+        </MachineScope>
       </div>
     </div>
   )

@@ -20,7 +20,7 @@ import {
 import type { CronJob, CronRun } from '../types'
 import { useI18n, type Translate } from '../i18n'
 import { ConfirmDialog } from './ConfirmDialog'
-import { MachineTabs } from './MachineTabs'
+import { MachineScope, useMachine } from './MachineTabs'
 import { RailSection } from './RightRail'
 import {
   Dialog,
@@ -107,7 +107,6 @@ function ScheduleBadge({ job }: { job: CronJob }) {
 
 export function CronPage({
   api,
-  machines,
   jobs,
   runningJobs,
   version,
@@ -115,7 +114,6 @@ export function CronPage({
   onRefresh,
 }: {
   api: (backend: string) => CronApi | undefined // 按机器取连接（定时是 per-机器）
-  machines: { id: string; name: string }[]
   jobs: CronJob[] // App 持有的跨机器合并列表（带 backend 标记）
   runningJobs: Record<string, string[]> // 机器 → 该机器运行中的 job id
   version: number
@@ -129,14 +127,16 @@ export function CronPage({
   const [dialog, setDialog] = useState<{ job: CronJob | null } | null>(null) // 创建/编辑表单
   const [pendingDelete, setPendingDelete] = useState<CronJob | null>(null)
 
+  const offline = useMachine(machine).scope !== 'connected'
   const gw = api(machine)
   // 传给子组件：操作落在选中机器。稳定引用——否则每次渲染换新身份会让 useCronRuns 反复重拉。
   const boundApi = useCallback(() => gw, [gw])
   const shownJobs = jobs.filter((j) => (j.backend || 'local') === machine)
-  const pickMachine = (m: string) => {
+  // 稳定引用：MachineScope 的自动落回效应把它当依赖，每渲染换身份会让效应反复重挂
+  const pickMachine = useCallback((m: string) => {
     setSelectedId(null)
     setMachine(m)
-  }
+  }, [])
 
   const toggle = (job: CronJob, enabled: boolean) => {
     gw?.toggleCronJob(job.id, enabled).then(onRefresh).catch(onRefresh)
@@ -176,18 +176,22 @@ export function CronPage({
               <h1 className="serif text-2xl">{t('cron.title')}</h1>
               <p className="text-sm text-muted-foreground mt-1">{t('cron.subtitle')}</p>
             </div>
-            <Button onClick={() => setDialog({ job: null })} className="shrink-0 rounded-xl gap-1.5">
+            {/* 同 ProjectsPage：新建在选择条上方，选中机器离线时自行禁用 */}
+            <Button
+              onClick={() => setDialog({ job: null })}
+              disabled={offline}
+              className="shrink-0 rounded-xl gap-1.5"
+            >
               <Plus size={15} />
               {t('cron.new')}
             </Button>
           </div>
 
-          <MachineTabs
-            machines={machines}
+          <MachineScope
             value={machine}
             onChange={pickMachine}
-            className="mt-4 flex flex-wrap gap-2"
-          />
+            tabsClassName="mt-4 flex flex-wrap gap-2"
+          >
 
           <div className="mt-5 flex items-center gap-2.5 rounded-2xl border border-line/30 bg-surface/60 px-4 py-3 text-sm text-muted-foreground">
             <Info size={15} className="shrink-0 text-info" />
@@ -213,6 +217,7 @@ export function CronPage({
               ))}
             </div>
           )}
+          </MachineScope>
         </div>
       )}
 

@@ -41,7 +41,9 @@ class ChannelRuntimeConfig(BaseModel):
         "泄漏出来的人工审批一律自动拒绝（飞书只保留 ask 询问卡片）",
     )
     workspace: str = Field(
-        default="", description="渠道会话绑定的项目根目录；空则用进程 cwd"
+        default="",
+        description="渠道会话绑定的项目根目录。必填、无兜底——空则渠道拒绝启动"
+        "（不退回 serve 进程 cwd），默认空只是「尚未配置」的初值",
     )
 
 

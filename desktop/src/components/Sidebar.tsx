@@ -15,7 +15,6 @@ import {
   Check,
   ChevronsUpDown,
   Plus,
-  RotateCw,
   Search,
   Send,
   User,
@@ -25,8 +24,9 @@ import {
   ArrowUpCircle,
 } from 'lucide-react'
 import { useUpdateState } from '../update'
+import { MachineDot, ReconnectButton, useMachineConn } from './MachineTabs'
 import type { ConnState } from '../gateway'
-import type { ChannelInfo, CronJob, SessionMeta } from '../types'
+import type { ChannelInfo, CronJob, Machine, SessionMeta } from '../types'
 import { basename, machineColor, machineName, sessionKey, beOf, FLOAT_GAP } from '@/lib/utils'
 import { useI18n, LANGS } from '../i18n'
 import {
@@ -48,7 +48,6 @@ const CONN_DOT: Record<ConnState, string> = {
   failed: 'bg-error',
 }
 
-type Machine = { id: string; name: string; enabled?: boolean }
 const CAP = 5 // 每个项目分组默认显示的会话数（置顶/进行中不计入，永远显示）
 
 // 会话前端身份 = backend + thread_id（与 App 的 store/activity key 同源）；飞书群在
@@ -122,7 +121,6 @@ export const Sidebar = memo(function Sidebar({
   sessions,
   loadedBackends,
   machines,
-  machineConn,
   channels,
   recentLimit,
   currentKey,
@@ -139,7 +137,6 @@ export const Sidebar = memo(function Sidebar({
   onSelect,
   onNew,
   onNewChat,
-  onReconnectMachine,
   onOpenProjects,
   onOpenScheduled,
   onOpenSettings,
@@ -154,7 +151,6 @@ export const Sidebar = memo(function Sidebar({
   sessions: SessionMeta[]
   loadedBackends: Record<string, true> // 该机器 list_sessions 成功返回过才允许显示「暂无会话」
   machines: Machine[]
-  machineConn: Record<string, ConnState>
   channels: Record<string, ChannelInfo[]> // 机器 id → IM 渠道列表（飞书组头绑定项目）
   recentLimit: number
   currentKey: string
@@ -171,7 +167,6 @@ export const Sidebar = memo(function Sidebar({
   onSelect: (threadId: string, backend: string) => void
   onNew: () => void
   onNewChat: (backend: string) => void
-  onReconnectMachine: (backend: string) => void
   onOpenProjects: () => void
   onOpenScheduled: () => void
   onOpenSettings: () => void
@@ -180,6 +175,7 @@ export const Sidebar = memo(function Sidebar({
   onDelete: (session: SessionMeta) => void
 }) {
   const { t } = useI18n()
+  const machineConn = useMachineConn()
   const [tab, setTab] = useState<'recent' | 'all'>(
     () => (localStorage.getItem('lumi-sidebar-tab') as 'recent' | 'all') || 'recent',
   )
@@ -292,7 +288,6 @@ export const Sidebar = memo(function Sidebar({
   // 全部 · 机器段：可折叠头(状态光点 + 名 + ＋) + 项目分组
   const renderMachine = (m: Machine) => {
     const collapsed = !!collapsedM[m.id]
-    const color = machineColor(m.id, machines)
     const cn = machineConn[m.id]
     const offline = cn === 'closed' || cn === 'failed'
     const groups = projectGroupsFor(sessions, m.id)
@@ -304,15 +299,7 @@ export const Sidebar = memo(function Sidebar({
               size={11}
               className={`shrink-0 text-muted-foreground transition-transform ${collapsed ? '' : 'rotate-90'}`}
             />
-            <span
-              className={`shrink-0 size-1.5 rounded-full ${cn === undefined || cn === 'connecting' ? 'animate-pulse' : ''}`}
-              style={
-                offline
-                  ? { border: '1.5px solid var(--color-separator)', opacity: 0.65 }
-                  : { background: color, boxShadow: `0 0 5px ${color}` }
-              }
-              title={cn ?? 'connecting'}
-            />
+            <MachineDot id={m.id} />
             <span className="flex-1 truncate text-xs font-semibold text-ink/75">{m.name}</span>
           </button>
           <button
@@ -332,13 +319,7 @@ export const Sidebar = memo(function Sidebar({
             <div className="flex flex-col items-center gap-2 px-3 py-4 text-center">
               <WifiOff size={22} className="text-separator" />
               <span className="text-xs text-muted-foreground">{t('sidebar.offline')}</span>
-              <button
-                onClick={() => onReconnectMachine(m.id)}
-                className="inline-flex items-center gap-1.5 rounded-lg border border-line bg-surface px-3 py-1.5 text-xs text-ink transition hover:border-primary hover:text-primary"
-              >
-                <RotateCw size={13} />
-                {t('sidebar.reconnect')}
-              </button>
+              <ReconnectButton id={m.id} label={t('sidebar.reconnect')} />
             </div>
           ) : cn === 'open' && loadedBackends[m.id] ? (
             // 确凿的空态：连接就绪且该机器的列表成功返回过（未返回前显示连接中，
@@ -351,7 +332,7 @@ export const Sidebar = memo(function Sidebar({
             </button>
           ) : (
             <div className="px-3 py-1.5 text-xs text-muted-foreground/60 animate-pulse">
-              {t('sidebar.connecting')}
+              {t('common.connecting')}
             </div>
           ))}
       </div>
@@ -615,8 +596,8 @@ function CollapsibleGroup({
   )
 }
 
-// 多机时的机器色点（仅颜色，无文字）：CronJobRow / SessionRow 行首共用
-function MachineDot({ color, name }: { color: string; name?: string }) {
+// 多机时的机器色点（仅颜色、不表状态）：CronJobRow / SessionRow 行首共用
+function ColorDot({ color, name }: { color: string; name?: string }) {
   return (
     <span
       className="shrink-0 size-1.5 rounded-full"
@@ -653,7 +634,7 @@ function CronJobRow({
       } ${job.enabled ? '' : 'opacity-55'}`}
     >
       {job.consecutive_errors > 0 && <AlertTriangle size={13} className="shrink-0 text-primary" />}
-      {dotColor && <MachineDot color={dotColor} name={dotName} />}
+      {dotColor && <ColorDot color={dotColor} name={dotName} />}
       <span className="flex-1 min-w-0 truncate text-left">{job.name}</span>
       {running ? (
         <span
@@ -773,7 +754,7 @@ function SessionRow({
           active ? 'bg-surface text-ink' : 'text-ink/80 hover:bg-surface/60 hover:text-ink'
         }`}
       >
-        {dotColor && <MachineDot color={dotColor} name={dotName} />}
+        {dotColor && <ColorDot color={dotColor} name={dotName} />}
         {/* 仅「等你处理」保留提醒点（需你操作）；置顶进段不带 📌、进行中不带脉冲点 */}
         {state === 'attention' && (
           <span

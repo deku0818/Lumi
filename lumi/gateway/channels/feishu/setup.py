@@ -129,6 +129,19 @@ def local_env_checks(workspace: str) -> list[dict]:
         )
     )
 
+    # 技能包按渠道绑定项目安装，无全局兜底——未绑定时装无处可去，结论就是「先绑项目」
+    if not workspace:
+        checks.append(
+            Check(
+                key="skills",
+                tone="error",
+                name="未绑定项目",
+                detail="飞书技能包装到绑定项目的 .lumi/skills/，请先在上方选择项目",
+                group=group,
+            )
+        )
+        return [asdict(c) for c in checks]
+
     embedded = toolbox.lark_skill_versions(cli.path)
     if embedded is None:
         # 清单读不到 ≠ 0 个技能待装：此时安装是空操作，给 fix_action 会造成
@@ -146,18 +159,13 @@ def local_env_checks(workspace: str) -> list[dict]:
         return [asdict(c) for c in checks]
 
     status = toolbox.skills_status(embedded, workspace)
-    dest = (
-        "绑定项目的 .lumi/skills/"
-        if workspace
-        else "~/.lumi/skills/（未绑定项目，全局兜底）"
-    )
     if not status["installed"]:
         checks.append(
             Check(
                 key="skills",
                 tone="error",
                 name="飞书技能包未安装",
-                detail=f"{status['total']} 个飞书技能（消息 / 妙记 / 文档…）→ {dest}",
+                detail=f"{status['total']} 个飞书技能（消息 / 妙记 / 文档…）→ 绑定项目的 .lumi/skills/",
                 fix_action="feishu-skills",
                 group=group,
             )

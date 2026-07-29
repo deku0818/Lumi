@@ -42,8 +42,18 @@ def load_feishu() -> FeishuChannelConfig:
 
 
 def save_feishu(config: dict) -> FeishuChannelConfig:
-    """校验并持久化飞书配置（含密钥，chmod 600 原子写），返回规范化后的配置。"""
+    """校验并持久化飞书配置（含密钥，chmod 600 原子写），返回规范化后的配置。
+
+    启用态必须绑定项目（无 cwd 兜底）。校验只卡 enabled——否则老配置（历史遗留的
+    无项目启用态）连「关掉它」这一步都保存不了。
+
+    刻意不放进 pydantic 模型：``load_feishu`` 吞 ValidationError 回落空配置，规则搬进
+    模型会让这类老记录在 UI 上静默丢掉 app_id/secret，且 RPC 只能吐一段 pydantic 报文
+    而非这句人话。
+    """
     validated = FeishuChannelConfig.model_validate(config)
+    if validated.enabled and not validated.workspace:
+        raise ValueError("启用飞书前必须绑定项目（设置 → 渠道 → 飞书 → 绑定项目）")
     data = _read()
     data["feishu"] = validated.model_dump()
     user_store.write_section("channels", data)

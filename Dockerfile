@@ -9,10 +9,14 @@ RUN apt-get update && apt-get install -y --no-install-recommends ripgrep \
 RUN pip install --no-cache-dir uv
 
 WORKDIR /app
-# 仅复制安装所需，利用层缓存（改代码不必重装依赖）
-COPY pyproject.toml README.md ./
+# 装锁文件里那套版本（--frozen）：不带锁去解析会拿到本地从未跑过的组合，
+# 上一次就把 mcp 解到 2.0 而 langchain-mcp-adapters 还在 import 1.x 的符号，镜像启动即崩。
+# 分两段：依赖只依赖 pyproject/uv.lock，改代码不会打穿这层（近百个包、上百 MB 轮子）
+COPY pyproject.toml uv.lock README.md ./
+RUN uv sync --frozen --no-dev --no-cache --no-install-project
 COPY lumi ./lumi
-RUN uv pip install --system --no-cache "."
+RUN uv sync --frozen --no-dev --no-cache
+ENV PATH="/app/.venv/bin:$PATH"
 
 # 默认 config：style=code（default 风格无提示词会启动即崩）+ checkpoint=sqlite
 # （默认 memory 不落盘、会话聊完即消失、list_sessions 看不到）。用户挂 .lumi 时以挂载为准。

@@ -12,7 +12,7 @@ import {
 import type { ActiveModel, ModelLimits, ModelPointer, ProviderProfile } from '../types'
 import type { Gateway } from '../gateway'
 import { useI18n } from '../i18n'
-import { MachineTabs } from './MachineTabs'
+import { MachineScope } from './MachineTabs'
 import { Section, SectionGroup, Card, Row, Field, TextInput, FormModal } from './SettingsKit'
 import { Tooltip, TooltipContent, TooltipTrigger } from '@/components/ui/tooltip'
 import { Button } from '@/components/ui/button'
@@ -54,11 +54,9 @@ const formFrom = (p: ProviderProfile): Form => ({
 //   列表视图：右上角「添加提供商」，下方提供商卡片（模型 chip 可点切换、编辑、删除）。
 //   表单视图：添加/编辑——一套连接 + 逐行模型（每行带「测试」与费用提示）。
 export function ProvidersPanel({
-  machines,
   gwFor,
   onChanged,
 }: {
-  machines: { id: string; name: string }[]
   gwFor: (id: string) => Gateway | undefined
   onChanged: (machine: string) => void
 }) {
@@ -149,7 +147,7 @@ export function ProvidersPanel({
 
   return (
     <div>
-      <MachineTabs machines={machines} value={machine} onChange={setMachine} />
+      <MachineScope value={machine} onChange={setMachine}>
       <SectionGroup>
       <Section
         title={t('providers.title')}
@@ -217,6 +215,7 @@ export function ProvidersPanel({
         </Section>
       )}
       </SectionGroup>
+      </MachineScope>
 
       {form && (
         <ProviderForm
