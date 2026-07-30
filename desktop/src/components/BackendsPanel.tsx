@@ -4,7 +4,7 @@ import type { BackendRemote, BackendsState } from '../types'
 import { useI18n } from '../i18n'
 import { machineColor } from '@/lib/utils'
 import { useMachine } from './MachineTabs'
-import { Empty, EntityCard, Field, FormModal, Section, SectionGroup, StatusDot, TextInput } from './SettingsKit'
+import { Empty, EntityCard, Field, FormModal, Section, SectionGroup, SecretInput, StatusDot, TextInput } from './SettingsKit'
 import { Button } from '@/components/ui/button'
 import { Switch } from '@/components/ui/switch'
 
@@ -283,7 +283,7 @@ function RemoteForm({
           <TextInput value={url} placeholder="wss://dev.example.com/ws" onChange={(e) => setUrl(e.target.value)} />
         </Field>
         <Field label={t('backends.token')}>
-          <TextInput password value={token} placeholder={t('backends.tokenPh')} onChange={(e) => setToken(e.target.value)} />
+          <SecretInput value={token} placeholder={t('backends.tokenPh')} onChange={(e) => setToken(e.target.value)} />
         </Field>
       </div>
     </FormModal>

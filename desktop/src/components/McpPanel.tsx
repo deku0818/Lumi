@@ -25,7 +25,8 @@ import type {
   Project,
 } from '../types'
 import type { Gateway } from '../gateway'
-import { MachineScope } from './MachineTabs'
+import { MachineScope, useConnectedEffect } from './MachineTabs'
+import { toast } from './Toast'
 import { DirBrowser } from './DirBrowser'
 import { basename, cn } from '@/lib/utils'
 import {
@@ -72,8 +73,9 @@ export function McpPanel({
   gwFor: (id: string) => Gateway | undefined
 }) {
   const [machine, setMachine] = useState('local')
-  const [scope, setScope] = useState<McpScope>('global')
+  const [scope, setScope] = useState<McpScope>('project')
   const [project, setProject] = useState('') // 项目作用范围下选中的项目路径
+  const [projects, setProjects] = useState<Project[]>([])
   const [servers, setServers] = useState<McpServers>({})
   // 当前 scope 的配置文件绝对路径，由 list_mcp_servers 下发（前端拼 ~/.lumi 既
   // 看不懂又在 --config-dir 时说谎）。未选项目时无目标文件，故为空
@@ -85,6 +87,9 @@ export function McpPanel({
 
   const gw = gwFor(machine)
   const inProject = scope === 'project'
+  // 全局作用域下请求恒传空项目：预选的默认项目只为切到项目 tab 时即刻可用，
+  // 不该让全局请求的 deps 跟着项目选择变（否则切机器会重复请求两遍）
+  const effProject = inProject ? project : ''
   // 项目范围但未选项目时不请求（无目标文件）
   const ready = !inProject || !!project
 
@@ -92,7 +97,7 @@ export function McpPanel({
   // 独立于 reload——loading 轮询只需对账状态，不必重拉配置列表
   const fetchStatus = useCallback(() => {
     gwFor(machine)
-      ?.getMcpStatus(inProject ? project : '')
+      ?.getMcpStatus(effProject)
       .then((r) => {
         setStatus(Object.fromEntries(r.servers.map((s) => [s.name, s])))
         setPoolLoading(r.loading)
@@ -101,7 +106,7 @@ export function McpPanel({
         setStatus({})
         setPoolLoading(false)
       })
-  }, [gwFor, machine, project, inProject])
+  }, [gwFor, machine, effProject])
 
   const reload = useCallback(() => {
     // 路径与列表恒同生共死：只清列表的话，头部会继续显示上一个 scope / 机器的
@@ -110,16 +115,16 @@ export function McpPanel({
       setServers({})
       setPath('')
     }
-    if (inProject && !project) return clear()
+    if (!ready) return clear()
     gwFor(machine)
-      ?.listMcpServers(scope, inProject ? project : '')
+      ?.listMcpServers(scope, effProject)
       .then((r) => {
         setServers(r.servers ?? {})
         setPath(r.path ?? '')
       })
       .catch(clear)
     fetchStatus()
-  }, [gwFor, machine, scope, project, inProject, fetchStatus])
+  }, [gwFor, machine, scope, effProject, ready, fetchStatus])
 
   // 切机器时重置项目选择（各机器项目集不同）。在渲染中调整而非 effect：
   // 否则 reload 会先用「新机器 + 旧机器的项目路径」错配打一次请求，再被重置触发第二次。
@@ -129,9 +134,39 @@ export function McpPanel({
     setProject('')
   }
 
-  useEffect(() => {
-    reload()
-  }, [reload])
+  // 项目列表随机器加载。默认作用范围就是「项目」，进面板即选中默认项目
+  // （未设默认则取最近使用的），免去「切到项目再选一次项目」两步。
+  useConnectedEffect(
+    machine,
+    () => {
+      let alive = true
+      gwFor(machine)
+        ?.listProjects()
+        .then((r) => {
+          if (!alive) return
+          const ps = r.projects ?? []
+          setProjects(ps)
+          setProject((cur) => cur || ((ps.find((p) => p.default) ?? ps[0])?.path ?? ''))
+        })
+        .catch(() => alive && setProjects([]))
+      return () => {
+        alive = false
+      }
+    },
+    [gwFor, machine],
+  )
+
+  // 「新建项目」落库后刷新列表并选中它；失败要说出来——DirBrowser 已经关了，
+  // 无声失败会让人把 server 存进上一个项目的作用域
+  const createProject = (path: string) =>
+    gw?.addProject(path)
+      .then((r) => {
+        setProjects(r.projects ?? [])
+        setProject(path)
+      })
+      .catch((e) => toast.error('新建项目失败：' + ((e as Error)?.message ?? e)))
+
+  useConnectedEffect(machine, reload, [reload])
 
   // 池后台加载完成的进程级广播（App 转发为 window 信号）：面板开着时即时刷徽标
   useEffect(() => {
@@ -195,7 +230,15 @@ export function McpPanel({
             { val: 'project', label: '项目' },
           ]}
         />
-        {inProject && <ProjectSelect gw={gw} value={project} onChange={setProject} />}
+        {inProject && (
+          <ProjectSelect
+            gw={gw}
+            projects={projects}
+            value={project}
+            onChange={setProject}
+            onCreate={createProject}
+          />
+        )}
         {/* 绝对路径可能很长（Windows 尤甚），行内截断 + title 悬停看全 */}
         <span
           title={path}
@@ -1066,39 +1109,28 @@ function KvEditor({
   )
 }
 
-// 项目选择器（项目作用范围）：从该机器已登记项目里选一个
+// 项目选择器（项目作用范围）：从该机器已登记项目里选一个（列表由面板层加载）
 function ProjectSelect({
   gw,
+  projects,
   value,
   onChange,
+  onCreate,
 }: {
   gw?: Gateway
+  projects: Project[]
   value: string
   onChange: (v: string) => void
+  onCreate: (path: string) => void
 }) {
-  const [projects, setProjects] = useState<Project[]>([])
   const [creating, setCreating] = useState(false)
 
-  const load = useCallback(() => {
-    gw?.listProjects()
-      .then((r) => setProjects(r.projects ?? []))
-      .catch(() => setProjects([]))
-  }, [gw])
-  useEffect(() => {
-    load()
-  }, [load])
-
-  const current = useMemo(() => projects.find((p) => p.path === value), [projects, value])
+  const current = projects.find((p) => p.path === value)
   const label = current ? current.name : value ? basename(value) : '选择项目…'
 
   const onCreated = (path: string) => {
     setCreating(false)
-    gw?.addProject(path)
-      .then((r) => {
-        setProjects(r.projects ?? [])
-        onChange(path)
-      })
-      .catch(() => {})
+    onCreate(path)
   }
 
   return (

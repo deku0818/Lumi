@@ -1,8 +1,8 @@
-import { useCallback, useEffect, useState } from 'react'
+import { useCallback, useState } from 'react'
 import { Hexagon, Search, Zap, type LucideIcon } from 'lucide-react'
 import type { Gateway } from '../gateway'
 import type { EnvInstallTarget, EnvProgress, EnvStatus, EnvToolStatus } from '../types'
-import { MachineScope, useMachines } from './MachineTabs'
+import { MachineScope, useConnectedEffect, useMachines } from './MachineTabs'
 import { Card, Pill, ProgressBar, Section, SectionGroup } from './SettingsKit'
 import { useEnvInstall } from './useEnvInstall'
 import { Button } from '@/components/ui/button'
@@ -50,11 +50,15 @@ export function EnvPanel({
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [gw])
 
-  useEffect(() => {
-    setStatus(null)
-    setError(null)
-    refresh()
-  }, [refresh])
+  useConnectedEffect(
+    machine,
+    () => {
+      setStatus(null)
+      setError(null)
+      refresh()
+    },
+    [refresh],
+  )
 
   const installing = Object.keys(progress).length > 0
   const onInstall = (target: EnvInstallTarget) => {

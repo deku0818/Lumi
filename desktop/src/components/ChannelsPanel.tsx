@@ -45,6 +45,7 @@ import {
   Section,
   SegmentedControl,
   StatusDot,
+  SecretInput,
   TextInput,
   type StatusTone,
 } from './SettingsKit'
@@ -420,7 +421,7 @@ function FeishuForm({
               <TextInput value={cfg.app_id} onChange={(e) => set({ app_id: e.target.value })} placeholder="cli_…" />
             </Field>
             <Field label="App Secret">
-              <TextInput password value={cfg.app_secret} onChange={(e) => set({ app_secret: e.target.value })} placeholder="●●●●" />
+              <SecretInput value={cfg.app_secret} onChange={(e) => set({ app_secret: e.target.value })} placeholder="●●●●" />
             </Field>
           </div>
           {/* 绑定项目归凭证组：它是体检的输入——技能包按此项目检测与安装，所见即所得 */}

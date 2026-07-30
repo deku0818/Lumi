@@ -1,7 +1,9 @@
-import { type ComponentProps, type ReactNode } from 'react'
-import type { LucideIcon } from 'lucide-react'
+import { type ComponentProps, type ReactNode, useRef, useState } from 'react'
+import { Check, Copy, Eye, EyeOff, type LucideIcon } from 'lucide-react'
 import type { CheckTone, EnvProgress } from '../types'
 import { cn } from '@/lib/utils'
+import { useI18n } from '../i18n'
+import { Button } from '@/components/ui/button'
 import { Dialog, DialogContent, DialogHeader, DialogTitle } from '@/components/ui/dialog'
 
 // 分段控件 / 步进器共用的药丸容器（SettingsDialog 的 stepper 也 import 复用，避免边框透明度漂移）。
@@ -91,15 +93,58 @@ export function Field({
 export const inputClass =
   'w-full h-9 px-3 rounded-lg text-sm bg-canvas/50 text-ink border border-line/50 outline-none transition focus:border-primary/50 focus:ring-2 focus:ring-primary/15 placeholder:text-muted-foreground/50'
 
-export function TextInput({
-  password,
-  type,
-  className,
-  ...props
-}: ComponentProps<'input'> & { password?: boolean }) {
+export function TextInput({ type, className, ...props }: ComponentProps<'input'>) {
   // cn = clsx + tailwind-merge：调用方的 className 能正确覆盖 inputClass 里的冲突项（如 h-8 覆盖 h-9）。
-  // type 透传：password 是语法糖，其余（text/time/number…）直接用调用方给的 type，故 time/number 也走本组件。
-  return <input type={password ? 'password' : (type ?? 'text')} className={cn(inputClass, className)} {...props} />
+  // type 透传：text/time/number 都走本组件；凭证类输入用 SecretInput。
+  return <input type={type ?? 'text'} className={cn(inputClass, className)} {...props} />
+}
+
+// 凭证输入框（受控，value 必为 string）：小眼睛切换明文/密文 + 一键复制
+// （api_key / token / app_secret 三处共用）。
+export function SecretInput({ className, ...props }: ComponentProps<'input'> & { value: string }) {
+  const { t } = useI18n()
+  const [show, setShow] = useState(false)
+  const [copied, setCopied] = useState(false)
+  const timer = useRef<ReturnType<typeof setTimeout>>(undefined)
+  const copy = () => {
+    if (!props.value) return
+    // 反馈门控在写入成功之后——密钥没进剪贴板却闪对勾是在骗人
+    void navigator.clipboard.writeText(props.value).then(() => {
+      setCopied(true)
+      clearTimeout(timer.current)
+      timer.current = setTimeout(() => setCopied(false), 1500)
+    })
+  }
+  return (
+    <div className="relative flex items-center">
+      {/* 68 = 两个 icon-sm 按钮(2×28) + gap(2) + right-1.5(6) + 4 余量 */}
+      <input type={show ? 'text' : 'password'} className={cn(inputClass, 'pr-[68px]', className)} {...props} />
+      <div className="absolute right-1.5 flex gap-0.5">
+        <Button
+          variant="ghost"
+          size="icon-sm"
+          type="button"
+          tabIndex={-1}
+          onClick={() => setShow(!show)}
+          title={show ? t('common.hide') : t('common.show')}
+          className="text-muted-foreground"
+        >
+          {show ? <EyeOff /> : <Eye />}
+        </Button>
+        <Button
+          variant="ghost"
+          size="icon-sm"
+          type="button"
+          tabIndex={-1}
+          onClick={copy}
+          title={copied ? t('common.copied') : t('common.copy')}
+          className={copied ? 'text-primary hover:text-primary' : 'text-muted-foreground'}
+        >
+          {copied ? <Check /> : <Copy />}
+        </Button>
+      </div>
+    </div>
+  )
 }
 
 // 玻璃卡壳单一 token：Card / EntityCard / GroupCard / 渠道体检卡共用（描边与填充 alpha 只此一份）。

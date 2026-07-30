@@ -41,6 +41,20 @@ export function useMachine(id: string): { scope: ScopeState; error: ConnError } 
   return { scope, error }
 }
 
+// 挂靠连接态的取数 effect：机器没连上时不发请求（Gateway 立即 reject 且无人重试），
+// 连上/重连成功后自动重跑。fn 可返回清理函数，与 useEffect 同约定；deps 不含连接态。
+export function useConnectedEffect(
+  machine: string,
+  fn: () => void | (() => void),
+  deps: unknown[],
+) {
+  const { scope } = useMachine(machine)
+  useEffect(() => {
+    if (scope === 'connected') return fn()
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [...deps, scope])
+}
+
 // 机器状态点：金/机器色实心=已连接、呼吸=连接中、空心=离线。侧栏机器分组头与
 // 选择条 pill 共用一份；点本体走 SettingsKit 的 StatusDot（color/hollow/pulse 三路全覆盖）。
 export function MachineDot({ id }: { id: string }) {

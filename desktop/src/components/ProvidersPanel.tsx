@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useState } from 'react'
+import { useCallback, useState } from 'react'
 import {
   Boxes,
   Check,
@@ -13,8 +13,8 @@ import {
 import type { ActiveModel, ModelLimits, ModelPointer, ProviderProfile } from '../types'
 import type { Gateway } from '../gateway'
 import { useI18n } from '../i18n'
-import { MachineScope } from './MachineTabs'
-import { Empty, EntityCard, Field, FormModal, Row, Section, SectionGroup, TextInput } from './SettingsKit'
+import { MachineScope, useConnectedEffect } from './MachineTabs'
+import { Empty, EntityCard, Field, FormModal, Row, Section, SectionGroup, SecretInput, TextInput } from './SettingsKit'
 import { Tooltip, TooltipContent, TooltipTrigger } from '@/components/ui/tooltip'
 import { Button } from '@/components/ui/button'
 import { fmtTokensFull } from '@/lib/utils'
@@ -86,9 +86,7 @@ export function ProvidersPanel({
       .catch(() => {})
   }, [gwFor, machine])
 
-  useEffect(() => {
-    reload()
-  }, [reload])
+  useConnectedEffect(machine, reload, [reload])
 
   const gw = gwFor(machine)
   const apply = (r: {
@@ -468,7 +466,7 @@ function ProviderForm({
           <TextInput value={form.base_url} onChange={(e) => setForm({ ...form, base_url: e.target.value })} placeholder={t('providers.baseUrlPlaceholder')} />
         </Field>
         <Field label={t('providers.apiKey')}>
-          <TextInput password value={form.api_key} onChange={(e) => setForm({ ...form, api_key: e.target.value })} placeholder="sk-…" />
+          <SecretInput value={form.api_key} onChange={(e) => setForm({ ...form, api_key: e.target.value })} placeholder="sk-…" />
         </Field>
 
         <div>
