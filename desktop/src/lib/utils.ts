@@ -16,7 +16,12 @@ export const CARD_L2 = 'border border-line/60 rounded-lg bg-surface/50'
 
 // 文本截断与路径文件名提取（工具标题 / 计划对话框等共用）
 export const clip = (s: string, n = 72) => (s.length > n ? s.slice(0, n) + '…' : s)
-export const basename = (p: string) => p.split('/').filter(Boolean).pop() || p
+// 路径是不是 Windows 形状（盘符 / UNC）。判据只此一份：basename 与 fileUrl 作用在
+// 同一批路径上，两份拷贝日后一旦分头细化（`\\?\C:\`、盘符相对路径 `C:foo`），会表现为
+// 文件名对而链接坏
+export const WIN_PATH = /^[a-zA-Z]:[\\/]|^\\\\/
+export const basename = (p: string) =>
+  (WIN_PATH.test(p) ? p.split(/[\\/]/) : p.split('/')).filter(Boolean).pop() || p
 
 // token 数格式化（≥1k 显示 x.xk）。与 TUI lumi/tui/widgets/agent_group.py::_format_tokens 同口径
 export const fmtTokens = (n: number) => (n >= 1000 ? `${(n / 1000).toFixed(1)}k` : String(n))

@@ -8,18 +8,19 @@ from __future__ import annotations
 
 import os
 import platform
-import shutil
 import sys
 
 from lumi.agents.permissions.workspace import get_authorized_directory
 
 
 def _detect_shell() -> str:
-    """检测当前 shell 名称。"""
+    """检测当前 shell 名称。
+
+    Windows 恒为 cmd：这条信息是给模型写命令用的，必须与 ``bash`` 工具实际 spawn 的
+    shell（``LocalShellSession`` 的 cmd.exe）一致。按机器上装没装 pwsh 来报，模型会
+    写出一堆 PowerShell 语法丢进 cmd 里执行。
+    """
     if sys.platform == "win32":
-        for candidate in ("pwsh", "powershell"):
-            if shutil.which(candidate):
-                return candidate
         return "cmd"
     # Unix
     shell = os.environ.get("SHELL", "")

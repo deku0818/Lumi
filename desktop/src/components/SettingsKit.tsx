@@ -109,11 +109,16 @@ export function SecretInput({ className, ...props }: ComponentProps<'input'> & {
   const copy = () => {
     if (!props.value) return
     // 反馈门控在写入成功之后——密钥没进剪贴板却闪对勾是在骗人
-    void navigator.clipboard.writeText(props.value).then(() => {
-      setCopied(true)
-      clearTimeout(timer.current)
-      timer.current = setTimeout(() => setCopied(false), 1500)
-    })
+    // catch 不可省：writeText 在文档失焦 / 权限被拒时是 reject 而非静默失败，
+    // 只 void 掉会变成未处理的 promise rejection（与 App.tsx 的 CopyButton 同款）
+    navigator.clipboard
+      .writeText(props.value)
+      .then(() => {
+        setCopied(true)
+        clearTimeout(timer.current)
+        timer.current = setTimeout(() => setCopied(false), 1500)
+      })
+      .catch(() => {})
   }
   return (
     <div className="relative flex items-center">

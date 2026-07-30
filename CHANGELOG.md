@@ -1,5 +1,19 @@
 # Changelog
 
+## [0.2.95] - 2026-07-30
+
+### Fixed
+- **飞书体检在中文 Windows 上崩在输出上**：`✓`/`✗` 不在 GBK 字符集里，stdout 被管道接走（desktop 拉起 `lumi serve`、agent 的 shell 跑 `lumi feishu diagnose`）时编码退回 locale，写第一行就 `UnicodeEncodeError`。两层修复：CLI 入口把标准流恒定成 UTF-8（覆盖整个后端进程，dream 的 🌙、审批的 ⚠、cron 的 ✅ 等一并兜住，且与读侧一律按 UTF-8 解码的约定自洽）；记号换成 GBK 字符集内的 `√`/`×`，旧版控制台按 GBK 配字体时不会掉成方框。
+- **bash 工具在中文 Windows 上收发全是乱码**：命令按 UTF-8 写进 cmd.exe 的 stdin、输出按 UTF-8 解码，而 cmd 用的是 OEM 代码页（简中 cp936）。改为 shell 起在 `/k chcp 65001>nul` 上并给子进程带 `PYTHONIOENCODING=utf-8`，整条链统一到 UTF-8。
+- **Windows 上四处功能根本不通**：定时任务（`fcntl` 是 Unix 专有，`import` 即失败、异常被吞成一条 warning）改用 `msvcrt` 字节区间锁；后台任务超时/取消（`os.killpg` 不存在，且 `start_new_session` 在 Windows 被 CPython 忽略）改用 `taskkill /T /F` 按进程树终止；MCP 子进程清理依赖的 `wmic` 自 Win11 24H2 起默认不装、25H2 升级即移除，改为 PowerShell `Get-CimInstance` 一次取回进程表、本地建树（顺带把逐层 spawn 压成 1 次）；shell hook 的绝对路径校验用 `startswith("/")`，把 `C:\...` 一律判成非法，改用 `os.path.isabs`。
+- **模型被告知的 shell 与实际执行的不是同一个**：Windows 上探测到 pwsh 就上报 pwsh，但 bash 工具恒 spawn `cmd.exe`，模型会写出 PowerShell 语法丢进 cmd；改为恒报 `cmd`（顺带省掉每轮两次 `shutil.which` 的 PATH 扫描）。同时 `get_cwd()` 在 Windows 改用不带参数的 `cd`——`pwd` 在 cmd 里不存在，查失败会让后台任务起在模型 `cd` 之前的目录。
+- **文件编辑会顺手改写行尾**（不只 Windows）：读取走通用换行、写回用默认 `newline`，导致 Windows 上改一行 LF 文件整份变 CRLF、POSIX 上改 CRLF 文件整份变 LF——一次小改动放大成全文件 diff。改为在原文上替换、只把待匹配串对齐到文件行尾，未命中的部分逐字节不动（混合行尾的文件同样只改命中那段）。
+- **桌面端不认 Windows 路径**：`basename` 只按 `/` 切，项目卡片名、新建项目存下的项目名、工具标题里的文件名在 Windows 上全是整条路径；文件预览的 `lumi-file://` 把盘符吃进 host 必然 404。两处判据统一到 `lib/utils` 的一份 `WIN_PATH`（POSIX 下反斜杠仍按合法文件名字符对待）。
+- **密钥一键复制的未处理 promise rejection**：`writeText` 在文档失焦 / 权限被拒时是 reject，`void` 只骗过 lint，补上 `.catch`。
+
+### Changed
+- **读非 UTF-8 文件不再直接报错**：中文 Windows 上大量 txt/csv/bat 是 GBK，现回落到系统本地编码并在正文前声明（行号不受影响）；`edit`/`write` 保持严格 UTF-8，避免一次编辑悄悄换掉整个文件的编码。二进制文件仍明确拒读——回落编码几乎吃得下任意字节，不挡住会把一屏乱码当文件内容喂给模型。
+
 ## [0.2.94] - 2026-07-30
 
 ### Added

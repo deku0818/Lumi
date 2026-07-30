@@ -6,7 +6,7 @@ from unittest.mock import patch
 
 from typer.testing import CliRunner
 
-from lumi.cli import app
+from lumi.cli import _CHECK_MARKS, app
 from lumi.gateway.channels import store
 from lumi.gateway.channels.feishu.checks import Check
 
@@ -115,8 +115,18 @@ def test_diagnose_prints_fix_and_exits_nonzero_on_error():
     with _diagnosed(bot=[bad]):
         result = runner.invoke(app, ["feishu", "diagnose"])
     assert result.exit_code == 1
-    assert "[✗] 缺少机器人权限" in result.stdout
+    assert "[×] 缺少机器人权限" in result.stdout
     assert "链接: https://open.feishu.cn/app/x/auth" in result.stdout
+
+
+def test_diagnose_marks_render_on_legacy_console():
+    """三个记号都取自 GBK 字符集：中文 Windows 的旧版控制台按 GBK 配字体，
+    ✓ U+2713 这类字符会掉成方框（能不能写出去是 _force_utf8_stdio 的事）。
+
+    只约束记号本身——体检文案里出现什么字符不该被这条测试管住。
+    """
+    for mark in _CHECK_MARKS.values():
+        mark.encode("gbk")
 
 
 def test_diagnose_includes_minutes_when_enabled():

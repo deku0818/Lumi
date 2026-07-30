@@ -168,12 +168,21 @@ class LocalShellSession:
     async def _spawn_shell(self) -> asyncio.subprocess.Process:
         """启动新的 shell 进程。"""
         if self._is_windows:
+            # 命令按 UTF-8 写进 stdin、输出按 UTF-8 解码（见 _execute_locked /
+            # _collect_output），而 cmd 默认用 OEM 代码页（简中 = cp936）：不对齐的话
+            # 带中文的命令会被 cmd 读成乱码、中文输出解码成 �。/k 先 chcp 到 65001
+            # 把这条链拉成同一种编码（>nul 吞掉 "Active code page" 那行，免得混进首条
+            # 命令的输出）。PYTHONIOENCODING 让子进程里的 python 也按 UTF-8 输出——
+            # 否则它同样回落到 cp936。
             return await asyncio.create_subprocess_exec(
                 "cmd.exe",
+                "/k",
+                "chcp 65001>nul",
                 stdin=asyncio.subprocess.PIPE,
                 stdout=asyncio.subprocess.PIPE,
                 stderr=asyncio.subprocess.STDOUT,
                 cwd=self._working_dir,
+                env={**os.environ, "PYTHONIOENCODING": "utf-8"},
             )
         return await asyncio.create_subprocess_shell(
             "/bin/bash --norc --noprofile",
@@ -189,14 +198,16 @@ class LocalShellSession:
     async def get_cwd(self) -> str:
         """获取当前会话的实际工作目录。
 
-        通过在 shell 中执行 pwd 命令获取，反映 cd 命令后的真实路径。
-        如果查询失败，回退到初始工作目录。
+        通过在 shell 中执行 pwd（cmd 下是不带参数的 cd）获取，反映 cd 命令后的真实
+        路径。如果查询失败，回退到初始工作目录——那会让后台任务在模型 cd 过之后仍
+        起在初始目录里（``bash(run_in_background=True)`` 按此值定 working_dir）。
         """
-        result = await self.execute("pwd", timeout=CWD_QUERY_TIMEOUT)
+        query = "cd" if self._is_windows else "pwd"
+        result = await self.execute(query, timeout=CWD_QUERY_TIMEOUT)
         if result.success and result.stdout.strip():
             return result.stdout.strip()
         logger.warning(
-            f"[LocalShellSession] pwd 失败 (exit_code={result.exit_code})，"
+            f"[LocalShellSession] {query} 失败 (exit_code={result.exit_code})，"
             f"回退到初始目录: {self._working_dir}"
         )
         return self._working_dir

@@ -74,7 +74,9 @@ def make_shell_hook(
     启动期校验 command 必须是绝对路径 + 存在 + 可执行——不通过抛 ``ValueError``，
     由 ``config_loader`` 捕获后 log 跳过该条（不让坏配置静默漂移到运行时）。
     """
-    if not command.startswith("/"):
+    # isabs 而非 startswith("/")：后者把 Windows 的 C:\... 一律判成非法，那边所有
+    # shell hook 都会在启动期被跳过
+    if not os.path.isabs(command):
         raise ValueError(
             f"make_shell_hook: command must be an absolute path, got {command!r}"
         )

@@ -180,6 +180,11 @@ feishu_app = typer.Typer(
 )
 app.add_typer(feishu_app, name="feishu")
 
+# 体检结果的行首记号。崩不崩由 _force_utf8_stdio 兜（写侧恒 UTF-8）；这里选
+# √ / × 只为渲染——中文 Windows 的旧版控制台按 GBK 配字体，✓ U+2713 不在 GBK
+# 字符集里，会掉成方框
+_CHECK_MARKS = {"ok": "√", "warn": "!", "error": "×"}
+
 
 def _parse_channel_field(name: str, raw: str) -> object:
     """key=value 预处理：只做 pydantic 做不了的两件事——未知字段当场拦（模型默认
@@ -282,10 +287,9 @@ def feishu_diagnose() -> None:
             pool.submit(minutes.diagnose, cfg.app_id) if cfg.minutes_enabled else None
         )
         checks = local.result() + remote.result() + (extra.result() if extra else [])
-    marks = {"ok": "✓", "warn": "!", "error": "✗"}
     for check in checks:
         detail = " ".join(filter(None, [check["detail"], check["emphasis"]]))
-        mark = marks[check["tone"]]
+        mark = _CHECK_MARKS[check["tone"]]
         typer.echo(f"[{mark}] {check['name']}" + (f"  {detail}" if detail else ""))
         for label, key in (
             ("链接", "fix_url"),
@@ -407,8 +411,22 @@ def _ensure_ca_bundle() -> None:
     os.environ["SSL_CERT_FILE"] = certifi.where()
 
 
+def _force_utf8_stdio() -> None:
+    """标准流恒定 UTF-8。
+
+    Windows 上 stdout 被管道接走时（desktop 拉 ``lumi serve``、agent 的 shell 跑
+    ``lumi feishu diagnose``）编码退回 locale——简中机器即 GBK，输出任何不在 GBK 字符集
+    的字符会直接 UnicodeEncodeError 崩掉整条命令。而读侧（shell_session / toolbox /
+    minutes）本就一律按 UTF-8 解码，写侧跟上才自洽。真实控制台的 stdout 早已是 UTF-8，
+    此处等同空操作。errors 兜住冻结产物等拿不到 UTF-8 的边角情形。
+    """
+    sys.stdout.reconfigure(encoding="utf-8", errors="replace")
+    sys.stderr.reconfigure(encoding="utf-8", errors="replace")
+
+
 def main() -> None:
     """CLI 主入口。"""
+    _force_utf8_stdio()
     _ensure_ca_bundle()
     app()
 

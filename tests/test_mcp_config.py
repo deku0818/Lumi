@@ -392,3 +392,39 @@ async def test_close_all_pools_latch_blocks_new_loads(monkeypatch):
     pool.ensure_loading()
     assert pool._load_task is None  # 闩已落：不起新加载
     await asyncio.wait_for(pool.wait_ready(), 1)  # 不挂死
+
+
+def test_parent_to_children_parses_powershell_table():
+    """Windows 进程表解析：只认 "<ppid> <pid>" 两列数字行，噪声行丢弃。
+
+    wmic 已被 Windows 淘汰（24H2 起默认不装），改用 PowerShell 一次取全表；
+    它的输出可能夹带空行 / 中文告警，解析不能被这些行带崩。
+    """
+    table = "1 100\r\n100 200\r\n\r\n无法加载配置文件\r\n100 201\r\nbad line here\r\n"
+    assert mcp._parent_to_children(table) == {1: [100], 100: [200, 201]}
+
+
+def test_collect_descendant_pids_windows_walks_tree(monkeypatch):
+    """整棵后代树都要收到（原实现逐层 spawn 一个 wmic，现在本地建树）。"""
+    import subprocess
+
+    table = "1 10\n10 20\n10 21\n20 30\n999 40\n"
+    monkeypatch.setattr(
+        subprocess,
+        "run",
+        lambda *a, **k: subprocess.CompletedProcess(a, 0, table, ""),
+    )
+    assert sorted(mcp._collect_descendant_pids_windows(10)) == [20, 21, 30]
+
+
+def test_collect_descendant_pids_windows_survives_cycle(monkeypatch):
+    """PID 复用可能让 ppid 关系成环，不能转不出来。"""
+    import subprocess
+
+    table = "10 20\n20 10\n"
+    monkeypatch.setattr(
+        subprocess,
+        "run",
+        lambda *a, **k: subprocess.CompletedProcess(a, 0, table, ""),
+    )
+    assert mcp._collect_descendant_pids_windows(10) == [20]

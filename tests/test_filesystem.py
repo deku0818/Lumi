@@ -1,5 +1,6 @@
 """文件系统工具测试（helpers + backend + tool wrappers）"""
 
+import locale
 import os
 
 import pytest
@@ -116,6 +117,36 @@ class TestBackendRead:
         result = await backend.read(str(f))
         assert "空" in result
 
+    async def test_read_non_utf8_falls_back(
+        self, backend, authorized_tmp_dir, monkeypatch
+    ):
+        """非 UTF-8 文件（中文 Windows 上大量 txt/csv 是 GBK）按本地编码兜底并声明。
+
+        提示不占正文行号：正文第一行仍是 1。
+        """
+        monkeypatch.setattr(locale, "getpreferredencoding", lambda _do_setlocale: "gbk")
+        f = authorized_tmp_dir / "gbk.txt"
+        f.write_bytes("第一行\n第二行".encode("gbk"))
+        result = await backend.read(str(f))
+        assert "gbk" in result
+        assert "\n1\t第一行" in result  # 提示后紧跟正文第 1 行，行号未被顶偏
+
+    @pytest.mark.parametrize("preferred", ["utf-8", "gbk"])
+    async def test_read_binary_reports_error(
+        self, backend, authorized_tmp_dir, monkeypatch, preferred
+    ):
+        """二进制文件仍是一句「读不了」，不许变成一屏乱码。
+
+        两条路都得挡住：POSIX 的本地编码就是 UTF-8，同一份字节换 errors="replace"
+        再解一遍必然“成功”；GBK 之类的编码更是几乎吃得下任意字节。
+        """
+        monkeypatch.setattr(
+            locale, "getpreferredencoding", lambda _do_setlocale: preferred
+        )
+        f = authorized_tmp_dir / "x.bin"
+        f.write_bytes(bytes(range(256)) * 20)
+        assert "错误" in await backend.read(str(f))
+
     async def test_read_path_outside(self, backend, authorized_tmp_dir):
         # 使用当前系统上一定存在但在授权目录之外的路径
         import tempfile
@@ -172,6 +203,42 @@ class TestBackendEdit:
         f.write_text("hello")
         result = await backend.edit(str(f), "xyz", "abc")
         assert result["error"] is not None
+
+    async def test_edit_keeps_crlf(self, backend, authorized_tmp_dir):
+        """CRLF 文件改一行后仍是 CRLF：否则一次小改动会变成全文件 diff。
+
+        old_string 用 \\n 也要能命中——匹配前统一成 LF，写回时再还原。
+        """
+        f = authorized_tmp_dir / "crlf.txt"
+        f.write_bytes(b"a\r\nb\r\nc\r\n")
+        result = await backend.edit(str(f), "a\nb", "a\nB")
+        assert result["error"] is None
+        assert f.read_bytes() == b"a\r\nB\r\nc\r\n"
+
+    async def test_edit_keeps_mixed_line_endings(self, backend, authorized_tmp_dir):
+        """混合行尾的文件只改命中那段，没被改到的行原样不动。
+
+        （CSV 引号内 CRLF、Windows/Unix 工具交替动过的文件都是这形状）
+        """
+        f = authorized_tmp_dir / "mixed.csv"
+        f.write_bytes(b"x\r\ny\nz\n")
+        result = await backend.edit(str(f), "x", "X")
+        assert result["error"] is None
+        assert f.read_bytes() == b"X\r\ny\nz\n"
+
+    async def test_edit_keeps_lf(self, backend, authorized_tmp_dir):
+        """LF 文件不许被写成 CRLF（Windows 上 write_text 默认会译成 os.linesep）。"""
+        f = authorized_tmp_dir / "lf.txt"
+        f.write_bytes(b"a\nb\nc\n")
+        result = await backend.edit(str(f), "b", "B")
+        assert result["error"] is None
+        assert f.read_bytes() == b"a\nB\nc\n"
+
+    async def test_write_keeps_lf(self, backend, authorized_tmp_dir):
+        """新建文件按模型给的原文落盘，三平台字节一致。"""
+        f = authorized_tmp_dir / "new_lf.txt"
+        await backend.write(str(f), "a\nb\n")
+        assert f.read_bytes() == b"a\nb\n"
 
 
 class TestBackendGlobInfo:

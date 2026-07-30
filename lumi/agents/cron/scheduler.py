@@ -11,6 +11,7 @@ from __future__ import annotations
 
 import asyncio
 import os
+import sys
 from collections.abc import Awaitable, Callable
 from datetime import datetime, timedelta
 from pathlib import Path
@@ -42,6 +43,25 @@ from lumi.utils.thread_id import CRON_THREAD_PREFIX, generate_thread_id
 
 # 向后兼容：历史上 ``_is_transient_error`` 定义在本模块，外部（含测试）经此路径导入。
 _is_transient_error = is_transient_error
+
+
+def _lock_exclusive(f: IO[str]) -> None:
+    """对已打开的文件加非阻塞独占锁；已被他人持有时抛 ``OSError``。
+
+    fcntl 是 Unix 专有模块，Windows 上 import 即 ModuleNotFoundError——整个 cron
+    子系统会在 ``start()`` 里静默失效（异常被 bootstrap 吞成一条 warning）。
+    Windows 对应物是 msvcrt 的字节区间锁：锁首字节即可（区间可越过 EOF），
+    与 flock 一样在 close 时释放。
+    """
+    if sys.platform == "win32":
+        import msvcrt
+
+        f.seek(0)
+        msvcrt.locking(f.fileno(), msvcrt.LK_NBLCK, 1)
+        return
+    import fcntl
+
+    fcntl.flock(f, fcntl.LOCK_EX | fcntl.LOCK_NB)
 
 
 class Scheduler:
@@ -210,12 +230,11 @@ class Scheduler:
         """跨进程调度互斥：同一 workspace 仅一个进程调度，后启动者跳过。"""
         if self._lock_path is None:
             return True
-        import fcntl
 
         # "a+" 不截断：抢锁失败时不抹掉持有进程已写入的 PID
         f = open(self._lock_path, "a+")
         try:
-            fcntl.flock(f, fcntl.LOCK_EX | fcntl.LOCK_NB)
+            _lock_exclusive(f)
         except OSError:
             f.close()
             return False

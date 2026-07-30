@@ -18,12 +18,18 @@ import {
 } from 'lucide-react'
 import type { PresentedFile } from '../types'
 import { useI18n } from '../i18n'
-import { fmtSize } from '@/lib/utils'
+import { fmtSize, WIN_PATH } from '@/lib/utils'
 
 // lumi-file://local/<abs path>：固定 host=local（自定义 standard scheme 不允许空 host，
 // 否则 Chromium 会把路径首段当 host 吃掉）；各路径段 encodeURIComponent，空格/中文/#/? 都安全。
 // 主进程 protocol.handle('lumi-file') 解码 pathname 后读本地文件。
-export const fileUrl = (p: string) => 'lumi-file://local' + p.split('/').map(encodeURIComponent).join('/')
+// Windows 路径先转成 URL 能表达的形状：`C:\a\b` → `/C:/a/b`，UNC `\\srv\s` → `//srv/s`
+// （POSIX 不动——反斜杠在那边是合法文件名字符）。主进程负责把 `/C:/…` 的前导斜杠去掉。
+export const fileUrl = (p: string) => {
+  const abs = WIN_PATH.test(p) ? p.replace(/\\/g, '/') : p
+  const rooted = abs.startsWith('/') ? abs : '/' + abs
+  return 'lumi-file://local' + rooted.split('/').map(encodeURIComponent).join('/')
+}
 
 // present_files 工具输出（JSON 字符串）→ 文件列表；非法 JSON 退化为空。
 export function parsePresentedFiles(output: string): PresentedFile[] {

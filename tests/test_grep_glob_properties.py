@@ -308,8 +308,10 @@ async def test_case_insensitive_flag(pattern):
         old_dirs = workspace._authorized_directories[:]
         workspace._authorized_directories = [tmp_dir]
         try:
-            # 文件内容包含大写版本
-            upper_content = f"prefix {pattern.upper()} suffix"
+            # 文件内容包含大写版本。包裹符号不用英文单词：hypothesis 会生成
+            # "efi" 这种恰好是 "prefix" 子串的模式，大小写敏感那侧照样命中，
+            # 测出来的不是 case 语义而是包裹词自身
+            upper_content = f"@@{pattern.upper()}@@"
             f = tmp_dir / "test.txt"
             f.write_text(upper_content)
 

@@ -517,7 +517,9 @@ app.whenReady().then(async () => {
   // 本地文件协议：lumi-file:///<abs-path>（renderer 端各路径段 encodeURIComponent）
   protocol.handle('lumi-file', async (request) => {
     try {
-      const filePath = decodeURIComponent(new URL(request.url).pathname)
+      // Windows 盘符路径在 URL 里是 `/C:/…`，前导斜杠得去掉才是真实路径（UNC `//srv/s` 保留）
+      const decoded = decodeURIComponent(new URL(request.url).pathname)
+      const filePath = /^\/[a-zA-Z]:/.test(decoded) ? decoded.slice(1) : decoded
       const st = await fs.promises.stat(filePath)
       if (st.size > MAX_SERVE_BYTES) return new Response('Too large', { status: 413 })
       const data = await fs.promises.readFile(filePath)

@@ -13,6 +13,7 @@ from __future__ import annotations
 import asyncio
 import os
 import signal
+import sys
 import time
 import uuid
 from contextlib import suppress
@@ -45,8 +46,26 @@ async def _terminate_group(process: asyncio.subprocess.Process) -> None:
     start_new_session 使 wrapper shell 为组长，killpg 连同命令内 fork 的后代一起
     终止。仅在 wrapper 尚存活时按组终止（组长存活即锚定 pgid，不会误杀被复用的
     id）；wrapper 已退出则无从安全定位组，维持不动。
+
+    Windows 没有进程组这一层（``start_new_session`` 在那边被 CPython 直接忽略），
+    ``os.killpg`` 更是 Unix 专有——照原路走会 AttributeError，任务超时/取消时留下
+    孤儿。改用 taskkill 按进程树杀；无 /F 的 taskkill 发的是 WM_CLOSE，控制台程序
+    普遍不理，故直接强杀。
     """
     if process.returncode is not None:
+        return
+    if sys.platform == "win32":
+        killer = await asyncio.create_subprocess_exec(
+            "taskkill",
+            "/T",
+            "/F",
+            "/PID",
+            str(process.pid),
+            stdout=asyncio.subprocess.DEVNULL,
+            stderr=asyncio.subprocess.DEVNULL,
+        )
+        await killer.wait()
+        await process.wait()
         return
     try:
         os.killpg(process.pid, signal.SIGTERM)

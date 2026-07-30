@@ -142,3 +142,31 @@ async def test_subagent_shells_isolated_between_siblings():
     )
     assert seen["A"] == "sub-A" and seen["A_after"] == "sub-A"  # 交错后仍是自己的 key
     assert seen["B"] == "sub-B" and seen["B_after"] == "sub-B"
+
+
+async def test_get_cwd_uses_cd_on_windows(monkeypatch):
+    """Windows 查当前目录用不带参数的 cd——cmd.exe 里没有 pwd。
+
+    查不到就回退到初始目录，后台任务会起在模型 cd 之前的位置（bash.py 按此值定
+    working_dir），所以这条不是显示问题。
+    """
+    from lumi.agents.runtime.shell_session import CommandResult, LocalShellSession
+
+    session = LocalShellSession("/start")
+    seen: list[str] = []
+
+    async def fake_execute(command, timeout=0):
+        seen.append(command)
+        return CommandResult(
+            stdout="D:\\proj", exit_code=0, success=True, timed_out=False
+        )
+
+    monkeypatch.setattr(session, "execute", fake_execute)
+    monkeypatch.setattr(LocalShellSession, "_is_windows", True)
+    assert await session.get_cwd() == "D:\\proj"
+    assert seen == ["cd"]
+
+    seen.clear()
+    monkeypatch.setattr(LocalShellSession, "_is_windows", False)
+    await session.get_cwd()
+    assert seen == ["pwd"]
