@@ -2562,7 +2562,7 @@ export default function App() {
                   {activeChannel && channelBanner()}
                   <div className="relative flex-1 min-h-0">
                     <div ref={scrollRef} onScroll={onScroll} className="h-full overflow-auto">
-                    <div className="max-w-3xl mx-auto w-full px-6 py-8 space-y-5">
+                    <div className="chat-body max-w-3xl mx-auto w-full px-6 py-8 space-y-5">
                       {segments.map((seg) => {
                         const key = segKey(seg)
                         const node =

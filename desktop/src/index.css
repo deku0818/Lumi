@@ -161,6 +161,12 @@ body {
   user-select: none;
 }
 
+/* 聊天流正文（用户气泡 + 助手 Markdown）比 UI 大一号，跟随设置→字号联动；
+   流内工具卡等用固定 text-xs/text-sm，不受影响 */
+.chat-body {
+  font-size: calc(var(--ui-font-size, 13px) + 1px);
+}
+
 .md,
 textarea,
 input,
