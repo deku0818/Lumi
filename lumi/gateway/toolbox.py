@@ -317,6 +317,9 @@ def install(name: str, progress: ProgressFn | None = None) -> ToolStatus:
                 _link(_node_tool_path(node_root, cmd), cmd)
         else:
             _extract_binary(archive, name)
+    if progress:
+        # 终态：装齐流程里已完成的行定格在「完成 100%」，而非停在最后一条脉冲
+        progress("完成", 1.0)
     return detect(name)
 
 

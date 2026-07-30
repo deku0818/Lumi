@@ -3,6 +3,10 @@
 安装是分钟级下载，不能挂在 RPC 响应里：env_install 立即返回 started，进度走
 env.progress（节流到整数百分比变化），结束后广播 env.state 全量状态——所有
 连接同步刷新，与 bg_tasks 的「快照广播、前端过滤」同范式。
+
+两个 target 语义不同：env.progress 的 target 恒为具体组件名（装齐时逐工具下发，
+"all" 永不上 progress 线，前端各行各显示各的）；env.state 的 target 是本次请求的
+目标（装齐 = "all"），供多面板判断这次安装与自己是否相关。
 """
 
 from __future__ import annotations
@@ -50,33 +54,44 @@ async def dispatch_env(method: str, params: dict) -> dict:
 async def _run_install(target: str, project: str = "") -> None:
     global _installing
     loop = asyncio.get_running_loop()
-    last = ("", -2)
 
-    def progress(phase: str, pct: float | None) -> None:
-        # 下载回调按 64KB 块触发，节流到「阶段变化或整数百分比前进」才广播
-        nonlocal last
-        pct_int = -1 if pct is None else int(pct * 100)
-        if (phase, pct_int) == last:
-            return
-        last = (phase, pct_int)
-        asyncio.run_coroutine_threadsafe(
-            hub.delivery.send_event(
-                "env.progress",
-                {"target": target, "phase": phase, "percent": pct_int},
-            ),
-            loop,
-        )
+    def progress_for(wire_target: str) -> toolbox.ProgressFn:
+        last = None
+
+        def progress(phase: str, pct: float | None) -> None:
+            # 下载回调按 64KB 块触发，节流到「阶段变化或整数百分比前进」才广播
+            nonlocal last
+            pct_int = -1 if pct is None else int(pct * 100)
+            if (phase, pct_int) == last:
+                return
+            last = (phase, pct_int)
+            asyncio.run_coroutine_threadsafe(
+                hub.delivery.send_event(
+                    "env.progress",
+                    {"target": wire_target, "phase": phase, "percent": pct_int},
+                ),
+                loop,
+            )
+
+        return progress
 
     error = ""
     try:
         if target == "lark-cli":
-            await asyncio.to_thread(toolbox.install_lark_cli, progress)
+            await asyncio.to_thread(toolbox.install_lark_cli, progress_for(target))
         elif target == "feishu-skills":
-            await asyncio.to_thread(toolbox.sync_lark_skills, progress, project)
+            await asyncio.to_thread(
+                toolbox.sync_lark_skills, progress_for(target), project
+            )
         else:
-            # all = 全部核心工具，其余 = 指定的那一个；「已装的跳过」在 install_missing 里
+            # all = 逐个装缺失的核心工具，进度按工具名广播（前端各行各显示各的）；
+            # 「已装的跳过」仍单源在 install_missing 里。逐个调用使其并行探测退化为
+            # 串行——探测毫秒级、下载分钟级，不值得为此给它加 progress 工厂参数
             names = toolbox.CORE_TOOLS if target == "all" else (target,)
-            await asyncio.to_thread(toolbox.install_missing, progress, names)
+            for name in names:
+                await asyncio.to_thread(
+                    toolbox.install_missing, progress_for(name), (name,)
+                )
     except Exception as e:
         logger.warning(f"安装 {target} 失败: {e}")
         error = str(e)

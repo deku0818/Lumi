@@ -64,7 +64,8 @@ export function EnvPanel({
 
   const toolOf = (name: string) => status?.tools.find((t) => t.name === name)
   const hasMissing = (status?.tools ?? []).some((t) => t.source === 'missing')
-  // 进度事件按 target 记：单装看自己，「一键装齐」的 target 是 all，missing 行共用
+  // 进度事件按工具名下发（装齐时后端逐个装、逐个报），各行只看自己；
+  // 'all' 键只来自「一键装齐」的乐观种子/恢复态，充当还没轮到的 missing 行的排队显示
   const progressOf = (name: string, tool?: EnvToolStatus): EnvProgress | undefined =>
     progress[name] ?? (tool?.source === 'missing' ? progress['all'] : undefined)
 

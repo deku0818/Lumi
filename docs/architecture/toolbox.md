@@ -80,7 +80,7 @@ Agent 任务工具链的探测与安装。实现在 `lumi/gateway/toolbox.py`（
 
 - **RPC** `env_status` → `{tools, installing, bin_dir}`：核心工具链全量状态（飞书组件有项目维度，归渠道体检）+ 进行中的安装 target，面板打开时据此恢复进行中态（对齐 `get_mcp_status` 的 loading 范式）。
 - **RPC** `env_install(target, project?)` → `{started}`：安装是分钟级，立即返回不挂在响应里。
-- **事件** `env.progress{target, phase, percent}`：节流到「阶段变化或整数百分比前进」才广播；`percent = -1` 表示进度不可知（解压 / npm 阶段）。
+- **事件** `env.progress{target, phase, percent}`：节流到「阶段变化或整数百分比前进」才广播；`percent = -1` 表示进度不可知（解压 / npm 阶段）。`target` 恒为具体组件名——装齐时逐工具下发（`all` 永不上 progress 线），前端各行各显示各的；每装完一个工具补发「完成 100%」终态，该行不停在最后一条脉冲。
 - **事件** `env.state{tools, target, bin_dir, error?}`：一次安装结束后的全量状态广播，所有连接同步刷新（与 `bg_tasks` 的「快照广播、前端过滤」同范式）。带 `target` 是因为多面板各自订阅——无 target 时一处的安装结束会误清另一处的进度、提前重跑无关体检。
 
 **全局互斥**：`_installing` 单值即不变量本身。target 之间有重叠（`all` ⊃ uv/rg/node，`lark-cli` 经 npm 写进 `node/` 树），并行会让两条线程写同一二进制 / rmtree 同一棵树，故任一安装进行中即拒绝新安装（返回 `started: false`）。

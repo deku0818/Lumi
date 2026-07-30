@@ -79,6 +79,24 @@ async def test_install_progress_throttled_and_state_broadcast(fake_hub, monkeypa
     assert states == [{"tools": ["x"], "target": "uv"}]
 
 
+async def test_install_all_broadcasts_per_tool_targets(fake_hub, monkeypatch):
+    """装齐时进度按工具名下发：前端各行各显示各的，rg 行不会写着「下载 uv」。"""
+
+    def fake_install(name, progress=None):
+        progress(f"下载 {name}", 0.5)
+
+    monkeypatch.setattr(toolbox, "install", fake_install)
+    monkeypatch.setattr(toolbox, "detect", lambda n: toolbox.ToolStatus(n, "missing"))
+    monkeypatch.setattr(toolbox, "status_all", lambda: {"tools": []})
+    await dispatch_env("env_install", {"target": "all"})
+    await _wait_install_done()
+
+    progress = [p for n, p in fake_hub.delivery.events if n == "env.progress"]
+    assert [p["target"] for p in progress] == list(toolbox.CORE_TOOLS)
+    # 结束态 target 仍是 all：面板据此清进度并整体刷新
+    assert fake_hub.delivery.events[-1][1]["target"] == "all"
+
+
 async def test_install_failure_reports_error_state(fake_hub, monkeypatch):
     def boom(name, progress=None):
         raise RuntimeError("网络不可达")
