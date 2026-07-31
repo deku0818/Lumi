@@ -42,6 +42,7 @@ from lumi.agents.tools.providers.mcp import (
     get_pool_status,
     pool_generation,
     project_wire_key,
+    refresh_pool_config,
 )
 from lumi.gateway.bridge.approval import ApprovalEnricher
 from lumi.gateway.bridge.broker import LUMI_APPROVAL_EVENT, ApprovalBroker
@@ -904,16 +905,17 @@ class AgentBridge:
             set_run_config_hooks(self._config_hooks)
 
             # MCP 池后台就位/换代后，轮首重建工具列表（后台加载不阻塞就绪的配套拼图：
-            # 会话秒开，工具在池加载完成后的下一轮自然可用；配置作废换代同理）
-            if (
-                self._context is not None
-                and pool_generation(self._mcp_project) != self._mcp_gen
-            ):
-                self._context.tools = await self._build_tools()
-                logger.info(
-                    "[AgentBridge] MCP 池换代，工具列表已重建（%d 个工具）",
-                    len(self._context.tools),
-                )
+            # 会话秒开，工具在池加载完成后的下一轮自然可用；配置作废换代同理）。
+            # 先自查进程外写入（agent 跑 `lumi mcp` / 手改文件没有 RPC 通知）——
+            # 配置变了则换代，随即被下面的版本号比对接住
+            if self._context is not None:
+                await refresh_pool_config(self._mcp_project)
+                if pool_generation(self._mcp_project) != self._mcp_gen:
+                    self._context.tools = await self._build_tools()
+                    logger.info(
+                        "[AgentBridge] MCP 池换代，工具列表已重建（%d 个工具）",
+                        len(self._context.tools),
+                    )
 
             # 检测残留图状态（待执行节点但无中断），自动恢复
             await self._recover_stale_state(graph)

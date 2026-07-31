@@ -202,6 +202,9 @@ def _config_hash(config: dict[str, Any]) -> str:
     return short_hash(json.dumps(config, sort_keys=True, ensure_ascii=False), 16)
 
 
+_EMPTY_CONFIG_HASH = _config_hash({})
+
+
 def _make_quiet_stdio_client(original_stdio_client: Any) -> Any:
     """包装 stdio_client，将 errlog 重定向到 devnull 以避免污染 TUI"""
 
@@ -605,6 +608,9 @@ class McpPool:
         # 另一半拼图（对齐 Claude Code：交互会话从不等 MCP，工具随连接就位动态出现）。
         self.generation = 0
         self.last_used = 0.0  # 最近访问 monotonic 时刻（LRU 淘汰用）
+        # 最近一次加载所尝试配置的 hash（失败也记）：sync_config 据此区分
+        # 「配置真变了」与「上次就是这份配置但没加载成功」——后者不反复重试
+        self.attempted_hash = _EMPTY_CONFIG_HASH
         self._load_task: asyncio.Task | None = None
 
     @property
@@ -651,6 +657,7 @@ class McpPool:
         task = asyncio.current_task()
         manager = self.manager
         mcp_config = _load_merged_mcp_config(_key_project_dir(self.key))
+        self.attempted_hash = _config_hash(mcp_config)
         try:
             if not mcp_config:
                 return
@@ -703,6 +710,27 @@ class McpPool:
             await asyncio.wait([task])
         await manager.close()
         self.generation += 1
+
+    async def sync_config(self, interrupt_loading: bool) -> None:
+        """配置比对换代的唯一决策点（RPC 作废与轮首自查共用）。
+
+        与最近一次尝试加载的配置 hash（``attempted_hash``，失败也记）比对，变了才
+        动作：暖池/在途池关池换代（close 内取消在途加载），冷池只递增版本号唤醒
+        会话重建（重建经 get_mcp_tools 按新配置触发加载）。没变则零动作——加载
+        失败的终态不会被反复重试，无关写入（如某项目自己覆盖了被改的全局 server）
+        完全不打断。``interrupt_loading=False``（轮首自查）不打断在途加载：首次
+        加载可横跨多条消息，贸然关闭永不收敛，其配置过期由完成后的下一轮收口；
+        RPC 写路径（True）则立即取消重来。
+        """
+        if self.loading and not interrupt_loading:
+            return
+        new_hash = _config_hash(_load_merged_mcp_config(_key_project_dir(self.key)))
+        if new_hash == self.attempted_hash:
+            return
+        if self.manager.is_started or self.loading:
+            await self.close()
+        else:
+            self.generation += 1
 
 
 _pools: dict[str, McpPool] = {}
@@ -800,13 +828,9 @@ async def close_all_pools() -> None:
 async def invalidate_mcp_pools(scope: str, project_dir: Path | None = None) -> None:
     """save/delete 后作废**配置真的变了**的会话池，下次加载时以新配置重建。
 
-    借鉴 Claude Code 的 config-hash diff：只关 merged 配置 hash 变了的池，
-    没变的（如某项目自己覆盖了被改的全局 server）原样保留、完全不打断。
-    close 内取消在途加载、杀本池子进程并递增版本号——存活会话轮首感知换代
-    重建工具列表，重建触发新池后台加载。
-
-    ``scope=="global"`` → 逐池重算 merged hash（全局层被所有项目继承）；
-    其它 → 只查该项目的池。
+    借鉴 Claude Code 的 config-hash diff（比对与动作单源在
+    :meth:`McpPool.sync_config`）。``scope=="global"`` → 逐池重算 merged hash
+    （全局层被所有项目继承）；其它 → 只查该项目的池。
     """
     if scope == "global":
         candidates = list(_pools.values())
@@ -815,15 +839,19 @@ async def invalidate_mcp_pools(scope: str, project_dir: Path | None = None) -> N
         candidates = [pool] if pool is not None else []
 
     for pool in candidates:
-        new_config = _load_merged_mcp_config(_key_project_dir(pool.key))
-        if not pool.manager.is_started and not pool.loading:
-            # 冷池没有可关的资源，但配置非空时必须换代：绑着它的存活会话只认
-            # 版本号比对，不换代则轮首永不重建（首个新增的 server 永不生效）
-            if new_config:
-                pool.generation += 1
-            continue
-        if _config_hash(new_config) != pool.manager._config_hash:
-            await pool.close()
+        await pool.sync_config(interrupt_loading=True)
+
+
+async def refresh_pool_config(project_dir: Path | None) -> None:
+    """轮首自失效：进程外写入（`lumi mcp` CLI / 手改文件）后感知配置变化并换代。
+
+    RPC 写路径落盘后即时 :func:`invalidate_mcp_pools`；进程外写入没有通知渠道，
+    交互会话每轮首调用本函数兜住（``_load_merged_mcp_config`` 按 mtime 缓存，
+    未变时零解析）。
+    """
+    pool = _pools.get(_project_key(project_dir))
+    if pool is not None:
+        await pool.sync_config(interrupt_loading=False)
 
 
 # ── 公共 API ──

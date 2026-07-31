@@ -1,5 +1,15 @@
 # Changelog
 
+## [0.2.96] - 2026-07-31
+
+### Added
+- **`lumi mcp` 命令行**（对齐 `claude mcp` 的命令面）：`add`（stdio 命令或 URL 自动分流，`-e KEY=VALUE` 传密钥、`-H` 传鉴权头、`-t sse` 选 SSE，兼容 claude 风格的 `--` 分隔符）/ `add-json`（README 里的 mcpServers 片段原样照抄）/ `list`（分层展示）/ `get`（合并语义取生效配置）/ `remove`（自动定位所在层，两层同名要求显式 `--scope`）/ `test`（真连一次列出工具清单）。scope 默认项目层（与桌面 MCP 面板一致），与面板读写同一份 `mcp_server.json`，防抹除严格读 + 0600 原子写同源（`mcp_rpc` 的 read/write_servers）。
+- **MCP 配置进程外写入热生效**：`lumi mcp` CLI、手改文件这类写入没有 RPC 通知，运行中的会话现在每轮首自查 merged 配置 hash（mtime 缓存，未变零成本），变了即换代重建工具列表——agent 在会话里自己 add 完，下一条消息新工具就出现，不用重启。加载失败的池只在配置真变了时才重试，不会每条消息对着坏 server 重新 spawn。
+- **lumi-config 技能**（原 setup-env 改名重构）：SKILL.md 变薄成路由（触发词 + 三篇索引 + 共用约定），执行依赖 / 飞书接入 / MCP 接入各自成篇按需读（`references/env.md|feishu.md|mcp.md`）——新增的 mcp.md 定好作用层怎么选、add→test→生效的全流程和连不上的排查路径，agent 对话内代劳接 MCP。
+
+### Changed
+- **MCP 池失效判定单源化**：RPC 作废（`invalidate_mcp_pools`）与轮首自查收敛到 `McpPool.sync_config`，比对恒用 `attempted_hash`（失败也记），唯一策略差异是「是否打断在途加载」一个显式布尔；顺带修正冷池配置未变时的过宽换代。
+
 ## [0.2.95] - 2026-07-30
 
 ### Fixed

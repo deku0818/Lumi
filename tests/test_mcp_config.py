@@ -168,6 +168,9 @@ class FakeManager:
 def _fake_pool(key: str, config_hash: str, closed: list[str]) -> mcp.McpPool:
     pool = mcp.McpPool(key)
     pool.manager = FakeManager(config_hash, closed)
+    # 已启动池的不变量：attempted_hash == manager._config_hash（_load 同源写入），
+    # sync_config 只比对 attempted_hash
+    pool.attempted_hash = config_hash
     return pool
 
 
@@ -315,8 +318,8 @@ async def test_cancelled_load_keeps_successor_registration(monkeypatch):
 
 async def test_first_server_added_bumps_cold_pool(tmp_path, monkeypatch):
     """从无到有添加首个 server：无配置时 get_mcp_tools 也登记池对象；invalidate
-    对配置非空的冷池直接换代——否则存活会话轮首版本号比对恒 0==0，新 server
-    到应用重启前都不生效。配置仍为空的冷池则不换代（无可重建）。"""
+    对配置变了的冷池换代——否则存活会话轮首版本号比对恒 0==0，新 server
+    到应用重启前都不生效。配置仍为空（hash 未变）的冷池则不换代（无可重建）。"""
     project = tmp_path / "proj"
     project.mkdir(parents=True)
     monkeypatch.setattr(mcp, "_global_mcp_config_path", lambda: tmp_path / "none.json")
@@ -335,6 +338,97 @@ async def test_first_server_added_bumps_cold_pool(tmp_path, monkeypatch):
     )
     await mcp.invalidate_mcp_pools("project", project)
     assert mcp.pool_generation(project) == 1  # 冷池换代：会话轮首感知并重建
+
+
+# ── 轮首自失效（进程外写入：lumi mcp CLI / 手改文件，没有 RPC invalidate 通知）──
+
+
+async def test_refresh_closes_started_pool_on_external_change(monkeypatch):
+    closed: list[str] = []
+    pool = _fake_pool("/p/X", "OLD", closed)
+    monkeypatch.setattr(mcp, "_pools", {"/p/X": pool})
+    monkeypatch.setattr(mcp, "_load_merged_mcp_config", lambda p: {"new": 1})
+    monkeypatch.setattr(mcp, "_config_hash", lambda cfg: "NEW")
+
+    await mcp.refresh_pool_config(Path("/p/X"))
+
+    assert closed == ["OLD"]
+    assert pool.generation == 1  # 换代：会话轮首据此重建工具列表
+
+
+async def test_refresh_noop_when_unchanged(monkeypatch):
+    closed: list[str] = []
+    pool = _fake_pool("/p/X", "SAME", closed)
+    monkeypatch.setattr(mcp, "_pools", {"/p/X": pool})
+    monkeypatch.setattr(mcp, "_load_merged_mcp_config", lambda p: {"x": 1})
+    monkeypatch.setattr(mcp, "_config_hash", lambda cfg: "SAME")
+
+    await mcp.refresh_pool_config(Path("/p/X"))
+
+    assert closed == [] and pool.generation == 0
+
+
+async def test_refresh_skips_inflight_load(monkeypatch):
+    """在途首次加载可横跨多条消息，轮首自查不得打断（打断则永不收敛）。"""
+    import asyncio
+
+    monkeypatch.setattr(mcp, "_pools", {})
+    monkeypatch.setattr(
+        mcp,
+        "_load_merged_mcp_config",
+        lambda p: (_ for _ in ()).throw(AssertionError("loading 池不应读配置")),
+    )
+    pool = mcp.pool_for(None)
+    pool._load_task = asyncio.get_event_loop().create_future()  # 在途
+
+    await mcp.refresh_pool_config(None)
+
+    assert pool.generation == 0
+    pool._load_task.cancel()
+
+
+async def test_refresh_cold_failed_pool_retries_only_on_config_change(monkeypatch):
+    """加载失败的终态冷池：配置没变绝不轮轮重试（每条消息重 spawn 坏 server），
+    配置真变了才换代重试——靠 _load 失败路径也记下的 attempted_hash 区分。"""
+    monkeypatch.setattr(mcp, "_pools", {})
+    holder = {"cfg": {"s": {"transport": "streamable_http", "url": "http://x/mcp"}}}
+    monkeypatch.setattr(mcp, "_load_merged_mcp_config", lambda p: holder["cfg"])
+
+    class FailingManager:
+        is_started = False
+        server_status: dict[str, dict] = {}
+
+        async def start(self, mcp_config):
+            raise RuntimeError("boom")
+
+    pool = mcp.pool_for(None)
+    pool.manager = FailingManager()
+    pool.ensure_loading()
+    await pool._load_task  # 失败终态（异常被 _load 吞掉、不换代）
+    assert pool.generation == 0
+    assert pool.attempted_hash == mcp._config_hash(holder["cfg"])
+
+    await mcp.refresh_pool_config(None)  # 配置未变：不重试
+    assert pool.generation == 0
+
+    holder["cfg"] = {"s": {"transport": "streamable_http", "url": "http://y/mcp"}}
+    await mcp.refresh_pool_config(None)  # 配置变了：换代唤醒会话重建重载
+    assert pool.generation == 1
+
+
+async def test_refresh_wakes_cold_pool_on_first_server(monkeypatch):
+    """空配置从未加载的冷池：首个 server 出现（CLI 写入）即换代，空转不换代。"""
+    monkeypatch.setattr(mcp, "_pools", {})
+    holder: dict = {"cfg": {}}
+    monkeypatch.setattr(mcp, "_load_merged_mcp_config", lambda p: holder["cfg"])
+
+    pool = mcp.pool_for(None)
+    await mcp.refresh_pool_config(None)
+    assert pool.generation == 0  # 仍是空配置：不动
+
+    holder["cfg"] = {"s": {"transport": "streamable_http", "url": "http://x/mcp"}}
+    await mcp.refresh_pool_config(None)
+    assert pool.generation == 1
 
 
 async def test_wait_ready_retries_new_generation_after_close(monkeypatch):

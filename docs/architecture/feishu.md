@@ -212,7 +212,7 @@ FAILED 不上抛），成功与否看**快照时刻有没有推进**（`record_t
 - **CLI 入口**：`lumi feishu config`（key=value 读写，`app_secret=-` 走 stdin）/
   `diagnose`（体检，妙记启用时追加妙记四项，任一 error 退出码非零）/ `sync-skills`
   （技能包 → 绑定项目）。与 desktop 渠道页同一份数据，供 agent 对话内代劳接入
-  （setup-env 技能的 `references/feishu.md` 消费）。
+  （lumi-config 技能的 `references/feishu.md` 消费）。
 - **热重载**：CLI 等进程外写入没有 RPC 通道，`watch_store()`（lifespan 起的
   fire-and-forget 任务）每 3s 查 lumi.json mtime，内容与最后应用的配置
   （`_applied`）真不同才 `reload()`——其他分区的写入不弹飞书长连接。

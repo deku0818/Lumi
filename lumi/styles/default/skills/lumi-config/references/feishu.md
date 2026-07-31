@@ -13,7 +13,7 @@
 
 ## 一、前置
 
-node 与 lark-cli 缺哪个都先按 SKILL.md 的流程装好（lark-cli 见「装不上 lark-cli 时」）。
+node 与 lark-cli 缺哪个都先按 `env.md` 的流程装好（lark-cli 见其「装不上 lark-cli 时」）。
 
 ## 二、建应用、拿凭证
 
