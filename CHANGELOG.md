@@ -1,5 +1,12 @@
 # Changelog
 
+## [0.2.97] - 2026-07-31
+
+### Changed
+- **依赖全量升级**：langchain 1.3.14 / langgraph 1.2.10 / langgraph-sdk 0.4.2 / langchain-anthropic 1.5.3 / langchain-openai 1.4.1 / anthropic 0.120.2 / openai 2.51.0，及 fastapi、uvicorn、ruff 等约 40 个包升至最新。全量测试与 MCP 真连（tavily/plane）验证通过。
+- **mcp 钉在 1.x**（现 1.29.0）并补成直接依赖：`langchain-mcp-adapters` 0.3.1 声明 `mcp>=1.24.0` 无上限，但 import 了 mcp 2.0 已删除的 `RequestContext`，装 2.0 即 ImportError；且 `providers/mcp.py` 本就直接 `from mcp import ClientSession`，不该靠传递依赖。待上游适配 2.0 后再放开。
+- **ruff 排除 markdown**：0.16 起 ruff format 会重排 md 内的 Python 代码块，docs 里的示意片段（对齐注释、紧凑字面量）被拆散，`extend-exclude = ["*.md"]` 保持手写排版。
+
 ## [0.2.96] - 2026-07-31
 
 ### Added

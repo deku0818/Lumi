@@ -1,6 +1,6 @@
 [project]
 name = "lumi"
-version = "0.2.96"
+version = "0.2.97"
 description = "基于 LangGraph 的 AI Agent 框架"
 readme = "README.md"
 requires-python = ">=3.12"
@@ -27,6 +27,7 @@ dependencies = [
     "jsonschema>=4.26.0",
     "lark-oapi>=1.7.1",
     "python-socks>=2.8.2",
+    "mcp>=1.24.0,<2",
 ]
 
 [project.scripts]
@@ -51,6 +52,8 @@ testpaths = ["tests"]
 [tool.ruff]
 line-length = 88
 target-version = "py312"
+# 0.16 起 ruff 会格式化 md 内的代码块；docs 里的示意片段保持手写排版
+extend-exclude = ["*.md"]
 
 [tool.ruff.lint]
 select = ["E", "F", "I", "W", "UP"]
