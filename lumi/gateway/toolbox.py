@@ -35,8 +35,12 @@ from lumi.utils.read_config import get_config
 UV_VERSION = "0.11.32"
 RG_VERSION = "15.2.0"
 NODE_VERSION = "24.18.0"
+OFFICECLI_VERSION = "1.0.143"
 
-CORE_TOOLS = ("uv", "rg", "node")
+# 工具链单枚举：探测（status_all）、装齐（env_rpc target=all）、CLI `lumi env install`
+# 全部共用。后端不再分「核心/可选」——该区分自装齐覆盖全部后已无行为消费者，
+# 环境页的两栏分组是纯展示概念，由前端 EnvPanel 独家持有
+ALL_TOOLS = ("uv", "rg", "node", "officecli")
 
 # 进度回调：(阶段描述, 0..1 或 None=不可知)
 ProgressFn = Callable[[str, float | None], None]
@@ -96,6 +100,14 @@ def download_url(tool: str, os_name: str, arch: str) -> str:
         )
     if tool == "node":
         return f"https://nodejs.org/dist/v{NODE_VERSION}/node-v{NODE_VERSION}-{os_name}-{arch}.{ext}"
+    if tool == "officecli":
+        # 发布物是免压缩的单二进制，命名平台段用 mac 而非 darwin
+        plat = "mac" if os_name == "darwin" else os_name
+        suffix = ".exe" if os_name == "win" else ""
+        return (
+            "https://github.com/iOfficeAI/OfficeCLI/releases/download/"
+            f"v{OFFICECLI_VERSION}/officecli-{plat}-{arch}{suffix}"
+        )
     raise ValueError(f"未知工具: {tool}")
 
 
@@ -160,7 +172,7 @@ def detect(name: str) -> ToolStatus:
 
 
 def status_all() -> dict:
-    """核心工具链全量状态，dict 结构可直接下发前端。
+    """工具链全量状态（核心 + 可选），dict 结构可直接下发前端。
 
     飞书组件不在此列——它的检测有项目维度（技能包按项目装），归渠道体检
     （diagnose_feishu_setup 的本地环境组），环境页保持纯机器级视图。
@@ -169,9 +181,9 @@ def status_all() -> dict:
     写法非技术用户看不懂，路径该由知道真值的一侧给出，而非前端硬编码。
     """
     # 每个 detect 一次 --version 子进程，并行探测把墙钟压到单次
-    with ThreadPoolExecutor(max_workers=len(CORE_TOOLS)) as pool:
+    with ThreadPoolExecutor(max_workers=len(ALL_TOOLS)) as pool:
         return {
-            "tools": [asdict(s) for s in pool.map(detect, CORE_TOOLS)],
+            "tools": [asdict(s) for s in pool.map(detect, ALL_TOOLS)],
             "bin_dir": str(get_config().bin_dir),
         }
 
@@ -191,19 +203,22 @@ def _pick_sha256(text: str) -> str:
     return match.group(0).lower() if match else ""
 
 
-def _fetch_checksum(url: str) -> str:
-    """取产物的官方 sha256（uv/rg 为 <asset>.sha256，node 为 SHASUMS256.txt）。
+# 无逐产物 .sha256 的工具走发布目录下的汇总清单（按文件名挑行）；
+# 不在表内 = 默认的 <asset>.sha256。与 download_url 同以工具名为派发键，
+# 换镜像/发布方迁 host 不会让校验静默失效
+_CHECKSUM_MANIFEST = {"node": "SHASUMS256.txt", "officecli": "SHA256SUMS"}
 
-    拿不到时返回空串跳过校验：checksum 与产物同源，只防传输损坏，
-    不值得为它让安装失败。
+
+def _fetch_checksum(url: str, tool: str) -> str:
+    """取产物的官方 sha256。拿不到时返回空串跳过校验：checksum 与产物同源，
+    只防传输损坏，不值得为它让安装失败。
     """
     try:
-        if "nodejs.org" in url:
+        manifest = _CHECKSUM_MANIFEST.get(tool, "")
+        if manifest:
             base, filename = url.rsplit("/", 1)
             body = (
-                urllib.request.urlopen(f"{base}/SHASUMS256.txt", timeout=30)
-                .read()
-                .decode()
+                urllib.request.urlopen(f"{base}/{manifest}", timeout=30).read().decode()
             )
             text = next(
                 (line for line in body.splitlines() if line.endswith(filename)), ""
@@ -221,11 +236,13 @@ def _fetch_checksum(url: str) -> str:
     return digest
 
 
-def _download(url: str, dest: Path, progress: ProgressFn | None, phase: str) -> None:
+def _download(
+    url: str, dest: Path, progress: ProgressFn | None, phase: str, tool: str = ""
+) -> None:
     """分块下载到 dest 并校验 checksum。走 urllib 默认代理（https_proxy）。"""
     # checksum 只在下载完成后比对时才需要，与下载并行省一次串行网络往返
     with ThreadPoolExecutor(max_workers=1) as pool:
-        checksum_future = pool.submit(_fetch_checksum, url)
+        checksum_future = pool.submit(_fetch_checksum, url, tool)
         digest = sha256()
         with urllib.request.urlopen(url, timeout=60) as resp, open(dest, "wb") as f:
             total = int(resp.headers.get("Content-Length") or 0)
@@ -307,7 +324,7 @@ def install(name: str, progress: ProgressFn | None = None) -> ToolStatus:
     url = download_url(name, os_name, arch)
     with tempfile.TemporaryDirectory() as tmp:
         archive = Path(tmp) / url.rsplit("/", 1)[-1]
-        _download(url, archive, progress, f"下载 {name}")
+        _download(url, archive, progress, f"下载 {name}", name)
         if progress:
             progress(f"安装 {name}", None)
         if name == "node":
@@ -315,6 +332,13 @@ def install(name: str, progress: ProgressFn | None = None) -> ToolStatus:
             _extract_tree(archive, node_root)
             for cmd in ("node", "npm", "npx"):
                 _link(_node_tool_path(node_root, cmd), cmd)
+        elif name == "officecli":
+            # 发布物是免压缩的单二进制，直落 bin_dir
+            bin_dir = get_config().bin_dir
+            bin_dir.mkdir(parents=True, exist_ok=True)
+            dest = bin_dir / _exe(name)
+            shutil.move(str(archive), str(dest))
+            dest.chmod(0o755)
         else:
             _extract_binary(archive, name)
     if progress:
@@ -335,7 +359,7 @@ def _node_tool_path(node_root: Path, name: str) -> Path:
 
 
 def install_missing(
-    progress: ProgressFn | None = None, names: tuple[str, ...] = CORE_TOOLS
+    progress: ProgressFn | None = None, names: tuple[str, ...] = ALL_TOOLS
 ) -> list[ToolStatus]:
     """只装 missing 的工具，system / toolbox 项原样返回。
 

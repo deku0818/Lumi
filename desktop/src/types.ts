@@ -75,8 +75,9 @@ export interface WireEventPayloads extends Record<WireEventType, object> {
   }
 }
 
-// env_install 的安装目标：核心工具为机器级；feishu-skills 装到 project 的 .lumi/skills/
-export type EnvInstallTarget = 'all' | 'uv' | 'rg' | 'node' | 'lark-cli' | 'feishu-skills'
+// env_install 的安装目标：核心工具为机器级；feishu-skills 装到 project 的 .lumi/skills/；
+// officecli 机器级（Office 预览转换），由预览面板就地安装
+export type EnvInstallTarget = 'all' | 'uv' | 'rg' | 'node' | 'lark-cli' | 'officecli' | 'feishu-skills'
 
 // MCP 池加载结果（mcp.status 事件 / get_mcp_status RPC 共用形状）
 export type McpServerStatus = { name: string; ok: boolean; tools?: number; error?: string }

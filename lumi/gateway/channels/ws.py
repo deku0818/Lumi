@@ -48,9 +48,13 @@ GatewaySession（见 session.py）。
 from __future__ import annotations
 
 import hmac
+import mimetypes
+import os
+import stat
 from contextlib import asynccontextmanager
 
-from fastapi import FastAPI, WebSocket, WebSocketDisconnect
+from fastapi import FastAPI, Response, WebSocket, WebSocketDisconnect
+from fastapi.responses import FileResponse
 
 from lumi.gateway.bootstrap import gateway_process
 from lumi.gateway.bridge import AgentBridge
@@ -83,6 +87,39 @@ def token_ok(configured: str, provided: str | None) -> bool:
     if not configured:
         return True
     return provided is not None and hmac.compare_digest(configured, provided)
+
+
+# 与 Electron 主进程 lumi-file 协议的上限一致：防超大文件整块进内存
+_MAX_FILE_BYTES = 128 * 1024 * 1024
+
+# 简单请求（GET/HEAD 无自定义 header）不触发 preflight，一个响应头即够。
+# TextPreview 的 fetch 受 CORS 约束（img/iframe 不受），404 也要带上，否则
+# 远程文件的存在性探测（HEAD）在前端读不到状态码。
+_CORS = {"Access-Control-Allow-Origin": "*"}
+
+
+@app.api_route("/file", methods=["GET", "HEAD"])
+async def file_endpoint(path: str, token: str | None = None) -> Response:
+    """present_files 预览的文件通道：远程后端的文件经此流回前端。
+
+    本地后端走 Electron 的 lumi-file 协议零拷贝读盘；远程后端的盘在对端机器上，
+    由本端点以同一 token 鉴权流式下发（含 office 渲染产物）。**不限路径范围**：
+    token 持有者本就能经 WS 驱动 agent 执行任意命令，文件读不构成新增权限，
+    加白名单只是自欺式纵深。HEAD 供前端做存在性探测（FileResponse 原生支持）。
+    """
+    if not token_ok(getattr(app.state, "token", ""), token):
+        return Response(status_code=401, headers=_CORS)
+    abs_path = os.path.abspath(os.path.expanduser(path))
+    try:
+        st = os.stat(abs_path)
+    except OSError:
+        return Response(status_code=404, headers=_CORS)
+    if not stat.S_ISREG(st.st_mode):
+        return Response(status_code=404, headers=_CORS)
+    if st.st_size > _MAX_FILE_BYTES:
+        return Response(status_code=413, headers=_CORS)
+    mime = mimetypes.guess_type(abs_path)[0] or "application/octet-stream"
+    return FileResponse(abs_path, media_type=mime, headers=_CORS)
 
 
 class WsChannel:

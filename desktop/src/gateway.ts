@@ -299,6 +299,26 @@ export class Gateway {
     return this.request<{ started: boolean }>('env_install', { target, project })
   }
 
+  // docx/xlsx/pptx → 自包含 HTML（officecli 转换，按源文件 mtime 缓存）。
+  // reason=missing 表示 officecli 未装，预览面板据此就地引导 envInstall('officecli')
+  renderOffice(path: string): Promise<{ ok: boolean; html_path?: string; reason?: string; message?: string }> {
+    return this.request('render_office', { path })
+  }
+
+  // 文件 HTTP 通道：从本连接的 WS 地址派生（ws→http 同主机同端口同 token）。
+  // 远程后端的预览走它（lumi-file 只能读本机盘），office 渲染产物同理。
+  // 原地改 URL 而非从 host 手拼：保留反代路径前缀（wss://x/lumi/ws → https://x/lumi/file）
+  fileHttpUrl(path: string): string {
+    const u = new URL(this.url)
+    u.protocol = u.protocol === 'wss:' ? 'https:' : 'http:'
+    u.pathname = u.pathname.replace(/\/ws\/?$/, '/file')
+    const token = u.searchParams.get('token')
+    u.search = ''
+    u.searchParams.set('path', path)
+    if (token) u.searchParams.set('token', token)
+    return u.toString()
+  }
+
   // —— MCP 服务器：读写该机器的全局层或 <project>/.lumi 下 mcp_server.json，下次新会话加载生效。
   // path = 该 scope 目标文件的绝对路径（面板原样展示）——
   listMcpServers(scope: McpScope, project = ''): Promise<{ servers: McpServers; path: string }> {

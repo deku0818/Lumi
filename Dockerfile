@@ -5,7 +5,12 @@ FROM python:3.12-slim
 # 用 Debian 预编译包，避免 ripgrep PyPI 包的 Rust 源码编译（已从依赖移除）；各架构自动选。
 # curl：@larksuite/cli 的 postinstall 用系统 curl 下载真实二进制（无 wget/Node 兜底），
 # 缺它时报出来的是包自己那段误导性的「配代理/公司镜像」文案。
+# libicuXX：officecli（Office 预览转换，.NET 自包含二进制）的运行时依赖——slim 镜像
+# 无 ICU 时进程启动即 Abort；office_rpc 虽有 invariant 降级兜底，装上才有完整 locale 保真。
+# 包名带版本号随 Debian 版本漂移，构建期动态解析只装运行时库（-dev 元包会多拖 ~50MB
+# 头文件与静态库进镜像）。
 RUN apt-get update && apt-get install -y --no-install-recommends ripgrep curl \
+    "$(apt-cache search --names-only '^libicu[0-9]+$' | awk '{print $1}' | sort -V | tail -1)" \
     && rm -rf /var/lib/apt/lists/*
 
 RUN pip install --no-cache-dir uv

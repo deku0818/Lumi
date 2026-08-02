@@ -77,6 +77,19 @@ def reset_lumi_config():
     LumiConfig.reset_instance()
 
 
+@pytest.fixture
+def isolated_config(tmp_path, monkeypatch):
+    """隔离配置目录：LumiConfig 单例指向 tmp（含 LUMI_CONFIG_DIR，使 toolbox_dir /
+    缓存等机器级路径一并进 tmp）。复位由 reset_lumi_config 自动兜底。"""
+    from lumi.utils.config import LumiConfig
+
+    config_dir = tmp_path / "lumi-config"
+    config_dir.mkdir()
+    monkeypatch.setenv("LUMI_CONFIG_DIR", str(config_dir))
+    LumiConfig.get_instance(str(config_dir), reset=True)
+    return config_dir
+
+
 @pytest.fixture(autouse=True)
 def reset_run_authorized():
     """每次测试清空 per-run 授权目录来源 contextvar + 进程全局兜底，避免跨测试泄漏。

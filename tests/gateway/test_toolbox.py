@@ -12,7 +12,7 @@ import pytest
 
 from lumi.gateway import toolbox
 from lumi.gateway.toolbox import (
-    CORE_TOOLS,
+    ALL_TOOLS,
     ToolStatus,
     detect,
     download_url,
@@ -22,21 +22,17 @@ from lumi.gateway.toolbox import (
     skills_status,
     sync_lark_skills,
 )
-from lumi.utils.config import LumiConfig
 from lumi.utils.read_config import get_config
 
 
 @pytest.fixture
-def toolbox_env(tmp_path, monkeypatch):
-    """隔离配置目录 + 干净 PATH（一个空的系统 bin 目录可控注入）。"""
-    config_dir = tmp_path / "lumi-config"
-    config_dir.mkdir()
+def toolbox_env(isolated_config, tmp_path, monkeypatch):
+    """共享配置隔离（conftest.isolated_config）之上：干净 PATH（一个空的系统 bin
+    目录可控注入）。"""
     system_bin = tmp_path / "system-bin"
     system_bin.mkdir()
     monkeypatch.setenv("PATH", str(system_bin))
-    LumiConfig.get_instance(str(config_dir), reset=True)
-    yield {"config": config_dir, "system_bin": system_bin}
-    LumiConfig.reset_instance()
+    return {"config": isolated_config, "system_bin": system_bin}
 
 
 def _fake_exe(directory, name, version="9.9.9"):
@@ -59,6 +55,9 @@ def _fake_exe(directory, name, version="9.9.9"):
         ("rg", "linux", "arm64", "ripgrep-15.2.0-aarch64-unknown-linux-gnu.tar.gz"),
         ("node", "darwin", "arm64", "node-v24.18.0-darwin-arm64.tar.gz"),
         ("node", "win", "x64", "node-v24.18.0-win-x64.zip"),
+        ("officecli", "darwin", "arm64", "officecli-mac-arm64"),
+        ("officecli", "linux", "x64", "officecli-linux-x64"),
+        ("officecli", "win", "arm64", "officecli-win-arm64.exe"),
     ],
 )
 def test_download_url_matrix(tool, os_name, arch, expect):
@@ -139,7 +138,7 @@ def _tar_with_binary(tmp_path, inner_path, content=b"#!/bin/sh\necho uv 0.11.32\
 def test_install_extracts_binary(toolbox_env, tmp_path, monkeypatch):
     archive = _tar_with_binary(tmp_path, "uv-aarch64-apple-darwin/uv")
 
-    def fake_download(url, dest, progress, phase):
+    def fake_download(url, dest, progress, phase, tool=""):
         dest.write_bytes(archive.read_bytes())
 
     monkeypatch.setattr(toolbox, "_download", fake_download)
@@ -160,7 +159,7 @@ def test_install_node_tree_and_links(toolbox_env, tmp_path, monkeypatch):
             info.mode = 0o755
             tar.addfile(info, io.BytesIO(content))
 
-    def fake_download(url, dest, progress, phase):
+    def fake_download(url, dest, progress, phase, tool=""):
         dest.write_bytes(archive.read_bytes())
 
     monkeypatch.setattr(toolbox, "_download", fake_download)
@@ -181,12 +180,37 @@ def test_install_missing_skips_present(toolbox_env, monkeypatch):
         toolbox, "install", lambda n, p=None: installed.append(n) or detect(n)
     )
     results = install_missing()
-    assert set(installed) == {"uv", "node"}
-    assert {s.name for s in results} == set(CORE_TOOLS)
+    assert set(installed) == {"uv", "node", "officecli"}
+    assert {s.name for s in results} == set(ALL_TOOLS)
+
+
+def test_install_officecli_skips_present(toolbox_env, monkeypatch):
+    """已有副本（system）经 install_missing 单目标路径直接返回，不重新下载。"""
+    _fake_exe(toolbox_env["system_bin"], "officecli")
+
+    def boom(*a, **k):
+        raise AssertionError("不应触发下载")
+
+    monkeypatch.setattr(toolbox, "_download", boom)
+    (status,) = install_missing(names=("officecli",))
+    assert status.source == "system"
+
+
+def test_install_officecli_places_binary(toolbox_env, monkeypatch):
+    """officecli 是免解压单二进制：install 直落 bin_dir 并可执行。"""
+
+    def fake_download(url, dest, progress, phase, tool=""):
+        dest.write_text('#!/bin/sh\necho "officecli 1.0.143"\n')
+
+    monkeypatch.setattr(toolbox, "_download", fake_download)
+    status = toolbox.install("officecli")
+    assert status.source == "toolbox"
+    assert status.version == "1.0.143"
+    assert os.access(status.path, os.X_OK)
 
 
 def test_checksum_mismatch_rejects(toolbox_env, tmp_path, monkeypatch):
-    monkeypatch.setattr(toolbox, "_fetch_checksum", lambda url: "0" * 64)
+    monkeypatch.setattr(toolbox, "_fetch_checksum", lambda url, tool="": "0" * 64)
 
     class FakeResp(io.BytesIO):
         headers = {"Content-Length": "4"}

@@ -366,6 +366,8 @@ export default function App() {
   // 从复合 active key 派生（机器 id 已编码其中），杜绝与 active 脱同步——任何切换路径
   // （activate / 通知点击等）只要 setActive 就自动带对机器。空/无分隔符归一到 'local'。
   const activeBackend = keyBackend(active) || 'local'
+  // 当前会话在远程机器上：文件预览据此选取用通道并隐藏本地打开入口
+  const remoteBackend = activeBackend !== 'local'
   const [showSettings, setShowSettings] = useState(false)
   // 当前会话的列表元数据（memo：App 每个流式 token 都重渲染，别每次 O(sessions) 扫）。
   // channel 只消费 wire 字段（服务端 _channel_of 是唯一判定点），非空 = 只读旁观。
@@ -2576,6 +2578,7 @@ export default function App() {
                               files={seg.files}
                               onOpen={setPreview}
                               activePath={preview?.path}
+                              remote={remoteBackend}
                             />
                           ) : (
                             <ItemView key={key} item={seg.item} />
@@ -2645,19 +2648,29 @@ export default function App() {
                 </div>
               )}
             </div>
-            {view === 'chat' && preview && (
-              <>
-                <ResizeHandle {...previewW} edge="left" />
-                <div style={{ width: previewW.width }} className="shrink-0 h-full">
-                  <PreviewPanel file={preview} onClose={() => setPreview(null)} />
-                </div>
-              </>
-            )}
           </div>
         )}
       </main>
       {/* 右侧两栏与左侧栏同级（不放进 main）：否则会被 main 内的 topStrip 压低一截，
           顶边对不上左侧栏。代价是它们上方那段不再是窗口拖拽区——本就被面板占满。 */}
+      {/* 文件预览浮框（方案 A）：上下 FLOAT_GAP、右缘 4px 缝，占位挤压聊天区；
+          顶边与左侧栏齐平（同级挂载），故与 RightRail 一样放在 main 外 */}
+      {view === 'chat' && preview && (
+        <>
+          <ResizeHandle {...previewW} edge="left" />
+          <div style={{ width: previewW.width }} className="shrink-0 h-full py-2.5 pr-1">
+            <PreviewPanel
+              file={preview}
+              // 只认目标机器的连接，缺位给 undefined（面板显示加载失败）——不走
+              // gwForBackend 的 anyGw 兜底：换台机器读同路径文件会静默显示错内容
+              // （同 projectHomeApi 的理由）
+              gw={controlConns.current[activeBackend]}
+              remote={remoteBackend}
+              onClose={() => setPreview(null)}
+            />
+          </div>
+        </>
+      )}
       {/* 统一右栏：chat / cronjob 共用一个实例（同一开合状态、同一宽度）。
           cron 会话置顶「执行记录」，后台任务等通用模块只声明一次、两视图同构往下叠。
           enter 仅聊天视图：首个后台任务出现时整栏动画入场，不猛挤聊天栏；

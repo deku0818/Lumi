@@ -19,8 +19,9 @@ from lumi.utils.logger import logger
 
 ENV_METHODS = frozenset({"env_status", "env_install"})
 
-# lark-cli 机器级、feishu-skills 项目级（需 project 参数），由渠道体检的 fix 按钮触发
-_TARGETS = frozenset({"all", "lark-cli", "feishu-skills", *toolbox.CORE_TOOLS})
+# lark-cli 机器级、feishu-skills 项目级（需 project 参数），由渠道体检的 fix 按钮
+# 触发；officecli（ALL_TOOLS 内）另有预览面板的就地安装按钮入口
+_TARGETS = frozenset({"all", "lark-cli", "feishu-skills", *toolbox.ALL_TOOLS})
 
 # 进行中的安装目标（空串 = 空闲）。任一安装进行中即拒绝新安装（全局互斥）：
 # target 之间有重叠（all ⊃ uv/rg/node，lark-cli 经 npm 写进 node 树），并行会让
@@ -84,10 +85,11 @@ async def _run_install(target: str, project: str = "") -> None:
                 toolbox.sync_lark_skills, progress_for(target), project
             )
         else:
-            # all = 逐个装缺失的核心工具，进度按工具名广播（前端各行各显示各的）；
-            # 「已装的跳过」仍单源在 install_missing 里。逐个调用使其并行探测退化为
-            # 串行——探测毫秒级、下载分钟级，不值得为此给它加 progress 工厂参数
-            names = toolbox.CORE_TOOLS if target == "all" else (target,)
+            # all = 逐个装缺失的工具（核心 + 可选，与环境页两栏一致），进度按工具名
+            # 广播（前端各行各显示各的）；「已装的跳过」仍单源在 install_missing 里
+            # （officecli 单目标同走此路）。逐个调用使其并行探测退化为串行——探测毫秒级、
+            # 下载分钟级，不值得为此给它加 progress 工厂参数
+            names = toolbox.ALL_TOOLS if target == "all" else (target,)
             for name in names:
                 await asyncio.to_thread(
                     toolbox.install_missing, progress_for(name), (name,)

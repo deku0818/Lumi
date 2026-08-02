@@ -3,7 +3,7 @@
 用法:
     lumi -p "query"         # 非交互模式：执行 prompt 后退出
     lumi serve              # 启动 WebSocket 服务（供 desktop / web 前端连接）
-    lumi env status         # 核心工具链（uv / node / rg）状态
+    lumi env status         # 工具链（uv / node / rg / officecli）状态
     lumi env install [tool] # 装齐缺失项 / 装指定工具到工具箱
     lumi feishu config      # 飞书渠道配置读写（key=value；app_secret=- 走 stdin）
     lumi feishu diagnose    # 飞书接入体检（本地环境 + 凭证/权限/事件/发布）
@@ -124,7 +124,9 @@ def serve(
 # agent 在会话里自助装环境（经 LUMI_BIN 回调）与无 GUI 的 serve 机器都走这里。
 # ------------------------------------------------------------------
 
-env_app = typer.Typer(help="环境工具箱：核心工具链（uv / node / rg）的探测与安装")
+env_app = typer.Typer(
+    help="环境工具箱：工具链（uv / node / rg / officecli）的探测与安装"
+)
 app.add_typer(env_app, name="env")
 
 _SOURCE_TEXT = {"system": "系统", "toolbox": "工具箱", "missing": "缺失"}
@@ -138,7 +140,7 @@ def _echo_tool(tool: dict) -> None:
 
 @env_app.command("status")
 def env_status() -> None:
-    """列出核心工具链状态（系统已有的永远优先，工具箱不产生影子副本）。"""
+    """列出工具链状态（系统已有的永远优先，工具箱不产生影子副本）。"""
     from lumi.gateway.toolbox import status_all
 
     state = status_all()
@@ -150,14 +152,14 @@ def env_status() -> None:
 @env_app.command("install")
 def env_install(
     tool: Annotated[
-        str, typer.Argument(help="uv / node / rg；留空则装齐全部缺失项")
+        str, typer.Argument(help="uv / node / rg / officecli；留空则装齐全部缺失项")
     ] = "",
 ) -> None:
-    """下载安装核心工具到工具箱目录（免 sudo、不碰系统全局；已装的跳过）。"""
-    from lumi.gateway.toolbox import CORE_TOOLS, install_missing
+    """下载安装工具链到工具箱目录（免 sudo、不碰系统全局；已装的跳过）。"""
+    from lumi.gateway.toolbox import ALL_TOOLS, install_missing
 
-    if tool and tool not in CORE_TOOLS:
-        raise typer.BadParameter(f"未知工具: {tool}（可选：{' / '.join(CORE_TOOLS)}）")
+    if tool and tool not in ALL_TOOLS:
+        raise typer.BadParameter(f"未知工具: {tool}（可选：{' / '.join(ALL_TOOLS)}）")
 
     last_phase = ""
 
@@ -169,7 +171,7 @@ def env_install(
             typer.echo(f"… {phase}")
 
     try:
-        results = install_missing(progress, (tool,) if tool else CORE_TOOLS)
+        results = install_missing(progress, (tool,) if tool else ALL_TOOLS)
     except Exception as e:
         # 下载失败（断网 / 代理 / GitHub 不可达）是常态，栈回溯对调用方没有信息量
         typer.echo(f"安装失败: {e}", err=True)

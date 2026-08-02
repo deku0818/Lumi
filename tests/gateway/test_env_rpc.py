@@ -92,7 +92,8 @@ async def test_install_all_broadcasts_per_tool_targets(fake_hub, monkeypatch):
     await _wait_install_done()
 
     progress = [p for n, p in fake_hub.delivery.events if n == "env.progress"]
-    assert [p["target"] for p in progress] == list(toolbox.CORE_TOOLS)
+    # 装齐覆盖全部工具（含 officecli），与环境页两栏一致
+    assert [p["target"] for p in progress] == list(toolbox.ALL_TOOLS)
     # 结束态 target 仍是 all：面板据此清进度并整体刷新
     assert fake_hub.delivery.events[-1][1]["target"] == "all"
 

@@ -1,5 +1,16 @@
 # Changelog
 
+## [0.2.98] - 2026-08-02
+
+### Added
+- **Office 文件窗口内预览**：agent `present_files` 的 docx/xlsx/pptx 现可直接在右侧预览面板渲染——后端新增 `render_office` RPC，经 OfficeCLI（开源 .NET 单二进制，pin v1.0.143）转成完全自包含的 HTML 走现有 iframe 沙箱通道；产物按「路径哈希-mtime-渲染版本」缓存于 `~/.lumi/cache/office_preview/`，写临时文件成功才原子改名（失败/超时的半截产物不投毒缓存）。未装组件时预览面板就地引导安装（约 34MB 一次性），装完自动重试渲染；转换失败时把 officecli 的具体报错（如缺 libicu）原样透出可复制。xlsx 产物注入列头拖拽调宽 + 双击自适应脚本，补上静态渲染没有的 Excel 交互。旧版 .doc/.xls/.ppt 保持「用系统应用打开」兜底。
+- **远程后端文件预览通道**：整条预览栈原本只能读本机盘（lumi-file 协议），远程机器的文件全部 404。serve 新增 `GET/HEAD /file` 端点（与 WS 同 token 鉴权、128MB 上限、带 CORS 供 fetch/HEAD 探测读状态码），前端按会话所在机器自动选通道：本地零拷贝、远程流式取回（含 Office 渲染产物）；远程文件隐藏「在访达中显示/用系统应用打开」等本地语义入口，存在性探测改 HEAD（仅 404 视为不存在，超限 413 正确显示「文件过大」）。预览面板只认目标机器的连接，缺位报加载失败而非静默落回本地盘读同路径文件。
+- **环境页「可选增强」分栏**：OfficeCLI 进「设置 → 环境」，与 ripgrep 同列可选栏（缺了自动降级：rg→内置搜索、officecli→系统应用打开），uv/Node.js 留核心栏；一键装齐覆盖两栏全部缺失项，CLI `lumi env install` 同步认全量工具集（`ALL_TOOLS` 单源）。旧版后端未上报的工具行也给安装按钮，安装请求被拒时错误上横幅不再静默。
+- **文件预览面板浮框化**：对齐后台任务侧栏的浮卡语言——玻璃材质、18px 圆角、上下 10px/右缘 4px 缝，顶边与左侧栏齐平（与右栏同级挂载），仍占位挤压聊天区、宽度可拖。
+
+### Fixed
+- **Docker/无 ICU Linux 上 Office 转换启动即崩**：officecli 是 .NET 自包含二进制，slim 镜像缺 libicu 时 Abort。镜像补装 ICU 运行时库（构建期动态解析包名，不随 Debian 版本漂移，不拖 -dev 头文件）；代码层撞 ICU 缺失自动以 invariant globalization 降级重试并记住结论，任何主机都不会因此渲染失败。
+
 ## [0.2.97] - 2026-07-31
 
 ### Changed

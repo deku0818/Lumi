@@ -32,6 +32,7 @@ from lumi.gateway.channels.manager import manager
 from lumi.gateway.cron_rpc import CRON_METHODS, dispatch_cron
 from lumi.gateway.env_rpc import ENV_METHODS, dispatch_env
 from lumi.gateway.mcp_rpc import MCP_METHODS, dispatch_mcp
+from lumi.gateway.office_rpc import OFFICE_METHODS, dispatch_office
 from lumi.gateway.projects import (
     add_project,
     list_projects,
@@ -692,6 +693,7 @@ IMPLEMENTED_METHODS = (
     | CHANNEL_METHODS
     | MCP_METHODS
     | ENV_METHODS
+    | OFFICE_METHODS
 )
 
 
@@ -1104,6 +1106,8 @@ class GatewaySession:
             return await dispatch_mcp(method, params)
         if method in ENV_METHODS:
             return await dispatch_env(method, params)
+        if method in OFFICE_METHODS:
+            return await dispatch_office(method, params)
         raise ValueError(f"未知方法: {method}")
 
     async def _run_rpc(self, rid, method: str, params: dict) -> None:

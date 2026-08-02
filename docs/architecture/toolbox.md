@@ -12,12 +12,13 @@ Agent 任务工具链的探测与安装。实现在 `lumi/gateway/toolbox.py`（
 
 | 类别 | 内容 | 安装时机 |
 | --- | --- | --- |
-| 核心工具链 | uv、ripgrep、Node.js（含 npm） | 全 lazy：用户在「设置 → 环境」点「一键装齐」或逐项安装；首启不下载任何东西 |
+| 工具链（`ALL_TOOLS`） | uv、ripgrep、Node.js（含 npm）、OfficeCLI | 全 lazy：用户在「设置 → 环境」点「一键装齐」或逐项安装；首启不下载任何东西 |
 | 飞书集成 | lark-cli（机器级）+ 技能包（**项目级**） | 「设置 → 渠道 → 飞书」接入体检的「本地环境」组就地一键装 |
 
 - **uv**：一个二进制 = 整个 Python 生态（`uv run --python 3.12`、`uvx`）。
 - **ripgrep**：现有纯 Python 降级链保留作兜底；装上后大仓库搜索快一个数量级。
 - **Node.js**：官方 tarball（自带 npm），agent 的 JS 任务 + lark-cli 的 npm 安装路径。
+- **OfficeCLI**：Office 文档引擎（.NET 自包含单二进制，免解压直落 bin_dir），docx/xlsx/pptx → 自包含 HTML 的预览转换靠它（`gateway/office_rpc.py` 的 `render_office`）；缺失时 Office 文件降级为「用系统应用打开」，预览面板可就地引导安装。后端只有 `ALL_TOOLS` 单枚举——环境页的「核心 / 可选」两栏是纯展示分组，由前端 `EnvPanel` 独家持有。
 - **飞书技能包**：占模型上下文（description 常驻注入），按「谁用谁装」装到渠道绑定项目的 `.lumi/skills/`，不进全局、不在环境页；未绑定项目时退回全局层兜底。
 
 ## 目录布局
@@ -78,16 +79,16 @@ Agent 任务工具链的探测与安装。实现在 `lumi/gateway/toolbox.py`（
 
 ## 协议（`protocol/events.json` 单一事实源）
 
-- **RPC** `env_status` → `{tools, installing, bin_dir}`：核心工具链全量状态（飞书组件有项目维度，归渠道体检）+ 进行中的安装 target，面板打开时据此恢复进行中态（对齐 `get_mcp_status` 的 loading 范式）。
+- **RPC** `env_status` → `{tools, installing, bin_dir}`：工具链全量状态（飞书组件有项目维度，归渠道体检）+ 进行中的安装 target，面板打开时据此恢复进行中态（对齐 `get_mcp_status` 的 loading 范式）。
 - **RPC** `env_install(target, project?)` → `{started}`：安装是分钟级，立即返回不挂在响应里。
 - **事件** `env.progress{target, phase, percent}`：节流到「阶段变化或整数百分比前进」才广播；`percent = -1` 表示进度不可知（解压 / npm 阶段）。`target` 恒为具体组件名——装齐时逐工具下发（`all` 永不上 progress 线），前端各行各显示各的；每装完一个工具补发「完成 100%」终态，该行不停在最后一条脉冲。
 - **事件** `env.state{tools, target, bin_dir, error?}`：一次安装结束后的全量状态广播，所有连接同步刷新（与 `bg_tasks` 的「快照广播、前端过滤」同范式）。带 `target` 是因为多面板各自订阅——无 target 时一处的安装结束会误清另一处的进度、提前重跑无关体检。
 
-**全局互斥**：`_installing` 单值即不变量本身。target 之间有重叠（`all` ⊃ uv/rg/node，`lark-cli` 经 npm 写进 `node/` 树），并行会让两条线程写同一二进制 / rmtree 同一棵树，故任一安装进行中即拒绝新安装（返回 `started: false`）。
+**全局互斥**：`_installing` 单值即不变量本身。target 之间有重叠（`all` ⊃ ALL_TOOLS，`lark-cli` 经 npm 写进 `node/` 树），并行会让两条线程写同一二进制 / rmtree 同一棵树，故任一安装进行中即拒绝新安装（返回 `started: false`）。
 
 ## 前端
 
-- **设置 → 环境**（`EnvPanel.tsx`）：核心工具链行式列表，纯机器级视图。徽章三态——未安装（虚线）/ 系统 vX（蓝点，用户自装）/ 工具箱 vX（金点，Lumi 托管）；安装中整行换成进度光带。
+- **设置 → 环境**（`EnvPanel.tsx`）：行式列表分「核心工具链」（uv/node，缺了能力残缺）与「可选增强」（rg/officecli，缺了自动降级）两栏，纯机器级视图；一键装齐覆盖两栏全部缺失项。徽章三态——未安装（虚线）/ 系统 vX（蓝点，用户自装）/ 工具箱 vX（金点，Lumi 托管）；安装中整行换成进度光带。
 - **设置 → 渠道 → 飞书**（`ChannelsPanel.tsx`）：接入体检一张清单，「本地环境」组（lark-cli / 技能包）+「机器人接入」组（凭证 / 权限 / 事件订阅 / 版本发布）。`Check.fix_action` 非空即渲染「一键安装」按钮，进度就地显示在该行——数据分层（机器级 / 项目级）不等于 UI 入口分散。修复动作不在本页时（缺 npm 装不了 lark-cli）给 `Check.fix_nav="env"`，渲染成跳去环境页的按钮：安装入口只有一个，复制一份到渠道页就会有第二个真相。绑定项目是体检输入（技能包按此项目检测与安装），故前置到凭证之后。
 - 进度状态机复用 `useEnvInstall.ts`（订阅 `env.progress`/`env.state`、按 target 过滤、面板重开时 seed 恢复），进度条组件 `ProgressBar` 在 `SettingsKit.tsx`——光效样式只此一份。
 
