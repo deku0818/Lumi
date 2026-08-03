@@ -50,6 +50,68 @@ const ext = (f: PresentedFile) => (f.name || f.path).toLowerCase().split('.').po
 const contentUrl = (path: string, remote?: boolean, gw?: Gateway) =>
   remote && gw ? gw.fileHttpUrl(path) : fileUrl(path)
 
+// 远程 iframe 内容经鉴权 fetch 落 blob: URL 再喂——token 只留在父应用的 fetch 里，
+// 不进 iframe 可读的 location。sandbox=allow-scripts 的脚本本可读 location.href 偷出
+// URL 里的 token，再拿它打 CORS='*' 的 /file 端点读任意远程文件外传；改喂 blob 后
+// 帧的 location 是 blob:null（opaque origin，无 token、连远程 host 都不知道），
+// 这条链彻底断掉。本地 lumi-file:// URL 无 token，直接用不 fetch。
+function useFrameSrc(url: string, remote?: boolean): { src: string; loading: boolean; err: boolean } {
+  const [blob, setBlob] = useState('')
+  const [err, setErr] = useState(false)
+  useEffect(() => {
+    if (!remote) return
+    let alive = true
+    let obj = ''
+    setBlob('')
+    setErr(false)
+    fetch(url)
+      .then((r) => {
+        if (!r.ok) throw new Error(`HTTP ${r.status}`)
+        return r.blob()
+      })
+      .then((b) => {
+        if (!alive) return
+        obj = URL.createObjectURL(b)
+        setBlob(obj)
+      })
+      .catch(() => alive && setErr(true))
+    return () => {
+      alive = false
+      if (obj) URL.revokeObjectURL(obj)
+    }
+  }, [url, remote])
+  if (!remote) return { src: url, loading: false, err: false }
+  return { src: blob, loading: !blob && !err, err }
+}
+
+// 带脚本的 iframe 预览（html / office 渲染产物）：远程经 blob 通道（见 useFrameSrc），
+// 本地直用 lumi-file URL。pdf/图片不走这里——它们不跑脚本，token 在 URL 里也无从外泄，
+// 且直用 URL 能让 Chromium 按需分段拉取，不必整块 blob 进内存。
+function FramePreview({
+  url,
+  title,
+  remote,
+}: {
+  url: string
+  title: string
+  remote?: boolean
+}) {
+  const { t } = useI18n()
+  const { src, loading, err } = useFrameSrc(url, remote)
+  if (err) return <div className="p-6 text-sm text-error/80">{t('files.loadFailed')}</div>
+  if (loading) return null
+  return (
+    <iframe
+      src={src}
+      title={title}
+      className="w-full h-full border-0"
+      // opaque origin + 无 token（blob:null / 本地 lumi-file 无 token）：脚本可跑让
+      // 交互页正常，但读不到本地文件、也偷不到 token
+      sandbox="allow-scripts"
+    />
+  )
+}
+
 // 图标按 kind 选字形（不上彩色，统一 muted）
 const KIND_ICON: Record<string, LucideIcon> = {
   image: ImageIcon,
@@ -181,7 +243,9 @@ export function PreviewPanel({
       : Promise.resolve(window.lumi.pathExists?.(file.path) ?? true)
     probe
       .then((ok) => alive && setExists(!!ok))
-      .catch(() => alive && setExists(false))
+      // 探测本身失败（网络中断 / 代理拦 HEAD / IPC 异常）说明「探不到」，不等于
+      // 「文件没了」：默认视为存在，让 PreviewBody 去报加载错误，别谎报「已删除」
+      .catch(() => alive && setExists(true))
     return () => {
       alive = false
     }
@@ -276,17 +340,14 @@ function PreviewBody({ file, gw, remote }: { file: PresentedFile; gw?: Gateway; 
         <img src={url} alt={file.name} className="max-w-full rounded-lg border border-line" />
       </div>
     )
-  if (kind === 'pdf' || kind === 'html')
+  // pdf 不跑脚本，直用 URL（Chromium PDF 查看器按需分段拉取，不整块进内存）
+  if (kind === 'pdf')
     return (
-      <iframe
-        src={url}
-        title={file.name || file.path}
-        className="w-full h-full border-0"
-        // HTML 用 allow-scripts（不带 allow-same-origin）：脚本可运行让交互页正常，
-        // 但 iframe 是 opaque origin，对 lumi-file 的 fetch 跨域被拦，读不到本地文件→不能外传。
-        sandbox={kind === 'html' ? 'allow-scripts' : undefined}
-      />
+      <iframe src={url} title={file.name || file.path} className="w-full h-full border-0" />
     )
+  // html 可能带脚本 → 走 blob 通道（远程）隔绝 token，见 FramePreview
+  if (kind === 'html')
+    return <FramePreview url={url} title={file.name || file.path} remote={remote} />
   if (kind === 'markdown' || kind === 'text') return <TextPreview url={url} markdown={kind === 'markdown'} />
   // none：无法内嵌（视频/音频/旧版 Office/未知类型）→ 兜底用系统应用打开
   return <NoPreview file={file} remote={remote} message={t('files.noPreview')} />
@@ -303,15 +364,24 @@ function OfficePreview({ file, gw, remote }: { file: PresentedFile; gw?: Gateway
     | { status: 'error'; detail?: string }
   >({ status: 'loading' })
   const [nonce, setNonce] = useState(0)
+  // 安装请求被互斥拒（一键装齐进行中点单项安装）时的提示：否则点击只闪一下就归零
+  const [installNote, setInstallNote] = useState('')
   const resultRef = useRef(result)
   resultRef.current = result
   const { progress, install } = useEnvInstall(gw, {
     targets: ['officecli'],
+    // 一键装齐（target='all'）含 officecli，需据其终态 env.state 重渲——故 opt-in watchAll
+    watchAll: true,
     // 安装结束（成败皆广播 env.state，含一键装齐的 target='all'）重试渲染；已 ready
     // 的预览不重发 RPC。失败时后端仍报 missing，回到安装引导
     onState: () => {
       if (resultRef.current.status !== 'ready') setNonce((n) => n + 1)
     },
+    // 已有安装在跑（全局互斥）→ 给一句「安装进行中」而非静默；officecli 会随那次
+    // 一键装齐装上，届时 onState 自动重渲
+    onBusy: () => setInstallNote(t('files.installBusy')),
+    // RPC 拒（旧版后端不认识 target 等）→ 原样透出错误串
+    onError: (_t, msg) => setInstallNote(msg),
   })
 
   useEffect(() => {
@@ -337,14 +407,12 @@ function OfficePreview({ file, gw, remote }: { file: PresentedFile; gw?: Gateway
   }, [gw, file.path, nonce])
 
   if (result.status === 'ready')
+    // 渲染产物生成在会话所在机器，取用通道同源文件（contentUrl）；远程经 blob 隔绝 token
     return (
-      <iframe
-        // 渲染产物生成在会话所在机器，取用通道同源文件（contentUrl）
-        src={contentUrl(result.htmlPath, remote, gw)}
+      <FramePreview
+        url={contentUrl(result.htmlPath, remote, gw)}
         title={file.name || file.path}
-        className="w-full h-full border-0"
-        // 同 html 预览：脚本可跑（渲染引擎内联 JS），opaque origin 拦跨域读本地文件
-        sandbox="allow-scripts"
+        remote={remote}
       />
     )
   if (result.status === 'error')
@@ -361,12 +429,20 @@ function OfficePreview({ file, gw, remote }: { file: PresentedFile; gw?: Gateway
           installing ? (
             <ProgressBar progress={installing} className="mt-3" />
           ) : (
-            <button
-              onClick={() => install('officecli')}
-              className="mt-3 inline-flex items-center gap-2 rounded-lg bg-primary text-primary-foreground px-4 py-2 text-[13px] font-semibold"
-            >
-              {t('files.installPreview')}
-            </button>
+            <>
+              <button
+                onClick={() => {
+                  setInstallNote('')
+                  install('officecli')
+                }}
+                className="mt-3 inline-flex items-center gap-2 rounded-lg bg-primary text-primary-foreground px-4 py-2 text-[13px] font-semibold"
+              >
+                {t('files.installPreview')}
+              </button>
+              {installNote && (
+                <div className="mt-2 text-[12px] text-muted-foreground">{installNote}</div>
+              )}
+            </>
           )
         }
       />
@@ -438,9 +514,15 @@ function TextPreview({ url, markdown }: { url: string; markdown: boolean }) {
     let alive = true
     setText(null)
     setErr(false)
-    fetch(url)
+    // 远程只取头 500KB：Range 是 CORS 安全列表头（单段 bytes=0-N 不触发预检），
+    // FileResponse 原生支持 → 回 206 只传这一段，而非整块下载 49MB 只为显示 1%。
+    // 本地 lumi-file 不带 Range（electron 协议不认，且读本地盘无网络成本）。
+    // slice 仍保留：服务端忽略 Range 时的兜底上限
+    const isHttp = /^https?:/.test(url)
+    fetch(url, isHttp ? { headers: { Range: `bytes=0-${500_000 - 1}` } } : undefined)
       .then((r) => {
         // 远程 /file 通道的非 2xx（401/404/413）带空体：不查状态码会渲染成静默空白
+        // （206 部分内容 r.ok 为真，正常放行）
         if (!r.ok) throw new Error(`HTTP ${r.status}`)
         return r.text()
       })

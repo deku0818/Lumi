@@ -23,6 +23,7 @@ from pathlib import Path
 from typing import TYPE_CHECKING
 
 from lumi.agents.core.meta_message import declared_items
+from lumi.agents.tools.providers.todo import todos_payload
 from lumi.gateway import project_config
 from lumi.gateway.bridge import AgentBridge, EventKind
 from lumi.gateway.broadcast import BroadcastHub, serialize_bg_tasks
@@ -259,6 +260,8 @@ async def _load_history(bridge: AgentBridge, params: dict) -> dict:
         "usage": AgentBridge._extract_last_ai_usage(snap),
         "model": model,
         "context_window": context_window,
+        # 右栏任务进度的历史还原：与 todos.update 事件同一真相源（state.todos）
+        "todos": todos_payload((snap.values or {}).get("todos", [])),
     }
 
 

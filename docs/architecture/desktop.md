@@ -211,6 +211,22 @@ cron 子系统是进程级资源（与会话无关）：serve 在 lifespan 中�
   - demo `.demos/lumi-bg-drawer-detail.html`、`.demos/bg-task-card.html`、
     `.demos/bg-task-long-text.html`、`.demos/unified-rail.html`。
 
+## 任务进度（统一右栏模块）
+
+`todos` 工具的任务列表在统一右栏里另有一节「任务进度」（`TodosSection`，与后台任务同挂
+`RightRail`），把 agent 当前对话的主线进度可视化——in_progress 用 `lumi-orb` 呼吸光点、
+completed 金色 ✓ 弹入 + 文字淡化，全部完成整节灰化保留待下一轮覆盖，空列表整节不渲染。
+
+- **数据通道**：`todos` 工具全量替换图状态 `state.todos`（每会话一份、随 checkpoint 持久
+  化）。bridge 在该工具 `on_tool_end` 后浮现专用事件 `todos.update`（`EventKind.TODOS_UPDATE`，
+  payload `{todos: TodoItem[]}`）——子代理的 todos 更新的是其独立图状态，`parent_id` 非空即
+  不外发。事件与历史快照**同一真相源**：`load_history` 直接从 `state.todos` 带回 `todos`，
+  两条路径共用 `todos_payload` 投影（吃工具原始 dict 入参与 checkpoint 往返回来的 `Todo`
+  实例两种形状）。故压缩 / 切会话 / 重连都能从权威快照还原，而非靠回放事件流反推。
+- **前端**（`TodosSection.tsx` + `App.tsx`）：`SessionState.todos` 随会话走，`todos.update`
+  事件替换该字段；`hydrateHistory` 不套 items 的 `hasStreaming` 护栏（todos 是全量替换语义，
+  快照永不比已收到的事件旧，重连补拉反而更新）。节内 `memo`，与后台任务同为流式期常驻子树。
+
 ## 输入栏文件附件
 
 `+` 按钮 / 拖拽 / 粘贴均经 `addFiles()` 加入附件，按 MIME 分两路：

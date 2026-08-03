@@ -44,6 +44,7 @@ from lumi.agents.tools.providers.mcp import (
     project_wire_key,
     refresh_pool_config,
 )
+from lumi.agents.tools.providers.todo import todos_payload
 from lumi.gateway.bridge.approval import ApprovalEnricher
 from lumi.gateway.bridge.broker import LUMI_APPROVAL_EVENT, ApprovalBroker
 from lumi.gateway.bridge.checkpoint import CheckpointService
@@ -161,6 +162,7 @@ class EventKind(StrEnum):
     CLARIFY = "clarify.request"
     APPROVAL = "approval.request"
     TURN_COMPLETE = "turn.complete"
+    TODOS_UPDATE = "todos.update"  # todos 工具更新任务列表（与 state.todos 同步）
     ERROR = "error"
 
 
@@ -1062,6 +1064,19 @@ class AgentBridge:
                                     parent_run_id=parent_id,
                                     run_id=run_id if name == "agent" else "",
                                 )
+
+                                # todos 工具全量替换 state.todos：同步浮现专用事件，
+                                # 前端右栏据此实时更新任务进度（历史快照走 load_history
+                                # 的 state.todos，同一真相源）。子代理的 todos 更新的是
+                                # 其独立图状态，不外发。
+                                if name == "todos" and not parent_id:
+                                    # inp 是 todos 结构化工具的已校验入参，恒为含
+                                    # 必填 todos 的 dict；不兜 shape，异常 shape 该失败
+                                    # 冒泡而非静默清空右栏
+                                    yield BridgeEvent(
+                                        kind=EventKind.TODOS_UPDATE,
+                                        data={"todos": todos_payload(inp["todos"])},
+                                    )
 
                             elif kind == "on_tool_error":
                                 # 工具抛异常时 LangGraph 发 on_tool_error（而非 on_tool_end），

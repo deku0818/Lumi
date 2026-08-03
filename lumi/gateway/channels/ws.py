@@ -99,27 +99,37 @@ _CORS = {"Access-Control-Allow-Origin": "*"}
 
 
 @app.api_route("/file", methods=["GET", "HEAD"])
-async def file_endpoint(path: str, token: str | None = None) -> Response:
+def file_endpoint(path: str, token: str | None = None) -> Response:
     """present_files 预览的文件通道：远程后端的文件经此流回前端。
 
     本地后端走 Electron 的 lumi-file 协议零拷贝读盘；远程后端的盘在对端机器上，
     由本端点以同一 token 鉴权流式下发（含 office 渲染产物）。**不限路径范围**：
     token 持有者本就能经 WS 驱动 agent 执行任意命令，文件读不构成新增权限，
     加白名单只是自欺式纵深。HEAD 供前端做存在性探测（FileResponse 原生支持）。
+
+    **同步 def**（非 async）：FastAPI 把同步路径函数丢线程池跑，os.stat 这类阻塞
+    调用不再卡住承载全部 WS 会话的事件循环（慢/网络文件系统上一次 stat 就能让整机
+    会话齐刷刷冻住）。状态码按 errno 细分：EACCES/IO 错误的文件仍然存在，谎报 404
+    会被前端当成「已删除」——只有真的找不到（ENOENT/ENOTDIR）才 404。
     """
     if not token_ok(getattr(app.state, "token", ""), token):
         return Response(status_code=401, headers=_CORS)
     abs_path = os.path.abspath(os.path.expanduser(path))
     try:
         st = os.stat(abs_path)
-    except OSError:
+    except (FileNotFoundError, NotADirectoryError):
         return Response(status_code=404, headers=_CORS)
+    except PermissionError:
+        return Response(status_code=403, headers=_CORS)
+    except OSError:
+        return Response(status_code=500, headers=_CORS)
     if not stat.S_ISREG(st.st_mode):
         return Response(status_code=404, headers=_CORS)
     if st.st_size > _MAX_FILE_BYTES:
         return Response(status_code=413, headers=_CORS)
     mime = mimetypes.guess_type(abs_path)[0] or "application/octet-stream"
-    return FileResponse(abs_path, media_type=mime, headers=_CORS)
+    # stat_result 复用上面那次：不给的话 FileResponse 会对同一路径再 stat 一遍
+    return FileResponse(abs_path, media_type=mime, headers=_CORS, stat_result=st)
 
 
 class WsChannel:

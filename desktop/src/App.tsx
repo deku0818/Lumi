@@ -39,6 +39,7 @@ import type {
   SessionMeta,
   SlashCommand,
   SubTool,
+  TodoItem,
   ToolMode,
   Usage,
   WireEvent,
@@ -52,6 +53,7 @@ import { Sidebar } from './components/Sidebar'
 import { MachinesProvider } from './components/MachineTabs'
 import { FileCards, PreviewPanel, parsePresentedFiles } from './components/PresentedFiles'
 import { BgTasksSection } from './components/BgTasksDrawer'
+import { TodosSection } from './components/TodosSection'
 import { CronPage, RunsSection } from './components/CronPage'
 import { RightRail } from './components/RightRail'
 import { ResizeHandle, usePersistedFlag, useResizableWidth } from './components/ResizeHandle'
@@ -241,6 +243,8 @@ type SessionState = {
   ctxWindow?: number
   // 历史压缩进行中（Summarizer 内部摘要调用期间为 true）；展示「正在压缩对话」指示
   compacting?: boolean
+  // todos 工具的任务列表快照（右栏任务进度节）；空/未定义 = 节不渲染
+  todos?: TodoItem[]
 }
 const emptySession = (items: Item[] = []): SessionState => ({
   items,
@@ -305,11 +309,21 @@ const hasStreaming = (s: SessionState): boolean =>
 // 快照被丢弃时置 loaded 会把掉线前的历史永久关在补拉门外。
 function hydrateHistory(
   s: SessionState,
-  r: { items: HistoryItem[]; usage?: Usage; model?: string; context_window?: number },
+  r: {
+    items: HistoryItem[]
+    usage?: Usage
+    model?: string
+    context_window?: number
+    todos?: TodoItem[]
+  },
 ): SessionState {
   return {
     ...s,
     items: hasStreaming(s) ? s.items : r.items.map(restore),
+    // todos 不套 items 的 hasStreaming 护栏：它是全量替换语义的 state 快照，由触发
+    // todos.update 的同一个 Command 原子写入，永不比已收到的事件旧；重连补拉时反而
+    // 更新（gap 期错过的 todos 更新只能靠这份快照补回，turn.complete 不带 todos）。
+    todos: r.todos ?? s.todos,
     ctx: ctxFromUsage(r.usage) ?? s.ctx,
     // 渠道旁观会话的上下文环分母来源（会话真实模型窗口）；desktop 自己的会话此值虽也回填但不消费。
     // 模型名与窗口成对更新：窗口未知（0，如目录查不到的模型）时整对保旧，避免明细弹窗
@@ -506,10 +520,13 @@ export default function App() {
     if (v) void window.lumi.notify?.({ title: 'Lumi', body: t('notify.enabled') })
   }
 
-  // 通知点击：主进程已聚焦窗口，这里切到对应会话
+  // 通知点击：主进程已聚焦窗口，这里切到对应会话。走 activate（经 ref 取最新闭包，
+  // 本 effect 挂一次）而非裸 setActive——activate 才是清预览（setPreview(null)）、按需
+  // 重拉渠道历史的单一入口；裸 setActive 会把上个会话的预览留着，让它对着新会话的
+  // 机器重新取同路径文件（跨机内容错配，正是 activate 要守的不变量）。
   useEffect(() => {
     window.lumi.onNotifyClick?.((tag) => {
-      if (tag) setActive(tag)
+      if (tag) void activateRef.current(keyThread(tag), '', keyBackend(tag) || 'local')
     })
   }, [])
 
@@ -767,6 +784,9 @@ export default function App() {
           n = q === s.clarify ? s : { ...s, clarify: q }
           break
         }
+        case 'todos.update':
+          n = { ...s, todos: payload.todos ?? [] }
+          break
         case 'turn.complete':
           // 轮结束：清掉可能残留的审批/澄清对话框（如 stop/切会话把挂起审批以拒绝收尾，
           // 此时不经 decide/resume 清理，靠 turn.complete 兜底关闭弹窗）
@@ -1504,6 +1524,9 @@ export default function App() {
     },
     [openConnection, reloadHistory],
   )
+  // onNotifyClick 的 effect 挂一次（[] 依赖），经 ref 取最新 activate，避免捕获旧闭包
+  const activateRef = useRef(activate)
+  activateRef.current = activate
 
   const openProjects = useCallback(() => {
     setNeedProjectHint(false) // 用户主动点「项目」标签，不是被新建会话逼过来的，不提示
@@ -2408,10 +2431,14 @@ export default function App() {
   // cron 视图里后台任务模块只在「当前会话确实是本任务的某次执行」时显示：任务还没跑过
   // （run_threads 空）时 active 仍指向先前的聊天会话，不加此闸会把无关会话的后台任务
   // 挂进 cron 右栏，停止/移除还真能杀错任务
-  const railBg =
-    (view === 'chat' || (!!cronRunThread && keyThread(active) === cronRunThread)) &&
-    activeBgTasks.length > 0
-  const showRail = view === 'cronjob' ? !!activeCronJob : view === 'chat' && railBg
+  const railSessionVisible =
+    view === 'chat' || (!!cronRunThread && keyThread(active) === cronRunThread)
+  const railBg = railSessionVisible && activeBgTasks.length > 0
+  // 任务进度节：todos 随会话走（SessionState.todos），空列表不渲染
+  const activeTodos = store[active]?.todos
+  const railTodos = railSessionVisible && !!activeTodos?.length
+  const showRail =
+    view === 'cronjob' ? !!activeCronJob : view === 'chat' && (railBg || railTodos)
   // 脉冲点 = 可见模块里确有东西在跑：隐藏的 bg 模块不算，直播中的 cron 执行算
   const railDot = (railBg && hasRunningBg) || cronLiveRuns.length > 0
 
@@ -2699,6 +2726,7 @@ export default function App() {
                 onPick={pickRun}
               />
             )}
+            {railTodos && <TodosSection todos={activeTodos!} />}
             {railBg && (
               <BgTasksSection
                 tasks={activeBgTasks}
@@ -3296,7 +3324,7 @@ const TOOL_META: Record<string, ToolMeta> = {
   grep: { icon: Search, verb: 'Searched', noun: '', status: 'status.searching', title: searchTitle },
   glob: { icon: Search, verb: 'Searched', noun: '', status: 'status.searching', title: searchTitle },
   agent: { icon: Bot, verb: 'Ran', noun: 'subagent', status: 'status.subtask', title: (a) => clip(argStr(a.prompt) || argStr(a.name) || 'Run subagent') },
-  todo: { icon: ListChecks, verb: 'Updated', noun: 'todo', status: 'status.tool', title: () => 'Update todos' },
+  todos: { icon: ListChecks, verb: 'Updated', noun: 'todo', status: 'status.tool', title: () => 'Update todos' },
 }
 
 const toolIcon = (name: string): LucideIcon => TOOL_META[name]?.icon ?? Wrench

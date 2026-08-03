@@ -27,6 +27,7 @@ import type {
   RpcMethod,
   SessionMeta,
   SlashCommand,
+  TodoItem,
   Usage,
   WireEvent,
 } from './types'
@@ -449,15 +450,21 @@ export class Gateway {
     }>('switch_session', { thread_id: threadId, workspace })
   }
 
-  loadHistory(
-    threadId: string,
-  ): Promise<{ items: HistoryItem[]; usage?: Usage; model?: string; context_window?: number }> {
+  loadHistory(threadId: string): Promise<{
+    items: HistoryItem[]
+    usage?: Usage
+    model?: string
+    context_window?: number
+    todos?: TodoItem[]
+  }> {
     return this.request<{
       items: HistoryItem[]
       usage?: Usage
       // 会话真实模型名与其上下文窗口：渠道旁观会话画上下文环的分母来源
       model?: string
       context_window?: number
+      // 会话 state.todos 快照：右栏任务进度的历史还原
+      todos?: TodoItem[]
     }>('load_history', { thread_id: threadId })
   }
 

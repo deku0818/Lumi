@@ -1,5 +1,23 @@
 # Changelog
 
+## [0.2.99] - 2026-08-03
+
+### Added
+- **任务进度右栏**：`todos` 工具的任务列表现在在桌面统一右栏里实时显示为「任务进度」节（与后台任务同挂 `RightRail`）——in_progress 呼吸光点、completed 金色 ✓ 弹入 + 文字淡化，全部完成整节灰化保留，空列表不渲染。新增 wire 事件 `todos.update`（走协议单一事实源 `protocol/events.json`，`EventKind` 值即 wire 名），`load_history` 一并带回 `state.todos` 快照——事件与历史同一真相源、共用 `todos_payload` 投影（吃工具原始 dict 入参与 checkpoint 往返回来的 `Todo` 实例两种形状），故压缩 / 切会话 / 重连都从权威快照还原而非回放事件流反推。子代理的 todos 更新其独立图状态，不外发。
+
+### Fixed
+- **远程 Office/HTML 预览的 token 泄漏**：带 serve token 的 `/file` URL 原本直接喂进 `sandbox="allow-scripts"` 的 iframe，页面脚本可读 `location.href` 偷出 token，再借端点的 CORS `*` 读任意远程文件外传。改为父应用鉴权 fetch 落 `blob:` URL 再喂——帧内 `location` 变 `blob:null`（opaque origin，无 token、连远程 host 都不知道），链路彻底断掉；本地 lumi-file 无 token，行为不变。
+- **`/file` 把权限不足误报「文件已删除」**：`os.stat` 的 EACCES 原本一律映射 404，前端据此显示「文件已被移动/删除」。改按 errno 细分（ENOENT/ENOTDIR→404、EACCES→403、其余→500），前端存在性探测失败也不再谎报「不存在」，交由预览区报加载错误。
+- **通知点击破坏跨机预览不变量**：点系统通知切会话走的是裸 `setActive`，绕过了 `activate` 的 `setPreview(null)`，导致已打开的预览对着新会话的机器重新取同路径文件（跨机内容错配）。改为统一经 `activate`。
+- **一键装齐进行中点单项安装静默无反应**：`env_install` 全局互斥返回 `started=false` 时前端只清进度不反馈。新增 `onBusy` 通道（与自由文本的 `onError` 分开，不让「busy」控制态渲染成 EnvPanel 的错误横幅），Office 预览的安装按钮给出「安装进行中，装完会继续」提示。
+
+### Changed
+- **`/file` 端点不再阻塞事件循环**：改同步 `def`（FastAPI 丢线程池执行），慢 / 网络文件系统上的 `os.stat` 不再卡住承载全部 WS 会话的单个事件循环；并把首次 `stat_result` 传给 `FileResponse` 免二次 stat。
+- **远程文本预览按需分段拉取**：`TextPreview` 远程 fetch 带 `Range: bytes=0-499999`（CORS 安全列表头不触发预检、`FileResponse` 回 206），不再为显示头 500KB 而整块下载数十 MB。
+- **Office 渲染省一次子进程**：新增 `toolbox.locate`（只解析来源 / 路径、不跑 `--version`），`detect` 在其上叠版本号，`render_office` 改用 `locate`——每次缓存未命中少一次 .NET 自包含二进制的启动。
+- **`useEnvInstall` 的 'all' 关联改 opt-in**：机器级一键装齐的终态 `env.state`（target='all'）原本触发所有 scoped 订阅方的 `onState`，会误跑渠道体检等副作用；新增 `watchAll`，仅显式 opt-in（如 Office 预览需 officecli 装完重渲）才响应 'all'。
+- **README 重写 + 英文版**：首页重新定位为「开源 AI 同事」，突出日常任务与飞书深度集成（会议妙记自动纪要推送、更多渠道路线图），新增 `README.en.md` 与中英语言切换。
+
 ## [0.2.98] - 2026-08-02
 
 ### Added

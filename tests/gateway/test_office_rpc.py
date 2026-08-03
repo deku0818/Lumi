@@ -21,10 +21,11 @@ def _ok_run(cmd, **kwargs):
 @pytest.fixture
 def office_env(isolated_config, tmp_path, monkeypatch):
     """共享配置隔离（缓存随之进 tmp），officecli 默认可用。"""
+    # render_office 用 locate（不跑 --version），故 stub locate 而非 detect
     monkeypatch.setattr(
         toolbox,
-        "detect",
-        lambda name: ToolStatus(name, "toolbox", "1.0.143", "/fake/officecli"),
+        "locate",
+        lambda name: ToolStatus(name, "toolbox", "", "/fake/officecli"),
     )
     monkeypatch.setattr(office_rpc, "_NEED_INVARIANT", False)
     src = tmp_path / "报告.docx"
@@ -45,7 +46,7 @@ def test_source_gone(office_env, tmp_path):
 
 
 def test_missing_cli(office_env, monkeypatch):
-    monkeypatch.setattr(toolbox, "detect", lambda name: ToolStatus(name, "missing"))
+    monkeypatch.setattr(toolbox, "locate", lambda name: ToolStatus(name, "missing"))
     assert render_office(str(office_env["src"])) == {"ok": False, "reason": "missing"}
 
 

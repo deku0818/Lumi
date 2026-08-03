@@ -11,11 +11,19 @@ export function useEnvInstall(
   opts: {
     // 本面板关心的安装目标；不传 = 全部
     targets?: EnvInstallTarget[]
+    // 也关心「一键装齐」(target='all')：它逐工具装，含本面板的 target 时其终态
+    // env.state 带 target='all'，需据此刷新（如 OfficePreview 等 officecli 装完重渲）。
+    // 默认关（false）——否则任一处的 all 安装都会触发所有 scoped 订阅方的 onState，
+    // 把无关面板的 onState 副作用（如渠道体检的 diagnose）误触发。
+    watchAll?: boolean
     // 相关安装结束（env.state 到达）后调用，进度已清空
     onState?: (payload: WireEventPayloads['env.state']) => void
-    // 安装请求本身被拒（RPC 错误，如旧版后端不认识该 target）：进度已回滚，
-    // 调用方据此给出反馈——否则点击只闪一下「准备…」就归零，零线索
+    // 安装请求被 RPC 拒（旧版后端不认识该 target 等）：message 是人话错误串，进度已回滚
     onError?: (target: string, message: string) => void
+    // 因全局互斥被拒（started=false，已有安装在跑）：与 onError 分开，别让「busy」这类
+    // 控制态挤进 onError 的自由文本 message——那会被直接渲染进错误横幅（EnvPanel）成
+    // 未翻译的字面量。进度已回滚，调用方自行给「装完会继续」这类提示
+    onBusy?: (target: string) => void
   } = {},
 ) {
   const [progress, setProgress] = useState<Record<string, EnvProgress>>({})
@@ -26,9 +34,12 @@ export function useEnvInstall(
     if (!gw) return
     const ours = (target: string) => {
       const targets = optsRef.current.targets
-      // 'all'（一键装齐）按定义覆盖所有工具，恒视为相关——它的终态 env.state 带
-      // target='all'，工具级订阅方（如 OfficePreview）无需各自记住这条约定
-      return !targets || target === 'all' || (targets as string[]).includes(target)
+      if (!targets) return true
+      // 'all'（一键装齐）只对显式 opt-in（watchAll）的订阅方相关：它逐工具装，
+      // 终态 env.state 带 target='all'；不 opt-in 的 scoped 面板不该被无关 all 安装
+      // 触发 onState 副作用
+      if (target === 'all') return !!optsRef.current.watchAll
+      return (targets as string[]).includes(target)
     }
     return gw.onEvent((ev) => {
       if (ev.type === 'env.progress' && ours(ev.payload.target)) {
@@ -46,7 +57,12 @@ export function useEnvInstall(
     gw
       ?.envInstall(target, project)
       .then((r) => {
-        if (!r.started) setProgress({})
+        // started=false = 已有安装在跑（全局互斥）：清乐观进度并走 onBusy，否则按钮只闪
+        // 一下「准备…」就归零、无任何线索（一键装齐进行中点单项安装即撞此路）
+        if (!r.started) {
+          setProgress({})
+          optsRef.current.onBusy?.(target)
+        }
       })
       .catch((e) => {
         setProgress({})

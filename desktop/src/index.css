@@ -476,6 +476,13 @@ body.resizing-col * {
 /* 更新提示条的图标：复用光核呼吸，与 .lumi-orb 同一套「光」的语言（文字保持静止） */
 .update-breathe { animation: lumi-breathe 2.2s ease-in-out infinite; }
 
+/* 任务进度节：completed 的 ✓ 弹入（图标动、文字静） */
+@keyframes todo-check-pop {
+  from { transform: scale(0.3); opacity: 0; }
+  60% { transform: scale(1.25); }
+}
+.todo-check-in { animation: todo-check-pop 0.35s ease; }
+
 /* ── 子代理卡片：运行中的有限工具窗口，新行从底部推入、旧行被挤出时向上淡出收起 ── */
 @keyframes subtool-in { from { opacity: 0; transform: translateY(6px); } to { opacity: 1; transform: none; } }
 @keyframes subtool-out {

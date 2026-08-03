@@ -80,6 +80,16 @@ TODOS_DESCRIPTION = """使用此工具为当前会话创建和管理结构化任
 如有疑问，请使用此工具。主动进行任务管理可以体现专注度，并确保成功完成所有需求。"""
 
 
+def todos_payload(items: list) -> list[dict]:
+    """把 todos 归一成 wire 形状 [{content, status}]。
+
+    两个调用点喂进来的元素形状不同：bridge 事件流拿的是工具原始入参（dict），
+    load_history 快照拿的是 checkpoint 往返回来的 Todo 实例。model_validate 两者
+    都吃，统一 model_dump 出 wire 形状。
+    """
+    return [Todo.model_validate(t).model_dump() for t in items]
+
+
 def _build_status_summary(todo_list: list[Todo]) -> str:
     """统计各状态的任务数量并生成摘要。"""
     pending = sum(1 for t in todo_list if t.status == "pending")

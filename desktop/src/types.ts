@@ -51,6 +51,7 @@ export interface WireEventPayloads extends Record<WireEventType, object> {
     boundary_violations?: string[]
   }
   'turn.complete': { usage?: Usage }
+  'todos.update': { todos: TodoItem[] }
   error: { message: string }
   'cron.result': {
     job_id: string
@@ -303,6 +304,12 @@ export interface HistoryItem {
   output?: string
   tool_call_id?: string
   done?: boolean
+}
+
+// todos 工具的任务项（todos.update 事件 / load_history 快照，形状对齐后端 todos_payload）
+export interface TodoItem {
+  content: string
+  status: 'pending' | 'in_progress' | 'completed'
 }
 
 // 后台任务（bash / agent / workflow），后端 TaskRegistry 的序列化快照

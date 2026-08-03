@@ -148,12 +148,12 @@ def _version_of(path: str, name: str) -> str:
     return match.group(1) if match else ""
 
 
-def detect(name: str) -> ToolStatus:
-    """探测单个工具：系统 PATH 优先 → 工具箱 → missing。
+def locate(name: str) -> ToolStatus:
+    """解析单个工具的来源与路径，**不跑 --version**（version 留空）。
 
-    系统来源永不被工具箱遮蔽（PATH 末尾追加保证 which 先见系统副本），
-    「一键装齐」据此跳过 system 项。用裸名 which：Windows 会自动遍历
-    PATHEXT（npm/npx/lark-cli 实为 .cmd，硬拼 .exe 会漏检）。
+    路径解析规则与 detect 同源（系统 PATH 优先 → 工具箱 → missing）。仅在调用方
+    只需 source/path（如 render_office 判是否已装 + 取路径）时用它，省掉一次 --version
+    子进程——officecli 是 .NET 自包含二进制，每次启动都不便宜。
     """
     bin_dir = get_config().bin_dir
     found = shutil.which(name)
@@ -163,12 +163,25 @@ def detect(name: str) -> ToolStatus:
         source = (
             "toolbox" if Path(found).parent.resolve() == bin_dir.resolve() else "system"
         )
-        return ToolStatus(name, source, _version_of(found, name), found)
+        return ToolStatus(name, source, "", found)
     # PATH 未注入时兜底查 bin_dir（安装刚完成的场景），同样交给 which 处理 PATHEXT
     box = shutil.which(name, path=str(bin_dir))
     if box:
-        return ToolStatus(name, "toolbox", _version_of(box, name), box)
+        return ToolStatus(name, "toolbox", "", box)
     return ToolStatus(name, "missing")
+
+
+def detect(name: str) -> ToolStatus:
+    """探测单个工具：系统 PATH 优先 → 工具箱 → missing，并解析版本号。
+
+    系统来源永不被工具箱遮蔽（PATH 末尾追加保证 which 先见系统副本），
+    「一键装齐」据此跳过 system 项。用裸名 which：Windows 会自动遍历
+    PATHEXT（npm/npx/lark-cli 实为 .cmd，硬拼 .exe 会漏检）。
+    """
+    found = locate(name)
+    if found.source == "missing":
+        return found
+    return ToolStatus(name, found.source, _version_of(found.path, name), found.path)
 
 
 def status_all() -> dict:

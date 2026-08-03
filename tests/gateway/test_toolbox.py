@@ -19,6 +19,7 @@ from lumi.gateway.toolbox import (
     inject_path,
     install_missing,
     lark_skill_versions,
+    locate,
     skills_status,
     sync_lark_skills,
 )
@@ -112,6 +113,30 @@ def test_detect_symlinked_tool_is_toolbox(toolbox_env):
     status = detect("node")
     assert status.source == "toolbox"
     assert status.version == "24.18.0"
+
+
+def test_locate_resolves_path_without_running_version(toolbox_env, monkeypatch):
+    """locate 只解析来源/路径，绝不跑 --version（officecli 是启动昂贵的 .NET 二进制）。
+
+    _version_of 一旦被调用即失败——证明 locate 走的是「不取版本」的路径；同时校验
+    source/path 与 detect 同源。"""
+
+    def boom(*a, **k):
+        raise AssertionError("locate 不应调用 _version_of")
+
+    monkeypatch.setattr(toolbox, "_version_of", boom)
+    box = get_config().bin_dir
+    box.mkdir(parents=True)
+    _fake_exe(box, "uv", "0.11.32")
+    inject_path()
+    status = locate("uv")
+    assert status.source == "toolbox"
+    assert status.version == ""  # 不取版本
+    assert status.path.endswith("uv")
+
+
+def test_locate_missing(toolbox_env):
+    assert locate("uv") == ToolStatus("uv", "missing")
 
 
 def test_detect_toolbox_without_inject(toolbox_env):

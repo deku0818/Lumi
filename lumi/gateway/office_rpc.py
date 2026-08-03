@@ -123,7 +123,9 @@ def render_office(path: str) -> dict:
     out = cache / f"{digest}-{mtime}-r{_RENDER_VERSION}.html"
     if out.exists():
         return {"ok": True, "html_path": str(out)}
-    cli = toolbox.detect("officecli")
+    # 只需 source/path：locate 不跑 --version，省掉一次 .NET 自包含二进制的启动开销
+    # （渲染失败本身就是「装坏了」的信号，无需靠 --version 预判）
+    cli = toolbox.locate("officecli")
     if cli.source == "missing":
         return {"ok": False, "reason": "missing"}
     cache.mkdir(parents=True, exist_ok=True)
