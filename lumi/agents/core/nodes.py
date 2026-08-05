@@ -429,7 +429,7 @@ async def human_approval(
             try:
                 decision = engine.evaluate(tc["name"], tc.get("args", {}))
                 if decision == PermissionDecision.DENY:
-                    messages = _build_reject_messages(
+                    messages = build_reject_messages(
                         last_message.tool_calls,
                         content="你执行的此操作命中了用户的禁止策略，你的操作可能被用户视为危险操作，你应该思考此操作的风险使用更低风险的操作来完成目标。",
                     )
@@ -441,7 +441,7 @@ async def human_approval(
                     e,
                     exc_info=True,
                 )
-                messages = _build_reject_messages(
+                messages = build_reject_messages(
                     last_message.tool_calls,
                     content="权限评估异常，无法确认操作安全性，已自动拒绝。",
                 )
@@ -451,7 +451,7 @@ async def human_approval(
     # 无法发起交互审批，fail-closed 自动拒绝并路由回 CallModel，让自治 agent 改用无需审批的方式
     broker = runtime.context.approval_broker
     if broker is None:
-        messages = _build_reject_messages(
+        messages = build_reject_messages(
             last_message.tool_calls,
             content="当前运行环境无交互式审批通道，已自动拒绝该操作，请改用无需审批的方式完成目标。",
         )
@@ -483,20 +483,20 @@ async def human_approval(
                 runtime.context.tool_mode = set_tool_mode
             return Command(goto="ToolExecutor")
         case "cancel":
-            messages = _build_reject_messages(
+            messages = build_reject_messages(
                 last_message.tool_calls,
                 content=message or "用户中断了工具调用请求",
             )
             return Command(goto=END, update={"messages": messages})
         case _:  # reject 及默认
-            messages = _build_reject_messages(
+            messages = build_reject_messages(
                 last_message.tool_calls,
                 content=message or "用户拒绝了工具执行",
             )
             return Command(goto=END, update={"messages": messages})
 
 
-def _build_reject_messages(
+def build_reject_messages(
     tool_calls: list[dict], content: str = "用户拒绝了工具执行"
 ) -> list[ToolMessage]:
     """为被拒绝/中断的工具调用构造模拟 ToolMessage 列表。
@@ -604,7 +604,7 @@ async def auto_classify(
         case "approve":
             return Command(goto="ToolExecutor")
         case _:  # reject（及任何非 approve 值）：自动拒绝，附原因回喂模型
-            messages = _build_reject_messages(
+            messages = build_reject_messages(
                 tool_calls,
                 content=(
                     f"此操作被 auto 模式安全分类器自动拒绝：{verdict.reason}。"

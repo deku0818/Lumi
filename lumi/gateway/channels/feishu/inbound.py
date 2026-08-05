@@ -545,7 +545,10 @@ class FeishuInbound:
             bridge = pool.peek(thread_id)
             if bridge is not None:
                 bridge.reject_pending()  # 停轮惯用法：挂起审批先拒绝收尾，再硬取消
-            task.cancel()
+            if not task.cancelling():
+                # 已在取消收尾中的轮不重复 cancel：第二发会把 run_turn 从收尾中
+                # 打出去提前放锁，积压的下一轮与游离的写回并发（同 desktop 守卫）
+                task.cancel()
         bg_stopped = await cancel_thread_bg_tasks(thread_id)
         if not run_stopped and not bg_stopped:
             lock = pool.try_lock(thread_id)

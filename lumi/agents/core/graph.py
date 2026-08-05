@@ -63,6 +63,12 @@ class LumiAgent(BaseGraph):
         self.builder.add_node("AutoClassify", auto_classify)
         self.builder.add_node("PolicyReject", policy_reject)
         self.builder.add_node("OnAgentStop", on_agent_stop)
+        # 离线写回锚点：正常流程永远不路由到它（刻意无入边）。bridge 在图不运行时
+        # 经 aupdate_state 写状态（中断收尾的半截回复/补合成 ToolMessage、离线压缩
+        # 摘要）统一挂此名——CallModel 的条件边 is_use_tool 需要 Runtime 注入而
+        # aupdate_state 给不了（必抛 Missing required config key），固定边节点则
+        # 免求值；且出边直达 END，写完 next 即空，checkpoint 恒干净。
+        self.builder.add_node("OfflineFlush", lambda _state: {})
 
     def _draw_edges(self):
         """添加边"""
@@ -90,6 +96,7 @@ class LumiAgent(BaseGraph):
             after_tool_executor,
             {"CallModel": "CallModel", "END": END},
         )
+        self.builder.add_edge("OfflineFlush", END)
 
     async def adelete_thread(self, thread_id: str) -> None:
         """

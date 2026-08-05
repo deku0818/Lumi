@@ -169,6 +169,22 @@ class _RunState:
     lock: asyncio.Lock = field(default_factory=asyncio.Lock)
     task: asyncio.Task | None = None
 
+    def cancel_once(self) -> None:
+        """取消当前轮任务；已在取消收尾中的不重复 cancel——第二发 CancelledError
+        会打进收尾分支的 await，跳过写回与 turn.complete。"""
+        if (
+            self.task is not None
+            and not self.task.done()
+            and not self.task.cancelling()
+        ):
+            self.task.cancel()
+
+    def clear_if(self, owner: asyncio.Task | None) -> None:
+        """按归属清空 task 槽位：收尾 await 期间新轮可能已挂上自己的 task，
+        无条件置 None 会抹掉它、令 stop 失去取消目标。"""
+        if self.task is owner:
+            self.task = None
+
 
 async def _list_sessions(bridge: AgentBridge, params: dict) -> dict:
     # workspace="" → 跨所有项目列出（方案甲机器→项目分组树由前端按 workspace_dir 分组）；
@@ -881,7 +897,8 @@ class GatewaySession:
                 await self._notif_task
         for task in (*self._rpc_tasks, self._run.task):
             if task is not None and not task.done():
-                task.cancel()
+                if not task.cancelling():  # 已在取消收尾中的任务只等待不重复 cancel
+                    task.cancel()
                 with suppress(asyncio.CancelledError, Exception):
                     await task
         await self._bridge.close()
@@ -913,10 +930,21 @@ class GatewaySession:
             )
         return {"ok": True}
 
+    async def _pump_with_finalize(self, gen) -> dict:
+        """pump + 图收尾一体化：任何死法（stop 取消 / 异常 / aclose 经句柄取消
+        parked 合成轮）都先确定性 finalize（关生成器 + 写回中断残留）再传播——
+        收尾不依赖各调用侧记得做，且发生在调用方仍持 run.lock 的位置，通知轮
+        无从在收尾完成前抢锁起新合成轮（重置 buffer / 并发写 checkpoint）。"""
+        try:
+            return await self._pump(gen)
+        except (asyncio.CancelledError, Exception):
+            await self._bridge.finalize_cancelled_stream(gen)
+            raise
+
     async def _run_stream(self, gen) -> dict:
         """串行化地跑一轮事件流（用户消息 / 命令）。审批挂起期间持锁不放。"""
         async with self._run.lock:
-            return await self._pump(gen)
+            return await self._pump_with_finalize(gen)
 
     async def _finalize_active_turn(self, *, wait: bool) -> bool:
         """收尾当前活跃用户轮，返回是否确有一轮被收尾。
@@ -930,7 +958,7 @@ class GatewaySession:
         if task is None or task.done():
             return rejected > 0
         if rejected == 0:
-            task.cancel()
+            self._run.cancel_once()
         if wait:
             with suppress(asyncio.CancelledError, Exception):
                 await task
@@ -959,7 +987,8 @@ class GatewaySession:
             if rid is not None:
                 await self._channel.send({"id": rid, "result": result})
         except asyncio.CancelledError:
-            # 被 stop 取消：本轮作废，通知前端结束 running 态（吞掉取消，已妥善收尾）
+            # 被 stop 取消：图收尾 + 中断残留写回已在 _run_stream 持锁段完成，
+            # 这里只通知前端结束 running 态
             await self._finish_cancelled_turn()
             if rid is not None:
                 with suppress(Exception):
@@ -970,7 +999,7 @@ class GatewaySession:
                 with suppress(Exception):
                     await self._channel.send({"id": rid, "error": {"message": str(e)}})
         finally:
-            self._run.task = None
+            self._run.clear_if(asyncio.current_task())
 
     def _maybe_generate_title(self, content: str | list) -> None:
         """用户消息发出时机会性生成会话标题（后台跑，不等本轮完成）。
@@ -1073,24 +1102,33 @@ class GatewaySession:
                 # 期间的新消息走 handle_frame 的 busy-check 得到「已有任务在执行」。
                 # 标记 meta 轮：断连时它不值得 detach 续接（无用户在等，见 should_detach）
                 self._synthetic_run = True
-                self._run.task = asyncio.create_task(
-                    self._pump(
-                        self._bridge.stream_response(
-                            hint, tool_mode="default", synthetic=True
-                        )
-                    )
+                gen = self._bridge.stream_response(
+                    hint, tool_mode="default", synthetic=True
                 )
+                pump = asyncio.create_task(self._pump_with_finalize(gen))
+                self._run.task = pump
+                keep_handle = False
                 try:
-                    await self._run.task
+                    # shield：裸 await task 时 waiter 被取消会经 _fut_waiter 连坐
+                    # 取消 pump——detach 停通知循环就会顺手杀掉合成轮，违反其
+                    # 「run task 与挂起 Future 原样存活」契约（修复前的老行为）
+                    await asyncio.shield(pump)
                 except asyncio.CancelledError:
-                    # 被 stop 取消：作废本轮并补发 turn.complete 收尾，通知轮继续
+                    if asyncio.current_task().cancelling() > 0:
+                        # 被取消的是通知循环自身（detach 停循环 / aclose 收尾）：
+                        # 合成轮原样存活（detach 续接用），句柄保留供 aclose 经
+                        # _run.task 统一取消（图收尾内置于 pump）。直接退出循环
+                        keep_handle = True
+                        raise
+                    # stop 取消了轮任务：图收尾已内置于 pump，补发 turn.complete 即可
                     await self._finish_cancelled_turn()
                 except Exception:
-                    # 连接断裂等：主循环会随之收尾并取消本任务，这里仅记录不致命
+                    # 连接断裂等：图收尾已内置于 pump，仅记录不致命
                     logger.error("[WS] 后台通知轮执行失败", exc_info=True)
                 finally:
-                    self._run.task = None
-                    self._synthetic_run = False
+                    if not keep_handle:
+                        self._synthetic_run = False
+                        self._run.clear_if(pump)
 
     async def _dispatch(self, method: str, params: dict) -> dict:
         """执行一个非流式 RPC 方法并返回结果（在独立 task 中运行，见 _run_rpc）。

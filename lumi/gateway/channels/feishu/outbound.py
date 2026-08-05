@@ -126,9 +126,13 @@ async def run_turn(
             elif kind == EventKind.TURN_COMPLETE:
                 await _end(aborted=False)
     except asyncio.CancelledError:
+        # /stop 硬取消：与 desktop 同一收尾——确定性关图 + 中断残留写回
+        # （shield 已内置于方法），卡片上已显示的内容不再从历史里消失
+        await bridge.finalize_cancelled_stream(stream)
         raise  # finally 兜底收尾
     except Exception as e:
         logger.error(f"Feishu run_turn 异常 chat={chat_id}: {e}", exc_info=True)
+        await bridge.finalize_cancelled_stream(stream)  # 确定性关图，不留 GC 竞争
         await _end(aborted=True)  # 先关卡再发错误提示，保证顺序
         await channel.send_markdown(
             chat_id, "⚠️ 处理消息时出错，请稍后重试。", reply_to=reply_to

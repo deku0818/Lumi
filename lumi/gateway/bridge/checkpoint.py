@@ -1,7 +1,10 @@
-"""文件级 Checkpoint / rewind（从 AgentBridge 拆出的职责子模块）。
+"""文件级 Checkpoint / rewind（从 AgentBridge 拆出的职责子模块，当前休眠未接线）。
 
-逻辑照搬自原 AgentBridge；持 bridge 反向引用以读 _agent / _config / _shadow，
-并复用 bridge 上的 checkpoint helper（_extract_cp_ids / _find_clean_checkpoint_id）。
+逻辑照搬自原 AgentBridge；持 bridge 反向引用以读 _agent / _config / _shadow。
+checkpoint 回溯 helper（_extract_cp_ids / _find_clean_checkpoint_id）随本模块自包含
+——bridge 的中断恢复已改就地修复不再回退，回退语义只属于 rewind。注意 rewind 的
+「回退到干净 checkpoint」与新的「保留中断轮」设计存在分歧（会连中断轮保住的内容
+一并 prune），接线前需同步语义。
 """
 
 from __future__ import annotations
@@ -26,6 +29,33 @@ class CheckpointService:
 
     def __init__(self, bridge: AgentBridge) -> None:
         self._bridge = bridge
+
+    @staticmethod
+    def _extract_cp_ids(state) -> tuple[str, str]:
+        """从 state 中提取 checkpoint_id 和 parent checkpoint_id。"""
+        configurable = state.config.get("configurable", {})
+        cp_id = configurable.get("checkpoint_id", "")
+        parent_cp_id = ""
+        parent_config = state.parent_config
+        if parent_config:
+            parent_cp_id = parent_config.get("configurable", {}).get(
+                "checkpoint_id", ""
+            )
+        return cp_id, parent_cp_id
+
+    @staticmethod
+    async def _find_clean_checkpoint_id(graph, state) -> str | None:
+        """沿 parent_config 链回溯，找到 state.next 为空的 checkpoint_id。"""
+        _MAX_WALK = 10
+        current = state
+        for _ in range(_MAX_WALK):
+            parent_config = current.parent_config
+            if not parent_config or "configurable" not in parent_config:
+                return None
+            current = await graph.aget_state(parent_config)
+            if not current.next:
+                return parent_config["configurable"].get("checkpoint_id")
+        return None
 
     def init_checkpoint(self, project_dir: Path) -> None:
         """初始化文件级 checkpoint manager
@@ -84,14 +114,14 @@ class CheckpointService:
                         intr for task in state.tasks for intr in task.interrupts
                     )
                     if not state.next or has_interrupts:
-                        lg_cp_id, lg_parent_cp_id = b._extract_cp_ids(state)
+                        lg_cp_id, lg_parent_cp_id = self._extract_cp_ids(state)
                     else:
                         # stale 且无 interrupt：回退到 clean checkpoint
-                        clean_id = await b._find_clean_checkpoint_id(graph, state)
+                        clean_id = await self._find_clean_checkpoint_id(graph, state)
                         if clean_id:
                             lg_cp_id = clean_id
                             # clean checkpoint 的 parent 即为其前一个 checkpoint
-                            lg_parent_cp_id = b._extract_cp_ids(state)[1]
+                            lg_parent_cp_id = self._extract_cp_ids(state)[1]
                         else:
                             logger.warning(
                                 "[AgentBridge] 未找到 clean checkpoint，"

@@ -12,13 +12,14 @@ from __future__ import annotations
 import asyncio
 import time
 from collections.abc import AsyncGenerator
+from contextlib import suppress
 from dataclasses import dataclass
 from enum import StrEnum
 from pathlib import Path
 from typing import TYPE_CHECKING
 
 import httpx
-from langchain_core.messages import HumanMessage
+from langchain_core.messages import AIMessage, HumanMessage, ToolMessage
 from langchain_core.runnables.config import RunnableConfig
 from langgraph.errors import GraphBubbleUp
 from langgraph.types import Command
@@ -27,9 +28,11 @@ from lumi.agents.core.graph import LumiAgent, create_agent
 from lumi.agents.core.hooks import build_config_hooks, set_run_config_hooks
 from lumi.agents.core.meta_message import synthetic_human_message
 from lumi.agents.core.node_helpers.messages import inject_text_into_message
+from lumi.agents.core.nodes import build_reject_messages
 from lumi.agents.core.state import LumiAgentContext
 from lumi.agents.permissions.workspace import set_run_authorized_source_for
 from lumi.agents.runtime.bg_tasks import (
+    SUBAGENT_SPAWNING_TOOLS,
     compose_notification_hint,
     current_thread_id,
     get_task_registry,
@@ -67,6 +70,12 @@ if TYPE_CHECKING:
 
 # LangChain 框架注入的内部字段，不传递给 TUI 渲染
 _TOOL_INTERNAL_KEYS = frozenset({"tool_call_id", "runtime"})
+
+# 中断残留的悬空 tool_call 补配对措辞。悬空 ≠ 未执行：cancel 可能落在工具已完成
+# 但超步 checkpoint 未提交的窗口，副作用（写文件/发消息）或已发生，不做未执行断言
+_INTERRUPTED_TOOL_NOTE = (
+    "[用户中断了本轮，此工具调用结果未记录；操作可能已实际执行，重做前先核实]"
+)
 
 
 def build_skill_command_blocks(
@@ -226,6 +235,12 @@ class AgentBridge:
         self._mcp_project: Path | None = None
         self._disabled_tools: list[str] | None = None
         self._mcp_gen: int = 0
+        # 当前在途主链 CallModel 已流出的正文分片 + 所属消息 id（每次主链模型调用
+        # 起始重置）。stop 硬取消时 CallModel 未返回、这段文字从未进 state，由
+        # persist_partial_reply 在图收尾后写回 checkpoint；分片列表延迟 join，
+        # 避免逐 delta 全量拷贝；id 供按消息身份防写重。
+        self._partial_chunks: list[str] = []
+        self._partial_msg_id: str = ""
         # 本会话是否已绑定真实项目目录（initialize 传有效 project_dir 或 set_workspace 成功后置真）。
         # 假时 workspace_dir 仍会退回进程 cwd 兜底可用，但 send_message/run_command 须拒绝——
         # 聊天必须绑定项目，不允许静默落在不可控的进程 cwd 上（见 session.py handle_frame）。
@@ -763,10 +778,10 @@ class AgentBridge:
             drop_ratio=token_config.summary_ptl_retry_drop_ratio,
         )
         update = build_compacted_update(body, [], summary_text)
-        # as_node 显式指定：不依赖 LangGraph 从末次 checkpoint 推断写入者；
-        # CallModel 的条件边对无 tool_calls 的末条（压缩后为摘要 carrier / 重挂的
-        # 用户消息）路由 OnAgentStop，不派生工具任务
-        await self.graph.aupdate_state(self._config, update, as_node="CallModel")
+        # 挂离线写回锚点：CallModel 的条件边需要 Runtime 注入，aupdate_state 给不了
+        # （必抛 Missing required config key）；OfflineFlush 出边直达 END，写完
+        # next 即空、不派生任何任务（见 graph.py 节点注释）
+        await self.graph.aupdate_state(self._config, update, as_node="OfflineFlush")
         logger.info(
             "[compact_thread] 已压缩 thread=%s（%d 条历史 → 摘要）",
             self.current_thread_id,
@@ -919,7 +934,7 @@ class AgentBridge:
                         len(self._context.tools),
                     )
 
-            # 检测残留图状态（待执行节点但无中断），自动恢复
+            # 中断轮残留（待执行节点但无 interrupt）就地修复：补悬空配对 / 清 ptl_retry
             await self._recover_stale_state(graph)
 
             for attempt in range(MAX_STREAM_RETRIES + 1):
@@ -941,6 +956,8 @@ class AgentBridge:
                             parent_id = self._resolve_subagent_parent(
                                 run_id, parent_ids
                             )
+                            # 主链 CallModel 事件（半截回复 buffer 只认它）
+                            is_main = not parent_id and self._is_main_call_model(event)
 
                             # agent 工具 run 登记（放在匹配之后，
                             # 确保 agent 自身的 on_tool_start 不会自匹配）
@@ -963,6 +980,10 @@ class AgentBridge:
                                 continue
 
                             if kind == "on_chat_model_start":
+                                if is_main:
+                                    # 一轮多次模型调用：已完成的调用由节点返回落库，
+                                    # buffer 只代表当前在途的这一次
+                                    self._reset_partial_buffer()
                                 yield BridgeEvent(
                                     kind=EventKind.MESSAGE_START,
                                     parent_run_id=parent_id,
@@ -982,6 +1003,10 @@ class AgentBridge:
                                         )
                                     text = self._extract_text_from_chunk(chunk)
                                     if text:
+                                        if is_main:
+                                            self._partial_chunks.append(text)
+                                            if not self._partial_msg_id and chunk.id:
+                                                self._partial_msg_id = chunk.id
                                         yield BridgeEvent(
                                             kind=EventKind.MESSAGE_DELTA,
                                             text=text,
@@ -1137,7 +1162,9 @@ class AgentBridge:
                         # 确保后续 aget_state 获取最新 checkpoint
                         self._config["configurable"].pop("checkpoint_id", None)
 
-                    # 流正常结束，退出重试循环
+                    # 流正常结束：buffer 使命完成即清（取消到不了这行，不与写回竞争；
+                    # 不清则每个闲置会话钉住末条长回复的碎片列表）
+                    self._reset_partial_buffer()
                     break
 
                 except self._TRANSIENT_NETWORK_ERRORS as e:
@@ -1193,15 +1220,105 @@ class AgentBridge:
         return args_tcid or run_id
 
     def _track_agent_run(self, kind: str, name: str, run_id: str) -> None:
-        """agent 工具开始时登记 run_id，供子代理事件归属（_resolve_subagent_parent）。
+        """派生子代理的工具开始时登记 run_id，供子代理事件归属
+        （_resolve_subagent_parent）。工具清单单源在 SUBAGENT_SPAWNING_TOOLS。
 
-        工具结束时刻意不移除：后台子代理在 agent 工具立即返回后仍继续产生事件
+        工具结束时刻意不移除：后台子代理在工具立即返回后仍继续产生事件
         （asyncio.create_task 继承父 run 上下文），移除会令其祖先匹配落空、事件以
         parent_id="" 泄漏进主流（截断主回复气泡、散落工具卡）。归属按祖先链匹配，
         保留已结束的 run_id 不会误挂无关事件；集合每轮开始时清空。
         """
-        if kind == "on_tool_start" and name == "agent":
+        if kind == "on_tool_start" and name in SUBAGENT_SPAWNING_TOOLS:
             self._active_agent_runs.add(run_id)
+
+    @staticmethod
+    def _is_main_call_model(event: dict) -> bool:
+        """事件是否来自主链 CallModel 节点（排除 Summarizer/AutoClassify 等内部链）。"""
+        return event.get("metadata", {}).get("langgraph_node") == "CallModel"
+
+    async def finalize_cancelled_stream(self, gen: AsyncGenerator) -> None:
+        """stop 硬取消后的统一图收尾（desktop / IM 渠道各取消·异常分支裸 await 即可）。
+
+        先确定性关闭事件生成器——取消可能落在消费侧 send 上，此时生成器停在
+        yield、图还活着，靠 GC 关闭时机不可控，会与下一轮的 checkpoint 写入
+        竞争；图停稳后再写回中断残留。shield 在方法内部：二次 stop / 切会话的
+        重复取消打不断收尾，调用方无需任何包裹。
+        """
+
+        async def close_then_persist() -> None:
+            with suppress(Exception):
+                await gen.aclose()
+            await self.persist_partial_reply()
+
+        with suppress(asyncio.CancelledError):
+            await asyncio.shield(close_then_persist())
+
+    async def persist_partial_reply(self) -> None:
+        """把中断残留一次写回 checkpoint（经 finalize_cancelled_stream 调用）。
+
+        CallModel 未返回时那条 AIMessage 从未进 state——前端已显示的半截回复
+        下一轮就凭空消失。只写正文（半截 thinking / tool_call 不进历史）。历史里
+        若还挂着未应答的 tool_calls（cancel 落在工具执行期间），同一次写入里先补
+        配对 ToolMessage 再接半截——单次有序写入，不依赖下一轮修复的顺序。
+
+        防写重按消息 id：cancel 落在「模型流完、节点已落库」之后时，buffer 对应的
+        消息已在历史里（同 id），跳过。此预检是承重墙：同 id 写入会让 add_messages
+        reducer 拿半截**替换**整条全文，不是兜底。id 缺失（个别方言 provider）退回
+        文本判重：经 extract_text_content 对比末条 AIMessage（str/block-list 通吃）。
+        """
+        text = "".join(self._partial_chunks)
+        msg_id = self._partial_msg_id
+        self._reset_partial_buffer()
+        if not text:
+            return
+        try:
+            graph = self._agent.graph
+            state = await graph.aget_state(self._config)
+            messages = state.values.get("messages", [])
+            if msg_id and any(m.id == msg_id for m in messages):
+                return
+            last_ai = next(
+                (m for m in reversed(messages) if isinstance(m, AIMessage)), None
+            )
+            if (
+                not msg_id
+                and last_ai is not None
+                and text in extract_text_content(last_ai.content)
+            ):
+                return
+            new_messages: list = build_reject_messages(
+                self._dangling_tool_calls(messages), content=_INTERRUPTED_TOOL_NOTE
+            )
+            new_messages.append(
+                AIMessage(
+                    content=text,
+                    id=msg_id or None,
+                    additional_kwargs={"lumi": {"interrupted": True}},
+                )
+            )
+            await graph.aupdate_state(
+                self._config, {"messages": new_messages}, as_node="OfflineFlush"
+            )
+            logger.info("[AgentBridge] 已写回被中断的半截回复（%d 字符）", len(text))
+        except Exception:
+            logger.error("[AgentBridge] 半截回复写回失败", exc_info=True)
+
+    def _reset_partial_buffer(self) -> None:
+        """半截 buffer 成对重置（分片 + 消息 id 必须同步清，单一入口防脱钩）。"""
+        self._partial_chunks = []
+        self._partial_msg_id = ""
+
+    @staticmethod
+    def _dangling_tool_calls(messages: list) -> list[dict]:
+        """历史里未被 ToolMessage 应答的 tool_calls（中断落在工具执行期间的残留）。"""
+        answered = {m.tool_call_id for m in messages if isinstance(m, ToolMessage)}
+        return [
+            tc
+            for m in messages
+            if isinstance(m, AIMessage)
+            for tc in m.tool_calls
+            if tc.get("id") not in answered
+        ]
 
     def _resolve_subagent_parent(self, run_id: str, parent_ids: list[str]) -> str:
         """事件的子代理归属：祖先链中「最浅」的活跃 agent run，无则空串。
@@ -1271,11 +1388,13 @@ class AgentBridge:
     # ── 残留状态恢复 ──
 
     async def _recover_stale_state(self, graph: CompiledStateGraph) -> None:
-        """检测并恢复残留的图状态。
+        """就地修复中断轮残留的图状态。
 
-        当上一轮执行异常或 rewind 后，checkpoint 可能残留待执行节点但无中断，
-        导致 astream_events 无法正常启动新的执行。此方法回退到最近的干净
-        checkpoint（state.next 为空），使下次 astream_events 能正常工作。
+        stop 硬取消（或异常）后 checkpoint 会残留待执行节点且无 interrupt。
+        带新输入调用会从 START 起新 run 并保留已落库消息，无需回退——回退
+        会把已执行完的工具结果（如子 agent 跑完的产出）一并丢掉。需要修的
+        残留只有两种：AIMessage 挂着未应答的 tool_calls（补配对 ToolMessage
+        收干净；悬空 ≠ 未执行，见措辞）、ptl_retry flag 残留（清掉）。
         """
         try:
             state = await graph.aget_state(self._config)
@@ -1293,46 +1412,26 @@ class AgentBridge:
         if has_interrupts:
             return
 
-        logger.warning(
-            "[AgentBridge] 检测到残留图状态 next=%s，尝试恢复",
-            state.next,
-        )
-        clean_cp_id = await self._find_clean_checkpoint_id(graph, state)
-        if clean_cp_id:
-            self._config["configurable"]["checkpoint_id"] = clean_cp_id
-            logger.info("[AgentBridge] 已回退到干净的 checkpoint")
-        else:
-            # 找不到干净的父 checkpoint，移除 checkpoint_id 让 LangGraph 重新开始
-            self._config["configurable"].pop("checkpoint_id", None)
-            logger.warning("[AgentBridge] 未找到干净 checkpoint，将从头开始")
+        dangling = self._dangling_tool_calls(state.values.get("messages", []))
 
-    async def _find_clean_checkpoint_id(
-        self, graph: CompiledStateGraph, state
-    ) -> str | None:
-        """沿 parent_config 链回溯，找到 state.next 为空的 checkpoint_id。"""
-        _MAX_WALK = 10
-        current = state
-        for _ in range(_MAX_WALK):
-            parent_config = current.parent_config
-            if not parent_config or "configurable" not in parent_config:
-                return None
-            current = await graph.aget_state(parent_config)
-            if not current.next:
-                return parent_config["configurable"].get("checkpoint_id")
-        return None
-
-    @staticmethod
-    def _extract_cp_ids(state) -> tuple[str, str]:
-        """从 state 中提取 checkpoint_id 和 parent checkpoint_id。"""
-        configurable = state.config.get("configurable", {})
-        cp_id = configurable.get("checkpoint_id", "")
-        parent_cp_id = ""
-        parent_config = state.parent_config
-        if parent_config:
-            parent_cp_id = parent_config.get("configurable", {}).get(
-                "checkpoint_id", ""
+        update: dict = {}
+        if state.values.get("ptl_retry"):
+            # 中断落在 PTL 强制压缩期间会把 flag 留在 checkpoint——不清掉的话
+            # 下一轮 Summarizer 见 flag 绕过阈值门无条件有损压缩
+            update["ptl_retry"] = False
+        if dangling:
+            update["messages"] = build_reject_messages(
+                dangling, content=_INTERRUPTED_TOOL_NOTE
             )
-        return cp_id, parent_cp_id
+        if not update:
+            return
+
+        logger.info(
+            "[AgentBridge] 中断轮残留就地修复：%d 个未应答 tool_call%s",
+            len(dangling),
+            "，清 ptl_retry" if "ptl_retry" in update else "",
+        )
+        await graph.aupdate_state(self._config, update, as_node="OfflineFlush")
 
     @classmethod
     def _extract_last_ai_usage(cls, state) -> dict | None:

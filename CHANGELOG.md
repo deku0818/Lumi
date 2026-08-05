@@ -1,5 +1,21 @@
 # Changelog
 
+## [0.2.100] - 2026-08-05
+
+### Fixed
+- **中断不再丢上下文（全链路）**：此前点停止会丢掉整轮内容——已跑完的子 agent/工具结果被下一轮的 stale 恢复回退掉，屏幕上已流出的半截回复也从未落库。三层修复：① stale 恢复从「回退到轮前干净 checkpoint」改为就地修复（已验证 LangGraph 对 stale checkpoint 带新输入会丢弃残留任务从 START 起新 run，工具结果天然保住），悬空 tool_call 补配对合成 ToolMessage（措辞不断言「未执行」——cancel 可落在工具已完成但超步未提交的窗口）、残留 `ptl_retry` 顺手清掉（防下轮无条件有损压缩）；② 半截回复经 `persist_partial_reply` 写回 checkpoint（带 `lumi.interrupted` 标记），与悬空配对合并为一次有序写入；③ 防写重按消息 id（流式 chunk id 与落库消息同 id），id 缺失的方言 provider 退回 `extract_text_content` 文本判重——旧的 `str(content)` 子串检查对 block-list/多行必失效。
+- **`aupdate_state(as_node="CallModel")` 在真实图上必炸被吞**：CallModel 条件边 `is_use_tool` 需要 Runtime 注入而 `aupdate_state` 无法提供（玩具图测试测不出，真实图上 100% 失败只留一条 ERROR 日志）。新增 `OfflineFlush` 锚点节点（无入边、出边直达 END）：三处离线写回（半截回复、悬空修复、IM dream 离线压缩摘要——后者同款隐性炸弹一并排掉）统一挂它，写完 `next` 即空。真实图契约测试锁住可写性 + 「CallModel 依旧不可写」哨兵（LangGraph 行为变化时提示可撤绕道）。
+- **取消收尾统一且防打断**：`finalize_cancelled_stream`（先确定性 aclose 生成器防 GC 延迟关图与下一轮竞争、再写回中断残留，shield 内置防二次取消打断）内置于 pump——desktop 用户轮、后台通知轮、飞书 `/stop`、各异常路径全部继承同一收尾，且发生在持 run.lock 段内（通知轮无从插队重置 buffer / 并发写 checkpoint）。双重取消守卫（`cancelling()`）落到 desktop 与飞书两端。
+- **通知轮两处生命周期缺陷**：裸 `await task` 的 waiter 被取消会经 `_fut_waiter` 连坐取消合成轮——detach 停通知循环就顺手杀掉挂审批的合成轮，违反其「run task 与挂起 Future 原样存活」契约（老行为，`asyncio.shield(pump)` 修复 + 回归测试）；finally 无条件抹 `_run.task` 会把收尾窗口里新挂上的用户轮句柄抹成 stop 杀不掉的野轮（改按归属校验）。
+- **workflow 工具子代理未登记归属**：其后台派生的子代理图节点同名 CallModel，会被判为主链事件（流错挂主气泡、文本混入半截 buffer）。派生子代理的工具清单单源化为 `bg_tasks.SUBAGENT_SPAWNING_TOOLS`。
+
+### Changed
+- **`build_reject_messages` 提升公开**（原 `_build_reject_messages`）：bridge 的悬空补配对与审批拒绝/取消路径共用同一构造器，消除首日分叉（`tc.get` vs `tc["id"]`）。
+- **checkpoint 回溯 helper 迁居**：`_find_clean_checkpoint_id`/`_extract_cp_ids` 随唯一消费者迁入休眠的 `bridge/checkpoint.py`（模块 docstring 记录 rewind 与「保留中断轮」的语义分歧，接线前需同步）；活代码里不再有回退机械。
+- **半截 buffer 列表化**：逐 delta 字符串累加（属性目标 += 全量拷贝，O(n²)）改分片列表 + 写回时一次 join；流正常结束即清（闲置会话不再钉住末条长回复）；成对重置收敛单一入口。
+- **`_RunState` 拥有生命周期方法**：`cancel_once()`（取消防重复）/`clear_if(owner)`（句柄归属）两条 asyncio 不变量各写一次。
+- **测试脚手架**：中断类测试共用 `toy_graph.py`（与主链同名节点 + 事件驱动取消，消掉 ~2s 固定 sleep）；自写慢速流式 fake 模型换 langchain 现成 `FakeListChatModel(sleep=...)`。
+
 ## [0.2.99] - 2026-08-03
 
 ### Added

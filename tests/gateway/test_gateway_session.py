@@ -65,6 +65,7 @@ class FakeBridge:
         self.stream_response_calls: list[dict] = []
         self.resolve_calls: list[tuple] = []
         self.reject_pending_calls = 0
+        self.finalize_calls = 0
         # 流式开始/被取消的同步原语，方便测试精确编排
         self.started = asyncio.Event()
         self.release = asyncio.Event()
@@ -84,6 +85,10 @@ class FakeBridge:
         # 默认无挂起审批（轮在流生成中途）→ 返回 0，stop/切会话回退到硬取消
         self.reject_pending_calls += 1
         return 0
+
+    async def finalize_cancelled_stream(self, gen) -> None:
+        # 硬取消收尾时 session 会调用（真 bridge：关图 + 半截回复写回）
+        self.finalize_calls += 1
 
     def pending_approval_events(self) -> list:
         # 断连续接重发用；默认空，测试可注入 _pending_events
@@ -287,6 +292,8 @@ async def test_stop_cancels_streaming_and_finalizes():
         # 被取消的流式轮补发 turn.complete + 自身 {stopped:True}
         assert len(channel.events("turn.complete")) == 1
         assert {"id": 1, "result": {"stopped": True}} in channel.responses()
+        # 取消→图收尾+半截写回的接线确实被调用
+        assert bridge.finalize_calls == 1
         # task 已清空
         assert session._run.task is None
     finally:
@@ -472,6 +479,33 @@ async def test_notification_loop_injects_and_pumps():
     assert bridge.stream_response_calls[0]["content"] == "后台任务已完成"
     # 注：完整 _notification_loop（含 NOTIFICATION_POLL_INTERVAL 轮询、与挂起审批轮
     # 持锁的竞争）只能靠真实 desktop 联调验证。
+
+
+async def test_notification_loop_cancel_keeps_parked_turn(monkeypatch):
+    """取消通知循环自身（detach 停循环 / aclose 收尾）不代杀正在跑的合成轮——
+    detach 契约要求 run task 与挂起 Future 原样存活，句柄保留供 aclose 统一取消。"""
+    import lumi.gateway.session as session_mod
+
+    monkeypatch.setattr(session_mod, "NOTIFICATION_POLL_INTERVAL", 0.01)
+    bridge = BlockingBridge(notifications=["后台任务已完成"])
+    session, _channel = _make_session(bridge)
+
+    notif = asyncio.create_task(session._notification_loop())
+    await bridge.started.wait()  # 合成轮已在流中挂住
+    pump = session._run.task
+    assert pump is not None and not pump.done()
+
+    notif.cancel()
+    with suppress(asyncio.CancelledError):
+        await notif
+
+    # 合成轮未被代杀、句柄仍在（供 detach 续接 / aclose 统一取消）
+    assert session._run.task is pump
+    assert not pump.done()
+
+    pump.cancel()
+    with suppress(asyncio.CancelledError, Exception):
+        await pump
 
 
 # -- resume：非流式控制 RPC，唤醒挂起的审批 Future --
