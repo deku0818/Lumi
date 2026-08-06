@@ -1,5 +1,10 @@
 # Changelog
 
+## [0.2.101] - 2026-08-06
+
+### Fixed
+- **「复制」按钮无声失效**：Electron 的权限收口（`defaultSession` 的 request / check 两个 handler）只放行 `local-fonts`，把 `clipboard-sanitized-write` 一并拒了，`navigator.clipboard.writeText` 的三处调用——消息正文复制、设置页凭证复制、文件卡片「复制路径」——因此写不进剪贴板。两个 handler 改共用一份 `ALLOWED_PERMS` 白名单并加入该权限；camera / mic / geolocation 等其余权限维持一律拒绝。
+
 ## [0.2.100] - 2026-08-05
 
 ### Fixed

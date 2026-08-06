@@ -510,10 +510,11 @@ if (!app.requestSingleInstanceLock()) {
 app.on('second-instance', focusMainWindow)
 
 app.whenReady().then(async () => {
-  // 只放行 local-fonts：让 renderer 的 queryLocalFonts() 枚举本机字体（设置→界面字体）。
-  // 其余权限（camera/mic/geolocation/clipboard 等）一律拒绝——本应用不需要。
-  session.defaultSession.setPermissionRequestHandler((_wc, perm, cb) => cb(perm === 'local-fonts'))
-  session.defaultSession.setPermissionCheckHandler((_wc, perm) => perm === 'local-fonts')
+  // 只放行 local-fonts（queryLocalFonts 枚举本机字体）和 clipboard-sanitized-write
+  // （navigator.clipboard.writeText——复制按钮/复制路径）。其余（camera/mic/geolocation 等）一律拒绝。
+  const ALLOWED_PERMS = new Set(['local-fonts', 'clipboard-sanitized-write'])
+  session.defaultSession.setPermissionRequestHandler((_wc, perm, cb) => cb(ALLOWED_PERMS.has(perm)))
+  session.defaultSession.setPermissionCheckHandler((_wc, perm) => ALLOWED_PERMS.has(perm))
   // 本地文件协议：lumi-file:///<abs-path>（renderer 端各路径段 encodeURIComponent）
   protocol.handle('lumi-file', async (request) => {
     try {
