@@ -11,12 +11,15 @@ Bedrock 形如 us.anthropic.claude-* 同样走 ChatAnthropic 客户端）。
 
 import json
 import os
-from typing import Any, Literal
+from typing import TYPE_CHECKING, Any, Literal
 
 from langchain_anthropic import ChatAnthropic
 from langchain_openai import ChatOpenAI
 
 from lumi.utils.logger import logger
+
+if TYPE_CHECKING:
+    from lumi.models.catalog import ModelEntry
 
 Protocol = Literal["anthropic", "openai"]
 
@@ -64,7 +67,18 @@ def _is_qwen_dialect(model_name: str) -> bool:
 
 
 def allowed_levels(model_name: str) -> tuple[str, ...]:
-    """该模型可设的思考档位集合（UI 下发与校验共用同一份）。
+    """该模型可设的思考档位集合（UI 下发与校验共用同一份）。"""
+    from lumi.models.catalog import lookup
+
+    return levels_for(lookup(model_name), model_name)
+
+
+def levels_for(entry: "ModelEntry | None", model_name: str) -> tuple[str, ...]:
+    """目录条目 → 可设档位集合。
+
+    收 entry 而非只收名字，是为了描述**目录条目本身**（如手动指定映射时的候选
+    列表）时不必再把 id 当模型名解析一遍——那一圈会经过别名表，算出别的条目的档位。
+    model_name 仅用于协议方言判定（Anthropic 与 OpenAI 的 auto 语义不同）。
 
     各形态的 auto 语义不同（见 docs/architecture/thinking.md）：
     - none 型（无思考/常开/未匹配/无缓存）→ 仅 auto（不传参数）
@@ -74,9 +88,6 @@ def allowed_levels(model_name: str) -> tuple[str, ...]:
     - openai effort 型 → auto = 不传（推理模型默认即思考），原生档位
       （含 none 等关闭值）原样列出
     """
-    from lumi.models.catalog import lookup
-
-    entry = lookup(model_name)
     if entry is None or entry.control == "none":
         return ("auto",)
     # 各形态的原生档位集合；末尾统一追加 Lumi 合成顶档 ultra（思考拉满 + 解锁 workflow

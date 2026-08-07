@@ -24,6 +24,7 @@ from __future__ import annotations
 import uuid
 from dataclasses import asdict, dataclass, field, replace
 
+from lumi.models import catalog
 from lumi.models.manager import allowed_levels, get_default_model_name
 from lumi.utils.config import user_store
 
@@ -48,6 +49,12 @@ class ProviderProfile:
     """按模型的上下文窗口覆盖（model → tokens），只存用户显式配置的。"""
     max_tokens: dict[str, int] = field(default_factory=dict)
     """按模型的单次输出上限覆盖（model → tokens），只存用户显式配置的。"""
+    catalog: dict[str, str] = field(default_factory=dict)
+    """按模型的目录条目覆盖（model → models.dev 条目 id），只存用户显式指定的。
+
+    代理别名（``plan-glm-5.2``）在目录里没有同名条目，自动匹配靠字符相似度猜，
+    猜错则上下文窗口 / 输出上限 / 思考档位一起取自别的模型。存在这里、随模型
+    增删一并清理，但生效是全局的（见 ``catalog.set_aliases`` 的按名不按连接）。"""
 
 
 def _coerce_profile(x: dict) -> ProviderProfile | None:
@@ -60,22 +67,31 @@ def _coerce_profile(x: dict) -> ProviderProfile | None:
     models = tuple(
         m.strip() for m in (raw_models or []) if isinstance(m, str) and m.strip()
     )
-    raw_effort = x.get("effort")
-    if not isinstance(raw_effort, dict):
-        raw_effort = {}
-    effort = {
-        m: lv for m, lv in raw_effort.items() if m in models and isinstance(lv, str)
-    }
     return ProviderProfile(
         id=x["id"],
         name=x.get("name", ""),
         base_url=x.get("base_url", ""),
         api_key=x.get("api_key", ""),
         models=models,
-        effort=effort,
+        effort=_coerce_str_map(x.get("effort"), models),
         context=_coerce_limits(x.get("context"), models),
         max_tokens=_coerce_limits(x.get("max_tokens"), models),
+        catalog=_coerce_str_map(x.get("catalog"), models),
     )
+
+
+def _coerce_str_map(raw: object, models: tuple[str, ...]) -> dict[str, str]:
+    """按模型的字符串覆盖表（思考档位 / 目录条目 id）：只留仍存在的模型 + 非空串。
+
+    空串视同没配（档位回落 auto、目录回落自动匹配），使界面上的「恢复自动」= 提交空值。
+    """
+    if not isinstance(raw, dict):
+        return {}
+    return {
+        m: v.strip()
+        for m, v in raw.items()
+        if m in models and isinstance(v, str) and v.strip()
+    }
 
 
 def _coerce_limits(raw: object, models: tuple[str, ...]) -> dict[str, int]:
@@ -117,14 +133,24 @@ def _normalize_active(profiles: list[ProviderProfile], active: dict) -> Active:
     return dict(_EMPTY_ACTIVE)
 
 
+def _publish_aliases(profiles: list[ProviderProfile]) -> None:
+    """把各 profile 的目录覆盖拍平发布给 catalog（全量替换，内容不变则 no-op）。"""
+    catalog.set_aliases({m: cid for p in profiles for m, cid in p.catalog.items()})
+
+
 def _read_data() -> dict:
     """读取 lumi.json 的 "providers" 分区一次；缺失/损坏返回空 dict。"""
     return user_store.read_section("providers", {})
 
 
 def _parse(data: dict) -> tuple[list[ProviderProfile], Active, dict[str, dict]]:
-    """从一次读盘的 data 解出 (profiles, 规范化 active, 规范化用途指针表)。"""
+    """从一次读盘的 data 解出 (profiles, 规范化 active, 规范化用途指针表)。
+
+    顺带把各 profile 的目录覆盖拍平发布给 catalog——所有读盘都过这里，是让
+    ``catalog.lookup`` 看见用户映射的唯一必经之路（它只拿得到模型名，没有 profile）。
+    """
     profiles = [p for p in map(_coerce_profile, data.get("profiles", [])) if p]
+    _publish_aliases(profiles)
     raw_active = data.get("active", {})
     if isinstance(raw_active, str):  # 旧格式：active 为 provider id
         raw_active = {"provider": raw_active, "model": ""}
@@ -157,6 +183,7 @@ def _save(
         if norm:
             payload[kind] = norm
     user_store.write_section("providers", payload)
+    _publish_aliases(profiles)  # 写后立即生效，不等下一次读盘
 
 
 def set_effort(provider_id: str, model: str, level: str) -> str | None:
@@ -329,8 +356,8 @@ def upsert(profile: dict) -> ProviderProfile:
     """新增或按 id 更新一个 profile（models 为列表，去空去重保序）。
 
     思考档位不经此通道（set_effort 专用）：保留旧记录中仍存在的模型的档位。
-    上下文窗口 / 输出上限的覆盖相反——编辑供应商的表单就是它们的唯一入口，
-    故以传入值为准（表单里清空 = 该模型恢复跟随 catalog 探测）。
+    上下文窗口 / 输出上限 / 目录条目的覆盖相反——编辑供应商的表单就是它们的唯一
+    入口，故以传入值为准（表单里清空 = 该模型恢复跟随 catalog 自动匹配）。
     """
     profiles, active, pointers = _load_all()
     pid = profile.get("id") or uuid.uuid4().hex[:8]
@@ -351,6 +378,7 @@ def upsert(profile: dict) -> ProviderProfile:
         effort=effort,
         context=_coerce_limits(profile.get("context"), models),
         max_tokens=_coerce_limits(profile.get("max_tokens"), models),
+        catalog=_coerce_str_map(profile.get("catalog"), models),
     )
     out = [p for p in profiles if p.id != pid]
     out.append(saved)

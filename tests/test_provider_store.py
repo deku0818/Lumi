@@ -288,6 +288,38 @@ def test_pointer_auto_cleared_when_target_deleted(store_path, kind):
     assert a.id != b.id
 
 
+def test_catalog_override_round_trips_and_publishes(store_path):
+    """目录条目覆盖：存进 profile → 读盘即发布给 catalog → lookup 按名就能看见。
+
+    发布是必须的：思考档位那条链（allowed_levels / effort_params /
+    rejects_forced_tool_choice）全程只有模型名、拿不到 profile，覆盖值只能经
+    catalog 的全局别名表送达。
+    """
+    saved = provider_store.upsert(
+        {**_p(models=("plan-glm-5.2",)), "catalog": {"plan-glm-5.2": "glm-5.2"}}
+    )
+    assert saved.catalog == {"plan-glm-5.2": "glm-5.2"}
+    assert catalog._aliases == {"plan-glm-5.2": "glm-5.2"}
+
+    # 清空后重新读盘（模拟新进程）也能拿到
+    catalog.set_aliases({})
+    provider_store.load()
+    assert catalog._aliases == {"plan-glm-5.2": "glm-5.2"}
+
+    # 模型被移出 profile → 覆盖一并清理，不留孤儿别名
+    provider_store.upsert({"id": saved.id, **_p(models=("other",))})
+    assert catalog._aliases == {}
+
+
+def test_catalog_override_empty_means_auto(store_path):
+    """空串视同没配（界面「恢复自动匹配」提交的就是空串）。"""
+    saved = provider_store.upsert(
+        {**_p(models=("m1",)), "catalog": {"m1": "  ", "ghost": "glm-5.2"}}
+    )
+    assert saved.catalog == {}  # 空值丢弃，不存在的模型也丢弃
+    assert catalog._aliases == {}
+
+
 def test_file_is_chmod_600_and_plaintext(store_path):
     provider_store.upsert(_p(key="sk-secret", models=("m1",)))
     assert stat.S_IMODE(store_path.stat().st_mode) == 0o600

@@ -50,19 +50,18 @@ class ProviderService:
         - context[model] / max_tokens[model] = 用户填的覆盖值（0 = 没填 = 跟随探测）；
         - probe[model] = {context, max_tokens} models.dev 探测值（0 = 未探测到）。
         顶层 fallback = 两者皆无时后端真正会用的兜底值，让 UI 显示的数与实跑一致。
+
+        另附目录映射两组，界面据此显示「这个名字被解析成了谁、可不可信」：
+        - catalog[model] = 用户指定的目录条目 id（空串 = 没指定 = 跟随自动匹配）；
+        - match[model] = {id, kind} **生效**的条目与来源，kind ∈ manual/exact/fuzzy/none。
+          fuzzy 是按字符相似度猜的，界面须与 exact 区分——猜错时上下文窗口、输出
+          上限、思考档位会一起取自别的模型。
         """
-        from lumi.models.catalog import context_window, lookup, max_output_tokens
-        from lumi.models.manager import allowed_levels
+        from lumi.models.catalog import context_window, match, max_output_tokens
+        from lumi.models.manager import levels_for
         from lumi.utils.read_config import get_config
 
         profiles, active = provider_store.load()
-
-        def thinking_of(m: str) -> dict:
-            entry = lookup(m)
-            return {
-                "control": entry.control if entry else "none",
-                "levels": list(allowed_levels(m)),
-            }
 
         def profile_payload(p: provider_store.ProviderProfile) -> dict:
             # 生效值走 provider_store.limits（取值链的唯一实现），而非 resolve()：
@@ -73,6 +72,8 @@ class ProviderService:
                 for m in p.models
             }
             eff = {m: provider_store.limits(p, m) for m in p.models}
+            # 思考能力与目录映射同源于一次 match：两者描述的是同一个解析结果
+            hit = {m: match(m) for m in p.models}
             return {
                 "id": p.id,
                 "name": p.name,
@@ -80,12 +81,24 @@ class ProviderService:
                 "api_key": p.api_key,
                 "models": list(p.models),
                 "thinking": {
-                    m: {**thinking_of(m), "effort": p.effort.get(m, "auto")}
+                    m: {
+                        "control": hit[m].entry.control if hit[m].entry else "none",
+                        "levels": list(levels_for(hit[m].entry, m)),
+                        "effort": p.effort.get(m, "auto"),
+                    }
                     for m in p.models
                 },
                 "context_window": {m: eff[m][0] for m in p.models},
                 "context": {m: p.context.get(m, 0) for m in p.models},
                 "max_tokens": {m: p.max_tokens.get(m, 0) for m in p.models},
+                "catalog": {m: p.catalog.get(m, "") for m in p.models},
+                "match": {
+                    m: {
+                        "id": hit[m].entry.id if hit[m].entry else "",
+                        "kind": hit[m].kind,
+                    }
+                    for m in p.models
+                },
                 "probe": probe,
             }
 
@@ -100,6 +113,31 @@ class ProviderService:
                 "context": cfg.token.context_length,
                 "max_tokens": cfg.agents.max_tokens,
             },
+        }
+
+    @staticmethod
+    def search_catalog(query: str) -> dict:
+        """按子串搜 models.dev 目录，供界面手动指定「这个别名对应哪个模型」。
+
+        每条附上下文窗口与思考档位，让人不点进去就能认出该选哪个（代理别名常有多个
+        候选：glm-5.2、zai/glm-5.2、umans-glm-5.2 …）。
+
+        levels 与 provider_list 的 thinking.levels 同源（``levels_for``），即**可选
+        档位全集**而非目录原生值：toggle 型模型的原生 values 是空的，直接下发会让它
+        显示成"无思考能力"，与真正无能力的条目混为一谈。
+        """
+        from lumi.models.catalog import search
+        from lumi.models.manager import levels_for
+
+        return {
+            "entries": [
+                {
+                    "id": e.id,
+                    "context": e.context_length,
+                    "levels": list(levels_for(e, e.id)),
+                }
+                for e in search(query)
+            ]
         }
 
     def set_effort(self, provider_id: str, model: str, level: str) -> dict:

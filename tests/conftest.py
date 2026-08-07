@@ -63,6 +63,17 @@ def isolate_user_store(tmp_path, monkeypatch):
 
 
 @pytest.fixture(autouse=True)
+def reset_catalog_aliases(monkeypatch):
+    """清空目录别名表（provider_store 读盘时发布的进程级全局）。
+
+    与 isolate_user_store 同理：不清的话，先跑的测试发布的别名会漏进后面的
+    lookup/allowed_levels 断言，结果随测试顺序漂移。
+    """
+    monkeypatch.setattr("lumi.models.catalog._aliases", {})
+    monkeypatch.setattr("lumi.models.catalog._lookup_memo", {})
+
+
+@pytest.fixture(autouse=True)
 def reset_lumi_config():
     """每次测试重置 LumiConfig 单例。
 

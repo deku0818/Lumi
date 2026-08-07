@@ -8,6 +8,7 @@
         list_commands   params: {}                                        → {commands:[...]}
         run_command     params: {name, extra_text?, tool_mode?}           → 流式
         list_providers  params: {}                                        → {profiles:[...], active:{provider,model}}
+        search_catalog  params: {query}                                    → {entries:[...]}  # models.dev 目录子串搜索
         test_provider   params: {base_url, api_key, model}                → {ok, error?, latency_ms?}
         set_provider    params: {provider, model}                         → {active:{provider,model}, model}
         save_provider   params: {profile}  # profile.models:[...]         → {profiles:[...], active}

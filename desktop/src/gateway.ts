@@ -4,6 +4,7 @@ import type {
   ActiveModel,
   BgTask,
   BgTaskOutput,
+  CatalogEntry,
   ChannelInfo,
   ModelLimits,
   ModelPointer,
@@ -229,6 +230,11 @@ export class Gateway {
   // 运行中实时切换工具审批模式：改后端共享 context，对当前轮后续工具立即生效
   setToolMode(toolMode: string): Promise<{ tool_mode: string }> {
     return this.request<{ tool_mode: string }>('set_tool_mode', { tool_mode: toolMode })
+  }
+
+  // 按子串搜 models.dev 目录：手动指定「这个代理别名对应哪个模型」时用。空 query 返回空表。
+  searchCatalog(query: string): Promise<{ entries: CatalogEntry[] }> {
+    return this.request<{ entries: CatalogEntry[] }>('search_catalog', { query })
   }
 
   testProvider(

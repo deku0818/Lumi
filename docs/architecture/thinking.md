@@ -129,13 +129,36 @@ create_llm(..., apply_effort=False)               ← 翻转默认：注入显�
 - 缓存 `~/.lumi/cache/models_dev.json`（含 fetched_at，TTL 24h），
   `lumi serve` / TUI 启动后台刷新；无网络沿用旧缓存；无缓存时
   所有模型按「无思考控制」处理（安全降级，仅 Auto）。
-- 匹配：全 provider 扁平化后按模型名 精确 → fuzzy；多 provider 同名时取
+- 匹配：全 provider 扁平化后按模型名 **手动指定 → 精确 → fuzzy**（见下节）；多 provider 同名时取
   reasoning_options 最完整的**单个**条目（档位写法按 provider 而异，跨 provider 混搭
   会造出没有端点实现的档位组合）。唯一跨 provider 汇总的是 `toggle_anywhere`——「该模型
   存在关思考的通道」：provider 各报各自暴露的控制项，择优条目没报 toggle 不代表关不掉
   （`qwen3.7-plus` 在一处只报 effort、另一处只报 toggle）。`toggle_anywhere` **只**服务关思考
   判定，不参与 `allowed_levels`（否则几十个 openai 协议 effort 模型会凭空多出 Off 档）。
 - `model_info.py` 的 context_length 一并迁来（`limit.context`），OpenRouter 退役。
+
+### 代理别名的手动映射
+
+代理 / 网关暴露的模型名在目录里没有同名条目（`plan-glm-5.2`、`aidong-claude-sonnet-5`），
+只能靠 fuzzy 猜，而猜错时**上下文窗口、输出上限、思考档位一起取自另一个模型**——
+实测 `plan-glm-5.2` 会猜中 `umans-glm-5.2`（`plan`/`umans` 的偶然字母重叠让它比真名
+`glm-5.2` 分还高），窗口从 1,048,560 缩到 405,504，档位从七档缩成两档且丢掉 Off。
+
+- **覆盖表**：`ProviderProfile.catalog`（model → 目录条目 id），与 `context` / `max_tokens`
+  并列存在 profile 里、随模型增删一并清理；空串 = 恢复自动匹配。
+- **生效是全局的**：`provider_store` 读盘 / 写盘时把各 profile 的覆盖拍平发布给
+  `catalog.set_aliases`。按名而非按 profile，是因为思考链（`allowed_levels` /
+  `effort_params` / `rejects_forced_tool_choice`）全程只有模型名、拿不到 profile；且
+  「`plan-glm-5.2` 到底是哪个模型」是名字的属性，不是连接的属性。代价：同名别名在两个
+  profile 指向不同条目时后写者覆盖前者。
+- **匹配来源随结果一起上报**：`catalog.match()` 返回 `Match(entry, kind)`，
+  `kind ∈ manual | exact | fuzzy | none | stale`。`stale` = 指定的条目已不在目录里
+  （数据更新后消失），`entry` 仍是回落的自动匹配结果——运行时照常工作，但「你的指定
+  没生效」要报出去而不是静默。`lookup()` 是丢掉 kind 的薄包装，只要条目的调用方继续用它。
+- **界面**：设置 → 模型 → 编辑供应商，每个模型名右侧常驻一枚徽标显示解析结果与来源。
+  只有 `fuzzy` / `stale` 报警（金点 / 红点呼吸），其余安静——每个代理别名都亮一下的话，
+  警示很快就没人看了。点开是 `search_catalog` 的搜索式选择器（整串无果时逐段剥前缀重试，
+  否则最需要帮忙的别名反而搜不出东西）。
 
 ## Ultra：Lumi 合成顶档（思考 + 编排能力）
 

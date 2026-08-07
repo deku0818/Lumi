@@ -341,6 +341,21 @@ const ZH: Dict = {
   'providers.limitSet': '已覆盖 · 清空恢复自动',
   'providers.limitFallback': '未探测到 · 兜底 {n}',
   'providers.limitPending': '保存后自动探测',
+  'providers.catalogTitle': '对应的目录模型',
+  'providers.catalogPending': '待解析',
+  'providers.catalogNone': '未匹配',
+  'providers.catalogKindManual': '你指定的目录条目。上下文窗口、输出上限、思考档位都取自它。',
+  'providers.catalogKindExact': '目录内有同名条目，直接命中。',
+  'providers.catalogKindFuzzy':
+    '目录里没有同名条目，这个是按名字相似度猜的。猜错时上下文窗口、输出上限、思考档位会一起取自别的模型——点此核对。',
+  'providers.catalogKindNone': '目录里找不到这个名字，上下文窗口与思考档位将不可用。点此手动指定。',
+  'providers.catalogKindStale':
+    '你指定的这个条目已不在 models.dev 目录里，运行时正在回落自动匹配。点此重新指定。',
+  'providers.catalogKindPending': '保存后解析。也可点此手动指定。',
+  'providers.catalogSearch': '搜索 models.dev 目录…',
+  'providers.catalogEmpty': '没有匹配的条目',
+  'providers.catalogAuto': '恢复自动匹配',
+  'providers.catalogLevels': '{n} 档',
   'providers.contextWarn': '比探测值大。它是压缩阈值的分母，填大了会该压不压，直接撞上下文超长。',
   'providers.maxTokensWarn': '比探测值大。超过模型真实上限时，服务端会直接拒绝请求。',
   'providers.requestFailed': '请求失败',
@@ -731,6 +746,23 @@ const EN: Dict = {
   'providers.limitSet': 'Overridden · clear to auto',
   'providers.limitFallback': 'Not detected · falls back to {n}',
   'providers.limitPending': 'Detected after saving',
+  'providers.catalogTitle': 'Catalog model',
+  'providers.catalogPending': 'Pending',
+  'providers.catalogNone': 'No match',
+  'providers.catalogKindManual':
+    'The catalog entry you picked. Context window, output cap and thinking levels all come from it.',
+  'providers.catalogKindExact': 'An entry with this exact name exists in the catalog.',
+  'providers.catalogKindFuzzy':
+    'No entry with this name — this one was guessed by name similarity. Guess wrong and the context window, output cap and thinking levels all come from a different model. Click to check.',
+  'providers.catalogKindNone':
+    'This name is not in the catalog, so context window and thinking levels are unavailable. Click to pick one.',
+  'providers.catalogKindStale':
+    'The entry you picked is no longer in the models.dev catalog, so the runtime has fallen back to auto matching. Click to pick again.',
+  'providers.catalogKindPending': 'Resolved after saving. You can also pick one now.',
+  'providers.catalogSearch': 'Search the models.dev catalog…',
+  'providers.catalogEmpty': 'No matching entries',
+  'providers.catalogAuto': 'Back to auto match',
+  'providers.catalogLevels': '{n} levels',
   'providers.contextWarn':
     'Larger than detected. This is the compaction threshold denominator — too large and it never compacts, hitting context overflow.',
   'providers.maxTokensWarn':

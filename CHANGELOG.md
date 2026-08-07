@@ -1,5 +1,23 @@
 # Changelog
 
+## [0.2.102] - 2026-08-07
+
+### Added
+- **代理别名的目录条目手动指定**：代理 / 网关暴露的模型名（`plan-glm-5.2`、`aidong-claude-sonnet-5`）在 models.dev 里没有同名条目，只能靠 fuzzy 猜，猜错则**上下文窗口、输出上限、思考档位一起取自另一个模型**且界面上完全看不出来——实测 `plan-glm-5.2` 会猜中 `umans-glm-5.2`（`plan`/`umans` 的偶然字母重叠让它比真名 `glm-5.2` 分还高），窗口从 1,048,560 缩到 405,504、档位从七档缩成两档且丢掉 Off。新增 `ProviderProfile.catalog` 覆盖表（model → 目录条目 id，与 `context`/`max_tokens` 并列、随模型增删清理、空串=恢复自动），由 `provider_store` 读写盘时拍平发布给 `catalog.set_aliases`——按名而非按 profile，因为思考链（`allowed_levels`/`effort_params`/`rejects_forced_tool_choice`）全程只有模型名拿不到 profile。
+- **匹配来源随结果上报**：`catalog.match()` 返回 `Match(entry, kind)`，`kind ∈ manual|exact|fuzzy|none|stale`。`stale` = 指定的条目已不在目录里（数据更新后消失），`entry` 仍是回落的自动匹配结果——运行时照常工作，但「你的指定没生效」由后端判定并下发，不留给客户端各自反推。`lookup()` 保留为丢掉 kind 的薄包装。
+- **设置 → 模型的映射徽标与选择器**：每个模型名右侧常驻徽标显示解析结果与来源，只有 `fuzzy`/`stale` 报警（金点/红点呼吸），其余安静——每个代理别名都亮一下的话警示很快就没人看了。点开是 `search_catalog` 搜索式选择器（新增 RPC），整串无果时逐段剥前缀重试，否则最需要帮忙的别名反而搜不出东西。
+
+### Fixed
+- **结构化输出链回散文时 `AttributeError` 崩整轮**：`_require_structured_result` 守卫此前只挂在软引导（`tool_choice=auto`）分支上，走强制 `tool_choice` 的模型（如经 LiteLLM 代理的 `plan-glm-5.2`，代理层可能把该参数丢掉）拿到的 `None` 会直接交给调用方——`auto_classify` 的 `verdict.decision` 在 `try` 外面炸 `AttributeError`，设计好的「分类器失败 → fail-closed 转人工审批」一次都跑不到。守卫移到链尾，两条分支同受保护，三个消费方（分类器 / 判官 / titler）一并覆盖。
+
+### Changed
+- **`manager.levels_for(entry, name)`**：`allowed_levels(name)` 退化为薄包装。描述目录条目本身（如映射候选列表）时不再把 id 当模型名重新解析——那一圈会经过别名表，可能算出别的条目的档位。
+- **`catalog._norm()` 统一归一规则**：索引键 / 别名键 / memo 键 / 搜索串此前四处写法各异，任一处漂移都会让手动指定静默失配。
+- **`provider_store._coerce_str_map`**：目录条目与思考档位两张按模型的字符串覆盖表共用一份 coercion。
+- **`match()` memo 改单次 `get`**：`set_aliases` 会在任意读 providers 分区的线程里清 memo（渠道线程首次 `load()` 即触发），「先 in 再取」两步之间被清掉会抛 `KeyError` 进 LLM 调用路径。
+- **徽标状态表合一 + 复用 `StatusDot`**：`tone`/`dot`/`hint` 三张平行表并作一张（漏改其一 = 圆点对了颜色不对且不报错）；圆点改用 `SettingsKit.StatusDot`，找回全应用统一的光晕。
+- **`conftest` 新增 `_aliases` autouse 重置**：别名表是进程级全局，不清会让先跑的测试污染后续 `lookup`/`allowed_levels` 断言，结果随测试顺序漂移。
+
 ## [0.2.101] - 2026-08-06
 
 ### Fixed

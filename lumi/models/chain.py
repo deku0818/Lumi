@@ -38,12 +38,15 @@ _API_AND_NETWORK_ERRORS = _API_ERRORS + (
 
 
 def _require_structured_result(result):
-    """软引导（tool_choice=auto）下模型可以改用散文回答，解析器就返回 ``None``——
-    显式抛错，不把 ``None`` 交给调用方（分类器据此 fail-closed 转人工审批，判官 /
-    titler 照常上抛，都比 ``AttributeError`` 可诊断）。
+    """模型回散文而非结构化工具调用时解析器返回 ``None``——显式抛错，不把 ``None``
+    交给调用方（分类器据此 fail-closed 转人工审批，判官 / titler 照常上抛，都比
+    ``AttributeError`` 可诊断）。
+
+    软引导（tool_choice=auto）下是常态，强制 tool_choice 下也会发生：兼容端点 /
+    代理层（LiteLLM 等）可能丢掉该参数，模型于是自由发挥。
 
     刻意不进 ``_with_retry`` 的重试类型：换一次调用也许能骗到工具调用，但那会掩盖
-    「该 prompt 不适配软引导」这个真问题，而三个调用点的 fail-closed / 上抛都已安全。
+    「该 prompt / 该端点不适配」这个真问题，而三个调用点的 fail-closed / 上抛都已安全。
     """
     if result is None:
         raise ValueError("模型未调用结构化输出工具（软引导下返回了散文）")
@@ -107,7 +110,7 @@ def structured_output(
     prompt = ChatPromptTemplate.from_messages(messages)
 
     # 强制 tool_choice 不被接受的模型（见 rejects_forced_tool_choice）：覆盖
-    # with_structured_output 默认注入的 tool_choice 降级软引导，链尾兜住散文回答。
+    # with_structured_output 默认注入的 tool_choice 降级软引导。
     # 模型名取自已构造的客户端（ChatOpenAI 用 model_name / ChatAnthropic 用 model），
     # 与真正发给端点的那个名字同源。
     if structure_method == "function_calling" and rejects_forced_tool_choice(
@@ -115,10 +118,12 @@ def structured_output(
     ):
         structured_llm = llm.with_structured_output(
             structure, method=structure_method, tool_choice="auto"
-        ) | RunnableLambda(_require_structured_result)
+        )
     else:
         structured_llm = llm.with_structured_output(structure, method=structure_method)
-    chain = prompt | structured_llm
+    # 守卫恒在链尾：强制 tool_choice 也不保证模型必发工具调用（代理层可能丢掉该参数），
+    # 两条分支都可能拿到 None。
+    chain = prompt | structured_llm | RunnableLambda(_require_structured_result)
     return _with_retry(chain, _API_AND_NETWORK_ERRORS)
 
 

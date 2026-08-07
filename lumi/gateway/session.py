@@ -309,6 +309,10 @@ async def _list_providers(session: GatewaySession, params: dict) -> dict:
     return session._bridge.list_providers()
 
 
+async def _search_catalog(session: GatewaySession, params: dict) -> dict:
+    return session._bridge.search_catalog(params.get("query", ""))
+
+
 async def _test_provider(session: GatewaySession, params: dict) -> dict:
     return await session._bridge.test_provider(
         params.get("base_url", ""),
@@ -667,6 +671,7 @@ _RPC_HANDLERS = {
     "resume": _resume,
     "list_commands": _list_commands,
     "list_providers": _list_providers,
+    "search_catalog": _search_catalog,
     "test_provider": _test_provider,
     "set_provider": _set_provider,
     "save_provider": _save_provider,

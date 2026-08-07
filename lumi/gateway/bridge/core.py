@@ -610,6 +610,9 @@ class AgentBridge:
     def list_providers(self) -> dict:
         return self._providers.list_providers()
 
+    def search_catalog(self, query: str) -> dict:
+        return self._providers.search_catalog(query)
+
     async def test_provider(self, base_url: str, api_key: str, model: str) -> dict:
         return await self._providers.test_provider(base_url, api_key, model)
 

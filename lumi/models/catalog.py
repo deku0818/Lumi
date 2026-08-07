@@ -43,6 +43,27 @@ class ModelEntry:
     max_output: int = 0  # 单次输出 token 上限（0 = 目录未标注）
 
 
+@dataclass(frozen=True)
+class Match:
+    """一次目录查询的结果 + **它是怎么来的**。
+
+    kind 存在的意义是让界面能把「猜的」和「确定的」分开显示：模糊匹配是按字符
+    相似度猜的，猜错时上下文窗口、输出上限、思考档位会一起取自另一个模型，而
+    这件事此前完全静默。消费方只关心条目时用 ``lookup``（丢掉 kind）。
+    """
+
+    entry: ModelEntry | None
+    # "manual" 用户指定 | "exact" 同名 | "fuzzy" 相似度猜 | "none" 没匹上
+    # | "stale" 指定的条目已不在目录里（entry 是自动匹配的回落结果）
+    kind: str
+
+
+def _norm(name: str) -> str:
+    """模型名 → 索引键。索引键、别名表键、memo 键、搜索串必须同一套规则，
+    否则手动指定会在某一侧静默失配。"""
+    return name.lower().strip()
+
+
 def _cache_path() -> Path:
     return GLOBAL_CONFIG_DIR / "cache" / "models_dev.json"
 
@@ -90,7 +111,7 @@ def _build_index(raw: dict) -> dict[str, ModelEntry]:
                 toggle_anywhere=has_toggle,  # 单 provider 视角，下面按 key 汇总
                 max_output=int(limit.get("output") or 0),
             )
-            key = mid.lower()
+            key = _norm(mid)
             if has_toggle:
                 toggle_keys.add(key)
             if key not in index or _entry_score(entry) > _entry_score(index[key]):
@@ -103,7 +124,13 @@ def _build_index(raw: dict) -> dict[str, ModelEntry]:
 
 # 模块级缓存：磁盘 JSON 只解析一次；lookup 结果按查询名 memo
 _index: dict[str, ModelEntry] | None = None
-_lookup_memo: dict[str, ModelEntry | None] = {}
+_lookup_memo: dict[str, Match] = {}
+
+# 用户手动指定的「模型名 → 目录条目 id」，由 provider_store 读盘时发布（见 set_aliases）。
+# 按名而非按 profile：「plan-glm-5.2 到底是哪个模型」是名字的属性，不是连接的属性——
+# 两个代理都叫这名字，背后几乎必然是同一个模型。而 context / max_tokens 会因端点
+# 限流而真的不同，所以那两个仍按 profile 存（provider_store.limits）。
+_aliases: dict[str, str] = {}
 
 
 def _get_index() -> dict[str, ModelEntry]:
@@ -131,26 +158,90 @@ def _invalidate() -> None:
     _lookup_memo.clear()
 
 
-def lookup(model_name: str) -> ModelEntry | None:
-    """按模型名查目录：精确（小写）→ 模糊兜底；无缓存/未匹配返回 None。"""
-    query = (model_name or "").lower().strip()
-    if not query:
+def set_aliases(mapping: dict[str, str]) -> None:
+    """发布「模型名 → 目录条目 id」手动映射（全量替换）。
+
+    内容不变则直接返回：这个函数在每次读 lumi.json 的 providers 分区时都会被调用，
+    无条件清 memo 等于把 lookup 的缓存废掉。
+    """
+    global _aliases
+    # 入参已由 provider_store._coerce_str_map 清洗（键在 models 内、值非空）；这里
+    # 只补索引侧的大小写规则。
+    normalized = {_norm(k): _norm(v) for k, v in mapping.items()}
+    if normalized != _aliases:
+        _aliases = normalized
+        _lookup_memo.clear()
+
+
+def _fuzzy_best(index: dict[str, ModelEntry], query: str) -> ModelEntry | None:
+    """相似度最高且过阈值的条目（并列取先见者）；无则 None。"""
+    if not index:
         return None
-    if query in _lookup_memo:
-        return _lookup_memo[query]
+    key = max(index, key=lambda k: fuzz.token_set_ratio(query, k))
+    return index[key] if fuzz.token_set_ratio(query, key) >= _MATCH_THRESHOLD else None
+
+
+def match(model_name: str) -> Match:
+    """按模型名查目录：手动指定 → 精确（小写）→ 模糊兜底。
+
+    手动指定优先于精确同名：用户明说了这个别名对应谁，就不该再被同名条目截胡。
+    指向的 id 已不在目录里（数据更新后条目消失）时降级为 ``stale``——照旧回落自动
+    匹配，但把「你的指定没生效」这件事报出去，而不是让它静默。
+    """
+    query = _norm(model_name)
+    if not query:
+        return Match(None, "none")
+    # 单次 get 而非「先 in 再取」：set_aliases 会在任意读 providers 分区的线程里清 memo
+    # （渠道线程首次 load 即触发），两步之间被清掉会抛 KeyError 进 LLM 调用路径。
+    if (cached := _lookup_memo.get(query)) is not None:
+        return cached
 
     index = _get_index()
-    entry = index.get(query)
-    if entry is None and index:
-        best_score, best_key = 0.0, None
-        for key in index:
-            score = fuzz.token_set_ratio(query, key)
-            if score > best_score:
-                best_score, best_key = score, key
-        if best_key and best_score >= _MATCH_THRESHOLD:
-            entry = index[best_key]
-    _lookup_memo[query] = entry
-    return entry
+    pinned = _aliases.get(query, "")
+    entry, kind = index.get(pinned), "manual"
+    if entry is None:
+        entry, kind = index.get(query), "exact"
+    if entry is None:
+        entry, kind = _fuzzy_best(index, query), "fuzzy"
+    if entry is None:
+        kind = "none"
+    # 指定了却没落到 manual = 目录里查无此条目。entry 仍是自动匹配的结果（运行时用
+    # 的就是它），只是把「你的指定没生效」报出去而不让它静默。
+    result = Match(entry, "stale" if pinned and kind != "manual" else kind)
+    _lookup_memo[query] = result
+    return result
+
+
+def lookup(model_name: str) -> ModelEntry | None:
+    """按模型名查目录条目；无缓存/未匹配返回 None。匹配来源见 ``match``。"""
+    return match(model_name).entry
+
+
+def search(query: str, limit: int = 40) -> list[ModelEntry]:
+    """目录内按子串搜索（供界面手动指定映射用），短名优先。
+
+    空查询给不出有意义的排序（目录 5000+ 条），返回空表让界面提示先输入。
+
+    整串无果时逐段剥前缀重试（``plan-glm-5.2`` → ``glm-5.2``），取最长的有果后缀：
+    界面用模型名预填搜索框，而需要手动指定的恰恰是目录里没有的代理别名——不剥前缀
+    的话，最需要帮忙的那一栏永远是空的。这只影响**搜什么**，选谁仍由人决定。
+    """
+    q = _norm(query)
+    if not q:
+        return []
+    index = _get_index()
+
+    def hits_for(s: str) -> list[ModelEntry]:
+        return [e for key, e in index.items() if s in key]
+
+    hits = hits_for(q)
+    if not hits:
+        # 空后缀（查询以分隔符结尾，用户正打到 "plan-"）跳过：空串是所有 key 的
+        # 子串，整个目录会涌进候选列表。
+        suffixes = (q[i + 1 :] for i, ch in enumerate(q) if not ch.isalnum())
+        hits = next((h for s in suffixes if s and (h := hits_for(s))), [])
+    hits.sort(key=lambda e: (len(e.id), e.id))
+    return hits[:limit]
 
 
 def context_window(model_name: str) -> int:

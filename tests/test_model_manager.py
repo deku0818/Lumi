@@ -61,7 +61,75 @@ def catalog(monkeypatch):
         ),
     }
     monkeypatch.setattr("lumi.models.catalog._index", index)
-    monkeypatch.setattr("lumi.models.catalog._lookup_memo", {})
+
+
+@pytest.fixture
+def alias_catalog(monkeypatch):
+    """含真名与第三方前缀变体的索引 + 干净的别名表。"""
+    index = {
+        "glm-5.2": _entry("glm-5.2", "effort", ("low", "high")),
+        "umans-glm-5.2": _entry("umans-glm-5.2", "effort", ("high",)),
+    }
+    monkeypatch.setattr("lumi.models.catalog._index", index)
+
+
+def test_match_reports_how_it_matched(alias_catalog):
+    """匹配来源必须可辨：fuzzy 是猜的，界面据此与 exact 分开显示。
+
+    代理别名 plan-glm-5.2 在目录里没有同名条目，模糊匹配会挑中 umans-glm-5.2
+    （plan/umans 偶然字母重叠 + 长度相近，比真名 glm-5.2 分高）——猜错时上下文
+    窗口、输出上限、思考档位一起取自另一个模型，此前完全静默。
+    """
+    from lumi.models.catalog import match
+
+    assert match("glm-5.2").kind == "exact"
+    guess = match("plan-glm-5.2")
+    assert (guess.kind, guess.entry.id) == ("fuzzy", "umans-glm-5.2")
+    assert match("zzz-nothing-alike").kind == "none"
+    assert match("").kind == "none"
+
+
+def test_alias_overrides_and_falls_back(alias_catalog):
+    """手动指定优先于自动匹配；指向的条目消失时视同没指定，继续自动匹配。"""
+    from lumi.models.catalog import lookup, match, set_aliases
+
+    set_aliases({"plan-glm-5.2": "glm-5.2"})
+    pinned = match("plan-glm-5.2")
+    assert (pinned.kind, pinned.entry.id) == ("manual", "glm-5.2")
+    assert lookup("plan-glm-5.2").id == "glm-5.2"  # 丢掉 kind 的老入口同样生效
+
+    # 目录数据更新后条目消失 → entry 回落自动匹配（运行时用的就是它），但 kind 报
+    # stale 而非 fuzzy：指定没生效这件事不能静默，否则正是本功能要消灭的错配
+    set_aliases({"plan-glm-5.2": "glm-5.2-deleted-upstream"})
+    dead = match("plan-glm-5.2")
+    assert (dead.kind, dead.entry.id) == ("stale", "umans-glm-5.2")
+
+    set_aliases({})
+    assert match("plan-glm-5.2").kind == "fuzzy"
+
+
+def test_alias_overrides_exact_same_name(alias_catalog):
+    """用户明说了映射到谁，就不该再被同名条目截胡。"""
+    from lumi.models.catalog import match, set_aliases
+
+    set_aliases({"umans-glm-5.2": "glm-5.2"})
+    hit = match("umans-glm-5.2")
+    assert (hit.kind, hit.entry.id) == ("manual", "glm-5.2")
+
+
+def test_search_strips_alias_prefix_when_no_direct_hit(alias_catalog):
+    """整串搜不到时剥前缀重试——界面用模型名预填搜索框，而需要手动指定的恰恰是
+    目录里没有的代理别名，不剥的话最需要帮忙的那一栏永远空着。"""
+    from lumi.models.catalog import search
+
+    assert [e.id for e in search("glm-5.2")] == ["glm-5.2", "umans-glm-5.2"]
+    assert [e.id for e in search("plan-glm-5.2")] == ["glm-5.2", "umans-glm-5.2"]
+    assert search("zzzz-nope") == []
+    assert search("") == []
+    # 以分隔符结尾（用户正打到 "plan-"）不能剥出空后缀——空串是所有 key 的子串，
+    # 整个目录会涌进候选列表，恰在最容易点错的时刻
+    assert search("plan-") == []
+    assert search("zzzz-nope-") == []
 
 
 def test_detect_protocol():
@@ -310,7 +378,7 @@ def test_structured_output_softens_tool_choice_for_thinking_only(catalog, monkey
 
 
 def test_soft_tool_choice_rejects_prose_answer():
-    """软引导下模型可以不调工具，解析器返回 None——须显式抛错而非交给调用方。
+    """模型不调工具时解析器返回 None——须显式抛错而非交给调用方。
 
     调用方拿 None 会 AttributeError（titler 的 result.title / 判官的 verdict.ok），
     抛错才能让分类器 fail-closed 转人工审批、其余照常上抛。
@@ -321,3 +389,35 @@ def test_soft_tool_choice_rejects_prose_answer():
     assert _require_structured_result(sentinel) is sentinel
     with pytest.raises(ValueError, match="未调用结构化输出工具"):
         _require_structured_result(None)
+
+
+@pytest.mark.parametrize("model", ["gpt-5.2", "qwen3.8-max-preview"])
+def test_structured_output_guards_both_branches(catalog, monkeypatch, model):
+    """散文兜底守卫挂在链尾，强制 tool_choice 那条分支同样受保护。
+
+    强制 tool_choice 不等于模型必发工具调用——兼容端点 / 代理层（LiteLLM 等）可能
+    丢掉该参数。守卫只挂软引导分支时，走强制分支的模型（如 plan-glm-5.2）会把 None
+    交给调用方，AutoClassify 的 verdict.decision 在 try 外炸 AttributeError，
+    fail-closed 转人工审批一次都跑不到。
+    """
+    from pydantic import BaseModel
+
+    from lumi.models import chain as chain_module
+
+    class _Schema(BaseModel):
+        ok: bool
+
+    class FakeLLM:
+        def __init__(self, model_name: str):
+            self.model_name = model_name
+
+        def with_structured_output(self, structure, **kwargs):
+            return RunnableLambda(lambda x: None)  # 模型回散文
+
+    monkeypatch.setattr(
+        chain_module, "create_llm", lambda model_name=None, **kw: FakeLLM(model_name)
+    )
+
+    chain = chain_module.structured_output("{q}", _Schema, model_name=model)
+    with pytest.raises(ValueError, match="未调用结构化输出工具"):
+        chain.invoke({"q": "x"})

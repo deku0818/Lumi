@@ -221,6 +221,30 @@ export interface ProviderProfile {
   max_tokens?: Record<string, number>
   // 按模型的 models.dev 探测值（0 = 未探测到），做编辑表单的占位符与说明。
   probe?: Record<string, ModelLimits>
+  // 按模型的用户指定 models.dev 条目 id（'' / 缺省 = 跟随自动匹配）。与 save_provider
+  // 的入参同名同义，故 list 结果可原样回传。
+  catalog?: Record<string, string>
+  // 按模型的**生效**目录条目与它的来源。fuzzy = 按字符相似度猜的，必须与 exact 分开
+  // 显示——猜错时上下文窗口、输出上限、思考档位会一起取自另一个模型。
+  match?: Record<string, CatalogMatch>
+}
+
+// 一次目录匹配的结果与来源（对齐后端 catalog.Match）。id 为空 = 没匹上。
+// stale = 用户指定的条目已不在目录里，id 是运行时实际回落到的自动匹配结果。
+export interface CatalogMatch {
+  id: string
+  kind: 'manual' | 'exact' | 'fuzzy' | 'none' | 'stale'
+}
+
+// models.dev 目录条目（search_catalog 结果），供手动指定别名映射时挑选。
+// 只带挑选时用得上的三项——候选列表要一眼分辨「哪个是我要的模型」，靠的是上下文
+// 窗口与思考档位数。
+export interface CatalogEntry {
+  id: string
+  context: number
+  // 可选档位全集（与 ProviderProfile.thinking[].levels 同源），已含 auto/off/ultra，
+  // 直接用 length 呈现；不是目录原生 values（toggle 型模型的原生值为空）
+  levels: string[]
 }
 
 // 一对限制值。三处同形：models.dev 探测值、用户覆盖值、后端兜底值
