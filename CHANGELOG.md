@@ -1,5 +1,28 @@
 # Changelog
 
+## [0.2.103] - 2026-08-09
+
+### Added
+- **对话时间旅行：重新生成 / 原地编辑重发**。用户气泡 hover 出操作条——**重新生成**原样重答，**编辑**把气泡原位换成可编辑框（Cancel 零副作用，Save 才提交）。两者语义相同：以该条消息为锚，**它之后的历史全部消失**（后端同步删 checkpoint 消息），不是分支。后端 `rewind_before_message` 走 `OfflineFlush` 锚点 + `RemoveMessage`，与 `compact_thread` 同一条离线写回路径；同一次 `aupdate_state` 里清空 `todos`（被删轮次建立的任务列表不该带进重答轮）并剥掉新末条的 `ctx_digest` marker（不剥会让 `context_inject` 误判「已注入过」而漏注上下文）。
+- **`turn.start` wire 事件**：真实用户轮开轮即广播该轮用户消息的落库 id，前端据此给乐观气泡上锚。走事件而非 RPC 返回值——id 是「轮的事实」而非「轮的结果」，中途 stop 的轮同样需要它，且不必让每个流式入口都记得回传。
+- **`regenerate` / `edit_resend` 两个流式 RPC**：各自是单个原子调用，截断与重发共处一轮、持同一把 `run.lock`。拆成「截断 RPC + send」会留出竞态窗口，中间任何失败都让编辑文本连同被删历史一起丢失。
+- **`load_history` 的 user item 带 `message_id`**：时间旅行的锚点只认消息 id，不做序号 / 文本猜测——本地列表可能含后端没有的条目（发送失败残留、系统命令气泡），按序号对齐会指错消息、静默截断错误的轮次。
+
+### Fixed
+- **重答会叠加上下文注入块**：checkpoint 里的 content 已烤入原轮注入块，原样重投会与新一轮注入叠加，**每重答一次全量 env/agents/skills/记忆负载就翻一倍**，且新旧 env 块互相矛盾。改为重建——`strip_injected_prefix` 回到用户原样输入后交 `_build_user_message` 走与新消息完全相同的构造流水线，附件标签由显示声明重新派生，构造对重发幂等。
+- **同一气泡第二次重新生成必失败**：截断后消息以新 id 重挂，而前端气泡仍持旧 id，第二次点击会先乐观删掉刚拿到的回复、再报「目标消息不存在」。改为重挂时清 `messageId`、由本轮 `turn.start` 重新上锚。
+- **`send()` 的乐观气泡插在斜杠命令分流之前**（与原注释所述相反）：`/compact`、`/dream` 这类系统命令会留下后端永远列不出的幽灵气泡，回合结束刷新时当着用户的面消失，并破坏本地与后端 user 消息的对应关系。
+- **`EditBubble` 的 Enter 缺输入法守卫**：中文 / 日文输入法按 Enter 确认候选词会直接触发截断重发，把半截拼音当成新消息发出去。补 `isComposing` 守卫（与 Composer 同款）——编辑提交是破坏性操作，误触代价远高于普通发送。
+- **失败路径不自愈**：后端拒绝（「已有任务在执行」等）时只复位 `running`，乐观截断永不恢复、UI 与后端永久分叉。`reportSendFailure` 统一补 `reloadHistory` 对齐后端真相。
+- **`resolveMessageId` 的 await 期间不复查在途态**：期间用户可能已发出新消息，会误删其气泡并清掉在飞轮的 `running`。id 改由事件下发后该异步窗口整体消失。
+
+### Changed
+- **`meta_message.py` 收拢消息元数据契约**：新增 `strip_ctx_digest`（压缩 `_reattach` 与时间旅行截断共用，marker 键名单源）、`strip_injected_prefix`（`visible_user_text` 与重发重建共用，「前 N 块是注入」只此一处解读）、`declared_file_paths`（`items[].files[].path` 形状契约单源）。
+- **`AgentBridge` 分出 `_stream_turn` / `_stream_user_turn` 两层**：前者是「以一条消息起一轮」的底层（合成轮直接用），后者叠加真实用户轮的开轮设置（checkpoint、文件夹/Ultra 边沿提醒、`turn.start`）。此前合成轮内联复制底层三行，且重答路径漏掉了边沿提醒注入。
+- **前端时间旅行合一**：`regenerate` / `saveEdit` 合并为 `timeTravel(itemId, newText?)`，截断与重挂气泡合为一次 `setStore`；新增 `userBubble` 工厂与 `startTurn`，消除气泡字面量重复与 `itemId === null` 哨兵。
+- **两处 hover 操作条合并**为共用的 `HoverActions` + `IconAction`，用户气泡不再绕过既有 `copyMap`/`activeKey` 机制自建一套；`CopyButton` 加 `memo`（现在每条用户气泡都常驻挂它，流式期间每个 delta 都会重渲染）。
+- **编辑框沿用气泡几何**（共享 `USER_BUBBLE` token）与 `.composer` 的 `field-sizing`，进出编辑态不跳变；提示改用 Radix Tooltip 与全应用一致。
+
 ## [0.2.102] - 2026-08-07
 
 ### Added

@@ -24,9 +24,9 @@ from langchain_core.messages import (
 )
 
 from lumi.agents.core.meta_message import (
-    CTX_DIGEST_KEY,
     is_reminder_message,
     message_ts,
+    strip_ctx_digest,
 )
 from lumi.agents.core.node_helpers.messages import drop_incomplete_tool_calls
 from lumi.agents.core.preprocessing.summary import build_summary_carrier
@@ -397,13 +397,12 @@ def _reattach(msg: BaseMessage) -> BaseMessage:
 
     换新 id：``add_messages`` 对「Remove + 同 id 重加」是原地更新、排不到 carrier
     之后（tool_call_id 配对在 content 里，不受消息 id 影响）。
-    剥 marker：不变量是「marker 存在 ⟺ 从上次全量起的完整 diff 链可见」，而压缩删掉
-    了基线块，marker 必须随之消失、下轮由 context_inject 重注全量。对应的旧注入块留
+    剥 marker（``strip_ctx_digest``，不变量见其 docstring）：压缩删掉了基线块，
+    marker 必须随之消失、下轮由 context_inject 重注全量。对应的旧注入块留
     在 content 里不动——``injected_prefix`` 计数与 ``<attached-file>`` 标签块共用，
     按计数剥会连附件路径一起丢；多留一个陈旧块只是噪音，丢路径是损失。
     """
-    kwargs = {k: v for k, v in msg.additional_kwargs.items() if k != CTX_DIGEST_KEY}
-    return msg.model_copy(update={"id": str(uuid4()), "additional_kwargs": kwargs})
+    return strip_ctx_digest(msg).model_copy(update={"id": str(uuid4())})
 
 
 def build_compacted_update(

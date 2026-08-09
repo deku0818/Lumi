@@ -23,6 +23,8 @@ def _payload(evt: BridgeEvent) -> dict:
         return payload
     if kind in (EventKind.MESSAGE_COMPLETE, EventKind.TURN_COMPLETE):
         return {"usage": evt.usage_metadata} if evt.usage_metadata else {}
+    if kind == EventKind.TURN_START:
+        return {"message_id": evt.text}
     if kind == EventKind.TOOL_START:
         payload = {
             "name": evt.name,

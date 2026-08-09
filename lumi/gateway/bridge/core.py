@@ -17,16 +17,28 @@ from dataclasses import dataclass
 from enum import StrEnum
 from pathlib import Path
 from typing import TYPE_CHECKING
+from uuid import uuid4
 
 import httpx
-from langchain_core.messages import AIMessage, HumanMessage, ToolMessage
+from langchain_core.messages import (
+    AIMessage,
+    HumanMessage,
+    RemoveMessage,
+    ToolMessage,
+)
 from langchain_core.runnables.config import RunnableConfig
 from langgraph.errors import GraphBubbleUp
 from langgraph.types import Command
 
 from lumi.agents.core.graph import LumiAgent, create_agent
 from lumi.agents.core.hooks import build_config_hooks, set_run_config_hooks
-from lumi.agents.core.meta_message import synthetic_human_message
+from lumi.agents.core.meta_message import (
+    CTX_DIGEST_KEY,
+    declared_file_paths,
+    strip_ctx_digest,
+    strip_injected_prefix,
+    synthetic_human_message,
+)
 from lumi.agents.core.node_helpers.messages import inject_text_into_message
 from lumi.agents.core.nodes import build_reject_messages
 from lumi.agents.core.state import LumiAgentContext
@@ -158,6 +170,7 @@ class EventKind(StrEnum):
     BridgeEvent.kind 即为前端收到的事件 type，无需额外映射层。
     """
 
+    TURN_START = "turn.start"  # 真实用户轮开始，携带该轮用户消息 id（时间旅行锚点）
     MESSAGE_START = "message.start"
     MESSAGE_DELTA = "message.delta"
     THINKING_DELTA = "thinking.delta"  # 模型思考增量（Anthropic thinking 块 / 方言 reasoning_content）
@@ -518,31 +531,56 @@ class AgentBridge:
 
         content, image_paths = await persist_image_blocks(content)
 
+        if synthetic:
+            # 合成轮：无 checkpoint / 无边沿提醒（不是真实用户输入，不消费排队 note）
+            gen = self._stream_turn(
+                synthetic_human_message(content), tool_mode, execution_mode
+            )
+        else:
+            gen = self._stream_user_turn(
+                self._build_user_message(
+                    content, message_meta, (attachments or []) + image_paths
+                ),
+                tool_mode,
+                execution_mode,
+            )
+        async for event in gen:
+            yield event
+
+    async def _stream_turn(
+        self, msg: HumanMessage, tool_mode: str, execution_mode: str
+    ) -> AsyncGenerator[BridgeEvent, None]:
+        """底层：以一条消息起一轮图执行（真实用户轮与合成轮共用的最小操作）。"""
         # 新一轮对话，清理上一轮残留的 agent 追踪状态
         self._active_agent_runs.clear()
         # tool_mode 是 context（运行时共享、可变）真相源：本轮 UI 选择写入，运行中经
         # set_tool_mode 改它即对后续工具实时生效。不进 input_data（state 快照改不动）。
         self._context.tool_mode = tool_mode
-        if synthetic:
-            msg = synthetic_human_message(content)
-        else:
-            msg = self._build_user_message(
-                content, message_meta, (attachments or []) + image_paths
-            )
-            # 在 agent 执行前创建 checkpoint（快照当前文件状态）；label 取消息的
-            # 显示声明。合成轮（如后台任务通知）不创建条目，避免在 Rewind 中显示
-            await self._create_checkpoint_before_turn(msg)
-            # 「添加文件夹」增减与 Ultra 档位切换的边沿提醒随下一条真实用户消息注入
-            # （合成轮不消费；label 来自 items 声明，注入不碰 items 故不污染 Rewind
-            # 标签；reminder 一旦前置进历史即长驻且不碰系统提示词，缓存安全）。
-            for note in (self._drain_folder_note(), self._drain_ultra_note()):
-                if note:
-                    msg = inject_text_into_message(msg, note)
-        input_data = {
-            "messages": [msg],
-            "execution_mode": execution_mode,
-        }
-        async for event in self._stream(input_data):
+        async for event in self._stream(
+            {"messages": [msg], "execution_mode": execution_mode}
+        ):
+            yield event
+
+    async def _stream_user_turn(
+        self, msg: HumanMessage, tool_mode: str, execution_mode: str
+    ) -> AsyncGenerator[BridgeEvent, None]:
+        """真实用户轮：send / regenerate / edit_resend 三入口共用的开轮设置。
+
+        每轮设置步骤（checkpoint、边沿提醒、turn.start）集中于此，不可能只改一边。
+        """
+        # 在 agent 执行前创建 checkpoint（快照当前文件状态）；label 取消息的显示声明
+        await self._create_checkpoint_before_turn(msg)
+        # 「添加文件夹」增减与 Ultra 档位切换的边沿提醒随下一条真实用户消息注入
+        # （注入不碰 items 故不污染 Rewind 标签；reminder 一旦前置进历史即长驻且
+        # 不碰系统提示词，缓存安全）。
+        for note in (self._drain_folder_note(), self._drain_ultra_note()):
+            if note:
+                msg = inject_text_into_message(msg, note)
+        # 开轮即广播本轮用户消息 id：前端据此给乐观气泡上锚（时间旅行按 id 截断）。
+        # 走事件而非 RPC 返回值——id 是「轮的事实」而非「轮的结果」，中途 stop 的轮
+        # 同样需要它，且不必让每个流式入口都记得回传。
+        yield BridgeEvent(kind=EventKind.TURN_START, text=msg.id or "")
+        async for event in self._stream_turn(msg, tool_mode, execution_mode):
             yield event
 
     @staticmethod
@@ -567,7 +605,9 @@ class AgentBridge:
         if items is None:
             text = extract_text_content(content).strip()
             items = [{"text": text}] if text else []
-        if paths:
+        # 已声明 files 的 items 原样保留：重发路径传入的 paths 正是从该声明派生的，
+        # 再挂一次会给合并轮多出一条重复的附件条目（构造对重发幂等）
+        if paths and not any(it.get("files") for it in items):
             files = [{"path": p, "name": Path(p).name} for p in paths]
             if len(items) == 1:
                 items = [{**items[0], "files": files}]
@@ -576,7 +616,13 @@ class AgentBridge:
         if len(items) == 1 and "ts" not in items[0]:
             items = [{**items[0], "ts": meta["ts"]}]
         meta["items"] = items
-        msg = HumanMessage(content=content, additional_kwargs={LUMI_META_KEY: meta})
+        # 显式赋 id（不等 add_messages 落库时补）：开轮即知 id，流式 RPC result
+        # 帧回传给前端做乐观气泡对账
+        msg = HumanMessage(
+            content=content,
+            additional_kwargs={LUMI_META_KEY: meta},
+            id=str(uuid4()),
+        )
         if paths:
             tags = "\n".join(
                 f"<{ATTACHED_FILE_TAG}>{p}</{ATTACHED_FILE_TAG}>" for p in paths
@@ -791,6 +837,88 @@ class AgentBridge:
             len(body),
         )
         return True
+
+    async def rewind_before_message(self, message_id: str) -> HumanMessage | None:
+        """时间旅行截断：删除目标用户消息及其后全部历史，返回被删的目标消息。
+
+        新末条若带 ctx_digest marker 须剥掉（其后的 diff 链已被删，不剥会让
+        context_inject 误判「已注入过」而漏注上下文；同 id 重加是原地更新，位置
+        不变）。写回走 OfflineFlush 锚点，与 compact_thread 同一条离线路径。
+        目标消息不存在（历史已被压缩换 id 等）返回 None。
+        """
+        messages = await self.snapshot_messages()
+        idx = next(
+            (
+                i
+                for i, m in enumerate(messages)
+                if m.id == message_id and isinstance(m, HumanMessage)
+            ),
+            None,
+        )
+        if idx is None:
+            return None
+        removed = messages[idx:]
+        update: list = [RemoveMessage(id=m.id) for m in removed if m.id]
+        if idx and CTX_DIGEST_KEY in messages[idx - 1].additional_kwargs:
+            update.append(strip_ctx_digest(messages[idx - 1]))
+        # todos 与消息同为 state 字段但无历史可回溯：不清会把「已删未来」的任务列表
+        # 带进重答轮（模型往幽灵清单续写），一并清空、由重答轮自行重建
+        await self.graph.aupdate_state(
+            self._config, {"messages": update, "todos": []}, as_node="OfflineFlush"
+        )
+        logger.info(
+            "[rewind] thread=%s 截断 %d 条消息（自 %s 起）",
+            self.current_thread_id,
+            len(removed),
+            message_id,
+        )
+        return removed[0]
+
+    async def _rewind_or_raise(self, message_id: str) -> HumanMessage:
+        """截断到目标用户消息，返回被删的它；不存在即抛（两个重发入口共用）。"""
+        original = await self.rewind_before_message(message_id)
+        if original is None:
+            raise ValueError("目标消息不存在，历史可能已被整理，请刷新会话")
+        return original
+
+    async def stream_regenerate(
+        self,
+        message_id: str,
+        tool_mode: str = "default",
+        execution_mode: str = "normal",
+    ) -> AsyncGenerator[BridgeEvent, None]:
+        """重新生成：截断目标用户消息及其后历史，用原消息重建后重走一轮。
+
+        重建而非原样重投：checkpoint 里的 content 已烤入原轮注入块，原样重投会与新
+        一轮注入叠加（token 逐次翻倍且新旧 env 互相矛盾）。重建 = 剥掉全部注入前缀
+        块回到用户原样输入，再交 ``_build_user_message`` 走与新消息完全相同的构造
+        流水线——附件标签由显示声明（items[].files）重新派生，故与原轮等价。
+        """
+        original = await self._rewind_or_raise(message_id)
+        msg = self._build_user_message(
+            strip_injected_prefix(original),
+            original.additional_kwargs.get(LUMI_META_KEY),
+            declared_file_paths(original),
+        )
+        async for event in self._stream_user_turn(msg, tool_mode, execution_mode):
+            yield event
+
+    async def stream_edit_resend(
+        self,
+        message_id: str,
+        content: str,
+        tool_mode: str = "default",
+        execution_mode: str = "normal",
+    ) -> AsyncGenerator[BridgeEvent, None]:
+        """编辑重发：截断目标用户消息及其后历史，以编辑后文本 + 原附件重走一轮。
+
+        单一原子入口（截断与重发共处一轮、持同一把 run.lock）——拆成「截断 RPC +
+        send」两步会留出竞态窗口，中间任何失败都让编辑文本连同被删历史一起丢失。
+        """
+        original = await self._rewind_or_raise(message_id)
+        msg = self._build_user_message(content, None, declared_file_paths(original))
+        async for event in self._stream_user_turn(msg, tool_mode, execution_mode):
+            yield event
 
     async def _emit_text_message(self, text: str) -> AsyncGenerator[BridgeEvent, None]:
         """把一段文本作为一条完整助手消息 yield（命令回执共用的四事件收尾）。"""

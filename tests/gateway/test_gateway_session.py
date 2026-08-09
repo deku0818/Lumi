@@ -231,6 +231,27 @@ async def test_streaming_send_message_pumps_events_then_result():
         await session.aclose()
 
 
+async def test_turn_start_carries_user_message_id():
+    """开轮事件带出本轮用户消息 id（前端据此给乐观气泡上锚做时间旅行对账）。"""
+    bridge = FakeBridge(
+        events=[
+            BridgeEvent(kind=EventKind.TURN_START, text="mid-42"),
+            BridgeEvent(kind=EventKind.TURN_COMPLETE),
+        ]
+    )
+    session, channel = _make_session(bridge)
+    await session.start()
+    try:
+        await session.handle_frame(
+            {"id": 1, "method": "send_message", "params": {"content": "hello"}}
+        )
+        await _drain(session)
+        start = next(e for e in channel.events() if e["params"]["type"] == "turn.start")
+        assert start["params"]["payload"] == {"message_id": "mid-42"}
+    finally:
+        await session.aclose()
+
+
 async def test_send_message_rejected_when_workspace_unbound():
     bridge = FakeBridge()
     bridge.workspace_bound = False

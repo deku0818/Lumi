@@ -1,4 +1,13 @@
-import { memo, useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState } from 'react'
+import {
+  memo,
+  useCallback,
+  useEffect,
+  useLayoutEffect,
+  useMemo,
+  useRef,
+  useState,
+  type ReactNode,
+} from 'react'
 import {
   SquareTerminal,
   FileText,
@@ -12,6 +21,9 @@ import {
   ChevronDown,
   Copy,
   Check,
+  Info,
+  Pencil,
+  RotateCcw,
   Square,
   Plus,
   Send,
@@ -74,6 +86,7 @@ import { isCommandMode, parseCommand, matchCommands } from './slash'
 import { toolDiff, type DiffLine } from './diff'
 import { clip, basename, fmtTokens, machineColor, machineName, msgTime, sessionKey, keyThread, keyBackend, beOf, FLOAT_GAP } from '@/lib/utils'
 import { Button } from '@/components/ui/button'
+import { Tooltip, TooltipContent, TooltipTrigger } from '@/components/ui/tooltip'
 import { useTheme } from './theme'
 import { useUiFont } from './font'
 import { useI18n } from './i18n'
@@ -132,7 +145,7 @@ const segKey = (seg: Segment): string =>
 // load_history 的历史项 → 前端 Item
 function restore(h: HistoryItem): Item {
   if (h.kind === 'user')
-    return { id: nid(), kind: 'user', text: h.text ?? '', images: h.images, files: h.files, sender: h.sender, ts: h.ts }
+    return { id: nid(), kind: 'user', text: h.text ?? '', images: h.images, files: h.files, sender: h.sender, ts: h.ts, messageId: h.message_id }
   if (h.kind === 'assistant')
     return { id: nid(), kind: 'assistant', text: h.text ?? '', streaming: false }
   return {
@@ -144,6 +157,35 @@ function restore(h: HistoryItem): Item {
     output: h.output ?? '',
     done: true,
   }
+}
+
+// 用户气泡的几何：气泡本体与原地编辑框共用，进出编辑态时不跳变
+const USER_BUBBLE = 'bg-surface rounded-3xl rounded-br-lg px-4 py-2.5 whitespace-pre-wrap'
+
+// 乐观插入的用户气泡（发送 / 编辑重发共用）。messageId 留空，等 turn.start 上锚。
+// ts 与服务端落库的到达时刻近似一致，重载前后时间头不跳变。
+const userBubble = (text: string, images?: string[], files?: AttachedFile[]): Item => ({
+  id: nid(),
+  kind: 'user',
+  text,
+  images,
+  files,
+  ts: Date.now(),
+})
+
+// 给最后一条尚未上锚的用户气泡打上后端消息 id（turn.start 事件驱动）。
+// 已上锚（历史回放带 id）或本轮无用户气泡（系统命令）时原数组返回，不触发重渲染。
+function anchorLastUser(items: Item[], messageId: string): Item[] {
+  if (!messageId) return items
+  for (let i = items.length - 1; i >= 0; i--) {
+    const it = items[i]
+    if (it.kind !== 'user') continue
+    if (it.messageId) return items
+    const copy = items.slice()
+    copy[i] = { ...it, messageId }
+    return copy
+  }
+  return items
 }
 
 // 把流式文本追加到最后一个仍在流式中的 assistant item；没有则新建。
@@ -728,6 +770,12 @@ export default function App() {
         // 还会把相邻工具在 groupItems 里隔断。改由首个 message.delta 懒创建气泡。
         case 'message.delta':
           n = { ...s, items: appendDelta(s.items, payload.text ?? '') }
+          break
+        case 'turn.start':
+          // 开轮广播本轮用户消息 id：给最后一条尚未上锚的用户气泡补上（run.lock 保证
+          // 每会话同时只有一轮在飞，故「最后一条无 messageId 的用户气泡」无歧义）。
+          // 时间旅行按此 id 截断，不做序号/文本猜测
+          n = { ...s, items: anchorLastUser(s.items, payload.message_id ?? '') }
           break
         case 'thinking.delta':
           n = { ...s, thinkingText: s.thinkingText + (payload.text ?? '') }
@@ -1956,13 +2004,26 @@ export default function App() {
   const resetRunning = (sid: string) =>
     setStore((s) => (s[sid] ? { ...s, [sid]: { ...s[sid], running: false } } : s))
 
-  // send/runCommand 的统一失败兜底：复位 running 之外必须把后端拒绝原因亮出来——
-  // 之前只 resetRunning 会让「未绑定项目」这类拒绝表现成消息发了没反应，无声消失
+  // send/runCommand/时间旅行的统一失败兜底：复位 running + 亮出后端拒绝原因 +
+  // 重载历史对齐后端真相——被拒的乐观改动（幽灵气泡 / 提前截断）随整表替换消失
   const reportSendFailure = (sid: string, err: unknown) => {
     resetRunning(sid)
     const message = err && typeof err === 'object' && 'message' in err ? String(err.message) : ''
     if (message) toast.error(message)
+    reloadHistory(sid, keyThread(sid))
   }
+
+  // 开轮：置 running，并可选地乐观插入用户气泡（系统命令轮传 null——它们不落库
+  // 为用户消息，插了会在回合结束刷新时当着用户的面消失）
+  const startTurn = (sid: string, bubble: Item | null) =>
+    setStore((s) => ({
+      ...s,
+      [sid]: {
+        ...s[sid],
+        items: bubble ? [...s[sid].items, bubble] : s[sid].items,
+        running: true,
+      },
+    }))
 
   // override：项目主页输入岛用——显式指定文本/附件与目标会话（新建的会话此刻还没
   // 进 active），绕开「等 React 把新 state 渲染进闭包」的时序依赖。附件随 override 显式
@@ -1982,39 +2043,31 @@ export default function App() {
     if ((!text && attCount === 0) || busy || !gw) return
     // 主动发送即视为「回到对话」：强制贴底，确保自己的消息与随后的回复都在视野内
     setPinned(true)
-    const files: AttachedFile[] = fileRefs.map((a) => ({ path: a.path, name: a.name }))
-    setStore((s) => ({
-      ...s,
-      [sid]: {
-        ...s[sid],
-        items: [
-          ...s[sid].items,
-          {
-            id: nid(),
-            kind: 'user',
-            text, // 可见正文只留用户输入；附件路径走 system-reminder，不污染气泡
-            images: imgs.length ? imgs.map((a) => a.dataUrl) : undefined,
-            files: files.length ? files : undefined,
-            ts: Date.now(), // 与服务端落库的到达时刻近似一致，重载前后时间头不跳变
-          },
-        ],
-        running: true,
-      },
-    }))
     if (!o) {
       setInput('')
       setAttachments([])
     }
+    const files: AttachedFile[] = fileRefs.map((a) => ({ path: a.path, name: a.name }))
+    const bubble = userBubble(
+      text, // 可见正文只留用户输入；附件路径走 system-reminder，不污染气泡
+      imgs.length ? imgs.map((a) => a.dataUrl) : undefined,
+      files.length ? files : undefined,
+    )
     // 纯文本的已知斜杠命令走 run_command；带附件则一律走 send_message。
-    // 注意此分支在乐观插入之前：/compact、/dream 这类不产生 checkpoint 的命令
-    // 不该插条目（后端永远列不出，回合结束刷新时会当着用户的面消失）。
+    // 此分支必须在乐观插入之前分流：/compact、/dream 这类系统命令不产生 checkpoint
+    // 条目，不该插气泡（后端永远列不出，回合结束刷新时会当着用户的面消失；幽灵
+    // 气泡还会破坏本地与后端 user 消息的对应关系）；技能命令会落库并声明
+    // 「/名 输入」气泡，照常乐观插入（其 id 同样由 turn.start 上锚）。
     if (attCount === 0 && text.startsWith('/')) {
       const [name, extra] = parseCommand(text)
-      if (commands.some((c) => c.name === name)) {
+      const cmd = commands.find((c) => c.name === name)
+      if (cmd) {
+        startTurn(sid, cmd.type === 'system' ? null : bubble)
         gw.runCommand(name, extra, toolMode).catch((err) => reportSendFailure(sid, err))
         return
       }
     }
+    startTurn(sid, bubble)
     // 新会话首条消息：checkpoint 未落盘前后端列不出来，先乐观插入侧栏条目——
     // 否则首轮期间会话在侧栏缺席、切出去就回不来。回合结束的整表刷新会以
     // 后端真实数据替换（display_time 沿用后端的相对时间文案格式）。
@@ -2051,6 +2104,51 @@ export default function App() {
     gw.sendMessage(payload, toolMode, filePaths).catch((err) => reportSendFailure(sid, err))
   }
   sendRef.current = send // 供项目主页输入岛在 newSession 后调用（override 自带目标，无时序依赖）
+
+  // ── 时间旅行（重新生成 / 编辑重发）──
+  // 以目标用户气泡为锚截断其后历史（后端同步删 checkpoint 消息 + 清 todos），再以
+  // 原文（重答）或编辑后文本重走一轮。锚点只认 messageId——由 turn.start 上锚或
+  // load_history 下发，不做序号/文本猜测：本地列表可能含后端没有的条目（发送失败
+  // 残留等）。id 缺失或气泡已不在（历史被整理）即刷新对齐后端，不冒险截错。
+  // newText 为空 = 重新生成（保留原气泡），非空 = 编辑重发（换成新气泡）。
+  const timeTravel = (itemId: number, newText?: string) => {
+    const sid = active
+    const gw = connsRef.current[sid]
+    const st = storeRef.current[sid]
+    if (!gw || st?.running) return
+    setEditingId(null)
+    const idx = st?.items.findIndex((it) => it.id === itemId) ?? -1
+    const anchor = idx >= 0 ? st!.items[idx] : undefined
+    if (anchor?.kind !== 'user' || !anchor.messageId) {
+      reloadHistory(sid, keyThread(sid))
+      return
+    }
+    const mid = anchor.messageId
+    setPinned(true)
+    // 截断 + 重挂气泡一次写入：重答沿用原气泡（后端重建同一句话），编辑换成新气泡
+    // （附件展示沿用原条目，后端按原消息声明重挂）。两者都清掉 messageId——后端截断
+    // 后以新 id 重挂，留着旧 id 会让下一次时间旅行指向已删除的消息；新 id 由本轮
+    // turn.start 重新上锚。
+    setStore((s) => ({
+      ...s,
+      [sid]: {
+        ...s[sid],
+        items: [
+          ...s[sid].items.slice(0, idx),
+          newText === undefined
+            ? { ...anchor, messageId: undefined }
+            : userBubble(newText, anchor.images, anchor.files),
+        ],
+        running: true,
+        todos: [], // 后端截断时一并清空：被删轮次建立的任务列表不该带进重答轮
+      },
+    }))
+    const rpc =
+      newText === undefined
+        ? gw.regenerate(mid, toolMode)
+        : gw.editResend(mid, newText, toolMode)
+    rpc.catch((err) => reportSendFailure(sid, err))
+  }
 
   // 中止当前流式轮：后端取消 task 并补发 turn.complete，running 随之复位
   const stop = () => {
@@ -2097,6 +2195,12 @@ export default function App() {
 
   const streaming = items.some((it) => it.kind === 'assistant' && it.streaming)
   const hasMessages = items.length > 0
+  // 时间旅行操作（重新生成/编辑重发）可用：空闲、已连接、非渠道/cron 旁观、无在途审批
+  const canTimeTravel =
+    conn === 'open' && !running && !observingCronRun && !activeChannel && !approval && !clarify
+  // 原地编辑中的用户气泡 id（一次只编辑一条；Cancel/切会话即退出，Save 前无任何实际修改）
+  const [editingId, setEditingId] = useState<number | null>(null)
+  useEffect(() => setEditingId(null), [active])
   // 连续工具分段只随 items 变化重算，避免每次渲染都扫描
   const segments = useMemo(() => groupItems(items), [items])
   // 复制按钮挂在每轮「最后一个 segment」之后——即整段助手输出的底部（像 Claude 的动作栏
@@ -2610,18 +2714,47 @@ export default function App() {
                           ) : (
                             <ItemView key={key} item={seg.item} />
                           )
-                        // 只对在飞的末轮（activeKey）按 running 把关；历史轮始终可复制。
-                        // 非复制段直接渲染裸 node（不套 wrapper），仅复制段才包一层挂按钮。
-                        const copyText =
-                          key === activeKey && running ? undefined : copyMap.get(key)
-                        if (!copyText) return node
+                        // 用户气泡编辑态：气泡原位换成可编辑框（Save 前零副作用）
+                        const userItem =
+                          seg.kind === 'item' && seg.item.kind === 'user' ? seg.item : null
+                        if (userItem && editingId === userItem.id) {
+                          return (
+                            <EditBubble
+                              key={key}
+                              initial={userItem.text}
+                              onCancel={() => setEditingId(null)}
+                              onSave={(text) => timeTravel(userItem.id, text)}
+                            />
+                          )
+                        }
+                        // 悬停操作条：用户气泡挂时间旅行 + 复制（空闲且非旁观才给截断类
+                        // 操作），助手轮挂复制——末轮（activeKey）在飞时不给，历史轮恒可。
+                        // 两侧共用同一个 HoverActions，悬停显隐的几何与时序只此一处。
+                        const copyText = userItem
+                          ? userItem.text
+                          : key === activeKey && running
+                            ? undefined
+                            : copyMap.get(key)
+                        const timeTravelable = userItem && canTimeTravel
+                        if (!copyText && !timeTravelable) return node
                         return (
-                          <div key={key} className="group/copy">
-                            {node}
-                            <div className="mt-1 -ml-1 opacity-0 group-hover/copy:opacity-100 transition-opacity">
-                              <CopyButton text={copyText} />
-                            </div>
-                          </div>
+                          <HoverActions key={key} node={node} align={userItem ? 'end' : 'start'}>
+                            {timeTravelable && (
+                              <>
+                                <IconAction
+                                  icon={RotateCcw}
+                                  label={t('chat.regenerate')}
+                                  onClick={() => timeTravel(userItem.id)}
+                                />
+                                <IconAction
+                                  icon={Pencil}
+                                  label={t('chat.edit')}
+                                  onClick={() => setEditingId(userItem.id)}
+                                />
+                              </>
+                            )}
+                            {copyText && <CopyButton text={copyText} />}
+                          </HoverActions>
                         )
                       })}
                       {/* 状态指示器常驻：运行中显示阶段文案，中断（审批/澄清）时
@@ -2948,7 +3081,7 @@ const ItemView = memo(function ItemView({ item }: { item: Exclude<Item, { kind: 
           </div>
         )}
         {item.text && (
-          <div className="selectable bg-surface rounded-3xl rounded-br-lg px-4 py-2.5 max-w-[80%] whitespace-pre-wrap wrap-anywhere">
+          <div className={`selectable ${USER_BUBBLE} max-w-[80%] wrap-anywhere`}>
             {item.text}
           </div>
         )}
@@ -2969,8 +3102,117 @@ const ItemView = memo(function ItemView({ item }: { item: Exclude<Item, { kind: 
   )
 })
 
-// AI 消息下的复制按钮：悬停出现，点击复制 markdown 原文，1.5s 内显示「已复制」反馈。
-function CopyButton({ text }: { text: string }) {
+// 用户气泡的原地编辑态：气泡原位换成可编辑框 + Cancel/Save（对齐 ChatGPT 编辑交互）。
+// Save 前零副作用——截断与重发全部发生在 onSave 回调里。Enter 保存、Esc 取消。
+function EditBubble({
+  initial,
+  onCancel,
+  onSave,
+}: {
+  initial: string
+  onCancel: () => void
+  onSave: (text: string) => void
+}) {
+  const { t } = useI18n()
+  const [text, setText] = useState(initial)
+  const ref = useRef<HTMLTextAreaElement>(null)
+  const submit = () => text.trim() && onSave(text.trim())
+  // 进入编辑即聚焦、光标置尾（高度自适应交给 .composer 的 field-sizing）
+  useEffect(() => {
+    const el = ref.current
+    if (!el) return
+    el.focus()
+    el.selectionStart = el.selectionEnd = el.value.length
+  }, [])
+  return (
+    <div className="flex flex-col items-end gap-2">
+      <textarea
+        ref={ref}
+        value={text}
+        onChange={(e) => setText(e.target.value)}
+        onKeyDown={(e) => {
+          // 输入法组合中的 Enter 是选字确认，不是提交（与 Composer 同守卫）——
+          // 编辑提交是截断历史的破坏性操作，误触代价远高于普通发送
+          if (e.nativeEvent.isComposing) return
+          if (e.key === 'Escape') onCancel()
+          else if (e.key === 'Enter' && !e.shiftKey) {
+            e.preventDefault()
+            submit()
+          }
+        }}
+        className={`composer w-full resize-none outline-none ring-1 ring-primary/60 ${USER_BUBBLE}`}
+      />
+      <div className="flex items-center gap-1.5">
+        <Tooltip>
+          <TooltipTrigger asChild>
+            <span className="mr-1 inline-flex cursor-help text-muted-foreground/70">
+              <Info size={13} />
+            </span>
+          </TooltipTrigger>
+          <TooltipContent>{t('chat.editHint')}</TooltipContent>
+        </Tooltip>
+        <Button variant="ghost" size="sm" onClick={onCancel}>
+          {t('common.cancel')}
+        </Button>
+        <Button size="sm" onClick={submit} disabled={!text.trim()}>
+          {t('common.save')}
+        </Button>
+      </div>
+    </div>
+  )
+}
+
+// 消息下方的悬停操作条：鼠标移到该段才淡入。用户气泡右对齐（贴气泡）、助手左对齐。
+function HoverActions({
+  node,
+  align,
+  children,
+}: {
+  node: ReactNode
+  align: 'start' | 'end'
+  children: ReactNode
+}) {
+  return (
+    <div className="group/act">
+      {node}
+      <div
+        className={`mt-1 flex opacity-0 group-hover/act:opacity-100 transition-opacity ${
+          align === 'end' ? 'justify-end' : '-ml-1'
+        }`}
+      >
+        {children}
+      </div>
+    </div>
+  )
+}
+
+// 操作条里的图标按钮（重新生成 / 编辑）：title 与 aria-label 同一文案，样式统一
+function IconAction({
+  icon: Icon,
+  label,
+  onClick,
+}: {
+  icon: LucideIcon
+  label: string
+  onClick: () => void
+}) {
+  return (
+    <Button
+      variant="ghost"
+      size="icon-sm"
+      onClick={onClick}
+      title={label}
+      aria-label={label}
+      className="text-muted-foreground"
+    >
+      <Icon />
+    </Button>
+  )
+}
+
+// 消息下的复制按钮：悬停出现，点击复制原文，1.5s 内显示「已复制」反馈。
+// memo：聊天流每个 delta 都重渲染，而本按钮的 props 只是一段文本——比较即可整体跳过。
+const CopyButton = memo(function CopyButton({ text }: { text: string }) {
   const { t } = useI18n()
   const [copied, setCopied] = useState(false)
   const copy = () => {
@@ -2994,7 +3236,7 @@ function CopyButton({ text }: { text: string }) {
       {copied ? <Check className="text-success" /> : <Copy />}
     </Button>
   )
-}
+})
 
 // 工具（单个或多个）统一渲染为一行自然语言摘要（参考 Claude：
 // "Edited 2 files, ran a command, read a file ›"）。无卡片、低调融入文本流，

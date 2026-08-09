@@ -168,7 +168,8 @@ export class Gateway {
   }
 
   // content 为纯文本字符串，或多模态 content blocks 列表（text + image 块）；
-  // files 为文件附件路径数组——后端统一拼标签给模型 + 写显示声明，前端不拼标签
+  // files 为文件附件路径数组——后端统一拼标签给模型 + 写显示声明，前端不拼标签。
+  // 本轮用户消息 id 由开轮的 turn.start 事件下发，不在 result 里
   sendMessage(
     content: string | unknown[],
     toolMode?: string,
@@ -176,9 +177,19 @@ export class Gateway {
   ): Promise<unknown> {
     const params: Record<string, unknown> = { content }
     if (files && files.length > 0) params.files = files
-    return this.request<{ commands: SlashCommand[] }>(
-      'send_message',
-      withToolMode(params, toolMode),
+    return this.request('send_message', withToolMode(params, toolMode))
+  }
+
+  // 时间旅行重答：截断该用户消息及其后全部历史并重建重走一轮，事件流同 send_message
+  regenerate(messageId: string, toolMode?: string): Promise<unknown> {
+    return this.request('regenerate', withToolMode({ message_id: messageId }, toolMode))
+  }
+
+  // 编辑重发（原子）：截断该用户消息及其后全部历史，以编辑后文本 + 原附件重走一轮
+  editResend(messageId: string, content: string, toolMode?: string): Promise<unknown> {
+    return this.request(
+      'edit_resend',
+      withToolMode({ message_id: messageId, content }, toolMode),
     )
   }
 
@@ -197,10 +208,7 @@ export class Gateway {
   }
 
   runCommand(name: string, extraText: string, toolMode?: string): Promise<unknown> {
-    return this.request<{
-      profiles: ProviderProfile[]
-      active: ActiveModel
-    }>('run_command', withToolMode({ name, extra_text: extraText }, toolMode))
+    return this.request('run_command', withToolMode({ name, extra_text: extraText }, toolMode))
   }
 
   listProviders(): Promise<{

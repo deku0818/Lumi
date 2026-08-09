@@ -59,7 +59,9 @@ if TYPE_CHECKING:
 
 # 需后台 task 承载、可被 stop 取消的流式方法。resume 改非流式控制 RPC（在途审批应答）：
 # 审批挂起期间原 prompt 流仍活、run.lock 仍持，流式方法会被拒成「已有任务在执行」。
-_STREAMING_METHODS = frozenset({"send_message", "run_command"})
+_STREAMING_METHODS = frozenset(
+    {"send_message", "run_command", "regenerate", "edit_resend"}
+)
 
 # 断连续接（Case 1）：detached 会话无人接回的兜底回收时长（保底防进程内泄漏）
 _DETACH_TTL_SECONDS = 8 * 3600
@@ -115,7 +117,8 @@ def _user_items(m) -> list[dict]:
         text = visible_user_text(m)
         if text:
             out.append({"kind": "user", "text": text})
-    return out
+    # 时间旅行（重新生成 / 编辑重发）按 message_id 定位截断点；合并轮 1:N 共享同一 id
+    return [{**it, "message_id": m.id} for it in out] if m.id else out
 
 
 def _history_items(messages: list) -> list[dict]:
@@ -916,6 +919,19 @@ class GatewaySession:
                 tool_mode=params.get("tool_mode", "default"),
                 execution_mode=params.get("execution_mode", "normal"),
                 attachments=params.get("files"),
+            )
+        if method == "regenerate":
+            return self._bridge.stream_regenerate(
+                params.get("message_id", ""),
+                tool_mode=params.get("tool_mode", "default"),
+                execution_mode=params.get("execution_mode", "normal"),
+            )
+        if method == "edit_resend":
+            return self._bridge.stream_edit_resend(
+                params.get("message_id", ""),
+                params.get("content", ""),
+                tool_mode=params.get("tool_mode", "default"),
+                execution_mode=params.get("execution_mode", "normal"),
             )
         return self._bridge.stream_command(
             params.get("name", ""),

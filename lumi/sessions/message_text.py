@@ -7,7 +7,7 @@ from __future__ import annotations
 
 import json
 
-from lumi.agents.core.meta_message import declared_items, injected_prefix
+from lumi.agents.core.meta_message import declared_items, strip_injected_prefix
 
 
 def visible_user_text(msg: object) -> str:
@@ -20,14 +20,7 @@ def visible_user_text(msg: object) -> str:
     items = declared_items(msg)
     if items is not None:
         return "\n".join(it.get("text", "") for it in items if it.get("text"))
-    if isinstance(msg, dict):
-        content = msg.get("content", "")
-    else:
-        content = getattr(msg, "content", "")
-    skip = injected_prefix(msg)
-    if skip and isinstance(content, list):
-        content = content[skip:]
-    return extract_text_content(content).strip()
+    return extract_text_content(strip_injected_prefix(msg)).strip()
 
 
 def extract_text_content(content: str | list) -> str:

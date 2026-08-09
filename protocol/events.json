@@ -3,6 +3,7 @@
   "version": 1,
   "events": {
     "gateway.ready": { "payload": { "model": "string", "workspace": "string", "workspace_bound": "boolean" }, "note": "连接握手，由 ws 端点直接发出；workspace 未绑定(workspace_bound=false)时仍给出进程 cwd 兜底值，仅供展示，不代表已绑定项目" },
+    "turn.start": { "payload": { "message_id": "string" }, "note": "真实用户轮开始（send_message / regenerate / edit_resend / 技能命令），携带该轮用户消息的落库 id；前端据此给乐观气泡上锚，时间旅行按 id 截断。开轮即发故中途 stop 的轮同样带到；系统命令（/compact 等）不产生用户消息、不发此事件" },
     "message.start": { "payload": {} },
     "message.delta": { "payload": { "text": "string", "usage?": "Usage" } },
     "thinking.delta": { "payload": { "text": "string", "usage?": "Usage" }, "note": "模型思考增量（Anthropic thinking 块 / 方言 reasoning_content）" },
@@ -34,7 +35,9 @@
   },
   "events_note": "任意事件 payload 都可能附带 parent_run_id（非空时表示属于某个子代理）",
   "methods": {
-    "send_message": { "params": ["content", "tool_mode?", "execution_mode?", "files?"], "streaming": true, "note": "files 为文件附件路径数组：后端统一拼 <attached-file> 标签块给模型 + 写进显示声明 items 的 files，前端不再拼标签" },
+    "send_message": { "params": ["content", "tool_mode?", "execution_mode?", "files?"], "streaming": true, "note": "files 为文件附件路径数组：后端统一拼 <attached-file> 标签块给模型 + 写进显示声明 items 的 files，前端不再拼标签。本轮用户消息 id 由开轮的 turn.start 事件下发，不走 result" },
+    "regenerate": { "params": ["message_id", "tool_mode?", "execution_mode?"], "streaming": true, "note": "时间旅行重答：删除目标用户消息及其后全部历史（todos 一并清空），重建原消息（剥旧注入前缀，附件按显示声明重挂）重走一轮；事件流同 send_message。message_id 入参来自 load_history user item 或上一次 turn.start" },
+    "edit_resend": { "params": ["message_id", "content", "tool_mode?", "execution_mode?"], "streaming": true, "note": "编辑重发（原子）：删除目标用户消息及其后全部历史（todos 一并清空），以编辑后 content + 原消息附件重走一轮；截断与重发共处一轮不留竞态窗口。事件流同 send_message" },
     "resume": { "params": ["approval_id", "value"], "note": "在途审批应答（非流式控制 RPC）：唤醒挂起的审批/提问 Future；value 形状 = 审批 {decision, message?, set_tool_mode?} 或 clarify 答案字符串/__ask_cancelled__" },
     "stop": { "params": [], "result": ["stopped"], "note": "中止当前流式轮，取消后补发 turn.complete" },
     "list_commands": { "params": [], "result": ["commands"] },
@@ -67,7 +70,7 @@
     "list_sessions": { "params": ["limit?"], "result": ["sessions"], "note": "跨所有项目返回（不按当前 cwd 过滤）；每条 session 含 workspace_dir（前端按机器→项目分组）、channel（IM 渠道标识，空=desktop 会话）、channel_kind（group/p2p，图标区分）" },
     "new_session": { "params": ["workspace?"], "result": ["thread_id"], "note": "workspace 指定新会话所属项目目录，省略=当前 cwd" },
     "switch_session": { "params": ["thread_id", "workspace?"], "result": ["thread_id"], "note": "workspace=该会话所属项目，切入时把进程 cwd 切过去" },
-    "load_history": { "params": ["thread_id"], "result": ["items", "usage?", "model?", "context_window?", "todos?"], "note": "usage/model/context_window 用于还原上下文用量环；渠道旁观会话分母取会话真实模型窗口（context_window）；todos 为该会话 state.todos 快照（TodoItem[]），还原右栏任务进度" },
+    "load_history": { "params": ["thread_id"], "result": ["items", "usage?", "model?", "context_window?", "todos?"], "note": "usage/model/context_window 用于还原上下文用量环；渠道旁观会话分母取会话真实模型窗口（context_window）；todos 为该会话 state.todos 快照（TodoItem[]），还原右栏任务进度；user item 带 message_id（时间旅行截断锚点，合并轮 1:N 共享同一 id）" },
     "pin_session": { "params": ["thread_id", "pinned"], "result": ["thread_id", "pinned"] },
     "rename_session": { "params": ["thread_id", "title"], "result": ["thread_id", "title"] },
     "delete_session": { "params": ["thread_id"], "result": ["thread_id"] },

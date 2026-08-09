@@ -20,7 +20,7 @@ from __future__ import annotations
 from collections.abc import Iterator
 from typing import Any
 
-from langchain_core.messages import HumanMessage
+from langchain_core.messages import BaseMessage, HumanMessage
 
 from lumi.utils.constants import LUMI_META_KEY
 
@@ -96,6 +96,46 @@ def message_ts(msg: object) -> int:
 def injected_prefix(msg: object) -> int:
     """消息 content 开头有几个注入块（无标记返回 0）。"""
     return _additional_kwargs(msg).get(INJECTED_PREFIX_KEY, 0)
+
+
+def strip_injected_prefix(msg: object) -> str | list:
+    """消息 content 掉掉注入块前缀，返回「用户原样输入」的 content。
+
+    注入恒为前置（``inject_text_into_message`` 插 index 0），故按计数切片即可。
+    显示侧（``visible_user_text`` 的 fallback）与重发侧（重建干净消息）共用——
+    「前 N 块是注入」这条不变量只此一处解读。
+    """
+    content = (
+        msg.get("content", "") if isinstance(msg, dict) else getattr(msg, "content", "")
+    )
+    skip = injected_prefix(msg)
+    return content[skip:] if skip and isinstance(content, list) else content
+
+
+def declared_file_paths(msg: object) -> list[str]:
+    """显示声明里的附件后端路径（重发时按声明重挂 ``<attached-file>`` 标签）。
+
+    与 ``declared_items`` 同处：``items[].files[].path`` 的形状契约只此一处解读。
+    """
+    return [
+        f["path"]
+        for it in declared_items(msg) or []
+        for f in it.get("files") or []
+        if f.get("path")
+    ]
+
+
+def strip_ctx_digest(msg: BaseMessage) -> BaseMessage:
+    """剥掉 ctx_digest marker，返回新消息（无 marker 时原对象直接返回）。
+
+    marker 不变量是「存在 ⟺ 从上次全量起的完整 diff 链可见」——凡删除 marker 之后
+    的历史（压缩重挂 / 时间旅行截断），保留侧消息必须经此剥离，否则 context_inject
+    误判「已注入过」而漏注上下文。压缩/截断/重发三处调用点共用，键名契约单源在此。
+    """
+    if CTX_DIGEST_KEY not in msg.additional_kwargs:
+        return msg
+    kwargs = {k: v for k, v in msg.additional_kwargs.items() if k != CTX_DIGEST_KEY}
+    return msg.model_copy(update={"additional_kwargs": kwargs})
 
 
 def is_reminder_message(msg: object) -> bool:

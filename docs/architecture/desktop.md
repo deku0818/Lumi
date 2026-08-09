@@ -46,13 +46,13 @@ server → client   {method:"event", params:<wire event>}       # 流式事件
 ```
 
 - **RPC 方法**：
-  - 流式：`send_message`、`resume`、`run_command`（运行斜杠命令）。
+  - 流式：`send_message`、`resume`、`run_command`（运行斜杠命令）、`regenerate` / `edit_resend`（时间旅行，见下方「重新生成 / 编辑重发」）。
   - 会话：`list_sessions`、`new_session`、`switch_session`、`load_history`、`pin_session`、`rename_session`、`delete_session`。
   - 项目 / 工作目录：`list_projects`、`add_project`、`remove_project`、`rename_project`、`set_default_project`（设为/取消默认项目，至多一个，见下方「聊天必须绑定项目」）、`set_workspace`（绑定本会话项目，会话级、不动进程 cwd）、`add_folder` / `remove_folder`（本会话临时目录）。连接 URL 另可带 `?workspace=`，open 握手即把本会话引擎 pin 到该项目。
   - 模型供应商：`list_providers`、`test_provider`、`set_provider`、`save_provider`、`delete_provider`。
   - 定时任务：`list_cron_jobs`、`create/update/delete/toggle_cron_job`、`run_cron_job`、`list_cron_runs`。
   - 其它：`stop`（中止当前流式轮）、`list_commands`（拉取斜杠命令）。
-- **wire 事件**：`message.*`、`tool.*`（含 `tool.generating`）、`clarify/approval`、`turn.complete`、`error`，加握手帧 `gateway.ready`。
+- **wire 事件**：`turn.start`（真实用户轮开始，带该轮用户消息 id）、`message.*`、`tool.*`（含 `tool.generating`）、`clarify/approval`、`turn.complete`、`error`，加握手帧 `gateway.ready`。
 - **进程级广播事件**：`cron.result` / `cron.running` / `bg_tasks.update` / `mcp.status` 不属于任何会话。前端在 `App.tsx` 的 `PROCESS_EVENTS` 集合里声明它们，会话连接与控制连接都转给同一个 `handleEvent`——远程机器通常没有活跃会话连接，只有控制连接，不转发它的定时/后台任务在界面上就是静止的。本机经两条连接各收一次，故这些处理器一律按机器整段覆盖或自带去重。机器断连/被移除时 `clearMachineSnapshots` 清掉它那份快照，否则等不到「结束」那一帧的任务会永远显示运行中。
 
 事件名与方法名都来自 [`protocol/events.json`](../../protocol/events.json) 单一事实源：TS 端 import derive 类型，Python 端由 `tests/server/test_protocol_contract.py` 锁住一致性。
@@ -103,6 +103,17 @@ WS 断开时若会话仍有**活跃 / 挂起轮**（典型：挂在工具审批 
 - **删除** — `delete_session` 经 `bridge.delete_thread()` 一并清理两类 checkpoint：LangGraph 会话（`LumiAgent.adelete_thread`）+ 文件级 checkpoint（`checkpoint.delete_thread_checkpoint`），再删除 sidecar 元数据条目。渠道会话删除前持渠道侧运行锁（`ChannelManager.thread_lock`），避开在途轮把删掉的历史写回。
 
 前端 `Sidebar` 每行 hover 出现 `⋮` 菜单（置顶 / 重命名 / 删除）；删除走二次确认弹窗（`ConfirmDialog`），删除当前会话时自动另开新会话顶上。
+
+### 重新生成 / 编辑重发（时间旅行）
+
+用户气泡 hover 出操作条（`HoverActions`，与助手侧复制按钮同一个组件）：**重新生成**原样重答，**编辑**把气泡原位换成可编辑框（`EditBubble`；Cancel 零副作用，Save 才提交）。两者语义相同——**以该条消息为锚，它之后的历史全部消失**，不是分支。
+
+- **锚点是消息 id，不是序号**。`turn.start` 事件在开轮即广播本轮用户消息的落库 id，前端给乐观气泡上锚（`anchorLastUser`）；历史回放的 id 来自 `load_history` 的 `message_id`。之所以走事件而非 RPC 返回值：id 是「轮的事实」而非「轮的结果」，中途 stop 的轮同样需要它，且不必让每个流式入口都记得回传。本地列表可能含后端没有的条目（发送失败残留、系统命令），按序号对齐会指错消息。
+- **`regenerate` / `edit_resend` 都是单个原子流式 RPC**：截断与重发共处一轮、持同一把 `run.lock`。拆成「截断 RPC + send」会留出竞态窗口，中间任何失败都让编辑文本连同被删历史一起丢失。
+- **后端截断**（`AgentBridge.rewind_before_message`）走 `OfflineFlush` 锚点 + `RemoveMessage`，与 `compact_thread` 同一条离线写回路径；同一次 `aupdate_state` 里清空 `todos`（被删轮次建立的任务列表不该带进重答轮），并剥掉新末条的 `ctx_digest` marker（见 [summary.md](summary.md) 的 marker 不变量）。
+- **重答的消息是重建的，不是原样重投**：checkpoint 里的 content 已烤入原轮的上下文注入块，原样重投会与新一轮注入叠加（token 逐次翻倍且新旧 env 互相矛盾）。重建 = `strip_injected_prefix` 回到用户原样输入 → 交 `_build_user_message` 走与新消息完全相同的构造流水线，附件标签由显示声明（`items[].files`）重新派生。该构造对重发幂等。
+- 截断后消息会以**新 id** 重挂，故前端重挂气泡时清掉旧 `messageId`、等本轮 `turn.start` 重新上锚——留着旧 id 会让下一次时间旅行指向已删除的消息。
+- 渠道旁观 / cron 观测 / 运行中 / 有在途审批时不提供该操作（服务端另有流式方法的渠道只读兜底）。
 
 **IM 渠道会话在 desktop 只读旁观**：飞书等渠道会话在「全部」树里按机器级「飞书 · 绑定项目」分组（A2 方案，`channel` 字段驱动，不进项目组）；打开后顶部渠道横幅（群名 / 审批模式 / 绑定项目 / 直达渠道设置），输入区替换为只读提示。只读在服务端兜底（流式方法对渠道 thread 直接拒绝；后台通知轮对渠道 thread 不消费）——desktop 与渠道 `BridgePool` 各持独立 bridge/锁，写入会绕过渠道的会话串行化。渠道跑完一轮广播 `channel.activity`，desktop 只刷该机器会话列表、正在旁观则重载历史（切回旁观会话也强制重拉）。消息级时间戳在 `bridge.stream_response` 统一落库（`additional_kwargs["lumi"].ts`，渠道另带 per-消息 `items`），气泡头渲染「发送者 · 时刻」。
 
