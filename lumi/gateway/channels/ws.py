@@ -101,7 +101,7 @@ _CORS = {"Access-Control-Allow-Origin": "*"}
 
 @app.api_route("/file", methods=["GET", "HEAD"])
 def file_endpoint(path: str, token: str | None = None) -> Response:
-    """present_files 预览的文件通道：远程后端的文件经此流回前端。
+    """artifacts 预览的文件通道：远程后端的文件经此流回前端。
 
     本地后端走 Electron 的 lumi-file 协议零拷贝读盘；远程后端的盘在对端机器上，
     由本端点以同一 token 鉴权流式下发（含 office 渲染产物）。**不限路径范围**：

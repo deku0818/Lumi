@@ -45,7 +45,7 @@ import type {
   CronJob,
   HistoryItem,
   Item,
-  PresentedFile,
+  Artifact,
   Project,
   ProviderProfile,
   SessionMeta,
@@ -63,7 +63,7 @@ import { ApprovalDialog } from './components/ApprovalDialog'
 import { ClarifyDialog, ASK_CANCELLED } from './components/ClarifyDialog'
 import { Sidebar } from './components/Sidebar'
 import { MachinesProvider } from './components/MachineTabs'
-import { FileCards, PreviewPanel, parsePresentedFiles } from './components/PresentedFiles'
+import { FileCards, PreviewPanel, parseArtifacts } from './components/Artifacts'
 import { BgTasksSection } from './components/BgTasksDrawer'
 import { TodosSection } from './components/TodosSection'
 import { CronPage, RunsSection } from './components/CronPage'
@@ -104,7 +104,7 @@ type ToolItem = Extract<Item, { kind: 'tool' }>
 type Segment =
   | { kind: 'tools'; tools: ToolItem[] }
   | { kind: 'agent'; items: ToolItem[] }
-  | { kind: 'files'; item: ToolItem; files: PresentedFile[] }
+  | { kind: 'files'; item: ToolItem; files: Artifact[] }
   | { kind: 'item'; item: Exclude<Item, { kind: 'tool' }> }
 
 // 把连续的 tool item 合并成一段，其余 item 各自独立 —— 用于工具分组渲染。
@@ -117,10 +117,13 @@ function groupItems(items: Item[]): Segment[] {
       const last = segs[segs.length - 1]
       if (last?.kind === 'agent') last.items.push(it)
       else segs.push({ kind: 'agent', items: [it] })
-    } else if (it.kind === 'tool' && it.name === 'present_files') {
-      // present_files 不并入灰色工具组：单独成段，渲染成文件卡片。
+    } else if (it.kind === 'tool' && (it.name === 'artifacts' || it.name === 'present_files')) {
+      // artifacts 不并入灰色工具组：单独成段，渲染成文件卡片。
+      // 兼容旧名 present_files：历史 checkpoint 里存的是当时的工具名（见
+      // session.py 的 _history_items 直取 tool_call.name），改名前的会话重开
+      // 仍要出卡片。输出 JSON 形状未变，认名即可。
       // 在此（随 items 记忆化）解析一次 JSON，避免每次渲染都 parse。
-      segs.push({ kind: 'files', item: it, files: parsePresentedFiles(it.output) })
+      segs.push({ kind: 'files', item: it, files: parseArtifacts(it.output) })
     } else if (it.kind === 'tool') {
       const last = segs[segs.length - 1]
       if (last?.kind === 'tools') last.tools.push(it)
@@ -457,7 +460,7 @@ export default function App() {
   const [attachments, setAttachments] = useState<Attachment[]>([])
   // 主区视图：聊天 / 项目管理页 / 定时任务管理页 / 任务会话视图（某任务的某次执行对话 + Runs 侧栏）
   const [bgTasks, setBgTasks] = useState<BgTask[]>([]) // 后台任务全量快照（按 thread 过滤展示）
-  const [preview, setPreview] = useState<PresentedFile | null>(null) // present_files 右侧预览面板（null=关）
+  const [preview, setPreview] = useState<Artifact | null>(null) // artifacts 右侧预览面板（null=关）
   // 可拖拽边栏宽度（持久化）：左侧会话栏 + 统一右栏 + 文件预览
   const sidebarW = useResizableWidth('lumi-sidebar-width', 256, 200, 420)
   // 悬浮侧栏展开/收起（持久化）

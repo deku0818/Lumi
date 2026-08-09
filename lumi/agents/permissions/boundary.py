@@ -37,7 +37,7 @@ _HEREDOC_OPERATORS: frozenset[str] = frozenset({"<<", "<<<"})
 # 命令分隔/管道符号：遇到后停止解析（后续是新命令）
 _COMMAND_SEPARATORS: frozenset[str] = frozenset({"|", "||", "&&", ";", "&"})
 
-# 列表型路径参数键名（如 present_files 的 filepaths），逐项提取参与边界检查
+# 列表型路径参数键名（如 artifacts 的 filepaths），逐项提取参与边界检查
 _PATH_LIST_ARG_KEYS: tuple[str, ...] = ("filepaths",)
 
 

@@ -147,7 +147,7 @@ cd desktop && npm install && npm run dist
 | `agent` | 委托任务给子 Agent |
 | `workflow` | 多 Agent 编排（一段确定性 Python 脚本调度一群子代理） |
 | `background_task` | 管理后台运行的任务（Bash 命令 / 子 Agent） |
-| `present_files` | 把文件呈现到桌面界面供查看 / 打开（含 Office 窗口内预览） |
+| `artifacts` | 把产出文件作为制品呈现到界面供查看 / 预览（含 Office 窗口内预览） |
 | `vision` | 图像识别（tool 模式） |
 
 工具描述写在各工具函数 docstring 里；外部工具经 MCP 接入。

@@ -1,5 +1,17 @@
 # Changelog
 
+## [0.2.104] - 2026-08-10
+
+### Changed
+- **`present_files` 工具更名为 `artifacts`（制品）**（`docs/architecture/desktop.md` artifacts 制品文件预览节）— 「制品」一词直指这个工具真正在做的事：把 Agent 产出的成果件交付到界面上，而 `present_files` 只描述了动作不描述交付物。后端 `providers/present_files.py` → `providers/artifacts.py`（`PresentFilesInput` → `ArtifactsInput`、注册名与工具名同步），前端 `PresentedFiles.tsx` → `Artifacts.tsx`（类型 `PresentedFile` → `Artifact`、`parsePresentedFiles` → `parseArtifacts`）。参数名 `filepaths` 刻意不动——`boundary.py` 的 `_PATH_LIST_ARG_KEYS` 按它做工作区边界检查，改名会静默失去约束。**行为无变化**，返回 JSON 形状不变。
+- **工具描述重写**，补齐与实际能力的落差：原描述只说「使文件可见 / 可打开下载」，未提预览面板的存在。新描述交代用户实际看到什么（聊天流文件卡片 + 右侧预览面板：图片 / PDF / HTML / Markdown / 文本代码内嵌渲染，docx / xlsx / pptx 窗口内渲染，视频 / 音频 / 其它兜底「用系统应用打开」）、受工作区边界约束、顺序即展示顺序、只呈现不改动文件，并明确「一次调用传本轮全部文件」避免逐个刷屏。
+
+### Fixed
+- **改名后旧会话的文件卡片丢失**（`desktop/src/App.tsx` `groupItems`）— 历史条目的工具名直取 checkpoint 里当时记录的 `tool_call.name`（`gateway/session.py` 的 `_history_items`），改名前的会话重开时带的是 `present_files`。只认新名会让这些文件从卡片段掉回灰色工具组、右侧预览面板对它们彻底不可达。改为两个名字都认——输出 JSON 形状未变，认名即可复原。
+
+### 已知未处理
+- 改名前用户存盘的权限规则按老工具名匹配：`always_allow_*` 写在 `.lumi/permissions.local.json` / `~/.lumi/permissions.json` 的授权会失效需重授一次，手写的 `deny present_files` 规则则静默不再匹配。未加别名表——为一次改名留永久兼容包袱不划算，且 `artifacts` 只 `stat` 文件不读内容，丢一条 deny 损失的是界面可见性而非数据。
+
 ## [0.2.103] - 2026-08-09
 
 ### Added

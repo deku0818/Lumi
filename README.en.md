@@ -147,7 +147,7 @@ For public deployments, always terminate TLS (`wss://`) behind Caddy/nginx and s
 | `agent` | Delegate a task to a sub-agent |
 | `workflow` | Multi-agent orchestration (a deterministic Python script scheduling a fleet of sub-agents) |
 | `background_task` | Manage background-running tasks (bash commands / sub-agents) |
-| `present_files` | Surface files in the desktop UI to view / open (incl. in-window Office preview) |
+| `artifacts` | Surface produced files as artifacts in the UI to view / preview (incl. in-window Office preview) |
 | `vision` | Image understanding (tool mode) |
 
 Tool descriptions live in each tool function's docstring; external tools are wired in via MCP.

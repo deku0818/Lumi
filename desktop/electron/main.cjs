@@ -17,7 +17,7 @@ const LOCAL_TOKEN = crypto.randomBytes(24).toString('hex')
 const DEV_ORIGIN = new URL(process.env.VITE_DEV_SERVER_URL || 'http://127.0.0.1:5173').origin
 
 // 自定义协议：让 renderer 安全引用本地文件（绕过 http origin 下的 file:// 限制），
-// 用于 present_files 预览面板里 <img>/<iframe> 加载图片/PDF/HTML。必须在 app ready 前登记。
+// 用于 artifacts 预览面板里 <img>/<iframe> 加载图片/PDF/HTML。必须在 app ready 前登记。
 protocol.registerSchemesAsPrivileged([
   { scheme: 'lumi-file', privileges: { standard: true, secure: true, supportFetchAPI: true, stream: true, bypassCSP: true } },
 ])
@@ -427,7 +427,7 @@ ipcMain.handle('lumi:backends:setActive', (_e, id) => {
   return { active: id }
 })
 
-// present_files 预览：用系统默认应用打开 / 在访达中显示该文件
+// artifacts 预览：用系统默认应用打开 / 在访达中显示该文件
 ipcMain.handle('lumi:open-path', (_e, p) => shell.openPath(String(p)))
 ipcMain.handle('lumi:reveal-path', (_e, p) => shell.showItemInFolder(String(p)))
 // 预览打开时探测文件是否还在（被移动/改名/删除则 false）；渲染卡片时不调，零开销。

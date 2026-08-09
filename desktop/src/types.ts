@@ -388,9 +388,9 @@ export interface BgTaskOutput {
 }
 export const EMPTY_BG_OUTPUT: BgTaskOutput = { text: '', size: 0, truncated: false }
 
-// present_files 工具返回的单个文件元数据（后端 providers/present_files.py）。
+// artifacts 工具返回的单个文件元数据（后端 providers/artifacts.py）。
 // kind ∈ image/pdf/video/audio/archive/doc/sheet/text/file；不存在的路径带 error。
-export interface PresentedFile {
+export interface Artifact {
   path: string
   name?: string
   mime_type?: string

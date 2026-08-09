@@ -17,7 +17,7 @@ import {
   type LucideIcon,
 } from 'lucide-react'
 import type { Gateway } from '../gateway'
-import type { PresentedFile } from '../types'
+import type { Artifact } from '../types'
 import { useI18n } from '../i18n'
 import { fmtSize, WIN_PATH } from '@/lib/utils'
 import { ProgressBar } from './SettingsKit'
@@ -34,8 +34,8 @@ export const fileUrl = (p: string) => {
   return 'lumi-file://local' + rooted.split('/').map(encodeURIComponent).join('/')
 }
 
-// present_files 工具输出（JSON 字符串）→ 文件列表；非法 JSON 退化为空。
-export function parsePresentedFiles(output: string): PresentedFile[] {
+// artifacts 工具输出（JSON 字符串）→ 文件列表；非法 JSON 退化为空。
+export function parseArtifacts(output: string): Artifact[] {
   try {
     const data = JSON.parse(output)
     return Array.isArray(data) ? data : []
@@ -44,7 +44,7 @@ export function parsePresentedFiles(output: string): PresentedFile[] {
   }
 }
 
-const ext = (f: PresentedFile) => (f.name || f.path).toLowerCase().split('.').pop() || ''
+const ext = (f: Artifact) => (f.name || f.path).toLowerCase().split('.').pop() || ''
 
 // 内容取用通道的唯一决策点：本地走 lumi-file 零拷贝，远程经该机器 serve 的 /file 端点流回
 const contentUrl = (path: string, remote?: boolean, gw?: Gateway) =>
@@ -122,9 +122,9 @@ const KIND_ICON: Record<string, LucideIcon> = {
   text: FileText,
   doc: FileText,
 }
-const fileIcon = (f: PresentedFile): LucideIcon => KIND_ICON[f.kind || ''] || File
+const fileIcon = (f: Artifact): LucideIcon => KIND_ICON[f.kind || ''] || File
 
-const typeText = (f: PresentedFile) => (ext(f) || f.kind || 'file').toUpperCase()
+const typeText = (f: Artifact) => (ext(f) || f.kind || 'file').toUpperCase()
 
 // 文本类扩展名：这些走 fetch().text() 在面板里直接展示
 const TEXT_EXT = new Set(
@@ -138,7 +138,7 @@ const MAX_PREVIEW_BYTES = 50 * 1024 * 1024
 const OFFICE_EXT = new Set(['docx', 'xlsx', 'pptx'])
 
 type PreviewKind = 'image' | 'pdf' | 'html' | 'markdown' | 'text' | 'office' | 'none'
-function previewKind(f: PresentedFile): PreviewKind {
+function previewKind(f: Artifact): PreviewKind {
   const e = ext(f)
   if (f.kind === 'image') return 'image'
   if (e === 'pdf') return 'pdf'
@@ -158,8 +158,8 @@ export function FileCards({
   activePath,
   remote,
 }: {
-  files: PresentedFile[]
-  onOpen: (f: PresentedFile) => void
+  files: Artifact[]
+  onOpen: (f: Artifact) => void
   activePath?: string
   remote?: boolean
 }) {
@@ -219,7 +219,7 @@ export function PreviewPanel({
   remote,
   onClose,
 }: {
-  file: PresentedFile
+  file: Artifact
   gw?: Gateway
   remote?: boolean
   onClose: () => void
@@ -300,7 +300,7 @@ export function PreviewPanel({
 }
 
 // 文件已不在原位置（移动/改名/删除）：克制提示 + 最后已知路径 + 重新检查
-function MissingState({ file, onRecheck }: { file: PresentedFile; onRecheck: () => void }) {
+function MissingState({ file, onRecheck }: { file: Artifact; onRecheck: () => void }) {
   const { t } = useI18n()
   return (
     <div className="h-full grid place-content-center justify-items-center text-center gap-1.5 px-7">
@@ -323,7 +323,7 @@ function MissingState({ file, onRecheck }: { file: PresentedFile; onRecheck: () 
   )
 }
 
-function PreviewBody({ file, gw, remote }: { file: PresentedFile; gw?: Gateway; remote?: boolean }) {
+function PreviewBody({ file, gw, remote }: { file: Artifact; gw?: Gateway; remote?: boolean }) {
   const { t } = useI18n()
   const kind = previewKind(file)
   // 远程但无该机连接：宁可报加载失败，也不落回 lumi-file 读本地盘——同路径文件
@@ -355,7 +355,7 @@ function PreviewBody({ file, gw, remote }: { file: PresentedFile; gw?: Gateway; 
 
 // Office 文档（docx/xlsx/pptx）：经后端 officecli 转自包含 HTML 后走 iframe。
 // 未装转换组件时就地引导安装（env_install target=officecli，机器级一次性）。
-function OfficePreview({ file, gw, remote }: { file: PresentedFile; gw?: Gateway; remote?: boolean }) {
+function OfficePreview({ file, gw, remote }: { file: Artifact; gw?: Gateway; remote?: boolean }) {
   const { t } = useI18n()
   const [result, setResult] = useState<
     | { status: 'loading' }
@@ -464,7 +464,7 @@ function NoPreview({
   icon: Icon = File,
   action,
 }: {
-  file: PresentedFile
+  file: Artifact
   remote?: boolean
   message: string
   detail?: string

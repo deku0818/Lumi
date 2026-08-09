@@ -1,8 +1,8 @@
-"""present_files 工具提供者 - 让 Agent 产出的文件对用户可见，供 desktop 前端渲染。
+"""artifacts 工具提供者 - 把 Agent 产出的文件作为「制品」呈现给用户，供 desktop 前端渲染。
 
 Lumi 是本地桌面应用，文件就在本机磁盘上，无需上传对象存储——本工具只校验路径、
 收集元数据（名称 / MIME / 大小 / 类别），以 JSON 返回。desktop 前端按 ``kind``
-渲染（图片走缩略图，其它文件走带类型图标的卡片，点击用系统应用打开）。
+选图标渲染文件卡片，点卡片在右侧预览面板内嵌预览（不能内嵌的兜底用系统应用打开）。
 """
 
 from __future__ import annotations
@@ -64,35 +64,40 @@ def _categorize(path: str, mime_type: str) -> str:
     return "file"
 
 
-class PresentFilesInput(BaseModel):
-    """present_files 工具的输入参数"""
+class ArtifactsInput(BaseModel):
+    """artifacts 工具的输入参数"""
 
     filepaths: list[str] = Field(
-        description="要展示给用户的文件路径列表（建议绝对路径）"
+        description="要呈现给用户的制品文件路径列表（用绝对路径）"
     )
 
 
-PRESENT_FILES_DESCRIPTION = """present_files 工具使文件对用户可见，以便在桌面界面中查看、打开或下载。
+ARTIFACTS_DESCRIPTION = """把你产出的文件作为「制品」呈现给用户：在 Lumi 界面里显示成文件卡片，点开即预览。
 
 何时使用：
-- 在创建了应当呈现给用户的文件之后（报告、图表、导出文件等）
-- 一次性呈现多个相关文件
-- 让用户能在界面上直接预览（图片）或用系统应用打开文件
+- 产出了用户要的成果文件之后（报告、表格、图表、生成的图片 / PDF、导出件等）——交付时一并呈现
+- 一次调用传入本轮全部相关文件，不要逐个文件反复调用
 
-何时不使用：
-- 你只是读取文件内容供自己处理时
-- 对于临时或中间文件，不打算给用户看的
+何时不用：
+- 只是读文件内容供自己处理
+- 临时文件 / 中间产物，不打算给用户看
 
-工作原理：
-- 接受文件路径数组，建议使用绝对路径
-- 返回每个文件的元数据（path / name / mime_type / size / kind），顺序与输入一致
-- 第一个输入路径应对应用户最需要首先看到的文件
-- 不存在的路径会在对应项返回 error 字段"""
+用户会看到什么：
+- 聊天流里每个文件一张卡片：类型图标 + 文件名 + 类型/大小 + 「在文件夹中显示」
+- 点卡片在右侧展开预览面板：图片 / PDF / HTML / Markdown / 文本与代码直接内嵌渲染；
+  docx / xlsx / pptx 在窗口内渲染；视频 / 音频 / 其它类型给出「用系统应用打开」
+
+约定：
+- 传绝对路径；文件须在当前工作区内（受工作区边界约束，越界会被拒）
+- 顺序即展示顺序，把用户最该先看的放第一个
+- 只呈现、不改动文件——文件留在原路径，不复制、不上传
+- 返回每个文件的 path / name / mime_type / size / kind，顺序与输入一致；
+  路径不存在或不是常规文件的那项返回 error 字段"""
 
 
-@tool(args_schema=PresentFilesInput, description=PRESENT_FILES_DESCRIPTION)
-def present_files(filepaths: list[str]) -> str:
-    """校验本地文件并返回元数据 JSON，供 desktop 前端渲染。"""
+@tool(args_schema=ArtifactsInput, description=ARTIFACTS_DESCRIPTION)
+def artifacts(filepaths: list[str]) -> str:
+    """校验本地文件并返回制品元数据 JSON，供 desktop 前端渲染。"""
     results = []
     for raw in filepaths:
         path = os.path.abspath(os.path.expanduser(raw))

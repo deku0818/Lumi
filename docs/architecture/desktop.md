@@ -247,12 +247,12 @@ completed 金色 ✓ 弹入 + 文字淡化，全部完成整节灰化保留待�
 
 `<attached-file>` 是纯模型侧约定（agent 用 read 读取路径）：前端经 wire `files` 参数只发路径数组，`bridge._build_user_message` 统一拼标签块注入 content（`injected_prefix` 计数）并把 `{path, name}` 写进显示声明 `lumi.items` 的 `files`；历史恢复的文件胶囊直接读 items，不解析正文。标签名 `ATTACHED_FILE_TAG` 定义在 `lumi/utils/constants.py`。气泡内文件渲染成品牌金描边胶囊（仅文件名 + hover tooltip）。
 
-## present_files 文件预览
+## artifacts 制品文件预览
 
-Agent 产出文件后调 `present_files` 工具把它们呈现给用户。后端 `lumi/agents/tools/providers/present_files.py` 只做本地元数据收集（无对象存储）：单次 `os.stat`（避免 isfile→getsize 的 TOCTOU）+ `mimetypes` 猜 MIME + 按扩展名分类 `kind`，返回 `{path, name, mime_type, size, kind}` 的 JSON 列表（不存在 / 非常规文件返回 `{path, error}`，顺序与输入一致）。这是常驻工具，走现有 `tool.start/complete` 事件流——**协议无新增事件**，前端按工具名 `present_files` 特化渲染。
+Agent 产出文件后调 `artifacts` 工具把它们作为「制品」呈现给用户。后端 `lumi/agents/tools/providers/artifacts.py` 只做本地元数据收集（无对象存储）：单次 `os.stat`（避免 isfile→getsize 的 TOCTOU）+ `mimetypes` 猜 MIME + 按扩展名分类 `kind`，返回 `{path, name, mime_type, size, kind}` 的 JSON 列表（不存在 / 非常规文件返回 `{path, error}`，顺序与输入一致）。这是常驻工具，走现有 `tool.start/complete` 事件流——**协议无新增事件**，前端按工具名 `artifacts` 特化渲染。
 
-- **边界约束**：`present_files` 的 `filepaths`（列表）经 `boundary.py` 的 `_PATH_LIST_ARG_KEYS` 逐项提取参与工作区边界检查，与 `bash`/`filesystem` 同等受限——不是绕过权限读任意文件的后门。
-- **聊天卡片**（`FileCards`，`desktop/src/components/PresentedFiles.tsx`）：present_files 在 `groupItems` 里单独成段（不并入灰色工具组），解析一次 JSON 缓存在段上（随 `items` 记忆化）。每个文件渲染成单色类型图标卡片（按 `kind` 选 lucide 字形，不上彩色）+ 文件名 + 类型/大小 + 「Show in Folder」按钮。**卡片层不加载任何文件字节**。
+- **边界约束**：`artifacts` 的 `filepaths`（列表）经 `boundary.py` 的 `_PATH_LIST_ARG_KEYS` 逐项提取参与工作区边界检查，与 `bash`/`filesystem` 同等受限——不是绕过权限读任意文件的后门。
+- **聊天卡片**（`FileCards`，`desktop/src/components/Artifacts.tsx`）：artifacts 在 `groupItems` 里单独成段（不并入灰色工具组），解析一次 JSON 缓存在段上（随 `items` 记忆化）。每个文件渲染成单色类型图标卡片（按 `kind` 选 lucide 字形，不上彩色）+ 文件名 + 类型/大小 + 「Show in Folder」按钮。**卡片层不加载任何文件字节**。
 - **右侧停靠预览面板**（`PreviewPanel`）：点卡片在聊天区右侧滑出（可拖宽、持久化 `lumi-preview-width`、Esc/✕ 关、切会话自动关）。打开时经 `lumi:path-exists` 探测一次存在性：缺失 → `MissingState`（文件已移动/改名/删除 + 重新检查）；存在 → 按类型渲染。
 - **预览分型**：图片 / PDF / HTML 经 `lumi-file://` 协议内嵌（`<img>`/`<iframe>`），文本 / Markdown 经 `fetch().text()` 读取后渲染；视频 / 音频 / Office / 未知类型 → 统一 `NoPreview`（提示 + 「用系统应用打开」）。**大小门控**：`> 50MB`（UI 阈值，用元数据 `size` 判定不读文件）走 `NoPreview` 提示「文件较大」。**HTML 安全**：`sandbox="allow-scripts"`（不带 `allow-same-origin`）——脚本可运行让交互页正常，但 iframe 是 opaque origin，对 `lumi-file` 的 fetch 跨域被拦，恶意页读不到本地文件外传。
 - **`lumi-file://` 协议**：`electron/main.cjs` 以 `protocol.registerSchemesAsPrivileged` + `protocol.handle` 实现，让 renderer 在 http origin 下安全引用本地文件（绕过 `file://` 限制）。URL 形如 `lumi-file://local/<abs-path>`（固定 host=local，自定义 standard scheme 不允许空 host；各路径段 `encodeURIComponent`）。handler 先 `stat`，`> MAX_SERVE_BYTES`(128MB) 返 413（兜底防超大文件读进内存撑爆主进程），否则按 `PREVIEW_MIME` 设 content-type 返回。
@@ -320,8 +320,8 @@ macOS 关窗后应用驻留 Dock，sidecar 保持运行，Dock 唤起（activate
 | `desktop/src/components/{SettingsDialog,ProvidersPanel,ModelPicker}.tsx` | 模型供应商配置 + 快速切换 |
 | `desktop/src/components/ContextMeter.tsx` | 上下文用量指示器（圆环 + 明细 popover） |
 | `desktop/src/components/Toast.tsx` | 可复用应用内轻量通知通道（`toast.error/success/info`） |
-| `desktop/src/components/PresentedFiles.tsx` | present_files 文件卡片 + 右侧停靠预览面板（含缺失态 / 大小门控 / `lumi-file://` URL） |
-| `lumi/agents/tools/providers/present_files.py` | present_files 工具（本地元数据收集，无对象存储） |
+| `desktop/src/components/Artifacts.tsx` | artifacts 制品文件卡片 + 右侧停靠预览面板（含缺失态 / 大小门控 / `lumi-file://` URL） |
+| `lumi/agents/tools/providers/artifacts.py` | artifacts 工具（本地元数据收集，无对象存储） |
 | `desktop/src/{font.ts,components/FontPicker.tsx}` | 界面字体偏好（本机字体枚举 + 字号）+ CSS 变量覆写 |
 | `desktop/src/components/CronPage.tsx` | 定时任务管理页 + 执行记录模块（`RunsSection`） |
 | `desktop/src/components/RightRail.tsx` | 统一右栏（收放钮 + `RailSection` 模块卡容器） |

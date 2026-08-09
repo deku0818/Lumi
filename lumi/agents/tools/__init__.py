@@ -9,13 +9,13 @@ from langchain_core.tools.structured import StructuredTool
 from .loader import AgentConfig, SkillConfig, load_agents, load_skills
 from .providers import (
     agent,
+    artifacts,
     ask,
     background_task,
     bash,
     cron,
     filesystem,
     mcp,
-    present_files,
     skill,
     todo,
     vision,
@@ -37,7 +37,7 @@ _registry.register("cron", cron)
 _registry.register("skill", skill)
 _registry.register("background_task", background_task)
 _registry.register("workflow", workflow)
-_registry.register("present_files", present_files)
+_registry.register("artifacts", artifacts)
 # vision 工具条件注册：仅当配置了视觉辅助模型（config.json 的 vision 段）时才出现，
 # 供无视觉主模型带具体问题识别图片/PDF（本地路径或 http(s) URL）。
 _registry.register("vision", vision.get_vision_tools)

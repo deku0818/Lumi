@@ -305,24 +305,24 @@ class TestWorkspaceBoundary:
         assert engine.check_workspace_boundary("bash", {"command": "ls"}) is True
 
     def test_filepaths_list_inside_boundary(self):
-        """present_files 的 filepaths 列表逐项提取，全在边界内则放行"""
+        """artifacts 的 filepaths 列表逐项提取，全在边界内则放行"""
         project_dir = Path(tempfile.mkdtemp())
         engine = PermissionEngine(project_dir)
         assert (
             engine.check_workspace_boundary(
-                "present_files",
+                "artifacts",
                 {"filepaths": [str(project_dir / "a.md"), str(project_dir / "b.png")]},
             )
             is True
         )
 
     def test_filepaths_list_outside_boundary_blocked(self):
-        """filepaths 中任一路径越界即拒绝——堵住经 present_files 绕过边界读任意文件"""
+        """filepaths 中任一路径越界即拒绝——堵住经 artifacts 绕过边界读任意文件"""
         project_dir = Path(tempfile.mkdtemp())
         engine = PermissionEngine(project_dir)
         assert (
             engine.check_workspace_boundary(
-                "present_files",
+                "artifacts",
                 {"filepaths": [str(project_dir / "a.md"), "/etc/passwd"]},
             )
             is False

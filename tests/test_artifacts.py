@@ -1,8 +1,8 @@
-"""present_files 工具测试 — 纯元数据收集，不做任何上传/打开等副作用。"""
+"""artifacts 工具测试 — 纯元数据收集，不做任何上传/打开等副作用。"""
 
 import json
 
-from lumi.agents.tools.providers.present_files import _categorize, present_files
+from lumi.agents.tools.providers.artifacts import _categorize, artifacts
 
 
 def test_categorize_by_extension():
@@ -22,7 +22,7 @@ def test_categorize_mime_fallback():
 def test_present_existing_file(tmp_path):
     f = tmp_path / "report.md"
     f.write_text("hello")
-    out = json.loads(present_files.invoke({"filepaths": [str(f)]}))
+    out = json.loads(artifacts.invoke({"filepaths": [str(f)]}))
     assert len(out) == 1
     item = out[0]
     assert item["path"] == str(f)
@@ -32,7 +32,7 @@ def test_present_existing_file(tmp_path):
 
 
 def test_present_missing_file_reports_error(tmp_path):
-    out = json.loads(present_files.invoke({"filepaths": [str(tmp_path / "nope.png")]}))
+    out = json.loads(artifacts.invoke({"filepaths": [str(tmp_path / "nope.png")]}))
     assert out[0]["error"] == "文件不存在"
     assert "size" not in out[0]
 
@@ -42,5 +42,5 @@ def test_order_preserved(tmp_path):
     b = tmp_path / "b.txt"
     a.write_text("a")
     b.write_text("b")
-    out = json.loads(present_files.invoke({"filepaths": [str(b), str(a)]}))
+    out = json.loads(artifacts.invoke({"filepaths": [str(b), str(a)]}))
     assert [i["name"] for i in out] == ["b.txt", "a.txt"]
