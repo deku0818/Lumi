@@ -44,6 +44,7 @@ from lumi.agents.core.structured_tool import (
 )
 from lumi.agents.permissions.models import PermissionDecision
 from lumi.agents.permissions.routing import route_decision
+from lumi.agents.tools.capability import is_local_path_tool, is_write_tool
 from lumi.models.chain import structured_output, tool_call_chain
 from lumi.models.manager import detect_protocol
 from lumi.models.provider_store import resolve, resolve_pointer
@@ -391,12 +392,38 @@ def is_use_tool(state: LumiAgentState, runtime: Runtime[LumiAgentContext]) -> st
         # 模型未调工具想结束 → OnAgentStop 节点分发 Stop hooks（默认 END）
         return "OnAgentStop"
 
-    return route_decision(
+    decision = route_decision(
         tool_calls,
         runtime.context.tool_mode,
         state.get("execution_mode", "normal"),
         runtime.context.permission_engine,
     )
+    # privileged 的「自动放行」本身即授权，这条路上既不审批也不过分类器，没有别的挂钩点
+    if decision == "ToolExecutor" and runtime.context.tool_mode == "privileged":
+        _widen_boundary_for(tool_calls, runtime)
+    return decision
+
+
+def _widen_boundary_for(tool_calls: list, runtime: Runtime[LumiAgentContext]) -> None:
+    """授权通过后把本批越界路径所在目录纳入本会话工作区。
+
+    边界与审批是两道正交的门，只过审批不放宽边界会同时踩两个坑——详见
+    docs/architecture/permissions.md「边界与审批是两道正交的门」。回调由 bridge
+    注入，headless 无 bridge 保持 None（不放宽）。
+
+    只放宽本批里会被边界拦下的**写**调用（本机路径工具 ∩ 写操作）：批次是混合的
+    （纯只读批次在 route_decision 更早处就短路了），批准一次越界 read 不该换来该
+    目录的写权。
+    """
+    engine = runtime.context.permission_engine
+    widen = runtime.context.widen_boundary
+    if engine is None or widen is None:
+        return
+    for tc in tool_calls:
+        name = tc.get("name", "")
+        args = tc.get("args", {})
+        if is_local_path_tool(name) and is_write_tool(name, args):
+            widen(engine.get_boundary_violations(name, args))
 
 
 async def human_approval(
@@ -481,6 +508,7 @@ async def human_approval(
             # 无需经 Command.update 写 state（state 已无此字段）。
             if set_tool_mode:
                 runtime.context.tool_mode = set_tool_mode
+            _widen_boundary_for(last_message.tool_calls, runtime)
             return Command(goto="ToolExecutor")
         case "cancel":
             messages = build_reject_messages(
@@ -602,6 +630,7 @@ async def auto_classify(
     logger.info("[AutoClassify] 裁决=%s 原因=%s", verdict.decision, verdict.reason)
     match verdict.decision:
         case "approve":
+            _widen_boundary_for(tool_calls, runtime)
             return Command(goto="ToolExecutor")
         case _:  # reject（及任何非 approve 值）：自动拒绝，附原因回喂模型
             messages = build_reject_messages(

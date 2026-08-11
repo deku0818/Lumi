@@ -170,6 +170,27 @@ _STRICTNESS = {Permission.DENY: 0, Permission.ASK: 1, Permission.ALLOW: 2}
 
 `get_boundary_violations()` 返回超出边界的路径列表，供审批 UI 展示。
 
+**边界与审批是两道正交的门，批准会连带放宽边界。** 权限规则（allow/ask/deny）与工作区边界各自独立否决：路由层要求 `decision == ALLOW && boundary_ok` 才直放，工具执行期 `filesystem/backend.py` 还会再过一次 `workspace.validate_path`。因此边界外的路径若只过审批不放宽边界，会同时踩两个坑——`write`/`edit` 在执行期照抛 `PermissionError`，而 default / auto 模式因 `boundary_ok` 恒 `False` 每轮重新回到审批，**连「始终允许」写入的 allow 规则都永远不生效**。
+
+故**三条授权路径在放行前都放宽边界**，同调 `nodes._widen_boundary_for()` 把本批越界路径所在目录纳入本会话工作区：
+
+| 路径 | 挂钩点 |
+|---|---|
+| 人工审批 | `human_approval` 的 `approve` 分支 |
+| auto 分类器 | `auto_classify` 的 `approve` 分支 |
+| privileged | `is_use_tool` 路由出 `ToolExecutor` 时 |
+
+auto 模式的分类器裁决与人工审批同权——AI 判断即用户授权，否则 auto 模式会陷入「每轮重新送分类器、每轮白付一次模型调用，写操作却永远被 `validate_path` 拒」。privileged 是「自动放行」的显式授权，边界不该再当第二道门。
+
+**三条路径的放宽面完全一致，都只覆盖本批里 `is_local_path_tool()`（`write` / `edit` / `bash`）∩ `is_write_tool()` 的调用**，两个条件缺一不可：
+
+- **只读调用不放宽** —— 批次天然是混合的（纯只读批次在 `route_decision` 更早处就短路了），批准一次越界 `read` 不该换来该目录的**写**权限。
+- **只限已知的本机路径工具** —— MCP 等外部工具的 `path` / `file_path` 参数含义未知（可能是 URL、库名、远端路径），拿它去开本地目录写权限没有根据；而 `is_write_tool()` 对未知工具 fail-closed 恒 `True`，不显式限定工具名就会把每个带 `path` 参数的 MCP 调用都算进来。代价：`artifacts` 等其余受边界约束的工具越界时不放宽，「始终允许」对它们仍是空操作，需用户显式「添加文件夹」。
+
+实现走 `context.widen_boundary` 回调（由 bridge 在 `initialize` 注入 `FolderManager.widen_for_violations`，与 `approval_broker` 同一注入模式，子代理经 agent 工具传播）。最终落到与「添加文件夹」完全相同的 `add_ephemeral_workspace`（仅内存不持久化），故模型下一轮经 `drain_folder_note` 会收到目录变更提醒。目录取法见 `folders._enclosing_dir`：路径本身是目录取自身，否则取最近的已存在祖先（越界路径常常整条尾巴都还不存在）；一路走到文件系统根仍不存在则放弃——把 `/` 纳入工作区等于关掉边界。
+
+分界是**有没有 bridge**，不是「是不是 cron」：`lumi serve` 下的 cron 整个 job 跑在 `AgentBridge` 上且 `tool_mode="privileged"`，已覆盖；真正落空的是 workflow、后台子代理和无 serve 的 cron fallback——这些路径无人值守，不该自行扩大文件系统访问面，正解是把目录预先写进 `permissions.json` 的 `workspaces`（持久化、跨 run 生效）。
+
 ### 动态规则管理
 
 - `add_allow_rule(tool_expr)` — 持久化到 `permissions.local.json`（审批对话框「始终允许」触发），内存与文件均去重

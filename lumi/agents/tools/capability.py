@@ -218,6 +218,11 @@ _ALWAYS_WRITE: frozenset[str] = frozenset({"write", "edit"})
 # cron 中的只读操作
 _CRON_READONLY_OPS: frozenset[str] = frozenset({"list", "runs"})
 
+# path/file_path 参数确定是本机路径的工具（write/edit 撞执行期 validate_path，
+# bash 真实操作本机盘）。MCP 等外部工具不在此列：其 path 含义未知（可能是 URL、
+# 库名、远端路径），且 is_write_tool 对未知工具 fail-closed 恒 True。
+_LOCAL_PATH_TOOLS: frozenset[str] = frozenset({"write", "edit", "bash"})
+
 
 # ── 公共 API ──
 
@@ -225,6 +230,15 @@ _CRON_READONLY_OPS: frozenset[str] = frozenset({"list", "runs"})
 def is_file_edit_tool(tool_name: str) -> bool:
     """判断是否为文件编辑工具（write/edit），不含 bash。"""
     return tool_name in _ALWAYS_WRITE
+
+
+def is_local_path_tool(tool_name: str) -> bool:
+    """路径参数确定指向本机文件系统的工具（write/edit/bash）。
+
+    用于「凭一次调用的路径去开本地目录权限」这类判断——外部工具的 path 含义未知，
+    不能据此放宽本地边界。
+    """
+    return tool_name in _LOCAL_PATH_TOOLS
 
 
 def is_write_tool(tool_name: str, tool_args: dict) -> bool:

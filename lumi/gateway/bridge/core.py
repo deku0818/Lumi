@@ -310,6 +310,8 @@ class AgentBridge:
         )
         # 注入在途审批 Broker（与 permission_engine 同源，事后赋值，零改 create_agent 签名）
         self._context.approval_broker = self._broker
+        # 授权通过后放宽工作区边界的回调（人工审批 / auto 分类器 / privileged 三条路共用）
+        self._context.widen_boundary = self._folders.widen_for_violations
         # 应用持久化的 active 供应商 (profile, model)（覆盖 config 默认模型）
         self._apply_active()
         # 渠道会话可指定独立模型 + 思考档位：覆盖上面的全局 active（连接由 resolve(model)

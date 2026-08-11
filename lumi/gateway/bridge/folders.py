@@ -17,6 +17,24 @@ if TYPE_CHECKING:
     from lumi.gateway.bridge.core import AgentBridge
 
 
+def _enclosing_dir(path: str) -> Path | None:
+    """越界路径对应的应授权目录：目录取自身，文件 / 待创建路径取最近的已存在祖先。
+
+    取「最近的已存在祖先」而非直接 parent，是因为越界路径常常整条尾巴都还不存在
+    （``write /b-dir/new/deep/x.txt``），拿不存在的 parent 去 add_folder 只会失败。
+    一路走到文件系统根仍不存在则放弃——把 ``/`` 加进工作区等于关掉边界，远超出
+    「放宽该目录」的授权语义。
+    """
+    resolved = Path(path).expanduser().resolve()
+    root = Path(resolved.root)
+    for candidate in (resolved, *resolved.parents):
+        if candidate == root:
+            return None
+        if candidate.is_dir():
+            return candidate
+    return None
+
+
 class FolderManager:
     """工作目录切换与本会话临时目录管理。"""
 
@@ -71,6 +89,17 @@ class FolderManager:
             if b._context is not None and b._context.permission_engine is not None:
                 b._context.permission_engine.add_ephemeral_workspace(folder)
         return {"folders": list(b._extra_folders)}
+
+    def widen_for_violations(self, violations: list[str]) -> None:
+        """批准越界操作 → 把路径所在目录纳入本会话工作区，等价于替用户点「添加文件夹」。
+
+        为什么批准必须连带放宽边界见 docs/architecture/permissions.md。
+        """
+        for raw in violations:
+            directory = _enclosing_dir(raw)
+            if directory is None:
+                continue
+            self.add_folder(str(directory))
 
     def remove_folder(self, path: str) -> dict:
         """移除临时添加的目录。"""

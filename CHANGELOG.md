@@ -1,5 +1,19 @@
 # Changelog
 
+## [0.2.105] - 2026-08-11
+
+### Fixed
+- **批准越界写入后仍被拒，且「始终允许」永远不生效**（`docs/architecture/permissions.md`「边界与审批是两道正交的门」节）— 权限规则与工作区边界是两道**各自独立否决**的门，而三条授权路径此前只过第一道。后果有两层：`write`/`edit` 通过审批后在执行期照样撞 `filesystem/backend.py` 的 `workspace.validate_path` 抛 `PermissionError`；更糟的是 default / auto 模式下 `boundary_ok` 恒为 `False`，同一个调用**每轮重新回到审批**，用户点多少次「始终允许」都出不来——写进 `permissions.local.json` 的 allow 规则被边界这道门无声吃掉。现三条授权路径（人工审批 / auto 分类器 / privileged）在放行前同调 `nodes._widen_boundary_for()`，把本批越界路径所在目录纳入本会话工作区，落点与用户手动「添加文件夹」完全相同（`add_ephemeral_workspace`，仅内存不持久化），模型下一轮经 `drain_folder_note` 收到目录变更提醒。
+- **auto 模式每轮白付一次分类器调用**：同上一条的同一根因在 auto 模式的表现——分类器裁决通过但边界未放宽，下一轮又被送回 `AutoClassify`。分类器裁决与人工审批同权：AI 判断即用户授权。
+
+### Changed
+- **放宽面刻意收窄**，只覆盖本批里 `is_local_path_tool()`（`write`/`edit`/`bash`）∩ `is_write_tool()` 的调用，两个条件缺一不可：批次是混合的，批准一次越界 `read` 不该换来该目录的**写**权限；而 `is_write_tool()` 对未知工具 fail-closed 恒 `True`，不显式限定工具名就会把每个带 `path` 参数的 MCP 调用都算进来——外部工具的 `path` 含义未知（可能是 URL、库名、远端路径），据此开本地写权限没有根据。代价：`artifacts` 等其余受边界约束的工具越界时不放宽，需用户显式「添加文件夹」。
+- **`is_local_path_tool()` 新入 `tools/capability.py`** —— 与 `is_file_edit_tool` / `is_write_tool` 同处，工具能力的声明归口在一个模块。
+- 授权目录取法（`folders._enclosing_dir`）取**最近的已存在祖先**而非直接 parent——越界路径常常整条尾巴都还不存在（`write /x/new/deep/a.txt`），拿不存在的 parent 去 `add_folder` 只会失败；一路走到文件系统根仍不存在则放弃，把 `/` 纳入工作区等于关掉边界。
+
+### 已知未处理
+- **无 bridge 的 headless 路径不放宽边界**：回调由 bridge 在 `initialize` 注入，故分界是「有没有 bridge」而非「是不是 cron」——`lumi serve` 下的 cron 整个 job 跑在 `AgentBridge` 上且 `tool_mode="privileged"`，已覆盖；落空的是 workflow、后台子代理和无 serve 的 cron fallback。刻意不打通：无人值守的任务自行扩大文件系统访问面，出问题时没人在场。这些场景请把目录预先写进 `permissions.json` 的 `workspaces`（持久化、跨 run 生效）。
+
 ## [0.2.104] - 2026-08-10
 
 ### Changed

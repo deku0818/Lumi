@@ -41,6 +41,7 @@ def _runtime(decision=None, engine=None):
         context=SimpleNamespace(
             permission_engine=engine,
             approval_broker=_FakeBroker(decision),
+            widen_boundary=None,  # headless/无 bridge：边界不放宽（见 test_approval_boundary_widen）
             tool_mode="default",
         )
     )
@@ -104,7 +105,9 @@ async def test_deny_skips_broker_and_routes_to_call_model():
 async def test_no_broker_headless_fails_closed():
     """无审批通道（headless：cron / workflow，approval_broker=None）：fail-closed 拒绝回 CallModel，不崩溃。"""
     rt = SimpleNamespace(
-        context=SimpleNamespace(permission_engine=None, approval_broker=None)
+        context=SimpleNamespace(
+            permission_engine=None, approval_broker=None, widen_boundary=None
+        )
     )
     cmd = await human_approval(_state(_TCS), rt)
     assert cmd.goto == "CallModel"
@@ -136,7 +139,9 @@ async def test_stop_via_reject_keeps_user_message_and_clean_state():
 
     async def approval_node(state):
         rt = SimpleNamespace(
-            context=SimpleNamespace(permission_engine=None, approval_broker=broker)
+            context=SimpleNamespace(
+                permission_engine=None, approval_broker=broker, widen_boundary=None
+            )
         )
         return await human_approval(state, rt)
 

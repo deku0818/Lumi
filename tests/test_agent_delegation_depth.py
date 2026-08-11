@@ -88,6 +88,7 @@ def _make_runtime(depth: int) -> SimpleNamespace:
         context=SimpleNamespace(
             permission_engine=None,
             approval_broker=None,
+            widen_boundary=None,
             tool_mode="default",
             project_dir=None,
         ),

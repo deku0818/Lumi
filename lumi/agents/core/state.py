@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+from collections.abc import Callable
 from typing import TYPE_CHECKING, Annotated, Any, NotRequired, TypedDict
 
 if TYPE_CHECKING:
@@ -44,6 +45,10 @@ class LumiAgentContext:
     """在途审批 Broker，由 bridge 在 create_agent 后注入（与 permission_engine 同源）。
     节点 / ask 工具经它 await 审批，替代 interrupt() 中断-恢复。子 agent 由 agent 工具
     从父 context 传播。无 bridge 的纯 graph 调用（headless）保持 None。"""
+    widen_boundary: Callable[[list[str]], None] | None = field(default=None)
+    """放宽本会话工作区边界的回调，由 bridge 注入（同 approval_broker，事后赋值）。
+    授权（人工审批 / auto 分类器 / privileged）通过后调用，把越界路径所在目录纳入本
+    会话工作区。无 bridge 的纯 graph 调用（headless）保持 None，边界不放宽。"""
     memory_enabled: bool = field(default=False)
     """是否为本 agent 注入持久记忆（MEMORY.md 索引 + 系统提示词行为说明）。
     默认 False（opt-in），与 create_agent 一致；仅 bridge 的主对话 agent 置 True。

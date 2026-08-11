@@ -35,9 +35,15 @@ def _make_engine(rules=None, project_dir: Path | None = None) -> PermissionEngin
 
 
 def _runtime(engine, tool_mode="default"):
-    """最小 runtime stub：is_use_tool 读 context.permission_engine + context.tool_mode。"""
+    """最小 runtime stub：is_use_tool 读 permission_engine / tool_mode / widen_boundary。
+
+    widen_boundary=None（headless，无 bridge 注入）：privileged 放行时不放宽边界，
+    本文件只断言路由目标。放宽行为见 test_approval_boundary_widen。
+    """
     return types.SimpleNamespace(
-        context=types.SimpleNamespace(permission_engine=engine, tool_mode=tool_mode)
+        context=types.SimpleNamespace(
+            permission_engine=engine, tool_mode=tool_mode, widen_boundary=None
+        )
     )
 
 

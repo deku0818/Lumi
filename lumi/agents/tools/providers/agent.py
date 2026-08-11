@@ -125,6 +125,9 @@ async def agent(
     # 白嫖 custom event 自带的 parent_ids 归属到本子代理卡片（旧 interrupt 无 checkpointer
     # 不可用，broker 才解锁子代理审批）。后台子代理 detached、无活流可挂，刻意不传播。
     context.approval_broker = runtime.context.approval_broker
+    # 边界放宽回调随审批通道一同传播：子代理复用父 PermissionEngine，其审批 / 分类器
+    # 裁决通过后放宽的是同一条边界（后台子代理无活流、也无审批，故不在此路径）
+    context.widen_boundary = runtime.context.widen_boundary
     # tool_mode 是 context 属性：从父 context 继承实时值（父运行中切换的模式随之传播）
     context.tool_mode = runtime.context.tool_mode
     logger.debug("[agent tool] resolved tool_mode=%s", context.tool_mode)
