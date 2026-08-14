@@ -159,8 +159,14 @@ CardKit「编辑同一张卡片」打字机：
 - `Throttle`：双阈值（250ms / 64 字符）+ `loop.call_later` 主动定时，静默期也刷尾部。
 - `UpdateQueue`：至多 1 in-flight + 1 pending 合并，压低 HTTP QPS 防限流。
 - 失效换卡（`is_card_invalid` 错误码 → 换 card_id 重建，epoch 作废旧卡更新）。
-- 超长截断（`_render_card_text` 取尾部 `STREAM_MAX_CHARS=20000`）；CardKit 全程不可用时
-  `_fallback_send` 降级到普通 markdown 卡（同样截断）。
+- 超时续写（`_is_stream_closed` = 200850 / 300309）：飞书的流式模式**距上次开启 10 分钟后
+  自动关闭**，超 10 分钟的一轮必然撞上。卡片本身没失效，故不换卡——`_push_update` 经
+  settings 把 `streaming_mode` 重开回 `true` 并重试一次，原卡继续写。
+- 超长截断（`_render_card_text` 取尾部 `STREAM_MAX_CHARS=20000`）；CardKit 全程不可用、
+  或终态那一刷失败时 `_fallback_send` 降级到普通 markdown 卡（同样截断）——判据是「卡片上
+  没有完整答案」，只看「全程没渲染成功过」会漏掉「前半段在卡上、后半段写不进去」。
+- 所有发往飞书的操作都在**发出前一刻**经 `buf.take_sequence()` 取号：飞书要求同卡
+  sequence 严格递增，入队时预分配的号会被在途的重开续写越过，那一刷必被拒。
 - 工具忙碌期 spinner 动画；纯工具轮（无正文）收尾落「✅ 已完成」而非空白卡。
 - 孤儿 buf 由 `_cleanup_loop` 按 `STREAM_BUF_TTL=300s` 驱逐。
 

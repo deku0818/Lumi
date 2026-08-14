@@ -6,11 +6,14 @@ FeishuChannel 把 BridgeEvent 流折叠成 ``send_delta`` 调用喂到这里。�
 （合并在途更新，至多 1 in-flight，字符阈值下的激进 fire 实际 HTTP QPS 仍受单次往返限制，
 不打爆飞书限流）。
 
-健壮性两道兜底：
+健壮性三道兜底：
 - **超长保护**：``buf.text`` 无上限累积，超过飞书卡片 markdown 上限会整段 update 失败、
   答案全丢；渲染前用 :func:`_render_card_text` 截到尾部窗口。
 - **卡片失效恢复**：卡片被撤销 / 已 finish / CardKit content 创建失败时（错误码见
   :func:`_is_card_invalid`），换新 card_id 重建并重发全量文本，而非默默卡死。
+- **流式超时续写**：飞书的流式模式「距上次开启 10 分钟后自动关闭」，超 10 分钟的一轮
+  必然撞上（见 :func:`_is_stream_closed`）；:meth:`_push_update` 就地重开流式模式并
+  重试，原卡继续写，而非此后每次更新都失败、后半段答案全丢。
 
 state 只含 per-chat 的累积 buf，由主事件循环里的 ``_cleanup_loop`` 定期扫描，驱逐
 ``STREAM_BUF_TTL`` 秒内无更新的孤儿 buf（客户端中途放弃 / 流异常未带终态）。
@@ -82,10 +85,20 @@ _DEFAULT_TOOL_ACTION = "处理任务"
 # 注意 230001 是"消息内容格式错"，不在此集合，否则会掩盖真正的 schema bug。
 _CARD_INVALID_CODES = {230002, 230005, 230017, 230020, 230099}
 
+# 流式模式已关闭——卡片本身还在、内容还在，只是不再接受 content 更新：飞书规定流式模式
+# 「距上次开启 10 分钟后自动关闭」，超过 10 分钟的一轮必然撞上。200850 是超时那一刻的
+# 报错，此后每次更新都是 300309。经 settings 重开流式模式即可在原卡继续写。
+_STREAM_CLOSED_CODES = {200850, 300309}
+
 
 def _is_card_invalid(code: int) -> bool:
     """流式卡片是否已失效、应换新卡重建。"""
     return code in _CARD_INVALID_CODES
+
+
+def _is_stream_closed(code: int) -> bool:
+    """流式模式是否已被飞书关闭（可重开，无需换卡）。"""
+    return code in _STREAM_CLOSED_CODES
 
 
 def _render_card_text(text: str) -> str:
@@ -128,7 +141,8 @@ class FeishuStreamBuf:
     """一次会话的 CardKit 流式卡片累积状态。
 
     text 始终是要写到卡片的全量 markdown（每次 update 覆盖式写入，非增量）；sequence
-    严格单调递增，飞书 OpenAPI 要求后续操作 sequence 大于前次。rendered_len 记录上次成功
+    是"已发出去的最大号"（新卡归 0），一切发往飞书的操作都在发出前一刻经
+    :meth:`take_sequence` 取号。rendered_len 记录上次成功
     渲染到卡片的 text 长度（-1 = 从未渲染成功）。reply_to_id / rebuilds / epoch 服务于
     卡片失效换卡。throttle / queue 在 buf 首次创建时装配。
     """
@@ -148,6 +162,13 @@ class FeishuStreamBuf:
     busy: bool = False
     anim_frame: int = 0
     anim_timer: asyncio.TimerHandle | None = field(default=None, repr=False)
+
+    def take_sequence(self) -> int:
+        """取下一个操作号。**只在发出前一刻调用**：飞书要求同卡 sequence 严格递增，
+        提前取号的请求会被后发的请求越过，那一刷必被拒。
+        """
+        self.sequence += 1
+        return self.sequence
 
     @property
     def dirty(self) -> bool:
@@ -211,10 +232,13 @@ class FeishuStreaming:
                 f"idle={now - buf.last_edit:.0f}s card_id={buf.card_id}"
             )
             if buf.card_id:
-                buf.sequence += 1
                 try:
                     await asyncio.get_running_loop().run_in_executor(
-                        None, self._close_streaming_mode_sync, buf.card_id, buf.sequence
+                        None,
+                        self._set_streaming_mode_sync,
+                        buf.card_id,
+                        False,
+                        buf.take_sequence(),
                     )
                 except Exception as e:
                     logger.warning(
@@ -293,7 +317,7 @@ class FeishuStreaming:
                 # 创建失败：buf.text 继续累积，下一次 delta 会再次尝试创建
                 return
             # 首帧立即渲染一次，不等节流——让用户尽快看到第一段文字
-            await self._push_update(buf, buf.card_id, buf.text, 1)
+            await self._push_update(buf, buf.card_id, buf.text)
             return
 
         # 卡片已建：交定时器节流，by-design 在静默期也会自动 flush 尾部
@@ -313,21 +337,50 @@ class FeishuStreaming:
         if not card_id:
             return False
         buf.card_id = card_id
-        buf.sequence = 1
         return True
 
-    async def _push_update(
-        self, buf: FeishuStreamBuf, card_id: str, text: str, seq: int
+    async def _send_content(
+        self, buf: FeishuStreamBuf, card_id: str, text: str
     ) -> tuple[bool, int]:
-        """一次卡片 content 覆写：渲染（含超长截断）→ executor 调用 → 记账。"""
-        loop = asyncio.get_running_loop()
-        ok, code = await loop.run_in_executor(
-            None, self._stream_update_text_sync, card_id, _compose(buf, text), seq
+        """发一次 content 覆写：取号 → 渲染（含超长截断 + 状态行）→ executor 调用。"""
+        return await asyncio.get_running_loop().run_in_executor(
+            None,
+            self._stream_update_text_sync,
+            card_id,
+            _compose(buf, text),
+            buf.take_sequence(),
         )
+
+    async def _push_update(
+        self, buf: FeishuStreamBuf, card_id: str, text: str
+    ) -> tuple[bool, int]:
+        """一次卡片 content 覆写 + 记账。
+
+        撞上"流式模式已关闭"（满 10 分钟被飞书自动关）时就地重开并重试一次——所有更新
+        路径都经此处，故这一处兜住整轮：超时后的内容照样写进同一张卡。
+        """
+        ok, code = await self._send_content(buf, card_id, text)
+        if not ok and _is_stream_closed(code):
+            ok, code = await self._resume_streaming(buf, card_id, text, code)
         buf.last_edit = time.monotonic()
         if ok:
             buf.rendered_len = len(text)
         return ok, code
+
+    async def _resume_streaming(
+        self, buf: FeishuStreamBuf, card_id: str, text: str, code: int
+    ) -> tuple[bool, int]:
+        """流式模式被飞书自动关闭后：重开它并把本次内容补刷回去。
+
+        重开失败则原样返回失败（带回原错误码），不递归重试。
+        """
+        logger.info(f"Feishu 流式模式已关闭，重开续写 card_id={card_id}")
+        ok = await asyncio.get_running_loop().run_in_executor(
+            None, self._set_streaming_mode_sync, card_id, True, buf.take_sequence()
+        )
+        if not ok:
+            return False, code
+        return await self._send_content(buf, card_id, text)
 
     def _on_fire(self, chat_id: str) -> None:
         """Throttle 回调（同步）：内容有变化时入队一次覆写更新。"""
@@ -339,15 +392,14 @@ class FeishuStreaming:
         self._enqueue_render(buf)
 
     def _enqueue_render(self, buf: FeishuStreamBuf) -> None:
-        """快照正文 + 递增 seq，入队一次卡片覆写（``_compose`` 自带工具状态行）。
+        """快照正文，入队一次卡片覆写（``_compose`` 自带工具状态行）。
 
-        update 撞上卡片失效错误码时触发换卡重建；epoch 校验丢弃重建前 enqueue 的旧卡
-        stale 更新。正文节流刷新、spinner 动画刷新、工具状态变更刷新共用此路径。
+        seq 不在此处预分配，由 ``_push_update`` 发出前现取——见其文档。update 撞上卡片
+        失效错误码时触发换卡重建；epoch 校验丢弃重建前 enqueue 的旧卡 stale 更新。正文
+        节流刷新、spinner 动画刷新、工具状态变更刷新共用此路径。
         """
         if buf.card_id is None or buf.queue is None:
             return
-        buf.sequence += 1
-        seq = buf.sequence
         card_id = buf.card_id
         epoch = buf.epoch
         text = buf.text
@@ -355,7 +407,7 @@ class FeishuStreaming:
         async def _task() -> None:
             if buf.epoch != epoch:
                 return  # 卡片已重建，这是旧卡的 stale 更新，丢弃
-            ok, code = await self._push_update(buf, card_id, text, seq)
+            ok, code = await self._push_update(buf, card_id, text)
             if not ok and _is_card_invalid(code):
                 await self._rebuild_card(buf)
 
@@ -439,8 +491,8 @@ class FeishuStreaming:
         if not new_card:
             return
         buf.card_id = new_card
-        buf.sequence = 1
-        await self._push_update(buf, new_card, buf.text, 1)
+        buf.sequence = 0  # 新卡从 0 开始发号
+        await self._push_update(buf, new_card, buf.text)
 
     async def _flush_end(
         self,
@@ -471,21 +523,22 @@ class FeishuStreaming:
                 )
             return
         # 非 aborted：仍有未刷尾部，或还挂着忙碌状态行（had_status）时补最后一刷。
+        final_ok = True
         if not aborted and (had_status or (buf.text.strip() and buf.dirty)):
-            buf.sequence += 1
             # 纯工具轮（无正文 token）：直接刷 buf.text="" 会经 _compose 回落成单空格，
             # 卡片定格成空白。无正文时落一个完成标记，让用户看到这轮已做完。
             final = buf.text if buf.text.strip() else "✅ 已完成"
-            await self._push_update(buf, buf.card_id, final, buf.sequence)
-        buf.sequence += 1
+            final_ok, _code = await self._push_update(buf, buf.card_id, final)
+        # 关掉 streaming_mode，让会话列表的"生成中"占位消失
         await loop.run_in_executor(
-            None, self._close_streaming_mode_sync, buf.card_id, buf.sequence
+            None, self._set_streaming_mode_sync, buf.card_id, False, buf.take_sequence()
         )
-        # 整段流式从未渲染成功：CardKit 全程失败、非 aborted 时降级到普通 markdown 卡。
-        if not aborted and buf.rendered_len < 0:
-            await self._fallback_send(
-                chat_id, buf.text, buf.reply_to_id, "全程未渲染成功"
-            )
+        # 卡片上没有完整答案时降级到普通 markdown 卡：全程未渲染成功（CardKit 全程失败），
+        # 或终态那一刷失败（流式模式关了又重开不上 / 未知错误码）。后者不兜住的话，正是
+        # 「前半段留在卡上、后半段静默丢失」——恰是流式超时续写要消灭的失败形态。
+        if not aborted and (buf.rendered_len < 0 or not final_ok):
+            why = "全程未渲染成功" if buf.rendered_len < 0 else "终态刷新失败"
+            await self._fallback_send(chat_id, buf.text, buf.reply_to_id, why)
 
     async def _fallback_send(
         self, chat_id: str, text: str, reply_to: str | None, why: str
@@ -611,8 +664,12 @@ class FeishuStreaming:
         )
         return resp is not None, code
 
-    def _close_streaming_mode_sync(self, card_id: str, sequence: int) -> bool:
-        """关闭卡片 streaming_mode，让会话列表的"生成中"占位消失。"""
+    def _set_streaming_mode_sync(
+        self, card_id: str, enabled: bool, sequence: int
+    ) -> bool:
+        """开 / 关卡片 streaming_mode。关是终态收尾（"生成中"占位消失），开是超时后
+        续写前的复位。
+        """
         from lark_oapi.api.cardkit.v1 import (
             SettingsCardRequest,
             SettingsCardRequestBody,
@@ -621,7 +678,7 @@ class FeishuStreaming:
         from lumi.gateway.channels.feishu.lark_call import lark_call
 
         settings_payload = json.dumps(
-            {"config": {"streaming_mode": False}}, ensure_ascii=False
+            {"config": {"streaming_mode": enabled}}, ensure_ascii=False
         )
         request = (
             SettingsCardRequest.builder()
@@ -636,7 +693,8 @@ class FeishuStreaming:
         )
         return (
             lark_call(
-                f"CardKit settings 关闭流式 card_id={card_id}",
+                f"CardKit settings {'开启' if enabled else '关闭'}流式 "
+                f"card_id={card_id}",
                 lambda: self.channel.client.cardkit.v1.card.settings(request),
             )
             is not None

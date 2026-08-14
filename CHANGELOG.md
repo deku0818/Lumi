@@ -1,5 +1,15 @@
 # Changelog
 
+## [0.2.107] - 2026-08-14
+
+### Fixed
+- **飞书一轮超过 10 分钟后，后半段回答静默丢失**（`lumi/gateway/channels/feishu/streaming.py`）— 飞书规定流式卡片的更新模式「距上次开启 10 分钟后自动关闭」，长轮次必然撞上：超时那一刻报 `200850 card streaming timeout`，此后每次 content 更新都是 `300309 streaming mode is closed`。这两个码此前不在任何恢复分支里，卡片就此定格在前 10 分钟的内容；又因为前半段渲染成功过（`rendered_len ≥ 0`），连「降级重发普通卡」的兜底都不触发，用户只看得到半截答案。现按语义分成两类：卡片失效（`_is_card_invalid`）才换新卡重发，**流式模式关闭（`_is_stream_closed`）则经 settings 把 `streaming_mode` 重开回 `true`，原卡继续写**——实测（含真等满 10 分钟自然超时）重开后同一张卡恢复可写，无需换卡也不重发已有内容。
+- **终态那一刷失败时不再无声吞掉整轮答案**：`_flush_end` 的降级判据从「全程未渲染成功」放宽到「卡片上没有完整答案」（全程未渲染成功 **或** 终态刷新失败），任何未知错误码导致的收尾失败都会降级到普通 markdown 卡重发全文。
+- **发号时机修正，消除「重开续写把在途更新的号越过去」**：`sequence` 原先在 `_enqueue_render` 入队时预分配，而入队到发出之间隔着 await，重开续写在这个窗口里取走的两个号会越过它，那一刷被飞书按「sequence 未递增」拒掉、卡片停在旧快照。现所有发往飞书的操作统一经 `buf.take_sequence()` 在**发出前一刻**取号。
+
+### Changed
+- 流式卡片的 settings 调用开关同源：`_close_streaming_mode_sync` 并入 `_set_streaming_mode_sync(card_id, enabled, sequence)`；content 发送收敛为唯一出口 `_send_content`（取号 + 渲染 + executor 调用），`_push_update` 与重开重试共用它。
+
 ## [0.2.106] - 2026-08-14
 
 ### Changed

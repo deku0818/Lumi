@@ -8,6 +8,7 @@ from __future__ import annotations
 
 import asyncio
 import json
+import threading
 from types import SimpleNamespace
 
 import pytest
@@ -1171,6 +1172,122 @@ def test_streaming_card_delivery_picks_api_by_anchor(monkeypatch):
     assert ch.streaming._create_streaming_card_sync("oc_room", "m1") == "card_1"
     assert calls["reply"] == ["m1"]
     assert len(calls["create"]) == 1
+
+
+async def test_push_update_reopens_timed_out_stream(monkeypatch):
+    """飞书「流式模式满 10 分钟自动关闭」：就地重开重试，后半段答案不丢。
+
+    回归：200850 / 300309 曾不在任何恢复分支里，超 10 分钟的一轮从超时那刻起每次
+    content 更新都失败，卡片定格在前半段，且 rendered_len ≥ 0 连降级重发都不触发。
+    """
+    ch = FeishuChannel(FeishuChannelConfig())
+    buf = ch.streaming._new_buf("oc_room")
+    buf.card_id = "card_1"
+    buf.sequence = 7
+    calls: list[tuple] = []
+
+    def fake_content(card_id, content, seq):
+        calls.append(("content", seq, content))
+        return (False, 200850) if len(calls) == 1 else (True, 0)
+
+    def fake_settings(card_id, enabled, seq):
+        calls.append(("settings", seq, enabled))
+        return True
+
+    monkeypatch.setattr(ch.streaming, "_stream_update_text_sync", fake_content)
+    monkeypatch.setattr(ch.streaming, "_set_streaming_mode_sync", fake_settings)
+
+    ok, _code = await ch.streaming._push_update(buf, "card_1", "答案后半段")
+    assert ok
+    assert [c[0] for c in calls] == ["content", "settings", "content"]
+    assert calls[1][2] is True  # 重开流式，而非关闭
+    assert calls[2][1] > calls[1][1] > calls[0][1] > 7  # sequence 严格递增
+    assert buf.rendered_len == len("答案后半段")
+
+
+async def test_push_update_gives_up_when_reopen_fails(monkeypatch):
+    """重开失败不递归重试，原错误码原样上抛给失效判定。"""
+    ch = FeishuChannel(FeishuChannelConfig())
+    buf = ch.streaming._new_buf("oc_room")
+    buf.card_id = "card_1"
+    contents = 0
+
+    def fake_content(card_id, content, seq):
+        nonlocal contents
+        contents += 1
+        return False, 300309
+
+    monkeypatch.setattr(ch.streaming, "_stream_update_text_sync", fake_content)
+    monkeypatch.setattr(
+        ch.streaming, "_set_streaming_mode_sync", lambda cid, on, seq: False
+    )
+
+    ok, code = await ch.streaming._push_update(buf, "card_1", "文本")
+    assert (ok, code, contents) == (False, 300309, 1)
+    assert buf.rendered_len == -1
+
+
+async def test_sequence_never_regresses_when_resume_interleaves(monkeypatch):
+    """回归：重开续写在途时入队的下一刷，seq 不得被重开取的号越过。
+
+    seq 若在入队时预分配，重开期间取的两个号会越过它，那一刷必被飞书按
+    「sequence 未递增」拒掉——卡片停在旧快照，且该错误码不在任何恢复分支里。
+    """
+    ch = FeishuChannel(FeishuChannelConfig())
+    buf = ch.streaming._new_buf("oc_room")
+    buf.card_id = "card_1"
+    buf.sequence = 10
+    seqs: list[int] = []
+    gate = threading.Event()
+
+    def fake_content(card_id, content, seq):
+        seqs.append(seq)
+        if len(seqs) == 1:
+            # 卡在首刷里（executor 线程，不挡事件循环），给测试留出「重开尚未取号时
+            # 入队下一刷」的窗口——不卡住的话 A 会整个跑完，交错根本不发生。
+            gate.wait(2.0)
+            return False, 300309
+        return True, 0
+
+    monkeypatch.setattr(ch.streaming, "_stream_update_text_sync", fake_content)
+    monkeypatch.setattr(
+        ch.streaming, "_set_streaming_mode_sync", lambda cid, on, seq: True
+    )
+
+    buf.text = "第一刷"
+    ch.streaming._enqueue_render(buf)  # 任务 A：撞上流式已关闭 → 触发重开
+    await asyncio.sleep(0.05)  # A 已开跑并卡在首刷上
+    buf.text = "第一刷 + 第二刷"
+    ch.streaming._enqueue_render(buf)  # 任务 B：在 A 重开取号之前入队
+    gate.set()
+    await buf.queue.drain()
+
+    assert len(seqs) == 3  # A 的首刷 + 重开后重试 + B 的一刷
+    assert seqs == sorted(set(seqs))  # 严格递增，无重号无回退
+
+
+async def test_flush_end_falls_back_when_final_push_fails(monkeypatch):
+    """终态那一刷失败 → 降级普通卡重发全文，别让后半段静默丢失。
+
+    回归：降级原先只看「全程未渲染成功」（rendered_len < 0）。超时后重开不上时前半段
+    已渲染成功，该条件永假，用户就此看不到后半段——正是本次修复要消灭的形态。
+    """
+    ch = FeishuChannel(FeishuChannelConfig())
+    st = ch.streaming
+    buf = st._new_buf("oc_room")
+    buf.card_id = "card_1"
+    buf.text = "前半段 + 后半段"
+    buf.rendered_len = len("前半段")  # 前半段已成功渲染过
+    st.bufs["oc_room"] = buf
+    sent = _sent_collector(ch, monkeypatch)
+
+    monkeypatch.setattr(
+        st, "_stream_update_text_sync", lambda cid, content, seq: (False, 300309)
+    )
+    monkeypatch.setattr(st, "_set_streaming_mode_sync", lambda cid, on, seq: False)
+
+    await st._flush_end(asyncio.get_running_loop(), "oc_room", aborted=False)
+    assert [text for text, _title in sent] == ["前半段 + 后半段"]
 
 
 def test_stream_buf_carries_chat_id():
