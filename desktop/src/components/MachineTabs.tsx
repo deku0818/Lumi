@@ -1,10 +1,9 @@
 import { createContext, useContext, useEffect } from 'react'
 import type { ReactNode } from 'react'
-import { WifiOff, RotateCw } from 'lucide-react'
+import { WifiOff, RotateCw, Laptop, Cloud } from 'lucide-react'
 import type { ConnState, ConnError, Machine } from '../types'
 import { machineColor } from '@/lib/utils'
 import { useI18n } from '../i18n'
-import { StatusDot } from './SettingsKit'
 
 // 机器表 + 各机器的实时连接态 + 重连入口。侧栏、设置各面板、项目/定时页都要按它决定
 // 「这台机器现在能不能读写」，逐层透传要穿过五六个组件，故走 context（App 在根部一次性提供）。
@@ -55,18 +54,50 @@ export function useConnectedEffect(
   }, [...deps, scope])
 }
 
-// 机器状态点：金/机器色实心=已连接、呼吸=连接中、空心=离线。侧栏机器分组头与
-// 选择条 pill 共用一份；点本体走 SettingsKit 的 StatusDot（color/hollow/pulse 三路全覆盖）。
-export function MachineDot({ id }: { id: string }) {
-  const { machines, conn } = useContext(Ctx)
-  const state = conn[id]
-  const offline = state === 'closed' || state === 'failed'
+// 机器类型图标：本地=笔记本、远程=云端
+const machineGlyph = (id: string) => (id === 'local' ? Laptop : Cloud)
+
+// 一行/一处要标「哪台机器」时传的三元组（侧栏会话行与定时任务行、模型 chip 共用）
+export type MachineMarker = { id: string; name: string; color: string }
+
+// 机器标识的渲染本体：形状给「本地还是云端」、颜色给「哪一台」，一个元素说完两件事，
+// 故取代了原先的纯色状态点。侧栏行 / 设置机器卡 / 模型 chip / 下面的 MachineIcon 共用
+// 这一份，尺寸与 tooltip 由调用方给；不传 color 即继承外层文字色。
+export function MachineMark({
+  id,
+  color,
+  title,
+  size = 12,
+  className = '',
+}: {
+  id: string
+  color?: string
+  title?: string
+  size?: number
+  className?: string
+}) {
+  const Glyph = machineGlyph(id)
   return (
-    <StatusDot
-      tone={offline ? 'hollow' : undefined}
-      color={offline ? undefined : machineColor(id, machines)}
-      pulse={state === undefined || state === 'connecting'}
-      title={state ?? 'connecting'}
+    <span title={title} className={`inline-flex shrink-0 ${className}`} style={color ? { color } : undefined}>
+      <Glyph size={size} />
+    </span>
+  )
+}
+
+// 带连接态的机器标识（机器分组头 / 机器选择条）：还在重试时呼吸、真的停了才转灰
+// ——状态按 useMachine 的 scope 判而非裸 conn：退避期 closed↔connecting 每轮来回跳，
+// 裸判会让机器色一闪一灭，而颜色是「这行属于哪台机」的唯一载体，不能跟着眨。
+export function MachineIcon({ id, size = 13 }: { id: string; size?: number }) {
+  const { machines } = useContext(Ctx)
+  const { scope } = useMachine(id)
+  const stopped = scope === 'stopped'
+  return (
+    <MachineMark
+      id={id}
+      size={size}
+      title={scope}
+      color={stopped ? undefined : machineColor(id, machines)}
+      className={`${stopped ? 'text-separator' : ''} ${scope === 'retrying' ? 'animate-pulse' : ''}`}
     />
   )
 }
@@ -111,7 +142,7 @@ function MachineTabs({
               : 'border-line text-muted-foreground hover:text-ink hover:border-separator'
           } ${conn[m.id] === 'open' ? '' : 'opacity-60'}`}
         >
-          <MachineDot id={m.id} />
+          <MachineIcon id={m.id} size={14} />
           {m.name}
         </button>
       ))}

@@ -2447,7 +2447,11 @@ export default function App() {
             active={activeModel}
             machine={
               machines.filter((m) => m.enabled !== false).length > 1
-                ? { name: machineName(activeBackend, machines), color: machineColor(activeBackend, machines) }
+                ? {
+                    id: activeBackend,
+                    name: machineName(activeBackend, machines),
+                    color: machineColor(activeBackend, machines),
+                  }
                 : undefined
             }
             onSwitch={switchModel}

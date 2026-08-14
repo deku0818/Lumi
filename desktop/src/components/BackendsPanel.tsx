@@ -1,9 +1,9 @@
 import { useEffect, useState } from 'react'
-import { Plus, Pencil, Trash2, Server } from 'lucide-react'
+import { Plus, Pencil, Trash2 } from 'lucide-react'
 import type { BackendRemote, BackendsState } from '../types'
 import { useI18n } from '../i18n'
 import { machineColor } from '@/lib/utils'
-import { useMachine } from './MachineTabs'
+import { MachineMark, useMachine } from './MachineTabs'
 import { Empty, EntityCard, Field, FormModal, Section, SectionGroup, SecretInput, StatusDot, TextInput } from './SettingsKit'
 import { Button } from '@/components/ui/button'
 import { Switch } from '@/components/ui/switch'
@@ -178,11 +178,13 @@ function MachineRow({
   ) : (
     <StatusDot color={color} pulse={live === 'retrying'} />
   )
-  // 地址被截断/被失败原因或「连接中」顶掉时，悬停恒能看到全文（subtitleTitle）
+  // 卡图标：本地=笔记本、远程=云端，着机器色（与侧栏机器头同一套标识）；停用的机器
+  // 不着色，跟着卡片整体淡下去。地址被截断/被失败原因或「连接中」顶掉时，悬停恒能
+  // 看到全文（subtitleTitle）
   return (
     <EntityCard
       dim={!enabled}
-      icon={<Server size={16} />}
+      icon={<MachineMark id={id} size={16} color={enabled ? color : undefined} />}
       title={name}
       meta={dot}
       subtitle={

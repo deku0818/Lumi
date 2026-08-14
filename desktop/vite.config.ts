@@ -12,6 +12,6 @@ export default defineConfig({
   plugins: [react(), tailwindcss()],
   base: './',
   resolve: { alias: { '@protocol': protocolDir, '@': srcDir } },
-  server: { port: 5173, strictPort: true, host: '127.0.0.1', fs: { allow: ['..'] } },
+  server: { port: 5175, strictPort: true, host: '127.0.0.1', fs: { allow: ['..'] } },
   build: { outDir: 'dist' },
 })

@@ -14,7 +14,7 @@ const { setupUpdater } = require('./updater.cjs')
 const LOCAL_TOKEN = crypto.randomBytes(24).toString('hex')
 
 // dev 服务器源的唯一事实：导航放行 / 同源判断 / loadURL 三处共用（改端口只动 env）
-const DEV_ORIGIN = new URL(process.env.VITE_DEV_SERVER_URL || 'http://127.0.0.1:5173').origin
+const DEV_ORIGIN = new URL(process.env.VITE_DEV_SERVER_URL || 'http://127.0.0.1:5175').origin
 
 // 自定义协议：让 renderer 安全引用本地文件（绕过 http origin 下的 file:// 限制），
 // 用于 artifacts 预览面板里 <img>/<iframe> 加载图片/PDF/HTML。必须在 app ready 前登记。

@@ -5,7 +5,7 @@
   "type": "module",
   "main": "electron/main.cjs",
   "scripts": {
-    "dev": "concurrently -k -n vite,electron -c blue,green \"vite\" \"wait-on tcp:127.0.0.1:5173 && electron .\"",
+    "dev": "concurrently -k -n vite,electron -c blue,green \"vite\" \"wait-on tcp:127.0.0.1:5175 && electron .\"",
     "build": "tsc && vite build",
     "start": "electron .",
     "pack": "npm run build && electron-builder --dir",

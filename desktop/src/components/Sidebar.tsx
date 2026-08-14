@@ -24,7 +24,7 @@ import {
   ArrowUpCircle,
 } from 'lucide-react'
 import { useUpdateState } from '../update'
-import { MachineDot, ReconnectButton, useMachineConn } from './MachineTabs'
+import { MachineIcon, MachineMark, ReconnectButton, useMachineConn, type MachineMarker } from './MachineTabs'
 import type { ConnState } from '../gateway'
 import type { ChannelInfo, CronJob, Machine, SessionMeta } from '../types'
 import { basename, machineColor, machineName, sessionKey, beOf, FLOAT_GAP } from '@/lib/utils'
@@ -194,18 +194,21 @@ export const Sidebar = memo(function Sidebar({
   const dispName = (s: SessionMeta) => s.title || s.first_message || t('sidebar.untitled')
   const q = query.trim()
   const filtering = !!q
-  // 多机时行尾一粒机器色点（仅用颜色标机器，不再写「机器·项目」文字）
-  const dotOf = (s: SessionMeta) => (multi ? machineColor(s.backend || 'local', machines) : undefined)
+  // 多机时行首一枚机器标记（形状分本地/云端、颜色分是哪一台，不再写「机器·项目」文字）；
+  // 会话行与定时任务行同一份，只认 backend 字段
+  const markOf = (x: { backend?: string | null }): MachineMarker | undefined =>
+    multi
+      ? { id: beOf(x), color: machineColor(beOf(x), machines), name: machineName(beOf(x), machines) }
+      : undefined
 
-  const row = (s: SessionMeta, dotColor?: string) => (
+  const row = (s: SessionMeta, machine?: MachineMarker) => (
     <SessionRow
       key={keyOf(s)}
       session={s}
       active={keyOf(s) === currentKey}
       state={activity[keyOf(s)]}
       name={dispName(s)}
-      dotColor={dotColor}
-      dotName={dotColor ? machineName(s.backend || 'local', machines) : undefined}
+      machine={machine}
       query={q}
       onSelect={onSelect}
       onPin={onPin}
@@ -299,7 +302,7 @@ export const Sidebar = memo(function Sidebar({
               size={11}
               className={`shrink-0 text-muted-foreground transition-transform ${collapsed ? '' : 'rotate-90'}`}
             />
-            <MachineDot id={m.id} />
+            <MachineIcon id={m.id} />
             <span className="flex-1 truncate text-xs font-semibold text-ink/75">{m.name}</span>
           </button>
           <button
@@ -350,7 +353,7 @@ export const Sidebar = memo(function Sidebar({
         <div className="px-3 pt-1 pb-1 text-[11px] text-muted-foreground/55">
           {t('sidebar.results', { n: res.length })}
         </div>
-        {res.map((s) => row(s, dotOf(s)))}
+        {res.map((s) => row(s, markOf(s)))}
       </>
     ) : (
       <div className="px-3 py-8 text-center text-xs text-muted-foreground">{t('sidebar.noMatch')}</div>
@@ -364,11 +367,11 @@ export const Sidebar = memo(function Sidebar({
         {pinned.length > 0 && (
           <>
             <SectionLabel>{t('sidebar.pinned')}</SectionLabel>
-            {pinned.map((s) => row(s, dotOf(s)))}
+            {pinned.map((s) => row(s, markOf(s)))}
           </>
         )}
         <SectionLabel>{t('sidebar.recent')}</SectionLabel>
-        {rest.slice(0, recentLimit).map((s) => row(s, dotOf(s)))}
+        {rest.slice(0, recentLimit).map((s) => row(s, markOf(s)))}
         {rest.length > recentLimit && (
           <div className="px-3 pt-2 pb-1 text-center text-[11px] text-muted-foreground/55">
             {t('sidebar.recentCapped', { n: recentLimit })}
@@ -395,8 +398,7 @@ export const Sidebar = memo(function Sidebar({
                 // ?? []：远程机器可能跑着不带 run_threads 的旧后端，缺字段按无未读处理而非崩侧栏
                 unread={(job.run_threads ?? []).filter((t) => !readRuns[t]).length}
                 running={(cronRunning[beOf(job)] ?? []).includes(job.id)}
-                dotColor={multi ? machineColor(job.backend || 'local', machines) : undefined}
-                dotName={multi ? machineName(job.backend || 'local', machines) : undefined}
+                machine={markOf(job)}
                 onOpen={onOpenCronJob}
               />
             ))}
@@ -596,33 +598,20 @@ function CollapsibleGroup({
   )
 }
 
-// 多机时的机器色点（仅颜色、不表状态）：CronJobRow / SessionRow 行首共用
-function ColorDot({ color, name }: { color: string; name?: string }) {
-  return (
-    <span
-      className="shrink-0 size-1.5 rounded-full"
-      style={{ background: color, boxShadow: `0 0 4px ${color}` }}
-      title={name}
-    />
-  )
-}
-
 // 定时任务行：失败 ⚠ + 任务名 + 未读角标（或运行中脉冲点）
 function CronJobRow({
   job,
   active,
   unread,
   running,
-  dotColor,
-  dotName,
+  machine,
   onOpen,
 }: {
   job: CronJob
   active: boolean
   unread: number
   running: boolean
-  dotColor?: string // 多机时行首机器色点
-  dotName?: string // 色点的机器名（tooltip）
+  machine?: MachineMarker // 多机时行首机器标记
   onOpen: (jobId: string) => void
 }) {
   const { t } = useI18n()
@@ -634,7 +623,7 @@ function CronJobRow({
       } ${job.enabled ? '' : 'opacity-55'}`}
     >
       {job.consecutive_errors > 0 && <AlertTriangle size={13} className="shrink-0 text-primary" />}
-      {dotColor && <ColorDot color={dotColor} name={dotName} />}
+      {machine && <MachineMark id={machine.id} color={machine.color} title={machine.name} />}
       <span className="flex-1 min-w-0 truncate text-left">{job.name}</span>
       {running ? (
         <span
@@ -703,14 +692,13 @@ function AccountMenu({
   )
 }
 
-// 会话行：进行中/待处理光点（行首左侧）+ 置顶 + 名 +（最近/搜索时）机器·项目标 + ⋮ 菜单
+// 会话行：（多机时）机器标记 + 待处理光点 + 渠道图标 + 名 + ⋮ 菜单
 function SessionRow({
   session,
   active,
   state,
   name,
-  dotColor,
-  dotName,
+  machine,
   query,
   onSelect,
   onPin,
@@ -721,8 +709,7 @@ function SessionRow({
   active: boolean
   state?: 'running' | 'attention'
   name: string
-  dotColor?: string // 多机时行首机器色点（仅颜色，无文字）
-  dotName?: string // 色点的机器名（tooltip）
+  machine?: MachineMarker // 多机时行首机器标记
   query?: string
   onSelect: (threadId: string, backend: string) => void
   onPin: (threadId: string, backend: string, pinned: boolean) => void
@@ -754,7 +741,7 @@ function SessionRow({
           active ? 'bg-surface text-ink' : 'text-ink/80 hover:bg-surface/60 hover:text-ink'
         }`}
       >
-        {dotColor && <ColorDot color={dotColor} name={dotName} />}
+        {machine && <MachineMark id={machine.id} color={machine.color} title={machine.name} />}
         {/* 仅「等你处理」保留提醒点（需你操作）；置顶进段不带 📌、进行中不带脉冲点 */}
         {state === 'attention' && (
           <span

@@ -1,5 +1,13 @@
 # Changelog
 
+## [0.2.106] - 2026-08-14
+
+### Changed
+- **多机标识从「纯色点」换成「机器类型图标」**（`desktop/src/components/MachineTabs.tsx`）— 侧栏里本地与远程只靠颜色区分，得先记住「金色=本机」才读得懂；现在形状直接说话：本地=笔记本、远程=云，颜色继续承担「是哪一台」（`machineColor` 未变，与会话行同源）。一个元素同时给出类型与身份，故取代了原先的纯色状态点。覆盖侧栏机器分组头、会话行（最近 / 搜索结果）、定时任务行、设置各面板的机器选择条、设置→连接的机器卡（原来是所有机器一律 `Server` 图标）、输入框模型 chip 与其下拉机器头。
+- **渲染本体收敛为一个 `MachineMark`**：`MachineDot` / `ColorDot` 两个组件与四处手写的「图标 + 着色 span」合并，`machineGlyph`（`id === 'local'` 的判定）退为模块私有，跨处漂移的尺寸与 tooltip 归一。`MachineIcon` = `MachineMark` + 连接态，`{ id, name, color }` 三元组具名为 `MachineMarker`，`CronJobRow` / `SessionRow` 的 `dotColor`+`dotName` 两参并作一个 `machine`。
+- **带连接态的图标按 `useMachine` 的 scope 判，不再裸读 `conn`**：断线机器在退避期是 `closed ↔ connecting` 来回跳，裸判会让图标在灰色静止与机器色呼吸之间一眨一眨；颜色现在是「这行属于哪台机」的唯一载体，不能跟着眨。改为重试中恒保持机器色 + 呼吸，只有 `stopped`（退避耗尽 / 令牌无效）才一次性转灰。
+- dev server 端口 5173 → 5175（`vite.config.ts` / `package.json` 的 `wait-on` / `main.cjs` 的 `DEV_ORIGIN` 三处同步），避开常被其它工具占用的 5173。
+
 ## [0.2.105] - 2026-08-11
 
 ### Fixed
