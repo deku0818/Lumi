@@ -54,7 +54,13 @@ async def run_relay_turn(
     got_text = False
     _end = turn_closer(streaming, chat_id, reply_to)
 
-    turn = run_claude_turn(prompt, cwd, binding.get("session_id", ""))
+    turn = run_claude_turn(
+        prompt,
+        cwd,
+        binding.get("session_id", ""),
+        model=binding.get("model", ""),
+        effort=binding.get("effort", ""),
+    )
     try:
         async for event in turn:
             kind = event.kind

@@ -20,6 +20,7 @@ import asyncio
 import contextlib
 import json
 import os
+import re
 import shutil
 from collections.abc import AsyncIterator
 from dataclasses import dataclass
@@ -47,7 +48,7 @@ def load_all() -> dict[str, dict]:
 
 
 def binding_of(thread_id: str) -> dict:
-    """某会话的直连绑定（{"active": bool, "session_id": str, "cwd": str}），无则空。"""
+    """某会话的直连绑定（{active, cwd, session_id, model, effort}），无则空。"""
     return load_all().get(thread_id, {})
 
 
@@ -63,21 +64,48 @@ def update_binding(thread_id: str, **fields) -> dict:
     return update_sidecar(_state_path(), thread_id, **fields)
 
 
-def split_dir_arg(rest: str) -> tuple[str | None, str]:
-    """/direct 进入参数切分：``--dir`` 打头则取到**行尾**为路径，任务从下一行开始。
+# 旗标前缀「短横」的各种形态：中文输入法会把连打的 `--` 自动变成破折号（— U+2014），
+# 移动端尤其如此，用户几乎必然踩到。不认它的代价不是少切一个参数，而是整段
+# `—dir /path` 被当任务喂给 cc——用户以为切了目录，cc 收到一句没头没尾的话。
+# 覆盖 ASCII 短横、U+2010–U+2015 各式连字符/破折号、U+2212 减号、U+FF0D 全角短横。
+_FLAG_DASH = re.compile(r"[-\u2010-\u2015\u2212\uff0d]{1,2}(?=[a-z])", re.IGNORECASE)
 
-    刻意不用引号/包裹类语法——输入法弯直混打、忘闭合都会静默错切；``--dir`` 前缀
-    吃到行尾没有歧义空间（无闭合符可错配，路径含空格免费支持），自然语言任务
-    不会以 ``--dir`` 开头。``--dir 路径`` 与 ``--dir=路径`` 都认（CLI 两种惯用形）。
-    返回 (路径, 任务)：路径 None = 没给旗标；"" = 给了旗标没给路径（调用方响亮报错）。
+
+# --effort 合法档位。cc 对无效值静默接受（实测 --effort bogus 照常跑），必须本侧校验；
+# --model 则由 cc 自己报明确错误（"may not exist or you may not have access"），不重复校验。
+EFFORT_LEVELS = ("low", "medium", "high", "xhigh", "max")
+DIRECT_FLAGS = ("dir", "model", "effort")
+
+
+def parse_direct_args(rest: str) -> tuple[dict[str, str], str]:
+    """/direct 进入参数：首行以旗标前缀开头即整行是旗标行，任务从下一行开始。
+
+    旗标行按前缀（``--`` 及其破折号变体，见 ``_FLAG_DASH``）切段，每段 ``key value…``：
+    值一直取到下一个前缀为止，故 ``--dir ~/My Projects --model opus`` 与
+    ``--model opus --dir ~/My Projects`` 都能解，路径含空格安全。刻意不用引号/包裹类
+    语法——输入法弯直混打、忘闭合会静默错切。返回 (旗标 dict, 任务)：未知旗标 / 旗标
+    缺值 → 抛 ValueError 带人话原因（调用方响亮报错）；首行不以前缀开头则整段是任务。
     """
-    if not rest.startswith("--dir"):
-        return None, rest.strip()
     first_line, _, task = rest.partition("\n")
-    arg = first_line[5:]
-    if arg and not arg.startswith((" ", "=")):
-        return None, rest.strip()  # "--dirty" 之类不是本旗标，整段仍是任务
-    return arg.lstrip("= ").strip(), task.strip()
+    if not _FLAG_DASH.match(first_line):
+        return {}, rest.strip()
+    flags: dict[str, str] = {}
+    for seg in _FLAG_DASH.split(first_line)[1:]:
+        seg = seg.strip()
+        if not seg:
+            continue
+        key, _, value = seg.partition(" ")
+        key, value = key.strip(), value.strip()
+        if key not in DIRECT_FLAGS:
+            raise ValueError(
+                f"不认识的选项 `--{key}`（可用：--dir / --model / --effort）"
+            )
+        if not value:
+            raise ValueError(f"`--{key}` 后面缺少值")
+        if key == "effort" and value not in EFFORT_LEVELS:
+            raise ValueError(f"`--effort` 只能是 {' / '.join(EFFORT_LEVELS)}")
+        flags[key] = value
+    return flags, task.strip()
 
 
 def relay_precheck() -> str:
@@ -184,7 +212,7 @@ async def _drain_stderr(stream: asyncio.StreamReader, tail: bytearray) -> None:
 
 
 async def run_claude_turn(
-    prompt: str, cwd: str, resume_sid: str = ""
+    prompt: str, cwd: str, resume_sid: str = "", model: str = "", effort: str = ""
 ) -> AsyncIterator[RelayEvent]:
     """跑一轮 cc 无头对话，产出 RelayEvent 流。
 
@@ -208,6 +236,11 @@ async def run_claude_turn(
     ]
     if resume_sid:
         cmd += ["--resume", resume_sid]
+    # 模型 / 思考档位是每轮属性而非会话属性：resume 时换模型照样生效且记忆不丢（实测）
+    if model:
+        cmd += ["--model", model]
+    if effort:
+        cmd += ["--effort", effort]
     proc = await asyncio.create_subprocess_exec(
         *cmd,
         stdin=asyncio.subprocess.PIPE,

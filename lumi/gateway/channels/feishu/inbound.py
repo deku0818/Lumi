@@ -33,8 +33,8 @@ from lumi.gateway.channels.feishu.relay_turn import run_relay_turn
 from lumi.gateway.channels.relay import (
     binding_of,
     is_active,
+    parse_direct_args,
     relay_precheck,
-    split_dir_arg,
     update_binding,
 )
 from lumi.sessions.session_meta import delete_meta, update_meta
@@ -119,6 +119,13 @@ def session_key_of(chat_type: str | None, chat_id: str, open_id: str) -> str:
     完整取舍见 docs/architecture/feishu.md。
     """
     return open_id if chat_type == "p2p" else chat_id
+
+
+def _model_line(model: str, effort: str) -> str:
+    """直连卡里的模型行：未指定不显示（跟随 cc 默认），指定了显示「模型：opus · high」。"""
+    if not model and not effort:
+        return ""
+    return "\n模型：`" + " · ".join(x for x in (model or "默认", effort) if x) + "`"
 
 
 def _help_line(name: str, description: str) -> str:
@@ -603,10 +610,14 @@ class FeishuInbound:
                 "`/direct claude` 任务 — 直连 Claude Code（续上次会话）\n"
                 "`/direct new` 任务 — 直连并开全新会话\n"
                 "`/direct exit` — 退出直连，回到 Lumi",
-                "指定目录：--dir 路径 放子命令后独占到行尾，任务换行写",
+                "选项（紧跟子命令、独占首行，任务换行写）：--dir 路径 · --model 别名/id · "
+                "--effort low|medium|high|xhigh|max",
             )
         else:
-            lines = [f"项目：`{binding.get('cwd') or self.channel.config.workspace}`"]
+            lines = [
+                f"项目：`{binding.get('cwd') or self.channel.config.workspace}`"
+                + _model_line(binding.get("model", ""), binding.get("effort", ""))
+            ]
             if sid := binding.get("session_id", ""):
                 # 完整 sid：resume 只认全 UUID（或标题），短号会报 No sessions match，
                 # 用户拿去终端接管时必须可整段复制
@@ -629,7 +640,8 @@ class FeishuInbound:
     async def _direct_enter(
         self, fresh: bool, rest: str, chat_id: str, thread_id: str, message_id: str
     ) -> None:
-        """进入直连：``--dir`` 切目录（粘性），换目录或 new 即开新会话，随带任务立刻跑。"""
+        """进入直连：``--dir`` 切目录 / ``--model`` ``--effort`` 定模型（均粘性），换目录或
+        new 即开新会话（换模型不换会话——模型是每轮属性），随带任务立刻跑。"""
         ch = self.channel
         if reason := relay_precheck():
             await ch.send_markdown(
@@ -646,21 +658,24 @@ class FeishuInbound:
         if fresh and ch.bridge_pool.busy(thread_id):
             await self._send_busy_hint(chat_id, message_id)
             return
-        raw_dir, task = split_dir_arg(rest)
-        if raw_dir == "":
+        try:
+            flags, task = parse_direct_args(rest)
+        except ValueError as e:
             await ch.send_markdown(
                 chat_id,
-                "`--dir` 后面缺少路径。",
+                str(e),
                 reply_to=message_id,
-                title="❌ 目录未指定",
+                title="❌ 选项有误",
                 template="red",
-                note="示例：/direct claude --dir ~/Cocoon/axi",
+                note="示例：/direct claude --dir ~/Cocoon/axi --model opus",
             )
             return
         binding = binding_of(thread_id)
         prev_cwd = binding.get("cwd") or ch.config.workspace
-        cwd = prev_cwd  # --dir 是粘性的：不给则沿用上次，首次进则渠道 workspace
-        if raw_dir:
+        cwd = (
+            prev_cwd  # 旗标都是粘性的：不给则沿用上次，首次进则渠道 workspace / cc 默认
+        )
+        if raw_dir := flags.get("dir"):
             target_dir = Path(raw_dir).expanduser()
             if not target_dir.is_dir():
                 # 响亮失败，绝不静默把打错的路径当任务文本喂给 cc
@@ -677,11 +692,15 @@ class FeishuInbound:
         # 会话属于项目：显式换了目录就开新会话，跨项目续旧上下文只会误导 cc
         switched = cwd != prev_cwd
         resumed = not fresh and not switched and bool(binding.get("session_id"))
+        model = flags.get("model", binding.get("model", ""))
+        effort = flags.get("effort", binding.get("effort", ""))
         update_binding(
             thread_id,
             active=True,
             cwd=cwd,
             session_id=binding.get("session_id", "") if resumed else "",
+            model=model,
+            effort=effort,
         )
         if resumed:
             mode = "续接上次会话"
@@ -691,7 +710,7 @@ class FeishuInbound:
             mode = "全新会话"
         await ch.send_markdown(
             chat_id,
-            f"**{mode}**\n项目：`{cwd}`",
+            f"**{mode}**\n项目：`{cwd}`" + _model_line(model, effort),
             reply_to=message_id,
             title="⚡ 已直连 Claude Code",
             template="yellow",
@@ -976,6 +995,16 @@ class FeishuInbound:
             raise
         # 本轮已入 checkpoint：通知 desktop 旁观刷新
         hub.on_channel_activity(thread_id, "feishu")
+        # 直连中通知只读：同一时刻只有一个工人在听，此刻回复会直达 Claude Code（它没有
+        # 这份上下文），想让 Lumi 跟进得先显式退出直连——把边界说清楚，不搞第二通道
+        if is_active(thread_id):
+            await ch.send_markdown(
+                chat_id,
+                "以上由 Lumi 推送。当前处于直连模式，直接回复会发给 Claude Code。",
+                title="⚡ 直连中",
+                template="yellow",
+                note="需要 Lumi 跟进请先 /direct exit",
+            )
 
     async def _run_minute_turn(
         self, bridge, thread_id: str, target: str, event: _MinuteEvent

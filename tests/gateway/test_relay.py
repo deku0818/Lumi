@@ -197,27 +197,51 @@ def test_tool_key_aliases():
     assert _tool_key("WebFetch") == "webfetch"  # 查不到落表默认动作，键原样
 
 
-def test_split_dir_arg():
-    from lumi.gateway.channels.relay import split_dir_arg
+def test_parse_direct_args():
+    import pytest
 
-    # 无前缀：路径 None，整段恒为任务
-    assert split_dir_arg("修一下构建报错") == (None, "修一下构建报错")
-    # 任务中途出现 --dir 不误判（只认开头）
-    assert split_dir_arg("看下 --dir xxx 是什么") == (None, "看下 --dir xxx 是什么")
-    # --dir 吃到行尾，任务从次行开始
-    assert split_dir_arg("--dir ~/Cocoon/axi\n修一下报错") == (
-        "~/Cocoon/axi",
+    from lumi.gateway.channels.relay import parse_direct_args
+
+    # 无旗标：整段恒为任务
+    assert parse_direct_args("修一下构建报错") == ({}, "修一下构建报错")
+    # 任务中途出现 --dir 不误判（只认首行开头）
+    assert parse_direct_args("看下 --dir xxx 是什么") == ({}, "看下 --dir xxx 是什么")
+    # 旗标行吃到行尾，任务从次行开始
+    assert parse_direct_args("--dir ~/Cocoon/axi\n修一下报错") == (
+        {"dir": "~/Cocoon/axi"},
         "修一下报错",
     )
-    # 等号形式同样认（CLI 两种惯用形）
-    assert split_dir_arg("--dir=~/Cocoon/axi") == ("~/Cocoon/axi", "")
-    # 路径含空格免费支持
-    assert split_dir_arg("--dir ~/My Projects/demo") == ("~/My Projects/demo", "")
-    # 只有 --dir 无路径 → 路径为空串（与 None 区分：调用方据此响亮报错）
-    assert split_dir_arg("--dir") == ("", "")
-    # "--dirxxx" 不是本旗标：路径 None，整段仍是任务
-    assert split_dir_arg("--dirty 是什么意思") == (None, "--dirty 是什么意思")
-    assert split_dir_arg("") == (None, "")
+    # 多旗标任意顺序；路径含空格安全（值取到下一个 -- 为止）
+    assert parse_direct_args("--dir ~/My Projects/demo --model opus") == (
+        {"dir": "~/My Projects/demo", "model": "opus"},
+        "",
+    )
+    assert parse_direct_args("--model opus --effort high --dir ~/x") == (
+        {"model": "opus", "effort": "high", "dir": "~/x"},
+        "",
+    )
+    # 中文输入法把 -- 打成破折号 / 全角短横：同样认，否则整段被当任务喂给 cc
+    assert parse_direct_args("\u2014dir ~/x \u2014model opus") == (
+        {"dir": "~/x", "model": "opus"},
+        "",
+    )
+    assert parse_direct_args("\uff0ddir ~/x") == ({"dir": "~/x"}, "")
+    # 任务正文里的破折号后跟中文，不是旗标前缀
+    assert parse_direct_args("修一下\u2014\u2014这个bug") == (
+        {},
+        "修一下\u2014\u2014这个bug",
+    )
+    # 不支持等号形式：--model=sonnet 是未知旗标名
+    with pytest.raises(ValueError, match="不认识"):
+        parse_direct_args("--model=sonnet")
+    # 响亮失败：缺值 / 未知旗标 / effort 非法值（cc 对无效 effort 静默接受，须本侧拦）
+    with pytest.raises(ValueError, match="缺少值"):
+        parse_direct_args("--dir")
+    with pytest.raises(ValueError, match="不认识"):
+        parse_direct_args("--dirty 是什么")
+    with pytest.raises(ValueError, match="effort"):
+        parse_direct_args("--effort bogus")
+    assert parse_direct_args("") == ({}, "")
 
 
 def test_source_note_full_sid():

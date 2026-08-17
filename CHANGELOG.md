@@ -1,5 +1,14 @@
 # Changelog
 
+## [0.2.109] - 2026-08-17
+
+### Added
+- **飞书 `/direct` 可指定模型与思考档位** — `--model 别名或id`（`fable`/`opus`/`sonnet`/`haiku` 或完整 id）、`--effort low|medium|high|xhigh|max`，与 `--dir` 同一套首行旗标语法（任意顺序、值取到下一个 `--`），三者均粘性；`/direct` 状态卡与进入确认卡显示「模型：opus · high」。换模型**不**开新会话——实测模型是每轮属性，`--resume` 时切换生效且记忆不丢。`--effort` 本侧枚举校验（实测 cc 对无效值静默接受），`--model` 交 cc 报明确错误经红卡透传。旗标前缀认 `--` 的破折号 / 全角变体（`—dir`）：中文输入法常把连打短横转成破折号，不认它整段会被当任务喂给 cc。不支持 `--key=value`。
+- **直连中的 Lumi 通知只读提示** — 妙记纪要 / 后台任务完成 / 日程提醒在直连期间照常推送，紧跟一张「⚡ 直连中」黄卡说明此刻回复会直达 Claude Code、需要 Lumi 跟进先 `/direct exit`。同一时刻只有一个工人在听，路由零特判。
+
+### Changed
+- `split_dir_arg` 泛化为 `parse_direct_args`：统一旗标行解析，未知旗标 / 缺值 / 非法 effort 抛人话 `ValueError` → 一张「选项有误」红卡。
+
 ## [0.2.108] - 2026-08-17
 
 ### Added
