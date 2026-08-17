@@ -10,6 +10,7 @@ persist_image_blocks 统一存盘取路径，与文件附件一并由 bridge 拼
 from __future__ import annotations
 
 import asyncio
+import itertools
 import json
 import os
 import re
@@ -28,6 +29,14 @@ from lumi.gateway.channels.commands import SYSTEM_COMMANDS, parse_slash_command
 from lumi.gateway.channels.feishu.directory import fallback_chat_name, fallback_name
 from lumi.gateway.channels.feishu.minutes import transcript_hint
 from lumi.gateway.channels.feishu.outbound import run_turn
+from lumi.gateway.channels.feishu.relay_turn import run_relay_turn
+from lumi.gateway.channels.relay import (
+    binding_of,
+    is_active,
+    relay_precheck,
+    split_dir_arg,
+    update_binding,
+)
 from lumi.sessions.session_meta import delete_meta, update_meta
 from lumi.utils.constants import (
     FEISHU_THREAD_PREFIX,
@@ -74,6 +83,9 @@ class _Pending:
     reply_to: str = ""
     sender_name: str = ""  # 发送者显示名（身份目录解析），渲染为 <sender> 标签
     ts: int = 0  # 飞书 message.create_time（毫秒），经 additional_kwargs 供 UI 渲染
+    relay: bool = (
+        False  # 入队那一刻是否处于直连——路由在发送时定格，不随后来的模式切换漂移
+    )
 
 
 @dataclass(frozen=True)
@@ -400,7 +412,11 @@ class FeishuInbound:
             parsed = parse_slash_command(text) if text else None
             if parsed and parsed[0] in SYSTEM_COMMANDS:
                 await self._run_system_command(
-                    parsed[0], chat_id, feishu_thread_id(session_key), message_id
+                    parsed[0],
+                    parsed[1],
+                    chat_id,
+                    feishu_thread_id(session_key),
+                    message_id,
                 )
                 return
 
@@ -443,40 +459,51 @@ class FeishuInbound:
                 sender_name = fallback_name(open_id)
 
             thread_id = feishu_thread_id(session_key)
-            # 映射记在池上：热重载保留池但重建 inbound，通知 poller 靠它回投。
-            # 存真实 chat_id（私聊的 thread key 是 open_id，但投递走 chat_id 更直接）
-            ch.bridge_pool.chat_ids[thread_id] = chat_id
             await self._sync_session_title(
                 thread_id, chat_id, chat_type, sender_name, open_id
             )
-            bridge = await ch.bridge_pool.get(thread_id)
-            lock = ch.bridge_pool.lock(thread_id)
-            pending = _Pending(
-                text,
-                image_refs,
-                file_refs,
-                reply_to=message_id,
-                sender_name=sender_name,
-                ts=int(getattr(message, "create_time", 0) or 0),
+            await self._admit(
+                chat_id,
+                thread_id,
+                _Pending(
+                    text,
+                    image_refs,
+                    file_refs,
+                    reply_to=message_id,
+                    sender_name=sender_name,
+                    ts=int(getattr(message, "create_time", 0) or 0),
+                    relay=is_active(thread_id),
+                ),
             )
-
-            # 忙判与上锁相邻、其间无 await：事件循环上原子。忙时入队（上限 _MAX_QUEUE，
-            # 满则丢弃并提示），由当前持锁者跑完后合并处理；空闲则当场上锁处理。
-            if lock.locked():
-                queue = self._queues.setdefault(thread_id, [])
-                if len(queue) >= _MAX_QUEUE:
-                    await ch.send_markdown(
-                        chat_id,
-                        "消息有点多，这条先跳过，等我回复后再发。",
-                        reply_to=message_id,
-                    )
-                    return
-                queue.append(pending)
-                return
-
-            await self._locked_drain(bridge, chat_id, thread_id, [pending])
         except Exception as e:
             logger.error(f"Feishu 消息处理失败: {e}", exc_info=True)
+
+    async def _admit(self, chat_id: str, thread_id: str, pending: _Pending) -> None:
+        """把一条待处理消息交给本会话：空闲当场上锁跑，忙则排队（上限 _MAX_QUEUE，满则
+        丢弃并提示）由持锁者跑完后合并处理。入站消息与 /direct 随带的首个任务共用。
+
+        忙判与上锁相邻、其间无 await：事件循环上原子。
+        """
+        pool = self.channel.bridge_pool
+        # 映射记在池上：热重载保留池但重建 inbound，通知 poller 靠它回投。
+        # 存真实 chat_id（私聊的 thread key 是 open_id，但投递走 chat_id 更直接）
+        pool.chat_ids[thread_id] = chat_id
+        bridge = await pool.get(thread_id)
+        lock = pool.lock(thread_id)
+        if lock.locked():
+            queue = self._queues.setdefault(thread_id, [])
+            if len(queue) >= _MAX_QUEUE:
+                await self.channel.send_markdown(
+                    chat_id,
+                    "消息有点多，等我回复后再发。",
+                    reply_to=pending.reply_to,
+                    title="⏳ 这条先跳过",
+                    template="orange",
+                )
+                return
+            queue.append(pending)
+            return
+        await self._locked_drain(bridge, chat_id, thread_id, [pending])
 
     async def _drain(
         self,
@@ -492,8 +519,12 @@ class FeishuInbound:
         故每轮跑完都重新 pop 队列直至为空。batch 为空时直接空转（通知轮的兜底调用）。
         """
         while batch:
-            await self._run_batch(ch, bridge, chat_id, thread_id, batch)
-            batch = self._queues.pop(thread_id, [])
+            # 排队期间用户可能切了 /direct：按每条入队时定格的路由分段，同段合并
+            # 成一轮，不同段各走各的——发给 Lumi 的不会因后来直连而被 cc 执行，反之亦然
+            flag = batch[0].relay
+            head = list(itertools.takewhile(lambda m: m.relay == flag, batch))
+            await self._run_batch(ch, bridge, chat_id, thread_id, head)
+            batch = batch[len(head) :] or self._queues.pop(thread_id, [])
 
     async def _locked_drain(
         self, bridge, chat_id: str, thread_id: str, batch: list[_Pending]
@@ -515,7 +546,7 @@ class FeishuInbound:
     # ── 渠道系统命令 ──
 
     async def _run_system_command(
-        self, name: str, chat_id: str, thread_id: str, message_id: str
+        self, name: str, extra: str, chat_id: str, thread_id: str, message_id: str
     ) -> None:
         """执行渠道系统命令（调用方已确认 name ∈ SYSTEM_COMMANDS）。"""
         if name == "stop":
@@ -524,9 +555,174 @@ class FeishuInbound:
             await self._cmd_clear(chat_id, thread_id, message_id)
         elif name == "help":
             await self._cmd_help(chat_id, thread_id, message_id)
+        elif name == "direct":
+            await self._cmd_direct(extra, chat_id, thread_id, message_id)
         else:
             # SYSTEM_COMMANDS 新增条目但忘写 handler：响亮失败，别静默误发 help
             logger.error(f"系统命令 /{name} 无 handler")
+
+    # ── 直连模式（/direct）──
+
+    async def _cmd_direct(
+        self, extra: str, chat_id: str, thread_id: str, message_id: str
+    ) -> None:
+        """/direct 直连管理：裸敲看状态，claude/new 进入（可带首个任务），exit 退出。
+
+        直连状态落盘（relay sidecar）——serve 重启后模式不静默失效，用户以为在和
+        cc 说话、消息突然灌进 Lumi 是事故。退出保留 session_id，续接零成本。
+        """
+        # split(maxsplit=1)：子命令与其余部分按任意空白切（含换行——--dir 语法任务在次行）
+        parts = extra.strip().split(maxsplit=1)
+        sub = parts[0] if parts else ""
+        rest = parts[1] if len(parts) > 1 else ""
+        if sub == "":
+            await self._direct_status(chat_id, thread_id, message_id)
+        elif sub in ("claude", "new"):
+            await self._direct_enter(sub == "new", rest, chat_id, thread_id, message_id)
+        elif sub == "exit":
+            await self._direct_exit(chat_id, thread_id, message_id)
+        else:
+            await self.channel.send_markdown(
+                chat_id,
+                f"`/direct {sub}` 不认识。",
+                reply_to=message_id,
+                title="⚠️ 未知子命令",
+                template="orange",
+                note="/direct 查看用法",
+            )
+
+    async def _direct_status(
+        self, chat_id: str, thread_id: str, message_id: str
+    ) -> None:
+        """裸敲 /direct：未连接=用法说明，直连中=会话状态。"""
+        binding = binding_of(thread_id)
+        if not binding.get("active"):
+            title, body, note = (
+                "⚡ 直连模式 · 未连接",
+                "把消息直达本机的编程工人，Lumi 不参与。\n"
+                "`/direct claude` 任务 — 直连 Claude Code（续上次会话）\n"
+                "`/direct new` 任务 — 直连并开全新会话\n"
+                "`/direct exit` — 退出直连，回到 Lumi",
+                "指定目录：--dir 路径 放子命令后独占到行尾，任务换行写",
+            )
+        else:
+            lines = [f"项目：`{binding.get('cwd') or self.channel.config.workspace}`"]
+            if sid := binding.get("session_id", ""):
+                # 完整 sid：resume 只认全 UUID（或标题），短号会报 No sessions match，
+                # 用户拿去终端接管时必须可整段复制
+                lines.append(f"会话：`{sid}`（退出后保留，可续接）")
+                lines.append(f"终端接管：`claude --resume {sid}`")
+            title, body, note = (
+                "⚡ 直连中 · Claude Code",
+                "\n".join(lines),
+                "/direct exit 退出直连",
+            )
+        await self.channel.send_markdown(
+            chat_id,
+            body,
+            reply_to=message_id,
+            title=title,
+            template="yellow",
+            note=note,
+        )
+
+    async def _direct_enter(
+        self, fresh: bool, rest: str, chat_id: str, thread_id: str, message_id: str
+    ) -> None:
+        """进入直连：``--dir`` 切目录（粘性），换目录或 new 即开新会话，随带任务立刻跑。"""
+        ch = self.channel
+        if reason := relay_precheck():
+            await ch.send_markdown(
+                chat_id,
+                reason,
+                reply_to=message_id,
+                title="❌ 无法直连",
+                template="red",
+                note="处理后重新发送 /direct claude",
+            )
+            return
+        # 在跑的轮结束时会把 sid 写回绑定：此刻清 sid 开新会话必被覆盖，"全新会话"
+        # 会静默变成续旧会话——与 /clear 同一守卫，先停再开
+        if fresh and ch.bridge_pool.busy(thread_id):
+            await self._send_busy_hint(chat_id, message_id)
+            return
+        raw_dir, task = split_dir_arg(rest)
+        if raw_dir == "":
+            await ch.send_markdown(
+                chat_id,
+                "`--dir` 后面缺少路径。",
+                reply_to=message_id,
+                title="❌ 目录未指定",
+                template="red",
+                note="示例：/direct claude --dir ~/Cocoon/axi",
+            )
+            return
+        binding = binding_of(thread_id)
+        prev_cwd = binding.get("cwd") or ch.config.workspace
+        cwd = prev_cwd  # --dir 是粘性的：不给则沿用上次，首次进则渠道 workspace
+        if raw_dir:
+            target_dir = Path(raw_dir).expanduser()
+            if not target_dir.is_dir():
+                # 响亮失败，绝不静默把打错的路径当任务文本喂给 cc
+                await ch.send_markdown(
+                    chat_id,
+                    f"`{raw_dir}`",
+                    reply_to=message_id,
+                    title="❌ 目录不存在",
+                    template="red",
+                    note="检查路径拼写，或先在该机器上创建目录",
+                )
+                return
+            cwd = str(target_dir)
+        # 会话属于项目：显式换了目录就开新会话，跨项目续旧上下文只会误导 cc
+        switched = cwd != prev_cwd
+        resumed = not fresh and not switched and bool(binding.get("session_id"))
+        update_binding(
+            thread_id,
+            active=True,
+            cwd=cwd,
+            session_id=binding.get("session_id", "") if resumed else "",
+        )
+        if resumed:
+            mode = "续接上次会话"
+        elif switched:
+            mode = "已切换项目，开启新会话"
+        else:
+            mode = "全新会话"
+        await ch.send_markdown(
+            chat_id,
+            f"**{mode}**\n项目：`{cwd}`",
+            reply_to=message_id,
+            title="⚡ 已直连 Claude Code",
+            template="yellow",
+            note="消息将直达 Claude Code · /direct exit 退出",
+        )
+        if task:
+            await self._admit(
+                chat_id, thread_id, _Pending(task, reply_to=message_id, relay=True)
+            )
+
+    async def _direct_exit(self, chat_id: str, thread_id: str, message_id: str) -> None:
+        ch = self.channel
+        if not binding_of(thread_id).get("active"):
+            await ch.send_markdown(
+                chat_id,
+                "当前未在直连模式，无需退出。",
+                reply_to=message_id,
+                title="⚠️ 未在直连模式",
+                template="orange",
+                note="/direct claude 进入直连",
+            )
+            return
+        update_binding(thread_id, active=False)
+        await ch.send_markdown(
+            chat_id,
+            "回到 Lumi。Claude Code 会话已保留。",
+            reply_to=message_id,
+            title="✅ 已退出直连",
+            template="green",
+            note="/direct claude 随时续接",
+        )
 
     async def _cmd_stop(self, chat_id: str, thread_id: str, message_id: str) -> None:
         """停止当前轮 + 本会话全部后台任务（IM 没有 desktop 的任务抽屉，这是唯一手段）。
@@ -557,10 +753,16 @@ class FeishuInbound:
                     chat_id,
                     "正在处理后台任务通知，这一轮无法中断，请稍候。",
                     reply_to=message_id,
+                    title="⏳ 暂时无法中断",
+                    template="orange",
                 )
             else:
                 await ch.send_markdown(
-                    chat_id, "当前没有正在执行的任务。", reply_to=message_id
+                    chat_id,
+                    "当前没有正在执行的任务。",
+                    reply_to=message_id,
+                    title="💤 当前空闲",
+                    template="blue",
                 )
             return
         parts = []
@@ -569,7 +771,11 @@ class FeishuInbound:
         if bg_stopped:
             parts.append(f"已停止 {bg_stopped} 个后台任务")
         await ch.send_markdown(
-            chat_id, "⏹ " + "，".join(parts) + "。", reply_to=message_id
+            chat_id,
+            "，".join(parts) + "。",
+            reply_to=message_id,
+            title="⏹ 已停止",
+            template="green",
         )
         if run_stopped:
             await self._drain_after_cancel(task, thread_id, chat_id)
@@ -593,24 +799,55 @@ class FeishuInbound:
             await self._locked_drain(bridge, chat_id, thread_id, batch)
 
     async def _cmd_clear(self, chat_id: str, thread_id: str, message_id: str) -> None:
-        """清空会话（与 desktop「清空会话」同路径：delete_thread + delete_meta + 广播）。"""
+        """清空会话（与 desktop「清空会话」同路径：delete_thread + delete_meta + 广播）。
+
+        直连模式下语义统一为「作用于你正在对话的那个工人」：只清 cc 的 session_id，
+        Lumi 会话原封不动。在跑的轮不清（result 会把新 sid 写回，等于白清）。
+        """
         ch = self.channel
+        if is_active(thread_id):
+            if ch.bridge_pool.busy(thread_id):
+                await self._send_busy_hint(chat_id, message_id)
+                return
+            update_binding(thread_id, session_id="")
+            await ch.send_markdown(
+                chat_id,
+                "下一条消息将开启全新对话。",
+                reply_to=message_id,
+                title="✅ 已清空 Claude Code 会话",
+                template="green",
+            )
+            return
         pool = ch.bridge_pool
         bridge = await pool.get(thread_id)
         lock = pool.lock(thread_id)
         if lock.locked():
-            await ch.send_markdown(
-                chat_id, "正在执行任务，请先发送 /stop。", reply_to=message_id
-            )
+            await self._send_busy_hint(chat_id, message_id)
             return
         async with lock:
             await bridge.delete_thread(thread_id)
         delete_meta(thread_id)
         hub.on_channel_activity(thread_id, "feishu")
-        await ch.send_markdown(chat_id, "会话已清空。", reply_to=message_id)
+        await ch.send_markdown(
+            chat_id,
+            "下一条消息将开启全新对话。",
+            reply_to=message_id,
+            title="✅ 会话已清空",
+            template="green",
+        )
         # 清空期间（持锁窗口）入队的消息在此接手，不留到下条消息才被捎带
         if not lock.locked() and (batch := self._queues.pop(thread_id, [])):
             await self._locked_drain(bridge, chat_id, thread_id, batch)
+
+    async def _send_busy_hint(self, chat_id: str, message_id: str) -> None:
+        """撞上在跑的轮的操作（/clear、/direct new）：提示先停。"""
+        await self.channel.send_markdown(
+            chat_id,
+            "正在执行任务，请先发送 /stop 再试。",
+            reply_to=message_id,
+            title="⏳ 请先停止任务",
+            template="orange",
+        )
 
     async def _cmd_help(self, chat_id: str, thread_id: str, message_id: str) -> None:
         """渠道直答命令列表卡片，不跑 agent、不为此建桥（建桥重且常驻）。
@@ -618,6 +855,19 @@ class FeishuInbound:
         渠道桥记忆恒开且 thread 恒为渠道前缀，available_commands(memory_enabled=True,
         channel=True) 与 bridge.list_commands() 恒等价，无需按有桥无桥分化。
         """
+        if is_active(thread_id):
+            # 直连期只有系统命令可用（技能不进 cc），/stop /clear 语义变为作用于 cc
+            lines = ["当前处于直连模式，消息将直达 Claude Code。", ""]
+            lines += [_help_line(n, d) for n, d in SYSTEM_COMMANDS.items()]
+            await self.channel.send_markdown(
+                chat_id,
+                "\n".join(lines),
+                reply_to=message_id,
+                title="⚡ 直连 · Claude Code",
+                template="yellow",
+                note="其余文本（含 Claude Code 自身的斜杠命令）原样透传",
+            )
+            return
         await self.channel.send_markdown(
             chat_id,
             help_markdown(
@@ -819,7 +1069,13 @@ class FeishuInbound:
         thread_id: str,
         batch: list[_Pending],
     ) -> None:
-        """把一批（≥1 条）积压消息合并成一次 agent run。媒体在此下载（调用方已持锁）。"""
+        """把一批（≥1 条）积压消息合并成一次 agent run。媒体在此下载（调用方已持锁）。
+
+        路由按 batch 里定格的 relay 标记（_drain 已保证同批同标记），不重读当前模式。
+        """
+        if batch[0].relay:
+            await self._run_relay_batch(ch, chat_id, thread_id, batch)
+            return
         merged_text = merge_messages(batch)
         image_refs = [r for m in batch for r in m.image_refs]
         file_refs = [r for m in batch for r in m.file_refs]
@@ -876,6 +1132,59 @@ class FeishuInbound:
         # 本轮已入 checkpoint：通知所有 desktop 连接刷新会话列表 / 旁观视图
         hub.on_channel_activity(thread_id, "feishu")
 
+    async def _run_relay_batch(
+        self,
+        ch: FeishuChannel,
+        chat_id: str,
+        thread_id: str,
+        batch: list[_Pending],
+    ) -> None:
+        """直连模式的一批消息 → 一轮 cc 无头对话（调用方已持锁）。
+
+        文本顺次合并（cc 不需要 <sender> 标签与合并 reminder）；媒体（图片 / 文件）
+        下载落盘后以路径行附在文本后，cc 自行 read（图片走视觉读取）。除被拦截的
+        系统命令外一切原样透传——cc 自己的斜杠命令因此天然可用。
+        """
+        # 多条合并时保留发言人（群聊里几个人的话混成一段，cc 分不清谁说的）；单条不加
+        texts = [
+            f"{m.sender_name}：{m.text}" if len(batch) > 1 and m.sender_name else m.text
+            for m in batch
+            if m.text
+        ]
+        target = inbound_dir(thread_id)
+        downloads = [
+            self._save_image(mid, ik, target) for m in batch for mid, ik in m.image_refs
+        ] + [
+            self._download_file(mid, fk, fname, target)
+            for m in batch
+            for mid, fk, fname in m.file_refs
+        ]
+        paths = [p for p in await asyncio.gather(*downloads) if p]
+        prompt = "\n\n".join(texts)
+        if paths:
+            listing = "\n".join(paths)
+            prompt = (
+                f"{prompt}\n\n用户随消息发来的文件（已存到本机，可直接读取）：\n{listing}"
+            ).strip()
+        if not prompt:
+            # 媒体-only 且全部下载失败：响亮失败，别让用户以为 Claude Code 在处理
+            await ch.send_markdown(
+                chat_id,
+                "附件下载失败，这条没有转给 Claude Code。",
+                reply_to=batch[-1].reply_to,
+                title="⚠️ 附件获取失败",
+                template="red",
+                note="请重新发送",
+            )
+            return
+        await run_relay_turn(
+            ch,
+            chat_id=chat_id,
+            thread_id=thread_id,
+            reply_to=batch[-1].reply_to,
+            prompt=prompt,
+        )
+
     def _is_bot_mentioned(self, message: Any) -> bool:
         """检查群消息是否 @ 了本机器人（@_all 或精确匹配 bot open_id）。
 
@@ -925,17 +1234,50 @@ class FeishuInbound:
         self, message_id: str, file_key: str, file_name: str, target: Path
     ) -> str | None:
         """下载飞书文件资源到 target 目录，返回落盘绝对路径。"""
+        return await self._download_to(
+            message_id,
+            file_key,
+            "file",
+            target,
+            lambda _: safe_filename(file_key, file_name),
+        )
+
+    async def _save_image(
+        self, message_id: str, image_key: str, target: Path
+    ) -> str | None:
+        """直连模式：图片落盘为文件（cc 用 read 视觉读取，不走 base64 block）。
+
+        完整 key 做文件名：飞书 image_key 前 12 位几乎全是固定前缀，截断会让同批
+        多图撞名互相覆盖。扩展名按字节嗅探。
+        """
+        from lumi.agents.tools.providers.filesystem.media import detect_image_format
+
+        def name_of(data: bytes) -> str:
+            ext = detect_image_format(data).removeprefix("image/") or "png"
+            return f"{safe_filename(image_key, image_key)}.{ext}"
+
+        return await self._download_to(message_id, image_key, "image", target, name_of)
+
+    async def _download_to(
+        self,
+        message_id: str,
+        key: str,
+        rtype: str,
+        target: Path,
+        name_of: Callable[[bytes], str],
+    ) -> str | None:
+        """下载一个飞书资源并写到 target/name_of(data)，返回绝对路径；失败 None。"""
         loop = asyncio.get_running_loop()
         data = await loop.run_in_executor(
-            None, self._download_resource_sync, message_id, file_key, "file"
+            None, self._download_resource_sync, message_id, key, rtype
         )
         if not data:
             return None
-        path = target / safe_filename(file_key, file_name)
+        path = target / name_of(data)
         try:
             await loop.run_in_executor(None, path.write_bytes, data)
         except Exception as e:
-            logger.error(f"Feishu 文件写盘失败 {path}: {e}", exc_info=True)
+            logger.error(f"Feishu 资源写盘失败 {path}: {e}", exc_info=True)
             return None
         return str(path)
 

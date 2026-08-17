@@ -100,6 +100,11 @@ class BridgePool:
         """该 thread 的运行锁；建桥时一并创建，故此处必然存在。"""
         return self._locks[thread_id]
 
+    def busy(self, thread_id: str) -> bool:
+        """本会话是否有轮在跑（不建桥、不建锁：从未建桥的会话必然空闲）。"""
+        lock = self.try_lock(thread_id)
+        return lock is not None and lock.locked()
+
     def try_lock(self, thread_id: str) -> asyncio.Lock | None:
         """该 thread 的运行锁；未建桥（无此 thread）返回 None。"""
         return self._locks.get(thread_id)

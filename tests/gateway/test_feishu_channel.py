@@ -251,7 +251,7 @@ async def test_run_batch_merges_media(monkeypatch):
 def _sent_collector(ch, monkeypatch):
     sent = []
 
-    async def fake_send(chat_id, text, reply_to=None, title=""):
+    async def fake_send(chat_id, text, reply_to=None, title="", template="", note=""):
         sent.append((text, title))
         return "mid"
 
@@ -271,7 +271,7 @@ async def test_stop_cancels_run_and_clears_queue(monkeypatch):
     await asyncio.sleep(0)
     ch.bridge_pool.run_tasks["t"] = task
     fi._queues["t"] = [inb._Pending("排队中")]
-    await fi._run_system_command("stop", "oc", "t", "m1")
+    await fi._run_system_command("stop", "", "oc", "t", "m1")
     assert "t" not in fi._queues  # 积压一并清空，否则马上又触发新一轮
     assert "已停止" in sent[0][0]
     with pytest.raises(asyncio.CancelledError):
@@ -281,7 +281,7 @@ async def test_stop_cancels_run_and_clears_queue(monkeypatch):
 async def test_stop_idle_replies_nothing_running(monkeypatch):
     ch = FeishuChannel(FeishuChannelConfig())
     sent = _sent_collector(ch, monkeypatch)
-    await ch.inbound._run_system_command("stop", "oc", "t", "m1")
+    await ch.inbound._run_system_command("stop", "", "oc", "t", "m1")
     assert "没有正在执行" in sent[0][0]
 
 
@@ -295,7 +295,7 @@ async def test_stop_idle_still_stops_bg_tasks(monkeypatch):
         return 2
 
     monkeypatch.setattr(inb, "cancel_thread_bg_tasks", fake_cancel)
-    await fi._run_system_command("stop", "oc", "t", "m1")
+    await fi._run_system_command("stop", "", "oc", "t", "m1")
     assert "已停止 2 个后台任务" in sent[0][0]
     assert "当前任务" not in sent[0][0]  # 没有在跑的轮，不虚报
 
@@ -316,7 +316,7 @@ async def test_stop_reports_run_and_bg_together(monkeypatch):
         return 1
 
     monkeypatch.setattr(inb, "cancel_thread_bg_tasks", fake_cancel)
-    await fi._run_system_command("stop", "oc", "t", "m1")
+    await fi._run_system_command("stop", "", "oc", "t", "m1")
     assert "已停止当前任务" in sent[0][0] and "1 个后台任务" in sent[0][0]
     with pytest.raises(asyncio.CancelledError):
         await task
@@ -331,7 +331,7 @@ async def test_stop_during_notification_turn_keeps_queue(monkeypatch):
     await lock.acquire()
     ch.bridge_pool._locks["t"] = lock  # 锁被占但 run_tasks 无条目 = poller 轮
     fi._queues["t"] = [inb._Pending("排队中")]
-    await fi._run_system_command("stop", "oc", "t", "m1")
+    await fi._run_system_command("stop", "", "oc", "t", "m1")
     assert "无法中断" in sent[0][0]
     assert fi._queues["t"]  # 没停到任何东西，排队消息不能被丢
 
@@ -359,9 +359,10 @@ async def test_clear_deletes_thread_and_meta(monkeypatch):
     _patch_pool_get(ch, monkeypatch, bridge)
     meta_deleted = []
     monkeypatch.setattr(inb, "delete_meta", meta_deleted.append)
-    await ch.inbound._run_system_command("clear", "oc", "t", "m1")
+    await ch.inbound._run_system_command("clear", "", "oc", "t", "m1")
     assert bridge.deleted == ["t"] and meta_deleted == ["t"]
-    assert "已清空" in sent[0][0]
+    # 方案 A 系统卡：结论走 header title，正文只留下一步提示
+    assert "已清空" in sent[0][1]
 
 
 async def test_clear_busy_prompts_stop_first(monkeypatch):
@@ -372,7 +373,7 @@ async def test_clear_busy_prompts_stop_first(monkeypatch):
     lock = asyncio.Lock()
     await lock.acquire()
     ch.bridge_pool._locks["t"] = lock
-    await ch.inbound._run_system_command("clear", "oc", "t", "m1")
+    await ch.inbound._run_system_command("clear", "", "oc", "t", "m1")
     assert bridge.deleted == []
     assert "/stop" in sent[0][0]
 
@@ -438,7 +439,7 @@ async def test_help_lists_skill_and_system_commands(monkeypatch):
             {"name": "commit", "description": "", "type": "skill"}
         ],
     )
-    await ch.inbound._run_system_command("help", "oc", "t", "m1")
+    await ch.inbound._run_system_command("help", "", "oc", "t", "m1")
     text, title = sent[0]
     assert "/commit" in text and "/stop" in text and "/help" in text
     assert "Lumi" in title  # /help 带彩色 header 卡片
@@ -456,7 +457,7 @@ async def test_clear_drains_messages_queued_during_clear(monkeypatch):
     _patch_pool_get(ch, monkeypatch, bridge)
     monkeypatch.setattr(inb, "delete_meta", lambda tid: None)
     fi._queues["t"] = [inb._Pending("清空期间到达", reply_to="m2")]
-    await fi._run_system_command("clear", "oc", "t", "m1")
+    await fi._run_system_command("clear", "", "oc", "t", "m1")
     assert "t" not in fi._queues
     assert "清空期间到达" in captured["content"]
 
@@ -1606,3 +1607,16 @@ def test_setup_lists_optional_gaps_alongside_required_ones(monkeypatch):
     assert scopes["tone"] == "error"
     assert "im:message:send_as_bot" in scopes["detail"]  # 必需项
     assert "打字机流式卡片" in scopes["detail"]  # 可选项也提前告知
+
+
+def test_markdown_card_note_renders_as_grey_markdown():
+    """schema 2.0 真机不支持 note 组件（230099/200861）：note 必须落在 markdown 里。"""
+    from lumi.gateway.channels.feishu.channel import _markdown_card
+
+    card = json.loads(
+        _markdown_card("正文", title="✅ T", template="green", note="下一步提示")
+    )
+    elements = card["body"]["elements"]
+    assert [e["tag"] for e in elements] == ["markdown"]
+    assert "<font color='grey'>下一步提示</font>" in elements[0]["content"]
+    assert card["header"]["template"] == "green"

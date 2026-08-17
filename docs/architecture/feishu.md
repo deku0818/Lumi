@@ -170,6 +170,44 @@ CardKit「编辑同一张卡片」打字机：
 - 工具忙碌期 spinner 动画；纯工具轮（无正文）收尾落「✅ 已完成」而非空白卡。
 - 孤儿 buf 由 `_cleanup_loop` 按 `STREAM_BUF_TTL=300s` 驱逐。
 
+## 直连模式（relay.py + relay_turn.py）
+
+`/direct` 让飞书消息**直达本机的 Claude Code**，Lumi 不参与——thread 级路由开关，
+Lumi 自身会话原封不动，退出即无缝回到原对话。
+
+- **驱动方式**：每条消息拉一次 `claude -p --output-format stream-json --include-partial-messages
+  --verbose --permission-mode bypassPermissions [--resume <sid>]` 子进程（prompt 走 stdin），
+  跑完即退。不用 tmux / PTY 刮屏：会话文件（`~/.claude/projects/…/<sid>.jsonl`）才是共享
+  基质，终端 `claude --resume <sid>` 打开的就是同一段对话（双向接管）。
+- **事件折叠**（`relay.parse_stream_line` 纯函数 → `RelayEvent`）：`system/init` 与 `result`
+  的 sid 都即时落盘（resume 恒追最新）；`text_delta` → 打字机；`tool_use`/`tool_result` 配对
+  → 忙碌状态行（cc 工具名经 `_TOOL_ALIASES` 映射到同一张友好动作表）；子代理内部活动
+  （`parent_tool_use_id` 非空）不外显。单行超 10MB 只丢该事件不死整轮。
+- **绑定 sidecar**（`~/.lumi/channels/relay.json`，经 `utils/json_sidecar`）：
+  `{thread: {active, cwd, session_id}}`。`active` 落盘 → serve 重启后模式不静默失效；
+  `/direct exit` 清 `active` 保 sid（续接零成本），`/clear` 清 sid。
+- **命令面**（`SYSTEM_COMMANDS.direct`，仅 IM）：`/direct` 状态/用法 · `/direct claude [任务]`
+  续接进入 · `/direct new [任务]` 新会话进入 · `/direct exit` 退出。指定目录用
+  `--dir 路径`（或 `--dir=`）紧跟子命令**独占到行尾**，任务换行写——刻意不用引号包裹
+  （输入法弯直混打、忘闭合会静默错切）；`--dir` 粘性，换目录自动开新会话（会话属于项目）。
+  直连中 `/stop` `/clear` `/help` 语义切为作用于 cc；其余文本（含 cc 自身斜杠命令）原样透传。
+- **路由定格**：`_Pending.relay` 在入队那一刻记录模式，`_drain` 按 `takewhile` 切连续段各走
+  各的——排队期间切换 `/direct` 不会把发给 Lumi 的消息喂给 cc（反之亦然），且保到达顺序。
+- **前置检查**（`relay_precheck`）：PATH 无 claude、或 root 运行未设 `IS_SANDBOX=1`（claude
+  拒绝 root 下 bypassPermissions，218 这类 root systemd 部署会命中）→ 进入即红卡拦下。
+- **收尾**：cc 出错时已流出的正文照常关卡保住再发红卡；`/stop` 经 `aclose()` →
+  `terminate_group` 杀整个进程组（shield 防二次 cancel 打断）；子进程秒退（未登录）时
+  stderr 尾部合成可读错误而非泛化"出错"。
+
+## 系统直发卡片规范
+
+渠道层生成、不经模型、不进上下文的消息（/stop /clear /help /direct 应答、排队提示、错误）
+统一「语义色 header + 正文 + 灰字 note」（`_markdown_card(title, template, note)`）：
+green 完成 / red 错误 / orange 提醒·Lumi 面板 / blue 信息 / yellow 直连；note 恒放
+"下一步能做什么"。note 用 `grey()`（`<font color='grey'>`）而非 note 组件——schema 2.0
+已不支持 note 标签（真机 230099/200861）。title 为空则回落无 header 轻卡（流式降级等模型
+内容不套系统卡样式）。
+
 ## 会话池（bridge_pool.py）
 
 `thread_id → (AgentBridge, asyncio.Lock)`。运行锁串行化同会话的轮次。每 chat 一个常驻
@@ -281,7 +319,9 @@ desktop `设置 → 渠道`（`ChannelsPanel.tsx`，进 `SettingsDialog`）：�
 |---|---|
 | `channels/feishu/channel.py` | lark WS 连接 + 收发 + 生命周期 + 状态 |
 | `channels/feishu/inbound.py` | 入站解析 / 媒体 / 排队合并 / 驱动 run / 后台任务通知轮询 |
-| `channels/feishu/outbound.py` | BridgeEvent 事件泵 |
+| `channels/feishu/outbound.py` | BridgeEvent 事件泵（`turn_closer` / `tool_activity` 与直连轮共用） |
+| `channels/relay.py` | 直连（/direct）渠道无关核心：绑定 sidecar / `--dir` 语法 / claude 无头轮驱动 + stream-json 解析 |
+| `channels/feishu/relay_turn.py` | 直连轮：RelayEvent 折叠成流式卡片 + 来源 footer |
 | `channels/feishu/streaming.py` `throttle.py` `update_queue.py` | CardKit 打字机卡片 |
 | `channels/feishu/setup.py` | 接入体检：凭证 / 权限 / 事件订阅 / 版本发布 |
 | `channels/feishu/scopes.py` | 所需权限与事件常量 + 开放平台直达链接（单一事实源） |

@@ -40,7 +40,7 @@ _TASK_ID_HEX_LENGTH = 12
 """任务 ID 中 UUID hex 截取长度。"""
 
 
-async def _terminate_group(process: asyncio.subprocess.Process) -> None:
+async def terminate_group(process: asyncio.subprocess.Process) -> None:
     """终止后台任务的整个进程组：先组 SIGTERM，超时后组 SIGKILL。
 
     start_new_session 使 wrapper shell 为组长，killpg 连同命令内 fork 的后代一起
@@ -193,7 +193,7 @@ class BackgroundTaskManager:
         # （见 _monitor_task），此处不再重复入队，否则同一取消通知会进队两次。
         self._registry.update_status(task_id, TaskStatus.FAILED, error="任务被取消")
         await self._cancel_monitor(task_id)
-        await _terminate_group(handle.process)
+        await terminate_group(handle.process)
 
         logger.info("[BackgroundTask] 已取消任务 %s", task_id)
 
@@ -204,7 +204,7 @@ class BackgroundTaskManager:
         if self._handles:
             # 各组终止相互独立，并发收尾：串行时 N 个顽固任务要等 5s×N
             await asyncio.gather(
-                *(_terminate_group(h.process) for h in self._handles.values())
+                *(terminate_group(h.process) for h in self._handles.values())
             )
 
         self._handles.clear()
@@ -258,7 +258,7 @@ class BackgroundTaskManager:
                     error=f"进程退出码: {exit_code}",
                 )
         except TimeoutError:
-            await _terminate_group(handle.process)
+            await terminate_group(handle.process)
             self._registry.update_status(
                 handle.task_id, TaskStatus.TIMED_OUT, error="超时"
             )

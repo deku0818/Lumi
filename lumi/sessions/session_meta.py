@@ -12,12 +12,11 @@ auto_title）。无 textual 依赖，可在 headless 服务中直接使用。
 
 from __future__ import annotations
 
-import json
 from pathlib import Path
 
 from lumi.utils.atomic_io import atomic_write_json
 from lumi.utils.config.global_manager import GlobalConfigManager
-from lumi.utils.logger import logger
+from lumi.utils.json_sidecar import load_sidecar, update_sidecar
 
 
 def _meta_path() -> Path:
@@ -26,14 +25,7 @@ def _meta_path() -> Path:
 
 def load_all() -> dict[str, dict]:
     """读取全部会话元数据，缺失或损坏时返回空字典。"""
-    path = _meta_path()
-    if not path.exists():
-        return {}
-    try:
-        return json.loads(path.read_text(encoding="utf-8"))
-    except (json.JSONDecodeError, OSError):
-        logger.warning("会话元数据读取失败: %s", path, exc_info=True)
-        return {}
+    return load_sidecar(_meta_path())
 
 
 def _save_all(data: dict[str, dict]) -> None:
@@ -46,18 +38,7 @@ def update_meta(thread_id: str, **fields) -> dict:
     合并后与现状一致则跳过写盘——高频调用方（飞书入站每条消息同步群名）
     据此免每消息一次全文件写，且删除后的重建能如实重写（无内存缓存可失效）。
     """
-    data = load_all()
-    old = data.get(thread_id, {})
-    entry = {**old, **fields}
-    entry = {k: v for k, v in entry.items() if v not in (None, "", False)}
-    if entry == old:
-        return entry
-    if entry:
-        data[thread_id] = entry
-    else:
-        data.pop(thread_id, None)
-    _save_all(data)
-    return entry
+    return update_sidecar(_meta_path(), thread_id, **fields)
 
 
 def delete_meta(thread_id: str) -> None:

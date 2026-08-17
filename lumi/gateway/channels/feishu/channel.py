@@ -27,18 +27,25 @@ from lumi.gateway.channels.feishu.directory import FeishuDirectory
 from lumi.gateway.channels.feishu.inbound import FeishuInbound
 from lumi.gateway.channels.feishu.lark_call import lark_call
 from lumi.gateway.channels.feishu.minutes import ensure_subscription
-from lumi.gateway.channels.feishu.streaming import FeishuStreaming
+from lumi.gateway.channels.feishu.streaming import FeishuStreaming, grey
 from lumi.utils.logger import logger
 
 FEISHU_AVAILABLE = importlib.util.find_spec("lark_oapi") is not None
 
 
-def _markdown_card(content: str, title: str = "") -> str:
-    """一次性 markdown 卡片 JSON（非流式，用于错误提示 / 流式降级 / /help）。
+def _markdown_card(
+    content: str, title: str = "", template: str = "orange", note: str = ""
+) -> str:
+    """一次性 markdown 卡片 JSON（非流式，系统直发消息 / 流式降级用）。
 
-    title 非空时加彩色 header（orange 为飞书原生枚举色，最接近品牌金）；
-    一句话提示不上横幅，保持无 header 的轻卡片。
+    系统直发消息统一「语义色 header + 正文 + 灰字 note」：template 用飞书原生枚举
+    （green 完成 / red 错误 / orange 提醒·Lumi 面板 / blue 信息 / yellow 直连），
+    note 恒放"下一步能做什么"的提示。title 为空则回落无 header 轻卡（流式降级等
+    模型内容不套系统卡样式）。
+
     """
+    if note:
+        content += "\n\n" + grey(note)
     card: dict = {
         "schema": "2.0",
         "config": {"wide_screen_mode": True, "update_multi": True},
@@ -47,7 +54,7 @@ def _markdown_card(content: str, title: str = "") -> str:
     if title:
         card["header"] = {
             "title": {"tag": "plain_text", "content": title},
-            "template": "orange",
+            "template": template,
         }
     return json.dumps(card, ensure_ascii=False)
 
@@ -377,15 +384,17 @@ class FeishuChannel:
         *,
         reply_to: str | None = None,
         title: str = "",
+        template: str = "orange",
+        note: str = "",
     ) -> str | None:
         """发一条 markdown 卡片消息，返回新消息 message_id（失败为 None）。
 
         有 reply_to 走 Reply API。通知 poller 用返回的 message_id 作流式卡片锚点。
-        title 非空时卡片带彩色 header（/help 等列表型内容用）。
+        title/template/note 见 :func:`_markdown_card` 的系统卡规范。
         """
         if not self._client or not content.strip():
             return None
-        body = _markdown_card(content, title=title)
+        body = _markdown_card(content, title=title, template=template, note=note)
         loop = asyncio.get_running_loop()
         if reply_to:
             return await loop.run_in_executor(

@@ -101,6 +101,13 @@ def _is_stream_closed(code: int) -> bool:
     return code in _STREAM_CLOSED_CODES
 
 
+def grey(text: str) -> str:
+    """灰字辅助行的唯一写法。schema 2.0 已不支持 note 组件（真机 230099/200861
+    "unsupported tag note"），font grey 则一直可用——系统卡的 note 与直连卡的来源
+    footer 都经此渲染。"""
+    return f"<font color='grey'>{text}</font>"
+
+
 def _render_card_text(text: str) -> str:
     """渲染到卡片的文本：超过 ``STREAM_MAX_CHARS`` 时只保留尾部窗口 + 省略提示。"""
     if len(text) <= STREAM_MAX_CHARS:

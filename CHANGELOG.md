@@ -1,5 +1,18 @@
 # Changelog
 
+## [0.2.108] - 2026-08-17
+
+### Added
+- **飞书 `/direct` 直连 Claude Code**（`lumi/gateway/channels/relay.py`、`feishu/relay_turn.py`）— 飞书消息直达本机 claude CLI，Lumi 不参与；thread 级路由开关，Lumi 会话原封不动，`/direct exit` 无缝回到原对话。走无头 `claude -p --output-format stream-json --resume` 子进程（每条消息一轮，跑完即退），不用 tmux/PTY 刮屏——cc 会话文件是共享基质，终端 `claude --resume <sid>` 打开的就是同一段对话（双向接管，卡片 footer 与 `/direct` 状态卡给完整 sid 可整段复制）。stream-json 事件折叠回现有流式卡片：token 打字机、`tool_use`/`tool_result` 配对驱动忙碌状态行、init/result 的 sid 即时落盘（sidecar `~/.lumi/channels/relay.json`，`active` 持久化 → serve 重启不静默失效）。命令面：`/direct` 状态/用法、`/direct claude [任务]` 续接进入、`/direct new [任务]` 新会话、`/direct exit` 退出；`--dir 路径` 紧跟子命令独占到行尾指定项目目录（粘性；换目录自动开新会话）。直连中 `/stop` `/clear` `/help` 作用于 cc，其余文本（含 cc 自身斜杠命令）原样透传；`--permission-mode bypassPermissions`（与渠道无人工审批现状同语义），root 运行未设 `IS_SANDBOX=1` 时进入即被 `relay_precheck` 拦下。
+- **飞书系统直发卡片体系** — 22 处渠道层生成、不经模型、不进上下文的消息（/stop /clear /help /direct 应答、排队提示、错误）统一「语义色 header + 正文 + 灰字 note（下一步提示）」：green 完成 / red 错误 / orange 提醒·Lumi 面板 / blue 信息 / yellow 直连；`_markdown_card` / `send_markdown` 加 `template` `note` 参数。note 用 `<font color='grey'>` 而非 note 组件——schema 2.0 真机报 230099/200861 "unsupported tag note"。
+
+### Fixed
+- 直连轮 cc 出错时已流出的正文不再随 `aborted=True` 收尾一并丢失（正常关卡保住答案再发红卡）；子进程秒退（未登录）时 stdin `ConnectionResetError` 不再穿透成泛化"出错"，改用 stderr 尾部合成可读原因；单行 stream-json 超 10MB 只丢该事件不死整轮。
+- 排队期间切换 `/direct` 不再把发给 Lumi 的消息改道给 cc（反之亦然）：路由在入队那一刻定格到 `_Pending.relay`，`_drain` 按连续段各走各的且保到达顺序；`/direct new` 在跑轮时清 sid 被写回覆盖（"全新会话"静默变续旧）加忙判守卫；直连模式图片文件名从 `image_key[:12]`（飞书 key 前 12 位几乎全是固定前缀，同批多图撞名互覆）改为完整 key；媒体-only 消息下载全失败不再静默吞掉；群聊直连多条合并保留发言人。
+
+### Changed
+- `lumi/utils/json_sidecar.py`：`session_meta` 与 `relay` 两份逐行相同的按 key 落盘 JSON sidecar 读写归一；`bg_process._terminate_group` 公开为 `terminate_group` 供直连子进程组终止复用（连带白得 Windows 分支）；`outbound.turn_closer` / `tool_activity` 抽出，`run_turn` 与 `run_relay_turn` 共用；`BridgePool.busy()` 收敛忙判写法。
+
 ## [0.2.107] - 2026-08-14
 
 ### Fixed

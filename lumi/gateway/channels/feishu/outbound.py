@@ -17,6 +17,7 @@
 from __future__ import annotations
 
 import asyncio
+from collections.abc import Awaitable, Callable
 from typing import TYPE_CHECKING
 
 from lumi.agents.tools.providers.ask import ASK_CANCELLED
@@ -25,6 +26,39 @@ from lumi.utils.logger import logger
 
 if TYPE_CHECKING:
     from lumi.gateway.channels.feishu.channel import FeishuChannel
+
+
+def turn_closer(
+    streaming, chat_id: str, reply_to: str
+) -> Callable[..., Awaitable[None]]:
+    """返回幂等的收尾函数 ``_end(aborted=)``：首个终态路径收尾流式卡 buf，其后的
+    调用（含 finally 兜底）空转不重复分发。run_turn / run_relay_turn 共用。"""
+    ended = False
+
+    async def _end(*, aborted: bool) -> None:
+        nonlocal ended
+        if ended:
+            return
+        ended = True
+        await streaming.send_delta(
+            chat_id,
+            "",
+            {"_stream_end": True, "_aborted": aborted, "message_id": reply_to},
+        )
+
+    return _end
+
+
+async def tool_activity(
+    streaming, chat_id: str, reply_to: str, phase: str, name: str
+) -> None:
+    """工具开始 / 结束信号 → 流式卡忙碌状态行（wire 约定单点）。"""
+    await streaming.send_delta(
+        chat_id,
+        "",
+        {"_tool_activity": {"phase": phase, "name": name}, "message_id": reply_to},
+    )
+
 
 # 飞书会话不支持人工工具审批：泄漏的 approval.request 一律以此理由自动拒绝。
 _AUTO_REJECT = {
@@ -54,19 +88,7 @@ async def run_turn(
     command=(name, extra_text) 时走 bridge.stream_command（斜杠命令轮，content 不使用）。
     """
     streaming = channel.streaming
-    ended = False
-
-    async def _end(*, aborted: bool) -> None:
-        # 首个终态路径收尾流式卡 buf，置 ended 让后续（含 finally 兜底）空转，不重复分发。
-        nonlocal ended
-        if ended:
-            return
-        ended = True
-        await streaming.send_delta(
-            chat_id,
-            "",
-            {"_stream_end": True, "_aborted": aborted, "message_id": reply_to},
-        )
+    _end = turn_closer(streaming, chat_id, reply_to)
 
     if command:
         stream = bridge.stream_command(
@@ -91,23 +113,9 @@ async def run_turn(
                         chat_id, evt.text, {"message_id": reply_to}
                     )
             elif kind == EventKind.TOOL_START:
-                await streaming.send_delta(
-                    chat_id,
-                    "",
-                    {
-                        "_tool_activity": {"phase": "start", "name": evt.name},
-                        "message_id": reply_to,
-                    },
-                )
+                await tool_activity(streaming, chat_id, reply_to, "start", evt.name)
             elif kind == EventKind.TOOL_COMPLETE:
-                await streaming.send_delta(
-                    chat_id,
-                    "",
-                    {
-                        "_tool_activity": {"phase": "end", "name": evt.name},
-                        "message_id": reply_to,
-                    },
-                )
+                await tool_activity(streaming, chat_id, reply_to, "end", evt.name)
             elif kind == EventKind.CLARIFY:
                 # 飞书已禁用 ask 工具，正常不会出现 clarify。防御性兜底：直接按"取消作答"
                 # 收尾，让模型自行判断后继续，避免 broker future 永挂、run-lock 永占。
@@ -121,7 +129,11 @@ async def run_turn(
             elif kind == EventKind.ERROR:
                 await _end(aborted=True)
                 await channel.send_markdown(
-                    chat_id, f"⚠️ {evt.error}", reply_to=reply_to
+                    chat_id,
+                    str(evt.error),
+                    reply_to=reply_to,
+                    title="⚠️ 出错了",
+                    template="red",
                 )
             elif kind == EventKind.TURN_COMPLETE:
                 await _end(aborted=False)
@@ -135,7 +147,11 @@ async def run_turn(
         await bridge.finalize_cancelled_stream(stream)  # 确定性关图，不留 GC 竞争
         await _end(aborted=True)  # 先关卡再发错误提示，保证顺序
         await channel.send_markdown(
-            chat_id, "⚠️ 处理消息时出错，请稍后重试。", reply_to=reply_to
+            chat_id,
+            "处理消息时出错，请稍后重试。",
+            reply_to=reply_to,
+            title="⚠️ 出错了",
+            template="red",
         )
     finally:
         # 兜底：未显式收尾的路径（取消 / 提前 return）在此关掉卡片，避免"生成中"冻死。

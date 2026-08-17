@@ -16,6 +16,7 @@ SYSTEM_COMMANDS: dict[str, str] = {
     "stop": "停止当前正在执行的任务",
     "clear": "清空本会话历史",
     "help": "列出可用命令",
+    "direct": "直连本机编程工人（Claude Code）：/direct 查看用法",
 }
 
 # mention 场景下命令起点：第一个前面是空白、以 "/" 开头的片段（到文本末尾）
