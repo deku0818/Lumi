@@ -50,7 +50,8 @@ STREAM_TRUNCATE_NOTICE = "_（内容较长，仅显示最新部分）_\n\n"
 # 单张流式卡片失效后换新卡重建的次数上限，防重建风暴。
 STREAM_MAX_REBUILDS = 2
 
-# 单个 buf 闲置多久视为孤儿（秒）。客户端放弃 streaming 但未触发终态时兜底。
+# 单个 buf 闲置多久视为孤儿（秒）。客户端放弃 streaming 但未触发终态时兜底；轮仍在跑
+# 的 chat 不算孤儿（见 _evict_stale）。
 STREAM_BUF_TTL = 300.0
 
 # 清扫协程的扫描周期（秒）
@@ -221,11 +222,21 @@ class FeishuStreaming:
             return
 
     async def _evict_stale(self) -> None:
+        """驱逐真正的孤儿 buf：闲置超 TTL **且**该 chat 没有轮在跑。
+
+        轮在跑（持运行锁）的 buf 即使久无更新也不能动——直连 cc 深度思考 / 限流重试
+        / 子 agent 干活期间可能几分钟没有外显输出，此时驱逐等于把这一轮的答案切碎到
+        多张卡（后续输出重新建卡、终态只剩来源行）。
+        """
         now = time.monotonic()
+        pool = self.channel.bridge_pool
+        running = {cid for tid, cid in pool.chat_ids.items() if pool.busy(tid)}
         stale: list[str] = [
             chat_id
             for chat_id, buf in self.bufs.items()
-            if buf.last_edit > 0.0 and (now - buf.last_edit) > STREAM_BUF_TTL
+            if chat_id not in running
+            and buf.last_edit > 0.0
+            and (now - buf.last_edit) > STREAM_BUF_TTL
         ]
         for chat_id in stale:
             buf = self.bufs.pop(chat_id, None)

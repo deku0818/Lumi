@@ -1620,3 +1620,39 @@ def test_markdown_card_note_renders_as_grey_markdown():
     assert [e["tag"] for e in elements] == ["markdown"]
     assert "<font color='grey'>下一步提示</font>" in elements[0]["content"]
     assert card["header"]["template"] == "green"
+
+
+async def test_evict_stale_spares_chat_with_running_turn(monkeypatch):
+    """闲置超 TTL 的 buf 只在该 chat 无轮在跑时驱逐。
+
+    回归：直连 cc 深度思考 / 子 agent 期间几分钟无外显输出，buf 被当孤儿驱逐、卡片
+    关掉，后续输出另起新卡、终态只剩来源行——一轮答案被切成几张残卡。
+    """
+    import asyncio
+    import time
+
+    from lumi.gateway.channels.feishu import streaming as st_mod
+
+    ch = FeishuChannel(FeishuChannelConfig())
+    st = ch.streaming
+    closed: list[str] = []
+    monkeypatch.setattr(
+        st, "_set_streaming_mode_sync", lambda cid, on, seq: closed.append(cid) or True
+    )
+    for cid in ("oc_running", "oc_idle"):
+        buf = st._new_buf(cid)
+        buf.card_id = f"card_{cid}"
+        buf.last_edit = time.monotonic() - st_mod.STREAM_BUF_TTL - 1
+        st.bufs[cid] = buf
+    pool = ch.bridge_pool
+    pool.chat_ids["t-running"] = "oc_running"
+    pool._locks["t-running"] = asyncio.Lock()
+
+    async with pool.lock("t-running"):
+        await st._evict_stale()
+    assert set(st.bufs) == {"oc_running"}
+    assert closed == ["card_oc_idle"]
+
+    await st._evict_stale()  # 锁已释放：现在才是孤儿
+    assert not st.bufs
+    assert closed == ["card_oc_idle", "card_oc_running"]
