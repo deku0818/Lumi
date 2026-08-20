@@ -632,6 +632,15 @@ class AgentBridge:
             msg = inject_text_into_message(msg, tags + "\n")
         return msg
 
+    def set_env_extra(self, lines: str) -> None:
+        """写入本会话注入 <env> 块的补充条目行（IM 渠道的群名 / chat_id）。
+
+        与 set_tool_mode 同理直改共享 context：下一轮 UserPromptSubmit 读到即生效，
+        群改名后下条消息自然刷新（digest 变 → 重发一次整块）。
+        """
+        if self._context is not None:
+            self._context.env_extra = lines
+
     def set_tool_mode(self, mode: str) -> dict:
         """运行中实时切换工具审批模式（用户仅切顶部选择器、不发消息时经此路径）。
 

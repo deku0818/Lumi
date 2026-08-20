@@ -118,6 +118,10 @@ async def agent(
         enable_memory=False,
     )
 
+    # <env> 块的渠道条目随父传播（前台 / 后台两条路都要）：子 agent 同样会被派去发
+    # 飞书消息、拉群成员，缺了这几行只能回头问父级要 chat_id
+    context.env_extra = runtime.context.env_extra
+
     if run_in_background:
         return _start_background_agent(name, prompt, lumi_agent, context, child_depth)
 

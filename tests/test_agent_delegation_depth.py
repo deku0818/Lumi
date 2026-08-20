@@ -91,6 +91,7 @@ def _make_runtime(depth: int) -> SimpleNamespace:
             widen_boundary=None,
             tool_mode="default",
             project_dir=None,
+            env_extra="",
         ),
     )
 

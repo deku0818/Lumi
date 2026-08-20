@@ -18,6 +18,7 @@ from lumi.gateway.channels.feishu import inbound as inb
 from lumi.gateway.channels.feishu.channel import FeishuChannel
 from lumi.gateway.channels.feishu.inbound import (
     build_content,
+    channel_env,
     extract_post_images,
     extract_post_text,
     feishu_thread_id,
@@ -342,6 +343,16 @@ class _ClearBridge:
 
     async def delete_thread(self, tid):
         self.deleted.append(tid)
+
+
+class _EnvBridge:
+    """入站路径用到的最小桥：只接 set_env_extra。"""
+
+    def __init__(self):
+        self.env = ""
+
+    def set_env_extra(self, lines):
+        self.env = lines
 
 
 def _patch_pool_get(ch, monkeypatch, bridge):
@@ -864,16 +875,13 @@ async def _inbound_thread_of(ch, monkeypatch, chat_type, chat_id, open_id) -> st
     async def fake_resolve(chat, ids):
         return {open_id: "张三"}
 
-    async def fake_sync(*a, **k):
-        return None
-
     async def fake_drain(bridge, cid, thread_id, batch):
         captured.append(thread_id)
 
     monkeypatch.setattr(ch.directory, "resolve_senders_in_chat", fake_resolve)
-    monkeypatch.setattr(fi, "_sync_session_title", fake_sync)
+    monkeypatch.setattr(fi, "_sync_session_title", lambda *a, **k: None)
     monkeypatch.setattr(fi, "_locked_drain", fake_drain)
-    _patch_pool_get(ch, monkeypatch, None)
+    _patch_pool_get(ch, monkeypatch, _EnvBridge())
 
     await fi.on_message(_inbound_event(chat_type, chat_id, open_id))
 
@@ -898,6 +906,56 @@ async def test_inbound_group_thread_keyed_by_chat_id(monkeypatch):
     assert a == b == feishu_thread_id("oc_team")
 
 
+def test_channel_env_nests_scene_and_ids_under_one_head():
+    """<env> 条目：一行"会话来源: 飞书" + 缩进子项；名字解析不到就整行省掉。"""
+    assert channel_env("group", "oc_team", "ou_a", "产品研发群") == (
+        "- 会话来源: 飞书\n  - 场景: 群聊\n  - 群名: 产品研发群\n  - chat_id: oc_team"
+    )
+    # 兜底名不进 env（模型会当真名复述给用户）——没名字就只剩场景与 id
+    assert channel_env("group", "oc_team", "ou_a", None) == (
+        "- 会话来源: 飞书\n  - 场景: 群聊\n  - chat_id: oc_team"
+    )
+    assert channel_env("p2p", "oc_dm", "ou_a", "张三") == (
+        "- 会话来源: 飞书\n"
+        "  - 场景: 私聊\n"
+        "  - 对方: 张三\n"
+        "  - chat_id: oc_dm\n"
+        "  - 对方 open_id: ou_a"
+    )
+    # 未知 chat_type 与 session_key_of 同口径：算群聊（那边也按 chat_id 派生 thread）
+    assert "场景: 群聊" in channel_env(None, "oc_team", "ou_a", None)
+
+
+async def test_inbound_hands_channel_env_to_the_bridge(monkeypatch):
+    """入站必须把会话来源写进 bridge —— 模型据此知道自己在哪个群、能拿 id 发消息。
+
+    从真实 on_message 跑出来（不是直接调 channel_env），否则接线断了也照样绿。
+    """
+    ch = FeishuChannel(FeishuChannelConfig(group_policy="open"))
+    fi = ch.inbound
+    bridge = _EnvBridge()
+
+    async def fake_resolve(chat, ids):
+        return {"ou_a": "张三"}
+
+    async def fake_chat_name(chat_id):
+        return "产品研发群"
+
+    async def fake_drain(*a, **k):
+        return None
+
+    monkeypatch.setattr(ch.directory, "resolve_senders_in_chat", fake_resolve)
+    monkeypatch.setattr(ch.directory, "resolve_chat_name", fake_chat_name)
+    monkeypatch.setattr(inb, "update_meta", lambda *a, **k: None)
+    monkeypatch.setattr(fi, "_locked_drain", fake_drain)
+    _patch_pool_get(ch, monkeypatch, bridge)
+
+    await fi.on_message(_inbound_event("group", "oc_team", "ou_a"))
+
+    assert bridge.env == channel_env("group", "oc_team", "ou_a", "产品研发群")
+    assert "群名: 产品研发群" in bridge.env
+
+
 async def test_inbound_takes_other_bots_at_but_never_its_own_message(monkeypatch):
     """别的机器人 @ 本机器人照常入站；本机器人自己的消息恒丢。
 
@@ -912,16 +970,13 @@ async def test_inbound_takes_other_bots_at_but_never_its_own_message(monkeypatch
     async def fake_resolve(chat, ids):
         return {}
 
-    async def fake_sync(*a, **k):
-        return None
-
     async def fake_drain(bridge, cid, thread_id, batch):
         ran.append(thread_id)
 
     monkeypatch.setattr(ch.directory, "resolve_senders_in_chat", fake_resolve)
-    monkeypatch.setattr(fi, "_sync_session_title", fake_sync)
+    monkeypatch.setattr(fi, "_sync_session_title", lambda *a, **k: None)
     monkeypatch.setattr(fi, "_locked_drain", fake_drain)
-    _patch_pool_get(ch, monkeypatch, None)
+    _patch_pool_get(ch, monkeypatch, _EnvBridge())
 
     await fi.on_message(
         _inbound_event("group", "oc_team", "ou_other_bot", "bot", [_Mention("ou_me")])

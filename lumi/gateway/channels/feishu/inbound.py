@@ -121,6 +121,29 @@ def session_key_of(chat_type: str | None, chat_id: str, open_id: str) -> str:
     return open_id if chat_type == "p2p" else chat_id
 
 
+def channel_env(
+    chat_type: str | None, chat_id: str, open_id: str, title: str | None
+) -> str:
+    """本会话在 <env> 块里的条目行：模型据此知道自己在哪、拿得到发消息要用的 id。
+
+    分层：一行"会话来源: 飞书" + 一级缩进子项（场景 / 群名或对方 / id），与系统那几
+    行区分开。``title`` 为 None（无 im:chat:read / 解析失败）时整行省掉——兜底名
+    「群_a1b2c3」不是真名，模型会当真名复述给用户。发言人**不进**这里：群里每条消息
+    都在换人，写进来等于每轮 digest 变、每轮重发整块，而"谁在说话"已由 <sender>
+    标签逐条带着。p2p 判定与 session_key_of 同口径（只有精确 "p2p" 算私聊）。
+    """
+    if chat_type == "p2p":
+        sub = [
+            ("场景", "私聊"),
+            ("对方", title),
+            ("chat_id", chat_id),
+            ("对方 open_id", open_id),
+        ]
+    else:
+        sub = [("场景", "群聊"), ("群名", title), ("chat_id", chat_id)]
+    return "\n".join(["- 会话来源: 飞书"] + [f"  - {k}: {v}" for k, v in sub if v])
+
+
 def _model_line(model: str, effort: str) -> str:
     """直连卡里的模型行：未指定不显示（跟随 cc 默认），指定了显示「模型：opus · high」。"""
     if not model and not effort:
@@ -325,36 +348,40 @@ class FeishuInbound:
         # 待处理的妙记事件；由通知轮询在会话空闲时认领
         self._minute_events: list[_MinuteEvent] = []
 
-    async def _sync_session_title(
-        self,
-        thread_id: str,
-        chat_id: str,
-        chat_type: str,
-        sender_name: str,
-        open_id: str,
+    async def _resolve_title(
+        self, chat_id: str, chat_type: str | None, sender_name: str, open_id: str
+    ) -> str | None:
+        """本会话的显示名：群名 / 私聊对方姓名；解析不到（或在退避冷却里）返回 None。
+
+        每条消息只解析一次，sidecar 与 <env> 块共用这一个结果——两处各解析一次会绕开
+        下面的退避冷却，把无名群刷成每消息一次 API。兜底名（群_xxx / 用户_xxx）一律
+        当作"没解析到"：写盘会让 API 抖动覆盖真名，喂模型会被当真名复述给用户。
+        """
+        if chat_type != "p2p":
+            if time.monotonic() < self._title_retry_at.get(chat_id, 0.0):
+                return None
+            title = await self.channel.directory.resolve_chat_name(chat_id)
+            if title == fallback_chat_name(chat_id):
+                self._title_retry_at[chat_id] = time.monotonic() + _TITLE_RETRY_COOLDOWN
+                return None
+            return title
+        return None if sender_name == fallback_name(open_id) else sender_name
+
+    def _sync_session_title(
+        self, thread_id: str, chat_type: str | None, title: str | None
     ) -> None:
-        """把群名 / 私聊对方姓名写进 session sidecar，供 desktop 会话列表显示。
+        """把会话显示名写进 session sidecar，供 desktop 会话列表显示。
 
         channel_title 与手动重命名的 title 分开存：手动名永久优先，群改名自动跟随。
         update_meta 内置变更检测（无变化不写盘），故可每消息无脑调用；desktop
-        「清空会话」删掉 sidecar 后，下条消息也能如实重写。解析失败的兜底名
-        （群_xxx / 用户_xxx）不写盘——API 抖动不该覆盖已存的真实名字。
+        「清空会话」删掉 sidecar 后，下条消息也能如实重写。
         """
-        if chat_type == "group":
-            if time.monotonic() < self._title_retry_at.get(chat_id, 0.0):
-                return
-            title, kind = (
-                await self.channel.directory.resolve_chat_name(chat_id),
-                "group",
+        if title:
+            update_meta(
+                thread_id,
+                channel_title=title,
+                channel_kind="p2p" if chat_type == "p2p" else "group",
             )
-            if title == fallback_chat_name(chat_id):
-                self._title_retry_at[chat_id] = time.monotonic() + _TITLE_RETRY_COOLDOWN
-                return
-        else:
-            title, kind = sender_name, "p2p"
-            if title == fallback_name(open_id):
-                return
-        update_meta(thread_id, channel_title=title, channel_kind=kind)
 
     def _is_duplicate(self, msg_id: str) -> bool:
         if msg_id in self._seen:
@@ -470,9 +497,8 @@ class FeishuInbound:
                 sender_name = fallback_name(open_id)
 
             thread_id = feishu_thread_id(session_key)
-            await self._sync_session_title(
-                thread_id, chat_id, chat_type, sender_name, open_id
-            )
+            title = await self._resolve_title(chat_id, chat_type, sender_name, open_id)
+            self._sync_session_title(thread_id, chat_type, title)
             await self._admit(
                 chat_id,
                 thread_id,
@@ -485,11 +511,18 @@ class FeishuInbound:
                     ts=int(getattr(message, "create_time", 0) or 0),
                     relay=is_active(thread_id),
                 ),
+                env=channel_env(chat_type, chat_id, open_id, title),
             )
         except Exception as e:
             logger.error(f"Feishu 消息处理失败: {e}", exc_info=True)
 
-    async def _admit(self, chat_id: str, thread_id: str, pending: _Pending) -> None:
+    async def _admit(
+        self,
+        chat_id: str,
+        thread_id: str,
+        pending: _Pending,
+        env: str = "",
+    ) -> None:
         """把一条待处理消息交给本会话：空闲当场上锁跑，忙则排队（上限 _MAX_QUEUE，满则
         丢弃并提示）由持锁者跑完后合并处理。入站消息与 /direct 随带的首个任务共用。
 
@@ -500,6 +533,10 @@ class FeishuInbound:
         # 存真实 chat_id（私聊的 thread key 是 open_id，但投递走 chat_id 更直接）
         pool.chat_ids[thread_id] = chat_id
         bridge = await pool.get(thread_id)
+        if env:
+            # 每条消息无脑覆盖（同 chat 恒等值，群改名即刷新）；/direct 的任务不带 env
+            # ——那一轮由 Claude Code 执行，本进程的 <env> 块与它无关
+            bridge.set_env_extra(env)
         lock = pool.lock(thread_id)
         if lock.locked():
             queue = self._queues.setdefault(thread_id, [])

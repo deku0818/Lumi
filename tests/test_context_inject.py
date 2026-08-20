@@ -42,9 +42,13 @@ def _patched(agents=(), skills=(), project_dir=None):
         yield
 
 
-def _runtime(tools=(), memory_enabled=False) -> SimpleNamespace:
+def _runtime(tools=(), memory_enabled=False, env_extra="") -> SimpleNamespace:
     return SimpleNamespace(
-        context=SimpleNamespace(tools=list(tools), memory_enabled=memory_enabled)
+        context=SimpleNamespace(
+            tools=list(tools),
+            memory_enabled=memory_enabled,
+            env_extra=env_extra,
+        )
     )
 
 
@@ -77,11 +81,27 @@ def _injected_text(msg: HumanMessage) -> str:
     return "".join(
         b["text"]
         for b in msg.content
-        if isinstance(b, dict) and "<system-reminder>" in b.get("text", "")
+        if isinstance(b, dict)
+        and ("<system-reminder>" in b.get("text", "") or "<env>" in b.get("text", ""))
     )
 
 
 # === 首轮全量 ===
+
+
+async def test_env_block_carries_channel_entries_and_has_no_header():
+    """渠道条目并进 <env> 块；块内不写标题句（条目自解释，变更时原样重发整块）。"""
+    entries = "- 会话来源: 飞书\n  - 场景: 群聊\n  - chat_id: oc_team"
+    with _patched():
+        cmd = await _run(
+            [HumanMessage(content="hi", id="m1")], _runtime(env_extra=entries)
+        )
+    text = _injected_text(cmd.update["messages"][0])
+    assert "<env>\n- os: " in text  # 紧跟标签就是条目，中间没有标题句
+    # 渠道条目缀在系统条目之后、同块之内，层级（缩进）原样保留
+    block = text.split("<env>\n")[1].split("\n</env>")[0]
+    assert block.endswith(entries) and block.startswith("- os: ")
+    assert "<system-reminder>" not in text.split("</env>")[0]
 
 
 async def test_first_turn_full_injection_and_marker():
@@ -90,7 +110,7 @@ async def test_first_turn_full_injection_and_marker():
     msg = cmd.update["messages"][0]
     assert msg.id == "m1"  # 同 id 替换末条
     text = _injected_text(msg)
-    assert "用户当前系统环境信息" in text  # env 全量
+    assert "<env>" in text and "- os: " in text  # env 全量
     assert "- myskill: do x" in text  # skill 全量
     marker = msg.additional_kwargs[CTX_DIGEST_KEY]
     assert set(marker) == {"env", "skills", "lumi_doc"}  # 无 agent 工具 / 记忆关闭
@@ -315,7 +335,7 @@ async def test_full_reinjection_after_compaction():
     msg = cmd.update["messages"][0]
     assert msg.id == "m2"  # 注入到用户消息，不碰 carrier
     text = _injected_text(msg)
-    assert "用户当前系统环境信息" in text and "- s: d" in text  # 全量
+    assert "<env>" in text and "- s: d" in text  # 全量
     assert CTX_DIGEST_KEY in msg.additional_kwargs
 
 

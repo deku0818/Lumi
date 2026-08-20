@@ -61,9 +61,21 @@ lark_oapi.ws.client.loop`，与 uvicorn 主 loop 隔离。入站回调在 WS 线
 排队或处理。发送者名挂在 `_Pending.sender_name` 上（解析失败恒退兜底名），渲染为
 `<sender>姓名</sender>` 标签行（`constants.SENDER_TAG`，纯给模型看）；每条原始消息的
 `{sender, ts, text}` 另经 `message_meta` 结构化写进 `additional_kwargs["lumi"]["items"]`，
-desktop 气泡只读它、不反解析正文。群名/私聊人名同时同步进 session sidecar
-（`channel_title`/`channel_kind`，desktop 会话列表显示名；兜底名不写盘，解析失败有 5 分钟
-重试冷却）。每轮跑完广播 `channel.activity`（desktop 刷列表/旁观重载，见 desktop.md）。
+desktop 气泡只读它、不反解析正文。会话显示名每条消息只解析一次（`_resolve_title`，兜底名
+一律当"没解析到"，群名解析失败有 5 分钟重试冷却），两处消费：写进 session sidecar
+（`channel_title`/`channel_kind`，desktop 会话列表显示名）＋ 拼成 `<env>` 块的会话来源条目
+（`channel_env` → `bridge.set_env_extra`，见下）。每轮跑完广播 `channel.activity`（desktop
+刷列表/旁观重载，见 desktop.md）。
+
+**会话来源注入 `<env>`**：模型不该靠猜自己在哪个群——`channel_env` 把「会话来源: 飞书」+ 一级
+缩进子项（场景 / 群名或对方 / chat_id，私聊另加对方 open_id）写进 `context.env_extra`，缀在
+os / cwd 之后、同块之内（`preprocessing/context_inject.py`，`constants.ENV_TAG`），模型据此直
+接调飞书工具发消息 / 拉群成员，不用回头问用户要 id。层级长什么样由渠道自己定——`env_extra`
+收的是**渲染好的条目行**（含缩进）而非结构，core 不认识群聊私聊。**发言人不进这块**：群里每条
+消息都在换人，写进来等于每轮 digest 变、每轮重发整块，而"谁在说话"已由 `<sender>` 标签逐条
+带着。群名解析不到时那一行整条省掉（只剩场景与 id）——兜底名「群_a1b2c3」会被模型当真名复述
+给用户。desktop 会话 `env_extra` 恒空，
+`<env>` 块与改动前逐字节相同；子 agent 由 agent 工具传播（前台 / 后台两条路都带）。
 
 **媒体**：
 - 图片（image / post 内嵌 / 被回复消息的图）→ 下载 → 走仓库统一压缩管线

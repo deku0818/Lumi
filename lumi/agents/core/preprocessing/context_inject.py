@@ -1,5 +1,8 @@
 """上下文注入 hook：env / agent / skill / 记忆索引 / LUMI.md 持久注入进末条用户消息。
 
+env 块用 `<env>` 标签（`constants.ENV_TAG`，块内无标题句、条目自解释、变更时原样重发
+整块），其余块走 `<system-reminder>`：环境是长期有效的事实，不是一次性提醒。
+
 Claude Code 式持久 reminder：块文本注入进末条 HumanMessage 的 content（进历史、进
 checkpoint），``additional_kwargs["ctx_digest"]`` marker 记录「模型已知状态」的条目级
 digest。每轮（UserPromptSubmit）比对 marker 与当前状态：
@@ -53,6 +56,7 @@ from lumi.agents.core.preprocessing.system_info import system_info_body
 from lumi.agents.memory.paths import memory_entrypoint, resolve_under_project
 from lumi.agents.memory.project_doc import PROJECT_DOC_NAME
 from lumi.agents.permissions.workspace import get_authorized_directory
+from lumi.utils.constants import ENV_TAG
 from lumi.utils.hashing import short_hash
 
 _SELF_EDIT_TOOLS = frozenset({"write", "edit"})
@@ -209,15 +213,15 @@ async def context_inject_hook(ctx: HookContext) -> HookResult:
     parts: list[str] = []
     marker: dict = {}
 
+    # 渠道补充的会话级条目（IM 的群名 / chat_id）与进程级系统信息同块——对模型是同一
+    # 类事实："我在哪台机器、哪个目录、哪个会话里"。desktop 会话 env_extra 恒空。
     env_body = system_info_body()
+    if runtime.context.env_extra:
+        env_body += "\n" + runtime.context.env_extra
     marker["env"] = short_hash(env_body)
     if old.get("env") != marker["env"]:
-        header = (
-            "用户当前系统环境信息"
-            if "env" not in old
-            else "环境信息已变更，以下为最新:"
-        )
-        parts.append(format_reminder(header, [env_body]))
+        # 变更时原样重发整块、不加"已变更"提示句：<env> 自解释，后出现的那块即最新
+        parts.append(f"<{ENV_TAG}>\n{env_body}\n</{ENV_TAG}>\n")
 
     if _has_agent_tool(runtime.context.tools):
         agents = AgentChangeDetector.get_instance(project_dir).peek()

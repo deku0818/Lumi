@@ -49,6 +49,14 @@ class LumiAgentContext:
     """放宽本会话工作区边界的回调，由 bridge 注入（同 approval_broker，事后赋值）。
     授权（人工审批 / auto 分类器 / privileged）通过后调用，把越界路径所在目录纳入本
     会话工作区。无 bridge 的纯 graph 调用（headless）保持 None，边界不放宽。"""
+    env_extra: str = field(default="")
+    """<env> 块尾部追加的会话级条目行（渠道无关，已按块内格式渲染好、含缩进）。
+
+    IM 渠道写"会话来源: 飞书 + 场景/群名/chat_id 子项"，让模型知道自己在哪个群、
+    拿得到发消息要用的 id。层级长什么样由渠道自己定（core 不认识群聊私聊），故这里
+    收的是文本而非结构。desktop 会话恒空 → <env> 块与改动前逐字节相同。子 agent 由
+    agent 工具从父 context 传播（env 块本就注入子 agent，缺了会出现"父知道在哪个群、
+    子不知道"的割裂）。"""
     memory_enabled: bool = field(default=False)
     """是否为本 agent 注入持久记忆（MEMORY.md 索引 + 系统提示词行为说明）。
     默认 False（opt-in），与 create_agent 一致；仅 bridge 的主对话 agent 置 True。

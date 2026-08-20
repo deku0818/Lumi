@@ -53,6 +53,12 @@ LUMI_META_KEY: Final[str] = "lumi"
 写入（bridge.stream_response：消息级 ts + IM 渠道的 items）与读取
 （gateway.session._user_items）共用，防写读两端字段名漂移。"""
 
+ENV_TAG: Final[str] = "env"
+"""环境信息注入块的标签 <env>\n- os: ...\n</env>（context_inject 每轮比对后注入）。
+
+不复用 <system-reminder>：那是"临时提醒"的语义，而这块是长期有效的环境事实，
+模型据此判断在哪台机器、哪个目录、哪个会话里干活。块内不写标题句，条目自解释。"""
+
 SENDER_TAG: Final[str] = "sender"
 """IM 渠道消息的发送者标注 <sender>姓名</sender>\\n正文。
 
