@@ -56,7 +56,7 @@ lark_oapi.ws.client.loop`，与 uvicorn 主 loop 隔离。入站回调在 WS 线
 `on_message` 流水线：去重（LRU by message_id）→ 跳过自身（比 `bot_open_id`，**不**按
 `sender_type == "bot"` 一刀切——别的机器人 @ 本机器人是正当来源）→ 白名单（`is_allowed`）→
 群策略（`group_policy=mention` 时仅 `@_all` 或精确匹配 `bot_open_id` 才响应；**不做** ou_
-启发式以免把真人误判为机器人）→ 解析文本（text / post）→ 收集媒体引用 → 解析发送者显示名
+启发式以免把真人误判为机器人）→ 解析文本（text / post / interactive）→ 收集媒体引用 → 解析发送者显示名
 （`channel.directory`，群聊走群成员源、私聊走通讯录源）→ 派生 thread + 取 bridge + 运行锁 →
 排队或处理。发送者名挂在 `_Pending.sender_name` 上（解析失败恒退兜底名），渲染为
 `<sender>姓名</sender>` 标签行（`constants.SENDER_TAG`，纯给模型看）；每条原始消息的
@@ -76,6 +76,13 @@ os / cwd 之后、同块之内（`preprocessing/context_inject.py`，`constants.
 带着。群名解析不到时那一行整条省掉（只剩场景与 id）——兜底名「群_a1b2c3」会被模型当真名复述
 给用户。desktop 会话 `env_extra` 恒空，
 `<env>` 块与改动前逐字节相同；子 agent 由 agent 工具传播（前台 / 后台两条路都带）。
+
+**卡片（interactive）**：机器人之间的对话几乎全是卡片（流式回答落地即 interactive），正文在
+事件 content 的 `user_dsl`（发送方卡片 DSL 的 JSON 串）里；同级 `elements` 是给老客户端的降级
+占位（一张图 +「请升级至最新版本客户端」），当正文用等于把噪音喂给模型，故 `extract_card_text`
+只读 user_dsl、读不到就当无正文跳过。DSL 里的 `<at id=... mention_key=@_user_1>` 只保留
+mention_key——`id=` 是**发送方应用**的 open_id（open_id 每应用一套，跨应用不通用），姓名交
+`resolve_mentions` 按事件的 `mentions` 换。卡片内图片不下载（降级占位里那张图不是内容）。
 
 **媒体**：
 - 图片（image / post 内嵌 / 被回复消息的图）→ 下载 → 走仓库统一压缩管线

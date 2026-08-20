@@ -1,5 +1,13 @@
 # Changelog
 
+## [0.2.113] - 2026-08-20
+
+### Fixed
+- **别的机器人 @ Lumi 仍不回应——卡片消息整类不解析**（`feishu/inbound.py` 的 `extract_card_text`）— v0.2.111 放行了 bot 发送者，但机器人之间的对话几乎全是卡片（流式回答落地即 `interactive`），而入站只认 `text` / `post`：事件收到、正文取空、走"既无文本也无媒体"静默跳过，表现与被过滤掉一模一样，这条路只通到一半。真机定位：事件确实推达（`sender_type=bot`、mentions 命中本机器人）、app 身份的 sender 也**有** open_id，死点是 `msg_type=interactive`。卡片正文在事件 content 的 `user_dsl`（发送方卡片 DSL 的 JSON 串）里，同级 `elements` 是给老客户端的降级占位（一张图 +「请升级至最新版本客户端」）——只读 user_dsl，读不到就当无正文跳过，不拿占位文案当正文喂模型；卡片内图片不下载（占位图不是内容）。DSL 里的 `<at id=... mention_key=@_user_1>` 只保留 mention_key：`id=` 是**发送方应用**的 open_id（open_id 每应用一套、跨应用不通用，照抄会 @ 错人），姓名统一交 `resolve_mentions` 按事件 `mentions` 换，与 text / post 同一条路。已在真机跑通：Lumi @ 对方 → 对方回卡片 → Lumi 回应。
+
+### Changed
+- 「既无文本也无媒体」是唯一会静默吞掉整条消息的分支，补一行 `跳过无正文消息 msg_type=xxx` 日志——不解析的消息类型（表情包、无 user_dsl 的老卡片…）从这里消失，没这行只能从"机器人不理我"倒查。
+
 ## [0.2.112] - 2026-08-20
 
 ### Added

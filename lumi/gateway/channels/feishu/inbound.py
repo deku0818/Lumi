@@ -220,6 +220,46 @@ def extract_post_text(content_json: dict) -> str:
     return ""
 
 
+_CARD_AT_TAG = re.compile(r"<at\b[^>]*\bmention_key=(@\S+?)\s*>\s*</at>")
+"""卡片 DSL 里的 @ 标签。id= 是**发送方应用**的 open_id（open_id 每应用一套，拿到我们
+这侧无意义），故只保留 mention_key，交 resolve_mentions 按事件的 mentions 换成姓名。"""
+
+
+def extract_card_text(content_json: dict) -> str:
+    """从 interactive（卡片）消息里取正文。
+
+    正文在 ``user_dsl``（发送方卡片 DSL 的 JSON 串）里；同级的 ``elements`` 是给老客户端
+    的降级占位（一张图 +「请升级至最新版本客户端」），当正文用等于把噪音喂给模型，故只
+    读 user_dsl、读不到就返回空串（该消息按无正文跳过，与改动前同）。
+
+    机器人之间的对话几乎全是卡片（流式回答落地就是 interactive），不解析这一类等于
+    「别的机器人 @ 我」整条路只通到一半。
+    """
+    dsl = content_json.get("user_dsl")
+    if not isinstance(dsl, str):
+        return ""
+    try:
+        card = json.loads(dsl)
+    except json.JSONDecodeError:
+        return ""
+
+    texts: list[str] = []
+
+    def walk(node: Any) -> None:
+        if isinstance(node, dict):
+            content = node.get("content")
+            if isinstance(content, str) and content.strip():
+                texts.append(content.strip())
+            for value in node.values():
+                walk(value)
+        elif isinstance(node, list):
+            for item in node:
+                walk(item)
+
+    walk(card.get("body"))
+    return _CARD_AT_TAG.sub(r"\1", "\n".join(texts)).strip()
+
+
 def resolve_mentions(text: str, mentions: list[Any] | None) -> str:
     """把飞书的 ``@_user_n`` 占位符替换为 ``@姓名``。"""
     if not mentions or not text:
@@ -441,6 +481,8 @@ class FeishuInbound:
                 )
             elif msg_type == "post":
                 text = resolve_mentions(extract_post_text(content_json), mentions)
+            elif msg_type == "interactive":
+                text = resolve_mentions(extract_card_text(content_json), mentions)
             else:
                 text = ""  # image / file 等：正文为空，靠媒体承载
 
@@ -483,6 +525,9 @@ class FeishuInbound:
                     file_refs.append((mid, fr[0], fr[1]))
 
             if not text and not image_refs and not file_refs:
+                # 唯一会静默吞掉整条消息的分支，留一行日志：不解析的消息类型（表情包、
+                # 无 user_dsl 的卡片…）从这里消失，没这行只能从"机器人不理我"倒查
+                logger.info(f"Feishu: 跳过无正文消息 msg_type={msg_type}")
                 return
 
             # 解析发送者显示名：群聊走群成员源、私聊走通讯录源；失败/取不到退兜底名。

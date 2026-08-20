@@ -19,6 +19,7 @@ from lumi.gateway.channels.feishu.channel import FeishuChannel
 from lumi.gateway.channels.feishu.inbound import (
     build_content,
     channel_env,
+    extract_card_text,
     extract_post_images,
     extract_post_text,
     feishu_thread_id,
@@ -176,8 +177,10 @@ class _Mid:
 
 
 class _Mention:
-    def __init__(self, open_id):
+    def __init__(self, open_id, key=None, name=None):
         self.id = _Mid(open_id)
+        self.key = key
+        self.name = name
 
 
 class _Msg:
@@ -954,6 +957,94 @@ async def test_inbound_hands_channel_env_to_the_bridge(monkeypatch):
 
     assert bridge.env == channel_env("group", "oc_team", "ou_a", "产品研发群")
     assert "群名: 产品研发群" in bridge.env
+
+
+def _card_content(text: str, *, with_dsl: bool = True) -> dict:
+    """一条 interactive 消息的 content（字段与真机事件对齐）。
+
+    elements 是给老客户端的降级占位，正文只在 user_dsl 里——两者同时给，测的就是
+    "取后者、别把前者当正文"。
+    """
+    content = {
+        "title": None,
+        "elements": [
+            [
+                {"tag": "img", "image_key": "img_v3_x"},
+                {"tag": "text", "text": "请升级至最新版本客户端，以查看内容"},
+                {"tag": "text", "text": ""},
+            ]
+        ],
+    }
+    if with_dsl:
+        content["user_dsl"] = json.dumps(
+            {
+                "schema": "2.0",
+                "config": {"streaming_mode": False},
+                "body": {
+                    "elements": [
+                        {
+                            "tag": "markdown",
+                            "element_id": "streaming_md",
+                            "content": text,
+                        }
+                    ]
+                },
+            },
+            ensure_ascii=False,
+        )
+    return content
+
+
+def test_extract_card_text_reads_user_dsl_not_the_downgrade_placeholder():
+    """卡片正文只认 user_dsl；elements 的「请升级」占位当正文用等于把噪音喂给模型。"""
+    raw = "<at id=ou_sender_side mention_key=@_user_1></at> 在的！收到，联调正常 ✅"
+    text = extract_card_text(_card_content(raw))
+    # at 标签只留 mention_key（id= 是发送方应用的 open_id，我们这侧无意义），
+    # 姓名由 resolve_mentions 按事件 mentions 换
+    assert text == "@_user_1 在的！收到，联调正常 ✅"
+    assert "请升级" not in text
+    # 没有 user_dsl（老卡片）→ 空串，按无正文跳过，不退回占位文案
+    assert extract_card_text(_card_content(raw, with_dsl=False)) == ""
+
+
+async def test_inbound_reads_a_bots_card_reply(monkeypatch):
+    """回归：别的机器人的回复几乎全是卡片（流式回答落地即 interactive）。
+
+    放行了 bot 发送者但不解析 interactive，「机器人 @ 机器人」只通到一半——事件收到、
+    正文为空、静默跳过，表现与被过滤掉一模一样。
+    """
+    ch = FeishuChannel(FeishuChannelConfig())  # group_policy 默认 mention
+    ch._bot_open_id = "ou_me"
+    fi = ch.inbound
+    batches: list[str] = []
+
+    async def fake_resolve(chat, ids):
+        return {}
+
+    async def fake_drain(bridge, cid, thread_id, batch):
+        batches.append(batch[0].text)
+
+    monkeypatch.setattr(ch.directory, "resolve_senders_in_chat", fake_resolve)
+    monkeypatch.setattr(fi, "_sync_session_title", lambda *a, **k: None)
+    monkeypatch.setattr(fi, "_locked_drain", fake_drain)
+    _patch_pool_get(ch, monkeypatch, _EnvBridge())
+
+    event = _inbound_event(
+        "group",
+        "oc_team",
+        "ou_other_bot",
+        "bot",
+        [_Mention("ou_me", key="@_user_1", name="Lumi")],
+    )
+    event.event.message.message_type = "interactive"
+    event.event.message.content = json.dumps(
+        _card_content("<at id=ou_x mention_key=@_user_1></at> 在的！联调正常 ✅"),
+        ensure_ascii=False,
+    )
+
+    await fi.on_message(event)
+
+    assert batches == ["@Lumi 在的！联调正常 ✅"]
 
 
 async def test_inbound_takes_other_bots_at_but_never_its_own_message(monkeypatch):
