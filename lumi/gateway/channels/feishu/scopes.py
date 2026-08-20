@@ -26,6 +26,7 @@ OPTIONAL_SCOPES: tuple[tuple[str, str], ...] = (
     ("contact:user.base:readonly", "发送者姓名"),
     ("im:chat:read", "群名与群信息"),
     ("im:chat.members:read", "群成员名单"),
+    ("im:message.group_at_msg.include_bot:readonly", "接收其他机器人的 @"),
     # CardKit 全程失败时 streaming.py 会降级成普通 markdown 卡（_fallback_send），
     # 回复不会丢，只是失去逐字上屏
     ("cardkit:card:write", "打字机流式卡片"),

@@ -824,7 +824,13 @@ def test_session_key_only_exact_p2p_uses_open_id():
     assert inb.session_key_of("topic", "oc_team", "ou_me") == "oc_team"
 
 
-def _inbound_event(chat_type: str, chat_id: str, open_id: str):
+def _inbound_event(
+    chat_type: str,
+    chat_id: str,
+    open_id: str,
+    sender_type: str = "user",
+    mentions=None,
+):
     """一条最简文本入站消息事件（字段名与 lark EventMessage 对齐）。
 
     message_id 随发送者变：同一测试里连发两条时不能被去重 LRU 吃掉。
@@ -837,11 +843,11 @@ def _inbound_event(chat_type: str, chat_id: str, open_id: str):
                 chat_type=chat_type,
                 message_type="text",
                 content=json.dumps({"text": "你好"}),
-                mentions=None,
+                mentions=mentions,
                 parent_id=None,
                 create_time=1000,
             ),
-            sender=SimpleNamespace(sender_type="user", sender_id=_Mid(open_id)),
+            sender=SimpleNamespace(sender_type=sender_type, sender_id=_Mid(open_id)),
         )
     )
 
@@ -890,6 +896,43 @@ async def test_inbound_group_thread_keyed_by_chat_id(monkeypatch):
     a = await _inbound_thread_of(ch, monkeypatch, "group", "oc_team", "ou_a")
     b = await _inbound_thread_of(ch, monkeypatch, "group", "oc_team", "ou_b")
     assert a == b == feishu_thread_id("oc_team")
+
+
+async def test_inbound_takes_other_bots_at_but_never_its_own_message(monkeypatch):
+    """别的机器人 @ 本机器人照常入站；本机器人自己的消息恒丢。
+
+    按 sender_type == "bot" 一刀切会让「机器人 @ 机器人」整条路哑掉（真实故障），
+    自己的消息若被回推则是无限自问自答——两条方向相反，故一并锁住。
+    """
+    ch = FeishuChannel(FeishuChannelConfig())  # group_policy 默认 mention
+    ch._bot_open_id = "ou_me"
+    fi = ch.inbound
+    ran: list[str] = []
+
+    async def fake_resolve(chat, ids):
+        return {}
+
+    async def fake_sync(*a, **k):
+        return None
+
+    async def fake_drain(bridge, cid, thread_id, batch):
+        ran.append(thread_id)
+
+    monkeypatch.setattr(ch.directory, "resolve_senders_in_chat", fake_resolve)
+    monkeypatch.setattr(fi, "_sync_session_title", fake_sync)
+    monkeypatch.setattr(fi, "_locked_drain", fake_drain)
+    _patch_pool_get(ch, monkeypatch, None)
+
+    await fi.on_message(
+        _inbound_event("group", "oc_team", "ou_other_bot", "bot", [_Mention("ou_me")])
+    )
+    assert ran == [feishu_thread_id("oc_team")]
+
+    ran.clear()
+    await fi.on_message(
+        _inbound_event("group", "oc_team", "ou_me", "bot", [_Mention("ou_me")])
+    )
+    assert ran == []
 
 
 async def test_minute_push_lands_on_the_inbound_p2p_thread(monkeypatch):

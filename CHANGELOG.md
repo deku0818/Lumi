@@ -1,5 +1,13 @@
 # Changelog
 
+## [0.2.111] - 2026-08-20
+
+### Fixed
+- **飞书里别的机器人 @ Lumi 收不到消息**（`feishu/inbound.py`）— 入站第一道原本按 `sender_type == "bot"` 一刀切丢弃（v0.2.3 首版起，本意只是防自己的消息回推成自问自答），把「机器人 @ 机器人」整条路一并挡死。改成只挡自身 `bot_open_id`：别的机器人的 @ 与真人同路进入。平台侧本就会推——飞书 `im:message.group_at_msg.include_bot:readonly` 正是为此设计，且明确不含本机器人自己发的消息；自身那道守卫仍留着，真回推就是无限自问自答。
+
+### Changed
+- `im:message.group_at_msg.include_bot:readonly` 进 `OPTIONAL_SCOPES`（"接收其他机器人的 @"）：接入体检会提示缺失，一键开通链接一并预填——不然新建的应用即使代码放行也收不到事件。
+
 ## [0.2.110] - 2026-08-19
 
 ### Fixed

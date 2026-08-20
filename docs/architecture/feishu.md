@@ -53,7 +53,8 @@ lark_oapi.ws.client.loop`，与 uvicorn 主 loop 隔离。入站回调在 WS 线
 
 ## 入站（inbound.py）
 
-`on_message` 流水线：去重（LRU by message_id）→ 跳过机器人自身 → 白名单（`is_allowed`）→
+`on_message` 流水线：去重（LRU by message_id）→ 跳过自身（比 `bot_open_id`，**不**按
+`sender_type == "bot"` 一刀切——别的机器人 @ 本机器人是正当来源）→ 白名单（`is_allowed`）→
 群策略（`group_policy=mention` 时仅 `@_all` 或精确匹配 `bot_open_id` 才响应；**不做** ou_
 启发式以免把真人误判为机器人）→ 解析文本（text / post）→ 收集媒体引用 → 解析发送者显示名
 （`channel.directory`，群聊走群成员源、私聊走通讯录源）→ 派生 thread + 取 bridge + 运行锁 →
@@ -285,8 +286,9 @@ FAILED 不上抛），成功与否看**快照时刻有没有推进**（`record_t
   避免「开完这一个回来发现又缺别的」。
 - **`events` 字段不可用于比对**：它返回的是中文显示名（`"接收消息"`），事件 code 只在
   `event_infos` 里（该字段未见于公开文档，但接口稳定返回）。
-- **可选权限不标红**：`OPTIONAL_SCOPES` 只影响显示名，缺了照样收发，故降级为 detail 里的提示——
-  否则用户会被支去修一个不影响使用的问题。
+- **可选权限不标红**：`OPTIONAL_SCOPES` 缺了主链路照样收发（丢的是显示名、流式卡片、或
+  「其他机器人的 @」这类分支），故降级为 detail 里的提示——否则用户会被支去修一个不影响
+  主流程的问题。
 - **共用结构**：`checks.py` 的 `Check` + `blocked_tail` 由接入体检与妙记诊断共用，desktop 侧对应
   `CheckPanel` / `CheckRow` + `useDiagnose`（`DiagnoseCheck` 类型）。失败项带 `fix_url` 直达开放
   平台，权限链接预填全部所需 scope（`scopes.py` 的 `auth_url`，`token_type=tenant` 停在应用身份 tab）。

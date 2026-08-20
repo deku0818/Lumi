@@ -375,10 +375,14 @@ class FeishuInbound:
             message_id = message.message_id
             if self._is_duplicate(message_id):
                 return
-            if sender.sender_type == "bot":
-                return  # 忽略机器人自己的消息
             open_id = sender.sender_id.open_id if sender.sender_id else None
             if not open_id:
+                return
+            # 只挡自己（而非按 sender_type == "bot" 一刀切）：别的机器人 @ 本机器人是
+            # 正当来源（需开 im:message.group_at_msg.include_bot:readonly），按 bot 全拒
+            # 会让这条路整个哑掉。飞书声明自己发的消息不回推，这里仍留一道——真回推了
+            # 就是无限自问自答。
+            if open_id == ch.bot_open_id:
                 return
 
             chat_id = message.chat_id
