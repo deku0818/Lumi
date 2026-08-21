@@ -17,6 +17,10 @@ from dataclasses import dataclass
 from datetime import UTC, datetime
 from typing import TYPE_CHECKING, Any
 
+from langgraph.checkpoint.postgres.aio import AsyncPostgresSaver
+from langgraph.checkpoint.sqlite.aio import AsyncSqliteSaver
+from langgraph.checkpoint.sqlite.utils import search_where
+
 from lumi.sessions.message_text import visible_user_text
 from lumi.sessions.message_visibility import (
     is_human_message,
@@ -103,14 +107,14 @@ async def _get_thread_ids(
 ) -> list[tuple[str, str]]:
     """从 checkpointer 获取所有 (thread_id, latest_checkpoint_id)
 
-    使用 checkpointer 的 alist 接口获取所有 checkpoint，
-    按 checkpoint_id 降序排列（最新优先），去重提取每个 thread
-    的最新 checkpoint_id。checkpoint_id 用于缓存失效判断——
+    sqlite / postgres 直接用轻量 SQL 取每个 thread 的最新 checkpoint_id——
+    alist 会把每一行 checkpoint blob 完整反序列化，库大时（GB 级）
+    一次列表要数十秒。checkpoint_id 用于缓存失效判断——
     内容未变则 id 不变，可跳过完整反序列化。
 
     Args:
         graph: 已编译的 LangGraph 状态图
-        filter: metadata 过滤条件，传递给 checkpointer.alist()
+        filter: metadata 过滤条件（形如 {"workspace_dir": ...}）
 
     Returns:
         按最近活跃时间降序排列的 (thread_id, checkpoint_id) 列表
@@ -119,17 +123,42 @@ async def _get_thread_ids(
     if checkpointer is None:
         return []
 
+    # 两条快路径同构：先在覆盖索引上分组取各 thread 最新 checkpoint_id（不碰行数据，
+    # 尤其不碰 GB 级 checkpoint blob），再回表只对每 thread 一行探 metadata 过滤。
+    # 语义注：过滤从"最新一条匹配的"变为"最新一条、且它匹配"——workspace_dir 随
+    # thread 恒定，二者等价。metadata 谓词复用 langgraph 自家构建器，与 alist 同源。
+    grouped_join = (
+        "SELECT c.thread_id, c.checkpoint_id FROM"
+        " (SELECT thread_id, MAX(checkpoint_id) AS checkpoint_id FROM checkpoints"
+        "  WHERE checkpoint_ns = '' GROUP BY thread_id) AS m"
+        " JOIN checkpoints AS c ON c.thread_id = m.thread_id"
+        " AND c.checkpoint_id = m.checkpoint_id AND c.checkpoint_ns = ''"
+    )
+
+    if isinstance(checkpointer, AsyncSqliteSaver):
+        where, params = search_where(None, filter)
+        sql = f"{grouped_join} {where} ORDER BY c.checkpoint_id DESC"
+        async with checkpointer.lock, checkpointer.conn.execute(sql, params) as cur:
+            return list(await cur.fetchall())
+
+    if isinstance(checkpointer, AsyncPostgresSaver):
+        where, pg_params = checkpointer._search_where(None, filter)
+        sql = f"{grouped_join} {where} ORDER BY c.checkpoint_id DESC"
+        async with checkpointer._cursor() as cur:
+            await cur.execute(sql, pg_params)
+            rows = await cur.fetchall()
+        return [(row["thread_id"], row["checkpoint_id"]) for row in rows]
+
+    # InMemorySaver 等其余类型：alist 在内存中遍历，无反序列化开销。
+    # alist(config=None) 返回所有 checkpoint，按 checkpoint_id DESC，
+    # 只取每个 thread 的第一条（最新的）
     seen: set[str] = set()
     pairs: list[tuple[str, str]] = []
-
-    # alist(config=None) 返回所有 checkpoint，按 checkpoint_id DESC
-    # 只取每个 thread 的第一条（最新的）
     async for cp_tuple in checkpointer.alist(None, filter=filter):
         cfg = cp_tuple.config["configurable"]
         tid = cfg["thread_id"]
-        ns = cfg.get("checkpoint_ns", "")
         # 只取根命名空间的 checkpoint
-        if ns != "":
+        if cfg.get("checkpoint_ns", "") != "":
             continue
         if tid not in seen:
             seen.add(tid)

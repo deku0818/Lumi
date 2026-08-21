@@ -31,10 +31,13 @@ from lumi.gateway.channels.feishu.minutes import transcript_hint
 from lumi.gateway.channels.feishu.outbound import run_turn
 from lumi.gateway.channels.feishu.relay_turn import run_relay_turn
 from lumi.gateway.channels.relay import (
+    EFFORT_LEVELS,
+    RELAY_COMMANDS,
     binding_of,
     is_active,
     parse_direct_args,
     relay_precheck,
+    setting_invalid_hint,
     update_binding,
 )
 from lumi.sessions.session_meta import delete_meta, update_meta
@@ -489,14 +492,25 @@ class FeishuInbound:
             # 渠道系统命令（/stop /clear /help）：渠道层即时执行，不进 agent、不排队
             # ——/stop 恰是忙时才有意义，进队列等锁就荒谬了。
             session_key = session_key_of(chat_type, chat_id, open_id)
+            thread_id = feishu_thread_id(session_key)
             parsed = parse_slash_command(text) if text else None
             if parsed and parsed[0] in SYSTEM_COMMANDS:
                 await self._run_system_command(
-                    parsed[0],
-                    parsed[1],
-                    chat_id,
-                    feishu_thread_id(session_key),
-                    message_id,
+                    parsed[0], parsed[1], chat_id, thread_id, message_id
+                )
+                return
+            # 直连期带值的 /model opus、/effort high：透传给 cc 只对当次进程生效
+            # （无头下每条消息都是新进程，"for this session only" 下一轮即丢），
+            # 渠道层拦下改写 relay 绑定才能持久。裸敲（无值）不拦、原样透传——
+            # cc 本地直答当前模型/用法，零 LLM 调用，事实源恒真；未直连时不拦
+            if (
+                parsed
+                and parsed[0] in RELAY_COMMANDS
+                and parsed[1]
+                and is_active(thread_id)
+            ):
+                await self._cmd_relay_setting(
+                    parsed[0], parsed[1], chat_id, thread_id, message_id
                 )
                 return
 
@@ -541,7 +555,6 @@ class FeishuInbound:
                 logger.warning(f"Feishu: 解析发送者姓名失败 {open_id}", exc_info=True)
                 sender_name = fallback_name(open_id)
 
-            thread_id = feishu_thread_id(session_key)
             title = await self._resolve_title(chat_id, chat_type, sender_name, open_id)
             self._sync_session_title(thread_id, chat_type, title)
             await self._admit(
@@ -697,7 +710,7 @@ class FeishuInbound:
                 "`/direct new` 任务 — 直连并开全新会话\n"
                 "`/direct exit` — 退出直连，回到 Lumi",
                 "选项（紧跟子命令、独占首行，任务换行写）：--dir 路径 · --model 别名/id · "
-                "--effort low|medium|high|xhigh|max",
+                f"--effort {'|'.join(EFFORT_LEVELS)} · --resume 会话UUID",
             )
         else:
             lines = [
@@ -727,7 +740,8 @@ class FeishuInbound:
         self, fresh: bool, rest: str, chat_id: str, thread_id: str, message_id: str
     ) -> None:
         """进入直连：``--dir`` 切目录 / ``--model`` ``--effort`` 定模型（均粘性），换目录或
-        new 即开新会话（换模型不换会话——模型是每轮属性），随带任务立刻跑。"""
+        new 即开新会话（换模型不换会话——模型是每轮属性），``--resume`` 显式接管指定 sid
+        （cc 续接复用同一 sid，此后所有轮都在这个会话里），随带任务立刻跑。"""
         ch = self.channel
         if reason := relay_precheck():
             await ch.send_markdown(
@@ -738,11 +752,6 @@ class FeishuInbound:
                 template="red",
                 note="处理后重新发送 /direct claude",
             )
-            return
-        # 在跑的轮结束时会把 sid 写回绑定：此刻清 sid 开新会话必被覆盖，"全新会话"
-        # 会静默变成续旧会话——与 /clear 同一守卫，先停再开
-        if fresh and ch.bridge_pool.busy(thread_id):
-            await self._send_busy_hint(chat_id, message_id)
             return
         try:
             flags, task = parse_direct_args(rest)
@@ -755,6 +764,22 @@ class FeishuInbound:
                 template="red",
                 note="示例：/direct claude --dir ~/Cocoon/axi --model opus",
             )
+            return
+        sid_flag = flags.get("resume", "")
+        if fresh and sid_flag:
+            await ch.send_markdown(
+                chat_id,
+                "`new` 是开全新会话，`--resume` 是续指定会话，二者矛盾。",
+                reply_to=message_id,
+                title="❌ 选项有误",
+                template="red",
+                note="续指定会话用 /direct claude --resume <sid>",
+            )
+            return
+        # 在跑的轮结束时会把 sid 写回绑定：此刻写入的 sid（清空开新 / 显式指定）必被
+        # 覆盖，静默变成续旧会话——与 /clear 同一守卫，先停再开
+        if (fresh or sid_flag) and ch.bridge_pool.busy(thread_id):
+            await self._send_busy_hint(chat_id, message_id)
             return
         binding = binding_of(thread_id)
         prev_cwd = binding.get("cwd") or ch.config.workspace
@@ -775,20 +800,28 @@ class FeishuInbound:
                 )
                 return
             cwd = str(target_dir)
-        # 会话属于项目：显式换了目录就开新会话，跨项目续旧上下文只会误导 cc
+        # 会话属于项目：显式换了目录就开新会话，跨项目续旧上下文只会误导 cc；
+        # --resume 是用户显式指定，压过这一切（含换目录——接管终端会话时目录本就在变）
         switched = cwd != prev_cwd
-        resumed = not fresh and not switched and bool(binding.get("session_id"))
+        if sid_flag:
+            session_id = sid_flag
+        elif not fresh and not switched:
+            session_id = binding.get("session_id", "")
+        else:
+            session_id = ""
         model = flags.get("model", binding.get("model", ""))
         effort = flags.get("effort", binding.get("effort", ""))
         update_binding(
             thread_id,
             active=True,
             cwd=cwd,
-            session_id=binding.get("session_id", "") if resumed else "",
+            session_id=session_id,
             model=model,
             effort=effort,
         )
-        if resumed:
+        if sid_flag:
+            mode = f"续接指定会话 `{sid_flag}`"
+        elif session_id:
             mode = "续接上次会话"
         elif switched:
             mode = "已切换项目，开启新会话"
@@ -827,6 +860,32 @@ class FeishuInbound:
             title="✅ 已退出直连",
             template="green",
             note="/direct claude 随时续接",
+        )
+
+    async def _cmd_relay_setting(
+        self, name: str, value: str, chat_id: str, thread_id: str, message_id: str
+    ) -> None:
+        """直连期带值的 /model /effort：改写 relay 绑定，下一轮生效（模型是每轮
+        属性，会话不换、上下文不丢）。裸敲不进这里——原样透传，cc 本地直答当前值。
+        值校验与 /direct 选项同源（setting_invalid_hint）。
+        """
+        if hint := setting_invalid_hint(name, value):
+            await self.channel.send_markdown(
+                chat_id,
+                f"`/{name}` {hint}",
+                reply_to=message_id,
+                title="❌ 模型名无效" if name == "model" else "❌ 档位无效",
+                template="red",
+            )
+            return
+        binding = update_binding(thread_id, **{name: value})
+        await self.channel.send_markdown(
+            chat_id,
+            _model_line(binding.get("model", ""), binding.get("effort", "")).strip(),
+            reply_to=message_id,
+            title="✅ 已切换",
+            template="green",
+            note="下一条消息生效 · 会话不变",
         )
 
     async def _cmd_stop(self, chat_id: str, thread_id: str, message_id: str) -> None:
@@ -963,7 +1022,9 @@ class FeishuInbound:
         if is_active(thread_id):
             # 直连期只有系统命令可用（技能不进 cc），/stop /clear 语义变为作用于 cc
             lines = ["当前处于直连模式，消息将直达 Claude Code。", ""]
-            lines += [_help_line(n, d) for n, d in SYSTEM_COMMANDS.items()]
+            lines += [
+                _help_line(n, d) for n, d in (SYSTEM_COMMANDS | RELAY_COMMANDS).items()
+            ]
             await self.channel.send_markdown(
                 chat_id,
                 "\n".join(lines),

@@ -1,5 +1,18 @@
 # Changelog
 
+## [0.2.114] - 2026-08-21
+
+### Added
+- **飞书直连期 `/model` `/effort` 带值热切换**（`relay.RELAY_COMMANDS` + `inbound._cmd_relay_setting`）— 透传给 cc 只对当次进程生效（无头下每条消息都是新进程，设置下一轮即丢），渠道层拦下改写 relay 绑定才能持久：下一轮生效、会话不换、上下文不丢。裸敲（无值）不拦、原样透传，cc 本地直答当前值，零 LLM 调用；未直连时不拦按普通文本走。直连态 `/help` 一并列出这组命令。
+- **`/direct --resume 会话UUID` 显式接管指定 cc 会话**（如终端里跑出来的）— 压过「换目录开新会话」规则（接管终端会话时目录本就在变），与 `new` 矛盾即拦；只认完整 UUID（短号每轮都报 No sessions match，入库前就拦）。cc 续接复用同一 sid（2.1.237 实测，fork 需显式 `--fork-session`），此后所有轮都在这个会话里，终端随时可用同一 id 接管回去。
+
+### Fixed
+- **`/model` 会把消息尾巴整串存进绑定并回绿色成功卡**——`/model opus --effort high`（正是 `/direct` 自己宣传的旗标写法）整串入库后，之后每轮直连都以坏 `--model` 失败，直到重发干净的 `/model`。model（拒多词）/ effort（拒非法档位）/ resume（只认完整 UUID）三类值校验统一收敛到 `relay.setting_invalid_hint`，`/direct` 选项与直连期命令同源，`--model opus 4.5 干活` 这类同款失误也一并拦下。
+
+### Changed
+- **会话列表弃 `alist` 全量反序列化，改轻量 SQL**（`session_store._get_thread_ids`）— `alist` 会把每一行 checkpoint blob 完整反序列化只为取 thread_id，库大时一次列表数十秒（远程 1.8GB 库实测 43s，summary 缓存救不了这个前置扫描）。sqlite / postgres 两条快路径同构：先在覆盖索引上分组取各 thread 最新 checkpoint_id（不碰 blob），再回表只对每 thread 一行探 metadata 过滤（带过滤路径不退化，autoDream 不受累）；metadata 谓词复用 langgraph 自家 `search_where` 构建器，与 `alist` 回退路径同源。真实库实测无过滤 5ms / 带过滤 7ms，结果与旧实现逐条一致。InMemorySaver 等其余类型仍走 alist（内存遍历无反序列化开销）。
+- 关键事实更正：cc `--resume` 默认**复用**原 session_id（旧版每轮派生新 sid，现在 fork 要显式 `--fork-session`）——事件携带的 sid 仍照常落盘作为单一事实源，两种行为都兼容（`relay.py` / `relay_turn.py` 注释与 `docs/architecture/feishu.md` 同步更正）。
+
 ## [0.2.113] - 2026-08-20
 
 ### Fixed

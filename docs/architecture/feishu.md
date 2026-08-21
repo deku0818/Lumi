@@ -208,16 +208,23 @@ Lumi 自身会话原封不动，退出即无缝回到原对话。
   `/direct exit` 清 `active` 保 sid（续接零成本），`/clear` 清 sid。
 - **命令面**（`SYSTEM_COMMANDS.direct`，仅 IM）：`/direct` 状态/用法 · `/direct claude [任务]`
   续接进入 · `/direct new [任务]` 新会话进入 · `/direct exit` 退出。选项 `--dir 路径` /
-  `--model 别名或id` / `--effort low|medium|high|xhigh|max` 紧跟子命令**独占首行**（任意
-  顺序，值取到下一个 `--` 为止，路径含空格安全），任务换行写——刻意不用引号包裹（输入法
-  弯直混打、忘闭合会静默错切）；`--` 的破折号 / 全角变体（`—dir`）同样认（中文输入法
-  常把连打短横转成破折号）；不支持 `--key=value`。三个选项均粘性；换目录自动开新会话
-  （会话属于项目），换模型不换会话（模型是每轮属性，resume 时切换生效且记忆不丢）。
-  `--effort` 本侧校验（cc 对无效值静默接受），`--model` 交 cc 报错。
+  `--model 别名或id` / `--effort low|medium|high|xhigh|max` / `--resume 会话UUID` 紧跟
+  子命令**独占首行**（任意顺序，值取到下一个 `--` 为止，路径含空格安全），任务换行写——
+  刻意不用引号包裹（输入法弯直混打、忘闭合会静默错切）；`--` 的破折号 / 全角变体（`—dir`）
+  同样认（中文输入法常把连打短横转成破折号）；不支持 `--key=value`。dir/model/effort 粘性；
+  换目录自动开新会话（会话属于项目），换模型不换会话（模型是每轮属性，resume 时切换生效且
+  记忆不丢）。`--resume` 显式接管指定 cc 会话（如终端里跑出来的），压过换目录开新会话的
+  规则、与 `new` 矛盾即拦；cc 续接复用同一 sid（2.1.237 实测，fork 需显式
+  `--fork-session`），此后所有轮都在这个会话里，终端随时可用同一 id 接管回去。
+  `--effort`/`--resume`（完整 UUID）本侧校验（cc 对无效值静默接受 / 短号报 No sessions
+  match），`--model` 拒多词（整串入库会让之后每轮都失败）、存在性交 cc 报错——三者同源
+  `relay.setting_invalid_hint`。
 - **直连中的 Lumi 通知**（妙记纪要 / 后台任务完成 / 日程提醒，`_run_synthetic_turn`）照常
   推送，紧跟一张「⚡ 直连中」黄卡说明此刻回复会直达 cc、需要 Lumi 跟进先 `/direct exit`——
   同一时刻只有一个工人在听，路由零特判、不搞回复链第二通道。
-  直连中 `/stop` `/clear` `/help` 语义切为作用于 cc；其余文本（含 cc 自身斜杠命令）原样透传。
+  直连中 `/stop` `/clear` `/help` 语义切为作用于 cc；带值的 `/model opus` `/effort high`
+  （`RELAY_COMMANDS`）渠道层拦下改写绑定——透传给 cc 只对当次进程生效，拦截才能持久，
+  裸敲不拦、cc 本地直答当前值；其余文本（含 cc 自身斜杠命令）原样透传。
 - **路由定格**：`_Pending.relay` 在入队那一刻记录模式，`_drain` 按 `takewhile` 切连续段各走
   各的——排队期间切换 `/direct` 不会把发给 Lumi 的消息喂给 cc（反之亦然），且保到达顺序。
 - **前置检查**（`relay_precheck`）：PATH 无 claude、或 root 运行未设 `IS_SANDBOX=1`（claude

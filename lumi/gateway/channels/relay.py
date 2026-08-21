@@ -9,8 +9,9 @@ codex runner / 其它渠道复用同一事件形状。
 
 关键事实（调研自 cc headless 行为）：
 - ``-p`` 下 stream-json 必须搭配 ``--verbose``；
-- 每轮 ``--resume`` 都派生**新的** session_id——init 与 result 事件携带的 sid 都要
-  落盘，续对话恒 resume 最新那个；
+- ``--resume`` 默认**复用**原 session_id（cc 2.1.237 实测；旧版每轮派生新 sid，现在
+  fork 要显式 ``--fork-session``）——init 与 result 携带的 sid 仍照常落盘，事件是
+  单一事实源，两种行为都兼容；
 - init 事件是第一行输出，sid 在任何产出之前就已可持久化，中断不丢续接能力。
 """
 
@@ -74,7 +75,37 @@ _FLAG_DASH = re.compile(r"[-\u2010-\u2015\u2212\uff0d]{1,2}(?=[a-z])", re.IGNORE
 # --effort 合法档位。cc 对无效值静默接受（实测 --effort bogus 照常跑），必须本侧校验；
 # --model 则由 cc 自己报明确错误（"may not exist or you may not have access"），不重复校验。
 EFFORT_LEVELS = ("low", "medium", "high", "xhigh", "max")
-DIRECT_FLAGS = ("dir", "model", "effort")
+
+# cc 会话 sid：resume 只认完整 UUID，短号/前缀会报 No sessions match
+_SID_RE = re.compile(r"[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}")
+
+
+def setting_invalid_hint(name: str, value: str) -> str:
+    """/direct 选项值的校验提示（空串 = 有效），model/effort 与直连期 /model /effort 共用。
+
+    model 只拒多词——整串入库会让之后每轮 --model 都失败（存在性由 cc 自己报错）；
+    effort 拒非法档位——cc 静默接受无效值，必须调用侧拦；
+    resume 只认完整 UUID——短号每轮都报 No sessions match，入库前就拦。
+    """
+    if name == "model" and len(value.split()) > 1:
+        return "只接受单个模型名（如 opus）"
+    if name == "effort" and value not in EFFORT_LEVELS:
+        return f"只能是 {' / '.join(EFFORT_LEVELS)}"
+    if name == "resume" and not _SID_RE.fullmatch(value):
+        return "只认完整会话 UUID（如 c143b89c-4b73-4e5e-908d-95c84de98c59）"
+    return ""
+
+
+DIRECT_FLAGS = ("dir", "model", "effort", "resume")
+
+# 直连期专属命令（名字 → 描述，/help 用）：带值时渠道层拦截、改写 relay 绑定、
+# 下一轮生效——透传给 cc 只对当次进程生效（无头下每条消息都是新进程，设置下一轮
+# 即丢）。裸敲（无值）不拦、原样透传，cc 本地直答当前模型/用法；未直连时不拦，
+# 按普通文本走。
+RELAY_COMMANDS: dict[str, str] = {
+    "model": "切换直连模型并保持，如 /model opus（裸敲查看当前模型）",
+    "effort": f"切换思考档位：{' / '.join(EFFORT_LEVELS)}",
+}
 
 
 def parse_direct_args(rest: str) -> tuple[dict[str, str], str]:
@@ -98,12 +129,12 @@ def parse_direct_args(rest: str) -> tuple[dict[str, str], str]:
         key, value = key.strip(), value.strip()
         if key not in DIRECT_FLAGS:
             raise ValueError(
-                f"不认识的选项 `--{key}`（可用：--dir / --model / --effort）"
+                f"不认识的选项 `--{key}`（可用：--dir / --model / --effort / --resume）"
             )
         if not value:
             raise ValueError(f"`--{key}` 后面缺少值")
-        if key == "effort" and value not in EFFORT_LEVELS:
-            raise ValueError(f"`--effort` 只能是 {' / '.join(EFFORT_LEVELS)}")
+        if hint := setting_invalid_hint(key, value):
+            raise ValueError(f"`--{key}` {hint}")
         flags[key] = value
     return flags, task.strip()
 

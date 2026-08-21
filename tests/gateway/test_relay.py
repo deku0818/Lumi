@@ -161,7 +161,7 @@ def test_binding_lifecycle(tmp_path, monkeypatch):
     relay.update_binding(tid, active=True, agent="claude", cwd="/proj")
     assert relay.is_active(tid)
 
-    # 每轮 resume 派生新 sid：落盘恒追最新
+    # sid 取自事件、落盘恒追最新（cc 续接默认复用原 sid，fork 行为也兼容）
     relay.update_binding(tid, session_id="sid-a")
     relay.update_binding(tid, session_id="sid-b")
     assert relay.binding_of(tid)["session_id"] == "sid-b"
@@ -241,6 +241,15 @@ def test_parse_direct_args():
         parse_direct_args("--dirty 是什么")
     with pytest.raises(ValueError, match="effort"):
         parse_direct_args("--effort bogus")
+    # --resume 只认完整 UUID：短号每轮都报 No sessions match，入库前就拦
+    assert parse_direct_args(
+        "--resume c143b89c-4b73-4e5e-908d-95c84de98c59\n继续刚才的任务"
+    ) == (
+        {"resume": "c143b89c-4b73-4e5e-908d-95c84de98c59"},
+        "继续刚才的任务",
+    )
+    with pytest.raises(ValueError, match="UUID"):
+        parse_direct_args("--resume c143b89c")
     assert parse_direct_args("") == ({}, "")
 
 
@@ -291,3 +300,33 @@ def test_relay_precheck_root_without_sandbox(monkeypatch):
     assert relay.relay_precheck() == ""
     monkeypatch.setattr(relay.shutil, "which", lambda _: None)
     assert "未安装" in relay.relay_precheck()
+
+
+async def test_relay_setting_command(tmp_path, monkeypatch):
+    """直连期带值 /model /effort：改写绑定、会话不换；无效档位拦下。"""
+    from lumi.gateway.channels.config import FeishuChannelConfig
+    from lumi.gateway.channels.feishu.channel import FeishuChannel
+
+    monkeypatch.setattr(relay, "GLOBAL_CONFIG_DIR", tmp_path)
+    ch = FeishuChannel(FeishuChannelConfig())
+    cards: list[tuple[str, str]] = []
+
+    async def fake_send(chat_id, body, **kw):
+        cards.append((kw.get("title", ""), body))
+
+    monkeypatch.setattr(ch, "send_markdown", fake_send)
+    tid = "feishu-chat-1"
+    relay.update_binding(tid, active=True, cwd="/proj", session_id="sid-a")
+
+    await ch.inbound._cmd_relay_setting("model", "opus", "chat", tid, "mid")
+    assert relay.binding_of(tid)["model"] == "opus"
+    # 换模型不换会话：sid 原封不动
+    assert relay.binding_of(tid)["session_id"] == "sid-a"
+    assert cards[-1][0] == "✅ 已切换"
+
+    await ch.inbound._cmd_relay_setting("effort", "bogus", "chat", tid, "mid")
+    assert "effort" not in relay.binding_of(tid)
+    assert cards[-1][0] == "❌ 档位无效"
+
+    await ch.inbound._cmd_relay_setting("effort", "high", "chat", tid, "mid")
+    assert relay.binding_of(tid)["effort"] == "high"

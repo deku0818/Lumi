@@ -45,8 +45,8 @@ async def run_relay_turn(
 ) -> None:
     """驱动一轮 cc 直连，把事件流渲染到飞书（调用方已持本会话运行锁）。
 
-    init / result 携带的 session_id 都即时落盘——每轮 ``--resume`` 派生新 sid，
-    续对话恒 resume 最新；init 先于一切产出，中断也不丢续接能力。
+    init / result 携带的 session_id 都即时落盘——事件是 sid 的单一事实源（cc 续接
+    默认复用原 sid，fork 行为也兼容）；init 先于一切产出，中断也不丢续接能力。
     """
     streaming = channel.streaming
     binding = binding_of(thread_id)
