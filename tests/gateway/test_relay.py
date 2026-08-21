@@ -226,6 +226,11 @@ def test_parse_direct_args():
         "",
     )
     assert parse_direct_args("\uff0ddir ~/x") == ({"dir": "~/x"}, "")
+    # 路径里的连字符不是旗标前缀（只有行首/空白后的短横才算）
+    assert parse_direct_args("--dir /y-codespaces/ep-liftOS") == (
+        {"dir": "/y-codespaces/ep-liftOS"},
+        "",
+    )
     # 任务正文里的破折号后跟中文，不是旗标前缀
     assert parse_direct_args("修一下\u2014\u2014这个bug") == (
         {},

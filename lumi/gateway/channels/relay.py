@@ -69,7 +69,10 @@ def update_binding(thread_id: str, **fields) -> dict:
 # 移动端尤其如此，用户几乎必然踩到。不认它的代价不是少切一个参数，而是整段
 # `—dir /path` 被当任务喂给 cc——用户以为切了目录，cc 收到一句没头没尾的话。
 # 覆盖 ASCII 短横、U+2010–U+2015 各式连字符/破折号、U+2212 减号、U+FF0D 全角短横。
-_FLAG_DASH = re.compile(r"[-\u2010-\u2015\u2212\uff0d]{1,2}(?=[a-z])", re.IGNORECASE)
+# (?<!\S) 锚定行首/空白后：路径里的连字符（/y-codespaces/ep-liftOS）不是旗标前缀。
+_FLAG_DASH = re.compile(
+    r"(?<!\S)[-\u2010-\u2015\u2212\uff0d]{1,2}(?=[a-z])", re.IGNORECASE
+)
 
 
 # --effort 合法档位。cc 对无效值静默接受（实测 --effort bogus 照常跑），必须本侧校验；
