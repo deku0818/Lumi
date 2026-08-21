@@ -9,6 +9,9 @@
 - **通讯录接口**（``contact.v3.users.batch``）：受可见范围限制 → 私聊等无群上下文
   时的退路。
 
+以上两源都只覆盖真人；**bot 发送者**走第三条路（``resolve_bot_sender``）：由它刚发
+的消息反查 app_id 再取应用名，结果与真人共享同一 ``open_id → 名`` 缓存。
+
 两个数据源共享同一个 ``open_id → 名`` 缓存：飞书群成员名即用户显示名，与通讯录名
 一致，无需按来源分层。群场景未命中只刷群成员、不回退通讯录——群成员接口已覆盖全员，
 群里却查不到的人（可见范围外）通讯录通常也查不到，回退收益低。
@@ -49,6 +52,13 @@ def fallback_name(open_id: str | None) -> str:
     if not open_id:
         return "用户_unknown"
     return f"用户_{open_id[-6:]}"
+
+
+def fallback_bot_name(open_id: str | None) -> str:
+    """bot 发送者解析不到时的占位名（与真人兜底名区分，别把机器人叫成用户）。"""
+    if not open_id:
+        return "机器人_unknown"
+    return f"机器人_{open_id[-6:]}"
 
 
 def fallback_chat_name(chat_id: str | None) -> str:
@@ -110,6 +120,21 @@ class FeishuDirectory:
             lambda ids: self._fetch_members_for(chat_id, ids),
             fallback_name,
         )
+
+    async def resolve_bot_sender(self, open_id: str, message_id: str) -> str:
+        """bot 发送者解析：群成员/通讯录两个数据源都不覆盖机器人（官方文档明确
+        群成员接口过滤 bot），唯一路径是拿它刚发的这条消息反查——
+        ``im.message.get`` 的 sender 给 app_id，再 ``application.get`` 取应用名。
+
+        后一跳查他方应用需 ``admin:app.info:readonly``，未授权时兜底
+        ``机器人_xxxxxx`` 且不写缓存（授权后下条消息即恢复真名）。
+        """
+        out = await self._users.resolve(
+            [open_id],
+            lambda ids: self._fetch_bot_name(open_id, message_id),
+            fallback_bot_name,
+        )
+        return out[open_id]
 
     # ------------------------------------------------------------------
     # 启动预热
@@ -266,6 +291,37 @@ class FeishuDirectory:
             return (oid, name) if oid and name else None
 
         return dict(self._paginate(page_call, extract))
+
+    def _fetch_bot_name(self, open_id: str, message_id: str) -> dict[str, str]:
+        """open_id → 应用名：``im.message.get`` 取 sender.app_id → ``application.get``。"""
+        if self._client is None:
+            return {}
+        from lark_oapi.api.application.v6 import GetApplicationRequest
+        from lark_oapi.api.im.v1 import GetMessageRequest
+
+        req = GetMessageRequest.builder().message_id(message_id).build()
+        resp = lark_call("im.message.get", lambda: self._client.im.v1.message.get(req))
+        if resp is None:
+            return {}
+        app_id = next(
+            (
+                getattr(it.sender, "id", None)
+                for it in getattr(resp.data, "items", None) or []
+                if getattr(getattr(it, "sender", None), "id_type", None) == "app_id"
+            ),
+            None,
+        )
+        if not app_id:
+            return {}
+        areq = GetApplicationRequest.builder().app_id(app_id).lang("zh_cn").build()
+        aresp = lark_call(
+            "application.get",
+            lambda: self._client.application.v6.application.get(areq),
+        )
+        if aresp is None:
+            return {}
+        name = getattr(getattr(aresp.data, "app", None), "app_name", None)
+        return {open_id: name} if name else {}
 
     def _fetch_members_for(self, chat_id: str, open_ids: list[str]) -> dict[str, str]:
         """群成员源补全：刷一次该群成员，整群结果交给 ``resolve`` 写缓存。

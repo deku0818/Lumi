@@ -1081,6 +1081,92 @@ async def test_inbound_takes_other_bots_at_but_never_its_own_message(monkeypatch
     assert ran == []
 
 
+async def test_bot_sender_name_resolved_via_app_lookup(monkeypatch):
+    """bot 发送者的显示名走应用反查，不走真人源。
+
+    群成员/通讯录接口都不返回 bot（官方明确过滤），把 bot 交给真人源解析必然落
+    「用户_xxxxxx」兜底——正是线上出现过的故障。"""
+    ch = FeishuChannel(FeishuChannelConfig())
+    ch._bot_open_id = "ou_me"
+    fi = ch.inbound
+    names: list[str] = []
+
+    async def fake_bot_resolve(open_id, message_id):
+        return "楚威的助手-a"
+
+    async def fake_drain(bridge, cid, thread_id, batch):
+        names.extend(m.sender_name for m in batch)
+
+    monkeypatch.setattr(ch.directory, "resolve_bot_sender", fake_bot_resolve)
+    monkeypatch.setattr(fi, "_sync_session_title", lambda *a, **k: None)
+    monkeypatch.setattr(fi, "_locked_drain", fake_drain)
+    _patch_pool_get(ch, monkeypatch, _EnvBridge())
+
+    await fi.on_message(
+        _inbound_event("group", "oc_team", "ou_other72fbe6", "bot", [_Mention("ou_me")])
+    )
+    assert names == ["楚威的助手-a"]
+
+
+async def test_bot_sender_fallback_says_bot_not_user(monkeypatch):
+    """bot 反查失败（无权限/无 client）时兜底名是 机器人_xxx，不冒充 用户_xxx。"""
+    ch = FeishuChannel(FeishuChannelConfig())  # directory 无 client → 反查必失败
+    ch._bot_open_id = "ou_me"
+    fi = ch.inbound
+    names: list[str] = []
+
+    async def fake_drain(bridge, cid, thread_id, batch):
+        names.extend(m.sender_name for m in batch)
+
+    monkeypatch.setattr(fi, "_sync_session_title", lambda *a, **k: None)
+    monkeypatch.setattr(fi, "_locked_drain", fake_drain)
+    _patch_pool_get(ch, monkeypatch, _EnvBridge())
+
+    await fi.on_message(
+        _inbound_event("group", "oc_team", "ou_other72fbe6", "bot", [_Mention("ou_me")])
+    )
+    assert names == ["机器人_72fbe6"]
+
+
+async def test_fetch_bot_name_two_hops():
+    """message.get → sender.app_id → application.get → app_name 的解析形状。
+
+    响应结构按 2026-08 真实 API 实测锁定：message.get 的 data.items[].sender 带
+    id_type=app_id；application.get 的 data.app.app_name 即应用名。"""
+    from lumi.gateway.channels.feishu.directory import FeishuDirectory
+
+    msg_resp = SimpleNamespace(
+        success=lambda: True,
+        data=SimpleNamespace(
+            items=[
+                SimpleNamespace(
+                    sender=SimpleNamespace(
+                        id="cli_other", id_type="app_id", sender_type="app"
+                    )
+                )
+            ]
+        ),
+    )
+    app_resp = SimpleNamespace(
+        success=lambda: True,
+        data=SimpleNamespace(app=SimpleNamespace(app_name="楚威的助手-a")),
+    )
+    client = SimpleNamespace(
+        im=SimpleNamespace(
+            v1=SimpleNamespace(message=SimpleNamespace(get=lambda req: msg_resp))
+        ),
+        application=SimpleNamespace(
+            v6=SimpleNamespace(application=SimpleNamespace(get=lambda req: app_resp))
+        ),
+    )
+    d = FeishuDirectory()
+    d.set_client(client)
+    assert await d.resolve_bot_sender("ou_other", "om_x") == "楚威的助手-a"
+    # 已写缓存：同一 bot 第二条消息不再打 API
+    d.set_client(None)
+    assert await d.resolve_bot_sender("ou_other", "om_y") == "楚威的助手-a"
+
+
 async def test_minute_push_lands_on_the_inbound_p2p_thread(monkeypatch):
     """回归：妙记推送与入站私聊必须落在同一条 thread 上。
 
@@ -1644,7 +1730,12 @@ def test_setup_optional_scope_missing_is_not_a_failure(monkeypatch):
     assert "发送者姓名" in scopes["emphasis"]
     # cardkit 降级后回复仍在，只是不逐字上屏
     assert "打字机流式卡片" in scopes["emphasis"]
+    # bot 发送者名字反查（缺了 bot 显示为 机器人_xxxxxx）
+    assert "其他机器人发送者的名称" in scopes["emphasis"]
     assert scopes["fix_url"]  # 想补的人不该再去翻文档找 scope 名
+    assert "admin:app.info:readonly" in scopes["fix_url"]  # 链接预填含新权限
+    # 权限改动只在发布版本后生效——不提醒的话用户开完回来看还是 warn，以为没生效
+    assert "发布" in scopes["fix_note"]
 
 
 def test_setup_detects_missing_event_subscription(monkeypatch):

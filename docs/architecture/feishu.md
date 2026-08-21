@@ -122,16 +122,19 @@ mention_key——`id=` 是**发送方应用**的 open_id（open_id 每应用一�
 `FeishuDirectory`：`open_id → 显示名` / `chat_id → 群名` 的唯一出口，让 agent 在群聊里分得清谁
 说的（每条消息带 `<sender>姓名</sender>` 标签）。两个数据源：群成员接口 `im.v1.chat_members.get`（群内显示名，
 **不受**通讯录可见范围限制，群场景首选且覆盖新人）、通讯录接口 `contact.v3.users.batch`（私聊
-等无群上下文时的退路），共享同一 `open_id → 名` 缓存。
+等无群上下文时的退路），共享同一 `open_id → 名` 缓存。两源都只覆盖真人（群成员接口官方明确
+过滤 bot），**bot 发送者**走第三条路 `resolve_bot_sender`：拿它刚发的这条消息反查——`im.message.get`
+的 sender 给 app_id，再 `application.get` 取应用名（查他方应用需 `admin:app.info:readonly`），
+结果写进同一缓存（同一 bot 只查一次）。
 
 - **缓存**：`CachingDirectory[K, V]`（`caching.py`）线程安全懒加载——命中不调 API，未命中的交 fetch
-  在 executor 里批量解析，只把成功项写回，失败项用兜底名（`用户_xxxxxx` / `群_xxxxxx`）**不**写缓存
+  在 executor 里批量解析，只把成功项写回，失败项用兜底名（`用户_xxxxxx` / `机器人_xxxxxx` / `群_xxxxxx`）**不**写缓存
   保留重试。进程内缓存，重启清空。
 - **启动预热**：`warmup()` 后台拉 bot 所在所有群 + 群成员灌入缓存（best-effort、不阻断启动、失败
   只记 warning）；`channel.start()` 里 `create_task` 起、`stop()` 取消（存引用防 GC）。
 - **群成员补刷防狂刷**：`_fetch_members_for` 带 per-chat 冷却（成功 60s）+ 空结果指数退避
   （5s→300s），避免无权限的群每条消息刷整群。
-- **所需应用权限**：见 `feishu/scopes.py` 的 `OPTIONAL_SCOPES`（群信息 / 群成员 / 通讯录批量）。
+- **所需应用权限**：见 `feishu/scopes.py` 的 `OPTIONAL_SCOPES`（群信息 / 群成员 / 通讯录批量 / 应用信息）。
   未授权也能跑，显示名全部退化成兜底名——故列为可选，接入体检不因缺它标红。
 
 ## 出站事件泵（outbound.py）

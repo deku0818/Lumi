@@ -289,6 +289,7 @@ def diagnose(app_id: str, app_secret: str) -> list[dict]:
                 emphasis="、".join(lost),
                 # 可选项不拦路但仍给链接：想补的人不该再去翻文档找 scope 名
                 fix_url=auth_url(app_id, ALL_SCOPES) if lost else "",
+                fix_note="开通后需发布版本才生效" if lost else "",
             )
         )
 

@@ -26,7 +26,11 @@ from lumi.agents.runtime.bg_tasks import compose_notification_hint, get_task_reg
 from lumi.gateway.bridge.core import available_commands
 from lumi.gateway.broadcast import hub
 from lumi.gateway.channels.commands import SYSTEM_COMMANDS, parse_slash_command
-from lumi.gateway.channels.feishu.directory import fallback_chat_name, fallback_name
+from lumi.gateway.channels.feishu.directory import (
+    fallback_bot_name,
+    fallback_chat_name,
+    fallback_name,
+)
 from lumi.gateway.channels.feishu.minutes import transcript_hint
 from lumi.gateway.channels.feishu.outbound import run_turn
 from lumi.gateway.channels.feishu.relay_turn import run_relay_turn
@@ -408,7 +412,9 @@ class FeishuInbound:
                 self._title_retry_at[chat_id] = time.monotonic() + _TITLE_RETRY_COOLDOWN
                 return None
             return title
-        return None if sender_name == fallback_name(open_id) else sender_name
+        if sender_name in (fallback_name(open_id), fallback_bot_name(open_id)):
+            return None
+        return sender_name
 
     def _sync_session_title(
         self, thread_id: str, chat_type: str | None, title: str | None
@@ -544,16 +550,25 @@ class FeishuInbound:
                 logger.info(f"Feishu: 跳过无正文消息 msg_type={msg_type}")
                 return
 
-            # 解析发送者显示名：群聊走群成员源、私聊走通讯录源；失败/取不到退兜底名。
+            # 解析发送者显示名：真人走群成员源/通讯录源，bot 走消息反查应用名
+            # （群成员/通讯录都不覆盖 bot）；失败/取不到退兜底名。
             # 恒有名字 → _render 的 <sender> 标签每条必带（模型的消息边界依赖它）。
+            is_bot = getattr(sender, "sender_type", "user") != "user"
             try:
-                name_map = await ch.directory.resolve_senders_in_chat(
-                    chat_id if chat_type == "group" else None, [open_id]
-                )
-                sender_name = name_map.get(open_id) or fallback_name(open_id)
+                if is_bot:
+                    sender_name = await ch.directory.resolve_bot_sender(
+                        open_id, message_id
+                    )
+                else:
+                    name_map = await ch.directory.resolve_senders_in_chat(
+                        chat_id if chat_type == "group" else None, [open_id]
+                    )
+                    sender_name = name_map.get(open_id) or fallback_name(open_id)
             except Exception:
                 logger.warning(f"Feishu: 解析发送者姓名失败 {open_id}", exc_info=True)
-                sender_name = fallback_name(open_id)
+                sender_name = (
+                    fallback_bot_name(open_id) if is_bot else fallback_name(open_id)
+                )
 
             title = await self._resolve_title(chat_id, chat_type, sender_name, open_id)
             self._sync_session_title(thread_id, chat_type, title)
