@@ -1,5 +1,7 @@
 """session_meta sidecar：变更检测与删除后重建。"""
 
+import pytest
+
 from lumi.sessions import session_meta
 
 
@@ -20,6 +22,20 @@ def test_update_meta_rewrites_after_delete(tmp_path, monkeypatch):
     session_meta.delete_meta("t1")
     session_meta.update_meta("t1", channel_title="Lumi 内测群")
     assert session_meta.load_all()["t1"]["channel_title"] == "Lumi 内测群"
+
+
+def test_delete_meta_write_failure_keeps_cache_intact(tmp_path, monkeypatch):
+    """写盘失败时缓存不能先掉条目：mtime 没变，那条会在本进程内一直「不存在」。"""
+    monkeypatch.setattr(session_meta, "_meta_path", lambda: tmp_path / "meta.json")
+    session_meta.update_meta("t1", pinned=True)
+
+    def boom(*_args, **_kwargs):
+        raise OSError("disk full")
+
+    monkeypatch.setattr("lumi.utils.json_sidecar.atomic_write_json", boom)
+    with pytest.raises(OSError):
+        session_meta.delete_meta("t1")
+    assert session_meta.load_all()["t1"]["pinned"] is True
 
 
 def test_get_goal_roundtrip_and_clear_preserves_marks(tmp_path, monkeypatch):

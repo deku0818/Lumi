@@ -675,39 +675,43 @@ def test_local_env_checks_without_workspace_blocks_skills(monkeypatch):
     assert "未绑定项目" in skills["name"] and not skills["fix_action"]
 
 
-def test_drain_ultra_note_prefers_channel_override(monkeypatch):
-    """drain_ultra_note：渠道 context.effort 覆盖优先于全局 resolve()。
+def test_drain_ultra_note_follows_effective_effort(monkeypatch):
+    """drain_ultra_note 的档位取值与 call_model 同链（覆盖 > 本会话模型的 profile）。
 
-    - override='ultra' → 触发 workflow 编排提醒（即便全局非 ultra）
-    - override='low' 但全局 ultra → 不触发（渠道档位说了算）
-    - override=None（desktop 会话）→ 回退全局 resolve().effort
+    - override='ultra' → 触发 workflow 编排提醒（即便该模型 profile 非 ultra）
+    - override='low' 但模型 profile 为 ultra → 不触发（覆盖说了算）
+    - override=None → 按**本会话模型**反查档位，而非全局 active
+      （/model 切过的渠道会话：全局是什么与本会话无关）
     """
     from types import SimpleNamespace
 
     from lumi.gateway.bridge.folders import FolderManager
 
-    # 全局 profile 为 ultra，用来验证 override 能盖过它
+    # 全局 active（name=None）为 low，会话模型 ultra-model 为 ultra：
+    # 两者刻意相反，取错源立刻现形
+    efforts = {None: "low", "ultra-model": "ultra", "plain-model": "low"}
     monkeypatch.setattr(
         "lumi.models.provider_store.resolve",
-        lambda name=None: SimpleNamespace(effort="ultra"),
+        lambda name=None, provider="": SimpleNamespace(effort=efforts[name]),
     )
 
-    def fm(effort):
+    def fm(effort, model):
         bridge = SimpleNamespace(
-            _context=SimpleNamespace(effort=effort), _notified_ultra=False
+            _context=SimpleNamespace(effort=effort, model_name=model, provider="p"),
+            _notified_ultra=False,
         )
         return FolderManager(bridge), bridge
 
-    # override='ultra' → 开启提醒
-    m, b = fm("ultra")
+    # override='ultra' 压过模型 profile 的 low → 开启提醒
+    m, b = fm("ultra", "plain-model")
     assert "已开启" in m.drain_ultra_note() and b._notified_ultra is True
 
-    # override='low' 压过全局 ultra → 不进 ultra 态（无提醒、状态保持 False）
-    m, b = fm("low")
+    # override='low' 压过模型 profile 的 ultra → 不进 ultra 态
+    m, b = fm("low", "ultra-model")
     assert m.drain_ultra_note() == "" and b._notified_ultra is False
 
-    # override=None → 回退全局 resolve()（ultra）→ 开启提醒
-    m, b = fm(None)
+    # override=None → 取会话模型（ultra）而非全局 active（low）→ 开启提醒
+    m, b = fm(None, "ultra-model")
     assert "已开启" in m.drain_ultra_note() and b._notified_ultra is True
 
 

@@ -52,6 +52,7 @@ server → client   {method:"event", params:<wire event>}       # 流式事件
   - 模型供应商：`list_providers`、`test_provider`、`set_provider`、`save_provider`、`delete_provider`。
   - 定时任务：`list_cron_jobs`、`create/update/delete/toggle_cron_job`、`run_cron_job`、`list_cron_runs`。
   - 其它：`stop`（中止当前流式轮）、`list_commands`（拉取斜杠命令）。
+- **HTTP 旁路**（同主机同端口同 token，URL 由本连接的 WS 地址原地改写派生，保留反代路径前缀）：文件字节走不了 JSON-RPC 帧，故另开两个端点——`GET /file` 下行（远程后端的预览 / office 产物，见「artifacts 制品文件预览」）与 `POST /upload` 上行（远程后端的输入栏附件，见「输入栏文件附件」）。两者共用 `token_ok` 与 CORS 头；上传因 Content-Type 非安全清单值需应答 `OPTIONS` 预检。落盘一律归 `gateway/uploads.py`（与内联图片同一个存盘口），`ws.py` 只做鉴权 / 净化 / 闸门 / 状态码。
 - **wire 事件**：`turn.start`（真实用户轮开始，带该轮用户消息 id）、`message.*`、`tool.*`（含 `tool.generating`）、`clarify/approval`、`turn.complete`、`error`，加握手帧 `gateway.ready`。
 - **进程级广播事件**：`cron.result` / `cron.running` / `bg_tasks.update` / `mcp.status` 不属于任何会话。前端在 `App.tsx` 的 `PROCESS_EVENTS` 集合里声明它们，会话连接与控制连接都转给同一个 `handleEvent`——远程机器通常没有活跃会话连接，只有控制连接，不转发它的定时/后台任务在界面上就是静止的。本机经两条连接各收一次，故这些处理器一律按机器整段覆盖或自带去重。机器断连/被移除时 `clearMachineSnapshots` 清掉它那份快照，否则等不到「结束」那一帧的任务会永远显示运行中。
 
@@ -246,6 +247,8 @@ completed 金色 ✓ 弹入 + 文字淡化，全部完成整节灰化保留待�
 - **其它文件（PDF / 视频 / docx…）**：经 Electron `webUtils.getPathForFile`（`preload.cjs` 暴露；Electron 33 起 `File.path` 已移除）取**绝对路径**，发送时以 `<attached-file>路径</attached-file>` 文本块注入消息，Agent 用 `read` 工具按路径读取。**不预授权**——能否读取交给现有权限引擎 / 工作区边界。取不到路径（如非文件系统来源的拖拽）不静默吞掉，经 toast 提示失败。
 
 `<attached-file>` 是纯模型侧约定（agent 用 read 读取路径）：前端经 wire `files` 参数只发路径数组，`bridge._build_user_message` 统一拼标签块注入 content（`injected_prefix` 计数）并把 `{path, name}` 写进显示声明 `lumi.items` 的 `files`；历史恢复的文件胶囊直接读 items，不解析正文。标签名 `ATTACHED_FILE_TAG` 定义在 `lumi/utils/constants.py`。气泡内文件渲染成品牌金描边胶囊（仅文件名 + hover tooltip）。
+
+**远程后端**：上面那条绝对路径是**前端本机**的，在对端机器上并不存在——直接发过去 agent 只会 read 到个 404。故附件上行的取值收敛在 `gateway.resolveAttachments(atts, remote)`（对应下行的 `contentUrl`）：本地后端原样用路径（零拷贝），远程后端先把文件内容 `POST /upload` 传过去、改用返回的对端路径。附件本体（`File`）为此留在输入栏附件项上，上传排在乐观气泡之后（大文件不卡输入反馈），失败则把正文与附件原样还回输入框。图片天然无此问题——它们本就以 base64 走 WS 到后端存盘。
 
 ## artifacts 制品文件预览
 

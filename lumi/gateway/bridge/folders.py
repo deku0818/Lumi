@@ -139,13 +139,17 @@ class FolderManager:
         无变化返回空串——reminder 一旦前置进某轮用户消息即长驻历史，无需每轮重复。
         workflow 工具本身常驻（不增删，缓存前缀恒定）。
         """
-        b = self._bridge
-        # 渠道会话有档位覆盖（context.effort 非 None）时以它为准；desktop 会话为 None，
-        # 回退到全局 active 的 profile 档位——保证 ultra 的 workflow 提醒与实际生效档位一致。
-        override = b._context.effort
+        ctx = self._bridge._context
+        # 档位取值须与 call_model 逐字同链（nodes.call_model → create_llm）：显式覆盖
+        # （context.effort 非 None）优先，否则按**本会话当前模型**反查 profile 档位。
+        # 回退到无参 resolve()（全局 active）会在会话模型 ≠ 全局 active 时报错档位——
+        # /model 切过的渠道会话、或渠道配了模型没配档位，提醒与实际生效档位就对不上。
         effective = (
-            override if override is not None else provider_store.resolve().effort
+            ctx.effort
+            if ctx.effort is not None
+            else provider_store.resolve(ctx.model_name, ctx.provider).effort
         )
+        b = self._bridge
         current = effective == "ultra"
         if current == b._notified_ultra:
             return ""

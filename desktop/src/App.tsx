@@ -95,10 +95,11 @@ import { useI18n } from './i18n'
 let _id = 0
 const nid = () => ++_id
 
-// 输入栏附件：图片嵌入（base64 data URL），其它文件只引用绝对路径
+// 输入栏附件：图片嵌入（base64 data URL），其它文件引用绝对路径 + 留住 File 本体
+// （远程后端要把内容上传过去，前端本机路径在对端不存在）
 type Attachment =
   | { id: number; kind: 'image'; dataUrl: string; name: string }
-  | { id: number; kind: 'file'; path: string; name: string }
+  | { id: number; kind: 'file'; path: string; name: string; blob: File }
 
 type ToolItem = Extract<Item, { kind: 'tool' }>
 type Segment =
@@ -1968,7 +1969,8 @@ export default function App() {
         continue
       }
       const path = window.lumi.getPathForFile?.(f) || ''
-      if (path) setAttachments((a) => [...a, { id: nid(), kind: 'file', path, name: f.name }])
+      if (path)
+        setAttachments((a) => [...a, { id: nid(), kind: 'file', path, name: f.name, blob: f }])
       else failed.push(f.name) // 取不到绝对路径（如非文件系统来源的拖拽），别静默吞掉
     }
     if (failed.length) {
@@ -2075,7 +2077,7 @@ export default function App() {
     // 否则首轮期间会话在侧栏缺席、切出去就回不来。回合结束的整表刷新会以
     // 后端真实数据替换（display_time 沿用后端的相对时间文案格式）。
     const tid = keyThread(sid)
-    const be = keyBackend(sid)
+    const be = keyBackend(sid) || 'local'
     if (!sessionsRef.current.some((s) => s.thread_id === tid && beOf(s) === be)) {
       setSessions((prev) => [
         {
@@ -2092,8 +2094,6 @@ export default function App() {
         ...prev,
       ])
     }
-    // 文件附件只发路径数组：后端统一拼 <attached-file> 标签块给模型 + 写显示声明 items
-    const filePaths = files.map((f) => f.path)
     let payload: string | unknown[] = text
     if (imgs.length > 0) {
       const blocks: unknown[] = text ? [{ type: 'text', text }] : []
@@ -2104,7 +2104,23 @@ export default function App() {
       }
       payload = blocks
     }
-    gw.sendMessage(payload, toolMode, filePaths).catch((err) => reportSendFailure(sid, err))
+    // 文件附件只发路径数组：后端统一拼 <attached-file> 标签块给模型 + 写显示声明 items
+    // （远程后端上 resolveAttachments 会先把内容传过去换成对端路径；图片走 base64 由
+    // 后端存盘，本就无此问题）。放在乐观气泡之后：大文件上传不该卡住输入反馈。
+    const dispatch = async () => {
+      const filePaths = await gw.resolveAttachments(fileRefs, be !== 'local')
+      await gw.sendMessage(payload, toolMode, filePaths)
+    }
+    dispatch().catch((err) => {
+      // 发失败就把输入原样还回去（override 入口自管清空，不越俎代庖）：远程上传
+      // 可能跑上几十秒，此时正文与附件早已从输入框清掉，只弹个 toast 等于让用户
+      // 白打一遍字、重新挑一遍文件
+      if (!o) {
+        setInput(text)
+        setAttachments(atts)
+      }
+      reportSendFailure(sid, err)
+    })
   }
   sendRef.current = send // 供项目主页输入岛在 newSession 后调用（override 自带目标，无时序依赖）
 

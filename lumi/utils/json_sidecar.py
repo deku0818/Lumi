@@ -13,7 +13,7 @@ from lumi.utils.logger import logger
 
 # path → (mtime_ns, data)：sidecar 被高频读取（直连绑定每条消息、模型覆盖每轮），
 # mtime 不变即复用上次解析结果；写入走 atomic 换文件，mtime 变化自然失效。
-# 约定：调用方把返回值当只读（update_sidecar 是唯一写口）。
+# 约定：调用方把返回值当只读（写一律经 _commit，见其注释）。
 _cache: dict[Path, tuple[int, dict]] = {}
 
 
@@ -35,6 +35,24 @@ def load_sidecar(path: Path) -> dict[str, dict]:
     return data
 
 
+def _commit(path: Path, data: dict) -> None:
+    """落盘 + 回填缓存（省掉下次读的整文件重解析）。**两个写口的唯一提交点。**
+
+    传进来的必须是新字典：就地改缓存里那本，写盘失败时缓存已经变了、mtime 又没变，
+    这份分歧会在本进程内一直活到重启。
+    """
+    atomic_write_json(path, data)
+    _cache[path] = (path.stat().st_mtime_ns, data)
+
+
+def delete_sidecar(path: Path, key: str) -> None:
+    """删除整条 key（不存在则不写盘）。"""
+    data = load_sidecar(path)
+    if key not in data:
+        return
+    _commit(path, {k: v for k, v in data.items() if k != key})
+
+
 def update_sidecar(path: Path, key: str, **fields) -> dict:
     """合并更新某 key 的字段；空值（False/""/None）删键保持精简，与现状一致则跳过写盘。"""
     data = load_sidecar(path)
@@ -44,10 +62,7 @@ def update_sidecar(path: Path, key: str, **fields) -> dict:
     if entry == old:
         return entry
     if entry:
-        data[key] = entry
+        _commit(path, {**data, key: entry})
     else:
-        data.pop(key, None)
-    atomic_write_json(path, data)
-    # 写后立即回填缓存，省掉下次读的整文件重解析
-    _cache[path] = (path.stat().st_mtime_ns, data)
+        delete_sidecar(path, key)
     return entry

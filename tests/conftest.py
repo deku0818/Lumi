@@ -245,3 +245,19 @@ def run_summarizer():
             )
 
     return _run
+
+
+@pytest.fixture
+def http_client():
+    """带 token 的 ASGI 直调客户端（/file、/upload 等 HTTP 端点共用，不跑 lifespan）。
+
+    ws 在夹具内惰性 import：只有 HTTP 端点测试才需要 fastapi 这一坨。
+    """
+    import httpx
+
+    from lumi.gateway.channels import ws
+
+    ws.app.state.token = "secret"
+    transport = httpx.ASGITransport(app=ws.app)
+    yield httpx.AsyncClient(transport=transport, base_url="http://test")
+    ws.app.state.token = ""

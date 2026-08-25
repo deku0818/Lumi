@@ -14,9 +14,8 @@ from __future__ import annotations
 
 from pathlib import Path
 
-from lumi.utils.atomic_io import atomic_write_json
 from lumi.utils.config.global_manager import GlobalConfigManager
-from lumi.utils.json_sidecar import load_sidecar, update_sidecar
+from lumi.utils.json_sidecar import delete_sidecar, load_sidecar, update_sidecar
 
 
 def _meta_path() -> Path:
@@ -26,10 +25,6 @@ def _meta_path() -> Path:
 def load_all() -> dict[str, dict]:
     """读取全部会话元数据，缺失或损坏时返回空字典。"""
     return load_sidecar(_meta_path())
-
-
-def _save_all(data: dict[str, dict]) -> None:
-    atomic_write_json(_meta_path(), data)
 
 
 def update_meta(thread_id: str, **fields) -> dict:
@@ -43,9 +38,7 @@ def update_meta(thread_id: str, **fields) -> dict:
 
 def delete_meta(thread_id: str) -> None:
     """删除某会话的元数据条目（会话被删除时调用）。"""
-    data = load_all()
-    if data.pop(thread_id, None) is not None:
-        _save_all(data)
+    delete_sidecar(_meta_path(), thread_id)
 
 
 def get_model_override(thread_id: str) -> tuple[str, str]:

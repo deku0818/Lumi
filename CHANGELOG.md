@@ -1,5 +1,16 @@
 # Changelog
 
+## [0.2.118] - 2026-08-25
+
+### Fixed
+- **远程后端永远传不了文件**（`POST /upload` + `gateway.resolveAttachments`）— desktop 的输入栏附件只发**前端本机**绝对路径，那台远程机器上并不存在这个文件，agent 一 `read` 就 404（图片走 base64 由后端存盘，本就无此问题，故只有普通文件中招）。现在远程后端上先把文件内容经 HTTP 传到对端落 `~/.lumi/uploads/<uuid>/<原名>` 再发对端路径，本地后端仍原样发路径零拷贝；端点与 `/file` 同 token 同 CORS，URL 由本连接 WS 地址原地改写派生（保留反代路径前缀），并应答 `OPTIONS` 预检（Content-Type 由文件类型决定，非 CORS 安全清单值，不应答会被浏览器直接掐死）。超限按 `Content-Length` 在收流前拒（一个字节不落盘），客户端另有本地前置拦截——否则服务端 413 时请求体未读完，连接一断浏览器只抛通用网络错，「文件太大」这个真正原因到不了用户眼前。
+- **Ultra 编排提醒的档位取自全局 active 而非本会话模型**（`folders.drain_ultra_note`）— `/model` 切过的渠道会话、或渠道配了模型没配档位时，提醒与 `call_model` 实际生效的档位对不上（该开不开 / 该关不关）。改为与 `nodes.call_model → create_llm` 逐字同链：显式覆盖优先，否则按本会话当前模型反查 profile 档位。
+- **sidecar 写盘失败会让条目在本进程内凭空消失**（`json_sidecar._commit`）— 两个写口都就地改缓存里那本字典再落盘，写失败时缓存已变、mtime 又没变，该条目直到重启前都读不到。现在写一律经唯一提交点 `_commit`（传新字典、落盘成功后才换缓存）。
+
+### Changed
+- **附件上行收敛为单一决策点**（`gateway.resolveAttachments`，对应下行的 `contentUrl`）— 「本地用路径 / 远程传内容」不再散在 `send()` 里，后续新增的上行调用方自动吃到同一规则。
+- **上传落盘归口 `gateway/uploads.py`**（新增 `save_upload`）— `~/.lumi/uploads` 此前有两个写入方、两套布局、跨层分布；现在两条上行管道（飞书进程内 base64 / desktop HTTP 流）仍各走各的传输，但存盘只有一份实现，日后的保留清理策略只需改一处。写盘经 `asyncio.to_thread` 按 4MB 攒批卸载——同步 write 直接压在事件循环上时，脏页回写一卡就把该进程承载的全部 WS 会话一起冻住（同文件的 `/file` 端点早为一次 `os.stat` 做过同样的取舍）。
+
 ## [0.2.117] - 2026-08-25
 
 ### Added

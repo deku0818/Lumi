@@ -32,6 +32,7 @@ import type {
   Usage,
   WireEvent,
 } from './types'
+import { fmtSize } from '@/lib/utils'
 
 // failed = 退避重试耗尽，已放弃自动重连，等用户主动点击重连
 export type ConnState = 'connecting' | 'open' | 'closed' | 'failed'
@@ -41,6 +42,9 @@ export type ConnState = 'connecting' | 'open' | 'closed' | 'failed'
 export type ConnError = '' | 'auth' | 'unreachable'
 
 const MAX_RETRY = 5 // 连续失败这么多次后停止自动重连
+
+// 附件上传上限，与后端 /upload 的 _MAX_FILE_BYTES 一致（ws.py）
+const MAX_UPLOAD_BYTES = 128 * 1024 * 1024
 
 // 附带工具审批模式：toolMode 省略或 'default' 时不传 tool_mode（后端按默认处理）
 function withToolMode<T extends object>(params: T, toolMode?: string): T {
@@ -320,18 +324,43 @@ export class Gateway {
     return this.request('render_office', { path })
   }
 
-  // 文件 HTTP 通道：从本连接的 WS 地址派生（ws→http 同主机同端口同 token）。
-  // 远程后端的预览走它（lumi-file 只能读本机盘），office 渲染产物同理。
+  // HTTP 通道：从本连接的 WS 地址派生（ws→http 同主机同端口同 token）。
   // 原地改 URL 而非从 host 手拼：保留反代路径前缀（wss://x/lumi/ws → https://x/lumi/file）
-  fileHttpUrl(path: string): string {
+  private httpUrl(endpoint: string, key: string, value: string): string {
     const u = new URL(this.url)
     u.protocol = u.protocol === 'wss:' ? 'https:' : 'http:'
-    u.pathname = u.pathname.replace(/\/ws\/?$/, '/file')
+    u.pathname = u.pathname.replace(/\/ws\/?$/, endpoint)
     const token = u.searchParams.get('token')
     u.search = ''
-    u.searchParams.set('path', path)
+    u.searchParams.set(key, value)
     if (token) u.searchParams.set('token', token)
     return u.toString()
+  }
+
+  // 文件下行：远程后端的预览走它（lumi-file 只能读本机盘），office 渲染产物同理。
+  fileHttpUrl(path: string): string {
+    return this.httpUrl('/file', 'path', path)
+  }
+
+  // 附件上行的唯一决策点（对应下行的 contentUrl）：本地后端直接用路径（零拷贝），
+  // 远程后端把内容传过去换成对端路径——前端本机的绝对路径在那台机器上不存在，
+  // 直接发路径 agent 只会读到个 404。并发上传，慢链路上不按附件数累加等待。
+  resolveAttachments(atts: { path: string; blob: File }[], remote: boolean): Promise<string[]> {
+    if (!remote) return Promise.resolve(atts.map((a) => a.path))
+    return Promise.all(atts.map((a) => this.uploadFile(a.blob)))
+  }
+
+  // 超限在本地先拦：服务端回 413 时请求体还没读完，连接一断浏览器只抛通用网络错，
+  // 「文件太大」这个真正的原因反而永远到不了用户眼前。
+  private async uploadFile(file: File): Promise<string> {
+    if (file.size > MAX_UPLOAD_BYTES)
+      throw new Error(`${file.name} 超过 ${fmtSize(MAX_UPLOAD_BYTES)} 上限`)
+    const r = await fetch(this.httpUrl('/upload', 'name', file.name), {
+      method: 'POST',
+      body: file,
+    })
+    if (!r.ok) throw new Error(`${file.name} 上传失败（${r.status}）`)
+    return ((await r.json()) as { path: string }).path
   }
 
   // —— MCP 服务器：读写该机器的全局层或 <project>/.lumi 下 mcp_server.json，下次新会话加载生效。
