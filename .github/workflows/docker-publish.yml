@@ -1,0 +1,105 @@
+name: Publish Docker Image
+
+# 推 v* tag 时把后端镜像发到 Docker Hub 公开仓库（与桌面安装包同一个 tag 触发）。
+# 需要仓库 Secrets：DOCKERHUB_USERNAME（账号名，非邮箱）+ DOCKERHUB_TOKEN（Access Token）。
+on:
+  push:
+    tags:
+      - "v*"
+  workflow_dispatch:
+
+env:
+  IMAGE: ycw0818/lumi-server
+
+jobs:
+  # 双架构各在原生 runner 上构建，不用 QEMU：镜像里要 uv sync 近百个包 + apt 装 ripgrep/libicu，
+  # 模拟 arm64 会把几分钟的构建拖成半小时级且更易超时。原生构建的代价是产物要分两次推、
+  # 最后再合成 manifest list（下面的 merge job）。
+  build:
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - os: ubuntu-22.04
+            platform: linux/amd64
+            arch: amd64
+          - os: ubuntu-22.04-arm
+            platform: linux/arm64
+            arch: arm64
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: docker/setup-buildx-action@v3
+
+      - uses: docker/login-action@v3
+        with:
+          username: ${{ secrets.DOCKERHUB_USERNAME }}
+          password: ${{ secrets.DOCKERHUB_TOKEN }}
+
+      # push-by-digest：只推无 tag 的镜像层，tag 由 merge job 统一挂到 manifest list 上。
+      # 若这里各自打 tag，两个架构会互相覆盖，最后只剩一个架构可用。
+      - name: Build and push by digest
+        id: build
+        uses: docker/build-push-action@v6
+        with:
+          platforms: ${{ matrix.platform }}
+          outputs: type=image,name=${{ env.IMAGE }},push-by-digest=true,name-canonical=true,push=true
+          cache-from: type=gha,scope=${{ matrix.arch }}
+          cache-to: type=gha,mode=max,scope=${{ matrix.arch }}
+
+      # 用「文件名 = digest」的空文件把 digest 传给 merge job（官方多架构范式）
+      - name: Export digest
+        run: |
+          mkdir -p ${{ runner.temp }}/digests
+          digest="${{ steps.build.outputs.digest }}"
+          touch "${{ runner.temp }}/digests/${digest#sha256:}"
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: digests-${{ matrix.arch }}
+          path: ${{ runner.temp }}/digests/*
+          if-no-files-found: error
+          retention-days: 1
+
+  # 把两个架构的 digest 合成一份 manifest list 并打 tag：用户 docker pull 时由 Docker
+  # 按自己的架构挑，命令里不需要出现 amd64/arm64。
+  merge:
+    needs: build
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          path: ${{ runner.temp }}/digests
+          pattern: digests-*
+          merge-multiple: true
+
+      - uses: docker/setup-buildx-action@v3
+
+      # tag 派生：v0.2.117 → 0.2.117 + 0.2 + latest；手动触发（无 tag）只出 edge，
+      # 免得试跑覆盖掉正式版的 latest。
+      - name: Docker meta
+        id: meta
+        uses: docker/metadata-action@v5
+        with:
+          images: ${{ env.IMAGE }}
+          tags: |
+            type=semver,pattern={{version}}
+            type=semver,pattern={{major}}.{{minor}}
+            type=raw,value=latest,enable=${{ github.ref_type == 'tag' }}
+            type=raw,value=edge,enable=${{ github.ref_type != 'tag' }}
+
+      - uses: docker/login-action@v3
+        with:
+          username: ${{ secrets.DOCKERHUB_USERNAME }}
+          password: ${{ secrets.DOCKERHUB_TOKEN }}
+
+      - name: Create manifest list and push
+        working-directory: ${{ runner.temp }}/digests
+        run: |
+          docker buildx imagetools create \
+            $(jq -cr '.tags | map("-t " + .) | join(" ")' <<< "$DOCKER_METADATA_OUTPUT_JSON") \
+            $(printf '${{ env.IMAGE }}@sha256:%s ' *)
+
+      - name: Inspect
+        run: docker buildx imagetools inspect ${{ env.IMAGE }}:${{ steps.meta.outputs.version }}
