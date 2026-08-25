@@ -15,26 +15,15 @@ from pydantic import BaseModel, Field
 class ChannelRuntimeConfig(BaseModel):
     """IM 渠道共享的「会话怎么跑」运行时配置。
 
-    所有渠道的 Agent 都要回答同一组问题——用什么模型、怎么思考、怎么审批、在哪个项目
-    跑。抽成基类供各渠道 config 继承（字段结构复用，值各渠道各存一份，不共享），新渠道
-    （企微等）接入时直接得到这组能力，无需重写。
+    所有渠道的 Agent 都要回答同一组问题——怎么审批、在哪个项目跑。抽成基类供各渠道
+    config 继承（字段结构复用，值各渠道各存一份，不共享），新渠道（企微等）接入时直接
+    得到这组能力，无需重写。
+
+    模型与思考档位刻意**不在**这里：它们是会话属性，由会话内的 ``/model`` / ``/effort``
+    定、按 thread 存（见 ``sessions/session_model.py``），未设则跟随新会话默认。渠道级
+    固定模型会让同一渠道下的每个群被迫同档，且与会话级设定构成两套优先级。
     """
 
-    model: str = Field(
-        default="",
-        description="该渠道固定使用的模型；空 = 跟随 desktop 全局 active 模型",
-    )
-    provider: str = Field(
-        default="",
-        description="model 所属供应商 profile id；(连接, 模型) 才是完整身份，同名模型"
-        "存在于多个 profile 时按名反查会取错家。空 = 老配置，按名反查兜底（active 优先）",
-    )
-    effort: str = Field(
-        default="auto",
-        description="思考档位（依附 model）：auto=不注入思考参数（跟随模型默认）；"
-        "low/high/xhigh 等原生档位原样下发；ultra=思考拉满 + 解锁 workflow 编排。"
-        "仅在 model 非空（渠道指定模型）时生效",
-    )
     tool_mode: Literal["auto", "privileged"] = Field(
         default="auto",
         description="工具审批模式：auto=AI 审批（默认）；privileged=自动放行。两种模式下"
@@ -51,8 +40,7 @@ class FeishuChannelConfig(ChannelRuntimeConfig):
     """飞书 / Lark Channel 配置（lark-oapi WebSocket 长连接，无需公网 webhook）。
 
     凭证支持 ``${ENV_VAR}`` 语法引用环境变量，channel 启动时经 ``os.path.expandvars``
-    解析，避免明文。运行时字段（model/effort/tool_mode/workspace）继承自
-    ``ChannelRuntimeConfig``。
+    解析，避免明文。运行时字段（tool_mode/workspace）继承自 ``ChannelRuntimeConfig``。
     """
 
     enabled: bool = Field(default=False, description="是否启用飞书 Channel")

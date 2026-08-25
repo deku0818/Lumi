@@ -43,6 +43,7 @@ from lumi.gateway.projects import (
     touch_project,
 )
 from lumi.gateway.protocol import bridge_event_to_wire, event_frame
+from lumi.sessions import session_model
 from lumi.sessions.message_text import extract_text_content, visible_user_text
 from lumi.sessions.message_visibility import should_show_human_message
 from lumi.sessions.session_meta import delete_meta, load_all, update_meta
@@ -234,8 +235,7 @@ def _snapshot_model_window(messages: list, thread_id: str) -> tuple[str, int]:
     优先于 catalog 探测）。未知模型返回窗口 0（前端自会隐藏环）。
 
     wire 名查不到目录时（LiteLLM 等代理回传上游真名，如 Bedrock inference-profile
-    ARN），渠道会话回退到渠道配置的模型别名（空 = 跟随 active profile）再查——
-    desktop 环的窗口本就走别名查目录这条路径。
+    ARN），回退到该会话生效的模型别名再查——desktop 环的窗口本就走别名查目录这条路径。
     """
     from lumi.models import provider_store
 
@@ -248,19 +248,13 @@ def _snapshot_model_window(messages: list, thread_id: str) -> tuple[str, int]:
         return "", 0
     if win := provider_store.resolve(wire).context_window:
         return wire, win
-    if _channel_of(thread_id):
-        from lumi.gateway.channels.store import load_feishu
-
-        cfg = load_feishu()
-        # 渠道配了模型就连 provider 一起带上（同名模型跨 profile 不串味）；
-        # 未配则跟随 active（resolve() 天然精确）
-        alias, prov = (
-            (cfg.model, cfg.provider)
-            if cfg.model
-            else (provider_store.resolve().model, "")
-        )
-        if alias and (win := provider_store.resolve(alias, prov).context_window):
-            return alias, win
+    # 回退到该会话生效的模型（连 provider 一起带，同名模型跨 profile 不串味）。
+    # 不分渠道／desktop：两边的会话模型现在同源，代理回传上游真名是共通的情况
+    target = session_model.resolve(thread_id)
+    if target.model and (
+        win := provider_store.resolve(target.model, target.provider).context_window
+    ):
+        return target.model, win
     return wire, 0
 
 
@@ -324,13 +318,26 @@ async def _test_provider(session: GatewaySession, params: dict) -> dict:
     )
 
 
-# provider 变更经 _apply_active 改写运行时 context，须与运行中的轮次互斥，
-# 否则会在轮内改掉下一次 call_model 读取的共享 context（中途换模型/连接）。
+# 与其余 provider 写操作一致持锁（store 的读-改-写，见 _set_effort）
 async def _set_provider(session: GatewaySession, params: dict) -> dict:
     async with session._run.lock:
         return session._bridge.set_provider(
             params.get("provider", ""), params.get("model", "")
         )
+
+
+async def _set_session_model(session: GatewaySession, params: dict) -> dict:
+    """切换**本会话**的模型：落 sidecar + 即刻改运行时 context。
+
+    与 set_provider（改的是新会话默认）分开：模型是会话属性，切一个会话不该动别人的。
+    持锁同 set_provider——改的是共享 context。
+    """
+    tid = session._bridge.current_thread_id
+    async with session._run.lock:
+        session_model.set_model(
+            tid, params.get("model", ""), params.get("provider", "")
+        )
+        return _model_payload(session._bridge.align_session_model())
 
 
 async def _save_provider(session: GatewaySession, params: dict) -> dict:
@@ -496,6 +503,23 @@ async def _remove_folder(session: GatewaySession, params: dict) -> dict:
         return session._bridge.remove_folder(params.get("path", ""))
 
 
+def _model_payload(target: session_model.SessionModel) -> dict:
+    """会话模型的 wire 形状。pinned 一并下发：它是「这个会话开跑过没有」的权威答案，
+    前端据此决定切模型要不要先警告缓存失效、以及能否跟随新会话默认漂移——让前端拿
+    items 是否为空去猜，历史还没加载完的那一瞬就会猜错。"""
+    return {
+        "model": target.model,
+        "provider": target.provider,
+        "pinned": target.pinned,
+    }
+
+
+def _model_of(thread_id: str) -> dict:
+    """该会话生效的模型，随切会话结果一并下发——模型是会话属性，前端据此点亮
+    选择器（不再从全局 active 推导，否则切回老会话会显示成别人的模型）。"""
+    return _model_payload(session_model.resolve(thread_id))
+
+
 async def _switch_session(session: GatewaySession, params: dict) -> dict:
     # new_session 不带 thread_id → 生成新的。切 thread 会改写 bridge._config，
     # 须与运行中的轮次互斥。
@@ -508,7 +532,7 @@ async def _switch_session(session: GatewaySession, params: dict) -> dict:
     # 审批还在」不成立，且会误杀挂起审批、或在挂起轮仍持着 run.lock 时让下面的 async with
     # 死等。只有真正切到「不同 thread」才需先收尾当前轮（单 bridge 单 run.task 的限制）。
     if tid == session._bridge.current_thread_id and session.has_active_turn():
-        return {"thread_id": tid}
+        return {"thread_id": tid, **_model_of(tid)}
     changing_thread = tid != session._bridge.current_thread_id
     if changing_thread:
         await session._finalize_active_turn(wait=True)
@@ -552,7 +576,7 @@ async def _switch_session(session: GatewaySession, params: dict) -> dict:
         session._hub.remove_observer_channel(session._channel)
         if is_cron_thread(tid):
             session._hub.add_observer(tid, session._channel)
-    return {"thread_id": tid}
+    return {"thread_id": tid, **_model_of(tid)}
 
 
 async def _pin_session(session: GatewaySession, params: dict) -> dict:
@@ -677,6 +701,7 @@ _RPC_HANDLERS = {
     "search_catalog": _search_catalog,
     "test_provider": _test_provider,
     "set_provider": _set_provider,
+    "set_session_model": _set_session_model,
     "save_provider": _save_provider,
     "delete_provider": _delete_provider,
     "set_effort": _set_effort,

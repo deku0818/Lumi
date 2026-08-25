@@ -49,6 +49,7 @@ import type {
   Project,
   ProviderProfile,
   SessionMeta,
+  SessionModelWire,
   SlashCommand,
   SubTool,
   TodoItem,
@@ -283,10 +284,13 @@ type SessionState = {
   clarify: Record<string, unknown>[]
   // 最近一次模型调用的上下文用量（用于输入栏的上下文进度环）；首轮前为 undefined
   ctx?: CtxUsage
-  // 渠道旁观会话的上下文环分母：会话真实模型名与其窗口（desktop 无本地 activeModel 可依，
-  // 由 load_history 快照带出）；desktop 自己的会话不用（直接取 activeModel）
+  // 渠道旁观会话的上下文环分母：会话真实模型名与其窗口（旁观连接拿不到该会话的
+  // 运行时模型，由 load_history 快照带出）；desktop 自己的会话不用（直接取 sessionModel）
   ctxModel?: string
   ctxWindow?: number
+  // 本会话**已固化**的模型（后端 switch_session / set_session_model 下发）。未固化时
+  // 留空，由 sessionModel 落到 defaultModel——固化与否是后端的判断，前端只存结果
+  model?: ActiveModel
   // 历史压缩进行中（Summarizer 内部摘要调用期间为 true）；展示「正在压缩对话」指示
   compacting?: boolean
   // todos 工具的任务列表快照（右栏任务进度节）；空/未定义 = 节不渲染
@@ -382,7 +386,6 @@ export default function App() {
   const [store, setStore] = useState<Record<string, SessionState>>({})
   const [active, setActive] = useState('')
   const [conn, setConn] = useState<ConnState>('connecting')
-  const [model, setModel] = useState('')
   // 进程级工作目录 = 当前项目（gateway.ready 下发；切项目对整个 app 生效）
   const [workspaceDir, setWorkspaceDir] = useState('')
   // handleEvent（稳定 useCallback）里做 mcp.status 的当前工作区过滤，须经 ref 读最新值
@@ -417,7 +420,9 @@ export default function App() {
   const [machineConn, setMachineConn] = useState<Record<string, ConnState>>({})
   const [machineErr, setMachineErr] = useState<Record<string, ConnError>>({})
   const [providers, setProviders] = useState<ProviderProfile[]>([])
-  const [activeModel, setActiveModel] = useState<ActiveModel>({ provider: '', model: '' })
+  // 「新会话默认模型」（providers.active）。**不是**当前会话在用的模型——那个按会话存在
+  // store[key].model 里（见 sessionModel）。改这个只影响之后新建的会话。
+  const [defaultModel, setDefaultModel] = useState<ActiveModel>({ provider: '', model: '' })
   // auto 审批分类器指针（providers.json 顶级 classifier，空=跟随会话模型）
   const [classifier, setClassifier] = useState<ModelPointer>({})
   // 工具审批模式：随后续 send/run 透传给后端（auto=AI 审批分类器）
@@ -443,6 +448,11 @@ export default function App() {
     setShowSettings(true)
   }, [])
   const [pendingDelete, setPendingDelete] = useState<SessionMeta | null>(null)
+  // 待确认的模型切换（仅已有对话的会话才需确认，见 switchModel）。key = 开弹窗那一刻的
+  // 会话：确认期间用户可能已切走，落到 activeRef 就切错了会话
+  const [pendingModelSwitch, setPendingModelSwitch] = useState<
+    (ActiveModel & { key: string }) | null
+  >(null)
   const [themePref, setThemePref] = useTheme()
   const [uiFont, setUiFont] = useUiFont()
   const { t } = useI18n()
@@ -526,6 +536,8 @@ export default function App() {
   const inputRef = useRef<HTMLTextAreaElement>(null)
   // handleEvent 是 []-依赖的稳定回调，通过 ref 读取最新的 store / 通知开关 / 翻译
   const storeRef = useRef<Record<string, SessionState>>({})
+  // 供 handleEvent（[]-依赖的稳定回调）在 turn.start 固化会话模型时读取
+  const defaultModelRef = useRef<ActiveModel>({ provider: '', model: '' })
   const notifyRef = useRef(notify)
   const tRef = useRef(t)
   // MCP 失败 toast 去重（`backend:server:error` → 上次弹出时刻）：配置保存→作废→
@@ -593,17 +605,27 @@ export default function App() {
   // 渲染队首（最早挂起的那条）；应答后出队，下一条自动浮现
   const approval = cur?.approval?.[0] ?? null
   const clarify = cur?.clarify?.[0] ?? null
-  // 当前 active 模型的上下文窗口（tokens）；能力未知时为 0，ContextMeter 自会隐藏。
+  // 本会话生效的模型：后端下发（gateway.ready / switch_session / set_session_model）后
+  // 按会话存住，未知时才退到新会话默认。顶部选择器、上下文环分母都读它——读全局默认会
+  // 在「改了默认、老会话仍跑旧模型」时显示错的那一个。
+  const sessionModel = cur?.model ?? defaultModel
+  const model = sessionModel.model
+  // 当前会话模型的上下文窗口（tokens）；能力未知时为 0，ContextMeter 自会隐藏。
   // memo 化避免每次流式 token 重渲染都重跑 providers.find。
   const contextWindow = useMemo(
     () =>
-      providers.find((p) => p.id === activeModel.provider)?.context_window?.[activeModel.model] ?? 0,
-    [providers, activeModel.provider, activeModel.model],
+      providers.find((p) => p.id === sessionModel.provider)?.context_window?.[
+        sessionModel.model
+      ] ?? 0,
+    [providers, sessionModel.provider, sessionModel.model],
   )
 
   useEffect(() => {
     storeRef.current = store
   }, [store])
+  useEffect(() => {
+    defaultModelRef.current = defaultModel
+  }, [defaultModel])
   useEffect(() => {
     notifyRef.current = notify
   }, [notify])
@@ -778,8 +800,14 @@ export default function App() {
         case 'turn.start':
           // 开轮广播本轮用户消息 id：给最后一条尚未上锚的用户气泡补上（run.lock 保证
           // 每会话同时只有一轮在飞，故「最后一条无 messageId 的用户气泡」无歧义）。
-          // 时间旅行按此 id 截断，不做序号/文本猜测
-          n = { ...s, items: anchorLastUser(s.items, payload.message_id ?? '') }
+          // 时间旅行按此 id 截断，不做序号/文本猜测。
+          // 同时固化会话模型：真人轮开跑正是后端 session_model.pin 的时刻，两边同时
+          // 发生——不同步的话，本会话此后切模型不会弹缓存失效确认
+          n = {
+            ...s,
+            items: anchorLastUser(s.items, payload.message_id ?? ''),
+            model: s.model ?? defaultModelRef.current,
+          }
           break
         case 'thinking.delta':
           n = { ...s, thinkingText: s.thinkingText + (payload.text ?? '') }
@@ -942,7 +970,6 @@ export default function App() {
           }
           gw.onEvent((ev) => {
             if (ev.type === 'gateway.ready') {
-              setModel((m) => m || ev.payload.model || '')
               // workspace_bound=false 时 payload.workspace 只是进程 cwd 兜底展示值，不是真
               // 绑定的项目——写进 workspaceDir 会污染侧栏项目分组等展示，未绑定就不写。
               if (ev.payload.workspace_bound && ev.payload.workspace) {
@@ -954,7 +981,12 @@ export default function App() {
                 // 新 bridge 的临时目录为空，需重放本会话已添加的目录，否则徽标显示
                 // 有目录而后端实际访问不到。
                 if (myThread) {
-                  void gw.switchSession(myThread, myWorkspace)
+                  // 重连拿到的是全新 bridge：切回原 thread 时后端会按会话解析模型，
+                  // 用返回值刷新显示（新 bridge 的 ready 报的是默认，不是本会话的）
+                  void gw
+                    .switchSession(myThread, myWorkspace)
+                    .then((r) => applySessionModel(myKey, r))
+                    .catch(() => {})
                   for (const f of folderStoreRef.current[myKey] ?? []) {
                     void gw.addFolder(f)
                   }
@@ -990,7 +1022,8 @@ export default function App() {
                   myWorkspace = targetWorkspace
                   gw.bindThread(targetThread)
                   try {
-                    await gw.switchSession(targetThread, targetWorkspace)
+                    // 结果带该会话生效的模型（ready 报的是默认，不是本会话的）
+                    applySessionModel(targetKey, await gw.switchSession(targetThread, targetWorkspace))
                   } catch {
                     /* 目录失效等：仍打开会话（后端已降级，不切 cwd） */
                   }
@@ -1484,16 +1517,28 @@ export default function App() {
   // 聊天侧 provider 上下文 = 活动会话所在机器的连接（ModelPicker/顶部模型跟随当前会话机器）
   const chatGw = useCallback(() => connsRef.current[activeRef.current], [])
 
-  // provider 列表响应统一回写；顶部模型显示随活动机器的 active 模型修正
+  // provider 列表响应统一回写。active = 新会话默认，只影响之后新建的会话——顶部选择器
+  // 读的是 store[key].model（本会话的），不在这里改
   const applyProviderResp = useCallback(
     (r: { profiles?: ProviderProfile[]; active?: ActiveModel; classifier?: ModelPointer }) => {
       setProviders(r.profiles ?? [])
-      setActiveModel(r.active ?? { provider: '', model: '' })
-      setModel(r.active?.model ?? '')
+      setDefaultModel(r.active ?? { provider: '', model: '' })
       setClassifier(r.classifier ?? {})
     },
     [],
   )
+
+  // 把后端下发的会话模型落到该会话（switch_session / set_session_model 共用）。
+  // **只存已固化的**：未固化的会话在后端跟随「新会话默认」，前端把 model 留空，
+  // sessionModel 便自动 fallback 到 defaultModel——改默认时零 RPC 自动同步，
+  // 也不会出现「显示冻在握手那一刻、实跑跟着默认走」的脱节
+  const applySessionModel = useCallback((key: string, m: SessionModelWire) => {
+    setStore((s) =>
+      s[key]
+        ? { ...s, [key]: { ...s[key], model: m.pinned ? { model: m.model, provider: m.provider } : undefined } }
+        : s,
+    )
+  }, [])
 
   const loadProviders = useCallback(() => {
     chatGw()?.listProviders().then(applyProviderResp).catch(() => {})
@@ -1504,22 +1549,39 @@ export default function App() {
     if (active) loadProviders()
   }, [active, loadProviders])
 
-  const switchEffort = (level: string) => {
+  // 档位按 (连接, 模型) 存，对所有用该模型的会话生效——按的是选择器当前指着的那个模型
+  const switchEffort = (level: string, target: ActiveModel) => {
     chatGw()
-      ?.setEffort(activeModel.provider, activeModel.model, level)
+      ?.setEffort(target.provider, target.model, level)
       .catch((e) => console.error('set_effort 失败:', e))
       .finally(() => loadProviders())
   }
 
-  // 切模型：在当前会话连接上切（该机器该 bridge 下一轮生效），更新顶部显示
-  const switchModel = (provider: string, model: string) => {
-    chatGw()
-      ?.setProvider(provider, model)
-      .then((r) => {
-        setActiveModel(r.active)
-        if (r.model) setModel(r.model)
-      })
-      .catch(() => {})
+  // 切模型：只切**本会话**（下一轮生效），别的会话与「新会话默认」都不动。
+  // key 在开弹窗时就捕获：确认期间用户可能已切走会话，那时的 activeRef 是别人
+  const applySwitchModel = (provider: string, model: string, key: string) => {
+    connsRef.current[key]
+      ?.setSessionModel(provider, model)
+      .then((r) => applySessionModel(key, r))
+      .catch((e) => console.error('set_session_model 失败:', e))
+  }
+  // 已经聊过的会话换模型有代价：整段历史要被新模型重读一遍（prompt 缓存按模型分桶）。
+  // 判据是后端给的「已固化」（= 这个会话开跑过），不是 items 是否为空——长会话的历史
+  // 加载完成前 items 也是空的，那一瞬会静默切掉。
+  //
+  // 项目主页没有「本会话」可切（active 还是上一个会话，改它是张冠李戴，同 FolderMenu /
+  // ApprovalModePicker 的 !project 取舍）：那里选模型的意思是「我要开的新会话用它」，
+  // 故改「新会话默认」，且无缓存可废、不弹确认。
+  const switchModel = (provider: string, model: string, project: boolean) => {
+    if (project) {
+      gwForBackend(projectHome?.backend ?? 'local')
+        ?.setProvider(provider, model)
+        .then((r) => setDefaultModel(r.active))
+        .catch((e) => console.error('set_provider 失败:', e))
+      return
+    }
+    if (!cur?.model) return applySwitchModel(provider, model, activeRef.current)
+    setPendingModelSwitch({ provider, model, key: activeRef.current })
   }
 
   // 设置面板改了某机器的 provider 后回调：若改的正是当前会话机器，刷新聊天侧
@@ -2360,7 +2422,7 @@ export default function App() {
   }
   // 只读提示条：替换渠道会话的输入框（send 已封禁，这里是视觉层）。
   // 右侧挂上下文环——旁观会话看不到实时流，但每轮结束重拉的快照带 usage/窗口，
-  // 分母取会话真实模型（cur.ctxWindow）而非 desktop activeModel。无数据时环自隐藏、文字仍居中。
+  // 分母取会话真实模型（cur.ctxWindow）而非本地选择器的模型。无数据时环自隐藏、文字仍居中。
   const readonlyBar = (
     <div className="flex items-center gap-2 rounded-3xl border border-dashed border-line bg-surface/50 py-2 pl-4 pr-2.5 text-xs text-muted-foreground">
       <span className="flex-1 text-center">{t('chan.readonly')}</span>
@@ -2457,10 +2519,11 @@ export default function App() {
               onRemove={(p) => void removeFolder(p)}
             />
           )}
+          {/* 项目主页指向的是「新会话默认」（那里还没有会话，active 是上一个），
+              聊天页指向本会话的模型 */}
           <ModelPicker
-            model={model}
             providers={providers}
-            active={activeModel}
+            active={project ? defaultModel : sessionModel}
             machine={
               machines.filter((m) => m.enabled !== false).length > 1
                 ? {
@@ -2470,8 +2533,8 @@ export default function App() {
                   }
                 : undefined
             }
-            onSwitch={switchModel}
-            onSwitchEffort={switchEffort}
+            onSwitch={(p, m) => switchModel(p, m, project)}
+            onSwitchEffort={(lv) => switchEffort(lv, project ? defaultModel : sessionModel)}
           />
           <ApprovalModePicker
             value={toolMode}
@@ -2534,9 +2597,12 @@ export default function App() {
   const projectComposer = useMemo(
     () => composer(t('projhome.composerPlaceholder', { name: homeProjectInfo?.name ?? '' }), true),
     // eslint-disable-next-line react-hooks/exhaustive-deps
+    // defaultModel 不可省：project 模式的选择器指着「新会话默认」（那里还没有会话），
+    // 漏了它就出现「切了模型 chip 纹丝不动、后端却已改」
     [
-      input, attachments, conn, model, providers, activeModel, machines, activeBackend,
-      toolMode, classifier, menuOpen, matched, cmdSel, cmdToken, homeProjectInfo?.name,
+      input, attachments, conn, model, providers, sessionModel, defaultModel, machines,
+      activeBackend, toolMode, classifier, menuOpen, matched, cmdSel, cmdToken,
+      homeProjectInfo?.name,
     ],
   )
 
@@ -2949,6 +3015,23 @@ export default function App() {
             setPendingRemoveProject(null)
           }}
           onCancel={() => setPendingRemoveProject(null)}
+        />
+      )}
+      {pendingModelSwitch && (
+        <ConfirmDialog
+          title={t('model.switchTitle')}
+          message={t('model.switchMessage', { name: pendingModelSwitch.model })}
+          confirmLabel={t('model.switchConfirm', { name: pendingModelSwitch.model })}
+          variant="default"
+          onConfirm={() => {
+            applySwitchModel(
+              pendingModelSwitch.provider,
+              pendingModelSwitch.model,
+              pendingModelSwitch.key,
+            )
+            setPendingModelSwitch(null)
+          }}
+          onCancel={() => setPendingModelSwitch(null)}
         />
       )}
       {pendingDelete && (

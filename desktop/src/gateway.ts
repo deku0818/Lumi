@@ -27,6 +27,7 @@ import type {
   ProviderProfile,
   RpcMethod,
   SessionMeta,
+  SessionModelWire,
   SlashCommand,
   TodoItem,
   Usage,
@@ -261,11 +262,14 @@ export class Gateway {
     })
   }
 
-  setProvider(provider: string, model: string): Promise<{ active: ActiveModel; model: string }> {
-    return this.request<{
-      active: ActiveModel
-      model: string
-    }>('set_provider', { provider, model })
+  /** 设「新会话默认模型」：不动任何已有会话（含本连接当前这个）。 */
+  setProvider(provider: string, model: string): Promise<{ active: ActiveModel }> {
+    return this.request<{ active: ActiveModel }>('set_provider', { provider, model })
+  }
+
+  /** 切换**本会话**的模型：按 thread 持久化，下一轮生效，不影响其他会话。 */
+  setSessionModel(provider: string, model: string): Promise<SessionModelWire> {
+    return this.request<SessionModelWire>('set_session_model', { provider, model })
   }
 
   saveProvider(
@@ -487,10 +491,15 @@ export class Gateway {
 
   // workspace：会话所属项目目录；切入时把本连接引擎绑定到该项目（会话级，不动进程 cwd）。
   // 新连接已在 open 握手 pin，这里多为切 thread；workspace 一致则后端跳过 rebase。
-  switchSession(threadId: string, workspace = ''): Promise<{ thread_id: string }> {
-    return this.request<{
-      thread_id: string
-    }>('switch_session', { thread_id: threadId, workspace })
+  /** 切会话；结果带该会话生效的模型（模型是会话属性，不从全局 active 推导）。 */
+  switchSession(
+    threadId: string,
+    workspace = '',
+  ): Promise<{ thread_id: string } & SessionModelWire> {
+    return this.request<{ thread_id: string } & SessionModelWire>('switch_session', {
+      thread_id: threadId,
+      workspace,
+    })
   }
 
   loadHistory(threadId: string): Promise<{

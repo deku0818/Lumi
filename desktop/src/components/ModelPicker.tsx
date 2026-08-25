@@ -24,14 +24,12 @@ const levelLabel = (lv: string, t: (k: string) => string) =>
 // chip 显示「模型名 档位」；一级菜单仅三行——当前模型 ✓ / Effort|Thinking ›（该模型
 // 无思考能力时不渲染）/ More models ›。档位选项完全由后端 thinking 数据驱动。
 export function ModelPicker({
-  model,
   providers,
   active,
   machine,
   onSwitch,
   onSwitchEffort,
 }: {
-  model: string
   providers: ProviderProfile[]
   active: ActiveModel
   // 多机时传入当前会话所在机器（chip 图标 + 下拉机器头）；单机为 undefined
@@ -59,7 +57,7 @@ export function ModelPicker({
           className="group flex items-center gap-1.5 max-w-60 px-2 py-1 rounded-lg text-xs text-muted-foreground hover:text-ink hover:bg-canvas/60 transition outline-none"
         >
           {machine && <MachineMark id={machine.id} color={machine.color} size={13} />}
-          <span className="truncate">{model || t('model.default')}</span>
+          <span className="truncate">{active.model || t('model.default')}</span>
           {stored !== 'auto' && (
             <span className={stored === 'ultra' ? 'text-primary font-medium' : 'opacity-70'}>
               {levelLabel(stored, t)}

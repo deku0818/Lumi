@@ -14,12 +14,15 @@ export function ConfirmDialog({
   title,
   message,
   confirmLabel,
+  variant = 'destructive',
   onConfirm,
   onCancel,
 }: {
   title: string
   message: string
   confirmLabel?: string
+  // 默认红（删除类）；可逆但有代价的确认（切模型废缓存）用 default
+  variant?: 'destructive' | 'default'
   onConfirm: () => void
   onCancel: () => void
 }) {
@@ -35,7 +38,7 @@ export function ConfirmDialog({
           <Button variant="outline" onClick={onCancel}>
             {t('common.cancel')}
           </Button>
-          <Button variant="destructive" onClick={onConfirm}>
+          <Button variant={variant} onClick={onConfirm}>
             {confirmLabel ?? t('common.delete')}
           </Button>
         </DialogFooter>

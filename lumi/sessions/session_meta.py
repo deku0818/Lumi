@@ -7,7 +7,8 @@
 存储形如 {"<thread_id>": {"pinned": true, "title": "自定义名"}}；仅写入非默认值，
 保持文件精简。除用户标记外也承载派生标题（channel_title 渠道自动名、auto_title
 模型生成标题及其定稿标记 auto_title_final，展示优先级 title > channel_title >
-auto_title）。无 textual 依赖，可在 headless 服务中直接使用。
+auto_title）与会话模型（model/model_provider/effort，读写经 session_model.py）。
+无 textual 依赖，可在 headless 服务中直接使用。
 """
 
 from __future__ import annotations
@@ -39,21 +40,6 @@ def update_meta(thread_id: str, **fields) -> dict:
 def delete_meta(thread_id: str) -> None:
     """删除某会话的元数据条目（会话被删除时调用）。"""
     delete_sidecar(_meta_path(), thread_id)
-
-
-def get_model_override(thread_id: str) -> tuple[str, str]:
-    """读某会话的模型覆盖 (provider, model)（IM 渠道 /model 命令设定）；未设定返回空串对。
-
-    与 goal 同理：会话级、跨轮跨重启存活的用户设定，与 pinned/title 同居一条 meta，
-    「清空/删除会话」的 delete_meta 天然连它一并清，新会话不继承旧覆盖。
-    """
-    meta = load_all().get(thread_id, {})
-    return meta.get("model_provider", ""), meta.get("model", "")
-
-
-def set_model_override(thread_id: str, provider: str, model: str) -> None:
-    """写会话级模型覆盖；空值即清除（update_meta 语义，保留 pin/title 等其他标记）。"""
-    update_meta(thread_id, model_provider=provider, model=model)
 
 
 def get_goal(thread_id: str) -> str:

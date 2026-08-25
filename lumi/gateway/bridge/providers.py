@@ -23,9 +23,11 @@ class ProviderService:
         self._bridge = bridge
 
     def apply_active(self) -> None:
-        """把当前 active 模型应用到运行时 context（下一轮 call_model 生效）。
+        """把「新会话默认」模型装进运行时 context 作初值（建桥时用）。
 
         连接（base_url / api_key）不进 context，由 create_llm 按模型名解析。
+        真正生效的模型由轮首 ``align_session_model`` 按会话解析——本方法只保证
+        thread 尚未确定时 context 里有个合法的模型名。
         """
         b = self._bridge
         if b._context is None:
@@ -193,7 +195,11 @@ class ProviderService:
             return {"ok": False, "error": f"{type(e).__name__}: {e}"}
 
     def set_provider(self, provider_id: str, model: str) -> dict:
-        """切换 active 到 (provider, model)：持久化 + 立即应用（下一轮生效）。
+        """把「新会话默认模型」切到 (provider, model)，持久化。
+
+        **不动任何已有会话**——包括本连接当前这个。模型是会话属性，已开跑的会话
+        在首轮就把模型固化了（``session_model.pin``），改默认不该在用户背后废掉
+        它们的 prompt 缓存；尚未开跑的空会话下一轮自会解析到新默认。
 
         Raises:
             ValueError: provider 或 model 不存在（如前端列表已过期）——
@@ -201,17 +207,18 @@ class ProviderService:
         """
         if provider_store.set_active(provider_id, model) is None:
             raise ValueError(f"切换失败：供应商或模型不存在（{provider_id} / {model}）")
-        self.apply_active()
-        return {"active": provider_store.load()[1], "model": self._bridge.model_name}
+        return {"active": provider_store.load()[1]}
 
     def save_provider(self, profile: dict) -> dict:
-        """新增或更新一个 profile；active 可能因其模型增删失效，故重新应用归位。"""
+        """新增或更新一个 profile（active 由 _save 规范化，失效自动归位）。"""
         provider_store.upsert(profile)
-        self.apply_active()
         return self.provider_list()
 
     def delete_provider(self, provider_id: str) -> dict:
-        """删除一个 profile；删的是 active 时回退到新的 active（或默认）。"""
+        """删除一个 profile；删的是 active 时回退到新的 active（或默认）。
+
+        运行时 context 不在此纠正：删掉的模型若正被某会话用着，其会话覆盖会在轮首
+        ``session_model.resolve`` 里就地清除自愈（不校验会拿死模型名打空连接）。
+        """
         provider_store.delete(provider_id)
-        self.apply_active()
         return self.provider_list()

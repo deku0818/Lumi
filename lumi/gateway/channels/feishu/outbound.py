@@ -87,9 +87,6 @@ async def run_turn(
     attachments 为下载好的文件路径，交 bridge 统一注入标签块 + 写 items.files。
     command=(name, extra_text) 时走 bridge.stream_command（斜杠命令轮，content 不使用）。
     """
-    # 开跑前对齐本会话模型（覆盖/渠道配置/全局 active 都可能在两轮之间变化）；
-    # 此刻已持本会话运行锁，改共享 context 不会撞在途轮
-    channel.bridge_pool.sync_bridge_model(bridge, thread_id)
     streaming = channel.streaming
     _end = turn_closer(streaming, chat_id, reply_to)
 

@@ -595,28 +595,21 @@ async def test_drain_processes_first_then_merges_queued(monkeypatch):
     assert "t" not in fi._queues  # 队列已清空
 
 
-# ── 渠道运行时配置：ChannelRuntimeConfig 基类 + effort 覆盖机制 ──────────
+# ── 渠道运行时配置：ChannelRuntimeConfig 基类 ──────────
 
 
 def test_channel_runtime_config_inherited():
-    """FeishuChannelConfig 继承 ChannelRuntimeConfig：model/effort/tool_mode/workspace
-    四项运行时字段都在，默认值正确（新渠道继承同一组即免费获得）。"""
+    """FeishuChannelConfig 继承 ChannelRuntimeConfig：tool_mode/workspace 两项运行时
+    字段都在（新渠道继承同一组即免费获得）。模型与档位刻意不在渠道层——它们按会话存
+    （session_model），渠道级固定模型会把同渠道所有会话绑死在一档。"""
     from lumi.gateway.channels.config import ChannelRuntimeConfig
 
     assert issubclass(FeishuChannelConfig, ChannelRuntimeConfig)
     base = ChannelRuntimeConfig()
-    assert (base.model, base.effort, base.tool_mode, base.workspace) == (
-        "",
-        "auto",
-        "auto",
-        "",
-    )
-
-    cfg = FeishuChannelConfig(model="claude-opus-4-8", effort="high")
-    assert cfg.model == "claude-opus-4-8" and cfg.effort == "high"
-    # 序列化含全部运行时字段（前端 config.model_dump 消费）
-    keys = cfg.model_dump().keys()
-    assert {"model", "effort", "tool_mode", "workspace"} <= set(keys)
+    assert (base.tool_mode, base.workspace) == ("auto", "")
+    keys = set(FeishuChannelConfig().model_dump())
+    assert {"tool_mode", "workspace"} <= keys
+    assert not ({"model", "provider", "effort"} & keys)
 
 
 # ── 绑定项目必选、无兜底 ───────────────────────────────────────────────
@@ -1957,23 +1950,27 @@ async def test_evict_stale_spares_chat_with_running_turn(monkeypatch):
     assert closed == ["card_oc_idle", "card_oc_running"]
 
 
-# ── 会话级模型覆盖（/model）──
+# ── 会话级模型（/model、/effort）──
 class _FakeBridge:
+    """只实现 align_session_model 依赖的那点接口（真 bridge 要起 MCP/权限引擎）。"""
+
     def __init__(self):
         self.model_name = ""
         self.applied = None
 
-    def set_session_model(self, model, provider, effort):
+    def _apply_model_to_context(self, model, provider, effort):
         self.model_name = model
         self.applied = (model, provider, effort)
 
 
 def _fake_resolve(model_name=None, provider=""):
-    """镜像 resolve() 契约：None=全局 active；按名解析已知模型回 profile，未知回空连接。"""
+    """镜像 resolve() 契约：None=全局默认；按名解析已知模型回 profile，未知回空连接。"""
     if model_name is None:
-        return SimpleNamespace(model="g-active", provider="pg")
-    known = {"ov-model": "po", "ch-model": "pc"}
-    return SimpleNamespace(model=model_name, provider=known.get(model_name, ""))
+        return SimpleNamespace(model="g-default", provider="pg", effort="auto")
+    known = {"g-default": "pg", "ov-model": "po", "m2": "p2"}
+    return SimpleNamespace(
+        model=model_name, provider=known.get(model_name, ""), effort="auto"
+    )
 
 
 def _isolate_meta(monkeypatch, tmp_path):
@@ -1982,62 +1979,239 @@ def _isolate_meta(monkeypatch, tmp_path):
     monkeypatch.setattr(session_meta, "_meta_path", lambda: tmp_path / "meta.json")
 
 
-def test_sync_bridge_model_precedence(monkeypatch, tmp_path):
-    from lumi.gateway.channels.feishu import bridge_pool
-    from lumi.sessions.session_meta import set_model_override
+def _patch_session_model(monkeypatch, levels=()):
+    from lumi.sessions import session_model
+
+    monkeypatch.setattr(session_model.provider_store, "resolve", _fake_resolve)
+    monkeypatch.setattr(session_model, "allowed_levels", lambda model: list(levels))
+
+
+def test_session_model_precedence(monkeypatch, tmp_path):
+    from lumi.sessions import session_model
 
     _isolate_meta(monkeypatch, tmp_path)
-    monkeypatch.setattr(bridge_pool.provider_store, "resolve", _fake_resolve)
-    bridge = _FakeBridge()
+    _patch_session_model(monkeypatch)
 
-    # 无覆盖 + 无渠道配置 → 跟随全局 active（effort=None 走 profile 解析）
-    pool = bridge_pool.BridgePool()
-    pool.sync_bridge_model(bridge, "t1")
-    assert bridge.applied == ("g-active", "pg", None)
+    # 无覆盖 → 跟随新会话默认（effort=None 走 profile 解析），且未固化
+    assert session_model.resolve("t1") == session_model.SessionModel(
+        "g-default", "pg", None, False
+    )
 
-    # 渠道配置了模型 → 用渠道三元组（effort 原样带）
-    pool = bridge_pool.BridgePool(model="ch-model", effort="ultra", provider="pc")
-    pool.sync_bridge_model(bridge, "t1")
-    assert bridge.applied == ("ch-model", "pc", "ultra")
+    # 会话覆盖优先；仍未设会话级档位 → None
+    session_model.set_model("t1", "ov-model", "po")
+    assert session_model.resolve("t1") == session_model.SessionModel(
+        "ov-model", "po", None, True
+    )
 
-    # 会话覆盖优先于渠道配置；effort 归 None（跟随新模型的 profile 档位）
-    set_model_override("t1", provider="po", model="ov-model")
-    pool.sync_bridge_model(bridge, "t1")
-    assert bridge.applied == ("ov-model", "po", None)
-
-    # 清除覆盖（空值即清）→ 回落渠道配置
-    set_model_override("t1", "", "")
-    pool.sync_bridge_model(bridge, "t1")
-    assert bridge.applied == ("ch-model", "pc", "ultra")
+    # 清除覆盖（空值即清）→ 回落默认
+    session_model.set_model("t1", "", "")
+    assert session_model.resolve("t1").model == "g-default"
 
 
-def test_sync_bridge_model_stale_override_self_heals(monkeypatch, tmp_path):
-    # 覆盖指向已删除的模型：清掉自愈，回落渠道配置，不拿死模型名跑
-    from lumi.gateway.channels.feishu import bridge_pool
-    from lumi.sessions.session_meta import get_model_override, set_model_override
+def test_session_model_pin_freezes_default(monkeypatch, tmp_path):
+    # 首轮固化：此后改「新会话默认」不再波及这个会话（prompt 缓存不在用户背后失效）
+    from lumi.sessions import session_model
 
     _isolate_meta(monkeypatch, tmp_path)
-    monkeypatch.setattr(bridge_pool.provider_store, "resolve", _fake_resolve)
+    _patch_session_model(monkeypatch)
+
+    assert session_model.pin("t1") == session_model.SessionModel(
+        "g-default", "pg", None, True
+    )
+    # 默认换人后，已固化的会话岿然不动；未固化的 t2 跟着走
+    monkeypatch.setattr(
+        session_model.provider_store,
+        "resolve",
+        lambda model_name=None, provider="": (
+            _fake_resolve("m2", "p2")
+            if model_name is None
+            else _fake_resolve(model_name, provider)
+        ),
+    )
+    assert session_model.resolve("t1").model == "g-default"
+    assert session_model.resolve("t2").model == "m2"
+    # 固化幂等：再 pin 不覆盖已有覆盖
+    assert session_model.pin("t1").model == "g-default"
+
+
+def test_session_model_stale_override_self_heals(monkeypatch, tmp_path):
+    # 覆盖指向已删除的模型：清掉自愈，回落默认，不拿死模型名跑
+    from lumi.sessions import session_meta, session_model
+
+    _isolate_meta(monkeypatch, tmp_path)
+    _patch_session_model(monkeypatch)
+    session_model.set_model("t1", "gone-model", "dead")
+    assert session_model.resolve("t1").model == "g-default"
+    assert session_meta.load_all().get("t1", {}).get("model", "") == ""
+
+
+def test_session_effort_scoped_and_model_bound(monkeypatch, tmp_path):
+    # 档位按会话存、依附模型：换模型即清，且不在新模型能力内的旧值视同未设
+    from lumi.sessions import session_model
+
+    _isolate_meta(monkeypatch, tmp_path)
+    _patch_session_model(monkeypatch, levels=("high",))
+    session_model.set_model("t1", "ov-model", "po")
+    session_model.set_effort("t1", "high")
+    assert session_model.resolve("t1").effort == "high"
+    assert session_model.resolve("t2").effort is None  # 别的会话不受影响
+
+    # auto = 清除（回到跟随 profile）
+    session_model.set_effort("t1", "auto")
+    assert session_model.resolve("t1").effort is None
+
+    # 换模型清档位
+    session_model.set_effort("t1", "high")
+    session_model.set_model("t1", "m2", "p2")
+    assert session_model.resolve("t1").effort is None
+
+    # 档位不在该模型能力内（模型能力变了）→ 视同未设，不下发端点不认的值
+    session_model.set_effort("t1", "high")
+    _patch_session_model(monkeypatch, levels=("low",))
+    assert session_model.resolve("t1").effort is None
+
+
+def test_align_session_model_applies_to_bridge(monkeypatch, tmp_path):
+    # 轮首对齐把应然值写进 context，且**不**固化——固化归真人轮（_stream_user_turn）
+    from lumi.gateway.bridge.core import AgentBridge
+    from lumi.sessions import session_model
+
+    _isolate_meta(monkeypatch, tmp_path)
+    _patch_session_model(monkeypatch)
     bridge = _FakeBridge()
-    pool = bridge_pool.BridgePool(model="ch-model", effort="high", provider="pc")
-    set_model_override("t1", provider="dead", model="gone-model")
-    pool.sync_bridge_model(bridge, "t1")
-    assert bridge.applied == ("ch-model", "pc", "high")
-    assert get_model_override("t1") == ("", "")  # 失效覆盖已被清除
+    bridge.current_thread_id = "t1"
+
+    AgentBridge.align_session_model(bridge)
+    assert bridge.applied == ("g-default", "pg", None)
+    assert session_model.resolve("t1").pinned is False  # 合成轮 / 压缩不钉死模型
+
+
+async def test_only_real_user_turn_pins_the_model(monkeypatch, tmp_path):
+    """固化挂在真人轮上：合成轮（后台通知）与压缩只对齐、不替用户钉死模型。
+
+    两条入口都在 AgentBridge 上，故按方法验证——按前端枚举调用点必然漏（合成轮曾漏）。
+    """
+    from langchain_core.messages import HumanMessage
+
+    from lumi.gateway.bridge.core import AgentBridge
+    from lumi.sessions import session_model
+
+    _isolate_meta(monkeypatch, tmp_path)
+    _patch_session_model(monkeypatch)
+
+    bridge = _FakeBridge()
+    bridge.current_thread_id = "t1"
+    bridge._active_agent_runs = {}
+    bridge._context = SimpleNamespace(tool_mode="")
+    bridge._create_checkpoint_before_turn = _anoop
+    bridge._drain_folder_note = lambda: ""
+    bridge._drain_ultra_note = lambda: ""
+    bridge._stream = lambda _data: _aempty()
+    # 借真方法：本测就是要验证 _stream_turn 确实经它对齐
+    bridge.align_session_model = lambda: AgentBridge.align_session_model(bridge)
+    bridge._stream_turn = lambda m, tm, em: AgentBridge._stream_turn(bridge, m, tm, em)
+
+    # 合成轮（_stream_turn 是它与真人轮共用的最小操作）：对齐但不固化
+    async for _ in AgentBridge._stream_turn(
+        bridge, HumanMessage("hi"), "default", "normal"
+    ):
+        pass
+    assert bridge.applied == ("g-default", "pg", None)
+    assert session_model.resolve("t1").pinned is False
+
+    # 真人轮：固化
+    async for _ in AgentBridge._stream_user_turn(
+        bridge, HumanMessage("hi"), "default", "normal"
+    ):
+        pass
+    assert session_model.resolve("t1").pinned is True
+
+
+async def _anoop(*args, **kwargs) -> None:
+    return None
+
+
+async def _aempty():
+    return
+    yield  # pragma: no cover — 让函数成为异步生成器
+
+
+async def test_cmd_session_model_switches_only_this_chat(monkeypatch, tmp_path):
+    # /model 只改本会话：落 sidecar、绿卡回执，别的群不受影响
+    from lumi.sessions import session_model
+
+    _isolate_meta(monkeypatch, tmp_path)
+    _patch_session_model(monkeypatch)
+    monkeypatch.setattr(
+        inb, "_provider_models", lambda: [("po", "OpenRouter", "ov-model")]
+    )
+    ch = FeishuChannel(FeishuChannelConfig())
+    sent = _sent_collector(ch, monkeypatch)
+
+    await ch.inbound._cmd_session_model("ov-model", "oc", "t-a", "m1")
+    assert session_model.resolve("t-a").model == "ov-model"
+    assert session_model.resolve("t-b").model == "g-default"  # 另一个群照旧
+    assert sent[0][1] == "✅ 已切换"  # 成功仍给回执（IM 里静默像没识别）
+
+    # /model default → 落回新会话默认
+    await ch.inbound._cmd_session_model("default", "oc", "t-a", "m2")
+    assert session_model.resolve("t-a").model == "g-default"
+
+    # 不存在的模型：红卡 + 不写任何覆盖
+    await ch.inbound._cmd_session_model("nope", "oc", "t-a", "m3")
+    assert "未找到模型" in sent[-1][1]
+    assert session_model.resolve("t-a").model == "g-default"
+
+
+async def test_cmd_session_effort_lists_auto_once(monkeypatch, tmp_path):
+    # allowed_levels 对多数形态本就以 auto 打头，裸拼会列出两个 auto
+    _isolate_meta(monkeypatch, tmp_path)
+    _patch_session_model(monkeypatch)
+    monkeypatch.setattr(inb, "allowed_levels", lambda model: ["auto", "low", "high"])
+    ch = FeishuChannel(FeishuChannelConfig())
+    sent = _sent_collector(ch, monkeypatch)
+
+    await ch.inbound._cmd_session_effort("", "oc", "t-a", "m1")
+    options = next(ln for ln in sent[0][0].splitlines() if ln.startswith("可选："))
+    assert options.count("`auto`") == 1, options
+
+
+async def test_cmd_session_effort_validates_against_current_model(
+    monkeypatch, tmp_path
+):
+    # /effort 的可选档位按本会话当前模型现算——列出端点不认的档位只会换来一次 400
+    from lumi.sessions import session_model
+
+    _isolate_meta(monkeypatch, tmp_path)
+    _patch_session_model(monkeypatch, levels=("low", "high"))
+    # 命令侧的可选档位与解析侧同源（都问 allowed_levels），测试里一并顶掉
+    monkeypatch.setattr(inb, "allowed_levels", lambda model: ["low", "high"])
+    ch = FeishuChannel(FeishuChannelConfig())
+    sent = _sent_collector(ch, monkeypatch)
+
+    await ch.inbound._cmd_session_effort("high", "oc", "t-a", "m1")
+    assert session_model.resolve("t-a").effort == "high"
+    assert session_model.resolve("t-b").effort is None  # 仅本会话
+
+    await ch.inbound._cmd_session_effort("nope", "oc", "t-a", "m2")
+    assert "档位无效" in sent[-1][1]
+    assert session_model.resolve("t-a").effort == "high"  # 非法值不落地
+
+    await ch.inbound._cmd_session_effort("auto", "oc", "t-a", "m3")
+    assert session_model.resolve("t-a").effort is None  # auto = 回到跟随 profile
 
 
 def test_model_override_meta_roundtrip(monkeypatch, tmp_path):
     # 覆盖与 pin/title 同居一条 meta：互不干扰，delete_meta 连覆盖一并清
-    from lumi.sessions import session_meta
+    from lumi.sessions import session_meta, session_model
 
     _isolate_meta(monkeypatch, tmp_path)
     session_meta.update_meta("t1", pinned=True)
-    session_meta.set_model_override("t1", provider="p1", model="m1")
-    assert session_meta.get_model_override("t1") == ("p1", "m1")
-    assert session_meta.get_model_override("t2") == ("", "")  # 其他会话不受影响
-    session_meta.set_model_override("t1", "", "")  # 空值即清除，pin 等标记保留
-    assert session_meta.get_model_override("t1") == ("", "")
+    session_model.set_model("t1", "m1", "p1")
+    assert session_meta.load_all()["t1"]["model"] == "m1"
+    assert "t2" not in session_meta.load_all()  # 其他会话不受影响
+    session_model.set_model("t1", "", "")  # 空值即清除，pin 等标记保留
     assert session_meta.load_all()["t1"] == {"pinned": True}
-    session_meta.set_model_override("t1", provider="p1", model="m1")
+    session_model.set_model("t1", "m1", "p1")
     session_meta.delete_meta("t1")
-    assert session_meta.get_model_override("t1") == ("", "")
+    assert session_meta.load_all().get("t1") is None

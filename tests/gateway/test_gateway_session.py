@@ -41,6 +41,12 @@ class FakeChannel:
         return [f for f in evts if f["params"]["type"] == event_type]
 
 
+def _result(channel, req_id: int) -> dict:
+    """取某次 RPC 的 result（按 id）。断子集而非全等：switch_session 等结果会随
+    协议增补字段，全等断言会把每次加字段都变成一片红。"""
+    return next(r["result"] for r in channel.responses() if r["id"] == req_id)
+
+
 class FakeBridge:
     """最小鸭子类型 bridge：可控产出 BridgeEvent 序列、可模拟中断收尾。
 
@@ -55,10 +61,13 @@ class FakeBridge:
     ) -> None:
         self.current_thread_id = "t-1"
         self.model_name = "fake-model"
+        self.aligned: list[bool] = []  # align_session_model 的 pin 参数记录
         self.workspace_dir = "/fake/project"  # 项目随会话绑定后 gateway.ready 取它
         self.workspace_bound = True  # 已绑定项目：send_message/run_command 关卡放行
         self.mcp_pool_key = lambda: "/fake/project"  # mcp.status 按连接过滤的匹配键
         self.mcp_status_payload = lambda: None  # 无已完成的池加载：注册后不补发
+        # 轮首模型对齐：真 bridge 会读 session_meta，这里只记录被调用过
+        self.align_session_model = lambda *, pin=False: self.aligned.append(pin)
         self._events = events or []
         self._notifications = list(notifications or [])
         self.closed = False
@@ -373,7 +382,7 @@ async def test_switch_session_cancels_active_turn():
         await _drain(session)
 
         # 切换成功返回；先试图以拒绝收尾挂起审批；被取消轮补发 turn.complete
-        assert {"id": 2, "result": {"thread_id": "t-2"}} in channel.responses()
+        assert _result(channel, 2)["thread_id"] == "t-2"
         assert bridge.reject_pending_calls >= 1
         assert len(channel.events("turn.complete")) == 1
         assert bridge.current_thread_id == "t-2"
@@ -409,7 +418,7 @@ async def test_switch_session_same_thread_preserves_active_turn():
                 await tk
 
         # 同 thread 立即返回，既不收尾也不取消挂起轮
-        assert {"id": 2, "result": {"thread_id": "t-1"}} in channel.responses()
+        assert _result(channel, 2)["thread_id"] == "t-1"
         assert bridge.reject_pending_calls == 0  # 未试图收尾
         assert len(channel.events("turn.complete")) == 0  # 轮未结束
         assert session._run.task is not None and not session._run.task.done()
@@ -438,7 +447,7 @@ async def test_switch_session_recovers_workspace_from_thread():
             {"id": 1, "method": "switch_session", "params": {"thread_id": "cron-x"}}
         )
         await _drain(session)
-        assert {"id": 1, "result": {"thread_id": "cron-x"}} in channel.responses()
+        assert _result(channel, 1)["thread_id"] == "cron-x"
         assert bridge.workspace_bound is True
     finally:
         await session.aclose()
@@ -710,8 +719,8 @@ def test_snapshot_model_window_no_labeled_message():
     assert _snapshot_model_window([], "t1") == ("", 0)
 
 
-def test_snapshot_model_window_channel_falls_back_to_configured_alias(monkeypatch):
-    """渠道会话 wire 名查不到目录（如 LiteLLM 回传 Bedrock ARN）→ 回退渠道配置别名再查。"""
+def test_snapshot_model_window_channel_falls_back_to_session_model(monkeypatch):
+    """渠道会话 wire 名查不到目录（如 LiteLLM 回传 Bedrock ARN）→ 回退该会话生效模型再查。"""
     monkeypatch.setattr(
         "lumi.models.catalog.lookup",
         lambda name: (
@@ -719,8 +728,8 @@ def test_snapshot_model_window_channel_falls_back_to_configured_alias(monkeypatc
         ),
     )
     monkeypatch.setattr(
-        "lumi.gateway.channels.store.load_feishu",
-        lambda: SimpleNamespace(model="jv-claude", provider=""),
+        "lumi.sessions.session_model.resolve",
+        lambda tid: SimpleNamespace(model="jv-claude", provider="p1"),
     )
     messages = [
         _msg("converse/arn:aws:bedrock:us-east-1:1:application-inference-profile/x")
@@ -728,22 +737,21 @@ def test_snapshot_model_window_channel_falls_back_to_configured_alias(monkeypatc
     assert _snapshot_model_window(messages, "feishu-oc-1") == ("jv-claude", 1_000_000)
 
 
-def test_snapshot_model_window_channel_alias_follows_active(monkeypatch):
-    """渠道未指定模型（空 = 跟随 active profile）→ 用 provider_store.resolve 的模型名。"""
+def test_snapshot_model_window_channel_follows_default(monkeypatch):
+    """会话没设过模型 → session_model.resolve 落到新会话默认，用它的模型名查窗口。"""
     monkeypatch.setattr(
         "lumi.models.catalog.lookup",
         lambda name: (
             catalog_entry(context_length=128_000) if name == "active-model" else None
         ),
     )
-    monkeypatch.setattr(
-        "lumi.gateway.channels.store.load_feishu", lambda: SimpleNamespace(model="")
-    )
-    # resolve 现在既解析模型名也带出限制：无参 = active 模型，带参 = 查该模型的窗口
+    # resolve 现在既解析模型名也带出限制：无参 = 默认模型，带参 = 查该模型的窗口
     monkeypatch.setattr(
         "lumi.models.provider_store.resolve",
         lambda name=None, provider="": SimpleNamespace(
             model=name or "active-model",
+            provider="pg",
+            effort="auto",
             context_window=128_000 if (name or "active-model") == "active-model" else 0,
         ),
     )

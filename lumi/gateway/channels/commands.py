@@ -25,6 +25,7 @@ SYSTEM_COMMANDS: dict[str, str] = {
 # 直连期的同名命令归 relay（改 relay 绑定，见 relay.RELAY_COMMANDS），互不相扰。
 RUNTIME_COMMANDS: dict[str, str] = {
     "model": "查看或切换本会话模型：/model 完整模型名（仅当前会话）",
+    "effort": "查看或切换本会话思考档位：/effort high（仅当前会话）",
 }
 
 # 渠道层会拦截的全部命令名（系统 + 运行时 + 直连期 relay）：最高优先级，同名技能

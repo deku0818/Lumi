@@ -51,7 +51,9 @@ from lumi.gateway.channels.relay import (
     update_binding,
 )
 from lumi.models import provider_store
-from lumi.sessions.session_meta import delete_meta, set_model_override, update_meta
+from lumi.models.manager import allowed_levels
+from lumi.sessions import session_model
+from lumi.sessions.session_meta import delete_meta, update_meta
 from lumi.utils.constants import (
     FEISHU_THREAD_PREFIX,
     NOTIFICATION_POLL_INTERVAL,
@@ -543,16 +545,21 @@ class FeishuInbound:
                     parsed[0], parsed[1], chat_id, thread_id, message_id
                 )
                 return
-            # 普通模式的 /model：本会话热切换（直连期同名命令归 relay，上面已拦；
-            # 直连裸敲 /model 仍透传 cc 直答当前模型）。值不像切换操作的（中文/
-            # 多词自然语言）不拦，按「未知命令照常喂模型」的既有契约走
+            # 普通模式的 /model、/effort：本会话热切换（直连期同名命令归 relay，上面
+            # 已拦；直连裸敲仍透传 cc 直答）。值不像切换操作的（中文/多词自然语言）
+            # 不拦，按「未知命令照常喂模型」的既有契约走
             if (
                 parsed
                 and parsed[0] in RUNTIME_COMMANDS
                 and is_model_arg(parsed[1])
                 and not is_active(thread_id)
             ):
-                await self._cmd_session_model(parsed[1], chat_id, thread_id, message_id)
+                runtime_cmd = (
+                    self._cmd_session_model
+                    if parsed[0] == "model"
+                    else self._cmd_session_effort
+                )
+                await runtime_cmd(parsed[1], chat_id, thread_id, message_id)
                 return
 
             # 媒体源 = 当前消息 +（若是回复）被回复的父消息。从每个源抽图片与文件。
@@ -943,23 +950,17 @@ class FeishuInbound:
     ) -> None:
         """普通模式的 /model：裸敲看本会话生效模型 + 可选列表，带完整模型名只切本会话。
 
-        写的是会话级覆盖（sidecar 落盘），下一轮开跑前经 ``sync_bridge_model`` 对齐
-        ——不动渠道配置、不重建池、不影响其他会话。``/model default`` 恢复渠道默认。
+        写的是会话级覆盖（sidecar 落盘），下一轮开跑前经 ``align_session_model`` 对齐
+        ——只动本会话，别的群 / desktop 都不受影响。``/model default`` 落回新会话默认。
         """
         ch = self.channel
-        cfg = ch.config
         if not value:
-            model, _, _, source = ch.bridge_pool.effective_model(thread_id)
-            label = {
-                "override": "本会话指定",
-                "channel": "渠道默认",
-                "global": "跟随全局",
-            }[source]
+            current = session_model.resolve(thread_id)
             await ch.send_markdown(
                 chat_id,
                 "\n".join(
                     [
-                        f"当前：`{model}`（{label}）",
+                        f"当前：`{current.model}`",
                         "",
                         *_model_listing(_provider_models()),
                     ]
@@ -970,13 +971,12 @@ class FeishuInbound:
             )
             return
         if value == "default":
-            set_model_override(thread_id, "", "")
-            fallback = cfg.model or provider_store.resolve().model
+            session_model.set_model(thread_id, "", "")
             await ch.send_markdown(
                 chat_id,
-                f"模型：`{fallback}`",
+                f"模型：`{session_model.resolve(thread_id).model}`",
                 reply_to=message_id,
-                title="✅ 已恢复渠道默认",
+                title="✅ 已恢复默认",
                 template="green",
                 note="下一条消息生效 · 仅本会话",
             )
@@ -996,16 +996,65 @@ class FeishuInbound:
         # 同名模型可能挂在多个连接下：连接偏好交给 resolve()（指定 profile 精确
         # 命中 > active 优先按名反查），不在这里重复实现它的契约
         model = matches[0][2]
-        pid = provider_store.resolve(model, cfg.provider).provider
+        pid = provider_store.resolve(model).provider
         pname = next((n for i, n, _ in matches if i == pid), matches[0][1])
-        if (pid, model) == (cfg.provider, cfg.model):
-            # 切回渠道默认 = 清覆盖：不留一个把渠道档位顶掉的等价覆盖
-            set_model_override(thread_id, "", "")
-        else:
-            set_model_override(thread_id, provider=pid, model=model)
+        session_model.set_model(thread_id, model, pid)
         await ch.send_markdown(
             chat_id,
             f"模型：`{model}`（{pname}）",
+            reply_to=message_id,
+            title="✅ 已切换",
+            template="green",
+            note="下一条消息生效 · 仅本会话",
+        )
+
+    async def _cmd_session_effort(
+        self, value: str, chat_id: str, thread_id: str, message_id: str
+    ) -> None:
+        """普通模式的 /effort：裸敲看本会话档位 + 该模型可选档位，带值只改本会话。
+
+        档位依附模型（``/model`` 换模型即清），故可选项按本会话当前模型现算——列出
+        端点不认的档位只会换来一次 400。auto 恒可选（= 清除会话档位、跟随模型默认），
+        但 ``allowed_levels`` 对多数形态本就以 auto 打头，去重保序免得列出两个 auto。
+        """
+        ch = self.channel
+        current = session_model.resolve(thread_id)
+        levels = list(dict.fromkeys(["auto", *allowed_levels(current.model)]))
+        options = "可选：" + " ".join(f"`{lv}`" for lv in levels)
+        if not value:
+            # 未设会话级档位时生效的是该模型在 profile 里的档位（desktop 选择器写的），
+            # 不是 auto——报 auto 会让「明明设过 high」看起来没生效
+            effective = (
+                current.effort
+                or provider_store.resolve(current.model, current.provider).effort
+            )
+            await ch.send_markdown(
+                chat_id,
+                "\n".join(
+                    [
+                        f"当前：`{effective}`（模型 `{current.model}`）",
+                        "",
+                        options,
+                    ]
+                ),
+                reply_to=message_id,
+                title="🧠 思考档位",
+                note="/effort 档位 切换（仅本会话）· auto = 跟随模型默认",
+            )
+            return
+        if value not in levels:
+            await ch.send_markdown(
+                chat_id,
+                f"`{current.model}` 没有 `{value}` 这个档位。\n\n{options}",
+                reply_to=message_id,
+                title="❌ 档位无效",
+                template="red",
+            )
+            return
+        session_model.set_effort(thread_id, value)
+        await ch.send_markdown(
+            chat_id,
+            f"档位：`{value}`",
             reply_to=message_id,
             title="✅ 已切换",
             template="green",

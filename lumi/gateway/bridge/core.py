@@ -65,7 +65,9 @@ from lumi.gateway.bridge.broker import LUMI_APPROVAL_EVENT, ApprovalBroker
 from lumi.gateway.bridge.checkpoint import CheckpointService
 from lumi.gateway.bridge.folders import FolderManager
 from lumi.gateway.bridge.providers import ProviderService
+from lumi.sessions import session_model
 from lumi.sessions.message_text import extract_text_content
+from lumi.sessions.session_model import SessionModel
 from lumi.utils.constants import (
     ATTACHED_FILE_TAG,
     LUMI_META_KEY,
@@ -269,9 +271,6 @@ class AgentBridge:
         project_dir: str = "",
         disabled_tools: list[str] | None = None,
         wait_mcp: bool = False,
-        model: str = "",
-        effort: str = "auto",
-        provider: str = "",
     ) -> None:
         """初始化 Agent。
 
@@ -281,10 +280,9 @@ class AgentBridge:
         disabled_tools：本会话禁用的工具黑名单（如飞书 channel 禁用 ``ask``）；None 时全量。
         wait_mcp：冷 MCP 池时是否等它就绪。交互会话默认 False（非阻塞 + 轮首刷新
         自愈）；headless CLI 单轮即退无自愈，传 True。
-        model / effort / provider：渠道会话独立指定的模型、思考档位与所属 profile
-        （IM channel 用）。model 非空时覆盖全局 active、把 effort 写进 context.effort
-        （绕过 profile）、provider 一并进 context（空 = 老配置，按名反查兜底）；
-        model 为空则跟随全局 active（desktop 常规路径），effort / provider 参数忽略。
+
+        模型不在此定：这里只把「新会话默认」装进 context 作初值，真正生效的是每轮
+        开跑前的 :meth:`align_session_model`（thread 此刻尚未确定，会话覆盖无从解析）。
         """
         agents_config = get_config().config.agents
         target = Path(project_dir).expanduser().resolve() if project_dir else None
@@ -312,13 +310,9 @@ class AgentBridge:
         self._context.approval_broker = self._broker
         # 授权通过后放宽工作区边界的回调（人工审批 / auto 分类器 / privileged 三条路共用）
         self._context.widen_boundary = self._folders.widen_for_violations
-        # 应用持久化的 active 供应商 (profile, model)（覆盖 config 默认模型）
-        self._apply_active()
-        # 渠道会话可指定独立模型 + 思考档位：覆盖上面的全局 active（连接由 resolve(model)
-        # 反查 profile，不改 provider_store）。仅在指定了 model 时覆盖档位——跟随全局时
-        # context.effort 保持 None，call_model 走 profile 解析。
-        if model:
-            self.set_session_model(model, provider, effort)
+        # 新会话默认模型 (profile, model) 作初值（覆盖 config 默认模型）；会话覆盖
+        # 由轮首 align_session_model 接手
+        self._providers.apply_active()
         # 本会话项目（引擎已绑定 project_dir 或退回 cwd）的 config hooks
         self._config_hooks = build_config_hooks(Path(self.workspace_dir))
         thread_id = generate_thread_id()
@@ -550,6 +544,8 @@ class AgentBridge:
         self, msg: HumanMessage, tool_mode: str, execution_mode: str
     ) -> AsyncGenerator[BridgeEvent, None]:
         """底层：以一条消息起一轮图执行（真实用户轮与合成轮共用的最小操作）。"""
+        # 跑图之前把模型对齐到本会话应然值（会话覆盖 / 新会话默认都可能在两轮之间变）
+        self.align_session_model()
         # 新一轮对话，清理上一轮残留的 agent 追踪状态
         self._active_agent_runs.clear()
         # tool_mode 是 context（运行时共享、可变）真相源：本轮 UI 选择写入，运行中经
@@ -567,6 +563,9 @@ class AgentBridge:
 
         每轮设置步骤（checkpoint、边沿提醒、turn.start）集中于此，不可能只改一边。
         """
+        # 固化本会话模型：只有真人轮算「会话开跑了」——合成的后台通知轮 / 压缩轮走
+        # _stream_turn 与 compact_thread，它们只对齐不固化，不替用户做决定
+        session_model.pin(self.current_thread_id)
         # 在 agent 执行前创建 checkpoint（快照当前文件状态）；label 取消息的显示声明
         await self._create_checkpoint_before_turn(msg)
         # 「添加文件夹」增减与 Ultra 档位切换的边沿提醒随下一条真实用户消息注入
@@ -649,19 +648,38 @@ class AgentBridge:
 
     # ── 模型供应商 profile（委派 ProviderService）──
 
-    def _apply_active(self) -> None:
-        self._providers.apply_active()
+    def _apply_model_to_context(
+        self, model: str, provider: str, effort: str | None
+    ) -> None:
+        """把一个已解析好的模型写进运行时 context，下一次 call_model 生效。
 
-    def set_session_model(self, model: str, provider: str, effort: str | None) -> None:
-        """本会话独立指定模型：直写运行时 context，下一次 call_model 生效。
-
-        不动 provider_store（全局 active 不变）。effort=None 表示跟随 profile 按模型
-        解析的档位。运行期调用须与在途轮互斥（改共享 context，中途换模型/连接）。
+        只改内存、不落盘（持久化归 ``session_model``）。effort=None 表示跟随 profile
+        按模型解析的档位。唯一调用者是 ``align_session_model``。
         """
         self._context.model_name = model
         self._context.provider = provider
         self._context.effort = effort
         self.model_name = model
+
+    def align_session_model(self) -> SessionModel:
+        """把 context 对齐到当前 thread 应然生效的模型。
+
+        模型是会话属性、不是进程状态：常驻 bridge 只在建桥时读定一次，而「新会话默认」
+        会在运行期变化（desktop 改设置）、会话覆盖也会（选择器 / IM ``/model``）。
+
+        「跑图之前先对齐」是**跑图**的不变量，不是某个前端的：故挂在 ``_stream_turn``
+        与 ``compact_thread`` 这两条唯一入口上，而不是让每个调用方各自记得调——按前端
+        枚举必然漏（合成的后台通知轮就漏过）。两处都在调用方的运行锁内跑，改共享
+        context 不会撞在途轮。
+        """
+        target = session_model.resolve(self.current_thread_id)
+        changed = self.model_name != target.model
+        self._apply_model_to_context(target.model, target.provider, target.effort)
+        if changed:
+            logger.info(
+                f"[AgentBridge] thread={self.current_thread_id} 模型对齐 → {target.model}"
+            )
+        return target
 
     def set_effort(self, provider_id: str, model: str, level: str) -> dict:
         return self._providers.set_effort(provider_id, model, level)
@@ -827,6 +845,9 @@ class AgentBridge:
 
         if self._context is None:
             return False
+        # 摘要以本 bridge 当前模型跑：上一轮之后会话模型可能已变，先对齐再压缩，
+        # 别拿旧模型（及其窗口算法）压。不固化——压缩不是用户轮
+        self.align_session_model()
         # 整段 body 进摘要（含末条 AI 回复，否则最后一句既不在历史也不在摘要里）；
         # 末条若是没等到回答的用户消息，其原话由 build_compacted_update 保住
         body = select_for_compaction(await self.snapshot_messages())

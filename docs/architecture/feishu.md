@@ -102,7 +102,8 @@ mention_key——`id=` 是**发送方应用**的 open_id（open_id 每应用一�
 
 **斜杠命令**（解析在 `channels/commands.py`，渠道无关）：命令按类别天然定可用范围，无 surface
 标注机制——skill 命令（含 `/dream`）恒全 surface；渠道系统命令（`SYSTEM_COMMANDS`：/stop
-/clear /help）恒仅 IM，不进 `bridge.list_commands()`（desktop 有终止/删除按钮）。
+/clear /help）与运行时命令（`RUNTIME_COMMANDS`：/model /effort）恒仅 IM，不进
+`bridge.list_commands()`（desktop 有终止/删除按钮与模型选择器）。
 
 - **skill 命令**：`_run_batch` 里仅"单条成批 + 纯文本"时识别，语法命中后对照
   `bridge.list_commands()`，命中走 `bridge.stream_command`（与 desktop 同一约定的 skill
@@ -114,6 +115,11 @@ mention_key——`id=` 是**发送方应用**的 open_id（open_id 每应用一�
   轮不登记（cancel 会杀轮询），如实回复"无法中断"。`/clear` = 持锁 `delete_thread` +
   `delete_meta` + 广播（与 desktop 删除同口径），完成后接手持锁窗口入队的消息。`/help` =
   直答彩色 header 卡片（`available_commands` 模块级函数，不为此建桥）。
+- **运行时命令**（`RUNTIME_COMMANDS`：/model /effort）：改本会话的模型 / 思考档位，落
+  `session_meta` 按 thread 存，下一轮开跑前经 `align_session_model` 生效——只动本会话，
+  别的群与 desktop 都不受影响。值不像切换操作的（中文 / 多词自然语言，见 `is_model_arg`）
+  不拦，按「未知命令照常喂模型」走；直连期同名命令归 relay（改 cc 的 `--model`，另一体系）。
+  渠道配置里没有模型字段，解析链与 desktop 同源，见 [model-switching.md](model-switching.md)。
 - 群聊 mention 模式下显示名可含空格（"Lumi Bot"），解析对 @ 开头文本取第一个空白后跟
   `/` 的位置作命令起点，误切由已知命令表兜底。
 

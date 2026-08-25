@@ -26,7 +26,6 @@ import type {
   CheckTone,
   DiagnoseCheck,
   Project,
-  ProviderProfile,
 } from '../types'
 import { useEnvInstall } from './useEnvInstall'
 import type { Gateway } from '../gateway'
@@ -91,9 +90,6 @@ const emptyFeishu = (): FeishuConfig => ({
   app_secret: '',
   allow_from: ['*'],
   group_policy: 'mention',
-  model: '',
-  provider: '',
-  effort: 'auto',
   tool_mode: 'auto',
   workspace: '',
   minutes_enabled: false,
@@ -119,7 +115,6 @@ export function ChannelsPanel({
 }) {
   const [machine, setMachine] = useState('local')
   const [list, setList] = useState<ChannelInfo[]>([])
-  const [providers, setProviders] = useState<ProviderProfile[]>([])
   const [editing, setEditing] = useState<FeishuConfig | null>(null) // null = 列表视图
   // 凭证落盘的绝对路径，由 get_channels 下发（渲染见 ConfigPath）
   const [configPath, setConfigPath] = useState('')
@@ -154,15 +149,6 @@ export function ChannelsPanel({
     const timer = setInterval(reload, 3000)
     return () => clearInterval(timer)
   }, [active, offline, reload])
-
-  // 该机器的供应商 profiles（渠道「模型 + 思考」配置的模型清单与思考能力来源）
-  useEffect(() => {
-    if (!active) return
-    gwFor(machine)
-      ?.listProviders()
-      .then((r) => setProviders(r.profiles ?? []))
-      .catch(() => setProviders([]))
-  }, [active, gwFor, machine])
 
   const feishu = list.find((c) => c.name === 'feishu')
 
@@ -224,7 +210,6 @@ export function ChannelsPanel({
         <FeishuForm
           initial={editing}
           gw={gw}
-          providers={providers}
           configPath={configPath}
           onNavigate={onNavigate && ((tab: string) => onNavigate(tab, machine))}
           onCancel={() => setEditing(null)}
@@ -325,7 +310,6 @@ function useDiagnose(call: () => Promise<{ checks: DiagnoseCheck[] }> | undefine
 function FeishuForm({
   initial,
   gw,
-  providers,
   configPath,
   onNavigate,
   onCancel,
@@ -333,7 +317,6 @@ function FeishuForm({
 }: {
   initial: FeishuConfig
   gw?: Gateway
-  providers: ProviderProfile[]
   configPath: string // 凭证落盘的绝对路径（空 = 尚未取到，文案退回不带路径的说法）
   onNavigate?: (tab: string) => void
   onCancel: () => void
@@ -472,8 +455,21 @@ function FeishuForm({
           )}
         </GroupCard>
 
-        <GroupCard icon={Cpu} title="会话运行时" desc="这个渠道的 Agent 用什么模型、怎么思考、怎么审批">
-          <ChannelRuntimeFields cfg={cfg} set={set} providers={providers} />
+        <GroupCard
+          icon={Cpu}
+          title="会话运行时"
+          desc="这个渠道的 Agent 怎么审批工具。模型与思考档位在群里用 /model、/effort 定，每个会话各记各的"
+        >
+          <Field label="工具审批模式" hint="两种模式下泄漏的人工审批一律自动拒绝；仅保留 ask 询问卡片">
+            <SegmentedControl
+              value={cfg.tool_mode}
+              onChange={(v) => set({ tool_mode: v as FeishuConfig['tool_mode'] })}
+              options={[
+                { val: 'auto', label: 'AI 审批' },
+                { val: 'privileged', label: '特权放行' },
+              ]}
+            />
+          </Field>
         </GroupCard>
 
         <GroupCard
@@ -780,205 +776,6 @@ function CheckRow({
         <Button size="sm" className="mt-0.5 h-6 px-2.5 text-[11px]" onClick={() => onFix(fixAction)}>
           一键安装
         </Button>
-      )}
-    </div>
-  )
-}
-
-// 档位显示名（对齐 ModelPicker）：auto→自动 / on→On / 其余首字母大写
-const levelLabel = (lv: string) =>
-  lv === 'auto' ? '自动' : lv === 'on' ? 'On' : lv.charAt(0).toUpperCase() + lv.slice(1)
-
-// 渠道「会话运行时」通用块：模型 + 思考档位 + 工具审批。各 IM 渠道复用同一块
-// （对齐后端 ChannelRuntimeConfig），值各渠道各存一份。model 空 = 跟随 desktop 全局。
-// 绑定项目已前置到凭证组（它是接入体检的输入），不在此块；卡壳由调用方的 GroupCard 提供。
-function ChannelRuntimeFields({
-  cfg,
-  set,
-  providers,
-}: {
-  cfg: FeishuConfig
-  set: (patch: Partial<FeishuConfig>) => void
-  providers: ProviderProfile[]
-}) {
-  // source 用本地状态表达用户意图（而非纯派生 !!cfg.model）：providers 尚未加载完时
-  // 也能切到「指定」进入选择视图（下拉负责选模型），不再因 firstModel='' 静默无反应
-  const [source, setSource] = useState<'global' | 'custom'>(cfg.model ? 'custom' : 'global')
-  const custom = source === 'custom'
-  // 某模型的思考能力：遍历 profiles 取第一处含该 model 的 thinking 条目（同名跨 provider 取先者）
-  const capOf = (model: string) => {
-    for (const p of providers) {
-      const t = p.thinking?.[model]
-      if (t) return t
-    }
-    return undefined
-  }
-  // 切模型时把档位收敛到该模型合法值；非法 → auto（最安全，不注入思考参数）
-  const coerce = (model: string, eff: string) => {
-    const cap = capOf(model)
-    if (!cap || cap.control === 'none') return 'auto'
-    return (cap.levels ?? ['auto']).includes(eff) ? eff : 'auto'
-  }
-  const firstProv = providers.find((p) => p.models.length)
-  const firstModel = firstProv?.models[0] ?? ''
-  const cap = custom ? capOf(cfg.model) : undefined
-  const control = cap?.control ?? 'none'
-
-  return (
-    <>
-      <Field
-        label="模型来源"
-        hint="跟随全局＝用 desktop 当前模型；指定＝本渠道独立，与 desktop 互不影响"
-      >
-        <SegmentedControl
-          value={custom ? 'custom' : 'global'}
-          onChange={(v) => {
-            setSource(v as 'global' | 'custom')
-            if (v === 'global') set({ model: '', provider: '', effort: 'auto' })
-            // 切「指定」时有可用模型就补第一个；providers 未加载完（firstModel=''）则
-            // 先进 custom 视图，由模型下拉待选，加载后即可选
-            else if (!cfg.model && firstModel)
-              set({ model: firstModel, provider: firstProv?.id ?? '', effort: 'auto' })
-          }}
-          options={[
-            { val: 'global', label: '跟随 desktop 全局' },
-            { val: 'custom', label: '为本渠道指定' },
-          ]}
-        />
-      </Field>
-
-      {custom && (
-        <Field label="模型">
-          <ModelDropdown
-            providers={providers}
-            value={cfg.model}
-            provider={cfg.provider}
-            onPick={(m, pid) => set({ model: m, provider: pid, effort: coerce(m, cfg.effort) })}
-          />
-          <ThinkingControl
-            control={control}
-            levels={cap?.levels ?? ['auto']}
-            effort={cfg.effort}
-            onPick={(e) => set({ effort: e })}
-          />
-        </Field>
-      )}
-
-      <Field label="工具审批模式" hint="两种模式下泄漏的人工审批一律自动拒绝；仅保留 ask 询问卡片">
-        <SegmentedControl
-          value={cfg.tool_mode}
-          onChange={(v) => set({ tool_mode: v as FeishuConfig['tool_mode'] })}
-          options={[
-            { val: 'auto', label: 'AI 审批' },
-            { val: 'privileged', label: '特权放行' },
-          ]}
-        />
-      </Field>
-    </>
-  )
-}
-
-// 模型下拉：按 provider 分组列出所有模型（对齐 ModelPicker 的 More models 子菜单）。
-// 选中态按 (provider, model) 判定——同名模型可存在于多个连接，只按名会两处都打勾。
-function ModelDropdown({
-  providers,
-  value,
-  provider,
-  onPick,
-}: {
-  providers: ProviderProfile[]
-  value: string
-  provider: string // 空 = 老配置未记录归属，回退按名找第一处
-  onPick: (m: string, providerId: string) => void
-}) {
-  const prov =
-    providers.find((p) => p.id === provider && p.models.includes(value)) ??
-    providers.find((p) => p.models.includes(value))
-  return (
-    <DropdownMenu>
-      <DropdownMenuTrigger asChild>
-        <button
-          type="button"
-          className="group flex w-full items-center gap-2.5 rounded-lg border border-line bg-surface px-3 py-2 text-left outline-none transition data-[state=open]:border-primary"
-        >
-          <div className="min-w-0 flex-1">
-            <div className="truncate text-sm text-ink">{value || '选择模型'}</div>
-            {prov && <div className="truncate text-[10.5px] text-muted-foreground">{prov.name}</div>}
-          </div>
-          <ChevronDown
-            size={14}
-            className="shrink-0 text-muted-foreground transition-transform group-data-[state=open]:rotate-180"
-          />
-        </button>
-      </DropdownMenuTrigger>
-      <DropdownMenuContent align="start" className="max-h-80 w-[--radix-dropdown-menu-trigger-width] overflow-auto">
-        {providers.length === 0 && (
-          <div className="px-2 py-1.5 text-xs text-muted-foreground">该机器暂无供应商</div>
-        )}
-        {providers.map((p, i) => (
-          <div key={p.id}>
-            {i > 0 && <DropdownMenuSeparator />}
-            <div className="px-2 py-1 text-[10px] uppercase tracking-wide text-muted-foreground/70">
-              {p.name}
-            </div>
-            {p.models.map((m) => (
-              <DropdownMenuItem key={m} onClick={() => onPick(m, p.id)}>
-                <Check
-                  className={`text-primary ${m === value && p.id === prov?.id ? 'opacity-100' : 'opacity-0'}`}
-                />
-                <span className="truncate">{m}</span>
-              </DropdownMenuItem>
-            ))}
-          </div>
-        ))}
-      </DropdownMenuContent>
-    </DropdownMenu>
-  )
-}
-
-// 思考档位控制：随模型能力变形——effort 分段（ultra 同排、金色标示顶档）/ toggle 开关 / none 隐藏。
-function ThinkingControl({
-  control,
-  levels,
-  effort,
-  onPick,
-}: {
-  control: 'none' | 'effort' | 'toggle'
-  levels: string[]
-  effort: string
-  onPick: (e: string) => void
-}) {
-  if (control === 'none') {
-    return (
-      <div className="mt-3 border-t border-dashed border-line pt-3 text-[11.5px] text-muted-foreground">
-        ◦ 该模型无思考控制
-      </div>
-    )
-  }
-  if (control === 'toggle') {
-    // toggle 型：auto（未显式设）按 On 展示，与 ModelPicker 一致
-    const on = effort === 'on' || effort === 'auto'
-    return (
-      <div className="mt-3 flex items-center gap-2 border-t border-dashed border-line pt-3">
-        <span className="flex-1 text-xs text-ink">深度思考（Thinking）</span>
-        <Switch checked={on} onCheckedChange={(v) => onPick(v ? 'on' : 'off')} />
-      </div>
-    )
-  }
-  return (
-    <div className="mt-3 border-t border-dashed border-line pt-3">
-      <div className="mb-1.5 text-xs text-muted-foreground">思考档位（Effort）</div>
-      {/* Ultra 与原生档位同排：金色标示 Lumi 顶档（沿用 ModelPicker chip 惯例），不单独占行 */}
-      <SegmentedControl
-        value={effort}
-        onChange={onPick}
-        options={levels.map((l) => ({
-          val: l,
-          label: l === 'ultra' ? <span className="font-medium text-primary">Ultra</span> : levelLabel(l),
-        }))}
-      />
-      {effort === 'ultra' && (
-        <div className="mt-1.5 text-[10.5px] text-muted-foreground">思考拉满 + 解锁 workflow 编排</div>
       )}
     </div>
   )

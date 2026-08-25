@@ -32,7 +32,13 @@ export interface ToolCallBrief {
 // 每个事件名 → payload 形状的单一映射。继承 Record<WireEventType, object> 兜底：
 // 漏写任一事件名 tsc 即报错，保证覆盖全部事件。events.json 承载语言中立的同构契约。
 export interface WireEventPayloads extends Record<WireEventType, object> {
-  'gateway.ready': { model: string; workspace: string; workspace_bound: boolean; running?: boolean }
+  'gateway.ready': {
+    model: string
+    provider: string
+    workspace: string
+    workspace_bound: boolean
+    running?: boolean
+  }
   'turn.start': { message_id: string }
   'message.start': Record<string, never>
   'message.delta': { text: string; usage?: Usage }
@@ -262,6 +268,12 @@ export interface ActiveModel {
   model: string
 }
 
+// 会话模型的 wire 形状（switch_session / new_session / set_session_model 结果）。
+// pinned=false 表示该会话尚未开跑过，仍跟随「新会话默认」——前端据此决定存不存。
+export interface SessionModelWire extends ActiveModel {
+  pinned: boolean
+}
+
 // 用途模型指针（providers 分区顶级 classifier / titler：auto 审批分类器、会话标题生成）。
 // provider/model 均空 = 未配置（跟随会话模型）。
 export type ModelPointer = { provider: string; model: string } | Record<string, never>
@@ -416,10 +428,8 @@ export interface FeishuConfig {
   app_secret: string
   allow_from: string[]
   group_policy: 'mention' | 'open'
-  // 运行时配置（对齐后端 ChannelRuntimeConfig，各渠道 config 继承）：模型 / 思考 / 审批 / 项目
-  model: string // 空 = 跟随 desktop 全局 active 模型
-  provider: string // model 所属 profile id（同名模型跨连接不串味）；空 = 老配置按名反查
-  effort: string // 思考档位（依附 model，仅 model 非空时生效）；auto/low/high/xhigh/ultra…
+  // 运行时配置（对齐后端 ChannelRuntimeConfig，各渠道 config 继承）：审批 / 项目。
+  // 模型与思考档位不在此列——它们按会话存，在群里用 /model、/effort 定
   tool_mode: 'auto' | 'privileged'
   workspace: string
   minutes_enabled: boolean // 妙记纪要：录音/会议生成妙记后自动整理纪要推私聊
