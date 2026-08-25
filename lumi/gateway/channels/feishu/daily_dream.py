@@ -133,6 +133,9 @@ async def _summary_phase(pool, config, channel_name: str, threads: list[str]) ->
         async with sem, lock:  # 并发配额只圈住真正的压缩调用
             try:
                 bridge = await pool.get(thread_id)
+                # 压缩用 bridge 当前模型跑：上一用户轮之后 /model 覆盖或全局
+                # active 可能已变，持锁后先对齐，别拿旧模型（及其窗口算法）压缩
+                pool.sync_bridge_model(bridge, thread_id)
                 if await bridge.compact_thread():
                     hub.on_channel_activity(thread_id, channel_name)
             except Exception:

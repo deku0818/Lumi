@@ -48,6 +48,21 @@ def delete_meta(thread_id: str) -> None:
         _save_all(data)
 
 
+def get_model_override(thread_id: str) -> tuple[str, str]:
+    """读某会话的模型覆盖 (provider, model)（IM 渠道 /model 命令设定）；未设定返回空串对。
+
+    与 goal 同理：会话级、跨轮跨重启存活的用户设定，与 pinned/title 同居一条 meta，
+    「清空/删除会话」的 delete_meta 天然连它一并清，新会话不继承旧覆盖。
+    """
+    meta = load_all().get(thread_id, {})
+    return meta.get("model_provider", ""), meta.get("model", "")
+
+
+def set_model_override(thread_id: str, provider: str, model: str) -> None:
+    """写会话级模型覆盖；空值即清除（update_meta 语义，保留 pin/title 等其他标记）。"""
+    update_meta(thread_id, model_provider=provider, model=model)
+
+
 def get_goal(thread_id: str) -> str:
     """读某会话当前生效的 goal 条件（/goal 命令设定）；未设定返回空串。
 

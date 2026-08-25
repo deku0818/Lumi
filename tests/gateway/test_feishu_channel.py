@@ -417,6 +417,21 @@ def test_help_markdown_system_commands_not_under_skills():
     assert "`/commit`" in skills_part
     assert "`/dream`" not in skills_part and "`/compact`" not in skills_part
     assert "`/dream`" in control_part and "`/compact`" in control_part
+
+
+def test_help_markdown_channel_commands_shadow_same_name_skill():
+    # 渠道命令（/stop /model 等）遮蔽同名技能：列表只出现渠道那一条，不出现两次
+    out = inb.help_markdown(
+        [
+            {"name": "model", "description": "同名技能", "type": "skill"},
+            {"name": "stop", "description": "同名技能", "type": "skill"},
+        ]
+    )
+    assert out.count("`/model`") == 1 and out.count("`/stop`") == 1
+    assert "同名技能" not in out
+    # 同名技能被滤光后不留空的「技能命令」组
+    assert "技能命令" not in out
+    control_part = out.split("会话控制", 1)[1]
     assert "`/stop`" in control_part  # 与渠道系统命令同组
 
 
@@ -1936,3 +1951,89 @@ async def test_evict_stale_spares_chat_with_running_turn(monkeypatch):
     await st._evict_stale()  # 锁已释放：现在才是孤儿
     assert not st.bufs
     assert closed == ["card_oc_idle", "card_oc_running"]
+
+
+# ── 会话级模型覆盖（/model）──
+class _FakeBridge:
+    def __init__(self):
+        self.model_name = ""
+        self.applied = None
+
+    def set_session_model(self, model, provider, effort):
+        self.model_name = model
+        self.applied = (model, provider, effort)
+
+
+def _fake_resolve(model_name=None, provider=""):
+    """镜像 resolve() 契约：None=全局 active；按名解析已知模型回 profile，未知回空连接。"""
+    if model_name is None:
+        return SimpleNamespace(model="g-active", provider="pg")
+    known = {"ov-model": "po", "ch-model": "pc"}
+    return SimpleNamespace(model=model_name, provider=known.get(model_name, ""))
+
+
+def _isolate_meta(monkeypatch, tmp_path):
+    from lumi.sessions import session_meta
+
+    monkeypatch.setattr(session_meta, "_meta_path", lambda: tmp_path / "meta.json")
+
+
+def test_sync_bridge_model_precedence(monkeypatch, tmp_path):
+    from lumi.gateway.channels.feishu import bridge_pool
+    from lumi.sessions.session_meta import set_model_override
+
+    _isolate_meta(monkeypatch, tmp_path)
+    monkeypatch.setattr(bridge_pool.provider_store, "resolve", _fake_resolve)
+    bridge = _FakeBridge()
+
+    # 无覆盖 + 无渠道配置 → 跟随全局 active（effort=None 走 profile 解析）
+    pool = bridge_pool.BridgePool()
+    pool.sync_bridge_model(bridge, "t1")
+    assert bridge.applied == ("g-active", "pg", None)
+
+    # 渠道配置了模型 → 用渠道三元组（effort 原样带）
+    pool = bridge_pool.BridgePool(model="ch-model", effort="ultra", provider="pc")
+    pool.sync_bridge_model(bridge, "t1")
+    assert bridge.applied == ("ch-model", "pc", "ultra")
+
+    # 会话覆盖优先于渠道配置；effort 归 None（跟随新模型的 profile 档位）
+    set_model_override("t1", provider="po", model="ov-model")
+    pool.sync_bridge_model(bridge, "t1")
+    assert bridge.applied == ("ov-model", "po", None)
+
+    # 清除覆盖（空值即清）→ 回落渠道配置
+    set_model_override("t1", "", "")
+    pool.sync_bridge_model(bridge, "t1")
+    assert bridge.applied == ("ch-model", "pc", "ultra")
+
+
+def test_sync_bridge_model_stale_override_self_heals(monkeypatch, tmp_path):
+    # 覆盖指向已删除的模型：清掉自愈，回落渠道配置，不拿死模型名跑
+    from lumi.gateway.channels.feishu import bridge_pool
+    from lumi.sessions.session_meta import get_model_override, set_model_override
+
+    _isolate_meta(monkeypatch, tmp_path)
+    monkeypatch.setattr(bridge_pool.provider_store, "resolve", _fake_resolve)
+    bridge = _FakeBridge()
+    pool = bridge_pool.BridgePool(model="ch-model", effort="high", provider="pc")
+    set_model_override("t1", provider="dead", model="gone-model")
+    pool.sync_bridge_model(bridge, "t1")
+    assert bridge.applied == ("ch-model", "pc", "high")
+    assert get_model_override("t1") == ("", "")  # 失效覆盖已被清除
+
+
+def test_model_override_meta_roundtrip(monkeypatch, tmp_path):
+    # 覆盖与 pin/title 同居一条 meta：互不干扰，delete_meta 连覆盖一并清
+    from lumi.sessions import session_meta
+
+    _isolate_meta(monkeypatch, tmp_path)
+    session_meta.update_meta("t1", pinned=True)
+    session_meta.set_model_override("t1", provider="p1", model="m1")
+    assert session_meta.get_model_override("t1") == ("p1", "m1")
+    assert session_meta.get_model_override("t2") == ("", "")  # 其他会话不受影响
+    session_meta.set_model_override("t1", "", "")  # 空值即清除，pin 等标记保留
+    assert session_meta.get_model_override("t1") == ("", "")
+    assert session_meta.load_all()["t1"] == {"pinned": True}
+    session_meta.set_model_override("t1", provider="p1", model="m1")
+    session_meta.delete_meta("t1")
+    assert session_meta.get_model_override("t1") == ("", "")

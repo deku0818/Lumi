@@ -1,5 +1,18 @@
 # Changelog
 
+## [0.2.117] - 2026-08-25
+
+### Added
+- **飞书 `/model` 会话级模型热切换**（`feishu/inbound._cmd_session_model` + `session_meta` 模型覆盖 + `BridgePool.effective_model`）— 裸敲显示本会话生效模型（本会话指定 / 渠道默认 / 跟随全局）与可选列表；`/model 完整模型名` 只切当前会话（覆盖与 pin/title 同存一条会话 meta，跨重启存活，effort 跟随新模型的 profile 档位），`/model default` 恢复渠道默认。只认完整模型名（不分大小写），拼错回红卡附全量列表；含中文或多词的内容按普通消息喂模型（分词启发式对无空格中文失效，判定看字符集）。同名模型挂多连接时连接偏好交给 `provider_store.resolve()`，切到渠道默认模型折叠为清覆盖（不留顶掉渠道档位的等价覆盖）。
+
+### Fixed
+- **渠道「跟随全局」模型只在建桥时快照**——desktop 切全局模型后，飞书常驻会话一直用旧模型。现在每轮开跑前 `sync_bridge_model` 按「会话覆盖 > 渠道配置 > 全局 active」对齐 bridge，下一轮即跟上；覆盖指向已被删除的模型/连接时就地清除自愈（不拿死模型名打空连接）；`/clear` 与桌面删会话经 `delete_meta` 天然连覆盖一并清，「全新对话」不继承旧覆盖；daily_dream 的 summary 压缩前同样先对齐，不拿旧模型（及其上下文窗口算法）压缩。
+
+### Changed
+- **渠道命令遮蔽单源化**（`commands.CHANNEL_COMMAND_NAMES`）— 系统 + 运行时 + 直连 relay 三表并集成为保留字集合，`/help` 过滤与技能命令匹配共用：同名技能在列表与执行两侧被彻底遮蔽，不再出现 help 列两条或多词形态漏进同名技能的分裂状态。
+- **sidecar 读取加 mtime 缓存**（`utils/json_sidecar`）— 直连绑定每条消息、模型覆盖每轮的高频读不再重复解析文件，写后回填缓存。
+- `AgentBridge.set_session_model` 抽出 initialize 的渠道模型覆盖写入，建桥与运行期对齐共用同一写点。
+
 ## [0.2.116] - 2026-08-21
 
 ### Fixed

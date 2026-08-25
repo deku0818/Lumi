@@ -11,6 +11,8 @@ from __future__ import annotations
 import asyncio
 
 from lumi.gateway.bridge import AgentBridge
+from lumi.models import provider_store
+from lumi.sessions.session_meta import get_model_override, set_model_override
 from lumi.utils.logger import logger
 
 # IM channel 的会话默认禁用的工具：飞书等不走 ask 询问卡片，关掉 ask 让模型自行判断
@@ -91,6 +93,42 @@ class BridgePool:
                 self._locks[thread_id] = asyncio.Lock()
                 logger.info(f"[BridgePool] 新建 AgentBridge thread={thread_id}")
             return bridge
+
+    def effective_model(self, thread_id: str) -> tuple[str, str, str | None, str]:
+        """本会话应然生效的模型：(model, provider, effort, source)。
+
+        优先级即 source 取值："override"（/model 会话覆盖）> "channel"（渠道配置，
+        effort 原样带）> "global"（全局 active）。sync 应用与 /model 状态卡渲染共用
+        这一条链，不各自推导。覆盖指向的模型已不在任何连接下（桌面删了模型/连接）
+        时就地清除自愈——不校验就会拿死模型名打空连接，会话永久卡死。
+        """
+        provider, model = get_model_override(thread_id)
+        if model:
+            resolved = provider_store.resolve(model, provider)
+            if resolved.provider:
+                return resolved.model, resolved.provider, None, "override"
+            set_model_override(thread_id, "", "")
+            logger.warning(
+                f"[BridgePool] thread={thread_id} 会话模型覆盖失效已清除: {model}"
+            )
+        if self._model:
+            return self._model, self._provider, self._effort, "channel"
+        resolved = provider_store.resolve()
+        return resolved.model, resolved.provider, None, "global"
+
+    def sync_bridge_model(self, bridge: AgentBridge, thread_id: str) -> None:
+        """每轮开跑前把 bridge 的模型对齐到 effective_model 的应然值。
+
+        常驻 bridge 只在建桥时读定模型，而会话覆盖（/model 命令）与全局 active
+        （desktop 切换）都会在运行期变化，不在此对齐就一直用旧值。调用方须已持
+        本会话运行锁（改共享 context 不能撞在途轮）。压缩等以 bridge 当前模型跑的
+        内部链（daily_dream 的 summary）开跑前也须先经这里对齐。
+        """
+        model, provider, effort, _ = self.effective_model(thread_id)
+        changed = bridge.model_name != model
+        bridge.set_session_model(model, provider, effort)
+        if changed:
+            logger.info(f"[BridgePool] thread={thread_id} 模型对齐 → {model}")
 
     def peek(self, thread_id: str) -> AgentBridge | None:
         """已建桥则返回，否则 None（不隐式建桥——建桥重且常驻，只在真要跑轮时建）。"""

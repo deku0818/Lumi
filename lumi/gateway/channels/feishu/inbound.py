@@ -25,7 +25,13 @@ from lumi.agents.runtime.bg_process import cancel_thread_bg_tasks
 from lumi.agents.runtime.bg_tasks import compose_notification_hint, get_task_registry
 from lumi.gateway.bridge.core import available_commands
 from lumi.gateway.broadcast import hub
-from lumi.gateway.channels.commands import SYSTEM_COMMANDS, parse_slash_command
+from lumi.gateway.channels.commands import (
+    CHANNEL_COMMAND_NAMES,
+    RUNTIME_COMMANDS,
+    SYSTEM_COMMANDS,
+    is_model_arg,
+    parse_slash_command,
+)
 from lumi.gateway.channels.feishu.directory import (
     fallback_bot_name,
     fallback_chat_name,
@@ -44,7 +50,8 @@ from lumi.gateway.channels.relay import (
     setting_invalid_hint,
     update_binding,
 )
-from lumi.sessions.session_meta import delete_meta, update_meta
+from lumi.models import provider_store
+from lumi.sessions.session_meta import delete_meta, set_model_override, update_meta
 from lumi.utils.constants import (
     FEISHU_THREAD_PREFIX,
     NOTIFICATION_POLL_INTERVAL,
@@ -158,6 +165,20 @@ def _model_line(model: str, effort: str) -> str:
     return "\n模型：`" + " · ".join(x for x in (model or "默认", effort) if x) + "`"
 
 
+def _provider_models() -> list[tuple[str, str, str]]:
+    """已配置的全部模型：(profile_id, profile_name, model) 列表（一次读盘）。"""
+    profiles, _ = provider_store.load()
+    return [(p.id, p.name, m) for p in profiles for m in p.models]
+
+
+def _model_listing(entries: list[tuple[str, str, str]]) -> list[str]:
+    """/model 卡片的可选模型段：灰字组标题 + 每行 `模型` — 连接名。"""
+    return [
+        "<font color='grey'>可选模型</font>",
+        *(f"`{m}` — {name}" for _, name, m in entries),
+    ]
+
+
 def _help_line(name: str, description: str) -> str:
     """单条命令行：`/名字` + 描述首行（超长截断，保住每行一条的可读性）。"""
     desc = description.splitlines()[0] if description else ""
@@ -176,6 +197,9 @@ def help_markdown(commands: list[dict]) -> str:
     分割线前后必须留空行：--- 紧贴上一行会按 markdown setext 规则把前面整段
     渲染成大字标题（飞书真机如此），换行也一并被吞。
     """
+    # 渠道命令遮蔽同名 bridge 命令：渠道层先拦截，同名技能/agent 层命令不可达，
+    # 列表只显示真正可用的那一个（遮蔽集含 relay 命令名，与技能匹配守卫同源）
+    commands = [c for c in commands if c["name"] not in CHANNEL_COMMAND_NAMES]
     skills = [c for c in commands if c.get("type") == "skill"]
     systems = [c for c in commands if c.get("type") != "skill"]
     lines: list[str] = []
@@ -185,7 +209,7 @@ def help_markdown(commands: list[dict]) -> str:
         lines += ["", "---", ""]
     lines.append("<font color='grey'>会话控制</font>")
     lines += [_help_line(c["name"], c["description"]) for c in systems]
-    lines += [_help_line(n, d) for n, d in SYSTEM_COMMANDS.items()]
+    lines += [_help_line(n, d) for n, d in (SYSTEM_COMMANDS | RUNTIME_COMMANDS).items()]
     return "\n".join(lines)
 
 
@@ -518,6 +542,17 @@ class FeishuInbound:
                 await self._cmd_relay_setting(
                     parsed[0], parsed[1], chat_id, thread_id, message_id
                 )
+                return
+            # 普通模式的 /model：本会话热切换（直连期同名命令归 relay，上面已拦；
+            # 直连裸敲 /model 仍透传 cc 直答当前模型）。值不像切换操作的（中文/
+            # 多词自然语言）不拦，按「未知命令照常喂模型」的既有契约走
+            if (
+                parsed
+                and parsed[0] in RUNTIME_COMMANDS
+                and is_model_arg(parsed[1])
+                and not is_active(thread_id)
+            ):
+                await self._cmd_session_model(parsed[1], chat_id, thread_id, message_id)
                 return
 
             # 媒体源 = 当前消息 +（若是回复）被回复的父消息。从每个源抽图片与文件。
@@ -903,6 +938,80 @@ class FeishuInbound:
             note="下一条消息生效 · 会话不变",
         )
 
+    async def _cmd_session_model(
+        self, value: str, chat_id: str, thread_id: str, message_id: str
+    ) -> None:
+        """普通模式的 /model：裸敲看本会话生效模型 + 可选列表，带完整模型名只切本会话。
+
+        写的是会话级覆盖（sidecar 落盘），下一轮开跑前经 ``sync_bridge_model`` 对齐
+        ——不动渠道配置、不重建池、不影响其他会话。``/model default`` 恢复渠道默认。
+        """
+        ch = self.channel
+        cfg = ch.config
+        if not value:
+            model, _, _, source = ch.bridge_pool.effective_model(thread_id)
+            label = {
+                "override": "本会话指定",
+                "channel": "渠道默认",
+                "global": "跟随全局",
+            }[source]
+            await ch.send_markdown(
+                chat_id,
+                "\n".join(
+                    [
+                        f"当前：`{model}`（{label}）",
+                        "",
+                        *_model_listing(_provider_models()),
+                    ]
+                ),
+                reply_to=message_id,
+                title="🧠 会话模型",
+                note="/model 完整模型名 切换（仅本会话）· /model default 恢复默认",
+            )
+            return
+        if value == "default":
+            set_model_override(thread_id, "", "")
+            fallback = cfg.model or provider_store.resolve().model
+            await ch.send_markdown(
+                chat_id,
+                f"模型：`{fallback}`",
+                reply_to=message_id,
+                title="✅ 已恢复渠道默认",
+                template="green",
+                note="下一条消息生效 · 仅本会话",
+            )
+            return
+        entries = _provider_models()
+        q = value.lower()
+        matches = [e for e in entries if e[2].lower() == q]
+        if not matches:
+            await ch.send_markdown(
+                chat_id,
+                "\n".join([f"没有叫 `{value}` 的模型。", "", *_model_listing(entries)]),
+                reply_to=message_id,
+                title="❌ 未找到模型",
+                template="red",
+            )
+            return
+        # 同名模型可能挂在多个连接下：连接偏好交给 resolve()（指定 profile 精确
+        # 命中 > active 优先按名反查），不在这里重复实现它的契约
+        model = matches[0][2]
+        pid = provider_store.resolve(model, cfg.provider).provider
+        pname = next((n for i, n, _ in matches if i == pid), matches[0][1])
+        if (pid, model) == (cfg.provider, cfg.model):
+            # 切回渠道默认 = 清覆盖：不留一个把渠道档位顶掉的等价覆盖
+            set_model_override(thread_id, "", "")
+        else:
+            set_model_override(thread_id, provider=pid, model=model)
+        await ch.send_markdown(
+            chat_id,
+            f"模型：`{model}`（{pname}）",
+            reply_to=message_id,
+            title="✅ 已切换",
+            template="green",
+            note="下一条消息生效 · 仅本会话",
+        )
+
     async def _cmd_stop(self, chat_id: str, thread_id: str, message_id: str) -> None:
         """停止当前轮 + 本会话全部后台任务（IM 没有 desktop 的任务抽屉，这是唯一手段）。
 
@@ -1005,6 +1114,8 @@ class FeishuInbound:
             return
         async with lock:
             await bridge.delete_thread(thread_id)
+        # 连会话级模型覆盖一并清（同存一条 meta）：thread_id 确定性派生，
+        # 不清则「全新对话」下一条消息又静默套回旧覆盖
         delete_meta(thread_id)
         hub.on_channel_activity(thread_id, "feishu")
         await ch.send_markdown(
@@ -1277,7 +1388,13 @@ class FeishuInbound:
         command = None
         if len(batch) == 1 and not image_refs and not file_refs:
             parsed = parse_slash_command(batch[0].text)
-            if parsed and any(c["name"] == parsed[0] for c in bridge.list_commands()):
+            # 渠道命令遮蔽同名技能：漏到这里的形态（如自然语言 /model）也不落入
+            # 同名技能，遮蔽到底，按普通文本喂模型
+            if (
+                parsed
+                and parsed[0] not in CHANNEL_COMMAND_NAMES
+                and any(c["name"] == parsed[0] for c in bridge.list_commands())
+            ):
                 command = parsed
 
         # 图片/文件各自独立、相互无依赖 → 并发下载（gather 保序），多媒体不再 N 倍延迟

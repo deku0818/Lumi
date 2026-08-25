@@ -318,10 +318,7 @@ class AgentBridge:
         # 反查 profile，不改 provider_store）。仅在指定了 model 时覆盖档位——跟随全局时
         # context.effort 保持 None，call_model 走 profile 解析。
         if model:
-            self._context.model_name = model
-            self._context.provider = provider
-            self.model_name = model
-            self._context.effort = effort
+            self.set_session_model(model, provider, effort)
         # 本会话项目（引擎已绑定 project_dir 或退回 cwd）的 config hooks
         self._config_hooks = build_config_hooks(Path(self.workspace_dir))
         thread_id = generate_thread_id()
@@ -654,6 +651,17 @@ class AgentBridge:
 
     def _apply_active(self) -> None:
         self._providers.apply_active()
+
+    def set_session_model(self, model: str, provider: str, effort: str | None) -> None:
+        """本会话独立指定模型：直写运行时 context，下一次 call_model 生效。
+
+        不动 provider_store（全局 active 不变）。effort=None 表示跟随 profile 按模型
+        解析的档位。运行期调用须与在途轮互斥（改共享 context，中途换模型/连接）。
+        """
+        self._context.model_name = model
+        self._context.provider = provider
+        self._context.effort = effort
+        self.model_name = model
 
     def set_effort(self, provider_id: str, model: str, level: str) -> dict:
         return self._providers.set_effort(provider_id, model, level)

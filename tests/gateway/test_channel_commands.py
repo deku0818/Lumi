@@ -2,7 +2,11 @@
 
 from __future__ import annotations
 
-from lumi.gateway.channels.commands import parse_slash_command
+from lumi.gateway.channels.commands import (
+    CHANNEL_COMMAND_NAMES,
+    is_model_arg,
+    parse_slash_command,
+)
 
 
 def test_parse_basic():
@@ -39,3 +43,26 @@ def test_parse_degenerate_forms_return_none():
     assert parse_slash_command("/ commit") is None
     assert parse_slash_command("") is None
     assert parse_slash_command("@Lumi") is None
+
+
+def test_channel_command_names_cover_all_tables():
+    # 遮蔽集 = 系统 + 运行时 + relay 三表并集：技能不得占用其中任何名字
+    assert {
+        "stop",
+        "clear",
+        "help",
+        "direct",
+        "model",
+        "effort",
+    } <= CHANNEL_COMMAND_NAMES
+
+
+def test_is_model_arg_cjk_and_multiword_fall_through():
+    # 空/default/单个 ASCII 词（含拼错）拦下反馈；中文或多词按自然语言喂模型
+    assert is_model_arg("")
+    assert is_model_arg("default")
+    assert is_model_arg("claude-opus-4-8")
+    assert is_model_arg("claude-opus-48")  # 拼错也拦，红卡反馈
+    assert not is_model_arg("换成最便宜的那个")  # 无空格中文单 token
+    assert not is_model_arg("claude-opus-4-8 谢谢")
+    assert not is_model_arg("帮我 看下 哪个便宜")
