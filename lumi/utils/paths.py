@@ -1,7 +1,12 @@
-"""临时输出目录的单一事实源
+"""路径单一事实源：用户级 lumi 根目录 + 临时输出目录。
 
-所有写到系统临时区的运行期产物（后台任务日志、IM 入站文件、dream 导出等）统一落在
-每用户私有的 lumi 根目录下，集中管理、自动清理，不污染 ``~/.lumi`` 与项目目录。
+:func:`lumi_home` 是**用户数据根**（配置、密钥、会话、记忆、日志、工具箱），默认
+``~/.lumi``，由 ``LUMI_CONFIG_DIR`` 整体改道——容器与服务器部署靠它把数据落到
+``/opt/lumi/data`` 之类的位置，而不必伪造 ``HOME``。
+
+以下是**临时输出根**（与用户数据无关）：所有写到系统临时区的运行期产物（后台任务
+日志、IM 入站文件、dream 导出等）统一落在每用户私有的 lumi 根目录下，集中管理、
+自动清理，不污染 :func:`lumi_home` 与项目目录。
 
 - **POSIX（Linux/macOS）**：``/tmp`` 可写时根取 ``/tmp/lumi-<uid>``——路径短、好找、便于
   调试（macOS 上 ``/tmp`` 即 ``/private/tmp``），用 uid 命名 + ``0700`` 权限 + 属主校验恢复
@@ -22,6 +27,22 @@ import tempfile
 from pathlib import Path
 
 from lumi.utils.workspace_id import get_workspace_id
+
+
+def lumi_home() -> Path:
+    """用户级 lumi 根目录：``LUMI_CONFIG_DIR`` > ``~/.lumi``（仅构造路径，不落盘）。
+
+    机器级用户数据（lumi.json 密钥 / checkpoints / memory / logs / bin / cron /
+    cache / uploads）全部挂在这个根下，故改一个环境变量即可整体搬家。取值点多为
+    模块级常量（import 时求值），环境变量须在**进程启动前**设好——systemd
+    ``Environment=`` / docker ``-e`` 均满足，进程内改 env 不生效。
+
+    注意与配置**发现链**（:class:`~lumi.utils.config.discovery.ConfigDiscovery`）的分工：
+    发现链解决「这次运行读哪份项目配置」（含 cwd/.lumi 等层），本函数只回答
+    「这台机器上这个用户的 lumi 数据放哪」，不参与项目层发现。
+    """
+    override = os.environ.get("LUMI_CONFIG_DIR")
+    return Path(override).expanduser().resolve() if override else Path.home() / ".lumi"
 
 
 def _user_tmp_root() -> Path:

@@ -37,12 +37,13 @@ from lumi.agents.core.hooks.exec_shell import DEFAULT_TIMEOUT_MS, make_shell_hoo
 from lumi.agents.core.hooks.schema import Hook, HookEvent
 from lumi.utils.jsonc import parse_jsonc
 from lumi.utils.logger import logger
+from lumi.utils.paths import lumi_home
 
 _VALID_EVENTS: frozenset[str] = frozenset(get_args(HookEvent))
 
 
 def _hooks_config_paths(project_dir: Path, user_config_dir: Path | None) -> list[Path]:
-    user_dir = user_config_dir or (Path.home() / ".lumi")
+    user_dir = user_config_dir or lumi_home()
     return [
         user_dir / "hooks.json",
         project_dir / ".lumi" / "hooks.json",

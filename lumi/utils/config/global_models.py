@@ -8,6 +8,8 @@ from pathlib import Path
 
 from pydantic import BaseModel, Field
 
+from lumi.utils.paths import lumi_home
+
 
 class GlobalConfig(BaseModel):
     """全局配置数据模型
@@ -38,4 +40,4 @@ class GlobalConfig(BaseModel):
         """
         if self.checkpoint_dir:
             return Path(self.checkpoint_dir).expanduser().resolve()
-        return Path.home() / ".lumi" / "checkpoints"
+        return lumi_home() / "checkpoints"

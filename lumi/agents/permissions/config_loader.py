@@ -18,6 +18,7 @@ from lumi.agents.permissions.models import (
 from lumi.utils.atomic_io import atomic_write_text
 from lumi.utils.jsonc import parse_jsonc
 from lumi.utils.logger import logger
+from lumi.utils.paths import lumi_home
 
 
 def _parse_rules(raw: dict[str, Any]) -> tuple[PermissionRule, ...]:
@@ -167,7 +168,7 @@ class ConfigLoader:
         """
         self._project_dir = project_dir.resolve()
         self._user_config_dir = (
-            user_config_dir.resolve() if user_config_dir else Path.home() / ".lumi"
+            user_config_dir.resolve() if user_config_dir else lumi_home()
         )
 
         # 三级配置文件路径（按优先级从低到高）

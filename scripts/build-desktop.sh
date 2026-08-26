@@ -20,10 +20,12 @@ echo "── 后端 lumi-backend v${VERSION} (PyInstaller onedir) ──"
 # 的，Linux 产物的 glibc 下限终究等于构建机的 glibc —— 故 CI 把 Linux 钉在最旧目标发行版上
 # 构建（见 .github/workflows/desktop-build.yml 的矩阵注释与 Assert glibc baseline）。
 # --python 3.12：钉住大版本，否则 requires-python>=3.12 会让 uv 取最新 managed 版本。
+# --collect-data 收包名（lumi），--copy-metadata 收发布名（lumi-harness）——两者刻意不同名
+# （PyPI 上 lumi 已被占）。漏了后者，冻结产物一 import lumi 就 PackageNotFoundError。
 uv run --managed-python --python 3.12 --with pyinstaller pyinstaller \
   --name lumi-backend --onedir --noconfirm --clean \
   --distpath dist --workpath build/pyinstaller --specpath build/pyinstaller \
-  --collect-data lumi --copy-metadata lumi \
+  --collect-data lumi --copy-metadata lumi-harness \
   scripts/pyinstaller_entry.py
 
 echo "── 桌面安装包 (electron-builder) ──"

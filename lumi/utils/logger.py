@@ -2,6 +2,8 @@ import logging
 import os
 from pathlib import Path
 
+from lumi.utils.paths import lumi_home
+
 
 class EventLoopClosedFilter(logging.Filter):
     """过滤掉"Event loop is closed"错误日志的过滤器"""
@@ -99,8 +101,8 @@ class Logger:
         self.logger.critical(msg, *args, **kwargs)
 
 
-# 日志统一写入 ~/.lumi/logs/，与全局配置目录保持一致
-_LOG_DIR = str(Path.home() / ".lumi" / "logs")
+# 日志统一写入 <lumi_home>/logs/，与全局配置目录保持一致
+_LOG_DIR = str(lumi_home() / "logs")
 logger = Logger("Lumi", log_dir=_LOG_DIR).logger
 
 # 也为根日志记录器添加过滤器，以防有些日志不经过我们的Logger类

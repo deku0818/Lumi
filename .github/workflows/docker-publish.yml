@@ -9,7 +9,7 @@ on:
   workflow_dispatch:
 
 env:
-  IMAGE: ycw0818/lumi-server
+  IMAGE: ycw0818/lumi-harness
 
 jobs:
   # 双架构各在原生 runner 上构建，不用 QEMU：镜像里要 uv sync 近百个包 + apt 装 ripgrep/libicu，

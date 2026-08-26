@@ -9,12 +9,13 @@ from __future__ import annotations
 from pathlib import Path
 
 from lumi.utils.logger import logger
+from lumi.utils.paths import lumi_home
 
 from . import user_store
 from .global_models import GlobalConfig
 
-# 路径常量：固定为 ~/.lumi/，不受命令行参数影响（cron / catalog / uploads 共用）
-GLOBAL_CONFIG_DIR: Path = Path.home() / ".lumi"
+# 路径常量：机器级用户数据根，不受命令行参数影响（cron / catalog / uploads 共用）
+GLOBAL_CONFIG_DIR: Path = lumi_home()
 
 
 def uploads_dir() -> Path:

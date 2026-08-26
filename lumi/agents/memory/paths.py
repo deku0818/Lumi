@@ -12,7 +12,9 @@ from __future__ import annotations
 
 from pathlib import Path
 
-MEMORY_ROOT: Path = Path.home() / ".lumi" / "memory" / "projects"
+from lumi.utils.paths import lumi_home
+
+MEMORY_ROOT: Path = lumi_home() / "memory" / "projects"
 """所有项目记忆的根目录（home 级，跨会话持久）。"""
 
 ENTRYPOINT_NAME = "MEMORY.md"

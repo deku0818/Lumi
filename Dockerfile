@@ -34,7 +34,9 @@ VOLUME ["/workspace"]
 WORKDIR /workspace
 
 EXPOSE 8765
-# 监听 0.0.0.0 对外；token 在 docker run 时追加（公网部署务必设置）。
-# 例：docker run -p 8765:8765 -v ~/.lumi:/root/.lumi -v $PWD:/workspace lumi --token <你的口令>
+# 监听 0.0.0.0 对外；token 经 LUMI_TOKEN 环境变量传入（公网部署务必设置），不进命令行。
+# 例：docker run -p 8765:8765 -e LUMI_TOKEN=<你的口令> \
+#       -v ~/.lumi:/root/.lumi -v $PWD:/workspace ycw0818/lumi-harness
 # 公网建议前面挂 Caddy/nginx 终止 TLS（wss://），不要裸暴露明文 ws。
+# 一键部署（含数据目录 / systemd / 握手验证）见 scripts/install.sh。
 ENTRYPOINT ["lumi", "serve", "--host", "0.0.0.0", "--port", "8765"]

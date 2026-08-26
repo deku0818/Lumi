@@ -1,6 +1,7 @@
 [project]
-name = "lumi"
-version = "0.2.119"
+# 发布名 lumi-harness（PyPI 上 lumi 已被占用）；命令名与包目录仍是 lumi
+name = "lumi-harness"
+version = "0.2.120"
 description = "基于 LangGraph 的 AI Agent 框架"
 readme = "README.md"
 requires-python = ">=3.12"
@@ -45,6 +46,10 @@ dev = [
 requires = ["hatchling"]
 build-backend = "hatchling.build"
 
+# 发布名与包目录不同名，须显式指明打哪个包（默认按发布名找 lumi_harness/ 会落空）
+[tool.hatch.build.targets.wheel]
+packages = ["lumi"]
+
 [tool.pytest.ini_options]
 asyncio_mode = "auto"
 testpaths = ["tests"]
@@ -64,4 +69,4 @@ ignore = ["E501"]
 known-first-party = ["lumi"]
 
 [tool.uv.sources]
-lumi = { workspace = true }
+lumi-harness = { workspace = true }

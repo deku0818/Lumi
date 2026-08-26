@@ -1,5 +1,18 @@
 # Changelog
 
+## [0.2.120] - 2026-08-26
+
+### Added
+- **服务器一键部署脚本 `scripts/install.sh`**（Docker / 宿主机 systemd 双模式，配 `docs/guides/deploy.md`）— 客户机器上装后端此前要人工照抄一串命令，漏一步的代价是「服务起来了但不对劲」。两种模式共用同一套目录、服务名与令牌文件，重跑即升级（不动数据、不换令牌），`uninstall` 默认保留数据。数据目录取 `LUMI_CONFIG_DIR`（默认 `<prefix>/data`）——已有 `~/.lumi` 的机器指过去即可原地接管，不必搬几百 MB 会话；接管来的目录 `--purge` 也不删，只删脚本自己建的那份。**部署验证是真握手**：连上去发 `list_sessions` 读到 id 匹配的 result，再用一个错误令牌连一次确认被拒——只做正向探针的话，一台完全没设令牌的服务器会痛快回 result，被报成「部署成功」。工作区只在 Docker 模式下有意义（容器只看得见挂进去的目录，`--workspace` 可指定、多项目自行加挂载）；宿主机模式不规定工作目录，项目按会话绑定绝对路径、几个都行。
+- **`lumi serve --token` 支持 `LUMI_TOKEN` 环境变量** — 令牌不再需要出现在命令行里（`ps` 对本机所有用户可见），systemd `EnvironmentFile` 与 docker `env_file` 直接喂进去。
+
+### Changed
+- **`LUMI_CONFIG_DIR` 贯通全部机器级数据**（新增 `utils/paths.lumi_home()` 作单一事实源）— 此前它只覆盖配置发现链的一部分，密钥（`lumi.json`）、会话、记忆、日志、工具箱、cron、cache、uploads 仍各自硬编码 `~/.lumi`，于是「换个数据目录」这件事只做到一半：服务器部署只能靠伪造 `HOME`，测试也曾把日志漏进真实 `~/.lumi` 误导排查。现在改一个环境变量整体搬家。取值点多为模块级常量（import 时求值），故变量须在进程启动前设好——systemd `Environment=` / docker `-e` 均满足；锁定测试 `tests/test_lumi_home.py` 在子进程里验证全部路径跟随，并以空的假家目录反证没有漏网回退。
+- **PyPI 发布名改为 `lumi-harness`，Docker 镜像统一为 `ycw0818/lumi-harness`**（新增 `pypi-publish.yml`，推 `v*` tag 经 Trusted Publishing 发布）— `lumi` 在 PyPI 已被占用；包目录与命令名仍是 `lumi`。发布名是两处按名取值的隐形依赖：`__version__` 的 `version("lumi-harness")` 与 PyInstaller 的 `--copy-metadata`（漏改会让冻结产物一 import 就 `PackageNotFoundError`）。**旧 venv 需重新 `uv sync` 才能 import。** 顺带删掉 `scripts/build-image.sh`（推腾讯云的手工 buildx 脚本，已由 CI 接管）。
+
+### Fixed
+- **非 ASCII 令牌让 WS 鉴权抛 `TypeError`**（`token_ok`）— `hmac.compare_digest` 不接受含非 ASCII 的 `str`，而令牌是用户自己起的、写成中文完全合法：那样每次连接都崩在鉴权这行、日志刷 traceback，而不是干净的 1008 拒绝。改为先 `encode()` 再比，时序安全不变。
+
 ## [0.2.119] - 2026-08-25
 
 ### Changed

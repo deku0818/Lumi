@@ -19,8 +19,9 @@ from pathlib import Path
 
 from lumi.utils.atomic_io import atomic_write_json
 from lumi.utils.logger import logger
+from lumi.utils.paths import lumi_home
 
-CONFIG_FILE: Path = Path.home() / ".lumi" / "lumi.json"
+CONFIG_FILE: Path = lumi_home() / "lumi.json"
 
 
 def _read_all() -> dict:

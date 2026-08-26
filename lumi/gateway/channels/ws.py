@@ -89,7 +89,11 @@ def token_ok(configured: str, provided: str | None) -> bool:
     """
     if not configured:
         return True
-    return provided is not None and hmac.compare_digest(configured, provided)
+    if provided is None:
+        return False
+    # 先编码成 bytes 再比：compare_digest 对含非 ASCII 的 str 直接抛 TypeError，
+    # 而令牌是用户自己起的，写成中文完全合法——不编码的话每次连接都崩在鉴权这行
+    return hmac.compare_digest(configured.encode(), provided.encode())
 
 
 # 与 Electron 主进程 lumi-file 协议的上限一致：防超大文件整块进内存

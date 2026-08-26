@@ -118,20 +118,32 @@ cd Lumi
 
 Lumi 分两个产物：**后端 `lumi`**（`lumi serve`，本地或服务器）+ **桌面 client**（Electron，连本地/远程）。
 
+**服务器一键部署**（Linux，Docker 或宿主机自动择一，详见 [部署指南](docs/guides/deploy.md)）：
+
 ```bash
-# 后端：本地安装为全局命令
-uv build && uv tool install dist/lumi-*.whl
+sudo ./scripts/install.sh          # 装：有 Docker 走 Docker，否则 uv + systemd
+sudo ./scripts/install.sh upgrade  # 升级（不动数据、不换令牌）
+sudo ./scripts/install.sh status   # 状态 + 连接串
+```
+
+装完打印 `ws://<本机IP>:8765/ws?token=…`，桌面端「设置 → 连接」填它即可；模型 API Key 在桌面端配，服务器上不用管。脚本会自建数据目录、生成令牌、装 agent 工具链，并**实际握手验证**（含「错误令牌必须被拒」）。
+
+手动安装：
+
+```bash
+# 后端
+uv tool install lumi-harness      # 发布名 lumi-harness，命令仍是 lumi
 lumi serve --port 8765 --token <口令>
 
-# 后端：服务器（Docker）
-docker build -t lumi .
-docker run -p 8765:8765 -v ~/.lumi:/root/.lumi -v "$PWD":/workspace lumi --token <口令>
+# 后端（Docker）
+docker run -p 8765:8765 -v ~/.lumi:/root/.lumi -v "$PWD":"$PWD" \
+  -e LUMI_TOKEN=<口令> ycw0818/lumi-harness
 
 # 桌面 client 安装包（dmg / exe / AppImage）
 cd desktop && npm install && npm run dist
 ```
 
-公网部署务必前置 Caddy/nginx 终止 TLS（`wss://`）并设置 `--token`，切勿裸暴露明文 `ws`。
+数据目录默认 `~/.lumi`，用 `LUMI_CONFIG_DIR` 可整体改道（密钥 / 会话 / 记忆 / 日志 / 工具箱一起搬）。公网部署务必前置 Caddy/nginx 终止 TLS（`wss://`）并设置令牌，切勿裸暴露明文 `ws`。
 
 ## 内置工具
 

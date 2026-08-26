@@ -14,6 +14,7 @@ import yaml
 from lumi.utils.config.discovery import ConfigDiscovery
 from lumi.utils.config.models import Config
 from lumi.utils.logger import logger
+from lumi.utils.paths import lumi_home
 
 
 def parse_frontmatter(content: str) -> tuple[dict, str]:
@@ -184,7 +185,7 @@ class LumiConfig:
         ``LUMI_CONFIG_DIR``）仍然优先：容器与测试靠它隔离。
         """
         explicit = self.discovery.cli_config_dir or os.getenv(ConfigDiscovery.ENV_VAR)
-        return self.config_dir if explicit else Path.home() / ".lumi"
+        return self.config_dir if explicit else lumi_home()
 
     @property
     def bin_dir(self) -> Path:

@@ -35,6 +35,7 @@ from mcp import ClientSession
 
 from lumi.utils.hashing import short_hash
 from lumi.utils.logger import logger
+from lumi.utils.paths import lumi_home
 from lumi.utils.read_config import get_config
 
 # ── 拦截器 ──
@@ -108,12 +109,12 @@ _current_project_dir: ContextVar[Path | None] = ContextVar(
 def _global_mcp_config_path() -> Path:
     """全局层配置路径 = 该机器固定位置。
 
-    显式覆盖优先：``--config-dir``（get_config().discovery.cli_config_dir）> ``LUMI_CONFIG_DIR``；
-    都没有则恒为 ``~/.lumi/mcp_server.json``。**刻意跳过 cwd/.lumi 发现**——两层模型下
+    显式覆盖优先：``--config-dir``（get_config().discovery.cli_config_dir）> ``lumi_home()``
+    （即 ``LUMI_CONFIG_DIR`` > ``~/.lumi``）。**刻意跳过 cwd/.lumi 发现**——两层模型下
     「cwd 到底算全局还是某个项目」有歧义，全局层必须是稳定的每机器位置。
     """
-    override = get_config().discovery.cli_config_dir or os.getenv("LUMI_CONFIG_DIR")
-    base = Path(override).expanduser().resolve() if override else Path.home() / ".lumi"
+    override = get_config().discovery.cli_config_dir
+    base = Path(override).expanduser().resolve() if override else lumi_home()
     return base / "mcp_server.json"
 
 

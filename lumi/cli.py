@@ -82,7 +82,9 @@ def serve(
     host: str = typer.Option("127.0.0.1", help="监听地址"),
     port: int = typer.Option(8765, help="监听端口"),
     token: str = typer.Option(
-        "", help="访问令牌；设置后客户端需在 ?token= 携带（公网部署务必设置）"
+        "",
+        envvar="LUMI_TOKEN",
+        help="访问令牌；设置后客户端需在 ?token= 携带（公网部署务必设置）",
     ),
     exit_with_parent: bool = typer.Option(
         False,
@@ -97,11 +99,10 @@ def serve(
     # （config_layers），显式 LUMI_CONFIG_DIR 仍最高优先（容器/测试用）。
     # 工具箱位置无需在此操心：bin_dir 自己就是机器级的（LumiConfig.toolbox_dir）。
     if not os.environ.get("LUMI_CONFIG_DIR"):
-        from pathlib import Path
-
+        from lumi.utils.paths import lumi_home
         from lumi.utils.read_config import get_config
 
-        get_config(str(Path.home() / ".lumi"))
+        get_config(str(lumi_home()))
 
     # 工具箱 bin 追加到 PATH 末尾：agent 子进程可见 uv/rg/node/lark-cli，系统同名优先
     from lumi.gateway.toolbox import inject_path

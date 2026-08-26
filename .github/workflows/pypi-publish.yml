@@ -1,0 +1,39 @@
+name: Publish to PyPI
+
+# 推 v* tag 时把后端发到 PyPI（与桌面安装包、Docker 镜像同一个 tag 触发）。
+# 发布名 lumi-harness，装完命令仍是 lumi：`uv tool install lumi-harness`。
+#
+# 前置（一次性，在 pypi.org 上做）：给项目 lumi-harness 配 Trusted Publisher —— owner
+# deku0818 / repo Lumi / workflow pypi-publish.yml。首发前项目还不存在，用「pending
+# publisher」按同样四项预先登记即可。配好后无需在仓库存任何 token。
+on:
+  push:
+    tags:
+      - "v*"
+  workflow_dispatch:
+
+jobs:
+  publish:
+    runs-on: ubuntu-latest
+    permissions:
+      id-token: write # Trusted Publishing 换 OIDC 令牌所需，缺它 uv publish 无凭证
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: astral-sh/setup-uv@v6
+
+      # PyPI 的版本取自 pyproject 而非 tag，两者不一致就会把旧版本号发出去，而 PyPI
+      # 的版本号用掉即不可重用（删了也不能重发）。故先卡住，别等发完才发现。
+      - name: Assert tag matches pyproject version
+        if: github.ref_type == 'tag'
+        run: |
+          tag="${GITHUB_REF_NAME#v}"
+          pkg=$(grep -m1 '^version = ' pyproject.toml | cut -d'"' -f2)
+          if [ "$tag" != "$pkg" ]; then
+            echo "tag v$tag 与 pyproject version $pkg 不一致，拒绝发布"
+            exit 1
+          fi
+
+      - run: uv build
+
+      - run: uv publish --trusted-publishing always

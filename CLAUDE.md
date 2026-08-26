@@ -96,6 +96,7 @@ START → Summarizer（超阈值当轮就地压缩 / ptl_retry 置位则绕阈�
 `lumi/styles/` 下每个子目录是一种风格，可含 `prompts/`、`agents/`、`skills/` 三类子目录（均可选）。
 
 - **加载优先级（三层，逐层同名覆盖）**：style 内置 < 全局层（进程配置目录；`lumi serve` 恒钉 `~/.lumi`，不随启动目录漂移）< 项目层（`<项目>/.lumi/`，随会话绑定的项目，仅该项目生效）。skills/agents 层序单源在 `loader.config_layers`，prompts 在 `manager.prompt_layers`（另有第四层框架内置 `lumi/prompts/` 兜底；空文件视同没有，继续往下找）。桌面「项目主页」的展示与增删改（`gateway/project_config.py`）消费同一层序，UI 所见即会话所加载
+- **用户数据根**：机器级数据（`lumi.json` 密钥 / checkpoints / memory / logs / 工具箱 / cron / cache / uploads）全部挂在 `utils/paths.py` 的 `lumi_home()` 下——`LUMI_CONFIG_DIR` > `~/.lumi`，改一个环境变量整体搬家（服务器部署即靠它，见 `docs/guides/deploy.md`）。取值点多为模块级常量（import 时求值），故环境变量须在进程启动前设好；锁定测试 `tests/test_lumi_home.py` 在子进程里验证全部路径跟随。与配置**发现链**（`ConfigDiscovery`，解决「这次读哪份项目配置」）职责不同，别混用
 - **配置方式**：`config.json` 的 `style` 字段，或 CLI `-s/--style` 参数（优先级更高）
 - **内置风格**：`default`（默认，**不带内置 prompts**，提示词全部来自 `.lumi/prompts/`；可内置 skill/agent）、`code`（完整编程提示词 + explore/plan 子 Agent）
 - **提示词组装**：`SOUL/AGENTS` 两文件按序**直接拼接**（不做 XML 包裹），缺失即跳过；`default` 无内置 prompts 时全靠 `.lumi/prompts/`，都没有则 `load_system_prompt` 返回空串（以无系统提示词运行）。`SUMMARY`（压缩用）走同一条 `load_prompt` 解析链，但框架内置了兜底（`lumi/prompts/SUMMARY.md`）——未配置也能压缩，故各调用点不再有「未配置 SUMMARY」的错误分支

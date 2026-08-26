@@ -118,20 +118,32 @@ The packaged desktop app is a **multi-machine client**: it connects to the local
 
 Lumi ships as two artifacts: the **backend `lumi`** (`lumi serve`, local or on a server) + the **desktop client** (Electron, connects to local/remote).
 
+**One-command server deployment** (Linux; picks Docker or host install automatically — see the [deployment guide](docs/guides/deploy.md)):
+
 ```bash
-# Backend: install as a global command
-uv build && uv tool install dist/lumi-*.whl
+sudo ./scripts/install.sh          # install: Docker if available, else uv + systemd
+sudo ./scripts/install.sh upgrade  # upgrade (keeps data and token)
+sudo ./scripts/install.sh status   # status + connection string
+```
+
+It prints `ws://<host-ip>:8765/ws?token=…` for the desktop client's "Settings → Connections"; model API keys are configured in the desktop app, not on the server. The script creates the data dir, generates a token, installs the agent toolchain, and **verifies with a real handshake** (including "a wrong token must be rejected").
+
+Manual install:
+
+```bash
+# Backend
+uv tool install lumi-harness      # distribution name is lumi-harness; the command is still lumi
 lumi serve --port 8765 --token <secret>
 
-# Backend: server (Docker)
-docker build -t lumi .
-docker run -p 8765:8765 -v ~/.lumi:/root/.lumi -v "$PWD":/workspace lumi --token <secret>
+# Backend (Docker)
+docker run -p 8765:8765 -v ~/.lumi:/root/.lumi -v "$PWD":"$PWD" \
+  -e LUMI_TOKEN=<secret> ycw0818/lumi-harness
 
 # Desktop client installers (dmg / exe / AppImage)
 cd desktop && npm install && npm run dist
 ```
 
-For public deployments, always terminate TLS (`wss://`) behind Caddy/nginx and set `--token` — never expose plain `ws` directly.
+The data directory defaults to `~/.lumi`; `LUMI_CONFIG_DIR` relocates all of it (keys, sessions, memory, logs, toolbox). For public deployments, always terminate TLS (`wss://`) behind Caddy/nginx and set a token — never expose plain `ws` directly.
 
 ## Built-in tools
 
