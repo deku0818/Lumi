@@ -35,15 +35,17 @@ plus a systemd unit template.
 | `/workspace` | Mount point for host directories the agent should reach. Projects are bound per session by absolute path, so mount as many directories as you need — matching host and container paths keeps registration simple |
 | Architectures | `linux/amd64`, `linux/arm64` |
 
-**When you mount `/root/.lumi`, write a `config.json` into it on first run** — the one baked into the
-image is hidden by your mount, and the defaults it overrides matter:
+**The image ships no `config.json`** — configuration lives in the data directory you mount. You may
+not need one: prompts are layered `style < /root/.lumi < <project>/.lumi`, so a project that carries
+its own `.lumi/prompts/SOUL.md` is already set. Otherwise the agent runs with **no system prompt at
+all**, because `style` falls back to `default`, which ships none. To give every project a built-in
+fallback style, write into your mounted data directory:
 
 ```json
-{"style": "code", "agents": {"checkpoint": "sqlite"}}
+{"style": "code"}
 ```
 
-Without it the agent runs with no system prompt (`style: default` ships none) and sessions are kept in
-memory only, so they vanish when the container stops.
+Session persistence needs no setting — `checkpoint` already defaults to `sqlite`.
 
 ## Tags
 

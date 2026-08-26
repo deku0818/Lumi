@@ -376,6 +376,50 @@ def _kill_child_processes() -> None:
     _kill_pids(set(_collect_descendant_pids(os.getpid())))
 
 
+# ── 工具 schema 归一 ──
+
+_SCHEMA_COMBINATORS = ("anyOf", "oneOf", "allOf")
+
+
+def flatten_top_level_combinators(schema: dict) -> dict:
+    """把顶层带 anyOf/oneOf/allOf 的 input_schema 压平成合法的 object schema。
+
+    MCP 规范要求 inputSchema 是 object schema，Anthropic 系 API 更是硬性校验顶层
+    ``type: object``；个别 server 直接吐组合式 schema，整个请求会被 400 拒收——
+    **一个坏工具连累该机器上所有会话**（含定时任务），且错误信息只给下标不给工具名，
+    几乎无从排查。故在加载期就地压平：各分支的 properties 并集、required 取交集
+    （某分支不要求的字段就不能强制），语义上只放宽、不丢工具。
+
+    无顶层组合词时原样返回**同一个对象**（调用方据此判断是否动过）。
+    """
+    branches = [
+        b
+        for key in _SCHEMA_COMBINATORS
+        for b in schema.get(key) or []
+        if isinstance(b, dict)
+    ]
+    if not branches:
+        return schema
+
+    properties = dict(schema.get("properties") or {})
+    for branch in branches:
+        properties.update(branch.get("properties") or {})
+    # 自身 required 恒保留；分支的 required 只留每个分支都要的那些
+    common = set.intersection(*(set(b.get("required") or []) for b in branches))
+    required = list(schema.get("required") or [])
+    for branch in branches:
+        required += [
+            n for n in branch.get("required") or [] if n in common and n not in required
+        ]
+
+    flat = {k: v for k, v in schema.items() if k not in _SCHEMA_COMBINATORS}
+    flat["type"] = "object"
+    flat["properties"] = properties
+    if required:
+        flat["required"] = required
+    return flat
+
+
 # ── 会话管理 ──
 
 
@@ -528,9 +572,19 @@ class MCPSessionManager:
         tools: list[StructuredTool],
         out_tools: list[StructuredTool],
     ) -> None:
-        """将工具注册到 server_name 映射并追加到输出列表。"""
+        """将工具注册到 server_name 映射并追加到输出列表（顺带压平坏 schema）。"""
         for t in tools:
             self._tool_server_map[t.name] = server_name
+            if isinstance(t.args_schema, dict):
+                flat = flatten_top_level_combinators(t.args_schema)
+                if flat is not t.args_schema:
+                    logger.warning(
+                        "[MCP] %s 的工具 %s 的 input_schema 顶层是组合式"
+                        "（anyOf/oneOf/allOf），已压平为 object",
+                        server_name,
+                        t.name,
+                    )
+                    t.args_schema = flat
         out_tools.extend(tools)
 
     def get_tools(self) -> list[StructuredTool]:

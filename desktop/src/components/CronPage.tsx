@@ -541,10 +541,24 @@ function RunRowInner({ run, lang, unread }: { run: CronRun; lang: string; unread
   )
 }
 
+// 失败/超时记录的错误全文。run 会话里看不到它——错误只作为 ERROR 事件流过、从不落进
+// checkpoint，点进失败的 run 是一片空白；RunRecord.error 是唯一能看全失败原因的地方，
+// 故直接摊开不折叠，且放在按钮外（按钮内选文本会误触跳转，错误就是用来复制的）。
+function RunError({ run }: { run: CronRun }) {
+  if (run.status === 'success' || !run.error) return null
+  return (
+    <div className="selectable px-3 pb-2.5 -mt-0.5 text-[11px] leading-relaxed text-error/90 whitespace-pre-wrap break-words">
+      {run.error}
+    </div>
+  )
+}
+
 // 任务会话右栏的「执行记录」模块（挂在 RightRail 里，定时任务会话置顶）：
 // 活条目置顶转圈、点进观测直播；当前查看高亮描边；蓝点=未读；无会话旧记录灰显。
-// run 卡外壳：活条目/完成条目/详情页 RunList 行共用基串；高亮与 hover 配方只此一份
-const RUN_CARD = 'w-full flex items-center gap-2.5 px-3 py-2.5 text-left transition'
+// run 卡外壳：活条目/完成条目/详情页 RunList 行共用基串；高亮与 hover 配方只此一份。
+// 壳与行两分——壳竖向堆叠（行 + 失败时的错误全文），行是单条内容
+const RUN_CARD = 'w-full flex flex-col items-stretch text-left transition'
+const RUN_ROW = 'w-full flex items-center gap-2.5 px-3 py-2.5 text-left'
 const runCardCls = (active: boolean) =>
   cn(
     CARD_L2,
@@ -590,7 +604,11 @@ export const RunsSection = memo(function RunsSection({
         {live.map((r) => {
           const active = r.thread_id === activeThread
           return (
-            <button key={r.thread_id} onClick={() => onPick(r.thread_id)} className={runCardCls(active)}>
+            <button
+              key={r.thread_id}
+              onClick={() => onPick(r.thread_id)}
+              className={cn(runCardCls(active), RUN_ROW)}
+            >
               <RunTimeCol startedAt={r.started_at} lang={lang} />
               <Loader2 size={13} className="shrink-0 animate-spin text-primary" />
             </button>
@@ -602,19 +620,24 @@ export const RunsSection = memo(function RunsSection({
         {(runs ?? []).map((r) => {
           const active = !!r.thread_id && r.thread_id === activeThread
           return (
-            <button
+            <div
               key={r.thread_id || r.started_at}
-              disabled={!r.thread_id}
-              onClick={() => r.thread_id && onPick(r.thread_id)}
-              title={r.error || r.output_summary}
               className={
                 !r.thread_id
-                  ? cn(CARD_L2, RUN_CARD, 'bg-surface/30 opacity-60 cursor-default')
+                  ? cn(CARD_L2, RUN_CARD, 'bg-surface/30 opacity-60')
                   : runCardCls(active)
               }
             >
-              <RunRowInner run={r} lang={lang} unread={!!r.thread_id && !readRuns[r.thread_id]} />
-            </button>
+              <button
+                disabled={!r.thread_id}
+                onClick={() => r.thread_id && onPick(r.thread_id)}
+                title={r.error || r.output_summary}
+                className={cn(RUN_ROW, !r.thread_id && 'cursor-default')}
+              >
+                <RunRowInner run={r} lang={lang} unread={!!r.thread_id && !readRuns[r.thread_id]} />
+              </button>
+              <RunError run={r} />
+            </div>
           )
         })}
       </div>
@@ -651,7 +674,7 @@ function RunList({
             onClick={() =>
               r.thread_id ? onOpenRun(r.thread_id) : setOpen(open === i ? null : i)
             }
-            className={cn('group', RUN_CARD, 'hover:bg-surface/70')}
+            className={cn('group', RUN_ROW, 'hover:bg-surface/70')}
           >
             <RunRowInner run={r} lang={lang} />
             {r.thread_id && (
@@ -661,9 +684,10 @@ function RunList({
               />
             )}
           </button>
+          <RunError run={r} />
           {open === i && !r.thread_id && (
-            <div className={`selectable px-3 pb-3 -mt-0.5 text-xs leading-relaxed whitespace-pre-wrap break-words ${r.error ? 'text-error/90' : 'text-muted-foreground'}`}>
-              {r.error || r.output_summary || '—'}
+            <div className="selectable px-3 pb-3 -mt-0.5 text-xs leading-relaxed whitespace-pre-wrap break-words text-muted-foreground">
+              {r.output_summary || '—'}
             </div>
           )}
         </div>

@@ -1,5 +1,18 @@
 # Changelog
 
+## [0.2.121] - 2026-08-26
+
+### Added
+- **服务器部署收敛成一行 `curl … | sudo sh`**（`scripts/install.sh` 单路径重写，配 `docs/guides/deploy.md`）— 双模式的代价是每条命令都要先判断自己在哪个世界里，而 Docker 那半本就有 `docker run` 一行可用。服务默认**以调用者本人的身份**运行（sudo 下取 `SUDO_USER`），数据落这个人的 `~/.lumi`，与平时手动跑 `lumi serve` 完全一致——不另造 lumi 系统用户、不另立数据目录，省掉「装完发现看不见自己项目」的事后搬迁。重跑即升级，沿用原令牌与数据。
+- **`lumi update` / `lumi status` / `lumi logs` 三条运维命令**（新增 `lumi/ops.py`）— 把此前只有安装脚本知道的事交还给包自己：`update` 按安装方式（uv tool / pip / editable）选升级命令并可指定版本回退；`status` 连上去发 `list_sessions` 读 id 匹配的 result，**再用一个错误令牌连一次确认被拒**（只做正向探针的话，一台完全没设令牌的服务器会痛快回 result、被报成「健康」）；`logs` 定位 `lumi_home()` 下的日志并 tail/follow。进程生命周期仍不归 lumi 管——一个 PyPI 包做不出崩溃拉起、开机自启与资源限制，做半套只会让人误以为它守着。
+
+### Fixed
+- **一个 MCP 工具的坏 schema 不再拖垮整台机器**（`mcp.py` 新增 `flatten_top_level_combinators`）— MCP 规范要求 `inputSchema` 是 object schema，Anthropic 系 API 更是硬校验顶层 `type: object`；个别 server 直接吐 `anyOf/oneOf/allOf`，整个请求被 400 拒收，**该机器上所有会话与定时任务一并发不出去**，而错误只给 `tools.68` 这么个下标、不给工具名，几乎无从排查。现在加载期就地压平：各分支 `properties` 取并集、`required` 只留每个分支都要的，语义只放宽不丢工具，并打一条带 server 名与工具名的 WARNING。
+- **定时任务失败的错误终于看得见**（`CronPage.tsx`）— 失败/超时记录的错误全文此前无处可看：run 会话里没有它（错误只作为 ERROR 事件流过、从不落 checkpoint，点进失败的 run 是一片空白），而记录列表的展开块被 `!thread_id` 挡着、现在的 run 全都有 thread_id，那个分支永远进不去，只剩系统通知里截断的 80 字。现在 `RunRecord.error` 直接摊开在 run 卡片里（右栏与详情页都有），放在按钮外以便选中复制；cron 通知体 80 → 200 字。
+
+### Changed
+- **Docker 镜像不再内置 `/root/.lumi/config.json`**（原先烤进 `{"style": "code", "agents": {"checkpoint": "sqlite"}}`）— `checkpoint` 本就默认 `sqlite`，而文档教的 bind mount 会把这份直接盖掉，它在推荐路径上一次也没生效过，只留下 Docker Hub 文档里一段「镜像里那份会被你的挂载藏起来」的解释。更要紧的是 `style: code` 对 harness 是错的默认：提示词按 `style < ~/.lumi < <项目>/.lumi` 三层覆盖，服务器上每个项目各带各的 `.lumi/prompts/`，镜像强塞等于给所有没自带提示词的项目单方面定了个编程人格。现在配置一律来自你挂进去的数据目录。
+
 ## [0.2.120] - 2026-08-26
 
 ### Added

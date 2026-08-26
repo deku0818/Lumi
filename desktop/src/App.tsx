@@ -743,7 +743,9 @@ export default function App() {
         const t = tRef.current
         void window.lumi.notify?.({
           title: payload.status === 'success' ? t('notify.cronDone') : t('notify.cronFailed'),
-          body: `${payload.job_name}: ${String(payload.output ?? '').slice(0, 80)}`,
+          // 失败时 output 是「[failed] <错误全文>」——截 80 只剩个开头，系统通知
+          // 本就按行数收，给足字数让错误至少露出关键那句（看全去执行记录）
+          body: `${payload.job_name}: ${String(payload.output ?? '').slice(0, 200)}`,
         })
       }
       return
