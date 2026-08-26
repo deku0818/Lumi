@@ -38,5 +38,5 @@ EXPOSE 8765
 # 例：docker run -p 8765:8765 -e LUMI_TOKEN=<你的口令> \
 #       -v ~/.lumi:/root/.lumi -v $PWD:/workspace ycw0818/lumi-harness
 # 公网建议前面挂 Caddy/nginx 终止 TLS（wss://），不要裸暴露明文 ws。
-# 一键部署（含数据目录 / systemd / 握手验证）见 scripts/install.sh。
+# 非 Docker 部署（uv tool install + systemd unit 样例）见 docs/guides/deploy.md。
 ENTRYPOINT ["lumi", "serve", "--host", "0.0.0.0", "--port", "8765"]

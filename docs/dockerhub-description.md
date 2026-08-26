@@ -20,14 +20,10 @@ docker run -d --name lumi --restart unless-stopped \
 Then point the desktop app at `ws://<host>:8765/ws?token=<your-secret>` (Settings → Connections).
 Model API keys are configured from the desktop app — nothing to edit on the server.
 
-Prefer one command? The repo ships a deployment script that creates the data directory, generates a
-token, installs the agent toolchain, and verifies the deployment with a real handshake:
-
-```bash
-sudo ./scripts/install.sh
-```
-
-See the [deployment guide](https://github.com/deku0818/Lumi/blob/main/docs/guides/deploy.md).
+Not using Docker? `uv tool install lumi-harness` gives you the same backend as a plain CLI, with
+`lumi update` for upgrades and `lumi status` for a real-handshake health check. See the
+[deployment guide](https://github.com/deku0818/Lumi/blob/main/docs/guides/deploy.md) for that path
+plus a systemd unit template.
 
 ## Configuration
 

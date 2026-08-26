@@ -118,21 +118,18 @@ The packaged desktop app is a **multi-machine client**: it connects to the local
 
 Lumi ships as two artifacts: the **backend `lumi`** (`lumi serve`, local or on a server) + the **desktop client** (Electron, connects to local/remote).
 
-**One-command server deployment** (Linux; picks Docker or host install automatically — see the [deployment guide](docs/guides/deploy.md)):
+**One-line server install** (Linux + systemd — see the [deployment guide](docs/guides/deploy.md)):
 
 ```bash
-sudo ./scripts/install.sh          # install: Docker if available, else uv + systemd
-sudo ./scripts/install.sh upgrade  # upgrade (keeps data and token)
-sudo ./scripts/install.sh status   # status + connection string
+curl -fsSL https://raw.githubusercontent.com/deku0818/Lumi/main/scripts/install.sh | sudo sh
 ```
 
-It prints `ws://<host-ip>:8765/ws?token=…` for the desktop client's "Settings → Connections"; model API keys are configured in the desktop app, not on the server. The script creates the data dir, generates a token, installs the agent toolchain, and **verifies with a real handshake** (including "a wrong token must be rejected").
+Installs the package, writes `lumi.service`, starts it, **verifies with a real handshake** (a wrong token must be rejected — otherwise anyone who reaches the port gets in), and prints the connection string. The service runs as **the person who invoked it**, with data in their own `~/.lumi` — no extra system user; `--user` overrides. Re-run to upgrade; the token is kept.
 
-Manual install:
+Point the desktop client's "Settings → Connections" at the printed `ws://<host-ip>:8765/ws?token=…`; model API keys are configured in the desktop app, not on the server. Day-to-day: `lumi update`, `lumi status`, `lumi logs -f`.
 
 ```bash
-# Backend
-uv tool install lumi-harness      # distribution name is lumi-harness; the command is still lumi
+# Run one locally
 lumi serve --port 8765 --token <secret>
 
 # Backend (Docker)

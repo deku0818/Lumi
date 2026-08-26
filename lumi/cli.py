@@ -3,6 +3,9 @@
 用法:
     lumi -p "query"         # 非交互模式：执行 prompt 后退出
     lumi serve              # 启动 WebSocket 服务（供 desktop / web 前端连接）
+    lumi update             # 升级 Lumi 自身（PyPI 包 lumi-harness）
+    lumi status             # 这台机的现状：版本 / 数据目录 / 服务通不通
+    lumi logs -f            # 跟踪运行日志
     lumi env status         # 工具链（uv / node / rg / officecli）状态
     lumi env install [tool] # 装齐缺失项 / 装指定工具到工具箱
     lumi feishu config      # 飞书渠道配置读写（key=value；app_secret=- 走 stdin）
@@ -30,9 +33,26 @@ app = typer.Typer(
 )
 
 
+def _show_version(value: bool) -> None:
+    if value:
+        from lumi import __version__
+
+        typer.echo(__version__)
+        raise typer.Exit()
+
+
 @app.callback(invoke_without_command=True)
 def _default(
     ctx: typer.Context,
+    version: Annotated[
+        bool,
+        typer.Option(
+            "--version",
+            help="显示版本号",
+            callback=_show_version,
+            is_eager=True,
+        ),
+    ] = False,
     prompt: Annotated[
         str | None,
         typer.Option("-p", "--prompt", help="非交互模式：执行 prompt 后退出"),
@@ -118,6 +138,151 @@ def serve(
         _watch_parent_exit()
     ws.app.state.token = token
     uvicorn.run(ws.app, host=host, port=port)
+
+
+# ------------------------------------------------------------------
+# 运维：升级自身 / 看现状 / 看日志。
+# 进程的起停不在此列——那归拉起它的人（systemd / docker / 桌面应用 / 你自己的
+# 终端），lumi 不做半套守护去跟他们抢。
+# ------------------------------------------------------------------
+
+_CANNOT_UPDATE = {
+    "source": "这是源码（可编辑）安装，升级请用 git pull",
+    "frozen": "这是桌面应用自带的后端，随应用一起更新，不单独升级",
+}
+
+
+@app.command("update")
+def update(
+    check: Annotated[
+        bool, typer.Option("--check", help="只查有没有新版，不安装")
+    ] = False,
+    target: Annotated[
+        str,
+        typer.Option("--version", help="装指定版本（同样用于回退到旧版）"),
+    ] = "",
+    port: Annotated[
+        int, typer.Option(help="探测本机服务用的端口（判断要不要提示重启）")
+    ] = 8765,
+) -> None:
+    """升级 Lumi 自身（PyPI 包 lumi-harness）。"""
+    from lumi import __version__
+    from lumi.ops import (
+        check_service,
+        install_kind,
+        latest_version,
+        run,
+        upgrade_command,
+    )
+
+    kind = install_kind()
+    if kind in _CANNOT_UPDATE:
+        typer.echo(f"✗ {_CANNOT_UPDATE[kind]}", err=True)
+        raise typer.Exit(1)
+
+    latest = latest_version()
+    if check:
+        if not latest:
+            typer.echo(f"当前 {__version__}；查不到 PyPI 最新版（网络不通？）")
+        elif latest == __version__:
+            typer.echo(f"已是最新 {__version__}")
+        else:
+            typer.echo(f"当前 {__version__} → 可升级到 {latest}")
+        return
+
+    if not target and latest and latest == __version__:
+        typer.echo(f"已是最新 {__version__}")
+        return
+
+    # 探针必须跑在升级之前：升级会就地替换本进程所在的那个 venv，之后再触发任何
+    # 延迟 import（探针要用的 websockets 就是）等于从一个刚被换掉的目录里加载模块。
+    # 而升级本身不会停服务，先探后探结论一样。
+    serving = check_service("127.0.0.1", port).running
+
+    typer.echo(f"› 升级 {__version__} → {target or latest or '最新版'}（{kind}）")
+    if run(upgrade_command(kind, target)) != 0:
+        typer.echo("✗ 升级失败，见上方输出", err=True)
+        raise typer.Exit(1)
+    typer.echo("✓ 升级完成")
+
+    # 跑着的服务仍是旧代码，而 lumi 不知道该敲哪条重启命令（unit 名 / 容器名是你起的），
+    # 所以只把事实说出来，不猜命令
+    if serving:
+        typer.echo(f"⚠ 127.0.0.1:{port} 上有服务在跑旧版代码，重启后新版才生效")
+
+
+@app.command("status")
+def status(
+    host: Annotated[str, typer.Option(help="探测地址")] = "127.0.0.1",
+    port: Annotated[int, typer.Option(help="探测端口")] = 8765,
+    token: Annotated[
+        str,
+        typer.Option(
+            envvar="LUMI_TOKEN",
+            help="给了就多跑一条正向探针，验证服务真能干活",
+        ),
+    ] = "",
+) -> None:
+    """这台机的现状：版本、装法、数据目录、服务通不通。
+
+    退出码给脚本用：0 = 服务在跑且鉴权生效，3 = 在跑但没设令牌（谁都能连），
+    1 = 没在跑或异常。部署脚本据此判成败——只打印文字的"验证"拦不住任何东西。
+
+    「无鉴权」故意跳过 2：click 用 2 表示用法错误，而**旧版 lumi 根本没有 status
+    子命令**，敲上去正是退 2。占用 2 的话，一台装了旧版的机器会被脚本一口咬定
+    「处于无鉴权状态」——诊断南辕北辙，还吓人。
+    """
+    from lumi import __version__
+    from lumi.ops import check_service, install_kind, log_file
+    from lumi.utils.paths import lumi_home
+
+    typer.echo(f"版本      {__version__}（{install_kind()} 安装）")
+    typer.echo(f"数据目录  {lumi_home()}")
+    typer.echo(f"日志      {log_file()}")
+
+    state = check_service(host, port, token)
+    label = {
+        "guarded": "运行中，令牌鉴权生效",
+        "unguarded": "运行中，但⚠ 未设令牌",
+        "down": "未在运行",
+        "error": "异常",
+    }[state.state]
+    detail = f"（{state.detail}）" if state.detail else ""
+    typer.echo(f"服务      ws://{host}:{port}  {label}{detail}")
+    if state.state == "unguarded":
+        typer.echo(
+            "⚠ agent 的 bash 与文件工具直接作用于这台机器——公网可达的话，"
+            "请用 --token 启动并套 TLS"
+        )
+        raise typer.Exit(3)
+    if not state.running:
+        raise typer.Exit(1)
+
+
+@app.command("logs")
+def logs(
+    lines: Annotated[int, typer.Option("-n", "--lines", help="末尾行数")] = 50,
+    follow: Annotated[
+        bool, typer.Option("-f", "--follow", help="持续跟踪新日志")
+    ] = False,
+) -> None:
+    """运行日志（<数据目录>/logs/Lumi.log）。"""
+    from lumi import ops
+
+    path = ops.log_file()
+    if not path.exists():
+        typer.echo(f"还没有日志：{path}", err=True)
+        raise typer.Exit(1)
+
+    for line in ops.tail(path, lines):
+        typer.echo(line)
+    if not follow:
+        return
+    try:
+        for line in ops.follow(path):
+            typer.echo(line)
+    except KeyboardInterrupt:
+        pass
 
 
 # ------------------------------------------------------------------

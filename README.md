@@ -118,21 +118,18 @@ cd Lumi
 
 Lumi 分两个产物：**后端 `lumi`**（`lumi serve`，本地或服务器）+ **桌面 client**（Electron，连本地/远程）。
 
-**服务器一键部署**（Linux，Docker 或宿主机自动择一，详见 [部署指南](docs/guides/deploy.md)）：
+**服务器一行装完**（Linux + systemd，详见 [部署指南](docs/guides/deploy.md)）：
 
 ```bash
-sudo ./scripts/install.sh          # 装：有 Docker 走 Docker，否则 uv + systemd
-sudo ./scripts/install.sh upgrade  # 升级（不动数据、不换令牌）
-sudo ./scripts/install.sh status   # 状态 + 连接串
+curl -fsSL https://raw.githubusercontent.com/deku0818/Lumi/main/scripts/install.sh | sudo sh
 ```
 
-装完打印 `ws://<本机IP>:8765/ws?token=…`，桌面端「设置 → 连接」填它即可；模型 API Key 在桌面端配，服务器上不用管。脚本会自建数据目录、生成令牌、装 agent 工具链，并**实际握手验证**（含「错误令牌必须被拒」）。
+装包 → 生成 `lumi.service` → 起服务 → **真握手验证**（错误令牌必须被拒，否则那是台谁都能连的机器）→ 打印连接串。服务以**调用者本人**的身份运行、数据落在他的 `~/.lumi`，不另造系统用户；`--user` 可改身份。重跑即升级，沿用原令牌。
 
-手动安装：
+桌面端「设置 → 连接」填打印出来的 `ws://<本机IP>:8765/ws?token=…`；模型 API Key 在桌面端配，服务器上不用管。日常运维：`lumi update` 升级、`lumi status` 体检、`lumi logs -f` 看日志。
 
 ```bash
-# 后端
-uv tool install lumi-harness      # 发布名 lumi-harness，命令仍是 lumi
+# 本机跑一个
 lumi serve --port 8765 --token <口令>
 
 # 后端（Docker）
