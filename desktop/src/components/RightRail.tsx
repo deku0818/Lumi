@@ -69,19 +69,16 @@ export function RightRail({
   )
 }
 
-// 右栏模块卡：玻璃材质 + 节头（标题 / 计数 / 附加操作 / chevron），点节头独立折叠。
-// 节头用 div 而非 button：headerExtra 里可放操作按钮（如「清除已完成」）。
+// 右栏模块卡：玻璃材质 + 节头（标题 / 计数 / chevron），点节头独立折叠。
 // grid-rows 0fr↔1fr：能给"内容自适应高度"做过渡的唯一干净写法；
 // inert：折叠后内容只是被裁到 0 高，不加这个仍能 Tab 进去触发交互。
 export function RailSection({
   title,
   count,
-  headerExtra,
   children,
 }: {
   title: string
-  count?: React.ReactNode // 数字或「5 · 2 运行中」这类摘要串
-  headerExtra?: React.ReactNode
+  count?: React.ReactNode // 数字或「3 运行中」这类摘要串
   children: React.ReactNode
 }) {
   const [collapsed, setCollapsed] = useState(false)
@@ -108,7 +105,6 @@ export function RailSection({
           <span className="text-xs text-muted-foreground truncate">{count}</span>
         )}
         <span className="ml-auto flex items-center gap-1">
-          {headerExtra}
           <ChevronDown
             className={`size-4 shrink-0 text-muted-foreground transition-transform duration-300 ease-[cubic-bezier(.32,.72,0,1)] ${
               collapsed ? '-rotate-90' : ''

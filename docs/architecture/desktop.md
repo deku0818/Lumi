@@ -204,23 +204,30 @@ cron 子系统是进程级资源（与会话无关）：serve 在 lifespan 中�
   复用旧对象、整段未变返回原引用，否则每次广播都让整列卡片重渲染。
 - **卡片信息量**：卡片要回答「它在做什么」和「它跑出了什么」——
   - *任务内容*：agent 用 prompt、workflow 用工具的 `description`、bash 用完整命令（`label`，
-    不另存一份免得每次快照多带一遍）。统一 clamp 三行，超出才出现「展开全部」。
+    不另存一份免得每次快照多带一遍）。它归展开后的详情，卡面上不占位。
   - *运行中的活动*：agent 逐超步上报 `{tool, tools_done}`（`tools_done` 取 `max` 单调递增，
     否则压缩删历史时计数会当场回退）；workflow 上报 `phase / done / total / last_log`。
+    卡面压成一行 `kind · 时长 · 活动 · N 次工具`（分隔点跟着后一格走，窄栏换行不留孤点）。
   - *输出*：`streams_output` 标记该任务是否边跑边写输出文件（仅 bash——它的 stdout 直接
     重定向进去；agent / workflow 完成时才一次性写）。据此，只有 bash 在运行中每 2s 续拉
-    尾部（末 8KB，截断时标注完整体积），其余只在转终态时拉一次，避免对必空的文件空转。
-    运行中贴底流最近三行，终态收成「查看输出」按需展开。
+    尾部（末 8KB，截断时标注完整体积），其余只在需要时拉一次，避免对必空的文件空转。
+    卡面只留末尾一行（还没吐字则「等待输出…」），全文在详情里定高滚动。
 - **前端结构**（`BgTasksDrawer.tsx` 的 `BgTasksSection` + `RightRail.tsx` + `App.tsx`）：
   - 挂在**统一右栏**（`RightRail`，见「可调宽边栏」）的模块卡里：chat / 定时任务会话两视图
-    通用，有任务整卡出现、无任务隐藏；节头带总数与「N 运行中」及「清除已完成」；
+    通用，有任务整卡出现、无任务隐藏；节头带「N 运行中」（无运行中时退回总数）；
     收放钮收起态亮脉动金点（含直播中的定时执行）。
-  - 模块内容 = 一摞**可独立折叠的任务卡片**（kind 图标 + 名称 + 状态光点/勾/叉 + chevron）；
-    运行中默认展开、终态默认折叠。
-  - 清理：终态卡片 hover 出现灰色移除 ✕，或节头「清除已完成」；运行中只能停止。
+  - **按状态分两组**：运行中是一摞紧凑卡片（kind 图标 + 名称 + 光点 + **常驻停止钮** /
+    元信息一行 / workflow 进度条 / 一行动静）；终态全部收进「已完成 N」一行折叠开关 +
+    「清除」，展开后是一行一个的紧凑列表（名称 + 勾/叉 + 用时 + hover 移除 ✕）。
+    分组是刻意的——终态任务每会话可攒到 20 条（`_TERMINAL_CAP`），平铺会把正在跑的挤出视野。
+  - **详情单开**：点卡片 / 已完成行就地展开（任务内容或命令原文、退出码、错误、输出尾部），
+    同时只开一个——右栏只有 256 宽，两份摊开就得来回滚。展开开关是 div（内含停止 / 移除
+    button，button 不能嵌 button），故自带 `role/tabIndex/Enter·Space`。
   - 运行中任务的 Duration 由本地每秒 tick 实时跳；**秒表与输出轮询都以右栏展开为前提**
     ——栏收起时卡片只是被移出视口、组件仍挂着，不设门就会在没人看的时候持续拉取。
-  - demo `.demos/lumi-bg-drawer-detail.html`、`.demos/bg-task-card.html`、
+    输出轮询另有一道门：只有「详情摊开了」或「边跑边写且卡面那行要跟着走」才拉。
+  - demo `.demos/bg-tasks-grouped.html`（现行分组版，含改版前后对照）、
+    `.demos/lumi-bg-drawer-detail.html`、`.demos/bg-task-card.html`、
     `.demos/bg-task-long-text.html`、`.demos/unified-rail.html`。
 
 ## 任务进度（统一右栏模块）
@@ -328,7 +335,7 @@ macOS 关窗后应用驻留 Dock，sidecar 保持运行，Dock 唤起（activate
 | `desktop/src/{font.ts,components/FontPicker.tsx}` | 界面字体偏好（本机字体枚举 + 字号）+ CSS 变量覆写 |
 | `desktop/src/components/CronPage.tsx` | 定时任务管理页 + 执行记录模块（`RunsSection`） |
 | `desktop/src/components/RightRail.tsx` | 统一右栏（收放钮 + `RailSection` 模块卡容器） |
-| `desktop/src/components/BgTasksDrawer.tsx` | 后台任务模块（`BgTasksSection`，折叠卡片 + 实时进度） |
+| `desktop/src/components/BgTasksDrawer.tsx` | 后台任务模块（`BgTasksSection`，运行中卡片 + 已完成折叠组） |
 | `desktop/src/components/{ProjectsPage,NewProjectDialog,FolderMenu}.tsx` | 项目管理页 + 新建项目 + 添加文件夹菜单 |
 | `desktop/src/i18n.ts` | 国际化（中文 / English） |
 | `lumi/gateway/channels/ws.py` | FastAPI WS 端点 + RPC dispatch |

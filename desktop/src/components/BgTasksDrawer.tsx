@@ -1,31 +1,29 @@
 import { memo, useEffect, useRef, useState } from 'react'
-import {
-  Bot,
-  Boxes,
-  Check,
-  ChevronDown,
-  ChevronRight,
-  Square,
-  SquareTerminal,
-  X,
-} from 'lucide-react'
+import { Bot, Boxes, Check, ChevronDown, Square, SquareTerminal, X } from 'lucide-react'
 import type { LucideIcon } from 'lucide-react'
-import type { BgTask, BgTaskKind, BgTaskOutput, BgTaskProgress } from '../types'
+import type { BgTask, BgTaskKind, BgTaskOutput } from '../types'
 import { EMPTY_BG_OUTPUT } from '../types'
 import { useI18n } from '../i18n'
+import type { Translate } from '../i18n'
 import { RailSection } from './RightRail'
 import { Button } from '@/components/ui/button'
 import { CARD_L2, fmtSize } from '@/lib/utils'
 
-const isTerminal = (t: BgTask): boolean => t.status !== 'running'
-
-// 后台任务模块（挂在统一右栏 RightRail 里）：一摞可独立折叠的任务卡片。
-// 后端数据见 TaskRegistry（serialize_task）；实时刷新经 bg_tasks.update 事件。
+// 后台任务模块（挂在统一右栏 RightRail 里）：运行中的一摞紧凑卡片 + 已完成折叠成一行。
+// 分组是刻意的——终态任务每会话可攒到 20 条（后端 _TERMINAL_CAP），平铺会把正在跑的
+// 挤出视野。后端数据见 TaskRegistry（serialize_task）；实时刷新经 bg_tasks.update 事件。
 
 const KIND_ICON: Record<BgTaskKind, LucideIcon> = {
   workflow: Boxes,
   agent: Bot,
   bash: SquareTerminal,
+}
+
+// 元信息行的第一格。三种 kind 都是专名，不进 i18n
+const KIND_LABEL: Record<BgTaskKind, string> = {
+  workflow: 'Workflow',
+  agent: 'Agent',
+  bash: 'Bash',
 }
 
 const displayName = (t: BgTask): string =>
@@ -36,7 +34,7 @@ const duration = (t: BgTask): string => {
   return `${Math.max(0, Math.round(end - t.started_at))}s`
 }
 
-const statusLabel = (t: BgTask, tr: (k: string) => string): string =>
+const statusLabel = (t: BgTask, tr: Translate): string =>
   t.status === 'running'
     ? tr('bg.running')
     : t.status === 'completed'
@@ -45,123 +43,59 @@ const statusLabel = (t: BgTask, tr: (k: string) => string): string =>
         ? tr('bg.timedOut')
         : tr('bg.failed')
 
-// 折叠时的一行摘要：kind + 进度/退出码/状态
-const hintLine = (t: BgTask, tr: (k: string) => string): string => {
-  if (t.kind === 'workflow' && t.progress?.total != null)
-    return `workflow · ${t.progress.done ?? 0}/${t.progress.total}`
-  if (t.kind === 'bash' && t.exit_code != null) return `bash · ${tr('bg.exitCode')} ${t.exit_code}`
-  return `${t.kind} · ${statusLabel(t, tr)}`
+// 元信息行的第三格「这一刻在干什么」：workflow=阶段进度 / agent=当前工具 / bash=退出码。
+// 空串即不占格（agent 刚起步、bash 还在跑时都没什么可说的）
+const activity = (task: BgTask, tr: Translate): string => {
+  const p = task.progress
+  if (task.kind === 'workflow' && p?.total != null)
+    return `${p.phase ?? ''} ${p.done ?? 0}/${p.total}`.trim()
+  if (task.kind === 'agent' && task.status === 'running')
+    return p?.tool ? `${tr('bg.calling')} ${p.tool}` : tr('bg.thinking')
+  if (task.kind === 'bash' && task.exit_code != null)
+    return `${tr('bg.exitCode')} ${task.exit_code}`
+  return ''
 }
 
-// 运行中默认展开（关注正在跑的），其余默认折叠
-const defaultCollapsed = (t: BgTask): boolean => t.status !== 'running'
+const outputLines = (tail: BgTaskOutput): string[] =>
+  tail.text ? tail.text.replace(/\n$/, '').split('\n') : []
+
+// 展开开关是 div（内部要塞停止 / 移除 button，button 不能嵌 button），
+// 键盘语义得自己补齐——同 RailSection 节头的先例
+const toggleProps = (onToggle: () => void, expanded: boolean) => ({
+  role: 'button',
+  tabIndex: 0,
+  'aria-expanded': expanded,
+  onClick: onToggle,
+  onKeyDown: (e: React.KeyboardEvent) => {
+    if (e.key === 'Enter' || e.key === ' ') {
+      e.preventDefault()
+      onToggle()
+    }
+  },
+})
 
 function StatusMark({ t }: { t: BgTask }) {
-  if (t.status === 'running') return <span className="lumi-orb" />
+  const { t: tr } = useI18n()
+  const title = statusLabel(t, tr)
+  if (t.status === 'running') return <span className="lumi-orb" title={title} />
   if (t.status === 'completed')
-    return <Check size={14} className={t.kind === 'bash' ? 'text-success' : 'text-primary'} />
-  return <span className="text-error text-xs font-bold leading-none">✕</span>
-}
-
-function WorkflowProgress({ p }: { p: BgTaskProgress }) {
-  const { t } = useI18n()
-  const pct = p.total ? Math.round(((p.done ?? 0) / p.total) * 100) : 0
+    return (
+      <Check
+        size={13}
+        className={t.kind === 'bash' ? 'text-success' : 'text-primary'}
+        aria-label={title}
+      />
+    )
   return (
-    <div className="mb-2.5">
-      {p.phase && (
-        <div className="text-[11px] text-muted-foreground mb-1.5">
-          {p.phase}
-          {p.total != null ? ` · ${p.done ?? 0}/${p.total}` : ''}
-          {p.running ? ` · ${p.running} ${t('bg.running')}` : ''}
-        </div>
-      )}
-      {p.total != null ? (
-        <div className="h-1.5 rounded-full bg-ink/10 overflow-hidden">
-          <div
-            className="h-full bg-primary rounded-full transition-[width] duration-700"
-            style={{ width: `${pct}%` }}
-          />
-        </div>
-      ) : null}
-      {/* 脚本 log() 的最新一条：输出文件完成时才写，运行中只有它能说明「跑到哪了」 */}
-      {p.last_log && (
-        <div className="mt-1.5 text-[10.5px] font-mono text-muted-foreground truncate">
-          ▸ {p.last_log}
-        </div>
-      )}
-    </div>
+    <span className="text-error text-xs font-bold leading-none" title={title}>
+      ✕
+    </span>
   )
 }
 
-// 后台 agent 运行中的活动行：正在调用的工具（模型思考中时为空）+ 已完成工具数
-function AgentActivity({ p }: { p: BgTaskProgress }) {
-  const { t } = useI18n()
-  return (
-    <div className="flex items-center gap-2 text-[11.5px] mb-2.5">
-      <span className="lumi-orb scale-[0.65] -mx-0.5" />
-      {p.tool ? (
-        <>
-          {t('bg.calling')} <span className="font-mono text-[11px] text-primary">{p.tool}</span>
-        </>
-      ) : (
-        <span className="text-muted-foreground">{t('bg.thinking')}</span>
-      )}
-      {p.tools_done ? (
-        <span className="text-muted-foreground">· {t('bg.toolsUsed', { n: p.tools_done })}</span>
-      ) : null}
-    </div>
-  )
-}
-
-// 任务内容：bash 是完整命令（等宽块，卡头只放得下一行截断），其余是交给它的 prompt。
-// 两者同一规则——默认 clamp 三行，超出才给展开出口（长命令能撑十几行，会把输出预览挤出视野）。
-function TaskIntent({ task }: { task: BgTask }) {
-  const { t } = useI18n()
-  const [expanded, setExpanded] = useState(false)
-  const [overflow, setOverflow] = useState(false)
-  const ref = useRef<HTMLDivElement>(null)
-  const mono = task.kind === 'bash'
-  const text = mono ? task.label : task.prompt
-  // 只随文本量一次：展开后 scrollHeight 等于 clientHeight，再量会把展开出口自己量没
-  useEffect(() => {
-    const el = ref.current
-    if (el) setOverflow(el.scrollHeight > el.clientHeight + 1)
-  }, [text])
-
-  if (!text) return null
-  return (
-    <div className="mb-2.5">
-      {!mono && (
-        <div className="text-[10px] uppercase tracking-wide text-muted-foreground mb-1">
-          {t('bg.intent')}
-        </div>
-      )}
-      <div
-        ref={ref}
-        onClick={() => overflow && setExpanded((v) => !v)}
-        className={`selectable text-ink/80 ${expanded ? '' : 'line-clamp-3'} ${
-          mono
-            ? 'rounded-md bg-ink/[0.05] px-2 py-1.5 font-mono text-[11px] leading-relaxed break-all'
-            : 'text-[11.5px] leading-relaxed'
-        } ${overflow ? 'cursor-pointer' : ''}`}
-      >
-        {text}
-      </div>
-      {overflow && (
-        <button
-          onClick={() => setExpanded((v) => !v)}
-          className="mt-1 text-[10.5px] text-muted-foreground hover:text-ink"
-        >
-          {expanded ? `▴ ${t('common.showLess')}` : `▾ ${t('bg.showAll')}`}
-        </button>
-      )}
-    </div>
-  )
-}
-
-// 输出文件尾部：卡片可见时拉一次，边跑边写的任务（bash）每 2s 续拉。
-// ``active`` 必须把右栏开合算进去：栏收起时卡片只是被移出视口/裁到 0 高，组件仍挂着，
-// 不看这个的话几个运行中的任务会在没人看的时候持续轮询（同下方每秒计时的 open 门）。
+// 输出文件尾部：需要显示时拉一次，边跑边写的任务（bash）每 2s 续拉。
+// ``active`` 必须把右栏开合与卡片是否显示输出一起算进去：栏收起时卡片只是被移出视口，
+// 组件仍挂着，不看这个的话几个运行中的任务会在没人看的时候持续轮询（同下方每秒计时的 open 门）。
 function useTaskOutput(task: BgTask, active: boolean, read: (id: string) => Promise<BgTaskOutput>) {
   const [tail, setTail] = useState<BgTaskOutput>(EMPTY_BG_OUTPUT)
   // 序号守卫跨 effect 轮次有效：只认最后发出的那次，先发后到不会把新尾巴覆盖成旧的
@@ -185,48 +119,42 @@ function useTaskOutput(task: BgTask, active: boolean, read: (id: string) => Prom
   return tail
 }
 
-// 输出预览：运行中贴底流出最后几行（顶部渐隐，同子代理工具窗口的语言），
-// 终态收成一行「查看输出」按需展开成可滚动的等宽框——终态输出常常很长，默认摊开会淹掉卡片
-function OutputPreview({ task, tail }: { task: BgTask; tail: BgTaskOutput }) {
+// 展开后的详情：任务内容（bash 是命令原文）+ 完整输出尾部 + 错误。
+// 不做行数 clamp——本身已在一次点击之后，再加一层「展开全部」是多余的门；改用定高滚动
+function TaskDetail({ task, tail }: { task: BgTask; tail: BgTaskOutput }) {
   const { t } = useI18n()
-  const [open, setOpen] = useState(false)
-  const lines = tail.text ? tail.text.replace(/\n$/, '').split('\n') : []
-  const mono = 'font-mono text-[10.5px] leading-[1.65] whitespace-pre'
-
-  if (task.status === 'running') {
-    // 空态不占位：边写边跑的任务给一行「等待输出…」，其余（输出到完成才写）什么都不画——
-    // 上方的活动行 / 进度条已经说明它在做什么
-    if (!lines.length)
-      return task.streams_output ? (
-        <div className="text-[11px] text-muted-foreground/70">{t('bg.waitingOutput')}</div>
-      ) : null
-    return (
-      <div
-        className={`${mono} h-[52px] flex flex-col justify-end overflow-hidden text-ink/60 [mask-image:linear-gradient(to_bottom,transparent_0,#000_20px)]`}
-      >
-        {lines.slice(-3).map((l, i) => (
-          <div key={i} className="truncate">
-            {l}
-          </div>
-        ))}
-      </div>
-    )
-  }
-
-  if (!lines.length) return null
+  const mono = task.kind === 'bash'
+  const text = mono ? task.label : task.prompt
+  const lines = outputLines(tail)
   return (
-    <div>
-      <button
-        onClick={() => setOpen((o) => !o)}
-        className="flex items-center gap-1 text-[11px] text-muted-foreground hover:text-ink py-0.5"
-      >
-        <ChevronRight size={12} className={`transition-transform ${open ? 'rotate-90' : ''}`} />
-        {open ? t('bg.hideOutput') : `${t('bg.viewOutput')} · ${lines.length}`}
-      </button>
-      {open && (
-        <div
-          className={`${mono} mt-1 max-h-56 overflow-auto rounded-md border border-line/50 bg-canvas/60 px-2 py-1.5 text-ink/70 selectable`}
-        >
+    <div className="mt-2 pt-2 border-t border-line/40">
+      {task.exit_code != null && (
+        <div className="text-[11px] text-muted-foreground mb-1.5">
+          {t('bg.exitCode')}{' '}
+          <b className={task.exit_code === 0 ? 'text-success' : 'text-error'}>{task.exit_code}</b>
+        </div>
+      )}
+      {task.error && (
+        <div className="text-error text-[11.5px] mb-1.5 break-words">{task.error}</div>
+      )}
+      {text && (
+        <>
+          <div className="text-[10px] uppercase tracking-wide text-muted-foreground mb-1">
+            {mono ? t('bg.command') : t('bg.intent')}
+          </div>
+          <div
+            className={`selectable max-h-40 overflow-auto leading-relaxed text-ink/80 ${
+              mono
+                ? 'rounded-md bg-ink/[0.05] px-2 py-1.5 font-mono text-[11px] break-all'
+                : 'text-[11.5px]'
+            }`}
+          >
+            {text}
+          </div>
+        </>
+      )}
+      {lines.length > 0 && (
+        <div className="mt-2 max-h-44 overflow-auto rounded-md border border-line/50 bg-canvas/60 px-2 py-1.5 font-mono text-[10.5px] leading-[1.65] whitespace-pre text-ink/70 selectable">
           {/* 后端只回末 8KB：不标出来的话，一个 5MB 的构建日志看着就像"这就是全部输出" */}
           {tail.truncated && (
             <div className="text-muted-foreground/70 font-sans text-[10.5px] mb-1">
@@ -238,108 +166,156 @@ function OutputPreview({ task, tail }: { task: BgTask; tail: BgTaskOutput }) {
           ))}
         </div>
       )}
+      {task.agent_count != null && (
+        <div className="mt-1.5 text-[11px] text-muted-foreground">
+          <b className="text-ink font-medium">{task.agent_count}</b> {t('bg.subagents')}
+        </div>
+      )}
     </div>
   )
 }
 
-function TaskCard({
+// 运行中的卡片：图标 + 名字 + 光点 + 常驻停止钮 / 元信息一行 / 进度条 / 最新一行动静。
+// 停止不再藏在展开之后——正在跑的任务最常做的操作就是叫停它
+function RunningCard({
   task,
+  tail,
   onStop,
-  onDismiss,
-  onReadOutput,
-  open,
-  collapsed,
+  expanded,
   onToggle,
 }: {
   task: BgTask
+  tail: BgTaskOutput
   onStop: (taskId: string) => void
-  onDismiss: (taskId: string) => void
-  onReadOutput: (taskId: string) => Promise<BgTaskOutput>
-  open: boolean
-  collapsed: boolean
+  expanded: boolean
   onToggle: () => void
 }) {
   const { t } = useI18n()
   const Icon = KIND_ICON[task.kind]
-  const running = task.status === 'running'
-  const terminal = isTerminal(task)
-  // 右栏收起时卡片仍挂载着，必须一并当作不可见，否则没人看也在每 2s 轮询
-  const tail = useTaskOutput(task, open && !collapsed, onReadOutput)
+  const p = task.progress
+  const pct = task.kind === 'workflow' && p?.total ? Math.round(((p.done ?? 0) / p.total) * 100) : null
+  const act = activity(task, t)
+  const lines = outputLines(tail)
+  // 卡片上只留一行动静：workflow 是脚本 log()，bash 是输出末行（还没吐字就说明在等）
+  const lastLine =
+    task.kind === 'workflow'
+      ? p?.last_log
+      : task.streams_output
+        ? (lines[lines.length - 1] ?? t('bg.waitingOutput'))
+        : null
+
   return (
-    <div className={`group ${CARD_L2} overflow-hidden`}>
-      {/* 卡头是可点的折叠开关（div 而非 button，以容纳内部的移除 button） */}
+    <div className={`${CARD_L2} px-2.5 py-2`}>
+      {/* 点头部区域展开详情；详情在这块之外，免得选中里面的文字顺手把卡片收了 */}
+      <div {...toggleProps(onToggle, expanded)} className="cursor-pointer">
+        <div className="flex items-center gap-2">
+          <Icon size={14} className="text-muted-foreground shrink-0" />
+          <span
+            className={`flex-1 min-w-0 truncate font-semibold ${
+              task.kind === 'bash' ? 'font-mono text-[11.5px]' : 'text-[12.5px]'
+            }`}
+          >
+            {displayName(task)}
+          </span>
+          <span className="lumi-orb scale-[0.85]" />
+          <button
+            onClick={(e) => {
+              e.stopPropagation()
+              onStop(task.task_id)
+            }}
+            title={t('bg.stop')}
+            className="grid place-items-center size-5 shrink-0 rounded-md text-muted-foreground hover:text-error hover:bg-error/15"
+          >
+            <Square size={11} fill="currentColor" />
+          </button>
+        </div>
+        {/* 缩进对齐名字：图标 14 + gap 8。分隔点跟着后一格走（同 span 内不换行），
+            否则窄栏换行时会在行尾留一个孤零零的「·」 */}
+        <div className="mt-1 pl-[22px] flex flex-wrap items-center gap-x-1.5 gap-y-0.5 text-[11px] text-muted-foreground">
+          <span>{KIND_LABEL[task.kind]}</span>
+          <b className="font-medium text-ink/85 tabular-nums whitespace-nowrap">
+            <span className="opacity-45 font-normal">· </span>
+            {duration(task)}
+          </b>
+          {act && (
+            <span className="min-w-0 truncate">
+              <span className="opacity-45">· </span>
+              {act}
+            </span>
+          )}
+          {task.kind === 'agent' && p?.tools_done ? (
+            <span className="whitespace-nowrap">
+              <span className="opacity-45">· </span>
+              {t('bg.toolsUsed', { n: p.tools_done })}
+            </span>
+          ) : null}
+        </div>
+        {pct !== null && (
+          <div className="mt-1.5 ml-[22px] h-[3px] rounded-full bg-ink/10 overflow-hidden">
+            <div
+              className="h-full bg-primary rounded-full transition-[width] duration-700"
+              style={{ width: `${pct}%` }}
+            />
+          </div>
+        )}
+        {lastLine && (
+          <div className="mt-1.5 pl-[22px] font-mono text-[10.5px] text-muted-foreground/80 truncate">
+            {lastLine}
+          </div>
+        )}
+      </div>
+      {expanded && <TaskDetail task={task} tail={tail} />}
+    </div>
+  )
+}
+
+// 已完成的一行：名字 + 结果标记 + 用时，点开就地出详情，hover 出移除 ✕
+function FinishedRow({
+  task,
+  tail,
+  onDismiss,
+  expanded,
+  onToggle,
+}: {
+  task: BgTask
+  tail: BgTaskOutput
+  onDismiss: (taskId: string) => void
+  expanded: boolean
+  onToggle: () => void
+}) {
+  const { t } = useI18n()
+  const Icon = KIND_ICON[task.kind]
+  return (
+    <div className={expanded ? `${CARD_L2} px-2.5 py-2` : ''}>
       <div
-        onClick={onToggle}
-        className="w-full flex items-center gap-2.5 px-3.5 py-3 text-left cursor-pointer hover:bg-white/[0.03]"
+        {...toggleProps(onToggle, expanded)}
+        className={`group flex items-center gap-2 cursor-pointer rounded-lg ${
+          expanded ? '' : 'px-2 py-1.5 hover:bg-white/[0.04]'
+        }`}
       >
-        <Icon size={16} className="text-muted-foreground shrink-0" />
+        <Icon size={13} className="text-muted-foreground shrink-0" />
         <span
-          className={`font-semibold flex-1 min-w-0 truncate ${task.kind === 'bash' ? 'font-mono text-[13px]' : ''}`}
+          className={`flex-1 min-w-0 truncate text-ink/80 ${
+            task.kind === 'bash' ? 'font-mono text-[11px]' : 'text-[12px]'
+          }`}
         >
           {displayName(task)}
         </span>
         <StatusMark t={task} />
-        {/* 终态：hover 显示灰色移除 ✕（与红色状态 ✕ 区分：位置在最右、灰色、仅 hover）；
-            出现时让位 chevron */}
-        {terminal ? (
-          <button
-            onClick={(e) => {
-              e.stopPropagation()
-              onDismiss(task.task_id)
-            }}
-            title={t('bg.dismiss')}
-            className="hidden group-hover:grid place-items-center w-5 h-5 rounded text-muted-foreground hover:text-ink hover:bg-white/10 shrink-0"
-          >
-            <X size={13} />
-          </button>
-        ) : null}
-        <ChevronDown
-          size={14}
-          className={`text-muted-foreground transition-transform shrink-0 ${collapsed ? '-rotate-90' : ''} ${terminal ? 'group-hover:hidden' : ''}`}
-        />
+        <span className="text-[11px] text-muted-foreground tabular-nums">{duration(task)}</span>
+        {/* 恒占位、hover 才显形：否则 ✕ 一出现会把用时整行往左挤 */}
+        <button
+          onClick={(e) => {
+            e.stopPropagation()
+            onDismiss(task.task_id)
+          }}
+          title={t('bg.dismiss')}
+          className="grid place-items-center size-4 shrink-0 rounded text-muted-foreground opacity-0 group-hover:opacity-100 hover:text-ink"
+        >
+          <X size={12} />
+        </button>
       </div>
-      {collapsed ? (
-        <div className="px-3.5 pb-3 -mt-1 text-xs text-muted-foreground truncate">
-          {hintLine(task, t)}
-        </div>
-      ) : (
-        <div className="px-3.5 pb-3.5">
-          <div className="flex flex-wrap gap-x-4 gap-y-1 text-muted-foreground text-xs mb-2.5">
-            <span>{statusLabel(task, t)}</span>
-            <span>
-              {t('bg.duration')} <b className="text-ink font-medium">{duration(task)}</b>
-            </span>
-            {task.exit_code != null && (
-              <span>
-                {t('bg.exitCode')}{' '}
-                <b className={task.exit_code === 0 ? 'text-success' : 'text-error'}>
-                  {task.exit_code}
-                </b>
-              </span>
-            )}
-            {task.agent_count != null && (
-              <span>
-                <b className="text-ink font-medium">{task.agent_count}</b> {t('bg.subagents')}
-              </span>
-            )}
-          </div>
-          {task.error && <div className="text-error text-xs mb-2 break-words">{task.error}</div>}
-          <TaskIntent task={task} />
-          {task.kind === 'workflow' && task.progress && <WorkflowProgress p={task.progress} />}
-          {task.kind === 'agent' && running && task.progress && (
-            <AgentActivity p={task.progress} />
-          )}
-          <OutputPreview task={task} tail={tail} />
-          {running && (
-            <button
-              onClick={() => onStop(task.task_id)}
-              className="mt-2.5 inline-flex items-center gap-1.5 text-error border border-error/40 rounded-lg px-2.5 py-1 text-xs hover:bg-error/10"
-            >
-              <Square size={11} fill="currentColor" /> {t('bg.stop')}
-            </button>
-          )}
-        </div>
-      )}
+      {expanded && <TaskDetail task={task} tail={tail} />}
     </div>
   )
 }
@@ -362,56 +338,114 @@ export const BgTasksSection = memo(function BgTasksSection({
   onClearFinished: () => void
 }) {
   const { t } = useI18n()
-  // 用户手动折叠/展开覆盖（无记录则用 defaultCollapsed）
-  const [override, setOverride] = useState<Record<string, boolean>>({})
+  // 详情单开：右栏只有 256 宽，两份详情同时摊开就得来回滚
+  const [expandedId, setExpandedId] = useState<string | null>(null)
+  const [finOpen, setFinOpen] = useState(false)
   // 每秒 tick：运行中任务的 duration 实时跳动（仅右栏展开且有任务在跑时计时，省开销）
   const [, setTick] = useState(0)
-  const running = tasks.filter((x) => x.status === 'running').length
+  const running = tasks.filter((x) => x.status === 'running')
+  const finished = tasks.filter((x) => x.status !== 'running')
   useEffect(() => {
-    if (!open || running === 0) return
+    if (!open || running.length === 0) return
     const id = setInterval(() => setTick((x) => x + 1), 1000)
     return () => clearInterval(id)
-  }, [open, running])
-  const finished = tasks.length - running
+  }, [open, running.length])
+
+  const toggle = (id: string) => setExpandedId((cur) => (cur === id ? null : id))
 
   return (
     <RailSection
       title={t('bg.title')}
-      // 总数之外保留旧头部的「N 运行中」：运行/完成占比一眼可见，不必逐卡辨认转圈
-      count={running > 0 ? `${tasks.length} · ${running} ${t('bg.running')}` : tasks.length}
-      headerExtra={
-        finished > 0 ? (
-          <Button
-            variant="ghost"
-            size="xs"
-            onClick={(e) => {
-              e.stopPropagation() // 节头是折叠开关，别让清除顺手把节折了
-              onClearFinished()
-            }}
-            className="text-[11px] font-normal text-muted-foreground hover:text-ink"
-          >
-            {t('bg.clearFinished')} {finished}
-          </Button>
-        ) : undefined
-      }
+      count={running.length > 0 ? `${running.length} ${t('bg.running')}` : tasks.length}
     >
-      <div className="flex flex-col gap-2.5">
-        {tasks.map((task) => {
-          const collapsed = override[task.task_id] ?? defaultCollapsed(task)
-          return (
-            <TaskCard
-              key={task.task_id}
-              task={task}
-              onStop={onStop}
-              onDismiss={onDismiss}
-              onReadOutput={onReadOutput}
-              open={open}
-              collapsed={collapsed}
-              onToggle={() => setOverride((o) => ({ ...o, [task.task_id]: !collapsed }))}
-            />
-          )
-        })}
+      <div className="flex flex-col gap-2">
+        {running.map((task) => (
+          <TaskSlot
+            key={task.task_id}
+            task={task}
+            open={open}
+            expanded={expandedId === task.task_id}
+            onToggle={() => toggle(task.task_id)}
+            onStop={onStop}
+            onDismiss={onDismiss}
+            onReadOutput={onReadOutput}
+          />
+        ))}
+        {finished.length > 0 && (
+          <div className={running.length > 0 ? 'border-t border-line/40 pt-1' : ''}>
+            <div className="flex items-center gap-1">
+              <button
+                onClick={() => setFinOpen((v) => !v)}
+                className="flex-1 flex items-center gap-1.5 px-1.5 py-1 text-[11.5px] text-muted-foreground hover:text-ink"
+              >
+                <ChevronDown
+                  size={13}
+                  className={`transition-transform duration-300 ease-[cubic-bezier(.32,.72,0,1)] ${finOpen ? '' : '-rotate-90'}`}
+                />
+                {t('bg.completed')} {finished.length}
+              </button>
+              <Button
+                variant="ghost"
+                size="xs"
+                onClick={onClearFinished}
+                className="text-[11px] font-normal text-muted-foreground hover:text-ink"
+              >
+                {t('bg.clear')}
+              </Button>
+            </div>
+            {finOpen && (
+              <div className="flex flex-col gap-0.5 mt-0.5">
+                {finished.map((task) => (
+                  <TaskSlot
+                    key={task.task_id}
+                    task={task}
+                    open={open}
+                    expanded={expandedId === task.task_id}
+                    onToggle={() => toggle(task.task_id)}
+                    onStop={onStop}
+                    onDismiss={onDismiss}
+                    onReadOutput={onReadOutput}
+                  />
+                ))}
+              </div>
+            )}
+          </div>
+        )}
       </div>
     </RailSection>
   )
 })
+
+// 取输出的那层壳：hook 只能在组件里调，运行中 / 已完成两种行都要它
+function TaskSlot({
+  task,
+  open,
+  expanded,
+  onToggle,
+  onStop,
+  onDismiss,
+  onReadOutput,
+}: {
+  task: BgTask
+  open: boolean
+  expanded: boolean
+  onToggle: () => void
+  onStop: (taskId: string) => void
+  onDismiss: (taskId: string) => void
+  onReadOutput: (taskId: string) => Promise<BgTaskOutput>
+}) {
+  const running = task.status === 'running'
+  // 要么详情摊开了，要么是边跑边写、卡片上那行动静得实时跟着走；其余情况一概不取
+  const tail = useTaskOutput(task, open && (expanded || (running && task.streams_output)), onReadOutput)
+  return running ? (
+    <RunningCard task={task} tail={tail} onStop={onStop} expanded={expanded} onToggle={onToggle} />
+  ) : (
+    <FinishedRow
+      task={task}
+      tail={tail}
+      onDismiss={onDismiss}
+      expanded={expanded}
+      onToggle={onToggle}
+    />
+  )
+}

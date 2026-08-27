@@ -23,7 +23,7 @@ system+tools 缓存前缀。详见 [thinking.md](thinking.md) 的 Ultra 一节�
 | `WorkflowEngine` | `agents/core/workflow/engine.py` | 编译 + 执行脚本，注入钩子，管并发 / 计数 / 进度 |
 | `workflow` 工具 | `agents/tools/providers/workflow.py` | LLM 入口；编译脚本 → 起后台任务 → 返回 task_id |
 | `TaskRegistry` | `agents/runtime/bg_tasks.py` | 统一后台任务注册中心（bash / agent / workflow 三类同源） |
-| `BgTasksSection` | `desktop/src/components/BgTasksDrawer.tsx` | 后台任务模块 UI（统一右栏内，折叠卡片 + 实时进度） |
+| `BgTasksSection` | `desktop/src/components/BgTasksDrawer.tsx` | 后台任务模块 UI（统一右栏内，运行中卡片 + 已完成折叠组） |
 
 ## 执行模型
 
