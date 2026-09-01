@@ -500,7 +500,10 @@ def test_local_env_checks_states(toolbox_env, monkeypatch, tmp_path):
 
     # 连 npm 都没有：不给「一键安装」（按下去只会报同一句缺 npm），改为引导去环境页
     checks = local_env_checks("")
-    assert [c["key"] for c in checks] == ["cli", "skills"]
+    assert [c["key"] for c in checks] == [
+        "cli",
+        "skills",
+    ]  # cli 缺失时 profile 项一并被挡
     assert checks[0]["tone"] == "error"
     assert checks[0]["fix_action"] == "" and checks[0]["fix_nav"] == "env"
 
@@ -512,12 +515,15 @@ def test_local_env_checks_states(toolbox_env, monkeypatch, tmp_path):
     _mock_lark_cli(monkeypatch, toolbox_env)
     project = tmp_path / "p"
     checks = local_env_checks(str(project))
+    assert [c["key"] for c in checks] == ["cli", "profile", "skills"]
     assert checks[0]["tone"] == "ok"
-    assert checks[1]["tone"] == "error" and checks[1]["fix_action"] == "feishu-skills"
+    # 机器级 lark-cli 版本低于 profile 注入门槛（1.0.77 < 1.0.92）→ 引导升级
+    assert checks[1]["tone"] == "warn" and checks[1]["fix_cmd"] == "lark-cli update"
+    assert checks[2]["tone"] == "error" and checks[2]["fix_action"] == "feishu-skills"
 
     sync_lark_skills(project_dir=str(project))
     checks = local_env_checks(str(project))
-    assert [c["tone"] for c in checks] == ["ok", "ok"]
+    assert [c["tone"] for c in checks] == ["ok", "warn", "ok"]
 
 
 # ── PATH 注入 ──

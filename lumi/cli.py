@@ -360,7 +360,7 @@ _CHECK_MARKS = {"ok": "√", "warn": "!", "error": "×"}
 def _parse_channel_field(name: str, raw: str) -> object:
     """key=value 预处理：只做 pydantic 做不了的两件事——未知字段当场拦（模型默认
     忽略多余 key，拼错会静默丢配置）、list[str] 逗号拆分。标量强转与校验交给
-    save_feishu 的 model_validate（非法值走「保存失败」出口）。
+    save_feishu_bot 的 model_validate（非法值走「保存失败」出口）。
     """
     from lumi.gateway.channels.config import FeishuChannelConfig
 
@@ -373,34 +373,78 @@ def _parse_channel_field(name: str, raw: str) -> object:
     return raw
 
 
+def _select_bot(bots: list, bot: str) -> object:
+    """按 --bot（id 或名字）选中一个机器人；恰有一个时可省略。"""
+    if bot:
+        matched = [b for b in bots if bot in (b.id, b.name)]
+        if not matched:
+            known = "、".join(f"{b.id}({b.name})" for b in bots) or "无"
+            raise typer.BadParameter(f"没有 id/名字为 {bot} 的机器人（现有：{known}）")
+        return matched[0]
+    if len(bots) == 1:
+        return bots[0]
+    raise typer.BadParameter(
+        "有多个机器人，需用 --bot <id或名字> 指定（lumi feishu config 可查看列表）"
+    )
+
+
+def _echo_bot(data: dict) -> None:
+    secret = data["app_secret"]
+    # ${ENV} 引用不是密文，打码反而藏掉唯一有用的信息；短密文露前缀等于全露
+    if secret and not secret.startswith("${"):
+        data["app_secret"] = secret[:6] + "…" if len(secret) > 10 else "（已设置）"
+    for key, value in data.items():
+        # 与写入语法往返一致：bool 显示 true/false、列表逗号连接，照抄即可改回去
+        if isinstance(value, bool):
+            value = "true" if value else "false"
+        elif isinstance(value, list):
+            value = ",".join(value)
+        typer.echo(f"{key}: {value}")
+
+
 @feishu_app.command("config")
 def feishu_config(
     pairs: Annotated[
         list[str] | None,
         typer.Argument(
             help="key=value 逐个设置（如 app_id=cli_xxx enabled=true "
-            "allow_from=ou_1,ou_2）；不传则显示当前配置。app_secret=- 从 stdin 读入"
+            "allow_from=ou_1,ou_2）；不传则显示全部机器人。app_secret=- 从 stdin 读入"
         ),
     ] = None,
+    bot: Annotated[
+        str, typer.Option("--bot", help="目标机器人（id 或名字）；只有一个时可省略")
+    ] = "",
+    new: Annotated[
+        bool, typer.Option("--new", help="新建一个机器人（与 --bot 互斥）")
+    ] = False,
 ) -> None:
-    """读写飞书渠道配置（lumi.json 的 channels 分区，运行中的后端会自动应用）。"""
+    """读写飞书机器人配置（lumi.json 的 channels 分区，运行中的后端会自动应用）。
+
+    一台机器可配多个机器人（每个绑定一个项目）：无参数列出全部；设置时恰有一个
+    机器人可直接写，多个需 --bot 指定，--new 新建。
+    """
     from lumi.gateway.channels import store
 
-    data = store.load_feishu().model_dump()
+    bots = store.load_feishu_bots()
     if not pairs:
-        secret = data["app_secret"]
-        # ${ENV} 引用不是密文，打码反而藏掉唯一有用的信息；短密文露前缀等于全露
-        if secret and not secret.startswith("${"):
-            data["app_secret"] = secret[:6] + "…" if len(secret) > 10 else "（已设置）"
-        for key, value in data.items():
-            # 与写入语法往返一致：bool 显示 true/false、列表逗号连接，照抄即可改回去
-            if isinstance(value, bool):
-                value = "true" if value else "false"
-            elif isinstance(value, list):
-                value = ",".join(value)
-            typer.echo(f"{key}: {value}")
+        if not bots:
+            typer.echo("还没有配置飞书机器人：lumi feishu config --new app_id=… 新建")
+        for i, b in enumerate(bots):
+            if i:
+                typer.echo("")
+            _echo_bot(b.model_dump())
         typer.echo(f"配置文件: {store.config_path()}")
         return
+
+    if new and bot:
+        raise typer.BadParameter("--new 与 --bot 互斥")
+    # 无 --new、无 --bot 且一个机器人都没有：视同新建（旧版单机器人时代的部署脚本
+    # 即此用法）。显式给了 --bot 则必须命中——零机器人时静默新建会让脚本以为更新了
+    # 目标，实际凭空多出一条残缺配置
+    if new or (not bots and not bot):
+        data = {}
+    else:
+        data = _select_bot(bots, bot).model_dump()
 
     for pair in pairs:
         key, sep, value = pair.partition("=")
@@ -409,36 +453,50 @@ def feishu_config(
         if key == "app_secret" and value == "-":
             value = sys.stdin.readline().strip()
         data[key] = _parse_channel_field(key, value)
+    from lumi.gateway.channels.feishu.lark_profile import save_bot_synced
+
+    # 校验 → 同步 lark-cli 身份 → 单次落盘（与 desktop save_channel 同一条路径）。
+    # 同步 best-effort——lark-cli 缺失/旧版不挡保存，diagnose 兜底
     try:
-        store.save_feishu(data)
+        saved, notice = save_bot_synced(data)
     except Exception as e:
-        # ValueError（启用未绑项目）带的是人话；ValidationError 取首条即可定位
+        # ValueError（启用未绑项目 / 项目或 app_id 撞已有机器人）带的是人话；
+        # ValidationError 取首条即可定位
         typer.echo(f"保存失败: {e}", err=True)
         raise typer.Exit(1) from e
-    typer.echo("已保存；运行中的 Lumi 后端会在几秒内自动应用")
+    if notice:
+        typer.echo(f"提示：lark-cli 身份未同步（{notice}），详见 lumi feishu diagnose")
+    typer.echo(
+        f"已保存机器人「{saved.name}」({saved.id})；运行中的 Lumi 后端会在几秒内自动应用"
+    )
 
 
 @feishu_app.command("sync-skills")
 def feishu_sync_skills() -> None:
-    """把 lark-cli 内嵌的飞书技能包导出到渠道绑定项目的 .lumi/skills/（按版本增量）。"""
+    """把 lark-cli 内嵌的飞书技能包导出到各机器人绑定项目的 .lumi/skills/（按版本增量）。"""
     from lumi.gateway.channels import store
     from lumi.gateway.toolbox import sync_lark_skills
 
-    workspace = store.load_feishu().workspace
-    if not workspace:
-        typer.echo("尚未绑定项目：先 lumi feishu config workspace=/项目路径", err=True)
+    workspaces = list(
+        dict.fromkeys(b.workspace for b in store.load_feishu_bots() if b.workspace)
+    )
+    if not workspaces:
+        typer.echo(
+            "尚无绑定项目的机器人：先 lumi feishu config workspace=/项目路径", err=True
+        )
         raise typer.Exit(1)
-    try:
-        updated = sync_lark_skills(None, workspace)
-    except RuntimeError as e:
-        typer.echo(str(e), err=True)
-        raise typer.Exit(1) from e
-    typer.echo(f"已同步 {updated} 个技能到 {workspace}/.lumi/skills")
+    for workspace in workspaces:
+        try:
+            updated = sync_lark_skills(None, workspace)
+        except RuntimeError as e:
+            typer.echo(str(e), err=True)
+            raise typer.Exit(1) from e
+        typer.echo(f"已同步 {updated} 个技能到 {workspace}/.lumi/skills")
 
 
 @feishu_app.command("diagnose")
 def feishu_diagnose() -> None:
-    """接入体检：本地环境 + 凭证 / 权限 / 事件 / 发布，任一 error 则退出码非零。
+    """接入体检（逐机器人）：本地环境 + 凭证 / 权限 / 事件 / 发布，任一 error 则退出码非零。
 
     妙记已启用时追加妙记四项（lark-cli 配置 / 用户授权 / 妙记权限 / 事件订阅）。
     """
@@ -448,28 +506,50 @@ def feishu_diagnose() -> None:
     from lumi.gateway.channels.feishu import minutes
     from lumi.gateway.channels.feishu.setup import diagnose, local_env_checks
 
-    cfg = store.load_feishu()
-    # 三组体检互相独立（各自 spawn lark-cli 子进程 / 走开放平台网络），串行要
-    # 2-6s；desktop RPC 同源路径已是并行（channel_rpc），CLI 不该是退化版
-    with ThreadPoolExecutor(max_workers=3) as pool:
-        local = pool.submit(local_env_checks, cfg.workspace)
-        remote = pool.submit(diagnose, cfg.app_id, cfg.app_secret)
-        extra = (
-            pool.submit(minutes.diagnose, cfg.app_id) if cfg.minutes_enabled else None
-        )
-        checks = local.result() + remote.result() + (extra.result() if extra else [])
-    for check in checks:
-        detail = " ".join(filter(None, [check["detail"], check["emphasis"]]))
-        mark = _CHECK_MARKS[check["tone"]]
-        typer.echo(f"[{mark}] {check['name']}" + (f"  {detail}" if detail else ""))
-        for label, key in (
-            ("链接", "fix_url"),
-            ("提示", "fix_note"),
-            ("命令", "fix_cmd"),
-        ):
-            if check[key]:
-                typer.echo(f"    {label}: {check[key]}")
-    if any(c["tone"] == "error" for c in checks):
+    bots = store.load_feishu_bots()
+    if not bots:
+        typer.echo("还没有配置飞书机器人", err=True)
+        raise typer.Exit(1)
+    failed = False
+    # 机器人之间、每机器人的三组体检之间都互相独立（各自 spawn lark-cli 子进程 /
+    # 走开放平台网络）：全部并发跑、按序打印——逐机器人串行要 N×2-6s，
+    # desktop RPC 同源路径已是并行（channel_rpc），CLI 不该是退化版
+    with ThreadPoolExecutor(max_workers=3 * len(bots)) as pool:
+        jobs = [
+            (
+                cfg,
+                pool.submit(
+                    local_env_checks, cfg.workspace, cfg.id, cfg.cli_profile, cfg.app_id
+                ),
+                pool.submit(diagnose, cfg.app_id, cfg.app_secret),
+                pool.submit(minutes.diagnose, cfg.app_id, cfg.cli_profile)
+                if cfg.minutes_enabled
+                else None,
+            )
+            for cfg in bots
+        ]
+        results = [
+            (cfg, local.result() + remote.result() + (extra.result() if extra else []))
+            for cfg, local, remote, extra in jobs
+        ]
+    for i, (cfg, checks) in enumerate(results):
+        if i:
+            typer.echo("")
+        if len(bots) > 1:
+            typer.echo(f"── {cfg.name} ({cfg.id}) ──")
+        for check in checks:
+            detail = " ".join(filter(None, [check["detail"], check["emphasis"]]))
+            mark = _CHECK_MARKS[check["tone"]]
+            typer.echo(f"[{mark}] {check['name']}" + (f"  {detail}" if detail else ""))
+            for label, key in (
+                ("链接", "fix_url"),
+                ("提示", "fix_note"),
+                ("命令", "fix_cmd"),
+            ):
+                if check[key]:
+                    typer.echo(f"    {label}: {check[key]}")
+        failed = failed or any(c["tone"] == "error" for c in checks)
+    if failed:
         raise typer.Exit(1)
 
 

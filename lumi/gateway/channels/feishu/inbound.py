@@ -54,11 +54,7 @@ from lumi.models import provider_store
 from lumi.models.manager import allowed_levels
 from lumi.sessions import session_model
 from lumi.sessions.session_meta import delete_meta, update_meta
-from lumi.utils.constants import (
-    FEISHU_THREAD_PREFIX,
-    NOTIFICATION_POLL_INTERVAL,
-    SENDER_TAG,
-)
+from lumi.utils.constants import NOTIFICATION_POLL_INTERVAL, SENDER_TAG
 from lumi.utils.logger import logger
 from lumi.utils.paths import lumi_tmp_dir
 from lumi.utils.thread_id import sanitize_thread_id
@@ -112,18 +108,23 @@ class _MinuteEvent:
     open_id: str
 
 
-def feishu_thread_id(session_key: str) -> str:
-    """飞书会话 key → Lumi thread_id（key 由 session_key_of 定）。"""
-    return sanitize_thread_id(f"{FEISHU_THREAD_PREFIX}{session_key}")
+def feishu_thread_id(session_key: str, prefix: str) -> str:
+    """飞书会话 key → Lumi thread_id（key 由 session_key_of 定）。
+
+    prefix 取机器人的 ``config.thread_prefix``，**必传**：多机器人时同一个群对每个
+    机器人各是一个会话（chat_id 相同也不撞）。给默认值等于留一把哑枪——新增推送
+    入口漏传编译照过，静默把某机器人的会话并进共享的旧命名空间。
+    """
+    return sanitize_thread_id(f"{prefix}{session_key}")
 
 
-def feishu_p2p_thread_id(open_id: str) -> str:
+def feishu_p2p_thread_id(open_id: str, prefix: str) -> str:
     """某人私聊会话的 thread —— 主动推送（妙记）只有 open_id 时的入口。
 
     与入站私聊同源：都以 open_id 为 key。别退回裸的 ``feishu_thread_id(open_id)``，
     那样传进去的是什么 id 在调用点无从分辨，正是两端不同源裂出两个会话的老路。
     """
-    return feishu_thread_id(open_id)
+    return feishu_thread_id(open_id, prefix)
 
 
 def session_key_of(chat_type: str | None, chat_id: str, open_id: str) -> str:
@@ -524,7 +525,7 @@ class FeishuInbound:
             # 渠道系统命令（/stop /clear /help）：渠道层即时执行，不进 agent、不排队
             # ——/stop 恰是忙时才有意义，进队列等锁就荒谬了。
             session_key = session_key_of(chat_type, chat_id, open_id)
-            thread_id = feishu_thread_id(session_key)
+            thread_id = feishu_thread_id(session_key, ch.config.thread_prefix)
             parsed = parse_slash_command(text) if text else None
             if parsed and parsed[0] in SYSTEM_COMMANDS:
                 await self._run_system_command(
@@ -1260,7 +1261,9 @@ class FeishuInbound:
         pool = self.channel.bridge_pool
         for item in list(self._minute_events):
             token = item.token
-            thread_id = feishu_p2p_thread_id(item.open_id)
+            thread_id = feishu_p2p_thread_id(
+                item.open_id, self.channel.config.thread_prefix
+            )
             # 妙记会话常是全新 thread（用户未必私聊过 bot），需先建桥；而建桥是
             # await 点，必须在取锁判忙**之前**做完：否则 try_lock 与 acquire 之间
             # 夹着 await，锁会被入站消息抢走，而 async with 是阻塞等待（非跳过），

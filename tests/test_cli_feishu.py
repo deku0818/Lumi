@@ -4,6 +4,7 @@ from contextlib import contextmanager
 from dataclasses import asdict
 from unittest.mock import patch
 
+import pytest
 from typer.testing import CliRunner
 
 from lumi.cli import _CHECK_MARKS, app
@@ -11,6 +12,16 @@ from lumi.gateway.channels import store
 from lumi.gateway.channels.feishu.checks import Check
 
 runner = CliRunner()
+
+
+@pytest.fixture(autouse=True)
+def no_lark_profile_sync():
+    """CLI 保存会 best-effort 同步 lark-cli profile——测试不真 spawn lark-cli、不碰真 ~/.lark-cli。"""
+    with patch(
+        "lumi.gateway.channels.feishu.lark_profile.sync_profile",
+        return_value=("", "测试跳过"),
+    ):
+        yield
 
 
 @contextmanager
@@ -33,7 +44,7 @@ def test_config_set_then_show_roundtrip():
         ["feishu", "config", "app_id=cli_x", "allow_from=ou_1,ou_2", "workspace=/w"],
     )
     assert result.exit_code == 0, result.output
-    assert store.load_feishu().allow_from == ["ou_1", "ou_2"]
+    assert store.load_feishu_bots()[0].allow_from == ["ou_1", "ou_2"]
 
     shown = runner.invoke(app, ["feishu", "config"])
     assert "app_id: cli_x" in shown.stdout
@@ -47,7 +58,7 @@ def test_config_secret_from_stdin_and_masked_display():
         app, ["feishu", "config", "app_secret=-"], input="topsecret-value\n"
     )
     assert result.exit_code == 0, result.output
-    assert store.load_feishu().app_secret == "topsecret-value"
+    assert store.load_feishu_bots()[0].app_secret == "topsecret-value"
 
     shown = runner.invoke(app, ["feishu", "config"])
     assert "topsecret-value" not in shown.stdout
@@ -73,7 +84,14 @@ def test_config_rejects_unknown_field():
     """拼错字段名当场退回并列出可用字段，不落盘。"""
     result = runner.invoke(app, ["feishu", "config", "app_ld=x"])
     assert result.exit_code != 0
-    assert store.load_feishu().app_id == ""
+    assert store.load_feishu_bots() == []  # 不落盘（本就没有机器人）
+
+
+def test_config_explicit_bot_with_no_bots_errors():
+    """零机器人时显式 --bot 必须报错，不得静默新建幽灵机器人（脚本误更新场景）。"""
+    result = runner.invoke(app, ["feishu", "config", "--bot", "prod", "app_id=cli_x"])
+    assert result.exit_code != 0
+    assert store.load_feishu_bots() == []
 
 
 def test_config_enable_without_workspace_fails():
@@ -81,7 +99,7 @@ def test_config_enable_without_workspace_fails():
     result = runner.invoke(app, ["feishu", "config", "enabled=true"])
     assert result.exit_code == 1
     assert "绑定项目" in result.output
-    assert store.load_feishu().enabled is False
+    assert not any(b.enabled for b in store.load_feishu_bots())
 
 
 def test_sync_skills_requires_workspace():
@@ -112,6 +130,7 @@ def test_diagnose_prints_fix_and_exits_nonzero_on_error():
             fix_note="开通后需发布版本",
         )
     )
+    runner.invoke(app, ["feishu", "config", "app_id=cli_x"])
     with _diagnosed(bot=[bad]):
         result = runner.invoke(app, ["feishu", "diagnose"])
     assert result.exit_code == 1
@@ -147,6 +166,7 @@ def test_diagnose_includes_minutes_when_enabled():
 def test_diagnose_all_ok_exits_zero():
     """全绿退出码 0——agent 复检闭环靠它判定「配好了」。"""
     ok = asdict(Check(key="credentials", name="应用凭证有效"))
+    runner.invoke(app, ["feishu", "config", "app_id=cli_x"])
     with _diagnosed(bot=[ok]):
         result = runner.invoke(app, ["feishu", "diagnose"])
     assert result.exit_code == 0

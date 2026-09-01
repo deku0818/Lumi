@@ -11,6 +11,8 @@ from typing import Literal
 
 from pydantic import BaseModel, Field
 
+from lumi.utils.constants import FEISHU_THREAD_PREFIX
+
 
 class ChannelRuntimeConfig(BaseModel):
     """IM 渠道共享的「会话怎么跑」运行时配置。
@@ -37,12 +39,25 @@ class ChannelRuntimeConfig(BaseModel):
 
 
 class FeishuChannelConfig(ChannelRuntimeConfig):
-    """飞书 / Lark Channel 配置（lark-oapi WebSocket 长连接，无需公网 webhook）。
+    """一个飞书 / Lark 机器人的配置（lark-oapi WebSocket 长连接，无需公网 webhook）。
 
-    凭证支持 ``${ENV_VAR}`` 语法引用环境变量，channel 启动时经 ``os.path.expandvars``
-    解析，避免明文。运行时字段（tool_mode/workspace）继承自 ``ChannelRuntimeConfig``。
+    一台机器可配多个机器人，每个绑定一个项目（1:1，见 ``store.save_feishu_bot`` 的
+    唯一性校验）。凭证支持 ``${ENV_VAR}`` 语法引用环境变量，channel 启动时经
+    ``os.path.expandvars`` 解析，避免明文。运行时字段（tool_mode/workspace）继承自
+    ``ChannelRuntimeConfig``。
     """
 
+    id: str = Field(
+        default="",
+        description="机器人稳定标识（8 hex，store 保存时生成）：manager 槽位、"
+        "会话 thread 命名空间、lark-cli profile 名都由它派生",
+    )
+    name: str = Field(default="飞书机器人", description="展示名（仅本机 UI 用）")
+    legacy_threads: bool = Field(
+        default=False,
+        description="旧版单机器人迁移标记：会话 thread 沿用不带机器人段的 "
+        "feishu-{key}（保住历史会话），新建机器人恒为 False 走 feishu-{id}-{key}",
+    )
     enabled: bool = Field(default=False, description="是否启用飞书 Channel")
     app_id: str = Field(default="", description="飞书应用 App ID（支持 ${ENV} 引用）")
     app_secret: str = Field(
@@ -75,4 +90,25 @@ class FeishuChannelConfig(ChannelRuntimeConfig):
         ge=1,
         le=8,
         description="summary 阶段最大并发数（限流防接口 429）；dream 恒串行不受此值影响",
+    )
+
+    @property
+    def thread_prefix(self) -> str:
+        """本机器人会话 thread 的确定性前缀。
+
+        同一个群里可能坐着两个 Lumi 机器人（不同项目各一个），chat_id 相同——thread
+        必须带机器人段才不撞会话。仅旧版迁移来的那一条沿用裸 ``feishu-``，保住历史。
+        前端 ``desktop/src/lib/utils.ts`` 的 ``botOfThread`` 按同一规则反解会话归属：
+        thread id 是持久化的 checkpoint 标识，此派生等于 wire 约定，两端一起才改。
+        """
+        if self.legacy_threads:
+            return FEISHU_THREAD_PREFIX
+        return f"{FEISHU_THREAD_PREFIX}{self.id}-"
+
+    cli_profile: str = Field(
+        default="",
+        description="已同步的 lark-cli profile 名（会话 env 注入 LARKSUITE_CLI_PROFILE 用）。"
+        "由 lark_profile.sync_profile 解析后写回：机器上已有指向本 app 的 profile 就复用"
+        "（lark-cli 强制 app_id 跨 profile 唯一，且复用能带上既有用户授权），没有才自建"
+        " lumi-{id}。空 = 尚未同步，会话不注入（回落全局 active profile）",
     )

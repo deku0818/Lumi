@@ -26,9 +26,27 @@
 └─────────────────────────────────────────────────────────────────┘
 ```
 
-每个飞书 chat（私聊 / 群）→ 一个常驻会话 `thread_id = sanitize_thread_id(f"feishu-{key}")`
-→ 一个 `AgentBridge`，复用与 desktop 完全相同的 Agent 运行时（`stream_response` 产 `BridgeEvent`
-流）。飞书侧只做「传输适配 + 事件折叠成卡片」，不碰 bridge / graph。
+一台机器可配**多个机器人**（`channels` 分区是机器人列表，一条一个）：每个机器人绑定一个
+项目（1:1，`app_id` 全局唯一），一机器人 = 一条 WS 长连接 + 一个会话池，`ChannelManager`
+按 `bot.id` 管槽位、reload 按条 diff（改 A 不弹 B）。
+
+每个飞书 chat（私聊 / 群）→ 一个常驻会话
+`thread_id = sanitize_thread_id(f"{bot.thread_prefix}{key}")`——`thread_prefix` 恒为
+`feishu-{bot.id}-`（同一个群里可能坐着两个 Lumi 机器人，chat_id 相同也不撞会话），仅旧版
+单机器人迁移来的那条（`legacy_threads=True`）沿用裸 `feishu-`，保住历史会话。thread →
+一个 `AgentBridge`，复用与 desktop 完全相同的 Agent 运行时（`stream_response` 产
+`BridgeEvent` 流）。飞书侧只做「传输适配 + 事件折叠成卡片」，不碰 bridge / graph。
+
+**lark-cli 身份隔离**：每个机器人对应一个 lark-cli profile（现成同 app 的复用、否则自建
+`lumi-{bot.id}`；CLI 与 RPC 共用 `lark_profile.save_bot_synced` 一条保存路径——校验 →
+同步 → 单次落盘，删除时回收自建的那个）。serve 启动时把 `store.shell_env_for`
+注册为 shell env provider（`channels_runtime`）——项目绑了机器人，该项目**所有会话**（飞书
+渠道 + desktop 同规则）的 Bash/后台任务/技能内嵌命令都注入 `LARKSUITE_CLI_PROFILE`
+（项目子目录同样命中：后台任务以 shell 当前 cwd spawn），项目里的 lark-cli
+调用即以本机器人身份出去，与用户自己的全局 active profile、其他项目互不干扰；没绑不注入，
+回落全局行为。profile 缺失时 lark-cli 硬报错并指出 env 来源，不会静默串身份（需
+lark-cli ≥ 1.0.92，体检有版本门槛）。妙记的用户授权也按 profile 各自独立
+（`minutes.diagnose(app_id, profile)`）。
 
 `key` 由 `inbound.session_key_of` 定：**私聊是对方 `open_id`，其余（群及未知 chat_type）
 是 `chat_id`**。私聊刻意不用 chat_id——主动推送（妙记）的事件只带 open_id，而飞书没有
@@ -296,7 +314,8 @@ FAILED 不上抛），成功与否看**快照时刻有没有推进**（`record_t
   desktop 经 `save_channel` RPC 改配置后 `reload()` **停旧起新**（`_reload_lock` 串行化）。
   **BridgePool 由 manager 拥有、跨传输重连存活**——改凭证/拨开关只重启 WS 连接，不清空进行中
   的会话；只在禁用 / workspace 变更 / 进程退出时回收会话池。
-- **CLI 入口**：`lumi feishu config`（key=value 读写，`app_secret=-` 走 stdin）/
+- **CLI 入口**：`lumi feishu config`（key=value 读写，`app_secret=-` 走 stdin；多机器人
+  时 `--bot <id或名字>` 指定、`--new` 新建，零机器人时直接写视同新建——旧部署脚本不变）/
   `diagnose`（体检，妙记启用时追加妙记四项，任一 error 退出码非零）/ `sync-skills`
   （技能包 → 绑定项目）。与 desktop 渠道页同一份数据，供 agent 对话内代劳接入
   （lumi-config 技能的 `references/feishu.md` 消费）。
@@ -336,9 +355,9 @@ FAILED 不上抛），成功与否看**快照时刻有没有推进**（`record_t
 
 ## RPC（channel_rpc.py，照抄 cron_rpc 进程级分发）
 
-`CHANNEL_METHODS = {get_channels, save_channel, diagnose_minutes, diagnose_feishu_setup}`，
+`CHANNEL_METHODS = {get_channels, save_channel, delete_channel, diagnose_minutes, diagnose_feishu_setup}`，
 接 `session.py` 的 `_dispatch` + `IMPLEMENTED_METHODS` + `protocol/events.json`（契约测试锁
-一致）。`save_channel` 复用 `save_feishu` 返回的 cfg 传给 `reload(cfg)` 省一次读盘。
+一致）。`save_channel` 按 `config.id` upsert（`store.save_feishu_bot`，缺 id 即新建）并 best-effort 同步 lark-cli profile；`delete_channel` 删机器人并回收其 profile。
 
 原有的 `test_channel`（「测试连接」按钮）已删除：接入体检第①项验的是同一件事且信息更全，
 两者并存还会互相矛盾——凭证正确但未开 `app_version:readonly` 时，`test_channel` 走
@@ -346,12 +365,14 @@ FAILED 不上抛），成功与否看**快照时刻有没有推进**（`record_t
 
 ## 前端
 
-desktop `设置 → 渠道`（`ChannelsPanel.tsx`，进 `SettingsDialog`）：渠道卡片列表（飞书连接状态 +
-开关 + 编辑、企业微信「即将支持」）→ 飞书配置弹窗（凭证 / 审批模式 / 群策略 / 白名单 / 绑定项目 +
+desktop `设置 → 渠道`（`ChannelsPanel.tsx`，进 `SettingsDialog`）：机器人列表（每机器人一行：
+名称 + 项目 + 连接状态 + 开关 + 编辑，末尾「新建飞书机器人」虚线行、企业微信「即将支持」）→ 机器人配置弹窗（凭证 / 审批模式 / 群策略 / 白名单 / 绑定项目 +
 测试连接 + 保存并重连）。**绑定项目**（`WorkspacePicker`）不再手填路径：从该机器已登记的项目
 （`list_projects`）里下拉选，可内联「新建项目」（`DirBrowser` + `add_project`）；切换已绑定项目
-会弹确认提醒（保存后回收进行中的飞书会话、历史不丢），无项目时空态引导新建。**绑定项目是必填项，
-无兜底**：未绑定时保存按钮禁用（列表开关打开也改为弹配置引导绑定），后端 `save_feishu` 拒绝启用态
+会弹确认提醒（保存后回收进行中的飞书会话、历史不丢），无项目时空态引导新建；已被其他机器人
+绑定的项目在下拉里置灰并标注被谁占用（1:1 约束）。已保存的机器人弹窗底部有「删除」（确认后
+连 profile 与会话池一并回收，聊天历史不删）。**绑定项目是必填项，
+无兜底**：未绑定时保存按钮禁用（列表开关打开也改为弹配置引导绑定），后端 `save_feishu_bot` 拒绝启用态
 落盘、`FeishuChannel.start` 直接不连并把「未绑定项目」报到状态灯——不存在"退回 serve 进程 cwd"
 这条路（否则飞书会在一个谁也没选过的目录里读写文件、装技能包）。连接状态以文字标签呈现（未启用 / 已停止 / 连接中 / 已连接 / 连接失败），失败态
 文字转红并显示后端给的具体原因。凭证下方是**接入体检**（`CheckPanel`，与妙记诊断共用），

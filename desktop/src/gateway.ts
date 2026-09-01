@@ -298,6 +298,11 @@ export class Gateway {
     return this.request<{ channels: ChannelInfo[] }>('save_channel', { name, config })
   }
 
+  // 删除一个飞书机器人（后端同时回收其 lark-cli 专属身份与会话池）
+  deleteChannel(name: string, botId: string): Promise<{ channels: ChannelInfo[] }> {
+    return this.request<{ channels: ChannelInfo[] }>('delete_channel', { name, bot_id: botId })
+  }
+
   // 机器人接入体检（凭证 / 权限 / 事件 / 发布）：一次「应用版本信息」查询即可判全部四项
   diagnoseFeishuSetup(
     name: string,

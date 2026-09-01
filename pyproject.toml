@@ -1,7 +1,7 @@
 [project]
 # 发布名 lumi-harness（PyPI 上 lumi 已被占用）；命令名与包目录仍是 lumi
 name = "lumi-harness"
-version = "0.2.122"
+version = "0.2.123"
 description = "基于 LangGraph 的 AI Agent 框架"
 readme = "README.md"
 requires-python = ">=3.12"

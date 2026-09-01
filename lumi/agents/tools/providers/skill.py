@@ -10,6 +10,7 @@
 # `runtime: ToolRuntime` 变成字符串注解，LangGraph 的注入识别失效（同 agent.py 的约定，
 # 见回归测试 test_runtime_injected_via_toolnode）。
 import asyncio
+import os
 import re
 from pathlib import Path
 
@@ -17,6 +18,7 @@ from langchain_core.tools import tool
 from langgraph.prebuilt.tool_node import ToolRuntime
 from pydantic import BaseModel, Field
 
+from lumi.agents.runtime.shell_session import provided_env
 from lumi.agents.tools.loader import SkillConfig
 from lumi.utils.logger import logger
 from lumi.utils.read_config import get_config
@@ -36,10 +38,14 @@ class SkillCommandExecutor:
         self,
         working_dir: str,
         skill_name: str,
+        env_dir: str = "",
         timeout: float = 10.0,
         max_output_bytes: int = 10_000,
     ) -> None:
         self.working_dir = working_dir
+        # 会话级 env 注入按它取（默认同 working_dir）：技能可能来自全局层
+        # ~/.lumi/skills/，按源目录查会漏掉项目专属身份，须按会话项目查
+        self.env_dir = env_dir or working_dir
         self.skill_name = skill_name
         self.timeout = timeout
         self.max_output_bytes = max_output_bytes
@@ -65,11 +71,14 @@ class SkillCommandExecutor:
         logger.debug("执行技能命令: %s", command)
 
         try:
+            # 与 shell/后台任务同源的会话级 env 注入（如项目专属飞书机器人的
+            # LARKSUITE_CLI_PROFILE）：按会话项目（env_dir）命中，cwd 仍是技能源目录
             proc = await asyncio.create_subprocess_shell(
                 command,
                 stdout=asyncio.subprocess.PIPE,
                 stderr=asyncio.subprocess.PIPE,
                 cwd=self.working_dir,
+                env={**os.environ, **provided_env(self.env_dir)},
             )
             stdout_bytes, stderr_bytes = await asyncio.wait_for(
                 proc.communicate(), timeout=self.timeout
@@ -137,7 +146,7 @@ def _get_skill_execution_config() -> dict[str, bool | float | int]:
 
 
 async def _execute_embedded_commands(
-    prompt_content: str, source_dir: Path, skill_name: str
+    prompt_content: str, source_dir: Path, skill_name: str, project_dir: str
 ) -> str:
     """若提示词中包含嵌入式命令且执行功能已启用，则执行并替换。"""
     exec_config = _get_skill_execution_config()
@@ -150,6 +159,7 @@ async def _execute_embedded_commands(
     executor = SkillCommandExecutor(
         working_dir=str(source_dir),
         skill_name=skill_name,
+        env_dir=project_dir,
         timeout=float(exec_config["timeout"]),
         max_output_bytes=int(exec_config["max_output_bytes"]),
     )
@@ -198,7 +208,10 @@ async def skill(name: str, runtime: ToolRuntime) -> str:
     if source_dir:
         try:
             prompt_content = await _execute_embedded_commands(
-                prompt_content, source_dir, skill_config.name
+                prompt_content,
+                source_dir,
+                skill_config.name,
+                str(project_dir) if project_dir else "",
             )
         except Exception as e:
             logger.error("执行技能命令失败: %s", e)

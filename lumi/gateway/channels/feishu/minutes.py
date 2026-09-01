@@ -13,9 +13,9 @@ from __future__ import annotations
 import json
 import os
 import shutil
-import subprocess
 from dataclasses import asdict
 
+from lumi.gateway.channels.feishu import lark_profile
 from lumi.gateway.channels.feishu.checks import Check, blocked_tail
 from lumi.gateway.channels.feishu.scopes import (
     MINUTE_EVENT,
@@ -26,11 +26,15 @@ from lumi.gateway.channels.feishu.scopes import (
 from lumi.utils.logger import logger
 
 _CLI = "lark-cli"
-_TIMEOUT = 20
+
 
 # login 只请求勾选/参数指定的 scope（应用开通了也不会自动带上），必须显式列出所需项；
 # --scope 与 --recommend 叠加，不会丢掉其他常用权限
-_LOGIN_CMD = f'{_CLI} auth login --recommend --scope "{",".join(MINUTES_SCOPES)}"'
+def _login_cmd(profile: str) -> str:
+    """扫码授权命令；机器人有专属 profile 时授权落在它名下（各机器人各自授权）。"""
+    flag = f"--profile {profile} " if profile else ""
+    return f'{_CLI} {flag}auth login --recommend --scope "{",".join(MINUTES_SCOPES)}"'
+
 
 # 四项检查的固定顺序与显示名。前一项不通时其后各项统一标记为「需先完成上一步」，
 # 由 blocked_tail 按本表补齐——各失败分支不再手写剩余项，免得步骤表漂移。
@@ -42,30 +46,18 @@ _STEPS: tuple[tuple[str, str], ...] = (
 )
 
 
-def _run_cli(*args: str) -> tuple[bool, str]:
-    """跑一次 lark-cli，返回 (成功, stdout 或错误原因)。
+def _run_cli(*args: str, profile: str = "") -> tuple[bool, str]:
+    """跑一次 lark-cli，返回 (是否启动成功, stdout 或错误原因)。
 
-    两处 Windows 讲究：走 which 解析出的完整路径（npm 装出的是 lark-cli.cmd，
-    subprocess 只会给裸名补 .exe，不像 which 那样遍历 PATHEXT）；显式 UTF-8 解码
-    （text=True 用系统 locale，中文 Windows 的 cp936 撞上 CLI 的中文输出即报错）。
+    薄适配 ``lark_profile.run_cli``（飞书包内唯一 runner）：本模块的调用方按
+    JSON 输出的 ok 字段判业务成败，只关心「启动起来没有」。profile 非空时以
+    机器人专属身份执行（多机器人时授权与订阅按 profile 各自独立）。
     """
-    exe = shutil.which(_CLI)
-    if exe is None:
-        return False, f"{_CLI} 不在 PATH"
-    try:
-        proc = subprocess.run(
-            [exe, *args],
-            capture_output=True,
-            encoding="utf-8",
-            errors="replace",
-            timeout=_TIMEOUT,
-        )
-    except Exception as e:  # 超时 / 其他执行失败
-        return False, str(e)
-    return True, proc.stdout or proc.stderr
+    code, out = lark_profile.run_cli(*args, profile=profile)
+    return code != -1, out
 
 
-def ensure_subscription() -> str:
+def ensure_subscription(profile: str = "") -> str:
     """幂等重建妙记事件订阅；成功返回空串，失败返回原因。
 
     每次 channel 启动都调：订阅会因 `lark-cli event consume` 优雅退出（它会主动
@@ -79,6 +71,7 @@ def ensure_subscription() -> str:
         json.dumps({"event_type": MINUTE_EVENT}),
         "--as",
         "user",
+        profile=profile,
     )
     if not ok:
         return out
@@ -92,13 +85,13 @@ def ensure_subscription() -> str:
     return str(error.get("message") or payload)[:200]
 
 
-def _auth_status() -> tuple[dict | None, str]:
+def _auth_status(profile: str = "") -> tuple[dict | None, str]:
     """lark-cli auth status --json 的解析结果，失败时 ``(None, 原因)``。
 
     原因要带出来：超时、CLI 崩溃、旧版本不认 --json 三种故障在诊断 UI 上必须可区分，
     否则用户只能被支回终端自己跑一遍看报错（与 ensure_subscription 同一范式）。
     """
-    ok, out = _run_cli("auth", "status", "--json")
+    ok, out = _run_cli("auth", "status", "--json", profile=profile)
     if not ok:
         return None, out
     try:
@@ -131,9 +124,10 @@ def transcript_hint(token: str, tmp_dir: str) -> str:
     )
 
 
-def diagnose(app_id: str) -> list[dict]:
+def diagnose(app_id: str, profile: str = "") -> list[dict]:
     """逐项体检妙记链路，返回可直接下发给 desktop 的 dict 列表。
 
+    profile = 机器人专属 lark-cli profile（多机器人时授权按 profile 各自独立）。
     同步实现（子进程 + 网络），调用方需丢线程池。前一项不通即短路返回，后续项由
     blocked_tail 补成「需先完成上一步」——省掉必然失败的探测调用。
     """
@@ -163,7 +157,7 @@ def diagnose(app_id: str) -> list[dict]:
     # （且不带 tokenStatus 字段）。刷新万一失败也漏不掉——第④步是真 API 调用，会暴露。
     # CLI 调用失败（超时 / 非零退出 / 输出非 JSON）单独成一支：与「未授权」混在一起会
     # 让用户去扫码，而扫码解决不了 CLI 本身跑不通。
-    status, reason = _auth_status()
+    status, reason = _auth_status(profile)
     if status is None:
         checks.append(
             Check(
@@ -185,7 +179,7 @@ def diagnose(app_id: str) -> list[dict]:
                 tone="error",
                 name="尚未授权或授权已失效",
                 detail=user.get("message") or "读取妙记内容需以用户身份登录",
-                fix_cmd=_LOGIN_CMD,
+                fix_cmd=_login_cmd(profile),
                 fix_note="终端执行后扫码授权；refresh_token 有效期 7 天，届时需重新登录",
             )
         )
@@ -205,7 +199,7 @@ def diagnose(app_id: str) -> list[dict]:
                 # token_type=user：lark-cli 以 --as user 取数，scope 必须加在「用户身份
                 # 权限」tab 下；tenant 侧开通不会进 user_access_token
                 fix_url=auth_url(app_id, MINUTES_SCOPES, token_type="user"),
-                fix_cmd=_LOGIN_CMD,
+                fix_cmd=_login_cmd(profile),
                 fix_note="需开通在「用户身份权限」下（应用身份不生效），开通并发布版本后执行上述命令重新授权",
             )
         )
@@ -213,7 +207,7 @@ def diagnose(app_id: str) -> list[dict]:
     checks.append(Check(key="scope", name="妙记权限已开通", detail="读取 + 订阅"))
 
     # ④ 服务端订阅（顺带把它重建好——诊断即修复）
-    error = ensure_subscription()
+    error = ensure_subscription(profile)
     if error:
         logger.warning(f"妙记订阅诊断失败: {error}")
         checks.append(

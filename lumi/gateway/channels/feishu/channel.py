@@ -323,7 +323,7 @@ class FeishuChannel:
     async def _ensure_subscription(self) -> None:
         """后台重建妙记事件订阅并把结果落进日志（失效是静默的，日志是唯一线索）。"""
         error = await asyncio.get_running_loop().run_in_executor(
-            None, ensure_subscription
+            None, ensure_subscription, self.config.cli_profile
         )
         if error:
             logger.warning(f"妙记事件订阅失败，妙记纪要将不可用: {error}")

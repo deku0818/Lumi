@@ -28,13 +28,14 @@ from lumi.gateway.channels.feishu.inbound import (
     resolve_mentions,
     safe_filename,
 )
+from lumi.utils.constants import FEISHU_THREAD_PREFIX
 
 
 # ── thread 派生 ──
 def test_feishu_thread_id_is_dns1035():
-    assert feishu_thread_id("oc_ABC123") == "feishu-oc-abc123"
+    assert feishu_thread_id("oc_ABC123", FEISHU_THREAD_PREFIX) == "feishu-oc-abc123"
     # 全非法字符也能得到合规 id（含 feishu 前缀）
-    tid = feishu_thread_id("oc_用户@#$")
+    tid = feishu_thread_id("oc_用户@#$", FEISHU_THREAD_PREFIX)
     assert tid.startswith("feishu-oc")
     assert all(c.islower() or c.isdigit() or c == "-" for c in tid)
 
@@ -638,13 +639,15 @@ def test_save_feishu_requires_workspace_when_enabled(monkeypatch, tmp_path):
     )
 
     with pytest.raises(ValueError, match="绑定项目"):
-        store.save_feishu({"enabled": True, "app_id": "cli_x", "app_secret": "s"})
+        store.save_feishu_bot({"enabled": True, "app_id": "cli_x", "app_secret": "s"})
     assert not written  # 非法配置不落盘
 
-    cfg = store.save_feishu({"enabled": False, "app_id": "cli_x", "app_secret": "s"})
+    cfg = store.save_feishu_bot(
+        {"enabled": False, "app_id": "cli_x", "app_secret": "s"}
+    )
     assert cfg.enabled is False and written  # 关掉无项目的老配置仍可保存
 
-    cfg = store.save_feishu(
+    cfg = store.save_feishu_bot(
         {"enabled": True, "app_id": "cli_x", "app_secret": "s", "workspace": "/w"}
     )
     assert cfg.workspace == "/w"
@@ -808,7 +811,7 @@ async def test_drain_minute_events_skips_busy_session(monkeypatch):
     monkeypatch.setattr(fi, "_run_minute_turn", spy)
 
     # 模拟"已建桥"：bridge 与锁在 pool.get 里一并创建
-    tid = feishu_thread_id("ou_me")
+    tid = feishu_thread_id("ou_me", FEISHU_THREAD_PREFIX)
     ch.bridge_pool._bridges[tid] = object()
     ch.bridge_pool._locks[tid] = asyncio.Lock()
     async with ch.bridge_pool._locks[tid]:  # 该会话正在跑一轮
@@ -836,7 +839,7 @@ async def test_drain_minute_events_bridges_unseen_session(monkeypatch):
 
     await fi._drain_minute_events()
 
-    tid = feishu_thread_id("ou_new")
+    tid = feishu_thread_id("ou_new", FEISHU_THREAD_PREFIX)
     assert ran == [(tid, "ou_new", "obcnTOK")]
     assert fi._minute_events == []
     assert ch.bridge_pool.chat_ids[tid] == "ou_new"  # 回填供后台通知认领
@@ -908,7 +911,7 @@ async def test_inbound_p2p_thread_keyed_by_open_id(monkeypatch):
     """入站私聊必须按 open_id 派生 thread —— 与妙记推送同源的前提。"""
     ch = FeishuChannel(FeishuChannelConfig())
     thread = await _inbound_thread_of(ch, monkeypatch, "p2p", "oc_dm", "ou_me")
-    assert thread == feishu_thread_id("ou_me")
+    assert thread == feishu_thread_id("ou_me", FEISHU_THREAD_PREFIX)
     # 投递地址仍回填真实 chat_id（thread key 是 open_id，两者刻意不同）
     assert ch.bridge_pool.chat_ids[thread] == "oc_dm"
 
@@ -918,7 +921,7 @@ async def test_inbound_group_thread_keyed_by_chat_id(monkeypatch):
     ch = FeishuChannel(FeishuChannelConfig(group_policy="open"))
     a = await _inbound_thread_of(ch, monkeypatch, "group", "oc_team", "ou_a")
     b = await _inbound_thread_of(ch, monkeypatch, "group", "oc_team", "ou_b")
-    assert a == b == feishu_thread_id("oc_team")
+    assert a == b == feishu_thread_id("oc_team", FEISHU_THREAD_PREFIX)
 
 
 def test_channel_env_nests_scene_and_ids_under_one_head():
@@ -1084,7 +1087,7 @@ async def test_inbound_takes_other_bots_at_but_never_its_own_message(monkeypatch
     await fi.on_message(
         _inbound_event("group", "oc_team", "ou_other_bot", "bot", [_Mention("ou_me")])
     )
-    assert ran == [feishu_thread_id("oc_team")]
+    assert ran == [feishu_thread_id("oc_team", FEISHU_THREAD_PREFIX)]
 
     ran.clear()
     await fi.on_message(

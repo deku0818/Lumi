@@ -85,7 +85,7 @@ import { AppTitleBar } from './components/AppTitleBar'
 import { toast } from './components/Toast'
 import { isCommandMode, parseCommand, matchCommands } from './slash'
 import { toolDiff, type DiffLine } from './diff'
-import { clip, basename, fmtTokens, machineColor, machineName, msgTime, sessionKey, keyThread, keyBackend, beOf, FLOAT_GAP } from '@/lib/utils'
+import { clip, basename, botOfThread, fmtTokens, machineColor, machineName, msgTime, sessionKey, keyThread, keyBackend, beOf, FLOAT_GAP } from '@/lib/utils'
 import { Button } from '@/components/ui/button'
 import { Tooltip, TooltipContent, TooltipTrigger } from '@/components/ui/tooltip'
 import { useTheme } from './theme'
@@ -2392,7 +2392,11 @@ export default function App() {
 
   // 飞书渠道会话：desktop 只读旁观。
   // 横幅数据：群名取会话列表 title（入站写的 channel_title），审批模式/绑定项目取渠道快照。
-  const feishuInfo = (channels[activeBackend] ?? []).find((c) => c.name === activeChannel)
+  // 按 thread 前缀定归属机器人——多机器人时行 name 全是 'feishu'，按 name find 会恒取第一行
+  const feishuInfo = botOfThread(
+    channels[activeBackend] ?? [],
+    activeSession?.thread_id ?? '',
+  )
   const channelBanner = () => {
     const proj = feishuInfo?.config.workspace ? basename(feishuInfo.config.workspace) : ''
     return (

@@ -28,7 +28,7 @@ from lumi.agents.runtime.bg_tasks import (
     bg_tasks_dir,
     get_task_registry,
 )
-from lumi.agents.runtime.shell_session import get_shell_session_manager
+from lumi.agents.runtime.shell_session import get_shell_session_manager, provided_env
 from lumi.utils.constants import GRACEFUL_SHUTDOWN_TIMEOUT
 from lumi.utils.logger import logger
 
@@ -144,6 +144,7 @@ class BackgroundTaskManager:
                 stdout=output_fd,
                 stderr=asyncio.subprocess.STDOUT,
                 cwd=working_dir,
+                env={**os.environ, **provided_env(working_dir)},
                 start_new_session=True,
             )
         except OSError:

@@ -31,7 +31,7 @@ import { useEnvInstall } from './useEnvInstall'
 import type { Gateway } from '../gateway'
 import { MachineScope, useMachine } from './MachineTabs'
 import { DirBrowser } from './DirBrowser'
-import { basename, cn } from '@/lib/utils'
+import { basename, cn, errorMessage } from '@/lib/utils'
 import {
   cardShell,
   Empty,
@@ -85,6 +85,8 @@ const STATE_TONE: Record<string, StatusTone> = {
 }
 
 const emptyFeishu = (): FeishuConfig => ({
+  id: '', // 空 = 新建（后端保存时生成）
+  name: '飞书机器人',
   enabled: false,
   app_id: '',
   app_secret: '',
@@ -116,6 +118,8 @@ export function ChannelsPanel({
   const [machine, setMachine] = useState('local')
   const [list, setList] = useState<ChannelInfo[]>([])
   const [editing, setEditing] = useState<FeishuConfig | null>(null) // null = 列表视图
+  // 最近一次保存/删除的后端拒绝原因（App ID 撞已有机器人等）：吞掉会让保存键看似失灵
+  const [saveError, setSaveError] = useState('')
   // 凭证落盘的绝对路径，由 get_channels 下发（渲染见 ConfigPath）
   const [configPath, setConfigPath] = useState('')
 
@@ -150,21 +154,32 @@ export function ChannelsPanel({
     return () => clearInterval(timer)
   }, [active, offline, reload])
 
-  const feishu = list.find((c) => c.name === 'feishu')
+  // 一台机器多个机器人：每个飞书机器人一条（config.id 区分）
+  const feishuBots = list.filter((c) => c.name === 'feishu')
+  // 其他机器人已占用的项目（workspace → 机器人名）：新建/改绑时置灰并说明被谁占用
+  const takenWorkspaces = (excludeId: string) =>
+    new Map(
+      feishuBots
+        .filter((c) => c.config.id !== excludeId && c.config.workspace)
+        .map((c) => [c.config.workspace, c.config.name]),
+    )
 
-  const save = (config: FeishuConfig) =>
-    gw
-      ?.saveChannel('feishu', config)
-      .then((r) => {
+  // save/remove 共用收尾：成功刷列表关弹窗清错误，失败把后端拒绝原因亮出来
+  const settle = (p?: Promise<{ channels?: ChannelInfo[] }>) =>
+    p
+      ?.then((r) => {
         setList(r.channels ?? [])
         setEditing(null)
+        setSaveError('')
       })
-      .catch(() => {})
+      .catch((e) => setSaveError(errorMessage(e)))
+
+  const save = (config: FeishuConfig) => settle(gw?.saveChannel('feishu', config))
+  const remove = (botId: string) => settle(gw?.deleteChannel('feishu', botId))
 
   // 列表开关：仅翻转 enabled 立即保存（凭证编辑走表单）。绑定项目是启用前置条件，
   // 未绑定时开关改为打开配置弹窗引导绑定——后端也会拒绝这种保存，别在这里先存一份跑不起来的启用态
-  const toggleEnabled = (on: boolean) => {
-    const cfg = feishu?.config ?? emptyFeishu()
+  const toggleEnabled = (cfg: FeishuConfig, on: boolean) => {
     if (on && !cfg.workspace) {
       setEditing({ ...cfg, enabled: true })
       return
@@ -186,16 +201,31 @@ export function ChannelsPanel({
         }
       >
         <div className="space-y-2">
-          {/* 飞书 */}
-          <ChannelCard
-            icon={<Send size={17} />}
-            title="飞书"
-            status={feishu?.status}
-            enabled={!!feishu?.enabled}
-            subtitle={feishuSubtitle(feishu)}
-            onToggle={toggleEnabled}
-            onEdit={() => setEditing(feishu?.config ?? emptyFeishu())}
-          />
+          {/* 飞书机器人：每个项目可配一个，一行一个 */}
+          {feishuBots.map((c) => (
+            <ChannelCard
+              key={c.config.id}
+              icon={<Send size={17} />}
+              title={c.config.name || '飞书机器人'}
+              status={c.status}
+              enabled={c.enabled}
+              subtitle={feishuSubtitle(c)}
+              onToggle={(on) => toggleEnabled(c.config, on)}
+              onEdit={() => setEditing(c.config)}
+            />
+          ))}
+          {/* 新建机器人（每个项目一个，项目在表单里选，已占用的置灰） */}
+          <button
+            onClick={() => setEditing(emptyFeishu())}
+            className="flex w-full items-center justify-center gap-1.5 rounded-xl border border-dashed border-separator px-3 py-2.5 text-xs text-muted-foreground transition hover:border-muted-foreground hover:text-ink"
+          >
+            <Plus size={13} />
+            新建飞书机器人
+          </button>
+          {/* 列表态操作（开关翻转等）被后端拒绝时的原因；表单内的错误在弹窗脚部显示 */}
+          {saveError && !editing && (
+            <div className="text-[11px] text-error">{saveError}</div>
+          )}
 
           {/* 企业微信（即将支持） */}
           {WECOM_CARD}
@@ -211,9 +241,15 @@ export function ChannelsPanel({
           initial={editing}
           gw={gw}
           configPath={configPath}
+          taken={takenWorkspaces(editing.id)}
+          saveError={saveError}
           onNavigate={onNavigate && ((tab: string) => onNavigate(tab, machine))}
-          onCancel={() => setEditing(null)}
+          onCancel={() => {
+            setEditing(null)
+            setSaveError('')
+          }}
           onSave={save}
+          onDelete={editing.id ? () => remove(editing.id) : undefined}
         />
       )}
     </div>
@@ -231,11 +267,13 @@ const WECOM_CARD = (
   />
 )
 
-function feishuSubtitle(c?: ChannelInfo): string {
-  if (!c?.enabled) return '未启用'
+function feishuSubtitle(c: ChannelInfo): string {
+  // 项目是机器人的身份归属，未启用也要能一眼分清哪条是哪个项目的
+  const proj = c.config.workspace ? basename(c.config.workspace) : '未绑定项目'
+  if (!c.enabled) return `${proj} · 未启用`
   const mode = c.config.tool_mode === 'auto' ? 'AI 审批' : '特权放行'
   const who = c.config.allow_from.includes('*') ? '所有人可用' : `${c.config.allow_from.length} 人白名单`
-  return `${mode} · ${who}`
+  return `${proj} · ${mode} · ${who}`
 }
 
 function ChannelCard({
@@ -311,31 +349,46 @@ function FeishuForm({
   initial,
   gw,
   configPath,
+  taken,
+  saveError,
   onNavigate,
   onCancel,
   onSave,
+  onDelete,
 }: {
   initial: FeishuConfig
   gw?: Gateway
   configPath: string // 凭证落盘的绝对路径（空 = 尚未取到，文案退回不带路径的说法）
+  taken: Map<string, string> // 其他机器人已占用的项目（workspace → 机器人名），1:1 约束
+  saveError?: string // 后端拒绝保存/删除的原因（App ID 撞已有机器人等）
   onNavigate?: (tab: string) => void
   onCancel: () => void
   onSave: (cfg: FeishuConfig) => void
+  onDelete?: () => void // 仅已保存的机器人可删（新建表单没有这条路）
 }) {
   const [cfg, setCfg] = useState<FeishuConfig>(initial)
+  const [confirmDelete, setConfirmDelete] = useState(false)
   const set = (patch: Partial<FeishuConfig>) => setCfg((c) => ({ ...c, ...patch }))
 
   // 接入体检：权限 / 事件订阅 / 版本发布任缺其一，机器人都是「连上了但不回消息」，
   // 且开放平台不报任何错。四项由一次「应用版本信息」查询判定。
   const setup = useDiagnose(() =>
     gw?.diagnoseFeishuSetup('feishu', {
+      id: cfg.id, // 体检「lark-cli 身份」项按机器人 profile（cli_profile）判定
+      cli_profile: cfg.cli_profile,
       app_id: cfg.app_id,
       app_secret: cfg.app_secret,
       workspace: cfg.workspace,
     }),
   )
-  // 妙记体检：走 lark-cli 子进程 + 网络，耗时 1-2s
-  const minutes = useDiagnose(() => gw?.diagnoseMinutes('feishu', { app_id: cfg.app_id }))
+  // 妙记体检：走 lark-cli 子进程 + 网络，耗时 1-2s（用户授权按机器人 profile 各自独立）
+  const minutes = useDiagnose(() =>
+    gw?.diagnoseMinutes('feishu', {
+      id: cfg.id,
+      cli_profile: cfg.cli_profile,
+      app_id: cfg.app_id,
+    }),
+  )
 
   // 就地修复（一键安装）：进度显示在对应检查行，本渠道相关安装结束后重跑体检
   const { progress: fixProgress, install: fixInstall, seed } = useEnvInstall(gw, {
@@ -369,7 +422,21 @@ function FeishuForm({
   // 未绑定项目不给保存：飞书会话必须有明确的工作目录，没有「用 serve 进程目录」这条退路
   const footer = (
     <>
+      {onDelete && (
+        <Button
+          variant="ghost"
+          className="text-error hover:text-error"
+          onClick={() => setConfirmDelete(true)}
+        >
+          删除
+        </Button>
+      )}
       {!cfg.workspace && <div className="text-[11px] text-error">请先绑定项目</div>}
+      {saveError && (
+        <div className="min-w-0 truncate text-[11px] text-error" title={saveError}>
+          {saveError}
+        </div>
+      )}
       <div className="flex-1" />
       <Button variant="ghost" onClick={onCancel}>
         取消
@@ -383,7 +450,7 @@ function FeishuForm({
   return (
     <FormModal
       onClose={onCancel}
-      title="飞书配置"
+      title={cfg.id ? cfg.name || '飞书机器人' : '新建飞书机器人'}
       footer={footer}
       className="sm:max-w-2xl"
       bodyClassName="max-h-[66vh]"
@@ -399,6 +466,13 @@ function FeishuForm({
             </>
           }
         >
+          <Field label="机器人名称" hint="仅本机展示用，方便分清哪条是哪个项目的">
+            <TextInput
+              value={cfg.name}
+              onChange={(e) => set({ name: e.target.value })}
+              placeholder="飞书机器人"
+            />
+          </Field>
           <div className="grid grid-cols-2 gap-4">
             <Field label="App ID" hint="支持 ${FEISHU_APP_ID} 引用环境变量">
               <TextInput value={cfg.app_id} onChange={(e) => set({ app_id: e.target.value })} placeholder="cli_…" />
@@ -408,7 +482,12 @@ function FeishuForm({
             </Field>
           </div>
           {/* 绑定项目归凭证组：它是体检的输入——技能包按此项目检测与安装，所见即所得 */}
-          <WorkspacePicker gw={gw} value={cfg.workspace} onChange={(v) => set({ workspace: v })} />
+          <WorkspacePicker
+            gw={gw}
+            value={cfg.workspace}
+            taken={taken}
+            onChange={(v) => set({ workspace: v })}
+          />
         </GroupCard>
 
         <GroupCard
@@ -534,6 +613,30 @@ function FeishuForm({
           </Field>
         </GroupCard>
       </div>
+
+      {/* 删除确认：连同其 lark-cli 专属身份与进行中的会话池一并回收，聊天历史不删 */}
+      <Dialog open={confirmDelete} onOpenChange={setConfirmDelete}>
+        <DialogContent className="sm:max-w-sm">
+          <DialogHeader>
+            <DialogTitle className="flex items-center gap-2">
+              <AlertTriangle size={17} className="text-error" />
+              删除机器人「{cfg.name || '飞书机器人'}」？
+            </DialogTitle>
+            <DialogDescription className="leading-relaxed">
+              将断开其飞书连接、回收进行中的会话池与 lark-cli 专属身份（用户授权一并清除）。
+              <b className="text-ink">聊天历史不会删除</b>，重新配置同一应用后可另起会话。
+            </DialogDescription>
+          </DialogHeader>
+          <DialogFooter>
+            <Button variant="ghost" onClick={() => setConfirmDelete(false)}>
+              取消
+            </Button>
+            <Button variant="destructive" onClick={() => onDelete?.()}>
+              删除
+            </Button>
+          </DialogFooter>
+        </DialogContent>
+      </Dialog>
     </FormModal>
   )
 }
@@ -787,10 +890,13 @@ function CheckRow({
 function WorkspacePicker({
   gw,
   value,
+  taken,
   onChange,
 }: {
   gw?: Gateway
   value: string
+  // 其他机器人已占用的项目（workspace → 机器人名）：置灰不可选（项目 ↔ 机器人 1:1）
+  taken: Map<string, string>
   onChange: (v: string) => void
 }) {
   const [projects, setProjects] = useState<Project[]>([])
@@ -867,17 +973,29 @@ function WorkspacePicker({
             </button>
           </DropdownMenuTrigger>
           <DropdownMenuContent align="start">
-            {projects.map((p) => (
-              <DropdownMenuItem key={p.path} onClick={() => choose(p.path)}>
-                <Check
-                  className={`text-primary ${p.path === value ? 'opacity-100' : 'opacity-0'}`}
-                />
-                <div className="min-w-0 flex-1">
-                  <div className="truncate text-sm text-ink">{p.name}</div>
-                  <div className="truncate font-mono text-[10px] text-muted-foreground">{p.path}</div>
-                </div>
-              </DropdownMenuItem>
-            ))}
+            {projects.map((p) => {
+              const holder = taken.get(p.path)
+              return (
+                <DropdownMenuItem
+                  key={p.path}
+                  disabled={!!holder}
+                  onClick={() => !holder && choose(p.path)}
+                >
+                  <Check
+                    className={`text-primary ${p.path === value ? 'opacity-100' : 'opacity-0'}`}
+                  />
+                  <div className="min-w-0 flex-1">
+                    <div className="truncate text-sm text-ink">{p.name}</div>
+                    <div className="truncate font-mono text-[10px] text-muted-foreground">{p.path}</div>
+                  </div>
+                  {holder && (
+                    <span className="shrink-0 text-[10px] text-muted-foreground">
+                      已被「{holder}」绑定
+                    </span>
+                  )}
+                </DropdownMenuItem>
+              )
+            })}
             <DropdownMenuSeparator />
             <DropdownMenuItem onClick={() => setCreating(true)} className="text-muted-foreground">
               <FolderPlus />

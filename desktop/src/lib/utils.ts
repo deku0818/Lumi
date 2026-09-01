@@ -97,3 +97,17 @@ export function errorMessage(e: unknown): string {
   const m = (e as { message?: unknown })?.message
   return typeof m === 'string' && m ? m : String(e)
 }
+
+// 渠道会话 → 归属的飞书机器人行。wire 的 channel 字段只有渠道名（多机器人同为
+// 'feishu'），机器人段编码在 thread_id 里：新机器人 `feishu-{botId}-…`，旧版迁移
+// 机器人（legacy_threads）沿用裸 `feishu-…` 放最后兜底。按 name 直接 find 会在
+// 多机器人时恒取第一行，把 B 机器人的会话标成 A 的审批模式/项目。
+export function botOfThread<
+  T extends { name: string; config: { id: string; legacy_threads?: boolean } },
+>(channels: T[], threadId: string): T | undefined {
+  const bots = channels.filter((c) => c.name === 'feishu')
+  return (
+    bots.find((c) => c.config.id && threadId.startsWith(`feishu-${c.config.id}-`)) ??
+    bots.find((c) => c.config.legacy_threads && threadId.startsWith('feishu-'))
+  )
+}

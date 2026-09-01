@@ -1,5 +1,12 @@
 # Changelog
 
+## [0.2.123] - 2026-09-01
+
+### Added
+- **项目级飞书机器人**——一台机器可配多个飞书机器人，每个绑定一个项目（1:1，app_id 全局唯一）。`lumi.json` 的 `channels.feishu` 从单对象改为机器人列表（旧配置读取时自动迁移，id 确定性派生、迁移机器人沿用原 thread key 保住历史会话）；`ChannelManager` 槽位按 `bot.id`、reload 按条 diff——改 A 不弹 B 的长连接。渠道设置页改为机器人列表 + 详情弹窗（新建先选项目，已占用项目置灰），会话侧栏按机器人分组、旁观横幅按 thread 归属显示对的审批模式与项目。新增 `delete_channel` RPC；CLI `lumi feishu config` 增 `--bot <id|名字>` / `--new`，`diagnose` 逐机器人体检（全并发）。新 thread key 带机器人段（`feishu-{id}-…`）——同一个群坐两个 Lumi 机器人也不撞会话。
+- **lark-cli 身份隔离**（新增 `lark_profile.py`）——解决「项目 B 的会话经 Bash 调 lark-cli 却用了机器全局身份」的串号问题。每个机器人对应一个 lark-cli profile（现成同 app 的复用、否则自建 `lumi-{id}`；CLI 与桌面共用 `save_bot_synced` 一条保存路径：校验 → 按需同步 → 单次落盘），serve 把 `shell_env_for` 注册为 shell env provider：项目绑了机器人，该项目所有会话的 Bash / 后台任务 / 技能内嵌命令自动注入 `LARKSUITE_CLI_PROFILE`（项目子目录同样命中），与用户全局 active profile、其他项目互不干扰；没绑不注入回落全局。需 lark-cli ≥ 1.0.92（体检有版本门槛 + 「lark-cli 身份」检查项）；妙记用户授权按 profile 各自独立。
+- 渠道保存/删除被后端拒绝时（如 App ID 撞已有机器人）错误原因显示在弹窗脚部，不再静默吞掉。
+
 ## [0.2.122] - 2026-08-27
 
 ### Changed

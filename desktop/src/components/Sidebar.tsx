@@ -27,7 +27,7 @@ import { useUpdateState } from '../update'
 import { MachineIcon, MachineMark, ReconnectButton, useMachineConn, type MachineMarker } from './MachineTabs'
 import type { ConnState } from '../gateway'
 import type { ChannelInfo, CronJob, Machine, SessionMeta } from '../types'
-import { basename, machineColor, machineName, sessionKey, beOf, FLOAT_GAP } from '@/lib/utils'
+import { basename, botOfThread, machineColor, machineName, sessionKey, beOf, FLOAT_GAP } from '@/lib/utils'
 import { useI18n, LANGS } from '../i18n'
 import {
   DropdownMenu,
@@ -263,29 +263,41 @@ export const Sidebar = memo(function Sidebar({
 
   // 全部 · IM 渠道分组（A2：机器级，组头「飞书 · 绑定项目」）。
   // 该机器无渠道会话则整组不渲染；渠道会话不进项目组（projectGroupsFor 已剔除）。
+  // 多机器人：按 thread 前缀归属机器人各成一组（行 name 全是 'feishu'，按 name 取
+  // 第一行会把 B 机器人的会话挂到 A 的项目组头下）；识别不出归属的归入无项目组。
   // 目前仅飞书一个渠道。（渠道连接状态灯仍在设置面板 ChannelsPanel 里展示）
   const renderChannelGroup = (backend: string) => {
     const mine = sessions.filter((s) => beOf(s) === backend && s.channel)
     if (!mine.length) return null
-    const key = `${backend}::__channel__`
-    const collapsed = !!collapsedP[key]
-    const info = (channels[backend] ?? []).find((c) => c.name === mine[0].channel)
-    const proj = info?.config.workspace ? basename(info.config.workspace) : ''
-    return (
-      <div key={key}>
-        <button
-          onClick={() => toggleP(key)}
-          className="w-full flex items-center gap-1.5 px-2 pt-1.5 pb-0.5 text-left text-[10.5px] text-muted-foreground hover:text-ink transition"
-        >
-          <Send size={11} className="shrink-0 opacity-70" />
-          <span className="min-w-0 truncate">
-            {t('sidebar.feishu')}
-            {proj && <span className="opacity-60"> · {proj}</span>}
-          </span>
-        </button>
-        {!collapsed && mine.sort(byRecency).map((s) => row(s))}
-      </div>
-    )
+    const chans = channels[backend] ?? []
+    const groups = new Map<string, typeof mine>()
+    for (const s of mine) {
+      const botId = botOfThread(chans, s.thread_id)?.config.id ?? ''
+      const arr = groups.get(botId)
+      if (arr) arr.push(s)
+      else groups.set(botId, [s])
+    }
+    return [...groups.entries()].map(([botId, group]) => {
+      const key = `${backend}::__channel__${botId}`
+      const collapsed = !!collapsedP[key]
+      const info = chans.find((c) => c.config.id === botId)
+      const proj = info?.config.workspace ? basename(info.config.workspace) : ''
+      return (
+        <div key={key}>
+          <button
+            onClick={() => toggleP(key)}
+            className="w-full flex items-center gap-1.5 px-2 pt-1.5 pb-0.5 text-left text-[10.5px] text-muted-foreground hover:text-ink transition"
+          >
+            <Send size={11} className="shrink-0 opacity-70" />
+            <span className="min-w-0 truncate">
+              {t('sidebar.feishu')}
+              {proj && <span className="opacity-60"> · {proj}</span>}
+            </span>
+          </button>
+          {!collapsed && group.sort(byRecency).map((s) => row(s))}
+        </div>
+      )
+    })
   }
 
   // 全部 · 机器段：可折叠头(状态光点 + 名 + ＋) + 项目分组

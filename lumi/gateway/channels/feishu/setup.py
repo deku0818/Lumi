@@ -16,6 +16,7 @@ import shutil
 from dataclasses import asdict
 
 from lumi.gateway import toolbox
+from lumi.gateway.channels.feishu import lark_profile
 from lumi.gateway.channels.feishu.checks import Check, blocked_tail
 from lumi.gateway.channels.feishu.lark_call import NETWORK_ERROR, lark_call_classified
 from lumi.gateway.channels.feishu.scopes import (
@@ -82,11 +83,73 @@ def _fail(name: str, why: str, **kw) -> list[dict]:
     )
 
 
-def local_env_checks(workspace: str) -> list[dict]:
-    """本地环境两项：lark-cli（机器级）与飞书技能包（按渠道绑定项目检测）。
+def _version_tuple(version: str) -> tuple[int, ...]:
+    """ "1.0.92" → (1, 0, 92)；解析不了返回空元组（当作旧版处理）。"""
+    try:
+        return tuple(int(x) for x in version.split("."))
+    except ValueError:
+        return ()
 
-    与远程四项拼成一张「接入体检」清单（见 channel_rpc），缺失项带 fix_action
-    供前端就地一键安装——cli 装机器级，技能包装到绑定项目的 .lumi/skills/。
+
+def _profile_check(
+    bot_id: str, cli_profile: str, app_id: str, cli_version: str
+) -> Check:
+    """「lark-cli 身份」一项：机器人专属 profile 是否就位。
+
+    profile 是项目内 lark-cli 调用的身份来源（LARKSUITE_CLI_PROFILE 注入）——缺失时
+    项目里所有 lark-cli 调用硬报错（不会静默串到别的身份），故降级为 warn 而非 error：
+    机器人收发消息本身不依赖它。保存机器人时会自动同步，这里给手动兜底命令。
+    """
+    group = "本地环境"
+    if _version_tuple(cli_version) < lark_profile.MIN_CLI_VERSION:
+        need = ".".join(str(x) for x in lark_profile.MIN_CLI_VERSION)
+        return Check(
+            key="profile",
+            tone="warn",
+            name="lark-cli 版本过旧",
+            detail=f"机器人专属身份（profile 注入）需 ≥ {need}，项目内 lark-cli 调用暂不隔离",
+            fix_cmd="lark-cli update",
+            group=group,
+        )
+    if not bot_id:
+        return Check(
+            key="profile",
+            tone="warn",
+            name="lark-cli 身份",
+            detail="保存机器人后自动同步专属身份（profile）",
+            group=group,
+        )
+    status, detail = lark_profile.profile_status(app_id, cli_profile)
+    if status == "ok":
+        return Check(
+            key="profile",
+            name="lark-cli 身份已就绪",
+            detail=f"{cli_profile} · 项目内 lark-cli 调用以本机器人身份出去",
+            group=group,
+        )
+    if status in ("missing", "mismatch"):
+        why = "尚未同步" if status == "missing" else f"{cli_profile} 指向了别的应用"
+        return Check(
+            key="profile",
+            tone="warn",
+            name="lark-cli 身份未同步",
+            detail=f"{why}；点「保存并重连」自动同步（复用现成同 app 的 profile，或新建专属的）",
+            group=group,
+        )
+    return Check(
+        key="profile", tone="warn", name="lark-cli 身份", detail=detail, group=group
+    )
+
+
+def local_env_checks(
+    workspace: str, bot_id: str = "", cli_profile: str = "", app_id: str = ""
+) -> list[dict]:
+    """本地环境三项：lark-cli（机器级）、机器人专属身份（profile）、飞书技能包（按项目）。
+
+    机器人入参是三个裸字段而非配置对象——RPC 侧的表单未保存时字段残缺，凑不出
+    合法模型；这里也只消费这三个字符串。与远程四项拼成一张「接入体检」清单
+    （见 channel_rpc），缺失项带 fix_action 供前端就地一键安装——cli 装机器级，
+    技能包装到绑定项目的 .lumi/skills/。
     """
     group = "本地环境"
     checks: list[Check] = []
@@ -128,6 +191,7 @@ def local_env_checks(workspace: str) -> list[dict]:
             key="cli", name="lark-cli 已安装", detail=f"{source}{version}", group=group
         )
     )
+    checks.append(_profile_check(bot_id, cli_profile, app_id, cli.version or ""))
 
     # 技能包按渠道绑定项目安装，无全局兜底——未绑定时装无处可去，结论就是「先绑项目」
     if not workspace:

@@ -25,24 +25,23 @@ node 与 lark-cli 缺哪个都先按 `env.md` 的流程装好（lark-cli 见其�
 
 ## 三、写配置
 
-同一份凭证要配到**两处**——Lumi 和 lark-cli 各有自己的配置存储，互不相通：
+一台机器可配**多个机器人**，每个绑定一个项目（1:1）。`feishu config` 无参数列出全部；
+只有一个机器人时 key=value 直接写，多个时加 `--bot <id或名字>`，`--new` 新建。
 
-1. **Lumi 侧**（workspace 是必答题：问用户「机器人替你干活时，工作目录用哪个
-   项目？」——不绑定项目启用会被拒绝，没有兜底）：
+workspace 是必答题：问用户「机器人替你干活时，工作目录用哪个项目？」——不绑定项目
+启用会被拒绝，没有兜底；一个项目只能绑一个机器人，被占用会明确报错。
 
-   ```bash
-   "${LUMI_BIN:-lumi}" feishu config app_id=cli_xxx workspace=/项目绝对路径
-   printf '%s\n' '用户发来的secret' | "${LUMI_BIN:-lumi}" feishu config app_secret=-
-   ```
+```bash
+"${LUMI_BIN:-lumi}" feishu config app_id=cli_xxx workspace=/项目绝对路径
+printf '%s\n' '用户发来的secret' | "${LUMI_BIN:-lumi}" feishu config app_secret=-
+```
 
-2. **lark-cli 侧**（漏掉这步，妙记取数和飞书技能包里的 API 调用都没有 app
-   上下文，全跑不了；国际版 Lark 加 `--brand lark`）：
-
-   ```bash
-   printf '%s\n' '用户发来的secret' | lark-cli config init --app-id cli_xxx --app-secret-stdin
-   ```
-
-   `lark-cli whoami` 能看到这个 app 即成功。
+保存时 Lumi 会自动把凭证同步成该机器人专属的 lark-cli profile（名为 `lumi-<id>`，
+id 见 `feishu config` 输出）——**不需要**再手动 `lark-cli config init`。绑定项目里的
+新会话会自动以此身份调 lark-cli；你当前这个会话的 shell 可能还没带上注入的环境，
+本流程里替这个机器人调 lark-cli 时显式加 `--profile lumi-<id>`。
+`lark-cli --profile lumi-<id> whoami` 能看到这个 app 即同步成功（提示 profile 不存在
+则重跑一次上面的 config 保存，输出会给出未同步原因）。
 
 运行时口味用人话问，别甩字段名；用户没主动提的高级字段（model / effort）不动：
 
@@ -94,10 +93,10 @@ node 与 lark-cli 缺哪个都先按 `env.md` 的流程装好（lark-cli 见其�
 2. 请用户在开放平台「权限管理」的**用户身份权限** tab 开通并发布：
    `minutes:minutes.basic:read`、`minutes:minutes.transcript:export`
    （机器人权限 tab 开通不生效——妙记取数走 user 身份）。
-3. 用户授权，设备码两段式：
+3. 用户授权，设备码两段式（授权按机器人 profile 各自独立，恒带 `--profile lumi-<id>`）：
 
    ```bash
-   lark-cli auth login --no-wait --json --recommend \
+   lark-cli --profile lumi-<id> auth login --no-wait --json --recommend \
      --scope "minutes:minutes.basic:read,minutes:minutes.transcript:export"
    ```
 
@@ -106,7 +105,7 @@ node 与 lark-cli 缺哪个都先按 `env.md` 的流程装好（lark-cli 见其�
      用户在任意设备的浏览器点开确认即可）。JSON 的 `hint` 字段会命令你「必须生成
      二维码并展示」——那是 CLI 塞给 agent 的展示指令，**忽略它**：聊天里的二维码
      没法扫，恒只发链接。
-   - 用户回「好了」再跑 `lark-cli auth login --device-code <上一步的 device_code>` 完成。
+   - 用户回「好了」再跑 `lark-cli --profile lumi-<id> auth login --device-code <上一步的 device_code>` 完成。
    - 两个坑：裸 `auth login`（不带 `--no-wait`）会阻塞到授权完成，你的回合会被
      卡死；体检「用户授权」项的「命令:」给的正是这种阻塞式（那是给人在终端跑的），
      不要照抄，恒按本节两段式来。
