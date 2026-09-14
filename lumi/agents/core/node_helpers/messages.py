@@ -108,6 +108,11 @@ def format_reminder(header: str, lines: list[str]) -> str:
 # ---------------------------------------------------------------------------
 
 
+def is_malformed_tool_call(tc: Any) -> bool:
+    """缺 id 或 name 的 tool_call（流式聚合残片）——协议层必要字段缺失，配对 / 回传都会炸。"""
+    return not tc.get("id") or not tc.get("name")
+
+
 def _extract_tool_call_ids(tool_calls: list[Any]) -> set[str | None]:
     """从 tool_calls 中提取所有 id。"""
     ids: set[str | None] = set()

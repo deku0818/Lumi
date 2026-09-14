@@ -8,6 +8,7 @@
     "message.delta": { "payload": { "text": "string", "usage?": "Usage" } },
     "thinking.delta": { "payload": { "text": "string", "usage?": "Usage" }, "note": "模型思考增量（Anthropic thinking 块 / 方言 reasoning_content）" },
     "message.complete": { "payload": { "usage?": "Usage" } },
+    "message.retry": { "payload": {}, "note": "模型输出畸形 tool_call（缺 id/name 的流式聚合残片），CallModel 丢弃该响应重试一次；前端据此把本次调用流出的正文回滚到该次调用的 message.start 边界（不动同轮更早迭代的正文），思考文本清空，重试的流从头开始。注意畸形那次调用的 message.complete 先于本事件到达，故回滚边界不能靠「流式中」标记反推。重试仍畸形则后端剔除空壳兜底，不再发此事件" },
     "tool.generating": { "payload": {}, "note": "模型正在生成工具调用参数" },
     "compaction.status": { "payload": { "active": "boolean" }, "note": "对话历史压缩进行中：active=true 开始、false 结束。压缩节点(Summarizer)内部的摘要 LLM 调用不作为 message.* 流出（否则摘要全文会泄漏成助手回答），改由此事件驱动「正在压缩对话」指示" },
     "tool.start": { "payload": { "name": "string", "args": "object", "tool_call_id": "string", "run_id?": "string" } },

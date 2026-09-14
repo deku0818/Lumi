@@ -40,7 +40,7 @@ from lumi.agents.core.meta_message import (
     synthetic_human_message,
 )
 from lumi.agents.core.node_helpers.messages import inject_text_into_message
-from lumi.agents.core.nodes import build_reject_messages
+from lumi.agents.core.nodes import LUMI_MODEL_RETRY_EVENT, build_reject_messages
 from lumi.agents.core.state import LumiAgentContext
 from lumi.agents.permissions.workspace import set_run_authorized_source_for
 from lumi.agents.runtime.bg_tasks import (
@@ -177,6 +177,9 @@ class EventKind(StrEnum):
     MESSAGE_DELTA = "message.delta"
     THINKING_DELTA = "thinking.delta"  # 模型思考增量（Anthropic thinking 块 / 方言 reasoning_content）
     MESSAGE_COMPLETE = "message.complete"
+    MESSAGE_RETRY = (
+        "message.retry"  # CallModel 丢弃畸形响应重试：前端清掉本轮已流出的文本
+    )
     TOOL_GENERATING = "tool.generating"  # LLM 正在生成工具调用参数
     COMPACTING = (
         "compaction.status"  # 历史压缩进行中（Summarizer 内部摘要调用不外泄为助手消息）
@@ -1301,6 +1304,16 @@ class AgentBridge:
                                     tool_call_id=tool_call_id,
                                     parent_run_id=parent_id,
                                     run_id=run_id if name == "agent" else "",
+                                )
+
+                            elif (
+                                kind == "on_custom_event"
+                                and event.get("name") == LUMI_MODEL_RETRY_EVENT
+                            ):
+                                # 半截 buffer 无需在此清：重试那次调用的 on_chat_model_start 会重置
+                                yield BridgeEvent(
+                                    kind=EventKind.MESSAGE_RETRY,
+                                    parent_run_id=parent_id,
                                 )
 
                             elif (

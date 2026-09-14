@@ -149,6 +149,8 @@ export type Item =
       outTok?: number
     }
   | { id: number; kind: 'notice'; text: string }
+  // 后端丢弃畸形响应重试后的本轮提示（message.retry）：轮结束即清，不进历史
+  | { id: number; kind: 'retry' }
 
 // 子代理内部的一次工具调用（不展开 output/diff，只展示调了什么）
 export interface SubTool {

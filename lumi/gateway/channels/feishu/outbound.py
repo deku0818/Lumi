@@ -60,6 +60,16 @@ async def tool_activity(
     )
 
 
+async def stream_mark(streaming, chat_id: str) -> None:
+    """一次模型调用开始 → 记下正文边界，供 retry 精确回滚（wire 约定单点）。"""
+    await streaming.send_delta(chat_id, "", {"_mark": True})
+
+
+async def retry_reset(streaming, chat_id: str, reply_to: str) -> None:
+    """后端丢弃畸形响应重试 → 回滚本次调用的正文、状态行改显重试（wire 约定单点）。"""
+    await streaming.send_delta(chat_id, "", {"_reset": True, "message_id": reply_to})
+
+
 # 飞书会话不支持人工工具审批：泄漏的 approval.request 一律以此理由自动拒绝。
 _AUTO_REJECT = {
     "decision": "reject",
@@ -112,6 +122,10 @@ async def run_turn(
                     await streaming.send_delta(
                         chat_id, evt.text, {"message_id": reply_to}
                     )
+            elif kind == EventKind.MESSAGE_START:
+                await stream_mark(streaming, chat_id)
+            elif kind == EventKind.MESSAGE_RETRY:
+                await retry_reset(streaming, chat_id, reply_to)
             elif kind == EventKind.TOOL_START:
                 await tool_activity(streaming, chat_id, reply_to, "start", evt.name)
             elif kind == EventKind.TOOL_COMPLETE:

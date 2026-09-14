@@ -169,6 +169,8 @@ mention_key——`id=` 是**发送方应用**的 open_id（open_id 每应用一�
 | EventKind | 处理 |
 |---|---|
 | `message.delta` | 喂打字机流式卡片 |
+| `message.start` | 记下本次模型调用的正文边界（`buf.committed`），供 retry 精确回滚 |
+| `message.retry` | 后端丢弃畸形响应重试：正文回滚到边界（同轮更早迭代的正文保留），状态行改显「输出异常，重新生成中…」，工具或正文一到即让位 |
 | `tool.start` / `tool.complete` | 驱动「正在…」忙碌状态行 |
 | `clarify.request` | ask 已禁用，正常不出现；防御性 `resolve_approval(ASK_CANCELLED)` |
 | `approval.request` | 泄漏的工具审批 → 一律自动 `resolve_approval(reject)`，永不弹审批卡 |

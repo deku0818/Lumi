@@ -121,6 +121,8 @@ def _status_line(buf: FeishuStreamBuf) -> str:
     if not buf.busy:
         return ""
     frame = TOOL_SPINNER_FRAMES[buf.anim_frame % len(TOOL_SPINNER_FRAMES)]
+    if buf.retrying:
+        return f"{frame} 输出异常，重新生成中…"
     if buf.active_tools:
         actions: list[str] = []
         for n in buf.active_tools:
@@ -168,6 +170,10 @@ class FeishuStreamBuf:
     queue: UpdateQueue | None = field(default=None, repr=False)
     active_tools: list[str] = field(default_factory=list)
     busy: bool = False
+    retrying: bool = False  # 后端丢弃畸形响应重试中：状态行改显重试文案
+    committed: int = (
+        0  # 本次模型调用开始时的正文长度：retry 回滚到此，不动更早迭代的正文
+    )
     anim_frame: int = 0
     anim_timer: asyncio.TimerHandle | None = field(default=None, repr=False)
 
@@ -287,6 +293,8 @@ class FeishuStreaming:
         - ``_stream_end=True``：终态。``_aborted=True`` 表示流异常中止，丢弃累积文本但
           仍关掉 streaming_mode；默认则 flush 全量 + 关 streaming_mode。
         - ``_tool_activity={"phase","name"}``：工具开始/结束信号，驱动忙碌状态行。
+        - ``_mark=True``：一次模型调用开始，记下正文边界供 ``_reset`` 回滚。
+        - ``_reset=True``：后端丢弃畸形响应重试，正文回滚到边界，状态行改显重试文案。
         - 其它：普通 token delta，追加到 buf.text，交节流器 ``note``。
         """
         if not self.channel.client:
@@ -308,6 +316,16 @@ class FeishuStreaming:
             await self._note_tool_activity(chat_id, activity, meta.get("message_id"))
             return
 
+        if meta.get("_mark"):
+            buf = self.bufs.get(chat_id)
+            if buf is not None:
+                buf.committed = len(buf.text)
+            return
+
+        if meta.get("_reset"):
+            await self._note_retry(chat_id, meta.get("message_id"))
+            return
+
         if not delta:
             return
         buf = self.bufs.get(chat_id)
@@ -325,6 +343,7 @@ class FeishuStreaming:
         if buf.active_tools or buf.busy:
             buf.active_tools.clear()
             buf.busy = False
+            buf.retrying = False
             self._cancel_anim(buf)
             if buf.card_id is not None:
                 self._enqueue_render(buf)
@@ -431,6 +450,25 @@ class FeishuStreaming:
 
         buf.queue.enqueue(_task)
 
+    async def _note_retry(self, chat_id: str, message_id: str | None) -> None:
+        """丢弃畸形响应重试：正文回滚到本次调用的起点，状态行改显重试文案。
+
+        与工具状态同一条「进忙碌态」路径（建 buf / 建卡 / 起 spinner / 重渲染）。
+        """
+        buf = self.bufs.get(chat_id)
+        if buf is None:
+            buf = self._new_buf(chat_id)
+            self.bufs[chat_id] = buf
+        buf.text = buf.text[: buf.committed]  # 只回滚被丢弃那次调用流出的正文
+        buf.busy = True
+        buf.retrying = True
+
+        if not await self._ensure_card(buf, message_id):
+            return  # 无 reply 锚点或建卡失败，等正文路径建卡
+
+        self._schedule_anim(chat_id)
+        self._enqueue_render(buf)
+
     async def _note_tool_activity(
         self, chat_id: str, activity: dict[str, str], message_id: str | None
     ) -> None:
@@ -453,6 +491,7 @@ class FeishuStreaming:
                 return
             buf.active_tools.remove(name)
         buf.busy = True
+        buf.retrying = False  # 工具已动起来：重试的响应在产出真内容，状态行让位
 
         if not await self._ensure_card(buf, message_id):
             return  # 无 reply 锚点或建卡失败，等正文路径建卡后再带上状态行

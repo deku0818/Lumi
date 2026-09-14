@@ -1,5 +1,6 @@
 from typing import Literal
 
+from langchain_core.callbacks import adispatch_custom_event
 from langchain_core.messages import (
     AIMessage,
     HumanMessage,
@@ -21,6 +22,7 @@ from lumi.agents.core.node_helpers.execution import (
 from lumi.agents.core.node_helpers.messages import (
     cleanup_incomplete_tool_calls,
     inject_message_cache_breakpoints,
+    is_malformed_tool_call,
 )
 from lumi.agents.core.preprocessing.compact import (
     build_compacted_update,
@@ -102,7 +104,7 @@ async def call_model(
             transformed_messages.append(m)
 
     try:
-        response = await chain.ainvoke({"messages": transformed_messages})
+        response = await _invoke_validated(chain, transformed_messages)
     except Exception as exc:
         # PTL 兜底：路由回 Summarizer 强制压缩后经正常拓扑重试（摘要调用在
         # Summarizer 节点名下运行，bridge 的压缩事件过滤天然生效）。ptl_retry
@@ -119,6 +121,33 @@ async def call_model(
     if state.get("ptl_retry"):
         update["ptl_retry"] = False  # 压缩重试成功，恢复下一次 PTL 的压缩机会
     return update
+
+
+# astream_events 中浮现该名的 on_custom_event 即一次丢弃重试；bridge 据此 yield message.retry。
+LUMI_MODEL_RETRY_EVENT = "lumi_model_retry"
+
+
+async def _invoke_validated(chain, messages: list) -> AIMessage:
+    """调模型并校验 tool_calls 协议字段：畸形响应不落库，重试一次后兜底剔除。
+
+    流式聚合偶发吐出缺 id / name 的空壳 tool_call（客户现场：qwen 一轮输出畸变），
+    落库后配对 ToolMessage 与回传模型 API 都会炸，且会永久污染 checkpoint。此时响应
+    尚未进 state，重试是零污染的；先发 retry 事件让前端清掉本轮已流出的文本。重试
+    仍畸形则剔掉空壳照常返回（最坏是这轮没调工具），并把原始 tool_calls 打进日志定性。
+    """
+    response = await chain.ainvoke({"messages": messages})
+    if not any(map(is_malformed_tool_call, response.tool_calls)):
+        return response
+    logger.warning(
+        "[CallModel] 模型输出畸形 tool_calls，丢弃重试: %r", response.tool_calls
+    )
+    await adispatch_custom_event(LUMI_MODEL_RETRY_EVENT, {})
+    response = await chain.ainvoke({"messages": messages})
+    kept = [tc for tc in response.tool_calls if not is_malformed_tool_call(tc)]
+    if len(kept) != len(response.tool_calls):
+        logger.error("[CallModel] 重试仍畸形，剔除空壳兜底: %r", response.tool_calls)
+        response.tool_calls = kept
+    return response
 
 
 def _cmd_messages(cmd: Command) -> list:

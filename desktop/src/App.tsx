@@ -214,6 +214,11 @@ function finishStreaming(items: Item[]): Item[] {
   )
 }
 
+// 轮次收尾：结束流式气泡 + 清掉只活在本轮的重试提示（complete/error 共用）。
+function finishTurn(items: Item[]): Item[] {
+  return finishStreaming(items.filter((it) => it.kind !== 'retry'))
+}
+
 // 子代理内部事件归属：把 tool.start/complete 与 token 用量写进 runId 匹配的 agent 卡片。
 // 找不到父卡片（嵌套子代理等）则返回 null，由调用方丢弃。
 // 子事件 payload：tool.start / tool.complete / message.complete 三者的字段并集（按访问取并、全可选），
@@ -295,6 +300,9 @@ type SessionState = {
   compacting?: boolean
   // todos 工具的任务列表快照（右栏任务进度节）；空/未定义 = 节不渲染
   todos?: TodoItem[]
+  // 本次模型调用开始时的 items 长度：message.retry 据此只回滚这一次调用流出的气泡，
+  // 不误伤同一轮里更早迭代（已落库）的助手文字。message.start 每次调用都刷新。
+  streamMark?: number
 }
 const emptySession = (items: Item[] = []): SessionState => ({
   items,
@@ -755,7 +763,7 @@ export default function App() {
     // 子代理的逐字流（正文/思考）不进 UI——只把子工具调用与 token 用量归属到父
     // agent 卡片（见下方 applyChildEvent）。中断类（审批/澄清/计划）即便带
     // parent_run_id 也照常往下走，仍需用户处理。
-    if (parentRun && (type === 'message.delta' || type === 'message.start' || type === 'thinking.delta')) {
+    if (parentRun && (type === 'message.delta' || type === 'message.start' || type === 'message.retry' || type === 'thinking.delta')) {
       return
     }
     // 系统通知：回复完成 + 等待用户处理的中断（审批/提问/计划）。
@@ -818,8 +826,22 @@ export default function App() {
           // 历史压缩进行中：仅切状态，不进消息流（摘要全文由后端拦截，不会泄漏为助手回答）
           n = { ...s, compacting: !!payload.active }
           break
+        case 'message.start':
+          // 每次模型调用的流起点。retry 要回滚的正是本次调用之后追加的气泡，而
+          // 畸形那次调用的 message.complete 先于 message.retry 到达（已把 streaming
+          // 清成 false），故必须在此记边界，不能事后靠 streaming 反推。
+          n = { ...s, streamMark: s.items.length }
+          break
         case 'message.complete':
           n = { ...s, items: finishStreaming(s.items), ctx: ctxFromUsage(payload.usage) ?? s.ctx }
+          break
+        case 'message.retry':
+          // 后端丢弃了畸形响应重试：回滚本次调用流出的气泡，原位留一行提示
+          //（思考文本由下方统一收口清掉）
+          n = {
+            ...s,
+            items: [...s.items.slice(0, s.streamMark ?? s.items.length), { id: nid(), kind: 'retry' }],
+          }
           break
         case 'tool.start': {
           const tcid = payload.tool_call_id ?? ''
@@ -878,7 +900,7 @@ export default function App() {
             compacting: false,
             approval: [],
             clarify: [],
-            items: finishStreaming(s.items),
+            items: finishTurn(s.items),
             ctx: ctxFromUsage(payload.usage) ?? s.ctx,
           }
           break
@@ -890,7 +912,7 @@ export default function App() {
             compacting: false,
             approval: [],
             clarify: [],
-            items: [...finishStreaming(s.items), { id: nid(), kind: 'notice', text: payload.message }],
+            items: [...finishTurn(s.items), { id: nid(), kind: 'notice', text: payload.message }],
           }
           break
       }
@@ -2304,8 +2326,8 @@ export default function App() {
         if (text && lastKey) map.set(lastKey, text) // 收尾上一轮
         text = null
         lastKey = null
-      } else if (kind !== 'notice') {
-        // 助手文字/工具才能锚定复制按钮；错误气泡(notice)跳过，不占锚点
+      } else if (kind !== 'notice' && kind !== 'retry') {
+        // 助手文字/工具才能锚定复制按钮；错误气泡(notice)/重试提示跳过，不占锚点
         lastKey = segKey(seg)
         if (seg.kind === 'item' && seg.item.kind === 'assistant' && seg.item.text) {
           text = seg.item.text
@@ -3152,6 +3174,18 @@ function StatusIndicator({
   )
 }
 
+// 单独组件：useI18n 会订阅 i18n context，放进 memo 的 ItemView 会让整条历史随
+// context 更新重渲染（含 ReactMarkdown 重解析），故只让这一行订阅。
+function RetryHint() {
+  const { t } = useI18n()
+  return (
+    <div className="flex items-center gap-2.5 text-muted-foreground text-sm">
+      <span className="lumi-orb lumi-orb-idle" />
+      <span>{t('status.retried')}</span>
+    </div>
+  )
+}
+
 // memo：流式期间每个 delta 都重建 items 数组，但未变更项保持对象身份，
 // memo 让历史消息（尤其 ReactMarkdown 解析）不随每个 token 重渲染。
 const ItemView = memo(function ItemView({ item }: { item: Exclude<Item, { kind: 'tool' }> }) {
@@ -3206,6 +3240,9 @@ const ItemView = memo(function ItemView({ item }: { item: Exclude<Item, { kind: 
         <Markdown>{item.text}</Markdown>
       </div>
     )
+  }
+  if (item.kind === 'retry') {
+    return <RetryHint />
   }
   return (
     <div className="selectable text-sm text-error/80 bg-error/5 rounded-xl px-3.5 py-2.5">

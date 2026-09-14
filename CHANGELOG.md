@@ -1,5 +1,11 @@
 # Changelog
 
+## [0.2.124] - 2026-09-14
+
+### Fixed
+- **模型吐出畸形 tool_call 不再毁掉会话**（`nodes._invoke_validated`）— 流式聚合偶发产出缺 `id` / `name` 的空壳 tool_call（客户现场 qwen，LangChain 自己聚合就会得到 `{'name': '', 'id': None}`）。此前空壳直接落进 checkpoint：无名工具走到审批，用户收到一张没有名字的审批卡、本轮挂住，之后每轮补配对 `ToolMessage(tool_call_id=None)` 撞 pydantic 校验，会话永久报废。现在 CallModel 在响应进 state 之前校验：畸形即丢弃并重试一次（零污染），重试仍畸形则剔掉空壳照常返回，原始 tool_calls 打进日志定性。
+- **重试时已流到屏幕上的乱码被回滚**（新增 `message.retry` 事件）— 桌面端原位留一行「输出异常，已重新生成」提示、轮次结束即清；飞书卡片正文回滚、状态行改显重试文案。回滚边界由 `message.start` 记下而非靠「流式中」标记反推：端到端实测畸形那次调用的 `message.complete` 先于 `message.retry` 到达，靠标记判定会一个都删不掉；按调用记边界也保证同一轮更早迭代的正文不被误伤。
+
 ## [0.2.123] - 2026-09-01
 
 ### Added
