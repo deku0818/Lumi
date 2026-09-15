@@ -44,7 +44,7 @@ START → Summarizer（超阈值当轮就地压缩 / ptl_retry 置位则绕阈�
   → PreprocessMessages（UserPromptSubmit hook 注入上下文）
   → CallModel → is_use_tool() 条件路由:
   ├─ ToolExecutor（已授权或 BYPASS_TOOLS）→ after_tool_executor → CallModel（循环）
-  ├─ HumanApproval（需用户审批）→ approve: ToolExecutor / reject·cancel: END / DENY·无审批通道: CallModel
+  ├─ HumanApproval（需用户审批，逐个 decisions）→ 有允许: ToolExecutor（被拒的先补拒绝 ToolMessage，ToolExecutor 只跑未应答的）/ 全拒绝·cancel: END / DENY·无审批通道: CallModel
   ├─ AutoClassify（auto 模式安全分类器）→ approve: ToolExecutor / reject: CallModel
   ├─ PolicyReject（执行模式策略阻止）→ CallModel
   ├─ OnAgentStop（无工具调用，分发 Stop hooks）→ END（hook 可拉回 CallModel）

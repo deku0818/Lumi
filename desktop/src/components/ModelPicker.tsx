@@ -27,13 +27,16 @@ export function ModelPicker({
   providers,
   active,
   machine,
+  multi,
+  project,
   onSwitch,
   onSwitchEffort,
 }: {
   providers: ProviderProfile[]
   active: ActiveModel
-  // 多机时传入当前会话所在机器（chip 图标 + 下拉机器头）；单机为 undefined
-  machine?: MachineMarker
+  machine: MachineMarker // 当前会话所在机器（下拉头恒显；chip 图标仅多机时）
+  multi: boolean
+  project: string // 当前会话所属项目名；项目主页为「新会话默认」项目
   onSwitch: (provider: string, model: string) => void
   onSwitchEffort: (level: string) => void
 }) {
@@ -56,7 +59,7 @@ export function ModelPicker({
           title={t('model.switch')}
           className="group flex items-center gap-1.5 max-w-60 px-2 py-1 rounded-lg text-xs text-muted-foreground hover:text-ink hover:bg-canvas/60 transition outline-none"
         >
-          {machine && <MachineMark id={machine.id} color={machine.color} size={13} />}
+          {multi && <MachineMark id={machine.id} color={machine.color} size={13} />}
           <span className="truncate">{active.model || t('model.default')}</span>
           {stored !== 'auto' && (
             <span className={stored === 'ultra' ? 'text-primary font-medium' : 'opacity-70'}>
@@ -67,16 +70,17 @@ export function ModelPicker({
         </button>
       </DropdownMenuTrigger>
       <DropdownMenuContent side="top" align="start" className="w-60">
-        {/* 机器头（多机时）：标明此对话运行在哪台机器，下面配的就是它的模型 */}
-        {machine && (
-          <div className="flex items-center gap-2 px-2 py-1.5 mb-1 border-b border-line/60">
-            <MachineMark id={machine.id} color={machine.color} size={15} />
-            <div className="min-w-0">
-              <div className="truncate text-[12.5px] font-medium">{machine.name}</div>
-              <div className="text-[10.5px] text-muted-foreground">{t('model.onMachine')}</div>
+        {/* 项目 · 机器头：标明此对话属于哪个项目、跑在哪台机器（工具条上不另设项目 chip，
+            这里是唯一的项目标识）；单机只显项目名 */}
+        <div className="flex items-center gap-2 px-2 py-1.5 mb-1 border-b border-line/60">
+          <MachineMark id={machine.id} color={machine.color} size={15} />
+          <div className="min-w-0">
+            <div className="truncate text-[12.5px] font-medium">
+              {multi ? `${project} · ${machine.name}` : project}
             </div>
+            <div className="text-[10.5px] text-muted-foreground">{t(multi ? 'model.onProjectMachine' : 'model.onProject')}</div>
           </div>
-        )}
+        </div>
         {/* 当前模型 */}
         <DropdownMenuItem className="pointer-events-none">
           <div className="flex-1 min-w-0">

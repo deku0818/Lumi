@@ -1,5 +1,22 @@
 # Changelog
 
+## [0.2.125] - 2026-09-15
+
+### Added
+- **工具审批改为逐个决定**（`ApprovalDialog.tsx` + 新增 `StepCard.tsx`）— 一批调用一次只看一个（逐项参数、长值折叠可展开），允许 / 拒绝即翻下一项；多个调用时末页总览可点回修改再提交。刻意不给「全部允许」类批量捷径——不看就同意等于没有审批。
+- **部分拒绝不再整批作废**（`nodes._apply_decisions`）— `resume` 新增 `{decisions}` 应答形状（与 `tool_calls` 同序，缺项按拒绝 fail-closed）：被拒调用补拒绝 ToolMessage，已允许的进 ToolExecutor 执行后照常回 CallModel，模型看到结果与被拒说明继续干活；全拒绝仍结束本轮。旧 `{decision}` 形状（飞书 / stop 收尾）展开成同值列表走同一裁决。
+- **ask 提问分步作答**（`ClarifyDialog.tsx`）— 一次一题，单选点选项即翻下一题，多选 / 自填点「下一个」，多题末页总览可回改；与审批共用 `StepCard` 骨架（翻页胶囊、按方向滑入、内容区封顶半屏滚动）。
+
+### Changed
+- **ToolExecutor 只执行未应答的调用**（`nodes.tool_executor`）— 直接把未应答 ToolCall 列表喂给 ToolNode，工具注入的 state 由 ToolNode 从 config 读真实图状态，hook 与工具看到的是真实历史而非伪造的过滤视图。`AgentBridge._dangling_tool_calls` 下沉为 `node_helpers.messages.dangling_tool_calls`，图与 gateway 共用。
+- **侧栏改为项目树**（`Sidebar.tsx`）— 去掉「最近 / 全部」tab、全局搜索与「最近」条数设置；各机器的项目组扁平并列按最近活跃排序，机器身份由组头图标颜色承载；组头悬停「＋」在该项目新建会话、「🔍」项目内搜索（含飞书）；飞书会话按绑定项目归入组内「飞书 · 机器人名」子组。定时任务移出侧栏，走顶部「定时任务」入口。
+- **新开应用默认 AI 审批（auto）**，`tool_mode` 恒显式透传（含 `default`），不再靠「缺省即 default」隐式约定。
+- **模型选择器下拉头显示所属项目**（多机时「项目 · 机器」），项目主页指向该主页的机器。
+- 审批富化去掉「命中 ask 规则」提示（需审批本身已说明这一点）。
+
+### Fixed
+- `test_message_retry_e2e` 走真 sqlite checkpointer 时不再写进 `~/.lumi`（侧栏冒出测试会话）。
+
 ## [0.2.124] - 2026-09-14
 
 ### Fixed

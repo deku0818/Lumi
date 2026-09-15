@@ -60,7 +60,7 @@ import type {
 } from './types'
 import { EMPTY_BG_OUTPUT } from './types'
 import { Markdown } from './components/Markdown'
-import { ApprovalDialog } from './components/ApprovalDialog'
+import { ApprovalDialog, type Decision } from './components/ApprovalDialog'
 import { ClarifyDialog, ASK_CANCELLED } from './components/ClarifyDialog'
 import { Sidebar } from './components/Sidebar'
 import { MachinesProvider } from './components/MachineTabs'
@@ -85,7 +85,7 @@ import { AppTitleBar } from './components/AppTitleBar'
 import { toast } from './components/Toast'
 import { isCommandMode, parseCommand, matchCommands } from './slash'
 import { toolDiff, type DiffLine } from './diff'
-import { clip, basename, botOfThread, fmtTokens, machineColor, machineName, msgTime, sessionKey, keyThread, keyBackend, beOf, FLOAT_GAP } from '@/lib/utils'
+import { asRecord, clip, basename, botOfThread, fmtTokens, machineColor, machineName, msgTime, sessionKey, keyThread, keyBackend, beOf, FLOAT_GAP } from '@/lib/utils'
 import { Button } from '@/components/ui/button'
 import { Tooltip, TooltipContent, TooltipTrigger } from '@/components/ui/tooltip'
 import { useTheme } from './theme'
@@ -434,7 +434,8 @@ export default function App() {
   // auto 审批分类器指针（providers.json 顶级 classifier，空=跟随会话模型）
   const [classifier, setClassifier] = useState<ModelPointer>({})
   // 工具审批模式：随后续 send/run 透传给后端（auto=AI 审批分类器）
-  const [toolMode, setToolMode] = useState<ToolMode>('default')
+  // 新开应用默认 auto（AI 审批）；渠道各按自己配置的 tool_mode，不受此影响
+  const [toolMode, setToolMode] = useState<ToolMode>('auto')
   // 活动会话所在机器：ModelPicker 机器标识 + 设置改模型时判断是否需刷新聊天侧。
   // 从复合 active key 派生（机器 id 已编码其中），杜绝与 active 脱同步——任何切换路径
   // （activate / 通知点击等）只要 setActive 就自动带对机器。空/无分隔符归一到 'local'。
@@ -465,15 +466,6 @@ export default function App() {
   const [uiFont, setUiFont] = useUiFont()
   const { t } = useI18n()
   const [notify, setNotify] = useState(() => localStorage.getItem('lumi-notify') === '1')
-  // 「最近」列表最多显示条数（界面偏好，localStorage 记忆，默认 20）
-  const [recentLimit, setRecentLimit] = useState(() => {
-    const v = parseInt(localStorage.getItem('lumi-recent-limit') || '20', 10)
-    return Number.isFinite(v) ? v : 20
-  })
-  const changeRecentLimit = (n: number) => {
-    localStorage.setItem('lumi-recent-limit', String(n))
-    setRecentLimit(n)
-  }
   // 图片嵌入消息（dataUrl→image 块）；其它文件只带绝对路径，发送时写进消息文本，
   // 由 Agent 用工具读取（不在此预授权，交给现有权限流程）
   const [attachments, setAttachments] = useState<Attachment[]>([])
@@ -2290,13 +2282,9 @@ export default function App() {
     })
   }
 
-  const decide = (decision: 'approve' | 'reject') =>
-    resumeWith(
-      decision === 'approve'
-        ? { decision: 'approve' }
-        : { decision: 'reject', message: t('approval.rejectedMessage') },
-      'approval',
-    )
+  // 逐个审批：decisions 与 tool_calls 同序；后端部分拒绝时执行已允许的、被拒的附说明回模型继续
+  const decide = (decisions: Decision[]) =>
+    resumeWith({ decisions, message: t('approval.rejectedMessage') }, 'approval')
 
   const streaming = items.some((it) => it.kind === 'assistant' && it.streaming)
   const hasMessages = items.length > 0
@@ -2462,6 +2450,8 @@ export default function App() {
   // 部件解耦——不显示上下文用量环（不读 cur.ctx，免后台流式 token 触发项目页重渲染）、
   // 永远显示发送键（不读活动会话 running）、隐藏文件夹菜单（会话级授权，发送前无会话可挂）。
   // 其余（斜杠命令/附件/模型选择/审批模式）与聊天页完全一致。
+  // 项目主页的模型钮指向「新会话默认」，机器/项目随主页；聊天页随活动会话
+  const pickerBackend = projectHome && view === 'project' ? projectHome.backend : activeBackend
   const composer = (placeholder: string, project = false) => (
     <div>
       {menuOpen && (
@@ -2552,15 +2542,13 @@ export default function App() {
           <ModelPicker
             providers={providers}
             active={project ? defaultModel : sessionModel}
-            machine={
-              machines.filter((m) => m.enabled !== false).length > 1
-                ? {
-                    id: activeBackend,
-                    name: machineName(activeBackend, machines),
-                    color: machineColor(activeBackend, machines),
-                  }
-                : undefined
-            }
+            machine={{
+              id: pickerBackend,
+              name: machineName(pickerBackend, machines),
+              color: machineColor(pickerBackend, machines),
+            }}
+            multi={machines.filter((m) => m.enabled !== false).length > 1}
+            project={basename(project ? projectHome?.path ?? '' : workspaceDir)}
             onSwitch={(p, m) => switchModel(p, m, project)}
             onSwitchEffort={(lv) => switchEffort(lv, project ? defaultModel : sessionModel)}
           />
@@ -2692,21 +2680,16 @@ export default function App() {
         loadedBackends={loadedBackends}
         machines={machines}
         channels={channels}
-        recentLimit={recentLimit}
         currentKey={view === 'chat' ? active : ''}
         conn={conn}
         model={model}
         activity={activity}
         projectsActive={view === 'projects' || view === 'project'}
         scheduledActive={view === 'scheduled'}
-        cronJobs={cronJobs}
-        readRuns={readRuns}
-        cronRunning={cronRunning}
-        activeCronJob={view === 'cronjob' ? activeCronJob : null}
-        onOpenCronJob={openCronJob}
         onSelect={selectSession}
         onNew={() => startNewChat()}
         onNewChat={(backend) => void goNewChat(backend)}
+        onNewChatIn={(backend, workspace) => void newSession(backend, workspace)}
         onOpenProjects={openProjects}
         onOpenScheduled={openScheduled}
         onOpenSettings={openSettings}
@@ -2901,9 +2884,17 @@ export default function App() {
                   <div className="px-6 pb-5">
                     <div className="max-w-3xl mx-auto w-full">
                       {/* 审批/澄清：渲染在输入框上方，切走时随会话留在原处 */}
-                      {approval && <ApprovalDialog data={approval} onDecide={decide} />}
+                      {/* key=approval_id：队首换成下一条挂起项时重置分步状态 */}
+                      {approval && (
+                        <ApprovalDialog
+                          key={String(approval.approval_id)}
+                          data={approval}
+                          onSubmit={decide}
+                        />
+                      )}
                       {clarify && (
                         <ClarifyDialog
+                          key={String(clarify.approval_id)}
                           data={clarify}
                           onSubmit={(answer) => resumeWith(answer, 'clarify')}
                           onCancel={() => resumeWith(ASK_CANCELLED, 'clarify')}
@@ -3000,8 +2991,6 @@ export default function App() {
           setUiFont={setUiFont}
           notify={notify}
           setNotify={toggleNotify}
-          recentLimit={recentLimit}
-          setRecentLimit={changeRecentLimit}
           gwFor={gwForBackend}
           onProvidersChanged={onProvidersChanged}
           onClose={() => {
@@ -3686,11 +3675,8 @@ function DiffView({ lines }: { lines: DiffLine[] }) {
   )
 }
 
-// 文本提取小工具（toolTitle 标题提取共用；clip/basename 在 lib/utils）
+// 文本提取小工具（toolTitle 标题提取共用；clip/basename/asRecord 在 lib/utils）
 const argStr = (v: unknown) => (typeof v === 'string' ? v : '')
-// 把未知的工具 args 安全收成 Record，便于按字段取值（toolTitle / agentName 共用）
-const asRecord = (v: unknown): Record<string, unknown> =>
-  v && typeof v === 'object' ? (v as Record<string, unknown>) : {}
 
 // 每个工具的展示元数据（图标 + 动作动词/名词 + 人类可读标题提取）集中在一张表，
 // 新增工具只需加一行。icon 驱动 ToolRow 图标，verb/noun 驱动 summarizeTools 聚合，

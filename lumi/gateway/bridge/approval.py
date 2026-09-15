@@ -72,8 +72,6 @@ class ApprovalEnricher:
             decisions.append(decision.value)
             if decision == PermissionDecision.DENY:
                 warnings.append(f"⚠ 工具 {name} 命中 deny 规则，该操作被标记为危险")
-            elif decision == PermissionDecision.ASK:
-                warnings.append(f"ℹ 工具 {name} 命中 ask 规则，需要确认")
 
             # Bash 安全校验器警告
             if name == "bash":

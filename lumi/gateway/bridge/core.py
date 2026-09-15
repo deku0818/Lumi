@@ -24,7 +24,6 @@ from langchain_core.messages import (
     AIMessage,
     HumanMessage,
     RemoveMessage,
-    ToolMessage,
 )
 from langchain_core.runnables.config import RunnableConfig
 from langgraph.errors import GraphBubbleUp
@@ -39,7 +38,10 @@ from lumi.agents.core.meta_message import (
     strip_injected_prefix,
     synthetic_human_message,
 )
-from lumi.agents.core.node_helpers.messages import inject_text_into_message
+from lumi.agents.core.node_helpers.messages import (
+    dangling_tool_calls,
+    inject_text_into_message,
+)
 from lumi.agents.core.nodes import LUMI_MODEL_RETRY_EVENT, build_reject_messages
 from lumi.agents.core.state import LumiAgentContext
 from lumi.agents.permissions.workspace import set_run_authorized_source_for
@@ -1471,7 +1473,7 @@ class AgentBridge:
             ):
                 return
             new_messages: list = build_reject_messages(
-                self._dangling_tool_calls(messages), content=_INTERRUPTED_TOOL_NOTE
+                dangling_tool_calls(messages), content=_INTERRUPTED_TOOL_NOTE
             )
             new_messages.append(
                 AIMessage(
@@ -1491,18 +1493,6 @@ class AgentBridge:
         """半截 buffer 成对重置（分片 + 消息 id 必须同步清，单一入口防脱钩）。"""
         self._partial_chunks = []
         self._partial_msg_id = ""
-
-    @staticmethod
-    def _dangling_tool_calls(messages: list) -> list[dict]:
-        """历史里未被 ToolMessage 应答的 tool_calls（中断落在工具执行期间的残留）。"""
-        answered = {m.tool_call_id for m in messages if isinstance(m, ToolMessage)}
-        return [
-            tc
-            for m in messages
-            if isinstance(m, AIMessage)
-            for tc in m.tool_calls
-            if tc.get("id") not in answered
-        ]
 
     def _resolve_subagent_parent(self, run_id: str, parent_ids: list[str]) -> str:
         """事件的子代理归属：祖先链中「最浅」的活跃 agent run，无则空串。
@@ -1596,7 +1586,7 @@ class AgentBridge:
         if has_interrupts:
             return
 
-        dangling = self._dangling_tool_calls(state.values.get("messages", []))
+        dangling = dangling_tool_calls(state.values.get("messages", []))
 
         update: dict = {}
         if state.values.get("ptl_retry"):

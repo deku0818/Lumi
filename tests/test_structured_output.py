@@ -54,11 +54,11 @@ class _StructuredFakeToolNode:
         self._tools = {t.name: t for t in tools}
         self._handle = handle_tool_errors or str
 
-    async def ainvoke(self, state):
-        tc = state["messages"][-1].tool_calls[0]
+    async def ainvoke(self, calls, config=None):
+        tc = calls[0]
         tool = self._tools[tc["name"]]
         try:
-            result = await tool.ainvoke({**tc, "type": "tool_call"})
+            result = await tool.ainvoke(tc)
         except Exception as e:
             result = ToolMessage(
                 content=self._handle(e),
@@ -77,7 +77,7 @@ class _MixedFakeToolNode:
     def __init__(self, tools, handle_tool_errors=None):
         pass
 
-    async def ainvoke(self, state):
+    async def ainvoke(self, calls, config=None):
         return [
             Command(
                 update={

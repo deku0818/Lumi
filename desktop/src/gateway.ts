@@ -47,9 +47,9 @@ const MAX_RETRY = 5 // 连续失败这么多次后停止自动重连
 // 附件上传上限，与后端 /upload 的 _MAX_FILE_BYTES 一致（ws.py）
 const MAX_UPLOAD_BYTES = 128 * 1024 * 1024
 
-// 附带工具审批模式：toolMode 省略或 'default' 时不传 tool_mode（后端按默认处理）
+// 附带工具审批模式：给了就原样透传（含 'default'），不靠「缺省即 default」的隐式约定
 function withToolMode<T extends object>(params: T, toolMode?: string): T {
-  return toolMode && toolMode !== 'default' ? { ...params, tool_mode: toolMode } : params
+  return toolMode ? { ...params, tool_mode: toolMode } : params
 }
 
 type EventHandler = (ev: WireEvent) => void

@@ -21,6 +21,7 @@ from lumi.agents.core.node_helpers.execution import (
 )
 from lumi.agents.core.node_helpers.messages import (
     cleanup_incomplete_tool_calls,
+    dangling_tool_calls,
     inject_message_cache_breakpoints,
     is_malformed_tool_call,
 )
@@ -155,6 +156,16 @@ def _cmd_messages(cmd: Command) -> list:
     return list((cmd.update or {}).get("messages") or [])
 
 
+def _pending_tool_calls(messages: list) -> list[dict]:
+    """末条 AIMessage 中尚无 ToolMessage 应答的 tool_calls（审批部分拒绝时被拒的已补应答）。"""
+    idx = next(
+        i
+        for i in range(len(messages) - 1, -1, -1)
+        if isinstance(messages[i], AIMessage)
+    )
+    return dangling_tool_calls(messages[idx:])
+
+
 async def tool_executor(
     state: LumiAgentState,
     runtime: Runtime[LumiAgentContext],
@@ -176,9 +187,8 @@ async def tool_executor(
         # 结构化输出真工具进 ToolExecutor 执行（与 call_model 注入同一 lru_cache 实例）
         tools = tools + [create_structured_output_tool(output_schema)]
 
-    # 1. PreToolUse hooks
-    last_message = state["messages"][-1]
-    pre_tool_calls = list(getattr(last_message, "tool_calls", []) or [])
+    # 1. PreToolUse hooks（只针对尚未应答的调用）
+    pre_tool_calls = _pending_tool_calls(state["messages"])
     # 内部伪工具 __structured_output__ 不暴露给用户 hook（否则宽 matcher 会误触发，
     # Block 还会破坏结构化输出流）；但保留在 pre_tool_calls 用于 Block 的 ToolMessage 配对。
     visible_tool_calls = [
@@ -229,7 +239,10 @@ async def tool_executor(
 
     # 2. 执行工具
     tool_node = ToolNode(tools, handle_tool_errors=handle_tool_error)
-    tool_messages = await tool_node.ainvoke(state)
+    # 直接喂 ToolCall 列表：只跑未应答的；工具注入的 state 由 ToolNode 从 config 读真实图状态
+    tool_messages = await tool_node.ainvoke(
+        [{**tc, "type": "tool_call"} for tc in pre_tool_calls], config
+    )
 
     # 3. 工具自带 Command 控制流（含 structured_output 成功写入）：保持直返
     if isinstance(tool_messages, Command):
@@ -520,37 +533,56 @@ async def human_approval(
         {"decision": "reject", "message": "用户停止了本轮，已拒绝该操作"},
     )
 
-    # 解析 decision 值
-    set_tool_mode: str | None = None
+    # 批量 {decision} 应答展开成同值列表，与逐个审批的 decisions 走同一裁决
+    tool_calls = last_message.tool_calls
     if isinstance(result, dict):
-        decision = result.get("decision", "reject")
+        decisions = result.get("decisions") or [result.get("decision", "reject")] * len(
+            tool_calls
+        )
         message = result.get("message", "")
         set_tool_mode = result.get("set_tool_mode")
     else:
         # 兼容字符串（简单场景 / headless）
-        decision = str(result)
-        message = ""
+        decisions, message, set_tool_mode = [str(result)] * len(tool_calls), "", None
+    return _apply_decisions(tool_calls, decisions, message, set_tool_mode, runtime)
 
-    match decision:
-        case "approve":
-            # tool_mode 是 context（运行时共享）属性，直接改即对后续工具生效——
-            # 无需经 Command.update 写 state（state 已无此字段）。
-            if set_tool_mode:
-                runtime.context.tool_mode = set_tool_mode
-            _widen_boundary_for(last_message.tool_calls, runtime)
-            return Command(goto="ToolExecutor")
-        case "cancel":
-            messages = build_reject_messages(
-                last_message.tool_calls,
-                content=message or "用户中断了工具调用请求",
-            )
-            return Command(goto=END, update={"messages": messages})
-        case _:  # reject 及默认
-            messages = build_reject_messages(
-                last_message.tool_calls,
-                content=message or "用户拒绝了工具执行",
-            )
-            return Command(goto=END, update={"messages": messages})
+
+def _apply_decisions(
+    tool_calls: list[dict],
+    decisions: list[str],
+    message: str,
+    set_tool_mode: str | None,
+    runtime: Runtime[LumiAgentContext],
+) -> Command:
+    """按与 tool_calls 同序的 decisions 裁决，缺项按拒绝（fail-closed）。
+
+    全拒绝 → END（附拒绝 / 中断原因）；有允许 → 被拒的补拒绝 ToolMessage 后进 ToolExecutor
+    （只执行未应答的），执行完照常回 CallModel，让模型看到结果与被拒说明继续干活。
+    """
+    approved: list[dict] = []
+    rejected: list[dict] = []
+    for i, tc in enumerate(tool_calls):
+        ok = i < len(decisions) and decisions[i] == "approve"
+        (approved if ok else rejected).append(tc)
+    content = message or (
+        "用户中断了工具调用请求" if "cancel" in decisions else "用户拒绝了工具执行"
+    )
+    if not approved:
+        return Command(
+            goto=END,
+            update={"messages": build_reject_messages(tool_calls, content=content)},
+        )
+    # tool_mode 是 context（运行时共享）属性，直接改即对后续工具生效——
+    # 无需经 Command.update 写 state（state 已无此字段）。
+    if set_tool_mode:
+        runtime.context.tool_mode = set_tool_mode
+    _widen_boundary_for(approved, runtime)
+    update = (
+        {"messages": build_reject_messages(rejected, content=content)}
+        if rejected
+        else None
+    )
+    return Command(goto="ToolExecutor", update=update)
 
 
 def build_reject_messages(

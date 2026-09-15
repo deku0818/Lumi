@@ -77,6 +77,11 @@ async def _no_tools(self, wait_mcp: bool = False) -> list:
     return []  # 不拉起项目 MCP：与本用例无关且会阻塞
 
 
+@pytest.fixture(autouse=True)
+def _isolated(isolated_config):
+    """真 initialize 走 sqlite checkpointer：不隔离会写进 ~/.lumi，侧栏冒出测试会话。"""
+
+
 async def _run(script: list[list[AIMessageChunk]], tmp_path):
     bridge = AgentBridge()
     with (

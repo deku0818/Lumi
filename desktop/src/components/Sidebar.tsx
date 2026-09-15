@@ -1,6 +1,5 @@
 import { memo, useEffect, useRef, useState, type ReactNode } from 'react'
 import {
-  AlertTriangle,
   ChevronRight,
   Clock,
   Folder,
@@ -26,7 +25,7 @@ import {
 import { useUpdateState } from '../update'
 import { MachineIcon, MachineMark, ReconnectButton, useMachineConn, type MachineMarker } from './MachineTabs'
 import type { ConnState } from '../gateway'
-import type { ChannelInfo, CronJob, Machine, SessionMeta } from '../types'
+import type { ChannelInfo, Machine, SessionMeta } from '../types'
 import { basename, botOfThread, machineColor, machineName, sessionKey, beOf, FLOAT_GAP } from '@/lib/utils'
 import { useI18n, LANGS } from '../i18n'
 import {
@@ -56,7 +55,7 @@ const keyOf = (s: SessionMeta) => sessionKey(beOf(s), s.thread_id)
 
 const projName = (dir: string) => (dir ? basename(dir) : '默认')
 
-// 折叠态持久化到 localStorage：返回 [record, toggle]，机器段 / 项目段共用。
+// 折叠态持久化到 localStorage：返回 [record, toggle]，项目组 / 飞书子组共用。
 function usePersistedToggle(key: string): [Record<string, boolean>, (k: string) => void] {
   const [map, setMap] = useState<Record<string, boolean>>(() => {
     try {
@@ -74,24 +73,32 @@ function usePersistedToggle(key: string): [Record<string, boolean>, (k: string) 
   return [map, toggle]
 }
 
-// 某台机器的会话按项目（workspace_dir）分组；当前项目排最前。渠道会话不进项目组
-// （A2：渠道身份优先于项目身份，另起机器级「飞书」分组）。
+// 会话按项目（workspace_dir）分组，桌面与渠道会话同一条路径归组（渠道会话的 checkpoint
+// 同样带 workspace_dir；机器人启用前必须绑项目，故不存在「无项目的飞书会话」这一类）。
 // 组内最近会话时间 —— 作为分组排序键，仅在有新会话时变化，点击选中不影响，故侧栏不跳动。
-const groupRecency = (list: SessionMeta[]) =>
-  Math.max(...list.map((s) => Date.parse(s.created_at || '') || 0))
+type ProjectGroup = {
+  backend: string
+  dir: string
+  name: string
+  recency: number
+  desktop: SessionMeta[]
+  channel: SessionMeta[]
+}
 
-function projectGroupsFor(sessions: SessionMeta[], backend: string) {
-  const mine = sessions.filter((s) => (s.backend || 'local') === backend && !s.channel)
-  const map = new Map<string, SessionMeta[]>()
-  for (const s of mine) {
+function projectGroupsFor(sessions: SessionMeta[], backend: string): ProjectGroup[] {
+  const map = new Map<string, ProjectGroup>()
+  for (const s of sessions) {
+    if (beOf(s) !== backend) continue
     const dir = s.workspace_dir || ''
-    const list = map.get(dir)
-    if (list) list.push(s)
-    else map.set(dir, [s])
+    let g = map.get(dir)
+    if (!g) {
+      g = { backend, dir, name: projName(dir), recency: 0, desktop: [], channel: [] }
+      map.set(dir, g)
+    }
+    g.recency = Math.max(g.recency, Date.parse(s.created_at || '') || 0)
+    ;(s.channel ? g.channel : g.desktop).push(s)
   }
-  return [...map.entries()]
-    .map(([dir, list]) => ({ dir, name: projName(dir), sessions: list }))
-    .sort((a, b) => groupRecency(b.sessions) - groupRecency(a.sessions))
+  return [...map.values()]
 }
 
 // 置顶优先，再按最近活跃（created_at）倒序 —— 「最近」流与筛选结果共用。
@@ -122,21 +129,16 @@ export const Sidebar = memo(function Sidebar({
   loadedBackends,
   machines,
   channels,
-  recentLimit,
   currentKey,
   conn,
   model,
   activity,
   projectsActive,
   scheduledActive,
-  cronJobs,
-  readRuns,
-  cronRunning,
-  activeCronJob,
-  onOpenCronJob,
   onSelect,
   onNew,
   onNewChat,
+  onNewChatIn,
   onOpenProjects,
   onOpenScheduled,
   onOpenSettings,
@@ -151,22 +153,17 @@ export const Sidebar = memo(function Sidebar({
   sessions: SessionMeta[]
   loadedBackends: Record<string, true> // 该机器 list_sessions 成功返回过才允许显示「暂无会话」
   machines: Machine[]
-  channels: Record<string, ChannelInfo[]> // 机器 id → IM 渠道列表（飞书组头绑定项目）
-  recentLimit: number
+  channels: Record<string, ChannelInfo[]> // 机器 id → IM 渠道列表（飞书子组头取机器人名）
   currentKey: string
   conn: ConnState
   model: string
   activity: Record<string, 'running' | 'attention'>
   projectsActive: boolean
   scheduledActive: boolean
-  cronJobs: CronJob[]
-  readRuns: Record<string, true> // 已查看过的 run（thread_id → true），与 Runs 栏蓝点同源
-  cronRunning: Record<string, string[]> // 机器 → 该机器运行中的 job id
-  activeCronJob: string | null
-  onOpenCronJob: (jobId: string) => void
   onSelect: (threadId: string, backend: string) => void
   onNew: () => void
   onNewChat: (backend: string) => void
+  onNewChatIn: (backend: string, workspace: string) => void // 项目组头「＋」：在该项目新建
   onOpenProjects: () => void
   onOpenScheduled: () => void
   onOpenSettings: () => void
@@ -176,24 +173,15 @@ export const Sidebar = memo(function Sidebar({
 }) {
   const { t } = useI18n()
   const machineConn = useMachineConn()
-  const [tab, setTab] = useState<'recent' | 'all'>(
-    () => (localStorage.getItem('lumi-sidebar-tab') as 'recent' | 'all') || 'recent',
-  )
-  const setTabP = (v: 'recent' | 'all') => {
-    localStorage.setItem('lumi-sidebar-tab', v)
-    setTab(v)
-  }
-  const [query, setQuery] = useState('')
+  // 项目内搜索：组头「🔍」打开，一次只开一个项目；query 只筛该项目（含飞书子组）
+  const [search, setSearch] = useState<{ key: string; q: string } | null>(null)
   const [expanded, setExpanded] = useState<Record<string, boolean>>({})
-  const [collapsedM, toggleM] = usePersistedToggle('lumi-sidebar-mcol')
   const [collapsedP, toggleP] = usePersistedToggle('lumi-sidebar-pcol')
 
   // 禁用（已配置但不连接）的机器从侧栏隐藏；machineColor 仍用全量 machines 保持配色稳定
   const visibleMachines = machines.filter((m) => m.enabled !== false)
   const multi = visibleMachines.length > 1
   const dispName = (s: SessionMeta) => s.title || s.first_message || t('sidebar.untitled')
-  const q = query.trim()
-  const filtering = !!q
   // 多机时行首一枚机器标记（形状分本地/云端、颜色分是哪一台，不再写「机器·项目」文字）；
   // 会话行与定时任务行同一份，只认 backend 字段
   const markOf = (x: { backend?: string | null }): MachineMarker | undefined =>
@@ -201,15 +189,15 @@ export const Sidebar = memo(function Sidebar({
       ? { id: beOf(x), color: machineColor(beOf(x), machines), name: machineName(beOf(x), machines) }
       : undefined
 
-  const row = (s: SessionMeta, machine?: MachineMarker) => (
+  // 扁平流（置顶段）传 machine；项目树传 bullet（+ 搜索态 query）
+  const row = (s: SessionMeta, opts: { machine?: MachineMarker; bullet?: boolean; query?: string }) => (
     <SessionRow
       key={keyOf(s)}
       session={s}
       active={keyOf(s) === currentKey}
       state={activity[keyOf(s)]}
       name={dispName(s)}
-      machine={machine}
-      query={q}
+      {...opts}
       onSelect={onSelect}
       onPin={onPin}
       onRename={onRename}
@@ -217,37 +205,87 @@ export const Sidebar = memo(function Sidebar({
     />
   )
 
-  // 全部 · 某项目分组：标题 + 限量会话 + 「显示全部 / 收起」
-  const renderProject = (backend: string, pg: { dir: string; name: string; sessions: SessionMeta[] }) => {
-    const key = `${backend}::${pg.dir}`
+  // 项目组：组头（机器识别色图标 + 项目名 + 折叠箭头 + 悬停「＋ 🔍」）+ 限量桌面会话
+  // + 飞书子组；搜索态下改为输入框 + 该项目内（含飞书）的扁平命中结果。组头字重颜色与区段标签同档，会话标题才是视觉主体；折叠箭头展开态悬停
+  // 才现、收起态常显（否则收起的项目与没会话的项目长得一样）。机器只靠图标颜色区分。
+  const renderProject = (pg: ProjectGroup) => {
+    const key = `${pg.backend}::${pg.dir}`
     const collapsed = !!collapsedP[key]
     const keep = new Set<string>()
-    pg.sessions.forEach((s, i) => {
+    pg.desktop.forEach((s, i) => {
       if (s.pinned || activity[keyOf(s)] || i < CAP) keep.add(keyOf(s))
     })
     const showAll = expanded[key]
-    const shown = showAll ? pg.sessions : pg.sessions.filter((s) => keep.has(keyOf(s)))
-    const hidden = pg.sessions.length - shown.length
+    const shown = showAll ? pg.desktop : pg.desktop.filter((s) => keep.has(keyOf(s)))
+    const hidden = pg.desktop.length - shown.length
+    const searching = search?.key === key
+    const q = searching ? search.q.trim() : ''
+    const hits = q
+      ? [...pg.desktop, ...pg.channel]
+          .filter((s) => dispName(s).toLowerCase().includes(q.toLowerCase()))
+          .sort(byRecency)
+      : null
     return (
       <div key={key}>
-        <button
-          onClick={() => toggleP(key)}
-          className="w-full flex items-center px-2 pt-1.5 pb-0.5 text-left text-[10.5px] uppercase tracking-wide text-muted-foreground hover:text-ink transition"
-        >
-          <span className="flex-1 min-w-0 truncate">{pg.name}</span>
-        </button>
-        {!collapsed && (
+        <div className="group/header flex items-center gap-1.5 pl-3 pr-1 pt-2.5 pb-1 text-xs text-muted-foreground/80 hover:text-muted-foreground transition">
+          <button onClick={() => toggleP(key)} className="flex flex-1 min-w-0 items-center gap-1.5 text-left">
+            <MachineIcon id={pg.backend} size={14} />
+            <span className="min-w-0 truncate">{pg.name}</span>
+            <ChevronRight
+              size={12}
+              className={`shrink-0 transition-all ${collapsed ? '' : 'rotate-90 opacity-0 group-hover/header:opacity-100'}`}
+            />
+          </button>
+          <button
+            onClick={() => onNewChatIn(pg.backend, pg.dir)}
+            title={t('sidebar.newChat')}
+            className="shrink-0 grid size-5 place-items-center rounded opacity-0 group-hover/header:opacity-100 hover:bg-line/30 hover:text-ink transition"
+          >
+            <Plus size={13} />
+          </button>
+          <button
+            onClick={() => setSearch(searching ? null : { key, q: '' })}
+            title={t('sidebar.search')}
+            className={`shrink-0 grid size-5 place-items-center rounded hover:bg-line/30 hover:text-ink transition ${
+              searching ? 'text-ink' : 'opacity-0 group-hover/header:opacity-100'
+            }`}
+          >
+            <Search size={13} />
+          </button>
+        </div>
+        {searching && (
+          <div className="mx-1 mb-1 flex items-center gap-2 px-2.5 py-1 rounded-lg bg-surface/70 border border-line/50 focus-within:border-primary/40 transition">
+            <input
+              autoFocus
+              value={search.q}
+              onChange={(e) => setSearch({ key, q: e.target.value })}
+              onKeyDown={(e) => e.key === 'Escape' && setSearch(null)}
+              placeholder={t('sidebar.search')}
+              className="flex-1 min-w-0 bg-transparent outline-none text-[13px] text-ink placeholder:text-muted-foreground/60"
+            />
+            <button onClick={() => setSearch(null)} className="shrink-0 text-muted-foreground hover:text-ink">
+              <X size={13} />
+            </button>
+          </div>
+        )}
+        {hits ? (
+          hits.length ? (
+            hits.map((s) => row(s, { bullet: true, query: q }))
+          ) : (
+            <div className="px-3 py-3 text-center text-xs text-muted-foreground">{t('sidebar.noMatch')}</div>
+          )
+        ) : !collapsed && (
           <>
-            {shown.map((s) => row(s))}
+            {shown.map((s) => row(s, { bullet: true }))}
             {hidden > 0 && (
               <button
                 onClick={() => setExpanded((e) => ({ ...e, [key]: true }))}
                 className="w-full text-left px-3 py-1 text-[10.5px] text-muted-foreground/55 hover:text-primary transition"
               >
-                {t('sidebar.showAll', { n: pg.sessions.length })}
+                {t('sidebar.showAll', { n: pg.desktop.length })}
               </button>
             )}
-            {showAll && pg.sessions.length > CAP && (
+            {showAll && pg.desktop.length > CAP && (
               <button
                 onClick={() => setExpanded((e) => ({ ...e, [key]: false }))}
                 className="w-full text-left px-3 py-1 text-[10.5px] text-muted-foreground/55 hover:text-primary transition"
@@ -255,184 +293,106 @@ export const Sidebar = memo(function Sidebar({
                 {t('common.showLess')}
               </button>
             )}
+            {renderFeishuSub(pg)}
           </>
         )}
       </div>
     )
   }
 
-  // 全部 · IM 渠道分组（A2：机器级，组头「飞书 · 绑定项目」）。
-  // 该机器无渠道会话则整组不渲染；渠道会话不进项目组（projectGroupsFor 已剔除）。
-  // 多机器人：按 thread 前缀归属机器人各成一组（行 name 全是 'feishu'，按 name 取
-  // 第一行会把 B 机器人的会话挂到 A 的项目组头下）；识别不出归属的归入无项目组。
-  // 目前仅飞书一个渠道。（渠道连接状态灯仍在设置面板 ChannelsPanel 里展示）
-  const renderChannelGroup = (backend: string) => {
-    const mine = sessions.filter((s) => beOf(s) === backend && s.channel)
-    if (!mine.length) return null
-    const chans = channels[backend] ?? []
-    const groups = new Map<string, typeof mine>()
-    for (const s of mine) {
+  // 项目内飞书子组（可折叠二级组）：「飞书 · 机器人名」+ 缩进一级的会话行。按 thread 前缀
+  // 归属机器人各成一组（一个项目一个机器人，多组只在换绑/旧数据时出现）；机器人已删则只显「飞书」。
+  const renderFeishuSub = (pg: ProjectGroup) => {
+    if (!pg.channel.length) return null
+    const chans = channels[pg.backend] ?? []
+    const groups = new Map<string, SessionMeta[]>()
+    for (const s of pg.channel) {
       const botId = botOfThread(chans, s.thread_id)?.config.id ?? ''
       const arr = groups.get(botId)
       if (arr) arr.push(s)
       else groups.set(botId, [s])
     }
     return [...groups.entries()].map(([botId, group]) => {
-      const key = `${backend}::__channel__${botId}`
+      const key = `${pg.backend}::${pg.dir}::feishu::${botId}`
       const collapsed = !!collapsedP[key]
-      const info = chans.find((c) => c.config.id === botId)
-      const proj = info?.config.workspace ? basename(info.config.workspace) : ''
+      const bot = chans.find((c) => c.config.id === botId)?.config.name
       return (
         <div key={key}>
           <button
             onClick={() => toggleP(key)}
-            className="w-full flex items-center gap-1.5 px-2 pt-1.5 pb-0.5 text-left text-[10.5px] text-muted-foreground hover:text-ink transition"
+            className="group/header w-full flex items-center gap-1.5 pl-4 pr-2 pt-1.5 pb-0.5 text-left text-[11px] text-muted-foreground/80 hover:text-muted-foreground transition"
           >
-            <Send size={11} className="shrink-0 opacity-70" />
+            <Send size={11} className="shrink-0" />
             <span className="min-w-0 truncate">
               {t('sidebar.feishu')}
-              {proj && <span className="opacity-60"> · {proj}</span>}
+              {bot && <span> · {bot}</span>}
             </span>
+            <ChevronRight
+              size={11}
+              className={`shrink-0 transition-all ${collapsed ? '' : 'rotate-90 opacity-0 group-hover/header:opacity-100'}`}
+            />
           </button>
-          {!collapsed && group.sort(byRecency).map((s) => row(s))}
+          {!collapsed && <div className="pl-2.5">{group.sort(byRecency).map((s) => row(s, { bullet: true }))}</div>}
         </div>
       )
     })
   }
 
-  // 全部 · 机器段：可折叠头(状态光点 + 名 + ＋) + 项目分组
-  const renderMachine = (m: Machine) => {
-    const collapsed = !!collapsedM[m.id]
+  // 没有任何项目组的机器才需要一行占位：离线 / 确凿空态 / 连接中（有组的机器由组头图标说明身份）
+  const renderMachinePlaceholder = (m: Machine) => {
     const cn = machineConn[m.id]
     const offline = cn === 'closed' || cn === 'failed'
-    const groups = projectGroupsFor(sessions, m.id)
+    const head = (
+      <div className="flex items-center gap-1.5 pl-3 pt-2.5 pb-1 text-xs text-muted-foreground/80">
+        <MachineIcon id={m.id} size={14} />
+        <span className="min-w-0 truncate">{m.name}</span>
+      </div>
+    )
     return (
-      <div key={m.id} className={`mt-0.5 ${offline ? 'opacity-60' : ''}`}>
-        <div className="flex items-center gap-1.5 px-2 pt-2 pb-0.5">
-          <button onClick={() => toggleM(m.id)} className="flex flex-1 min-w-0 items-center gap-1.5 text-left">
-            <ChevronRight
-              size={11}
-              className={`shrink-0 text-muted-foreground transition-transform ${collapsed ? '' : 'rotate-90'}`}
-            />
-            <MachineIcon id={m.id} />
-            <span className="flex-1 truncate text-xs font-semibold text-ink/75">{m.name}</span>
-          </button>
+      <div key={m.id}>
+        {multi && head}
+        {offline ? (
+          // 离线（重连耗尽/退避中）：建会话无意义，改显示离线占位 + 重连
+          <div className="flex flex-col items-center gap-2 px-3 py-4 text-center">
+            <WifiOff size={22} className="text-separator" />
+            <span className="text-xs text-muted-foreground">{t('sidebar.offline')}</span>
+            <ReconnectButton id={m.id} label={t('sidebar.reconnect')} />
+          </div>
+        ) : cn === 'open' && loadedBackends[m.id] ? (
+          // 确凿的空态：连接就绪且该机器的列表成功返回过（未返回前显示连接中，
+          // 别把「首拉还没到手/失败」渲染成「没有会话」）
           <button
             onClick={() => onNewChat(m.id)}
-            title={t('sidebar.newChat')}
-            className="shrink-0 grid size-5 place-items-center rounded text-muted-foreground hover:bg-line/30 hover:text-primary transition"
+            className="w-full text-left px-3 py-1.5 text-xs text-muted-foreground/60 hover:text-ink transition"
           >
-            <Plus size={14} />
+            {t('sidebar.noSessionsNew')}
           </button>
-        </div>
-        {!collapsed && renderChannelGroup(m.id)}
-        {!collapsed &&
-          (groups.length ? (
-            groups.map((pg) => renderProject(m.id, pg))
-          ) : offline ? (
-            // 离线（重连耗尽/退避中）：建会话无意义，改显示离线占位 + 重连
-            <div className="flex flex-col items-center gap-2 px-3 py-4 text-center">
-              <WifiOff size={22} className="text-separator" />
-              <span className="text-xs text-muted-foreground">{t('sidebar.offline')}</span>
-              <ReconnectButton id={m.id} label={t('sidebar.reconnect')} />
-            </div>
-          ) : cn === 'open' && loadedBackends[m.id] ? (
-            // 确凿的空态：连接就绪且该机器的列表成功返回过（未返回前显示连接中，
-            // 别把「首拉还没到手/失败」渲染成「没有会话」）
-            <button
-              onClick={() => onNewChat(m.id)}
-              className="w-full text-left px-3 py-1.5 text-xs text-muted-foreground/60 hover:text-ink transition"
-            >
-              {t('sidebar.noSessionsNew')}
-            </button>
-          ) : (
-            <div className="px-3 py-1.5 text-xs text-muted-foreground/60 animate-pulse">
-              {t('common.connecting')}
-            </div>
-          ))}
+        ) : (
+          <div className="px-3 py-1.5 text-xs text-muted-foreground/60 animate-pulse">{t('common.connecting')}</div>
+        )}
       </div>
     )
   }
 
-  // 内容区：搜索中 → 扁平结果；否则按 tab（最近=扁平时间流 / 全部=分组树）
-  let content: ReactNode
-  if (filtering) {
-    const res = sessions
-      .filter((s) => dispName(s).toLowerCase().includes(q.toLowerCase()))
-      .sort(byRecency)
-    content = res.length ? (
-      <>
-        <div className="px-3 pt-1 pb-1 text-[11px] text-muted-foreground/55">
-          {t('sidebar.results', { n: res.length })}
-        </div>
-        {res.map((s) => row(s, markOf(s)))}
-      </>
-    ) : (
-      <div className="px-3 py-8 text-center text-xs text-muted-foreground">{t('sidebar.noMatch')}</div>
-    )
-  } else if (tab === 'recent') {
-    const sorted = [...sessions].sort(byRecency)
-    const pinned = sorted.filter((s) => s.pinned)
-    const rest = sorted.filter((s) => !s.pinned)
-    content = sorted.length ? (
-      <>
-        {pinned.length > 0 && (
-          <>
-            <SectionLabel>{t('sidebar.pinned')}</SectionLabel>
-            {pinned.map((s) => row(s, markOf(s)))}
-          </>
-        )}
-        <SectionLabel>{t('sidebar.recent')}</SectionLabel>
-        {rest.slice(0, recentLimit).map((s) => row(s, markOf(s)))}
-        {rest.length > recentLimit && (
-          <div className="px-3 pt-2 pb-1 text-center text-[11px] text-muted-foreground/55">
-            {t('sidebar.recentCapped', { n: recentLimit })}
-          </div>
-        )}
-      </>
-    ) : Object.keys(loadedBackends).length > 0 ? (
-      <div className="px-3 py-8 text-center text-xs text-muted-foreground">{t('sidebar.empty')}</div>
-    ) : null
-  } else {
-    const localGroups = projectGroupsFor(sessions, 'local')
-    // 已关闭机器的定时任务不显示（刷新时序可能残留旧 job，按可见机器过滤兜底）
-    const visibleIds = new Set(visibleMachines.map((m) => m.id))
-    const visibleCron = cronJobs.filter((j) => visibleIds.has(j.backend || 'local'))
-    content = (
-      <>
-        {visibleCron.length > 0 && (
-          <CollapsibleGroup label={t('sidebar.scheduled')} storageKey="scheduled">
-            {visibleCron.map((job) => (
-              <CronJobRow
-                key={job.id}
-                job={job}
-                active={job.id === activeCronJob}
-                // ?? []：远程机器可能跑着不带 run_threads 的旧后端，缺字段按无未读处理而非崩侧栏
-                unread={(job.run_threads ?? []).filter((t) => !readRuns[t]).length}
-                running={(cronRunning[beOf(job)] ?? []).includes(job.id)}
-                machine={markOf(job)}
-                onOpen={onOpenCronJob}
-              />
-            ))}
-          </CollapsibleGroup>
-        )}
-        {multi ? (
-          visibleMachines.map(renderMachine)
-        ) : (
-          <>
-            {renderChannelGroup('local')}
-            {localGroups.length
-              ? localGroups.map((pg) => renderProject('local', pg))
-              : !sessions.length && loadedBackends['local'] && (
-                  <div className="px-3 py-8 text-center text-xs text-muted-foreground">
-                    {t('sidebar.empty')}
-                  </div>
-                )}
-          </>
-        )}
-      </>
-    )
-  }
+  // 内容区：置顶段 + 项目组（所有可见机器扁平并列、按最近活跃排序，机器身份由组头图标
+  // 颜色承载）+ 无项目组机器的占位。定时任务不进侧栏，走顶部「定时任务」入口。
+  const groups = visibleMachines
+    .flatMap((m) => projectGroupsFor(sessions, m.id))
+    .sort((a, b) => b.recency - a.recency)
+  const withGroups = new Set(groups.map((g) => g.backend))
+  const pinned = sessions.filter((s) => s.pinned).sort(byRecency)
+  const content = (
+    <>
+      {pinned.length > 0 && (
+        <>
+          <SectionLabel>{t('sidebar.pinned')}</SectionLabel>
+          {pinned.map((s) => row(s, { machine: markOf(s) }))}
+        </>
+      )}
+      {groups.map(renderProject)}
+      {visibleMachines.filter((m) => !withGroups.has(m.id)).map(renderMachinePlaceholder)}
+    </>
+  )
 
   return (
     <aside
@@ -489,38 +449,7 @@ export const Sidebar = memo(function Sidebar({
         </button>
       </div>
 
-      {/* 最近 / 全部 段式 tab */}
-      <div className="mx-2 flex gap-0.5 p-0.5 rounded-lg bg-surface/70">
-        {(['recent', 'all'] as const).map((v) => (
-          <button
-            key={v}
-            onClick={() => setTabP(v)}
-            className={`flex-1 py-1 rounded-md text-xs transition ${
-              tab === v ? 'bg-canvas text-ink font-medium shadow-sm' : 'text-muted-foreground hover:text-ink'
-            }`}
-          >
-            {t(v === 'recent' ? 'sidebar.recent' : 'sidebar.all')}
-          </button>
-        ))}
-      </div>
-
-      {/* 搜索 */}
-      <div className="mx-2 mt-2 flex items-center gap-2 px-2.5 py-1.5 rounded-lg bg-surface/70 border border-line/50 focus-within:border-primary/40 transition">
-        <Search size={14} className="shrink-0 text-muted-foreground" />
-        <input
-          value={query}
-          onChange={(e) => setQuery(e.target.value)}
-          placeholder={t('sidebar.search')}
-          className="flex-1 min-w-0 bg-transparent outline-none text-sm text-ink placeholder:text-muted-foreground/60"
-        />
-        {query && (
-          <button onClick={() => setQuery('')} className="shrink-0 text-muted-foreground hover:text-ink">
-            <X size={13} />
-          </button>
-        )}
-      </div>
-
-      <div className="mt-2 flex-1 overflow-y-auto overflow-x-hidden px-2 pb-2">{content}</div>
+      <div className="flex-1 overflow-y-auto overflow-x-hidden px-2 pb-2">{content}</div>
 
       <div className="p-2 border-t border-line/20 space-y-1.5">
         <UpdateBar />
@@ -572,85 +501,7 @@ function UpdateBar() {
 
 // 区段标题（置顶 / 最近）：浅色弱化的非折叠分隔标签
 function SectionLabel({ children }: { children: React.ReactNode }) {
-  return <div className="px-3 pt-2.5 pb-1 text-xs text-muted-foreground/60">{children}</div>
-}
-
-// 可折叠分组（定时任务用）：标题浅色弱化，点击收起/展开，状态持久化
-function CollapsibleGroup({
-  label,
-  storageKey,
-  children,
-}: {
-  label: string
-  storageKey: string
-  children: React.ReactNode
-}) {
-  const key = `lumi-sidebar-collapsed-${storageKey}`
-  const [collapsed, setCollapsed] = useState(() => localStorage.getItem(key) === '1')
-  const toggle = () => {
-    setCollapsed((c) => {
-      localStorage.setItem(key, c ? '0' : '1')
-      return !c
-    })
-  }
-  return (
-    <div>
-      <button
-        onClick={toggle}
-        className="group/header w-full flex items-center gap-1.5 px-3 pt-2 pb-1.5 text-xs text-muted-foreground/60 hover:text-muted-foreground transition"
-      >
-        <span>{label}</span>
-        <ChevronRight
-          size={11}
-          className={`shrink-0 opacity-0 group-hover/header:opacity-100 transition-all ${collapsed ? '' : 'rotate-90'}`}
-        />
-      </button>
-      {!collapsed && children}
-    </div>
-  )
-}
-
-// 定时任务行：失败 ⚠ + 任务名 + 未读角标（或运行中脉冲点）
-function CronJobRow({
-  job,
-  active,
-  unread,
-  running,
-  machine,
-  onOpen,
-}: {
-  job: CronJob
-  active: boolean
-  unread: number
-  running: boolean
-  machine?: MachineMarker // 多机时行首机器标记
-  onOpen: (jobId: string) => void
-}) {
-  const { t } = useI18n()
-  return (
-    <button
-      onClick={() => onOpen(job.id)}
-      className={`w-full flex items-center gap-2 pl-3 pr-2.5 py-2 rounded-lg text-sm transition ${
-        active ? 'bg-surface text-ink' : 'text-ink/80 hover:bg-surface/60 hover:text-ink'
-      } ${job.enabled ? '' : 'opacity-55'}`}
-    >
-      {job.consecutive_errors > 0 && <AlertTriangle size={13} className="shrink-0 text-primary" />}
-      {machine && <MachineMark id={machine.id} color={machine.color} title={machine.name} />}
-      <span className="flex-1 min-w-0 truncate text-left">{job.name}</span>
-      {running ? (
-        <span
-          title={t('sidebar.processing')}
-          className="shrink-0 size-1.5 rounded-full bg-primary animate-pulse"
-        />
-      ) : (
-        unread > 0 && (
-          <span className="shrink-0 rounded-full bg-primary/15 px-[7px] py-0.5 text-[11px] leading-none font-medium text-primary">
-            {t('cron.newBadge', { n: unread })}
-          </span>
-        )
-      )}
-    </button>
-  )
+  return <div className="px-3 pt-2.5 pb-1 text-[11px] text-muted-foreground/80">{children}</div>
 }
 
 // 左下角账户入口：向上弹出菜单（设置 / 语言子菜单）。
@@ -711,6 +562,7 @@ function SessionRow({
   state,
   name,
   machine,
+  bullet,
   query,
   onSelect,
   onPin,
@@ -721,7 +573,8 @@ function SessionRow({
   active: boolean
   state?: 'running' | 'attention'
   name: string
-  machine?: MachineMarker // 多机时行首机器标记
+  machine?: MachineMarker // 多机时行首机器标记（扁平流用；项目树里机器身份在组头）
+  bullet?: boolean // 项目树里的行首空心圆点（当前会话实心金）；渠道行仍用群/私聊图标
   query?: string
   onSelect: (threadId: string, backend: string) => void
   onPin: (threadId: string, backend: string, pinned: boolean) => void
@@ -745,20 +598,18 @@ function SessionRow({
   }
 
   return (
-    <div className="group relative">
+    <div className="group relative mb-0.5">
       <button
         onClick={() => onSelect(session.thread_id, backend)}
         title={session.first_message}
-        className={`flex w-full items-center gap-1.5 pl-2.5 pr-8 py-2 rounded-lg text-sm transition ${
+        className={`flex w-full items-center gap-2 pl-3 pr-8 py-[5px] rounded-lg text-sm transition ${
           active ? 'bg-surface text-ink' : 'text-ink/80 hover:bg-surface/60 hover:text-ink'
         }`}
       >
         {machine && <MachineMark id={machine.id} color={machine.color} title={machine.name} />}
-        {/* 仅「等你处理」保留提醒点（需你操作）；置顶进段不带 📌、进行中不带脉冲点 */}
-        {state === 'attention' && (
+        {bullet && !session.channel && (
           <span
-            title={t('sidebar.needsYou')}
-            className="shrink-0 size-1.5 rounded-full bg-primary"
+            className={`shrink-0 size-1.5 rounded-full border ${active ? 'border-primary bg-primary' : 'border-separator'}`}
           />
         )}
         {/* 渠道会话：群/私聊图标（最近流、搜索结果、飞书分组内统一） */}
@@ -769,6 +620,13 @@ function SessionRow({
             <Users size={13} className="shrink-0 text-info/80" />
           ))}
         <span className="flex-1 min-w-0 truncate text-left">{query ? highlight(name, query) : name}</span>
+        {/* 仅「等你处理」保留提醒点（需你操作）；置顶进段不带 📌、进行中不带脉冲点 */}
+        {state === 'attention' && (
+          <span
+            title={t('sidebar.needsYou')}
+            className="shrink-0 size-1.5 rounded-full bg-primary shadow-[0_0_0_3px_color-mix(in_srgb,var(--color-accent)_22%,transparent)]"
+          />
+        )}
       </button>
       <DropdownMenu>
         <DropdownMenuTrigger asChild>

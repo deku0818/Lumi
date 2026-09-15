@@ -116,7 +116,7 @@ WS 断开时若会话仍有**活跃 / 挂起轮**（典型：挂在工具审批 
 - 截断后消息会以**新 id** 重挂，故前端重挂气泡时清掉旧 `messageId`、等本轮 `turn.start` 重新上锚——留着旧 id 会让下一次时间旅行指向已删除的消息。
 - 渠道旁观 / cron 观测 / 运行中 / 有在途审批时不提供该操作（服务端另有流式方法的渠道只读兜底）。
 
-**IM 渠道会话在 desktop 只读旁观**：飞书等渠道会话在「全部」树里按机器级「飞书 · 绑定项目」分组（A2 方案，`channel` 字段驱动，不进项目组）；打开后顶部渠道横幅（群名 / 审批模式 / 绑定项目 / 直达渠道设置），输入区替换为只读提示。只读在服务端兜底（流式方法对渠道 thread 直接拒绝；后台通知轮对渠道 thread 不消费）——desktop 与渠道 `BridgePool` 各持独立 bridge/锁，写入会绕过渠道的会话串行化。渠道跑完一轮广播 `channel.activity`，desktop 只刷该机器会话列表、正在旁观则重载历史（切回旁观会话也强制重拉）。消息级时间戳在 `bridge.stream_response` 统一落库（`additional_kwargs["lumi"].ts`，渠道另带 per-消息 `items`），气泡头渲染「发送者 · 时刻」。
+**IM 渠道会话在 desktop 只读旁观**：侧栏是项目树（各机器项目组扁平并列、按最近活跃排序，组头图标颜色区分机器；组头「＋」在该项目新建、「🔍」项目内搜索），飞书等渠道会话与桌面会话同一条路径按 `workspace_dir` 归组，在组内「飞书 · 机器人名」子组展示（`channel` 字段驱动；机器人启用前必须绑项目，不存在无项目的渠道会话）；打开后顶部渠道横幅（群名 / 审批模式 / 绑定项目 / 直达渠道设置），输入区替换为只读提示。只读在服务端兜底（流式方法对渠道 thread 直接拒绝；后台通知轮对渠道 thread 不消费）——desktop 与渠道 `BridgePool` 各持独立 bridge/锁，写入会绕过渠道的会话串行化。渠道跑完一轮广播 `channel.activity`，desktop 只刷该机器会话列表、正在旁观则重载历史（切回旁观会话也强制重拉）。消息级时间戳在 `bridge.stream_response` 统一落库（`additional_kwargs["lumi"].ts`，渠道另带 per-消息 `items`），气泡头渲染「发送者 · 时刻」。
 
 ## 项目与工作目录
 
@@ -183,7 +183,7 @@ cron 子系统是进程级资源（与会话无关）：serve 在 lifespan 中�
 
 - **结果广播**：`lumi/gateway/desktop_delivery.py` 的 `DesktopDelivery` 把任务结果（`cron.result`）与运行状态（`cron.running`）推给所有活跃 WS 连接——wire 信封格式属 server 层，agents 层只定义 `ResultDelivery` 抽象。无连接时不缓存：结果已落 RunLog，重连后经 `list_cron_runs` 查询。
 - **前端结构**（`CronPage.tsx` + `App.tsx`）：
-  - 侧栏「定时任务」分组（任务名 + 未读角标 + 运行中脉冲点）→ 点击进入**任务会话视图**：主区为最近一次执行的完整对话（composer 可续聊），右侧统一右栏（`RightRail`）置顶「执行记录」模块（`RunsSection`）列历次执行，蓝点 = 未读、点开即消失。
+  - 定时任务不进侧栏；在顶部「定时任务」管理页的执行记录里点某次执行，进入**任务会话视图**：主区为最近一次执行的完整对话（composer 可续聊），右侧统一右栏（`RightRail`）置顶「执行记录」模块（`RunsSection`）列历次执行，蓝点 = 未读、点开即消失。
   - 顶部「定时任务」导航入口 → 管理页（卡片网格 + 新建 / 编辑 / 删除 + 详情）。
   - **未读是派生的，不是累积的**：唯一的本地事实源是已读集合 `readRuns`（run 的 `thread_id` → true，持久化 localStorage），侧栏角标 = 该任务 `run_threads`（`list_cron_jobs` 带回的近期可跳转 run，窗口同 `MAX_CRON_RUN_THREADS`）减去 `readRuns`，与执行记录模块蓝点同源。因此桌面端离线期间执行的 run 重连后照样算未读——事件累积做不到这点。正在看某任务时新到的 run 直接记为已读，避免角标在用户眼皮底下跳出来。
   - App 持有 cron 数据单一来源（jobs / `readRuns` / 按机器分段的运行中 job id）；`cron.result` 经会话连接与控制连接双路径消费（远程机器通常只有控制连接），前端按 `job_id:started_at` 去重。

@@ -35,8 +35,6 @@ export function SettingsDialog({
   setUiFont,
   notify,
   setNotify,
-  recentLimit,
-  setRecentLimit,
   gwFor,
   onProvidersChanged,
   onClose,
@@ -48,8 +46,6 @@ export function SettingsDialog({
   setUiFont: (p: FontPref) => void
   notify: boolean
   setNotify: (v: boolean) => void
-  recentLimit: number
-  setRecentLimit: (n: number) => void
   gwFor: (id: string) => Gateway | undefined
   onProvidersChanged: (machine: string) => void
   onClose: () => void
@@ -115,8 +111,6 @@ export function SettingsDialog({
               setUiFont={setUiFont}
               notify={notify}
               setNotify={setNotify}
-              recentLimit={recentLimit}
-              setRecentLimit={setRecentLimit}
             />
           </TabsContent>
           <TabsContent value="models" className="flex-1 min-w-0 overflow-auto px-6 pb-6 pt-12 mt-0">
@@ -171,8 +165,6 @@ function GeneralPanel({
   setUiFont,
   notify,
   setNotify,
-  recentLimit,
-  setRecentLimit,
 }: {
   themePref: ThemePref
   setThemePref: (p: ThemePref) => void
@@ -180,8 +172,6 @@ function GeneralPanel({
   setUiFont: (p: FontPref) => void
   notify: boolean
   setNotify: (v: boolean) => void
-  recentLimit: number
-  setRecentLimit: (n: number) => void
 }) {
   const { t } = useI18n()
   return (
@@ -203,12 +193,6 @@ function GeneralPanel({
         </Row>
         <Row label={t('settings.fontSize')} hint={t('settings.fontSizeHint')}>
           <SizeStepper value={uiFont.size} onChange={(size) => setUiFont({ ...uiFont, size })} />
-        </Row>
-      </Section>
-
-      <Section title={t('settings.sessions')}>
-        <Row label={t('settings.recentLimit')} hint={t('settings.recentLimitHint')}>
-          <RecentStepper value={recentLimit} onChange={setRecentLimit} />
         </Row>
       </Section>
 
@@ -250,36 +234,3 @@ function SizeStepper({ value, onChange }: { value: number; onChange: (n: number)
 }
 
 // 「最近」显示条数步进器：− [n 条] + ，范围 5–100、步进 5；点数字回默认 20。
-const RECENT_MIN = 5
-const RECENT_MAX = 100
-const RECENT_STEP = 5
-const RECENT_DEFAULT = 20
-const clampRecent = (n: number) => Math.min(RECENT_MAX, Math.max(RECENT_MIN, n))
-function RecentStepper({ value, onChange }: { value: number; onChange: (n: number) => void }) {
-  const { t } = useI18n()
-  return (
-    <div className={PILL_WRAP}>
-      <button
-        className={STEP_BTN}
-        onClick={() => onChange(clampRecent(value - RECENT_STEP))}
-        disabled={value <= RECENT_MIN}
-      >
-        <Minus size={14} />
-      </button>
-      <button
-        onClick={() => onChange(RECENT_DEFAULT)}
-        title={String(RECENT_DEFAULT)}
-        className="min-w-12 text-center text-sm tabular-nums text-ink hover:text-primary transition"
-      >
-        {t('settings.recentN', { n: value })}
-      </button>
-      <button
-        className={STEP_BTN}
-        onClick={() => onChange(clampRecent(value + RECENT_STEP))}
-        disabled={value >= RECENT_MAX}
-      >
-        <Plus size={14} />
-      </button>
-    </div>
-  )
-}

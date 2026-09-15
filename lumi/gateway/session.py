@@ -289,7 +289,7 @@ async def _resume(session: GatewaySession, params: dict) -> dict:
 
     原 prompt 流仍活、run.lock 仍持，故应答走轻量 RPC 而非流式——事件继续从原流吐出，
     不开新流。value 形状沿用原 resume 值：tool_approval 为 {decision, message?,
-    set_tool_mode?}；ask 为答案字符串 / ASK_CANCELLED。resolved=False 表示审批已被
+    set_tool_mode?} 或逐个审批 {decisions, message?}；ask 为答案字符串 / ASK_CANCELLED。resolved=False 表示审批已被
     stop / 切会话作废（无未决请求命中）。
     """
     ok = session._bridge.resolve_approval(

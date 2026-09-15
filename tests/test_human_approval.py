@@ -114,6 +114,82 @@ async def test_no_broker_headless_fails_closed():
     assert cmd.update["messages"][0].tool_call_id == "tc1"
 
 
+# === 逐个审批：decisions 与 tool_calls 同序 ===
+
+_TCS3 = [
+    {"id": "a", "name": "bash", "args": {"command": "ls"}},
+    {"id": "b", "name": "bash", "args": {"command": "rm -rf build"}},
+    {"id": "c", "name": "read", "args": {"file_path": "x.md"}},
+]
+
+
+async def test_per_call_all_approve_executes_whole_batch():
+    rt = _runtime(decision={"decisions": ["approve"] * 3})
+    cmd = await human_approval(_state(_TCS3), rt)
+    assert cmd.goto == "ToolExecutor"
+    assert not cmd.update
+
+
+async def test_per_call_all_reject_ends_turn():
+    rt = _runtime(decision={"decisions": ["reject"] * 3, "message": "不行"})
+    cmd = await human_approval(_state(_TCS3), rt)
+    assert cmd.goto == END
+    assert [m.tool_call_id for m in cmd.update["messages"]] == ["a", "b", "c"]
+
+
+async def test_per_call_partial_rejects_only_rejected_then_executes():
+    """部分拒绝：只为被拒调用补拒绝 ToolMessage 并进 ToolExecutor（执行完回 CallModel 继续）。"""
+    rt = _runtime(
+        decision={"decisions": ["approve", "reject", "approve"], "message": "不行"}
+    )
+    cmd = await human_approval(_state(_TCS3), rt)
+    assert cmd.goto == "ToolExecutor"
+    msgs = cmd.update["messages"]
+    assert [m.tool_call_id for m in msgs] == ["b"]
+    assert "不行" in msgs[0].content
+
+
+async def test_per_call_missing_decision_fails_closed():
+    """decisions 短于 tool_calls：缺项按拒绝。"""
+    rt = _runtime(decision={"decisions": ["approve"]})
+    cmd = await human_approval(_state(_TCS3), rt)
+    assert cmd.goto == "ToolExecutor"
+    assert [m.tool_call_id for m in cmd.update["messages"]] == ["b", "c"]
+
+
+async def test_tool_executor_runs_only_unanswered_calls(monkeypatch):
+    """部分拒绝后进 ToolExecutor：已有拒绝 ToolMessage 的调用不再执行，只跑剩余的。"""
+    from langchain_core.messages import ToolMessage
+
+    from lumi.agents.core import nodes
+    from lumi.agents.core.nodes import build_reject_messages, tool_executor
+    from lumi.agents.core.state import LumiAgentContext
+
+    executed: list[str] = []
+
+    class _CaptureToolNode:
+        def __init__(self, tools, handle_tool_errors=None):
+            pass
+
+        async def ainvoke(self, calls, config=None):
+            executed.extend(tc["id"] for tc in calls)
+            return {
+                "messages": [
+                    ToolMessage(content="ok", tool_call_id=tc["id"], name=tc["name"])
+                    for tc in calls
+                ]
+            }
+
+    monkeypatch.setattr(nodes, "ToolNode", _CaptureToolNode)
+    ai = AIMessage(content="", tool_calls=_TCS3)
+    state = {"messages": [ai, *build_reject_messages([_TCS3[1]], content="不行")]}
+    result = await tool_executor(
+        state, SimpleNamespace(context=LumiAgentContext(tools=[])), {}
+    )
+    assert executed == ["a", "c"]
+    assert [m.tool_call_id for m in result["messages"]] == ["a", "c"]
+
+
 async def test_stop_via_reject_keeps_user_message_and_clean_state():
     """端到端：真实图挂在 human_approval 审批上，stop 经 broker.reject_all 收尾——本轮以
     拒绝跑到 END、checkpoint 干净（next 为空，下轮不回退），用户消息保留在历史里。

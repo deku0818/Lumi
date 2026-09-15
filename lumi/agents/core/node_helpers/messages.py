@@ -113,6 +113,18 @@ def is_malformed_tool_call(tc: Any) -> bool:
     return not tc.get("id") or not tc.get("name")
 
 
+def dangling_tool_calls(messages: list[Any]) -> list[dict]:
+    """messages 里尚未被 ToolMessage 应答的 tool_calls（按 tool_call_id 配对）。"""
+    answered = {m.tool_call_id for m in messages if isinstance(m, ToolMessage)}
+    return [
+        tc
+        for m in messages
+        if isinstance(m, AIMessage)
+        for tc in m.tool_calls
+        if tc.get("id") not in answered
+    ]
+
+
 def _extract_tool_call_ids(tool_calls: list[Any]) -> set[str | None]:
     """从 tool_calls 中提取所有 id。"""
     ids: set[str | None] = set()

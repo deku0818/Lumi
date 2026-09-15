@@ -94,6 +94,7 @@ broker 三个方法：`request(payload, reject_value)`、`resolve(approval_id, d
 
 ### `agents/core/nodes.py`
 - `human_approval` 改 **async**，`interrupt(...)` → `await ctx.approval_broker.request({...}, {"decision":"reject","message":...})`。DENY 快速拒绝分支、三态路由（approve→ToolExecutor / reject·cancel→END）**保留不变**，只换「怎么拿到 decision」。
+  - 后续（v0.2.125）应答扩展为**逐个审批** `{decisions: [...], message?}`（与 `tool_calls` 同序，缺项按拒绝）：有允许时被拒的补拒绝 ToolMessage 后进 ToolExecutor（`tool_executor` 只把未应答的 ToolCall 喂给 ToolNode），全拒绝 / cancel 仍 END。旧 `{decision}`（飞书、上面的 `reject_value`）展开成同值列表走同一裁决 `_apply_decisions`。
 - 新增 **headless 守卫**：`approval_broker is None`（cron / workflow / 后台子代理）→ fail-closed 自动拒绝并路由回 `CallModel`，让自治 agent 改用无需审批的方式，而非崩溃。
 
 ### `agents/tools/providers/ask.py`

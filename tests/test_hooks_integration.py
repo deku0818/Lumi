@@ -26,7 +26,7 @@ class _FakeToolNode:
     def __init__(self, tools, handle_tool_errors=None):
         self._tools = tools
 
-    async def ainvoke(self, state):
+    async def ainvoke(self, calls, config=None):
         return {
             "messages": [ToolMessage(content="echo:hi", tool_call_id="1", name="echo")]
         }
