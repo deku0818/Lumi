@@ -2682,7 +2682,8 @@ export default function App() {
         channels={channels}
         currentKey={view === 'chat' ? active : ''}
         conn={conn}
-        model={model}
+        backend={activeBackend}
+        workspace={workspaceDir}
         activity={activity}
         projectsActive={view === 'projects' || view === 'project'}
         scheduledActive={view === 'scheduled'}

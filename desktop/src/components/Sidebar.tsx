@@ -131,7 +131,8 @@ export const Sidebar = memo(function Sidebar({
   channels,
   currentKey,
   conn,
-  model,
+  backend,
+  workspace,
   activity,
   projectsActive,
   scheduledActive,
@@ -156,7 +157,8 @@ export const Sidebar = memo(function Sidebar({
   channels: Record<string, ChannelInfo[]> // 机器 id → IM 渠道列表（飞书子组头取机器人名）
   currentKey: string
   conn: ConnState
-  model: string
+  backend: string // 当前会话所在机器（底栏显示连接名）
+  workspace: string // 当前会话绑定的项目目录（底栏显示项目名）
   activity: Record<string, 'running' | 'attention'>
   projectsActive: boolean
   scheduledActive: boolean
@@ -227,7 +229,7 @@ export const Sidebar = memo(function Sidebar({
       : null
     return (
       <div key={key}>
-        <div className="group/header flex items-center gap-1.5 pl-3 pr-1 pt-2.5 pb-1 text-xs text-muted-foreground/80 hover:text-muted-foreground transition">
+        <div className="group/header flex items-center gap-1.5 pl-1 pr-1 pt-2.5 pb-1 text-xs text-muted-foreground/80 hover:text-muted-foreground transition">
           <button onClick={() => toggleP(key)} className="flex flex-1 min-w-0 items-center gap-1.5 text-left">
             <MachineIcon id={pg.backend} size={14} />
             <span className="min-w-0 truncate">{pg.name}</span>
@@ -343,7 +345,7 @@ export const Sidebar = memo(function Sidebar({
     const cn = machineConn[m.id]
     const offline = cn === 'closed' || cn === 'failed'
     const head = (
-      <div className="flex items-center gap-1.5 pl-3 pt-2.5 pb-1 text-xs text-muted-foreground/80">
+      <div className="flex items-center gap-1.5 pl-1 pt-2.5 pb-1 text-xs text-muted-foreground/80">
         <MachineIcon id={m.id} size={14} />
         <span className="min-w-0 truncate">{m.name}</span>
       </div>
@@ -420,18 +422,18 @@ export const Sidebar = memo(function Sidebar({
           <PanelLeft />
         </Button>
       </div>
-      <div className="px-3 pb-2">
+      <div className="px-2 pb-2">
         <Button
           variant="ghost"
           onClick={onNew}
-          className="no-drag w-full justify-start gap-2 h-auto px-3 py-2 rounded-xl"
+          className="no-drag w-full justify-start gap-2 h-auto pl-1 pr-2 py-2 rounded-xl"
         >
           <span className="text-primary text-base leading-none">＋</span>
           {t('sidebar.newChat')}
         </Button>
         <button
           onClick={onOpenProjects}
-          className={`no-drag relative w-full flex items-center gap-2 px-3 py-2 rounded-xl text-sm transition ${
+          className={`no-drag relative w-full flex items-center gap-2 pl-1 pr-2 py-2 rounded-xl text-sm transition ${
             projectsActive ? 'bg-surface text-ink' : 'text-muted-foreground hover:bg-surface/60 hover:text-ink'
           }`}
         >
@@ -440,7 +442,7 @@ export const Sidebar = memo(function Sidebar({
         </button>
         <button
           onClick={onOpenScheduled}
-          className={`no-drag relative w-full flex items-center gap-2 px-3 py-2 rounded-xl text-sm transition ${
+          className={`no-drag relative w-full flex items-center gap-2 pl-1 pr-2 py-2 rounded-xl text-sm transition ${
             scheduledActive ? 'bg-surface text-ink' : 'text-muted-foreground hover:bg-surface/60 hover:text-ink'
           }`}
         >
@@ -453,7 +455,13 @@ export const Sidebar = memo(function Sidebar({
 
       <div className="p-2 border-t border-line/20 space-y-1.5">
         <UpdateBar />
-        <AccountMenu conn={conn} model={model} onOpenSettings={onOpenSettings} />
+        <AccountMenu
+          conn={conn}
+          backend={backend}
+          workspace={workspace}
+          machines={machines}
+          onOpenSettings={onOpenSettings}
+        />
       </div>
     </aside>
   )
@@ -504,14 +512,18 @@ function SectionLabel({ children }: { children: React.ReactNode }) {
   return <div className="px-3 pt-2.5 pb-1 text-[11px] text-muted-foreground/80">{children}</div>
 }
 
-// 左下角账户入口：向上弹出菜单（设置 / 语言子菜单）。
+// 左下角账户入口：机器图标（带连接态点）+ 当前项目名 + 靠右连接名；向上弹出菜单（设置 / 语言子菜单）。
 function AccountMenu({
   conn,
-  model,
+  backend,
+  workspace,
+  machines,
   onOpenSettings,
 }: {
   conn: ConnState
-  model: string
+  backend: string
+  workspace: string
+  machines: Machine[]
   onOpenSettings: () => void
 }) {
   const { t, lang, setLang } = useI18n()
@@ -519,14 +531,17 @@ function AccountMenu({
     <DropdownMenu>
       <DropdownMenuTrigger asChild>
         <button className="w-full flex items-center gap-2 px-2 py-1.5 rounded-lg hover:bg-surface transition text-left outline-none">
-          <span className="relative shrink-0 size-6 grid place-items-center rounded-full bg-primary/15 text-primary text-sm">
-            ✦
+          <span className="relative shrink-0 size-6 grid place-items-center rounded-full bg-surface">
+            <MachineIcon id={backend} size={14} />
             <span
               className={`absolute -right-0.5 -bottom-0.5 size-2 rounded-full ring-2 ring-canvas ${CONN_DOT[conn]}`}
             />
           </span>
-          <span className="flex-1 min-w-0 truncate text-xs text-muted-foreground" title={model}>
-            {model || t('sidebar.disconnected')}
+          <span className="flex-1 min-w-0 truncate text-xs text-ink" title={workspace}>
+            {workspace ? basename(workspace) : ''}
+          </span>
+          <span className="shrink min-w-0 max-w-[45%] truncate text-[11px] text-muted-foreground">
+            {machineName(backend, machines)}
           </span>
           <ChevronsUpDown size={14} className="shrink-0 text-muted-foreground" />
         </button>
@@ -602,7 +617,7 @@ function SessionRow({
       <button
         onClick={() => onSelect(session.thread_id, backend)}
         title={session.first_message}
-        className={`flex w-full items-center gap-2 pl-3 pr-8 py-[5px] rounded-lg text-sm transition ${
+        className={`flex w-full items-center gap-2 pl-3 pr-8 py-[5px] rounded-lg text-[13px] transition ${
           active ? 'bg-surface text-ink' : 'text-ink/80 hover:bg-surface/60 hover:text-ink'
         }`}
       >
