@@ -401,7 +401,8 @@ export default function App() {
   useEffect(() => {
     workspaceDirRef.current = workspaceDir
   }, [workspaceDir])
-  const [projects, setProjects] = useState<Project[]>([])
+  // null = 该机器列表尚未成功拉到（未连上 / 拉取中 / 失败）——不能渲染成「还没有项目」
+  const [projects, setProjects] = useState<Project[] | null>(null)
   // 项目视图作用的机器（方案甲「先选机器」）+ 该机器当前项目
   const [projectsMachine, setProjectsMachine] = useState('local')
   const [projectsCurrent, setProjectsCurrent] = useState('')
@@ -1447,26 +1448,12 @@ export default function App() {
     [gwForBackend],
   )
 
-  // 初始：起各机器控制连接（合并会话列表）+ 本地一条新会话连接（聊天流）。
-  // 聊天必须绑定项目——开局不能像从前那样无条件开一条 workspace='' 的空会话：
-  // 有默认项目就直接绑上，没有则打开后立刻转去项目选择器提示，不放行未绑定输入。
+  // 初始：起各机器控制连接（合并会话列表）；开局会话见下一条 effect。
+  const bootedRef = useRef(false)
   useEffect(() => {
-    let disposed = false
-    void (async () => {
-      await syncBackends()
-      const workspace = (await fetchDefaultProject('local')) || ''
-      const tid = await openConnection(null, workspace, 'local')
-      if (!disposed) {
-        setActive(tid)
-        setConn('open')
-        if (!workspace) {
-          setNeedProjectHint(true)
-          setView('projects')
-        }
-      }
-    })()
+    void syncBackends()
     return () => {
-      disposed = true
+      bootedRef.current = false
       Object.values(connsRef.current).forEach((g) => g.close())
       Object.values(controlConns.current).forEach((g) => g.close())
       // 必须清空 ref：close() 置 closedByUser=true 使其永不重连，若残留在 ref 里，
@@ -1475,14 +1462,46 @@ export default function App() {
       connsRef.current = {}
       controlConns.current = {}
     }
-  }, [openConnection, syncBackends, fetchDefaultProject])
+  }, [syncBackends])
 
-  // 兜底自愈：窗口重获焦点时全量刷新会话列表。ready 首拉失败后没有别的自动重试路径，
-  // 没有这条，空列表会一直定格到手动重载（服务端有 checkpoint_id 缓存，刷新很便宜）。
+  // 开局会话（本地一条新会话连接）。聊天必须绑定项目——有默认项目就直接绑上，没有则转去
+  // 项目选择器提示。查默认项目走本地控制连接，须等它连上：早于握手去查必然落空，有默认
+  // 项目也会被误送去选择器。一次性（bootedRef），重连不重跑。
+  const localConn = machineConn.local
   useEffect(() => {
-    const onFocus = () => void refreshSessions()
+    if (localConn !== 'open' || bootedRef.current) return
+    bootedRef.current = true
+    void (async () => {
+      const workspace = (await fetchDefaultProject('local')) || ''
+      const tid = await openConnection(null, workspace, 'local')
+      if (!bootedRef.current) return // 期间 effect 被拆（HMR）
+      setActive(tid)
+      setConn(connsRef.current[tid]?.state ?? 'open')
+      if (!workspace) {
+        setNeedProjectHint(true)
+        setView('projects')
+      }
+    })()
+  }, [localConn, fetchDefaultProject, openConnection])
+
+  // 兜底自愈：窗口重获焦点 / 网络恢复时，唤醒退避耗尽停摆的连接（它们不会自己再试，
+  // 离开久了回来就一直离线），连上后各处挂在连接态上的取数自动重跑；焦点同时全量刷新
+  // 会话列表（ready 首拉失败后没有别的重试路径，服务端有 checkpoint_id 缓存，很便宜）。
+  useEffect(() => {
+    const wake = () => {
+      for (const gw of Object.values(controlConns.current)) gw.wake()
+      for (const gw of Object.values(connsRef.current)) gw.wake()
+    }
+    const onFocus = () => {
+      wake()
+      void refreshSessions()
+    }
     window.addEventListener('focus', onFocus)
-    return () => window.removeEventListener('focus', onFocus)
+    window.addEventListener('online', wake)
+    return () => {
+      window.removeEventListener('focus', onFocus)
+      window.removeEventListener('online', wake)
+    }
   }, [refreshSessions])
 
   // BackendsPanel 增删/编辑远程机器后广播此事件 → 重连各机器、刷新合并列表（无 reload）。
@@ -1513,6 +1532,12 @@ export default function App() {
     },
     [gwForBackend],
   )
+  // 项目列表挂在所选机器的连接态上：连上 / 重连成功即重拉。开局抢在握手前、断线期间
+  // 拉取失败都靠这里补上，不再定格成「还没有项目」
+  const projectsConn = machineConn[projectsMachine]
+  useEffect(() => {
+    if (projectsConn === 'open') void refreshProjects(projectsMachine)
+  }, [projectsConn, projectsMachine, refreshProjects])
 
   // 只在回合结束（running 落回 false）和切会话时刷新：发送时刷新没有新信息
   // （首条消息尚未落 checkpoint），白白多一次全量 checkpoint 扫描。
@@ -1664,13 +1689,15 @@ export default function App() {
     void refreshProjects(projectsMachine)
   }, [refreshProjects, projectsMachine])
 
-  // 项目视图切机器（先选机器）
+  // 项目视图切机器（先选机器）。换机器先清成未加载（别把上一台的列表挂在这台名下），
+  // 由连接态 effect 拉取；点的仍是当前机器则就地重拉
   const selectProjectsMachine = useCallback(
     (machine: string) => {
+      if (machine === projectsMachine) return void refreshProjects(machine)
+      setProjects(null)
       setProjectsMachine(machine)
-      void refreshProjects(machine)
     },
-    [refreshProjects],
+    [projectsMachine, refreshProjects],
   )
 
   // 聊天必须绑定项目：无默认项目时阻断式跳去项目选择器，不放行空 workspace 会话。
@@ -1679,16 +1706,16 @@ export default function App() {
   // 复活刚堵掉的口子。真正安全的复用信号是后端书签列表里显式登记的 default 项目。
   const requireProject = useCallback(
     (backend?: string, opts?: { skipRefresh?: boolean }) => {
-      if (backend && backend !== projectsMachine) {
-        // skipRefresh：调用方（goNewChat）已经手头有本 backend 的最新列表，
-        // 不用 selectProjectsMachine 再重新拉一遍 listProjects
+      if (backend) {
+        // skipRefresh：调用方（goNewChat）刚拿到本 backend 的最新列表，只切机器不清空重拉；
+        // 否则（含拉取失败）走 selectProjectsMachine 重拉——同机器也要拉，不能沿用失败留下的旧态
         if (opts?.skipRefresh) setProjectsMachine(backend)
         else selectProjectsMachine(backend)
       }
       setNeedProjectHint(true)
       setView('projects')
     },
-    [projectsMachine, selectProjectsMachine],
+    [selectProjectsMachine],
   )
 
   // 在指定机器开新会话（方案甲：边栏每台机器各有「＋新对话」）。workspace 须非空——
@@ -1803,7 +1830,7 @@ export default function App() {
   // 触发 setStore），配合 ProjectHomePage 的 memo()，停在项目页时不再整页 reconcile
   // 当前项目的登记条目（name/default 都从这一次 find 取）
   const homeProject = projectHome
-    ? projects.find((p) => p.path === projectHome.path)
+    ? projects?.find((p) => p.path === projectHome.path)
     : undefined
   const homeProjectInfo = useMemo(
     () =>
@@ -2750,7 +2777,7 @@ export default function App() {
             onOpen={(p) => openProjectHome(p, projectsMachine)}
             onNew={() => setShowNewProject(true)}
             onRemove={(path) =>
-              setPendingRemoveProject(projects.find((p) => p.path === path) ?? null)
+              setPendingRemoveProject(projects?.find((p) => p.path === path) ?? null)
             }
             onRename={(path, name) => renameProjectInList(path, name, projectsMachine)}
             onSetDefault={(path, isDefault) => setProjectDefault(path, isDefault, projectsMachine)}
@@ -2758,6 +2785,7 @@ export default function App() {
         ) : view === 'project' && homeProjectInfo ? (
           <ProjectHomePage
             project={homeProjectInfo}
+            machine={projectHome?.backend ?? 'local'}
             isDefault={!!homeProject?.default}
             api={projectHomeApi}
             sessions={homeSessions}
@@ -2795,6 +2823,9 @@ export default function App() {
                 <>
                   {activeChannel && channelBanner()}
                   <div className="relative flex-1 min-h-0">
+                    {/* 顶栏渐隐：内容滚到顶栏时淡出而非硬切。高度不超过 chat-body 的 py-8，
+                        停在顶部时首条内容不被遮；right-2 让开滚动条 */}
+                    <div className="pointer-events-none absolute left-0 right-2 top-0 z-10 h-8 bg-gradient-to-b from-canvas to-transparent" />
                     <div ref={scrollRef} onScroll={onScroll} className="h-full overflow-auto">
                     <div className="chat-body max-w-3xl mx-auto w-full px-6 py-8 space-y-5">
                       {segments.map((seg) => {
@@ -2959,6 +2990,7 @@ export default function App() {
               <RunsSection
                 key={activeCronJob}
                 api={runsRailApi}
+                machine={cronBackendOf(activeCronJob)}
                 jobId={activeCronJob}
                 open={railOpen}
                 activeThread={cronRunThread}

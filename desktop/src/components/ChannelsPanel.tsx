@@ -29,7 +29,7 @@ import type {
 } from '../types'
 import { useEnvInstall } from './useEnvInstall'
 import type { Gateway } from '../gateway'
-import { MachineScope, useMachine } from './MachineTabs'
+import { MachineScope, useConnectedEffect, useMachine } from './MachineTabs'
 import { DirBrowser } from './DirBrowser'
 import { basename, cn, errorMessage } from '@/lib/utils'
 import {
@@ -240,6 +240,7 @@ export function ChannelsPanel({
         <FeishuForm
           initial={editing}
           gw={gw}
+          machine={machine}
           configPath={configPath}
           taken={takenWorkspaces(editing.id)}
           saveError={saveError}
@@ -348,6 +349,7 @@ function useDiagnose(call: () => Promise<{ checks: DiagnoseCheck[] }> | undefine
 function FeishuForm({
   initial,
   gw,
+  machine,
   configPath,
   taken,
   saveError,
@@ -358,6 +360,7 @@ function FeishuForm({
 }: {
   initial: FeishuConfig
   gw?: Gateway
+  machine: string
   configPath: string // 凭证落盘的绝对路径（空 = 尚未取到，文案退回不带路径的说法）
   taken: Map<string, string> // 其他机器人已占用的项目（workspace → 机器人名），1:1 约束
   saveError?: string // 后端拒绝保存/删除的原因（App ID 撞已有机器人等）
@@ -484,6 +487,7 @@ function FeishuForm({
           {/* 绑定项目归凭证组：它是体检的输入——技能包按此项目检测与安装，所见即所得 */}
           <WorkspacePicker
             gw={gw}
+            machine={machine}
             value={cfg.workspace}
             taken={taken}
             onChange={(v) => set({ workspace: v })}
@@ -889,11 +893,13 @@ function CheckRow({
 // 必选、无兜底：未绑定则保存按钮禁用，后端也拒绝启用（不退回 serve 进程目录）。
 function WorkspacePicker({
   gw,
+  machine,
   value,
   taken,
   onChange,
 }: {
   gw?: Gateway
+  machine: string
   value: string
   // 其他机器人已占用的项目（workspace → 机器人名）：置灰不可选（项目 ↔ 机器人 1:1）
   taken: Map<string, string>
@@ -904,12 +910,17 @@ function WorkspacePicker({
   const [pending, setPending] = useState<string | null>(null) // 待确认切换的目标路径
   const [addErr, setAddErr] = useState('') // 新建项目登记失败原因（否则失败无声，看着像没反应）
 
-  useEffect(() => {
-    gw
-      ?.listProjects()
-      .then((r) => setProjects(r.projects ?? []))
-      .catch(() => setProjects([]))
-  }, [gw])
+  // 挂在机器连接态上：弹窗开着时机器瞬断，连回来自动重拉，不会定格成「没有项目」
+  useConnectedEffect(
+    machine,
+    () => {
+      gw
+        ?.listProjects()
+        .then((r) => setProjects(r.projects ?? []))
+        .catch(() => setProjects([]))
+    },
+    [gw],
+  )
 
   const current = projects.find((p) => p.path === value)
   const bound = !!value

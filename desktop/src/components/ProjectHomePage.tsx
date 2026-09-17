@@ -24,6 +24,7 @@ import type {
 } from '../types'
 import { useI18n } from '../i18n'
 import { Markdown } from './Markdown'
+import { useConnectedEffect } from './MachineTabs'
 import { toast } from './Toast'
 import { errorMessage, timeAgo } from '@/lib/utils'
 import { Button } from '@/components/ui/button'
@@ -42,6 +43,7 @@ type Sheet =
 // 停在项目主页时后台 token 不再引发整页 reconcile
 export const ProjectHomePage = memo(function ProjectHomePage({
   project,
+  machine,
   isDefault,
   api,
   sessions,
@@ -53,6 +55,7 @@ export const ProjectHomePage = memo(function ProjectHomePage({
   onToggleCron,
 }: {
   project: { name: string; path: string }
+  machine: string // 项目所在机器：概览拉取挂在它的连接态上
   isDefault: boolean
   api: () => Gateway | undefined
   sessions: SessionMeta[]
@@ -69,21 +72,26 @@ export const ProjectHomePage = memo(function ProjectHomePage({
   const [sheet, setSheet] = useState<Sheet | null>(null)
   const [promptTab, setPromptTab] = useState<'SOUL' | 'AGENTS'>('SOUL')
 
-  // 概览加载：ovTick 驱动重拉（写操作后 +1）；stale 判废防切换项目时旧响应倒灌
+  // 概览加载：ovTick 驱动重拉（写操作后 +1）；挂在机器连接态上，连上 / 重连成功即重拉
+  // （断线期间进来不会定格成空卡片）；stale 判废防切换项目时旧响应倒灌
   const [ovTick, setOvTick] = useState(0)
   const refresh = useCallback(() => setOvTick((n) => n + 1), [])
-  useEffect(() => {
-    let stale = false
-    api()
-      ?.projectOverview(project.path)
-      .then((ov) => {
-        if (!stale) setOverview(ov)
-      })
-      .catch(() => {})
-    return () => {
-      stale = true
-    }
-  }, [api, project.path, ovTick])
+  useConnectedEffect(
+    machine,
+    () => {
+      let stale = false
+      api()
+        ?.projectOverview(project.path)
+        .then((ov) => {
+          if (!stale) setOverview(ov)
+        })
+        .catch(() => {})
+      return () => {
+        stale = true
+      }
+    },
+    [api, project.path, ovTick],
+  )
 
   const prompt = overview?.prompts.find((p) => p.name === promptTab)
   const pinned = sessions.filter((s) => s.pinned)

@@ -645,6 +645,12 @@ export class Gateway {
     this.connect()
   }
 
+  // 环境可能已恢复（窗口回到前台 / 网络恢复）：只唤醒退避耗尽停在 failed 的连接。
+  // 主动关闭与 1008 鉴权拒绝（closedByUser）不碰——前者复活即僵尸，后者重连也会再被拒
+  wake(): void {
+    if (!this.closedByUser && this.currentState === 'failed') this.reconnect()
+  }
+
   // 关闭后不可复用：退避中的重连定时器一并取消，否则定时器触发会复活
   // 一条无人引用的僵尸连接（服务端凭空多一个 bridge，且永久自动重连）
   close(): void {

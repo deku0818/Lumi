@@ -152,6 +152,12 @@ WS 断开时若会话仍有**活跃 / 挂起轮**（典型：挂在工具审批 
   `MachineScope` 之上（状态要跨机器切换存活），机器没连上时照样触发、请求立即被 Gateway reject
   且无人重试，面板会钉死在空态直到换机器。该 hook 让 fn 只在 `connected` 时跑、重连成功自动重跑，
   供应商 / MCP / 环境三页的列表加载共用（渠道页因叠加 `active` 条件仍自持 offline 判断）。
+  **约定：凡按机器取数一律走它**（项目主页概览、定时执行记录、飞书绑定项目选择同样接入）；App 本身
+  是 context 提供方用不了 hook，项目列表与开局查默认项目直接依赖 `machineConn[machine] === 'open'`
+  写 effect，语义相同。项目列表未成功拉到时为 `null`（列表区留空），不渲染成「还没有项目」。
+- **停摆唤醒**：`stopped` 里的退避耗尽不是终态——窗口重获焦点 / `online` 时 App 对全部控制连接与
+  会话连接调 `Gateway.wake()`（仅 `failed` 且非主动关闭 / 非 1008 才重连）。离开久了（睡眠、断网
+  超过约 15s 的退避窗口）回来即自愈，连上后上面挂在连接态的取数自动重跑，无需逐处写补拉。
 - **弹窗必须放在 `MachineScope` 之外**（飞书配置、MCP 服务器表单）：瞬断会卸载作用域内容，正在
   输入的凭证会跟着没——这正是 `SettingsDialog` 给渠道页加 `forceMount` 要防的事。作用域外的
   新建入口（项目页/定时页的「新建」按钮）则各自 `disabled`。
@@ -323,7 +329,7 @@ macOS 关窗后应用驻留 Dock，sidecar 保持运行，Dock 唤起（activate
 | `desktop/electron/main.cjs` | sidecar 生命周期、窗口、端口分配 |
 | `desktop/electron/updater.cjs` | 应用内更新状态机（Win/Linux 全自动、macOS 半自动） |
 | `desktop/src/{update.ts,components/AboutPanel.tsx}` | 更新状态订阅 hook + 设置→关于面板 |
-| `desktop/src/gateway.ts` | WS JSON-RPC 客户端（指数退避自动重连，超 `MAX_RETRY` 转 `failed` 态等用户手动重连；`setUrl` 支持改址重连；URL 可带 `?workspace=` open 握手 pin 项目） |
+| `desktop/src/gateway.ts` | WS JSON-RPC 客户端（指数退避自动重连，超 `MAX_RETRY` 转 `failed` 态，等用户手动重连或窗口焦点 / 网络恢复时 `wake()`；`setUrl` 支持改址重连；URL 可带 `?workspace=` open 握手 pin 项目） |
 | `desktop/src/App.tsx` | 会话状态机、事件路由、聊天流渲染 |
 | `desktop/src/components/Sidebar.tsx` | 会话列表 + 右键菜单 + 内联重命名 |
 | `desktop/src/components/ResizeHandle.tsx` | 边栏拖拽调宽（`useResizableWidth` hook + 分隔条，宽度持久化） |

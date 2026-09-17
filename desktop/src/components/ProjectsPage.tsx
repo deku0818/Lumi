@@ -41,7 +41,7 @@ export function ProjectsPage({
   onRename,
   onSetDefault,
 }: {
-  projects: Project[]
+  projects: Project[] | null // null = 尚未拉到，列表区留空而非谎报「还没有项目」
   current: string
   machine: string
   needProjectHint?: boolean
@@ -62,6 +62,7 @@ export function ProjectsPage({
   // 后端已按最近使用降序下发，名称排序在前端做
   const shown = useMemo(() => {
     const q = query.trim().toLowerCase()
+    if (!projects) return null
     const list = projects.filter(
       (p) => !q || p.name.toLowerCase().includes(q) || p.path.toLowerCase().includes(q),
     )
@@ -118,7 +119,7 @@ export function ProjectsPage({
           />
         </div>
 
-        {shown.length === 0 ? (
+        {!shown ? null : shown.length === 0 ? (
           <div className="py-20 text-center text-sm text-muted-foreground select-none">
             {t('projects.empty')}
           </div>

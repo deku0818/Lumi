@@ -4,7 +4,7 @@
 //        → 左右两栏「执行记录 | 任务内容」。
 // 数据经 gateway 的 cron RPC 读写；cron.result/cron.running 事件由 App 转为
 // version/runningJobs props 驱动刷新，本组件不直接订阅 WS。
-import { memo, useCallback, useEffect, useState } from 'react'
+import { memo, useCallback, useState } from 'react'
 import {
   AlertTriangle,
   ChevronLeft,
@@ -20,7 +20,7 @@ import {
 import type { CronJob, CronRun } from '../types'
 import { useI18n, type Translate } from '../i18n'
 import { ConfirmDialog } from './ConfirmDialog'
-import { MachineScope, useMachine } from './MachineTabs'
+import { MachineScope, useConnectedEffect, useMachine } from './MachineTabs'
 import { RailSection } from './RightRail'
 import {
   Dialog,
@@ -355,6 +355,7 @@ function JobDetail({
           <div className="text-sm text-muted-foreground mb-2">{t('cron.tabRuns')}</div>
           <RunList
             api={api}
+            machine={beOf(job)}
             jobId={job.id}
             version={version}
             onOpenRun={(tid) => onOpenRun(tid, job.id)}
@@ -488,19 +489,24 @@ function Field({
 // enabled=false（右栏收起）时不拉——完全不可见还随 cron 事件白拉 50 条，重新可见时依赖变化自动补拉
 function useCronRuns(
   api: () => CronApi | undefined,
+  machine: string, // 挂在该机器连接态上：连上 / 重连成功即重拉，断线期间的失败不会定格成「无记录」
   jobId: string,
   version: number,
   limit = 20,
   enabled = true,
 ): CronRun[] | null {
   const [runs, setRuns] = useState<CronRun[] | null>(null)
-  useEffect(() => {
-    if (!enabled) return
-    api()
-      ?.listCronRuns(jobId, limit)
-      .then((r) => setRuns(r.runs ?? []))
-      .catch(() => setRuns([]))
-  }, [api, jobId, version, limit, enabled])
+  useConnectedEffect(
+    machine,
+    () => {
+      if (!enabled) return
+      api()
+        ?.listCronRuns(jobId, limit)
+        .then((r) => setRuns(r.runs ?? []))
+        .catch(() => setRuns([]))
+    },
+    [api, jobId, version, limit, enabled],
+  )
   return runs
 }
 
@@ -572,6 +578,7 @@ export const RunsSection = memo(function RunsSection({
   api,
   jobId,
   open,
+  machine,
   activeThread,
   readRuns,
   version,
@@ -579,6 +586,7 @@ export const RunsSection = memo(function RunsSection({
   onPick,
 }: {
   api: () => CronApi | undefined
+  machine: string
   jobId: string
   open: boolean // 右栏开合：收起时暂停拉取
   activeThread: string | null
@@ -588,7 +596,7 @@ export const RunsSection = memo(function RunsSection({
   onPick: (threadId: string) => void
 }) {
   const { t, lang } = useI18n()
-  const runs = useCronRuns(api, jobId, version, 50, open)
+  const runs = useCronRuns(api, machine, jobId, version, 50, open)
   // 运行中的 run 已完成日志尚未落，故从 liveRuns 单独在顶部渲染活条目；一旦该次跑完
   // 进入 runs（同 thread_id），就从活条目里去掉，避免与完成条目重复。
   const doneThreads = new Set((runs ?? []).map((r) => r.thread_id))
@@ -649,17 +657,19 @@ export const RunsSection = memo(function RunsSection({
 // 有会话的记录点击跳转到该次执行的会话（可续聊）；无会话的旧记录点击展开摘要。
 function RunList({
   api,
+  machine,
   jobId,
   version,
   onOpenRun,
 }: {
   api: () => CronApi | undefined
+  machine: string
   jobId: string
   version: number
   onOpenRun: (threadId: string) => void
 }) {
   const { t, lang } = useI18n()
-  const runs = useCronRuns(api, jobId, version)
+  const runs = useCronRuns(api, machine, jobId, version)
   const [open, setOpen] = useState<number | null>(null)
 
   if (runs === null) return null
