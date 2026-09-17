@@ -1,5 +1,5 @@
 import { memo, useEffect, useRef, useState } from 'react'
-import { Bot, Boxes, Check, ChevronDown, Square, SquareTerminal, X } from 'lucide-react'
+import { Bot, Boxes, Check, ChevronDown, Square, SquareTerminal, Trash2, X } from 'lucide-react'
 import type { LucideIcon } from 'lucide-react'
 import type { BgTask, BgTaskKind, BgTaskOutput } from '../types'
 import { EMPTY_BG_OUTPUT } from '../types'
@@ -386,11 +386,12 @@ export const BgTasksSection = memo(function BgTasksSection({
               </button>
               <Button
                 variant="ghost"
-                size="xs"
+                size="icon-xs"
                 onClick={onClearFinished}
-                className="text-[11px] font-normal text-muted-foreground hover:text-ink"
+                title={t('bg.clear')}
+                className="text-muted-foreground hover:text-ink"
               >
-                {t('bg.clear')}
+                <Trash2 size={12} />
               </Button>
             </div>
             {finOpen && (

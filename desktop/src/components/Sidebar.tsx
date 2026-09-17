@@ -322,7 +322,7 @@ export const Sidebar = memo(function Sidebar({
         <div key={key}>
           <button
             onClick={() => toggleP(key)}
-            className="group/header w-full flex items-center gap-1.5 pl-4 pr-2 pt-1.5 pb-0.5 text-left text-[11px] text-muted-foreground/80 hover:text-muted-foreground transition"
+            className="group/header w-full flex items-center gap-1.5 pl-1.5 pr-2 pt-1.5 pb-0.5 text-left text-[11px] text-muted-foreground/80 hover:text-muted-foreground transition"
           >
             <Send size={11} className="shrink-0" />
             <span className="min-w-0 truncate">
@@ -334,7 +334,7 @@ export const Sidebar = memo(function Sidebar({
               className={`shrink-0 transition-all ${collapsed ? '' : 'rotate-90 opacity-0 group-hover/header:opacity-100'}`}
             />
           </button>
-          {!collapsed && <div className="pl-2.5">{group.sort(byRecency).map((s) => row(s, { bullet: true }))}</div>}
+          {!collapsed && <div>{group.sort(byRecency).map((s) => row(s, { bullet: true }))}</div>}
         </div>
       )
     })
@@ -623,16 +623,18 @@ function SessionRow({
       >
         {machine && <MachineMark id={machine.id} color={machine.color} title={machine.name} />}
         {bullet && !session.channel && (
+          // 圆点左移 3px、右边补回 3px：标题文字位置不变，只拉开点与标题的距离
           <span
-            className={`shrink-0 size-1.5 rounded-full border ${active ? 'border-primary bg-primary' : 'border-separator'}`}
+            className={`shrink-0 size-1.5 -ml-[3px] mr-[3px] rounded-full border ${active ? 'border-primary bg-primary' : 'border-separator'}`}
           />
         )}
-        {/* 渠道会话：群/私聊图标（最近流、搜索结果、飞书分组内统一） */}
+        {/* 渠道会话：群/私聊图标（最近流、搜索结果、飞书分组内统一）。-ml 让 13px 图标与
+            普通行的圆点同中心线、标题与普通行标题同起点 */}
         {session.channel &&
           (session.channel_kind === 'p2p' ? (
-            <User size={13} className="shrink-0 text-success/80" />
+            <User size={13} className="shrink-0 -ml-[7px] text-success/80" />
           ) : (
-            <Users size={13} className="shrink-0 text-info/80" />
+            <Users size={13} className="shrink-0 -ml-[7px] text-info/80" />
           ))}
         <span className="flex-1 min-w-0 truncate text-left">{query ? highlight(name, query) : name}</span>
         {/* 仅「等你处理」保留提醒点（需你操作）；置顶进段不带 📌、进行中不带脉冲点 */}

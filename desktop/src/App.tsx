@@ -63,7 +63,7 @@ import { Markdown } from './components/Markdown'
 import { ApprovalDialog, type Decision } from './components/ApprovalDialog'
 import { ClarifyDialog, ASK_CANCELLED } from './components/ClarifyDialog'
 import { Sidebar } from './components/Sidebar'
-import { MachinesProvider } from './components/MachineTabs'
+import { MachineIcon, MachinesProvider } from './components/MachineTabs'
 import { FileCards, PreviewPanel, parseArtifacts } from './components/Artifacts'
 import { BgTasksSection } from './components/BgTasksDrawer'
 import { TodosSection } from './components/TodosSection'
@@ -2761,8 +2761,27 @@ export default function App() {
                 </Button>
               </div>
             )}
-            {/* 中段纯拖拽条：独立矩形，与按钮区互不重叠，无需挖洞 */}
-            <div className={`flex-1 ${isMacTitleBar ? 'app-drag' : ''}`} />
+            {/* 中段纯拖拽条：独立矩形，与按钮区互不重叠，无需挖洞。
+                会话标题只读无交互，放在拖拽条内不影响拖窗；mac 同按钮区下移对齐红绿灯中心线 */}
+            <div className={`flex-1 min-w-0 flex items-center ${isMacTitleBar ? 'app-drag' : ''}`}>
+              {view === 'chat' && activeSession && (
+                <div
+                  className={`flex min-w-0 items-center gap-2 select-none ${sidebarOpen ? 'pl-4' : 'pl-1'} ${
+                    isMacTitleBar ? 'translate-y-[10px]' : ''
+                  }`}
+                >
+                  <MachineIcon id={activeBackend} size={14} />
+                  <span className="truncate text-[13px] font-semibold text-ink">
+                    {activeSession.title || activeSession.first_message}
+                  </span>
+                  {activeSession.workspace_dir && (
+                    <span className="shrink-0 rounded-[5px] bg-surface px-1.5 text-[11.5px] text-muted-foreground">
+                      {basename(activeSession.workspace_dir)}
+                    </span>
+                  )}
+                </div>
+              )}
+            </div>
           </div>
         )}
         {view === 'projects' ? (
