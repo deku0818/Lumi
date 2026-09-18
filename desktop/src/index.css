@@ -473,6 +473,10 @@ body.resizing-col * {
 .lumi-orb-idle::before { animation: none; opacity: 0; }
 .lumi-orb-idle::after { animation: none; opacity: 0.75; }
 
+/* 侧栏执行中会话的行首金点：缓慢明灭（2.4s 一周期） */
+@keyframes lumi-blink { 50% { opacity: 0.25; } }
+.lumi-blink { animation: lumi-blink 2.4s ease-in-out infinite; }
+
 /* 分步卡（审批 / ask）翻页：按前进/后退方向滑入，--step-dx 由组件给正负 */
 @keyframes step-slide { from { opacity: 0; transform: translateX(var(--step-dx, 0)); } }
 .step-slide { animation: step-slide 0.28s cubic-bezier(0.2, 0.8, 0.2, 1); }

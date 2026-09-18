@@ -5,7 +5,7 @@ import { Check, Wrench } from 'lucide-react'
 import { useI18n } from '../i18n'
 import type { ToolCallBrief } from '../types'
 import { Button } from '@/components/ui/button'
-import { asRecord, clip, cn } from '@/lib/utils'
+import { argText, asRecord, clip, cn } from '@/lib/utils'
 import { GROUP, StepCard, StepReview, useStepper } from './StepCard'
 
 export type Decision = 'approve' | 'reject'
@@ -17,7 +17,6 @@ interface ApprovalData {
 }
 
 const argEntries = (c: ToolCallBrief) => Object.entries(asRecord(c.args))
-const argText = (v: unknown) => (typeof v === 'string' ? v : JSON.stringify(v))
 
 export function ApprovalDialog({
   data,

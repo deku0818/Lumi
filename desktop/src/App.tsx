@@ -85,12 +85,13 @@ import { AppTitleBar } from './components/AppTitleBar'
 import { toast } from './components/Toast'
 import { isCommandMode, parseCommand, matchCommands } from './slash'
 import { toolDiff, type DiffLine } from './diff'
-import { asRecord, clip, basename, botOfThread, fmtTokens, machineColor, machineName, msgTime, sessionKey, keyThread, keyBackend, beOf, FLOAT_GAP } from '@/lib/utils'
+import { shellTokens } from './shell'
+import { argText, asRecord, clip, basename, botOfThread, fmtTokens, machineColor, machineName, msgTime, sessionKey, keyThread, keyBackend, beOf, FLOAT_GAP } from '@/lib/utils'
 import { Button } from '@/components/ui/button'
 import { Tooltip, TooltipContent, TooltipTrigger } from '@/components/ui/tooltip'
 import { useTheme } from './theme'
 import { useUiFont } from './font'
-import { useI18n } from './i18n'
+import { useI18n, type Translate } from './i18n'
 
 // 单 app 实例，模块级自增 id 即可，避免 hook 依赖问题。
 let _id = 0
@@ -3661,59 +3662,162 @@ function SubToolRow({ child }: { child: SubTool }) {
   )
 }
 
-// 展开后的工具明细行：图标 + 人类可读标题 + 旋转箭头，点击看输出/diff。
-// 出错的工具行红色高亮并默认展开；edit/write 渲染 +/- diff 而非裸输出。
+// 展开后的工具明细行。收起：图标 + 标题 + 第二行关键参数（命令着色 / 路径 / 搜索词 / 键值）
+// 与非默认选项 chip，扫一眼就知道调了什么。展开：整行合成一张卡——标题行作卡头（悬停只亮卡头），
+// 发丝线下是命令/路径（或键值表）、虚线下接输出或 diff；chip 挪到标题行，复制悬停才出现。
+// 卡边即行边，左右不留悬空的缩进与错位。出错行默认展开。
 const ToolRow = memo(function ToolRow({ item }: { item: ToolItem }) {
   const { t } = useI18n()
   const errored = !!item.error
   // edit/write 展示 diff；出错时优先展示错误输出而非 diff
   const diff = errored ? null : toolDiff(item.name, item.args)
+  const args = toolArgs(item.name, item.args, t)
   const hasOutput = item.done && !!item.output
-  const hasDetail = !!diff || hasOutput
+  const expandable = !!args.text || !!diff || hasOutput
   const [override, setOverride] = useState<boolean | null>(null)
-  const open = override ?? errored
+  const open = expandable && (override ?? errored)
+  // 展开体首次打开才挂载、之后常驻（收起动画要内容在）：成组展开时不为每行预渲染输出 / diff
+  const [seen, setSeen] = useState(false)
   const Icon = toolIcon(item.name)
+  const chips = <ArgChips chips={args.chips} diff={diff} />
+  const argText = args.shell ? <ShellText cmd={args.text} /> : args.text
+  const argBlock = args.kv ? (
+    <dl className="m-0 grid grid-cols-[max-content_1fr] gap-x-3.5 gap-y-0.5 py-2 pl-3 pr-10">
+      {args.kv.map(([k, v]) => (
+        <div key={k} className="contents">
+          <dt className="text-muted-foreground">{k}</dt>
+          <dd className="m-0 min-w-0 whitespace-pre-wrap break-all text-ink">{v}</dd>
+        </div>
+      ))}
+    </dl>
+  ) : args.text ? (
+    <pre className={`m-0 whitespace-pre-wrap break-all py-2 pr-10 text-ink ${args.shell ? 'pl-[26px]' : 'pl-3'}`}>
+      {/* $ 挂在左侧留白里：多行命令的续行与首行命令对齐，而非顶格像缺字 */}
+      {args.shell && <span className="-ml-[14px] select-none text-muted-foreground">$ </span>}
+      {argText}
+    </pre>
+  ) : null
+  const body = diff ? (
+    <DiffView lines={diff} />
+  ) : !item.done ? (
+    <div className="flex items-center gap-2 px-3 py-2 font-sans text-muted-foreground">
+      <span className="lumi-orb scale-75" />
+      {t(TOOL_META[item.name]?.status ?? 'status.tool')}
+    </div>
+  ) : hasOutput ? (
+    <pre
+      className={`m-0 max-h-60 overflow-auto whitespace-pre-wrap break-all px-3 py-2 ${errored ? 'text-error/90' : 'text-muted-foreground/90'}`}
+    >
+      {item.output.slice(0, 4000)}
+      {item.output.length > 4000 && '\n' + t('common.truncated')}
+    </pre>
+  ) : null
   return (
-    <div className="rounded-lg overflow-hidden">
+    <div
+      className={`rounded-[10px] transition-[background-color,box-shadow,margin] duration-300 ${open ? 'my-1 bg-[color-mix(in_srgb,var(--color-ink)_4%,var(--color-canvas))] ring-1 ring-inset ring-line' : ''}`}
+    >
       <button
-        onClick={() => hasDetail && setOverride((o) => !(o ?? errored))}
-        className={`w-full px-2 py-1.5 flex items-center gap-2.5 text-left text-sm rounded-lg ${hasDetail ? 'hover:bg-white/5' : 'cursor-default'}`}
+        onClick={() => {
+          if (!expandable) return
+          setSeen(true)
+          setOverride((o) => !(o ?? errored))
+        }}
+        className={`w-full px-2 py-1.5 flex items-start gap-2.5 text-left text-sm ${open ? 'rounded-t-[10px]' : 'rounded-lg'} ${expandable ? 'hover:bg-ink/5' : 'cursor-default'}`}
       >
         <Icon
           size={15}
-          className={`shrink-0 ${!item.done ? 'text-primary animate-pulse' : errored ? 'text-error' : 'text-muted-foreground'}`}
+          className={`mt-[3px] shrink-0 ${!item.done ? 'text-primary animate-pulse' : errored ? 'text-error' : 'text-muted-foreground'}`}
         />
-        <span className={`truncate flex-1 ${errored ? 'text-error' : 'text-ink/80'}`}>
-          {toolTitle(item.name, item.args)}
+        <span className="min-w-0 flex-1">
+          <span className="flex min-w-0 items-center gap-1.5">
+            {/* 未登记工具（MCP 等）的参数已在第二行键值里，标题用工具名免重复 */}
+            <span className={`truncate ${errored ? 'text-error' : 'text-ink/80'}`}>
+              {TOOL_META[item.name] ? toolTitle(item.name, item.args) : item.name}
+            </span>
+            {open && chips}
+          </span>
+          {args.text && (
+            <Fold open={!open}>
+              <span className="flex min-w-0 items-center gap-1.5 pt-px">
+                <span className="truncate font-mono text-xs text-ink/60">{argText}</span>
+                {chips}
+              </span>
+            </Fold>
+          )}
         </span>
-        {hasDetail && (
+        {expandable && (
           <ChevronRight
             size={13}
-            className={`shrink-0 text-muted-foreground transition-transform ${open ? 'rotate-90' : ''}`}
+            className={`mt-[4px] shrink-0 text-muted-foreground transition-transform ${open ? 'rotate-90' : ''}`}
           />
         )}
       </button>
-      {open && diff && <DiffView lines={diff} />}
-      {open && !diff && hasOutput && (
-        <pre
-          className={`text-xs ml-[26px] mr-1 mb-1 px-3 py-2 rounded-lg bg-canvas/60 overflow-auto max-h-60 whitespace-pre-wrap ${errored ? 'text-error/90' : 'text-muted-foreground/90'}`}
-        >
-          {item.output.slice(0, 4000)}
-          {item.output.length > 4000 && '\n' + t('common.truncated')}
-        </pre>
+      {expandable && (
+        <Fold open={open}>
+          {(open || seen) && (
+            <div className="group/blk relative border-t border-line/70 font-mono text-xs">
+              {args.text && (
+                <div className="absolute right-1 top-1 rounded-md bg-canvas/80 opacity-0 transition-opacity group-hover/blk:opacity-100">
+                  <CopyButton text={args.text} />
+                </div>
+              )}
+              {argBlock}
+              {argBlock && body && <div className="border-t border-dashed border-line" />}
+              {body}
+            </div>
+          )}
+        </Fold>
       )}
     </div>
   )
 })
 
+// 高度平滑开合：grid-rows 0fr↔1fr（内容常驻 DOM 才有过渡；收起时 inert 免 Tab 进隐藏内容）
+function Fold({ open, children }: { open: boolean; children: ReactNode }) {
+  return (
+    <span
+      inert={!open}
+      className={`grid transition-[grid-template-rows,opacity] duration-300 ease-[cubic-bezier(0.2,0.8,0.2,1)] ${open ? 'grid-rows-[1fr]' : 'grid-rows-[0fr] opacity-0'}`}
+    >
+      <span className="block min-h-0 overflow-hidden">{children}</span>
+    </span>
+  )
+}
+
+// 参数选项 chip（超时 / 后台 / 行范围 / glob…）+ edit/write 的 +/- 行数
+function ArgChips({ chips, diff }: { chips: string[]; diff: DiffLine[] | null }) {
+  const chip = 'shrink-0 rounded-md bg-ink/[0.06] px-1.5 font-sans text-[11px] leading-[19px] whitespace-nowrap'
+  const add = diff?.filter((l) => l.kind === 'add').length
+  const del = diff?.filter((l) => l.kind === 'del').length
+  return (
+    <>
+      {chips.map((c) => (
+        <span key={c} className={`${chip} text-muted-foreground`}>
+          {c}
+        </span>
+      ))}
+      {!!add && <span className={`${chip} text-success`}>+{add}</span>}
+      {!!del && <span className={`${chip} text-error`}>−{del}</span>}
+    </>
+  )
+}
+
+function ShellText({ cmd }: { cmd: string }) {
+  return shellTokens(cmd).map((tk, i) => (
+    <span key={i} style={tk.hl ? { color: `var(--hl-${tk.hl})` } : undefined}>
+      {tk.text}
+    </span>
+  ))
+}
+
 // edit/write 的行级 diff 视图：新增行绿底、删除行红底、上下文行淡显。
 function DiffView({ lines }: { lines: DiffLine[] }) {
   return (
-    <pre className="text-xs ml-[26px] mr-1 mb-1 px-2 py-2 rounded-lg bg-canvas/60 overflow-auto max-h-72 leading-relaxed">
+    <pre className="m-0 max-h-72 overflow-auto py-2 leading-relaxed">
       {lines.map((l, i) => (
         <div
           key={i}
-          className={l.kind === 'add' ? 'bg-success/10' : l.kind === 'del' ? 'bg-error/10' : ''}
+          className={`px-3 ${l.kind === 'add' ? 'bg-success/10' : l.kind === 'del' ? 'bg-error/10' : ''}`}
         >
           <span
             className={`select-none ${l.kind === 'add' ? 'text-success' : l.kind === 'del' ? 'text-error' : 'text-muted-foreground/40'}`}
@@ -3739,19 +3843,55 @@ type ToolMeta = {
   noun: string
   status: string // 运行中的状态指示器文案 i18n key（动作级粒度）
   title: (a: Record<string, unknown>, name: string) => string
+  // 工具行展示的参数；缺省 = 不展示（agent/todos 另有专门渲染）。未登记的工具（MCP 等）走 kvArgs
+  args?: (a: Record<string, unknown>, t: Translate) => ToolArgs
 }
+// text：收起态第二行 / 展开块首行 / 复制内容；kv 非空时展开块改渲染键值表；shell 着色命令
+type ToolArgs = { text: string; kv?: [string, string][]; shell?: boolean; chips: string[] }
+
+const kvArgs = (a: Record<string, unknown>): ToolArgs => {
+  const kv = Object.entries(a).map(([k, v]): [string, string] => [k, argText(v)])
+  // 无参调用不给 kv：空键值表会在展开块里留一条空白
+  return { text: kv.map(([k, v]) => `${k}=${v}`).join('  '), kv: kv.length ? kv : undefined, chips: [] }
+}
+const bashArgs = (a: Record<string, unknown>, t: Translate): ToolArgs => ({
+  text: argStr(a.command),
+  shell: true,
+  chips: [
+    typeof a.timeout === 'number' && a.timeout > 0 ? t('tool.timeout', { n: a.timeout }) : '',
+    a.run_in_background ? t('tool.background') : '',
+  ].filter(Boolean),
+})
+// read 的 offset 从 0 起：显示成 1 起的行号范围；只有显式传了才出 chip
+const readArgs = (a: Record<string, unknown>, t: Translate): ToolArgs => {
+  const from = (typeof a.offset === 'number' ? a.offset : 0) + 1
+  const range =
+    typeof a.limit === 'number' ? `L${from}–${from + a.limit - 1}` : typeof a.offset === 'number' ? `L${from}–` : ''
+  return {
+    text: argStr(a.file_path),
+    chips: [range, argStr(a.pages) && t('tool.pages', { p: argStr(a.pages) })].filter(Boolean),
+  }
+}
+const editArgs = (a: Record<string, unknown>, t: Translate): ToolArgs => ({
+  text: argStr(a.file_path),
+  chips: a.replace_all ? [t('tool.replaceAll')] : [],
+})
+const searchArgs = (a: Record<string, unknown>, t: Translate): ToolArgs => ({
+  text: [argStr(a.pattern), argStr(a.path) === '.' ? '' : argStr(a.path)].filter(Boolean).join('  ·  '),
+  chips: [argStr(a.glob), argStr(a.type), a.case_insensitive ? t('tool.ignoreCase') : ''].filter(Boolean),
+})
 const fileTitle = (a: Record<string, unknown>, name: string) =>
   argStr(a.file_path) ? basename(argStr(a.file_path)) : name
 const searchTitle = (a: Record<string, unknown>) =>
   argStr(a.pattern) ? `Search ${clip(argStr(a.pattern), 48)}` : 'Search'
 
 const TOOL_META: Record<string, ToolMeta> = {
-  bash: { icon: SquareTerminal, verb: 'Ran', noun: 'command', status: 'status.runCommand', title: (a) => clip(argStr(a.description) || argStr(a.command) || 'Run command') },
-  read: { icon: FileText, verb: 'Read', noun: 'file', status: 'status.readFile', title: fileTitle },
-  write: { icon: FilePlus, verb: 'Wrote', noun: 'file', status: 'status.editFile', title: fileTitle },
-  edit: { icon: FilePen, verb: 'Edited', noun: 'file', status: 'status.editFile', title: fileTitle },
-  grep: { icon: Search, verb: 'Searched', noun: '', status: 'status.searching', title: searchTitle },
-  glob: { icon: Search, verb: 'Searched', noun: '', status: 'status.searching', title: searchTitle },
+  bash: { icon: SquareTerminal, verb: 'Ran', noun: 'command', status: 'status.runCommand', title: (a) => clip(argStr(a.description) || 'Run command'), args: bashArgs },
+  read: { icon: FileText, verb: 'Read', noun: 'file', status: 'status.readFile', title: fileTitle, args: readArgs },
+  write: { icon: FilePlus, verb: 'Wrote', noun: 'file', status: 'status.editFile', title: fileTitle, args: editArgs },
+  edit: { icon: FilePen, verb: 'Edited', noun: 'file', status: 'status.editFile', title: fileTitle, args: editArgs },
+  grep: { icon: Search, verb: 'Searched', noun: '', status: 'status.searching', title: searchTitle, args: searchArgs },
+  glob: { icon: Search, verb: 'Searched', noun: '', status: 'status.searching', title: searchTitle, args: searchArgs },
   agent: { icon: Bot, verb: 'Ran', noun: 'subagent', status: 'status.subtask', title: (a) => clip(argStr(a.prompt) || argStr(a.name) || 'Run subagent') },
   todos: { icon: ListChecks, verb: 'Updated', noun: 'todo', status: 'status.tool', title: () => 'Update todos' },
 }
@@ -3789,11 +3929,19 @@ function summarizeTools(tools: ToolItem[]): string {
 }
 
 // 从工具 args 提取人类可读标题（非技术用户看得懂），而非 dump raw JSON。
-// 提取规则定义在 TOOL_META[name].title；未知工具回退到第一个字符串字段。
+// 提取规则定义在 TOOL_META[name].title；未知工具回退到第一个字符串字段（子代理行只有标题，
+// 靠它保留信息；主流 ToolRow 有第二行键值，对未知工具改用工具名，见 ToolRow）。
 function toolTitle(name: string, args: unknown): string {
   const a = asRecord(args)
   const m = TOOL_META[name]
   if (m) return m.title(a, name)
   const first = Object.values(a).find((v) => typeof v === 'string')
   return first ? clip(String(first)) : name
+}
+
+// 工具行展示的参数：登记了的按 TOOL_META[name].args 提取，未登记的（MCP 等）全量键值
+function toolArgs(name: string, args: unknown, t: Translate): ToolArgs {
+  const m = TOOL_META[name]
+  const a = asRecord(args)
+  return m ? (m.args?.(a, t) ?? { text: '', chips: [] }) : kvArgs(a)
 }

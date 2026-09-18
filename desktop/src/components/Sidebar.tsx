@@ -589,7 +589,7 @@ function SessionRow({
   state?: 'running' | 'attention'
   name: string
   machine?: MachineMarker // 多机时行首机器标记（扁平流用；项目树里机器身份在组头）
-  bullet?: boolean // 项目树里的行首空心圆点（当前会话实心金）；渠道行仍用群/私聊图标
+  bullet?: boolean // 项目树里的行首空心圆点（执行中实心金；当前会话靠行底色区分）；渠道行仍用群/私聊图标
   query?: string
   onSelect: (threadId: string, backend: string) => void
   onPin: (threadId: string, backend: string, pinned: boolean) => void
@@ -625,7 +625,7 @@ function SessionRow({
         {bullet && !session.channel && (
           // 圆点左移 3px、右边补回 3px：标题文字位置不变，只拉开点与标题的距离
           <span
-            className={`shrink-0 size-1.5 -ml-[3px] mr-[3px] rounded-full border ${active ? 'border-primary bg-primary' : 'border-separator'}`}
+            className={`shrink-0 size-1.5 -ml-[3px] mr-[3px] rounded-full border ${state === 'running' ? 'border-primary bg-primary lumi-blink' : 'border-separator'}`}
           />
         )}
         {/* 渠道会话：群/私聊图标（最近流、搜索结果、飞书分组内统一）。-ml 让 13px 图标与

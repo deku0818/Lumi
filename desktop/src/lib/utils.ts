@@ -19,6 +19,8 @@ export const clip = (s: string, n = 72) => (s.length > n ? s.slice(0, n) + '…'
 // 把未知的工具 args 安全收成 Record，便于按字段取值（工具标题 / 审批参数共用）
 export const asRecord = (v: unknown): Record<string, unknown> =>
   v && typeof v === 'object' ? (v as Record<string, unknown>) : {}
+// 工具参数值转展示文本：字符串原样，其余 JSON（审批参数 / 工具行键值共用）
+export const argText = (v: unknown) => (typeof v === 'string' ? v : JSON.stringify(v))
 // 路径是不是 Windows 形状（盘符 / UNC）。判据只此一份：basename 与 fileUrl 作用在
 // 同一批路径上，两份拷贝日后一旦分头细化（`\\?\C:\`、盘符相对路径 `C:foo`），会表现为
 // 文件名对而链接坏

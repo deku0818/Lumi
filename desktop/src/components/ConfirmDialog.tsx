@@ -29,13 +29,14 @@ export function ConfirmDialog({
   const { t } = useI18n()
   return (
     <Dialog open onOpenChange={(o) => !o && onCancel()}>
-      <DialogContent className="sm:max-w-sm">
+      <DialogContent showCloseButton={false} className="sm:max-w-sm p-5">
         <DialogHeader>
           <DialogTitle>{title}</DialogTitle>
           <DialogDescription className="break-words">{message}</DialogDescription>
         </DialogHeader>
-        <DialogFooter>
-          <Button variant="outline" onClick={onCancel}>
+        {/* 单一底色：抹掉 DialogFooter 默认的灰底 + 分隔线 + 负边距出血 */}
+        <DialogFooter className="m-0 border-t-0 bg-transparent p-0 pt-1">
+          <Button variant="ghost" className="bg-ink/10 hover:bg-ink/15" onClick={onCancel}>
             {t('common.cancel')}
           </Button>
           <Button variant={variant} onClick={onConfirm}>
