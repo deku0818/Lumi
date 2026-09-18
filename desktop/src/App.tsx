@@ -86,7 +86,7 @@ import { toast } from './components/Toast'
 import { isCommandMode, parseCommand, matchCommands } from './slash'
 import { toolDiff, type DiffLine } from './diff'
 import { shellTokens } from './shell'
-import { argText, asRecord, clip, basename, botOfThread, fmtTokens, machineColor, machineName, msgTime, sessionKey, keyThread, keyBackend, beOf, FLOAT_GAP } from '@/lib/utils'
+import { argText, asRecord, clip, basename, botOfThread, fmtDuration, fmtTokens, machineColor, machineName, msgTime, sessionKey, keyThread, keyBackend, beOf, FLOAT_GAP } from '@/lib/utils'
 import { Button } from '@/components/ui/button'
 import { Tooltip, TooltipContent, TooltipTrigger } from '@/components/ui/tooltip'
 import { useTheme } from './theme'
@@ -282,6 +282,8 @@ function applyChildEvent(
 type SessionState = {
   items: Item[]
   running: boolean
+  // 本轮开始的墙钟时间（epoch 毫秒）：计时由此推算，切走再切回 / 重连都不归零
+  runStart?: number
   // 当前进行中的思考流文本（只在思考期间非空；正文/工具一开始即清空，不留痕迹）
   thinkingText: string
   // 挂起的审批/澄清按 approval_id 排队（后端并发解锁：一条消息多个工具 / 多个前台子代理
@@ -594,6 +596,7 @@ export default function App() {
   const cur = store[active]
   const items = cur?.items ?? []
   const running = cur?.running ?? false
+  const runStart = cur?.runStart
   const thinkingText = cur?.thinkingText ?? ''
   const compacting = cur?.compacting ?? false
   // 观测中的运行中 cron run：当前视图正看着一条仍在执行的 cron 线程（cron.running 为
@@ -1014,7 +1017,14 @@ export default function App() {
                   // 据后端实际运行态恢复 running（否则挂起轮被当空闲，stop 隐藏/输入栏启用）。
                   setStore((s) =>
                     s[myKey]
-                      ? { ...s, [myKey]: { ...s[myKey], running: !!ev.payload.running } }
+                      ? {
+                          ...s,
+                          [myKey]: {
+                            ...s[myKey],
+                            running: !!ev.payload.running,
+                            runStart: ev.payload.run_started_at ?? undefined,
+                          },
+                        }
                       : s,
                   )
                 }
@@ -1051,7 +1061,10 @@ export default function App() {
                     if (targetWorkspace) setWorkspaceDir(targetWorkspace)
                     // 水合历史（保留续接期间已落入的审批/澄清队列与流式在途内容）；
                     // running 据后端运行态恢复（续接的挂起轮要显示运行态，否则被当空闲）。
-                    applySnapshot(targetKey, r, { running: !!ev.payload.running })
+                    applySnapshot(targetKey, r, {
+                      running: !!ev.payload.running,
+                      runStart: ev.payload.run_started_at ?? undefined,
+                    })
                   } catch {
                     /* 瞬断等：历史未加载（loaded=false），重连 ready 分支补拉 */
                   }
@@ -2133,6 +2146,7 @@ export default function App() {
         ...s[sid],
         items: bubble ? [...s[sid].items, bubble] : s[sid].items,
         running: true,
+        runStart: Date.now(),
       },
     }))
 
@@ -2265,6 +2279,7 @@ export default function App() {
             : userBubble(newText, anchor.images, anchor.files),
         ],
         running: true,
+        runStart: Date.now(),
         todos: [], // 后端截断时一并清空：被删轮次建立的任务列表不该带进重答轮
       },
     }))
@@ -2914,6 +2929,7 @@ export default function App() {
                       <StatusIndicator
                         items={items}
                         running={running || observingCronRun}
+                        runStart={liveRun ? Date.parse(liveRun.started_at) : runStart}
                         waiting={!!(approval || clarify)}
                         streaming={streaming}
                         thinkingText={thinkingText}
@@ -3128,6 +3144,7 @@ export default function App() {
 function StatusIndicator({
   items,
   running,
+  runStart,
   waiting,
   streaming,
   thinkingText,
@@ -3135,6 +3152,7 @@ function StatusIndicator({
 }: {
   items: Item[]
   running: boolean
+  runStart?: number
   waiting: boolean
   streaming: boolean
   thinkingText: string
@@ -3142,15 +3160,16 @@ function StatusIndicator({
 }) {
   const { t } = useI18n()
   const [open, setOpen] = useState(false)
-  const [sec, setSec] = useState(0)
+  const [now, setNow] = useState(Date.now)
   const boxRef = useRef<HTMLPreElement>(null)
-  // 计时跟随 running：开始时归零起跑，结束即停（中断 waiting 期间继续走）
+  // 计时由本轮开始时刻推算（存在会话状态里），组件重挂载不归零；waiting 期间照走
   useEffect(() => {
     if (!running) return
-    setSec(0)
-    const id = setInterval(() => setSec((s) => s + 1), 1000)
+    setNow(Date.now())
+    const id = setInterval(() => setNow(Date.now()), 1000)
     return () => clearInterval(id)
   }, [running])
+  const sec = runStart ? Math.max(0, Math.floor((now - runStart) / 1000)) : 0
   useEffect(() => {
     if (open && boxRef.current) boxRef.current.scrollTop = boxRef.current.scrollHeight
   }, [thinkingText, open])
@@ -3191,7 +3210,7 @@ function StatusIndicator({
       <div className="flex items-center gap-2.5 text-muted-foreground text-sm">
         <span className="lumi-orb" />
         <span>{label}</span>
-        {sec > 0 && <span className="text-xs opacity-60">· {sec}s</span>}
+        {sec > 0 && <span className="text-xs opacity-60">· {fmtDuration(sec)}</span>}
         {thinking && (
           <button
             onClick={() => setOpen((o) => !o)}

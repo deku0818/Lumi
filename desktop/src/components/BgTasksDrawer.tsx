@@ -7,7 +7,7 @@ import { useI18n } from '../i18n'
 import type { Translate } from '../i18n'
 import { RailSection } from './RightRail'
 import { Button } from '@/components/ui/button'
-import { CARD_L2, fmtSize } from '@/lib/utils'
+import { CARD_L2, fmtDuration, fmtSize } from '@/lib/utils'
 
 // 后台任务模块（挂在统一右栏 RightRail 里）：运行中的一摞紧凑卡片 + 已完成折叠成一行。
 // 分组是刻意的——终态任务每会话可攒到 20 条（后端 _TERMINAL_CAP），平铺会把正在跑的
@@ -31,7 +31,7 @@ const displayName = (t: BgTask): string =>
 
 const duration = (t: BgTask): string => {
   const end = t.completed_at ?? Date.now() / 1000
-  return `${Math.max(0, Math.round(end - t.started_at))}s`
+  return fmtDuration(Math.max(0, Math.round(end - t.started_at)))
 }
 
 const statusLabel = (t: BgTask, tr: Translate): string =>

@@ -17,6 +17,7 @@ from __future__ import annotations
 import asyncio
 import ntpath
 import os
+import time
 from contextlib import suppress
 from dataclasses import dataclass, field
 from pathlib import Path
@@ -172,6 +173,12 @@ class _RunState:
 
     lock: asyncio.Lock = field(default_factory=asyncio.Lock)
     task: asyncio.Task | None = None
+    # 当前轮开始的墙钟时间（epoch 毫秒）：重连 / 重载后的前端据此续算本轮计时，不归零
+    started_at: int = 0
+
+    def begin(self, task: asyncio.Task) -> None:
+        self.task = task
+        self.started_at = int(time.time() * 1000)
 
     def cancel_once(self) -> None:
         """取消当前轮任务；已在取消收尾中的不重复 cancel——第二发 CancelledError
@@ -793,6 +800,9 @@ class GatewaySession:
                 # 续接时本会话可能仍挂着活跃 / 审批轮：带上运行态，让重连 / 重载后的前端恢复
                 # running（否则 stop 隐藏、输入栏当空闲启用、续跑正文以非运行态渲染）。
                 "running": self.has_active_turn(),
+                "run_started_at": self._run.started_at
+                if self.has_active_turn()
+                else None,
             },
         )
 
@@ -904,8 +914,10 @@ class GatewaySession:
                         {"id": rid, "error": {"message": "请先选择项目再开始对话"}}
                     )
                 return
-            self._run.task = asyncio.create_task(
-                self._run_streaming_rpc(rid, self._stream_gen(method, params))
+            self._run.begin(
+                asyncio.create_task(
+                    self._run_streaming_rpc(rid, self._stream_gen(method, params))
+                )
             )
             # 标题在消息发出时就机会性生成（不等本轮跑完，几秒内上屏，对齐
             # claude-code）；斜杠命令是合成消息、不是用户话题，不触发。
@@ -1152,7 +1164,7 @@ class GatewaySession:
                     hint, tool_mode="default", synthetic=True
                 )
                 pump = asyncio.create_task(self._pump_with_finalize(gen))
-                self._run.task = pump
+                self._run.begin(pump)
                 keep_handle = False
                 try:
                     # shield：裸 await task 时 waiter 被取消会经 _fut_waiter 连坐

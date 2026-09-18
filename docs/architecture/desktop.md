@@ -76,8 +76,8 @@ WS 断开时若会话仍有**活跃 / 挂起轮**（典型：挂在工具审批 
 
 - **`lumi/gateway/session_registry.py`**：进程内 `thread_id → 已 detached 的 GatewaySession`。只存 detached 会话；干净关闭 / TTL 到期即移除。
 - **`GatewaySession.detach()`**（断开且 `should_detach()`）：摘掉死 channel（换 `_NoopChannel`，断连期事件丢弃）、停掉通知轮、登记进 registry、挂 `_DETACH_TTL_SECONDS`（8h 兜底回收）。`should_detach()` 排除**纯后台通知 meta 轮**（无用户在等），除非它自身正挂着审批。
-- **`GatewaySession.reattach(channel)`**（同 thread 重连）：取消 TTL、换上新 channel、重注册广播、重起通知轮、重发 `gateway.ready`（带 `running`）并把挂起的审批 / 澄清卡片再推一遍（`bridge.pending_approval_events()`）。
-- **前端配合**（`desktop/src/`）：每会话一条独立 WS（`connsRef[key]`，`key = sessionKey(backend, thread)` 复合键——IM channel 的 thread_id 按 chat_id 确定性派生，同一飞书群在本地/远程两台 server 上 thread 同名，只用 thread 当键会让两条会话在 client 里塌缩成一条，故会话身份一律带机器维度；切到别的会话不碰本会话连接）；连接 URL 带 `?thread=`（含 Ctrl+R 重载后点回会话的初次连接），后端据此在建空 bridge 前先认领回 detached 会话；`approval` / `clarify` 改按 `approval_id` 排队（渲染队首、逐个出队，并发审批不互相覆盖），重连重发按 `approval_id` 去重；`running` 据 `gateway.ready.running` 复位（断连时 `sendMessage` 的 catch 已置 false）。
+- **`GatewaySession.reattach(channel)`**（同 thread 重连）：取消 TTL、换上新 channel、重注册广播、重起通知轮、重发 `gateway.ready`（带 `running` 与本轮开始时刻 `run_started_at`，epoch 毫秒）并把挂起的审批 / 澄清卡片再推一遍（`bridge.pending_approval_events()`）。
+- **前端配合**（`desktop/src/`）：每会话一条独立 WS（`connsRef[key]`，`key = sessionKey(backend, thread)` 复合键——IM channel 的 thread_id 按 chat_id 确定性派生，同一飞书群在本地/远程两台 server 上 thread 同名，只用 thread 当键会让两条会话在 client 里塌缩成一条，故会话身份一律带机器维度；切到别的会话不碰本会话连接）；连接 URL 带 `?thread=`（含 Ctrl+R 重载后点回会话的初次连接），后端据此在建空 bridge 前先认领回 detached 会话；`approval` / `clarify` 改按 `approval_id` 排队（渲染队首、逐个出队，并发审批不互相覆盖），重连重发按 `approval_id` 去重；`running` 据 `gateway.ready.running` 复位（断连时 `sendMessage` 的 catch 已置 false）；状态行计时由会话状态里的 `runStart` 推算（开轮时取本地时刻，重连 / 重载取 `run_started_at`），切会话、重连都不归零。
 - **边界**：仅 sidecar 存活的断连可救（**Case 1**）；**后端进程重启（Case 2）** 不幸存——in-memory Future 随进程消失，刻意不做落盘（见 [approval-inflight.md](./approval-inflight.md)）。`switch_session` 切回**同 thread**且有活跃轮时不收尾本轮（早返回），避免误杀正挂着的审批。
 
 ## 子代理事件归属（多层委派）

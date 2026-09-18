@@ -2,7 +2,7 @@
   "$comment": "Lumi 前端(desktop / 未来 TS TUI) 与后端的 WebSocket 协议契约。语言中立的单一事实来源：TS 端 import 本文件 derive 静态类型，Python 后端用契约测试(tests/gateway/test_protocol_contract.py)锁住一致性。payload 字段中 '?' 后缀表示可选。新增/改名事件或方法时，只改这里，两端的类型与测试随之收敛。",
   "version": 1,
   "events": {
-    "gateway.ready": { "payload": { "model": "string", "workspace": "string", "workspace_bound": "boolean" }, "note": "连接握手，由 ws 端点直接发出；workspace 未绑定(workspace_bound=false)时仍给出进程 cwd 兜底值，仅供展示，不代表已绑定项目。model 仅供展示（握手时连接尚未绑定 thread，它是新会话默认而非某个会话的模型）——会话模型由 switch_session / new_session 下发" },
+    "gateway.ready": { "payload": { "model": "string", "workspace": "string", "workspace_bound": "boolean", "running": "boolean", "run_started_at": "number|null" }, "note": "连接握手，由 ws 端点直接发出；workspace 未绑定(workspace_bound=false)时仍给出进程 cwd 兜底值，仅供展示，不代表已绑定项目。running/run_started_at（epoch 毫秒）为续接时的活跃轮状态，供前端恢复运行态与本轮计时。model 仅供展示（握手时连接尚未绑定 thread，它是新会话默认而非某个会话的模型）——会话模型由 switch_session / new_session 下发" },
     "turn.start": { "payload": { "message_id": "string" }, "note": "真实用户轮开始（send_message / regenerate / edit_resend / 技能命令），携带该轮用户消息的落库 id；前端据此给乐观气泡上锚，时间旅行按 id 截断。开轮即发故中途 stop 的轮同样带到；系统命令（/compact 等）不产生用户消息、不发此事件" },
     "message.start": { "payload": {} },
     "message.delta": { "payload": { "text": "string", "usage?": "Usage" } },

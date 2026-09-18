@@ -38,6 +38,7 @@ export interface WireEventPayloads extends Record<WireEventType, object> {
     workspace: string
     workspace_bound: boolean
     running?: boolean
+    run_started_at?: number | null
   }
   'turn.start': { message_id: string }
   'message.start': Record<string, never>

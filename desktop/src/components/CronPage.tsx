@@ -30,7 +30,7 @@ import {
 } from '@/components/ui/dialog'
 import { Switch } from '@/components/ui/switch'
 import { Button } from '@/components/ui/button'
-import { CARD_L2, beOf, cn, errorMessage } from '@/lib/utils'
+import { CARD_L2, beOf, cn, errorMessage, fmtDuration } from '@/lib/utils'
 
 // 后端能力句柄：App 注入 anyGw() 返回的 Gateway 子集，便于解耦与测试
 export interface CronApi {
@@ -540,7 +540,7 @@ function RunRowInner({ run, lang, unread }: { run: CronRun; lang: string; unread
     <>
       <RunTimeCol startedAt={run.started_at} lang={lang} />
       <span className="text-[11px] text-muted-foreground tabular-nums shrink-0">
-        {(run.duration_ms / 1000).toFixed(0)}s
+        {fmtDuration(Math.round(run.duration_ms / 1000))}
       </span>
       <RunStatusMark run={run} unread={unread} />
     </>

@@ -12,6 +12,7 @@ FakeChannel（收集 send 帧）+ 一个最小鸭子类型 FakeBridge（可控�
 from __future__ import annotations
 
 import asyncio
+import time
 from contextlib import suppress
 from types import SimpleNamespace
 
@@ -190,6 +191,7 @@ async def test_start_emits_gateway_ready():
             "workspace": ANY_WORKSPACE,
             "workspace_bound": True,
             "running": False,  # start 时无活跃轮
+            "run_started_at": None,
         }
     finally:
         await session.aclose()
@@ -639,6 +641,7 @@ async def test_reattach_resends_ready_and_pending_approvals():
     bridge._pending_events = [approval]
     session, _ = _make_session(bridge)
     await session.start()
+    before = int(time.time() * 1000)
     await session.handle_frame(
         {"id": 1, "method": "send_message", "params": {"content": "x"}}
     )
@@ -647,7 +650,12 @@ async def test_reattach_resends_ready_and_pending_approvals():
     try:
         ch2 = FakeChannel()
         await session.reattach(ch2)
-        assert len(ch2.events("gateway.ready")) == 1
+        ready = ch2.events("gateway.ready")
+        assert len(ready) == 1
+        # 续接带回本轮开始时刻：前端据此续算计时而非从 0 起跑
+        payload = ready[0]["params"]["payload"]
+        assert payload["running"] is True
+        assert before <= payload["run_started_at"] <= int(time.time() * 1000)
         approvals = ch2.events("approval.request")
         assert len(approvals) == 1
         assert approvals[0]["params"]["payload"]["approval_id"] == "ap-1"

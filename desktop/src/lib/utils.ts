@@ -34,6 +34,17 @@ export const fmtTokens = (n: number) => (n >= 1000 ? `${(n / 1000).toFixed(1)}k`
 // token 数完整写法（千分位）：窗口 / 上限这类"要看准确数字"的场合，配合 fmtTokens 的缩写用
 export const fmtTokensFull = (n: number) => n.toLocaleString('en-US')
 
+// 时长格式化（运行计时 / 后台任务耗时共用）：满 60 进位，秒恒显示——只显到分会让
+// 小时级任务看起来像卡住了。42s / 1m 5s / 1h 2m 3s
+export const fmtDuration = (sec: number) => {
+  const h = Math.floor(sec / 3600)
+  const m = Math.floor((sec % 3600) / 60)
+  const s = sec % 60
+  if (h) return `${h}h ${m}m ${s}s`
+  if (m) return `${m}m ${s}s`
+  return `${s}s`
+}
+
 // 字节数格式化（附件卡片 / 后台任务输出体积共用）
 export const fmtSize = (n?: number) => {
   if (n == null) return ''
