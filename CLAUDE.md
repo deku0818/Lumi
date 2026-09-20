@@ -48,13 +48,19 @@ START → Summarizer（超阈值当轮就地压缩 / ptl_retry 置位则绕阈�
   ├─ AutoClassify（auto 模式安全分类器）→ approve: ToolExecutor / reject: CallModel
   ├─ PolicyReject（执行模式策略阻止）→ CallModel
   ├─ OnAgentStop（无工具调用，分发 Stop hooks）→ END（hook 可拉回 CallModel）
-  └─ END（防御性路径 / ptl_retry 置位的压缩路由步）
+  └─ END（防御性路径）
 ```
 压缩恒在上下文注入之前：hook 永远在压缩后的世界运行，marker 由压缩侧恒剥（`compact._reattach`）后自动全量重建（见 `preprocessing/context_inject.py`）。在线 / PTL / 离线三条压缩路径共用 `compact.build_compacted_update`：删整段 → 摘要 carrier → 重挂 `keep`；**正在被回答的那条真人消息（`find_pending_human`）恒原样保住**，不让摘要转述取代用户原话；carrier 继承被删真人消息的 `ts`，使 dream 判活基线（`latest_human_ts`）不随压缩归零。
 
-**PTL 兜底回路：** CallModel 撞 prompt-too-long 时返回 `Command(goto="Summarizer", update={"ptl_retry": True})`，经 Summarizer 的 `_ptl_forced_compact`（绕阈值门、按 API round 保尾）压缩后走正常拓扑重试；成功清 `ptl_retry`，置位期间再撞直接抛原错误（每次 PTL 只换一次压缩机会）。注意 LangGraph 中节点返回 `Command(goto)` 与其条件边取并集——`is_use_tool` 对 `ptl_retry` 置位返回 END，避免该路由步误分发 Stop hooks。
+**PTL 兜底回路：** CallModel 撞 prompt-too-long 时由**节点级 error_handler**（`on_call_model_error`，挂在 `add_node(..., error_handler=)`）返回 `Command(goto="Summarizer", update={"ptl_retry": True})`，经 Summarizer 的 `_ptl_forced_compact`（绕阈值门、按 API round 保尾）压缩后走正常拓扑重试；成功清 `ptl_retry`，置位期间再撞直接原样抛出（每次 PTL 只换一次压缩机会）。用 error_handler 而非节点内 try/except 的原因：**节点自身返回**的 `Command(goto)` 会与其条件边取并集（曾为此在 `is_use_tool` 挂 ptl_retry 守卫防 Stop hooks 误分发），而 error_handler 的路由不触发条件边求值，守卫随之删除——不变量改由 `test_full_graph_ptl_roundtrip` 的 Stop hook 计数断言把住。
 
-**关键状态 `LumiAgentState`：** messages（LangGraph add_messages reducer）、tool_mode（auto/privileged）、summary、todos、output_schema 等。
+**关键状态 `LumiAgentState`：** messages（`DeltaChannel` 增量通道）、tool_mode（auto/privileged）、summary、todos、output_schema 等。
+
+**messages 通道是 `DeltaChannel`**（不是 `add_messages`）：checkpoint 只存增量写入 + 周期快照，长会话不再每个 super-step 重写整段历史。两条随之而来的约束：① 压缩写回用 `Overwrite` 整体替换而非逐条 `RemoveMessage`（`build_compacted_update`）；② **`aupdate_state` 不自动补消息 id**（LangGraph 只在 `put_writes` 补节点写入的），补 id 只能在写入构造时做（放进 reducer 会让每次回放生成新 id）。因此**所有离线写回只走 `AgentBridge.flush_offline` 这一个出口**，由它统一补 id + 挂 `OfflineFlush` 锚点；③ `snapshot_frequency` 必须显式给（取 100），官方默认 1000 等于几乎不快照，会让读退化成 O(链长)。语义差异锁在 `tests/test_delta_channel.py`，出口契约锁在 `tests/gateway/test_offline_flush_stamps.py`。
+
+**协作式停机：** `lumi/agents/core/run_control.py` 的 `drain_all()` 让在跑的图停在 super-step 边界（checkpoint 完整、`next` 指向待执行节点，续跑传 `None` 即可），由 `gateway_process()` 退出时调用。与用户按停的硬 cancel 分工不同：cancel 要立刻、可能落在节点半途（靠 `persist_partial_reply` 事后修），drain 要干净、切不断正在流的模型调用。因 `astream_events(version="v2")` 不转发 `control=`，改经 config 注入带 control 的 parent runtime（用到私有常量，由 `tests/test_drain.py` 锁住）。
+
+**checkpoint 加密（可选）：** 设 `LUMI_CHECKPOINT_AES_KEY`（16/24/32 字节）后 checkpoint 加密落盘，需可选依赖 `pip install 'lumi-harness[encryption]'`；存量明文仍可读，开关随时可开。
 
 **运行时上下文 `LumiAgentContext`：** 通过 LangGraph 的 `Runtime` 参数传递，包含 tools、system_prompt、model_name、permission_engine。在节点函数中通过 `Runtime[LumiAgentContext]` 访问。所有节点共享同一实例。
 

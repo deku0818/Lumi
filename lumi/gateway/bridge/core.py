@@ -26,7 +26,8 @@ from langchain_core.messages import (
     RemoveMessage,
 )
 from langchain_core.runnables.config import RunnableConfig
-from langgraph.errors import GraphBubbleUp
+from langgraph.errors import GraphBubbleUp, GraphDrained
+from langgraph.runtime import RunControl
 from langgraph.types import Command
 
 from lumi.agents.core.graph import LumiAgent, create_agent
@@ -41,8 +42,14 @@ from lumi.agents.core.meta_message import (
 from lumi.agents.core.node_helpers.messages import (
     dangling_tool_calls,
     inject_text_into_message,
+    stamp_missing_ids,
 )
 from lumi.agents.core.nodes import LUMI_MODEL_RETRY_EVENT, build_reject_messages
+from lumi.agents.core.run_control import (
+    register,
+    unregister,
+    with_run_control,
+)
 from lumi.agents.core.state import LumiAgentContext
 from lumi.agents.permissions.workspace import set_run_authorized_source_for
 from lumi.agents.runtime.bg_tasks import (
@@ -836,7 +843,7 @@ class AgentBridge:
 
         供 IM 渠道每日 dream 后的 summary 阶段调用：读 checkpoint 快照 → 复用 summarizer
         的压缩核（``run_summary``）→ 经 ``aupdate_state`` 把摘要 carrier 写回 checkpoint
-        （走 add_messages reducer，压缩后历史 = ``[System?, Human(<summary>)]``，另有一条
+        （整条通道 Overwrite，压缩后历史 = ``[System?, Human(<summary>)]``，另有一条
         尚未被回答的用户消息时原样重挂在 carrier 之后；下条真实用户消息到来时由
         context_inject 全量重建上下文），全程不经 astream_events 故不外泄到渠道。
 
@@ -855,7 +862,8 @@ class AgentBridge:
         self.align_session_model()
         # 整段 body 进摘要（含末条 AI 回复，否则最后一句既不在历史也不在摘要里）；
         # 末条若是没等到回答的用户消息，其原话由 build_compacted_update 保住
-        body = select_for_compaction(await self.snapshot_messages())
+        snapshot = await self.snapshot_messages()
+        body = select_for_compaction(snapshot)
         if body is None:
             return False
 
@@ -871,17 +879,33 @@ class AgentBridge:
             max_retry=token_config.summary_ptl_retry_max,
             drop_ratio=token_config.summary_ptl_retry_drop_ratio,
         )
-        update = build_compacted_update(body, [], summary_text)
-        # 挂离线写回锚点：CallModel 的条件边需要 Runtime 注入，aupdate_state 给不了
-        # （必抛 Missing required config key）；OfflineFlush 出边直达 END，写完
-        # next 即空、不派生任何任务（见 graph.py 节点注释）
-        await self.graph.aupdate_state(self._config, update, as_node="OfflineFlush")
+        update = build_compacted_update(snapshot, [], summary_text)
+        await self.flush_offline(update)
         logger.info(
             "[compact_thread] 已压缩 thread=%s（%d 条历史 → 摘要）",
             self.current_thread_id,
             len(body),
         )
         return True
+
+    async def flush_offline(self, update: dict, graph=None) -> None:
+        """离线写回 state 的**唯一出口**（图不在跑时经 ``aupdate_state`` 改状态）。
+
+        两条规矩都在这里落实，调用方不必各记一遍——漏了都是静默的：
+
+        - ``stamp_missing_ids``：messages 通道是 DeltaChannel，``aupdate_state``
+          不像节点写入那样自动补消息 id（见该函数 docstring）。漏补则这些消息
+          一辈子没 id，而 rewind 截断 / 半截判重 / 压缩选材全按 id 认消息。
+        - ``as_node="OfflineFlush"``：CallModel 的条件边要 Runtime 注入而
+          aupdate_state 给不了（必抛 Missing required config key）；OfflineFlush
+          是无入边的锚点，出边直达 END，写完 next 即空（见 graph.py 节点注释）。
+
+        ``graph`` 缺省取 ``self.graph``；中断收尾路径持有自己那个引用，显式传入。
+        """
+        target = graph if graph is not None else self.graph
+        await target.aupdate_state(
+            self._config, stamp_missing_ids(update), as_node="OfflineFlush"
+        )
 
     async def rewind_before_message(self, message_id: str) -> HumanMessage | None:
         """时间旅行截断：删除目标用户消息及其后全部历史，返回被删的目标消息。
@@ -908,9 +932,7 @@ class AgentBridge:
             update.append(strip_ctx_digest(messages[idx - 1]))
         # todos 与消息同为 state 字段但无历史可回溯：不清会把「已删未来」的任务列表
         # 带进重答轮（模型往幽灵清单续写），一并清空、由重答轮自行重建
-        await self.graph.aupdate_state(
-            self._config, {"messages": update, "todos": []}, as_node="OfflineFlush"
-        )
+        await self.flush_offline({"messages": update, "todos": []})
         logger.info(
             "[rewind] thread=%s 截断 %d 条消息（自 %s 起）",
             self.current_thread_id,
@@ -1081,6 +1103,8 @@ class AgentBridge:
         """
         # 本轮内注册的后台任务归属当前 thread，使完成通知能路由回本会话
         current_thread_id.set(self.current_thread_id)
+        # 在 try 之前声明：finally 恒要注销它，而 try 里有早退分支
+        run_control: RunControl | None = None
         try:
             if self._agent is None or self._config is None:
                 yield BridgeEvent(
@@ -1113,15 +1137,23 @@ class AgentBridge:
             # 中断轮残留（待执行节点但无 interrupt）就地修复：补悬空配对 / 清 ptl_retry
             await self._recover_stale_state(graph)
 
+            # 协作式停机：进程要退出时 drain_all 让本轮在 super-step 边界干净停下，
+            # 停在完整 checkpoint 上（见 agents/core/run_control.py）
+            run_control = RunControl()
+            register(run_control)
+
             for attempt in range(MAX_STREAM_RETRIES + 1):
                 try:
                     # 首次使用原始 input；重试时传 None，
                     # LangGraph 从 checkpoint 恢复执行待定节点
                     stream_input = input_data if attempt == 0 else None
+                    # 每次重试都从**当前** _config 重建：上一次的 finally 刚 pop 掉
+                    # checkpoint_id，快照一次会让重试仍钉在旧 checkpoint 上重放
+                    stream_config = with_run_control(self._config, run_control)
                     try:
                         async for event in graph.astream_events(
                             stream_input,
-                            self._config,
+                            stream_config,
                             context=self._context,
                             version="v2",  # 锁死版本：on_custom_event 浮现 + parent_ids 依赖此契约
                         ):
@@ -1353,6 +1385,17 @@ class AgentBridge:
                     self._reset_partial_buffer()
                     break
 
+                except GraphDrained as e:
+                    # 协作式停机：图停在 super-step 边界、checkpoint 完整、next 指向
+                    # 待执行节点。不重试（进程正在退出），也不报错——下次连上传 None
+                    # 就从这里续跑。只发 MESSAGE_COMPLETE 收口半截气泡，**不发**
+                    # turn.complete：这一轮并没有跑完，报完成会让前端把待续跑的轮
+                    # 标成已结束，续跑时又往「已完成」的轮里灌流。
+                    logger.info("[AgentBridge] 图已优雅停机：%s", e)
+                    self._reset_partial_buffer()
+                    yield BridgeEvent(kind=EventKind.MESSAGE_COMPLETE)
+                    return
+
                 except self._TRANSIENT_NETWORK_ERRORS as e:
                     if attempt >= MAX_STREAM_RETRIES:
                         raise
@@ -1395,6 +1438,11 @@ class AgentBridge:
                 exc_info=True,
             )
             yield BridgeEvent(kind=EventKind.ERROR, error=f"[{err_type}] {e}")
+        finally:
+            # 本轮结束（正常 / 取消 / 出错都算）→ 注销 drain 登记，别让停机信号
+            # 发给早已跑完的运行
+            if run_control is not None:
+                unregister(run_control)
 
     @staticmethod
     def _resolve_tool_call_id(name: str, args_tcid: str, run_id: str) -> str:
@@ -1448,8 +1496,9 @@ class AgentBridge:
         配对 ToolMessage 再接半截——单次有序写入，不依赖下一轮修复的顺序。
 
         防写重按消息 id：cancel 落在「模型流完、节点已落库」之后时，buffer 对应的
-        消息已在历史里（同 id），跳过。此预检是承重墙：同 id 写入会让 add_messages
-        reducer 拿半截**替换**整条全文，不是兜底。id 缺失（个别方言 provider）退回
+        消息已在历史里（同 id），跳过。此预检是承重墙：同 id 写入会让 messages 通道
+        拿半截**替换**整条全文，不是兜底（DeltaChannel 的批量 reducer 同此语义，
+        锁在 tests/test_delta_channel.py）。id 缺失（个别方言 provider）退回
         文本判重：经 extract_text_content 对比末条 AIMessage（str/block-list 通吃）。
         """
         text = "".join(self._partial_chunks)
@@ -1482,9 +1531,7 @@ class AgentBridge:
                     additional_kwargs={"lumi": {"interrupted": True}},
                 )
             )
-            await graph.aupdate_state(
-                self._config, {"messages": new_messages}, as_node="OfflineFlush"
-            )
+            await self.flush_offline({"messages": new_messages}, graph)
             logger.info("[AgentBridge] 已写回被中断的半截回复（%d 字符）", len(text))
         except Exception:
             logger.error("[AgentBridge] 半截回复写回失败", exc_info=True)
@@ -1605,7 +1652,7 @@ class AgentBridge:
             len(dangling),
             "，清 ptl_retry" if "ptl_retry" in update else "",
         )
-        await graph.aupdate_state(self._config, update, as_node="OfflineFlush")
+        await self.flush_offline(update, graph)
 
     @classmethod
     def _extract_last_ai_usage(cls, state) -> dict | None:

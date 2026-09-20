@@ -12,7 +12,7 @@ Lumi 的 Summary 机制在对话历史接近模型上下文窗口时自动压缩
 
 | 组件 | 文件 | 职责 |
 |------|------|------|
-| `summarizer` 节点 | `lumi/agents/core/nodes.py` | 阈值判断 → `_summarize` 生成摘要 → 当轮就地 `RemoveMessage` + 摘要 carrier；`ptl_retry` 置位时改走 `_ptl_forced_compact` 绕阈值强制压缩 |
+| `summarizer` 节点 | `lumi/agents/core/nodes.py` | 阈值判断 → `_summarize` 生成摘要 → 当轮就地 `Overwrite` 整条历史为「摘要 carrier + 保留尾部」；`ptl_retry` 置位时改走 `_ptl_forced_compact` 绕阈值强制压缩 |
 | `_summarize` / `_ptl_forced_compact` | `lumi/agents/core/nodes.py` | `_summarize`：剔悬空 tool_use + `run_summary`（两条压缩路径共用核）；`_ptl_forced_compact`：PTL 路径的选材（保尾）+ 熔断包裹 + carrier 组装 |
 | `compact` 辅助 | `lumi/agents/core/preprocessing/compact.py` | PTL 错误识别、API round 分组与截头、图像剥离、`run_summary`/`summarize_with_ptl_retry`、`select_for_ptl_compaction`（按 round 保尾选材）、per-thread 熔断器 |
 | `context_window_tokens` | `lumi/utils/sizing.py` | 上下文窗口 token 数：优先取最近一条消息的真实 `usage_metadata`，其后新增消息按字节粗估（无 tiktoken） |
@@ -25,10 +25,10 @@ Lumi 的 Summary 机制在对话历史接近模型上下文窗口时自动压缩
 START
   └─► Summarizer ──► PreprocessMessages ──► CallModel ──► (工具循环 / 结束)
                                               │
-                                    撞 PTL ────┘ Command(goto="Summarizer", ptl_retry=True)
+                                    撞 PTL ────┘ error_handler → Command(goto="Summarizer", ptl_retry=True)
 ```
 
-`Summarizer` 串行夹在 `START` 与 `PreprocessMessages` 之间（压缩恒在上下文注入之前，见 `context_inject.py`）。未超阈值 / 熔断打开 / 可压缩消息 < 2 条时它是近乎空跑的直通节点（只做一次廉价的 token 估算），原样放行到 `PreprocessMessages`。`CallModel` 撞 PTL 时经 `Command(goto)` 折返 `Summarizer`（`ptl_retry` 置位），压缩后再走一遍正常拓扑。
+`Summarizer` 串行夹在 `START` 与 `PreprocessMessages` 之间（压缩恒在上下文注入之前，见 `context_inject.py`）。未超阈值 / 熔断打开 / 可压缩消息 < 2 条时它是近乎空跑的直通节点（只做一次廉价的 token 估算），原样放行到 `PreprocessMessages`。`CallModel` 撞 PTL 时由节点级 `error_handler` 折返 `Summarizer`（`ptl_retry` 置位），压缩后再走一遍正常拓扑。
 
 ## 触发与阈值
 
@@ -56,10 +56,10 @@ Human({用户原始消息 + context_inject 全量注入块})
 
 `Summarizer` 只覆盖「进入用户轮时超阈值」的场景；但工具循环内 `ToolExecutor` 直接回 `CallModel` 不经 `Summarizer`，长循环中上下文只增不减，PTL 最可能发生在循环中段（此时末条是 `ToolMessage`，`Summarizer` 的「尾必须 Human」不变量不成立）。
 
-- **触发**：`call_model` 捕获 `is_ptl_error` 后返回 `Command(goto="Summarizer", update={"ptl_retry": True})`；`ptl_retry` 已置位（刚压缩过仍超长）或非 PTL 异常则直接抛出——**每次 PTL 只换一次压缩机会**，收敛且不死循环。
+- **触发**：`call_model` 不再自捕 PTL，异常交给节点级 `error_handler`（`on_call_model_error`，`add_node(..., error_handler=)`）：`is_ptl_error` 命中则返回 `Command(goto="Summarizer", update={"ptl_retry": True})`；`ptl_retry` 已置位（刚压缩过仍超长）或非 PTL 异常则原样抛出——**每次 PTL 只换一次压缩机会**，收敛且不死循环。
 - **强制压缩**（`_ptl_forced_compact`）：绕阈值门与「尾必须 Human」不变量，`select_for_ptl_compaction` 按 API round 保留尾部 `_PTL_KEEP_TAIL_ROUNDS`（=2）组（保住进行中的工具轮），其余进摘要；共用 `_summarize` + 熔断器。任何不可压 / 摘要失败都返回 `{}` 放行，靠 `ptl_retry` 守卫在重试再撞时抛原 PTL。
-- **写回**：`[RemoveMessage(头部+尾部旧 id), carrier, 尾部换新 id 副本]`——尾部 round 必须删旧 id + 换新 id 重加（`add_messages` 只能 append，同 id 是原地更新排不到 carrier 之后；`tool_call_id` 配对在 content 里，不受消息 id 更换影响）。`ptl_retry` 不在此清除，`CallModel` 成功后才清。
-- **条件边守卫**：LangGraph 中节点返回 `Command(goto)` 与其条件边取并集——PTL 路由步 `is_use_tool` 会被求值，`ptl_retry` 置位时返回 `END` 空分支，避免末条 `ToolMessage` 把 `OnAgentStop` 拉进同一 superstep 分发 Stop hooks。
+- **写回**：`Overwrite([System?, carrier, 尾部换新 id 副本])`——整条 messages 通道一次替换（messages 是 `DeltaChannel`，逐条 `RemoveMessage` 会多留一串待回放的删除写入）。尾部仍换新 id，让前端把重挂的原文当新条目；`tool_call_id` 配对在 content 里，不受消息 id 更换影响。`ptl_retry` 不在此清除，`CallModel` 成功后才清。
+- **为什么是 error_handler 而非节点内 try/except**：LangGraph 中**节点自身返回**的 `Command(goto)` 与其条件边取并集——PTL 路由步 `is_use_tool` 也会被求值，末条 `ToolMessage` 会把 `OnAgentStop` 拉进同一 superstep 误分发 Stop hooks（旧实现为此在 `is_use_tool` 挂 `ptl_retry` 守卫返回 `END`）。`error_handler` 的路由不触发条件边求值，守卫已删除，不变量由 `test_full_graph_ptl_roundtrip` 的 Stop hook 计数断言把住。
 - **不外泄**：摘要调用在 `Summarizer` 节点名下运行，gateway 的 `compaction.status` 拦截天然生效（见下节）——这正是把反应式压缩做成路由回 `Summarizer`、而非内联在 `CallModel` 里的主因。
 
 ## 压缩状态隔离（gateway）
@@ -84,10 +84,10 @@ IM 每日整理的 summary 阶段调用：
   文本）被节点与离线入口共用；离线绕开节点专属的阈值门 / 熔断器 / 「末条必须 Human」不变量。
 - **判定**（`select_for_compaction`）：不设大小门，仅两条结构性前提——末条须是无 tool_calls
   的干净 AIMessage（= 已完成一轮的空闲会话），且末条之外至少有一条可删消息。
-- **写回**（`build_compacted_update` → `aupdate_state(..., as_node="CallModel")`）：删除整段
-  body（含末条 AI），按序追加 `[Human(<summary>), AI(末条副本)]`——`add_messages` 按序追加，
-  末条恒为 AI。头部 SystemMessage 不动。`as_node` 显式指定，不依赖 LangGraph 从末次
-  checkpoint 推断写入者。
+- **写回**（`build_compacted_update` → `AgentBridge.flush_offline`）：整条 messages 通道
+  `Overwrite` 成 `[System?, Human(<summary>), 保留的原文]`，头部 SystemMessage 原位保留
+  （`compact.split_head` 是这条规则的单一实现）。`flush_offline` 是离线写回的唯一出口，
+  它统一补消息 id（`aupdate_state` 不像节点写入那样自动补）并挂 `OfflineFlush` 锚点。
 - **两个刻意的"不带"**：末条 AI 副本**不带 usage_metadata**——`context_window_tokens` 无
   usage 锚点时退化为字节估算，压缩后不会因旧 usage 误判仍超阈值；摘要载体 Human **不带
   lumi ts**——IM 每日整理的判活（`latest_human_ts`）不会把"压缩过但无人说话"的会话误判为

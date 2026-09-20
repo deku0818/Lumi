@@ -7,6 +7,7 @@ from __future__ import annotations
 
 from pathlib import Path
 from typing import Any
+from uuid import uuid4
 
 from langchain_core.messages import AIMessage, HumanMessage, RemoveMessage, ToolMessage
 
@@ -244,3 +245,23 @@ def inject_message_cache_breakpoints(messages: list[Any]) -> None:
     # 最后 1 条
     idx = non_system_indices[-1]
     messages[idx] = _add_cache_control(messages[idx])
+
+
+def stamp_missing_ids(update: dict) -> dict:
+    """给 state 更新里缺 id 的消息就地补上 id，返回同一个 dict。
+
+    messages 通道是 ``DeltaChannel``：checkpoint 存的是**待回放的写入**，回放要
+    还原出同一份历史就要求 reducer 确定性——所以补 id 只能发生在写入构造时，不能
+    放进 reducer（每次回放生成新 uuid，同一条消息在每个快照里换个身份）。
+
+    LangGraph 自己在 ``put_writes`` 补节点写入的 id，但 ``aupdate_state`` 不经那条
+    路。离线写回（半截回复 / 压缩 carrier / 补合成 ToolMessage）构造的消息因此可能
+    一辈子没有 id，而 Lumi 全链按 id 认消息（rewind 截断 / 半截判重 / 压缩选材）。
+    """
+    value = update.get("messages")
+    messages = getattr(value, "value", value)  # Overwrite 包了一层
+    if isinstance(messages, list):
+        for msg in messages:
+            if msg.id is None:
+                msg.id = str(uuid4())
+    return update

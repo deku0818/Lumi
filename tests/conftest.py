@@ -261,3 +261,48 @@ def http_client():
     transport = httpx.ASGITransport(app=ws.app)
     yield httpx.AsyncClient(transport=transport, base_url="http://test")
     ws.app.state.token = ""
+
+
+def apply_messages_update(existing: list, update) -> list:
+    """把节点返回的 messages 更新过**真实 messages 通道**应用一次，返回合并后的列表。
+
+    通道实例直接取自 ``LumiAgentState`` 的标注，所以 Overwrite / 同 id 替换 /
+    RemoveMessage 这些语义由运行时那一份定义说了算——测试不再手搓 reducer，换通道
+    实现时测试跟着一起变（换错了会红）。
+    """
+    channel = messages_channel().copy()
+    if existing:
+        channel.update([existing])
+    channel.update([update])
+    return channel.get()
+
+
+def graph_run_config(**token_overrides):
+    """跑真实 LumiAgent 图所需的最小 ``get_config()`` 替身。
+
+    token 段用真实 ``TokenConfig``（只覆盖调用方关心的字段）：新增字段时测试跟着
+    生产默认走，不会因手搓 SimpleNamespace 缺字段而假绿——同 test_compact 的
+    ``_summarizer_env``，此处多带一个 ``agents`` 段供 call_model 取 max_tokens。
+    """
+    from types import SimpleNamespace
+
+    from lumi.utils.config.models import TokenConfig
+
+    return SimpleNamespace(
+        config=SimpleNamespace(
+            agents=SimpleNamespace(max_tokens=None),
+            token=TokenConfig(**token_overrides),
+        ),
+        load_prompt=lambda name: "SUMMARY PROMPT",
+    )
+
+
+def messages_channel():
+    """``LumiAgentState`` 上 messages 通道的定义（测试断言通道语义的单一取法）。"""
+    from typing import get_type_hints
+
+    from lumi.agents.core.state import LumiAgentState
+
+    return get_type_hints(LumiAgentState, include_extras=True)["messages"].__metadata__[
+        0
+    ]

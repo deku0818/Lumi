@@ -11,6 +11,7 @@ from __future__ import annotations
 import asyncio
 from contextlib import asynccontextmanager
 
+from lumi.agents.core.run_control import drain_all, wait_drained
 from lumi.agents.cron.delivery import DeliveryManager
 from lumi.agents.cron.runtime import setup_cron
 from lumi.agents.runtime.bg_tasks import get_task_registry
@@ -18,6 +19,10 @@ from lumi.gateway.bridge import shutdown_shared_runtime
 from lumi.gateway.broadcast import hub
 from lumi.gateway.cron_rpc import set_cron_runtime
 from lumi.utils.logger import logger
+
+# 停机时留给在跑的图跑完当前 super-step 的**上限**（真停完就立刻返回，不空等）。
+# 一个 super-step 通常是一次模型调用或一批工具，超时就硬切——这不是等它跑完整轮。
+_DRAIN_GRACE_SECONDS = 3.0
 
 
 @asynccontextmanager
@@ -65,6 +70,12 @@ async def gateway_process():
     try:
         yield
     finally:
+        # 先请求在跑的图运行优雅停机，再拆子系统：drain 让它们停在 super-step
+        # 边界（checkpoint 完整、next 指向待执行节点，重连传 None 即续跑），
+        # 而不是被随后的进程退出硬切在节点半途。宽限期是上限不是定额——停完即返回；
+        # 超时没停完的照旧被取消，那条路本来就有 persist_partial_reply 兜底。
+        if drain_all("gateway shutdown"):
+            await wait_drained(_DRAIN_GRACE_SECONDS)
         if not catalog_task.done():
             catalog_task.cancel()
         get_task_registry().set_on_change(None)

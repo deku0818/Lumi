@@ -19,7 +19,10 @@ from lumi.agents.core.meta_message import (
     injected_prefix,
     strip_injected_prefix,
 )
-from lumi.agents.core.node_helpers.messages import inject_text_into_message
+from lumi.agents.core.node_helpers.messages import (
+    inject_text_into_message,
+    stamp_missing_ids,
+)
 from lumi.gateway.bridge.core import AgentBridge
 from lumi.sessions.message_text import extract_text_content
 from lumi.utils.constants import LUMI_META_KEY
@@ -35,10 +38,14 @@ def _bridge(thread_id: str = "t-rewind") -> AgentBridge:
 
 
 async def _seed(bridge, messages: list, todos: list | None = None) -> list:
+    """播种历史。经 stamp_missing_ids 与生产的离线写回同路——messages 通道是
+    DeltaChannel，aupdate_state 不自动补 id（补在写入构造时，见该函数 docstring）。"""
     update: dict = {"messages": messages}
     if todos is not None:
         update["todos"] = todos
-    await bridge.graph.aupdate_state(bridge._config, update, as_node="OfflineFlush")
+    await bridge.graph.aupdate_state(
+        bridge._config, stamp_missing_ids(update), as_node="OfflineFlush"
+    )
     return await bridge.snapshot_messages()
 
 

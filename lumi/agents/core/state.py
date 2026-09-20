@@ -10,7 +10,8 @@ if TYPE_CHECKING:
 from dataclasses import dataclass, field
 from pathlib import Path
 
-from langgraph.graph.message import add_messages
+from langgraph.channels.delta import DeltaChannel
+from langgraph.graph.message import _messages_delta_reducer
 
 
 @dataclass
@@ -64,7 +65,36 @@ class LumiAgentContext:
 
 
 class LumiAgentState(TypedDict):
-    messages: Annotated[list, add_messages]
+    messages: Annotated[
+        list, DeltaChannel(_messages_delta_reducer, snapshot_frequency=100)
+    ]
+    """对话历史。通道用 ``DeltaChannel``（增量 checkpoint）而非 ``add_messages``：
+    后者每个 super-step 都把整条历史重新序列化落库，长会话下 checkpoint 库按轮数
+    平方增长。``DeltaChannel`` 只存哨兵 + 回放祖先写入，每 ``snapshot_frequency``
+    次更新写一次完整快照。
+
+    ``snapshot_frequency`` 必须显式给：官方默认 1000 实际等于「几乎不快照」，而恢复
+    状态要一路回放到上一个快照，于是**读**退化成 O(链长)——读一次 state 在生产里
+    每轮至少三次（``_recover_stale_state`` / 跑图 / ``_turn_complete_event``），会话
+    列表还会并发 25 个。200 轮长回复会话实测（单次 ``aget_state`` / 库大小）：
+
+    - ``add_messages``：2.4 ms / 497 MB
+    - ``snapshot_frequency=1000``（默认）：11.2 ms / 4.1 MB —— 且随轮数持续增长
+    - ``snapshot_frequency=100``：2.7 ms / 6.8 MB —— 回放深度有上限，读不再随会话变老
+
+    取 100：读与 ``add_messages`` 持平，库仍小 70 倍以上。
+
+    ``_messages_delta_reducer`` 是官方配套的批量 reducer（带 ``_`` 前缀、标
+    Experimental，但它是唯一与 ``add_messages`` 语义对齐的批量实现）。与
+    ``add_messages`` **一致**的部分锁在 ``tests/test_delta_channel.py``：同 id 替换
+    （``persist_partial_reply`` 的承重墙）、``RemoveMessage`` 删除、``Overwrite``
+    整体替换、以及对存量 ``add_messages`` checkpoint 的读兼容。
+
+    **唯一不一致、且会咬人的地方**：``add_messages`` 给 ``id=None`` 的消息自动补
+    UUID，本通道**只在节点写入时**补（LangGraph 的 ``put_writes``），``aupdate_state``
+    不补。所有离线写回必须先过 ``node_helpers.messages.stamp_missing_ids``，否则那些
+    消息一辈子没有 id，而 rewind 截断 / 半截判重 / 压缩选材全按 id 认消息。这条差异
+    正反两面都有锁定用例。"""
     iterations: int
     todos: NotRequired[list]
     """任务列表，用于追踪复杂任务的执行进度"""

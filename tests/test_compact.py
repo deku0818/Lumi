@@ -9,15 +9,18 @@ from types import SimpleNamespace
 from unittest.mock import AsyncMock, patch
 
 import pytest
-from conftest import PTLError, resolved, tool_loop_history
+from conftest import (
+    PTLError,
+    apply_messages_update,
+    resolved,
+    tool_loop_history,
+)
 from langchain_core.messages import (
     AIMessage,
     HumanMessage,
-    RemoveMessage,
     SystemMessage,
     ToolMessage,
 )
-from langgraph.graph.message import add_messages
 
 from lumi.agents.core import nodes
 from lumi.agents.core.meta_message import CTX_DIGEST_KEY, reminder_human_message
@@ -405,11 +408,9 @@ async def test_summarizer_emits_carrier_before_last_human():
             {"messages": messages}, runtime, {"configurable": {"thread_id": "tm"}}
         )
 
-    # 必须过真实 add_messages 断言合并后顺序：reducer 对「Remove + 同 id 重加」
-    # 是原地更新回原位置，只看 update 列表顺序会漏掉 carrier 落到末尾的回归
-    from langgraph.graph.message import add_messages
-
-    merged = add_messages(messages, result["messages"])
+    # 必须过真实 messages 通道断言合并后顺序：只看 update 内容会漏掉 carrier
+    # 落到末尾之类的回归（通道定义换了，这里跟着换）
+    merged = apply_messages_update(messages, result["messages"])
     assert [type(m).__name__ for m in merged] == ["HumanMessage", "HumanMessage"]
     carrier, last = merged
     carrier_text = _human_text(carrier)
@@ -526,31 +527,26 @@ def test_select_returns_full_body():
 
 
 def test_build_update_removes_body_keeps_head_leaves_carrier():
-    body = select_for_compaction(_conversation(5))
-    update = build_compacted_update(body, [], "浓缩摘要")
+    msgs = _conversation(5)
+    merged = apply_messages_update(
+        msgs, build_compacted_update(msgs, [], "浓缩摘要")["messages"]
+    )
 
-    out = update["messages"]
-    removes = [m for m in out if isinstance(m, RemoveMessage)]
-    additions = [m for m in out if not isinstance(m, RemoveMessage)]
-
-    # 整段 body（含末条 AI）都被删；头部 System 未被删
-    removed_ids = {m.id for m in removes}
-    assert removed_ids == {f"h{i}" for i in range(5)} | {f"a{i}" for i in range(5)}
-    assert "s" not in removed_ids
-
-    # 只追加单条摘要 carrier；下条用户消息到来时由 context_inject 全量重建上下文
-    assert len(additions) == 1
-    assert isinstance(additions[0], HumanMessage)
-    assert "浓缩摘要" in additions[0].content
+    # 整段 body（含末条 AI）被摘要取代；头部 System 原位保留
+    assert isinstance(merged[0], SystemMessage) and merged[0].id == "s"
+    # 只剩单条摘要 carrier；下条用户消息到来时由 context_inject 全量重建上下文
+    assert len(merged) == 2
+    assert isinstance(merged[1], HumanMessage)
+    assert "浓缩摘要" in merged[1].content
 
 
 def test_build_update_reattaches_pending_human_verbatim():
     """末条是未被回答的用户消息 → 原话重挂在 carrier 之后（换新 id 才排得过去）。"""
     msgs = [*_conversation(2), _user("我的问题", "pending", ts=9000)]
     body = select_for_compaction(msgs)
-    update = build_compacted_update(body, [find_pending_human(body)], "浓缩摘要")
+    update = build_compacted_update(msgs, [find_pending_human(body)], "浓缩摘要")
 
-    merged = add_messages(msgs, update["messages"])
+    merged = apply_messages_update(msgs, update["messages"])
     assert [_human_text(m) for m in merged if isinstance(m, HumanMessage)][-2:] == [
         "<summary>\n浓缩摘要\n</summary>\n",
         "我的问题",
@@ -569,9 +565,9 @@ def test_carrier_inherits_ts_so_dream_liveness_survives_compaction():
     ]
     assert latest_human_ts(msgs) == 9.0
 
-    body = select_for_compaction(msgs)
-    merged = add_messages(
-        msgs, build_compacted_update(body, [], "浓缩摘要")["messages"]
+    assert select_for_compaction(msgs) is not None
+    merged = apply_messages_update(
+        msgs, build_compacted_update(msgs, [], "浓缩摘要")["messages"]
     )
     assert [m.id for m in merged] == ["s", merged[-1].id]  # 只剩 System + carrier
     assert latest_human_ts(merged) == 9.0
@@ -588,7 +584,7 @@ def test_reattached_messages_drop_ctx_marker():
     update = build_compacted_update(
         [HumanMessage(content="旧", id="h0"), marked], [marked], "摘要"
     )
-    reattached = update["messages"][-1]
+    reattached = update["messages"].value[-1]
     assert CTX_DIGEST_KEY not in reattached.additional_kwargs
     assert reattached.additional_kwargs[LUMI_META_KEY] == {"ts": 7000}  # 其余原样
 

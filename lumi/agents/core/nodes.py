@@ -4,10 +4,10 @@ from langchain_core.callbacks import adispatch_custom_event
 from langchain_core.messages import (
     AIMessage,
     HumanMessage,
-    SystemMessage,
     ToolMessage,
 )
 from langchain_core.runnables import RunnableConfig
+from langgraph.errors import NodeError
 from langgraph.graph import END
 from langgraph.prebuilt import ToolNode
 from langgraph.runtime import Runtime
@@ -33,6 +33,7 @@ from lumi.agents.core.preprocessing.compact import (
     reset_circuit,
     run_summary,
     select_for_ptl_compaction,
+    split_head,
 )
 from lumi.agents.core.response import message_transform
 from lumi.agents.core.state import LumiAgentContext, LumiAgentState
@@ -104,16 +105,8 @@ async def call_model(
         else:
             transformed_messages.append(m)
 
-    try:
-        response = await _invoke_validated(chain, transformed_messages)
-    except Exception as exc:
-        # PTL 兜底：路由回 Summarizer 强制压缩后经正常拓扑重试（摘要调用在
-        # Summarizer 节点名下运行，bridge 的压缩事件过滤天然生效）。ptl_retry
-        # 已置位说明刚压缩过仍超长（或压缩被放行跳过），直接抛原错误。
-        if not is_ptl_error(exc) or state.get("ptl_retry"):
-            raise
-        logger.warning("[CallModel] prompt-too-long，路由回 Summarizer 强制压缩重试")
-        return Command(goto="Summarizer", update={"ptl_retry": True})
+    # 失败不在此拦，交给节点级 error_handler（见 on_call_model_error）
+    response = await _invoke_validated(chain, transformed_messages)
 
     if response.tool_calls:
         logger.debug(f"[LumiAgent]正在进行第「{iterations}」次工具调用迭代")
@@ -126,6 +119,25 @@ async def call_model(
 
 # astream_events 中浮现该名的 on_custom_event 即一次丢弃重试；bridge 据此 yield message.retry。
 LUMI_MODEL_RETRY_EVENT = "lumi_model_retry"
+
+
+async def on_call_model_error(state: LumiAgentState, error: NodeError) -> Command:
+    """CallModel 的节点级 error_handler：撞 prompt-too-long 就绕回 Summarizer 强制压缩。
+
+    压缩后经正常拓扑重试（摘要调用在 Summarizer 节点名下运行，bridge 的压缩事件
+    过滤天然生效）。``ptl_retry`` 已置位说明刚压缩过仍超长（或压缩被放行跳过），
+    原样抛出——每次 PTL 只换一次压缩机会，用户看到的恒是 PTL 而非内部错误。
+    非 PTL 的错误一律原样抛出，与没有 handler 时逐字节相同。
+
+    放在 error_handler 而非节点内 try/except：LangGraph 对**节点自身返回**的
+    ``Command(goto=)`` 与其条件边取并集（曾为此在 ``is_use_tool`` 里挂 ptl_retry
+    守卫，免得空步把 OnAgentStop 拉进同一 superstep 分发 Stop hooks），而
+    error_handler 的路由不触发条件边求值，那道守卫随之不再需要。
+    """
+    if not is_ptl_error(error.error) or state.get("ptl_retry"):
+        raise error.error
+    logger.warning("[CallModel] prompt-too-long，路由回 Summarizer 强制压缩重试")
+    return Command(goto="Summarizer", update={"ptl_retry": True})
 
 
 async def _invoke_validated(chain, messages: list) -> AIMessage:
@@ -408,13 +420,6 @@ def is_use_tool(state: LumiAgentState, runtime: Runtime[LumiAgentContext]) -> st
     9. default 模式：全部 ALLOW + 边界 OK → ToolExecutor（快速路径）
     10. 其他 → HumanApproval
     """
-    # CallModel 撞 PTL 返回 Command(goto="Summarizer") 时本条件边仍会被求值
-    # （LangGraph 对 Command 路由与条件边取并集）。此步没有新 AIMessage，必须
-    # 走 END 空分支，免得末条 ToolMessage 把 OnAgentStop 拉进同一 superstep
-    # 分发 Stop hooks。CallModel 成功时恒清 ptl_retry，正常路由不受影响。
-    if state.get("ptl_retry"):
-        return "END"
-
     messages = state.get("messages", [])
     if not messages:
         logger.warning("[is_use_tool] 消息列表为空，无法判断工具调用")
@@ -786,9 +791,7 @@ async def summarizer(
     logger.info(f"[Summarizer] {stat}，开始压缩")
 
     # 跳过头部 SystemMessage（不参与摘要、不删除）；尾必须是 HumanMessage
-    messages = original_messages
-    if messages and isinstance(messages[0], SystemMessage):
-        messages = messages[1:]
+    _, messages = split_head(original_messages)
     if not messages or not isinstance(messages[-1], HumanMessage):
         raise ValueError("[Summarizer] 最后一条消息必须是 HumanMessage")
 
@@ -820,8 +823,9 @@ async def summarizer(
     )
 
     # 摘要作独立 carrier 插在重挂的消息之前（三条压缩路径共用 build_compacted_update：
-    # 末条原样重挂，正在被回答的真人消息由它自己认出来一并保住）
-    return build_compacted_update(messages, [messages[-1]], summary_text)
+    # 末条原样重挂，正在被回答的真人消息由它自己认出来一并保住）。传完整历史——
+    # 写回是整条通道 Overwrite，头部 SystemMessage 由它自己保位
+    return build_compacted_update(original_messages, [messages[-1]], summary_text)
 
 
 async def _ptl_forced_compact(
@@ -867,7 +871,7 @@ async def _ptl_forced_compact(
         ptl_retries,
     )
 
-    return build_compacted_update([*to_summarize, *tail], tail, summary_text)
+    return build_compacted_update(messages, tail, summary_text)
 
 
 async def preprocess_messages(

@@ -1,7 +1,8 @@
 """PTL 反应式压缩测试：call_model 路由决策 + summarizer 的 PTL 强制压缩分支。
 
 mock chain / run_summary / get_config，不触发真实 LLM。验证：
-- call_model 撞 PTL → Command(goto="Summarizer", update={"ptl_retry": True})
+- call_model 撞 PTL → 原样抛给节点级 error_handler
+- error_handler 撞 PTL → Command(goto="Summarizer", update={"ptl_retry": True})
 - ptl_retry 已置位再撞 PTL / 非 PTL 异常 → 原样 raise
 - 成功响应清 ptl_retry
 - summarizer PTL 分支：强制压缩产出 removes + carrier + 尾部换新 id 重加；
@@ -10,18 +11,24 @@ mock chain / run_summary / get_config，不触发真实 LLM。验证：
 
 from __future__ import annotations
 
+import functools
 from types import SimpleNamespace
 from unittest.mock import AsyncMock, patch
 
 import pytest
-from conftest import PTLError, resolved, tool_loop_history
+from conftest import (
+    PTLError,
+    apply_messages_update,
+    resolved,
+    tool_loop_history,
+)
 from langchain_core.messages import (
     AIMessage,
     HumanMessage,
     SystemMessage,
     ToolMessage,
 )
-from langgraph.graph.message import add_messages
+from langgraph.errors import NodeError
 from langgraph.types import Command
 
 from lumi.agents.core import nodes
@@ -97,12 +104,25 @@ async def _run_call_model(chain, state):
         return await nodes.call_model(state, _RUNTIME)
 
 
-async def test_ptl_routes_to_summarizer():
+async def test_call_model_lets_ptl_raise_for_the_handler():
+    """call_model 自己不再兜 PTL——错误交给节点级 error_handler 裁决。"""
     chain = SimpleNamespace(
         ainvoke=AsyncMock(side_effect=PTLError("prompt is too long"))
     )
-    result = await _run_call_model(
-        chain, {"messages": tool_loop_history(), "iterations": 1}
+    with pytest.raises(PTLError):
+        await _run_call_model(chain, {"messages": tool_loop_history(), "iterations": 1})
+
+
+async def _handle(exc: BaseException, state: dict):
+    return await nodes.on_call_model_error(
+        state, NodeError(node="CallModel", error=exc)
+    )
+
+
+async def test_ptl_routes_to_summarizer():
+    result = await _handle(
+        PTLError("prompt is too long"),
+        {"messages": tool_loop_history(), "iterations": 1},
     )
     assert isinstance(result, Command)
     assert result.goto == "Summarizer"
@@ -111,19 +131,19 @@ async def test_ptl_routes_to_summarizer():
 
 async def test_ptl_with_flag_set_raises_original():
     """刚压缩过仍超长：直接抛原错误，不再路由——每次 PTL 只换一次压缩机会"""
-    chain = SimpleNamespace(
-        ainvoke=AsyncMock(side_effect=PTLError("prompt is too long"))
-    )
-    with pytest.raises(PTLError):
-        await _run_call_model(
-            chain, {"messages": tool_loop_history(), "iterations": 1, "ptl_retry": True}
+    exc = PTLError("prompt is too long")
+    with pytest.raises(PTLError) as caught:
+        await _handle(
+            exc, {"messages": tool_loop_history(), "iterations": 1, "ptl_retry": True}
         )
+    assert caught.value is exc  # 原样抛出，不包一层
 
 
 async def test_non_ptl_error_propagates():
-    chain = SimpleNamespace(ainvoke=AsyncMock(side_effect=ValueError("boom")))
-    with pytest.raises(ValueError):
-        await _run_call_model(chain, {"messages": tool_loop_history(), "iterations": 1})
+    exc = ValueError("boom")
+    with pytest.raises(ValueError) as caught:
+        await _handle(exc, {"messages": tool_loop_history(), "iterations": 1})
+    assert caught.value is exc
 
 
 async def test_success_clears_ptl_retry():
@@ -166,9 +186,9 @@ async def test_forced_compact_mid_tool_loop():
     messages = tool_loop_history()
     result = await _run_summarizer_ptl(messages)
 
-    # 过真实 add_messages 断言合并后形态：
+    # 过真实 messages 通道断言合并后形态：
     # [System, carrier, 正在被回答的提问, 尾部 2 round 新 id 副本]
-    merged = add_messages(messages, result["messages"])
+    merged = apply_messages_update(messages, result["messages"])
     assert isinstance(merged[0], SystemMessage)
     assert isinstance(merged[1], HumanMessage) and "<summary>" in merged[1].content
     # "q" 是模型正在回答的诉求，压缩不能把它删成摘要转述
@@ -195,7 +215,7 @@ async def test_forced_compact_keeps_pending_human_mid_history():
     ]
     result = await _run_summarizer_ptl(messages)
 
-    merged = add_messages(messages, result["messages"])
+    merged = apply_messages_update(messages, result["messages"])
     texts = [m.content for m in merged if isinstance(m, HumanMessage)]
     assert "现在的问题" in texts  # 原话仍在上下文里
     assert "很早的问题" not in texts  # 已答完的旧问题照常压掉
@@ -237,11 +257,13 @@ async def test_forced_compact_summary_failure_passes_through_and_records_circuit
 
 
 async def test_full_graph_ptl_roundtrip():
-    """真实拓扑走完整回路：CallModel PTL → Command 路由回 Summarizer 强制压缩
-    → PreprocessMessages → CallModel 重试成功 → OnAgentStop → END。
+    """真实拓扑走完整回路：CallModel PTL → error_handler 路由回 Summarizer 强制
+    压缩 → PreprocessMessages → CallModel 重试成功 → OnAgentStop → END。
 
-    锁两件事：Command(goto) 与 is_use_tool 条件边并集时不把 OnAgentStop 拉进
-    PTL 路由步（守卫走 END 空分支）；压缩 update 与重试响应在 state 中的最终形态。
+    锁两件事：PTL 路由步**不**分发 Stop hooks（error_handler 的 Command 路由不触发
+    条件边求值，OnAgentStop 全程只进一次——这是先前 is_use_tool 里那道 ptl_retry
+    守卫在保的不变量，守卫已随 handler 移除，改由本断言把住）；压缩 update 与重试
+    响应在 state 中的最终形态。
     """
     from lumi.agents.core.graph import LumiAgent
     from lumi.agents.core.state import LumiAgentContext
@@ -261,12 +283,24 @@ async def test_full_graph_ptl_roundtrip():
             nodes, "run_summary", new=AsyncMock(return_value=("SUMMARY_TEXT", 0))
         ),
     ):
-        agent = LumiAgent()
-        result = await agent.graph.ainvoke(
-            {"messages": tool_loop_history(), "iterations": 1},
-            context=LumiAgentContext(model_name="fake-model"),
-        )
+        from lumi.agents.core import graph as graph_module
 
+        stop_calls = []
+        real_stop = graph_module.on_agent_stop
+
+        @functools.wraps(real_stop)
+        async def counting_stop(*args, **kwargs):
+            stop_calls.append(1)
+            return await real_stop(*args, **kwargs)
+
+        with patch.object(graph_module, "on_agent_stop", counting_stop):
+            agent = LumiAgent()
+            result = await agent.graph.ainvoke(
+                {"messages": tool_loop_history(), "iterations": 1},
+                context=LumiAgentContext(model_name="fake-model"),
+            )
+
+    assert stop_calls == [1]  # PTL 路由步没把 OnAgentStop 拉进来
     assert chain.ainvoke.await_count == 2
     assert result["ptl_retry"] is False
     contents = [m.content for m in result["messages"]]

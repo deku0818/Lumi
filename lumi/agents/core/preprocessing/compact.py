@@ -19,9 +19,9 @@ from langchain_core.messages import (
     AIMessage,
     BaseMessage,
     HumanMessage,
-    RemoveMessage,
     SystemMessage,
 )
+from langgraph.types import Overwrite
 
 from lumi.agents.core.meta_message import (
     is_reminder_message,
@@ -54,6 +54,20 @@ def is_ptl_error(exc: BaseException) -> bool:
         return True
     status = getattr(exc, "status_code", None)
     return status in (400, 413)
+
+
+def split_head(
+    messages: list[BaseMessage],
+) -> tuple[list[BaseMessage], list[BaseMessage]]:
+    """切成 ``(头部 SystemMessage 或空, 其余)``。
+
+    压缩的四条路径（选材 / PTL 选材 / 写回 / summarizer 节点）都要「头部 System 不
+    参与、原位保留」，规则写一次。state 里实际从不存 SystemMessage（系统提示词在
+    chain 里拼），这是防御性的。
+    """
+    if messages and isinstance(messages[0], SystemMessage):
+        return messages[:1], list(messages[1:])
+    return [], list(messages)
 
 
 def find_pending_human(messages: list[BaseMessage]) -> HumanMessage | None:
@@ -133,11 +147,7 @@ def select_for_ptl_compaction(
     SystemMessage 不参与（调用方原位保留不删）。rounds ≤ keep_rounds + 1 时
     头部只剩前导组（往往就是当前用户消息），压缩有害无益，返回 None。
     """
-    body = (
-        messages[1:]
-        if messages and isinstance(messages[0], SystemMessage)
-        else list(messages)
-    )
+    _, body = split_head(messages)
     rounds = split_into_rounds(body)
     if len(rounds) <= keep_rounds + 1:
         return None
@@ -384,7 +394,7 @@ def select_for_compaction(messages: list) -> list[BaseMessage] | None:
     """
     if not messages:
         return None
-    body = messages[1:] if isinstance(messages[0], SystemMessage) else list(messages)
+    _, body = split_head(messages)
     if not body or not any(m.id for m in body[:-1]):
         return None
     last = body[-1]
@@ -395,8 +405,8 @@ def select_for_compaction(messages: list) -> list[BaseMessage] | None:
 def _reattach(msg: BaseMessage) -> BaseMessage:
     """压缩后重挂一条消息：换新 id + 剥 ctx_digest marker。
 
-    换新 id：``add_messages`` 对「Remove + 同 id 重加」是原地更新、排不到 carrier
-    之后（tool_call_id 配对在 content 里，不受消息 id 影响）。
+    换新 id：重挂的原文与摘要 carrier 同属一次 ``Overwrite``，换 id 让前端把它当新
+    条目（tool_call_id 配对在 content 里，不受消息 id 影响）。
     剥 marker（``strip_ctx_digest``，不变量见其 docstring）：压缩删掉了基线块，
     marker 必须随之消失、下轮由 context_inject 重注全量。对应的旧注入块留
     在 content 里不动——``injected_prefix`` 计数与 ``<attached-file>`` 标签块共用，
@@ -406,25 +416,30 @@ def _reattach(msg: BaseMessage) -> BaseMessage:
 
 
 def build_compacted_update(
-    removed: list[BaseMessage], keep_tail: list[BaseMessage], summary_text: str
+    messages: list[BaseMessage], keep_tail: list[BaseMessage], summary_text: str
 ) -> dict:
-    """压缩写回：删 ``removed`` 全部 → 摘要 carrier → 按序重挂保留的原文。
+    """压缩写回：整条 messages 通道一次性替换为 ``[System?, 摘要 carrier, 保留的原文]``。
 
-    在线 / PTL / 离线三条压缩路径共用的重写形态
-    ``[System?, Human(<summary>), 待回答的真人消息?, *keep_tail]``（头部 SystemMessage
-    未被删、留在原位；连续 human 各 provider 均接受）。
+    在线 / PTL / 离线三条压缩路径共用。``messages`` 传**当前完整历史**，返回的
+    ``Overwrite`` 绕过 add_messages reducer 直接写定最终形态——压缩本就是「历史变成
+    这个样子」，不是「删掉这些条」；逐条 RemoveMessage 在 DeltaChannel 下还会多留
+    一串待回放的删除写入。头部 SystemMessage（若有）原位保留，其余整段被摘要取代。
 
     ``keep_tail`` 是调用方指定要留的尾部（PTL 保尾的工具轮 / 在线路径的末条）；正在
-    被回答的那条真人消息由本函数从 ``removed`` 里认出来（``find_pending_human``），不
-    在 ``keep_tail`` 里就补在它前面——三条路径同一条规则，各自不再判一次。留下的都
-    换新 id 并剥 marker，见 :func:`_reattach`。carrier 继承 ``removed`` 里最后一条真人
-    消息的 ts，使 dream 判活基线不随压缩归零。
+    被回答的那条真人消息由本函数认出来（``find_pending_human``），不在 ``keep_tail``
+    里就补在它前面——三条路径同一条规则，各自不再判一次。留下的都换新 id 并剥
+    marker，见 :func:`_reattach`。carrier 继承被取代段里最后一条真人消息的 ts，使
+    dream 判活基线不随压缩归零。
     """
-    pending = find_pending_human(removed)
+    head, body = split_head(messages)
+    pending = find_pending_human(body)
     if pending is not None and not any(m is pending for m in keep_tail):
         keep_tail = [pending, *keep_tail]
     carrier = build_summary_carrier(
-        summary_text, ts=max((message_ts(m) for m in removed), default=0)
+        summary_text, ts=max((message_ts(m) for m in body), default=0)
     )
-    removes = [RemoveMessage(id=m.id) for m in removed if m.id]
-    return {"messages": [*removes, carrier, *(_reattach(m) for m in keep_tail)]}
+    return {
+        "messages": Overwrite(
+            value=[*head, carrier, *(_reattach(m) for m in keep_tail)]
+        )
+    }

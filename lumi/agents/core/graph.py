@@ -6,6 +6,7 @@ from langgraph.checkpoint.memory import InMemorySaver
 from langgraph.checkpoint.postgres.aio import AsyncPostgresSaver
 from langgraph.checkpoint.sqlite.aio import AsyncSqliteSaver
 from langgraph.graph import END, START
+from langgraph.types import TracePolicy
 from psycopg import AsyncConnection
 from psycopg.rows import dict_row
 
@@ -17,6 +18,7 @@ from lumi.agents.core.nodes import (
     human_approval,
     is_use_tool,
     on_agent_stop,
+    on_call_model_error,
     policy_reject,
     preprocess_messages,
     summarizer,
@@ -29,6 +31,22 @@ from lumi.models import provider_store
 from lumi.utils.config import CheckpointMode, GlobalConfigManager
 from lumi.utils.logger import logger
 from lumi.utils.read_config import get_config
+
+
+def _digest_history(value):
+    """节点 trace 输入里把整段消息历史换成一行摘要。
+
+    每个节点的 ``on_chain_start`` 默认携带**全量 state**（含全部消息）。bridge 一条
+    都不消费（只认 ``on_chat_model_*`` / ``on_tool_*`` / ``on_custom_event``），却要
+    让整段历史随每个 super-step 的每个节点在事件流里过一遍；接了 LangSmith 的话还会
+    原样上传。这里只影响**记录**的内容，传给节点的值不变（见 TracePolicy 文档）。
+    """
+    if not isinstance(value, dict) or "messages" not in value:
+        return value
+    return {**value, "messages": f"<{len(value['messages'])} 条历史，trace 已省略>"}
+
+
+_DIGEST_HISTORY = TracePolicy(process_inputs=_digest_history)
 
 
 class LumiAgent(BaseGraph):
@@ -55,20 +73,25 @@ class LumiAgent(BaseGraph):
 
     def _draw_nodes(self):
         """添加节点"""
-        self.builder.add_node("PreprocessMessages", preprocess_messages)
-        self.builder.add_node("Summarizer", summarizer)
-        self.builder.add_node("CallModel", call_model)
-        self.builder.add_node("ToolExecutor", tool_executor)
-        self.builder.add_node("HumanApproval", human_approval)
-        self.builder.add_node("AutoClassify", auto_classify)
-        self.builder.add_node("PolicyReject", policy_reject)
-        self.builder.add_node("OnAgentStop", on_agent_stop)
+
+        def add(name: str, action, **kwargs) -> None:
+            self.builder.add_node(name, action, trace_policy=_DIGEST_HISTORY, **kwargs)
+
+        add("PreprocessMessages", preprocess_messages)
+        add("Summarizer", summarizer)
+        # PTL 兜底走节点级 error_handler，理由见 nodes.on_call_model_error
+        add("CallModel", call_model, error_handler=on_call_model_error)
+        add("ToolExecutor", tool_executor)
+        add("HumanApproval", human_approval)
+        add("AutoClassify", auto_classify)
+        add("PolicyReject", policy_reject)
+        add("OnAgentStop", on_agent_stop)
         # 离线写回锚点：正常流程永远不路由到它（刻意无入边）。bridge 在图不运行时
         # 经 aupdate_state 写状态（中断收尾的半截回复/补合成 ToolMessage、离线压缩
         # 摘要）统一挂此名——CallModel 的条件边 is_use_tool 需要 Runtime 注入而
         # aupdate_state 给不了（必抛 Missing required config key），固定边节点则
         # 免求值；且出边直达 END，写完 next 即空，checkpoint 恒干净。
-        self.builder.add_node("OfflineFlush", lambda _state: {})
+        add("OfflineFlush", lambda _state: {})
 
     def _draw_edges(self):
         """添加边"""
