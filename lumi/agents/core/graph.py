@@ -1,9 +1,12 @@
+import os
 from pathlib import Path
 
 import aiosqlite
 from langgraph.checkpoint.base import BaseCheckpointSaver
 from langgraph.checkpoint.memory import InMemorySaver
 from langgraph.checkpoint.postgres.aio import AsyncPostgresSaver
+from langgraph.checkpoint.serde.base import SerializerProtocol
+from langgraph.checkpoint.serde.jsonplus import JsonPlusSerializer
 from langgraph.checkpoint.sqlite.aio import AsyncSqliteSaver
 from langgraph.graph import END, START
 from langgraph.types import TracePolicy
@@ -27,6 +30,7 @@ from lumi.agents.core.nodes import (
 from lumi.agents.core.state import LumiAgentContext, LumiAgentState
 from lumi.agents.permissions.engine import PermissionEngine
 from lumi.agents.tools import get_tools
+from lumi.agents.tools.providers.todo import Todo
 from lumi.models import provider_store
 from lumi.utils.config import CheckpointMode, GlobalConfigManager
 from lumi.utils.logger import logger
@@ -228,6 +232,41 @@ async def close_checkpointer(checkpointer: BaseCheckpointSaver | None) -> None:
             logger.error(f"关闭 checkpointer 连接失败: {e}")
 
 
+CHECKPOINT_AES_KEY_ENV = "LUMI_CHECKPOINT_AES_KEY"
+
+# 进 checkpoint 的自定义类型白名单。langgraph 默认「警告但放行」任意类型，日志每次
+# 读盘刷一条 "will be blocked in a future version"；显式列出后 msgpack 转严格模式：
+# 内置安全类型 + 这里列的才允许反序列化，其余被拦下并记 warning（值变空，不抛异常）。
+# 现存 checkpoint 库里扫出来的自定义类型只有 Todo 一个。
+# **新增会落进 state 的自定义类型时必须加到这里**，否则那个字段读回来是空的。
+_ALLOWED_CHECKPOINT_TYPES = (Todo,)
+
+
+def _checkpoint_serde() -> SerializerProtocol:
+    """checkpoint 序列化器：类型白名单恒生效，配了密钥再叠一层 AES 加密。
+
+    加密开关是 ``LUMI_CHECKPOINT_AES_KEY``（16/24/32 字节）——checkpoints.db 存的是
+    整段对话原文。密钥只认环境变量、不进 ``lumi.json``：钥匙和锁放同一个 ``~/.lumi``
+    目录等于没锁。存量明文 checkpoint 仍可读（``EncryptedSerializer.loads_typed`` 按
+    类型标记分流，无 cipher 标记的走明文），所以开关随时可开、不需要迁移；关掉则新
+    写入恢复明文、已加密的读不回来。加密依赖可选包：
+    ``pip install 'lumi-harness[encryption]'``。
+    """
+    base = JsonPlusSerializer(allowed_msgpack_modules=_ALLOWED_CHECKPOINT_TYPES)
+    key = os.environ.get(CHECKPOINT_AES_KEY_ENV, "").encode()
+    if not key:
+        return base
+    # 自己校验长度：langgraph 只在读它自己那个 env 变量时校验，显式传 key 会跳过，
+    # 于是坏密钥一路装到第一次落盘才炸（服务照常起来，之后每轮都写不进 checkpoint）
+    if len(key) not in (16, 24, 32):
+        raise ValueError(
+            f"{CHECKPOINT_AES_KEY_ENV} 须是 16 / 24 / 32 字节，当前 {len(key)} 字节"
+        )
+    from langgraph.checkpoint.serde.encrypted import EncryptedSerializer
+
+    return EncryptedSerializer.from_pycryptodome_aes(serde=base, key=key)
+
+
 async def create_checkpointer(
     checkpoint: CheckpointMode | None = None,
 ) -> BaseCheckpointSaver | None:
@@ -250,7 +289,7 @@ async def create_checkpointer(
             try:
                 checkpoint_dir.mkdir(parents=True, exist_ok=True)
                 conn = await aiosqlite.connect(db_path)
-                checkpointer = AsyncSqliteSaver(conn)
+                checkpointer = AsyncSqliteSaver(conn, serde=_checkpoint_serde())
                 await checkpointer.setup()
                 return checkpointer
             except Exception as e:
@@ -266,11 +305,11 @@ async def create_checkpointer(
             conn = await AsyncConnection.connect(
                 uri, autocommit=True, prepare_threshold=0, row_factory=dict_row
             )
-            checkpointer = AsyncPostgresSaver(conn=conn)
+            checkpointer = AsyncPostgresSaver(conn=conn, serde=_checkpoint_serde())
             await checkpointer.setup()
             return checkpointer
         case _:
-            return InMemorySaver()
+            return InMemorySaver(serde=_checkpoint_serde())
 
 
 async def create_agent(
