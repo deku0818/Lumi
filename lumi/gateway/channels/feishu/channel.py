@@ -26,6 +26,7 @@ from lumi.gateway.channels.feishu.daily_dream import daily_dream_loop
 from lumi.gateway.channels.feishu.directory import FeishuDirectory
 from lumi.gateway.channels.feishu.inbound import FeishuInbound
 from lumi.gateway.channels.feishu.lark_call import lark_call
+from lumi.gateway.channels.feishu.lark_loop import use_loop_in_this_thread
 from lumi.gateway.channels.feishu.minutes import ensure_subscription
 from lumi.gateway.channels.feishu.streaming import FeishuStreaming, grey
 from lumi.utils.logger import logger
@@ -243,11 +244,11 @@ class FeishuChannel:
         """独立线程跑 WebSocket 客户端；自动重连，异常只记日志不外抛。"""
         import time
 
-        import lark_oapi.ws.client as _lark_ws_client
-
         ws_loop = asyncio.new_event_loop()
         asyncio.set_event_loop(ws_loop)
-        _lark_ws_client.loop = ws_loop  # lark 模块级 loop，否则会抢主事件循环
+        # lark 把事件循环存在模块级全局上，直接赋值会让多机器人互相覆盖（后写的赢，
+        # 先连上的那个当场掉线并永久重连失败）。改登记到按线程分发的代理，见 lark_loop
+        use_loop_in_this_thread(ws_loop)
         self._ws_loop = ws_loop  # 暴露给 stop()：停掉它即可打断阻塞的 start()
         try:
             while self._running:
