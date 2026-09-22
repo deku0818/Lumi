@@ -468,6 +468,15 @@ async def human_approval(
         {"decision": "reject", "message": "用户停止了本轮，已拒绝该操作"},
     )
 
+    # 应答来自 wire（resume 的 value 由客户端给），形状不可信：非 dict 一律按拒绝收尾，
+    # 与下方「缺项按拒绝」同一条 fail-closed 约定——否则畸形负载会以 AttributeError
+    # 打断整条流式，而不是干净地拒掉这批工具调用。
+    if not isinstance(result, dict):
+        logger.warning(
+            "[HumanApproval] 应答格式非法（%s），按拒绝处理", type(result).__name__
+        )
+        result = {"decision": "reject", "message": "审批应答格式非法，已拒绝该操作"}
+
     # 批量 {decision} 应答展开成同值列表，与逐个审批的 decisions 走同一裁决
     tool_calls = last_message.tool_calls
     decisions = result.get("decisions") or [result.get("decision", "reject")] * len(

@@ -147,6 +147,19 @@ async def test_per_call_missing_decision_fails_closed():
     assert [m.tool_call_id for m in cmd.update["messages"]] == ["b", "c"]
 
 
+async def test_malformed_answer_fails_closed():
+    """resume 的 value 由客户端给、形状不可信：非 dict 一律按拒绝收尾。
+
+    回归：曾直接 result.get(...)，客户端漏传 value（None）时以 AttributeError
+    打断整条流式——挂起的工具既没执行也没被干净拒掉，本轮就此崩掉。
+    """
+    for bad in (None, "approve", ["approve"], 42):
+        rt = _runtime(decision=bad)
+        cmd = await human_approval(_state(_TCS3), rt)
+        assert cmd.goto == END, f"{bad!r} 应按拒绝收尾"
+        assert len(cmd.update["messages"]) == 3  # 三个调用各补一条拒绝 ToolMessage
+
+
 async def test_tool_executor_runs_only_unanswered_calls(monkeypatch):
     """部分拒绝后进 ToolExecutor：已有拒绝 ToolMessage 的调用不再执行，只跑剩余的。"""
     from langchain_core.messages import ToolMessage
