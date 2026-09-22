@@ -1,4 +1,4 @@
-// 斜杠命令解析（对齐后端 lumi/tui/slash_commands/parser.py）。
+// 斜杠命令解析：命令名 = "/" 后到第一个空格之间的子串，其余为参数文本。
 import type { SlashCommand } from './types'
 
 // 命令模式：以 "/" 开头、命令名尚未输完（无空格、无换行）时展示补全菜单。
@@ -7,7 +7,7 @@ export function isCommandMode(text: string): boolean {
 }
 
 // 提取命令前缀（"/" 后到第一个空格之间的子串）。"/rev" -> "rev"
-export function commandPrefix(text: string): string {
+function commandPrefix(text: string): string {
   return text.slice(1).split(' ', 1)[0]
 }
 

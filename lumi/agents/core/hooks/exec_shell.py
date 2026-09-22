@@ -44,22 +44,13 @@ KILL_GRACE_SECONDS = 1.0
 ENV_PASSTHROUGH_PREFIX = "LUMI_HOOK_"
 """仅 ``LUMI_HOOK_*`` 前缀环境变量透传，防 secrets（API_KEY / DB_URL 等）泄露。"""
 
-_env_cache: dict[str, str] | None = None
-
 
 def _filter_env() -> dict[str, str]:
-    """构造 subprocess env：仅白名单前缀 + PATH（module-level cache）。
-
-    cache 没 invalidate API——测试需要重置时直接把 ``_env_cache`` 置 None。
-    """
-    global _env_cache
-    if _env_cache is None:
-        env = {"PATH": os.environ.get("PATH", "")}
-        for k, v in os.environ.items():
-            if k.startswith(ENV_PASSTHROUGH_PREFIX):
-                env[k] = v
-        _env_cache = env
-    return _env_cache
+    """构造 subprocess env：仅白名单前缀 + PATH。"""
+    return {
+        "PATH": os.environ.get("PATH", ""),
+        **{k: v for k, v in os.environ.items() if k.startswith(ENV_PASSTHROUGH_PREFIX)},
+    }
 
 
 def make_shell_hook(

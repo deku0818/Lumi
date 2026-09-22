@@ -5,11 +5,13 @@
 
 from __future__ import annotations
 
+from types import SimpleNamespace
+
 import pytest
 from conftest import resolved
 from langchain_core.messages import AIMessage, HumanMessage
 
-from lumi.agents.core.hooks import AdditionalContext, HookContext, iter_hooks
+from lumi.agents.core.hooks import AdditionalContext, HookContext, dispatch
 from lumi.agents.core.hooks import goal as goal_hook
 from lumi.sessions import session_meta
 
@@ -22,12 +24,23 @@ def meta_file(tmp_path, monkeypatch):
     return tmp_path / "meta.json"
 
 
-def _ctx(messages=None):
+def _runtime():
+    """bridge 注入的 goal 回调（core 不依赖 sessions 层，经 context 拿）。"""
+    return SimpleNamespace(
+        context=SimpleNamespace(
+            get_goal=session_meta.get_goal,
+            clear_goal=lambda tid: session_meta.update_meta(tid, goal=""),
+        )
+    )
+
+
+def _ctx(messages=None, **state):
     return HookContext(
-        state={"messages": messages or []},
+        state={"messages": messages or [], **state},
         config={"configurable": {"thread_id": THREAD}},
         event="Stop",
         payload={},
+        runtime=_runtime(),
     )
 
 
@@ -46,7 +59,22 @@ async def test_no_goal_passes_through(meta_file):
 
 
 async def test_no_thread_id_passes_through(meta_file):
-    ctx = HookContext(state={"messages": []}, config={}, event="Stop", payload={})
+    ctx = HookContext(
+        state={"messages": []}, config={}, event="Stop", payload={}, runtime=_runtime()
+    )
+    assert await goal_hook.goal_stop_hook(ctx) is None
+
+
+async def test_no_runtime_headless_passes_through(meta_file, monkeypatch):
+    # cron / 子 agent 无 bridge 注入 goal 回调（runtime=None）→ 不参与目标驱动
+    session_meta.update_meta(THREAD, goal="建 hello.txt")
+    _mock_judge(monkeypatch, ok=False, reason="不该被调用")
+    ctx = HookContext(
+        state={"messages": []},
+        config={"configurable": {"thread_id": THREAD}},
+        event="Stop",
+        payload={},
+    )
     assert await goal_hook.goal_stop_hook(ctx) is None
 
 
@@ -54,13 +82,7 @@ async def test_sub_agent_depth_passes_through(meta_file, monkeypatch):
     # 子 agent（depth>0）继承父 thread_id，但不该参与目标驱动——即便父有活跃 goal
     session_meta.update_meta(THREAD, goal="建 hello.txt")
     _mock_judge(monkeypatch, ok=False, reason="不该被调用")
-    ctx = HookContext(
-        state={"messages": [], "depth": 1},
-        config={"configurable": {"thread_id": THREAD}},
-        event="Stop",
-        payload={},
-    )
-    assert await goal_hook.goal_stop_hook(ctx) is None
+    assert await goal_hook.goal_stop_hook(_ctx(depth=1)) is None
     assert session_meta.get_goal(THREAD) == "建 hello.txt"  # 未被误清
 
 
@@ -233,7 +255,7 @@ async def test_dispatch_chain_passes_when_no_goal(meta_file):
 def test_stop_hook_order_goal_between_structured_and_dream():
     import lumi.agents.core.hooks.builtin  # noqa: F401  触发注册
 
-    names = [h.__name__ for h in iter_hooks("Stop")]
+    names = [h.__name__ for h in dispatch._hooks_for("Stop")]
     assert (
         names.index("structured_output_stop_hook")
         < names.index("goal_stop_hook")

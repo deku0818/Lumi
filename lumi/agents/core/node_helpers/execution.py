@@ -10,9 +10,9 @@ from datetime import datetime
 from typing import Any
 
 from lumi.agents.core.node_helpers.messages import content_to_str, write_offload_file
+from lumi.utils.config import get_config
 from lumi.utils.logger import logger
 from lumi.utils.paths import lumi_tmp_dir
-from lumi.utils.read_config import get_config
 from lumi.utils.sizing import (
     content_size,
     text_size,
@@ -150,8 +150,8 @@ _MIN_PER_MSG_CAP = 4096
 assert _MIN_PER_MSG_CAP > _OFFLOAD_PREVIEW_BYTES  # 见上：份额必须容得下预览
 
 
-async def truncate_tool_results(messages_list: list[Any]) -> list[Any]:
-    """截断或卸载工具返回结果。
+async def truncate_tool_results(messages_list: list[Any]) -> None:
+    """就地截断或卸载工具返回结果。
 
     根据工具类型采取不同策略：
     - ``_TRUNCATE_ONLY_TOOLS``：截断并提示分段读取
@@ -180,8 +180,6 @@ async def truncate_tool_results(messages_list: list[Any]) -> list[Any]:
         if size > max_bytes:
             await _truncate_single_message(msg, max_bytes)
 
-    return messages_list
-
 
 # ---------------------------------------------------------------------------
 # 错误处理
@@ -193,10 +191,5 @@ def handle_tool_error(error: Exception) -> str:
 
     被 ``ToolNode`` 内部调用，确保单个工具失败不影响并发执行的其他工具。
     """
-    error_message = str(error)
-    logger.error("[ToolExecutor] 工具执行失败: %s", error_message)
-
-    if "no search results" in error_message.lower():
-        return "此关键词未找到相关搜索结果"
-
-    return f"工具执行失败: {error_message}"
+    logger.error("[ToolExecutor] 工具执行失败: %s", error)
+    return f"工具执行失败: {error}"

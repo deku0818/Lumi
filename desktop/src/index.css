@@ -4,7 +4,7 @@
 
 @custom-variant dark (&:is(.dark *));
 
-/* Lumi 双主题色板，与 lumi/tui/theme.py 的 DARK_PALETTE / LIGHT_PALETTE 保持一致。
+/* Lumi 双主题色板。
    暗色为暖中性炭灰（去除旧版的蓝紫冷调，配暖金 accent 与暖白亮色主题）；
    运行时通过根元素 .light class 切换；@theme inline 让 Tailwind 工具类引用这些变量。 */
 :root {

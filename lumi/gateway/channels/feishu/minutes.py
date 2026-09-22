@@ -12,11 +12,11 @@ from __future__ import annotations
 
 import json
 import os
-import shutil
 from dataclasses import asdict
 
-from lumi.gateway.channels.feishu import lark_profile
+from lumi.gateway import toolbox
 from lumi.gateway.channels.feishu.checks import Check, blocked_tail
+from lumi.gateway.channels.feishu.lark_profile import CLI, run_cli
 from lumi.gateway.channels.feishu.scopes import (
     MINUTE_EVENT,
     MINUTES_SCOPES,
@@ -25,15 +25,13 @@ from lumi.gateway.channels.feishu.scopes import (
 )
 from lumi.utils.logger import logger
 
-_CLI = "lark-cli"
-
 
 # login 只请求勾选/参数指定的 scope（应用开通了也不会自动带上），必须显式列出所需项；
 # --scope 与 --recommend 叠加，不会丢掉其他常用权限
 def _login_cmd(profile: str) -> str:
     """扫码授权命令；机器人有专属 profile 时授权落在它名下（各机器人各自授权）。"""
     flag = f"--profile {profile} " if profile else ""
-    return f'{_CLI} {flag}auth login --recommend --scope "{",".join(MINUTES_SCOPES)}"'
+    return f'{CLI} {flag}auth login --recommend --scope "{",".join(MINUTES_SCOPES)}"'
 
 
 # 四项检查的固定顺序与显示名。前一项不通时其后各项统一标记为「需先完成上一步」，
@@ -46,24 +44,14 @@ _STEPS: tuple[tuple[str, str], ...] = (
 )
 
 
-def _run_cli(*args: str, profile: str = "") -> tuple[bool, str]:
-    """跑一次 lark-cli，返回 (是否启动成功, stdout 或错误原因)。
-
-    薄适配 ``lark_profile.run_cli``（飞书包内唯一 runner）：本模块的调用方按
-    JSON 输出的 ok 字段判业务成败，只关心「启动起来没有」。profile 非空时以
-    机器人专属身份执行（多机器人时授权与订阅按 profile 各自独立）。
-    """
-    code, out = lark_profile.run_cli(*args, profile=profile)
-    return code != -1, out
-
-
 def ensure_subscription(profile: str = "") -> str:
     """幂等重建妙记事件订阅；成功返回空串，失败返回原因。
 
     每次 channel 启动都调：订阅会因 `lark-cli event consume` 优雅退出（它会主动
     unsubscribe）、user token 过期、换机器授权等多种原因失效，而失效是静默的。
+    业务成败看 JSON 输出的 ok 字段，退出码只用来判「启动起来没有」（-1）。
     """
-    ok, out = _run_cli(
+    code, out = run_cli(
         "api",
         "POST",
         "/open-apis/minutes/v1/minutes/subscription",
@@ -73,7 +61,7 @@ def ensure_subscription(profile: str = "") -> str:
         "user",
         profile=profile,
     )
-    if not ok:
+    if code == -1:
         return out
     try:
         payload = json.loads(out)
@@ -91,8 +79,8 @@ def _auth_status(profile: str = "") -> tuple[dict | None, str]:
     原因要带出来：超时、CLI 崩溃、旧版本不认 --json 三种故障在诊断 UI 上必须可区分，
     否则用户只能被支回终端自己跑一遍看报错（与 ensure_subscription 同一范式）。
     """
-    ok, out = _run_cli("auth", "status", "--json", profile=profile)
-    if not ok:
+    code, out = run_cli("auth", "status", "--json", profile=profile)
+    if code == -1:
         return None, out
     try:
         return json.loads(out), ""
@@ -117,7 +105,7 @@ def transcript_hint(token: str, tmp_dir: str) -> str:
         "请询问用户下一步的动作，如：生成纪要，制定后续工作任务。\n"
         f"minute_token: {token}\n"
         "逐字稿此刻已可读取，可以使用下面的命令获取：\n"
-        f"  cd {tmp_dir} && {_CLI} minutes +detail --minute-tokens {token} "
+        f"  cd {tmp_dir} && {CLI} minutes +detail --minute-tokens {token} "
         "--transcript --as user\n"
         f"逐字稿落在 {tmp_dir}/minutes/{token}/transcript.txt，带说话人与时间戳。\n"
         "</system-reminder>"
@@ -136,8 +124,8 @@ def diagnose(app_id: str, profile: str = "") -> list[dict]:
     app_id = os.path.expandvars(app_id)
     checks: list[Check] = []
 
-    # ① lark-cli 可用性
-    if shutil.which(_CLI) is None:
+    # ① lark-cli 可用性（与接入体检同一探测：系统 PATH 优先 → 工具箱）
+    if toolbox.detect(CLI).source == "missing":
         checks.append(
             Check(
                 key="cli",
@@ -145,6 +133,7 @@ def diagnose(app_id: str, profile: str = "") -> list[dict]:
                 name="lark-cli 未安装",
                 detail="妙记取数与事件订阅依赖该命令行工具",
                 fix_cmd="npm i -g @larksuite/cli",
+                fix_action="lark-cli",
             )
         )
         return blocked_tail(checks, _STEPS, "需先安装 lark-cli")
@@ -165,7 +154,7 @@ def diagnose(app_id: str, profile: str = "") -> list[dict]:
                 tone="error",
                 name="lark-cli 状态读取失败",
                 detail=reason,
-                fix_cmd=f"{_CLI} auth status",
+                fix_cmd=f"{CLI} auth status",
                 fix_note="版本过旧可 npm i -g @larksuite/cli 升级",
             )
         )

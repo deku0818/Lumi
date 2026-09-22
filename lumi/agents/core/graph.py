@@ -8,12 +8,11 @@ from langgraph.checkpoint.postgres.aio import AsyncPostgresSaver
 from langgraph.checkpoint.serde.base import SerializerProtocol
 from langgraph.checkpoint.serde.jsonplus import JsonPlusSerializer
 from langgraph.checkpoint.sqlite.aio import AsyncSqliteSaver
-from langgraph.graph import END, START
+from langgraph.graph import END, START, StateGraph
 from langgraph.types import TracePolicy
 from psycopg import AsyncConnection
 from psycopg.rows import dict_row
 
-from lumi.agents.core.base_graph import BaseGraph
 from lumi.agents.core.nodes import (
     after_tool_executor,
     auto_classify,
@@ -22,7 +21,6 @@ from lumi.agents.core.nodes import (
     is_use_tool,
     on_agent_stop,
     on_call_model_error,
-    policy_reject,
     preprocess_messages,
     summarizer,
     tool_executor,
@@ -32,9 +30,8 @@ from lumi.agents.permissions.engine import PermissionEngine
 from lumi.agents.tools import get_tools
 from lumi.agents.tools.providers.todo import Todo
 from lumi.models import provider_store
-from lumi.utils.config import CheckpointMode, GlobalConfigManager
+from lumi.utils.config import CheckpointMode, GlobalConfigManager, get_config
 from lumi.utils.logger import logger
-from lumi.utils.read_config import get_config
 
 
 def _digest_history(value):
@@ -53,13 +50,8 @@ def _digest_history(value):
 _DIGEST_HISTORY = TracePolicy(process_inputs=_digest_history)
 
 
-class LumiAgent(BaseGraph):
-    state_cls = LumiAgentState
-
-    def __init__(
-        self,
-        checkpointer: BaseCheckpointSaver | None = None,
-    ):
+class LumiAgent:
+    def __init__(self, checkpointer: BaseCheckpointSaver | None = None):
         """
         初始化 LumiAgent
 
@@ -67,13 +59,10 @@ class LumiAgent(BaseGraph):
             checkpointer: checkpointer 实例，用于状态持久化，默认为 None（不使用）
         """
         self.checkpointer = checkpointer
-
-        super().__init__()
-        # 直接编译 graph
-        if self.checkpointer is not None:
-            self.graph = self.builder.compile(checkpointer=self.checkpointer)
-        else:
-            self.graph = self.builder.compile()
+        self.builder = StateGraph(LumiAgentState)
+        self._draw_nodes()
+        self._draw_edges()
+        self.graph = self.builder.compile(checkpointer=checkpointer)
 
     def _draw_nodes(self):
         """添加节点"""
@@ -88,7 +77,6 @@ class LumiAgent(BaseGraph):
         add("ToolExecutor", tool_executor)
         add("HumanApproval", human_approval)
         add("AutoClassify", auto_classify)
-        add("PolicyReject", policy_reject)
         add("OnAgentStop", on_agent_stop)
         # 离线写回锚点：正常流程永远不路由到它（刻意无入边）。bridge 在图不运行时
         # 经 aupdate_state 写状态（中断收尾的半截回复/补合成 ToolMessage、离线压缩
@@ -112,10 +100,7 @@ class LumiAgent(BaseGraph):
                 "ToolExecutor": "ToolExecutor",
                 "HumanApproval": "HumanApproval",
                 "AutoClassify": "AutoClassify",
-                "PolicyReject": "PolicyReject",
                 "OnAgentStop": "OnAgentStop",
-                # END 保留给 is_use_tool 的防御性路径（消息为空/None）
-                "END": END,
             },
         )
         self.builder.add_conditional_edges(
@@ -135,11 +120,7 @@ class LumiAgent(BaseGraph):
         """
         if self.checkpointer is None:
             raise RuntimeError("当前Agent未启用checkpointer，无法删除线程")
-
-        if hasattr(self.checkpointer, "adelete_thread"):
-            await self.checkpointer.adelete_thread(thread_id)
-        else:
-            raise RuntimeError("checkpointer 不支持 adelete_thread 方法")
+        await self.checkpointer.adelete_thread(thread_id)
 
     async def aprune_checkpoints_after(self, thread_id: str, checkpoint_id: str) -> int:
         """删除指定 checkpoint_id 之后的所有 checkpoint（用于 rewind 清理旧分支）。
@@ -375,10 +356,7 @@ async def create_agent(
 
     # 复用或新建权限引擎（项目根随会话绑定，调用方未传则退回进程 cwd）
     if permission_engine is None:
-        try:
-            permission_engine = PermissionEngine(project_dir or Path.cwd())
-        except Exception:
-            logger.error("权限引擎创建失败，将以无权限模式运行", exc_info=True)
+        permission_engine = PermissionEngine(project_dir or Path.cwd())
 
     if checkpointer is None:
         checkpointer = await create_checkpointer(checkpoint)

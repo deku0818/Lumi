@@ -17,8 +17,8 @@ COMMAND_TOOLS: frozenset[str] = frozenset({"bash"})
 # 需要通过路径模式匹配的工具
 PATH_TOOLS: frozenset[str] = frozenset({"read", "write", "edit", "glob", "grep"})
 
-# bash 工具中命令参数的可能键名
-COMMAND_ARG_KEYS: tuple[str, ...] = ("command", "cmd")
+# bash 工具中命令参数的键名
+COMMAND_ARG_KEYS: tuple[str, ...] = ("command",)
 
 
 class RuleMatcher:
@@ -142,13 +142,16 @@ class RuleMatcher:
             return False
 
     @staticmethod
-    def match_rule(rule: PermissionRule, tool_name: str, tool_args: dict) -> bool:
+    def match_rule(
+        rule: PermissionRule, tool_name: str, tool_args: dict, project_dir: Path
+    ) -> bool:
         """判断单条规则是否匹配给定的工具调用。
 
         Args:
             rule: 权限规则
             tool_name: 工具名称
             tool_args: 工具参数
+            project_dir: 路径模式的锚定根（引擎绑定的项目根，不是进程 cwd）
 
         Returns:
             是否匹配
@@ -176,8 +179,6 @@ class RuleMatcher:
             file_path = extract_arg(tool_args, PATH_ARG_KEYS)
             if file_path is None:
                 return False
-            # 使用当前工作目录作为默认项目目录
-            project_dir = Path(tool_args.get("project_dir", ".")).resolve()
             return RuleMatcher.match_path_pattern(pattern, file_path, project_dir)
 
         # 其他工具（如 MCP 工具）带模式时，尝试将模式与第一个字符串参数匹配

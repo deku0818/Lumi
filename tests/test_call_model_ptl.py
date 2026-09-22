@@ -25,18 +25,18 @@ from conftest import (
 from langchain_core.messages import (
     AIMessage,
     HumanMessage,
-    SystemMessage,
     ToolMessage,
 )
 from langgraph.errors import NodeError
 from langgraph.types import Command
 
 from lumi.agents.core import nodes
+from lumi.agents.core.meta_message import latest_human_ts
+from lumi.agents.core.preprocessing import compact
 from lumi.agents.core.preprocessing.compact import (
     is_circuit_open,
     record_circuit_failure,
 )
-from lumi.sessions.message_visibility import latest_human_ts
 from lumi.utils.constants import LUMI_META_KEY
 
 
@@ -110,7 +110,7 @@ async def test_call_model_lets_ptl_raise_for_the_handler():
         ainvoke=AsyncMock(side_effect=PTLError("prompt is too long"))
     )
     with pytest.raises(PTLError):
-        await _run_call_model(chain, {"messages": tool_loop_history(), "iterations": 1})
+        await _run_call_model(chain, {"messages": tool_loop_history()})
 
 
 async def _handle(exc: BaseException, state: dict):
@@ -122,7 +122,7 @@ async def _handle(exc: BaseException, state: dict):
 async def test_ptl_routes_to_summarizer():
     result = await _handle(
         PTLError("prompt is too long"),
-        {"messages": tool_loop_history(), "iterations": 1},
+        {"messages": tool_loop_history()},
     )
     assert isinstance(result, Command)
     assert result.goto == "Summarizer"
@@ -133,16 +133,14 @@ async def test_ptl_with_flag_set_raises_original():
     """刚压缩过仍超长：直接抛原错误，不再路由——每次 PTL 只换一次压缩机会"""
     exc = PTLError("prompt is too long")
     with pytest.raises(PTLError) as caught:
-        await _handle(
-            exc, {"messages": tool_loop_history(), "iterations": 1, "ptl_retry": True}
-        )
+        await _handle(exc, {"messages": tool_loop_history(), "ptl_retry": True})
     assert caught.value is exc  # 原样抛出，不包一层
 
 
 async def test_non_ptl_error_propagates():
     exc = ValueError("boom")
     with pytest.raises(ValueError) as caught:
-        await _handle(exc, {"messages": tool_loop_history(), "iterations": 1})
+        await _handle(exc, {"messages": tool_loop_history()})
     assert caught.value is exc
 
 
@@ -150,7 +148,7 @@ async def test_success_clears_ptl_retry():
     ok = AIMessage(content="ok", id="resp")
     chain = SimpleNamespace(ainvoke=AsyncMock(return_value=ok))
     result = await _run_call_model(
-        chain, {"messages": tool_loop_history(), "iterations": 1, "ptl_retry": True}
+        chain, {"messages": tool_loop_history(), "ptl_retry": True}
     )
     assert result["ptl_retry"] is False
     assert result["messages"] == [ok]
@@ -159,9 +157,7 @@ async def test_success_clears_ptl_retry():
 async def test_success_without_flag_no_flag_update():
     ok = AIMessage(content="ok", id="resp")
     chain = SimpleNamespace(ainvoke=AsyncMock(return_value=ok))
-    result = await _run_call_model(
-        chain, {"messages": tool_loop_history(), "iterations": 1}
-    )
+    result = await _run_call_model(chain, {"messages": tool_loop_history()})
     assert "ptl_retry" not in result
 
 
@@ -171,8 +167,9 @@ async def test_success_without_flag_no_flag_update():
 async def _run_summarizer_ptl(messages, run_summary=None):
     with (
         patch.object(nodes, "get_config", return_value=_fake_config()),
+        patch.object(compact, "get_config", return_value=_fake_config()),
         patch.object(
-            nodes,
+            compact,
             "run_summary",
             new=run_summary or AsyncMock(return_value=("SUMMARY_TEXT", 0)),
         ),
@@ -187,16 +184,15 @@ async def test_forced_compact_mid_tool_loop():
     result = await _run_summarizer_ptl(messages)
 
     # 过真实 messages 通道断言合并后形态：
-    # [System, carrier, 正在被回答的提问, 尾部 2 round 新 id 副本]
+    # [carrier, 正在被回答的提问, 尾部 2 round 新 id 副本]
     merged = apply_messages_update(messages, result["messages"])
-    assert isinstance(merged[0], SystemMessage)
-    assert isinstance(merged[1], HumanMessage) and "<summary>" in merged[1].content
+    assert isinstance(merged[0], HumanMessage) and "<summary>" in merged[0].content
     # "q" 是模型正在回答的诉求，压缩不能把它删成摘要转述
-    assert [m.content for m in merged[2:]] == ["q", "a2", "t2", "a3", "t3"]
-    assert merged[2].id != "h"  # 换新 id 才排得到 carrier 之后
+    assert [m.content for m in merged[1:]] == ["q", "a2", "t2", "a3", "t3"]
+    assert merged[1].id != "h"  # 换新 id 才排得到 carrier 之后
     # 尾部换了新 id、tool_call_id 配对原样
-    assert merged[3].id != "a2" and merged[3].tool_calls[0]["id"] == "tc2"
-    assert merged[4].tool_call_id == "tc2"
+    assert merged[2].id != "a2" and merged[2].tool_calls[0]["id"] == "tc2"
+    assert merged[3].tool_call_id == "tc2"
     # ptl_retry 不在此清除（CallModel 成功后才清）
     assert "ptl_retry" not in result
 
@@ -205,7 +201,6 @@ async def test_forced_compact_keeps_pending_human_mid_history():
     """当前提问不在历史开头时同样要保住：round 分组把它并进前一个 AI 的 round，
     工具循环长于 keep_rounds 就会被卷进 to_summarize。"""
     messages = [
-        SystemMessage(content="sys", id="s"),
         _user_message("很早的问题", "h0", ts=1000),
         *_tool_round("a0"),
         _user_message("现在的问题", "h1", ts=2000),
@@ -279,8 +274,9 @@ async def test_full_graph_ptl_roundtrip():
         # 阈值门的分母要查 models.dev 目录：钉 0 走 _TOKEN_CONFIG 兜底，不让本用例
         # 依赖本机 ~/.lumi/cache 里恰好没有条目模糊匹配上 "fake-model"
         patch.object(nodes, "resolve", return_value=resolved(0)),
+        patch.object(compact, "get_config", return_value=_fake_config()),
         patch.object(
-            nodes, "run_summary", new=AsyncMock(return_value=("SUMMARY_TEXT", 0))
+            compact, "run_summary", new=AsyncMock(return_value=("SUMMARY_TEXT", 0))
         ),
     ):
         from lumi.agents.core import graph as graph_module
@@ -296,7 +292,7 @@ async def test_full_graph_ptl_roundtrip():
         with patch.object(graph_module, "on_agent_stop", counting_stop):
             agent = LumiAgent()
             result = await agent.graph.ainvoke(
-                {"messages": tool_loop_history(), "iterations": 1},
+                {"messages": tool_loop_history()},
                 context=LumiAgentContext(model_name="fake-model"),
             )
 
@@ -304,7 +300,6 @@ async def test_full_graph_ptl_roundtrip():
     assert chain.ainvoke.await_count == 2
     assert result["ptl_retry"] is False
     contents = [m.content for m in result["messages"]]
-    # [System, carrier, 当前提问, 尾部 2 round, 重试响应]；头部历史已压缩
-    assert contents[0] == "sys"
-    assert "<summary>" in contents[1] and "SUMMARY_TEXT" in contents[1]
-    assert contents[2:] == ["q", "a2", "t2", "a3", "t3", "ok"]
+    # [carrier, 当前提问, 尾部 2 round, 重试响应]；头部历史已压缩
+    assert "<summary>" in contents[0] and "SUMMARY_TEXT" in contents[0]
+    assert contents[1:] == ["q", "a2", "t2", "a3", "t3", "ok"]

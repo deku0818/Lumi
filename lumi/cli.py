@@ -87,7 +87,7 @@ def _default(
         return
 
     if style is not None:
-        from lumi.utils.read_config import get_config
+        from lumi.utils.config import get_config
 
         get_config().set_style_override(style)
 
@@ -119,8 +119,8 @@ def serve(
     # （config_layers），显式 LUMI_CONFIG_DIR 仍最高优先（容器/测试用）。
     # 工具箱位置无需在此操心：bin_dir 自己就是机器级的（LumiConfig.toolbox_dir）。
     if not os.environ.get("LUMI_CONFIG_DIR"):
+        from lumi.utils.config import get_config
         from lumi.utils.paths import lumi_home
-        from lumi.utils.read_config import get_config
 
         get_config(str(lumi_home()))
 
@@ -500,38 +500,26 @@ def feishu_diagnose() -> None:
 
     妙记已启用时追加妙记四项（lark-cli 配置 / 用户授权 / 妙记权限 / 事件订阅）。
     """
-    from concurrent.futures import ThreadPoolExecutor
+    import asyncio
 
+    from lumi.gateway.channel_rpc import diagnose_bot
     from lumi.gateway.channels import store
-    from lumi.gateway.channels.feishu import minutes
-    from lumi.gateway.channels.feishu.setup import diagnose, local_env_checks
 
     bots = store.load_feishu_bots()
     if not bots:
         typer.echo("还没有配置飞书机器人", err=True)
         raise typer.Exit(1)
     failed = False
+
     # 机器人之间、每机器人的三组体检之间都互相独立（各自 spawn lark-cli 子进程 /
-    # 走开放平台网络）：全部并发跑、按序打印——逐机器人串行要 N×2-6s，
-    # desktop RPC 同源路径已是并行（channel_rpc），CLI 不该是退化版
-    with ThreadPoolExecutor(max_workers=3 * len(bots)) as pool:
-        jobs = [
-            (
-                cfg,
-                pool.submit(
-                    local_env_checks, cfg.workspace, cfg.id, cfg.cli_profile, cfg.app_id
-                ),
-                pool.submit(diagnose, cfg.app_id, cfg.app_secret),
-                pool.submit(minutes.diagnose, cfg.app_id, cfg.cli_profile)
-                if cfg.minutes_enabled
-                else None,
-            )
-            for cfg in bots
-        ]
-        results = [
-            (cfg, local.result() + remote.result() + (extra.result() if extra else []))
-            for cfg, local, remote, extra in jobs
-        ]
+    # 走开放平台网络）：全部并发跑、按序打印——逐机器人串行要 N×2-6s。
+    # 体检清单的组装与 desktop RPC 共用 diagnose_bot，CLI 只负责并发编排与打印。
+    async def _all() -> list[list[dict]]:
+        return await asyncio.gather(
+            *(diagnose_bot(cfg, minutes=cfg.minutes_enabled) for cfg in bots)
+        )
+
+    results = list(zip(bots, asyncio.run(_all()), strict=True))
     for i, (cfg, checks) in enumerate(results):
         if i:
             typer.echo("")
@@ -586,21 +574,17 @@ def _mcp_read(path: Path) -> dict:
 
 
 def _mcp_write(scope: str, project: str, name: str, config: dict | None) -> Path:
-    """单个 server 的写入（``config=None`` 即删除）：严格读防抹除 + 原子写，
-    与 desktop RPC 同语义（read_servers/write_servers 同源）。"""
-    from lumi.gateway.mcp_rpc import read_servers, write_servers
+    """单个 server 的写入（``config=None`` 即删除）：与 desktop RPC 共用
+    ``upsert_server``（严格读防抹除 + 原子写 0o600），CLI 只负责把错误转成退出码。"""
+    from lumi.gateway.mcp_rpc import resolve_project_dir, upsert_server
 
-    path = _mcp_path(scope, project)
     try:
-        servers = read_servers(path)
+        path, _ = upsert_server(
+            scope, resolve_project_dir(scope, project), name, config
+        )
     except ValueError as e:
         typer.echo(f"写入失败: {e}", err=True)
         raise typer.Exit(1) from e
-    if config is None:
-        servers.pop(name, None)
-    else:
-        servers[name] = config
-    write_servers(path, servers)
     return path
 
 
@@ -871,7 +855,7 @@ def _run_headless(
 
     async def _execute() -> None:
         # 注入 config.json 中的环境变量（API key 等）
-        from lumi.utils.read_config import get_config
+        from lumi.utils.config import get_config
 
         get_config().apply_env()
         # 与 serve 同源：工具箱 bin 追加到 PATH 末尾，agent 子进程可见 uv/rg/lark-cli

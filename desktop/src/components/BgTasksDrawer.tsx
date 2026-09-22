@@ -7,7 +7,8 @@ import { useI18n } from '../i18n'
 import type { Translate } from '../i18n'
 import { RailSection } from './RightRail'
 import { Button } from '@/components/ui/button'
-import { CARD_L2, fmtDuration, fmtSize } from '@/lib/utils'
+import { fmtDuration, fmtSize } from '@/lib/utils'
+import { CARD_L3 } from './glass'
 
 // 后台任务模块（挂在统一右栏 RightRail 里）：运行中的一摞紧凑卡片 + 已完成折叠成一行。
 // 分组是刻意的——终态任务每会话可攒到 20 条（后端 _TERMINAL_CAP），平铺会把正在跑的
@@ -205,7 +206,7 @@ function RunningCard({
         : null
 
   return (
-    <div className={`${CARD_L2} px-2.5 py-2`}>
+    <div className={`${CARD_L3} px-2.5 py-2`}>
       {/* 点头部区域展开详情；详情在这块之外，免得选中里面的文字顺手把卡片收了 */}
       <div {...toggleProps(onToggle, expanded)} className="cursor-pointer">
         <div className="flex items-center gap-2">
@@ -286,7 +287,7 @@ function FinishedRow({
   const { t } = useI18n()
   const Icon = KIND_ICON[task.kind]
   return (
-    <div className={expanded ? `${CARD_L2} px-2.5 py-2` : ''}>
+    <div className={expanded ? `${CARD_L3} px-2.5 py-2` : ''}>
       <div
         {...toggleProps(onToggle, expanded)}
         className={`group flex items-center gap-2 cursor-pointer rounded-lg ${

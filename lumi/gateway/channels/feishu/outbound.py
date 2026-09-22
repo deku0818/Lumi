@@ -1,12 +1,12 @@
 """把一次 agent run 的 BridgeEvent 流折叠成飞书消息。
 
-这是 Lumi「每会话一 AgentBridge」直驱模型替代 OmniAgent dispatcher 的那层胶水：消费
-``bridge.stream_response`` 产出的 :class:`BridgeEvent`，驱动打字机流式卡片，并按既定规则
-处理交互——
+消费 ``bridge.stream_response`` 产出的 :class:`BridgeEvent`，驱动打字机流式卡片
+（:class:`FeishuStreaming`），并按既定规则处理交互——
 
 - ``message.delta`` → 喂流式卡片打字机
+- ``message.start`` / ``message.retry`` → 记正文边界 / 回滚畸形响应
 - ``tool.start`` / ``tool.complete`` → 驱动"正在…"忙碌状态行
-- ``clarify.request``（ask 工具）→ 收尾当前卡片后单独发 ask 询问卡片（保留的唯一交互）
+- ``clarify.request``（ask 工具，IM 会话已禁用）→ 防御性按"取消作答"收尾
 - ``approval.request``（DENY / bypass-immune / 分类器 ask 等泄漏的人工审批）→ **不弹卡片**，
   飞书侧一律自动拒绝，让模型改用无需审批的方式（privileged / auto 两模式通用）
 - ``error`` / 异常 / 取消 → 中止卡片并提示
@@ -17,7 +17,6 @@
 from __future__ import annotations
 
 import asyncio
-from collections.abc import Awaitable, Callable
 from typing import TYPE_CHECKING
 
 from lumi.agents.tools.providers.ask import ASK_CANCELLED
@@ -26,49 +25,6 @@ from lumi.utils.logger import logger
 
 if TYPE_CHECKING:
     from lumi.gateway.channels.feishu.channel import FeishuChannel
-
-
-def turn_closer(
-    streaming, chat_id: str, reply_to: str
-) -> Callable[..., Awaitable[None]]:
-    """返回幂等的收尾函数 ``_end(aborted=)``：首个终态路径收尾流式卡 buf，其后的
-    调用（含 finally 兜底）空转不重复分发。run_turn / run_relay_turn 共用。"""
-    ended = False
-
-    async def _end(*, aborted: bool) -> None:
-        nonlocal ended
-        if ended:
-            return
-        ended = True
-        await streaming.send_delta(
-            chat_id,
-            "",
-            {"_stream_end": True, "_aborted": aborted, "message_id": reply_to},
-        )
-
-    return _end
-
-
-async def tool_activity(
-    streaming, chat_id: str, reply_to: str, phase: str, name: str
-) -> None:
-    """工具开始 / 结束信号 → 流式卡忙碌状态行（wire 约定单点）。"""
-    await streaming.send_delta(
-        chat_id,
-        "",
-        {"_tool_activity": {"phase": phase, "name": name}, "message_id": reply_to},
-    )
-
-
-async def stream_mark(streaming, chat_id: str) -> None:
-    """一次模型调用开始 → 记下正文边界，供 retry 精确回滚（wire 约定单点）。"""
-    await streaming.send_delta(chat_id, "", {"_mark": True})
-
-
-async def retry_reset(streaming, chat_id: str, reply_to: str) -> None:
-    """后端丢弃畸形响应重试 → 回滚本次调用的正文、状态行改显重试（wire 约定单点）。"""
-    await streaming.send_delta(chat_id, "", {"_reset": True, "message_id": reply_to})
-
 
 # 飞书会话不支持人工工具审批：泄漏的 approval.request 一律以此理由自动拒绝。
 _AUTO_REJECT = {
@@ -82,10 +38,8 @@ async def run_turn(
     bridge,
     *,
     chat_id: str,
-    thread_id: str,
     reply_to: str,
     content: str | list,
-    tool_mode: str,
     message_meta: dict | None = None,
     synthetic: bool = False,
     attachments: list[str] | None = None,
@@ -96,9 +50,10 @@ async def run_turn(
     synthetic=True 标记系统合成轮（后台任务通知），注入文本不作为用户消息呈现。
     attachments 为下载好的文件路径，交 bridge 统一注入标签块 + 写 items.files。
     command=(name, extra_text) 时走 bridge.stream_command（斜杠命令轮，content 不使用）。
+    终态收尾 ``streaming.end`` 幂等：首个终态路径收尾，finally 兜底重调空转。
     """
     streaming = channel.streaming
-    _end = turn_closer(streaming, chat_id, reply_to)
+    tool_mode = channel.config.tool_mode
 
     if command:
         stream = bridge.stream_command(
@@ -118,18 +73,15 @@ async def run_turn(
                 continue  # 子代理内部活动不外显
             kind = evt.kind
             if kind == EventKind.MESSAGE_DELTA:
-                if evt.text:
-                    await streaming.send_delta(
-                        chat_id, evt.text, {"message_id": reply_to}
-                    )
+                await streaming.append(chat_id, evt.text, reply_to)
             elif kind == EventKind.MESSAGE_START:
-                await stream_mark(streaming, chat_id)
+                streaming.mark(chat_id)
             elif kind == EventKind.MESSAGE_RETRY:
-                await retry_reset(streaming, chat_id, reply_to)
+                await streaming.reset(chat_id, reply_to)
             elif kind == EventKind.TOOL_START:
-                await tool_activity(streaming, chat_id, reply_to, "start", evt.name)
+                await streaming.tool_activity(chat_id, "start", evt.name, reply_to)
             elif kind == EventKind.TOOL_COMPLETE:
-                await tool_activity(streaming, chat_id, reply_to, "end", evt.name)
+                await streaming.tool_activity(chat_id, "end", evt.name, reply_to)
             elif kind == EventKind.CLARIFY:
                 # 飞书已禁用 ask 工具，正常不会出现 clarify。防御性兜底：直接按"取消作答"
                 # 收尾，让模型自行判断后继续，避免 broker future 永挂、run-lock 永占。
@@ -141,7 +93,7 @@ async def run_turn(
                 if aid:
                     bridge.resolve_approval(aid, dict(_AUTO_REJECT))
             elif kind == EventKind.ERROR:
-                await _end(aborted=True)
+                await streaming.end(chat_id, aborted=True, reply_to=reply_to)
                 await channel.send_markdown(
                     chat_id,
                     str(evt.error),
@@ -150,7 +102,7 @@ async def run_turn(
                     template="red",
                 )
             elif kind == EventKind.TURN_COMPLETE:
-                await _end(aborted=False)
+                await streaming.end(chat_id, aborted=False, reply_to=reply_to)
     except asyncio.CancelledError:
         # /stop 硬取消：与 desktop 同一收尾——确定性关图 + 中断残留写回
         # （shield 已内置于方法），卡片上已显示的内容不再从历史里消失
@@ -159,7 +111,8 @@ async def run_turn(
     except Exception as e:
         logger.error(f"Feishu run_turn 异常 chat={chat_id}: {e}", exc_info=True)
         await bridge.finalize_cancelled_stream(stream)  # 确定性关图，不留 GC 竞争
-        await _end(aborted=True)  # 先关卡再发错误提示，保证顺序
+        # 先关卡再发错误提示，保证顺序
+        await streaming.end(chat_id, aborted=True, reply_to=reply_to)
         await channel.send_markdown(
             chat_id,
             "处理消息时出错，请稍后重试。",
@@ -169,4 +122,4 @@ async def run_turn(
         )
     finally:
         # 兜底：未显式收尾的路径（取消 / 提前 return）在此关掉卡片，避免"生成中"冻死。
-        await _end(aborted=True)
+        await streaming.end(chat_id, aborted=True, reply_to=reply_to)

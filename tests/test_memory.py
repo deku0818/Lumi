@@ -136,7 +136,7 @@ def test_route_memory_write_auto_allows(monkeypatch):
         "lumi.agents.permissions.routing.get_authorized_directory", lambda: _PROJ
     )
     tcs = [_write_tc(str(memory_dir(_PROJ) / "feedback_x.md"))]
-    assert route_decision(tcs, "default", "normal", None) == "ToolExecutor"
+    assert route_decision(tcs, "default", None) == "ToolExecutor"
 
 
 def test_route_non_memory_write_still_evaluated(monkeypatch):
@@ -145,7 +145,7 @@ def test_route_non_memory_write_still_evaluated(monkeypatch):
         "lumi.agents.permissions.routing.get_authorized_directory", lambda: _PROJ
     )
     tcs = [_write_tc("/tmp/evil.sh")]
-    assert route_decision(tcs, "default", "normal", None) == "HumanApproval"
+    assert route_decision(tcs, "default", None) == "HumanApproval"
 
 
 # === 首条消息注入块 ===

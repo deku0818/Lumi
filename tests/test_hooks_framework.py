@@ -1,4 +1,4 @@
-"""Hook 框架内核测试：dispatch 三模式 + 返回值翻译 + 错误隔离 + 注册 API。"""
+"""Hook 框架内核测试：dispatch 两模式 + 返回值翻译 + 错误隔离 + 注册 API。"""
 
 from __future__ import annotations
 
@@ -13,11 +13,9 @@ from lumi.agents.core.hooks import (
     HookContext,
     dispatch,
     dispatch_hooks,
-    iter_hooks,
     register_hook,
     replace_hooks,
     set_run_config_hooks,
-    unregister_hook,
 )
 
 
@@ -127,22 +125,6 @@ async def test_collect_all_none_returns_none():
     )
 
 
-# === dispatch: side_effect ===
-
-
-async def test_side_effect_runs_all_ignores_returns():
-    record: list[str] = []
-    register_hook("SessionEnd", _hook(Block("被忽略"), record=record, name="a"))
-    register_hook(
-        "SessionEnd", _hook(AdditionalContext("也忽略"), record=record, name="b")
-    )
-
-    cmd = await dispatch_hooks("SessionEnd", _ctx("SessionEnd"), mode="side_effect")
-
-    assert cmd is None
-    assert sorted(record) == ["a", "b"]  # 都跑了（并发，顺序不定）
-
-
 # === 返回值翻译 ===
 
 
@@ -221,19 +203,10 @@ async def test_run_config_hooks_run_before_builtin_and_isolated():
     assert record == ["builtin"]  # 只剩进程全局 builtin
 
 
-def test_unregister_removes_hook():
-    hook = _hook(None)
-    register_hook("Stop", hook)
-    assert iter_hooks("Stop") == [hook]
-    assert unregister_hook("Stop", hook) is True
-    assert iter_hooks("Stop") == []
-    assert unregister_hook("Stop", hook) is False
-
-
 async def test_replace_hooks_restores_after_exit():
     original = _hook(None)
     register_hook("Stop", original)
     with replace_hooks("Stop", [_hook(Block("临时"))]):
         cmd = await dispatch_hooks("Stop", _ctx())
         assert cmd.goto == END
-    assert iter_hooks("Stop") == [original]
+    assert dispatch._HOOKS["Stop"] == [original]

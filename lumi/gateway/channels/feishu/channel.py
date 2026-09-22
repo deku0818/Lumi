@@ -2,8 +2,8 @@
 
 - 不需要公网 webhook；消息经 WS 推到本地，由 SDK 回调分发
 - 发送 / patch 消息走 HTTP SDK（同步 API，用线程池包裹避免阻塞事件循环）
-- lark WS ``Client.start()`` 阻塞且模块级抓 ``asyncio.get_event_loop()``，故跑在独立
-  daemon 线程 + 独立 loop，并 patch 模块级 loop；入站事件经 ``run_coroutine_threadsafe``
+- lark WS ``Client.start()`` 阻塞，故跑在独立 daemon 线程 + 独立 loop（多机器人各一条，
+  经 ``lark_loop`` 的按线程代理互不覆盖）；入站事件经 ``run_coroutine_threadsafe``
   投回主事件循环喂 AgentBridge
 
 每个飞书 chat 派生一个常驻会话 thread（见 :class:`BridgePool`），全程 ``tool_mode``
@@ -28,7 +28,7 @@ from lumi.gateway.channels.feishu.inbound import FeishuInbound
 from lumi.gateway.channels.feishu.lark_call import lark_call
 from lumi.gateway.channels.feishu.lark_loop import use_loop_in_this_thread
 from lumi.gateway.channels.feishu.minutes import ensure_subscription
-from lumi.gateway.channels.feishu.streaming import FeishuStreaming, grey
+from lumi.gateway.channels.feishu.streaming import FeishuStreaming, card_json, grey
 from lumi.utils.logger import logger
 
 FEISHU_AVAILABLE = importlib.util.find_spec("lark_oapi") is not None
@@ -43,21 +43,10 @@ def _markdown_card(
     （green 完成 / red 错误 / orange 提醒·Lumi 面板 / blue 信息 / yellow 直连），
     note 恒放"下一步能做什么"的提示。title 为空则回落无 header 轻卡（流式降级等
     模型内容不套系统卡样式）。
-
     """
     if note:
         content += "\n\n" + grey(note)
-    card: dict = {
-        "schema": "2.0",
-        "config": {"wide_screen_mode": True, "update_multi": True},
-        "body": {"elements": [{"tag": "markdown", "content": content}]},
-    }
-    if title:
-        card["header"] = {
-            "title": {"tag": "plain_text", "content": title},
-            "template": template,
-        }
-    return json.dumps(card, ensure_ascii=False)
+    return card_json(content, title=title, template=template)
 
 
 class FeishuChannel:
@@ -100,10 +89,6 @@ class FeishuChannel:
     @property
     def client(self) -> Any:
         return self._client
-
-    @property
-    def loop(self) -> asyncio.AbstractEventLoop | None:
-        return self._loop
 
     @property
     def bot_open_id(self) -> str | None:
@@ -359,7 +344,8 @@ class FeishuChannel:
         except Exception as e:
             logger.warning(f"解析 Feishu bot 信息异常: {e}")
             return None
-        bot = (data.get("data") or data).get("bot") or data.get("bot") or {}
+        # bot 字段在顶层（lark SDK 自家的 bot_identity 同样按"data 或顶层"取）
+        bot = (data.get("data") or data).get("bot") or {}
         return bot.get("open_id")
 
     # ── 权限 ──

@@ -3,9 +3,10 @@
 from __future__ import annotations
 
 import pytest
+from conftest import rpc
 
-from lumi.gateway import channel_rpc
 from lumi.gateway.channels import store
+from lumi.gateway.channels.feishu import lark_profile
 from lumi.gateway.channels.feishu.lark_profile import sync_profile as _real_sync_profile
 from lumi.utils.config import user_store
 
@@ -21,13 +22,9 @@ def sidecar(tmp_path, monkeypatch):
 @pytest.fixture(autouse=True)
 def no_lark_cli(monkeypatch):
     """RPC 保存/删除会 best-effort 同步 lark-cli profile——测试不真 spawn lark-cli。"""
+    monkeypatch.setattr(lark_profile, "sync_profile", lambda cfg: ("", "测试跳过"))
     monkeypatch.setattr(
-        channel_rpc.lark_profile, "sync_profile", lambda cfg: ("", "测试跳过")
-    )
-    monkeypatch.setattr(
-        channel_rpc.lark_profile,
-        "remove_profile",
-        lambda bot_id, cli_profile: None,
+        lark_profile, "remove_profile", lambda bot_id, cli_profile: None
     )
 
 
@@ -195,10 +192,10 @@ def test_sync_profile_reuses_own_named_profile(sidecar, monkeypatch):
 
 
 async def test_rpc_get_channels_shape(sidecar):
-    r = await channel_rpc.dispatch_channel("get_channels", {})
+    r = await rpc("get_channels", {})
     assert r["channels"] == []  # 无机器人 → 空列表
     store.save_feishu_bot({"app_id": "cli_x"})
-    r = await channel_rpc.dispatch_channel("get_channels", {})
+    r = await rpc("get_channels", {})
     ch = r["channels"][0]
     assert ch["name"] == "feishu"
     assert ch["enabled"] is False
@@ -207,7 +204,7 @@ async def test_rpc_get_channels_shape(sidecar):
 
 
 async def test_rpc_save_persists_and_reflects(sidecar):
-    r = await channel_rpc.dispatch_channel(
+    r = await rpc(
         "save_channel",
         {
             "name": "feishu",
@@ -221,13 +218,9 @@ async def test_rpc_save_persists_and_reflects(sidecar):
 
 
 async def test_rpc_delete_channel(sidecar):
-    r = await channel_rpc.dispatch_channel(
-        "save_channel", {"name": "feishu", "config": {"app_id": "cli_y"}}
-    )
+    r = await rpc("save_channel", {"name": "feishu", "config": {"app_id": "cli_y"}})
     bot_id = r["channels"][0]["config"]["id"]
-    r = await channel_rpc.dispatch_channel(
-        "delete_channel", {"name": "feishu", "bot_id": bot_id}
-    )
+    r = await rpc("delete_channel", {"name": "feishu", "bot_id": bot_id})
     assert r["channels"] == []
 
 
@@ -249,7 +242,7 @@ async def test_rpc_setup_diagnose_missing_creds(sidecar, monkeypatch):
         asdict(Check(key="skills", name="飞书技能包", tone="error", group="本地环境")),
     ]
     monkeypatch.setattr(setup, "local_env_checks", lambda *args: fake_local)
-    r = await channel_rpc.dispatch_channel(
+    r = await rpc(
         "diagnose_feishu_setup",
         {"name": "feishu", "config": {"app_id": "", "app_secret": ""}},
     )
@@ -269,9 +262,7 @@ async def test_rpc_setup_diagnose_missing_creds(sidecar, monkeypatch):
 
 async def test_rpc_unknown_channel_rejected(sidecar):
     with pytest.raises(ValueError):
-        await channel_rpc.dispatch_channel(
-            "save_channel", {"name": "wecom", "config": {}}
-        )
+        await rpc("save_channel", {"name": "wecom", "config": {}})
 
 
 # ── ChannelManager 生命周期（reload 按机器人 diff、会话池跨重连存活）──

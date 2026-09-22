@@ -16,7 +16,7 @@ Lumi 的 Summary 机制在对话历史接近模型上下文窗口时自动压缩
 | `_summarize` / `_ptl_forced_compact` | `lumi/agents/core/nodes.py` | `_summarize`：剔悬空 tool_use + `run_summary`（两条压缩路径共用核）；`_ptl_forced_compact`：PTL 路径的选材（保尾）+ 熔断包裹 + carrier 组装 |
 | `compact` 辅助 | `lumi/agents/core/preprocessing/compact.py` | PTL 错误识别、API round 分组与截头、图像剥离、`run_summary`/`summarize_with_ptl_retry`、`select_for_ptl_compaction`（按 round 保尾选材）、per-thread 熔断器 |
 | `context_window_tokens` | `lumi/utils/sizing.py` | 上下文窗口 token 数：优先取最近一条消息的真实 `usage_metadata`，其后新增消息按字节粗估（无 tiktoken） |
-| `build_summary_carrier` | `lumi/agents/core/preprocessing/summary.py` | 把摘要包成 `<summary>` 标签块，构造为独立 carrier（合成 HumanMessage，声明不可显示） |
+| `build_summary_carrier` | `lumi/agents/core/preprocessing/compact.py` | 把摘要包成 `<summary>` 标签块，构造为独立 carrier（合成 HumanMessage，声明不可显示） |
 | gateway 拦截 | `lumi/gateway/bridge/core.py` | 把 `langgraph_node == "Summarizer"` 的 `on_chat_model_*` 转成 `compaction.status` 状态事件、丢弃其 stream，摘要不渲染成助手回答 |
 
 ## Graph 拓扑

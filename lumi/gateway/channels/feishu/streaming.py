@@ -1,6 +1,7 @@
 """飞书 CardKit 流式卡片：首帧创建 → 定时器节流覆写 → 终态关闭。
 
-FeishuChannel 把 BridgeEvent 流折叠成 ``send_delta`` 调用喂到这里。节流模型：每个 buf
+``outbound.run_turn`` / ``relay_turn`` 把事件流折叠成 :class:`FeishuStreaming` 的
+``append`` / ``tool_activity`` / ``mark`` / ``reset`` / ``end`` 调用喂到这里。节流模型：每个 buf
 配一个 :class:`Throttle`（``loop.call_later`` 主动注册定时器，即使上游静默——工具执行 /
 网络抖动——也在 ``STREAM_MIN_MS`` 后把累积尾部自动刷出）+ 一个 :class:`UpdateQueue`
 （合并在途更新，至多 1 in-flight，字符阈值下的激进 fire 实际 HTTP QPS 仍受单次往返限制，
@@ -25,7 +26,7 @@ import asyncio
 import json
 import time
 from dataclasses import dataclass, field
-from typing import TYPE_CHECKING, Any
+from typing import TYPE_CHECKING
 
 from lumi.gateway.channels.feishu.throttle import Throttle
 from lumi.gateway.channels.feishu.update_queue import UpdateQueue
@@ -69,7 +70,6 @@ TOOL_FRIENDLY_ACTIONS = {
     "read": "查看文件",
     "write": "撰写文件",
     "edit": "修改文件",
-    "ls": "浏览目录",
     "glob": "查找文件",
     "grep": "检索内容",
     "todos": "梳理任务",
@@ -107,6 +107,28 @@ def grey(text: str) -> str:
     "unsupported tag note"），font grey 则一直可用——系统卡的 note 与直连卡的来源
     footer 都经此渲染。"""
     return f"<font color='grey'>{text}</font>"
+
+
+def card_json(
+    content: str, *, title: str = "", template: str = "", streaming: bool = False
+) -> str:
+    """schema 2.0 卡片 JSON：单个 markdown 元素 + 可选 header。系统直发卡与流式卡共用。
+
+    ``streaming=True`` 开 streaming_mode 并给元素标 ``STREAM_ELEMENT_ID``（后续按
+    card_id + element_id 覆写）。
+    """
+    element = {"tag": "markdown", "content": content}
+    config = {"wide_screen_mode": True, "update_multi": True}
+    if streaming:
+        element["element_id"] = STREAM_ELEMENT_ID
+        config["streaming_mode"] = True
+    card: dict = {"schema": "2.0", "config": config, "body": {"elements": [element]}}
+    if title:
+        card["header"] = {
+            "title": {"tag": "plain_text", "content": title},
+            "template": template,
+        }
+    return json.dumps(card, ensure_ascii=False)
 
 
 def _render_card_text(text: str) -> str:
@@ -191,7 +213,8 @@ class FeishuStreamBuf:
 
 
 class FeishuStreaming:
-    """持有每会话的 streaming 状态，供 FeishuChannel.send_delta 调用。"""
+    """每会话一张流式卡的状态机：正文 ``append``、忙碌行 ``tool_activity``、重试回滚
+    ``mark`` / ``reset``、终态 ``end``。"""
 
     def __init__(self, channel: FeishuChannel) -> None:
         self.channel = channel
@@ -281,57 +304,20 @@ class FeishuStreaming:
             ),
         )
 
-    async def send_delta(
-        self,
-        chat_id: str,
-        delta: str,
-        metadata: dict[str, Any] | None = None,
-    ) -> None:
-        """流式片段推送：首帧创建 CardKit 卡片，后续交给定时器节流覆写。
-
-        metadata 约定：
-        - ``_stream_end=True``：终态。``_aborted=True`` 表示流异常中止，丢弃累积文本但
-          仍关掉 streaming_mode；默认则 flush 全量 + 关 streaming_mode。
-        - ``_tool_activity={"phase","name"}``：工具开始/结束信号，驱动忙碌状态行。
-        - ``_mark=True``：一次模型调用开始，记下正文边界供 ``_reset`` 回滚。
-        - ``_reset=True``：后端丢弃畸形响应重试，正文回滚到边界，状态行改显重试文案。
-        - 其它：普通 token delta，追加到 buf.text，交节流器 ``note``。
-        """
-        if not self.channel.client:
-            return
-        meta = metadata or {}
-        loop = asyncio.get_running_loop()
-
-        if meta.get("_stream_end"):
-            await self._flush_end(
-                loop,
-                chat_id,
-                aborted=bool(meta.get("_aborted")),
-                reply_to=meta.get("message_id"),
-            )
-            return
-
-        activity = meta.get("_tool_activity")
-        if activity is not None:
-            await self._note_tool_activity(chat_id, activity, meta.get("message_id"))
-            return
-
-        if meta.get("_mark"):
-            buf = self.bufs.get(chat_id)
-            if buf is not None:
-                buf.committed = len(buf.text)
-            return
-
-        if meta.get("_reset"):
-            await self._note_retry(chat_id, meta.get("message_id"))
-            return
-
-        if not delta:
-            return
+    def _buf(self, chat_id: str) -> FeishuStreamBuf:
+        """取该 chat 的 buf，没有则装配一个。"""
         buf = self.bufs.get(chat_id)
         if buf is None:
             buf = self._new_buf(chat_id)
             self.bufs[chat_id] = buf
+        return buf
+
+    async def append(self, chat_id: str, delta: str, reply_to: str | None) -> None:
+        """正文 token：首帧创建 CardKit 卡片（``reply_to`` 为锚点，空则直投 chat_id），
+        后续交给定时器节流覆写。"""
+        if not delta:
+            return
+        buf = self._buf(chat_id)
         buf.text += delta
 
         if not buf.text.strip():
@@ -349,8 +335,7 @@ class FeishuStreaming:
                 self._enqueue_render(buf)
 
         if buf.card_id is None:
-            # message_id 可为空：无锚点时 _ensure_card 会经 Create API 直投 chat_id
-            if not await self._ensure_card(buf, meta.get("message_id")):
+            if not await self._ensure_card(buf, reply_to):
                 # 创建失败：buf.text 继续累积，下一次 delta 会再次尝试创建
                 return
             # 首帧立即渲染一次，不等节流——让用户尽快看到第一段文字
@@ -450,33 +435,32 @@ class FeishuStreaming:
 
         buf.queue.enqueue(_task)
 
-    async def _note_retry(self, chat_id: str, message_id: str | None) -> None:
-        """丢弃畸形响应重试：正文回滚到本次调用的起点，状态行改显重试文案。
+    def mark(self, chat_id: str) -> None:
+        """一次模型调用开始：记下正文边界，供 ``reset`` 精确回滚。"""
+        buf = self.bufs.get(chat_id)
+        if buf is not None:
+            buf.committed = len(buf.text)
+
+    async def reset(self, chat_id: str, reply_to: str | None) -> None:
+        """后端丢弃畸形响应重试：正文回滚到 ``mark`` 边界，状态行改显重试文案。
 
         与工具状态同一条「进忙碌态」路径（建 buf / 建卡 / 起 spinner / 重渲染）。
         """
-        buf = self.bufs.get(chat_id)
-        if buf is None:
-            buf = self._new_buf(chat_id)
-            self.bufs[chat_id] = buf
+        buf = self._buf(chat_id)
         buf.text = buf.text[: buf.committed]  # 只回滚被丢弃那次调用流出的正文
         buf.busy = True
         buf.retrying = True
 
-        if not await self._ensure_card(buf, message_id):
+        if not await self._ensure_card(buf, reply_to):
             return  # 无 reply 锚点或建卡失败，等正文路径建卡
 
         self._schedule_anim(chat_id)
         self._enqueue_render(buf)
 
-    async def _note_tool_activity(
-        self, chat_id: str, activity: dict[str, str], message_id: str | None
+    async def tool_activity(
+        self, chat_id: str, phase: str, name: str, reply_to: str | None
     ) -> None:
-        """记录工具开始/结束，驱动状态行 + spinner 动画。"""
-        name = activity.get("name")
-        phase = activity.get("phase")
-        if not name:
-            return
+        """工具开始（``phase="start"``）/ 结束（``"end"``）信号，驱动状态行 + spinner。"""
         buf = self.bufs.get(chat_id)
         if buf is None:
             if phase != "start":
@@ -493,7 +477,7 @@ class FeishuStreaming:
         buf.busy = True
         buf.retrying = False  # 工具已动起来：重试的响应在产出真内容，状态行让位
 
-        if not await self._ensure_card(buf, message_id):
+        if not await self._ensure_card(buf, reply_to):
             return  # 无 reply 锚点或建卡失败，等正文路径建卡后再带上状态行
 
         self._schedule_anim(chat_id)
@@ -551,17 +535,17 @@ class FeishuStreaming:
         buf.sequence = 0  # 新卡从 0 开始发号
         await self._push_update(buf, new_card, buf.text)
 
-    async def _flush_end(
-        self,
-        loop: asyncio.AbstractEventLoop,
-        chat_id: str,
-        *,
-        aborted: bool,
-        reply_to: str | None = None,
+    async def end(
+        self, chat_id: str, *, aborted: bool, reply_to: str | None = None
     ) -> None:
+        """终态：``aborted`` 丢弃累积文本但仍关掉 streaming_mode；否则 flush 全量 + 关流。
+
+        buf 出栈即收尾，同一 chat 再次调用空转——调用方的 finally 兜底可以无脑重调。
+        """
         buf = self.bufs.pop(chat_id, None)
         if not buf:
             return
+        loop = asyncio.get_running_loop()
         if buf.throttle is not None:
             buf.throttle.dispose()  # 停掉未触发的节流定时器
         self._cancel_anim(buf)
@@ -639,25 +623,12 @@ class FeishuStreaming:
 
         from lumi.gateway.channels.feishu.lark_call import lark_call
 
-        card_json = {
-            "schema": "2.0",
-            "config": {
-                "wide_screen_mode": True,
-                "update_multi": True,
-                "streaming_mode": True,
-            },
-            "body": {
-                "elements": [
-                    {"tag": "markdown", "content": "", "element_id": STREAM_ELEMENT_ID}
-                ]
-            },
-        }
         request = (
             CreateCardRequest.builder()
             .request_body(
                 CreateCardRequestBody.builder()
                 .type("card_json")
-                .data(json.dumps(card_json, ensure_ascii=False))
+                .data(card_json("", streaming=True))
                 .build()
             )
             .build()

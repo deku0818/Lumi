@@ -1,5 +1,28 @@
 # Changelog
 
+## [0.2.130] - 2026-09-22
+
+一次全仓整理：删掉两套「写完但没有任何客户端能触发」的子系统，消除跨层依赖与重复实现，补上此前缺失的 CI。净减约 5500 行。
+
+### Removed
+- **执行模式（`execution_mode` / `mode_policy` / `PolicyReject`）整套移除** — 后端到协议是完整活链路，但 desktop 与 IM 渠道都不会设置它，运行时恒为 `"normal"`，策略注册表里唯一的 `readonly` 无从进入。只读语义本就能用 PermissionEngine 的 Deny 规则表达，不需要第二套并行评估器。权限系统从三层缩回两层。
+- **文件级 checkpoint（`runtime/checkpoint*.py` / `file_tracker.py` / `bridge/checkpoint.py`）整套移除** — 1032 行的文件快照与回退实现，唯一初始化入口 `init_checkpoint` 全仓无调用方，协议与前端均无入口，`~/.lumi/checkpoints/` 下也从未产生过 `filediff` 目录。同时清掉文件系统后端的 tracker 钩子、cron 删线程时的目录清理、以及只服务于它的 `max_checkpoints` / `stale_thread_days` 两个全局配置项。**与 LangGraph 的消息 checkpoint 无关，后者不受影响。**
+- 删除 `lumi/utils/read_config.py` 兼容垫片（合并回 `lumi.utils.config`）、`scripts/migrate_config.py`（v0.2.18 的一次性迁移，不进 wheel）、孤儿文件 `skills-lock.json`、未被读取的配置项 `ptc` / `tool_offload` / `agents.tools` / `agents.disabled_tools`、零引用依赖 `json-repair`，以及桌面端两个无人调用的 IPC 通道。
+
+### Fixed
+- **路径权限规则锚定到项目根**（`permissions/matcher.py`）— 相对路径模式此前从 `tool_args["project_dir"]` 取基准，而没有任何工具会传这个键，实际回退到进程 cwd。`lumi serve` 的工作目录一旦不是项目目录，`edit(src/**/*.py)` 这类规则就永远不命中。改由 `PermissionEngine` 显式传入自己绑定的项目根。
+- **每日 dream 的锁重试恢复为整批**（`feishu/daily_dream.py`）— 重构中误改成逐会话各等一轮，K 个忙会话的等待时间线性累加，且空闲会话要排在忙会话的重试之后。现在每轮扫全部会话、只睡一次。
+- **协议契约测试覆盖全部事件**（新增 `ServerEvent` 枚举）— 此前 25 个 wire 事件里有 10 个在生产代码中是裸字符串，测试拿自己维护的一份名单比对，生产端写错名字测不出来。
+
+### Changed
+- **跨层依赖收口** — `ApprovalBroker` 移入 `agents/core/`（消除全树唯一的 agents→gateway 反向依赖）；消息显示函数并入 `agents/core/meta_message.py`（解开 core ↔ sessions 双向依赖）。
+- **模块合并与拆分** — `mcp.py`（1056 行）拆为 `mcp/` 包；`observers.py` + `desktop_delivery.py` 并入 `BroadcastHub`；五个 `*_rpc.py` 统一为 `HANDLERS` 表，`session._dispatch` 合并一次；供应商 CRUD 下沉为模块级函数，删掉 bridge 上的一层转发；`FolderManager` 自持状态。
+- **桌面端** — `App.tsx` 3966 → 3466 行，事件归约与工具元数据外移，11 个 state→ref 镜像收敛为 `useLatest`；McpPanel 与 ChannelsPanel 各减约一半，两个重复的项目选择器与 chip 编辑器合一；MCP 与渠道面板补齐 i18n。
+- **Lumi Glass 卡壳四档收口**（新增 `components/glass.ts`）— L1 / L2 / L3 / POPOVER 四档取值集中一处，此前散落 8 种描边填充组合。L3 填充压淡一档使嵌套层级可辨；MCP 可递归的参数下钻框按层交替 L3 / L3_ALT，任意深度相邻两层都有边界。
+
+### Added
+- **CI**（`.github/workflows/ci.yml`）— 此前三个 workflow 全是发布流程，没有任何一条跑测试或 lint。现在 push / PR 触发 ruff check + ruff format + pytest，以及桌面端的 `tsc --noEmit`。
+
 ## [0.2.129] - 2026-09-18
 
 ### Fixed

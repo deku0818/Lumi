@@ -3,7 +3,6 @@
 from __future__ import annotations
 
 import re
-import uuid
 from dataclasses import dataclass, field
 from datetime import datetime, timedelta
 from enum import StrEnum
@@ -11,6 +10,8 @@ from enum import StrEnum
 from apscheduler.triggers.cron import CronTrigger
 from apscheduler.triggers.date import DateTrigger
 from apscheduler.triggers.interval import IntervalTrigger
+
+from lumi.agents.runtime.bg_tasks import new_task_id
 
 # 间隔简写的单位映射（秒）
 _UNIT_SECONDS: dict[str, int] = {
@@ -170,7 +171,7 @@ class Job:
     name: str
     schedule: Schedule
     prompt: str
-    id: str = field(default_factory=lambda: uuid.uuid4().hex[:12])
+    id: str = field(default_factory=lambda: new_task_id(""))
     enabled: bool = True
     created_at: datetime = field(default_factory=datetime.now)
     consecutive_errors: int = 0

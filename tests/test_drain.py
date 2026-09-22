@@ -53,9 +53,8 @@ async def test_drain_stops_real_graph_at_superstep_boundary():
                         tool_calls=[{"name": "noop", "args": {}, "id": "tc1"}],
                     )
                 ],
-                "iterations": 2,
             }
-        return {"messages": [AIMessage("done", id="final")], "iterations": 3}
+        return {"messages": [AIMessage("done", id="final")]}
 
     checkpointer = MemorySaver()
     config = {"configurable": {"thread_id": "t-drain"}}
@@ -68,7 +67,7 @@ async def test_drain_stops_real_graph_at_superstep_boundary():
         graph = LumiAgent(checkpointer=checkpointer).graph
         with pytest.raises(GraphDrained):
             async for _ in graph.astream_events(
-                {"messages": [HumanMessage("hi", id="h1")], "iterations": 1},
+                {"messages": [HumanMessage("hi", id="h1")]},
                 with_run_control(config, control),
                 context=context,
                 version="v2",
@@ -87,7 +86,7 @@ async def test_with_run_control_keeps_context_and_original_config():
 
     async def spy(state, runtime):
         seen["model"] = runtime.context.model_name
-        return {"messages": [AIMessage("ok", id="r1")], "iterations": 2}
+        return {"messages": [AIMessage("ok", id="r1")]}
 
     control = RunControl()
     config = {"configurable": {"thread_id": "t-ctx"}}
@@ -100,7 +99,7 @@ async def test_with_run_control_keeps_context_and_original_config():
     ):
         graph = LumiAgent(checkpointer=MemorySaver()).graph
         await graph.ainvoke(
-            {"messages": [HumanMessage("hi", id="h1")], "iterations": 1},
+            {"messages": [HumanMessage("hi", id="h1")]},
             injected,
             context=LumiAgentContext(model_name="fake-model"),
         )

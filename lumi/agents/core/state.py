@@ -4,8 +4,8 @@ from collections.abc import Callable
 from typing import TYPE_CHECKING, Annotated, Any, NotRequired, TypedDict
 
 if TYPE_CHECKING:
+    from lumi.agents.core.broker import ApprovalBroker
     from lumi.agents.permissions.engine import PermissionEngine
-    from lumi.gateway.bridge.broker import ApprovalBroker
 
 from dataclasses import dataclass, field
 from pathlib import Path
@@ -35,7 +35,7 @@ class LumiAgentContext:
     """PermissionEngine 实例，用于工具权限评估"""
     tool_mode: str = field(default="default")
     """工具审批模式（运行时真相源，所有节点共享同一 context 实例，bridge 侧可随时改）:
-    - "default": 权限引擎评估，未通过则由 TUI 询问用户审批
+    - "default": 权限引擎评估，未通过则经审批 Broker 询问用户
     - "accept_edits": 文件编辑工具(write/edit)在工作区内自动放行，bash 等仍需审批
     - "privileged": 权限引擎评估但自动放行，仅 bypass-immune 仍需审批
     - "auto": AI 审批模式——本该问人的批次交分类器(AutoClassify 节点)裁决
@@ -44,12 +44,18 @@ class LumiAgentContext:
     是共享可变引用，bridge 改它后下一个节点 runtime.context 立即读到 → 支持运行中实时切换。"""
     approval_broker: ApprovalBroker | None = field(default=None)
     """在途审批 Broker，由 bridge 在 create_agent 后注入（与 permission_engine 同源）。
-    节点 / ask 工具经它 await 审批，替代 interrupt() 中断-恢复。子 agent 由 agent 工具
-    从父 context 传播。无 bridge 的纯 graph 调用（headless）保持 None。"""
+    节点 / ask 工具经它原地 await 审批。子 agent 由 agent 工具从父 context 传播。
+    无 bridge 的纯 graph 调用（headless）保持 None。"""
     widen_boundary: Callable[[list[str]], None] | None = field(default=None)
     """放宽本会话工作区边界的回调，由 bridge 注入（同 approval_broker，事后赋值）。
     授权（人工审批 / auto 分类器 / privileged）通过后调用，把越界路径所在目录纳入本
     会话工作区。无 bridge 的纯 graph 调用（headless）保持 None，边界不放宽。"""
+    get_goal: Callable[[str], str] | None = field(default=None)
+    """按 thread_id 读会话当前 ``/goal`` 条件（未设定返回空串），由 bridge 注入。
+    goal 存 sessions 层的 sidecar，core 不直接依赖 sessions——同 widen_boundary 的
+    注入方式。None（headless / cron / 子 agent）= 无目标驱动。"""
+    clear_goal: Callable[[str], None] | None = field(default=None)
+    """按 thread_id 清会话 goal（达成 / 永远达不成时由 goal_stop_hook 调用），同上注入。"""
     env_extra: str = field(default="")
     """<env> 块尾部追加的会话级条目行（渠道无关，已按块内格式渲染好、含缩进）。
 
@@ -95,13 +101,10 @@ class LumiAgentState(TypedDict):
     不补。所有离线写回必须先过 ``node_helpers.messages.stamp_missing_ids``，否则那些
     消息一辈子没有 id，而 rewind 截断 / 半截判重 / 压缩选材全按 id 认消息。这条差异
     正反两面都有锁定用例。"""
-    iterations: int
     todos: NotRequired[list]
     """任务列表，用于追踪复杂任务的执行进度"""
     output_schema: NotRequired[dict[str, Any]]
     """结构化输出的 JSON Schema"""
-    output_enrich: NotRequired[list[dict[str, Any]]]
-    """结构化输出附加数据规则"""
     structured_output: NotRequired[dict[str, Any]]
     """结构化输出结果"""
     tool_cancelled: NotRequired[bool]
@@ -112,7 +115,3 @@ class LumiAgentState(TypedDict):
     depth: NotRequired[int]
     """子 agent 委派深度：主 agent 为 0，每委派一层 +1。
     agent 工具据此限制最大委派层数（见 agents.max_delegation_depth）。"""
-    execution_mode: NotRequired[str]
-    """执行模式: "normal"(默认) | "plan" | "readonly" | 自定义模式
-    非 "normal" 时 is_use_tool 路由会根据对应 ModePolicy 拦截不允许的工具调用。
-    """

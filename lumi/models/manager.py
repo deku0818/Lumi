@@ -220,7 +220,7 @@ def create_llm(
     无内置调参默认，未指定的参数交给 SDK 默认值。
     """
     from lumi.models import provider_store
-    from lumi.utils.read_config import get_config
+    from lumi.utils.config import get_config
 
     level = "auto"
     if "base_url" in llm_params or "api_key" in llm_params:

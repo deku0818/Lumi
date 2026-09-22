@@ -1,17 +1,19 @@
 // WS JSON-RPC 客户端：对接 lumi serve 的 /ws。
-// 帧协议见 lumi/server/ws.py。带指数退避自动重连（sidecar 启动需要时间）。
+// 帧协议见 lumi/gateway/channels/ws.py。带指数退避自动重连（sidecar 启动需要时间）。
 import type {
   ActiveModel,
   BgTask,
   BgTaskOutput,
   CatalogEntry,
   ChannelInfo,
+  ConnError,
+  ConnState,
   ModelLimits,
   ModelPointer,
   CronJob,
   CronRun,
   FeishuConfig,
-  HistoryItem,
+  HistorySnapshot,
   McpScope,
   McpServerConfig,
   McpServers,
@@ -29,18 +31,9 @@ import type {
   SessionMeta,
   SessionModelWire,
   SlashCommand,
-  TodoItem,
-  Usage,
   WireEvent,
 } from './types'
 import { fmtSize } from '@/lib/utils'
-
-// failed = 退避重试耗尽，已放弃自动重连，等用户主动点击重连
-export type ConnState = 'connecting' | 'open' | 'closed' | 'failed'
-
-// 连不上时的原因，供「连接」列表把机器行的副标题换成人话（'' = 没出过错）。
-// 只分两类：服务端明确拒绝（1008 令牌无效）与其余一切连不通，多分也给不出不同的下一步
-export type ConnError = '' | 'auth' | 'unreachable'
 
 const MAX_RETRY = 5 // 连续失败这么多次后停止自动重连
 
@@ -404,10 +397,6 @@ export class Gateway {
     return this.request<McpTestResult>('test_mcp_server', { config })
   }
 
-  setWorkspace(path: string): Promise<{ workspace: string }> {
-    return this.request<{ workspace: string }>('set_workspace', { path })
-  }
-
   listProjects(): Promise<{ projects: Project[]; current: string }> {
     return this.request<{ projects: Project[]; current: string }>('list_projects')
   }
@@ -507,26 +496,12 @@ export class Gateway {
     })
   }
 
-  loadHistory(threadId: string): Promise<{
-    items: HistoryItem[]
-    usage?: Usage
-    model?: string
-    context_window?: number
-    todos?: TodoItem[]
-  }> {
-    return this.request<{
-      items: HistoryItem[]
-      usage?: Usage
-      // 会话真实模型名与其上下文窗口：渠道旁观会话画上下文环的分母来源
-      model?: string
-      context_window?: number
-      // 会话 state.todos 快照：右栏任务进度的历史还原
-      todos?: TodoItem[]
-    }>('load_history', { thread_id: threadId })
+  loadHistory(threadId: string): Promise<HistorySnapshot> {
+    return this.request<HistorySnapshot>('load_history', { thread_id: threadId })
   }
 
   pinSession(threadId: string, pinned: boolean): Promise<unknown> {
-    return this.request<{ jobs: CronJob[] }>('pin_session', { thread_id: threadId, pinned })
+    return this.request('pin_session', { thread_id: threadId, pinned })
   }
 
   renameSession(threadId: string, title: string): Promise<unknown> {

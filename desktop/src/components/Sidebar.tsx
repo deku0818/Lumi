@@ -24,8 +24,7 @@ import {
 } from 'lucide-react'
 import { useUpdateState } from '../update'
 import { MachineIcon, MachineMark, ReconnectButton, useMachineConn, type MachineMarker } from './MachineTabs'
-import type { ConnState } from '../gateway'
-import type { ChannelInfo, Machine, SessionMeta } from '../types'
+import type { ChannelInfo, ConnState, Machine, SessionMeta } from '../types'
 import { basename, botOfThread, machineColor, machineName, sessionKey, beOf, FLOAT_GAP } from '@/lib/utils'
 import { useI18n, LANGS } from '../i18n'
 import {

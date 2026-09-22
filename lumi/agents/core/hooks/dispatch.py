@@ -3,13 +3,12 @@
 所有形态（Python callable / Shell / YAML 包装）共享同一 dispatch——非 Python
 形态在外部模块包装为 ``Hook`` 函数后调 ``register_hook``，本模块不感知形态差异。
 
-3 模式：
+2 模式：
 - ``first_intercept``：第一个返非 None 的 hook 拦截，后续不跑。Stop /
   UserPromptSubmit 用——接管者语义。
 - ``collect``：多 hook 的 AdditionalContext 合并到同一 Command；遇到首个
   Block / Command 立即拦截但已收的 reminder 一起注入。PreToolUse / PostToolUse
   用——多 reminder 共存有意义。
-- ``side_effect``：所有 hook 并发跑，返回值仅 warning。SessionEnd 用。
 
 错误隔离：每个 hook 包 try/except，单 hook 抛错 ``logger.exception`` 后继续
 下一个，dispatch 不抛。Shell/YAML wrapper 内部异常走同路径——对调用方透明。
@@ -17,7 +16,6 @@
 
 from __future__ import annotations
 
-import asyncio
 import contextvars
 from collections.abc import Iterator
 from contextlib import contextmanager
@@ -54,10 +52,7 @@ def set_run_config_hooks(hooks: dict[HookEvent, list[Hook]] | None) -> None:
 
 
 def _hooks_for(event: HookEvent) -> list[Hook]:
-    """本 run 生效的 hook：项目级 config（优先）+ 框架 builtin（其后）。
-
-    顺序与旧 prepend 实现一致——config hook 整体压在 builtin 之前。
-    """
+    """本 run 生效的 hook：项目级 config 整体压在框架 builtin 之前。"""
     config = _run_config_hooks.get()
     config_hooks = config.get(event, []) if config else []
     return [*config_hooks, *_HOOKS.get(event, [])]
@@ -84,18 +79,6 @@ def register_hook(event: HookEvent, hook: Hook) -> None:
     适合 Python 代码（import side effect / 运行时）注册内置 fallback hook。
     """
     _HOOKS.setdefault(event, []).append(hook)
-
-
-def unregister_hook(event: HookEvent, hook: Hook) -> bool:
-    """从事件队列移除指定 hook。命中返 True，未命中返 False。
-
-    给 YAML 配置重载用——重载时精准移除 YAML 注册的 hook 而保留 builtin。
-    """
-    hooks = _HOOKS.get(event)
-    if hooks and hook in hooks:
-        hooks.remove(hook)
-        return True
-    return False
 
 
 def _to_command(result: HookResult, *, default_goto: str) -> Command | None:
@@ -125,7 +108,7 @@ async def dispatch_hooks(
     ctx: HookContext,
     *,
     default_goto: str = "CallModel",
-    mode: Literal["first_intercept", "collect", "side_effect"] = "first_intercept",
+    mode: Literal["first_intercept", "collect"] = "first_intercept",
 ) -> Command | None:
     """串行跑事件下的所有 hook，按 mode 决定协同行为。
 
@@ -135,29 +118,6 @@ async def dispatch_hooks(
     """
     hooks = _hooks_for(event)
     if not hooks:
-        return None
-
-    if mode == "side_effect":
-        # 所有 hook 并发跑——side_effect 无短路语义，独立 await 浪费时间
-        results = await asyncio.gather(
-            *(hook(ctx) for hook in hooks), return_exceptions=True
-        )
-        for hook, result in zip(hooks, results):
-            if isinstance(result, BaseException):
-                logger.error(
-                    "[hooks] %s hook %r raised; ignored: %s",
-                    event,
-                    hook,
-                    result,
-                    exc_info=result,
-                )
-            elif result is not None:
-                logger.warning(
-                    "[hooks] %s hook %r returned %s; side_effect mode ignores",
-                    event,
-                    hook,
-                    type(result).__name__,
-                )
         return None
 
     if mode == "first_intercept":
@@ -215,8 +175,3 @@ def replace_hooks(event: HookEvent, hooks: list[Hook]) -> Iterator[None]:
         yield
     finally:
         _HOOKS[event] = original
-
-
-def iter_hooks(event: HookEvent) -> list[Hook]:
-    """只读暴露某事件下生效的 hook 列表（config + builtin，调用方修改不影响内部状态）。"""
-    return _hooks_for(event)

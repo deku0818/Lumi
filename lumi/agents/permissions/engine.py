@@ -21,7 +21,6 @@ from lumi.agents.permissions.models import (
     PermissionConfig,
     PermissionDecision,
     PermissionRule,
-    ToolCallInfo,
 )
 from lumi.agents.permissions.workspace import (
     add_authorized_directory,
@@ -57,18 +56,18 @@ class PermissionEngine:
         # reload()/rebase() 从磁盘整体覆盖，若把 ephemeral 混进去，配置文件一变更
         # 用户本会话加的目录就被悄悄撤销。单独存字段使其跨 reload/rebase 存活。
         self._ephemeral_workspaces: list[Path] = []
-
-        try:
-            self._loader = ConfigLoader(project_dir, user_config_dir)
-            self._config = self._loader.load()
-        except (OSError, json.JSONDecodeError, ValueError, KeyError) as e:
-            logger.error("权限配置加载失败 (%s)，回退到无规则状态", e, exc_info=True)
-            if not hasattr(self, "_loader"):
-                self._loader = ConfigLoader(project_dir, user_config_dir)
-            self._config = PermissionConfig()
-
+        self._loader = ConfigLoader(project_dir, user_config_dir)
+        self._config = self._load_config()
         # 构建工作区边界检查器并同步到 filesystem 层
         self._rebuild_boundary()
+
+    def _load_config(self) -> PermissionConfig:
+        """从磁盘加载配置；失败回退到无规则状态（所有调用返回 unmatched）。"""
+        try:
+            return self._loader.load()
+        except (OSError, json.JSONDecodeError, ValueError, KeyError) as e:
+            logger.error("权限配置加载失败 (%s)，回退到无规则状态", e, exc_info=True)
+            return PermissionConfig()
 
     @property
     def config(self) -> PermissionConfig:
@@ -119,12 +118,8 @@ class PermissionEngine:
     def rebase(self, project_dir: Path) -> None:
         """切换项目根目录：重载新目录的权限配置并重建工作区边界。"""
         self._project_dir = project_dir.resolve()
-        try:
-            self._loader = ConfigLoader(self._project_dir, self._user_config_dir)
-            self._config = self._loader.load()
-        except (OSError, json.JSONDecodeError, ValueError, KeyError) as e:
-            logger.error("权限配置加载失败 (%s)，回退到无规则状态", e, exc_info=True)
-            self._config = PermissionConfig()
+        self._loader = ConfigLoader(self._project_dir, self._user_config_dir)
+        self._config = self._load_config()
         self._rebuild_boundary()
 
     def evaluate(self, tool_name: str, tool_args: dict) -> PermissionDecision:
@@ -141,21 +136,6 @@ class PermissionEngine:
         Returns:
             权限决策结果
         """
-        # 参数验证
-        if not isinstance(tool_name, str) or not tool_name:
-            logger.error(f"[PermissionEngine.evaluate] tool_name 无效：{tool_name!r}")
-            return PermissionDecision.UNMATCHED
-
-        if not isinstance(tool_args, dict):
-            logger.error(
-                f"[PermissionEngine.evaluate] tool_args 类型异常：{type(tool_args)}"
-            )
-            return PermissionDecision.UNMATCHED
-
-        if self._config is None:
-            logger.warning("[PermissionEngine.evaluate] 配置未加载，返回 UNMATCHED")
-            return PermissionDecision.UNMATCHED
-
         # bash 复合命令：拆分后逐个子命令评估，取最严格结果
         if tool_name in COMMAND_TOOLS:
             command = extract_arg(tool_args, COMMAND_ARG_KEYS)
@@ -190,7 +170,7 @@ class PermissionEngine:
         for rule in self._config.permissions:
             priority = self._STRICTNESS[rule.permission]
             if priority < best_priority and RuleMatcher.match_rule(
-                rule, tool_name, tool_args
+                rule, tool_name, tool_args, self._project_dir
             ):
                 best_priority = priority
                 best_decision = self._TO_DECISION[rule.permission]
@@ -224,101 +204,20 @@ class PermissionEngine:
             return PermissionDecision.UNMATCHED
         return PermissionDecision.ALLOW
 
-    def evaluate_batch(
-        self, tool_calls: list[ToolCallInfo]
-    ) -> list[PermissionDecision]:
-        """批量评估多个工具调用（各自独立）。
-
-        Args:
-            tool_calls: 工具调用信息列表
-
-        Returns:
-            对应的权限决策列表
-        """
-        return [self.evaluate(tc.name, tc.args) for tc in tool_calls]
-
     def check_workspace_boundary(self, tool_name: str, tool_args: dict) -> bool:
-        """检查工具调用是否在工作区边界内。
-
-        Args:
-            tool_name: 工具名称
-            tool_args: 工具参数
-
-        Returns:
-            True 表示在边界内（或无法提取路径），False 表示超出边界
-        """
-        # 边界检查器未初始化时保守拒绝
-        if self._boundary is None:
-            logger.error(f"[PermissionEngine] 边界检查器未初始化，拒绝工具 {tool_name}")
-            return False
-
-        try:
-            paths = self._boundary.extract_paths_from_tool_call(tool_name, tool_args)
-        except Exception as e:
-            logger.error(
-                f"[PermissionEngine] 工具 {tool_name} 路径提取失败：{e}",
-                exc_info=True,
+        """工具调用是否在工作区边界内（提取不到路径视为边界内）。"""
+        violations = self.get_boundary_violations(tool_name, tool_args)
+        if violations:
+            logger.warning(
+                "[PermissionEngine] 工具 %s 超出工作区边界：%s", tool_name, violations
             )
-            return False  # 保守策略：无法提取路径时拒绝执行
-
-        if not paths:
-            # 无法提取路径，记录调试信息但视为边界内
-            logger.debug(f"[PermissionEngine] 工具 {tool_name} 未包含可提取的路径参数")
-            return True
-
-        for p in paths:
-            try:
-                # 相对路径基于项目目录解析
-                resolved = p if p.is_absolute() else self._project_dir / p
-                if not self._boundary.is_within_boundary(resolved):
-                    logger.warning(
-                        f"[PermissionEngine] 工具 {tool_name} 超出工作区边界：{resolved}"
-                    )
-                    return False
-            except Exception as e:
-                logger.error(
-                    f"[PermissionEngine] 工具 {tool_name} 边界检查异常 (路径：{p}): {e}",
-                    exc_info=True,
-                )
-                return False  # 保守策略：检查异常时拒绝执行
-
-        return True
+        return not violations
 
     def get_boundary_violations(self, tool_name: str, tool_args: dict) -> list[str]:
-        """获取超出工作区边界的路径列表。
-
-        Args:
-            tool_name: 工具名称
-            tool_args: 工具参数
-
-        Returns:
-            超出边界的路径字符串列表
-        """
-        try:
-            paths = self._boundary.extract_paths_from_tool_call(tool_name, tool_args)
-        except Exception as e:
-            logger.error(
-                "[PermissionEngine] get_boundary_violations 路径提取失败 (%s): %s",
-                tool_name,
-                e,
-                exc_info=True,
-            )
-            return []
-
-        violations: list[str] = []
-        for p in paths:
-            try:
-                resolved = p if p.is_absolute() else self._project_dir / p
-                if not self._boundary.is_within_boundary(resolved):
-                    violations.append(str(resolved))
-            except Exception as e:
-                logger.error(
-                    "[PermissionEngine] 边界检查异常 (路径: %s): %s",
-                    p,
-                    e,
-                    exc_info=True,
-                )
-        return violations
+        """超出工作区边界的路径列表（相对路径基于项目目录解析）。"""
+        paths = self._boundary.extract_paths_from_tool_call(tool_name, tool_args)
+        resolved = [p if p.is_absolute() else self._project_dir / p for p in paths]
+        return [str(p) for p in resolved if not self._boundary.is_within_boundary(p)]
 
     def add_allow_rule(self, tool_expr: str) -> None:
         """将 allow 规则追加到项目本地配置并更新内存。
@@ -415,27 +314,6 @@ class PermissionEngine:
             return
         self._ephemeral_workspaces.remove(resolved)
         self._rebuild_boundary()
-
-    def add_ephemeral_rules(self, allow_exprs: list[str]) -> None:
-        """添加临时 allow 规则（仅内存，不持久化）。
-
-        用于 CLI --allow 参数传入的会话级规则。
-
-        Args:
-            allow_exprs: 工具表达式列表，如 ["bash(npm *)", "edit"]
-        """
-        new_rules = []
-        existing = {
-            r.tool for r in self._config.permissions if r.permission == Permission.ALLOW
-        }
-        for expr in allow_exprs:
-            if expr and expr not in existing:
-                new_rules.append(PermissionRule(tool=expr, permission=Permission.ALLOW))
-        if new_rules:
-            self._config = PermissionConfig(
-                workspaces=self._config.workspaces,
-                permissions=(*self._config.permissions, *new_rules),
-            )
 
     def reload(self) -> None:
         """重新加载配置文件（仅在文件变更时）。"""

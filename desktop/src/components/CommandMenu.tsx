@@ -1,5 +1,6 @@
 import { useEffect, useRef } from 'react'
 import type { SlashCommand } from '../types'
+import { POPOVER } from './glass'
 
 // 斜杠命令补全菜单：悬浮在 composer 上方，键盘上下选择 + Enter/Tab 确认。
 // 选中态由父组件（App）持有，键盘事件也在 composer 的 textarea 上统一处理。
@@ -22,7 +23,7 @@ export function CommandMenu({
   }, [selected])
 
   return (
-    <div className="mb-1.5 rounded-2xl border border-line/40 bg-surface shadow-lg overflow-hidden">
+    <div className={`mb-1.5 ${POPOVER}`}>
       <div ref={ref} className="max-h-64 overflow-auto py-1">
         {commands.map((cmd, i) => (
           <button

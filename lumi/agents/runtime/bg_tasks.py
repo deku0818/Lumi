@@ -10,6 +10,7 @@ from __future__ import annotations
 
 import asyncio
 import time
+import uuid
 from collections.abc import Awaitable, Callable
 from contextvars import ContextVar
 from dataclasses import dataclass, field, fields
@@ -35,11 +36,14 @@ def bg_tasks_dir() -> Path:
     return lumi_tmp_dir("bg_tasks")
 
 
+def new_task_id(prefix: str) -> str:
+    """``prefix`` + 12 位 uuid hex：后台任务 / 子代理 / cron job / shell 哨兵共用的短唯一 id。"""
+    return f"{prefix}{uuid.uuid4().hex[:12]}"
+
+
 # ---------------------------------------------------------------------------
 # Enums
 # ---------------------------------------------------------------------------
-
-_TERMINAL_STATUSES: frozenset[str] = frozenset()  # populated after TaskStatus
 
 
 class TaskKind(StrEnum):
@@ -124,12 +128,6 @@ class NotificationQueue:
     def enqueue(self, notification_xml: str, thread_id: str = "") -> None:
         """将通知 XML 放入队列（非阻塞）。"""
         self._items.append((thread_id, notification_xml))
-
-    def drain_all(self) -> list[str]:
-        """取出全部待发送通知并清空队列（单会话前端，如 TUI）。"""
-        items = [xml for _, xml in self._items]
-        self._items.clear()
-        return items
 
     def drain_for(self, thread_id: str) -> list[str]:
         """取出精确归属指定 thread 的通知，其余留在队列中等待各自会话认领。
@@ -358,7 +356,7 @@ class TaskRegistry:
         self._entries: dict[str, BackgroundTaskEntry] = {}
         self._notification_queue = NotificationQueue()
         # 状态/进度变更观察者：server 层注册，把变更广播给 desktop drawer（同 cron
-        # 的 on_job_status 模式）。TUI / 测试不设 → 不广播。同步回调，内部自行调度异步。
+        # 的 on_job_status 模式）。未注册（测试）→ 不广播。同步回调，内部自行调度异步。
         self._on_change: Callable[[], None] | None = None
 
     @property
@@ -521,17 +519,10 @@ class TaskRegistry:
 
     def cleanup(self) -> None:
         """清理：取消所有运行中的 Agent 任务并发送通知，然后清空条目。"""
-        for entry in self._entries.values():
-            if (
-                entry.status == TaskStatus.RUNNING
-                and entry.kind in (TaskKind.AGENT, TaskKind.WORKFLOW)
-                and entry.async_task is not None
-            ):
-                entry.async_task.cancel()
-                entry.status = TaskStatus.FAILED
-                entry.error = "清理时终止"
-                entry.completed_at = time.time()
-                self.enqueue_notification(entry.task_id)
+        for task_id in list(self._entries):
+            if self.cancel_agent_task(task_id):
+                self.update_status(task_id, TaskStatus.FAILED, error="清理时终止")
+                self.enqueue_notification(task_id)
         self._entries.clear()
         logger.info("[TaskRegistry] 已清理所有任务条目")
 

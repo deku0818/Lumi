@@ -1262,13 +1262,14 @@ def test_run_cli_decodes_utf8_under_non_utf8_locale(monkeypatch):
     import shutil
     import sys
 
-    from lumi.gateway.channels.feishu import minutes
+    from lumi.gateway.channels.feishu import lark_profile
 
     monkeypatch.setattr(locale, "getencoding", lambda: "gbk")
-    monkeypatch.setattr(shutil, "which", lambda name: sys.executable)
+    monkeypatch.setattr(shutil, "which", lambda name, **kw: sys.executable)
     payload = '{"identities": {"user": {"available": true, "userName": "鄢楚威"}}}'
     code = f"import sys; sys.stdout.buffer.write({ascii(payload)}.encode('utf-8'))"
-    ok, out = minutes._run_cli("-c", code)
+    code_out, out = lark_profile.run_cli("-c", code)
+    ok = code_out == 0
     assert ok
     assert json.loads(out)["identities"]["user"]["userName"] == "鄢楚威"
 
@@ -1289,11 +1290,21 @@ def test_ensure_subscription_handles_timeout(monkeypatch):
 
 
 def _patch_which(monkeypatch, found: bool):
+    """lark-cli 的存在性探测统一走 toolbox.detect（与环境页同源），在此打桩。"""
     import shutil
 
+    from lumi.gateway import toolbox
+
+    path = "/usr/local/bin/lark-cli" if found else ""
     monkeypatch.setattr(
-        shutil, "which", lambda name: "/usr/local/bin/lark-cli" if found else None
+        toolbox,
+        "detect",
+        lambda name: toolbox.ToolStatus(
+            name, "system" if found else "missing", "", path
+        ),
     )
+    # run_cli 执行的是解析后的完整路径（Windows 上裸名找不到 .cmd）
+    monkeypatch.setattr(shutil, "which", lambda name, **kw: path or None)
 
 
 def test_diagnose_reports_missing_cli_and_blocks_rest(monkeypatch):
@@ -1577,7 +1588,7 @@ async def test_flush_end_falls_back_when_final_push_fails(monkeypatch):
     )
     monkeypatch.setattr(st, "_set_streaming_mode_sync", lambda cid, on, seq: False)
 
-    await st._flush_end(asyncio.get_running_loop(), "oc_room", aborted=False)
+    await st.end("oc_room", aborted=False)
     assert [text for text, _title in sent] == ["前半段 + 后半段"]
 
 
@@ -1960,6 +1971,10 @@ class _FakeBridge:
     def __init__(self):
         self.model_name = ""
         self.applied = None
+        # 真 bridge 的用户轮会 drain 目录/档位提醒，这里给个恒空的桩
+        self.folders = SimpleNamespace(
+            drain_folder_note=lambda: "", drain_ultra_note=lambda: ""
+        )
 
     def _apply_model_to_context(self, model, provider, effort):
         self.model_name = model
@@ -2112,20 +2127,16 @@ async def test_only_real_user_turn_pins_the_model(monkeypatch, tmp_path):
     bridge._stream = lambda _data: _aempty()
     # 借真方法：本测就是要验证 _stream_turn 确实经它对齐
     bridge.align_session_model = lambda: AgentBridge.align_session_model(bridge)
-    bridge._stream_turn = lambda m, tm, em: AgentBridge._stream_turn(bridge, m, tm, em)
+    bridge._stream_turn = lambda m, tm: AgentBridge._stream_turn(bridge, m, tm)
 
     # 合成轮（_stream_turn 是它与真人轮共用的最小操作）：对齐但不固化
-    async for _ in AgentBridge._stream_turn(
-        bridge, HumanMessage("hi"), "default", "normal"
-    ):
+    async for _ in AgentBridge._stream_turn(bridge, HumanMessage("hi"), "default"):
         pass
     assert bridge.applied == ("g-default", "pg", None)
     assert session_model.resolve("t1").pinned is False
 
     # 真人轮：固化
-    async for _ in AgentBridge._stream_user_turn(
-        bridge, HumanMessage("hi"), "default", "normal"
-    ):
+    async for _ in AgentBridge._stream_user_turn(bridge, HumanMessage("hi"), "default"):
         pass
     assert session_model.resolve("t1").pinned is True
 

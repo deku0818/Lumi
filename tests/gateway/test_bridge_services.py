@@ -1,20 +1,16 @@
-"""AgentBridge service 子模块特征测试（bridge 拆包安全网）。
+"""bridge 子模块特征测试（bridge 拆包安全网）。
 
-ProviderService：list / set / save / delete 经 bridge 委派往返 provider_store。
-CheckpointService：构造 + 未初始化 shadow 时的基本调用 smoke。
-均不初始化真实 Agent graph（参考 tests/test_bridge_workspace.py 的构造方式）。
+供应商 CRUD：list / set / save / delete 经模块级函数往返 provider_store。
+不初始化真实 Agent graph（参考 tests/test_bridge_workspace.py 的构造方式）。
 """
 
 from __future__ import annotations
 
 import pytest
 
-from lumi.gateway.bridge import AgentBridge
-from lumi.gateway.bridge.checkpoint import CheckpointService
-from lumi.gateway.bridge.providers import ProviderService
+from lumi.gateway.bridge import providers
 from lumi.models import provider_store
-from lumi.utils.config import user_store
-from lumi.utils.read_config import get_config
+from lumi.utils.config import get_config, user_store
 
 
 @pytest.fixture
@@ -29,20 +25,11 @@ def _profile(name="A", base="u", key="k", models=("m1", "m2")):
     return {"name": name, "base_url": base, "api_key": key, "models": list(models)}
 
 
-# ── ProviderService ──
-
-
-def test_bridge_wires_services():
-    bridge = AgentBridge()
-    assert isinstance(bridge._providers, ProviderService)
-    assert isinstance(bridge._checkpoint, CheckpointService)
-    assert bridge._providers._bridge is bridge
-    assert bridge._checkpoint._bridge is bridge
+# ── 供应商 CRUD（模块级函数，无需 bridge 实例）──
 
 
 def test_list_providers_empty(store_path):
-    bridge = AgentBridge()
-    result = bridge.list_providers()
+    result = providers.list_providers()
     cfg = get_config().config
     assert result == {
         "profiles": [],
@@ -58,8 +45,7 @@ def test_list_providers_empty(store_path):
 
 
 def test_save_provider_persists_and_lists(store_path):
-    bridge = AgentBridge()
-    result = bridge.save_provider(_profile())
+    result = providers.save_provider(_profile())
     assert len(result["profiles"]) == 1
     p = result["profiles"][0]
     assert p["name"] == "A"
@@ -73,8 +59,7 @@ def test_save_provider_persists_and_lists(store_path):
 
 def test_save_provider_keeps_limit_overrides(store_path):
     """按模型的上下文/输出覆盖经表单落盘，并原样回到 list 结果（可直接回填表单）。"""
-    bridge = AgentBridge()
-    result = bridge.save_provider(
+    result = providers.save_provider(
         {**_profile(), "context": {"m1": 262144}, "max_tokens": {"m1": 4096}}
     )
     p = result["profiles"][0]
@@ -89,10 +74,9 @@ def test_save_provider_keeps_limit_overrides(store_path):
 
 def test_save_provider_clearing_limit_restores_auto(store_path):
     """表单清空该格 = 删除覆盖（不是存 0）：编辑表单是限制覆盖的唯一入口。"""
-    bridge = AgentBridge()
-    bridge.save_provider({**_profile(), "context": {"m1": 262144}})
+    providers.save_provider({**_profile(), "context": {"m1": 262144}})
     pid = provider_store.load()[1]["provider"]
-    bridge.save_provider({**_profile(), "id": pid, "context": {}})
+    providers.save_provider({**_profile(), "id": pid, "context": {}})
     profiles, _ = provider_store.load()
     assert profiles[0].context == {}
 
@@ -102,49 +86,43 @@ def test_save_provider_clearing_limit_restores_auto(store_path):
 )
 def test_save_provider_rejects_bad_limits(store_path, raw):
     """0 / 负数 / 非数字 / 不存在的模型一律不落盘——留下就会被当成真上限用。"""
-    bridge = AgentBridge()
-    bridge.save_provider({**_profile(), "context": raw})
+    providers.save_provider({**_profile(), "context": raw})
     profiles, _ = provider_store.load()
     assert profiles[0].context == {}
 
 
 def test_set_provider_switches_active(store_path):
-    bridge = AgentBridge()
-    bridge.save_provider(_profile())
+    providers.save_provider(_profile())
     pid = provider_store.load()[1]["provider"]
-    result = bridge.set_provider(pid, "m2")
+    result = providers.set_provider(pid, "m2")
     assert result["active"] == {"provider": pid, "model": "m2"}
 
 
 def test_set_provider_unknown_raises(store_path):
-    bridge = AgentBridge()
     with pytest.raises(ValueError):
-        bridge.set_provider("nope", "m1")
+        providers.set_provider("nope", "m1")
 
 
 def test_set_effort_auto_returns_and_clears(store_path):
-    bridge = AgentBridge()
-    bridge.save_provider(_profile())
+    providers.save_provider(_profile())
     pid = provider_store.load()[1]["provider"]
     # auto 永远合法；存储语义为"未设置"（不落盘条目，恢复默认不传参）
-    assert bridge.set_effort(pid, "m1", "auto") == {"effort": "auto"}
+    assert providers.set_effort(pid, "m1", "auto") == {"effort": "auto"}
     profiles, _ = provider_store.load()
     assert "m1" not in profiles[0].effort
 
 
 def test_set_effort_unknown_raises(store_path):
-    bridge = AgentBridge()
-    bridge.save_provider(_profile())
+    providers.save_provider(_profile())
     pid = provider_store.load()[1]["provider"]
     with pytest.raises(ValueError):
-        bridge.set_effort(pid, "missing-model", "auto")
+        providers.set_effort(pid, "missing-model", "auto")
 
 
 def test_delete_provider_removes(store_path):
-    bridge = AgentBridge()
-    bridge.save_provider(_profile())
+    providers.save_provider(_profile())
     pid = provider_store.load()[1]["provider"]
-    result = bridge.delete_provider(pid)
+    result = providers.delete_provider(pid)
     cfg = get_config().config
     assert result == {
         "profiles": [],
@@ -157,25 +135,3 @@ def test_delete_provider_removes(store_path):
         },
     }
     assert provider_store.load()[0] == []
-
-
-# ── CheckpointService ──
-
-
-async def test_list_checkpoints_no_shadow_returns_empty():
-    bridge = AgentBridge()
-    assert bridge._shadow is None
-    assert await bridge.list_checkpoints() == []
-
-
-async def test_create_checkpoint_before_turn_no_shadow_noop():
-    bridge = AgentBridge()
-    # 无 shadow 时静默返回，不抛错
-    await bridge._create_checkpoint_before_turn("hello")
-
-
-async def test_rewind_no_shadow_returns_error():
-    bridge = AgentBridge()
-    ok, msg = await bridge.rewind_to_checkpoint(object())  # shadow 未初始化即早返回
-    assert ok is False
-    assert msg == "Checkpoint 未初始化"

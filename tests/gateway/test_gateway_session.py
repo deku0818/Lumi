@@ -246,7 +246,7 @@ async def test_turn_start_carries_user_message_id():
     """开轮事件带出本轮用户消息 id（前端据此给乐观气泡上锚做时间旅行对账）。"""
     bridge = FakeBridge(
         events=[
-            BridgeEvent(kind=EventKind.TURN_START, text="mid-42"),
+            BridgeEvent(kind=EventKind.TURN_START, message_id="mid-42"),
             BridgeEvent(kind=EventKind.TURN_COMPLETE),
         ]
     )

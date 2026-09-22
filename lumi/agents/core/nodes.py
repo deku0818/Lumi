@@ -15,6 +15,10 @@ from langgraph.types import Command
 from pydantic import BaseModel, Field
 
 from lumi.agents.core.hooks import HookContext, dispatch_hooks, has_hooks
+from lumi.agents.core.meta_message import (
+    should_show_human_message,
+    visible_user_text,
+)
 from lumi.agents.core.node_helpers.execution import (
     handle_tool_error,
     truncate_tool_results,
@@ -26,21 +30,18 @@ from lumi.agents.core.node_helpers.messages import (
     is_malformed_tool_call,
 )
 from lumi.agents.core.preprocessing.compact import (
-    build_compacted_update,
+    compact_messages,
     is_circuit_open,
     is_ptl_error,
     record_circuit_failure,
     reset_circuit,
-    run_summary,
     select_for_ptl_compaction,
-    split_head,
 )
 from lumi.agents.core.response import message_transform
 from lumi.agents.core.state import LumiAgentContext, LumiAgentState
 from lumi.agents.core.structured_tool import (
     MAX_CONSECUTIVE_FAILURES,
     STRUCTURED_OUTPUT_INSTRUCTION,
-    apply_enrich_to_command,
     count_consecutive_structured_output_failures,
     create_structured_output_tool,
     format_structured_output_abort_message,
@@ -52,8 +53,8 @@ from lumi.agents.tools.capability import is_local_path_tool, is_write_tool
 from lumi.models.chain import structured_output, tool_call_chain
 from lumi.models.manager import detect_protocol
 from lumi.models.provider_store import resolve, resolve_pointer
+from lumi.utils.config import get_config
 from lumi.utils.logger import logger
-from lumi.utils.read_config import get_config
 from lumi.utils.sizing import context_window_tokens
 
 
@@ -88,8 +89,6 @@ async def call_model(
         effort=runtime.context.effort,  # 渠道会话的档位覆盖（None=跟随 profile）
         provider=runtime.context.provider,  # 同名模型跨 profile 不串味
     )
-    iterations = state.get("iterations", 1)
-
     messages = list(state["messages"])
 
     # Anthropic 模型：为对话消息注入缓存断点（滑动窗口策略）
@@ -108,10 +107,7 @@ async def call_model(
     # 失败不在此拦，交给节点级 error_handler（见 on_call_model_error）
     response = await _invoke_validated(chain, transformed_messages)
 
-    if response.tool_calls:
-        logger.debug(f"[LumiAgent]正在进行第「{iterations}」次工具调用迭代")
-
-    update: dict = {"messages": [response], "iterations": iterations + 1}
+    update: dict = {"messages": [response]}
     if state.get("ptl_retry"):
         update["ptl_retry"] = False  # 压缩重试成功，恢复下一次 PTL 的压缩机会
     return update
@@ -178,6 +174,87 @@ def _pending_tool_calls(messages: list) -> list[dict]:
     return dangling_tool_calls(messages[idx:])
 
 
+async def _pre_tool_hooks(
+    state: LumiAgentState,
+    config: RunnableConfig,
+    tools: list,
+    pending: list[dict],
+    visible: list[dict],
+) -> tuple[Command | None, list]:
+    """PreToolUse hooks（collect 模式）→ ``(需直接返回的 Command, 收集到的 reminder)``。
+
+    ``Block`` 为 ``pending`` 里每个调用补 ToolMessage(status=error) 配对后 END（残留
+    tool_call 会让 LangGraph 校验失败）；hook 自定义路由原样透传；``AdditionalContext``
+    收集为 reminder，工具仍执行。
+    """
+    ctx = HookContext(
+        state=state,
+        config=config,
+        event="PreToolUse",
+        payload={
+            "tool_calls": visible,
+            "tool_names": [t.name for t in tools if not is_internal_tool(t.name)],
+        },
+    )
+    cmd = await dispatch_hooks(
+        "PreToolUse", ctx, default_goto="ToolExecutor", mode="collect"
+    )
+    if cmd is None:
+        return None, []
+    if cmd.goto == "ToolExecutor":
+        return None, _cmd_messages(cmd)
+    if cmd.goto != END:
+        return cmd, []
+    existing = _cmd_messages(cmd)
+    reason = next((m.content for m in existing if isinstance(m, AIMessage)), "blocked")
+    tool_msgs = [
+        ToolMessage(
+            content=reason,
+            tool_call_id=tc.get("id", ""),
+            name=tc["name"],
+            status="error",
+        )
+        for tc in pending
+    ]
+    return Command(
+        goto=END, update={**(cmd.update or {}), "messages": [*tool_msgs, *existing]}
+    ), []
+
+
+async def _post_tool_hooks(
+    state: LumiAgentState,
+    config: RunnableConfig,
+    visible: list[dict],
+    tool_messages: list[ToolMessage],
+) -> Command | None:
+    """PostToolUse hooks（collect 模式）：hook 看到截断后的最终 ToolMessage。"""
+    ctx = HookContext(
+        state=state,
+        config=config,
+        event="PostToolUse",
+        payload={
+            "tool_calls": visible,
+            "tool_messages": [m for m in tool_messages if not is_internal_tool(m.name)],
+        },
+    )
+    return await dispatch_hooks(
+        "PostToolUse", ctx, default_goto="CallModel", mode="collect"
+    )
+
+
+def _split_tool_output(output) -> tuple[list[ToolMessage], list[Command]]:
+    """ToolNode 输出归一为 ``(ToolMessage 列表, Command 列表)``。
+
+    喂 ToolCall 列表时 ToolNode 返回 ``{"messages": [...]}``；任一工具返回 Command
+    时改返 ``[Command | {"messages": [ToolMessage]}]``（见
+    ``ToolNode._combine_tool_outputs``）。
+    """
+    items = output if isinstance(output, list) else [output]
+    commands = [it for it in items if isinstance(it, Command)]
+    messages = [m for it in items if isinstance(it, dict) for m in it["messages"]]
+    return messages, commands
+
+
 async def tool_executor(
     state: LumiAgentState,
     runtime: Runtime[LumiAgentContext],
@@ -189,133 +266,51 @@ async def tool_executor(
     - PreToolUse：``Block`` 补齐 ToolMessage(status=error) 配对后终止；
       ``AdditionalContext`` 收集为 reminder，工具仍执行，结果注入 ToolMessage 之后。
     - PostToolUse：hook 看到截断后的最终 ToolMessage，reminder 追加到末尾。
-    工具自身返回 Command（ask/agent 等控制流）的少见路径保持直返，不接 reminder /
-    PostToolUse——这些工具用 Command 自定义路由，注入会破坏其控制流。
+    工具自身返回 Command（ask/agent/structured_output 等控制流）的路径直返
+    ``[*Command, {"messages": [...]}]``，不接 PostToolUse——这些工具用 Command 自定义
+    路由，注入会破坏其控制流。
     """
     tools = list(runtime.context.tools)
     output_schema = state.get("output_schema")
-    enrich = state.get("output_enrich") if output_schema else None
     if output_schema:
         # 结构化输出真工具进 ToolExecutor 执行（与 call_model 注入同一 lru_cache 实例）
         tools = tools + [create_structured_output_tool(output_schema)]
 
-    # 1. PreToolUse hooks（只针对尚未应答的调用）
-    pre_tool_calls = _pending_tool_calls(state["messages"])
+    # 只针对尚未应答的调用（审批部分拒绝时被拒的已补应答）
+    pending = _pending_tool_calls(state["messages"])
     # 内部伪工具 __structured_output__ 不暴露给用户 hook（否则宽 matcher 会误触发，
-    # Block 还会破坏结构化输出流）；但保留在 pre_tool_calls 用于 Block 的 ToolMessage 配对。
-    visible_tool_calls = [
-        tc for tc in pre_tool_calls if not is_internal_tool(tc.get("name", ""))
-    ]
+    # Block 还会破坏结构化输出流）；但保留在 pending 用于 Block 的 ToolMessage 配对。
+    visible = [tc for tc in pending if not is_internal_tool(tc.get("name", ""))]
     extra_msgs: list = []
-    # 无 PreToolUse hook 时跳过整段——避免每个工具轮白白构造 HookContext + tool_names。
+    # 无 hook 时跳过整段——避免每个工具轮白白构造 HookContext + tool_names。
     if has_hooks("PreToolUse"):
-        pre_ctx = HookContext(
-            state=state,
-            config=config,
-            event="PreToolUse",
-            payload={
-                "tool_calls": visible_tool_calls,
-                "tool_names": [t.name for t in tools if not is_internal_tool(t.name)],
-            },
-        )
-        pre_cmd = await dispatch_hooks(
-            "PreToolUse", pre_ctx, default_goto="ToolExecutor", mode="collect"
-        )
-        if pre_cmd is not None:
-            if pre_cmd.goto == END:
-                # Block：补齐 ToolMessage 配对，避免残留 tool_call 致 LangGraph 校验失败
-                existing = _cmd_messages(pre_cmd)
-                reason = next(
-                    (m.content for m in existing if isinstance(m, AIMessage)), "blocked"
-                )
-                tool_msgs = [
-                    ToolMessage(
-                        content=reason,
-                        tool_call_id=tc.get("id", ""),
-                        name=tc["name"],
-                        status="error",
-                    )
-                    for tc in pre_tool_calls
-                ]
-                return Command(
-                    goto=END,
-                    update={
-                        **(pre_cmd.update or {}),
-                        "messages": [*tool_msgs, *existing],
-                    },
-                )
-            if pre_cmd.goto != "ToolExecutor":
-                # hook 显式自定义路由，原样透传
-                return pre_cmd
-            extra_msgs = _cmd_messages(pre_cmd)
+        cmd, extra_msgs = await _pre_tool_hooks(state, config, tools, pending, visible)
+        if cmd is not None:
+            return cmd
 
-    # 2. 执行工具
     tool_node = ToolNode(tools, handle_tool_errors=handle_tool_error)
     # 直接喂 ToolCall 列表：只跑未应答的；工具注入的 state 由 ToolNode 从 config 读真实图状态
-    tool_messages = await tool_node.ainvoke(
-        [{**tc, "type": "tool_call"} for tc in pre_tool_calls], config
+    output = await tool_node.ainvoke(
+        [{**tc, "type": "tool_call"} for tc in pending], config
     )
+    tool_messages, commands = _split_tool_output(output)
+    await truncate_tool_results(tool_messages)
+    final_msgs = [*tool_messages, *extra_msgs]
+    if commands:
+        return [*commands, {"messages": final_msgs}]
 
-    # 3. 工具自带 Command 控制流（含 structured_output 成功写入）：保持直返
-    if isinstance(tool_messages, Command):
-        # structured_output 成功时 Command.update 含 structured_output，按规则 enrich
-        return apply_enrich_to_command(tool_messages, enrich)
-    elif isinstance(tool_messages, list):
-        if any(isinstance(item, Command) for item in tool_messages):
-            # 混合返回（Command 控制流 + 普通 ToolMessage）：仍要截断普通结果防 token
-            # 爆炸，并对 structured_output Command 应用 enrich；PreToolUse reminder 一并
-            # 追加。PostToolUse 在此罕见路径不接（含 goto 的 Command 注入会破坏控制流）。
-            await truncate_tool_results(
-                [m for m in tool_messages if isinstance(m, ToolMessage)]
-            )
-            processed = [
-                apply_enrich_to_command(item, enrich)
-                if isinstance(item, Command)
-                else item
-                for item in tool_messages
-            ]
-            return [*processed, *extra_msgs] if extra_msgs else processed
-        messages_list = tool_messages
-    else:
-        messages_list = tool_messages.get("messages", [])
-
-    # 4. 截断结果（含卸载）
-    await truncate_tool_results(messages_list)
-
-    # 5. PreToolUse 收集的 reminder 注入到 ToolMessage 之后
-    final_msgs = [*messages_list, *extra_msgs]
-
-    # 6. PostToolUse hooks（看到截断后的最终 ToolMessage）——无 hook 时跳过构造
     if has_hooks("PostToolUse"):
-        post_ctx = HookContext(
-            state=state,
-            config=config,
-            event="PostToolUse",
-            payload={
-                "tool_calls": visible_tool_calls,
-                "tool_messages": [
-                    m
-                    for m in messages_list
-                    if isinstance(m, ToolMessage) and not is_internal_tool(m.name)
-                ],
-            },
-        )
-        post_cmd = await dispatch_hooks(
-            "PostToolUse", post_ctx, default_goto="CallModel", mode="collect"
-        )
+        post_cmd = await _post_tool_hooks(state, config, visible, tool_messages)
         if post_cmd is not None:
-            post_extra = _cmd_messages(post_cmd)
+            final_msgs = [*final_msgs, *_cmd_messages(post_cmd)]
             if post_cmd.goto == END:
-                return Command(
-                    goto=END, update={"messages": [*final_msgs, *post_extra]}
-                )
-            final_msgs = [*final_msgs, *post_extra]
+                return Command(goto=END, update={"messages": final_msgs})
 
-    # 7. structured_output 连续失败兜底：本轮累计失败 >= 上限时强制结束循环。
-    #    计数用纯净 messages_list（不含注入的 reminder HumanMessage，否则尾扫会被
-    #    HumanMessage 提前 break 导致计数失真）。
+    # structured_output 连续失败兜底：本轮累计失败 >= 上限时强制结束循环。
+    # 计数用纯净 tool_messages（不含注入的 reminder HumanMessage，否则尾扫会被
+    # HumanMessage 提前 break 导致计数失真）。
     if output_schema:
-        abort_msg = _structured_output_abort_message(state, messages_list)
+        abort_msg = _structured_output_abort_message(state, tool_messages)
         if abort_msg is not None:
             return Command(goto=END, update={"messages": [*final_msgs, abort_msg]})
 
@@ -368,42 +363,6 @@ async def on_agent_stop(
     return cmd if cmd is not None else Command(goto=END)
 
 
-def policy_reject(state: LumiAgentState) -> Command:
-    """通用策略拒绝节点 — 自动拒绝被执行模式策略阻止的工具调用
-
-    为每个被阻止的 tool_call 生成拒绝 ToolMessage，路由回 CallModel 让模型调整。
-    确保 tool_call_id 匹配（避免 LangGraph 校验失败）。
-    """
-    from lumi.agents.permissions.mode_policy import check_policy, get_policy
-
-    mode = state.get("execution_mode", "normal")
-    policy = get_policy(mode)
-
-    last_message = state["messages"][-1]
-    messages = []
-    for tc in last_message.tool_calls:
-        if policy is not None:
-            result = check_policy(policy, tc.get("name", ""), tc.get("args", {}))
-        else:
-            result = None
-
-        if result is not None and not result.allowed:
-            content = (
-                f"[{policy.label}] 操作被阻止: {result.reason}。"
-                f"当前处于 {policy.label}，只允许策略内的操作。"
-            )
-        else:
-            content = f"[{policy.label}] 同批次中存在被阻止的操作，此调用被跳过。"
-        messages.append(
-            ToolMessage(
-                content=content,
-                tool_call_id=tc.get("id", ""),
-                name=tc["name"],
-            )
-        )
-    return Command(goto="CallModel", update={"messages": messages})
-
-
 def is_use_tool(state: LumiAgentState, runtime: Runtime[LumiAgentContext]) -> str:
     """条件路由函数 - 判断下一步执行哪个节点
 
@@ -412,7 +371,6 @@ def is_use_tool(state: LumiAgentState, runtime: Runtime[LumiAgentContext]) -> st
     2. 纯内部伪工具（如结构化输出）→ ToolExecutor（闭包内校验，绕过权限审批）；
        内部工具与其他工具混合的批次不绕过，落到下方正常权限评估
     3. 全部 bypass 类工具 → ToolExecutor
-    4. 执行模式策略守卫 → PolicyReject（Layer 2 模式级工具限制）
     5. bypass-immune 检查（所有模式）→ 命中则 HumanApproval
     6. 权限引擎 DENY（所有模式）→ HumanApproval（节点内自动拒绝，路由回 CallModel）
     7. accept_edits 模式 → 文件编辑工具(write/edit)工作区内自动放行，其余 HumanApproval
@@ -420,21 +378,7 @@ def is_use_tool(state: LumiAgentState, runtime: Runtime[LumiAgentContext]) -> st
     9. default 模式：全部 ALLOW + 边界 OK → ToolExecutor（快速路径）
     10. 其他 → HumanApproval
     """
-    messages = state.get("messages", [])
-    if not messages:
-        logger.warning("[is_use_tool] 消息列表为空，无法判断工具调用")
-        return "END"
-
-    last_message = messages[-1]
-    if last_message is None:
-        logger.warning("[is_use_tool] 最后一条消息为 None")
-        return "END"
-
-    tool_calls = getattr(last_message, "tool_calls", None) or []
-    if not isinstance(tool_calls, list):
-        logger.error(f"[is_use_tool] tool_calls 类型异常：{type(tool_calls)}")
-        tool_calls = []
-
+    tool_calls = state["messages"][-1].tool_calls
     if not tool_calls:
         # 模型未调工具想结束 → OnAgentStop 节点分发 Stop hooks（默认 END）
         return "OnAgentStop"
@@ -442,7 +386,6 @@ def is_use_tool(state: LumiAgentState, runtime: Runtime[LumiAgentContext]) -> st
     decision = route_decision(
         tool_calls,
         runtime.context.tool_mode,
-        state.get("execution_mode", "normal"),
         runtime.context.permission_engine,
     )
     # privileged 的「自动放行」本身即授权，这条路上既不审批也不过分类器，没有别的挂钩点
@@ -495,31 +438,18 @@ async def human_approval(
         for tc in last_message.tool_calls
     ]
 
-    # DENY 命中：跳过 interrupt，直接拒绝并路由回 CallModel 让模型调整
-    # 注：is_use_tool 已将 DENY 路由到此节点，此处为防御性二次确认
+    # DENY 命中：不发审批，直接拒绝并路由回 CallModel 让模型调整。route_decision 只
+    # 返回节点名、条件边又写不了 state，DENY 与 ASK 到此同名，故此处再评估一次分辨。
     engine = runtime.context.permission_engine
-    if engine is not None:
-        for tc in last_message.tool_calls:
-            try:
-                decision = engine.evaluate(tc["name"], tc.get("args", {}))
-                if decision == PermissionDecision.DENY:
-                    messages = build_reject_messages(
-                        last_message.tool_calls,
-                        content="你执行的此操作命中了用户的禁止策略，你的操作可能被用户视为危险操作，你应该思考此操作的风险使用更低风险的操作来完成目标。",
-                    )
-                    return Command(goto="CallModel", update={"messages": messages})
-            except Exception as e:
-                logger.error(
-                    "[HumanApproval] DENY 检查异常 (%s): %s, 保守拒绝",
-                    tc["name"],
-                    e,
-                    exc_info=True,
-                )
-                messages = build_reject_messages(
-                    last_message.tool_calls,
-                    content="权限评估异常，无法确认操作安全性，已自动拒绝。",
-                )
-                return Command(goto="CallModel", update={"messages": messages})
+    if engine is not None and any(
+        engine.evaluate(tc["name"], tc.get("args", {})) == PermissionDecision.DENY
+        for tc in last_message.tool_calls
+    ):
+        messages = build_reject_messages(
+            last_message.tool_calls,
+            content="你执行的此操作命中了用户的禁止策略，你的操作可能被用户视为危险操作，你应该思考此操作的风险使用更低风险的操作来完成目标。",
+        )
+        return Command(goto="CallModel", update={"messages": messages})
 
     # 无审批通道（headless：cron / workflow / 后台子代理，context.approval_broker 为 None）：
     # 无法发起交互审批，fail-closed 自动拒绝并路由回 CallModel，让自治 agent 改用无需审批的方式
@@ -540,16 +470,16 @@ async def human_approval(
 
     # 批量 {decision} 应答展开成同值列表，与逐个审批的 decisions 走同一裁决
     tool_calls = last_message.tool_calls
-    if isinstance(result, dict):
-        decisions = result.get("decisions") or [result.get("decision", "reject")] * len(
-            tool_calls
-        )
-        message = result.get("message", "")
-        set_tool_mode = result.get("set_tool_mode")
-    else:
-        # 兼容字符串（简单场景 / headless）
-        decisions, message, set_tool_mode = [str(result)] * len(tool_calls), "", None
-    return _apply_decisions(tool_calls, decisions, message, set_tool_mode, runtime)
+    decisions = result.get("decisions") or [result.get("decision", "reject")] * len(
+        tool_calls
+    )
+    return _apply_decisions(
+        tool_calls,
+        decisions,
+        result.get("message", ""),
+        result.get("set_tool_mode"),
+        runtime,
+    )
 
 
 def _apply_decisions(
@@ -639,9 +569,6 @@ def _latest_user_intent(messages: list) -> str:
     真实用户输入，**停在这里**返回空串（本轮无文本意图，分类器保守裁决）——
     不上溯到更早轮次，否则会把上一轮的陈旧意图当本轮意图误导安全裁决。
     """
-    from lumi.sessions.message_text import visible_user_text
-    from lumi.sessions.message_visibility import should_show_human_message
-
     for msg in reversed(messages):
         if isinstance(msg, HumanMessage) and should_show_human_message(msg):
             return visible_user_text(msg)
@@ -712,23 +639,41 @@ async def auto_classify(
 
 
 async def _summarize(
-    body: list, prompt: str, runtime: Runtime[LumiAgentContext], token_config
-) -> tuple[str, int]:
-    """摘要正常路径与 PTL 强制压缩的共用核：绑 runtime / token_config 调 run_summary。
+    messages: list,
+    to_summarize: list,
+    keep_tail: list,
+    runtime: Runtime[LumiAgentContext],
+    thread_id: str,
+    token_config,
+) -> dict | None:
+    """摘要正常路径与 PTL 强制压缩的共用核：``compact_messages`` + 熔断记账。
 
-    悬空 tool_use 的剔除在 ``run_summary`` 里（三条压缩路径同一个入口）。熔断记账留在
-    各调用方（失败语义不同：正常路径 raise、PTL 路径返回 {} 放行）。
+    成功清零熔断计数、返回压缩写回 update；失败记一次失败、返回 ``None``——
+    调用方按各自语义决定抛出（正常路径）还是放行（PTL 路径）。
     """
-    return await run_summary(
-        body,
-        prompt,
-        tools=runtime.context.tools,
-        system_prompt=runtime.context.system_prompt,
-        model_name=runtime.context.model_name,
-        provider=runtime.context.provider,
-        max_retry=token_config.summary_ptl_retry_max,
-        drop_ratio=token_config.summary_ptl_retry_drop_ratio,
+    try:
+        update, ptl_retries = await compact_messages(
+            messages, to_summarize, keep_tail, runtime.context
+        )
+    except Exception as exc:
+        fail_count = record_circuit_failure(
+            thread_id, token_config.summary_circuit_reset_seconds
+        )
+        logger.warning(
+            "[Summarizer] 摘要生成失败 thread=%s err=%s 连续失败=%d",
+            thread_id,
+            type(exc).__name__,
+            fail_count,
+        )
+        return None
+    reset_circuit(thread_id)
+    logger.info(
+        "[Summarizer] 压缩完成，%d 条进摘要、保留 %d 条，PTL 重试 %d 次",
+        len(to_summarize),
+        len(keep_tail),
+        ptl_retries,
     )
+    return update
 
 
 async def summarizer(
@@ -742,8 +687,7 @@ async def summarizer(
     压缩（删历史 + 摘要作独立 carrier 消息插在重挂的用户消息之前），即将溢出的这次
     调用立刻受益。压缩先于 PreprocessMessages 的 UserPromptSubmit hook：上下文注入
     永远发生在压缩后的世界里（marker 由 ``build_compacted_update`` 恒剥，hook 扫不到
-    即注入全量），在线/离线压缩后的形态同构：
-    ``[System?, Human(<summary>), Human(ctx全量+用户消息)]``。
+    即注入全量），在线/离线压缩后的形态同构：``[Human(<summary>), Human(ctx全量+用户消息)]``。
 
     缓存安全的分叉：复用主对话的 system_prompt + tools 前缀，只在末尾追加摘要指令。
 
@@ -754,7 +698,7 @@ async def summarizer(
     - 触发压缩 → strip 图像后走 PTL 截头重试；失败记录熔断计数并抛出（让上层感知），
       成功则清零熔断、经 ``build_compacted_update`` 写回删除 + 摘要 + 重挂
 
-    保留规则：头 SystemMessage 不参与摘要；尾必须是 HumanMessage（不变量，否则报错）。
+    保留规则：尾必须是 HumanMessage（不变量，否则报错）。
     """
     token_config = get_config().config.token
     thread_id = (config.get("configurable") or {}).get("thread_id", "_anon")
@@ -768,13 +712,11 @@ async def summarizer(
         logger.warning("[Summarizer] 熔断打开 thread=%s，跳过压缩直接放行", thread_id)
         return {}
 
+    messages = list(state["messages"])
     # PTL 反应式压缩：CallModel 撞 prompt-too-long 后路由回本节点，绕过阈值门强制压缩
     if state.get("ptl_retry"):
-        return await _ptl_forced_compact(
-            list(state["messages"]), runtime, thread_id, token_config
-        )
+        return await _ptl_forced_compact(messages, runtime, thread_id, token_config)
 
-    original_messages = list(state["messages"])
     # 分母必须是会话实际所跑模型的窗口：静态 context_length 会把 1M 窗口的模型按 200K
     # 压——用量刚过 14% 就触发压缩。
     window = (
@@ -782,50 +724,28 @@ async def summarizer(
         or token_config.context_length
     )
     threshold = window * token_config.summary_threshold
-    total_tokens = context_window_tokens(original_messages)
+    total_tokens = context_window_tokens(messages)
     stat = f"上下文 token {total_tokens} / 阈值 {threshold:.0f}（窗口 {window}）"
     if total_tokens < threshold:
         logger.debug(f"[Summarizer] {stat}，无需压缩")
         return {}
 
     logger.info(f"[Summarizer] {stat}，开始压缩")
-
-    # 跳过头部 SystemMessage（不参与摘要、不删除）；尾必须是 HumanMessage
-    _, messages = split_head(original_messages)
     if not messages or not isinstance(messages[-1], HumanMessage):
         raise ValueError("[Summarizer] 最后一条消息必须是 HumanMessage")
 
-    messages_to_summarize = messages[:-1]
-    summarizable = sum(1 for msg in messages_to_summarize if msg.id)
     # 可压缩消息过少（≤1 条）时压缩收益甚微，直接放行
-    if summarizable < 2:
+    if sum(1 for msg in messages[:-1] if msg.id) < 2:
         return {}
 
-    prompt = get_config().load_prompt("SUMMARY")
-    try:
-        summary_text, ptl_retries = await _summarize(
-            messages_to_summarize, prompt, runtime, token_config
-        )
-    except Exception as exc:
-        fail_count = record_circuit_failure(
-            thread_id, token_config.summary_circuit_reset_seconds
-        )
-        logger.warning(
-            "[Summarizer] 摘要生成失败 thread=%s err=%s 连续失败=%d",
-            thread_id,
-            type(exc).__name__,
-            fail_count,
-        )
-        raise
-    reset_circuit(thread_id)
-    logger.info(
-        f"[Summarizer] 压缩完成，{summarizable} 条消息，PTL 重试 {ptl_retries} 次"
+    # 摘要作独立 carrier 插在重挂的末条之前（正在被回答的真人消息由
+    # build_compacted_update 自己认出来一并保住）
+    update = await _summarize(
+        messages, messages[:-1], [messages[-1]], runtime, thread_id, token_config
     )
-
-    # 摘要作独立 carrier 插在重挂的消息之前（三条压缩路径共用 build_compacted_update：
-    # 末条原样重挂，正在被回答的真人消息由它自己认出来一并保住）。传完整历史——
-    # 写回是整条通道 Overwrite，头部 SystemMessage 由它自己保位
-    return build_compacted_update(original_messages, [messages[-1]], summary_text)
+    if update is None:
+        raise RuntimeError("[Summarizer] 摘要生成失败")
+    return update
 
 
 async def _ptl_forced_compact(
@@ -846,32 +766,10 @@ async def _ptl_forced_compact(
         logger.warning("[Summarizer] PTL 强制压缩：可压缩 round 不足，放行")
         return {}
     to_summarize, tail = selected
-
-    prompt = get_config().load_prompt("SUMMARY")
-    try:
-        summary_text, ptl_retries = await _summarize(
-            to_summarize, prompt, runtime, token_config
-        )
-    except Exception as exc:
-        fail_count = record_circuit_failure(
-            thread_id, token_config.summary_circuit_reset_seconds
-        )
-        logger.warning(
-            "[Summarizer] PTL 强制压缩失败 thread=%s err=%s 连续失败=%d，放行",
-            thread_id,
-            type(exc).__name__,
-            fail_count,
-        )
-        return {}
-    reset_circuit(thread_id)
-    logger.info(
-        "[Summarizer] PTL 强制压缩完成，%d 条进摘要、尾部保留 %d 条，PTL 重试 %d 次",
-        len(to_summarize),
-        len(tail),
-        ptl_retries,
+    update = await _summarize(
+        messages, to_summarize, tail, runtime, thread_id, token_config
     )
-
-    return build_compacted_update(messages, tail, summary_text)
+    return update if update is not None else {}
 
 
 async def preprocess_messages(

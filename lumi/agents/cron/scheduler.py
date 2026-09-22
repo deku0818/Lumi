@@ -32,13 +32,12 @@ from lumi.agents.cron.models import Job, ScheduleType
 from lumi.agents.cron.retry import backoff_delay, is_transient_error
 from lumi.agents.cron.run_log import RunLog, RunRecord
 from lumi.agents.runtime.bg_tasks import current_thread_id
-from lumi.agents.runtime.checkpoint import delete_thread_checkpoint
+from lumi.utils.config import get_config
 from lumi.utils.constants import (
     MAX_CRON_RETRIES,
     MAX_CRON_RUN_THREADS,
 )
 from lumi.utils.logger import logger
-from lumi.utils.read_config import get_config
 from lumi.utils.thread_id import CRON_THREAD_PREFIX, generate_thread_id
 
 # 向后兼容：历史上 ``_is_transient_error`` 定义在本模块，外部（含测试）经此路径导入。
@@ -602,11 +601,7 @@ class Scheduler:
         await self._run_log.delete_log(job_id)
 
     async def _delete_thread(self, thread_id: str) -> None:
-        """删除单个会话线程的 checkpoint（LangGraph + 文件级），失败仅告警不中断。
-
-        cron 线程在 desktop 中续聊会产生文件级 filediff checkpoint，
-        与 AgentBridge.delete_thread 对齐，一并清理避免孤儿目录。
-        """
+        """删除单个会话线程的 LangGraph checkpoint，失败仅告警不中断。"""
         if self._checkpointer is None or not hasattr(
             self._checkpointer, "adelete_thread"
         ):
@@ -615,10 +610,6 @@ class Scheduler:
             await self._checkpointer.adelete_thread(thread_id)
         except Exception:
             logger.warning("删除会话 checkpoint 失败: %s", thread_id, exc_info=True)
-        try:
-            await asyncio.to_thread(delete_thread_checkpoint, thread_id)
-        except Exception:
-            logger.warning("删除文件级 checkpoint 失败: %s", thread_id, exc_info=True)
 
     # ------------------------------------------------------------------
     # Helpers

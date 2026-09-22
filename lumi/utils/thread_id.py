@@ -1,12 +1,12 @@
 """Thread ID 工具模块
 
-生成和验证符合 DNS-1035 规范的 thread_id，用于 Kubernetes Service 名称等场景。
+Lumi 的 thread_id 按前缀区分会话来源，各处分流（session 列表、dream 门控）据此判定：
 
-DNS-1035 规范要求:
-- 必须以小写字母开头
-- 只能包含小写字母、数字和连字符（-）
-- 必须以字母或数字结尾
-- 长度不能超过 63 个字符
+- desktop / API 会话：``t-<uuid hex>``（:func:`generate_thread_id` 默认前缀）
+- cron 执行会话：``cron-<uuid hex>``（前缀 :data:`CRON_THREAD_PREFIX`）
+- IM 渠道常驻会话：``<渠道前缀><会话 key>``，由 :func:`sanitize_thread_id` 收敛成
+  小写字母 / 数字 / ``-``、不超过 63 字符的确定性 id（飞书为 ``feishu-<chat_id>``），
+  同一群 / 同一人跨重启落回同一 thread
 """
 
 import re
@@ -14,8 +14,6 @@ from uuid import uuid4
 
 from lumi.utils.constants import FEISHU_THREAD_PREFIX
 
-# DNS-1035 正则表达式
-DNS_1035_PATTERN = re.compile(r"^[a-z][a-z0-9-]*[a-z0-9]$|^[a-z]$")
 MAX_LENGTH = 63
 
 # cron 执行会话的 thread 前缀：scheduler 生成、session_store 过滤共用此单一定义
@@ -40,29 +38,13 @@ def is_cron_thread(thread_id: str) -> bool:
     return thread_id.startswith(CRON_THREAD_PREFIX)
 
 
-class InvalidThreadIdError(ValueError):
-    """无效的 thread_id 错误"""
-
-
 def generate_thread_id(prefix: str = "t") -> str:
-    """生成符合 DNS-1035 规范的 thread_id
-
-    格式: {prefix}-{uuid_hex}
-    例如: t-7e2fe03e335d4cb8829ef86518c9e232
-
-    Args:
-        prefix: 前缀，默认为 "t"，必须以小写字母开头
-
-    Returns:
-        符合 DNS-1035 规范的 thread_id
-    """
-    uuid_hex = uuid4().hex
-    thread_id = f"{prefix}-{uuid_hex}"
-    return thread_id
+    """生成随机 thread_id：``{prefix}-{uuid_hex}``，如 ``t-7e2fe03e335d4cb8829ef86518c9e232``。"""
+    return f"{prefix}-{uuid4().hex}"
 
 
 def sanitize_thread_id(thread_id: str) -> str:
-    """将任意字符串转为 DNS-1035 合规的 ID
+    """将任意字符串收敛为小写字母 / 数字 / ``-`` 组成、不超过 63 字符的确定性 ID
 
     转换规则:
     - 转小写
@@ -76,7 +58,7 @@ def sanitize_thread_id(thread_id: str) -> str:
         thread_id: 原始 thread_id
 
     Returns:
-        符合 DNS-1035 规范的 ID
+        收敛后的 ID
     """
     # 转小写，非法字符替换为 -
     sanitized = re.sub(r"[^a-z0-9-]", "-", thread_id.lower())
@@ -95,42 +77,3 @@ def sanitize_thread_id(thread_id: str) -> str:
     sanitized = sanitized[:MAX_LENGTH].rstrip("-")
 
     return sanitized
-
-
-def valid_thread_id(thread_id: str) -> str:
-    """验证 thread_id 是否符合 DNS-1035 规范
-
-    Args:
-        thread_id: 待验证的 thread_id
-
-    Returns:
-        验证通过时返回原 thread_id
-
-    Raises:
-        InvalidThreadIdError: thread_id 不符合 DNS-1035 规范
-    """
-    if not thread_id:
-        raise InvalidThreadIdError("thread_id 不能为空")
-
-    if len(thread_id) > MAX_LENGTH:
-        raise InvalidThreadIdError(
-            f"thread_id 长度不能超过 {MAX_LENGTH} 个字符，当前长度: {len(thread_id)}"
-        )
-
-    if not DNS_1035_PATTERN.match(thread_id):
-        errors = []
-        if not thread_id[0].isalpha() or not thread_id[0].islower():
-            errors.append("必须以小写字母开头")
-        if not thread_id[-1].isalnum() or (
-            thread_id[-1].isalpha() and not thread_id[-1].islower()
-        ):
-            errors.append("必须以小写字母或数字结尾")
-        if any(c not in "abcdefghijklmnopqrstuvwxyz0123456789-" for c in thread_id):
-            errors.append("只能包含小写字母、数字和连字符（-）")
-
-        error_msg = f"thread_id '{thread_id}' 不符合 DNS-1035 规范"
-        if errors:
-            error_msg += f": {'; '.join(errors)}"
-        raise InvalidThreadIdError(error_msg)
-
-    return thread_id

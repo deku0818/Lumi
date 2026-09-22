@@ -43,7 +43,6 @@ from lumi.agents.core.node_helpers.messages import (
     inject_text_into_message,
 )
 from lumi.agents.core.preprocessing.agent_detector import AgentChangeDetector
-from lumi.agents.core.preprocessing.agents import AGENT_HEADER, agent_lines
 from lumi.agents.core.preprocessing.memory import (
     MEMORY_HEADER,
     PROJECT_DOC_HEADER,
@@ -51,7 +50,6 @@ from lumi.agents.core.preprocessing.memory import (
     project_doc_lines,
 )
 from lumi.agents.core.preprocessing.skill_detector import SkillChangeDetector
-from lumi.agents.core.preprocessing.skills import SKILL_HEADER, skill_lines
 from lumi.agents.core.preprocessing.system_info import system_info_body
 from lumi.agents.memory.paths import memory_entrypoint, resolve_under_project
 from lumi.agents.memory.project_doc import PROJECT_DOC_NAME
@@ -60,6 +58,19 @@ from lumi.utils.constants import ENV_TAG
 from lumi.utils.hashing import short_hash
 
 _SELF_EDIT_TOOLS = frozenset({"write", "edit"})
+
+AGENT_HEADER = "以下 agent 可用于 agent 工具:"
+SKILL_HEADER = "以下技能可用于 skill 工具:"
+
+
+def entry_lines(configs: list) -> dict[str, str]:
+    """技能 / agent 列表 → ``{name: "- name: description"}``（按名排序，确定性），
+    供 ``_emit_keyed`` 组装为全量块或条目级 diff。"""
+    return {
+        c.name: f"- {c.name}: {c.description}"
+        for c in sorted(configs, key=lambda c: c.name)
+    }
+
 
 _ANCHOR_MAX_CHARS = 30
 """LUMI.md diff 内容锚的截断长度（锚 = 变更处上方最近的未变行原文）。"""
@@ -228,7 +239,7 @@ async def context_inject_hook(ctx: HookContext) -> HookResult:
         text, marker["agents"] = _emit_keyed(
             "agent 列表",
             AGENT_HEADER,
-            agent_lines(agents),
+            entry_lines(agents),
             old.get("agents"),
             written,
             sources=_source_map(agents, written),
@@ -239,7 +250,7 @@ async def context_inject_hook(ctx: HookContext) -> HookResult:
     text, marker["skills"] = _emit_keyed(
         "技能列表",
         SKILL_HEADER,
-        skill_lines(skills),
+        entry_lines(skills),
         old.get("skills"),
         written,
         sources=_source_map(skills, written),

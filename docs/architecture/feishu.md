@@ -292,7 +292,7 @@ IM 长会话（一群/一人一个永久 thread）不走 Stop 钩子的增量 dr
 
 **判活**：存在落库 ts（`additional_kwargs["lumi"]["ts"]`，`stream_response` 写入的本机时钟毫秒）
 晚于该 thread 上次 dream 快照时刻（sqlite `dream_thread.dreamed_at`）的真实 human 即有新内容
-（`sessions/message_visibility.latest_human_ts`）。基于时间戳而非消息计数——compact 增删历史
+（`agents/core/meta_message.latest_human_ts`）。基于时间戳而非消息计数——compact 增删历史
 不影响判定。
 
 **次序不变量：先沉淀再压缩，dream 失败绝不压缩。** 压缩摘要载体刻意**不带 ts**（否则压缩后

@@ -1,0 +1,43 @@
+name: CI
+
+# push / PR 到 main 时跑后端 lint + 测试，以及桌面端 TypeScript 类型检查。
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+
+jobs:
+  backend:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      # uv 按 pyproject 的 requires-python 自动下 Python，无需 setup-python
+      - uses: astral-sh/setup-uv@v6
+        with:
+          enable-cache: true
+
+      - run: uv sync --all-groups --frozen
+
+      - run: uv run ruff check .
+      - run: uv run ruff format --check .
+
+      - run: uv run pytest -q
+
+  desktop:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+          cache-dependency-path: desktop/package-lock.json
+
+      - run: npm ci
+        working-directory: desktop
+
+      - run: npx tsc --noEmit -p tsconfig.json
+        working-directory: desktop

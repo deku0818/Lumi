@@ -327,7 +327,7 @@ async def test_memory_gated_by_memory_enabled(tmp_path, monkeypatch):
 async def test_full_reinjection_after_compaction():
     """压缩后历史 = [Human(<summary>), Human(用户)]（marker 随旧消息删除）→
     hook 对末条注入全量，carrier 不受影响。"""
-    from lumi.agents.core.preprocessing.summary import format_summary_block
+    from lumi.agents.core.preprocessing.compact import format_summary_block
 
     carrier = HumanMessage(content=format_summary_block("摘要"), id="c1")
     with _patched(skills=[_cfg("s", "d")]):

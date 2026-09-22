@@ -13,10 +13,13 @@ from __future__ import annotations
 
 from pydantic import BaseModel, Field
 
+from lumi.agents.core.meta_message import (
+    extract_text_content,
+    should_show_human_message,
+    visible_user_text,
+)
 from lumi.models.chain import structured_output
 from lumi.models.provider_store import resolve_pointer
-from lumi.sessions.message_text import extract_text_content, visible_user_text
-from lumi.sessions.message_visibility import should_show_human_message
 
 # 对话素材取末尾 1000 字符：话题漂移时近期内容优先（对齐 CC extractConversationText）
 _TAIL_CHARS = 1000

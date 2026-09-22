@@ -4,14 +4,14 @@
 安全重构的安全网。所有用例都是纯断言：只构造 state/runtime 参数、断言返回的
 路由字符串，从不真正执行工具或危险命令。
 
-决策树（见 nodes.py:315-495）分支编号与本文件的 TestClass 一一对应。
+决策树（见 nodes.py is_use_tool 文档）分支编号与本文件的 TestClass 一一对应。
 """
 
 import tempfile
 import types
 from pathlib import Path
 
-from langchain_core.messages import AIMessage, HumanMessage
+from langchain_core.messages import AIMessage
 
 from lumi.agents.core.nodes import is_use_tool
 from lumi.agents.core.structured_tool import STRUCTURED_OUTPUT_TOOL_NAME
@@ -51,7 +51,7 @@ def _tc(name: str, args: dict | None = None, tc_id: str = "call_1") -> dict:
     return {"name": name, "args": args or {}, "id": tc_id}
 
 
-def _state(tool_calls, execution_mode="normal", messages=None):
+def _state(tool_calls, messages=None):
     """构造 state dict，messages 末尾是一条带 tool_calls 的 AIMessage。
 
     tool_mode 已移家 context（见 _runtime），不再进 state。
@@ -60,12 +60,11 @@ def _state(tool_calls, execution_mode="normal", messages=None):
         messages = [AIMessage(content="", tool_calls=tool_calls or [])]
     return {
         "messages": messages,
-        "execution_mode": execution_mode,
     }
 
 
-def _route(tool_calls, *, engine=None, tool_mode="default", execution_mode="normal"):
-    state = _state(tool_calls, execution_mode=execution_mode)
+def _route(tool_calls, *, engine=None, tool_mode="default"):
+    state = _state(tool_calls)
     return is_use_tool(state, _runtime(engine, tool_mode))
 
 
@@ -74,45 +73,6 @@ def _engine_with_project():
     project_dir = Path(tempfile.mkdtemp())
     engine = _make_engine([], project_dir=project_dir)
     return engine, project_dir
-
-
-# ── 分支 1 / 2：消息列表异常回退 ──
-
-
-class TestBranch1And2_MessageFallbacks:
-    def test_empty_messages_returns_end(self):
-        """1) 无 messages → END"""
-        state = {"messages": [], "tool_mode": "default", "execution_mode": "normal"}
-        assert is_use_tool(state, _runtime(None)) == "END"
-
-    def test_missing_messages_key_returns_end(self):
-        """state 完全没有 messages 键 → END"""
-        state = {"tool_mode": "default", "execution_mode": "normal"}
-        assert is_use_tool(state, _runtime(None)) == "END"
-
-    def test_last_message_none_returns_end(self):
-        """2) 最后一条消息为 None → END"""
-        state = {
-            "messages": [AIMessage(content="hi"), None],
-            "tool_mode": "default",
-            "execution_mode": "normal",
-        }
-        assert is_use_tool(state, _runtime(None)) == "END"
-
-    def test_tool_calls_not_a_list_falls_back_to_on_agent_stop(self):
-        """2) tool_calls 非 list → 视为空 → 走 OnAgentStop（无工具调用）"""
-        msg = HumanMessage(content="plain")
-        # HumanMessage 无 tool_calls 属性 → getattr 返回 None → []
-        assert not hasattr(msg, "tool_calls") or getattr(msg, "tool_calls") in (
-            None,
-            [],
-        )
-        state = {
-            "messages": [msg],
-            "tool_mode": "default",
-            "execution_mode": "normal",
-        }
-        assert is_use_tool(state, _runtime(None)) == "OnAgentStop"
 
 
 # ── 分支 3：无 tool_calls → OnAgentStop ──
@@ -232,29 +192,6 @@ class TestBranch5And6_DenyBeforeReadonly:
         )
         tcs = [_tc("vision", {"file_path": "/x.png", "question": "?"})]
         assert _route(tcs, engine=engine) == "HumanApproval"
-
-
-# ── 分支 7：execution_mode 策略守卫 → PolicyReject ──
-
-
-class TestBranch7_PolicyGuard:
-    def test_readonly_mode_blocks_write_tool(self):
-        """7) readonly 模式 + write 工具 → PolicyReject"""
-        engine, project_dir = _engine_with_project()
-        tcs = [_tc("write", {"file_path": str(project_dir / "a.py"), "content": "x"})]
-        assert _route(tcs, engine=engine, execution_mode="readonly") == "PolicyReject"
-
-    def test_readonly_mode_does_not_reach_policy_for_readonly_tool(self):
-        """readonly 模式 + 只读工具：在分支6只读短路就返回 ToolExecutor，根本到不了策略守卫"""
-        engine, _ = _engine_with_project()
-        tcs = [_tc("read", {"file_path": "/x"})]
-        assert _route(tcs, engine=engine, execution_mode="readonly") == "ToolExecutor"
-
-    def test_normal_mode_skips_policy_guard(self):
-        """normal 模式无策略守卫：write 落到完整评估，default+无规则 → HumanApproval"""
-        engine, project_dir = _engine_with_project()
-        tcs = [_tc("write", {"file_path": str(project_dir / "a.py"), "content": "x"})]
-        assert _route(tcs, engine=engine, execution_mode="normal") == "HumanApproval"
 
 
 # ── 分支 8：bypass-immune 安全检查 ──
@@ -445,42 +382,19 @@ class TestEngineNoneFallback:
         assert _route(tcs, engine=None, tool_mode="accept_edits") == "HumanApproval"
 
 
-# ── tool_mode × execution_mode × engine 组合矩阵（精选交叉） ──
+# ── tool_mode × engine 组合矩阵（精选交叉） ──
 
 
 class TestCombinationMatrix:
-    def test_privileged_readonly_mode_write_blocked_by_policy(self):
-        """privileged 模式 ≠ 绕过执行模式策略：readonly 下 write 仍 PolicyReject
-        （策略守卫在 tool_mode 分支之前）"""
-        engine, project_dir = _engine_with_project()
-        tcs = [_tc("write", {"file_path": str(project_dir / "a.py"), "content": "x"})]
-        assert (
-            _route(
-                tcs, engine=engine, tool_mode="privileged", execution_mode="readonly"
-            )
-            == "PolicyReject"
-        )
-
-    def test_accept_edits_readonly_mode_write_blocked_by_policy(self):
-        """accept_edits + readonly：策略守卫(分支7)在 accept_edits(分支9)之前 → PolicyReject"""
-        engine, project_dir = _engine_with_project()
-        tcs = [_tc("write", {"file_path": str(project_dir / "a.py"), "content": "x"})]
-        assert (
-            _route(
-                tcs, engine=engine, tool_mode="accept_edits", execution_mode="readonly"
-            )
-            == "PolicyReject"
-        )
-
-    def test_deny_precheck_beats_policy_guard(self):
-        """DENY 预检(分支5)在执行模式策略守卫(分支7)之前：
-        readonly 模式 + 被 DENY 的 write → HumanApproval（而非 PolicyReject）"""
+    def test_deny_precheck_beats_privileged(self):
+        """DENY 预检(分支5)在 tool_mode 分支之前：privileged + 被 DENY 的 write
+        仍走 HumanApproval，不被特权放行。"""
         engine, project_dir = _engine_with_project()
         engine._config = PermissionConfig(
             permissions=(PermissionRule(tool="write", permission=Permission.DENY),)
         )
         tcs = [_tc("write", {"file_path": str(project_dir / "a.py"), "content": "x"})]
-        assert _route(tcs, engine=engine, execution_mode="readonly") == "HumanApproval"
+        assert _route(tcs, engine=engine, tool_mode="privileged") == "HumanApproval"
 
     def test_bypass_immune_beats_accept_edits(self):
         """bypass-immune(分支8) 在 accept_edits(分支9) 之前：

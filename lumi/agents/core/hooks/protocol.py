@@ -28,7 +28,7 @@ from __future__ import annotations
 
 import json
 import re
-from typing import Any, Literal
+from typing import Any
 
 from langchain_core.messages import AIMessage, BaseMessage, HumanMessage, ToolMessage
 
@@ -48,11 +48,8 @@ PROTOCOL_VERSION = 1
 DEFAULT_MESSAGES_TAIL = 10
 """默认透传给外部 hook 的尾部消息条数。避免子进程吞超大 JSON。"""
 
-Decision = Literal["allow", "deny", "passthrough"]
-
-DECISION_DENY: Decision = "deny"
-DECISION_ALLOW: Decision = "allow"
-DECISION_PASSTHROUGH: Decision = "passthrough"
+DECISION_DENY = "deny"
+"""``decision`` 唯一有行为的取值；``allow`` / ``passthrough`` / 缺省都不阻断。"""
 
 TOOL_FILTERED_EVENTS: frozenset[HookEvent] = frozenset({"PreToolUse", "PostToolUse"})
 """``matcher`` 字段仅在这些事件下按 ``tool_calls[*].name`` 筛选。"""

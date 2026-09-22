@@ -11,11 +11,10 @@ from types import SimpleNamespace
 from langchain_core.messages import AIMessage, HumanMessage
 
 from lumi.agents.core.hooks.schema import HookContext
-from lumi.agents.core.meta_message import synthetic_human_message
+from lumi.agents.core.meta_message import latest_human_ts, synthetic_human_message
 from lumi.agents.memory import dream as dream_mod
 from lumi.agents.memory import dream_lock
 from lumi.agents.memory.dream import auto_dream_stop_hook, start_dream
-from lumi.sessions.message_visibility import latest_human_ts
 from lumi.utils.constants import LUMI_META_KEY
 
 
@@ -120,7 +119,7 @@ def test_latest_ts_zero_when_no_ts():
 def test_latest_ts_counts_summary_carrier_watermark():
     """压缩把真人消息删光后，摘要 carrier 继承的 ts 就是判活基线——否则
     该 thread 从此对 dream 隐身（0.0 恒 ≤ dreamed_at）。"""
-    from lumi.agents.core.preprocessing.summary import build_summary_carrier
+    from lumi.agents.core.preprocessing.compact import build_summary_carrier
 
     assert latest_human_ts([build_summary_carrier("摘要", ts=3_000_000)]) == 3000.0
     assert latest_human_ts([build_summary_carrier("摘要")]) == 0.0

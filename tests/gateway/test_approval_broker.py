@@ -12,7 +12,7 @@ import asyncio
 import pytest
 from langchain_core.runnables import RunnableLambda
 
-from lumi.gateway.bridge.broker import LUMI_APPROVAL_EVENT, ApprovalBroker
+from lumi.agents.core.broker import LUMI_APPROVAL_EVENT, ApprovalBroker
 
 _REJECT = {"decision": "reject"}
 

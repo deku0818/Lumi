@@ -177,7 +177,7 @@ Tool descriptions live in each tool function's docstring; external tools are wir
 ## Development
 
 ```bash
-uv sync --all              # install dev dependencies
+uv sync --all-groups       # install dev dependencies
 uv run pytest              # run tests
 uv run ruff format .       # format code
 uv run ruff check --fix .  # lint

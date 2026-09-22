@@ -1,12 +1,9 @@
 import asyncio
-import json
+import re
 
 import httpx
-from langchain_core.load import dumpd
-from langchain_core.runnables.config import RunnableConfig
-from langgraph.graph.state import CompiledStateGraph
 
-from lumi.models.manager import detect_protocol, get_default_model_name
+from lumi.models.manager import detect_protocol
 from lumi.utils.image import download_image_as_base64
 from lumi.utils.logger import logger
 
@@ -39,29 +36,6 @@ def extract_ainvoke_content(content) -> str:
         return str(content) if content else ""
 
 
-async def astream_raw_events(
-    graph: CompiledStateGraph,
-    state,
-    config: RunnableConfig,
-    context=None,
-):
-    """LangGraph 原始事件流式响应生成器
-
-    直接输出 astream_events 的所有事件，使用 dumpd 序列化为 JSON。
-    不做任何过滤或转换。
-    """
-    try:
-        async for event in graph.astream_events(
-            state, config, stream_mode="updates", context=context
-        ):
-            event_json = dumpd(event)
-            yield f"data: {json.dumps(event_json, ensure_ascii=False)}\n\n"
-    except Exception as e:
-        logger.error(f"LangGraph SSE stream error: {e}", exc_info=True)
-        error_json = {"status": "error", "error": str(e)}
-        yield f"data: {json.dumps(error_json, ensure_ascii=False)}\n\n"
-
-
 _EXPECTED_DOWNLOAD_ERRORS = (
     httpx.HTTPStatusError,
     httpx.TimeoutException,
@@ -71,33 +45,26 @@ _EXPECTED_DOWNLOAD_ERRORS = (
 )
 
 
+# Bedrock 的 Anthropic 模型 id：``anthropic.claude-*`` 或带区域 / global 前缀的
+# ``us.anthropic.claude-*``；直连 Anthropic 的 ``claude-*`` 不带 ``anthropic.`` 段。
+_BEDROCK_CLAUDE = re.compile(r"^(?:[a-z]+\.)?anthropic\.claude-", re.IGNORECASE)
+
+
 async def message_transform(
-    question: str | list[dict],
-    model_name: str = None,
+    question: str | list[dict], model_name: str
 ) -> str | list[dict]:
     """转换用户问题的 content 内容（按目标模型 provider 归一化多模态图片块）
 
     处理流程：
     1. 字符串直接返回
-    2. 非 Anthropic 模型 → 转换为 OpenAI 图片格式
-    3. Anthropic + Bedrock 模型 → URL 图片异步下载转 base64
+    2. Bedrock 的 Anthropic 模型 → URL 图片异步下载转 base64（Bedrock 不收 URL 图）
+    3. 非 Anthropic 协议 → 转换为 OpenAI 图片格式
     4. 直连 Anthropic 模型 → 保持原格式
-
-    Args:
-        question: 用户问题内容，支持 str 或 list[dict] (Anthropic content blocks)
-        model_name: 模型名称，如果为 None 则从环境变量获取
-
-    Returns:
-        转换后的 content（str 或 list[dict]）
     """
     if isinstance(question, str):
         return question
 
-    if model_name is None:
-        model_name = get_default_model_name()
-
-    # Bedrock（us.anthropic.claude-*）不支持 URL 图片，需下载转 base64
-    if "anthropic.claude" in model_name.lower():
+    if _BEDROCK_CLAUDE.match(model_name):
         return await _convert_content_images_for_bedrock(question)
     if detect_protocol(model_name) == "openai":
         return _convert_content_to_openai_format(question, model_name)

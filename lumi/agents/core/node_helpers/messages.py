@@ -16,7 +16,7 @@ from lumi.models.cache import CACHE_CONTROL
 from lumi.utils.logger import logger
 
 # ---------------------------------------------------------------------------
-# 共享工具函数（供 executor_tools 等模块复用，避免循环导入）
+# 共享工具函数（execution / hooks.protocol 等模块复用）
 # ---------------------------------------------------------------------------
 
 
@@ -226,25 +226,11 @@ def _add_cache_control(
 def inject_message_cache_breakpoints(messages: list[Any]) -> None:
     """为消息列表末尾添加缓存断点（滑动窗口策略）。
 
-    在倒数第 2 条和最后 1 条非系统消息上添加 ``cache_control``，
-    使每轮请求的断点随对话向后滑动。仅对 Anthropic 模型有意义。
+    在倒数第 2 条和最后 1 条消息上添加 ``cache_control``，使每轮请求的断点随对话
+    向后滑动。仅对 Anthropic 模型有意义。
     """
-    from langchain_core.messages import SystemMessage
-
-    non_system_indices = [
-        i for i, m in enumerate(messages) if not isinstance(m, SystemMessage)
-    ]
-    if not non_system_indices:
-        return
-
-    # 倒数第 2 条（如果存在）
-    if len(non_system_indices) >= 2:
-        idx = non_system_indices[-2]
+    for idx in range(max(len(messages) - 2, 0), len(messages)):
         messages[idx] = _add_cache_control(messages[idx])
-
-    # 最后 1 条
-    idx = non_system_indices[-1]
-    messages[idx] = _add_cache_control(messages[idx])
 
 
 def stamp_missing_ids(update: dict) -> dict:

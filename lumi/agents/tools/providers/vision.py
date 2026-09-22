@@ -190,7 +190,7 @@ async def get_vision_tools(names: list[str] | None = None) -> list:
     async loader 每次 get_tools 调用都重新求值；registry 不对 loader 结果按 names 后置过滤，
     故此处自行处理白名单。config.json 改动需重启 sidecar 生效。
     """
-    from lumi.utils.read_config import get_config
+    from lumi.utils.config import get_config
 
     if not get_config().config.vision.model:
         return []

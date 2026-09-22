@@ -2,7 +2,7 @@ import events from '@protocol/events.json'
 
 // 事件名/方法名从协议事实来源 protocol/events.json derive，无需手写同步。
 // 不留 (string & {}) 逃生口——否则任何字符串都可赋值，tsc 对事件名拼写错误失明。
-export type WireEventType = keyof typeof events.events
+type WireEventType = keyof typeof events.events
 export type RpcMethod = keyof typeof events.methods
 
 // LangChain usage_metadata 快照（事件 payload 里附带）。字段在不同 provider /
@@ -15,10 +15,14 @@ export interface Usage {
   [k: string]: unknown
 }
 
-// ask 工具的单个澄清问题（clarify.request）。后端形状宽松，至少含 question。
+// ask 工具的单个澄清问题（clarify.request，对齐后端 ask.py 的 _question_payload）。
+// options 末项 label 为空 = 自定义输入占位。
 export interface Question {
+  id?: number
   question: string
-  [k: string]: unknown
+  header?: string
+  options: { label: string; description?: string }[]
+  multiSelect?: boolean
 }
 
 // 审批请求里的单个工具调用摘要（approval.request）。
@@ -93,7 +97,7 @@ export type McpServerStatus = { name: string; ok: boolean; tools?: number; error
 
 // 环境工具箱（env_status RPC / env.state 事件共用形状，后端 gateway/toolbox.py）。
 // source：system=用户自装（永不覆盖）、toolbox=Lumi 托管（<配置目录>/bin）
-export type EnvToolSource = 'system' | 'toolbox' | 'missing'
+type EnvToolSource = 'system' | 'toolbox' | 'missing'
 export interface EnvToolStatus {
   name: string
   source: EnvToolSource
@@ -153,6 +157,8 @@ export type Item =
   // 后端丢弃畸形响应重试后的本轮提示（message.retry）：轮结束即清，不进历史
   | { id: number; kind: 'retry' }
 
+export type ToolItem = Extract<Item, { kind: 'tool' }>
+
 // 子代理内部的一次工具调用（不展开 output/diff，只展示调了什么）
 export interface SubTool {
   toolCallId: string
@@ -175,7 +181,7 @@ export interface Project {
 export type ProjectResourceKind = 'skill' | 'agent' | 'prompt' | 'memory'
 
 // 提示词解析结果：source 标注命中层（''=三层都没有）；body=剥好 frontmatter 的正文（预览用）
-export interface ProjectPromptInfo {
+interface ProjectPromptInfo {
   name: 'SOUL' | 'AGENTS'
   source: '' | 'project' | 'style' | 'builtin'
   path: string
@@ -344,8 +350,18 @@ export interface HistoryItem {
   args?: unknown
   output?: string
   tool_call_id?: string
-  done?: boolean
   message_id?: string // user 项：后端消息 id（时间旅行截断锚点）
+}
+
+// load_history 的返回（对齐后端 session.py load_history）
+export interface HistorySnapshot {
+  items: HistoryItem[]
+  usage?: Usage
+  // 会话真实模型名与其上下文窗口：渠道旁观会话画上下文环的分母来源
+  model?: string
+  context_window?: number
+  // 会话 state.todos 快照：右栏任务进度的历史还原
+  todos?: TodoItem[]
 }
 
 // todos 工具的任务项（todos.update 事件 / load_history 快照，形状对齐后端 todos_payload）
@@ -356,11 +372,11 @@ export interface TodoItem {
 
 // 后台任务（bash / agent / workflow），后端 TaskRegistry 的序列化快照
 export type BgTaskKind = 'bash' | 'agent' | 'workflow'
-export type BgTaskStatus = 'running' | 'completed' | 'timed_out' | 'failed'
+type BgTaskStatus = 'running' | 'completed' | 'timed_out' | 'failed'
 
 // 运行中的实时活动快照（后端 notify_progress 透传，形状按 kind 分两族，前端宽松消费）：
 // workflow → phase/计数/last_log；agent → 当前工具 + 已完成工具数。bash 无（输出即进度）。
-export interface BgTaskProgress {
+interface BgTaskProgress {
   phase?: string
   done?: number
   total?: number
@@ -417,11 +433,11 @@ export interface Artifact {
 // 远程后端（机器）注册项；本地 sidecar 是隐式后端（id='local'），不入此表。
 // enabled=false：已配置但不连接（不开控制连接、侧栏隐藏）；缺省视为启用。
 export type BackendRemote = { id: string; name: string; url: string; token: string; enabled?: boolean }
-export type BackendsState = { active: string; remotes: BackendRemote[] }
+export type BackendsState = { remotes: BackendRemote[] }
 
 // —— IM 渠道（飞书等）——
-export type ChannelStatusState = 'off' | 'stopped' | 'connecting' | 'connected' | 'error'
-export interface ChannelStatus {
+type ChannelStatusState = 'off' | 'stopped' | 'connecting' | 'connected' | 'error'
+interface ChannelStatus {
   state: ChannelStatusState
   detail: string
 }
@@ -499,7 +515,7 @@ export interface McpServerConfig {
 export type McpServers = Record<string, McpServerConfig>
 
 // —— MCP 连接测试（test_mcp_server）——
-export interface McpToolInfo {
+interface McpToolInfo {
   name: string
   description: string
   input_schema?: Record<string, unknown> // 工具的 JSON Schema（properties/required）
@@ -527,7 +543,7 @@ export interface McpTestResult {
 
 // 应用内更新状态（主进程 electron/updater.cjs 是唯一事实源，renderer 只订阅）。
 // manual=true 时（macOS 未签名）不会有 downloading/ready，停在 available 由浏览器接手下载。
-export type UpdateStatus = 'idle' | 'checking' | 'latest' | 'available' | 'downloading' | 'ready' | 'error'
+type UpdateStatus = 'idle' | 'checking' | 'latest' | 'available' | 'downloading' | 'ready' | 'error'
 
 export type UpdateState = {
   status: UpdateStatus
@@ -558,9 +574,7 @@ declare global {
         list: () => Promise<BackendsState>
         save: (b: Partial<BackendRemote>) => Promise<BackendsState>
         remove: (id: string) => Promise<BackendsState>
-        setActive: (id: string) => Promise<{ active: string }>
       }
-      pickDirectory?: () => Promise<string | null>
       getPathForFile?: (file: File) => string
       openPath?: (path: string) => Promise<string>
       revealInFolder?: (path: string) => Promise<void>
@@ -578,5 +592,11 @@ declare global {
 }
 
 // 一台机器（本地 sidecar + 各远程 serve）。id 是后端标识，enabled=false = 已配置但不连接。
-export type { ConnState, ConnError } from './gateway'
 export type Machine = { id: string; name: string; enabled?: boolean }
+
+// WS 连接态。failed = 退避重试耗尽，已放弃自动重连，等用户主动点击重连
+export type ConnState = 'connecting' | 'open' | 'closed' | 'failed'
+
+// 连不上时的原因，供「连接」列表把机器行的副标题换成人话（'' = 没出过错）。
+// 只分两类：服务端明确拒绝（1008 令牌无效）与其余一切连不通，多分也给不出不同的下一步
+export type ConnError = '' | 'auth' | 'unreachable'

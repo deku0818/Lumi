@@ -181,10 +181,10 @@ class LumiConfig:
         工具箱是**机器级**的（一台机器一份 uv / node / rg），不随「在哪个目录启动」
         漂移——跟着 cwd 发现链走的话，在任何带 ``.lumi/`` 的项目里启动的 serve /
         headless / CLI 各自看到一个空工具箱，桌面端刚装好的工具在那儿显示成「缺失」，
-        用户只会重装第二份到谁也不用的地方。显式覆盖（``--config-dir`` /
-        ``LUMI_CONFIG_DIR``）仍然优先：容器与测试靠它隔离。
+        用户只会重装第二份到谁也不用的地方。显式指定（构造参数 / ``LUMI_CONFIG_DIR``）
+        仍然优先：容器与测试靠它隔离。
         """
-        explicit = self.discovery.cli_config_dir or os.getenv(ConfigDiscovery.ENV_VAR)
+        explicit = self.discovery.explicit_dir or os.getenv(ConfigDiscovery.ENV_VAR)
         return self.config_dir if explicit else lumi_home()
 
     @property
@@ -193,32 +193,9 @@ class LumiConfig:
         return self.toolbox_dir / "bin"
 
     @property
-    def agents_dir(self) -> Path:
-        """获取 agents 目录路径"""
-        return self.config_dir / "agents"
-
-    @property
     def prompts_dir(self) -> Path:
         """获取 prompts 目录路径"""
         return self.config_dir / "prompts"
-
-    @property
-    def mcp_config_path(self) -> Path:
-        """获取 MCP 配置文件路径"""
-        return self.config_dir / "mcp_server.json"
-
-    # === 配置加载方法 ===
-
-    def load_mcp_config(self) -> dict:
-        """加载 MCP 配置
-
-        Returns:
-            MCP 配置字典，如果文件不存在返回空字典
-        """
-        if not self.mcp_config_path.exists():
-            return {}
-        with open(self.mcp_config_path, encoding="utf-8") as f:
-            return json.load(f)
 
     def active_style_for(self, project_dir: str | Path | None) -> str:
         """某项目会话生效的风格：CLI override > 项目 .lumi/config.json > 进程配置 > default。
@@ -247,8 +224,7 @@ class LumiConfig:
             layers.append(
                 ("project", Path(project_dir) / ".lumi" / "prompts" / f"{name}.md")
             )
-        # 直接拼而不用 get_style_prompts_dir：风格没有 prompts/ 是常态（default 即如此），
-        # 那个函数为此抛 ValueError，异常消息还要 iterdir 整个 styles 目录
+        # 风格没有 prompts/ 是常态（default 即如此），路径不存在由 resolve_prompt 跳过
         style_dir = STYLES_ROOT / self.active_style_for(project_dir) / "prompts"
         layers.append(("global", self.prompts_dir / f"{name}.md"))
         layers.append(("style", style_dir / f"{name}.md"))
@@ -310,16 +286,6 @@ class LumiConfig:
         """
         resolved = self.resolve_prompt(name, project_dir)
         return strip_frontmatter(resolved[2]) if resolved else None
-
-    def ensure_dirs(self):
-        """确保所有配置目录存在"""
-        self.config_dir.mkdir(parents=True, exist_ok=True)
-        self.skills_dir.mkdir(exist_ok=True)
-        self.agents_dir.mkdir(exist_ok=True)
-
-    def exists(self) -> bool:
-        """检查配置目录是否存在"""
-        return self.config_dir.exists()
 
 
 def get_config(config_dir: str | None = None) -> LumiConfig:

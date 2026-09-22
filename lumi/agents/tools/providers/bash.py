@@ -10,6 +10,7 @@ from langchain_core.tools import tool
 from pydantic import BaseModel, Field
 
 from lumi.agents.permissions.workspace import get_authorized_directory
+from lumi.agents.runtime.bg_process import get_bg_manager
 from lumi.agents.runtime.bg_tasks import current_thread_id
 from lumi.agents.runtime.shell_session import (
     CommandResult,
@@ -115,7 +116,7 @@ async def bash(
             current_cwd = await session.get_cwd()
             # 后台省略(None)或显式 0 → 不限时；否则用给定上限
             bg_timeout = timeout if timeout else None
-            task = await session_mgr.bg_manager.start_task(
+            task = await get_bg_manager().start_task(
                 command=command,
                 timeout=bg_timeout,
                 working_dir=current_cwd,

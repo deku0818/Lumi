@@ -47,7 +47,7 @@ def wired(tmp_path):
             context=SimpleNamespace(
                 permission_engine=engine,
                 approval_broker=_FakeBroker({"decision": decision}),
-                widen_boundary=bridge._folders.widen_for_violations,
+                widen_boundary=bridge.folders.widen_for_violations,
                 tool_mode=tool_mode,
             )
         )
@@ -126,7 +126,7 @@ async def test_human_approve_widens_boundary(wired):
     assert cmd.goto == "ToolExecutor"
     assert w.engine.check_workspace_boundary("write", {"file_path": target})
     assert w.outside.resolve() in w.engine.authorized_directories()
-    assert w.bridge._extra_folders == [str(w.outside.resolve())]
+    assert w.bridge.folders.extra_folders == [str(w.outside.resolve())]
 
 
 async def test_human_reject_does_not_widen(wired):
@@ -136,7 +136,7 @@ async def test_human_reject_does_not_widen(wired):
     await human_approval(_state([_call("write", {"file_path": target})]), w.runtime)
 
     assert not w.engine.check_workspace_boundary("write", {"file_path": target})
-    assert w.bridge._extra_folders == []
+    assert w.bridge.folders.extra_folders == []
 
 
 # ── auto 模式分类器路径 ──
@@ -154,7 +154,7 @@ async def test_classifier_approve_widens_boundary(wired, monkeypatch):
 
     assert cmd.goto == "ToolExecutor"
     assert w.engine.check_workspace_boundary("write", {"file_path": target})
-    assert w.bridge._extra_folders == [str(w.outside.resolve())]
+    assert w.bridge.folders.extra_folders == [str(w.outside.resolve())]
 
 
 async def test_classifier_reject_does_not_widen(wired, monkeypatch):
@@ -168,7 +168,7 @@ async def test_classifier_reject_does_not_widen(wired, monkeypatch):
 
     assert cmd.goto == "CallModel"
     assert not w.engine.check_workspace_boundary("write", {"file_path": target})
-    assert w.bridge._extra_folders == []
+    assert w.bridge.folders.extra_folders == []
 
 
 # ── 端到端：两道门都通 ──
@@ -195,12 +195,12 @@ async def test_approve_ends_the_approval_loop(wired):
     w = wired()
     args = {"command": f"mkdir {w.outside}/sub", "description": "m"}
     calls = [_call("bash", args)]
-    assert route_decision(calls, "default", "normal", w.engine) == "HumanApproval"
+    assert route_decision(calls, "default", w.engine) == "HumanApproval"
 
     await human_approval(_state(calls), w.runtime)
     w.engine.add_allow_rule(build_exact_expr("bash", args))
 
-    assert route_decision(calls, "default", "normal", w.engine) == "ToolExecutor"
+    assert route_decision(calls, "default", w.engine) == "ToolExecutor"
 
 
 async def test_classifier_approve_ends_the_auto_loop(wired, monkeypatch):
@@ -212,12 +212,12 @@ async def test_classifier_approve_ends_the_auto_loop(wired, monkeypatch):
     _stub_classifier(monkeypatch, "approve")
     args = {"command": f"mkdir {w.outside}/sub", "description": "m"}
     calls = [_call("bash", args)]
-    assert route_decision(calls, "auto", "normal", w.engine) == "AutoClassify"
+    assert route_decision(calls, "auto", w.engine) == "AutoClassify"
 
     await auto_classify(_state(calls), w.runtime)
     w.engine.add_allow_rule(build_exact_expr("bash", args))
 
-    assert route_decision(calls, "auto", "normal", w.engine) == "ToolExecutor"
+    assert route_decision(calls, "auto", w.engine) == "ToolExecutor"
 
 
 # ── privileged 模式：自动放行即授权，边界随之放宽 ──
@@ -243,7 +243,7 @@ def test_default_mode_routing_does_not_widen(wired):
         "HumanApproval"
     )
     assert not w.engine.check_workspace_boundary("write", {"file_path": target})
-    assert w.bridge._extra_folders == []
+    assert w.bridge.folders.extra_folders == []
 
 
 # ── 放宽面收窄：越界但非「本机路径写操作」的调用不换来该目录的写权 ──
@@ -273,7 +273,7 @@ def test_privileged_does_not_widen_for_non_local_writes(wired, make_call, why):
     w = wired(tool_mode="privileged")
 
     assert is_use_tool(_state([make_call(w.outside)]), w.runtime) == "ToolExecutor", why
-    assert w.bridge._extra_folders == [], why
+    assert w.bridge.folders.extra_folders == [], why
     assert not w.engine.check_workspace_boundary(
         "write", {"file_path": str(w.outside / "pwn.txt")}
     ), why
@@ -293,7 +293,7 @@ async def test_mixed_batch_does_not_widen_for_read(wired):
         w.runtime,
     )
 
-    assert w.bridge._extra_folders == []
+    assert w.bridge.folders.extra_folders == []
     assert not w.engine.check_workspace_boundary(
         "write", {"file_path": str(w.outside / "pwn.txt")}
     )

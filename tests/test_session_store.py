@@ -6,7 +6,7 @@ from types import SimpleNamespace
 
 from langchain_core.messages import AIMessage, HumanMessage
 
-from lumi.agents.core.preprocessing.summary import build_summary_carrier
+from lumi.agents.core.preprocessing.compact import build_summary_carrier
 from lumi.sessions.session_store import _summary_from_snapshot
 
 

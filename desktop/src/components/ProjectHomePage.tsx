@@ -30,6 +30,7 @@ import { errorMessage, timeAgo } from '@/lib/utils'
 import { Button } from '@/components/ui/button'
 import { Switch } from '@/components/ui/switch'
 import { Dialog, DialogContent, DialogTitle } from '@/components/ui/dialog'
+import { CARD_L1 } from './glass'
 
 // 项目主页（交互定稿见 .demos/project-home.html）：点进项目卡片后的落地页。
 // 左列 = 输入岛（发送即在此项目新建会话）+ 该项目会话流；右列 = 项目画像五卡
@@ -370,7 +371,7 @@ function Card({
   children: React.ReactNode
 }) {
   return (
-    <div className="rounded-2xl border border-line/45 bg-panel/70 px-3.5 py-3">
+    <div className={`${CARD_L1} px-3.5 py-3`}>
       <div className="flex items-center gap-1.5 mb-2 select-none">
         <span className="text-muted-foreground">{icon}</span>
         <span className="text-xs font-semibold">{title}</span>

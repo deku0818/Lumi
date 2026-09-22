@@ -19,22 +19,13 @@ import json
 from pathlib import Path
 
 from lumi.agents.tools.providers.mcp import (
-    _global_mcp_config_path,
     get_pool_status,
+    global_mcp_config_path,
     invalidate_mcp_pools,
+    project_mcp_config_path,
     test_mcp_server,
 )
 from lumi.utils.atomic_io import atomic_write_json
-
-MCP_METHODS = frozenset(
-    {
-        "list_mcp_servers",
-        "save_mcp_server",
-        "delete_mcp_server",
-        "test_mcp_server",
-        "get_mcp_status",
-    }
-)
 
 
 def resolve_project_dir(scope: str, project: str) -> Path | None:
@@ -49,9 +40,10 @@ def server_config_path(scope: str, project_dir: Path | None) -> Path:
     if scope == "project":
         if project_dir is None:
             raise ValueError("项目级 MCP 操作缺少 project 路径")
-        return project_dir / ".lumi" / "mcp_server.json"
-    # 全局层写入位置须与加载侧同源（同样尊重 --config-dir / LUMI_CONFIG_DIR），否则「存了却加载不到」
-    return _global_mcp_config_path()
+        return project_mcp_config_path(project_dir)
+    # 全局层写入位置须与加载侧同源（同样尊重 LUMI_CONFIG_DIR / 显式配置目录），
+    # 否则「存了却加载不到」
+    return global_mcp_config_path()
 
 
 def read_servers(path: Path) -> dict:
@@ -76,44 +68,67 @@ def read_servers_lenient(path: Path) -> dict:
         return {}
 
 
-def write_servers(path: Path, servers: dict) -> None:
-    """原子写 + 0o600（env/headers 可含密钥，与 channels 一致）；与 read_servers 成对。"""
-    atomic_write_json(path, servers, mode=0o600)
-
-
-async def dispatch_mcp(method: str, params: dict) -> dict:
-    """执行一个 MCP RPC 方法（method 已确认属于 MCP_METHODS）。"""
-    if method == "test_mcp_server":
-        # 连接测试：直接用前端传来的配置临时连一次，与 scope/写盘无关
-        return await test_mcp_server(params.get("config") or {})
-
-    if method == "get_mcp_status":
-        # 项目池的最近加载状态（面板徽标）：project 空 = 全局池。
-        # 复用 resolve_project_dir 保证路径归一化与建池/作废一个口径
-        return get_pool_status(
-            resolve_project_dir("project", params.get("project") or "")
-        )
-
-    scope = params.get("scope") or "global"
-    project = params.get("project") or ""
-    project_dir = resolve_project_dir(scope, project)
+def upsert_server(
+    scope: str, project_dir: Path | None, name: str, config: dict | None
+) -> tuple[Path, dict]:
+    """单个 server 的写入（``config=None`` 即删除）：严格读防抹除 + 原子写 0o600
+    （env/headers 可含密钥）。desktop RPC 与 `lumi mcp` CLI 的唯一写入路径；
+    返回 (落盘路径, 写后的全部 server)。"""
     path = server_config_path(scope, project_dir)
+    servers = read_servers(path)  # 损坏则抛错，避免抹掉全部配置
+    if config is None:
+        servers.pop(name, None)
+    else:
+        servers[name] = config
+    atomic_write_json(path, servers, mode=0o600)
+    return path, servers
 
-    if method == "list_mcp_servers":
-        # 附带该 scope 配置文件的绝对路径供面板原样展示——前端拼 ~/.lumi 既
-        # 看不懂又会在 --config-dir 时说谎
-        return {"servers": read_servers_lenient(path), "path": str(path)}
 
-    servers = read_servers(path)  # 损坏则抛错，避免 save/delete 抹掉全部配置
+def _scope_of(params: dict) -> tuple[str, Path | None]:
+    scope = params.get("scope") or "global"
+    return scope, resolve_project_dir(scope, params.get("project") or "")
 
-    if method == "save_mcp_server":
-        name = params.get("name") or ""
-        if not name:
-            raise ValueError("MCP server 缺少 name")
-        servers[name] = params.get("config") or {}
-    else:  # delete_mcp_server
-        servers.pop(params.get("name") or "", None)
 
-    write_servers(path, servers)
+async def _test(params: dict) -> dict:
+    # 连接测试：直接用前端传来的配置临时连一次，与 scope/写盘无关
+    return await test_mcp_server(params.get("config") or {})
+
+
+async def _status(params: dict) -> dict:
+    # 项目池的最近加载状态（面板徽标）：project 空 = 全局池。
+    # 复用 resolve_project_dir 保证路径归一化与建池/作废一个口径
+    return get_pool_status(resolve_project_dir("project", params.get("project") or ""))
+
+
+async def _list(params: dict) -> dict:
+    scope, project_dir = _scope_of(params)
+    path = server_config_path(scope, project_dir)
+    # 附带该 scope 配置文件的绝对路径供面板原样展示——前端拼 ~/.lumi 既
+    # 看不懂又会在 LUMI_CONFIG_DIR / 显式配置目录下说谎
+    return {"servers": read_servers_lenient(path), "path": str(path)}
+
+
+async def _save(params: dict) -> dict:
+    name = params.get("name") or ""
+    if not name:
+        raise ValueError("MCP server 缺少 name")
+    scope, project_dir = _scope_of(params)
+    _, servers = upsert_server(scope, project_dir, name, params.get("config") or {})
     await invalidate_mcp_pools(scope, project_dir)
     return {"servers": servers}
+
+
+async def _delete(params: dict) -> dict:
+    scope, project_dir = _scope_of(params)
+    _, servers = upsert_server(scope, project_dir, params.get("name") or "", None)
+    await invalidate_mcp_pools(scope, project_dir)
+    return {"servers": servers}
+
+
+HANDLERS = {
+    "list_mcp_servers": _list,
+    "save_mcp_server": _save,
+    "delete_mcp_server": _delete,
+    "test_mcp_server": _test,
+    "get_mcp_status": _status,
+}

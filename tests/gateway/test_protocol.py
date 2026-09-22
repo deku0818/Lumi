@@ -112,7 +112,7 @@ def test_parent_run_id_injected_into_payload():
 
 def test_compacting_maps_active_true():
     wire = bridge_event_to_wire(
-        BridgeEvent(kind=EventKind.COMPACTING, data={"active": True}), SID
+        BridgeEvent(kind=EventKind.COMPACTION_STATUS, data={"active": True}), SID
     )["params"]
     assert wire == {
         "type": "compaction.status",
@@ -123,6 +123,6 @@ def test_compacting_maps_active_true():
 
 def test_compacting_maps_active_false():
     wire = bridge_event_to_wire(
-        BridgeEvent(kind=EventKind.COMPACTING, data={"active": False}), SID
+        BridgeEvent(kind=EventKind.COMPACTION_STATUS, data={"active": False}), SID
     )["params"]
     assert wire["payload"] == {"active": False}

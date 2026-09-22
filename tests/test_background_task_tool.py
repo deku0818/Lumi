@@ -188,17 +188,14 @@ async def test_stop_bash_task(registry):
             output_file=Path("/tmp/bg_hhh.txt"),
         )
     )
-    from lumi.agents.runtime import shell_session
+    from lumi.agents.runtime import bg_process
 
     mock_mgr = AsyncMock()
     mock_mgr.cancel_task = AsyncMock()
-    mock_sm = AsyncMock()
-    mock_sm.has_bg_manager = True
-    mock_sm.bg_manager = mock_mgr
-    shell_session._session_manager = mock_sm
+    bg_process._bg_manager = mock_mgr
     try:
         result = await _handle_stop("bg_hhh")
         mock_mgr.cancel_task.assert_awaited_once_with("bg_hhh")
         assert "已停止" in result
     finally:
-        shell_session._session_manager = None
+        bg_process._bg_manager = None

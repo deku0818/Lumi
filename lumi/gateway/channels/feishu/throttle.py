@@ -34,13 +34,9 @@ class Throttle:
         self._pending_chars = 0
         self._last_fire_ms = 0
         self._timer: asyncio.TimerHandle | None = None
-        self._running = False
 
     def note(self, delta_chars: int) -> None:
         self._pending_chars += max(0, delta_chars)
-        if self._running:
-            # 已有一次 fire 在进行；当前 on_fire 会把最新内容一起带走
-            return
         if self._pending_chars >= self._min_chars:
             self._cancel_timer()
             self._do_fire()
@@ -56,16 +52,11 @@ class Throttle:
         self._cancel_timer()
 
     def _do_fire(self) -> None:
-        # 在同步 on_fire 之前先清状态：若回调里重入 note（少见但合法），状态需一致，
-        # 且不希望 fire 期间 self._timer 仍看起来"在排队"。
+        # 先清状态再回调：fire 期间 self._timer 不该看起来"在排队"
         self._timer = None
         self._pending_chars = 0
         self._last_fire_ms = _now_ms()
-        self._running = True
-        try:
-            self._on_fire()
-        finally:
-            self._running = False
+        self._on_fire()
 
     def _cancel_timer(self) -> None:
         if self._timer is not None:

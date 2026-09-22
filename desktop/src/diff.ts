@@ -7,7 +7,7 @@ export type DiffLine = { kind: 'ctx' | 'add' | 'del'; text: string }
 const MAX_DIFF_LINES = 240
 
 // 公共前后缀裁剪的轻量行级 diff（old → new）
-export function diffLines(oldText: string, newText: string): DiffLine[] {
+function diffLines(oldText: string, newText: string): DiffLine[] {
   const a = oldText.split('\n')
   const b = newText.split('\n')
   let pre = 0

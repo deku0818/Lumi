@@ -9,6 +9,7 @@ import shlex
 from pathlib import Path
 from typing import Any
 
+from lumi.agents.permissions.matcher import COMMAND_ARG_KEYS, extract_arg
 from lumi.agents.permissions.models import PATH_ARG_KEYS
 from lumi.utils.logger import logger
 
@@ -129,8 +130,8 @@ class WorkspaceBoundary:
         解析命令字符串，识别常见命令并提取路径参数。
         无法识别的命令返回空列表（视为边界内）。
         """
-        command = tool_args.get("command") or tool_args.get("cmd")
-        if not isinstance(command, str) or not command.strip():
+        command = extract_arg(tool_args, COMMAND_ARG_KEYS)
+        if command is None or not command.strip():
             return []
 
         # 多行命令处理：仅在检测到 heredoc 操作符时截断，其他多行命令逐行解析

@@ -19,7 +19,7 @@ from lumi.agents.tools.loader import AgentConfig
 from lumi.agents.tools.providers.agent import _child_tools, agent
 from lumi.agents.tools.providers.skill import skill
 from lumi.agents.tools.providers.workflow import workflow
-from lumi.utils.read_config import get_config
+from lumi.utils.config import get_config
 
 
 class _FakeTool:

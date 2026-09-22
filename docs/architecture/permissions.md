@@ -17,7 +17,6 @@ lumi/agents/permissions/
 ├── boundary.py       # 工作区边界检查器：路径提取与边界判定
 ├── safety.py         # Bypass-immune 安全检查：受保护文件/命令检测
 ├── validators.py     # Bash 命令安全警告（非阻断）
-├── mode_policy.py    # 执行模式策略（readonly）
 └── workspace.py      # 授权路径管理（进程全局兜底 + per-run contextvar 覆盖，供 filesystem provider 使用）
 
 lumi/agents/tools/capability.py  # 只读/写入工具判定 + bash 复合命令拆分
@@ -25,16 +24,14 @@ lumi/agents/tools/capability.py  # 只读/写入工具判定 + bash 复合命令
 
 ---
 
-## 三层工具限制机制
+## 两层工具限制机制
 
-权限系统采用三层架构，各层职责独立：
+权限系统采用两层架构，各层职责独立：
 
 ```
 Layer 1: 只读/写入判定 (capability.py)
   ↓ 判断工具调用是否写入操作 → 只读则跳过审批直接执行
-Layer 2: 执行模式策略 (mode_policy.py)
-  ↓ readonly 模式下拦截不允许的写入操作
-Layer 3: 权限引擎 (engine.py)
+Layer 2: 权限引擎 (engine.py)
   ↓ 规则匹配 + 工作区边界 → allow/deny/ask/unmatched
 ```
 
@@ -71,36 +68,7 @@ _CRON_READONLY_OPS: frozenset[str] = frozenset({"list", "runs"})
 
 `split_compound_command(command)` 是字符级状态机，按 `&&`、`||`、`;`、`|`、`&` 拆分复合命令，正确处理单/双引号内的分隔符不拆分。该函数同时供 `capability` 内部和权限引擎的复合命令评估共用。
 
-### Layer 2: ModePolicy（mode_policy.py）
-
-执行模式策略守卫，根据当前模式（`execution_mode` state 字段：`"normal"` / `"readonly"` / 自定义）限制工具调用：
-
-```python
-@dataclass(frozen=True)
-class ModePolicy:
-    name: str                                  # "readonly"
-    label: str                                 # 拒绝消息中显示，如 "Readonly mode"
-    allow_write: bool = True                   # True → 不限制写入（等同无策略）
-    path_filter: Callable[[str], bool] | None = None  # allow_write=False 时的写入路径白名单
-```
-
-内置策略：
-
-| 模式 | allow_write | path_filter |
-|---|---|---|
-| `readonly` | False | None（禁止所有写入） |
-| `normal` | 无策略（`get_policy("normal")` 返回 None），走后续权限引擎 | — |
-
-`check_policy(policy, tool_name, tool_args) -> PolicyResult`：
-- `allow_write=True` → 全部放行
-- 只读操作（`is_write_tool` 为 False）→ 放行
-- 写入操作 → 检查 `path_filter`；bash 写入命令 / 文件写入 / 其他写入工具被拒绝，`PolicyResult.reason` 说明原因
-
-`filter_tools_for_mode(tools, policy)` 在子 Agent 创建时静态过滤工具列表：移除写入工具，但 `bash` 保留（运行时动态判断只读性），有 `path_filter` 的策略保留文件写入工具（运行时检查路径）。
-
-扩展方式：`register_policy("my_mode", ModePolicy(...))` 注册自定义模式。
-
-### Layer 3: PermissionEngine（engine.py）
+### Layer 2: PermissionEngine（engine.py）
 
 规则匹配 + 工作区边界检查，详见下文。
 
@@ -358,7 +326,6 @@ is_use_tool() 路由优先级：
    内部工具与其他工具混合的批次不绕过，落到下方正常评估
 3. 权限引擎 DENY 前置检查（所有模式）→ 命中则 HumanApproval（deny 不可绕过，优先于 bypass）
 4. 全部只读工具（Layer 1: is_write_tool 全 False）→ ToolExecutor
-5. 执行模式策略守卫（Layer 2: check_policy）→ 命中则 PolicyReject
 6. bypass-immune 安全检查（所有模式）→ 命中则 HumanApproval
 7. accept_edits 模式：文件编辑工具(write/edit)工作区内自动放行，其余 → HumanApproval
 8. 权限引擎完整评估:
@@ -410,20 +377,3 @@ _READONLY_PREFIXES = frozenset({..., "my-readonly-cmd"})
 
 在 `boundary.py` 的 `_BASH_PATH_COMMANDS` 中添加命令名。
 
-### 注册自定义执行模式
-
-```python
-from lumi.agents.permissions.mode_policy import ModePolicy, register_policy
-
-register_policy(
-    "docs_only",
-    ModePolicy(
-        name="docs_only",
-        label="Docs-only mode",
-        allow_write=False,
-        path_filter=lambda p: p.endswith(".md"),
-    ),
-)
-```
-
-注册后，将该模式名作为 `execution_mode` 传给 `AgentBridge.stream_response(...)`（WS `send_message` 的 `execution_mode` 参数）即可在 `is_use_tool()` 路由中生效：只读操作和写入 `*.md` 的操作放行，其余写入被路由到 `PolicyReject`。

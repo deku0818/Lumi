@@ -18,15 +18,19 @@ from conftest import (
 from langchain_core.messages import (
     AIMessage,
     HumanMessage,
-    SystemMessage,
     ToolMessage,
 )
 
 from lumi.agents.core import nodes
-from lumi.agents.core.meta_message import CTX_DIGEST_KEY, reminder_human_message
+from lumi.agents.core.meta_message import (
+    CTX_DIGEST_KEY,
+    latest_human_ts,
+    reminder_human_message,
+)
 from lumi.agents.core.preprocessing import compact
 from lumi.agents.core.preprocessing.compact import (
     build_compacted_update,
+    build_summary_carrier,
     find_pending_human,
     is_circuit_open,
     is_ptl_error,
@@ -40,8 +44,6 @@ from lumi.agents.core.preprocessing.compact import (
     summarize_with_ptl_retry,
     truncate_head_for_ptl_retry,
 )
-from lumi.agents.core.preprocessing.summary import build_summary_carrier
-from lumi.sessions.message_visibility import latest_human_ts
 from lumi.utils.config.models import TokenConfig
 from lumi.utils.constants import LUMI_META_KEY
 
@@ -81,15 +83,13 @@ def test_truncate_head_returns_none_when_single_round():
 # ─────────────────────────── PTL 反应式压缩选材 ───────────────────────────
 
 
-def test_select_for_ptl_keeps_tail_rounds_excludes_system():
+def test_select_for_ptl_keeps_tail_rounds():
     msgs = tool_loop_history()  # rounds: [Human], [a0,t0], [a1,t1], [a2,t2], [a3,t3]
     selected = select_for_ptl_compaction(msgs, keep_rounds=2)
     assert selected is not None
     to_summarize, tail = selected
     assert [m.id for m in to_summarize] == ["h", "a0", "t0", "a1", "t1"]
     assert [m.id for m in tail] == ["a2", "t2", "a3", "t3"]
-    # System 不在任何一侧（调用方原位保留）
-    assert not any(isinstance(m, SystemMessage) for m in [*to_summarize, *tail])
 
 
 def test_select_for_ptl_none_when_rounds_insufficient():
@@ -257,7 +257,7 @@ async def test_run_summary_drops_dangling_tool_use():
         ),
         HumanMessage(content="新问题", id="h1"),
     ]
-    with patch("lumi.models.chain.tool_call_chain", return_value=chain):
+    with patch.object(compact, "tool_call_chain", return_value=chain):
         await _run_summary(history)
     assert [m.id for m in captured["messages"] if m.id] == ["h0", "h1"]
 
@@ -274,13 +274,7 @@ async def test_run_summary_transforms_media_for_non_anthropic():
         ]
     )
     chain, captured = _capture_chain()
-    with (
-        patch("lumi.models.chain.tool_call_chain", return_value=chain),
-        patch(
-            "lumi.agents.core.response.get_default_model_name",
-            return_value="gpt-4o",
-        ),
-    ):
+    with patch.object(compact, "tool_call_chain", return_value=chain):
         text = await _run_summary([img_human], model_name="gpt-4o")
     assert text == "摘要"
     sent = captured["messages"][0].content
@@ -396,10 +390,11 @@ async def test_summarizer_emits_carrier_before_last_human():
     runtime, fake_config = _summarizer_env(context_length=1000, summary_threshold=0.5)
     with (
         patch.object(nodes, "get_config", return_value=fake_config),
+        patch.object(compact, "get_config", return_value=fake_config),
         patch.object(nodes, "context_window_tokens", return_value=10**9),
         patch.object(nodes, "resolve", return_value=resolved(0)),  # 不查真实目录
         patch.object(
-            nodes,
+            compact,
             "run_summary",
             new=AsyncMock(return_value=("SUMMARY_TEXT", 0)),
         ),
@@ -442,9 +437,10 @@ async def test_summary_threshold_follows_real_model_window(
     run_summary = AsyncMock(return_value=("SUMMARY_TEXT", 0))
     with (
         patch.object(nodes, "get_config", return_value=fake_config),
+        patch.object(compact, "get_config", return_value=fake_config),
         patch.object(nodes, "context_window_tokens", return_value=usage),
         patch.object(nodes, "resolve", return_value=resolved(model_window)),
-        patch.object(nodes, "run_summary", new=run_summary),
+        patch.object(compact, "run_summary", new=run_summary),
     ):
         result = await nodes.summarizer(
             {"messages": messages}, runtime, {"configurable": {"thread_id": "tw"}}
@@ -460,8 +456,8 @@ async def test_summary_threshold_follows_real_model_window(
 
 
 def _conversation(pairs: int) -> list:
-    """[System, H0, A0, H1, A1, …]，末条恒为干净 AIMessage。"""
-    msgs: list = [SystemMessage(content="sys", id="s")]
+    """[H0, A0, H1, A1, …]，末条恒为干净 AIMessage。"""
+    msgs: list = []
     for i in range(pairs):
         msgs.append(HumanMessage(content=f"h{i}", id=f"h{i}"))
         msgs.append(AIMessage(content=f"a{i}", id=f"a{i}"))
@@ -485,12 +481,7 @@ def test_select_compacts_small_conversation():
 
 def test_select_skips_when_nothing_to_summarize():
     # body 仅剩末条 AI（无可压消息）→ 不白跑摘要
-    assert (
-        select_for_compaction(
-            [SystemMessage(content="s", id="s"), AIMessage(content="a", id="a")]
-        )
-        is None
-    )
+    assert select_for_compaction([AIMessage(content="a", id="a")]) is None
 
 
 def test_select_accepts_trailing_pending_human():
@@ -520,24 +511,23 @@ def test_select_skips_when_last_ai_has_tool_calls():
 
 
 def test_select_returns_full_body():
-    msgs = _conversation(5)  # 1 system + 10 body
+    msgs = _conversation(5)  # 10 body
     body = select_for_compaction(msgs)
     assert len(body) == 10  # 含末条 AI——调用方整段进摘要，不再漏掉最后一句回复
     assert isinstance(body[-1], AIMessage) and body[-1].content == "a4"
 
 
-def test_build_update_removes_body_keeps_head_leaves_carrier():
+def test_build_update_replaces_body_with_carrier():
     msgs = _conversation(5)
     merged = apply_messages_update(
         msgs, build_compacted_update(msgs, [], "浓缩摘要")["messages"]
     )
 
-    # 整段 body（含末条 AI）被摘要取代；头部 System 原位保留
-    assert isinstance(merged[0], SystemMessage) and merged[0].id == "s"
-    # 只剩单条摘要 carrier；下条用户消息到来时由 context_inject 全量重建上下文
-    assert len(merged) == 2
-    assert isinstance(merged[1], HumanMessage)
-    assert "浓缩摘要" in merged[1].content
+    # 整段 body（含末条 AI）被摘要取代，只剩单条摘要 carrier；下条用户消息到来时
+    # 由 context_inject 全量重建上下文
+    assert len(merged) == 1
+    assert isinstance(merged[0], HumanMessage)
+    assert "浓缩摘要" in merged[0].content
 
 
 def test_build_update_reattaches_pending_human_verbatim():
@@ -557,7 +547,6 @@ def test_build_update_reattaches_pending_human_verbatim():
 def test_carrier_inherits_ts_so_dream_liveness_survives_compaction():
     """压缩删光真人消息后 dream 判活基线不能归零（否则该会话对 dream 隐身）。"""
     msgs = [
-        SystemMessage(content="sys", id="s"),
         _user("早上问的", "h0", ts=5000),
         AIMessage(content="a0", id="a0"),
         _user("下午问的", "h1", ts=9000),
@@ -569,7 +558,7 @@ def test_carrier_inherits_ts_so_dream_liveness_survives_compaction():
     merged = apply_messages_update(
         msgs, build_compacted_update(msgs, [], "浓缩摘要")["messages"]
     )
-    assert [m.id for m in merged] == ["s", merged[-1].id]  # 只剩 System + carrier
+    assert len(merged) == 1  # 只剩 carrier
     assert latest_human_ts(merged) == 9.0
 
 

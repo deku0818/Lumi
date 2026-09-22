@@ -12,7 +12,7 @@ active 指向「某 profile 下的某个 model」。存储为 ~/.lumi/lumi.json 
                    "models":["m1","m2"], "effort":{"m1":"high"}}, ...]}
 
 classifier / titler 是独立于对话 active 的「用途指针」（auto 审批裁决 / 会话标题生成），
-缺省/失效时回退会话 active 模型；经 get_pointer / resolve_pointer / set_pointer 读写。
+缺省/失效时回退会话 active 模型；经 get_pointers / resolve_pointer / set_pointer 读写。
 
 无 textual 依赖，可在 headless 服务（lumi serve）中直接使用。
 兼容旧格式（profile 用单个 "model" 字段、active 为字符串 id；
@@ -300,7 +300,7 @@ def resolve_vision() -> ResolvedModel | None:
     base_url / api_key 留空则反查 providers 分区里含该模型的 profile 连接（resolve）；
     仍查不到则连接为空（create_llm 用 env / SDK 默认）。档位恒 auto。
     """
-    from lumi.utils.read_config import get_config
+    from lumi.utils.config import get_config
 
     cfg = get_config().config.vision
     if not cfg.model:
@@ -313,14 +313,9 @@ def resolve_vision() -> ResolvedModel | None:
     return replace(resolve(cfg.model), effort="auto")
 
 
-def get_pointer(kind: str) -> dict:
-    """返回规范化后的用途指针 {provider, model}；未配/失效为空 dict。"""
-    return get_pointers()[kind]
-
-
 def get_pointers() -> dict[str, dict]:
-    """一次读盘返回全部用途指针表（list_providers 一并下发两个指针时免重复读）。"""
-    _, _, pointers = _parse(_read_data())
+    """一次读盘返回全部用途指针表 {kind: {provider, model}}；未配/失效为空 dict。"""
+    _, _, pointers = _load_all()
     return pointers
 
 
@@ -329,9 +324,7 @@ def resolve_pointer(kind: str) -> ResolvedModel:
 
     未配置或指针失效 → 回退会话 active 模型（= 不单独配置时的行为）。
     """
-    profiles, _, pointers = _parse(
-        _read_data()
-    )  # 单次读盘，同时拿 profiles 与规范化指针
+    profiles, _, pointers = _load_all()
     ptr = pointers[kind]
     if not ptr:
         return resolve()  # 跟随会话模型

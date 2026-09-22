@@ -1,7 +1,7 @@
 """LumiAgent 桥接层包（`lumi.gateway.bridge`）。
 
-公共 API 与导入路径与拆包前完全一致：AgentBridge 仍是流式 + 会话生命周期核心，
-Provider CRUD / 审批富化 / checkpoint / folder 等职责拆到 service 子模块。
+AgentBridge 是流式 + 会话生命周期核心；folder / 文件级 checkpoint 是其子模块，
+审批富化与供应商 CRUD 是无状态函数（approval / providers）。
 """
 
 from __future__ import annotations

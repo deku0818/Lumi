@@ -90,7 +90,7 @@ async def test_trace_digest_does_not_touch_what_the_node_receives():
 
     async def spy(state, runtime):
         seen["count"] = len(state["messages"])
-        return {"messages": [AIMessage("ok", id="r1")], "iterations": 2}
+        return {"messages": [AIMessage("ok", id="r1")]}
 
     history = [HumanMessage(f"m{i}", id=f"h{i}") for i in range(12)]
     traced: list = []
@@ -100,7 +100,7 @@ async def test_trace_digest_does_not_touch_what_the_node_receives():
     ):
         graph = LumiAgent(checkpointer=MemorySaver()).graph
         async for event in graph.astream_events(
-            {"messages": history, "iterations": 1},
+            {"messages": history},
             {"configurable": {"thread_id": "t-trace"}},
             context=LumiAgentContext(model_name="fake"),
             version="v2",

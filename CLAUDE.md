@@ -36,7 +36,7 @@ Lumi 并非仅仅面向Coder，也面向所有非技术人员。
 
 ### Agent Graph（LangGraph）
 
-核心入口是 `lumi/agents/core/graph.py` 中的 `LumiAgent`，继承自 `BaseGraph`（模板模式）。
+核心入口是 `lumi/agents/core/graph.py` 中的 `LumiAgent`（自带节点/边装配与 compile）。
 
 **Graph 流程：**
 ```
@@ -46,7 +46,6 @@ START → Summarizer（超阈值当轮就地压缩 / ptl_retry 置位则绕阈�
   ├─ ToolExecutor（已授权或 BYPASS_TOOLS）→ after_tool_executor → CallModel（循环）
   ├─ HumanApproval（需用户审批，逐个 decisions）→ 有允许: ToolExecutor（被拒的先补拒绝 ToolMessage，ToolExecutor 只跑未应答的）/ 全拒绝·cancel: END / DENY·无审批通道: CallModel
   ├─ AutoClassify（auto 模式安全分类器）→ approve: ToolExecutor / reject: CallModel
-  ├─ PolicyReject（执行模式策略阻止）→ CallModel
   ├─ OnAgentStop（无工具调用，分发 Stop hooks）→ END（hook 可拉回 CallModel）
   └─ END（防御性路径）
 ```
@@ -89,11 +88,11 @@ START → Summarizer（超阈值当轮就地压缩 / ptl_retry 置位则绕阈�
 
 桌面应用（Electron + TS 前端）经 WebSocket 调用后端 `AgentBridge` 复用 Agent 运行时。详见 `docs/architecture/desktop.md`。
 
-- **`lumi/server/ws.py`**：`lumi serve` 拉起的 FastAPI WS 端点。一条 WS = 一个 `AgentBridge`（可切换 thread），JSON-RPC 帧 `{id, method, params}` ↔ `{id, result|error}`，流式事件用 `{method:"event", params}`。
-- **`AgentBridge`**（`agents/bridge.py`）：前端（desktop / 未来 TS TUI）经 WS **复用**的中立桥接层，把 LangGraph 事件封装为 `BridgeEvent` 流。`EventKind` 成员值直接 = 对外 wire 名（`namespace.verb`），`server/protocol.py` 只做 payload 重组，无映射层。
-- **协议单一事实源**：`protocol/events.json`。TS 端 import derive 类型，Python 端由 `tests/server/test_protocol_contract.py` 锁住事件名/方法名一致——改协议只改这一处。
-- **会话元数据**：列表由 checkpoint 派生（`sessions/session_store.py`），但 pin/重命名等用户标记存在 `sessions/session_meta.py` 的 JSON sidecar（`~/.lumi/checkpoints/session_meta.json`），`list_sessions` 合并后置顶排序。删除经 `bridge.delete_thread()` 一并清理 LangGraph + 文件级 checkpoint。
-- **消息显示声明制**：每条 HumanMessage 构造时在 `additional_kwargs["lumi"]["items"]` 声明显示内容（气泡条目：text/sender/ts/files），content 只给模型（`<sender>`/`<attached-file>`/command 标签均为纯模型侧约定）——显示侧（`lumi/sessions/message_text.py` 的 `visible_user_text`）零正则。`items: []` = 合成消息不可见（摘要 carrier/后台通知/工具回灌，经 `synthetic_human_message` 构造）；未声明（cron/子 agent 直接构造）fallback 到 content 掉 `injected_prefix` 前缀块。上下文注入块经 `inject_text_into_message` 前置并计数（见 `preprocessing/context_inject.py`）。
+- **`lumi/gateway/channels/ws.py`**：`lumi serve` 拉起的 FastAPI WS 端点。一条 WS = 一个 `AgentBridge`（可切换 thread），JSON-RPC 帧 `{id, method, params}` ↔ `{id, result|error}`，流式事件用 `{method:"event", params}`。
+- **`AgentBridge`**（`gateway/bridge/`）：前端（desktop）与 IM 渠道经 WS **复用**的中立桥接层，把 LangGraph 事件封装为 `BridgeEvent` 流。`EventKind` 成员值直接 = 对外 wire 名（`namespace.verb`），`gateway/protocol.py` 只做 payload 重组，无映射层。
+- **协议单一事实源**：`protocol/events.json`。TS 端 import derive 类型，Python 端由 `tests/gateway/test_protocol_contract.py` 锁住事件名/方法名一致——改协议只改这一处。
+- **会话元数据**：列表由 checkpoint 派生（`sessions/session_store.py`），但 pin/重命名等用户标记存在 `sessions/session_meta.py` 的 JSON sidecar（`~/.lumi/checkpoints/session_meta.json`），`list_sessions` 合并后置顶排序。删除经 `bridge.delete_thread()` 清理 LangGraph checkpoint 并回收该会话的持久 shell。
+- **消息显示声明制**：每条 HumanMessage 构造时在 `additional_kwargs["lumi"]["items"]` 声明显示内容（气泡条目：text/sender/ts/files），content 只给模型（`<sender>`/`<attached-file>`/command 标签均为纯模型侧约定）——显示侧（`lumi/agents/core/meta_message.py` 的 `visible_user_text`）零正则。`items: []` = 合成消息不可见（摘要 carrier/后台通知/工具回灌，经 `synthetic_human_message` 构造）；未声明（cron/子 agent 直接构造）fallback 到 content 掉 `injected_prefix` 前缀块。上下文注入块经 `inject_text_into_message` 前置并计数（见 `preprocessing/context_inject.py`）。
 - **前端**（`desktop/src/`）：`gateway.ts` 每会话一条 WS 连接（指数退避重连）；`App.tsx` 会话状态机 + 聊天流渲染；`Sidebar.tsx` 会话列表 + `⋮` 右键菜单（置顶/重命名/删除）；`ProjectHomePage.tsx` 项目主页（点项目卡片进入：输入岛新建会话 + 项目会话流 + 提示词/记忆/定时/技能/子 Agent 五卡，项目层资源支持增删改、内置/全局层只读可「复制到项目」）。
 - **模型解析与思考管理**（详见 `docs/architecture/thinking.md`）：`provider_store.resolve()` 是「模型 + 连接 + 思考档位」单一事实源；`create_llm(apply_effort=...)` 默认不注入思考参数（仅主对话链 `call_model` 传 True，内部链天然干净）。思考能力（有无/档位枚举/开关）来自 models.dev（`utils/model_catalog.py`，缓存 `~/.lumi/cache/`，context_length 同源），档位按模型存 profile 的 `effort` dict；`model_manager.effort_params()` 是档位→协议参数的唯一映射点（原生值直传，不存在档位翻译；auto = 不传任何参数）。入口为 desktop ModelPicker（Claude 式三行 + 二级菜单）。**模型是会话属性**：按 thread 存在 session_meta、首轮固化、每轮开跑前经 `bridge.align_session_model()` 对齐，desktop 与 IM 共用 `sessions/session_model.py` 一条解析链（会话模型 > 新会话默认），渠道配置里没有模型字段——详见 `docs/architecture/model-switching.md`。
 

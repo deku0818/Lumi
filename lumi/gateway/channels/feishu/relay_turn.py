@@ -9,7 +9,6 @@ from __future__ import annotations
 
 from typing import TYPE_CHECKING
 
-from lumi.gateway.channels.feishu.outbound import tool_activity, turn_closer
 from lumi.gateway.channels.feishu.streaming import grey
 from lumi.gateway.channels.relay import binding_of, run_claude_turn, update_binding
 from lumi.utils.logger import logger
@@ -52,7 +51,6 @@ async def run_relay_turn(
     binding = binding_of(thread_id)
     cwd = binding.get("cwd") or channel.config.workspace
     got_text = False
-    _end = turn_closer(streaming, chat_id, reply_to)
 
     turn = run_claude_turn(
         prompt,
@@ -66,16 +64,10 @@ async def run_relay_turn(
             kind = event.kind
             if kind == "delta":
                 got_text = True
-                await streaming.send_delta(
-                    chat_id, event.text, {"message_id": reply_to}
-                )
+                await streaming.append(chat_id, event.text, reply_to)
             elif kind in ("tool_start", "tool_end"):
-                await tool_activity(
-                    streaming,
-                    chat_id,
-                    reply_to,
-                    kind.removeprefix("tool_"),
-                    _tool_key(event.name),
+                await streaming.tool_activity(
+                    chat_id, kind.removeprefix("tool_"), _tool_key(event.name), reply_to
                 )
             elif kind == "init":
                 if event.session_id:
@@ -88,12 +80,12 @@ async def run_relay_turn(
                     # 已流出的正文必须保住：正常关卡（flush 尾部 + 挂来源行），再发红卡。
                     # aborted=True 会跳过尾部 flush 与降级发送，等于把答案前半段扔了。
                     if got_text:
-                        await streaming.send_delta(
-                            chat_id,
-                            _source_note(event.session_id),
-                            {"message_id": reply_to},
+                        await streaming.append(
+                            chat_id, _source_note(event.session_id), reply_to
                         )
-                    await _end(aborted=not got_text)
+                    await streaming.end(
+                        chat_id, aborted=not got_text, reply_to=reply_to
+                    )
                     await channel.send_markdown(
                         chat_id,
                         (event.text or "执行失败")[:500],
@@ -105,15 +97,13 @@ async def run_relay_turn(
                 else:
                     # 极端情形（无任何 delta 流出）用 result 文本兜底，再挂来源行
                     tail = "" if got_text else event.text
-                    await streaming.send_delta(
-                        chat_id,
-                        tail + _source_note(event.session_id),
-                        {"message_id": reply_to},
+                    await streaming.append(
+                        chat_id, tail + _source_note(event.session_id), reply_to
                     )
-                    await _end(aborted=False)
+                    await streaming.end(chat_id, aborted=False, reply_to=reply_to)
     except Exception as e:
         logger.error(f"Feishu 直连轮异常 chat={chat_id}: {e}", exc_info=True)
-        await _end(aborted=True)
+        await streaming.end(chat_id, aborted=True, reply_to=reply_to)
         await channel.send_markdown(
             chat_id,
             "请稍后重试。",
@@ -125,4 +115,4 @@ async def run_relay_turn(
         # 含 /stop 取消路径：aclose 让 run_claude_turn 的 finally 终止子进程组，
         # 再兜底关卡（未显式收尾的路径），避免"生成中"冻死
         await turn.aclose()
-        await _end(aborted=True)
+        await streaming.end(chat_id, aborted=True, reply_to=reply_to)

@@ -2,9 +2,10 @@
 
 主体服务于 ``lumi.agents.core.nodes.summarizer`` 节点（串行拓扑
 ``Summarizer → PreprocessMessages → CallModel``，summary 在关键路径上，故失败需熔断
-兜底、自身超长需 PTL 截头重试）。文件末尾另有**离线强制压缩**入口
-（``select_for_compaction`` / ``build_compacted_update``），供 ``AgentBridge.compact_thread``
-/ ``/compact`` 命令 / IM 每日整理对空闲会话主动压缩，绕开节点专属的阈值门与熔断器。
+兜底、自身超长需 PTL 截头重试）。文件末尾另有**离线强制压缩**选材
+（``select_for_compaction``）与三条路径共用的主干 ``compact_messages``，供
+``AgentBridge.compact_thread`` / ``/compact`` 命令 / IM 每日整理对空闲会话主动压缩，
+绕开节点专属的阈值门与熔断器。
 """
 
 from __future__ import annotations
@@ -15,22 +16,21 @@ from uuid import uuid4
 
 import anthropic
 import openai
-from langchain_core.messages import (
-    AIMessage,
-    BaseMessage,
-    HumanMessage,
-    SystemMessage,
-)
+from langchain_core.messages import AIMessage, BaseMessage, HumanMessage
 from langgraph.types import Overwrite
 
 from lumi.agents.core.meta_message import (
     is_reminder_message,
     message_ts,
+    should_show_human_message,
     strip_ctx_digest,
+    synthetic_human_message,
 )
 from lumi.agents.core.node_helpers.messages import drop_incomplete_tool_calls
-from lumi.agents.core.preprocessing.summary import build_summary_carrier
-from lumi.sessions.message_visibility import should_show_human_message
+from lumi.agents.core.response import extract_ainvoke_content, message_transform
+from lumi.agents.core.state import LumiAgentContext
+from lumi.models.chain import tool_call_chain
+from lumi.utils.config import get_config
 
 _PTL_SUBSTRINGS = (
     "prompt is too long",
@@ -54,20 +54,6 @@ def is_ptl_error(exc: BaseException) -> bool:
         return True
     status = getattr(exc, "status_code", None)
     return status in (400, 413)
-
-
-def split_head(
-    messages: list[BaseMessage],
-) -> tuple[list[BaseMessage], list[BaseMessage]]:
-    """切成 ``(头部 SystemMessage 或空, 其余)``。
-
-    压缩的四条路径（选材 / PTL 选材 / 写回 / summarizer 节点）都要「头部 System 不
-    参与、原位保留」，规则写一次。state 里实际从不存 SystemMessage（系统提示词在
-    chain 里拼），这是防御性的。
-    """
-    if messages and isinstance(messages[0], SystemMessage):
-        return messages[:1], list(messages[1:])
-    return [], list(messages)
 
 
 def find_pending_human(messages: list[BaseMessage]) -> HumanMessage | None:
@@ -143,12 +129,10 @@ def select_for_ptl_compaction(
     """PTL 反应式压缩选材：返回 ``(to_summarize, tail)``，不可压返回 ``None``。
 
     与 summarizer 节点不同，此路径可发生在工具循环中段（末条是 ToolMessage），
-    故按 API round 切组、保留尾部 ``keep_rounds`` 组，其余进摘要。头部
-    SystemMessage 不参与（调用方原位保留不删）。rounds ≤ keep_rounds + 1 时
-    头部只剩前导组（往往就是当前用户消息），压缩有害无益，返回 None。
+    故按 API round 切组、保留尾部 ``keep_rounds`` 组，其余进摘要。rounds ≤
+    keep_rounds + 1 时头部只剩前导组（往往就是当前用户消息），压缩有害无益，返回 None。
     """
-    _, body = split_head(messages)
-    rounds = split_into_rounds(body)
+    rounds = split_into_rounds(messages)
     if len(rounds) <= keep_rounds + 1:
         return None
     to_summarize = [m for r in rounds[:-keep_rounds] for m in r]
@@ -268,10 +252,6 @@ async def run_summary(
     三条压缩路径都不经 PreprocessMessages 的清理，而中途被取消的工具轮是各路径共通的
     输入形态（在线 summarizer 是图首节点、先于清理；离线压缩在轮外）。
     """
-    # 函数级 import 避开 compact（早被 nodes import）→ chain/response 的潜在环
-    from lumi.agents.core.response import extract_ainvoke_content, message_transform
-    from lumi.models.chain import tool_call_chain
-
     transformed: list = []
     for m in drop_incomplete_tool_calls(messages):
         if isinstance(m, HumanMessage) and isinstance(m.content, list):
@@ -385,21 +365,33 @@ def clear_all_circuits() -> None:
 def select_for_compaction(messages: list) -> list[BaseMessage] | None:
     """判定是否可压缩，返回**待删除的整段 body**或 ``None``。
 
-    不设大小门——有历史就压。仅保留三条**结构性**前提（非阈值）：
-    - 头部 SystemMessage 不参与、保留不动；
+    不设大小门——有历史就压。仅保留两条**结构性**前提（非阈值）：
     - 末条须是**无 tool_calls 的干净 AIMessage**（= 已完成一轮的空闲会话）或**尚未
       被回答的真实用户消息**（turn 中途崩掉 / 进程被杀 / 用户发完就断连）——两者都不
       会在压缩后留下半截工具轮，后者的原话由 ``build_compacted_update`` 保住；
     - 末条之外须至少有一条带 id 的消息可压（否则无可压缩、白跑一次摘要）。
     """
-    if not messages:
+    if not messages or not any(m.id for m in messages[:-1]):
         return None
-    _, body = split_head(messages)
-    if not body or not any(m.id for m in body[:-1]):
-        return None
-    last = body[-1]
+    last = messages[-1]
     clean_ai = isinstance(last, AIMessage) and not last.tool_calls
-    return body if clean_ai or find_pending_human(body) is last else None
+    return list(messages) if clean_ai or find_pending_human(messages) is last else None
+
+
+def format_summary_block(summary_text: str) -> str:
+    """将摘要文本包裹为 ``<summary>`` 标签块。"""
+    return f"<summary>\n{summary_text}\n</summary>\n"
+
+
+def build_summary_carrier(summary_text: str, *, ts: int = 0) -> HumanMessage:
+    """摘要 carrier：声明无可显示的合成消息（不渲染为用户气泡），独立于用户消息
+    存在，在线/离线压缩共用——carrier 形态的单一真源。
+
+    ``ts`` = 被压缩掉的最后一条真人消息的落库时刻（毫秒，见 ``message_ts``）。压缩
+    可能把全部真人消息删光，dream 判活基线（``latest_human_ts``）随之归零、该会话
+    从此对 dream 隐身；carrier 继承该时刻把基线留住——那条消息确实在 ts 时刻存在过。
+    """
+    return synthetic_human_message(format_summary_block(summary_text), ts=ts)
 
 
 def _reattach(msg: BaseMessage) -> BaseMessage:
@@ -418,12 +410,13 @@ def _reattach(msg: BaseMessage) -> BaseMessage:
 def build_compacted_update(
     messages: list[BaseMessage], keep_tail: list[BaseMessage], summary_text: str
 ) -> dict:
-    """压缩写回：整条 messages 通道一次性替换为 ``[System?, 摘要 carrier, 保留的原文]``。
+    """压缩写回：整条 messages 通道一次性替换为 ``[摘要 carrier, 保留的原文]``。
 
     在线 / PTL / 离线三条压缩路径共用。``messages`` 传**当前完整历史**，返回的
     ``Overwrite`` 绕过 add_messages reducer 直接写定最终形态——压缩本就是「历史变成
     这个样子」，不是「删掉这些条」；逐条 RemoveMessage 在 DeltaChannel 下还会多留
-    一串待回放的删除写入。头部 SystemMessage（若有）原位保留，其余整段被摘要取代。
+    一串待回放的删除写入。整段历史被摘要取代（系统提示词在 chain 里拼，state 从不存
+    SystemMessage）。
 
     ``keep_tail`` 是调用方指定要留的尾部（PTL 保尾的工具轮 / 在线路径的末条）；正在
     被回答的那条真人消息由本函数认出来（``find_pending_human``），不在 ``keep_tail``
@@ -431,15 +424,38 @@ def build_compacted_update(
     marker，见 :func:`_reattach`。carrier 继承被取代段里最后一条真人消息的 ts，使
     dream 判活基线不随压缩归零。
     """
-    head, body = split_head(messages)
-    pending = find_pending_human(body)
+    pending = find_pending_human(messages)
     if pending is not None and not any(m is pending for m in keep_tail):
         keep_tail = [pending, *keep_tail]
     carrier = build_summary_carrier(
-        summary_text, ts=max((message_ts(m) for m in body), default=0)
+        summary_text, ts=max((message_ts(m) for m in messages), default=0)
     )
-    return {
-        "messages": Overwrite(
-            value=[*head, carrier, *(_reattach(m) for m in keep_tail)]
-        )
-    }
+    return {"messages": Overwrite(value=[carrier, *(_reattach(m) for m in keep_tail)])}
+
+
+async def compact_messages(
+    messages: list[BaseMessage],
+    to_summarize: list[BaseMessage],
+    keep_tail: list[BaseMessage],
+    context: LumiAgentContext,
+) -> tuple[dict, int]:
+    """三条压缩路径的共用主干：SUMMARY 提示词 + token 配置 → ``run_summary`` →
+    ``build_compacted_update``。返回 ``(state update, PTL 重试次数)``。
+
+    选材（在线保末条 / PTL 按 round 保尾 / 离线整段）各路径自己定，其余全在这里；
+    节点专属的阈值门与熔断记账留在 ``nodes.summarizer``，离线 ``compact_thread``
+    不带。摘要模型 / tools / system_prompt 取自会话 ``context``（缓存安全的分叉）。
+    """
+    config = get_config()
+    token = config.config.token
+    summary_text, ptl_retries = await run_summary(
+        to_summarize,
+        config.load_prompt("SUMMARY"),
+        tools=context.tools,
+        system_prompt=context.system_prompt,
+        model_name=context.model_name,
+        provider=context.provider,
+        max_retry=token.summary_ptl_retry_max,
+        drop_ratio=token.summary_ptl_retry_drop_ratio,
+    )
+    return build_compacted_update(messages, keep_tail, summary_text), ptl_retries

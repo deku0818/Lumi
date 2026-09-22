@@ -229,7 +229,7 @@ _KINDS = ("classifier", "titler")
 def test_pointer_unset_falls_back_to_session_model(store_path, kind):
     """未配指针：get 为空，resolve_pointer 回退会话 active 模型。"""
     s = provider_store.upsert(_p(base="ua", key="ka", models=("m1",)))
-    assert provider_store.get_pointer(kind) == {}
+    assert provider_store.get_pointers()[kind] == {}
     # 回退 = resolve()（会话模型 + 其连接）
     assert provider_store.resolve_pointer(kind) == provider_store.ResolvedModel(
         "m1", "ua", "ka", provider=s.id
@@ -246,7 +246,7 @@ def test_pointer_set_resolves_exact_connection(store_path, kind):
         "provider": b.id,
         "model": "haiku",
     }
-    assert provider_store.get_pointer(kind) == {"provider": b.id, "model": "haiku"}
+    assert provider_store.get_pointers()[kind] == {"provider": b.id, "model": "haiku"}
     # active 仍是 A 的 m1，但指针解析到 B 的连接
     assert provider_store.resolve_pointer(kind) == provider_store.ResolvedModel(
         "haiku", "ub", "kb", provider=b.id
@@ -259,10 +259,10 @@ def test_pointer_clear_and_invalid_pointer(store_path, kind):
     provider_store.set_pointer(kind, s.id, "m1")
     # 空参数 → 清除
     assert provider_store.set_pointer(kind, "", "") == {}
-    assert provider_store.get_pointer(kind) == {}
+    assert provider_store.get_pointers()[kind] == {}
     # 指向不存在的 model → 规范化丢弃（视为未配，回退会话模型）
     assert provider_store.set_pointer(kind, s.id, "nope") == {}
-    assert provider_store.get_pointer(kind) == {}
+    assert provider_store.get_pointers()[kind] == {}
 
 
 def test_pointer_survives_unrelated_writes(store_path, monkeypatch):
@@ -273,8 +273,11 @@ def test_pointer_survives_unrelated_writes(store_path, monkeypatch):
     provider_store.set_pointer("titler", s.id, "m1")
     provider_store.set_effort(s.id, "m1", "high")
     provider_store.set_active(s.id, "m1")
-    assert provider_store.get_pointer("classifier") == {"provider": s.id, "model": "m2"}
-    assert provider_store.get_pointer("titler") == {"provider": s.id, "model": "m1"}
+    assert provider_store.get_pointers()["classifier"] == {
+        "provider": s.id,
+        "model": "m2",
+    }
+    assert provider_store.get_pointers()["titler"] == {"provider": s.id, "model": "m1"}
 
 
 @pytest.mark.parametrize("kind", _KINDS)
@@ -284,7 +287,7 @@ def test_pointer_auto_cleared_when_target_deleted(store_path, kind):
     provider_store.set_pointer(kind, b.id, "haiku")
     # 删除指针所在 profile → 指针自动失效清空
     provider_store.delete(b.id)
-    assert provider_store.get_pointer(kind) == {}
+    assert provider_store.get_pointers()[kind] == {}
     assert a.id != b.id
 
 

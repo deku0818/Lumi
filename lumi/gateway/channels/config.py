@@ -29,7 +29,7 @@ class ChannelRuntimeConfig(BaseModel):
     tool_mode: Literal["auto", "privileged"] = Field(
         default="auto",
         description="工具审批模式：auto=AI 审批（默认）；privileged=自动放行。两种模式下"
-        "泄漏出来的人工审批一律自动拒绝（飞书只保留 ask 询问卡片）",
+        "泄漏出来的人工审批一律自动拒绝（IM 会话无审批卡片，ask 工具亦已禁用）",
     )
     workspace: str = Field(
         default="",

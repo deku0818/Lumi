@@ -44,7 +44,7 @@ def _resolved(monkeypatch):
 
 def _set_vision_model(monkeypatch, model: str):
     """把 config.json 的 vision.model 打桩为指定值（get_vision_tools 据此条件加载）。"""
-    import lumi.utils.read_config as rc
+    import lumi.utils.config as rc
 
     fake = SimpleNamespace(config=SimpleNamespace(vision=SimpleNamespace(model=model)))
     monkeypatch.setattr(rc, "get_config", lambda: fake)

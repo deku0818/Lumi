@@ -17,6 +17,7 @@
 
 from __future__ import annotations
 
+import json
 from collections.abc import Iterator
 from typing import Any
 
@@ -156,3 +157,133 @@ def iter_current_turn(messages: list) -> Iterator[Any]:
         if isinstance(msg, HumanMessage) and not is_reminder_message(msg):
             return
         yield msg
+
+
+# ── 显示侧读取（visible_user_text / should_show_human_message 等）──
+
+
+def should_show_human_message(msg: object) -> bool:
+    """判断 HumanMessage 是否应在 restore / session 列表中显示。
+
+    按显示声明判定（见 ``lumi.agents.core.meta_message``）：``items`` 已声明 →
+    非空即显示（``[]`` = 合成消息，不显示）；未声明（cron / 子 agent 等
+    不经 bridge 的构造点）→ 显示，文本走 fallback。
+
+    Args:
+        msg: LangChain Message 对象或等效字典。
+    """
+    items = declared_items(msg)
+    return bool(items) if items is not None else True
+
+
+def is_human_message(m: object) -> bool:
+    """human 消息类型判定，兼容 LangChain 对象与 dict 格式——checkpoint 恢复
+    路径的 messages 可能是对象或 ``{"type": "human", ...}`` dict。
+    session_store 与 latest_human_ts 共用，双形态判定的单一实现。"""
+    if isinstance(m, HumanMessage):
+        return True
+    return isinstance(m, dict) and m.get("type") == "human"
+
+
+def latest_human_ts(messages: list) -> float:
+    """真实用户消息的最新落库时刻，epoch 秒；一条带 ts 的都没有返 0.0。
+
+    ts 由 bridge 构造真实用户消息时写入 ``additional_kwargs["lumi"]["ts"]``（本机时钟、
+    毫秒），其余合成消息（reminder / 后台通知 / 工具回灌）一律不带——故判据即「human
+    且带 ts」。供 dream 判定「自上次综合以来有无新内容」：基于时间戳而非消息计数，且
+    压缩把真人消息删光时由摘要 carrier 继承该时刻（见 ``build_summary_carrier``），
+    判活基线不随压缩归零。
+    """
+    return (
+        max((message_ts(m) for m in messages if is_human_message(m)), default=0) / 1000
+    )
+
+
+def visible_user_text(msg: object) -> str:
+    """用户消息（对象或 dict）的可读文本——所有"这条消息给用户看什么"的单一入口。
+
+    显示声明优先：``lumi.items`` 已声明 → join 各条目 text（``[]`` = 合成消息，
+    返回空串）。未声明（cron / 子 agent 等不经 bridge 的构造点，content 本就
+    无标签）→ fallback：按 ``injected_prefix`` 计数掉注入前缀块后取文本。
+    """
+    items = declared_items(msg)
+    if items is not None:
+        return "\n".join(it.get("text", "") for it in items if it.get("text"))
+    return extract_text_content(strip_injected_prefix(msg)).strip()
+
+
+def extract_text_content(content: str | list) -> str:
+    """从消息 content 中提取纯文本。
+
+    支持 str 和 list[dict] 两种 LangChain 消息格式。
+    """
+    if isinstance(content, str):
+        return content
+    if isinstance(content, list):
+        parts = []
+        for block in content:
+            if isinstance(block, dict) and block.get("type") == "text":
+                parts.append(block.get("text", ""))
+            elif isinstance(block, str):
+                parts.append(block)
+        return "\n".join(parts)
+    return ""
+
+
+def _tool_call_name(tc) -> str:
+    """工具调用名，兼容 dict（标准 tool_call）与 ToolCall 对象（某些反序列化路径）。"""
+    if isinstance(tc, dict):
+        return tc.get("name") or "?"
+    return getattr(tc, "name", None) or "?"
+
+
+def _tool_call_desc(tc) -> str:
+    """工具调用的 ``name(args)`` 描述。args 经 json.dumps 天然单行（换行被转义）。"""
+    name = _tool_call_name(tc)
+    args = tc.get("args") if isinstance(tc, dict) else getattr(tc, "args", None)
+    if not args:
+        return name
+    return f"{name}({json.dumps(args, ensure_ascii=False, default=str)})"
+
+
+def extract_messages_as_text(messages: list) -> str:
+    """把消息列表导出成扁平文本，一行一消息，供 dream 语料与 goal 判官转录。
+
+    格式：``[user] …`` / ``[assistant] …`` / ``[assistant→tool:NAME] name({args}) …``
+    （带工具调用，参数完整保留——写了哪个文件、跑了什么命令是动作记录的核心）/
+    ``[tool:NAME] …``（工具结果）。消息内换行转义为字面 ``\\n`` 保证每条恰好一行
+    （grep 友好）；system 消息跳过。比 ``messages_to_dict`` 的嵌套 JSON 对窄关键词
+    grep 友好得多。
+    """
+    lines: list[str] = []
+    for m in messages:
+        role = getattr(m, "type", "")
+        if role == "system":
+            continue
+        if role == "human":
+            # visible_user_text 对合成 human（摘要 carrier / hook reminder /
+            # 后台通知，items 声明为空）返回空串 → 该行天然被丢弃；真实用户
+            # 消息取声明文本或 fallback，注入块不会淹没 grep 语料里的真实输入
+            raw = visible_user_text(m)
+        else:
+            raw = extract_text_content(getattr(m, "content", ""))
+        text = raw.replace("\n", "\\n").strip()
+        if role == "human":
+            tag = "user"
+        elif role == "ai":
+            tool_calls = getattr(m, "tool_calls", None) or []
+            if tool_calls:
+                names = ",".join(_tool_call_name(tc) for tc in tool_calls)
+                tag = f"assistant→tool:{names}"
+                calls = " ".join(_tool_call_desc(tc) for tc in tool_calls)
+                text = f"{calls} {text}".strip()
+            else:
+                tag = "assistant"
+        elif role == "tool":
+            tag = f"tool:{getattr(m, 'name', None) or '?'}"
+        else:
+            tag = role or "?"
+        # assistant 调工具时 content 可能为空，仍保留行以标注调了什么
+        if text or role == "ai":
+            lines.append(f"[{tag}] {text}".rstrip())
+    return "\n".join(lines)

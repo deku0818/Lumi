@@ -5,7 +5,8 @@ import { useEffect, useLayoutEffect, useRef, useState, type CSSProperties, type 
 import { ChevronLeft, ChevronRight } from 'lucide-react'
 import { useI18n } from '../i18n'
 import { Button } from '@/components/ui/button'
-import { CARD_L2, cn } from '@/lib/utils'
+import { cn } from '@/lib/utils'
+import { CARD_L2 } from './glass'
 
 // 分组列表容器：参数 / 选项 / 总览行共用，项间发丝线
 export const GROUP = 'overflow-hidden rounded-[10px] border border-line/60 bg-canvas/70 divide-y divide-line/60'
@@ -88,7 +89,7 @@ export function StepCard({
   }, [])
 
   return (
-    <div className={cn(CARD_L2, 'overflow-hidden rounded-xl shadow-sm')}>
+    <div className={cn(CARD_L2, 'overflow-hidden shadow-sm')}>
       <div
         className={cn(
           'flex items-center gap-2.5 py-3 pl-4 pr-3.5 transition-shadow',

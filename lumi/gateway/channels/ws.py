@@ -2,7 +2,7 @@
 
 帧协议（client ↔ server）：
     client → server  {id, method, params}
-        send_message    params: {content, tool_mode?, execution_mode?}   → 流式
+        send_message    params: {content, tool_mode?}   → 流式
         resume          params: {value}                                   → 流式
         stop            params: {}                                        → {stopped}  # 中止当前流式轮
         list_commands   params: {}                                        → {commands:[...]}

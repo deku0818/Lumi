@@ -12,10 +12,6 @@ import locale
 import re
 from datetime import datetime
 from pathlib import Path
-from typing import TYPE_CHECKING
-
-if TYPE_CHECKING:
-    from lumi.agents.runtime.file_tracker import FileChangeTracker
 
 import wcmatch.glob
 
@@ -29,7 +25,7 @@ from lumi.agents.tools.providers.filesystem.ripgrep import (
     _parse_ripgrep_counts,
     _parse_ripgrep_files,
 )
-from lumi.utils.read_config import get_config
+from lumi.utils.config import get_config
 
 # ============================================================================
 # Constants
@@ -156,17 +152,6 @@ class LocalFilesystemBackend:
     所有路径在操作前都会经过授权目录校验。
     """
 
-    def __init__(self) -> None:
-        self._tracker: FileChangeTracker | None = None
-
-    def set_tracker(self, tracker: FileChangeTracker) -> None:
-        """注册文件变更追踪器，用于 checkpoint 系统。"""
-        self._tracker = tracker
-
-    @property
-    def _tracker_active(self) -> bool:
-        return self._tracker is not None and self._tracker.active
-
     async def read(
         self, file_path: str, offset: int = 0, limit: int = DEFAULT_READ_LIMIT
     ) -> str:
@@ -226,8 +211,6 @@ class LocalFilesystemBackend:
             }
 
         try:
-            if self._tracker_active:
-                self._tracker.record_pre_write(resolved)
             resolved.parent.mkdir(parents=True, exist_ok=True)
             # newline=""：模型写的 \n 原样落盘，不被 os.linesep 悄悄译成 CRLF（同一份
             # 内容在三个平台上生成同样的字节）
@@ -254,8 +237,6 @@ class LocalFilesystemBackend:
             }
 
         try:
-            if self._tracker_active:
-                self._tracker.record_pre_edit(resolved)
             # 从字节解码而非 read_text：后者会做通用换行翻译（CRLF→\n），原文件的行尾
             # 就此丢失（read_text 的 newline 参数要 3.13 才有，本项目下限 3.12）
             raw = resolved.read_bytes().decode("utf-8")

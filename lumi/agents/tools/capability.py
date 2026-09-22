@@ -266,11 +266,6 @@ def is_write_tool(tool_name: str, tool_args: dict) -> bool:
     return True
 
 
-def is_read_only(tool_name: str, tool_args: dict) -> bool:
-    """工具调用是否只读（is_write_tool 的反义）"""
-    return not is_write_tool(tool_name, tool_args)
-
-
 # ── bash 只读命令判断 ──
 
 # 已知只读命令前缀（白名单，fail-closed）
@@ -441,8 +436,6 @@ def _matches_readonly_prefix(command: str) -> bool:
         if command == prefix or command.startswith(prefix + " "):
             return True
         # 支持带路径的命令（如 /usr/bin/ls）
-        if "/" in prefix:
-            continue
         if command.startswith(f"/usr/bin/{prefix} ") or command.startswith(
             f"/bin/{prefix} "
         ):

@@ -1,4 +1,4 @@
-"""在途审批 Broker —— 以 asyncio.Future 替代 interrupt() 的中断-恢复。
+"""在途审批 Broker —— 节点原地 await 一个 asyncio.Future 等用户应答。
 
 节点 / 工具侧 ``await broker.request(payload, reject_value)`` 原地挂起，请求经
 ``adispatch_custom_event`` 发出（在 ``astream_events`` 以 ``on_custom_event`` 浮现，

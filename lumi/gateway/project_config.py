@@ -22,8 +22,8 @@ from lumi.agents.tools.loader import (
     validate_definition,
 )
 from lumi.styles import STYLES_ROOT
+from lumi.utils.config import get_config
 from lumi.utils.config.manager import strip_frontmatter
-from lumi.utils.read_config import get_config
 
 PROMPT_NAMES = ("SOUL", "AGENTS")
 

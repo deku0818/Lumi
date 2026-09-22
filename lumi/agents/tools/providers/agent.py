@@ -6,7 +6,6 @@
 
 import asyncio
 import time
-import uuid
 from pathlib import Path
 
 from langchain_core.messages import HumanMessage, ToolMessage
@@ -21,13 +20,12 @@ from lumi.agents.runtime.bg_tasks import (
     bg_tasks_dir,
     get_task_registry,
     make_bg_done_callback,
+    new_task_id,
     run_background_task,
 )
 from lumi.agents.runtime.shell_session import run_with_shell
+from lumi.utils.config import get_config
 from lumi.utils.logger import logger
-from lumi.utils.read_config import get_config
-
-_TASK_ID_HEX_LENGTH = 12
 
 _AGENT_DESCRIPTION = """启动一个专门的子代理（独立上下文）来自主完成复杂任务。每种代理类型都具备特定的能力和可用工具。
 
@@ -140,7 +138,7 @@ async def agent(
         "depth": child_depth,
     }
     # 子代理独立 shell：cd/env 不污染父与兄弟代理；用完即回收
-    sub_key = f"sub-{uuid.uuid4().hex[:_TASK_ID_HEX_LENGTH]}"
+    sub_key = new_task_id("sub-")
     invoke_result = await run_with_shell(
         sub_key, lumi_agent.graph.ainvoke(inputs, context=context)
     )
@@ -162,7 +160,7 @@ def _start_background_agent(
     depth: int,
 ) -> str:
     """注册后台 Agent 任务并 fire-and-forget 启动。"""
-    task_id = f"bg_{uuid.uuid4().hex[:_TASK_ID_HEX_LENGTH]}"
+    task_id = new_task_id("bg_")
 
     output_file = bg_tasks_dir() / f"{task_id}.txt"
 
@@ -209,7 +207,7 @@ def _agent_activity(state: dict, tools_done: int = 0) -> dict:
     后台代理的 output_file 完成时才写，运行中唯一能看的就是这个：``tool`` 为当前发起
     的工具调用（模型思考中 / 刚收完工具结果时为 None），``tools_done`` 为已完成的工具数。
 
-    计数取 ``max(已知值, 本快照所见)``：Summarizer 压缩会 RemoveMessage 删掉历史，
+    计数取 ``max(已知值, 本快照所见)``：Summarizer 压缩会 Overwrite 整段替换掉历史，
     只数当前快照的话，长任务压缩后计数会当着用户的面往回跳。
     """
     messages = state.get("messages") or []

@@ -31,7 +31,8 @@ import {
 } from '@/components/ui/dropdown-menu'
 import { Tooltip, TooltipContent, TooltipTrigger } from '@/components/ui/tooltip'
 import { Button } from '@/components/ui/button'
-import { fmtTokensFull } from '@/lib/utils'
+import { cn, fmtTokensFull } from '@/lib/utils'
+import { CARD_L3 } from './glass'
 
 type TestResult = { ok: boolean; error?: string; latency_ms?: number }
 type RowTest = 'testing' | TestResult | undefined
@@ -644,7 +645,7 @@ function ModelRowEditor({
         </Button>
       </div>
       {open && (
-        <div className="mt-1 grid grid-cols-2 gap-2.5 rounded-lg border border-line/40 bg-canvas/30 px-3 py-2.5">
+        <div className={cn('mt-1 grid grid-cols-2 gap-2.5 px-3 py-2.5', CARD_L3)}>
           <LimitField
             label={t('providers.contextWindow')}
             value={row.ctx}

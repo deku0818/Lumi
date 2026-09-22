@@ -11,7 +11,7 @@ need uv  "https://docs.astral.sh/uv/getting-started/installation/"
 need npm  "请先安装 Node.js（含 npm）"
 
 echo "› 同步后端依赖 (uv sync)…"
-uv sync   # 飞书等可选功能需要额外 extra 时改用：uv sync --all-extras
+uv sync   # checkpoint 加密（唯一的 extra）需要时改用：uv sync --extra encryption
 
 if [ ! -d desktop/node_modules ]; then
   echo "› 安装前端依赖 (npm install)…"

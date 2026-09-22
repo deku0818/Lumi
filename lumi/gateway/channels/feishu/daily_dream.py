@@ -24,10 +24,10 @@ import time
 from datetime import datetime, timedelta
 from pathlib import Path
 
+from lumi.agents.core.meta_message import latest_human_ts
 from lumi.agents.memory import dream_lock
 from lumi.agents.memory.dream import consolidate_session_dream
 from lumi.gateway.broadcast import hub
-from lumi.sessions.message_visibility import latest_human_ts
 from lumi.utils.logger import logger
 
 # run-lock 被用户轮占用时的重试：最多 N 次、每次隔 M 秒，耗尽则本轮跳过该会话。
@@ -87,7 +87,10 @@ async def _dream_one(bridge, thread_id: str) -> bool:
 async def _dream_phase(pool) -> list[str]:
     """阶段一：串行 dream 有新消息的 thread，返回成功 dream 的 thread 列表。
 
-    忙 thread 整批重试，``_LOCK_ATTEMPTS`` 轮后仍忙则本轮跳过（不进 summary 阶段）。
+    忙 thread **整批**重试：每轮把当下空闲的都 dream 掉、忙的收集起来，一轮只睡一次
+    ``_LOCK_RETRY_SECONDS``；``_LOCK_ATTEMPTS`` 轮后仍忙则本轮跳过（不进 summary 阶段）。
+    刻意不复用 ``_acquire_idle_lock``——那是**单 thread** 等锁（summary 阶段各等各的），
+    在这里逐个等会让等待时间随忙会话数线性累加，且空闲会话要排在忙会话的重试后面。
     """
     pending = list(pool.chat_ids)
     dreamed: list[str] = []
@@ -160,12 +163,12 @@ async def daily_dream_loop(pool, config, channel_name: str) -> None:
     重起，故 config 在单次任务生命内恒定）。
     """
     while True:
-        if not config.enabled or not config.daily_dream_enabled:
+        if not config.daily_dream_enabled:
             await asyncio.sleep(_IDLE_SLEEP_SECONDS)
             continue
         try:
             delay = seconds_until_next(datetime.now(), config.daily_dream_time)
-        except (ValueError, AttributeError):
+        except ValueError:
             logger.warning(
                 "[daily-dream] 无法解析 daily_dream_time=%r，空转",
                 config.daily_dream_time,

@@ -4,7 +4,6 @@ import pytest
 
 from lumi.agents.tools.capability import (
     has_background_operator,
-    is_read_only,
     is_readonly_command,
     is_write_tool,
 )
@@ -54,29 +53,6 @@ class TestIsWriteTool:
     def test_cron_no_operation_is_write(self):
         """无 operation 参数时 fail-closed"""
         assert is_write_tool("cron", {})
-
-
-# ── is_read_only ──
-
-
-class TestIsReadOnly:
-    def test_read_is_readonly(self):
-        assert is_read_only("read", {})
-
-    def test_write_is_not_readonly(self):
-        assert not is_read_only("write", {})
-
-    def test_bash_ls_is_readonly(self):
-        assert is_read_only("bash", {"command": "ls"})
-
-    def test_bash_rm_is_not_readonly(self):
-        assert not is_read_only("bash", {"command": "rm file"})
-
-    def test_ask_is_readonly(self):
-        assert is_read_only("ask", {})
-
-    def test_todos_is_readonly(self):
-        assert is_read_only("todos", {})
 
 
 # ── is_readonly_command ──

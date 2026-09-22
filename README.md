@@ -175,7 +175,7 @@ cd desktop && npm install && npm run dist
 ## 开发
 
 ```bash
-uv sync --all              # 安装开发依赖
+uv sync --all-groups       # 安装开发依赖
 uv run pytest              # 运行测试
 uv run ruff format .       # 代码格式化
 uv run ruff check --fix .  # Lint 检查

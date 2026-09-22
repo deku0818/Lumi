@@ -10,19 +10,11 @@ import asyncio
 import contextvars
 import os
 import sys
-import uuid
-from collections.abc import Callable
 from dataclasses import dataclass
-from typing import TYPE_CHECKING
 
-from lumi.agents.runtime.bg_tasks import (
-    NotificationQueue,
-    TaskStatus,
-    get_task_registry,
-)
-
-if TYPE_CHECKING:
-    from lumi.agents.runtime.bg_process import BackgroundTaskManager
+from lumi.agents.runtime.bg_process import get_bg_manager
+from lumi.agents.runtime.bg_tasks import get_task_registry, new_task_id
+from lumi.agents.runtime.shell_env import provided_env
 from lumi.utils.constants import (
     BASH_MAX_OUTPUT_BYTES,
     CWD_QUERY_TIMEOUT,
@@ -30,9 +22,6 @@ from lumi.utils.constants import (
     GRACEFUL_SHUTDOWN_TIMEOUT,
 )
 from lumi.utils.logger import logger
-
-# Re-export for backward compatibility
-__all__ = ["TaskStatus", "NotificationQueue"]
 
 # ---------------------------------------------------------------------------
 # Constants
@@ -43,35 +32,6 @@ _SENTINEL_PREFIX = "__LUMI_SENTINEL_"
 
 _SENTINEL_SUFFIX = "__"
 """命令输出边界标记后缀。"""
-
-_TASK_ID_HEX_LENGTH = 12
-"""任务 ID 中 UUID hex 截取长度。"""
-
-
-# ---------------------------------------------------------------------------
-# 按工作目录的会话级环境注入（provider 由 gateway 在 serve 启动时注册）
-# ---------------------------------------------------------------------------
-
-# working_dir → 额外环境变量（如项目专属飞书机器人的 LARKSUITE_CLI_PROFILE）。
-# agents 层不 import gateway，靠注册倒转依赖；未注册（纯 CLI 等场景）不注入。
-_env_provider: Callable[[str], dict[str, str]] | None = None
-
-
-def set_shell_env_provider(provider: Callable[[str], dict[str, str]]) -> None:
-    """注册会话环境 provider：``fn(working_dir) -> dict[str, str]``。"""
-    global _env_provider
-    _env_provider = provider
-
-
-def provided_env(working_dir: str) -> dict[str, str]:
-    """当前 provider 对该工作目录的注入项；未注册/失败返回空（不阻断 shell 启动）。"""
-    if _env_provider is None:
-        return {}
-    try:
-        return _env_provider(working_dir) or {}
-    except Exception:
-        logger.warning("shell env provider 执行失败，跳过注入", exc_info=True)
-        return {}
 
 
 # ---------------------------------------------------------------------------
@@ -126,23 +86,6 @@ class _BoundedOutputBuffer:
 # ---------------------------------------------------------------------------
 
 
-async def _terminate_process(process: asyncio.subprocess.Process) -> None:
-    """终止进程：先 terminate()，超时后 kill()。"""
-    if process.returncode is not None:
-        return
-    try:
-        process.terminate()
-        await asyncio.wait_for(process.wait(), timeout=GRACEFUL_SHUTDOWN_TIMEOUT)
-    except TimeoutError:
-        try:
-            process.kill()
-            await process.wait()
-        except (ProcessLookupError, OSError) as e:
-            logger.debug(f"[BackgroundTask] kill/wait 异常（进程可能已退出）: {e}")
-    except ProcessLookupError:
-        logger.debug("[BackgroundTask] 进程已退出，无需终止")
-
-
 async def _close_process_transport(proc: asyncio.subprocess.Process) -> None:
     """显式关闭子进程 transport。
 
@@ -162,9 +105,7 @@ async def _close_process_transport(proc: asyncio.subprocess.Process) -> None:
 
 def _make_sentinel() -> str:
     """生成唯一哨兵标记，用于区分命令输出边界。"""
-    return (
-        f"{_SENTINEL_PREFIX}{uuid.uuid4().hex[:_TASK_ID_HEX_LENGTH]}{_SENTINEL_SUFFIX}"
-    )
+    return new_task_id(_SENTINEL_PREFIX) + _SENTINEL_SUFFIX
 
 
 class LocalShellSession:
@@ -415,21 +356,6 @@ class ShellSessionManager:
 
     def __init__(self) -> None:
         self._sessions: dict[str, LocalShellSession] = {}
-        self._bg_manager: BackgroundTaskManager | None = None
-
-    @property
-    def bg_manager(self) -> BackgroundTaskManager:
-        """获取后台任务管理器（懒初始化）。"""
-        if self._bg_manager is None:
-            from lumi.agents.runtime.bg_process import BackgroundTaskManager
-
-            self._bg_manager = BackgroundTaskManager()
-        return self._bg_manager
-
-    @property
-    def has_bg_manager(self) -> bool:
-        """后台任务管理器是否已初始化。"""
-        return self._bg_manager is not None
 
     def get_session(
         self, thread_id: str, working_dir: str | None = None
@@ -455,8 +381,7 @@ class ShellSessionManager:
 
     async def close_all(self) -> None:
         """关闭所有会话并清理后台任务。"""
-        if self._bg_manager is not None:
-            await self._bg_manager.cleanup_all()
+        await get_bg_manager().cleanup_all()
         get_task_registry().cleanup()
         for session in self._sessions.values():
             await session.close()

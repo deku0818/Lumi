@@ -2,9 +2,8 @@
 
 from __future__ import annotations
 
-from lumi.agents.core.meta_message import injected_prefix
+from lumi.agents.core.meta_message import injected_prefix, visible_user_text
 from lumi.gateway.bridge.core import AgentBridge
-from lumi.sessions.message_text import visible_user_text
 
 _build = AgentBridge._build_user_message
 

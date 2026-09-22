@@ -1,7 +1,7 @@
-"""Folder / workspace 管理（从 AgentBridge 拆出的职责子模块）。
+"""Folder / workspace 管理：会话项目切换与本会话临时可访问目录。
 
-folder 状态（_extra_folders / _notified_folders）仍归属 AgentBridge；本类持
-bridge 反向引用，逻辑逐字照搬自原 AgentBridge。
+临时目录状态（``extra_folders`` / 已通知快照）归本类所有；bridge 反向引用只用来
+触达运行时 context（权限引擎）与项目切换的连带动作（MCP 池 / checkpoint 元数据 / shell）。
 """
 
 from __future__ import annotations
@@ -14,6 +14,7 @@ from lumi.agents.runtime.shell_session import get_shell_session_manager
 from lumi.models import provider_store
 
 if TYPE_CHECKING:
+    from lumi.agents.permissions.engine import PermissionEngine
     from lumi.gateway.bridge.core import AgentBridge
 
 
@@ -40,6 +41,17 @@ class FolderManager:
 
     def __init__(self, bridge: AgentBridge) -> None:
         self._bridge = bridge
+        # 本会话临时添加的额外可访问目录（不持久化，连接断开即失效）
+        self.extra_folders: list[str] = []
+        # 上次通知模型时的目录快照，用于在下一条用户消息注入增减变更提醒
+        self._notified_folders: set[str] = set()
+
+    @property
+    def _engine(self) -> PermissionEngine | None:
+        """本会话的权限引擎；``initialize()`` 之前为 None——此时只记账不同步引擎，
+        建连后的首次 initialize 会按 extra_folders 重放。"""
+        context = self._bridge._context
+        return context.permission_engine if context is not None else None
 
     async def set_workspace(self, path: str) -> dict:
         """把本会话（bridge）的项目切到 path——项目随会话绑定。
@@ -70,25 +82,23 @@ class FolderManager:
         （「添加文件夹」）存于引擎独立字段、跨 rebase 自动保留，无需重新加回。
         config hooks 与引擎独立，随项目切换重载（下一轮 _stream 注入 per-run）。
         """
-        b = self._bridge
-        b._config_hooks = build_config_hooks(target)
-        engine = b._context.permission_engine if b._context else None
-        if engine is None:
-            return
-        engine.rebase(target)
+        self._bridge._config_hooks = build_config_hooks(target)
+        engine = self._engine
+        if engine is not None:
+            engine.rebase(target)
 
     def add_folder(self, path: str) -> dict:
         """临时把目录加进本会话可访问范围（仅内存，不持久化）。"""
-        b = self._bridge
         target = Path(path).expanduser().resolve()
         if not target.is_dir():
             raise ValueError(f"目录不存在: {target}")
         folder = str(target)
-        if folder not in b._extra_folders:
-            b._extra_folders.append(folder)
-            if b._context is not None and b._context.permission_engine is not None:
-                b._context.permission_engine.add_ephemeral_workspace(folder)
-        return {"folders": list(b._extra_folders)}
+        if folder not in self.extra_folders:
+            self.extra_folders.append(folder)
+            engine = self._engine
+            if engine is not None:
+                engine.add_ephemeral_workspace(folder)
+        return {"folders": list(self.extra_folders)}
 
     def widen_for_violations(self, violations: list[str]) -> None:
         """批准越界操作 → 把路径所在目录纳入本会话工作区，等价于替用户点「添加文件夹」。
@@ -97,30 +107,28 @@ class FolderManager:
         """
         for raw in violations:
             directory = _enclosing_dir(raw)
-            if directory is None:
-                continue
-            self.add_folder(str(directory))
+            if directory is not None:
+                self.add_folder(str(directory))
 
     def remove_folder(self, path: str) -> dict:
         """移除临时添加的目录。"""
-        b = self._bridge
         folder = str(Path(path).expanduser().resolve())
-        if folder in b._extra_folders:
-            b._extra_folders.remove(folder)
-            if b._context is not None and b._context.permission_engine is not None:
-                b._context.permission_engine.remove_ephemeral_workspace(folder)
-        return {"folders": list(b._extra_folders)}
+        if folder in self.extra_folders:
+            self.extra_folders.remove(folder)
+            engine = self._engine
+            if engine is not None:
+                engine.remove_ephemeral_workspace(folder)
+        return {"folders": list(self.extra_folders)}
 
     def drain_folder_note(self) -> str:
         """对比上次通知后的额外目录增减，生成 system-reminder 文本（无变更返回空串）。
 
         与快照做差集：添加后又移除的目录自然抵消，不产生提醒。
         """
-        b = self._bridge
-        current = set(b._extra_folders)
-        added = [f for f in b._extra_folders if f not in b._notified_folders]
-        removed = sorted(b._notified_folders - current)
-        b._notified_folders = current
+        current = set(self.extra_folders)
+        added = [f for f in self.extra_folders if f not in self._notified_folders]
+        removed = sorted(self._notified_folders - current)
+        self._notified_folders = current
         if not added and not removed:
             return ""
         lines: list[str] = []
@@ -161,15 +169,3 @@ class FolderManager:
             else "Ultra 编排模式已关闭：回到常规处理，不再主动用 workflow 编排。"
         )
         return "<system-reminder>\n" + body + "\n</system-reminder>\n"
-
-    def add_workspace(self, directory: str) -> None:
-        """持久化工作区目录到权限引擎"""
-        from lumi.utils.logger import logger
-
-        b = self._bridge
-        if b._context and b._context.permission_engine:
-            b._context.permission_engine.add_workspace(directory)
-        else:
-            logger.warning(
-                "[Bridge] add_workspace 跳过: 权限引擎不可用 (dir=%s)", directory
-            )

@@ -4,7 +4,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass, field
 
-from lumi.sessions.message_visibility import should_show_human_message
+from lumi.agents.core.meta_message import should_show_human_message
 
 
 @dataclass

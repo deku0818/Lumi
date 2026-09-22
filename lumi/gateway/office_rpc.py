@@ -14,10 +14,8 @@ import tempfile
 from pathlib import Path
 
 from lumi.gateway import toolbox
+from lumi.utils.config import get_config
 from lumi.utils.hashing import short_hash
-from lumi.utils.read_config import get_config
-
-OFFICE_METHODS = frozenset({"render_office"})
 
 OFFICE_EXTS = frozenset({".docx", ".xlsx", ".pptx"})
 _RENDER_TIMEOUT = 120
@@ -28,60 +26,11 @@ _RENDER_VERSION = 2
 # xlsx 增强脚本：officecli 忠实还原 Excel 列宽，窄列内容被截断后静态页无法像
 # Excel 那样拖宽列——注入列头拖拽调宽 + 双击自动适应内容宽。初始列宽不动（保真），
 # 交互仅是增强；iframe 沙箱为 opaque origin，父页够不到内嵌 DOM，只能在产物里注入。
-_XLSX_RESIZE_JS = """
-<script>
-(function () {
-  var ctx = document.createElement('canvas').getContext('2d');
-  function syncWidth(table) {
-    var sum = 0;
-    table.querySelectorAll('colgroup col').forEach(function (c) {
-      sum += c.getBoundingClientRect().width;
-    });
-    table.style.width = sum + 'px';
-  }
-  function autofit(table, col, idx) {
-    var w = 30;
-    table.querySelectorAll('tbody tr').forEach(function (tr) {
-      var td = tr.children[idx + 1]; // +1 跳过行号 th
-      if (!td || !td.textContent) return;
-      var s = getComputedStyle(td);
-      ctx.font = s.fontWeight + ' ' + s.fontSize + ' ' + s.fontFamily;
-      w = Math.max(w, ctx.measureText(td.textContent).width + 14);
-    });
-    col.style.width = w + 'px';
-    syncWidth(table);
-  }
-  document.querySelectorAll('table').forEach(function (table) {
-    var cols = table.querySelectorAll('colgroup col:not(.row-header-col)');
-    table.querySelectorAll('thead .col-header').forEach(function (th, i) {
-      var col = cols[i];
-      if (!col) return;
-      var grip = document.createElement('span');
-      grip.style.cssText =
-        'position:absolute;right:-4px;top:0;width:9px;height:100%;cursor:col-resize;z-index:5';
-      th.style.position = 'relative';
-      th.appendChild(grip);
-      grip.addEventListener('dblclick', function () { autofit(table, col, i); });
-      grip.addEventListener('mousedown', function (e) {
-        e.preventDefault();
-        var startX = e.clientX;
-        var startW = col.getBoundingClientRect().width;
-        function move(ev) {
-          col.style.width = Math.max(24, startW + ev.clientX - startX) + 'px';
-          syncWidth(table);
-        }
-        function up() {
-          document.removeEventListener('mousemove', move);
-          document.removeEventListener('mouseup', up);
-        }
-        document.addEventListener('mousemove', move);
-        document.addEventListener('mouseup', up);
-      });
-    });
-  });
-})();
-</script>
-"""
+_XLSX_RESIZE_JS = (
+    "<script>\n"
+    + (Path(__file__).with_name("xlsx_resize.js")).read_text(encoding="utf-8")
+    + "</script>\n"
+)
 
 
 # 本机 .NET 需要 invariant globalization 模式（首次撞 ICU 缺失后置位，进程内记住）
@@ -169,6 +118,8 @@ def render_office(path: str) -> dict:
     return {"ok": True, "html_path": str(out)}
 
 
-async def dispatch_office(method: str, params: dict) -> dict:
-    """执行一个 Office RPC 方法（method 已确认属于 OFFICE_METHODS）。"""
+async def _render(params: dict) -> dict:
     return await asyncio.to_thread(render_office, params.get("path") or "")
+
+
+HANDLERS = {"render_office": _render}

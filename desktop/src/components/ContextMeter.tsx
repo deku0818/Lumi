@@ -92,7 +92,7 @@ export function ContextMeter({
         side="top"
         align="end"
         sideOffset={10}
-        className="w-61 rounded-2xl border-line bg-panel p-3.5"
+        className="w-61 rounded-2xl bg-panel p-3.5"
       >
         <div className="mb-3 flex items-center justify-between">
           <span className="text-[12.5px] font-semibold text-ink">{t('ctx.title')}</span>

@@ -29,7 +29,7 @@ _DRAIN_GRACE_SECONDS = 3.0
 async def gateway_process():
     """进程级运行时上下文：进入时启动共享子系统，退出时收尾。任何 channel 复用。"""
     from lumi.models import catalog
-    from lumi.utils.read_config import get_config
+    from lumi.utils.config import get_config
 
     get_config().apply_env()
 
@@ -41,7 +41,7 @@ async def gateway_process():
     cron_runtime = None
     try:
         delivery = DeliveryManager()
-        delivery.register(hub.delivery)
+        delivery.register(hub)
         cron_runtime = setup_cron(delivery, on_job_status=hub.on_cron_job_status)
         # 任务增删改（agent 工具 / desktop UI 两条路都经此 store）→ 广播 cron.jobs，
         # 驱动前端实时刷新列表，无需手动 Ctrl+R

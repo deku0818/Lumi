@@ -4,7 +4,7 @@ from __future__ import annotations
 
 from langchain_core.messages import AIMessage, HumanMessage, SystemMessage, ToolMessage
 
-from lumi.sessions.message_text import extract_messages_as_text
+from lumi.agents.core.meta_message import extract_messages_as_text
 
 
 def test_roles_and_tags():

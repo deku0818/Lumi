@@ -15,14 +15,6 @@ type CheckpointMode = Literal["memory", "sqlite", "postgres"]
 class AgentsConfig(BaseModel):
     """Agents配置类"""
 
-    tools: list[str] = Field(
-        default=[],
-        description="启用的工具列表（白名单），空列表表示启用所有工具",
-    )
-    disabled_tools: list[str] = Field(
-        default=[],
-        description="禁用的工具列表（黑名单），优先级高于 tools",
-    )
     max_tokens: int = Field(
         default=8192,
         description="模型单次输出 token 数的**兜底**值：优先用按模型配置的覆盖值，"
@@ -135,17 +127,6 @@ class ToolArgsConfig(BaseModel):
         # 将所有额外字段存储下来
         self._param_mappings = {k: v for k, v in data.items() if isinstance(v, list)}
 
-    def get_allowed_tools_for_param(self, param_name: str) -> list:
-        """获取可以接收指定参数的工具列表
-
-        Args:
-            param_name: 参数名称
-
-        Returns:
-            工具名称列表，如果参数不存在则返回空列表
-        """
-        return getattr(self, param_name, [])
-
     def get_all_param_mappings(self) -> dict:
         """获取所有参数到工具的映射关系
 
@@ -154,17 +135,6 @@ class ToolArgsConfig(BaseModel):
         """
         # 返回存储的参数映射
         return getattr(self, "_param_mappings", {})
-
-
-class ToolOffloadConfig(BaseModel):
-    """工具结果卸载配置类
-
-    用于配置将特定工具的大量返回结果卸载到文件系统，避免占用过多上下文窗口。
-    """
-
-    enabled: bool = Field(default=False, description="是否启用工具结果卸载")
-    token_threshold: int = Field(default=2000, description="触发卸载的token阈值")
-    tools: list = Field(default=[], description="需要卸载结果的工具列表")
 
 
 class ModelTypeParamsConfig(BaseModel):
@@ -204,22 +174,6 @@ class SkillExecutionConfig(BaseModel):
     enabled: bool = Field(default=True, description="是否启用技能命令执行")
     command_timeout: float = Field(default=10.0, description="命令执行超时时间(秒)")
     max_output_bytes: int = Field(default=10_000, description="命令输出最大字节数")
-
-
-class PTCConfig(BaseModel):
-    """PTC (Programmatic Tool Calling) 配置
-
-    将 MCP 工具转换为可直接调用的 Python 函数，
-    使模型可以通过生成代码调用工具，而非每次生成 JSON。
-    """
-
-    enabled: bool = Field(default=True, description="是否启用 PTC")
-    tools: list[str] = Field(
-        default=[], description="启用 PTC 的 MCP 工具列表，空表示所有 MCP 工具"
-    )
-    disabled_tools: list[str] = Field(
-        default=[], description="排除的工具列表，优先级高于 tools"
-    )
 
 
 class FilesystemConfig(BaseModel):
@@ -280,17 +234,11 @@ class Config(BaseModel):
     tool_args: ToolArgsConfig = Field(
         default_factory=ToolArgsConfig, description="工具参数配置"
     )
-    tool_offload: ToolOffloadConfig = Field(
-        default_factory=ToolOffloadConfig, description="工具结果卸载配置"
-    )
     llm_params: LlmParamsConfig = Field(
         default_factory=LlmParamsConfig, description="LLM参数配置"
     )
     skill_execution: SkillExecutionConfig = Field(
         default_factory=SkillExecutionConfig, description="技能命令执行配置"
-    )
-    ptc: PTCConfig = Field(
-        default_factory=PTCConfig, description="PTC (Programmatic Tool Calling) 配置"
     )
     filesystem: FilesystemConfig = Field(
         default_factory=FilesystemConfig, description="文件系统工具配置"

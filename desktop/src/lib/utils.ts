@@ -10,10 +10,6 @@ export function cn(...inputs: ClassValue[]) {
 // trafficLightPosition 为唯一事实源（x 由本间距派生、y 含用户目感微调），改这里要同步那边。
 export const FLOAT_GAP = 10
 
-// L2 卡片配方（审批卡 / 后台任务卡共用）：与 SettingsKit 的 Card（L1，设置页容器）
-// 是不同层级的材质——值只此一份，别在组件里手写字面量
-export const CARD_L2 = 'border border-line/60 rounded-lg bg-surface/50'
-
 // 文本截断与路径文件名提取（工具标题 / 计划对话框等共用）
 export const clip = (s: string, n = 72) => (s.length > n ? s.slice(0, n) + '…' : s)
 // 把未知的工具 args 安全收成 Record，便于按字段取值（工具标题 / 审批参数共用）
@@ -28,7 +24,7 @@ export const WIN_PATH = /^[a-zA-Z]:[\\/]|^\\\\/
 export const basename = (p: string) =>
   (WIN_PATH.test(p) ? p.split(/[\\/]/) : p.split('/')).filter(Boolean).pop() || p
 
-// token 数格式化（≥1k 显示 x.xk）。与 TUI lumi/tui/widgets/agent_group.py::_format_tokens 同口径
+// token 数格式化（≥1k 显示 x.xk）
 export const fmtTokens = (n: number) => (n >= 1000 ? `${(n / 1000).toFixed(1)}k` : String(n))
 
 // token 数完整写法（千分位）：窗口 / 上限这类"要看准确数字"的场合，配合 fmtTokens 的缩写用
@@ -70,7 +66,7 @@ export const keyBackend = (key: string) => {
 }
 
 // 机器识别色：本地走品牌金，远程从语法高亮调色板取（Sidebar / ModelPicker / 设置统一）
-export const MACHINE_COLORS = ['#6fc7c0', '#e58a52', '#c79bd6', '#7fb3e0']
+const MACHINE_COLORS = ['#6fc7c0', '#e58a52', '#c79bd6', '#7fb3e0']
 export function machineColor(id: string, machines: { id: string }[]): string {
   if (id === 'local') return 'var(--color-accent)'
   const idx = machines.filter((m) => m.id !== 'local').findIndex((m) => m.id === id)

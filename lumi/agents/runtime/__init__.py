@@ -4,8 +4,6 @@
 
 - ``shell_session``: 持久化 bash shell 会话管理
 - ``bg_process``: 后台 Bash 进程生命周期管理
-- ``checkpoint``: 文件级快照与回退
-- ``file_tracker``: 文件修改追踪
 - ``bg_tasks``: 后台任务元数据注册表
 
 外部使用统一走全路径（如 ``from lumi.agents.runtime.shell_session import ...``），

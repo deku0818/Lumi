@@ -1,5 +1,5 @@
 """结构化输出增强测试：JSON Schema 校验 + 连续失败保护 + 真工具闭包 +
-Stop hook 联动 + enrich。"""
+Stop hook 联动。"""
 
 from __future__ import annotations
 
@@ -47,7 +47,8 @@ class _StructuredFakeToolNode:
     保留真实校验逻辑（Pydantic args_schema + 闭包内 jsonschema），只替换 ToolNode
     这层基础设施——真实 ToolNode 在 graph 外执行需 LangGraph runtime context。
     与真实 ToolNode 一致：工具抛异常（如 Pydantic required 校验失败）经
-    handle_tool_errors 转为 error ToolMessage。
+    handle_tool_errors 转为 error ToolMessage；输出形态同 ``_combine_tool_outputs``
+    （无 Command → ``{"messages": [...]}``，有 Command → ``[Command | {"messages"}]``）。
     """
 
     def __init__(self, tools, handle_tool_errors=None):
@@ -67,7 +68,7 @@ class _StructuredFakeToolNode:
                 status="error",
             )
         if isinstance(result, Command):
-            return result
+            return [result]
         return {"messages": [result]}
 
 
@@ -85,7 +86,11 @@ class _MixedFakeToolNode:
                     "messages": [_ok_tm("1")],
                 }
             ),
-            ToolMessage(content="x" * 100, tool_call_id="2", name="bash"),
+            {
+                "messages": [
+                    ToolMessage(content="x" * 100, tool_call_id="2", name="bash")
+                ]
+            },
         ]
 
 
@@ -276,19 +281,10 @@ async def test_tool_executor_structured_success(monkeypatch):
     monkeypatch.setattr(nodes, "ToolNode", _StructuredFakeToolNode)
     state = {"messages": [_call({"name": "Lumi"})], "output_schema": SCHEMA}
     result = await tool_executor(state, _runtime([]), {})
-    assert isinstance(result, Command)
-    assert result.update["structured_output"] == {"name": "Lumi"}
-
-
-async def test_tool_executor_structured_enrich(monkeypatch):
-    monkeypatch.setattr(nodes, "ToolNode", _StructuredFakeToolNode)
-    state = {
-        "messages": [_call({"name": "Lumi"})],
-        "output_schema": SCHEMA,
-        "output_enrich": [{"target": "$", "data": {"source": "lumi"}}],
-    }
-    result = await tool_executor(state, _runtime([]), {})
-    assert result.update["structured_output"]["source"] == "lumi"
+    # 工具 Command 直返：[Command, {"messages": 普通结果 + reminder}]
+    assert isinstance(result, list) and isinstance(result[0], Command)
+    assert result[0].update["structured_output"] == {"name": "Lumi"}
+    assert result[1] == {"messages": []}
 
 
 async def test_tool_executor_structured_failure_goes_normal_path(monkeypatch):
@@ -421,20 +417,16 @@ async def test_structured_tool_nullable_required_accepts_null():
     assert result.update["structured_output"] == {"mid": None}
 
 
-# === Fix: 混合 list 路径仍 enrich ===
+# === 混合输出：Command 控制流 + 普通 ToolMessage ===
 
 
-async def test_tool_executor_mixed_list_applies_enrich(monkeypatch):
+async def test_tool_executor_mixed_output_keeps_command_and_messages(monkeypatch):
     monkeypatch.setattr(nodes, "ToolNode", _MixedFakeToolNode)
-    state = {
-        "messages": [_call({"name": "Lumi"})],
-        "output_schema": SCHEMA,
-        "output_enrich": [{"target": "$", "data": {"source": "lumi"}}],
-    }
+    state = {"messages": [_call({"name": "Lumi"})], "output_schema": SCHEMA}
     result = await tool_executor(state, _runtime([]), {})
-    assert isinstance(result, list)
-    cmd = next(item for item in result if isinstance(item, Command))
-    assert cmd.update["structured_output"]["source"] == "lumi"  # 混合路径 enrich 生效
+    cmd, update = result
+    assert cmd.update["structured_output"] == {"name": "Lumi"}
+    assert [m.tool_call_id for m in update["messages"]] == ["2"]
 
 
 # === Fix: 内部工具不泄漏给用户 hook ===

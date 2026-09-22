@@ -11,6 +11,7 @@ import json
 from pathlib import Path
 
 from lumi.gateway.bridge import EventKind
+from lumi.gateway.protocol import ServerEvent
 from lumi.gateway.session import IMPLEMENTED_METHODS
 
 # protocol/ 与 lumi/ 同级，位于仓库根
@@ -20,24 +21,10 @@ _PROTOCOL = json.loads(
     )
 )
 
-# 服务端直接发出但不经 EventKind 的事件（握手帧 + cron/bg/渠道/MCP 广播）
-_DIRECT_EVENTS = {
-    "gateway.ready",
-    "cron.result",
-    "cron.running",
-    "cron.jobs",
-    "bg_tasks.update",
-    "channel.activity",
-    "session.title",
-    "mcp.status",
-    "env.progress",
-    "env.state",
-}
-
 
 def test_event_names_match_source_of_truth():
-    """后端产出的全部 wire 事件名（EventKind 值 + 握手帧）== events.json 声明。"""
-    produced = {str(e) for e in EventKind} | _DIRECT_EVENTS
+    """后端产出的全部 wire 事件名（EventKind + ServerEvent 成员值）== events.json 声明。"""
+    produced = {str(e) for e in EventKind} | {str(e) for e in ServerEvent}
     declared = set(_PROTOCOL["events"])
     assert produced == declared, (
         f"协议漂移：后端独有={produced - declared}，json 独有={declared - produced}"

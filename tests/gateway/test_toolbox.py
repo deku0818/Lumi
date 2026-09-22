@@ -23,7 +23,7 @@ from lumi.gateway.toolbox import (
     skills_status,
     sync_lark_skills,
 )
-from lumi.utils.read_config import get_config
+from lumi.utils.config import get_config
 
 
 @pytest.fixture

@@ -9,6 +9,9 @@ from __future__ import annotations
 import re
 from pathlib import Path, PurePosixPath
 
+from lumi.agents.permissions.matcher import COMMAND_ARG_KEYS, extract_arg
+from lumi.agents.permissions.models import PATH_ARG_KEYS
+
 # 写入类工具（只检查这些，读取类工具不阻断）
 _WRITE_TOOLS: frozenset[str] = frozenset({"write", "edit"})
 
@@ -91,10 +94,11 @@ def is_bypass_immune(tool_name: str, tool_args: dict) -> tuple[bool, str]:
 
 def _check_file_tool(tool_args: dict) -> tuple[bool, str]:
     """检查 write/edit 工具的目标路径是否受保护。"""
-    file_path = tool_args.get("file_path") or tool_args.get("path")
-    if not isinstance(file_path, str):
-        if file_path is not None:
-            return True, f"file_path 参数类型异常: {type(file_path).__name__}"
+    file_path = extract_arg(tool_args, PATH_ARG_KEYS)
+    if file_path is None:
+        # 给了参数却不是字符串：fail-closed 交审批
+        if any(tool_args.get(k) is not None for k in PATH_ARG_KEYS):
+            return True, "file_path 参数类型异常"
         return False, ""
 
     try:
@@ -131,10 +135,10 @@ def _check_file_tool(tool_args: dict) -> tuple[bool, str]:
 
 def _check_bash_tool(tool_args: dict) -> tuple[bool, str]:
     """检查 bash 命令是否包含危险模式或写入受保护路径。"""
-    command = tool_args.get("command") or tool_args.get("cmd")
-    if not isinstance(command, str):
-        if command is not None:
-            return True, f"command 参数类型异常: {type(command).__name__}"
+    command = extract_arg(tool_args, COMMAND_ARG_KEYS)
+    if command is None:
+        if any(tool_args.get(k) is not None for k in COMMAND_ARG_KEYS):
+            return True, "command 参数类型异常"
         return False, ""
 
     # 检查危险命令模式

@@ -20,9 +20,7 @@
 
 from __future__ import annotations
 
-import copy
 import json
-import re
 from functools import lru_cache
 from typing import Annotated, Any, Literal
 
@@ -34,9 +32,6 @@ from pydantic import BaseModel, Field, create_model
 
 from lumi.agents.core.meta_message import iter_current_turn
 from lumi.utils.logger import logger
-
-# target 合法语法：$ 或 由标识符和 * 组成的点分路径
-_TARGET_PATTERN = re.compile(r"^(?:\$|(?:[a-zA-Z_]\w*|\*)(?:\.(?:[a-zA-Z_]\w*|\*))*)$")
 
 STRUCTURED_OUTPUT_TOOL_NAME = "__structured_output__"
 
@@ -333,93 +328,3 @@ def _build_structured_output_tool(user_schema: dict[str, Any]) -> StructuredTool
         description=tool_description,
         args_schema=args_model,
     )
-
-
-# === output_enrich：静态数据按路径注入 ===
-
-
-def apply_enrich_to_command(
-    merged: Command, enrich_rules: list[dict] | None
-) -> Command:
-    """``merged.update`` 里有 ``structured_output`` 时按规则做 enrich；失败回原值。
-
-    工具闭包拿不到 ``state.output_enrich``，enrich 必须在节点层做。这里把
-    "取 structured_output → apply_output_enrich → 异常静默回灌"封到一处，
-    让 ``tool_executor`` 只剩 wiring。
-    """
-    if not enrich_rules or not isinstance(merged, Command):
-        return merged
-    structured = (merged.update or {}).get("structured_output")
-    if not structured:
-        return merged
-    try:
-        merged.update["structured_output"] = apply_output_enrich(
-            structured, enrich_rules
-        )
-    except Exception:
-        logger.error(
-            "[structured_output] enrich 执行失败，返回未注入的原始结构化输出",
-            exc_info=True,
-        )
-    return merged
-
-
-def apply_output_enrich(data: dict, enrich_rules: list[dict]) -> dict:
-    """将静态数据按 target 表达式注入到结构化输出中。
-
-    所有异常和不匹配情况均静默处理，仅记录日志。返回注入后的新数据（不改原始）。
-    """
-    if not enrich_rules:
-        return data
-    result = copy.deepcopy(data)
-    for i, rule in enumerate(enrich_rules):
-        try:
-            target = rule.get("target", "$")
-            enrich_data = rule.get("data", {})
-            if not enrich_data:
-                continue
-            if not _TARGET_PATTERN.match(target):
-                logger.warning(
-                    "[OutputEnrich] rule #%d target '%s' 语法无效，跳过", i, target
-                )
-                continue
-            matched = _inject_at_path(result, target, enrich_data)
-            if not matched:
-                logger.warning(
-                    "[OutputEnrich] rule #%d target '%s' 未匹配到任何节点，数据未注入",
-                    i,
-                    target,
-                )
-        except Exception:
-            logger.error(
-                "[OutputEnrich] rule #%d 执行失败，跳过: %r", i, rule, exc_info=True
-            )
-    return result
-
-
-def _inject_at_path(data: dict, target: str, enrich_data: dict) -> bool:
-    """返回 True 表示至少命中一个节点"""
-    if target == "$":
-        data.update(enrich_data)
-        return True
-    return _navigate_and_inject(data, target.split("."), enrich_data)
-
-
-def _navigate_and_inject(current, parts: list[str], enrich_data: dict) -> bool:
-    """返回 True 表示至少命中一个节点"""
-    if not parts:
-        if isinstance(current, dict):
-            current.update(enrich_data)
-            return True
-        return False
-    part, rest = parts[0], parts[1:]
-    if part == "*":
-        if isinstance(current, list) and current:
-            hit = False
-            for item in current:
-                hit = _navigate_and_inject(item, rest, enrich_data) or hit
-            return hit
-        return False
-    elif isinstance(current, dict) and part in current:
-        return _navigate_and_inject(current[part], rest, enrich_data)
-    return False

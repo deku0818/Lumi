@@ -23,7 +23,7 @@ def test_missing_returns_defaults(tmp_path):
 
 
 def test_ignores_legacy_yaml(tmp_path):
-    """config.yaml 不再被读取（迁移交给 scripts/migrate_config.py）。"""
+    """config.yaml 不再被读取。"""
     (tmp_path / "config.yaml").write_text("style: code\n", encoding="utf-8")
     cfg = LumiConfig(str(tmp_path))
     assert cfg.config.style == "default"  # 未读 yaml
@@ -88,5 +88,5 @@ def test_toolbox_is_machine_level(tmp_path, monkeypatch):
 
 
 def test_explicit_config_dir_owns_toolbox(tmp_path):
-    """显式指定（--config-dir / LUMI_CONFIG_DIR）时工具箱跟着它——容器与测试靠这条隔离。"""
+    """显式指定（构造参数 / LUMI_CONFIG_DIR）时工具箱跟着它——容器与测试靠这条隔离。"""
     assert LumiConfig(str(tmp_path)).bin_dir == tmp_path / "bin"

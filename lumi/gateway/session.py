@@ -23,18 +23,25 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import TYPE_CHECKING
 
-from lumi.agents.core.meta_message import declared_items
+from lumi.agents.core.meta_message import (
+    declared_items,
+    extract_text_content,
+    should_show_human_message,
+    visible_user_text,
+)
 from lumi.agents.tools.providers.todo import todos_payload
-from lumi.gateway import project_config
-from lumi.gateway.bridge import AgentBridge, EventKind
+from lumi.gateway import (
+    channel_rpc,
+    cron_rpc,
+    env_rpc,
+    mcp_rpc,
+    office_rpc,
+    project_config,
+)
+from lumi.gateway.bridge import AgentBridge, EventKind, providers
 from lumi.gateway.broadcast import BroadcastHub, serialize_bg_tasks
 from lumi.gateway.channel import Channel
-from lumi.gateway.channel_rpc import CHANNEL_METHODS, dispatch_channel
 from lumi.gateway.channels.manager import manager
-from lumi.gateway.cron_rpc import CRON_METHODS, dispatch_cron
-from lumi.gateway.env_rpc import ENV_METHODS, dispatch_env
-from lumi.gateway.mcp_rpc import MCP_METHODS, dispatch_mcp
-from lumi.gateway.office_rpc import OFFICE_METHODS, dispatch_office
 from lumi.gateway.projects import (
     add_project,
     list_projects,
@@ -43,12 +50,11 @@ from lumi.gateway.projects import (
     set_default_project,
     touch_project,
 )
-from lumi.gateway.protocol import bridge_event_to_wire, event_frame
+from lumi.gateway.protocol import ServerEvent, bridge_event_to_wire, event_frame
 from lumi.sessions import session_model
-from lumi.sessions.message_text import extract_text_content, visible_user_text
-from lumi.sessions.message_visibility import should_show_human_message
 from lumi.sessions.session_meta import delete_meta, load_all, update_meta
 from lumi.sessions.session_store import list_sessions
+from lumi.sessions.usage import last_ai_usage
 from lumi.utils.constants import (
     FEISHU_THREAD_PREFIX,
     NOTIFICATION_POLL_INTERVAL,
@@ -202,7 +208,6 @@ async def _list_sessions(bridge: AgentBridge, params: dict) -> dict:
     # 不再按当前进程 cwd 过滤，故切项目不影响列表完整性。
     sessions = await list_sessions(
         bridge.graph,
-        current_thread_id="",
         workspace="",
         limit=params.get("limit", 50),
     )
@@ -277,7 +282,7 @@ async def _load_history(bridge: AgentBridge, params: dict) -> dict:
     model, context_window = _snapshot_model_window(messages, thread_id)
     return {
         "items": _history_items(messages),
-        "usage": AgentBridge._extract_last_ai_usage(snap),
+        "usage": last_ai_usage(snap),
         "model": model,
         "context_window": context_window,
         # 右栏任务进度的历史还原：与 todos.update 事件同一真相源（state.todos）
@@ -310,15 +315,15 @@ async def _list_commands(session: GatewaySession, params: dict) -> dict:
 
 
 async def _list_providers(session: GatewaySession, params: dict) -> dict:
-    return session._bridge.list_providers()
+    return providers.list_providers()
 
 
 async def _search_catalog(session: GatewaySession, params: dict) -> dict:
-    return session._bridge.search_catalog(params.get("query", ""))
+    return providers.search_catalog(params.get("query", ""))
 
 
 async def _test_provider(session: GatewaySession, params: dict) -> dict:
-    return await session._bridge.test_provider(
+    return await providers.test_provider(
         params.get("base_url", ""),
         params.get("api_key", ""),
         params.get("model", ""),
@@ -328,7 +333,7 @@ async def _test_provider(session: GatewaySession, params: dict) -> dict:
 # 与其余 provider 写操作一致持锁（store 的读-改-写，见 _set_effort）
 async def _set_provider(session: GatewaySession, params: dict) -> dict:
     async with session._run.lock:
-        return session._bridge.set_provider(
+        return providers.set_provider(
             params.get("provider", ""), params.get("model", "")
         )
 
@@ -349,19 +354,19 @@ async def _set_session_model(session: GatewaySession, params: dict) -> dict:
 
 async def _save_provider(session: GatewaySession, params: dict) -> dict:
     async with session._run.lock:
-        return session._bridge.save_provider(params.get("profile", {}))
+        return providers.save_provider(params.get("profile", {}))
 
 
 async def _delete_provider(session: GatewaySession, params: dict) -> dict:
     async with session._run.lock:
-        return session._bridge.delete_provider(params.get("id", ""))
+        return providers.delete_provider(params.get("id", ""))
 
 
 async def _set_effort(session: GatewaySession, params: dict) -> dict:
     # 与其余 provider 写操作一致持锁：set_effort 也走 provider_store load→改→save，
     # 不持锁会与并发的 set/save/delete_provider 互相 clobber（读改写丢更新）。
     async with session._run.lock:
-        return session._bridge.set_effort(
+        return providers.set_effort(
             params.get("provider", ""), params.get("model", ""), params.get("level", "")
         )
 
@@ -369,16 +374,14 @@ async def _set_effort(session: GatewaySession, params: dict) -> dict:
 async def _set_classifier(session: GatewaySession, params: dict) -> dict:
     # 同样走 provider_store load→改→save，持锁防与并发 provider 写操作 clobber。
     async with session._run.lock:
-        return session._bridge.set_classifier(
+        return providers.set_classifier(
             params.get("provider", ""), params.get("model", "")
         )
 
 
 async def _set_titler(session: GatewaySession, params: dict) -> dict:
     async with session._run.lock:
-        return session._bridge.set_titler(
-            params.get("provider", ""), params.get("model", "")
-        )
+        return providers.set_titler(params.get("provider", ""), params.get("model", ""))
 
 
 # 刻意不持 _run.lock：与 set_provider 相反，这里就是要在运行中改共享 context 的
@@ -390,7 +393,7 @@ async def _set_tool_mode(session: GatewaySession, params: dict) -> dict:
 # chdir / 权限边界 / shell 会话都是进程级状态，须与运行中的轮次互斥
 async def _set_workspace(session: GatewaySession, params: dict) -> dict:
     async with session._run.lock:
-        result = await session._bridge.set_workspace(params.get("path", ""))
+        result = await session._bridge.folders.set_workspace(params.get("path", ""))
     touch_project(result["workspace"])
     return result
 
@@ -502,12 +505,12 @@ async def _project_copy_builtin(session: GatewaySession, params: dict) -> dict:
 # 改写本连接 engine 的边界，与运行中的轮次互斥
 async def _add_folder(session: GatewaySession, params: dict) -> dict:
     async with session._run.lock:
-        return session._bridge.add_folder(params.get("path", ""))
+        return session._bridge.folders.add_folder(params.get("path", ""))
 
 
 async def _remove_folder(session: GatewaySession, params: dict) -> dict:
     async with session._run.lock:
-        return session._bridge.remove_folder(params.get("path", ""))
+        return session._bridge.folders.remove_folder(params.get("path", ""))
 
 
 def _model_payload(target: session_model.SessionModel) -> dict:
@@ -563,7 +566,7 @@ async def _switch_session(session: GatewaySession, params: dict) -> dict:
             # 项目目录可能已被删/改名：绑定失败也要继续切会话，否则整个 RPC 报错、
             # 前端切会话卡死。降级为「不绑项目，仍打开会话」。
             try:
-                await session._bridge.set_workspace(workspace)
+                await session._bridge.folders.set_workspace(workspace)
                 bound_this_call = True
             except (ValueError, OSError) as e:
                 logger.warning(
@@ -744,15 +747,19 @@ _RPC_HANDLERS = {
     "clear_finished_bg_tasks": _clear_finished_bg_tasks,
 }
 
+# 领域 RPC 分发表：各 *_rpc 模块导出 HANDLERS（签名 (params) -> dict），与上面
+# 会话绑定的 _RPC_HANDLERS（签名 (session, params)）区别仅在是否需要会话上下文。
+_DOMAIN_HANDLERS = {
+    **cron_rpc.HANDLERS,
+    **channel_rpc.HANDLERS,
+    **mcp_rpc.HANDLERS,
+    **env_rpc.HANDLERS,
+    **office_rpc.HANDLERS,
+}
+
 # 本服务实现的全部 RPC 方法（供协议契约测试断言与 events.json 一致）
 IMPLEMENTED_METHODS = (
-    frozenset(_RPC_HANDLERS)
-    | _STREAMING_METHODS
-    | CRON_METHODS
-    | CHANNEL_METHODS
-    | MCP_METHODS
-    | ENV_METHODS
-    | OFFICE_METHODS
+    frozenset(_RPC_HANDLERS) | frozenset(_DOMAIN_HANDLERS) | _STREAMING_METHODS
 )
 
 
@@ -788,7 +795,7 @@ class GatewaySession:
 
     def _ready_frame(self) -> dict:
         return event_frame(
-            "gateway.ready",
+            ServerEvent.GATEWAY_READY,
             self._bridge.current_thread_id,
             {
                 "model": self._bridge.model_name,
@@ -823,7 +830,7 @@ class GatewaySession:
         self._hub.register(self._channel, mcp_key=self._bridge.mcp_pool_key)
         payload = self._bridge.mcp_status_payload()
         if payload is not None:
-            await self._channel.send(event_frame("mcp.status", "", payload))
+            await self._channel.send(event_frame(ServerEvent.MCP_STATUS, "", payload))
 
     # ── 断连续接（Case 1）：会话生命周期与 WS 解耦 ──
 
@@ -954,21 +961,18 @@ class GatewaySession:
             return self._bridge.stream_response(
                 params.get("content", ""),
                 tool_mode=params.get("tool_mode", "default"),
-                execution_mode=params.get("execution_mode", "normal"),
                 attachments=params.get("files"),
             )
         if method == "regenerate":
             return self._bridge.stream_regenerate(
                 params.get("message_id", ""),
                 tool_mode=params.get("tool_mode", "default"),
-                execution_mode=params.get("execution_mode", "normal"),
             )
         if method == "edit_resend":
             return self._bridge.stream_edit_resend(
                 params.get("message_id", ""),
                 params.get("content", ""),
                 tool_mode=params.get("tool_mode", "default"),
-                execution_mode=params.get("execution_mode", "normal"),
             )
         return self._bridge.stream_command(
             params.get("name", ""),
@@ -1197,16 +1201,9 @@ class GatewaySession:
         handler = _RPC_HANDLERS.get(method)
         if handler is not None:
             return await handler(self, params)
-        if method in CRON_METHODS:
-            return await dispatch_cron(method, params)
-        if method in CHANNEL_METHODS:
-            return await dispatch_channel(method, params)
-        if method in MCP_METHODS:
-            return await dispatch_mcp(method, params)
-        if method in ENV_METHODS:
-            return await dispatch_env(method, params)
-        if method in OFFICE_METHODS:
-            return await dispatch_office(method, params)
+        domain_handler = _DOMAIN_HANDLERS.get(method)
+        if domain_handler is not None:
+            return await domain_handler(params)
         raise ValueError(f"未知方法: {method}")
 
     async def _run_rpc(self, rid, method: str, params: dict) -> None:

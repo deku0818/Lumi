@@ -1,18 +1,5 @@
 import { useCallback, useEffect, useMemo, useState } from 'react'
-import {
-  Check,
-  ChevronDown,
-  ChevronRight,
-  Folder,
-  FolderPlus,
-  Globe,
-  Pencil,
-  Plus,
-  Radar,
-  Terminal,
-  Trash2,
-  X,
-} from 'lucide-react'
+import { ChevronDown, ChevronRight, Globe, Pencil, Plus, Radar, Terminal, Trash2, X } from 'lucide-react'
 import type {
   McpPromptInfo,
   McpResourceInfo,
@@ -22,19 +9,19 @@ import type {
   McpServerStatus,
   McpTestResult,
   McpTransport,
-  Project,
 } from '../types'
 import type { Gateway } from '../gateway'
+import { useI18n } from '../i18n'
 import { MachineScope, useConnectedEffect } from './MachineTabs'
-import { toast } from './Toast'
-import { DirBrowser } from './DirBrowser'
-import { basename, cn } from '@/lib/utils'
+import { ProjectPicker } from './ProjectPicker'
+import { cn, errorMessage } from '@/lib/utils'
 import {
-  cardShell,
+  ChipInput,
   Empty,
   EntityCard,
   Field,
   FormModal,
+  Loading,
   Pill,
   Section,
   SegmentedControl,
@@ -43,15 +30,9 @@ import {
 } from './SettingsKit'
 import { Button } from '@/components/ui/button'
 import { Switch } from '@/components/ui/switch'
-import {
-  DropdownMenu,
-  DropdownMenuContent,
-  DropdownMenuItem,
-  DropdownMenuSeparator,
-  DropdownMenuTrigger,
-} from '@/components/ui/dropdown-menu'
+import { CARD_L2, CARD_L3, nestedTier } from './glass'
 
-// —— 配置 ↔ 视图的纯函数（与 .demos/mcp-panel.html 同源）——
+// —— 配置 ↔ 视图的纯函数 ——
 const isStdio = (t: McpTransport) => t === 'stdio'
 const transportOf = (s: McpServerConfig): McpTransport =>
   s.transport ?? (s.url ? 'streamable_http' : 'stdio')
@@ -72,10 +53,10 @@ export function McpPanel({
 }: {
   gwFor: (id: string) => Gateway | undefined
 }) {
+  const { t } = useI18n()
   const [machine, setMachine] = useState('local')
   const [scope, setScope] = useState<McpScope>('project')
   const [project, setProject] = useState('') // 项目作用范围下选中的项目路径
-  const [projects, setProjects] = useState<Project[]>([])
   const [servers, setServers] = useState<McpServers>({})
   // 当前 scope 的配置文件绝对路径，由 list_mcp_servers 下发（前端拼 ~/.lumi 既
   // 看不懂又在 --config-dir 时说谎）。未选项目时无目标文件，故为空
@@ -134,38 +115,6 @@ export function McpPanel({
     setProject('')
   }
 
-  // 项目列表随机器加载。默认作用范围就是「项目」，进面板即选中默认项目
-  // （未设默认则取最近使用的），免去「切到项目再选一次项目」两步。
-  useConnectedEffect(
-    machine,
-    () => {
-      let alive = true
-      gwFor(machine)
-        ?.listProjects()
-        .then((r) => {
-          if (!alive) return
-          const ps = r.projects ?? []
-          setProjects(ps)
-          setProject((cur) => cur || ((ps.find((p) => p.default) ?? ps[0])?.path ?? ''))
-        })
-        .catch(() => alive && setProjects([]))
-      return () => {
-        alive = false
-      }
-    },
-    [gwFor, machine],
-  )
-
-  // 「新建项目」落库后刷新列表并选中它；失败要说出来——DirBrowser 已经关了，
-  // 无声失败会让人把 server 存进上一个项目的作用域
-  const createProject = (path: string) =>
-    gw?.addProject(path)
-      .then((r) => {
-        setProjects(r.projects ?? [])
-        setProject(path)
-      })
-      .catch((e) => toast.error('新建项目失败：' + ((e as Error)?.message ?? e)))
-
   useConnectedEffect(machine, reload, [reload])
 
   // 池后台加载完成的进程级广播（App 转发为 window 信号）：面板开着时即时刷徽标
@@ -219,26 +168,19 @@ export function McpPanel({
       <MachineScope value={machine} onChange={setMachine}>
 
       {/* 作用范围行：与实体卡同一张卡壳 token，免得透明度组合独自漂移 */}
-      <div className={cn(cardShell, 'flex items-center gap-3 mb-4 px-3 py-2.5')}>
-        <span className="text-xs text-muted-foreground shrink-0">作用范围</span>
+      <div className={cn(CARD_L2, 'flex items-center gap-3 mb-4 px-3 py-2.5')}>
+        <span className="text-xs text-muted-foreground shrink-0">{t('mcp.scope')}</span>
         <SegmentedControl
           className="shrink-0"
           value={scope}
           onChange={(v) => setScope(v as McpScope)}
           options={[
-            { val: 'global', label: '全局' },
-            { val: 'project', label: '项目' },
+            { val: 'global', label: t('mcp.scopeGlobal') },
+            { val: 'project', label: t('mcp.scopeProject') },
           ]}
         />
-        {inProject && (
-          <ProjectSelect
-            gw={gw}
-            projects={projects}
-            value={project}
-            onChange={setProject}
-            onCreate={createProject}
-          />
-        )}
+        {/* 默认作用范围就是「项目」，进面板即自动选中默认项目，免去「切到项目再选一次」两步 */}
+        {inProject && <ProjectPicker gw={gw} machine={machine} value={project} onChange={setProject} autoDefault />}
         {/* 绝对路径可能很长（Windows 尤甚），行内截断 + title 悬停看全 */}
         <span
           title={path}
@@ -249,28 +191,28 @@ export function McpPanel({
       </div>
 
       <Section
-        title="MCP 服务器"
+        title={t('mcp.title')}
         action={
           ready && (
             <Button variant="outline" size="sm" onClick={() => setEditing(null)}>
               <Plus size={14} className="mr-1" />
-              添加
+              {t('common.add')}
             </Button>
           )
         }
       >
         {!ready ? (
-          <Empty>选择一个项目以管理其专属 MCP 服务器。</Empty>
+          <Empty>{t('mcp.pickProject')}</Empty>
         ) : names.length === 0 ? (
           <Empty>
             {inProject ? (
               <>
-                该项目还没有专属 MCP 服务器。
+                {t('mcp.emptyProject')}
                 <br />
-                它仍会加载全局层的 server；在此「添加」的只对本项目生效。
+                {t('mcp.emptyProjectHint')}
               </>
             ) : (
-              <>还没有 MCP 服务器。点右上「添加」接入第一个。</>
+              t('mcp.emptyGlobal')
             )}
           </Empty>
         ) : (
@@ -337,22 +279,22 @@ function ServerCard({
   onEdit: () => void
   onDelete: () => void
 }) {
-  const t = transportOf(config)
+  const { t } = useI18n()
   const off = config.disabled === true
   // 状态点：绿=已连接（title 显示工具数）、红=失败（title 显示原因）、
   // 灰呼吸=池后台加载中；池未加载过则不显示（避免误导为"离线"）
   const dot = status ? (
     <StatusDot
       tone={status.ok ? 'ok' : 'error'}
-      title={status.ok ? `已连接 · ${status.tools ?? 0} 个工具` : status.error}
+      title={status.ok ? t('mcp.connectedTools', { n: status.tools ?? 0 }) : status.error}
     />
   ) : poolLoading && !off ? (
-    <StatusDot tone="idle" pulse title="正在后台连接…" />
+    <StatusDot tone="idle" pulse title={t('mcp.poolConnecting')} />
   ) : null
   return (
     <EntityCard
       dim={off}
-      icon={isStdio(t) ? <Terminal size={17} /> : <Globe size={17} />}
+      icon={isStdio(transportOf(config)) ? <Terminal size={17} /> : <Globe size={17} />}
       title={name}
       meta={
         <>
@@ -368,7 +310,7 @@ function ServerCard({
             variant="ghost"
             size="icon-sm"
             onClick={onTest}
-            title="测试连接"
+            title={t('mcp.test')}
             className="text-muted-foreground"
           >
             <Radar />
@@ -478,8 +420,10 @@ function toolParams(schema?: Schema, root: Schema = schema ?? {}, depth = 0): Pa
   })
 }
 
-// 单个参数：名称 + 类型胶囊 + 必填/可选；嵌套 object 带「N 个字段」胶囊，点开下钻子框
-function ParamItem({ p }: { p: ParamNode }) {
+// 单个参数：名称 + 类型胶囊 + 必填/可选；嵌套 object 带「N 个字段」胶囊，点开下钻子框。
+// depth = 本参数所在框的层号；下钻出的子框是 depth+1，卡壳据此逐层互换（见 glass.nestedTier）
+function ParamItem({ p, depth }: { p: ParamNode; depth: number }) {
+  const { t } = useI18n()
   const [open, setOpen] = useState(false)
   return (
     <div className="py-2">
@@ -491,7 +435,7 @@ function ParamItem({ p }: { p: ParamNode }) {
           </span>
         )}
         <span className={`text-[10px] ${p.required ? 'text-primary' : 'text-muted-foreground'}`}>
-          {p.required ? '必填' : '可选'}
+          {t(p.required ? 'mcp.required' : 'mcp.optional')}
         </span>
         {p.children.length > 0 && (
           <button
@@ -500,7 +444,7 @@ function ParamItem({ p }: { p: ParamNode }) {
             className="inline-flex items-center gap-1 rounded-full border border-line bg-panel px-2 py-px text-[10.5px] text-muted-foreground hover:border-separator hover:text-ink"
           >
             <ChevronRight size={9} className={`transition-transform ${open ? 'rotate-90' : ''}`} />
-            {p.children.length} 个字段
+            {t('mcp.fields', { n: p.children.length })}
           </button>
         )}
       </div>
@@ -510,9 +454,9 @@ function ParamItem({ p }: { p: ParamNode }) {
         </div>
       )}
       {open && (
-        <div className="mt-2 divide-y divide-line/40 rounded-lg border border-line/70 bg-surface/55 px-3">
+        <div className={cn('mt-2 divide-y divide-line/40 px-3', nestedTier(depth + 1))}>
           {p.children.map((c) => (
-            <ParamItem key={c.name} p={c} />
+            <ParamItem key={c.name} p={c} depth={depth + 1} />
           ))}
         </div>
       )}
@@ -531,9 +475,10 @@ function CapItem({
   description: string
   params: ParamNode[]
 }) {
+  const { t } = useI18n()
   const [open, setOpen] = useState(false)
   return (
-    <div className={`rounded-lg ${open ? 'border border-line/60 bg-surface/40' : ''}`}>
+    <div className={cn('rounded-lg', open && CARD_L3)}>
       <button
         type="button"
         onClick={() => setOpen((o) => !o)}
@@ -546,7 +491,7 @@ function CapItem({
           />
           <span className="min-w-0 truncate font-mono text-xs text-ink">{name}</span>
           <span className="ml-auto shrink-0 text-[10px] text-muted-foreground">
-            {params.length > 0 ? `${params.length} 个参数` : '无参数'}
+            {params.length > 0 ? t('mcp.params', { n: params.length }) : t('mcp.noParams')}
           </span>
         </div>
         <div
@@ -556,9 +501,9 @@ function CapItem({
         </div>
       </button>
       {open && params.length > 0 && (
-        <div className="mx-2.5 mb-2.5 ml-[30px] divide-y divide-line/50 rounded-lg border border-line/80 bg-panel/90 px-3">
+        <div className={cn('mx-2.5 mb-2.5 ml-[30px] divide-y divide-line/50 px-3', nestedTier(1))}>
           {params.map((p) => (
-            <ParamItem key={p.name} p={p} />
+            <ParamItem key={p.name} p={p} depth={1} />
           ))}
         </div>
       )}
@@ -579,42 +524,50 @@ function TestDialog({
   config: McpServerConfig
   onClose: () => void
 }) {
+  const { t } = useI18n()
   const [result, setResult] = useState<McpTestResult | null>(null) // null=连接中
   const [tab, setTab] = useState<TestTab>('tools')
   const [query, setQuery] = useState('')
 
   useEffect(() => {
     if (!gw) {
-      setResult({ ok: false, error: '未连接到该机器' })
+      setResult({ ok: false, error: t('machines.offline') })
       return
     }
     let alive = true
     gw.testMcpServer(config)
       .then((r) => alive && setResult(r))
-      // RPC 错误帧 reject 的是裸 {message} 对象，String() 会成 [object Object]
-      .catch((e) => alive && setResult({ ok: false, error: String((e as Error)?.message ?? e) }))
+      .catch((e) => alive && setResult({ ok: false, error: errorMessage(e) }))
     return () => {
       alive = false
     }
+    // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [gw, config])
 
   // 参数树在结果到达时解析一次；过滤时不再逐键重算
   const toolItems = useMemo(
-    () => (result?.tools ?? []).map((t) => ({ ...t, params: toolParams(t.input_schema) })),
+    () => (result?.tools ?? []).map((tool) => ({ ...tool, params: toolParams(tool.input_schema) })),
     [result],
   )
 
   const q = query.trim().toLowerCase()
   const match = (s: string) => s.toLowerCase().includes(q)
-  const tools = toolItems.filter((t) => match(t.name + t.description))
+  const tools = toolItems.filter((tool) => match(tool.name + tool.description))
   const prompts = (result?.prompts ?? []).filter((p) => match(p.name + p.description))
   const resources = (result?.resources ?? []).filter((r) => match(r.uri + r.name + r.description))
 
-  const tabs: { val: TestTab; label: string; count: number }[] = [
-    { val: 'tools', label: '工具', count: result?.tools?.length ?? 0 },
-    { val: 'prompts', label: '提示', count: result?.prompts?.length ?? 0 },
-    { val: 'resources', label: '资源', count: result?.resources?.length ?? 0 },
-  ]
+  // tab 标签带计数胶囊（选中态金描边）
+  const tabOf = (val: TestTab, count: number) => ({
+    val,
+    label: (
+      <>
+        {t(`mcp.${val}`)}
+        <span className={`rounded-full border px-1.5 text-[10.5px] ${tab === val ? 'border-primary/50 text-primary' : 'border-line'}`}>
+          {count}
+        </span>
+      </>
+    ),
+  })
   const active = { tools, prompts, resources }[tab] // 当前 tab 的过滤后列表（空态判断用）
 
   return (
@@ -634,13 +587,13 @@ function TestDialog({
       <div className="flex min-h-5 shrink-0 items-center gap-2 text-xs">
         {result === null ? (
           <>
-            <span className="lumi-orb" style={{ width: 11, height: 11 }} />
-            <span className="text-muted-foreground">正在连接…</span>
+            <Loading />
+            <span className="text-muted-foreground">{t('common.connecting')}</span>
           </>
         ) : result.ok ? (
           <>
             <StatusDot tone="ok" className="size-2" />
-            <span className="text-success">已连接</span>
+            <span className="text-success">{t('mcp.connected')}</span>
             <span className="font-mono text-[11px] text-muted-foreground">
               {result.server?.name} v{result.server?.version} · {result.latency_ms}ms
             </span>
@@ -648,7 +601,7 @@ function TestDialog({
         ) : (
           <>
             <StatusDot tone="error" className="size-2" />
-            <span className="text-error">连接失败</span>
+            <span className="text-error">{t('mcp.connectFailed')}</span>
           </>
         )}
       </div>
@@ -661,41 +614,28 @@ function TestDialog({
 
       {result?.ok && (
         <>
-          <div className="mt-3 flex shrink-0 gap-0.5 border-b border-line">
-            {tabs.map((t) => (
-              <button
-                key={t.val}
-                type="button"
-                onClick={() => setTab(t.val)}
-                className={`-mb-px inline-flex items-center gap-1.5 border-b-2 px-3 py-1.5 text-xs font-medium ${
-                  tab === t.val
-                    ? 'border-primary text-ink'
-                    : 'border-transparent text-muted-foreground hover:text-ink'
-                }`}
-              >
-                {t.label}
-                <span
-                  className={`rounded-full border px-1.5 text-[10.5px] ${
-                    tab === t.val ? 'border-primary/50 text-primary' : 'border-line'
-                  }`}
-                >
-                  {t.count}
-                </span>
-              </button>
-            ))}
-          </div>
+          <SegmentedControl
+            className="mt-3 shrink-0 self-start"
+            value={tab}
+            onChange={setTab}
+            options={[
+              tabOf('tools', result.tools?.length ?? 0),
+              tabOf('prompts', result.prompts?.length ?? 0),
+              tabOf('resources', result.resources?.length ?? 0),
+            ]}
+          />
 
           <TextInput
             className="mt-3 h-8 shrink-0 text-xs"
             value={query}
             onChange={(e) => setQuery(e.target.value)}
-            placeholder="过滤…"
+            placeholder={t('mcp.filter')}
           />
 
           <div className="mt-2 min-h-0 flex-1 space-y-0.5 overflow-y-auto">
             {tab === 'tools' &&
-              tools.map((t) => (
-                <CapItem key={t.name} name={t.name} description={t.description} params={t.params} />
+              tools.map((tool) => (
+                <CapItem key={tool.name} name={tool.name} description={tool.description} params={tool.params} />
               ))}
             {tab === 'prompts' &&
               prompts.map((p: McpPromptInfo) => (
@@ -724,7 +664,7 @@ function TestDialog({
               ))}
             {active.length === 0 && (
               <div className="py-6 text-center text-[11.5px] text-muted-foreground">
-                {query ? '没有匹配的条目' : '该 server 未提供此类能力'}
+                {t(query ? 'mcp.noMatch' : 'mcp.noCapability')}
               </div>
             )}
           </div>
@@ -759,6 +699,7 @@ function ServerForm({
   onSave: (name: string, config: McpServerConfig, originalName?: string) => void
   onDelete?: () => void
 }) {
+  const { t } = useI18n()
   const init = config ?? { transport: 'stdio' as McpTransport }
   const originalName = name ?? undefined
   const wasDisabled = config?.disabled === true
@@ -772,7 +713,7 @@ function ServerForm({
   const [cwd, setCwd] = useState(init.cwd ?? '')
   const [url, setUrl] = useState(init.url ?? '')
   const [headers, setHeaders] = useState<Kv[]>(toKv(init.headers))
-  const [timeout, setTimeout] = useState(init.timeout != null ? String(init.timeout) : '')
+  const [timeoutSec, setTimeoutSec] = useState(init.timeout != null ? String(init.timeout) : '')
   const [sseRead, setSseRead] = useState(
     init.sse_read_timeout != null ? String(init.sse_read_timeout) : '',
   )
@@ -795,12 +736,12 @@ function ServerForm({
       if (url.trim()) cfg.url = url.trim()
       const h = fromKv(headers)
       if (Object.keys(h).length) cfg.headers = h
-      if (timeout.trim()) cfg.timeout = Number(timeout)
+      if (timeoutSec.trim()) cfg.timeout = Number(timeoutSec)
       if (sseRead.trim()) cfg.sse_read_timeout = Number(sseRead)
     }
     if (wasDisabled) cfg.disabled = true
     return cfg
-  }, [transport, stdio, command, args, env, cwd, url, headers, timeout, sseRead, wasDisabled])
+  }, [transport, stdio, command, args, env, cwd, url, headers, timeoutSec, sseRead, wasDisabled])
 
   // 配置对象 → 表单字段（JSON 切回表单时回填）
   const configToForm = (cfg: McpServerConfig) => {
@@ -811,7 +752,7 @@ function ServerForm({
     setCwd(cfg.cwd ?? '')
     setUrl(cfg.url ?? '')
     setHeaders(toKv(cfg.headers))
-    setTimeout(cfg.timeout != null ? String(cfg.timeout) : '')
+    setTimeoutSec(cfg.timeout != null ? String(cfg.timeout) : '')
     setSseRead(cfg.sse_read_timeout != null ? String(cfg.sse_read_timeout) : '')
   }
 
@@ -823,7 +764,7 @@ function ServerForm({
       try {
         configToForm(JSON.parse(json))
       } catch (e) {
-        setJsonErr('JSON 解析失败：' + (e as Error).message)
+        setJsonErr(t('mcp.jsonParseFailed', { error: errorMessage(e) }))
         return
       }
     }
@@ -839,12 +780,12 @@ function ServerForm({
       try {
         parsed = JSON.parse(json)
       } catch (e) {
-        setJsonErr('JSON 解析失败：' + (e as Error).message)
+        setJsonErr(t('mcp.jsonParseFailed', { error: errorMessage(e) }))
         return
       }
       // 必须是对象——否则加载侧 _strip_disabled 会静默丢弃（数组/标量非法）
       if (typeof parsed !== 'object' || parsed === null || Array.isArray(parsed)) {
-        setJsonErr('配置必须是一个 JSON 对象，如 {"command": "npx", "args": [...]}')
+        setJsonErr(t('mcp.jsonNotObject'))
         return
       }
       cfg = parsed as McpServerConfig
@@ -860,205 +801,144 @@ function ServerForm({
     <>
       {onDelete && (
         <Button variant="ghost" onClick={onDelete} className="text-error hover:text-error">
-          删除
+          {t('common.delete')}
         </Button>
       )}
       <div className="flex-1" />
       <Button variant="ghost" onClick={onCancel}>
-        取消
+        {t('common.cancel')}
       </Button>
       <Button onClick={submit} disabled={!srvName.trim() || dup}>
-        保存
+        {t('common.save')}
       </Button>
     </>
   )
 
   return (
-    <FormModal
-      onClose={onCancel}
-      title={name ? '编辑 MCP 服务器' : '添加 MCP 服务器'}
-      footer={footer}
-    >
+    <FormModal onClose={onCancel} title={t(name ? 'mcp.editTitle' : 'mcp.addTitle')} footer={footer}>
       <div className="flex justify-end mb-3">
         <SegmentedControl
           value={mode}
           onChange={(v) => switchMode(v as 'form' | 'json')}
           options={[
-            { val: 'form', label: '表单' },
+            { val: 'form', label: t('mcp.modeForm') },
             { val: 'json', label: 'JSON' },
           ]}
         />
       </div>
 
-      {mode === 'form' ? (
-        <div className="space-y-4">
-          <Field label="名称" hint="服务器唯一标识，作为 mcp_server.json 的键名">
-            <TextInput
-              value={srvName}
-              onChange={(e) => setSrvName(e.target.value)}
-              placeholder="my-server"
-            />
-            {dup && <div className="text-[11px] text-error mt-1">已存在同名 server</div>}
-          </Field>
+      <div className="space-y-4">
+        <Field label={t('mcp.name')} hint={t('mcp.nameHint')} error={dup && t('mcp.dupName')}>
+          <TextInput value={srvName} onChange={(e) => setSrvName(e.target.value)} placeholder="my-server" />
+        </Field>
 
-          <Field label="传输类型">
-            <SegmentedControl
-              value={transport}
-              onChange={(v) => setTransport(v as McpTransport)}
-              options={[
-                { val: 'stdio', label: 'stdio' },
-                { val: 'streamable_http', label: 'HTTP' },
-                { val: 'sse', label: 'SSE' },
-              ]}
-            />
-          </Field>
-
-          {stdio ? (
-            <>
-              <Field label="启动命令">
-                <TextInput
-                  className="font-mono"
-                  value={command}
-                  onChange={(e) => setCommand(e.target.value)}
-                  placeholder="npx"
-                />
-              </Field>
-              <Field label="参数" hint="回车追加一项；每项对应 args 数组的一个元素">
-                <ArgsEditor values={args} onChange={setArgs} />
-              </Field>
-              <Field label="环境变量" hint="值支持 ${ENV_NAME} 引用外部环境变量">
-                <KvEditor rows={env} onChange={setEnv} keyPlaceholder="KEY" />
-              </Field>
-            </>
-          ) : (
-            <>
-              <Field label="服务器 URL">
-                <TextInput
-                  className="font-mono"
-                  value={url}
-                  onChange={(e) => setUrl(e.target.value)}
-                  placeholder="https://example.com/mcp"
-                />
-              </Field>
-              <Field label="请求头 Headers" hint="鉴权在此写，如 Authorization: Bearer ${TOKEN}">
-                <KvEditor rows={headers} onChange={setHeaders} keyPlaceholder="Header" />
-              </Field>
-            </>
-          )}
-
-          {/* 高级选项 */}
-          <div className="border-t border-line/40 pt-3">
-            <button
-              type="button"
-              onClick={() => setAdvOpen((o) => !o)}
-              className="flex items-center gap-1.5 text-xs text-muted-foreground hover:text-ink"
-            >
-              <ChevronDown
-                size={13}
-                className={`transition-transform ${advOpen ? '' : '-rotate-90'}`}
+        {mode === 'form' ? (
+          <>
+            <Field label={t('mcp.transport')}>
+              <SegmentedControl
+                value={transport}
+                onChange={(v) => setTransport(v as McpTransport)}
+                options={[
+                  { val: 'stdio', label: 'stdio' },
+                  { val: 'streamable_http', label: 'HTTP' },
+                  { val: 'sse', label: 'SSE' },
+                ]}
               />
-              高级选项
-            </button>
-            {advOpen && (
-              <div className="mt-3">
-                {stdio ? (
-                  <Field label="工作目录 cwd">
-                    <TextInput
-                      className="font-mono"
-                      value={cwd}
-                      onChange={(e) => setCwd(e.target.value)}
-                      placeholder="留空 = 继承 serve 进程目录"
-                    />
-                  </Field>
-                ) : (
-                  <div className="grid grid-cols-2 gap-3">
-                    <Field label="timeout（秒）">
-                      <TextInput
-                        type="number"
-                        value={timeout}
-                        onChange={(e) => setTimeout(e.target.value)}
-                        placeholder="5"
-                      />
-                    </Field>
-                    <Field label="sse_read_timeout（秒）">
-                      <TextInput
-                        type="number"
-                        value={sseRead}
-                        onChange={(e) => setSseRead(e.target.value)}
-                        placeholder="300"
-                      />
-                    </Field>
-                  </div>
-                )}
-              </div>
+            </Field>
+
+            {stdio ? (
+              <>
+                <Field label={t('mcp.command')}>
+                  <TextInput
+                    className="font-mono"
+                    value={command}
+                    onChange={(e) => setCommand(e.target.value)}
+                    placeholder="npx"
+                  />
+                </Field>
+                <Field label={t('mcp.args')} hint={t('mcp.argsHint')}>
+                  <ChipInput mono values={args} onChange={setArgs} placeholder={t('mcp.argPlaceholder')} />
+                </Field>
+                <Field label={t('mcp.env')} hint={t('mcp.envHint')}>
+                  <KvEditor rows={env} onChange={setEnv} keyPlaceholder="KEY" />
+                </Field>
+              </>
+            ) : (
+              <>
+                <Field label={t('mcp.url')}>
+                  <TextInput
+                    className="font-mono"
+                    value={url}
+                    onChange={(e) => setUrl(e.target.value)}
+                    placeholder="https://example.com/mcp"
+                  />
+                </Field>
+                <Field label={t('mcp.headers')} hint={t('mcp.headersHint')}>
+                  <KvEditor rows={headers} onChange={setHeaders} keyPlaceholder="Header" />
+                </Field>
+              </>
             )}
-          </div>
-        </div>
-      ) : (
-        <div className="space-y-4">
-          <Field label="名称" hint="服务器唯一标识，作为 mcp_server.json 的键名">
-            <TextInput
-              value={srvName}
-              onChange={(e) => setSrvName(e.target.value)}
-              placeholder="my-server"
-            />
-            {dup && <div className="text-[11px] text-error mt-1">已存在同名 server</div>}
-          </Field>
-          <Field
-            label="服务器配置（JSON）"
-            hint="直接编辑该 server 的 JSON 片段；切回「表单」时解析回填"
-          >
+
+            {/* 高级选项 */}
+            <div className="border-t border-line/40 pt-3">
+              <button
+                type="button"
+                onClick={() => setAdvOpen((o) => !o)}
+                className="flex items-center gap-1.5 text-xs text-muted-foreground hover:text-ink"
+              >
+                <ChevronDown
+                  size={13}
+                  className={`transition-transform ${advOpen ? '' : '-rotate-90'}`}
+                />
+                {t('mcp.advanced')}
+              </button>
+              {advOpen && (
+                <div className="mt-3">
+                  {stdio ? (
+                    <Field label={t('mcp.cwd')}>
+                      <TextInput
+                        className="font-mono"
+                        value={cwd}
+                        onChange={(e) => setCwd(e.target.value)}
+                        placeholder={t('mcp.cwdPlaceholder')}
+                      />
+                    </Field>
+                  ) : (
+                    <div className="grid grid-cols-2 gap-3">
+                      <Field label={t('mcp.timeout')}>
+                        <TextInput
+                          type="number"
+                          value={timeoutSec}
+                          onChange={(e) => setTimeoutSec(e.target.value)}
+                          placeholder="5"
+                        />
+                      </Field>
+                      <Field label={t('mcp.sseReadTimeout')}>
+                        <TextInput
+                          type="number"
+                          value={sseRead}
+                          onChange={(e) => setSseRead(e.target.value)}
+                          placeholder="300"
+                        />
+                      </Field>
+                    </div>
+                  )}
+                </div>
+              )}
+            </div>
+          </>
+        ) : (
+          <Field label={t('mcp.jsonLabel')} hint={t('mcp.jsonHint')} error={jsonErr}>
             <textarea
               spellCheck={false}
               value={json}
               onChange={(e) => setJson(e.target.value)}
               className="w-full min-h-[220px] px-3 py-2 rounded-lg text-[12px] font-mono leading-relaxed bg-canvas/50 text-ink border border-line/50 outline-none transition focus:border-primary/50 resize-y"
             />
-            {jsonErr && <div className="text-[11px] text-error mt-1.5">{jsonErr}</div>}
           </Field>
-        </div>
-      )}
+        )}
+      </div>
     </FormModal>
-  )
-}
-
-// 参数编辑：有序 chip，允许重复
-function ArgsEditor({ values, onChange }: { values: string[]; onChange: (v: string[]) => void }) {
-  const [draft, setDraft] = useState('')
-  const add = () => {
-    const v = draft.trim()
-    if (v) onChange([...values, v])
-    setDraft('')
-  }
-  return (
-    <div className="flex flex-wrap items-center gap-1.5">
-      {values.map((v, i) => (
-        <span
-          key={i}
-          className="inline-flex items-center gap-1.5 bg-surface border border-line rounded-full px-2.5 py-1 text-xs font-mono"
-        >
-          {v}
-          <button
-            onClick={() => onChange(values.filter((_, j) => j !== i))}
-            className="text-muted-foreground hover:text-ink"
-          >
-            <X size={11} />
-          </button>
-        </span>
-      ))}
-      <span className="inline-flex items-center gap-1 bg-surface border border-dashed border-line rounded-full px-2 py-1">
-        <input
-          value={draft}
-          onChange={(e) => setDraft(e.target.value)}
-          onKeyDown={(e) => e.key === 'Enter' && (e.preventDefault(), add())}
-          placeholder="新参数…"
-          className="bg-transparent outline-none text-xs font-mono w-28 text-ink"
-        />
-        <button onClick={add} className="text-muted-foreground hover:text-ink">
-          <Plus size={12} />
-        </button>
-      </span>
-    </div>
   )
 }
 
@@ -1072,6 +952,7 @@ function KvEditor({
   onChange: (rows: Kv[]) => void
   keyPlaceholder: string
 }) {
+  const { t } = useI18n()
   const set = (i: number, patch: Partial<Kv>) =>
     onChange(rows.map((r, j) => (j === i ? { ...r, ...patch } : r)))
   return (
@@ -1103,78 +984,8 @@ function KvEditor({
         className="w-full flex items-center justify-center gap-1.5 py-1.5 rounded-md border border-dashed border-line text-[11.5px] text-muted-foreground hover:text-ink hover:border-separator"
       >
         <Plus size={13} />
-        添加一项
+        {t('mcp.addRow')}
       </button>
     </div>
-  )
-}
-
-// 项目选择器（项目作用范围）：从该机器已登记项目里选一个（列表由面板层加载）
-function ProjectSelect({
-  gw,
-  projects,
-  value,
-  onChange,
-  onCreate,
-}: {
-  gw?: Gateway
-  projects: Project[]
-  value: string
-  onChange: (v: string) => void
-  onCreate: (path: string) => void
-}) {
-  const [creating, setCreating] = useState(false)
-
-  const current = projects.find((p) => p.path === value)
-  const label = current ? current.name : value ? basename(value) : '选择项目…'
-
-  const onCreated = (path: string) => {
-    setCreating(false)
-    onCreate(path)
-  }
-
-  return (
-    <>
-      <DropdownMenu>
-        <DropdownMenuTrigger asChild>
-          <button
-            type="button"
-            className="group flex shrink-0 items-center gap-2 rounded-lg border border-line bg-surface px-2.5 py-1.5 text-left text-xs outline-none transition data-[state=open]:border-primary"
-          >
-            <Folder size={14} className="shrink-0 text-primary" />
-            <span className="truncate max-w-[140px] text-ink">{label}</span>
-            <ChevronDown
-              size={13}
-              className="shrink-0 text-muted-foreground transition-transform group-data-[state=open]:rotate-180"
-            />
-          </button>
-        </DropdownMenuTrigger>
-        <DropdownMenuContent align="start">
-          {projects.map((p) => (
-            <DropdownMenuItem key={p.path} onClick={() => onChange(p.path)}>
-              <Check className={`text-primary ${p.path === value ? 'opacity-100' : 'opacity-0'}`} />
-              <div className="min-w-0 flex-1">
-                <div className="truncate text-sm text-ink">{p.name}</div>
-                <div className="truncate font-mono text-[10px] text-muted-foreground">{p.path}</div>
-              </div>
-            </DropdownMenuItem>
-          ))}
-          {projects.length > 0 && <DropdownMenuSeparator />}
-          <DropdownMenuItem onClick={() => setCreating(true)} className="text-muted-foreground">
-            <FolderPlus />
-            新建项目
-          </DropdownMenuItem>
-        </DropdownMenuContent>
-      </DropdownMenu>
-
-      {creating && (
-        <DirBrowser
-          gw={gw}
-          title="新建项目"
-          onPick={onCreated}
-          onCancel={() => setCreating(false)}
-        />
-      )}
-    </>
   )
 }

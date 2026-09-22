@@ -21,10 +21,10 @@ from langgraph.checkpoint.postgres.aio import AsyncPostgresSaver
 from langgraph.checkpoint.sqlite.aio import AsyncSqliteSaver
 from langgraph.checkpoint.sqlite.utils import search_where
 
-from lumi.sessions.message_text import visible_user_text
-from lumi.sessions.message_visibility import (
+from lumi.agents.core.meta_message import (
     is_human_message,
     should_show_human_message,
+    visible_user_text,
 )
 from lumi.utils.logger import logger
 from lumi.utils.thread_id import CRON_THREAD_PREFIX
@@ -170,7 +170,6 @@ async def _get_thread_ids(
 async def list_sessions(
     graph: CompiledStateGraph,
     *,
-    current_thread_id: str = "",
     workspace: str = "",
     limit: int = 50,
 ) -> list[SessionSummary]:
@@ -181,7 +180,6 @@ async def list_sessions(
 
     Args:
         graph: 已编译的 LangGraph 状态图（需要带 checkpointer）
-        current_thread_id: 当前会话 thread_id，将从结果中排除
         workspace: 按工作目录过滤，空字符串表示不过滤
         limit: 最大返回数量
 
@@ -196,9 +194,7 @@ async def list_sessions(
     # cron 执行会话不进会话列表（即使续聊后带上 workspace 元数据也不"转正"），
     # 只能从定时任务详情的执行记录进入
     candidates = [
-        (tid, cid)
-        for tid, cid in pairs
-        if tid != current_thread_id and not tid.startswith(f"{CRON_THREAD_PREFIX}-")
+        (tid, cid) for tid, cid in pairs if not tid.startswith(f"{CRON_THREAD_PREFIX}-")
     ]
 
     # 分批并发加载 state：串行 aget_state 在会话多时是侧栏刷新的延迟瓶颈；

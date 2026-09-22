@@ -62,7 +62,7 @@ def test_project_layer_merges_and_overrides(tmp_path):
 
 def test_load_prompt_project_layer(tmp_path):
     """load_prompt 的项目层优先于其余各层。"""
-    from lumi.utils.read_config import get_config
+    from lumi.utils.config import get_config
 
     prompts_dir = tmp_path / ".lumi" / "prompts"
     prompts_dir.mkdir(parents=True)

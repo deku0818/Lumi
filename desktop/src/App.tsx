@@ -9,14 +9,8 @@ import {
   type ReactNode,
 } from 'react'
 import {
-  SquareTerminal,
   FileText,
-  FilePlus,
-  FilePen,
-  Search,
   Bot,
-  ListChecks,
-  Wrench,
   ChevronRight,
   ChevronDown,
   Copy,
@@ -31,6 +25,27 @@ import {
   PanelLeft,
   type LucideIcon,
 } from 'lucide-react'
+import {
+  emptySession,
+  nid,
+  hasStreaming,
+  hydrateHistory,
+  reduceEvent,
+  sessionModelPatch,
+  userBubble,
+  type SessionState,
+} from './sessionReducer'
+import {
+  isKnownTool,
+  argStr,
+  summarizeTools,
+  toolArgs,
+  toolIcon,
+  toolStatusKey,
+  toolTitle,
+} from './toolMeta'
+import { CARD_L1 } from './components/glass'
+import { useLatest } from './hooks/useLatest'
 import { Gateway } from './gateway'
 import type {
   ActiveModel,
@@ -52,11 +67,9 @@ import type {
   SessionModelWire,
   SlashCommand,
   SubTool,
-  TodoItem,
   ToolMode,
   Usage,
   WireEvent,
-  WireEventPayloads,
 } from './types'
 import { EMPTY_BG_OUTPUT } from './types'
 import { Markdown } from './components/Markdown'
@@ -74,7 +87,7 @@ import { ConfirmDialog } from './components/ConfirmDialog'
 import { SettingsDialog } from './components/SettingsDialog'
 import { ModelPicker } from './components/ModelPicker'
 import { ApprovalModePicker } from './components/ApprovalModePicker'
-import { ContextMeter, type CtxUsage } from './components/ContextMeter'
+import { ContextMeter } from './components/ContextMeter'
 import { ProjectHomePage } from './components/ProjectHomePage'
 import { ProjectsPage } from './components/ProjectsPage'
 import { DirBrowser } from './components/DirBrowser'
@@ -86,16 +99,12 @@ import { toast } from './components/Toast'
 import { isCommandMode, parseCommand, matchCommands } from './slash'
 import { toolDiff, type DiffLine } from './diff'
 import { shellTokens } from './shell'
-import { argText, asRecord, clip, basename, botOfThread, fmtDuration, fmtTokens, machineColor, machineName, msgTime, sessionKey, keyThread, keyBackend, beOf, FLOAT_GAP } from '@/lib/utils'
+import { asRecord, clip, basename, botOfThread, fmtDuration, fmtTokens, machineColor, machineName, msgTime, sessionKey, keyThread, keyBackend, beOf, FLOAT_GAP } from '@/lib/utils'
 import { Button } from '@/components/ui/button'
 import { Tooltip, TooltipContent, TooltipTrigger } from '@/components/ui/tooltip'
 import { useTheme } from './theme'
 import { useUiFont } from './font'
-import { useI18n, type Translate } from './i18n'
-
-// 单 app 实例，模块级自增 id 即可，避免 hook 依赖问题。
-let _id = 0
-const nid = () => ++_id
+import { useI18n } from './i18n'
 
 // 输入栏附件：图片嵌入（base64 data URL），其它文件引用绝对路径 + 留住 File 本体
 // （远程后端要把内容上传过去，前端本机路径在对端不存在）
@@ -148,179 +157,9 @@ const segKey = (seg: Segment): string =>
         ? `f${seg.item.id}`
         : `i${seg.item.id}`
 
-// load_history 的历史项 → 前端 Item
-function restore(h: HistoryItem): Item {
-  if (h.kind === 'user')
-    return { id: nid(), kind: 'user', text: h.text ?? '', images: h.images, files: h.files, sender: h.sender, ts: h.ts, messageId: h.message_id }
-  if (h.kind === 'assistant')
-    return { id: nid(), kind: 'assistant', text: h.text ?? '', streaming: false }
-  return {
-    id: nid(),
-    kind: 'tool',
-    toolCallId: h.tool_call_id ?? '',
-    name: h.name ?? '',
-    args: h.args,
-    output: h.output ?? '',
-    done: true,
-  }
-}
-
-// 用户气泡的几何：气泡本体与原地编辑框共用，进出编辑态时不跳变
 const USER_BUBBLE = 'bg-surface rounded-3xl rounded-br-lg px-4 py-2.5 whitespace-pre-wrap'
 
 // 乐观插入的用户气泡（发送 / 编辑重发共用）。messageId 留空，等 turn.start 上锚。
-// ts 与服务端落库的到达时刻近似一致，重载前后时间头不跳变。
-const userBubble = (text: string, images?: string[], files?: AttachedFile[]): Item => ({
-  id: nid(),
-  kind: 'user',
-  text,
-  images,
-  files,
-  ts: Date.now(),
-})
-
-// 给最后一条尚未上锚的用户气泡打上后端消息 id（turn.start 事件驱动）。
-// 已上锚（历史回放带 id）或本轮无用户气泡（系统命令）时原数组返回，不触发重渲染。
-function anchorLastUser(items: Item[], messageId: string): Item[] {
-  if (!messageId) return items
-  for (let i = items.length - 1; i >= 0; i--) {
-    const it = items[i]
-    if (it.kind !== 'user') continue
-    if (it.messageId) return items
-    const copy = items.slice()
-    copy[i] = { ...it, messageId }
-    return copy
-  }
-  return items
-}
-
-// 把流式文本追加到最后一个仍在流式中的 assistant item；没有则新建。
-function appendDelta(items: Item[], text: string): Item[] {
-  for (let i = items.length - 1; i >= 0; i--) {
-    const it = items[i]
-    if (it.kind === 'assistant' && it.streaming) {
-      const copy = items.slice()
-      copy[i] = { ...it, text: it.text + text }
-      return copy
-    }
-  }
-  return [...items, { id: nid(), kind: 'assistant', text, streaming: true }]
-}
-
-// 结束所有流式中的 assistant 气泡。轮次边界（complete/error）必须调用：
-// 残留的 streaming 气泡会被下一轮 appendDelta 匹配，新回复拼进旧气泡。
-function finishStreaming(items: Item[]): Item[] {
-  return items.map((it) =>
-    it.kind === 'assistant' && it.streaming ? { ...it, streaming: false } : it,
-  )
-}
-
-// 轮次收尾：结束流式气泡 + 清掉只活在本轮的重试提示（complete/error 共用）。
-function finishTurn(items: Item[]): Item[] {
-  return finishStreaming(items.filter((it) => it.kind !== 'retry'))
-}
-
-// 子代理内部事件归属：把 tool.start/complete 与 token 用量写进 runId 匹配的 agent 卡片。
-// 找不到父卡片（嵌套子代理等）则返回 null，由调用方丢弃。
-// 子事件 payload：tool.start / tool.complete / message.complete 三者的字段并集（按访问取并、全可选），
-// 由 type 在运行时区分分支，故类型层不需判别——保留宽松形状即可覆盖三种。
-type ChildEventPayload = Partial<
-  WireEventPayloads['tool.start'] &
-    WireEventPayloads['tool.complete'] &
-    WireEventPayloads['message.complete']
->
-
-function applyChildEvent(
-  s: SessionState,
-  parentRun: string,
-  type: string,
-  payload: ChildEventPayload,
-): SessionState | null {
-  // 从尾部反向找：agent 卡片几乎总在对话流末尾，长会话下避免每个子事件全量正扫
-  let idx = -1
-  for (let i = s.items.length - 1; i >= 0; i--) {
-    const it = s.items[i]
-    if (it.kind === 'tool' && it.runId === parentRun) {
-      idx = i
-      break
-    }
-  }
-  if (idx < 0) return null
-  const agent = s.items[idx] as ToolItem
-  const children = agent.children ?? []
-  let next: ToolItem
-  if (type === 'tool.start') {
-    const tcid = payload.tool_call_id ?? ''
-    if (tcid && children.some((c) => c.toolCallId === tcid)) return null
-    next = {
-      ...agent,
-      children: [...children, { toolCallId: tcid, name: payload.name ?? '', args: payload.args, done: false }],
-    }
-  } else if (type === 'tool.complete') {
-    next = {
-      ...agent,
-      children: children.map((c) =>
-        c.toolCallId === payload.tool_call_id ? { ...c, done: true, error: !!payload.is_error } : c,
-      ),
-    }
-  } else if (type === 'message.complete' && payload.usage) {
-    // usage 按 max 累计（与 TUI agent_group.record_tokens 同口径）
-    next = {
-      ...agent,
-      inTok: Math.max(agent.inTok ?? 0, payload.usage.input_tokens ?? 0),
-      outTok: Math.max(agent.outTok ?? 0, payload.usage.output_tokens ?? 0),
-    }
-  } else {
-    return null
-  }
-  const items = s.items.slice()
-  items[idx] = next
-  return { ...s, items }
-}
-
-// 每个会话的独立状态（多会话并发：A 在跑时可切到 B，互不影响）
-type SessionState = {
-  items: Item[]
-  running: boolean
-  // 本轮开始的墙钟时间（epoch 毫秒）：计时由此推算，切走再切回 / 重连都不归零
-  runStart?: number
-  // 当前进行中的思考流文本（只在思考期间非空；正文/工具一开始即清空，不留痕迹）
-  thinkingText: string
-  // 挂起的审批/澄清按 approval_id 排队（后端并发解锁：一条消息多个工具 / 多个前台子代理
-  // 可同时挂起审批）；渲染队首，逐个应答出队，不丢任何挂起的 Future。
-  approval: Record<string, unknown>[]
-  clarify: Record<string, unknown>[]
-  // 最近一次模型调用的上下文用量（用于输入栏的上下文进度环）；首轮前为 undefined
-  ctx?: CtxUsage
-  // 渠道旁观会话的上下文环分母：会话真实模型名与其窗口（旁观连接拿不到该会话的
-  // 运行时模型，由 load_history 快照带出）；desktop 自己的会话不用（直接取 sessionModel）
-  ctxModel?: string
-  ctxWindow?: number
-  // 本会话**已固化**的模型（后端 switch_session / set_session_model 下发）。未固化时
-  // 留空，由 sessionModel 落到 defaultModel——固化与否是后端的判断，前端只存结果
-  model?: ActiveModel
-  // 历史压缩进行中（Summarizer 内部摘要调用期间为 true）；展示「正在压缩对话」指示
-  compacting?: boolean
-  // todos 工具的任务列表快照（右栏任务进度节）；空/未定义 = 节不渲染
-  todos?: TodoItem[]
-  // 本次模型调用开始时的 items 长度：message.retry 据此只回滚这一次调用流出的气泡，
-  // 不误伤同一轮里更早迭代（已落库）的助手文字。message.start 每次调用都刷新。
-  streamMark?: number
-}
-const emptySession = (items: Item[] = []): SessionState => ({
-  items,
-  running: false,
-  thinkingText: '',
-  approval: [],
-  clarify: [],
-})
-
-// 用某机器的最新 bg 任务快照替换该机器那一段（保留其它机器的），并给每条打上 backend 标记。
-// bg_tasks.update / list_bg_tasks 是各机器进程级快照（仅含本机任务），直接整列 setBgTasks 会
-// 抹掉别机的任务，故按机器分段替换——同一飞书群 thread 在多台机器上会重名，靠 backend 区分。
-// 每次变更都广播一份全量快照，无差别重建对象会让下游 memo 全线失效（别的机器 / 别的会话的
-// 任务一动，本会话整列卡片跟着重渲染，而后台 agent 逐超步上报时这很频繁）：故逐条按值比对，
-// 没变的沿用旧对象；整段都没变就把 prev 原样返回，连一次 setState 的新引用都不产生。
 const replaceBackendTasks = (prev: BgTask[], backend: string, tasks: BgTask[]): BgTask[] => {
   const mine = prev.filter((t) => beOf(t) === backend)
   const next = tasks.map((t) => {
@@ -338,60 +177,6 @@ const replaceBackendTasks = (prev: BgTask[], backend: string, tasks: BgTask[]): 
 // 连接各收一次，这些处理器都按机器整段覆盖或自带去重，重复到达幂等。
 const PROCESS_EVENTS = new Set(['cron.result', 'cron.running', 'cron.jobs', 'bg_tasks.update', 'mcp.status'])
 
-// 按 approval_id 把挂起的审批/澄清入队；已在队列则原样返回（重连后端会重发，去重保幂等）。
-const enqueuePending = (
-  queue: Record<string, unknown>[],
-  item: Record<string, unknown>,
-): Record<string, unknown>[] => {
-  const id = (item as { approval_id?: string }).approval_id
-  return queue.some((p) => (p as { approval_id?: string }).approval_id === id)
-    ? queue
-    : [...queue, item]
-}
-
-// 从 LangChain usage_metadata 提炼上下文环所需快照。input_tokens 含缓存命中部分，
-// 直接作为「当前上下文占用」；缺字段（如非流式补发不带 input_tokens）返回 undefined。
-const ctxFromUsage = (u: Usage | undefined): CtxUsage | undefined => {
-  if (!u || typeof u.input_tokens !== 'number') return undefined
-  return {
-    used: u.input_tokens,
-    output: u.output_tokens ?? 0,
-    cacheRead: u.input_token_details?.cache_read ?? 0,
-  }
-}
-
-// 会话是否有流式在途的 assistant 气泡：历史快照能否整表替换的判据。
-const hasStreaming = (s: SessionState): boolean =>
-  s.items.some((it) => it.kind === 'assistant' && it.streaming)
-
-// loadHistory 结果 → 会话槽位的统一水合（初次加载 / 重连补拉 / 渠道切回三处共用）。
-// 已有流式在途内容时保留现有 items 不覆盖：checkpoint 快照比正在流出的直播轮旧，
-// 整体替换会截断刚流入的助手内容/工具卡。调用方置 loaded 前须自查 hasStreaming——
-// 快照被丢弃时置 loaded 会把掉线前的历史永久关在补拉门外。
-function hydrateHistory(
-  s: SessionState,
-  r: {
-    items: HistoryItem[]
-    usage?: Usage
-    model?: string
-    context_window?: number
-    todos?: TodoItem[]
-  },
-): SessionState {
-  return {
-    ...s,
-    items: hasStreaming(s) ? s.items : r.items.map(restore),
-    // todos 不套 items 的 hasStreaming 护栏：它是全量替换语义的 state 快照，由触发
-    // todos.update 的同一个 Command 原子写入，永不比已收到的事件旧；重连补拉时反而
-    // 更新（gap 期错过的 todos 更新只能靠这份快照补回，turn.complete 不带 todos）。
-    todos: r.todos ?? s.todos,
-    ctx: ctxFromUsage(r.usage) ?? s.ctx,
-    // 渠道旁观会话的上下文环分母来源（会话真实模型窗口）；desktop 自己的会话此值虽也回填但不消费。
-    // 模型名与窗口成对更新：窗口未知（0，如目录查不到的模型）时整对保旧，避免明细弹窗
-    // 出现「新模型名 · 旧模型窗口」的错配。
-    ...(r.context_window ? { ctxModel: r.model, ctxWindow: r.context_window } : {}),
-  }
-}
 
 export default function App() {
   const [store, setStore] = useState<Record<string, SessionState>>({})
@@ -400,10 +185,7 @@ export default function App() {
   // 进程级工作目录 = 当前项目（gateway.ready 下发；切项目对整个 app 生效）
   const [workspaceDir, setWorkspaceDir] = useState('')
   // handleEvent（稳定 useCallback）里做 mcp.status 的当前工作区过滤，须经 ref 读最新值
-  const workspaceDirRef = useRef('')
-  useEffect(() => {
-    workspaceDirRef.current = workspaceDir
-  }, [workspaceDir])
+  const workspaceDirRef = useLatest(workspaceDir)
   // null = 该机器列表尚未成功拉到（未连上 / 拉取中 / 失败）——不能渲染成「还没有项目」
   const [projects, setProjects] = useState<Project[] | null>(null)
   // 项目视图作用的机器（方案甲「先选机器」）+ 该机器当前项目
@@ -512,24 +294,24 @@ export default function App() {
       return {}
     }
   })
-  const viewRef = useRef(view)
-  const activeCronJobRef = useRef(activeCronJob)
+  const viewRef = useLatest(view)
+  const activeCronJobRef = useLatest(activeCronJob)
   // cron 事件经 DesktopDelivery 广播到每条 WS 连接，多会话时同一结果会收到多次，按 key 去重
   const seenCronRef = useRef(new Set<string>())
   const fileInputRef = useRef<HTMLInputElement>(null)
   const connsRef = useRef<Record<string, Gateway>>({})
-  const activeRef = useRef('')
+  const activeRef = useLatest(active)
   // activate 调用序号：判废晚到的建连结果（openConnection 悬置期间用户切走后不回拽）
   const activationSeqRef = useRef(0)
   // 会话列表镜像到 ref：切会话时据此查它所属项目（workspace_dir），随 switch 下发让后端切 cwd
-  const sessionsRef = useRef<SessionMeta[]>([])
+  const sessionsRef = useLatest(sessions)
   // 本窗口手动命名过的会话 key：session.title 广播与手动重命名竞态时，
   // 自动标题不得覆盖用户敲的名字（后端侧手动名本就优先，只是事件可能晚到）。
   // 按数据标记而非 RPC 在途时序——广播与 rename 响应帧之间没有顺序保证。
   const renamedRef = useRef<Set<string>>(new Set())
   // 每台机器一条「控制连接」：用于跨机器 fan-out list_sessions / 全局 RPC（非 chat 流）
   const controlConns = useRef<Record<string, Gateway>>({})
-  const cronJobsRef = useRef<CronJob[]>([]) // 据此把定时操作路由到任务所属机器
+  const cronJobsRef = useLatest(cronJobs)
   const refreshCronJobsRef = useRef<((only?: string) => void) | null>(null) // handleEvent 经此按机器刷新
   const scrollRef = useRef<HTMLDivElement>(null)
   // 聊天流「粘底」：贴底时才跟随流式输出，用户上滚即放手（不再抢界面）。
@@ -539,11 +321,11 @@ export default function App() {
   const lastActiveRef = useRef(active) // 与当前 active 不同即说明刚切了会话
   const inputRef = useRef<HTMLTextAreaElement>(null)
   // handleEvent 是 []-依赖的稳定回调，通过 ref 读取最新的 store / 通知开关 / 翻译
-  const storeRef = useRef<Record<string, SessionState>>({})
+  const storeRef = useLatest(store)
   // 供 handleEvent（[]-依赖的稳定回调）在 turn.start 固化会话模型时读取
-  const defaultModelRef = useRef<ActiveModel>({ provider: '', model: '' })
-  const notifyRef = useRef(notify)
-  const tRef = useRef(t)
+  const defaultModelRef = useLatest(defaultModel)
+  const notifyRef = useLatest(notify)
+  const tRef = useLatest(t)
   // MCP 失败 toast 去重（`backend:server:error` → 上次弹出时刻）：配置保存→作废→
   // 重载的连环加载会重播同一失败，60s 内不重复弹
   const mcpToastAtRef = useRef(new Map<string, number>())
@@ -551,26 +333,8 @@ export default function App() {
   // 面板刷新信号合并：同一池的广播每条绑定连接各收一帧，微任务尾只发一次
   const mcpSignalQueuedRef = useRef(false)
   // 临时目录是连接级（bridge 内存）状态：重连得到全新 bridge 后需重放，故镜像到 ref
-  const folderStoreRef = useRef<Record<string, string[]>>({})
+  const folderStoreRef = useLatest(folderStore)
 
-  useEffect(() => {
-    folderStoreRef.current = folderStore
-  }, [folderStore])
-  useEffect(() => {
-    activeRef.current = active
-  }, [active])
-  useEffect(() => {
-    sessionsRef.current = sessions
-  }, [sessions])
-  useEffect(() => {
-    cronJobsRef.current = cronJobs
-  }, [cronJobs])
-  useEffect(() => {
-    viewRef.current = view
-  }, [view])
-  useEffect(() => {
-    activeCronJobRef.current = activeCronJob
-  }, [activeCronJob])
   useEffect(() => {
     localStorage.setItem('lumi-cron-read-runs', JSON.stringify(readRuns))
   }, [readRuns])
@@ -625,18 +389,6 @@ export default function App() {
     [providers, sessionModel.provider, sessionModel.model],
   )
 
-  useEffect(() => {
-    storeRef.current = store
-  }, [store])
-  useEffect(() => {
-    defaultModelRef.current = defaultModel
-  }, [defaultModel])
-  useEffect(() => {
-    notifyRef.current = notify
-  }, [notify])
-  useEffect(() => {
-    tRef.current = t
-  })
 
   // 每个会话的活动态，喂给侧栏显示圆点：attention=等你处理（审批/澄清），running=处理中。
   // store 每个流式 token 都换新身份，内容不变时复用上一个对象，避免 Sidebar 每 token 重渲染。
@@ -789,138 +541,8 @@ export default function App() {
         void window.lumi.notify?.({ title, body: String(body).slice(0, 80), tag: sid })
       }
     }
-    setStore((store) => {
-      const s = store[sid]
-      if (!s) return store
-      let n: SessionState | null = null
-      // 子代理的工具调用与 token 用量归属到父 agent 卡片，不进主流；其余带 parent_run_id
-      // 的事件（审批/澄清/计划/错误/轮次完成等中断）仍需用户处理，照常走下方 switch。
-      if (parentRun && (type === 'tool.start' || type === 'tool.complete' || type === 'message.complete')) {
-        return { ...store, [sid]: applyChildEvent(s, parentRun, type, payload) ?? s }
-      }
-      switch (type) {
-        // message.start 不再预建空 assistant：模型直接调工具（无文字）时会留下空气泡，
-        // 还会把相邻工具在 groupItems 里隔断。改由首个 message.delta 懒创建气泡。
-        case 'message.delta':
-          n = { ...s, items: appendDelta(s.items, payload.text ?? '') }
-          break
-        case 'turn.start':
-          // 开轮广播本轮用户消息 id：给最后一条尚未上锚的用户气泡补上（run.lock 保证
-          // 每会话同时只有一轮在飞，故「最后一条无 messageId 的用户气泡」无歧义）。
-          // 时间旅行按此 id 截断，不做序号/文本猜测。
-          // 同时固化会话模型：真人轮开跑正是后端 session_model.pin 的时刻，两边同时
-          // 发生——不同步的话，本会话此后切模型不会弹缓存失效确认
-          n = {
-            ...s,
-            items: anchorLastUser(s.items, payload.message_id ?? ''),
-            model: s.model ?? defaultModelRef.current,
-          }
-          break
-        case 'thinking.delta':
-          n = { ...s, thinkingText: s.thinkingText + (payload.text ?? '') }
-          break
-        case 'compaction.status':
-          // 历史压缩进行中：仅切状态，不进消息流（摘要全文由后端拦截，不会泄漏为助手回答）
-          n = { ...s, compacting: !!payload.active }
-          break
-        case 'message.start':
-          // 每次模型调用的流起点。retry 要回滚的正是本次调用之后追加的气泡，而
-          // 畸形那次调用的 message.complete 先于 message.retry 到达（已把 streaming
-          // 清成 false），故必须在此记边界，不能事后靠 streaming 反推。
-          n = { ...s, streamMark: s.items.length }
-          break
-        case 'message.complete':
-          n = { ...s, items: finishStreaming(s.items), ctx: ctxFromUsage(payload.usage) ?? s.ctx }
-          break
-        case 'message.retry':
-          // 后端丢弃了畸形响应重试：回滚本次调用流出的气泡，原位留一行提示
-          //（思考文本由下方统一收口清掉）
-          n = {
-            ...s,
-            items: [...s.items.slice(0, s.streamMark ?? s.items.length), { id: nid(), kind: 'retry' }],
-          }
-          break
-        case 'tool.start': {
-          const tcid = payload.tool_call_id ?? ''
-          // 防御性去重：同一 tool_call_id 重复 tool.start 只建一行（在途审批后 ask 单次发出，
-          // 此守卫不再为 ask 必需，仅兜底任何意外重发）
-          if (tcid && s.items.some((it) => it.kind === 'tool' && it.toolCallId === tcid)) break
-          n = {
-            ...s,
-            items: [
-              ...s.items,
-              {
-                id: nid(),
-                kind: 'tool',
-                toolCallId: tcid,
-                name: payload.name ?? '',
-                args: payload.args,
-                output: '',
-                done: false,
-                // agent 工具自带 run_id：子工具事件经 parent_run_id 归属到此卡片
-                ...(payload.run_id ? { runId: payload.run_id, children: [] } : {}),
-              },
-            ],
-          }
-          break
-        }
-        case 'tool.complete':
-          n = {
-            ...s,
-            items: s.items.map((it) =>
-              it.kind === 'tool' && it.toolCallId === payload.tool_call_id
-                ? { ...it, output: payload.output ?? '', done: true, error: !!payload.is_error }
-                : it,
-            ),
-          }
-          break
-        case 'approval.request': {
-          // 追加而非覆盖：并发审批各自入队、逐个处理，不丢任何挂起的 Future（去重见 enqueuePending）
-          const q = enqueuePending(s.approval, payload)
-          n = q === s.approval ? s : { ...s, approval: q }
-          break
-        }
-        case 'clarify.request': {
-          const q = enqueuePending(s.clarify, payload)
-          n = q === s.clarify ? s : { ...s, clarify: q }
-          break
-        }
-        case 'todos.update':
-          n = { ...s, todos: payload.todos ?? [] }
-          break
-        case 'turn.complete':
-          // 轮结束：清掉可能残留的审批/澄清对话框（如 stop/切会话把挂起审批以拒绝收尾，
-          // 此时不经 decide/resume 清理，靠 turn.complete 兜底关闭弹窗）
-          n = {
-            ...s,
-            running: false,
-            compacting: false,
-            approval: [],
-            clarify: [],
-            items: finishTurn(s.items),
-            ctx: ctxFromUsage(payload.usage) ?? s.ctx,
-          }
-          break
-        case 'error':
-          // 出错中断的流（bridge 只发 error、无 message.complete）也要收尾气泡 + 关弹窗
-          n = {
-            ...s,
-            running: false,
-            compacting: false,
-            approval: [],
-            clarify: [],
-            items: [...finishTurn(s.items), { id: nid(), kind: 'notice', text: payload.message }],
-          }
-          break
-      }
-      // 思考的生命周期统一收口：除 thinking.delta 自身外，任何事件到达都意味着
-      // 这段思考已结束（正文/工具/审批/轮次边界），清空累积文本——新增事件类型
-      // 无需再各自记得清理
-      if (n && type !== 'thinking.delta' && n.thinkingText) {
-        n = { ...n, thinkingText: '' }
-      }
-      return n ? { ...store, [sid]: n } : store
-    })
+    // 事件 → 会话状态的纯归约（见 sessionReducer.reduceEvent）；此处只负责喂进去。
+    setStore((store) => reduceEvent(store, sid, ev, defaultModelRef.current))
   }, [])
 
   // 为某会话建立一条独立 WS 连接（每会话一条，互不阻塞）。targetThread=null 为新会话。
@@ -1583,16 +1205,10 @@ export default function App() {
     [],
   )
 
-  // 把后端下发的会话模型落到该会话（switch_session / set_session_model 共用）。
-  // **只存已固化的**：未固化的会话在后端跟随「新会话默认」，前端把 model 留空，
-  // sessionModel 便自动 fallback 到 defaultModel——改默认时零 RPC 自动同步，
-  // 也不会出现「显示冻在握手那一刻、实跑跟着默认走」的脱节
+  // 把后端下发的会话模型落到该会话（switch_session / set_session_model 共用）；
+  // 「只存已固化的」这条语义归 sessionModelPatch（见 sessionReducer）。
   const applySessionModel = useCallback((key: string, m: SessionModelWire) => {
-    setStore((s) =>
-      s[key]
-        ? { ...s, [key]: { ...s[key], model: m.pinned ? { model: m.model, provider: m.provider } : undefined } }
-        : s,
-    )
+    setStore((s) => (s[key] ? { ...s, [key]: { ...s[key], ...sessionModelPatch(m) } } : s))
   }, [])
 
   const loadProviders = useCallback(() => {
@@ -1694,8 +1310,7 @@ export default function App() {
     [openConnection, reloadHistory],
   )
   // onNotifyClick 的 effect 挂一次（[] 依赖），经 ref 取最新 activate，避免捕获旧闭包
-  const activateRef = useRef(activate)
-  activateRef.current = activate
+  const activateRef = useLatest(activate)
 
   const openProjects = useCallback(() => {
     setNeedProjectHint(false) // 用户主动点「项目」标签，不是被新建会话逼过来的，不提示
@@ -3198,7 +2813,7 @@ function StatusIndicator({
     : compacting
       ? t('status.compacting')
       : runningTool
-        ? t(TOOL_META[runningTool.name]?.status ?? 'status.tool')
+        ? t(toolStatusKey(runningTool.name))
         : thinking
           ? t('common.thinking')
           : streaming
@@ -3517,7 +3132,7 @@ const agentName = (args: unknown, i: number): string =>
 // 子代理完成态的纯单行（不可展开）：静止光点 + 标签 + 详情 + 统计。单个与并发共用。
 function DoneCard({ label, detail, stats }: { label: string; detail: string; stats: string }) {
   return (
-    <div className="rounded-xl border border-line bg-panel flex items-center gap-2.5 px-3 py-2">
+    <div className={`${CARD_L1} flex items-center gap-2.5 px-3 py-2`}>
       <span className="lumi-orb lumi-orb-idle" />
       <span className="font-medium shrink-0">{label}</span>
       <span className="text-muted-foreground truncate flex-1">{detail}</span>
@@ -3539,7 +3154,7 @@ function SingleAgent({ item }: { item: ToolItem }) {
     return <DoneCard label={t('subagent.label')} detail={title} stats={stats} />
   }
   return (
-    <div className="rounded-xl border border-line bg-panel overflow-hidden">
+    <div className={`${CARD_L1} overflow-hidden`}>
       <div className="flex items-center gap-2.5 px-3 py-2">
         <span className="lumi-orb" />
         <span className="font-medium flex-1 truncate">{title}</span>
@@ -3564,7 +3179,7 @@ function AgentFleet({ items }: { items: ToolItem[] }) {
     return <DoneCard label={t('subagent.agentsDone', { n: items.length })} detail={names} stats={stats} />
   }
   return (
-    <div className="rounded-xl border border-line bg-panel overflow-hidden">
+    <div className={`${CARD_L1} overflow-hidden`}>
       <div className="flex items-center gap-2.5 px-3 py-2">
         <span className="lumi-orb" />
         <span className="font-medium flex-1">{t('subagent.running', { n: items.length })}</span>
@@ -3721,7 +3336,7 @@ const ToolRow = memo(function ToolRow({ item }: { item: ToolItem }) {
   ) : !item.done ? (
     <div className="flex items-center gap-2 px-3 py-2 font-sans text-muted-foreground">
       <span className="lumi-orb scale-75" />
-      {t(TOOL_META[item.name]?.status ?? 'status.tool')}
+      {t(toolStatusKey(item.name))}
     </div>
   ) : hasOutput ? (
     <pre
@@ -3751,7 +3366,7 @@ const ToolRow = memo(function ToolRow({ item }: { item: ToolItem }) {
           <span className="flex min-w-0 items-center gap-1.5">
             {/* 未登记工具（MCP 等）的参数已在第二行键值里，标题用工具名免重复 */}
             <span className={`truncate ${errored ? 'text-error' : 'text-ink/80'}`}>
-              {TOOL_META[item.name] ? toolTitle(item.name, item.args) : item.name}
+              {isKnownTool(item.name) ? toolTitle(item.name, item.args) : item.name}
             </span>
             {open && chips}
           </span>
@@ -3850,117 +3465,3 @@ function DiffView({ lines }: { lines: DiffLine[] }) {
   )
 }
 
-// 文本提取小工具（toolTitle 标题提取共用；clip/basename/asRecord 在 lib/utils）
-const argStr = (v: unknown) => (typeof v === 'string' ? v : '')
-
-// 每个工具的展示元数据（图标 + 动作动词/名词 + 人类可读标题提取）集中在一张表，
-// 新增工具只需加一行。icon 驱动 ToolRow 图标，verb/noun 驱动 summarizeTools 聚合，
-// title 从 args 提取非技术用户看得懂的标题。
-type ToolMeta = {
-  icon: LucideIcon
-  verb: string
-  noun: string
-  status: string // 运行中的状态指示器文案 i18n key（动作级粒度）
-  title: (a: Record<string, unknown>, name: string) => string
-  // 工具行展示的参数；缺省 = 不展示（agent/todos 另有专门渲染）。未登记的工具（MCP 等）走 kvArgs
-  args?: (a: Record<string, unknown>, t: Translate) => ToolArgs
-}
-// text：收起态第二行 / 展开块首行 / 复制内容；kv 非空时展开块改渲染键值表；shell 着色命令
-type ToolArgs = { text: string; kv?: [string, string][]; shell?: boolean; chips: string[] }
-
-const kvArgs = (a: Record<string, unknown>): ToolArgs => {
-  const kv = Object.entries(a).map(([k, v]): [string, string] => [k, argText(v)])
-  // 无参调用不给 kv：空键值表会在展开块里留一条空白
-  return { text: kv.map(([k, v]) => `${k}=${v}`).join('  '), kv: kv.length ? kv : undefined, chips: [] }
-}
-const bashArgs = (a: Record<string, unknown>, t: Translate): ToolArgs => ({
-  text: argStr(a.command),
-  shell: true,
-  chips: [
-    typeof a.timeout === 'number' && a.timeout > 0 ? t('tool.timeout', { n: a.timeout }) : '',
-    a.run_in_background ? t('tool.background') : '',
-  ].filter(Boolean),
-})
-// read 的 offset 从 0 起：显示成 1 起的行号范围；只有显式传了才出 chip
-const readArgs = (a: Record<string, unknown>, t: Translate): ToolArgs => {
-  const from = (typeof a.offset === 'number' ? a.offset : 0) + 1
-  const range =
-    typeof a.limit === 'number' ? `L${from}–${from + a.limit - 1}` : typeof a.offset === 'number' ? `L${from}–` : ''
-  return {
-    text: argStr(a.file_path),
-    chips: [range, argStr(a.pages) && t('tool.pages', { p: argStr(a.pages) })].filter(Boolean),
-  }
-}
-const editArgs = (a: Record<string, unknown>, t: Translate): ToolArgs => ({
-  text: argStr(a.file_path),
-  chips: a.replace_all ? [t('tool.replaceAll')] : [],
-})
-const searchArgs = (a: Record<string, unknown>, t: Translate): ToolArgs => ({
-  text: [argStr(a.pattern), argStr(a.path) === '.' ? '' : argStr(a.path)].filter(Boolean).join('  ·  '),
-  chips: [argStr(a.glob), argStr(a.type), a.case_insensitive ? t('tool.ignoreCase') : ''].filter(Boolean),
-})
-const fileTitle = (a: Record<string, unknown>, name: string) =>
-  argStr(a.file_path) ? basename(argStr(a.file_path)) : name
-const searchTitle = (a: Record<string, unknown>) =>
-  argStr(a.pattern) ? `Search ${clip(argStr(a.pattern), 48)}` : 'Search'
-
-const TOOL_META: Record<string, ToolMeta> = {
-  bash: { icon: SquareTerminal, verb: 'Ran', noun: 'command', status: 'status.runCommand', title: (a) => clip(argStr(a.description) || 'Run command'), args: bashArgs },
-  read: { icon: FileText, verb: 'Read', noun: 'file', status: 'status.readFile', title: fileTitle, args: readArgs },
-  write: { icon: FilePlus, verb: 'Wrote', noun: 'file', status: 'status.editFile', title: fileTitle, args: editArgs },
-  edit: { icon: FilePen, verb: 'Edited', noun: 'file', status: 'status.editFile', title: fileTitle, args: editArgs },
-  grep: { icon: Search, verb: 'Searched', noun: '', status: 'status.searching', title: searchTitle, args: searchArgs },
-  glob: { icon: Search, verb: 'Searched', noun: '', status: 'status.searching', title: searchTitle, args: searchArgs },
-  agent: { icon: Bot, verb: 'Ran', noun: 'subagent', status: 'status.subtask', title: (a) => clip(argStr(a.prompt) || argStr(a.name) || 'Run subagent') },
-  todos: { icon: ListChecks, verb: 'Updated', noun: 'todo', status: 'status.tool', title: () => 'Update todos' },
-}
-
-const toolIcon = (name: string): LucideIcon => TOOL_META[name]?.icon ?? Wrench
-
-const toolAction = (name: string): { verb: string; noun: string } => {
-  const m = TOOL_META[name]
-  return m ? { verb: m.verb, noun: m.noun } : { verb: 'Used', noun: name }
-}
-
-// 聚合成 "Edited 2 files, ran a command, read a file" 式自然语言摘要：
-// 同动作合并计数，首个短语首字母大写、其余句中小写。
-function summarizeTools(tools: ToolItem[]): string {
-  if (tools.length === 0) return ''
-  const order: string[] = []
-  const agg = new Map<string, { verb: string; noun: string; n: number }>()
-  for (const t of tools) {
-    const a = toolAction(t.name)
-    const key = `${a.verb}|${a.noun}`
-    if (!agg.has(key)) {
-      agg.set(key, { ...a, n: 0 })
-      order.push(key)
-    }
-    agg.get(key)!.n++
-  }
-  const phrases = order.map((k) => {
-    const { verb, noun, n } = agg.get(k)!
-    if (!noun) return n === 1 ? verb : `${verb} ${n} times`
-    return n === 1 ? `${verb} a ${noun}` : `${verb} ${n} ${noun}s`
-  })
-  return phrases
-    .map((p, i) => (i === 0 ? p : p.charAt(0).toLowerCase() + p.slice(1)))
-    .join(', ')
-}
-
-// 从工具 args 提取人类可读标题（非技术用户看得懂），而非 dump raw JSON。
-// 提取规则定义在 TOOL_META[name].title；未知工具回退到第一个字符串字段（子代理行只有标题，
-// 靠它保留信息；主流 ToolRow 有第二行键值，对未知工具改用工具名，见 ToolRow）。
-function toolTitle(name: string, args: unknown): string {
-  const a = asRecord(args)
-  const m = TOOL_META[name]
-  if (m) return m.title(a, name)
-  const first = Object.values(a).find((v) => typeof v === 'string')
-  return first ? clip(String(first)) : name
-}
-
-// 工具行展示的参数：登记了的按 TOOL_META[name].args 提取，未登记的（MCP 等）全量键值
-function toolArgs(name: string, args: unknown, t: Translate): ToolArgs {
-  const m = TOOL_META[name]
-  const a = asRecord(args)
-  return m ? (m.args?.(a, t) ?? { text: '', chips: [] }) : kvArgs(a)
-}

@@ -1,17 +1,17 @@
-"""LumiAgent 桥接层（中立层，供 TUI / desktop WS 服务等前端复用）
+"""LumiAgent 桥接层（中立层，供 desktop WS / IM 渠道 / cron 等前端复用）
 
 直接调用 LumiAgent graph（不走 HTTP），将原始 LangGraph 事件封装为干净的
-BridgeEvent 流，并处理子代理追踪、权限审批富化、checkpoint 回退等。
+BridgeEvent 流，并处理子代理追踪、权限审批富化、中断残留修复等。
 
-AgentBridge 保留流式 + 会话生命周期核心；Provider CRUD / 审批富化 /
-checkpoint / folder 等职责拆到 service 子模块，AgentBridge 通过瘦委派对外暴露。
+AgentBridge 保留流式 + 会话生命周期核心；folder（``bridge.folders``）与文件级
+checkpoint 是它的子模块，供应商 CRUD 是无状态的模块级函数（``bridge/providers.py``）。
 """
 
 from __future__ import annotations
 
 import asyncio
 import time
-from collections.abc import AsyncGenerator
+from collections.abc import AsyncGenerator, Iterator
 from contextlib import suppress
 from dataclasses import dataclass
 from enum import StrEnum
@@ -30,11 +30,13 @@ from langgraph.errors import GraphBubbleUp, GraphDrained
 from langgraph.runtime import RunControl
 from langgraph.types import Command
 
+from lumi.agents.core.broker import LUMI_APPROVAL_EVENT, ApprovalBroker
 from lumi.agents.core.graph import LumiAgent, create_agent
 from lumi.agents.core.hooks import build_config_hooks, set_run_config_hooks
 from lumi.agents.core.meta_message import (
     CTX_DIGEST_KEY,
     declared_file_paths,
+    extract_text_content,
     strip_ctx_digest,
     strip_injected_prefix,
     synthetic_human_message,
@@ -58,8 +60,6 @@ from lumi.agents.runtime.bg_tasks import (
     current_thread_id,
     get_task_registry,
 )
-from lumi.agents.runtime.checkpoint import CheckpointInfo, FileCheckpointManager
-from lumi.agents.runtime.file_tracker import FileChangeTracker
 from lumi.agents.runtime.shell_session import get_shell_session_manager
 from lumi.agents.tools.providers.mcp import (
     close_all_pools,
@@ -69,14 +69,14 @@ from lumi.agents.tools.providers.mcp import (
     refresh_pool_config,
 )
 from lumi.agents.tools.providers.todo import todos_payload
-from lumi.gateway.bridge.approval import ApprovalEnricher
-from lumi.gateway.bridge.broker import LUMI_APPROVAL_EVENT, ApprovalBroker
-from lumi.gateway.bridge.checkpoint import CheckpointService
+from lumi.gateway.bridge.approval import enrich_tool_approval
 from lumi.gateway.bridge.folders import FolderManager
-from lumi.gateway.bridge.providers import ProviderService
+from lumi.models import provider_store
 from lumi.sessions import session_model
-from lumi.sessions.message_text import extract_text_content
+from lumi.sessions.session_meta import get_goal, update_meta
 from lumi.sessions.session_model import SessionModel
+from lumi.sessions.usage import extract_usage, last_ai_usage
+from lumi.utils.config import get_config
 from lumi.utils.constants import (
     ATTACHED_FILE_TAG,
     LUMI_META_KEY,
@@ -84,14 +84,13 @@ from lumi.utils.constants import (
     RETRY_BASE_WAIT,
 )
 from lumi.utils.logger import logger
-from lumi.utils.read_config import get_config
+from lumi.utils.paths import get_workspace_dir
 from lumi.utils.thread_id import generate_thread_id, is_channel_thread
-from lumi.utils.workspace_id import get_workspace_dir
 
 if TYPE_CHECKING:
     from langgraph.graph.state import CompiledStateGraph
 
-# LangChain 框架注入的内部字段，不传递给 TUI 渲染
+# LangChain 框架注入的内部字段，不传递给前端渲染
 _TOOL_INTERNAL_KEYS = frozenset({"tool_call_id", "runtime"})
 
 # 中断残留的悬空 tool_call 补配对措辞。悬空 ≠ 未执行：cancel 可能落在工具已完成
@@ -104,7 +103,7 @@ _INTERRUPTED_TOOL_NOTE = (
 def build_skill_command_blocks(
     skill_name: str, content: str, extra_text: str = ""
 ) -> list[dict]:
-    """构建技能斜杠命令发给 Agent 的结构化 content blocks（TUI / desktop 共用）。
+    """构建技能斜杠命令发给 Agent 的结构化 content blocks（各前端共用）。
 
     与 Agent 侧的命令解析约定保持一致，是该格式的单一事实来源：
         Block 0: <command-name>/xxx</command-name><command-type>skill</command-type>
@@ -190,7 +189,7 @@ class EventKind(StrEnum):
         "message.retry"  # CallModel 丢弃畸形响应重试：前端清掉本轮已流出的文本
     )
     TOOL_GENERATING = "tool.generating"  # LLM 正在生成工具调用参数
-    COMPACTING = (
+    COMPACTION_STATUS = (
         "compaction.status"  # 历史压缩进行中（Summarizer 内部摘要调用不外泄为助手消息）
     )
     TOOL_START = "tool.start"
@@ -202,12 +201,13 @@ class EventKind(StrEnum):
     ERROR = "error"
 
 
-@dataclass
+@dataclass(frozen=True)
 class BridgeEvent:
-    """Bridge 事件数据"""
+    """Bridge 事件数据（不可变：构造后只被序列化 / 留底重发）。"""
 
     kind: EventKind
     text: str = ""
+    message_id: str = ""  # TURN_START 专用：本轮用户消息 id（时间旅行锚点）
     name: str = ""
     args: dict | None = None
     tool_call_id: str = ""
@@ -223,14 +223,14 @@ class BridgeEvent:
 async def shutdown_shared_runtime() -> None:
     """关闭进程级共享运行时（MCP 子进程、shell / 后台任务会话）。
 
-    进程退出时调用一次：TUI 在 quit 时、`lumi serve` 在 lifespan shutdown 时。
+    进程退出时调用一次（`lumi serve` 的 lifespan shutdown）。
     """
     await close_all_pools()
     await get_shell_session_manager().close_all()
 
 
 class AgentBridge:
-    """TUI 与 LumiAgent 的桥接层"""
+    """前端与 LumiAgent 的桥接层：一条连接 / 一个渠道会话一个实例。"""
 
     def __init__(self) -> None:
         self._agent: LumiAgent | None = None
@@ -247,12 +247,6 @@ class AgentBridge:
         # 活跃 agent 工具 run_id 集合：流式 / 审批事件的子代理归属（_resolve_subagent_parent）
         # 据此判定祖先链中是否含活跃 agent run。在途审批后审批卡片也走同一归属机制。
         self._active_agent_runs: set[str] = set()
-        self._shadow: FileCheckpointManager | None = None
-        self._tracker: FileChangeTracker | None = None
-        # 本会话临时添加的额外可访问目录（不持久化，连接断开即失效）
-        self._extra_folders: list[str] = []
-        # 上次通知模型时的目录快照，用于在下一条用户消息注入增减变更提醒
-        self._notified_folders: set[str] = set()
         # 上次通知模型时的 ultra 档位状态，仅在开/关切换的那一轮注入边沿提醒
         self._notified_ultra: bool = False
         # 本会话项目的 config hooks（.lumi/hooks.json）：随项目绑定，set_workspace 时重载，
@@ -272,11 +266,8 @@ class AgentBridge:
         # 假时 workspace_dir 仍会退回进程 cwd 兜底可用，但 send_message/run_command 须拒绝——
         # 聊天必须绑定项目，不允许静默落在不可控的进程 cwd 上（见 session.py handle_frame）。
         self._workspace_bound: bool = False
-        # 职责子模块（back-reference 组合）
-        self._providers = ProviderService(self)
-        self._approval = ApprovalEnricher(self)
-        self._checkpoint = CheckpointService(self)
-        self._folders = FolderManager(self)
+        # 子模块（back-reference 组合）：本会话临时目录 / 项目切换；文件级 checkpoint（休眠）
+        self.folders = FolderManager(self)
 
     async def initialize(
         self,
@@ -321,10 +312,15 @@ class AgentBridge:
         # 注入在途审批 Broker（与 permission_engine 同源，事后赋值，零改 create_agent 签名）
         self._context.approval_broker = self._broker
         # 授权通过后放宽工作区边界的回调（人工审批 / auto 分类器 / privileged 三条路共用）
-        self._context.widen_boundary = self._folders.widen_for_violations
+        self._context.widen_boundary = self.folders.widen_for_violations
+        # /goal 条件存 sessions 层 sidecar；goal_stop_hook 经这两个回调读 / 清
+        self._context.get_goal = get_goal
+        self._context.clear_goal = lambda tid: update_meta(tid, goal="")
         # 新会话默认模型 (profile, model) 作初值（覆盖 config 默认模型）；会话覆盖
-        # 由轮首 align_session_model 接手
-        self._providers.apply_active()
+        # 由轮首 align_session_model 接手。连接（base_url / api_key）不进 context，
+        # 由 create_llm 按模型名解析
+        default = provider_store.resolve()
+        self._apply_model_to_context(default.model, default.provider, None)
         # 本会话项目（引擎已绑定 project_dir 或退回 cwd）的 config hooks
         self._config_hooks = build_config_hooks(Path(self.workspace_dir))
         thread_id = generate_thread_id()
@@ -438,18 +434,14 @@ class AgentBridge:
         return self._context is not None and self._context.memory_enabled
 
     async def delete_thread(self, thread_id: str) -> None:
-        """删除指定会话的全部 checkpoint（LangGraph 会话 + 文件级 checkpoint）。"""
+        """删除指定会话的 LangGraph checkpoint，并回收其持久 shell。"""
         if not thread_id:
             return
-        from lumi.agents.runtime.checkpoint import delete_thread_checkpoint
-
-        # adelete_thread 抛错也要清理文件级 checkpoint，否则残留孤儿目录
+        # 删除抛错也要回收 shell（按 thread_id 键、会话私有），否则留下孤儿进程
         try:
             if self._agent is not None:
                 await self._agent.adelete_thread(thread_id)
         finally:
-            await asyncio.to_thread(delete_thread_checkpoint, thread_id)
-            # 该会话 thread 的持久 shell 一并回收（按 thread_id 键、会话私有）
             await get_shell_session_manager().close_session(thread_id)
 
     def switch_thread(self, thread_id: str) -> None:
@@ -464,11 +456,6 @@ class AgentBridge:
             metadata={"workspace_dir": self.workspace_dir},
             recursion_limit=recursion_limit,
         )
-        # 切换 checkpoint manager（复用 tracker）
-        if self._shadow is not None and self._tracker is not None:
-            self._shadow = FileCheckpointManager(
-                thread_id, self._shadow.project_dir, self._tracker
-            )
         logger.info("[AgentBridge] 切换到会话: %s", thread_id)
 
     def mark_workspace_bound(self) -> None:
@@ -486,31 +473,10 @@ class AgentBridge:
         """
         self._workspace_bound = False
 
-    # ── Folder / workspace（委派 FolderManager；folder 状态留 AgentBridge）──
-
-    async def set_workspace(self, path: str) -> dict:
-        return await self._folders.set_workspace(path)
-
-    def add_folder(self, path: str) -> dict:
-        return self._folders.add_folder(path)
-
-    def remove_folder(self, path: str) -> dict:
-        return self._folders.remove_folder(path)
-
-    def _drain_folder_note(self) -> str:
-        return self._folders.drain_folder_note()
-
-    def _drain_ultra_note(self) -> str:
-        return self._folders.drain_ultra_note()
-
-    def add_workspace(self, directory: str) -> None:
-        self._folders.add_workspace(directory)
-
     async def stream_response(
         self,
         content: str | list,
         tool_mode: str = "default",
-        execution_mode: str = "normal",
         synthetic: bool = False,
         message_meta: dict | None = None,
         attachments: list[str] | None = None,
@@ -520,7 +486,6 @@ class AgentBridge:
         Args:
             content: 纯文本字符串或多模态 content blocks 列表。
             tool_mode: 工具审批模式（default / accept_edits / privileged）。
-            execution_mode: 执行模式（normal / plan / readonly / 自定义）。
             synthetic: 系统合成轮（后台任务通知等）：声明无可显示（items: []）、
                 不建 Rewind checkpoint、不注入 folder/ultra 提醒。
             message_meta: UI 侧渲染元数据（IM 渠道的 per-消息 items 等），挂到
@@ -538,22 +503,19 @@ class AgentBridge:
 
         if synthetic:
             # 合成轮：无 checkpoint / 无边沿提醒（不是真实用户输入，不消费排队 note）
-            gen = self._stream_turn(
-                synthetic_human_message(content), tool_mode, execution_mode
-            )
+            gen = self._stream_turn(synthetic_human_message(content), tool_mode)
         else:
             gen = self._stream_user_turn(
                 self._build_user_message(
                     content, message_meta, (attachments or []) + image_paths
                 ),
                 tool_mode,
-                execution_mode,
             )
         async for event in gen:
             yield event
 
     async def _stream_turn(
-        self, msg: HumanMessage, tool_mode: str, execution_mode: str
+        self, msg: HumanMessage, tool_mode: str
     ) -> AsyncGenerator[BridgeEvent, None]:
         """底层：以一条消息起一轮图执行（真实用户轮与合成轮共用的最小操作）。"""
         # 跑图之前把模型对齐到本会话应然值（会话覆盖 / 新会话默认都可能在两轮之间变）
@@ -563,13 +525,11 @@ class AgentBridge:
         # tool_mode 是 context（运行时共享、可变）真相源：本轮 UI 选择写入，运行中经
         # set_tool_mode 改它即对后续工具实时生效。不进 input_data（state 快照改不动）。
         self._context.tool_mode = tool_mode
-        async for event in self._stream(
-            {"messages": [msg], "execution_mode": execution_mode}
-        ):
+        async for event in self._stream({"messages": [msg]}):
             yield event
 
     async def _stream_user_turn(
-        self, msg: HumanMessage, tool_mode: str, execution_mode: str
+        self, msg: HumanMessage, tool_mode: str
     ) -> AsyncGenerator[BridgeEvent, None]:
         """真实用户轮：send / regenerate / edit_resend 三入口共用的开轮设置。
 
@@ -578,19 +538,17 @@ class AgentBridge:
         # 固化本会话模型：只有真人轮算「会话开跑了」——合成的后台通知轮 / 压缩轮走
         # _stream_turn 与 compact_thread，它们只对齐不固化，不替用户做决定
         session_model.pin(self.current_thread_id)
-        # 在 agent 执行前创建 checkpoint（快照当前文件状态）；label 取消息的显示声明
-        await self._create_checkpoint_before_turn(msg)
         # 「添加文件夹」增减与 Ultra 档位切换的边沿提醒随下一条真实用户消息注入
         # （注入不碰 items 故不污染 Rewind 标签；reminder 一旦前置进历史即长驻且
         # 不碰系统提示词，缓存安全）。
-        for note in (self._drain_folder_note(), self._drain_ultra_note()):
+        for note in (self.folders.drain_folder_note(), self.folders.drain_ultra_note()):
             if note:
                 msg = inject_text_into_message(msg, note)
         # 开轮即广播本轮用户消息 id：前端据此给乐观气泡上锚（时间旅行按 id 截断）。
         # 走事件而非 RPC 返回值——id 是「轮的事实」而非「轮的结果」，中途 stop 的轮
         # 同样需要它，且不必让每个流式入口都记得回传。
-        yield BridgeEvent(kind=EventKind.TURN_START, text=msg.id or "")
-        async for event in self._stream_turn(msg, tool_mode, execution_mode):
+        yield BridgeEvent(kind=EventKind.TURN_START, message_id=msg.id or "")
+        async for event in self._stream_turn(msg, tool_mode):
             yield event
 
     @staticmethod
@@ -658,15 +616,13 @@ class AgentBridge:
         self._context.tool_mode = mode
         return {"tool_mode": mode}
 
-    # ── 模型供应商 profile（委派 ProviderService）──
-
     def _apply_model_to_context(
         self, model: str, provider: str, effort: str | None
     ) -> None:
         """把一个已解析好的模型写进运行时 context，下一次 call_model 生效。
 
         只改内存、不落盘（持久化归 ``session_model``）。effort=None 表示跟随 profile
-        按模型解析的档位。唯一调用者是 ``align_session_model``。
+        按模型解析的档位。建桥时装「新会话默认」、轮首经 ``align_session_model`` 对齐。
         """
         self._context.model_name = model
         self._context.provider = provider
@@ -692,33 +648,6 @@ class AgentBridge:
                 f"[AgentBridge] thread={self.current_thread_id} 模型对齐 → {target.model}"
             )
         return target
-
-    def set_effort(self, provider_id: str, model: str, level: str) -> dict:
-        return self._providers.set_effort(provider_id, model, level)
-
-    def set_classifier(self, provider_id: str, model: str) -> dict:
-        return self._providers.set_classifier(provider_id, model)
-
-    def set_titler(self, provider_id: str, model: str) -> dict:
-        return self._providers.set_titler(provider_id, model)
-
-    def list_providers(self) -> dict:
-        return self._providers.list_providers()
-
-    def search_catalog(self, query: str) -> dict:
-        return self._providers.search_catalog(query)
-
-    async def test_provider(self, base_url: str, api_key: str, model: str) -> dict:
-        return await self._providers.test_provider(base_url, api_key, model)
-
-    def set_provider(self, provider_id: str, model: str) -> dict:
-        return self._providers.set_provider(provider_id, model)
-
-    def save_provider(self, profile: dict) -> dict:
-        return self._providers.save_provider(profile)
-
-    def delete_provider(self, provider_id: str) -> dict:
-        return self._providers.delete_provider(provider_id)
 
     def list_commands(self) -> list[dict]:
         """列出当前可用的斜杠命令（技能命令），供前端补全菜单使用。
@@ -850,8 +779,7 @@ class AgentBridge:
         返回是否真的压缩了（会话太短 / 末条是半截工具轮 / 无摘要提示词时跳过并返回 False）。
         """
         from lumi.agents.core.preprocessing.compact import (
-            build_compacted_update,
-            run_summary,
+            compact_messages,
             select_for_compaction,
         )
 
@@ -867,19 +795,7 @@ class AgentBridge:
         if body is None:
             return False
 
-        prompt = get_config().load_prompt("SUMMARY")
-        token_config = get_config().config.token
-        summary_text, _ = await run_summary(
-            body,
-            prompt,
-            tools=self._context.tools,
-            system_prompt=self._context.system_prompt,
-            model_name=self._context.model_name,
-            provider=self._context.provider,
-            max_retry=token_config.summary_ptl_retry_max,
-            drop_ratio=token_config.summary_ptl_retry_drop_ratio,
-        )
-        update = build_compacted_update(snapshot, [], summary_text)
+        update, _ = await compact_messages(snapshot, body, [], self._context)
         await self.flush_offline(update)
         logger.info(
             "[compact_thread] 已压缩 thread=%s（%d 条历史 → 摘要）",
@@ -952,7 +868,6 @@ class AgentBridge:
         self,
         message_id: str,
         tool_mode: str = "default",
-        execution_mode: str = "normal",
     ) -> AsyncGenerator[BridgeEvent, None]:
         """重新生成：截断目标用户消息及其后历史，用原消息重建后重走一轮。
 
@@ -967,7 +882,7 @@ class AgentBridge:
             original.additional_kwargs.get(LUMI_META_KEY),
             declared_file_paths(original),
         )
-        async for event in self._stream_user_turn(msg, tool_mode, execution_mode):
+        async for event in self._stream_user_turn(msg, tool_mode):
             yield event
 
     async def stream_edit_resend(
@@ -975,7 +890,6 @@ class AgentBridge:
         message_id: str,
         content: str,
         tool_mode: str = "default",
-        execution_mode: str = "normal",
     ) -> AsyncGenerator[BridgeEvent, None]:
         """编辑重发：截断目标用户消息及其后历史，以编辑后文本 + 原附件重走一轮。
 
@@ -984,7 +898,7 @@ class AgentBridge:
         """
         original = await self._rewind_or_raise(message_id)
         msg = self._build_user_message(content, None, declared_file_paths(original))
-        async for event in self._stream_user_turn(msg, tool_mode, execution_mode):
+        async for event in self._stream_user_turn(msg, tool_mode):
             yield event
 
     async def _emit_text_message(self, text: str) -> AsyncGenerator[BridgeEvent, None]:
@@ -1022,7 +936,6 @@ class AgentBridge:
           ``/goal <条件>``。该轮结束触发 OnAgentStop → goal_stop_hook 立即评估。
         """
         from lumi.agents.core.hooks.goal import ACTIVATION_REMINDER
-        from lumi.sessions.session_meta import get_goal, update_meta
 
         thread_id = self.current_thread_id
 
@@ -1106,11 +1019,6 @@ class AgentBridge:
         # 在 try 之前声明：finally 恒要注销它，而 try 里有早退分支
         run_control: RunControl | None = None
         try:
-            if self._agent is None or self._config is None:
-                yield BridgeEvent(
-                    kind=EventKind.ERROR, error="Agent 未初始化，请重启 Lumi"
-                )
-                return
             graph = self._agent.graph
 
             # 注入本会话的授权目录来源 + config hooks 到当前 run 上下文：filesystem/bash
@@ -1118,7 +1026,7 @@ class AgentBridge:
             # 进程全局所清洗（见 permissions.workspace 两层来源说明）。降级（无引擎）兜底
             # 逻辑与 cron 共用 set_run_authorized_source_for。
             engine = self._context.permission_engine if self._context else None
-            set_run_authorized_source_for(engine, self._extra_folders)
+            set_run_authorized_source_for(engine, self.folders.extra_folders)
             set_run_config_hooks(self._config_hooks)
 
             # MCP 池后台就位/换代后，轮首重建工具列表（后台加载不阻塞就绪的配套拼图：
@@ -1157,224 +1065,8 @@ class AgentBridge:
                             context=self._context,
                             version="v2",  # 锁死版本：on_custom_event 浮现 + parent_ids 依赖此契约
                         ):
-                            kind = event.get("event", "")
-                            run_id = event.get("run_id", "")
-                            parent_ids = event.get("parent_ids", [])
-
-                            parent_id = self._resolve_subagent_parent(
-                                run_id, parent_ids
-                            )
-                            # 主链 CallModel 事件（半截回复 buffer 只认它）
-                            is_main = not parent_id and self._is_main_call_model(event)
-
-                            # agent 工具 run 登记（放在匹配之后，
-                            # 确保 agent 自身的 on_tool_start 不会自匹配）
-                            self._track_agent_run(kind, event.get("name", ""), run_id)
-
-                            # 压缩节点(Summarizer)内部的摘要 LLM 调用：不作为 message.* 流出
-                            # （astream_events 会把它逐字浮现成 on_chat_model_stream，否则摘要
-                            # 全文会泄漏成助手回答），改用 compaction.status 驱动「正在压缩」指示。
-                            # 对齐 claude-code：压缩调用内部消费 + 'compacting' 状态，不进用户流。
-                            if kind.startswith("on_chat_model") and (
-                                event.get("metadata", {}).get("langgraph_node")
-                                == "Summarizer"
-                            ):
-                                # start→压缩开始、end/error→结束；stream 直接丢弃（摘要不外泄）
-                                if kind != "on_chat_model_stream":
-                                    yield BridgeEvent(
-                                        kind=EventKind.COMPACTING,
-                                        data={"active": kind == "on_chat_model_start"},
-                                    )
-                                continue
-
-                            if kind == "on_chat_model_start":
-                                if is_main:
-                                    # 一轮多次模型调用：已完成的调用由节点返回落库，
-                                    # buffer 只代表当前在途的这一次
-                                    self._reset_partial_buffer()
-                                yield BridgeEvent(
-                                    kind=EventKind.MESSAGE_START,
-                                    parent_run_id=parent_id,
-                                )
-
-                            elif kind == "on_chat_model_stream":
-                                chunk = event.get("data", {}).get("chunk")
-                                if chunk:
-                                    usage = self._extract_usage(chunk)
-                                    thinking = self._extract_thinking_from_chunk(chunk)
-                                    if thinking:
-                                        yield BridgeEvent(
-                                            kind=EventKind.THINKING_DELTA,
-                                            text=thinking,
-                                            usage_metadata=usage,
-                                            parent_run_id=parent_id,
-                                        )
-                                    text = self._extract_text_from_chunk(chunk)
-                                    if text:
-                                        if is_main:
-                                            self._partial_chunks.append(text)
-                                            if not self._partial_msg_id and chunk.id:
-                                                self._partial_msg_id = chunk.id
-                                        yield BridgeEvent(
-                                            kind=EventKind.MESSAGE_DELTA,
-                                            text=text,
-                                            usage_metadata=usage,
-                                            parent_run_id=parent_id,
-                                        )
-                                    elif not thinking and self._has_tool_call_chunk(
-                                        chunk
-                                    ):
-                                        yield BridgeEvent(
-                                            kind=EventKind.TOOL_GENERATING,
-                                            usage_metadata=usage,
-                                            parent_run_id=parent_id,
-                                        )
-
-                            elif kind == "on_chat_model_end":
-                                output = event.get("data", {}).get("output")
-                                usage = self._extract_usage(output) if output else None
-                                yield BridgeEvent(
-                                    kind=EventKind.MESSAGE_COMPLETE,
-                                    usage_metadata=usage,
-                                    parent_run_id=parent_id,
-                                )
-
-                            elif kind == "on_tool_start":
-                                name = event.get("name", "unknown")
-                                data = event.get("data", {})
-                                args = data.get("input", {})
-                                if isinstance(args, dict):
-                                    tool_call_id = args.get("tool_call_id", "")
-                                    args = {
-                                        k: v
-                                        for k, v in args.items()
-                                        if k not in _TOOL_INTERNAL_KEYS
-                                    }
-                                else:
-                                    tool_call_id = ""
-                                    args = {}
-                                # 未注入 tool_call_id 的工具（如 bash）回退到 run_id：
-                                # run_id 每次执行唯一，且 on_tool_start/end 共享同一个，
-                                # 避免前端按空 id 把多个工具输出匹配混淆。
-                                tool_call_id = self._resolve_tool_call_id(
-                                    name, tool_call_id, run_id
-                                )
-                                yield BridgeEvent(
-                                    kind=EventKind.TOOL_START,
-                                    name=name,
-                                    args=args,
-                                    tool_call_id=tool_call_id,
-                                    parent_run_id=parent_id,
-                                    run_id=run_id if name == "agent" else "",
-                                )
-
-                            elif kind == "on_tool_end":
-                                name = event.get("name", "unknown")
-                                data = event.get("data", {})
-                                output = data.get("output", "")
-                                if isinstance(output, Command):
-                                    msgs = (output.update or {}).get("messages", [])
-                                    if msgs and hasattr(msgs[0], "content"):
-                                        output = msgs[0].content
-                                    else:
-                                        output = ""
-                                elif hasattr(output, "content"):
-                                    output = output.content
-                                tool_call_id = ""
-                                inp = data.get("input", {})
-                                if isinstance(inp, dict):
-                                    tool_call_id = inp.get("tool_call_id", "")
-                                # 普通工具回退 run_id（与 on_tool_start 对齐）
-                                tool_call_id = self._resolve_tool_call_id(
-                                    name, tool_call_id, run_id
-                                )
-
-                                yield BridgeEvent(
-                                    kind=EventKind.TOOL_COMPLETE,
-                                    name=name,
-                                    output=str(output) if output else "",
-                                    tool_call_id=tool_call_id,
-                                    parent_run_id=parent_id,
-                                    run_id=run_id if name == "agent" else "",
-                                )
-
-                                # todos 工具全量替换 state.todos：同步浮现专用事件，
-                                # 前端右栏据此实时更新任务进度（历史快照走 load_history
-                                # 的 state.todos，同一真相源）。子代理的 todos 更新的是
-                                # 其独立图状态，不外发。
-                                if name == "todos" and not parent_id:
-                                    # inp 是 todos 结构化工具的已校验入参，恒为含
-                                    # 必填 todos 的 dict；不兜 shape，异常 shape 该失败
-                                    # 冒泡而非静默清空右栏
-                                    yield BridgeEvent(
-                                        kind=EventKind.TODOS_UPDATE,
-                                        data={"todos": todos_payload(inp["todos"])},
-                                    )
-
-                            elif kind == "on_tool_error":
-                                # 工具抛异常时 LangGraph 发 on_tool_error（而非 on_tool_end），
-                                # ToolNode 的 handle_tool_errors 随后生成 error ToolMessage 续跑。
-                                # 不在此收尾的话前端工具行会永远卡在运行态——故补发一个标记
-                                # is_error 的 TOOL_COMPLETE，让前端结束该行并红色高亮。
-                                name = event.get("name", "unknown")
-                                err = event.get("data", {}).get("error", "")
-                                # Command 冒泡等控制流不是真失败，跳过不报错。
-                                if isinstance(err, GraphBubbleUp):
-                                    continue
-                                inp = event.get("data", {}).get("input", {})
-                                args_tcid = (
-                                    inp.get("tool_call_id", "")
-                                    if isinstance(inp, dict)
-                                    else ""
-                                )
-                                tool_call_id = self._resolve_tool_call_id(
-                                    name, args_tcid, run_id
-                                )
-                                yield BridgeEvent(
-                                    kind=EventKind.TOOL_COMPLETE,
-                                    name=name,
-                                    output=f"工具执行失败: {err}",
-                                    is_error=True,
-                                    tool_call_id=tool_call_id,
-                                    parent_run_id=parent_id,
-                                    run_id=run_id if name == "agent" else "",
-                                )
-
-                            elif (
-                                kind == "on_custom_event"
-                                and event.get("name") == LUMI_MODEL_RETRY_EVENT
-                            ):
-                                # 半截 buffer 无需在此清：重试那次调用的 on_chat_model_start 会重置
-                                yield BridgeEvent(
-                                    kind=EventKind.MESSAGE_RETRY,
-                                    parent_run_id=parent_id,
-                                )
-
-                            elif (
-                                kind == "on_custom_event"
-                                and event.get("name") == LUMI_APPROVAL_EVENT
-                            ):
-                                # 在途审批：节点 / ask 工具经 broker 发出的审批请求在此浮现
-                                # 成卡片（内联流出，节点随后才挂起）。parent_run_id 复用流式
-                                # 归属——子 / 外部 agent 的审批白嫖 custom event 自带的 parent_ids。
-                                data = event.get("data", {}) or {}
-                                if data.get("type") == "ask":
-                                    approval_evt = BridgeEvent(
-                                        kind=EventKind.CLARIFY,
-                                        data=data,
-                                        parent_run_id=parent_id,
-                                    )
-                                else:  # tool_approval：bridge 层富化权限评估 / 选项
-                                    approval_evt = BridgeEvent(
-                                        kind=EventKind.APPROVAL,
-                                        data=self._enrich_tool_approval(data),
-                                        parent_run_id=parent_id,
-                                    )
-                                # 留底供 WS 重连重发（节点续跑/被拒时由 resolve/reject 清理）
-                                aid = data.get("approval_id", "")
-                                if aid:
-                                    self._pending_approval_events[aid] = approval_evt
-                                yield approval_evt
+                            for evt in self._translate_event(event):
+                                yield evt
                     finally:
                         # 清除 rewind 或恢复时设置的 checkpoint_id，
                         # 确保后续 aget_state 获取最新 checkpoint
@@ -1407,7 +1099,7 @@ class AgentBridge:
                         attempt + 1,
                         MAX_STREAM_RETRIES,
                     )
-                    # 结束 TUI 中未完成的 assistant message，避免残留碎片
+                    # 结束前端未完成的 assistant message，避免残留碎片
                     yield BridgeEvent(kind=EventKind.MESSAGE_COMPLETE)
                     # 用 STREAM_TOKEN 显示重试提示（不使用 ERROR，因为它会终止 run）
                     retry_msg = (
@@ -1443,6 +1135,206 @@ class AgentBridge:
             # 发给早已跑完的运行
             if run_control is not None:
                 unregister(run_control)
+
+    def _translate_event(self, event: dict) -> Iterator[BridgeEvent]:
+        """一条 astream_events(v2) 原始事件 → 零到多条 BridgeEvent。
+
+        纯翻译，不做 I/O；随手维护三份轮内追踪态：子代理 run 登记、主链半截回复
+        buffer、挂起审批留底。
+        """
+        kind = event.get("event", "")
+        run_id = event.get("run_id", "")
+        parent_ids = event.get("parent_ids", [])
+
+        parent_id = self._resolve_subagent_parent(run_id, parent_ids)
+        # 主链 CallModel 事件（半截回复 buffer 只认它）
+        is_main = not parent_id and self._is_main_call_model(event)
+
+        # agent 工具 run 登记（放在匹配之后，
+        # 确保 agent 自身的 on_tool_start 不会自匹配）
+        self._track_agent_run(kind, event.get("name", ""), run_id)
+
+        # 压缩节点(Summarizer)内部的摘要 LLM 调用：不作为 message.* 流出
+        # （astream_events 会把它逐字浮现成 on_chat_model_stream，否则摘要
+        # 全文会泄漏成助手回答），改用 compaction.status 驱动「正在压缩」指示。
+        # 对齐 claude-code：压缩调用内部消费 + 'compacting' 状态，不进用户流。
+        if kind.startswith("on_chat_model") and (
+            event.get("metadata", {}).get("langgraph_node") == "Summarizer"
+        ):
+            # start→压缩开始、end/error→结束；stream 直接丢弃（摘要不外泄）
+            if kind != "on_chat_model_stream":
+                yield BridgeEvent(
+                    kind=EventKind.COMPACTION_STATUS,
+                    data={"active": kind == "on_chat_model_start"},
+                )
+            return
+
+        if kind == "on_chat_model_start":
+            if is_main:
+                # 一轮多次模型调用：已完成的调用由节点返回落库，
+                # buffer 只代表当前在途的这一次
+                self._reset_partial_buffer()
+            yield BridgeEvent(
+                kind=EventKind.MESSAGE_START,
+                parent_run_id=parent_id,
+            )
+
+        elif kind == "on_chat_model_stream":
+            chunk = event.get("data", {}).get("chunk")
+            if chunk:
+                usage = extract_usage(chunk)
+                thinking = self._extract_thinking_from_chunk(chunk)
+                if thinking:
+                    yield BridgeEvent(
+                        kind=EventKind.THINKING_DELTA,
+                        text=thinking,
+                        usage_metadata=usage,
+                        parent_run_id=parent_id,
+                    )
+                text = extract_text_content(getattr(chunk, "content", ""))
+                if text:
+                    if is_main:
+                        self._partial_chunks.append(text)
+                        if not self._partial_msg_id and chunk.id:
+                            self._partial_msg_id = chunk.id
+                    yield BridgeEvent(
+                        kind=EventKind.MESSAGE_DELTA,
+                        text=text,
+                        usage_metadata=usage,
+                        parent_run_id=parent_id,
+                    )
+                elif not thinking and self._has_tool_call_chunk(chunk):
+                    yield BridgeEvent(
+                        kind=EventKind.TOOL_GENERATING,
+                        usage_metadata=usage,
+                        parent_run_id=parent_id,
+                    )
+
+        elif kind == "on_chat_model_end":
+            output = event.get("data", {}).get("output")
+            usage = extract_usage(output) if output else None
+            yield BridgeEvent(
+                kind=EventKind.MESSAGE_COMPLETE,
+                usage_metadata=usage,
+                parent_run_id=parent_id,
+            )
+
+        elif kind == "on_tool_start":
+            name = event.get("name", "unknown")
+            data = event.get("data", {})
+            args = data.get("input", {})
+            if isinstance(args, dict):
+                tool_call_id = args.get("tool_call_id", "")
+                args = {k: v for k, v in args.items() if k not in _TOOL_INTERNAL_KEYS}
+            else:
+                tool_call_id = ""
+                args = {}
+            # 未注入 tool_call_id 的工具（如 bash）回退到 run_id：
+            # run_id 每次执行唯一，且 on_tool_start/end 共享同一个，
+            # 避免前端按空 id 把多个工具输出匹配混淆。
+            tool_call_id = self._resolve_tool_call_id(name, tool_call_id, run_id)
+            yield BridgeEvent(
+                kind=EventKind.TOOL_START,
+                name=name,
+                args=args,
+                tool_call_id=tool_call_id,
+                parent_run_id=parent_id,
+                run_id=run_id if name == "agent" else "",
+            )
+
+        elif kind == "on_tool_end":
+            name = event.get("name", "unknown")
+            data = event.get("data", {})
+            output = data.get("output", "")
+            if isinstance(output, Command):
+                msgs = (output.update or {}).get("messages", [])
+                if msgs and hasattr(msgs[0], "content"):
+                    output = msgs[0].content
+                else:
+                    output = ""
+            elif hasattr(output, "content"):
+                output = output.content
+            tool_call_id = ""
+            inp = data.get("input", {})
+            if isinstance(inp, dict):
+                tool_call_id = inp.get("tool_call_id", "")
+            # 普通工具回退 run_id（与 on_tool_start 对齐）
+            tool_call_id = self._resolve_tool_call_id(name, tool_call_id, run_id)
+
+            yield BridgeEvent(
+                kind=EventKind.TOOL_COMPLETE,
+                name=name,
+                output=str(output) if output else "",
+                tool_call_id=tool_call_id,
+                parent_run_id=parent_id,
+                run_id=run_id if name == "agent" else "",
+            )
+
+            # todos 工具全量替换 state.todos：同步浮现专用事件，
+            # 前端右栏据此实时更新任务进度（历史快照走 load_history
+            # 的 state.todos，同一真相源）。子代理的 todos 更新的是
+            # 其独立图状态，不外发。
+            if name == "todos" and not parent_id:
+                # inp 是 todos 结构化工具的已校验入参，恒为含
+                # 必填 todos 的 dict；不兜 shape，异常 shape 该失败
+                # 冒泡而非静默清空右栏
+                yield BridgeEvent(
+                    kind=EventKind.TODOS_UPDATE,
+                    data={"todos": todos_payload(inp["todos"])},
+                )
+
+        elif kind == "on_tool_error":
+            # 工具抛异常时 LangGraph 发 on_tool_error（而非 on_tool_end），
+            # ToolNode 的 handle_tool_errors 随后生成 error ToolMessage 续跑。
+            # 不在此收尾的话前端工具行会永远卡在运行态——故补发一个标记
+            # is_error 的 TOOL_COMPLETE，让前端结束该行并红色高亮。
+            name = event.get("name", "unknown")
+            err = event.get("data", {}).get("error", "")
+            # Command 冒泡等控制流不是真失败，跳过不报错。
+            if isinstance(err, GraphBubbleUp):
+                return
+            inp = event.get("data", {}).get("input", {})
+            args_tcid = inp.get("tool_call_id", "") if isinstance(inp, dict) else ""
+            tool_call_id = self._resolve_tool_call_id(name, args_tcid, run_id)
+            yield BridgeEvent(
+                kind=EventKind.TOOL_COMPLETE,
+                name=name,
+                output=f"工具执行失败: {err}",
+                is_error=True,
+                tool_call_id=tool_call_id,
+                parent_run_id=parent_id,
+                run_id=run_id if name == "agent" else "",
+            )
+
+        elif kind == "on_custom_event" and event.get("name") == LUMI_MODEL_RETRY_EVENT:
+            # 半截 buffer 无需在此清：重试那次调用的 on_chat_model_start 会重置
+            yield BridgeEvent(
+                kind=EventKind.MESSAGE_RETRY,
+                parent_run_id=parent_id,
+            )
+
+        elif kind == "on_custom_event" and event.get("name") == LUMI_APPROVAL_EVENT:
+            # 在途审批：节点 / ask 工具经 broker 发出的审批请求在此浮现
+            # 成卡片（内联流出，节点随后才挂起）。parent_run_id 复用流式
+            # 归属——子 / 外部 agent 的审批白嫖 custom event 自带的 parent_ids。
+            data = event.get("data", {}) or {}
+            if data.get("type") == "ask":
+                approval_evt = BridgeEvent(
+                    kind=EventKind.CLARIFY,
+                    data=data,
+                    parent_run_id=parent_id,
+                )
+            else:  # tool_approval：bridge 层富化权限评估 / 选项
+                approval_evt = BridgeEvent(
+                    kind=EventKind.APPROVAL,
+                    data=enrich_tool_approval(self._context.permission_engine, data),
+                    parent_run_id=parent_id,
+                )
+            # 留底供 WS 重连重发（节点续跑/被拒时由 resolve/reject 清理）
+            aid = data.get("approval_id", "")
+            if aid:
+                self._pending_approval_events[aid] = approval_evt
+            yield approval_evt
 
     @staticmethod
     def _resolve_tool_call_id(name: str, args_tcid: str, run_id: str) -> str:
@@ -1566,7 +1458,7 @@ class AgentBridge:
         """
         try:
             state = await self._agent.graph.aget_state(self._config)
-            usage = self._extract_last_ai_usage(state)
+            usage = last_ai_usage(state)
         except Exception as e:
             logger.error(
                 "[AgentBridge] 取 turn.complete usage 失败: %s", e, exc_info=True
@@ -1574,20 +1466,12 @@ class AgentBridge:
             usage = None
         return BridgeEvent(kind=EventKind.TURN_COMPLETE, usage_metadata=usage)
 
-    # ── 权限评估（委派 ApprovalEnricher）──
-
-    def _enrich_tool_approval(self, data: dict) -> dict:
-        return self._approval.enrich_tool_approval(data)
-
-    def add_allow_rule(self, tool_expr: str) -> None:
-        self._approval.add_allow_rule(tool_expr)
-
     # ── 在途审批应答（委派 ApprovalBroker）──
 
     def resolve_approval(self, approval_id: str, value) -> bool:
         """会话层收到 resume 应答时唤醒挂起的审批 / 提问（非流式控制路径）。
 
-        value 形状沿用原 interrupt resume 值：tool_approval 为 dict
+        value 形状：tool_approval 为 dict
         {decision, message?, set_tool_mode?}；ask 为答案字符串 / ASK_CANCELLED。
         返回是否命中一个未决请求（未命中=审批已被 stop/切会话收尾）。
         """
@@ -1654,33 +1538,6 @@ class AgentBridge:
         )
         await self.flush_offline(update, graph)
 
-    @classmethod
-    def _extract_last_ai_usage(cls, state) -> dict | None:
-        """从 graph state 的最后一条 AI message 提取 usage_metadata。
-
-        作为 on_chat_model_end 的补充数据源，某些 API 在 state 中保留了
-        比流式聚合更完整的 usage（如 cache 详情）。
-        复用 _extract_usage 确保 input_token_details 等字段被一致提取。
-        """
-        messages = (state.values or {}).get("messages", [])
-        for msg in reversed(messages):
-            if getattr(msg, "usage_metadata", None) is not None:
-                return cls._extract_usage(msg)
-        return None
-
-    @staticmethod
-    def _extract_text_from_chunk(chunk) -> str:
-        """从 LangChain chunk 中提取文本"""
-        if hasattr(chunk, "content"):
-            content = chunk.content
-            if isinstance(content, str):
-                return content
-            if isinstance(content, list):
-                for item in content:
-                    if isinstance(item, dict) and item.get("type") == "text":
-                        return item.get("text", "")
-        return ""
-
     @staticmethod
     def _extract_thinking_from_chunk(chunk) -> str:
         """从 LangChain chunk 中提取思考增量。
@@ -1700,56 +1557,7 @@ class AgentBridge:
             )
         return ""
 
-    # ── File-level Checkpoint（委派 CheckpointService）──
-
-    def init_checkpoint(self, project_dir: Path) -> None:
-        self._checkpoint.init_checkpoint(project_dir)
-
-    async def _create_checkpoint_before_turn(self, msg: HumanMessage) -> None:
-        await self._checkpoint.create_checkpoint_before_turn(msg)
-
-    async def list_checkpoints(self) -> list[CheckpointInfo]:
-        return await self._checkpoint.list_checkpoints()
-
-    async def rewind_to_checkpoint(
-        self, checkpoint: CheckpointInfo
-    ) -> tuple[bool, str]:
-        return await self._checkpoint.rewind_to_checkpoint(checkpoint)
-
-    @staticmethod
-    def _extract_usage(obj) -> dict | None:
-        """从 LangChain 对象中提取 usage_metadata。"""
-        um = getattr(obj, "usage_metadata", None)
-        if um is None:
-            return None
-        if isinstance(um, dict):
-            return um if um else None
-        # UsageMetadata (TypedDict subclass) → 转 dict，保留 input_token_details
-        result = {
-            "input_tokens": getattr(um, "input_tokens", 0),
-            "output_tokens": getattr(um, "output_tokens", 0),
-            "total_tokens": getattr(um, "total_tokens", 0),
-        }
-        itd = getattr(um, "input_token_details", None)
-        if itd:
-            result["input_token_details"] = (
-                dict(itd) if not isinstance(itd, dict) else itd
-            )
-        otd = getattr(um, "output_token_details", None)
-        if otd:
-            result["output_token_details"] = (
-                dict(otd) if not isinstance(otd, dict) else otd
-            )
-        return result
-
     @staticmethod
     def _has_tool_call_chunk(chunk) -> bool:
-        """检测 chunk 是否包含工具调用数据"""
-        # LangChain AIMessageChunk 的 tool_call_chunks 属性
-        if hasattr(chunk, "tool_call_chunks") and chunk.tool_call_chunks:
-            return True
-        # 备用：检查 additional_kwargs 中的 tool_calls
-        if hasattr(chunk, "additional_kwargs"):
-            if chunk.additional_kwargs.get("tool_calls"):
-                return True
-        return False
+        """AIMessageChunk 是否含工具调用数据（原生 tool_call_chunks 或方言 additional_kwargs）。"""
+        return bool(chunk.tool_call_chunks or chunk.additional_kwargs.get("tool_calls"))

@@ -9,7 +9,7 @@
 
 含密钥，整体 chmod 600。各领域模块（global_manager / projects / provider_store /
 channels.store）保留自身 API，内部委托本模块读写自己的分区——分区间互不干扰，
-写入只 patch 自己那一段。旧的分散配置文件由 ``scripts/migrate_config.py`` 一次性合并。
+写入只 patch 自己那一段。
 """
 
 from __future__ import annotations

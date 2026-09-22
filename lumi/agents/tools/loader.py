@@ -9,9 +9,9 @@ from pathlib import Path
 
 from pydantic import BaseModel, Field, ValidationError
 
+from lumi.utils.config import get_config
 from lumi.utils.config.manager import parse_frontmatter
 from lumi.utils.logger import logger
-from lumi.utils.read_config import get_config
 
 # ------------------------------------------------------------------
 # 数据模型

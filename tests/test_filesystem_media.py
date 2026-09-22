@@ -693,7 +693,7 @@ class TestSyntheticHumanMessageDeclaration:
 
     def test_should_show_human_message_filters_synthetic(self):
         """集成检查:should_show_human_message 确实会过滤空声明消息"""
-        from lumi.sessions.message_visibility import should_show_human_message
+        from lumi.agents.core.meta_message import should_show_human_message
 
         synthetic_msg = HumanMessage(
             content=[{"type": "text", "text": "..."}],
@@ -708,9 +708,9 @@ class TestSyntheticHumanMessageDeclaration:
         跨层契约——三个调用点必须共用同一 lumi.items 声明。"""
         from lumi.agents.core.meta_message import (
             declared_items,
+            should_show_human_message,
             synthetic_human_message,
         )
-        from lumi.sessions.message_visibility import should_show_human_message
 
         msg = synthetic_human_message([{"type": "text", "text": "..."}])
         assert declared_items(msg) == []

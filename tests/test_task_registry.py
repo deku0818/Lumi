@@ -23,14 +23,14 @@ def test_notification_queue_enqueue_and_drain():
     q = NotificationQueue()
     q.enqueue("<xml>a</xml>")
     q.enqueue("<xml>b</xml>")
-    items = q.drain_all()
+    items = q.drain_for("")
     assert items == ["<xml>a</xml>", "<xml>b</xml>"]
     assert q.is_empty()
 
 
 def test_notification_queue_drain_empty():
     q = NotificationQueue()
-    assert q.drain_all() == []
+    assert q.drain_for("") == []
 
 
 def test_notification_queue_drain_for_exact_owner_only():
@@ -191,7 +191,7 @@ def test_registry_enqueue_notification():
     )
     reg.register(entry)
     reg.enqueue_notification("bg_003")
-    items = reg.notification_queue.drain_all()
+    items = reg.notification_queue.drain_for("")
     assert len(items) == 1
     assert "bg_003" in items[0]
 
@@ -331,6 +331,6 @@ async def test_registry_cleanup_enqueues_notifications():
     )
     reg.register(entry)
     reg.cleanup()
-    notifications = reg.notification_queue.drain_all()
+    notifications = reg.notification_queue.drain_for("")
     assert len(notifications) == 1
     assert "bg_cleanup" in notifications[0]

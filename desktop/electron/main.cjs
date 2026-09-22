@@ -1,5 +1,5 @@
 // Electron 主进程：拉起 lumi serve sidecar、创建窗口、经 IPC 把 ws 连接信息给 renderer。
-const { app, BrowserWindow, clipboard, dialog, ipcMain, protocol, session, shell, Notification, Menu } = require('electron')
+const { app, BrowserWindow, clipboard, ipcMain, protocol, session, shell, Notification, Menu } = require('electron')
 const { spawn, execFile } = require('node:child_process')
 const { promisify } = require('node:util')
 const execFileAsync = promisify(execFile)
@@ -366,7 +366,7 @@ function createWindow() {
 }
 
 // ── 多机后端注册表（~/Library/.../userData/backends.json）──
-// 形状：{ active: 'local' | <remoteId>, remotes: [{id, name, url, token}] }
+// 形状：{ remotes: [{id, name, url, token, enabled?}] }
 // 本地 sidecar 是隐式后端（id='local'），不入表；远程机器才持久化。
 function backendsFile() {
   return path.join(app.getPath('userData'), 'backends.json')
@@ -374,9 +374,9 @@ function backendsFile() {
 function readBackends() {
   try {
     const d = JSON.parse(fs.readFileSync(backendsFile(), 'utf8'))
-    return { active: d.active || 'local', remotes: Array.isArray(d.remotes) ? d.remotes : [] }
+    return { remotes: Array.isArray(d.remotes) ? d.remotes : [] }
   } catch {
-    return { active: 'local', remotes: [] }
+    return { remotes: [] }
   }
 }
 function writeBackends(d) {
@@ -398,9 +398,9 @@ function connectionFor(id) {
   return { wsUrl: `ws://127.0.0.1:${wsPort}/ws?token=${LOCAL_TOKEN}` }
 }
 
-// renderer 按 backendId 拿对应机器的 WS 地址（带 token）。省略 id 回退到 active（兼容）。
-// 方案甲：前端为每台机器各开连接，不再"切换活动"，故按 id 取而非取单一 active。
-ipcMain.handle('lumi:connection', (_e, id) => connectionFor(id || readBackends().active))
+// renderer 按 backendId 拿对应机器的 WS 地址（带 token）。
+// 方案甲：前端为每台机器各开连接，不存在"活动机器"，按 id 取。
+ipcMain.handle('lumi:connection', (_e, id) => connectionFor(id))
 ipcMain.handle('lumi:backends:list', () => readBackends())
 ipcMain.handle('lumi:backends:save', (_e, b) => {
   const d = readBackends()
@@ -416,15 +416,8 @@ ipcMain.handle('lumi:backends:save', (_e, b) => {
 ipcMain.handle('lumi:backends:remove', (_e, id) => {
   const d = readBackends()
   d.remotes = d.remotes.filter((x) => x.id !== id)
-  if (d.active === id) d.active = 'local'
   writeBackends(d)
   return d
-})
-ipcMain.handle('lumi:backends:setActive', (_e, id) => {
-  const d = readBackends()
-  d.active = id
-  writeBackends(d)
-  return { active: id }
 })
 
 // artifacts 预览：用系统默认应用打开 / 在访达中显示该文件
@@ -441,12 +434,6 @@ ipcMain.handle('lumi:path-exists', async (_e, p) => {
   }
 })
 
-// 原生目录选择器（切换工作目录用），取消返回 null
-ipcMain.handle('lumi:pick-directory', async () => {
-  const r = await dialog.showOpenDialog({ properties: ['openDirectory', 'createDirectory'] })
-  return r.canceled ? null : r.filePaths[0]
-})
-
 // 通知点击：把窗口带回前台（还原最小化 + 跨平台聚焦）
 function focusMainWindow() {
   const win = BrowserWindow.getAllWindows()[0]
@@ -459,11 +446,8 @@ function focusMainWindow() {
 // 系统通知走主进程 Notification（renderer 的 HTML5 Notification 在 macOS
 // dev/未签名场景不可靠）。点击时聚焦窗口并把 tag 回传 renderer 切会话。
 ipcMain.handle('lumi:notify', (event, { title, body, tag }) => {
-  console.log('[notify] 请求:', title, '| supported =', Notification.isSupported())
   if (!Notification.isSupported()) return
   const n = new Notification({ title: String(title || 'Lumi'), body: String(body || '') })
-  n.on('show', () => console.log('[notify] 已展示:', title))
-  n.on('failed', (_e, err) => console.log('[notify] 失败:', err))
   n.on('click', () => {
     focusMainWindow()
     if (!event.sender.isDestroyed()) event.sender.send('lumi:notify-click', tag)

@@ -12,7 +12,7 @@ from lumi.gateway.channels.relay import RELAY_COMMANDS
 
 # IM 渠道通用系统命令：渠道层直接执行，不进 agent、不排队。desktop 有终止/删除
 # 按钮，不需要它们，故不进 bridge.list_commands()（否则 desktop 补全里也会冒出来）。
-# handler 依赖各渠道的传输层，由渠道自己实现（飞书在 inbound._run_system_command），
+# handler 依赖各渠道的传输层，由渠道自己实现（飞书在 feishu/session_commands.py），
 # 这里只共享名字与描述——第二个渠道接入时复用同一套命令面。
 SYSTEM_COMMANDS: dict[str, str] = {
     "stop": "停止当前正在执行的任务",

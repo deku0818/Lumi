@@ -1,7 +1,4 @@
-"""human_approval 节点测试：经在途审批 Broker 拿 decision 后的三态路由 + DENY 快速拒绝。
-
-只换底层等待机制（interrupt → broker.request），三态路由 / DENY 防御分支语义不变。
-"""
+"""human_approval 节点测试：经在途审批 Broker 拿 decision 后的三态路由 + DENY 快速拒绝。"""
 
 import asyncio
 from types import SimpleNamespace
@@ -84,13 +81,6 @@ async def test_cancel_routes_to_end():
     cmd = await human_approval(_state(_TCS), rt)
     assert cmd.goto == END
     assert cmd.update["messages"][0].tool_call_id == "tc1"
-
-
-async def test_string_decision_falls_to_reject():
-    """退化为纯字符串 decision（headless）：非 approve/cancel 走 reject 默认。"""
-    rt = _runtime(decision="reject")
-    cmd = await human_approval(_state(_TCS), rt)
-    assert cmd.goto == END
 
 
 async def test_deny_skips_broker_and_routes_to_call_model():
@@ -203,7 +193,7 @@ async def test_stop_via_reject_keeps_user_message_and_clean_state():
     from langgraph.graph import START, StateGraph
     from langgraph.graph.message import add_messages
 
-    from lumi.gateway.bridge.broker import LUMI_APPROVAL_EVENT, ApprovalBroker
+    from lumi.agents.core.broker import LUMI_APPROVAL_EVENT, ApprovalBroker
 
     broker = ApprovalBroker()
 

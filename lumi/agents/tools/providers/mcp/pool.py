@@ -1,4 +1,4 @@
-"""MCP工具提供者 - 从MCP服务器加载工具
+"""MCP 会话池：持久会话管理器 + 按项目分池（后台加载 / LRU / 换代 / 关停）。
 
 支持两种会话模式：
 - 无状态模式（默认）：每次工具调用创建新会话，适合无状态服务器
@@ -8,15 +8,9 @@
 from __future__ import annotations
 
 import asyncio
-import json
 import os
-import signal
-import subprocess
-import sys
-import time
 from collections.abc import Awaitable, Callable
-from contextlib import AsyncExitStack, nullcontext
-from contextvars import ContextVar
+from contextlib import AsyncExitStack
 from dataclasses import dataclass
 from functools import wraps
 from pathlib import Path
@@ -31,12 +25,19 @@ from langchain_mcp_adapters.interceptors import (
 )
 from langchain_mcp_adapters.tools import load_mcp_tools
 from langgraph.prebuilt import ToolRuntime
-from mcp import ClientSession
 
-from lumi.utils.hashing import short_hash
+from lumi.agents.tools.providers.mcp.config import (
+    EMPTY_CONFIG_HASH,
+    config_hash,
+    load_merged_mcp_config,
+)
+from lumi.agents.tools.providers.mcp.procs import (
+    collect_descendant_pids,
+    kill_child_processes,
+    kill_pids,
+)
+from lumi.utils.config import get_config
 from lumi.utils.logger import logger
-from lumi.utils.paths import lumi_home
-from lumi.utils.read_config import get_config
 
 # ── 拦截器 ──
 
@@ -94,120 +95,13 @@ _PERSISTENT_TRANSPORTS: frozenset[str] = frozenset({"stdio"})
 # 超时对齐 Claude Code 的默认 30s，npx 冷启动拉包也从容。
 _SERVER_START_TIMEOUT = 30.0
 
-# stdio 子进程 stderr 默认输出到 sys.stderr，会污染 TUI 界面。
+# stdio 子进程 stderr 默认输出到 sys.stderr，会混进 serve 进程自己的输出。
 # 用 devnull 替代，将 MCP 子进程的 stderr 静默丢弃。
 _DEVNULL = open(os.devnull, "w")  # noqa: SIM115  # 模块级单例，避免每次调用泄漏 fd
 
-# ── 配置加载 ──
-
-# 当前会话项目根：get_tools(project_dir=...) 进入时 set，get_mcp_tools 未显式传参时读它。
-_current_project_dir: ContextVar[Path | None] = ContextVar(
-    "lumi_mcp_project_dir", default=None
-)
-
-
-def _global_mcp_config_path() -> Path:
-    """全局层配置路径 = 该机器固定位置。
-
-    显式覆盖优先：``--config-dir``（get_config().discovery.cli_config_dir）> ``lumi_home()``
-    （即 ``LUMI_CONFIG_DIR`` > ``~/.lumi``）。**刻意跳过 cwd/.lumi 发现**——两层模型下
-    「cwd 到底算全局还是某个项目」有歧义，全局层必须是稳定的每机器位置。
-    """
-    override = get_config().discovery.cli_config_dir
-    base = Path(override).expanduser().resolve() if override else lumi_home()
-    return base / "mcp_server.json"
-
-
-def _read_json_dict(path: Path) -> dict[str, Any]:
-    """读取单个 mcp_server.json；不存在/损坏/非 dict 一律返回空 dict。"""
-    if not path.exists():
-        return {}
-    try:
-        with open(path, encoding="utf-8") as f:
-            data = json.load(f)
-    except (json.JSONDecodeError, OSError) as e:
-        logger.error(f"MCP配置文件加载失败。文件路径: {path}, 错误: {e}")
-        return {}
-    return data if isinstance(data, dict) else {}
-
-
-def _normalize_server_config(cfg: dict[str, Any]) -> dict[str, Any]:
-    """单个 server 配置归一化：剥离 Lumi 元字段 ``disabled``、补推缺省 ``transport``/``args``。
-
-    ``disabled`` 绝不能下传给 langchain adapter（它 ``**params`` 全透传，混入未知键会
-    TypeError）；``transport`` 缺省按有无 url 推断（Claude Desktop 风格配置不写该键，
-    而 adapter 的 create_session 强制要求）；``args`` 同理——命令本身自足（无参数可传）
-    时配置里没有该键，但 adapter 硬性要求 stdio 必须带 args，补空列表即可。
-    会话池与连接测试共用，两路行为恒一致。
-    """
-    out = {k: v for k, v in cfg.items() if k != "disabled"}
-    if "transport" not in out:
-        out["transport"] = "streamable_http" if out.get("url") else "stdio"
-    if out["transport"] == "stdio":
-        out.setdefault("args", [])
-    return out
-
-
-def _strip_disabled(config: dict[str, Any]) -> dict[str, Any]:
-    """丢弃被禁用的 server，其余逐个归一化（见 :func:`_normalize_server_config`）。"""
-    return {
-        name: _normalize_server_config(cfg)
-        for name, cfg in config.items()
-        if isinstance(cfg, dict) and cfg.get("disabled") is not True
-    }
-
-
-# merged 配置按两文件 mtime 缓存（同 PermissionEngine 热重载思路）：每次建 agent
-# 都要读（wait_ready 探空配置 + get_mcp_tools 各一次），不缓存则每个子代理/cron/
-# workflow 构建都重复读盘解析。key=(全局路径, 项目路径)。
-_merged_cache: dict[tuple[str, str], tuple[int, int, dict[str, Any]]] = {}
-
-
-def _mtime_ns(path: Path | None) -> int:
-    if path is None:
-        return -1
-    try:
-        return path.stat().st_mtime_ns
-    except OSError:
-        return -1
-
-
-def _load_merged_mcp_config(project_dir: Path | None) -> dict[str, Any]:
-    """分层合并的 MCP 配置（全局 ∪ 项目，项目同名覆盖），并剥离 ``disabled``。
-
-    全局层由 :func:`_global_mcp_config_path` 决定；项目层为
-    ``<project_dir>/.lumi/mcp_server.json``（仅当其路径 ≠ 全局层时叠加）。
-    返回可直接下传 adapter 的配置。
-    """
-    global_path = _global_mcp_config_path()
-    project_path = (
-        project_dir / ".lumi" / "mcp_server.json" if project_dir is not None else None
-    )
-    if project_path == global_path:
-        project_path = None
-    key = (str(global_path), str(project_path))
-    mtimes = (_mtime_ns(global_path), _mtime_ns(project_path))
-    cached = _merged_cache.get(key)
-    if cached is not None and (cached[0], cached[1]) == mtimes:
-        return cached[2]
-    merged = dict(_read_json_dict(global_path))
-    if project_path is not None:
-        merged.update(_read_json_dict(project_path))
-    result = _strip_disabled(merged)
-    _merged_cache[key] = (mtimes[0], mtimes[1], result)
-    return result
-
-
-def _config_hash(config: dict[str, Any]) -> str:
-    """merged 配置的稳定 hash（key 排序 → {a,b} 与 {b,a} 同 hash）。用于判断池是否真变。"""
-    return short_hash(json.dumps(config, sort_keys=True, ensure_ascii=False), 16)
-
-
-_EMPTY_CONFIG_HASH = _config_hash({})
-
 
 def _make_quiet_stdio_client(original_stdio_client: Any) -> Any:
-    """包装 stdio_client，将 errlog 重定向到 devnull 以避免污染 TUI"""
+    """包装 stdio_client，将 errlog 重定向到 devnull（子进程 stderr 不混进本进程输出）。"""
 
     @wraps(original_stdio_client)
     def wrapper(server: Any, errlog: Any = None) -> Any:
@@ -221,159 +115,17 @@ def _make_quiet_stdio_client(original_stdio_client: Any) -> Any:
 sessions.stdio_client = _make_quiet_stdio_client(sessions.stdio_client)
 
 
-def _filter_tools(
-    tools: list[StructuredTool], filter_names: list[str] | None
-) -> list[StructuredTool]:
-    """按名称过滤工具列表。filter_names 为空时返回全部。"""
-    if not filter_names:
-        return tools
-    return [t for t in tools if t.name in filter_names]
-
-
 def _needs_persistent_session(server_config: dict[str, Any]) -> bool:
     """判断服务器是否需要持久会话"""
     return server_config.get("transport", "") in _PERSISTENT_TRANSPORTS
 
 
-def _format_exception_details(e: Exception) -> str:
+def format_exception_details(e: Exception) -> str:
     """格式化异常详情，特别处理 ExceptionGroup 以提取子异常信息"""
     if isinstance(e, ExceptionGroup):
         sub_errors = "; ".join(f"{type(sub).__name__}: {sub}" for sub in e.exceptions)
         return f"{type(e).__name__}: {e}. 子异常详情: [{sub_errors}]"
     return f"{type(e).__name__}: {e}"
-
-
-# ── 子进程管理 ──
-
-
-def _collect_descendant_pids(parent_pid: int) -> list[int]:
-    """递归收集指定进程的所有后代 PID（跨平台）。"""
-    try:
-        if sys.platform == "win32":
-            return _collect_descendant_pids_windows(parent_pid)
-        return _collect_descendant_pids_unix(parent_pid)
-    except (OSError, subprocess.SubprocessError):
-        return []
-
-
-def _collect_descendant_pids_unix(parent_pid: int) -> list[int]:
-    """Unix: 通过 pgrep 递归收集后代 PID"""
-    result = subprocess.run(
-        ["pgrep", "-P", str(parent_pid)],
-        capture_output=True,
-        text=True,
-        timeout=2,
-    )
-    if result.returncode != 0 or not result.stdout.strip():
-        return []
-
-    pids: list[int] = []
-    for line in result.stdout.strip().split("\n"):
-        try:
-            pid = int(line.strip())
-        except ValueError:
-            continue
-        pids.append(pid)
-        pids.extend(_collect_descendant_pids(pid))
-    return pids
-
-
-def _parent_to_children(table: str) -> dict[int, list[int]]:
-    """``"<ppid> <pid>"`` 逐行文本 → ``{ppid: [pid, ...]}``（非数字行直接丢弃）。"""
-    tree: dict[int, list[int]] = {}
-    for line in table.splitlines():
-        parts = line.split()
-        if len(parts) != 2:
-            continue
-        try:
-            ppid, pid = int(parts[0]), int(parts[1])
-        except ValueError:
-            continue
-        tree.setdefault(ppid, []).append(pid)
-    return tree
-
-
-def _collect_descendant_pids_windows(parent_pid: int) -> list[int]:
-    """Windows: 一次取回全进程表，本地建树后广度收集后代。
-
-    原实现逐层 spawn ``wmic``，而 wmic 自 Win11 23H2/24H2 起默认不再安装、25H2 升级时
-    移除、2026 年的功能更新彻底删除且不再作为 FoD 提供——在新版 Windows 上等同于没有
-    清理逻辑。官方替代是 PowerShell 的 Get-CimInstance；它启动成本高，故只调一次拿全表，
-    递归改在本地做（顺带把原来 S 层子进程压成 1 个）。
-    """
-    result = subprocess.run(
-        [
-            "powershell",
-            "-NoProfile",
-            "-NonInteractive",
-            "-Command",
-            # -Property 只取两列：默认会把每个进程的四十多个属性全 marshal 回来
-            "Get-CimInstance Win32_Process -Property ProcessId,ParentProcessId | "
-            'ForEach-Object { "$($_.ParentProcessId) $($_.ProcessId)" }',
-        ],
-        capture_output=True,
-        # 这里只有数字和空格，宽松解码即可——text=True 走 locale（简中 cp936），
-        # 撞上 PowerShell 的中文报错行会抛
-        encoding="utf-8",
-        errors="replace",
-        timeout=10,
-    )
-    if result.returncode != 0:
-        return []
-    tree = _parent_to_children(result.stdout)
-
-    seen = {parent_pid}
-    stack = [parent_pid]
-    while stack:
-        for pid in tree.get(stack.pop(), ()):
-            # PID 复用可能让 ppid 关系成环，seen 保证不会绕不出来
-            if pid not in seen:
-                seen.add(pid)
-                stack.append(pid)
-    return list(seen - {parent_pid})
-
-
-def _kill_pids(pids: set[int]) -> None:
-    """强制终止指定 PID 集合（仅这些，不波及其它）。
-
-    Unix: SIGTERM → 短暂等待 → SIGKILL 兜底。
-    Windows: taskkill /F /PID。
-    """
-    targets = [p for p in pids if p]
-    if not targets:
-        return
-
-    if sys.platform == "win32":
-        for pid in targets:
-            try:
-                subprocess.run(
-                    ["taskkill", "/F", "/PID", str(pid)],
-                    capture_output=True,
-                    timeout=5,
-                )
-            except (OSError, subprocess.SubprocessError):
-                pass
-        return
-
-    # Unix: 先 SIGTERM 再 SIGKILL
-    for pid in targets:
-        try:
-            os.kill(pid, signal.SIGTERM)
-        except (ProcessLookupError, PermissionError):
-            pass
-
-    time.sleep(0.3)
-
-    for pid in targets:
-        try:
-            os.kill(pid, signal.SIGKILL)
-        except (ProcessLookupError, PermissionError):
-            pass
-
-
-def _kill_child_processes() -> None:
-    """SIGKILL 兜底：终止当前进程的**全部**后代。仅进程退出路径可用。"""
-    _kill_pids(set(_collect_descendant_pids(os.getpid())))
 
 
 # ── 工具 schema 归一 ──
@@ -439,14 +191,10 @@ class MCPSessionManager:
 
     def __init__(self) -> None:
         self._exit_stack: AsyncExitStack | None = None
-        self._sessions: dict[str, ClientSession] = {}
         self._tools: list[StructuredTool] = []
-        self._tool_server_map: dict[str, str] = {}  # tool_name -> server_name
         self._started: bool = False
         # 本 manager start 期间新出现的子进程 PID（精确 teardown 用，绝不碰其它池的）
         self._child_pids: set[int] = set()
-        # 构建本池所用配置的稳定 hash（供 invalidate 精准判断「是否真变了」）
-        self._config_hash: str = ""
         # 各 server 最近一次加载结果：name → {ok, tools?|error?}（mcp.status 广播 / 面板徽标）
         self.server_status: dict[str, dict] = {}
 
@@ -486,7 +234,6 @@ class MCPSessionManager:
         await self._start_servers(persistent, interceptors, all_tools, persistent=True)
         await self._start_servers(stateless, interceptors, all_tools, persistent=False)
 
-        self._config_hash = _config_hash(mcp_config)
         self._tools = all_tools
         self._started = True
         return all_tools
@@ -505,12 +252,12 @@ class MCPSessionManager:
         kind = "服务器" if persistent else "无状态服务器"
         # 逐 server 记录新 spawn 的子进程 PID（仅 persistent=stdio 会留驻子进程）：
         # 快照 diff 放进 finally——连接中途被取消（配置作废）也已入账，close 的
-        # SIGKILL 兜底不漏杀。精确归属依赖 _start_lock 串行化 spawn，故上一轮的
+        # SIGKILL 兜底不漏杀。精确归属依赖 start_lock 串行化 spawn，故上一轮的
         # after 可直接复用为下一轮的 before，全程 S+1 次进程树遍历而非 2S 次；
         # 每次遍历对每个存活后代同步 spawn 一个 pgrep，须下放线程避免阻塞事件循环
-        # （本函数跑在持 _start_lock 的后台加载里，阻塞会拖停所有会话的流式输出）。
+        # （本函数跑在持 start_lock 的后台加载里，阻塞会拖停所有会话的流式输出）。
         before = (
-            set(await asyncio.to_thread(_collect_descendant_pids, os.getpid()))
+            set(await asyncio.to_thread(collect_descendant_pids, os.getpid()))
             if persistent
             else set()
         )
@@ -525,7 +272,6 @@ class MCPSessionManager:
                         session = await self._exit_stack.enter_async_context(
                             client.session(server_name)
                         )
-                        self._sessions[server_name] = session
                         tools = await load_mcp_tools(
                             session,
                             server_name=server_name,
@@ -552,29 +298,27 @@ class MCPSessionManager:
             except Exception as e:
                 self.server_status[server_name] = {
                     "ok": False,
-                    "error": _format_exception_details(e)[:200],
+                    "error": format_exception_details(e)[:200],
                 }
                 logger.error(
-                    f"[MCP] {kind} {server_name} 加载失败: "
-                    f"{_format_exception_details(e)}"
+                    f"[MCP] {kind} {server_name} 加载失败: {format_exception_details(e)}"
                 )
             finally:
                 if persistent:
                     after = set(
-                        await asyncio.to_thread(_collect_descendant_pids, os.getpid())
+                        await asyncio.to_thread(collect_descendant_pids, os.getpid())
                     )
                     self._child_pids |= after - before
                     before = after
 
+    @staticmethod
     def _register_tools(
-        self,
         server_name: str,
         tools: list[StructuredTool],
         out_tools: list[StructuredTool],
     ) -> None:
-        """将工具注册到 server_name 映射并追加到输出列表（顺带压平坏 schema）。"""
+        """把工具追加到输出列表（顺带压平坏 schema）。"""
         for t in tools:
-            self._tool_server_map[t.name] = server_name
             if isinstance(t.args_schema, dict):
                 flat = flatten_top_level_combinators(t.args_schema)
                 if flat is not t.args_schema:
@@ -609,15 +353,12 @@ class MCPSessionManager:
             # anyio cancel scope 不允许跨 task 退出；下方 SIGKILL 兜底本池子进程
             pass
         except Exception as e:
-            logger.error(f"[MCP] 关闭持久会话时出错: {_format_exception_details(e)}")
+            logger.error(f"[MCP] 关闭持久会话时出错: {format_exception_details(e)}")
         finally:
-            _kill_pids(self._child_pids)  # 只杀本池自己的子进程
+            kill_pids(self._child_pids)  # 只杀本池自己的子进程
             self._exit_stack = None
-            self._sessions.clear()
             self._tools.clear()
-            self._tool_server_map.clear()
             self._child_pids.clear()
-            self._config_hash = ""
             self._started = False
             logger.info("[MCP] 持久会话已关闭（本池）")
 
@@ -632,8 +373,8 @@ _GLOBAL_POOL_KEY = "__global__"
 # 增长。与 Claude Code「连接持进程生命周期」同思路，只是加一个宽松上限防病态无界增长。
 _MAX_POOLS = 16
 # 串行化 start：保证 start 期间的子进程 PID 快照精确归属本池（不与并发 spawn 交叉），
-# 并顺带消除同一池并发首次初始化时重复 start 的竞态。
-_start_lock = asyncio.Lock()
+# 并顺带消除同一池并发首次初始化时重复 start 的竞态。连接测试的 stdio spawn 同锁。
+start_lock = asyncio.Lock()
 # 池加载完成回调（gateway 注册，广播 mcp.status 给绑定该池的连接）
 _on_pool_loaded: Callable[[dict], None] | None = None
 # 关停闩：close_all_pools 置位后不再受理新加载——清理期间/之后残存的后台任务
@@ -665,7 +406,7 @@ class McpPool:
         self.last_used = 0.0  # 最近访问 monotonic 时刻（LRU 淘汰用）
         # 最近一次加载所尝试配置的 hash（失败也记）：sync_config 据此区分
         # 「配置真变了」与「上次就是这份配置但没加载成功」——后者不反复重试
-        self.attempted_hash = _EMPTY_CONFIG_HASH
+        self.attempted_hash = EMPTY_CONFIG_HASH
         self._load_task: asyncio.Task | None = None
 
     @property
@@ -693,7 +434,7 @@ class McpPool:
         等待期间池被 close 换代（配置作废）则对新一代重试，加载失败终态不重试。
         """
         while not self.manager.is_started:
-            if not self.loading and not _load_merged_mcp_config(
+            if not self.loading and not load_merged_mcp_config(
                 _key_project_dir(self.key)
             ):
                 return
@@ -711,12 +452,12 @@ class McpPool:
         """后台加载；完成后递增版本号并通知订阅者（含失败的 server 明细）。"""
         task = asyncio.current_task()
         manager = self.manager
-        mcp_config = _load_merged_mcp_config(_key_project_dir(self.key))
-        self.attempted_hash = _config_hash(mcp_config)
+        mcp_config = load_merged_mcp_config(_key_project_dir(self.key))
+        self.attempted_hash = config_hash(mcp_config)
         try:
             if not mcp_config:
                 return
-            async with _start_lock:
+            async with start_lock:
                 # 等锁期间池可能被 close（配置作废换代）：manager 已换新，
                 # 对旧 manager start 会 spawn 无人追踪的子进程，必须放弃本次加载
                 if self.manager is not manager:
@@ -728,7 +469,7 @@ class McpPool:
             raise
         except Exception as e:
             logger.error(
-                f"加载MCP工具失败: {_format_exception_details(e)}. "
+                f"加载MCP工具失败: {format_exception_details(e)}. "
                 f"配置的服务器: {list(mcp_config.keys())}"
             )
             return
@@ -779,7 +520,7 @@ class McpPool:
         """
         if self.loading and not interrupt_loading:
             return
-        new_hash = _config_hash(_load_merged_mcp_config(_key_project_dir(self.key)))
+        new_hash = config_hash(load_merged_mcp_config(_key_project_dir(self.key)))
         if new_hash == self.attempted_hash:
             return
         if self.manager.is_started or self.loading:
@@ -827,7 +568,7 @@ def get_pool_status(project_dir: Path | None) -> dict:
 
 
 async def _evict_lru_pools(keep: McpPool) -> None:
-    """已启动的池数超上限时，优雅关闭最久未用的（keep 除外）。在 _start_lock 内调用。
+    """已启动的池数超上限时，优雅关闭最久未用的（keep 除外）。在 start_lock 内调用。
 
     close 会递增被淘汰池的版本号：仍绑着它的存活会话轮首感知换代、重建并按需重载。
     """
@@ -874,7 +615,7 @@ async def close_all_pools() -> None:
     # 逐池收尾统一走 close()（等任务退出 + 换代）
     for pool in _pools.values():
         pool.cancel_loading()
-    _kill_child_processes()
+    kill_child_processes()
     for pool in list(_pools.values()):
         await pool.close()
     _pools.clear()
@@ -901,156 +642,9 @@ async def refresh_pool_config(project_dir: Path | None) -> None:
     """轮首自失效：进程外写入（`lumi mcp` CLI / 手改文件）后感知配置变化并换代。
 
     RPC 写路径落盘后即时 :func:`invalidate_mcp_pools`；进程外写入没有通知渠道，
-    交互会话每轮首调用本函数兜住（``_load_merged_mcp_config`` 按 mtime 缓存，
+    交互会话每轮首调用本函数兜住（``load_merged_mcp_config`` 按 mtime 缓存，
     未变时零解析）。
     """
     pool = _pools.get(_project_key(project_dir))
     if pool is not None:
         await pool.sync_config(interrupt_loading=False)
-
-
-# ── 公共 API ──
-
-
-async def _list_all_pages(
-    list_page: Callable[..., Awaitable[Any]], attr: str
-) -> list[Any]:
-    """按 MCP 分页协议取全量：循环 cursor 直到 nextCursor 为空。"""
-    items: list[Any] = []
-    cursor: str | None = None
-    while True:
-        page = await list_page(cursor=cursor)
-        items.extend(getattr(page, attr))
-        if not page.nextCursor:
-            return items
-        cursor = page.nextCursor
-
-
-async def _probe_mcp_server(config: dict[str, Any], timeout: float) -> dict[str, Any]:
-    """建一次会话完成握手并枚举能力（tools/prompts/resources 按声明的 capability 取）。
-
-    超时从拿到 spawn 锁才起表：后台池加载可长时间持锁（30s/server 串行），
-    把排队时间计入预算会把健康 server 误报成超时。
-    """
-    async with asyncio.timeout(None) as probe_timeout:
-        async with AsyncExitStack() as stack:
-            # stdio spawn 子进程须与池 start 的 PID 快照互斥（diff 归属正确性依赖快照期间
-            # 无别处 spawn），只锁 spawn 一瞬；HTTP/SSE 无子进程不加锁
-            guard = _start_lock if config.get("transport") == "stdio" else nullcontext()
-            async with guard:
-                probe_timeout.reschedule(asyncio.get_running_loop().time() + timeout)
-                start = time.monotonic()
-                session = await stack.enter_async_context(
-                    sessions.create_session(config)
-                )
-            init = await session.initialize()
-            latency_ms = int((time.monotonic() - start) * 1000)
-            caps = init.capabilities
-
-            tools = (
-                [
-                    {
-                        "name": t.name,
-                        "description": t.description or "",
-                        "input_schema": t.inputSchema,
-                    }
-                    for t in await _list_all_pages(session.list_tools, "tools")
-                ]
-                if caps.tools is not None
-                else []
-            )
-            prompts = (
-                [
-                    {
-                        "name": p.name,
-                        "description": p.description or "",
-                        "arguments": [
-                            {
-                                "name": a.name,
-                                "description": a.description or "",
-                                "required": bool(a.required),
-                            }
-                            for a in (p.arguments or [])
-                        ],
-                    }
-                    for p in await _list_all_pages(session.list_prompts, "prompts")
-                ]
-                if caps.prompts is not None
-                else []
-            )
-            resources = (
-                [
-                    {
-                        "uri": str(r.uri),
-                        "name": r.name or "",
-                        "description": r.description or "",
-                        "mime_type": r.mimeType or "",
-                    }
-                    for r in await _list_all_pages(session.list_resources, "resources")
-                ]
-                if caps.resources is not None
-                else []
-            )
-
-    return {
-        "ok": True,
-        "server": {"name": init.serverInfo.name, "version": init.serverInfo.version},
-        "latency_ms": latency_ms,
-        "tools": tools,
-        "prompts": prompts,
-        "resources": resources,
-    }
-
-
-async def test_mcp_server(
-    server_config: dict[str, Any], timeout: float = 15.0
-) -> dict[str, Any]:
-    """连接测试：用给定配置临时建一次会话，握手后枚举能力，随即断开。
-
-    超时独立于 _SERVER_START_TIMEOUT：这是交互路径，用户在弹窗前实时等待，
-    后台池加载放宽到 30s 的理由不适用。计时从拿到 spawn 锁开始（见 _probe_mcp_server）。
-
-    与常驻会话池完全独立——验证的是「这份配置能不能连上、有什么能力」，
-    不动任何已建立的池。配置归一化与加载侧同源（:func:`_normalize_server_config`），
-    测试通过 = 会话加载也认。成功返回 ``{ok, server, latency_ms, tools, prompts,
-    resources}``，失败返回 ``{ok: False, error}``。
-    """
-    config = _normalize_server_config(server_config)
-    try:
-        return await _probe_mcp_server(config, timeout)
-    except TimeoutError:
-        return {"ok": False, "error": f"连接超时（{timeout:g}s）"}
-    except Exception as e:
-        return {"ok": False, "error": _format_exception_details(e)}
-
-
-async def get_mcp_tools(
-    filter_names: list[str] | None = None,
-    project_dir: Path | None = None,
-) -> list[StructuredTool]:
-    """获取MCP服务器提供的工具（分层配置：全局 ∪ 会话项目）。
-
-    ``project_dir`` 未显式给定时读 contextvar（由 ``get_tools`` 设置）；缺省即纯全局。
-    每个项目一个会话池，池内首次加载后缓存工具；自动为 stdio 服务器创建持久会话。
-    本函数恒不阻塞；需要等冷池就位的调用方经 ``get_tools(wait_mcp=True)`` 先等池。
-    """
-    if project_dir is None:
-        project_dir = _current_project_dir.get()
-
-    # 先登记池对象（轻量、不触发加载）再查配置：无配置的项目也要在 _pools 挂名，
-    # 否则用户添加首个 server 时 invalidate 找不到池、无从换代
-    pool = pool_for(project_dir)
-    pool.last_used = time.monotonic()  # LRU 记账
-
-    mcp_config = _load_merged_mcp_config(project_dir)
-    if not mcp_config:
-        return []
-
-    if not pool.manager.is_started:
-        # 后台加载、立即返回空集：MCP 从不阻塞会话就绪/轮次（对齐 Claude Code 的
-        # pending 语义）。就位后 generation 变化，会话在轮首重建工具列表。
-        pool.ensure_loading()
-        logger.warning("[MCP] 池加载中，本轮无 MCP 工具（下一轮自愈）: %s", pool.key)
-        return []
-
-    return _filter_tools(pool.manager.get_tools(), filter_names)

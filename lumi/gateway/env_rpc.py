@@ -14,10 +14,9 @@ from __future__ import annotations
 import asyncio
 
 from lumi.gateway import toolbox
-from lumi.gateway.broadcast import hub
+from lumi.gateway.broadcast import hub, spawn
+from lumi.gateway.protocol import ServerEvent
 from lumi.utils.logger import logger
-
-ENV_METHODS = frozenset({"env_status", "env_install"})
 
 # lark-cli 机器级、feishu-skills 项目级（需 project 参数），由渠道体检的 fix 按钮
 # 触发；officecli（ALL_TOOLS 内）另有预览面板的就地安装按钮入口
@@ -28,27 +27,23 @@ _TARGETS = frozenset({"all", "lark-cli", "feishu-skills", *toolbox.ALL_TOOLS})
 # 两条线程写同一二进制/rmtree 同一棵树。单值即互斥不变量本身，也直接下发给 env_status
 # 供前端恢复进行中态（对齐 get_mcp_status 的 loading 范式）。
 _installing = ""
-# 事件循环只弱引用 task，自持引用避免分钟级安装任务在执行中被 GC（同 BroadcastHub._spawn）
-_tasks: set[asyncio.Task] = set()
 
 
-async def dispatch_env(method: str, params: dict) -> dict:
-    """执行一个环境 RPC 方法（method 已确认属于 ENV_METHODS）。"""
+async def _status(params: dict) -> dict:
+    status = await asyncio.to_thread(toolbox.status_all)
+    status["installing"] = _installing
+    return status
+
+
+async def _install(params: dict) -> dict:
     global _installing
-    if method == "env_status":
-        status = await asyncio.to_thread(toolbox.status_all)
-        status["installing"] = _installing
-        return status
-
     target = params.get("target") or "all"
     if target not in _TARGETS:
         raise ValueError(f"未知安装目标: {target}")
     if _installing:
         return {"started": False}
     _installing = target
-    task = asyncio.create_task(_run_install(target, params.get("project") or ""))
-    _tasks.add(task)
-    task.add_done_callback(_tasks.discard)
+    spawn(_run_install(target, params.get("project") or ""))
     return {"started": True}
 
 
@@ -67,8 +62,8 @@ async def _run_install(target: str, project: str = "") -> None:
                 return
             last = (phase, pct_int)
             asyncio.run_coroutine_threadsafe(
-                hub.delivery.send_event(
-                    "env.progress",
+                hub.send_event(
+                    ServerEvent.ENV_PROGRESS,
                     {"target": wire_target, "phase": phase, "percent": pct_int},
                 ),
                 loop,
@@ -106,4 +101,7 @@ async def _run_install(target: str, project: str = "") -> None:
     state["target"] = target
     if error:
         state["error"] = {"target": target, "message": error}
-    await hub.delivery.send_event("env.state", state)
+    await hub.send_event(ServerEvent.ENV_STATE, state)
+
+
+HANDLERS = {"env_status": _status, "env_install": _install}

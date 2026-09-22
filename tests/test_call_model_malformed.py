@@ -57,9 +57,7 @@ async def _run(chain):
         patch.object(nodes, "detect_protocol", return_value="openai"),
         patch.object(nodes, "adispatch_custom_event", dispatch),
     ):
-        result = await nodes.call_model(
-            {"messages": tool_loop_history(), "iterations": 1}, _RUNTIME
-        )
+        result = await nodes.call_model({"messages": tool_loop_history()}, _RUNTIME)
     return result, dispatch
 
 
@@ -113,7 +111,7 @@ async def test_feishu_reset_clears_buffer_and_shows_retry_status():
     buf.text = "'by 能, the the latest logs"
     streaming.bufs["chat"] = buf
 
-    await streaming.send_delta("chat", "", {"_reset": True})
+    await streaming.reset("chat", None)
     await buf.queue.drain()
 
     assert buf.text == ""
@@ -121,7 +119,7 @@ async def test_feishu_reset_clears_buffer_and_shows_retry_status():
     assert buf.retrying and buf.busy
     assert "重新生成中" in _status_line(buf)  # 状态行改显重试文案
 
-    await streaming.send_delta("chat", "重试的正文")  # 正文一到即让位
+    await streaming.append("chat", "重试的正文", None)  # 正文一到即让位
     assert not buf.retrying and not buf.busy
 
 
@@ -133,14 +131,12 @@ async def test_feishu_reset_keeps_earlier_iteration_text():
     buf.card_id = "card"
     streaming.bufs["chat"] = buf
 
-    await streaming.send_delta("chat", "", {"_mark": True})  # 第一次模型调用
-    await streaming.send_delta("chat", "我来查一下")
-    await streaming.send_delta(
-        "chat", "", {"_tool_activity": {"phase": "start", "name": "read"}}
-    )
-    await streaming.send_delta("chat", "", {"_mark": True})  # 第二次调用（畸形）
-    await streaming.send_delta("chat", "'by 能, the the")
-    await streaming.send_delta("chat", "", {"_reset": True})
+    streaming.mark("chat")  # 第一次模型调用
+    await streaming.append("chat", "我来查一下", None)
+    await streaming.tool_activity("chat", "start", "read", None)
+    streaming.mark("chat")  # 第二次调用（畸形）
+    await streaming.append("chat", "'by 能, the the", None)
+    await streaming.reset("chat", None)
 
     assert buf.text == "我来查一下"  # 只回滚第二次调用的乱码
 
@@ -153,10 +149,8 @@ async def test_feishu_retry_status_yields_to_tool_activity():
     buf.card_id = "card"
     streaming.bufs["chat"] = buf
 
-    await streaming.send_delta("chat", "", {"_reset": True})
+    await streaming.reset("chat", None)
     assert buf.retrying
-    await streaming.send_delta(
-        "chat", "", {"_tool_activity": {"phase": "start", "name": "read"}}
-    )
+    await streaming.tool_activity("chat", "start", "read", None)
     assert not buf.retrying
     assert "重新生成中" not in _status_line(buf)

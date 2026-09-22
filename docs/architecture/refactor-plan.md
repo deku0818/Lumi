@@ -5,6 +5,8 @@
 > **审计基线已逐项核验**：文件 LOC、死代码零引用、`execution_mode` 链路、`_atomic_write_json` 跨模块依赖、`api/app.py` 启动方式、ruff/test 现状均已实测确认。
 >
 > **一处诚实修正**：`execution_mode` **不是死参数**。`bridge.stream_response → LumiAgentState.execution_mode → nodes.py 的 get_policy/plan 守卫` 是完整活链路，且 `ws.py:322` 确实从 params 读取它。准确表述是「后端 + WS 都活，仅前端 `gateway.ts` 未暴露它」。
+>
+> **后续（本文写就之后）**：`execution_mode` / `mode_policy` / `PolicyReject` 已整套删除——链路虽活，但没有任何客户端会设置它，只读语义改由 PermissionEngine 的 Deny 规则表达。下文凡提及它的段落均为历史记录。
 
 ## 决策（已与用户确认）
 
@@ -171,7 +173,7 @@ lumi/
 ## 5. 分阶段路线图（每阶段独立可交付、保持可运行、测试可通过）
 
 ### 阶段 0 — 清扫与护栏（低风险）
-删 `general_tools.py`/`clipboard.py`/`api/`（560 行）+ mcp 三处死链路（180 行）+ nodes/messages/execution 死代码 + TUI 死字段；删 `tests/tui/` 空壳；重写 `permissions.md` + 修 `summary.md`/`plan.md`/`checkpoint.md` 失效路径 + 修 CLAUDE.md 权限文件名；**新增 `[tool.ruff]`**（ICN 禁 import-as / F401 / I isort）；全仓清 `SimpleAgent`/`TUI` 残留命名。
+删 `general_tools.py`/`clipboard.py`/`api/`（560 行）+ mcp 三处死链路（180 行）+ nodes/messages/execution 死代码 + TUI 死字段；删 `tests/tui/` 空壳；重写 `permissions.md` + 修 `summary.md`/`plan.md`/`checkpoint.md` 失效路径（`checkpoint.md` 已随文件级 checkpoint 一并删除） + 修 CLAUDE.md 权限文件名；**新增 `[tool.ruff]`**（ICN 禁 import-as / F401 / I isort）；全仓清 `SimpleAgent`/`TUI` 残留命名。
 
 ### 阶段 1 — 提公共原语，断开分层倒置
 `_atomic_write_json` → `utils/atomic_io.py`（5 importer 改路径）；统一相对时间格式化为单一 util；统一卸载实现（删死拷贝）；统一 logger 获取；收敛 `PATH_ARG_KEYS`/能力常量单点。

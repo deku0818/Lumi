@@ -13,7 +13,6 @@
 import asyncio
 import json
 import time
-import uuid
 from pathlib import Path
 from typing import Any
 
@@ -33,10 +32,9 @@ from lumi.agents.runtime.bg_tasks import (
     bg_tasks_dir,
     get_task_registry,
     make_bg_done_callback,
+    new_task_id,
     run_background_task,
 )
-
-_TASK_ID_HEX_LENGTH = 12
 
 
 class WorkflowInput(BaseModel):
@@ -193,7 +191,7 @@ def _start_workflow_task(
     name: str, engine: WorkflowEngine, description: str = ""
 ) -> BackgroundTaskEntry:
     """注册后台 Workflow 任务并 fire-and-forget 启动。"""
-    task_id = f"wf_{uuid.uuid4().hex[:_TASK_ID_HEX_LENGTH]}"
+    task_id = new_task_id("wf_")
     output_file = bg_tasks_dir() / f"{task_id}.json"
 
     entry = BackgroundTaskEntry(

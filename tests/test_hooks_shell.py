@@ -34,14 +34,6 @@ def _ctx(event="Stop", payload=None, state=None, config=None):
     )
 
 
-@pytest.fixture(autouse=True)
-def _isolate():
-    # config hooks 改为返回式 build_config_hooks（无进程全局），仅需清 env 缓存
-    exec_shell._env_cache = None
-    yield
-    exec_shell._env_cache = None
-
-
 # === protocol ===
 
 
@@ -158,7 +150,6 @@ async def test_shell_hook_matcher_skips_subprocess(tmp_path):
 
 
 def test_filter_env_whitelist(monkeypatch):
-    monkeypatch.setattr(exec_shell, "_env_cache", None)
     monkeypatch.setenv("LUMI_HOOK_FOO", "visible")
     monkeypatch.setenv("SECRET_KEY", "should-not-leak")
     env = exec_shell._filter_env()

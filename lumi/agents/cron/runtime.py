@@ -19,7 +19,7 @@ from lumi.agents.cron.scheduler import Scheduler
 from lumi.agents.tools.providers.cron import init_cron_tool
 from lumi.utils.config.global_manager import GLOBAL_CONFIG_DIR
 from lumi.utils.logger import logger
-from lumi.utils.workspace_id import get_workspace_dir, get_workspace_id
+from lumi.utils.paths import get_workspace_dir, get_workspace_id
 
 
 @dataclass(frozen=True)

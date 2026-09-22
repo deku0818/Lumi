@@ -2,6 +2,7 @@ import { useEffect, useMemo, useRef, useState } from 'react'
 import { Check, ChevronDown } from 'lucide-react'
 import { useI18n } from '../i18n'
 import { listLocalFonts, cssFamily } from '../font'
+import { POPOVER } from './glass'
 
 // 列表最多渲染的行数（多出的提示用搜索收窄）
 const MAX_VISIBLE = 60
@@ -61,7 +62,7 @@ export function FontPicker({ value, onChange }: { value: string; onChange: (f: s
       </button>
 
       {open && (
-        <div className="absolute right-0 z-50 mt-1 w-64 rounded-xl border border-line/40 bg-surface shadow-lg overflow-hidden">
+        <div className={`absolute right-0 z-50 mt-1 w-64 ${POPOVER}`}>
           <input
             autoFocus
             value={query}

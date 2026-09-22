@@ -15,19 +15,6 @@ from lumi.agents.cron.scheduler import Scheduler
 from lumi.agents.cron.service import CronService
 from lumi.utils.constants import MAX_CRON_RUN_THREADS
 
-CRON_METHODS = frozenset(
-    {
-        "list_cron_jobs",
-        "create_cron_job",
-        "update_cron_job",
-        "delete_cron_job",
-        "toggle_cron_job",
-        "run_cron_job",
-        "stop_cron_run",
-        "list_cron_runs",
-    }
-)
-
 _runtime: CronRuntime | None = None
 
 
@@ -37,10 +24,12 @@ def set_cron_runtime(runtime: CronRuntime | None) -> None:
     _runtime = runtime
 
 
-def _require_runtime() -> CronRuntime:
+def _service() -> tuple[CronRuntime, CronService]:
     if _runtime is None:
         raise RuntimeError("定时任务子系统未启动")
-    return _runtime
+    return _runtime, CronService(
+        _runtime.scheduler, _runtime.job_store, _runtime.run_log
+    )
 
 
 def _job_to_wire(job: Job, scheduler: Scheduler) -> dict:
@@ -67,57 +56,78 @@ async def _job_to_wire_with_runs(
     return data
 
 
-async def dispatch_cron(method: str, params: dict) -> dict:
-    """执行一个 cron RPC 方法（method 已确认属于 CRON_METHODS）。"""
-    rt = _require_runtime()
-    service = CronService(rt.scheduler, rt.job_store, rt.run_log)
+async def _list_jobs(params: dict) -> dict:
+    rt, service = _service()
+    jobs = await service.get_all()
+    # 每个任务各读一次日志尾部，并发取（任务数可观时省掉逐个 await 的串行等待）
+    wire = await asyncio.gather(
+        *(_job_to_wire_with_runs(j, rt.scheduler, service) for j in jobs)
+    )
+    return {"jobs": wire}
 
-    if method == "list_cron_jobs":
-        jobs = await service.get_all()
-        # 每个任务各读一次日志尾部，并发取（任务数可观时省掉逐个 await 的串行等待）
-        wire = await asyncio.gather(
-            *(_job_to_wire_with_runs(j, rt.scheduler, service) for j in jobs)
-        )
-        return {"jobs": wire}
 
-    if method == "create_cron_job":
-        job = await service.create(
-            params.get("name") or "",
-            params.get("schedule") or "",
-            params.get("prompt") or "",
-        )
-        return {"job": _job_to_wire(job, rt.scheduler)}
+async def _create_job(params: dict) -> dict:
+    rt, service = _service()
+    job = await service.create(
+        params.get("name") or "",
+        params.get("schedule") or "",
+        params.get("prompt") or "",
+    )
+    return {"job": _job_to_wire(job, rt.scheduler)}
 
-    if method == "update_cron_job":
-        job = await service.update(
-            params.get("job_id", ""),
-            name=params.get("name"),
-            schedule_raw=params.get("schedule"),
-            prompt=params.get("prompt"),
-        )
-        return {"job": _job_to_wire(job, rt.scheduler)}
 
-    if method == "delete_cron_job":
-        job_id = params.get("job_id", "")
-        await service.delete(job_id)
-        return {"job_id": job_id}
+async def _update_job(params: dict) -> dict:
+    rt, service = _service()
+    job = await service.update(
+        params.get("job_id", ""),
+        name=params.get("name"),
+        schedule_raw=params.get("schedule"),
+        prompt=params.get("prompt"),
+    )
+    return {"job": _job_to_wire(job, rt.scheduler)}
 
-    if method == "toggle_cron_job":
-        job = await service.set_enabled(
-            params.get("job_id", ""), bool(params.get("enabled"))
-        )
-        return {"job": _job_to_wire(job, rt.scheduler)}
 
-    if method == "run_cron_job":
-        await service.trigger(params.get("job_id", ""))
-        return {"ok": True}
+async def _delete_job(params: dict) -> dict:
+    _, service = _service()
+    job_id = params.get("job_id", "")
+    await service.delete(job_id)
+    return {"job_id": job_id}
 
-    if method == "stop_cron_run":
-        stopped = service.stop(params.get("job_id", ""))
-        return {"stopped": stopped}
 
-    # list_cron_runs
+async def _toggle_job(params: dict) -> dict:
+    rt, service = _service()
+    job = await service.set_enabled(
+        params.get("job_id", ""), bool(params.get("enabled"))
+    )
+    return {"job": _job_to_wire(job, rt.scheduler)}
+
+
+async def _run_job(params: dict) -> dict:
+    _, service = _service()
+    await service.trigger(params.get("job_id", ""))
+    return {"ok": True}
+
+
+async def _stop_run(params: dict) -> dict:
+    _, service = _service()
+    return {"stopped": service.stop(params.get("job_id", ""))}
+
+
+async def _list_runs(params: dict) -> dict:
+    _, service = _service()
     records = await service.recent_runs(
         params.get("job_id", ""), limit=params.get("limit", 20)
     )
     return {"runs": [r.to_dict() for r in records]}
+
+
+HANDLERS = {
+    "list_cron_jobs": _list_jobs,
+    "create_cron_job": _create_job,
+    "update_cron_job": _update_job,
+    "delete_cron_job": _delete_job,
+    "toggle_cron_job": _toggle_job,
+    "run_cron_job": _run_job,
+    "stop_cron_run": _stop_run,
+    "list_cron_runs": _list_runs,
+}

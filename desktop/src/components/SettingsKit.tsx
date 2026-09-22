@@ -1,10 +1,12 @@
 import { type ComponentProps, type ReactNode, useRef, useState } from 'react'
-import { Check, Copy, Eye, EyeOff, type LucideIcon } from 'lucide-react'
+import { Check, Copy, Eye, EyeOff, Plus, X, type LucideIcon } from 'lucide-react'
 import type { CheckTone, EnvProgress } from '../types'
 import { cn } from '@/lib/utils'
 import { useI18n } from '../i18n'
+import { CARD_L2 } from './glass'
 import { Button } from '@/components/ui/button'
 import { Dialog, DialogContent, DialogHeader, DialogTitle } from '@/components/ui/dialog'
+import './orb.css'
 
 // 分段控件 / 步进器共用的药丸容器（SettingsDialog 的 stepper 也 import 复用，避免边框透明度漂移）。
 export const segmentShell = 'inline-flex gap-0.5 p-0.5 rounded-lg bg-canvas/60 border border-line/40'
@@ -70,27 +72,33 @@ export function Row({
   )
 }
 
-// 竖排字段：label 上 / 控件下（表单输入用）。
+// 竖排字段：label 上 / 控件下（表单输入用）。error 非空时顶掉 hint 位置显示。
 export function Field({
   label,
   hint,
+  error,
   children,
 }: {
   label: ReactNode
   hint?: ReactNode
+  error?: ReactNode
   children: ReactNode
 }) {
   return (
     <div>
       <div className="text-xs text-muted-foreground mb-1.5">{label}</div>
       {children}
-      {hint && <div className="text-[11px] text-muted-foreground mt-1.5 leading-relaxed">{hint}</div>}
+      {error ? (
+        <div className="text-[11px] text-error mt-1.5 break-words">{error}</div>
+      ) : (
+        hint && <div className="text-[11px] text-muted-foreground mt-1.5 leading-relaxed">{hint}</div>
+      )}
     </div>
   )
 }
 
-// 统一输入框样式（合并原三套 bg-canvas/60·bg-surface·bg-canvas 的分歧）。
-export const inputClass =
+// 统一输入框样式（合并原三套 bg-canvas/60·bg-surface·bg-canvas 的分歧）。只经 TextInput / SecretInput 使用。
+const inputClass =
   'w-full h-9 px-3 rounded-lg text-sm bg-canvas/50 text-ink border border-line/50 outline-none transition focus:border-primary/50 focus:ring-2 focus:ring-primary/15 placeholder:text-muted-foreground/50'
 
 export function TextInput({ type, className, ...props }: ComponentProps<'input'>) {
@@ -152,12 +160,62 @@ export function SecretInput({ className, ...props }: ComponentProps<'input'> & {
   )
 }
 
-// 玻璃卡壳单一 token：Card / EntityCard / GroupCard / 渠道体检卡共用（描边与填充 alpha 只此一份）。
-export const cardShell = 'rounded-xl border border-line/60 bg-surface/50'
+// 设置页卡壳 = 玻璃材质 L2：Card / EntityCard / GroupCard / 渠道体检卡共用。
 
 // 统一卡片：透明描边 + 极淡填充 + 统一圆角/内边距。
 export function Card({ className, children }: { className?: string; children: ReactNode }) {
-  return <div className={cn(cardShell, 'px-4 py-3', className)}>{children}</div>
+  return <div className={cn(CARD_L2, 'px-4 py-3', className)}>{children}</div>
+}
+
+// chip 输入：已选项成胶囊、末尾虚线胶囊里回车 / 加号追加。mono 给命令参数；unique 去重（白名单 open_id）。
+export function ChipInput({
+  values,
+  onChange,
+  placeholder,
+  mono,
+  unique,
+  className,
+}: {
+  values: string[]
+  onChange: (v: string[]) => void
+  placeholder?: string
+  mono?: boolean
+  unique?: boolean
+  className?: string
+}) {
+  const [draft, setDraft] = useState('')
+  const add = () => {
+    const v = draft.trim()
+    if (v && !(unique && values.includes(v))) onChange([...values, v])
+    setDraft('')
+  }
+  return (
+    <div className={cn('flex flex-wrap items-center gap-1.5', className)}>
+      {values.map((v, i) => (
+        <span
+          key={unique ? v : i}
+          className={cn('inline-flex items-center gap-1.5 bg-surface border border-line rounded-full px-2.5 py-1 text-xs', mono && 'font-mono')}
+        >
+          {v}
+          <button type="button" onClick={() => onChange(values.filter((_, j) => j !== i))} className="text-muted-foreground hover:text-ink">
+            <X size={11} />
+          </button>
+        </span>
+      ))}
+      <span className="inline-flex items-center gap-1 bg-surface border border-dashed border-line rounded-full px-2 py-1">
+        <input
+          value={draft}
+          onChange={(e) => setDraft(e.target.value)}
+          onKeyDown={(e) => e.key === 'Enter' && (e.preventDefault(), add())}
+          placeholder={placeholder}
+          className={cn('bg-transparent outline-none text-xs w-28 text-ink', mono && 'font-mono')}
+        />
+        <button type="button" onClick={add} className="text-muted-foreground hover:text-ink">
+          <Plus size={12} />
+        </button>
+      </span>
+    </div>
+  )
 }
 
 // 统一分段控件（合并 SettingsDialog 的 Segmented 与 ChannelsPanel 的 Seg 两份实现）。
@@ -195,12 +253,14 @@ export function SegmentedControl<T extends string>({
 }
 
 // 安装进度光带（品牌金光晕语言）：percent 为 -1 时不可知（解压/npm 阶段），整条脉冲。
-// 环境面板与渠道体检行共用——光效样式只此一份。
+// 环境面板与渠道体检行共用——光效样式只此一份。phase 经 t() 解析：前端乐观阶段给的是
+// i18n key（useEnvInstall），后端下发的原文没有对应词条则原样透出。
 export function ProgressBar({ progress, className }: { progress: EnvProgress; className?: string }) {
+  const { t } = useI18n()
   const known = progress.percent >= 0
   return (
     <div className={cn('flex items-center gap-2 text-[11px] text-muted-foreground', className)}>
-      <span className="truncate">{progress.phase}</span>
+      <span className="truncate">{t(progress.phase)}</span>
       <span className="h-1 w-24 shrink-0 overflow-hidden rounded-full bg-separator/45">
         <i
           className={`block h-full rounded-full bg-primary shadow-[0_0_8px_var(--color-accent)] ${known ? 'transition-[width]' : 'w-full animate-pulse opacity-60'}`}
@@ -212,7 +272,7 @@ export function ProgressBar({ progress, className }: { progress: EnvProgress; cl
   )
 }
 
-// ── 实体列表统一语法（.demos/settings-unify.html 定稿）──
+// ── 实体列表统一语法 ──
 
 // 状态点：全设置页统一 6px。连接/诊断语义带光晕，idle/hollow 为静态灰。
 // title 用于悬停看详情（如 MCP「已连接 · N 个工具」）。语义色走 tone；机器色这类
@@ -314,7 +374,7 @@ export function EntityCard({
   dim?: boolean
 }) {
   return (
-    <div className={cn(cardShell, 'group flex items-center gap-3 px-3.5 py-2.5', dim && 'opacity-55')}>
+    <div className={cn(CARD_L2, 'group flex items-center gap-3 px-3.5 py-2.5', dim && 'opacity-55')}>
       <div className="grid place-items-center w-9 h-9 rounded-lg bg-surface border border-line text-ink shrink-0">
         {icon}
       </div>
@@ -361,7 +421,7 @@ export function GroupCard({
   children?: ReactNode
 }) {
   return (
-    <div className={cn(cardShell, 'overflow-hidden')}>
+    <div className={cn(CARD_L2, 'overflow-hidden')}>
       <div className="flex items-center gap-3 px-4 py-3">
         <div className="grid place-items-center w-7 h-7 rounded-lg bg-surface border border-line/60 text-muted-foreground shrink-0">
           <Icon size={15} />
@@ -380,12 +440,44 @@ export function GroupCard({
   )
 }
 
-// 空态统一虚线框：一句现状 + 一句去处。
-export function Empty({ children }: { children: ReactNode }) {
+// 空态：默认虚线框（设置页列表：一句现状 + 一句去处）；size="page" 是整页留白版
+// （项目 / 定时任务列表为空：可选图标 + 标题 + 副题，无框）。
+export function Empty({
+  size,
+  icon,
+  title,
+  children,
+}: {
+  size?: 'page'
+  icon?: ReactNode
+  title?: ReactNode
+  children?: ReactNode
+}) {
+  if (size === 'page')
+    return (
+      <div className="mt-16 flex flex-col items-center text-center select-none">
+        {icon && <span className="text-muted-foreground/50 [&_svg]:size-9">{icon}</span>}
+        {title && <div className={cn('text-ink', icon && 'mt-4')}>{title}</div>}
+        {children && <div className="mt-1 text-sm text-muted-foreground">{children}</div>}
+      </div>
+    )
   return (
     <div className="rounded-xl border border-dashed border-separator px-5 py-7 text-center text-[12px] leading-relaxed text-muted-foreground">
       {children}
     </div>
+  )
+}
+
+// 加载态光点（品牌「光」的语言）：延迟 180ms 淡入——毫秒级本地读取不闪，远程往返时可见。
+// 行内尺寸（11px）；需要别的尺寸时由调用方用 className 覆盖。
+export function Loading({ className }: { className?: string }) {
+  return (
+    <span
+      className={cn(
+        'lumi-orb lumi-orb-sm animate-in fade-in fill-mode-both delay-[180ms]',
+        className,
+      )}
+    />
   )
 }
 

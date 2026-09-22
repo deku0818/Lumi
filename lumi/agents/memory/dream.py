@@ -17,7 +17,6 @@ from __future__ import annotations
 import asyncio
 import shutil
 import time
-import uuid
 from collections.abc import Callable
 from pathlib import Path
 from typing import TYPE_CHECKING
@@ -26,8 +25,8 @@ from langchain_core.messages import HumanMessage
 
 from lumi.agents.memory import dream_lock
 from lumi.agents.memory.normalize import normalize_memory_index
+from lumi.utils.config import get_config
 from lumi.utils.logger import logger
-from lumi.utils.read_config import get_config
 from lumi.utils.thread_id import is_channel_thread, is_cron_thread
 
 if TYPE_CHECKING:
@@ -209,7 +208,7 @@ async def _run_dream(
 
 async def _export_sessions(reader, sessions, project_dir: Path) -> Path:
     """把其他近期会话各导出为扁平 text（一行一消息）到 per-project 临时目录。"""
-    from lumi.sessions.message_text import extract_messages_as_text
+    from lumi.agents.core.meta_message import extract_messages_as_text
     from lumi.utils.paths import lumi_tmp_dir, project_slug
 
     out_dir = lumi_tmp_dir("dream_transcripts", project_slug(project_dir))
@@ -299,6 +298,7 @@ async def _run_dream_fork(
         TaskStatus,
         bg_tasks_dir,
         get_task_registry,
+        new_task_id,
         run_background_task,
     )
     from lumi.agents.tools import get_tools
@@ -321,7 +321,7 @@ async def _run_dream_fork(
             "depth": 1,  # 防自递归：dream agent 的 stop 经 depth 门直接放行
         }
 
-        task_id = f"dream_{uuid.uuid4().hex[:12]}"
+        task_id = new_task_id("dream_")
         output_file = bg_tasks_dir() / f"{task_id}.txt"
         entry = BackgroundTaskEntry(
             task_id=task_id,

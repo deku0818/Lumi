@@ -22,7 +22,7 @@ from lumi.gateway.channels import store
 from lumi.gateway.channels.config import FeishuChannelConfig
 from lumi.utils.logger import logger
 
-_CLI = "lark-cli"
+CLI = "lark-cli"
 _TIMEOUT = 20
 
 # LARKSUITE_CLI_PROFILE 自这个版本起可用（env 选 profile + profile add 非交互）
@@ -45,9 +45,9 @@ def run_cli(
     用系统 locale，中文 Windows 的 cp936 撞上 CLI 的中文输出即报错）。
     profile 非空时经 ``LARKSUITE_CLI_PROFILE`` 指定机器人专属身份。
     """
-    exe = shutil.which(_CLI)
+    exe = shutil.which(CLI)
     if exe is None:
-        return -1, f"{_CLI} 不在 PATH"
+        return -1, f"{CLI} 不在 PATH"
     env = {**os.environ, "LARKSUITE_CLI_PROFILE": profile} if profile else None
     try:
         proc = subprocess.run(

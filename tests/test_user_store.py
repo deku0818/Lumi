@@ -51,4 +51,4 @@ def test_global_config_load_survives_non_dict_settings(tmp_config):
     from lumi.utils.config.global_manager import GlobalConfigManager
 
     user_store.write_section("settings", ["not", "a", "dict"])
-    assert GlobalConfigManager.load().max_checkpoints == 20
+    assert GlobalConfigManager.load().checkpoint_dir == ""

@@ -13,15 +13,10 @@ from typing import TYPE_CHECKING
 
 from lumi.agents.core.structured_tool import is_internal_tool
 from lumi.agents.memory import is_memory_path
-from lumi.agents.permissions.mode_policy import check_policy, get_policy
 from lumi.agents.permissions.models import PermissionDecision
 from lumi.agents.permissions.safety import is_bypass_immune
 from lumi.agents.permissions.workspace import get_authorized_directory
-from lumi.agents.tools.capability import (
-    is_file_edit_tool,
-    is_read_only,
-    is_write_tool,
-)
+from lumi.agents.tools.capability import is_file_edit_tool, is_write_tool
 from lumi.utils.logger import logger
 
 if TYPE_CHECKING:
@@ -40,7 +35,6 @@ def _is_memory_write(tc: dict, project_dir: Path) -> bool:
 def route_decision(
     tool_calls: list[dict],
     tool_mode: str,
-    execution_mode: str,
     engine: PermissionEngine | None,
 ) -> str:
     """对一批非空 tool_calls 计算下一节点名。
@@ -49,7 +43,6 @@ def route_decision(
     2. 纯内部伪工具 → ToolExecutor（绕过权限审批）；混合批次落到正常评估
     6. 权限引擎 DENY（优先于只读短路与 bypass）→ HumanApproval
     5/6. 只读工具批次 → ToolExecutor
-    4. 执行模式策略守卫 → PolicyReject
     8. bypass-immune（所有模式）→ HumanApproval
     7. accept_edits 模式 → 文件编辑工具工作区内放行，其余 HumanApproval
     9/10. 权限引擎完整评估：
@@ -91,21 +84,6 @@ def route_decision(
         for tc in tool_calls
     ):
         return "ToolExecutor"
-
-    # 执行模式策略守卫（Layer 2: 根据当前模式策略拦截不允许的工具调用）
-    if execution_mode != "normal":
-        policy = get_policy(execution_mode)
-        if policy is not None:
-            for tc in tool_calls:
-                result = check_policy(policy, tc.get("name", ""), tc.get("args", {}))
-                if not result.allowed:
-                    logger.info(
-                        "[PolicyGuard] %s 拒绝: %s - %s",
-                        policy.label,
-                        tc.get("name"),
-                        result.reason,
-                    )
-                    return "PolicyReject"
 
     # bypass-immune 安全检查（所有模式都执行）
     for tc in tool_calls:
@@ -166,7 +144,7 @@ def route_decision(
                 # 只读工具（read/vision/glob/grep 等）不受工作区边界限制：只读无破坏性，
                 # 可跨项目/读 URL；DENY 规则仍先于此拦截（上方 has_deny）。与 line 83 的
                 # 只读快路径一致（纯只读批次本就免边界，此处覆盖只读+写的混合批次）。
-                boundary_ok = is_read_only(
+                boundary_ok = not is_write_tool(
                     name, args
                 ) or engine.check_workspace_boundary(name, args)
                 logger.debug(

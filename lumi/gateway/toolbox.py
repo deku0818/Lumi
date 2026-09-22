@@ -28,9 +28,9 @@ from dataclasses import asdict, dataclass
 from hashlib import sha256
 from pathlib import Path
 
+from lumi.utils.config import get_config
 from lumi.utils.config.manager import parse_frontmatter
 from lumi.utils.logger import logger
-from lumi.utils.read_config import get_config
 
 UV_VERSION = "0.11.32"
 RG_VERSION = "15.2.0"

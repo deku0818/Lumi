@@ -1,9 +1,9 @@
 // 主题偏好：system（跟随系统，随系统变化实时切换）/ light / dark。
-// localStorage 记忆，root .light class 切换。effective 为实际生效的明/暗。
+// localStorage 记忆，root .light class 切换。
 import { useEffect, useState } from 'react'
 
 export type ThemePref = 'system' | 'light' | 'dark'
-export type Theme = 'light' | 'dark'
+type Theme = 'light' | 'dark'
 
 const KEY = 'lumi-theme'
 
@@ -39,27 +39,20 @@ function syncTitleBarOverlay(): void {
   })
 }
 
-// 返回 [偏好, 设置偏好, 实际生效的明/暗]
-export function useTheme(): [ThemePref, (p: ThemePref) => void, Theme] {
+// 返回 [偏好, 设置偏好]；实际生效的明/暗只作用到 root class，无消费者读它
+export function useTheme(): [ThemePref, (p: ThemePref) => void] {
   const [pref, setPref] = useState<ThemePref>(initialPref)
-  const [eff, setEff] = useState<Theme>(() => effective(initialPref()))
 
   useEffect(() => {
-    const e = effective(pref)
-    setEff(e)
-    apply(e)
+    apply(effective(pref))
     localStorage.setItem(KEY, pref)
     if (pref !== 'system') return
     // 跟随系统：监听系统明暗切换实时更新
     const mq = window.matchMedia('(prefers-color-scheme: light)')
-    const onChange = () => {
-      const t = systemTheme()
-      setEff(t)
-      apply(t)
-    }
+    const onChange = () => apply(systemTheme())
     mq.addEventListener('change', onChange)
     return () => mq.removeEventListener('change', onChange)
   }, [pref])
 
-  return [pref, setPref, eff]
+  return [pref, setPref]
 }

@@ -1,13 +1,9 @@
-import { useCallback, useEffect, useState } from 'react'
+import { memo, useCallback, useEffect, useState, type ReactNode } from 'react'
 import {
   AlertTriangle,
   Building2,
-  Check,
-  ChevronDown,
   ChevronRight,
   Cpu,
-  Folder,
-  FolderPlus,
   KeyRound,
   MessageCircle,
   Mic,
@@ -16,7 +12,6 @@ import {
   Plus,
   Send,
   ShieldCheck,
-  X,
 } from 'lucide-react'
 import type {
   ChannelInfo,
@@ -25,20 +20,21 @@ import type {
   FeishuConfig,
   CheckTone,
   DiagnoseCheck,
-  Project,
 } from '../types'
 import { useEnvInstall } from './useEnvInstall'
 import type { Gateway } from '../gateway'
-import { MachineScope, useConnectedEffect, useMachine } from './MachineTabs'
-import { DirBrowser } from './DirBrowser'
+import { useI18n, type Translate } from '../i18n'
+import { ConfirmDialog } from './ConfirmDialog'
+import { MachineScope, useMachine } from './MachineTabs'
+import { ProjectPicker } from './ProjectPicker'
 import { basename, cn, errorMessage } from '@/lib/utils'
 import {
-  cardShell,
-  Empty,
+  ChipInput,
   EntityCard,
   Field,
   FormModal,
   GroupCard,
+  Loading,
   Pill,
   ProgressBar,
   Section,
@@ -50,29 +46,11 @@ import {
 } from './SettingsKit'
 import { Button } from '@/components/ui/button'
 import { Switch } from '@/components/ui/switch'
-import {
-  Dialog,
-  DialogContent,
-  DialogDescription,
-  DialogFooter,
-  DialogHeader,
-  DialogTitle,
-} from '@/components/ui/dialog'
-import {
-  DropdownMenu,
-  DropdownMenuContent,
-  DropdownMenuItem,
-  DropdownMenuSeparator,
-  DropdownMenuTrigger,
-} from '@/components/ui/dropdown-menu'
+import { CARD_L2 } from './glass'
 
-const STATUS_LABEL: Record<string, string> = {
-  off: '未启用',
-  stopped: '已停止',
-  connecting: '连接中',
-  connected: '已连接',
-  error: '连接失败',
-}
+// 文案里 **…** 段加粗（确认弹窗里用户唯一需据以决策的信息）
+const emphasize = (s: string): ReactNode =>
+  s.split('**').map((seg, i) => (i % 2 ? <b key={i} className="text-ink">{seg}</b> : seg))
 
 // 渠道连接态 → 统一状态点语义：绿=已连接、金呼吸=连接中（warn+pulse）、红=失败，
 // 未启用/停止为静态灰
@@ -84,9 +62,9 @@ const STATE_TONE: Record<string, StatusTone> = {
   stopped: 'idle',
 }
 
-const emptyFeishu = (): FeishuConfig => ({
+const emptyFeishu = (t: Translate): FeishuConfig => ({
   id: '', // 空 = 新建（后端保存时生成）
-  name: '飞书机器人',
+  name: t('channels.feishuBot'),
   enabled: false,
   app_id: '',
   app_secret: '',
@@ -115,6 +93,7 @@ export function ChannelsPanel({
   // 体检跑在哪台机器上，就该去哪台机器的环境页装，否则装到本机而红灯照旧
   onNavigate?: (tab: string, machine: string) => void
 }) {
+  const { t } = useI18n()
   const [machine, setMachine] = useState('local')
   const [list, setList] = useState<ChannelInfo[]>([])
   const [editing, setEditing] = useState<FeishuConfig | null>(null) // null = 列表视图
@@ -191,12 +170,12 @@ export function ChannelsPanel({
     <div>
       <MachineScope value={machine} onChange={setMachine}>
       <Section
-        title="渠道"
+        title={t('settings.channels')}
         desc={
           <>
-            把 Lumi 接入飞书等 IM。凭证存该机器的{' '}
+            {t('channels.desc1')}
             <ConfigPath path={configPath} />
-            （限本人可读），保存后实时重连。全程 AI 审批，仅保留 ask 询问卡片。
+            {t('channels.desc2')}
           </>
         }
       >
@@ -205,22 +184,21 @@ export function ChannelsPanel({
           {feishuBots.map((c) => (
             <ChannelCard
               key={c.config.id}
-              icon={<Send size={17} />}
-              title={c.config.name || '飞书机器人'}
+              title={c.config.name || t('channels.feishuBot')}
               status={c.status}
               enabled={c.enabled}
-              subtitle={feishuSubtitle(c)}
+              subtitle={feishuSubtitle(c, t)}
               onToggle={(on) => toggleEnabled(c.config, on)}
               onEdit={() => setEditing(c.config)}
             />
           ))}
           {/* 新建机器人（每个项目一个，项目在表单里选，已占用的置灰） */}
           <button
-            onClick={() => setEditing(emptyFeishu())}
+            onClick={() => setEditing(emptyFeishu(t))}
             className="flex w-full items-center justify-center gap-1.5 rounded-xl border border-dashed border-separator px-3 py-2.5 text-xs text-muted-foreground transition hover:border-muted-foreground hover:text-ink"
           >
             <Plus size={13} />
-            新建飞书机器人
+            {t('channels.newBot')}
           </button>
           {/* 列表态操作（开关翻转等）被后端拒绝时的原因；表单内的错误在弹窗脚部显示 */}
           {saveError && !editing && (
@@ -228,7 +206,7 @@ export function ChannelsPanel({
           )}
 
           {/* 企业微信（即将支持） */}
-          {WECOM_CARD}
+          <WecomCard />
         </div>
       </Section>
 
@@ -257,28 +235,33 @@ export function ChannelsPanel({
   )
 }
 
-// 纯静态占位卡提为模块常量：本面板可见期间每 3s 轮询重渲，恒等引用让 React 跳过该子树
-const WECOM_CARD = (
-  <EntityCard
-    dim
-    icon={<Building2 size={17} />}
-    title="企业微信"
-    subtitle="即将支持"
-    badge={<Pill dashed>即将支持</Pill>}
-  />
-)
+// 纯静态占位卡 memo：本面板可见期间每 3s 轮询重渲，无 props 让 React 跳过该子树
+const WecomCard = memo(function WecomCard() {
+  const { t } = useI18n()
+  return (
+    <EntityCard
+      dim
+      icon={<Building2 size={17} />}
+      title={t('channels.wecom')}
+      subtitle={t('channels.comingSoon')}
+      badge={<Pill dashed>{t('channels.comingSoon')}</Pill>}
+    />
+  )
+})
 
-function feishuSubtitle(c: ChannelInfo): string {
+function feishuSubtitle(c: ChannelInfo, t: Translate): string {
   // 项目是机器人的身份归属，未启用也要能一眼分清哪条是哪个项目的
-  const proj = c.config.workspace ? basename(c.config.workspace) : '未绑定项目'
-  if (!c.enabled) return `${proj} · 未启用`
-  const mode = c.config.tool_mode === 'auto' ? 'AI 审批' : '特权放行'
-  const who = c.config.allow_from.includes('*') ? '所有人可用' : `${c.config.allow_from.length} 人白名单`
+  const proj = c.config.workspace ? basename(c.config.workspace) : t('channels.unbound')
+  if (!c.enabled) return `${proj} · ${t('channels.status.off')}`
+  const mode = t(c.config.tool_mode === 'auto' ? 'chan.mode.auto' : 'chan.mode.privileged')
+  const who = c.config.allow_from.includes('*')
+    ? t('channels.allowAll')
+    : t('channels.allowN', { n: c.config.allow_from.length })
   return `${proj} · ${mode} · ${who}`
 }
 
+// 飞书机器人行：状态点 + 状态字 + 副题（error 态换成后端给的具体原因）+ 编辑 + 开关
 function ChannelCard({
-  icon,
   title,
   status,
   enabled,
@@ -286,7 +269,6 @@ function ChannelCard({
   onToggle,
   onEdit,
 }: {
-  icon: React.ReactNode
   title: string
   status?: { state: string; detail: string }
   enabled: boolean
@@ -294,12 +276,12 @@ function ChannelCard({
   onToggle: (on: boolean) => void
   onEdit: () => void
 }) {
+  const { t } = useI18n()
   const state = status?.state ?? 'off'
-  // error 态用后端给的具体原因（缺凭证 / 未装 lark…）替代泛化副标题
   const sub = state === 'error' && status?.detail ? status.detail : subtitle
   return (
     <EntityCard
-      icon={icon}
+      icon={<Send size={17} />}
       title={title}
       meta={
         <>
@@ -307,19 +289,13 @@ function ChannelCard({
           <span
             className={`shrink-0 text-[11px] font-normal ${state === 'error' ? 'text-error' : 'text-muted-foreground'}`}
           >
-            {STATUS_LABEL[state]}
+            {t(`channels.status.${state}`)}
           </span>
         </>
       }
       subtitle={state === 'error' ? <span className="text-error">{sub}</span> : sub}
       actions={
-        <Button
-          variant="ghost"
-          size="icon-sm"
-          onClick={onEdit}
-          aria-label="编辑"
-          className="text-muted-foreground"
-        >
+        <Button variant="ghost" size="icon-sm" onClick={onEdit} aria-label={t('common.edit')} className="text-muted-foreground">
           <Pencil />
         </Button>
       }
@@ -340,7 +316,7 @@ function useDiagnose(call: () => Promise<{ checks: DiagnoseCheck[] }> | undefine
     setLoading(true)
     setError('')
     p.then((r) => setChecks(r.checks))
-      .catch((e) => setError(String(e?.message || e) || '体检请求失败'))
+      .catch((e) => setError(errorMessage(e)))
       .finally(() => setLoading(false))
   }
   return { checks, loading, error, run }
@@ -369,6 +345,7 @@ function FeishuForm({
   onSave: (cfg: FeishuConfig) => void
   onDelete?: () => void // 仅已保存的机器人可删（新建表单没有这条路）
 }) {
+  const { t } = useI18n()
   const [cfg, setCfg] = useState<FeishuConfig>(initial)
   const [confirmDelete, setConfirmDelete] = useState(false)
   const set = (patch: Partial<FeishuConfig>) => setCfg((c) => ({ ...c, ...patch }))
@@ -431,10 +408,10 @@ function FeishuForm({
           className="text-error hover:text-error"
           onClick={() => setConfirmDelete(true)}
         >
-          删除
+          {t('common.delete')}
         </Button>
       )}
-      {!cfg.workspace && <div className="text-[11px] text-error">请先绑定项目</div>}
+      {!cfg.workspace && <div className="text-[11px] text-error">{t('channels.bindFirst')}</div>}
       {saveError && (
         <div className="min-w-0 truncate text-[11px] text-error" title={saveError}>
           {saveError}
@@ -442,10 +419,10 @@ function FeishuForm({
       )}
       <div className="flex-1" />
       <Button variant="ghost" onClick={onCancel}>
-        取消
+        {t('common.cancel')}
       </Button>
       <Button disabled={!cfg.workspace} onClick={() => onSave(cfg)}>
-        保存并重连
+        {t('channels.saveReconnect')}
       </Button>
     </>
   )
@@ -453,7 +430,7 @@ function FeishuForm({
   return (
     <FormModal
       onClose={onCancel}
-      title={cfg.id ? cfg.name || '飞书机器人' : '新建飞书机器人'}
+      title={cfg.id ? cfg.name || t('channels.feishuBot') : t('channels.newBot')}
       footer={footer}
       className="sm:max-w-2xl"
       bodyClassName="max-h-[66vh]"
@@ -461,95 +438,100 @@ function FeishuForm({
       <div className="space-y-3">
         <GroupCard
           icon={KeyRound}
-          title="应用凭证"
+          title={t('channels.credentials')}
           desc={
             <>
-              chmod 600 存 <ConfigPath path={configPath} />
-              ，不写入项目目录
+              {t('channels.credDesc1')}
+              <ConfigPath path={configPath} />
+              {t('channels.credDesc2')}
             </>
           }
         >
-          <Field label="机器人名称" hint="仅本机展示用，方便分清哪条是哪个项目的">
+          <Field label={t('channels.botName')} hint={t('channels.botNameHint')}>
             <TextInput
               value={cfg.name}
               onChange={(e) => set({ name: e.target.value })}
-              placeholder="飞书机器人"
+              placeholder={t('channels.feishuBot')}
             />
           </Field>
           <div className="grid grid-cols-2 gap-4">
-            <Field label="App ID" hint="支持 ${FEISHU_APP_ID} 引用环境变量">
+            <Field label="App ID" hint={t('channels.appIdHint')}>
               <TextInput value={cfg.app_id} onChange={(e) => set({ app_id: e.target.value })} placeholder="cli_…" />
             </Field>
             <Field label="App Secret">
               <SecretInput value={cfg.app_secret} onChange={(e) => set({ app_secret: e.target.value })} placeholder="●●●●" />
             </Field>
           </div>
-          {/* 绑定项目归凭证组：它是体检的输入——技能包按此项目检测与安装，所见即所得 */}
-          <WorkspacePicker
-            gw={gw}
-            machine={machine}
-            value={cfg.workspace}
-            taken={taken}
-            onChange={(v) => set({ workspace: v })}
-          />
+          {/* 绑定项目归凭证组：它是体检的输入——技能包按此项目检测与安装，所见即所得。
+              必选、无兜底：未绑定则保存按钮禁用，后端也拒绝启用；切换已绑定项目会弹重置提醒 */}
+          <Field
+            label={t('channels.bindProject')}
+            hint={t(cfg.workspace ? 'channels.bindHintBound' : 'channels.bindHintUnbound')}
+          >
+            <ProjectPicker
+              gw={gw}
+              machine={machine}
+              value={cfg.workspace}
+              onChange={(v) => set({ workspace: v })}
+              taken={taken}
+              required
+              confirmSwitch={{
+                title: t('channels.switchTitle'),
+                message: () => emphasize(t('channels.switchMessage')),
+                confirmLabel: t('channels.switchConfirm'),
+              }}
+            />
+          </Field>
         </GroupCard>
 
-        <GroupCard
-          icon={ShieldCheck}
-          title="接入体检"
-          desc="本地环境 / 权限 / 事件订阅 / 版本发布，缺任一机器人都收不到消息且开放平台不报错"
-        >
+        <GroupCard icon={ShieldCheck} title={t('channels.setupCheck')} desc={t('channels.setupCheckDesc')}>
           <CheckPanel
             key={panelKey(setup.checks)}
             {...setup}
-            subject="机器人接入"
-            ready="已就绪 · 可正常收发消息"
+            subject={t('channels.setupSubject')}
+            ready={t('channels.setupReady')}
             onFix={onFix}
             onNavigate={onNavigate}
             fixProgress={fixProgress}
           />
         </GroupCard>
 
-        <GroupCard icon={MessageCircle} title="消息行为" desc="谁能唤起 Lumi、在群里何时回应">
+        <GroupCard icon={MessageCircle} title={t('channels.behavior')} desc={t('channels.behaviorDesc')}>
           <div className="grid grid-cols-2 gap-4">
-            <Field label="群消息策略">
+            <Field label={t('channels.groupPolicy')}>
               <SegmentedControl
                 value={cfg.group_policy}
                 onChange={(v) => set({ group_policy: v as FeishuConfig['group_policy'] })}
                 options={[
-                  { val: 'mention', label: '@我才回' },
-                  { val: 'open', label: '响应全部' },
+                  { val: 'mention', label: t('channels.policyMention') },
+                  { val: 'open', label: t('channels.policyOpen') },
                 ]}
               />
             </Field>
-            <Field label="可用成员（白名单）" hint={allowAll ? '所有人可用' : '仅列表内 open_id 可用；为空 = 全部拒绝'}>
+            <Field label={t('channels.allowList')} hint={t(allowAll ? 'channels.allowAll' : 'channels.allowListHint')}>
               <SegmentedControl
                 value={allowAll ? 'all' : 'list'}
                 onChange={(v) => set({ allow_from: v === 'all' ? ['*'] : [] })}
                 options={[
-                  { val: 'all', label: '所有人' },
-                  { val: 'list', label: '指定成员' },
+                  { val: 'all', label: t('channels.everyone') },
+                  { val: 'list', label: t('channels.members') },
                 ]}
               />
             </Field>
           </div>
           {!allowAll && (
-            <ChipEditor values={cfg.allow_from} onChange={(vals) => set({ allow_from: vals })} />
+            <ChipInput unique className="mt-2" values={cfg.allow_from} onChange={(vals) => set({ allow_from: vals })} placeholder="open_id" />
           )}
         </GroupCard>
 
-        <GroupCard
-          icon={Cpu}
-          title="会话运行时"
-          desc="这个渠道的 Agent 怎么审批工具。模型与思考档位在群里用 /model、/effort 定，每个会话各记各的"
-        >
-          <Field label="工具审批模式" hint="两种模式下泄漏的人工审批一律自动拒绝；仅保留 ask 询问卡片">
+        <GroupCard icon={Cpu} title={t('channels.runtime')} desc={t('channels.runtimeDesc')}>
+          <Field label={t('approval.label')} hint={t('channels.toolModeHint')}>
             <SegmentedControl
               value={cfg.tool_mode}
               onChange={(v) => set({ tool_mode: v as FeishuConfig['tool_mode'] })}
               options={[
-                { val: 'auto', label: 'AI 审批' },
-                { val: 'privileged', label: '特权放行' },
+                { val: 'auto', label: t('chan.mode.auto') },
+                { val: 'privileged', label: t('chan.mode.privileged') },
               ]}
             />
           </Field>
@@ -557,8 +539,8 @@ function FeishuForm({
 
         <GroupCard
           icon={Mic}
-          title="妙记纪要"
-          desc="录音 / 会议结束后自动整理纪要，推送到私聊"
+          title={t('channels.minutes')}
+          desc={t('channels.minutesDesc')}
           open={cfg.minutes_enabled}
           action={
             <Switch
@@ -574,15 +556,15 @@ function FeishuForm({
           <CheckPanel
             key={panelKey(minutes.checks)}
             {...minutes}
-            subject="妙记链路"
-            ready="已就绪 · 妙记生成后自动推送纪要"
+            subject={t('channels.minutesSubject')}
+            ready={t('channels.minutesReady')}
           />
         </GroupCard>
 
         <GroupCard
           icon={Moon}
-          title="每日记忆整理（Dream）"
-          desc="到点自动沉淀记忆 + 压缩会话，长会话不再无限膨胀"
+          title={t('channels.dream')}
+          desc={t('channels.dreamDesc')}
           open={cfg.daily_dream_enabled}
           action={
             <Switch
@@ -592,14 +574,14 @@ function FeishuForm({
           }
           bodyClassName="grid grid-cols-2 gap-4"
         >
-          <Field label="执行时间（每天）" hint="建议选低峰时段">
+          <Field label={t('channels.dreamTime')} hint={t('channels.dreamTimeHint')}>
             <TextInput
               type="time"
               value={cfg.daily_dream_time}
               onChange={(e) => set({ daily_dream_time: e.target.value })}
             />
           </Field>
-          <Field label="Summary 最大并发" hint="限流防接口 429；dream 恒串行">
+          <Field label={t('channels.summaryConcurrency')} hint={t('channels.summaryConcurrencyHint')}>
             <TextInput
               type="number"
               min={1}
@@ -619,28 +601,15 @@ function FeishuForm({
       </div>
 
       {/* 删除确认：连同其 lark-cli 专属身份与进行中的会话池一并回收，聊天历史不删 */}
-      <Dialog open={confirmDelete} onOpenChange={setConfirmDelete}>
-        <DialogContent className="sm:max-w-sm">
-          <DialogHeader>
-            <DialogTitle className="flex items-center gap-2">
-              <AlertTriangle size={17} className="text-error" />
-              删除机器人「{cfg.name || '飞书机器人'}」？
-            </DialogTitle>
-            <DialogDescription className="leading-relaxed">
-              将断开其飞书连接、回收进行中的会话池与 lark-cli 专属身份（用户授权一并清除）。
-              <b className="text-ink">聊天历史不会删除</b>，重新配置同一应用后可另起会话。
-            </DialogDescription>
-          </DialogHeader>
-          <DialogFooter>
-            <Button variant="ghost" onClick={() => setConfirmDelete(false)}>
-              取消
-            </Button>
-            <Button variant="destructive" onClick={() => onDelete?.()}>
-              删除
-            </Button>
-          </DialogFooter>
-        </DialogContent>
-      </Dialog>
+      {confirmDelete && (
+        <ConfirmDialog
+          icon={<AlertTriangle size={17} className="text-error" />}
+          title={t('channels.deleteTitle', { name: cfg.name || t('channels.feishuBot') })}
+          message={emphasize(t('channels.deleteMessage'))}
+          onConfirm={() => onDelete?.()}
+          onCancel={() => setConfirmDelete(false)}
+        />
+      )}
     </FormModal>
   )
 }
@@ -652,11 +621,12 @@ const panelKey = (checks: DiagnoseCheck[] | null) =>
 // 凭证落盘路径：后端给绝对路径（前端拼 ~/.lumi 既看不懂，--config-dir 时还会说谎），
 // 尚未取到时退回一句不带路径的说法。两处文案共用一份，免得各写各的措辞
 function ConfigPath({ path }: { path: string }) {
-  return path ? <code className="break-all">{path}</code> : <>本机配置文件</>
+  const { t } = useI18n()
+  return path ? <code className="break-all">{path}</code> : <>{t('channels.localConfig')}</>
 }
 
-// Check.fix_nav 的取值 → 设置面板名。检查行是各链路共用的，标签只认 tab、不认具体检查
-const TAB_LABEL: Record<string, string> = { env: '环境' }
+// Check.fix_nav 的取值 → 设置面板名的 i18n key。检查行是各链路共用的，标签只认 tab、不认具体检查
+const TAB_LABEL: Record<string, string> = { env: 'settings.env' }
 
 // 逐项体检面板（demo 方案 A「整卡开合」）：机器人接入与妙记链路共用。详情装在卡内
 // ——头行整行可点、chevron 指示开合，卡顶 2px 色线 + 头行状态点表达三色语义（tint 只
@@ -682,6 +652,7 @@ function CheckPanel({
   onNavigate?: (tab: string) => void
   fixProgress?: Record<string, EnvProgress>
 }) {
+  const { t } = useI18n()
   const bad = checks?.filter((c) => c.tone === 'error') ?? []
   const warned = checks?.filter((c) => c.tone === 'warn') ?? []
   // 有问题就默认展开——用户不该为了知道哪里坏了还多点一次；之后随用户手动开合
@@ -691,8 +662,8 @@ function CheckPanel({
     return (
       <DiagShell bar="bg-primary/30">
         <div className={`${diagRow} text-muted-foreground`}>
-          <span className="lumi-orb" style={{ width: 11, height: 11 }} />
-          正在检查{subject}…
+          <Loading />
+          {t('channels.checking', { subject })}
         </div>
       </DiagShell>
     )
@@ -703,9 +674,9 @@ function CheckPanel({
       <DiagShell bar="bg-error/60">
         <div className={diagRow}>
           <StatusDot tone="error" />
-          <span className="flex-1 text-error">体检未能执行：{error}</span>
+          <span className="flex-1 text-error">{t('channels.diagError', { error })}</span>
           <button onClick={run} className="text-[11px] text-muted-foreground hover:text-ink">
-            重试
+            {t('common.retry')}
           </button>
         </div>
       </DiagShell>
@@ -717,7 +688,7 @@ function CheckPanel({
         onClick={run}
         className="rounded-lg border border-line bg-surface px-3 py-2 text-xs text-muted-foreground hover:text-ink"
       >
-        检查{subject}
+        {t('channels.check', { subject })}
       </button>
     )
 
@@ -733,9 +704,9 @@ function CheckPanel({
         <StatusDot tone={tone} />
         <span className={`flex-1 min-w-0 truncate ${TONE[tone].text}`}>
           {tone === 'error'
-            ? `${bad.length} 项未就绪：${bad[0].name}`
+            ? t('channels.notReady', { n: bad.length, name: bad[0].name })
             : tone === 'warn'
-              ? `${ready}，${warned.length} 项功能降级`
+              ? t('channels.degraded', { ready, n: warned.length })
               : ready}
         </span>
         {/* 缩略点阵：收起时也能一眼看到每项检查各自的红绿 */}
@@ -751,11 +722,11 @@ function CheckPanel({
           }}
           className="shrink-0 text-[11px] text-muted-foreground hover:text-ink"
         >
-          重新检查
+          {t('channels.recheck')}
         </button>
         <button
           aria-expanded={open}
-          aria-label={open ? '收起检查详情' : '查看检查详情'}
+          aria-label={t(open ? 'channels.collapseDetails' : 'channels.expandDetails')}
           onClick={(e) => {
             e.stopPropagation()
             setOpen((v) => !v)
@@ -804,7 +775,7 @@ function CheckPanel({
 // 头行行高与内边距由 diagRow 统一——免得三处 chrome 各自漂移
 function DiagShell({ bar, children }: { bar: string; children: React.ReactNode }) {
   return (
-    <div className={cn(cardShell, 'overflow-hidden')}>
+    <div className={cn(CARD_L2, 'overflow-hidden')}>
       <div className={`h-0.5 ${bar}`} />
       {children}
     </div>
@@ -831,6 +802,7 @@ function CheckRow({
   onNavigate?: (tab: string) => void
   progress?: EnvProgress
 }) {
+  const { t } = useI18n()
   // const 收窄让闭包里也保持 EnvInstallTarget 类型（直接用 check.fix_action 在回调内不收窄）
   const fixAction = check.fix_action || null
   return (
@@ -854,14 +826,7 @@ function CheckRow({
           </div>
         )}
         {check.fix_url && (
-          <a
-            href={check.fix_url}
-            target="_blank"
-            rel="noreferrer"
-            className="mt-1.5 inline-flex items-center gap-1 rounded-lg border border-primary/40 bg-primary/10 px-2.5 py-1 text-[11px] text-primary hover:bg-primary/20"
-          >
-            去开放平台配置 ↗
-          </a>
+          <FixLink href={check.fix_url}>{t('channels.openPlatform')}</FixLink>
         )}
         {check.fix_note && (
           <div className="text-[11px] text-muted-foreground mt-1">{check.fix_note}</div>
@@ -870,248 +835,32 @@ function CheckRow({
             标签取自 tab 名而非某一条检查的内容——这行是各条链路共用的，具体做什么由
             后端写在 detail / fix_note 里（同 fix_url 的「去开放平台配置」） */}
         {check.fix_nav && onNavigate && TAB_LABEL[check.fix_nav] && (
-          <button
-            onClick={() => onNavigate(check.fix_nav)}
-            className="mt-1.5 inline-flex items-center gap-1 rounded-lg border border-primary/40 bg-primary/10 px-2.5 py-1 text-[11px] text-primary hover:bg-primary/20"
-          >
-            去「{TAB_LABEL[check.fix_nav]}」→
-          </button>
+          <FixLink onClick={() => onNavigate(check.fix_nav)}>
+            {t('channels.goTo', { tab: t(TAB_LABEL[check.fix_nav]) })}
+          </FixLink>
         )}
       </div>
       {/* 就地修复按钮：一键安装（cli / 技能包），进行中由上方进度条替代 */}
       {fixAction && check.tone !== 'ok' && !progress && onFix && (
         <Button size="sm" className="mt-0.5 h-6 px-2.5 text-[11px]" onClick={() => onFix(fixAction)}>
-          一键安装
+          {t('channels.install')}
         </Button>
       )}
     </div>
   )
 }
 
-// 绑定项目：从该机器已登记的项目里挑一个作为飞书工作目录（参考 .demos/feishu-project-select.html A）。
-// 不再让用户手填路径——先在「项目」页建项目，渠道里只选已有项目；切换已绑定项目会弹重置提醒。
-// 必选、无兜底：未绑定则保存按钮禁用，后端也拒绝启用（不退回 serve 进程目录）。
-function WorkspacePicker({
-  gw,
-  machine,
-  value,
-  taken,
-  onChange,
-}: {
-  gw?: Gateway
-  machine: string
-  value: string
-  // 其他机器人已占用的项目（workspace → 机器人名）：置灰不可选（项目 ↔ 机器人 1:1）
-  taken: Map<string, string>
-  onChange: (v: string) => void
-}) {
-  const [projects, setProjects] = useState<Project[]>([])
-  const [creating, setCreating] = useState(false) // DirBrowser 新建项目中
-  const [pending, setPending] = useState<string | null>(null) // 待确认切换的目标路径
-  const [addErr, setAddErr] = useState('') // 新建项目登记失败原因（否则失败无声，看着像没反应）
-
-  // 挂在机器连接态上：弹窗开着时机器瞬断，连回来自动重拉，不会定格成「没有项目」
-  useConnectedEffect(
-    machine,
-    () => {
-      gw
-        ?.listProjects()
-        .then((r) => setProjects(r.projects ?? []))
-        .catch(() => setProjects([]))
-    },
-    [gw],
-  )
-
-  const current = projects.find((p) => p.path === value)
-  const bound = !!value
-  // 触发器展示：已登记取项目名 / 仅有路径取 basename / 未绑定 = 红字催选（不是某个兜底目录）
-  const shown = current
-    ? { name: current.name, path: value }
-    : bound
-      ? { name: basename(value), path: value }
-      : { name: '未绑定项目', path: '点此选择一个项目作为飞书工作目录' }
-
-  // 选中项目：与当前不同且已有绑定 → 弹确认；否则直接生效
-  const choose = (path: string) => {
-    if (path === value) return
-    if (value) setPending(path)
-    else onChange(path)
-  }
-
-  // 新建项目：浏览目录 → 登记 → 刷新列表 → 直接绑定。登记失败要说出来——
-  // 否则弹窗一关什么都没变，用户以为已经绑上了
-  const onCreated = (path: string) => {
-    setCreating(false)
-    setAddErr('')
-    gw
-      ?.addProject(path)
-      .then((r) => {
-        setProjects(r.projects ?? [])
-        choose(path)
-      })
-      .catch((e) => setAddErr(String(e?.message || e) || '登记项目失败'))
-  }
-
-  return (
-    <Field
-      label="绑定项目（必选）"
-      hint={
-        value
-          ? '飞书所有会话以此项目为工作目录；飞书技能包也安装到它的 .lumi/skills/'
-          : '必选：未绑定项目的飞书渠道不会启动，也没有「用 serve 进程目录」的兜底'
-      }
-    >
-      {projects.length === 0 && !value ? (
-        <EmptyProjects onCreate={() => setCreating(true)} />
-      ) : (
-        <DropdownMenu>
-          <DropdownMenuTrigger asChild>
-            <button
-              type="button"
-              className={`group flex w-full items-center gap-2.5 rounded-lg border bg-surface px-3 py-2 text-left outline-none transition data-[state=open]:border-primary ${bound ? 'border-line' : 'border-error/60'}`}
-            >
-              <Folder size={16} className={`shrink-0 ${bound ? 'text-primary' : 'text-error'}`} />
-              <div className="min-w-0 flex-1">
-                <div className={`truncate text-sm ${bound ? 'text-ink' : 'text-error'}`}>{shown.name}</div>
-                <div className={`truncate text-[10.5px] text-muted-foreground ${bound ? 'font-mono' : ''}`}>
-                  {shown.path}
-                </div>
-              </div>
-              <ChevronDown
-                size={14}
-                className="shrink-0 text-muted-foreground transition-transform group-data-[state=open]:rotate-180"
-              />
-            </button>
-          </DropdownMenuTrigger>
-          <DropdownMenuContent align="start">
-            {projects.map((p) => {
-              const holder = taken.get(p.path)
-              return (
-                <DropdownMenuItem
-                  key={p.path}
-                  disabled={!!holder}
-                  onClick={() => !holder && choose(p.path)}
-                >
-                  <Check
-                    className={`text-primary ${p.path === value ? 'opacity-100' : 'opacity-0'}`}
-                  />
-                  <div className="min-w-0 flex-1">
-                    <div className="truncate text-sm text-ink">{p.name}</div>
-                    <div className="truncate font-mono text-[10px] text-muted-foreground">{p.path}</div>
-                  </div>
-                  {holder && (
-                    <span className="shrink-0 text-[10px] text-muted-foreground">
-                      已被「{holder}」绑定
-                    </span>
-                  )}
-                </DropdownMenuItem>
-              )
-            })}
-            <DropdownMenuSeparator />
-            <DropdownMenuItem onClick={() => setCreating(true)} className="text-muted-foreground">
-              <FolderPlus />
-              新建项目
-            </DropdownMenuItem>
-          </DropdownMenuContent>
-        </DropdownMenu>
-      )}
-
-      {addErr && <div className="mt-1.5 text-[11px] text-error">{addErr}</div>}
-
-      {creating && (
-        <DirBrowser
-          gw={gw}
-          title="新建项目"
-          onPick={onCreated}
-          onCancel={() => setCreating(false)}
-        />
-      )}
-
-      {/* 切换项目提醒（参考 demo A）：保存后会回收进行中的飞书会话，历史不丢 */}
-      <Dialog open={pending !== null} onOpenChange={(o) => !o && setPending(null)}>
-        <DialogContent className="sm:max-w-sm">
-          <DialogHeader>
-            <DialogTitle className="flex items-center gap-2">
-              <AlertTriangle size={17} className="text-primary" />
-              切换项目会重置飞书会话
-            </DialogTitle>
-            <DialogDescription className="leading-relaxed">
-              保存后将<b className="text-ink">回收当前所有进行中的飞书会话</b>（群聊 / 私聊各自的常驻会话池会被重建）。正在执行的任务会被中断，但
-              <b className="text-ink">历史不会丢失</b>，下条消息会在新项目目录下接着聊。
-            </DialogDescription>
-          </DialogHeader>
-          <div className="flex items-center gap-2 rounded-lg border border-line bg-canvas px-3 py-2 font-mono text-[11px]">
-            <span className="truncate text-muted-foreground line-through">{value}</span>
-            <span className="shrink-0 text-primary">→</span>
-            <span className="truncate text-ink">{pending}</span>
-          </div>
-          <DialogFooter>
-            <Button variant="ghost" onClick={() => setPending(null)}>
-              取消
-            </Button>
-            <Button
-              onClick={() => {
-                onChange(pending!)
-                setPending(null)
-              }}
-            >
-              确认切换
-            </Button>
-          </DialogFooter>
-        </DialogContent>
-      </Dialog>
-    </Field>
-  )
-}
-
-// 空态：该机器还没有项目，引导新建（而非手填路径）。外壳走统一 Empty（虚线框）。
-function EmptyProjects({ onCreate }: { onCreate: () => void }) {
-  return (
-    <Empty>
-      <div className="flex flex-col items-center gap-2">
-        <Folder size={28} className="text-muted-foreground/60" />
-        <div className="text-sm text-ink">还没有项目</div>
-        <div className="max-w-[230px] text-[11px] text-muted-foreground">
-          飞书会话需要绑定一个项目作为工作目录。新建一个，或先去「项目」页登记。
-        </div>
-        <Button variant="outline" size="sm" onClick={onCreate} className="mt-1">
-          <FolderPlus size={14} className="mr-1" />
-          新建项目
-        </Button>
-      </div>
-    </Empty>
-  )
-}
-
-function ChipEditor({ values, onChange }: { values: string[]; onChange: (v: string[]) => void }) {
-  const [draft, setDraft] = useState('')
-  const add = () => {
-    const v = draft.trim()
-    if (v && !values.includes(v)) onChange([...values, v])
-    setDraft('')
-  }
-  return (
-    <div className="flex flex-wrap items-center gap-1.5 mt-2">
-      {values.map((v) => (
-        <span key={v} className="inline-flex items-center gap-1.5 bg-surface border border-line rounded-full px-2.5 py-1 text-xs">
-          {v}
-          <button onClick={() => onChange(values.filter((x) => x !== v))} className="text-muted-foreground hover:text-ink">
-            <X size={11} />
-          </button>
-        </span>
-      ))}
-      <span className="inline-flex items-center gap-1 bg-surface border border-dashed border-line rounded-full px-2 py-1">
-        <input
-          value={draft}
-          onChange={(e) => setDraft(e.target.value)}
-          onKeyDown={(e) => e.key === 'Enter' && add()}
-          placeholder="open_id"
-          className="bg-transparent outline-none text-xs w-24 text-ink"
-        />
-        <button onClick={add} className="text-muted-foreground hover:text-ink">
-          <Plus size={12} />
-        </button>
-      </span>
-    </div>
+// 修复入口的金字淡底胶囊：外链（去开放平台）与面板跳转（去「环境」）共用一副皮
+const fixLinkClass =
+  'mt-1.5 inline-flex items-center gap-1 rounded-lg border border-primary/40 bg-primary/10 px-2.5 py-1 text-[11px] text-primary hover:bg-primary/20'
+function FixLink({ href, onClick, children }: { href?: string; onClick?: () => void; children: ReactNode }) {
+  return href ? (
+    <a href={href} target="_blank" rel="noreferrer" className={fixLinkClass}>
+      {children}
+    </a>
+  ) : (
+    <button onClick={onClick} className={fixLinkClass}>
+      {children}
+    </button>
   )
 }

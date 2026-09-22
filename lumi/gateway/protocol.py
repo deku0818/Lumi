@@ -1,7 +1,7 @@
-"""Desktop WS 服务对外事件协议。
+"""gateway 对外事件协议。
 
-把内部 BridgeEvent 序列化为线缆事件信封 {type, session_id, payload}，对齐
-hermes-agent 的 GatewayEvent 设计：扁平信封 + payload 按事件类型分类。
+把内部 BridgeEvent 序列化为线缆事件信封 {type, session_id, payload}：扁平信封 +
+payload 按事件类型分类。
 
 事件名（type）直接来自 EventKind 的成员值（namespace.verb，见 protocol/events.json
 单一事实来源）——无需额外映射层。本模块只负责把 BridgeEvent 的扁平字段重组成
@@ -10,7 +10,29 @@ hermes-agent 的 GatewayEvent 设计：扁平信封 + payload 按事件类型分
 
 from __future__ import annotations
 
+from enum import StrEnum
+
 from lumi.gateway.bridge import BridgeEvent, EventKind
+
+
+class ServerEvent(StrEnum):
+    """不经 BridgeEvent、由服务端直接广播的 wire 事件。
+
+    与 EventKind 同样「成员值直接 = wire 名」，两者合起来就是后端产出的全部事件——
+    契约测试据此与 protocol/events.json 比对，故新增广播事件必须登记在这里，
+    而不是在发送点写字符串字面量（那样漂移测不出来）。
+    """
+
+    GATEWAY_READY = "gateway.ready"
+    CRON_RESULT = "cron.result"
+    CRON_RUNNING = "cron.running"
+    CRON_JOBS = "cron.jobs"
+    BG_TASKS_UPDATE = "bg_tasks.update"
+    CHANNEL_ACTIVITY = "channel.activity"
+    SESSION_TITLE = "session.title"
+    MCP_STATUS = "mcp.status"
+    ENV_PROGRESS = "env.progress"
+    ENV_STATE = "env.state"
 
 
 def _payload(evt: BridgeEvent) -> dict:
@@ -24,7 +46,7 @@ def _payload(evt: BridgeEvent) -> dict:
     if kind in (EventKind.MESSAGE_COMPLETE, EventKind.TURN_COMPLETE):
         return {"usage": evt.usage_metadata} if evt.usage_metadata else {}
     if kind == EventKind.TURN_START:
-        return {"message_id": evt.text}
+        return {"message_id": evt.message_id}
     if kind == EventKind.TOOL_START:
         payload = {
             "name": evt.name,
@@ -43,7 +65,7 @@ def _payload(evt: BridgeEvent) -> dict:
         if evt.is_error:
             payload["is_error"] = True
         return payload
-    if kind == EventKind.COMPACTING:
+    if kind == EventKind.COMPACTION_STATUS:
         return {"active": bool(evt.data and evt.data.get("active"))}
     if kind == EventKind.TODOS_UPDATE:
         return {"todos": (evt.data or {}).get("todos", [])}

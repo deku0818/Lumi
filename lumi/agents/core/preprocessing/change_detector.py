@@ -96,17 +96,13 @@ class FileSetChangeDetector[T]:
             hasher.update(repr(entry).encode())
         return hasher.hexdigest()
 
-    def _current(self) -> tuple[list[T], str]:
-        """当前列表 + digest：digest 未变直接用缓存，变了才重新加载。"""
+    def peek(self) -> list[T]:
+        """当前列表：digest 未变直接用缓存，变了才重新加载。"""
         digest = self._compute_digest()
         if digest != self._data_digest:
             self._data = self._load()
             self._data_digest = digest
-        return self._data, digest
-
-    def peek(self) -> list[T]:
-        """获取当前列表（digest 未变时走缓存）。"""
-        return list(self._current()[0])
+        return list(self._data)
 
     # ------------------------------------------------------------------
     # 实例管理（按子类 × 项目隔离）

@@ -60,7 +60,7 @@
    `write`/`edit` 所有 tool_mode 直接 `ToolExecutor`（项目根取 `get_authorized_directory()`，
    与注入同源）；同时 `engine._rebuild_boundary` 把记忆目录并入工作区边界，使 `validate_path` 放行。
 
-   **顺序很关键**：DENY 规则、只读短路、执行模式策略守卫（plan/readonly）、bypass-immune 都在 carve-out
+   **顺序很关键**：DENY 规则、只读短路、bypass-immune 都在 carve-out
    **之前**，故用户的 DENY 规则与 readonly 模式仍能拦住记忆写入；carve-out 只免掉「本该问人」的审批。
 
 ## opt-in 语义
@@ -85,7 +85,7 @@
 >
 > 设计源于推倒 2026-06-30 删除的旧版 autoDream（综合质量不满意）。下文「三病根」即旧版与本方案的差异根因。
 > **实现落点**：`agents/memory/dream.py`（hook 门控 + runner）、`dream_lock.py`（锁/lastAt/节流）、
-> `normalize.py`（索引规范化）、`sessions/message_text.py`（`extract_messages_as_text`）、
+> `normalize.py`（索引规范化）、`agents/core/meta_message.py`（`extract_messages_as_text`）、
 > `utils/config/manager.py`（`parse_frontmatter` 共用）、`config/models.py`（`AutoDreamConfig`）。
 
 ## 定位：dream 做什么、不做什么
@@ -110,7 +110,7 @@
    - **会话门**：`list_sessions(workspace=project)` 筛 `created_at > lastAt`（最新 checkpoint 时间 = 最后活动时间）的 recent，`len(recent) ≥ min_sessions`。老会话有新活动同样计入；不数消息、无游标——compact 增删历史不影响判定
    - 并发锁：进程内 `_in_flight`（入口同步快返）+ per-project `asyncio.Lock`（`project_lock`，正确性互斥，见下）
 3. **达标 → 跑 dream；成功后 `record_dream`** 写回本次**快照时刻**（dream 后台跑时新到的消息不在快照内，记快照时刻才不会误判为已综合）。IM 长会话另有 per-thread 的 `dream_thread.dreamed_at`（`record_thread_dream`），判活 = 存在落库 ts（`additional_kwargs["lumi"]["ts"]`）晚于它的真实 human。
-4. **导出其他近期会话为 text** → 临时 `transcriptDir`。扁平一行一消息（`[user]/[assistant]/[tool:X]`，换行折叠），**复用 `lumi/sessions/message_text`**。**当前会话不导**（靠完整 message 进 dream）。
+4. **导出其他近期会话为 text** → 临时 `transcriptDir`。扁平一行一消息（`[user]/[assistant]/[tool:X]`，换行折叠），**复用 `lumi/agents/core/meta_message`**。**当前会话不导**（靠完整 message 进 dream）。
 5. **fork 当前主 agent → dream agent**：
    - system prompt = 主 agent **同一份**（`enable_memory=True`，记忆指令照常注入）—— **切病根①**
    - 初始 messages = 当前会话完整 `state["messages"]`（stop hook 当场可取，见 `on_agent_stop`）+ 末尾 consolidation `HumanMessage`（含 `transcriptDir` 路径）—— **切病根②**
@@ -164,5 +164,5 @@ IM 每日整理另有「先沉淀再压缩、dream 失败绝不压缩」的次�
 
 ## 旧基建复用清单
 
-- **回来（可更简）**：transcript 导出（改 text、只导其他会话、复用 `message_text`）、门控阶梯、dream 状态持久化（sqlite `dream_state.db`）、bg-task 注册、记忆写入 carve-out。
+- **回来（可更简）**：transcript 导出（改 text、只导其他会话、复用 `meta_message`）、门控阶梯、dream 状态持久化（sqlite `dream_state.db`）、bg-task 注册、记忆写入 carve-out。
 - **不回来**：内联 taxonomy（改复用 system prompt）、`enable_memory=False` 防递归（改 hook 隔离）、四阶段里的「自由判决」部分。

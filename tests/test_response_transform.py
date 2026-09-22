@@ -131,43 +131,6 @@ class TestOpenAIConversion:
 # ═════════════════════════════════════════════════════════════════════════
 
 
-class TestModelNameFallback:
-    """model_name=None 时应按 LLM_MODEL_NAME env 推断 provider。"""
-
-    async def test_none_model_name_falls_back_to_env_openai(self, monkeypatch):
-        """env=gpt-4o + model_name=None → 走 OpenAI 转换"""
-        monkeypatch.setenv("LLM_MODEL_NAME", "gpt-4o")
-        content = [
-            {
-                "type": "image",
-                "source": {
-                    "type": "base64",
-                    "media_type": "image/png",
-                    "data": "abc",
-                },
-            }
-        ]
-        result = await message_transform(content, model_name=None)
-        assert result[0]["type"] == "image_url"
-        assert "data:image/png;base64,abc" in result[0]["image_url"]["url"]
-
-    async def test_none_model_name_falls_back_to_env_anthropic(self, monkeypatch):
-        """env=claude + model_name=None → 原样透传"""
-        monkeypatch.setenv("LLM_MODEL_NAME", "claude-sonnet-4-5")
-        content = [
-            {
-                "type": "image",
-                "source": {
-                    "type": "base64",
-                    "media_type": "image/png",
-                    "data": "abc",
-                },
-            }
-        ]
-        result = await message_transform(content, model_name=None)
-        assert result == content
-
-
 class TestBedrockPassthrough:
     async def test_base64_image_passthrough(self):
         content = [
@@ -248,7 +211,6 @@ class TestCallModelIntegration:
         )
         state = {
             "messages": [human_msg],
-            "iterations": 1,
             "output_schema": None,
         }
 
@@ -299,7 +261,6 @@ class TestCallModelIntegration:
         tool_msg = ToolMessage(content="read OK", tool_call_id="x", name="read")
         state = {
             "messages": [tool_msg],
-            "iterations": 1,
             "output_schema": None,
         }
 

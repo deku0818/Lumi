@@ -26,7 +26,7 @@ import stat
 import tempfile
 from pathlib import Path
 
-from lumi.utils.workspace_id import get_workspace_id
+from lumi.utils.hashing import short_hash
 
 
 def lumi_home() -> Path:
@@ -43,6 +43,16 @@ def lumi_home() -> Path:
     """
     override = os.environ.get("LUMI_CONFIG_DIR")
     return Path(override).expanduser().resolve() if override else Path.home() / ".lumi"
+
+
+def get_workspace_dir(cwd: Path | None = None) -> str:
+    """resolved 工作目录的字符串形式（默认当前目录）。"""
+    return str((cwd or Path.cwd()).resolve())
+
+
+def get_workspace_id(cwd: Path | None = None) -> str:
+    """SHA256(resolved 工作目录)[:12]：cron 等按目录隔离存储的 workspace 标识。"""
+    return short_hash(get_workspace_dir(cwd), 12)
 
 
 def _user_tmp_root() -> Path:
@@ -64,7 +74,7 @@ def project_slug(project_dir: str | os.PathLike[str]) -> str:
     """项目根 → 短且稳定的目录名：``<basename>-<路径哈希6位>``。
 
     如 ``/Users/y-pc/Cocoon/Lumi`` → ``Lumi-1a2b3c``；同名不同路径不会相撞。
-    哈希段复用 :func:`~lumi.utils.workspace_id.get_workspace_id`（路径→id 的单一事实源）。
+    哈希段复用 :func:`get_workspace_id`（路径→id 的单一事实源）。
     """
     resolved = Path(project_dir).resolve()
     return f"{resolved.name}-{get_workspace_id(resolved)[:6]}"

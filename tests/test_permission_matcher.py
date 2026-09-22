@@ -10,6 +10,8 @@ from lumi.agents.permissions.matcher import (
 from lumi.agents.permissions.models import Permission, PermissionRule
 from lumi.agents.tools.capability import split_compound_command
 
+_PROJECT = Path("/proj")
+
 
 class TestParseToolExpression:
     """parse_tool_expression 测试"""
@@ -146,35 +148,52 @@ class TestMatchRule:
 
     def test_plain_tool_name_match(self):
         rule = PermissionRule(tool="read", permission=Permission.ALLOW)
-        assert RuleMatcher.match_rule(rule, "read", {}) is True
+        assert RuleMatcher.match_rule(rule, "read", {}, _PROJECT) is True
 
     def test_plain_tool_name_no_match(self):
         rule = PermissionRule(tool="read", permission=Permission.ALLOW)
-        assert RuleMatcher.match_rule(rule, "write", {}) is False
+        assert RuleMatcher.match_rule(rule, "write", {}, _PROJECT) is False
 
     def test_bash_command_match(self):
         rule = PermissionRule(tool="bash(npm *)", permission=Permission.ALLOW)
-        assert RuleMatcher.match_rule(rule, "bash", {"command": "npm test"}) is True
+        assert (
+            RuleMatcher.match_rule(rule, "bash", {"command": "npm test"}, _PROJECT)
+            is True
+        )
 
     def test_bash_command_no_match(self):
         rule = PermissionRule(tool="bash(npm *)", permission=Permission.ALLOW)
-        assert RuleMatcher.match_rule(rule, "bash", {"command": "yarn test"}) is False
+        assert (
+            RuleMatcher.match_rule(rule, "bash", {"command": "yarn test"}, _PROJECT)
+            is False
+        )
 
     def test_bash_no_command_arg(self):
         rule = PermissionRule(tool="bash(npm *)", permission=Permission.ALLOW)
-        assert RuleMatcher.match_rule(rule, "bash", {"other": "value"}) is False
+        assert (
+            RuleMatcher.match_rule(rule, "bash", {"other": "value"}, _PROJECT) is False
+        )
 
     def test_path_tool_match(self):
         rule = PermissionRule(tool="edit(src/**/*.py)", permission=Permission.ALLOW)
-        assert RuleMatcher.match_rule(rule, "edit", {"path": "src/main.py"}) is True
+        assert (
+            RuleMatcher.match_rule(rule, "edit", {"path": "src/main.py"}, _PROJECT)
+            is True
+        )
 
     def test_path_tool_no_match(self):
         rule = PermissionRule(tool="write(*.log)", permission=Permission.DENY)
-        assert RuleMatcher.match_rule(rule, "write", {"path": "src/main.py"}) is False
+        assert (
+            RuleMatcher.match_rule(rule, "write", {"path": "src/main.py"}, _PROJECT)
+            is False
+        )
 
     def test_deny_rule_matches(self):
         rule = PermissionRule(tool="bash(rm -rf *)", permission=Permission.DENY)
-        assert RuleMatcher.match_rule(rule, "bash", {"command": "rm -rf /"}) is True
+        assert (
+            RuleMatcher.match_rule(rule, "bash", {"command": "rm -rf /"}, _PROJECT)
+            is True
+        )
 
 
 class TestSplitCompoundCommand:

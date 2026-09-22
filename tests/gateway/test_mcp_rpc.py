@@ -6,6 +6,7 @@ import stat
 import sys
 
 import pytest
+from conftest import rpc
 
 from lumi.gateway import mcp_rpc
 
@@ -23,7 +24,7 @@ def _no_pool_side_effects(monkeypatch):
 async def test_save_then_list_roundtrip(tmp_path, monkeypatch):
     proj = tmp_path / "proj"
     proj.mkdir()
-    await mcp_rpc.dispatch_mcp(
+    await rpc(
         "save_mcp_server",
         {
             "scope": "project",
@@ -32,9 +33,7 @@ async def test_save_then_list_roundtrip(tmp_path, monkeypatch):
             "config": {"command": "npx", "transport": "stdio", "disabled": True},
         },
     )
-    r = await mcp_rpc.dispatch_mcp(
-        "list_mcp_servers", {"scope": "project", "project": str(proj)}
-    )
+    r = await rpc("list_mcp_servers", {"scope": "project", "project": str(proj)})
     assert r["servers"]["foo"]["disabled"] is True  # 原始 dict 保留 disabled
 
 
@@ -45,7 +44,7 @@ async def test_corrupt_file_blocks_save_not_wipes(tmp_path):
     path.write_text("{ broken json,,,", encoding="utf-8")
 
     with pytest.raises(ValueError):
-        await mcp_rpc.dispatch_mcp(
+        await rpc(
             "save_mcp_server",
             {
                 "scope": "project",
@@ -63,16 +62,14 @@ async def test_corrupt_file_lists_empty(tmp_path):
     path.parent.mkdir(parents=True)
     path.write_text("nonsense", encoding="utf-8")
     # 全局 scope 但把 home 指向 tmp
-    r = await mcp_rpc.dispatch_mcp(
-        "list_mcp_servers", {"scope": "project", "project": str(tmp_path)}
-    )
+    r = await rpc("list_mcp_servers", {"scope": "project", "project": str(tmp_path)})
     assert r["servers"] == {}
 
 
 async def test_saved_file_is_0600(tmp_path):
     proj = tmp_path / "proj"
     proj.mkdir()
-    await mcp_rpc.dispatch_mcp(
+    await rpc(
         "save_mcp_server",
         {
             "scope": "project",
@@ -99,7 +96,7 @@ async def test_project_path_resolved_matches_pool_key(tmp_path, monkeypatch):
 
     monkeypatch.setattr(mcp_rpc, "invalidate_mcp_pools", _capture)
 
-    await mcp_rpc.dispatch_mcp(
+    await rpc(
         "save_mcp_server",
         {
             "scope": "project",
@@ -149,7 +146,7 @@ async def test_probe_stdio_server_lists_capabilities(tmp_path):
     为 stdio、disabled 元字段被剥离而非下传 adapter。"""
     script = tmp_path / "fake_mcp.py"
     script.write_text(_FAKE_SERVER, encoding="utf-8")
-    r = await mcp_rpc.dispatch_mcp(
+    r = await rpc(
         "test_mcp_server",
         {
             "config": {
@@ -177,7 +174,7 @@ async def test_probe_stdio_server_lists_capabilities(tmp_path):
 
 async def test_probe_failure_returns_error():
     """连不上时返回 {ok: False, error}，不抛异常。"""
-    r = await mcp_rpc.dispatch_mcp(
+    r = await rpc(
         "test_mcp_server",
         {"config": {"url": "http://127.0.0.1:9/mcp", "transport": "streamable_http"}},
     )

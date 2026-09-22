@@ -17,7 +17,8 @@
 群里却查不到的人（可见范围外）通讯录通常也查不到，回退收益低。
 
 缓存命中即不调 API；解析不到用兜底名（``用户_xxxxxx`` / ``群_xxxxxx``）且不写缓存，
-保留下次重试机会。进程内缓存，重启即清空（启动预热重建）。
+保留下次重试机会（群名另有 ``CHAT_NAME_RETRY_COOLDOWN`` 冷却：无名群 / 无权限的群
+不必每条消息都打一次 ``im.chat.get``）。进程内缓存，重启即清空（启动预热重建）。
 
 需要应用权限：``im:chat``（列群 / 群成员 / 群信息）、``contact:user.base:readonly``
 （通讯录批量）。
@@ -43,6 +44,8 @@ MEMBER_REFRESH_COOLDOWN = 60.0
 # 持续失败指数退避到上限，避免权限不足的群每条消息刷整群刷屏
 MEMBER_BACKOFF_MIN = 5.0
 MEMBER_BACKOFF_MAX = 300.0
+# 群名解析失败（无名群 / 无权限，缓存不收兜底名）后的重试冷却（秒）
+CHAT_NAME_RETRY_COOLDOWN = 300.0
 
 T = TypeVar("T")
 
@@ -77,17 +80,11 @@ class FeishuDirectory:
         self._chats: CachingDirectory[str, str] = CachingDirectory()  # chat_id→群名
         self._member_cooldown: dict[str, float] = {}  # chat_id → 下次可刷成员的时刻
         self._member_backoff: dict[str, float] = {}  # chat_id → 当前失败退避秒数
+        self._chat_retry_at: dict[str, float] = {}  # chat_id → 群名解析下次可重试时刻
         self._refresh_lock = threading.Lock()
 
     def set_client(self, client: Any) -> None:
         self._client = client
-
-    # ------------------------------------------------------------------
-    # 注入（预热 / 测试）
-    # ------------------------------------------------------------------
-
-    def prime_user(self, open_id: str, name: str) -> None:
-        self._users.prime(open_id, name)
 
     # ------------------------------------------------------------------
     # 对外解析
@@ -102,7 +99,7 @@ class FeishuDirectory:
         )
         return out[chat_id]
 
-    async def resolve_users(self, open_ids: list[str]) -> dict[str, str]:
+    async def _resolve_users(self, open_ids: list[str]) -> dict[str, str]:
         """通讯录源解析 open_id → 名（私聊 / 无群上下文场景）。"""
         return await self._users.resolve(open_ids, self._fetch_users, fallback_name)
 
@@ -114,7 +111,7 @@ class FeishuDirectory:
         没有 chat_id（私聊等）时退回通讯录源。
         """
         if not chat_id:
-            return await self.resolve_users(open_ids)
+            return await self._resolve_users(open_ids)
         return await self._users.resolve(
             open_ids,
             lambda ids: self._fetch_members_for(chat_id, ids),
@@ -222,22 +219,29 @@ class FeishuDirectory:
         return out
 
     def _fetch_chat_names(self, chat_ids: list[str]) -> dict[str, str]:
-        """逐个 ``im.chat.get`` 取群名（无批量接口）。"""
+        """逐个 ``im.chat.get`` 取群名（无批量接口）。
+
+        解析不到的群（无名 / 无权限 / 调用失败）进入 ``CHAT_NAME_RETRY_COOLDOWN``
+        冷却：兜底名不写缓存，没有冷却这类群每条消息都会白打一次。
+        """
         if self._client is None:
             return {}
         from lark_oapi.api.im.v1 import GetChatRequest
 
+        now = time.monotonic()
         out: dict[str, str] = {}
         for cid in chat_ids:
+            if now < self._chat_retry_at.get(cid, 0.0):
+                continue
             req = GetChatRequest.builder().chat_id(cid).build()
             resp = lark_call(
                 "im.chat.get", lambda r=req: self._client.im.v1.chat.get(r)
             )
-            if resp is None:
-                continue
-            name = getattr(resp.data, "name", None)
+            name = getattr(resp.data, "name", None) if resp is not None else None
             if name:
                 out[cid] = name
+            else:
+                self._chat_retry_at[cid] = now + CHAT_NAME_RETRY_COOLDOWN
         return out
 
     def _fetch_chats(self) -> list[tuple[str, str | None]]:

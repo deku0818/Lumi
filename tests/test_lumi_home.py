@@ -27,12 +27,12 @@ from pathlib import Path
 from lumi.agents.core.hooks.config_loader import _hooks_config_paths
 from lumi.agents.memory import paths as memory_paths
 from lumi.agents.permissions.config_loader import ConfigLoader
-from lumi.agents.tools.providers.mcp import _global_mcp_config_path
+from lumi.agents.tools.providers.mcp import global_mcp_config_path
 from lumi.models.catalog import _cache_path
 from lumi.utils.config import global_manager, user_store
 from lumi.utils.config.global_models import GlobalConfig
 from lumi.utils.logger import _LOG_DIR
-from lumi.utils.read_config import get_config
+from lumi.utils.config import get_config
 
 project = Path.cwd()
 probes = {
@@ -44,7 +44,7 @@ probes = {
     "memory": memory_paths.MEMORY_ROOT,
     "hooks": _hooks_config_paths(project, None)[0],
     "permissions": ConfigLoader(project)._config_paths[0],
-    "mcp": _global_mcp_config_path(),
+    "mcp": global_mcp_config_path(),
     "catalog_cache": _cache_path(),
     "toolbox_bin": get_config().bin_dir,
 }

@@ -5,14 +5,14 @@ from __future__ import annotations
 from datetime import datetime
 
 import pytest
+from conftest import rpc
 
 from lumi.agents.cron.delivery import DeliveryManager
 from lumi.agents.cron.job_store import JobStore
 from lumi.agents.cron.run_log import RunLog, RunRecord
 from lumi.agents.cron.runtime import CronRuntime
 from lumi.agents.cron.scheduler import Scheduler
-from lumi.gateway.cron_rpc import dispatch_cron, set_cron_runtime
-from lumi.gateway.desktop_delivery import DesktopDelivery
+from lumi.gateway.cron_rpc import set_cron_runtime
 
 
 @pytest.fixture
@@ -29,7 +29,7 @@ def cron_runtime(tmp_path):
 
 
 async def _create(name: str = "每日总结", schedule: str = "0 9 * * *") -> dict:
-    result = await dispatch_cron(
+    result = await rpc(
         "create_cron_job",
         {"name": name, "schedule": schedule, "prompt": "总结今天的待办"},
     )
@@ -46,7 +46,7 @@ async def test_create_and_list(cron_runtime):
     assert job["enabled"] is True
     assert "next_run" in job
 
-    result = await dispatch_cron("list_cron_jobs", {})
+    result = await rpc("list_cron_jobs", {})
     assert [j["id"] for j in result["jobs"]] == [job["id"]]
 
 
@@ -57,9 +57,7 @@ async def test_create_invalid_schedule_raises(cron_runtime):
 
 async def test_create_empty_name_raises(cron_runtime):
     with pytest.raises(ValueError, match="不能为空"):
-        await dispatch_cron(
-            "create_cron_job", {"name": " ", "schedule": "5m", "prompt": "x"}
-        )
+        await rpc("create_cron_job", {"name": " ", "schedule": "5m", "prompt": "x"})
 
 
 # -- update / toggle / delete --
@@ -67,7 +65,7 @@ async def test_create_empty_name_raises(cron_runtime):
 
 async def test_update_fields(cron_runtime):
     job = await _create()
-    result = await dispatch_cron(
+    result = await rpc(
         "update_cron_job",
         {"job_id": job["id"], "name": "新名字", "schedule": "10m", "prompt": "新载荷"},
     )
@@ -83,23 +81,21 @@ async def test_update_fields(cron_runtime):
 
 async def test_update_unknown_job_raises(cron_runtime):
     with pytest.raises(ValueError, match="不存在"):
-        await dispatch_cron("update_cron_job", {"job_id": "nope", "name": "x"})
+        await rpc("update_cron_job", {"job_id": "nope", "name": "x"})
 
 
 async def test_update_empty_name_raises(cron_runtime):
     """显式传空串应报错（与 create 校验一致），而非静默忽略。"""
     job = await _create()
     with pytest.raises(ValueError, match="不能为空"):
-        await dispatch_cron("update_cron_job", {"job_id": job["id"], "name": " "})
+        await rpc("update_cron_job", {"job_id": job["id"], "name": " "})
     with pytest.raises(ValueError, match="不能为空"):
-        await dispatch_cron("update_cron_job", {"job_id": job["id"], "schedule": ""})
+        await rpc("update_cron_job", {"job_id": job["id"], "schedule": ""})
 
 
 async def test_toggle_disables_and_persists(cron_runtime):
     job = await _create()
-    result = await dispatch_cron(
-        "toggle_cron_job", {"job_id": job["id"], "enabled": False}
-    )
+    result = await rpc("toggle_cron_job", {"job_id": job["id"], "enabled": False})
     assert result["job"]["enabled"] is False
     stored = await cron_runtime.job_store.get(job["id"])
     assert stored.enabled is False
@@ -107,19 +103,19 @@ async def test_toggle_disables_and_persists(cron_runtime):
 
 async def test_delete_removes_job(cron_runtime):
     job = await _create()
-    result = await dispatch_cron("delete_cron_job", {"job_id": job["id"]})
+    result = await rpc("delete_cron_job", {"job_id": job["id"]})
     assert result["job_id"] == job["id"]
-    assert (await dispatch_cron("list_cron_jobs", {}))["jobs"] == []
+    assert (await rpc("list_cron_jobs", {}))["jobs"] == []
 
 
 async def test_delete_unknown_job_raises(cron_runtime):
     with pytest.raises(ValueError, match="不存在"):
-        await dispatch_cron("delete_cron_job", {"job_id": "nope"})
+        await rpc("delete_cron_job", {"job_id": "nope"})
 
 
 async def test_run_unknown_job_raises(cron_runtime):
     with pytest.raises(ValueError, match="不存在"):
-        await dispatch_cron("run_cron_job", {"job_id": "nope"})
+        await rpc("run_cron_job", {"job_id": "nope"})
 
 
 # -- runs --
@@ -139,7 +135,7 @@ async def test_list_cron_runs(cron_runtime):
     )
     await cron_runtime.run_log.append(record)
 
-    result = await dispatch_cron("list_cron_runs", {"job_id": job["id"]})
+    result = await rpc("list_cron_runs", {"job_id": job["id"]})
     assert len(result["runs"]) == 1
     assert result["runs"][0]["status"] == "success"
     assert result["runs"][0]["output_summary"] == "完成"
@@ -163,7 +159,7 @@ async def test_list_jobs_carries_run_threads(cron_runtime):
             )
         )
 
-    jobs = (await dispatch_cron("list_cron_jobs", {}))["jobs"]
+    jobs = (await rpc("list_cron_jobs", {}))["jobs"]
     # 时间倒序，空 thread_id（无 checkpointer / 已被保留策略清理）不可跳转故剔除
     assert jobs[0]["run_threads"] == ["cron-b", "cron-a"]
 
@@ -190,84 +186,4 @@ async def test_run_record_thread_id_backward_compat():
 async def test_uninitialized_raises():
     set_cron_runtime(None)
     with pytest.raises(RuntimeError, match="未启动"):
-        await dispatch_cron("list_cron_jobs", {})
-
-
-# -- DesktopDelivery --
-
-
-class FakeChannel:
-    """记录 send 帧的假传输（Channel）。"""
-
-    def __init__(self) -> None:
-        self.frames: list[dict] = []
-
-    async def send(self, frame: dict) -> None:
-        self.frames.append(frame)
-
-
-class BrokenChannel:
-    """send 总是失败的假传输。"""
-
-    async def send(self, frame: dict) -> None:
-        raise ConnectionError("broken")
-
-
-async def test_desktop_delivery_broadcasts_result():
-    delivery = DesktopDelivery()
-    ws = FakeChannel()
-    delivery.register(ws)
-
-    record = RunRecord(
-        job_id="abc",
-        job_name="每日总结",
-        started_at=datetime(2026, 6, 10, 9, 0, 0),
-        finished_at=datetime(2026, 6, 10, 9, 0, 1),
-        status="success",
-        duration_ms=1200,
-        output_summary="done",
-        thread_id="cron-xyz",
-    )
-    await delivery.deliver(record, "done")
-
-    assert len(ws.frames) == 1
-    params = ws.frames[0]["params"]
-    assert params["type"] == "cron.result"
-    assert params["payload"]["job_id"] == "abc"
-    assert params["payload"]["status"] == "success"
-    assert params["payload"]["duration_ms"] == 1200
-    # 前端据 thread_id 按 run 追踪未读（看一条消一条）
-    assert params["payload"]["thread_id"] == "cron-xyz"
-
-
-async def test_desktop_delivery_drops_broken_ws():
-    delivery = DesktopDelivery()
-    ok = FakeChannel()
-    delivery.register(BrokenChannel())
-    delivery.register(ok)
-
-    await delivery.send_event("cron.running", {"names": ["a"]})
-
-    assert len(ok.frames) == 1
-    # 失败连接被移除，后续广播不再尝试
-    await delivery.send_event("cron.running", {"names": []})
-    assert len(ok.frames) == 2
-
-
-async def test_desktop_delivery_unregister():
-    delivery = DesktopDelivery()
-    ws = FakeChannel()
-    delivery.register(ws)
-    delivery.unregister(ws)
-
-    record = RunRecord(
-        job_id="x",
-        job_name="job",
-        started_at=datetime(2026, 6, 10, 9, 0, 0),
-        finished_at=datetime(2026, 6, 10, 9, 0, 1),
-        status="success",
-        duration_ms=1,
-        output_summary="out",
-    )
-    await delivery.deliver(record, "out")
-    assert ws.frames == []
+        await rpc("list_cron_jobs", {})

@@ -2,7 +2,7 @@
 # Feature: dynamic-skill-loading, Property 4: 消息注入保持原始内容不变
 """SkillInjector 属性测试
 
-Property 3: 验证技能全量块（skill_lines + format_reminder）的输出格式完整性
+Property 3: 验证技能全量块（entry_lines + format_reminder）的输出格式完整性
 Property 4: 验证 inject_text_into_message() 注入后原始内容不变
 """
 
@@ -18,13 +18,13 @@ from lumi.agents.core.node_helpers.messages import (
     format_reminder,
     inject_text_into_message,
 )
-from lumi.agents.core.preprocessing.skills import SKILL_HEADER, skill_lines
+from lumi.agents.core.preprocessing.context_inject import SKILL_HEADER, entry_lines
 from lumi.agents.tools.loader import SkillConfig
 
 
 def format_skill_reminder(skills: list[SkillConfig]) -> str:
     """全量技能块（context_inject 的组装方式：条目行 + format_reminder）。"""
-    return format_reminder(SKILL_HEADER, list(skill_lines(skills).values()))
+    return format_reminder(SKILL_HEADER, list(entry_lines(skills).values()))
 
 
 # --- 共用策略定义 ---
@@ -206,81 +206,3 @@ def test_inject_prepends_reminder_and_preserves_original(
             assert "<system-reminder>" not in block.get("text", ""), (
                 "只有第一个 block 应包含 <system-reminder>"
             )
-
-
-# --- Property 5 策略定义 ---
-
-# Feature: dynamic-skill-loading, Property 5: 触发条件包含
-
-
-class SkillConfigWithTrigger(SkillConfig):
-    """带 trigger 字段的 SkillConfig 子类，用于测试触发条件格式化。"""
-
-    trigger: str | None = None
-
-
-# 触发条件文本策略：非空、无换行
-_trigger_text_st = st.text(
-    alphabet=st.characters(
-        whitelist_categories=("L", "N", "Z", "P"),
-        blacklist_characters="\n\r",
-    ),
-    min_size=1,
-    max_size=60,
-).filter(lambda s: s.strip() != "")
-
-
-def _build_skill_with_trigger(
-    name: str, description: str, prompt: str, trigger: str
-) -> SkillConfigWithTrigger:
-    """构建带 trigger 的 SkillConfig 实例。"""
-    return SkillConfigWithTrigger(
-        name=name, description=description, prompt=prompt, trigger=trigger
-    )
-
-
-# 带 trigger 的单个技能策略
-_skill_with_trigger_st = st.builds(
-    _build_skill_with_trigger,
-    name=skill_name_st,
-    description=skill_description_st,
-    prompt=skill_prompt_st,
-    trigger=_trigger_text_st,
-)
-
-# 带 trigger 的非空技能列表策略（名称唯一）
-_skill_with_trigger_list_st = (
-    st.lists(_skill_with_trigger_st, min_size=1, max_size=8)
-    .map(lambda configs: list({c.name: c for c in configs}.values()))
-    .filter(lambda configs: len(configs) >= 1)
-)
-
-
-# --- Property 5 属性测试 ---
-
-
-# **Validates: Requirements 2.4**
-@settings(max_examples=100)
-@given(skills=_skill_with_trigger_list_st)
-def test_trigger_condition_included(
-    skills: list[SkillConfigWithTrigger],
-) -> None:
-    """验证触发条件包含在格式化输出中。
-
-    对任意带 trigger 的 SkillConfig 列表：
-    1. 输出中每个技能条目应包含其 trigger 文本
-    2. 触发条件格式为 `（触发条件：{trigger}）`
-    """
-    result = format_skill_reminder(skills)
-
-    for skill in skills:
-        # 1. 输出包含 trigger 文本
-        assert skill.trigger in result, (
-            f"输出应包含触发条件文本 {skill.trigger!r}，实际输出:\n{result}"
-        )
-
-        # 2. 触发条件格式正确
-        expected_trigger_fmt = f"（触发条件：{skill.trigger}）"
-        assert expected_trigger_fmt in result, (
-            f"输出应包含格式化的触发条件 {expected_trigger_fmt!r}，实际输出:\n{result}"
-        )

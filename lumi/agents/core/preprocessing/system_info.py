@@ -38,8 +38,6 @@ def collect_system_info() -> dict[str, str]:
     }
 
 
-def system_info_body(info: dict[str, str] | None = None) -> str:
+def system_info_body() -> str:
     """系统信息条目行（digest 与全量/变更重发共用同一 body）。"""
-    if info is None:
-        info = collect_system_info()
-    return "\n".join(f"- {k}: {v}" for k, v in info.items() if v)
+    return "\n".join(f"- {k}: {v}" for k, v in collect_system_info().items() if v)

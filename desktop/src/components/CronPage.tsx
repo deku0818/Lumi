@@ -30,7 +30,9 @@ import {
 } from '@/components/ui/dialog'
 import { Switch } from '@/components/ui/switch'
 import { Button } from '@/components/ui/button'
-import { CARD_L2, beOf, cn, errorMessage, fmtDuration } from '@/lib/utils'
+import { beOf, cn, errorMessage, fmtDuration } from '@/lib/utils'
+import { CARD_L1, CARD_L1_HOVER, CARD_L3 } from './glass'
+import { Empty } from './SettingsKit'
 
 // 后端能力句柄：App 注入 anyGw() 返回的 Gateway 子集，便于解耦与测试
 export interface CronApi {
@@ -193,17 +195,15 @@ export function CronPage({
             tabsClassName="mt-4 flex flex-wrap gap-2"
           >
 
-          <div className="mt-5 flex items-center gap-2.5 rounded-2xl border border-line/30 bg-surface/60 px-4 py-3 text-sm text-muted-foreground">
+          <div className={`mt-5 flex items-center gap-2.5 ${CARD_L1} px-4 py-3 text-sm text-muted-foreground`}>
             <Info size={15} className="shrink-0 text-info" />
             {t('cron.banner')}
           </div>
 
           {shownJobs.length === 0 ? (
-            <div className="mt-16 flex flex-col items-center text-center select-none">
-              <Clock size={36} className="text-muted-foreground/50" />
-              <div className="mt-4 text-ink">{t('cron.empty')}</div>
-              <div className="mt-1 text-sm text-muted-foreground">{t('cron.emptyHint')}</div>
-            </div>
+            <Empty size="page" icon={<Clock />} title={t('cron.empty')}>
+              {t('cron.emptyHint')}
+            </Empty>
           ) : (
             <div className="mt-5 grid gap-4 grid-cols-[repeat(auto-fill,minmax(230px,1fr))]">
               {shownJobs.map((job) => (
@@ -259,7 +259,7 @@ function JobCard({
   const { t } = useI18n()
   return (
     <div
-      className={`flex flex-col rounded-2xl border border-line/30 bg-surface/40 hover:bg-surface/70 hover:border-line/60 transition cursor-pointer p-4 ${job.enabled ? '' : 'opacity-55'}`}
+      className={`flex flex-col ${CARD_L1} ${CARD_L1_HOVER} cursor-pointer p-4 ${job.enabled ? '' : 'opacity-55'}`}
       onClick={onOpen}
     >
       <div className="flex items-start gap-2">
@@ -567,7 +567,7 @@ const RUN_CARD = 'w-full flex flex-col items-stretch text-left transition'
 const RUN_ROW = 'w-full flex items-center gap-2.5 px-3 py-2.5 text-left'
 const runCardCls = (active: boolean) =>
   cn(
-    CARD_L2,
+    CARD_L3,
     RUN_CARD,
     active ? 'border-primary/45 bg-primary/[0.08]' : 'hover:bg-surface/70 hover:border-primary/30',
   )
@@ -632,7 +632,7 @@ export const RunsSection = memo(function RunsSection({
               key={r.thread_id || r.started_at}
               className={
                 !r.thread_id
-                  ? cn(CARD_L2, RUN_CARD, 'bg-surface/30 opacity-60')
+                  ? cn(CARD_L3, RUN_CARD, 'opacity-60')
                   : runCardCls(active)
               }
             >
@@ -679,7 +679,7 @@ function RunList({
   return (
     <div className="flex flex-col gap-2">
       {runs.map((r, i) => (
-        <div key={r.thread_id || r.started_at} className={`${CARD_L2} overflow-hidden`}>
+        <div key={r.thread_id || r.started_at} className={`${CARD_L3} overflow-hidden`}>
           <button
             onClick={() =>
               r.thread_id ? onOpenRun(r.thread_id) : setOpen(open === i ? null : i)

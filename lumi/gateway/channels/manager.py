@@ -177,7 +177,7 @@ async def channels_runtime():
     同时注册 shell env provider：项目绑了机器人，该项目所有会话的 Bash 里 lark-cli
     自动带上机器人专属 profile（LARKSUITE_CLI_PROFILE），项目间身份不串。
     """
-    from lumi.agents.runtime.shell_session import set_shell_env_provider
+    from lumi.agents.runtime.shell_env import set_shell_env_provider
 
     set_shell_env_provider(shell_env_for)
     await manager.reload()

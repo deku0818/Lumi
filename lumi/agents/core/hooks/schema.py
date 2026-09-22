@@ -23,31 +23,21 @@ if TYPE_CHECKING:
     from lumi.agents.core.state import LumiAgentState
 
 
-HookEvent = Literal[
-    "Stop",
-    "UserPromptSubmit",
-    "PreToolUse",
-    "PostToolUse",
-    "SessionStart",
-    "SessionEnd",
-]
+HookEvent = Literal["Stop", "UserPromptSubmit", "PreToolUse", "PostToolUse"]
 
 
 @dataclass(frozen=True)
 class HookContext:
-    """Hook 入参：state + config + event + 按事件填的 payload。
-
-    SessionStart 阶段 ``state`` 可能为 ``{}``（graph 还没跑），hook 必须容忍空
-    state 这一情况，否则会在 SessionStart 路径上崩。
-    """
+    """Hook 入参：state + config + event + 按事件填的 payload，不可变、hook 只读。"""
 
     state: LumiAgentState
     config: RunnableConfig
     event: HookEvent
     payload: dict[str, Any] = field(default_factory=dict)
     runtime: Any = None
-    """LangGraph ``Runtime[LumiAgentContext]``，由 ``on_agent_stop`` 传入；Stop hook 经它取
-    ``context``（system_prompt / permission_engine / memory_enabled）。其余事件可为 None。"""
+    """LangGraph ``Runtime[LumiAgentContext]``，Stop / UserPromptSubmit 调用点传入，hook
+    经它取 ``context``（system_prompt / permission_engine / memory_enabled / goal 回调）。
+    PreToolUse / PostToolUse 为 None。"""
 
 
 @dataclass(frozen=True)

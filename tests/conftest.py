@@ -184,18 +184,10 @@ class PTLError(Exception):
 
 
 def tool_loop_history() -> list:
-    """[System, Human, (AI+Tool)×4]，模拟工具循环中段（末条 ToolMessage）。"""
-    from langchain_core.messages import (
-        AIMessage,
-        HumanMessage,
-        SystemMessage,
-        ToolMessage,
-    )
+    """[Human, (AI+Tool)×4]，模拟工具循环中段（末条 ToolMessage）。"""
+    from langchain_core.messages import AIMessage, HumanMessage, ToolMessage
 
-    msgs: list = [
-        SystemMessage(content="sys", id="s"),
-        HumanMessage(content="q", id="h"),
-    ]
+    msgs: list = [HumanMessage(content="q", id="h")]
     for i in range(4):
         msgs.append(
             AIMessage(
@@ -306,3 +298,14 @@ def messages_channel():
     return get_type_hints(LumiAgentState, include_extras=True)["messages"].__metadata__[
         0
     ]
+
+
+async def rpc(method: str, params: dict) -> dict:
+    """按方法名派发一次非流式领域 RPC，走与生产同一张合并表。
+
+    生产端 ``GatewaySession._dispatch`` 从 ``_DOMAIN_HANDLERS`` 取用；这里查同一张表，
+    而非各测试各自 ``mod.HANDLERS[...]``——后者在某模块忘记注册进 session 时仍会通过。
+    """
+    from lumi.gateway.session import _DOMAIN_HANDLERS
+
+    return await _DOMAIN_HANDLERS[method](params)

@@ -9,7 +9,8 @@
 ``structured_output`` chain 调用：把对话转录渲染成纯文本作单条 user 内容喂给判官
 系统提示。这是个全新 prompt，与主对话滚动缓存零交集——验收不扰主缓存。
 
-**条件存 sidecar 而非 LangGraph state**（见 ``session_meta.get_goal``）：达成时本
+**条件存 sidecar 而非 LangGraph state**（读写经 ``context.get_goal`` /
+``context.clear_goal`` 回调，由 bridge 注入，core 不依赖 sessions 层）：达成时本
 hook 清条件（副作用）并返回 ``None``，让 dispatch 继续跑到 ``auto_dream_stop_hook``；
 若存 state，清条件必须靠 ``Command(goto=END)``，会 first_intercept 短路掉 dream。
 """
@@ -19,12 +20,11 @@ from __future__ import annotations
 from pydantic import BaseModel, Field
 
 from lumi.agents.core.hooks.schema import AdditionalContext, HookContext, HookResult
+from lumi.agents.core.meta_message import extract_messages_as_text
 from lumi.models.chain import structured_output
 from lumi.models.provider_store import resolve
-from lumi.sessions.message_text import extract_messages_as_text
-from lumi.sessions.session_meta import get_goal, update_meta
+from lumi.utils.config import get_config
 from lumi.utils.logger import logger
-from lumi.utils.read_config import get_config
 from lumi.utils.sizing import BYTES_PER_TOKEN, text_size
 
 # 转录预算占上下文窗口的比例：留 20% 给判官系统提示 + 三态输出 + 截断说明。
@@ -133,7 +133,7 @@ async def _judge(condition: str, messages: list) -> _GoalVerdict:
 async def goal_stop_hook(ctx: HookContext) -> HookResult:
     """会话有活跃 goal 时，模型想结束前判定条件是否成立。
 
-    - 无 goal → ``None`` 放行。
+    - 无 goal（含无 bridge 注入回调的 headless / cron）→ ``None`` 放行。
     - ok:true → 清 goal（副作用）+ ``None`` 放行结束（dispatch 继续，dream 正常触发）。
     - ok:false → ``AdditionalContext``（short-circuit dream）拉回 CallModel 继续。
     - ok:false + impossible → 清 goal + ``None`` 放行结束（条件永远达不成，别烧循环）。
@@ -144,13 +144,14 @@ async def goal_stop_hook(ctx: HookContext) -> HookResult:
     # 子 agent（depth>0）不参与目标驱动：它经 contextvar 继承父 thread_id，若不挡
     # 会拿子 agent 的无关转录去判父 goal（误拉回子 agent / 误清父目标）。主 agent
     # depth=0/缺省。goal 是会话级概念，只对主对话生效。
-    if ctx.state.get("depth"):
+    if ctx.state.get("depth") or ctx.runtime is None:
         return None
+    context = ctx.runtime.context
     configurable = ctx.config.get("configurable", {}) if ctx.config else {}
     thread_id = configurable.get("thread_id")
-    if not thread_id:
+    if not thread_id or context.get_goal is None:
         return None
-    condition = get_goal(thread_id)
+    condition = context.get_goal(thread_id)
     if not condition:
         return None
 
@@ -164,6 +165,6 @@ async def goal_stop_hook(ctx: HookContext) -> HookResult:
 
     if verdict.ok or verdict.impossible:
         # 达成或永远达不成：清 goal 放行结束（保留 pin/rename）
-        update_meta(thread_id, goal="")
+        context.clear_goal(thread_id)
         return None
     return AdditionalContext(CONTINUATION.format(reason=verdict.reason))

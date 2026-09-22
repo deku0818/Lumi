@@ -117,15 +117,6 @@ class TestBasicEvaluation:
         decision = engine.evaluate("bash", {"command": "ls"})
         assert decision == PermissionDecision.UNMATCHED
 
-    def test_invalid_tool_name(self):
-        engine = _make_engine([])
-        assert engine.evaluate("", {}) == PermissionDecision.UNMATCHED
-        assert engine.evaluate(None, {}) == PermissionDecision.UNMATCHED  # type: ignore
-
-    def test_invalid_tool_args(self):
-        engine = _make_engine([])
-        assert engine.evaluate("bash", "not a dict") == PermissionDecision.UNMATCHED  # type: ignore
-
 
 class TestAskRuleEvaluation:
     """Ask 规则语义测试"""
@@ -231,50 +222,27 @@ class TestAskRuleEvaluation:
         assert decision == PermissionDecision.DENY
 
 
-class TestEphemeralRules:
-    """CLI --allow 临时规则测试"""
+class TestPathPatternAnchoredToProjectDir:
+    """路径模式锚定在引擎绑定的项目根，而非进程 cwd。
 
-    def test_ephemeral_rules_take_effect(self):
-        engine = _make_engine([])
-        assert (
-            engine.evaluate("bash", {"command": "npm test"})
-            == PermissionDecision.UNMATCHED
-        )
+    回归：曾从 tool_args 取 ``project_dir``（没有工具会传）退到 ``Path(".")``，
+    进程 cwd 一旦不是项目根，绝对路径的 relative_to 失败 → 规则永远不命中。
+    """
 
-        engine.add_ephemeral_rules(["bash(npm *)"])
-        assert (
-            engine.evaluate("bash", {"command": "npm test"}) == PermissionDecision.ALLOW
-        )
-
-    def test_ephemeral_rules_deduplicate(self):
+    def test_relative_pattern_matches_project_file_when_cwd_elsewhere(
+        self, tmp_path, monkeypatch
+    ):
+        project_dir = tmp_path / "proj"
+        project_dir.mkdir()
+        elsewhere = tmp_path / "elsewhere"
+        elsewhere.mkdir()
+        monkeypatch.chdir(elsewhere)
         engine = _make_engine(
-            [
-                PermissionRule(tool="bash(npm *)", permission=Permission.ALLOW),
-            ]
+            [PermissionRule(tool="edit(src/**/*.py)", permission=Permission.DENY)],
+            project_dir=project_dir,
         )
-        original_count = len(engine._config.permissions)
-        engine.add_ephemeral_rules(["bash(npm *)"])
-        assert len(engine._config.permissions) == original_count
-
-    def test_ephemeral_rules_do_not_override_deny(self):
-        engine = _make_engine(
-            [
-                PermissionRule(tool="bash(curl *)", permission=Permission.DENY),
-            ]
-        )
-        engine.add_ephemeral_rules(["bash(curl *)"])
-        # deny 仍然优先
-        assert (
-            engine.evaluate("bash", {"command": "curl evil.com"})
-            == PermissionDecision.DENY
-        )
-
-    def test_empty_ephemeral_rules(self):
-        engine = _make_engine([])
-        engine.add_ephemeral_rules([])
-        assert (
-            engine.evaluate("bash", {"command": "ls"}) == PermissionDecision.UNMATCHED
-        )
+        target = str(project_dir / "src" / "main.py")
+        assert engine.evaluate("edit", {"file_path": target}) == PermissionDecision.DENY
 
 
 class TestWorkspaceBoundary:

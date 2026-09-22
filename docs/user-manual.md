@@ -160,11 +160,6 @@ lumi --version
     "command_timeout": 10.0,
     "max_output_bytes": 10000
   },
-  "ptc": {
-    "enabled": true,
-    "tools": [],
-    "disabled_tools": []
-  },
   "filesystem": {
     "grep_max_file_size_mb": 10
   }
@@ -842,11 +837,6 @@ your-project/
     "enabled": true,
     "command_timeout": 10.0,
     "max_output_bytes": 10000
-  },
-  "ptc": {
-    "enabled": true,
-    "tools": [],
-    "disabled_tools": []
   },
   "filesystem": {
     "grep_max_file_size_mb": 10

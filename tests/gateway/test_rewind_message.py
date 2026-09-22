@@ -16,6 +16,7 @@ from lumi.agents.core.graph import LumiAgent
 from lumi.agents.core.meta_message import (
     CTX_DIGEST_KEY,
     declared_file_paths,
+    extract_text_content,
     injected_prefix,
     strip_injected_prefix,
 )
@@ -24,7 +25,6 @@ from lumi.agents.core.node_helpers.messages import (
     stamp_missing_ids,
 )
 from lumi.gateway.bridge.core import AgentBridge
-from lumi.sessions.message_text import extract_text_content
 from lumi.utils.constants import LUMI_META_KEY
 from tests.gateway.toy_graph import bridge_with
 

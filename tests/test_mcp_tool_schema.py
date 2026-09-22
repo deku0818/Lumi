@@ -9,7 +9,7 @@ from __future__ import annotations
 
 from langchain_core.tools import StructuredTool
 
-from lumi.agents.tools.providers.mcp import (
+from lumi.agents.tools.providers.mcp.pool import (
     MCPSessionManager,
     flatten_top_level_combinators,
 )

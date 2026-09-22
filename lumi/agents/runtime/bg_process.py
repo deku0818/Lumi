@@ -15,29 +15,21 @@ import os
 import signal
 import sys
 import time
-import uuid
 from contextlib import suppress
 from dataclasses import dataclass
 from typing import IO
 
 from lumi.agents.runtime.bg_tasks import (
     BackgroundTaskEntry,
-    NotificationQueue,
     TaskKind,
     TaskStatus,
     bg_tasks_dir,
     get_task_registry,
+    new_task_id,
 )
-from lumi.agents.runtime.shell_session import get_shell_session_manager, provided_env
+from lumi.agents.runtime.shell_env import provided_env
 from lumi.utils.constants import GRACEFUL_SHUTDOWN_TIMEOUT
 from lumi.utils.logger import logger
-
-# ---------------------------------------------------------------------------
-# Constants
-# ---------------------------------------------------------------------------
-
-_TASK_ID_HEX_LENGTH = 12
-"""任务 ID 中 UUID hex 截取长度。"""
 
 
 async def terminate_group(process: asyncio.subprocess.Process) -> None:
@@ -115,11 +107,6 @@ class BackgroundTaskManager:
         self._monitors: dict[str, asyncio.Task[None]] = {}
         self._registry = get_task_registry()
 
-    @property
-    def notification_queue(self) -> NotificationQueue:
-        """获取通知队列（委托给 TaskRegistry）。"""
-        return self._registry.notification_queue
-
     async def start_task(
         self, command: str, timeout: float | None, working_dir: str
     ) -> BackgroundTaskEntry:
@@ -131,7 +118,7 @@ class BackgroundTaskManager:
         Raises:
             OSError: 进程启动失败。
         """
-        task_id = f"bg_{uuid.uuid4().hex[:_TASK_ID_HEX_LENGTH]}"
+        task_id = new_task_id("bg_")
 
         output_file = bg_tasks_dir() / f"{task_id}.txt"
 
@@ -173,7 +160,7 @@ class BackgroundTaskManager:
         )
         self._registry.register(entry)
 
-        logger.info("[BackgroundTask] 已启动后台任务 %s: %s", task_id, command)
+        logger.info("[BackgroundTaskManager] 已启动后台任务 %s: %s", task_id, command)
         return entry
 
     async def cancel_task(self, task_id: str) -> None:
@@ -196,7 +183,7 @@ class BackgroundTaskManager:
         await self._cancel_monitor(task_id)
         await terminate_group(handle.process)
 
-        logger.info("[BackgroundTask] 已取消任务 %s", task_id)
+        logger.info("[BackgroundTaskManager] 已取消任务 %s", task_id)
 
     async def cleanup_all(self) -> None:
         """终止所有运行中的任务并清理进程资源。"""
@@ -210,7 +197,7 @@ class BackgroundTaskManager:
 
         self._handles.clear()
         self._monitors.clear()
-        logger.info("[BackgroundTask] 已清理所有后台任务")
+        logger.info("[BackgroundTaskManager] 已清理所有后台任务")
 
     # -- Private helpers --
 
@@ -271,7 +258,7 @@ class BackgroundTaskManager:
                 handle.task_id, TaskStatus.FAILED, error=str(e)
             )
             logger.error(
-                "[BackgroundTask] 监控任务 %s 异常: %s",
+                "[BackgroundTaskManager] 监控任务 %s 异常: %s",
                 handle.task_id,
                 e,
                 exc_info=True,
@@ -281,7 +268,7 @@ class BackgroundTaskManager:
                 output_fd.close()
             except OSError as e:
                 logger.warning(
-                    "[BackgroundTask] 关闭输出文件句柄失败 %s: %s",
+                    "[BackgroundTaskManager] 关闭输出文件句柄失败 %s: %s",
                     handle.task_id,
                     e,
                 )
@@ -293,17 +280,27 @@ class BackgroundTaskManager:
 
 
 # ---------------------------------------------------------------------------
-# Unified cancel entry
+# Singleton + unified cancel entry
 # ---------------------------------------------------------------------------
+
+_bg_manager: BackgroundTaskManager | None = None
+
+
+def get_bg_manager() -> BackgroundTaskManager:
+    """进程级 BackgroundTaskManager 单例（懒建）。"""
+    global _bg_manager
+    if _bg_manager is None:
+        _bg_manager = BackgroundTaskManager()
+    return _bg_manager
 
 
 async def cancel_background_task(task_id: str) -> bool:
     """按 kind 停止一个运行中的后台任务（统一入口）。
 
-    BASH → 经 ``bg_manager.cancel_task``（杀进程）；AGENT / WORKFLOW → 经
+    BASH → 经 ``BackgroundTaskManager.cancel_task``（杀进程）；AGENT / WORKFLOW → 经
     ``registry.cancel_agent_task``（取消 asyncio.Task）。非运行中 / 不存在 → False。
 
-    ws / TUI / background_task 工具共用此函数，避免各自重复 kind 分派（新增 TaskKind
+    ws / IM 渠道 / background_task 工具共用此函数，避免各自重复 kind 分派（新增 TaskKind
     只改这一处）。返回是否成功发起取消。
     """
     registry = get_task_registry()
@@ -311,11 +308,8 @@ async def cancel_background_task(task_id: str) -> bool:
     if entry is None or entry.status != TaskStatus.RUNNING:
         return False
     if entry.kind == TaskKind.BASH:
-        mgr = get_shell_session_manager()
-        if not mgr.has_bg_manager:
-            return False
         try:
-            await mgr.bg_manager.cancel_task(task_id)
+            await get_bg_manager().cancel_task(task_id)
         except Exception:
             logger.error(
                 "[cancel_background_task] 停止 Bash 失败 %s", task_id, exc_info=True
