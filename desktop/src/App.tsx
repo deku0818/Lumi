@@ -243,11 +243,6 @@ export default function App() {
     setShowSettings(true)
   }, [])
   const [pendingDelete, setPendingDelete] = useState<SessionMeta | null>(null)
-  // 待确认的模型切换（仅已有对话的会话才需确认，见 switchModel）。key = 开弹窗那一刻的
-  // 会话：确认期间用户可能已切走，落到 activeRef 就切错了会话
-  const [pendingModelSwitch, setPendingModelSwitch] = useState<
-    (ActiveModel & { key: string }) | null
-  >(null)
   const [themePref, setThemePref] = useTheme()
   const [uiFont, setUiFont] = useUiFont()
   const { t } = useI18n()
@@ -1236,13 +1231,9 @@ export default function App() {
       .then((r) => applySessionModel(key, r))
       .catch((e) => console.error('set_session_model 失败:', e))
   }
-  // 已经聊过的会话换模型有代价：整段历史要被新模型重读一遍（prompt 缓存按模型分桶）。
-  // 判据是后端给的「已固化」（= 这个会话开跑过），不是 items 是否为空——长会话的历史
-  // 加载完成前 items 也是空的，那一瞬会静默切掉。
-  //
   // 项目主页没有「本会话」可切（active 还是上一个会话，改它是张冠李戴，同 FolderMenu /
   // ApprovalModePicker 的 !project 取舍）：那里选模型的意思是「我要开的新会话用它」，
-  // 故改「新会话默认」，且无缓存可废、不弹确认。
+  // 故改「新会话默认」。会话内切换直接生效，不弹确认（换模型可逆，不值得阻断）。
   const switchModel = (provider: string, model: string, project: boolean) => {
     if (project) {
       gwForBackend(projectHome?.backend ?? 'local')
@@ -1251,8 +1242,7 @@ export default function App() {
         .catch((e) => console.error('set_provider 失败:', e))
       return
     }
-    if (!cur?.model) return applySwitchModel(provider, model, activeRef.current)
-    setPendingModelSwitch({ provider, model, key: activeRef.current })
+    applySwitchModel(provider, model, activeRef.current)
   }
 
   // 设置面板改了某机器的 provider 后回调：若改的正是当前会话机器，刷新聊天侧
@@ -1660,7 +1650,7 @@ export default function App() {
       setSessions((prev) => prev.filter((s) => !(s.thread_id === tid && beOf(s) === backend)))
     removeRow()
     try {
-      // 等后端删除提交后再清理本地 / 切会话——否则 activate(null) 触发的刷新
+      // 等后端删除提交后再清理本地 / 切会话——否则 goNewChat 触发的刷新
       // 会读到尚未删除的 checkpoint，把会话又加回列表
       await gwForBackend(backend)?.deleteSession(tid)
     } catch {
@@ -1682,8 +1672,9 @@ export default function App() {
       delete n[key]
       return n
     })
-    // 删除的是当前会话：另开一个新会话顶上
-    if (key === activeRef.current) await activate(null)
+    // 删除的是当前会话：另开一个新会话顶上。走 goNewChat 而非裸 activate(null)——
+    // 后者不带 workspace，后端会以「请先选择项目」拒收首条消息
+    if (key === activeRef.current) await goNewChat(backend)
   }
 
   // 读取图片文件为 data URL 加入附件（粘贴 / 拖拽 / ＋ 选择 共用，仅图片类型）
@@ -2716,23 +2707,6 @@ export default function App() {
             setPendingRemoveProject(null)
           }}
           onCancel={() => setPendingRemoveProject(null)}
-        />
-      )}
-      {pendingModelSwitch && (
-        <ConfirmDialog
-          title={t('model.switchTitle')}
-          message={t('model.switchMessage', { name: pendingModelSwitch.model })}
-          confirmLabel={t('model.switchConfirm', { name: pendingModelSwitch.model })}
-          variant="default"
-          onConfirm={() => {
-            applySwitchModel(
-              pendingModelSwitch.provider,
-              pendingModelSwitch.model,
-              pendingModelSwitch.key,
-            )
-            setPendingModelSwitch(null)
-          }}
-          onCancel={() => setPendingModelSwitch(null)}
         />
       )}
       {pendingDelete && (

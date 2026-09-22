@@ -92,10 +92,6 @@ const ZH: Dict = {
   'model.switch': '切换模型',
   'model.onProject': '此对话属于此项目',
   'model.onProjectMachine': '此对话属于此项目、运行在此机器',
-  'model.switchTitle': '切换模型？',
-  'model.switchMessage':
-    '这段对话已按当前模型缓存。换成 {name} 后，下一条消息会让它把完整历史重新读一遍——更慢，也更费 token。',
-  'model.switchConfirm': '换成 {name}',
   'sidebar.projects': '项目',
   'projects.title': '项目',
   'projects.new': '新建项目',
@@ -645,10 +641,6 @@ const EN: Dict = {
   'model.switch': 'Switch model',
   'model.onProject': 'This chat belongs to this project',
   'model.onProjectMachine': 'This chat belongs to this project and runs on this machine',
-  'model.switchTitle': 'Switch model?',
-  'model.switchMessage':
-    'This conversation is cached for the current model. Switching to {name} means the full history gets re-read on your next message — slower, and more tokens.',
-  'model.switchConfirm': 'Switch to {name}',
   'sidebar.projects': 'Projects',
   'projects.title': 'Projects',
   'projects.new': 'New project',
