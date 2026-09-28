@@ -5,7 +5,6 @@
 
 from __future__ import annotations
 
-import json
 from pathlib import Path
 
 from lumi.agents.memory.paths import resolve_under_project
@@ -63,12 +62,8 @@ class PermissionEngine:
         self._rebuild_boundary()
 
     def _load_config(self) -> PermissionConfig:
-        """从磁盘加载配置；失败回退到无规则状态（所有调用返回 unmatched）。"""
-        try:
-            return self._loader.load()
-        except (OSError, json.JSONDecodeError, ValueError, KeyError) as e:
-            logger.error("权限配置加载失败 (%s)，回退到无规则状态", e, exc_info=True)
-            return PermissionConfig()
+        """从磁盘加载配置（坏文件 / 坏字段由 loader 逐文件、逐项丢弃并告警）。"""
+        return self._loader.load()
 
     @property
     def config(self) -> PermissionConfig:

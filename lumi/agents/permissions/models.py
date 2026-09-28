@@ -57,4 +57,6 @@ class PermissionConfig:
 
 DEFAULT_RULES: tuple[PermissionRule, ...] = (
     PermissionRule(tool="cron", permission=Permission.ALLOW),
+    # 只呈现不改动文件；越界照样审批（完整评估仍要求 boundary_ok）
+    PermissionRule(tool="artifacts", permission=Permission.ALLOW),
 )

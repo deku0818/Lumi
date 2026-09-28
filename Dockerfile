@@ -9,7 +9,8 @@ FROM python:3.12-slim
 # 无 ICU 时进程启动即 Abort；office_rpc 虽有 invariant 降级兜底，装上才有完整 locale 保真。
 # 包名带版本号随 Debian 版本漂移，构建期动态解析只装运行时库（-dev 元包会多拖 ~50MB
 # 头文件与静态库进镜像）。
-RUN apt-get update && apt-get install -y --no-install-recommends ripgrep curl \
+# procps：停机兜底按进程树收后代（MCP server 等）走 pgrep，slim 镜像默认不带。
+RUN apt-get update && apt-get install -y --no-install-recommends ripgrep curl procps \
     "$(apt-cache search --names-only '^libicu[0-9]+$' | awk '{print $1}' | sort -V | tail -1)" \
     && rm -rf /var/lib/apt/lists/*
 

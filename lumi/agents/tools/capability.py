@@ -197,6 +197,9 @@ def is_write_tool(tool_name: str, tool_args: dict) -> bool:
         return not is_readonly_command(tool_args.get("command", ""))
     if tool_name == "cron":
         return tool_args.get("operation", "") not in _CRON_READONLY_OPS
+    if tool_name == "background_task":
+        # list / status 只看本会话的任务（按会话隔离，见 bg_tasks.owned_by）
+        return tool_args.get("action") not in {"list", "status"}
     # 未知工具 fail-closed
     return True
 

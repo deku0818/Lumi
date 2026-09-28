@@ -32,7 +32,8 @@ def _enclosing_dir(path: str) -> Path | None:
     「放宽该目录」的授权语义。
     """
     resolved = Path(path).expanduser().resolve()
-    root = Path(resolved.root)
+    # 用 anchor 而非 root：Windows 下 root 只有 \，与盘符根 D:\ 永远等不上
+    root = Path(resolved.anchor)
     for candidate in (resolved, *resolved.parents):
         if candidate == root:
             return None

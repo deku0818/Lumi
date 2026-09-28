@@ -9,8 +9,9 @@ const path = require('node:path')
 const crypto = require('node:crypto')
 const { setupUpdater } = require('./updater.cjs')
 
-// 本地 sidecar 的访问令牌：每次启动随机生成，经 `lumi serve --token` 注入；
-// 前端连接时在 ?token= 携带。本地与远程公网部署走同一套鉴权，无本地特例。
+// 本地 sidecar 的访问令牌：每次启动随机生成，经环境变量 LUMI_TOKEN 注入（不走 argv：
+// 命令行对本机其它用户可见）；前端连接时在 ?token= 携带。本地与远程公网部署走同一套
+// 鉴权，无本地特例。
 const LOCAL_TOKEN = crypto.randomBytes(24).toString('hex')
 
 // dev 服务器源的唯一事实：导航放行 / 同源判断 / loadURL 三处共用（改端口只动 env）
@@ -123,13 +124,13 @@ async function startSidecar(port) {
   // --exit-with-parent + stdin 管道：本进程死亡（含崩溃/强杀）时 OS 关闭管道，
   // sidecar 读到 stdin EOF 自退——否则孤儿 sidecar 会与新实例抢同一 checkpoint
   // 数据库，会话读写悬挂表现为「会话打不开」
-  const serveArgs = ['serve', '--port', String(port), '--token', LOCAL_TOKEN, '--exit-with-parent']
+  const serveArgs = ['serve', '--port', String(port), '--exit-with-parent']
   const args = dev ? ['run', 'lumi', ...serveArgs] : serveArgs
   const resolvedPath = await sidecarPath()
   if (stopping) return // 等 PATH 期间用户已退出：别再拉起孤儿进程
   // PYTHONUNBUFFERED：PyInstaller 产物 stdout 接管道时块缓冲，日志会滞留到进程退出才刷出
   const opts = {
-    env: { ...process.env, PATH: resolvedPath, PYTHONUNBUFFERED: '1' },
+    env: { ...process.env, PATH: resolvedPath, PYTHONUNBUFFERED: '1', LUMI_TOKEN: LOCAL_TOKEN },
     stdio: ['pipe', 'pipe', 'pipe'],
   }
   if (dev) opts.cwd = PROJECT_ROOT
@@ -344,8 +345,11 @@ function createWindow() {
   win.on('unmaximize', () => sendWindowState(win))
 
   // 外链（markdown 里的链接、window.open）一律走系统浏览器，避免应用窗口被导航走。
+  // 只把网页 / 邮件链接交给系统打开：file:、自定义协议等交出去等于让远程后端下发的
+  // 链接（如渠道体检的 fix_url）在本机启动任意程序
+  const openSafe = (url) => /^(https?|mailto):/i.test(url) && shell.openExternal(url)
   win.webContents.setWindowOpenHandler(({ url }) => {
-    shell.openExternal(url)
+    openSafe(url)
     return { action: 'deny' }
   })
   // SPA 里任何整页导航都不合法：只放行应用入口自身（刷新 / vite 全量重载），
@@ -359,7 +363,7 @@ function createWindow() {
       !url.startsWith('file://') &&
       !url.startsWith('lumi-file://')
     ) {
-      shell.openExternal(url)
+      openSafe(url)
     }
   })
 
@@ -384,9 +388,12 @@ function readBackends() {
     return { remotes: [] }
   }
 }
+// 含远程机器 token：仅本人可读（0600），先写临时文件再 rename，写到一半崩溃不留坏文件
 function writeBackends(d) {
   try {
-    fs.writeFileSync(backendsFile(), JSON.stringify(d, null, 2))
+    const tmp = backendsFile() + '.tmp'
+    fs.writeFileSync(tmp, JSON.stringify(d, null, 2), { mode: 0o600 })
+    fs.renameSync(tmp, backendsFile())
   } catch (e) {
     console.error('[backends] 写入失败:', e)
   }

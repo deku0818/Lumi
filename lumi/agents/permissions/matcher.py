@@ -8,6 +8,7 @@ from __future__ import annotations
 import re
 from pathlib import Path
 
+from lumi.agents.memory.paths import resolve_under_project
 from lumi.agents.permissions.models import PATH_ARG_KEYS, PermissionRule
 from lumi.utils.logger import logger
 
@@ -109,19 +110,18 @@ class RuleMatcher:
             - 不带 `/` 前缀的模式在任意目录层级匹配
         """
         try:
-            # 将文件路径标准化为相对于项目根目录的路径
-            path = Path(file_path)
-            if path.is_absolute():
-                try:
-                    rel_path = path.relative_to(project_dir).as_posix()
-                except ValueError:
-                    # 路径不在项目目录下，无法匹配
-                    return False
-            else:
-                rel_path = path.as_posix()
+            # 与工具执行同一口径归一（展开 ~、消掉 ..）：否则 src/../secrets/k 能绕过
+            # deny /secrets/**。项目外路径：锚定模式（相对项目根）一律不命中，尾部模式
+            # 以绝对路径参与匹配——**/.env 这类 deny 照样命中
+            target = resolve_under_project(file_path, project_dir)
+            root = project_dir.resolve()
+            inside = target.is_relative_to(root)
+            rel_path = (target.relative_to(root) if inside else target).as_posix()
 
             # 判断是否为根匹配模式（带 / 前缀）
             if pattern.startswith("/"):
+                if not inside:
+                    return False
                 anchor = True
                 pattern = pattern[1:]  # 去掉前缀 /
             else:
@@ -181,7 +181,7 @@ class RuleMatcher:
                 return False
             return RuleMatcher.match_path_pattern(pattern, file_path, project_dir)
 
-        # 其他工具（如 MCP 工具）带模式时，尝试将模式与第一个字符串参数匹配
+        # 其他工具（如 MCP 工具）带模式时，与任一字符串参数匹配即算命中（对 deny 更严）
         for value in tool_args.values():
             if isinstance(value, str) and RuleMatcher.match_command_pattern(
                 pattern, value

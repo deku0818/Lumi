@@ -44,11 +44,11 @@ def route_decision(
     6. 权限引擎 DENY（优先于只读短路与 bypass）→ HumanApproval
     5/6. 只读工具批次 → ToolExecutor
     8. bypass-immune（所有模式）→ HumanApproval
-    7. accept_edits 模式 → 文件编辑工具工作区内放行，其余 HumanApproval
     9/10. 权限引擎完整评估：
         - privileged → ASK 审批，其余放行
         - auto → ALLOW 放行，其余交 AutoClassify（AI 分类器裁决）
         - default → 全 ALLOW 放行，否则 HumanApproval
+        - accept_edits → 同 default，另把工作区内未命中规则的文件编辑视同 ALLOW
     """
     if any(is_internal_tool(tc.get("name", "")) for tc in tool_calls):
         if all(is_internal_tool(tc.get("name", "")) for tc in tool_calls):
@@ -109,25 +109,6 @@ def route_decision(
     if all(_is_memory_write(tc, mem_project) for tc in tool_calls):
         return "ToolExecutor"
 
-    # accept_edits 模式：文件编辑工具(write/edit)在工作区内自动放行
-    if tool_mode == "accept_edits":
-        all_auto = True
-        for tc in tool_calls:
-            name = tc.get("name", "")
-            if is_file_edit_tool(name):
-                if engine is not None and engine.check_workspace_boundary(
-                    name, tc.get("args", {})
-                ):
-                    continue
-                all_auto = False
-                break
-            else:
-                all_auto = False
-                break
-        if all_auto:
-            return "ToolExecutor"
-        return "HumanApproval"
-
     # 权限引擎完整评估（deny 已在上方处理，此处处理 allow/ask/unmatched）
 
     if engine is not None:
@@ -158,7 +139,15 @@ def route_decision(
                     break
                 if decision == PermissionDecision.ASK:
                     has_ask = True
-                if decision != PermissionDecision.ALLOW or not boundary_ok:
+                # accept_edits = default + 工作区内的文件编辑视同 allow（显式 ask 规则照样审批）
+                edit_ok = (
+                    tool_mode == "accept_edits"
+                    and is_file_edit_tool(name)
+                    and decision == PermissionDecision.UNMATCHED
+                )
+                if (
+                    decision != PermissionDecision.ALLOW and not edit_ok
+                ) or not boundary_ok:
                     all_allowed = False
             except Exception as e:
                 logger.error(

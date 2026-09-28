@@ -655,14 +655,10 @@ def _owns_bg_task(bridge: AgentBridge, task_id: str) -> bool:
 
     不存在 → True（交下游返回未停止/未移除）；归属为空 → True（无主任务任一会话可清）。
     """
-    from lumi.agents.runtime.bg_tasks import get_task_registry
+    from lumi.agents.runtime.bg_tasks import get_task_registry, owned_by
 
     entry = get_task_registry().get(task_id)
-    return (
-        entry is None
-        or not entry.thread_id
-        or entry.thread_id == bridge.current_thread_id
-    )
+    return entry is None or owned_by(entry, bridge.current_thread_id)
 
 
 async def _read_bg_task_output(session: GatewaySession, params: dict) -> dict:

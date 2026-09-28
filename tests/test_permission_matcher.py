@@ -146,10 +146,14 @@ class TestMatchPathPattern:
         )
 
     def test_absolute_path_outside_project(self):
+        # 项目外路径：锚定模式不命中，尾部模式照样命中（deny **/.env 不能被项目外路径绕过）
         project = Path("/project")
         assert (
-            RuleMatcher.match_path_pattern("*.py", "/other/main.py", project) is False
+            RuleMatcher.match_path_pattern("/*.py", "/other/main.py", project) is False
         )
+        assert RuleMatcher.match_path_pattern("*.py", "/other/main.py", project) is True
+        # /** 的 ** 转成 .*，不显式排除就会命中任意项目外路径
+        assert RuleMatcher.match_path_pattern("/**", "/etc/hosts", project) is False
 
 
 class TestMatchRule:

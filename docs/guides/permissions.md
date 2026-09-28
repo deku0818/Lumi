@@ -255,6 +255,7 @@ lumi --allow "bash(npm *)" --allow "edit"
 系统内置以下默认规则（可被用户配置覆盖）：
 
 - `cron` → allow
+- `artifacts` → allow（只呈现文件；工作区外的文件仍需审批）
 
 ---
 

@@ -80,7 +80,10 @@ def normalize_memory_index(project_dir: Path) -> None:
         if not m:
             out_lines.append(line)
             continue
-        topic = mem_dir / m.group("file")
+        topic = (mem_dir / m.group("file")).resolve()
+        if not topic.is_relative_to(mem_dir.resolve()):
+            out_lines.append(line)  # 绝对路径 / ../ 指针：记忆目录外的文件一概不碰
+            continue
         tag = m.group("tag")
         if tag is None:
             _backfill_date(topic, _file_date(topic))  # 新格式行：只补缺失的 date

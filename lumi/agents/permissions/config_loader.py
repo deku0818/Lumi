@@ -67,11 +67,18 @@ def _config_from_dict(data: dict[str, Any]) -> PermissionConfig:
     Returns:
         PermissionConfig 实例
     """
-    workspaces = tuple(data.get("workspaces", []))
+    workspaces = data.get("workspaces", [])
+    if not isinstance(workspaces, list):
+        # 字符串会被逐字符展开（"/opt/x" → "/" 进边界），非列表一律丢弃
+        logger.warning("workspaces 须为路径列表，已忽略: %r", workspaces)
+        workspaces = []
+    valid = tuple(w for w in workspaces if isinstance(w, str) and w)
+    if len(valid) != len(workspaces):
+        logger.warning("跳过无效 workspace 项: %r", workspaces)
     raw_permissions = data.get("permissions", {})
     permissions = _parse_rules(raw_permissions) if raw_permissions else ()
     return PermissionConfig(
-        workspaces=workspaces,
+        workspaces=valid,
         permissions=permissions,
     )
 
@@ -225,8 +232,8 @@ class ConfigLoader:
                 logger.warning("权限配置文件格式错误（非对象）: %s", path)
                 return None
             return _config_from_dict(data)
-        except json.JSONDecodeError as e:
-            logger.warning("权限配置文件 JSON 语法错误 %s: %s", path, e)
+        except ValueError as e:  # 含 JSONDecodeError / UnicodeDecodeError
+            logger.warning("权限配置文件解析失败 %s: %s", path, e)
             return None
         except OSError as e:
             logger.warning("读取权限配置文件失败 %s: %s", path, e)

@@ -127,3 +127,18 @@ def test_标题含方括号(tmp_path, monkeypatch):
     )
     normalize_memory_index(proj)
     assert memory_entrypoint(proj).read_text() == "- [修复 [bug] 的记录](b.md) — 钩子\n"
+
+
+def test_不碰记忆目录外的文件(tmp_path, monkeypatch):
+    # 回归：索引里写绝对路径 / ../ 指针时，项目文件被当 topic 插入 date 行
+    proj = _setup(tmp_path, monkeypatch)
+    outside = proj / "docs" / "post.md"
+    outside.parent.mkdir()
+    body = "---\nname: post\ndescription: d\n---\n正文\n"
+    outside.write_text(body, encoding="utf-8")
+    rel = "../" * 10 + str(outside).lstrip("/")
+    memory_entrypoint(proj).write_text(
+        f"- [a]({outside})\n- [b]({rel})\n", encoding="utf-8"
+    )
+    normalize_memory_index(proj)
+    assert outside.read_text(encoding="utf-8") == body

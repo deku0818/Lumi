@@ -95,7 +95,7 @@ class ApprovalRequest:          # 传递给 LangGraph interrupt 的审批请求
 
 常量：
 - `BYPASS_TOOLS`：兼容性保留，新代码应使用 `capability.is_write_tool()`
-- `DEFAULT_RULES`：`(PermissionRule(tool="cron", permission=Permission.ALLOW),)`
+- `DEFAULT_RULES`：`cron`、`artifacts` 两条 ALLOW（artifacts 越界仍审批）
 
 ---
 
@@ -329,11 +329,12 @@ is_use_tool() 路由优先级：
 3. 权限引擎 DENY 前置检查（所有模式）→ 命中则 HumanApproval（deny 不可绕过，优先于 bypass）
 4. 全部只读工具（Layer 1: is_write_tool 全 False）→ ToolExecutor
 6. bypass-immune 安全检查（所有模式）→ 命中则 HumanApproval
-7. accept_edits 模式：文件编辑工具(write/edit)工作区内自动放行，其余 → HumanApproval
 8. 权限引擎完整评估:
    ├─ 有 DENY → HumanApproval（节点内自动拒绝）
    ├─ privileged 模式: ASK → HumanApproval，其余 → ToolExecutor
-   └─ default 模式: 全部 ALLOW + 边界 OK → ToolExecutor，否则 → HumanApproval
+   ├─ default 模式: 全部 ALLOW + 边界 OK → ToolExecutor，否则 → HumanApproval
+   └─ accept_edits 模式: 同 default，另把工作区内未命中规则的文件编辑(write/edit)视同 ALLOW
+      （allow 规则照常生效，显式 ask 规则照样审批）
 9. 引擎不可用: privileged → ToolExecutor，default/accept_edits → HumanApproval
 ```
 

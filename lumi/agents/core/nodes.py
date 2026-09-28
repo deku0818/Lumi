@@ -399,9 +399,9 @@ def is_use_tool(state: LumiAgentState, runtime: Runtime[LumiAgentContext]) -> st
     3. 全部 bypass 类工具 → ToolExecutor
     5. bypass-immune 检查（所有模式）→ 命中则 HumanApproval
     6. 权限引擎 DENY（所有模式）→ HumanApproval（节点内自动拒绝，路由回 CallModel）
-    7. accept_edits 模式 → 文件编辑工具(write/edit)工作区内自动放行，其余 HumanApproval
     8. privileged 模式 → ASK 命中则 HumanApproval，其余 ToolExecutor
-    9. default 模式：全部 ALLOW + 边界 OK → ToolExecutor（快速路径）
+    9. default 模式：全部 ALLOW + 边界 OK → ToolExecutor（快速路径）；accept_edits 同 default，
+       另把工作区内未命中规则的文件编辑视同 ALLOW
     10. 其他 → HumanApproval
     """
     tool_calls = state["messages"][-1].tool_calls

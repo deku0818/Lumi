@@ -97,6 +97,18 @@ def _default(
         typer.echo(ctx.get_help())
 
 
+def _redact_token(record) -> bool:
+    """uvicorn 日志里的 ?token=… 打码（WS 握手行走 uvicorn.error，HTTP 走 uvicorn.access）。"""
+    import re
+
+    if isinstance(record.args, tuple):
+        record.args = tuple(
+            re.sub(r"token=[^&\s\"]+", "token=***", a) if isinstance(a, str) else a
+            for a in record.args
+        )
+    return True
+
+
 @app.command("serve")
 def serve(
     host: str = typer.Option("127.0.0.1", help="监听地址"),
@@ -137,6 +149,12 @@ def serve(
     if exit_with_parent:
         _watch_parent_exit()
     ws.app.state.token = token
+    # 读完即删：bash / MCP 等子进程继承环境，别让它们拿到能驱动 agent 的令牌
+    os.environ.pop("LUMI_TOKEN", None)
+    import logging
+
+    for name in ("uvicorn.error", "uvicorn.access"):
+        logging.getLogger(name).addFilter(_redact_token)
     uvicorn.run(ws.app, host=host, port=port)
 
 
