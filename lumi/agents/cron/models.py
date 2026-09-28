@@ -166,6 +166,8 @@ class Job:
         enabled: 是否启用。
         created_at: 创建时间。
         consecutive_errors: 连续错误计数，用于重试退避。
+        project_dir: 所属项目根（创建时会话的项目）；执行时在该项目里跑。空串 =
+            未绑定（存量任务 / 表单创建），退回 serve 进程 cwd。
     """
 
     name: str
@@ -175,6 +177,7 @@ class Job:
     enabled: bool = True
     created_at: datetime = field(default_factory=datetime.now)
     consecutive_errors: int = 0
+    project_dir: str = ""
 
     def to_dict(self) -> dict[str, object]:
         """将 Job 序列化为字典，用于 JSON 持久化。
@@ -193,6 +196,7 @@ class Job:
             "enabled": self.enabled,
             "created_at": self.created_at.isoformat(),
             "consecutive_errors": self.consecutive_errors,
+            "project_dir": self.project_dir,
         }
 
     @staticmethod
@@ -217,4 +221,5 @@ class Job:
             enabled=data.get("enabled", True),
             created_at=datetime.fromisoformat(data["created_at"]),
             consecutive_errors=data.get("consecutive_errors", 0),
+            project_dir=data.get("project_dir", ""),
         )

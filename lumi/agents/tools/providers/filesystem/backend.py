@@ -17,6 +17,7 @@ import wcmatch.glob
 
 from lumi.agents.permissions.workspace import (
     get_authorized_directory,
+    resolve_tool_path,
     validate_path,
 )
 from lumi.agents.tools.providers.filesystem.ripgrep import (
@@ -156,7 +157,7 @@ class LocalFilesystemBackend:
         self, file_path: str, offset: int = 0, limit: int = DEFAULT_READ_LIMIT
     ) -> str:
         """读取文件内容并添加行号"""
-        resolved = Path(file_path).resolve()
+        resolved = resolve_tool_path(file_path)
 
         if not resolved.exists():
             return f"错误: 文件 '{file_path}' 不存在"
@@ -278,7 +279,7 @@ class LocalFilesystemBackend:
         if path is None:
             search_path = get_authorized_directory()
         else:
-            search_path = Path(path).resolve()
+            search_path = resolve_tool_path(path)
 
         if not search_path.exists() or not search_path.is_dir():
             return []
@@ -320,7 +321,7 @@ class LocalFilesystemBackend:
         search_path = (
             str(get_authorized_directory())
             if path is None
-            else str(Path(path).resolve())
+            else str(resolve_tool_path(path))
         )
 
         results = await self._ripgrep_search(

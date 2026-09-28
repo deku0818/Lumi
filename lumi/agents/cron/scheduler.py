@@ -101,7 +101,7 @@ class Scheduler:
         self._user_stopped_jobs: set[str] = set()
         # 注入的流式 runner（gateway 用 AgentBridge 跑并 publish 直播事件）。未注入
         # （TUI / 测试）时 fallback 到 create_agent + ainvoke，不直播。见 set_stream_runner。
-        self._stream_runner: Callable[[str, str], Awaitable[str]] | None = None
+        self._stream_runner: Callable[[str, str, str], Awaitable[str]] | None = None
         self._on_job_status = on_job_status
         self._compensate_task: asyncio.Task[None] | None = None
         # 常驻 checkpointer：所有 run 共用一条连接，每次执行独立 cron- thread，
@@ -382,7 +382,7 @@ class Scheduler:
         await self._run_job_task(job)
 
     def set_stream_runner(
-        self, runner: Callable[[str, str], Awaitable[str]] | None
+        self, runner: Callable[[str, str, str], Awaitable[str]] | None
     ) -> None:
         """注入流式 runner：``async runner(prompt, thread_id) -> output``。
 
@@ -505,7 +505,7 @@ class Scheduler:
     async def _run_agent(self, job: Job, thread_id: str) -> str:
         """跑一次 job：优先注入的流式 runner（直播），否则 fallback ainvoke（不直播）。"""
         if self._stream_runner is not None:
-            return await self._stream_runner(job.prompt, thread_id)
+            return await self._stream_runner(job.prompt, thread_id, job.project_dir)
 
         # 延迟 import：cron 经 bootstrap→cron.runtime→scheduler 在 tools/permissions 完成
         # 初始化前就被加载，模块顶层引入会触发循环导入，故调用时再引入。

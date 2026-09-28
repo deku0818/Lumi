@@ -8,6 +8,7 @@ from __future__ import annotations
 import json
 from pathlib import Path
 
+from lumi.agents.memory.paths import resolve_under_project
 from lumi.agents.permissions.boundary import WorkspaceBoundary
 from lumi.agents.permissions.config_loader import ConfigLoader
 from lumi.agents.permissions.matcher import (
@@ -216,7 +217,9 @@ class PermissionEngine:
     def get_boundary_violations(self, tool_name: str, tool_args: dict) -> list[str]:
         """超出工作区边界的路径列表（相对路径基于项目目录解析）。"""
         paths = self._boundary.extract_paths_from_tool_call(tool_name, tool_args)
-        resolved = [p if p.is_absolute() else self._project_dir / p for p in paths]
+        # 与工具执行同一口径：先展开 ~ 再按项目根解析（~/x 先拼项目根就成了界内的
+        # <项目>/~/x，实际写到的却是家目录）
+        resolved = [resolve_under_project(p, self._project_dir) for p in paths]
         return [str(p) for p in resolved if not self._boundary.is_within_boundary(p)]
 
     def add_allow_rule(self, tool_expr: str) -> None:

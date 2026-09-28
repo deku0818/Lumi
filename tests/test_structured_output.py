@@ -6,7 +6,6 @@ from __future__ import annotations
 from types import SimpleNamespace
 
 from langchain_core.messages import AIMessage, HumanMessage, ToolMessage
-from langgraph.graph import END
 from langgraph.types import Command
 
 from lumi.agents.core import nodes
@@ -322,7 +321,7 @@ async def test_tool_executor_aborts_after_max_failures(monkeypatch):
     state = {"messages": [*history, _call({"age": 1})], "output_schema": SCHEMA}
     result = await tool_executor(state, _runtime([]), {})
     assert isinstance(result, Command)
-    assert result.goto == END
+    assert result.update["tool_cancelled"] is True  # 由条件边路由到 END
     assert isinstance(result.update["messages"][-1], AIMessage)
 
 

@@ -84,7 +84,8 @@ async def test_pre_tool_use_block_pairs_tool_message_and_ends():
     state = {"messages": [last]}
     with replace_hooks("PreToolUse", [_hook(Block("禁止危险命令"))]):
         cmd = await tool_executor(state, _runtime([]), {})
-    assert cmd.goto == END
+    # 终止意图写进 state 由条件边判定（goto=END 会被出边并集盖过，见 test_graph_halt）
+    assert cmd.update["tool_cancelled"] is True
     msgs = cmd.update["messages"]
     tool_msgs = [m for m in msgs if isinstance(m, ToolMessage)]
     # 补齐了与 tool_call 配对的 error ToolMessage

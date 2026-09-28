@@ -21,6 +21,7 @@ from langgraph.types import Command
 from pydantic import Field
 
 from lumi.agents.core.meta_message import synthetic_human_message
+from lumi.agents.permissions.workspace import resolve_tool_path
 from lumi.agents.tools.providers.filesystem.backend import (
     BINARY_CHECK_BYTES,
     DEFAULT_CONTENT_HEAD_LIMIT,
@@ -84,7 +85,7 @@ async def read(
     """读取文件内容。文本文件返回带行号的文本;
     图片(PNG/JPG/GIF/WebP)作为 image block 注入对话;
     PDF 渲染为图片页(小 PDF 整体;大 PDF 按 pages 分段)。"""
-    resolved = Path(file_path).expanduser().resolve()
+    resolved = resolve_tool_path(file_path)
     if not resolved.exists():
         return f"错误: 文件 '{file_path}' 不存在"
 

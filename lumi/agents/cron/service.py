@@ -25,13 +25,20 @@ class CronService:
         self._job_store = job_store
         self._run_log = run_log
 
-    async def create(self, name: str, schedule_raw: str, prompt: str) -> Job:
-        """创建并注册任务。name/prompt strip 后均须非空。"""
+    async def create(
+        self, name: str, schedule_raw: str, prompt: str, project_dir: str = ""
+    ) -> Job:
+        """创建并注册任务。name/prompt strip 后均须非空；project_dir 为所属项目根。"""
         name = name.strip()
         prompt = prompt.strip()
         if not name or not prompt:
             raise ValueError("任务名称和提示词不能为空")
-        job = Job(name=name, schedule=Schedule.parse(schedule_raw), prompt=prompt)
+        job = Job(
+            name=name,
+            schedule=Schedule.parse(schedule_raw),
+            prompt=prompt,
+            project_dir=project_dir,
+        )
         await self._job_store.upsert(job)
         self._scheduler.add_job(job)
         return job

@@ -17,6 +17,7 @@ from lumi.agents.cron.models import ScheduleType
 from lumi.agents.cron.run_log import RunLog
 from lumi.agents.cron.scheduler import Scheduler
 from lumi.agents.cron.service import CronService
+from lumi.agents.permissions.workspace import get_authorized_directory
 from lumi.utils.logger import logger
 
 # ---------------------------------------------------------------------------
@@ -89,8 +90,10 @@ class CronInput(BaseModel):
 
 
 async def _handle_create(name: str, schedule_raw: str, prompt: str) -> str:
-    """创建新任务。"""
-    job = await _service().create(name, schedule_raw, prompt)
+    """创建新任务，绑定当前会话的项目（执行时在该项目里跑）。"""
+    job = await _service().create(
+        name, schedule_raw, prompt, project_dir=str(get_authorized_directory())
+    )
     sched = job.schedule
 
     if sched.type == ScheduleType.AT:

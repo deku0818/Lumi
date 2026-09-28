@@ -21,6 +21,7 @@ from langchain_core.messages import HumanMessage
 from langchain_core.tools import tool
 from pydantic import Field
 
+from lumi.agents.permissions.workspace import resolve_tool_path
 from lumi.agents.tools.providers.filesystem.media import (
     PDF_INLINE_PAGE_THRESHOLD,
     PDF_MAGIC,
@@ -111,7 +112,7 @@ async def _load_blocks(file_path: str) -> list[dict]:
             return await _pdf_blocks_from_raw(raw, file_path)
         return await _image_blocks_from_raw(raw)
 
-    path = Path(file_path).expanduser().resolve()
+    path = resolve_tool_path(file_path)
     if not path.exists():
         raise MediaReadError(f"文件不存在: {file_path}")
     ext = path.suffix.lower()

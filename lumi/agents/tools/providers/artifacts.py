@@ -15,6 +15,8 @@ import stat
 from langchain_core.tools import tool
 from pydantic import BaseModel, Field
 
+from lumi.agents.permissions.workspace import resolve_tool_path
+
 # kind 决定前端渲染形态：image=缩略图，其余=类型图标卡片。
 # 扩展名优先（mimetypes 对 .md/.ts 等返回 None），mime 兜底。
 _KIND_BY_EXT: dict[str, str] = {
@@ -100,7 +102,7 @@ def artifacts(filepaths: list[str]) -> str:
     """校验本地文件并返回制品元数据 JSON，供 desktop 前端渲染。"""
     results = []
     for raw in filepaths:
-        path = os.path.abspath(os.path.expanduser(raw))
+        path = str(resolve_tool_path(raw))
         # 单次 stat：避免 isfile→getsize 之间文件被删的 TOCTOU（一致快照，且不会抛）
         try:
             st = os.stat(path)

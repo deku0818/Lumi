@@ -62,7 +62,12 @@ class LumiAgent:
         self.builder = StateGraph(LumiAgentState)
         self._draw_nodes()
         self._draw_edges()
-        self.graph = self.builder.compile(checkpointer=checkpointer)
+        # 不持久化须显式传 False：None 在 LangGraph 里是「作为子图继承父级」，子代理 /
+        # workflow / dream 在父运行的工具节点里执行时会借用父会话的 checkpointer，每个
+        # 超步都写进父 thread，父连接关闭后后台子代理随即崩溃
+        self.graph = self.builder.compile(
+            checkpointer=checkpointer if checkpointer is not None else False
+        )
 
     def _draw_nodes(self):
         """添加节点"""
@@ -92,7 +97,11 @@ class LumiAgent:
         # 与 marker 随历史删除，hook 自动全量重建；hook 注入的消息也不会被当轮压掉。
         self.builder.add_edge(START, "Summarizer")
         self.builder.add_edge("Summarizer", "PreprocessMessages")
-        self.builder.add_edge("PreprocessMessages", "CallModel")
+        self.builder.add_conditional_edges(
+            "PreprocessMessages",
+            after_tool_executor,
+            {"CallModel": "CallModel", "END": END},
+        )
         self.builder.add_conditional_edges(
             "CallModel",
             is_use_tool,

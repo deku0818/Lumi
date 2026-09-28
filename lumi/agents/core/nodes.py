@@ -184,7 +184,7 @@ async def _pre_tool_hooks(
 ) -> tuple[Command | None, list]:
     """PreToolUse hooks（collect 模式）→ ``(需直接返回的 Command, 收集到的 reminder)``。
 
-    ``Block`` 为 ``pending`` 里每个调用补 ToolMessage(status=error) 配对后 END（残留
+    ``Block`` 为 ``pending`` 里每个调用补 ToolMessage(status=error) 配对后结束本轮（残留
     tool_call 会让 LangGraph 校验失败）；hook 自定义路由原样透传；``AdditionalContext``
     收集为 reminder，工具仍执行。
     """
@@ -217,9 +217,7 @@ async def _pre_tool_hooks(
         )
         for tc in pending
     ]
-    return Command(
-        goto=END, update={**(cmd.update or {}), "messages": [*tool_msgs, *existing]}
-    ), []
+    return _halt({**(cmd.update or {}), "messages": [*tool_msgs, *existing]}), []
 
 
 async def _post_tool_hooks(
@@ -324,7 +322,7 @@ async def tool_executor(
         if post_cmd is not None:
             final_msgs = [*final_msgs, *_cmd_messages(post_cmd)]
             if post_cmd.goto == END:
-                return Command(goto=END, update={"messages": final_msgs})
+                return _halt({"messages": final_msgs})
 
     # structured_output 连续失败兜底：本轮累计失败 >= 上限时强制结束循环。
     # 计数用纯净 tool_messages（不含注入的 reminder HumanMessage，否则尾扫会被
@@ -332,7 +330,7 @@ async def tool_executor(
     if output_schema:
         abort_msg = _structured_output_abort_message(state, tool_messages)
         if abort_msg is not None:
-            return Command(goto=END, update={"messages": [*final_msgs, abort_msg]})
+            return _halt({"messages": [*final_msgs, abort_msg]})
 
     return {"messages": final_msgs}
 
@@ -356,8 +354,18 @@ def _structured_output_abort_message(
     return AIMessage(content=format_structured_output_abort_message(fails))
 
 
+def _halt(update: dict) -> Command:
+    """结束本轮：终止意图写进 state（``tool_cancelled``），由条件边读取后路由到 END。
+
+    ToolExecutor / PreprocessMessages 都挂着出边：节点自己返回的 ``Command(goto=END)``
+    会与出边取并集，END 被 CallModel 盖过，本轮结束不了。
+    """
+    return Command(update={**update, "tool_cancelled": True})
+
+
 def after_tool_executor(state: LumiAgentState) -> str:
-    """ToolExecutor 后的条件路由：工具被取消时走向 END，否则继续 CallModel"""
+    """ToolExecutor / PreprocessMessages 后的条件路由：本轮被终止（用户取消 ask、hook
+    Block、结构化输出失败上限）时走向 END，否则继续 CallModel"""
     if state.get("tool_cancelled"):
         return "END"
     return "CallModel"
@@ -811,7 +819,7 @@ async def preprocess_messages(
     记忆索引 / LUMI.md 按 marker 比对注入末条用户消息，见 :mod:`context_inject`）。
 
     hook 返回的消息 update（同 id 替换末条 / 追加 reminder）合并进本节点返回值；
-    goto 忽略——本节点固定边 → CallModel。历史压缩在上游 ``Summarizer`` 已完成，
+    ``Block`` 拦下本条提问、结束本轮（不调模型）。历史压缩在上游 ``Summarizer`` 已完成，
     本节点恒在压缩后的世界里运行。
     """
     messages = state["messages"]
@@ -834,6 +842,8 @@ async def preprocess_messages(
         cmd = await dispatch_hooks("UserPromptSubmit", ctx, mode="collect")
         if cmd is not None:
             result_messages = [*result_messages, *_cmd_messages(cmd)]
+            if cmd.goto == END:
+                updates["tool_cancelled"] = True
 
     if result_messages or updates:
         return {"messages": result_messages, **updates}

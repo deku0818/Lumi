@@ -14,17 +14,17 @@ from lumi.agents.cron.job_runner import extract_output
 from lumi.gateway.protocol import bridge_event_to_wire
 
 
-def build_cron_stream_runner(hub) -> Callable[[str, str], Awaitable[str]]:
+def build_cron_stream_runner(hub) -> Callable[[str, str, str], Awaitable[str]]:
     """构造注入 Scheduler 的流式 runner；``hub`` 提供 publish_thread_event。"""
 
-    async def runner(prompt: str, thread_id: str) -> str:
+    async def runner(prompt: str, thread_id: str, project_dir: str) -> str:
         # 延迟 import 避免 gateway.bridge 在 bootstrap 早期成环
         from lumi.gateway.bridge import AgentBridge, EventKind
 
         bridge = AgentBridge()
-        # project_dir="" → 退回进程 cwd（cron 项目，与旧 create_agent 路径一致）；
-        # wait_mcp=True：单发执行无下一轮自愈，须等 MCP 池就位。
-        await bridge.initialize(project_dir="", wait_mcp=True)
+        # 在任务所属项目里跑（权限边界 / MCP / 项目说明随之加载）；空串 = 未绑定项目的
+        # 存量 / 表单任务，退回进程 cwd。wait_mcp=True：单发执行无下一轮自愈，须等 MCP 池就位。
+        await bridge.initialize(project_dir=project_dir, wait_mcp=True)
         bridge.switch_thread(thread_id)
         error = ""
         try:

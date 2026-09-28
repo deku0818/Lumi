@@ -237,7 +237,7 @@ async def test_offline_missed_at_job_runs_once_at_start(
     瞬间再触发一次（晚到不限时），快速失败时同一任务被执行两遍。"""
     calls: list[str] = []
 
-    async def failing_runner(prompt: str, thread_id: str) -> str:
+    async def failing_runner(prompt: str, thread_id: str, project_dir: str) -> str:
         calls.append(thread_id)
         raise RuntimeError("boom")
 
@@ -391,7 +391,7 @@ async def test_stream_runner_used_and_thread_in_status(
         on_job_status=captured.append,
     )
 
-    async def fake_runner(prompt: str, thread_id: str) -> str:
+    async def fake_runner(prompt: str, thread_id: str, project_dir: str) -> str:
         assert thread_id.startswith("cron")
         return f"ran:{prompt}"
 
@@ -415,7 +415,7 @@ async def test_stream_runner_error_records_failed(
     """流式 runner 抛错（cron_stream 检测到 ERROR 事件后补抛）→ 如实记 failed。"""
     scheduler = Scheduler(job_store=job_store, run_log=run_log, delivery=delivery)
 
-    async def failing_runner(prompt: str, thread_id: str) -> str:
+    async def failing_runner(prompt: str, thread_id: str, project_dir: str) -> str:
         raise RuntimeError("boom")
 
     scheduler.set_stream_runner(failing_runner)
@@ -429,7 +429,7 @@ async def test_run_job_task_skips_concurrent_same_job(scheduler: Scheduler) -> N
     """同 job 已在跑时再触发（如 run_cron_job 撞调度）应跳过，不新建并发 task。"""
     started = asyncio.Event()
 
-    async def slow_runner(prompt: str, thread_id: str) -> str:
+    async def slow_runner(prompt: str, thread_id: str, project_dir: str) -> str:
         started.set()
         await asyncio.sleep(10)
         return "x"

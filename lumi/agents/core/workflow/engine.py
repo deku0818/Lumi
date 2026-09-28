@@ -23,9 +23,11 @@ import os
 import textwrap
 import time
 from dataclasses import dataclass, field
-from pathlib import Path
 from typing import Any
 
+from lumi.agents.core.state import LumiAgentContext
+from lumi.agents.runtime.bg_tasks import new_task_id
+from lumi.agents.runtime.shell_session import run_with_shell
 from lumi.utils.logger import logger
 
 _MAX_AGENTS = 1000
@@ -143,19 +145,17 @@ class WorkflowEngine:
         self,
         script: str,
         *,
-        permission_engine: Any = None,
-        tool_mode: str = "default",
-        project_dir: Path | None = None,
+        parent: LumiAgentContext | None = None,
         args: Any = None,
         name: str = "workflow",
     ) -> None:
         self._script = script
-        # 子代理复用父 PermissionEngine（共享工作区边界 + 权限规则），故读得到父正在
-        # 处理的工作文件——review/audit 类编排能跑的前提。
-        self._permission_engine = permission_engine
-        # 父级项目根：工作流 agent 的 MCP 分层加载/冷池等待随父项目走
-        self._project_dir = project_dir
-        self._tool_mode = tool_mode
+        # 父 context：子代理经 create_subagent 复用其 PermissionEngine（共享工作区边界 +
+        # 权限规则，故读得到父正在处理的工作文件——review/audit 类编排能跑的前提）、
+        # 项目根（MCP 分层加载/冷池等待随父项目走）与渠道 env
+        self._parent = parent or LumiAgentContext()
+        # tool_mode 取发起 workflow 那一刻父 context 的值
+        self._tool_mode = self._parent.tool_mode
         self._args = args
         self._name = name
 
@@ -293,7 +293,12 @@ class WorkflowEngine:
                 }
                 if schema:
                     inputs["output_schema"] = schema
-                result = await sub_agent.graph.ainvoke(inputs, context=context)
+                # 每个子代理独立 shell：并行扇出不在同一把锁上串行，cd/env 不污染
+                # 兄弟代理与主会话；用完即回收
+                result = await run_with_shell(
+                    new_task_id("sub-"),
+                    sub_agent.graph.ainvoke(inputs, context=context),
+                )
 
                 if schema:
                     out = result.get("structured_output")
@@ -332,37 +337,32 @@ class WorkflowEngine:
         return cached
 
     async def _create_agent(self, agent_name: str | None) -> tuple[Any, Any]:
-        from lumi.agents.core.graph import create_agent
         from lumi.agents.tools import get_tools, load_agents
+        from lumi.agents.tools.providers.agent import create_subagent
 
         # 工作流 agent 按名缓存、整个工作流生命周期不重建：get_tools 默认等冷池
         # 就位，否则空工具集被缓存后本次工作流永远缺 MCP（project 随父显式传递）
-
-        if agent_name:
-            configs = load_agents(name=agent_name, project_dir=self._project_dir)
-            if not configs:
-                raise WorkflowRuntimeError(f"子代理 '{agent_name}' 未找到")
-            cfg = configs[0]
+        project_dir = self._parent.project_dir
+        if not agent_name:
             tools = await get_tools(
-                tools=cfg.tools or None,
-                disabled_tools=_SUBAGENT_DISABLED,
-                project_dir=self._project_dir,
+                disabled_tools=_SUBAGENT_DISABLED, project_dir=project_dir
             )
-            return await create_agent(
-                tools=tools,
-                system_prompt=cfg.system_prompt,
-                model_name=cfg.model or None,
-                permission_engine=self._permission_engine,
-                project_dir=self._project_dir,
-            )
+            return await create_subagent(self._parent, tools)
 
+        configs = load_agents(name=agent_name, project_dir=project_dir)
+        if not configs:
+            raise WorkflowRuntimeError(f"子代理 '{agent_name}' 未找到")
+        cfg = configs[0]
         tools = await get_tools(
-            disabled_tools=_SUBAGENT_DISABLED, project_dir=self._project_dir
+            tools=cfg.tools or None,
+            disabled_tools=_SUBAGENT_DISABLED,
+            project_dir=project_dir,
         )
-        return await create_agent(
-            tools=tools,
-            permission_engine=self._permission_engine,
-            project_dir=self._project_dir,
+        return await create_subagent(
+            self._parent,
+            tools,
+            system_prompt=cfg.system_prompt,
+            model_name=cfg.model or None,
         )
 
     # ---- 并发编排 -----------------------------------------------------------

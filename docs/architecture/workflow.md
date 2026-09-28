@@ -53,9 +53,10 @@ system+tools 缓存前缀。详见 [thinking.md](thinking.md) 的 Ultra 一节�
 
 ## 子代理（共享父沙箱语义）
 
-`agent()` 用 `create_agent(permission_engine=<父>)` 建子 LumiAgent（`checkpointer=None`），
+`agent()` 与 agent 工具共用 `create_subagent(<父 context>, tools)` 建子 LumiAgent（不持久化），
 **复用父 PermissionEngine**——天然共享工作区边界，子代理读得到父正在处理的工作文件
-（review / audit 类编排能跑的前提），不需要沙箱。子代理工具集禁用
+（review / audit 类编排能跑的前提），不需要沙箱；项目根与渠道 env 同样随父。每个子代理经
+`run_with_shell` 拿独立 shell（`cd`/env 不串兄弟与主会话、用完回收）。子代理工具集禁用
 `agent / workflow / ask / cron / background_task`（防递归 + 后台 graph 无法 interrupt 的 ask）。
 
 ## 实时进度

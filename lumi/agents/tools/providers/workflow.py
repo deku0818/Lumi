@@ -25,6 +25,7 @@ from lumi.agents.core.workflow import (
     WorkflowOutcome,
     WorkflowScriptError,
 )
+from lumi.agents.permissions.workspace import resolve_tool_path
 from lumi.agents.runtime.bg_tasks import (
     BackgroundTaskEntry,
     TaskKind,
@@ -144,7 +145,7 @@ async def workflow(
     """用一段确定性脚本编排子代理，后台执行（详见 WORKFLOW_DESCRIPTION）。"""
     # path 优先于 script：读出版本化脚本文件（可审计 / 可迭代）。
     if path:
-        file_path = Path(path).expanduser()
+        file_path = resolve_tool_path(path)
         try:
             script = file_path.read_text(encoding="utf-8")
         except OSError as e:
@@ -154,15 +155,9 @@ async def workflow(
         return "workflow 需要提供 script（内联脚本）或 path（脚本文件路径）之一。"
     name = name or "workflow"
 
-    # 子代理复用父 PermissionEngine（共享工作区边界）、继承父 tool_mode 与项目根。
-    engine = WorkflowEngine(
-        script,
-        permission_engine=runtime.context.permission_engine,
-        tool_mode=runtime.context.tool_mode,
-        project_dir=runtime.context.project_dir,
-        args=args,
-        name=name,
-    )
+    # 子代理经父 context 复用 PermissionEngine（共享工作区边界）、项目根与渠道 env，
+    # 继承父 tool_mode。
+    engine = WorkflowEngine(script, parent=runtime.context, args=args, name=name)
     try:
         engine.compile()
     except WorkflowScriptError as e:

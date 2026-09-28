@@ -131,6 +131,15 @@ def get_all_authorized_directories() -> list[Path]:
     return [Path.cwd().resolve()]
 
 
+def resolve_tool_path(path: str | Path) -> Path:
+    """工具路径参数的统一解析：展开 ``~``，相对路径基于当前会话项目根（主授权目录）。
+
+    ``lumi serve`` 是多项目网关、从不 chdir：按进程 cwd 解析会读到别处的同名文件，
+    且与写入侧（validate_path）指向不同文件。
+    """
+    return resolve_under_project(path, get_authorized_directory())
+
+
 def validate_path(path: str) -> Path:
     """验证路径是否在任一授权目录范围内。
 
@@ -145,7 +154,7 @@ def validate_path(path: str) -> Path:
     """
     all_dirs = get_all_authorized_directories()
     # 相对路径基于主授权目录解析（与 is_memory_path / context_inject 同口径）
-    resolved = resolve_under_project(path, all_dirs[0])
+    resolved = resolve_tool_path(path)
 
     for authorized in all_dirs:
         if resolved.is_relative_to(authorized):

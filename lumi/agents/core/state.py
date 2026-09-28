@@ -108,7 +108,8 @@ class LumiAgentState(TypedDict):
     structured_output: NotRequired[dict[str, Any]]
     """结构化输出结果"""
     tool_cancelled: NotRequired[bool]
-    """工具执行被用户取消时置 True，供条件边路由到 END"""
+    """本轮被终止（用户取消 ask、hook Block、结构化输出失败上限）时置 True，供条件边
+    路由到 END；下一轮 PreprocessMessages 开头复位。字段名沿用旧名，免迁移存量 checkpoint"""
     ptl_retry: NotRequired[bool]
     """CallModel 撞 prompt-too-long 后置 True 并路由回 Summarizer 强制压缩，
     成功响应后清 False。置位期间再撞 PTL 直接抛原错误——每次 PTL 只换一次压缩机会。"""

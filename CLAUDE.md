@@ -41,9 +41,9 @@ Lumi 并非仅仅面向Coder，也面向所有非技术人员。
 **Graph 流程：**
 ```
 START → Summarizer（超阈值当轮就地压缩 / ptl_retry 置位则绕阈值强制压缩）
-  → PreprocessMessages（UserPromptSubmit hook 注入上下文）
+  → PreprocessMessages（UserPromptSubmit hook 注入上下文；hook Block 则 END）
   → CallModel → is_use_tool() 条件路由:
-  ├─ ToolExecutor（已授权或 BYPASS_TOOLS）→ after_tool_executor → CallModel（循环）
+  ├─ ToolExecutor（已授权或 BYPASS_TOOLS）→ after_tool_executor → CallModel（循环；Block / 结构化输出失败上限置 tool_cancelled → END）
   ├─ HumanApproval（需用户审批，逐个 decisions）→ 有允许: ToolExecutor（被拒的先补拒绝 ToolMessage，ToolExecutor 只跑未应答的）/ 全拒绝·cancel: END / DENY·无审批通道: CallModel
   ├─ AutoClassify（auto 模式安全分类器）→ approve: ToolExecutor / reject: CallModel
   ├─ OnAgentStop（无工具调用，分发 Stop hooks）→ END（hook 可拉回 CallModel）
