@@ -7,10 +7,13 @@
 from __future__ import annotations
 
 import re
-from pathlib import Path, PurePosixPath
+from pathlib import Path
 
+from lumi.agents.permissions.boundary import bash_write_targets
 from lumi.agents.permissions.matcher import COMMAND_ARG_KEYS, extract_arg
 from lumi.agents.permissions.models import PATH_ARG_KEYS
+from lumi.agents.permissions.workspace import resolve_tool_path
+from lumi.agents.tools.shell_syntax import DYNAMIC
 
 # 写入类工具（只检查这些，读取类工具不阻断）
 _WRITE_TOOLS: frozenset[str] = frozenset({"write", "edit"})
@@ -32,12 +35,19 @@ _PROTECTED_HOME_PREFIXES: tuple[str, ...] = (
     ".gnupg/",
 )
 
-# 受保护的项目相对路径
+# 受保护的项目相对路径（任意目录下同名即命中，含 ~/.lumi/ 全局层）：权限规则，以及会
+# 自动执行命令的配置——hooks 在事件触发时跑 shell、MCP 配置在会话开始时拉起进程、
+# config.json 的 env 注入进程环境、git 在 status 等操作时执行 config / hooks 里的命令
 _PROTECTED_PROJECT_PATHS: tuple[str, ...] = (
     ".lumi/permissions.json",
     ".lumi/permissions.local.json",
+    ".lumi/hooks.json",
+    ".lumi/hooks.local.json",
+    ".lumi/mcp_server.json",
+    ".lumi/config.json",
     ".git/config",
 )
+_PROTECTED_PROJECT_PREFIXES: tuple[str, ...] = (".git/hooks/",)
 
 # 危险 bash 命令模式（预编译正则）
 _DANGEROUS_COMMAND_PATTERNS: tuple[tuple[re.Pattern[str], str], ...] = (
@@ -45,29 +55,10 @@ _DANGEROUS_COMMAND_PATTERNS: tuple[tuple[re.Pattern[str], str], ...] = (
     (re.compile(r"wget\s.*\|\s*(?:ba)?sh"), "wget 管道到 shell 执行"),
 )
 
-# 写入操作匹配模式（路径占位符 {path} 由调用方填充）
-# 匹配：> path, >> path, tee path, sed -i path, cp ... path, mv ... path
-_WRITE_TARGET_TEMPLATES: tuple[str, ...] = (
-    r">{1,2}\s*{path}",  # 重定向: > path, >> path
-    r"tee\s+(?:-a\s+)?{path}",  # tee path, tee -a path
-    r"sed\s+-i\s+\S+\s+{path}",  # sed -i 's/...' path
-    r"cp\s+\S+\s+{path}",  # cp src path
-    r"mv\s+\S+\s+{path}",  # mv src path
-)
-
 try:
-    _HOME: Path | None = Path.home()
+    _HOME: Path | None = Path.home().resolve()
 except RuntimeError:
     _HOME = None
-
-
-def _is_write_target(command: str, path_pattern: str) -> bool:
-    """检查受保护路径是否出现在写入操作的目标位置。"""
-    for template in _WRITE_TARGET_TEMPLATES:
-        pattern = template.replace("{path}", path_pattern)
-        if re.search(pattern, command):
-            return True
-    return False
 
 
 def is_bypass_immune(tool_name: str, tool_args: dict) -> tuple[bool, str]:
@@ -100,37 +91,8 @@ def _check_file_tool(tool_args: dict) -> tuple[bool, str]:
         if any(tool_args.get(k) is not None for k in PATH_ARG_KEYS):
             return True, "file_path 参数类型异常"
         return False, ""
-
-    try:
-        p = Path(file_path).expanduser()
-    except (RuntimeError, OSError):
-        return True, f"路径解析失败: {file_path}"
-
-    # 检查 home 目录下的受保护文件
-    if _HOME is not None:
-        try:
-            rel_to_home = p.relative_to(_HOME)
-            rel_str = rel_to_home.as_posix()
-
-            for protected in _PROTECTED_HOME_PATHS:
-                if rel_str == protected:
-                    return True, f"受保护文件: ~/{protected}"
-
-            for prefix in _PROTECTED_HOME_PREFIXES:
-                if rel_str.startswith(prefix):
-                    return True, f"受保护目录: ~/{prefix}"
-        except ValueError:
-            pass  # 不在 home 目录下，继续检查
-
-    # 检查项目相对路径（.lumi/, .git/ 等）
-    path_str = p.as_posix()
-    for protected in _PROTECTED_PROJECT_PATHS:
-        if path_str.endswith(f"/{protected}") or path_str.endswith(
-            f"/{PurePosixPath(protected)}"
-        ):
-            return True, f"受保护文件: {protected}"
-
-    return False, ""
+    reason = _target_reason(file_path)
+    return bool(reason), reason
 
 
 def _check_bash_tool(tool_args: dict) -> tuple[bool, str]:
@@ -141,42 +103,58 @@ def _check_bash_tool(tool_args: dict) -> tuple[bool, str]:
             return True, "command 参数类型异常"
         return False, ""
 
-    # 检查危险命令模式
     for pattern, reason in _DANGEROUS_COMMAND_PATTERNS:
         if pattern.search(command):
             return True, reason
 
-    if _HOME is None:
-        return False, ""
-
-    # 检查是否写入受保护文件
-    home_str = _HOME.as_posix()
-
-    # 检查 home 目录下的受保护文件（精确路径）
-    for protected in _PROTECTED_HOME_PATHS:
-        full_path = re.escape(f"{home_str}/{protected}")
-        tilde_path = re.escape(f"~/{protected}")
-        path_alt = f"(?:{full_path}|{tilde_path})"
-
-        if _is_write_target(command, path_alt):
-            return True, f"bash 写入受保护文件: ~/{protected}"
-
-    # 检查 home 目录下的受保护目录（前缀匹配）
-    for prefix in _PROTECTED_HOME_PREFIXES:
-        full_prefix = re.escape(f"{home_str}/{prefix}")
-        tilde_prefix = re.escape(f"~/{prefix}")
-        path_alt = f"(?:{full_prefix}|{tilde_prefix})\\S*"
-
-        if _is_write_target(command, path_alt):
-            return True, f"bash 写入受保护目录: ~/{prefix}"
-
-    # 检查项目相对路径（.lumi/, .git/ 等）
-    for protected in _PROTECTED_PROJECT_PATHS:
-        escaped = re.escape(protected)
-        # 匹配绝对路径或相对路径中的受保护文件
-        path_alt = f"(?:\\S*/)?{escaped}"
-
-        if _is_write_target(command, path_alt):
-            return True, f"bash 写入受保护文件: {protected}"
-
+    for target in bash_write_targets(command):
+        if reason := _target_reason(target):
+            return True, f"bash 写入{reason}"
     return False, ""
+
+
+def _target_reason(target: str) -> str:
+    """写入目标命中保护名单的原因（未命中为空串）。
+
+    按工具执行同一口径归一（展开 ``~``、相对路径基于项目根、resolve ``..``）后比较，
+    取两种形态：完全 resolve（跟随符号链接到真正落盘处）与只 resolve 父目录（受保护
+    文件本身是符号链接时仍按原名命中）。值未知的 bash 路径（``$HOME/.bashrc``）按
+    其静态尾部比较。
+    """
+    if DYNAMIC in target:
+        return _relative_reason(target.rsplit(DYNAMIC, 1)[1].lstrip("/"))
+    try:
+        path = Path(target)
+        candidates = (
+            resolve_tool_path(path),
+            resolve_tool_path(path.parent) / path.name,
+        )
+    except (RuntimeError, OSError):
+        return f"路径解析失败: {target}"
+    for candidate in candidates:
+        if _HOME is not None and candidate.is_relative_to(_HOME):
+            if reason := _relative_reason(candidate.relative_to(_HOME).as_posix()):
+                return reason
+        if reason := _project_reason(candidate.as_posix()):
+            return reason
+    return ""
+
+
+def _relative_reason(rel: str) -> str:
+    """相对家目录（或值未知前缀之后）的路径是否受保护。"""
+    if rel in _PROTECTED_HOME_PATHS:
+        return f"受保护文件: ~/{rel}"
+    for prefix in _PROTECTED_HOME_PREFIXES:
+        if rel.startswith(prefix):
+            return f"受保护目录: ~/{prefix}"
+    return _project_reason("/" + rel)
+
+
+def _project_reason(posix: str) -> str:
+    for protected in _PROTECTED_PROJECT_PATHS:
+        if posix.endswith("/" + protected):
+            return f"受保护文件: {protected}"
+    for prefix in _PROTECTED_PROJECT_PREFIXES:
+        if "/" + prefix in posix:
+            return f"受保护目录: {prefix}"
+    return ""

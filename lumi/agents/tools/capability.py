@@ -10,84 +10,19 @@ from __future__ import annotations
 
 import re
 
-# ── 复合命令拆分 ──
+from lumi.agents.tools.shell_syntax import Segment, parse_command
 
-# 双字符复合分隔符（优先匹配）
-_DOUBLE_SEPARATORS: frozenset[str] = frozenset({"&&", "||"})
-# 单字符复合分隔符
-_SINGLE_SEPARATORS: frozenset[str] = frozenset({"|", ";", "&"})
+# ── 复合命令拆分 ──
 
 
 def split_compound_command(command: str) -> list[str]:
-    """拆分由 &&、||、;、| 连接的复合命令，返回各子命令字符串。
+    """拆出命令里会执行的全部子命令原文（逐个参与权限规则匹配）。
 
-    使用字符级状态机，正确处理引号（单引号、双引号）内的分隔符不拆分。
-    单命令返回 [command]。
-
-    Args:
-        command: 完整的 bash 命令字符串
-
-    Returns:
-        子命令字符串列表
+    分隔符含 &&、||、;、|、&、换行与子 shell 括号；命令替换 / 进程替换里的命令也作为
+    独立子命令拆出，引号、转义、注释与 heredoc 正文按 bash 规则处理（见 shell_syntax）。
     """
-    if not command or not command.strip():
-        return [command] if command else []
-
-    segments: list[str] = []
-    current: list[str] = []
-    i = 0
-    n = len(command)
-    in_single_quote = False
-    in_double_quote = False
-
-    while i < n:
-        c = command[i]
-
-        # 引号状态切换
-        if c == "'" and not in_double_quote:
-            in_single_quote = not in_single_quote
-            current.append(c)
-            i += 1
-        elif c == '"' and not in_single_quote:
-            in_double_quote = not in_double_quote
-            current.append(c)
-            i += 1
-        elif c == "\\" and in_double_quote and i + 1 < n:
-            # 双引号内的转义
-            current.append(c)
-            current.append(command[i + 1])
-            i += 2
-        elif not in_single_quote and not in_double_quote:
-            # 非引号内：检查分隔符
-            two = command[i : i + 2]
-            if two in _DOUBLE_SEPARATORS:
-                seg = "".join(current).strip()
-                if seg:
-                    segments.append(seg)
-                current = []
-                i += 2
-            elif c in _SINGLE_SEPARATORS:
-                seg = "".join(current).strip()
-                if seg:
-                    segments.append(seg)
-                current = []
-                i += 1
-            else:
-                current.append(c)
-                i += 1
-        else:
-            current.append(c)
-            i += 1
-
-    # 末尾段
-    seg = "".join(current).strip()
-    if seg:
-        segments.append(seg)
-
-    if not segments:
-        return [command.strip()]
-
-    return segments
+    texts = [seg.text for seg in parse_command(command)]
+    return texts or ([command.strip()] if command.strip() else [])
 
 
 def has_background_operator(command: str) -> bool:
@@ -268,16 +203,17 @@ def is_write_tool(tool_name: str, tool_args: dict) -> bool:
 
 # ── bash 只读命令判断 ──
 
-# 已知只读命令前缀（白名单，fail-closed）
-_READONLY_PREFIXES: frozenset[str] = frozenset(
-    {
+# 已知只读命令（白名单，按词匹配，fail-closed）。能执行子命令、写文件或联网的程序
+# 不在此列（xargs / env / awk / sed / curl 等）——它们的「只读」取决于参数或脚本内容，
+# 静态判定不可靠，交由审批模式裁决。
+_READONLY_COMMANDS: frozenset[tuple[str, ...]] = frozenset(
+    tuple(p.split())
+    for p in (
         # 文件查看
         "ls",
         "cat",
         "head",
         "tail",
-        "less",
-        "more",
         "bat",
         "tree",
         "exa",
@@ -288,7 +224,6 @@ _READONLY_PREFIXES: frozenset[str] = frozenset(
         "rg",
         "ag",
         "fd",
-        "fzf",
         # 文件信息
         "wc",
         "du",
@@ -305,7 +240,6 @@ _READONLY_PREFIXES: frozenset[str] = frozenset(
         "hostname",
         "uname",
         "date",
-        "env",
         "printenv",
         "id",
         "uptime",
@@ -341,103 +275,96 @@ _READONLY_PREFIXES: frozenset[str] = frozenset(
         "uniq",
         "cut",
         "tr",
-        "awk",
-        "sed",  # 无 -i 时只输出
         "diff",
         "comm",
         "paste",
         "column",
-        "xargs",
-        # 包管理查询
+        # 包管理查询（本地）
         "npm list",
         "npm ls",
-        "npm view",
         "pip list",
         "pip show",
         "pip freeze",
-        "pip index",
         "uv pip list",
         "uv pip show",
-        "cargo metadata",
-        "cargo tree",
-        # 项目工具（只读）
-        "uv run pytest",
-        "uv run ruff check",
-        "uv run ruff format --check",
-        "uv run mypy",
-        # 网络查询
-        "curl",
-        "wget",
-        "dig",
-        "nslookup",
-        "ping",
-        "host",
-    }
+    )
 )
 
-# 重定向操作符正则（匹配 > 或 >> 但排除 &> 和 N>&M 形式的 fd 重定向）
-_REDIRECT_PATTERN = re.compile(
-    r"(?<!\d)(?<!&)>{1,2}(?!&)"  # > 或 >>，但不匹配 2>&1、&>、>&
-)
+# 白名单命令里能执行子命令、写文件或改系统状态的选项：带上即不算只读
+_UNSAFE_OPTIONS: dict[tuple[str, ...], tuple[str, ...]] = {
+    ("find",): (
+        "-exec",
+        "-execdir",
+        "-ok",
+        "-okdir",
+        "-delete",
+        "-fprint",
+        "-fprint0",
+        "-fprintf",
+        "-fls",
+    ),
+    ("rg",): ("--pre",),
+    ("ag",): ("--pager",),
+    ("fd",): ("-x", "--exec", "-X", "--exec-batch"),
+    ("bat",): ("--pager",),
+    ("tree",): ("-o",),
+    ("file",): ("-C", "--compile"),
+    ("date",): ("-s", "--set"),
+    ("sort",): ("-o", "--output", "--compress-program"),
+    ("yq",): ("-i", "--inplace"),
+    ("xmllint",): ("--output",),
+    ("git", "log"): ("--output",),
+    ("git", "diff"): ("--output",),
+    ("git", "show"): ("--output",),
+}
 
-# sed -i 检测
-_SED_INPLACE_PATTERN = re.compile(r"\bsed\s+(-\S*i|--in-place)")
+# 操作数超过此数即有副作用的命令（uniq IN OUT 写 OUT；hostname NAME 改主机名）
+_MAX_OPERANDS: dict[tuple[str, ...], int] = {("uniq",): 1, ("hostname",): 0}
 
-# 危险 curl/wget 管道
-_PIPE_TO_SHELL = re.compile(r"\|\s*(?:ba)?sh\b")
+# 值在执行时才确定、或本身就在执行命令的构造：不做静态只读判定
+_DYNAMIC_CONSTRUCTS: tuple[str, ...] = ("$(", "`", "<(", ">(")
 
 
 def is_readonly_command(command: str) -> bool:
-    """判断 bash 命令是否只读
+    """判断 bash 命令是否只读（白名单，未识别的命令视为非只读）。
 
-    使用白名单 + 危险模式检测。未识别的命令默认视为非只读（fail-closed）。
-
-    Args:
-        command: bash 命令字符串
-
-    Returns:
-        True 表示只读，False 表示可能有写操作
+    每个子命令（含替换 / 子 shell 内的）都须是白名单命令、不带有副作用的选项、
+    且没有写重定向（``2>/dev/null``、``2>&1`` 不算写）。
     """
-    if not command or not command.strip():
+    if not command.strip():
         return True
-
-    # 快速排除：存在重定向操作符
-    if _REDIRECT_PATTERN.search(command):
+    if any(construct in command for construct in _DYNAMIC_CONSTRUCTS):
         return False
-
-    # 快速排除：sed -i（原地修改）
-    if _SED_INPLACE_PATTERN.search(command):
-        return False
-
-    # 快速排除：管道到 shell
-    if _PIPE_TO_SHELL.search(command):
-        return False
-
-    # 移除 fd 重定向修饰符（如 2>&1、2>/dev/null），它们不改变命令的只读性
-    cleaned = re.sub(r"\d*>&\d+", "", command)
-    cleaned = re.sub(r"\d+>\s*/dev/null", "", cleaned)
-
-    # 拆分复合命令，每个子命令都必须匹配只读前缀
-    sub_commands = split_compound_command(cleaned)
-
-    for sub in sub_commands:
-        sub = sub.strip()
-        if not sub:
-            continue
-        if not _matches_readonly_prefix(sub):
-            return False
-
-    return True
+    return all(_is_readonly_segment(seg) for seg in parse_command(command))
 
 
-def _matches_readonly_prefix(command: str) -> bool:
-    """检查单条命令是否匹配只读前缀白名单"""
-    for prefix in _READONLY_PREFIXES:
-        if command == prefix or command.startswith(prefix + " "):
-            return True
-        # 支持带路径的命令（如 /usr/bin/ls）
-        if command.startswith(f"/usr/bin/{prefix} ") or command.startswith(
-            f"/bin/{prefix} "
-        ):
-            return True
+def _is_readonly_segment(seg: Segment) -> bool:
+    if seg.writes or not seg.words:
+        return not seg.writes
+    words = list(seg.words)
+    # 支持系统目录下的绝对路径调用（如 /usr/bin/ls）；./ls 之类的本地脚本不算
+    for prefix in ("/usr/bin/", "/bin/"):
+        words[0] = words[0].removeprefix(prefix)
+    for n in (3, 2, 1):
+        head = tuple(words[:n])
+        if head in _READONLY_COMMANDS:
+            return not _has_side_effects(head, words[n:])
     return False
+
+
+def _has_side_effects(command: tuple[str, ...], args: list[str]) -> bool:
+    """白名单命令的参数是否带出副作用（查 _UNSAFE_OPTIONS / _MAX_OPERANDS）。"""
+    options = _UNSAFE_OPTIONS.get(command, ())
+    if any(_has_option(arg, opt) for arg in args for opt in options):
+        return True
+    operands = [a for a in args if not a.startswith("-")]
+    return len(operands) > _MAX_OPERANDS.get(command, len(operands))
+
+
+def _has_option(arg: str, option: str) -> bool:
+    """``arg`` 是否带上 ``option``：长选项含 ``--opt=值``，短选项含合写（``-uo``）。"""
+    if arg == option:
+        return True
+    if option.startswith("--") or len(option) != 2:
+        return arg.startswith(option + "=")
+    return arg.startswith("-") and not arg.startswith("--") and option[1] in arg[1:]

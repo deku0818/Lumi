@@ -41,7 +41,7 @@
 `lumi-{bot.id}`；CLI 与 RPC 共用 `lark_profile.save_bot_synced` 一条保存路径——校验 →
 同步 → 单次落盘，删除时回收自建的那个）。serve 启动时把 `store.shell_env_for`
 注册为 shell env provider（`channels_runtime`）——项目绑了机器人，该项目**所有会话**（飞书
-渠道 + desktop 同规则）的 Bash/后台任务/技能内嵌命令都注入 `LARKSUITE_CLI_PROFILE`
+渠道 + desktop 同规则）的 Bash/后台任务都注入 `LARKSUITE_CLI_PROFILE`
 （项目子目录同样命中：后台任务以 shell 当前 cwd spawn），项目里的 lark-cli
 调用即以本机器人身份出去，与用户自己的全局 active profile、其他项目互不干扰；没绑不注入，
 回落全局行为。profile 缺失时 lark-cli 硬报错并指出 env 来源，不会静默串身份（需

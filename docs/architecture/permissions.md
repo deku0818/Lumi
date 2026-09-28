@@ -19,7 +19,8 @@ lumi/agents/permissions/
 ├── validators.py     # Bash 命令安全警告（非阻断）
 └── workspace.py      # 授权路径管理（进程全局兜底 + per-run contextvar 覆盖，供 filesystem provider 使用）
 
-lumi/agents/tools/capability.py  # 只读/写入工具判定 + bash 复合命令拆分
+lumi/agents/tools/capability.py    # 只读/写入工具判定 + bash 复合命令拆分
+lumi/agents/tools/shell_syntax.py  # bash 保守词法切分（只读判定 / 规则匹配 / 边界 / 写保护共用）
 ```
 
 ---
@@ -64,9 +65,11 @@ _CRON_READONLY_OPS: frozenset[str] = frozenset({"list", "runs"})
 
 `is_read_only()` 是 `is_write_tool()` 的反义；`is_file_edit_tool()` 仅判断 write/edit（不含 bash）。
 
-`is_readonly_command(command)` 通过白名单 `_READONLY_PREFIXES`（如 `ls`、`cat`、`git status`、`git log`）+ 危险模式检测（重定向 `>`/`>>`、`sed -i`、`curl ... | sh` 等）判断 bash 命令是否只读，未识别命令默认视为非只读（fail-closed）。复合命令拆分后要求每个子命令都匹配只读前缀才算只读。
+bash 命令统一经 `shell_syntax.parse_command` 切成子命令（`Segment`：原文 / 去引号的词 / 写重定向目标）。它不实现完整 bash 语法，只保证在「会执行哪些子命令、写哪些文件」上不比 bash 乐观：引号、转义、`$'…'`、注释与 heredoc 正文按 bash 规则处理；分隔符含 `&&`、`||`、`;`、`|`、`&`、换行与子 shell 括号；命令替换 / 进程替换 / 反引号里的命令作为独立子命令拆出；开头的 `if`/`then`/`do`/`!`/`{`/`time` 等关键字切掉（变量赋值前缀保留，它会改变命令行为）；值在执行时才确定的词（变量、命令替换）以 `DYNAMIC` 标记。
 
-`split_compound_command(command)` 是字符级状态机，按 `&&`、`||`、`;`、`|`、`&` 拆分复合命令，正确处理单/双引号内的分隔符不拆分。该函数同时供 `capability` 内部和权限引擎的复合命令评估共用。
+`is_readonly_command(command)`：含 `$(`、反引号、`<(`、`>(` 一律非只读；否则每个子命令都须命中白名单 `_READONLY_COMMANDS`（按词匹配，如 `ls`、`git status`）、不带 `_UNSAFE_OPTIONS` 里有副作用的选项（`find -exec/-delete`、`rg --pre`、`fd -x`、`sort -o`、`git log --output` 等）、操作数不超过 `_MAX_OPERANDS`（`uniq IN OUT`），且没有写重定向（`2>/dev/null`、`2>&1` 不算）。能执行子命令、写文件或联网的程序（`xargs`、`env`、`awk`、`sed`、`curl`、`wget`、`dig`、`uv run …` 等）不在白名单，交审批模式裁决。
+
+`split_compound_command(command)` 返回各子命令原文，供权限引擎的复合命令评估逐个匹配规则——deny 规则因此看得到换行、命令替换、注释之后藏着的子命令。
 
 ### Layer 2: PermissionEngine（engine.py）
 
@@ -131,7 +134,7 @@ _STRICTNESS = {Permission.DENY: 0, Permission.ASK: 1, Permission.ALLOW: 2}
 
 `check_workspace_boundary(tool_name, tool_args) -> bool`:
 
-1. `WorkspaceBoundary.extract_paths_from_tool_call()` 从工具参数提取路径：标量键 `_PATH_ARG_KEYS`（`file_path` / `path`）取字符串值，列表键 `_PATH_LIST_ARG_KEYS`（`filepaths`，如 `artifacts`）逐项提取；新增带路径参数的工具时须把对应键名登记进来，否则不参与边界检查
+1. `WorkspaceBoundary.extract_paths_from_tool_call()` 从工具参数提取路径：标量键 `_PATH_ARG_KEYS`（`file_path` / `path`）取字符串值，列表键 `_PATH_LIST_ARG_KEYS`（`filepaths`，如 `artifacts`）逐项提取；新增带路径参数的工具时须把对应键名登记进来，否则不参与边界检查。bash 取 `bash_write_targets(command, with_cwd=True)`：每个子命令的写重定向、写入类命令（`rm`/`mv`/`mkdir`/`touch`/`chmod`/`tee` 等）的路径参数、`cp`/`ln` 的目标与 `cd` 的目录；读取来源（`<` 输入、`cp` 的源、`cat` 的参数）不算，值未知的路径（`"$DIR"`）按越界处理
 2. 相对路径基于项目目录解析
 3. 逐个检查是否在任一工作区目录下
 4. 无法提取路径时视为边界内（不阻断）；解析异常时保守拒绝
@@ -276,16 +279,15 @@ auto 模式的分类器裁决与人工审批同权——AI 判断即用户授权
 
 ### write/edit 工具
 
-检查目标路径（`file_path` / `path`）是否在受保护列表中：
+目标路径按工具执行同一口径归一（展开 `~`、相对路径基于项目根、resolve `..`；同时比对完全 resolve 与只 resolve 父目录两种形态，符号链接两头都拦）后，检查是否在受保护列表中：
 - Home 目录精确匹配（`_PROTECTED_HOME_PATHS`）：`.bashrc`、`.bash_profile`、`.zshrc`、`.zprofile`、`.profile`、`.login`、`.gitconfig`
 - Home 目录前缀匹配（`_PROTECTED_HOME_PREFIXES`）：`.ssh/`、`.gnupg/`
-- 项目路径匹配（`_PROTECTED_PROJECT_PATHS`）：`.lumi/permissions.json`、`.lumi/permissions.local.json`、`.git/config`
+- 项目路径匹配（`_PROTECTED_PROJECT_PATHS`，任意目录下同名即命中，含 `~/.lumi/` 全局层）：权限规则 `.lumi/permissions.json`、`.lumi/permissions.local.json`，以及会自动执行命令的配置 `.lumi/hooks.json`、`.lumi/hooks.local.json`、`.lumi/mcp_server.json`、`.lumi/config.json`（`env` 注入进程环境）、`.git/config`；前缀 `.git/hooks/`
 
 ### bash 工具
 
 1. 危险命令模式（`_DANGEROUS_COMMAND_PATTERNS`）：`curl ... | sh`、`wget ... | bash`
-2. 写入受保护路径检测：通过 `_WRITE_TARGET_TEMPLATES` 匹配重定向（`>`/`>>`）、`tee`、`sed -i`、`cp`、`mv` 的目标位置
-   - 同时匹配绝对路径和 `~/` 形式
+2. 写入受保护路径检测：`bash_write_targets(command)`（与边界检查同源，含重定向、`tee`、`sed -i`、`cp`/`mv`/`rm` 等）的每个目标按上述同一口径归一后比对；值未知的目标（`$HOME/.bashrc`）按静态尾部比对。相对路径以项目根为基准——shell 此前 cd 到别处无从得知，属尽力而为
 
 ---
 
@@ -359,15 +361,15 @@ _ALWAYS_READONLY = frozenset({..., "my_readonly_tool"})
 
 ### 添加新的 bash 只读命令
 
-在 `capability.py` 的 `_READONLY_PREFIXES` 中添加命令前缀：
+在 `capability.py` 的 `_READONLY_COMMANDS` 列表中添加命令（多词如 `"git status"` 按词匹配）；该命令若有能执行子命令或写文件的选项，同时登记进 `_UNSAFE_OPTIONS`：
 
 ```python
-_READONLY_PREFIXES = frozenset({..., "my-readonly-cmd"})
+_UNSAFE_OPTIONS = {..., ("my-readonly-cmd",): ("--exec", "-o")}
 ```
 
 ### 添加 bypass-immune 受保护路径
 
-在 `safety.py` 的 `_PROTECTED_HOME_PATHS`、`_PROTECTED_HOME_PREFIXES` 或 `_PROTECTED_PROJECT_PATHS` 中添加。
+在 `safety.py` 的 `_PROTECTED_HOME_PATHS`、`_PROTECTED_HOME_PREFIXES`、`_PROTECTED_PROJECT_PATHS` 或 `_PROTECTED_PROJECT_PREFIXES` 中添加。
 
 ### 添加危险 bash 命令警告
 

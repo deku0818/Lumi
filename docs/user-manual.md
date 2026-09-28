@@ -155,11 +155,6 @@ lumi --version
       "temperature": 0.7
     }
   },
-  "skill_execution": {
-    "enabled": true,
-    "command_timeout": 10.0,
-    "max_output_bytes": 10000
-  },
   "filesystem": {
     "grep_max_file_size_mb": 10
   }
@@ -832,11 +827,6 @@ your-project/
     "anthropic": {
       "temperature": 0.7
     }
-  },
-  "skill_execution": {
-    "enabled": true,
-    "command_timeout": 10.0,
-    "max_output_bytes": 10000
   },
   "filesystem": {
     "grep_max_file_size_mb": 10

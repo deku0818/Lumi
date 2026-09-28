@@ -156,7 +156,7 @@ bash 复合命令（如 `git add . && git push`）会被拆分为独立子命令
 | `agent` | 子 agent 调度，权限由子 agent 自身独立评估 |
 | `cron` | 定时任务管理（默认 allow 规则） |
 
-此外，bash 中的只读命令（如 `ls`、`cat`、`git status`、`grep` 等）也会自动绕过审批。
+此外，bash 中的只读命令（如 `ls`、`cat`、`git status`、`grep` 等）也会自动绕过审批。命令里带命令替换（`$(…)`、反引号）、写重定向（`> file`）或有副作用的选项（`find -exec`、`sort -o` 等）时不算只读；能执行子命令、写文件或联网的程序（`xargs`、`env`、`awk`、`sed`、`curl`、`wget` 等）也不在只读之列。
 
 ---
 
@@ -201,10 +201,11 @@ lumi --privileged-danger -p "执行所有迁移"
 | Shell 配置 | `~/.bashrc`、`~/.zshrc`、`~/.bash_profile`、`~/.zprofile`、`~/.profile`、`~/.login` |
 | Git 配置 | `~/.gitconfig` |
 | SSH/GPG | `~/.ssh/*`、`~/.gnupg/*` |
-| 项目权限配置 | `.lumi/permissions.json`、`.lumi/permissions.local.json`、`.git/config` |
+| 项目权限配置 | `.lumi/permissions.json`、`.lumi/permissions.local.json` |
+| 会自动执行命令的配置 | `.lumi/hooks.json`、`.lumi/hooks.local.json`、`.lumi/mcp_server.json`、`.lumi/config.json`、`.git/config`、`.git/hooks/*` |
 | 危险 bash 模式 | `curl ... \| sh`、`wget ... \| bash` |
 
-仅检查写入操作，读取不受限。
+仅检查写入操作，读取不受限。路径按实际落盘位置比对：相对路径、`..`、符号链接、`$HOME` 写法都不能绕过。
 
 ---
 

@@ -141,22 +141,6 @@ CLI 参数可覆盖：`lumi -s code`。优先级：CLI > config.json > 默认值
 
 ---
 
-## skill_execution — 技能命令执行
-
-```json
-{
-  "skill_execution": {
-    "enabled": true,
-    "command_timeout": 10.0,
-    "max_output_bytes": 10000
-  }
-}
-```
-
-字段说明：`command_timeout` 为超时时间（秒）；`max_output_bytes` 为输出最大字节数。
-
----
-
 ## ptc — Programmatic Tool Calling
 
 将 MCP 工具转换为可直接调用的 Python 函数：

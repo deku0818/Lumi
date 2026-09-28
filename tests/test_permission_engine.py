@@ -454,3 +454,76 @@ class TestPersistence:
         assert (
             engine.evaluate("bash", {"command": "npm test"}) == PermissionDecision.ALLOW
         )
+
+
+class TestDenyHiddenSubcommands:
+    """回归：deny 规则曾可被换行 / 命令替换 / 注释 / 转义引号藏起的子命令绕过"""
+
+    import pytest
+
+    @pytest.mark.parametrize(
+        "command",
+        [
+            "ls\nrm -rf ~",
+            "ls $(rm -rf ~)",
+            'ls "`rm -rf ~`"',
+            "ls # '\nrm -rf ~\necho '",
+            "ls \\' ; rm -rf ~ ; echo \\'",
+            "if true; then rm -rf ~; fi",
+            "cat <<EOF\n$(rm -rf ~)\nEOF",
+        ],
+    )
+    def test_deny_sees_hidden_subcommand(self, command):
+        engine = _make_engine(
+            [PermissionRule(tool="bash(rm *)", permission=Permission.DENY)]
+        )
+        assert engine.evaluate("bash", {"command": command}) == PermissionDecision.DENY
+
+    def test_heredoc_body_text_is_not_a_command(self):
+        # heredoc 正文（引号定界词）是数据：不因里面写着 rm 而被 deny
+        engine = _make_engine(
+            [PermissionRule(tool="bash(rm *)", permission=Permission.DENY)]
+        )
+        command = "cat > clean.sh <<'EOF'\nrm -rf build\nEOF"
+        assert engine.evaluate("bash", {"command": command}) != PermissionDecision.DENY
+
+
+class TestBashBoundary:
+    """bash 越界检查：写入目标按 shell 语义提取（回归）"""
+
+    import pytest
+
+    def _violations(self, command: str) -> list[str]:
+        project = Path(tempfile.mkdtemp())
+        return _make_engine([], project).get_boundary_violations(
+            "bash", {"command": command}
+        )
+
+    @pytest.mark.parametrize(
+        "command",
+        [
+            "rm ~/x",  # ~ 是家目录，不是项目下名为 ~ 的目录
+            "ls && rm -rf /etc/x",  # 复合命令的后续子命令同样检查
+            "ls\nrm -rf /etc/x",
+            "echo x > /etc/x",  # 任意命令的写重定向
+            "echo x | tee /etc/x",
+            "cd /etc",
+            'rm -rf "$DIR"',  # 值未知的路径按越界处理
+            "true $(rm -rf /etc/x)",
+        ],
+    )
+    def test_write_outside_is_violation(self, command):
+        assert self._violations(command), command
+
+    @pytest.mark.parametrize(
+        "command",
+        [
+            "cp /etc/hosts ./hosts",  # 读取来源不是写入目标
+            "cat /etc/hosts > hosts.txt",
+            "grep x < /etc/hosts > out.txt",
+            "ls /etc 2>/dev/null",
+            "mkdir -p build && touch build/x",
+        ],
+    )
+    def test_read_sources_are_not_violations(self, command):
+        assert self._violations(command) == [], command

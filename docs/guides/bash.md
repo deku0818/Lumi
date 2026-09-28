@@ -79,6 +79,6 @@ Output File: /path/to/output.log
 ## 权限与工作区
 
 - bash 命令受权限规则约束，参考 [permissions.md](permissions.md)
-- 复合命令（`cmd1 && cmd2`）会拆分子命令逐个评估，取最严格结果
+- 复合命令（`cmd1 && cmd2`、换行分隔、`$(…)` 里的命令）会拆分子命令逐个评估，取最严格结果
 - 只读命令（`ls`、`cat`、`git status`、`grep` 等）默认绕过审批
 - 写操作命令在工作区边界外会被拒绝
