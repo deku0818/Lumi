@@ -4,7 +4,8 @@
 
 export type DiffLine = { kind: 'ctx' | 'add' | 'del'; text: string }
 
-const MAX_DIFF_LINES = 240
+// 渲染上限（DiffView 截断并提示）；toolDiff 返回完整 diff，+/- 计数按全量算
+export const MAX_DIFF_LINES = 240
 
 // 公共前后缀裁剪的轻量行级 diff（old → new）
 function diffLines(oldText: string, newText: string): DiffLine[] {
@@ -24,7 +25,7 @@ function diffLines(oldText: string, newText: string): DiffLine[] {
   for (let i = pre; i < a.length - suf; i++) out.push({ kind: 'del', text: a[i] })
   for (let i = pre; i < b.length - suf; i++) out.push({ kind: 'add', text: b[i] })
   for (let i = a.length - suf; i < a.length; i++) out.push({ kind: 'ctx', text: a[i] })
-  return out.slice(0, MAX_DIFF_LINES)
+  return out
 }
 
 // 工具调用是否可渲染为 diff：edit 取 old/new_string，write 视为全新增。无则返回 null。
@@ -34,10 +35,7 @@ export function toolDiff(name: string, args: unknown): DiffLine[] | null {
     return diffLines(a.old_string, a.new_string)
   }
   if (name === 'write' && typeof a.content === 'string') {
-    return a.content
-      .split('\n')
-      .slice(0, MAX_DIFF_LINES)
-      .map((text) => ({ kind: 'add', text }) as DiffLine)
+    return a.content.split('\n').map((text) => ({ kind: 'add', text }) as DiffLine)
   }
   return null
 }

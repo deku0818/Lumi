@@ -221,10 +221,22 @@ export const hasStreaming = (s: SessionState): boolean =>
 // 已有流式在途内容时保留现有 items 不覆盖：checkpoint 快照比正在流出的直播轮旧，
 // 整体替换会截断刚流入的助手内容/工具卡。调用方置 loaded 前须自查 hasStreaming——
 // 快照被丢弃时置 loaded 会把掉线前的历史永久关在补拉门外。
+// 按位置复用内容未变的旧条目（连同 id）：重载历史（渠道旁观每轮 / 切回 / 重连补拉）
+// 不让整个聊天流换 key 卸载重挂——已展开的工具行不收起，Markdown 不重解析
+function keepUnchanged(prev: Item[], next: Item[]): Item[] {
+  return next.map((it, i) => {
+    const old = prev[i] as Record<string, unknown> | undefined
+    const same =
+      old &&
+      Object.entries(it).every(([k, v]) => k === 'id' || JSON.stringify(old[k]) === JSON.stringify(v))
+    return same ? (old as Item) : it
+  })
+}
+
 export function hydrateHistory(s: SessionState, r: HistorySnapshot): SessionState {
   return {
     ...s,
-    items: hasStreaming(s) ? s.items : r.items.map(restore),
+    items: hasStreaming(s) ? s.items : keepUnchanged(s.items, r.items.map(restore)),
     // todos 不套 items 的 hasStreaming 护栏：它是全量替换语义的 state 快照，由触发
     // todos.update 的同一个 Command 原子写入，永不比已收到的事件旧；重连补拉时反而
     // 更新（gap 期错过的 todos 更新只能靠这份快照补回，turn.complete 不带 todos）。

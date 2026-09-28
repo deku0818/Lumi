@@ -34,7 +34,7 @@ import { beOf, cn, errorMessage, fmtDuration } from '@/lib/utils'
 import { CARD_L1, CARD_L1_HOVER, CARD_L3 } from './glass'
 import { Empty } from './SettingsKit'
 
-// 后端能力句柄：App 注入 anyGw() 返回的 Gateway 子集，便于解耦与测试
+// 后端能力句柄：App 注入所选机器控制连接的 Gateway 子集，便于解耦与测试
 export interface CronApi {
   listCronJobs(): Promise<{ jobs: CronJob[] }>
   createCronJob(name: string, schedule: string, prompt: string): Promise<{ job: CronJob }>
@@ -109,6 +109,7 @@ function ScheduleBadge({ job }: { job: CronJob }) {
 
 export function CronPage({
   api,
+  initialMachine = 'local',
   jobs,
   runningJobs,
   version,
@@ -116,15 +117,16 @@ export function CronPage({
   onRefresh,
 }: {
   api: (backend: string) => CronApi | undefined // 按机器取连接（定时是 per-机器）
+  initialMachine?: string // 打开时选中的机器（从项目主页跳来 = 该项目所在机器）
   jobs: CronJob[] // App 持有的跨机器合并列表（带 backend 标记）
   runningJobs: Record<string, string[]> // 机器 → 该机器运行中的 job id
   version: number
   onOpenRun: (threadId: string, jobId: string) => void
-  onRefresh: () => void
+  onRefresh: (backend: string) => void // 只刷这台机器的任务列表
 }) {
   const { t } = useI18n()
   // 方案甲「先选机器」：定时任务在各自机器的调度器上跑，按机器管理。
-  const [machine, setMachine] = useState('local')
+  const [machine, setMachine] = useState(initialMachine)
   const [selectedId, setSelectedId] = useState<string | null>(null) // 详情页任务
   const [dialog, setDialog] = useState<{ job: CronJob | null } | null>(null) // 创建/编辑表单
   const [pendingDelete, setPendingDelete] = useState<CronJob | null>(null)
@@ -141,7 +143,8 @@ export function CronPage({
   }, [])
 
   const toggle = (job: CronJob, enabled: boolean) => {
-    gw?.toggleCronJob(job.id, enabled).then(onRefresh).catch(onRefresh)
+    const refresh = () => onRefresh(machine)
+    gw?.toggleCronJob(job.id, enabled).then(refresh).catch(refresh)
   }
 
   const runNow = (job: CronJob) => {
@@ -151,7 +154,7 @@ export function CronPage({
   const doDelete = (job: CronJob) => {
     setPendingDelete(null)
     if (selectedId === job.id) setSelectedId(null)
-    gw?.deleteCronJob(job.id).then(onRefresh).catch(() => {})
+    gw?.deleteCronJob(job.id).then(() => onRefresh(machine)).catch(() => {})
   }
 
   const selected = selectedId ? shownJobs.find((j) => j.id === selectedId) : undefined
@@ -228,7 +231,7 @@ export function CronPage({
           onClose={() => setDialog(null)}
           onSaved={() => {
             setDialog(null)
-            onRefresh()
+            onRefresh(machine)
           }}
         />
       )}

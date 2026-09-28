@@ -64,9 +64,9 @@ export function DirBrowser({
     const name = newName.trim()
     if (!name || !gw || !selectable) return
     setMkErr('')
-    const r = await gw.makeDir(join(name)).catch(() => ({ ok: false, error: '请求失败' }))
+    const r = await gw.makeDir(join(name)).catch(() => ({ ok: false, error: t('projects.mkdirRequestFailed') }))
     if (!r.ok) {
-      setMkErr(r.error || '新建失败') // 权限不足/同名文件等：保留输入，给出原因
+      setMkErr(r.error || t('projects.mkdirFailed')) // 权限不足/同名文件等：保留输入，给出原因
       return
     }
     setCreating(false)
@@ -79,7 +79,16 @@ export function DirBrowser({
 
   return (
     <Dialog open onOpenChange={(o) => !o && onCancel()}>
-      <DialogContent className="sm:max-w-lg">
+      <DialogContent
+        className="sm:max-w-lg"
+        // 新建文件夹时 Esc 只退出新建，不关整个目录浏览器（Radix 在 document 捕获阶段
+        // 处理 Esc，输入框里拦不住，只能在这里分流）
+        onEscapeKeyDown={(e) => {
+          if (!creating) return
+          e.preventDefault()
+          setCreating(false)
+        }}
+      >
         <DialogHeader>
           <DialogTitle>{title}</DialogTitle>
           <DialogDescription className="sr-only">{title}</DialogDescription>
@@ -127,8 +136,8 @@ export function DirBrowser({
                   setMkErr('')
                 }}
                 onKeyDown={(e) => {
-                  if (e.key === 'Enter') void doMkdir()
-                  else if (e.key === 'Escape') setCreating(false)
+                  // 输入法组字时的回车是确认候选词，不是提交
+                  if (e.key === 'Enter' && !e.nativeEvent.isComposing) void doMkdir()
                 }}
                 placeholder={t('projects.folderName')}
                 className={input}

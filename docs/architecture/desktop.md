@@ -51,7 +51,7 @@ server → client   {method:"event", params:<wire event>}       # 流式事件
   - 项目 / 工作目录：`list_projects`、`add_project`、`remove_project`、`rename_project`、`set_default_project`（设为/取消默认项目，至多一个，见下方「聊天必须绑定项目」）、`set_workspace`（绑定本会话项目，会话级、不动进程 cwd）、`add_folder` / `remove_folder`（本会话临时目录）。连接 URL 另可带 `?workspace=`，open 握手即把本会话引擎 pin 到该项目。
   - 模型供应商：`list_providers`、`test_provider`、`set_provider`、`save_provider`、`delete_provider`。
   - 定时任务：`list_cron_jobs`、`create/update/delete/toggle_cron_job`、`run_cron_job`、`list_cron_runs`。
-  - 其它：`stop`（中止当前流式轮）、`list_commands`（拉取斜杠命令）。
+  - 其它：`stop`（中止当前流式轮）、`list_commands`（拉取斜杠命令；项目主页经目标机器的控制连接带 `workspace` 按项目取）。
 - **HTTP 旁路**（同主机同端口同 token，URL 由本连接的 WS 地址原地改写派生，保留反代路径前缀）：文件字节走不了 JSON-RPC 帧，故另开两个端点——`GET /file` 下行（远程后端的预览 / office 产物，见「artifacts 制品文件预览」）与 `POST /upload` 上行（远程后端的输入栏附件，见「输入栏文件附件」）。两者共用 `token_ok` 与 CORS 头；上传因 Content-Type 非安全清单值需应答 `OPTIONS` 预检。落盘一律归 `gateway/uploads.py`（与内联图片同一个存盘口），`ws.py` 只做鉴权 / 净化 / 闸门 / 状态码。
 - **wire 事件**：`turn.start`（真实用户轮开始，带该轮用户消息 id）、`message.*`、`tool.*`（含 `tool.generating`）、`clarify/approval`、`turn.complete`、`error`，加握手帧 `gateway.ready`。
 - **进程级广播事件**：`cron.result` / `cron.running` / `bg_tasks.update` / `mcp.status` 不属于任何会话。前端在 `App.tsx` 的 `PROCESS_EVENTS` 集合里声明它们，会话连接与控制连接都转给同一个 `handleEvent`——远程机器通常没有活跃会话连接，只有控制连接，不转发它的定时/后台任务在界面上就是静止的。本机经两条连接各收一次，故这些处理器一律按机器整段覆盖或自带去重。机器断连/被移除时 `clearMachineSnapshots` 清掉它那份快照，否则等不到「结束」那一帧的任务会永远显示运行中。

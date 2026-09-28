@@ -53,7 +53,7 @@ export function useEnvInstall(
   }, [gw])
 
   const install = (target: EnvInstallTarget, project = '') => {
-    setProgress((p) => ({ ...p, [target]: { phase: '准备…', percent: -1 } }))
+    setProgress((p) => ({ ...p, [target]: { phase: 'env.phasePreparing', percent: -1 } }))
     gw
       ?.envInstall(target, project)
       .then((r) => {
@@ -72,7 +72,7 @@ export function useEnvInstall(
 
   // env_status 报告有安装进行中（本面板打开前触发的）时恢复进行中态
   const seed = (target: string) => {
-    setProgress((p) => (p[target] ? p : { ...p, [target]: { phase: '安装中…', percent: -1 } }))
+    setProgress((p) => (p[target] ? p : { ...p, [target]: { phase: 'env.phaseInstalling', percent: -1 } }))
   }
 
   return { progress, install, seed }

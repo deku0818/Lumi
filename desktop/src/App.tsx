@@ -98,7 +98,7 @@ import { Composer } from './components/Composer'
 import { AppTitleBar } from './components/AppTitleBar'
 import { toast } from './components/Toast'
 import { isCommandMode, parseCommand, matchCommands } from './slash'
-import { toolDiff, type DiffLine } from './diff'
+import { MAX_DIFF_LINES, toolDiff, type DiffLine } from './diff'
 import { shellTokens } from './shell'
 import { asRecord, clip, basename, botOfThread, fmtDuration, fmtTokens, machineColor, machineName, msgTime, sessionKey, keyThread, keyBackend, beOf, FLOAT_GAP } from '@/lib/utils'
 import { Button } from '@/components/ui/button'
@@ -268,6 +268,12 @@ export default function App() {
   const [view, setView] = useState<'chat' | 'projects' | 'project' | 'scheduled' | 'cronjob'>('chat')
   // 项目主页当前查看的项目（view='project' 时有效）
   const [projectHome, setProjectHome] = useState<{ backend: string; path: string } | null>(null)
+  // 模型菜单 / 斜杠命令 / 输入框连接态的目标：项目主页随主页（那里还没有会话），聊天页随
+  // 活动会话。各回调按 ref 判废：请求在途时目标变了，晚到的旧响应丢弃
+  const homeTarget = view === 'project' ? projectHome : null
+  const pickerBackend = homeTarget ? homeTarget.backend : activeBackend
+  const pickerRef = useLatest(pickerBackend)
+  const cmdTargetRef = useLatest(homeTarget ? `${homeTarget.backend}\0${homeTarget.path}` : active)
   // 运行中任务：机器 → 该机器正在执行的 job id。按机器分段——每台机器各发各的进程级快照
   const [cronRunning, setCronRunning] = useState<Record<string, string[]>>({})
   // 运行中的 run（含 thread_id）：机器 → 活条目。cronRunning 从这里派生，另供执行记录
@@ -341,16 +347,6 @@ export default function App() {
     localStorage.setItem('lumi-notify', v ? '1' : '0')
     if (v) void window.lumi.notify?.({ title: 'Lumi', body: t('notify.enabled') })
   }
-
-  // 通知点击：主进程已聚焦窗口，这里切到对应会话。走 activate（经 ref 取最新闭包，
-  // 本 effect 挂一次）而非裸 setActive——activate 才是清预览（setPreview(null)）、按需
-  // 重拉渠道历史的单一入口；裸 setActive 会把上个会话的预览留着，让它对着新会话的
-  // 机器重新取同路径文件（跨机内容错配，正是 activate 要守的不变量）。
-  useEffect(() => {
-    window.lumi.onNotifyClick?.((tag) => {
-      if (tag) void activateRef.current(keyThread(tag), '', keyBackend(tag) || 'local')
-    })
-  }, [])
 
   // 当前活动会话的派生视图
   const cur = store[active]
@@ -482,7 +478,9 @@ export default function App() {
       if (seenCronRef.current.size > 500) {
         seenCronRef.current.delete(seenCronRef.current.values().next().value!)
       }
-      // 未读不在此累积：重拉任务列表即带回最新 run_threads，角标随之派生（见 cronVersion effect）
+      // 未读不在此累积：重拉来源机器的任务列表即带回最新 run_threads，角标随之派生；
+      // cronVersion 驱动 CronPage 重拉执行记录
+      refreshCronJobsRef.current?.(backend)
       setCronVersion((v) => v + 1)
       const viewingThisJob =
         viewRef.current === 'cronjob' && activeCronJobRef.current === payload.job_id
@@ -612,7 +610,8 @@ export default function App() {
             if (ev.type === 'gateway.ready') {
               // workspace_bound=false 时 payload.workspace 只是进程 cwd 兜底展示值，不是真
               // 绑定的项目——写进 workspaceDir 会污染侧栏项目分组等展示，未绑定就不写。
-              if (ev.payload.workspace_bound && ev.payload.workspace) {
+              // workspaceDir = 活动会话的项目：重连时后台会话的 ready 不得覆盖它
+              if (ev.payload.workspace_bound && ev.payload.workspace && myKey === activeRef.current) {
                 setWorkspaceDir(ev.payload.workspace)
               }
               if (ready) {
@@ -679,8 +678,6 @@ export default function App() {
                   }
                   try {
                     const r = await gw.loadHistory(targetThread)
-                    // 引擎已在 open 握手 pin 到本会话项目；同步当前项目指示
-                    if (targetWorkspace) setWorkspaceDir(targetWorkspace)
                     // 水合历史（保留续接期间已落入的审批/澄清队列与流式在途内容）；
                     // running 据后端运行态恢复（续接的挂起轮要显示运行态，否则被当空闲）。
                     applySnapshot(targetKey, r, {
@@ -760,28 +757,25 @@ export default function App() {
   }, [setPinned])
 
   useEffect(() => {
-    if (conn === 'open' && !running) inputRef.current?.focus()
+    if (conn !== 'open' || running) return
+    // 别抢别处输入框的焦点：侧栏重命名 / 搜索正打字时别的会话回合结束，失焦会把半截
+    // 标题提交出去
+    const el = document.activeElement
+    if (
+      el instanceof HTMLInputElement ||
+      (el instanceof HTMLTextAreaElement && el !== inputRef.current) ||
+      (el instanceof HTMLElement && el.isContentEditable)
+    )
+      return
+    inputRef.current?.focus()
   }, [conn, running, active])
 
-  // 会话管理 / cron RPC 操作全局资源，与连接当前 thread 无关，任一活跃连接皆可。
-  // 稳定引用（useCallback []）：作为 CronPage 的 api prop，避免每次渲染触发其刷新。
-  // 全局 RPC（providers/cron/projects/bg）走本地控制连接（这些当前以本地机器为准；
-  // 远程的同类作用域属层3）。控制连接缺位时回退到任一会话连接。
-  const anyGw = useCallback(
-    () =>
-      controlConns.current['local'] ??
-      Object.values(controlConns.current)[0] ??
-      connsRef.current[activeRef.current] ??
-      Object.values(connsRef.current)[0],
-    [],
-  )
-  // 某台机器的控制连接（pin/重命名/删除等按会话所属机器路由）
-  const gwForBackend = useCallback(
-    (backend: string) => controlConns.current[backend] ?? anyGw(),
-    [anyGw],
-  )
+  // 某台机器的控制连接（pin/重命名/删除/cron/项目等按所属机器路由）。缺位（离线 / 已删）
+  // 返回 undefined，调用方 ?. 空操作——绝不回退到别的机器：同一 thread / 路径在另一台
+  // 机器上是另一回事，请求会被静默落到错的地方。
+  const gwForBackend = useCallback((backend: string) => controlConns.current[backend], [])
 
-  // 后台任务属于当前会话的 bridge，必须发到该会话的连接（不是控制连接 anyGw，
+  // 后台任务属于当前会话的 bridge，必须发到该会话的连接（不是控制连接，
   // 否则后端按控制连接的 thread_id 匹配不到，停/清都是空操作、任务还会回来）。
   // 乐观更新只作用于当前会话所在机器的任务：task_id 可能跨机重名，按 active 的 backend 圈定
   const stopBgTask = useCallback((taskId: string) => {
@@ -981,8 +975,9 @@ export default function App() {
         const gw = new Gateway(wsUrl)
         gw.onEvent((ev) => {
           if (ev.type === 'gateway.ready') {
-            void refreshSessions()
-            refreshCronJobs()
+            // 只刷这台机器：每台 ready 都全量拉一遍，N 台机器启动就是 N² 次请求
+            void refreshSessions(backend)
+            refreshCronJobs(backend)
             refreshChannels(backend)
             // 后台任务初始快照：之后的变更经 bg_tasks.update 推送。没有这一拉，
             // 无会话连接的远程机器（其任务不由本端发起）任务面板会一直空着
@@ -1059,6 +1054,13 @@ export default function App() {
           return next
         })
         clearMachineSnapshots(id)
+      }
+    }
+    // 该机器的会话连接一并关掉：否则仍连着已删 / 停用的机器，闪断重连、focus 唤醒照旧
+    for (const [key, gw] of Object.entries(connsRef.current)) {
+      if (!wanted.has(keyBackend(key))) {
+        gw.close()
+        delete connsRef.current[key]
       }
     }
     for (const id of wanted) openControlConn(id)
@@ -1146,7 +1148,14 @@ export default function App() {
     const onChanged = (e: Event) => {
       void syncBackends()
       const id = (e as CustomEvent<{ reconnectId?: string }>).detail?.reconnectId
-      if (id) void reconnectMachine(id)
+      if (!id) return
+      void reconnectMachine(id)
+      // 会话连接同样持有旧地址 / token：换址重连，否则 1008 死在旧 token 上
+      void window.lumi.getConnection(id).then(({ wsUrl }) => {
+        for (const [key, gw] of Object.entries(connsRef.current)) {
+          if (keyBackend(key) === id) gw.rebase(wsUrl)
+        }
+      })
     }
     window.addEventListener('lumi:backends-changed', onChanged)
     return () => window.removeEventListener('lumi:backends-changed', onChanged)
@@ -1178,21 +1187,23 @@ export default function App() {
   // 只在回合结束（running 落回 false）和切会话时刷新：发送时刷新没有新信息
   // （首条消息尚未落 checkpoint），白白多一次全量 checkpoint 扫描。
   useEffect(() => {
-    if (active && !running) void refreshSessions()
+    if (active && !running) void refreshSessions(keyBackend(active))
   }, [active, running, refreshSessions])
 
   // 拉取斜杠命令（技能命令，按项目动态）。技能目录随项目变化，故进入命令模式时刷新。
-  // 斜杠命令来自当前会话所在机器（命令在会话连接上执行）——远程会话用远程的 skills，
-  // 否则菜单/校验是本地命令、发远程独有命令会被判非法。
+  // 聊天页取活动会话的连接（命令在会话连接上执行）；项目主页经目标机器的控制连接按项目
+  // 取——否则菜单/校验是别处的命令，发本项目独有的技能会被当普通文本。
   const loadCommands = useCallback(() => {
-    connsRef.current[activeRef.current]
-      ?.listCommands()
-      .then((r) => setCommands(r.commands ?? []))
+    const want = cmdTargetRef.current
+    const req = homeTarget
+      ? controlConns.current[homeTarget.backend]?.listCommands(homeTarget.path)
+      : connsRef.current[activeRef.current]?.listCommands()
+    req
+      ?.then((r) => {
+        if (cmdTargetRef.current === want) setCommands(r.commands ?? [])
+      })
       .catch(() => {})
-  }, [])
-
-  // 聊天侧 provider 上下文 = 活动会话所在机器的连接（ModelPicker/顶部模型跟随当前会话机器）
-  const chatGw = useCallback(() => connsRef.current[activeRef.current], [])
+  }, [homeTarget, cmdTargetRef])
 
   // provider 列表响应统一回写。active = 新会话默认，只影响之后新建的会话——顶部选择器
   // 读的是 store[key].model（本会话的），不在这里改
@@ -1211,21 +1222,32 @@ export default function App() {
     setStore((s) => (s[key] ? { ...s, [key]: { ...s[key], ...sessionModelPatch(m) } } : s))
   }, [])
 
-  const loadProviders = useCallback(() => {
-    chatGw()?.listProviders().then(applyProviderResp).catch(() => {})
-  }, [chatGw, applyProviderResp])
+  // providers 是机器级配置：走模型菜单所指机器的控制连接
+  const loadProviders = useCallback(
+    (backend: string) => {
+      controlConns.current[backend]
+        ?.listProviders()
+        .then((r) => {
+          if (pickerRef.current === backend) applyProviderResp(r)
+        })
+        .catch(() => {})
+    },
+    [applyProviderResp, pickerRef],
+  )
 
-  // 切会话即重载该机器的 providers（修了「切到远程会话仍显示本地模型」的 bug）
+  // 模型菜单换了机器、或该机器连上（首次点开未建连的远程会话时请求会落空）即重载
+  const pickerConn = machineConn[pickerBackend]
   useEffect(() => {
-    if (active) loadProviders()
-  }, [active, loadProviders])
+    if (pickerConn === 'open') loadProviders(pickerBackend)
+  }, [pickerBackend, pickerConn, loadProviders])
 
   // 档位按 (连接, 模型) 存，对所有用该模型的会话生效——按的是选择器当前指着的那个模型
   const switchEffort = (level: string, target: ActiveModel) => {
-    chatGw()
+    const backend = pickerBackend
+    gwForBackend(backend)
       ?.setEffort(target.provider, target.model, level)
       .catch((e) => console.error('set_effort 失败:', e))
-      .finally(() => loadProviders())
+      .finally(() => loadProviders(backend))
   }
 
   // 切模型：只切**本会话**（下一轮生效），别的会话与「新会话默认」都不动。
@@ -1250,12 +1272,12 @@ export default function App() {
     applySwitchModel(provider, model, activeRef.current)
   }
 
-  // 设置面板改了某机器的 provider 后回调：若改的正是当前会话机器，刷新聊天侧
+  // 设置面板改了某机器的 provider 后回调：若改的正是模型菜单所指机器，刷新之
   const onProvidersChanged = useCallback(
     (machine: string) => {
-      if (machine === (keyBackend(activeRef.current) || 'local')) loadProviders()
+      if (machine === pickerRef.current) loadProviders(machine)
     },
-    [loadProviders],
+    [loadProviders, pickerRef],
   )
 
   // 激活一个会话：无现成连接时先建立（target=null 为新会话），并同步连接指示灯。
@@ -1294,7 +1316,8 @@ export default function App() {
         )
         if (meta?.channel || !storeRef.current[key]?.items.length) reloadHistory(key, target!)
       }
-      if (workspace) setWorkspaceDir(workspace)
+      // 无项目（cron 执行会话等）写空串：别让上个会话的项目留在指示上
+      setWorkspaceDir(workspace)
       setActive(key) // activeBackend 从 active 派生，无需单独设
       // 按连接真实状态点灯：openConnection 失败路径也会 resolve（乐观切换契约），
       // 硬编码 'open' 会在连接实际已断时点亮假绿灯
@@ -1304,8 +1327,6 @@ export default function App() {
     },
     [openConnection, reloadHistory],
   )
-  // onNotifyClick 的 effect 挂一次（[] 依赖），经 ref 取最新 activate，避免捕获旧闭包
-  const activateRef = useLatest(activate)
 
   const openProjects = useCallback(() => {
     setNeedProjectHint(false) // 用户主动点「项目」标签，不是被新建会话逼过来的，不提示
@@ -1395,7 +1416,26 @@ export default function App() {
     [activate],
   )
 
-  const openScheduled = useCallback(() => setView('scheduled'), [])
+  // 通知点击：主进程已聚焦窗口，这里切到对应会话。走 selectSession 而非裸 activate：
+  // 停在定时 / 项目页时要切回聊天页，且带上该会话的项目
+  useEffect(
+    () =>
+      window.lumi.onNotifyClick?.((tag) => {
+        if (tag) void selectSession(keyThread(tag), keyBackend(tag) || 'local')
+      }),
+    [selectSession],
+  )
+
+  // 定时页按机器管理：侧栏入口落本机，项目主页跳过去落该项目所在机器
+  const [cronMachine, setCronMachine] = useState('local')
+  const openScheduled = useCallback(() => {
+    setCronMachine('local')
+    setView('scheduled')
+  }, [])
+  const openHomeScheduled = useCallback(() => {
+    setCronMachine(projectHome?.backend ?? 'local')
+    setView('scheduled')
+  }, [projectHome])
 
   // 打开项目 = 在该机器开一条绑定到此项目的新会话（项目经 open 握手随会话绑定，
   // 不再先在共享连接上 setWorkspace 改进程态——那对新会话的独立连接无效）
@@ -1442,8 +1482,7 @@ export default function App() {
     setAttachments([])
   }, [projectHome, newSession, input, attachments, t])
 
-  // 项目主页专用 API：只认目标机器的控制连接，缺位返回 undefined——文件写操作
-  // 绝不回退到别的机器（gwForBackend 的 anyGw 兜底对注册表类操作无害，对写文件有害）。
+  // 项目主页专用 API：只认目标机器的控制连接，缺位返回 undefined（同 gwForBackend）。
   // useCallback 稳定引用：ProjectHomePage 的加载 effect 依赖它，不稳会随 App 重渲染风暴重发
   const projectHomeApi = useCallback(
     () => (projectHome ? controlConns.current[projectHome.backend] : undefined),
@@ -1484,11 +1523,13 @@ export default function App() {
     [selectSession, projectHome],
   )
   const toggleHomeCron = useCallback(
-    (id: string, enabled: boolean) =>
-      void gwForBackend(projectHome?.backend ?? 'local')
+    (id: string, enabled: boolean) => {
+      const backend = projectHome?.backend ?? 'local'
+      void gwForBackend(backend)
         ?.toggleCronJob(id, enabled)
-        .then(() => refreshCronJobs())
-        .catch(() => {}),
+        .then(() => refreshCronJobs(backend))
+        .catch(() => {})
+    },
     [gwForBackend, projectHome, refreshCronJobs],
   )
 
@@ -1560,11 +1601,6 @@ export default function App() {
     (path: string) => void applyFolderOp((gw) => gw.removeFolder(path)),
     [applyFolderOp],
   )
-
-  // 拉取任务列表：唯一数据源，侧栏分组与管理页共用（CRUD 后经 onRefresh 刷新）
-  useEffect(() => {
-    if (conn === 'open') refreshCronJobs()
-  }, [conn, cronVersion, refreshCronJobs])
 
   // 在任务会话视图内切换到某次执行的会话（不改变 view），并标记该次执行为已读。
   // 已读集合封顶 500 条（对象按插入序，砍最旧的），避免 localStorage 无限增长。
@@ -2104,8 +2140,6 @@ export default function App() {
   // 部件解耦——不显示上下文用量环（不读 cur.ctx，免后台流式 token 触发项目页重渲染）、
   // 永远显示发送键（不读活动会话 running）、隐藏文件夹菜单（会话级授权，发送前无会话可挂）。
   // 其余（斜杠命令/附件/模型选择/审批模式）与聊天页完全一致。
-  // 项目主页的模型钮指向「新会话默认」，机器/项目随主页；聊天页随活动会话
-  const pickerBackend = projectHome && view === 'project' ? projectHome.backend : activeBackend
   const composer = (placeholder: string, project = false) => (
     <div>
       {menuOpen && (
@@ -2166,7 +2200,8 @@ export default function App() {
         onChange={onComposerChange}
         onKeyDown={onComposerKey}
         onPaste={onPasteImages}
-        disabled={conn !== 'open' || observingCronRun}
+        // 项目主页看目标机器的连接（没有会话连接），聊天页看活动会话的
+        disabled={(project ? pickerConn : conn) !== 'open' || observingCronRun}
         placeholder={placeholder}
         highlightLen={cmdToken.length}
         inputRef={inputRef}
@@ -2270,7 +2305,7 @@ export default function App() {
     // defaultModel 不可省：project 模式的选择器指着「新会话默认」（那里还没有会话），
     // 漏了它就出现「切了模型 chip 纹丝不动、后端却已改」
     [
-      input, attachments, conn, model, providers, sessionModel, defaultModel, machines,
+      input, attachments, conn, pickerConn, model, providers, sessionModel, defaultModel, machines,
       activeBackend, toolMode, classifier, menuOpen, matched, cmdSel, cmdToken,
       homeProjectInfo?.name,
     ],
@@ -2342,9 +2377,10 @@ export default function App() {
         projectsActive={view === 'projects' || view === 'project'}
         scheduledActive={view === 'scheduled'}
         onSelect={selectSession}
-        onNew={() => startNewChat()}
-        onNewChat={(backend) => void goNewChat(backend)}
-        onNewChatIn={(backend, workspace) => void newSession(backend, workspace)}
+        // 直接传稳定引用：内联箭头每次渲染换身份，击穿 Sidebar 的 memo（每个流式 token 整棵重渲）
+        onNew={startNewChat}
+        onNewChat={goNewChat}
+        onNewChatIn={newSession}
         onOpenProjects={openProjects}
         onOpenScheduled={openScheduled}
         onOpenSettings={openSettings}
@@ -2439,12 +2475,13 @@ export default function App() {
             composerSlot={projectComposer}
             onBack={openProjects}
             onOpenSession={openHomeSession}
-            onOpenScheduled={openScheduled}
+            onOpenScheduled={openHomeScheduled}
             onToggleCron={toggleHomeCron}
           />
         ) : view === 'scheduled' ? (
           <CronPage
             api={gwForBackend}
+            initialMachine={cronMachine}
               jobs={cronJobs}
             runningJobs={cronRunning}
             version={cronVersion}
@@ -2608,9 +2645,7 @@ export default function App() {
           <div style={{ width: previewW.width }} className="shrink-0 h-full py-2.5 pr-1">
             <PreviewPanel
               file={preview}
-              // 只认目标机器的连接，缺位给 undefined（面板显示加载失败）——不走
-              // gwForBackend 的 anyGw 兜底：换台机器读同路径文件会静默显示错内容
-              // （同 projectHomeApi 的理由）
+              // 只认目标机器的连接，缺位给 undefined（面板显示加载失败）
               gw={controlConns.current[activeBackend]}
               remote={remoteBackend}
               onClose={() => setPreview(null)}
@@ -2691,7 +2726,7 @@ export default function App() {
       )}
       {addingFolder && (
         <DirBrowser
-          gw={chatGw()}
+          gw={connsRef.current[active]}
           title={t('folder.chooseOn', {
             machine: machines.find((m) => m.id === activeBackend)?.name ?? activeBackend,
           })}
@@ -3425,9 +3460,10 @@ function ShellText({ cmd }: { cmd: string }) {
 
 // edit/write 的行级 diff 视图：新增行绿底、删除行红底、上下文行淡显。
 function DiffView({ lines }: { lines: DiffLine[] }) {
+  const { t } = useI18n()
   return (
     <pre className="m-0 max-h-72 overflow-auto py-2 leading-relaxed">
-      {lines.map((l, i) => (
+      {lines.slice(0, MAX_DIFF_LINES).map((l, i) => (
         <div
           key={i}
           className={`px-3 ${l.kind === 'add' ? 'bg-success/10' : l.kind === 'del' ? 'bg-error/10' : ''}`}
@@ -3440,6 +3476,7 @@ function DiffView({ lines }: { lines: DiffLine[] }) {
           <span className={l.kind === 'ctx' ? 'text-muted-foreground/70' : 'text-ink/90'}>{l.text || ' '}</span>
         </div>
       ))}
+      {lines.length > MAX_DIFF_LINES && <div className="px-3 text-muted-foreground">{t('common.truncated')}</div>}
     </pre>
   )
 }

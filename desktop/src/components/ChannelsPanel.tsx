@@ -1,4 +1,4 @@
-import { memo, useCallback, useEffect, useState, type ReactNode } from 'react'
+import { memo, useCallback, useEffect, useRef, useState, type ReactNode } from 'react'
 import {
   AlertTriangle,
   Building2,
@@ -310,14 +310,17 @@ function useDiagnose(call: () => Promise<{ checks: DiagnoseCheck[] }> | undefine
   const [checks, setChecks] = useState<DiagnoseCheck[] | null>(null)
   const [loading, setLoading] = useState(false)
   const [error, setError] = useState('')
+  // 连点重检 / 改了配置再检：只认最后一次的结果，旧的晚到响应丢弃
+  const seq = useRef(0)
   const run = () => {
     const p = call()
     if (!p) return // 未连接
+    const my = ++seq.current
     setLoading(true)
     setError('')
-    p.then((r) => setChecks(r.checks))
-      .catch((e) => setError(errorMessage(e)))
-      .finally(() => setLoading(false))
+    p.then((r) => my === seq.current && setChecks(r.checks))
+      .catch((e) => my === seq.current && setError(errorMessage(e)))
+      .finally(() => my === seq.current && setLoading(false))
   }
   return { checks, loading, error, run }
 }

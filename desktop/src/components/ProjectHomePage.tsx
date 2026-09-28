@@ -534,7 +534,7 @@ function SheetBody({ api, path, sheet, onClose, onChanged, onSwitch }: SheetProp
     try {
       if (sheet.mode === 'create') {
         const target = newName.trim() // 合法性由创建按钮的 disabled 把关
-        await gw.projectResourceWrite(path, kind, target, text)
+        await gw.projectResourceWrite(path, kind, target, text, '', true)
         onChanged()
         onSwitch({ mode: 'view', kind: sheet.kind, name: target })
       } else {

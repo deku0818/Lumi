@@ -205,16 +205,24 @@ def read_resource(project: Path, kind: str, name: str, file: str = "") -> dict:
 
 
 def write_resource(
-    project: Path, kind: str, name: str, content: str, file: str = ""
+    project: Path,
+    kind: str,
+    name: str,
+    content: str,
+    file: str = "",
+    create: bool = False,
 ) -> dict:
-    """写项目层资源（新建或覆盖），按需建目录。其余层不可写。"""
+    """写项目层资源（新建或覆盖），按需建目录。其余层不可写。
+
+    create=True（前端「新建」）时目标已存在即拒绝：否则同名会把用户写过的定义整体
+    换成模板，且无法撤销。
+    """
     project = project.resolve()
     if kind == "skill":
         _check_name(name)
         if not file or file == "SKILL.md":
             validate_definition(content, name)
         skill_dir = project / ".lumi" / "skills" / name
-        skill_dir.mkdir(parents=True, exist_ok=True)
         target = _skill_file_in(skill_dir, file or "SKILL.md")
     elif kind == "agent":
         _check_name(name)
@@ -226,6 +234,8 @@ def write_resource(
         target = project / ".lumi" / "prompts" / f"{name}.md"
     else:
         raise ValueError(f"资源类型不可写: {kind}")
+    if create and target.exists():
+        raise ValueError(f"已存在同名定义: {name}")
     target.parent.mkdir(parents=True, exist_ok=True)
     target.write_text(content, encoding="utf-8")
     return {"ok": True, "path": _display_path(target, project)}

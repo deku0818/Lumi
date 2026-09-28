@@ -206,7 +206,8 @@ export function ChipInput({
         <input
           value={draft}
           onChange={(e) => setDraft(e.target.value)}
-          onKeyDown={(e) => e.key === 'Enter' && (e.preventDefault(), add())}
+          // 输入法组字时的回车是确认候选词，不是添加
+          onKeyDown={(e) => e.key === 'Enter' && !e.nativeEvent.isComposing && (e.preventDefault(), add())}
           placeholder={placeholder}
           className={cn('bg-transparent outline-none text-xs w-28 text-ink', mono && 'font-mono')}
         />

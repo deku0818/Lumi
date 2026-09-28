@@ -887,3 +887,15 @@ async def test_synthetic_flag_resets_after_detached_synthetic_turn(monkeypatch):
         for _task, gate in bridge.running:
             gate.set()
         await session.aclose()
+
+
+async def test_list_commands_for_project_home(isolated_config, tmp_path):
+    """项目主页（尚无会话）经控制连接按目标项目列命令：控制连接自己的 bridge 不在该项目。"""
+    from lumi.gateway.session import _list_commands
+
+    skill = tmp_path / ".lumi" / "skills" / "beta-skill"
+    skill.mkdir(parents=True)
+    (skill / "SKILL.md").write_text("---\nname: beta-skill\ndescription: b\n---\nbody")
+    session = SimpleNamespace(_bridge=SimpleNamespace(list_commands=lambda: []))
+    r = await _list_commands(session, {"workspace": str(tmp_path)})
+    assert "beta-skill" in [c["name"] for c in r["commands"]]

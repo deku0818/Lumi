@@ -5,6 +5,7 @@ import type { EnvInstallTarget, EnvProgress, EnvStatus, EnvToolStatus } from '..
 import { MachineScope, useConnectedEffect, useMachines } from './MachineTabs'
 import { Card, Pill, ProgressBar, Section, SectionGroup } from './SettingsKit'
 import { useEnvInstall } from './useEnvInstall'
+import { useI18n } from '../i18n'
 import { Button } from '@/components/ui/button'
 
 // 环境面板（设置 → 环境）。核心工具链 + 可选增强两栏，一键装齐覆盖全部——纯机器级视图。
@@ -12,15 +13,12 @@ import { Button } from '@/components/ui/button'
 // 探测/安装全在后端 toolbox 模块：系统已有的永不覆盖，安装落 <配置目录>/bin。
 // 方案 A 行式列表（.demos/env-toolbox-panel.html）；图标统一 lucide 线性（emoji 退场）。
 
-const TOOL_META: Record<string, { icon: LucideIcon; label: string; hint: string }> = {
-  uv: { icon: Zap, label: 'uv', hint: 'Python 运行时与包管理 · agent 的 Python 任务全靠它' },
-  rg: { icon: Search, label: 'ripgrep', hint: '高速代码搜索 · 缺失时自动降级为内置搜索（较慢）' },
-  node: { icon: Hexagon, label: 'Node.js', hint: 'JS 运行时（含 npm）· agent 的 JS 任务与 npm 生态' },
-  officecli: {
-    icon: Presentation,
-    label: 'OfficeCLI',
-    hint: 'Office 文档引擎 · Word/Excel/PPT 窗口内预览，缺失时用系统应用打开',
-  },
+// 行说明走 i18n：env.hint.<工具名>
+const TOOL_META: Record<string, { icon: LucideIcon; label: string }> = {
+  uv: { icon: Zap, label: 'uv' },
+  rg: { icon: Search, label: 'ripgrep' },
+  node: { icon: Hexagon, label: 'Node.js' },
+  officecli: { icon: Presentation, label: 'OfficeCLI' },
 }
 
 // 分栏按用户视角的「缺失后果」划分：核心缺了对应能力残缺（Python/JS 任务跑不了）；
@@ -37,6 +35,7 @@ export function EnvPanel({
   // 由跳转来源指定（渠道体检在哪台机器上跑就装哪台）；空 = 默认第一台
   initialMachine?: string
 }) {
+  const { t } = useI18n()
   const machines = useMachines()
   const [machine, setMachine] = useState(initialMachine ?? machines[0]?.id ?? 'local')
   const gw = gwFor(machine)
@@ -117,40 +116,38 @@ export function EnvPanel({
       <MachineScope value={machine} onChange={setMachine}>
 
       <Section
-        title="核心工具链"
+        title={t('env.core')}
         desc={
           <>
-            agent 执行 Python / JS 任务所需，缺失时对应能力受限。系统已有的不重复安装
+            {t('env.coreDesc')}
             {/* 路径由后端下发（各平台真值不同），未拿到前整句略去免得跳字 */}
             {status?.bin_dir ? (
               <>
-                ，其余装到 <code className="break-all">{status.bin_dir}</code>
+                {t('env.coreDescBin')}
+                <code className="break-all">{status.bin_dir}</code>
               </>
             ) : (
-              '。'
+              t('env.coreDescEnd')
             )}
           </>
         }
         action={
           <Button size="sm" onClick={() => onInstall('all')} disabled={!status || installing || !hasMissing}>
-            {installing ? '安装中…' : hasMissing ? '一键装齐' : '已就绪 ✓'}
+            {installing ? t('env.installing') : hasMissing ? t('env.installAll') : t('env.ready')}
           </Button>
         }
       >
         {toolRows(CORE_ROWS)}
       </Section>
 
-      <Section
-        title="可选增强"
-        desc="不装也能用，装上体验更好：ripgrep 提速内容搜索，OfficeCLI 让 Word / Excel / PPT 直接在窗口内预览。一键装齐会一并装上。"
-      >
+      <Section title={t('env.optional')} desc={t('env.optionalDesc')}>
         {toolRows(OPTIONAL_ROWS)}
       </Section>
 
       {error && (
         <p className="text-xs text-error leading-relaxed">
-          安装 {error.target} 失败：{error.message}
-          <span className="text-muted-foreground">（可重试；如网络受限可设置 https_proxy 后重启）</span>
+          {t('env.installFailed', { target: error.target, error: error.message })}
+          <span className="text-muted-foreground">{t('env.installFailedHint')}</span>
         </p>
       )}
       </MachineScope>
@@ -161,11 +158,12 @@ export function EnvPanel({
 // —— 状态徽章（统一 Pill 族）：missing 虚线 / system 蓝点（用户自装）/ toolbox 金点（Lumi 托管） ——
 // status: undefined = 检测中，null = 后端未上报该工具（视同未安装）
 function Badge({ status }: { status: EnvToolStatus | null | undefined }) {
-  if (status === undefined) return <Pill>检测中…</Pill>
+  const { t } = useI18n()
+  if (status === undefined) return <Pill>{t('env.detecting')}</Pill>
   const version = status?.version ? ` v${status.version}` : ''
-  if (status?.source === 'system') return <Pill dot="info">系统{version}</Pill>
-  if (status?.source === 'toolbox') return <Pill dot="gold">工具箱{version}</Pill>
-  return <Pill dashed>未安装</Pill>
+  if (status?.source === 'system') return <Pill dot="info">{t('env.system', { version })}</Pill>
+  if (status?.source === 'toolbox') return <Pill dot="gold">{t('env.toolbox', { version })}</Pill>
+  return <Pill dashed>{t('env.missing')}</Pill>
 }
 
 function ToolRow({
@@ -181,6 +179,7 @@ function ToolRow({
   onInstall: () => void
   busy: boolean
 }) {
+  const { t } = useI18n()
   const meta = TOOL_META[name]
   return (
     <div className="flex items-center gap-3.5 py-3 border-b border-line/20 last:border-b-0">
@@ -189,7 +188,7 @@ function ToolRow({
       </div>
       <div className="flex-1 min-w-0">
         <div className="text-[13px] font-medium text-ink">{meta.label}</div>
-        <div className="text-[11.5px] text-muted-foreground truncate">{meta.hint}</div>
+        <div className="text-[11.5px] text-muted-foreground truncate">{t(`env.hint.${name}`)}</div>
       </div>
       {progress ? (
         <ProgressBar progress={progress} className="w-52 justify-end" />
@@ -199,7 +198,7 @@ function ToolRow({
           {/* null = 后端未上报（旧版后端），徽章同显「未安装」，安装入口不能缺 */}
           {(status === null || status?.source === 'missing') && (
             <Button size="sm" variant="outline" onClick={onInstall} disabled={busy}>
-              安装
+              {t('env.install')}
             </Button>
           )}
         </div>

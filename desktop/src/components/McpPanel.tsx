@@ -15,6 +15,7 @@ import { useI18n } from '../i18n'
 import { MachineScope, useConnectedEffect } from './MachineTabs'
 import { ProjectPicker } from './ProjectPicker'
 import { cn, errorMessage } from '@/lib/utils'
+import { toast } from './Toast'
 import {
   ChipInput,
   Empty,
@@ -76,14 +77,16 @@ export function McpPanel({
 
   // 会话池最近加载状态（徽标数据源）：项目 scope 查该项目池，global 查全局池。
   // 独立于 reload——loading 轮询只需对账状态，不必重拉配置列表
-  const fetchStatus = useCallback(() => {
+  const fetchStatus = useCallback((alive: () => boolean = () => true) => {
     gwFor(machine)
       ?.getMcpStatus(effProject)
       .then((r) => {
+        if (!alive()) return
         setStatus(Object.fromEntries(r.servers.map((s) => [s.name, s])))
         setPoolLoading(r.loading)
       })
       .catch(() => {
+        if (!alive()) return
         setStatus({})
         setPoolLoading(false)
       })
@@ -97,14 +100,20 @@ export function McpPanel({
       setPath('')
     }
     if (!ready) return clear()
+    // 快速切机器 / 作用域 / 项目：旧请求晚到的响应丢弃（effect 清理置 false）
+    let alive = true
     gwFor(machine)
       ?.listMcpServers(scope, effProject)
       .then((r) => {
+        if (!alive) return
         setServers(r.servers ?? {})
         setPath(r.path ?? '')
       })
-      .catch(clear)
-    fetchStatus()
+      .catch(() => alive && clear())
+    fetchStatus(() => alive)
+    return () => {
+      alive = false
+    }
   }, [gwFor, machine, scope, effProject, ready, fetchStatus])
 
   // 切机器时重置项目选择（各机器项目集不同）。在渲染中调整而非 effect：
@@ -129,31 +138,40 @@ export function McpPanel({
   // 否则徽标会永远停在「正在后台连接…」
   useEffect(() => {
     if (!poolLoading) return
-    const t = setInterval(fetchStatus, 3000)
+    const t = setInterval(() => fetchStatus(), 3000)
     return () => clearInterval(t)
   }, [poolLoading, fetchStatus])
 
+  // 失败提示后端原因（如「解析失败，已中止写入」）并 reload 回真实态
+  const fail = (e: unknown) => {
+    toast.error(errorMessage(e))
+    reload()
+  }
+
+  // 保存失败弹窗保持打开可重试。改名：save 只写新键、旧键单独删——新键已写入即关弹窗，
+  // 旧键删失败则提示，列表显示新旧并存，可手动删掉旧的
   const save = (name: string, config: McpServerConfig, originalName?: string) =>
     gw
       ?.saveMcpServer(scope, project, name, config)
       .then(async (r) => {
-        // 改名：save 只写新键，旧键要单独删。删失败则 reload 回真实态（旧+新并存），
-        // 不吞错、不误报成功——弹窗保持打开让用户重试/手动清理。
+        setServers(r.servers ?? {})
+        setEditing(undefined)
         if (originalName && originalName !== name) {
           const r2 = await gw.deleteMcpServer(scope, project, originalName)
           setServers(r2.servers ?? {})
-        } else {
-          setServers(r.servers ?? {})
         }
-        setEditing(undefined)
       })
-      .catch(() => reload())
+      .catch(fail)
 
+  // 删除成功一并关编辑弹窗：否则它还挂着旧字段，再点保存会把刚删的 server 写回
   const remove = (name: string) =>
     gw
       ?.deleteMcpServer(scope, project, name)
-      .then((r) => setServers(r.servers ?? {}))
-      .catch(() => reload())
+      .then((r) => {
+        setServers(r.servers ?? {})
+        setEditing(undefined)
+      })
+      .catch(fail)
 
   // 开关：翻转 disabled 立即保存（其余字段不动）
   const toggle = (name: string, on: boolean) => {
@@ -684,6 +702,11 @@ const fromKv = (rows: Kv[]): Record<string, string> => {
   return o
 }
 
+// 表单直接管理的配置键（type 是 transport 的别名，表单改了 transport 就得一并丢掉）
+const FORM_KEYS = new Set([
+  'transport', 'type', 'command', 'args', 'env', 'cwd', 'url', 'headers', 'timeout', 'sse_read_timeout', 'disabled',
+])
+
 function ServerForm({
   name,
   config,
@@ -720,12 +743,15 @@ function ServerForm({
   const [advOpen, setAdvOpen] = useState(false)
   const [json, setJson] = useState('')
   const [jsonErr, setJsonErr] = useState('')
+  // 表单不管的键（adapter 支持的其它配置）从这里原样带过去，JSON 切回表单时随之更新
+  const [base, setBase] = useState<McpServerConfig>(init)
 
   const stdio = isStdio(transport)
 
-  // 表单字段 → 配置对象（保留 disabled 元字段）
+  // 表单字段 → 配置对象：以 base 去掉表单管理的键为底，未知键原样保留（保留 disabled 元字段）
   const formToConfig = useCallback((): McpServerConfig => {
-    const cfg: McpServerConfig = { transport }
+    const rest = Object.fromEntries(Object.entries(base).filter(([k]) => !FORM_KEYS.has(k)))
+    const cfg: McpServerConfig = { ...rest, transport }
     if (stdio) {
       if (command.trim()) cfg.command = command.trim()
       if (args.length) cfg.args = args
@@ -741,10 +767,11 @@ function ServerForm({
     }
     if (wasDisabled) cfg.disabled = true
     return cfg
-  }, [transport, stdio, command, args, env, cwd, url, headers, timeoutSec, sseRead, wasDisabled])
+  }, [base, transport, stdio, command, args, env, cwd, url, headers, timeoutSec, sseRead, wasDisabled])
 
   // 配置对象 → 表单字段（JSON 切回表单时回填）
   const configToForm = (cfg: McpServerConfig) => {
+    setBase(cfg)
     setTransport(transportOf(cfg))
     setCommand(cfg.command ?? '')
     setArgs(cfg.args ?? [])
@@ -757,6 +784,8 @@ function ServerForm({
   }
 
   const switchMode = (m: 'form' | 'json') => {
+    // 已在该模式：别用表单态重生成 JSON，冲掉正在编辑、还没应用的内容
+    if (m === mode) return
     setJsonErr('')
     if (m === 'json') {
       setJson(JSON.stringify(formToConfig(), null, 2))

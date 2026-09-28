@@ -39,6 +39,7 @@ from lumi.gateway import (
     project_config,
 )
 from lumi.gateway.bridge import AgentBridge, EventKind, providers
+from lumi.gateway.bridge.core import available_commands
 from lumi.gateway.broadcast import BroadcastHub, serialize_bg_tasks
 from lumi.gateway.channel import Channel
 from lumi.gateway.channels.manager import manager
@@ -315,6 +316,9 @@ async def _resume(session: GatewaySession, params: dict) -> dict:
 
 
 async def _list_commands(session: GatewaySession, params: dict) -> dict:
+    # 项目主页（尚无会话）经目标机器的控制连接按项目取：视角同该项目的新 desktop 会话
+    if workspace := params.get("workspace"):
+        return {"commands": available_commands(True, workspace=workspace)}
     return {"commands": session._bridge.list_commands()}
 
 
@@ -487,6 +491,7 @@ async def _project_resource_write(session: GatewaySession, params: dict) -> dict
         params.get("name", ""),
         params.get("content", ""),
         params.get("file", ""),
+        bool(params.get("create", False)),
     )
 
 

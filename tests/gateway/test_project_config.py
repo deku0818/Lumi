@@ -212,3 +212,20 @@ def test_prompt_chain_project_over_style(project: Path):
     soul = next(p for p in ov["prompts"] if p["name"] == "SOUL")
     assert soul["source"] == "project"
     assert soul["content"] == "项目灵魂"
+
+
+def test_create_refuses_to_overwrite_existing(tmp_path):
+    # 回归：项目主页「新建」用已有名字会把用户写过的定义整体换成模板
+    project = tmp_path / "proj"
+    project.mkdir()
+    project_config.write_resource(project, "agent", "foo", agent_md("foo", "精心写过"))
+    with pytest.raises(ValueError, match="已存在"):
+        project_config.write_resource(
+            project, "agent", "foo", agent_md("foo"), create=True
+        )
+    skill = "---\nname: bar\ndescription: d\n---\n正文"
+    project_config.write_resource(project, "skill", "bar", skill)
+    with pytest.raises(ValueError, match="已存在"):
+        project_config.write_resource(project, "skill", "bar", skill, create=True)
+    agent_file = project / ".lumi" / "agents" / "foo.md"
+    assert "精心写过" in agent_file.read_text()

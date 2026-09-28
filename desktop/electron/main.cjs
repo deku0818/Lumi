@@ -102,14 +102,14 @@ async function loginShellPath() {
   if (process.platform === 'win32') return ''
   try {
     // -i 才会读 rc（nvm 通常写在 .zshrc 而非 .zprofile）；rc 里的欢迎语会混进 stdout，
-    // 故打 marker 再挑行。stderr 一并丢弃：rc 的告警不该污染判断。
-    const { stdout } = await execFileAsync(
-      process.env.SHELL || '/bin/zsh',
-      ['-ilc', 'echo __LUMI_PATH__$PATH'],
-      { encoding: 'utf8', timeout: 5000 }
-    )
-    const hit = stdout.split('\n').find((l) => l.startsWith('__LUMI_PATH__'))
-    return hit ? hit.slice('__LUMI_PATH__'.length).trim() : ''
+    // 故挑 PATH= 行。走 env 而非 echo $PATH：fish 的 $PATH 是列表，echo 出来以空格
+    // 分隔，而导出给子进程的仍是冒号分隔。stderr 一并丢弃：rc 的告警不该污染判断。
+    const { stdout } = await execFileAsync(process.env.SHELL || '/bin/zsh', ['-ilc', 'env'], {
+      encoding: 'utf8',
+      timeout: 5000,
+    })
+    const hit = stdout.split('\n').find((l) => l.startsWith('PATH='))
+    return hit ? hit.slice('PATH='.length).trim() : ''
   } catch {
     // shell 缺失 / rc 卡死超时：只用原 PATH，宁可少几条路径也不能拖住启动
     return ''
@@ -133,17 +133,22 @@ async function startSidecar(port) {
     stdio: ['pipe', 'pipe', 'pipe'],
   }
   if (dev) opts.cwd = PROJECT_ROOT
-  serveProc = spawn(cmd, args, opts)
-  serveProc.stdout.on('data', (d) => process.stdout.write(`[lumi serve] ${d}`))
-  serveProc.stderr.on('data', (d) => process.stderr.write(`[lumi serve] ${d}`))
-  serveProc.on('error', (e) => {
+  const proc = spawn(cmd, args, opts)
+  serveProc = proc
+  proc.stdout.on('data', (d) => process.stdout.write(`[lumi serve] ${d}`))
+  proc.stderr.on('data', (d) => process.stderr.write(`[lumi serve] ${d}`))
+  // 回调只认自己这个实例：stopSidecar 已放手（或 resume 已换上新进程）的旧进程晚到的
+  // exit 不该再排一次重启——否则新旧两条重启链并存，一条永远在抢被占的端口
+  proc.on('error', (e) => {
+    if (serveProc !== proc) return
     // 多为 ENOENT：未装本地后端。不崩、不重启，前端连本地会显示离线，用远程即可。
     console.warn(`[lumi serve] 本地后端启动失败（${e.code || e.message}）；可在设置→连接添加远程机器`)
     serveProc = null
     sidecarFailed = true
   })
-  serveProc.on('exit', (code) => {
+  proc.on('exit', (code) => {
     console.log(`[lumi serve] 退出，code=${code}`)
+    if (serveProc !== proc) return
     serveProc = null
     // 非主动停止（崩溃/被外部杀）时同端口自愈重启；但 spawn 失败（未装）不重启
     if (!stopping && !sidecarFailed) {
@@ -513,7 +518,7 @@ app.whenReady().then(async () => {
   const ALLOWED_PERMS = new Set(['local-fonts', 'clipboard-sanitized-write'])
   session.defaultSession.setPermissionRequestHandler((_wc, perm, cb) => cb(ALLOWED_PERMS.has(perm)))
   session.defaultSession.setPermissionCheckHandler((_wc, perm) => ALLOWED_PERMS.has(perm))
-  // 本地文件协议：lumi-file:///<abs-path>（renderer 端各路径段 encodeURIComponent）
+  // 本地文件协议：lumi-file://local/<abs-path>（renderer 端各路径段 encodeURIComponent，见 Artifacts.tsx）
   protocol.handle('lumi-file', async (request) => {
     try {
       // Windows 盘符路径在 URL 里是 `/C:/…`，前导斜杠得去掉才是真实路径（UNC `//srv/s` 保留）

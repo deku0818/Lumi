@@ -35,9 +35,10 @@ export interface ToolCallBrief {
   [k: string]: unknown
 }
 
-// 每个事件名 → payload 形状的单一映射。继承 Record<WireEventType, object> 兜底：
-// 漏写任一事件名 tsc 即报错，保证覆盖全部事件。events.json 承载语言中立的同构契约。
-export interface WireEventPayloads extends Record<WireEventType, object> {
+// 每个事件名 → payload 形状的单一映射。穷尽检查在下方 WireEvent：它按 events.json 的
+// 全部事件名索引本表，漏写任一个 tsc 即报错（别给本表加 Record 索引签名——那会让漏写
+// 的键静默落到签名上，检查失效）。events.json 承载语言中立的同构契约。
+export interface WireEventPayloads {
   'gateway.ready': {
     model: string
     provider: string
@@ -51,6 +52,7 @@ export interface WireEventPayloads extends Record<WireEventType, object> {
   'message.delta': { text: string; usage?: Usage }
   'thinking.delta': { text: string; usage?: Usage }
   'message.complete': { usage?: Usage }
+  'message.retry': Record<string, never>
   'tool.generating': Record<string, never>
   'compaction.status': { active: boolean }
   'tool.start': { name: string; args: unknown; tool_call_id: string; run_id?: string }
@@ -73,6 +75,7 @@ export interface WireEventPayloads extends Record<WireEventType, object> {
     thread_id: string // 空串=本次执行无可跳转会话（无 checkpointer / 已被清理）
   }
   'cron.running': { runs: { job_id: string; thread_id: string; started_at: string }[] }
+  'cron.jobs': Record<string, never>
   'bg_tasks.update': { tasks: BgTask[] }
   'channel.activity': { thread_id: string; channel: string }
   'session.title': { thread_id: string; title: string }
@@ -579,7 +582,7 @@ declare global {
       pathExists?: (path: string) => Promise<boolean>
       readText: (path: string) => Promise<string>
       notify?: (payload: { title: string; body?: string; tag?: string }) => Promise<void>
-      onNotifyClick?: (cb: (tag: string) => void) => void
+      onNotifyClick?: (cb: (tag: string) => void) => () => void // 返回解绑
       update?: {
         state: () => Promise<UpdateState>
         check: () => Promise<UpdateState>

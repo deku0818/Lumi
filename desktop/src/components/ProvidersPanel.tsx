@@ -31,7 +31,8 @@ import {
 } from '@/components/ui/dropdown-menu'
 import { Tooltip, TooltipContent, TooltipTrigger } from '@/components/ui/tooltip'
 import { Button } from '@/components/ui/button'
-import { cn, fmtTokensFull } from '@/lib/utils'
+import { cn, errorMessage, fmtTokensFull } from '@/lib/utils'
+import { toast } from './Toast'
 import { CARD_L3 } from './glass'
 
 type TestResult = { ok: boolean; error?: string; latency_ms?: number }
@@ -91,9 +92,11 @@ export function ProvidersPanel({
   const [picking, setPicking] = useState<PickTarget | null>(null) // 打开模型选择弹窗的用途
 
   const reload = useCallback(() => {
+    let alive = true // 快速切机器：旧机器晚到的响应丢弃（effect 清理置 false）
     gwFor(machine)
       ?.listProviders()
       .then((r) => {
+        if (!alive) return
         setProfiles(r.profiles ?? [])
         setActive(r.active ?? { provider: '', model: '' })
         setClassifier(r.classifier ?? {})
@@ -101,6 +104,9 @@ export function ProvidersPanel({
         setFallback(r.fallback ?? { context: 0, max_tokens: 0 })
       })
       .catch(() => {})
+    return () => {
+      alive = false
+    }
   }, [gwFor, machine])
 
   useConnectedEffect(machine, reload, [reload])
@@ -130,11 +136,19 @@ export function ProvidersPanel({
           apply(r)
           onChanged(machine)
         })
-        .catch(() => {})
+        .catch((e) => toast.error(errorMessage(e)))
   const pickSession = makePick((p, m) => gw?.setProvider(p, m), (r) => setActive(r.active ?? { provider: '', model: '' }))
   const pickClassifier = makePick((p, m) => gw?.setClassifier(p, m), (r) => setClassifier(r.classifier ?? {}))
   const pickTitler = makePick((p, m) => gw?.setTitler(p, m), (r) => setTitler(r.titler ?? {}))
-  const onSave = (draft: Partial<ProviderProfile>) => gw?.saveProvider(draft).then(apply).catch(() => {})
+  // 成功才关表单；失败（断线 / 写盘失败）保留表单并提示，别把填好的 API Key 等丢掉
+  const onSave = (draft: Partial<ProviderProfile>) =>
+    gw
+      ?.saveProvider(draft)
+      .then((r) => {
+        apply(r)
+        setForm(null)
+      })
+      .catch((e) => toast.error(errorMessage(e)))
   const onDelete = (id: string) => gw?.deleteProvider(id).then(apply).catch(() => {})
   const onTest = (baseUrl: string, apiKey: string, model: string): Promise<TestResult> =>
     gw?.testProvider(baseUrl, apiKey, model) ??
@@ -254,10 +268,7 @@ export function ProvidersPanel({
           fallback={fallback}
           onTest={onTest}
           onSearchCatalog={onSearchCatalog}
-          onSubmit={(draft) => {
-            onSave(draft)
-            setForm(null)
-          }}
+          onSubmit={onSave}
           onCancel={() => setForm(null)}
         />
       )}
@@ -435,10 +446,10 @@ function ProviderForm({
   const canSave = !!form.name.trim() && !!form.base_url.trim() && validModels.length > 0
 
   const patchModel = (id: number, patch: Partial<ModelRow>) =>
-    setForm({ ...form, models: form.models.map((m) => (m.id === id ? { ...m, ...patch } : m)) })
-  const addModel = () => setForm({ ...form, models: [...form.models, newRow()] })
+    setForm((f) => ({ ...f, models: f.models.map((m) => (m.id === id ? { ...m, ...patch } : m)) }))
+  const addModel = () => setForm((f) => ({ ...f, models: [...f.models, newRow()] }))
   const removeModel = (id: number) =>
-    setForm({ ...form, models: form.models.length > 1 ? form.models.filter((m) => m.id !== id) : form.models })
+    setForm((f) => ({ ...f, models: f.models.length > 1 ? f.models.filter((m) => m.id !== id) : f.models }))
 
   const testModel = async (row: ModelRow) => {
     const name = row.name.trim()
@@ -501,13 +512,13 @@ function ProviderForm({
     >
       <div className="space-y-4">
         <Field label={t('providers.name')}>
-          <TextInput value={form.name} onChange={(e) => setForm({ ...form, name: e.target.value })} placeholder={t('providers.namePlaceholder')} />
+          <TextInput value={form.name} onChange={(e) => setForm((f) => ({ ...f, name: e.target.value }))} placeholder={t('providers.namePlaceholder')} />
         </Field>
         <Field label={t('providers.baseUrl')}>
-          <TextInput value={form.base_url} onChange={(e) => setForm({ ...form, base_url: e.target.value })} placeholder={t('providers.baseUrlPlaceholder')} />
+          <TextInput value={form.base_url} onChange={(e) => setForm((f) => ({ ...f, base_url: e.target.value }))} placeholder={t('providers.baseUrlPlaceholder')} />
         </Field>
         <Field label={t('providers.apiKey')}>
-          <SecretInput value={form.api_key} onChange={(e) => setForm({ ...form, api_key: e.target.value })} placeholder="sk-…" />
+          <SecretInput value={form.api_key} onChange={(e) => setForm((f) => ({ ...f, api_key: e.target.value }))} placeholder="sk-…" />
         </Field>
 
         <div>
