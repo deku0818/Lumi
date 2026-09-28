@@ -7,14 +7,17 @@
 from __future__ import annotations
 
 import asyncio
+import inspect
 import json
 import threading
 from types import SimpleNamespace
 
 import pytest
 
+from lumi.gateway.bridge import AgentBridge
 from lumi.gateway.channels.config import FeishuChannelConfig
 from lumi.gateway.channels.feishu import inbound as inb
+from lumi.gateway.channels.feishu import outbound
 from lumi.gateway.channels.feishu.channel import FeishuChannel
 from lumi.gateway.channels.feishu.inbound import (
     build_content,
@@ -250,6 +253,24 @@ async def test_run_batch_merges_media(monkeypatch):
             {"sender": "", "ts": 2000, "text": "［图片］"},
         ]
     }
+
+
+async def test_run_batch_file_authorizes_inbound_dir(monkeypatch, tmp_path):
+    # 文件消息：落地目录经真实 AgentBridge 的 folders 授权给本会话，下载路径作附件交给 run_turn
+    captured = {}
+    monkeypatch.setattr(inb, "run_turn", _capture_run_turn(captured))
+    monkeypatch.setattr(inb, "inbound_dir", lambda thread_id: tmp_path)
+    fi = FeishuChannel(FeishuChannelConfig()).inbound
+
+    async def fake_download(mid, fk, fname, target):
+        return str(target / fname)
+
+    monkeypatch.setattr(fi, "_download_file", fake_download)
+    bridge = AgentBridge()  # 不 initialize：folders 只记账，不需要权限引擎
+    batch = [inb._Pending("看附件", file_refs=[("m1", "fk1", "a.pdf")], reply_to="m1")]
+    await fi._run_batch(fi.channel, bridge, "oc", "t", batch)
+    assert bridge.folders.extra_folders == [str(tmp_path.resolve())]
+    assert captured["attachments"] == [str(tmp_path / "a.pdf")]
 
 
 # ── 渠道系统命令 ──
@@ -499,9 +520,15 @@ class _CmdBridge:
 
 
 def _capture_run_turn(captured):
-    """run_turn 的统一 fake：记录全部关键字实参（各测试按需断言）。"""
+    """run_turn 的统一 fake：记录全部关键字实参（各测试按需断言）。
+
+    先按真实签名绑定实参：调用方传了 run_turn 已删除的参数时当场 TypeError，
+    不让宽松的 fake 掩盖接口脱节。
+    """
+    signature = inspect.signature(outbound.run_turn)
 
     async def fake_run_turn(ch, bridge, **kwargs):
+        signature.bind(ch, bridge, **kwargs)
         captured.update(kwargs)
 
     return fake_run_turn
@@ -768,7 +795,6 @@ async def test_minute_turn_targets_open_id_and_injects_token(monkeypatch):
     )
 
     assert captured["chat_id"] == "ou_me"
-    assert captured["thread_id"] == "feishu-ou-me"
     assert "obcnTOK" in captured["content"]
     assert captured["synthetic"] is True  # 合成轮：用户侧不显示注入文本
 

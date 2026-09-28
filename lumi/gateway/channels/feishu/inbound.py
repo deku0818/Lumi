@@ -1309,10 +1309,8 @@ class FeishuInbound:
                 ch,
                 bridge,
                 chat_id=chat_id,
-                thread_id=thread_id,
                 reply_to="",
                 content=content,
-                tool_mode=ch.config.tool_mode,
                 synthetic=True,
             )
         except asyncio.CancelledError:
@@ -1459,7 +1457,7 @@ class FeishuInbound:
         file_paths: list[str] = []
         if file_refs:
             target = inbound_dir(thread_id)
-            bridge.add_folder(str(target))  # 授权该目录给本会话权限引擎
+            bridge.folders.add_folder(str(target))  # 授权该目录给本会话权限引擎
             results = await asyncio.gather(
                 *(
                     self._download_file(mid, fk, fname, target)
@@ -1472,10 +1470,8 @@ class FeishuInbound:
             ch,
             bridge,
             chat_id=chat_id,
-            thread_id=thread_id,
             reply_to=reply_to,
             content=build_content(merged_text, image_blocks),
-            tool_mode=ch.config.tool_mode,
             command=command,
             attachments=file_paths,
             # 渲染数据与模型文本分离：每条原始消息的 {sender, ts, text} 结构化存进
