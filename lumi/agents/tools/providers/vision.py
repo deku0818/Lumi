@@ -143,7 +143,8 @@ async def vision(
     调用本工具。传入文件的本地路径或 http(s) URL，以及你想了解的具体问题，工具会用视觉辅助
     模型给出文字答案。同一文件可带不同问题多次调用以获取更细节的信息。
     """
-    from lumi.agents.core.response import extract_ainvoke_content, message_transform
+    from lumi.agents.core.meta_message import extract_text_content
+    from lumi.agents.core.response import message_transform
     from lumi.models import provider_store
     from lumi.models.manager import create_llm
 
@@ -182,7 +183,7 @@ async def vision(
             exc_info=True,
         )
         return f"错误: 视觉模型 {resolved.model} 识别失败: {e}"
-    return extract_ainvoke_content(resp.content) or "（视觉模型未返回可读文本）"
+    return extract_text_content(resp.content) or "（视觉模型未返回可读文本）"
 
 
 async def get_vision_tools(names: list[str] | None = None) -> list:

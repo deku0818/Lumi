@@ -356,3 +356,30 @@ async def test_foreground_subagent_links_parent_mode() -> None:
             name="worker", prompt="x", runtime=runtime, run_in_background=False
         )
     assert context.mode_parent is runtime.context
+
+
+async def test_subagent_result_is_text_only() -> None:
+    """回归：子代理最终消息只有 thinking 块时，思考原文（带签名）被字符串化交给父代理；
+    多个 text 块时只取了第一个。"""
+    captured: dict = {}
+    p1, p2, p3, p4 = _patch_agent_internals(captured)
+    blocks = [
+        {"type": "thinking", "thinking": "SECRET", "signature": "sig"},
+        {"type": "text", "text": "PART1"},
+        {"type": "text", "text": "PART2"},
+    ]
+
+    async def fake_create_agent(**kwargs):
+        async def ainvoke(inputs, context=None):
+            return {"messages": [AIMessage(content=blocks)]}
+
+        return SimpleNamespace(
+            graph=SimpleNamespace(ainvoke=ainvoke)
+        ), SimpleNamespace()
+
+    with p1, p2, p3 as create_agent, p4:
+        create_agent.side_effect = fake_create_agent
+        out = await agent.coroutine(
+            name="worker", prompt="x", runtime=_make_runtime(0), run_in_background=False
+        )
+    assert out == "PART1\nPART2"

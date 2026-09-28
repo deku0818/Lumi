@@ -20,6 +20,7 @@ from langchain_core.messages import AIMessage, BaseMessage, HumanMessage
 from langgraph.types import Overwrite
 
 from lumi.agents.core.meta_message import (
+    extract_text_content,
     is_reminder_message,
     message_ts,
     should_show_human_message,
@@ -27,7 +28,7 @@ from lumi.agents.core.meta_message import (
     synthetic_human_message,
 )
 from lumi.agents.core.node_helpers.messages import drop_incomplete_tool_calls
-from lumi.agents.core.response import extract_ainvoke_content, message_transform
+from lumi.agents.core.response import message_transform
 from lumi.agents.core.state import LumiAgentContext
 from lumi.models.chain import tool_call_chain
 from lumi.utils.config import get_config
@@ -66,18 +67,19 @@ def find_pending_human(messages: list[BaseMessage]) -> HumanMessage | None:
 
     「终态」要排掉被拉回的那种：结构化输出未按格式 / Stop hook remind 会在无 tool_calls
     的 AI 之后追加 reminder 再回 CallModel，此时那条 AI 不是终态、用户诉求仍未被回答
-    （见 ``meta_message.is_reminder_message`` 的图语义标记）。
+    （见 ``meta_message.is_reminder_message`` 的图语义标记）。豁免只给紧挨在 reminder
+    前的那一条——标志一旦越过它就复位，否则会一路粘到更早、早已答完的轮次。
     """
-    pulled_back = False
+    after_reminder = False
     for msg in reversed(messages):
-        if isinstance(msg, HumanMessage):
-            if is_reminder_message(msg):
-                pulled_back = True
-                continue
-            if should_show_human_message(msg):
-                return msg
-        elif isinstance(msg, AIMessage) and not msg.tool_calls and not pulled_back:
+        if isinstance(msg, HumanMessage) and is_reminder_message(msg):
+            after_reminder = True
+            continue
+        if isinstance(msg, HumanMessage) and should_show_human_message(msg):
+            return msg
+        if isinstance(msg, AIMessage) and not msg.tool_calls and not after_reminder:
             return None
+        after_reminder = False
     return None
 
 
@@ -192,14 +194,15 @@ async def summarize_with_ptl_retry(
     *,
     max_retry: int,
     drop_ratio: float,
-) -> tuple[object, int]:
+) -> tuple[str, int]:
     """主入口：调 chain → PTL →（先剥图，再截头）→ 再调，直到成功或超 ``max_retry``。
 
     首次尝试带原图，让在线 summarizer 命中主循环的热消息缓存；仅当撞 PTL 时才逐档
     缓解：第一档剥图（保全文字、只丢图，仅一次），仍 PTL 再按 round 截头。
 
-    返回 ``(response_content, ptl_retry_count)``；``response_content`` 是 raw
-    AIMessage.content，调用方负责 ``extract_ainvoke_content``。
+    返回 ``(summary_text, ptl_retry_count)``。摘要链带着全部工具（为命中主循环缓存），
+    模型回空或转去调工具时抛 ``ValueError``——交给调用方的熔断 / 失败路径，绝不能拿
+    空摘要或一段前言去替换整段历史。
     """
     work = list(messages_to_summarize)
     attempt = 0
@@ -209,7 +212,10 @@ async def summarize_with_ptl_retry(
             response = await chain.ainvoke(
                 {"messages": work + [HumanMessage(content=prompt)]}
             )
-            return response.content, attempt
+            text = extract_text_content(response.content).strip()
+            if response.tool_calls or not text:
+                raise ValueError("摘要模型未返回摘要文本（空回复或调用了工具）")
+            return text, attempt
         except Exception as e:
             if attempt >= max_retry or not is_ptl_error(e):
                 raise
@@ -244,6 +250,12 @@ async def run_summary(
     ``summarize_with_ptl_retry`` 剥除。**不含**节点专属的熔断 / 阈值——调用方按需包裹。
     返回 ``(summary_text, ptl_retries)``。
 
+    实际命中范围因 provider 而异：OpenAI 系按前缀自动缓存，消息部分也能读到；Anthropic
+    只在 cache_control 断点处读缓存，摘要链只在 system prompt 上打断点、且不带主链的
+    thinking 参数（thinking 参数不同即 messages 缓存失效），故只命中 system + tools 前缀，
+    消息部分按原价计。要让消息也命中得给摘要链补断点并带上同样的思考参数（摘要本身就要
+    付思考 token），目前未做。
+
     多模态 block 与 ``call_model`` 同法 ``message_transform``（按 provider 归一化图片
     格式）：对直连 Anthropic 是恒等（内容不变、缓存字节不受影响），对 OpenAI/Bedrock
     转成各自格式——既发得对，又与主循环发出的字节一致、同样命中缓存。
@@ -267,10 +279,9 @@ async def run_summary(
         provider=provider,
         streaming=False,
     )
-    raw_content, ptl_retries = await summarize_with_ptl_retry(
+    return await summarize_with_ptl_retry(
         transformed, prompt, chain, max_retry=max_retry, drop_ratio=drop_ratio
     )
-    return extract_ainvoke_content(raw_content), ptl_retries
 
 
 # ---------------------------------------------------------------------------

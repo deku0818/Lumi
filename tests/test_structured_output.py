@@ -320,9 +320,8 @@ async def test_tool_executor_aborts_after_max_failures(monkeypatch):
     ]
     state = {"messages": [*history, _call({"age": 1})], "output_schema": SCHEMA}
     result = await tool_executor(state, _runtime([]), {})
-    assert isinstance(result, Command)
-    assert result.update["tool_cancelled"] is True  # 由条件边路由到 END
-    assert isinstance(result.update["messages"][-1], AIMessage)
+    assert result["tool_cancelled"] is True  # 由条件边路由到 END
+    assert isinstance(result["messages"][-1], AIMessage)
 
 
 # === Stop hook 联动 ===
@@ -464,3 +463,43 @@ async def test_pretooluse_excludes_internal_structured_tool(monkeypatch):
         await tool_executor(state, _runtime([]), {})
     assert all(n != TOOL for n in captured["names"])
     assert all(tc["name"] != TOOL for tc in captured["calls"])
+
+
+def test_model_sees_nested_schema_constraints():
+    # 回归：嵌套对象降成 {type: object, additionalProperties: true}，约束与用户写的
+    # 顶层 description 全部丢失，模型只能靠一轮轮校验报错去摸字段
+    from langchain_core.utils.function_calling import convert_to_openai_tool
+
+    from lumi.agents.core.structured_tool import create_structured_output_tool
+
+    schema = {
+        "type": "object",
+        "description": "审查结论",
+        "properties": {
+            "owner": {
+                "type": "object",
+                "properties": {"email": {"type": "string", "pattern": "^.+@.+$"}},
+                "required": ["email"],
+            },
+            "score": {"type": "integer", "minimum": 0, "maximum": 10},
+        },
+        "required": ["owner", "score"],
+    }
+    spec = convert_to_openai_tool(create_structured_output_tool(schema))["function"]
+    dumped = str(spec)
+    assert "^.+@.+$" in dumped and "'maximum': 10" in dumped
+    assert "审查结论" in spec["description"]
+
+
+def test_schema_with_refs_still_builds():
+    from langchain_core.utils.function_calling import convert_to_openai_tool
+
+    from lumi.agents.core.structured_tool import create_structured_output_tool
+
+    schema = {
+        "type": "object",
+        "$defs": {"P": {"type": "object", "properties": {"n": {"type": "string"}}}},
+        "properties": {"p": {"$ref": "#/$defs/P"}},
+        "required": ["p"],
+    }
+    convert_to_openai_tool(create_structured_output_tool(schema))

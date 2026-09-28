@@ -254,25 +254,6 @@ def _split_tool_output(output) -> tuple[list[ToolMessage], list[Command]]:
     return messages, commands
 
 
-def _tool_results_first(commands: list[Command], messages: list) -> list:
-    """把工具 Command 里的 messages 抽出来与其余结果合并：全部 ToolMessage 在前，
-    工具附带的其它消息（read 读图片/PDF 回灌的 HumanMessage、hook reminder）在后。
-
-    逐个 Command 原样应用时顺序是 ToolMessage、HumanMessage、ToolMessage…——provider
-    要求同批 tool_result 紧跟 tool_use，中间夹一条 user 内容即违反协议。Command 的
-    其余 update（todos / structured_output）原样保留。
-    """
-    merged = [*(m for c in commands for m in _cmd_messages(c)), *messages]
-    ordered = [m for m in merged if isinstance(m, ToolMessage)] + [
-        m for m in merged if not isinstance(m, ToolMessage)
-    ]
-    stripped = [
-        replace(c, update={k: v for k, v in c.update.items() if k != "messages"})
-        for c in commands
-    ]
-    return [*stripped, {"messages": ordered}]
-
-
 async def tool_executor(
     state: LumiAgentState,
     runtime: Runtime[LumiAgentContext],
@@ -284,9 +265,10 @@ async def tool_executor(
     - PreToolUse：``Block`` 补齐 ToolMessage(status=error) 配对后终止；
       ``AdditionalContext`` 收集为 reminder，工具仍执行，结果注入 ToolMessage 之后。
     - PostToolUse：hook 看到截断后的最终 ToolMessage，reminder 追加到末尾。
-    工具自身返回 Command（ask/agent/structured_output 等控制流）的路径直返
-    ``[*Command, {"messages": [...]}]``，不接 PostToolUse——这些工具用 Command 自定义
-    路由，注入会破坏其控制流。
+    工具自身返回的 Command（todos / read 图片 / 结构化输出等，都只带 state 更新、不带
+    路由）照常经 PostToolUse 与失败上限检查；其 messages 抽出与其余结果合并，全部
+    ToolMessage 在前、附带的其它消息（读图回灌的 HumanMessage、reminder）在后——provider
+    要求同批 tool_result 紧跟 tool_use，中间夹一条 user 内容即违反协议。
     """
     tools = list(runtime.context.tools)
     output_schema = state.get("output_schema")
@@ -313,26 +295,42 @@ async def tool_executor(
     )
     tool_messages, commands = _split_tool_output(output)
     await truncate_tool_results(tool_messages)
-    final_msgs = [*tool_messages, *extra_msgs]
-    if commands:
-        return _tool_results_first(commands, final_msgs)
+    merged = [*tool_messages, *(m for c in commands for m in _cmd_messages(c))]
+    # tool_result 按 tool_use 的顺序排（Command 里的与普通结果分两路收集，原序已丢）
+    order = {tc["id"]: i for i, tc in enumerate(pending)}
+    results = sorted(
+        (m for m in merged if isinstance(m, ToolMessage)),
+        key=lambda m: order.get(m.tool_call_id, len(order)),
+    )
+    trailing = [*(m for m in merged if not isinstance(m, ToolMessage)), *extra_msgs]
+    halt = False
 
     if has_hooks("PostToolUse"):
-        post_cmd = await _post_tool_hooks(state, config, visible, tool_messages)
+        post_cmd = await _post_tool_hooks(state, config, visible, results)
         if post_cmd is not None:
-            final_msgs = [*final_msgs, *_cmd_messages(post_cmd)]
-            if post_cmd.goto == END:
-                return _halt({"messages": final_msgs})
+            trailing += _cmd_messages(post_cmd)
+            halt = post_cmd.goto == END
 
     # structured_output 连续失败兜底：本轮累计失败 >= 上限时强制结束循环。
-    # 计数用纯净 tool_messages（不含注入的 reminder HumanMessage，否则尾扫会被
+    # 计数用纯净的 ToolMessage（不含注入的 reminder HumanMessage，否则尾扫会被
     # HumanMessage 提前 break 导致计数失真）。
-    if output_schema:
-        abort_msg = _structured_output_abort_message(state, tool_messages)
+    if output_schema and not halt:
+        abort_msg = _structured_output_abort_message(state, results)
         if abort_msg is not None:
-            return _halt({"messages": [*final_msgs, abort_msg]})
+            trailing.append(abort_msg)
+            halt = True
 
-    return {"messages": final_msgs}
+    update = {"messages": [*results, *trailing]}
+    if halt:
+        update["tool_cancelled"] = True
+    if not commands:
+        return update
+    # Command 的其余 update（todos / structured_output）原样保留，messages 已并入上面
+    stripped = [
+        replace(c, update={k: v for k, v in c.update.items() if k != "messages"})
+        for c in commands
+    ]
+    return [*stripped, update]
 
 
 def _structured_output_abort_message(

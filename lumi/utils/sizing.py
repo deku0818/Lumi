@@ -77,31 +77,6 @@ def truncate_text_to_max_bytes(text: Any, max_bytes: int) -> str:
     return encoded[:max_bytes].decode("utf-8", errors="ignore")
 
 
-def truncate_docs_to_max_bytes(
-    docs: list[str] | str, max_bytes: int
-) -> list[str] | str:
-    """截取字符串或字符串列表到指定的最大 UTF-8 字节数。
-
-    单个字符串按字节截断；列表只保留能完整放下的项目，不截断单项。
-    """
-    if isinstance(docs, str):
-        return truncate_text_to_max_bytes(docs, max_bytes)
-
-    truncated_items: list[str] = []
-    current_bytes = 0
-    for item in docs:
-        item_str = item if isinstance(item, str) else str(item)
-        item_bytes = text_size(item_str)
-        # 单项超限直接跳过；加入当前项会超限则停止
-        if item_bytes > max_bytes:
-            continue
-        if current_bytes + item_bytes > max_bytes:
-            break
-        truncated_items.append(item)
-        current_bytes += item_bytes
-    return truncated_items
-
-
 def _usage_window_tokens(msg: Any) -> int | None:
     """从一条消息的 ``usage_metadata`` 取真实上下文窗口大小。
 

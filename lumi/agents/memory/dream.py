@@ -290,7 +290,7 @@ async def _run_dream_fork(
     """
     from lumi.agents.core.graph import create_agent
     from lumi.agents.core.hooks.dispatch import set_run_config_hooks
-    from lumi.agents.core.response import extract_ainvoke_content
+    from lumi.agents.core.meta_message import extract_text_content
     from lumi.agents.permissions.workspace import set_run_authorized_source_for
     from lumi.agents.runtime.bg_tasks import (
         BackgroundTaskEntry,
@@ -346,7 +346,7 @@ async def _run_dream_fork(
             # 综合成功才推进快照时刻（失败则不动，下次仍按旧边界判活）
             record()
             msgs = result.get("messages") or []
-            return extract_ainvoke_content(msgs[-1].content) if msgs else "dream 完成"
+            return extract_text_content(msgs[-1].content) if msgs else "dream 完成"
 
         await run_background_task(
             task_id,

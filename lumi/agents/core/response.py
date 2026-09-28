@@ -7,35 +7,6 @@ from lumi.models.manager import detect_protocol
 from lumi.utils.image import download_image_as_base64
 from lumi.utils.logger import logger
 
-
-def extract_ainvoke_content(content) -> str:
-    """从 LLM 响应中提取文本内容
-
-    Args:
-        content: LLM 响应的 content 字段，可能是 str 或 list[dict]
-
-    Returns:
-        提取的文本内容
-    """
-    if isinstance(content, list) and len(content) > 0:
-        # 遍历查找包含 text 字段的项（跳过 thinking 等）
-        for item in content:
-            if isinstance(item, dict) and "text" in item:
-                text_content = item.get("text", "")
-                if text_content:
-                    return text_content
-        # 回退：取第一个元素
-        first_item = content[0]
-        if isinstance(first_item, dict):
-            return first_item.get("text", str(first_item))
-        return str(first_item)
-    elif isinstance(content, str):
-        return content
-    else:
-        logger.error(f"extract_ainvoke_content 出现未知类型: {type(content)}")
-        return str(content) if content else ""
-
-
 _EXPECTED_DOWNLOAD_ERRORS = (
     httpx.HTTPStatusError,
     httpx.TimeoutException,

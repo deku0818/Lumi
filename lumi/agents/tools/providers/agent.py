@@ -13,6 +13,7 @@ from langchain_core.tools import tool
 from langgraph.prebuilt.tool_node import ToolRuntime
 from pydantic import BaseModel, Field
 
+from lumi.agents.core.meta_message import extract_text_content
 from lumi.agents.runtime.bg_tasks import (
     BackgroundTaskEntry,
     TaskKind,
@@ -101,8 +102,6 @@ async def agent(
     run_in_background: bool = True,
 ) -> str:
     """Agent工具 - 委托给 LumiAgent 执行"""
-    # Lazy import 避免循环依赖
-    from lumi.agents.core.response import extract_ainvoke_content
 
     # 委派深度网关：当前 agent 已达上限则拒绝再委派（主 agent depth=0）
     current_depth: int = runtime.state.get("depth", 0)
@@ -157,7 +156,7 @@ async def agent(
     )
 
     content = invoke_result["messages"][-1].content if invoke_result["messages"] else ""
-    return extract_ainvoke_content(content)
+    return extract_text_content(content)
 
 
 # ---------------------------------------------------------------------------
@@ -243,8 +242,6 @@ async def _run_agent_background(
     output_file: Path,
 ) -> None:
     """后台执行 Agent；收尾（写文件 / 状态 / 通知）走共用 run_background_task。"""
-    from lumi.agents.core.response import extract_ainvoke_content
-
     registry = get_task_registry()
 
     async def _stream() -> str:
@@ -259,7 +256,7 @@ async def _run_agent_background(
             activity = _agent_activity(state, activity.get("tools_done", 0))
             registry.notify_progress(task_id, activity)
         msgs = final.get("messages") or []
-        return extract_ainvoke_content(msgs[-1].content if msgs else "")
+        return extract_text_content(msgs[-1].content if msgs else "")
 
     await run_background_task(
         task_id,

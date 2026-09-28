@@ -26,6 +26,7 @@ import traceback
 from dataclasses import dataclass, field
 from typing import Any
 
+from lumi.agents.core.meta_message import extract_text_content
 from lumi.agents.core.state import LumiAgentContext
 from lumi.agents.runtime.bg_tasks import new_task_id
 from lumi.agents.runtime.shell_session import run_with_shell
@@ -343,11 +344,8 @@ class WorkflowEngine:
                         )
                     return out
 
-                from lumi.agents.core.response import extract_ainvoke_content
-
                 messages = result.get("messages") or []
-                content = messages[-1].content if messages else ""
-                return extract_ainvoke_content(content)
+                return extract_text_content(messages[-1].content if messages else "")
             finally:
                 self._done += 1
                 self._emit_progress()  # 完成（done++）

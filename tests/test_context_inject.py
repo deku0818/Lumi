@@ -48,6 +48,7 @@ def _runtime(tools=(), memory_enabled=False, env_extra="") -> SimpleNamespace:
             tools=list(tools),
             memory_enabled=memory_enabled,
             env_extra=env_extra,
+            project_dir=None,
         )
     )
 
@@ -360,3 +361,41 @@ async def test_skips_without_runtime():
 
 if __name__ == "__main__":
     pytest.main([__file__, "-q"])
+
+
+async def test_reinjects_into_pending_human_after_mid_turn_compaction():
+    # 回归：工具轮中段 PTL 压缩删掉了注入块（marker 一并剥掉），而末条不是用户消息，
+    # 本轮后续模型调用一直缺 <env> / 技能 / 项目说明，直到下一轮才恢复
+    from langchain_core.messages import AIMessage, ToolMessage
+
+    from lumi.agents.core.preprocessing.compact import build_summary_carrier
+
+    pending = HumanMessage(content="帮我改一下配置", id="h1")
+    messages = [
+        build_summary_carrier("往期摘要"),
+        pending,
+        AIMessage(content="", tool_calls=[{"name": "read", "args": {}, "id": "c"}]),
+        ToolMessage(content="ok", tool_call_id="c"),
+    ]
+    with _patched(skills=[_cfg("pdf", "处理 PDF")]):
+        cmd = await _run(messages)
+    [updated] = cmd.update["messages"]
+    assert updated.id == "h1"
+    assert "<env>" in _injected_text(updated) and "pdf" in _injected_text(updated)
+
+
+async def test_announced_lists_use_session_project_like_the_tools():
+    # 回归：注入按授权目录（无项目时是进程 cwd）列技能 / 子代理，skill / agent 工具却按
+    # 会话 context.project_dir 查——CLI 等无项目场景宣告了 cwd 下的技能，调用时却「不存在」
+    rt = _runtime(tools=[SimpleNamespace(name="agent")])
+    rt.context.project_dir = None
+    with (
+        _patched() as _,
+        patch.object(context_inject.SkillChangeDetector, "get_instance") as si,
+        patch.object(context_inject.AgentChangeDetector, "get_instance") as ai,
+    ):
+        si.return_value.peek.return_value = []
+        ai.return_value.peek.return_value = []
+        await _run([HumanMessage(content="hi", id="m1")], rt)
+    si.assert_called_with(None)
+    ai.assert_called_with(None)
