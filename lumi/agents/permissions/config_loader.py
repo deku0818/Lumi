@@ -5,7 +5,6 @@
 
 from __future__ import annotations
 
-import json
 from pathlib import Path
 from typing import Any
 
@@ -15,7 +14,6 @@ from lumi.agents.permissions.models import (
     PermissionConfig,
     PermissionRule,
 )
-from lumi.utils.atomic_io import atomic_write_text
 from lumi.utils.jsonc import parse_jsonc
 from lumi.utils.logger import logger
 from lumi.utils.paths import lumi_home
@@ -81,40 +79,6 @@ def _config_from_dict(data: dict[str, Any]) -> PermissionConfig:
         workspaces=valid,
         permissions=permissions,
     )
-
-
-def _config_to_dict(config: PermissionConfig) -> dict[str, Any]:
-    """将 PermissionConfig 序列化为字典（新格式）。
-
-    Args:
-        config: 权限配置
-
-    Returns:
-        可 JSON 序列化的字典
-    """
-    allow_list: list[str] = []
-    deny_list: list[str] = []
-    ask_list: list[str] = []
-    for r in config.permissions:
-        if r.permission == Permission.ALLOW:
-            allow_list.append(r.tool)
-        elif r.permission == Permission.DENY:
-            deny_list.append(r.tool)
-        elif r.permission == Permission.ASK:
-            ask_list.append(r.tool)
-
-    permissions: dict[str, list[str]] = {}
-    if allow_list:
-        permissions["allow"] = allow_list
-    if deny_list:
-        permissions["deny"] = deny_list
-    if ask_list:
-        permissions["ask"] = ask_list
-
-    return {
-        "workspaces": list(config.workspaces),
-        "permissions": permissions,
-    }
 
 
 def _merge_configs(configs: list[PermissionConfig]) -> PermissionConfig:
@@ -188,11 +152,6 @@ class ConfigLoader:
         # mtime 缓存，用于检测文件变更
         self._mtimes: dict[Path, float] = {}
 
-    @property
-    def local_config_path(self) -> Path:
-        """项目本地配置文件路径。"""
-        return self._config_paths[-1]
-
     def load(self) -> PermissionConfig:
         """加载并合并所有层级的配置，返回最终配置。
 
@@ -238,25 +197,6 @@ class ConfigLoader:
         except OSError as e:
             logger.warning("读取权限配置文件失败 %s: %s", path, e)
             return None
-
-    def save_local(self, config: PermissionConfig) -> None:
-        """将配置写入项目本地配置文件（原子写入）。
-
-        目录不存在时自动创建。
-
-        Args:
-            config: 要写入的配置
-        """
-        target = self.local_config_path
-        data = _config_to_dict(config)
-        content = json.dumps(data, indent=2, ensure_ascii=False) + "\n"
-
-        # 复用 utils.atomic_io 的单一原子写实现（内部建目录 + 失败清理临时文件）
-        try:
-            atomic_write_text(target, content)
-        except OSError as e:
-            logger.error("写入权限配置文件失败 %s: %s", target, e)
-            raise
 
     def needs_reload(self) -> bool:
         """检查配置文件是否有变更（基于 mtime）。

@@ -1,6 +1,6 @@
 """按工作目录的会话级环境注入（provider 由 gateway 在 serve 启动时注册）。
 
-shell 会话、后台 Bash 任务、技能嵌入命令三条 spawn 路径共用同一份注入。
+shell 会话、后台 Bash 任务两条 spawn 路径共用同一份注入。
 agents 层不 import gateway，靠注册倒转依赖；未注册（纯 CLI 等场景）不注入。
 """
 

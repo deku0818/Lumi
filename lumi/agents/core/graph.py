@@ -13,6 +13,9 @@ from langgraph.types import TracePolicy
 from psycopg import AsyncConnection
 from psycopg.rows import dict_row
 
+# import side effect：在图的装配点注册内置 hooks（放在包 __init__ 里的话，builtin 回头
+# import 的模块若是进程首个导入者，会撞上自己初始化到一半的循环）
+from lumi.agents.core.hooks import builtin  # noqa: F401
 from lumi.agents.core.nodes import (
     after_tool_executor,
     auto_classify,

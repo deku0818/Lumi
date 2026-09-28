@@ -174,6 +174,24 @@ def locate(name: str) -> ToolStatus:
     return ToolStatus(name, "missing")
 
 
+def terminal_cmd(cmd: str) -> str:
+    """给用户粘贴进终端跑的命令（体检 fix_cmd）：首个词只装在工具箱里时补上工具箱 bin。
+
+    用户 shell 的 PATH 里没有工具箱；lark-cli / npm 又是 ``#!/usr/bin/env node``
+    脚本，只给绝对路径仍找不到 node，故 POSIX 在命令前临时追加 PATH（末尾追加，与
+    inject_path 同样系统优先）。Windows 给 .cmd shim 的绝对路径——npm 生成的 shim
+    自己找同目录的 node.exe。
+    """
+    name, _, rest = cmd.partition(" ")
+    found = locate(name)
+    if found.source != "toolbox":
+        return cmd
+    if _plat()[0] == "win":
+        exe = f'"{found.path}"' if " " in found.path else found.path
+        return f"{exe} {rest}"
+    return f'PATH="$PATH:{get_config().bin_dir}" {cmd}'
+
+
 def detect(name: str) -> ToolStatus:
     """探测单个工具：系统 PATH 优先 → 工具箱 → missing，并解析版本号。
 

@@ -11,6 +11,7 @@ from __future__ import annotations
 
 import asyncio
 import json
+import os
 import secrets
 import shutil
 import subprocess
@@ -29,8 +30,12 @@ PROBE_TIMEOUT = 10.0
 # ── 自更新 ────────────────────────────────────────────────────────────────
 
 
+_DOCKERENV = Path("/.dockerenv")
+
+
 def install_kind() -> str:
-    """本进程这个 lumi 是怎么装的：``uv-tool`` | ``pipx`` | ``pip`` | ``source`` | ``frozen``。
+    """本进程这个 lumi 是怎么装的：``uv-tool`` | ``pipx`` | ``pip`` | ``source`` |
+    ``docker`` | ``frozen``。
 
     看 ``sys.prefix`` 下安装器自己留的落款，而不是匹配 ``~/.local/share/uv/tools``
     这类路径——工具目录可被 ``UV_TOOL_DIR`` / ``PIPX_HOME`` 改道，路径匹配会漏判，
@@ -44,7 +49,8 @@ def install_kind() -> str:
     if (root / "pipx_metadata.json").exists():
         return "pipx"
     if _editable():
-        return "source"
+        # 官方镜像用 uv sync 装（可编辑安装），不是源码开发树
+        return "docker" if _DOCKERENV.exists() else "source"
     return "pip"
 
 
@@ -74,10 +80,15 @@ def upgrade_command(kind: str, target: str) -> list[str]:
 
 
 def _uv_path() -> str:
-    """uv 可执行文件：系统 PATH 优先，回落 Lumi 工具箱（与 env 命令同一套解析）。"""
+    """uv 可执行文件：系统 PATH 优先，回落 Lumi 工具箱（与 env 命令同一套解析），再回落
+    lumi 自己所在的目录（install.sh 把 uv 与 lumi 装进同一 bin；sudo 精简 PATH 时靠它）。"""
     from lumi.gateway.toolbox import locate
 
-    found = shutil.which("uv") or locate("uv").path
+    found = (
+        shutil.which("uv")
+        or locate("uv").path
+        or shutil.which("uv", path=os.path.dirname(sys.argv[0]))
+    )
     if not found:
         raise RuntimeError("找不到 uv——这个 lumi 是 uv tool 装的，升级也得由它来做")
     return found

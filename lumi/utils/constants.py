@@ -24,9 +24,6 @@ RETRY_BASE_WAIT: Final[int] = 5
 DEFAULT_COMMAND_TIMEOUT: Final[float] = 120.0
 """execute() 默认超时秒数"""
 
-CWD_QUERY_TIMEOUT: Final[float] = 5.0
-"""get_cwd() 查询超时秒数"""
-
 GRACEFUL_SHUTDOWN_TIMEOUT: Final[float] = 5.0
 """进程优雅关闭等待秒数"""
 

@@ -43,6 +43,16 @@ def test_frozen_wins_over_everything(tmp_path, monkeypatch):
     assert ops.install_kind() == "frozen"
 
 
+def test_editable_inside_docker_is_docker(tmp_path, monkeypatch):
+    # 回归：官方镜像用 uv sync（可编辑安装），容器里 lumi update 提示去 git pull
+    dockerenv = tmp_path / ".dockerenv"
+    dockerenv.write_text("")
+    monkeypatch.setattr(sys, "prefix", str(tmp_path))
+    monkeypatch.setattr(ops, "_editable", lambda: True)
+    monkeypatch.setattr(ops, "_DOCKERENV", dockerenv)
+    assert ops.install_kind() == "docker"
+
+
 def test_editable_reads_real_dist_info():
     # 拿真实 dist-info 试一次：本仓库自身就是可编辑安装（uv sync 的装法）。
     # 构造的假 direct_url.json 证明不了字段路径写对了，真文件能
@@ -55,6 +65,42 @@ def test_editable_reads_real_dist_info():
 @pytest.fixture
 def fake_uv(monkeypatch):
     monkeypatch.setattr(ops, "_uv_path", lambda: "/fake/uv")
+
+
+def test_uv_found_next_to_lumi_when_path_is_trimmed(tmp_path, monkeypatch):
+    # 回归：sudo 精简 PATH 下找不到 ~/.local/bin/uv——install.sh 把 uv 与 lumi 装进同一目录
+    from lumi.gateway.toolbox import ToolStatus
+
+    bin_dir = tmp_path / "bin"
+    bin_dir.mkdir()
+    uv = bin_dir / "uv"
+    uv.write_text("#!/bin/sh\n")
+    uv.chmod(0o755)
+    monkeypatch.setenv("PATH", str(tmp_path / "empty"))
+    monkeypatch.setattr(
+        "lumi.gateway.toolbox.locate", lambda n: ToolStatus(n, "missing")
+    )
+    monkeypatch.setattr(sys, "argv", [str(bin_dir / "lumi"), "update"])
+    assert ops._uv_path() == str(uv)
+
+
+def test_update_without_uv_exits_cleanly(monkeypatch):
+    # 回归：找不到 uv 的 RuntimeError 没人接，lumi update 打出整段堆栈
+    from typer.testing import CliRunner
+
+    from lumi.cli import app
+
+    def no_uv(kind, target):
+        raise RuntimeError("找不到 uv")
+
+    monkeypatch.setattr(ops, "install_kind", lambda: "uv-tool")
+    monkeypatch.setattr(ops, "latest_version", lambda: "")
+    monkeypatch.setattr(ops, "check_service", lambda *a: ops.ServiceStatus("down"))
+    monkeypatch.setattr(ops, "upgrade_command", no_uv)
+    result = CliRunner().invoke(app, ["update"])
+    assert result.exit_code == 1
+    assert "找不到 uv" in result.stderr
+    assert result.exception is None or isinstance(result.exception, SystemExit)
 
 
 def test_uv_latest_clears_version_pin(fake_uv):

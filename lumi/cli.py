@@ -70,7 +70,6 @@ def _default(
         typer.Option(
             "--privileged-danger",
             help="特权模式：跳过所有工具审批（危险）",
-            is_flag=True,
         ),
     ] = False,
     accept_edits: Annotated[
@@ -78,11 +77,16 @@ def _default(
         typer.Option(
             "--accept-edits",
             help="自动放行文件编辑(write/edit)，bash 仍需审批",
-            is_flag=True,
         ),
     ] = False,
 ) -> None:
     """运行 Lumi：-p 非交互执行 prompt；无参数显示帮助。前端经 `lumi serve` 连接。"""
+    # 工具箱 bin 追加到 PATH 末尾（系统同名优先）：每个子命令的探测、agent 子进程
+    # 都看到同一份 uv/rg/node/lark-cli
+    from lumi.gateway.toolbox import inject_path
+
+    inject_path()
+    _export_lumi_bin()
     if ctx.invoked_subcommand is not None:
         return
 
@@ -136,12 +140,6 @@ def serve(
 
         get_config(str(lumi_home()))
 
-    # 工具箱 bin 追加到 PATH 末尾：agent 子进程可见 uv/rg/node/lark-cli，系统同名优先
-    from lumi.gateway.toolbox import inject_path
-
-    inject_path()
-    _export_lumi_bin()
-
     import uvicorn
 
     from lumi.gateway.channels import ws
@@ -167,6 +165,7 @@ def serve(
 _CANNOT_UPDATE = {
     "source": "这是源码（可编辑）安装，升级请用 git pull",
     "frozen": "这是桌面应用自带的后端，随应用一起更新，不单独升级",
+    "docker": "这是 Docker 镜像，升级请 docker pull 后重建容器",
 }
 
 
@@ -217,8 +216,13 @@ def update(
     # 而升级本身不会停服务，先探后探结论一样。
     serving = check_service("127.0.0.1", port).running
 
+    try:
+        command = upgrade_command(kind, target)
+    except RuntimeError as e:
+        typer.echo(f"✗ {e}", err=True)
+        raise typer.Exit(1) from e
     typer.echo(f"› 升级 {__version__} → {target or latest or '最新版'}（{kind}）")
-    if run(upgrade_command(kind, target)) != 0:
+    if run(command) != 0:
         typer.echo("✗ 升级失败，见上方输出", err=True)
         raise typer.Exit(1)
     typer.echo("✓ 升级完成")
@@ -354,14 +358,19 @@ def env_install(
             last_phase = phase
             typer.echo(f"… {phase}")
 
-    try:
-        results = install_missing(progress, (tool,) if tool else ALL_TOOLS)
-    except Exception as e:
-        # 下载失败（断网 / 代理 / GitHub 不可达）是常态，栈回溯对调用方没有信息量
-        typer.echo(f"安装失败: {e}", err=True)
-        raise typer.Exit(1) from e
-    for status in results:
+    failed = False
+    # 逐项装：一项失败不连累后面的
+    for name in (tool,) if tool else ALL_TOOLS:
+        try:
+            (status,) = install_missing(progress, (name,))
+        except Exception as e:
+            # 下载失败（断网 / 代理 / GitHub 不可达）是常态，栈回溯对调用方没有信息量
+            typer.echo(f"{name} 安装失败: {e}", err=True)
+            failed = True
+            continue
         _echo_tool(asdict(status))
+    if failed:
+        raise typer.Exit(1)
 
 
 feishu_app = typer.Typer(
@@ -825,7 +834,7 @@ def mcp_test(
 
 
 def _export_lumi_bin() -> None:
-    """把本 CLI 的可执行入口暴露为 ``LUMI_BIN``，供 agent 子进程回调（与 inject_path 同处调用）。
+    """把本 CLI 的可执行入口暴露为 ``LUMI_BIN``，供 agent 子进程回调（根回调里与 inject_path 一起调）。
 
     打包版后端躺在 app 的 resources 目录里、不在 PATH 上，agent 的 shell 无从定位它；
     dev 下则是 venv 里的 lumi 脚本。
@@ -882,11 +891,6 @@ def _run_headless(
         from lumi.utils.config import get_config
 
         get_config().apply_env()
-        # 与 serve 同源：工具箱 bin 追加到 PATH 末尾，agent 子进程可见 uv/rg/lark-cli
-        from lumi.gateway.toolbox import inject_path
-
-        inject_path()
-        _export_lumi_bin()
 
         bridge = AgentBridge()
         try:

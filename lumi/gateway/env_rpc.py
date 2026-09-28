@@ -83,12 +83,19 @@ async def _run_install(target: str, project: str = "") -> None:
             # all = 逐个装缺失的工具（核心 + 可选，与环境页两栏一致），进度按工具名
             # 广播（前端各行各显示各的）；「已装的跳过」仍单源在 install_missing 里
             # （officecli 单目标同走此路）。逐个调用使其并行探测退化为串行——探测毫秒级、
-            # 下载分钟级，不值得为此给它加 progress 工厂参数
+            # 下载分钟级，不值得为此给它加 progress 工厂参数。一项失败不连累后面的，
+            # 错误逐项带上工具名
             names = toolbox.ALL_TOOLS if target == "all" else (target,)
+            failures = []
             for name in names:
-                await asyncio.to_thread(
-                    toolbox.install_missing, progress_for(name), (name,)
-                )
+                try:
+                    await asyncio.to_thread(
+                        toolbox.install_missing, progress_for(name), (name,)
+                    )
+                except Exception as e:
+                    failures.append(f"{name}: {e}" if len(names) > 1 else str(e))
+            if failures:
+                raise RuntimeError("\n".join(failures))
     except Exception as e:
         logger.warning(f"安装 {target} 失败: {e}")
         error = str(e)

@@ -20,7 +20,6 @@ from lumi.agents.permissions.models import (
     Permission,
     PermissionConfig,
     PermissionDecision,
-    PermissionRule,
 )
 from lumi.agents.permissions.workspace import (
     add_authorized_directory,
@@ -217,87 +216,12 @@ class PermissionEngine:
         resolved = [resolve_under_project(p, self._project_dir) for p in paths]
         return [str(p) for p in resolved if not self._boundary.is_within_boundary(p)]
 
-    def add_allow_rule(self, tool_expr: str) -> None:
-        """将 allow 规则追加到项目本地配置并更新内存。
-
-        已存在相同表达式的 allow 规则时跳过，避免重复。
-
-        Args:
-            tool_expr: 工具表达式，如 "bash(ls -la)" 或 "bash(ls *)"
-        """
-        # 去重：内存中已有相同 allow 规则则跳过
-        for rule in self._config.permissions:
-            if rule.tool == tool_expr and rule.permission == Permission.ALLOW:
-                return
-
-        new_rule = PermissionRule(tool=tool_expr, permission=Permission.ALLOW)
-
-        # 更新内存中的配置
-        self._config = PermissionConfig(
-            workspaces=self._config.workspaces,
-            permissions=(*self._config.permissions, new_rule),
-        )
-
-        # 持久化到本地配置文件
-        try:
-            local_cfg = self._loader.load_single(self._loader.local_config_path)
-            if local_cfg is None:
-                local_cfg = PermissionConfig()
-            # 文件中也做去重检查
-            existing = {
-                r.tool
-                for r in local_cfg.permissions
-                if r.permission == Permission.ALLOW
-            }
-            if tool_expr in existing:
-                return
-            updated = PermissionConfig(
-                workspaces=local_cfg.workspaces,
-                permissions=(*local_cfg.permissions, new_rule),
-            )
-            self._loader.save_local(updated)
-        except Exception:
-            logger.error(
-                "持久化 allow 规则失败，规则仅保留在内存中: %s",
-                tool_expr,
-                exc_info=True,
-            )
-
-    def add_workspace(self, directory: str) -> None:
-        """将目录添加到工作区列表并持久化。
-
-        Args:
-            directory: 目录绝对路径
-        """
-        if directory in self._config.workspaces:
-            return
-
-        # 更新内存
-        self._config = PermissionConfig(
-            workspaces=(*self._config.workspaces, directory),
-            permissions=self._config.permissions,
-        )
-
-        # 重建边界检查器并同步到 filesystem 层
-        self._rebuild_boundary()
-        try:
-            local_cfg = self._loader.load_single(self._loader.local_config_path)
-            if local_cfg is None:
-                local_cfg = PermissionConfig()
-            updated = PermissionConfig(
-                workspaces=(*local_cfg.workspaces, directory),
-                permissions=local_cfg.permissions,
-            )
-            self._loader.save_local(updated)
-        except Exception:
-            logger.error("持久化工作区配置失败: %s", directory, exc_info=True)
-
     def add_ephemeral_workspace(self, directory: str) -> None:
         """临时把目录加入工作区（仅内存，不持久化；会话级「添加文件夹」用）。
 
         存独立的 _ephemeral_workspaces 而非 _config.workspaces——后者会被
         reload()/rebase() 从磁盘整体覆盖，导致用户本会话添加的目录在权限配置
-        文件变更（如审批「总是允许」写入 local 配置）后被悄悄撤销。
+        文件变更（如用户手改 permissions.local.json）后被悄悄撤销。
         """
         resolved = Path(directory).resolve()
         if resolved in self._ephemeral_workspaces:

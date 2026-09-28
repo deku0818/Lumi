@@ -1,5 +1,7 @@
 """共享 Fixtures"""
 
+import os
+
 import pytest
 
 import lumi.agents.permissions.workspace as workspace
@@ -71,6 +73,19 @@ def reset_catalog_aliases(monkeypatch):
     """
     monkeypatch.setattr("lumi.models.catalog._aliases", {})
     monkeypatch.setattr("lumi.models.catalog._lookup_memo", {})
+
+
+@pytest.fixture(autouse=True)
+def restore_cli_env():
+    """CLI 根回调会改进程级 PATH（追加工具箱 bin）与 LUMI_BIN：测完复原，免得各用例的
+    tmp bin 目录越积越多、串进后续用例的工具探测。"""
+    saved = {k: os.environ.get(k) for k in ("PATH", "LUMI_BIN")}
+    yield
+    for key, value in saved.items():
+        if value is None:
+            os.environ.pop(key, None)
+        else:
+            os.environ[key] = value
 
 
 @pytest.fixture(autouse=True)

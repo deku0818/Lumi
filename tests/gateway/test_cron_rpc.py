@@ -15,13 +15,17 @@ from lumi.agents.cron.scheduler import Scheduler
 from lumi.gateway.cron_rpc import set_cron_runtime
 
 
+async def _noop_runner(prompt: str, thread_id: str, project_dir: str) -> str:
+    return "ok"
+
+
 @pytest.fixture
 def cron_runtime(tmp_path):
     """tmp_path 下组装 CronRuntime 并注入 cron_rpc，调度器不启动。"""
     delivery = DeliveryManager()
     job_store = JobStore(tmp_path / "jobs.json")
     run_log = RunLog(tmp_path / "runs")
-    scheduler = Scheduler(job_store, run_log, delivery)
+    scheduler = Scheduler(job_store, run_log, delivery, _noop_runner)
     runtime = CronRuntime(scheduler, job_store, run_log, delivery, tmp_path)
     set_cron_runtime(runtime)
     yield runtime

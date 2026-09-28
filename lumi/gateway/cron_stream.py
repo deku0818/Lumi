@@ -1,6 +1,6 @@
 """cron 执行的流式 runner：用 AgentBridge 跑 job，把 BridgeEvent 逐条直播给观测者。
 
-注入进 Scheduler（``set_stream_runner``）。调度器是唯一驱动者——它 ``await runner`` 把流
+经 setup_cron 注入 Scheduler（构造必填）。调度器是唯一驱动者——它 ``await runner`` 把流
 抽干到底，无论有没有观测者都跑完；runner 每产出一个事件就 ``publish`` 给该 thread 的
 观测者（0 个时空操作）。用全套 AgentBridge：事件转换、workspace_dir metadata、记忆全部
 复用，cron 因此成为一等会话。cron 线程不触发 autoDream（见 memory.dream 的 cron 前缀闸）。
@@ -11,7 +11,7 @@ from __future__ import annotations
 import asyncio
 from collections.abc import Awaitable, Callable
 
-from lumi.agents.cron.job_runner import extract_output
+from lumi.agents.core.meta_message import extract_text_content
 from lumi.gateway.protocol import bridge_event_to_wire
 
 
@@ -57,7 +57,7 @@ def build_cron_stream_runner(hub) -> Callable[[str, str, str], Awaitable[str]]:
                 # 停机 drain 让图停在 super-step 边界、并没跑完：按「关机宽限期被取消」
                 # 处理——不记执行记录、AT 不删，重启后由补偿接手（否则半截输出记成 success）
                 raise asyncio.CancelledError("gateway drain")
-            return extract_output(snap.values)
+            return extract_text_content(snap.values["messages"][-1].content).strip()
         finally:
             await bridge.close()
 

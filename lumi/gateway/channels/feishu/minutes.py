@@ -31,7 +31,9 @@ from lumi.utils.logger import logger
 def _login_cmd(profile: str) -> str:
     """扫码授权命令；机器人有专属 profile 时授权落在它名下（各机器人各自授权）。"""
     flag = f"--profile {profile} " if profile else ""
-    return f'{CLI} {flag}auth login --recommend --scope "{",".join(MINUTES_SCOPES)}"'
+    return toolbox.terminal_cmd(
+        f'{CLI} {flag}auth login --recommend --scope "{",".join(MINUTES_SCOPES)}"'
+    )
 
 
 # 四项检查的固定顺序与显示名。前一项不通时其后各项统一标记为「需先完成上一步」，
@@ -132,7 +134,7 @@ def diagnose(app_id: str, profile: str = "") -> list[dict]:
                 tone="error",
                 name="lark-cli 未安装",
                 detail="妙记取数与事件订阅依赖该命令行工具",
-                fix_cmd="npm i -g @larksuite/cli",
+                fix_cmd=toolbox.terminal_cmd("npm i -g @larksuite/cli"),
                 fix_action="lark-cli",
             )
         )
@@ -154,7 +156,7 @@ def diagnose(app_id: str, profile: str = "") -> list[dict]:
                 tone="error",
                 name="lark-cli 状态读取失败",
                 detail=reason,
-                fix_cmd=f"{CLI} auth status",
+                fix_cmd=toolbox.terminal_cmd(f"{CLI} auth status"),
                 fix_note="版本过旧可 npm i -g @larksuite/cli 升级",
             )
         )

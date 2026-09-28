@@ -1,6 +1,6 @@
 """Bash 工具提供者 - 提供本地 shell 命令执行功能
 
-持久化 shell 会话，保持环境变量、别名、工作目录等状态，
+持久化 shell 会话，保持环境变量、工作目录等状态，
 支持超时控制和后台执行。
 """
 
@@ -51,7 +51,7 @@ class BashInput(BaseModel):
 
 BASH_DESCRIPTION = """执行 bash 命令并返回输出。
 
-工作目录在命令之间持久保持；shell 环境从用户的 profile（bash 或 zsh）初始化。
+工作目录与环境变量在命令之间持久保持。shell 是非交互 bash（不读 rc / profile），只继承服务进程的环境（PATH 末尾加了工具箱 bin）；命令的 stdin 接 /dev/null，需要交互输入的命令拿不到输入。
 
 **重要**：除非明确被要求、或已确认专用工具无法完成任务，避免用本工具跑 `find`、`grep`、`cat`、`head`、`tail`、`sed`、`awk`、`echo` 命令，改用对应的专用工具：
 
@@ -66,7 +66,7 @@ BASH_DESCRIPTION = """执行 bash 命令并返回输出。
 
 - 文件路径包含空格时用双引号括起来
 - 尽量使用绝对路径，避免 `cd`
-- 独立命令可以并行调用多个 bash 工具；依赖前一个命令结果的用 `&&` 串联
+- 同一会话的 bash 调用串行执行；依赖前一个命令结果的用 `&&` 串联，互不依赖的长任务用 `run_in_background`
 - Git 安全规则：不 force push；不跳过 hooks（--no-verify）；不 amend、不 rebase 已推送的提交；仅在用户明确要求时才 commit / push
 - 避免不必要的 `sleep`
 
@@ -113,7 +113,7 @@ async def bash(
                     "取消）。请去掉 `&`（及配套的 `echo $!` 等），由 run_in_background "
                     "追踪完整生命周期。"
                 )
-            current_cwd = await session.get_cwd()
+            current_cwd = session.cwd
             # 后台省略(None)或显式 0 → 不限时；否则用给定上限
             bg_timeout = timeout if timeout else None
             task = await get_bg_manager().start_task(

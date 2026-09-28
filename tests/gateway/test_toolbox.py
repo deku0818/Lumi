@@ -556,3 +556,23 @@ def test_inject_path_idempotent(toolbox_env):
     parts = os.environ["PATH"].split(os.pathsep)
     assert parts.count(str(get_config().bin_dir)) == 1
     assert parts[-1] == str(get_config().bin_dir)  # 末尾追加，系统优先
+
+
+# ── 给用户粘贴进终端的修复命令 ──
+
+
+def test_terminal_cmd_adds_toolbox_bin_for_toolbox_only_tool(toolbox_env, monkeypatch):
+    # 回归：体检的 fix_cmd 是裸命令名，工具只装在工具箱时用户终端里 command not found
+    monkeypatch.setattr(toolbox, "_plat", lambda: ("linux", "x64"))
+    bin_dir = get_config().bin_dir
+    bin_dir.mkdir(parents=True)
+    _fake_exe(bin_dir, "lark-cli")
+    assert toolbox.terminal_cmd("lark-cli auth login") == (
+        f'PATH="$PATH:{bin_dir}" lark-cli auth login'
+    )
+
+
+def test_terminal_cmd_leaves_system_tool_alone(toolbox_env):
+    _fake_exe(toolbox_env["system_bin"], "lark-cli")
+    assert toolbox.terminal_cmd("lark-cli auth login") == "lark-cli auth login"
+    assert toolbox.terminal_cmd("npm i -g x") == "npm i -g x"  # 缺失同样原样

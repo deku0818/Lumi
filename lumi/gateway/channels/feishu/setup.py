@@ -108,7 +108,7 @@ def _profile_check(
             tone="warn",
             name="lark-cli 版本过旧",
             detail=f"机器人专属身份（profile 注入）需 ≥ {need}，项目内 lark-cli 调用暂不隔离",
-            fix_cmd="lark-cli update",
+            fix_cmd=toolbox.terminal_cmd("lark-cli update"),
             group=group,
         )
     if not bot_id:
@@ -216,7 +216,7 @@ def local_env_checks(
                 tone="error",
                 name="无法读取飞书技能清单",
                 detail="lark-cli 不支持 skills 子命令或输出异常，请先升级",
-                fix_cmd="npm update -g @larksuite/cli",
+                fix_cmd=toolbox.terminal_cmd("npm update -g @larksuite/cli"),
                 group=group,
             )
         )

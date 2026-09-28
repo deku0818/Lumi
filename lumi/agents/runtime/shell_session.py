@@ -9,6 +9,7 @@ from __future__ import annotations
 import asyncio
 import contextvars
 import os
+import shlex
 import sys
 from dataclasses import dataclass
 
@@ -17,7 +18,6 @@ from lumi.agents.runtime.bg_tasks import get_task_registry, new_task_id
 from lumi.agents.runtime.shell_env import provided_env
 from lumi.utils.constants import (
     BASH_MAX_OUTPUT_BYTES,
-    CWD_QUERY_TIMEOUT,
     DEFAULT_COMMAND_TIMEOUT,
     GRACEFUL_SHUTDOWN_TIMEOUT,
 )
@@ -121,6 +121,7 @@ class LocalShellSession:
     def __init__(self, working_dir: str | None = None) -> None:
         self._process: asyncio.subprocess.Process | None = None
         self._working_dir: str = working_dir or os.getcwd()
+        self._cwd: str | None = None
         self._lock = asyncio.Lock()
 
     # -- Process management --
@@ -178,22 +179,14 @@ class LocalShellSession:
 
     # -- Command execution --
 
-    async def get_cwd(self) -> str:
-        """获取当前会话的实际工作目录。
+    @property
+    def cwd(self) -> str:
+        """上一条命令结束时 shell 的工作目录（随哨兵行带回，不占会话锁）。
 
-        通过在 shell 中执行 pwd（cmd 下是不带参数的 cd）获取，反映 cd 命令后的真实
-        路径。如果查询失败，回退到初始工作目录——那会让后台任务在模型 cd 过之后仍
-        起在初始目录里（``bash(run_in_background=True)`` 按此值定 working_dir）。
+        后台任务按此值定 working_dir，不必排在前台长命令后面查询；未跑过命令或
+        shell 重建后即初始目录。
         """
-        query = "cd" if self._is_windows else "pwd"
-        result = await self.execute(query, timeout=CWD_QUERY_TIMEOUT)
-        if result.success and result.stdout.strip():
-            return result.stdout.strip()
-        logger.warning(
-            f"[LocalShellSession] {query} 失败 (exit_code={result.exit_code})，"
-            f"回退到初始目录: {self._working_dir}"
-        )
-        return self._working_dir
+        return self._cwd or self._working_dir
 
     async def execute(
         self, command: str, timeout: float = DEFAULT_COMMAND_TIMEOUT
@@ -239,10 +232,19 @@ class LocalShellSession:
             raise
 
     def _wrap_command(self, command: str, sentinel: str) -> str:
-        """将用户命令包装为带哨兵标记和退出码的 shell 脚本片段。"""
+        """将用户命令包装为带哨兵标记、退出码与 cwd 的 shell 脚本片段。
+
+        Unix 下整条命令经 eval 执行、stdin 接 /dev/null：命令与哨兵共用 shell 的
+        stdin，直接拼接时读 stdin 的命令（read / cat / input()）会吃掉包装行或挂满
+        超时，未闭合的引号会吞掉哨兵——之后每条命令都失步。eval 在当前 shell 执行，
+        cd / export / 函数照常保留；语法错误只让 eval 返回 2。
+        """
         if self._is_windows:
-            return f"{command}\r\necho.\r\necho {sentinel} %ERRORLEVEL%\r\n"
-        return f'{command}\n__lumi_ec=$?\necho ""\necho "{sentinel} $__lumi_ec"\n'
+            return f"{command}\r\necho.\r\necho {sentinel} %ERRORLEVEL% %CD%\r\n"
+        return (
+            f"eval {shlex.quote(command)} </dev/null\n__lumi_ec=$?\n"
+            f'echo ""\necho "{sentinel} $__lumi_ec $PWD"\n'
+        )
 
     async def _read_until_sentinel(
         self,
@@ -258,7 +260,10 @@ class LocalShellSession:
         try:
             # 整条命令的墙钟上限（逐行计时的话，持续有输出的命令永不超时）
             async with asyncio.timeout(timeout):
-                exit_code = await self._collect_output(process.stdout, sentinel, buffer)
+                exit_code, cwd = await self._collect_output(
+                    process.stdout, sentinel, buffer
+                )
+            self._cwd = cwd or None
             return CommandResult(
                 stdout=str(buffer),
                 exit_code=exit_code,
@@ -279,8 +284,8 @@ class LocalShellSession:
         stdout: asyncio.StreamReader,
         sentinel: str,
         buffer: _BoundedOutputBuffer,
-    ) -> int:
-        """从 stdout 逐行收集输出到 buffer，返回解析到的退出码。
+    ) -> tuple[int, str]:
+        """从 stdout 逐行收集输出到 buffer，返回哨兵行带回的 (退出码, cwd)。
 
         buffer 超限后续行会被丢弃，但循环会持续读取以消费 pipe
         直到遇到 sentinel — 避免 shell 因 stdout pipe 未被消费而阻塞。
@@ -314,20 +319,19 @@ class LocalShellSession:
                 continue
 
             # sentinel 行不进 buffer —— 保证 exit code 解析不受截断影响
-            parts = line.split(sentinel)
-            if len(parts) >= 2:
-                code_str = parts[1].strip()
-                try:
-                    exit_code = int(code_str)
-                except ValueError:
-                    pass
-            break
+            code_str, _, cwd = line.split(sentinel, 1)[1].lstrip().partition(" ")
+            try:
+                exit_code = int(code_str)
+            except ValueError:
+                pass
+            return exit_code, cwd
 
-        return exit_code
+        return exit_code, ""
 
     async def _discard_process(self, process: asyncio.subprocess.Process) -> None:
         """按组终止 shell（连同正在跑的命令）并丢弃，下次执行重建。"""
         self._process = None
+        self._cwd = None
         await terminate_group(process)
         await _close_process_transport(process)
 

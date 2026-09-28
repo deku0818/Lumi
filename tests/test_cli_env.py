@@ -23,6 +23,24 @@ def isolated_home(tmp_path, monkeypatch):
     monkeypatch.delenv("LUMI_CONFIG_DIR", raising=False)
 
 
+def test_every_subcommand_sees_toolbox_path():
+    # 回归：PATH 注入只在 serve / -p 里做，env / feishu 等子命令探测不到工具箱里的
+    # node / lark-cli，和桌面端给出的状态对不上
+    from lumi.utils.config import get_config
+
+    seen = {}
+
+    def fake_status():
+        seen["path"] = os.environ["PATH"].split(os.pathsep)
+        seen["lumi_bin"] = os.environ.get("LUMI_BIN")
+        return {"tools": [], "bin_dir": ""}
+
+    with patch("lumi.gateway.toolbox.status_all", fake_status):
+        assert runner.invoke(app, ["env", "status"]).exit_code == 0
+    assert str(get_config().bin_dir) in seen["path"]
+    assert seen["lumi_bin"]
+
+
 def test_status_lists_each_source_and_bin_dir():
     """三种来源各自的呈现；缺失项没有版本与路径，行尾不留空白。"""
     state = {
@@ -73,6 +91,31 @@ def test_install_failure_exits_nonzero():
     ):
         result = runner.invoke(app, ["env", "install", "rg"])
     assert result.exit_code == 1
+
+
+def test_install_all_keeps_going_after_one_failure():
+    # 回归：无参装齐时首个失败即中止，后面的工具不再尝试，也不说是哪一个失败
+    tried = []
+
+    def install(name, progress=None):
+        tried.append(name)
+        if name == "uv":
+            raise RuntimeError("connect timeout")
+        return ToolStatus(name, "toolbox", "1.0", f"/box/bin/{name}")
+
+    with (
+        patch(
+            "lumi.gateway.toolbox.detect",
+            side_effect=lambda n: ToolStatus(n, "missing"),
+        ),
+        patch("lumi.gateway.toolbox.install", side_effect=install),
+    ):
+        result = runner.invoke(app, ["env", "install"])
+    from lumi.gateway.toolbox import ALL_TOOLS
+
+    assert tried == list(ALL_TOOLS)
+    assert result.exit_code == 1
+    assert "uv" in result.stderr and "connect timeout" in result.stderr
 
 
 def test_install_reports_final_status():

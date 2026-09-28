@@ -103,6 +103,26 @@ async def test_install_failure_reports_error_state(fake_hub, monkeypatch):
     assert state["error"] == {"target": "rg", "message": "网络不可达"}
 
 
+async def test_install_all_reports_each_failed_tool(fake_hub, monkeypatch):
+    # 回归：all 首个失败即中止，error.target 固定为 all，看不出是哪一项、后面的也没装
+    tried = []
+
+    def install(name, progress=None):
+        tried.append(name)
+        if name in ("uv", "rg"):
+            raise RuntimeError("网络不可达")
+        return toolbox.ToolStatus(name, "toolbox")
+
+    monkeypatch.setattr(toolbox, "install", install)
+    monkeypatch.setattr(toolbox, "detect", lambda n: toolbox.ToolStatus(n, "missing"))
+    monkeypatch.setattr(toolbox, "status_all", lambda: {"tools": []})
+    await rpc("env_install", {"target": "all"})
+    await _wait_install_done()
+    assert tried == list(toolbox.ALL_TOOLS)
+    message = fake_hub.events[-1][1]["error"]["message"]
+    assert "uv: 网络不可达" in message and "rg: 网络不可达" in message
+
+
 async def test_install_duplicate_returns_not_started(fake_hub, monkeypatch):
     """安装全局互斥：target 之间有重叠（all ⊃ uv，lark-cli 经 npm 写进 node 树），
     任一进行中都拒绝新安装——否则两线程并发写同一二进制。"""

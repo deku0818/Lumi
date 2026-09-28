@@ -19,11 +19,20 @@ from lumi.agents.permissions.workspace import set_run_authorized_source
 from lumi.agents.tools.providers.cron import cron, init_cron_tool
 
 
+async def _noop_runner(prompt: str, thread_id: str, project_dir: str) -> str:
+    return "ok"
+
+
 @pytest.fixture
 def scheduler(tmp_path: Path) -> Scheduler:
     store = JobStore(tmp_path / "jobs.json")
     run_log = RunLog(tmp_path / "runs")
-    s = Scheduler(job_store=store, run_log=run_log, delivery=DeliveryManager())
+    s = Scheduler(
+        job_store=store,
+        run_log=run_log,
+        delivery=DeliveryManager(),
+        stream_runner=_noop_runner,
+    )
     init_cron_tool(s, store, run_log)
     return s
 
@@ -67,7 +76,7 @@ async def test_scheduler_runs_job_in_its_project(scheduler: Scheduler):
         seen.append(project_dir)
         return "ok"
 
-    scheduler.set_stream_runner(runner)
+    scheduler._stream_runner = runner
     job = Job(
         name="n",
         schedule=Schedule(type=ScheduleType.INTERVAL, value="5m"),

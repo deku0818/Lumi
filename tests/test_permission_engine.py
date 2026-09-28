@@ -304,26 +304,6 @@ class TestWorkspaceBoundary:
         )
         assert len(violations) > 0
 
-    def test_add_workspace_expands_boundary(self):
-        project_dir = Path(tempfile.mkdtemp())
-        extra_dir = Path(tempfile.mkdtemp())
-        engine = PermissionEngine(project_dir)
-        # 额外目录初始在边界外
-        assert (
-            engine.check_workspace_boundary(
-                "write", {"file_path": str(extra_dir / "file.txt")}
-            )
-            is False
-        )
-        # 添加后应在边界内
-        engine.add_workspace(str(extra_dir))
-        assert (
-            engine.check_workspace_boundary(
-                "write", {"file_path": str(extra_dir / "file.txt")}
-            )
-            is True
-        )
-
     def test_rebase_moves_boundary_to_new_dir(self):
         """rebase 后边界整体迁移：新目录在界内，旧目录出界，filesystem 全局授权目录同步"""
         from lumi.agents.permissions.workspace import get_authorized_directory
@@ -374,9 +354,9 @@ class TestWorkspaceBoundary:
         """回归：会话级临时目录不应被 reload 清洗。
 
         ephemeral 目录曾被存进 _config.workspaces，任何写权限配置文件的动作
-        （如审批「总是允许」→ add_allow_rule → save_local）会改 mtime，下一次
-        工具批次的 engine.reload() 从磁盘重载配置（不含 ephemeral）即把它撤销，
-        导致用户「明明加了文件夹却仍被拒」。现存独立字段，须跨 reload 存活。
+        （如用户手改 permissions.local.json）会改 mtime，下一次工具批次的
+        engine.reload() 从磁盘重载配置（不含 ephemeral）即把它撤销，导致用户
+        「明明加了文件夹却仍被拒」。现存独立字段，须跨 reload 存活。
         """
         from lumi.agents.permissions.workspace import get_all_authorized_directories
 
@@ -386,8 +366,10 @@ class TestWorkspaceBoundary:
         engine = PermissionEngine(project_dir)
         engine.add_ephemeral_workspace(str(extra))
 
-        # 模拟审批「总是允许」：写 local 配置文件 → 触发 needs_reload
-        engine.add_allow_rule("bash(ls *)")
+        # 写 local 配置文件 → 触发 needs_reload
+        (project_dir / ".lumi" / "permissions.local.json").write_text(
+            '{"permissions": {"allow": ["bash(ls *)"]}}', encoding="utf-8"
+        )
         assert engine._loader.needs_reload() is True
         engine.reload()
 
@@ -401,35 +383,8 @@ class TestWorkspaceBoundary:
         assert extra in get_all_authorized_directories()
 
 
-class TestPersistence:
-    """规则持久化测试"""
-
-    def test_add_allow_rule_persists_to_local_config(self):
-        project_dir = Path(tempfile.mkdtemp())
-        (project_dir / ".lumi").mkdir()
-        engine = PermissionEngine(project_dir)
-        engine.add_allow_rule("bash(npm *)")
-
-        # 重新加载验证规则已持久化
-        engine2 = PermissionEngine(project_dir)
-        assert (
-            engine2.evaluate("bash", {"command": "npm test"})
-            == PermissionDecision.ALLOW
-        )
-
-    def test_add_allow_rule_deduplicates(self):
-        project_dir = Path(tempfile.mkdtemp())
-        (project_dir / ".lumi").mkdir()
-        engine = PermissionEngine(project_dir)
-        engine.add_allow_rule("bash(npm *)")
-        engine.add_allow_rule("bash(npm *)")
-
-        allow_count = sum(
-            1
-            for r in engine.config.permissions
-            if r.tool == "bash(npm *)" and r.permission == Permission.ALLOW
-        )
-        assert allow_count == 1
+class TestReload:
+    """配置热重载测试"""
 
     def test_reload_detects_file_changes(self):
         import json

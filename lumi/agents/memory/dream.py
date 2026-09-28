@@ -19,21 +19,15 @@ import shutil
 import time
 from collections.abc import Callable
 from pathlib import Path
-from typing import TYPE_CHECKING
 
 from langchain_core.messages import HumanMessage
 
+from lumi.agents.core.hooks.schema import HookContext, HookResult
 from lumi.agents.memory import dream_lock
 from lumi.agents.memory.normalize import normalize_memory_index
 from lumi.utils.config import get_config
 from lumi.utils.logger import logger
 from lumi.utils.thread_id import is_channel_thread, is_cron_thread
-
-if TYPE_CHECKING:
-    # 仅类型注解（本模块有 `from __future__ import annotations`，注解为字符串、运行时不求值）。
-    # 运行时 import hooks.schema 会触发 hooks/__init__ → builtin → 回头 import 本模块，形成
-    # 循环（当 dream 是首个被 import 的模块时直接报错）。移进 TYPE_CHECKING 从根上断环。
-    from lumi.agents.core.hooks.schema import HookContext, HookResult
 
 # dream agent 工具白名单：只读 + 写记忆目录。不给 bash/agent/cron/skill/workflow（防递归 + 防危险）。
 _DREAM_TOOL_NAMES = {"read", "grep", "glob", "write", "edit"}
@@ -93,18 +87,26 @@ async def auto_dream_stop_hook(ctx: HookContext) -> HookResult:
     return None
 
 
-def _spawn_dream(
-    context, current_messages, workspace: str, current_thread: str, *, force: bool
-) -> None:
-    """落 in_flight + fire-and-forget 启动后台 dream task（auto hook 与 /dream 共用）。"""
-    project_dir = context.permission_engine.project_dir
+def _spawn(project_dir: Path, coro) -> None:
+    """落 in_flight + fire-and-forget 启动后台 dream task；未处理的异常进日志。"""
+    from lumi.agents.runtime.bg_tasks import make_bg_done_callback
+
     dream_lock.mark_in_flight(project_dir)
-    task = asyncio.create_task(
-        _run_dream(context, current_messages, workspace, current_thread, force=force)
-    )
+    task = asyncio.create_task(coro)
     _DREAM_TASKS.add(task)
     task.add_done_callback(_DREAM_TASKS.discard)
     task.add_done_callback(lambda _t: dream_lock.clear_in_flight(project_dir))
+    task.add_done_callback(make_bg_done_callback("dream", "dream"))
+
+
+def _spawn_dream(
+    context, current_messages, workspace: str, current_thread: str, *, force: bool
+) -> None:
+    """启动短会话 dream（auto hook 与 /dream 共用）。"""
+    _spawn(
+        context.permission_engine.project_dir,
+        _run_dream(context, current_messages, workspace, current_thread, force=force),
+    )
 
 
 async def start_dream(
@@ -136,15 +138,12 @@ async def start_dream_session(
     if dream_lock.is_in_flight(project_dir):
         return "🌙 已有一次记忆整理在进行中，请稍候。"
 
-    dream_lock.mark_in_flight(project_dir)
-    task = asyncio.create_task(
+    _spawn(
+        project_dir,
         consolidate_session_dream(
             project_dir, current_messages, current_thread, time.time(), notify=True
-        )
+        ),
     )
-    _DREAM_TASKS.add(task)
-    task.add_done_callback(_DREAM_TASKS.discard)
-    task.add_done_callback(lambda _t: dream_lock.clear_in_flight(project_dir))
     return "🌙 已在后台开始整理本会话记忆——完成后会通知你。"
 
 
@@ -333,7 +332,6 @@ async def _run_dream_fork(
             output_file=output_file,
         )
         get_task_registry().register(entry)
-        entry.async_task = asyncio.current_task()  # 使面板取消生效
 
         async def _produce() -> str:
             # 授权指向 dream 自己 engine（非 bridge 活引用，切项目不失配）+ 清 config hooks
@@ -348,13 +346,19 @@ async def _run_dream_fork(
             msgs = result.get("messages") or []
             return extract_text_content(msgs[-1].content) if msgs else "dream 完成"
 
-        await run_background_task(
-            task_id,
-            output_file,
-            _produce,
-            cancel_text="dream 综合已取消",
-            notify=notify,
+        # 独立 task：面板取消只停这次综合，不波及调用方（每日 dream 循环等）；
+        # 调用方被取消时 gather 连带取消它
+        task = asyncio.create_task(
+            run_background_task(
+                task_id,
+                output_file,
+                _produce,
+                cancel_text="dream 综合已取消",
+                notify=notify,
+            )
         )
+        entry.async_task = task
+        await asyncio.gather(task, return_exceptions=True)
 
 
 def _consolidation_prompt(transcript_dir: Path) -> str:

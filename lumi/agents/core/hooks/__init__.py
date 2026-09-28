@@ -17,8 +17,6 @@ Python callable 与 shell hook 共享同一 dispatch 内核——shell hook 由 
 ``dispatch_hooks`` 调用，否则注册了也永不触发。
 """
 
-# import side effect：注册内置 hooks（structured_output_stop_hook）
-from lumi.agents.core.hooks import builtin  # noqa: F401
 from lumi.agents.core.hooks.config_loader import build_config_hooks
 from lumi.agents.core.hooks.dispatch import (
     dispatch_hooks,

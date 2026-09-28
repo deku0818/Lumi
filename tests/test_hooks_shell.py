@@ -2,8 +2,11 @@
 
 from __future__ import annotations
 
+import asyncio
 import json
 import re
+import sys
+from pathlib import Path
 
 import pytest
 from langchain_core.messages import HumanMessage
@@ -139,6 +142,41 @@ async def test_shell_hook_timeout(tmp_path):
     hook = make_shell_hook(event="Stop", command=cmd, timeout_ms=100)
     r = await hook(_ctx("Stop"))
     assert isinstance(r, Block) and "timeout" in r.reason
+
+
+def _alive(marker: str) -> bool:
+    """/proc 里是否还有命令行含 marker 的进程。"""
+    for cmdline in Path("/proc").glob("[0-9]*/cmdline"):
+        try:
+            if marker in cmdline.read_bytes().replace(b"\0", b" ").decode():
+                return True
+        except OSError:
+            continue
+    return False
+
+
+@pytest.mark.skipif(sys.platform == "win32", reason="进程组语义")
+async def test_shell_hook_timeout_kills_descendants(tmp_path):
+    # 回归：超时只 terminate hook 脚本本身，脚本里起的子进程成为孤儿
+    cmd = _write_script(tmp_path, "sleep 313.81 &\nsleep 313.81")
+    hook = make_shell_hook(event="Stop", command=cmd, timeout_ms=300)
+    assert isinstance(await hook(_ctx("Stop")), Block)
+    await asyncio.sleep(0.2)
+    assert not _alive("sleep 313.81")
+
+
+@pytest.mark.skipif(sys.platform == "win32", reason="进程组语义")
+async def test_shell_hook_cancel_kills_subprocess(tmp_path):
+    # 回归：本轮被取消（用户按停）时 hook 子进程不收，一直活到自己结束
+    cmd = _write_script(tmp_path, "sleep 313.82")
+    hook = make_shell_hook(event="Stop", command=cmd, timeout_ms=60_000)
+    task = asyncio.create_task(hook(_ctx("Stop")))
+    await asyncio.sleep(0.3)
+    task.cancel()
+    with pytest.raises(asyncio.CancelledError):
+        await task
+    await asyncio.sleep(0.2)
+    assert not _alive("sleep 313.82")
 
 
 async def test_shell_hook_matcher_skips_subprocess(tmp_path):

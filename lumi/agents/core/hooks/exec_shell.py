@@ -3,7 +3,7 @@
 把 hooks.json 配置的 shell command（``command`` 字段）包装为 Python ``Hook``：
 - 启动 subprocess，stdin 喂 ``protocol.serialize_input`` 输出
 - stdout 读到上限 / 进程退出，``protocol.parse_output`` 翻译为 ``HookResult``
-- 5 秒默认超时；到点 SIGTERM → 1s 后 SIGKILL
+- 5 秒默认超时；到点或本轮被取消时按进程组终止（SIGTERM → 宽限后 SIGKILL）
 - env 仅传 ``LUMI_HOOK_*`` 前缀变量 + ``PATH``，防 secrets 泄露
 - ``matcher`` 正则：仅 PreToolUse / PostToolUse 生效，未命中则跳过 subprocess
 - exit code: 0=正常解析 stdout / 2=deny / 其他=非阻断 error（放行）
@@ -30,6 +30,7 @@ from lumi.agents.core.hooks.schema import (
     HookEvent,
     HookResult,
 )
+from lumi.agents.runtime.bg_process import terminate_group
 from lumi.utils.logger import logger
 
 DEFAULT_TIMEOUT_MS = 5000
@@ -37,9 +38,6 @@ DEFAULT_TIMEOUT_MS = 5000
 
 STDOUT_LIMIT_BYTES = 10 * 1024 * 1024
 """stdout 上限 10 MB。超限截断 + 标记 error。"""
-
-KILL_GRACE_SECONDS = 1.0
-"""SIGTERM 后等待时长，超时再 SIGKILL。"""
 
 ENV_PASSTHROUGH_PREFIX = "LUMI_HOOK_"
 """仅 ``LUMI_HOOK_*`` 前缀环境变量透传，防 secrets（API_KEY / DB_URL 等）泄露。"""
@@ -93,6 +91,8 @@ def make_shell_hook(
             stderr=asyncio.subprocess.PIPE,
             env=_filter_env(),
             cwd=cwd,
+            # 自立进程组：超时 / 取消时连同脚本起的子进程一起收掉，不留孤儿
+            start_new_session=True,
         )
 
         try:
@@ -101,17 +101,12 @@ def make_shell_hook(
                 timeout=timeout_ms / 1000,
             )
         except TimeoutError:
-            logger.warning("[hooks] %s 超时 %dms，发送 SIGTERM", label, timeout_ms)
-            try:
-                proc.terminate()
-                await asyncio.wait_for(proc.wait(), timeout=KILL_GRACE_SECONDS)
-            except TimeoutError:
-                logger.warning("[hooks] %s SIGTERM 后未退出，发送 SIGKILL", label)
-                proc.kill()
-                await proc.wait()
-            except ProcessLookupError:
-                pass
+            logger.warning("[hooks] %s 超时 %dms，终止进程组", label, timeout_ms)
+            await terminate_group(proc)
             return Block(f"hook timeout after {timeout_ms}ms")
+        except asyncio.CancelledError:
+            await asyncio.shield(terminate_group(proc))
+            raise
 
         exit_code = proc.returncode if proc.returncode is not None else -1
 

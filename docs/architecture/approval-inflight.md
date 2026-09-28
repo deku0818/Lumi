@@ -152,7 +152,7 @@ broker 三个方法：`request(payload, reject_value)`、`resolve(approval_id, d
    - 等待期间 `set_provider` 等配置类 RPC 等审批结束再生效，可接受。
 3. **命名**：wire 方法名保留 `resume`（仅改非流式），不改名，减小前端 diff。
 4. **ask 同批迁移**：ask 与 human_approval 一起改 broker——二者共用 `resume` 入口，迁 human_approval 后 tool_approval 应答必须非流式，ask 若仍 interrupt 则其恢复需流式，同名方法无法兼具两种语义，故必须同批。
-5. **broker 注入** = bridge 在 `create_agent` 后事后赋值（与 `add_allow_rule`/`add_workspace` 风格一致，避免 agents→gateway 反向依赖）。
+5. **broker 注入** = bridge 在 `create_agent` 后事后赋值（与 `widen_boundary` 回调同一注入模式，避免 agents→gateway 反向依赖）。
 6. **权限富化留 bridge** = `ApprovalEnricher` 从旧 `_check_interrupts` 调用点平移到新 `on_custom_event` 分支，节点只发裸 `tool_calls`。
 7. **headless fail-closed** = 无 broker（cron / workflow / 后台子代理）时 human_approval 自动拒绝、ask 提示继续，不崩溃。
 

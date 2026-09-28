@@ -51,7 +51,7 @@ class JobStore:
         self._lock = asyncio.Lock()
         # 任务增删改变更观察者：gateway 层注册，把变更广播给 desktop 刷新任务列表
         # （同 bg_tasks 的 TaskRegistry.set_on_change 模式）。tool 与 UI 两条路都经
-        # 本 store 落盘，故这里是唯一 choke point。TUI / 测试不设 → 不广播。
+        # 本 store 落盘，故这里是唯一 choke point。测试不设 → 不广播。
         self._on_change: Callable[[], None] | None = None
 
     def set_on_change(self, callback: Callable[[], None] | None) -> None:

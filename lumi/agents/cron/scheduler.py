@@ -4,7 +4,7 @@
 - 从 JobStore 加载任务并注册到 APScheduler
 - 添加/移除/暂停/恢复任务
 - 管理调度器启停生命周期
-- 创建独立 Agent 子会话执行任务，支持超时和结果投递
+- 经注入的 runner 在独立 cron- thread 里执行任务，支持超时和结果投递
 """
 
 from __future__ import annotations
@@ -20,13 +20,10 @@ from typing import IO
 from apscheduler.jobstores.base import JobLookupError
 from apscheduler.schedulers.asyncio import AsyncIOScheduler
 from apscheduler.triggers.date import DateTrigger
-from langchain_core.runnables.config import RunnableConfig
 from langgraph.checkpoint.base import BaseCheckpointSaver
 
-from lumi.agents.core.meta_message import synthetic_human_message
 from lumi.agents.cron.compensation import should_compensate
 from lumi.agents.cron.delivery import DeliveryManager
-from lumi.agents.cron.job_runner import extract_output
 from lumi.agents.cron.job_store import JobStore
 from lumi.agents.cron.models import Job, ScheduleType
 from lumi.agents.cron.retry import backoff_delay, is_transient_error
@@ -75,6 +72,7 @@ class Scheduler:
         job_store: JobStore,
         run_log: RunLog,
         delivery: DeliveryManager,
+        stream_runner: Callable[[str, str, str], Awaitable[str]],
         execution_timeout: int = 6000,
         on_job_status: Callable[[list[dict]], None] | None = None,
         lock_path: Path | None = None,
@@ -99,13 +97,13 @@ class Scheduler:
         # 用户主动中断的 job id：cancel_job 置位，_invoke_agent 的取消处理据此把本次
         # 运行记为 "stopped"（而非关机 grace 期的取消——那种照常向上抛，不落 record）。
         self._user_stopped_jobs: set[str] = set()
-        # 注入的流式 runner（gateway 用 AgentBridge 跑并 publish 直播事件）。未注入
-        # （TUI / 测试）时 fallback 到 create_agent + ainvoke，不直播。见 set_stream_runner。
-        self._stream_runner: Callable[[str, str, str], Awaitable[str]] | None = None
+        # 执行 runner：``async runner(prompt, thread_id, project_dir) -> output``。gateway
+        # 注入 AgentBridge 版（见 cron_stream），逐事件 publish 给该 thread 的观测者
+        self._stream_runner = stream_runner
         self._on_job_status = on_job_status
         self._compensate_task: asyncio.Task[None] | None = None
-        # 常驻 checkpointer：所有 run 共用一条连接，每次执行独立 cron- thread，
-        # 使执行过程像普通会话一样可回看、可续聊。初始化失败时退化为无会话模式。
+        # 常驻 checkpointer：只用于会话保留策略（清掉超出 N 次的历史执行 thread）与删任务
+        # 时级联删线程；执行本身由 runner 自带 checkpointer。初始化失败时不做这两件事。
         self._checkpointer: BaseCheckpointSaver | None = None
 
     async def start(self) -> None:
@@ -124,7 +122,7 @@ class Scheduler:
                 "cron checkpointer 初始化失败，执行记录将不带会话", exc_info=True
             )
 
-        # 同一 workspace 的 jobs.json 可能同时被 TUI 与 lumi serve 加载，
+        # 同一 workspace 的 jobs.json 可能同时被多个 lumi serve 进程加载，
         # 不互斥的话每个任务会在每个进程各执行一次
         if not self._try_acquire_lock():
             logger.info(
@@ -392,16 +390,6 @@ class Scheduler:
             raise KeyError(f"任务 {job_id} 不存在")
         return await self._run_job_task(job)
 
-    def set_stream_runner(
-        self, runner: Callable[[str, str, str], Awaitable[str]] | None
-    ) -> None:
-        """注入流式 runner：``async runner(prompt, thread_id) -> output``。
-
-        gateway 用 AgentBridge 跑 job、逐事件 publish 到该 thread 的观测者，返回终态
-        output。未注入时 fallback 到 create_agent + ainvoke（不直播，TUI / 测试用）。
-        """
-        self._stream_runner = runner
-
     def cancel_job(self, job_id: str) -> bool:
         """中断正在执行的任务：按 job_id 取到 task 并 cancel。
 
@@ -446,14 +434,9 @@ class Scheduler:
     async def _execute_job(self, job: Job) -> RunRecord:
         """执行单个任务：Agent 调用、重试判定、结果投递与日志记录。"""
         started_at = datetime.now().astimezone()
-        # thread_id 在起始生成（不再由 _invoke_agent 内部生成）：使运行态广播能带上
-        # thread_id，前端在执行记录顶部显示可点进观测的活条目。注入 runner 时 bridge
-        # 自带 checkpointer，thread 恒有；仅无 runner 且无常驻 checkpointer 时才空。
-        thread_id = (
-            generate_thread_id(CRON_THREAD_PREFIX)
-            if (self._stream_runner is not None or self._checkpointer)
-            else ""
-        )
+        # thread_id 在起始生成：使运行态广播能带上 thread_id，前端在执行记录顶部显示
+        # 可点进观测的活条目
+        thread_id = generate_thread_id(CRON_THREAD_PREFIX)
         self._active_runs[job.id] = (thread_id, started_at)
         self._notify_job_status()
 
@@ -489,14 +472,14 @@ class Scheduler:
     ) -> tuple[str, str, str, Exception | None]:
         """执行任务 prompt，返回 (output, status, error, exception)。
 
-        注入了流式 runner 则走 bridge 直播；否则 fallback 到 create_agent + ainvoke。
         统一包超时 / 取消 / 异常判定；cron- thread 里的现场经 checkpoint 保留、可续聊。
         """
         # 执行中产生的后台任务归属本次 run 的 thread，通知不会被无关会话认领
         current_thread_id.set(thread_id)
         try:
             output = await asyncio.wait_for(
-                self._run_agent(job, thread_id), timeout=self._execution_timeout
+                self._stream_runner(job.prompt, thread_id, job.project_dir),
+                timeout=self._execution_timeout,
             )
             return output, "success", "", None
         except TimeoutError as exc:
@@ -516,36 +499,6 @@ class Scheduler:
         except Exception as exc:
             logger.exception("任务执行失败: %s [%s]", job.name, job.id)
             return "", "failed", f"{type(exc).__name__}: {exc}", exc
-
-    async def _run_agent(self, job: Job, thread_id: str) -> str:
-        """跑一次 job：优先注入的流式 runner（直播），否则 fallback ainvoke（不直播）。"""
-        if self._stream_runner is not None:
-            return await self._stream_runner(job.prompt, thread_id, job.project_dir)
-
-        # 延迟 import：cron 经 bootstrap→cron.runtime→scheduler 在 tools/permissions 完成
-        # 初始化前就被加载，模块顶层引入会触发循环导入，故调用时再引入。
-        from lumi.agents.core.graph import create_agent
-        from lumi.agents.core.hooks import build_config_hooks, set_run_config_hooks
-        from lumi.agents.permissions.workspace import set_run_authorized_source_for
-
-        agent, context = await create_agent(checkpointer=self._checkpointer)
-        # 自行注入本 run 的授权目录来源与项目 config hooks（bridge runner 内部自带，
-        # 此 fallback 路径需手动）；降级兜底与 bridge 共用同一 helper。
-        eng = context.permission_engine
-        set_run_authorized_source_for(eng)
-        proj = eng.project_dir if eng is not None else Path.cwd().resolve()
-        set_run_config_hooks(build_config_hooks(proj))
-        # 无人应答：auto 由分类器逐个裁决；create_agent 不带审批通道，需人工审批的自动拒绝
-        context.tool_mode = "auto"
-        inputs = {"messages": [synthetic_human_message(job.prompt)]}
-        config = RunnableConfig(
-            recursion_limit=get_config().config.agents.recursion_limit,
-            metadata={"workspace_dir": str(proj)},
-        )
-        if thread_id:
-            config["configurable"] = {"thread_id": thread_id}
-        response = await agent.graph.ainvoke(inputs, config=config, context=context)
-        return extract_output(response)
 
     async def _handle_retry(self, job: Job, caught_exc: Exception | None) -> bool:
         """根据执行结果决定是否安排退避重试或重置错误计数。
