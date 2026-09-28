@@ -24,14 +24,17 @@ def build_cron_stream_runner(hub) -> Callable[[str, str, str], Awaitable[str]]:
         bridge = AgentBridge()
         # 在任务所属项目里跑（权限边界 / MCP / 项目说明随之加载）；空串 = 未绑定项目的
         # 存量 / 表单任务，退回进程 cwd。wait_mcp=True：单发执行无下一轮自愈，须等 MCP 池就位。
-        await bridge.initialize(project_dir=project_dir, wait_mcp=True)
+        # interactive=False：无人应答，需人工审批的直接自动拒绝、ask 直接取消，不挂满超时。
+        await bridge.initialize(
+            project_dir=project_dir, wait_mcp=True, interactive=False
+        )
         bridge.switch_thread(thread_id)
         error = ""
         try:
-            # privileged：cron 无交互审批通道。synthetic：job prompt 是机器注入指令、
+            # auto：分类器逐个裁决。synthetic：job prompt 是机器注入指令、
             # 不作用户气泡显示（items: []），但助手/工具事件照常直播。
             async for evt in bridge.stream_response(
-                prompt, tool_mode="privileged", synthetic=True
+                prompt, tool_mode="auto", synthetic=True
             ):
                 # 零观测者（无人在看这条 cron 线程）时不白建 wire 帧——token 级 delta 每 run
                 # 成百上千，构帧只在有人观测时才值得。错误检测独立于观测，恒执行。

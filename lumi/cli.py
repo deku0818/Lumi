@@ -851,12 +851,13 @@ def _run_headless(
 
     from lumi.gateway.bridge import AgentBridge, EventKind
 
+    # 默认 auto（与桌面一致）：命令行上没人应答审批，分类器逐个裁决
     if privileged:
         tool_mode = "privileged"
     elif accept_edits:
         tool_mode = "accept_edits"
     else:
-        tool_mode = "default"
+        tool_mode = "auto"
 
     async def _execute() -> None:
         # 注入 config.json 中的环境变量（API key 等）
@@ -871,8 +872,9 @@ def _run_headless(
 
         bridge = AgentBridge()
         try:
-            # 单轮即退、无下一轮自愈：冷池等 MCP 工具就位后再建 agent
-            await bridge.initialize(wait_mcp=True)
+            # 单轮即退、无下一轮自愈：冷池等 MCP 工具就位后再建 agent。
+            # interactive=False：无人应答，需人工审批的直接自动拒绝，不永久挂起
+            await bridge.initialize(wait_mcp=True, interactive=False)
             async for evt in bridge.stream_response(prompt, tool_mode=tool_mode):
                 if evt.kind == EventKind.MESSAGE_DELTA and evt.text:
                     sys.stdout.write(evt.text)

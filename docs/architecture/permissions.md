@@ -160,7 +160,7 @@ auto 模式的分类器裁决与人工审批同权——AI 判断即用户授权
 
 实现走 `context.widen_boundary` 回调（由 bridge 在 `initialize` 注入 `FolderManager.widen_for_violations`，与 `approval_broker` 同一注入模式，子代理经 agent 工具传播）。最终落到与「添加文件夹」完全相同的 `add_ephemeral_workspace`（仅内存不持久化），故模型下一轮经 `drain_folder_note` 会收到目录变更提醒。目录取法见 `folders._enclosing_dir`：路径本身是目录取自身，否则取最近的已存在祖先（越界路径常常整条尾巴都还不存在）；一路走到文件系统根仍不存在则放弃——把 `/` 纳入工作区等于关掉边界。
 
-分界是**有没有 bridge**，不是「是不是 cron」：`lumi serve` 下的 cron 整个 job 跑在 `AgentBridge` 上且 `tool_mode="privileged"`，已覆盖；真正落空的是 workflow、后台子代理和无 serve 的 cron fallback——这些路径无人值守，不该自行扩大文件系统访问面，正解是把目录预先写进 `permissions.json` 的 `workspaces`（持久化、跨 run 生效）。
+分界是**有没有 bridge**，不是「是不是 cron」：`lumi serve` 下的 cron 整个 job 跑在 `AgentBridge` 上（`tool_mode="auto"`），已覆盖；真正落空的是 workflow、后台子代理和无 serve 的 cron fallback——这些路径无人值守，不该自行扩大文件系统访问面，正解是把目录预先写进 `permissions.json` 的 `workspaces`（持久化、跨 run 生效）。
 
 ### 动态规则管理
 

@@ -55,7 +55,8 @@ uv pip install -e .
 ### 3. 启动 Lumi
 
 ```bash
-# Headless 模式（执行 prompt 后输出到 stdout 退出）
+# Headless 模式（执行 prompt 后输出到 stdout 退出；默认 auto 模式，由 AI 分类器审批，
+# 需人工确认的操作直接拒绝，不会卡住等待）
 lumi -p "你的问题"
 
 # 指定风格

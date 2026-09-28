@@ -2255,3 +2255,33 @@ def test_model_override_meta_roundtrip(monkeypatch, tmp_path):
     session_model.set_model("t1", "m1", "p1")
     session_meta.delete_meta("t1")
     assert session_meta.load_all().get("t1") is None
+
+
+async def test_subagent_approval_is_auto_rejected():
+    # 回归：前台子代理的审批事件带 parent_run_id，曾在自动拒绝之前被过滤掉——
+    # broker Future 无人 resolve，该轮永挂、会话锁永占
+    from unittest.mock import AsyncMock, MagicMock
+
+    from lumi.gateway.bridge import BridgeEvent, EventKind
+    from lumi.gateway.channels.feishu import outbound
+
+    resolved: list[tuple[str, object]] = []
+
+    class _Bridge:
+        async def stream_response(self, content, **kw):
+            yield BridgeEvent(
+                kind=EventKind.APPROVAL,
+                data={"approval_id": "a1"},
+                parent_run_id="sub-run",
+            )
+            yield BridgeEvent(kind=EventKind.TURN_COMPLETE)
+
+        def resolve_approval(self, aid, value):
+            resolved.append((aid, value))
+
+    channel = MagicMock()
+    channel.streaming = AsyncMock()
+    channel.config.tool_mode = "auto"
+    await outbound.run_turn(channel, _Bridge(), chat_id="c", reply_to="m", content="hi")
+    assert [aid for aid, _ in resolved] == ["a1"]
+    assert resolved[0][1]["decision"] == "reject"

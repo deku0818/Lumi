@@ -77,10 +77,10 @@ async def create_subagent(
 
 
 def _child_tools(all_tools: list, child_depth: int, max_depth: int) -> list:
-    """子代理工具集：未达委派上限则保留 agent 工具（可继续往下委派），否则剔除以防无限递归。"""
-    if child_depth >= max_depth:
-        return [t for t in all_tools if t.name != "agent"]
-    return list(all_tools)
+    """子代理工具集：不含 ask（向用户提问只归主 agent——IM 渠道无处作答、后台无人应答）；
+    未达委派上限保留 agent 工具（可继续往下委派），否则剔除以防无限递归。"""
+    excluded = {"ask"} if child_depth < max_depth else {"ask", "agent"}
+    return [t for t in all_tools if t.name not in excluded]
 
 
 class AgentInput(BaseModel):
@@ -193,8 +193,9 @@ def _start_background_agent(
     registry = get_task_registry()
     registry.register(entry)
 
-    # 后台子 agent 无交互审批通道，固定 privileged（tool_mode 是 context 属性）
-    context.tool_mode = "privileged"
+    # 后台子 agent 无交互审批通道：auto 由分类器逐个裁决，需人工审批的自动拒绝
+    # （approval_broker 不传播）。不用 privileged——否则委派一次即可让写操作绕过分类器
+    context.tool_mode = "auto"
     inputs = {
         "messages": [HumanMessage(content=prompt)],
         "depth": depth,

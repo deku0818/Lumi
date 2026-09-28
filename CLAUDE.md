@@ -81,7 +81,8 @@ START → Summarizer（超阈值当轮就地压缩 / ptl_retry 置位则绕阈�
 
 - 工具实现在 `agents/tools/providers/agent.py`
 - 创建新 `LumiAgent` 实例，**无 checkpointer**（节省开销），复用父级 `PermissionEngine`
-- tool_mode 从父状态继承
+- 前台子代理继承父 tool_mode；后台子代理（与 cron / dream / `lumi -p` 一样无人应答）固定 `auto`，无审批通道，需人工审批的自动拒绝
+- 子代理一律不带 `ask` 工具（`_child_tools`）
 - 前端通过 `parent_run_id` 识别子 Agent 事件（非空=属于某子 Agent），做轻量统计展示
 
 ### Desktop / WS 服务

@@ -290,17 +290,16 @@ async def test_execute_job_creates_agent_and_returns_success(
     mock_create.assert_awaited_once_with(checkpointer=None)
 
 
-async def test_execute_job_sets_tool_mode_privileged(scheduler: Scheduler) -> None:
-    """_execute_job() 应将 tool_mode 设为 'privileged' 跳过人工审批。"""
+async def test_execute_job_runs_in_auto_mode(scheduler: Scheduler) -> None:
+    """_execute_job() 以 auto 运行：分类器逐个裁决，需人工审批的直接自动拒绝。"""
     job = _make_interval_job("auto-mode-test")
     mock_create = _mock_create_agent()
 
     with patch(_PATCH_CREATE_AGENT, mock_create):
         await scheduler._execute_job(job)
 
-    # tool_mode 已移家 context：验证 create_agent 返回的 context.tool_mode="privileged"
     context = mock_create.return_value[1]
-    assert context.tool_mode == "privileged"
+    assert context.tool_mode == "auto"
 
 
 async def test_execute_job_records_workspace_dir_metadata(scheduler: Scheduler) -> None:

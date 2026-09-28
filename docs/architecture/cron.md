@@ -59,7 +59,8 @@ Desktop 端：`lumi serve` 在 lifespan 中经 `setup_cron()` 启动调度器，
 
 1. 创建独立的 Agent 子会话，落在专属的 `cron-` 前缀 thread 中（共用 Scheduler
    启动时创建的常驻 checkpointer 连接），像普通会话一样可回看、可续聊
-2. 将任务的 `prompt` 作为输入，`tool_mode` 设为 `privileged`（跳过人工审批）
+2. 将任务的 `prompt` 作为输入，`tool_mode` 设为 `auto`（分类器逐个裁决）；bridge 以
+   `interactive=False` 初始化、不接审批通道，需人工审批的操作直接自动拒绝、`ask` 直接取消
 3. 使用 `asyncio.wait_for` 限制执行时间，默认超时 10 分钟
 4. 执行完成后通过 DeliveryManager 广播结果到所有已注册的投递通道
 5. 记录执行日志到 RunLog（含本次执行的 `thread_id`）
@@ -67,7 +68,7 @@ Desktop 端：`lumi serve` 在 lifespan 中经 `setup_cron()` 启动调度器，
 ### 执行即会话
 
 - 每次执行一个独立 thread（`cron-{uuid}`），desktop 端在执行记录中点击可跳转
-  该会话并继续对话（续聊走普通审批模式，不再 privileged）
+  该会话并继续对话（续聊走会话自身选择的审批模式）
 - cron 线程**不进入会话列表**：执行时不带 `workspace_dir` 元数据天然被过滤，
   `session_store.list_sessions` 再按 `cron-` 前缀兜底排除（续聊后也不"转正"）
 - **保留策略**：每个任务只保留最近 `MAX_CRON_RUN_THREADS`（50）次执行的会话

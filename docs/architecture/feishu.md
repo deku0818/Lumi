@@ -179,7 +179,8 @@ mention_key——`id=` 是**发送方应用**的 open_id（open_id 每应用一�
 **审批语义**：`tool_mode` 取配置（`auto` AI 审批 / `privileged` 自动放行），两档下「泄漏的人工
 审批触点」（DENY / bypass-immune / 分类器异常回落）一律自动拒绝。**ask 工具已禁用**——`BridgePool`
 默认 `disabled_tools=["ask"]`（经 `AgentBridge.initialize → create_agent(tools=…)`），模型无从
-调用，遇需澄清时自行判断而非弹卡片。
+调用，遇需澄清时自行判断而非弹卡片。子代理的审批事件带 `parent_run_id`，同样自动拒绝（先于子代理
+过滤处理，否则其 broker Future 无人收尾、该轮永挂）；子代理一律不带 `ask`。
 
 ## 后台任务完成通知（notification poller）
 

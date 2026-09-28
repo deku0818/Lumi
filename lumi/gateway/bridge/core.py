@@ -274,6 +274,7 @@ class AgentBridge:
         project_dir: str = "",
         disabled_tools: list[str] | None = None,
         wait_mcp: bool = False,
+        interactive: bool = True,
     ) -> None:
         """初始化 Agent。
 
@@ -283,6 +284,9 @@ class AgentBridge:
         disabled_tools：本会话禁用的工具黑名单（如飞书 channel 禁用 ``ask``）；None 时全量。
         wait_mcp：冷 MCP 池时是否等它就绪。交互会话默认 False（非阻塞 + 轮首刷新
         自愈）；headless CLI 单轮即退无自愈，传 True。
+        interactive：有没有人应答审批 / 提问。无人应答的入口（cron、``lumi -p``）传 False：
+        不接审批通道，需人工审批的调用直接自动拒绝、ask 直接取消（见 nodes.human_approval
+        与 ask 工具的无通道分支），而不是挂起等一个永远不来的应答。
 
         模型不在此定：这里只把「新会话默认」装进 context 作初值，真正生效的是每轮
         开跑前的 :meth:`align_session_model`（thread 此刻尚未确定，会话覆盖无从解析）。
@@ -310,7 +314,8 @@ class AgentBridge:
             enable_memory=True,
         )
         # 注入在途审批 Broker（与 permission_engine 同源，事后赋值，零改 create_agent 签名）
-        self._context.approval_broker = self._broker
+        if interactive:
+            self._context.approval_broker = self._broker
         # 授权通过后放宽工作区边界的回调（人工审批 / auto 分类器 / privileged 三条路共用）
         self._context.widen_boundary = self.folders.widen_for_violations
         # /goal 条件存 sessions 层 sidecar；goal_stop_hook 经这两个回调读 / 清

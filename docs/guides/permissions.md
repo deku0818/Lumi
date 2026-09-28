@@ -153,8 +153,8 @@ bash 复合命令（如 `git add . && git push`）会被拆分为独立子命令
 | `read`、`glob`、`grep` | 只读操作，无副作用 |
 | `todos` | 仅修改会话内部状态 |
 | `skill` | 读取技能提示词，只读 |
-| `agent` | 子 agent 调度，权限由子 agent 自身独立评估 |
-| `cron` | 定时任务管理（默认 allow 规则） |
+| `agent` | 子 agent 调度，权限由子 agent 自身独立评估（后台子代理以 `auto` 运行） |
+| `cron` | 定时任务管理（默认 allow 规则；任务以 `auto` 运行） |
 
 此外，bash 中的只读命令（如 `ls`、`cat`、`git status`、`grep` 等）也会自动绕过审批。命令里带命令替换（`$(…)`、反引号）、写重定向（`> file`）或有副作用的选项（`find -exec`、`sort -o` 等）时不算只读；能执行子命令、写文件或联网的程序（`xargs`、`env`、`awk`、`sed`、`curl`、`wget` 等）也不在只读之列。
 
@@ -162,11 +162,12 @@ bash 复合命令（如 `git add . && git push`）会被拆分为独立子命令
 
 ## 工具审批模式
 
-Lumi 提供三种工具审批模式，控制工具调用何时需要人工审批：
+Lumi 提供四种工具审批模式，控制工具调用何时需要人工审批：
 
 | 模式 | 行为 | 启用方式 | 状态栏 |
 |---|---|---|---|
-| `default` | 权限引擎评估，`allow` 规则 + 边界 OK 直接放行，其余弹出审批 | 默认 | 无 |
+| `auto` | `allow` 规则 + 边界 OK 直接放行，其余交 AI 分类器裁决 | 默认（桌面、`lumi -p`） | 盾形图标 |
+| `default` | 权限引擎评估，`allow` 规则 + 边界 OK 直接放行，其余弹出审批 | 桌面输入栏切换 | 无 |
 | `accept_edits` | 文件编辑工具（`write`/`edit`）在工作区内自动放行，`bash` 等仍需审批 | `--accept-edits` 或 `Shift+Tab` 切换 | `✎ accept edits` |
 | `privileged` | 权限引擎评估但自动放行，仅 `ask`/`deny`/bypass-immune 仍需审批 | `--privileged-danger` | `▶▶ privileged ⚠` |
 
@@ -191,6 +192,10 @@ lumi --privileged-danger -p "执行所有迁移"
 ```
 
 > **注意**：特权模式下，`ask` 规则仍会弹出审批，`deny` 规则仍会触发自动拒绝。只有 `unmatched` 和 `allow` 的工具调用会直接放行。
+
+### 无人应答的执行
+
+后台子代理、定时任务、`lumi -p` 与记忆整理（dream）都以 `auto` 运行：分类器逐个裁决，不因「派到后台」而绕过审批。它们没有审批通道——仍需人工确认的操作（`ask` 规则、bypass-immune）直接自动拒绝，提问直接取消，不会挂起等待。子代理一律不带 `ask` 工具。
 
 ### 即使特权模式也不可跳过的操作
 

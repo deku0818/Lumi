@@ -520,7 +520,8 @@ class Scheduler:
         set_run_authorized_source_for(eng)
         proj = eng.project_dir if eng is not None else Path.cwd().resolve()
         set_run_config_hooks(build_config_hooks(proj))
-        context.tool_mode = "privileged"  # cron 无交互审批通道，固定 privileged
+        # 无人应答：auto 由分类器逐个裁决；create_agent 不带审批通道，需人工审批的自动拒绝
+        context.tool_mode = "auto"
         inputs = {"messages": [synthetic_human_message(job.prompt)]}
         config = RunnableConfig(
             recursion_limit=get_config().config.agents.recursion_limit,
