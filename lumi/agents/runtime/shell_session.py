@@ -12,7 +12,7 @@ import os
 import sys
 from dataclasses import dataclass
 
-from lumi.agents.runtime.bg_process import get_bg_manager
+from lumi.agents.runtime.bg_process import get_bg_manager, terminate_group
 from lumi.agents.runtime.bg_tasks import get_task_registry, new_task_id
 from lumi.agents.runtime.shell_env import provided_env
 from lumi.utils.constants import (
@@ -156,12 +156,17 @@ class LocalShellSession:
                     "PYTHONIOENCODING": "utf-8",
                 },
             )
-        return await asyncio.create_subprocess_shell(
-            "/bin/bash --norc --noprofile",
+        # 直接 exec bash 并自立进程组：超时 / 取消 / 关闭时按组终止，连同正在跑的命令
+        # 一起收掉（经 /bin/sh -c 包一层时只杀得到外层 sh，bash 与命令成孤儿）
+        return await asyncio.create_subprocess_exec(
+            "/bin/bash",
+            "--norc",
+            "--noprofile",
             stdin=asyncio.subprocess.PIPE,
             stdout=asyncio.subprocess.PIPE,
             stderr=asyncio.subprocess.STDOUT,
             cwd=self._working_dir,
+            start_new_session=True,
             env={
                 **os.environ,
                 **provided_env(self._working_dir),
@@ -223,10 +228,15 @@ class LocalShellSession:
         sentinel = _make_sentinel()
         wrapped = self._wrap_command(command, sentinel)
 
-        process.stdin.write(wrapped.encode())
-        await process.stdin.drain()
-
-        return await self._read_until_sentinel(process, sentinel, timeout)
+        try:
+            process.stdin.write(wrapped.encode())
+            await process.stdin.drain()
+            return await self._read_until_sentinel(process, sentinel, timeout)
+        except asyncio.CancelledError:
+            # 调用方被取消（stop / 切会话 / 断连）时命令仍在 shell 里跑：不收掉的话，
+            # 下一条命令排在它后面，还会读到它的输出和哨兵
+            await asyncio.shield(self._discard_process(process))
+            raise
 
     def _wrap_command(self, command: str, sentinel: str) -> str:
         """将用户命令包装为带哨兵标记和退出码的 shell 脚本片段。"""
@@ -246,9 +256,9 @@ class LocalShellSession:
         exit_code = -1
 
         try:
-            exit_code = await self._collect_output(
-                process.stdout, sentinel, buffer, timeout
-            )
+            # 整条命令的墙钟上限（逐行计时的话，持续有输出的命令永不超时）
+            async with asyncio.timeout(timeout):
+                exit_code = await self._collect_output(process.stdout, sentinel, buffer)
             return CommandResult(
                 stdout=str(buffer),
                 exit_code=exit_code,
@@ -256,7 +266,7 @@ class LocalShellSession:
                 timed_out=False,
             )
         except TimeoutError:
-            await self._handle_timeout(process)
+            await self._discard_process(process)
             return CommandResult(
                 stdout=str(buffer),
                 exit_code=exit_code,
@@ -269,21 +279,31 @@ class LocalShellSession:
         stdout: asyncio.StreamReader,
         sentinel: str,
         buffer: _BoundedOutputBuffer,
-        timeout: float,
     ) -> int:
         """从 stdout 逐行收集输出到 buffer，返回解析到的退出码。
 
         buffer 超限后续行会被丢弃，但循环会持续读取以消费 pipe
         直到遇到 sentinel — 避免 shell 因 stdout pipe 未被消费而阻塞。
-
-        Raises:
-            asyncio.TimeoutError: 读取超时。
         """
         exit_code = -1
+        long_line = False
         while True:
-            line_bytes = await asyncio.wait_for(stdout.readline(), timeout=timeout)
+            try:
+                line_bytes = await stdout.readuntil(b"\n")
+            except asyncio.IncompleteReadError as e:
+                line_bytes = e.partial
+            except asyncio.LimitOverrunError as e:
+                # 单行超过 StreamReader 上限（64KB）：丢掉超限部分、接着读到换行，
+                # 整行只留一行标记（哨兵恒在独立的一行）
+                await stdout.readexactly(e.consumed)
+                long_line = True
+                continue
             if not line_bytes:
                 break
+            if long_line:
+                long_line = False
+                buffer.append("... [超长行已截断]")
+                continue
 
             line = (
                 line_bytes.decode("utf-8", errors="replace").rstrip("\n").rstrip("\r")
@@ -305,14 +325,11 @@ class LocalShellSession:
 
         return exit_code
 
-    async def _handle_timeout(self, process: asyncio.subprocess.Process) -> None:
-        """超时后杀掉进程并清理 transport。"""
-        try:
-            process.kill()
-        except ProcessLookupError:
-            pass
-        await _close_process_transport(process)
+    async def _discard_process(self, process: asyncio.subprocess.Process) -> None:
+        """按组终止 shell（连同正在跑的命令）并丢弃，下次执行重建。"""
         self._process = None
+        await terminate_group(process)
+        await _close_process_transport(process)
 
     # -- Lifecycle --
 
@@ -337,8 +354,8 @@ class LocalShellSession:
             await proc.stdin.drain()
             await asyncio.wait_for(proc.wait(), timeout=GRACEFUL_SHUTDOWN_TIMEOUT)
         except TimeoutError:
-            proc.kill()
-            await proc.wait()
+            # exit 排在仍在跑的命令之后：按组终止，不留孤儿
+            await terminate_group(proc)
         except (ProcessLookupError, BrokenPipeError, OSError):
             pass
 
