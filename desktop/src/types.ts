@@ -579,6 +579,7 @@ declare global {
       openPath?: (path: string) => Promise<string>
       revealInFolder?: (path: string) => Promise<void>
       pathExists?: (path: string) => Promise<boolean>
+      readText: (path: string) => Promise<string>
       notify?: (payload: { title: string; body?: string; tag?: string }) => Promise<void>
       onNotifyClick?: (cb: (tag: string) => void) => void
       update?: {

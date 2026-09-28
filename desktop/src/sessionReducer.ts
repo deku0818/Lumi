@@ -237,6 +237,14 @@ export function hydrateHistory(s: SessionState, r: HistorySnapshot): SessionStat
   }
 }
 
+// 重连 ready 后按后端运行态复位本会话。断开期间的事件已丢（detach 期落 NoopChannel），
+// 本地的流式气泡 / 运行中工具卡不再可信，须以历史快照对账：后端已空闲时按轮次收尾处理——
+// 否则 hydrateHistory 因 hasStreaming 丢弃快照，残留气泡还会吞掉下一轮回复；仍在跑时
+// 只复位运行态，流式在途内容留到轮次收尾再对账。
+export function resumeAfterReconnect(s: SessionState, running: boolean, runStart?: number): SessionState {
+  return running ? { ...s, running, runStart } : { ...endTurn(s), runStart: undefined }
+}
+
 // 后端下发的会话模型 → 会话槽位补丁（switch_session / set_session_model 共用）。
 // **只存已固化的**：未固化的会话在后端跟随「新会话默认」，前端把 model 留空，
 // sessionModel 便自动 fallback 到 defaultModel——改默认时零 RPC 自动同步，

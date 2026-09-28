@@ -31,6 +31,7 @@ import {
   hasStreaming,
   hydrateHistory,
   reduceEvent,
+  resumeAfterReconnect,
   sessionModelPatch,
   userBubble,
   type SessionState,
@@ -575,14 +576,14 @@ export default function App() {
           // 本连接所属项目；重连得到全新 bridge 后据此切回原 thread + 重放临时目录
           let myWorkspace = ''
           let ready = false
-          // 历史是否已成功加载并应用：初次加载被瞬断打断、或快照因流式在途被
-          // hydrateHistory 丢弃时保持 false，重连 ready / 轮次收尾时补拉
+          // 本地视图是否已与后端历史对齐：初次加载被瞬断打断、重连（断开期事件已丢）、
+          // 快照取自轮次进行中时保持 false，重连 ready / 轮次收尾时补拉
           let loaded = false
           // 补拉在途标记：防抖动连接下多个 ready 并发重复 loadHistory
           let loadingHistory = false
-          // 历史快照统一落位（初次加载 / 补拉共用）：无流式在途 = hydrateHistory
-          // 会真正应用快照，此时才算加载完成——被丢弃时置 loaded 会把掉线前的
-          // 历史永久关在补拉门外
+          // 历史快照统一落位（初次加载 / 补拉共用）。仅当快照被真正应用（无流式在途）且
+          // 后端空闲（轮次进行中的快照缺在途调用的输出）时才算对齐——否则置 loaded 会把
+          // 缺失内容永久关在补拉门外
           const applySnapshot = (
             key: string,
             r: { items: HistoryItem[]; usage?: Usage; model?: string; context_window?: number },
@@ -591,8 +592,9 @@ export default function App() {
             setStore((s) => {
               const cur = s[key]
               if (!cur) return s
-              if (!hasStreaming(cur)) loaded = true
-              return { ...s, [key]: { ...hydrateHistory(cur, r), ...patch } }
+              const next = { ...hydrateHistory(cur, r), ...patch }
+              if (!hasStreaming(next) && !next.running) loaded = true
+              return { ...s, [key]: next }
             })
           }
           const backfillHistory = () => {
@@ -628,22 +630,25 @@ export default function App() {
                   for (const f of folderStoreRef.current[myKey] ?? []) {
                     void gw.addFolder(f)
                   }
-                  // 初次历史加载被瞬断打断：重连后补拉（真正应用才置 loaded，失败留给下次触发）
-                  backfillHistory()
                   // 复位运行态：断连时 sendMessage 的 catch 已 resetRunning(false)，续接后
-                  // 据后端实际运行态恢复 running（否则挂起轮被当空闲，stop 隐藏/输入栏启用）。
+                  // 据后端实际运行态恢复 running（否则挂起轮被当空闲，stop 隐藏/输入栏启用）；
+                  // 后端已空闲则收掉断开前残留的流式气泡 / 运行中工具卡。
                   setStore((s) =>
                     s[myKey]
                       ? {
                           ...s,
-                          [myKey]: {
-                            ...s[myKey],
-                            running: !!ev.payload.running,
-                            runStart: ev.payload.run_started_at ?? undefined,
-                          },
+                          [myKey]: resumeAfterReconnect(
+                            s[myKey],
+                            !!ev.payload.running,
+                            ev.payload.run_started_at ?? undefined,
+                          ),
                         }
                       : s,
                   )
+                  // 断开期间的事件已丢：以历史快照对账补回 gap 期消息（真正对齐才置
+                  // loaded，失败或轮次仍在跑时留给下次重连 / 轮次收尾）
+                  loaded = false
+                  backfillHistory()
                 }
                 return
               }
@@ -695,7 +700,7 @@ export default function App() {
                 myThread = ev.session_id ?? ''
                 myKey = sessionKey(backendId, myThread)
                 myWorkspace = ev.payload.workspace || ''
-                loaded = true // 新会话无历史可拉，重连分支不做补拉覆盖
+                loaded = true // 新会话无历史可拉（重连后照常对账）
                 gw.bindThread(myThread) // 重连携带 ?thread= → 后端断连续接
                 connsRef.current[myKey] = gw
                 setStore((s) => ({ ...s, [myKey]: emptySession() }))

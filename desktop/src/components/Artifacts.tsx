@@ -126,7 +126,7 @@ const fileIcon = (f: Artifact): LucideIcon => KIND_ICON[f.kind || ''] || File
 
 const typeText = (f: Artifact) => (ext(f) || f.kind || 'file').toUpperCase()
 
-// 文本类扩展名：这些走 fetch().text() 在面板里直接展示
+// 文本类扩展名：这些按文本读出、在面板里直接展示（见 TextPreview）
 const TEXT_EXT = new Set(
   'txt csv tsv json jsonl log xml yaml yml ini toml env py ts tsx js jsx mjs cjs css scss sass sh bash zsh rs go java kt c h cpp hpp cc rb php swift sql r lua pl conf cfg gitignore dockerfile makefile'.split(' '),
 )
@@ -348,7 +348,8 @@ function PreviewBody({ file, gw, remote }: { file: Artifact; gw?: Gateway; remot
   // html 可能带脚本 → 走 blob 通道（远程）隔绝 token，见 FramePreview
   if (kind === 'html')
     return <FramePreview url={url} title={file.name || file.path} remote={remote} />
-  if (kind === 'markdown' || kind === 'text') return <TextPreview url={url} markdown={kind === 'markdown'} />
+  if (kind === 'markdown' || kind === 'text')
+    return <TextPreview url={url} localPath={remote ? undefined : file.path} markdown={kind === 'markdown'} />
   // none：无法内嵌（视频/音频/旧版 Office/未知类型）→ 兜底用系统应用打开
   return <NoPreview file={file} remote={remote} message={t('files.noPreview')} />
 }
@@ -506,7 +507,7 @@ function NoPreview({
   )
 }
 
-function TextPreview({ url, markdown }: { url: string; markdown: boolean }) {
+function TextPreview({ url, localPath, markdown }: { url: string; localPath?: string; markdown: boolean }) {
   const { t } = useI18n()
   const [text, setText] = useState<string | null>(null)
   const [err, setErr] = useState(false)
@@ -514,24 +515,25 @@ function TextPreview({ url, markdown }: { url: string; markdown: boolean }) {
     let alive = true
     setText(null)
     setErr(false)
-    // 远程只取头 500KB：Range 是 CORS 安全列表头（单段 bytes=0-N 不触发预检），
-    // FileResponse 原生支持 → 回 206 只传这一段，而非整块下载 49MB 只为显示 1%。
-    // 本地 lumi-file 不带 Range（electron 协议不认，且读本地盘无网络成本）。
+    // 本地经主进程 IPC 读头 500KB：renderer 对 lumi-file 的 fetch 恒被 CORS 拦（见 main.cjs
+    // lumi:read-text）。远程经 /file 只取头 500KB：Range 是 CORS 安全列表头（单段 bytes=0-N
+    // 不触发预检），FileResponse 原生支持 → 回 206 只传这一段，而非整块下载 49MB 只为显示 1%。
     // slice 仍保留：服务端忽略 Range 时的兜底上限
-    const isHttp = /^https?:/.test(url)
-    fetch(url, isHttp ? { headers: { Range: `bytes=0-${500_000 - 1}` } } : undefined)
-      .then((r) => {
-        // 远程 /file 通道的非 2xx（401/404/413）带空体：不查状态码会渲染成静默空白
-        // （206 部分内容 r.ok 为真，正常放行）
-        if (!r.ok) throw new Error(`HTTP ${r.status}`)
-        return r.text()
-      })
+    const read = localPath
+      ? window.lumi.readText(localPath)
+      : fetch(url, { headers: { Range: `bytes=0-${500_000 - 1}` } }).then((r) => {
+          // 远程 /file 通道的非 2xx（401/404/413）带空体：不查状态码会渲染成静默空白
+          // （206 部分内容 r.ok 为真，正常放行）
+          if (!r.ok) throw new Error(`HTTP ${r.status}`)
+          return r.text()
+        })
+    read
       .then((s) => alive && setText(s.slice(0, 500_000)))
       .catch(() => alive && setErr(true))
     return () => {
       alive = false
     }
-  }, [url])
+  }, [url, localPath])
   if (err) return <div className="p-6 text-sm text-error/80">{t('files.loadFailed')}</div>
   if (text == null) return <div className="p-6 text-sm text-muted-foreground">…</div>
   if (markdown)

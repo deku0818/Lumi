@@ -22,7 +22,7 @@ protocol.registerSchemesAsPrivileged([
   { scheme: 'lumi-file', privileges: { standard: true, secure: true, supportFetchAPI: true, stream: true, bypassCSP: true } },
 ])
 
-// 仅 img/pdf/html 走 src 加载需正确 content-type；文本类经 fetch().text() 读取，类型不敏感。
+// img/pdf/html 走 src 加载需正确 content-type；文本类不走本协议（见 lumi:read-text）。
 const PREVIEW_MIME = {
   '.pdf': 'application/pdf', '.html': 'text/html', '.htm': 'text/html',
   '.png': 'image/png', '.jpg': 'image/jpeg', '.jpeg': 'image/jpeg', '.gif': 'image/gif',
@@ -431,6 +431,20 @@ ipcMain.handle('lumi:path-exists', async (_e, p) => {
     return true
   } catch {
     return false
+  }
+})
+
+// 本地文本预览只取头 TEXT_PREVIEW_BYTES。不走 lumi-file 的 fetch：自定义协议不在 Chromium
+// 跨源白名单里，fetch 恒被 CORS 拦；也不能给协议开 corsEnabled——沙箱 HTML 预览正靠这道
+// 拦截读不到本地文件（preload 只注入主 frame，iframe 拿不到本接口）。
+const TEXT_PREVIEW_BYTES = 500_000
+ipcMain.handle('lumi:read-text', async (_e, p) => {
+  const fh = await fs.promises.open(String(p), 'r')
+  try {
+    const { buffer, bytesRead } = await fh.read(Buffer.alloc(TEXT_PREVIEW_BYTES), 0, TEXT_PREVIEW_BYTES, 0)
+    return buffer.toString('utf8', 0, bytesRead)
+  } finally {
+    await fh.close()
   }
 })
 
