@@ -201,8 +201,8 @@ def set_effort(provider_id: str, model: str, level: str) -> str | None:
     effort = {m: lv for m, lv in prof.effort.items() if m != model}
     if level != "auto":
         effort[model] = level
-    out = [p for p in profiles if p.id != provider_id]
-    out.append(replace(prof, effort=effort))
+    # 原位替换：同名模型按 profile 顺序反查，挪位会换掉解析结果
+    out = [replace(p, effort=effort) if p.id == provider_id else p for p in profiles]
     _save(out, active, pointers)
     return level
 
@@ -319,15 +319,17 @@ def get_pointers() -> dict[str, dict]:
     return pointers
 
 
-def resolve_pointer(kind: str) -> ResolvedModel:
+def resolve_pointer(
+    kind: str, model_name: str | None = None, provider: str = ""
+) -> ResolvedModel:
     """解析某用途指针的模型 + 连接（按 provider id 精确取 base_url/api_key）。
 
-    未配置或指针失效 → 回退会话 active 模型（= 不单独配置时的行为）。
+    未配置或指针失效 → 回退给定的会话模型（调用方不在会话里则为新会话默认）。
     """
     profiles, _, pointers = _load_all()
     ptr = pointers[kind]
     if not ptr:
-        return resolve()  # 跟随会话模型
+        return resolve(model_name, provider)
     # ptr 已由 _parse 对同一 profiles 规范化，provider 必存在
     prof = next(p for p in profiles if p.id == ptr["provider"])
     return _resolved(ptr["model"], prof)
@@ -373,8 +375,10 @@ def upsert(profile: dict) -> ProviderProfile:
         max_tokens=_coerce_limits(profile.get("max_tokens"), models),
         catalog=_coerce_str_map(profile.get("catalog"), models),
     )
-    out = [p for p in profiles if p.id != pid]
-    out.append(saved)
+    # 编辑原位替换（同 set_effort 的理由），新增追加末尾
+    out = [saved if p.id == pid else p for p in profiles]
+    if old is None:
+        out.append(saved)
     _save(out, active, pointers)  # active 由 _save 规范化（首条/失效自动归位）
     return saved
 

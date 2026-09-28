@@ -60,7 +60,7 @@ def project_style_override(project_dir: Path) -> str | None:
     """
     try:
         data = json.loads((project_dir / ".lumi" / "config.json").read_text("utf-8"))
-    except (OSError, json.JSONDecodeError):
+    except (OSError, ValueError):  # 含 JSONDecodeError / 非 UTF-8
         return None
     style = data.get("style")
     return str(style) if style else None
@@ -263,7 +263,7 @@ class LumiConfig:
         for source, path in self.prompt_layers(name, project_dir):
             try:
                 content = path.read_text(encoding="utf-8")
-            except OSError:
+            except (OSError, ValueError):  # ValueError：非 UTF-8，跳过这层
                 continue
             if strip_frontmatter(content).strip():
                 return source, path, content

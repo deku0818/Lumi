@@ -331,7 +331,7 @@ export interface CronRun {
   job_name: string
   started_at: string
   finished_at: string
-  status: 'success' | 'failed' | 'timeout'
+  status: 'success' | 'failed' | 'timeout' | 'stopped' // stopped = 用户主动中断
   duration_ms: number
   output_summary: string
   error: string

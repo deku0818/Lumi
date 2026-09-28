@@ -8,6 +8,11 @@ from lumi.agents.cron.run_log import RunLog, RunRecord
 from lumi.utils.constants import MAX_RUN_LOG_FILE_SIZE
 
 
+def _local(*args: int) -> datetime:
+    """执行记录的时间一律带时区（本地偏移）。"""
+    return datetime(*args).astimezone()
+
+
 def _make_record(
     job_id: str = "test123456ab",
     job_name: str = "测试任务",
@@ -22,8 +27,8 @@ def _make_record(
     return RunRecord(
         job_id=job_id,
         job_name=job_name,
-        started_at=started_at or datetime(2025, 1, 15, 9, 0, 0),
-        finished_at=finished_at or datetime(2025, 1, 15, 9, 0, 5),
+        started_at=started_at or _local(2025, 1, 15, 9, 0, 0),
+        finished_at=finished_at or _local(2025, 1, 15, 9, 0, 5),
         status=status,
         duration_ms=duration_ms,
         output_summary=output_summary,
@@ -40,7 +45,7 @@ class TestRunRecordSerialization:
         d = record.to_dict()
         assert d["job_id"] == "test123456ab"
         assert d["status"] == "success"
-        assert d["started_at"] == "2025-01-15T09:00:00"
+        assert d["started_at"].startswith("2025-01-15T09:00:00")  # 带本地偏移
         assert d["error"] == ""
 
     def test_from_dict_roundtrip(self) -> None:
@@ -83,26 +88,26 @@ class TestRunLogAppendAndGetRecent:
         self, tmp_path: Path
     ) -> None:
         log = RunLog(tmp_path)
-        r1 = _make_record(started_at=datetime(2025, 1, 15, 8, 0, 0))
-        r2 = _make_record(started_at=datetime(2025, 1, 15, 9, 0, 0))
-        r3 = _make_record(started_at=datetime(2025, 1, 15, 10, 0, 0))
+        r1 = _make_record(started_at=_local(2025, 1, 15, 8, 0, 0))
+        r2 = _make_record(started_at=_local(2025, 1, 15, 9, 0, 0))
+        r3 = _make_record(started_at=_local(2025, 1, 15, 10, 0, 0))
         await log.append(r1)
         await log.append(r2)
         await log.append(r3)
         results = await log.get_recent("test123456ab")
-        assert results[0].started_at == datetime(2025, 1, 15, 10, 0, 0)
-        assert results[1].started_at == datetime(2025, 1, 15, 9, 0, 0)
-        assert results[2].started_at == datetime(2025, 1, 15, 8, 0, 0)
+        assert results[0].started_at == _local(2025, 1, 15, 10, 0, 0)
+        assert results[1].started_at == _local(2025, 1, 15, 9, 0, 0)
+        assert results[2].started_at == _local(2025, 1, 15, 8, 0, 0)
 
     async def test_get_recent_respects_limit(self, tmp_path: Path) -> None:
         log = RunLog(tmp_path)
         for i in range(10):
-            r = _make_record(started_at=datetime(2025, 1, 15, i, 0, 0))
+            r = _make_record(started_at=_local(2025, 1, 15, i, 0, 0))
             await log.append(r)
         results = await log.get_recent("test123456ab", limit=3)
         assert len(results) == 3
         # 最近的 3 条
-        assert results[0].started_at == datetime(2025, 1, 15, 9, 0, 0)
+        assert results[0].started_at == _local(2025, 1, 15, 9, 0, 0)
 
     async def test_recent_thread_ids_newest_first_skips_empty(
         self, tmp_path: Path
@@ -111,7 +116,7 @@ class TestRunLogAppendAndGetRecent:
         log = RunLog(tmp_path)
         for i, tid in enumerate(["t-a", "", "t-b"]):
             await log.append(
-                _make_record(started_at=datetime(2025, 1, 15, i, 0, 0), thread_id=tid)
+                _make_record(started_at=_local(2025, 1, 15, i, 0, 0), thread_id=tid)
             )
         assert await log.recent_thread_ids("test123456ab", 50) == ["t-b", "t-a"]
 
@@ -121,7 +126,7 @@ class TestRunLogAppendAndGetRecent:
         for i in range(10):
             await log.append(
                 _make_record(
-                    started_at=datetime(2025, 1, 15, i, 0, 0), thread_id=f"t-{i}"
+                    started_at=_local(2025, 1, 15, i, 0, 0), thread_id=f"t-{i}"
                 )
             )
         assert await log.recent_thread_ids("test123456ab", 3) == ["t-9", "t-8", "t-7"]
@@ -204,7 +209,7 @@ class TestRunLogTrim:
         new_record = _make_record(
             job_id=job_id,
             output_summary="最新记录",
-            started_at=datetime(2099, 12, 31, 23, 59, 59),
+            started_at=_local(2099, 12, 31, 23, 59, 59),
         )
         await log.append(new_record)
 
@@ -265,7 +270,7 @@ class TestPruneThreadIds:
             await log.append(
                 _make_record(
                     job_id="prune",
-                    started_at=datetime(2025, 1, 15, 9, i, 0),
+                    started_at=_local(2025, 1, 15, 9, i, 0),
                     thread_id=f"cron-{i}",
                 )
             )
@@ -284,7 +289,7 @@ class TestPruneThreadIds:
             await log.append(
                 _make_record(
                     job_id="idem",
-                    started_at=datetime(2025, 1, 15, 9, i, 0),
+                    started_at=_local(2025, 1, 15, 9, i, 0),
                     thread_id=f"cron-{i}",
                 )
             )

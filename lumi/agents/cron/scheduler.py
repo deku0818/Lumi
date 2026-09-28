@@ -171,7 +171,7 @@ class Scheduler:
 
     async def _compensate_missed_runs(self, jobs: list[Job]) -> None:
         """检查并补偿在离线期间错过的任务，有则补执行一次（coalesce）。"""
-        now = datetime.now()
+        now = datetime.now().astimezone()
         compensated = 0
 
         for job in jobs:
@@ -313,6 +313,16 @@ class Scheduler:
         Args:
             job_id: 要删除的任务 ID。
         """
+        # 在跑的先停并等它收尾：否则跑完 run_log.append 会把刚清掉的执行日志重建出来。
+        # agent 在本任务自己的执行里删自己时不能等自己（会死锁）——交给收尾时的存在性检查
+        task = self._running_tasks.get(job_id)
+        run_thread = self._active_runs.get(job_id, ("", None))[0]
+        self_delete = task is asyncio.current_task() or (
+            run_thread and current_thread_id.get() == run_thread
+        )
+        if task is not None and not self_delete:
+            task.cancel()
+            await asyncio.gather(task, return_exceptions=True)
         self.remove_job(job_id)
         await self._job_store.delete(job_id)
         await self.purge_job_data(job_id)
@@ -364,8 +374,9 @@ class Scheduler:
         """
         self._aps.resume_job(job_id)
 
-    async def trigger(self, job_id: str) -> None:
-        """立即执行一次指定任务，不影响 APScheduler 中的正常调度。
+    async def trigger(self, job_id: str) -> bool:
+        """立即执行一次指定任务，不影响 APScheduler 中的正常调度；返回是否真的起了一次执行
+        （该任务已在跑则跳过，返回 False）。
 
         从 JobStore 加载任务并通过 ``_run_job_task`` 创建独立执行，
         不修改 APScheduler 中该任务的 trigger 或下次触发时间。
@@ -379,7 +390,7 @@ class Scheduler:
         job = await self._job_store.get(job_id)
         if job is None:
             raise KeyError(f"任务 {job_id} 不存在")
-        await self._run_job_task(job)
+        return await self._run_job_task(job)
 
     def set_stream_runner(
         self, runner: Callable[[str, str, str], Awaitable[str]] | None
@@ -405,20 +416,21 @@ class Scheduler:
         logger.info("用户中断定时任务执行: [%s]", job_id)
         return True
 
-    async def _run_job_task(self, job: Job) -> None:
+    async def _run_job_task(self, job: Job) -> bool:
         """将 _execute_job 包装为 asyncio.Task 并登记进 ``_running_tasks``（按 job_id）。
 
-        APScheduler 回调入口。同 job 不并发：APScheduler 调度侧 max_instances=1 已挡定时
-        重叠，但 run_cron_job 手动触发绕过它——已有一次在跑就跳过（_active_runs / cancel_job
-        均按 job_id 单值建模，并发会串号）。
+        APScheduler 回调 / 手动触发 / 补偿共用入口。同 job 不并发（_fire_job 只起 task 就
+        返回，max_instances 挡不住重叠）：已有一次在跑就跳过并返回 False——_active_runs /
+        cancel_job 均按 job_id 单值建模，并发会串号。
         """
         running = self._running_tasks.get(job.id)
         if running is not None and not running.done():
             logger.info("任务 %s [%s] 已在执行中，跳过本次触发", job.name, job.id)
-            return
+            return False
         task = asyncio.create_task(self._execute_job(job), name=f"cron-job-{job.id}")
         self._running_tasks[job.id] = task
         task.add_done_callback(lambda t: self._on_task_done(job.id, t))
+        return True
 
     def _on_task_done(self, job_id: str, task: asyncio.Task[RunRecord]) -> None:
         # 只在登记的仍是本 task 时移除：同 job 紧接着重跑会覆盖该 key，别把新 task 抹掉。
@@ -433,7 +445,7 @@ class Scheduler:
 
     async def _execute_job(self, job: Job) -> RunRecord:
         """执行单个任务：Agent 调用、重试判定、结果投递与日志记录。"""
-        started_at = datetime.now()
+        started_at = datetime.now().astimezone()
         # thread_id 在起始生成（不再由 _invoke_agent 内部生成）：使运行态广播能带上
         # thread_id，前端在执行记录顶部显示可点进观测的活条目。注入 runner 时 bridge
         # 自带 checkpointer，thread 恒有；仅无 runner 且无常驻 checkpointer 时才空。
@@ -449,7 +461,7 @@ class Scheduler:
             output, status, error, caught_exc = await self._invoke_agent(job, thread_id)
             retry_scheduled = await self._handle_retry(job, caught_exc)
 
-            finished_at = datetime.now()
+            finished_at = datetime.now().astimezone()
             duration_ms = int((finished_at - started_at).total_seconds() * 1000)
 
             record = RunRecord(
@@ -467,6 +479,9 @@ class Scheduler:
             return record
         finally:
             self._active_runs.pop(job.id, None)
+            # 停止落在收尾投递阶段时 _invoke_agent 没机会清标记：残留会让之后关机宽限期的
+            # 取消被当成用户停止吞掉
+            self._user_stopped_jobs.discard(job.id)
             self._notify_job_status()
 
     async def _invoke_agent(
@@ -564,6 +579,10 @@ class Scheduler:
         retry_scheduled: bool = False,
     ) -> None:
         """记录执行日志、广播结果、应用会话保留策略、清理一次性任务。"""
+        # 以最新配置为准：执行期间任务可能被删（不留日志）或被改（AT 改周期就别删它）
+        latest = await self._job_store.get(job.id)
+        if latest is None:
+            return
         try:
             await self._run_log.append(record)
         except Exception:
@@ -592,7 +611,7 @@ class Scheduler:
             logger.warning("广播结果失败: %s [%s]", job.name, job.id, exc_info=True)
 
         # 已安排重试时保留 AT 任务，否则重试触发的 _fire_job 会读到 None 而丢失
-        if job.schedule.type == ScheduleType.AT and not retry_scheduled:
+        if latest.schedule.type == ScheduleType.AT and not retry_scheduled:
             try:
                 await self._job_store.delete(job.id)
                 logger.info("一次性任务已完成并删除: %s [%s]", job.name, job.id)

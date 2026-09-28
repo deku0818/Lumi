@@ -52,7 +52,7 @@ def _parse_md_file(file_path: str) -> dict[str, object] | None:
     """
     try:
         content = Path(file_path).read_text(encoding="utf-8")
-    except OSError as e:
+    except (OSError, ValueError) as e:  # ValueError：非 UTF-8（GBK 另存为等）
         logger.error(f"读取文件失败 {file_path}: {e}")
         return None
 

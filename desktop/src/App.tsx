@@ -489,8 +489,12 @@ export default function App() {
       if (viewingThisJob && payload.thread_id) {
         setReadRuns((r) => (r[payload.thread_id] ? r : { ...r, [payload.thread_id]: true }))
       }
-      // 正在看该任务且窗口聚焦时不打扰，其余情况按通知开关弹系统通知
-      if (notifyRef.current && (!viewingThisJob || !document.hasFocus())) {
+      // 正在看该任务且窗口聚焦时不打扰；用户自己按的停止也不报「失败」。其余按通知开关弹系统通知
+      if (
+        notifyRef.current &&
+        payload.status !== 'stopped' &&
+        (!viewingThisJob || !document.hasFocus())
+      ) {
         const t = tRef.current
         void window.lumi.notify?.({
           title: payload.status === 'success' ? t('notify.cronDone') : t('notify.cronFailed'),

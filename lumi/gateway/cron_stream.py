@@ -8,6 +8,7 @@
 
 from __future__ import annotations
 
+import asyncio
 from collections.abc import Awaitable, Callable
 
 from lumi.agents.cron.job_runner import extract_output
@@ -49,8 +50,14 @@ def build_cron_stream_runner(hub) -> Callable[[str, str, str], Awaitable[str]]:
             # 由 bridge 内部重试过（MAX_STREAM_RETRIES），走到这里即持久失败。
             if error:
                 raise RuntimeError(error)
-            msgs = await bridge.snapshot_messages()
-            return extract_output({"messages": msgs})
+            snap = await bridge.graph.aget_state(
+                {"configurable": {"thread_id": thread_id}}
+            )
+            if snap.next:
+                # 停机 drain 让图停在 super-step 边界、并没跑完：按「关机宽限期被取消」
+                # 处理——不记执行记录、AT 不删，重启后由补偿接手（否则半截输出记成 success）
+                raise asyncio.CancelledError("gateway drain")
+            return extract_output(snap.values)
         finally:
             await bridge.close()
 

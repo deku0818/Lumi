@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import asyncio
 from types import SimpleNamespace
 from unittest.mock import patch
 
@@ -22,17 +23,23 @@ class _Hub:
         self.published.append(frame)
 
 
-def _fake_bridge(events: list[BridgeEvent], final_text: str = "done"):
+def _fake_bridge(
+    events: list[BridgeEvent], final_text: str = "done", pending: tuple = ()
+):
+    class _Graph:
+        async def aget_state(self, config):
+            messages = [SimpleNamespace(content=final_text)]
+            return SimpleNamespace(next=pending, values={"messages": messages})
+
     class _FakeBridge:
+        graph = _Graph()
+
         async def initialize(self, **kw) -> None: ...
         def switch_thread(self, thread_id: str) -> None: ...
 
         async def stream_response(self, prompt, **kw):
             for e in events:
                 yield e
-
-        async def snapshot_messages(self):
-            return [SimpleNamespace(content=final_text)]
 
         async def close(self) -> None: ...
 
@@ -121,3 +128,13 @@ async def test_runner_is_auto_mode_without_approval_channel():
         await build_cron_stream_runner(_Hub())("do it", "cron-x", "/proj")
     assert captured["init"]["interactive"] is False
     assert captured["stream"]["tool_mode"] == "auto"
+
+
+async def test_drained_run_is_not_reported_as_success():
+    """停机 drain 让图停在边界（next 非空）：按取消处理，不把半截输出记成 success。"""
+    events = [BridgeEvent(kind=EventKind.MESSAGE_COMPLETE)]
+    bridge = _fake_bridge(events, final_text="file_a", pending=("CallModel",))
+    with patch("lumi.gateway.bridge.AgentBridge", bridge):
+        runner = build_cron_stream_runner(_Hub())
+        with pytest.raises(asyncio.CancelledError):
+            await runner("do it", "cron-x", "")

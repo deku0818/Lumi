@@ -37,7 +37,7 @@ def _read_json_dict(path: Path) -> dict[str, Any]:
     try:
         with open(path, encoding="utf-8") as f:
             data = json.load(f)
-    except (json.JSONDecodeError, OSError) as e:
+    except (OSError, ValueError) as e:  # 含 JSONDecodeError / 非 UTF-8
         logger.error(f"MCP配置文件加载失败。文件路径: {path}, 错误: {e}")
         return {}
     return data if isinstance(data, dict) else {}

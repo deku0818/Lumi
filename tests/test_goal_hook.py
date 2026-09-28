@@ -30,6 +30,8 @@ def _runtime():
         context=SimpleNamespace(
             get_goal=session_meta.get_goal,
             clear_goal=lambda tid: session_meta.update_meta(tid, goal=""),
+            model_name="m",
+            provider="p",
         )
     )
 
@@ -45,7 +47,7 @@ def _ctx(messages=None, **state):
 
 
 def _mock_judge(monkeypatch, *, ok, impossible=False, reason="r"):
-    async def fake(condition, messages):
+    async def fake(condition, messages, **_model):
         return goal_hook._GoalVerdict(ok=ok, impossible=impossible, reason=reason)
 
     monkeypatch.setattr(goal_hook, "_judge", fake)
@@ -133,7 +135,7 @@ def _pin_budget(monkeypatch, *, window=0, context_length=20):
     window=0 = 用户没配且目录也未收录 → 走 context_length 兜底；同时消除对本机
     ``~/.lumi``（providers.json / catalog 缓存）的隐性依赖。
     """
-    monkeypatch.setattr(goal_hook, "resolve", lambda: resolved(window))
+    monkeypatch.setattr(goal_hook, "resolve", lambda *a, **k: resolved(window))
     fake_cfg = type(
         "C",
         (),
@@ -149,7 +151,7 @@ def _pin_budget(monkeypatch, *, window=0, context_length=20):
 def test_render_transcript_no_truncation(monkeypatch):
     _pin_budget(monkeypatch, context_length=200000)
     msgs = [HumanMessage(content="hi"), AIMessage(content="hello")]
-    text = goal_hook._render_transcript(msgs)
+    text = goal_hook._render_transcript(msgs, None, "")
     assert "较早的对话已被截断" not in text
     assert "hello" in text
 
@@ -159,7 +161,7 @@ def test_render_transcript_truncates_head_and_counts(monkeypatch):
     _pin_budget(monkeypatch)
 
     msgs = [AIMessage(content=f"message-number-{i:03d}-padding") for i in range(10)]
-    text = goal_hook._render_transcript(msgs)
+    text = goal_hook._render_transcript(msgs, None, "")
 
     assert "较早的对话已被截断" in text
     assert "省略了前面" in text
@@ -174,7 +176,7 @@ def test_render_transcript_budget_uses_model_window(monkeypatch):
     _pin_budget(monkeypatch, window=1000)
 
     msgs = [AIMessage(content=f"message-number-{i:03d}-padding") for i in range(10)]
-    text = goal_hook._render_transcript(msgs)
+    text = goal_hook._render_transcript(msgs, None, "")
 
     assert "较早的对话已被截断" not in text
     assert "message-number-000" in text
@@ -192,7 +194,7 @@ def test_render_transcript_counts_tool_call_bytes(monkeypatch):
         ],
     )
     small = AIMessage(content="尾巴")
-    text = goal_hook._render_transcript([big, small])
+    text = goal_hook._render_transcript([big, small], None, "")
     # big 单条已超预算 → 被丢，触发截断说明；若只算 content(=0) 则不会截断
     assert "较早的对话已被截断" in text
     assert "尾巴" in text
@@ -209,7 +211,7 @@ def test_render_transcript_omitted_excludes_system(monkeypatch):
         AIMessage(content="老消息-padding-xxxx"),
         AIMessage(content="新消息-padding-yyyy"),
     ]
-    text = goal_hook._render_transcript(msgs)
+    text = goal_hook._render_transcript(msgs, None, "")
     # system + 1 条老 AI 被丢，但 N 只数会渲染的 → 1（不是 2）
     assert "省略了前面 1 条消息" in text
 
@@ -261,3 +263,31 @@ def test_stop_hook_order_goal_between_structured_and_dream():
         < names.index("goal_stop_hook")
         < names.index("auto_dream_stop_hook")
     ), names
+
+
+async def test_judge_runs_on_session_model(meta_file, monkeypatch):
+    # 回归：判官不传模型 → 落到「新会话默认」而不是本会话的模型（/model 切过的会话、
+    # 渠道会话都会用错模型，转录预算也按错的窗口算）
+    session_meta.update_meta(THREAD, goal="建 hello.txt")
+    seen: dict = {}
+
+    class _Chain:
+        async def ainvoke(self, _):
+            return goal_hook._GoalVerdict(ok=True, impossible=False, reason="")
+
+    def fake_structured_output(**kw):
+        seen["llm"] = (kw.get("model_name"), kw.get("provider"))
+        return _Chain()
+
+    def fake_resolve(*args):
+        seen["window_of"] = args
+        return resolved(0)
+
+    monkeypatch.setattr(goal_hook, "structured_output", fake_structured_output)
+    monkeypatch.setattr(goal_hook, "resolve", fake_resolve)
+    ctx = _ctx()
+    ctx.runtime.context.model_name = "m-sess"
+    ctx.runtime.context.provider = "p-sess"
+    await goal_hook.goal_stop_hook(ctx)
+    assert seen["llm"] == ("m-sess", "p-sess")
+    assert seen["window_of"] == ("m-sess", "p-sess")

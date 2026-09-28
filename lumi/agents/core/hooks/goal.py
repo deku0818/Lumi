@@ -78,7 +78,7 @@ class _GoalVerdict(BaseModel):
     )
 
 
-def _render_transcript(messages: list) -> str:
+def _render_transcript(messages: list, model_name: str | None, provider: str) -> str:
     """渲染转录并按预算截头保尾，超预算时前置截断说明。
 
     先整体渲染一次；未超预算（常态）直接返回，热路径零逐条开销。超预算才从尾部
@@ -87,10 +87,13 @@ def _render_transcript(messages: list) -> str:
     渲染文本衡量（含工具调用 ``name({args})``），不用 content 字节——tool_calls 的
     AI 消息 content 常为空，只算 content 会把工具密集尾部严重低估。
     """
-    # 窗口取判官实际所跑模型的（判官不显式传模型 = resolve() 的 active 模型）：
-    # 静态 context_length 会把 1M 窗口的判官按 200K 截转录，证据被截掉 → default-deny
-    # 误判未完成、反复拉回。目录未收录才退回 token.context_length 兜底。
-    window = resolve().context_window or get_config().config.token.context_length
+    # 窗口取判官实际所跑模型（= 本会话模型）的：静态 context_length 会把 1M 窗口的判官
+    # 按 200K 截转录，证据被截掉 → default-deny 误判未完成、反复拉回。目录未收录才退回
+    # token.context_length 兜底。
+    window = (
+        resolve(model_name, provider).context_window
+        or get_config().config.token.context_length
+    )
     budget = int(window * TRANSCRIPT_BUDGET_RATIO * BYTES_PER_TOKEN)
     full = extract_messages_as_text(messages or [])
     if text_size(full) <= budget:
@@ -113,21 +116,24 @@ def _render_transcript(messages: list) -> str:
     return f"{TRUNCATION_NOTE.format(n=omitted)}\n\n{body}" if omitted else body
 
 
-async def _judge(condition: str, messages: list) -> _GoalVerdict:
-    """跑一次判官：转录纯文本作 user 内容，复用会话模型，输出三态。
+async def _judge(
+    condition: str, messages: list, model_name: str | None, provider: str
+) -> _GoalVerdict:
+    """跑一次判官：转录纯文本作 user 内容，复用会话模型（连接一并给，同名模型可能
+    分属多个连接），输出三态。
 
     转录经 ``{transcript}`` 占位传入（不拼进模板字符串）——转录含工具参数的
     ``{...}``，直接拼会被 ChatPromptTemplate 当模板变量解析而 KeyError。
-
-    不显式传 model_name：``structured_output`` 缺省即 ``create_llm(model_name=None)``
-    → 解析会话 active 模型 + 连接（与显式 ``resolve()`` 同源），且内部 force_no_thinking。
     """
     chain = structured_output(
         template="{transcript}",
         structure=_GoalVerdict,
         system_prompt=JUDGE_SYSTEM.format(condition=condition),
+        model_name=model_name,
+        provider=provider,
     )
-    return await chain.ainvoke({"transcript": _render_transcript(messages)})
+    transcript = _render_transcript(messages, model_name, provider)
+    return await chain.ainvoke({"transcript": transcript})
 
 
 async def goal_stop_hook(ctx: HookContext) -> HookResult:
@@ -138,8 +144,8 @@ async def goal_stop_hook(ctx: HookContext) -> HookResult:
     - ok:false → ``AdditionalContext``（short-circuit dream）拉回 CallModel 继续。
     - ok:false + impossible → 清 goal + ``None`` 放行结束（条件永远达不成，别烧循环）。
 
-    判官复用会话模型且 ``structured_output`` 自带重试；重试后仍失败说明会话本身
-    也会失败，照常抛出（不做 fail-open）。
+    判官复用会话模型且 ``structured_output`` 自带重试；重试后仍失败则抛出，由 dispatch
+    记日志放行——本轮照常结束、goal 保留到下一轮（fail-closed 会在判官端点坏掉时无限拉回）。
     """
     # 子 agent（depth>0）不参与目标驱动：它经 contextvar 继承父 thread_id，若不挡
     # 会拿子 agent 的无关转录去判父 goal（误拉回子 agent / 误清父目标）。主 agent
@@ -155,7 +161,12 @@ async def goal_stop_hook(ctx: HookContext) -> HookResult:
     if not condition:
         return None
 
-    verdict = await _judge(condition, ctx.state.get("messages") or [])
+    verdict = await _judge(
+        condition,
+        ctx.state.get("messages") or [],
+        model_name=context.model_name,
+        provider=context.provider,
+    )
     logger.info(
         "[goal] 判定 ok=%s impossible=%s reason=%s",
         verdict.ok,

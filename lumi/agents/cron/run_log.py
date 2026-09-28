@@ -72,8 +72,9 @@ class RunRecord:
         return RunRecord(
             job_id=data["job_id"],
             job_name=data["job_name"],
-            started_at=datetime.fromisoformat(data["started_at"]),
-            finished_at=datetime.fromisoformat(data["finished_at"]),
+            # 存量 naive 值按本机本地时间解释
+            started_at=datetime.fromisoformat(data["started_at"]).astimezone(),
+            finished_at=datetime.fromisoformat(data["finished_at"]).astimezone(),
             status=data["status"],
             duration_ms=data["duration_ms"],
             output_summary=data["output_summary"],

@@ -1,6 +1,9 @@
 # config.json 配置说明
 
-Lumi 的项目级配置文件位于 `.lumi/config.json`，启动时自动加载。所有字段均可选，未配置时使用默认值。
+所有字段均可选，未配置时使用默认值。读哪份 config.json 取决于入口：
+
+- **`lumi serve`（桌面端 / 服务器）**：只读用户级 `~/.lumi/config.json`（设了 `LUMI_CONFIG_DIR` 则读那里）；项目 `.lumi/config.json` 里只有 `style` 生效（按会话所属项目）。
+- **命令行 `lumi` / `lumi -p`**：按当前目录向上发现，`./.lumi/config.json` 存在则用它，否则用户级。
 
 ---
 
@@ -41,17 +44,16 @@ CLI 参数可覆盖：`lumi -s code`。优先级：CLI > config.json > 默认值
 ```json
 {
   "agents": {
-    "tools": [],
-    "disabled_tools": [],
     "max_tokens": 8192,
     "recursion_limit": 5000,
+    "max_delegation_depth": 3,
     "checkpoint": "sqlite",
     "postgres_uri": ""
   }
 }
 ```
 
-字段说明：`tools` 为启用的工具白名单（空列表 = 全部启用）；`disabled_tools` 为禁用的工具黑名单（优先级高于 `tools`）；`max_tokens` 为模型单次输出 token 数的**兜底**值（优先用设置→模型里按模型配的覆盖值，其次 models.dev 探测到的该模型输出上限，两者都没有才用它）；`recursion_limit` 为 Agent 最大执行轮次；`checkpoint` 为检查点存储模式（`sqlite` | `memory` | `postgres`）；`postgres_uri` 为 PostgreSQL 连接 URI（仅 `checkpoint=postgres` 时需要）。
+字段说明：`max_tokens` 为模型单次输出 token 数的**兜底**值（优先用设置→模型里按模型配的覆盖值，其次 models.dev 探测到的该模型输出上限，两者都没有才用它）；`recursion_limit` 为 Agent 最大执行轮次；`max_delegation_depth` 为子 Agent 委派的最大嵌套层数（主 Agent 为第 0 层，到上限的子 Agent 不再能继续委派，0 = 禁止委派）；`checkpoint` 为检查点存储模式（`sqlite` | `memory` | `postgres`）；`postgres_uri` 为 PostgreSQL 连接 URI（仅 `checkpoint=postgres` 时需要）。
 
 ### vision — 视觉辅助模型
 
@@ -86,13 +88,23 @@ CLI 参数可覆盖：`lumi -s code`。优先级：CLI > config.json > 默认值
 {
   "token": {
     "once_tool_ratio": 0.1,
+    "round_tool_ratio": 0.3,
     "context_length": 200000,
-    "summary_threshold": 0.7
+    "summary_threshold": 0.7,
+    "summary_ptl_retry_max": 3,
+    "summary_ptl_retry_drop_ratio": 0.3,
+    "summary_failure_circuit_threshold": 3,
+    "summary_circuit_reset_seconds": 600
   }
 }
 ```
 
-字段说明：`once_tool_ratio` 为单次工具调用返回结果最大 token 占比；`context_length` 为模型上下文窗口最大 token 数；`summary_threshold` 为触发总结的阈值比例。
+字段说明：
+- `once_tool_ratio` / `round_tool_ratio`：单次工具结果 / 单轮全部工具结果的最大占比（相对 `context_length`，按字节衡量）；超出的结果被截断或卸载到文件。
+- `context_length`：上下文窗口的兜底值。工具结果上限恒以它为基准；压缩阈值优先用 models.dev 里该模型的真实窗口，查不到才用它。
+- `summary_threshold`：上下文用量达到模型窗口的这个比例时自动压缩历史。
+- `summary_ptl_retry_max` / `summary_ptl_retry_drop_ratio`：压缩请求本身超长时，最多截头重试几次、每次丢掉多少比例的最早轮次。
+- `summary_failure_circuit_threshold` / `summary_circuit_reset_seconds`：同一会话压缩连续失败这么多次后暂停压缩，过多少秒再试。
 
 ---
 
@@ -102,22 +114,6 @@ CLI 参数可覆盖：`lumi -s code`。优先级：CLI > config.json > 默认值
 {
   "tool_args": {
     "extra_match": ["knowledge_retrieval", "qs_retrieval"]
-  }
-}
-```
-
----
-
-## tool_offload — 工具结果卸载
-
-将大量返回结果卸载到文件系统，避免占用过多上下文窗口：
-
-```json
-{
-  "tool_offload": {
-    "enabled": false,
-    "token_threshold": 2000,
-    "tools": []
   }
 }
 ```
@@ -141,21 +137,19 @@ CLI 参数可覆盖：`lumi -s code`。优先级：CLI > config.json > 默认值
 
 ---
 
-## ptc — Programmatic Tool Calling
-
-将 MCP 工具转换为可直接调用的 Python 函数：
+## auto_dream — 后台记忆整理
 
 ```json
 {
-  "ptc": {
-    "enabled": true,
-    "tools": [],
-    "disabled_tools": []
+  "auto_dream": {
+    "enabled": false,
+    "min_hours": 24,
+    "min_sessions": 3
   }
 }
 ```
 
-字段说明：`tools` 为启用 PTC 的工具列表（空 = 所有 MCP 工具）；`disabled_tools` 为排除的工具列表。
+会话结束时按门控在后台把近期会话的零散记忆综合成连贯记忆（仅桌面端，按项目隔离，默认关闭）：距上次整理至少 `min_hours` 小时、且期间至少有 `min_sessions` 个其它会话活跃过才触发。
 
 ---
 

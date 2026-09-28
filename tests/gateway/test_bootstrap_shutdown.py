@@ -87,3 +87,17 @@ async def test_lifespan_drains_before_channel_teardown(light_process, monkeypatc
     async with lifespan(app):
         pass
     assert seen == [True]
+
+
+async def test_catalog_refreshes_periodically(light_process, monkeypatch):
+    # 回归：模型目录只在启动时拉一次，常驻 serve 此后再也拿不到新模型 / 新窗口
+    calls: list[int] = []
+
+    async def refresh() -> None:
+        calls.append(1)
+
+    monkeypatch.setattr("lumi.models.catalog.refresh", refresh)
+    monkeypatch.setattr(bootstrap, "_CATALOG_REFRESH_SECONDS", 0.01)
+    async with bootstrap.gateway_process():
+        await asyncio.sleep(0.1)
+    assert len(calls) >= 2

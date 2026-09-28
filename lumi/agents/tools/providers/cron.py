@@ -72,7 +72,7 @@ class CronInput(BaseModel):
     )
     schedule: str | None = Field(
         default=None,
-        description="调度规则，四种格式：相对时间 +10m/+2h/+1d（从现在起，一次性）；ISO 8601 时间点如 2025-01-15T09:00:00（一次性）；固定间隔 30s/5m/2h/1d；5 字段 cron 表达式如 */5 * * * *",
+        description="调度规则，四种格式：相对时间 +10m/+2h/+1d（从现在起，一次性）；ISO 8601 时间点（一次性，须是未来时间，建议带时区偏移如 +08:00）；固定间隔 30s/5m/2h/1d；5 字段 cron 表达式如 */5 * * * *",
     )
     prompt: str | None = Field(
         default=None,
@@ -140,7 +140,8 @@ async def _handle_delete(job_id: str) -> str:
 
 async def _handle_run(job_id: str) -> str:
     """立即执行一次任务。"""
-    await _service().trigger(job_id)
+    if not await _service().trigger(job_id):
+        return f"任务 {job_id} 已在执行中，未重复触发"
     return f"✅ 任务 {job_id} 已触发执行（异步），请稍后使用 runs 查看结果"
 
 

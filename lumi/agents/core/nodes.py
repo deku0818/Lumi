@@ -625,8 +625,9 @@ async def auto_classify(
     # chain 构造一并纳入 try：create_llm/with_structured_output 在构造期也可能抛
     # （如解析到的分类器模型缺 api_key），fail-closed 须覆盖构造与调用全程。
     try:
-        # 分类器模型独立可配（lumi.json providers 分区的 classifier 指针）；未配则回退会话模型。
-        clf = resolve_pointer("classifier")
+        # 分类器模型独立可配（lumi.json providers 分区的 classifier 指针）；未配则跟随本会话模型。
+        ctx = runtime.context
+        clf = resolve_pointer("classifier", ctx.model_name, ctx.provider)
         chain = structured_output(
             template=(
                 "用户最近的请求：\n{user_intent}\n\n"

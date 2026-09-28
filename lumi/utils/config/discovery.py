@@ -40,13 +40,14 @@ class ConfigDiscovery:
 
         # 1. 显式指定
         if self.explicit_dir:
-            self._cached_config_dir = Path(self.explicit_dir).resolve()
+            self._cached_config_dir = Path(self.explicit_dir).expanduser().resolve()
             return self._cached_config_dir
 
         # 2. 环境变量
         env_dir = os.getenv(self.ENV_VAR)
         if env_dir:
-            self._cached_config_dir = Path(env_dir).resolve()
+            # 与 lumi_home 同口径展开 ~：否则 '~/x' 落在 <cwd>/~/x，密钥与数据各在一处
+            self._cached_config_dir = Path(env_dir).expanduser().resolve()
             return self._cached_config_dir
 
         # 3. 当前目录查找

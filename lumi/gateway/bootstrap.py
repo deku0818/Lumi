@@ -24,6 +24,16 @@ from lumi.utils.logger import logger
 # 停机时留给在跑的图跑完当前 super-step 的**上限**（真停完就立刻返回，不空等）。
 # 一个 super-step 通常是一次模型调用或一批工具，超时就硬切——这不是等它跑完整轮。
 _DRAIN_GRACE_SECONDS = 3.0
+# models.dev 目录的刷新间隔：常驻 serve 不重启也要拿到新模型 / 新窗口（refresh 自带 TTL）
+_CATALOG_REFRESH_SECONDS = 24 * 3600
+
+
+async def _refresh_catalog_forever() -> None:
+    from lumi.models import catalog
+
+    while True:
+        await catalog.refresh()
+        await asyncio.sleep(_CATALOG_REFRESH_SECONDS)
 
 
 async def drain_runs() -> None:
@@ -40,14 +50,13 @@ async def drain_runs() -> None:
 @asynccontextmanager
 async def gateway_process():
     """进程级运行时上下文：进入时启动共享子系统，退出时收尾。任何 channel 复用。"""
-    from lumi.models import catalog
     from lumi.utils.config import get_config
 
     get_config().apply_env()
 
-    # 后台刷新 models.dev 模型目录（思考能力 + context_length 数据源）。
+    # 后台定期刷新 models.dev 模型目录（思考能力 + context_length 数据源）。
     # 必须持强引用：事件循环只弱引用 task，不留引用可能在协程首次挂起前被 GC。
-    catalog_task = asyncio.create_task(catalog.refresh())
+    catalog_task = asyncio.create_task(_refresh_catalog_forever())
 
     # 初始化定时任务子系统（按工作目录隔离）
     cron_runtime = None

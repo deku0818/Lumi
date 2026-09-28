@@ -346,6 +346,7 @@ async def test_cancel_job_records_stopped(
     """用户中断运行中的任务：记为 stopped，且 record 照常出（uncancel 后投递不被打断）。"""
     scheduler._execution_timeout = 10  # 够长，确保是 cancel 而非 timeout
     job = _make_interval_job("stop-test")
+    await scheduler._job_store.upsert(job)  # 执行中的任务恒在库里（不在 = 已被删）
 
     started = asyncio.Event()
 
@@ -470,6 +471,7 @@ async def test_execute_job_records_to_run_log(
 ) -> None:
     """_execute_job() 应将执行记录写入 RunLog。"""
     job = _make_interval_job("log-test")
+    await scheduler._job_store.upsert(job)  # 执行中的任务恒在库里（不在 = 已被删）
     mock_create = _mock_create_agent("日志测试输出")
 
     with patch(_PATCH_CREATE_AGENT, mock_create):
@@ -487,6 +489,7 @@ async def test_execute_job_broadcasts_result(scheduler: Scheduler) -> None:
     scheduler._delivery.register(mock_channel)
 
     job = _make_interval_job("broadcast-test")
+    await scheduler._job_store.upsert(job)  # 执行中的任务恒在库里（不在 = 已被删）
     mock_create = _mock_create_agent("广播内容")
 
     with patch(_PATCH_CREATE_AGENT, mock_create):
@@ -859,3 +862,116 @@ async def test_trigger_does_not_affect_aps_schedule(
         assert aps_job_after.next_run_time == next_run_before
     finally:
         await scheduler.stop()
+
+
+async def test_delete_running_job_stops_it_and_leaves_no_log(
+    scheduler: Scheduler, job_store: JobStore, run_log: RunLog
+) -> None:
+    """删除运行中的任务：先停掉这次执行，跑完也不再把刚清掉的执行日志写回来。"""
+    scheduler._execution_timeout = 10
+    job = _make_interval_job("del-running")
+    await job_store.upsert(job)
+    started = asyncio.Event()
+
+    async def slow_invoke(*args, **kwargs):
+        started.set()
+        await asyncio.sleep(10)
+        return {"messages": [MagicMock(content="不应到达")]}
+
+    mock_create = _mock_create_agent()
+    mock_create.return_value[0].graph.ainvoke = slow_invoke
+    with patch(_PATCH_CREATE_AGENT, mock_create):
+        await scheduler._run_job_task(job)
+        task = scheduler._running_tasks[job.id]
+        await started.wait()
+        await asyncio.wait_for(scheduler.delete_job(job.id), 2)
+    assert task.done()
+    assert await run_log.get_all(job.id) == []
+
+
+async def test_job_deleting_itself_mid_run(
+    scheduler: Scheduler, job_store: JobStore, run_log: RunLog
+) -> None:
+    """agent 在任务自己的执行里调 cron delete：不能等自己（死锁），跑完也不留执行日志。"""
+    job = _make_interval_job("self-delete")
+    await job_store.upsert(job)
+
+    async def invoke_that_deletes(*args, **kwargs):
+        await asyncio.wait_for(scheduler.delete_job(job.id), 2)
+        return {"messages": [MagicMock(content="删掉了自己")]}
+
+    mock_create = _mock_create_agent()
+    mock_create.return_value[0].graph.ainvoke = invoke_that_deletes
+    with patch(_PATCH_CREATE_AGENT, mock_create):
+        await scheduler._run_job_task(job)
+        record = await scheduler._running_tasks[job.id]
+    assert record.status == "success"
+    assert await job_store.get(job.id) is None
+    assert await run_log.get_all(job.id) == []
+
+
+async def test_at_job_edited_to_interval_mid_run_is_kept(
+    scheduler: Scheduler, job_store: JobStore
+) -> None:
+    """一次性任务执行期间被改成周期任务：收尾按最新配置判断，不再按快照删掉它。"""
+    job = _make_at_job("at-then-interval")
+    await job_store.upsert(job)
+    edited = Job(
+        id=job.id,
+        name=job.name,
+        schedule=Schedule(type=ScheduleType.INTERVAL, value="5m"),
+        prompt=job.prompt,
+    )
+
+    async def invoke_while_edited(*args, **kwargs):
+        await job_store.upsert(edited)
+        return {"messages": [MagicMock(content="ok")]}
+
+    mock_create = _mock_create_agent()
+    mock_create.return_value[0].graph.ainvoke = invoke_while_edited
+    with patch(_PATCH_CREATE_AGENT, mock_create):
+        await scheduler._execute_job(job)
+    assert await job_store.get(job.id) is not None
+
+
+async def test_stop_mark_does_not_outlive_the_run(scheduler: Scheduler) -> None:
+    """停止落在收尾投递阶段时标记也要清掉：否则之后关机宽限期的取消被当成用户停止吞掉。"""
+    job = _make_interval_job("late-stop")
+    await scheduler._job_store.upsert(job)
+    delivering = asyncio.Event()
+    release = asyncio.Event()
+
+    async def slow_deliver(*args, **kwargs):
+        delivering.set()
+        await release.wait()
+
+    scheduler._deliver_and_log = slow_deliver  # type: ignore[method-assign]
+    with patch(_PATCH_CREATE_AGENT, _mock_create_agent()):
+        await scheduler._run_job_task(job)
+        task = scheduler._running_tasks[job.id]
+        await delivering.wait()
+        scheduler.cancel_job(job.id)
+        release.set()
+        await asyncio.gather(task, return_exceptions=True)
+    assert job.id not in scheduler._user_stopped_jobs
+
+
+async def test_trigger_reports_when_already_running(
+    scheduler: Scheduler, job_store: JobStore
+) -> None:
+    """同一任务在跑时再触发会被跳过：如实返回未触发，工具别再回复「已触发执行」。"""
+    job = _make_interval_job("busy")
+    await job_store.upsert(job)
+    gate = asyncio.Event()
+
+    async def slow_invoke(*args, **kwargs):
+        await gate.wait()
+        return {"messages": [MagicMock(content="ok")]}
+
+    mock_create = _mock_create_agent()
+    mock_create.return_value[0].graph.ainvoke = slow_invoke
+    with patch(_PATCH_CREATE_AGENT, mock_create):
+        assert await scheduler.trigger(job.id) is True
+        assert await scheduler.trigger(job.id) is False
+        gate.set()
+        await scheduler._running_tasks[job.id]

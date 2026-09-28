@@ -104,8 +104,7 @@ async def _toggle_job(params: dict) -> dict:
 
 async def _run_job(params: dict) -> dict:
     _, service = _service()
-    await service.trigger(params.get("job_id", ""))
-    return {"ok": True}
+    return {"ok": await service.trigger(params.get("job_id", ""))}
 
 
 async def _stop_run(params: dict) -> dict:

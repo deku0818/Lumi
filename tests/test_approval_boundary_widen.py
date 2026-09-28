@@ -80,7 +80,7 @@ def _stub_classifier(monkeypatch, decision: str) -> None:
 
     monkeypatch.setattr(
         "lumi.agents.core.nodes.resolve_pointer",
-        lambda _name: SimpleNamespace(model="m", conn_kwargs=lambda: {}),
+        lambda *_a: SimpleNamespace(model="m", conn_kwargs=lambda: {}),
     )
     monkeypatch.setattr(
         "lumi.agents.core.nodes.structured_output", lambda **_kw: _Chain()
