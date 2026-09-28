@@ -230,6 +230,39 @@ async def test_late_fire_still_runs(scheduler: Scheduler) -> None:
         await scheduler.stop()
 
 
+async def test_offline_missed_at_job_runs_once_at_start(
+    scheduler: Scheduler, job_store: JobStore
+) -> None:
+    """离线期间过点的一次性任务只由启动补偿执行一次：再交给 APScheduler 会在启动
+    瞬间再触发一次（晚到不限时），快速失败时同一任务被执行两遍。"""
+    calls: list[str] = []
+
+    async def failing_runner(prompt: str, thread_id: str) -> str:
+        calls.append(thread_id)
+        raise RuntimeError("boom")
+
+    scheduler.set_stream_runner(failing_runner)
+    decide = scheduler._should_compensate
+
+    async def slow_decide(job: Job, now: datetime) -> bool:
+        await asyncio.sleep(0.3)  # 补偿判定晚于 APScheduler 首轮触发（竞态的坏时序）
+        return await decide(job, now)
+
+    scheduler._should_compensate = slow_decide  # type: ignore[method-assign]
+    past = (datetime.now() - timedelta(hours=2)).isoformat()
+    await job_store.upsert(
+        Job(
+            name="once", schedule=Schedule(type=ScheduleType.AT, value=past), prompt="p"
+        )
+    )
+    await scheduler.start()
+    try:
+        await asyncio.sleep(1)
+    finally:
+        await scheduler.stop()
+    assert len(calls) == 1
+
+
 # --- 任务执行逻辑测试（7.2）---
 
 # patch 目标：_execute_job 内部通过 lazy import 引入 create_agent

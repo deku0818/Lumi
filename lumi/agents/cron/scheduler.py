@@ -133,10 +133,18 @@ class Scheduler:
             return
 
         jobs = await self._job_store.load()
+        now = datetime.now().astimezone()
         for job in jobs:
             if not job.enabled:
                 continue
             try:
+                # 离线期间已过点的一次性任务只归下面的补偿处理：交给 APScheduler 会在
+                # 启动瞬间再触发一次（晚到不限时），与补偿重复执行
+                if (
+                    job.schedule.type == ScheduleType.AT
+                    and job.schedule.to_trigger().run_date <= now
+                ):
+                    continue
                 self._register_job(job)
             except Exception:
                 logger.warning(
