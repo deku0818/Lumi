@@ -62,8 +62,12 @@ def _parse_md_file(file_path: str) -> dict[str, object] | None:
         logger.warning(f"文件缺少有效 YAML frontmatter: {file_path}")
         return None
 
-    # tools 支持 CSV 字符串和列表两种写法
-    tools_raw = metadata.get("tools", [])
+    if not metadata.get("name"):
+        logger.warning(f"文件缺少 name 字段，跳过: {file_path}")
+        return None
+
+    # tools 支持 CSV 字符串和列表两种写法；`tools:` 留空（None）同不写 = 全部工具
+    tools_raw = metadata.get("tools") or []
     tools = (
         [t.strip() for t in tools_raw.split(",")]
         if isinstance(tools_raw, str)
@@ -71,7 +75,7 @@ def _parse_md_file(file_path: str) -> dict[str, object] | None:
     )
 
     return {
-        "name": metadata.get("name", ""),
+        "name": metadata["name"],
         "description": metadata.get("description", ""),
         "model": metadata.get("model"),
         "tools": tools,

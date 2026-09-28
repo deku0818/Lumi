@@ -51,7 +51,7 @@ Hook 签名 `async (HookContext) -> HookResult`，`HookResult = None | Command |
 
 ### Shell hook 决策协议（`protocol.py`）
 
-输入（stdin JSON）：`{version, event, thread_id, payload, messages_tail}`。
+输入（stdin JSON）：`{version, event, thread_id, depth, stop_hook_active, payload, messages_tail}`——`depth` 为委派深度（0 = 主 agent，config hook 随会话被子代理继承，据此区分），`stop_hook_active` 表示本轮已有 hook 注入过提醒（Stop hook 据此避免无限拉回）。子进程工作目录为所属项目根。
 输出（stdout JSON）：`{decision: "allow"|"deny"|"passthrough", additionalContext?, stopReason?}`
 → `deny` 翻译为 `Block`，`additionalContext` 翻译为 `AdditionalContext`。
 `matcher` 正则仅 PreToolUse/PostToolUse 生效，未命中则跳过 subprocess。

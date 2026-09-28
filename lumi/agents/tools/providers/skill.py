@@ -52,9 +52,17 @@ async def skill(name: str, runtime: ToolRuntime) -> str:
     if skill_config is None:
         return f"技能 '{name}' 不存在，请检查技能名称是否正确"
 
-    # 源目录即胜出层 SKILL.md 所在目录（path 由 loader 落好，无需再扫）
+    return render_skill(skill_config)
+
+
+def render_skill(skill_config: SkillConfig) -> str:
+    """技能正文 + 资源目录提示（skill 工具与 /技能 斜杠命令共用）。
+
+    源目录即胜出层 SKILL.md 所在目录（path 由 loader 落好）——内置技能在安装包里，
+    正文说的「本目录 references/」不给出路径模型无从找起。
+    """
     source_dir = Path(skill_config.path).parent if skill_config.path else None
     skill_path = str(source_dir) if source_dir else f"skills/{skill_config.name}"
-    tips = f"\n\n---\n**Tips**: 技能资源位于 `{skill_path}/` 目录下。"
-
-    return skill_config.prompt + tips
+    return (
+        f"{skill_config.prompt}\n\n---\n**Tips**: 技能资源位于 `{skill_path}/` 目录下。"
+    )

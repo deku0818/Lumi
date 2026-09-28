@@ -112,7 +112,7 @@ def build_skill_command_blocks(
 
     Args:
         skill_name: 技能名称（不含前导 "/"）。
-        content: 技能正文（通常为 skill.prompt，可能已拼接 extra_text）。
+        content: 技能正文（``render_skill`` 的产物：正文 + 资源目录提示）。
         extra_text: 用户在斜杠命令后追加的原始文本。
     """
     meta = (
@@ -676,7 +676,8 @@ class AgentBridge:
     ) -> AsyncGenerator[BridgeEvent, None]:
         """执行技能斜杠命令并 yield 事件流。
 
-        查表拿到 skill.prompt，按统一约定构建结构化消息后复用 stream_response。
+        查表拿到技能（正文 + 资源目录，与 skill 工具同一渲染），按统一约定构建结构化
+        消息后复用 stream_response。
 
         Args:
             name: 技能名称（不含前导 "/"）。
@@ -725,10 +726,9 @@ class AgentBridge:
             yield BridgeEvent(kind=EventKind.ERROR, error=f"未知命令: /{name}")
             return
 
-        content = skill.prompt
-        if extra_text:
-            content = f"{content}\n\n{extra_text}"
-        blocks = build_skill_command_blocks(name, content, extra_text)
+        from lumi.agents.tools.providers.skill import render_skill
+
+        blocks = build_skill_command_blocks(name, render_skill(skill), extra_text)
         # 显示声明：desktop 无 message_meta 时声明「/名 输入」单条（content 是
         # 命令 wire 格式，纯给模型看）；IM 渠道自带 items（用户敲的原文）原样用
         message_meta = dict(message_meta or {})

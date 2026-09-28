@@ -25,7 +25,6 @@ from lumi.agents.runtime.bg_tasks import (
 )
 from lumi.agents.runtime.shell_session import run_with_shell
 from lumi.utils.config import get_config
-from lumi.utils.logger import logger
 
 _AGENT_DESCRIPTION = """启动一个专门的子代理（独立上下文）来自主完成复杂任务。每种代理类型都具备特定的能力和可用工具。
 
@@ -78,8 +77,8 @@ async def create_subagent(
 
 def _child_tools(all_tools: list, child_depth: int, max_depth: int) -> list:
     """子代理工具集：不含 ask（向用户提问只归主 agent——IM 渠道无处作答、后台无人应答）；
-    未达委派上限保留 agent 工具（可继续往下委派），否则剔除以防无限递归。"""
-    excluded = {"ask"} if child_depth < max_depth else {"ask", "agent"}
+    未达委派上限保留 agent / workflow（可继续往下委派），否则剔除以防无限递归。"""
+    excluded = {"ask"} if child_depth < max_depth else {"ask", "agent", "workflow"}
     return [t for t in all_tools if t.name not in excluded]
 
 
@@ -145,9 +144,8 @@ async def agent(
     # 边界放宽回调随审批通道一同传播：子代理复用父 PermissionEngine，其审批 / 分类器
     # 裁决通过后放宽的是同一条边界（后台子代理无活流、也无审批，故不在此路径）
     context.widen_boundary = runtime.context.widen_boundary
-    # tool_mode 是 context 属性：从父 context 继承实时值（父运行中切换的模式随之传播）
-    context.tool_mode = runtime.context.tool_mode
-    logger.debug("[agent tool] resolved tool_mode=%s", context.tool_mode)
+    # 审批模式是会话属性：挂到父 context 上实时读写（父运行中切换即时生效）
+    context.mode_parent = runtime.context
     inputs = {
         "messages": [HumanMessage(content=prompt)],
         "depth": child_depth,

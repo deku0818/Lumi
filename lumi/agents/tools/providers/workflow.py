@@ -36,6 +36,7 @@ from lumi.agents.runtime.bg_tasks import (
     new_task_id,
     run_background_task,
 )
+from lumi.utils.config import get_config
 
 
 class WorkflowInput(BaseModel):
@@ -81,7 +82,7 @@ WORKFLOW_DESCRIPTION = """用一段确定性的 Python 脚本编排一群子代�
 否则，即使任务看起来很适合编排，也**不要主动调用**——正常处理任务即可；若任务确实庞大，可一句话建议用户「开启 Ultra 档位后我能并行拆解处理」，由用户决定。
 
 ## 执行模型
-后台执行：本工具立即返回 task_id，脚本在后台跑完后你会自动收到 task-notification。脚本里的「干活」单元是 `agent()`——派一个独立上下文的 LLM 子代理（语义推理），子代理可用 bash / filesystem 等工具自主完成确定性的活。并发上限约 min(16, CPU-2)，传多少都收，只是排队。
+后台执行：本工具立即返回 task_id，脚本在后台跑完后你会自动收到 task-notification。脚本里的「干活」单元是 `agent()`——派一个独立上下文的 LLM 子代理（语义推理），子代理可用 bash / filesystem 等工具自主完成确定性的活。并发上限 4~16（随 CPU 核数），传多少都收，只是排队。
 
 ## 脚本怎么写
 脚本是一段 Python 代码片段（**不要**再包 `def` / `async def`，引擎会自动包进 async 函数），可直接用顶层 `await` 和 `return`。`return` 的值就是最终产物，形状由你定。两种给法：内联 `script`，或把脚本写进文件、用 `path` 引用（版本化、可复核，**优先于** `script`）。
@@ -89,13 +90,12 @@ WORKFLOW_DESCRIPTION = """用一段确定性的 Python 脚本编排一群子代�
 
 - `agent(prompt, *, schema=None, label=None, phase=None, agent_name=None)` —— async，派一个 LLM 子代理。给了 `schema`（JSON Schema dict）就强制结构化输出、返回校验过的 dict；否则返回子代理最终文本。\
 `agent_name` 指定 .lumi/agents 里的具名子代理，缺省用通用子代理。**注意**：schema 模式下若子代理多次填不对结构会被中止，此时返回 `None`——拿来索引前先判空（`r or {}`、`[x for x in r if x]`）。
-- `parallel(thunks)` —— async，**屏障**：并发跑一组无参 thunk（`lambda: agent(...)`），等全部完成才返回列表；失败项落 `None`，用前 `[x for x in r if x]` 过滤。
+- `parallel(thunks)` —— async，**屏障**：并发跑一组 `lambda: agent(...)`（或直接传 `agent(...)`，Python 协程不 await 不会执行），等全部完成才返回列表；失败项落 `None`（原因记进日志），用前 `[x for x in r if x]` 过滤。
 - `pipeline(items, stage1, stage2, ...)` —— async，**无屏障**：每个 item 独立穿过所有 stage，谁先走完谁先往下。stage 收 `(prev, item, idx)`（按形参个数截取，\
 `lambda d: ...` 也行），第一个 stage 的 prev 就是 item。**默认优先用 pipeline**，只有 stage N 真需要 N-1 的全部结果时才用 parallel。
 - `phase(title)` / `log(msg)` —— 标记阶段 / 发进度。`args` —— 你传入的输入值。
 
 ## 关键规则
-- thunk 必须是**无参函数**：`lambda: agent(...)`，不是 `agent(...)`（后者会立即执行，parallel 失去调度权）。
 - 脚本本身不能 `import` / 读写文件（它只是编排骨架）；干活靠 `agent()`——确定性的重活让子代理用 bash / filesystem 等工具去做。
 - 让结果可信：每条发现派独立 skeptic 用 `schema` 对抗式验证（prompt 里要求"默认证伪，须独立核对源码"）。
 
@@ -143,6 +143,10 @@ async def workflow(
     args=None,
 ) -> str:
     """用一段确定性脚本编排子代理，后台执行（详见 WORKFLOW_DESCRIPTION）。"""
+    # 与 agent 工具同一道委派深度网关（max_delegation_depth=0 即禁止任何扇出）
+    max_depth = get_config().config.agents.max_delegation_depth
+    if runtime.state.get("depth", 0) >= max_depth:
+        return f"已达到最大委派层数（{max_depth}），无法再用 workflow 扇出子代理"
     # path 优先于 script：读出版本化脚本文件（可审计 / 可迭代）。
     if path:
         file_path = resolve_tool_path(path)
@@ -155,8 +159,8 @@ async def workflow(
         return "workflow 需要提供 script（内联脚本）或 path（脚本文件路径）之一。"
     name = name or "workflow"
 
-    # 子代理经父 context 复用 PermissionEngine（共享工作区边界）、项目根与渠道 env，
-    # 继承父 tool_mode。
+    # 子代理经父 context 复用 PermissionEngine（共享工作区边界）、项目根与渠道 env；
+    # 无审批通道，以 auto 运行。
     engine = WorkflowEngine(script, parent=runtime.context, args=args, name=name)
     try:
         engine.compile()

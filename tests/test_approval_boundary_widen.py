@@ -12,6 +12,7 @@ import pytest
 from langchain_core.messages import AIMessage
 
 from lumi.agents.core.nodes import auto_classify, human_approval, is_use_tool
+from lumi.agents.core.state import LumiAgentContext
 from lumi.agents.permissions.engine import PermissionEngine
 from lumi.agents.permissions.matcher import build_exact_expr
 from lumi.agents.permissions.routing import route_decision
@@ -44,7 +45,7 @@ def wired(tmp_path):
         bridge = AgentBridge()
         bridge._context = SimpleNamespace(permission_engine=engine)
         runtime = SimpleNamespace(
-            context=SimpleNamespace(
+            context=LumiAgentContext(
                 permission_engine=engine,
                 approval_broker=_FakeBroker({"decision": decision}),
                 widen_boundary=bridge.folders.widen_for_violations,

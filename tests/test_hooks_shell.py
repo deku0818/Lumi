@@ -208,3 +208,28 @@ def test_build_config_hooks_preserves_declaration_order(tmp_path):
     hooks = build_config_hooks(tmp_path, user_config_dir=_user_dir_absent(tmp_path))
     names = [h.__name__ for h in hooks["PreToolUse"]]
     assert names == ["shell_hook_a.sh", "shell_hook_b.sh"]  # 声明顺序
+
+
+def test_project_equal_to_user_dir_parent_loads_hooks_once(tmp_path):
+    # 回归：项目目录恰为用户配置目录的父目录（项目 = ~）时，同一个 hooks.json 被当作
+    # 用户级与项目级各加载一次，hook 执行两遍
+    cmd = _write_script(tmp_path, "echo '{}'")
+    _write_hooks_json(tmp_path, {"Stop": [{"command": cmd}]})
+    hooks = build_config_hooks(tmp_path, user_config_dir=tmp_path / ".lumi")
+    assert len(hooks["Stop"]) == 1
+
+
+async def test_config_hook_runs_in_project_dir_and_sees_depth(tmp_path):
+    # 回归：config hook 子进程不设 cwd（落在 serve 进程目录，git / pytest 类 hook 在错误
+    # 目录执行）；输入也不区分主 agent 与子代理
+    project = tmp_path / "proj"
+    project.mkdir()
+    seen = tmp_path / "seen"
+    cmd = _write_script(tmp_path, f"pwd > {seen}.cwd; cat > {seen}.json; echo '{{}}'")
+    _write_hooks_json(project, {"Stop": [{"command": cmd}]})
+    [hook] = build_config_hooks(project, user_config_dir=_user_dir_absent(tmp_path))[
+        "Stop"
+    ]
+    await hook(_ctx(state={"messages": [], "depth": 1}))
+    assert (tmp_path / "seen.cwd").read_text().strip() == str(project)
+    assert json.loads((tmp_path / "seen.json").read_text())["depth"] == 1

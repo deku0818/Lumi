@@ -411,13 +411,10 @@ def is_use_tool(state: LumiAgentState, runtime: Runtime[LumiAgentContext]) -> st
         # 模型未调工具想结束 → OnAgentStop 节点分发 Stop hooks（默认 END）
         return "OnAgentStop"
 
-    decision = route_decision(
-        tool_calls,
-        runtime.context.tool_mode,
-        runtime.context.permission_engine,
-    )
+    tool_mode = runtime.context.mode_root().tool_mode
+    decision = route_decision(tool_calls, tool_mode, runtime.context.permission_engine)
     # privileged 的「自动放行」本身即授权，这条路上既不审批也不过分类器，没有别的挂钩点
-    if decision == "ToolExecutor" and runtime.context.tool_mode == "privileged":
+    if decision == "ToolExecutor" and tool_mode == "privileged":
         _widen_boundary_for(tool_calls, runtime)
     return decision
 
@@ -545,9 +542,9 @@ def _apply_decisions(
             update={"messages": build_reject_messages(tool_calls, content=content)},
         )
     # tool_mode 是 context（运行时共享）属性，直接改即对后续工具生效——
-    # 无需经 Command.update 写 state（state 已无此字段）。
+    # 无需经 Command.update 写 state（state 已无此字段）。子代理审批卡里切换的是会话模式。
     if set_tool_mode:
-        runtime.context.tool_mode = set_tool_mode
+        runtime.context.mode_root().tool_mode = set_tool_mode
     _widen_boundary_for(approved, runtime)
     update = (
         {"messages": build_reject_messages(rejected, content=content)}

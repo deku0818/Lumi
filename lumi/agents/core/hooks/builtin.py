@@ -4,7 +4,7 @@ from __future__ import annotations
 
 from langchain_core.messages import ToolMessage
 
-from lumi.agents.core.hooks.dispatch import register_hook
+from lumi.agents.core.hooks.dispatch import _reminder_message, register_hook
 from lumi.agents.core.hooks.schema import AdditionalContext, HookContext, HookResult
 from lumi.agents.core.meta_message import is_reminder_message, iter_current_turn
 from lumi.agents.core.structured_tool import (
@@ -16,6 +16,9 @@ from lumi.utils.logger import logger
 # 本轮最多拉回模型几次去补结构化输出——超过则放弃 END，避免模型一直纯文本结束
 # 时 OnAgentStop↔CallModel 无限循环直到 GraphRecursionError。
 MAX_STOP_PULLBACKS = 3
+
+# 本 hook 注入的拉回 reminder 内容：计数只认它，别的 hook（如项目 lint）的 reminder 不算
+_PULLBACK_CONTENT = _reminder_message(STRUCTURED_OUTPUT_REMINDER).content
 
 
 def _is_accepted_structured(msg) -> bool:
@@ -31,14 +34,14 @@ def _pullback_count(messages) -> int:
     """本轮已注入过几次结构化输出 reminder（拉回次数）。
 
     本轮窗口由 ``iter_current_turn`` 界定。从新到旧遇 accepted structured ToolMessage
-    即停（已成功）；每条 hook reminder 计 +1（按 ``is_reminder_message`` 标记识别，不
-    再嗅探 reminder 文本，措辞改了也不失效）。
+    即停（已成功）；本 hook 注入的每条 reminder 计 +1（按 ``is_reminder_message`` 标记
+    且内容与 ``_PULLBACK_CONTENT`` 同源识别，其它 hook 的 reminder 不计）。
     """
     count = 0
     for msg in iter_current_turn(messages):
         if _is_accepted_structured(msg):
             break
-        if is_reminder_message(msg):
+        if is_reminder_message(msg) and msg.content == _PULLBACK_CONTENT:
             count += 1
     return count
 

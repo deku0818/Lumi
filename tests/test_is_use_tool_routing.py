@@ -14,6 +14,7 @@ from pathlib import Path
 from langchain_core.messages import AIMessage
 
 from lumi.agents.core.nodes import is_use_tool
+from lumi.agents.core.state import LumiAgentContext
 from lumi.agents.core.structured_tool import STRUCTURED_OUTPUT_TOOL_NAME
 from lumi.agents.permissions.engine import PermissionEngine
 from lumi.agents.permissions.models import (
@@ -41,7 +42,7 @@ def _runtime(engine, tool_mode="default"):
     本文件只断言路由目标。放宽行为见 test_approval_boundary_widen。
     """
     return types.SimpleNamespace(
-        context=types.SimpleNamespace(
+        context=LumiAgentContext(
             permission_engine=engine, tool_mode=tool_mode, widen_boundary=None
         )
     )

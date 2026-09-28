@@ -59,11 +59,14 @@ def make_shell_hook(
     command: str,
     timeout_ms: int = DEFAULT_TIMEOUT_MS,
     matcher: str | None = None,
+    cwd: Path | None = None,
 ) -> Hook:
     """构造一个 Shell command hook，可直接 ``register_hook(event, hook)``。
 
     启动期校验 command 必须是绝对路径 + 存在 + 可执行——不通过抛 ``ValueError``，
     由 ``config_loader`` 捕获后 log 跳过该条（不让坏配置静默漂移到运行时）。
+    ``cwd``：子进程工作目录（config hook 为所属项目根；serve 从不 chdir，缺省会落在
+    进程启动目录，git / pytest 类 hook 就在错误的目录执行）。
     """
     # isabs 而非 startswith("/")：后者把 Windows 的 C:\... 一律判成非法，那边所有
     # shell hook 都会在启动期被跳过
@@ -89,6 +92,7 @@ def make_shell_hook(
             stdout=asyncio.subprocess.PIPE,
             stderr=asyncio.subprocess.PIPE,
             env=_filter_env(),
+            cwd=cwd,
         )
 
         try:

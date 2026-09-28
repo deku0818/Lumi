@@ -379,6 +379,25 @@ async def test_stop_hook_gives_up_after_max_pullbacks():
     assert await structured_output_stop_hook(ctx) is None
 
 
+async def test_stop_hook_ignores_other_hooks_reminders():
+    # 回归：别的 hook（如项目 PostToolUse lint）注入的 reminder 曾被计为本 hook 的拉回
+    # 次数，一次都没拉回就放弃，结构化输出静默变成 None
+    from lumi.agents.core.hooks.dispatch import _reminder_message
+
+    msgs = [
+        HumanMessage("q"),
+        *[_reminder_message("lint: 3 warnings")] * MAX_STOP_PULLBACKS,
+        AIMessage("纯文本结束"),
+    ]
+    ctx = HookContext(
+        state={"messages": msgs, "output_schema": SCHEMA},
+        config={},
+        event="Stop",
+        payload={},
+    )
+    assert isinstance(await structured_output_stop_hook(ctx), AdditionalContext)
+
+
 # === Fix: 混合批次权限路由 ===
 
 

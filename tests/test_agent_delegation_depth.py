@@ -306,3 +306,53 @@ async def test_background_agent_runs_in_auto_mode() -> None:
             name="worker", prompt="干活", runtime=_make_runtime(depth=0)
         )
     assert context.tool_mode == "auto"
+
+
+def test_child_tools_strips_workflow_at_limit() -> None:
+    # 回归：到顶的子代理曾仍带 workflow 工具，委派层数上限管不到 workflow 扇出
+    tools = [_FakeTool("agent"), _FakeTool("workflow"), _FakeTool("bash")]
+    assert _names(_child_tools(tools, child_depth=3, max_depth=3)) == {"bash"}
+
+
+async def test_workflow_refused_at_depth_limit() -> None:
+    """已达委派上限（含 max_delegation_depth=0）时 workflow 同样拒绝扇出。"""
+    result = await workflow.coroutine(
+        runtime=_make_runtime(depth=3), script='return await agent("x")'
+    )
+    assert "最大委派层数" in result
+
+
+def test_foreground_subagent_follows_parent_mode_live() -> None:
+    """回归：前台子代理的 tool_mode 曾是委派瞬间的快照——父会话运行中从 privileged
+    切回 default，子代理的写操作照样免审批。"""
+    from lumi.agents.core.nodes import is_use_tool
+    from lumi.agents.core.state import LumiAgentContext
+
+    parent = LumiAgentContext(tool_mode="privileged")
+    child = LumiAgentContext(mode_parent=parent)
+    call = {"name": "write", "args": {"file_path": "x.txt", "content": ""}, "id": "1"}
+    state = {"messages": [AIMessage(content="", tool_calls=[call])]}
+    runtime = SimpleNamespace(context=child)
+    assert is_use_tool(state, runtime) == "ToolExecutor"
+    parent.tool_mode = "default"
+    assert is_use_tool(state, runtime) == "HumanApproval"
+
+
+async def test_foreground_subagent_links_parent_mode() -> None:
+    captured: dict = {}
+    p1, p2, p3, p4 = _patch_agent_internals(captured)
+    context = SimpleNamespace()
+
+    async def fake_create_agent(**kwargs):
+        async def ainvoke(inputs, context=None):
+            return {"messages": [AIMessage(content="done")]}
+
+        return SimpleNamespace(graph=SimpleNamespace(ainvoke=ainvoke)), context
+
+    runtime = _make_runtime(depth=0)
+    with p1, p2, p3 as create_agent, p4:
+        create_agent.side_effect = fake_create_agent
+        await agent.coroutine(
+            name="worker", prompt="x", runtime=runtime, run_in_background=False
+        )
+    assert context.mode_parent is runtime.context
