@@ -276,7 +276,7 @@ green 完成 / red 错误 / orange 提醒·Lumi 面板 / blue 信息 / yellow �
 
 `thread_id → (AgentBridge, asyncio.Lock)`。运行锁串行化同会话的轮次。每 chat 一个常驻
 bridge（含 graph / 权限引擎 / checkpoint），**刻意不做 TTL 回收**——进程存活期一直驻留、复用
-checkpoint。`close_all` 回收前先 `reject_pending` + 等锁（5s 上限）避免 use-after-close。
+checkpoint。`close_all` 回收前先 `reject_pending` + 取消在途轮，再并发等各会话的锁（总共 5s 上限）避免 use-after-close；持 `_init_lock`，正在建的新桥不会漏关。停机时 serve lifespan 先 drain 再拆会话池。
 
 ## 每日记忆整理（daily_dream.py）
 

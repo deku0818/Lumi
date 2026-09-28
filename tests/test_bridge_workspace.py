@@ -38,18 +38,18 @@ async def test_close_reaps_thread_shell():
 
 
 async def test_set_workspace_preserves_extra_folders(tmp_path):
-    """切目录后本会话临时目录保留，且 _notified_folders 不脱节（无虚假移除提醒）。"""
+    """切目录后本会话临时目录保留（无虚假移除提醒）。"""
     extra = tmp_path / "extra"
     extra.mkdir()
     dest = tmp_path / "dest"
     dest.mkdir()
     bridge = AgentBridge()
     bridge.folders.add_folder(str(extra))
-    bridge.folders.drain_folder_note()  # 已告知模型，快照对齐
+    known = bridge.folders.extra_folders[:]  # 已告知模型
     await bridge.folders.set_workspace(str(dest))
     assert bridge.folders.extra_folders == [str(extra.resolve())]
     # 临时目录未变 → 不产生任何增减提醒
-    assert bridge.folders.drain_folder_note() == ""
+    assert bridge.folders.folder_note(known) == ""
 
 
 def test_add_remove_folder(tmp_path):
@@ -75,16 +75,16 @@ def test_folder_note_add_then_remove_lifecycle(tmp_path):
     extra.mkdir()
     resolved = str(extra.resolve())
 
-    # 添加 → 下一次 drain 产出添加提醒
+    # 添加 → 与模型已知（无）做差产出添加提醒
     bridge.folders.add_folder(str(extra))
-    note = bridge.folders.drain_folder_note()
+    note = bridge.folders.folder_note([])
     assert resolved in note and "添加" in note
-    # 无新变更 → 空串（提醒只发一次）
-    assert bridge.folders.drain_folder_note() == ""
+    # 模型已知 = 当前 → 空串（提醒只发一次）
+    assert bridge.folders.folder_note([resolved]) == ""
 
     # 移除 → 中性措辞的移除提醒
     bridge.folders.remove_folder(str(extra))
-    note = bridge.folders.drain_folder_note()
+    note = bridge.folders.folder_note([resolved])
     assert resolved in note and "移除" in note
     assert "不应" not in note
 
@@ -96,7 +96,7 @@ def test_folder_note_add_remove_cancels_out(tmp_path):
     bridge.folders.add_folder(str(extra))
     bridge.folders.remove_folder(str(extra))
     # 消息发出前加了又删 → 抵消，不打扰模型
-    assert bridge.folders.drain_folder_note() == ""
+    assert bridge.folders.folder_note([]) == ""
 
 
 def test_injected_note_marked_structurally():

@@ -57,7 +57,7 @@ START → Summarizer（超阈值当轮就地压缩 / ptl_retry 置位则绕阈�
 
 **messages 通道是 `DeltaChannel`**（不是 `add_messages`）：checkpoint 只存增量写入 + 周期快照，长会话不再每个 super-step 重写整段历史。两条随之而来的约束：① 压缩写回用 `Overwrite` 整体替换而非逐条 `RemoveMessage`（`build_compacted_update`）；② **`aupdate_state` 不自动补消息 id**（LangGraph 只在 `put_writes` 补节点写入的），补 id 只能在写入构造时做（放进 reducer 会让每次回放生成新 id）。因此**所有离线写回只走 `AgentBridge.flush_offline` 这一个出口**，由它统一补 id + 挂 `OfflineFlush` 锚点；③ `snapshot_frequency` 必须显式给（取 100），官方默认 1000 等于几乎不快照，会让读退化成 O(链长)。语义差异锁在 `tests/test_delta_channel.py`，出口契约锁在 `tests/gateway/test_offline_flush_stamps.py`。
 
-**协作式停机：** `lumi/agents/core/run_control.py` 的 `drain_all()` 让在跑的图停在 super-step 边界（checkpoint 完整、`next` 指向待执行节点，续跑传 `None` 即可），由 `gateway_process()` 退出时调用。与用户按停的硬 cancel 分工不同：cancel 要立刻、可能落在节点半途（靠 `persist_partial_reply` 事后修），drain 要干净、切不断正在流的模型调用。因 `astream_events(version="v2")` 不转发 `control=`，改经 config 注入带 control 的 parent runtime（用到私有常量，由 `tests/test_drain.py` 锁住）。
+**协作式停机：** `lumi/agents/core/run_control.py` 的 `drain_all()` 让在跑的图停在 super-step 边界（checkpoint 完整、`next` 指向待执行节点；不续跑，下一轮开跑前由 `_recover_stale_state` 按中断轮收尾），由 `bootstrap.drain_runs()` 在拆任何子系统之前调用（`lumi serve` 的 lifespan 在渠道会话池关闭前先调）。与用户按停的硬 cancel 分工不同：cancel 要立刻、可能落在节点半途（靠 `persist_partial_reply` 事后修），drain 要 checkpoint 完整、切不断正在流的模型调用；前台子代理 / workflow 的子图继承同一 control，会让父级工具步在半途结束。因 `astream_events(version="v2")` 不转发 `control=`，改经 config 注入带 control 的 parent runtime（用到私有常量，由 `tests/test_drain.py` 锁住）。
 
 **checkpoint 加密（可选）：** 设 `LUMI_CHECKPOINT_AES_KEY`（16/24/32 字节）后 checkpoint 加密落盘，需可选依赖 `pip install 'lumi-harness[encryption]'`；存量明文仍可读，开关随时可开。
 

@@ -876,7 +876,12 @@ def _run_headless(
             # interactive=False：无人应答，需人工审批的直接自动拒绝，不永久挂起
             await bridge.initialize(wait_mcp=True, interactive=False)
             async for evt in bridge.stream_response(prompt, tool_mode=tool_mode):
-                if evt.kind == EventKind.MESSAGE_DELTA and evt.text:
+                # 只输出主 agent 的正文：子代理（parent_run_id 非空）的流式内容不外显
+                if (
+                    evt.kind == EventKind.MESSAGE_DELTA
+                    and evt.text
+                    and not evt.parent_run_id
+                ):
                     sys.stdout.write(evt.text)
                     sys.stdout.flush()
                 elif evt.kind == EventKind.ERROR:

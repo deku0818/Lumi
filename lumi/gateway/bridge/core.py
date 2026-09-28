@@ -70,7 +70,7 @@ from lumi.agents.tools.providers.mcp import (
 )
 from lumi.agents.tools.providers.todo import todos_payload
 from lumi.gateway.bridge.approval import enrich_tool_approval
-from lumi.gateway.bridge.folders import FolderManager
+from lumi.gateway.bridge.folders import REMINDED_KEY, FolderManager
 from lumi.models import provider_store
 from lumi.sessions import session_model
 from lumi.sessions.session_meta import get_goal, update_meta
@@ -223,10 +223,11 @@ class BridgeEvent:
 async def shutdown_shared_runtime() -> None:
     """关闭进程级共享运行时（MCP 子进程、shell / 后台任务会话）。
 
-    进程退出时调用一次（`lumi serve` 的 lifespan shutdown）。
+    进程退出时调用一次（`lumi serve` 的 lifespan shutdown）。先按组优雅终止 shell 与
+    后台进程，最后才关 MCP 池——它会对全部后代 SIGKILL 兜底，放前面优雅收尾就没了。
     """
-    await close_all_pools()
     await get_shell_session_manager().close_all()
+    await close_all_pools()
 
 
 class AgentBridge:
@@ -247,8 +248,6 @@ class AgentBridge:
         # 活跃 agent 工具 run_id 集合：流式 / 审批事件的子代理归属（_resolve_subagent_parent）
         # 据此判定祖先链中是否含活跃 agent run。在途审批后审批卡片也走同一归属机制。
         self._active_agent_runs: set[str] = set()
-        # 上次通知模型时的 ultra 档位状态，仅在开/关切换的那一轮注入边沿提醒
-        self._notified_ultra: bool = False
         # 本会话项目的 config hooks（.lumi/hooks.json）：随项目绑定，set_workspace 时重载，
         # 每轮 _stream 注入 per-run contextvar。空 dict = 暂无（initialize 后填充）。
         self._config_hooks: dict = {}
@@ -545,10 +544,31 @@ class AgentBridge:
         session_model.pin(self.current_thread_id)
         # 「添加文件夹」增减与 Ultra 档位切换的边沿提醒随下一条真实用户消息注入
         # （注入不碰 items 故不污染 Rewind 标签；reminder 一旦前置进历史即长驻且
-        # 不碰系统提示词，缓存安全）。
-        for note in (self.folders.drain_folder_note(), self.folders.drain_ultra_note()):
+        # 不碰系统提示词，缓存安全）。「模型已知什么」取自当前历史里最近的 marker，
+        # 不存 bridge 内存：rewind / 压缩删掉携带提醒的消息、重连换 bridge 都自动重发。
+        known = next(
+            (
+                m.additional_kwargs[REMINDED_KEY]
+                for m in reversed(await self.snapshot_messages())
+                if REMINDED_KEY in m.additional_kwargs
+            ),
+            {},
+        )
+        folders = self.folders
+        for note in (
+            folders.folder_note(known.get("folders", [])),
+            folders.ultra_note(known.get("ultra", False)),
+        ):
             if note:
                 msg = inject_text_into_message(msg, note)
+        msg = msg.model_copy(
+            update={
+                "additional_kwargs": {
+                    **msg.additional_kwargs,
+                    REMINDED_KEY: folders.reminded_state(),
+                }
+            }
+        )
         # 开轮即广播本轮用户消息 id：前端据此给乐观气泡上锚（时间旅行按 id 截断）。
         # 走事件而非 RPC 返回值——id 是「轮的事实」而非「轮的结果」，中途 stop 的轮
         # 同样需要它，且不必让每个流式入口都记得回传。
@@ -824,8 +844,12 @@ class AgentBridge:
         ``graph`` 缺省取 ``self.graph``；中断收尾路径持有自己那个引用，显式传入。
         """
         target = graph if graph is not None else self.graph
+        # 离线写回一律意味着在途的 PTL 重试已放弃（stop 写回半截 / rewind / 压缩）：
+        # 清掉标志，否则下一轮被迫无视阈值做一次有损压缩
         await target.aupdate_state(
-            self._config, stamp_missing_ids(update), as_node="OfflineFlush"
+            self._config,
+            stamp_missing_ids({**update, "ptl_retry": False}),
+            as_node="OfflineFlush",
         )
 
     async def rewind_before_message(self, message_id: str) -> HumanMessage | None:
@@ -1084,10 +1108,9 @@ class AgentBridge:
 
                 except GraphDrained as e:
                     # 协作式停机：图停在 super-step 边界、checkpoint 完整、next 指向
-                    # 待执行节点。不重试（进程正在退出），也不报错——下次连上传 None
-                    # 就从这里续跑。只发 MESSAGE_COMPLETE 收口半截气泡，**不发**
-                    # turn.complete：这一轮并没有跑完，报完成会让前端把待续跑的轮
-                    # 标成已结束，续跑时又往「已完成」的轮里灌流。
+                    # 待执行节点。不重试（进程正在退出），也不报错——下一轮开跑前由
+                    # _recover_stale_state 按中断轮收尾。只发 MESSAGE_COMPLETE 收口半截
+                    # 气泡，不发 turn.complete：进程正在退出，连接随之断开。
                     logger.info("[AgentBridge] 图已优雅停机：%s", e)
                     self._reset_partial_buffer()
                     yield BridgeEvent(kind=EventKind.MESSAGE_COMPLETE)
@@ -1134,6 +1157,9 @@ class AgentBridge:
                 cause_info,
                 exc_info=True,
             )
+            # 半截回复随本轮作废：留着的话，下一轮首个 CallModel 前按停会把它当成
+            # 本轮的中断回复写进 checkpoint
+            self._reset_partial_buffer()
             yield BridgeEvent(kind=EventKind.ERROR, error=f"[{err_type}] {e}")
         finally:
             # 本轮结束（正常 / 取消 / 出错都算）→ 注销 drain 登记，别让停机信号

@@ -1,8 +1,8 @@
 """停机（drain）停下的一轮对外发什么事件。
 
 回归：``GraphDrained`` 分支 break 后曾落到 ``yield await self._turn_complete_event()``，
-把一轮**没跑完**的会话报成已完成——前端据此收掉运行态，续跑时又往「已完成」的轮里
-灌流。停机只该收口半截气泡（MESSAGE_COMPLETE），不该报 turn.complete。
+把一轮**没跑完**的会话报成已完成。停机只该收口半截气泡（MESSAGE_COMPLETE），不该报
+turn.complete。
 
 用 toy_graph 的真实 ``_stream`` 脚手架跑，不是结构断言。
 """
@@ -47,6 +47,6 @@ async def test_drained_turn_emits_message_complete_but_not_turn_complete():
     assert EventKind.MESSAGE_COMPLETE in kinds, f"半截气泡要收口: {kinds}"
     assert EventKind.TURN_COMPLETE not in kinds, f"这一轮并没跑完: {kinds}"
 
-    # 图确实停在边界：next 指向待执行节点，续跑传 None 即可接上
+    # 图确实停在边界：next 指向待执行节点（下一轮由 _recover_stale_state 收尾）
     snapshot = await graph.aget_state(config)
     assert snapshot.next, "drain 应停在 super-step 边界而非跑完"

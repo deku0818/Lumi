@@ -302,6 +302,19 @@ async def create_checkpointer(
             return InMemorySaver(serde=_checkpoint_serde())
 
 
+def with_memory_instructions(system_prompt: str, project_dir: Path | None) -> str:
+    """确保记忆目录存在，并把记忆行为说明追加到系统提示词尾部。
+
+    记忆目录按会话项目根（project_dir，未传则进程 cwd）隔离，与权限引擎同源。
+    """
+    from lumi.agents.memory import build_memory_instructions, ensure_memory_dir
+
+    instructions = build_memory_instructions(
+        ensure_memory_dir(project_dir or Path.cwd())
+    )
+    return f"{system_prompt}\n\n{instructions}" if system_prompt else instructions
+
+
 async def create_agent(
     tools: list | None = None,
     system_prompt: str | None = None,
@@ -351,17 +364,8 @@ async def create_agent(
         model_name = resolved.model
         provider = resolved.provider
 
-    # 启用记忆：确保记忆目录存在，并把记忆行为说明追加到主 agent 系统提示词尾部。
-    # 记忆目录按会话项目根（project_dir，未传则进程 cwd）隔离，与权限引擎同源。
     if enable_memory:
-        from lumi.agents.memory import build_memory_instructions, ensure_memory_dir
-
-        # 记忆目录 key 由 memory_dir 内部 resolve，此处不必重复 resolve。
-        mem_dir = ensure_memory_dir(project_dir or Path.cwd())
-        instructions = build_memory_instructions(mem_dir)
-        system_prompt = (
-            f"{system_prompt}\n\n{instructions}" if system_prompt else instructions
-        )
+        system_prompt = with_memory_instructions(system_prompt, project_dir)
 
     # 复用或新建权限引擎（项目根随会话绑定，调用方未传则退回进程 cwd）
     if permission_engine is None:

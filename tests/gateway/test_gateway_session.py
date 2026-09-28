@@ -618,7 +618,7 @@ async def test_should_detach_excludes_pure_synthetic_turn():
     await bridge.started.wait()
     try:
         assert session.should_detach() is True  # 普通用户轮 → 续接
-        session._synthetic_run = True
+        session._run.synthetic = True
         assert session.should_detach() is False  # 纯合成轮 → 不续接
         bridge._pending_events = [
             BridgeEvent(kind=EventKind.APPROVAL, data={"approval_id": "a"})
@@ -767,3 +767,123 @@ def test_snapshot_model_window_channel_follows_default(monkeypatch):
         "active-model",
         128_000,
     )
+
+
+async def test_detach_drops_cron_observer_and_reattach_restores_it():
+    """cron 直播观测者随 channel 走：detach 注销死 channel（否则 drain task 对着死连接
+    空转到 TTL），reattach 给新 channel 重新登记（否则续接后直播断流）。"""
+    from lumi.gateway.session_registry import SessionRegistry
+
+    reg = SessionRegistry()
+    bridge = BlockingBridge()
+    bridge.current_thread_id = "cron-abc"
+    session, ch1 = _make_session(bridge)
+    await session.start()
+    session._hub.add_observer(
+        "cron-abc", ch1
+    )  # 切到 cron 线程时登记（_switch_session）
+    await session.handle_frame(
+        {"id": 1, "method": "send_message", "params": {"content": "x"}}
+    )
+    await bridge.started.wait()
+    try:
+        session.detach(reg)
+        assert session._hub.has_observers("cron-abc") is False
+        ch2 = FakeChannel()
+        await session.reattach(ch2)
+        assert list(session._hub._observers["cron-abc"]) == [ch2]
+    finally:
+        bridge.release.set()
+        await session.aclose()
+
+
+class GateBridge(FakeBridge):
+    """每次 stream_response 各挂一道闸（running[i] = (所在 task, 闸)），测试逐个放行。"""
+
+    def __init__(self, **kw) -> None:
+        super().__init__(**kw)
+        self.running: list[tuple[asyncio.Task, asyncio.Event]] = []
+
+    async def stream_response(self, content, *, tool_mode="default", **kwargs):
+        gate = asyncio.Event()
+        self.running.append((asyncio.current_task(), gate))
+        await gate.wait()
+        return
+        yield  # pragma: no cover
+
+
+async def _until(cond) -> None:
+    for _ in range(200):
+        if cond():
+            return
+        await asyncio.sleep(0.005)
+    raise AssertionError("条件未达成")
+
+
+async def test_detached_synthetic_turn_keeps_run_lock(monkeypatch):
+    """detach 停通知轮时，挂着的合成轮仍持 run.lock——否则重连后同一 bridge 能并发第二轮。"""
+    import lumi.gateway.session as session_mod
+    from lumi.gateway.session_registry import SessionRegistry
+
+    monkeypatch.setattr(session_mod, "NOTIFICATION_POLL_INTERVAL", 0.01)
+    bridge = GateBridge(notifications=["后台任务已完成"])
+    session, _ = _make_session(bridge)
+    await session.start()
+    try:
+        await _until(lambda: bridge.running)
+        session.detach(SessionRegistry())
+        await asyncio.sleep(0.02)
+        assert session._run.lock.locked()
+    finally:
+        await session.aclose()
+
+
+async def test_notification_turn_never_orphans_queued_user_turn(monkeypatch):
+    """跑着的每一轮都必须挂在 _run.task 上（stop / 忙检查 / aclose 都靠它够到）。"""
+    import lumi.gateway.session as session_mod
+
+    monkeypatch.setattr(session_mod, "NOTIFICATION_POLL_INTERVAL", 0.01)
+    bridge = GateBridge(notifications=["后台任务已完成"])
+    session, _ = _make_session(bridge)
+    await session.start()
+    try:
+        async with session._run.lock:  # 非轮操作（如 switch_session）持锁 await
+            await asyncio.sleep(0.05)  # 通知轮先排上
+            await session.handle_frame(
+                {"id": 1, "method": "send_message", "params": {"content": "x"}}
+            )
+        await _until(lambda: bridge.running)
+        bridge.running[0][1].set()
+        await asyncio.sleep(0.05)
+        for task, _gate in bridge.running:
+            if not task.done():
+                assert task is session._run.task
+    finally:
+        for _task, gate in bridge.running:
+            gate.set()
+        await session.aclose()
+
+
+async def test_synthetic_flag_resets_after_detached_synthetic_turn(monkeypatch):
+    """断连期间合成轮跑完后，之后的真人轮断连仍应续接（synthetic 标记不残留）。"""
+    import lumi.gateway.session as session_mod
+    from lumi.gateway.session_registry import SessionRegistry
+
+    monkeypatch.setattr(session_mod, "NOTIFICATION_POLL_INTERVAL", 0.01)
+    bridge = GateBridge(notifications=["后台任务已完成"])
+    session, _ = _make_session(bridge)
+    await session.start()
+    try:
+        await _until(lambda: bridge.running)
+        session.detach(SessionRegistry())
+        bridge.running[0][1].set()
+        await _until(lambda: not session.has_active_turn())
+        await session.handle_frame(
+            {"id": 1, "method": "send_message", "params": {"content": "x"}}
+        )
+        await _until(lambda: len(bridge.running) == 2)
+        assert session.should_detach() is True
+    finally:
+        for _task, gate in bridge.running:
+            gate.set()
+        await session.aclose()

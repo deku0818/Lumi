@@ -75,3 +75,28 @@ async def test_dream_agent_runs_in_auto_mode(tmp_path: Path) -> None:
             tmp_path, [], "p", label="dream", notify=False, record=lambda: None
         )
     assert seen["mode"] == "auto"
+
+
+def test_cli_prints_only_main_agent_text(capsys) -> None:
+    # 回归：lumi -p 不过滤子代理事件，子代理的流式正文混进 stdout
+    from lumi.cli import _run_headless
+    from lumi.gateway.bridge import BridgeEvent, EventKind
+
+    class _Bridge:
+        async def initialize(self, **kw) -> None: ...
+
+        async def stream_response(self, prompt, **kw):
+            yield BridgeEvent(
+                kind=EventKind.MESSAGE_DELTA, text="子代理正文", parent_run_id="r"
+            )
+            yield BridgeEvent(kind=EventKind.MESSAGE_DELTA, text="主回答")
+
+        async def close(self) -> None: ...
+
+    with (
+        patch("lumi.gateway.bridge.AgentBridge", _Bridge),
+        patch("lumi.gateway.toolbox.inject_path"),
+        patch("lumi.cli._export_lumi_bin"),
+    ):
+        _run_headless("hi")
+    assert capsys.readouterr().out == "主回答\n"

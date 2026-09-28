@@ -18,11 +18,23 @@ from lumi.agents.runtime.bg_tasks import get_task_registry
 from lumi.gateway.bridge import shutdown_shared_runtime
 from lumi.gateway.broadcast import hub
 from lumi.gateway.cron_rpc import set_cron_runtime
+from lumi.gateway.session_registry import registry
 from lumi.utils.logger import logger
 
 # 停机时留给在跑的图跑完当前 super-step 的**上限**（真停完就立刻返回，不空等）。
 # 一个 super-step 通常是一次模型调用或一批工具，超时就硬切——这不是等它跑完整轮。
 _DRAIN_GRACE_SECONDS = 3.0
+
+
+async def drain_runs() -> None:
+    """请求在跑的图运行（desktop / 渠道 / cron）停在 super-step 边界，最多等宽限期。
+
+    宿主须在拆任何子系统（含 IM 渠道的会话池）之前调用：drain 让它们停在完整
+    checkpoint 上，而不是被随后的拆除硬切在节点半途。宽限期是上限不是定额——停完即
+    返回；超时没停完的照旧被取消，那条路本来就有 persist_partial_reply 兜底。
+    """
+    if drain_all("gateway shutdown"):
+        await wait_drained(_DRAIN_GRACE_SECONDS)
 
 
 @asynccontextmanager
@@ -70,12 +82,12 @@ async def gateway_process():
     try:
         yield
     finally:
-        # 先请求在跑的图运行优雅停机，再拆子系统：drain 让它们停在 super-step
-        # 边界（checkpoint 完整、next 指向待执行节点，重连传 None 即续跑），
-        # 而不是被随后的进程退出硬切在节点半途。宽限期是上限不是定额——停完即返回；
-        # 超时没停完的照旧被取消，那条路本来就有 persist_partial_reply 兜底。
-        if drain_all("gateway shutdown"):
-            await wait_drained(_DRAIN_GRACE_SECONDS)
+        # 宿主已在拆渠道前 drain 过时这里是空操作；没有渠道的宿主靠这一处
+        await drain_runs()
+        # 断连续接挂着的会话无人再接回：关掉其 bridge（非 daemon 的 aiosqlite 线程
+        # 不关，解释器退出时 join 永久阻塞）
+        for session in registry.pop_all():
+            await session.aclose()
         if not catalog_task.done():
             catalog_task.cancel()
         get_task_registry().set_on_change(None)

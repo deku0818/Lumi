@@ -30,6 +30,8 @@ export interface ToolCallBrief {
   id?: string
   name?: string
   args?: unknown
+  warnings?: string[]
+  boundary_violations?: string[]
   [k: string]: unknown
 }
 
@@ -57,10 +59,6 @@ export interface WireEventPayloads extends Record<WireEventType, object> {
   'approval.request': {
     approval_id: string
     tool_calls: ToolCallBrief[]
-    decisions?: Record<string, unknown>
-    options?: Record<string, unknown>
-    warnings?: string[]
-    boundary_violations?: string[]
   }
   'turn.complete': { usage?: Usage }
   'todos.update': { todos: TodoItem[] }

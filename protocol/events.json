@@ -15,8 +15,8 @@
     "tool.complete": { "payload": { "name": "string", "output": "string", "tool_call_id": "string", "is_error?": "boolean" }, "note": "is_error=true 表示工具以异常收尾" },
     "clarify.request": { "payload": { "approval_id": "string", "questions": "Question[]" }, "note": "ask 工具，经 resume(approval_id, value) 应答" },
     "approval.request": {
-      "payload": { "approval_id": "string", "tool_calls": "ToolCallBrief[]", "decisions?": "object", "options?": "object", "warnings?": "string[]", "boundary_violations?": "string[]" },
-      "note": "工具审批，经 resume(approval_id, value) 应答"
+      "payload": { "approval_id": "string", "tool_calls": "ToolCallBrief[]" },
+      "note": "工具审批，经 resume(approval_id, value) 应答。ToolCallBrief 形状 {id, name, args, warnings?: string[], boundary_violations?: string[]}——风险提示挂在各自的调用上"
     },
     "turn.complete": { "payload": { "usage?": "Usage" } },
     "todos.update": { "payload": { "todos": "TodoItem[]" }, "note": "todos 工具更新任务列表（全量替换语义，与图状态 state.todos 同步）；仅主 agent（子代理的 todos 不外发）。item 形状 {content, status: pending|in_progress|completed}" },

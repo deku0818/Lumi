@@ -58,7 +58,7 @@ from pathlib import Path
 from fastapi import FastAPI, Request, Response, WebSocket, WebSocketDisconnect
 from fastapi.responses import FileResponse, JSONResponse
 
-from lumi.gateway.bootstrap import gateway_process
+from lumi.gateway.bootstrap import drain_runs, gateway_process
 from lumi.gateway.bridge import AgentBridge
 from lumi.gateway.broadcast import hub
 from lumi.gateway.session import GatewaySession
@@ -75,7 +75,11 @@ async def lifespan(app: FastAPI):
     from lumi.gateway.channels.manager import channels_runtime
 
     async with gateway_process(), channels_runtime():
-        yield
+        try:
+            yield
+        finally:
+            # 最先 drain：channels_runtime 退出会关渠道会话池，得在那之前让渠道轮停稳
+            await drain_runs()
 
 
 app = FastAPI(lifespan=lifespan)

@@ -698,8 +698,8 @@ def test_local_env_checks_without_workspace_blocks_skills(monkeypatch):
     assert "未绑定项目" in skills["name"] and not skills["fix_action"]
 
 
-def test_drain_ultra_note_follows_effective_effort(monkeypatch):
-    """drain_ultra_note 的档位取值与 call_model 同链（覆盖 > 本会话模型的 profile）。
+def test_ultra_note_follows_effective_effort(monkeypatch):
+    """ultra_note 的档位取值与 call_model 同链（覆盖 > 本会话模型的 profile）。
 
     - override='ultra' → 触发 workflow 编排提醒（即便该模型 profile 非 ultra）
     - override='low' 但模型 profile 为 ultra → 不触发（覆盖说了算）
@@ -721,21 +721,17 @@ def test_drain_ultra_note_follows_effective_effort(monkeypatch):
     def fm(effort, model):
         bridge = SimpleNamespace(
             _context=SimpleNamespace(effort=effort, model_name=model, provider="p"),
-            _notified_ultra=False,
         )
-        return FolderManager(bridge), bridge
+        return FolderManager(bridge)
 
     # override='ultra' 压过模型 profile 的 low → 开启提醒
-    m, b = fm("ultra", "plain-model")
-    assert "已开启" in m.drain_ultra_note() and b._notified_ultra is True
+    assert "已开启" in fm("ultra", "plain-model").ultra_note(False)
 
     # override='low' 压过模型 profile 的 ultra → 不进 ultra 态
-    m, b = fm("low", "ultra-model")
-    assert m.drain_ultra_note() == "" and b._notified_ultra is False
+    assert fm("low", "ultra-model").ultra_note(False) == ""
 
     # override=None → 取会话模型（ultra）而非全局 active（low）→ 开启提醒
-    m, b = fm(None, "ultra-model")
-    assert "已开启" in m.drain_ultra_note() and b._notified_ultra is True
+    assert "已开启" in fm(None, "ultra-model").ultra_note(False)
 
 
 # ── 妙记生成事件 ──
@@ -1997,10 +1993,15 @@ class _FakeBridge:
     def __init__(self):
         self.model_name = ""
         self.applied = None
-        # 真 bridge 的用户轮会 drain 目录/档位提醒，这里给个恒空的桩
+        # 真 bridge 的用户轮会按历史 marker 生成目录/档位提醒，这里给个恒空的桩
         self.folders = SimpleNamespace(
-            drain_folder_note=lambda: "", drain_ultra_note=lambda: ""
+            folder_note=lambda known: "",
+            ultra_note=lambda known: "",
+            reminded_state=lambda: {},
         )
+
+    async def snapshot_messages(self) -> list:
+        return []
 
     def _apply_model_to_context(self, model, provider, effort):
         self.model_name = model
@@ -2148,8 +2149,6 @@ async def test_only_real_user_turn_pins_the_model(monkeypatch, tmp_path):
     bridge._active_agent_runs = {}
     bridge._context = SimpleNamespace(tool_mode="")
     bridge._create_checkpoint_before_turn = _anoop
-    bridge._drain_folder_note = lambda: ""
-    bridge._drain_ultra_note = lambda: ""
     bridge._stream = lambda _data: _aempty()
     # 借真方法：本测就是要验证 _stream_turn 确实经它对齐
     bridge.align_session_model = lambda: AgentBridge.align_session_model(bridge)
