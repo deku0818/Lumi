@@ -1,3 +1,4 @@
+from dataclasses import replace
 from typing import Literal
 
 from langchain_core.callbacks import adispatch_custom_event
@@ -255,6 +256,25 @@ def _split_tool_output(output) -> tuple[list[ToolMessage], list[Command]]:
     return messages, commands
 
 
+def _tool_results_first(commands: list[Command], messages: list) -> list:
+    """把工具 Command 里的 messages 抽出来与其余结果合并：全部 ToolMessage 在前，
+    工具附带的其它消息（read 读图片/PDF 回灌的 HumanMessage、hook reminder）在后。
+
+    逐个 Command 原样应用时顺序是 ToolMessage、HumanMessage、ToolMessage…——provider
+    要求同批 tool_result 紧跟 tool_use，中间夹一条 user 内容即违反协议。Command 的
+    其余 update（todos / structured_output）原样保留。
+    """
+    merged = [*(m for c in commands for m in _cmd_messages(c)), *messages]
+    ordered = [m for m in merged if isinstance(m, ToolMessage)] + [
+        m for m in merged if not isinstance(m, ToolMessage)
+    ]
+    stripped = [
+        replace(c, update={k: v for k, v in c.update.items() if k != "messages"})
+        for c in commands
+    ]
+    return [*stripped, {"messages": ordered}]
+
+
 async def tool_executor(
     state: LumiAgentState,
     runtime: Runtime[LumiAgentContext],
@@ -297,7 +317,7 @@ async def tool_executor(
     await truncate_tool_results(tool_messages)
     final_msgs = [*tool_messages, *extra_msgs]
     if commands:
-        return [*commands, {"messages": final_msgs}]
+        return _tool_results_first(commands, final_msgs)
 
     if has_hooks("PostToolUse"):
         post_cmd = await _post_tool_hooks(state, config, visible, tool_messages)

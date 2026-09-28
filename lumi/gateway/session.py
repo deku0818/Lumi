@@ -206,12 +206,13 @@ class _RunState:
 async def _list_sessions(bridge: AgentBridge, params: dict) -> dict:
     # workspace="" → 跨所有项目列出（方案甲机器→项目分组树由前端按 workspace_dir 分组）；
     # 不再按当前进程 cwd 过滤，故切项目不影响列表完整性。
+    meta = load_all()
     sessions = await list_sessions(
         bridge.graph,
         workspace="",
         limit=params.get("limit", 50),
+        include=frozenset(tid for tid, e in meta.items() if e.get("pinned")),
     )
-    meta = load_all()
     out = []
     for s in sessions:
         entry = meta.get(s.thread_id, {})

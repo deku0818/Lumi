@@ -49,3 +49,21 @@ def test_get_goal_roundtrip_and_clear_preserves_marks(tmp_path, monkeypatch):
     session_meta.update_meta("t1", goal="")  # 清 goal
     assert session_meta.get_goal("t1") == ""
     assert session_meta.load_all()["t1"]["pinned"] is True  # pin 仍在
+
+
+@pytest.mark.parametrize(
+    "broken", ['{"t0": {"pinned": true},,}', '["not", "a", "dict"]']
+)
+def test_update_meta_on_corrupt_file_keeps_original_aside(
+    tmp_path, monkeypatch, broken
+):
+    """损坏（或顶层不是对象）的 sidecar 不被一次 update 覆盖抹掉：原文件移到
+    .corrupt-* 留档，读侧回落为空，新条目照常写入。"""
+    path = tmp_path / "meta.json"
+    monkeypatch.setattr(session_meta, "_meta_path", lambda: path)
+    path.write_text(broken, encoding="utf-8")
+    assert session_meta.load_all() == {}
+    session_meta.update_meta("t1", pinned=True)
+    kept = list(tmp_path.glob("meta.json.corrupt-*"))
+    assert [p.read_text(encoding="utf-8") for p in kept] == [broken]
+    assert session_meta.load_all() == {"t1": {"pinned": True}}

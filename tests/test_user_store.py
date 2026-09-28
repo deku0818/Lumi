@@ -52,3 +52,14 @@ def test_global_config_load_survives_non_dict_settings(tmp_config):
 
     user_store.write_section("settings", ["not", "a", "dict"])
     assert GlobalConfigManager.load().checkpoint_dir == ""
+
+
+def test_write_on_corrupt_file_keeps_original_aside(tmp_config):
+    """损坏的 lumi.json 不能被一次分区写入抹掉（里面是全部密钥）：原文件移到
+    .corrupt-* 留档，新文件从空开始写，后续写入照常可用。"""
+    broken = '{"providers": {"active": {"api_key": "sk-keep"}},, }'
+    tmp_config.write_text(broken, encoding="utf-8")
+    user_store.write_section("projects", [{"path": "/a"}])
+    kept = list(tmp_config.parent.glob("lumi.json.corrupt-*"))
+    assert [p.read_text(encoding="utf-8") for p in kept] == [broken]
+    assert user_store.read_section("projects", []) == [{"path": "/a"}]

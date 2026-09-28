@@ -112,6 +112,15 @@ class TestMatchPathPattern:
             is True
         )
 
+    def test_trailing_double_star_matches_everything_inside(self):
+        # 回归：结尾 /** 曾多拼一个 /（secrets/(?:/.*)?），整条规则永不命中
+        project = Path("/project")
+        for path in ("secrets", "secrets/k.txt", "secrets/a/b.txt", "x/secrets/k"):
+            assert RuleMatcher.match_path_pattern("secrets/**", path, project) is True
+        assert RuleMatcher.match_path_pattern("/secrets/**", "secrets/k", project)
+        assert not RuleMatcher.match_path_pattern("/secrets/**", "x/secrets/k", project)
+        assert not RuleMatcher.match_path_pattern("secrets/**", "secretsX/k", project)
+
     def test_anchored_pattern(self):
         project = Path("/project")
         # 带 / 前缀从根匹配

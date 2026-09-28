@@ -51,6 +51,24 @@ def test_missing_transport_inferred(tmp_path, monkeypatch):
     assert merged["web"]["transport"] == "streamable_http"
 
 
+def test_type_field_maps_to_transport():
+    """Claude Code / VS Code 风格用 ``type`` 声明传输方式：映射为 adapter 的 transport，
+    且 ``type`` 本身不下传（adapter 的 ``**params`` 全透传，未知键会 TypeError）。"""
+    norm = config.normalize_server_config
+    assert norm({"type": "stdio", "command": "uvx", "args": ["x"]}) == {
+        "command": "uvx",
+        "args": ["x"],
+        "transport": "stdio",
+    }
+    assert norm({"type": "http", "url": "https://h/mcp"}) == {
+        "url": "https://h/mcp",
+        "transport": "streamable_http",
+    }
+    assert norm({"type": "sse", "url": "https://s/sse"})["transport"] == "sse"
+    # 显式 transport 优先于 type
+    assert norm({"type": "http", "transport": "sse", "url": "u"})["transport"] == "sse"
+
+
 def test_missing_args_filled_for_stdio_only(tmp_path, monkeypatch):
     """命令自足（无参数可传）时配置里没有 ``args``，但 adapter 硬性要求 stdio 必须带
     （缺则抛「'args' parameter is required for stdio connection」）——加载侧补空列表。

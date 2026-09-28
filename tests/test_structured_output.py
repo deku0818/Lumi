@@ -281,10 +281,10 @@ async def test_tool_executor_structured_success(monkeypatch):
     monkeypatch.setattr(nodes, "ToolNode", _StructuredFakeToolNode)
     state = {"messages": [_call({"name": "Lumi"})], "output_schema": SCHEMA}
     result = await tool_executor(state, _runtime([]), {})
-    # 工具 Command 直返：[Command, {"messages": 普通结果 + reminder}]
+    # 工具 Command 直返：[Command(其余 update), {"messages": 全部 ToolMessage 在前}]
     assert isinstance(result, list) and isinstance(result[0], Command)
-    assert result[0].update["structured_output"] == {"name": "Lumi"}
-    assert result[1] == {"messages": []}
+    assert result[0].update == {"structured_output": {"name": "Lumi"}}
+    assert [m.tool_call_id for m in result[1]["messages"]] == ["1"]
 
 
 async def test_tool_executor_structured_failure_goes_normal_path(monkeypatch):
@@ -425,8 +425,8 @@ async def test_tool_executor_mixed_output_keeps_command_and_messages(monkeypatch
     state = {"messages": [_call({"name": "Lumi"})], "output_schema": SCHEMA}
     result = await tool_executor(state, _runtime([]), {})
     cmd, update = result
-    assert cmd.update["structured_output"] == {"name": "Lumi"}
-    assert [m.tool_call_id for m in update["messages"]] == ["2"]
+    assert cmd.update == {"structured_output": {"name": "Lumi"}}
+    assert [m.tool_call_id for m in update["messages"]] == ["1", "2"]
 
 
 # === Fix: 内部工具不泄漏给用户 hook ===

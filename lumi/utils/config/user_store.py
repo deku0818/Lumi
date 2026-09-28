@@ -17,7 +17,7 @@ from __future__ import annotations
 import json
 from pathlib import Path
 
-from lumi.utils.atomic_io import atomic_write_json
+from lumi.utils.atomic_io import atomic_write_json, read_json_object_for_update
 from lumi.utils.logger import logger
 from lumi.utils.paths import lumi_home
 
@@ -53,7 +53,11 @@ def read_section(key: str, default):
 
 
 def write_section(key: str, value) -> None:
-    """section-patch 原子写：读全量 → 替换该分区 → 整体写回（chmod 600）。"""
-    data = _read_all()
+    """section-patch 原子写：读全量 → 替换该分区 → 整体写回（chmod 600）。
+
+    写前读不走 ``_read_all`` 的宽松回落：文件损坏时拿空 dict 写回会抹掉其余分区
+    的全部密钥，改由 read_json_object_for_update 把原文件移走留档。
+    """
+    data = read_json_object_for_update(CONFIG_FILE)
     data[key] = value
     atomic_write_json(CONFIG_FILE, data, mode=0o600)  # atomic_write 内部已建父目录

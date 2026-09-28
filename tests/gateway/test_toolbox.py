@@ -161,16 +161,37 @@ def _tar_with_binary(tmp_path, inner_path, content=b"#!/bin/sh\necho uv 0.11.32\
 
 
 def test_install_extracts_binary(toolbox_env, tmp_path, monkeypatch):
-    archive = _tar_with_binary(tmp_path, "uv-aarch64-apple-darwin/uv")
+    archive = _tar_with_binary(tmp_path, "ripgrep-15.2.0-aarch64-apple-darwin/rg")
 
     def fake_download(url, dest, progress, phase, tool=""):
         dest.write_bytes(archive.read_bytes())
 
     monkeypatch.setattr(toolbox, "_download", fake_download)
     monkeypatch.setattr(toolbox, "_plat", lambda: ("darwin", "arm64"))
-    status = toolbox.install("uv")
+    status = toolbox.install("rg")
     assert status.source == "toolbox"
-    assert os.access(get_config().bin_dir / "uv", os.X_OK)
+    assert os.access(get_config().bin_dir / "rg", os.X_OK)
+
+
+def test_install_uv_also_extracts_uvx(toolbox_env, tmp_path, monkeypatch):
+    # 官方 uv 包自带 uvx（stdio MCP 常用启动器），只提取 uv 会让 uvx 起的 server ENOENT
+    archive = tmp_path / "asset.tar.gz"
+    with tarfile.open(archive, "w:gz") as tar:
+        for exe in ("uvx", "uv"):
+            content = b"#!/bin/sh\necho uv 0.11.32\n"
+            info = tarfile.TarInfo(f"uv-aarch64-apple-darwin/{exe}")
+            info.size = len(content)
+            info.mode = 0o755
+            tar.addfile(info, io.BytesIO(content))
+
+    def fake_download(url, dest, progress, phase, tool=""):
+        dest.write_bytes(archive.read_bytes())
+
+    monkeypatch.setattr(toolbox, "_download", fake_download)
+    monkeypatch.setattr(toolbox, "_plat", lambda: ("darwin", "arm64"))
+    toolbox.install("uv")
+    for exe in ("uv", "uvx"):
+        assert os.access(get_config().bin_dir / exe, os.X_OK)
 
 
 def test_install_node_tree_and_links(toolbox_env, tmp_path, monkeypatch):

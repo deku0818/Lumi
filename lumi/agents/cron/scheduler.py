@@ -79,7 +79,11 @@ class Scheduler:
         on_job_status: Callable[[list[dict]], None] | None = None,
         lock_path: Path | None = None,
     ) -> None:
-        self._aps = AsyncIOScheduler()
+        # 晚到的触发照常执行一次（多次错过合并为一次）：APScheduler 默认只容忍晚 1 秒，
+        # 机器休眠或事件循环卡顿后到点的任务会被静默跳过
+        self._aps = AsyncIOScheduler(
+            job_defaults={"misfire_grace_time": None, "coalesce": True}
+        )
         self._job_store = job_store
         self._run_log = run_log
         self._delivery = delivery

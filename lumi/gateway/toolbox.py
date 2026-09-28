@@ -42,6 +42,9 @@ OFFICECLI_VERSION = "1.0.143"
 # 环境页的两栏分组是纯展示概念，由前端 EnvPanel 独家持有
 ALL_TOOLS = ("uv", "rg", "node", "officecli")
 
+# 同一压缩包里需一并落进 bin_dir 的伴生可执行：uv 包自带 uvx（stdio MCP 常用启动器）
+_COMPANIONS = {"uv": ("uvx",)}
+
 # 进度回调：(阶段描述, 0..1 或 None=不可知)
 ProgressFn = Callable[[str, float | None], None]
 
@@ -353,7 +356,8 @@ def install(name: str, progress: ProgressFn | None = None) -> ToolStatus:
             shutil.move(str(archive), str(dest))
             dest.chmod(0o755)
         else:
-            _extract_binary(archive, name)
+            for exe in (name, *_COMPANIONS.get(name, ())):
+                _extract_binary(archive, exe)
     if progress:
         # 终态：装齐流程里已完成的行定格在「完成 100%」，而非停在最后一条脉冲
         progress("完成", 1.0)

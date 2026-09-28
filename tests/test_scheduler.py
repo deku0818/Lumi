@@ -211,6 +211,25 @@ async def test_register_different_trigger_types(scheduler: Scheduler) -> None:
         await scheduler.stop()
 
 
+async def test_late_fire_still_runs(scheduler: Scheduler) -> None:
+    """休眠或事件循环卡顿后晚到的触发照常执行一次：APScheduler 默认只容忍晚 1 秒，
+    超出即静默跳过（一次性任务就此永不执行）。"""
+    from apscheduler.triggers.date import DateTrigger
+
+    await scheduler.start()
+    fired = asyncio.Event()
+
+    async def fire() -> None:
+        fired.set()
+
+    try:
+        late = datetime.now() - timedelta(seconds=30)
+        scheduler._aps.add_job(fire, trigger=DateTrigger(run_date=late))
+        await asyncio.wait_for(fired.wait(), timeout=2)
+    finally:
+        await scheduler.stop()
+
+
 # --- 任务执行逻辑测试（7.2）---
 
 # patch 目标：_execute_job 内部通过 lazy import 引入 create_agent

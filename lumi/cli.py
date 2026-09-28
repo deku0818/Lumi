@@ -557,13 +557,20 @@ _SCOPES = ("global", "project")
 _HTTP_TRANSPORTS = {"http": "streamable_http", "sse": "sse"}
 
 
-def _mcp_path(scope: str, project: str) -> Path:
-    """按 scope 解析配置文件路径；project 缺省取当前目录（会话的 shell 就在项目根）。"""
-    from lumi.gateway.mcp_rpc import resolve_project_dir, server_config_path
+def _mcp_project_dir(scope: str, project: str) -> Path | None:
+    """按 scope 解析项目根（读写共用）；project 缺省取当前目录（会话的 shell 就在项目根）。"""
+    from lumi.gateway.mcp_rpc import resolve_project_dir
 
     if scope not in _SCOPES:
         raise typer.BadParameter(f"scope 只能是 {' / '.join(_SCOPES)}")
-    return server_config_path(scope, resolve_project_dir(scope, project or "."))
+    return resolve_project_dir(scope, project or ".")
+
+
+def _mcp_path(scope: str, project: str) -> Path:
+    """按 scope 解析配置文件路径。"""
+    from lumi.gateway.mcp_rpc import server_config_path
+
+    return server_config_path(scope, _mcp_project_dir(scope, project))
 
 
 def _mcp_read(path: Path) -> dict:
@@ -576,12 +583,10 @@ def _mcp_read(path: Path) -> dict:
 def _mcp_write(scope: str, project: str, name: str, config: dict | None) -> Path:
     """单个 server 的写入（``config=None`` 即删除）：与 desktop RPC 共用
     ``upsert_server``（严格读防抹除 + 原子写 0o600），CLI 只负责把错误转成退出码。"""
-    from lumi.gateway.mcp_rpc import resolve_project_dir, upsert_server
+    from lumi.gateway.mcp_rpc import upsert_server
 
     try:
-        path, _ = upsert_server(
-            scope, resolve_project_dir(scope, project), name, config
-        )
+        path, _ = upsert_server(scope, _mcp_project_dir(scope, project), name, config)
     except ValueError as e:
         typer.echo(f"写入失败: {e}", err=True)
         raise typer.Exit(1) from e
