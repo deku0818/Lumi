@@ -374,10 +374,9 @@ async def test_output_mode_files_with_matches_structure():
             result = await backend.grep_raw(
                 "findme", str(tmp_dir), output_mode="files_with_matches"
             )
-            assert isinstance(result, list)
-            paths = [r["path"] for r in result]
+            paths = [r["path"] for r in result["items"]]
             assert len(paths) == len(set(paths)), "文件路径应去重"
-            for r in result:
+            for r in result["items"]:
                 assert "path" in r
         finally:
             workspace._authorized_directories = old_dirs
@@ -395,8 +394,7 @@ async def test_output_mode_count_structure():
             f.write_text("findme\nno\nfindme")
 
             result = await backend.grep_raw("findme", str(tmp_dir), output_mode="count")
-            assert isinstance(result, list)
-            for r in result:
+            for r in result["items"]:
                 assert "path" in r
                 assert "count" in r
                 assert isinstance(r["count"], int)

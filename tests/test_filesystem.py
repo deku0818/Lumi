@@ -277,7 +277,7 @@ class TestBackendGrepRaw:
     async def test_grep_invalid_regex(self, backend, authorized_tmp_dir):
         result = await backend.grep_raw("[invalid", str(authorized_tmp_dir))
         assert isinstance(result, str)
-        assert "无效" in result
+        assert "错误" in result
 
     async def test_grep_no_match(self, backend, authorized_tmp_dir):
         f = authorized_tmp_dir / "empty_search.txt"
@@ -371,3 +371,59 @@ class TestToolWrappers:
             }
         )
         assert "找到" in result and "匹配" in result
+
+
+async def test_multiline_edit_in_mixed_line_ending_file(authorized_tmp_dir):
+    # 回归：文件里出现过 CRLF 就把 old_string 整体换成 CRLF，混合行尾文件里跨 LF 行的
+    # 多行编辑必然「未找到」
+    from lumi.agents.tools.providers.filesystem.tools import edit
+
+    f = authorized_tmp_dir / "mixed.txt"
+    f.write_bytes(b"header\r\nb\nc\n")
+    out = await edit.ainvoke(
+        {"file_path": str(f), "old_string": "b\nc", "new_string": "B\nC"}
+    )
+    assert out.startswith("成功"), out
+    assert f.read_bytes() == b"header\r\nB\nC\n"
+
+
+async def test_edit_error_has_single_prefix(authorized_tmp_dir):
+    from lumi.agents.tools.providers.filesystem.tools import edit
+
+    f = authorized_tmp_dir / "a.txt"
+    f.write_text("hello\n")
+    out = await edit.ainvoke(
+        {"file_path": str(f), "old_string": "zzz", "new_string": "y"}
+    )
+    assert out.count("错误") == 1, out
+
+
+async def test_read_line_numbers_match_rg_with_form_feed(authorized_tmp_dir):
+    # 回归：splitlines() 在 \f、U+2028 等处额外断行，read 的行号与 grep 不一致，
+    # 按 read 视图写的 old_string 也对不上
+    f = authorized_tmp_dir / "ff.txt"
+    f.write_text("line1\fstill1\nline2 still2\nline3\n")
+    out = await LocalFilesystemBackend().read(str(f))
+    rows = out.split("\n")
+    assert len(rows) == 3
+    assert rows[2].endswith("\tline3")
+
+
+async def test_read_runs_off_event_loop(authorized_tmp_dir, monkeypatch):
+    # 回归：read 在事件循环线程上同步读盘 + 解码（150MB 文件卡住整个网关 1.7s，所有
+    # 会话、飞书、cron 共用这一个循环）
+    import threading
+    from pathlib import Path
+
+    f = authorized_tmp_dir / "a.txt"
+    f.write_text("hello\n")
+    on_loop_thread: list[bool] = []
+    original = Path.read_bytes
+
+    def spy(self):
+        on_loop_thread.append(threading.current_thread() is threading.main_thread())
+        return original(self)
+
+    monkeypatch.setattr(Path, "read_bytes", spy)
+    await LocalFilesystemBackend().read(str(f))
+    assert on_loop_thread == [False]

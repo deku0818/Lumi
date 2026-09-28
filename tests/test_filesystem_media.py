@@ -715,3 +715,49 @@ class TestSyntheticHumanMessageDeclaration:
         msg = synthetic_human_message([{"type": "text", "text": "..."}])
         assert declared_items(msg) == []
         assert should_show_human_message(msg) is False
+
+
+# ═════════════════════════════════════════════════════════════════════════
+# 回归：快路径直通与格式边界
+# ═════════════════════════════════════════════════════════════════════════
+
+
+def test_non_api_format_is_reencoded_not_mislabeled():
+    # BMP 存成 .png：快路径曾原样发出 BMP 字节却标 image/png，API 拒收
+    buf = io.BytesIO()
+    Image.new("RGB", (50, 50), (0, 128, 0)).save(buf, format="BMP")
+    out = maybe_resize_and_downsample_image(buf.getvalue(), "image/png")
+    assert out.data.startswith(b"\x89PNG")
+
+
+def test_exif_rotation_applied_on_fast_path():
+    # orientation=6 的 200x100 JPEG：快路径曾报 100x200 却发出未旋转的原始像素
+    img = Image.new("RGB", (200, 100), (255, 0, 0))
+    exif = img.getexif()
+    exif[0x0112] = 6
+    buf = io.BytesIO()
+    img.save(buf, format="JPEG", exif=exif.tobytes())
+    out = maybe_resize_and_downsample_image(buf.getvalue())
+    assert (out.width, out.height) == (100, 200)
+    assert Image.open(io.BytesIO(out.data)).size == (100, 200)
+
+
+def test_16bit_grayscale_png_compresses_to_jpeg():
+    # 16 位灰度走 JPEG 降级曾抛 "cannot write mode I;16 as JPEG"
+    import os
+
+    img = Image.frombytes("I;16", (400, 400), os.urandom(400 * 400 * 2))
+    buf = io.BytesIO()
+    img.save(buf, format="PNG")
+    stage1 = maybe_resize_and_downsample_image(buf.getvalue())
+    out = compress_image_with_token_budget(stage1, max_tokens=2000)
+    assert out.media_type == "image/jpeg"
+
+
+def test_oversized_pdf_hint_does_not_suggest_pages(tmp_path):
+    # 超限的检查先于 pages 解析，提示「用 pages 分页」照做仍报同样的错
+    p = tmp_path / "big.pdf"
+    p.write_bytes(b"%PDF-1.4\n" + b"0" * 2048)
+    with pytest.raises(MediaReadError) as e:
+        validate_pdf_bytes(p, max_size=1024)
+    assert "pages" not in (e.value.hint or "")

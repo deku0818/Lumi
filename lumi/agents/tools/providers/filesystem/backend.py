@@ -95,20 +95,29 @@ def format_content_with_line_numbers(lines: list[str], start_line: int = 1) -> s
     )
 
 
+def split_lines(content: str) -> list[str]:
+    r"""按 \n 切行（兼容 \r\n）。不用 str.splitlines()：它还在 \f、\v、\x85、U+2028 等处
+    断行，行号就与 rg / 编辑器对不上，按 read 视图写的 old_string 也匹配不到。"""
+    lines = [line.removesuffix("\r") for line in content.split("\n")]
+    if lines[-1] == "":
+        lines.pop()
+    return lines
+
+
 def perform_string_replacement(
     content: str, old_string: str, new_string: str, replace_all: bool = False
 ) -> tuple[str, int] | str:
     """执行字符串替换,返回 (新内容, 替换次数) 或错误消息"""
     if old_string == new_string:
-        return "错误: 旧字符串和新字符串相同,无需替换"
+        return "旧字符串和新字符串相同,无需替换"
     if not old_string:
-        return "错误: 要替换的字符串不能为空"
+        return "要替换的字符串不能为空"
 
     count = content.count(old_string)
     if count == 0:
-        return "错误: 未找到要替换的字符串"
+        return "未找到要替换的字符串"
     if count > 1 and not replace_all:
-        return f"错误: 找到 {count} 处匹配项,但 replace_all=False。请设置 replace_all=True 以替换所有匹配项,或提供更具体的字符串以唯一匹配"
+        return f"找到 {count} 处匹配项,但 replace_all=False。请设置 replace_all=True 以替换所有匹配项,或提供更具体的字符串以唯一匹配"
 
     if replace_all:
         return (content.replace(old_string, new_string), count)
@@ -116,20 +125,21 @@ def perform_string_replacement(
 
 
 def _glob_sync(search_path: Path, pattern: str) -> list[dict]:
-    """同步全树 glob 遍历（供 glob_info 经 asyncio.to_thread 调用，避免阻塞事件循环）。"""
+    """同步 glob（供 glob_info 经 asyncio.to_thread 调用，避免阻塞事件循环）。
+
+    由 wcmatch 按模式剪枝遍历（不先全树 rglob 再过滤——.venv / node_modules 整个走一遍
+    慢几十倍）；悬空符号链接等读不到的条目跳过，不让整个工具报错。
+    """
     results: list[dict] = []
-    for item in search_path.rglob("*"):
-        if item.is_dir():
-            continue
+    flags = wcmatch.glob.GLOBSTAR | wcmatch.glob.BRACE
+    for rel in wcmatch.glob.glob(pattern, root_dir=search_path, flags=flags):
+        item = search_path / rel
         try:
-            rel_path = str(item.relative_to(search_path))
-        except ValueError:
+            if not item.is_file():
+                continue
+            stat = item.stat()
+        except OSError:
             continue
-        if not wcmatch.glob.globmatch(
-            rel_path, pattern, flags=wcmatch.glob.GLOBSTAR | wcmatch.glob.BRACE
-        ):
-            continue
-        stat = item.stat()
         results.append(
             {
                 "path": str(item),
@@ -156,7 +166,10 @@ class LocalFilesystemBackend:
     async def read(
         self, file_path: str, offset: int = 0, limit: int = DEFAULT_READ_LIMIT
     ) -> str:
-        """读取文件内容并添加行号"""
+        """读取文件内容并添加行号（读盘与解码在线程里做：网关所有会话共用一个事件循环）"""
+        return await asyncio.to_thread(self._read_sync, file_path, offset, limit)
+
+    def _read_sync(self, file_path: str, offset: int, limit: int) -> str:
         resolved = resolve_tool_path(file_path)
 
         if not resolved.exists():
@@ -190,7 +203,7 @@ class LocalFilesystemBackend:
         if empty_msg:
             return empty_msg
 
-        lines = content.splitlines()
+        lines = split_lines(content)
         if offset >= len(lines):
             return f"错误: 行偏移量 {offset} 超过文件长度({len(lines)} 行)"
 
@@ -248,9 +261,13 @@ class LocalFilesystemBackend:
         # 没被改到的行也一起改写（混合行尾的文件——CSV 引号内的 CRLF、Windows/Unix
         # 工具交替动过的文件——一次小改动就变成全文件 diff）。old_string 里用 \n 还是
         # \r\n 都能命中：先压成 \n 再按需展开
+        # 只在 CRLF 形态确实出现在文件里时才换：混合行尾的文件里，LF 段落的多行编辑
+        # 按原样才能命中
         if "\r\n" in raw:
-            old_string = old_string.replace("\r\n", "\n").replace("\n", "\r\n")
-            new_string = new_string.replace("\r\n", "\n").replace("\n", "\r\n")
+            crlf_old = old_string.replace("\r\n", "\n").replace("\n", "\r\n")
+            if crlf_old in raw:
+                old_string = crlf_old
+                new_string = new_string.replace("\r\n", "\n").replace("\n", "\r\n")
 
         result = perform_string_replacement(raw, old_string, new_string, replace_all)
         if isinstance(result, str):
@@ -309,14 +326,11 @@ class LocalFilesystemBackend:
         优先使用 ripgrep，不可用时自动降级到纯 Python 实现。
 
         Returns:
-            content 模式返回分页字典 {"matches", "total", "offset", "truncated"}；
-            files_with_matches/count 模式返回 list[dict]；
-            正则无效时返回错误字符串。
+            content 模式返回分页字典 {"matches", "total", "offset", "truncated"}
+            （total 只数匹配行，不含上下文行）；files_with_matches/count 模式返回
+            {"items", "total", "offset", "truncated"}；rg 报错（正则 / type / 路径）时
+            返回错误字符串。正则方言以 rg 为准，不做 Python re 预校验。
         """
-        try:
-            re.compile(pattern)
-        except re.error as e:
-            return f"无效的正则表达式: {e}"
 
         search_path = (
             str(get_authorized_directory())
@@ -340,29 +354,31 @@ class LocalFilesystemBackend:
             rows = await self._python_search(
                 pattern, search_path, file_glob, case_insensitive=case_insensitive
             )
+            if isinstance(rows, str):
+                return rows
             results = _reshape_python_grep(rows, output_mode)
+        if isinstance(results, str):
+            return results
 
-        # content 模式：返回带分页元信息的 dict
-        if isinstance(results, list) and output_mode == "content":
-            total = len(results)
-            effective_limit = (
-                head_limit if head_limit is not None else DEFAULT_CONTENT_HEAD_LIMIT
-            )
-            paginated = results[offset : offset + effective_limit]
+        # rg 多线程输出顺序不定，按路径稳定排序后分页才不漏不重（同文件内行序保留）
+        results.sort(key=lambda r: r["path"])
+        if output_mode == "content":
+            limit = head_limit if head_limit is not None else DEFAULT_CONTENT_HEAD_LIMIT
+            page = results[offset : offset + limit]
             return {
-                "matches": paginated,
-                "total": total,
+                "matches": page,
+                "total": sum(1 for r in results if not r.get("is_context")),
                 "offset": offset,
-                "truncated": total > offset + len(paginated),
+                "truncated": len(results) > offset + len(page),
             }
-
-        # files_with_matches / count：按 offset/head_limit 截断列表（与工具文档一致；
-        # head_limit=None 即不限，保持返回 list 形状不变）
-        if isinstance(results, list) and (offset or head_limit is not None):
-            end = offset + head_limit if head_limit is not None else None
-            return results[offset:end]
-
-        return results
+        end = offset + head_limit if head_limit is not None else None
+        page = results[offset:end]
+        return {
+            "items": page,
+            "total": len(results),
+            "offset": offset,
+            "truncated": len(results) > offset + len(page),
+        }
 
     async def _ripgrep_search(
         self,
@@ -376,8 +392,8 @@ class LocalFilesystemBackend:
         case_insensitive: bool = False,
         multiline: bool = False,
         output_mode: str = "content",
-    ) -> list[dict] | None:
-        """使用 ripgrep 搜索文件内容，不可用时返回 None"""
+    ) -> list[dict] | str | None:
+        """使用 ripgrep 搜索，未安装时返回 None，rg 报错时返回错误字符串。"""
         cmd = _build_ripgrep_command(
             pattern,
             search_path,
@@ -391,18 +407,28 @@ class LocalFilesystemBackend:
             output_mode=output_mode,
         )
 
-        stdout = await self._run_ripgrep(cmd)
-        if stdout is None:
+        ran = await self._run_ripgrep(cmd)
+        if ran is None:
             return None
+        returncode, stdout, stderr = ran
 
         if output_mode == "files_with_matches":
-            return _parse_ripgrep_files(stdout)
-        if output_mode == "count":
-            return _parse_ripgrep_counts(stdout)
-        return _parse_ripgrep_content(stdout)
+            parsed = _parse_ripgrep_files(stdout)
+        elif output_mode == "count":
+            parsed = _parse_ripgrep_counts(stdout)
+        else:
+            parsed = _parse_ripgrep_content(stdout)
+        # 退出码 1 = 无匹配；2 = 出错，但有结果时是部分目录无权限之类，保留结果。
+        # 按解析结果判空而非 stdout：--json 模式出错时 stdout 仍有 summary 行
+        if not parsed and returncode not in (0, 1):
+            return f"错误: {stderr.strip() or f'rg 退出码 {returncode}'}"
+        return parsed
 
-    async def _run_ripgrep(self, cmd: list[str]) -> str | None:
-        """执行 ripgrep 子进程，返回 stdout 或 None（不可用/超时时）"""
+    async def _run_ripgrep(self, cmd: list[str]) -> tuple[int, str, str] | None:
+        """执行 ripgrep，返回 (退出码, stdout, stderr)；未安装返回 None。
+
+        超时按错误返回（不降级到更慢的纯 Python 扫描）。
+        """
         try:
             proc = await asyncio.create_subprocess_exec(
                 *cmd,
@@ -419,15 +445,17 @@ class LocalFilesystemBackend:
                 proc.kill()
             except ProcessLookupError:
                 pass
-            return None
+            return (
+                -1,
+                "",
+                f"搜索超时（{RIPGREP_TIMEOUT_SECONDS}s），请缩小 path 或加 glob / type 过滤",
+            )
 
-        stderr = stderr_bytes.decode("utf-8", errors="replace")
-        if proc.returncode not in (0, 1) and (
-            "not found" in stderr.lower() or "command not found" in stderr.lower()
-        ):
-            return None
-
-        return stdout_bytes.decode("utf-8", errors="replace")
+        return (
+            proc.returncode,
+            stdout_bytes.decode("utf-8", errors="replace"),
+            stderr_bytes.decode("utf-8", errors="replace"),
+        )
 
     async def _python_search(
         self,
@@ -435,12 +463,12 @@ class LocalFilesystemBackend:
         search_path: str,
         file_glob: str | None,
         case_insensitive: bool = False,
-    ) -> list[dict[str, str | int]]:
+    ) -> list[dict[str, str | int]] | str:
         """纯 Python 实现的文件搜索（ripgrep 降级方案）"""
         try:
             regex = re.compile(pattern, re.IGNORECASE if case_insensitive else 0)
-        except re.error:
-            return []
+        except re.error as e:
+            return f"无效的正则表达式: {e}"
 
         max_file_size = (
             get_config().config.filesystem.grep_max_file_size_mb * 1024 * 1024
@@ -472,7 +500,7 @@ class LocalFilesystemBackend:
             except OSError:
                 continue
 
-            for line_num, line in enumerate(content.splitlines(), start=1):
+            for line_num, line in enumerate(split_lines(content), start=1):
                 if regex.search(line):
                     matches.append(
                         {

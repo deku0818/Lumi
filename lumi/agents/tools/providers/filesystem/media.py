@@ -162,6 +162,10 @@ def detect_image_format(buf: bytes) -> str:
 
 def _encode_image(img: Image.Image, fmt: str, **save_kwargs) -> bytes:
     """把 PIL Image 编码为指定格式的字节。RGBA -> JPEG 时加白色背景。"""
+    if fmt.upper() == "JPEG" and img.mode == "I;16":
+        # JPEG 不支持 16 位灰度；直接 convert("L") 会把 >255 的值截成 255（整张发白），
+        # 先按比例缩到 8 位
+        img = img.point(lambda v: v / 256).convert("L")
     if fmt.upper() == "JPEG" and img.mode in ("RGBA", "LA", "P"):
         # JPEG 不支持透明通道,用白色背景合成
         background = Image.new("RGB", img.size, (255, 255, 255))
@@ -234,6 +238,14 @@ def maybe_resize_and_downsample_image(
             hint="请确认文件是有效的 PNG/JPG/GIF/WebP",
         ) from e
 
+    # 快路径只放行 API 认得的格式且无需旋转的图：BMP/TIFF 之类会被标成 image/png 原样
+    # 发出而被拒收；带 EXIF 方向的 JPEG 原字节未转正。须在 exif_transpose 前判定
+    # （转置后 .format 恒为 None）
+    passthrough = (
+        img.format in {"PNG", "JPEG", "GIF", "WEBP"}
+        and img.getexif().get(0x0112, 1) == 1
+    )
+
     # EXIF 旋转失败会让模型看到方向错误的图片,影响输出质量
     try:
         img = ImageOps.exif_transpose(img)
@@ -251,7 +263,8 @@ def maybe_resize_and_downsample_image(
 
     # ── 快路径:满足所有约束直接返回 ──
     if (
-        original_size <= IMAGE_TARGET_RAW_SIZE
+        passthrough
+        and original_size <= IMAGE_TARGET_RAW_SIZE
         and width <= IMAGE_MAX_DIMENSION
         and height <= IMAGE_MAX_DIMENSION
     ):
@@ -509,7 +522,7 @@ def validate_pdf_bytes(path: Path, max_size: int) -> bytes:
     if size > max_size:
         raise MediaReadError(
             f"PDF 文件 {size // 1024 // 1024}MB 超过上限 {max_size // 1024 // 1024}MB",
-            hint="请使用 pages 参数分页读取",
+            hint="文件过大无法读取，请让用户只导出需要的页或拆分 PDF",
         )
 
     raw = path.read_bytes()
