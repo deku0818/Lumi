@@ -77,6 +77,12 @@ uv sync
     （其他群/私聊、desktop 都不受影响，且换了就一直是它），`/model default` 恢复默认；
   - `/effort` —— 查看/切换**本会话**的思考档位：`/effort high`，可选档位按当前模型现算；
     `/effort auto` 回到跟随模型默认。换模型会一并重置档位（旧档位对新模型多半不适用）；
+  - `/goal <条件>` —— 设定会话目标，agent 持续工作直到条件达成（`/goal clear` 提前解除），
+    详见 [slash-commands.md](slash-commands.md)；
+  - `/direct` —— 把本会话直连到 serve 机器上的 Claude Code（`/direct claude` 进入、
+    `/direct exit` 退出），以 `--permission-mode bypassPermissions` 免审批执行。有权跟机器人说话
+    的人即可触发（`allow_from` 默认 `*`，请按需收紧）；前提：PATH 里有 `claude`，以 root 运行
+    serve 需设 `IS_SANDBOX=1`；
   - `/compact` —— 压缩本会话历史（保留摘要），长期聊的群可手动瘦身；
   - `/dream-session` —— 立即整理本会话记忆（后台跑，完成会回音）；
   - 其余命令来自项目的技能目录（与 desktop 输入框的 `/` 补全同一套，如 `/commit`），

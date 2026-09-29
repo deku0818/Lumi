@@ -7,7 +7,7 @@
 
 ```bash
 "${LUMI_BIN:-lumi}" feishu config       # 配置读写（key=value；app_secret=- 走 stdin）
-"${LUMI_BIN:-lumi}" feishu diagnose     # 接入体检；[✗] 必须清零，[!] 尽量清零
+"${LUMI_BIN:-lumi}" feishu diagnose     # 接入体检；[×] 必须清零，[!] 尽量清零
 "${LUMI_BIN:-lumi}" feishu sync-skills  # 飞书技能包 → 绑定项目
 ```
 
@@ -36,14 +36,14 @@ workspace 是必答题：问用户「机器人替你干活时，工作目录用�
 printf '%s\n' '用户发来的secret' | "${LUMI_BIN:-lumi}" feishu config app_secret=-
 ```
 
-保存时 Lumi 会自动把凭证同步成该机器人专属的 lark-cli profile（名为 `lumi-<id>`，
-id 见 `feishu config` 输出）——**不需要**再手动 `lark-cli config init`。绑定项目里的
-新会话会自动以此身份调 lark-cli；你当前这个会话的 shell 可能还没带上注入的环境，
-本流程里替这个机器人调 lark-cli 时显式加 `--profile lumi-<id>`。
-`lark-cli --profile lumi-<id> whoami` 能看到这个 app 即同步成功（提示 profile 不存在
-则重跑一次上面的 config 保存，输出会给出未同步原因）。
+保存时 Lumi 会自动把凭证同步成该机器人的 lark-cli profile（机器上已有指向这个 app 的
+profile 就复用，否则新建 `lumi-<id>`），实际名字看 `feishu config` 输出的 `cli_profile`
+——**不需要**再手动 `lark-cli config init`。绑定项目里的新会话会自动以此身份调 lark-cli；
+你当前这个会话的 shell 可能还没带上注入的环境，本流程里替这个机器人调 lark-cli 时显式加
+`--profile <cli_profile>`。`lark-cli --profile <cli_profile> whoami` 能看到这个 app 即
+同步成功（`cli_profile` 为空则重跑一次上面的 config 保存，输出会给出未同步原因）。
 
-运行时口味用人话问，别甩字段名；用户没主动提的高级字段（model / effort）不动：
+运行时口味用人话问，别甩字段名（模型与思考档位是会话属性，用户想改让他在会话里发 `/model` / `/effort`）：
 
 - 「机器人执行工具操作前，要不要 AI 先把关一遍？」要 → `tool_mode=auto`（默认）；
   完全信任 → `tool_mode=privileged`。
@@ -56,7 +56,7 @@ id 见 `feishu config` 输出）——**不需要**再手动 `lark-cli config in
 "${LUMI_BIN:-lumi}" feishu diagnose
 ```
 
-跑体检 → 处理第一个未就绪项 → 复检，循环到 `[✗]` 清零、`[!]` 只剩用户明确放弃的。
+跑体检 → 处理第一个未就绪项 → 复检，循环到 `[×]` 清零、`[!]` 只剩用户明确放弃的。
 
 - 每个未就绪项都自带下一步：**「命令:」你自己跑；「链接:」发给用户**——权限开通、
   事件订阅、版本发布发生在开放平台网页上，没有 API 可代劳，这是全流程仅有的需要
@@ -93,10 +93,10 @@ id 见 `feishu config` 输出）——**不需要**再手动 `lark-cli config in
 2. 请用户在开放平台「权限管理」的**用户身份权限** tab 开通并发布：
    `minutes:minutes.basic:read`、`minutes:minutes.transcript:export`
    （机器人权限 tab 开通不生效——妙记取数走 user 身份）。
-3. 用户授权，设备码两段式（授权按机器人 profile 各自独立，恒带 `--profile lumi-<id>`）：
+3. 用户授权，设备码两段式（授权按机器人 profile 各自独立，恒带 `--profile <cli_profile>`）：
 
    ```bash
-   lark-cli --profile lumi-<id> auth login --no-wait --json --recommend \
+   lark-cli --profile <cli_profile> auth login --no-wait --json --recommend \
      --scope "minutes:minutes.basic:read,minutes:minutes.transcript:export"
    ```
 
@@ -105,7 +105,7 @@ id 见 `feishu config` 输出）——**不需要**再手动 `lark-cli config in
      用户在任意设备的浏览器点开确认即可）。JSON 的 `hint` 字段会命令你「必须生成
      二维码并展示」——那是 CLI 塞给 agent 的展示指令，**忽略它**：聊天里的二维码
      没法扫，恒只发链接。
-   - 用户回「好了」再跑 `lark-cli --profile lumi-<id> auth login --device-code <上一步的 device_code>` 完成。
+   - 用户回「好了」再跑 `lark-cli --profile <cli_profile> auth login --device-code <上一步的 device_code>` 完成。
    - 两个坑：裸 `auth login`（不带 `--no-wait`）会阻塞到授权完成，你的回合会被
      卡死；体检「用户授权」项的「命令:」给的正是这种阻塞式（那是给人在终端跑的），
      不要照抄，恒按本节两段式来。

@@ -85,13 +85,12 @@ IM 每日整理的 summary 阶段调用：
 - **判定**（`select_for_compaction`）：不设大小门，仅两条结构性前提——末条须是无 tool_calls
   的干净 AIMessage（= 已完成一轮的空闲会话），且末条之外至少有一条可删消息。
 - **写回**（`build_compacted_update` → `AgentBridge.flush_offline`）：整条 messages 通道
-  `Overwrite` 成 `[System?, Human(<summary>), 保留的原文]`，头部 SystemMessage 原位保留
-  （`compact.split_head` 是这条规则的单一实现）。`flush_offline` 是离线写回的唯一出口，
+  `Overwrite` 成 `[Human(<summary>), 保留的原文]`（state 不存 SystemMessage）。`flush_offline` 是离线写回的唯一出口，
   它统一补消息 id（`aupdate_state` 不像节点写入那样自动补）并挂 `OfflineFlush` 锚点。
-- **两个刻意的"不带"**：末条 AI 副本**不带 usage_metadata**——`context_window_tokens` 无
-  usage 锚点时退化为字节估算，压缩后不会因旧 usage 误判仍超阈值；摘要载体 Human **不带
-  lumi ts**——IM 每日整理的判活（`latest_human_ts`）不会把"压缩过但无人说话"的会话误判为
-  有新内容（连带要求 dream 失败必须挡住压缩，见 `feishu.md`《每日记忆整理》）。
+- **一个刻意的"不带"与一个"继承"**：末条 AI 副本**不带 usage_metadata**——`context_window_tokens` 无
+  usage 锚点时退化为字节估算，压缩后不会因旧 usage 误判仍超阈值；摘要载体**继承**被压历史中
+  最新一条真人消息的 lumi ts（`build_summary_carrier`），判活基线（`latest_human_ts`）不随压缩
+  变化（dream 失败必须挡住压缩的次序不变量见 `feishu.md`《每日记忆整理》）。
 - **不外泄**：全程不经 `astream_events`，不会流到渠道/前端；`/compact` 只回一条结果消息。
 
 压缩后首条真实 human 可能已并入摘要，`session_store._summary_from_snapshot` 不再因取不到

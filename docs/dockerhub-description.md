@@ -13,7 +13,7 @@ docker run -d --name lumi --restart unless-stopped \
   -p 8765:8765 \
   -e LUMI_TOKEN=<your-secret> \
   -v /opt/lumi/data:/root/.lumi \
-  -v /opt/lumi/workspace:/workspace \
+  -v /srv/projects:/srv/projects \
   ycw0818/lumi-harness
 ```
 
@@ -32,7 +32,7 @@ plus a systemd unit template.
 | Port | `8765` (WebSocket endpoint `/ws`) |
 | `LUMI_TOKEN` | Access token. Clients must pass it as `?token=…`. **Always set it.** |
 | `/root/.lumi` | All persistent data: credentials (`lumi.json`, 0600), sessions, memory, logs, toolbox |
-| `/workspace` | Mount point for host directories the agent should reach. Projects are bound per session by absolute path, so mount as many directories as you need — matching host and container paths keeps registration simple |
+| Project directories | Mount host directories at the **same path** (e.g. `-v /srv/projects:/srv/projects`) — projects are bound per session by absolute path, so mount as many as you need |
 | Architectures | `linux/amd64`, `linux/arm64` |
 
 **The image ships no `config.json`** — configuration lives in the data directory you mount. You may

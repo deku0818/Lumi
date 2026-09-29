@@ -20,7 +20,9 @@
 | `/stop` | 仅 IM 渠道 | 停止正在执行的任务（含派生后台任务），清掉排队消息。渠道层即时执行、不排队。 |
 | `/clear` | 仅 IM 渠道 | 清空本会话历史，重新开始。 |
 | `/help` | 仅 IM 渠道 | 列出全部可用命令（技能命令 / 会话控制两组卡片）。 |
-| `/model [模型名]` | 仅 IM 渠道 | 查看/切换**本会话**的模型：裸敲显示当前生效模型（本会话指定 / 渠道默认 / 跟随全局）+ 可选列表；`/model 完整模型名` 只切当前会话，下一条消息生效、落盘持久；`/model default` 恢复渠道默认。含中文或多词的内容按普通消息交给模型。 |
+| `/model [模型名]` | 仅 IM 渠道 | 查看/切换**本会话**的模型：裸敲显示当前生效模型（本会话指定 / 新会话默认）+ 可选列表；`/model 完整模型名` 只切当前会话，下一条消息生效、落盘持久；`/model default` 恢复跟随新会话默认。含中文或多词的内容按普通消息交给模型。 |
+| `/effort [档位]` | 仅 IM 渠道 | 查看/切换本会话思考档位，`/effort auto` 回到跟随模型默认；换模型会重置档位。 |
+| `/direct` | 仅 IM 渠道 | 把本会话直连到 serve 机器上的 Claude Code（`/direct claude` 进入、`/direct new` 开新会话、`/direct exit` 退出），以 `--permission-mode bypassPermissions` 免审批执行。有权跟机器人说话的人即可触发（`allow_from` 默认 `*`，请按需收紧）。前提：PATH 里有 `claude`；以 root 运行 serve 需设 `IS_SANDBOX=1`。 |
 
 dream 系按载体分流：desktop 短会话只见 `/dream`，IM 长会话（一群/一人一个永久 thread）只见
 `/dream-session`——两端各见其一。同名技能会被内置命令屏蔽（内置优先）。
@@ -29,7 +31,7 @@ dream 系按载体分流：desktop 短会话只见 `/dream`，IM 长会话（一
 
 ## 技能命令
 
-技能命令从项目 `.lumi/skills/`（及所用 style 的 `skills/`）自动加载。每个技能目录下需包含
+技能命令从项目 `.lumi/skills/`（及全局 `~/.lumi/skills/`、所用 style 的 `skills/`）自动加载。每个技能目录下需包含
 `SKILL.md`，定义技能的名称、描述和 prompt。
 
 ```

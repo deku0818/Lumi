@@ -33,7 +33,7 @@ Lumi 桌面应用（Electron + TS 前端）的内部实现。前端通过 WebSoc
 
 - **main 进程**：唯一持有 sidecar 生命周期。sidecar 非主动退出（崩溃/被杀）时同端口自愈重启，renderer 的重连逻辑自动连上。单实例锁（双开时聚焦已有窗口）；sidecar 以 stdin 管道拉起并传 `--exit-with-parent`——主进程无论如何死亡（含崩溃/强杀），sidecar 读到 stdin EOF 数秒内自退，杜绝孤儿进程与新实例抢同一 checkpoint 数据库（读写悬挂表现为「会话打不开」）。
 - **renderer**：纯前端，无 Node 访问（`contextIsolation`）。只通过 preload 暴露的 `getConnection()` 拿到 `ws://127.0.0.1:<port>/ws`。
-- **sidecar**：headless FastAPI，启动时不引入 textual（TUI 专属模块在用到时才懒加载）。
+- **sidecar**：headless FastAPI（`lumi serve`）。
 
 ## WS / JSON-RPC 帧协议
 
@@ -56,17 +56,17 @@ server → client   {method:"event", params:<wire event>}       # 流式事件
 - **wire 事件**：`turn.start`（真实用户轮开始，带该轮用户消息 id）、`message.*`、`tool.*`（含 `tool.generating`）、`clarify/approval`、`turn.complete`、`error`，加握手帧 `gateway.ready`。
 - **进程级广播事件**：`cron.result` / `cron.running` / `bg_tasks.update` / `mcp.status` 不属于任何会话。前端在 `App.tsx` 的 `PROCESS_EVENTS` 集合里声明它们，会话连接与控制连接都转给同一个 `handleEvent`——远程机器通常没有活跃会话连接，只有控制连接，不转发它的定时/后台任务在界面上就是静止的。本机经两条连接各收一次，故这些处理器一律按机器整段覆盖或自带去重。机器断连/被移除时 `clearMachineSnapshots` 清掉它那份快照，否则等不到「结束」那一帧的任务会永远显示运行中。
 
-事件名与方法名都来自 [`protocol/events.json`](../../protocol/events.json) 单一事实源：TS 端 import derive 类型，Python 端由 `tests/server/test_protocol_contract.py` 锁住一致性。
+事件名与方法名都来自 [`protocol/events.json`](../../protocol/events.json) 单一事实源：TS 端 import derive 类型，Python 端由 `tests/gateway/test_protocol_contract.py` 锁住一致性。
 
 ## AgentBridge 复用
 
-`lumi/gateway/bridge.py` 是中立桥接层（TUI 与 desktop 共用），把 LangGraph 的原始事件封装为干净的 `BridgeEvent` 流。`EventKind` 成员值直接采用对外 wire 命名（`namespace.verb`），`lumi/gateway/protocol.py` 只做 `BridgeEvent → {type, session_id, payload}` 的 payload 重组，无额外映射层。
+`lumi/gateway/bridge/core.py` 是中立桥接层（desktop 与 IM 渠道共用），把 LangGraph 的原始事件封装为干净的 `BridgeEvent` 流。`EventKind` 成员值直接采用对外 wire 命名（`namespace.verb`），`lumi/gateway/protocol.py` 只做 `BridgeEvent → {type, session_id, payload}` 的 payload 重组，无额外映射层。
 
 每条 WS 连接独立持有一个 `AgentBridge` 实例，`current_thread_id` 即该连接当前会话。多会话并发时各连接互不阻塞。
 
 进程级共享资源的边界：连接干净关闭（无活跃轮）时 `bridge.close()` 只清理该 bridge 自身；MCP 子进程、
 shell / 后台任务会话等全局单例由 `shutdown_shared_runtime()` 在 lifespan shutdown
-时统一关闭（TUI 则在 quit 时调用）。后台任务的完成通知按归属认领——任务注册时经
+时统一关闭。后台任务的完成通知按归属认领——任务注册时经
 `ContextVar` 捕获所属 thread_id，各连接的通知轮询只取走归属自己当前 thread（或无归属）
 的通知，不会把别的会话的任务结果注入本会话。
 
@@ -82,17 +82,11 @@ WS 断开时若会话仍有**活跃 / 挂起轮**（典型：挂在工具审批 
 
 ## 子代理事件归属（多层委派）
 
-子代理（`agent` 工具）可多层委派（`agents.max_delegation_depth` 默认 3，主 agent 为第 0 层）。前端按 `parent_run_id` 把子代理事件聚成轻量分组卡片展示——**该标记仅用于展示，不参与中断的 interrupt/resume，故归属错误不影响功能**。`bridge/core.py` 维护「活跃 agent 工具 run_id → 其 `parent_ids`」的映射 `_active_agent_runs`（`dict[str, list[str]]`，`on_tool_start name=="agent"` 时存入、`on_tool_end`/`on_tool_error` 时移除），两条归属路径：
+子代理（`agent` 工具）可多层委派（`agents.max_delegation_depth` 默认 3，主 agent 为第 0 层）。前端按 `parent_run_id` 把子代理事件聚成轻量分组卡片展示——**该标记仅用于展示，故归属错误不影响功能**。
 
-- **流式事件**（`_resolve_subagent_parent`）：从事件 `parent_ids`（langchain 的 root→直接父序）正序取首个仍活跃的 agent run。深层（孙及更深）活动据此**确定性归并到主 agent 直接派生的顶层子代理**；并行兄弟各自的事件也按各自 `parent_ids` 正确区分。
-- **中断事件**（`_subagent_marker`，ask / tool_approval）：`aget_state` 拿到的是主图状态、payload 无 `parent_ids`，故 `_active_agent_runs` 存下每个活跃 run 的 `parent_ids`，据此判断祖先关系——「唯一顶层子代理」（其 `parent_ids` 不含任何活跃 run）即归属目标，与流式路径同口径。
+`bridge/core.py` 的 `_active_agent_runs` 是 `set[str]`：`on_tool_start` 且工具名 ∈ `SUBAGENT_SPAWNING_TOOLS`（agent / workflow）时登记，每轮开始清空、工具结束不移除（后台子代理工具返回后仍在产事件）。流式事件与审批 / 澄清（custom event 自带 `parent_ids`）共用 `_resolve_subagent_parent`：从 `parent_ids`（root→直接父序）正序取首个活跃 run，并行兄弟可精确归属。
 
-**已知限制（均为展示层、功能零影响）：**
-
-1. **深层嵌套展平**：孙 / 曾孙活动全部挂在顶层子代理卡片下，看不到层级树。属刻意取舍——子代理经 `create_agent(checkpoint=None)` 无 checkpointer，主图不保留其嵌套 task 结构。
-2. **并行兄弟 + 中断无法精确归属**：同一轮并行委派 ≥2 个顶层子代理、其中之一触发 ask / tool_approval 时，因中断 payload 无 `parent_ids`，无法判断「来自哪个并行兄弟」。根因：子代理 checkpointer-less 跑在 `agent` 工具这个不透明边界内，中断冒泡到主图 `ToolExecutor` 时已丢失结构链接。
-   - **已实现的兜底**（仅 `bridge/core.py`）：`_subagent_marker` 发现 ≥2 个并行顶层子代理同时活跃时，`parent_run_id` 返回空串——审批 / 提问卡片挂到主 agent，而非自信地错挂某个兄弟（**仍能正常看到并回答，回答也正确生效**，只是不归到具体子代理分组）。单链委派（祖→孙）不受影响，仍精确归到唯一顶层。
-   - **真正根治**：把子代理身份从 spawn 一路串到中断 payload，再在 bridge 关联回前端的 `run_id` 卡片，跨 `agent.py` / `ask.py` / `nodes.py`（approval）/ `bridge` / 前端，且需对抗「子代理无 checkpointer」的省开销设计——暂留待需。
+**已知限制**（展示层、功能零影响）：孙及更深活动展平到顶层子代理卡片，看不到层级树——子代理经 `create_agent(checkpoint=None)` 无 checkpointer，主图不保留其嵌套结构。
 
 ## 会话管理
 
@@ -123,15 +117,15 @@ WS 断开时若会话仍有**活跃 / 挂起轮**（典型：挂在工具审批 
 **项目 = 工作目录，随会话绑定**（不再是进程级单一 cwd）。会话列表按 checkpoint metadata 的 `workspace_dir` 过滤分组。
 
 - **会话级项目绑定**：每条 WS 连接 = 一个 bridge / 引擎，引擎在 `initialize` 时直接 pin 到本会话项目——open 握手经连接 URL 的 `?workspace=` 携带（与 `?token=` 同机制），`bridge.initialize(project_dir=...)` 据此新建权限引擎、构造本项目 config hooks、写 checkpoint 元数据。**不动进程 `os.chdir`**，故同进程多会话各绑各项目、并发互不影响。`bridge.workspace_dir` 取本引擎 `project_dir`（无引擎退回进程 cwd 兜底展示值），是会话项目的单一来源（`gateway.ready` / 元数据 / `system_info` 注入都据此）；`bridge.workspace_bound` 是与之独立的布尔态——`workspace_dir` 在未绑定时仍会给出 cwd 兜底值（仅供展示），只有 `workspace_bound` 才代表"真绑定了项目"。
-- **聊天必须绑定项目**：`GatewaySession.handle_frame` 对 `send_message` / `run_command` 在 `workspace_bound=False` 时直接拒绝（`{"error":{"message":"请先选择项目再开始对话"}}`），不放行静默退回进程 cwd 的未绑定会话——堵住"不选项目直接聊天"落在不可控 cwd、`PermissionEngine` 边界检查形同虚设的口子。关卡刻意只加在 desktop WS 聊天入口：cron（不走 `AgentBridge`）、飞书 channel（自有一道更严的关卡：`workspace` 必填，未绑定项目直接拒绝启动，见 [feishu.md](feishu.md)）都不受影响，两者都不经过 `handle_frame`。前端配合：`gateway.ready` 的 `workspace_bound` 字段告诉前端是否该把 `payload.workspace` 当真项目写进本地状态（未绑定时只是兜底展示值，写进去会污染侧栏项目分组）；app 冷启动、切会话、"新建会话" 均已改为绑定失败/无默认项目时主动跳转项目选择器，不再放行空 `workspace=''` 的会话。
-- **per-run 授权 / hooks 注入**：filesystem/bash 工具不持有引擎，故 bridge 在每轮 `_stream` 起点经 contextvar 注入本会话引擎的授权目录来源（`set_run_authorized_source_for`）与 config hooks（`set_run_config_hooks`），cron 在 `_invoke_agent` 起点同理；各 run 按 contextvar 隔离，不被并发会话重建进程全局所清洗。详见 [permissions.md](permissions.md) / [hooks.md](hooks.md)。
+- **聊天必须绑定项目**：`GatewaySession.handle_frame` 对 `send_message` / `run_command` 在 `workspace_bound=False` 时直接拒绝（`{"error":{"message":"请先选择项目再开始对话"}}`），不放行静默退回进程 cwd 的未绑定会话——堵住"不选项目直接聊天"落在不可控 cwd、`PermissionEngine` 边界检查形同虚设的口子。关卡刻意只加在 desktop WS 聊天入口：cron（后台调度，不经 WS）、飞书 channel（自有一道更严的关卡：`workspace` 必填，未绑定项目直接拒绝启动，见 [feishu.md](feishu.md)）都不受影响，两者都不经过 `handle_frame`。前端配合：`gateway.ready` 的 `workspace_bound` 字段告诉前端是否该把 `payload.workspace` 当真项目写进本地状态（未绑定时只是兜底展示值，写进去会污染侧栏项目分组）；app 冷启动、切会话、"新建会话" 均已改为绑定失败/无默认项目时主动跳转项目选择器，不再放行空 `workspace=''` 的会话。
+- **per-run 授权 / hooks 注入**：filesystem/bash 工具不持有引擎，故 bridge 在每轮 `_stream` 起点经 contextvar 注入本会话引擎的授权目录来源（`set_run_authorized_source_for`）与 config hooks（`set_run_config_hooks`），serve 下 cron 经 `cron_stream` 也跑在 AgentBridge 上、同在 `_stream` 注入；各 run 按 contextvar 隔离，不被并发会话重建进程全局所清洗。详见 [permissions.md](permissions.md) / [hooks.md](hooks.md)。
 - **`set_workspace`（会话级改项目）**：只 rebase 本 bridge 引擎、重载本会话 config hooks、更新元数据、重置本会话当前 thread 的持久 shell——**不 chdir、不影响其它会话**。原 `_active_bridges` 进程级 rebase-all 已随 cwd 进程级模型一并移除。前端「打开项目」= 经 open 握手开一条绑定到该项目的新会话（不再先 `set_workspace` 改进程态）；`set_workspace` RPC 主要用于原地改当前会话项目（及未来复用单连接的非 desktop client）。`set_workspace` / `add_folder` / `remove_folder` 在 `_dispatch` 中持 `run.lock`，与运行中的轮次互斥。
 - **项目清单**：纯手动登记，持久化在 `~/.lumi/lumi.json` 的 `projects` 分区（`lumi/gateway/projects.py`，复用 `_atomic_write_json`），按 `last_used` 降序。`list_projects` 返回 `{projects, current}`（current = 本会话项目）；`add_project`（缺省用目录末端名，重复添加保留用户重命名）/ `remove_project`（只删条目，不动磁盘）/ `rename_project`；`set_workspace` 成功后经 `touch_project` 刷新 `last_used`。
 - **默认项目**：每条目可带 `default: bool`，`set_default_project(path, default)` 保证至多一个默认（设新的自动顶掉旧的；取消默认只清目标自身，不碰其它条目）。前端"新建会话"（`App.tsx::goNewChat`，app 冷启动路径同款逻辑）每次都问后端要最新 `list_projects()`（不信任本地缓存，default 可能刚在别的窗口/设备改过），有默认项目直接绑定新会话，没有则跳项目选择器（顶部提示"选一个项目开始对话；点「⋯」→「设为默认」，以后新建会话直接进"）。`ProjectsPage` 项目卡「⋯」菜单可设为/取消默认，卡片名旁挂静止金星标记（`.proj-star`，设为默认那一刻光环扩散一次）。
   - **默认的兜底两条**：清单原本为空时 `add_project` 直接把首个项目标为默认（新用户建完就能开聊）；清单非空但**所有条目都不含 `default` 键**（= 该机制上线前登记、从没碰过它）时，`list_projects` 一次性把最近使用的回填为默认并落盘。判据是「有没有这个键」而非「值真不真」——主动取消过默认的人条目上是 `default: False`，带键即不回填，用户意愿不会被覆盖。
 - **添加文件夹（本会话临时）**：`add_folder` / `remove_folder` 把目录临时加进**本连接**引擎的 `_ephemeral_workspaces`（引擎独立字段、仅内存、与会被 `reload()`/`rebase()` 从磁盘重载的 `_config.workspaces` 分离，故跨配置重载 / 项目切换存活；连接断开即失效），变更经 `<system-reminder>`（`folder_note` + `inject_text_into_message` 前置注入块，带 `injected_prefix` 计数）在下一条用户消息告知模型；「模型已知哪些目录」取自历史里最近一条真实用户消息的 `lumi_reminded` marker 而非 bridge 内存，故 rewind / 压缩 / 重连后自动补发。WS 重连复用同一 URL（含 `?workspace=`）使新 bridge 重新 pin，前端再按 `folderStore` 重放 `add_folder`。
 - **持久 shell 按会话 / 子代理隔离**：bash 的持久 shell 不再全进程共用一个，而是按 `current_thread_id` 分（会话私有，`cd`/env 不串别的会话），断连（`bridge.close`）/ 删会话（`delete_thread`）时回收，避免长跑 serve 累积孤儿进程。子代理（`agent` 工具）经 `shell_session.run_with_shell` 在 `copy_context` 副本里用专属 key 跑、拿独立 shell（`cd` 不污染父 / 兄弟、用完即弃），不继承父 shell 状态（在项目根 fresh 起）。
-- **前端**：侧栏「项目」入口（`onOpenProjects`）打开 `ProjectsPage`（搜索 + 排序 + 卡片，当前项目金描边）；`NewProjectDialog` 选目录 + 命名；composer 底栏 `FolderMenu`（图标 + 数量徽标 + 增减菜单）。原生目录选择器经 Electron `lumi:pick-directory` IPC（`dialog.showOpenDialog`）。
+- **前端**：侧栏「项目」入口（`onOpenProjects`）打开 `ProjectsPage`（搜索 + 排序 + 卡片，当前项目金描边）；`DirBrowser`（经 `list_dir` RPC 浏览后端目录）新建项目；composer 底栏 `FolderMenu`（图标 + 数量徽标 + 增减菜单）。
 
 ## 多机界面：连接态即可用性
 
@@ -169,10 +163,10 @@ WS 断开时若会话仍有**活跃 / 挂起轮**（典型：挂在工具审批 
 
 ## 模型供应商管理
 
-用户自定义的「连接 + 模型」持久化在 `~/.lumi/lumi.json` 的 `providers` 分区（明文，`chmod 600`，含 `api_key`），由 `lumi/agents/runtime/provider_store.py` 读写——textual-free，desktop 前端经 RPC 读写。
+用户自定义的「连接 + 模型」持久化在 `~/.lumi/lumi.json` 的 `providers` 分区（明文，`chmod 600`，含 `api_key`），由 `lumi/models/provider_store.py` 读写——textual-free，desktop 前端经 RPC 读写。
 
-- **数据模型**：一个 **profile** = 一套连接（`name` / `base_url` / `api_key`）+ 该连接下的一组 `models`；`active` 指向「某 profile 下的某个 model」。协议（OpenAI / Anthropic 客户端）仍由 model 名经 `model_manager.detect_model_type` 自动判定，无需配置。`provider_store` 兼容旧格式（单 `model` 字段、`active` 为字符串 id），读取时自动迁移并把失效 `active` 归位到首个可用模型。
-- **运行时生效**：`LumiAgentContext` 增加 `base_url` / `api_key` 两个字段（`state.py`）；`call_model` 经 `_provider_kwargs()`（`nodes.py`）仅在非空时透传给 `create_llm`，空则沿用 env / SDK 默认。`AgentBridge._apply_active()` 把当前 `active` 应用到 context，**下一轮** `call_model` 生效。
+- **数据模型**：一个 **profile** = 一套连接（`name` / `base_url` / `api_key`）+ 该连接下的一组 `models`；`active` 指向「某 profile 下的某个 model」。协议（OpenAI / Anthropic 客户端）仍由 model 名经 `lumi/models/manager.detect_protocol` 自动判定，无需配置。`provider_store` 兼容旧格式（单 `model` 字段、`active` 为字符串 id），读取时自动迁移并把失效 `active` 归位到首个可用模型。
+- **运行时生效**：模型是会话属性，每轮开跑前 `bridge.align_session_model()` 对齐 `context.model_name` / `provider`，连接由 `provider_store.resolve()` 解析。
 - **RPC**：`list_providers`（列全部 profile + active）、`save_provider` / `delete_provider`（增删改，返回刷新后的 `{profiles, active}`）、`set_provider`（切换 active，返回 `{active, model}`）、`test_provider`（用给定连接对模型发最小请求验证可达，15s 短超时、不缓存不重试）。`set/save/delete_provider` 在 `_dispatch` 中持 `run.lock`，与运行中的轮次互斥，避免轮内改掉共享 context。
 - **前端**：`SettingsDialog` + `ProvidersPanel` 完成增 / 删 / 改 / 测试；`ModelPicker`（顶栏）做快速切换。
 
@@ -185,9 +179,9 @@ composer 右下角（发送键左侧）一粒圆环，实时反映「当前对�
 
 ## 定时任务管理
 
-cron 子系统是进程级资源（与会话无关）：serve 在 lifespan 中经 `lumi/agents/cron/runtime.setup_cron()`（TUI 共用的装配工厂）启动调度器，RPC 实现在 `lumi/gateway/cron_rpc.py`，不经 AgentBridge。内部机制（执行即会话、保留策略、级联删除）见 [`cron.md`](cron.md)。
+cron 子系统是进程级资源（与会话无关）：serve 在 lifespan 中经 `lumi/agents/cron/runtime.setup_cron()` 启动调度器，RPC 实现在 `lumi/gateway/cron_rpc.py`，不经 AgentBridge。内部机制（执行即会话、保留策略、级联删除）见 [`cron.md`](cron.md)。
 
-- **结果广播**：`lumi/gateway/desktop_delivery.py` 的 `DesktopDelivery` 把任务结果（`cron.result`）与运行状态（`cron.running`）推给所有活跃 WS 连接——wire 信封格式属 server 层，agents 层只定义 `ResultDelivery` 抽象。无连接时不缓存：结果已落 RunLog，重连后经 `list_cron_runs` 查询。
+- **结果广播**：`lumi/gateway/broadcast.py` 的 `BroadcastHub` 把任务结果（`cron.result`）与运行状态（`cron.running`）推给所有活跃 WS 连接——wire 信封格式属 server 层，agents 层只定义 `ResultDelivery` 抽象。无连接时不缓存：结果已落 RunLog，重连后经 `list_cron_runs` 查询。
 - **前端结构**（`CronPage.tsx` + `App.tsx`）：
   - 定时任务不进侧栏；在顶部「定时任务」管理页的执行记录里点某次执行，进入**任务会话视图**：主区为最近一次执行的完整对话（composer 可续聊），右侧统一右栏（`RightRail`）置顶「执行记录」模块（`RunsSection`）列历次执行，蓝点 = 未读、点开即消失。
   - 顶部「定时任务」导航入口 → 管理页（卡片网格 + 新建 / 编辑 / 删除 + 详情）。
@@ -199,8 +193,8 @@ cron 子系统是进程级资源（与会话无关）：serve 在 lifespan 中�
 统一右栏里的「后台任务」模块，纳管 **bash / agent / workflow** 三类后台任务（`TaskRegistry`
 单一注册中心）。引擎 / 工具侧设计见 [`workflow.md`](workflow.md)。
 
-- **实时推送**：`TaskRegistry.set_on_change` 观察者（server 层注册）→ `_on_bg_task_change`
-  **~100ms 去抖合并** → 复用 `DesktopDelivery` 广播 `bg_tasks.update`（本机进程级快照，前端
+- **实时推送**：`TaskRegistry.set_on_change` 观察者（server 层注册）→ `BroadcastHub.on_bg_task_change`
+  **~100ms 去抖合并** → 广播 `bg_tasks.update`（本机进程级快照，前端
   按机器分段替换合并、按 thread + backend 过滤展示——同名飞书群跨机不串）。RPC：`list_bg_tasks`（初始拉取）/ `read_bg_task_output`（输出预览）/ `stop_bg_task` / `dismiss_bg_task` /
   `clear_finished_bg_tasks`，读 / stop / dismiss 带会话归属校验。
 - **广播是全量快照**，故凡随快照走的字段都必须有界：`prompt` 截 1000 字、workflow 的
@@ -342,15 +336,15 @@ macOS 关窗后应用驻留 Dock，sidecar 保持运行，Dock 唤起（activate
 | `desktop/src/components/CronPage.tsx` | 定时任务管理页 + 执行记录模块（`RunsSection`） |
 | `desktop/src/components/RightRail.tsx` | 统一右栏（收放钮 + `RailSection` 模块卡容器） |
 | `desktop/src/components/BgTasksDrawer.tsx` | 后台任务模块（`BgTasksSection`，运行中卡片 + 已完成折叠组） |
-| `desktop/src/components/{ProjectsPage,NewProjectDialog,FolderMenu}.tsx` | 项目管理页 + 新建项目 + 添加文件夹菜单 |
+| `desktop/src/components/{ProjectsPage,DirBrowser,FolderMenu}.tsx` | 项目管理页 + 目录浏览（新建项目）+ 添加文件夹菜单 |
 | `desktop/src/i18n.ts` | 国际化（中文 / English） |
 | `lumi/gateway/channels/ws.py` | FastAPI WS 端点 + RPC dispatch |
 | `lumi/gateway/projects.py` | 项目清单持久化（`~/.lumi/lumi.json` 的 `projects` 分区） |
 | `lumi/gateway/protocol.py` | BridgeEvent → wire 序列化 |
 | `lumi/gateway/cron_rpc.py` | 定时任务 RPC 方法实现 |
-| `lumi/gateway/desktop_delivery.py` | cron 结果 → WS 广播投递通道 |
-| `lumi/gateway/bridge.py` | LangGraph ↔ 前端中立桥接层 |
-| `lumi/agents/runtime/provider_store.py` | 模型供应商 profile 持久化（`~/.lumi/lumi.json` 的 `providers` 分区） |
+| `lumi/gateway/broadcast.py` | 进程级广播中枢 `BroadcastHub`（含 cron 结果投递通道） |
+| `lumi/gateway/bridge/core.py` | LangGraph ↔ 前端中立桥接层 |
+| `lumi/models/provider_store.py` | 模型供应商 profile 持久化（`~/.lumi/lumi.json` 的 `providers` 分区） |
 | `lumi/sessions/session_store.py` | 会话列表从 checkpoint 派生 |
 | `lumi/sessions/session_meta.py` | 会话用户元数据 sidecar |
 | `protocol/events.json` | 协议单一事实源 |

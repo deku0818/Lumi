@@ -1,9 +1,9 @@
 # config.json 配置说明
 
-所有字段均可选，未配置时使用默认值。读哪份 config.json 取决于入口：
+所有字段均可选，未配置时使用默认值；未知字段会被静默忽略。读哪份 config.json 取决于入口：
 
 - **`lumi serve`（桌面端 / 服务器）**：只读用户级 `~/.lumi/config.json`（设了 `LUMI_CONFIG_DIR` 则读那里）；项目 `.lumi/config.json` 里只有 `style` 生效（按会话所属项目）。
-- **命令行 `lumi` / `lumi -p`**：按当前目录向上发现，`./.lumi/config.json` 存在则用它，否则用户级。
+- **命令行 `lumi -p`**：按当前目录向上发现，`./.lumi/config.json` 存在则用它，否则用户级。
 
 ---
 
@@ -17,7 +17,7 @@
 
 默认值为 `"default"`。指定系统提示词和子 Agent 配置的风格，详见 [styles.md](styles.md)。
 
-CLI 参数可覆盖：`lumi -s code`。优先级：CLI > config.json > 默认值。
+`lumi -p` 可用 `-s code` 覆盖（对桌面 / `lumi serve` 无效）。优先级：CLI（仅 `lumi -p`）> 项目 `.lumi/config.json` 的 `style` > 进程 config.json > `default`。
 
 ---
 
@@ -76,7 +76,7 @@ CLI 参数可覆盖：`lumi -s code`。优先级：CLI > config.json > 默认值
 
 | 值 | 说明 | 适用场景 |
 |---|---|---|
-| `sqlite` | SQLite 文件持久化（默认），跨重启保留 | 单机部署、需要会话恢复（[`/resume`](slash-commands.md)） |
+| `sqlite` | SQLite 文件持久化（默认），跨重启保留 | 单机部署、需要会话恢复 |
 | `memory` | 内存存储，进程退出后丢失，且同进程内连接间互相隔离 | 开发调试、临时使用 |
 | `postgres` | PostgreSQL 持久化 | 多实例部署、生产环境 |
 
