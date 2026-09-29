@@ -157,19 +157,26 @@ def local_env_checks(
     cli = toolbox.detect("lark-cli")
     if cli.source == "missing":
         # lark-cli 是 npm 包，缺 npm 就装不了。此时不给「一键安装」——按下去只会
-        # 报同一句缺 npm；核心工具链的安装入口只有环境页一个，把人送过去。
+        # 报同一句缺 npm。Node 也缺：核心工具链的安装入口只有环境页一个，把人送过去；
+        # 系统 Node 缺 npm：环境页里 Node 显示已装、不会再装，送过去是死路，直说补 npm。
         # 这里只要一个「有没有」，用 which 而非 detect：后者还会 spawn 一次
         # `npm --version`（Node 冷启动 200-500ms），而版本号在这条分支上没人看
         npm_missing = shutil.which("npm") is None
+        node_missing = npm_missing and shutil.which("node") is None
+        if node_missing:
+            hint = "；它经 npm 安装，需先装 Node.js"
+        elif npm_missing:
+            hint = "；系统 Node 缺少 npm，请用系统包管理器安装 npm（或卸载系统 Node 后在「设置 → 环境」安装）"
+        else:
+            hint = ""
         checks.append(
             Check(
                 key="cli",
                 tone="error",
                 name="lark-cli 未安装",
-                detail="飞书 API 调用与妙记取数依赖该命令行工具"
-                + ("；它经 npm 安装，需先装 Node.js" if npm_missing else ""),
+                detail="飞书 API 调用与妙记取数依赖该命令行工具" + hint,
                 fix_action="" if npm_missing else "lark-cli",
-                fix_nav="env" if npm_missing else "",
+                fix_nav="env" if node_missing else "",
                 group=group,
             )
         )
@@ -216,7 +223,7 @@ def local_env_checks(
                 tone="error",
                 name="无法读取飞书技能清单",
                 detail="lark-cli 不支持 skills 子命令或输出异常，请先升级",
-                fix_cmd=toolbox.terminal_cmd("npm update -g @larksuite/cli"),
+                fix_cmd=toolbox.lark_cli_update_cmd(cli.source),
                 group=group,
             )
         )

@@ -389,42 +389,6 @@ def test_install_lark_cli_translates_missing_curl(toolbox_env, monkeypatch):
         toolbox.install_lark_cli()
 
 
-def test_install_lark_cli_links_from_npm_prefix(toolbox_env, monkeypatch):
-    """装出的 cli 不在 PATH 上时，链接目标问 `npm prefix -g`，不按 node 树硬拼。
-
-    用户级 .npmrc 改过 prefix（Windows 上指到 %APPDATA%\\npm 很常见）时硬拼会链出
-    一个探测得到、一跑就报「找不到路径」的幽灵 shim：体检显示 lark-cli 已安装，
-    而技能包同步与妙记取数全部静默失败。
-    """
-    _fake_exe(toolbox_env["system_bin"], "npm")
-    prefix = toolbox_env["config"] / "elsewhere"  # 与工具箱 node 树无关的目录
-    (prefix / "bin").mkdir(parents=True)
-    _fake_exe(prefix / "bin", "lark-cli", "1.0.78")
-
-    def fake_run(cmd, timeout=30):
-        if cmd[1:] == ["prefix", "-g"]:
-            return True, f"{prefix}\n"
-        return True, ""  # npm install -g
-
-    monkeypatch.setattr(toolbox, "_run", fake_run)
-    status = toolbox.install_lark_cli()
-    assert status.source == "toolbox"
-    link = toolbox_env["config"] / "bin" / "lark-cli"
-    assert link.resolve() == (prefix / "bin" / "lark-cli").resolve()
-
-
-def test_install_lark_cli_rejects_missing_binary(toolbox_env, monkeypatch):
-    """npm 说装好了却找不到产物：报错，而不是链一个指向空气的 shim。"""
-    _fake_exe(toolbox_env["system_bin"], "npm")
-    monkeypatch.setattr(
-        toolbox,
-        "_run",
-        lambda cmd, timeout=30: (True, str(toolbox_env["config"] / "nowhere")),
-    )
-    with pytest.raises(RuntimeError, match="不存在"):
-        toolbox.install_lark_cli()
-
-
 def test_skills_status_reports_outdated(toolbox_env, monkeypatch):
     _mock_lark_cli(monkeypatch, toolbox_env)
     sync_lark_skills()

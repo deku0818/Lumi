@@ -31,10 +31,9 @@ from lumi.utils.logger import logger
 # login 只请求勾选/参数指定的 scope（应用开通了也不会自动带上），必须显式列出所需项；
 # --scope 与 --recommend 叠加，不会丢掉其他常用权限
 def _login_cmd(profile: str) -> str:
-    """扫码授权命令；机器人有专属 profile 时授权落在它名下（各机器人各自授权）。"""
-    flag = f"--profile {profile} " if profile else ""
+    """扫码授权命令：授权落在机器人专属 profile 名下（各机器人各自授权）。"""
     return toolbox.terminal_cmd(
-        f'{CLI} {flag}auth login --recommend --scope "{",".join(MINUTES_SCOPES)}"'
+        f'{CLI} --profile {profile} auth login --recommend --scope "{",".join(MINUTES_SCOPES)}"'
     )
 
 
@@ -136,19 +135,26 @@ def diagnose(app_id: str, profile: str = "") -> list[dict]:
     checks: list[Check] = []
 
     # ① lark-cli 可用性（与接入体检同一探测：系统 PATH 优先 → 工具箱）
-    if toolbox.detect(CLI).source == "missing":
+    cli = toolbox.detect(CLI)
+    if cli.source == "missing":
         checks.append(
             Check(
                 key="cli",
                 tone="error",
                 name="lark-cli 未安装",
                 detail="妙记取数与事件订阅依赖该命令行工具",
-                fix_cmd=toolbox.terminal_cmd("npm i -g @larksuite/cli"),
+                # 只给一键安装：手敲装进 prefix 的不会被链进 bin 目录，体检照样判缺
                 fix_action="lark-cli",
             )
         )
         return blocked_tail(checks, _STEPS, "需先安装 lark-cli")
     checks.append(Check(key="cli", name="lark-cli 已安装"))
+    # 机器人专属 profile 是唯一正确身份：不带 profile 的 lark-cli 调用会落到全局 active
+    # profile，查到的是别的身份，结论却记在本机器人名下（与接入体检「身份未同步」矛盾）
+    if not profile:
+        return blocked_tail(
+            checks, _STEPS, "需先同步 lark-cli 身份（保存机器人即可同步）"
+        )
 
     # ② 用户授权（订阅与读逐字稿都必须 user 身份，app 身份读会被拒 2091005）
     # 判 available 而非 tokenStatus == "valid"：access_token 约 2 小时到期后状态转
@@ -166,7 +172,7 @@ def diagnose(app_id: str, profile: str = "") -> list[dict]:
                 name="lark-cli 状态读取失败",
                 detail=reason,
                 fix_cmd=toolbox.terminal_cmd(f"{CLI} auth status"),
-                fix_note="版本过旧可 npm i -g @larksuite/cli 升级",
+                fix_note=f"版本过旧可执行 {toolbox.lark_cli_update_cmd(cli.source)} 升级",
             )
         )
         return blocked_tail(checks, _STEPS, "需先排除 lark-cli 故障")

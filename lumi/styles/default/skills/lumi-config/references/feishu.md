@@ -42,6 +42,8 @@ profile 就复用，否则新建 `lumi-<id>`），实际名字看 `feishu config
 你当前这个会话的 shell 可能还没带上注入的环境，本流程里替这个机器人调 lark-cli 时显式加
 `--profile <cli_profile>`。`lark-cli --profile <cli_profile> whoami` 能看到这个 app 即
 同步成功（`cli_profile` 为空则重跑一次上面的 config 保存，输出会给出未同步原因）。
+`cli_profile` 为空时妙记诊断停在「需先同步 lark-cli 身份」、事件订阅也不建——不会回落
+全局 lark-cli 身份，必须先把它同步出来。
 
 运行时口味用人话问，别甩字段名（模型与思考档位是会话属性，用户想改让他在会话里发 `/model` / `/effort`）：
 

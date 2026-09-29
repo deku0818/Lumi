@@ -39,9 +39,9 @@ ATTACHED_FILE_TAG: Final[str] = "attached-file"
 标签块注入 content；显示侧不解析——附件胶囊数据走 lumi.items 的 files 字段。"""
 
 FEISHU_THREAD_PREFIX: Final[str] = "feishu-"
-"""飞书渠道会话的 thread 前缀（确定性派生 feishu-{key}，key 见 inbound.session_key_of）。
+"""飞书渠道会话的 thread 前缀（确定性派生 feishu-{key}，key 见 parse.session_key_of）。
 
-单一事实源：inbound.feishu_thread_id 的派生与 gateway.session._channel_of 的
+单一事实源：parse.feishu_thread_id 的派生与 gateway.session._channel_of 的
 判定（会话列表标注 / 只读守卫 / 通知轮跳过）共用此常量。"""
 
 LUMI_META_KEY: Final[str] = "lumi"

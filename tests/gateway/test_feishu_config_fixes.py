@@ -252,7 +252,7 @@ def test_minutes_diagnose_unset_env_ref_not_in_fix_url(monkeypatch):
         "_auth_status",
         lambda p: ({"identities": {"user": {"available": True, "scope": ""}}}, ""),
     )
-    checks = minutes.diagnose("${LUMI_T_UNSET}")
+    checks = minutes.diagnose("${LUMI_T_UNSET}", "lumi-x")
     scope = next(c for c in checks if c["key"] == "scope")
     assert "${" not in scope["fix_url"]
 

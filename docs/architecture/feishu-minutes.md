@@ -200,7 +200,7 @@ agent 通过已装好的 `lark-minutes` skill（`.lumi/skills/lark-minutes/`，�
 `pool.chat_ids` 是**内存态、懒填充**——仅在用户主动发消息时写入（`inbound.py:414`），
 重启后若用户尚未与 bot 私聊过，轮询器看不到该会话，事件将无法投递。
 
-**已实施**（`inbound.session_key_of`）：**私聊的会话 key 是对方 open_id，群聊才是
+**已实施**（`parse.session_key_of`）：**私聊的会话 key 是对方 open_id，群聊才是
 chat_id**。入站与推送因此天然同源，与先后顺序、有无历史都无关。
 
 早期实现两端不一致（入站 `feishu-{chat_id}`、推送 `feishu-{open_id}`），同一私聊裂成

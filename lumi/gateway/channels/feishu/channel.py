@@ -312,7 +312,15 @@ class FeishuChannel:
             asyncio.run_coroutine_threadsafe(self.inbound.on_message(data), self._loop)
 
     async def _ensure_subscription(self) -> None:
-        """后台重建妙记事件订阅并把结果落进日志（失效是静默的，日志是唯一线索）。"""
+        """后台重建妙记事件订阅并把结果落进日志（失效是静默的，日志是唯一线索）。
+
+        无专属 profile 不订阅：lark-cli 会落到全局 active profile，订阅记在别的身份名下。
+        """
+        if not self.config.cli_profile:
+            logger.warning(
+                "妙记事件订阅跳过：机器人未同步 lark-cli 身份（保存机器人即可同步）"
+            )
+            return
         error = await asyncio.get_running_loop().run_in_executor(
             None, ensure_subscription, self.config.cli_profile
         )

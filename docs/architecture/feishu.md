@@ -46,9 +46,12 @@
 调用即以本机器人身份出去，与用户自己的全局 active profile、其他项目互不干扰；没绑不注入，
 回落全局行为。profile 缺失时 lark-cli 硬报错并指出 env 来源，不会静默串身份（需
 lark-cli ≥ 1.0.92，体检有版本门槛）。妙记的用户授权也按 profile 各自独立
-（`minutes.diagnose(app_id, profile)`）。
+（`minutes.diagnose(app_id, profile)`）。妙记诊断与事件订阅**严格**按机器人 profile：
+`cli_profile` 为空时不经 `run_cli` 回落全局 active profile（查到的是别的身份，结论却记在本机器人
+名下，与接入体检「身份未同步」矛盾）——诊断停在「需先同步 lark-cli 身份（保存机器人即可同步）」，
+`channel._ensure_subscription` 跳过订阅并记 warning。
 
-`key` 由 `inbound.session_key_of` 定：**私聊是对方 `open_id`，其余（群及未知 chat_type）
+`key` 由 `parse.session_key_of` 定：**私聊是对方 `open_id`，其余（群及未知 chat_type）
 是 `chat_id`**。私聊刻意不用 chat_id——主动推送（妙记）的事件只带 open_id，而飞书没有
 open_id → p2p chat_id 的查询 API，两端不同源就会把同一私聊裂成两个会话（详见
 [feishu-minutes.md](feishu-minutes.md)）。
@@ -74,7 +77,7 @@ lark_oapi.ws.client.loop`，与 uvicorn 主 loop 隔离。入站回调在 WS 线
 `on_message` 流水线：去重（LRU by message_id）→ 跳过自身（比 `bot_open_id`，**不**按
 `sender_type == "bot"` 一刀切——别的机器人 @ 本机器人是正当来源）→ 白名单（`is_allowed`）→
 群策略（`group_policy=mention` 时仅 `@_all` 或精确匹配 `bot_open_id` 才响应；**不做** ou_
-启发式以免把真人误判为机器人）→ 解析文本（text / post / interactive）→ 收集媒体引用 → 解析发送者显示名
+启发式以免把真人误判为机器人）→ 解析文本（text / post / interactive，`parse.message_text`）→ 收集媒体引用 → 解析发送者显示名
 （`channel.directory`，群聊走群成员源、私聊走通讯录源）→ 派生 thread + 取 bridge + 运行锁 →
 排队或处理。发送者名挂在 `_Pending.sender_name` 上（解析失败恒退兜底名），渲染为
 `<sender>姓名</sender>` 标签行（`constants.SENDER_TAG`，纯给模型看）；每条原始消息的
@@ -108,7 +111,10 @@ mention_key——`id=` 是**发送方应用**的 open_id（open_id 每应用一�
   5MB/2000px 硬约束 + token 预算）→ base64 Anthropic content block，与 desktop 发图同构。
 - 文件 → 下载到 `<系统临时区>/lumi/feishu/<thread>/`（如 Linux `/tmp/lumi/feishu/<thread>/`）→ `bridge.folders.add_folder()` 授权该目录给会话权限
   引擎 → `<attached-file>路径</attached-file>` 注入正文，agent 用 `read` 读（PDF 渲染、文本直读）。
-- 回复某条消息时，一并拉取**被回复消息**里的图片/文件（用父消息 id 下载）。
+- 回复某条消息时，一并拉取**被回复消息**里的图片/文件（用父消息 id 下载）；其正文按类型抽取
+  （text / post / 卡片，@ 占位按父消息自己的 `mentions` 换姓名）记进 `_Pending.quote`，以「> 」引用块
+  前置到**模型侧**文本（`_render` / 直连 `texts`），气泡 `items` 不带——群聊 mention 模式下被引用的
+  内容通常不在会话历史里。父消息是本机器人自己发的（sender 为本 app_id）则跳过：已在历史里。
 
 **忙时排队 + 合并**（同会话同一时刻只跑一轮）：
 - 上一轮在跑（运行锁被占）时，新消息存入 `_queues[thread]`（上限 `_MAX_QUEUE=10`，满则丢弃
@@ -309,6 +315,11 @@ FAILED 不上抛），成功与否看**快照时刻有没有推进**（`record_t
 夜间循环撞上时后者原地排队。生命周期随渠道 `start/stop`（config 变更 → manager.reload 重建
 渠道 → 本任务取消重起，故 config 单任务生命内恒定）；未启用时 3600s 空转。
 
+**等到点按墙钟**：先算出目标墙钟时刻，再以 ≤300s 一段分段睡、每段醒来重读 `datetime.now()`，
+而非一次 `asyncio.sleep(时长)`——后者走单调时钟，挂起期间不走（合盖 20:00→08:00 会拖到 15:00
+才触发），调钟也会让它落在错的钟点。挂起期间已过点则醒来一段内（≤5 分钟）即补跑，不顺延次日：
+夜里合盖的笔记本若顺延就永远不整理，而渠道 thread 又不走 Stop 钩子 dream。
+
 ## 配置与生命周期
 
 - **存储**：`~/.lumi/lumi.json` 的 `channels` 分区（含密钥，chmod 600 原子写，照抄 `provider_store` 范式），
@@ -386,7 +397,8 @@ desktop `设置 → 渠道`（`ChannelsPanel.tsx`，进 `SettingsDialog`）：�
 | 文件 | 职责 |
 |---|---|
 | `channels/feishu/channel.py` | lark WS 连接 + 收发 + 生命周期 + 状态 |
-| `channels/feishu/inbound.py` | 入站解析 / 媒体 / 排队合并 / 驱动 run / 后台任务通知轮询 |
+| `channels/feishu/inbound.py` | 入站处理 / 媒体下载 / 排队合并 / 驱动 run / 后台任务通知轮询 |
+| `channels/feishu/parse.py` | 纯函数：content 解析（正文 / 媒体引用 / @ 姓名）、会话 key → thread、`<env>` 条目、/help 正文 |
 | `channels/feishu/outbound.py` | BridgeEvent 事件泵（`turn_closer` / `tool_activity` 与直连轮共用） |
 | `channels/relay.py` | 直连（/direct）渠道无关核心：绑定 sidecar / `--dir` 语法 / claude 无头轮驱动 + stream-json 解析 |
 | `channels/feishu/relay_turn.py` | 直连轮：RelayEvent 折叠成流式卡片 + 来源 footer |

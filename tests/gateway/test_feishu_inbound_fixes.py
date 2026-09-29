@@ -8,7 +8,7 @@ from types import SimpleNamespace
 from lumi.gateway.channels.config import FeishuChannelConfig
 from lumi.gateway.channels.feishu import inbound as inb
 from lumi.gateway.channels.feishu.channel import FeishuChannel
-from lumi.gateway.channels.feishu.inbound import (
+from lumi.gateway.channels.feishu.parse import (
     extract_post_text,
     resolve_mentions,
     safe_filename,

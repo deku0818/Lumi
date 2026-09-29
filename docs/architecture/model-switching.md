@@ -101,7 +101,7 @@ desktop 侧的 Effort 子菜单仍写 profile（按模型全局），这是有�
 | desktop 切模型 → 飞书任何群 | ❌ | 同上；desktop 不再写全局 active |
 | 改「新会话默认」→ 已聊过的会话（任何端） | ❌ | 首轮已固化 |
 | 改「新会话默认」→ 还没开口的空会话 | ✅ | 未固化，`resolve()` 落到默认 |
-| 飞书 A 群 `/model` → B 群 | ❌ | 群按 `chat_id` 各自成 thread（`session_key_of`，`inbound.py:127`） |
+| 飞书 A 群 `/model` → B 群 | ❌ | 群按 `chat_id` 各自成 thread（`parse.session_key_of`） |
 | 飞书私聊 → 同一个人所在的群 | ❌ | 私聊按 `open_id` 成 thread，与群是两个会话 |
 | 改某模型的档位默认 → 设过 `/effort` 的会话 | ❌ | 会话级档位优先 |
 | 本机 desktop 改任何模型设置 → 远程后端上的会话 | ❌ | `lumi.json` 与 `session_meta.json` 都是**每台后端机器一份** |

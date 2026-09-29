@@ -17,9 +17,9 @@ import pytest
 from lumi.gateway.bridge import AgentBridge
 from lumi.gateway.channels.config import FeishuChannelConfig
 from lumi.gateway.channels.feishu import inbound as inb
-from lumi.gateway.channels.feishu import outbound
+from lumi.gateway.channels.feishu import outbound, parse
 from lumi.gateway.channels.feishu.channel import FeishuChannel
-from lumi.gateway.channels.feishu.inbound import (
+from lumi.gateway.channels.feishu.parse import (
     build_content,
     channel_env,
     extract_card_text,
@@ -415,20 +415,20 @@ async def test_clear_busy_prompts_stop_first(monkeypatch):
 
 
 def test_help_markdown_groups_and_empty_skills():
-    out = inb.help_markdown(
+    out = parse.help_markdown(
         [{"name": "commit", "description": "提交", "type": "skill"}]
     )
     assert "技能命令" in out and "`/commit` 提交" in out
     # 分割线前后必须有空行：紧贴上一行的 --- 会把整段变成 setext 大字标题
     assert "\n\n---\n\n" in out
     # 无 skill：跳过技能组，无悬空分割线
-    out2 = inb.help_markdown([])
+    out2 = parse.help_markdown([])
     assert "技能命令" not in out2 and "---" not in out2 and "`/stop`" in out2
 
 
 def test_help_markdown_system_commands_not_under_skills():
     # system 类命令（dream/compact 等）归「会话控制」，不混进「技能命令」
-    out = inb.help_markdown(
+    out = parse.help_markdown(
         [
             {"name": "commit", "description": "提交", "type": "skill"},
             {"name": "dream", "description": "整理记忆", "type": "system"},
@@ -443,7 +443,7 @@ def test_help_markdown_system_commands_not_under_skills():
 
 def test_help_markdown_channel_commands_shadow_same_name_skill():
     # 渠道命令（/stop /model 等）遮蔽同名技能：列表只出现渠道那一条，不出现两次
-    out = inb.help_markdown(
+    out = parse.help_markdown(
         [
             {"name": "model", "description": "同名技能", "type": "skill"},
             {"name": "stop", "description": "同名技能", "type": "skill"},
@@ -458,8 +458,8 @@ def test_help_markdown_channel_commands_shadow_same_name_skill():
 
 
 def test_help_line_truncates_long_and_multiline_description():
-    assert inb._help_line("x", "第一行\n第二行") == "`/x` 第一行"
-    long = inb._help_line("y", "很" * 80)
+    assert parse.help_line("x", "第一行\n第二行") == "`/x` 第一行"
+    long = parse.help_line("y", "很" * 80)
     assert long.endswith("…") and len(long) < 80
 
 
@@ -857,10 +857,10 @@ async def test_drain_minute_events_bridges_unseen_session(monkeypatch):
 
 def test_session_key_only_exact_p2p_uses_open_id():
     """仅精确 "p2p" 用 open_id；群与任何未知 chat_type 一律 chat_id（宁可不裂）。"""
-    assert inb.session_key_of("p2p", "oc_dm", "ou_me") == "ou_me"
-    assert inb.session_key_of("group", "oc_team", "ou_me") == "oc_team"
-    assert inb.session_key_of(None, "oc_team", "ou_me") == "oc_team"
-    assert inb.session_key_of("topic", "oc_team", "ou_me") == "oc_team"
+    assert parse.session_key_of("p2p", "oc_dm", "ou_me") == "ou_me"
+    assert parse.session_key_of("group", "oc_team", "ou_me") == "oc_team"
+    assert parse.session_key_of(None, "oc_team", "ou_me") == "oc_team"
+    assert parse.session_key_of("topic", "oc_team", "ou_me") == "oc_team"
 
 
 def _inbound_event(
@@ -1322,10 +1322,10 @@ def test_diagnose_reports_missing_cli_and_blocks_rest(monkeypatch):
     from lumi.gateway.channels.feishu.minutes import diagnose
 
     _patch_which(monkeypatch, False)
-    checks = diagnose("cli_x")
+    checks = diagnose("cli_x", "lumi-x")
     assert [c["key"] for c in checks] == ["cli", "auth", "scope", "subscription"]
     assert all(c["tone"] == "error" for c in checks)
-    assert "npm i -g @larksuite/cli" in checks[0]["fix_cmd"]
+    assert checks[0]["fix_action"] == "lark-cli"  # 一键安装（手敲装进 prefix 不会被链进 bin）
 
 
 def test_diagnose_reports_unauthorized(monkeypatch):
@@ -1340,7 +1340,7 @@ def test_diagnose_reports_unauthorized(monkeypatch):
             stdout='{"identities": {"user": {"status": "missing", "available": false}}}'
         ),
     )
-    checks = diagnose("cli_x")
+    checks = diagnose("cli_x", "lumi-x")
     assert checks[0]["tone"] == "ok" and checks[1]["tone"] == "error"
     assert "auth login" in checks[1]["fix_cmd"]
 
@@ -1351,7 +1351,7 @@ def test_diagnose_separates_cli_failure_from_unauthorized(monkeypatch):
 
     _patch_which(monkeypatch, True)
     _patch_subprocess(monkeypatch, _fake_run(stdout="Segmentation fault"))
-    checks = diagnose("cli_x")
+    checks = diagnose("cli_x", "lumi-x")
     auth = next(c for c in checks if c["key"] == "auth")
     assert auth["tone"] == "error"
     assert "auth login" not in auth["fix_cmd"]  # 不引导扫码
@@ -1386,7 +1386,7 @@ def test_diagnose_accepts_needs_refresh(monkeypatch):
             )
         ),
     )
-    checks = diagnose("cli_x")
+    checks = diagnose("cli_x", "lumi-x")
     auth = next(c for c in checks if c["key"] == "auth")
     assert auth["tone"] == "ok"
     # 未被 _with_blocked_tail 截断：后续项是真探测出来的
@@ -1414,7 +1414,7 @@ def test_diagnose_reports_missing_scope_with_link(monkeypatch):
             )
         ),
     )
-    checks = diagnose("cli_x")
+    checks = diagnose("cli_x", "lumi-x")
     scope = next(c for c in checks if c["key"] == "scope")
     assert scope["tone"] == "error"
     assert "transcript:export" in scope["detail"]
@@ -1445,7 +1445,7 @@ def test_diagnose_all_green(monkeypatch):
         return SimpleNamespace(stdout=json.dumps(body), stderr="", returncode=0)
 
     _patch_subprocess(monkeypatch, run)
-    checks = diagnose("cli_x")
+    checks = diagnose("cli_x", "lumi-x")
     assert all(c["tone"] == "ok" for c in checks)
     # 诊断即修复：全绿路径必然调过一次订阅接口
     assert any("subscription" in " ".join(c) for c in calls)

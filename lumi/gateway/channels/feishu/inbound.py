@@ -2,18 +2,18 @@
 
 支持纯文本 / post 富文本 / 图片（下载为原始 base64 块，经 stream_response 的
 persist_image_blocks 统一存盘取路径，与文件附件一并由 bridge 拼 <attached-file>
-标签块注入，模型用 read/vision 读）/ 文件（下载到 /tmp/lumi 经 attachments 参数传入）；回复某条消息时一并带上被回复消息里的图片/文件。每条消息经身份目录解析发送者显示名
+标签块注入，模型用 read/vision 读）/ 文件（下载到 /tmp/lumi 经 attachments 参数传入）；
+回复某条消息时一并带上被回复消息里的图片/文件，其正文以「> 」引用块只进模型侧（气泡
+不显示）。每条消息经身份目录解析发送者显示名
 （``channel.directory``），正文加 ``<sender>姓名</sender>`` 标签（模型分清群聊里谁说的），
 并把 {sender, ts, text} 结构化写进 additional_kwargs 供 desktop 气泡渲染。
+content 解析与会话派生的纯函数在 ``parse``。
 """
 
 from __future__ import annotations
 
 import asyncio
 import itertools
-import json
-import os
-import re
 import time
 from collections import OrderedDict
 from collections.abc import Callable
@@ -32,6 +32,7 @@ from lumi.gateway.channels.commands import (
     is_model_arg,
     parse_slash_command,
 )
+from lumi.gateway.channels.config import resolve_ref
 from lumi.gateway.channels.feishu.directory import (
     fallback_bot_name,
     fallback_chat_name,
@@ -39,6 +40,20 @@ from lumi.gateway.channels.feishu.directory import (
 )
 from lumi.gateway.channels.feishu.minutes import transcript_hint
 from lumi.gateway.channels.feishu.outbound import run_turn
+from lumi.gateway.channels.feishu.parse import (
+    build_content,
+    channel_env,
+    feishu_p2p_thread_id,
+    feishu_thread_id,
+    file_ref_of,
+    help_line,
+    help_markdown,
+    image_keys_of,
+    message_text,
+    parse_content,
+    safe_filename,
+    session_key_of,
+)
 from lumi.gateway.channels.feishu.relay_turn import run_relay_turn
 from lumi.gateway.channels.relay import (
     EFFORT_LEVELS,
@@ -57,7 +72,6 @@ from lumi.sessions.session_meta import delete_meta, update_meta
 from lumi.utils.constants import NOTIFICATION_POLL_INTERVAL, SENDER_TAG
 from lumi.utils.logger import logger
 from lumi.utils.paths import lumi_tmp_dir
-from lumi.utils.thread_id import sanitize_thread_id
 
 if TYPE_CHECKING:
     from lumi.gateway.channels.feishu.channel import FeishuChannel
@@ -98,6 +112,7 @@ class _Pending:
     relay: bool = (
         False  # 入队那一刻是否处于直连——路由在发送时定格，不随后来的模式切换漂移
     )
+    quote: str = ""  # 被回复消息的正文：只进模型侧（引用块），气泡不显示
 
 
 @dataclass(frozen=True)
@@ -106,59 +121,6 @@ class _MinuteEvent:
 
     token: str
     open_id: str
-
-
-def feishu_thread_id(session_key: str, prefix: str) -> str:
-    """飞书会话 key → Lumi thread_id（key 由 session_key_of 定）。
-
-    prefix 取机器人的 ``config.thread_prefix``，**必传**：多机器人时同一个群对每个
-    机器人各是一个会话（chat_id 相同也不撞）。给默认值等于留一把哑枪——新增推送
-    入口漏传编译照过，静默把某机器人的会话并进共享的旧命名空间。
-    """
-    return sanitize_thread_id(f"{prefix}{session_key}")
-
-
-def feishu_p2p_thread_id(open_id: str, prefix: str) -> str:
-    """某人私聊会话的 thread —— 主动推送（妙记）只有 open_id 时的入口。
-
-    与入站私聊同源：都以 open_id 为 key。别退回裸的 ``feishu_thread_id(open_id)``，
-    那样传进去的是什么 id 在调用点无从分辨，正是两端不同源裂出两个会话的老路。
-    """
-    return feishu_thread_id(open_id, prefix)
-
-
-def session_key_of(chat_type: str | None, chat_id: str, open_id: str) -> str:
-    """一条入站消息归属的会话 key：私聊按发送者 open_id，其余一律按 chat_id。
-
-    只有精确的 ``"p2p"`` 用 open_id——未知 chat_type（lark 声明为 Optional[str]）
-    按 chat_id 保住「一 chat 一 thread」，最坏只是没合并。别和群策略的
-    ``chat_type == "group"`` 并成一个谓词：那里未知类型应当响应，方向相反。
-    完整取舍见 docs/architecture/feishu.md。
-    """
-    return open_id if chat_type == "p2p" else chat_id
-
-
-def channel_env(
-    chat_type: str | None, chat_id: str, open_id: str, title: str | None
-) -> str:
-    """本会话在 <env> 块里的条目行：模型据此知道自己在哪、拿得到发消息要用的 id。
-
-    分层：一行"会话来源: 飞书" + 一级缩进子项（场景 / 群名或对方 / id），与系统那几
-    行区分开。``title`` 为 None（无 im:chat:read / 解析失败）时整行省掉——兜底名
-    「群_a1b2c3」不是真名，模型会当真名复述给用户。发言人**不进**这里：群里每条消息
-    都在换人，写进来等于每轮 digest 变、每轮重发整块，而"谁在说话"已由 <sender>
-    标签逐条带着。p2p 判定与 session_key_of 同口径（只有精确 "p2p" 算私聊）。
-    """
-    if chat_type == "p2p":
-        sub = [
-            ("场景", "私聊"),
-            ("对方", title),
-            ("chat_id", chat_id),
-            ("对方 open_id", open_id),
-        ]
-    else:
-        sub = [("场景", "群聊"), ("群名", title), ("chat_id", chat_id)]
-    return "\n".join(["- 会话来源: 飞书"] + [f"  - {k}: {v}" for k, v in sub if v])
 
 
 def _model_line(model: str, effort: str) -> str:
@@ -182,184 +144,9 @@ def _model_listing(entries: list[tuple[str, str, str]]) -> list[str]:
     ]
 
 
-def _help_line(name: str, description: str) -> str:
-    """单条命令行：`/名字` + 描述首行（超长截断，保住每行一条的可读性）。"""
-    desc = description.splitlines()[0] if description else ""
-    if len(desc) > 60:
-        desc = desc[:60] + "…"
-    return f"`/{name}` {desc}".rstrip()
-
-
-def help_markdown(commands: list[dict]) -> str:
-    """/help 卡片正文：技能命令 / 会话控制两组，`/名字` code 高亮 + 灰字组标题。
-
-    ``commands``（来自 ``list_commands``）按 ``type`` 分流：``skill`` 进「技能命令」，
-    ``system``（dream / compact 等 agent 层命令）与渠道 ``SYSTEM_COMMANDS``（/stop /clear
-    /help）同归「会话控制」——system 命令不是技能，不该混进技能分组。
-
-    分割线前后必须留空行：--- 紧贴上一行会按 markdown setext 规则把前面整段
-    渲染成大字标题（飞书真机如此），换行也一并被吞。
-    """
-    # 渠道命令遮蔽同名 bridge 命令：渠道层先拦截，同名技能/agent 层命令不可达，
-    # 列表只显示真正可用的那一个（遮蔽集含 relay 命令名，与技能匹配守卫同源）
-    commands = [c for c in commands if c["name"] not in CHANNEL_COMMAND_NAMES]
-    skills = [c for c in commands if c.get("type") == "skill"]
-    systems = [c for c in commands if c.get("type") != "skill"]
-    lines: list[str] = []
-    if skills:
-        lines.append("<font color='grey'>技能命令</font>")
-        lines += [_help_line(c["name"], c["description"]) for c in skills]
-        lines += ["", "---", ""]
-    lines.append("<font color='grey'>会话控制</font>")
-    lines += [_help_line(c["name"], c["description"]) for c in systems]
-    lines += [_help_line(n, d) for n, d in (SYSTEM_COMMANDS | RUNTIME_COMMANDS).items()]
-    return "\n".join(lines)
-
-
-def extract_post_text(content_json: dict) -> str:
-    """从飞书 post（富文本）消息中提取纯文本：标题独占首行，段内片段直接相连，段间换行
-    （图片另由 extract_post_images 取）。"""
-
-    def _parse_block(block: dict) -> str | None:
-        if not isinstance(block, dict) or not isinstance(block.get("content"), list):
-            return None
-        lines: list[str] = [title] if (title := block.get("title")) else []
-        for row in block["content"]:
-            if not isinstance(row, list):
-                continue
-            parts: list[str] = []
-            for el in row:
-                if not isinstance(el, dict):
-                    continue
-                tag = el.get("tag")
-                if tag in ("text", "a"):
-                    parts.append(el.get("text", ""))
-                elif tag == "at":
-                    parts.append(f"@{el.get('user_name', 'user')}")
-            lines.append("".join(parts))
-        return "\n".join(lines).strip() or None
-
-    root = content_json
-    if isinstance(root, dict) and isinstance(root.get("post"), dict):
-        root = root["post"]
-    if not isinstance(root, dict):
-        return ""
-    if "content" in root and (text := _parse_block(root)):
-        return text
-    for key in ("zh_cn", "en_us", "ja_jp"):
-        if key in root and (text := _parse_block(root[key])):
-            return text
-    for val in root.values():
-        if isinstance(val, dict) and (text := _parse_block(val)):
-            return text
-    return ""
-
-
-_CARD_AT_TAG = re.compile(r"<at\b[^>]*\bmention_key=(@\S+?)\s*>\s*</at>")
-"""卡片 DSL 里的 @ 标签。id= 是**发送方应用**的 open_id（open_id 每应用一套，拿到我们
-这侧无意义），故只保留 mention_key，交 resolve_mentions 按事件的 mentions 换成姓名。"""
-
-
-def extract_card_text(content_json: dict) -> str:
-    """从 interactive（卡片）消息里取正文。
-
-    正文在 ``user_dsl``（发送方卡片 DSL 的 JSON 串）里；同级的 ``elements`` 是给老客户端
-    的降级占位（一张图 +「请升级至最新版本客户端」），当正文用等于把噪音喂给模型，故只
-    读 user_dsl、读不到就返回空串（该消息按无正文跳过，与改动前同）。
-
-    机器人之间的对话几乎全是卡片（流式回答落地就是 interactive），不解析这一类等于
-    「别的机器人 @ 我」整条路只通到一半。
-    """
-    dsl = content_json.get("user_dsl")
-    if not isinstance(dsl, str):
-        return ""
-    try:
-        card = json.loads(dsl)
-    except json.JSONDecodeError:
-        return ""
-
-    texts: list[str] = []
-
-    def walk(node: Any) -> None:
-        if isinstance(node, dict):
-            content = node.get("content")
-            if isinstance(content, str) and content.strip():
-                texts.append(content.strip())
-            for value in node.values():
-                walk(value)
-        elif isinstance(node, list):
-            for item in node:
-                walk(item)
-
-    walk(card.get("body"))
-    return _CARD_AT_TAG.sub(r"\1", "\n".join(texts)).strip()
-
-
-def resolve_mentions(text: str, mentions: list[Any] | None) -> str:
-    """把飞书的 ``@_user_n`` 占位符替换为 ``@姓名``。"""
-    if not mentions or not text:
-        return text
-    # 长 key 先换：@_user_1 是 @_user_10 的前缀，先换短的会把后者换坏
-    for mention in sorted(
-        mentions, key=lambda m: len(getattr(m, "key", "") or ""), reverse=True
-    ):
-        key = getattr(mention, "key", None)
-        if not key or key not in text:
-            continue
-        name = getattr(mention, "name", None) or key
-        text = text.replace(key, f"@{name}")
-    return text
-
-
-def extract_post_images(content_json: dict) -> list[str]:
-    """递归取出 post 富文本里所有内嵌图片的 image_key。"""
-    keys: list[str] = []
-
-    def walk(node: Any) -> None:
-        if isinstance(node, dict):
-            if node.get("tag") == "img" and node.get("image_key"):
-                keys.append(node["image_key"])
-            for v in node.values():
-                walk(v)
-        elif isinstance(node, list):
-            for it in node:
-                walk(it)
-
-    walk(content_json)
-    return keys
-
-
-def image_keys_of(msg_type: str, content_json: dict) -> list[str]:
-    """按消息类型取出其可下载图片的 image_key（image / post）。"""
-    if msg_type == "image":
-        ik = content_json.get("image_key")
-        return [ik] if ik else []
-    if msg_type == "post":
-        return extract_post_images(content_json)
-    return []
-
-
-def file_ref_of(msg_type: str, content_json: dict) -> tuple[str, str] | None:
-    """file 消息 → (file_key, file_name)；否则 None。"""
-    if msg_type == "file":
-        fk = content_json.get("file_key")
-        if fk:
-            return (fk, content_json.get("file_name") or "")
-    return None
-
-
 def inbound_dir(thread_id: str) -> Path:
     """本会话飞书入站文件落地目录（/tmp/lumi/feishu/<thread>/），下载文件存这里。"""
     return lumi_tmp_dir("feishu", thread_id)
-
-
-def safe_filename(file_key: str, name: str) -> str:
-    """生成安全落盘名：{file_key}_{清洗后的原名}，防路径穿越。
-
-    用完整 key：飞书 key 的前缀几乎是固定的，截断会让不同文件同名时互相覆盖。"""
-    base = os.path.basename((name or "").strip())
-    base = re.sub(r"[^\w.\-]+", "_", base, flags=re.UNICODE).strip("._")
-    return f"{file_key}_{base}" if base else f"{file_key}.bin"
 
 
 def _media_placeholder(m: _Pending) -> str:
@@ -380,15 +167,23 @@ def _body(m: _Pending) -> str:
     return m.text or _media_placeholder(m)
 
 
+def _quoted(m: _Pending, body: str) -> str:
+    """被回复消息的正文以「> 」引用块前置到 body——只用于模型侧文本，气泡 items 不走这里。"""
+    if not m.quote:
+        return body
+    return "\n".join(f"> {line}" for line in m.quote.splitlines()) + f"\n{body}"
+
+
 def _render(m: _Pending) -> str:
     """单条消息渲染：有发送者则加 <sender> 标签行；媒体-only 用占位保住存在感。
 
     标签是渠道无关约定（见 constants.SENDER_TAG）：纯给模型看（分清群聊里谁说的）；
     desktop 气泡从 additional_kwargs 的结构化 items 渲染，不解析此文本。
     """
+    body = _quoted(m, _body(m))
     if m.sender_name:
-        return f"<{SENDER_TAG}>{m.sender_name}</{SENDER_TAG}>\n{_body(m)}"
-    return _body(m)
+        return f"<{SENDER_TAG}>{m.sender_name}</{SENDER_TAG}>\n{body}"
+    return body
 
 
 def merge_messages(batch: list[_Pending]) -> str:
@@ -400,17 +195,6 @@ def merge_messages(batch: list[_Pending]) -> str:
     if len(batch) == 1:
         return _render(batch[0])
     return _MERGE_REMINDER.format(n=len(batch)) + "\n\n".join(_render(m) for m in batch)
-
-
-def build_content(text: str, image_blocks: list[dict]) -> str | list[dict]:
-    """无图 → 纯文本字符串；有图 → Anthropic 多模态 content blocks（与 desktop 同构）。"""
-    if not image_blocks:
-        return text
-    blocks: list[dict] = []
-    if text:
-        blocks.append({"type": "text", "text": text})
-    blocks.extend(image_blocks)
-    return blocks
 
 
 class FeishuInbound:
@@ -508,22 +292,11 @@ class FeishuInbound:
             ):
                 return
 
-            try:
-                content_json = json.loads(message.content) if message.content else {}
-            except json.JSONDecodeError:
-                content_json = {}
-
-            mentions = getattr(message, "mentions", None)
-            if msg_type == "text":
-                text = resolve_mentions(
-                    (content_json.get("text") or "").strip(), mentions
-                )
-            elif msg_type == "post":
-                text = resolve_mentions(extract_post_text(content_json), mentions)
-            elif msg_type == "interactive":
-                text = resolve_mentions(extract_card_text(content_json), mentions)
-            else:
-                text = ""  # image / file 等：正文为空，靠媒体承载
+            content_json = parse_content(message.content)
+            # image / file 等正文为空，靠媒体承载
+            text = message_text(
+                msg_type, content_json, getattr(message, "mentions", None)
+            )
 
             # 渠道系统命令（/stop /clear /help）：渠道层即时执行，不进 agent、不排队
             # ——/stop 恰是忙时才有意义，进队列等锁就荒谬了。
@@ -568,18 +341,23 @@ class FeishuInbound:
 
             # 媒体源 = 当前消息 +（若是回复）被回复的父消息。从每个源抽图片与文件。
             sources = [(message_id, msg_type, content_json)]
+            quote = ""
             parent_id = getattr(message, "parent_id", None)
             if parent_id:
                 parent = await asyncio.get_running_loop().run_in_executor(
                     None, self._fetch_parent_sync, parent_id
                 )
                 if parent:
-                    p_id, p_type, p_content = parent
-                    try:
-                        p_json = json.loads(p_content) if p_content else {}
-                    except json.JSONDecodeError:
-                        p_json = {}
-                    sources.append((p_id, p_type, p_json))
+                    p_type = parent.msg_type or ""
+                    p_json = parse_content(parent.body.content if parent.body else "")
+                    sources.append((parent.message_id or parent_id, p_type, p_json))
+                    # 父消息正文作引用只进模型侧：群聊 mention 模式下它通常不在会话
+                    # 历史里（「回复并 @机器人 总结」）。本机器人自己发的已在历史，跳过
+                    if not (
+                        parent.sender
+                        and parent.sender.id == resolve_ref(ch.config.app_id)
+                    ):
+                        quote = message_text(p_type, p_json, parent.mentions)
 
             # 只收集媒体引用，先不下载（下载放到持锁后，避免 TOCTOU 误判忙闲）
             image_refs: list[tuple[str, str]] = []  # (owner_message_id, image_key)
@@ -629,6 +407,7 @@ class FeishuInbound:
                     sender_name=sender_name,
                     ts=int(getattr(message, "create_time", 0) or 0),
                     relay=is_active(thread_id),
+                    quote=quote,
                 ),
                 env=channel_env(chat_type, chat_id, open_id, title),
             )
@@ -1193,7 +972,7 @@ class FeishuInbound:
             # 直连期只有系统命令可用（技能不进 cc），/stop /clear 语义变为作用于 cc
             lines = ["当前处于直连模式，消息将直达 Claude Code。", ""]
             lines += [
-                _help_line(n, d) for n, d in (SYSTEM_COMMANDS | RELAY_COMMANDS).items()
+                help_line(n, d) for n, d in (SYSTEM_COMMANDS | RELAY_COMMANDS).items()
             ]
             await self.channel.send_markdown(
                 chat_id,
@@ -1489,7 +1268,12 @@ class FeishuInbound:
         """
         # 多条合并时保留发言人（群聊里几个人的话混成一段，cc 分不清谁说的）；单条不加
         texts = [
-            f"{m.sender_name}：{m.text}" if len(batch) > 1 and m.sender_name else m.text
+            _quoted(
+                m,
+                f"{m.sender_name}：{m.text}"
+                if len(batch) > 1 and m.sender_name
+                else m.text,
+            )
             for m in batch
             if m.text
         ]
@@ -1648,8 +1432,8 @@ class FeishuInbound:
         f = resp.file
         return f.read() if hasattr(f, "read") else f
 
-    def _fetch_parent_sync(self, parent_id: str) -> tuple[str, str, str] | None:
-        """同步：取父消息，返回 (message_id, msg_type, content_json_str)；失败 None。"""
+    def _fetch_parent_sync(self, parent_id: str) -> Any | None:
+        """同步：取父消息（lark ``Message``：msg_type / body / mentions / sender）；失败 None。"""
         from lark_oapi.api.im.v1 import GetMessageRequest
 
         from lumi.gateway.channels.feishu.lark_call import lark_call
@@ -1662,13 +1446,4 @@ class FeishuInbound:
         if resp is None:
             return None
         items = getattr(resp.data, "items", None) or []
-        if not items:
-            return None
-        item = items[0]
-        body = getattr(item, "body", None)
-        content = (getattr(body, "content", "") if body else "") or ""
-        return (
-            getattr(item, "message_id", parent_id),
-            getattr(item, "msg_type", "") or "",
-            content,
-        )
+        return items[0] if items else None
