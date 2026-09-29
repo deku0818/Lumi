@@ -11,11 +11,11 @@
 from __future__ import annotations
 
 import json
-import os
 import shutil
 from dataclasses import asdict
 
 from lumi.gateway import toolbox
+from lumi.gateway.channels.config import resolve_ref
 from lumi.gateway.channels.feishu import lark_profile
 from lumi.gateway.channels.feishu.checks import Check, blocked_tail
 from lumi.gateway.channels.feishu.lark_call import NETWORK_ERROR, lark_call_classified
@@ -207,8 +207,8 @@ def local_env_checks(
         return [asdict(c) for c in checks]
 
     embedded = toolbox.lark_skill_versions(cli.path)
-    if embedded is None:
-        # 清单读不到 ≠ 0 个技能待装：此时安装是空操作，给 fix_action 会造成
+    if not embedded:
+        # 清单读不到或为空 ≠ 0 个技能待装：此时安装是空操作，给 fix_action 会造成
         # 「一键安装 → 仍然报错」的死循环，正确出路是升级 cli
         checks.append(
             Check(
@@ -264,8 +264,8 @@ def diagnose(app_id: str, app_secret: str) -> list[dict]:
     """
     # 两者都支持 ${ENV_VAR} 引用（见 FeishuChannelConfig）：不展开会拿空凭证请求，
     # 也会拼出 https://open.feishu.cn/app/${FEISHU_APP_ID}/auth 这种点不开的链接
-    app_id = os.path.expandvars(app_id)
-    app_secret = os.path.expandvars(app_secret)
+    app_id = resolve_ref(app_id)
+    app_secret = resolve_ref(app_secret)
 
     if not app_id or not app_secret:
         return _fail(

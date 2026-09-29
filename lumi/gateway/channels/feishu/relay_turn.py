@@ -77,15 +77,13 @@ async def run_relay_turn(
                 if event.session_id:
                     update_binding(thread_id, session_id=event.session_id)
                 if event.is_error:
-                    # 已流出的正文必须保住：正常关卡（flush 尾部 + 挂来源行），再发红卡。
-                    # aborted=True 会跳过尾部 flush 与降级发送，等于把答案前半段扔了。
+                    # 已流出的正文照常保住（end 恒 flush 尾部，aborted 只决定空正文的
+                    # 占位），挂来源行后关卡，再发红卡
                     if got_text:
                         await streaming.append(
                             chat_id, _source_note(event.session_id), reply_to
                         )
-                    await streaming.end(
-                        chat_id, aborted=not got_text, reply_to=reply_to
-                    )
+                    await streaming.end(chat_id, aborted=True, reply_to=reply_to)
                     await channel.send_markdown(
                         chat_id,
                         (event.text or "执行失败")[:500],

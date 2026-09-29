@@ -5,9 +5,10 @@ IM 是单长连接承载 N 个用户/群，每个 chat 派生一个 thread_id，
 thread 配一把 ``asyncio.Lock`` 串行化本会话的轮次——同会话同一时刻只跑一条 stream，
 避免并发 stream 撞坏 LangGraph 状态。
 
-池同时承载**须跨配置热重载存活的会话态**（投递地址 / 在跑的轮）：热重载保留池但重建
-channel 及其 inbound，这两样跟着会话走、不随传输层重建而丢。积压消息与待处理妙记事件
-目前仍归 inbound 私有，重载会丢——见 inbound 的 ``_queues`` / ``_minute_events``。
+池同时承载**须跨配置热重载存活的会话态**（投递地址 / 在跑的轮 / 待处理妙记事件）：
+热重载保留池但重建 channel 及其 inbound，这些跟着会话走、不随传输层重建而丢。积压
+消息仍归 inbound 私有，但每条积压都有自己的 task 在等池上的锁（见 inbound._admit），
+重载后照样被接手。
 """
 
 from __future__ import annotations
@@ -37,8 +38,12 @@ class BridgePool:
         # thread_id → 当前用户轮的 run task（/stop 取消用）。只登记用户轮：通知 poller
         # 的轮跑在 poller task 自身里，cancel 会杀掉整个轮询。
         self.run_tasks: dict[str, asyncio.Task] = {}
+        # 待处理的妙记事件；由通知轮询在会话空闲时认领
+        self.minute_events: list = []
         # 串行化"建桥"本身：首条消息并发到达同一新 thread 时只建一次
         self._init_lock = asyncio.Lock()
+        # 已进入回收：池不复用，等锁的积压者拿到锁也不再开新轮
+        self.closed = False
 
     @property
     def workspace(self) -> str:
@@ -47,6 +52,9 @@ class BridgePool:
 
     async def get(self, thread_id: str) -> AgentBridge:
         """取该 thread 的 AgentBridge，不存在则初始化一个并切到该 thread。"""
+        # 快路径不排 _init_lock：只让首次建桥串行，别的会话建桥时已有会话照常收消息
+        if (bridge := self._bridges.get(thread_id)) is not None:
+            return bridge
         async with self._init_lock:
             bridge = self._bridges.get(thread_id)
             if bridge is None:
@@ -85,6 +93,7 @@ class BridgePool:
         正在建的新桥不会在清空后被丢弃、漏关。
         """
         async with self._init_lock:
+            self.closed = True
             for bridge in self._bridges.values():
                 bridge.reject_pending()
             for task in self.run_tasks.values():

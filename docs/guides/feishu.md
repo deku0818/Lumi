@@ -94,12 +94,12 @@ uv sync
 
 | 检查项 | 没通过怎么办 |
 |---|---|
-| lark-cli 已安装 | 「接入体检 → 本地环境」里 **一键安装**（经 npm；机器上没 npm 时自动降级下载官方单二进制到 `~/.lumi/bin`，全程无需 Node/npm 预装）。也可自己 `npm i -g @larksuite/cli` |
-| 用户已授权 | 终端跑 `lark-cli auth login --recommend --scope "minutes:minutes.basic:read,minutes:minutes.transcript:export"` 扫码（读妙记内容必须**用户身份**，应用身份会被拒；login 只请求命令里指定的 scope，应用开通了也不会自动带上，所以必须显式 `--scope`） |
+| lark-cli 已安装 | 「接入体检 → 本地环境」里 **一键安装**（经 npm 安装；机器上缺 Node/npm 时先去 **设置 → 环境** 装好）。也可自己 `npm i -g @larksuite/cli` |
+| 用户已授权 | 终端跑体检面板给出的授权命令扫码——它带着 `--profile <机器人 profile>`，授权落在该机器人名下（各机器人各自授权）；手敲则是 `lark-cli --profile <cli_profile> auth login --recommend --scope "minutes:minutes.basic:read,minutes:minutes.transcript:export"`（读妙记内容必须**用户身份**，应用身份会被拒；login 只请求命令里指定的 scope，应用开通了也不会自动带上，所以必须显式 `--scope`） |
 | 妙记权限已开通 | 点面板给出的开放平台链接，在「**用户身份权限**」tab 下开通 `minutes:minutes.basic:read` 与 `minutes:minutes.transcript:export`（应用身份不生效）并**发布版本**，然后重跑上面的 login 命令使新权限进 token |
 | 事件订阅生效 | 开放平台「事件与回调」添加 `minutes.minute.generated_v1`（添加后需发布版本）。Lumi 每次启动会自动重建订阅 |
 
-> ⚠️ 授权有效期 **7 天**（refresh_token），超期需重新 `lark-cli auth login`。
+> ⚠️ 授权有效期 **7 天**（refresh_token），超期需重新授权——照样用体检面板给出的命令（带 `--profile <机器人 profile>`）。
 > 另外**别用 `lark-cli event consume` 长期占用**——它退出时会主动取消订阅，导致妙记功能静默失效；
 > 真发生了，重开一次配置弹窗即可自动修复（体检第四项会重建订阅）。
 

@@ -217,26 +217,27 @@ def help_markdown(commands: list[dict]) -> str:
 
 
 def extract_post_text(content_json: dict) -> str:
-    """从飞书 post（富文本）消息中提取纯文本（忽略内嵌图片，v1 不支持媒体）。"""
+    """从飞书 post（富文本）消息中提取纯文本：标题独占首行，段内片段直接相连，段间换行
+    （图片另由 extract_post_images 取）。"""
 
     def _parse_block(block: dict) -> str | None:
         if not isinstance(block, dict) or not isinstance(block.get("content"), list):
             return None
-        texts: list[str] = []
-        if title := block.get("title"):
-            texts.append(title)
+        lines: list[str] = [title] if (title := block.get("title")) else []
         for row in block["content"]:
             if not isinstance(row, list):
                 continue
+            parts: list[str] = []
             for el in row:
                 if not isinstance(el, dict):
                     continue
                 tag = el.get("tag")
                 if tag in ("text", "a"):
-                    texts.append(el.get("text", ""))
+                    parts.append(el.get("text", ""))
                 elif tag == "at":
-                    texts.append(f"@{el.get('user_name', 'user')}")
-        return " ".join(texts).strip() or None
+                    parts.append(f"@{el.get('user_name', 'user')}")
+            lines.append("".join(parts))
+        return "\n".join(lines).strip() or None
 
     root = content_json
     if isinstance(root, dict) and isinstance(root.get("post"), dict):
@@ -298,7 +299,10 @@ def resolve_mentions(text: str, mentions: list[Any] | None) -> str:
     """把飞书的 ``@_user_n`` 占位符替换为 ``@姓名``。"""
     if not mentions or not text:
         return text
-    for mention in mentions:
+    # 长 key 先换：@_user_1 是 @_user_10 的前缀，先换短的会把后者换坏
+    for mention in sorted(
+        mentions, key=lambda m: len(getattr(m, "key", "") or ""), reverse=True
+    ):
         key = getattr(mention, "key", None)
         if not key or key not in text:
             continue
@@ -350,11 +354,12 @@ def inbound_dir(thread_id: str) -> Path:
 
 
 def safe_filename(file_key: str, name: str) -> str:
-    """生成安全落盘名：{key 前缀}_{清洗后的原名}，防路径穿越。"""
+    """生成安全落盘名：{file_key}_{清洗后的原名}，防路径穿越。
+
+    用完整 key：飞书 key 的前缀几乎是固定的，截断会让不同文件同名时互相覆盖。"""
     base = os.path.basename((name or "").strip())
     base = re.sub(r"[^\w.\-]+", "_", base, flags=re.UNICODE).strip("._")
-    prefix = file_key[:12]
-    return f"{prefix}_{base}" if base else f"{prefix}.bin"
+    return f"{file_key}_{base}" if base else f"{file_key}.bin"
 
 
 def _media_placeholder(m: _Pending) -> str:
@@ -419,8 +424,6 @@ class FeishuInbound:
         # chat_id → 群名解析失败（无名群/无权限，缓存不收兜底名）后的下次重试时刻，
         # 免得这类群每条消息都白打一次 im.chat.get
         self._title_retry_at: dict[str, float] = {}
-        # 待处理的妙记事件；由通知轮询在会话空闲时认领
-        self._minute_events: list[_MinuteEvent] = []
 
     async def _resolve_title(
         self, chat_id: str, chat_type: str | None, sender_name: str, open_id: str
@@ -640,9 +643,12 @@ class FeishuInbound:
         env: str = "",
     ) -> None:
         """把一条待处理消息交给本会话：空闲当场上锁跑，忙则排队（上限 _MAX_QUEUE，满则
-        丢弃并提示）由持锁者跑完后合并处理。入站消息与 /direct 随带的首个任务共用。
+        丢弃并提示）。入站消息与 /direct 随带的首个任务共用。
 
-        忙判与上锁相邻、其间无 await：事件循环上原子。
+        队列里的首条由自己的 task 等锁接手、把积压合并跑完：持锁的不一定是会取队列的
+        用户轮（妙记轮 / 每日整理 / 删会话 / 通知轮），靠持锁者兜底会让消息搁浅到下一条
+        消息才被捎带。积压轮跑在消息自己的 task 里，照常登记 run_tasks 可被 /stop 取消。
+        忙判与入队相邻、其间无 await：事件循环上原子。
         """
         pool = self.channel.bridge_pool
         # 映射记在池上：热重载保留池但重建 inbound，通知 poller 靠它回投。
@@ -666,6 +672,9 @@ class FeishuInbound:
                 )
                 return
             queue.append(pending)
+            if len(queue) > 1:
+                return  # 已有排在前面的积压者在等锁，它会一并取走
+            await self._locked_drain(bridge, chat_id, thread_id, [])
             return
         await self._locked_drain(bridge, chat_id, thread_id, [pending])
 
@@ -693,7 +702,7 @@ class FeishuInbound:
     async def _locked_drain(
         self, bridge, chat_id: str, thread_id: str, batch: list[_Pending]
     ) -> None:
-        """持锁跑一轮 drain，并登记 run_tasks 供 /stop 取消。
+        """持锁跑一轮 drain，并登记 run_tasks 供 /stop 取消；batch 为空即接手积压队列。
 
         所有"拿锁跑用户轮"的入口统一走这里，登记不可能被漏掉（每条消息经
         run_coroutine_threadsafe 独立成 task，cancel 只杀本轮，不伤接收循环）。
@@ -701,9 +710,17 @@ class FeishuInbound:
         """
         pool = self.channel.bridge_pool
         async with pool.lock(thread_id):
+            if pool.closed:
+                return
             pool.run_tasks[thread_id] = asyncio.current_task()
             try:
-                await self._drain(self.channel, bridge, chat_id, thread_id, batch)
+                await self._drain(
+                    self.channel,
+                    bridge,
+                    chat_id,
+                    thread_id,
+                    batch or self._queues.pop(thread_id, []),
+                )
             finally:
                 pool.run_tasks.pop(thread_id, None)
 
@@ -834,11 +851,6 @@ class FeishuInbound:
                 note="续指定会话用 /direct claude --resume <sid>",
             )
             return
-        # 在跑的轮结束时会把 sid 写回绑定：此刻写入的 sid（清空开新 / 显式指定）必被
-        # 覆盖，静默变成续旧会话——与 /clear 同一守卫，先停再开
-        if (fresh or sid_flag) and ch.bridge_pool.busy(thread_id):
-            await self._send_busy_hint(chat_id, message_id)
-            return
         binding = binding_of(thread_id)
         prev_cwd = binding.get("cwd") or ch.config.workspace
         cwd = (
@@ -861,6 +873,11 @@ class FeishuInbound:
         # 会话属于项目：显式换了目录就开新会话，跨项目续旧上下文只会误导 cc；
         # --resume 是用户显式指定，压过这一切（含换目录——接管终端会话时目录本就在变）
         switched = cwd != prev_cwd
+        # 在跑的轮结束时会把 sid 写回绑定：此刻写入的 sid（清空开新 / 换目录开新 /
+        # 显式指定）必被覆盖，静默变成续旧会话——与 /clear 同一守卫，先停再开
+        if (fresh or sid_flag or switched) and ch.bridge_pool.busy(thread_id):
+            await self._send_busy_hint(chat_id, message_id)
+            return
         if sid_flag:
             session_id = sid_flag
         elif not fresh and not switched:
@@ -1115,26 +1132,6 @@ class FeishuInbound:
             title="⏹ 已停止",
             template="green",
         )
-        if run_stopped:
-            await self._drain_after_cancel(task, thread_id, chat_id)
-
-    async def _drain_after_cancel(
-        self, task: asyncio.Task, thread_id: str, chat_id: str
-    ) -> None:
-        """等被取消的轮释放锁后，接手取消窗口内入队的消息。
-
-        cancel 只是调度 CancelledError，被取消轮的 finally 还要 await 网络收尾，
-        期间到达的消息见锁忙入队——被取消的 _drain 不会再 pop 队列，不接手就
-        搁浅到下条消息才被捎带。锁已被新轮占用则不管：持锁者的 _drain 会兜底。
-        """
-        await asyncio.wait({task}, timeout=15)
-        pool = self.channel.bridge_pool
-        lock = pool.try_lock(thread_id)
-        bridge = pool.peek(thread_id)  # 本路径刚 cancel 过该 thread 的轮，桥必已建
-        if lock is None or bridge is None or lock.locked():
-            return
-        if batch := self._queues.pop(thread_id, []):
-            await self._locked_drain(bridge, chat_id, thread_id, batch)
 
     async def _cmd_clear(self, chat_id: str, thread_id: str, message_id: str) -> None:
         """清空会话（与 desktop「清空会话」同路径：delete_thread + delete_meta + 广播）。
@@ -1175,9 +1172,6 @@ class FeishuInbound:
             title="✅ 会话已清空",
             template="green",
         )
-        # 清空期间（持锁窗口）入队的消息在此接手，不留到下条消息才被捎带
-        if not lock.locked() and (batch := self._queues.pop(thread_id, [])):
-            await self._locked_drain(bridge, chat_id, thread_id, batch)
 
     async def _send_busy_hint(self, chat_id: str, message_id: str) -> None:
         """撞上在跑的轮的操作（/clear、/direct new）：提示先停。"""
@@ -1248,7 +1242,7 @@ class FeishuInbound:
             logger.warning(f"妙记事件无 subscriber_ids，无法定位推送对象 token={token}")
             return
         for open_id in open_ids:
-            self._minute_events.append(_MinuteEvent(token, open_id))
+            self.channel.bridge_pool.minute_events.append(_MinuteEvent(token, open_id))
 
     async def _drain_minute_events(self) -> None:
         """认领待处理的妙记事件（与后台通知共用轮询节拍）。
@@ -1256,10 +1250,8 @@ class FeishuInbound:
         会话忙则跳过留到下个 tick，与通知轮同一套空闲加锁策略。单条失败只记日志，
         不影响其余事件。
         """
-        if not self._minute_events:
-            return
         pool = self.channel.bridge_pool
-        for item in list(self._minute_events):
+        for item in list(pool.minute_events):
             token = item.token
             thread_id = feishu_p2p_thread_id(
                 item.open_id, self.channel.config.thread_prefix
@@ -1273,14 +1265,15 @@ class FeishuInbound:
                 try:
                     bridge = await pool.get(thread_id)
                 except Exception:
-                    # 建桥失败：事件留在队列，下个 tick 重试，不吞
+                    # 建桥失败出队不重试：持久故障不会自愈，留队只会每个 tick 刷一条堆栈
+                    pool.minute_events.remove(item)
                     logger.error(f"妙记会话建桥失败 token={token}", exc_info=True)
                     continue
             # 自此到 async with 之间无 await 点，锁不会被抢（与通知轮同一范式）
             lock = pool.try_lock(thread_id)
             if lock is None or lock.locked():
                 continue  # 在跑的轮次持锁，下个 tick 再认领
-            self._minute_events.remove(item)
+            pool.minute_events.remove(item)
             async with lock:
                 try:
                     # 有真实 chat_id 就用，没有则 open_id 直投并回填（供通知轮认领）
@@ -1342,7 +1335,7 @@ class FeishuInbound:
             thread_id,
             target,
             transcript_hint(event.token, str(lumi_tmp_dir())),
-            lambda: self._minute_events.append(event),
+            lambda: self.channel.bridge_pool.minute_events.append(event),
         )
 
     # ── 后台任务完成通知 ──
@@ -1377,15 +1370,8 @@ class FeishuInbound:
                 async with lock:
                     try:
                         bridge = await pool.get(thread_id)
+                        # 持锁期间排队的入站消息由它们自己的 task 等锁接手（见 _admit）
                         await self._run_notification_turn(bridge, thread_id, chat_id)
-                        # 持锁期间排队的入站消息由持锁者兜底取走
-                        await self._drain(
-                            self.channel,
-                            bridge,
-                            chat_id,
-                            thread_id,
-                            self._queues.pop(thread_id, []),
-                        )
                     except Exception:
                         # CancelledError 是 BaseException，不会被吞，自然传播停掉轮询
                         logger.error(
@@ -1610,7 +1596,7 @@ class FeishuInbound:
 
         def name_of(data: bytes) -> str:
             ext = detect_image_format(data).removeprefix("image/") or "png"
-            return f"{safe_filename(image_key, image_key)}.{ext}"
+            return f"{image_key}.{ext}"
 
         return await self._download_to(message_id, image_key, "image", target, name_of)
 

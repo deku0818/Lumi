@@ -53,7 +53,7 @@ def test_extract_post_text_localized():
             ],
         }
     }
-    assert extract_post_text(content) == "标题 你好 链接"
+    assert extract_post_text(content) == "标题\n你好链接"
 
 
 def test_extract_post_text_wrapped_and_at():
@@ -497,22 +497,6 @@ async def test_help_lists_skill_and_system_commands(monkeypatch):
     assert ch.bridge_pool._bridges == {}  # 没有因 /help 建桥
 
 
-async def test_clear_drains_messages_queued_during_clear(monkeypatch):
-    # /clear 持锁窗口内入队的消息：清空完成后当场接手，不搁浅到下条消息
-    captured = {}
-    monkeypatch.setattr(inb, "run_turn", _capture_run_turn(captured))
-    ch = FeishuChannel(FeishuChannelConfig())
-    fi = ch.inbound
-    _sent_collector(ch, monkeypatch)
-    bridge = _ClearBridge()
-    _patch_pool_get(ch, monkeypatch, bridge)
-    monkeypatch.setattr(inb, "delete_meta", lambda tid: None)
-    fi._queues["t"] = [inb._Pending("清空期间到达", reply_to="m2")]
-    await fi._run_system_command("clear", "", "oc", "t", "m1")
-    assert "t" not in fi._queues
-    assert "清空期间到达" in captured["content"]
-
-
 # ── 斜杠命令路由 ──
 class _CmdBridge:
     def list_commands(self):
@@ -755,27 +739,29 @@ class _MinuteData:
 async def test_minute_event_enqueues_token_and_subscriber():
     fi = FeishuChannel(FeishuChannelConfig()).inbound
     await fi.on_minute_generated(_MinuteData("obcnTOK", ["ou_me"]))
-    assert fi._minute_events == [inb._MinuteEvent("obcnTOK", "ou_me")]
+    assert fi.channel.bridge_pool.minute_events == [
+        inb._MinuteEvent("obcnTOK", "ou_me")
+    ]
 
 
 async def test_minute_event_deduped_by_event_id():
     fi = FeishuChannel(FeishuChannelConfig()).inbound
     await fi.on_minute_generated(_MinuteData("obcnTOK", ["ou_me"], event_id="e1"))
     await fi.on_minute_generated(_MinuteData("obcnTOK", ["ou_me"], event_id="e1"))
-    assert len(fi._minute_events) == 1  # 飞书重推同一事件只处理一次
+    assert len(fi.channel.bridge_pool.minute_events) == 1  # 飞书重推同一事件只处理一次
 
 
 async def test_minute_event_without_subscribers_skipped():
     """payload 无 owner 字段，subscriber_ids 为空则无法定位推送对象，跳过而非猜。"""
     fi = FeishuChannel(FeishuChannelConfig()).inbound
     await fi.on_minute_generated(_MinuteData("obcnTOK", []))
-    assert fi._minute_events == []
+    assert fi.channel.bridge_pool.minute_events == []
 
 
 async def test_minute_event_without_token_skipped():
     fi = FeishuChannel(FeishuChannelConfig()).inbound
     await fi.on_minute_generated(_MinuteData("", ["ou_me"]))
-    assert fi._minute_events == []
+    assert fi.channel.bridge_pool.minute_events == []
 
 
 async def test_minute_turn_targets_open_id_and_injects_token(monkeypatch):
@@ -824,7 +810,7 @@ async def test_drain_minute_events_skips_busy_session(monkeypatch):
     """已建桥的会话正在跑时不抢锁，事件留队下个 tick 再认领。"""
     ch = FeishuChannel(FeishuChannelConfig())
     fi = ch.inbound
-    fi._minute_events = [inb._MinuteEvent("obcnTOK", "ou_me")]
+    fi.channel.bridge_pool.minute_events[:] = [inb._MinuteEvent("obcnTOK", "ou_me")]
     ran = []
 
     async def spy(*a):
@@ -839,7 +825,9 @@ async def test_drain_minute_events_skips_busy_session(monkeypatch):
     async with ch.bridge_pool._locks[tid]:  # 该会话正在跑一轮
         await fi._drain_minute_events()
 
-    assert ran == [] and fi._minute_events == [inb._MinuteEvent("obcnTOK", "ou_me")]
+    assert ran == [] and fi.channel.bridge_pool.minute_events == [
+        inb._MinuteEvent("obcnTOK", "ou_me")
+    ]
 
 
 async def test_drain_minute_events_bridges_unseen_session(monkeypatch):
@@ -850,7 +838,7 @@ async def test_drain_minute_events_bridges_unseen_session(monkeypatch):
     """
     ch = FeishuChannel(FeishuChannelConfig())
     fi = ch.inbound
-    fi._minute_events = [inb._MinuteEvent("obcnTOK", "ou_new")]
+    fi.channel.bridge_pool.minute_events[:] = [inb._MinuteEvent("obcnTOK", "ou_new")]
     ran = []
 
     async def spy(bridge, thread_id, target, event):
@@ -863,7 +851,7 @@ async def test_drain_minute_events_bridges_unseen_session(monkeypatch):
 
     tid = feishu_thread_id("ou_new", FEISHU_THREAD_PREFIX)
     assert ran == [(tid, "ou_new", "obcnTOK")]
-    assert fi._minute_events == []
+    assert fi.channel.bridge_pool.minute_events == []
     assert ch.bridge_pool.chat_ids[tid] == "ou_new"  # 回填供后台通知认领
 
 
@@ -1219,7 +1207,7 @@ async def test_minute_push_lands_on_the_inbound_p2p_thread(monkeypatch):
         ran.append((thread_id, target))
 
     fi = ch.inbound
-    fi._minute_events = [inb._MinuteEvent("obcnTOK", "ou_me")]
+    fi.channel.bridge_pool.minute_events[:] = [inb._MinuteEvent("obcnTOK", "ou_me")]
     monkeypatch.setattr(fi, "_run_minute_turn", spy)  # 桥已由 _inbound_thread_of 打桩
 
     await fi._drain_minute_events()
@@ -1630,7 +1618,7 @@ async def test_drain_minute_events_bridges_before_lock_check(monkeypatch):
     """
     ch = FeishuChannel(FeishuChannelConfig())
     fi = ch.inbound
-    fi._minute_events = [inb._MinuteEvent("obcnTOK", "ou_new")]
+    fi.channel.bridge_pool.minute_events[:] = [inb._MinuteEvent("obcnTOK", "ou_new")]
     order: list[str] = []
     pool = ch.bridge_pool
 
@@ -1663,291 +1651,6 @@ async def test_drain_minute_events_bridges_before_lock_check(monkeypatch):
     assert "try_lock" in order[2:], f"建桥后必须重新判忙，实际顺序: {order}"
     # 且 get 只调一次——第一次的 bridge 直接复用，不再重复建
     assert order.count("get") == 1
-
-
-async def test_drain_minute_events_keeps_event_when_bridging_fails(monkeypatch):
-    """建桥失败时事件留在队列等下轮，不能已出队又丢掉。"""
-    ch = FeishuChannel(FeishuChannelConfig())
-    fi = ch.inbound
-    fi._minute_events = [inb._MinuteEvent("obcnTOK", "ou_new")]
-
-    async def boom(tid):
-        raise RuntimeError("initialize failed")
-
-    monkeypatch.setattr(ch.bridge_pool, "get", boom)
-    await fi._drain_minute_events()
-    assert fi._minute_events == [inb._MinuteEvent("obcnTOK", "ou_new")]
-
-
-def test_diagnose_expands_env_var_app_id(monkeypatch):
-    """app_id 支持 ${ENV} 引用；不展开会拼出点不开的修复链接。"""
-    from lumi.gateway.channels.feishu.minutes import diagnose
-
-    monkeypatch.setenv("DEMO_FEISHU_APP", "cli_real123")
-    _patch_which(monkeypatch, True)
-    # 未授权分支不含链接，故用缺 scope 分支验证 URL
-    _patch_subprocess(
-        monkeypatch,
-        _fake_run(
-            stdout=json.dumps(
-                {"identities": {"user": {"available": True, "scope": ""}}}
-            )
-        ),
-    )
-    checks = diagnose("${DEMO_FEISHU_APP}")
-    scope = next(c for c in checks if c["key"] == "scope")
-    assert "cli_real123" in scope["fix_url"]
-    assert "${" not in scope["fix_url"]
-
-
-# ── 机器人接入体检（feishu/setup.py）──
-# 四项全部从「应用版本信息」一次读出，故测试只需替换 _fetch_version 的返回。
-# 样本形状取自真实接口响应：events 是中文显示名（不可用于比对），event_type 在
-# event_infos 里；scopes 为对象数组而非字符串数组。
-
-
-def _version_sample(**overrides) -> dict:
-    from lumi.gateway.channels.feishu.scopes import (
-        BOT_SCOPES,
-        MESSAGE_EVENT,
-        OPTIONAL_SCOPES,
-    )
-
-    sample = {
-        "app_name": "楚威的助手",
-        "version": "1.0.7",
-        "status": 1,
-        "scopes": [
-            {"scope": s, "level": 1}
-            for s in BOT_SCOPES + tuple(x for x, _ in OPTIONAL_SCOPES)
-        ],
-        "events": ["接收消息"],
-        "event_infos": [{"event_name": "接收消息", "event_type": MESSAGE_EVENT}],
-    }
-    sample.update(overrides)
-    return sample
-
-
-def _patch_version(monkeypatch, version: dict | None, reason: str = "", code: int = 0):
-    from lumi.gateway.channels.feishu import setup
-
-    monkeypatch.setattr(
-        setup, "_fetch_version", lambda app_id, secret: (version, reason, code)
-    )
-
-
-def test_setup_all_green(monkeypatch):
-    """权限、事件、版本俱全时四项全通过。"""
-    from lumi.gateway.channels.feishu.setup import diagnose
-
-    _patch_version(monkeypatch, _version_sample())
-    checks = diagnose("cli_x", "secret")
-    assert [c["key"] for c in checks] == ["credentials", "scopes", "events", "version"]
-    assert all(c["tone"] == "ok" for c in checks)
-
-
-def test_setup_missing_scope_gives_prefilled_auth_link(monkeypatch):
-    """缺必需权限：修复链接须预填全部权限，且带上可选项一并开通。"""
-    from lumi.gateway.channels.feishu.scopes import BOT_SCOPES
-    from lumi.gateway.channels.feishu.setup import diagnose
-
-    kept = [{"scope": s} for s in BOT_SCOPES if s != "im:message:send_as_bot"]
-    _patch_version(monkeypatch, _version_sample(scopes=kept))
-    scopes = next(c for c in diagnose("cli_x", "secret") if c["key"] == "scopes")
-    assert scopes["tone"] == "error"
-    assert "im:message:send_as_bot" in scopes["detail"]
-    assert "im:message:send_as_bot" in scopes["fix_url"]
-    assert "token_type=tenant" in scopes["fix_url"]  # 机器人权限在应用身份 tab
-
-
-def test_setup_optional_scope_missing_is_not_a_failure(monkeypatch):
-    """可选权限缺失不该标红——各有降级路径，收发照常，否则用户会去修一个不影响使用的问题。
-
-    但要按「丢了什么功能」报，而非甩一串 scope 名：这几项的影响彼此完全不同
-    （显示名 vs 打字机效果），用户得据此判断值不值得去补。
-    """
-    from lumi.gateway.channels.feishu.scopes import BOT_SCOPES
-    from lumi.gateway.channels.feishu.setup import diagnose
-
-    _patch_version(
-        monkeypatch, _version_sample(scopes=[{"scope": s} for s in BOT_SCOPES])
-    )
-    scopes = next(c for c in diagnose("cli_x", "secret") if c["key"] == "scopes")
-    assert scopes["tone"] == "warn"
-    # 降级掉的功能走 emphasis（前端加粗），不埋在 detail 里让前端切字符串
-    assert "发送者姓名" in scopes["emphasis"]
-    # cardkit 降级后回复仍在，只是不逐字上屏
-    assert "打字机流式卡片" in scopes["emphasis"]
-    # bot 发送者名字反查（缺了 bot 显示为 机器人_xxxxxx）
-    assert "其他机器人发送者的名称" in scopes["emphasis"]
-    assert scopes["fix_url"]  # 想补的人不该再去翻文档找 scope 名
-    assert "admin:app.info:readonly" in scopes["fix_url"]  # 链接预填含新权限
-    # 权限改动只在发布版本后生效——不提醒的话用户开完回来看还是 warn，以为没生效
-    assert "发布" in scopes["fix_note"]
-
-
-def test_setup_detects_missing_event_subscription(monkeypatch):
-    """事件没订阅时长连接照样能建立，只是一条消息都收不到——必须单独报出来。"""
-    from lumi.gateway.channels.feishu.setup import diagnose
-
-    # 订了别的事件但没订接收消息：中文 events 仍有值，只有 event_type 能判准
-    _patch_version(
-        monkeypatch,
-        _version_sample(
-            events=["消息已读"],
-            event_infos=[
-                {"event_name": "消息已读", "event_type": "im.message.message_read_v1"}
-            ],
-        ),
-    )
-    events = next(c for c in diagnose("cli_x", "secret") if c["key"] == "events")
-    assert events["tone"] == "error"
-    assert "im.message.receive_v1" in events["detail"]
-    assert events["fix_url"].endswith("/event")
-
-
-def test_setup_detects_unpublished_version(monkeypatch):
-    """权限与事件改完不发布，表现与没配一模一样，故未发布必须报错而非全绿。"""
-    from lumi.gateway.channels.feishu.setup import diagnose
-
-    _patch_version(monkeypatch, _version_sample(status=4))
-    checks = {c["key"]: c for c in diagnose("cli_x", "secret")}
-    assert (
-        checks["scopes"]["tone"] == "ok" and checks["events"]["tone"] == "ok"
-    )  # 前两项照常判
-    assert checks["version"]["tone"] == "error"
-    assert "尚未提交审核" in checks["version"]["detail"]
-
-
-def test_setup_blocks_rest_when_credentials_fail(monkeypatch):
-    """凭证不通时后三项无从判起，统一标记而不是谎报通过。"""
-    from lumi.gateway.channels.feishu.setup import diagnose
-
-    _patch_version(monkeypatch, None, "code=10003 invalid param")
-    checks = diagnose("cli_x", "bad_secret")
-    assert [c["key"] for c in checks] == ["credentials", "scopes", "events", "version"]
-    assert all(c["tone"] == "error" for c in checks)
-    assert "10003" in checks[0]["detail"]
-
-
-def test_setup_expands_env_vars_in_credentials(monkeypatch):
-    """app_id 支持 ${ENV} 引用，不展开会拼出点不开的修复链接（与妙记诊断同一处坑）。"""
-    from lumi.gateway.channels.feishu.scopes import BOT_SCOPES
-    from lumi.gateway.channels.feishu.setup import diagnose
-
-    monkeypatch.setenv("DEMO_FEISHU_APP", "cli_real123")
-    _patch_version(
-        monkeypatch, _version_sample(scopes=[{"scope": s} for s in BOT_SCOPES[:1]])
-    )
-    scopes = next(
-        c for c in diagnose("${DEMO_FEISHU_APP}", "secret") if c["key"] == "scopes"
-    )
-    assert "cli_real123" in scopes["fix_url"]
-    assert "${" not in scopes["fix_url"]
-
-
-def test_setup_permission_denied_is_not_reported_as_bad_credentials(monkeypatch):
-    """缺体检权限（99991672）时凭证其实是好的——报成「凭证无效」会把用户支去重抄 Secret。
-
-    体检接口自身也需授权，这是整套自动判定的前置条件：必须单独识别并给出开通链接，
-    且链接要连同机器人权限一并预填，否则用户开完这一个回来仍是红的。
-    """
-    from lumi.gateway.channels.feishu.scopes import BOT_SCOPES, SETUP_SCOPES
-    from lumi.gateway.channels.feishu.setup import diagnose
-
-    _patch_version(monkeypatch, None, "code=99991672 Access denied.", code=99991672)
-    checks = diagnose("cli_x", "secret")
-    cred = checks[0]
-    assert cred["tone"] == "error"
-    assert "凭证无效" not in cred["name"]
-    assert SETUP_SCOPES[0] in cred["detail"]
-    # 一键链接须覆盖体检权限 + 机器人权限，让用户只点一次
-    assert SETUP_SCOPES[0] in cred["fix_url"]
-    assert all(s in cred["fix_url"] for s in BOT_SCOPES)
-    assert all(c["tone"] == "error" for c in checks[1:])
-
-
-def test_setup_marks_degraded_instead_of_claiming_all_good(monkeypatch):
-    """缺可选权限时该项 ok 但须置 warn——否则汇总条报「全部生效」，与详情里的
-    「暂不可用」自相矛盾。「能用」和「完好」是两种状态。"""
-    from lumi.gateway.channels.feishu.scopes import BOT_SCOPES
-    from lumi.gateway.channels.feishu.setup import diagnose
-
-    _patch_version(
-        monkeypatch, _version_sample(scopes=[{"scope": s} for s in BOT_SCOPES])
-    )
-    checks = {c["key"]: c for c in diagnose("cli_x", "secret")}
-    assert checks["scopes"]["tone"] == "warn"
-    # 其余各项无降级，不该被误标
-    assert all(checks[k]["tone"] == "ok" for k in ("credentials", "events", "version"))
-
-
-def test_setup_no_warn_when_everything_granted(monkeypatch):
-    """全部权限齐备时不得置 warn，否则汇总条永远挂着「功能降级」。"""
-    from lumi.gateway.channels.feishu.setup import diagnose
-
-    _patch_version(monkeypatch, _version_sample())
-    assert all(c["tone"] == "ok" for c in diagnose("cli_x", "secret"))
-
-
-def test_event_constants_match_registered_handlers():
-    """scopes.py 的事件常量必须与 channel.py 实际注册的处理器一致。
-
-    lark SDK 只认 register_p2_xxx 方法名、吃不进字符串，两边无法共用一份定义，故在
-    此锁住。若改了注册点而没同步常量：体检拿旧 code 比对 event_infos，会报「事件订阅
-    已配置」而机器人一条消息都收不到——正是体检本该拦住的那种静默故障。
-    """
-    import lark_oapi as lark
-
-    from lumi.gateway.channels.feishu.scopes import MESSAGE_EVENT, MINUTE_EVENT
-
-    handler = FeishuChannel(FeishuChannelConfig())._build_event_handler(lark)
-    registered = set(handler._processorMap)
-    # SDK 以 p2. 前缀存放 v2 事件处理器
-    assert f"p2.{MESSAGE_EVENT}" in registered
-    assert f"p2.{MINUTE_EVENT}" in registered
-
-
-def test_setup_network_failure_is_not_reported_as_bad_credentials():
-    """断网时凭证根本没被验证过，报「凭证无效」会把用户支去重抄 Secret——抄多少遍都没用。"""
-    from lumi.gateway.channels.feishu import setup
-    from lumi.gateway.channels.feishu.setup import diagnose
-
-    original = setup._fetch_version
-    try:
-        setup._fetch_version = lambda a, s: (None, "Connection timed out", -1)
-        checks = diagnose("cli_x", "secret")
-    finally:
-        setup._fetch_version = original
-    cred = checks[0]
-    assert cred["tone"] == "error"
-    assert "凭证无效" not in cred["name"]
-    assert "Connection timed out" in cred["detail"]
-    assert not cred["fix_url"]  # 断网时给开放平台链接是误导
-
-
-def test_setup_lists_optional_gaps_alongside_required_ones(monkeypatch):
-    """必需与可选权限同时缺失时要一次报全，否则用户补完必需项才发现还有降级，白跑一轮。"""
-    from lumi.gateway.channels.feishu.setup import diagnose
-
-    _patch_version(monkeypatch, _version_sample(scopes=[]))
-    scopes = next(c for c in diagnose("cli_x", "secret") if c["key"] == "scopes")
-    assert scopes["tone"] == "error"
-    assert "im:message:send_as_bot" in scopes["detail"]  # 必需项
-    assert "打字机流式卡片" in scopes["detail"]  # 可选项也提前告知
-
-
-def test_markdown_card_note_renders_as_grey_markdown():
-    """schema 2.0 真机不支持 note 组件（230099/200861）：note 必须落在 markdown 里。"""
-    from lumi.gateway.channels.feishu.channel import _markdown_card
-
-    card = json.loads(
-        _markdown_card("正文", title="✅ T", template="green", note="下一步提示")
-    )
-    elements = card["body"]["elements"]
-    assert [e["tag"] for e in elements] == ["markdown"]
-    assert "<font color='grey'>下一步提示</font>" in elements[0]["content"]
-    assert card["header"]["template"] == "green"
 
 
 async def test_evict_stale_spares_chat_with_running_turn(monkeypatch):

@@ -416,8 +416,8 @@ _LARK_PKG = "@larksuite/cli"
 def lark_skill_versions(cli_path: str) -> dict[str, str] | None:
     """lark-cli 内嵌技能清单 {name: version}；命令失败/输出不可解析返回 None。
 
-    None 与空 dict 必须区分：None = 清单读不到（cli 版本过旧等），不能当
-    「0 个技能待装」处理，否则体检报 error 而安装是空操作，永远修不绿。
+    None（读不到）与空 dict（清单里没有技能）都不能当「0 个技能待装」处理：体检
+    若报 error 而安装是空操作，永远修不绿——setup 对两者一律报「无法读取技能清单」。
     """
     ok, out = _run([cli_path, "skills", "list"])
     if not ok:

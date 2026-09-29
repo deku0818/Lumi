@@ -19,7 +19,7 @@ import shutil
 import subprocess
 
 from lumi.gateway.channels import store
-from lumi.gateway.channels.config import FeishuChannelConfig
+from lumi.gateway.channels.config import FeishuChannelConfig, resolve_ref
 from lumi.utils.logger import logger
 
 CLI = "lark-cli"
@@ -83,7 +83,7 @@ def profile_status(app_id: str, cli_profile: str) -> tuple[str, str]:
     ``error``（判不了，详情给原因）。状态恒是这四个 token——把人话混进同一个
     返回值会让消费方靠猜区分枚举与详情。
     """
-    app_id = os.path.expandvars(app_id)
+    app_id = resolve_ref(app_id)
     if not app_id:
         return "error", "凭证未配置"
     if not cli_profile:
@@ -105,8 +105,8 @@ def sync_profile(cfg: FeishuChannelConfig) -> tuple[str, str]:
     带过来）→ 自建 ``lumi-{id}``。用户自己的 profile 恒不删不改——app 换绑那种失效
     只重建我们自建的那个。
     """
-    app_id = os.path.expandvars(cfg.app_id)
-    secret = os.path.expandvars(cfg.app_secret)
+    app_id = resolve_ref(cfg.app_id)
+    secret = resolve_ref(cfg.app_secret)
     if not app_id or not secret:
         return "", "凭证未配置"
     profiles = _list_profiles()
@@ -154,8 +154,10 @@ def save_bot_synced(config: dict) -> tuple[FeishuChannelConfig, str]:
     CLI 与 ``save_channel`` RPC 共用的唯一保存路径：先校验（约束不过不跑同步，
     免得为存不进去的配置建出孤儿 profile）、再解析 profile、最后单次写盘——
     watch_store 只见最终态，不会因「先存后补写 cli_profile」的中间态多弹一次连接。
-    app 未变且 profile 已有记录时跳过同步：纯开关/白名单改动不必付一次 lark-cli
-    子进程。同步 best-effort——lark-cli 缺失/旧版不挡保存（提示非空），体检兜底。
+    app 未变且记录的 profile 仍完好时跳过同步：纯开关/白名单改动不必付 add/remove。
+    记录已失效（被删 / 指向别的 app）则照常重同步——否则坏值被永久固化；``error``
+    （lark-cli 暂时判不了）也保留原值，免得 CLI 一抖动纯开关保存就丢身份。
+    同步 best-effort——lark-cli 缺失/旧版不挡保存（提示非空），体检兜底。
     """
     validated = store.validate_feishu_bot(config)
     prev = next((b for b in store.load_feishu_bots() if b.id == validated.id), None)
@@ -164,13 +166,14 @@ def save_bot_synced(config: dict) -> tuple[FeishuChannelConfig, str]:
         prev is not None
         and prev.cli_profile
         and store.same_app(prev.app_id, validated.app_id)
+        and profile_status(validated.app_id, prev.cli_profile)[0] in ("ok", "error")
     ):
-        # app 未变且已同步过：profile 以服务端记录为准（前端只透传，不当授权来源）
+        # profile 以服务端记录为准（前端只透传，不当授权来源）
         validated = validated.model_copy(update={"cli_profile": prev.cli_profile})
     else:
+        # 同步失败置空：回落用户全局 profile，好过继续绑一个错的身份
         profile, notice = sync_profile(validated)
-        if profile:
-            validated = validated.model_copy(update={"cli_profile": profile})
+        validated = validated.model_copy(update={"cli_profile": profile})
     return store.persist_feishu_bot(validated), notice
 
 

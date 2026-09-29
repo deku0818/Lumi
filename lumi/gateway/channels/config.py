@@ -7,11 +7,22 @@ WS RPC 管理、持久化到 ``lumi.json`` 的 "channels" 分区（见 ``channel
 
 from __future__ import annotations
 
+import os
 from typing import Literal
 
 from pydantic import BaseModel, Field
 
 from lumi.utils.constants import FEISHU_THREAD_PREFIX
+
+
+def resolve_ref(v: str) -> str:
+    """展开凭证里的 ``${ENV}`` 引用；引用的变量未设置时返回空串。
+
+    ``os.path.expandvars`` 对未设置的变量原样保留字面 ``${X}``，会绕过各处的空值守卫
+    （拿字面值去连、拼出点不开的链接）；归一成空串后统一走「缺凭证」提示。
+    """
+    e = os.path.expandvars(v)
+    return "" if "${" in e else e
 
 
 class ChannelRuntimeConfig(BaseModel):
@@ -43,7 +54,7 @@ class FeishuChannelConfig(ChannelRuntimeConfig):
 
     一台机器可配多个机器人，每个绑定一个项目（1:1，见 ``store.save_feishu_bot`` 的
     唯一性校验）。凭证支持 ``${ENV_VAR}`` 语法引用环境变量，channel 启动时经
-    ``os.path.expandvars`` 解析，避免明文。运行时字段（tool_mode/workspace）继承自
+    :func:`resolve_ref` 解析，避免明文。运行时字段（tool_mode/workspace）继承自
     ``ChannelRuntimeConfig``。
     """
 
