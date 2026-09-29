@@ -94,7 +94,7 @@ class TestGrepEdgeCases:
         """搜索不存在的路径（在授权目录内）"""
         backend = LocalFilesystemBackend()
         result = await backend.grep_raw("test", str(authorized_tmp_dir / "no_such_dir"))
-        # ripgrep 或 python 降级均应返回空结果
+        # ripgrep 应返回空结果
         if isinstance(result, dict):
             assert result["matches"] == []
 

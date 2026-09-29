@@ -101,3 +101,25 @@ async def test_catalog_refreshes_periodically(light_process, monkeypatch):
     async with bootstrap.gateway_process():
         await asyncio.sleep(0.1)
     assert len(calls) >= 2
+
+
+async def test_startup_prunes_week_old_office_previews(light_process):
+    # 回归：预览缓存只写不删，~/.lumi 随打开过的文档无限增长
+    import os
+    import time
+
+    from lumi.gateway import office_rpc
+
+    cache = office_rpc._cache_dir()
+    cache.mkdir(parents=True)
+    old, fresh = cache / "old-1-r2.html", cache / "fresh-1-r2.html"
+    old.write_text("x")
+    fresh.write_text("x")
+    stale = time.time() - 8 * 24 * 3600
+    os.utime(old, (stale, stale))
+
+    async with bootstrap.gateway_process():
+        pass
+
+    assert not old.exists()
+    assert fresh.exists()

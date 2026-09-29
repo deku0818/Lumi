@@ -137,11 +137,11 @@ async def test_shell_hook_allow_passthrough(tmp_path):
     assert await hook(_ctx("Stop")) is None
 
 
-async def test_shell_hook_timeout(tmp_path):
+async def test_shell_hook_timeout_passes_through(tmp_path):
+    # 超时放行：卡住的 hook 不该拦下工具 / 结束本轮（与 exit!=0/2 的非阻断错误同语义）
     cmd = _write_script(tmp_path, "sleep 2")
     hook = make_shell_hook(event="Stop", command=cmd, timeout_ms=100)
-    r = await hook(_ctx("Stop"))
-    assert isinstance(r, Block) and "timeout" in r.reason
+    assert await hook(_ctx("Stop")) is None
 
 
 def _alive(marker: str) -> bool:
@@ -160,7 +160,7 @@ async def test_shell_hook_timeout_kills_descendants(tmp_path):
     # 回归：超时只 terminate hook 脚本本身，脚本里起的子进程成为孤儿
     cmd = _write_script(tmp_path, "sleep 313.81 &\nsleep 313.81")
     hook = make_shell_hook(event="Stop", command=cmd, timeout_ms=300)
-    assert isinstance(await hook(_ctx("Stop")), Block)
+    assert await hook(_ctx("Stop")) is None
     await asyncio.sleep(0.2)
     assert not _alive("sleep 313.81")
 

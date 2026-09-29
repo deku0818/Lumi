@@ -2,7 +2,8 @@
 
 转换靠 officecli（toolbox 托管，机器级）；未安装返回 reason=missing，前端在
 预览面板就地引导 env_install。产物按「路径哈希-mtime」落缓存目录，源文件一改
-即失效；同路径的旧 mtime 产物顺手清掉，缓存不随反复编辑膨胀。
+即失效；同路径的旧 mtime 产物顺手清掉，缓存不随反复编辑膨胀；7 天前的产物在
+进程启动时清掉（见 prune_cache）。
 """
 
 from __future__ import annotations
@@ -11,6 +12,7 @@ import asyncio
 import os
 import subprocess
 import tempfile
+import time
 from pathlib import Path
 
 from lumi.gateway import toolbox
@@ -22,6 +24,7 @@ _RENDER_TIMEOUT = 120
 
 # 注入逻辑变更时递增，使旧缓存产物失效重渲
 _RENDER_VERSION = 2
+_CACHE_MAX_AGE_SECONDS = 7 * 24 * 3600
 
 # xlsx 增强脚本：officecli 忠实还原 Excel 列宽，窄列内容被截断后静态页无法像
 # Excel 那样拖宽列——注入列头拖拽调宽 + 双击自动适应内容宽。初始列宽不动（保真），
@@ -54,6 +57,18 @@ def _run_officecli(cli_path: str, src: Path, out: Path) -> subprocess.CompletedP
 def _cache_dir() -> Path:
     # 机器级缓存，与 models_dev.json 同层（~/.lumi/cache/，测试经配置目录隔离）
     return get_config().toolbox_dir / "cache" / "office_preview"
+
+
+def prune_cache() -> None:
+    """删掉 7 天前生成的预览产物（进程启动时调一次）。
+
+    同路径的旧 mtime 产物在重渲时已顺手清掉，这里兜住「源文件再没打开过」的那批
+    （及崩溃残留的 .part），否则缓存随打开过的文档只增不减。
+    """
+    cutoff = time.time() - _CACHE_MAX_AGE_SECONDS
+    for f in _cache_dir().glob("*"):
+        if f.stat().st_mtime < cutoff:
+            f.unlink(missing_ok=True)
 
 
 def render_office(path: str) -> dict:

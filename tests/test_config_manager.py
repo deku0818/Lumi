@@ -90,3 +90,15 @@ def test_toolbox_is_machine_level(tmp_path, monkeypatch):
 def test_explicit_config_dir_owns_toolbox(tmp_path):
     """显式指定（构造参数 / LUMI_CONFIG_DIR）时工具箱跟着它——容器与测试靠这条隔离。"""
     assert LumiConfig(str(tmp_path)).bin_dir == tmp_path / "bin"
+
+
+def test_invalid_section_drops_only_that_section(tmp_path):
+    # 某一段校验失败只丢该段：此前整份回退默认，env 里的 API key、style 一并丢失
+    (tmp_path / "config.json").write_text(
+        json.dumps({"style": "code", "env": {"FOO": "bar"}, "agents": "oops"}),
+        encoding="utf-8",
+    )
+    cfg = LumiConfig(str(tmp_path))
+    assert cfg.config.style == "code"
+    assert cfg.config.env == {"FOO": "bar"}
+    assert cfg.config.agents == type(cfg.config.agents)()  # 坏段回默认

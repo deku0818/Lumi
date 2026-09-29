@@ -10,7 +10,9 @@ FROM python:3.12-slim
 # 包名带版本号随 Debian 版本漂移，构建期动态解析只装运行时库（-dev 元包会多拖 ~50MB
 # 头文件与静态库进镜像）。
 # procps：停机兜底按进程树收后代（MCP server 等）走 pgrep，slim 镜像默认不带。
-RUN apt-get update && apt-get install -y --no-install-recommends ripgrep curl procps \
+# tini：做 PID 1。lumi 自己当 PID 1 时，bash / hook / 后台任务被终止后留下的孤儿会
+# 过继给它而永远不被回收（僵尸越积越多），SIGTERM 也拿不到默认处置。
+RUN apt-get update && apt-get install -y --no-install-recommends ripgrep curl procps tini \
     "$(apt-cache search --names-only '^libicu[0-9]+$' | awk '{print $1}' | sort -V | tail -1)" \
     && rm -rf /var/lib/apt/lists/*
 
@@ -26,14 +28,14 @@ COPY lumi ./lumi
 RUN uv sync --frozen --no-dev --no-cache
 ENV PATH="/app/.venv/bin:$PATH"
 
-# agent 的文件/bash 操作发生在工作目录；挂载你要让它操作的目录到这里
-VOLUME ["/workspace"]
+# 项目按绝对路径绑定到会话：把宿主机的项目目录按**同一路径**挂进来（见下方示例），
+# 桌面端里选的路径在容器内才对得上
 WORKDIR /workspace
 
 EXPOSE 8765
 # 监听 0.0.0.0 对外；token 经 LUMI_TOKEN 环境变量传入（公网部署务必设置），不进命令行。
 # 例：docker run -p 8765:8765 -e LUMI_TOKEN=<你的口令> \
-#       -v ~/.lumi:/root/.lumi -v $PWD:/workspace ycw0818/lumi-harness
+#       -v ~/.lumi:/root/.lumi -v /srv/projects:/srv/projects ycw0818/lumi-harness
 # 公网建议前面挂 Caddy/nginx 终止 TLS（wss://），不要裸暴露明文 ws。
 # 非 Docker 部署（uv tool install + systemd unit 样例）见 docs/guides/deploy.md。
-ENTRYPOINT ["lumi", "serve", "--host", "0.0.0.0", "--port", "8765"]
+ENTRYPOINT ["tini", "--", "lumi", "serve", "--host", "0.0.0.0", "--port", "8765"]

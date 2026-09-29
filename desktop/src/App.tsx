@@ -189,9 +189,8 @@ export default function App() {
   const workspaceDirRef = useLatest(workspaceDir)
   // null = 该机器列表尚未成功拉到（未连上 / 拉取中 / 失败）——不能渲染成「还没有项目」
   const [projects, setProjects] = useState<Project[] | null>(null)
-  // 项目视图作用的机器（方案甲「先选机器」）+ 该机器当前项目
+  // 项目视图作用的机器（方案甲「先选机器」）
   const [projectsMachine, setProjectsMachine] = useState('local')
-  const [projectsCurrent, setProjectsCurrent] = useState('')
   // 项目页是被「新建会话」阻断跳转到的（而非用户主动点「项目」标签）时，顶部提示为什么在这里
   const [needProjectHint, setNeedProjectHint] = useState(false)
   const [showNewProject, setShowNewProject] = useState(false)
@@ -1071,7 +1070,7 @@ export default function App() {
     void refreshSessions()
   }, [openControlConn, refreshSessions, clearMachineSnapshots])
 
-  // 查该机器登记的默认项目路径，顺带把 projects/projectsCurrent 同步成最新——boot effect
+  // 查该机器登记的默认项目路径，顺带把 projects 同步成最新——boot effect
   // 与下方 goNewChat 共用同一份查找逻辑，避免各自倒腾一遍 listProjects。
   // 返回 null = 没查到（连接波动等），空串 = 查到了但确实没有默认项目，两者调用方处理不同
   // （前者该重试，后者不用）。声明在 boot effect 之前，纯是为了这条 useEffect 能引用它。
@@ -1081,7 +1080,6 @@ export default function App() {
         const r = await gwForBackend(backend)?.listProjects()
         if (!r) return null
         setProjects(r.projects)
-        setProjectsCurrent(r.current)
         return r.projects.find((p) => p.default)?.path ?? ''
       } catch {
         return null
@@ -1165,16 +1163,13 @@ export default function App() {
     return () => window.removeEventListener('lumi:backends-changed', onChanged)
   }, [syncBackends, reconnectMachine])
 
-  // 按机器拉项目（方案甲先选机器）：projects + 该机器当前项目（projectsCurrent）。
-  // 活动会话的 workspaceDir 由 activate/gateway.ready 维护，与项目视图分离。
+  // 按机器拉项目（方案甲先选机器）。「当前项目」高亮 = 活动会话的 workspaceDir
+  // （由 activate/gateway.ready 维护），不再由后端下发。
   const refreshProjects = useCallback(
     async (backend = 'local') => {
       try {
         const r = await gwForBackend(backend)?.listProjects()
-        if (r) {
-          setProjects(r.projects)
-          setProjectsCurrent(r.current)
-        }
+        if (r) setProjects(r.projects)
       } catch {
         /* 忽略：连接波动时静默 */
       }
@@ -1446,7 +1441,6 @@ export default function App() {
   const openProject = useCallback(
     async (path: string, backend = 'local') => {
       try {
-        setProjectsCurrent(path)
         await newSession(backend, path)
       } catch {
         /* 忽略：连接波动时静默 */
@@ -1458,7 +1452,6 @@ export default function App() {
   // 项目主页：点项目卡片进入落地页（会话流 + 提示词/记忆/定时/技能/Agent 五卡）
   const openProjectHome = useCallback((path: string, backend = 'local') => {
     setProjectHome({ backend, path })
-    setProjectsCurrent(path) // 与旧「点卡片即当前项目」的高亮语义保持一致
     setView('project')
     // 输入栏在项目页与聊天页共用同一份 input/attachments：进项目页先清空，
     // 免得上个会话的草稿/附件串到「在此项目开新会话」里
@@ -2454,7 +2447,7 @@ export default function App() {
         {view === 'projects' ? (
           <ProjectsPage
             projects={projects}
-            current={projectsCurrent}
+            current={projectsMachine === activeBackend ? workspaceDir : ''}
               machine={projectsMachine}
             needProjectHint={needProjectHint}
             onSelectMachine={selectProjectsMachine}
@@ -3090,14 +3083,21 @@ const sameItems = (a: ToolItem[], b: ToolItem[]) =>
   a.length === b.length && a.every((x, i) => x === b[i])
 
 const ToolGroup = memo(function ToolGroup({ tools }: { tools: ToolItem[] }) {
+  const { t } = useI18n()
   const running = tools.some((t) => !t.done)
   const hasError = tools.some((t) => t.error)
   // override=null 时按 hasError 决定默认展开；出错的工具组默认展开但仍可手动收起
   const [override, setOverride] = useState<boolean | null>(null)
   const open = running || (override ?? hasError)
   const summary = running
-    ? `${summarizeTools(tools.filter((t) => t.done)) || 'Working'}…`
-    : summarizeTools(tools)
+    ? (() => {
+        const done = summarizeTools(
+          tools.filter((tool) => tool.done),
+          t,
+        )
+        return done ? `${done}…` : t('status.working')
+      })()
+    : summarizeTools(tools, t)
 
   return (
     <div>
@@ -3165,7 +3165,7 @@ function SingleAgent({ item }: { item: ToolItem }) {
   const { t } = useI18n()
   const children = item.children ?? []
   const tokens = (item.inTok ?? 0) + (item.outTok ?? 0)
-  const title = toolTitle('agent', item.args)
+  const title = toolTitle('agent', item.args, t)
   const stats = agentStats(children.length, tokens, t)
 
   if (item.done) {
@@ -3222,7 +3222,7 @@ function FleetRow({ item, name }: { item: ToolItem; name: string }) {
   const action = item.done
     ? t('subagent.done')
     : last
-      ? toolTitle(last.name, last.args)
+      ? toolTitle(last.name, last.args, t)
       : t('common.thinking')
   return (
     <div className="flex items-center gap-2.5 px-3 py-1.5 border-t border-line/40 first:border-t-0">
@@ -3299,6 +3299,7 @@ function RunningWindow({ children }: { children: SubTool[] }) {
 
 // 子工具行：图标 + 人类可读标题。运行中（!done）金色高亮，完成绿勾，出错红色。
 function SubToolRow({ child }: { child: SubTool }) {
+  const { t } = useI18n()
   const running = !child.done
   const Icon = child.done && !child.error ? Check : toolIcon(child.name)
   return (
@@ -3308,7 +3309,7 @@ function SubToolRow({ child }: { child: SubTool }) {
         className={`shrink-0 ${running ? 'text-primary' : child.error ? 'text-error' : 'text-success/80'}`}
       />
       <span className={`truncate ${running ? 'text-ink' : child.error ? 'text-error' : 'text-muted-foreground'}`}>
-        {toolTitle(child.name, child.args)}
+        {toolTitle(child.name, child.args, t)}
       </span>
     </div>
   )
@@ -3384,7 +3385,7 @@ const ToolRow = memo(function ToolRow({ item }: { item: ToolItem }) {
           <span className="flex min-w-0 items-center gap-1.5">
             {/* 未登记工具（MCP 等）的参数已在第二行键值里，标题用工具名免重复 */}
             <span className={`truncate ${errored ? 'text-error' : 'text-ink/80'}`}>
-              {isKnownTool(item.name) ? toolTitle(item.name, item.args) : item.name}
+              {isKnownTool(item.name) ? toolTitle(item.name, item.args, t) : item.name}
             </span>
             {open && chips}
           </span>

@@ -118,7 +118,7 @@ class JobStore:
         content = json.dumps(data, ensure_ascii=False, indent=2)
         await asyncio.to_thread(atomic_write_text, self._path, content)
 
-    async def upsert(self, job: Job, *, notify: bool = True) -> None:
+    async def upsert(self, job: Job) -> None:
         """创建或更新单个任务。
 
         如果已存在相同 ID 的任务则替换，否则追加。
@@ -126,9 +126,6 @@ class JobStore:
 
         Args:
             job: 要创建或更新的任务。
-            notify: 是否触发变更观察者。用户增删改用默认 True；内部记账（如
-                consecutive_errors 退避计数持久化）传 False，避免非用户可见的
-                字段变更也触发前端全量刷新。
         """
         async with self._lock:
             jobs = await self.load()
@@ -139,8 +136,7 @@ class JobStore:
             else:
                 jobs.append(job)
             await self.save(jobs)
-        if notify:
-            self._fire_change()
+        self._fire_change()
 
     async def delete(self, job_id: str) -> bool:
         """删除指定 ID 的任务。

@@ -45,13 +45,14 @@ Hook 签名 `async (HookContext) -> HookResult`，`HookResult = None | Command |
 
 - **Python callable**：进程内直接 await（内置 hook 走这条，见 `builtin.py`）。
 - **Shell 命令**（`exec_shell.py`）：subprocess，stdin 喂决策 JSON、stdout 读回。5s 超时
-  → SIGTERM→SIGKILL；env 仅透传 `LUMI_HOOK_*` 前缀 + `PATH`（防 secrets 泄露）；
+  → 按进程组 SIGTERM→SIGKILL 并**放行**（记 warning，同非阻断 error；卡住的 hook 不拦工具、
+  不扣留本轮结束）；env 仅透传 `LUMI_HOOK_*` 前缀 + `PATH`（防 secrets 泄露）；
   exit code 0=解析 stdout / 2=deny / 其他=非阻断放行。
 - HTTP webhook / Subagent：**未实现**（按需再加）。
 
 ### Shell hook 决策协议（`protocol.py`）
 
-输入（stdin JSON）：`{version, event, thread_id, depth, stop_hook_active, payload, messages_tail}`——`depth` 为委派深度（0 = 主 agent，config hook 随会话被子代理继承，据此区分），`stop_hook_active` 表示本轮已有 hook 注入过提醒（Stop hook 据此避免无限拉回）。子进程工作目录为所属项目根。
+输入（stdin JSON）：`{version, event, thread_id, depth, stop_hook_active, payload, messages_tail}`——`depth` 为委派深度（0 = 主 agent，config hook 随会话被子代理继承，据此区分；Stop 事件只在 depth=0 分发给 config hook），`stop_hook_active` 表示本轮已有 hook 注入过提醒（Stop hook 据此避免无限拉回）。子进程工作目录为所属项目根。
 输出（stdout JSON）：`{decision: "allow"|"deny"|"passthrough", additionalContext?, stopReason?}`
 → `deny` 翻译为 `Block`，`additionalContext` 翻译为 `AdditionalContext`。
 `matcher` 正则仅 PreToolUse/PostToolUse 生效，未命中则跳过 subprocess。
@@ -82,6 +83,12 @@ Hook 签名 `async (HookContext) -> HookResult`，`HookResult = None | Command |
 **builtin Python hook**（`builtin.py`，如结构化输出兜底）在 import 时 `register_hook` 注册到进程全局 `_HOOKS`（import 由 `core/graph.py` 在图装配点触发）——框架级、与项目无关。
 
 **config hook（hooks.json）随会话/项目绑定，不进进程全局**：`build_config_hooks(project)` 读三级文件、构造 `{event: [hook]}` 字典（纯函数式、不注册）；bridge 在 `initialize` / `set_workspace` 时为本会话项目构造一次并存 `_config_hooks`，每轮 `_stream` 起点经 `set_run_config_hooks(...)` 注入 per-run contextvar `_run_config_hooks`；`lumi serve` 下的 cron 经 `cron_stream` 同样跑在 `AgentBridge` 上，在 `_stream` 注入本 cron 项目的。`dispatch_hooks` / `has_hooks` 经 `_hooks_for(event)` 读取 **config（contextvar，本会话项目）+ builtin（进程全局）** 的合并——config 整体排在 builtin 之前、同事件内保声明顺序。
+
+**子代理不跑项目 Stop hook**：子代理（agent 工具前台 / 后台、workflow 扇出）继承父 run 的
+contextvar，PreToolUse / PostToolUse / UserPromptSubmit 的 config hook 照常作用于子代理；但
+Stop 表示「用户这一轮结束」，子代理收尾不算——`_hooks_for` 在 `depth>0` 时略过 config 的
+Stop hook（否则跑测试 / 拉回类 hook 每个子代理各触发一次、甚至把子代理困住）。builtin
+Stop hook 照常分发，各自有 depth 闸。workflow 子代理的 `depth` 为父 depth + 1（与 agent 工具一致）。
 
 **为何 config hook 走 per-run contextvar 而非进程单例**：一个 `lumi serve` 进程承载多条 WS 连接、项目随会话绑定（见 [desktop.md](desktop.md)），各会话各绑各项目的 hooks，进程单例无法共存、且会被并发会话互相清洗（这也是早期 `_LOADED` 全局守卫被去掉的原因）。builtin 与项目无关故仍留全局。
 

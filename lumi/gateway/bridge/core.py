@@ -304,8 +304,9 @@ class AgentBridge:
         self._mcp_project = target
         self._disabled_tools = disabled_tools
         tools = await self._build_tools(wait_mcp=wait_mcp)
-        # enable_memory=True：bridge 是唯一面向用户的对话入口，持久记忆只在此处 opt-in
-        # （子 agent / workflow / cron 走 create_agent 默认 False，天然不带记忆）。
+        # enable_memory=True：bridge 是面向用户的对话入口，持久记忆只在此处 opt-in。
+        # 子 agent、workflow 走 create_agent 默认 False，不带记忆；cron 经 AgentBridge
+        # 执行，与普通会话一样带记忆（但不触发 autoDream，见 memory.dream 的 cron 闸）。
         self._agent, self._context = await create_agent(
             checkpoint=agents_config.checkpoint,
             project_dir=target,
@@ -407,7 +408,7 @@ class AgentBridge:
         """本会话是否已绑定真实项目（而非静默退回进程 cwd）。
 
         **本属性不在 `stream_response`/`stream_command` 内部强制**——桌面 desktop WS 聊天
-        要求"未绑定就拒绝"，但 cron（不走 AgentBridge）与飞书 channel（`ChannelConfig.workspace`
+        要求"未绑定就拒绝"，但 cron（未绑定项目的存量任务传空 project_dir）与飞书 channel（`ChannelConfig.workspace`
         可显式配成空串、故意退回进程 cwd，见 `lumi/gateway/channels/config.py`）合法地依赖退回
         cwd 的兜底语义，不能在这里统一收紧。桌面聊天的强制关卡在
         `GatewaySession.handle_frame`（`lumi/gateway/session.py`）。**新增任何直接调用
@@ -438,13 +439,22 @@ class AgentBridge:
         return self._context is not None and self._context.memory_enabled
 
     async def delete_thread(self, thread_id: str) -> None:
-        """删除指定会话的 LangGraph checkpoint，并回收其持久 shell。"""
+        """删除指定会话的 LangGraph checkpoint，回收其上传附件与持久 shell。"""
+        from lumi.gateway.uploads import remove_uploads
+
         if not thread_id:
             return
         # 删除抛错也要回收 shell（按 thread_id 键、会话私有），否则留下孤儿进程
         try:
             if self._agent is not None:
+                # 先读出消息声明的附件：checkpoint 一删就无从得知哪些上传归它
+                files = [
+                    p
+                    for m in await self.snapshot_messages(thread_id)
+                    for p in declared_file_paths(m)
+                ]
                 await self._agent.adelete_thread(thread_id)
+                await asyncio.to_thread(remove_uploads, files)
         finally:
             await get_shell_session_manager().close_session(thread_id)
 

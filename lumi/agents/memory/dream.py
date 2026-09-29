@@ -56,7 +56,7 @@ async def auto_dream_stop_hook(ctx: HookContext) -> HookResult:
     if runtime is None:
         return None
     context = runtime.context
-    # 2. 记忆开关（子 agent / cron / 后台天然 False）+ 跳过结构化输出轮 + config 开关
+    # 2. 记忆开关（子 agent / workflow 为 False）+ 跳过结构化输出轮 + config 开关
     if not getattr(context, "memory_enabled", False):
         return None
     if state.get("output_schema"):

@@ -145,7 +145,8 @@ async def workflow(
     """用一段确定性脚本编排子代理，后台执行（详见 WORKFLOW_DESCRIPTION）。"""
     # 与 agent 工具同一道委派深度网关（max_delegation_depth=0 即禁止任何扇出）
     max_depth = get_config().config.agents.max_delegation_depth
-    if runtime.state.get("depth", 0) >= max_depth:
+    depth = runtime.state.get("depth", 0)
+    if depth >= max_depth:
         return f"已达到最大委派层数（{max_depth}），无法再用 workflow 扇出子代理"
     # path 优先于 script：读出版本化脚本文件（可审计 / 可迭代）。
     if path:
@@ -161,7 +162,9 @@ async def workflow(
 
     # 子代理经父 context 复用 PermissionEngine（共享工作区边界）、项目根与渠道 env；
     # 无审批通道，以 auto 运行。
-    engine = WorkflowEngine(script, parent=runtime.context, args=args, name=name)
+    engine = WorkflowEngine(
+        script, parent=runtime.context, args=args, name=name, depth=depth + 1
+    )
     try:
         engine.compile()
     except WorkflowScriptError as e:

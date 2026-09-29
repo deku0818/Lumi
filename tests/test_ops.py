@@ -207,3 +207,39 @@ def test_tail_handles_short_file(tmp_path):
     log = tmp_path / "Lumi.log"
     log.write_text("only\n")
     assert ops.tail(log, 50) == ["only"]
+
+
+# ── 日志轮转 ──────────────────────────────────────────────────────────────
+
+
+def test_log_file_rotates():
+    # 回归：普通 FileHandler 无上限，7×24 跑的 serve 把日志写到几百 MB 上 GB
+    from logging.handlers import RotatingFileHandler
+
+    from lumi.utils.logger import LOG_FILE, logger
+
+    handler = next(h for h in logger.handlers if isinstance(h, RotatingFileHandler))
+    assert handler.maxBytes == 10 * 1024 * 1024 and handler.backupCount == 3
+    assert ops.log_file() == LOG_FILE
+
+
+def test_follow_reopens_after_rotation(tmp_path):
+    # 轮转后路径指向新文件：-f 若死守旧句柄，之后的日志一行都看不到
+    import queue
+    import threading
+    import time
+
+    log = tmp_path / "Lumi.log"
+    log.write_text("")
+    got: queue.Queue[str] = queue.Queue()
+    # 守护线程：旧实现在这里永远读不到新行，不能让它拖住测试进程退出
+    threading.Thread(
+        target=lambda: [got.put(line) for line in ops.follow(log)], daemon=True
+    ).start()
+    time.sleep(0.3)  # 等 follow 打开文件并 seek 到末尾，否则 old 在它之前写入被跳过
+    with log.open("a") as f:
+        f.write("old\n")
+    assert got.get(timeout=5) == "old"
+    log.rename(tmp_path / "Lumi.log.1")
+    log.write_text("new\n")
+    assert got.get(timeout=5) == "new"

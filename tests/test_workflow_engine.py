@@ -111,3 +111,28 @@ async def test_subagents_run_in_auto_mode(invoked):
         'return await agent("x")', parent=LumiAgentContext(tool_mode="privileged")
     )
     assert invoked[0].tool_mode == "auto"
+
+
+async def test_subagents_run_at_child_depth(monkeypatch):
+    # 回归：workflow 子代理入参不带 depth（恒按主 agent depth=0 跑），按 depth 区分
+    # 主/子代理的闸（项目 Stop hook、goal、autoDream、shell hook 协议里的 depth）全失效
+    depths: list = []
+
+    class _Graph:
+        async def ainvoke(self, inputs, context=None):
+            depths.append(inputs.get("depth"))
+            return {"messages": [AIMessage(content="ok")]}
+
+    async def fake_get_tools(**kwargs):
+        return []
+
+    async def fake_create_agent(**kwargs):
+        return SimpleNamespace(graph=_Graph()), LumiAgentContext()
+
+    monkeypatch.setattr("lumi.agents.tools.get_tools", fake_get_tools)
+    monkeypatch.setattr("lumi.agents.core.graph.create_agent", fake_create_agent)
+    monkeypatch.setattr("lumi.agents.tools.load_agents", lambda **kw: [])
+
+    await _run('return await agent("x")')
+    await _run('return await agent("x")', depth=2)
+    assert depths == [1, 2]

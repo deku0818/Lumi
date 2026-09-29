@@ -347,7 +347,8 @@ async def create_agent(
                      hooks 已改为按会话经 contextvar 注入，此处不再加载。
         enable_memory: 是否为本 agent 启用持久记忆（默认 False，opt-in）。持久记忆有副作用
                        （写磁盘 / 改系统提示词 / 注入上下文 / 写入免审批），故只有面向用户的
-                       对话入口（bridge）显式传 True；子 agent、workflow、cron 等天然不带记忆。
+                       对话入口（bridge，含经它执行的 cron）显式传 True；子 agent、workflow
+                       不带记忆。
 
     Returns:
         (agent, context) 元组

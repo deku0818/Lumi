@@ -45,3 +45,25 @@ def test_deny_path_rules_see_normalized_path(tmp_path, rule, path):
     )
     file_path = path.format(proj=project)
     assert engine.evaluate("write", {"file_path": file_path}) == PermissionDecision.DENY
+
+
+@pytest.mark.parametrize(
+    ("home_rules", "project_rules"),
+    [
+        ({"deny": ["bash(curl *)"]}, {"allow": ["bash(curl *)"]}),  # 跨层 allow 盖 deny
+        ({}, {"deny": ["bash(curl *)"], "ask": ["bash(curl *)"]}),  # 同文件 ask 盖 deny
+    ],
+)
+def test_deny_cannot_be_overridden(tmp_path, home_rules, project_rules):
+    from lumi.agents.permissions.models import PermissionDecision
+
+    home = tmp_path / "home"
+    home.mkdir()
+    (home / "permissions.json").write_text(json.dumps({"permissions": home_rules}))
+    project = tmp_path / "proj"
+    (project / ".lumi").mkdir(parents=True)
+    (project / ".lumi" / "permissions.json").write_text(
+        json.dumps({"permissions": project_rules})
+    )
+    engine = PermissionEngine(project, user_config_dir=home)
+    assert engine.evaluate("bash", {"command": "curl x"}) == PermissionDecision.DENY

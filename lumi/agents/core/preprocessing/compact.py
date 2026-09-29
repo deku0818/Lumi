@@ -166,8 +166,8 @@ def strip_images_from_messages(msgs: list[BaseMessage]) -> list[BaseMessage]:
     """把 image / document block 替换为 ``[image]`` / ``[document]`` 文本占位。
 
     仅在 summary 调用撞 PTL 时作为**第一档缓解**（保全文字、只丢图，比截头损失小），
-    不再无条件预剥——预剥会让 messages 偏离主循环写下的滚动缓存断点、砸掉在线
-    summarizer 本可命中的热缓存读（见 :func:`summarize_with_ptl_retry`）。
+    不再无条件预剥——预剥会让 messages 偏离主循环发出的字节、砸掉在线 summarizer
+    在前缀自动缓存的 provider（OpenAI 系）上本可命中的热缓存读（见 :func:`run_summary`）。
     无图消息原样放行不复制；只对真有图/文档的消息做 model_copy。
     """
     result: list[BaseMessage] = []
@@ -197,10 +197,11 @@ async def summarize_with_ptl_retry(
 ) -> tuple[str, int]:
     """主入口：调 chain → PTL →（先剥图，再截头）→ 再调，直到成功或超 ``max_retry``。
 
-    首次尝试带原图，让在线 summarizer 命中主循环的热消息缓存；仅当撞 PTL 时才逐档
-    缓解：第一档剥图（保全文字、只丢图，仅一次），仍 PTL 再按 round 截头。
+    首次尝试带原图，与主循环发出的消息字节一致（缓存命中范围因 provider 而异，见
+    :func:`run_summary`）；仅当撞 PTL 时才逐档缓解：第一档剥图（保全文字、只丢图，仅一次），
+    仍 PTL 再按 round 截头。
 
-    返回 ``(summary_text, ptl_retry_count)``。摘要链带着全部工具（为命中主循环缓存），
+    返回 ``(summary_text, ptl_retry_count)``。摘要链带着全部工具（与主循环前缀一致），
     模型回空或转去调工具时抛 ``ValueError``——交给调用方的熔断 / 失败路径，绝不能拿
     空摘要或一段前言去替换整段历史。
     """
@@ -242,23 +243,23 @@ async def run_summary(
     max_retry: int,
     drop_ratio: float,
 ) -> tuple[str, int]:
-    """跑一次摘要：剔残留 tool_use → 缓存安全的 tool_call_chain → 带原图调用 → PTL 时先剥图再截头 → 提取文本。
+    """跑一次摘要：剔残留 tool_use → 与主链同前缀的 tool_call_chain → 带原图调用 → PTL 时先剥图再截头 → 提取文本。
 
-    summarizer 节点与离线 ``AgentBridge.compact_thread`` 共用这段（缓存安全的分叉：与主对话
-    相同的 system_prompt + tools 前缀复用 Prompt Caching，摘要本身不调工具）。首次带原图，
-    使在线 summarizer 命中主循环写下的滚动消息缓存（字节一致才读得到）；图仅在撞 PTL 时才由
-    ``summarize_with_ptl_retry`` 剥除。**不含**节点专属的熔断 / 阈值——调用方按需包裹。
-    返回 ``(summary_text, ptl_retries)``。
+    summarizer 节点与离线 ``AgentBridge.compact_thread`` 共用这段（与主对话相同的
+    system_prompt + tools 前缀，摘要本身不调工具）。首次带原图，与主循环发出的消息字节一致；
+    图仅在撞 PTL 时才由 ``summarize_with_ptl_retry`` 剥除。**不含**节点专属的熔断 / 阈值——
+    调用方按需包裹。返回 ``(summary_text, ptl_retries)``。
 
-    实际命中范围因 provider 而异：OpenAI 系按前缀自动缓存，消息部分也能读到；Anthropic
-    只在 cache_control 断点处读缓存，摘要链只在 system prompt 上打断点、且不带主链的
-    thinking 参数（thinking 参数不同即 messages 缓存失效），故只命中 system + tools 前缀，
-    消息部分按原价计。要让消息也命中得给摘要链补断点并带上同样的思考参数（摘要本身就要
-    付思考 token），目前未做。
+    缓存复用因 provider 而异：OpenAI 系按前缀自动缓存，字节一致的前缀（含消息）能读到主循环
+    的缓存。**Anthropic 下摘要调用不命中主对话的缓存**：摘要链不带主链的思考参数（thinking /
+    effort 不同即 messages 缓存失效；对把思考配置渲染在 tools/system 之前的模型，tools +
+    system 缓存也一并失效，官方按模型而定、不作保证），也不在消息上打断点；带
+    ``output_schema`` 的轮次主链还多出结构化输出工具与指令，前缀本就不同。故按全价估算摘要
+    成本。要命中得给摘要链带上同样的思考参数并补消息断点（摘要本身就要付思考 token），目前未做。
 
     多模态 block 与 ``call_model`` 同法 ``message_transform``（按 provider 归一化图片
-    格式）：对直连 Anthropic 是恒等（内容不变、缓存字节不受影响），对 OpenAI/Bedrock
-    转成各自格式——既发得对，又与主循环发出的字节一致、同样命中缓存。
+    格式）：对直连 Anthropic 是恒等（内容不变），对 OpenAI/Bedrock 转成各自格式——既发得对，
+    又与主循环发出的字节一致（前缀自动缓存的 provider 上据此命中）。
 
     残留 tool_use 的剔除（``drop_incomplete_tool_calls``）放在本函数而非各调用点：
     三条压缩路径都不经 PreprocessMessages 的清理，而中途被取消的工具轮是各路径共通的
@@ -455,7 +456,7 @@ async def compact_messages(
 
     选材（在线保末条 / PTL 按 round 保尾 / 离线整段）各路径自己定，其余全在这里；
     节点专属的阈值门与熔断记账留在 ``nodes.summarizer``，离线 ``compact_thread``
-    不带。摘要模型 / tools / system_prompt 取自会话 ``context``（缓存安全的分叉）。
+    不带。摘要模型 / tools / system_prompt 取自会话 ``context``（与主对话同一前缀）。
     """
     config = get_config()
     token = config.config.token

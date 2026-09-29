@@ -66,8 +66,9 @@
 ## opt-in 语义
 
 `create_agent(enable_memory=...)` **默认 False**。持久记忆有副作用（写盘 / 改 prompt / 注入上下文 /
-写入免审批），故只有面向用户的对话入口 `bridge` 显式传 `True`；子 agent（`agent.py`）、workflow、cron
-走默认 False 天然干净。这样「需要记忆的少数显式声明」而非「不需要的多数记得排除」，新增调用方默认安全。
+写入免审批），故只有面向用户的对话入口 `bridge` 显式传 `True`；子 agent（`agent.py`）、workflow
+走默认 False 天然干净。cron 经 `cron_stream` → `AgentBridge.initialize` 执行，与普通会话一样带记忆，
+但 cron 线程不触发 autoDream（`auto_dream_stop_hook` 的 `is_cron_thread` 闸）。这样「需要记忆的少数显式声明」而非「不需要的多数记得排除」，新增调用方默认安全。
 
 ## 演进方向
 

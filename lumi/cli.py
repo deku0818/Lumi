@@ -62,21 +62,21 @@ def _default(
         typer.Option(
             "-s",
             "--style",
-            help="系统提示词风格（如 code），覆盖 config.json 中的 style 配置",
+            help="系统提示词风格（如 code），覆盖 config.json 中的 style 配置（仅 -p 模式）",
         ),
     ] = None,
     privileged_danger: Annotated[
         bool,
         typer.Option(
             "--privileged-danger",
-            help="特权模式：跳过所有工具审批（危险）",
+            help="特权模式：跳过所有工具审批（危险；仅 -p 模式）",
         ),
     ] = False,
     accept_edits: Annotated[
         bool,
         typer.Option(
             "--accept-edits",
-            help="自动放行文件编辑(write/edit)，bash 仍需审批",
+            help="自动放行文件编辑(write/edit)，bash 仍需审批（仅 -p 模式）",
         ),
     ] = False,
 ) -> None:
@@ -88,6 +88,13 @@ def _default(
     inject_path()
     _export_lumi_bin()
     if ctx.invoked_subcommand is not None:
+        # 这些选项只作用于 -p：配子命令时静默丢弃会让人以为 serve 用上了（serve 还会
+        # 重建配置单例，-s 的覆盖本就留不住），明确报错
+        if prompt is not None or style is not None or privileged_danger or accept_edits:
+            raise typer.BadParameter(
+                "-p / -s / --privileged-danger / --accept-edits 仅用于 `lumi -p` 模式，"
+                "不能与子命令同用"
+            )
         return
 
     if style is not None:
@@ -850,20 +857,27 @@ def _export_lumi_bin() -> None:
 
 
 def _watch_parent_exit() -> None:
-    """守望 stdin：读到 EOF（父进程死亡、管道被 OS 关闭）即整体退出。
+    """守望 stdin：收到 ``shutdown`` 行即优雅停机；读到 EOF（父进程死亡）即整体退出。
 
-    孤儿 sidecar 会与新实例抢同一 checkpoint 数据库，把会话读写悬挂成
-    「会话打不开」。stdin 管道是跨平台最可靠的父进程死亡信号（Electron 侧以
-    stdio pipe 启动，崩溃/强杀同样触发管道关闭）。os._exit 而非优雅关停：
-    父进程已死无人在乎，checkpoint 写入是 SQLite 事务、中断也原子。
+    正常退出时桌面端先发 ``shutdown``、等本进程走完 lifespan（drain 在跑的轮，
+    checkpoint 停在完整的 super-step 边界）再退；给 SIGINT 而不是直接退出，就是
+    借 uvicorn 自己的停机流程——跨平台（Windows 上没法从外部给 sidecar 发 SIGTERM
+    式的软信号）。EOF 分支兜崩溃 / 强杀：孤儿 sidecar 会与新实例抢同一 checkpoint
+    数据库，把会话读写悬挂成「会话打不开」，此时父进程已死，os._exit 立即退出。
     """
     import os
+    import signal
     import threading
 
     def _watch() -> None:
+        # 直接读 fd 而不经 sys.stdin.buffer：停机收尾时本线程还阻塞在读上，带缓冲的
+        # reader 持着锁会让解释器退出时 abort（Fatal Python error: _enter_buffered_busy）
+        fd = sys.stdin.fileno()
         try:
-            sys.stdin.buffer.read()
-        except Exception:
+            while chunk := os.read(fd, 4096):
+                if b"shutdown" in chunk:
+                    signal.raise_signal(signal.SIGINT)
+        except OSError:
             pass
         os._exit(0)
 

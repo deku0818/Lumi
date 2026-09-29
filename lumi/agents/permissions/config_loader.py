@@ -84,7 +84,8 @@ def _config_from_dict(data: dict[str, Any]) -> PermissionConfig:
 def _merge_configs(configs: list[PermissionConfig]) -> PermissionConfig:
     """合并多级配置，高优先级覆盖低优先级同工具规则。
 
-    合并策略：按优先级从低到高遍历，同一工具表达式的规则以最后出现的为准。
+    合并策略：按优先级从低到高遍历，同一工具表达式的规则以最后出现的为准，
+    但 deny 不可被覆盖（任何层、同文件内的 allow/ask 都盖不掉已有的 deny）。
     最终追加 DEFAULT_RULES 中未被覆盖的规则。
 
     Args:
@@ -104,6 +105,9 @@ def _merge_configs(configs: list[PermissionConfig]) -> PermissionConfig:
                 all_workspaces.append(ws)
                 seen_workspaces.add(ws)
         for rule in cfg.permissions:
+            prev = rule_map.get(rule.tool)
+            if prev is not None and prev.permission == Permission.DENY:
+                continue
             rule_map[rule.tool] = rule
 
     # 追加默认规则（仅当未被用户规则覆盖时）

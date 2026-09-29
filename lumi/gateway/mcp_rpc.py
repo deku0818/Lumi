@@ -6,7 +6,8 @@
 
 读写的是**原始** dict（含 ``disabled`` 元字段供 UI 置灰）；分层合并 + 剥离 disabled
 发生在加载侧（``mcp._load_merged_mcp_config``）。save/delete 写盘后作废配置真变了的
-会话池，下次新会话加载时以新配置重建（没变的池完全不打断）。
+会话池，下次新会话加载时以新配置重建（没变的池完全不打断）。save 与测试通过也是用户
+的显式重试：有 server 加载失败的池一并换代重连（否则首次加载失败的池永不重连）。
 
 项目根统一 ``expanduser().resolve()``，与 bridge 建池时（core.py 的 initialize）的池
 key 口径一致——否则 symlink 路径（如 macOS /tmp→/private/tmp）会导致作废 pop 不中、
@@ -90,8 +91,12 @@ def _scope_of(params: dict) -> tuple[str, Path | None]:
 
 
 async def _test(params: dict) -> dict:
-    # 连接测试：直接用前端传来的配置临时连一次，与 scope/写盘无关
-    return await test_mcp_server(params.get("config") or {})
+    # 连接测试：直接用前端传来的配置临时连一次，与 scope/写盘无关。
+    # 通过即视为显式重试：参数不带 scope，故对所有有失败 server 的池换代重连
+    result = await test_mcp_server(params.get("config") or {})
+    if result["ok"]:
+        await invalidate_mcp_pools("global", force=True)
+    return result
 
 
 async def _status(params: dict) -> dict:
@@ -114,7 +119,7 @@ async def _save(params: dict) -> dict:
         raise ValueError("MCP server 缺少 name")
     scope, project_dir = _scope_of(params)
     _, servers = upsert_server(scope, project_dir, name, params.get("config") or {})
-    await invalidate_mcp_pools(scope, project_dir)
+    await invalidate_mcp_pools(scope, project_dir, force=True)
     return {"servers": servers}
 
 

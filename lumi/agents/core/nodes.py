@@ -713,7 +713,8 @@ async def summarizer(
     永远发生在压缩后的世界里（marker 由 ``build_compacted_update`` 恒剥，hook 扫不到
     即注入全量），在线/离线压缩后的形态同构：``[Human(<summary>), Human(ctx全量+用户消息)]``。
 
-    缓存安全的分叉：复用主对话的 system_prompt + tools 前缀，只在末尾追加摘要指令。
+    与主对话同一 system_prompt + tools 前缀，只在末尾追加摘要指令（缓存命中因 provider
+    而异，Anthropic 下不命中主对话缓存，见 ``compact.run_summary``）。
 
     - 不超阈值（``模型窗口 * summary_threshold``，真实 usage）→ 直接放行
     - 熔断器打开（同 thread 连续失败超阈值且未到 reset）→ 直接放行

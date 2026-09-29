@@ -203,6 +203,31 @@ async def test_run_config_hooks_run_before_builtin_and_isolated():
     assert record == ["builtin"]  # 只剩进程全局 builtin
 
 
+async def test_config_stop_hooks_skip_subagents():
+    """项目 config 的 Stop hook 只在主 agent（depth=0）收尾时跑：子代理（depth>0）继承
+    本 run 的 contextvar，若照跑，跑测试 / 拉回类 hook 会每个子代理各触发一次、甚至困住
+    子代理。builtin 照常分发（各自有 depth 闸）；其他事件的 config hook 不受影响。
+    """
+    record: list[str] = []
+    register_hook("Stop", _hook(None, record=record, name="builtin"))
+    set_run_config_hooks(
+        {
+            "Stop": [_hook(None, record=record, name="config")],
+            "PreToolUse": [_hook(None, record=record, name="config-pre")],
+        }
+    )
+    await dispatch_hooks("Stop", _ctx(state={"depth": 1}))
+    assert record == ["builtin"]
+
+    record.clear()
+    await dispatch_hooks("Stop", _ctx(state={"depth": 0}))
+    assert record == ["config", "builtin"]
+
+    record.clear()
+    await dispatch_hooks("PreToolUse", _ctx("PreToolUse", state={"depth": 1}))
+    assert record == ["config-pre"]
+
+
 async def test_replace_hooks_restores_after_exit():
     original = _hook(None)
     register_hook("Stop", original)

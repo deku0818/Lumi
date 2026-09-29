@@ -32,7 +32,7 @@ from lumi.agents.tools.providers.mcp import global_mcp_config_path
 from lumi.models.catalog import _cache_path
 from lumi.utils.config import global_manager, user_store
 from lumi.utils.config.global_models import GlobalConfig
-from lumi.utils.logger import _LOG_DIR
+from lumi.utils.logger import LOG_FILE
 from lumi.utils.config import get_config
 
 project = Path.cwd()
@@ -41,7 +41,7 @@ probes = {
     "global_dir": global_manager.GLOBAL_CONFIG_DIR,
     "uploads": global_manager.uploads_dir(),
     "checkpoints": GlobalConfig().get_checkpoint_dir(),
-    "logs": _LOG_DIR,
+    "logs": LOG_FILE.parent,
     "memory": memory_paths.MEMORY_ROOT,
     "hooks": _hooks_config_paths(project, None)[0],
     "permissions": ConfigLoader(project)._config_paths[0],

@@ -9,7 +9,7 @@
 | 风格 | 说明 |
 |------|------|
 | `default` | 默认风格。**不内置提示词**——系统提示词全部来自用户 `.lumi/prompts/`；内置 general-purpose / explore 两个子 Agent 与 lumi-config 技能 |
-| `code` | 面向软件工程。内置完整的系统提示词（SOUL / AGENTS）和 explore / plan 两个子 Agent |
+| `code` | 面向软件工程。内置完整的系统提示词（SOUL / AGENTS）和 explore / plan 两个子 Agent；default 的子 Agent 与技能作为基底一并可用（同名 explore 以 code 为准） |
 
 每种风格可内置三类资源：`prompts/`（系统提示词）、`agents/`（子 Agent）、`skills/`（技能），三者均为可选。`default` 不带 `prompts/`，提示词全部来自用户 `.lumi/prompts/`；两处都没有时以空系统提示词运行（不报错）。
 
@@ -58,7 +58,7 @@ lumi -s code -p "重构这个模块"
     └── my-skill/SKILL.md          # 覆盖 style 的同名 skill
 ```
 
-加载优先级：项目 `.lumi/` > 全局 `~/.lumi/` > style 内置（prompts / agents / skills 三类一致）。升级 Lumi 时自动获取改进，用户只需覆盖想要自定义的部分。
+加载优先级：项目 `.lumi/` > 全局 `~/.lumi/` > style 内置（prompts / agents / skills 三类一致）。其中 agents / skills 的 style 内置层 = `default` 基底 + 当前 style（同名以当前 style 为准），切到非 default 风格不会丢掉 default 自带的 general-purpose 子 Agent 与 lumi-config 技能；prompts 无此基底（default 不内置提示词）。升级 Lumi 时自动获取改进，用户只需覆盖想要自定义的部分。
 
 ---
 

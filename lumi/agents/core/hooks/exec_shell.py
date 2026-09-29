@@ -3,7 +3,7 @@
 把 hooks.json 配置的 shell command（``command`` 字段）包装为 Python ``Hook``：
 - 启动 subprocess，stdin 喂 ``protocol.serialize_input`` 输出
 - stdout 读到上限 / 进程退出，``protocol.parse_output`` 翻译为 ``HookResult``
-- 5 秒默认超时；到点或本轮被取消时按进程组终止（SIGTERM → 宽限后 SIGKILL）
+- 5 秒默认超时；到点或本轮被取消时按进程组终止（SIGTERM → 宽限后 SIGKILL），超时放行
 - env 仅传 ``LUMI_HOOK_*`` 前缀变量 + ``PATH``，防 secrets 泄露
 - ``matcher`` 正则：仅 PreToolUse / PostToolUse 生效，未命中则跳过 subprocess
 - exit code: 0=正常解析 stdout / 2=deny / 其他=非阻断 error（放行）
@@ -101,9 +101,10 @@ def make_shell_hook(
                 timeout=timeout_ms / 1000,
             )
         except TimeoutError:
-            logger.warning("[hooks] %s 超时 %dms，终止进程组", label, timeout_ms)
+            # 超时放行（同非阻断 error）：卡住的 hook 不拦工具、不扣留本轮结束
+            logger.warning("[hooks] %s 超时 %dms，终止进程组并放行", label, timeout_ms)
             await terminate_group(proc)
-            return Block(f"hook timeout after {timeout_ms}ms")
+            return None
         except asyncio.CancelledError:
             await asyncio.shield(terminate_group(proc))
             raise

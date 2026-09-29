@@ -190,14 +190,14 @@ async def _probe(url: str) -> tuple[str, str]:
 
 
 def log_file() -> Path:
-    """服务与 agent 的运行日志，与 utils/logger.py 同一份。"""
-    from lumi.utils.paths import lumi_home
+    """服务与 agent 的运行日志（utils/logger.py 写的那一份）。"""
+    from lumi.utils.logger import LOG_FILE
 
-    return lumi_home() / "logs" / "Lumi.log"
+    return LOG_FILE
 
 
 def tail(path: Path, lines: int) -> list[str]:
-    """末尾 N 行。只读文件尾部——这份日志没有轮转，整读会把几百 MB 拉进内存。"""
+    """末尾 N 行。只读文件尾部（轮转上限 10MB，整读也没必要）。"""
     with path.open("rb") as handle:
         size = handle.seek(0, 2)
         handle.seek(max(0, size - 256 * 1024))
@@ -206,19 +206,33 @@ def tail(path: Path, lines: int) -> list[str]:
 
 
 def follow(path: Path) -> Iterator[str]:
-    """从文件末尾起持续吐新行，直到调用方中断。"""
-    with path.open("rb") as handle:
-        handle.seek(0, 2)
-        buffer = b""
+    """从文件末尾起持续吐新行，直到调用方中断。
+
+    日志会轮转：读到末尾时若路径已指向另一个文件（inode 变了），换开新文件从头读。
+    """
+    handle = path.open("rb")
+    handle.seek(0, 2)
+    buffer = b""
+    try:
         while True:
             chunk = handle.read(65536)
-            if not chunk:
-                sleep(0.5)
+            if chunk:
+                buffer += chunk
+                *ready, buffer = buffer.split(b"\n")
+                for line in ready:
+                    yield line.decode("utf-8", "replace")
                 continue
-            buffer += chunk
-            *ready, buffer = buffer.split(b"\n")
-            for line in ready:
-                yield line.decode("utf-8", "replace")
+            try:
+                rotated = path.stat().st_ino != os.fstat(handle.fileno()).st_ino
+            except FileNotFoundError:
+                rotated = False  # 轮转的 rename 与新建之间的空窗
+            if rotated:
+                handle.close()
+                handle = path.open("rb")
+                continue
+            sleep(0.5)
+    finally:
+        handle.close()
 
 
 def run(cmd: list[str]) -> int:

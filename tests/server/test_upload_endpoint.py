@@ -66,12 +66,29 @@ async def test_null_byte_name_400(http_client, uploads_root):
 
 async def test_oversize_413_writes_nothing(http_client, uploads_root, monkeypatch):
     """超限按 Content-Length 在收流前拒：一个字节都不该落盘（无半截文件可回滚）。"""
-    monkeypatch.setattr(ws, "_MAX_FILE_BYTES", 4)
+    monkeypatch.setattr(ws, "MAX_UPLOAD_BYTES", 4)
     r = await http_client.post(
         "/upload", params={"name": "big.bin", "token": "secret"}, content=b"xxxxxx"
     )
     assert r.status_code == 413
     assert not uploads_root.exists()
+
+
+async def test_chunked_oversize_413_leaves_nothing(
+    http_client, uploads_root, monkeypatch
+):
+    """分块传输不带 Content-Length：边收边数兜住上限，半截文件连同目录删掉。"""
+    monkeypatch.setattr(uploads, "MAX_UPLOAD_BYTES", 4)
+
+    async def body():
+        yield b"xxx"
+        yield b"xxx"
+
+    r = await http_client.post(
+        "/upload", params={"name": "big.bin", "token": "secret"}, content=body()
+    )
+    assert r.status_code == 413
+    assert list(uploads_root.iterdir()) == []
 
 
 async def test_preflight_allows_post(http_client):

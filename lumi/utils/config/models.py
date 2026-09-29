@@ -164,14 +164,6 @@ class LlmParamsConfig(BaseModel):
         return cfg.to_dict()
 
 
-class FilesystemConfig(BaseModel):
-    """文件系统工具配置"""
-
-    grep_max_file_size_mb: int = Field(
-        default=10, description="grep 搜索时跳过的最大文件大小(MB)"
-    )
-
-
 class AutoDreamConfig(BaseModel):
     """后台 Dream（离线记忆综合）配置
 
@@ -224,9 +216,6 @@ class Config(BaseModel):
     )
     llm_params: LlmParamsConfig = Field(
         default_factory=LlmParamsConfig, description="LLM参数配置"
-    )
-    filesystem: FilesystemConfig = Field(
-        default_factory=FilesystemConfig, description="文件系统工具配置"
     )
     auto_dream: AutoDreamConfig = Field(
         default_factory=AutoDreamConfig, description="后台 Dream（离线记忆综合）配置"

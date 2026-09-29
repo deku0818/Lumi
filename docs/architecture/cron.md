@@ -35,7 +35,7 @@
 | 任务存储 | `lumi/agents/cron/job_store.py` | JSON 文件持久化，原子写入 |
 | 执行日志 | `lumi/agents/cron/run_log.py` | JSONL 追加写入，自动裁剪 |
 | 结果投递 | `lumi/agents/cron/delivery.py` | ABC 基类 + DeliveryManager；唯一实现是 `lumi/gateway/broadcast.py` 的 `BroadcastHub`（wire 信封属 gateway 层） |
-| 调度引擎 | `lumi/agents/cron/scheduler.py` | APScheduler 封装，重试逻辑 |
+| 调度引擎 | `lumi/agents/cron/scheduler.py` | APScheduler 封装，执行与收尾 |
 | 运行时装配 | `lumi/agents/cron/runtime.py` | `setup_cron()` 工厂（必填 `stream_runner`），由 `lumi serve` 的 `gateway_process` 调用 |
 | 对话工具 | `lumi/agents/tools/providers/cron.py` | 7 种操作的 LangChain Tool |
 | Desktop RPC | `lumi/gateway/cron_rpc.py` | WS 管理方法（list/create/update/delete/toggle/run/runs） |
@@ -59,7 +59,7 @@ Desktop 端：`lumi serve` 在 lifespan 中经 `setup_cron()` 启动调度器，
    落在专属的 `cron-` 前缀 thread 中（checkpointer 由 bridge 自带），像普通会话一样可回看、可续聊
 2. 将任务的 `prompt` 作为输入，`tool_mode` 设为 `auto`（分类器逐个裁决）；bridge 以
    `interactive=False` 初始化、不接审批通道，需人工审批的操作直接自动拒绝、`ask` 直接取消
-3. 使用 `asyncio.wait_for` 限制执行时间，默认超时 10 分钟
+3. 使用 `asyncio.wait_for` 限制执行时间，默认超时 6000 秒（100 分钟）
 4. 执行完成后通过 DeliveryManager 广播结果到所有已注册的投递通道
 5. 记录执行日志到 RunLog（含本次执行的 `thread_id`）
 
@@ -83,15 +83,14 @@ Desktop 端：`lumi serve` 在 lifespan 中经 `setup_cron()` 启动调度器，
 
 ---
 
-## 重试机制
+## 失败处理
 
-任务执行失败时，系统自动判断错误类型：
+cron 层**不做重试**：模型调用的瞬态错误（限流 / 5xx / 断连）已在模型层与 bridge
+重试过，到 Scheduler 的失败（含整轮超时）按最终结果记为 `failed` / `timeout`，写入
+执行日志并广播，等下一次调度。一次性（at）任务无论成败执行完即删除。
 
-**瞬态错误**（自动重试）：`asyncio.TimeoutError`、`httpx.HTTPStatusError`（429 / 5xx）、`ConnectionError`、`OSError`
-
-**永久错误**（不重试）：`ValueError`、`KeyError` 等业务逻辑错误
-
-重试策略采用退避间隔，最多重试 3 次：第 1 次 30s、第 2 次 60s、第 3 次 5min。成功后连续错误计数归零。
+`Job.consecutive_errors` 是早期 cron 级重试留下的历史字段，仅为兼容旧 `jobs.json`
+保留，不再更新。
 
 ---
 

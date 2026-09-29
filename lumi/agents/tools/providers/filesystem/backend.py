@@ -9,7 +9,6 @@ from __future__ import annotations
 import asyncio
 import codecs
 import locale
-import re
 from datetime import datetime
 from pathlib import Path
 
@@ -26,7 +25,6 @@ from lumi.agents.tools.providers.filesystem.ripgrep import (
     _parse_ripgrep_counts,
     _parse_ripgrep_files,
 )
-from lumi.utils.config import get_config
 
 # ============================================================================
 # Constants
@@ -40,39 +38,6 @@ BINARY_CHECK_BYTES = 8192
 # ============================================================================
 # Helper Utilities
 # ============================================================================
-
-
-def _glob_matches(file_path: Path, search_dir: Path, file_glob: str) -> bool:
-    """对齐 ripgrep --glob 语义：不含 / 的模式匹配任意层级的文件名，
-    含 / 的模式相对搜索根匹配（支持 **）。仅匹配 basename 会漏掉 '**/*.py'、
-    'src/*.ts' 这类带目录的 glob。"""
-    flags = wcmatch.glob.BRACE | wcmatch.glob.GLOBSTAR
-    if wcmatch.glob.globmatch(file_path.name, file_glob, flags=flags):
-        return True
-    try:
-        rel = file_path.relative_to(search_dir)
-    except ValueError:
-        return False
-    return wcmatch.glob.globmatch(str(rel), file_glob, flags=flags)
-
-
-def _reshape_python_grep(
-    rows: list[dict[str, str | int]], output_mode: str
-) -> list[dict[str, str | int]]:
-    """将 _python_search 的 content 行重塑为 count / files_with_matches 形状，
-    与 ripgrep 解析输出对齐（降级路径，否则非 content 模式会返回逐行内容字典）。"""
-    if output_mode == "files_with_matches":
-        seen: dict[str, None] = {}
-        for r in rows:
-            seen.setdefault(str(r["path"]), None)
-        return [{"path": p} for p in seen]
-    if output_mode == "count":
-        counts: dict[str, int] = {}
-        for r in rows:
-            p = str(r["path"])
-            counts[p] = counts.get(p, 0) + 1
-        return [{"path": p, "count": n} for p, n in counts.items()]
-    return rows
 
 
 def check_empty_content(content: str) -> str | None:
@@ -193,7 +158,7 @@ class LocalFilesystemBackend:
             if codecs.lookup(fallback).name == "utf-8":
                 return f"错误: 读取文件 '{file_path}' 失败: {e}"
             # GBK 之类的单/双字节编码几乎吃得下任意字节，二进制文件同样会“解码成功”；
-            # 用与 _python_search 同一条判据在解码前挡掉
+            # 用与 rg 同一条判据（前 8KB 含 NUL 即二进制）在解码前挡掉
             if b"\x00" in raw[:BINARY_CHECK_BYTES]:
                 return f"错误: 文件 '{file_path}' 不是文本文件"
             content = raw.decode(fallback, errors="replace")
@@ -323,7 +288,8 @@ class LocalFilesystemBackend:
     ) -> list[dict] | dict | str:
         """在文件内容中搜索正则表达式模式
 
-        优先使用 ripgrep，不可用时自动降级到纯 Python 实现。
+        依赖 ripgrep：未安装时返回安装提示（不做纯 Python 降级——那条路不认
+        .gitignore、不支持 type / 上下文 / 多行，结果与 rg 语义对不上）。
 
         Returns:
             content 模式返回分页字典 {"matches", "total", "offset", "truncated"}
@@ -350,13 +316,6 @@ class LocalFilesystemBackend:
             multiline=multiline,
             output_mode=output_mode,
         )
-        if results is None:
-            rows = await self._python_search(
-                pattern, search_path, file_glob, case_insensitive=case_insensitive
-            )
-            if isinstance(rows, str):
-                return rows
-            results = _reshape_python_grep(rows, output_mode)
         if isinstance(results, str):
             return results
 
@@ -392,8 +351,8 @@ class LocalFilesystemBackend:
         case_insensitive: bool = False,
         multiline: bool = False,
         output_mode: str = "content",
-    ) -> list[dict] | str | None:
-        """使用 ripgrep 搜索，未安装时返回 None，rg 报错时返回错误字符串。"""
+    ) -> list[dict] | str:
+        """使用 ripgrep 搜索；未安装或 rg 报错时返回错误字符串。"""
         cmd = _build_ripgrep_command(
             pattern,
             search_path,
@@ -409,7 +368,10 @@ class LocalFilesystemBackend:
 
         ran = await self._run_ripgrep(cmd)
         if ran is None:
-            return None
+            return (
+                "错误: 未安装 ripgrep（rg），搜索不可用。请运行 `lumi env install rg`"
+                "（或在 设置 → 环境 中安装）后重试"
+            )
         returncode, stdout, stderr = ran
 
         if output_mode == "files_with_matches":
@@ -427,7 +389,7 @@ class LocalFilesystemBackend:
     async def _run_ripgrep(self, cmd: list[str]) -> tuple[int, str, str] | None:
         """执行 ripgrep，返回 (退出码, stdout, stderr)；未安装返回 None。
 
-        超时按错误返回（不降级到更慢的纯 Python 扫描）。
+        超时按错误返回。
         """
         try:
             proc = await asyncio.create_subprocess_exec(
@@ -456,65 +418,6 @@ class LocalFilesystemBackend:
             stdout_bytes.decode("utf-8", errors="replace"),
             stderr_bytes.decode("utf-8", errors="replace"),
         )
-
-    async def _python_search(
-        self,
-        pattern: str,
-        search_path: str,
-        file_glob: str | None,
-        case_insensitive: bool = False,
-    ) -> list[dict[str, str | int]] | str:
-        """纯 Python 实现的文件搜索（ripgrep 降级方案）"""
-        try:
-            regex = re.compile(pattern, re.IGNORECASE if case_insensitive else 0)
-        except re.error as e:
-            return f"无效的正则表达式: {e}"
-
-        max_file_size = (
-            get_config().config.filesystem.grep_max_file_size_mb * 1024 * 1024
-        )
-
-        search_dir = Path(search_path)
-        if not search_dir.exists():
-            return []
-
-        matches: list[dict[str, str | int]] = []
-        for file_path in search_dir.rglob("*"):
-            if not file_path.is_file():
-                continue
-
-            if file_glob and not _glob_matches(file_path, search_dir, file_glob):
-                continue
-
-            try:
-                if file_path.stat().st_size > max_file_size:
-                    continue
-            except OSError:
-                continue
-
-            try:
-                content_bytes = file_path.read_bytes()
-                if b"\x00" in content_bytes[:BINARY_CHECK_BYTES]:
-                    continue
-                content = content_bytes.decode("utf-8", errors="ignore")
-            except OSError:
-                continue
-
-            for line_num, line in enumerate(split_lines(content), start=1):
-                if regex.search(line):
-                    matches.append(
-                        {
-                            "path": str(file_path),
-                            "line": line_num,
-                            "text": line.rstrip("\n"),
-                        }
-                    )
-
-            if len(matches) >= DEFAULT_CONTENT_HEAD_LIMIT:
-                break
-
-        return matches
-
 
 # ============================================================================
 # Backend Factory

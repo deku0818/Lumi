@@ -25,9 +25,10 @@ from fastapi.responses import FileResponse, JSONResponse
 from lumi.gateway.bootstrap import drain_runs, gateway_process
 from lumi.gateway.bridge import AgentBridge
 from lumi.gateway.broadcast import hub
+from lumi.gateway.projects import touch_project
 from lumi.gateway.session import GatewaySession
 from lumi.gateway.session_registry import registry
-from lumi.gateway.uploads import save_upload
+from lumi.gateway.uploads import MAX_UPLOAD_BYTES, UploadTooLarge, save_upload
 from lumi.utils.logger import logger
 
 
@@ -131,7 +132,7 @@ async def upload_endpoint(
     远程后端专用：前端给的是**前端本机**路径，那台机器上并不存在这个文件，直接发路径
     等于发了个死引用（agent 一 read 就 404）。本地后端不走这里（路径本就有效，零拷贝）。
 
-    本函数只做传输侧的事——鉴权、文件名净化、大小闸门、状态码；字节落到哪、
+    本函数只做传输侧的事——鉴权、文件名净化、大小预检、状态码；字节落到哪、
     怎么写、日后怎么清，全归 gateway/uploads.py（与内联图片同一个存盘口）。
     """
     if not token_ok(getattr(app.state, "token", ""), token):
@@ -141,13 +142,16 @@ async def upload_endpoint(
     safe = Path(name).name
     if not safe or safe == ".." or "\x00" in safe:
         return JSONResponse({"error": "bad name"}, 400, headers=_CORS)
-    # 先看 Content-Length 再收流：超限的请求一个字节都不该落盘，也省掉半截文件的回滚
-    if int(request.headers.get("content-length", 0)) > _MAX_FILE_BYTES:
-        logger.warning("[uploads] %s 超过 %dMB 上限", safe, _MAX_FILE_BYTES // 1024**2)
+    # 先看 Content-Length 再收流：超限的请求一个字节都不该落盘；分块传输不带该头，
+    # 由 save_upload 边收边数兜住（超限即中止并删掉半截文件）
+    try:
+        if int(request.headers.get("content-length", 0)) > MAX_UPLOAD_BYTES:
+            raise UploadTooLarge(safe)
+        path = await save_upload(safe, request.stream())
+    except UploadTooLarge:
+        logger.warning("[uploads] %s 超过 %dMB 上限", safe, MAX_UPLOAD_BYTES // 1024**2)
         return JSONResponse({"error": "too large"}, 413, headers=_CORS)
-    return JSONResponse(
-        {"path": await save_upload(safe, request.stream())}, headers=_CORS
-    )
+    return JSONResponse({"path": path}, headers=_CORS)
 
 
 class WsChannel:
@@ -180,6 +184,8 @@ async def ws_endpoint(ws: WebSocket) -> None:
         # open 握手携带 ?workspace=：直接把本会话引擎 pin 到其项目（项目随会话绑定），
         # 省掉 ready 后再 switch_session rebase 的来回。缺省 / 无效则退回进程 cwd。
         await bridge.initialize(project_dir=ws.query_params.get("workspace", ""))
+        if bridge.workspace_bound:  # 打开项目里的会话 = 使用了该项目
+            touch_project(bridge.workspace_dir)
         session = GatewaySession(bridge, ch, hub)
         await session.start()
     try:

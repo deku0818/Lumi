@@ -46,8 +46,8 @@ def build_cron_stream_runner(hub) -> Callable[[str, str, str], Awaitable[str]]:
                 if evt.kind == EventKind.ERROR:
                     error = evt.error or "cron 执行出错"
             # stream_response 把异常吞成 ERROR 事件、不抛；这里补抛，使 scheduler 如实记
-            # failed（而非误记 success、且错误计数被清零致该重试的也不重试）。瞬态网络错已
-            # 由 bridge 内部重试过（MAX_STREAM_RETRIES），走到这里即持久失败。
+            # failed 而非误记 success。瞬态网络错已由 bridge 内部重试过（MAX_STREAM_RETRIES），
+            # 走到这里即持久失败。
             if error:
                 raise RuntimeError(error)
             snap = await bridge.graph.aget_state(

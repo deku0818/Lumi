@@ -259,7 +259,6 @@ function JobCard({
   onOpen: () => void
   onToggle: (enabled: boolean) => void
 }) {
-  const { t } = useI18n()
   return (
     <div
       className={`flex flex-col ${CARD_L1} ${CARD_L1_HOVER} cursor-pointer p-4 ${job.enabled ? '' : 'opacity-55'}`}
@@ -268,11 +267,6 @@ function JobCard({
       <div className="flex items-start gap-2">
         <div className="flex-1 min-w-0 font-medium truncate">{job.name}</div>
         {running && <Loader2 size={15} className="shrink-0 mt-0.5 animate-spin text-primary" />}
-        {!running && job.consecutive_errors > 0 && (
-          <span title={t('cron.errorsHint', { n: job.consecutive_errors })} className="shrink-0 mt-0.5">
-            <AlertTriangle size={15} className="text-primary" />
-          </span>
-        )}
       </div>
 
       <div className="mt-1.5 text-sm text-muted-foreground line-clamp-3 flex-1">{job.prompt}</div>
@@ -345,13 +339,6 @@ function JobDetail({
           <span className="text-sm text-muted-foreground">{t('cron.nextRun', { time: fmtTime(job.next_run) })}</span>
         )}
       </div>
-
-      {job.consecutive_errors > 0 && (
-        <div className="mt-5 flex items-center gap-2.5 rounded-2xl border border-primary/40 bg-primary/10 px-4 py-3 text-sm">
-          <AlertTriangle size={15} className="shrink-0 text-primary" />
-          {t('cron.errorsHint', { n: job.consecutive_errors })}
-        </div>
-      )}
 
       <div className="mt-8 pt-6 border-t border-line/30 grid grid-cols-1 md:grid-cols-[5fr_7fr] gap-10">
         <div>

@@ -1,6 +1,6 @@
 # config.json 配置说明
 
-所有字段均可选，未配置时使用默认值；未知字段会被静默忽略。读哪份 config.json 取决于入口：
+所有字段均可选，未配置时使用默认值；未知字段会被静默忽略。某一顶层段校验失败（如类型写错）只让该段回默认并记 warning，其余段照常生效；JSON 语法错误则整份回退默认。读哪份 config.json 取决于入口：
 
 - **`lumi serve`（桌面端 / 服务器）**：只读用户级 `~/.lumi/config.json`（设了 `LUMI_CONFIG_DIR` 则读那里）；项目 `.lumi/config.json` 里只有 `style` 生效（按会话所属项目）。
 - **命令行 `lumi -p`**：按当前目录向上发现，`./.lumi/config.json` 存在则用它，否则用户级。
@@ -150,20 +150,6 @@
 ```
 
 会话结束时按门控在后台把近期会话的零散记忆综合成连贯记忆（仅桌面端，按项目隔离，默认关闭）：距上次整理至少 `min_hours` 小时、且期间至少有 `min_sessions` 个其它会话活跃过才触发。
-
----
-
-## filesystem — 文件系统工具配置
-
-```json
-{
-  "filesystem": {
-    "grep_max_file_size_mb": 10
-  }
-}
-```
-
-`grep_max_file_size_mb` 为 grep 搜索时跳过的最大文件大小（MB）。
 
 ---
 

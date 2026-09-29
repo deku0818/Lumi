@@ -899,3 +899,205 @@ async def test_list_commands_for_project_home(isolated_config, tmp_path):
     session = SimpleNamespace(_bridge=SimpleNamespace(list_commands=lambda: []))
     r = await _list_commands(session, {"workspace": str(tmp_path)})
     assert "beta-skill" in [c["name"] for c in r["commands"]]
+
+
+# -- 删除会话：先停在途轮再删（否则该轮续写 checkpoint，已删会话「复活」）--
+
+
+class _DeleteLogBridge(BlockingBridge):
+    """记录「停轮」与「删 thread」的先后：删除必须排在持有者的在途轮收尾之后。"""
+
+    def __init__(self, log: list[str], tid: str) -> None:
+        super().__init__()
+        self.current_thread_id = tid
+        self._log = log
+
+    async def finalize_cancelled_stream(self, gen) -> None:
+        await super().finalize_cancelled_stream(gen)
+        self._log.append("stop")
+
+    async def delete_thread(self, thread_id: str) -> None:
+        self._log.append(f"delete:{thread_id}")
+
+
+def _no_bg_tasks(monkeypatch) -> list[str]:
+    import lumi.gateway.session as session_mod
+
+    cancelled: list[str] = []
+
+    async def fake_cancel(thread_id: str) -> int:
+        cancelled.append(thread_id)
+        return 0
+
+    monkeypatch.setattr(session_mod, "cancel_thread_bg_tasks", fake_cancel)
+    return cancelled
+
+
+async def test_delete_session_stops_turn_on_other_connection_first(monkeypatch):
+    _no_bg_tasks(monkeypatch)
+    log: list[str] = []
+    owner_bridge = _DeleteLogBridge(log, "t-del-live")
+    owner, _ = _make_session(owner_bridge)
+    ctl, ctl_ch = _make_session(_DeleteLogBridge(log, "t-ctl"))
+    await owner.start()
+    await ctl.start()
+    try:
+        await owner.handle_frame(
+            {"id": 1, "method": "send_message", "params": {"content": "x"}}
+        )
+        await owner_bridge.started.wait()
+        await ctl.handle_frame(
+            {"id": 2, "method": "delete_session", "params": {"thread_id": "t-del-live"}}
+        )
+        await _drain(ctl)
+        assert _result(ctl_ch, 2) == {"thread_id": "t-del-live"}
+        assert log == ["stop", "delete:t-del-live"]
+        assert owner.has_active_turn() is False
+    finally:
+        owner_bridge.release.set()
+        await owner.aclose()
+        await ctl.aclose()
+
+
+async def test_delete_session_closes_detached_owner_and_its_leftovers(monkeypatch):
+    from lumi.agents.runtime.bg_tasks import get_task_registry
+    from lumi.gateway.session_registry import registry
+
+    cancelled = _no_bg_tasks(monkeypatch)
+    queue = get_task_registry().notification_queue
+    log: list[str] = []
+    owner_bridge = _DeleteLogBridge(log, "t-del-detached")
+    owner, _ = _make_session(owner_bridge)
+    ctl, _ = _make_session(_DeleteLogBridge(log, "t-ctl"))
+    await owner.start()
+    await ctl.start()
+    await owner.handle_frame(
+        {"id": 1, "method": "send_message", "params": {"content": "x"}}
+    )
+    await owner_bridge.started.wait()
+    owner.detach(registry)  # 前端关了该会话的连接，轮挂在 registry 里续跑
+    queue.enqueue("<task-notification/>", "t-del-detached")
+    try:
+        await ctl.handle_frame(
+            {
+                "id": 2,
+                "method": "delete_session",
+                "params": {"thread_id": "t-del-detached"},
+            }
+        )
+        await _drain(ctl)
+        assert log == ["stop", "delete:t-del-detached"]
+        assert owner_bridge.closed is True
+        assert registry.take("t-del-detached") is None
+        assert cancelled == ["t-del-detached"]
+        assert queue.has_for("t-del-detached") is False
+    finally:
+        owner_bridge.release.set()
+        registry.discard("t-del-detached", owner)
+        await owner.aclose()
+        await ctl.aclose()
+
+
+# -- provider 写类 RPC 改的是机器级配置，不等本会话在途轮 --
+
+
+async def test_provider_writes_do_not_wait_for_running_turn(monkeypatch):
+    import lumi.gateway.session as session_mod
+
+    methods = (
+        "set_provider",
+        "save_provider",
+        "delete_provider",
+        "set_effort",
+        "set_classifier",
+        "set_titler",
+    )
+    for m in methods:
+        monkeypatch.setattr(session_mod.providers, m, lambda *a: {"ok": True})
+    bridge = BlockingBridge()
+    session, channel = _make_session(bridge)
+    await session.start()
+    try:
+        await session.handle_frame(
+            {"id": 1, "method": "send_message", "params": {"content": "x"}}
+        )
+        await bridge.started.wait()
+        for i, m in enumerate(methods, start=10):
+            await session.handle_frame({"id": i, "method": m, "params": {}})
+        await asyncio.wait_for(asyncio.gather(*session._rpc_tasks), timeout=1)
+        for i in range(10, 10 + len(methods)):
+            assert _result(channel, i) == {"ok": True}
+    finally:
+        bridge.release.set()
+        await session.aclose()
+
+
+# -- 项目「最近使用」随会话绑定刷新；list_projects 不再下发进程级 current --
+
+
+async def test_switch_session_touches_bound_project(monkeypatch):
+    import lumi.gateway.session as session_mod
+
+    touched: list[str] = []
+    monkeypatch.setattr(session_mod, "touch_project", touched.append)
+    bridge = FakeBridge()
+    session, _ = _make_session(bridge)
+    await session.start()
+    try:
+        await session.handle_frame(
+            {"id": 1, "method": "switch_session", "params": {"thread_id": "t-2"}}
+        )
+        await _drain(session)
+        assert touched == []  # 未绑定项目的切换不算使用
+        await session.handle_frame(
+            {
+                "id": 2,
+                "method": "switch_session",
+                "params": {"thread_id": "t-3", "workspace": "/fake/project"},
+            }
+        )
+        await _drain(session)
+        assert touched == ["/fake/project"]
+    finally:
+        await session.aclose()
+
+
+async def test_list_projects_has_no_process_current(isolated_config):
+    from lumi.gateway.session import _list_projects
+
+    session = SimpleNamespace(_bridge=SimpleNamespace(workspace_dir="/cwd"))
+    assert "current" not in await _list_projects(session, {})
+
+
+class _OpenWs:
+    """ws_endpoint 的最小假 WebSocket：握手后立即断开。"""
+
+    def __init__(self, query: dict) -> None:
+        self.query_params = query
+
+    async def accept(self) -> None:
+        return
+
+    async def send_json(self, frame: dict) -> None:
+        return
+
+    async def receive_json(self) -> dict:
+        from fastapi import WebSocketDisconnect
+
+        raise WebSocketDisconnect()
+
+
+async def test_ws_open_with_bound_workspace_touches_project(monkeypatch):
+    from lumi.gateway.channels import ws as ws_mod
+
+    class OpenBridge(FakeBridge):
+        async def initialize(self, project_dir: str = "") -> None:
+            self.workspace_dir = project_dir or "/cwd"
+            self.workspace_bound = bool(project_dir)
+
+    touched: list[str] = []
+    monkeypatch.setattr(ws_mod, "touch_project", touched.append)
+    monkeypatch.setattr(ws_mod, "AgentBridge", OpenBridge)
+    await ws_mod.ws_endpoint(_OpenWs({"workspace": "/p/a"}))
+    await ws_mod.ws_endpoint(_OpenWs({}))
+    assert touched == ["/p/a"]

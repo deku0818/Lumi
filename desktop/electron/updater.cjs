@@ -82,13 +82,13 @@ function setupUpdater({ repoUrl, beforeQuit, onInstallFailed }) {
     await maybeCheck()
     return state
   })
-  ipcMain.handle('lumi:update:install', () => {
+  ipcMain.handle('lumi:update:install', async () => {
     if (MANUAL_DOWNLOAD) return shell.openExternal(releasesUrl)
     if (state.status !== 'ready') return
     // sidecar 必须先收走：quitAndInstall 后新实例会立刻起来抢同一 checkpoint 数据库。
     // 失败有两条路：同步抛异常，或异步 emit error（见上面的 error 处理器），两条都要回滚。
     installing = true
-    beforeQuit()
+    await beforeQuit()
     try {
       autoUpdater.quitAndInstall()
     } catch (e) {

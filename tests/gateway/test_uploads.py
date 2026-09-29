@@ -111,3 +111,65 @@ async def test_oversized_image_dropped_with_placeholder(_tmp_uploads):
     assert "已跳过" in _first_text(out)
     assert paths == []
     assert not _tmp_uploads.exists()
+
+
+async def _chunks(*parts: bytes, fail: BaseException | None = None):
+    for p in parts:
+        yield p
+    if fail is not None:
+        raise fail
+
+
+async def test_save_upload_limit_enforced_while_streaming(_tmp_uploads, monkeypatch):
+    # 分块传输不带 Content-Length：上限只能边收边数，超限即中止且不留半截文件
+    monkeypatch.setattr(umod, "MAX_UPLOAD_BYTES", 10)
+    with pytest.raises(umod.UploadTooLarge):
+        await umod.save_upload("big.bin", _chunks(b"12345678", b"12345678"))
+    assert list(_tmp_uploads.iterdir()) == []
+
+
+async def test_save_upload_disconnect_removes_partial(_tmp_uploads):
+    from starlette.requests import ClientDisconnect
+
+    with pytest.raises(ClientDisconnect):
+        await umod.save_upload("a.txt", _chunks(b"half", fail=ClientDisconnect()))
+    assert list(_tmp_uploads.iterdir()) == []
+
+
+async def test_remove_uploads_only_touches_uploads_dir(_tmp_uploads, tmp_path):
+    kept = tmp_path / "用户自己的文件.txt"  # 本地后端附件是用户原文件，绝不能删
+    kept.write_text("x")
+    path = await umod.save_upload("远程.txt", _chunks(b"data"))
+    _, (image,) = await umod.persist_image_blocks([_img_block()])
+    umod.remove_uploads([path, image, str(kept), "https://example.com/pic.png"])
+    assert list(_tmp_uploads.iterdir()) == []  # 独占 uuid 子目录随之删掉
+    assert kept.exists()
+
+
+async def test_delete_thread_removes_declared_uploads(_tmp_uploads, tmp_path):
+    from langchain_core.messages import HumanMessage
+    from langgraph.checkpoint.memory import MemorySaver
+    from langgraph.graph import START, MessagesState, StateGraph
+    from toy_graph import bridge_with
+
+    kept = tmp_path / "local.txt"
+    kept.write_text("x")
+    path = await umod.save_upload("远程.txt", _chunks(b"data"))
+    files = [{"path": path}, {"path": str(kept)}]
+    msg = HumanMessage(
+        content="看附件", additional_kwargs={"lumi": {"items": [{"files": files}]}}
+    )
+    builder = StateGraph(MessagesState)
+    builder.add_node("N", lambda _s: {})
+    builder.add_edge(START, "N")
+    graph = builder.compile(checkpointer=MemorySaver())
+    config = {"configurable": {"thread_id": "t-up"}}
+    await graph.ainvoke({"messages": [msg]}, config)
+    bridge = bridge_with(config, graph)
+    bridge._agent.adelete_thread = graph.checkpointer.adelete_thread
+
+    await bridge.delete_thread("t-up")
+
+    assert (await graph.aget_state(config)).values == {}
+    assert list(_tmp_uploads.iterdir()) == []
+    assert kept.exists()

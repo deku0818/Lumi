@@ -40,7 +40,8 @@ from lumi.utils.logger import logger
 _HOOKS: dict[HookEvent, list[Hook]] = {}
 
 # 本 run 的项目级 config hook（来自 .lumi/hooks.json）。per-run contextvar：每个
-# 会话各绑各项目、并发互不串；后台子代理继承父 run 的 contextvar。None = 无配置 hook。
+# 会话各绑各项目、并发互不串；子代理继承父 run 的 contextvar（Stop 除外，见 _hooks_for）。
+# None = 无配置 hook。
 _run_config_hooks: contextvars.ContextVar[dict[HookEvent, list[Hook]] | None] = (
     contextvars.ContextVar("lumi_run_config_hooks", default=None)
 )
@@ -54,10 +55,15 @@ def set_run_config_hooks(hooks: dict[HookEvent, list[Hook]] | None) -> None:
     _run_config_hooks.set(hooks)
 
 
-def _hooks_for(event: HookEvent) -> list[Hook]:
-    """本 run 生效的 hook：项目级 config 整体压在框架 builtin 之前。"""
+def _hooks_for(event: HookEvent, depth: int = 0) -> list[Hook]:
+    """本 run 生效的 hook：项目级 config 整体压在框架 builtin 之前。
+
+    子代理（``depth>0``）不跑 config 的 Stop hook：Stop 指用户这一轮结束，子代理收尾不算
+    （否则跑测试 / 拉回类 hook 每个子代理各触发一次、甚至困住子代理）。builtin 各自有 depth 闸。
+    """
     config = _run_config_hooks.get()
-    config_hooks = config.get(event, []) if config else []
+    skip = event == "Stop" and depth > 0
+    config_hooks = config.get(event, []) if config and not skip else []
     return [*config_hooks, *_HOOKS.get(event, [])]
 
 
@@ -119,7 +125,7 @@ async def dispatch_hooks(
     - ``Command``：调用方应据此路由（一般 ``return cmd``）
     - ``None``：所有 hook 放行，调用方走默认行为
     """
-    hooks = _hooks_for(event)
+    hooks = _hooks_for(event, ctx.state.get("depth", 0))
     if not hooks:
         return None
 

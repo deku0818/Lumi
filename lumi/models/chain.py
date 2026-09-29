@@ -2,9 +2,6 @@
 
 from typing import Any, Literal
 
-import anthropic
-import httpx
-import openai
 from langchain_anthropic import ChatAnthropic
 from langchain_core.messages import SystemMessage
 from langchain_core.prompts import (
@@ -18,24 +15,6 @@ from pydantic import BaseModel
 from lumi.models.cache import CACHE_CONTROL
 from lumi.models.manager import create_llm, rejects_forced_tool_choice
 
-# 仅重试真正瞬态的错误：限流、5xx、连接/超时（APIConnectionError 含 Timeout 子类）。
-# 不能用宽泛的 APIError——它包含 4xx 客户端错误（如模型不支持某参数的 400），
-# 重试只会在指数退避里"卡住"数分钟，正确行为是立即失败并把错误透传给用户。
-# 流式 chain 不重试中途断开的 httpx 错误，否则会导致 TUI 重复输出。
-_API_ERRORS = (
-    openai.RateLimitError,
-    openai.InternalServerError,
-    openai.APIConnectionError,
-    anthropic.RateLimitError,
-    anthropic.InternalServerError,
-    anthropic.APIConnectionError,
-)
-_API_AND_NETWORK_ERRORS = _API_ERRORS + (
-    httpx.RemoteProtocolError,
-    httpx.ConnectError,
-    httpx.ReadError,
-)
-
 
 def _require_structured_result(result):
     """模型回散文而非结构化工具调用时解析器返回 ``None``——显式抛错，不把 ``None``
@@ -45,21 +24,12 @@ def _require_structured_result(result):
     软引导（tool_choice=auto）下是常态，强制 tool_choice 下也会发生：兼容端点 /
     代理层（LiteLLM 等）可能丢掉该参数，模型于是自由发挥。
 
-    刻意不进 ``_with_retry`` 的重试类型：换一次调用也许能骗到工具调用，但那会掩盖
+    刻意不重试：换一次调用也许能骗到工具调用，但那会掩盖
     「该 prompt / 该端点不适配」这个真问题，而三个调用点的 fail-closed / 上抛都已安全。
     """
     if result is None:
         raise ValueError("模型未调用结构化输出工具（软引导下返回了散文）")
     return result
-
-
-def _with_retry(chain, retry_errors: tuple):
-    return chain.with_retry(
-        stop_after_attempt=5,
-        retry_if_exception_type=retry_errors,
-        wait_exponential_jitter=True,
-        exponential_jitter_params={"initial": 15, "max": 300},
-    )
 
 
 def structured_output(
@@ -123,8 +93,7 @@ def structured_output(
         structured_llm = llm.with_structured_output(structure, method=structure_method)
     # 守卫恒在链尾：强制 tool_choice 也不保证模型必发工具调用（代理层可能丢掉该参数），
     # 两条分支都可能拿到 None。
-    chain = prompt | structured_llm | RunnableLambda(_require_structured_result)
-    return _with_retry(chain, _API_AND_NETWORK_ERRORS)
+    return prompt | structured_llm | RunnableLambda(_require_structured_result)
 
 
 def tool_call_chain(
@@ -205,5 +174,4 @@ def tool_call_chain(
     messages.append(MessagesPlaceholder(variable_name="messages"))
 
     prompt = ChatPromptTemplate.from_messages(messages)
-    chain = prompt | llm_with_tools
-    return _with_retry(chain, _API_ERRORS)
+    return prompt | llm_with_tools

@@ -2,7 +2,7 @@
 
 不绑定任何具体传输（无 FastAPI 依赖）。FastAPI 的 lifespan、独立进程 channel
 （如未来的 IM long-polling 进程）都包一层 ``async with gateway_process():`` 复用同一份
-逻辑：第三方库补丁 / 配置生效 / 模型目录刷新 / cron 子系统 / 后台任务广播接线，
+逻辑：第三方库补丁 / 配置生效 / 过期缓存清理 / 模型目录刷新 / cron 子系统 / 后台任务广播接线，
 退出时统一收尾共享运行时。
 """
 
@@ -15,6 +15,7 @@ from lumi.agents.core.run_control import drain_all, wait_drained
 from lumi.agents.cron.delivery import DeliveryManager
 from lumi.agents.cron.runtime import setup_cron
 from lumi.agents.runtime.bg_tasks import get_task_registry
+from lumi.gateway import office_rpc
 from lumi.gateway.bridge import shutdown_shared_runtime
 from lumi.gateway.broadcast import hub
 from lumi.gateway.cron_rpc import set_cron_runtime
@@ -53,6 +54,7 @@ async def gateway_process():
     from lumi.utils.config import get_config
 
     get_config().apply_env()
+    office_rpc.prune_cache()
 
     # 后台定期刷新 models.dev 模型目录（思考能力 + context_length 数据源）。
     # 必须持强引用：事件循环只弱引用 task，不留引用可能在协程首次挂起前被 GC。

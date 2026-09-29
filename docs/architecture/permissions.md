@@ -194,7 +194,7 @@ auto 模式的分类器裁决与人工审批同权——AI 判断即用户授权
 
 ### 合并策略
 
-`_merge_configs(configs)` — 按优先级从低到高遍历，同一工具表达式的规则以最后出现的为准（后覆盖前）。最后追加 `DEFAULT_RULES` 中未被覆盖的规则。workspaces 取并集并去重。
+`_merge_configs(configs)` — 按优先级从低到高遍历，同一工具表达式的规则以最后出现的为准（后覆盖前），但 DENY 例外：同一表达式已有 DENY 时后来的 ALLOW/ASK 一律跳过，deny 规则不可被其他层（或同文件内）更低严格度的规则覆盖。最后追加 `DEFAULT_RULES` 中未被覆盖的规则。workspaces 取并集并去重。
 
 ### 持久化
 

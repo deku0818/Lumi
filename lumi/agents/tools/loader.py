@@ -94,18 +94,19 @@ def config_layers(
 ) -> list[tuple[str, Path]]:
     """(来源标签, 目录) 列表，优先级从低到高，逐层同名覆盖。
 
-    style 内置（builtin）→ 进程配置目录（global）→ 项目 ``.lumi/``（project，
-    仅在传入 project_dir 时存在）。load_skills/load_agents、detector 的变更扫描、
-    gateway/project_config 的 UI 聚合都消费这一份——层序只写在这里。
+    style 内置（builtin：default 恒为基底，非 default 风格再叠其上）→ 进程配置目录
+    （global）→ 项目 ``.lumi/``（project，仅在传入 project_dir 时存在）。
+    load_skills/load_agents、detector 的变更扫描、gateway/project_config 的 UI
+    聚合都消费这一份——层序只写在这里。prompts 不走此基底（default 无内置 prompts）。
     """
     from lumi.styles import STYLES_ROOT
 
     config = get_config()
     style = config.active_style_for(project_dir)
     layers = [
-        ("builtin", STYLES_ROOT / style / subdir),
-        ("global", config.config_dir / subdir),
+        ("builtin", STYLES_ROOT / s / subdir) for s in dict.fromkeys(("default", style))
     ]
+    layers.append(("global", config.config_dir / subdir))
     if project_dir:
         layers.append(("project", Path(project_dir) / ".lumi" / subdir))
     return layers

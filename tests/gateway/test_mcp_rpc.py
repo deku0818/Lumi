@@ -15,7 +15,7 @@ from lumi.gateway import mcp_rpc
 def _no_pool_side_effects(monkeypatch):
     """作废走真实 _pools 会读文件；测试里 stub 掉，只验 dispatch 自身逻辑。"""
 
-    async def _noop(scope, project_dir=None):
+    async def _noop(scope, project_dir=None, force=False):
         return None
 
     monkeypatch.setattr(mcp_rpc, "invalidate_mcp_pools", _noop)
@@ -91,7 +91,7 @@ async def test_project_path_resolved_matches_pool_key(tmp_path, monkeypatch):
 
     captured = {}
 
-    async def _capture(scope, project_dir=None):
+    async def _capture(scope, project_dir=None, force=False):
         captured["dir"] = project_dir
 
     monkeypatch.setattr(mcp_rpc, "invalidate_mcp_pools", _capture)

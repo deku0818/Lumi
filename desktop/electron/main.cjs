@@ -159,12 +159,28 @@ async function startSidecar(port) {
   })
 }
 
+// 优雅停机：经 stdin 请求 sidecar 走自己的停机流程（drain 在跑的轮，checkpoint 停在
+// 完整边界），最多等 SIDECAR_STOP_MS，超时强杀。不用 kill()：Windows 上它就是强杀，
+// POSIX 上发完 SIGTERM 本进程立刻退出、stdin 一断 sidecar 就被 os._exit 截断。
+const SIDECAR_STOP_MS = 5000
+
 function stopSidecar() {
   stopping = true
-  if (serveProc) {
-    serveProc.kill()
-    serveProc = null
-  }
+  const proc = serveProc
+  serveProc = null
+  if (!proc || proc.exitCode !== null) return Promise.resolve()
+  return new Promise((resolve) => {
+    const timer = setTimeout(() => {
+      proc.kill('SIGKILL')
+      resolve()
+    }, SIDECAR_STOP_MS)
+    proc.once('exit', () => {
+      clearTimeout(timer)
+      resolve()
+    })
+    proc.stdin.once('error', () => {}) // 恰在此刻已退出：EPIPE 交给上面的 exit 收尾
+    proc.stdin.write('shutdown\n')
+  })
 }
 
 // 安装更新失败时的回滚。quitAndInstall 之前必须先收走 sidecar（防新旧实例抢同一
@@ -559,4 +575,10 @@ app.on('window-all-closed', () => {
   if (process.platform !== 'darwin') app.quit()
 })
 
-app.on('before-quit', stopSidecar)
+// 退出等 sidecar 停完（最多 SIDECAR_STOP_MS）：先拦下本次 quit，停完再重新 quit——
+// 第二次进来时 serveProc 已空，直接放行
+app.on('before-quit', (event) => {
+  if (!serveProc) return
+  event.preventDefault()
+  stopSidecar().then(() => app.quit())
+})

@@ -161,6 +161,7 @@ class WorkflowEngine:
         parent: LumiAgentContext | None = None,
         args: Any = None,
         name: str = "workflow",
+        depth: int = 1,
     ) -> None:
         self._script = script
         # 父 context：子代理经 create_subagent 复用其 PermissionEngine（共享工作区边界 +
@@ -169,6 +170,9 @@ class WorkflowEngine:
         self._parent = parent or LumiAgentContext()
         self._args = args
         self._name = name
+        # 子代理的委派深度（父 depth + 1）：按 depth 区分主 / 子代理的闸（项目 Stop hook、
+        # goal、autoDream）与 shell hook 协议里的 depth 都靠它
+        self._depth = depth
 
         self._code: Any = None
         self._semaphore = asyncio.Semaphore(_max_concurrency())
@@ -322,6 +326,7 @@ class WorkflowEngine:
                 context.tool_mode = "auto"
                 inputs: dict[str, Any] = {
                     "messages": [HumanMessage(content=prompt)],
+                    "depth": self._depth,
                 }
                 if schema:
                     inputs["output_schema"] = schema

@@ -13,32 +13,24 @@ import asyncio
 import os
 import sys
 from collections.abc import Awaitable, Callable
-from datetime import datetime, timedelta
+from datetime import datetime
 from pathlib import Path
 from typing import IO
 
 from apscheduler.jobstores.base import JobLookupError
 from apscheduler.schedulers.asyncio import AsyncIOScheduler
-from apscheduler.triggers.date import DateTrigger
 from langgraph.checkpoint.base import BaseCheckpointSaver
 
 from lumi.agents.cron.compensation import should_compensate
 from lumi.agents.cron.delivery import DeliveryManager
 from lumi.agents.cron.job_store import JobStore
 from lumi.agents.cron.models import Job, ScheduleType
-from lumi.agents.cron.retry import backoff_delay, is_transient_error
 from lumi.agents.cron.run_log import RunLog, RunRecord
 from lumi.agents.runtime.bg_tasks import current_thread_id
 from lumi.utils.config import get_config
-from lumi.utils.constants import (
-    MAX_CRON_RETRIES,
-    MAX_CRON_RUN_THREADS,
-)
+from lumi.utils.constants import MAX_CRON_RUN_THREADS
 from lumi.utils.logger import logger
 from lumi.utils.thread_id import CRON_THREAD_PREFIX, generate_thread_id
-
-# 向后兼容：历史上 ``_is_transient_error`` 定义在本模块，外部（含测试）经此路径导入。
-_is_transient_error = is_transient_error
 
 
 def _lock_exclusive(f: IO[str]) -> None:
@@ -428,11 +420,15 @@ class Scheduler:
             logger.error("定时任务意外失败: %s", exc, exc_info=exc)
 
     # ------------------------------------------------------------------
-    # Job execution: split into invoke / retry / deliver sub-functions
+    # Job execution: split into invoke / deliver sub-functions
     # ------------------------------------------------------------------
 
     async def _execute_job(self, job: Job) -> RunRecord:
-        """执行单个任务：Agent 调用、重试判定、结果投递与日志记录。"""
+        """执行单个任务：Agent 调用、结果投递与日志记录。
+
+        cron 层不重试：模型调用的瞬态错误已在模型层 / bridge 重试过，到这里的失败按
+        最终结果记录，等下次调度。
+        """
         started_at = datetime.now().astimezone()
         # thread_id 在起始生成：使运行态广播能带上 thread_id，前端在执行记录顶部显示
         # 可点进观测的活条目
@@ -441,8 +437,7 @@ class Scheduler:
         self._notify_job_status()
 
         try:
-            output, status, error, caught_exc = await self._invoke_agent(job, thread_id)
-            retry_scheduled = await self._handle_retry(job, caught_exc)
+            output, status, error = await self._invoke_agent(job, thread_id)
 
             finished_at = datetime.now().astimezone()
             duration_ms = int((finished_at - started_at).total_seconds() * 1000)
@@ -458,7 +453,7 @@ class Scheduler:
                 error=error,
                 thread_id=thread_id,
             )
-            await self._deliver_and_log(job, record, output, retry_scheduled)
+            await self._deliver_and_log(job, record, output)
             return record
         finally:
             self._active_runs.pop(job.id, None)
@@ -467,10 +462,8 @@ class Scheduler:
             self._user_stopped_jobs.discard(job.id)
             self._notify_job_status()
 
-    async def _invoke_agent(
-        self, job: Job, thread_id: str
-    ) -> tuple[str, str, str, Exception | None]:
-        """执行任务 prompt，返回 (output, status, error, exception)。
+    async def _invoke_agent(self, job: Job, thread_id: str) -> tuple[str, str, str]:
+        """执行任务 prompt，返回 (output, status, error)。
 
         统一包超时 / 取消 / 异常判定；cron- thread 里的现场经 checkpoint 保留、可续聊。
         """
@@ -481,10 +474,10 @@ class Scheduler:
                 self._stream_runner(job.prompt, thread_id, job.project_dir),
                 timeout=self._execution_timeout,
             )
-            return output, "success", "", None
-        except TimeoutError as exc:
+            return output, "success", ""
+        except TimeoutError:
             logger.warning("任务执行超时: %s [%s]", job.name, job.id)
-            return "", "timeout", f"任务执行超时（{self._execution_timeout}s）", exc
+            return "", "timeout", f"任务执行超时（{self._execution_timeout}s）"
         except asyncio.CancelledError:
             # 用户主动中断：吞掉取消、记为 stopped（wait_for 已把内层 graph 掐断，现场经
             # checkpoint 保留、续聊自愈）。关机 grace 期的取消未置标记 → 照常上抛。
@@ -494,42 +487,17 @@ class Scheduler:
                 # 投递的 await 不被 asyncio 当作仍在取消而打断（Python 3.11+ 语义）。
                 if (task := asyncio.current_task()) is not None:
                     task.uncancel()
-                return "", "stopped", "用户中断执行", None
+                return "", "stopped", "用户中断执行"
             raise
         except Exception as exc:
             logger.exception("任务执行失败: %s [%s]", job.name, job.id)
-            return "", "failed", f"{type(exc).__name__}: {exc}", exc
-
-    async def _handle_retry(self, job: Job, caught_exc: Exception | None) -> bool:
-        """根据执行结果决定是否安排退避重试或重置错误计数。
-
-        返回是否已安排重试——调用方据此决定一次性(AT)任务是否可删除：
-        已安排重试时若立即删除，重试触发的 _fire_job 会读到 None 而静默丢失。
-        """
-        if caught_exc is not None and is_transient_error(caught_exc):
-            if job.consecutive_errors < MAX_CRON_RETRIES:
-                job.consecutive_errors += 1
-                await self._persist_consecutive_errors(job)
-                self._schedule_retry(job)
-                return True
-            logger.error(
-                "任务重试次数耗尽（%d/%d），记录最终失败: %s [%s]",
-                job.consecutive_errors,
-                MAX_CRON_RETRIES,
-                job.name,
-                job.id,
-            )
-        elif caught_exc is None and job.consecutive_errors > 0:
-            job.consecutive_errors = 0
-            await self._persist_consecutive_errors(job)
-        return False
+            return "", "failed", f"{type(exc).__name__}: {exc}"
 
     async def _deliver_and_log(
         self,
         job: Job,
         record: RunRecord,
         output: str,
-        retry_scheduled: bool = False,
     ) -> None:
         """记录执行日志、广播结果、应用会话保留策略、清理一次性任务。"""
         # 以最新配置为准：执行期间任务可能被删（不留日志）或被改（AT 改周期就别删它）
@@ -563,8 +531,7 @@ class Scheduler:
         except Exception:
             logger.warning("广播结果失败: %s [%s]", job.name, job.id, exc_info=True)
 
-        # 已安排重试时保留 AT 任务，否则重试触发的 _fire_job 会读到 None 而丢失
-        if latest.schedule.type == ScheduleType.AT and not retry_scheduled:
+        if latest.schedule.type == ScheduleType.AT:
             try:
                 await self._job_store.delete(job.id)
                 logger.info("一次性任务已完成并删除: %s [%s]", job.name, job.id)
@@ -616,41 +583,3 @@ class Scheduler:
             self._on_job_status(runs)
         except Exception:
             logger.error("广播任务运行状态失败", exc_info=True)
-
-    def _schedule_retry(self, job: Job) -> None:
-        """通过 APScheduler DateTrigger 安排退避重试。"""
-        delay = backoff_delay(job.consecutive_errors)
-        run_at = datetime.now() + timedelta(seconds=delay)
-        retry_id = f"{job.id}-retry-{job.consecutive_errors}"
-
-        self._aps.add_job(
-            self._fire_job,
-            trigger=DateTrigger(run_date=run_at),
-            args=[job.id],
-            id=retry_id,
-            replace_existing=True,
-        )
-        logger.info(
-            "已安排重试 %d/%d，%d 秒后执行: %s [%s]",
-            job.consecutive_errors,
-            MAX_CRON_RETRIES,
-            delay,
-            job.name,
-            job.id,
-        )
-
-    async def _persist_consecutive_errors(self, job: Job) -> None:
-        """将 Job 的 consecutive_errors 持久化到 JobStore。
-
-        notify=False：错误计数是重试退避的内部状态、前端不展示，无需触发 cron.jobs
-        广播（否则 flapping 任务每次重试都让所有 desktop 全量重拉任务列表）。
-        """
-        try:
-            await self._job_store.upsert(job, notify=False)
-        except Exception:
-            logger.warning(
-                "更新 consecutive_errors 失败: %s [%s]",
-                job.name,
-                job.id,
-                exc_info=True,
-            )

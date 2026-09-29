@@ -17,6 +17,7 @@ from functools import wraps
 from pathlib import Path
 from typing import Any, TextIO
 
+import anyio
 from langchain_core.tools.structured import StructuredTool
 from langchain_mcp_adapters import sessions
 from langchain_mcp_adapters.client import MultiServerMCPClient
@@ -26,6 +27,8 @@ from langchain_mcp_adapters.interceptors import (
 )
 from langchain_mcp_adapters.tools import load_mcp_tools
 from langgraph.prebuilt import ToolRuntime
+from mcp.shared.exceptions import McpError
+from mcp.types import CONNECTION_CLOSED
 
 from lumi.agents.tools.providers.mcp.config import (
     EMPTY_CONFIG_HASH,
@@ -298,6 +301,8 @@ class MCPSessionManager:
                     tools = await self._load_persistent(
                         client, server_name, interceptors
                     )
+                    for t in tools:
+                        self._watch_session_lost(t)
                 else:
                     async with asyncio.timeout(_SERVER_START_TIMEOUT):
                         tools = await client.get_tools()
@@ -345,6 +350,28 @@ class MCPSessionManager:
                     )
                     t.args_schema = flat
         out_tools.extend(tools)
+
+    def _watch_session_lost(self, tool: StructuredTool) -> None:
+        """包装持久会话工具：server 进程已死（调用抛 ClosedResourceError 或
+        「Connection closed」McpError）时关本池换代，下一轮自然重载；异常照旧上抛。
+
+        不包则状态恒显示 ok、工具恒调用失败——常驻会话没有别的途径感知进程死亡。
+        """
+        call = tool.coroutine
+
+        @wraps(call)
+        async def watched(*args: Any, **kwargs: Any) -> Any:
+            try:
+                return await call(*args, **kwargs)
+            except anyio.ClosedResourceError:
+                await _on_session_lost(self)
+                raise
+            except McpError as e:
+                if e.error.code == CONNECTION_CLOSED:
+                    await _on_session_lost(self)
+                raise
+
+        tool.coroutine = watched
 
     def get_tools(self) -> list[StructuredTool]:
         """获取已加载的工具列表"""
@@ -406,7 +433,8 @@ class McpPool:
         self.generation = 0
         self.last_used = 0.0  # 最近访问 monotonic 时刻（LRU 淘汰用）
         # 最近一次加载所尝试配置的 hash（失败也记）：sync_config 据此区分
-        # 「配置真变了」与「上次就是这份配置但没加载成功」——后者不反复重试
+        # 「配置真变了」与「上次就是这份配置但没加载成功」——后者不自动重试
+        # （面板 save/test 的显式重试除外，见 sync_config 的 force）
         self.attempted_hash = EMPTY_CONFIG_HASH
         self._load_task: asyncio.Task | None = None
 
@@ -508,13 +536,15 @@ class McpPool:
         await manager.close()
         self.generation += 1
 
-    async def sync_config(self, interrupt_loading: bool) -> None:
+    async def sync_config(self, interrupt_loading: bool, force: bool = False) -> None:
         """配置比对换代的唯一决策点（RPC 作废与轮首自查共用）。
 
         与最近一次尝试加载的配置 hash（``attempted_hash``，失败也记）比对，变了才
-        动作：暖池/在途池关池换代（close 内取消在途加载），冷池只递增版本号唤醒
-        会话重建（重建经 get_mcp_tools 按新配置触发加载）。没变则零动作——加载
-        失败的终态不会被反复重试，无关写入（如某项目自己覆盖了被改的全局 server）
+        动作（``force=True`` 时本池有失败 server 也动作——面板 save/test 即用户显式
+        重试，否则同配置下的失败终态永不重连）：暖池/在途池关池换代（close 内取消
+        在途加载），冷池只递增版本号唤醒会话重建（重建经 get_mcp_tools 按新配置
+        触发加载）。没变则零动作——加载
+        失败的终态不会被自动反复重试，无关写入（如某项目自己覆盖了被改的全局 server）
         完全不打断。``interrupt_loading=False``（轮首自查）不打断在途加载：首次
         加载可横跨多条消息，贸然关闭永不收敛，其配置过期由完成后的下一轮收口；
         RPC 写路径（True）则立即取消重来。
@@ -522,7 +552,8 @@ class McpPool:
         if self.loading and not interrupt_loading:
             return
         new_hash = config_hash(load_merged_mcp_config(_key_project_dir(self.key)))
-        if new_hash == self.attempted_hash:
+        failed = any(not st["ok"] for st in self.manager.server_status.values())
+        if new_hash == self.attempted_hash and not (force and failed):
             return
         if self.manager.is_started or self.loading:
             await self.close()
@@ -622,12 +653,15 @@ async def close_all_pools() -> None:
     _pools.clear()
 
 
-async def invalidate_mcp_pools(scope: str, project_dir: Path | None = None) -> None:
+async def invalidate_mcp_pools(
+    scope: str, project_dir: Path | None = None, force: bool = False
+) -> None:
     """save/delete 后作废**配置真的变了**的会话池，下次加载时以新配置重建。
 
     借鉴 Claude Code 的 config-hash diff（比对与动作单源在
     :meth:`McpPool.sync_config`）。``scope=="global"`` → 逐池重算 merged hash
-    （全局层被所有项目继承）；其它 → 只查该项目的池。
+    （全局层被所有项目继承）；其它 → 只查该项目的池。``force=True``（面板
+    save/test）另把有失败 server 的池一并换代重连。
     """
     if scope == "global":
         candidates = list(_pools.values())
@@ -636,7 +670,18 @@ async def invalidate_mcp_pools(scope: str, project_dir: Path | None = None) -> N
         candidates = [pool] if pool is not None else []
 
     for pool in candidates:
-        await pool.sync_config(interrupt_loading=True)
+        await pool.sync_config(interrupt_loading=True, force=force)
+
+
+async def _on_session_lost(manager: MCPSessionManager) -> None:
+    """持久会话的 server 进程已死：关其所属池换代（会话轮首重建、按需重载）。
+
+    按 identity 找池：同批并发调用各自撞上时，首个已换代，其余找不到即无操作。
+    """
+    pool = next((p for p in _pools.values() if p.manager is manager), None)
+    if pool is not None:
+        logger.warning("[MCP] 会话池 %s 有 server 连接已断，换代待下一轮重载", pool.key)
+        await pool.close()
 
 
 async def refresh_pool_config(project_dir: Path | None) -> None:

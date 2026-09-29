@@ -90,3 +90,16 @@ async def test_overlong_line_is_truncated(authorized_tmp_dir):
         pattern="hit", path=str(authorized_tmp_dir), output_mode="content"
     )
     assert len(out) < 2000
+
+
+async def test_missing_rg_asks_to_install(authorized_tmp_dir, monkeypatch):
+    # 没有 rg 时不再降级到纯 Python 扫描（不认 .gitignore、不支持 type / 上下文 /
+    # 多行，结果与 rg 语义不一致），直接给出安装办法
+    (authorized_tmp_dir / "a.txt").write_text("hello\n")
+
+    async def no_rg(self, cmd):
+        return None
+
+    monkeypatch.setattr(LocalFilesystemBackend, "_run_ripgrep", no_rg)
+    out = await _grep(pattern="hello", path=str(authorized_tmp_dir))
+    assert "lumi env install rg" in out

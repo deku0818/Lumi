@@ -12,10 +12,15 @@ env:
   IMAGE: ycw0818/lumi-harness
 
 jobs:
+  # 测试 + 版本一致性门（见 ci.yml）
+  ci:
+    uses: ./.github/workflows/ci.yml
+
   # 双架构各在原生 runner 上构建，不用 QEMU：镜像里要 uv sync 近百个包 + apt 装 ripgrep/libicu，
   # 模拟 arm64 会把几分钟的构建拖成半小时级且更易超时。原生构建的代价是产物要分两次推、
   # 最后再合成 manifest list（下面的 merge job）。
   build:
+    needs: ci
     strategy:
       fail-fast: false
       matrix:

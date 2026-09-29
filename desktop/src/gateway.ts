@@ -424,8 +424,8 @@ export class Gateway {
     return this.request<McpTestResult>('test_mcp_server', { config })
   }
 
-  listProjects(): Promise<{ projects: Project[]; current: string }> {
-    return this.request<{ projects: Project[]; current: string }>('list_projects')
+  listProjects(): Promise<{ projects: Project[] }> {
+    return this.request<{ projects: Project[] }>('list_projects')
   }
 
   addProject(path: string, name = ''): Promise<{ projects: Project[] }> {

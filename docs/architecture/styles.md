@@ -30,7 +30,7 @@ lumi/styles/
 
 层序单一事实源是 `loader.config_layers(subdir, project_dir)`，优先级从低到高、逐层同名覆盖：
 
-1. **style 内置**：`lumi/styles/{style}/{subdir}/`（只读，随发布）
+1. **style 内置**：`lumi/styles/default/{subdir}/` 作基底，当前 style 非 default 时再叠 `lumi/styles/{style}/{subdir}/`（同名后者胜；两者来源标签都是 `builtin`；只读，随发布）
 2. **全局层**：进程配置目录 `{config_dir}/{subdir}/`——`lumi serve` 恒钉在 `~/.lumi`（serve 是多项目网关，全局层不随启动目录漂移）；`lumi -p` 单项目 CLI 仍走 cwd 发现链
 3. **项目层**：`<项目>/.lumi/{subdir}/`——随会话绑定的项目传入（`load_skills/load_agents` 的 `project_dir` 参数），只对该项目的会话生效
 

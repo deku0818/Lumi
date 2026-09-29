@@ -171,7 +171,8 @@ class Job:
         prompt: 执行载荷，发送给 Agent 的提示词。
         enabled: 是否启用。
         created_at: 创建时间。
-        consecutive_errors: 连续错误计数，用于重试退避。
+        consecutive_errors: 历史字段（cron 级重试已移除），仅为兼容读写旧 jobs.json 保留，
+            不再更新。
         project_dir: 所属项目根（创建时会话的项目）；执行时在该项目里跑。空串 =
             未绑定（存量任务 / 表单创建），退回 serve 进程 cwd。
     """

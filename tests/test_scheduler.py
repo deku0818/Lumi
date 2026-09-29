@@ -5,7 +5,7 @@ from __future__ import annotations
 import asyncio
 from datetime import datetime, timedelta
 from pathlib import Path
-from unittest.mock import AsyncMock, patch
+from unittest.mock import AsyncMock
 
 import pytest
 
@@ -13,8 +13,7 @@ from lumi.agents.cron.delivery import DeliveryManager, ResultDelivery
 from lumi.agents.cron.job_store import JobStore
 from lumi.agents.cron.models import Job, Schedule, ScheduleType
 from lumi.agents.cron.run_log import RunLog
-from lumi.agents.cron.scheduler import Scheduler, _is_transient_error
-from lumi.utils.constants import MAX_CRON_RETRIES
+from lumi.agents.cron.scheduler import Scheduler
 
 
 @pytest.fixture
@@ -482,212 +481,66 @@ async def test_run_job_task_adds_to_running_tasks(scheduler: Scheduler) -> None:
     assert len(scheduler._running_tasks) == 0
 
 
-# --- 重试逻辑测试（7.3）---
+# --- 失败收尾：cron 层不重试、不回写任务快照 ---
 
 
-class TestIsTransientError:
-    """_is_transient_error() 瞬态错误判定测试。"""
-
-    def test_timeout_error_is_transient(self) -> None:
-        assert _is_transient_error(TimeoutError()) is True
-
-    def test_connection_error_is_transient(self) -> None:
-        assert _is_transient_error(ConnectionError("连接失败")) is True
-
-    def test_os_error_is_transient(self) -> None:
-        assert _is_transient_error(OSError("网络不可达")) is True
-
-    def test_httpx_429_is_transient(self) -> None:
-        import httpx
-
-        response = httpx.Response(429, request=httpx.Request("GET", "https://x.com"))
-        exc = httpx.HTTPStatusError("限流", request=response.request, response=response)
-        assert _is_transient_error(exc) is True
-
-    def test_httpx_500_is_transient(self) -> None:
-        import httpx
-
-        response = httpx.Response(500, request=httpx.Request("GET", "https://x.com"))
-        exc = httpx.HTTPStatusError(
-            "服务端错误", request=response.request, response=response
-        )
-        assert _is_transient_error(exc) is True
-
-    def test_httpx_503_is_transient(self) -> None:
-        import httpx
-
-        response = httpx.Response(503, request=httpx.Request("GET", "https://x.com"))
-        exc = httpx.HTTPStatusError(
-            "不可用", request=response.request, response=response
-        )
-        assert _is_transient_error(exc) is True
-
-    def test_httpx_400_is_not_transient(self) -> None:
-        import httpx
-
-        response = httpx.Response(400, request=httpx.Request("GET", "https://x.com"))
-        exc = httpx.HTTPStatusError(
-            "客户端错误", request=response.request, response=response
-        )
-        assert _is_transient_error(exc) is False
-
-    def test_httpx_404_is_not_transient(self) -> None:
-        import httpx
-
-        response = httpx.Response(404, request=httpx.Request("GET", "https://x.com"))
-        exc = httpx.HTTPStatusError(
-            "未找到", request=response.request, response=response
-        )
-        assert _is_transient_error(exc) is False
-
-    def test_value_error_is_not_transient(self) -> None:
-        assert _is_transient_error(ValueError("无效参数")) is False
-
-    def test_runtime_error_is_not_transient(self) -> None:
-        assert _is_transient_error(RuntimeError("运行时错误")) is False
-
-    def test_key_error_is_not_transient(self) -> None:
-        assert _is_transient_error(KeyError("missing")) is False
-
-
-async def test_transient_error_schedules_retry(
+async def test_failed_at_job_is_deleted_without_retry(
     scheduler: Scheduler, job_store: JobStore, runner: FakeRunner
 ) -> None:
-    """瞬态错误（TimeoutError）应递增 consecutive_errors 并安排重试。"""
+    """一次性任务失败（含超时）同样执行完即删：cron 层不做重试，也不为重试保留任务。"""
     scheduler._execution_timeout = 0.01
     runner.delay = 10
-    job = _make_interval_job("retry-test")
-    job.consecutive_errors = 0
-    await job_store.upsert(job)
-
-    await scheduler.start()
-    try:
-        record = await scheduler._execute_job(job)
-
-        assert record.status == "timeout"
-        assert job.consecutive_errors == 1
-
-        # 验证 JobStore 中的 consecutive_errors 已更新
-        stored = await job_store.get(job.id)
-        assert stored is not None
-        assert stored.consecutive_errors == 1
-
-        # 验证重试任务已注册到 APScheduler
-        retry_id = f"{job.id}-retry-1"
-        aps_job = scheduler._aps.get_job(retry_id)
-        assert aps_job is not None
-    finally:
-        await scheduler.stop()
-
-
-async def test_retry_uses_correct_backoff_intervals(
-    scheduler: Scheduler, job_store: JobStore, runner: FakeRunner
-) -> None:
-    """重试间隔应按 BACKOFF_INTERVALS 递增。"""
-    job = _make_interval_job("backoff-test")
-    await job_store.upsert(job)
-    runner.error = ConnectionError("连接失败")
-
-    await scheduler.start()
-    try:
-        # 第 1 次失败 → 退避 30s
-        job.consecutive_errors = 0
-        await scheduler._execute_job(job)
-        assert job.consecutive_errors == 1
-        retry_job_1 = scheduler._aps.get_job(f"{job.id}-retry-1")
-        assert retry_job_1 is not None
-
-        # 第 2 次失败 → 退避 60s
-        await scheduler._execute_job(job)
-        assert job.consecutive_errors == 2
-        retry_job_2 = scheduler._aps.get_job(f"{job.id}-retry-2")
-        assert retry_job_2 is not None
-
-        # 第 3 次失败 → 退避 300s
-        await scheduler._execute_job(job)
-        assert job.consecutive_errors == 3
-        retry_job_3 = scheduler._aps.get_job(f"{job.id}-retry-3")
-        assert retry_job_3 is not None
-    finally:
-        await scheduler.stop()
-
-
-async def test_retry_exhausted_no_more_retries(
-    scheduler: Scheduler, job_store: JobStore, runner: FakeRunner
-) -> None:
-    """重试次数耗尽后不再安排重试。"""
-    job = _make_interval_job("exhausted-test")
-    job.consecutive_errors = MAX_CRON_RETRIES  # 已达上限
-    await job_store.upsert(job)
-    runner.error = ConnectionError("连接失败")
-
-    await scheduler.start()
-    try:
-        record = await scheduler._execute_job(job)
-
-        assert record.status == "failed"
-        # consecutive_errors 不应再递增（已达上限，不重试）
-        assert job.consecutive_errors == MAX_CRON_RETRIES
-
-        # 不应有新的重试任务
-        retry_id = f"{job.id}-retry-{MAX_CRON_RETRIES + 1}"
-        assert scheduler._aps.get_job(retry_id) is None
-    finally:
-        await scheduler.stop()
-
-
-async def test_success_resets_consecutive_errors(
-    scheduler: Scheduler, job_store: JobStore
-) -> None:
-    """成功执行后应重置 consecutive_errors 为 0。"""
-    job = _make_interval_job("reset-test")
-    job.consecutive_errors = 2
+    job = _make_at_job("at-timeout")
     await job_store.upsert(job)
 
     record = await scheduler._execute_job(job)
 
-    assert record.status == "success"
-    assert job.consecutive_errors == 0
-
-    # 验证 JobStore 中也已重置
-    stored = await job_store.get(job.id)
-    assert stored is not None
-    assert stored.consecutive_errors == 0
+    assert record.status == "timeout"
+    assert await job_store.get(job.id) is None
+    assert scheduler._aps.get_jobs() == []
 
 
-async def test_permanent_error_no_retry(
-    scheduler: Scheduler, job_store: JobStore, runner: FakeRunner
-) -> None:
-    """永久错误（如 ValueError）不应触发重试。"""
-    job = _make_interval_job("perm-error-test")
-    job.consecutive_errors = 0
-    await job_store.upsert(job)
-    runner.error = ValueError("无效参数")
-
-    await scheduler.start()
-    try:
-        record = await scheduler._execute_job(job)
-
-        assert record.status == "failed"
-        # 永久错误不递增 consecutive_errors，也不安排重试
-        assert job.consecutive_errors == 0
-        assert scheduler._aps.get_job(f"{job.id}-retry-1") is None
-    finally:
-        await scheduler.stop()
-
-
-async def test_success_with_zero_errors_no_upsert(
+async def test_failed_run_does_not_roll_back_mid_run_edit(
     scheduler: Scheduler, job_store: JobStore
 ) -> None:
-    """consecutive_errors 已为 0 时成功执行不应触发额外的 upsert。"""
-    job = _make_interval_job("no-upsert-test")
-    job.consecutive_errors = 0
+    """执行期间任务被编辑、随后本次失败：收尾不得用执行起点的快照覆盖回去。"""
+    job = _make_interval_job("edit-then-fail")
+    await job_store.upsert(job)
+    edited = Job(
+        id=job.id, name=job.name, schedule=job.schedule, prompt="编辑后的 prompt"
+    )
 
-    with patch.object(job_store, "upsert", new_callable=AsyncMock) as mock_upsert:
-        await scheduler._execute_job(job)
+    async def runner_edits_then_fails(
+        prompt: str, thread_id: str, project_dir: str
+    ) -> str:
+        await job_store.upsert(edited)
+        raise ConnectionError("连接失败")
 
-    # consecutive_errors 为 0 时不需要调用 upsert
-    mock_upsert.assert_not_awaited()
+    scheduler._stream_runner = runner_edits_then_fails
+    record = await scheduler._execute_job(job)
+
+    assert record.status == "failed"
+    stored = await job_store.get(job.id)
+    assert stored is not None and stored.prompt == "编辑后的 prompt"
+
+
+async def test_failed_run_does_not_resurrect_deleted_job(
+    scheduler: Scheduler, job_store: JobStore
+) -> None:
+    """执行期间任务被删、随后本次失败：收尾不得把已删任务写回来。"""
+    job = _make_interval_job("delete-then-fail")
+    await job_store.upsert(job)
+
+    async def runner_deletes_then_fails(
+        prompt: str, thread_id: str, project_dir: str
+    ) -> str:
+        await job_store.delete(job.id)
+        raise ConnectionError("连接失败")
+
+    scheduler._stream_runner = runner_deletes_then_fails
+    await scheduler._execute_job(job)
+
+    assert await job_store.get(job.id) is None
 
 
 # --- trigger() 立即执行测试（7.4）---
