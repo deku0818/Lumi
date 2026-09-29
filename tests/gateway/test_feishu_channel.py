@@ -1325,7 +1325,9 @@ def test_diagnose_reports_missing_cli_and_blocks_rest(monkeypatch):
     checks = diagnose("cli_x", "lumi-x")
     assert [c["key"] for c in checks] == ["cli", "auth", "scope", "subscription"]
     assert all(c["tone"] == "error" for c in checks)
-    assert checks[0]["fix_action"] == "lark-cli"  # 一键安装（手敲装进 prefix 不会被链进 bin）
+    assert (
+        checks[0]["fix_action"] == "lark-cli"
+    )  # 一键安装（手敲装进 prefix 不会被链进 bin）
 
 
 def test_diagnose_reports_unauthorized(monkeypatch):
