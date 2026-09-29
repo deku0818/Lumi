@@ -1,8 +1,14 @@
 """共享 Fixtures"""
 
 import os
+import tempfile
 
-import pytest
+# 必须在任何 `import lumi` 之前：数据根的取值点多为模块级常量（import 时求值），
+# logger import 期就会建 <lumi_home>/logs。用赋值不用 setdefault——开发者自己 export
+# 的 LUMI_CONFIG_DIR 正是真实数据根，同样不能碰。
+os.environ["LUMI_CONFIG_DIR"] = tempfile.mkdtemp(prefix="lumi-test-")
+
+import pytest  # noqa: E402
 
 import lumi.agents.permissions.workspace as workspace
 import lumi.agents.runtime.bg_tasks as task_registry
@@ -54,7 +60,8 @@ def authorized_tmp_dir(tmp_path):
 
 @pytest.fixture(autouse=True)
 def isolate_user_store(tmp_path, monkeypatch):
-    """所有测试的用户级配置（~/.lumi/lumi.json）重定向到 tmp，杜绝读写真实 ~/.lumi。
+    """所有测试的用户级配置（lumi.json）重定向到本测试自己的 tmp（数据根已由文件顶部
+    的 LUMI_CONFIG_DIR 整体挪走，这里再按测试隔离，免得用例之间串值）。
 
     需要具体路径的测试可再显式 monkeypatch user_store.CONFIG_FILE（同一 tmp_path、同名文件，
     值一致、无冲突）。

@@ -15,10 +15,8 @@ from langgraph.checkpoint.memory import MemorySaver
 from lumi.agents.core.graph import LumiAgent
 from lumi.agents.core.meta_message import (
     CTX_DIGEST_KEY,
-    declared_file_paths,
     extract_text_content,
     injected_prefix,
-    strip_injected_prefix,
 )
 from lumi.agents.core.node_helpers.messages import (
     inject_text_into_message,
@@ -102,15 +100,6 @@ async def test_rewind_unknown_id_is_noop():
     assert [m.content for m in await bridge.snapshot_messages()] == ["h1", "a1"]
 
 
-def _rebuild(msg):
-    """stream_regenerate 的重建步（与其保持同构：剥注入前缀 → 按声明重建）。"""
-    return AgentBridge._build_user_message(
-        strip_injected_prefix(msg),
-        msg.additional_kwargs.get(LUMI_META_KEY),
-        declared_file_paths(msg),
-    )
-
-
 def test_rebuild_strips_injected_prefix_and_reattaches_files():
     """重建剥掉全部注入前缀（上下文块 + 附件标签），按声明路径重挂标签。"""
     msg = AgentBridge._build_user_message("原话", None, ["/tmp/a.txt"])
@@ -120,7 +109,7 @@ def test_rebuild_strips_injected_prefix_and_reattaches_files():
     )
     assert injected_prefix(msg) == 2  # 附件标签块 + 上下文块
 
-    rebuilt = _rebuild(msg)
+    rebuilt = AgentBridge._rebuild_user_message(msg)
     text = extract_text_content(rebuilt.content)
     assert "旧环境上下文" not in text  # 旧注入不叠加
     assert "/tmp/a.txt" in text  # 附件标签按声明重挂
@@ -136,8 +125,10 @@ def test_rebuild_strips_injected_prefix_and_reattaches_files():
 
 def test_rebuild_is_idempotent():
     """重建的重建仍等价——反复重新生成不会累积注入块或附件条目。"""
-    once = _rebuild(AgentBridge._build_user_message("原话", None, ["/tmp/a.txt"]))
-    twice = _rebuild(once)
+    once = AgentBridge._rebuild_user_message(
+        AgentBridge._build_user_message("原话", None, ["/tmp/a.txt"])
+    )
+    twice = AgentBridge._rebuild_user_message(once)
     assert extract_text_content(twice.content) == extract_text_content(once.content)
     assert injected_prefix(twice) == injected_prefix(once) == 1
     assert (
@@ -148,6 +139,8 @@ def test_rebuild_is_idempotent():
 
 def test_rebuild_plain_text_message_roundtrip():
     """无附件无注入的纯文本消息重建后内容不变。"""
-    rebuilt = _rebuild(AgentBridge._build_user_message("你好", None, []))
+    rebuilt = AgentBridge._rebuild_user_message(
+        AgentBridge._build_user_message("你好", None, [])
+    )
     assert extract_text_content(rebuilt.content) == "你好"
     assert injected_prefix(rebuilt) == 0

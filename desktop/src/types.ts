@@ -41,7 +41,6 @@ export interface ToolCallBrief {
 export interface WireEventPayloads {
   'gateway.ready': {
     model: string
-    provider: string
     workspace: string
     workspace_bound: boolean
     running?: boolean

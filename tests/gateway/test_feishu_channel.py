@@ -1660,7 +1660,6 @@ async def test_evict_stale_spares_chat_with_running_turn(monkeypatch):
     关掉，后续输出另起新卡、终态只剩来源行——一轮答案被切成几张残卡。
     """
     import asyncio
-    import time
 
     from lumi.gateway.channels.feishu import streaming as st_mod
 
@@ -1670,10 +1669,13 @@ async def test_evict_stale_spares_chat_with_running_turn(monkeypatch):
     monkeypatch.setattr(
         st, "_set_streaming_mode_sync", lambda cid, on, seq: closed.append(cid) or True
     )
+    # 钉住时钟：真实 monotonic 从开机起算，开机不足 TTL 秒时 now - TTL - 1 为负，被
+    # 「last_edit > 0 才算编辑过」的哨兵挡住，用例必挂（只 patch 本模块的 time，asyncio 在用全局）
+    monkeypatch.setattr(st_mod, "time", SimpleNamespace(monotonic=lambda: 10_000.0))
     for cid in ("oc_running", "oc_idle"):
         buf = st._new_buf(cid)
         buf.card_id = f"card_{cid}"
-        buf.last_edit = time.monotonic() - st_mod.STREAM_BUF_TTL - 1
+        buf.last_edit = 10_000.0 - st_mod.STREAM_BUF_TTL - 1
         st.bufs[cid] = buf
     pool = ch.bridge_pool
     pool.chat_ids["t-running"] = "oc_running"
@@ -1987,3 +1989,58 @@ async def test_subagent_approval_is_auto_rejected():
     await outbound.run_turn(channel, _Bridge(), chat_id="c", reply_to="m", content="hi")
     assert [aid for aid, _ in resolved] == ["a1"]
     assert resolved[0][1]["decision"] == "reject"
+
+
+def _run_turn_channel():
+    from unittest.mock import AsyncMock, MagicMock
+
+    channel = MagicMock()
+    channel.streaming = AsyncMock()
+    channel.send_markdown = AsyncMock()
+    channel.config.tool_mode = "auto"
+    return channel
+
+
+async def test_run_turn_cancels_clarify():
+    # 飞书禁用了 ask；万一有 clarify 冒出来，按「取消作答」收尾，否则 broker Future
+    # 永挂、会话锁永占
+    from lumi.agents.tools.providers.ask import ASK_CANCELLED
+    from lumi.gateway.bridge import BridgeEvent, EventKind
+    from lumi.gateway.channels.feishu import outbound
+
+    resolved: list[tuple[str, object]] = []
+
+    class _Bridge:
+        async def stream_response(self, content, **kw):
+            yield BridgeEvent(kind=EventKind.CLARIFY, data={"approval_id": "q1"})
+            yield BridgeEvent(kind=EventKind.TURN_COMPLETE)
+
+        def resolve_approval(self, aid, value):
+            resolved.append((aid, value))
+
+    await outbound.run_turn(
+        _run_turn_channel(), _Bridge(), chat_id="c", reply_to="m", content="hi"
+    )
+    assert resolved == [("q1", ASK_CANCELLED)]
+
+
+async def test_run_turn_exception_closes_graph_and_reports():
+    # 流中途异常：确定性关图（不留给 GC 与下一轮竞争），先关卡再发错误提示
+    from lumi.gateway.bridge import BridgeEvent, EventKind
+    from lumi.gateway.channels.feishu import outbound
+
+    finalized: list = []
+
+    class _Bridge:
+        async def stream_response(self, content, **kw):
+            yield BridgeEvent(kind=EventKind.MESSAGE_START)
+            raise RuntimeError("boom")
+
+        async def finalize_cancelled_stream(self, stream):
+            finalized.append(stream)
+
+    channel = _run_turn_channel()
+    await outbound.run_turn(channel, _Bridge(), chat_id="c", reply_to="m", content="hi")
+    assert len(finalized) == 1
+    channel.streaming.end.assert_awaited()
+    assert "出错" in channel.send_markdown.await_args.kwargs["title"]

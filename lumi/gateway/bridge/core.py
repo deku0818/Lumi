@@ -906,13 +906,18 @@ class AgentBridge:
         流水线——附件标签由显示声明（items[].files）重新派生，故与原轮等价。
         """
         original = await self._rewind_or_raise(message_id)
-        msg = self._build_user_message(
+        msg = self._rebuild_user_message(original)
+        async for event in self._stream_user_turn(msg, tool_mode):
+            yield event
+
+    @classmethod
+    def _rebuild_user_message(cls, original: HumanMessage) -> HumanMessage:
+        """剥掉全部注入前缀回到用户原样输入，按显示声明重建（见 stream_regenerate）。"""
+        return cls._build_user_message(
             strip_injected_prefix(original),
             original.additional_kwargs.get(LUMI_META_KEY),
             declared_file_paths(original),
         )
-        async for event in self._stream_user_turn(msg, tool_mode):
-            yield event
 
     async def stream_edit_resend(
         self,

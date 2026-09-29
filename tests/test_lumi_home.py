@@ -6,7 +6,8 @@
 前设好 env。
 
 子进程的 ``HOME`` 指向一个空的假家目录：任何漏网的 ``~/.lumi`` 回退都会在那里留下
-痕迹，比只断言「路径前缀对」更抓得住（也顺带保证跑测试不写真实 ``~/.lumi``）。
+痕迹，比只断言「路径前缀对」更抓得住。整个测试进程不碰真实数据根另由 conftest 顶部的
+``LUMI_CONFIG_DIR`` 保证。
 """
 
 from __future__ import annotations
@@ -84,3 +85,14 @@ def test_lumi_config_dir_relocates_all_user_data(tmp_path):
     assert not list(fake_home.iterdir()), (
         f"有代码回退到了 ~/.lumi：假家目录被写入 {list(fake_home.iterdir())}"
     )
+
+
+def test_suite_runs_against_throwaway_data_root():
+    # 回归：测试进程的数据根就是开发机真实 ~/.lumi——本机 config.json 改了某个默认值
+    # （如 max_delegation_depth），相关用例随机器漂移；logger import 期还会往里建 logs
+    import os
+
+    from lumi.utils.paths import lumi_home
+
+    assert not lumi_home().is_relative_to(Path.home() / ".lumi")
+    assert os.environ["LUMI_CONFIG_DIR"] == str(lumi_home())
