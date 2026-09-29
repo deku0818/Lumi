@@ -8,7 +8,7 @@
 
 | 风格 | 说明 |
 |------|------|
-| `default` | 默认风格。**不内置提示词**——系统提示词全部来自用户 `.lumi/prompts/`；可内置 skill / agent（当前为空） |
+| `default` | 默认风格。**不内置提示词**——系统提示词全部来自用户 `.lumi/prompts/`；内置 general-purpose / explore 两个子 Agent 与 lumi-config 技能 |
 | `code` | 面向软件工程。内置完整的系统提示词（SOUL / AGENTS）和 explore / plan 两个子 Agent |
 
 每种风格可内置三类资源：`prompts/`（系统提示词）、`agents/`（子 Agent）、`skills/`（技能），三者均为可选。`default` 不带 `prompts/`，提示词全部来自用户 `.lumi/prompts/`；两处都没有时以空系统提示词运行（不报错）。
@@ -23,20 +23,23 @@
 
 ### config.json
 
+在全局 `~/.lumi/config.json`（所有会话）或项目 `<项目>/.lumi/config.json`（只影响该项目的会话）写 `style`：
+
 ```json
 {
   "style": "code"
 }
 ```
 
-### CLI 参数（优先级更高）
+### CLI 参数（仅 `lumi -p`）
 
 ```bash
-lumi -s code
 lumi -s code -p "重构这个模块"
 ```
 
-优先级：CLI `--style` > config.json `style` > 默认值 `"default"`
+`-s` 只对 `lumi -p` 生效，对桌面 / `lumi serve` 无效。
+
+优先级：CLI `-s`（仅 `-p`）> 项目 `.lumi/config.json` > `~/.lumi/config.json` > 默认值 `"default"`
 
 ---
 
@@ -55,7 +58,7 @@ lumi -s code -p "重构这个模块"
     └── my-skill/SKILL.md          # 覆盖 style 的同名 skill
 ```
 
-加载优先级：用户 `.lumi/` 下的同名文件 > style 内置文件（prompts / agents / skills 三类一致）。升级 Lumi 时自动获取改进，用户只需覆盖想要自定义的部分。
+加载优先级：项目 `.lumi/` > 全局 `~/.lumi/` > style 内置（prompts / agents / skills 三类一致）。升级 Lumi 时自动获取改进，用户只需覆盖想要自定义的部分。
 
 ---
 

@@ -1,17 +1,17 @@
 """Hook 注册表与 dispatch 内核。
 
-所有形态（Python callable / Shell / YAML 包装）共享同一 dispatch——非 Python
-形态在外部模块包装为 ``Hook`` 函数后调 ``register_hook``，本模块不感知形态差异。
+所有形态（Python callable / Shell）共享同一 dispatch，本模块不感知形态差异：
+builtin 经 ``register_hook`` 进进程全局；shell hook 由 ``config_loader`` 包装为
+``Hook`` 后经 per-run contextvar 注入（``set_run_config_hooks``，不注册）。
 
 2 模式：
-- ``first_intercept``：第一个返非 None 的 hook 拦截，后续不跑。Stop /
-  UserPromptSubmit 用——接管者语义。
+- ``first_intercept``：第一个返非 None 的 hook 拦截，后续不跑。Stop 用——接管者语义。
 - ``collect``：多 hook 的 AdditionalContext 合并到同一 Command；遇到首个
-  Block / Command 立即拦截但已收的 reminder 一起注入。PreToolUse / PostToolUse
-  用——多 reminder 共存有意义。
+  Block / Command 立即拦截但已收的 reminder 一起注入。PreToolUse / PostToolUse /
+  UserPromptSubmit 用——多 reminder 共存有意义。
 
 错误隔离：每个 hook 包 try/except，单 hook 抛错 ``logger.exception`` 后继续
-下一个，dispatch 不抛。Shell/YAML wrapper 内部异常走同路径——对调用方透明。
+下一个，dispatch 不抛。Shell wrapper 内部异常走同路径——对调用方透明。
 """
 
 from __future__ import annotations
@@ -47,7 +47,10 @@ _run_config_hooks: contextvars.ContextVar[dict[HookEvent, list[Hook]] | None] = 
 
 
 def set_run_config_hooks(hooks: dict[HookEvent, list[Hook]] | None) -> None:
-    """注入当前 run 的项目级 config hook（bridge / cron 在 run 起点调用）。"""
+    """注入当前 run 的项目级 config hook。
+
+    bridge 在 ``_stream`` 起点调用；cron 经 cron_stream 同样跑在 bridge 上。
+    """
     _run_config_hooks.set(hooks)
 
 

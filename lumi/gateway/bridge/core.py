@@ -1058,7 +1058,7 @@ class AgentBridge:
             # 注入本会话的授权目录来源 + config hooks 到当前 run 上下文：filesystem/bash
             # 工具按 contextvar 取范围，使同进程多会话并发各 run 互不串扰、不被彼此重建
             # 进程全局所清洗（见 permissions.workspace 两层来源说明）。降级（无引擎）兜底
-            # 逻辑与 cron 共用 set_run_authorized_source_for。
+            # 逻辑收在 set_run_authorized_source_for。
             engine = self._context.permission_engine if self._context else None
             set_run_authorized_source_for(engine, self.folders.extra_folders)
             set_run_config_hooks(self._config_hooks)

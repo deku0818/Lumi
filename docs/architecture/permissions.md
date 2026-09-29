@@ -12,9 +12,10 @@
 lumi/agents/permissions/
 ├── models.py         # 数据模型：枚举、frozen dataclass、常量
 ├── engine.py         # 权限引擎：协调配置加载、规则匹配、边界检查
-├── config_loader.py  # 三级配置加载、JSONC 解析、合并、持久化
+├── config_loader.py  # 三级配置加载、JSONC 解析、合并
 ├── matcher.py        # 规则匹配器：命令模式、路径模式
 ├── boundary.py       # 工作区边界检查器：路径提取与边界判定
+├── routing.py        # route_decision：is_use_tool 的路由决策纯函数
 ├── safety.py         # Bypass-immune 安全检查：受保护文件/命令检测
 ├── validators.py     # Bash 命令安全警告（非阻断）
 └── workspace.py      # 授权路径管理（进程全局兜底 + per-run contextvar 覆盖，供 filesystem provider 使用）
@@ -45,7 +46,7 @@ Layer 2: 权限引擎 (engine.py)
 ```python
 # 无论参数如何，始终为只读的工具
 _ALWAYS_READONLY: frozenset[str] = frozenset({
-    "read", "glob", "grep", "skill", "agent",
+    "read", "vision", "glob", "grep", "skill", "agent",
     "ask", "todos",
 })
 
@@ -63,7 +64,7 @@ _CRON_READONLY_OPS: frozenset[str] = frozenset({"list", "runs"})
 - `cron` → `operation` 不在 `_CRON_READONLY_OPS` 中视为写入
 - 未知工具 → fail-closed，默认视为写入
 
-`is_read_only()` 是 `is_write_tool()` 的反义；`is_file_edit_tool()` 仅判断 write/edit（不含 bash）。
+`is_file_edit_tool()` 仅判断 write/edit（不含 bash）。
 
 bash 命令统一经 `shell_syntax.parse_command` 切成子命令（`Segment`：原文 / 去引号的词 / 写重定向目标）。它不实现完整 bash 语法，只保证在「会执行哪些子命令、写哪些文件」上不比 bash 乐观：引号、转义、`$'…'`、注释与 heredoc 正文按 bash 规则处理；分隔符含 `&&`、`||`、`;`、`|`、`&`、换行与子 shell 括号；命令替换 / 进程替换 / 反引号里的命令作为独立子命令拆出；开头的 `if`/`then`/`do`/`!`/`{`/`time` 等关键字切掉（变量赋值前缀保留，它会改变命令行为）；值在执行时才确定的词（变量、命令替换）以 `DYNAMIC` 标记。
 
@@ -88,13 +89,9 @@ class PermissionDecision(Enum): # allow | deny | ask | unmatched
 @dataclass(frozen=True)
 class PermissionRule:           # tool: str, permission: Permission
 class PermissionConfig:         # workspaces: tuple[str], permissions: tuple[PermissionRule]
-class ToolCallInfo:             # name: str, args: dict（批量评估用）
-class ApprovalOption:           # key, label, tool_expr（审批 UI 选项）
-class ApprovalRequest:          # 传递给 LangGraph interrupt 的审批请求
 ```
 
 常量：
-- `BYPASS_TOOLS`：兼容性保留，新代码应使用 `capability.is_write_tool()`
 - `DEFAULT_RULES`：`cron`、`artifacts` 两条 ALLOW（artifacts 越界仍审批）
 
 ---
@@ -236,8 +233,8 @@ auto 模式的分类器裁决与人工审批同权——AI 判断即用户授权
 
 `match_path_pattern(pattern, file_path, project_dir)`:
 - gitignore 风格：`*` 匹配单层不含 `/`，`**` 匹配零或多层
-- `/` 前缀 → 从项目根匹配（fullmatch），否则任意目录层级匹配
-- 绝对路径先转为相对于项目根的相对路径
+- 路径先按工具执行同一口径归一（展开 `~`、消掉 `..`）；项目内路径转为相对项目根，项目外路径保持绝对
+- `/` 前缀 → 锚定项目根匹配（fullmatch），项目外路径一律不命中（含 `/**`）；否则任意目录层级匹配（项目外路径以绝对路径参与，`**/.env` 这类 deny 照样命中）
 
 ---
 
@@ -294,13 +291,13 @@ auto 模式的分类器裁决与人工审批同权——AI 判断即用户授权
 filesystem provider 的 `validate_path()` 与 bash 工作目录都经此读取授权目录。**两层来源，读取时 per-run 覆盖优先于进程全局兜底**：
 
 - **进程全局兜底** `_authorized_directories`：无 run 上下文时使用（测试、启动期），由 `PermissionEngine._rebuild_boundary()` 在初始化/重载时经 `set_authorized_directory()`（重置为主目录）+ `add_authorized_directory()`（追加）同步。
-- **per-run 覆盖** `_run_authorized_source` contextvar：每次 agent run 由 bridge（`_stream` 起点）/ cron（`_invoke_agent` 起点）经 `set_run_authorized_source_for(engine, extra_folders)` 注入本会话引擎的 `authorized_directories` 方法（**实时回调，非快照**）。设置后覆盖兜底。
+- **per-run 覆盖** `_run_authorized_source` contextvar：每次 agent run 由 bridge 在 `_stream` 起点（`lumi serve` 下的 cron 经 `cron_stream` 同样跑在 `AgentBridge` 上）经 `set_run_authorized_source_for(engine, extra_folders)` 注入本会话引擎的 `authorized_directories` 方法（**实时回调，非快照**）。设置后覆盖兜底。
 
 读取 API（`get_authorized_directory()` / `get_all_authorized_directories()` / `validate_path()`）一律走「run 覆盖 → 全局兜底 → cwd」三级。
 
 **为什么用 per-run contextvar 而非纯进程全局**：一个 `lumi serve` 进程承载多条 WS 连接（每连接一个 bridge / engine），项目随会话绑定（见 [desktop.md](desktop.md)）。若各 engine 都只写同一个进程全局，并发会话会互相清洗——A 会话「添加的目录」会被 B 会话重建边界时抹掉。contextvar 按 run 隔离，各读各的引擎边界；存**实时回调**而非快照，使后台子代理（`asyncio.create_task` 拷贝上下文）与跨工具步 `reload()` 都能即时看到引擎边界的变化。
 
-`set_run_authorized_source_for(engine, ...)` 是 bridge / cron 共用封装：有引擎注入其实时回调；无引擎（构造失败的降级态）降级为 `[cwd, *extra_folders]` 的本轮快照。
+`set_run_authorized_source_for(engine, ...)` 是 run 起点的统一封装：有引擎注入其实时回调；无引擎（构造失败的降级态）降级为 `[cwd, *extra_folders]` 的本轮快照。
 
 > 子代理另经 `shell_session.run_with_shell` 在 `copy_context` 副本里隔离各自的 shell 会话（`cd`/env 不串父/兄弟、用完回收），见 [desktop.md](desktop.md)。
 
@@ -308,35 +305,37 @@ filesystem provider 的 `validate_path()` 与 bash 工作目录都经此读取�
 
 ## Graph 节点集成
 
-权限系统在 `lumi/agents/core/nodes.py` 的 `is_use_tool()` 条件路由函数中被调用。结构化输出已改为真工具（内部伪工具 `__structured_output__`），不再有独立的 `ExtractStructuredOutput` 节点：
+路由决策在 `lumi/agents/permissions/routing.py` 的 `route_decision()`；`lumi/agents/core/nodes.py` 的 `is_use_tool()` 条件边只是薄壳（无 tool_calls 时直接返回 OnAgentStop，其余交给 `route_decision`）。结构化输出已改为真工具（内部伪工具 `__structured_output__`），不再有独立的 `ExtractStructuredOutput` 节点：
 
 ```
-is_use_tool() 路由优先级：
+路由优先级：
 
 1. 无 tool_calls → OnAgentStop（分发 Stop hooks，默认 END）
 2. 纯内部伪工具（如结构化输出）→ ToolExecutor（闭包内自校验，绕过权限审批）；
    内部工具与其他工具混合的批次不绕过，落到下方正常评估
-3. 权限引擎 DENY 前置检查（所有模式）→ 命中则 HumanApproval（deny 不可绕过，优先于 bypass）
+3. 权限引擎 DENY 前置检查（所有模式）→ 命中或评估异常则 HumanApproval（deny 不可绕过，先于只读短路）
 4. 全部只读工具（Layer 1: is_write_tool 全 False）→ ToolExecutor
-6. bypass-immune 安全检查（所有模式）→ 命中则 HumanApproval
-8. 权限引擎完整评估:
+5. bypass-immune 安全检查（所有模式）→ 命中则 HumanApproval
+6. 全部是写入本项目记忆目录的 write/edit → ToolExecutor（所有模式）
+7. 权限引擎完整评估:
    ├─ 有 DENY → HumanApproval（节点内自动拒绝）
    ├─ privileged 模式: ASK → HumanApproval，其余 → ToolExecutor
+   ├─ auto 模式: 全部 ALLOW + 边界 OK → ToolExecutor，否则 → AutoClassify
    ├─ default 模式: 全部 ALLOW + 边界 OK → ToolExecutor，否则 → HumanApproval
    └─ accept_edits 模式: 同 default，另把工作区内未命中规则的文件编辑(write/edit)视同 ALLOW
       （allow 规则照常生效，显式 ask 规则照样审批）
-9. 引擎不可用: privileged → ToolExecutor，default/accept_edits → HumanApproval
+8. 引擎不可用: privileged → ToolExecutor，auto → AutoClassify，其余 → HumanApproval
 ```
 
 关键设计：
 - `engine.reload()` 在路由入口调用，实现热重载
-- DENY 检查在 bypass 判断之前，确保 deny 规则对只读/bypass 工具也生效
-- bypass-immune 检查在模式策略之后、权限引擎完整评估之前
+- DENY 预检在只读短路之前，确保 deny 规则对只读工具也生效
+- bypass-immune 检查在只读短路之后、记忆目录放行与所有模式策略之前
 - 异常时保守处理：评估失败 → 要求人工审批
 
 ### HumanApproval 节点
 
-`human_approval()` 先做防御性 DENY 二次检查（命中则跳过 interrupt，构造拒绝 ToolMessage 并 `Command(goto="CallModel")` 让模型调整）。非 DENY 时通过 `interrupt({"type": "tool_approval", ...})` 中断 graph 执行，等待前端（desktop / WS 层）的用户响应。resume 值为 `{"decision": "approve"/"reject"/"cancel", "message": ..., "set_tool_mode": ...}`。权限评估、选项构建、规则持久化由 Bridge / 前端层负责。
+`human_approval()` 先做 DENY 二次检查（命中直接构造拒绝 ToolMessage 并 `Command(goto="CallModel")` 让模型调整）；无审批通道（`context.approval_broker` 为 None，如后台子代理）自动拒绝 → CallModel；否则经 `ApprovalBroker` 原地 await 用户应答（`decisions` 逐个裁决，见 [approval-inflight.md](approval-inflight.md)）。应答为 `{"decision" | "decisions", "message", "set_tool_mode"}`，缺项按拒绝。
 
 ---
 

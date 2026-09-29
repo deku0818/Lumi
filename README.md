@@ -107,7 +107,7 @@ cd Lumi
 
 > ⚠️ **无沙箱**：Lumi 不做隔离，agent 的工具（`bash`、文件读写等）**直接作用于你本地真实环境**。权限规则 + 审批模式 + 工作区边界是唯一的安全边界——建议保持默认审批，谨慎使用 `Privileged`（一律放行）。
 
-- **权限规则**（[permissions.md](docs/guides/permissions.md)）：用户级 / 项目共享 / 项目本地三处加载，Deny → Allow → Unmatched 求值 + 工作区边界检查。
+- **权限规则**（[permissions.md](docs/guides/permissions.md)）：用户级 / 项目共享 / 项目本地三处加载，取最严格匹配（Deny > Ask > Allow > Unmatched）+ 写操作的工作区边界检查。
 - **审批模式**：`Default`（权限引擎判定）· `Accept Edits`（工作区内编辑自动放行）· `Privileged`（一律放行，危险操作仍拦）· `Auto`（交 AI 分类器裁决 approve / ask / reject）。
 
 ### 多机 / 远程

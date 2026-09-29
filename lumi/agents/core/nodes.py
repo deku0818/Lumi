@@ -392,17 +392,8 @@ async def on_agent_stop(
 def is_use_tool(state: LumiAgentState, runtime: Runtime[LumiAgentContext]) -> str:
     """条件路由函数 - 判断下一步执行哪个节点
 
-    路由优先级：
-    1. 无 tool_calls → OnAgentStop（分发 Stop hooks）
-    2. 纯内部伪工具（如结构化输出）→ ToolExecutor（闭包内校验，绕过权限审批）；
-       内部工具与其他工具混合的批次不绕过，落到下方正常权限评估
-    3. 全部 bypass 类工具 → ToolExecutor
-    5. bypass-immune 检查（所有模式）→ 命中则 HumanApproval
-    6. 权限引擎 DENY（所有模式）→ HumanApproval（节点内自动拒绝，路由回 CallModel）
-    8. privileged 模式 → ASK 命中则 HumanApproval，其余 ToolExecutor
-    9. default 模式：全部 ALLOW + 边界 OK → ToolExecutor（快速路径）；accept_edits 同 default，
-       另把工作区内未命中规则的文件编辑视同 ALLOW
-    10. 其他 → HumanApproval
+    无 tool_calls → OnAgentStop（分发 Stop hooks）；其余分支见
+    ``permissions.routing.route_decision`` 的 docstring。
     """
     tool_calls = state["messages"][-1].tool_calls
     if not tool_calls:
@@ -446,14 +437,14 @@ async def human_approval(
 
     Graph 侧处理：
     - DENY 命中 → 跳过审批，直接拒绝并路由回 CallModel
-    - 非 DENY → await broker.request 等待用户审批：
-      - approve → ToolExecutor
-      - reject  → END（附带拒绝原因 ToolMessage）
-      - cancel  → END（附带取消原因 ToolMessage）
+    - 无审批通道（approval_broker 为 None：cron / workflow / 后台子代理）→ 自动拒绝、回 CallModel
+    - 否则 await broker.request 等待用户逐个裁决（见 _apply_decisions）：
+      - 有允许 → 被拒的补拒绝 ToolMessage，其余进 ToolExecutor
+      - 全拒绝 / cancel → END（附带拒绝 / 取消原因 ToolMessage）
 
-    权限评估、选项构建、规则持久化由 Bridge 层负责（on_custom_event 分支富化）。
-    decision 为 dict: {"decision": "approve"/"reject"/"cancel", "message": "...",
-    "set_tool_mode": "..."}（stop / 切会话取消挂起轮时 await 抛 CancelledError 向上冒泡）。
+    风险提示与越界路径由 Bridge 层富化（on_custom_event 分支）。应答为 dict：批量
+    {"decision", "message"?, "set_tool_mode"?} 或逐个 {"decisions": [...], "message"?}
+    （stop / 切会话收尾挂起审批时以 reject_value 返回拒绝）。
     """
     last_message = state["messages"][-1]
     tool_calls_data = [

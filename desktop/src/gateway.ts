@@ -1,5 +1,5 @@
 // WS JSON-RPC 客户端：对接 lumi serve 的 /ws。
-// 帧协议见 lumi/gateway/channels/ws.py。带指数退避自动重连（sidecar 启动需要时间）。
+// 方法与事件见 protocol/events.json。带指数退避自动重连（sidecar 启动需要时间）。
 import type {
   ActiveModel,
   BgTask,

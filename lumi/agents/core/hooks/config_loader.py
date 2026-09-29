@@ -1,4 +1,4 @@
-"""把三级 ``hooks.json`` 加载为已注册的 Shell hook。
+"""把三级 ``hooks.json`` 构造为 per-run 的 Shell hook 字典（不进全局注册表）。
 
 配置文件（优先级从低到高，与 permissions.json 同级同模式，支持 JSONC）：
 1. 用户全局 ``~/.lumi/hooks.json``

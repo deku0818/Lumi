@@ -9,7 +9,7 @@
 非流式 RPC 同样 spawn 成独立 task：部分方法需等待 run.lock（与流式轮互斥），
 inline await 会卡住接收循环，使 stop 帧在整轮结束前都读不到。
 
-帧协议（client ↔ server）见 channels/ws.py 模块文档。
+帧协议见 channels/ws.py，方法/事件清单见 protocol/events.json。
 """
 
 from __future__ import annotations

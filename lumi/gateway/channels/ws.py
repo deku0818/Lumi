@@ -1,44 +1,8 @@
 """Desktop WebSocket 服务：把 GatewaySession 暴露为 JSON-RPC over WS。
 
-帧协议（client ↔ server）：
-    client → server  {id, method, params}
-        send_message    params: {content, tool_mode?}   → 流式
-        resume          params: {value}                                   → 流式
-        stop            params: {}                                        → {stopped}  # 中止当前流式轮
-        list_commands   params: {}                                        → {commands:[...]}
-        run_command     params: {name, extra_text?, tool_mode?}           → 流式
-        list_providers  params: {}                                        → {profiles:[...], active:{provider,model}}
-        search_catalog  params: {query}                                    → {entries:[...]}  # models.dev 目录子串搜索
-        test_provider   params: {base_url, api_key, model}                → {ok, error?, latency_ms?}
-        set_provider    params: {provider, model}                         → {active:{provider,model}, model}
-        save_provider   params: {profile}  # profile.models:[...]         → {profiles:[...], active}
-        delete_provider params: {id}                                      → {profiles:[...], active}
-        set_effort      params: {provider, model, level}                  → {effort}  # 档位 ∈ 该模型能力(models.dev)
-        set_workspace   params: {path}                                    → {workspace}  # 会话级（绑定本连接项目，不动进程 cwd）
-        list_projects   params: {}                                        → {projects:[...], current}
-        add_project     params: {path}                                    → {projects:[...]}
-        remove_project  params: {path}                                    → {projects:[...]}
-        rename_project  params: {path, name}                              → {projects:[...]}
-        set_default_project params: {path, default}  # 「新建会话」直接落地的项目，至多一个 → {projects:[...]}
-        add_folder      params: {path}                                    → {folders:[...]}  # 本会话临时
-        remove_folder   params: {path}                                    → {folders:[...]}
-        list_sessions   params: {limit?}                                  → {sessions:[...]}
-        new_session     params: {}                                        → {thread_id}
-        switch_session  params: {thread_id}                               → {thread_id}
-        load_history    params: {thread_id}                               → {items:[...]}
-        pin_session     params: {thread_id, pinned}                       → {thread_id, pinned}
-        rename_session  params: {thread_id, title}                        → {thread_id, title}
-        delete_session  params: {thread_id}                               → {thread_id}
-        list_cron_jobs  params: {}                                        → {jobs:[...]}  # job 含 next_run
-        create_cron_job params: {name, schedule, prompt}                  → {job}
-        update_cron_job params: {job_id, name?, schedule?, prompt?}       → {job}
-        delete_cron_job params: {job_id}                                  → {job_id}
-        toggle_cron_job params: {job_id, enabled}                         → {job}
-        run_cron_job    params: {job_id}                                  → {ok}  # 异步触发，结果经 cron.result
-        list_cron_runs  params: {job_id, limit?}                          → {runs:[...]}
-    server → client
-        事件帧  {method: "event", params: <wire event>}   # 见 protocol.py
-        响应帧  {id, result}  或  {id, error: {message}}
+帧协议：client → server ``{id, method, params}``；server → client 事件帧
+``{method: "event", params: <wire event>}``、响应帧 ``{id, result}`` 或
+``{id, error: {message}}``。方法与事件清单见 protocol/events.json。
 
 一个 WS 连接 = 一个 GatewaySession（独立 AgentBridge，可切换 thread）。连接 URL 可带
 ``?token=``（鉴权）与 ``?workspace=``（本会话项目，open 时直接 pin 引擎）。本模块退化为
