@@ -1,5 +1,6 @@
 import { useCallback, useEffect, useRef, useState } from 'react'
 import {
+  AlertTriangle,
   Boxes,
   Check,
   Pencil,
@@ -33,6 +34,7 @@ import { Tooltip, TooltipContent, TooltipTrigger } from '@/components/ui/tooltip
 import { Button } from '@/components/ui/button'
 import { cn, errorMessage, fmtTokensFull } from '@/lib/utils'
 import { toast } from './Toast'
+import { ConfirmDialog } from './ConfirmDialog'
 import { CARD_L3 } from './glass'
 
 type TestResult = { ok: boolean; error?: string; latency_ms?: number }
@@ -89,6 +91,8 @@ export function ProvidersPanel({
   // 后端兜底值（模型既无用户覆盖也没探测到时实际会用的数）；UI 显示它以免与实跑口径不一致
   const [fallback, setFallback] = useState<ModelLimits>({ context: 0, max_tokens: 0 })
   const [form, setForm] = useState<Form | null>(null) // null = 关闭 provider 表单
+  // 待确认删除的供应商：删了连 API Key 与逐模型覆盖一起没，不可撤销，先确认
+  const [deleting, setDeleting] = useState<ProviderProfile | null>(null)
   const [picking, setPicking] = useState<PickTarget | null>(null) // 打开模型选择弹窗的用途
 
   const reload = useCallback(() => {
@@ -224,7 +228,7 @@ export function ProvidersPanel({
                     <Button
                       variant="ghost"
                       size="icon-sm"
-                      onClick={() => onDelete(p.id)}
+                      onClick={() => setDeleting(p)}
                       aria-label={t('common.delete')}
                       className="text-muted-foreground hover:text-error"
                     >
@@ -258,6 +262,19 @@ export function ProvidersPanel({
       )}
       </SectionGroup>
       </MachineScope>
+
+      {deleting && (
+        <ConfirmDialog
+          icon={<AlertTriangle size={17} className="text-error" />}
+          title={t('providers.deleteTitle', { name: deleting.name })}
+          message={t('providers.deleteMessage')}
+          onConfirm={() => {
+            onDelete(deleting.id)
+            setDeleting(null)
+          }}
+          onCancel={() => setDeleting(null)}
+        />
+      )}
 
       {form && (
         <ProviderForm

@@ -68,10 +68,12 @@ async def _list_jobs(params: dict) -> dict:
 
 async def _create_job(params: dict) -> dict:
     rt, service = _service()
+    # project_dir：从项目主页新建时绑定该项目（执行时在其中跑）；缺省 = 未绑定
     job = await service.create(
         params.get("name") or "",
         params.get("schedule") or "",
         params.get("prompt") or "",
+        project_dir=params.get("project_dir") or "",
     )
     return {"job": _job_to_wire(job, rt.scheduler)}
 

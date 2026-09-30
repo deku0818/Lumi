@@ -31,6 +31,7 @@ import { Button } from '@/components/ui/button'
 import { Switch } from '@/components/ui/switch'
 import { Dialog, DialogContent, DialogTitle } from '@/components/ui/dialog'
 import { CARD_L1 } from './glass'
+import { describeSchedule } from './CronPage'
 
 // 项目主页（交互定稿见 .demos/project-home.html）：点进项目卡片后的落地页。
 // 左列 = 输入岛（发送即在此项目新建会话）+ 该项目会话流；右列 = 项目画像五卡
@@ -65,7 +66,8 @@ export const ProjectHomePage = memo(function ProjectHomePage({
   composerSlot: ReactNode
   onBack: () => void
   onOpenSession: (tid: string) => void
-  onOpenScheduled: () => void
+  // 空 = 打开定时页；jobId = 直达该任务；create = 直接打开创建表单（绑定本项目）
+  onOpenScheduled: (target?: { jobId?: string; create?: boolean }) => void
   onToggleCron: (jobId: string, enabled: boolean) => void
 }) {
   const { t } = useI18n()
@@ -219,7 +221,7 @@ export const ProjectHomePage = memo(function ProjectHomePage({
               title={t('projhome.scheduled')}
               count={cronJobs.length}
               action={
-                <CardAction title={t('cron.new')} onClick={onOpenScheduled}>
+                <CardAction title={t('cron.new')} onClick={() => onOpenScheduled({ create: true })}>
                   <Plus size={12} />
                 </CardAction>
               }
@@ -229,10 +231,10 @@ export const ProjectHomePage = memo(function ProjectHomePage({
               ) : (
                 cronJobs.map((j) => (
                   <div key={j.id} className="flex items-center gap-2 py-1.5 border-t border-line/40 first:border-0">
-                    <button onClick={onOpenScheduled} className="flex-1 min-w-0 text-left">
+                    <button onClick={() => onOpenScheduled({ jobId: j.id })} className="flex-1 min-w-0 text-left">
                       <div className="text-xs truncate">{j.name}</div>
-                      <div className="text-[10.5px] text-muted-foreground font-mono truncate">
-                        {j.schedule.value}
+                      <div className="text-[10.5px] text-muted-foreground truncate">
+                        {describeSchedule(j, t)}
                       </div>
                     </button>
                     <Switch checked={j.enabled} onCheckedChange={(v) => onToggleCron(j.id, v)} />

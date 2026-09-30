@@ -1402,16 +1402,26 @@ export default function App() {
     [selectSession],
   )
 
-  // 定时页按机器管理：侧栏入口落本机，项目主页跳过去落该项目所在机器
-  const [cronMachine, setCronMachine] = useState('local')
+  // 定时页按机器管理：侧栏入口落本机；项目主页跳过去落该项目所在机器，点某条任务直达
+  // 其详情，「新建任务」直接打开绑定本项目的创建表单
+  const [cronEntry, setCronEntry] = useState<{ machine: string; jobId?: string; createIn?: string }>({
+    machine: 'local',
+  })
   const openScheduled = useCallback(() => {
-    setCronMachine('local')
+    setCronEntry({ machine: 'local' })
     setView('scheduled')
   }, [])
-  const openHomeScheduled = useCallback(() => {
-    setCronMachine(projectHome?.backend ?? 'local')
-    setView('scheduled')
-  }, [projectHome])
+  const openHomeScheduled = useCallback(
+    (target?: { jobId?: string; create?: boolean }) => {
+      setCronEntry({
+        machine: projectHome?.backend ?? 'local',
+        jobId: target?.jobId,
+        createIn: target?.create ? projectHome?.path : undefined,
+      })
+      setView('scheduled')
+    },
+    [projectHome],
+  )
 
   // 打开项目 = 在该机器开一条绑定到此项目的新会话（项目经 open 握手随会话绑定，
   // 不再先在共享连接上 setWorkspace 改进程态——那对新会话的独立连接无效）
@@ -2455,7 +2465,9 @@ export default function App() {
         ) : view === 'scheduled' ? (
           <CronPage
             api={gwForBackend}
-            initialMachine={cronMachine}
+            initialMachine={cronEntry.machine}
+            initialJobId={cronEntry.jobId}
+            createIn={cronEntry.createIn}
               jobs={cronJobs}
             runningJobs={cronRunning}
             version={cronVersion}

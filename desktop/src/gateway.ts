@@ -544,10 +544,11 @@ export class Gateway {
     return this.request('list_cron_jobs')
   }
 
-  createCronJob(name: string, schedule: string, prompt: string): Promise<{ job: CronJob }> {
+  // projectDir：从项目主页新建时绑定该项目（执行时在其中跑）
+  createCronJob(name: string, schedule: string, prompt: string, projectDir?: string): Promise<{ job: CronJob }> {
     return this.request<{
       job: CronJob
-    }>('create_cron_job', { name, schedule, prompt })
+    }>('create_cron_job', { name, schedule, prompt, ...(projectDir ? { project_dir: projectDir } : {}) })
   }
 
   updateCronJob(

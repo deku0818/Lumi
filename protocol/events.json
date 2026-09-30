@@ -77,7 +77,7 @@
     "rename_session": { "params": ["thread_id", "title"], "result": ["thread_id", "title"] },
     "delete_session": { "params": ["thread_id"], "result": ["thread_id"] },
     "list_cron_jobs": { "params": [], "result": ["jobs"], "note": "job 含 next_run（ISO 时间或 null）" },
-    "create_cron_job": { "params": ["name", "schedule", "prompt"], "result": ["job"] },
+    "create_cron_job": { "params": ["name", "schedule", "prompt", "project_dir?"], "result": ["job"], "note": "project_dir：从项目主页新建时绑定该项目，执行时在其中跑；缺省 = 未绑定（在 serve 进程目录执行）" },
     "update_cron_job": { "params": ["job_id", "name?", "schedule?", "prompt?"], "result": ["job"] },
     "delete_cron_job": { "params": ["job_id"], "result": ["job_id"] },
     "toggle_cron_job": { "params": ["job_id", "enabled"], "result": ["job"] },

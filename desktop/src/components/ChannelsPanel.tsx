@@ -96,7 +96,9 @@ export function ChannelsPanel({
   const { t } = useI18n()
   const [machine, setMachine] = useState('local')
   const [list, setList] = useState<ChannelInfo[]>([])
-  const [editing, setEditing] = useState<FeishuConfig | null>(null) // null = 列表视图
+  // null = 列表视图。表单每次改动都回写到这里（草稿）：离开渠道页时表单卸载，
+  // 回来按草稿重开——弹窗不会挡在别的设置页上面，刚粘贴的 App Secret 也还在
+  const [editing, setEditing] = useState<FeishuConfig | null>(null)
   // 最近一次保存/删除的后端拒绝原因（App ID 撞已有机器人等）：吞掉会让保存键看似失灵
   const [saveError, setSaveError] = useState('')
   // 凭证落盘的绝对路径，由 get_channels 下发（渲染见 ConfigPath）
@@ -213,10 +215,12 @@ export function ChannelsPanel({
       </MachineScope>
 
       {/* 弹窗放在作用域之外：机器瞬断（服务端重启 / 笔记本唤醒）会让作用域内的内容卸载，
-          正在编辑的凭证会随之丢失——这正是 SettingsDialog 加 forceMount 要防的事 */}
-      {editing && (
+          正在编辑的凭证会随之丢失。只在渠道页可见时挂载：弹窗 portal 到 body，不卸载的话
+          「去环境」切过去它仍盖在最上层；重新挂载时按草稿重开并重跑体检 */}
+      {editing && active && (
         <FeishuForm
           initial={editing}
+          onDraft={setEditing}
           gw={gw}
           machine={machine}
           configPath={configPath}
@@ -333,11 +337,13 @@ function FeishuForm({
   taken,
   saveError,
   onNavigate,
+  onDraft,
   onCancel,
   onSave,
   onDelete,
 }: {
   initial: FeishuConfig
+  onDraft: (cfg: FeishuConfig) => void // 每次改动回写草稿（表单卸载后由它重开）
   gw?: Gateway
   machine: string
   configPath: string // 凭证落盘的绝对路径（空 = 尚未取到，文案退回不带路径的说法）
@@ -352,6 +358,7 @@ function FeishuForm({
   const [cfg, setCfg] = useState<FeishuConfig>(initial)
   const [confirmDelete, setConfirmDelete] = useState(false)
   const set = (patch: Partial<FeishuConfig>) => setCfg((c) => ({ ...c, ...patch }))
+  useEffect(() => onDraft(cfg), [cfg, onDraft])
 
   // 接入体检：权限 / 事件订阅 / 版本发布任缺其一，机器人都是「连上了但不回消息」，
   // 且开放平台不报任何错。四项由一次「应用版本信息」查询判定。

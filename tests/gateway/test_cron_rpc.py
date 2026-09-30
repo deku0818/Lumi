@@ -54,6 +54,17 @@ async def test_create_and_list(cron_runtime):
     assert [j["id"] for j in result["jobs"]] == [job["id"]]
 
 
+async def test_create_binds_project(cron_runtime, tmp_path):
+    # 回归：桌面表单新建的任务不带项目，执行时落到 serve 进程 cwd；从项目主页新建
+    # 应绑定该项目（与 agent 在会话里建任务同一语义）
+    job = await rpc(
+        "create_cron_job",
+        {"name": "巡检", "schedule": "5m", "prompt": "x", "project_dir": str(tmp_path)},
+    )
+    stored = await cron_runtime.job_store.get(job["job"]["id"])
+    assert stored.project_dir == str(tmp_path)
+
+
 async def test_create_invalid_schedule_raises(cron_runtime):
     with pytest.raises(ValueError, match="无法识别调度规则"):
         await _create(schedule="every day")

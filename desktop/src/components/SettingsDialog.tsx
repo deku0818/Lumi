@@ -116,8 +116,8 @@ export function SettingsDialog({
           <TabsContent value="models" className="flex-1 min-w-0 overflow-auto px-6 pb-6 pt-12 mt-0">
             <ProvidersPanel gwFor={gwFor} onChanged={onProvidersChanged} />
           </TabsContent>
-          {/* forceMount：跳去环境页装 Node 再回来时，编辑中的飞书凭证不能没了——
-              不常驻的话整棵子树会被卸载，用户刚粘贴的 App Secret 随之丢失。
+          {/* forceMount：跳去环境页装 Node 再回来时，编辑中的飞书凭证不能没了——草稿存在
+              常驻的 ChannelsPanel 里（表单本身离开渠道页即卸载），不常驻的话草稿随之丢失。
               data-[state=inactive]:hidden 是承重的，不能删：forceMount 下 Radix 的
               hidden={!present} 恒为 false，它自己不隐藏，非激活时全靠这个 class */}
           <TabsContent

@@ -2,7 +2,7 @@ import { memo, useState, type ReactNode } from 'react'
 import { ChevronRight } from 'lucide-react'
 import type { Item } from '../../types'
 import { isKnownTool, summarizeTools, toolArgs, toolIcon, toolStatusKey, toolTitle } from '../../toolMeta'
-import { MAX_DIFF_LINES, toolDiff, type DiffLine } from '../../diff'
+import { MAX_DIFF_LINES, foldContext, toolDiff, type DiffLine } from '../../diff'
 import { shellTokens } from '../../shell'
 import { useI18n } from '../../i18n'
 import { CopyButton } from './MessageActions'
@@ -211,22 +211,33 @@ function ShellText({ cmd }: { cmd: string }) {
 // edit/write 的行级 diff 视图：新增行绿底、删除行红底、上下文行淡显。
 function DiffView({ lines }: { lines: DiffLine[] }) {
   const { t } = useI18n()
+  const rows = foldContext(lines)
   return (
     <pre className="m-0 max-h-72 overflow-auto py-2 leading-relaxed">
-      {lines.slice(0, MAX_DIFF_LINES).map((l, i) => (
-        <div
-          key={i}
-          className={`px-3 ${l.kind === 'add' ? 'bg-success/10' : l.kind === 'del' ? 'bg-error/10' : ''}`}
-        >
-          <span
-            className={`select-none ${l.kind === 'add' ? 'text-success' : l.kind === 'del' ? 'text-error' : 'text-muted-foreground/40'}`}
+      {rows.slice(0, MAX_DIFF_LINES).map((l, i) =>
+        l.kind === 'gap' ? (
+          <div key={i} className="px-3 text-center italic text-muted-foreground bg-ink/[0.04] select-none">
+            {t('diff.unchanged', { n: l.n })}
+          </div>
+        ) : (
+          <div
+            key={i}
+            className={`px-3 ${l.kind === 'add' ? 'bg-success/10' : l.kind === 'del' ? 'bg-error/10' : ''}`}
           >
-            {l.kind === 'add' ? '+ ' : l.kind === 'del' ? '- ' : '  '}
-          </span>
-          <span className={l.kind === 'ctx' ? 'text-muted-foreground/70' : 'text-ink/90'}>{l.text || ' '}</span>
+            <span
+              className={`select-none ${l.kind === 'add' ? 'text-success' : l.kind === 'del' ? 'text-error' : 'text-muted-foreground/40'}`}
+            >
+              {l.kind === 'add' ? '+ ' : l.kind === 'del' ? '- ' : '  '}
+            </span>
+            <span className={l.kind === 'ctx' ? 'text-muted-foreground/70' : 'text-ink/90'}>{l.text || ' '}</span>
+          </div>
+        ),
+      )}
+      {rows.length > MAX_DIFF_LINES && (
+        <div className="px-3 text-muted-foreground">
+          {t('diff.truncated', { max: MAX_DIFF_LINES, n: lines.length })}
         </div>
-      ))}
-      {lines.length > MAX_DIFF_LINES && <div className="px-3 text-muted-foreground">{t('common.truncated')}</div>}
+      )}
     </pre>
   )
 }

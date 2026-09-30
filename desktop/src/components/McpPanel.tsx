@@ -1,5 +1,5 @@
 import { useCallback, useEffect, useMemo, useState } from 'react'
-import { ChevronDown, ChevronRight, Globe, Pencil, Plus, Radar, Terminal, Trash2, X } from 'lucide-react'
+import { AlertTriangle, ChevronDown, ChevronRight, Globe, Pencil, Plus, Radar, Terminal, Trash2, X } from 'lucide-react'
 import type {
   McpPromptInfo,
   McpResourceInfo,
@@ -16,6 +16,7 @@ import { MachineScope, useConnectedEffect } from './MachineTabs'
 import { ProjectPicker } from './ProjectPicker'
 import { cn, errorMessage } from '@/lib/utils'
 import { toast } from './Toast'
+import { ConfirmDialog } from './ConfirmDialog'
 import {
   ChipInput,
   Empty,
@@ -163,6 +164,9 @@ export function McpPanel({
       })
       .catch(fail)
 
+  // 待确认删除的 server：env / headers 里常带密钥，删了不可撤销，列表与编辑弹窗两处都先确认
+  const [deleting, setDeleting] = useState<string | null>(null)
+
   // 删除成功一并关编辑弹窗：否则它还挂着旧字段，再点保存会把刚删的 server 写回
   const remove = (name: string) =>
     gw
@@ -245,7 +249,7 @@ export function McpPanel({
                 onToggle={(on) => toggle(name, on)}
                 onTest={() => setTesting(name)}
                 onEdit={() => setEditing(name)}
-                onDelete={() => remove(name)}
+                onDelete={() => setDeleting(name)}
               />
             ))}
           </div>
@@ -271,7 +275,20 @@ export function McpPanel({
           existing={names}
           onCancel={() => setEditing(undefined)}
           onSave={save}
-          onDelete={editing ? () => remove(editing) : undefined}
+          onDelete={editing ? () => setDeleting(editing) : undefined}
+        />
+      )}
+
+      {deleting !== null && (
+        <ConfirmDialog
+          icon={<AlertTriangle size={17} className="text-error" />}
+          title={t('mcp.deleteTitle', { name: deleting })}
+          message={t('mcp.deleteMessage')}
+          onConfirm={() => {
+            remove(deleting)
+            setDeleting(null)
+          }}
+          onCancel={() => setDeleting(null)}
         />
       )}
     </div>
