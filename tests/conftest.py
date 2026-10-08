@@ -1,6 +1,19 @@
 """共享 Fixtures"""
 
-import pytest
+import os
+import tempfile
+
+# 必须在任何 `import lumi` 之前：数据根的取值点多为模块级常量（import 时求值），
+# logger import 期就会建 <lumi_home>/logs。用赋值不用 setdefault——开发者自己 export
+# 的 LUMI_CONFIG_DIR 正是真实数据根，同样不能碰。
+# 数据根挪走前先把真实工具箱 bin 补到 PATH 末尾（与运行时注入一致，系统优先）：
+# 本机 rg 常只装在工具箱里，否则 grep 类用例一律「未安装 ripgrep」。只读执行，不写数据。
+os.environ["PATH"] += os.pathsep + os.path.join(
+    os.environ.get("LUMI_CONFIG_DIR") or os.path.expanduser("~/.lumi"), "bin"
+)
+os.environ["LUMI_CONFIG_DIR"] = tempfile.mkdtemp(prefix="lumi-test-")
+
+import pytest  # noqa: E402
 
 import lumi.agents.permissions.workspace as workspace
 import lumi.agents.runtime.bg_tasks as task_registry
@@ -52,7 +65,8 @@ def authorized_tmp_dir(tmp_path):
 
 @pytest.fixture(autouse=True)
 def isolate_user_store(tmp_path, monkeypatch):
-    """所有测试的用户级配置（~/.lumi/lumi.json）重定向到 tmp，杜绝读写真实 ~/.lumi。
+    """所有测试的用户级配置（lumi.json）重定向到本测试自己的 tmp（数据根已由文件顶部
+    的 LUMI_CONFIG_DIR 整体挪走，这里再按测试隔离，免得用例之间串值）。
 
     需要具体路径的测试可再显式 monkeypatch user_store.CONFIG_FILE（同一 tmp_path、同名文件，
     值一致、无冲突）。
@@ -71,6 +85,19 @@ def reset_catalog_aliases(monkeypatch):
     """
     monkeypatch.setattr("lumi.models.catalog._aliases", {})
     monkeypatch.setattr("lumi.models.catalog._lookup_memo", {})
+
+
+@pytest.fixture(autouse=True)
+def restore_cli_env():
+    """CLI 根回调会改进程级 PATH（追加工具箱 bin）与 LUMI_BIN：测完复原，免得各用例的
+    tmp bin 目录越积越多、串进后续用例的工具探测。"""
+    saved = {k: os.environ.get(k) for k in ("PATH", "LUMI_BIN")}
+    yield
+    for key, value in saved.items():
+        if value is None:
+            os.environ.pop(key, None)
+        else:
+            os.environ[key] = value
 
 
 @pytest.fixture(autouse=True)

@@ -1,17 +1,17 @@
 """Hook 注册表与 dispatch 内核。
 
-所有形态（Python callable / Shell / YAML 包装）共享同一 dispatch——非 Python
-形态在外部模块包装为 ``Hook`` 函数后调 ``register_hook``，本模块不感知形态差异。
+所有形态（Python callable / Shell）共享同一 dispatch，本模块不感知形态差异：
+builtin 经 ``register_hook`` 进进程全局；shell hook 由 ``config_loader`` 包装为
+``Hook`` 后经 per-run contextvar 注入（``set_run_config_hooks``，不注册）。
 
 2 模式：
-- ``first_intercept``：第一个返非 None 的 hook 拦截，后续不跑。Stop /
-  UserPromptSubmit 用——接管者语义。
+- ``first_intercept``：第一个返非 None 的 hook 拦截，后续不跑。Stop 用——接管者语义。
 - ``collect``：多 hook 的 AdditionalContext 合并到同一 Command；遇到首个
-  Block / Command 立即拦截但已收的 reminder 一起注入。PreToolUse / PostToolUse
-  用——多 reminder 共存有意义。
+  Block / Command 立即拦截但已收的 reminder 一起注入。PreToolUse / PostToolUse /
+  UserPromptSubmit 用——多 reminder 共存有意义。
 
 错误隔离：每个 hook 包 try/except，单 hook 抛错 ``logger.exception`` 后继续
-下一个，dispatch 不抛。Shell/YAML wrapper 内部异常走同路径——对调用方透明。
+下一个，dispatch 不抛。Shell wrapper 内部异常走同路径——对调用方透明。
 """
 
 from __future__ import annotations
@@ -40,21 +40,30 @@ from lumi.utils.logger import logger
 _HOOKS: dict[HookEvent, list[Hook]] = {}
 
 # 本 run 的项目级 config hook（来自 .lumi/hooks.json）。per-run contextvar：每个
-# 会话各绑各项目、并发互不串；后台子代理继承父 run 的 contextvar。None = 无配置 hook。
+# 会话各绑各项目、并发互不串；子代理继承父 run 的 contextvar（Stop 除外，见 _hooks_for）。
+# None = 无配置 hook。
 _run_config_hooks: contextvars.ContextVar[dict[HookEvent, list[Hook]] | None] = (
     contextvars.ContextVar("lumi_run_config_hooks", default=None)
 )
 
 
 def set_run_config_hooks(hooks: dict[HookEvent, list[Hook]] | None) -> None:
-    """注入当前 run 的项目级 config hook（bridge / cron 在 run 起点调用）。"""
+    """注入当前 run 的项目级 config hook。
+
+    bridge 在 ``_stream`` 起点调用；cron 经 cron_stream 同样跑在 bridge 上。
+    """
     _run_config_hooks.set(hooks)
 
 
-def _hooks_for(event: HookEvent) -> list[Hook]:
-    """本 run 生效的 hook：项目级 config 整体压在框架 builtin 之前。"""
+def _hooks_for(event: HookEvent, depth: int = 0) -> list[Hook]:
+    """本 run 生效的 hook：项目级 config 整体压在框架 builtin 之前。
+
+    子代理（``depth>0``）不跑 config 的 Stop hook：Stop 指用户这一轮结束，子代理收尾不算
+    （否则跑测试 / 拉回类 hook 每个子代理各触发一次、甚至困住子代理）。builtin 各自有 depth 闸。
+    """
     config = _run_config_hooks.get()
-    config_hooks = config.get(event, []) if config else []
+    skip = event == "Stop" and depth > 0
+    config_hooks = config.get(event, []) if config and not skip else []
     return [*config_hooks, *_HOOKS.get(event, [])]
 
 
@@ -116,7 +125,7 @@ async def dispatch_hooks(
     - ``Command``：调用方应据此路由（一般 ``return cmd``）
     - ``None``：所有 hook 放行，调用方走默认行为
     """
-    hooks = _hooks_for(event)
+    hooks = _hooks_for(event, ctx.state.get("depth", 0))
     if not hooks:
         return None
 

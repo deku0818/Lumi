@@ -6,7 +6,6 @@ from __future__ import annotations
 from types import SimpleNamespace
 
 from langchain_core.messages import AIMessage, HumanMessage, ToolMessage
-from langgraph.graph import END
 from langgraph.types import Command
 
 from lumi.agents.core import nodes
@@ -281,10 +280,10 @@ async def test_tool_executor_structured_success(monkeypatch):
     monkeypatch.setattr(nodes, "ToolNode", _StructuredFakeToolNode)
     state = {"messages": [_call({"name": "Lumi"})], "output_schema": SCHEMA}
     result = await tool_executor(state, _runtime([]), {})
-    # 工具 Command 直返：[Command, {"messages": 普通结果 + reminder}]
+    # 工具 Command 直返：[Command(其余 update), {"messages": 全部 ToolMessage 在前}]
     assert isinstance(result, list) and isinstance(result[0], Command)
-    assert result[0].update["structured_output"] == {"name": "Lumi"}
-    assert result[1] == {"messages": []}
+    assert result[0].update == {"structured_output": {"name": "Lumi"}}
+    assert [m.tool_call_id for m in result[1]["messages"]] == ["1"]
 
 
 async def test_tool_executor_structured_failure_goes_normal_path(monkeypatch):
@@ -321,9 +320,8 @@ async def test_tool_executor_aborts_after_max_failures(monkeypatch):
     ]
     state = {"messages": [*history, _call({"age": 1})], "output_schema": SCHEMA}
     result = await tool_executor(state, _runtime([]), {})
-    assert isinstance(result, Command)
-    assert result.goto == END
-    assert isinstance(result.update["messages"][-1], AIMessage)
+    assert result["tool_cancelled"] is True  # 由条件边路由到 END
+    assert isinstance(result["messages"][-1], AIMessage)
 
 
 # === Stop hook 联动 ===
@@ -380,6 +378,25 @@ async def test_stop_hook_gives_up_after_max_pullbacks():
     assert await structured_output_stop_hook(ctx) is None
 
 
+async def test_stop_hook_ignores_other_hooks_reminders():
+    # 回归：别的 hook（如项目 PostToolUse lint）注入的 reminder 曾被计为本 hook 的拉回
+    # 次数，一次都没拉回就放弃，结构化输出静默变成 None
+    from lumi.agents.core.hooks.dispatch import _reminder_message
+
+    msgs = [
+        HumanMessage("q"),
+        *[_reminder_message("lint: 3 warnings")] * MAX_STOP_PULLBACKS,
+        AIMessage("纯文本结束"),
+    ]
+    ctx = HookContext(
+        state={"messages": msgs, "output_schema": SCHEMA},
+        config={},
+        event="Stop",
+        payload={},
+    )
+    assert isinstance(await structured_output_stop_hook(ctx), AdditionalContext)
+
+
 # === Fix: 混合批次权限路由 ===
 
 
@@ -425,8 +442,8 @@ async def test_tool_executor_mixed_output_keeps_command_and_messages(monkeypatch
     state = {"messages": [_call({"name": "Lumi"})], "output_schema": SCHEMA}
     result = await tool_executor(state, _runtime([]), {})
     cmd, update = result
-    assert cmd.update["structured_output"] == {"name": "Lumi"}
-    assert [m.tool_call_id for m in update["messages"]] == ["2"]
+    assert cmd.update == {"structured_output": {"name": "Lumi"}}
+    assert [m.tool_call_id for m in update["messages"]] == ["1", "2"]
 
 
 # === Fix: 内部工具不泄漏给用户 hook ===
@@ -446,3 +463,43 @@ async def test_pretooluse_excludes_internal_structured_tool(monkeypatch):
         await tool_executor(state, _runtime([]), {})
     assert all(n != TOOL for n in captured["names"])
     assert all(tc["name"] != TOOL for tc in captured["calls"])
+
+
+def test_model_sees_nested_schema_constraints():
+    # 回归：嵌套对象降成 {type: object, additionalProperties: true}，约束与用户写的
+    # 顶层 description 全部丢失，模型只能靠一轮轮校验报错去摸字段
+    from langchain_core.utils.function_calling import convert_to_openai_tool
+
+    from lumi.agents.core.structured_tool import create_structured_output_tool
+
+    schema = {
+        "type": "object",
+        "description": "审查结论",
+        "properties": {
+            "owner": {
+                "type": "object",
+                "properties": {"email": {"type": "string", "pattern": "^.+@.+$"}},
+                "required": ["email"],
+            },
+            "score": {"type": "integer", "minimum": 0, "maximum": 10},
+        },
+        "required": ["owner", "score"],
+    }
+    spec = convert_to_openai_tool(create_structured_output_tool(schema))["function"]
+    dumped = str(spec)
+    assert "^.+@.+$" in dumped and "'maximum': 10" in dumped
+    assert "审查结论" in spec["description"]
+
+
+def test_schema_with_refs_still_builds():
+    from langchain_core.utils.function_calling import convert_to_openai_tool
+
+    from lumi.agents.core.structured_tool import create_structured_output_tool
+
+    schema = {
+        "type": "object",
+        "$defs": {"P": {"type": "object", "properties": {"n": {"type": "string"}}}},
+        "properties": {"p": {"$ref": "#/$defs/P"}},
+        "required": ["p"],
+    }
+    convert_to_openai_tool(create_structured_output_tool(schema))

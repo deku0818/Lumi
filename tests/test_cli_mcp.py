@@ -180,6 +180,30 @@ def test_remove_ambiguous_requires_scope(mcp_dirs):
     assert "dup" in _read(_proj_file(proj))
 
 
+def test_default_project_is_cwd(mcp_dirs, monkeypatch):
+    """不带 --project：add / add-json / remove 都落在当前目录的项目层（与 list/get 同口径）。"""
+    _, proj = mcp_dirs
+    monkeypatch.chdir(proj)
+    r = runner.invoke(app, ["mcp", "add", "chrome", "npx", "-y", "@browsermcp/mcp"])
+    assert r.exit_code == 0, r.output
+    r = runner.invoke(app, ["mcp", "add-json", "x", '{"command": "x"}'])
+    assert r.exit_code == 0, r.output
+    assert set(_read(_proj_file(proj))) == {"chrome", "x"}
+    r = runner.invoke(app, ["mcp", "remove", "chrome"])
+    assert r.exit_code == 0, r.output
+    assert set(_read(_proj_file(proj))) == {"x"}
+
+
+def test_unknown_scope_rejected_not_written(mcp_dirs):
+    """未知 --scope（如 Claude Code 的 local / user）直接报错，不静默写进全局层。"""
+    global_file, proj = mcp_dirs
+    r = runner.invoke(
+        app, ["mcp", "add", "--scope", "user", "--project", str(proj), "s", "cmd"]
+    )
+    assert r.exit_code != 0
+    assert not global_file.exists()
+
+
 def test_remove_missing_exits_nonzero(mcp_dirs):
     _, proj = mcp_dirs
     r = runner.invoke(app, ["mcp", "remove", "--project", str(proj), "nope"])

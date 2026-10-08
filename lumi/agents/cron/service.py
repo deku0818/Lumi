@@ -25,13 +25,20 @@ class CronService:
         self._job_store = job_store
         self._run_log = run_log
 
-    async def create(self, name: str, schedule_raw: str, prompt: str) -> Job:
-        """创建并注册任务。name/prompt strip 后均须非空。"""
+    async def create(
+        self, name: str, schedule_raw: str, prompt: str, project_dir: str = ""
+    ) -> Job:
+        """创建并注册任务。name/prompt strip 后均须非空；project_dir 为所属项目根。"""
         name = name.strip()
         prompt = prompt.strip()
         if not name or not prompt:
             raise ValueError("任务名称和提示词不能为空")
-        job = Job(name=name, schedule=Schedule.parse(schedule_raw), prompt=prompt)
+        job = Job(
+            name=name,
+            schedule=Schedule.parse(schedule_raw),
+            prompt=prompt,
+            project_dir=project_dir,
+        )
         await self._job_store.upsert(job)
         self._scheduler.add_job(job)
         return job
@@ -51,10 +58,13 @@ class CronService:
         ):
             raise ValueError("任务名称和提示词不能为空")
 
-        schedule_changed = False
-        if schedule_raw is not None:
+        # 表单恒回传 schedule：原样未变就不重新解析 / 注册（interval 不因改名重锚节拍，
+        # 已过期的暂停一次性任务也能改名）
+        schedule_changed = (
+            schedule_raw is not None and schedule_raw.strip() != job.schedule.value
+        )
+        if schedule_changed:
             job.schedule = Schedule.parse(schedule_raw)
-            schedule_changed = True
         if name is not None:
             job.name = name.strip()
         if prompt is not None:
@@ -82,11 +92,11 @@ class CronService:
             self._scheduler.remove_job(job.id)
         return job
 
-    async def trigger(self, job_id: str) -> Job:
-        """立即执行一次任务。先 get_or_raise 保证友好错误（而非 KeyError）。"""
+    async def trigger(self, job_id: str) -> bool:
+        """立即执行一次任务，返回是否真的起了执行（已在跑则 False）。先 get_or_raise
+        保证友好错误（而非 KeyError）。"""
         job = await self.get_or_raise(job_id)
-        await self._scheduler.trigger(job.id)
-        return job
+        return await self._scheduler.trigger(job.id)
 
     def stop(self, job_id: str) -> bool:
         """中断该任务正在进行的执行。返回是否确有一次运行被中断。"""

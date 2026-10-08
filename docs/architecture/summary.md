@@ -40,7 +40,7 @@ START
 1. **熔断检查** — 同 thread summary 连续失败超 `summary_failure_circuit_threshold` 且未到 `summary_circuit_reset_seconds`：直接返回放行 `CallModel`。
 2. **阈值判断** — `context_window_tokens < 阈值` → 返回放行。
 3. **消息分区** — 跳过头部 SystemMessage（不删除）；尾必须是 HumanMessage（不变量，否则报错）；中间消息为待摘要内容。可压缩消息 < 2 条时直接放行。
-4. **生成摘要（`_summarize`）** — 内部 `strip_images_from_messages` 把 image/document block 换成占位（防摘要调用自身撞 PTL），剔除悬空 tool_use，复用主对话 system_prompt + tools 前缀（Prompt Caching 命中）调 `run_summary`；自身撞 prompt-too-long 时按 `summary_ptl_retry_drop_ratio` 从头部丢弃整组 round 重试，至多 `summary_ptl_retry_max` 次。失败则记录熔断计数并抛出。
+4. **生成摘要（`_summarize`）** — 剔除悬空 tool_use，沿用主对话 system_prompt + tools 前缀调 `run_summary`（缓存命中因 provider 而异：OpenAI 系前缀自动缓存可复用；Anthropic 下摘要链不带主链的思考参数、也不在消息上打断点，不命中主对话缓存，按全价计）；自身撞 prompt-too-long 时先由 `strip_images_from_messages` 把 image/document block 换成占位（仅一次），仍超长再按 `summary_ptl_retry_drop_ratio` 从头部丢弃整组 round 重试，至多 `summary_ptl_retry_max` 次。失败则记录熔断计数并抛出。
 5. **就地替换** — 成功后清零熔断，返回 `[RemoveMessage(历史…), RemoveMessage(末条 Human), carrier, 换新 id 的末条 Human]`。摘要作独立 carrier 插在末条 Human 之前；上下文注入块不在此重建——下游 `PreprocessMessages` 的 `context_inject` hook 在压缩后的历史上扫不到 marker，自动全量重注入（见 `context_inject.py`）。
 
 ## 摘要 carrier 格式
@@ -80,18 +80,17 @@ Summarizer 节点只在「即将溢出的当轮」工作；对**空闲会话**�
 （`compact.py` 文件末尾 + `AgentBridge.compact_thread`），供 `/compact` 命令（两端可用）与
 IM 每日整理的 summary 阶段调用：
 
-- **共用压缩核**：`run_summary`（strip 图 → 缓存安全 tool_call_chain → PTL 截头重试 → 提取
+- **共用压缩核**：`run_summary`（与主链同前缀的 tool_call_chain → PTL 时先剥图再截头重试 → 提取
   文本）被节点与离线入口共用；离线绕开节点专属的阈值门 / 熔断器 / 「末条必须 Human」不变量。
 - **判定**（`select_for_compaction`）：不设大小门，仅两条结构性前提——末条须是无 tool_calls
   的干净 AIMessage（= 已完成一轮的空闲会话），且末条之外至少有一条可删消息。
 - **写回**（`build_compacted_update` → `AgentBridge.flush_offline`）：整条 messages 通道
-  `Overwrite` 成 `[System?, Human(<summary>), 保留的原文]`，头部 SystemMessage 原位保留
-  （`compact.split_head` 是这条规则的单一实现）。`flush_offline` 是离线写回的唯一出口，
+  `Overwrite` 成 `[Human(<summary>), 保留的原文]`（state 不存 SystemMessage）。`flush_offline` 是离线写回的唯一出口，
   它统一补消息 id（`aupdate_state` 不像节点写入那样自动补）并挂 `OfflineFlush` 锚点。
-- **两个刻意的"不带"**：末条 AI 副本**不带 usage_metadata**——`context_window_tokens` 无
-  usage 锚点时退化为字节估算，压缩后不会因旧 usage 误判仍超阈值；摘要载体 Human **不带
-  lumi ts**——IM 每日整理的判活（`latest_human_ts`）不会把"压缩过但无人说话"的会话误判为
-  有新内容（连带要求 dream 失败必须挡住压缩，见 `feishu.md`《每日记忆整理》）。
+- **一个刻意的"不带"与一个"继承"**：末条 AI 副本**不带 usage_metadata**——`context_window_tokens` 无
+  usage 锚点时退化为字节估算，压缩后不会因旧 usage 误判仍超阈值；摘要载体**继承**被压历史中
+  最新一条真人消息的 lumi ts（`build_summary_carrier`），判活基线（`latest_human_ts`）不随压缩
+  变化（dream 失败必须挡住压缩的次序不变量见 `feishu.md`《每日记忆整理》）。
 - **不外泄**：全程不经 `astream_events`，不会流到渠道/前端；`/compact` 只回一条结果消息。
 
 压缩后首条真实 human 可能已并入摘要，`session_store._summary_from_snapshot` 不再因取不到

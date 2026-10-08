@@ -43,6 +43,7 @@ from lumi.agents.core.node_helpers.messages import (
     inject_text_into_message,
 )
 from lumi.agents.core.preprocessing.agent_detector import AgentChangeDetector
+from lumi.agents.core.preprocessing.compact import find_pending_human
 from lumi.agents.core.preprocessing.memory import (
     MEMORY_HEADER,
     PROJECT_DOC_HEADER,
@@ -215,11 +216,20 @@ async def context_inject_hook(ctx: HookContext) -> HookResult:
     if runtime is None:
         return None
     messages = list(ctx.state.get("messages") or [])
-    if not messages or not isinstance(messages[-1], HumanMessage):
+    if not messages:
         return None
 
     project_dir = get_authorized_directory()
     old_marker, written = _scan_history(messages, project_dir)
+    target = messages[-1]
+    if not isinstance(target, HumanMessage):
+        # 工具轮中段刚被 PTL 兜底压缩：注入块连同 marker 一起删了，本轮后续调用就缺
+        # env / 技能 / 项目说明。注入到压缩原样保住的那条真人消息上（同 id 替换）
+        if old_marker is not None:
+            return None
+        target = find_pending_human(messages)
+        if target is None:
+            return None
     old = old_marker or {}
     parts: list[str] = []
     marker: dict = {}
@@ -235,7 +245,8 @@ async def context_inject_hook(ctx: HookContext) -> HookResult:
         parts.append(f"<{ENV_TAG}>\n{env_body}\n</{ENV_TAG}>\n")
 
     if _has_agent_tool(runtime.context.tools):
-        agents = AgentChangeDetector.get_instance(project_dir).peek()
+        # 列表按会话项目取，与 agent / skill 工具查找同源（宣告了的一定调得到）
+        agents = AgentChangeDetector.get_instance(runtime.context.project_dir).peek()
         text, marker["agents"] = _emit_keyed(
             "agent 列表",
             AGENT_HEADER,
@@ -246,7 +257,7 @@ async def context_inject_hook(ctx: HookContext) -> HookResult:
         )
         parts.append(text)
 
-    skills = SkillChangeDetector.get_instance(project_dir).peek()
+    skills = SkillChangeDetector.get_instance(runtime.context.project_dir).peek()
     text, marker["skills"] = _emit_keyed(
         "技能列表",
         SKILL_HEADER,
@@ -283,7 +294,7 @@ async def context_inject_hook(ctx: HookContext) -> HookResult:
     # ① "本会话写过"名单的窗口每轮收口——防止某次不改 digest 的 write（如改
     #   SKILL.md 正文没动 description）永远留在窗口里、误静默未来的外部变更；
     # ② 倒扫恒在上一条用户消息处停下，长会话不退化为 O(n²)。
-    last = messages[-1]
+    last = target
     inject = "".join(parts)
     if inject:
         last = inject_text_into_message(last, inject)

@@ -1,6 +1,6 @@
-// 每个工具的展示元数据（图标 + 动作动词/名词 + 人类可读标题提取）集中在一张表，
-// 新增工具只需加一行。icon 驱动 ToolRow 图标，verb/noun 驱动 summarizeTools 聚合，
-// title 从 args 提取非技术用户看得懂的标题。
+// 每个工具的展示元数据（图标 + 摘要动作 + 人类可读标题提取）集中在一张表，
+// 新增工具只需加一行。icon 驱动 ToolRow 图标，sum 驱动 summarizeTools 聚合（i18n 键
+// tool.sum.<sum> / tool.sum.<sum>.n），title 从 args 提取非技术用户看得懂的标题。
 import {
   SquareTerminal,
   FileText,
@@ -21,10 +21,9 @@ export const argStr = (v: unknown) => (typeof v === 'string' ? v : '')
 
 type ToolMeta = {
   icon: LucideIcon
-  verb: string
-  noun: string
+  sum: string // 摘要动作（同动作合并计数），见 tool.sum.* 词条
   status: string // 运行中的状态指示器文案 i18n key（动作级粒度）
-  title: (a: Record<string, unknown>, name: string) => string
+  title: (a: Record<string, unknown>, t: Translate, name: string) => string
   // 工具行展示的参数；缺省 = 不展示（agent/todos 另有专门渲染）。未登记的工具（MCP 等）走 kvArgs
   args?: (a: Record<string, unknown>, t: Translate) => ToolArgs
 }
@@ -62,20 +61,20 @@ const searchArgs = (a: Record<string, unknown>, t: Translate): ToolArgs => ({
   text: [argStr(a.pattern), argStr(a.path) === '.' ? '' : argStr(a.path)].filter(Boolean).join('  ·  '),
   chips: [argStr(a.glob), argStr(a.type), a.case_insensitive ? t('tool.ignoreCase') : ''].filter(Boolean),
 })
-const fileTitle = (a: Record<string, unknown>, name: string) =>
+const fileTitle = (a: Record<string, unknown>, _t: Translate, name: string) =>
   argStr(a.file_path) ? basename(argStr(a.file_path)) : name
-const searchTitle = (a: Record<string, unknown>) =>
-  argStr(a.pattern) ? `Search ${clip(argStr(a.pattern), 48)}` : 'Search'
+const searchTitle = (a: Record<string, unknown>, t: Translate) =>
+  argStr(a.pattern) ? t('tool.title.searchFor', { q: clip(argStr(a.pattern), 48) }) : t('tool.title.search')
 
 const TOOL_META: Record<string, ToolMeta> = {
-  bash: { icon: SquareTerminal, verb: 'Ran', noun: 'command', status: 'status.runCommand', title: (a) => clip(argStr(a.description) || 'Run command'), args: bashArgs },
-  read: { icon: FileText, verb: 'Read', noun: 'file', status: 'status.readFile', title: fileTitle, args: readArgs },
-  write: { icon: FilePlus, verb: 'Wrote', noun: 'file', status: 'status.editFile', title: fileTitle, args: editArgs },
-  edit: { icon: FilePen, verb: 'Edited', noun: 'file', status: 'status.editFile', title: fileTitle, args: editArgs },
-  grep: { icon: Search, verb: 'Searched', noun: '', status: 'status.searching', title: searchTitle, args: searchArgs },
-  glob: { icon: Search, verb: 'Searched', noun: '', status: 'status.searching', title: searchTitle, args: searchArgs },
-  agent: { icon: Bot, verb: 'Ran', noun: 'subagent', status: 'status.subtask', title: (a) => clip(argStr(a.prompt) || argStr(a.name) || 'Run subagent') },
-  todos: { icon: ListChecks, verb: 'Updated', noun: 'todo', status: 'status.tool', title: () => 'Update todos' },
+  bash: { icon: SquareTerminal, sum: 'command', status: 'status.runCommand', title: (a, t) => clip(argStr(a.description) || t('tool.title.command')), args: bashArgs },
+  read: { icon: FileText, sum: 'read', status: 'status.readFile', title: fileTitle, args: readArgs },
+  write: { icon: FilePlus, sum: 'write', status: 'status.editFile', title: fileTitle, args: editArgs },
+  edit: { icon: FilePen, sum: 'edit', status: 'status.editFile', title: fileTitle, args: editArgs },
+  grep: { icon: Search, sum: 'search', status: 'status.searching', title: searchTitle, args: searchArgs },
+  glob: { icon: Search, sum: 'search', status: 'status.searching', title: searchTitle, args: searchArgs },
+  agent: { icon: Bot, sum: 'subagent', status: 'status.subtask', title: (a, t) => clip(argStr(a.prompt) || argStr(a.name) || t('tool.title.subagent')) },
+  todos: { icon: ListChecks, sum: 'todos', status: 'status.tool', title: (_a, t) => t('tool.title.todos') },
 }
 
 export const toolIcon = (name: string): LucideIcon => TOOL_META[name]?.icon ?? Wrench
@@ -87,43 +86,30 @@ export const toolStatusKey = (name: string): string =>
 // 是否是登记过的内置工具：未登记的（MCP 等）标题栏直接显示工具名
 export const isKnownTool = (name: string): boolean => name in TOOL_META
 
-const toolAction = (name: string): { verb: string; noun: string } => {
-  const m = TOOL_META[name]
-  return m ? { verb: m.verb, noun: m.noun } : { verb: 'Used', noun: name }
-}
-
-// 聚合成 "Edited 2 files, ran a command, read a file" 式自然语言摘要：
-// 同动作合并计数，首个短语首字母大写、其余句中小写。
-export function summarizeTools(tools: ToolItem[]): string {
-  if (tools.length === 0) return ''
-  const order: string[] = []
-  const agg = new Map<string, { verb: string; noun: string; n: number }>()
-  for (const t of tools) {
-    const a = toolAction(t.name)
-    const key = `${a.verb}|${a.noun}`
-    if (!agg.has(key)) {
-      agg.set(key, { ...a, n: 0 })
-      order.push(key)
-    }
-    agg.get(key)!.n++
+// 聚合成「编辑了 2 个文件，运行了 1 条命令」/ "Edited 2 files, ran a command" 式摘要：
+// 同动作合并计数（未登记的工具按工具名各自成组），首个短语之后句中小写（英文）。
+export function summarizeTools(tools: ToolItem[], t: Translate): string {
+  const counts = new Map<string, number>()
+  for (const tool of tools) {
+    const key = TOOL_META[tool.name]?.sum ?? `other:${tool.name}`
+    counts.set(key, (counts.get(key) ?? 0) + 1)
   }
-  const phrases = order.map((k) => {
-    const { verb, noun, n } = agg.get(k)!
-    if (!noun) return n === 1 ? verb : `${verb} ${n} times`
-    return n === 1 ? `${verb} a ${noun}` : `${verb} ${n} ${noun}s`
+  const phrases = [...counts].map(([key, n]) => {
+    const [sum, name] = key.startsWith('other:') ? ['other', key.slice(6)] : [key, '']
+    return t(n === 1 ? `tool.sum.${sum}` : `tool.sum.${sum}.n`, { n, name })
   })
   return phrases
     .map((p, i) => (i === 0 ? p : p.charAt(0).toLowerCase() + p.slice(1)))
-    .join(', ')
+    .join(t('tool.sum.sep'))
 }
 
 // 从工具 args 提取人类可读标题（非技术用户看得懂），而非 dump raw JSON。
 // 提取规则定义在 TOOL_META[name].title；未知工具回退到第一个字符串字段（子代理行只有标题，
 // 靠它保留信息；主流 ToolRow 有第二行键值，对未知工具改用工具名，见 ToolRow）。
-export function toolTitle(name: string, args: unknown): string {
+export function toolTitle(name: string, args: unknown, t: Translate): string {
   const a = asRecord(args)
   const m = TOOL_META[name]
-  if (m) return m.title(a, name)
+  if (m) return m.title(a, t, name)
   const first = Object.values(a).find((v) => typeof v === 'string')
   return first ? clip(String(first)) : name
 }

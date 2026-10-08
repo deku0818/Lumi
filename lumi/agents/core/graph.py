@@ -13,6 +13,9 @@ from langgraph.types import TracePolicy
 from psycopg import AsyncConnection
 from psycopg.rows import dict_row
 
+# import side effect：在图的装配点注册内置 hooks（放在包 __init__ 里的话，builtin 回头
+# import 的模块若是进程首个导入者，会撞上自己初始化到一半的循环）
+from lumi.agents.core.hooks import builtin  # noqa: F401
 from lumi.agents.core.nodes import (
     after_tool_executor,
     auto_classify,
@@ -62,7 +65,12 @@ class LumiAgent:
         self.builder = StateGraph(LumiAgentState)
         self._draw_nodes()
         self._draw_edges()
-        self.graph = self.builder.compile(checkpointer=checkpointer)
+        # 不持久化须显式传 False：None 在 LangGraph 里是「作为子图继承父级」，子代理 /
+        # workflow / dream 在父运行的工具节点里执行时会借用父会话的 checkpointer，每个
+        # 超步都写进父 thread，父连接关闭后后台子代理随即崩溃
+        self.graph = self.builder.compile(
+            checkpointer=checkpointer if checkpointer is not None else False
+        )
 
     def _draw_nodes(self):
         """添加节点"""
@@ -92,7 +100,11 @@ class LumiAgent:
         # 与 marker 随历史删除，hook 自动全量重建；hook 注入的消息也不会被当轮压掉。
         self.builder.add_edge(START, "Summarizer")
         self.builder.add_edge("Summarizer", "PreprocessMessages")
-        self.builder.add_edge("PreprocessMessages", "CallModel")
+        self.builder.add_conditional_edges(
+            "PreprocessMessages",
+            after_tool_executor,
+            {"CallModel": "CallModel", "END": END},
+        )
         self.builder.add_conditional_edges(
             "CallModel",
             is_use_tool,
@@ -293,6 +305,19 @@ async def create_checkpointer(
             return InMemorySaver(serde=_checkpoint_serde())
 
 
+def with_memory_instructions(system_prompt: str, project_dir: Path | None) -> str:
+    """确保记忆目录存在，并把记忆行为说明追加到系统提示词尾部。
+
+    记忆目录按会话项目根（project_dir，未传则进程 cwd）隔离，与权限引擎同源。
+    """
+    from lumi.agents.memory import build_memory_instructions, ensure_memory_dir
+
+    instructions = build_memory_instructions(
+        ensure_memory_dir(project_dir or Path.cwd())
+    )
+    return f"{system_prompt}\n\n{instructions}" if system_prompt else instructions
+
+
 async def create_agent(
     tools: list | None = None,
     system_prompt: str | None = None,
@@ -322,7 +347,8 @@ async def create_agent(
                      hooks 已改为按会话经 contextvar 注入，此处不再加载。
         enable_memory: 是否为本 agent 启用持久记忆（默认 False，opt-in）。持久记忆有副作用
                        （写磁盘 / 改系统提示词 / 注入上下文 / 写入免审批），故只有面向用户的
-                       对话入口（bridge）显式传 True；子 agent、workflow、cron 等天然不带记忆。
+                       对话入口（bridge，含经它执行的 cron）显式传 True；子 agent、workflow
+                       不带记忆。
 
     Returns:
         (agent, context) 元组
@@ -342,17 +368,8 @@ async def create_agent(
         model_name = resolved.model
         provider = resolved.provider
 
-    # 启用记忆：确保记忆目录存在，并把记忆行为说明追加到主 agent 系统提示词尾部。
-    # 记忆目录按会话项目根（project_dir，未传则进程 cwd）隔离，与权限引擎同源。
     if enable_memory:
-        from lumi.agents.memory import build_memory_instructions, ensure_memory_dir
-
-        # 记忆目录 key 由 memory_dir 内部 resolve，此处不必重复 resolve。
-        mem_dir = ensure_memory_dir(project_dir or Path.cwd())
-        instructions = build_memory_instructions(mem_dir)
-        system_prompt = (
-            f"{system_prompt}\n\n{instructions}" if system_prompt else instructions
-        )
+        system_prompt = with_memory_instructions(system_prompt, project_dir)
 
     # 复用或新建权限引擎（项目根随会话绑定，调用方未传则退回进程 cwd）
     if permission_engine is None:

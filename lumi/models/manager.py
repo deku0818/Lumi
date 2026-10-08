@@ -24,6 +24,9 @@ if TYPE_CHECKING:
 Protocol = Literal["anthropic", "openai"]
 
 _cache: dict[str, Any] = {}
+# SDK 重试次数（指数退避约 0.5→8s 封顶，或按 retry-after）：SDK 默认 2 次对 529 过载
+# 偏少；chain 外不叠 with_retry，此即唯一重试层
+_MAX_RETRIES = 5
 
 
 class DialectChatOpenAI(ChatOpenAI):
@@ -217,7 +220,10 @@ def create_llm(
     effort（非 None）显式覆盖档位、绕过 profile：IM 渠道会话据此独立配置思考模式，
     而不改动全局 provider_store 的 profile；None 时沿用 resolve() 解析出的 profile 档位。
     参数优先级：config.json llm_params < effort 档位 < 调用方 llm_params；
-    无内置调参默认，未指定的参数交给 SDK 默认值。
+    无内置调参默认，未指定的参数交给 SDK 默认值——唯一例外是 max_retries 默认
+    :data:`_MAX_RETRIES`：SDK 是唯一重试层（408/409/429/5xx 含 Anthropic 529，
+    遵从 retry-after / x-should-retry），chain 外不再叠一层；流中途断开由 bridge
+    的 MAX_STREAM_RETRIES 兜。
     """
     from lumi.models import provider_store
     from lumi.utils.config import get_config
@@ -251,6 +257,7 @@ def create_llm(
         "model": model_name,
         **llm_params,
     }
+    final_params.setdefault("max_retries", _MAX_RETRIES)
     if protocol == "openai":
         # 功能性标志而非调参：流式响应里携带 token 用量统计
         final_params.setdefault("stream_usage", True)

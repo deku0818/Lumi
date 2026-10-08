@@ -10,6 +10,7 @@ import os
 from pathlib import Path
 
 import yaml
+from pydantic import ValidationError
 
 from lumi.utils.config.discovery import ConfigDiscovery
 from lumi.utils.config.models import Config
@@ -60,7 +61,7 @@ def project_style_override(project_dir: Path) -> str | None:
     """
     try:
         data = json.loads((project_dir / ".lumi" / "config.json").read_text("utf-8"))
-    except (OSError, json.JSONDecodeError):
+    except (OSError, ValueError):  # 含 JSONDecodeError / 非 UTF-8
         return None
     style = data.get("style")
     return str(style) if style else None
@@ -154,9 +155,12 @@ class LumiConfig:
 
         try:
             return Config(**config_dict)
-        except ValueError as e:
-            logger.error(f"config.json 字段校验失败，使用默认配置: {e}")
-            return Config()
+        except ValidationError as e:
+            # 只丢校验失败的顶层段（回默认），其余照常生效：整份回退会连带丢掉
+            # env 里的 API key、style 等无关配置
+            bad = {err["loc"][0] for err in e.errors()}
+            logger.warning(f"config.json 段 {sorted(bad)} 校验失败，已按默认处理: {e}")
+            return Config(**{k: v for k, v in config_dict.items() if k not in bad})
 
     def apply_env(self) -> None:
         """将配置中的 env 字段注入到 os.environ
@@ -263,7 +267,7 @@ class LumiConfig:
         for source, path in self.prompt_layers(name, project_dir):
             try:
                 content = path.read_text(encoding="utf-8")
-            except OSError:
+            except (OSError, ValueError):  # ValueError：非 UTF-8，跳过这层
                 continue
             if strip_frontmatter(content).strip():
                 return source, path, content

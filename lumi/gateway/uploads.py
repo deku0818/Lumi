@@ -7,7 +7,7 @@
 
 两条管道不合并（飞书在进程内直接产 image block，没有指向自己的 HTTP 客户端；
 反过来 100MB 文件也不该塞进 JSON-RPC 帧走 base64），但存盘这一半只有一份实现：
-落盘布局 / 上限 / 日后的保留清理策略都在本模块改一次。产出的路径由 bridge 与
+落盘布局 / 上限 / 保留清理（删会话时回收，见 remove_uploads）都在本模块改一次。产出的路径由 bridge 与
 文件附件统一拼 ``<attached-file>`` 标签块（模型侧）+ 写进 ``lumi.items`` 的
 files（显示侧），让 read / vision 工具按路径消费。
 
@@ -21,8 +21,10 @@ from __future__ import annotations
 import asyncio
 import base64
 import binascii
+import shutil
 import uuid
-from collections.abc import AsyncIterator
+from collections.abc import AsyncIterator, Iterable
+from pathlib import Path
 
 from lumi.utils.config.global_manager import uploads_dir
 from lumi.utils.logger import logger
@@ -37,9 +39,16 @@ _MEDIA_EXT = {
 # 单张内联图片解码后大小上限（仅存盘用，read/vision 端会再按 token 预算压缩）
 _MAX_IMAGE_BYTES = 50 * 1024 * 1024
 
+# 单个上传文件上限（与 Electron 主进程 lumi-file 协议的上限一致）
+MAX_UPLOAD_BYTES = 128 * 1024 * 1024
+
 # 攒够这么多再写一次盘：写调用同步阻塞，单块太小则线程切换次数按文件大小线性膨胀，
 # 太大则一次 write 卡住的时间变长。4MB 下 128MB 文件约 32 次跳转。
 _FLUSH_BYTES = 4 * 1024 * 1024
+
+
+class UploadTooLarge(Exception):
+    """上传字节数超过 ``MAX_UPLOAD_BYTES``（边收边数，分块传输同样拦得住）。"""
 
 
 async def save_upload(name: str, chunks: AsyncIterator[bytes]) -> str:
@@ -51,27 +60,49 @@ async def save_upload(name: str, chunks: AsyncIterator[bytes]) -> str:
     边收边写（不整块进内存）：一台远程机上几个并发上传就能把内存顶穿。写盘经
     ``asyncio.to_thread`` 卸载并按 ``_FLUSH_BYTES`` 攒批——同步 write 直接压在
     事件循环上时，脏页回写一卡就把该进程承载的**全部 WS 会话**一起冻住。
-    调用方负责在收流前挡掉超限请求（见 ws.upload_endpoint）。
+
+    上限边收边数（分块传输不带 Content-Length，只靠请求头预检挡不住），超限抛
+    ``UploadTooLarge``；超限 / 客户端中途断开 / 取消都连同独占目录删掉半截文件。
     """
     dest_dir = uploads_dir() / uuid.uuid4().hex[:12]
     await asyncio.to_thread(dest_dir.mkdir, parents=True)
     dest = dest_dir / name
     size = 0
-    with dest.open("wb") as fp:
-        pending: list[bytes] = []
-        buffered = 0
-        async for chunk in chunks:
-            pending.append(chunk)
-            buffered += len(chunk)
-            if buffered >= _FLUSH_BYTES:
+    try:
+        with dest.open("wb") as fp:
+            pending: list[bytes] = []
+            buffered = 0
+            async for chunk in chunks:
+                size += len(chunk)
+                if size > MAX_UPLOAD_BYTES:
+                    raise UploadTooLarge(name)
+                pending.append(chunk)
+                buffered += len(chunk)
+                if buffered >= _FLUSH_BYTES:
+                    await asyncio.to_thread(fp.write, b"".join(pending))
+                    pending, buffered = [], 0
+            if pending:
                 await asyncio.to_thread(fp.write, b"".join(pending))
-                size += buffered
-                pending, buffered = [], 0
-        if pending:
-            await asyncio.to_thread(fp.write, b"".join(pending))
-            size += buffered
+    except BaseException:
+        shutil.rmtree(dest_dir, ignore_errors=True)
+        raise
     logger.info("[uploads] %s → %s (%d bytes)", name, dest, size)
     return str(dest)
+
+
+def remove_uploads(paths: Iterable[str]) -> None:
+    """删除会话声明过的上传件（删会话时回收）。
+
+    只动 uploads 目录里的路径：本地后端的附件是用户自己的原文件（零拷贝发路径），
+    url 附件不落盘，都不碰。``save_upload`` 的独占 uuid 子目录随文件一并删掉。
+    """
+    root = uploads_dir().resolve()
+    for p in paths:
+        path = Path(p).resolve()
+        if path.parent == root:  # 内联图片：直接平铺在 uploads 下
+            path.unlink(missing_ok=True)
+        elif path.parent.parent == root:  # save_upload：uploads/<uuid>/<name>
+            shutil.rmtree(path.parent, ignore_errors=True)
 
 
 def _save_base64_image(media_type: str, data: str) -> str | None:

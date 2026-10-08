@@ -37,24 +37,34 @@ def _read_json_dict(path: Path) -> dict[str, Any]:
     try:
         with open(path, encoding="utf-8") as f:
             data = json.load(f)
-    except (json.JSONDecodeError, OSError) as e:
+    except (OSError, ValueError) as e:  # 含 JSONDecodeError / 非 UTF-8
         logger.error(f"MCP配置文件加载失败。文件路径: {path}, 错误: {e}")
         return {}
     return data if isinstance(data, dict) else {}
 
 
-def normalize_server_config(cfg: dict[str, Any]) -> dict[str, Any]:
-    """单个 server 配置归一化：剥离 Lumi 元字段 ``disabled``、补推缺省 ``transport``/``args``。
+# Claude Code / VS Code 配置的 "type"（stdio / http / sse）里，只有 http 与 adapter 的
+# transport 名不同
+_TYPE_TO_TRANSPORT = {"http": "streamable_http"}
 
-    ``disabled`` 绝不能下传给 langchain adapter（它 ``**params`` 全透传，混入未知键会
-    TypeError）；``transport`` 缺省按有无 url 推断（Claude Desktop 风格配置不写该键，
-    而 adapter 的 create_session 强制要求）；``args`` 同理——命令本身自足（无参数可传）
-    时配置里没有该键，但 adapter 硬性要求 stdio 必须带 args，补空列表即可。
+
+def normalize_server_config(cfg: dict[str, Any]) -> dict[str, Any]:
+    """单个 server 配置归一化：剥离 ``disabled`` / ``type``、补推缺省 ``transport``/``args``。
+
+    ``disabled`` 与 ``type`` 绝不能下传给 langchain adapter（它 ``**params`` 全透传，
+    混入未知键会 TypeError）；``transport`` 缺省时先认 Claude Code / VS Code 风格的
+    ``type``，再按有无 url 推断（Claude Desktop 风格两者都不写，而 adapter 的
+    create_session 强制要求）；``args`` 同理——命令本身自足（无参数可传）时配置里没有
+    该键，但 adapter 硬性要求 stdio 必须带 args，补空列表即可。
     会话池与连接测试共用，两路行为恒一致。
     """
-    out = {k: v for k, v in cfg.items() if k != "disabled"}
+    out = {k: v for k, v in cfg.items() if k not in ("disabled", "type")}
     if "transport" not in out:
-        out["transport"] = "streamable_http" if out.get("url") else "stdio"
+        declared = cfg.get("type")
+        if declared:
+            out["transport"] = _TYPE_TO_TRANSPORT.get(declared, declared)
+        else:
+            out["transport"] = "streamable_http" if out.get("url") else "stdio"
     if out["transport"] == "stdio":
         out.setdefault("args", [])
     return out

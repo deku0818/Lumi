@@ -9,162 +9,13 @@
 # 注意：本模块**不能**加 `from __future__ import annotations`——它会把
 # `runtime: ToolRuntime` 变成字符串注解，LangGraph 的注入识别失效（同 agent.py 的约定，
 # 见回归测试 test_runtime_injected_via_toolnode）。
-import asyncio
-import os
-import re
 from pathlib import Path
 
 from langchain_core.tools import tool
 from langgraph.prebuilt.tool_node import ToolRuntime
 from pydantic import BaseModel, Field
 
-from lumi.agents.runtime.shell_env import provided_env
 from lumi.agents.tools.loader import SkillConfig
-from lumi.utils.config import get_config
-from lumi.utils.logger import logger
-
-# ============================================================================
-# Skill Command Executor
-# ============================================================================
-
-
-class SkillCommandExecutor:
-    """执行技能 markdown 内容中的嵌入式命令。"""
-
-    # 匹配 !`command` 或 !```command``` 语法
-    COMMAND_PATTERN = re.compile(r"!```(.+?)```|!`([^`]+)`", re.MULTILINE | re.DOTALL)
-
-    def __init__(
-        self,
-        working_dir: str,
-        skill_name: str,
-        env_dir: str = "",
-        timeout: float = 10.0,
-        max_output_bytes: int = 10_000,
-    ) -> None:
-        self.working_dir = working_dir
-        # 会话级 env 注入按它取（默认同 working_dir）：技能可能来自全局层
-        # ~/.lumi/skills/，按源目录查会漏掉项目专属身份，须按会话项目查
-        self.env_dir = env_dir or working_dir
-        self.skill_name = skill_name
-        self.timeout = timeout
-        self.max_output_bytes = max_output_bytes
-
-    async def execute_commands(self, content: str) -> str:
-        """执行内容中的所有嵌入式命令，将成功的命令替换为其输出。
-
-        失败或超时的命令保留原始文本不变。
-        """
-        rendered = content
-        for match in self.COMMAND_PATTERN.finditer(content):
-            command = (match.group(1) or match.group(2)).strip()
-            original_text = match.group(0)
-
-            command_output = await self._run_single_command(command)
-            if command_output is not None:
-                rendered = rendered.replace(original_text, command_output, 1)
-
-        return rendered
-
-    async def _run_single_command(self, command: str) -> str | None:
-        """执行单个命令，成功返回截断后的 stdout，失败返回 None。"""
-        logger.debug("执行技能命令: %s", command)
-
-        try:
-            # 与 shell/后台任务同源的会话级 env 注入（如项目专属飞书机器人的
-            # LARKSUITE_CLI_PROFILE）：按会话项目（env_dir）命中，cwd 仍是技能源目录
-            proc = await asyncio.create_subprocess_shell(
-                command,
-                stdout=asyncio.subprocess.PIPE,
-                stderr=asyncio.subprocess.PIPE,
-                cwd=self.working_dir,
-                env={**os.environ, **provided_env(self.env_dir)},
-            )
-            stdout_bytes, stderr_bytes = await asyncio.wait_for(
-                proc.communicate(), timeout=self.timeout
-            )
-        except TimeoutError:
-            logger.warning("技能命令执行超时: %s", command)
-            try:
-                proc.kill()  # type: ignore[possibly-undefined]
-            except (ProcessLookupError, OSError):
-                pass
-            return None
-        except OSError as e:
-            logger.error("执行技能命令时发生异常 '%s': %s", command, e)
-            return None
-
-        if proc.returncode != 0:
-            error_msg = (
-                stderr_bytes.decode("utf-8", errors="ignore")
-                or f"退出码: {proc.returncode}"
-            )
-            logger.warning("技能命令执行失败: %s - %s", command, error_msg)
-            return None
-
-        output = stdout_bytes.decode("utf-8", errors="ignore")
-        if len(output.encode()) > self.max_output_bytes:
-            output = output.encode()[: self.max_output_bytes].decode(errors="ignore")
-        return output
-
-    @staticmethod
-    def has_commands(content: str) -> bool:
-        """检查内容是否包含 !`command` 形式的可执行命令。"""
-        return SkillCommandExecutor.COMMAND_PATTERN.search(content) is not None
-
-
-# ============================================================================
-# Skill Provider
-# ============================================================================
-
-
-def _get_skill_execution_config() -> dict[str, bool | float | int]:
-    """获取技能嵌入式命令的执行配置。
-
-    返回包含 enabled、timeout、max_output_bytes 的字典，
-    配置加载失败时回退到默认值。
-    """
-    defaults: dict[str, bool | float | int] = {
-        "enabled": True,
-        "timeout": 10.0,
-        "max_output_bytes": 10_000,
-    }
-
-    try:
-        app_config = get_config().config
-        if hasattr(app_config, "skill_execution"):
-            se = app_config.skill_execution
-            return {
-                "enabled": se.enabled,
-                "timeout": se.command_timeout,
-                "max_output_bytes": se.max_output_bytes,
-            }
-    except (AttributeError, TypeError) as e:
-        logger.warning("无法加载技能执行配置,使用默认值: %s", e)
-
-    return defaults
-
-
-async def _execute_embedded_commands(
-    prompt_content: str, source_dir: Path, skill_name: str, project_dir: str
-) -> str:
-    """若提示词中包含嵌入式命令且执行功能已启用，则执行并替换。"""
-    exec_config = _get_skill_execution_config()
-    if not exec_config["enabled"]:
-        return prompt_content
-
-    if not SkillCommandExecutor.has_commands(prompt_content):
-        return prompt_content
-
-    executor = SkillCommandExecutor(
-        working_dir=str(source_dir),
-        skill_name=skill_name,
-        env_dir=project_dir,
-        timeout=float(exec_config["timeout"]),
-        max_output_bytes=int(exec_config["max_output_bytes"]),
-    )
-    return await executor.execute_commands(prompt_content)
-
 
 _SKILL_DESCRIPTION = """在主对话中执行技能（skill）。
 
@@ -201,23 +52,17 @@ async def skill(name: str, runtime: ToolRuntime) -> str:
     if skill_config is None:
         return f"技能 '{name}' 不存在，请检查技能名称是否正确"
 
-    prompt_content = skill_config.prompt
+    return render_skill(skill_config)
 
-    # 源目录即胜出层 SKILL.md 所在目录（path 由 loader 落好，无需再扫）
+
+def render_skill(skill_config: SkillConfig) -> str:
+    """技能正文 + 资源目录提示（skill 工具与 /技能 斜杠命令共用）。
+
+    源目录即胜出层 SKILL.md 所在目录（path 由 loader 落好）——内置技能在安装包里，
+    正文说的「本目录 references/」不给出路径模型无从找起。
+    """
     source_dir = Path(skill_config.path).parent if skill_config.path else None
-    if source_dir:
-        try:
-            prompt_content = await _execute_embedded_commands(
-                prompt_content,
-                source_dir,
-                skill_config.name,
-                str(project_dir) if project_dir else "",
-            )
-        except Exception as e:
-            logger.error("执行技能命令失败: %s", e)
-
-    # 返回 prompt + Tips
     skill_path = str(source_dir) if source_dir else f"skills/{skill_config.name}"
-    tips = f"\n\n---\n**Tips**: 技能资源位于 `{skill_path}/` 目录下。"
-
-    return prompt_content + tips
+    return (
+        f"{skill_config.prompt}\n\n---\n**Tips**: 技能资源位于 `{skill_path}/` 目录下。"
+    )

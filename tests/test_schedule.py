@@ -54,12 +54,12 @@ class TestScheduleParse:
         assert s.value == "30m"
 
     def test_parse_iso8601(self) -> None:
-        s = Schedule.parse("2025-01-15T09:00:00")
+        s = Schedule.parse("2099-01-15T09:00:00")
         assert s.type == ScheduleType.AT
-        assert s.value == "2025-01-15T09:00:00"
+        assert s.value == "2099-01-15T09:00:00"
 
     def test_parse_iso8601_date_only(self) -> None:
-        s = Schedule.parse("2025-01-15")
+        s = Schedule.parse("2099-01-15")
         assert s.type == ScheduleType.AT
 
     def test_parse_cron(self) -> None:

@@ -16,23 +16,28 @@
 
 from __future__ import annotations
 
+import ast
 import asyncio
 import builtins
 import inspect
 import os
-import textwrap
 import time
+import traceback
 from dataclasses import dataclass, field
-from pathlib import Path
 from typing import Any
 
+from lumi.agents.core.meta_message import extract_text_content
+from lumi.agents.core.state import LumiAgentContext
+from lumi.agents.runtime.bg_tasks import new_task_id
+from lumi.agents.runtime.shell_session import run_with_shell
 from lumi.utils.logger import logger
 
 _MAX_AGENTS = 1000
 """单个 workflow 终身 agent 调用上限，防失控的兜底。"""
 
 _HARD_CONCURRENCY_CAP = 16
-"""并发上限硬顶；实际取 ``min(此值, cpu-2)``。"""
+"""并发上限硬顶；实际取 ``max(4, min(此值, cpu-2))``——子代理是 I/O 密集的 LLM 调用，
+不该被核数卡死。"""
 
 _LAST_LOG_LIMIT = 300
 """进度快照里 last_log 的截断长度（卡片只显示一行；日志全文在 output_file 里）。"""
@@ -84,10 +89,16 @@ _SAFE_BUILTIN_NAMES = (
     "__build_class__",
     # 异常类型，让脚本能写 try/except
     "Exception",
-    "ValueError",
+    "ArithmeticError",
+    "AttributeError",
+    "IndexError",
     "KeyError",
-    "TypeError",
+    "LookupError",
     "RuntimeError",
+    "StopIteration",
+    "TypeError",
+    "ValueError",
+    "ZeroDivisionError",
 )
 _SAFE_BUILTINS = {n: getattr(builtins, n) for n in _SAFE_BUILTIN_NAMES}
 
@@ -110,11 +121,12 @@ class WorkflowOutcome:
 
 
 def _max_concurrency() -> int:
-    return max(1, min(_HARD_CONCURRENCY_CAP, (os.cpu_count() or 4) - 2))
+    return max(4, min(_HARD_CONCURRENCY_CAP, (os.cpu_count() or 4) - 2))
 
 
 def _positional_arity(fn: Any) -> int:
-    """统计可按位置传入的形参个数（封顶 3）；``*args`` 视为 3。无法内省时按 1——
+    """统计必须按位置传入的形参个数（封顶 3）；``*args`` 视为 3。带默认值的不算——
+    ``lambda d, schema=S: ...`` 是默认绑定，传 item 进去会顶掉它。无法内省时按 1——
     pipeline stage 绝大多数是单参 ``lambda d: ...``，按 1 调用比按 3 误传安全。"""
     try:
         params = inspect.signature(fn).parameters.values()
@@ -124,7 +136,10 @@ def _positional_arity(fn: Any) -> int:
     for p in params:
         if p.kind is p.VAR_POSITIONAL:
             return 3
-        if p.kind in (p.POSITIONAL_ONLY, p.POSITIONAL_OR_KEYWORD):
+        if (
+            p.kind in (p.POSITIONAL_ONLY, p.POSITIONAL_OR_KEYWORD)
+            and p.default is p.empty
+        ):
             count += 1
     return min(count, 3)
 
@@ -143,21 +158,21 @@ class WorkflowEngine:
         self,
         script: str,
         *,
-        permission_engine: Any = None,
-        tool_mode: str = "default",
-        project_dir: Path | None = None,
+        parent: LumiAgentContext | None = None,
         args: Any = None,
         name: str = "workflow",
+        depth: int = 1,
     ) -> None:
         self._script = script
-        # 子代理复用父 PermissionEngine（共享工作区边界 + 权限规则），故读得到父正在
-        # 处理的工作文件——review/audit 类编排能跑的前提。
-        self._permission_engine = permission_engine
-        # 父级项目根：工作流 agent 的 MCP 分层加载/冷池等待随父项目走
-        self._project_dir = project_dir
-        self._tool_mode = tool_mode
+        # 父 context：子代理经 create_subagent 复用其 PermissionEngine（共享工作区边界 +
+        # 权限规则，故读得到父正在处理的工作文件——review/audit 类编排能跑的前提）、
+        # 项目根（MCP 分层加载/冷池等待随父项目走）与渠道 env
+        self._parent = parent or LumiAgentContext()
         self._args = args
         self._name = name
+        # 子代理的委派深度（父 depth + 1）：按 depth 区分主 / 子代理的闸（项目 Stop hook、
+        # goal、autoDream）与 shell hook 协议里的 depth 都靠它
+        self._depth = depth
 
         self._code: Any = None
         self._semaphore = asyncio.Semaphore(_max_concurrency())
@@ -177,14 +192,17 @@ class WorkflowEngine:
         self._agent_cache_lock = asyncio.Lock()
 
     def compile(self) -> None:
-        """把脚本包进 ``async def`` 并编译。语法错误抛 ``WorkflowScriptError``。"""
+        """把脚本作为 ``async def`` 的函数体编译。语法错误抛 ``WorkflowScriptError``。
+
+        在 AST 层嫁接而非按文本缩进包裹：多行字符串内容不被改写，报错行号即脚本行号。
+        """
         if not self._script.strip():
             raise WorkflowScriptError("脚本为空")
-        wrapped = "async def __workflow_main__():\n" + textwrap.indent(
-            self._script, "    "
-        )
+        module = ast.parse("async def __workflow_main__():\n    pass")
         try:
-            self._code = compile(wrapped, "<workflow>", "exec")
+            body = ast.parse(self._script, "<workflow>").body
+            module.body[0].body = body or [ast.Pass()]
+            self._code = compile(module, "<workflow>", "exec")
         except SyntaxError as e:
             raise WorkflowScriptError(f"语法错误: {e}") from e
 
@@ -200,12 +218,29 @@ class WorkflowEngine:
         }
         exec(self._code, namespace)  # noqa: S102 — 受限命名空间，见模块 docstring
         main = namespace["__workflow_main__"]
-        result = await main()
+        try:
+            result = await main()
+        except WorkflowRuntimeError:
+            raise
+        except Exception as e:
+            raise WorkflowRuntimeError(self._failure_summary(e)) from e
         return WorkflowOutcome(
             result=result,
             agent_count=self._agent_count,
             logs=self._logs,
         )
+
+    def _failure_summary(self, e: Exception) -> str:
+        """脚本失败的诊断：异常类型、脚本行号、已派子代理数与最近日志（失败时子代理
+        成本已花出去，得让模型看得出错在哪一步）。"""
+        lines = [
+            f.lineno
+            for f in traceback.extract_tb(e.__traceback__)
+            if f.filename == "<workflow>"
+        ]
+        where = f"脚本第 {lines[-1]} 行，" if lines else ""
+        recent = f"，最近日志: {self._logs[-3:]}" if self._logs else ""
+        return f"{type(e).__name__}: {e}（{where}已派 {self._agent_count} 个子代理{recent}）"
 
     def set_progress_sink(self, sink: Any) -> None:
         """绑定进度回调 ``sink(progress: dict)``（workflow 工具绑定 task_id 后调用）。"""
@@ -274,6 +309,7 @@ class WorkflowEngine:
             # 检查 + 自增紧贴、无 await → 硬上限。检查放 semaphore 外会让突发扇出在任何
             # 一次自增前全部通过、越过 _MAX_AGENTS。
             if self._agent_count >= _MAX_AGENTS:
+                self._dispatched -= 1  # 未运行，撤回 total，进度才能收敛
                 raise WorkflowRuntimeError(f"agent 调用超过上限 {_MAX_AGENTS}")
             self._agent_count += 1
             lbl = label or agent_name or f"agent#{self._agent_count}"
@@ -286,14 +322,20 @@ class WorkflowEngine:
             self._emit_progress()  # 进入运行（running++）
 
             try:
-                # tool_mode 是 context 属性（继承自父 workflow 调用时的父 context 值）
-                context.tool_mode = self._tool_mode
+                # 无审批通道（与后台子代理同）：auto 由分类器逐个裁决，需人工审批的自动拒绝
+                context.tool_mode = "auto"
                 inputs: dict[str, Any] = {
                     "messages": [HumanMessage(content=prompt)],
+                    "depth": self._depth,
                 }
                 if schema:
                     inputs["output_schema"] = schema
-                result = await sub_agent.graph.ainvoke(inputs, context=context)
+                # 每个子代理独立 shell：并行扇出不在同一把锁上串行，cd/env 不污染
+                # 兄弟代理与主会话；用完即回收
+                result = await run_with_shell(
+                    new_task_id("sub-"),
+                    sub_agent.graph.ainvoke(inputs, context=context),
+                )
 
                 if schema:
                     out = result.get("structured_output")
@@ -307,11 +349,8 @@ class WorkflowEngine:
                         )
                     return out
 
-                from lumi.agents.core.response import extract_ainvoke_content
-
                 messages = result.get("messages") or []
-                content = messages[-1].content if messages else ""
-                return extract_ainvoke_content(content)
+                return extract_text_content(messages[-1].content if messages else "")
             finally:
                 self._done += 1
                 self._emit_progress()  # 完成（done++）
@@ -332,49 +371,48 @@ class WorkflowEngine:
         return cached
 
     async def _create_agent(self, agent_name: str | None) -> tuple[Any, Any]:
-        from lumi.agents.core.graph import create_agent
         from lumi.agents.tools import get_tools, load_agents
+        from lumi.agents.tools.providers.agent import create_subagent
 
         # 工作流 agent 按名缓存、整个工作流生命周期不重建：get_tools 默认等冷池
         # 就位，否则空工具集被缓存后本次工作流永远缺 MCP（project 随父显式传递）
-
-        if agent_name:
-            configs = load_agents(name=agent_name, project_dir=self._project_dir)
-            if not configs:
-                raise WorkflowRuntimeError(f"子代理 '{agent_name}' 未找到")
-            cfg = configs[0]
+        project_dir = self._parent.project_dir
+        if not agent_name:
             tools = await get_tools(
-                tools=cfg.tools or None,
-                disabled_tools=_SUBAGENT_DISABLED,
-                project_dir=self._project_dir,
+                disabled_tools=_SUBAGENT_DISABLED, project_dir=project_dir
             )
-            return await create_agent(
-                tools=tools,
-                system_prompt=cfg.system_prompt,
-                model_name=cfg.model or None,
-                permission_engine=self._permission_engine,
-                project_dir=self._project_dir,
-            )
+            return await create_subagent(self._parent, tools)
 
+        configs = load_agents(name=agent_name, project_dir=project_dir)
+        if not configs:
+            raise WorkflowRuntimeError(f"子代理 '{agent_name}' 未找到")
+        cfg = configs[0]
         tools = await get_tools(
-            disabled_tools=_SUBAGENT_DISABLED, project_dir=self._project_dir
+            tools=cfg.tools or None,
+            disabled_tools=_SUBAGENT_DISABLED,
+            project_dir=project_dir,
         )
-        return await create_agent(
-            tools=tools,
-            permission_engine=self._permission_engine,
-            project_dir=self._project_dir,
+        return await create_subagent(
+            self._parent,
+            tools,
+            system_prompt=cfg.system_prompt,
+            model_name=cfg.model or None,
         )
 
     # ---- 并发编排 -----------------------------------------------------------
 
     async def _parallel(self, thunks: list) -> list:
-        """并行执行一组无参 thunk，屏障——全完成才返回。失败的 thunk 落为 None。"""
+        """并行执行一组无参 thunk（或直接传协程），屏障——全完成才返回。失败的落为
+        None，原因记进日志。"""
 
         async def _one(thunk: Any) -> Any:
             try:
-                return await _ensure_awaitable(thunk())
-            except Exception:
+                return await _ensure_awaitable(thunk() if callable(thunk) else thunk)
+            except Exception as e:
                 logger.exception("[workflow:%s] parallel thunk 失败", self._name)
+                self._log(
+                    f"parallel 第 {thunks.index(thunk)} 项失败: {type(e).__name__}: {e}"
+                )
                 return None
 
         return list(await asyncio.gather(*[_one(t) for t in thunks]))
@@ -392,10 +430,11 @@ class WorkflowEngine:
                 try:
                     called = stage(*(prev, item, idx)[:n])
                     prev = await _ensure_awaitable(called)
-                except Exception:
+                except Exception as e:
                     logger.exception(
                         "[workflow:%s] pipeline stage 失败 (item=%d)", self._name, idx
                     )
+                    self._log(f"pipeline 第 {idx} 项失败: {type(e).__name__}: {e}")
                     return None
             return prev
 
@@ -408,8 +447,9 @@ class WorkflowEngine:
         logger.info("[workflow:%s] phase → %s", self._name, title)
         self._emit_progress()
 
-    def _log(self, *messages: Any) -> None:
-        msg = " ".join(str(m) for m in messages)
+    def _log(self, *messages: Any, sep: str = " ", **_: Any) -> None:
+        """脚本的 ``log`` / ``print``：兼容 print 的 sep，其余关键字（end/file/flush）忽略。"""
+        msg = sep.join(str(m) for m in messages)
         self._logs.append(msg)
         logger.info("[workflow:%s] %s", self._name, msg)
         # 新日志推给 drawer，但按 _LOG_EMIT_INTERVAL 节流：log 同时是脚本里 print 的

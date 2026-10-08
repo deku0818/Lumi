@@ -9,15 +9,15 @@ from __future__ import annotations
 import asyncio
 import contextvars
 import os
+import shlex
 import sys
 from dataclasses import dataclass
 
-from lumi.agents.runtime.bg_process import get_bg_manager
+from lumi.agents.runtime.bg_process import get_bg_manager, terminate_group
 from lumi.agents.runtime.bg_tasks import get_task_registry, new_task_id
 from lumi.agents.runtime.shell_env import provided_env
 from lumi.utils.constants import (
     BASH_MAX_OUTPUT_BYTES,
-    CWD_QUERY_TIMEOUT,
     DEFAULT_COMMAND_TIMEOUT,
     GRACEFUL_SHUTDOWN_TIMEOUT,
 )
@@ -121,6 +121,7 @@ class LocalShellSession:
     def __init__(self, working_dir: str | None = None) -> None:
         self._process: asyncio.subprocess.Process | None = None
         self._working_dir: str = working_dir or os.getcwd()
+        self._cwd: str | None = None
         self._lock = asyncio.Lock()
 
     # -- Process management --
@@ -156,12 +157,17 @@ class LocalShellSession:
                     "PYTHONIOENCODING": "utf-8",
                 },
             )
-        return await asyncio.create_subprocess_shell(
-            "/bin/bash --norc --noprofile",
+        # 直接 exec bash 并自立进程组：超时 / 取消 / 关闭时按组终止，连同正在跑的命令
+        # 一起收掉（经 /bin/sh -c 包一层时只杀得到外层 sh，bash 与命令成孤儿）
+        return await asyncio.create_subprocess_exec(
+            "/bin/bash",
+            "--norc",
+            "--noprofile",
             stdin=asyncio.subprocess.PIPE,
             stdout=asyncio.subprocess.PIPE,
             stderr=asyncio.subprocess.STDOUT,
             cwd=self._working_dir,
+            start_new_session=True,
             env={
                 **os.environ,
                 **provided_env(self._working_dir),
@@ -173,22 +179,14 @@ class LocalShellSession:
 
     # -- Command execution --
 
-    async def get_cwd(self) -> str:
-        """获取当前会话的实际工作目录。
+    @property
+    def cwd(self) -> str:
+        """上一条命令结束时 shell 的工作目录（随哨兵行带回，不占会话锁）。
 
-        通过在 shell 中执行 pwd（cmd 下是不带参数的 cd）获取，反映 cd 命令后的真实
-        路径。如果查询失败，回退到初始工作目录——那会让后台任务在模型 cd 过之后仍
-        起在初始目录里（``bash(run_in_background=True)`` 按此值定 working_dir）。
+        后台任务按此值定 working_dir，不必排在前台长命令后面查询；未跑过命令或
+        shell 重建后即初始目录。
         """
-        query = "cd" if self._is_windows else "pwd"
-        result = await self.execute(query, timeout=CWD_QUERY_TIMEOUT)
-        if result.success and result.stdout.strip():
-            return result.stdout.strip()
-        logger.warning(
-            f"[LocalShellSession] {query} 失败 (exit_code={result.exit_code})，"
-            f"回退到初始目录: {self._working_dir}"
-        )
-        return self._working_dir
+        return self._cwd or self._working_dir
 
     async def execute(
         self, command: str, timeout: float = DEFAULT_COMMAND_TIMEOUT
@@ -223,16 +221,30 @@ class LocalShellSession:
         sentinel = _make_sentinel()
         wrapped = self._wrap_command(command, sentinel)
 
-        process.stdin.write(wrapped.encode())
-        await process.stdin.drain()
-
-        return await self._read_until_sentinel(process, sentinel, timeout)
+        try:
+            process.stdin.write(wrapped.encode())
+            await process.stdin.drain()
+            return await self._read_until_sentinel(process, sentinel, timeout)
+        except asyncio.CancelledError:
+            # 调用方被取消（stop / 切会话 / 断连）时命令仍在 shell 里跑：不收掉的话，
+            # 下一条命令排在它后面，还会读到它的输出和哨兵
+            await asyncio.shield(self._discard_process(process))
+            raise
 
     def _wrap_command(self, command: str, sentinel: str) -> str:
-        """将用户命令包装为带哨兵标记和退出码的 shell 脚本片段。"""
+        """将用户命令包装为带哨兵标记、退出码与 cwd 的 shell 脚本片段。
+
+        Unix 下整条命令经 eval 执行、stdin 接 /dev/null：命令与哨兵共用 shell 的
+        stdin，直接拼接时读 stdin 的命令（read / cat / input()）会吃掉包装行或挂满
+        超时，未闭合的引号会吞掉哨兵——之后每条命令都失步。eval 在当前 shell 执行，
+        cd / export / 函数照常保留；语法错误只让 eval 返回 2。
+        """
         if self._is_windows:
-            return f"{command}\r\necho.\r\necho {sentinel} %ERRORLEVEL%\r\n"
-        return f'{command}\n__lumi_ec=$?\necho ""\necho "{sentinel} $__lumi_ec"\n'
+            return f"{command}\r\necho.\r\necho {sentinel} %ERRORLEVEL% %CD%\r\n"
+        return (
+            f"eval {shlex.quote(command)} </dev/null\n__lumi_ec=$?\n"
+            f'echo ""\necho "{sentinel} $__lumi_ec $PWD"\n'
+        )
 
     async def _read_until_sentinel(
         self,
@@ -246,9 +258,12 @@ class LocalShellSession:
         exit_code = -1
 
         try:
-            exit_code = await self._collect_output(
-                process.stdout, sentinel, buffer, timeout
-            )
+            # 整条命令的墙钟上限（逐行计时的话，持续有输出的命令永不超时）
+            async with asyncio.timeout(timeout):
+                exit_code, cwd = await self._collect_output(
+                    process.stdout, sentinel, buffer
+                )
+            self._cwd = cwd or None
             return CommandResult(
                 stdout=str(buffer),
                 exit_code=exit_code,
@@ -256,7 +271,7 @@ class LocalShellSession:
                 timed_out=False,
             )
         except TimeoutError:
-            await self._handle_timeout(process)
+            await self._discard_process(process)
             return CommandResult(
                 stdout=str(buffer),
                 exit_code=exit_code,
@@ -269,21 +284,31 @@ class LocalShellSession:
         stdout: asyncio.StreamReader,
         sentinel: str,
         buffer: _BoundedOutputBuffer,
-        timeout: float,
-    ) -> int:
-        """从 stdout 逐行收集输出到 buffer，返回解析到的退出码。
+    ) -> tuple[int, str]:
+        """从 stdout 逐行收集输出到 buffer，返回哨兵行带回的 (退出码, cwd)。
 
         buffer 超限后续行会被丢弃，但循环会持续读取以消费 pipe
         直到遇到 sentinel — 避免 shell 因 stdout pipe 未被消费而阻塞。
-
-        Raises:
-            asyncio.TimeoutError: 读取超时。
         """
         exit_code = -1
+        long_line = False
         while True:
-            line_bytes = await asyncio.wait_for(stdout.readline(), timeout=timeout)
+            try:
+                line_bytes = await stdout.readuntil(b"\n")
+            except asyncio.IncompleteReadError as e:
+                line_bytes = e.partial
+            except asyncio.LimitOverrunError as e:
+                # 单行超过 StreamReader 上限（64KB）：丢掉超限部分、接着读到换行，
+                # 整行只留一行标记（哨兵恒在独立的一行）
+                await stdout.readexactly(e.consumed)
+                long_line = True
+                continue
             if not line_bytes:
                 break
+            if long_line:
+                long_line = False
+                buffer.append("... [超长行已截断]")
+                continue
 
             line = (
                 line_bytes.decode("utf-8", errors="replace").rstrip("\n").rstrip("\r")
@@ -294,25 +319,21 @@ class LocalShellSession:
                 continue
 
             # sentinel 行不进 buffer —— 保证 exit code 解析不受截断影响
-            parts = line.split(sentinel)
-            if len(parts) >= 2:
-                code_str = parts[1].strip()
-                try:
-                    exit_code = int(code_str)
-                except ValueError:
-                    pass
-            break
+            code_str, _, cwd = line.split(sentinel, 1)[1].lstrip().partition(" ")
+            try:
+                exit_code = int(code_str)
+            except ValueError:
+                pass
+            return exit_code, cwd
 
-        return exit_code
+        return exit_code, ""
 
-    async def _handle_timeout(self, process: asyncio.subprocess.Process) -> None:
-        """超时后杀掉进程并清理 transport。"""
-        try:
-            process.kill()
-        except ProcessLookupError:
-            pass
-        await _close_process_transport(process)
+    async def _discard_process(self, process: asyncio.subprocess.Process) -> None:
+        """按组终止 shell（连同正在跑的命令）并丢弃，下次执行重建。"""
         self._process = None
+        self._cwd = None
+        await terminate_group(process)
+        await _close_process_transport(process)
 
     # -- Lifecycle --
 
@@ -337,8 +358,8 @@ class LocalShellSession:
             await proc.stdin.drain()
             await asyncio.wait_for(proc.wait(), timeout=GRACEFUL_SHUTDOWN_TIMEOUT)
         except TimeoutError:
-            proc.kill()
-            await proc.wait()
+            # exit 排在仍在跑的命令之后：按组终止，不留孤儿
+            await terminate_group(proc)
         except (ProcessLookupError, BrokenPipeError, OSError):
             pass
 

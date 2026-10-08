@@ -5,7 +5,7 @@ from __future__ import annotations
 import asyncio
 from datetime import datetime, timedelta
 from pathlib import Path
-from unittest.mock import AsyncMock, MagicMock, patch
+from unittest.mock import AsyncMock
 
 import pytest
 
@@ -13,8 +13,7 @@ from lumi.agents.cron.delivery import DeliveryManager, ResultDelivery
 from lumi.agents.cron.job_store import JobStore
 from lumi.agents.cron.models import Job, Schedule, ScheduleType
 from lumi.agents.cron.run_log import RunLog
-from lumi.agents.cron.scheduler import Scheduler, _is_transient_error
-from lumi.utils.constants import MAX_CRON_RETRIES
+from lumi.agents.cron.scheduler import Scheduler
 
 
 @pytest.fixture
@@ -32,28 +31,39 @@ def delivery() -> DeliveryManager:
     return DeliveryManager()
 
 
+class FakeRunner:
+    """注入的执行 runner 替身：返回预设输出 / 抛预设异常 / 可拖慢，并记录调用。"""
+
+    def __init__(self) -> None:
+        self.output = "测试输出"
+        self.error: BaseException | None = None
+        self.delay = 0.0
+        self.calls: list[tuple[str, str, str]] = []
+        # 进入 runner 即置位：需要「执行中」时点的测试据此同步
+        self.started = asyncio.Event()
+
+    async def __call__(self, prompt: str, thread_id: str, project_dir: str) -> str:
+        self.calls.append((prompt, thread_id, project_dir))
+        self.started.set()
+        if self.delay:
+            await asyncio.sleep(self.delay)
+        if self.error is not None:
+            raise self.error
+        return self.output
+
+
+@pytest.fixture
+def runner() -> FakeRunner:
+    return FakeRunner()
+
+
 @pytest.fixture
 def scheduler(
-    job_store: JobStore, run_log: RunLog, delivery: DeliveryManager
+    job_store: JobStore, run_log: RunLog, delivery: DeliveryManager, runner: FakeRunner
 ) -> Scheduler:
-    return Scheduler(job_store=job_store, run_log=run_log, delivery=delivery)
-
-
-def _mock_create_agent(output_content: str = "测试输出") -> AsyncMock:
-    """创建一个模拟的 create_agent，返回预设输出。"""
-    mock_msg = MagicMock()
-    mock_msg.content = output_content
-
-    mock_graph = AsyncMock()
-    mock_graph.ainvoke = AsyncMock(return_value={"messages": [mock_msg]})
-
-    mock_agent = MagicMock()
-    mock_agent.graph = mock_graph
-
-    mock_context = MagicMock()
-
-    create_agent_mock = AsyncMock(return_value=(mock_agent, mock_context))
-    return create_agent_mock
+    return Scheduler(
+        job_store=job_store, run_log=run_log, delivery=delivery, stream_runner=runner
+    )
 
 
 def _make_interval_job(name: str = "test", interval: str = "5m") -> Job:
@@ -211,21 +221,63 @@ async def test_register_different_trigger_types(scheduler: Scheduler) -> None:
         await scheduler.stop()
 
 
+async def test_late_fire_still_runs(scheduler: Scheduler) -> None:
+    """休眠或事件循环卡顿后晚到的触发照常执行一次：APScheduler 默认只容忍晚 1 秒，
+    超出即静默跳过（一次性任务就此永不执行）。"""
+    from apscheduler.triggers.date import DateTrigger
+
+    await scheduler.start()
+    fired = asyncio.Event()
+
+    async def fire() -> None:
+        fired.set()
+
+    try:
+        late = datetime.now() - timedelta(seconds=30)
+        scheduler._aps.add_job(fire, trigger=DateTrigger(run_date=late))
+        await asyncio.wait_for(fired.wait(), timeout=2)
+    finally:
+        await scheduler.stop()
+
+
+async def test_offline_missed_at_job_runs_once_at_start(
+    scheduler: Scheduler, job_store: JobStore, runner: FakeRunner
+) -> None:
+    """离线期间过点的一次性任务只由启动补偿执行一次：再交给 APScheduler 会在启动
+    瞬间再触发一次（晚到不限时），快速失败时同一任务被执行两遍。"""
+    runner.error = RuntimeError("boom")
+    decide = scheduler._should_compensate
+
+    async def slow_decide(job: Job, now: datetime) -> bool:
+        await asyncio.sleep(0.3)  # 补偿判定晚于 APScheduler 首轮触发（竞态的坏时序）
+        return await decide(job, now)
+
+    scheduler._should_compensate = slow_decide  # type: ignore[method-assign]
+    past = (datetime.now() - timedelta(hours=2)).isoformat()
+    await job_store.upsert(
+        Job(
+            name="once", schedule=Schedule(type=ScheduleType.AT, value=past), prompt="p"
+        )
+    )
+    await scheduler.start()
+    try:
+        await asyncio.sleep(1)
+    finally:
+        await scheduler.stop()
+    assert len(runner.calls) == 1
+
+
 # --- 任务执行逻辑测试（7.2）---
 
-# patch 目标：_execute_job 内部通过 lazy import 引入 create_agent
-_PATCH_CREATE_AGENT = "lumi.agents.core.graph.create_agent"
 
-
-async def test_execute_job_creates_agent_and_returns_success(
-    scheduler: Scheduler, run_log: RunLog
+async def test_execute_job_runs_prompt_and_returns_success(
+    scheduler: Scheduler, runner: FakeRunner
 ) -> None:
-    """_execute_job() 应创建独立 Agent 子会话并返回 success 状态的 RunRecord。"""
+    """_execute_job() 经 runner 在独立 cron- thread 里跑任务 prompt，返回 success 的 RunRecord。"""
     job = _make_interval_job("exec-test")
-    mock_create = _mock_create_agent("Agent 执行完成")
+    runner.output = "Agent 执行完成"
 
-    with patch(_PATCH_CREATE_AGENT, mock_create):
-        record = await scheduler._execute_job(job)
+    record = await scheduler._execute_job(job)
 
     assert record.job_id == job.id
     assert record.job_name == job.name
@@ -233,56 +285,19 @@ async def test_execute_job_creates_agent_and_returns_success(
     assert "Agent 执行完成" in record.output_summary
     assert record.error == ""
     assert record.duration_ms >= 0
-
-    # 验证 create_agent 被正确调用
-    mock_create.assert_awaited_once_with(checkpointer=None)
-
-
-async def test_execute_job_sets_tool_mode_privileged(scheduler: Scheduler) -> None:
-    """_execute_job() 应将 tool_mode 设为 'privileged' 跳过人工审批。"""
-    job = _make_interval_job("auto-mode-test")
-    mock_create = _mock_create_agent()
-
-    with patch(_PATCH_CREATE_AGENT, mock_create):
-        await scheduler._execute_job(job)
-
-    # tool_mode 已移家 context：验证 create_agent 返回的 context.tool_mode="privileged"
-    context = mock_create.return_value[1]
-    assert context.tool_mode == "privileged"
+    # thread_id 恒由调度器生成（cron- 前缀），项目随任务透传给 runner
+    assert runner.calls == [(job.prompt, record.thread_id, job.project_dir)]
+    assert record.thread_id.startswith("cron-")
 
 
-async def test_execute_job_records_workspace_dir_metadata(scheduler: Scheduler) -> None:
-    """_execute_job() 应把项目写进 checkpoint metadata。
-
-    cron 线程在 desktop 续聊时据此恢复 workspace 绑定；漏写则工作区边界关卡拒发
-    「请先选择项目」。
-    """
-    job = _make_interval_job("ws-meta")
-    mock_create = _mock_create_agent()
-    mock_create.return_value[1].permission_engine.project_dir = Path("/proj/x")
-
-    with patch(_PATCH_CREATE_AGENT, mock_create):
-        await scheduler._execute_job(job)
-
-    config = mock_create.return_value[0].graph.ainvoke.call_args.kwargs["config"]
-    assert config["metadata"]["workspace_dir"] == "/proj/x"
-
-
-async def test_execute_job_timeout(scheduler: Scheduler, run_log: RunLog) -> None:
+async def test_execute_job_timeout(scheduler: Scheduler, runner: FakeRunner) -> None:
     """_execute_job() 超时应返回 timeout 状态。"""
     # 使用极短超时
     scheduler._execution_timeout = 0.01
+    runner.delay = 10
     job = _make_interval_job("timeout-test")
 
-    async def slow_invoke(*args, **kwargs):
-        await asyncio.sleep(10)
-        return {"messages": [MagicMock(content="不应到达")]}
-
-    mock_create = _mock_create_agent()
-    mock_create.return_value[0].graph.ainvoke = slow_invoke
-
-    with patch(_PATCH_CREATE_AGENT, mock_create):
-        record = await scheduler._execute_job(job)
+    record = await scheduler._execute_job(job)
 
     assert record.status == "timeout"
     assert "超时" in record.error
@@ -290,28 +305,19 @@ async def test_execute_job_timeout(scheduler: Scheduler, run_log: RunLog) -> Non
 
 
 async def test_cancel_job_records_stopped(
-    scheduler: Scheduler, run_log: RunLog
+    scheduler: Scheduler, run_log: RunLog, runner: FakeRunner
 ) -> None:
     """用户中断运行中的任务：记为 stopped，且 record 照常出（uncancel 后投递不被打断）。"""
     scheduler._execution_timeout = 10  # 够长，确保是 cancel 而非 timeout
+    runner.delay = 10  # 会被 cancel 掐断
     job = _make_interval_job("stop-test")
+    await scheduler._job_store.upsert(job)  # 执行中的任务恒在库里（不在 = 已被删）
 
-    started = asyncio.Event()
-
-    async def slow_invoke(*args, **kwargs):
-        started.set()
-        await asyncio.sleep(10)  # 会被 cancel 掐断
-        return {"messages": [MagicMock(content="不应到达")]}
-
-    mock_create = _mock_create_agent()
-    mock_create.return_value[0].graph.ainvoke = slow_invoke
-
-    with patch(_PATCH_CREATE_AGENT, mock_create):
-        await scheduler._run_job_task(job)
-        task = scheduler._running_tasks[job.id]
-        await started.wait()
-        assert scheduler.cancel_job(job.id) is True
-        record = await task
+    await scheduler._run_job_task(job)
+    task = scheduler._running_tasks[job.id]
+    await runner.started.wait()
+    assert scheduler.cancel_job(job.id) is True
+    record = await task
 
     assert record.status == "stopped"
     assert "中断" in record.error
@@ -327,23 +333,23 @@ async def test_cancel_job_not_running_returns_false(scheduler: Scheduler) -> Non
     assert scheduler.cancel_job("nonexistent") is False
 
 
-async def test_stream_runner_used_and_thread_in_status(
+async def test_run_status_broadcast_carries_thread_id(
     job_store: JobStore, run_log: RunLog, delivery: DeliveryManager
 ) -> None:
-    """注入 stream_runner 时走 runner（不走 ainvoke）；运行态广播带 cron- thread_id。"""
+    """runner 的产出即执行结果；运行态广播带该 run 的 cron- thread_id。"""
     captured: list[list[dict]] = []
+
+    async def fake_runner(prompt: str, thread_id: str, project_dir: str) -> str:
+        assert thread_id.startswith("cron")
+        return f"ran:{prompt}"
+
     scheduler = Scheduler(
         job_store=job_store,
         run_log=run_log,
         delivery=delivery,
+        stream_runner=fake_runner,
         on_job_status=captured.append,
     )
-
-    async def fake_runner(prompt: str, thread_id: str) -> str:
-        assert thread_id.startswith("cron")
-        return f"ran:{prompt}"
-
-    scheduler.set_stream_runner(fake_runner)
     job = _make_interval_job("stream-test")
 
     record = await scheduler._execute_job(job)
@@ -357,36 +363,15 @@ async def test_stream_runner_used_and_thread_in_status(
     assert captured[-1] == []
 
 
-async def test_stream_runner_error_records_failed(
-    job_store: JobStore, run_log: RunLog, delivery: DeliveryManager
+async def test_run_job_task_skips_concurrent_same_job(
+    scheduler: Scheduler, runner: FakeRunner
 ) -> None:
-    """流式 runner 抛错（cron_stream 检测到 ERROR 事件后补抛）→ 如实记 failed。"""
-    scheduler = Scheduler(job_store=job_store, run_log=run_log, delivery=delivery)
-
-    async def failing_runner(prompt: str, thread_id: str) -> str:
-        raise RuntimeError("boom")
-
-    scheduler.set_stream_runner(failing_runner)
-    record = await scheduler._execute_job(_make_interval_job("fail-stream"))
-
-    assert record.status == "failed"
-    assert "boom" in record.error
-
-
-async def test_run_job_task_skips_concurrent_same_job(scheduler: Scheduler) -> None:
     """同 job 已在跑时再触发（如 run_cron_job 撞调度）应跳过，不新建并发 task。"""
-    started = asyncio.Event()
-
-    async def slow_runner(prompt: str, thread_id: str) -> str:
-        started.set()
-        await asyncio.sleep(10)
-        return "x"
-
-    scheduler.set_stream_runner(slow_runner)
+    runner.delay = 10
     job = _make_interval_job("concurrent")
 
     await scheduler._run_job_task(job)
-    await started.wait()
+    await runner.started.wait()
     assert len(scheduler._running_tasks) == 1
 
     await scheduler._run_job_task(job)  # 同 job 再触发 → 跳过
@@ -398,16 +383,12 @@ async def test_run_job_task_skips_concurrent_same_job(scheduler: Scheduler) -> N
             await task
 
 
-async def test_execute_job_failure(scheduler: Scheduler) -> None:
-    """_execute_job() Agent 执行异常应返回 failed 状态。"""
+async def test_execute_job_failure(scheduler: Scheduler, runner: FakeRunner) -> None:
+    """runner 抛错（如 cron_stream 检测到 ERROR 事件后补抛）→ 如实记 failed。"""
     job = _make_interval_job("fail-test")
-    mock_create = _mock_create_agent()
-    mock_create.return_value[0].graph.ainvoke = AsyncMock(
-        side_effect=RuntimeError("模拟错误")
-    )
+    runner.error = RuntimeError("模拟错误")
 
-    with patch(_PATCH_CREATE_AGENT, mock_create):
-        record = await scheduler._execute_job(job)
+    record = await scheduler._execute_job(job)
 
     assert record.status == "failed"
     assert "RuntimeError" in record.error
@@ -419,10 +400,9 @@ async def test_execute_job_records_to_run_log(
 ) -> None:
     """_execute_job() 应将执行记录写入 RunLog。"""
     job = _make_interval_job("log-test")
-    mock_create = _mock_create_agent("日志测试输出")
+    await scheduler._job_store.upsert(job)  # 执行中的任务恒在库里（不在 = 已被删）
 
-    with patch(_PATCH_CREATE_AGENT, mock_create):
-        await scheduler._execute_job(job)
+    await scheduler._execute_job(job)
 
     records = await run_log.get_recent(job.id)
     assert len(records) == 1
@@ -430,16 +410,18 @@ async def test_execute_job_records_to_run_log(
     assert records[0].status == "success"
 
 
-async def test_execute_job_broadcasts_result(scheduler: Scheduler) -> None:
+async def test_execute_job_broadcasts_result(
+    scheduler: Scheduler, runner: FakeRunner
+) -> None:
     """_execute_job() 应通过 DeliveryManager 广播结果。"""
     mock_channel = AsyncMock(spec=ResultDelivery)
     scheduler._delivery.register(mock_channel)
 
     job = _make_interval_job("broadcast-test")
-    mock_create = _mock_create_agent("广播内容")
+    await scheduler._job_store.upsert(job)  # 执行中的任务恒在库里（不在 = 已被删）
+    runner.output = "广播内容"
 
-    with patch(_PATCH_CREATE_AGENT, mock_create):
-        await scheduler._execute_job(job)
+    await scheduler._execute_job(job)
 
     mock_channel.deliver.assert_awaited_once()
     record, text = mock_channel.deliver.call_args[0]
@@ -455,10 +437,7 @@ async def test_execute_job_at_type_deletes_from_store(
     job = _make_at_job("once-delete")
     await job_store.upsert(job)
 
-    mock_create = _mock_create_agent("一次性任务完成")
-
-    with patch(_PATCH_CREATE_AGENT, mock_create):
-        await scheduler._execute_job(job)
+    await scheduler._execute_job(job)
 
     # 验证任务已从 JobStore 删除
     remaining = await job_store.get(job.id)
@@ -472,23 +451,20 @@ async def test_execute_job_interval_not_deleted(
     job = _make_interval_job("keep-alive")
     await job_store.upsert(job)
 
-    mock_create = _mock_create_agent("周期任务输出")
-
-    with patch(_PATCH_CREATE_AGENT, mock_create):
-        await scheduler._execute_job(job)
+    await scheduler._execute_job(job)
 
     remaining = await job_store.get(job.id)
     assert remaining is not None
 
 
-async def test_execute_job_output_truncated_to_500(scheduler: Scheduler) -> None:
+async def test_execute_job_output_truncated_to_500(
+    scheduler: Scheduler, runner: FakeRunner
+) -> None:
     """_execute_job() 应将输出截取前 500 字符作为 output_summary。"""
-    long_output = "A" * 1000
+    runner.output = "A" * 1000
     job = _make_interval_job("truncate-test")
-    mock_create = _mock_create_agent(long_output)
 
-    with patch(_PATCH_CREATE_AGENT, mock_create):
-        record = await scheduler._execute_job(job)
+    record = await scheduler._execute_job(job)
 
     assert len(record.output_summary) == 500
 
@@ -496,277 +472,93 @@ async def test_execute_job_output_truncated_to_500(scheduler: Scheduler) -> None
 async def test_run_job_task_adds_to_running_tasks(scheduler: Scheduler) -> None:
     """_run_job_task() 应将 asyncio.Task 加入 _running_tasks 集合。"""
     job = _make_interval_job("task-track")
-    mock_create = _mock_create_agent("跟踪测试")
 
-    with patch(_PATCH_CREATE_AGENT, mock_create):
-        await scheduler._run_job_task(job)
-        # 给 task 一点时间完成
-        await asyncio.sleep(0.1)
+    await scheduler._run_job_task(job)
+    # 给 task 一点时间完成
+    await asyncio.sleep(0.1)
 
     # 任务完成后应自动从集合中移除
     assert len(scheduler._running_tasks) == 0
 
 
-# --- 重试逻辑测试（7.3）---
+# --- 失败收尾：cron 层不重试、不回写任务快照 ---
 
 
-class TestIsTransientError:
-    """_is_transient_error() 瞬态错误判定测试。"""
-
-    def test_timeout_error_is_transient(self) -> None:
-        assert _is_transient_error(TimeoutError()) is True
-
-    def test_connection_error_is_transient(self) -> None:
-        assert _is_transient_error(ConnectionError("连接失败")) is True
-
-    def test_os_error_is_transient(self) -> None:
-        assert _is_transient_error(OSError("网络不可达")) is True
-
-    def test_httpx_429_is_transient(self) -> None:
-        import httpx
-
-        response = httpx.Response(429, request=httpx.Request("GET", "https://x.com"))
-        exc = httpx.HTTPStatusError("限流", request=response.request, response=response)
-        assert _is_transient_error(exc) is True
-
-    def test_httpx_500_is_transient(self) -> None:
-        import httpx
-
-        response = httpx.Response(500, request=httpx.Request("GET", "https://x.com"))
-        exc = httpx.HTTPStatusError(
-            "服务端错误", request=response.request, response=response
-        )
-        assert _is_transient_error(exc) is True
-
-    def test_httpx_503_is_transient(self) -> None:
-        import httpx
-
-        response = httpx.Response(503, request=httpx.Request("GET", "https://x.com"))
-        exc = httpx.HTTPStatusError(
-            "不可用", request=response.request, response=response
-        )
-        assert _is_transient_error(exc) is True
-
-    def test_httpx_400_is_not_transient(self) -> None:
-        import httpx
-
-        response = httpx.Response(400, request=httpx.Request("GET", "https://x.com"))
-        exc = httpx.HTTPStatusError(
-            "客户端错误", request=response.request, response=response
-        )
-        assert _is_transient_error(exc) is False
-
-    def test_httpx_404_is_not_transient(self) -> None:
-        import httpx
-
-        response = httpx.Response(404, request=httpx.Request("GET", "https://x.com"))
-        exc = httpx.HTTPStatusError(
-            "未找到", request=response.request, response=response
-        )
-        assert _is_transient_error(exc) is False
-
-    def test_value_error_is_not_transient(self) -> None:
-        assert _is_transient_error(ValueError("无效参数")) is False
-
-    def test_runtime_error_is_not_transient(self) -> None:
-        assert _is_transient_error(RuntimeError("运行时错误")) is False
-
-    def test_key_error_is_not_transient(self) -> None:
-        assert _is_transient_error(KeyError("missing")) is False
-
-
-async def test_transient_error_schedules_retry(
-    scheduler: Scheduler, job_store: JobStore
+async def test_failed_at_job_is_deleted_without_retry(
+    scheduler: Scheduler, job_store: JobStore, runner: FakeRunner
 ) -> None:
-    """瞬态错误（TimeoutError）应递增 consecutive_errors 并安排重试。"""
+    """一次性任务失败（含超时）同样执行完即删：cron 层不做重试，也不为重试保留任务。"""
     scheduler._execution_timeout = 0.01
-    job = _make_interval_job("retry-test")
-    job.consecutive_errors = 0
+    runner.delay = 10
+    job = _make_at_job("at-timeout")
     await job_store.upsert(job)
 
-    await scheduler.start()
-    try:
+    record = await scheduler._execute_job(job)
 
-        async def slow_invoke(*args, **kwargs):
-            await asyncio.sleep(10)
-            return {"messages": [MagicMock(content="不应到达")]}
-
-        mock_create = _mock_create_agent()
-        mock_create.return_value[0].graph.ainvoke = slow_invoke
-
-        with patch(_PATCH_CREATE_AGENT, mock_create):
-            record = await scheduler._execute_job(job)
-
-        assert record.status == "timeout"
-        assert job.consecutive_errors == 1
-
-        # 验证 JobStore 中的 consecutive_errors 已更新
-        stored = await job_store.get(job.id)
-        assert stored is not None
-        assert stored.consecutive_errors == 1
-
-        # 验证重试任务已注册到 APScheduler
-        retry_id = f"{job.id}-retry-1"
-        aps_job = scheduler._aps.get_job(retry_id)
-        assert aps_job is not None
-    finally:
-        await scheduler.stop()
+    assert record.status == "timeout"
+    assert await job_store.get(job.id) is None
+    assert scheduler._aps.get_jobs() == []
 
 
-async def test_retry_uses_correct_backoff_intervals(
+async def test_failed_run_does_not_roll_back_mid_run_edit(
     scheduler: Scheduler, job_store: JobStore
 ) -> None:
-    """重试间隔应按 BACKOFF_INTERVALS 递增。"""
-    job = _make_interval_job("backoff-test")
+    """执行期间任务被编辑、随后本次失败：收尾不得用执行起点的快照覆盖回去。"""
+    job = _make_interval_job("edit-then-fail")
     await job_store.upsert(job)
+    edited = Job(
+        id=job.id, name=job.name, schedule=job.schedule, prompt="编辑后的 prompt"
+    )
 
-    await scheduler.start()
-    try:
-        mock_create = _mock_create_agent()
-        mock_create.return_value[0].graph.ainvoke = AsyncMock(
-            side_effect=ConnectionError("连接失败")
-        )
+    async def runner_edits_then_fails(
+        prompt: str, thread_id: str, project_dir: str
+    ) -> str:
+        await job_store.upsert(edited)
+        raise ConnectionError("连接失败")
 
-        # 第 1 次失败 → 退避 30s
-        job.consecutive_errors = 0
-        with patch(_PATCH_CREATE_AGENT, mock_create):
-            await scheduler._execute_job(job)
-        assert job.consecutive_errors == 1
-        retry_job_1 = scheduler._aps.get_job(f"{job.id}-retry-1")
-        assert retry_job_1 is not None
+    scheduler._stream_runner = runner_edits_then_fails
+    record = await scheduler._execute_job(job)
 
-        # 第 2 次失败 → 退避 60s
-        with patch(_PATCH_CREATE_AGENT, mock_create):
-            await scheduler._execute_job(job)
-        assert job.consecutive_errors == 2
-        retry_job_2 = scheduler._aps.get_job(f"{job.id}-retry-2")
-        assert retry_job_2 is not None
-
-        # 第 3 次失败 → 退避 300s
-        with patch(_PATCH_CREATE_AGENT, mock_create):
-            await scheduler._execute_job(job)
-        assert job.consecutive_errors == 3
-        retry_job_3 = scheduler._aps.get_job(f"{job.id}-retry-3")
-        assert retry_job_3 is not None
-    finally:
-        await scheduler.stop()
-
-
-async def test_retry_exhausted_no_more_retries(
-    scheduler: Scheduler, job_store: JobStore
-) -> None:
-    """重试次数耗尽后不再安排重试。"""
-    job = _make_interval_job("exhausted-test")
-    job.consecutive_errors = MAX_CRON_RETRIES  # 已达上限
-    await job_store.upsert(job)
-
-    await scheduler.start()
-    try:
-        mock_create = _mock_create_agent()
-        mock_create.return_value[0].graph.ainvoke = AsyncMock(
-            side_effect=ConnectionError("连接失败")
-        )
-
-        with patch(_PATCH_CREATE_AGENT, mock_create):
-            record = await scheduler._execute_job(job)
-
-        assert record.status == "failed"
-        # consecutive_errors 不应再递增（已达上限，不重试）
-        assert job.consecutive_errors == MAX_CRON_RETRIES
-
-        # 不应有新的重试任务
-        retry_id = f"{job.id}-retry-{MAX_CRON_RETRIES + 1}"
-        assert scheduler._aps.get_job(retry_id) is None
-    finally:
-        await scheduler.stop()
-
-
-async def test_success_resets_consecutive_errors(
-    scheduler: Scheduler, job_store: JobStore
-) -> None:
-    """成功执行后应重置 consecutive_errors 为 0。"""
-    job = _make_interval_job("reset-test")
-    job.consecutive_errors = 2
-    await job_store.upsert(job)
-
-    mock_create = _mock_create_agent("执行成功")
-
-    with patch(_PATCH_CREATE_AGENT, mock_create):
-        record = await scheduler._execute_job(job)
-
-    assert record.status == "success"
-    assert job.consecutive_errors == 0
-
-    # 验证 JobStore 中也已重置
+    assert record.status == "failed"
     stored = await job_store.get(job.id)
-    assert stored is not None
-    assert stored.consecutive_errors == 0
+    assert stored is not None and stored.prompt == "编辑后的 prompt"
 
 
-async def test_permanent_error_no_retry(
+async def test_failed_run_does_not_resurrect_deleted_job(
     scheduler: Scheduler, job_store: JobStore
 ) -> None:
-    """永久错误（如 ValueError）不应触发重试。"""
-    job = _make_interval_job("perm-error-test")
-    job.consecutive_errors = 0
+    """执行期间任务被删、随后本次失败：收尾不得把已删任务写回来。"""
+    job = _make_interval_job("delete-then-fail")
     await job_store.upsert(job)
 
-    await scheduler.start()
-    try:
-        mock_create = _mock_create_agent()
-        mock_create.return_value[0].graph.ainvoke = AsyncMock(
-            side_effect=ValueError("无效参数")
-        )
+    async def runner_deletes_then_fails(
+        prompt: str, thread_id: str, project_dir: str
+    ) -> str:
+        await job_store.delete(job.id)
+        raise ConnectionError("连接失败")
 
-        with patch(_PATCH_CREATE_AGENT, mock_create):
-            record = await scheduler._execute_job(job)
+    scheduler._stream_runner = runner_deletes_then_fails
+    await scheduler._execute_job(job)
 
-        assert record.status == "failed"
-        # 永久错误不递增 consecutive_errors，也不安排重试
-        assert job.consecutive_errors == 0
-        assert scheduler._aps.get_job(f"{job.id}-retry-1") is None
-    finally:
-        await scheduler.stop()
-
-
-async def test_success_with_zero_errors_no_upsert(
-    scheduler: Scheduler, job_store: JobStore
-) -> None:
-    """consecutive_errors 已为 0 时成功执行不应触发额外的 upsert。"""
-    job = _make_interval_job("no-upsert-test")
-    job.consecutive_errors = 0
-
-    mock_create = _mock_create_agent("正常输出")
-
-    with (
-        patch(_PATCH_CREATE_AGENT, mock_create),
-        patch.object(job_store, "upsert", new_callable=AsyncMock) as mock_upsert,
-    ):
-        await scheduler._execute_job(job)
-
-    # consecutive_errors 为 0 时不需要调用 upsert
-    mock_upsert.assert_not_awaited()
+    assert await job_store.get(job.id) is None
 
 
 # --- trigger() 立即执行测试（7.4）---
 
 
 async def test_trigger_executes_job_immediately(
-    scheduler: Scheduler, job_store: JobStore
+    scheduler: Scheduler, job_store: JobStore, runner: FakeRunner
 ) -> None:
     """trigger() 应立即执行指定任务。"""
     job = _make_interval_job("trigger-test")
     await job_store.upsert(job)
 
-    mock_create = _mock_create_agent("立即执行输出")
+    await scheduler.trigger(job.id)
+    # 等待 task 完成
+    await asyncio.sleep(0.1)
 
-    with patch(_PATCH_CREATE_AGENT, mock_create):
-        await scheduler.trigger(job.id)
-        # 等待 task 完成
-        await asyncio.sleep(0.1)
-
-    # 验证 Agent 被调用
-    mock_create.assert_awaited_once_with(checkpointer=None)
+    # 验证 runner 被调用
+    assert [prompt for prompt, _, _ in runner.calls] == [job.prompt]
 
     # 验证执行记录已写入 RunLog
     records = await scheduler._run_log.get_recent(job.id)
@@ -796,11 +588,8 @@ async def test_trigger_does_not_affect_aps_schedule(
         assert aps_job_before is not None
         next_run_before = aps_job_before.next_run_time
 
-        mock_create = _mock_create_agent("不影响调度")
-
-        with patch(_PATCH_CREATE_AGENT, mock_create):
-            await scheduler.trigger(job.id)
-            await asyncio.sleep(0.1)
+        await scheduler.trigger(job.id)
+        await asyncio.sleep(0.1)
 
         # trigger 后 APScheduler 中的任务状态不变
         aps_job_after = scheduler._aps.get_job(job.id)
@@ -808,3 +597,101 @@ async def test_trigger_does_not_affect_aps_schedule(
         assert aps_job_after.next_run_time == next_run_before
     finally:
         await scheduler.stop()
+
+
+async def test_delete_running_job_stops_it_and_leaves_no_log(
+    scheduler: Scheduler, job_store: JobStore, run_log: RunLog, runner: FakeRunner
+) -> None:
+    """删除运行中的任务：先停掉这次执行，跑完也不再把刚清掉的执行日志写回来。"""
+    scheduler._execution_timeout = 10
+    runner.delay = 10
+    job = _make_interval_job("del-running")
+    await job_store.upsert(job)
+
+    await scheduler._run_job_task(job)
+    task = scheduler._running_tasks[job.id]
+    await runner.started.wait()
+    await asyncio.wait_for(scheduler.delete_job(job.id), 2)
+    assert task.done()
+    assert await run_log.get_all(job.id) == []
+
+
+async def test_job_deleting_itself_mid_run(
+    scheduler: Scheduler, job_store: JobStore, run_log: RunLog
+) -> None:
+    """agent 在任务自己的执行里调 cron delete：不能等自己（死锁），跑完也不留执行日志。"""
+    job = _make_interval_job("self-delete")
+    await job_store.upsert(job)
+
+    async def runner_that_deletes(prompt: str, thread_id: str, project_dir: str) -> str:
+        await asyncio.wait_for(scheduler.delete_job(job.id), 2)
+        return "删掉了自己"
+
+    scheduler._stream_runner = runner_that_deletes
+    await scheduler._run_job_task(job)
+    record = await scheduler._running_tasks[job.id]
+    assert record.status == "success"
+    assert await job_store.get(job.id) is None
+    assert await run_log.get_all(job.id) == []
+
+
+async def test_at_job_edited_to_interval_mid_run_is_kept(
+    scheduler: Scheduler, job_store: JobStore
+) -> None:
+    """一次性任务执行期间被改成周期任务：收尾按最新配置判断，不再按快照删掉它。"""
+    job = _make_at_job("at-then-interval")
+    await job_store.upsert(job)
+    edited = Job(
+        id=job.id,
+        name=job.name,
+        schedule=Schedule(type=ScheduleType.INTERVAL, value="5m"),
+        prompt=job.prompt,
+    )
+
+    async def runner_while_edited(prompt: str, thread_id: str, project_dir: str) -> str:
+        await job_store.upsert(edited)
+        return "ok"
+
+    scheduler._stream_runner = runner_while_edited
+    await scheduler._execute_job(job)
+    assert await job_store.get(job.id) is not None
+
+
+async def test_stop_mark_does_not_outlive_the_run(scheduler: Scheduler) -> None:
+    """停止落在收尾投递阶段时标记也要清掉：否则之后关机宽限期的取消被当成用户停止吞掉。"""
+    job = _make_interval_job("late-stop")
+    await scheduler._job_store.upsert(job)
+    delivering = asyncio.Event()
+    release = asyncio.Event()
+
+    async def slow_deliver(*args, **kwargs):
+        delivering.set()
+        await release.wait()
+
+    scheduler._deliver_and_log = slow_deliver  # type: ignore[method-assign]
+    await scheduler._run_job_task(job)
+    task = scheduler._running_tasks[job.id]
+    await delivering.wait()
+    scheduler.cancel_job(job.id)
+    release.set()
+    await asyncio.gather(task, return_exceptions=True)
+    assert job.id not in scheduler._user_stopped_jobs
+
+
+async def test_trigger_reports_when_already_running(
+    scheduler: Scheduler, job_store: JobStore
+) -> None:
+    """同一任务在跑时再触发会被跳过：如实返回未触发，工具别再回复「已触发执行」。"""
+    job = _make_interval_job("busy")
+    await job_store.upsert(job)
+    gate = asyncio.Event()
+
+    async def gated_runner(prompt: str, thread_id: str, project_dir: str) -> str:
+        await gate.wait()
+        return "ok"
+
+    scheduler._stream_runner = gated_runner
+    assert await scheduler.trigger(job.id) is True
+    assert await scheduler.trigger(job.id) is False
+    gate.set()
+    await scheduler._running_tasks[job.id]

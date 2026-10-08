@@ -169,10 +169,13 @@ function ProjectCard({
   onSetDefault: (isDefault: boolean) => void
 }) {
   const { t, lang } = useI18n()
+  // 重命名期间卡片不是按钮、也不挂 ⋮ 菜单：输入框不能嵌在 <button> 里（点它移动光标会
+  // 冒泡成「进入项目」），菜单关闭时的焦点归还也会抢走刚挂载的输入框焦点（同侧栏会话行）
+  const Card = renaming ? 'div' : 'button'
   return (
     <div className="group relative">
-      <button
-        onClick={() => onOpen(project.path)}
+      <Card
+        onClick={renaming ? undefined : () => onOpen(project.path)}
         className={`w-full text-left rounded-2xl border p-4 transition ${
           active
             ? 'border-primary/40 bg-primary/5'
@@ -201,34 +204,36 @@ function ProjectCard({
         <div className="mt-1.5 text-[11px] text-muted-foreground/75">
           {timeAgo(project.last_used, lang)}
         </div>
-      </button>
-      <DropdownMenu>
-        <DropdownMenuTrigger asChild>
-          <button
-            aria-label={t('sidebar.sessionActions')}
-            className="absolute right-2.5 top-2.5 size-6 grid place-items-center rounded-md text-muted-foreground hover:bg-line/30 hover:text-ink transition opacity-0 group-hover:opacity-100 data-[state=open]:opacity-100 outline-none"
-          >
-            <MoreVertical size={15} />
-          </button>
-        </DropdownMenuTrigger>
-        <DropdownMenuContent align="start" className="w-44">
-          <DropdownMenuItem onClick={onRenameStart}>
-            <Pencil />
-            {t('projects.rename')}
-          </DropdownMenuItem>
-          <DropdownMenuItem
-            className={project.default ? 'text-primary [&_svg]:text-primary' : ''}
-            onClick={() => onSetDefault(!project.default)}
-          >
-            <Star fill={project.default ? 'currentColor' : 'none'} />
-            {t(project.default ? 'projects.unsetDefault' : 'projects.setDefault')}
-          </DropdownMenuItem>
-          <DropdownMenuItem variant="destructive" onClick={() => onRemove(project.path)}>
-            <Trash2 />
-            {t('projects.remove')}
-          </DropdownMenuItem>
-        </DropdownMenuContent>
-      </DropdownMenu>
+      </Card>
+      {!renaming && (
+        <DropdownMenu>
+          <DropdownMenuTrigger asChild>
+            <button
+              aria-label={t('sidebar.sessionActions')}
+              className="absolute right-2.5 top-2.5 size-6 grid place-items-center rounded-md text-muted-foreground hover:bg-line/30 hover:text-ink transition opacity-0 group-hover:opacity-100 data-[state=open]:opacity-100 outline-none"
+            >
+              <MoreVertical size={15} />
+            </button>
+          </DropdownMenuTrigger>
+          <DropdownMenuContent align="start" className="w-44">
+            <DropdownMenuItem onClick={onRenameStart}>
+              <Pencil />
+              {t('projects.rename')}
+            </DropdownMenuItem>
+            <DropdownMenuItem
+              className={project.default ? 'text-primary [&_svg]:text-primary' : ''}
+              onClick={() => onSetDefault(!project.default)}
+            >
+              <Star fill={project.default ? 'currentColor' : 'none'} />
+              {t(project.default ? 'projects.unsetDefault' : 'projects.setDefault')}
+            </DropdownMenuItem>
+            <DropdownMenuItem variant="destructive" onClick={() => onRemove(project.path)}>
+              <Trash2 />
+              {t('projects.remove')}
+            </DropdownMenuItem>
+          </DropdownMenuContent>
+        </DropdownMenu>
+      )}
     </div>
   )
 }

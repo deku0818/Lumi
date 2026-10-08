@@ -68,3 +68,34 @@ def test_load_prompt_project_layer(tmp_path):
     prompts_dir.mkdir(parents=True)
     (prompts_dir / "SOUL.md").write_text("项目灵魂", encoding="utf-8")
     assert get_config().load_prompt("SOUL", tmp_path) == "项目灵魂"
+
+
+def test_loader_skips_nameless_and_keeps_empty_tools(tmp_path) -> None:
+    # 回归：缺 name 的定义曾被注册成空名字；YAML 里 `tools:` 留空（值为 None）的
+    # agent 校验失败被整个丢弃——而它本意是「全部工具」
+    from lumi.agents.tools.loader import _load_agents_from_dir
+
+    (tmp_path / "nameless.md").write_text("---\ndescription: d\n---\nbody")
+    (tmp_path / "empty.md").write_text(
+        "---\nname: empty\ndescription: d\ntools:\n---\nb"
+    )
+    agents = _load_agents_from_dir(tmp_path)
+    assert list(agents) == ["empty"]
+    assert agents["empty"].tools == []
+
+
+def test_non_default_style_keeps_default_as_base(tmp_path):
+    """切到 code 风格仍带 default 的内置层作基底（lumi-config 技能、general-purpose
+    子 Agent 不丢），code 的同名 explore 仍盖过 default 那份。"""
+    from lumi.agents.tools.loader import load_agents, load_skills
+    from lumi.styles import STYLES_ROOT
+
+    (tmp_path / ".lumi").mkdir()
+    (tmp_path / ".lumi" / "config.json").write_text('{"style": "code"}')
+
+    agents = {a.name: a for a in load_agents(project_dir=tmp_path)}
+    assert "general-purpose" in agents and "plan" in agents
+    assert (
+        Path(agents["explore"].path) == STYLES_ROOT / "code" / "agents" / "explore.md"
+    )
+    assert any(s.name == "lumi-config" for s in load_skills(project_dir=tmp_path))

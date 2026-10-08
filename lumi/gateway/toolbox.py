@@ -42,6 +42,9 @@ OFFICECLI_VERSION = "1.0.143"
 # 环境页的两栏分组是纯展示概念，由前端 EnvPanel 独家持有
 ALL_TOOLS = ("uv", "rg", "node", "officecli")
 
+# 同一压缩包里需一并落进 bin_dir 的伴生可执行：uv 包自带 uvx（stdio MCP 常用启动器）
+_COMPANIONS = {"uv": ("uvx",)}
+
 # 进度回调：(阶段描述, 0..1 或 None=不可知)
 ProgressFn = Callable[[str, float | None], None]
 
@@ -169,6 +172,24 @@ def locate(name: str) -> ToolStatus:
     if box:
         return ToolStatus(name, "toolbox", "", box)
     return ToolStatus(name, "missing")
+
+
+def terminal_cmd(cmd: str) -> str:
+    """给用户粘贴进终端跑的命令（体检 fix_cmd）：首个词只装在工具箱里时补上工具箱 bin。
+
+    用户 shell 的 PATH 里没有工具箱；lark-cli / npm 又是 ``#!/usr/bin/env node``
+    脚本，只给绝对路径仍找不到 node，故 POSIX 在命令前临时追加 PATH（末尾追加，与
+    inject_path 同样系统优先）。Windows 给 .cmd shim 的绝对路径——npm 生成的 shim
+    自己找同目录的 node.exe。
+    """
+    name, _, rest = cmd.partition(" ")
+    found = locate(name)
+    if found.source != "toolbox":
+        return cmd
+    if _plat()[0] == "win":
+        exe = f'"{found.path}"' if " " in found.path else found.path
+        return f"{exe} {rest}"
+    return f'PATH="$PATH:{get_config().bin_dir}" {cmd}'
 
 
 def detect(name: str) -> ToolStatus:
@@ -353,7 +374,8 @@ def install(name: str, progress: ProgressFn | None = None) -> ToolStatus:
             shutil.move(str(archive), str(dest))
             dest.chmod(0o755)
         else:
-            _extract_binary(archive, name)
+            for exe in (name, *_COMPANIONS.get(name, ())):
+                _extract_binary(archive, exe)
     if progress:
         # 终态：装齐流程里已完成的行定格在「完成 100%」，而非停在最后一条脉冲
         progress("完成", 1.0)
@@ -394,8 +416,8 @@ _LARK_PKG = "@larksuite/cli"
 def lark_skill_versions(cli_path: str) -> dict[str, str] | None:
     """lark-cli 内嵌技能清单 {name: version}；命令失败/输出不可解析返回 None。
 
-    None 与空 dict 必须区分：None = 清单读不到（cli 版本过旧等），不能当
-    「0 个技能待装」处理，否则体检报 error 而安装是空操作，永远修不绿。
+    None（读不到）与空 dict（清单里没有技能）都不能当「0 个技能待装」处理：体检
+    若报 error 而安装是空操作，永远修不绿——setup 对两者一律报「无法读取技能清单」。
     """
     ok, out = _run([cli_path, "skills", "list"])
     if not ok:
@@ -451,20 +473,20 @@ def skills_status(embedded: dict[str, str], project_dir: str = "") -> dict:
     return {"total": len(embedded), "installed": installed, "outdated": outdated}
 
 
-def _npm_global_bin(npm_path: str, name: str) -> Path:
-    """npm 全局装出的可执行文件路径——**问 npm 要 prefix，不按 node 树硬拼**。
+def _lark_prefix() -> Path:
+    """lark-cli 的 npm 安装前缀：Lumi 自有目录。
 
-    prefix 可被用户级 `.npmrc` 改掉（Windows 上指到 `%APPDATA%\\npm` 很常见），
-    猜错会链出一个探测得到、一跑就报「找不到路径」的幽灵 shim：体检显示 lark-cli
-    已安装，而技能包同步、妙记取数全部静默失败。
+    系统 npm 的全局目录常属 root，``npm install -g`` 直接 EACCES，应用内无解；装进
+    自有 prefix 免 sudo、不碰系统全局，产物位置也就已知（无需再问 ``npm prefix -g``）。
     """
-    ok, out = _run([npm_path, "prefix", "-g"])
-    if not ok:
-        raise RuntimeError(f"读取 npm 全局目录失败: {out.strip()[-200:]}")
-    target = _node_tool_path(Path(out.strip()), name)
-    if not target.exists():
-        raise RuntimeError(f"npm 报告安装成功，但 {target} 不存在")
-    return target
+    return get_config().toolbox_dir / "npm-global"
+
+
+def lark_cli_update_cmd(source: str) -> str:
+    """给用户终端跑的 lark-cli 升级命令（体检 fix_cmd）：在装的地方升——系统全局装的走
+    ``npm -g``，Lumi 自装的走 install_lark_cli 同一 prefix（在别处 update 什么也不做）。"""
+    prefix = "" if source == "system" else f' --prefix "{_lark_prefix()}"'
+    return terminal_cmd(f"npm update -g{prefix} {_LARK_PKG}")
 
 
 def install_lark_cli(progress: ProgressFn | None = None) -> ToolStatus:
@@ -472,16 +494,25 @@ def install_lark_cli(progress: ProgressFn | None = None) -> ToolStatus:
 
     缺 npm 不在此处代装：核心工具链的安装入口是「设置 → 环境」，在渠道页偷偷拉一个
     几十 MB 的 Node 下载，用户既没点过也不知道在等什么。故抛错，由体检把人引过去。
+    系统 Node 缺 npm 例外：环境页里 Node 显示已装、不会再装，只能让用户补 npm。
     """
     cli = detect("lark-cli")
     if cli.source != "missing":
         return cli
     npm = detect("npm")
     if npm.source == "missing":
+        if locate("node").source != "missing":
+            raise RuntimeError(
+                "系统 Node 缺少 npm，请用系统包管理器安装 npm"
+                "（或卸载系统 Node 后在「设置 → 环境」安装）"
+            )
         raise RuntimeError("未检测到 npm，请先在「设置 → 环境」安装 Node.js")
     if progress:
         progress("安装 lark-cli", None)
-    ok, out = _run([npm.path, "install", "-g", _LARK_PKG], timeout=600)
+    prefix = _lark_prefix()
+    ok, out = _run(
+        [npm.path, "install", "-g", "--prefix", str(prefix), _LARK_PKG], timeout=600
+    )
     if not ok:
         # 包的 postinstall 用系统 curl 下载真实二进制，缺 curl 时它打印的却是
         # 「配代理/公司镜像」的网络受限文案——按原文透传会把人引去查网络
@@ -490,14 +521,11 @@ def install_lark_cli(progress: ProgressFn | None = None) -> ToolStatus:
                 "npm 安装 lark-cli 失败：系统缺 curl（安装脚本靠它下载二进制），"
                 "请先安装 curl 后重试"
             )
-        # 原文带出来：权限、代理、registry 不可达各有各的下一步，笼统一句「安装失败」
+        # 原文带出来：代理、registry 不可达各有各的下一步，笼统一句「安装失败」
         # 只会让用户反复点同一个按钮
         raise RuntimeError(f"npm 安装 lark-cli 失败: {out.strip()[-300:]}")
-    cli = detect("lark-cli")
-    if cli.source != "missing":
-        return cli
-    # 装成功却探测不到 = npm 的全局 bin 不在 PATH 上（工具箱 npm 恒如此），接入 bin_dir
-    _link(_npm_global_bin(npm.path, "lark-cli"), "lark-cli")
+    # 自有 prefix 不在 PATH 上，接入 bin_dir
+    _link(_node_tool_path(prefix, "lark-cli"), "lark-cli")
     return detect("lark-cli")
 
 

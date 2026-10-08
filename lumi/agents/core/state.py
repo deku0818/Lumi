@@ -42,6 +42,10 @@ class LumiAgentContext:
       approve/ask/reject；DENY 与 bypass-immune 仍免疫，强制走人工审批
     放在 context（而非 state）：state 是每个 super-step 的快照，运行中改不动；context
     是共享可变引用，bridge 改它后下一个节点 runtime.context 立即读到 → 支持运行中实时切换。"""
+    mode_parent: LumiAgentContext | None = field(default=None)
+    """前台子代理指向父 context：审批模式是会话属性，读写都落到根 context（见
+    :meth:`mode_root`）——父会话运行中切换模式对子代理即时生效，子代理审批卡里切换也
+    回到会话本身。后台 / workflow 子代理无审批通道、固定 auto，不设。"""
     approval_broker: ApprovalBroker | None = field(default=None)
     """在途审批 Broker，由 bridge 在 create_agent 后注入（与 permission_engine 同源）。
     节点 / ask 工具经它原地 await 审批。子 agent 由 agent 工具从父 context 传播。
@@ -68,6 +72,13 @@ class LumiAgentContext:
     """是否为本 agent 注入持久记忆（MEMORY.md 索引 + 系统提示词行为说明）。
     默认 False（opt-in），与 create_agent 一致；仅 bridge 的主对话 agent 置 True。
     项目说明 LUMI.md 不受此开关影响，主/子 agent 均注入。"""
+
+    def mode_root(self) -> LumiAgentContext:
+        """审批模式的归属 context：沿 ``mode_parent`` 上溯到会话根。"""
+        ctx = self
+        while ctx.mode_parent is not None:
+            ctx = ctx.mode_parent
+        return ctx
 
 
 class LumiAgentState(TypedDict):
@@ -108,7 +119,8 @@ class LumiAgentState(TypedDict):
     structured_output: NotRequired[dict[str, Any]]
     """结构化输出结果"""
     tool_cancelled: NotRequired[bool]
-    """工具执行被用户取消时置 True，供条件边路由到 END"""
+    """本轮被终止（用户取消 ask、hook Block、结构化输出失败上限）时置 True，供条件边
+    路由到 END；下一轮 PreprocessMessages 开头复位。字段名沿用旧名，免迁移存量 checkpoint"""
     ptl_retry: NotRequired[bool]
     """CallModel 撞 prompt-too-long 后置 True 并路由回 Summarizer 强制压缩，
     成功响应后清 False。置位期间再撞 PTL 直接抛原错误——每次 PTL 只换一次压缩机会。"""

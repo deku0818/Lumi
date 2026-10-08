@@ -50,3 +50,20 @@ def test_unguarded_exits_three_not_two(monkeypatch):
 def test_missing_subcommand_still_exits_two():
     # 上一条依赖的前提：click 确实把用法错误报成 2。它变了，3 这个选择就失去意义
     assert runner.invoke(app, ["nonexistent-command"]).exit_code == 2
+
+
+@pytest.mark.parametrize(
+    "args",
+    [
+        ["-s", "code", "status"],
+        ["--privileged-danger", "status"],
+        ["--accept-edits", "status"],
+        ["-p", "hi", "status"],
+    ],
+)
+def test_root_options_with_subcommand_are_rejected(args):
+    # 回归：根选项只作用于 -p 模式，配子命令时曾被静默丢弃（以为 serve 用上了 code 风格
+    # / 特权模式，其实没有）
+    result = runner.invoke(app, args)
+    assert result.exit_code == 2
+    assert "-p" in result.output

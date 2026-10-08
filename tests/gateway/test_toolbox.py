@@ -161,16 +161,37 @@ def _tar_with_binary(tmp_path, inner_path, content=b"#!/bin/sh\necho uv 0.11.32\
 
 
 def test_install_extracts_binary(toolbox_env, tmp_path, monkeypatch):
-    archive = _tar_with_binary(tmp_path, "uv-aarch64-apple-darwin/uv")
+    archive = _tar_with_binary(tmp_path, "ripgrep-15.2.0-aarch64-apple-darwin/rg")
 
     def fake_download(url, dest, progress, phase, tool=""):
         dest.write_bytes(archive.read_bytes())
 
     monkeypatch.setattr(toolbox, "_download", fake_download)
     monkeypatch.setattr(toolbox, "_plat", lambda: ("darwin", "arm64"))
-    status = toolbox.install("uv")
+    status = toolbox.install("rg")
     assert status.source == "toolbox"
-    assert os.access(get_config().bin_dir / "uv", os.X_OK)
+    assert os.access(get_config().bin_dir / "rg", os.X_OK)
+
+
+def test_install_uv_also_extracts_uvx(toolbox_env, tmp_path, monkeypatch):
+    # 官方 uv 包自带 uvx（stdio MCP 常用启动器），只提取 uv 会让 uvx 起的 server ENOENT
+    archive = tmp_path / "asset.tar.gz"
+    with tarfile.open(archive, "w:gz") as tar:
+        for exe in ("uvx", "uv"):
+            content = b"#!/bin/sh\necho uv 0.11.32\n"
+            info = tarfile.TarInfo(f"uv-aarch64-apple-darwin/{exe}")
+            info.size = len(content)
+            info.mode = 0o755
+            tar.addfile(info, io.BytesIO(content))
+
+    def fake_download(url, dest, progress, phase, tool=""):
+        dest.write_bytes(archive.read_bytes())
+
+    monkeypatch.setattr(toolbox, "_download", fake_download)
+    monkeypatch.setattr(toolbox, "_plat", lambda: ("darwin", "arm64"))
+    toolbox.install("uv")
+    for exe in ("uv", "uvx"):
+        assert os.access(get_config().bin_dir / exe, os.X_OK)
 
 
 def test_install_node_tree_and_links(toolbox_env, tmp_path, monkeypatch):
@@ -368,42 +389,6 @@ def test_install_lark_cli_translates_missing_curl(toolbox_env, monkeypatch):
         toolbox.install_lark_cli()
 
 
-def test_install_lark_cli_links_from_npm_prefix(toolbox_env, monkeypatch):
-    """装出的 cli 不在 PATH 上时，链接目标问 `npm prefix -g`，不按 node 树硬拼。
-
-    用户级 .npmrc 改过 prefix（Windows 上指到 %APPDATA%\\npm 很常见）时硬拼会链出
-    一个探测得到、一跑就报「找不到路径」的幽灵 shim：体检显示 lark-cli 已安装，
-    而技能包同步与妙记取数全部静默失败。
-    """
-    _fake_exe(toolbox_env["system_bin"], "npm")
-    prefix = toolbox_env["config"] / "elsewhere"  # 与工具箱 node 树无关的目录
-    (prefix / "bin").mkdir(parents=True)
-    _fake_exe(prefix / "bin", "lark-cli", "1.0.78")
-
-    def fake_run(cmd, timeout=30):
-        if cmd[1:] == ["prefix", "-g"]:
-            return True, f"{prefix}\n"
-        return True, ""  # npm install -g
-
-    monkeypatch.setattr(toolbox, "_run", fake_run)
-    status = toolbox.install_lark_cli()
-    assert status.source == "toolbox"
-    link = toolbox_env["config"] / "bin" / "lark-cli"
-    assert link.resolve() == (prefix / "bin" / "lark-cli").resolve()
-
-
-def test_install_lark_cli_rejects_missing_binary(toolbox_env, monkeypatch):
-    """npm 说装好了却找不到产物：报错，而不是链一个指向空气的 shim。"""
-    _fake_exe(toolbox_env["system_bin"], "npm")
-    monkeypatch.setattr(
-        toolbox,
-        "_run",
-        lambda cmd, timeout=30: (True, str(toolbox_env["config"] / "nowhere")),
-    )
-    with pytest.raises(RuntimeError, match="不存在"):
-        toolbox.install_lark_cli()
-
-
 def test_skills_status_reports_outdated(toolbox_env, monkeypatch):
     _mock_lark_cli(monkeypatch, toolbox_env)
     sync_lark_skills()
@@ -535,3 +520,23 @@ def test_inject_path_idempotent(toolbox_env):
     parts = os.environ["PATH"].split(os.pathsep)
     assert parts.count(str(get_config().bin_dir)) == 1
     assert parts[-1] == str(get_config().bin_dir)  # 末尾追加，系统优先
+
+
+# ── 给用户粘贴进终端的修复命令 ──
+
+
+def test_terminal_cmd_adds_toolbox_bin_for_toolbox_only_tool(toolbox_env, monkeypatch):
+    # 回归：体检的 fix_cmd 是裸命令名，工具只装在工具箱时用户终端里 command not found
+    monkeypatch.setattr(toolbox, "_plat", lambda: ("linux", "x64"))
+    bin_dir = get_config().bin_dir
+    bin_dir.mkdir(parents=True)
+    _fake_exe(bin_dir, "lark-cli")
+    assert toolbox.terminal_cmd("lark-cli auth login") == (
+        f'PATH="$PATH:{bin_dir}" lark-cli auth login'
+    )
+
+
+def test_terminal_cmd_leaves_system_tool_alone(toolbox_env):
+    _fake_exe(toolbox_env["system_bin"], "lark-cli")
+    assert toolbox.terminal_cmd("lark-cli auth login") == "lark-cli auth login"
+    assert toolbox.terminal_cmd("npm i -g x") == "npm i -g x"  # 缺失同样原样

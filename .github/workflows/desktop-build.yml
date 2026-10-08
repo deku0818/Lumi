@@ -13,7 +13,12 @@ permissions:
   contents: write # 附加产物到 Release 需要写权限
 
 jobs:
+  # 测试 + 版本一致性门（见 ci.yml）
+  ci:
+    uses: ./.github/workflows/ci.yml
+
   build:
+    needs: ci
     strategy:
       fail-fast: false # 一个平台失败不牵连另一个
       matrix:

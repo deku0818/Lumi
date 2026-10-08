@@ -3,7 +3,7 @@
 把 hooks.json 配置的 shell command（``command`` 字段）包装为 Python ``Hook``：
 - 启动 subprocess，stdin 喂 ``protocol.serialize_input`` 输出
 - stdout 读到上限 / 进程退出，``protocol.parse_output`` 翻译为 ``HookResult``
-- 5 秒默认超时；到点 SIGTERM → 1s 后 SIGKILL
+- 5 秒默认超时；到点或本轮被取消时按进程组终止（SIGTERM → 宽限后 SIGKILL），超时放行
 - env 仅传 ``LUMI_HOOK_*`` 前缀变量 + ``PATH``，防 secrets 泄露
 - ``matcher`` 正则：仅 PreToolUse / PostToolUse 生效，未命中则跳过 subprocess
 - exit code: 0=正常解析 stdout / 2=deny / 其他=非阻断 error（放行）
@@ -30,6 +30,7 @@ from lumi.agents.core.hooks.schema import (
     HookEvent,
     HookResult,
 )
+from lumi.agents.runtime.bg_process import terminate_group
 from lumi.utils.logger import logger
 
 DEFAULT_TIMEOUT_MS = 5000
@@ -37,9 +38,6 @@ DEFAULT_TIMEOUT_MS = 5000
 
 STDOUT_LIMIT_BYTES = 10 * 1024 * 1024
 """stdout 上限 10 MB。超限截断 + 标记 error。"""
-
-KILL_GRACE_SECONDS = 1.0
-"""SIGTERM 后等待时长，超时再 SIGKILL。"""
 
 ENV_PASSTHROUGH_PREFIX = "LUMI_HOOK_"
 """仅 ``LUMI_HOOK_*`` 前缀环境变量透传，防 secrets（API_KEY / DB_URL 等）泄露。"""
@@ -59,11 +57,14 @@ def make_shell_hook(
     command: str,
     timeout_ms: int = DEFAULT_TIMEOUT_MS,
     matcher: str | None = None,
+    cwd: Path | None = None,
 ) -> Hook:
     """构造一个 Shell command hook，可直接 ``register_hook(event, hook)``。
 
     启动期校验 command 必须是绝对路径 + 存在 + 可执行——不通过抛 ``ValueError``，
     由 ``config_loader`` 捕获后 log 跳过该条（不让坏配置静默漂移到运行时）。
+    ``cwd``：子进程工作目录（config hook 为所属项目根；serve 从不 chdir，缺省会落在
+    进程启动目录，git / pytest 类 hook 就在错误的目录执行）。
     """
     # isabs 而非 startswith("/")：后者把 Windows 的 C:\... 一律判成非法，那边所有
     # shell hook 都会在启动期被跳过
@@ -89,6 +90,9 @@ def make_shell_hook(
             stdout=asyncio.subprocess.PIPE,
             stderr=asyncio.subprocess.PIPE,
             env=_filter_env(),
+            cwd=cwd,
+            # 自立进程组：超时 / 取消时连同脚本起的子进程一起收掉，不留孤儿
+            start_new_session=True,
         )
 
         try:
@@ -97,17 +101,13 @@ def make_shell_hook(
                 timeout=timeout_ms / 1000,
             )
         except TimeoutError:
-            logger.warning("[hooks] %s 超时 %dms，发送 SIGTERM", label, timeout_ms)
-            try:
-                proc.terminate()
-                await asyncio.wait_for(proc.wait(), timeout=KILL_GRACE_SECONDS)
-            except TimeoutError:
-                logger.warning("[hooks] %s SIGTERM 后未退出，发送 SIGKILL", label)
-                proc.kill()
-                await proc.wait()
-            except ProcessLookupError:
-                pass
-            return Block(f"hook timeout after {timeout_ms}ms")
+            # 超时放行（同非阻断 error）：卡住的 hook 不拦工具、不扣留本轮结束
+            logger.warning("[hooks] %s 超时 %dms，终止进程组并放行", label, timeout_ms)
+            await terminate_group(proc)
+            return None
+        except asyncio.CancelledError:
+            await asyncio.shield(terminate_group(proc))
+            raise
 
         exit_code = proc.returncode if proc.returncode is not None else -1
 

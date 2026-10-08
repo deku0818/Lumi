@@ -123,3 +123,15 @@ def test_cache_correctness_after_modification() -> None:
         # 新增一个 agent 文件
         _create_agent_file(tmp_dir, "beta", "beta 提示词")
         assert {"alpha", "beta"} <= {a.name for a in detector.peek()}
+
+
+def test_style_switch_refreshes_builtin_agents(tmp_path, isolated_config):
+    """回归：内置层不参与 digest，改项目 style 后缓存长期沿用旧风格的内置子代理。"""
+    lumi_dir = tmp_path / ".lumi"
+    lumi_dir.mkdir()
+    (lumi_dir / "config.json").write_text('{"style": "default"}', encoding="utf-8")
+    detector = AgentChangeDetector.get_instance(tmp_path)
+    assert "general-purpose" in {a.name for a in detector.peek()}
+
+    (lumi_dir / "config.json").write_text('{"style": "code"}', encoding="utf-8")
+    assert "plan" in {a.name for a in detector.peek()}

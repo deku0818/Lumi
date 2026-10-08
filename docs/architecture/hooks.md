@@ -12,53 +12,54 @@
 | **Stop** | 模型不调工具想结束 | `OnAgentStop` 节点（`nodes.py`） | first_intercept |
 | **PreToolUse** | 工具执行前 | `tool_executor` 节点开头 | collect |
 | **PostToolUse** | 工具结果合并后 | `tool_executor` 节点末尾 | collect |
-| UserPromptSubmit / SessionStart / SessionEnd | — | 枚举已定义，**未插桩**（Lumi 拓扑/会话层与 OmniAgent 不同，按需再做） | — |
+| **UserPromptSubmit** | 每轮模型调用前 | `PreprocessMessages` 节点（`nodes.preprocess_messages`） | collect |
 
 **为何 Stop 用独立节点**：`is_use_tool` 是纯条件路由函数，只能返回字符串、不能返回
 `Command`。而 hook 要能注入消息（`AdditionalContext`）或改路由（`Block`），必须落在
 能返回 `Command` 的节点里。故无 tool_calls 时路由到 `OnAgentStop` 薄节点，节点内
 `dispatch_hooks` 后默认 `Command(goto=END)`，hook 可拦截。
 
-## 返回值与三模式
+## 返回值与两种模式
 
 Hook 签名 `async (HookContext) -> HookResult`，`HookResult = None | Command | AdditionalContext | Block`：
 
 - `None` — 放行
 - `AdditionalContext(text)` — 软扩展：注入 `<system-reminder>` 让模型继续（声明 `items: []`
-  + `is_hook_reminder` 标记，TUI 不渲染为用户气泡、轮边界扫描据此跳过，见下）
+  + `is_hook_reminder` 标记，前端不渲染为用户气泡、轮边界扫描据此跳过，见下）
 - `Block(reason)` — 硬终止：拒绝执行 + 以 reason 收尾
 - `Command(...)` — 完全控制 graph 路由 + state
 
-`dispatch.py` 的三模式（`_to_command` 把 `AdditionalContext`/`Block` 翻译为 `Command`）：
+`dispatch.py` 的两种模式（`_to_command` 把 `AdditionalContext`/`Block` 翻译为 `Command`）：
 
 - **first_intercept**（Stop）：第一个返非 `None` 的 hook 拦截，后续不跑。
-- **collect**（PreToolUse/PostToolUse）：多个 `AdditionalContext` 合并到同一条消息；遇
+- **collect**（PreToolUse/PostToolUse/UserPromptSubmit）：多个 `AdditionalContext` 合并到同一条消息；遇
   `Block`/`Command` 短路但已收的 reminder 一起注入。
-- **side_effect**（SessionEnd 预留）：所有 hook 并发跑，返回值仅 warning。
 
 错误隔离：每个 hook 包 try/except，单个抛错记日志后继续，dispatch 不抛。
 
 ## 三种形态
 
-三形态在 dispatch 层完全等价——非 Python 形态由 wrapper 包装为 Python `Hook` 后
-`register_hook` 注册，dispatch 不感知形态差异。
+各形态在 dispatch 层完全等价，dispatch 不感知形态差异：builtin 经 `register_hook` 进
+进程全局；shell hook 由 `build_config_hooks` 包装为 Python `Hook` 后经 per-run contextvar
+注入（不注册）。
 
 - **Python callable**：进程内直接 await（内置 hook 走这条，见 `builtin.py`）。
 - **Shell 命令**（`exec_shell.py`）：subprocess，stdin 喂决策 JSON、stdout 读回。5s 超时
-  → SIGTERM→SIGKILL；env 仅透传 `LUMI_HOOK_*` 前缀 + `PATH`（防 secrets 泄露）；
+  → 按进程组 SIGTERM→SIGKILL 并**放行**（记 warning，同非阻断 error；卡住的 hook 不拦工具、
+  不扣留本轮结束）；env 仅透传 `LUMI_HOOK_*` 前缀 + `PATH`（防 secrets 泄露）；
   exit code 0=解析 stdout / 2=deny / 其他=非阻断放行。
-- HTTP webhook / Subagent：**未实现**（对桌面 TUI 偏重，按需再加）。
+- HTTP webhook / Subagent：**未实现**（按需再加）。
 
 ### Shell hook 决策协议（`protocol.py`）
 
-输入（stdin JSON）：`{version, event, thread_id, payload, messages_tail}`。
+输入（stdin JSON）：`{version, event, thread_id, depth, stop_hook_active, payload, messages_tail}`——`depth` 为委派深度（0 = 主 agent，config hook 随会话被子代理继承，据此区分；Stop 事件只在 depth=0 分发给 config hook），`stop_hook_active` 表示本轮已有 hook 注入过提醒（Stop hook 据此避免无限拉回）。子进程工作目录为所属项目根。
 输出（stdout JSON）：`{decision: "allow"|"deny"|"passthrough", additionalContext?, stopReason?}`
 → `deny` 翻译为 `Block`，`additionalContext` 翻译为 `AdditionalContext`。
 `matcher` 正则仅 PreToolUse/PostToolUse 生效，未命中则跳过 subprocess。
 
 ## 配置：三级 hooks.json
 
-与 `permissions.json` 同级同模式（JSONC，优先级低→高）：
+与 `permissions.json` 同级同位置（JSONC）；三层全部生效，按此顺序执行：
 
 1. 用户全局 `~/.lumi/hooks.json`
 2. 项目共享 `{project}/.lumi/hooks.json`
@@ -79,9 +80,15 @@ Hook 签名 `async (HookContext) -> HookResult`，`HookResult = None | Command |
 默认 5000）。**容错策略**：单条构造失败（路径不存在/不可执行/正则非法）→ log 跳过，
 不让整个 agent 起不来（Lumi 面向非技术用户，hook 是高级特性）。
 
-**builtin Python hook**（`builtin.py`，如结构化输出兜底）在 import 时 `register_hook` 注册到进程全局 `_HOOKS`——框架级、与项目无关。
+**builtin Python hook**（`builtin.py`，如结构化输出兜底）在 import 时 `register_hook` 注册到进程全局 `_HOOKS`（import 由 `core/graph.py` 在图装配点触发）——框架级、与项目无关。
 
-**config hook（hooks.json）随会话/项目绑定，不进进程全局**：`build_config_hooks(project)` 读三级文件、构造 `{event: [hook]}` 字典（纯函数式、不注册）；bridge 在 `initialize` / `set_workspace` 时为本会话项目构造一次并存 `_config_hooks`，每轮 `_stream` 起点经 `set_run_config_hooks(...)` 注入 per-run contextvar `_run_config_hooks`；cron 在 `_invoke_agent` 起点同理注入本 cron 项目的。`dispatch_hooks` / `has_hooks` 经 `_hooks_for(event)` 读取 **config（contextvar，本会话项目）+ builtin（进程全局）** 的合并——config 整体排在 builtin 之前、同事件内保声明顺序。
+**config hook（hooks.json）随会话/项目绑定，不进进程全局**：`build_config_hooks(project)` 读三级文件、构造 `{event: [hook]}` 字典（纯函数式、不注册）；bridge 在 `initialize` / `set_workspace` 时为本会话项目构造一次并存 `_config_hooks`，每轮 `_stream` 起点经 `set_run_config_hooks(...)` 注入 per-run contextvar `_run_config_hooks`；`lumi serve` 下的 cron 经 `cron_stream` 同样跑在 `AgentBridge` 上，在 `_stream` 注入本 cron 项目的。`dispatch_hooks` / `has_hooks` 经 `_hooks_for(event)` 读取 **config（contextvar，本会话项目）+ builtin（进程全局）** 的合并——config 整体排在 builtin 之前、同事件内保声明顺序。
+
+**子代理不跑项目 Stop hook**：子代理（agent 工具前台 / 后台、workflow 扇出）继承父 run 的
+contextvar，PreToolUse / PostToolUse / UserPromptSubmit 的 config hook 照常作用于子代理；但
+Stop 表示「用户这一轮结束」，子代理收尾不算——`_hooks_for` 在 `depth>0` 时略过 config 的
+Stop hook（否则跑测试 / 拉回类 hook 每个子代理各触发一次、甚至把子代理困住）。builtin
+Stop hook 照常分发，各自有 depth 闸。workflow 子代理的 `depth` 为父 depth + 1（与 agent 工具一致）。
 
 **为何 config hook 走 per-run contextvar 而非进程单例**：一个 `lumi serve` 进程承载多条 WS 连接、项目随会话绑定（见 [desktop.md](desktop.md)），各会话各绑各项目的 hooks，进程单例无法共存、且会被并发会话互相清洗（这也是早期 `_LOADED` 全局守卫被去掉的原因）。builtin 与项目无关故仍留全局。
 
@@ -119,7 +126,7 @@ PreToolUse/PostToolUse payload（宽 matcher 不会误触发）；(2) **纯内�
 | 文件 | 职责 |
 |---|---|
 | `hooks/schema.py` | 契约：`HookEvent` / `HookContext` / `AdditionalContext` / `Block` |
-| `hooks/dispatch.py` | builtin 全局注册表 `_HOOKS` + config per-run contextvar `_run_config_hooks` + `_hooks_for` 合并 + dispatch 三模式 + `has_hooks` |
+| `hooks/dispatch.py` | builtin 全局注册表 `_HOOKS` + config per-run contextvar `_run_config_hooks` + `_hooks_for` 合并 + dispatch 两种模式 + `has_hooks` |
 | `hooks/builtin.py` | 内置 hook 注册（import 时注册全局）。Stop 序：`structured_output_stop_hook` → `goal_stop_hook` → `auto_dream_stop_hook`；UserPromptSubmit：`context_inject_hook` |
 | `hooks/goal.py` | `/goal` 目标驱动：session 级 Stop 条件评估。无状态 `structured_output` 判官（转录渲染成文本、复用会话模型、三态 ok/reason/impossible）；条件存 `session_meta` sidecar（达成清条件+返 None 不短路 dream）；子 agent（depth>0）免疫 |
 | `hooks/protocol.py` | Shell hook 决策 JSON 协议 |

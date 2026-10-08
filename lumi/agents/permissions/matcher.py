@@ -8,6 +8,7 @@ from __future__ import annotations
 import re
 from pathlib import Path
 
+from lumi.agents.memory.paths import resolve_under_project
 from lumi.agents.permissions.models import PATH_ARG_KEYS, PermissionRule
 from lumi.utils.logger import logger
 
@@ -109,19 +110,18 @@ class RuleMatcher:
             - 不带 `/` 前缀的模式在任意目录层级匹配
         """
         try:
-            # 将文件路径标准化为相对于项目根目录的路径
-            path = Path(file_path)
-            if path.is_absolute():
-                try:
-                    rel_path = path.relative_to(project_dir).as_posix()
-                except ValueError:
-                    # 路径不在项目目录下，无法匹配
-                    return False
-            else:
-                rel_path = path.as_posix()
+            # 与工具执行同一口径归一（展开 ~、消掉 ..）：否则 src/../secrets/k 能绕过
+            # deny /secrets/**。项目外路径：锚定模式（相对项目根）一律不命中，尾部模式
+            # 以绝对路径参与匹配——**/.env 这类 deny 照样命中
+            target = resolve_under_project(file_path, project_dir)
+            root = project_dir.resolve()
+            inside = target.is_relative_to(root)
+            rel_path = (target.relative_to(root) if inside else target).as_posix()
 
             # 判断是否为根匹配模式（带 / 前缀）
             if pattern.startswith("/"):
+                if not inside:
+                    return False
                 anchor = True
                 pattern = pattern[1:]  # 去掉前缀 /
             else:
@@ -181,7 +181,7 @@ class RuleMatcher:
                 return False
             return RuleMatcher.match_path_pattern(pattern, file_path, project_dir)
 
-        # 其他工具（如 MCP 工具）带模式时，尝试将模式与第一个字符串参数匹配
+        # 其他工具（如 MCP 工具）带模式时，与任一字符串参数匹配即算命中（对 deny 更严）
         for value in tool_args.values():
             if isinstance(value, str) and RuleMatcher.match_command_pattern(
                 pattern, value
@@ -195,7 +195,7 @@ def _glob_to_regex(pattern: str) -> str:
 
     处理规则:
         - `**/` → 匹配零或多层目录（`(?:.+/)?`）
-        - `/**` → 匹配零或多层路径后缀（`(?:/.*)?`）
+        - 结尾 `/**` → 匹配该目录本身及其下任意层（`dir(?:/.*)?`）
         - `**` (独立) → 匹配任意路径（`.*`）
         - `*` → 匹配单层中任意字符（`[^/]*`）
 
@@ -218,8 +218,9 @@ def _glob_to_regex(pattern: str) -> str:
                     # **/ → 匹配零或多层目录前缀
                     result.append("(?:.+/)?")
                     i += 3
-                elif i > 0 and pattern[i - 1] == "/":
-                    # /** → 匹配零或多层路径后缀
+                elif i + 2 == n and i > 0 and pattern[i - 1] == "/":
+                    # 结尾 /** → 匹配目录本身及其下任意层；前面已输出的 / 由后缀接管
+                    result.pop()
                     result.append("(?:/.*)?")
                     i += 2
                 else:
@@ -238,59 +239,6 @@ def _glob_to_regex(pattern: str) -> str:
             i += 1
 
     return "".join(result)
-
-
-def build_exact_expr(tool_name: str, tool_args: dict) -> str:
-    """构造精确匹配的工具表达式。
-
-    根据工具类型提取具体的命令或路径参数，生成如 "bash(npm test)" 的表达式。
-    无参数时返回纯工具名。
-
-    Args:
-        tool_name: 工具名称
-        tool_args: 工具参数
-
-    Returns:
-        工具表达式字符串
-    """
-    if tool_name in COMMAND_TOOLS:
-        cmd = extract_arg(tool_args, COMMAND_ARG_KEYS) or ""
-        return f"{tool_name}({cmd})" if cmd else tool_name
-    if tool_name in PATH_TOOLS:
-        path = extract_arg(tool_args, PATH_ARG_KEYS) or ""
-        return f"{tool_name}({path})" if path else tool_name
-    return tool_name
-
-
-def build_pattern_expr(tool_name: str, tool_args: dict) -> str:
-    """构造宽泛模式的工具表达式。
-
-    对命令工具取首个单词加 *，对路径工具取文件扩展名加 **/*。
-    无参数时返回纯工具名。
-
-    Args:
-        tool_name: 工具名称
-        tool_args: 工具参数
-
-    Returns:
-        工具表达式字符串
-    """
-    if tool_name in COMMAND_TOOLS:
-        cmd = extract_arg(tool_args, COMMAND_ARG_KEYS) or ""
-        if cmd:
-            words = cmd.split()
-            first_word = words[0] if words else cmd
-            return f"{tool_name}({first_word} *)"
-        return tool_name
-    if tool_name in PATH_TOOLS:
-        path = extract_arg(tool_args, PATH_ARG_KEYS) or ""
-        if path:
-            suffix = Path(path).suffix
-            if suffix:
-                return f"{tool_name}(**/*{suffix})"
-            return f"{tool_name}(**/*)"
-        return tool_name
-    return tool_name
 
 
 def extract_arg(args: dict, keys: tuple[str, ...]) -> str | None:

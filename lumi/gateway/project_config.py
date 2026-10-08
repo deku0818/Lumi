@@ -78,13 +78,13 @@ def _prompt_info(project: Path, name: str) -> dict:
 
 
 def _list_skills(project: Path) -> list[dict]:
-    # 以目录名为身份归并（CRUD 按目录定位；写入时校验 frontmatter name 与目录名一致）
+    # 以 frontmatter name 为身份归并，与运行时 loader 同键（项目层写入时校验 name 与
+    # 目录名一致；低层目录名可以不同，定位一律按解析结果走 _skill_dir）
     merged: dict[str, dict] = {}
     for source, layer in config_layers("skills", project):
         for s in _load_skills_from_dir(layer).values():
-            dir_name = Path(s.path or "").parent.name
-            merged[dir_name] = {
-                "name": dir_name,
+            merged[s.name] = {
+                "name": s.name,
                 "description": s.description,
                 "source": source,
                 "builtin": source != "project",
@@ -96,9 +96,8 @@ def _list_agents(project: Path) -> list[dict]:
     merged: dict[str, dict] = {}
     for source, layer in config_layers("agents", project):
         for a in _load_agents_from_dir(layer).values():
-            stem = Path(a.path or "").stem
-            merged[stem] = {
-                "name": stem,
+            merged[a.name] = {
+                "name": a.name,
                 "description": a.description,
                 "tools": a.tools,
                 "source": source,
@@ -124,22 +123,23 @@ def _list_memory(project: Path) -> list[dict]:
 
 
 def _skill_dir(project: Path, name: str) -> tuple[Path, str]:
-    """定位技能目录，返回 (目录, 来源标签)。高优先层先命中。"""
+    """定位技能目录，返回 (目录, 来源标签)。高优先层先命中；按解析结果而非文件存在
+    判定——写坏解析不了的文件运行时也不加载，不能遮住低层那份。"""
     _check_name(name)
     for source, layer in reversed(config_layers("skills", project)):
-        candidate = layer / name
-        if (candidate / "SKILL.md").is_file():
-            return candidate, source
+        skill = _load_skills_from_dir(layer).get(name)
+        if skill is not None:
+            return Path(skill.path).parent, source
     raise ValueError(f"技能不存在: {name}")
 
 
 def _agent_file(project: Path, name: str) -> tuple[Path, str]:
-    """定位 agent 定义文件，返回 (文件, 来源标签)。高优先层先命中。"""
+    """定位 agent 定义文件，返回 (文件, 来源标签)。判定同 _skill_dir。"""
     _check_name(name)
     for source, layer in reversed(config_layers("agents", project)):
-        candidate = layer / f"{name}.md"
-        if candidate.is_file():
-            return candidate, source
+        agent = _load_agents_from_dir(layer).get(name)
+        if agent is not None:
+            return Path(agent.path), source
     raise ValueError(f"Agent 不存在: {name}")
 
 
@@ -205,16 +205,24 @@ def read_resource(project: Path, kind: str, name: str, file: str = "") -> dict:
 
 
 def write_resource(
-    project: Path, kind: str, name: str, content: str, file: str = ""
+    project: Path,
+    kind: str,
+    name: str,
+    content: str,
+    file: str = "",
+    create: bool = False,
 ) -> dict:
-    """写项目层资源（新建或覆盖），按需建目录。其余层不可写。"""
+    """写项目层资源（新建或覆盖），按需建目录。其余层不可写。
+
+    create=True（前端「新建」）时目标已存在即拒绝：否则同名会把用户写过的定义整体
+    换成模板，且无法撤销。
+    """
     project = project.resolve()
     if kind == "skill":
         _check_name(name)
         if not file or file == "SKILL.md":
             validate_definition(content, name)
         skill_dir = project / ".lumi" / "skills" / name
-        skill_dir.mkdir(parents=True, exist_ok=True)
         target = _skill_file_in(skill_dir, file or "SKILL.md")
     elif kind == "agent":
         _check_name(name)
@@ -226,6 +234,8 @@ def write_resource(
         target = project / ".lumi" / "prompts" / f"{name}.md"
     else:
         raise ValueError(f"资源类型不可写: {kind}")
+    if create and target.exists():
+        raise ValueError(f"已存在同名定义: {name}")
     target.parent.mkdir(parents=True, exist_ok=True)
     target.write_text(content, encoding="utf-8")
     return {"ok": True, "path": _display_path(target, project)}

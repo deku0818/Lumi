@@ -6,8 +6,8 @@
 from __future__ import annotations
 
 import asyncio
-from datetime import datetime
 from typing import Any
+from uuid import uuid4
 
 from lumi.agents.core.node_helpers.messages import content_to_str, write_offload_file
 from lumi.utils.config import get_config
@@ -16,7 +16,6 @@ from lumi.utils.paths import lumi_tmp_dir
 from lumi.utils.sizing import (
     content_size,
     text_size,
-    truncate_docs_to_max_bytes,
     truncate_text_to_max_bytes,
 )
 
@@ -61,8 +60,8 @@ async def _try_offload_to_file(
     byte_count = text_size(content_str)
     line_count = content_str.count("\n") + 1
 
-    timestamp = datetime.now().strftime("%H%M%S%f")
-    file_path = lumi_tmp_dir("offload") / f"{tool_name}_result_{timestamp}.txt"
+    # 唯一名不靠时间戳：Windows 上 Py3.12 的时钟精度约 15ms，同一轮两条结果会撞名
+    file_path = lumi_tmp_dir("offload") / f"{tool_name}_result_{uuid4().hex}.txt"
 
     try:
         await asyncio.to_thread(write_offload_file, file_path, content_str)
@@ -116,14 +115,10 @@ async def _truncate_single_message(msg: object, max_bytes: int) -> None:
     if _has_multimodal_blocks(original_content):
         return
 
-    truncated_content = truncate_docs_to_max_bytes(
-        original_content, max_bytes=max_bytes
-    )
-    if truncated_content == original_content:
-        return
-
     content_str = content_to_str(original_content)
-    truncated_str = content_to_str(truncated_content)
+    if text_size(content_str) <= max_bytes:
+        return
+    truncated_str = truncate_text_to_max_bytes(content_str, max_bytes)
     tool_name: str = getattr(msg, "name", "unknown")
 
     # read 等工具：截断并附带分段读取提示

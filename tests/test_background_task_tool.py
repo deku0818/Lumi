@@ -199,3 +199,32 @@ async def test_stop_bash_task(registry):
         assert "已停止" in result
     finally:
         bg_process._bg_manager = None
+
+
+async def test_other_sessions_tasks_are_invisible(registry):
+    # 回归：进程级注册表不分会话——会话 B 能列出 A 的任务（命令行里的密钥一并暴露）、
+    # 查它的输出路径、甚至停掉它
+    from lumi.agents.runtime.bg_tasks import current_thread_id
+
+    token = current_thread_id.set("t-A")
+    try:
+        registry.register(
+            BackgroundTaskEntry(
+                task_id="bg_secret",
+                kind=TaskKind.BASH,
+                status=TaskStatus.RUNNING,
+                label="curl -H 'Authorization: Bearer sk-A'",
+                started_at=time.time(),
+                output_file=Path("/tmp/bg_secret.txt"),
+            )
+        )
+    finally:
+        current_thread_id.reset(token)
+    token = current_thread_id.set("t-B")
+    try:
+        assert "bg_secret" not in _format_task_list()
+        assert "不存在" in _format_task_status("bg_secret")
+        assert "不存在" in await _handle_stop("bg_secret")
+    finally:
+        current_thread_id.reset(token)
+    assert registry.get("bg_secret").status == TaskStatus.RUNNING

@@ -101,15 +101,16 @@ Wants=network-online.target
 
 [Service]
 Type=simple
-User=lumi
+User=<你的用户名>
 # ExecStart 必须写绝对路径：systemd 不读你的 shell 配置，PATH 里没有 ~/.local/bin。
-# 路径取 `uv tool dir --bin` 的输出，注意那是**服务运行身份**的家目录，不是你的
-ExecStart=/home/lumi/.local/bin/lumi serve --host 0.0.0.0 --port 8765
-# 机器级数据（密钥 / 会话 / 记忆 / 日志 / 工具箱）全跟着这一个变量走
-Environment=LUMI_CONFIG_DIR=/opt/lumi/data
+# 路径取 `uv tool dir --bin` 的输出
+ExecStart=/home/<你>/.local/bin/lumi serve --host 0.0.0.0 --port 8765
+# 显式给 HOME：机器级数据（密钥 / 会话 / 记忆 / 日志 / 工具箱）默认落在 $HOME/.lumi
+Environment=HOME=/home/<你>
+# Environment=LUMI_CONFIG_DIR=/opt/lumi/data   # 可选：另立数据目录
 # 进程从不 chdir（项目按会话绑定绝对路径），这里只是给个保证存在的落脚点，
 # 免得 cwd 落在 / 上让相对路径写进根目录
-WorkingDirectory=/opt/lumi/data
+WorkingDirectory=/home/<你>
 # 令牌经环境文件进来，不写进 ExecStart（否则 ps 里人人可见）
 EnvironmentFile=/etc/lumi.env
 Restart=always

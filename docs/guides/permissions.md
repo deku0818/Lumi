@@ -20,7 +20,7 @@ Lumi 内置了基于配置文件的工具权限管理系统。Agent 在执行工
 | 2 | `.lumi/permissions.json` | 项目共享配置（可提交到 Git） |
 | 3 | `.lumi/permissions.local.json` | 项目本地配置（建议加入 .gitignore） |
 
-高优先级配置中的同名工具规则会覆盖低优先级的规则。配置文件修改后自动热重载，无需重启。
+高优先级配置中的同名工具规则会覆盖低优先级的规则，但 `deny` 规则不可被覆盖：任何一层（包括同一文件内）对同一表达式写的 `allow`/`ask` 都盖不掉已有的 `deny`。配置文件修改后自动热重载，无需重启。
 
 ### 配置结构
 
@@ -54,7 +54,7 @@ Lumi 内置了基于配置文件的工具权限管理系统。Agent 在执行工
 | 权限 | 行为 |
 |---|---|
 | `allow` | 直接放行，不弹出审批 |
-| `deny` | 标记为危险，审批界面显示警告并自动拒绝 |
+| `deny` | 直接拒绝、不弹审批，拒绝原因回给模型让它换做法 |
 | `ask` | 弹出审批，即使存在更宽泛的 allow 规则 |
 
 当同一个工具调用匹配多条规则时，取最严格结果：`deny` > `ask` > `allow`。
@@ -76,8 +76,8 @@ Lumi 内置了基于配置文件的工具权限管理系统。Agent 在执行工
 ### 纯工具名 vs 带括号模式
 
 - `read` — 无条件放行所有 read 调用，不检查路径
-- `read(*)` — 只允许读取当前目录下的文件（`*` 不含 `/`）
-- `read(**)` — 允许读取任意路径的文件
+- `read(*)` / `read(**)` — 不带 `/` 前缀的模式在任意层级匹配，效果等同纯工具名（任意路径）
+- `read(/*)` — 只匹配项目根下一层的文件；`read(/src/**)` 只匹配 `src` 子树
 
 如果你想放行某个工具的全部操作，直接写工具名即可，不需要加 `(*)`。
 
@@ -94,7 +94,7 @@ Lumi 内置了基于配置文件的工具权限管理系统。Agent 在执行工
 
 - `*` 匹配单层目录中的任意字符（不含 `/`）
 - `**` 匹配零或多层目录
-- `/` 前缀表示从项目根目录开始匹配
+- `/` 前缀表示从项目根目录开始匹配；项目外的路径一律不命中（`/**` 也不例外）
 - `edit(src/**/*.py)` — 匹配 src 下所有 Python 文件
 - `read(*.md)` — 匹配任意目录下的 Markdown 文件
 
@@ -150,32 +150,32 @@ bash 复合命令（如 `git add . && git push`）会被拆分为独立子命令
 | 工具 | 原因 |
 |---|---|
 | `ask` | 向用户提问，自带中断机制 |
-| `read`、`glob`、`grep` | 只读操作，无副作用 |
+| `read`、`vision`、`glob`、`grep` | 只读操作，无副作用 |
 | `todos` | 仅修改会话内部状态 |
 | `skill` | 读取技能提示词，只读 |
-| `agent` | 子 agent 调度，权限由子 agent 自身独立评估 |
-| `cron` | 定时任务管理（默认 allow 规则） |
+| `agent` | 子 agent 调度，权限由子 agent 自身独立评估（后台子代理以 `auto` 运行） |
+| `cron` | 定时任务管理（默认 allow 规则；任务以 `auto` 运行） |
 
-此外，bash 中的只读命令（如 `ls`、`cat`、`git status`、`grep` 等）也会自动绕过审批。
+此外，bash 中的只读命令（如 `ls`、`cat`、`git status`、`grep` 等）也会自动绕过审批。命令里带命令替换（`$(…)`、反引号）、写重定向（`> file`）或有副作用的选项（`find -exec`、`sort -o` 等）时不算只读；能执行子命令、写文件或联网的程序（`xargs`、`env`、`awk`、`sed`、`curl`、`wget` 等）也不在只读之列。
 
 ---
 
 ## 工具审批模式
 
-Lumi 提供三种工具审批模式，控制工具调用何时需要人工审批：
+Lumi 提供四种工具审批模式，控制工具调用何时需要人工审批：
 
-| 模式 | 行为 | 启用方式 | 状态栏 |
-|---|---|---|---|
-| `default` | 权限引擎评估，`allow` 规则 + 边界 OK 直接放行，其余弹出审批 | 默认 | 无 |
-| `accept_edits` | 文件编辑工具（`write`/`edit`）在工作区内自动放行，`bash` 等仍需审批 | `--accept-edits` 或 `Shift+Tab` 切换 | `✎ accept edits` |
-| `privileged` | 权限引擎评估但自动放行，仅 `ask`/`deny`/bypass-immune 仍需审批 | `--privileged-danger` | `▶▶ privileged ⚠` |
+| 模式 | 行为 | 启用方式 |
+|---|---|---|
+| `auto` | `allow` 规则 + 边界 OK 直接放行，其余交 AI 分类器裁决 | 默认（桌面、`lumi -p`） |
+| `default` | 权限引擎评估，`allow` 规则 + 边界 OK 直接放行，其余弹出审批 | 桌面输入栏审批模式切换 |
+| `accept_edits` | 文件编辑工具（`write`/`edit`）在工作区内自动放行，`bash` 等仍需审批 | 桌面输入栏审批模式切换；`lumi -p` 加 `--accept-edits` |
+| `privileged` | 权限引擎评估但自动放行，仅 `ask`/`deny`/bypass-immune 仍需审批 | 桌面输入栏审批模式切换；`lumi -p` 加 `--privileged-danger` |
 
 ### accept_edits 模式
 
 适合连续执行多个文件编辑的场景。文件编辑工具在工作区边界内自动放行，但 `bash` 等具有副作用的命令仍需审批：
 
 ```bash
-lumi --accept-edits
 lumi --accept-edits -p "重构这个文件的类型定义"
 ```
 
@@ -183,14 +183,17 @@ lumi --accept-edits -p "重构这个文件的类型定义"
 
 ### 特权模式
 
-通过 `--privileged-danger` 启用特权模式，跳过所有常规审批：
+桌面输入栏切换，或 `lumi -p` 加 `--privileged-danger`，跳过所有常规审批：
 
 ```bash
-lumi --privileged-danger
 lumi --privileged-danger -p "执行所有迁移"
 ```
 
 > **注意**：特权模式下，`ask` 规则仍会弹出审批，`deny` 规则仍会触发自动拒绝。只有 `unmatched` 和 `allow` 的工具调用会直接放行。
+
+### 无人应答的执行
+
+后台子代理、定时任务、`lumi -p` 与记忆整理（dream）都以 `auto` 运行：分类器逐个裁决，不因「派到后台」而绕过审批。它们没有审批通道——仍需人工确认的操作（`ask` 规则、bypass-immune）直接自动拒绝，提问直接取消，不会挂起等待。子代理一律不带 `ask` 工具。
 
 ### 即使特权模式也不可跳过的操作
 
@@ -201,32 +204,11 @@ lumi --privileged-danger -p "执行所有迁移"
 | Shell 配置 | `~/.bashrc`、`~/.zshrc`、`~/.bash_profile`、`~/.zprofile`、`~/.profile`、`~/.login` |
 | Git 配置 | `~/.gitconfig` |
 | SSH/GPG | `~/.ssh/*`、`~/.gnupg/*` |
-| 项目权限配置 | `.lumi/permissions.json`、`.lumi/permissions.local.json`、`.git/config` |
+| 项目权限配置 | `.lumi/permissions.json`、`.lumi/permissions.local.json` |
+| 会自动执行命令的配置 | `.lumi/hooks.json`、`.lumi/hooks.local.json`、`.lumi/mcp_server.json`、`.lumi/config.json`、`.git/config`、`.git/hooks/*` |
 | 危险 bash 模式 | `curl ... \| sh`、`wget ... \| bash` |
 
-仅检查写入操作，读取不受限。
-
----
-
-## 执行模式
-
-除了上述工具审批模式，Lumi 还支持以下执行模式（与工具审批模式正交）：
-
-| 模式 | 行为 | 切换方式 |
-|---|---|---|
-| `readonly` | 仅允许只读操作，完全禁止写入 | 编程接口设置 |
-
-readonly 模式下，Agent 可以阅读代码、检索和分析，但不能修改任何文件或执行有副作用的命令。
-
----
-
-## 临时规则
-
-通过 CLI `--allow` 参数添加仅当前会话有效的 allow 规则，不写入配置文件：
-
-```bash
-lumi --allow "bash(npm *)" --allow "edit"
-```
+仅检查写入操作，读取不受限。路径按实际落盘位置比对：相对路径、`..`、符号链接、`$HOME` 写法都不能绕过。
 
 ---
 
@@ -249,6 +231,7 @@ lumi --allow "bash(npm *)" --allow "edit"
 系统内置以下默认规则（可被用户配置覆盖）：
 
 - `cron` → allow
+- `artifacts` → allow（只呈现文件；工作区外的文件仍需审批）
 
 ---
 

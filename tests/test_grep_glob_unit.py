@@ -76,7 +76,7 @@ class TestGrepEdgeCases:
         backend = LocalFilesystemBackend()
         result = await backend.grep_raw("[invalid", str(authorized_tmp_dir))
         assert isinstance(result, str)
-        assert "无效" in result
+        assert "错误" in result
 
     async def test_grep_offset_out_of_range(self, authorized_tmp_dir):
         """offset 超出结果范围应返回空 matches"""
@@ -94,7 +94,7 @@ class TestGrepEdgeCases:
         """搜索不存在的路径（在授权目录内）"""
         backend = LocalFilesystemBackend()
         result = await backend.grep_raw("test", str(authorized_tmp_dir / "no_such_dir"))
-        # ripgrep 或 python 降级均应返回空结果
+        # ripgrep 应返回空结果
         if isinstance(result, dict):
             assert result["matches"] == []
 
@@ -117,8 +117,7 @@ class TestGrepEdgeCases:
         result = await backend.grep_raw(
             "target", str(authorized_tmp_dir), output_mode="files_with_matches"
         )
-        assert isinstance(result, list)
-        paths = [r["path"] for r in result]
+        paths = [r["path"] for r in result["items"]]
         assert len(paths) == 2  # a.py and b.py
 
     async def test_grep_count_mode(self, authorized_tmp_dir):
@@ -128,9 +127,8 @@ class TestGrepEdgeCases:
         result = await backend.grep_raw(
             "foo", str(authorized_tmp_dir), output_mode="count"
         )
-        assert isinstance(result, list)
-        assert len(result) == 1
-        assert result[0]["count"] == 3
+        assert len(result["items"]) == 1
+        assert result["items"][0]["count"] == 3
 
 
 class TestGrepTruncation:
@@ -262,3 +260,11 @@ class TestGrepToolFormat:
             }
         )
         assert "处匹配" in result
+
+
+async def test_glob_skips_dangling_symlink(authorized_tmp_dir):
+    # 回归：目录里一个悬空符号链接就让整个 glob 抛 FileNotFoundError
+    (authorized_tmp_dir / "ok.txt").write_text("x")
+    (authorized_tmp_dir / "dangling.txt").symlink_to(authorized_tmp_dir / "gone.txt")
+    result = await LocalFilesystemBackend().glob_info("*.txt", str(authorized_tmp_dir))
+    assert [r["path"] for r in result] == [str(authorized_tmp_dir / "ok.txt")]

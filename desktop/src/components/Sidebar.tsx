@@ -691,10 +691,13 @@ export function RenameInput({
     ref.current?.select()
   }, [])
 
+  // 没改就按取消：失焦即提交会把显示用的占位名（首条消息 / 「新对话」）固化成手动标题，
+  // 此后自动标题再也进不来
   const finish = (commit: boolean) => {
     if (done.current) return
     done.current = true
-    onResolve(commit ? value.trim() : null)
+    const v = value.trim()
+    onResolve(commit && v !== initial.trim() ? v : null)
   }
 
   return (

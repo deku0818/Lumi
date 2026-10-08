@@ -17,6 +17,7 @@ from lumi.agents.cron.models import ScheduleType
 from lumi.agents.cron.run_log import RunLog
 from lumi.agents.cron.scheduler import Scheduler
 from lumi.agents.cron.service import CronService
+from lumi.agents.permissions.workspace import get_authorized_directory
 from lumi.utils.logger import logger
 
 # ---------------------------------------------------------------------------
@@ -71,7 +72,7 @@ class CronInput(BaseModel):
     )
     schedule: str | None = Field(
         default=None,
-        description="调度规则，四种格式：相对时间 +10m/+2h/+1d（从现在起，一次性）；ISO 8601 时间点如 2025-01-15T09:00:00（一次性）；固定间隔 30s/5m/2h/1d；5 字段 cron 表达式如 */5 * * * *",
+        description="调度规则，四种格式：相对时间 +10m/+2h/+1d（从现在起，一次性）；ISO 8601 时间点（一次性，须是未来时间，建议带时区偏移如 +08:00）；固定间隔 30s/5m/2h/1d；5 字段 cron 表达式如 */5 * * * *",
     )
     prompt: str | None = Field(
         default=None,
@@ -89,8 +90,10 @@ class CronInput(BaseModel):
 
 
 async def _handle_create(name: str, schedule_raw: str, prompt: str) -> str:
-    """创建新任务。"""
-    job = await _service().create(name, schedule_raw, prompt)
+    """创建新任务，绑定当前会话的项目（执行时在该项目里跑）。"""
+    job = await _service().create(
+        name, schedule_raw, prompt, project_dir=str(get_authorized_directory())
+    )
     sched = job.schedule
 
     if sched.type == ScheduleType.AT:
@@ -137,7 +140,8 @@ async def _handle_delete(job_id: str) -> str:
 
 async def _handle_run(job_id: str) -> str:
     """立即执行一次任务。"""
-    await _service().trigger(job_id)
+    if not await _service().trigger(job_id):
+        return f"任务 {job_id} 已在执行中，未重复触发"
     return f"✅ 任务 {job_id} 已触发执行（异步），请稍后使用 runs 查看结果"
 
 

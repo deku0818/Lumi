@@ -70,7 +70,7 @@ from lumi.agents.tools.providers.mcp import (
 )
 from lumi.agents.tools.providers.todo import todos_payload
 from lumi.gateway.bridge.approval import enrich_tool_approval
-from lumi.gateway.bridge.folders import FolderManager
+from lumi.gateway.bridge.folders import REMINDED_KEY, FolderManager
 from lumi.models import provider_store
 from lumi.sessions import session_model
 from lumi.sessions.session_meta import get_goal, update_meta
@@ -112,7 +112,7 @@ def build_skill_command_blocks(
 
     Args:
         skill_name: 技能名称（不含前导 "/"）。
-        content: 技能正文（通常为 skill.prompt，可能已拼接 extra_text）。
+        content: 技能正文（``render_skill`` 的产物：正文 + 资源目录提示）。
         extra_text: 用户在斜杠命令后追加的原始文本。
     """
     meta = (
@@ -223,10 +223,11 @@ class BridgeEvent:
 async def shutdown_shared_runtime() -> None:
     """关闭进程级共享运行时（MCP 子进程、shell / 后台任务会话）。
 
-    进程退出时调用一次（`lumi serve` 的 lifespan shutdown）。
+    进程退出时调用一次（`lumi serve` 的 lifespan shutdown）。先按组优雅终止 shell 与
+    后台进程，最后才关 MCP 池——它会对全部后代 SIGKILL 兜底，放前面优雅收尾就没了。
     """
-    await close_all_pools()
     await get_shell_session_manager().close_all()
+    await close_all_pools()
 
 
 class AgentBridge:
@@ -247,8 +248,6 @@ class AgentBridge:
         # 活跃 agent 工具 run_id 集合：流式 / 审批事件的子代理归属（_resolve_subagent_parent）
         # 据此判定祖先链中是否含活跃 agent run。在途审批后审批卡片也走同一归属机制。
         self._active_agent_runs: set[str] = set()
-        # 上次通知模型时的 ultra 档位状态，仅在开/关切换的那一轮注入边沿提醒
-        self._notified_ultra: bool = False
         # 本会话项目的 config hooks（.lumi/hooks.json）：随项目绑定，set_workspace 时重载，
         # 每轮 _stream 注入 per-run contextvar。空 dict = 暂无（initialize 后填充）。
         self._config_hooks: dict = {}
@@ -274,6 +273,7 @@ class AgentBridge:
         project_dir: str = "",
         disabled_tools: list[str] | None = None,
         wait_mcp: bool = False,
+        interactive: bool = True,
     ) -> None:
         """初始化 Agent。
 
@@ -283,6 +283,9 @@ class AgentBridge:
         disabled_tools：本会话禁用的工具黑名单（如飞书 channel 禁用 ``ask``）；None 时全量。
         wait_mcp：冷 MCP 池时是否等它就绪。交互会话默认 False（非阻塞 + 轮首刷新
         自愈）；headless CLI 单轮即退无自愈，传 True。
+        interactive：有没有人应答审批 / 提问。无人应答的入口（cron、``lumi -p``）传 False：
+        不接审批通道，需人工审批的调用直接自动拒绝、ask 直接取消（见 nodes.human_approval
+        与 ask 工具的无通道分支），而不是挂起等一个永远不来的应答。
 
         模型不在此定：这里只把「新会话默认」装进 context 作初值，真正生效的是每轮
         开跑前的 :meth:`align_session_model`（thread 此刻尚未确定，会话覆盖无从解析）。
@@ -301,8 +304,9 @@ class AgentBridge:
         self._mcp_project = target
         self._disabled_tools = disabled_tools
         tools = await self._build_tools(wait_mcp=wait_mcp)
-        # enable_memory=True：bridge 是唯一面向用户的对话入口，持久记忆只在此处 opt-in
-        # （子 agent / workflow / cron 走 create_agent 默认 False，天然不带记忆）。
+        # enable_memory=True：bridge 是面向用户的对话入口，持久记忆只在此处 opt-in。
+        # 子 agent、workflow 走 create_agent 默认 False，不带记忆；cron 经 AgentBridge
+        # 执行，与普通会话一样带记忆（但不触发 autoDream，见 memory.dream 的 cron 闸）。
         self._agent, self._context = await create_agent(
             checkpoint=agents_config.checkpoint,
             project_dir=target,
@@ -310,7 +314,8 @@ class AgentBridge:
             enable_memory=True,
         )
         # 注入在途审批 Broker（与 permission_engine 同源，事后赋值，零改 create_agent 签名）
-        self._context.approval_broker = self._broker
+        if interactive:
+            self._context.approval_broker = self._broker
         # 授权通过后放宽工作区边界的回调（人工审批 / auto 分类器 / privileged 三条路共用）
         self._context.widen_boundary = self.folders.widen_for_violations
         # /goal 条件存 sessions 层 sidecar；goal_stop_hook 经这两个回调读 / 清
@@ -403,7 +408,7 @@ class AgentBridge:
         """本会话是否已绑定真实项目（而非静默退回进程 cwd）。
 
         **本属性不在 `stream_response`/`stream_command` 内部强制**——桌面 desktop WS 聊天
-        要求"未绑定就拒绝"，但 cron（不走 AgentBridge）与飞书 channel（`ChannelConfig.workspace`
+        要求"未绑定就拒绝"，但 cron（未绑定项目的存量任务传空 project_dir）与飞书 channel（`ChannelConfig.workspace`
         可显式配成空串、故意退回进程 cwd，见 `lumi/gateway/channels/config.py`）合法地依赖退回
         cwd 的兜底语义，不能在这里统一收紧。桌面聊天的强制关卡在
         `GatewaySession.handle_frame`（`lumi/gateway/session.py`）。**新增任何直接调用
@@ -434,13 +439,22 @@ class AgentBridge:
         return self._context is not None and self._context.memory_enabled
 
     async def delete_thread(self, thread_id: str) -> None:
-        """删除指定会话的 LangGraph checkpoint，并回收其持久 shell。"""
+        """删除指定会话的 LangGraph checkpoint，回收其上传附件与持久 shell。"""
+        from lumi.gateway.uploads import remove_uploads
+
         if not thread_id:
             return
         # 删除抛错也要回收 shell（按 thread_id 键、会话私有），否则留下孤儿进程
         try:
             if self._agent is not None:
+                # 先读出消息声明的附件：checkpoint 一删就无从得知哪些上传归它
+                files = [
+                    p
+                    for m in await self.snapshot_messages(thread_id)
+                    for p in declared_file_paths(m)
+                ]
                 await self._agent.adelete_thread(thread_id)
+                await asyncio.to_thread(remove_uploads, files)
         finally:
             await get_shell_session_manager().close_session(thread_id)
 
@@ -540,10 +554,31 @@ class AgentBridge:
         session_model.pin(self.current_thread_id)
         # 「添加文件夹」增减与 Ultra 档位切换的边沿提醒随下一条真实用户消息注入
         # （注入不碰 items 故不污染 Rewind 标签；reminder 一旦前置进历史即长驻且
-        # 不碰系统提示词，缓存安全）。
-        for note in (self.folders.drain_folder_note(), self.folders.drain_ultra_note()):
+        # 不碰系统提示词，缓存安全）。「模型已知什么」取自当前历史里最近的 marker，
+        # 不存 bridge 内存：rewind / 压缩删掉携带提醒的消息、重连换 bridge 都自动重发。
+        known = next(
+            (
+                m.additional_kwargs[REMINDED_KEY]
+                for m in reversed(await self.snapshot_messages())
+                if REMINDED_KEY in m.additional_kwargs
+            ),
+            {},
+        )
+        folders = self.folders
+        for note in (
+            folders.folder_note(known.get("folders", [])),
+            folders.ultra_note(known.get("ultra", False)),
+        ):
             if note:
                 msg = inject_text_into_message(msg, note)
+        msg = msg.model_copy(
+            update={
+                "additional_kwargs": {
+                    **msg.additional_kwargs,
+                    REMINDED_KEY: folders.reminded_state(),
+                }
+            }
+        )
         # 开轮即广播本轮用户消息 id：前端据此给乐观气泡上锚（时间旅行按 id 截断）。
         # 走事件而非 RPC 返回值——id 是「轮的事实」而非「轮的结果」，中途 stop 的轮
         # 同样需要它，且不必让每个流式入口都记得回传。
@@ -671,7 +706,8 @@ class AgentBridge:
     ) -> AsyncGenerator[BridgeEvent, None]:
         """执行技能斜杠命令并 yield 事件流。
 
-        查表拿到 skill.prompt，按统一约定构建结构化消息后复用 stream_response。
+        查表拿到技能（正文 + 资源目录，与 skill 工具同一渲染），按统一约定构建结构化
+        消息后复用 stream_response。
 
         Args:
             name: 技能名称（不含前导 "/"）。
@@ -720,10 +756,9 @@ class AgentBridge:
             yield BridgeEvent(kind=EventKind.ERROR, error=f"未知命令: /{name}")
             return
 
-        content = skill.prompt
-        if extra_text:
-            content = f"{content}\n\n{extra_text}"
-        blocks = build_skill_command_blocks(name, content, extra_text)
+        from lumi.agents.tools.providers.skill import render_skill
+
+        blocks = build_skill_command_blocks(name, render_skill(skill), extra_text)
         # 显示声明：desktop 无 message_meta 时声明「/名 输入」单条（content 是
         # 命令 wire 格式，纯给模型看）；IM 渠道自带 items（用户敲的原文）原样用
         message_meta = dict(message_meta or {})
@@ -819,8 +854,12 @@ class AgentBridge:
         ``graph`` 缺省取 ``self.graph``；中断收尾路径持有自己那个引用，显式传入。
         """
         target = graph if graph is not None else self.graph
+        # 离线写回一律意味着在途的 PTL 重试已放弃（stop 写回半截 / rewind / 压缩）：
+        # 清掉标志，否则下一轮被迫无视阈值做一次有损压缩
         await target.aupdate_state(
-            self._config, stamp_missing_ids(update), as_node="OfflineFlush"
+            self._config,
+            stamp_missing_ids({**update, "ptl_retry": False}),
+            as_node="OfflineFlush",
         )
 
     async def rewind_before_message(self, message_id: str) -> HumanMessage | None:
@@ -877,13 +916,18 @@ class AgentBridge:
         流水线——附件标签由显示声明（items[].files）重新派生，故与原轮等价。
         """
         original = await self._rewind_or_raise(message_id)
-        msg = self._build_user_message(
+        msg = self._rebuild_user_message(original)
+        async for event in self._stream_user_turn(msg, tool_mode):
+            yield event
+
+    @classmethod
+    def _rebuild_user_message(cls, original: HumanMessage) -> HumanMessage:
+        """剥掉全部注入前缀回到用户原样输入，按显示声明重建（见 stream_regenerate）。"""
+        return cls._build_user_message(
             strip_injected_prefix(original),
             original.additional_kwargs.get(LUMI_META_KEY),
             declared_file_paths(original),
         )
-        async for event in self._stream_user_turn(msg, tool_mode):
-            yield event
 
     async def stream_edit_resend(
         self,
@@ -1024,7 +1068,7 @@ class AgentBridge:
             # 注入本会话的授权目录来源 + config hooks 到当前 run 上下文：filesystem/bash
             # 工具按 contextvar 取范围，使同进程多会话并发各 run 互不串扰、不被彼此重建
             # 进程全局所清洗（见 permissions.workspace 两层来源说明）。降级（无引擎）兜底
-            # 逻辑与 cron 共用 set_run_authorized_source_for。
+            # 逻辑收在 set_run_authorized_source_for。
             engine = self._context.permission_engine if self._context else None
             set_run_authorized_source_for(engine, self.folders.extra_folders)
             set_run_config_hooks(self._config_hooks)
@@ -1079,10 +1123,9 @@ class AgentBridge:
 
                 except GraphDrained as e:
                     # 协作式停机：图停在 super-step 边界、checkpoint 完整、next 指向
-                    # 待执行节点。不重试（进程正在退出），也不报错——下次连上传 None
-                    # 就从这里续跑。只发 MESSAGE_COMPLETE 收口半截气泡，**不发**
-                    # turn.complete：这一轮并没有跑完，报完成会让前端把待续跑的轮
-                    # 标成已结束，续跑时又往「已完成」的轮里灌流。
+                    # 待执行节点。不重试（进程正在退出），也不报错——下一轮开跑前由
+                    # _recover_stale_state 按中断轮收尾。只发 MESSAGE_COMPLETE 收口半截
+                    # 气泡，不发 turn.complete：进程正在退出，连接随之断开。
                     logger.info("[AgentBridge] 图已优雅停机：%s", e)
                     self._reset_partial_buffer()
                     yield BridgeEvent(kind=EventKind.MESSAGE_COMPLETE)
@@ -1129,6 +1172,9 @@ class AgentBridge:
                 cause_info,
                 exc_info=True,
             )
+            # 半截回复随本轮作废：留着的话，下一轮首个 CallModel 前按停会把它当成
+            # 本轮的中断回复写进 checkpoint
+            self._reset_partial_buffer()
             yield BridgeEvent(kind=EventKind.ERROR, error=f"[{err_type}] {e}")
         finally:
             # 本轮结束（正常 / 取消 / 出错都算）→ 注销 drain 登记，别让停机信号

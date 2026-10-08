@@ -304,26 +304,6 @@ class TestWorkspaceBoundary:
         )
         assert len(violations) > 0
 
-    def test_add_workspace_expands_boundary(self):
-        project_dir = Path(tempfile.mkdtemp())
-        extra_dir = Path(tempfile.mkdtemp())
-        engine = PermissionEngine(project_dir)
-        # 额外目录初始在边界外
-        assert (
-            engine.check_workspace_boundary(
-                "write", {"file_path": str(extra_dir / "file.txt")}
-            )
-            is False
-        )
-        # 添加后应在边界内
-        engine.add_workspace(str(extra_dir))
-        assert (
-            engine.check_workspace_boundary(
-                "write", {"file_path": str(extra_dir / "file.txt")}
-            )
-            is True
-        )
-
     def test_rebase_moves_boundary_to_new_dir(self):
         """rebase 后边界整体迁移：新目录在界内，旧目录出界，filesystem 全局授权目录同步"""
         from lumi.agents.permissions.workspace import get_authorized_directory
@@ -374,9 +354,9 @@ class TestWorkspaceBoundary:
         """回归：会话级临时目录不应被 reload 清洗。
 
         ephemeral 目录曾被存进 _config.workspaces，任何写权限配置文件的动作
-        （如审批「总是允许」→ add_allow_rule → save_local）会改 mtime，下一次
-        工具批次的 engine.reload() 从磁盘重载配置（不含 ephemeral）即把它撤销，
-        导致用户「明明加了文件夹却仍被拒」。现存独立字段，须跨 reload 存活。
+        （如用户手改 permissions.local.json）会改 mtime，下一次工具批次的
+        engine.reload() 从磁盘重载配置（不含 ephemeral）即把它撤销，导致用户
+        「明明加了文件夹却仍被拒」。现存独立字段，须跨 reload 存活。
         """
         from lumi.agents.permissions.workspace import get_all_authorized_directories
 
@@ -386,8 +366,10 @@ class TestWorkspaceBoundary:
         engine = PermissionEngine(project_dir)
         engine.add_ephemeral_workspace(str(extra))
 
-        # 模拟审批「总是允许」：写 local 配置文件 → 触发 needs_reload
-        engine.add_allow_rule("bash(ls *)")
+        # 写 local 配置文件 → 触发 needs_reload
+        (project_dir / ".lumi" / "permissions.local.json").write_text(
+            '{"permissions": {"allow": ["bash(ls *)"]}}', encoding="utf-8"
+        )
         assert engine._loader.needs_reload() is True
         engine.reload()
 
@@ -401,35 +383,8 @@ class TestWorkspaceBoundary:
         assert extra in get_all_authorized_directories()
 
 
-class TestPersistence:
-    """规则持久化测试"""
-
-    def test_add_allow_rule_persists_to_local_config(self):
-        project_dir = Path(tempfile.mkdtemp())
-        (project_dir / ".lumi").mkdir()
-        engine = PermissionEngine(project_dir)
-        engine.add_allow_rule("bash(npm *)")
-
-        # 重新加载验证规则已持久化
-        engine2 = PermissionEngine(project_dir)
-        assert (
-            engine2.evaluate("bash", {"command": "npm test"})
-            == PermissionDecision.ALLOW
-        )
-
-    def test_add_allow_rule_deduplicates(self):
-        project_dir = Path(tempfile.mkdtemp())
-        (project_dir / ".lumi").mkdir()
-        engine = PermissionEngine(project_dir)
-        engine.add_allow_rule("bash(npm *)")
-        engine.add_allow_rule("bash(npm *)")
-
-        allow_count = sum(
-            1
-            for r in engine.config.permissions
-            if r.tool == "bash(npm *)" and r.permission == Permission.ALLOW
-        )
-        assert allow_count == 1
+class TestReload:
+    """配置热重载测试"""
 
     def test_reload_detects_file_changes(self):
         import json
@@ -454,3 +409,76 @@ class TestPersistence:
         assert (
             engine.evaluate("bash", {"command": "npm test"}) == PermissionDecision.ALLOW
         )
+
+
+class TestDenyHiddenSubcommands:
+    """回归：deny 规则曾可被换行 / 命令替换 / 注释 / 转义引号藏起的子命令绕过"""
+
+    import pytest
+
+    @pytest.mark.parametrize(
+        "command",
+        [
+            "ls\nrm -rf ~",
+            "ls $(rm -rf ~)",
+            'ls "`rm -rf ~`"',
+            "ls # '\nrm -rf ~\necho '",
+            "ls \\' ; rm -rf ~ ; echo \\'",
+            "if true; then rm -rf ~; fi",
+            "cat <<EOF\n$(rm -rf ~)\nEOF",
+        ],
+    )
+    def test_deny_sees_hidden_subcommand(self, command):
+        engine = _make_engine(
+            [PermissionRule(tool="bash(rm *)", permission=Permission.DENY)]
+        )
+        assert engine.evaluate("bash", {"command": command}) == PermissionDecision.DENY
+
+    def test_heredoc_body_text_is_not_a_command(self):
+        # heredoc 正文（引号定界词）是数据：不因里面写着 rm 而被 deny
+        engine = _make_engine(
+            [PermissionRule(tool="bash(rm *)", permission=Permission.DENY)]
+        )
+        command = "cat > clean.sh <<'EOF'\nrm -rf build\nEOF"
+        assert engine.evaluate("bash", {"command": command}) != PermissionDecision.DENY
+
+
+class TestBashBoundary:
+    """bash 越界检查：写入目标按 shell 语义提取（回归）"""
+
+    import pytest
+
+    def _violations(self, command: str) -> list[str]:
+        project = Path(tempfile.mkdtemp())
+        return _make_engine([], project).get_boundary_violations(
+            "bash", {"command": command}
+        )
+
+    @pytest.mark.parametrize(
+        "command",
+        [
+            "rm ~/x",  # ~ 是家目录，不是项目下名为 ~ 的目录
+            "ls && rm -rf /etc/x",  # 复合命令的后续子命令同样检查
+            "ls\nrm -rf /etc/x",
+            "echo x > /etc/x",  # 任意命令的写重定向
+            "echo x | tee /etc/x",
+            "cd /etc",
+            'rm -rf "$DIR"',  # 值未知的路径按越界处理
+            "true $(rm -rf /etc/x)",
+        ],
+    )
+    def test_write_outside_is_violation(self, command):
+        assert self._violations(command), command
+
+    @pytest.mark.parametrize(
+        "command",
+        [
+            "cp /etc/hosts ./hosts",  # 读取来源不是写入目标
+            "cat /etc/hosts > hosts.txt",
+            "grep x < /etc/hosts > out.txt",
+            "ls /etc 2>/dev/null",
+            "mkdir -p build && touch build/x",
+        ],
+    )
+    def test_read_sources_are_not_violations(self, command):
+        assert self._violations(command) == [], command

@@ -11,10 +11,12 @@ lark-cli（agent 取逐字稿本就依赖它，非新增依赖）。
 from __future__ import annotations
 
 import json
-import os
+import shlex
+import sys
 from dataclasses import asdict
 
 from lumi.gateway import toolbox
+from lumi.gateway.channels.config import resolve_ref
 from lumi.gateway.channels.feishu.checks import Check, blocked_tail
 from lumi.gateway.channels.feishu.lark_profile import CLI, run_cli
 from lumi.gateway.channels.feishu.scopes import (
@@ -29,9 +31,10 @@ from lumi.utils.logger import logger
 # login 只请求勾选/参数指定的 scope（应用开通了也不会自动带上），必须显式列出所需项；
 # --scope 与 --recommend 叠加，不会丢掉其他常用权限
 def _login_cmd(profile: str) -> str:
-    """扫码授权命令；机器人有专属 profile 时授权落在它名下（各机器人各自授权）。"""
-    flag = f"--profile {profile} " if profile else ""
-    return f'{CLI} {flag}auth login --recommend --scope "{",".join(MINUTES_SCOPES)}"'
+    """扫码授权命令：授权落在机器人专属 profile 名下（各机器人各自授权）。"""
+    return toolbox.terminal_cmd(
+        f'{CLI} --profile {profile} auth login --recommend --scope "{",".join(MINUTES_SCOPES)}"'
+    )
 
 
 # 四项检查的固定顺序与显示名。前一项不通时其后各项统一标记为「需先完成上一步」，
@@ -97,16 +100,23 @@ def transcript_hint(token: str, tmp_dir: str) -> str:
 
     落盘先 cd 到临时区：工具默认写 ./minutes/，会把含敏感内容的会议记录留在工作区；
     不用 --output-dir——它只收「当前目录内的相对路径」，绝对路径直接报 invalid_argument。
-    命令拼装留在本模块，与其余 lark-cli 知识同处一地。
+    cd 必须限定在这一条命令内：会话 shell 是持久的，裸 cd 会把它永久挪进临时区（此后
+    命令都在错的目录跑，后台任务也按 cwd 丢掉项目的 lark-cli 身份）。POSIX 用子 shell，
+    Windows 会话 shell 是 cmd.exe，用 pushd/popd。命令拼装留在本模块，与其余 lark-cli
+    知识同处一地。
     """
+    fetch = f"{CLI} minutes +detail --minute-tokens {token} --transcript --as user"
+    if sys.platform == "win32":
+        cmd = f'pushd "{tmp_dir}" && {fetch} & popd'
+    else:
+        cmd = f"(cd {shlex.quote(tmp_dir)} && {fetch})"
     return (
         "<system-reminder>\n"
         "用户刚开完一场会，或录制了一段个人语音，飞书已生成对应妙记，"
         "请询问用户下一步的动作，如：生成纪要，制定后续工作任务。\n"
         f"minute_token: {token}\n"
         "逐字稿此刻已可读取，可以使用下面的命令获取：\n"
-        f"  cd {tmp_dir} && {CLI} minutes +detail --minute-tokens {token} "
-        "--transcript --as user\n"
+        f"  {cmd}\n"
         f"逐字稿落在 {tmp_dir}/minutes/{token}/transcript.txt，带说话人与时间戳。\n"
         "</system-reminder>"
     )
@@ -121,23 +131,30 @@ def diagnose(app_id: str, profile: str = "") -> list[dict]:
     """
     # app_id 支持 ${ENV_VAR} 引用（见 FeishuChannelConfig），不展开会拼出
     # https://open.feishu.cn/app/${FEISHU_APP_ID}/auth 这种点不开的修复链接
-    app_id = os.path.expandvars(app_id)
+    app_id = resolve_ref(app_id)
     checks: list[Check] = []
 
     # ① lark-cli 可用性（与接入体检同一探测：系统 PATH 优先 → 工具箱）
-    if toolbox.detect(CLI).source == "missing":
+    cli = toolbox.detect(CLI)
+    if cli.source == "missing":
         checks.append(
             Check(
                 key="cli",
                 tone="error",
                 name="lark-cli 未安装",
                 detail="妙记取数与事件订阅依赖该命令行工具",
-                fix_cmd="npm i -g @larksuite/cli",
+                # 只给一键安装：手敲装进 prefix 的不会被链进 bin 目录，体检照样判缺
                 fix_action="lark-cli",
             )
         )
         return blocked_tail(checks, _STEPS, "需先安装 lark-cli")
     checks.append(Check(key="cli", name="lark-cli 已安装"))
+    # 机器人专属 profile 是唯一正确身份：不带 profile 的 lark-cli 调用会落到全局 active
+    # profile，查到的是别的身份，结论却记在本机器人名下（与接入体检「身份未同步」矛盾）
+    if not profile:
+        return blocked_tail(
+            checks, _STEPS, "需先同步 lark-cli 身份（保存机器人即可同步）"
+        )
 
     # ② 用户授权（订阅与读逐字稿都必须 user 身份，app 身份读会被拒 2091005）
     # 判 available 而非 tokenStatus == "valid"：access_token 约 2 小时到期后状态转
@@ -154,8 +171,8 @@ def diagnose(app_id: str, profile: str = "") -> list[dict]:
                 tone="error",
                 name="lark-cli 状态读取失败",
                 detail=reason,
-                fix_cmd=f"{CLI} auth status",
-                fix_note="版本过旧可 npm i -g @larksuite/cli 升级",
+                fix_cmd=toolbox.terminal_cmd(f"{CLI} auth status"),
+                fix_note=f"版本过旧可执行 {toolbox.lark_cli_update_cmd(cli.source)} 升级",
             )
         )
         return blocked_tail(checks, _STEPS, "需先排除 lark-cli 故障")

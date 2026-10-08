@@ -1,6 +1,6 @@
 """畸形 tool_call 丢弃重试的端到端契约：真实 LumiAgent 图 + 真实 AgentBridge。
 
-假的只有 create_llm 一处，prompt / bind_tools / _with_retry / astream_events / 图拓扑 /
+假的只有 create_llm 一处，prompt / bind_tools / astream_events / 图拓扑 /
 bridge 事件翻译全是真的。空壳形状不手搓——把 ``name=None, id=None`` 的 tool_call_chunk
 交给 LangChain 自己聚合，得到的正是客户现场 qwen 的 ``{'name': '', 'id': None}``。
 

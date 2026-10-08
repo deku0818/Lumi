@@ -302,4 +302,9 @@ async def test_full_graph_ptl_roundtrip():
     contents = [m.content for m in result["messages"]]
     # [carrier, 当前提问, 尾部 2 round, 重试响应]；头部历史已压缩
     assert "<summary>" in contents[0] and "SUMMARY_TEXT" in contents[0]
-    assert contents[1:] == ["q", "a2", "t2", "a3", "t3", "ok"]
+    # 当前提问原话保住，且压缩删掉的上下文注入块已在它上面重建（本轮后续调用不缺 env）
+    from lumi.agents.core.meta_message import visible_user_text
+
+    assert visible_user_text(result["messages"][1]) == "q"
+    assert "<env>" in str(contents[1])
+    assert contents[2:] == ["a2", "t2", "a3", "t3", "ok"]

@@ -2,11 +2,7 @@
 
 from pathlib import Path
 
-from lumi.agents.permissions.matcher import (
-    RuleMatcher,
-    build_exact_expr,
-    build_pattern_expr,
-)
+from lumi.agents.permissions.matcher import RuleMatcher
 from lumi.agents.permissions.models import Permission, PermissionRule
 from lumi.agents.tools.capability import split_compound_command
 
@@ -112,6 +108,15 @@ class TestMatchPathPattern:
             is True
         )
 
+    def test_trailing_double_star_matches_everything_inside(self):
+        # 回归：结尾 /** 曾多拼一个 /（secrets/(?:/.*)?），整条规则永不命中
+        project = Path("/project")
+        for path in ("secrets", "secrets/k.txt", "secrets/a/b.txt", "x/secrets/k"):
+            assert RuleMatcher.match_path_pattern("secrets/**", path, project) is True
+        assert RuleMatcher.match_path_pattern("/secrets/**", "secrets/k", project)
+        assert not RuleMatcher.match_path_pattern("/secrets/**", "x/secrets/k", project)
+        assert not RuleMatcher.match_path_pattern("secrets/**", "secretsX/k", project)
+
     def test_anchored_pattern(self):
         project = Path("/project")
         # 带 / 前缀从根匹配
@@ -137,10 +142,14 @@ class TestMatchPathPattern:
         )
 
     def test_absolute_path_outside_project(self):
+        # 项目外路径：锚定模式不命中，尾部模式照样命中（deny **/.env 不能被项目外路径绕过）
         project = Path("/project")
         assert (
-            RuleMatcher.match_path_pattern("*.py", "/other/main.py", project) is False
+            RuleMatcher.match_path_pattern("/*.py", "/other/main.py", project) is False
         )
+        assert RuleMatcher.match_path_pattern("*.py", "/other/main.py", project) is True
+        # /** 的 ** 转成 .*，不显式排除就会命中任意项目外路径
+        assert RuleMatcher.match_path_pattern("/**", "/etc/hosts", project) is False
 
 
 class TestMatchRule:
@@ -264,48 +273,3 @@ class TestSplitCompoundCommand:
         """引号未闭合时不拆分（引号内的分隔符被忽略）"""
         result = split_compound_command("echo 'hello && world")
         assert len(result) == 1
-
-
-class TestBuildExactExpr:
-    """build_exact_expr 测试"""
-
-    def test_bash_tool(self):
-        assert build_exact_expr("bash", {"command": "npm test"}) == "bash(npm test)"
-
-    def test_path_tool(self):
-        assert (
-            build_exact_expr("edit", {"file_path": "src/main.py"})
-            == "edit(src/main.py)"
-        )
-
-    def test_no_args(self):
-        assert build_exact_expr("bash", {}) == "bash"
-
-    def test_other_tool(self):
-        assert build_exact_expr("agent", {"prompt": "hi"}) == "agent"
-
-
-class TestBuildPatternExpr:
-    """build_pattern_expr 测试"""
-
-    def test_bash_tool(self):
-        assert build_pattern_expr("bash", {"command": "npm test"}) == "bash(npm *)"
-
-    def test_path_tool_with_extension(self):
-        assert (
-            build_pattern_expr("edit", {"file_path": "src/main.py"}) == "edit(**/*.py)"
-        )
-
-    def test_path_tool_without_extension(self):
-        assert build_pattern_expr("edit", {"file_path": "Makefile"}) == "edit(**/*)"
-
-    def test_no_args(self):
-        assert build_pattern_expr("bash", {}) == "bash"
-
-    def test_other_tool(self):
-        assert build_pattern_expr("agent", {"prompt": "hi"}) == "agent"
-
-    def test_pattern_differs_from_exact(self):
-        exact = build_exact_expr("bash", {"command": "npm test"})
-        pattern = build_pattern_expr("bash", {"command": "npm test"})
-        assert exact != pattern

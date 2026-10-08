@@ -212,3 +212,46 @@ def test_prompt_chain_project_over_style(project: Path):
     soul = next(p for p in ov["prompts"] if p["name"] == "SOUL")
     assert soul["source"] == "project"
     assert soul["content"] == "项目灵魂"
+
+
+def test_create_refuses_to_overwrite_existing(tmp_path):
+    # 回归：项目主页「新建」用已有名字会把用户写过的定义整体换成模板
+    project = tmp_path / "proj"
+    project.mkdir()
+    project_config.write_resource(project, "agent", "foo", agent_md("foo", "精心写过"))
+    with pytest.raises(ValueError, match="已存在"):
+        project_config.write_resource(
+            project, "agent", "foo", agent_md("foo"), create=True
+        )
+    skill = "---\nname: bar\ndescription: d\n---\n正文"
+    project_config.write_resource(project, "skill", "bar", skill)
+    with pytest.raises(ValueError, match="已存在"):
+        project_config.write_resource(project, "skill", "bar", skill, create=True)
+    agent_file = project / ".lumi" / "agents" / "foo.md"
+    assert "精心写过" in agent_file.read_text()
+
+
+def test_resources_keyed_by_parsed_name_like_runtime(project: Path):
+    # 回归：主页以目录名为键，运行时 loader 以 frontmatter name 为键——目录名 ≠ name 时
+    # UI 列出的名字会话里调不到，点开也找不到
+    import os
+
+    skill_dir = Path(os.environ["LUMI_CONFIG_DIR"]) / "skills" / "dir-name"
+    skill_dir.mkdir(parents=True)
+    (skill_dir / "SKILL.md").write_text(skill_md("real-name", "全局"), encoding="utf-8")
+    names = {s["name"] for s in project_config.overview(project)["skills"]}
+    assert "real-name" in names and "dir-name" not in names
+    detail = project_config.read_resource(project, "skill", "real-name")
+    assert detail["source"] == "global"
+
+
+def test_unparseable_project_file_does_not_shadow_lower_layer(
+    project: Path, builtin_agent: str
+):
+    # 回归：项目层同名文件写坏时列表显示内置项（运行时也加载内置那份），点开却是项目里的
+    # 坏文件，「复制到项目」报已在项目内
+    broken = project / ".lumi" / "agents" / f"{builtin_agent}.md"
+    broken.write_text("没有 frontmatter", encoding="utf-8")
+    assert project_config.read_resource(project, "agent", builtin_agent)["builtin"]
+    assert project_config.copy_builtin(project, "agent", builtin_agent)["ok"]
+    assert f"name: {builtin_agent}" in broken.read_text("utf-8")

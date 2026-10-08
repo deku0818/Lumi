@@ -9,13 +9,15 @@ from __future__ import annotations
 
 import asyncio
 import os
+import time
 from collections.abc import Awaitable, Callable
-from contextlib import AsyncExitStack
+from contextvars import ContextVar
 from dataclasses import dataclass
 from functools import wraps
 from pathlib import Path
-from typing import Any
+from typing import Any, TextIO
 
+import anyio
 from langchain_core.tools.structured import StructuredTool
 from langchain_mcp_adapters import sessions
 from langchain_mcp_adapters.client import MultiServerMCPClient
@@ -25,17 +27,15 @@ from langchain_mcp_adapters.interceptors import (
 )
 from langchain_mcp_adapters.tools import load_mcp_tools
 from langgraph.prebuilt import ToolRuntime
+from mcp.shared.exceptions import McpError
+from mcp.types import CONNECTION_CLOSED
 
 from lumi.agents.tools.providers.mcp.config import (
     EMPTY_CONFIG_HASH,
     config_hash,
     load_merged_mcp_config,
 )
-from lumi.agents.tools.providers.mcp.procs import (
-    collect_descendant_pids,
-    kill_child_processes,
-    kill_pids,
-)
+from lumi.agents.tools.providers.mcp.procs import kill_child_processes
 from lumi.utils.config import get_config
 from lumi.utils.logger import logger
 
@@ -98,14 +98,17 @@ _SERVER_START_TIMEOUT = 30.0
 # stdio 子进程 stderr 默认输出到 sys.stderr，会混进 serve 进程自己的输出。
 # 用 devnull 替代，将 MCP 子进程的 stderr 静默丢弃。
 _DEVNULL = open(os.devnull, "w")  # noqa: SIM115  # 模块级单例，避免每次调用泄漏 fd
+# 本次 spawn 的 stderr 去向：池里的长驻 server 丢弃（长跑会无界增长）；连接测试设成
+# 临时文件，失败时把 server 自己说的原因附进报错
+stdio_errlog: ContextVar[TextIO] = ContextVar("stdio_errlog", default=_DEVNULL)
 
 
 def _make_quiet_stdio_client(original_stdio_client: Any) -> Any:
-    """包装 stdio_client，将 errlog 重定向到 devnull（子进程 stderr 不混进本进程输出）。"""
+    """包装 stdio_client，stderr 按 stdio_errlog 重定向（不混进本进程输出）。"""
 
     @wraps(original_stdio_client)
     def wrapper(server: Any, errlog: Any = None) -> Any:
-        return original_stdio_client(server, errlog=_DEVNULL)
+        return original_stdio_client(server, errlog=stdio_errlog.get())
 
     return wrapper
 
@@ -120,11 +123,11 @@ def _needs_persistent_session(server_config: dict[str, Any]) -> bool:
     return server_config.get("transport", "") in _PERSISTENT_TRANSPORTS
 
 
-def format_exception_details(e: Exception) -> str:
-    """格式化异常详情，特别处理 ExceptionGroup 以提取子异常信息"""
-    if isinstance(e, ExceptionGroup):
-        sub_errors = "; ".join(f"{type(sub).__name__}: {sub}" for sub in e.exceptions)
-        return f"{type(e).__name__}: {e}. 子异常详情: [{sub_errors}]"
+def format_exception_details(e: BaseException) -> str:
+    """格式化异常详情：ExceptionGroup 递归展开只报叶子（anyio 常包两层，外层只有
+    「unhandled errors in a TaskGroup」这种摘要）。"""
+    if isinstance(e, BaseExceptionGroup):
+        return "; ".join(format_exception_details(sub) for sub in e.exceptions)
     return f"{type(e).__name__}: {e}"
 
 
@@ -178,8 +181,9 @@ def flatten_top_level_combinators(schema: dict) -> dict:
 class MCPSessionManager:
     """MCP 持久会话管理器
 
-    为 stdio 等需要保持子进程存活的传输类型维护长连接会话。
-    使用 AsyncExitStack 管理多个 async context manager 的生命周期。
+    stdio 类 server 需要子进程常驻：每个由一个专属 task 持有会话，进出会话上下文都在
+    该 task 内（anyio 的 cancel scope 不许跨 task 退出）。关闭时让它们自己退出，SDK
+    随之关 stdin、等待、按进程组终止——只动本 server 的进程，不碰别的会话 spawn 的。
 
     用法：
         manager = MCPSessionManager()
@@ -190,11 +194,10 @@ class MCPSessionManager:
     """
 
     def __init__(self) -> None:
-        self._exit_stack: AsyncExitStack | None = None
         self._tools: list[StructuredTool] = []
         self._started: bool = False
-        # 本 manager start 期间新出现的子进程 PID（精确 teardown 用，绝不碰其它池的）
-        self._child_pids: set[int] = set()
+        self._stop = asyncio.Event()
+        self._owners: list[asyncio.Task] = []
         # 各 server 最近一次加载结果：name → {ok, tools?|error?}（mcp.status 广播 / 面板徽标）
         self.server_status: dict[str, dict] = {}
 
@@ -208,8 +211,6 @@ class MCPSessionManager:
 
         对于 stdio 类型服务器，创建持久会话保持子进程存活；
         对于其他类型服务器，使用默认的无状态模式加载工具。
-        子进程 PID 在 _start_servers 内逐 server 记录——任意时刻被取消
-        （配置作废）都不漏杀已 spawn 的子进程。
         """
         if self._started:
             logger.warning("[MCP] SessionManager 已启动，请先 close 再重新 start")
@@ -217,9 +218,6 @@ class MCPSessionManager:
 
         if not mcp_config:
             return []
-
-        self._exit_stack = AsyncExitStack()
-        await self._exit_stack.__aenter__()
 
         interceptors = [ToolArgsInterceptor()]
 
@@ -238,6 +236,49 @@ class MCPSessionManager:
         self._started = True
         return all_tools
 
+    async def _hold_session(
+        self,
+        client: MultiServerMCPClient,
+        server_name: str,
+        interceptors: list[ToolArgsInterceptor],
+        ready: asyncio.Future,
+    ) -> None:
+        """持有一个 stdio server 的会话直到 close：加载好工具交给 ready，然后等停。"""
+        try:
+            async with client.session(server_name) as session:
+                ready.set_result(
+                    await load_mcp_tools(
+                        session, server_name=server_name, tool_interceptors=interceptors
+                    )
+                )
+                await self._stop.wait()
+        except Exception as e:
+            if not ready.done():
+                ready.set_exception(e)  # 连接失败：交给 start 记状态
+            else:
+                logger.warning(
+                    f"[MCP] {server_name} 会话异常退出: {format_exception_details(e)}"
+                )
+
+    async def _load_persistent(
+        self,
+        client: MultiServerMCPClient,
+        server_name: str,
+        interceptors: list[ToolArgsInterceptor],
+    ) -> list[StructuredTool]:
+        """起 owner task 并等它交出工具；超时即取消它（会话在它自己的 task 里收尾）。"""
+        ready = asyncio.get_running_loop().create_future()
+        owner = asyncio.create_task(
+            self._hold_session(client, server_name, interceptors, ready)
+        )
+        self._owners.append(owner)
+        try:
+            async with asyncio.timeout(_SERVER_START_TIMEOUT):
+                return await asyncio.shield(ready)
+        except TimeoutError:
+            owner.cancel()
+            raise
+
     async def _start_servers(
         self,
         servers: dict[str, Any],
@@ -250,34 +291,20 @@ class MCPSessionManager:
         超时/异常/状态记录脚手架两类共用——server_status 的形状与文案只此一份。
         """
         kind = "服务器" if persistent else "无状态服务器"
-        # 逐 server 记录新 spawn 的子进程 PID（仅 persistent=stdio 会留驻子进程）：
-        # 快照 diff 放进 finally——连接中途被取消（配置作废）也已入账，close 的
-        # SIGKILL 兜底不漏杀。精确归属依赖 start_lock 串行化 spawn，故上一轮的
-        # after 可直接复用为下一轮的 before，全程 S+1 次进程树遍历而非 2S 次；
-        # 每次遍历对每个存活后代同步 spawn 一个 pgrep，须下放线程避免阻塞事件循环
-        # （本函数跑在持 start_lock 的后台加载里，阻塞会拖停所有会话的流式输出）。
-        before = (
-            set(await asyncio.to_thread(collect_descendant_pids, os.getpid()))
-            if persistent
-            else set()
-        )
         for server_name, server_config in servers.items():
             try:
                 client = MultiServerMCPClient(
                     {server_name: server_config},
                     tool_interceptors=interceptors,
                 )
-                async with asyncio.timeout(_SERVER_START_TIMEOUT):
-                    if persistent:
-                        session = await self._exit_stack.enter_async_context(
-                            client.session(server_name)
-                        )
-                        tools = await load_mcp_tools(
-                            session,
-                            server_name=server_name,
-                            tool_interceptors=interceptors,
-                        )
-                    else:
+                if persistent:
+                    tools = await self._load_persistent(
+                        client, server_name, interceptors
+                    )
+                    for t in tools:
+                        self._watch_session_lost(t)
+                else:
+                    async with asyncio.timeout(_SERVER_START_TIMEOUT):
                         tools = await client.get_tools()
                 self._register_tools(server_name, tools, out_tools)
                 self.server_status[server_name] = {"ok": True, "tools": len(tools)}
@@ -303,13 +330,6 @@ class MCPSessionManager:
                 logger.error(
                     f"[MCP] {kind} {server_name} 加载失败: {format_exception_details(e)}"
                 )
-            finally:
-                if persistent:
-                    after = set(
-                        await asyncio.to_thread(collect_descendant_pids, os.getpid())
-                    )
-                    self._child_pids |= after - before
-                    before = after
 
     @staticmethod
     def _register_tools(
@@ -331,36 +351,45 @@ class MCPSessionManager:
                     t.args_schema = flat
         out_tools.extend(tools)
 
+    def _watch_session_lost(self, tool: StructuredTool) -> None:
+        """包装持久会话工具：server 进程已死（调用抛 ClosedResourceError 或
+        「Connection closed」McpError）时关本池换代，下一轮自然重载；异常照旧上抛。
+
+        不包则状态恒显示 ok、工具恒调用失败——常驻会话没有别的途径感知进程死亡。
+        """
+        call = tool.coroutine
+
+        @wraps(call)
+        async def watched(*args: Any, **kwargs: Any) -> Any:
+            try:
+                return await call(*args, **kwargs)
+            except anyio.ClosedResourceError:
+                await _on_session_lost(self)
+                raise
+            except McpError as e:
+                if e.error.code == CONNECTION_CLOSED:
+                    await _on_session_lost(self)
+                raise
+
+        tool.coroutine = watched
+
     def get_tools(self) -> list[StructuredTool]:
         """获取已加载的工具列表"""
         return self._tools
 
     async def close(self) -> None:
-        """只关闭**本 manager** 的持久会话，不波及其它池。
-
-        优雅 aclose（3s 超时）拆掉本池 exit_stack 里的会话/子进程；随后 SIGKILL
-        兜底**仅限本池 start 期间记录的 PID**（应对某些 server 优雅关闭挂起），
-        绝不像旧实现那样扫杀整个进程的后代（会误杀别的池）。
-        """
-        if self._exit_stack is None:
-            return
-
-        try:
-            await asyncio.wait_for(self._exit_stack.aclose(), timeout=3.0)
-        except TimeoutError:
-            logger.warning("[MCP] 关闭持久会话超时（3s），强制跳过")
-        except RuntimeError:
-            # anyio cancel scope 不允许跨 task 退出；下方 SIGKILL 兜底本池子进程
-            pass
-        except Exception as e:
-            logger.error(f"[MCP] 关闭持久会话时出错: {format_exception_details(e)}")
-        finally:
-            kill_pids(self._child_pids)  # 只杀本池自己的子进程
-            self._exit_stack = None
-            self._tools.clear()
-            self._child_pids.clear()
-            self._started = False
-            logger.info("[MCP] 持久会话已关闭（本池）")
+        """只关闭本 manager 的会话：通知各 owner task 退出（SDK 自行终止其 server 进程组），
+        5s 内没退的取消并等它收尾。"""
+        self._stop.set()
+        if self._owners:
+            _, pending = await asyncio.wait(self._owners, timeout=5.0)
+            for task in pending:
+                task.cancel()
+            await asyncio.gather(*pending, return_exceptions=True)
+        self._owners.clear()
+        self._tools.clear()
+        self._started = False
+        logger.info("[MCP] 持久会话已关闭（本池）")
 
 
 # ── 会话池（按项目分池）──
@@ -372,8 +401,7 @@ _GLOBAL_POOL_KEY = "__global__"
 # 已启动池数上限：超过则优雅淘汰最久未用的池，bound 住长跑 serve 多项目切换的子进程
 # 增长。与 Claude Code「连接持进程生命周期」同思路，只是加一个宽松上限防病态无界增长。
 _MAX_POOLS = 16
-# 串行化 start：保证 start 期间的子进程 PID 快照精确归属本池（不与并发 spawn 交叉），
-# 并顺带消除同一池并发首次初始化时重复 start 的竞态。连接测试的 stdio spawn 同锁。
+# 串行化 start：消除同一池并发首次初始化时重复 start 的竞态，也让淘汰在锁内进行
 start_lock = asyncio.Lock()
 # 池加载完成回调（gateway 注册，广播 mcp.status 给绑定该池的连接）
 _on_pool_loaded: Callable[[dict], None] | None = None
@@ -405,7 +433,8 @@ class McpPool:
         self.generation = 0
         self.last_used = 0.0  # 最近访问 monotonic 时刻（LRU 淘汰用）
         # 最近一次加载所尝试配置的 hash（失败也记）：sync_config 据此区分
-        # 「配置真变了」与「上次就是这份配置但没加载成功」——后者不反复重试
+        # 「配置真变了」与「上次就是这份配置但没加载成功」——后者不自动重试
+        # （面板 save/test 的显式重试除外，见 sync_config 的 force）
         self.attempted_hash = EMPTY_CONFIG_HASH
         self._load_task: asyncio.Task | None = None
 
@@ -489,7 +518,7 @@ class McpPool:
             )
 
     async def close(self) -> None:
-        """关池并换代：取消并送走在途加载、关 manager（杀本池子进程）、递增版本号。"""
+        """关池并换代：取消并送走在途加载、关 manager（送走本池的 server 进程）、递增版本号。"""
         # 换 manager 必须在首个 await 之前：wait_ready 的等待者先于本方法被唤醒
         # （同等一个任务，done-callback 按注册序 FIFO 分发），排水期间 ensure_loading
         # 也可能进来——二者全靠 identity 校验感知换代（等待者对新代重试、新加载绑定
@@ -501,19 +530,21 @@ class McpPool:
         task = self._load_task
         self._load_task = None
         if task is not None:
-            # 必须等被取消的任务退出：取消是异步送达的，_start_servers 的 finally
-            # 还没把刚 spawn 的 PID 记进 manager 就关它，会漏杀该子进程
+            # 必须等被取消的任务退出：取消是异步送达的，它刚起的 owner task 还没
+            # 登记进 manager 就关它，那个 server 进程就没人收了
             await asyncio.wait([task])
         await manager.close()
         self.generation += 1
 
-    async def sync_config(self, interrupt_loading: bool) -> None:
+    async def sync_config(self, interrupt_loading: bool, force: bool = False) -> None:
         """配置比对换代的唯一决策点（RPC 作废与轮首自查共用）。
 
         与最近一次尝试加载的配置 hash（``attempted_hash``，失败也记）比对，变了才
-        动作：暖池/在途池关池换代（close 内取消在途加载），冷池只递增版本号唤醒
-        会话重建（重建经 get_mcp_tools 按新配置触发加载）。没变则零动作——加载
-        失败的终态不会被反复重试，无关写入（如某项目自己覆盖了被改的全局 server）
+        动作（``force=True`` 时本池有失败 server 也动作——面板 save/test 即用户显式
+        重试，否则同配置下的失败终态永不重连）：暖池/在途池关池换代（close 内取消
+        在途加载），冷池只递增版本号唤醒会话重建（重建经 get_mcp_tools 按新配置
+        触发加载）。没变则零动作——加载
+        失败的终态不会被自动反复重试，无关写入（如某项目自己覆盖了被改的全局 server）
         完全不打断。``interrupt_loading=False``（轮首自查）不打断在途加载：首次
         加载可横跨多条消息，贸然关闭永不收敛，其配置过期由完成后的下一轮收口；
         RPC 写路径（True）则立即取消重来。
@@ -521,7 +552,8 @@ class McpPool:
         if self.loading and not interrupt_loading:
             return
         new_hash = config_hash(load_merged_mcp_config(_key_project_dir(self.key)))
-        if new_hash == self.attempted_hash:
+        failed = any(not st["ok"] for st in self.manager.server_status.values())
+        if new_hash == self.attempted_hash and not (force and failed):
             return
         if self.manager.is_started or self.loading:
             await self.close()
@@ -621,12 +653,15 @@ async def close_all_pools() -> None:
     _pools.clear()
 
 
-async def invalidate_mcp_pools(scope: str, project_dir: Path | None = None) -> None:
+async def invalidate_mcp_pools(
+    scope: str, project_dir: Path | None = None, force: bool = False
+) -> None:
     """save/delete 后作废**配置真的变了**的会话池，下次加载时以新配置重建。
 
     借鉴 Claude Code 的 config-hash diff（比对与动作单源在
     :meth:`McpPool.sync_config`）。``scope=="global"`` → 逐池重算 merged hash
-    （全局层被所有项目继承）；其它 → 只查该项目的池。
+    （全局层被所有项目继承）；其它 → 只查该项目的池。``force=True``（面板
+    save/test）另把有失败 server 的池一并换代重连。
     """
     if scope == "global":
         candidates = list(_pools.values())
@@ -635,7 +670,18 @@ async def invalidate_mcp_pools(scope: str, project_dir: Path | None = None) -> N
         candidates = [pool] if pool is not None else []
 
     for pool in candidates:
-        await pool.sync_config(interrupt_loading=True)
+        await pool.sync_config(interrupt_loading=True, force=force)
+
+
+async def _on_session_lost(manager: MCPSessionManager) -> None:
+    """持久会话的 server 进程已死：关其所属池换代（会话轮首重建、按需重载）。
+
+    按 identity 找池：同批并发调用各自撞上时，首个已换代，其余找不到即无操作。
+    """
+    pool = next((p for p in _pools.values() if p.manager is manager), None)
+    if pool is not None:
+        logger.warning("[MCP] 会话池 %s 有 server 连接已断，换代待下一轮重载", pool.key)
+        await pool.close()
 
 
 async def refresh_pool_config(project_dir: Path | None) -> None:
@@ -647,4 +693,5 @@ async def refresh_pool_config(project_dir: Path | None) -> None:
     """
     pool = _pools.get(_project_key(project_dir))
     if pool is not None:
+        pool.last_used = time.monotonic()  # 交互会话每轮必经：活跃池不被 LRU 淘汰
         await pool.sync_config(interrupt_loading=False)

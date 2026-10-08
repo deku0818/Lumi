@@ -259,3 +259,127 @@ def test_collect_tools_rejects_stringized_runtime() -> None:
     mod.probe = probe
     with pytest.raises(RuntimeError, match="字符串化"):
         _collect_tools_from_module(mod)
+
+
+# --- 子代理的审批模式与工具集（回归）---
+
+
+async def test_subagent_has_no_ask_tool() -> None:
+    """子代理拿不到 ask：IM 渠道无处作答，后台无人应答，前台也不该绕过主 agent 直接问用户。"""
+    captured: dict = {}
+    p1, p2, p3, p4 = _patch_agent_internals(captured)
+
+    async def tools_with_ask(tools=None, project_dir=None, **kwargs):
+        return [_FakeTool("agent"), _FakeTool("bash"), _FakeTool("ask")]
+
+    with p1, p2 as get_tools, p3, p4:
+        get_tools.side_effect = tools_with_ask
+        await agent.coroutine(
+            name="worker",
+            prompt="干活",
+            runtime=_make_runtime(depth=0),
+            run_in_background=False,
+        )
+    assert "ask" not in _names(captured["tools"])
+    assert "bash" in _names(captured["tools"])
+
+
+async def test_background_agent_runs_in_auto_mode() -> None:
+    """后台子代理用 auto（分类器逐个裁决），不再固定 privileged——此前委派一次即可
+    让写操作绕过分类器。"""
+    captured: dict = {}
+    p1, p2, p3, p4 = _patch_agent_internals(captured)
+    context = SimpleNamespace()
+
+    async def fake_create_agent(**kwargs):
+        return SimpleNamespace(graph=None), context
+
+    with (
+        p1,
+        p2,
+        p3 as create_agent,
+        p4,
+        patch("lumi.agents.tools.providers.agent._run_agent_background"),
+    ):
+        create_agent.side_effect = fake_create_agent
+        await agent.coroutine(
+            name="worker", prompt="干活", runtime=_make_runtime(depth=0)
+        )
+    assert context.tool_mode == "auto"
+
+
+def test_child_tools_strips_workflow_at_limit() -> None:
+    # 回归：到顶的子代理曾仍带 workflow 工具，委派层数上限管不到 workflow 扇出
+    tools = [_FakeTool("agent"), _FakeTool("workflow"), _FakeTool("bash")]
+    assert _names(_child_tools(tools, child_depth=3, max_depth=3)) == {"bash"}
+
+
+async def test_workflow_refused_at_depth_limit() -> None:
+    """已达委派上限（含 max_delegation_depth=0）时 workflow 同样拒绝扇出。"""
+    result = await workflow.coroutine(
+        runtime=_make_runtime(depth=3), script='return await agent("x")'
+    )
+    assert "最大委派层数" in result
+
+
+def test_foreground_subagent_follows_parent_mode_live() -> None:
+    """回归：前台子代理的 tool_mode 曾是委派瞬间的快照——父会话运行中从 privileged
+    切回 default，子代理的写操作照样免审批。"""
+    from lumi.agents.core.nodes import is_use_tool
+    from lumi.agents.core.state import LumiAgentContext
+
+    parent = LumiAgentContext(tool_mode="privileged")
+    child = LumiAgentContext(mode_parent=parent)
+    call = {"name": "write", "args": {"file_path": "x.txt", "content": ""}, "id": "1"}
+    state = {"messages": [AIMessage(content="", tool_calls=[call])]}
+    runtime = SimpleNamespace(context=child)
+    assert is_use_tool(state, runtime) == "ToolExecutor"
+    parent.tool_mode = "default"
+    assert is_use_tool(state, runtime) == "HumanApproval"
+
+
+async def test_foreground_subagent_links_parent_mode() -> None:
+    captured: dict = {}
+    p1, p2, p3, p4 = _patch_agent_internals(captured)
+    context = SimpleNamespace()
+
+    async def fake_create_agent(**kwargs):
+        async def ainvoke(inputs, context=None):
+            return {"messages": [AIMessage(content="done")]}
+
+        return SimpleNamespace(graph=SimpleNamespace(ainvoke=ainvoke)), context
+
+    runtime = _make_runtime(depth=0)
+    with p1, p2, p3 as create_agent, p4:
+        create_agent.side_effect = fake_create_agent
+        await agent.coroutine(
+            name="worker", prompt="x", runtime=runtime, run_in_background=False
+        )
+    assert context.mode_parent is runtime.context
+
+
+async def test_subagent_result_is_text_only() -> None:
+    """回归：子代理最终消息只有 thinking 块时，思考原文（带签名）被字符串化交给父代理；
+    多个 text 块时只取了第一个。"""
+    captured: dict = {}
+    p1, p2, p3, p4 = _patch_agent_internals(captured)
+    blocks = [
+        {"type": "thinking", "thinking": "SECRET", "signature": "sig"},
+        {"type": "text", "text": "PART1"},
+        {"type": "text", "text": "PART2"},
+    ]
+
+    async def fake_create_agent(**kwargs):
+        async def ainvoke(inputs, context=None):
+            return {"messages": [AIMessage(content=blocks)]}
+
+        return SimpleNamespace(
+            graph=SimpleNamespace(ainvoke=ainvoke)
+        ), SimpleNamespace()
+
+    with p1, p2, p3 as create_agent, p4:
+        create_agent.side_effect = fake_create_agent
+        out = await agent.coroutine(
+            name="worker", prompt="x", runtime=_make_runtime(0), run_in_background=False
+        )
+    assert out == "PART1\nPART2"

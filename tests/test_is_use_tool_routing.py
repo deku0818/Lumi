@@ -14,6 +14,7 @@ from pathlib import Path
 from langchain_core.messages import AIMessage
 
 from lumi.agents.core.nodes import is_use_tool
+from lumi.agents.core.state import LumiAgentContext
 from lumi.agents.core.structured_tool import STRUCTURED_OUTPUT_TOOL_NAME
 from lumi.agents.permissions.engine import PermissionEngine
 from lumi.agents.permissions.models import (
@@ -41,7 +42,7 @@ def _runtime(engine, tool_mode="default"):
     本文件只断言路由目标。放宽行为见 test_approval_boundary_widen。
     """
     return types.SimpleNamespace(
-        context=types.SimpleNamespace(
+        context=LumiAgentContext(
             permission_engine=engine, tool_mode=tool_mode, widen_boundary=None
         )
     )
@@ -268,6 +269,30 @@ class TestBranch9_AcceptEdits:
         ]
         assert _route(tcs, engine=engine, tool_mode="accept_edits") == "HumanApproval"
 
+    def test_accept_edits_keeps_allow_rules(self):
+        """accept_edits 是 default 的超集：已 allow 的非编辑工具照样放行"""
+        engine, _ = _engine_with_project()
+        engine._config = PermissionConfig(
+            permissions=(
+                PermissionRule(tool="bash(git commit *)", permission=Permission.ALLOW),
+            )
+        )
+        tcs = [_tc("bash", {"command": "git commit -m x"})]
+        assert _route(tcs, engine=engine, tool_mode="accept_edits") == "ToolExecutor"
+
+    def test_accept_edits_respects_ask_rules(self):
+        """显式 ask 规则命中的编辑不因 accept_edits 免审"""
+        engine, project_dir = _engine_with_project()
+        engine._config = PermissionConfig(
+            permissions=(
+                PermissionRule(tool="write(**/*.lock)", permission=Permission.ASK),
+            )
+        )
+        tcs = [
+            _tc("write", {"file_path": str(project_dir / "uv.lock"), "content": "x"})
+        ]
+        assert _route(tcs, engine=engine, tool_mode="accept_edits") == "HumanApproval"
+
 
 # ── 分支 10：完整权限评估 ──
 
@@ -467,3 +492,24 @@ class TestAutoMode:
         engine = _make_engine([], project_dir=home)
         tcs = [_tc("write", {"file_path": str(home / ".zshrc"), "content": "x"})]
         assert _route(tcs, engine=engine, tool_mode="auto") == "HumanApproval"
+
+
+class TestHarmlessToolsSkipApproval:
+    """只读 / 纯呈现类工具在 default 模式不弹审批（越界照样审批）"""
+
+    def test_background_task_list_and_status_are_readonly(self):
+        engine, _ = _engine_with_project()
+        for action in ("list", "status"):
+            tcs = [_tc("background_task", {"action": action, "task_id": "bg_x"})]
+            assert _route(tcs, engine=engine) == "ToolExecutor"
+        tcs = [_tc("background_task", {"action": "stop", "task_id": "bg_x"})]
+        assert _route(tcs, engine=engine) == "HumanApproval"
+
+    def test_artifacts_inside_workspace_skip_approval(self):
+        # 默认规则在加载时合并：用真加载的引擎，别用会覆盖 _config 的 _make_engine
+        project_dir = Path(tempfile.mkdtemp())
+        engine = PermissionEngine(project_dir, user_config_dir=project_dir / ".home")
+        inside = [_tc("artifacts", {"filepaths": [str(project_dir / "r.pdf")]})]
+        assert _route(inside, engine=engine) == "ToolExecutor"
+        outside = [_tc("artifacts", {"filepaths": ["/etc/passwd"]})]
+        assert _route(outside, engine=engine) == "HumanApproval"

@@ -1,11 +1,12 @@
 import { useEffect, useState } from 'react'
-import { Plus, Pencil, Trash2 } from 'lucide-react'
+import { AlertTriangle, Plus, Pencil, Trash2 } from 'lucide-react'
 import type { BackendRemote, BackendsState } from '../types'
 import { useI18n } from '../i18n'
 import { machineColor } from '@/lib/utils'
 import { MachineMark, useMachine } from './MachineTabs'
 import { Empty, EntityCard, Field, FormModal, Section, SectionGroup, SecretInput, StatusDot, TextInput } from './SettingsKit'
 import { Button } from '@/components/ui/button'
+import { ConfirmDialog } from './ConfirmDialog'
 import { Switch } from '@/components/ui/switch'
 
 // 一次性测试连接：开一条裸 WS（带 ?token=），收到首帧=通、1008=鉴权失败、其余=不可达。
@@ -58,6 +59,8 @@ export function BackendsPanel() {
   const { t } = useI18n()
   const [state, setState] = useState<BackendsState | null>(null)
   const [editing, setEditing] = useState<Partial<BackendRemote> | null>(null)
+  // 待确认删除的机器：连同其访问令牌一起删，不可撤销，先确认
+  const [deleting, setDeleting] = useState<BackendRemote | null>(null)
 
   const api = window.lumi.backends
   const reload = () => api?.list().then(setState)
@@ -114,7 +117,7 @@ export function BackendsPanel() {
                   color={machineColor(r.id, [{ id: 'local' }, ...state.remotes])}
                   enabled={r.enabled !== false}
                   onEdit={() => setEditing(r)}
-                  onDelete={() => remove(r.id)}
+                  onDelete={() => setDeleting(r)}
                   onToggle={(v) => toggle(r.id, v)}
                 />
               ))}
@@ -134,6 +137,19 @@ export function BackendsPanel() {
             // 编辑现有机器（draft.id 存在）→ 换址重连；新增则交给 syncBackends 建连
             notifyChanged(draft.id)
           }}
+        />
+      )}
+
+      {deleting && (
+        <ConfirmDialog
+          icon={<AlertTriangle size={17} className="text-error" />}
+          title={t('backends.deleteTitle', { name: deleting.name || deleting.url })}
+          message={t('backends.deleteMessage')}
+          onConfirm={() => {
+            remove(deleting.id)
+            setDeleting(null)
+          }}
+          onCancel={() => setDeleting(null)}
         />
       )}
     </div>

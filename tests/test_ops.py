@@ -43,6 +43,16 @@ def test_frozen_wins_over_everything(tmp_path, monkeypatch):
     assert ops.install_kind() == "frozen"
 
 
+def test_editable_inside_docker_is_docker(tmp_path, monkeypatch):
+    # 回归：官方镜像用 uv sync（可编辑安装），容器里 lumi update 提示去 git pull
+    dockerenv = tmp_path / ".dockerenv"
+    dockerenv.write_text("")
+    monkeypatch.setattr(sys, "prefix", str(tmp_path))
+    monkeypatch.setattr(ops, "_editable", lambda: True)
+    monkeypatch.setattr(ops, "_DOCKERENV", dockerenv)
+    assert ops.install_kind() == "docker"
+
+
 def test_editable_reads_real_dist_info():
     # 拿真实 dist-info 试一次：本仓库自身就是可编辑安装（uv sync 的装法）。
     # 构造的假 direct_url.json 证明不了字段路径写对了，真文件能
@@ -55,6 +65,42 @@ def test_editable_reads_real_dist_info():
 @pytest.fixture
 def fake_uv(monkeypatch):
     monkeypatch.setattr(ops, "_uv_path", lambda: "/fake/uv")
+
+
+def test_uv_found_next_to_lumi_when_path_is_trimmed(tmp_path, monkeypatch):
+    # 回归：sudo 精简 PATH 下找不到 ~/.local/bin/uv——install.sh 把 uv 与 lumi 装进同一目录
+    from lumi.gateway.toolbox import ToolStatus
+
+    bin_dir = tmp_path / "bin"
+    bin_dir.mkdir()
+    uv = bin_dir / "uv"
+    uv.write_text("#!/bin/sh\n")
+    uv.chmod(0o755)
+    monkeypatch.setenv("PATH", str(tmp_path / "empty"))
+    monkeypatch.setattr(
+        "lumi.gateway.toolbox.locate", lambda n: ToolStatus(n, "missing")
+    )
+    monkeypatch.setattr(sys, "argv", [str(bin_dir / "lumi"), "update"])
+    assert ops._uv_path() == str(uv)
+
+
+def test_update_without_uv_exits_cleanly(monkeypatch):
+    # 回归：找不到 uv 的 RuntimeError 没人接，lumi update 打出整段堆栈
+    from typer.testing import CliRunner
+
+    from lumi.cli import app
+
+    def no_uv(kind, target):
+        raise RuntimeError("找不到 uv")
+
+    monkeypatch.setattr(ops, "install_kind", lambda: "uv-tool")
+    monkeypatch.setattr(ops, "latest_version", lambda: "")
+    monkeypatch.setattr(ops, "check_service", lambda *a: ops.ServiceStatus("down"))
+    monkeypatch.setattr(ops, "upgrade_command", no_uv)
+    result = CliRunner().invoke(app, ["update"])
+    assert result.exit_code == 1
+    assert "找不到 uv" in result.stderr
+    assert result.exception is None or isinstance(result.exception, SystemExit)
 
 
 def test_uv_latest_clears_version_pin(fake_uv):
@@ -161,3 +207,39 @@ def test_tail_handles_short_file(tmp_path):
     log = tmp_path / "Lumi.log"
     log.write_text("only\n")
     assert ops.tail(log, 50) == ["only"]
+
+
+# ── 日志轮转 ──────────────────────────────────────────────────────────────
+
+
+def test_log_file_rotates():
+    # 回归：普通 FileHandler 无上限，7×24 跑的 serve 把日志写到几百 MB 上 GB
+    from logging.handlers import RotatingFileHandler
+
+    from lumi.utils.logger import LOG_FILE, logger
+
+    handler = next(h for h in logger.handlers if isinstance(h, RotatingFileHandler))
+    assert handler.maxBytes == 10 * 1024 * 1024 and handler.backupCount == 3
+    assert ops.log_file() == LOG_FILE
+
+
+def test_follow_reopens_after_rotation(tmp_path):
+    # 轮转后路径指向新文件：-f 若死守旧句柄，之后的日志一行都看不到
+    import queue
+    import threading
+    import time
+
+    log = tmp_path / "Lumi.log"
+    log.write_text("")
+    got: queue.Queue[str] = queue.Queue()
+    # 守护线程：旧实现在这里永远读不到新行，不能让它拖住测试进程退出
+    threading.Thread(
+        target=lambda: [got.put(line) for line in ops.follow(log)], daemon=True
+    ).start()
+    time.sleep(0.3)  # 等 follow 打开文件并 seek 到末尾，否则 old 在它之前写入被跳过
+    with log.open("a") as f:
+        f.write("old\n")
+    assert got.get(timeout=5) == "old"
+    log.rename(tmp_path / "Lumi.log.1")
+    log.write_text("new\n")
+    assert got.get(timeout=5) == "new"

@@ -1,13 +1,17 @@
 """图运行的协作式停机（drain）。
 
 LangGraph 的 ``RunControl`` 让运行在 **super-step 边界**停下：上一步的写入已落
-checkpoint、下一批任务还没开跑，停下时 state 干净、``next`` 指向待执行节点，之后
-传 ``None`` 即可从 checkpoint 续跑。与硬 cancel 的分工别混：
+checkpoint、下一批任务还没开跑，``next`` 指向待执行节点。没有续跑：下一轮开跑前
+bridge 的 ``_recover_stale_state`` 按中断轮收尾（未执行的 tool_call 补中断说明）。
+与硬 cancel 的分工别混：
 
 - cancel（用户按停）要的是**立刻**，代价是可能落在节点半途（半截回复 / 未应答的
   tool_call），靠 ``persist_partial_reply`` + ``_recover_stale_state`` 事后修；
-- drain 要的是**干净**，代价是得等当前 super-step 跑完——切不断正在流的模型调用。
-  进程要重启（``lumi serve`` 收到停机信号 / sidecar 被换代）时用它。
+- drain 要的是 **checkpoint 完整**，代价是得等当前 super-step 跑完——切不断正在流
+  的模型调用。进程要重启（``lumi serve`` 收到停机信号 / sidecar 被换代）时用它。
+
+前台子代理 / workflow 的子图经 parent runtime 继承同一个 control，会在自己的边界
+先停下并抛出 ``GraphDrained``——父级那个工具步因此在半途结束，不是干净边界。
 
 注入方式绕了个弯：``astream_events(version="v2")`` **不转发** ``control=``（v1/v2
 只把 version 和 **kwargs 透传给父类，具名参数在签名里被吃掉，只有 v3 转发），而
@@ -78,8 +82,8 @@ def drain_all(reason: str = "shutdown") -> int:
 async def wait_drained(timeout: float) -> bool:
     """等到所有在跑的运行都注销（drain 完成），或到 ``timeout``。返回是否等干净了。
 
-    轮询而非 Event：登记方来自多个线程/渠道，一个跨 loop 共享的 Event 更容易出错，
-    而这条路径一辈子只在进程停机时走一次。停机时早一秒返回就是早一秒重启完。
+    轮询而非 Event：这条路径一辈子只在进程停机时走一次，50ms 粒度足够。停机时早一秒
+    返回就是早一秒重启完。
     """
     deadline = monotonic() + timeout
     while _active and monotonic() < deadline:

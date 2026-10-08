@@ -15,6 +15,7 @@ import {
   Pencil,
   Play,
   Plus,
+  Square,
   Trash2,
 } from 'lucide-react'
 import type { CronJob, CronRun } from '../types'
@@ -34,10 +35,10 @@ import { beOf, cn, errorMessage, fmtDuration } from '@/lib/utils'
 import { CARD_L1, CARD_L1_HOVER, CARD_L3 } from './glass'
 import { Empty } from './SettingsKit'
 
-// 后端能力句柄：App 注入 anyGw() 返回的 Gateway 子集，便于解耦与测试
+// 后端能力句柄：App 注入所选机器控制连接的 Gateway 子集，便于解耦与测试
 export interface CronApi {
   listCronJobs(): Promise<{ jobs: CronJob[] }>
-  createCronJob(name: string, schedule: string, prompt: string): Promise<{ job: CronJob }>
+  createCronJob(name: string, schedule: string, prompt: string, projectDir?: string): Promise<{ job: CronJob }>
   updateCronJob(
     jobId: string,
     fields: { name?: string; schedule?: string; prompt?: string },
@@ -70,7 +71,8 @@ const runParts = (iso: string, lang: string) => {
 
 // 调度规则人类可读化：覆盖常见形态（间隔简写、每天/每周 cron、一次性），
 // 其余 cron 表达式按原文显示（足够看懂，不重造 cron 解析器）。
-function describeSchedule(job: CronJob, t: Translate): string {
+// 项目主页的定时卡片共用：两处调度文案一致
+export function describeSchedule(job: CronJob, t: Translate): string {
   const { type, value } = job.schedule
   if (type === 'interval') {
     const m = /^(\d+)([smhd])$/.exec(value)
@@ -109,6 +111,9 @@ function ScheduleBadge({ job }: { job: CronJob }) {
 
 export function CronPage({
   api,
+  initialMachine = 'local',
+  initialJobId,
+  createIn,
   jobs,
   runningJobs,
   version,
@@ -116,17 +121,23 @@ export function CronPage({
   onRefresh,
 }: {
   api: (backend: string) => CronApi | undefined // 按机器取连接（定时是 per-机器）
+  initialMachine?: string // 打开时选中的机器（从项目主页跳来 = 该项目所在机器）
+  initialJobId?: string // 打开时直达的任务详情（从项目主页点某条任务）
+  createIn?: string // 打开时即弹创建表单并绑定该项目（项目主页「新建任务」）
   jobs: CronJob[] // App 持有的跨机器合并列表（带 backend 标记）
   runningJobs: Record<string, string[]> // 机器 → 该机器运行中的 job id
   version: number
   onOpenRun: (threadId: string, jobId: string) => void
-  onRefresh: () => void
+  onRefresh: (backend: string) => void // 只刷这台机器的任务列表
 }) {
   const { t } = useI18n()
   // 方案甲「先选机器」：定时任务在各自机器的调度器上跑，按机器管理。
-  const [machine, setMachine] = useState('local')
-  const [selectedId, setSelectedId] = useState<string | null>(null) // 详情页任务
-  const [dialog, setDialog] = useState<{ job: CronJob | null } | null>(null) // 创建/编辑表单
+  const [machine, setMachine] = useState(initialMachine)
+  const [selectedId, setSelectedId] = useState<string | null>(initialJobId ?? null) // 详情页任务
+  // 创建/编辑表单；projectDir 仅创建时用（项目主页新建带上所在项目）
+  const [dialog, setDialog] = useState<{ job: CronJob | null; projectDir?: string } | null>(
+    createIn ? { job: null, projectDir: createIn } : null,
+  )
   const [pendingDelete, setPendingDelete] = useState<CronJob | null>(null)
 
   const offline = useMachine(machine).scope !== 'connected'
@@ -141,7 +152,8 @@ export function CronPage({
   }, [])
 
   const toggle = (job: CronJob, enabled: boolean) => {
-    gw?.toggleCronJob(job.id, enabled).then(onRefresh).catch(onRefresh)
+    const refresh = () => onRefresh(machine)
+    gw?.toggleCronJob(job.id, enabled).then(refresh).catch(refresh)
   }
 
   const runNow = (job: CronJob) => {
@@ -151,7 +163,7 @@ export function CronPage({
   const doDelete = (job: CronJob) => {
     setPendingDelete(null)
     if (selectedId === job.id) setSelectedId(null)
-    gw?.deleteCronJob(job.id).then(onRefresh).catch(() => {})
+    gw?.deleteCronJob(job.id).then(() => onRefresh(machine)).catch(() => {})
   }
 
   const selected = selectedId ? shownJobs.find((j) => j.id === selectedId) : undefined
@@ -225,10 +237,11 @@ export function CronPage({
         <JobFormDialog
           api={boundApi}
           job={dialog.job}
+          projectDir={dialog.projectDir}
           onClose={() => setDialog(null)}
           onSaved={() => {
             setDialog(null)
-            onRefresh()
+            onRefresh(machine)
           }}
         />
       )}
@@ -256,7 +269,6 @@ function JobCard({
   onOpen: () => void
   onToggle: (enabled: boolean) => void
 }) {
-  const { t } = useI18n()
   return (
     <div
       className={`flex flex-col ${CARD_L1} ${CARD_L1_HOVER} cursor-pointer p-4 ${job.enabled ? '' : 'opacity-55'}`}
@@ -265,11 +277,6 @@ function JobCard({
       <div className="flex items-start gap-2">
         <div className="flex-1 min-w-0 font-medium truncate">{job.name}</div>
         {running && <Loader2 size={15} className="shrink-0 mt-0.5 animate-spin text-primary" />}
-        {!running && job.consecutive_errors > 0 && (
-          <span title={t('cron.errorsHint', { n: job.consecutive_errors })} className="shrink-0 mt-0.5">
-            <AlertTriangle size={15} className="text-primary" />
-          </span>
-        )}
       </div>
 
       <div className="mt-1.5 text-sm text-muted-foreground line-clamp-3 flex-1">{job.prompt}</div>
@@ -343,13 +350,6 @@ function JobDetail({
         )}
       </div>
 
-      {job.consecutive_errors > 0 && (
-        <div className="mt-5 flex items-center gap-2.5 rounded-2xl border border-primary/40 bg-primary/10 px-4 py-3 text-sm">
-          <AlertTriangle size={15} className="shrink-0 text-primary" />
-          {t('cron.errorsHint', { n: job.consecutive_errors })}
-        </div>
-      )}
-
       <div className="mt-8 pt-6 border-t border-line/30 grid grid-cols-1 md:grid-cols-[5fr_7fr] gap-10">
         <div>
           <div className="text-sm text-muted-foreground mb-2">{t('cron.tabRuns')}</div>
@@ -374,11 +374,13 @@ function JobDetail({
 function JobFormDialog({
   api,
   job,
+  projectDir,
   onClose,
   onSaved,
 }: {
   api: () => CronApi | undefined
   job: CronJob | null
+  projectDir?: string
   onClose: () => void
   onSaved: () => void
 }) {
@@ -401,7 +403,7 @@ function JobFormDialog({
           prompt: prompt.trim(),
         })
       } else {
-        await api()?.createCronJob(name.trim(), schedule.trim(), prompt.trim())
+        await api()?.createCronJob(name.trim(), schedule.trim(), prompt.trim(), projectDir)
       }
       onSaved()
     } catch (e) {
@@ -417,6 +419,12 @@ function JobFormDialog({
           <DialogTitle>{job ? t('cron.editTitle') : t('cron.createTitle')}</DialogTitle>
         </DialogHeader>
         <div className="space-y-4">
+          {projectDir && (
+            <div className="text-xs text-muted-foreground">
+              {t('cron.project')}
+              <span className="ml-1.5 font-mono text-ink/80 break-all">{projectDir}</span>
+            </div>
+          )}
           <Field label={t('cron.name')}>
             <input
               value={name}
@@ -512,6 +520,10 @@ function useCronRuns(
 
 // 单次执行的状态标记：失败/超时 ⚠；成功仅在未读时显示蓝点
 function RunStatusMark({ run, unread }: { run: CronRun; unread?: boolean }) {
+  // 用户自己按停的：中性灰方块，不当失败渲染
+  if (run.status === 'stopped') {
+    return <Square size={11} className="shrink-0 text-muted-foreground fill-current" />
+  }
   if (run.status !== 'success') {
     return (
       <AlertTriangle
@@ -551,6 +563,10 @@ function RunRowInner({ run, lang, unread }: { run: CronRun; lang: string; unread
 // checkpoint，点进失败的 run 是一片空白；RunRecord.error 是唯一能看全失败原因的地方，
 // 故直接摊开不折叠，且放在按钮外（按钮内选文本会误触跳转，错误就是用来复制的）。
 function RunError({ run }: { run: CronRun }) {
+  const { t } = useI18n()
+  if (run.status === 'stopped') {
+    return <div className="px-3 pb-2.5 -mt-0.5 text-[11px] text-muted-foreground">{t('cron.runStopped')}</div>
+  }
   if (run.status === 'success' || !run.error) return null
   return (
     <div className="selectable px-3 pb-2.5 -mt-0.5 text-[11px] leading-relaxed text-error/90 whitespace-pre-wrap break-words">

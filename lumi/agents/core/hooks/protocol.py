@@ -1,12 +1,14 @@
 """Shell hook 的决策 JSON 协议。
 
-输入（喂给外部命令的 stdin）：
+输入（喂给外部命令的 stdin；子进程工作目录为所属项目根）：
 ::
 
     {
       "version": 1,
       "event": "PreToolUse",
       "thread_id": "abc-123",
+      "depth": 0,                  # 0 = 主 agent，>0 = 子代理
+      "stop_hook_active": false,   # 本轮是否已有 hook 注入过提醒
       "payload": {...},
       "messages_tail": [...]
     }
@@ -39,6 +41,7 @@ from lumi.agents.core.hooks.schema import (
     HookEvent,
     HookResult,
 )
+from lumi.agents.core.meta_message import is_reminder_message, iter_current_turn
 from lumi.agents.core.node_helpers.messages import content_to_str
 from lumi.utils.logger import logger
 
@@ -141,6 +144,12 @@ def serialize_input(
         "version": PROTOCOL_VERSION,
         "event": event,
         "thread_id": configurable.get("thread_id"),
+        # 委派深度：0 = 主 agent，>0 = 子代理（config hook 随会话被子代理继承，据此区分）
+        "depth": ctx.state.get("depth", 0) if ctx.state else 0,
+        # 本轮是否已有 hook 注入过提醒（Stop hook 据此避免无限拉回）
+        "stop_hook_active": any(
+            is_reminder_message(m) for m in iter_current_turn(raw_messages)
+        ),
         "payload": _sanitize_payload(ctx.payload),
         "messages_tail": [
             _serialize_message(m) for m in tail if isinstance(m, BaseMessage)

@@ -8,6 +8,10 @@ from __future__ import annotations
 
 import json
 
+# 单行匹配文本的上限：压缩过的 js / 数据文件一行就是几十万字符（rg 的 --max-columns
+# 在 --json 模式下不生效，只能解析时截）
+MAX_LINE_CHARS = 500
+
 
 def _build_ripgrep_command(
     pattern: str,
@@ -28,7 +32,8 @@ def _build_ripgrep_command(
     if output_mode == "files_with_matches":
         cmd.append("-l")
     elif output_mode == "count":
-        cmd.append("--count")
+        # 恒带文件名：搜单个文件时 rg 默认只输出数字，解析时整行被丢
+        cmd.extend(["--count", "--with-filename"])
     else:
         cmd.append("--json")
 
@@ -53,7 +58,8 @@ def _build_ripgrep_command(
         # 显式指定大小写敏感，避免 ripgrep smart-case 行为
         cmd.append("--case-sensitive")
     if multiline:
-        cmd.append("--multiline")
+        # 工具描述承诺跨行模式里 . 能匹配换行
+        cmd.extend(["--multiline", "--multiline-dotall"])
 
     cmd.extend(["--", pattern, search_path])
     return cmd
@@ -98,6 +104,8 @@ def _parse_ripgrep_json_match(data: dict) -> dict[str, str | int | bool] | None:
         return None
 
     text = pdata.get("lines", {}).get("text", "").rstrip("\n")
+    if len(text) > MAX_LINE_CHARS:
+        text = text[:MAX_LINE_CHARS] + "…[行过长已截断]"
     return {
         "path": file_path,
         "line": int(line_number),

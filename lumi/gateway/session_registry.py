@@ -37,6 +37,12 @@ class SessionRegistry:
         if self._detached.get(thread_id) is session:
             self._detached.pop(thread_id, None)
 
+    def pop_all(self) -> list[GatewaySession]:
+        """取出并清空全部 detached 会话（进程停机时统一 aclose）。"""
+        sessions = list(self._detached.values())
+        self._detached.clear()
+        return sessions
+
 
 # 进程级单例（与 broadcast.hub 同风格，全 WS 连接共享）
 registry = SessionRegistry()

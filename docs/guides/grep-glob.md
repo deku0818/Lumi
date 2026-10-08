@@ -6,7 +6,7 @@ Lumi 内置 `grep` 和 `glob` 两个文件搜索工具，分别用于文件内�
 
 ## Grep 工具
 
-基于 ripgrep 的搜索工具，支持正则表达式、多种输出模式、上下文行和分页。ripgrep 不可用时自动降级到纯 Python 实现。
+基于 ripgrep 的搜索工具，支持正则表达式、多种输出模式、上下文行和分页。未安装 ripgrep 时返回安装提示（`lumi env install rg`，或 设置 → 环境）。
 
 ### 参数
 

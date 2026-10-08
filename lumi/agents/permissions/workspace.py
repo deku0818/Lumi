@@ -36,8 +36,8 @@ _run_authorized_source: contextvars.ContextVar[Callable[[], list[Path]] | None] 
 def set_run_authorized_source(source: Callable[[], list[Path]] | None) -> None:
     """注入当前 agent run 的授权目录来源（实时回调）。
 
-    bridge 在 ``_stream`` 起点、cron 在 ``_invoke_agent`` 起点调用，传入本会话权限
-    引擎的 ``authorized_directories`` 方法。读取时实时调用，故引擎边界在 run 内变化
+    bridge 在 ``_stream`` 起点调用（cron 经 cron_stream 同样跑在 bridge 上），传入本会话
+    权限引擎的 ``authorized_directories`` 方法。读取时实时调用，故引擎边界在 run 内变化
     （添加文件夹、reload）能即时反映，后台子代理继承该回调后读到的也是引擎当前状态
     而非 spawn 时快照。contextvar 隔离使并发 run 各读各的引擎，互不串扰。
 
@@ -50,7 +50,8 @@ def set_run_authorized_source(source: Callable[[], list[Path]] | None) -> None:
 def set_run_authorized_source_for(
     engine, extra_folders: tuple[str, ...] | list[str] = ()
 ) -> None:
-    """run 起点统一注入授权目录来源——bridge / cron 共用，避免各写一份降级分支。
+    """run 起点统一注入授权目录来源（bridge 与 dream 等自建 agent 的入口共用），
+    避免各写一份降级分支。
 
     有引擎：注入其 ``authorized_directories`` 方法（实时回调，子代理 / 跨步 reload 都读
     当前态）。无引擎（构造失败的降级态）：用 ``[cwd, *extra_folders]`` 的本轮快照兜底
@@ -131,6 +132,15 @@ def get_all_authorized_directories() -> list[Path]:
     return [Path.cwd().resolve()]
 
 
+def resolve_tool_path(path: str | Path) -> Path:
+    """工具路径参数的统一解析：展开 ``~``，相对路径基于当前会话项目根（主授权目录）。
+
+    ``lumi serve`` 是多项目网关、从不 chdir：按进程 cwd 解析会读到别处的同名文件，
+    且与写入侧（validate_path）指向不同文件。
+    """
+    return resolve_under_project(path, get_authorized_directory())
+
+
 def validate_path(path: str) -> Path:
     """验证路径是否在任一授权目录范围内。
 
@@ -145,7 +155,7 @@ def validate_path(path: str) -> Path:
     """
     all_dirs = get_all_authorized_directories()
     # 相对路径基于主授权目录解析（与 is_memory_path / context_inject 同口径）
-    resolved = resolve_under_project(path, all_dirs[0])
+    resolved = resolve_tool_path(path)
 
     for authorized in all_dirs:
         if resolved.is_relative_to(authorized):

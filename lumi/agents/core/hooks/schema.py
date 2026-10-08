@@ -3,8 +3,8 @@
 设计原则：
 - ``HookEvent`` 是事件名 Literal；新增事件必须同步在 graph 对应位置加
   ``dispatch_hooks`` 调用，否则注册了也永不触发。
-- ``HookContext`` 不可变，hook 只读；``payload`` 字段按 ``event`` 不同，键由
-  下面的 ``*Payload`` TypedDict 约定。运行时不强校验，IDE 补全靠它。
+- ``HookContext`` 不可变，hook 只读；``payload`` 字段按 ``event`` 不同，形状由
+  各 ``dispatch_hooks`` 调用点约定（见 ``Hook`` 的 docstring）。
 - ``HookResult = None | Command | AdditionalContext | Block``——后两者是常用
   软扩展糖，``dispatch.py`` 内部翻译成 ``Command``。Hook 写者不必手拼
   ``HumanMessage(content=[{type:text, text: <system-reminder>...}])``。

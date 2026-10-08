@@ -1,21 +1,14 @@
 import {
-  memo,
   useCallback,
   useEffect,
   useLayoutEffect,
   useMemo,
   useRef,
   useState,
-  type ReactNode,
 } from 'react'
 import {
   FileText,
-  Bot,
-  ChevronRight,
   ChevronDown,
-  Copy,
-  Check,
-  Info,
   Pencil,
   RotateCcw,
   Square,
@@ -23,7 +16,6 @@ import {
   Send,
   X,
   PanelLeft,
-  type LucideIcon,
 } from 'lucide-react'
 import {
   emptySession,
@@ -31,20 +23,11 @@ import {
   hasStreaming,
   hydrateHistory,
   reduceEvent,
+  resumeAfterReconnect,
   sessionModelPatch,
   userBubble,
   type SessionState,
 } from './sessionReducer'
-import {
-  isKnownTool,
-  argStr,
-  summarizeTools,
-  toolArgs,
-  toolIcon,
-  toolStatusKey,
-  toolTitle,
-} from './toolMeta'
-import { CARD_L1 } from './components/glass'
 import { useLatest } from './hooks/useLatest'
 import { Gateway } from './gateway'
 import type {
@@ -66,13 +49,11 @@ import type {
   SessionMeta,
   SessionModelWire,
   SlashCommand,
-  SubTool,
   ToolMode,
   Usage,
   WireEvent,
 } from './types'
 import { EMPTY_BG_OUTPUT } from './types'
-import { Markdown } from './components/Markdown'
 import { ApprovalDialog, type Decision } from './components/ApprovalDialog'
 import { ClarifyDialog, ASK_CANCELLED } from './components/ClarifyDialog'
 import { Sidebar } from './components/Sidebar'
@@ -95,13 +76,14 @@ import { FolderMenu } from './components/FolderMenu'
 import { CommandMenu } from './components/CommandMenu'
 import { Composer } from './components/Composer'
 import { AppTitleBar } from './components/AppTitleBar'
+import { StatusIndicator, ItemView } from './components/chat/ItemView'
+import { EditBubble, HoverActions, IconAction, CopyButton } from './components/chat/MessageActions'
+import { ToolGroup, type ToolItem } from './components/chat/ToolViews'
+import { AgentGroup } from './components/chat/AgentViews'
 import { toast } from './components/Toast'
 import { isCommandMode, parseCommand, matchCommands } from './slash'
-import { toolDiff, type DiffLine } from './diff'
-import { shellTokens } from './shell'
-import { asRecord, clip, basename, botOfThread, fmtDuration, fmtTokens, machineColor, machineName, msgTime, sessionKey, keyThread, keyBackend, beOf, FLOAT_GAP } from '@/lib/utils'
+import { clip, basename, botOfThread, machineColor, machineName, sessionKey, keyThread, keyBackend, beOf, FLOAT_GAP } from '@/lib/utils'
 import { Button } from '@/components/ui/button'
-import { Tooltip, TooltipContent, TooltipTrigger } from '@/components/ui/tooltip'
 import { useTheme } from './theme'
 import { useUiFont } from './font'
 import { useI18n } from './i18n'
@@ -112,7 +94,6 @@ type Attachment =
   | { id: number; kind: 'image'; dataUrl: string; name: string }
   | { id: number; kind: 'file'; path: string; name: string; blob: File }
 
-type ToolItem = Extract<Item, { kind: 'tool' }>
 type Segment =
   | { kind: 'tools'; tools: ToolItem[] }
   | { kind: 'agent'; items: ToolItem[] }
@@ -157,9 +138,6 @@ const segKey = (seg: Segment): string =>
         ? `f${seg.item.id}`
         : `i${seg.item.id}`
 
-const USER_BUBBLE = 'bg-surface rounded-3xl rounded-br-lg px-4 py-2.5 whitespace-pre-wrap'
-
-// 乐观插入的用户气泡（发送 / 编辑重发共用）。messageId 留空，等 turn.start 上锚。
 const replaceBackendTasks = (prev: BgTask[], backend: string, tasks: BgTask[]): BgTask[] => {
   const mine = prev.filter((t) => beOf(t) === backend)
   const next = tasks.map((t) => {
@@ -188,9 +166,8 @@ export default function App() {
   const workspaceDirRef = useLatest(workspaceDir)
   // null = 该机器列表尚未成功拉到（未连上 / 拉取中 / 失败）——不能渲染成「还没有项目」
   const [projects, setProjects] = useState<Project[] | null>(null)
-  // 项目视图作用的机器（方案甲「先选机器」）+ 该机器当前项目
+  // 项目视图作用的机器（方案甲「先选机器」）
   const [projectsMachine, setProjectsMachine] = useState('local')
-  const [projectsCurrent, setProjectsCurrent] = useState('')
   // 项目页是被「新建会话」阻断跳转到的（而非用户主动点「项目」标签）时，顶部提示为什么在这里
   const [needProjectHint, setNeedProjectHint] = useState(false)
   const [showNewProject, setShowNewProject] = useState(false)
@@ -267,6 +244,12 @@ export default function App() {
   const [view, setView] = useState<'chat' | 'projects' | 'project' | 'scheduled' | 'cronjob'>('chat')
   // 项目主页当前查看的项目（view='project' 时有效）
   const [projectHome, setProjectHome] = useState<{ backend: string; path: string } | null>(null)
+  // 模型菜单 / 斜杠命令 / 输入框连接态的目标：项目主页随主页（那里还没有会话），聊天页随
+  // 活动会话。各回调按 ref 判废：请求在途时目标变了，晚到的旧响应丢弃
+  const homeTarget = view === 'project' ? projectHome : null
+  const pickerBackend = homeTarget ? homeTarget.backend : activeBackend
+  const pickerRef = useLatest(pickerBackend)
+  const cmdTargetRef = useLatest(homeTarget ? `${homeTarget.backend}\0${homeTarget.path}` : active)
   // 运行中任务：机器 → 该机器正在执行的 job id。按机器分段——每台机器各发各的进程级快照
   const [cronRunning, setCronRunning] = useState<Record<string, string[]>>({})
   // 运行中的 run（含 thread_id）：机器 → 活条目。cronRunning 从这里派生，另供执行记录
@@ -340,16 +323,6 @@ export default function App() {
     localStorage.setItem('lumi-notify', v ? '1' : '0')
     if (v) void window.lumi.notify?.({ title: 'Lumi', body: t('notify.enabled') })
   }
-
-  // 通知点击：主进程已聚焦窗口，这里切到对应会话。走 activate（经 ref 取最新闭包，
-  // 本 effect 挂一次）而非裸 setActive——activate 才是清预览（setPreview(null)）、按需
-  // 重拉渠道历史的单一入口；裸 setActive 会把上个会话的预览留着，让它对着新会话的
-  // 机器重新取同路径文件（跨机内容错配，正是 activate 要守的不变量）。
-  useEffect(() => {
-    window.lumi.onNotifyClick?.((tag) => {
-      if (tag) void activateRef.current(keyThread(tag), '', keyBackend(tag) || 'local')
-    })
-  }, [])
 
   // 当前活动会话的派生视图
   const cur = store[active]
@@ -481,7 +454,9 @@ export default function App() {
       if (seenCronRef.current.size > 500) {
         seenCronRef.current.delete(seenCronRef.current.values().next().value!)
       }
-      // 未读不在此累积：重拉任务列表即带回最新 run_threads，角标随之派生（见 cronVersion effect）
+      // 未读不在此累积：重拉来源机器的任务列表即带回最新 run_threads，角标随之派生；
+      // cronVersion 驱动 CronPage 重拉执行记录
+      refreshCronJobsRef.current?.(backend)
       setCronVersion((v) => v + 1)
       const viewingThisJob =
         viewRef.current === 'cronjob' && activeCronJobRef.current === payload.job_id
@@ -490,8 +465,12 @@ export default function App() {
       if (viewingThisJob && payload.thread_id) {
         setReadRuns((r) => (r[payload.thread_id] ? r : { ...r, [payload.thread_id]: true }))
       }
-      // 正在看该任务且窗口聚焦时不打扰，其余情况按通知开关弹系统通知
-      if (notifyRef.current && (!viewingThisJob || !document.hasFocus())) {
+      // 正在看该任务且窗口聚焦时不打扰；用户自己按的停止也不报「失败」。其余按通知开关弹系统通知
+      if (
+        notifyRef.current &&
+        payload.status !== 'stopped' &&
+        (!viewingThisJob || !document.hasFocus())
+      ) {
         const t = tRef.current
         void window.lumi.notify?.({
           title: payload.status === 'success' ? t('notify.cronDone') : t('notify.cronFailed'),
@@ -575,14 +554,14 @@ export default function App() {
           // 本连接所属项目；重连得到全新 bridge 后据此切回原 thread + 重放临时目录
           let myWorkspace = ''
           let ready = false
-          // 历史是否已成功加载并应用：初次加载被瞬断打断、或快照因流式在途被
-          // hydrateHistory 丢弃时保持 false，重连 ready / 轮次收尾时补拉
+          // 本地视图是否已与后端历史对齐：初次加载被瞬断打断、重连（断开期事件已丢）、
+          // 快照取自轮次进行中时保持 false，重连 ready / 轮次收尾时补拉
           let loaded = false
           // 补拉在途标记：防抖动连接下多个 ready 并发重复 loadHistory
           let loadingHistory = false
-          // 历史快照统一落位（初次加载 / 补拉共用）：无流式在途 = hydrateHistory
-          // 会真正应用快照，此时才算加载完成——被丢弃时置 loaded 会把掉线前的
-          // 历史永久关在补拉门外
+          // 历史快照统一落位（初次加载 / 补拉共用）。仅当快照被真正应用（无流式在途）且
+          // 后端空闲（轮次进行中的快照缺在途调用的输出）时才算对齐——否则置 loaded 会把
+          // 缺失内容永久关在补拉门外
           const applySnapshot = (
             key: string,
             r: { items: HistoryItem[]; usage?: Usage; model?: string; context_window?: number },
@@ -591,8 +570,9 @@ export default function App() {
             setStore((s) => {
               const cur = s[key]
               if (!cur) return s
-              if (!hasStreaming(cur)) loaded = true
-              return { ...s, [key]: { ...hydrateHistory(cur, r), ...patch } }
+              const next = { ...hydrateHistory(cur, r), ...patch }
+              if (!hasStreaming(next) && !next.running) loaded = true
+              return { ...s, [key]: next }
             })
           }
           const backfillHistory = () => {
@@ -610,7 +590,8 @@ export default function App() {
             if (ev.type === 'gateway.ready') {
               // workspace_bound=false 时 payload.workspace 只是进程 cwd 兜底展示值，不是真
               // 绑定的项目——写进 workspaceDir 会污染侧栏项目分组等展示，未绑定就不写。
-              if (ev.payload.workspace_bound && ev.payload.workspace) {
+              // workspaceDir = 活动会话的项目：重连时后台会话的 ready 不得覆盖它
+              if (ev.payload.workspace_bound && ev.payload.workspace && myKey === activeRef.current) {
                 setWorkspaceDir(ev.payload.workspace)
               }
               if (ready) {
@@ -628,22 +609,25 @@ export default function App() {
                   for (const f of folderStoreRef.current[myKey] ?? []) {
                     void gw.addFolder(f)
                   }
-                  // 初次历史加载被瞬断打断：重连后补拉（真正应用才置 loaded，失败留给下次触发）
-                  backfillHistory()
                   // 复位运行态：断连时 sendMessage 的 catch 已 resetRunning(false)，续接后
-                  // 据后端实际运行态恢复 running（否则挂起轮被当空闲，stop 隐藏/输入栏启用）。
+                  // 据后端实际运行态恢复 running（否则挂起轮被当空闲，stop 隐藏/输入栏启用）；
+                  // 后端已空闲则收掉断开前残留的流式气泡 / 运行中工具卡。
                   setStore((s) =>
                     s[myKey]
                       ? {
                           ...s,
-                          [myKey]: {
-                            ...s[myKey],
-                            running: !!ev.payload.running,
-                            runStart: ev.payload.run_started_at ?? undefined,
-                          },
+                          [myKey]: resumeAfterReconnect(
+                            s[myKey],
+                            !!ev.payload.running,
+                            ev.payload.run_started_at ?? undefined,
+                          ),
                         }
                       : s,
                   )
+                  // 断开期间的事件已丢：以历史快照对账补回 gap 期消息（真正对齐才置
+                  // loaded，失败或轮次仍在跑时留给下次重连 / 轮次收尾）
+                  loaded = false
+                  backfillHistory()
                 }
                 return
               }
@@ -674,8 +658,6 @@ export default function App() {
                   }
                   try {
                     const r = await gw.loadHistory(targetThread)
-                    // 引擎已在 open 握手 pin 到本会话项目；同步当前项目指示
-                    if (targetWorkspace) setWorkspaceDir(targetWorkspace)
                     // 水合历史（保留续接期间已落入的审批/澄清队列与流式在途内容）；
                     // running 据后端运行态恢复（续接的挂起轮要显示运行态，否则被当空闲）。
                     applySnapshot(targetKey, r, {
@@ -695,7 +677,7 @@ export default function App() {
                 myThread = ev.session_id ?? ''
                 myKey = sessionKey(backendId, myThread)
                 myWorkspace = ev.payload.workspace || ''
-                loaded = true // 新会话无历史可拉，重连分支不做补拉覆盖
+                loaded = true // 新会话无历史可拉（重连后照常对账）
                 gw.bindThread(myThread) // 重连携带 ?thread= → 后端断连续接
                 connsRef.current[myKey] = gw
                 setStore((s) => ({ ...s, [myKey]: emptySession() }))
@@ -755,28 +737,25 @@ export default function App() {
   }, [setPinned])
 
   useEffect(() => {
-    if (conn === 'open' && !running) inputRef.current?.focus()
+    if (conn !== 'open' || running) return
+    // 别抢别处输入框的焦点：侧栏重命名 / 搜索正打字时别的会话回合结束，失焦会把半截
+    // 标题提交出去
+    const el = document.activeElement
+    if (
+      el instanceof HTMLInputElement ||
+      (el instanceof HTMLTextAreaElement && el !== inputRef.current) ||
+      (el instanceof HTMLElement && el.isContentEditable)
+    )
+      return
+    inputRef.current?.focus()
   }, [conn, running, active])
 
-  // 会话管理 / cron RPC 操作全局资源，与连接当前 thread 无关，任一活跃连接皆可。
-  // 稳定引用（useCallback []）：作为 CronPage 的 api prop，避免每次渲染触发其刷新。
-  // 全局 RPC（providers/cron/projects/bg）走本地控制连接（这些当前以本地机器为准；
-  // 远程的同类作用域属层3）。控制连接缺位时回退到任一会话连接。
-  const anyGw = useCallback(
-    () =>
-      controlConns.current['local'] ??
-      Object.values(controlConns.current)[0] ??
-      connsRef.current[activeRef.current] ??
-      Object.values(connsRef.current)[0],
-    [],
-  )
-  // 某台机器的控制连接（pin/重命名/删除等按会话所属机器路由）
-  const gwForBackend = useCallback(
-    (backend: string) => controlConns.current[backend] ?? anyGw(),
-    [anyGw],
-  )
+  // 某台机器的控制连接（pin/重命名/删除/cron/项目等按所属机器路由）。缺位（离线 / 已删）
+  // 返回 undefined，调用方 ?. 空操作——绝不回退到别的机器：同一 thread / 路径在另一台
+  // 机器上是另一回事，请求会被静默落到错的地方。
+  const gwForBackend = useCallback((backend: string) => controlConns.current[backend], [])
 
-  // 后台任务属于当前会话的 bridge，必须发到该会话的连接（不是控制连接 anyGw，
+  // 后台任务属于当前会话的 bridge，必须发到该会话的连接（不是控制连接，
   // 否则后端按控制连接的 thread_id 匹配不到，停/清都是空操作、任务还会回来）。
   // 乐观更新只作用于当前会话所在机器的任务：task_id 可能跨机重名，按 active 的 backend 圈定
   const stopBgTask = useCallback((taskId: string) => {
@@ -976,8 +955,9 @@ export default function App() {
         const gw = new Gateway(wsUrl)
         gw.onEvent((ev) => {
           if (ev.type === 'gateway.ready') {
-            void refreshSessions()
-            refreshCronJobs()
+            // 只刷这台机器：每台 ready 都全量拉一遍，N 台机器启动就是 N² 次请求
+            void refreshSessions(backend)
+            refreshCronJobs(backend)
             refreshChannels(backend)
             // 后台任务初始快照：之后的变更经 bg_tasks.update 推送。没有这一拉，
             // 无会话连接的远程机器（其任务不由本端发起）任务面板会一直空着
@@ -1056,11 +1036,18 @@ export default function App() {
         clearMachineSnapshots(id)
       }
     }
+    // 该机器的会话连接一并关掉：否则仍连着已删 / 停用的机器，闪断重连、focus 唤醒照旧
+    for (const [key, gw] of Object.entries(connsRef.current)) {
+      if (!wanted.has(keyBackend(key))) {
+        gw.close()
+        delete connsRef.current[key]
+      }
+    }
     for (const id of wanted) openControlConn(id)
     void refreshSessions()
   }, [openControlConn, refreshSessions, clearMachineSnapshots])
 
-  // 查该机器登记的默认项目路径，顺带把 projects/projectsCurrent 同步成最新——boot effect
+  // 查该机器登记的默认项目路径，顺带把 projects 同步成最新——boot effect
   // 与下方 goNewChat 共用同一份查找逻辑，避免各自倒腾一遍 listProjects。
   // 返回 null = 没查到（连接波动等），空串 = 查到了但确实没有默认项目，两者调用方处理不同
   // （前者该重试，后者不用）。声明在 boot effect 之前，纯是为了这条 useEffect 能引用它。
@@ -1070,7 +1057,6 @@ export default function App() {
         const r = await gwForBackend(backend)?.listProjects()
         if (!r) return null
         setProjects(r.projects)
-        setProjectsCurrent(r.current)
         return r.projects.find((p) => p.default)?.path ?? ''
       } catch {
         return null
@@ -1141,22 +1127,26 @@ export default function App() {
     const onChanged = (e: Event) => {
       void syncBackends()
       const id = (e as CustomEvent<{ reconnectId?: string }>).detail?.reconnectId
-      if (id) void reconnectMachine(id)
+      if (!id) return
+      void reconnectMachine(id)
+      // 会话连接同样持有旧地址 / token：换址重连，否则 1008 死在旧 token 上
+      void window.lumi.getConnection(id).then(({ wsUrl }) => {
+        for (const [key, gw] of Object.entries(connsRef.current)) {
+          if (keyBackend(key) === id) gw.rebase(wsUrl)
+        }
+      })
     }
     window.addEventListener('lumi:backends-changed', onChanged)
     return () => window.removeEventListener('lumi:backends-changed', onChanged)
   }, [syncBackends, reconnectMachine])
 
-  // 按机器拉项目（方案甲先选机器）：projects + 该机器当前项目（projectsCurrent）。
-  // 活动会话的 workspaceDir 由 activate/gateway.ready 维护，与项目视图分离。
+  // 按机器拉项目（方案甲先选机器）。「当前项目」高亮 = 活动会话的 workspaceDir
+  // （由 activate/gateway.ready 维护），不再由后端下发。
   const refreshProjects = useCallback(
     async (backend = 'local') => {
       try {
         const r = await gwForBackend(backend)?.listProjects()
-        if (r) {
-          setProjects(r.projects)
-          setProjectsCurrent(r.current)
-        }
+        if (r) setProjects(r.projects)
       } catch {
         /* 忽略：连接波动时静默 */
       }
@@ -1173,21 +1163,23 @@ export default function App() {
   // 只在回合结束（running 落回 false）和切会话时刷新：发送时刷新没有新信息
   // （首条消息尚未落 checkpoint），白白多一次全量 checkpoint 扫描。
   useEffect(() => {
-    if (active && !running) void refreshSessions()
+    if (active && !running) void refreshSessions(keyBackend(active))
   }, [active, running, refreshSessions])
 
   // 拉取斜杠命令（技能命令，按项目动态）。技能目录随项目变化，故进入命令模式时刷新。
-  // 斜杠命令来自当前会话所在机器（命令在会话连接上执行）——远程会话用远程的 skills，
-  // 否则菜单/校验是本地命令、发远程独有命令会被判非法。
+  // 聊天页取活动会话的连接（命令在会话连接上执行）；项目主页经目标机器的控制连接按项目
+  // 取——否则菜单/校验是别处的命令，发本项目独有的技能会被当普通文本。
   const loadCommands = useCallback(() => {
-    connsRef.current[activeRef.current]
-      ?.listCommands()
-      .then((r) => setCommands(r.commands ?? []))
+    const want = cmdTargetRef.current
+    const req = homeTarget
+      ? controlConns.current[homeTarget.backend]?.listCommands(homeTarget.path)
+      : connsRef.current[activeRef.current]?.listCommands()
+    req
+      ?.then((r) => {
+        if (cmdTargetRef.current === want) setCommands(r.commands ?? [])
+      })
       .catch(() => {})
-  }, [])
-
-  // 聊天侧 provider 上下文 = 活动会话所在机器的连接（ModelPicker/顶部模型跟随当前会话机器）
-  const chatGw = useCallback(() => connsRef.current[activeRef.current], [])
+  }, [homeTarget, cmdTargetRef])
 
   // provider 列表响应统一回写。active = 新会话默认，只影响之后新建的会话——顶部选择器
   // 读的是 store[key].model（本会话的），不在这里改
@@ -1206,21 +1198,32 @@ export default function App() {
     setStore((s) => (s[key] ? { ...s, [key]: { ...s[key], ...sessionModelPatch(m) } } : s))
   }, [])
 
-  const loadProviders = useCallback(() => {
-    chatGw()?.listProviders().then(applyProviderResp).catch(() => {})
-  }, [chatGw, applyProviderResp])
+  // providers 是机器级配置：走模型菜单所指机器的控制连接
+  const loadProviders = useCallback(
+    (backend: string) => {
+      controlConns.current[backend]
+        ?.listProviders()
+        .then((r) => {
+          if (pickerRef.current === backend) applyProviderResp(r)
+        })
+        .catch(() => {})
+    },
+    [applyProviderResp, pickerRef],
+  )
 
-  // 切会话即重载该机器的 providers（修了「切到远程会话仍显示本地模型」的 bug）
+  // 模型菜单换了机器、或该机器连上（首次点开未建连的远程会话时请求会落空）即重载
+  const pickerConn = machineConn[pickerBackend]
   useEffect(() => {
-    if (active) loadProviders()
-  }, [active, loadProviders])
+    if (pickerConn === 'open') loadProviders(pickerBackend)
+  }, [pickerBackend, pickerConn, loadProviders])
 
   // 档位按 (连接, 模型) 存，对所有用该模型的会话生效——按的是选择器当前指着的那个模型
   const switchEffort = (level: string, target: ActiveModel) => {
-    chatGw()
+    const backend = pickerBackend
+    gwForBackend(backend)
       ?.setEffort(target.provider, target.model, level)
       .catch((e) => console.error('set_effort 失败:', e))
-      .finally(() => loadProviders())
+      .finally(() => loadProviders(backend))
   }
 
   // 切模型：只切**本会话**（下一轮生效），别的会话与「新会话默认」都不动。
@@ -1245,12 +1248,12 @@ export default function App() {
     applySwitchModel(provider, model, activeRef.current)
   }
 
-  // 设置面板改了某机器的 provider 后回调：若改的正是当前会话机器，刷新聊天侧
+  // 设置面板改了某机器的 provider 后回调：若改的正是模型菜单所指机器，刷新之
   const onProvidersChanged = useCallback(
     (machine: string) => {
-      if (machine === (keyBackend(activeRef.current) || 'local')) loadProviders()
+      if (machine === pickerRef.current) loadProviders(machine)
     },
-    [loadProviders],
+    [loadProviders, pickerRef],
   )
 
   // 激活一个会话：无现成连接时先建立（target=null 为新会话），并同步连接指示灯。
@@ -1289,7 +1292,8 @@ export default function App() {
         )
         if (meta?.channel || !storeRef.current[key]?.items.length) reloadHistory(key, target!)
       }
-      if (workspace) setWorkspaceDir(workspace)
+      // 无项目（cron 执行会话等）写空串：别让上个会话的项目留在指示上
+      setWorkspaceDir(workspace)
       setActive(key) // activeBackend 从 active 派生，无需单独设
       // 按连接真实状态点灯：openConnection 失败路径也会 resolve（乐观切换契约），
       // 硬编码 'open' 会在连接实际已断时点亮假绿灯
@@ -1299,8 +1303,6 @@ export default function App() {
     },
     [openConnection, reloadHistory],
   )
-  // onNotifyClick 的 effect 挂一次（[] 依赖），经 ref 取最新 activate，避免捕获旧闭包
-  const activateRef = useLatest(activate)
 
   const openProjects = useCallback(() => {
     setNeedProjectHint(false) // 用户主动点「项目」标签，不是被新建会话逼过来的，不提示
@@ -1390,14 +1392,42 @@ export default function App() {
     [activate],
   )
 
-  const openScheduled = useCallback(() => setView('scheduled'), [])
+  // 通知点击：主进程已聚焦窗口，这里切到对应会话。走 selectSession 而非裸 activate：
+  // 停在定时 / 项目页时要切回聊天页，且带上该会话的项目
+  useEffect(
+    () =>
+      window.lumi.onNotifyClick?.((tag) => {
+        if (tag) void selectSession(keyThread(tag), keyBackend(tag) || 'local')
+      }),
+    [selectSession],
+  )
+
+  // 定时页按机器管理：侧栏入口落本机；项目主页跳过去落该项目所在机器，点某条任务直达
+  // 其详情，「新建任务」直接打开绑定本项目的创建表单
+  const [cronEntry, setCronEntry] = useState<{ machine: string; jobId?: string; createIn?: string }>({
+    machine: 'local',
+  })
+  const openScheduled = useCallback(() => {
+    setCronEntry({ machine: 'local' })
+    setView('scheduled')
+  }, [])
+  const openHomeScheduled = useCallback(
+    (target?: { jobId?: string; create?: boolean }) => {
+      setCronEntry({
+        machine: projectHome?.backend ?? 'local',
+        jobId: target?.jobId,
+        createIn: target?.create ? projectHome?.path : undefined,
+      })
+      setView('scheduled')
+    },
+    [projectHome],
+  )
 
   // 打开项目 = 在该机器开一条绑定到此项目的新会话（项目经 open 握手随会话绑定，
   // 不再先在共享连接上 setWorkspace 改进程态——那对新会话的独立连接无效）
   const openProject = useCallback(
     async (path: string, backend = 'local') => {
       try {
-        setProjectsCurrent(path)
         await newSession(backend, path)
       } catch {
         /* 忽略：连接波动时静默 */
@@ -1409,7 +1439,6 @@ export default function App() {
   // 项目主页：点项目卡片进入落地页（会话流 + 提示词/记忆/定时/技能/Agent 五卡）
   const openProjectHome = useCallback((path: string, backend = 'local') => {
     setProjectHome({ backend, path })
-    setProjectsCurrent(path) // 与旧「点卡片即当前项目」的高亮语义保持一致
     setView('project')
     // 输入栏在项目页与聊天页共用同一份 input/attachments：进项目页先清空，
     // 免得上个会话的草稿/附件串到「在此项目开新会话」里
@@ -1437,8 +1466,7 @@ export default function App() {
     setAttachments([])
   }, [projectHome, newSession, input, attachments, t])
 
-  // 项目主页专用 API：只认目标机器的控制连接，缺位返回 undefined——文件写操作
-  // 绝不回退到别的机器（gwForBackend 的 anyGw 兜底对注册表类操作无害，对写文件有害）。
+  // 项目主页专用 API：只认目标机器的控制连接，缺位返回 undefined（同 gwForBackend）。
   // useCallback 稳定引用：ProjectHomePage 的加载 effect 依赖它，不稳会随 App 重渲染风暴重发
   const projectHomeApi = useCallback(
     () => (projectHome ? controlConns.current[projectHome.backend] : undefined),
@@ -1479,11 +1507,13 @@ export default function App() {
     [selectSession, projectHome],
   )
   const toggleHomeCron = useCallback(
-    (id: string, enabled: boolean) =>
-      void gwForBackend(projectHome?.backend ?? 'local')
+    (id: string, enabled: boolean) => {
+      const backend = projectHome?.backend ?? 'local'
+      void gwForBackend(backend)
         ?.toggleCronJob(id, enabled)
-        .then(() => refreshCronJobs())
-        .catch(() => {}),
+        .then(() => refreshCronJobs(backend))
+        .catch(() => {})
+    },
     [gwForBackend, projectHome, refreshCronJobs],
   )
 
@@ -1555,11 +1585,6 @@ export default function App() {
     (path: string) => void applyFolderOp((gw) => gw.removeFolder(path)),
     [applyFolderOp],
   )
-
-  // 拉取任务列表：唯一数据源，侧栏分组与管理页共用（CRUD 后经 onRefresh 刷新）
-  useEffect(() => {
-    if (conn === 'open') refreshCronJobs()
-  }, [conn, cronVersion, refreshCronJobs])
 
   // 在任务会话视图内切换到某次执行的会话（不改变 view），并标记该次执行为已读。
   // 已读集合封顶 500 条（对象按插入序，砍最旧的），避免 localStorage 无限增长。
@@ -2099,8 +2124,6 @@ export default function App() {
   // 部件解耦——不显示上下文用量环（不读 cur.ctx，免后台流式 token 触发项目页重渲染）、
   // 永远显示发送键（不读活动会话 running）、隐藏文件夹菜单（会话级授权，发送前无会话可挂）。
   // 其余（斜杠命令/附件/模型选择/审批模式）与聊天页完全一致。
-  // 项目主页的模型钮指向「新会话默认」，机器/项目随主页；聊天页随活动会话
-  const pickerBackend = projectHome && view === 'project' ? projectHome.backend : activeBackend
   const composer = (placeholder: string, project = false) => (
     <div>
       {menuOpen && (
@@ -2161,7 +2184,8 @@ export default function App() {
         onChange={onComposerChange}
         onKeyDown={onComposerKey}
         onPaste={onPasteImages}
-        disabled={conn !== 'open' || observingCronRun}
+        // 项目主页看目标机器的连接（没有会话连接），聊天页看活动会话的
+        disabled={(project ? pickerConn : conn) !== 'open' || observingCronRun}
         placeholder={placeholder}
         highlightLen={cmdToken.length}
         inputRef={inputRef}
@@ -2265,7 +2289,7 @@ export default function App() {
     // defaultModel 不可省：project 模式的选择器指着「新会话默认」（那里还没有会话），
     // 漏了它就出现「切了模型 chip 纹丝不动、后端却已改」
     [
-      input, attachments, conn, model, providers, sessionModel, defaultModel, machines,
+      input, attachments, conn, pickerConn, model, providers, sessionModel, defaultModel, machines,
       activeBackend, toolMode, classifier, menuOpen, matched, cmdSel, cmdToken,
       homeProjectInfo?.name,
     ],
@@ -2337,9 +2361,10 @@ export default function App() {
         projectsActive={view === 'projects' || view === 'project'}
         scheduledActive={view === 'scheduled'}
         onSelect={selectSession}
-        onNew={() => startNewChat()}
-        onNewChat={(backend) => void goNewChat(backend)}
-        onNewChatIn={(backend, workspace) => void newSession(backend, workspace)}
+        // 直接传稳定引用：内联箭头每次渲染换身份，击穿 Sidebar 的 memo（每个流式 token 整棵重渲）
+        onNew={startNewChat}
+        onNewChat={goNewChat}
+        onNewChatIn={newSession}
         onOpenProjects={openProjects}
         onOpenScheduled={openScheduled}
         onOpenSettings={openSettings}
@@ -2409,7 +2434,7 @@ export default function App() {
         {view === 'projects' ? (
           <ProjectsPage
             projects={projects}
-            current={projectsCurrent}
+            current={projectsMachine === activeBackend ? workspaceDir : ''}
               machine={projectsMachine}
             needProjectHint={needProjectHint}
             onSelectMachine={selectProjectsMachine}
@@ -2434,12 +2459,15 @@ export default function App() {
             composerSlot={projectComposer}
             onBack={openProjects}
             onOpenSession={openHomeSession}
-            onOpenScheduled={openScheduled}
+            onOpenScheduled={openHomeScheduled}
             onToggleCron={toggleHomeCron}
           />
         ) : view === 'scheduled' ? (
           <CronPage
             api={gwForBackend}
+            initialMachine={cronEntry.machine}
+            initialJobId={cronEntry.jobId}
+            createIn={cronEntry.createIn}
               jobs={cronJobs}
             runningJobs={cronRunning}
             version={cronVersion}
@@ -2603,9 +2631,7 @@ export default function App() {
           <div style={{ width: previewW.width }} className="shrink-0 h-full py-2.5 pr-1">
             <PreviewPanel
               file={preview}
-              // 只认目标机器的连接，缺位给 undefined（面板显示加载失败）——不走
-              // gwForBackend 的 anyGw 兜底：换台机器读同路径文件会静默显示错内容
-              // （同 projectHomeApi 的理由）
+              // 只认目标机器的连接，缺位给 undefined（面板显示加载失败）
               gw={controlConns.current[activeBackend]}
               remote={remoteBackend}
               onClose={() => setPreview(null)}
@@ -2686,7 +2712,7 @@ export default function App() {
       )}
       {addingFolder && (
         <DirBrowser
-          gw={chatGw()}
+          gw={connsRef.current[active]}
           title={t('folder.chooseOn', {
             machine: machines.find((m) => m.id === activeBackend)?.name ?? activeBackend,
           })}
@@ -2724,718 +2750,3 @@ export default function App() {
     </MachinesProvider>
   )
 }
-
-// 会话底部常驻状态指示器（参考 Claude）：
-// - 运行中：光点 + 当前阶段文案 + 本轮计时；思考阶段右侧箭头点开看流式思考
-// - 中断（审批/澄清/计划）：保持显示「等待确认…」，计时继续
-// - 完成：退化为无文字的静止光点，留在最后一条消息下
-// 阶段优先级：等待确认 > 工具执行中 > 思考中 > 正文输出中 > 兜底「正在处理…」。
-function StatusIndicator({
-  items,
-  running,
-  runStart,
-  waiting,
-  streaming,
-  thinkingText,
-  compacting,
-}: {
-  items: Item[]
-  running: boolean
-  runStart?: number
-  waiting: boolean
-  streaming: boolean
-  thinkingText: string
-  compacting: boolean
-}) {
-  const { t } = useI18n()
-  const [open, setOpen] = useState(false)
-  const [now, setNow] = useState(Date.now)
-  const boxRef = useRef<HTMLPreElement>(null)
-  // 计时由本轮开始时刻推算（存在会话状态里），组件重挂载不归零；waiting 期间照走
-  useEffect(() => {
-    if (!running) return
-    setNow(Date.now())
-    const id = setInterval(() => setNow(Date.now()), 1000)
-    return () => clearInterval(id)
-  }, [running])
-  const sec = runStart ? Math.max(0, Math.floor((now - runStart) / 1000)) : 0
-  useEffect(() => {
-    if (open && boxRef.current) boxRef.current.scrollTop = boxRef.current.scrollHeight
-  }, [thinkingText, open])
-
-  if (!running) {
-    // 完成态：无文字的静止光点
-    return (
-      <div className="mt-2">
-        <span className="lumi-orb lumi-orb-idle" />
-      </div>
-    )
-  }
-
-  let runningTool: ToolItem | undefined
-  for (let i = items.length - 1; i >= 0; i--) {
-    const it = items[i]
-    // agent 工具的运行态由其专属卡片（AgentGroup）展示，底栏不再重复「正在执行子任务…」
-    if (it.kind === 'tool' && !it.done && it.name !== 'agent') {
-      runningTool = it
-      break
-    }
-  }
-  const thinking = !waiting && !runningTool && !streaming && !!thinkingText
-  const label = waiting
-    ? t('status.waiting')
-    : compacting
-      ? t('status.compacting')
-      : runningTool
-        ? t(toolStatusKey(runningTool.name))
-        : thinking
-          ? t('common.thinking')
-          : streaming
-            ? t('status.writing')
-            : t('status.working')
-
-  return (
-    <div className="mt-2">
-      <div className="flex items-center gap-2.5 text-muted-foreground text-sm">
-        <span className="lumi-orb" />
-        <span>{label}</span>
-        {sec > 0 && <span className="text-xs opacity-60">· {fmtDuration(sec)}</span>}
-        {thinking && (
-          <button
-            onClick={() => setOpen((o) => !o)}
-            className="px-1.5 text-muted-foreground hover:text-ink transition-colors"
-          >
-            <ChevronRight
-              size={13}
-              className={`transition-transform ${open ? 'rotate-90' : ''}`}
-            />
-          </button>
-        )}
-      </div>
-      {thinking && open && (
-        <pre
-          ref={boxRef}
-          className="text-xs mt-1.5 ml-6 px-3 py-2 rounded-lg bg-surface/60 border border-line/60 overflow-auto max-h-28 whitespace-pre-wrap text-muted-foreground/90 leading-relaxed"
-        >
-          {thinkingText}
-        </pre>
-      )}
-    </div>
-  )
-}
-
-// 单独组件：useI18n 会订阅 i18n context，放进 memo 的 ItemView 会让整条历史随
-// context 更新重渲染（含 ReactMarkdown 重解析），故只让这一行订阅。
-function RetryHint() {
-  const { t } = useI18n()
-  return (
-    <div className="flex items-center gap-2.5 text-muted-foreground text-sm">
-      <span className="lumi-orb lumi-orb-idle" />
-      <span>{t('status.retried')}</span>
-    </div>
-  )
-}
-
-// memo：流式期间每个 delta 都重建 items 数组，但未变更项保持对象身份，
-// memo 让历史消息（尤其 ReactMarkdown 解析）不随每个 token 重渲染。
-const ItemView = memo(function ItemView({ item }: { item: Exclude<Item, { kind: 'tool' }> }) {
-  if (item.kind === 'user') {
-    return (
-      <div className="flex flex-col items-end gap-1.5">
-        {/* 消息头：发送者 · 发送时刻。渠道消息两者都有；desktop 消息只有 ts
-            （stream_response 统一落库的到达时刻），只显示时间 */}
-        {(item.sender || item.ts) && (
-          <div className="pr-1.5 text-[10.5px] text-muted-foreground/75">
-            {item.sender}
-            {item.ts ? `${item.sender ? ' · ' : ''}${msgTime(item.ts)}` : ''}
-          </div>
-        )}
-        {item.images && item.images.length > 0 && (
-          <div className="flex flex-wrap gap-1.5 justify-end max-w-[80%]">
-            {item.images.map((src, i) => (
-              <img
-                key={i}
-                src={src}
-                alt=""
-                className="max-h-52 rounded-2xl border border-line/40 object-cover"
-              />
-            ))}
-          </div>
-        )}
-        {item.files && item.files.length > 0 && (
-          <div className="flex flex-wrap gap-1.5 justify-end max-w-[80%]">
-            {item.files.map((f, i) => (
-              <span
-                key={i}
-                title={f.path}
-                className="inline-flex items-center gap-1.5 rounded-full border px-2.5 py-1 text-xs border-primary/30 bg-primary/10 text-ink"
-              >
-                <FileText size={12} className="shrink-0 text-primary" />
-                <span className="max-w-52 truncate">{f.name}</span>
-              </span>
-            ))}
-          </div>
-        )}
-        {item.text && (
-          <div className={`selectable ${USER_BUBBLE} max-w-[80%] wrap-anywhere`}>
-            {item.text}
-          </div>
-        )}
-      </div>
-    )
-  }
-  if (item.kind === 'assistant') {
-    return (
-      <div className="md md-serif">
-        <Markdown>{item.text}</Markdown>
-      </div>
-    )
-  }
-  if (item.kind === 'retry') {
-    return <RetryHint />
-  }
-  return (
-    <div className="selectable text-sm text-error/80 bg-error/5 rounded-xl px-3.5 py-2.5">
-      {item.text}
-    </div>
-  )
-})
-
-// 用户气泡的原地编辑态：气泡原位换成可编辑框 + Cancel/Save（对齐 ChatGPT 编辑交互）。
-// Save 前零副作用——截断与重发全部发生在 onSave 回调里。Enter 保存、Esc 取消。
-function EditBubble({
-  initial,
-  onCancel,
-  onSave,
-}: {
-  initial: string
-  onCancel: () => void
-  onSave: (text: string) => void
-}) {
-  const { t } = useI18n()
-  const [text, setText] = useState(initial)
-  const ref = useRef<HTMLTextAreaElement>(null)
-  const submit = () => text.trim() && onSave(text.trim())
-  // 进入编辑即聚焦、光标置尾（高度自适应交给 .composer 的 field-sizing）
-  useEffect(() => {
-    const el = ref.current
-    if (!el) return
-    el.focus()
-    el.selectionStart = el.selectionEnd = el.value.length
-  }, [])
-  return (
-    <div className="flex flex-col items-end gap-2">
-      <textarea
-        ref={ref}
-        value={text}
-        onChange={(e) => setText(e.target.value)}
-        onKeyDown={(e) => {
-          // 输入法组合中的 Enter 是选字确认，不是提交（与 Composer 同守卫）——
-          // 编辑提交是截断历史的破坏性操作，误触代价远高于普通发送
-          if (e.nativeEvent.isComposing) return
-          if (e.key === 'Escape') onCancel()
-          else if (e.key === 'Enter' && !e.shiftKey) {
-            e.preventDefault()
-            submit()
-          }
-        }}
-        className={`composer w-full resize-none outline-none ring-1 ring-primary/60 ${USER_BUBBLE}`}
-      />
-      <div className="flex items-center gap-1.5">
-        <Tooltip>
-          <TooltipTrigger asChild>
-            <span className="mr-1 inline-flex cursor-help text-muted-foreground/70">
-              <Info size={13} />
-            </span>
-          </TooltipTrigger>
-          <TooltipContent>{t('chat.editHint')}</TooltipContent>
-        </Tooltip>
-        <Button variant="ghost" size="sm" onClick={onCancel}>
-          {t('common.cancel')}
-        </Button>
-        <Button size="sm" onClick={submit} disabled={!text.trim()}>
-          {t('common.save')}
-        </Button>
-      </div>
-    </div>
-  )
-}
-
-// 消息下方的悬停操作条：鼠标移到该段才淡入。用户气泡右对齐（贴气泡）、助手左对齐。
-function HoverActions({
-  node,
-  align,
-  children,
-}: {
-  node: ReactNode
-  align: 'start' | 'end'
-  children: ReactNode
-}) {
-  return (
-    <div className="group/act">
-      {node}
-      <div
-        className={`mt-1 flex opacity-0 group-hover/act:opacity-100 transition-opacity ${
-          align === 'end' ? 'justify-end' : '-ml-1'
-        }`}
-      >
-        {children}
-      </div>
-    </div>
-  )
-}
-
-// 操作条里的图标按钮（重新生成 / 编辑）：title 与 aria-label 同一文案，样式统一
-function IconAction({
-  icon: Icon,
-  label,
-  onClick,
-}: {
-  icon: LucideIcon
-  label: string
-  onClick: () => void
-}) {
-  return (
-    <Button
-      variant="ghost"
-      size="icon-sm"
-      onClick={onClick}
-      title={label}
-      aria-label={label}
-      className="text-muted-foreground"
-    >
-      <Icon />
-    </Button>
-  )
-}
-
-// 消息下的复制按钮：悬停出现，点击复制原文，1.5s 内显示「已复制」反馈。
-// memo：聊天流每个 delta 都重渲染，而本按钮的 props 只是一段文本——比较即可整体跳过。
-const CopyButton = memo(function CopyButton({ text }: { text: string }) {
-  const { t } = useI18n()
-  const [copied, setCopied] = useState(false)
-  const copy = () => {
-    navigator.clipboard
-      .writeText(text)
-      .then(() => {
-        setCopied(true)
-        setTimeout(() => setCopied(false), 1500)
-      })
-      .catch(() => {})
-  }
-  return (
-    <Button
-      variant="ghost"
-      size="icon-sm"
-      onClick={copy}
-      title={copied ? t('common.copied') : t('common.copy')}
-      aria-label={t('common.copy')}
-      className="text-muted-foreground"
-    >
-      {copied ? <Check className="text-success" /> : <Copy />}
-    </Button>
-  )
-})
-
-// 工具（单个或多个）统一渲染为一行自然语言摘要（参考 Claude：
-// "Edited 2 files, ran a command, read a file ›"）。无卡片、低调融入文本流，
-// 点击展开看每个工具的细节。运行中强制展开看进度，完成后默认折叠。
-// groupItems 每次产出新的数组包装，但元素身份稳定：逐元素同身份即视为未变。
-// ToolGroup / AgentGroup 的 memo 比较器共用，避免流式文本期间整组（含 diff 计算）重渲染。
-const sameItems = (a: ToolItem[], b: ToolItem[]) =>
-  a.length === b.length && a.every((x, i) => x === b[i])
-
-const ToolGroup = memo(function ToolGroup({ tools }: { tools: ToolItem[] }) {
-  const running = tools.some((t) => !t.done)
-  const hasError = tools.some((t) => t.error)
-  // override=null 时按 hasError 决定默认展开；出错的工具组默认展开但仍可手动收起
-  const [override, setOverride] = useState<boolean | null>(null)
-  const open = running || (override ?? hasError)
-  const summary = running
-    ? `${summarizeTools(tools.filter((t) => t.done)) || 'Working'}…`
-    : summarizeTools(tools)
-
-  return (
-    <div>
-      <button
-        onClick={() => setOverride((o) => !(o ?? hasError))}
-        className="flex items-center gap-1.5 text-sm text-muted-foreground hover:text-ink transition"
-      >
-        {running && <span className="text-primary animate-pulse text-[10px]">●</span>}
-        {!running && hasError && <span className="text-error text-[10px]">●</span>}
-        <span className={hasError ? 'text-error' : ''}>{summary}</span>
-        <ChevronRight
-          size={14}
-          className={`shrink-0 opacity-60 transition-transform ${open ? 'rotate-90' : ''}`}
-        />
-      </button>
-      {open && (
-        <div className="mt-1.5 ml-0.5 border-l border-line/40 pl-3 space-y-0.5">
-          {tools.map((t) => (
-            <ToolRow key={t.id} item={t} />
-          ))}
-        </div>
-      )}
-    </div>
-  )
-},
-(prev, next) => sameItems(prev.tools, next.tools))
-
-// 运行中卡片里最多同时显示的子工具行（旧的滚出，避免无限堆积撑开主流）
-const SUBAGENT_WINDOW = 3
-
-// 子代理段渲染：单个 → 滚动窗口卡片（SingleAgent）；并发多个 → 合并面板（AgentFleet）。
-const AgentGroup = memo(
-  function AgentGroup({ items }: { items: ToolItem[] }) {
-    return items.length === 1 ? <SingleAgent item={items[0]} /> : <AgentFleet items={items} />
-  },
-  (prev, next) => sameItems(prev.items, next.items),
-)
-
-// 子工具数 + token 摘要。无子工具且无 token 时返回空串——历史恢复的卡片（子代理内部
-// 活动不进 checkpoint）与刚启动尚未调工具的瞬间，都不显示误导性的「0 工具」。
-const agentStats = (children: number, tokens: number, t: ReturnType<typeof useI18n>['t']) =>
-  children || tokens
-    ? `${children} ${t('subagent.tool')}${tokens ? ` · ${fmtTokens(tokens)}` : ''}`
-    : ''
-
-// 子代理 args.name（子代理类型名，如 explorer），缺失回退到序号
-const agentName = (args: unknown, i: number): string =>
-  argStr(asRecord(args).name) || `agent ${i + 1}`
-
-// 子代理完成态的纯单行（不可展开）：静止光点 + 标签 + 详情 + 统计。单个与并发共用。
-function DoneCard({ label, detail, stats }: { label: string; detail: string; stats: string }) {
-  return (
-    <div className={`${CARD_L1} flex items-center gap-2.5 px-3 py-2`}>
-      <span className="lumi-orb lumi-orb-idle" />
-      <span className="font-medium shrink-0">{label}</span>
-      <span className="text-muted-foreground truncate flex-1">{detail}</span>
-      {stats && <span className="text-muted-foreground text-xs tabular-nums shrink-0">{stats}</span>}
-    </div>
-  )
-}
-
-// 单个子代理卡片：运行中显示头部统计 + 最近 N 个子工具的有限滚动窗口（新行推入、旧行挤出）；
-// 完成后收成纯单行（不可展开）。
-function SingleAgent({ item }: { item: ToolItem }) {
-  const { t } = useI18n()
-  const children = item.children ?? []
-  const tokens = (item.inTok ?? 0) + (item.outTok ?? 0)
-  const title = toolTitle('agent', item.args)
-  const stats = agentStats(children.length, tokens, t)
-
-  if (item.done) {
-    return <DoneCard label={t('subagent.label')} detail={title} stats={stats} />
-  }
-  return (
-    <div className={`${CARD_L1} overflow-hidden`}>
-      <div className="flex items-center gap-2.5 px-3 py-2">
-        <span className="lumi-orb" />
-        <span className="font-medium flex-1 truncate">{title}</span>
-        {stats && <span className="text-muted-foreground text-xs tabular-nums shrink-0">{stats}</span>}
-      </div>
-      {children.length > 0 && <RunningWindow children={children} />}
-    </div>
-  )
-}
-
-// 并发子代理面板：卡片头「运行 N 个子 Agent」+ 总统计；每个 agent 一行（光点 · 名称 ·
-// 当前动作 · 工具数）。全部完成后收成纯单行。
-function AgentFleet({ items }: { items: ToolItem[] }) {
-  const { t } = useI18n()
-  const allDone = items.every((it) => it.done)
-  const totalTools = items.reduce((n, it) => n + (it.children?.length ?? 0), 0)
-  const totalTok = items.reduce((n, it) => n + (it.inTok ?? 0) + (it.outTok ?? 0), 0)
-  const stats = agentStats(totalTools, totalTok, t)
-
-  if (allDone) {
-    const names = items.map((it, i) => agentName(it.args, i)).join(', ')
-    return <DoneCard label={t('subagent.agentsDone', { n: items.length })} detail={names} stats={stats} />
-  }
-  return (
-    <div className={`${CARD_L1} overflow-hidden`}>
-      <div className="flex items-center gap-2.5 px-3 py-2">
-        <span className="lumi-orb" />
-        <span className="font-medium flex-1">{t('subagent.running', { n: items.length })}</span>
-        {stats && <span className="text-muted-foreground text-xs tabular-nums shrink-0">{stats}</span>}
-      </div>
-      <div className="border-t border-line/70">
-        {items.map((it, i) => (
-          <FleetRow key={it.id} item={it} name={agentName(it.args, i)} />
-        ))}
-      </div>
-    </div>
-  )
-}
-
-// 并发面板单行：光点 + agent 名 + 当前动作（最后一个子工具，运行中金色高亮）+ 工具数。
-function FleetRow({ item, name }: { item: ToolItem; name: string }) {
-  const { t } = useI18n()
-  const children = item.children ?? []
-  const last = children[children.length - 1]
-  const running = !item.done
-  const Icon = item.done ? Check : last ? toolIcon(last.name) : Bot
-  const action = item.done
-    ? t('subagent.done')
-    : last
-      ? toolTitle(last.name, last.args)
-      : t('common.thinking')
-  return (
-    <div className="flex items-center gap-2.5 px-3 py-1.5 border-t border-line/40 first:border-t-0">
-      <span className={`subagent-dot ${running ? 'subagent-dot-run' : 'subagent-dot-done'}`} />
-      <span className="font-medium shrink-0 w-20 truncate">{name}</span>
-      <span className="flex items-center gap-1.5 text-muted-foreground text-xs flex-1 min-w-0">
-        <Icon size={13} className={`shrink-0 ${running ? 'text-primary' : 'text-success/80'}`} />
-        <span className="truncate">{action}</span>
-      </span>
-      <span className="text-muted-foreground text-[11px] tabular-nums shrink-0">
-        {children.length} {t('subagent.tool')}
-      </span>
-    </div>
-  )
-}
-
-// 运行中的有限工具窗口：只保留最近 SUBAGENT_WINDOW 行。新子工具从底部推入（subtool-enter），
-// 超出窗口的最旧行标记 leaving 向上淡出收起（subtool-leave），动画结束后真正移除。
-// seen 记录已入场过的 toolCallId，避免 leaving 行移除后又被重新加回。
-function RunningWindow({ children }: { children: SubTool[] }) {
-  const [rows, setRows] = useState<{ c: SubTool; leaving: boolean }[]>([])
-  const seen = useRef<Set<string>>(new Set())
-
-  useEffect(() => {
-    setRows((rows) => {
-      // 同步已显示行的最新状态（done/error）
-      let next = rows.map((r) => {
-        const fresh = children.find((c) => c.toolCallId === r.c.toolCallId)
-        return fresh ? { ...r, c: fresh } : r
-      })
-      // 追加首次出现的子工具
-      const added = children.filter((c) => !seen.current.has(c.toolCallId))
-      added.forEach((c) => seen.current.add(c.toolCallId))
-      next = [...next, ...added.map((c) => ({ c, leaving: false }))]
-      // 活跃行超出窗口 → 最旧的几条标记离场
-      const active = next.filter((r) => !r.leaving)
-      const overflow = active.length - SUBAGENT_WINDOW
-      if (overflow > 0) {
-        const leave = new Set(active.slice(0, overflow).map((r) => r.c.toolCallId))
-        next = next.map((r) => (leave.has(r.c.toolCallId) ? { ...r, leaving: true } : r))
-      }
-      return next
-    })
-  }, [children])
-
-  const drop = (id: string) => setRows((rows) => rows.filter((r) => r.c.toolCallId !== id))
-
-  // animationend 兜底：窗口后台化等场景下浏览器可能不派发离场动画结束事件，
-  // 每个 leaving 行额外排一个一次性定时器移除，避免隐形僵尸行永久残留。drop 幂等。
-  const scheduled = useRef<Set<string>>(new Set())
-  useEffect(() => {
-    for (const r of rows) {
-      if (r.leaving && !scheduled.current.has(r.c.toolCallId)) {
-        scheduled.current.add(r.c.toolCallId)
-        window.setTimeout(() => drop(r.c.toolCallId), 320)
-      }
-    }
-  }, [rows])
-
-  return (
-    <div className="border-t border-line/70 pl-7 pr-2.5 py-1">
-      {rows.map(({ c, leaving }) => (
-        <div
-          key={c.toolCallId}
-          className={leaving ? 'subtool-leave' : 'subtool-enter'}
-          onAnimationEnd={leaving ? () => drop(c.toolCallId) : undefined}
-        >
-          <SubToolRow child={c} />
-        </div>
-      ))}
-    </div>
-  )
-}
-
-// 子工具行：图标 + 人类可读标题。运行中（!done）金色高亮，完成绿勾，出错红色。
-function SubToolRow({ child }: { child: SubTool }) {
-  const running = !child.done
-  const Icon = child.done && !child.error ? Check : toolIcon(child.name)
-  return (
-    <div className="flex items-center gap-2.5 px-1.5 py-1 text-sm">
-      <Icon
-        size={15}
-        className={`shrink-0 ${running ? 'text-primary' : child.error ? 'text-error' : 'text-success/80'}`}
-      />
-      <span className={`truncate ${running ? 'text-ink' : child.error ? 'text-error' : 'text-muted-foreground'}`}>
-        {toolTitle(child.name, child.args)}
-      </span>
-    </div>
-  )
-}
-
-// 展开后的工具明细行。收起：图标 + 标题 + 第二行关键参数（命令着色 / 路径 / 搜索词 / 键值）
-// 与非默认选项 chip，扫一眼就知道调了什么。展开：整行合成一张卡——标题行作卡头（悬停只亮卡头），
-// 发丝线下是命令/路径（或键值表）、虚线下接输出或 diff；chip 挪到标题行，复制悬停才出现。
-// 卡边即行边，左右不留悬空的缩进与错位。出错行默认展开。
-const ToolRow = memo(function ToolRow({ item }: { item: ToolItem }) {
-  const { t } = useI18n()
-  const errored = !!item.error
-  // edit/write 展示 diff；出错时优先展示错误输出而非 diff
-  const diff = errored ? null : toolDiff(item.name, item.args)
-  const args = toolArgs(item.name, item.args, t)
-  const hasOutput = item.done && !!item.output
-  const expandable = !!args.text || !!diff || hasOutput
-  const [override, setOverride] = useState<boolean | null>(null)
-  const open = expandable && (override ?? errored)
-  // 展开体首次打开才挂载、之后常驻（收起动画要内容在）：成组展开时不为每行预渲染输出 / diff
-  const [seen, setSeen] = useState(false)
-  const Icon = toolIcon(item.name)
-  const chips = <ArgChips chips={args.chips} diff={diff} />
-  const argText = args.shell ? <ShellText cmd={args.text} /> : args.text
-  const argBlock = args.kv ? (
-    <dl className="m-0 grid grid-cols-[max-content_1fr] gap-x-3.5 gap-y-0.5 py-2 pl-3 pr-10">
-      {args.kv.map(([k, v]) => (
-        <div key={k} className="contents">
-          <dt className="text-muted-foreground">{k}</dt>
-          <dd className="m-0 min-w-0 whitespace-pre-wrap break-all text-ink">{v}</dd>
-        </div>
-      ))}
-    </dl>
-  ) : args.text ? (
-    <pre className={`m-0 whitespace-pre-wrap break-all py-2 pr-10 text-ink ${args.shell ? 'pl-[26px]' : 'pl-3'}`}>
-      {/* $ 挂在左侧留白里：多行命令的续行与首行命令对齐，而非顶格像缺字 */}
-      {args.shell && <span className="-ml-[14px] select-none text-muted-foreground">$ </span>}
-      {argText}
-    </pre>
-  ) : null
-  const body = diff ? (
-    <DiffView lines={diff} />
-  ) : !item.done ? (
-    <div className="flex items-center gap-2 px-3 py-2 font-sans text-muted-foreground">
-      <span className="lumi-orb scale-75" />
-      {t(toolStatusKey(item.name))}
-    </div>
-  ) : hasOutput ? (
-    <pre
-      className={`m-0 max-h-60 overflow-auto whitespace-pre-wrap break-all px-3 py-2 ${errored ? 'text-error/90' : 'text-muted-foreground/90'}`}
-    >
-      {item.output.slice(0, 4000)}
-      {item.output.length > 4000 && '\n' + t('common.truncated')}
-    </pre>
-  ) : null
-  return (
-    <div
-      className={`rounded-[10px] transition-[background-color,box-shadow,margin] duration-300 ${open ? 'my-1 bg-[color-mix(in_srgb,var(--color-ink)_4%,var(--color-canvas))] ring-1 ring-inset ring-line' : ''}`}
-    >
-      <button
-        onClick={() => {
-          if (!expandable) return
-          setSeen(true)
-          setOverride((o) => !(o ?? errored))
-        }}
-        className={`w-full px-2 py-1.5 flex items-start gap-2.5 text-left text-sm ${open ? 'rounded-t-[10px]' : 'rounded-lg'} ${expandable ? 'hover:bg-ink/5' : 'cursor-default'}`}
-      >
-        <Icon
-          size={15}
-          className={`mt-[3px] shrink-0 ${!item.done ? 'text-primary animate-pulse' : errored ? 'text-error' : 'text-muted-foreground'}`}
-        />
-        <span className="min-w-0 flex-1">
-          <span className="flex min-w-0 items-center gap-1.5">
-            {/* 未登记工具（MCP 等）的参数已在第二行键值里，标题用工具名免重复 */}
-            <span className={`truncate ${errored ? 'text-error' : 'text-ink/80'}`}>
-              {isKnownTool(item.name) ? toolTitle(item.name, item.args) : item.name}
-            </span>
-            {open && chips}
-          </span>
-          {args.text && (
-            <Fold open={!open}>
-              <span className="flex min-w-0 items-center gap-1.5 pt-px">
-                <span className="truncate font-mono text-xs text-ink/60">{argText}</span>
-                {chips}
-              </span>
-            </Fold>
-          )}
-        </span>
-        {expandable && (
-          <ChevronRight
-            size={13}
-            className={`mt-[4px] shrink-0 text-muted-foreground transition-transform ${open ? 'rotate-90' : ''}`}
-          />
-        )}
-      </button>
-      {expandable && (
-        <Fold open={open}>
-          {(open || seen) && (
-            <div className="group/blk relative border-t border-line/70 font-mono text-xs">
-              {args.text && (
-                <div className="absolute right-1 top-1 rounded-md bg-canvas/80 opacity-0 transition-opacity group-hover/blk:opacity-100">
-                  <CopyButton text={args.text} />
-                </div>
-              )}
-              {argBlock}
-              {argBlock && body && <div className="border-t border-dashed border-line" />}
-              {body}
-            </div>
-          )}
-        </Fold>
-      )}
-    </div>
-  )
-})
-
-// 高度平滑开合：grid-rows 0fr↔1fr（内容常驻 DOM 才有过渡；收起时 inert 免 Tab 进隐藏内容）
-function Fold({ open, children }: { open: boolean; children: ReactNode }) {
-  return (
-    <span
-      inert={!open}
-      className={`grid transition-[grid-template-rows,opacity] duration-300 ease-[cubic-bezier(0.2,0.8,0.2,1)] ${open ? 'grid-rows-[1fr]' : 'grid-rows-[0fr] opacity-0'}`}
-    >
-      <span className="block min-h-0 overflow-hidden">{children}</span>
-    </span>
-  )
-}
-
-// 参数选项 chip（超时 / 后台 / 行范围 / glob…）+ edit/write 的 +/- 行数
-function ArgChips({ chips, diff }: { chips: string[]; diff: DiffLine[] | null }) {
-  const chip = 'shrink-0 rounded-md bg-ink/[0.06] px-1.5 font-sans text-[11px] leading-[19px] whitespace-nowrap'
-  const add = diff?.filter((l) => l.kind === 'add').length
-  const del = diff?.filter((l) => l.kind === 'del').length
-  return (
-    <>
-      {chips.map((c) => (
-        <span key={c} className={`${chip} text-muted-foreground`}>
-          {c}
-        </span>
-      ))}
-      {!!add && <span className={`${chip} text-success`}>+{add}</span>}
-      {!!del && <span className={`${chip} text-error`}>−{del}</span>}
-    </>
-  )
-}
-
-function ShellText({ cmd }: { cmd: string }) {
-  return shellTokens(cmd).map((tk, i) => (
-    <span key={i} style={tk.hl ? { color: `var(--hl-${tk.hl})` } : undefined}>
-      {tk.text}
-    </span>
-  ))
-}
-
-// edit/write 的行级 diff 视图：新增行绿底、删除行红底、上下文行淡显。
-function DiffView({ lines }: { lines: DiffLine[] }) {
-  return (
-    <pre className="m-0 max-h-72 overflow-auto py-2 leading-relaxed">
-      {lines.map((l, i) => (
-        <div
-          key={i}
-          className={`px-3 ${l.kind === 'add' ? 'bg-success/10' : l.kind === 'del' ? 'bg-error/10' : ''}`}
-        >
-          <span
-            className={`select-none ${l.kind === 'add' ? 'text-success' : l.kind === 'del' ? 'text-error' : 'text-muted-foreground/40'}`}
-          >
-            {l.kind === 'add' ? '+ ' : l.kind === 'del' ? '- ' : '  '}
-          </span>
-          <span className={l.kind === 'ctx' ? 'text-muted-foreground/70' : 'text-ink/90'}>{l.text || ' '}</span>
-        </div>
-      ))}
-    </pre>
-  )
-}
-

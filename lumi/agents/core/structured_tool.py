@@ -28,7 +28,7 @@ from jsonschema import Draft202012Validator, SchemaError
 from langchain_core.messages import ToolMessage
 from langchain_core.tools import InjectedToolCallId, StructuredTool
 from langgraph.types import Command
-from pydantic import BaseModel, Field, create_model
+from pydantic import BaseModel, Field, WithJsonSchema, create_model
 
 from lumi.agents.core.meta_message import iter_current_turn
 from lumi.utils.logger import logger
@@ -208,6 +208,10 @@ def _user_schema_to_pydantic_model(
     fields: dict[str, Any] = {}
     for prop_name, prop_schema in properties.items():
         py_type = _json_type_to_python(prop_schema)
+        # 模型可见 schema 用用户的原子 schema（嵌套字段、pattern、范围约束原样呈现）；
+        # py_type 只管宽松解包。含 $ref 的不透传（引用的 $defs 不在字段内，pydantic 解析不了）
+        if isinstance(prop_schema, dict) and "$ref" not in json.dumps(prop_schema):
+            py_type = Annotated[py_type, WithJsonSchema(prop_schema)]
         description = (
             prop_schema.get("description", "") if isinstance(prop_schema, dict) else ""
         )
@@ -224,11 +228,7 @@ def _user_schema_to_pydantic_model(
     # 使其在模型可见 schema 中消失而永远无法满足 required 校验（陷入连续失败）。
     fields[tcid_key] = (Annotated[str, InjectedToolCallId], "")
 
-    model = create_model(user_schema.get("title") or name, **fields)
-    model.__doc__ = user_schema.get("description") or (
-        "Output the final structured result for the user's task."
-    )
-    return model
+    return create_model(user_schema.get("title") or name, **fields)
 
 
 # === 真工具构造 ===
@@ -321,6 +321,8 @@ def _build_structured_output_tool(user_schema: dict[str, Any]) -> StructuredTool
         "Use this tool to output the final structured result. Fill the structured "
         "fields directly. Call exactly once when you have completed the task."
     )
+    if user_schema.get("description"):
+        tool_description += f"\n\n{user_schema['description']}"
 
     return StructuredTool.from_function(
         coroutine=_structured_output_call,

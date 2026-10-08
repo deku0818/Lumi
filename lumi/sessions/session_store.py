@@ -167,11 +167,36 @@ async def _get_thread_ids(
     return pairs
 
 
+async def _load_summaries(
+    graph: CompiledStateGraph, pairs: list[tuple[str, str]]
+) -> list[SessionSummary]:
+    """按 pairs 顺序加载会话摘要：缓存命中（checkpoint_id 未变）直接复用，跳过完整
+    反序列化——删除/置顶/重命名后的刷新几乎全部命中，是侧栏卡顿的主要来源。"""
+    miss = [(tid, cid) for tid, cid in pairs if _cache_get(tid, cid) is None]
+    if miss:
+        snapshots = await asyncio.gather(
+            *(
+                graph.aget_state({"configurable": {"thread_id": tid}})
+                for tid, _ in miss
+            ),
+            return_exceptions=True,
+        )
+        for (tid, cid), snapshot in zip(miss, snapshots):
+            if isinstance(snapshot, BaseException):
+                logger.warning("获取会话 %s 状态失败: %s", tid, snapshot)
+                continue
+            summary = _summary_from_snapshot(tid, snapshot)
+            if summary is not None:
+                _summary_cache[tid] = (cid, summary)
+    return [s for tid, cid in pairs if (s := _cache_get(tid, cid)) is not None]
+
+
 async def list_sessions(
     graph: CompiledStateGraph,
     *,
     workspace: str = "",
     limit: int = 50,
+    include: frozenset[str] = frozenset(),
 ) -> list[SessionSummary]:
     """查询所有历史会话摘要
 
@@ -181,10 +206,11 @@ async def list_sessions(
     Args:
         graph: 已编译的 LangGraph 状态图（需要带 checkpointer）
         workspace: 按工作目录过滤，空字符串表示不过滤
-        limit: 最大返回数量
+        limit: 最近活跃会话的最大返回数量
+        include: 不受 limit 截断、始终返回的 thread（置顶会话），追加在末尾
 
     Returns:
-        按 created_at 降序排列的会话摘要列表
+        最近 limit 条按 created_at 降序，其后是落在其外的 include 会话
     """
     if graph.checkpointer is None:
         return []
@@ -199,38 +225,18 @@ async def list_sessions(
 
     # 分批并发加载 state：串行 aget_state 在会话多时是侧栏刷新的延迟瓶颈；
     # 分批（而非全量 gather）保留 limit 早停，不为远超 limit 的旧会话买单。
-    # 缓存命中（checkpoint_id 未变）的会话直接复用，跳过完整反序列化——
-    # 删除/置顶/重命名后的刷新几乎全部命中，是侧栏卡顿的主要来源。
     sessions: list[SessionSummary] = []
     batch_size = 25
     for i in range(0, len(candidates), batch_size):
-        batch = candidates[i : i + batch_size]
-        miss = [(tid, cid) for tid, cid in batch if _cache_get(tid, cid) is None]
-        if miss:
-            snapshots = await asyncio.gather(
-                *(
-                    graph.aget_state({"configurable": {"thread_id": tid}})
-                    for tid, _ in miss
-                ),
-                return_exceptions=True,
-            )
-            for (tid, cid), snapshot in zip(miss, snapshots):
-                if isinstance(snapshot, BaseException):
-                    logger.warning("获取会话 %s 状态失败: %s", tid, snapshot)
-                    continue
-                summary = _summary_from_snapshot(tid, snapshot)
-                if summary is not None:
-                    _summary_cache[tid] = (cid, summary)
+        sessions += await _load_summaries(graph, candidates[i : i + batch_size])
+        if len(sessions) >= limit:
+            sessions = sessions[:limit]
+            break
 
-        for tid, cid in batch:
-            cached = _cache_get(tid, cid)
-            if cached is None:
-                continue
-            sessions.append(cached)
-            if len(sessions) >= limit:
-                return sessions
-
-    return sessions
+    # include（置顶）不受 limit 截断：补上落在最近 limit 条之外的
+    loaded = {s.thread_id for s in sessions}
+    extra = [(t, c) for t, c in candidates if t in include and t not in loaded]
+    return sessions + await _load_summaries(graph, extra)
 
 
 # thread_id -> (checkpoint_id, summary)。按 checkpoint_id 失效：

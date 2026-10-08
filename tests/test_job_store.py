@@ -236,11 +236,3 @@ class TestJobStoreOnChange:
     async def test_no_callback_is_safe(self, tmp_path: Path) -> None:
         store = JobStore(tmp_path / "jobs.json")
         await store.upsert(_make_job())  # 未设 on_change 也不报错
-
-    async def test_upsert_notify_false_suppresses(self, tmp_path: Path) -> None:
-        # 内部记账（consecutive_errors 持久化）传 notify=False，不触发前端刷新
-        store = JobStore(tmp_path / "jobs.json")
-        calls = []
-        store.set_on_change(lambda: calls.append(1))
-        await store.upsert(_make_job(), notify=False)
-        assert calls == []

@@ -16,8 +16,7 @@
 - **无 checkpointer**：子 Agent 不持久化状态，节省开销
 - **动态加载**：`agent` 工具描述/schema 静态，可用代理列表经 `<system-reminder>` 注入（与 skill 同款机制，见 `preprocessing/change_detector.py`），随 `.lumi/agents` 热更新；注入门控以「工具集是否含 `agent`」为准
 - **多层委派**：子 Agent 可继续委派下层子 Agent，深度由 `agents.max_delegation_depth` 限制（默认 3，主 Agent 为第 0 层，每委派 +1）；达上限的子 Agent 工具集中剔除 `agent` 工具、不能再往下委派（`0` = 禁止委派）。`depth` 经 `LumiAgentState` 逐层 +1 传播
-- **权限继承**：复用父级 `PermissionEngine`，`tool_mode` 从父 context 继承（`context.tool_mode`，随父运行中的实时切换传播）
-- **模式策略**：readonly 模式下，子 Agent 创建时通过 `filter_tools_for_mode()` 静态过滤工具列表
+- **权限继承**：复用父级 `PermissionEngine`；前台子代理经 `mode_parent` 读写会话根 context 的 `tool_mode`（父会话运行中切换即时生效），后台子代理固定 `auto`、无审批通道
 
 ## 模块
 
@@ -25,7 +24,7 @@
 |---|---|---|
 | 工具实现 | `lumi/agents/tools/providers/agent.py` | Agent 工具核心逻辑：委派深度网关、创建子 LumiAgent |
 | Agent 加载 | `lumi/agents/tools/loader.py` | 扫描解析 `.lumi/agents` 与风格内置 Agent 配置（`load_agents`） |
-| 变更检测 / 注入 | `lumi/agents/core/preprocessing/{agent_detector,agents}.py` | 检测 `.lumi/agents` 变更，把可用列表注入 `<system-reminder>` |
+| 变更检测 / 注入 | `lumi/agents/core/preprocessing/{agent_detector,context_inject}.py` | 检测 `.lumi/agents` 变更，把可用列表注入 `<system-reminder>` |
 
 ## 前端集成
 

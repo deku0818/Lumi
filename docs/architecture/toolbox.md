@@ -49,9 +49,9 @@ Agent 任务工具链的探测与安装。实现在 `lumi/gateway/toolbox.py`（
 
 ## PATH 注入（单点）
 
-`inject_path()` 把 `<配置目录>/bin` 追加到进程 `os.environ["PATH"]` **末尾**——bash 工具、`minutes.py` subprocess、MCP stdio 子进程全部自动继承；末尾追加保证系统同名版本优先，无影子冲突。调用点只有两处：`lumi serve` 与 headless 运行（`lumi/cli.py`）。
+`inject_path()` 把 `<配置目录>/bin` 追加到进程 `os.environ["PATH"]` **末尾**——bash 工具、`minutes.py` subprocess、MCP stdio 子进程全部自动继承；末尾追加保证系统同名版本优先，无影子冲突。调用点只有一处：CLI 根回调（`lumi/cli.py` 的 `_default`），`serve`、`-p` 与 `env` / `feishu` 等所有子命令都在同一份 PATH 下运行。
 
-用户终端场景（如 `lark-cli auth login` 扫码）由体检 `fix_cmd` 给绝对路径 `~/.lumi/bin/lark-cli auth login`，粘贴即跑，不改 shell rc。
+用户终端场景（如 `lark-cli auth login` 扫码）由体检 `fix_cmd` 经 `toolbox.terminal_cmd` 生成：工具只装在工具箱时，POSIX 给 `PATH="$PATH:~/.lumi/bin" lark-cli auth login`（lark-cli / npm 是 `#!/usr/bin/env node` 脚本，只给绝对路径仍找不到 node），Windows 给 `.cmd` shim 的绝对路径；系统已有则原样。粘贴即跑，不改 shell rc。
 
 ## 命令行入口与 agent 自助安装
 

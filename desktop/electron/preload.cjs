@@ -30,10 +30,11 @@ contextBridge.exposeInMainWorld('lumi', {
     save: (b) => ipcRenderer.invoke('lumi:backends:save', b),
     remove: (id) => ipcRenderer.invoke('lumi:backends:remove', id),
   },
-  // artifacts 预览：用系统应用打开 / 在访达中显示 / 探测文件是否还在
+  // artifacts 预览：用系统应用打开 / 在访达中显示 / 探测文件是否还在 / 读本地文本
   openPath: (p) => ipcRenderer.invoke('lumi:open-path', p),
   revealInFolder: (p) => ipcRenderer.invoke('lumi:reveal-path', p),
   pathExists: (p) => ipcRenderer.invoke('lumi:path-exists', p),
+  readText: (p) => ipcRenderer.invoke('lumi:read-text', p),
   // Electron 33 起拿文件绝对路径的唯一途径（File.path 已移除）；拿不到返回空串
   getPathForFile: (file) => {
     try {
@@ -56,5 +57,9 @@ contextBridge.exposeInMainWorld('lumi', {
   // 系统通知经主进程发（renderer 的 HTML5 Notification 在 macOS dev 下不可靠），
   // 点击时主进程自行聚焦窗口并回传 tag
   notify: (payload) => ipcRenderer.invoke('lumi:notify', payload),
-  onNotifyClick: (cb) => ipcRenderer.on('lumi:notify-click', (_e, tag) => cb(tag)),
+  onNotifyClick: (cb) => {
+    const handler = (_e, tag) => cb(tag)
+    ipcRenderer.on('lumi:notify-click', handler)
+    return () => ipcRenderer.removeListener('lumi:notify-click', handler)
+  },
 })

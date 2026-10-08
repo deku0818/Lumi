@@ -15,12 +15,11 @@ from __future__ import annotations
 import asyncio
 import importlib.util
 import json
-import os
 import threading
 from contextlib import suppress
 from typing import Any
 
-from lumi.gateway.channels.config import FeishuChannelConfig
+from lumi.gateway.channels.config import FeishuChannelConfig, resolve_ref
 from lumi.gateway.channels.feishu.bridge_pool import BridgePool
 from lumi.gateway.channels.feishu.daily_dream import daily_dream_loop
 from lumi.gateway.channels.feishu.directory import FeishuDirectory
@@ -32,6 +31,7 @@ from lumi.gateway.channels.feishu.streaming import FeishuStreaming, card_json, g
 from lumi.utils.logger import logger
 
 FEISHU_AVAILABLE = importlib.util.find_spec("lark_oapi") is not None
+_BOT_ID_RETRY_S = 10.0  # bot_open_id 取不到时的重试间隔
 
 
 def _markdown_card(
@@ -127,8 +127,8 @@ class FeishuChannel:
             logger.error(self._error)
             return
 
-        app_id = os.path.expandvars(self.config.app_id)
-        app_secret = os.path.expandvars(self.config.app_secret)
+        app_id = resolve_ref(self.config.app_id)
+        app_secret = resolve_ref(self.config.app_secret)
         if not app_id or not app_secret:
             self._error = "缺少 app_id / app_secret"
             logger.error("Feishu channel %s", self._error)
@@ -165,12 +165,6 @@ class FeishuChannel:
                 target=self._run_ws_in_thread, name="feishu-ws", daemon=True
             )
             self._ws_thread.start()
-            # 拉机器人自身 open_id 用于群 @mention 识别（best-effort）
-            self._bot_open_id = await self._loop.run_in_executor(
-                None, self._fetch_bot_open_id
-            )
-            if self._bot_open_id:
-                logger.info(f"Feishu bot open_id: {self._bot_open_id}")
             # 妙记订阅自愈：best-effort 且无人读结果，故不 await——它是子进程 + 网络
             # 调用（最坏 20s 超时），阻塞会连带推迟 notification_loop 起跑，而事件此刻
             # 已可能在进队。失败只记日志：IM 收发不依赖订阅，只是妙记纪要不可用。
@@ -191,7 +185,18 @@ class FeishuChannel:
             return
 
         logger.info("Feishu channel 已通过 WebSocket 长连接启动（无需公网）")
+        # 机器人自身 open_id（群 @mention 识别 + 状态灯）在常驻循环里取、取不到每
+        # _BOT_ID_RETRY_S 秒重试：只在启动时取一次的话，那一刻断网就永久是 None——
+        # 网络恢复后状态灯仍卡「连接中」、群里 @ 机器人的消息全被丢
+        retry_at = 0.0
         while self._running:
+            if not self._bot_open_id and self._loop.time() >= retry_at:
+                self._bot_open_id = await self._loop.run_in_executor(
+                    None, self._fetch_bot_open_id
+                )
+                retry_at = self._loop.time() + _BOT_ID_RETRY_S
+                if self._bot_open_id:
+                    logger.info(f"Feishu bot open_id: {self._bot_open_id}")
             await asyncio.sleep(1)
 
     def _build_event_handler(self, lark: Any) -> Any:
@@ -307,7 +312,15 @@ class FeishuChannel:
             asyncio.run_coroutine_threadsafe(self.inbound.on_message(data), self._loop)
 
     async def _ensure_subscription(self) -> None:
-        """后台重建妙记事件订阅并把结果落进日志（失效是静默的，日志是唯一线索）。"""
+        """后台重建妙记事件订阅并把结果落进日志（失效是静默的，日志是唯一线索）。
+
+        无专属 profile 不订阅：lark-cli 会落到全局 active profile，订阅记在别的身份名下。
+        """
+        if not self.config.cli_profile:
+            logger.warning(
+                "妙记事件订阅跳过：机器人未同步 lark-cli 身份（保存机器人即可同步）"
+            )
+            return
         error = await asyncio.get_running_loop().run_in_executor(
             None, ensure_subscription, self.config.cli_profile
         )

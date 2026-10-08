@@ -213,3 +213,76 @@ class TestOtherTools:
     def test_todos_tool_is_safe(self):
         immune, _ = is_bypass_immune("todos", {"todos": []})
         assert immune is False
+
+
+class TestNormalizedProtection:
+    """回归：保护名单曾只按字面路径匹配——相对路径、`..`、$HOME 写法与 hooks / MCP
+    等会自动执行命令的配置都不受保护"""
+
+    import pytest
+
+    @pytest.fixture(autouse=True)
+    def _project(self, tmp_path):
+        from lumi.agents.permissions.workspace import set_run_authorized_source
+
+        self.project = tmp_path
+        set_run_authorized_source(lambda: [tmp_path])
+        yield
+        set_run_authorized_source(None)
+
+    @pytest.mark.parametrize(
+        "file_path",
+        [
+            ".lumi/permissions.local.json",
+            "sub/../.lumi/permissions.json",
+            "~/x/../.ssh/authorized_keys",
+            ".lumi/hooks.json",
+            ".lumi/hooks.local.json",
+            ".lumi/mcp_server.json",
+            "~/.lumi/config.json",
+            ".git/hooks/pre-commit",
+        ],
+    )
+    def test_file_tool_protected(self, file_path):
+        assert is_bypass_immune("write", {"file_path": file_path})[0], file_path
+
+    def test_symlink_to_protected_file(self):
+        link = self.project / "notes"
+        link.symlink_to(Path.home() / ".bashrc")
+        assert is_bypass_immune("write", {"file_path": "notes"})[0]
+
+    def test_protected_file_that_is_a_symlink(self, tmp_path_factory):
+        (self.project / ".lumi").mkdir()
+        elsewhere = tmp_path_factory.mktemp("elsewhere") / "rules.json"
+        (self.project / ".lumi" / "permissions.json").symlink_to(elsewhere)
+        assert is_bypass_immune("edit", {"file_path": ".lumi/permissions.json"})[0]
+
+    @pytest.mark.parametrize(
+        "command",
+        [
+            "echo x > $HOME/.bashrc",
+            "echo x >> ${HOME}/.zshrc",
+            "echo x > ~/x/../.bashrc",
+            "echo '{}' > .lumi/hooks.json",
+            "cp evil.json .lumi/mcp_server.json",
+            "rm .lumi/permissions.json",
+            "ls && echo x | tee .git/hooks/post-checkout",
+        ],
+    )
+    def test_bash_protected(self, command):
+        assert is_bypass_immune("bash", {"command": command})[0], command
+
+    @pytest.mark.parametrize(
+        "command",
+        [
+            "cat .lumi/permissions.json",
+            "cp .lumi/permissions.json backup.json",
+            "echo x > notes.txt",
+        ],
+    )
+    def test_bash_reads_not_protected(self, command):
+        assert not is_bypass_immune("bash", {"command": command})[0], command
+
+
+def test_cd_into_protected_dir_is_not_a_write():
+    assert not is_bypass_immune("bash", {"command": "cd ~/.ssh && ls"})[0]

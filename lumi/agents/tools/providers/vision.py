@@ -21,6 +21,7 @@ from langchain_core.messages import HumanMessage
 from langchain_core.tools import tool
 from pydantic import Field
 
+from lumi.agents.permissions.workspace import resolve_tool_path
 from lumi.agents.tools.providers.filesystem.media import (
     PDF_INLINE_PAGE_THRESHOLD,
     PDF_MAGIC,
@@ -111,7 +112,7 @@ async def _load_blocks(file_path: str) -> list[dict]:
             return await _pdf_blocks_from_raw(raw, file_path)
         return await _image_blocks_from_raw(raw)
 
-    path = Path(file_path).expanduser().resolve()
+    path = resolve_tool_path(file_path)
     if not path.exists():
         raise MediaReadError(f"文件不存在: {file_path}")
     ext = path.suffix.lower()
@@ -142,7 +143,8 @@ async def vision(
     调用本工具。传入文件的本地路径或 http(s) URL，以及你想了解的具体问题，工具会用视觉辅助
     模型给出文字答案。同一文件可带不同问题多次调用以获取更细节的信息。
     """
-    from lumi.agents.core.response import extract_ainvoke_content, message_transform
+    from lumi.agents.core.meta_message import extract_text_content
+    from lumi.agents.core.response import message_transform
     from lumi.models import provider_store
     from lumi.models.manager import create_llm
 
@@ -181,7 +183,7 @@ async def vision(
             exc_info=True,
         )
         return f"错误: 视觉模型 {resolved.model} 识别失败: {e}"
-    return extract_ainvoke_content(resp.content) or "（视觉模型未返回可读文本）"
+    return extract_text_content(resp.content) or "（视觉模型未返回可读文本）"
 
 
 async def get_vision_tools(names: list[str] | None = None) -> list:

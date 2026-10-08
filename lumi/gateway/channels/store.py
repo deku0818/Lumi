@@ -14,11 +14,10 @@
 from __future__ import annotations
 
 import functools
-import os
 import uuid
 from pathlib import Path
 
-from lumi.gateway.channels.config import FeishuChannelConfig
+from lumi.gateway.channels.config import FeishuChannelConfig, resolve_ref
 from lumi.utils.config import user_store
 from lumi.utils.hashing import short_hash
 from lumi.utils.logger import logger
@@ -75,8 +74,13 @@ def same_app(a: str, b: str) -> bool:
 
     公开供 ``lark_profile.save_bot_synced`` 判「app 未变可跳过同步」——判据只此一份。
     """
-    ea, eb = os.path.expandvars(a), os.path.expandvars(b)
+    ea, eb = resolve_ref(a), resolve_ref(b)
     return bool(ea) and ea == eb
+
+
+def _norm_workspace(ws: str) -> str:
+    """项目路径规范化：展开 ``~``、去尾斜杠。不 resolve——保持与前端路径字符串一致。"""
+    return str(Path(ws).expanduser()) if ws else ""
 
 
 def validate_feishu_bot(config: dict) -> FeishuChannelConfig:
@@ -96,8 +100,12 @@ def validate_feishu_bot(config: dict) -> FeishuChannelConfig:
     **之前**把校验错误挡下来，免得为一条存不进去的配置先建出个孤儿 profile。
     """
     validated = FeishuChannelConfig.model_validate(config)
-    if not validated.id:
-        validated = validated.model_copy(update={"id": uuid.uuid4().hex[:8]})
+    validated = validated.model_copy(
+        update={
+            "id": validated.id or uuid.uuid4().hex[:8],
+            "workspace": _norm_workspace(validated.workspace),
+        }
+    )
     if validated.enabled and not validated.workspace:
         raise ValueError(
             "启用飞书机器人前必须绑定项目（设置 → 渠道 → 该机器人 → 绑定项目）"
@@ -109,7 +117,10 @@ def validate_feishu_bot(config: dict) -> FeishuChannelConfig:
             FeishuChannelConfig.model_validate(b)
         except Exception:
             continue
-        if validated.workspace and b.get("workspace") == validated.workspace:
+        # 两侧都规范化：``~/p``、尾斜杠与绝对路径是同一项目，写法差异不能绕过 1:1
+        if validated.workspace and (
+            _norm_workspace(b.get("workspace") or "") == validated.workspace
+        ):
             raise ValueError(
                 f"该项目已被机器人「{b.get('name') or b.get('id')}」绑定，一个项目只能配一个机器人"
             )
@@ -166,7 +177,7 @@ def _workspace_profiles(path: str, mtime_ns: int) -> tuple[tuple[Path, str], ...
     每次 spawn 都要查，不该次次读盘 + 全量 pydantic 校验。键含路径防测试等场景
     换文件后 mtime 撞值。深路径在前：嵌套项目取最近的机器人。"""
     pairs = [
-        (Path(b.workspace).resolve(), b.cli_profile)
+        (Path(b.workspace).expanduser().resolve(), b.cli_profile)  # 老条目可能存 ~
         for b in load_feishu_bots()
         if b.cli_profile and b.workspace
     ]

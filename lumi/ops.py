@@ -11,6 +11,7 @@ from __future__ import annotations
 
 import asyncio
 import json
+import os
 import secrets
 import shutil
 import subprocess
@@ -29,8 +30,12 @@ PROBE_TIMEOUT = 10.0
 # ── 自更新 ────────────────────────────────────────────────────────────────
 
 
+_DOCKERENV = Path("/.dockerenv")
+
+
 def install_kind() -> str:
-    """本进程这个 lumi 是怎么装的：``uv-tool`` | ``pipx`` | ``pip`` | ``source`` | ``frozen``。
+    """本进程这个 lumi 是怎么装的：``uv-tool`` | ``pipx`` | ``pip`` | ``source`` |
+    ``docker`` | ``frozen``。
 
     看 ``sys.prefix`` 下安装器自己留的落款，而不是匹配 ``~/.local/share/uv/tools``
     这类路径——工具目录可被 ``UV_TOOL_DIR`` / ``PIPX_HOME`` 改道，路径匹配会漏判，
@@ -44,7 +49,8 @@ def install_kind() -> str:
     if (root / "pipx_metadata.json").exists():
         return "pipx"
     if _editable():
-        return "source"
+        # 官方镜像用 uv sync 装（可编辑安装），不是源码开发树
+        return "docker" if _DOCKERENV.exists() else "source"
     return "pip"
 
 
@@ -74,10 +80,15 @@ def upgrade_command(kind: str, target: str) -> list[str]:
 
 
 def _uv_path() -> str:
-    """uv 可执行文件：系统 PATH 优先，回落 Lumi 工具箱（与 env 命令同一套解析）。"""
+    """uv 可执行文件：系统 PATH 优先，回落 Lumi 工具箱（与 env 命令同一套解析），再回落
+    lumi 自己所在的目录（install.sh 把 uv 与 lumi 装进同一 bin；sudo 精简 PATH 时靠它）。"""
     from lumi.gateway.toolbox import locate
 
-    found = shutil.which("uv") or locate("uv").path
+    found = (
+        shutil.which("uv")
+        or locate("uv").path
+        or shutil.which("uv", path=os.path.dirname(sys.argv[0]))
+    )
     if not found:
         raise RuntimeError("找不到 uv——这个 lumi 是 uv tool 装的，升级也得由它来做")
     return found
@@ -179,14 +190,14 @@ async def _probe(url: str) -> tuple[str, str]:
 
 
 def log_file() -> Path:
-    """服务与 agent 的运行日志，与 utils/logger.py 同一份。"""
-    from lumi.utils.paths import lumi_home
+    """服务与 agent 的运行日志（utils/logger.py 写的那一份）。"""
+    from lumi.utils.logger import LOG_FILE
 
-    return lumi_home() / "logs" / "Lumi.log"
+    return LOG_FILE
 
 
 def tail(path: Path, lines: int) -> list[str]:
-    """末尾 N 行。只读文件尾部——这份日志没有轮转，整读会把几百 MB 拉进内存。"""
+    """末尾 N 行。只读文件尾部（轮转上限 10MB，整读也没必要）。"""
     with path.open("rb") as handle:
         size = handle.seek(0, 2)
         handle.seek(max(0, size - 256 * 1024))
@@ -195,19 +206,33 @@ def tail(path: Path, lines: int) -> list[str]:
 
 
 def follow(path: Path) -> Iterator[str]:
-    """从文件末尾起持续吐新行，直到调用方中断。"""
-    with path.open("rb") as handle:
-        handle.seek(0, 2)
-        buffer = b""
+    """从文件末尾起持续吐新行，直到调用方中断。
+
+    日志会轮转：读到末尾时若路径已指向另一个文件（inode 变了），换开新文件从头读。
+    """
+    handle = path.open("rb")
+    handle.seek(0, 2)
+    buffer = b""
+    try:
         while True:
             chunk = handle.read(65536)
-            if not chunk:
-                sleep(0.5)
+            if chunk:
+                buffer += chunk
+                *ready, buffer = buffer.split(b"\n")
+                for line in ready:
+                    yield line.decode("utf-8", "replace")
                 continue
-            buffer += chunk
-            *ready, buffer = buffer.split(b"\n")
-            for line in ready:
-                yield line.decode("utf-8", "replace")
+            try:
+                rotated = path.stat().st_ino != os.fstat(handle.fileno()).st_ino
+            except FileNotFoundError:
+                rotated = False  # 轮转的 rename 与新建之间的空窗
+            if rotated:
+                handle.close()
+                handle = path.open("rb")
+                continue
+            sleep(0.5)
+    finally:
+        handle.close()
 
 
 def run(cmd: list[str]) -> int:

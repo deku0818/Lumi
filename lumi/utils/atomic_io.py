@@ -9,7 +9,10 @@ from __future__ import annotations
 import json
 import os
 import tempfile
+import time
 from pathlib import Path
+
+from lumi.utils.logger import logger
 
 
 def atomic_write_text(path: Path, content: str, mode: int | None = None) -> None:
@@ -35,3 +38,24 @@ def atomic_write_text(path: Path, content: str, mode: int | None = None) -> None
 def atomic_write_json(path: Path, data: object, mode: int | None = None) -> None:
     """原子写入 JSON 文件（基于 :func:`atomic_write_text`）。"""
     atomic_write_text(path, json.dumps(data, ensure_ascii=False, indent=2), mode)
+
+
+def read_json_object_for_update(path: Path) -> dict:
+    """读-改-写之前的读：缺失为空；损坏（非 JSON / 顶层不是对象）时把原文件改名为
+    ``<name>.corrupt-<时间>`` 留档后返回空。
+
+    既不拿空 dict 覆盖抹掉原内容（里面可能是全部密钥），也不让一份坏文件卡死后续
+    所有写入（非技术用户没法手修 JSON）。
+    """
+    try:
+        data = json.loads(path.read_text(encoding="utf-8"))
+    except FileNotFoundError:
+        return {}
+    except ValueError:  # JSONDecodeError / UnicodeDecodeError
+        data = None
+    if isinstance(data, dict):
+        return data
+    backup = path.with_name(f"{path.name}.corrupt-{time.strftime('%Y%m%d-%H%M%S')}")
+    path.replace(backup)
+    logger.error("%s 已损坏，原文件已移到 %s，本次写入从空开始", path, backup)
+    return {}

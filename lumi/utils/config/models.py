@@ -164,26 +164,6 @@ class LlmParamsConfig(BaseModel):
         return cfg.to_dict()
 
 
-class SkillExecutionConfig(BaseModel):
-    """技能命令执行配置类
-
-    用于配置技能中嵌入式命令的执行行为。
-    技能可以使用 !`command` 语法执行命令并将输出渲染到提示词中。
-    """
-
-    enabled: bool = Field(default=True, description="是否启用技能命令执行")
-    command_timeout: float = Field(default=10.0, description="命令执行超时时间(秒)")
-    max_output_bytes: int = Field(default=10_000, description="命令输出最大字节数")
-
-
-class FilesystemConfig(BaseModel):
-    """文件系统工具配置"""
-
-    grep_max_file_size_mb: int = Field(
-        default=10, description="grep 搜索时跳过的最大文件大小(MB)"
-    )
-
-
 class AutoDreamConfig(BaseModel):
     """后台 Dream（离线记忆综合）配置
 
@@ -236,12 +216,6 @@ class Config(BaseModel):
     )
     llm_params: LlmParamsConfig = Field(
         default_factory=LlmParamsConfig, description="LLM参数配置"
-    )
-    skill_execution: SkillExecutionConfig = Field(
-        default_factory=SkillExecutionConfig, description="技能命令执行配置"
-    )
-    filesystem: FilesystemConfig = Field(
-        default_factory=FilesystemConfig, description="文件系统工具配置"
     )
     auto_dream: AutoDreamConfig = Field(
         default_factory=AutoDreamConfig, description="后台 Dream（离线记忆综合）配置"

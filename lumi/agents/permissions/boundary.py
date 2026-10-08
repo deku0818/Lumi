@@ -5,38 +5,28 @@
 
 from __future__ import annotations
 
-import shlex
+import re
 from pathlib import Path
 from typing import Any
 
 from lumi.agents.permissions.matcher import COMMAND_ARG_KEYS, extract_arg
 from lumi.agents.permissions.models import PATH_ARG_KEYS
+from lumi.agents.tools.shell_syntax import DYNAMIC, parse_command
 from lumi.utils.logger import logger
 
-# bash 命令中常见的路径操作命令，匹配时提取所有非标志参数作为路径
-_BASH_PATH_COMMANDS: frozenset[str] = frozenset(
-    {
-        "ls",
-        "cat",
-        "cd",
-        "cp",
-        "mv",
-        "rm",
-        "mkdir",
-        "touch",
-        "chmod",
-        "chown",
-    }
+# bash 写入类命令：非选项参数都是写入目标
+_BASH_WRITE_COMMANDS: frozenset[str] = frozenset(
+    {"rm", "rmdir", "mv", "mkdir", "touch", "chmod", "chown", "tee"}
 )
+# 切换目录的命令：不写，但其后的相对路径都落在那里（边界检查计入，写保护不计）
+_BASH_CWD_COMMANDS: frozenset[str] = frozenset({"cd", "pushd"})
+# 只有最后一个参数是写入目标的命令（其余是读取来源）
+_BASH_DEST_COMMANDS: frozenset[str] = frozenset({"cp", "ln"})
 
-# 重定向符号：后面的 token 是文件路径，需要检查边界
-_REDIRECT_TO_PATH: frozenset[str] = frozenset({">", ">>", "<", "2>", "2>>", "&>"})
+# 值在执行时才确定的路径（变量 / 命令替换）：无法静态定位，按越界处理
+_UNKNOWN_PATH = Path("/⟨dynamic-path⟩")
 
-# heredoc 符号：后面的 token 是定界符，不是路径
-_HEREDOC_OPERATORS: frozenset[str] = frozenset({"<<", "<<<"})
-
-# 命令分隔/管道符号：遇到后停止解析（后续是新命令）
-_COMMAND_SEPARATORS: frozenset[str] = frozenset({"|", "||", "&&", ";", "&"})
+_ASSIGNMENT = re.compile(r"[A-Za-z_][A-Za-z0-9_]*=")
 
 # 列表型路径参数键名（如 artifacts 的 filepaths），逐项提取参与边界检查
 _PATH_LIST_ARG_KEYS: tuple[str, ...] = ("filepaths",)
@@ -125,69 +115,46 @@ class WorkspaceBoundary:
         return paths
 
     def _extract_bash_paths(self, tool_args: dict[str, Any]) -> list[Path]:
-        """从 bash 命令中尝试提取目标路径。
-
-        解析命令字符串，识别常见命令并提取路径参数。
-        无法识别的命令返回空列表（视为边界内）。
-        """
+        """bash 命令的写入目标；值未知的按越界处理。未识别的命令不提取（视为边界内）。"""
         command = extract_arg(tool_args, COMMAND_ARG_KEYS)
         if command is None or not command.strip():
             return []
+        return [
+            _UNKNOWN_PATH if DYNAMIC in t else Path(t)
+            for t in bash_write_targets(command, with_cwd=True)
+        ]
 
-        # 多行命令处理：仅在检测到 heredoc 操作符时截断，其他多行命令逐行解析
-        lines = command.split("\n")
-        parse_target = lines[0]
-        for i, line in enumerate(lines):
-            stripped = line.rstrip()
-            # 检测 heredoc 操作符，截断后续行（heredoc 内容不是路径）
-            if "<<" in stripped:
-                parse_target = "\n".join(lines[: i + 1])
-                break
-        else:
-            # 无 heredoc：拼接所有行（处理反斜杠续行和多行命令）
-            parse_target = " ".join(line.rstrip("\\").strip() for line in lines)
 
-        try:
-            parts = shlex.split(parse_target)
-        except ValueError:
-            logger.warning("bash 命令含无效引号，视为越界: %.200s", parse_target)
-            return [Path("/⟨unparseable-command⟩")]
+def bash_write_targets(command: str, *, with_cwd: bool = False) -> list[str]:
+    """bash 命令的写入目标原文（值未知处含 ``DYNAMIC``；边界与写保护检查共用）。
 
-        if not parts:
-            return []
+    取各子命令（含替换 / 子 shell 内的）的写重定向与写入类命令的路径参数；读取来源
+    （``<`` 输入、``cp`` 的源、``cat`` 的参数）不算；``with_cwd`` 时计入 cd 的目标目录。
+    相对路径的基准是项目根——shell 此前 cd 到别处的情形无从得知，属尽力而为。
+    """
+    targets: list[str] = []
+    for seg in parse_command(command):
+        targets.extend(seg.writes)
+        words = list(seg.words)
+        while words and (words[0] == "sudo" or _ASSIGNMENT.match(words[0])):
+            words.pop(0)
+        if not words:
+            continue
+        name = Path(words[0]).name
+        operands = [w for w in words[1:] if not w.startswith("-")]
+        if name in _BASH_DEST_COMMANDS:
+            targets.extend(operands[-1:])
+        elif (
+            name in _BASH_WRITE_COMMANDS
+            or (with_cwd and name in _BASH_CWD_COMMANDS)
+            or (name == "sed" and _sed_in_place(words))
+        ):
+            targets.extend(operands)
+    return targets
 
-        # 跳过前导的 env 变量赋值和 sudo
-        cmd_start = 0
-        for i, part in enumerate(parts):
-            if part == "sudo" or "=" in part:
-                cmd_start = i + 1
-            else:
-                break
 
-        if cmd_start >= len(parts):
-            return []
-
-        cmd_name = Path(parts[cmd_start]).name
-        if cmd_name not in _BASH_PATH_COMMANDS:
-            return []
-
-        # 过滤标志参数、shell 操作符，正确处理重定向和 heredoc
-        raw_args = parts[cmd_start + 1 :]
-        path_args: list[str] = []
-        skip_next = False
-        for arg in raw_args:
-            if skip_next:
-                skip_next = False
-                continue
-            if arg in _COMMAND_SEPARATORS:
-                break  # 管道/分号后是新命令，停止解析
-            if arg in _HEREDOC_OPERATORS:
-                skip_next = True  # heredoc 定界符不是路径
-                continue
-            if arg in _REDIRECT_TO_PATH:
-                continue  # 跳过符号本身，路径 token 在下轮迭代正常收集
-            if arg.startswith("-"):
-                continue
-            path_args.append(arg)
-
-        return [Path(a) for a in path_args]
+def _sed_in_place(words: list[str]) -> bool:
+    return any(
+        w.startswith("--in-place") or (w[:1] == "-" and w[1:2] != "-" and "i" in w)
+        for w in words[1:]
+    )

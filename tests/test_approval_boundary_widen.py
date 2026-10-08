@@ -12,9 +12,8 @@ import pytest
 from langchain_core.messages import AIMessage
 
 from lumi.agents.core.nodes import auto_classify, human_approval, is_use_tool
+from lumi.agents.core.state import LumiAgentContext
 from lumi.agents.permissions.engine import PermissionEngine
-from lumi.agents.permissions.matcher import build_exact_expr
-from lumi.agents.permissions.routing import route_decision
 from lumi.gateway.bridge import AgentBridge
 from lumi.gateway.bridge.folders import _enclosing_dir
 
@@ -44,7 +43,7 @@ def wired(tmp_path):
         bridge = AgentBridge()
         bridge._context = SimpleNamespace(permission_engine=engine)
         runtime = SimpleNamespace(
-            context=SimpleNamespace(
+            context=LumiAgentContext(
                 permission_engine=engine,
                 approval_broker=_FakeBroker({"decision": decision}),
                 widen_boundary=bridge.folders.widen_for_violations,
@@ -79,7 +78,7 @@ def _stub_classifier(monkeypatch, decision: str) -> None:
 
     monkeypatch.setattr(
         "lumi.agents.core.nodes.resolve_pointer",
-        lambda _name: SimpleNamespace(model="m", conn_kwargs=lambda: {}),
+        lambda *_a: SimpleNamespace(model="m", conn_kwargs=lambda: {}),
     )
     monkeypatch.setattr(
         "lumi.agents.core.nodes.structured_output", lambda **_kw: _Chain()
@@ -188,36 +187,6 @@ async def test_approve_unblocks_execution_time_validate_path(wired):
     await human_approval(_state([_call("write", {"file_path": target})]), w.runtime)
 
     assert validate_path(target) == Path(target).resolve()
-
-
-async def test_approve_ends_the_approval_loop(wired):
-    """授权 + 「始终允许」后同一命令直放，不再每轮回到审批。"""
-    w = wired()
-    args = {"command": f"mkdir {w.outside}/sub", "description": "m"}
-    calls = [_call("bash", args)]
-    assert route_decision(calls, "default", w.engine) == "HumanApproval"
-
-    await human_approval(_state(calls), w.runtime)
-    w.engine.add_allow_rule(build_exact_expr("bash", args))
-
-    assert route_decision(calls, "default", w.engine) == "ToolExecutor"
-
-
-async def test_classifier_approve_ends_the_auto_loop(wired, monkeypatch):
-    """auto 模式：分类器放行后同一命令不再每轮重新送分类器（省一次模型调用）。
-
-    与上一条走 route_decision 的不同分支（auto 的 all_allowed 快路径），故不合并。
-    """
-    w = wired()
-    _stub_classifier(monkeypatch, "approve")
-    args = {"command": f"mkdir {w.outside}/sub", "description": "m"}
-    calls = [_call("bash", args)]
-    assert route_decision(calls, "auto", w.engine) == "AutoClassify"
-
-    await auto_classify(_state(calls), w.runtime)
-    w.engine.add_allow_rule(build_exact_expr("bash", args))
-
-    assert route_decision(calls, "auto", w.engine) == "ToolExecutor"
 
 
 # ── privileged 模式：自动放行即授权，边界随之放宽 ──

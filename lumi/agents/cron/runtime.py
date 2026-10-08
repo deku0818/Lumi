@@ -1,4 +1,4 @@
-"""Cron 运行时装配：TUI 与 desktop serve 共用的初始化工厂。
+"""Cron 运行时装配：按工作目录组装 cron 子系统的初始化工厂。
 
 按工作目录隔离组装 JobStore / RunLog / Scheduler，并注入 cron 工具依赖。
 调用方负责注册投递通道和在事件循环中启停 scheduler。
@@ -7,7 +7,7 @@
 from __future__ import annotations
 
 import json
-from collections.abc import Callable
+from collections.abc import Awaitable, Callable
 from dataclasses import dataclass
 from datetime import datetime
 from pathlib import Path
@@ -35,6 +35,7 @@ class CronRuntime:
 
 def setup_cron(
     delivery: DeliveryManager,
+    stream_runner: Callable[[str, str, str], Awaitable[str]],
     on_job_status: Callable[[list[str]], None] | None = None,
 ) -> CronRuntime:
     """组装当前 workspace 的 cron 子系统并注入 cron 工具依赖。
@@ -43,6 +44,7 @@ def setup_cron(
 
     Args:
         delivery: 已注册好投递通道的 DeliveryManager。
+        stream_runner: 执行 runner（``async runner(prompt, thread_id, project_dir)``）。
         on_job_status: 任务开始/结束时的运行状态回调。
 
     Returns:
@@ -58,6 +60,7 @@ def setup_cron(
         job_store,
         run_log,
         delivery,
+        stream_runner=stream_runner,
         on_job_status=on_job_status,
         lock_path=cron_dir / "scheduler.lock",
     )

@@ -62,28 +62,39 @@ def _default(
         typer.Option(
             "-s",
             "--style",
-            help="系统提示词风格（如 code），覆盖 config.json 中的 style 配置",
+            help="系统提示词风格（如 code），覆盖 config.json 中的 style 配置（仅 -p 模式）",
         ),
     ] = None,
     privileged_danger: Annotated[
         bool,
         typer.Option(
             "--privileged-danger",
-            help="特权模式：跳过所有工具审批（危险）",
-            is_flag=True,
+            help="特权模式：跳过所有工具审批（危险；仅 -p 模式）",
         ),
     ] = False,
     accept_edits: Annotated[
         bool,
         typer.Option(
             "--accept-edits",
-            help="自动放行文件编辑(write/edit)，bash 仍需审批",
-            is_flag=True,
+            help="自动放行文件编辑(write/edit)，bash 仍需审批（仅 -p 模式）",
         ),
     ] = False,
 ) -> None:
     """运行 Lumi：-p 非交互执行 prompt；无参数显示帮助。前端经 `lumi serve` 连接。"""
+    # 工具箱 bin 追加到 PATH 末尾（系统同名优先）：每个子命令的探测、agent 子进程
+    # 都看到同一份 uv/rg/node/lark-cli
+    from lumi.gateway.toolbox import inject_path
+
+    inject_path()
+    _export_lumi_bin()
     if ctx.invoked_subcommand is not None:
+        # 这些选项只作用于 -p：配子命令时静默丢弃会让人以为 serve 用上了（serve 还会
+        # 重建配置单例，-s 的覆盖本就留不住），明确报错
+        if prompt is not None or style is not None or privileged_danger or accept_edits:
+            raise typer.BadParameter(
+                "-p / -s / --privileged-danger / --accept-edits 仅用于 `lumi -p` 模式，"
+                "不能与子命令同用"
+            )
         return
 
     if style is not None:
@@ -95,6 +106,18 @@ def _default(
         _run_headless(prompt, privileged=privileged_danger, accept_edits=accept_edits)
     else:
         typer.echo(ctx.get_help())
+
+
+def _redact_token(record) -> bool:
+    """uvicorn 日志里的 ?token=… 打码（WS 握手行走 uvicorn.error，HTTP 走 uvicorn.access）。"""
+    import re
+
+    if isinstance(record.args, tuple):
+        record.args = tuple(
+            re.sub(r"token=[^&\s\"]+", "token=***", a) if isinstance(a, str) else a
+            for a in record.args
+        )
+    return True
 
 
 @app.command("serve")
@@ -124,12 +147,6 @@ def serve(
 
         get_config(str(lumi_home()))
 
-    # 工具箱 bin 追加到 PATH 末尾：agent 子进程可见 uv/rg/node/lark-cli，系统同名优先
-    from lumi.gateway.toolbox import inject_path
-
-    inject_path()
-    _export_lumi_bin()
-
     import uvicorn
 
     from lumi.gateway.channels import ws
@@ -137,6 +154,12 @@ def serve(
     if exit_with_parent:
         _watch_parent_exit()
     ws.app.state.token = token
+    # 读完即删：bash / MCP 等子进程继承环境，别让它们拿到能驱动 agent 的令牌
+    os.environ.pop("LUMI_TOKEN", None)
+    import logging
+
+    for name in ("uvicorn.error", "uvicorn.access"):
+        logging.getLogger(name).addFilter(_redact_token)
     uvicorn.run(ws.app, host=host, port=port)
 
 
@@ -149,6 +172,7 @@ def serve(
 _CANNOT_UPDATE = {
     "source": "这是源码（可编辑）安装，升级请用 git pull",
     "frozen": "这是桌面应用自带的后端，随应用一起更新，不单独升级",
+    "docker": "这是 Docker 镜像，升级请 docker pull 后重建容器",
 }
 
 
@@ -199,8 +223,13 @@ def update(
     # 而升级本身不会停服务，先探后探结论一样。
     serving = check_service("127.0.0.1", port).running
 
+    try:
+        command = upgrade_command(kind, target)
+    except RuntimeError as e:
+        typer.echo(f"✗ {e}", err=True)
+        raise typer.Exit(1) from e
     typer.echo(f"› 升级 {__version__} → {target or latest or '最新版'}（{kind}）")
-    if run(upgrade_command(kind, target)) != 0:
+    if run(command) != 0:
         typer.echo("✗ 升级失败，见上方输出", err=True)
         raise typer.Exit(1)
     typer.echo("✓ 升级完成")
@@ -336,14 +365,19 @@ def env_install(
             last_phase = phase
             typer.echo(f"… {phase}")
 
-    try:
-        results = install_missing(progress, (tool,) if tool else ALL_TOOLS)
-    except Exception as e:
-        # 下载失败（断网 / 代理 / GitHub 不可达）是常态，栈回溯对调用方没有信息量
-        typer.echo(f"安装失败: {e}", err=True)
-        raise typer.Exit(1) from e
-    for status in results:
+    failed = False
+    # 逐项装：一项失败不连累后面的
+    for name in (tool,) if tool else ALL_TOOLS:
+        try:
+            (status,) = install_missing(progress, (name,))
+        except Exception as e:
+            # 下载失败（断网 / 代理 / GitHub 不可达）是常态，栈回溯对调用方没有信息量
+            typer.echo(f"{name} 安装失败: {e}", err=True)
+            failed = True
+            continue
         _echo_tool(asdict(status))
+    if failed:
+        raise typer.Exit(1)
 
 
 feishu_app = typer.Typer(
@@ -557,13 +591,20 @@ _SCOPES = ("global", "project")
 _HTTP_TRANSPORTS = {"http": "streamable_http", "sse": "sse"}
 
 
-def _mcp_path(scope: str, project: str) -> Path:
-    """按 scope 解析配置文件路径；project 缺省取当前目录（会话的 shell 就在项目根）。"""
-    from lumi.gateway.mcp_rpc import resolve_project_dir, server_config_path
+def _mcp_project_dir(scope: str, project: str) -> Path | None:
+    """按 scope 解析项目根（读写共用）；project 缺省取当前目录（会话的 shell 就在项目根）。"""
+    from lumi.gateway.mcp_rpc import resolve_project_dir
 
     if scope not in _SCOPES:
         raise typer.BadParameter(f"scope 只能是 {' / '.join(_SCOPES)}")
-    return server_config_path(scope, resolve_project_dir(scope, project or "."))
+    return resolve_project_dir(scope, project or ".")
+
+
+def _mcp_path(scope: str, project: str) -> Path:
+    """按 scope 解析配置文件路径。"""
+    from lumi.gateway.mcp_rpc import server_config_path
+
+    return server_config_path(scope, _mcp_project_dir(scope, project))
 
 
 def _mcp_read(path: Path) -> dict:
@@ -576,12 +617,10 @@ def _mcp_read(path: Path) -> dict:
 def _mcp_write(scope: str, project: str, name: str, config: dict | None) -> Path:
     """单个 server 的写入（``config=None`` 即删除）：与 desktop RPC 共用
     ``upsert_server``（严格读防抹除 + 原子写 0o600），CLI 只负责把错误转成退出码。"""
-    from lumi.gateway.mcp_rpc import resolve_project_dir, upsert_server
+    from lumi.gateway.mcp_rpc import upsert_server
 
     try:
-        path, _ = upsert_server(
-            scope, resolve_project_dir(scope, project), name, config
-        )
+        path, _ = upsert_server(scope, _mcp_project_dir(scope, project), name, config)
     except ValueError as e:
         typer.echo(f"写入失败: {e}", err=True)
         raise typer.Exit(1) from e
@@ -802,7 +841,7 @@ def mcp_test(
 
 
 def _export_lumi_bin() -> None:
-    """把本 CLI 的可执行入口暴露为 ``LUMI_BIN``，供 agent 子进程回调（与 inject_path 同处调用）。
+    """把本 CLI 的可执行入口暴露为 ``LUMI_BIN``，供 agent 子进程回调（根回调里与 inject_path 一起调）。
 
     打包版后端躺在 app 的 resources 目录里、不在 PATH 上，agent 的 shell 无从定位它；
     dev 下则是 venv 里的 lumi 脚本。
@@ -818,20 +857,27 @@ def _export_lumi_bin() -> None:
 
 
 def _watch_parent_exit() -> None:
-    """守望 stdin：读到 EOF（父进程死亡、管道被 OS 关闭）即整体退出。
+    """守望 stdin：收到 ``shutdown`` 行即优雅停机；读到 EOF（父进程死亡）即整体退出。
 
-    孤儿 sidecar 会与新实例抢同一 checkpoint 数据库，把会话读写悬挂成
-    「会话打不开」。stdin 管道是跨平台最可靠的父进程死亡信号（Electron 侧以
-    stdio pipe 启动，崩溃/强杀同样触发管道关闭）。os._exit 而非优雅关停：
-    父进程已死无人在乎，checkpoint 写入是 SQLite 事务、中断也原子。
+    正常退出时桌面端先发 ``shutdown``、等本进程走完 lifespan（drain 在跑的轮，
+    checkpoint 停在完整的 super-step 边界）再退；给 SIGINT 而不是直接退出，就是
+    借 uvicorn 自己的停机流程——跨平台（Windows 上没法从外部给 sidecar 发 SIGTERM
+    式的软信号）。EOF 分支兜崩溃 / 强杀：孤儿 sidecar 会与新实例抢同一 checkpoint
+    数据库，把会话读写悬挂成「会话打不开」，此时父进程已死，os._exit 立即退出。
     """
     import os
+    import signal
     import threading
 
     def _watch() -> None:
+        # 直接读 fd 而不经 sys.stdin.buffer：停机收尾时本线程还阻塞在读上，带缓冲的
+        # reader 持着锁会让解释器退出时 abort（Fatal Python error: _enter_buffered_busy）
+        fd = sys.stdin.fileno()
         try:
-            sys.stdin.buffer.read()
-        except Exception:
+            while chunk := os.read(fd, 4096):
+                if b"shutdown" in chunk:
+                    signal.raise_signal(signal.SIGINT)
+        except OSError:
             pass
         os._exit(0)
 
@@ -846,30 +892,32 @@ def _run_headless(
 
     from lumi.gateway.bridge import AgentBridge, EventKind
 
+    # 默认 auto（与桌面一致）：命令行上没人应答审批，分类器逐个裁决
     if privileged:
         tool_mode = "privileged"
     elif accept_edits:
         tool_mode = "accept_edits"
     else:
-        tool_mode = "default"
+        tool_mode = "auto"
 
     async def _execute() -> None:
         # 注入 config.json 中的环境变量（API key 等）
         from lumi.utils.config import get_config
 
         get_config().apply_env()
-        # 与 serve 同源：工具箱 bin 追加到 PATH 末尾，agent 子进程可见 uv/rg/lark-cli
-        from lumi.gateway.toolbox import inject_path
-
-        inject_path()
-        _export_lumi_bin()
 
         bridge = AgentBridge()
         try:
-            # 单轮即退、无下一轮自愈：冷池等 MCP 工具就位后再建 agent
-            await bridge.initialize(wait_mcp=True)
+            # 单轮即退、无下一轮自愈：冷池等 MCP 工具就位后再建 agent。
+            # interactive=False：无人应答，需人工审批的直接自动拒绝，不永久挂起
+            await bridge.initialize(wait_mcp=True, interactive=False)
             async for evt in bridge.stream_response(prompt, tool_mode=tool_mode):
-                if evt.kind == EventKind.MESSAGE_DELTA and evt.text:
+                # 只输出主 agent 的正文：子代理（parent_run_id 非空）的流式内容不外显
+                if (
+                    evt.kind == EventKind.MESSAGE_DELTA
+                    and evt.text
+                    and not evt.parent_run_id
+                ):
                     sys.stdout.write(evt.text)
                     sys.stdout.flush()
                 elif evt.kind == EventKind.ERROR:

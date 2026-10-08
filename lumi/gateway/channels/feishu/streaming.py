@@ -175,8 +175,9 @@ class FeishuStreamBuf:
     text 始终是要写到卡片的全量 markdown（每次 update 覆盖式写入，非增量）；sequence
     是"已发出去的最大号"（新卡归 0），一切发往飞书的操作都在发出前一刻经
     :meth:`take_sequence` 取号。rendered_len 记录上次成功
-    渲染到卡片的 text 长度（-1 = 从未渲染成功）。reply_to_id / rebuilds / epoch 服务于
-    卡片失效换卡。throttle / queue 在 buf 首次创建时装配。
+    渲染到卡片的 text 长度（-1 = 从未渲染成功）。reply_to_id / rebuilds 服务于
+    卡片失效换卡；card_failed 标记建卡已失败，本轮不再重试、终态降级普通卡。throttle /
+    queue 在 buf 首次创建时装配。
     """
 
     text: str = ""
@@ -187,7 +188,7 @@ class FeishuStreamBuf:
     rendered_len: int = -1
     reply_to_id: str | None = None
     rebuilds: int = 0
-    epoch: int = 0
+    card_failed: bool = False
     throttle: Throttle | None = field(default=None, repr=False)
     queue: UpdateQueue | None = field(default=None, repr=False)
     active_tools: list[str] = field(default_factory=list)
@@ -336,8 +337,7 @@ class FeishuStreaming:
 
         if buf.card_id is None:
             if not await self._ensure_card(buf, reply_to):
-                # 创建失败：buf.text 继续累积，下一次 delta 会再次尝试创建
-                return
+                return  # 建卡失败：buf.text 继续累积，end() 降级普通卡整段发出
             # 首帧立即渲染一次，不等节流——让用户尽快看到第一段文字
             await self._push_update(buf, buf.card_id, buf.text)
             return
@@ -349,14 +349,18 @@ class FeishuStreaming:
         """buf 尚无 card 时建一张 streaming 卡。
 
         有 message_id 则 reply 到它，没有则直投 buf.chat_id（通知 / 妙记纪要轮）。
+        失败一次即本轮放弃，不在每个 append / tool_activity / reset 上反复重试。
         """
         if buf.card_id is not None:
             return True
+        if buf.card_failed:
+            return False
         buf.reply_to_id = message_id
         card_id = await asyncio.get_running_loop().run_in_executor(
             None, self._create_streaming_card_sync, buf.chat_id, message_id
         )
         if not card_id:
+            buf.card_failed = True
             return False
         buf.card_id = card_id
         return True
@@ -414,22 +418,17 @@ class FeishuStreaming:
         self._enqueue_render(buf)
 
     def _enqueue_render(self, buf: FeishuStreamBuf) -> None:
-        """快照正文，入队一次卡片覆写（``_compose`` 自带工具状态行）。
+        """入队一次卡片覆写（``_compose`` 自带工具状态行）。
 
-        seq 不在此处预分配，由 ``_push_update`` 发出前现取——见其文档。update 撞上卡片
-        失效错误码时触发换卡重建；epoch 校验丢弃重建前 enqueue 的旧卡 stale 更新。正文
+        card_id / text / seq 都在任务开跑时现取，不在入队时快照：队列串行，换卡等待期间
+        入队的刷新开跑时自然打到新卡。update 撞上卡片失效错误码时触发换卡重建。正文
         节流刷新、spinner 动画刷新、工具状态变更刷新共用此路径。
         """
         if buf.card_id is None or buf.queue is None:
             return
-        card_id = buf.card_id
-        epoch = buf.epoch
-        text = buf.text
 
         async def _task() -> None:
-            if buf.epoch != epoch:
-                return  # 卡片已重建，这是旧卡的 stale 更新，丢弃
-            ok, code = await self._push_update(buf, card_id, text)
+            ok, code = await self._push_update(buf, buf.card_id, buf.text)
             if not ok and _is_card_invalid(code):
                 await self._rebuild_card(buf)
 
@@ -515,13 +514,12 @@ class FeishuStreaming:
     async def _rebuild_card(self, buf: FeishuStreamBuf) -> None:
         """流式卡片失效 → 换新卡并重发全量文本。
 
-        epoch 自增使旧卡的在途 / 后续更新作废；rebuilds 上限防重建风暴。
+        rebuilds 上限防重建风暴。
         """
         # 无需 reply_to_id 也能重建：无锚点（通知 / 纪要轮）时靠 buf.chat_id 直投
         if buf.rebuilds >= STREAM_MAX_REBUILDS:
             return
         buf.rebuilds += 1
-        buf.epoch += 1
         logger.warning(
             f"Feishu 流式卡片失效，换新卡重建（第 {buf.rebuilds} 次）: old={buf.card_id}"
         )
@@ -538,7 +536,9 @@ class FeishuStreaming:
     async def end(
         self, chat_id: str, *, aborted: bool, reply_to: str | None = None
     ) -> None:
-        """终态：``aborted`` 丢弃累积文本但仍关掉 streaming_mode；否则 flush 全量 + 关流。
+        """终态：flush 全量（抹掉忙碌状态行）+ 关流，卡上没有完整答案时降级普通卡。
+
+        ``aborted`` 只决定无正文时的占位（已中止 / 已完成）——已流出的正文照样保住。
 
         buf 出栈即收尾，同一 chat 再次调用空转——调用方的 finally 兜底可以无脑重调。
         """
@@ -556,19 +556,22 @@ class FeishuStreaming:
         if buf.queue is not None:
             await buf.queue.drain()
         if not buf.card_id:
-            # CardKit 全程不可用（lark 缺 cardkit 模块 / create 持续失败）：非 aborted
-            # 时必须降级到普通 markdown 卡，否则整轮已完成的回复对用户完全不可见（静默丢失）。
-            if not aborted:
-                await self._fallback_send(
-                    chat_id, buf.text, reply_to or buf.reply_to_id, "未创建"
-                )
+            # CardKit 全程不可用（lark 缺 cardkit 模块 / 建卡失败）：降级到普通 markdown
+            # 卡，否则已流出的回复对用户完全不可见（静默丢失）。
+            await self._fallback_send(
+                chat_id, buf.text, reply_to or buf.reply_to_id, "未创建"
+            )
             return
-        # 非 aborted：仍有未刷尾部，或还挂着忙碌状态行（had_status）时补最后一刷。
+        # 仍有未刷尾部，或还挂着忙碌状态行（had_status）时补最后一刷。
         final_ok = True
-        if not aborted and (had_status or (buf.text.strip() and buf.dirty)):
+        if had_status or (buf.text.strip() and buf.dirty):
             # 纯工具轮（无正文 token）：直接刷 buf.text="" 会经 _compose 回落成单空格，
-            # 卡片定格成空白。无正文时落一个完成标记，让用户看到这轮已做完。
-            final = buf.text if buf.text.strip() else "✅ 已完成"
+            # 卡片定格成空白。无正文时落一个终态标记，让用户看到这轮已结束。
+            final = (
+                buf.text
+                if buf.text.strip()
+                else ("⏹ 已中止" if aborted else "✅ 已完成")
+            )
             final_ok, _code = await self._push_update(buf, buf.card_id, final)
         # 关掉 streaming_mode，让会话列表的"生成中"占位消失
         await loop.run_in_executor(
@@ -577,7 +580,7 @@ class FeishuStreaming:
         # 卡片上没有完整答案时降级到普通 markdown 卡：全程未渲染成功（CardKit 全程失败），
         # 或终态那一刷失败（流式模式关了又重开不上 / 未知错误码）。后者不兜住的话，正是
         # 「前半段留在卡上、后半段静默丢失」——恰是流式超时续写要消灭的失败形态。
-        if not aborted and (buf.rendered_len < 0 or not final_ok):
+        if buf.rendered_len < 0 or not final_ok:
             why = "全程未渲染成功" if buf.rendered_len < 0 else "终态刷新失败"
             await self._fallback_send(chat_id, buf.text, buf.reply_to_id, why)
 
@@ -643,11 +646,13 @@ class FeishuStreaming:
         if not card_id:
             return None
         card_payload = json.dumps({"type": "card", "data": {"card_id": card_id}})
+        sent_mid = None
         if reply_to_id:
             sent_mid = self.channel.reply_message_sync(
                 reply_to_id, "interactive", card_payload
             )
-        else:
+        if sent_mid is None:
+            # 无锚点，或锚点已撤回 / 不可回复：直投 chat_id，别让已建的卡成孤儿
             sent_mid = self.channel.send_message_sync(
                 chat_id, "interactive", card_payload
             )

@@ -1,3 +1,4 @@
+from dataclasses import replace
 from typing import Literal
 
 from langchain_core.callbacks import adispatch_custom_event
@@ -183,7 +184,7 @@ async def _pre_tool_hooks(
 ) -> tuple[Command | None, list]:
     """PreToolUse hooks（collect 模式）→ ``(需直接返回的 Command, 收集到的 reminder)``。
 
-    ``Block`` 为 ``pending`` 里每个调用补 ToolMessage(status=error) 配对后 END（残留
+    ``Block`` 为 ``pending`` 里每个调用补 ToolMessage(status=error) 配对后结束本轮（残留
     tool_call 会让 LangGraph 校验失败）；hook 自定义路由原样透传；``AdditionalContext``
     收集为 reminder，工具仍执行。
     """
@@ -216,9 +217,7 @@ async def _pre_tool_hooks(
         )
         for tc in pending
     ]
-    return Command(
-        goto=END, update={**(cmd.update or {}), "messages": [*tool_msgs, *existing]}
-    ), []
+    return _halt({**(cmd.update or {}), "messages": [*tool_msgs, *existing]}), []
 
 
 async def _post_tool_hooks(
@@ -266,9 +265,10 @@ async def tool_executor(
     - PreToolUse：``Block`` 补齐 ToolMessage(status=error) 配对后终止；
       ``AdditionalContext`` 收集为 reminder，工具仍执行，结果注入 ToolMessage 之后。
     - PostToolUse：hook 看到截断后的最终 ToolMessage，reminder 追加到末尾。
-    工具自身返回 Command（ask/agent/structured_output 等控制流）的路径直返
-    ``[*Command, {"messages": [...]}]``，不接 PostToolUse——这些工具用 Command 自定义
-    路由，注入会破坏其控制流。
+    工具自身返回的 Command（todos / read 图片 / 结构化输出等，都只带 state 更新、不带
+    路由）照常经 PostToolUse 与失败上限检查；其 messages 抽出与其余结果合并，全部
+    ToolMessage 在前、附带的其它消息（读图回灌的 HumanMessage、reminder）在后——provider
+    要求同批 tool_result 紧跟 tool_use，中间夹一条 user 内容即违反协议。
     """
     tools = list(runtime.context.tools)
     output_schema = state.get("output_schema")
@@ -295,26 +295,42 @@ async def tool_executor(
     )
     tool_messages, commands = _split_tool_output(output)
     await truncate_tool_results(tool_messages)
-    final_msgs = [*tool_messages, *extra_msgs]
-    if commands:
-        return [*commands, {"messages": final_msgs}]
+    merged = [*tool_messages, *(m for c in commands for m in _cmd_messages(c))]
+    # tool_result 按 tool_use 的顺序排（Command 里的与普通结果分两路收集，原序已丢）
+    order = {tc["id"]: i for i, tc in enumerate(pending)}
+    results = sorted(
+        (m for m in merged if isinstance(m, ToolMessage)),
+        key=lambda m: order.get(m.tool_call_id, len(order)),
+    )
+    trailing = [*(m for m in merged if not isinstance(m, ToolMessage)), *extra_msgs]
+    halt = False
 
     if has_hooks("PostToolUse"):
-        post_cmd = await _post_tool_hooks(state, config, visible, tool_messages)
+        post_cmd = await _post_tool_hooks(state, config, visible, results)
         if post_cmd is not None:
-            final_msgs = [*final_msgs, *_cmd_messages(post_cmd)]
-            if post_cmd.goto == END:
-                return Command(goto=END, update={"messages": final_msgs})
+            trailing += _cmd_messages(post_cmd)
+            halt = post_cmd.goto == END
 
     # structured_output 连续失败兜底：本轮累计失败 >= 上限时强制结束循环。
-    # 计数用纯净 tool_messages（不含注入的 reminder HumanMessage，否则尾扫会被
+    # 计数用纯净的 ToolMessage（不含注入的 reminder HumanMessage，否则尾扫会被
     # HumanMessage 提前 break 导致计数失真）。
-    if output_schema:
-        abort_msg = _structured_output_abort_message(state, tool_messages)
+    if output_schema and not halt:
+        abort_msg = _structured_output_abort_message(state, results)
         if abort_msg is not None:
-            return Command(goto=END, update={"messages": [*final_msgs, abort_msg]})
+            trailing.append(abort_msg)
+            halt = True
 
-    return {"messages": final_msgs}
+    update = {"messages": [*results, *trailing]}
+    if halt:
+        update["tool_cancelled"] = True
+    if not commands:
+        return update
+    # Command 的其余 update（todos / structured_output）原样保留，messages 已并入上面
+    stripped = [
+        replace(c, update={k: v for k, v in c.update.items() if k != "messages"})
+        for c in commands
+    ]
+    return [*stripped, update]
 
 
 def _structured_output_abort_message(
@@ -336,8 +352,18 @@ def _structured_output_abort_message(
     return AIMessage(content=format_structured_output_abort_message(fails))
 
 
+def _halt(update: dict) -> Command:
+    """结束本轮：终止意图写进 state（``tool_cancelled``），由条件边读取后路由到 END。
+
+    ToolExecutor / PreprocessMessages 都挂着出边：节点自己返回的 ``Command(goto=END)``
+    会与出边取并集，END 被 CallModel 盖过，本轮结束不了。
+    """
+    return Command(update={**update, "tool_cancelled": True})
+
+
 def after_tool_executor(state: LumiAgentState) -> str:
-    """ToolExecutor 后的条件路由：工具被取消时走向 END，否则继续 CallModel"""
+    """ToolExecutor / PreprocessMessages 后的条件路由：本轮被终止（用户取消 ask、hook
+    Block、结构化输出失败上限）时走向 END，否则继续 CallModel"""
     if state.get("tool_cancelled"):
         return "END"
     return "CallModel"
@@ -366,30 +392,18 @@ async def on_agent_stop(
 def is_use_tool(state: LumiAgentState, runtime: Runtime[LumiAgentContext]) -> str:
     """条件路由函数 - 判断下一步执行哪个节点
 
-    路由优先级：
-    1. 无 tool_calls → OnAgentStop（分发 Stop hooks）
-    2. 纯内部伪工具（如结构化输出）→ ToolExecutor（闭包内校验，绕过权限审批）；
-       内部工具与其他工具混合的批次不绕过，落到下方正常权限评估
-    3. 全部 bypass 类工具 → ToolExecutor
-    5. bypass-immune 检查（所有模式）→ 命中则 HumanApproval
-    6. 权限引擎 DENY（所有模式）→ HumanApproval（节点内自动拒绝，路由回 CallModel）
-    7. accept_edits 模式 → 文件编辑工具(write/edit)工作区内自动放行，其余 HumanApproval
-    8. privileged 模式 → ASK 命中则 HumanApproval，其余 ToolExecutor
-    9. default 模式：全部 ALLOW + 边界 OK → ToolExecutor（快速路径）
-    10. 其他 → HumanApproval
+    无 tool_calls → OnAgentStop（分发 Stop hooks）；其余分支见
+    ``permissions.routing.route_decision`` 的 docstring。
     """
     tool_calls = state["messages"][-1].tool_calls
     if not tool_calls:
         # 模型未调工具想结束 → OnAgentStop 节点分发 Stop hooks（默认 END）
         return "OnAgentStop"
 
-    decision = route_decision(
-        tool_calls,
-        runtime.context.tool_mode,
-        runtime.context.permission_engine,
-    )
+    tool_mode = runtime.context.mode_root().tool_mode
+    decision = route_decision(tool_calls, tool_mode, runtime.context.permission_engine)
     # privileged 的「自动放行」本身即授权，这条路上既不审批也不过分类器，没有别的挂钩点
-    if decision == "ToolExecutor" and runtime.context.tool_mode == "privileged":
+    if decision == "ToolExecutor" and tool_mode == "privileged":
         _widen_boundary_for(tool_calls, runtime)
     return decision
 
@@ -423,14 +437,14 @@ async def human_approval(
 
     Graph 侧处理：
     - DENY 命中 → 跳过审批，直接拒绝并路由回 CallModel
-    - 非 DENY → await broker.request 等待用户审批：
-      - approve → ToolExecutor
-      - reject  → END（附带拒绝原因 ToolMessage）
-      - cancel  → END（附带取消原因 ToolMessage）
+    - 无审批通道（approval_broker 为 None：cron / workflow / 后台子代理）→ 自动拒绝、回 CallModel
+    - 否则 await broker.request 等待用户逐个裁决（见 _apply_decisions）：
+      - 有允许 → 被拒的补拒绝 ToolMessage，其余进 ToolExecutor
+      - 全拒绝 / cancel → END（附带拒绝 / 取消原因 ToolMessage）
 
-    权限评估、选项构建、规则持久化由 Bridge 层负责（on_custom_event 分支富化）。
-    decision 为 dict: {"decision": "approve"/"reject"/"cancel", "message": "...",
-    "set_tool_mode": "..."}（stop / 切会话取消挂起轮时 await 抛 CancelledError 向上冒泡）。
+    风险提示与越界路径由 Bridge 层富化（on_custom_event 分支）。应答为 dict：批量
+    {"decision", "message"?, "set_tool_mode"?} 或逐个 {"decisions": [...], "message"?}
+    （stop / 切会话收尾挂起审批时以 reject_value 返回拒绝）。
     """
     last_message = state["messages"][-1]
     tool_calls_data = [
@@ -517,9 +531,9 @@ def _apply_decisions(
             update={"messages": build_reject_messages(tool_calls, content=content)},
         )
     # tool_mode 是 context（运行时共享）属性，直接改即对后续工具生效——
-    # 无需经 Command.update 写 state（state 已无此字段）。
+    # 无需经 Command.update 写 state（state 已无此字段）。子代理审批卡里切换的是会话模式。
     if set_tool_mode:
-        runtime.context.tool_mode = set_tool_mode
+        runtime.context.mode_root().tool_mode = set_tool_mode
     _widen_boundary_for(approved, runtime)
     update = (
         {"messages": build_reject_messages(rejected, content=content)}
@@ -602,8 +616,9 @@ async def auto_classify(
     # chain 构造一并纳入 try：create_llm/with_structured_output 在构造期也可能抛
     # （如解析到的分类器模型缺 api_key），fail-closed 须覆盖构造与调用全程。
     try:
-        # 分类器模型独立可配（lumi.json providers 分区的 classifier 指针）；未配则回退会话模型。
-        clf = resolve_pointer("classifier")
+        # 分类器模型独立可配（lumi.json providers 分区的 classifier 指针）；未配则跟随本会话模型。
+        ctx = runtime.context
+        clf = resolve_pointer("classifier", ctx.model_name, ctx.provider)
         chain = structured_output(
             template=(
                 "用户最近的请求：\n{user_intent}\n\n"
@@ -698,7 +713,8 @@ async def summarizer(
     永远发生在压缩后的世界里（marker 由 ``build_compacted_update`` 恒剥，hook 扫不到
     即注入全量），在线/离线压缩后的形态同构：``[Human(<summary>), Human(ctx全量+用户消息)]``。
 
-    缓存安全的分叉：复用主对话的 system_prompt + tools 前缀，只在末尾追加摘要指令。
+    与主对话同一 system_prompt + tools 前缀，只在末尾追加摘要指令（缓存命中因 provider
+    而异，Anthropic 下不命中主对话缓存，见 ``compact.run_summary``）。
 
     - 不超阈值（``模型窗口 * summary_threshold``，真实 usage）→ 直接放行
     - 熔断器打开（同 thread 连续失败超阈值且未到 reset）→ 直接放行
@@ -791,7 +807,7 @@ async def preprocess_messages(
     记忆索引 / LUMI.md 按 marker 比对注入末条用户消息，见 :mod:`context_inject`）。
 
     hook 返回的消息 update（同 id 替换末条 / 追加 reminder）合并进本节点返回值；
-    goto 忽略——本节点固定边 → CallModel。历史压缩在上游 ``Summarizer`` 已完成，
+    ``Block`` 拦下本条提问、结束本轮（不调模型）。历史压缩在上游 ``Summarizer`` 已完成，
     本节点恒在压缩后的世界里运行。
     """
     messages = state["messages"]
@@ -814,6 +830,8 @@ async def preprocess_messages(
         cmd = await dispatch_hooks("UserPromptSubmit", ctx, mode="collect")
         if cmd is not None:
             result_messages = [*result_messages, *_cmd_messages(cmd)]
+            if cmd.goto == END:
+                updates["tool_cancelled"] = True
 
     if result_messages or updates:
         return {"messages": result_messages, **updates}

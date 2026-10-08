@@ -208,24 +208,31 @@ def _format_grep_content(result: dict, pattern: str, line_number: bool) -> str:
     return "\n".join(lines)
 
 
-def _format_grep_files(result: list[dict], pattern: str) -> str:
+def _truncation_note(result: dict) -> list[str]:
+    if not result["truncated"]:
+        return []
+    off, shown = result["offset"], len(result["items"])
+    return [
+        f"  [已截断] 共 {result['total']} 个文件，显示第 {off + 1}-{off + shown} 个"
+    ]
+
+
+def _format_grep_files(result: dict, pattern: str) -> str:
     """格式化 files_with_matches 模式的 grep 结果"""
-    if not result:
+    if not result["total"]:
         return f"未找到匹配 '{pattern}' 的文件"
-    lines = [f"找到 {len(result)} 个匹配文件:"]
-    for item in result:
-        lines.append(f"  {item['path']}")
-    return "\n".join(lines)
+    lines = [f"找到 {result['total']} 个匹配文件:"]
+    lines += [f"  {item['path']}" for item in result["items"]]
+    return "\n".join(lines + _truncation_note(result))
 
 
-def _format_grep_counts(result: list[dict], pattern: str) -> str:
+def _format_grep_counts(result: dict, pattern: str) -> str:
     """格式化 count 模式的 grep 结果"""
-    if not result:
+    if not result["total"]:
         return f"未找到匹配 '{pattern}' 的内容"
-    lines = [f"在 {len(result)} 个文件中找到匹配:"]
-    for item in result:
-        lines.append(f"  {item['path']}: {item['count']} 处匹配")
-    return "\n".join(lines)
+    lines = [f"在 {result['total']} 个文件中找到匹配:"]
+    lines += [f"  {item['path']}: {item['count']} 处匹配" for item in result["items"]]
+    return "\n".join(lines + _truncation_note(result))
 
 
 @tool(args_schema=GrepInput, description=_GREP_DESCRIPTION)
@@ -266,23 +273,10 @@ async def grep(
         line_number=line_number,
     )
 
-    # 错误字符串直接返回
-    if isinstance(result, str):
+    if isinstance(result, str):  # rg 报错 / 正则无效
         return result
-
-    # content 模式返回分页字典
-    if isinstance(result, dict):
+    if output_mode == "content":
         return _format_grep_content(result, pattern, line_number)
-
-    # files_with_matches 模式
     if output_mode == "files_with_matches":
         return _format_grep_files(result, pattern)
-
-    # count 模式
-    if output_mode == "count":
-        return _format_grep_counts(result, pattern)
-
-    # 兜底
-    if not result:
-        return f"未找到匹配 '{pattern}' 的内容"
-    return str(result)
+    return _format_grep_counts(result, pattern)

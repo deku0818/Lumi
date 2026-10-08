@@ -24,9 +24,6 @@ RETRY_BASE_WAIT: Final[int] = 5
 DEFAULT_COMMAND_TIMEOUT: Final[float] = 120.0
 """execute() 默认超时秒数"""
 
-CWD_QUERY_TIMEOUT: Final[float] = 5.0
-"""get_cwd() 查询超时秒数"""
-
 GRACEFUL_SHUTDOWN_TIMEOUT: Final[float] = 5.0
 """进程优雅关闭等待秒数"""
 
@@ -42,9 +39,9 @@ ATTACHED_FILE_TAG: Final[str] = "attached-file"
 标签块注入 content；显示侧不解析——附件胶囊数据走 lumi.items 的 files 字段。"""
 
 FEISHU_THREAD_PREFIX: Final[str] = "feishu-"
-"""飞书渠道会话的 thread 前缀（确定性派生 feishu-{key}，key 见 inbound.session_key_of）。
+"""飞书渠道会话的 thread 前缀（确定性派生 feishu-{key}，key 见 parse.session_key_of）。
 
-单一事实源：inbound.feishu_thread_id 的派生与 gateway.session._channel_of 的
+单一事实源：parse.feishu_thread_id 的派生与 gateway.session._channel_of 的
 判定（会话列表标注 / 只读守卫 / 通知轮跳过）共用此常量。"""
 
 LUMI_META_KEY: Final[str] = "lumi"
@@ -81,12 +78,6 @@ IMAGE_TOKEN_ESTIMATE: Final[int] = 800
 
 MAX_RUN_LOG_FILE_SIZE: Final[int] = 2 * 1024 * 1024  # 2MB
 """单个 JSONL 运行日志文件最大字节数"""
-
-MAX_CRON_RETRIES: Final[int] = 3
-"""Cron 任务最大重试次数"""
-
-CRON_BACKOFF_INTERVALS: Final[tuple[int, ...]] = (30, 60, 300)
-"""Cron 重试退避间隔（秒）"""
 
 MAX_CRON_RUN_THREADS: Final[int] = 50
 """每个 cron 任务保留会话 checkpoint 的最近执行次数，超出部分清理"""

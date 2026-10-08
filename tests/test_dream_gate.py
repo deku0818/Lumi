@@ -136,3 +136,69 @@ def test_latest_ts_dict_format():
         HumanMessage("无 ts"),
     ]
     assert latest_human_ts(msgs) == 5000.0
+
+
+# --- 面板取消只停这次综合 ---
+
+
+async def test_cancel_dream_entry_does_not_cancel_caller(tmp_path):
+    # 回归：条目的 async_task 曾是调用方 task——每日 dream 循环经此调入时，面板上停掉
+    # 一次综合会把常驻循环一起取消
+    import asyncio
+    from unittest.mock import AsyncMock, patch
+
+    from lumi.agents.runtime.bg_tasks import TaskStatus, get_task_registry
+
+    started = asyncio.Event()
+
+    async def fake_ainvoke(inputs, context=None):
+        started.set()
+        await asyncio.sleep(30)
+
+    ctx = SimpleNamespace(permission_engine=None, tool_mode="default")
+    agent = SimpleNamespace(graph=SimpleNamespace(ainvoke=fake_ainvoke))
+    with (
+        patch(
+            "lumi.agents.core.graph.create_agent",
+            AsyncMock(return_value=(agent, ctx)),
+        ),
+        patch("lumi.agents.tools.get_tools", AsyncMock(return_value=[])),
+    ):
+        caller = asyncio.create_task(
+            dream_mod._run_dream_fork(
+                tmp_path,
+                [],
+                "p",
+                label="dream-cancel",
+                notify=False,
+                record=lambda: None,
+            )
+        )
+        await asyncio.wait_for(started.wait(), 5)
+        registry = get_task_registry()
+        entry = next(e for e in registry.all_tasks() if e.label == "dream-cancel")
+        assert registry.cancel_agent_task(entry.task_id)
+        await asyncio.wait_for(caller, 5)  # 调用方正常返回，不抛 CancelledError
+    assert entry.status == TaskStatus.FAILED
+
+
+async def test_spawned_dream_logs_setup_failure(monkeypatch, tmp_path):
+    # 回归：前置阶段（建 reader / 列会话 / 导出）的异常只挂在 task 上，GC 时才进 stderr，
+    # Lumi.log 里看不到
+    import asyncio
+
+    from lumi.agents.memory import paths as memory_paths
+    from lumi.agents.runtime import bg_tasks
+
+    monkeypatch.setattr(memory_paths, "MEMORY_ROOT", tmp_path / "mem")
+    errors: list = []
+    monkeypatch.setattr(bg_tasks.logger, "error", lambda *a, **k: errors.append(a))
+
+    async def boom(*_a, **_k):
+        raise RuntimeError("reader 建不起来")
+
+    monkeypatch.setattr(dream_mod, "_run_dream", boom)
+    dream_mod._spawn_dream(_engine_ctx(tmp_path / "p"), [], "/p", "t", force=True)
+    await asyncio.gather(*dream_mod._DREAM_TASKS, return_exceptions=True)
+    await asyncio.sleep(0)
+    assert any("reader 建不起来" in str(a) for a in errors)

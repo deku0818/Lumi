@@ -1,44 +1,8 @@
 """Desktop WebSocket 服务：把 GatewaySession 暴露为 JSON-RPC over WS。
 
-帧协议（client ↔ server）：
-    client → server  {id, method, params}
-        send_message    params: {content, tool_mode?}   → 流式
-        resume          params: {value}                                   → 流式
-        stop            params: {}                                        → {stopped}  # 中止当前流式轮
-        list_commands   params: {}                                        → {commands:[...]}
-        run_command     params: {name, extra_text?, tool_mode?}           → 流式
-        list_providers  params: {}                                        → {profiles:[...], active:{provider,model}}
-        search_catalog  params: {query}                                    → {entries:[...]}  # models.dev 目录子串搜索
-        test_provider   params: {base_url, api_key, model}                → {ok, error?, latency_ms?}
-        set_provider    params: {provider, model}                         → {active:{provider,model}, model}
-        save_provider   params: {profile}  # profile.models:[...]         → {profiles:[...], active}
-        delete_provider params: {id}                                      → {profiles:[...], active}
-        set_effort      params: {provider, model, level}                  → {effort}  # 档位 ∈ 该模型能力(models.dev)
-        set_workspace   params: {path}                                    → {workspace}  # 会话级（绑定本连接项目，不动进程 cwd）
-        list_projects   params: {}                                        → {projects:[...], current}
-        add_project     params: {path}                                    → {projects:[...]}
-        remove_project  params: {path}                                    → {projects:[...]}
-        rename_project  params: {path, name}                              → {projects:[...]}
-        set_default_project params: {path, default}  # 「新建会话」直接落地的项目，至多一个 → {projects:[...]}
-        add_folder      params: {path}                                    → {folders:[...]}  # 本会话临时
-        remove_folder   params: {path}                                    → {folders:[...]}
-        list_sessions   params: {limit?}                                  → {sessions:[...]}
-        new_session     params: {}                                        → {thread_id}
-        switch_session  params: {thread_id}                               → {thread_id}
-        load_history    params: {thread_id}                               → {items:[...]}
-        pin_session     params: {thread_id, pinned}                       → {thread_id, pinned}
-        rename_session  params: {thread_id, title}                        → {thread_id, title}
-        delete_session  params: {thread_id}                               → {thread_id}
-        list_cron_jobs  params: {}                                        → {jobs:[...]}  # job 含 next_run
-        create_cron_job params: {name, schedule, prompt}                  → {job}
-        update_cron_job params: {job_id, name?, schedule?, prompt?}       → {job}
-        delete_cron_job params: {job_id}                                  → {job_id}
-        toggle_cron_job params: {job_id, enabled}                         → {job}
-        run_cron_job    params: {job_id}                                  → {ok}  # 异步触发，结果经 cron.result
-        list_cron_runs  params: {job_id, limit?}                          → {runs:[...]}
-    server → client
-        事件帧  {method: "event", params: <wire event>}   # 见 protocol.py
-        响应帧  {id, result}  或  {id, error: {message}}
+帧协议：client → server ``{id, method, params}``；server → client 事件帧
+``{method: "event", params: <wire event>}``、响应帧 ``{id, result}`` 或
+``{id, error: {message}}``。方法与事件清单见 protocol/events.json。
 
 一个 WS 连接 = 一个 GatewaySession（独立 AgentBridge，可切换 thread）。连接 URL 可带
 ``?token=``（鉴权）与 ``?workspace=``（本会话项目，open 时直接 pin 引擎）。本模块退化为
@@ -58,12 +22,13 @@ from pathlib import Path
 from fastapi import FastAPI, Request, Response, WebSocket, WebSocketDisconnect
 from fastapi.responses import FileResponse, JSONResponse
 
-from lumi.gateway.bootstrap import gateway_process
+from lumi.gateway.bootstrap import drain_runs, gateway_process
 from lumi.gateway.bridge import AgentBridge
 from lumi.gateway.broadcast import hub
+from lumi.gateway.projects import touch_project
 from lumi.gateway.session import GatewaySession
 from lumi.gateway.session_registry import registry
-from lumi.gateway.uploads import save_upload
+from lumi.gateway.uploads import MAX_UPLOAD_BYTES, UploadTooLarge, save_upload
 from lumi.utils.logger import logger
 
 
@@ -75,7 +40,11 @@ async def lifespan(app: FastAPI):
     from lumi.gateway.channels.manager import channels_runtime
 
     async with gateway_process(), channels_runtime():
-        yield
+        try:
+            yield
+        finally:
+            # 最先 drain：channels_runtime 退出会关渠道会话池，得在那之前让渠道轮停稳
+            await drain_runs()
 
 
 app = FastAPI(lifespan=lifespan)
@@ -163,7 +132,7 @@ async def upload_endpoint(
     远程后端专用：前端给的是**前端本机**路径，那台机器上并不存在这个文件，直接发路径
     等于发了个死引用（agent 一 read 就 404）。本地后端不走这里（路径本就有效，零拷贝）。
 
-    本函数只做传输侧的事——鉴权、文件名净化、大小闸门、状态码；字节落到哪、
+    本函数只做传输侧的事——鉴权、文件名净化、大小预检、状态码；字节落到哪、
     怎么写、日后怎么清，全归 gateway/uploads.py（与内联图片同一个存盘口）。
     """
     if not token_ok(getattr(app.state, "token", ""), token):
@@ -173,13 +142,16 @@ async def upload_endpoint(
     safe = Path(name).name
     if not safe or safe == ".." or "\x00" in safe:
         return JSONResponse({"error": "bad name"}, 400, headers=_CORS)
-    # 先看 Content-Length 再收流：超限的请求一个字节都不该落盘，也省掉半截文件的回滚
-    if int(request.headers.get("content-length", 0)) > _MAX_FILE_BYTES:
-        logger.warning("[uploads] %s 超过 %dMB 上限", safe, _MAX_FILE_BYTES // 1024**2)
+    # 先看 Content-Length 再收流：超限的请求一个字节都不该落盘；分块传输不带该头，
+    # 由 save_upload 边收边数兜住（超限即中止并删掉半截文件）
+    try:
+        if int(request.headers.get("content-length", 0)) > MAX_UPLOAD_BYTES:
+            raise UploadTooLarge(safe)
+        path = await save_upload(safe, request.stream())
+    except UploadTooLarge:
+        logger.warning("[uploads] %s 超过 %dMB 上限", safe, MAX_UPLOAD_BYTES // 1024**2)
         return JSONResponse({"error": "too large"}, 413, headers=_CORS)
-    return JSONResponse(
-        {"path": await save_upload(safe, request.stream())}, headers=_CORS
-    )
+    return JSONResponse({"path": path}, headers=_CORS)
 
 
 class WsChannel:
@@ -212,6 +184,8 @@ async def ws_endpoint(ws: WebSocket) -> None:
         # open 握手携带 ?workspace=：直接把本会话引擎 pin 到其项目（项目随会话绑定），
         # 省掉 ready 后再 switch_session rebase 的来回。缺省 / 无效则退回进程 cwd。
         await bridge.initialize(project_dir=ws.query_params.get("workspace", ""))
+        if bridge.workspace_bound:  # 打开项目里的会话 = 使用了该项目
+            touch_project(bridge.workspace_dir)
         session = GatewaySession(bridge, ch, hub)
         await session.start()
     try:

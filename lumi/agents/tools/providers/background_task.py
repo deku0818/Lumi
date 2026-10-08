@@ -9,8 +9,11 @@ from langchain_core.tools import tool
 from pydantic import BaseModel, Field
 
 from lumi.agents.runtime.bg_tasks import (
+    BackgroundTaskEntry,
     TaskStatus,
+    current_thread_id,
     get_task_registry,
+    owned_by,
 )
 from lumi.utils.logger import logger
 
@@ -69,10 +72,16 @@ async def background_task(
             return f"未知操作: {action}"
 
 
+def _own_task(task_id: str) -> BackgroundTaskEntry | None:
+    """本会话可见的任务；别的会话的按不存在处理。"""
+    entry = get_task_registry().get(task_id)
+    return entry if entry and owned_by(entry, current_thread_id.get()) else None
+
+
 def _format_task_list() -> str:
     """格式化所有后台任务为表格字符串。"""
-    registry = get_task_registry()
-    entries = registry.all_tasks()
+    thread_id = current_thread_id.get()
+    entries = [e for e in get_task_registry().all_tasks() if owned_by(e, thread_id)]
 
     if not entries:
         return "当前没有后台任务"
@@ -91,9 +100,7 @@ def _format_task_list() -> str:
 
 def _format_task_status(task_id: str) -> str:
     """格式化指定任务的详细状态。"""
-    registry = get_task_registry()
-    entry = registry.get(task_id)
-
+    entry = _own_task(task_id)
     if entry is None:
         return f"任务 {task_id} 不存在"
 
@@ -128,7 +135,7 @@ async def _handle_stop(task_id: str) -> str:
     """停止运行中的后台任务（bash/agent/workflow 统一经 cancel_background_task）。"""
     from lumi.agents.runtime.bg_process import cancel_background_task
 
-    entry = get_task_registry().get(task_id)
+    entry = _own_task(task_id)
     if entry is None:
         return f"任务 {task_id} 不存在"
     if entry.status != TaskStatus.RUNNING:

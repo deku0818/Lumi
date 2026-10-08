@@ -61,13 +61,14 @@
    与注入同源）；同时 `engine._rebuild_boundary` 把记忆目录并入工作区边界，使 `validate_path` 放行。
 
    **顺序很关键**：DENY 规则、只读短路、bypass-immune 都在 carve-out
-   **之前**，故用户的 DENY 规则与 readonly 模式仍能拦住记忆写入；carve-out 只免掉「本该问人」的审批。
+   **之前**，故用户的 DENY 规则仍能拦住记忆写入；carve-out 只免掉「本该问人」的审批。
 
 ## opt-in 语义
 
 `create_agent(enable_memory=...)` **默认 False**。持久记忆有副作用（写盘 / 改 prompt / 注入上下文 /
-写入免审批），故只有面向用户的对话入口 `bridge` 显式传 `True`；子 agent（`agent.py`）、workflow、cron
-走默认 False 天然干净。这样「需要记忆的少数显式声明」而非「不需要的多数记得排除」，新增调用方默认安全。
+写入免审批），故只有面向用户的对话入口 `bridge` 显式传 `True`；子 agent（`agent.py`）、workflow
+走默认 False 天然干净。cron 经 `cron_stream` → `AgentBridge.initialize` 执行，与普通会话一样带记忆，
+但 cron 线程不触发 autoDream（`auto_dream_stop_hook` 的 `is_cron_thread` 闸）。这样「需要记忆的少数显式声明」而非「不需要的多数记得排除」，新增调用方默认安全。
 
 ## 演进方向
 
@@ -121,8 +122,8 @@
 7. **dream 四阶段**：orient → gather → consolidate → prune。重心 **synthesis**，**不做自由判决** —— **切病根③**。
 8. **收尾**：写/更新记忆 + 规范化 `MEMORY.md`（剥 legacy `[type · 日期]` tag、把日期归位到 frontmatter，见召回端）；清 `transcriptDir`。
 
-**Dream 全程 per-project**：lastAt、游标、human 门、导出、写入全部按当前 project（sqlite 按 `project_key` 列隔离）。
-- lastAt/游标存独立 `~/.lumi/checkpoints/dream_state.db`（`dream_meta`/`dream_cursor` 两表，同步 `sqlite3`）：**不放记忆目录**避免清理 `.md` 时误删；原子写；`last_at` 从「文件 mtime 隐式」变显式列。丢失是软失败（退化重数、最坏多跑一次幂等 dream）。
+**Dream 全程 per-project**：lastAt、每 thread 快照时刻、导出、写入全部按当前 project（sqlite 按 `project_key` 列隔离）。
+- lastAt / 每 thread 快照时刻存独立 `~/.lumi/checkpoints/dream_state.db`（`dream_meta`/`dream_thread` 两表，同步 `sqlite3`）：**不放记忆目录**避免清理 `.md` 时误删；原子写；`last_at` 从「文件 mtime 隐式」变显式列。丢失是软失败（退化重数、最坏多跑一次幂等 dream）。
 - 传 `list_sessions(workspace=...)` 用**原始 workspace 串**（config metadata 的 `workspace_dir`），**不 `resolve()`**——SQL 按存储串精确匹配，resolve 改写路径会一个会话都捞不到（旧版 code-review 踩过）。
 
 ## 读取侧 · 召回端裁决
@@ -160,7 +161,7 @@
 
 所有 dream（Stop 钩子 / `/dream` / `/dream-session` / IM 每日定时）都经唯一底座 `_run_dream_fork`，其内部持 per-project `dream_lock.project_lock`（`asyncio.Lock`）跑完整个综合——同一份 MEMORY.md 恒只有一个写者，**任何入口都绕不开**；迟到者原地排队。`_in_flight` 集合降级为入口层 UX：手动命令的同步快返（"已有一次整理在进行中"），堵 fire-and-forget 的 create_task 与任务实际拿锁之间的空窗。
 
-IM 每日整理另有「先沉淀再压缩、dream 失败绝不压缩」的次序不变量与摘要载体不带 ts 的设计权衡，见 `feishu.md`《每日记忆整理》。
+IM 每日整理另有「先沉淀再压缩、dream 失败绝不压缩」的次序不变量与摘要载体继承 ts 的设计，见 `feishu.md`《每日记忆整理》。
 
 ## 旧基建复用清单
 

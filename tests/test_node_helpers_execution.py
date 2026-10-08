@@ -398,3 +398,34 @@ class TestRoundToolBudget:
         assert "已卸载到文件" in bash_msg.content
         assert "预览" in bash_msg.content
         assert content_size(bash_msg.content) < original_size  # 收缩恒真收缩
+
+
+async def test_offload_paths_unique_under_coarse_clock(tmp_path, monkeypatch):
+    # 回归：文件名只靠 %H%M%S%f 去重，Windows（Py3.12 时钟精度约 15ms）上同一轮两条
+    # 结果写进同一个文件，前一条的指针指向后一条的内容
+    from datetime import datetime
+
+    class _Frozen(datetime):
+        @classmethod
+        def now(cls, tz=None):
+            return datetime(2026, 1, 1, 12, 0, 0)
+
+    monkeypatch.setattr(lumi.utils.paths, "LUMI_TMP_ROOT", tmp_path / "root")
+    monkeypatch.setattr(execution, "datetime", _Frozen, raising=False)
+    await _try_offload_to_file("bash", "A" * 100, max_bytes=10)
+    await _try_offload_to_file("bash", "B" * 100, max_bytes=10)
+    assert len(list((tmp_path / "root" / "offload").iterdir())) == 2
+
+
+async def test_list_content_fallback_truncation_keeps_text(monkeypatch):
+    # 回归：卸载失败回退截断时，list[text] 形态的结果被截成空，模型什么都拿不到
+    def _fail(*args):
+        raise OSError("disk full")
+
+    monkeypatch.setattr(execution, "write_offload_file", _fail)
+    msg = ToolMessage(
+        content=[{"type": "text", "text": "y" * 5000}], tool_call_id="t", name="mcp_x"
+    )
+    with patch.object(execution, "get_config", return_value=_fake_config(1000, 10**6)):
+        await truncate_tool_results([msg])
+    assert "yyyy" in content_to_str(msg.content)

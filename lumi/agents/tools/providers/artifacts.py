@@ -15,6 +15,8 @@ import stat
 from langchain_core.tools import tool
 from pydantic import BaseModel, Field
 
+from lumi.agents.permissions.workspace import resolve_tool_path
+
 # kind 决定前端渲染形态：image=缩略图，其余=类型图标卡片。
 # 扩展名优先（mimetypes 对 .md/.ts 等返回 None），mime 兜底。
 _KIND_BY_EXT: dict[str, str] = {
@@ -88,7 +90,7 @@ ARTIFACTS_DESCRIPTION = """把你产出的文件作为「制品」呈现给用�
   docx / xlsx / pptx 在窗口内渲染；视频 / 音频 / 其它类型给出「用系统应用打开」
 
 约定：
-- 传绝对路径；文件须在当前工作区内（受工作区边界约束，越界会被拒）
+- 传绝对路径；工作区外的文件需用户审批
 - 顺序即展示顺序，把用户最该先看的放第一个
 - 只呈现、不改动文件——文件留在原路径，不复制、不上传
 - 返回每个文件的 path / name / mime_type / size / kind，顺序与输入一致；
@@ -100,7 +102,7 @@ def artifacts(filepaths: list[str]) -> str:
     """校验本地文件并返回制品元数据 JSON，供 desktop 前端渲染。"""
     results = []
     for raw in filepaths:
-        path = os.path.abspath(os.path.expanduser(raw))
+        path = str(resolve_tool_path(raw))
         # 单次 stat：避免 isfile→getsize 之间文件被删的 TOCTOU（一致快照，且不会抛）
         try:
             st = os.stat(path)

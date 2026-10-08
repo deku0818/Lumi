@@ -1,13 +1,17 @@
 """Shell 会话管理测试"""
 
+import asyncio
 import sys
 import tempfile
+import time
+from pathlib import Path
 
 import pytest
 
 from lumi.agents.runtime.shell_session import (
     LocalShellSession,
     ShellSessionManager,
+    _BoundedOutputBuffer,
 )
 
 # Windows 下 shell 会话使用 cmd.exe，bash 语法不适用
@@ -63,6 +67,123 @@ async def test_execute_timeout():
         assert not result.success
     finally:
         await s.close()
+
+
+def _procs_with(marker: str) -> list[str]:
+    """/proc 里命令行含 marker 的进程（不依赖 pgrep/ps）。"""
+    found = []
+    for cmdline in Path("/proc").glob("[0-9]*/cmdline"):
+        try:
+            args = cmdline.read_bytes().replace(b"\0", b" ").decode()
+        except OSError:
+            continue
+        if marker in args:
+            found.append(args)
+    return found
+
+
+@_SKIP_WINDOWS
+async def test_timeout_is_wall_clock_not_per_line(shell_session):
+    # 回归：超时曾按「单行空闲」计时，持续有输出的命令永不超时、前台回合被无界挂死
+    result = await asyncio.wait_for(
+        shell_session.execute("while true; do echo x; sleep 0.1; done", timeout=1),
+        timeout=10,
+    )
+    assert result.timed_out
+
+
+@_SKIP_WINDOWS
+async def test_timeout_kills_running_command(shell_session):
+    # 回归：超时只杀掉 /bin/sh 包装层，bash 与正在跑的命令成为孤儿
+    await shell_session.execute("sleep 313.7", timeout=0.5)
+    await asyncio.sleep(0.5)
+    assert _procs_with("sleep 313.7") == []
+
+
+@_SKIP_WINDOWS
+async def test_cancel_kills_command_and_next_call_is_clean(shell_session):
+    # 回归：取消（stop / 切会话 / 断连）不终止 shell 里的命令，下一条命令排在它后面，
+    # 还会读到它的输出和哨兵
+    task = asyncio.create_task(shell_session.execute("sleep 3; echo stale", timeout=30))
+    await asyncio.sleep(0.3)
+    task.cancel()
+    with pytest.raises(asyncio.CancelledError):
+        await task
+    started = time.monotonic()
+    result = await shell_session.execute("echo fresh", timeout=10)
+    assert result.stdout.strip() == "fresh"
+    assert time.monotonic() - started < 2
+
+
+@_SKIP_WINDOWS
+@pytest.mark.parametrize(
+    "command",
+    [
+        "read x; echo got:[$x]",
+        "cat",
+        "python3 -c 'import sys; print(len(sys.stdin.read()))'",
+        'echo "abc',
+    ],
+)
+async def test_stdin_and_syntax_errors_do_not_desync(shell_session, tmp_path, command):
+    # 回归：命令与哨兵共用 shell 的 stdin——读 stdin 的命令吃掉包装行 / 挂满超时，
+    # 未闭合引号吞掉哨兵，之后每条命令都失步
+    await shell_session.execute(f"cd {tmp_path} && export KEEP=1")
+    result = await asyncio.wait_for(shell_session.execute(command, timeout=10), 5)
+    assert not result.timed_out
+    assert "__lumi_ec" not in result.stdout
+    followup = await shell_session.execute("echo $KEEP; pwd", timeout=5)
+    assert followup.stdout.split() == ["1", str(tmp_path)]
+
+
+@_SKIP_WINDOWS
+async def test_get_cwd_not_blocked_by_running_command(shell_session, tmp_path):
+    # 回归：get_cwd 经 execute 持会话锁，后台 bash 要排到前台长命令结束才能起
+    await shell_session.execute(f"cd {tmp_path}")
+    task = asyncio.create_task(shell_session.execute("sleep 3", timeout=10))
+    await asyncio.sleep(0.2)
+    assert shell_session.cwd == str(tmp_path)
+    task.cancel()
+    with pytest.raises(asyncio.CancelledError):
+        await task
+    # shell 被丢弃重建，回到初始目录
+    assert shell_session.cwd == shell_session._working_dir
+
+
+async def test_sentinel_line_carries_cwd():
+    # cwd 随哨兵行带回（Windows 的 %CD% 同格式），路径含空格也完整
+    reader = asyncio.StreamReader()
+    reader.feed_data(b"out\nSENTINEL 3 D:\\my proj\n")
+    reader.feed_eof()
+    result = await LocalShellSession._collect_output(
+        reader, "SENTINEL", _BoundedOutputBuffer(1024)
+    )
+    assert result == (3, "D:\\my proj")
+
+
+@_SKIP_WINDOWS
+async def test_line_longer_than_stream_limit(shell_session):
+    # 回归：单行超过 StreamReader 上限（64KB）时 readline 抛 ValueError，整条命令报内部错误
+    result = await shell_session.execute(
+        "head -c 200000 /dev/zero | tr '\\0' a; echo; echo after", timeout=10
+    )
+    assert result.success
+    assert result.stdout.splitlines()[-1] == "after"
+    followup = await shell_session.execute("echo ok", timeout=5)
+    assert followup.stdout.strip() == "ok"
+
+
+async def test_long_line_already_buffered_keeps_next_line():
+    # 超长行连同换行已整段在缓冲里（读端落后于写端）时，下一行（可能就是哨兵）不能被吞
+    reader = asyncio.StreamReader()
+    reader.feed_data(b"a" * 70000 + b"\nafter\nSENTINEL 0\n")
+    reader.feed_eof()
+    buffer = _BoundedOutputBuffer(30 * 1024)
+    exit_code, _ = await asyncio.wait_for(
+        LocalShellSession._collect_output(reader, "SENTINEL", buffer), timeout=5
+    )
+    assert exit_code == 0
+    assert str(buffer).splitlines()[-1] == "after"
 
 
 @_SKIP_WINDOWS

@@ -9,7 +9,7 @@
 非流式 RPC 同样 spawn 成独立 task：部分方法需等待 run.lock（与流式轮互斥），
 inline await 会卡住接收循环，使 stop 帧在整轮结束前都读不到。
 
-帧协议（client ↔ server）见 channels/ws.py 模块文档。
+帧协议见 channels/ws.py，方法/事件清单见 protocol/events.json。
 """
 
 from __future__ import annotations
@@ -18,10 +18,9 @@ import asyncio
 import ntpath
 import os
 import time
-from contextlib import suppress
+from contextlib import AsyncExitStack, suppress
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import TYPE_CHECKING
 
 from lumi.agents.core.meta_message import (
     declared_items,
@@ -29,6 +28,8 @@ from lumi.agents.core.meta_message import (
     should_show_human_message,
     visible_user_text,
 )
+from lumi.agents.runtime.bg_process import cancel_thread_bg_tasks
+from lumi.agents.runtime.bg_tasks import get_task_registry
 from lumi.agents.tools.providers.todo import todos_payload
 from lumi.gateway import (
     channel_rpc,
@@ -39,6 +40,7 @@ from lumi.gateway import (
     project_config,
 )
 from lumi.gateway.bridge import AgentBridge, EventKind, providers
+from lumi.gateway.bridge.core import available_commands
 from lumi.gateway.broadcast import BroadcastHub, serialize_bg_tasks
 from lumi.gateway.channel import Channel
 from lumi.gateway.channels.manager import manager
@@ -51,6 +53,7 @@ from lumi.gateway.projects import (
     touch_project,
 )
 from lumi.gateway.protocol import ServerEvent, bridge_event_to_wire, event_frame
+from lumi.gateway.session_registry import SessionRegistry, registry
 from lumi.sessions import session_model
 from lumi.sessions.session_meta import delete_meta, load_all, update_meta
 from lumi.sessions.session_store import list_sessions
@@ -62,9 +65,6 @@ from lumi.utils.constants import (
 from lumi.utils.logger import logger
 from lumi.utils.thread_id import generate_thread_id, is_cron_thread
 
-if TYPE_CHECKING:
-    from lumi.gateway.session_registry import SessionRegistry
-
 # 需后台 task 承载、可被 stop 取消的流式方法。resume 改非流式控制 RPC（在途审批应答）：
 # 审批挂起期间原 prompt 流仍活、run.lock 仍持，流式方法会被拒成「已有任务在执行」。
 _STREAMING_METHODS = frozenset(
@@ -74,6 +74,10 @@ _STREAMING_METHODS = frozenset(
 # 断连续接（Case 1）：detached 会话无人接回的兜底回收时长（保底防进程内泄漏）
 _DETACH_TTL_SECONDS = 8 * 3600
 _WINDOWS_ROOTS_PATH = "__lumi_windows_roots__"
+
+# 进程内全部活会话（在线 + detached，start 登记、aclose 注销）：删会话据此找到
+# 持有该 thread 的会话先收尾其在途轮
+_live: set[GatewaySession] = set()
 
 
 def _windows_drive_roots() -> list[str]:
@@ -172,18 +176,21 @@ class _RunState:
     """单条连接的运行协调状态。
 
     lock 串行化所有会改写 bridge 运行态的操作（用户轮 / 后台通知轮 / 切换会话），
-    确保同一时刻 bridge 上只跑一件事。在途审批期间该轮仍活、持着 lock，后台通知轮抢锁
-    自然被挡，无需额外旗标。task 持有当前正在跑的用户流式轮——独立于主接收循环，以便
-    stop 帧能取消它。
+    确保同一时刻 bridge 上只跑一件事。两类轮都由自己的 task 在 task 内持锁（在途审批期间
+    该轮仍活、持着 lock）。task 持有当前的轮——独立于主接收循环，以便 stop 帧能取消它；
+    登记前先查 has_active_turn，查与登记之间无 await，故不会顶掉已排队的轮。
     """
 
     lock: asyncio.Lock = field(default_factory=asyncio.Lock)
     task: asyncio.Task | None = None
     # 当前轮开始的墙钟时间（epoch 毫秒）：重连 / 重载后的前端据此续算本轮计时，不归零
     started_at: int = 0
+    # 当前轮是否为后台通知合成轮（无用户在等）——断连时不值得 detach 续接
+    synthetic: bool = False
 
-    def begin(self, task: asyncio.Task) -> None:
+    def begin(self, task: asyncio.Task, *, synthetic: bool = False) -> None:
         self.task = task
+        self.synthetic = synthetic
         self.started_at = int(time.time() * 1000)
 
     def cancel_once(self) -> None:
@@ -206,12 +213,13 @@ class _RunState:
 async def _list_sessions(bridge: AgentBridge, params: dict) -> dict:
     # workspace="" → 跨所有项目列出（方案甲机器→项目分组树由前端按 workspace_dir 分组）；
     # 不再按当前进程 cwd 过滤，故切项目不影响列表完整性。
+    meta = load_all()
     sessions = await list_sessions(
         bridge.graph,
         workspace="",
         limit=params.get("limit", 50),
+        include=frozenset(tid for tid, e in meta.items() if e.get("pinned")),
     )
-    meta = load_all()
     out = []
     for s in sessions:
         entry = meta.get(s.thread_id, {})
@@ -311,6 +319,9 @@ async def _resume(session: GatewaySession, params: dict) -> dict:
 
 
 async def _list_commands(session: GatewaySession, params: dict) -> dict:
+    # 项目主页（尚无会话）经目标机器的控制连接按项目取：视角同该项目的新 desktop 会话
+    if workspace := params.get("workspace"):
+        return {"commands": available_commands(True, workspace=workspace)}
     return {"commands": session._bridge.list_commands()}
 
 
@@ -330,19 +341,18 @@ async def _test_provider(session: GatewaySession, params: dict) -> dict:
     )
 
 
-# 与其余 provider 写操作一致持锁（store 的读-改-写，见 _set_effort）
+# provider 写类 RPC 改的是机器级配置（provider_store 的同步读改写，单事件循环内不会
+# 交错），不碰本会话 thread 的运行态，故不持 _run.lock——持锁只会让改档位 / 默认模型
+# 一直挂到本轮结束；新配置在下一轮开跑前对齐生效。
 async def _set_provider(session: GatewaySession, params: dict) -> dict:
-    async with session._run.lock:
-        return providers.set_provider(
-            params.get("provider", ""), params.get("model", "")
-        )
+    return providers.set_provider(params.get("provider", ""), params.get("model", ""))
 
 
 async def _set_session_model(session: GatewaySession, params: dict) -> dict:
     """切换**本会话**的模型：落 sidecar + 即刻改运行时 context。
 
     与 set_provider（改的是新会话默认）分开：模型是会话属性，切一个会话不该动别人的。
-    持锁同 set_provider——改的是共享 context。
+    与上面的机器级写不同，这里改的是本会话共享的运行时 context，须与在途轮互斥而持锁。
     """
     tid = session._bridge.current_thread_id
     async with session._run.lock:
@@ -353,38 +363,28 @@ async def _set_session_model(session: GatewaySession, params: dict) -> dict:
 
 
 async def _save_provider(session: GatewaySession, params: dict) -> dict:
-    async with session._run.lock:
-        return providers.save_provider(params.get("profile", {}))
+    return providers.save_provider(params.get("profile", {}))
 
 
 async def _delete_provider(session: GatewaySession, params: dict) -> dict:
-    async with session._run.lock:
-        return providers.delete_provider(params.get("id", ""))
+    return providers.delete_provider(params.get("id", ""))
 
 
 async def _set_effort(session: GatewaySession, params: dict) -> dict:
-    # 与其余 provider 写操作一致持锁：set_effort 也走 provider_store load→改→save，
-    # 不持锁会与并发的 set/save/delete_provider 互相 clobber（读改写丢更新）。
-    async with session._run.lock:
-        return providers.set_effort(
-            params.get("provider", ""), params.get("model", ""), params.get("level", "")
-        )
+    return providers.set_effort(
+        params.get("provider", ""), params.get("model", ""), params.get("level", "")
+    )
 
 
 async def _set_classifier(session: GatewaySession, params: dict) -> dict:
-    # 同样走 provider_store load→改→save，持锁防与并发 provider 写操作 clobber。
-    async with session._run.lock:
-        return providers.set_classifier(
-            params.get("provider", ""), params.get("model", "")
-        )
+    return providers.set_classifier(params.get("provider", ""), params.get("model", ""))
 
 
 async def _set_titler(session: GatewaySession, params: dict) -> dict:
-    async with session._run.lock:
-        return providers.set_titler(params.get("provider", ""), params.get("model", ""))
+    return providers.set_titler(params.get("provider", ""), params.get("model", ""))
 
 
-# 刻意不持 _run.lock：与 set_provider 相反，这里就是要在运行中改共享 context 的
+# 刻意不持 _run.lock：与 set_session_model 相反，这里就是要在运行中改共享 context 的
 # tool_mode——单字段幂等赋值，只影响后续 is_use_tool 路由判决，实时切换正是需求本身。
 async def _set_tool_mode(session: GatewaySession, params: dict) -> dict:
     return session._bridge.set_tool_mode(params.get("tool_mode", "default"))
@@ -399,8 +399,8 @@ async def _set_workspace(session: GatewaySession, params: dict) -> dict:
 
 
 async def _list_projects(session: GatewaySession, params: dict) -> dict:
-    # current = 本会话项目（随会话绑定），而非进程 cwd
-    return {"projects": list_projects(), "current": session._bridge.workspace_dir}
+    # 不下发「当前项目」：项目随会话绑定，高亮由前端按活动会话的项目自己定
+    return {"projects": list_projects()}
 
 
 async def _add_project(session: GatewaySession, params: dict) -> dict:
@@ -483,6 +483,7 @@ async def _project_resource_write(session: GatewaySession, params: dict) -> dict
         params.get("name", ""),
         params.get("content", ""),
         params.get("file", ""),
+        bool(params.get("create", False)),
     )
 
 
@@ -579,6 +580,9 @@ async def _switch_session(session: GatewaySession, params: dict) -> dict:
             bound_this_call = True
         if changing_thread and not bound_this_call:
             session._bridge.mark_workspace_unbound()
+    # 「最近使用」随会话绑定刷新（desktop 绑项目只走 open 握手与这里，不调 set_workspace）
+    if bound_this_call:
+        touch_project(session._bridge.workspace_dir)
     # cron 执行直播：切到 cron 线程即登记为其观测者，运行中则实时收到事件流。非 cron
     # 线程不登记（避免给每条普通会话空起 drain task）；已完成的 cron 线程也会登记一个空转
     # 观测者（成本 = 一个 await queue.get 阻塞的协程，可忽略），切走/关闭即注销。
@@ -604,8 +608,24 @@ async def _rename_session(session: GatewaySession, params: dict) -> dict:
 
 
 async def _delete_session(session: GatewaySession, params: dict) -> dict:
+    """删会话：先停后删。
+
+    该 thread 可能正在别的连接（desktop 每会话一条连接）或 registry 里 detached 的
+    会话上跑：不先收尾，删后该轮会续写 checkpoint、会话「复活」。故持有者先收尾在途
+    轮（挂审批以拒绝收尾，否则取消并等其写回完毕），detached 的直接回收；删除期间持
+    各持有者的 run.lock，通知轮无从在删除途中起合成轮往该 thread 写回；最后停掉其
+    后台任务、丢弃其待认领通知（删后再无人认领）。
+    """
     tid = params.get("thread_id", "")
-    async with session._run.lock:
+    owners = [s for s in _live if s.current_thread_id == tid]
+    for owner in owners:
+        await owner._finalize_active_turn(wait=True)
+    if (detached := registry.take(tid)) is not None:
+        await detached.aclose()
+    async with AsyncExitStack() as stack:
+        for owner in owners:
+            await stack.enter_async_context(owner._run.lock)
+        await cancel_thread_bg_tasks(tid)
         # 渠道会话（清空会话）：持渠道侧运行锁再删，避开在途轮把删掉的历史写回；
         # 非渠道 thread 不在任何池里，thread_lock 恒返回 None。
         # 轮可能跑数分钟，等 5s 仍占用则如实报错让用户稍后再试，不无限挂 RPC。
@@ -621,6 +641,7 @@ async def _delete_session(session: GatewaySession, params: dict) -> dict:
                 chan_lock.release()
         else:
             await session._bridge.delete_thread(tid)
+        get_task_registry().notification_queue.drain_for(tid)
     delete_meta(tid)  # 渠道会话的模型覆盖同存这条 meta，随之一并清
     # 渠道会话：广播给其他连接/旁观视图刷新（与渠道侧 /clear 同口径）
     if channel_name := _channel_of(tid):
@@ -646,14 +667,10 @@ def _owns_bg_task(bridge: AgentBridge, task_id: str) -> bool:
 
     不存在 → True（交下游返回未停止/未移除）；归属为空 → True（无主任务任一会话可清）。
     """
-    from lumi.agents.runtime.bg_tasks import get_task_registry
+    from lumi.agents.runtime.bg_tasks import get_task_registry, owned_by
 
     entry = get_task_registry().get(task_id)
-    return (
-        entry is None
-        or not entry.thread_id
-        or entry.thread_id == bridge.current_thread_id
-    )
+    return entry is None or owned_by(entry, bridge.current_thread_id)
 
 
 async def _read_bg_task_output(session: GatewaySession, params: dict) -> dict:
@@ -781,8 +798,6 @@ class GatewaySession:
         self._notif_task: asyncio.Task | None = None
         # 断连续接：detached（断开但仍挂着活跃轮）期间的 TTL 兜底回收 task
         self._ttl_task: asyncio.Task | None = None
-        # 当前 _run.task 是否为后台通知合成轮（无用户在等）——断连时不值得 detach 续接
-        self._synthetic_run: bool = False
         # 标题生成状态（按 thread）：pending 防同线程并发生成（后发的会抢在
         # 首条话题消息前定标题）；done 是本连接已知不必再试的 thread（已定稿 /
         # 手动名 / 生成失败放弃），使帧路径免于每条消息读盘
@@ -815,6 +830,7 @@ class GatewaySession:
 
     async def start(self) -> None:
         """握手：发 gateway.ready、注册广播、拉起后台通知轮询。"""
+        _live.add(self)
         await self._channel.send(self._ready_frame())
         await self._attach_channel()
         # 后台任务完成通知轮询：与主接收循环并发，空闲时把队列通知注入新一轮推回前端
@@ -843,7 +859,7 @@ class GatewaySession:
         自身正挂着审批）。纯合成轮断连应正常 aclose，不占 registry / per-thread shell 满 8h。"""
         if not self.has_active_turn():
             return False
-        return not self._synthetic_run or bool(self._bridge.pending_approval_events())
+        return not self._run.synthetic or bool(self._bridge.pending_approval_events())
 
     def detach(self, registry: SessionRegistry) -> GatewaySession | None:
         """WS 断开但本会话仍有活跃轮：不 aclose，原地挂着等同 thread 重连续接。
@@ -853,6 +869,7 @@ class GatewaySession:
         thread 旧会话（罕见，调用方 aclose 它）。
         """
         self._hub.unregister(self._channel)
+        self._hub.remove_observer_channel(self._channel)  # reattach 时给新 channel 重登
         self._channel = _NoopChannel()
         # 停掉通知轮：无 WS 期间没有可推送的对象，继续跑只会把本 thread 的通知 drain 进
         # NoopChannel 白白丢弃（reattach 时再起）。
@@ -882,6 +899,8 @@ class GatewaySession:
             self._ttl_task = None
         self._channel = channel
         await self._attach_channel()
+        if is_cron_thread(self.current_thread_id):
+            self._hub.add_observer(self.current_thread_id, channel)
         # 重起通知轮（detach 时停掉了）：恢复后台任务完成反馈推送
         if self._notif_task is None:
             self._notif_task = asyncio.create_task(self._notification_loop())
@@ -938,6 +957,7 @@ class GatewaySession:
 
     async def aclose(self) -> None:
         """连接收尾：注销广播、取消 TTL/通知/RPC/流式 task、关闭 bridge。"""
+        _live.discard(self)
         if self._ttl_task is not None:
             self._ttl_task.cancel()
             self._ttl_task = None
@@ -1140,16 +1160,27 @@ class GatewaySession:
         """
         while True:
             await asyncio.sleep(NOTIFICATION_POLL_INTERVAL)
-            # 无归属本 thread 的通知（绝大多数 tick）时不去抢 run.lock，避免在流式轮
-            # 后面排队——渠道会话的通知会在队列里合法滞留（等渠道 poller 认领），
-            # 全局非空不代表本会话有活干。审批挂起期间该轮持着 run.lock，下面
-            # async with 自然被挡到审批结束，不会插入到挂起轮中间。
+            # 无归属本 thread 的通知（绝大多数 tick）时不起轮——渠道会话的通知会在队列
+            # 里合法滞留（等渠道 poller 认领），全局非空不代表本会话有活干。
             if not self._bridge.has_notifications(self._bridge.current_thread_id):
                 continue
             # 渠道会话旁观连接不消费通知：注入 meta 轮 = 绕过渠道会话锁并发写共享
             # thread（与 handle_frame 只读守卫同因）。通知留在队列，宁滞留不写坏。
             if _channel_of(self._bridge.current_thread_id):
                 continue
+            # 已有轮（运行中 / 排队等锁 / 挂审批）就等它跑完，不顶掉它的 _run.task
+            if self.has_active_turn():
+                continue
+            # 合成轮自成 task、在 task 内持锁：本循环被取消（detach / aclose）不连坐它，
+            # 也不会在它仍挂着时释放锁。挂到 _run.task 使 stop 可取消、期间的新消息走
+            # handle_frame 的 busy-check 得到「已有任务在执行」
+            self._run.begin(
+                asyncio.create_task(self._run_synthetic_turn()), synthetic=True
+            )
+
+    async def _run_synthetic_turn(self) -> None:
+        """一轮后台通知合成轮：持锁认领本 thread 的通知并 pump。"""
+        try:
             async with self._run.lock:
                 # 只认领归属本连接当前 thread 的通知——队列是进程级共享的，
                 # 按归属认领才不会把其他会话的后台任务通知抢到本会话注入
@@ -1157,40 +1188,23 @@ class GatewaySession:
                     self._bridge.current_thread_id
                 )
                 if not hint:
-                    continue
+                    return
                 logger.info("[WS] 注入后台任务通知")
-                # 挂到 _run.task：否则 stop 取消不了这一轮，且新 send_message 会卡在
-                # run.lock 上直到 meta 轮跑完（UI 挂死）。设为 task 后，stop 可取消、
-                # 期间的新消息走 handle_frame 的 busy-check 得到「已有任务在执行」。
-                # 标记 meta 轮：断连时它不值得 detach 续接（无用户在等，见 should_detach）
-                self._synthetic_run = True
-                gen = self._bridge.stream_response(
-                    hint, tool_mode="default", synthetic=True
-                )
-                pump = asyncio.create_task(self._pump_with_finalize(gen))
-                self._run.begin(pump)
-                keep_handle = False
                 try:
-                    # shield：裸 await task 时 waiter 被取消会经 _fut_waiter 连坐
-                    # 取消 pump——detach 停通知循环就会顺手杀掉合成轮，违反其
-                    # 「run task 与挂起 Future 原样存活」契约（修复前的老行为）
-                    await asyncio.shield(pump)
+                    await self._pump_with_finalize(
+                        self._bridge.stream_response(
+                            hint, tool_mode="default", synthetic=True
+                        )
+                    )
                 except asyncio.CancelledError:
-                    if asyncio.current_task().cancelling() > 0:
-                        # 被取消的是通知循环自身（detach 停循环 / aclose 收尾）：
-                        # 合成轮原样存活（detach 续接用），句柄保留供 aclose 经
-                        # _run.task 统一取消（图收尾内置于 pump）。直接退出循环
-                        keep_handle = True
-                        raise
-                    # stop 取消了轮任务：图收尾已内置于 pump，补发 turn.complete 即可
+                    # stop / aclose 取消了本轮：图收尾已内置于 pump，补发 turn.complete
+                    # 即可（还在等锁时被取消则前端从未见过这一轮，不补发）
                     await self._finish_cancelled_turn()
                 except Exception:
                     # 连接断裂等：图收尾已内置于 pump，仅记录不致命
                     logger.error("[WS] 后台通知轮执行失败", exc_info=True)
-                finally:
-                    if not keep_handle:
-                        self._synthetic_run = False
-                        self._run.clear_if(pump)
+        finally:
+            self._run.clear_if(asyncio.current_task())
 
     async def _dispatch(self, method: str, params: dict) -> dict:
         """执行一个非流式 RPC 方法并返回结果（在独立 task 中运行，见 _run_rpc）。
@@ -1209,7 +1223,7 @@ class GatewaySession:
     async def _run_rpc(self, rid, method: str, params: dict) -> None:
         """在独立 task 中执行非流式 RPC 并回发响应帧。
 
-        需要 run.lock 的方法（delete_session / set_provider 等）在流式轮进行中
+        需要 run.lock 的方法（switch_session / set_session_model 等）在流式轮进行中
         会等锁——若 inline await 在接收循环里，等锁期间连 stop 帧都读不到。
         """
         try:

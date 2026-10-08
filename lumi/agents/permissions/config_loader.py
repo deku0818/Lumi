@@ -1,11 +1,10 @@
 """工具权限控制系统 - 配置加载器
 
-负责三级配置文件的发现、解析（支持 JSONC）、合并和持久化。
+负责三级配置文件的发现、解析（支持 JSONC）与合并（只读，不写配置文件）。
 """
 
 from __future__ import annotations
 
-import json
 from pathlib import Path
 from typing import Any
 
@@ -15,7 +14,6 @@ from lumi.agents.permissions.models import (
     PermissionConfig,
     PermissionRule,
 )
-from lumi.utils.atomic_io import atomic_write_text
 from lumi.utils.jsonc import parse_jsonc
 from lumi.utils.logger import logger
 from lumi.utils.paths import lumi_home
@@ -67,53 +65,27 @@ def _config_from_dict(data: dict[str, Any]) -> PermissionConfig:
     Returns:
         PermissionConfig 实例
     """
-    workspaces = tuple(data.get("workspaces", []))
+    workspaces = data.get("workspaces", [])
+    if not isinstance(workspaces, list):
+        # 字符串会被逐字符展开（"/opt/x" → "/" 进边界），非列表一律丢弃
+        logger.warning("workspaces 须为路径列表，已忽略: %r", workspaces)
+        workspaces = []
+    valid = tuple(w for w in workspaces if isinstance(w, str) and w)
+    if len(valid) != len(workspaces):
+        logger.warning("跳过无效 workspace 项: %r", workspaces)
     raw_permissions = data.get("permissions", {})
     permissions = _parse_rules(raw_permissions) if raw_permissions else ()
     return PermissionConfig(
-        workspaces=workspaces,
+        workspaces=valid,
         permissions=permissions,
     )
-
-
-def _config_to_dict(config: PermissionConfig) -> dict[str, Any]:
-    """将 PermissionConfig 序列化为字典（新格式）。
-
-    Args:
-        config: 权限配置
-
-    Returns:
-        可 JSON 序列化的字典
-    """
-    allow_list: list[str] = []
-    deny_list: list[str] = []
-    ask_list: list[str] = []
-    for r in config.permissions:
-        if r.permission == Permission.ALLOW:
-            allow_list.append(r.tool)
-        elif r.permission == Permission.DENY:
-            deny_list.append(r.tool)
-        elif r.permission == Permission.ASK:
-            ask_list.append(r.tool)
-
-    permissions: dict[str, list[str]] = {}
-    if allow_list:
-        permissions["allow"] = allow_list
-    if deny_list:
-        permissions["deny"] = deny_list
-    if ask_list:
-        permissions["ask"] = ask_list
-
-    return {
-        "workspaces": list(config.workspaces),
-        "permissions": permissions,
-    }
 
 
 def _merge_configs(configs: list[PermissionConfig]) -> PermissionConfig:
     """合并多级配置，高优先级覆盖低优先级同工具规则。
 
-    合并策略：按优先级从低到高遍历，同一工具表达式的规则以最后出现的为准。
+    合并策略：按优先级从低到高遍历，同一工具表达式的规则以最后出现的为准，
+    但 deny 不可被覆盖（任何层、同文件内的 allow/ask 都盖不掉已有的 deny）。
     最终追加 DEFAULT_RULES 中未被覆盖的规则。
 
     Args:
@@ -133,6 +105,9 @@ def _merge_configs(configs: list[PermissionConfig]) -> PermissionConfig:
                 all_workspaces.append(ws)
                 seen_workspaces.add(ws)
         for rule in cfg.permissions:
+            prev = rule_map.get(rule.tool)
+            if prev is not None and prev.permission == Permission.DENY:
+                continue
             rule_map[rule.tool] = rule
 
     # 追加默认规则（仅当未被用户规则覆盖时）
@@ -181,11 +156,6 @@ class ConfigLoader:
         # mtime 缓存，用于检测文件变更
         self._mtimes: dict[Path, float] = {}
 
-    @property
-    def local_config_path(self) -> Path:
-        """项目本地配置文件路径。"""
-        return self._config_paths[-1]
-
     def load(self) -> PermissionConfig:
         """加载并合并所有层级的配置，返回最终配置。
 
@@ -225,31 +195,12 @@ class ConfigLoader:
                 logger.warning("权限配置文件格式错误（非对象）: %s", path)
                 return None
             return _config_from_dict(data)
-        except json.JSONDecodeError as e:
-            logger.warning("权限配置文件 JSON 语法错误 %s: %s", path, e)
+        except ValueError as e:  # 含 JSONDecodeError / UnicodeDecodeError
+            logger.warning("权限配置文件解析失败 %s: %s", path, e)
             return None
         except OSError as e:
             logger.warning("读取权限配置文件失败 %s: %s", path, e)
             return None
-
-    def save_local(self, config: PermissionConfig) -> None:
-        """将配置写入项目本地配置文件（原子写入）。
-
-        目录不存在时自动创建。
-
-        Args:
-            config: 要写入的配置
-        """
-        target = self.local_config_path
-        data = _config_to_dict(config)
-        content = json.dumps(data, indent=2, ensure_ascii=False) + "\n"
-
-        # 复用 utils.atomic_io 的单一原子写实现（内部建目录 + 失败清理临时文件）
-        try:
-            atomic_write_text(target, content)
-        except OSError as e:
-            logger.error("写入权限配置文件失败 %s: %s", target, e)
-            raise
 
     def needs_reload(self) -> bool:
         """检查配置文件是否有变更（基于 mtime）。

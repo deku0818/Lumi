@@ -1,6 +1,6 @@
 # bash 工具使用指南
 
-`bash` 工具在持久化 shell 会话中执行命令，保留环境变量、别名、工作目录等状态。支持超时控制、后台执行和输出大小限制。
+`bash` 工具在持久化 shell 会话中执行命令，保留环境变量、工作目录等状态。支持超时控制、后台执行和输出大小限制。
 
 ---
 
@@ -21,9 +21,11 @@
 
 - `export FOO=bar` 之后 `echo $FOO` 仍然有 `bar`
 - `cd somedir` 之后后续命令在新目录下执行
-- 别名（如果在启动 profile 里定义）持续可用
+- 同一会话的 bash 调用串行执行（前一条跑完才轮到下一条）
 
-会话在线程结束或 `ShellSessionManager.close_all()` 时关闭。Windows 下使用 `cmd.exe`，bash-only 语法不可用。
+shell 是非交互的 `bash --norc --noprofile`：不读 `~/.bashrc` / profile，别名与 profile 里的设置都不生效，只继承服务进程的环境（`PATH` 末尾追加了工具箱 `bin`）。命令的 stdin 接 `/dev/null`，`read`、无参 `cat` 这类等输入的命令会立即拿到 EOF，不会挂住会话。
+
+会话在被删除或服务退出（`ShellSessionManager.close_all()`）时关闭。Windows 下使用 `cmd.exe`，bash-only 语法不可用。
 
 ---
 
@@ -49,11 +51,11 @@ yes | head -n 100000 > /tmp/big.log
 
 ## 后台执行
 
-`run_in_background=True` 时命令交给 `BgManager`，立即返回 task ID 与输出文件路径：
+`run_in_background=True` 时命令交给 `BackgroundTaskManager`，在当前 shell 的工作目录下另起进程，立即返回 task ID 与输出文件路径：
 
 ```
 后台任务已启动
-Task ID: bg-task-xxx
+Task ID: bg_xxx
 Output File: /path/to/output.log
 ```
 
@@ -61,7 +63,7 @@ Output File: /path/to/output.log
 
 后台默认**不限时**（起常驻服务/长跑不会被墙钟砍掉）；需要上限再显式传 `timeout`。
 
-参考 [background-execution.md](../claude-code/background-execution.md) 了解后台任务管理界面（`Ctrl+B`）。
+运行中的后台任务可在桌面端的后台任务抽屉里查看与停止，模型侧用 `background_task` 工具查询。
 
 ---
 
@@ -69,7 +71,7 @@ Output File: /path/to/output.log
 
 - **前台**：省略时默认 120 秒，最大 600 秒；传 `0`（不限时）会报错——前台无界阻塞会永久挂死当前回合且无 task_id 可取消
 - **后台**：省略或传 `0` 即不限时；传正数则按上限
-- 超时后进程会被 `terminate()` 优雅关闭，5 秒后仍存活则 `kill()`
+- 超时按整条命令的墙钟计时（持续有输出也会超时），到点对整个进程组发 `SIGTERM`，shell 退出（至多等 5 秒）后对整组补 `SIGKILL`，不留忽略 `SIGTERM` 的孤儿；前台超时会重建 shell，`cd` / `export` 状态随之丢失
 - 超时返回 `Error: Timeout`（不带 stdout）
 
 需要长时间运行的任务请用 `run_in_background=True`（默认不限时）。
@@ -79,6 +81,6 @@ Output File: /path/to/output.log
 ## 权限与工作区
 
 - bash 命令受权限规则约束，参考 [permissions.md](permissions.md)
-- 复合命令（`cmd1 && cmd2`）会拆分子命令逐个评估，取最严格结果
+- 复合命令（`cmd1 && cmd2`、换行分隔、`$(…)` 里的命令）会拆分子命令逐个评估，取最严格结果
 - 只读命令（`ls`、`cat`、`git status`、`grep` 等）默认绕过审批
-- 写操作命令在工作区边界外会被拒绝
+- 写操作命令涉及工作区边界外的路径时需要审批，审批卡会提示越界（见 [permissions.md](permissions.md)）

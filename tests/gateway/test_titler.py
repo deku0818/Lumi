@@ -59,3 +59,25 @@ def test_refresh_digest_tail_slices_and_excludes_meta_text():
     assert len(digest) <= _TAIL_CHARS
     assert digest.endswith("尾")
     assert "通知" not in digest
+
+
+async def test_title_source_is_bounded(monkeypatch):
+    # 回归：首条消息生成标题时素材不截断——超长粘贴（整份日志 / 文档）全文发给标题模型
+    from lumi.gateway import titler
+
+    seen: list[str] = []
+
+    class _Chain:
+        async def ainvoke(self, inp):
+            seen.append(inp["conversation"])
+            return titler._Title(title="t")
+
+    monkeypatch.setattr(titler, "structured_output", lambda **kw: _Chain())
+    monkeypatch.setattr(
+        titler,
+        "resolve_pointer",
+        lambda name: type("R", (), {"model": "m", "conn_kwargs": lambda self: {}})(),
+    )
+    await titler.generate_title("开头" + "x" * 100_000)
+    assert len(seen[0]) <= 2 * titler._TAIL_CHARS
+    assert seen[0].startswith("开头")

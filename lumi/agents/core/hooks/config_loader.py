@@ -1,4 +1,4 @@
-"""把三级 ``hooks.json`` 加载为已注册的 Shell hook。
+"""把三级 ``hooks.json`` 构造为 per-run 的 Shell hook 字典（不进全局注册表）。
 
 配置文件（优先级从低到高，与 permissions.json 同级同模式，支持 JSONC）：
 1. 用户全局 ``~/.lumi/hooks.json``
@@ -93,7 +93,11 @@ def build_config_hooks(
     """
     # 按文件优先级从低到高收集所有 spec（声明顺序 = 收集顺序）
     by_event: dict[str, list[dict[str, Any]]] = {}
-    for path in _hooks_config_paths(project_dir, user_config_dir):
+    # 按实际文件去重：项目 = 用户配置目录的父目录（项目即 ~）时两层指向同一个 hooks.json
+    paths = dict.fromkeys(
+        p.resolve() for p in _hooks_config_paths(project_dir, user_config_dir)
+    )
+    for path in paths:
         for event_name, spec in _read_specs(path):
             by_event.setdefault(event_name, []).append(spec)
 
@@ -107,6 +111,7 @@ def build_config_hooks(
                     command=spec["command"],
                     timeout_ms=int(spec.get("timeout", DEFAULT_TIMEOUT_MS)),
                     matcher=spec.get("matcher"),
+                    cwd=project_dir,
                 )
             except Exception as e:
                 logger.warning("[hooks] 构造 %s hook 失败，跳过该条: %s", event_name, e)

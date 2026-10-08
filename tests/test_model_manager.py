@@ -421,3 +421,45 @@ def test_structured_output_guards_both_branches(catalog, monkeypatch, model):
     chain = chain_module.structured_output("{q}", _Schema, model_name=model)
     with pytest.raises(ValueError, match="未调用结构化输出工具"):
         chain.invoke({"q": "x"})
+
+
+@pytest.mark.parametrize("model", ["claude-opus-4-6", "gpt-5.2"])
+def test_create_llm_sdk_is_single_retry_layer(catalog, monkeypatch, model):
+    """重试只留 SDK 一层：默认 max_retries=5（SDK 自带 408/409/429/5xx 含 529、
+    retry-after / x-should-retry），调用方显式给的值（如连通性测试的 0）不被覆盖。"""
+    from lumi.models import manager
+    from lumi.models.provider_store import ResolvedModel
+
+    monkeypatch.setattr(
+        "lumi.models.provider_store.resolve",
+        lambda name=None, provider="": ResolvedModel(model, "", "sk-test", "auto"),
+    )
+    assert manager.create_llm(model, use_cache=False).max_retries == 5
+    assert manager.create_llm(model, use_cache=False, max_retries=0).max_retries == 0
+
+
+def test_chains_have_no_outer_retry(catalog, monkeypatch):
+    """外层 with_retry 与 SDK 重试叠乘（最多约 15 次请求、数分钟静默），已删。"""
+    from langchain_core.runnables.retry import RunnableRetry
+    from pydantic import BaseModel
+
+    from lumi.models import chain as chain_module
+
+    class _Schema(BaseModel):
+        ok: bool
+
+    class FakeLLM:
+        model_name = "gpt-5.2"
+
+        def with_structured_output(self, structure, **kwargs):
+            return RunnableLambda(lambda x: x)
+
+        def bind_tools(self, tools, **kwargs):
+            return RunnableLambda(lambda x: x)
+
+    monkeypatch.setattr(chain_module, "create_llm", lambda **kw: FakeLLM())
+    chains = [
+        chain_module.structured_output("{q}", _Schema),
+        chain_module.tool_call_chain([]),
+    ]
+    assert not any(isinstance(c, RunnableRetry) for c in chains)

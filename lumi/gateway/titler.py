@@ -75,6 +75,8 @@ async def generate_title(conversation: str) -> str:
     """根据对话素材生成标题；素材为空返回空串（模型失败向上抛，由调用方记录）。"""
     if not conversation.strip():
         return ""
+    # 首条消息可能是整份粘贴的日志 / 文档：取开头一段足够起标题，不把全文发给标题模型
+    conversation = conversation[: 2 * _TAIL_CHARS]
     titler = resolve_pointer("titler")
     chain = structured_output(
         template="{conversation}",

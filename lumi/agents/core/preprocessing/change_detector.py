@@ -18,8 +18,8 @@ from lumi.utils.logger import logger
 class FileSetChangeDetector[T]:
     """文件集加载缓存基类（按 子类 × 项目 一实例，各子类自持 ``_instances``）。
 
-    变更源是可变的 global + project 两层（目录集来自 loader.config_layers），
-    风格内置视作只读不参与 digest。子类只声明 ``_subdir``/``_pattern`` 与 ``_load``。
+    变更源是 builtin（随生效 style 切换目录）+ global + project 三层（目录集来自
+    loader.config_layers）。子类只声明 ``_subdir``/``_pattern`` 与 ``_load``。
     """
 
     _instances: dict[str, FileSetChangeDetector]
@@ -47,11 +47,7 @@ class FileSetChangeDetector[T]:
 
         if self._explicit_dir:
             return [self._explicit_dir]
-        return [
-            layer
-            for label, layer in config_layers(self._subdir, self._project_dir)
-            if label != "builtin"
-        ]
+        return [layer for _, layer in config_layers(self._subdir, self._project_dir)]
 
     def _iter_files(self) -> list[Path]:
         files: list[Path] = []

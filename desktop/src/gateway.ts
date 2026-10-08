@@ -1,5 +1,5 @@
 // WS JSON-RPC 客户端：对接 lumi serve 的 /ws。
-// 帧协议见 lumi/gateway/channels/ws.py。带指数退避自动重连（sidecar 启动需要时间）。
+// 方法与事件见 protocol/events.json。带指数退避自动重连（sidecar 启动需要时间）。
 import type {
   ActiveModel,
   BgTask,
@@ -68,6 +68,22 @@ export class Gateway {
     this.url = url
   }
 
+  // 机器地址 / token 在设置里改了：换到新地址（保留本连接自带的 workspace / thread）并重连
+  rebase(base: string): void {
+    try {
+      const next = new URL(base)
+      const cur = new URL(this.url)
+      for (const k of ['workspace', 'thread']) {
+        const v = cur.searchParams.get(k)
+        if (v) next.searchParams.set(k, v)
+      }
+      this.url = next.toString()
+    } catch {
+      this.url = base // 非法地址：connect 会停在 failed
+    }
+    this.reconnect()
+  }
+
   // 绑定本连接的会话 thread：写进 URL，使断线重连自动携带 ?thread=，触发后端「断连续接」
   // ——接回断开期仍挂着的会话（parked 审批/运行轮原样还在），而非新建 bridge 丢掉它。
   // 握手拿到 thread 后调用一次即可。
@@ -106,10 +122,17 @@ export class Gateway {
   connect(): void {
     this.teardown()
     this.setState('connecting')
-    const ws = new WebSocket(this.url)
+    let ws: WebSocket
+    try {
+      ws = new WebSocket(this.url)
+    } catch {
+      // 非法地址：构造同步抛错、不会有 onclose，重试也只会再抛——直接停在 failed
+      this.lastError = 'unreachable'
+      this.setState('failed')
+      return
+    }
     this.ws = ws
     ws.onopen = () => {
-      this.retry = 0
       this.lastError = ''
       this.setState('open')
     }
@@ -143,6 +166,9 @@ export class Gateway {
 
   private onMessage(frame: any): void {
     if (frame.method === 'event') {
+      // 退避计数到握手完成才清零：服务端 accept 后立刻关闭（如初始化失败）时 onopen
+      // 照样会触发，在那里清零会让退避永远停在首档、永不进 failed
+      if (frame.params?.type === 'gateway.ready') this.retry = 0
       for (const h of this.eventHandlers) h(frame.params)
     } else if (frame.id != null) {
       const p = this.pending.get(frame.id)
@@ -201,8 +227,9 @@ export class Gateway {
     return this.request('stop')
   }
 
-  listCommands(): Promise<{ commands: SlashCommand[] }> {
-    return this.request('list_commands')
+  // workspace 给定 = 按该项目新会话的视角列（项目主页经控制连接取，尚无会话连接）
+  listCommands(workspace?: string): Promise<{ commands: SlashCommand[] }> {
+    return this.request('list_commands', workspace ? { workspace } : {})
   }
 
   runCommand(name: string, extraText: string, toolMode?: string): Promise<unknown> {
@@ -397,8 +424,8 @@ export class Gateway {
     return this.request<McpTestResult>('test_mcp_server', { config })
   }
 
-  listProjects(): Promise<{ projects: Project[]; current: string }> {
-    return this.request<{ projects: Project[]; current: string }>('list_projects')
+  listProjects(): Promise<{ projects: Project[] }> {
+    return this.request<{ projects: Project[] }>('list_projects')
   }
 
   addProject(path: string, name = ''): Promise<{ projects: Project[] }> {
@@ -437,8 +464,9 @@ export class Gateway {
     name: string,
     content: string,
     file = '',
+    create = false, // 「新建」：目标已存在即报错，不覆盖已有定义
   ): Promise<{ ok: boolean; path: string }> {
-    return this.request('project_resource_write', { path, kind, name, content, file })
+    return this.request('project_resource_write', { path, kind, name, content, file, create })
   }
 
   projectResourceDelete(
@@ -516,10 +544,11 @@ export class Gateway {
     return this.request('list_cron_jobs')
   }
 
-  createCronJob(name: string, schedule: string, prompt: string): Promise<{ job: CronJob }> {
+  // projectDir：从项目主页新建时绑定该项目（执行时在其中跑）
+  createCronJob(name: string, schedule: string, prompt: string, projectDir?: string): Promise<{ job: CronJob }> {
     return this.request<{
       job: CronJob
-    }>('create_cron_job', { name, schedule, prompt })
+    }>('create_cron_job', { name, schedule, prompt, ...(projectDir ? { project_dir: projectDir } : {}) })
   }
 
   updateCronJob(

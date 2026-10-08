@@ -141,9 +141,11 @@ def _deduplicate(tools: list[StructuredTool]) -> list[StructuredTool]:
     seen: set[str] = set()
     unique: list[StructuredTool] = []
     for tool in tools:
-        if tool.name not in seen:
-            seen.add(tool.name)
-            unique.append(tool)
+        if tool.name in seen:
+            logger.warning("工具名 %r 重复，已忽略后来者", tool.name)
+            continue
+        seen.add(tool.name)
+        unique.append(tool)
     return unique
 
 

@@ -31,9 +31,9 @@ class TestJobDefaults:
         assert job.consecutive_errors == 0
 
     def test_created_at_auto(self) -> None:
-        before = datetime.now()
+        before = datetime.now().astimezone()
         job = Job(name="t", schedule=Schedule(ScheduleType.INTERVAL, "1m"), prompt="p")
-        after = datetime.now()
+        after = datetime.now().astimezone()
         assert before <= job.created_at <= after
 
 
@@ -47,7 +47,7 @@ class TestJobSerialization:
             schedule=Schedule(type=ScheduleType.CRON, value="0 9 * * *"),
             prompt="请汇总今天的待办事项",
             enabled=True,
-            created_at=datetime(2025, 1, 15, 8, 0, 0),
+            created_at=datetime(2025, 1, 15, 8, 0, 0).astimezone(),
             consecutive_errors=2,
         )
 
@@ -58,7 +58,7 @@ class TestJobSerialization:
         assert d["schedule"] == {"type": "cron", "value": "0 9 * * *"}
         assert d["prompt"] == "请汇总今天的待办事项"
         assert d["enabled"] is True
-        assert d["created_at"] == "2025-01-15T08:00:00"
+        assert d["created_at"].startswith("2025-01-15T08:00:00")  # 带本地偏移
         assert d["consecutive_errors"] == 2
 
     def test_from_dict(self) -> None:
@@ -77,7 +77,8 @@ class TestJobSerialization:
         assert job.schedule == Schedule(type=ScheduleType.CRON, value="0 9 * * *")
         assert job.prompt == "请汇总今天的待办事项"
         assert job.enabled is True
-        assert job.created_at == datetime(2025, 1, 15, 8, 0, 0)
+        # 存量 naive 值按本地时间解释
+        assert job.created_at == datetime(2025, 1, 15, 8, 0, 0).astimezone()
         assert job.consecutive_errors == 2
 
     def test_round_trip(self) -> None:

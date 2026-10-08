@@ -7,6 +7,7 @@ from langchain_core.messages import AIMessage
 from langgraph.graph import END
 
 from lumi.agents.core.nodes import human_approval
+from lumi.agents.core.state import LumiAgentContext
 from lumi.agents.permissions.models import PermissionDecision
 
 
@@ -35,7 +36,7 @@ def _state(tool_calls):
 
 def _runtime(decision=None, engine=None):
     return SimpleNamespace(
-        context=SimpleNamespace(
+        context=LumiAgentContext(
             permission_engine=engine,
             approval_broker=_FakeBroker(decision),
             widen_boundary=None,  # headless/无 bridge：边界不放宽（见 test_approval_boundary_widen）

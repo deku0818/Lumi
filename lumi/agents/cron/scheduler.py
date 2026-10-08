@@ -4,7 +4,7 @@
 - 从 JobStore 加载任务并注册到 APScheduler
 - 添加/移除/暂停/恢复任务
 - 管理调度器启停生命周期
-- 创建独立 Agent 子会话执行任务，支持超时和结果投递
+- 经注入的 runner 在独立 cron- thread 里执行任务，支持超时和结果投递
 """
 
 from __future__ import annotations
@@ -13,35 +13,24 @@ import asyncio
 import os
 import sys
 from collections.abc import Awaitable, Callable
-from datetime import datetime, timedelta
+from datetime import datetime
 from pathlib import Path
 from typing import IO
 
 from apscheduler.jobstores.base import JobLookupError
 from apscheduler.schedulers.asyncio import AsyncIOScheduler
-from apscheduler.triggers.date import DateTrigger
-from langchain_core.runnables.config import RunnableConfig
 from langgraph.checkpoint.base import BaseCheckpointSaver
 
-from lumi.agents.core.meta_message import synthetic_human_message
 from lumi.agents.cron.compensation import should_compensate
 from lumi.agents.cron.delivery import DeliveryManager
-from lumi.agents.cron.job_runner import extract_output
 from lumi.agents.cron.job_store import JobStore
 from lumi.agents.cron.models import Job, ScheduleType
-from lumi.agents.cron.retry import backoff_delay, is_transient_error
 from lumi.agents.cron.run_log import RunLog, RunRecord
 from lumi.agents.runtime.bg_tasks import current_thread_id
 from lumi.utils.config import get_config
-from lumi.utils.constants import (
-    MAX_CRON_RETRIES,
-    MAX_CRON_RUN_THREADS,
-)
+from lumi.utils.constants import MAX_CRON_RUN_THREADS
 from lumi.utils.logger import logger
 from lumi.utils.thread_id import CRON_THREAD_PREFIX, generate_thread_id
-
-# 向后兼容：历史上 ``_is_transient_error`` 定义在本模块，外部（含测试）经此路径导入。
-_is_transient_error = is_transient_error
 
 
 def _lock_exclusive(f: IO[str]) -> None:
@@ -75,11 +64,16 @@ class Scheduler:
         job_store: JobStore,
         run_log: RunLog,
         delivery: DeliveryManager,
+        stream_runner: Callable[[str, str, str], Awaitable[str]],
         execution_timeout: int = 6000,
         on_job_status: Callable[[list[dict]], None] | None = None,
         lock_path: Path | None = None,
     ) -> None:
-        self._aps = AsyncIOScheduler()
+        # 晚到的触发照常执行一次（多次错过合并为一次）：APScheduler 默认只容忍晚 1 秒，
+        # 机器休眠或事件循环卡顿后到点的任务会被静默跳过
+        self._aps = AsyncIOScheduler(
+            job_defaults={"misfire_grace_time": None, "coalesce": True}
+        )
         self._job_store = job_store
         self._run_log = run_log
         self._delivery = delivery
@@ -95,13 +89,13 @@ class Scheduler:
         # 用户主动中断的 job id：cancel_job 置位，_invoke_agent 的取消处理据此把本次
         # 运行记为 "stopped"（而非关机 grace 期的取消——那种照常向上抛，不落 record）。
         self._user_stopped_jobs: set[str] = set()
-        # 注入的流式 runner（gateway 用 AgentBridge 跑并 publish 直播事件）。未注入
-        # （TUI / 测试）时 fallback 到 create_agent + ainvoke，不直播。见 set_stream_runner。
-        self._stream_runner: Callable[[str, str], Awaitable[str]] | None = None
+        # 执行 runner：``async runner(prompt, thread_id, project_dir) -> output``。gateway
+        # 注入 AgentBridge 版（见 cron_stream），逐事件 publish 给该 thread 的观测者
+        self._stream_runner = stream_runner
         self._on_job_status = on_job_status
         self._compensate_task: asyncio.Task[None] | None = None
-        # 常驻 checkpointer：所有 run 共用一条连接，每次执行独立 cron- thread，
-        # 使执行过程像普通会话一样可回看、可续聊。初始化失败时退化为无会话模式。
+        # 常驻 checkpointer：只用于会话保留策略（清掉超出 N 次的历史执行 thread）与删任务
+        # 时级联删线程；执行本身由 runner 自带 checkpointer。初始化失败时不做这两件事。
         self._checkpointer: BaseCheckpointSaver | None = None
 
     async def start(self) -> None:
@@ -120,7 +114,7 @@ class Scheduler:
                 "cron checkpointer 初始化失败，执行记录将不带会话", exc_info=True
             )
 
-        # 同一 workspace 的 jobs.json 可能同时被 TUI 与 lumi serve 加载，
+        # 同一 workspace 的 jobs.json 可能同时被多个 lumi serve 进程加载，
         # 不互斥的话每个任务会在每个进程各执行一次
         if not self._try_acquire_lock():
             logger.info(
@@ -129,10 +123,18 @@ class Scheduler:
             return
 
         jobs = await self._job_store.load()
+        now = datetime.now().astimezone()
         for job in jobs:
             if not job.enabled:
                 continue
             try:
+                # 离线期间已过点的一次性任务只归下面的补偿处理：交给 APScheduler 会在
+                # 启动瞬间再触发一次（晚到不限时），与补偿重复执行
+                if (
+                    job.schedule.type == ScheduleType.AT
+                    and job.schedule.to_trigger().run_date <= now
+                ):
+                    continue
                 self._register_job(job)
             except Exception:
                 logger.warning(
@@ -159,7 +161,7 @@ class Scheduler:
 
     async def _compensate_missed_runs(self, jobs: list[Job]) -> None:
         """检查并补偿在离线期间错过的任务，有则补执行一次（coalesce）。"""
-        now = datetime.now()
+        now = datetime.now().astimezone()
         compensated = 0
 
         for job in jobs:
@@ -301,6 +303,16 @@ class Scheduler:
         Args:
             job_id: 要删除的任务 ID。
         """
+        # 在跑的先停并等它收尾：否则跑完 run_log.append 会把刚清掉的执行日志重建出来。
+        # agent 在本任务自己的执行里删自己时不能等自己（会死锁）——交给收尾时的存在性检查
+        task = self._running_tasks.get(job_id)
+        run_thread = self._active_runs.get(job_id, ("", None))[0]
+        self_delete = task is asyncio.current_task() or (
+            run_thread and current_thread_id.get() == run_thread
+        )
+        if task is not None and not self_delete:
+            task.cancel()
+            await asyncio.gather(task, return_exceptions=True)
         self.remove_job(job_id)
         await self._job_store.delete(job_id)
         await self.purge_job_data(job_id)
@@ -352,8 +364,9 @@ class Scheduler:
         """
         self._aps.resume_job(job_id)
 
-    async def trigger(self, job_id: str) -> None:
-        """立即执行一次指定任务，不影响 APScheduler 中的正常调度。
+    async def trigger(self, job_id: str) -> bool:
+        """立即执行一次指定任务，不影响 APScheduler 中的正常调度；返回是否真的起了一次执行
+        （该任务已在跑则跳过，返回 False）。
 
         从 JobStore 加载任务并通过 ``_run_job_task`` 创建独立执行，
         不修改 APScheduler 中该任务的 trigger 或下次触发时间。
@@ -367,17 +380,7 @@ class Scheduler:
         job = await self._job_store.get(job_id)
         if job is None:
             raise KeyError(f"任务 {job_id} 不存在")
-        await self._run_job_task(job)
-
-    def set_stream_runner(
-        self, runner: Callable[[str, str], Awaitable[str]] | None
-    ) -> None:
-        """注入流式 runner：``async runner(prompt, thread_id) -> output``。
-
-        gateway 用 AgentBridge 跑 job、逐事件 publish 到该 thread 的观测者，返回终态
-        output。未注入时 fallback 到 create_agent + ainvoke（不直播，TUI / 测试用）。
-        """
-        self._stream_runner = runner
+        return await self._run_job_task(job)
 
     def cancel_job(self, job_id: str) -> bool:
         """中断正在执行的任务：按 job_id 取到 task 并 cancel。
@@ -393,20 +396,21 @@ class Scheduler:
         logger.info("用户中断定时任务执行: [%s]", job_id)
         return True
 
-    async def _run_job_task(self, job: Job) -> None:
+    async def _run_job_task(self, job: Job) -> bool:
         """将 _execute_job 包装为 asyncio.Task 并登记进 ``_running_tasks``（按 job_id）。
 
-        APScheduler 回调入口。同 job 不并发：APScheduler 调度侧 max_instances=1 已挡定时
-        重叠，但 run_cron_job 手动触发绕过它——已有一次在跑就跳过（_active_runs / cancel_job
-        均按 job_id 单值建模，并发会串号）。
+        APScheduler 回调 / 手动触发 / 补偿共用入口。同 job 不并发（_fire_job 只起 task 就
+        返回，max_instances 挡不住重叠）：已有一次在跑就跳过并返回 False——_active_runs /
+        cancel_job 均按 job_id 单值建模，并发会串号。
         """
         running = self._running_tasks.get(job.id)
         if running is not None and not running.done():
             logger.info("任务 %s [%s] 已在执行中，跳过本次触发", job.name, job.id)
-            return
+            return False
         task = asyncio.create_task(self._execute_job(job), name=f"cron-job-{job.id}")
         self._running_tasks[job.id] = task
         task.add_done_callback(lambda t: self._on_task_done(job.id, t))
+        return True
 
     def _on_task_done(self, job_id: str, task: asyncio.Task[RunRecord]) -> None:
         # 只在登记的仍是本 task 时移除：同 job 紧接着重跑会覆盖该 key，别把新 task 抹掉。
@@ -416,28 +420,26 @@ class Scheduler:
             logger.error("定时任务意外失败: %s", exc, exc_info=exc)
 
     # ------------------------------------------------------------------
-    # Job execution: split into invoke / retry / deliver sub-functions
+    # Job execution: split into invoke / deliver sub-functions
     # ------------------------------------------------------------------
 
     async def _execute_job(self, job: Job) -> RunRecord:
-        """执行单个任务：Agent 调用、重试判定、结果投递与日志记录。"""
-        started_at = datetime.now()
-        # thread_id 在起始生成（不再由 _invoke_agent 内部生成）：使运行态广播能带上
-        # thread_id，前端在执行记录顶部显示可点进观测的活条目。注入 runner 时 bridge
-        # 自带 checkpointer，thread 恒有；仅无 runner 且无常驻 checkpointer 时才空。
-        thread_id = (
-            generate_thread_id(CRON_THREAD_PREFIX)
-            if (self._stream_runner is not None or self._checkpointer)
-            else ""
-        )
+        """执行单个任务：Agent 调用、结果投递与日志记录。
+
+        cron 层不重试：模型调用的瞬态错误已在模型层 / bridge 重试过，到这里的失败按
+        最终结果记录，等下次调度。
+        """
+        started_at = datetime.now().astimezone()
+        # thread_id 在起始生成：使运行态广播能带上 thread_id，前端在执行记录顶部显示
+        # 可点进观测的活条目
+        thread_id = generate_thread_id(CRON_THREAD_PREFIX)
         self._active_runs[job.id] = (thread_id, started_at)
         self._notify_job_status()
 
         try:
-            output, status, error, caught_exc = await self._invoke_agent(job, thread_id)
-            retry_scheduled = await self._handle_retry(job, caught_exc)
+            output, status, error = await self._invoke_agent(job, thread_id)
 
-            finished_at = datetime.now()
+            finished_at = datetime.now().astimezone()
             duration_ms = int((finished_at - started_at).total_seconds() * 1000)
 
             record = RunRecord(
@@ -451,30 +453,31 @@ class Scheduler:
                 error=error,
                 thread_id=thread_id,
             )
-            await self._deliver_and_log(job, record, output, retry_scheduled)
+            await self._deliver_and_log(job, record, output)
             return record
         finally:
             self._active_runs.pop(job.id, None)
+            # 停止落在收尾投递阶段时 _invoke_agent 没机会清标记：残留会让之后关机宽限期的
+            # 取消被当成用户停止吞掉
+            self._user_stopped_jobs.discard(job.id)
             self._notify_job_status()
 
-    async def _invoke_agent(
-        self, job: Job, thread_id: str
-    ) -> tuple[str, str, str, Exception | None]:
-        """执行任务 prompt，返回 (output, status, error, exception)。
+    async def _invoke_agent(self, job: Job, thread_id: str) -> tuple[str, str, str]:
+        """执行任务 prompt，返回 (output, status, error)。
 
-        注入了流式 runner 则走 bridge 直播；否则 fallback 到 create_agent + ainvoke。
         统一包超时 / 取消 / 异常判定；cron- thread 里的现场经 checkpoint 保留、可续聊。
         """
         # 执行中产生的后台任务归属本次 run 的 thread，通知不会被无关会话认领
         current_thread_id.set(thread_id)
         try:
             output = await asyncio.wait_for(
-                self._run_agent(job, thread_id), timeout=self._execution_timeout
+                self._stream_runner(job.prompt, thread_id, job.project_dir),
+                timeout=self._execution_timeout,
             )
-            return output, "success", "", None
-        except TimeoutError as exc:
+            return output, "success", ""
+        except TimeoutError:
             logger.warning("任务执行超时: %s [%s]", job.name, job.id)
-            return "", "timeout", f"任务执行超时（{self._execution_timeout}s）", exc
+            return "", "timeout", f"任务执行超时（{self._execution_timeout}s）"
         except asyncio.CancelledError:
             # 用户主动中断：吞掉取消、记为 stopped（wait_for 已把内层 graph 掐断，现场经
             # checkpoint 保留、续聊自愈）。关机 grace 期的取消未置标记 → 照常上抛。
@@ -484,73 +487,23 @@ class Scheduler:
                 # 投递的 await 不被 asyncio 当作仍在取消而打断（Python 3.11+ 语义）。
                 if (task := asyncio.current_task()) is not None:
                     task.uncancel()
-                return "", "stopped", "用户中断执行", None
+                return "", "stopped", "用户中断执行"
             raise
         except Exception as exc:
             logger.exception("任务执行失败: %s [%s]", job.name, job.id)
-            return "", "failed", f"{type(exc).__name__}: {exc}", exc
-
-    async def _run_agent(self, job: Job, thread_id: str) -> str:
-        """跑一次 job：优先注入的流式 runner（直播），否则 fallback ainvoke（不直播）。"""
-        if self._stream_runner is not None:
-            return await self._stream_runner(job.prompt, thread_id)
-
-        # 延迟 import：cron 经 bootstrap→cron.runtime→scheduler 在 tools/permissions 完成
-        # 初始化前就被加载，模块顶层引入会触发循环导入，故调用时再引入。
-        from lumi.agents.core.graph import create_agent
-        from lumi.agents.core.hooks import build_config_hooks, set_run_config_hooks
-        from lumi.agents.permissions.workspace import set_run_authorized_source_for
-
-        agent, context = await create_agent(checkpointer=self._checkpointer)
-        # 自行注入本 run 的授权目录来源与项目 config hooks（bridge runner 内部自带，
-        # 此 fallback 路径需手动）；降级兜底与 bridge 共用同一 helper。
-        eng = context.permission_engine
-        set_run_authorized_source_for(eng)
-        proj = eng.project_dir if eng is not None else Path.cwd().resolve()
-        set_run_config_hooks(build_config_hooks(proj))
-        context.tool_mode = "privileged"  # cron 无交互审批通道，固定 privileged
-        inputs = {"messages": [synthetic_human_message(job.prompt)]}
-        config = RunnableConfig(
-            recursion_limit=get_config().config.agents.recursion_limit,
-            metadata={"workspace_dir": str(proj)},
-        )
-        if thread_id:
-            config["configurable"] = {"thread_id": thread_id}
-        response = await agent.graph.ainvoke(inputs, config=config, context=context)
-        return extract_output(response)
-
-    async def _handle_retry(self, job: Job, caught_exc: Exception | None) -> bool:
-        """根据执行结果决定是否安排退避重试或重置错误计数。
-
-        返回是否已安排重试——调用方据此决定一次性(AT)任务是否可删除：
-        已安排重试时若立即删除，重试触发的 _fire_job 会读到 None 而静默丢失。
-        """
-        if caught_exc is not None and is_transient_error(caught_exc):
-            if job.consecutive_errors < MAX_CRON_RETRIES:
-                job.consecutive_errors += 1
-                await self._persist_consecutive_errors(job)
-                self._schedule_retry(job)
-                return True
-            logger.error(
-                "任务重试次数耗尽（%d/%d），记录最终失败: %s [%s]",
-                job.consecutive_errors,
-                MAX_CRON_RETRIES,
-                job.name,
-                job.id,
-            )
-        elif caught_exc is None and job.consecutive_errors > 0:
-            job.consecutive_errors = 0
-            await self._persist_consecutive_errors(job)
-        return False
+            return "", "failed", f"{type(exc).__name__}: {exc}"
 
     async def _deliver_and_log(
         self,
         job: Job,
         record: RunRecord,
         output: str,
-        retry_scheduled: bool = False,
     ) -> None:
         """记录执行日志、广播结果、应用会话保留策略、清理一次性任务。"""
+        # 以最新配置为准：执行期间任务可能被删（不留日志）或被改（AT 改周期就别删它）
+        latest = await self._job_store.get(job.id)
+        if latest is None:
+            return
         try:
             await self._run_log.append(record)
         except Exception:
@@ -578,8 +531,7 @@ class Scheduler:
         except Exception:
             logger.warning("广播结果失败: %s [%s]", job.name, job.id, exc_info=True)
 
-        # 已安排重试时保留 AT 任务，否则重试触发的 _fire_job 会读到 None 而丢失
-        if job.schedule.type == ScheduleType.AT and not retry_scheduled:
+        if latest.schedule.type == ScheduleType.AT:
             try:
                 await self._job_store.delete(job.id)
                 logger.info("一次性任务已完成并删除: %s [%s]", job.name, job.id)
@@ -631,41 +583,3 @@ class Scheduler:
             self._on_job_status(runs)
         except Exception:
             logger.error("广播任务运行状态失败", exc_info=True)
-
-    def _schedule_retry(self, job: Job) -> None:
-        """通过 APScheduler DateTrigger 安排退避重试。"""
-        delay = backoff_delay(job.consecutive_errors)
-        run_at = datetime.now() + timedelta(seconds=delay)
-        retry_id = f"{job.id}-retry-{job.consecutive_errors}"
-
-        self._aps.add_job(
-            self._fire_job,
-            trigger=DateTrigger(run_date=run_at),
-            args=[job.id],
-            id=retry_id,
-            replace_existing=True,
-        )
-        logger.info(
-            "已安排重试 %d/%d，%d 秒后执行: %s [%s]",
-            job.consecutive_errors,
-            MAX_CRON_RETRIES,
-            delay,
-            job.name,
-            job.id,
-        )
-
-    async def _persist_consecutive_errors(self, job: Job) -> None:
-        """将 Job 的 consecutive_errors 持久化到 JobStore。
-
-        notify=False：错误计数是重试退避的内部状态、前端不展示，无需触发 cron.jobs
-        广播（否则 flapping 任务每次重试都让所有 desktop 全量重拉任务列表）。
-        """
-        try:
-            await self._job_store.upsert(job, notify=False)
-        except Exception:
-            logger.warning(
-                "更新 consecutive_errors 失败: %s [%s]",
-                job.name,
-                job.id,
-                exc_info=True,
-            )

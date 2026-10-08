@@ -35,6 +35,8 @@ _LOCK_ATTEMPTS = 3
 _LOCK_RETRY_SECONDS = 180
 # daily_dream_time 无法解析 / 未启用时的空转间隔。
 _IDLE_SLEEP_SECONDS = 3600
+# 等到点时每段睡眠的上限：合盖挂起后最迟这么久发现已过点、醒来补跑。
+_WAKE_CHECK_SECONDS = 300
 
 
 def seconds_until_next(now: datetime, hhmm: str) -> float:
@@ -166,8 +168,11 @@ async def daily_dream_loop(pool, config, channel_name: str) -> None:
         if not config.daily_dream_enabled:
             await asyncio.sleep(_IDLE_SLEEP_SECONDS)
             continue
+        now = datetime.now()
         try:
-            delay = seconds_until_next(datetime.now(), config.daily_dream_time)
+            target = now + timedelta(
+                seconds=seconds_until_next(now, config.daily_dream_time)
+            )
         except ValueError:
             logger.warning(
                 "[daily-dream] 无法解析 daily_dream_time=%r，空转",
@@ -175,7 +180,11 @@ async def daily_dream_loop(pool, config, channel_name: str) -> None:
             )
             await asyncio.sleep(_IDLE_SLEEP_SECONDS)
             continue
-        await asyncio.sleep(delay)
+        # 按墙钟目标分段睡，不一次睡满时长：asyncio.sleep 走单调时钟，挂起期间不走
+        # （合盖 20:00→08:00 会拖到 15:00 才触发），调钟也会让它落在错的钟点。
+        # 挂起时已过点 → 醒来一段内即补跑
+        while (left := (target - datetime.now()).total_seconds()) > 0:
+            await asyncio.sleep(min(left, _WAKE_CHECK_SECONDS))
         try:
             await _run_cycle(pool, config, channel_name)
         except asyncio.CancelledError:

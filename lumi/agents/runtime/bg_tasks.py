@@ -24,6 +24,13 @@ from lumi.utils.paths import lumi_tmp_dir
 # 后台任务注册时捕获为归属标记，使完成通知能路由回正确的会话（多 WS 连接场景）
 current_thread_id: ContextVar[str] = ContextVar("current_thread_id", default="")
 
+
+def owned_by(entry: BackgroundTaskEntry, thread_id: str) -> bool:
+    """任务是否对该会话可见（无主任务任一会话可见）。注册表是进程级的，跨会话
+    列出 / 查看 / 停止都得先过这一关——命令行里常带密钥。"""
+    return not entry.thread_id or entry.thread_id == thread_id
+
+
 # 会经 asyncio.create_task 后台派生子代理的工具名（agent.py / workflow.py 的
 # create_task 处）。bridge 按此登记 run_id 做子代理事件归属——漏登记的后果是
 # 子代理流被判为主链：错挂进主气泡、文本混入半截回复 buffer（workflow 曾因此

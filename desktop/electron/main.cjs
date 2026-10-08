@@ -9,8 +9,9 @@ const path = require('node:path')
 const crypto = require('node:crypto')
 const { setupUpdater } = require('./updater.cjs')
 
-// 本地 sidecar 的访问令牌：每次启动随机生成，经 `lumi serve --token` 注入；
-// 前端连接时在 ?token= 携带。本地与远程公网部署走同一套鉴权，无本地特例。
+// 本地 sidecar 的访问令牌：每次启动随机生成，经环境变量 LUMI_TOKEN 注入（不走 argv：
+// 命令行对本机其它用户可见）；前端连接时在 ?token= 携带。本地与远程公网部署走同一套
+// 鉴权，无本地特例。
 const LOCAL_TOKEN = crypto.randomBytes(24).toString('hex')
 
 // dev 服务器源的唯一事实：导航放行 / 同源判断 / loadURL 三处共用（改端口只动 env）
@@ -22,7 +23,7 @@ protocol.registerSchemesAsPrivileged([
   { scheme: 'lumi-file', privileges: { standard: true, secure: true, supportFetchAPI: true, stream: true, bypassCSP: true } },
 ])
 
-// 仅 img/pdf/html 走 src 加载需正确 content-type；文本类经 fetch().text() 读取，类型不敏感。
+// img/pdf/html 走 src 加载需正确 content-type；文本类不走本协议（见 lumi:read-text）。
 const PREVIEW_MIME = {
   '.pdf': 'application/pdf', '.html': 'text/html', '.htm': 'text/html',
   '.png': 'image/png', '.jpg': 'image/jpeg', '.jpeg': 'image/jpeg', '.gif': 'image/gif',
@@ -102,14 +103,14 @@ async function loginShellPath() {
   if (process.platform === 'win32') return ''
   try {
     // -i 才会读 rc（nvm 通常写在 .zshrc 而非 .zprofile）；rc 里的欢迎语会混进 stdout，
-    // 故打 marker 再挑行。stderr 一并丢弃：rc 的告警不该污染判断。
-    const { stdout } = await execFileAsync(
-      process.env.SHELL || '/bin/zsh',
-      ['-ilc', 'echo __LUMI_PATH__$PATH'],
-      { encoding: 'utf8', timeout: 5000 }
-    )
-    const hit = stdout.split('\n').find((l) => l.startsWith('__LUMI_PATH__'))
-    return hit ? hit.slice('__LUMI_PATH__'.length).trim() : ''
+    // 故挑 PATH= 行。走 env 而非 echo $PATH：fish 的 $PATH 是列表，echo 出来以空格
+    // 分隔，而导出给子进程的仍是冒号分隔。stderr 一并丢弃：rc 的告警不该污染判断。
+    const { stdout } = await execFileAsync(process.env.SHELL || '/bin/zsh', ['-ilc', 'env'], {
+      encoding: 'utf8',
+      timeout: 5000,
+    })
+    const hit = stdout.split('\n').find((l) => l.startsWith('PATH='))
+    return hit ? hit.slice('PATH='.length).trim() : ''
   } catch {
     // shell 缺失 / rc 卡死超时：只用原 PATH，宁可少几条路径也不能拖住启动
     return ''
@@ -123,27 +124,32 @@ async function startSidecar(port) {
   // --exit-with-parent + stdin 管道：本进程死亡（含崩溃/强杀）时 OS 关闭管道，
   // sidecar 读到 stdin EOF 自退——否则孤儿 sidecar 会与新实例抢同一 checkpoint
   // 数据库，会话读写悬挂表现为「会话打不开」
-  const serveArgs = ['serve', '--port', String(port), '--token', LOCAL_TOKEN, '--exit-with-parent']
+  const serveArgs = ['serve', '--port', String(port), '--exit-with-parent']
   const args = dev ? ['run', 'lumi', ...serveArgs] : serveArgs
   const resolvedPath = await sidecarPath()
   if (stopping) return // 等 PATH 期间用户已退出：别再拉起孤儿进程
   // PYTHONUNBUFFERED：PyInstaller 产物 stdout 接管道时块缓冲，日志会滞留到进程退出才刷出
   const opts = {
-    env: { ...process.env, PATH: resolvedPath, PYTHONUNBUFFERED: '1' },
+    env: { ...process.env, PATH: resolvedPath, PYTHONUNBUFFERED: '1', LUMI_TOKEN: LOCAL_TOKEN },
     stdio: ['pipe', 'pipe', 'pipe'],
   }
   if (dev) opts.cwd = PROJECT_ROOT
-  serveProc = spawn(cmd, args, opts)
-  serveProc.stdout.on('data', (d) => process.stdout.write(`[lumi serve] ${d}`))
-  serveProc.stderr.on('data', (d) => process.stderr.write(`[lumi serve] ${d}`))
-  serveProc.on('error', (e) => {
+  const proc = spawn(cmd, args, opts)
+  serveProc = proc
+  proc.stdout.on('data', (d) => process.stdout.write(`[lumi serve] ${d}`))
+  proc.stderr.on('data', (d) => process.stderr.write(`[lumi serve] ${d}`))
+  // 回调只认自己这个实例：stopSidecar 已放手（或 resume 已换上新进程）的旧进程晚到的
+  // exit 不该再排一次重启——否则新旧两条重启链并存，一条永远在抢被占的端口
+  proc.on('error', (e) => {
+    if (serveProc !== proc) return
     // 多为 ENOENT：未装本地后端。不崩、不重启，前端连本地会显示离线，用远程即可。
     console.warn(`[lumi serve] 本地后端启动失败（${e.code || e.message}）；可在设置→连接添加远程机器`)
     serveProc = null
     sidecarFailed = true
   })
-  serveProc.on('exit', (code) => {
+  proc.on('exit', (code) => {
     console.log(`[lumi serve] 退出，code=${code}`)
+    if (serveProc !== proc) return
     serveProc = null
     // 非主动停止（崩溃/被外部杀）时同端口自愈重启；但 spawn 失败（未装）不重启
     if (!stopping && !sidecarFailed) {
@@ -153,12 +159,28 @@ async function startSidecar(port) {
   })
 }
 
+// 优雅停机：经 stdin 请求 sidecar 走自己的停机流程（drain 在跑的轮，checkpoint 停在
+// 完整边界），最多等 SIDECAR_STOP_MS，超时强杀。不用 kill()：Windows 上它就是强杀，
+// POSIX 上发完 SIGTERM 本进程立刻退出、stdin 一断 sidecar 就被 os._exit 截断。
+const SIDECAR_STOP_MS = 5000
+
 function stopSidecar() {
   stopping = true
-  if (serveProc) {
-    serveProc.kill()
-    serveProc = null
-  }
+  const proc = serveProc
+  serveProc = null
+  if (!proc || proc.exitCode !== null) return Promise.resolve()
+  return new Promise((resolve) => {
+    const timer = setTimeout(() => {
+      proc.kill('SIGKILL')
+      resolve()
+    }, SIDECAR_STOP_MS)
+    proc.once('exit', () => {
+      clearTimeout(timer)
+      resolve()
+    })
+    proc.stdin.once('error', () => {}) // 恰在此刻已退出：EPIPE 交给上面的 exit 收尾
+    proc.stdin.write('shutdown\n')
+  })
 }
 
 // 安装更新失败时的回滚。quitAndInstall 之前必须先收走 sidecar（防新旧实例抢同一
@@ -339,8 +361,11 @@ function createWindow() {
   win.on('unmaximize', () => sendWindowState(win))
 
   // 外链（markdown 里的链接、window.open）一律走系统浏览器，避免应用窗口被导航走。
+  // 只把网页 / 邮件链接交给系统打开：file:、自定义协议等交出去等于让远程后端下发的
+  // 链接（如渠道体检的 fix_url）在本机启动任意程序
+  const openSafe = (url) => /^(https?|mailto):/i.test(url) && shell.openExternal(url)
   win.webContents.setWindowOpenHandler(({ url }) => {
-    shell.openExternal(url)
+    openSafe(url)
     return { action: 'deny' }
   })
   // SPA 里任何整页导航都不合法：只放行应用入口自身（刷新 / vite 全量重载），
@@ -354,7 +379,7 @@ function createWindow() {
       !url.startsWith('file://') &&
       !url.startsWith('lumi-file://')
     ) {
-      shell.openExternal(url)
+      openSafe(url)
     }
   })
 
@@ -379,9 +404,12 @@ function readBackends() {
     return { remotes: [] }
   }
 }
+// 含远程机器 token：仅本人可读（0600），先写临时文件再 rename，写到一半崩溃不留坏文件
 function writeBackends(d) {
   try {
-    fs.writeFileSync(backendsFile(), JSON.stringify(d, null, 2))
+    const tmp = backendsFile() + '.tmp'
+    fs.writeFileSync(tmp, JSON.stringify(d, null, 2), { mode: 0o600 })
+    fs.renameSync(tmp, backendsFile())
   } catch (e) {
     console.error('[backends] 写入失败:', e)
   }
@@ -431,6 +459,20 @@ ipcMain.handle('lumi:path-exists', async (_e, p) => {
     return true
   } catch {
     return false
+  }
+})
+
+// 本地文本预览只取头 TEXT_PREVIEW_BYTES。不走 lumi-file 的 fetch：自定义协议不在 Chromium
+// 跨源白名单里，fetch 恒被 CORS 拦；也不能给协议开 corsEnabled——沙箱 HTML 预览正靠这道
+// 拦截读不到本地文件（preload 只注入主 frame，iframe 拿不到本接口）。
+const TEXT_PREVIEW_BYTES = 500_000
+ipcMain.handle('lumi:read-text', async (_e, p) => {
+  const fh = await fs.promises.open(String(p), 'r')
+  try {
+    const { buffer, bytesRead } = await fh.read(Buffer.alloc(TEXT_PREVIEW_BYTES), 0, TEXT_PREVIEW_BYTES, 0)
+    return buffer.toString('utf8', 0, bytesRead)
+  } finally {
+    await fh.close()
   }
 })
 
@@ -499,7 +541,7 @@ app.whenReady().then(async () => {
   const ALLOWED_PERMS = new Set(['local-fonts', 'clipboard-sanitized-write'])
   session.defaultSession.setPermissionRequestHandler((_wc, perm, cb) => cb(ALLOWED_PERMS.has(perm)))
   session.defaultSession.setPermissionCheckHandler((_wc, perm) => ALLOWED_PERMS.has(perm))
-  // 本地文件协议：lumi-file:///<abs-path>（renderer 端各路径段 encodeURIComponent）
+  // 本地文件协议：lumi-file://local/<abs-path>（renderer 端各路径段 encodeURIComponent，见 Artifacts.tsx）
   protocol.handle('lumi-file', async (request) => {
     try {
       // Windows 盘符路径在 URL 里是 `/C:/…`，前导斜杠得去掉才是真实路径（UNC `//srv/s` 保留）
@@ -533,4 +575,10 @@ app.on('window-all-closed', () => {
   if (process.platform !== 'darwin') app.quit()
 })
 
-app.on('before-quit', stopSidecar)
+// 退出等 sidecar 停完（最多 SIDECAR_STOP_MS）：先拦下本次 quit，停完再重新 quit——
+// 第二次进来时 serveProc 已空，直接放行
+app.on('before-quit', (event) => {
+  if (!serveProc) return
+  event.preventDefault()
+  stopSidecar().then(() => app.quit())
+})

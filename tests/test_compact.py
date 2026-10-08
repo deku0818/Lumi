@@ -187,6 +187,46 @@ async def test_summarize_retries_on_ptl_then_succeeds():
     assert chain.ainvoke.await_count == 2
 
 
+@pytest.mark.parametrize(
+    "response",
+    [
+        AIMessage(content="", tool_calls=[{"name": "read", "args": {}, "id": "t"}]),
+        AIMessage(
+            content="先读一下",
+            tool_calls=[{"name": "read", "args": {}, "id": "t"}],
+        ),
+        AIMessage(content=[{"type": "thinking", "thinking": "x", "signature": "s"}]),
+        AIMessage(content="   "),
+    ],
+)
+async def test_summarize_rejects_non_text_summary(response):
+    # 回归：摘要回复不做校验——模型回空或去调工具时，写回的是空 <summary> 或前言，
+    # 整段历史被不可逆替换。失败应抛出，走现有的熔断 / 失败路径
+    chain = AsyncMock()
+    chain.ainvoke = AsyncMock(return_value=response)
+    with pytest.raises(ValueError):
+        await summarize_with_ptl_retry(
+            [HumanMessage("h")], "PROMPT", chain, max_retry=1, drop_ratio=0.3
+        )
+
+
+async def test_summarize_joins_all_text_blocks():
+    chain = AsyncMock()
+    chain.ainvoke = AsyncMock(
+        return_value=AIMessage(
+            content=[
+                {"type": "thinking", "thinking": "x", "signature": "s"},
+                {"type": "text", "text": "第一段"},
+                {"type": "text", "text": "第二段"},
+            ]
+        )
+    )
+    text, _ = await summarize_with_ptl_retry(
+        [HumanMessage("h")], "PROMPT", chain, max_retry=1, drop_ratio=0.3
+    )
+    assert text == "第一段\n第二段"
+
+
 async def test_summarize_strips_images_before_truncating_on_ptl():
     # 首次带原图撞 PTL → 第一档缓解剥图（不截头），剥图后成功
     img_human = HumanMessage(
@@ -604,3 +644,25 @@ def test_find_pending_human_sees_through_reminder_pullback():
         reminder_human_message("<system-reminder>请调用工具</system-reminder>"),
     ]
     assert find_pending_human(pulled_back).id == "h1"
+
+
+def test_find_pending_human_pullback_does_not_leak_to_answered_turns():
+    """回归：拉回标志跨轮粘滞——后台通知轮被拉回（或带 PostToolUse reminder）时，
+    更早那条早已答完的真人问题被当成待答诉求，压缩后作为当前诉求重挂。"""
+    from lumi.agents.core.meta_message import synthetic_human_message
+
+    old = [
+        HumanMessage(content="旧问题", id="h0"),
+        AIMessage(content="旧回答", id="a0"),
+        synthetic_human_message("后台任务完成"),
+    ]
+    stop_pullback = [*old, AIMessage(content="处理通知"), reminder_human_message("x")]
+    assert find_pending_human(stop_pullback) is None
+
+    post_tool = [
+        *old,
+        AIMessage(content="", tool_calls=[{"name": "t", "args": {}, "id": "c"}]),
+        ToolMessage(content="ok", tool_call_id="c"),
+        reminder_human_message("lint"),
+    ]
+    assert find_pending_human(post_tool) is None

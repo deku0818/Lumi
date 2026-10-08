@@ -72,7 +72,8 @@ def _valid_effort(meta: dict, model: str) -> str | None:
 def pin(thread_id: str) -> SessionModel:
     """把当前生效的模型固化到该会话；已固化则原样返回（真人轮首调用，幂等）。"""
     current = resolve(thread_id)
-    if current.pinned:
+    # 没有连接（纯 env 配置）无从固化：固化了下次 resolve 也会当失效清掉，只能跟随 env 默认
+    if current.pinned or not current.provider:
         return current
     update_meta(thread_id, model=current.model, model_provider=current.provider)
     return replace(current, pinned=True)

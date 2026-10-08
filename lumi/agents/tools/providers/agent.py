@@ -13,6 +13,7 @@ from langchain_core.tools import tool
 from langgraph.prebuilt.tool_node import ToolRuntime
 from pydantic import BaseModel, Field
 
+from lumi.agents.core.meta_message import extract_text_content
 from lumi.agents.runtime.bg_tasks import (
     BackgroundTaskEntry,
     TaskKind,
@@ -25,7 +26,6 @@ from lumi.agents.runtime.bg_tasks import (
 )
 from lumi.agents.runtime.shell_session import run_with_shell
 from lumi.utils.config import get_config
-from lumi.utils.logger import logger
 
 _AGENT_DESCRIPTION = """启动一个专门的子代理（独立上下文）来自主完成复杂任务。每种代理类型都具备特定的能力和可用工具。
 
@@ -48,11 +48,39 @@ _AGENT_DESCRIPTION = """启动一个专门的子代理（独立上下文）来�
 - 子代理的最终消息将作为工具结果返回给你，不会展示给用户——请转达关键信息"""
 
 
+async def create_subagent(
+    parent,
+    tools: list,
+    *,
+    system_prompt: str | None = None,
+    model_name: str | None = None,
+):
+    """子代理的唯一构建入口（agent 工具与 workflow 共用；工具集由调用方按各自规则选好）。
+
+    复用父 PermissionEngine 与项目根（共享工作区边界）；不持久化、不带持久记忆
+    （临时执行单元保持上下文干净，项目说明 LUMI.md 仍由 preprocess 注入）；<env> 的
+    渠道条目随父传播——子代理同样会被派去发飞书消息、拉群成员。执行时须包在
+    ``run_with_shell`` 里：cd/env 不污染父与兄弟代理。
+    """
+    from lumi.agents.core.graph import create_agent
+
+    lumi_agent, context = await create_agent(
+        tools=tools,
+        system_prompt=system_prompt,
+        model_name=model_name,
+        permission_engine=parent.permission_engine,
+        project_dir=parent.project_dir,
+        enable_memory=False,
+    )
+    context.env_extra = parent.env_extra
+    return lumi_agent, context
+
+
 def _child_tools(all_tools: list, child_depth: int, max_depth: int) -> list:
-    """子代理工具集：未达委派上限则保留 agent 工具（可继续往下委派），否则剔除以防无限递归。"""
-    if child_depth >= max_depth:
-        return [t for t in all_tools if t.name != "agent"]
-    return list(all_tools)
+    """子代理工具集：不含 ask（向用户提问只归主 agent——IM 渠道无处作答、后台无人应答）；
+    未达委派上限保留 agent / workflow（可继续往下委派），否则剔除以防无限递归。"""
+    excluded = {"ask"} if child_depth < max_depth else {"ask", "agent", "workflow"}
+    return [t for t in all_tools if t.name not in excluded]
 
 
 class AgentInput(BaseModel):
@@ -74,9 +102,6 @@ async def agent(
     run_in_background: bool = True,
 ) -> str:
     """Agent工具 - 委托给 LumiAgent 执行"""
-    # Lazy import 避免循环依赖
-    from lumi.agents.core.graph import create_agent
-    from lumi.agents.core.response import extract_ainvoke_content
 
     # 委派深度网关：当前 agent 已达上限则拒绝再委派（主 agent depth=0）
     current_depth: int = runtime.state.get("depth", 0)
@@ -98,27 +123,15 @@ async def agent(
     # lazy import：providers 不能顶层引 tools 包（包 __init__ 反向注册本模块，成环）
     from lumi.agents.tools import get_tools
 
-    project_dir = runtime.context.project_dir
     all_tools = await get_tools(
-        tools=agent_config.tools or None, project_dir=project_dir
+        tools=agent_config.tools or None, project_dir=runtime.context.project_dir
     )
-    available_tools = _child_tools(all_tools, child_depth, max_depth)
-
-    # 创建并执行 agent（子 agent 不使用 checkpointer，复用主 agent 权限引擎）
-    # enable_memory=False：子 agent 是临时执行单元，不注入持久记忆（MEMORY.md +
-    # 行为说明），保持上下文干净；项目说明 LUMI.md 仍由 preprocess 注入。
-    lumi_agent, context = await create_agent(
-        tools=available_tools,
+    lumi_agent, context = await create_subagent(
+        runtime.context,
+        _child_tools(all_tools, child_depth, max_depth),
         system_prompt=agent_config.system_prompt,
         model_name=agent_config.model or None,
-        permission_engine=runtime.context.permission_engine,
-        project_dir=project_dir,
-        enable_memory=False,
     )
-
-    # <env> 块的渠道条目随父传播（前台 / 后台两条路都要）：子 agent 同样会被派去发
-    # 飞书消息、拉群成员，缺了这几行只能回头问父级要 chat_id
-    context.env_extra = runtime.context.env_extra
 
     if run_in_background:
         return _start_background_agent(name, prompt, lumi_agent, context, child_depth)
@@ -130,9 +143,8 @@ async def agent(
     # 边界放宽回调随审批通道一同传播：子代理复用父 PermissionEngine，其审批 / 分类器
     # 裁决通过后放宽的是同一条边界（后台子代理无活流、也无审批，故不在此路径）
     context.widen_boundary = runtime.context.widen_boundary
-    # tool_mode 是 context 属性：从父 context 继承实时值（父运行中切换的模式随之传播）
-    context.tool_mode = runtime.context.tool_mode
-    logger.debug("[agent tool] resolved tool_mode=%s", context.tool_mode)
+    # 审批模式是会话属性：挂到父 context 上实时读写（父运行中切换即时生效）
+    context.mode_parent = runtime.context
     inputs = {
         "messages": [HumanMessage(content=prompt)],
         "depth": child_depth,
@@ -144,7 +156,7 @@ async def agent(
     )
 
     content = invoke_result["messages"][-1].content if invoke_result["messages"] else ""
-    return extract_ainvoke_content(content)
+    return extract_text_content(content)
 
 
 # ---------------------------------------------------------------------------
@@ -178,8 +190,9 @@ def _start_background_agent(
     registry = get_task_registry()
     registry.register(entry)
 
-    # 后台子 agent 无交互审批通道，固定 privileged（tool_mode 是 context 属性）
-    context.tool_mode = "privileged"
+    # 后台子 agent 无交互审批通道：auto 由分类器逐个裁决，需人工审批的自动拒绝
+    # （approval_broker 不传播）。不用 privileged——否则委派一次即可让写操作绕过分类器
+    context.tool_mode = "auto"
     inputs = {
         "messages": [HumanMessage(content=prompt)],
         "depth": depth,
@@ -229,8 +242,6 @@ async def _run_agent_background(
     output_file: Path,
 ) -> None:
     """后台执行 Agent；收尾（写文件 / 状态 / 通知）走共用 run_background_task。"""
-    from lumi.agents.core.response import extract_ainvoke_content
-
     registry = get_task_registry()
 
     async def _stream() -> str:
@@ -245,7 +256,7 @@ async def _run_agent_background(
             activity = _agent_activity(state, activity.get("tools_done", 0))
             registry.notify_progress(task_id, activity)
         msgs = final.get("messages") or []
-        return extract_ainvoke_content(msgs[-1].content if msgs else "")
+        return extract_text_content(msgs[-1].content if msgs else "")
 
     await run_background_task(
         task_id,

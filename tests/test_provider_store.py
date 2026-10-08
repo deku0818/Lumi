@@ -237,6 +237,15 @@ def test_pointer_unset_falls_back_to_session_model(store_path, kind):
     assert s.models == ("m1",)
 
 
+def test_unset_classifier_follows_given_session_model(store_path):
+    """分类器未单独配置时跟随「本会话」模型，而不是新会话默认（/model 切过的会话）。"""
+    provider_store.upsert(_p("A", base="ua", key="ka", models=("m1",)))
+    b = provider_store.upsert(_p("B", base="ub", key="kb", models=("m2",)))
+    assert provider_store.resolve_pointer(
+        "classifier", "m2", b.id
+    ) == provider_store.ResolvedModel("m2", "ub", "kb", provider=b.id)
+
+
 @pytest.mark.parametrize("kind", _KINDS)
 def test_pointer_set_resolves_exact_connection(store_path, kind):
     """指针指向另一 profile：按 provider id 精确取该 profile 的连接。"""
@@ -329,3 +338,13 @@ def test_file_is_chmod_600_and_plaintext(store_path):
     providers = json.loads(store_path.read_text(encoding="utf-8"))["providers"]
     assert providers["profiles"][0]["api_key"] == "sk-secret"
     assert providers["profiles"][0]["models"] == ["m1"]
+
+
+def test_edits_keep_profile_order(store_path):
+    """改档位 / 编辑保存不改变 profile 顺序：同名模型按顺序反查，挪到末尾会换掉解析结果。"""
+    a, b, c = (provider_store.upsert(_p(n, models=("m",))) for n in "ABC")
+    ids = lambda: [p.id for p in provider_store._load_all()[0]]  # noqa: E731
+    provider_store.set_effort(b.id, "m", "auto")
+    assert ids() == [a.id, b.id, c.id]
+    provider_store.upsert({**_p("B2", models=("m",)), "id": b.id})
+    assert ids() == [a.id, b.id, c.id]

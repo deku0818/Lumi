@@ -33,11 +33,13 @@ from lumi.utils.logger import logger
 
 
 async def terminate_group(process: asyncio.subprocess.Process) -> None:
-    """终止后台任务的整个进程组：先组 SIGTERM，超时后组 SIGKILL。
+    """终止后台任务的整个进程组：先组 SIGTERM，组长退出或宽限期满后组 SIGKILL。
 
     start_new_session 使 wrapper shell 为组长，killpg 连同命令内 fork 的后代一起
-    终止。仅在 wrapper 尚存活时按组终止（组长存活即锚定 pgid，不会误杀被复用的
-    id）；wrapper 已退出则无从安全定位组，维持不动。
+    终止。仅在 wrapper 尚存活时发起（组长存活即锚定 pgid，不会误杀被复用的 id）。
+    组长退出不代表组空了（sh 收到 SIGTERM 立即退出，忽略 SIGTERM 的子进程还活着），
+    所以收尾恒补一次组 SIGKILL。不轮询「组是否已空」：被 init 迟迟不回收的孤儿
+    僵尸也算组员，轮询会把每次停止拖满宽限期。
 
     Windows 没有进程组这一层（``start_new_session`` 在那边被 CPython 直接忽略），
     ``os.killpg`` 更是 Unix 专有——照原路走会 AttributeError，任务超时/取消时留下
@@ -63,12 +65,11 @@ async def terminate_group(process: asyncio.subprocess.Process) -> None:
         os.killpg(process.pid, signal.SIGTERM)
     except ProcessLookupError:
         return
-    try:
+    with suppress(TimeoutError):
         await asyncio.wait_for(process.wait(), timeout=GRACEFUL_SHUTDOWN_TIMEOUT)
-    except TimeoutError:
-        with suppress(ProcessLookupError):
-            os.killpg(process.pid, signal.SIGKILL)
-        await process.wait()
+    with suppress(ProcessLookupError):
+        os.killpg(process.pid, signal.SIGKILL)
+    await process.wait()
 
 
 # ---------------------------------------------------------------------------
@@ -187,13 +188,12 @@ class BackgroundTaskManager:
 
     async def cleanup_all(self) -> None:
         """终止所有运行中的任务并清理进程资源。"""
+        # 先取句柄快照：monitor 被取消时其 finally 会摘掉自己的句柄
+        handles = list(self._handles.values())
         await self._cancel_all_monitors()
 
-        if self._handles:
-            # 各组终止相互独立，并发收尾：串行时 N 个顽固任务要等 5s×N
-            await asyncio.gather(
-                *(terminate_group(h.process) for h in self._handles.values())
-            )
+        # 各组终止相互独立，并发收尾：串行时 N 个顽固任务要等 5s×N
+        await asyncio.gather(*(terminate_group(h.process) for h in handles))
 
         self._handles.clear()
         self._monitors.clear()
@@ -264,6 +264,8 @@ class BackgroundTaskManager:
                 exc_info=True,
             )
         finally:
+            self._handles.pop(handle.task_id, None)
+            self._monitors.pop(handle.task_id, None)
             try:
                 output_fd.close()
             except OSError as e:

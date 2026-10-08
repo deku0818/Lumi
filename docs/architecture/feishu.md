@@ -41,14 +41,17 @@
 `lumi-{bot.id}`；CLI 与 RPC 共用 `lark_profile.save_bot_synced` 一条保存路径——校验 →
 同步 → 单次落盘，删除时回收自建的那个）。serve 启动时把 `store.shell_env_for`
 注册为 shell env provider（`channels_runtime`）——项目绑了机器人，该项目**所有会话**（飞书
-渠道 + desktop 同规则）的 Bash/后台任务/技能内嵌命令都注入 `LARKSUITE_CLI_PROFILE`
+渠道 + desktop 同规则）的 Bash/后台任务都注入 `LARKSUITE_CLI_PROFILE`
 （项目子目录同样命中：后台任务以 shell 当前 cwd spawn），项目里的 lark-cli
 调用即以本机器人身份出去，与用户自己的全局 active profile、其他项目互不干扰；没绑不注入，
 回落全局行为。profile 缺失时 lark-cli 硬报错并指出 env 来源，不会静默串身份（需
 lark-cli ≥ 1.0.92，体检有版本门槛）。妙记的用户授权也按 profile 各自独立
-（`minutes.diagnose(app_id, profile)`）。
+（`minutes.diagnose(app_id, profile)`）。妙记诊断与事件订阅**严格**按机器人 profile：
+`cli_profile` 为空时不经 `run_cli` 回落全局 active profile（查到的是别的身份，结论却记在本机器人
+名下，与接入体检「身份未同步」矛盾）——诊断停在「需先同步 lark-cli 身份（保存机器人即可同步）」，
+`channel._ensure_subscription` 跳过订阅并记 warning。
 
-`key` 由 `inbound.session_key_of` 定：**私聊是对方 `open_id`，其余（群及未知 chat_type）
+`key` 由 `parse.session_key_of` 定：**私聊是对方 `open_id`，其余（群及未知 chat_type）
 是 `chat_id`**。私聊刻意不用 chat_id——主动推送（妙记）的事件只带 open_id，而飞书没有
 open_id → p2p chat_id 的查询 API，两端不同源就会把同一私聊裂成两个会话（详见
 [feishu-minutes.md](feishu-minutes.md)）。
@@ -74,7 +77,7 @@ lark_oapi.ws.client.loop`，与 uvicorn 主 loop 隔离。入站回调在 WS 线
 `on_message` 流水线：去重（LRU by message_id）→ 跳过自身（比 `bot_open_id`，**不**按
 `sender_type == "bot"` 一刀切——别的机器人 @ 本机器人是正当来源）→ 白名单（`is_allowed`）→
 群策略（`group_policy=mention` 时仅 `@_all` 或精确匹配 `bot_open_id` 才响应；**不做** ou_
-启发式以免把真人误判为机器人）→ 解析文本（text / post / interactive）→ 收集媒体引用 → 解析发送者显示名
+启发式以免把真人误判为机器人）→ 解析文本（text / post / interactive，`parse.message_text`）→ 收集媒体引用 → 解析发送者显示名
 （`channel.directory`，群聊走群成员源、私聊走通讯录源）→ 派生 thread + 取 bridge + 运行锁 →
 排队或处理。发送者名挂在 `_Pending.sender_name` 上（解析失败恒退兜底名），渲染为
 `<sender>姓名</sender>` 标签行（`constants.SENDER_TAG`，纯给模型看）；每条原始消息的
@@ -106,9 +109,12 @@ mention_key——`id=` 是**发送方应用**的 open_id（open_id 每应用一�
 - 图片（image / post 内嵌 / 被回复消息的图）→ 下载 → 走仓库统一压缩管线
   （`media.maybe_resize_and_downsample_image` + `compress_image_with_token_budget`，满足
   5MB/2000px 硬约束 + token 预算）→ base64 Anthropic content block，与 desktop 发图同构。
-- 文件 → 下载到 `<系统临时区>/lumi/feishu/<thread>/`（如 Linux `/tmp/lumi/feishu/<thread>/`）→ `bridge.add_folder()` 授权该目录给会话权限
+- 文件 → 下载到 `<系统临时区>/lumi/feishu/<thread>/`（如 Linux `/tmp/lumi/feishu/<thread>/`）→ `bridge.folders.add_folder()` 授权该目录给会话权限
   引擎 → `<attached-file>路径</attached-file>` 注入正文，agent 用 `read` 读（PDF 渲染、文本直读）。
-- 回复某条消息时，一并拉取**被回复消息**里的图片/文件（用父消息 id 下载）。
+- 回复某条消息时，一并拉取**被回复消息**里的图片/文件（用父消息 id 下载）；其正文按类型抽取
+  （text / post / 卡片，@ 占位按父消息自己的 `mentions` 换姓名）记进 `_Pending.quote`，以「> 」引用块
+  前置到**模型侧**文本（`_render` / 直连 `texts`），气泡 `items` 不带——群聊 mention 模式下被引用的
+  内容通常不在会话历史里。父消息是本机器人自己发的（sender 为本 app_id）则跳过：已在历史里。
 
 **忙时排队 + 合并**（同会话同一时刻只跑一轮）：
 - 上一轮在跑（运行锁被占）时，新消息存入 `_queues[thread]`（上限 `_MAX_QUEUE=10`，满则丢弃
@@ -179,7 +185,8 @@ mention_key——`id=` 是**发送方应用**的 open_id（open_id 每应用一�
 **审批语义**：`tool_mode` 取配置（`auto` AI 审批 / `privileged` 自动放行），两档下「泄漏的人工
 审批触点」（DENY / bypass-immune / 分类器异常回落）一律自动拒绝。**ask 工具已禁用**——`BridgePool`
 默认 `disabled_tools=["ask"]`（经 `AgentBridge.initialize → create_agent(tools=…)`），模型无从
-调用，遇需澄清时自行判断而非弹卡片。
+调用，遇需澄清时自行判断而非弹卡片。子代理的审批事件带 `parent_run_id`，同样自动拒绝（先于子代理
+过滤处理，否则其 broker Future 无人收尾、该轮永挂）；子代理一律不带 `ask`。
 
 ## 后台任务完成通知（notification poller）
 
@@ -275,7 +282,7 @@ green 完成 / red 错误 / orange 提醒·Lumi 面板 / blue 信息 / yellow �
 
 `thread_id → (AgentBridge, asyncio.Lock)`。运行锁串行化同会话的轮次。每 chat 一个常驻
 bridge（含 graph / 权限引擎 / checkpoint），**刻意不做 TTL 回收**——进程存活期一直驻留、复用
-checkpoint。`close_all` 回收前先 `reject_pending` + 等锁（5s 上限）避免 use-after-close。
+checkpoint。`close_all` 回收前先 `reject_pending` + 取消在途轮，再并发等各会话的锁（总共 5s 上限）避免 use-after-close；持 `_init_lock`，正在建的新桥不会漏关。停机时 serve lifespan 先 drain 再拆会话池。
 
 ## 每日记忆整理（daily_dream.py）
 
@@ -295,9 +302,9 @@ IM 长会话（一群/一人一个永久 thread）不走 Stop 钩子的增量 dr
 （`agents/core/meta_message.latest_human_ts`）。基于时间戳而非消息计数——compact 增删历史
 不影响判定。
 
-**次序不变量：先沉淀再压缩，dream 失败绝不压缩。** 压缩摘要载体刻意**不带 ts**（否则压缩后
-无人说话的会话每晚被误判有新内容白跑 dream），代价是一旦未沉淀的历史被压掉，判活无法把它
-救回来。因此 `_dream_one` 的返回值把关 summary 阶段：dream 的异常被 bg-task 收尾吞掉（写
+**次序不变量：先沉淀再压缩，dream 失败不压缩。** 摘要载体继承被压历史中最新一条真人消息的
+ts，压缩不改变判活基线：无人说话的会话不会被误判有新内容，未沉淀就被压掉的窗口也仍判为活跃、
+次日 dream 可见其摘要；次序不变量保护的只是摘要未保留的原文细节。因此 `_dream_one` 的返回值把关 summary 阶段：dream 的异常被 bg-task 收尾吞掉（写
 FAILED 不上抛），成功与否看**快照时刻有没有推进**（`record_thread_dream` 仅综合成功后写入），
 失败的 thread 不进 summary、历史留到明天重试。两个已评估接受的残余路径：手动 `/compact`
 压掉未 dream 的窗口、以及 dream 结束到 compact 之间落库的消息被一起压掉——两者内容都以浓缩
@@ -307,6 +314,11 @@ FAILED 不上抛），成功与否看**快照时刻有没有推进**（`record_t
 `dream_lock.project_lock` 串行（见 `memory.md`《Dream 互斥》），手动 `/dream-session` 与
 夜间循环撞上时后者原地排队。生命周期随渠道 `start/stop`（config 变更 → manager.reload 重建
 渠道 → 本任务取消重起，故 config 单任务生命内恒定）；未启用时 3600s 空转。
+
+**等到点按墙钟**：先算出目标墙钟时刻，再以 ≤300s 一段分段睡、每段醒来重读 `datetime.now()`，
+而非一次 `asyncio.sleep(时长)`——后者走单调时钟，挂起期间不走（合盖 20:00→08:00 会拖到 15:00
+才触发），调钟也会让它落在错的钟点。挂起期间已过点则醒来一段内（≤5 分钟）即补跑，不顺延次日：
+夜里合盖的笔记本若顺延就永远不整理，而渠道 thread 又不走 Stop 钩子 dream。
 
 ## 配置与生命周期
 
@@ -385,7 +397,8 @@ desktop `设置 → 渠道`（`ChannelsPanel.tsx`，进 `SettingsDialog`）：�
 | 文件 | 职责 |
 |---|---|
 | `channels/feishu/channel.py` | lark WS 连接 + 收发 + 生命周期 + 状态 |
-| `channels/feishu/inbound.py` | 入站解析 / 媒体 / 排队合并 / 驱动 run / 后台任务通知轮询 |
+| `channels/feishu/inbound.py` | 入站处理 / 媒体下载 / 排队合并 / 驱动 run / 后台任务通知轮询 |
+| `channels/feishu/parse.py` | 纯函数：content 解析（正文 / 媒体引用 / @ 姓名）、会话 key → thread、`<env>` 条目、/help 正文 |
 | `channels/feishu/outbound.py` | BridgeEvent 事件泵（`turn_closer` / `tool_activity` 与直连轮共用） |
 | `channels/relay.py` | 直连（/direct）渠道无关核心：绑定 sidecar / `--dir` 语法 / claude 无头轮驱动 + stream-json 解析 |
 | `channels/feishu/relay_turn.py` | 直连轮：RelayEvent 折叠成流式卡片 + 来源 footer |

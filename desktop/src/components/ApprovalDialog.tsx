@@ -12,8 +12,6 @@ export type Decision = 'approve' | 'reject'
 
 interface ApprovalData {
   tool_calls?: ToolCallBrief[]
-  warnings?: string[]
-  boundary_violations?: string[]
 }
 
 const argEntries = (c: ToolCallBrief) => Object.entries(asRecord(c.args))
@@ -91,16 +89,16 @@ export function ApprovalDialog({
           ))}
         />
       ) : (
-        <CallDetail call={calls[step.index]} data={data} />
+        <CallDetail call={calls[step.index]} />
       )}
     </StepCard>
   )
 }
 
-function CallDetail({ call, data }: { call: ToolCallBrief; data: ApprovalData }) {
+function CallDetail({ call }: { call: ToolCallBrief }) {
   const { t } = useI18n()
   const args = argEntries(call)
-  const boundary = data.boundary_violations ?? []
+  const boundary = call.boundary_violations ?? []
   return (
     <>
       <div className="mb-3 mt-0.5 flex items-center gap-2.5">
@@ -131,7 +129,7 @@ function CallDetail({ call, data }: { call: ToolCallBrief; data: ApprovalData })
           {boundary.join('、')}
         </div>
       )}
-      {(data.warnings ?? []).map((w, i) => (
+      {(call.warnings ?? []).map((w, i) => (
         <div key={i} className="mt-1.5 text-xs text-primary/90">
           {w}
         </div>
