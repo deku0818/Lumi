@@ -39,15 +39,6 @@ def load_sidecar(path: Path) -> dict[str, dict]:
     return data
 
 
-def _load_for_update(path: Path) -> dict[str, dict]:
-    """写前读：宽松读拿到空而文件仍在，说明它损坏了——交给
-    read_json_object_for_update 移走留档，而不是拿空 dict 覆盖掉其余条目。"""
-    data = load_sidecar(path)
-    if data or not path.exists():
-        return data
-    return read_json_object_for_update(path)
-
-
 def _commit(path: Path, data: dict) -> None:
     """落盘 + 回填缓存（省掉下次读的整文件重解析）。**两个写口的唯一提交点。**
 
@@ -60,7 +51,7 @@ def _commit(path: Path, data: dict) -> None:
 
 def delete_sidecar(path: Path, key: str) -> None:
     """删除整条 key（不存在则不写盘）。"""
-    data = _load_for_update(path)
+    data = read_json_object_for_update(path)
     if key not in data:
         return
     _commit(path, {k: v for k, v in data.items() if k != key})
@@ -68,7 +59,7 @@ def delete_sidecar(path: Path, key: str) -> None:
 
 def update_sidecar(path: Path, key: str, **fields) -> dict:
     """合并更新某 key 的字段；空值（False/""/None）删键保持精简，与现状一致则跳过写盘。"""
-    data = _load_for_update(path)
+    data = read_json_object_for_update(path)
     old = data.get(key, {})
     entry = {**old, **fields}
     entry = {k: v for k, v in entry.items() if v not in (None, "", False)}

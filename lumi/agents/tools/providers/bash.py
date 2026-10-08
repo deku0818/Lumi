@@ -17,7 +17,7 @@ from lumi.agents.runtime.shell_session import (
     current_shell_key,
     get_shell_session_manager,
 )
-from lumi.agents.tools.capability import has_background_operator
+from lumi.agents.tools.shell_syntax import has_background_operator
 from lumi.utils.logger import logger
 
 

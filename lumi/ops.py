@@ -84,11 +84,7 @@ def _uv_path() -> str:
     lumi 自己所在的目录（install.sh 把 uv 与 lumi 装进同一 bin；sudo 精简 PATH 时靠它）。"""
     from lumi.gateway.toolbox import locate
 
-    found = (
-        shutil.which("uv")
-        or locate("uv").path
-        or shutil.which("uv", path=os.path.dirname(sys.argv[0]))
-    )
+    found = locate("uv").path or shutil.which("uv", path=os.path.dirname(sys.argv[0]))
     if not found:
         raise RuntimeError("找不到 uv——这个 lumi 是 uv tool 装的，升级也得由它来做")
     return found

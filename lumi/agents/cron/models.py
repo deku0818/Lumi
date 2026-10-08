@@ -171,8 +171,6 @@ class Job:
         prompt: 执行载荷，发送给 Agent 的提示词。
         enabled: 是否启用。
         created_at: 创建时间。
-        consecutive_errors: 历史字段（cron 级重试已移除），仅为兼容读写旧 jobs.json 保留，
-            不再更新。
         project_dir: 所属项目根（创建时会话的项目）；执行时在该项目里跑。空串 =
             未绑定（存量任务 / 表单创建），退回 serve 进程 cwd。
     """
@@ -183,7 +181,6 @@ class Job:
     id: str = field(default_factory=lambda: new_task_id(""))
     enabled: bool = True
     created_at: datetime = field(default_factory=lambda: datetime.now().astimezone())
-    consecutive_errors: int = 0
     project_dir: str = ""
 
     def to_dict(self) -> dict[str, object]:
@@ -202,7 +199,6 @@ class Job:
             "prompt": self.prompt,
             "enabled": self.enabled,
             "created_at": self.created_at.isoformat(),
-            "consecutive_errors": self.consecutive_errors,
             "project_dir": self.project_dir,
         }
 
@@ -228,6 +224,5 @@ class Job:
             enabled=data.get("enabled", True),
             # 存量 naive 值按本机本地时间解释
             created_at=datetime.fromisoformat(data["created_at"]).astimezone(),
-            consecutive_errors=data.get("consecutive_errors", 0),
             project_dir=data.get("project_dir", ""),
         )

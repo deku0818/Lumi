@@ -89,15 +89,15 @@ export const isKnownTool = (name: string): boolean => name in TOOL_META
 // 聚合成「编辑了 2 个文件，运行了 1 条命令」/ "Edited 2 files, ran a command" 式摘要：
 // 同动作合并计数（未登记的工具按工具名各自成组），首个短语之后句中小写（英文）。
 export function summarizeTools(tools: ToolItem[], t: Translate): string {
-  const counts = new Map<string, number>()
+  const groups = new Map<string, { sum: string; name: string; n: number }>()
   for (const tool of tools) {
-    const key = TOOL_META[tool.name]?.sum ?? `other:${tool.name}`
-    counts.set(key, (counts.get(key) ?? 0) + 1)
+    const sum = TOOL_META[tool.name]?.sum
+    const key = sum ?? `other:${tool.name}`
+    const g = groups.get(key) ?? { sum: sum ?? 'other', name: sum ? '' : tool.name, n: 0 }
+    groups.set(key, { ...g, n: g.n + 1 })
   }
-  const phrases = [...counts].map(([key, n]) => {
-    const [sum, name] = key.startsWith('other:') ? ['other', key.slice(6)] : [key, '']
-    return t(n === 1 ? `tool.sum.${sum}` : `tool.sum.${sum}.n`, { n, name })
-  })
+  const phrases = [...groups.values()].map(({ sum, name, n }) =>
+    t(n === 1 ? `tool.sum.${sum}` : `tool.sum.${sum}.n`, { n, name }))
   return phrases
     .map((p, i) => (i === 0 ? p : p.charAt(0).toLowerCase() + p.slice(1)))
     .join(t('tool.sum.sep'))

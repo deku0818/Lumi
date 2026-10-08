@@ -249,7 +249,7 @@ export default function App() {
   const homeTarget = view === 'project' ? projectHome : null
   const pickerBackend = homeTarget ? homeTarget.backend : activeBackend
   const pickerRef = useLatest(pickerBackend)
-  const cmdTargetRef = useLatest(homeTarget ? `${homeTarget.backend}\0${homeTarget.path}` : active)
+  const cmdTargetRef = useLatest(homeTarget ? sessionKey(homeTarget.backend, homeTarget.path) : active)
   // 运行中任务：机器 → 该机器正在执行的 job id。按机器分段——每台机器各发各的进程级快照
   const [cronRunning, setCronRunning] = useState<Record<string, string[]>>({})
   // 运行中的 run（含 thread_id）：机器 → 活条目。cronRunning 从这里派生，另供执行记录

@@ -314,7 +314,6 @@ export interface CronJob {
   prompt: string
   enabled: boolean
   created_at: string
-  consecutive_errors: number
   next_run: string | null
   // 近期可跳转的 run（最近 50 条里 thread_id 非空的），时间倒序。
   // 侧栏未读数 = 它减去本地已读集合 readRuns，故离线期间的执行也算未读。

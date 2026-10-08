@@ -124,11 +124,14 @@ def set_default_project(path: str, default: bool) -> list[dict]:
 
 
 def touch_project(path: str) -> None:
-    """刷新项目的最近使用时间（未登记的路径忽略）。"""
+    """刷新项目的最近使用时间（未登记的路径忽略；60 秒内已刷过则跳过）。"""
     target = _resolve(path)
     projects = _load()
     for p in projects:
         if p["path"] == target:
+            # 每条 WS 连接都会调；重连风暴时别反复重写整份 lumi.json（分钟粒度足够排序）
+            if time.time() - p.get("last_used", 0) < 60:
+                return
             p["last_used"] = time.time()
             _save(projects)
             return

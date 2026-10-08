@@ -80,6 +80,13 @@ def parse_command(command: str) -> tuple[Segment, ...]:
     return tuple(lexer.segments)
 
 
+def has_background_operator(command: str) -> bool:
+    """命令中（含替换 / 子 shell 内）是否有后台符 ``&``——其进程会脱离追踪。"""
+    lexer = _Lexer(command)
+    lexer.run(nested=False)
+    return lexer.background
+
+
 @dataclass
 class _Builder:
     """正在累积的一条子命令。"""
@@ -119,6 +126,7 @@ class _Lexer:
         self.s = source
         self.i = 0
         self.segments: list[Segment] = []
+        self.background = False  # 遇到过后台符 &
 
     def run(self, nested: bool) -> None:
         """从当前位置切分到串尾；``nested`` 时到未配对的 ``)`` 为止（命令 / 进程替换）。"""
@@ -169,6 +177,7 @@ class _Lexer:
                     self.i += 1
                     break
                 depth += {"(": 1, ")": -1}.get(op, 0)
+                self.background |= op == "&"
                 seg = self._flush(seg, heredocs, self.i)
                 self.i += len(op)
                 if op == "\n" and heredocs:
@@ -216,7 +225,12 @@ class _Lexer:
     def _dollar(self, seg: _Builder) -> None:
         s = self.s
         nxt = s[self.i + 1 : self.i + 2]
-        if nxt == "(":  # 命令替换（含算术 $((…))）
+        if s.startswith("$((", self.i):  # 算术：& 是位与、<< 是位移，括号配平越过
+            depth, self.i = 2, self.i + 3
+            while self.i < len(s) and depth:
+                depth += {"(": 1, ")": -1}.get(s[self.i], 0)
+                self.i += 1
+        elif nxt == "(":  # 命令替换
             self.i += 2
             self.run(nested=True)
         elif nxt == "{":

@@ -26,10 +26,6 @@ class TestJobDefaults:
         job = Job(name="t", schedule=Schedule(ScheduleType.INTERVAL, "1m"), prompt="p")
         assert job.enabled is True
 
-    def test_consecutive_errors_default_zero(self) -> None:
-        job = Job(name="t", schedule=Schedule(ScheduleType.INTERVAL, "1m"), prompt="p")
-        assert job.consecutive_errors == 0
-
     def test_created_at_auto(self) -> None:
         before = datetime.now().astimezone()
         job = Job(name="t", schedule=Schedule(ScheduleType.INTERVAL, "1m"), prompt="p")
@@ -48,7 +44,6 @@ class TestJobSerialization:
             prompt="请汇总今天的待办事项",
             enabled=True,
             created_at=datetime(2025, 1, 15, 8, 0, 0).astimezone(),
-            consecutive_errors=2,
         )
 
     def test_to_dict_structure(self) -> None:
@@ -59,7 +54,6 @@ class TestJobSerialization:
         assert d["prompt"] == "请汇总今天的待办事项"
         assert d["enabled"] is True
         assert d["created_at"].startswith("2025-01-15T08:00:00")  # 带本地偏移
-        assert d["consecutive_errors"] == 2
 
     def test_from_dict(self) -> None:
         data = {
@@ -79,7 +73,6 @@ class TestJobSerialization:
         assert job.enabled is True
         # 存量 naive 值按本地时间解释
         assert job.created_at == datetime(2025, 1, 15, 8, 0, 0).astimezone()
-        assert job.consecutive_errors == 2
 
     def test_round_trip(self) -> None:
         original = self._make_job()
@@ -90,10 +83,9 @@ class TestJobSerialization:
         assert restored.prompt == original.prompt
         assert restored.enabled == original.enabled
         assert restored.created_at == original.created_at
-        assert restored.consecutive_errors == original.consecutive_errors
 
     def test_from_dict_defaults_optional_fields(self) -> None:
-        """enabled 和 consecutive_errors 缺失时使用默认值。"""
+        """enabled 缺失时使用默认值。"""
         data = {
             "id": "x",
             "name": "n",
@@ -103,7 +95,6 @@ class TestJobSerialization:
         }
         job = Job.from_dict(data)
         assert job.enabled is True
-        assert job.consecutive_errors == 0
 
     def test_round_trip_all_schedule_types(self) -> None:
         """三种调度类型都能正确 round-trip。"""

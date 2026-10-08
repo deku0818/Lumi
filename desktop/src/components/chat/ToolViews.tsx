@@ -1,4 +1,4 @@
-import { memo, useState, type ReactNode } from 'react'
+import { memo, useMemo, useState, type ReactNode } from 'react'
 import { ChevronRight } from 'lucide-react'
 import type { Item } from '../../types'
 import { isKnownTool, summarizeTools, toolArgs, toolIcon, toolStatusKey, toolTitle } from '../../toolMeta'
@@ -68,7 +68,7 @@ const ToolRow = memo(function ToolRow({ item }: { item: ToolItem }) {
   const { t } = useI18n()
   const errored = !!item.error
   // edit/write 展示 diff；出错时优先展示错误输出而非 diff
-  const diff = errored ? null : toolDiff(item.name, item.args)
+  const diff = useMemo(() => (errored ? null : toolDiff(item.name, item.args)), [errored, item.name, item.args])
   const args = toolArgs(item.name, item.args, t)
   const hasOutput = item.done && !!item.output
   const expandable = !!args.text || !!diff || hasOutput

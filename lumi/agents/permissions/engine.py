@@ -56,13 +56,9 @@ class PermissionEngine:
         # 用户本会话加的目录就被悄悄撤销。单独存字段使其跨 reload/rebase 存活。
         self._ephemeral_workspaces: list[Path] = []
         self._loader = ConfigLoader(project_dir, user_config_dir)
-        self._config = self._load_config()
+        self._config = self._loader.load()
         # 构建工作区边界检查器并同步到 filesystem 层
         self._rebuild_boundary()
-
-    def _load_config(self) -> PermissionConfig:
-        """从磁盘加载配置（坏文件 / 坏字段由 loader 逐文件、逐项丢弃并告警）。"""
-        return self._loader.load()
 
     @property
     def config(self) -> PermissionConfig:
@@ -114,7 +110,7 @@ class PermissionEngine:
         """切换项目根目录：重载新目录的权限配置并重建工作区边界。"""
         self._project_dir = project_dir.resolve()
         self._loader = ConfigLoader(self._project_dir, self._user_config_dir)
-        self._config = self._load_config()
+        self._config = self._loader.load()
         self._rebuild_boundary()
 
     def evaluate(self, tool_name: str, tool_args: dict) -> PermissionDecision:

@@ -11,7 +11,6 @@
 from __future__ import annotations
 
 import json
-import shutil
 from dataclasses import asdict
 
 from lumi.gateway import toolbox
@@ -159,10 +158,10 @@ def local_env_checks(
         # lark-cli 是 npm 包，缺 npm 就装不了。此时不给「一键安装」——按下去只会
         # 报同一句缺 npm。Node 也缺：核心工具链的安装入口只有环境页一个，把人送过去；
         # 系统 Node 缺 npm：环境页里 Node 显示已装、不会再装，送过去是死路，直说补 npm。
-        # 这里只要一个「有没有」，用 which 而非 detect：后者还会 spawn 一次
+        # 这里只要一个「有没有」，用 locate 而非 detect：后者还会 spawn 一次
         # `npm --version`（Node 冷启动 200-500ms），而版本号在这条分支上没人看
-        npm_missing = shutil.which("npm") is None
-        node_missing = npm_missing and shutil.which("node") is None
+        npm_missing = toolbox.locate("npm").source == "missing"
+        node_missing = npm_missing and toolbox.locate("node").source == "missing"
         if node_missing:
             hint = "；它经 npm 安装，需先装 Node.js"
         elif npm_missing:

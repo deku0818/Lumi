@@ -3,10 +3,10 @@
 import pytest
 
 from lumi.agents.tools.capability import (
-    has_background_operator,
     is_readonly_command,
     is_write_tool,
 )
+from lumi.agents.tools.shell_syntax import has_background_operator
 
 # ── is_write_tool ──
 
