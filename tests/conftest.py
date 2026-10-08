@@ -6,6 +6,11 @@ import tempfile
 # 必须在任何 `import lumi` 之前：数据根的取值点多为模块级常量（import 时求值），
 # logger import 期就会建 <lumi_home>/logs。用赋值不用 setdefault——开发者自己 export
 # 的 LUMI_CONFIG_DIR 正是真实数据根，同样不能碰。
+# 数据根挪走前先把真实工具箱 bin 补到 PATH 末尾（与运行时注入一致，系统优先）：
+# 本机 rg 常只装在工具箱里，否则 grep 类用例一律「未安装 ripgrep」。只读执行，不写数据。
+os.environ["PATH"] += os.pathsep + os.path.join(
+    os.environ.get("LUMI_CONFIG_DIR") or os.path.expanduser("~/.lumi"), "bin"
+)
 os.environ["LUMI_CONFIG_DIR"] = tempfile.mkdtemp(prefix="lumi-test-")
 
 import pytest  # noqa: E402

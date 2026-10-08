@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+from pathlib import Path
 
 import pytest
 
@@ -17,7 +18,7 @@ def test_malformed_workspaces_are_dropped(tmp_path, bad):
     (project / ".lumi" / "permissions.json").write_text(json.dumps({"workspaces": bad}))
     engine = PermissionEngine(project, user_config_dir=tmp_path / "home")
     assert engine.get_boundary_violations("write", {"file_path": "/etc/passwd"}) == [
-        "/etc/passwd"
+        str(Path("/etc/passwd").resolve())  # macOS 上 /etc → /private/etc
     ]
 
 

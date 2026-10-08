@@ -37,6 +37,9 @@ jobs:
         with:
           enable-cache: true
 
+      # grep/glob 工具调 rg 二进制（不作 Python 依赖），测试需要真实 rg
+      - run: sudo apt-get update && sudo apt-get install -y ripgrep
+
       - run: uv sync --all-groups --frozen
 
       - run: uv run ruff check .

@@ -95,4 +95,4 @@ def test_suite_runs_against_throwaway_data_root():
     from lumi.utils.paths import lumi_home
 
     assert not lumi_home().is_relative_to(Path.home() / ".lumi")
-    assert os.environ["LUMI_CONFIG_DIR"] == str(lumi_home())
+    assert Path(os.environ["LUMI_CONFIG_DIR"]).resolve() == lumi_home().resolve()
