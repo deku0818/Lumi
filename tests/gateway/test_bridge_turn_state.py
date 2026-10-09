@@ -108,3 +108,29 @@ async def test_folder_reminder_follows_history_not_bridge_memory(tmp_path, bridg
         finally:
             await other.close()
     assert "移除" in text and str(extra) in text
+
+
+async def test_user_turns_share_one_start_snapshot(tmp_path, bridge):
+    from unittest.mock import AsyncMock
+
+    with (
+        patch(
+            "lumi.models.chain.create_llm",
+            return_value=ScriptedLLM(script=[[AIMessageChunk(content="ok")]]),
+        ),
+        patch.object(AgentBridge, "_build_tools", new=_no_tools),
+    ):
+        await bridge.initialize(project_dir=str(tmp_path))
+        graph = bridge.graph
+        reads = AsyncMock(wraps=graph.aget_state)
+        with patch.object(graph, "aget_state", reads):
+            for make_turn in (
+                lambda: bridge.stream_response("hi"),
+                lambda: bridge.stream_regenerate(message_id),
+                lambda: bridge.stream_edit_resend(message_id, "edited"),
+            ):
+                reads.reset_mock()
+                events = [e async for e in make_turn()]
+                message_id = next(e.message_id for e in events if e.message_id)
+                # 一次开轮快照（提醒 + 残留修复/截断共用），一次收尾 usage 快照。
+                assert reads.await_count == 2

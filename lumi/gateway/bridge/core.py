@@ -28,7 +28,7 @@ from langchain_core.messages import (
 from langchain_core.runnables.config import RunnableConfig
 from langgraph.errors import GraphBubbleUp, GraphDrained
 from langgraph.runtime import RunControl
-from langgraph.types import Command
+from langgraph.types import Command, StateSnapshot
 
 from lumi.agents.core.broker import LUMI_APPROVAL_EVENT, ApprovalBroker
 from lumi.agents.core.graph import LumiAgent, create_agent
@@ -529,7 +529,11 @@ class AgentBridge:
             yield event
 
     async def _stream_turn(
-        self, msg: HumanMessage, tool_mode: str
+        self,
+        msg: HumanMessage,
+        tool_mode: str,
+        *,
+        snapshot: StateSnapshot | None = None,
     ) -> AsyncGenerator[BridgeEvent, None]:
         """底层：以一条消息起一轮图执行（真实用户轮与合成轮共用的最小操作）。"""
         # 跑图之前把模型对齐到本会话应然值（会话覆盖 / 新会话默认都可能在两轮之间变）
@@ -539,11 +543,15 @@ class AgentBridge:
         # tool_mode 是 context（运行时共享、可变）真相源：本轮 UI 选择写入，运行中经
         # set_tool_mode 改它即对后续工具实时生效。不进 input_data（state 快照改不动）。
         self._context.tool_mode = tool_mode
-        async for event in self._stream({"messages": [msg]}):
+        async for event in self._stream({"messages": [msg]}, snapshot=snapshot):
             yield event
 
     async def _stream_user_turn(
-        self, msg: HumanMessage, tool_mode: str
+        self,
+        msg: HumanMessage,
+        tool_mode: str,
+        *,
+        snapshot: StateSnapshot | None = None,
     ) -> AsyncGenerator[BridgeEvent, None]:
         """真实用户轮：send / regenerate / edit_resend 三入口共用的开轮设置。
 
@@ -556,10 +564,12 @@ class AgentBridge:
         # （注入不碰 items 故不污染 Rewind 标签；reminder 一旦前置进历史即长驻且
         # 不碰系统提示词，缓存安全）。「模型已知什么」取自当前历史里最近的 marker，
         # 不存 bridge 内存：rewind / 压缩删掉携带提醒的消息、重连换 bridge 都自动重发。
+        if snapshot is None:
+            snapshot = await self.graph.aget_state(self._config)
         known = next(
             (
                 m.additional_kwargs[REMINDED_KEY]
-                for m in reversed(await self.snapshot_messages())
+                for m in reversed((snapshot.values or {}).get("messages", []))
                 if REMINDED_KEY in m.additional_kwargs
             ),
             {},
@@ -583,7 +593,7 @@ class AgentBridge:
         # 走事件而非 RPC 返回值——id 是「轮的事实」而非「轮的结果」，中途 stop 的轮
         # 同样需要它，且不必让每个流式入口都记得回传。
         yield BridgeEvent(kind=EventKind.TURN_START, message_id=msg.id or "")
-        async for event in self._stream_turn(msg, tool_mode):
+        async for event in self._stream_turn(msg, tool_mode, snapshot=snapshot):
             yield event
 
     @staticmethod
@@ -862,7 +872,9 @@ class AgentBridge:
             as_node="OfflineFlush",
         )
 
-    async def rewind_before_message(self, message_id: str) -> HumanMessage | None:
+    async def rewind_before_message(
+        self, message_id: str, *, messages: list | None = None
+    ) -> HumanMessage | None:
         """时间旅行截断：删除目标用户消息及其后全部历史，返回被删的目标消息。
 
         新末条若带 ctx_digest marker 须剥掉（其后的 diff 链已被删，不剥会让
@@ -870,7 +882,8 @@ class AgentBridge:
         不变）。写回走 OfflineFlush 锚点，与 compact_thread 同一条离线路径。
         目标消息不存在（历史已被压缩换 id 等）返回 None。
         """
-        messages = await self.snapshot_messages()
+        if messages is None:
+            messages = await self.snapshot_messages()
         idx = next(
             (
                 i
@@ -888,6 +901,9 @@ class AgentBridge:
         # todos 与消息同为 state 字段但无历史可回溯：不清会把「已删未来」的任务列表
         # 带进重答轮（模型往幽灵清单续写），一并清空、由重答轮自行重建
         await self.flush_offline({"messages": update, "todos": []})
+        del messages[idx:]
+        if messages and CTX_DIGEST_KEY in messages[-1].additional_kwargs:
+            messages[-1] = strip_ctx_digest(messages[-1])
         logger.info(
             "[rewind] thread=%s 截断 %d 条消息（自 %s 起）",
             self.current_thread_id,
@@ -896,12 +912,25 @@ class AgentBridge:
         )
         return removed[0]
 
-    async def _rewind_or_raise(self, message_id: str) -> HumanMessage:
-        """截断到目标用户消息，返回被删的它；不存在即抛（两个重发入口共用）。"""
-        original = await self.rewind_before_message(message_id)
+    async def _rewind_or_raise(
+        self, message_id: str
+    ) -> tuple[HumanMessage, StateSnapshot]:
+        """一次读快照完成截断，并把截断后的历史交给重发轮复用。"""
+        snapshot = await self.graph.aget_state(self._config)
+        messages = list((snapshot.values or {}).get("messages", []))
+        original = await self.rewind_before_message(message_id, messages=messages)
         if original is None:
             raise ValueError("目标消息不存在，历史可能已被整理，请刷新会话")
-        return original
+        return original, snapshot._replace(
+            values={
+                **snapshot.values,
+                "messages": messages,
+                "todos": [],
+                "ptl_retry": False,
+            },
+            next=(),
+            tasks=(),
+        )
 
     async def stream_regenerate(
         self,
@@ -915,9 +944,9 @@ class AgentBridge:
         块回到用户原样输入，再交 ``_build_user_message`` 走与新消息完全相同的构造
         流水线——附件标签由显示声明（items[].files）重新派生，故与原轮等价。
         """
-        original = await self._rewind_or_raise(message_id)
+        original, snapshot = await self._rewind_or_raise(message_id)
         msg = self._rebuild_user_message(original)
-        async for event in self._stream_user_turn(msg, tool_mode):
+        async for event in self._stream_user_turn(msg, tool_mode, snapshot=snapshot):
             yield event
 
     @classmethod
@@ -940,9 +969,9 @@ class AgentBridge:
         单一原子入口（截断与重发共处一轮、持同一把 run.lock）——拆成「截断 RPC +
         send」两步会留出竞态窗口，中间任何失败都让编辑文本连同被删历史一起丢失。
         """
-        original = await self._rewind_or_raise(message_id)
+        original, snapshot = await self._rewind_or_raise(message_id)
         msg = self._build_user_message(content, None, declared_file_paths(original))
-        async for event in self._stream_user_turn(msg, tool_mode):
+        async for event in self._stream_user_turn(msg, tool_mode, snapshot=snapshot):
             yield event
 
     async def _emit_text_message(self, text: str) -> AsyncGenerator[BridgeEvent, None]:
@@ -1052,7 +1081,9 @@ class AgentBridge:
         httpx.ReadError,
     )
 
-    async def _stream(self, input_data) -> AsyncGenerator[BridgeEvent, None]:
+    async def _stream(
+        self, input_data, *, snapshot: StateSnapshot | None = None
+    ) -> AsyncGenerator[BridgeEvent, None]:
         """核心流式处理 - yield BridgeEvent
 
         Args:
@@ -1087,7 +1118,7 @@ class AgentBridge:
                     )
 
             # 中断轮残留（待执行节点但无 interrupt）就地修复：补悬空配对 / 清 ptl_retry
-            await self._recover_stale_state(graph)
+            await self._recover_stale_state(graph, snapshot)
 
             # 协作式停机：进程要退出时 drain_all 让本轮在 super-step 边界干净停下，
             # 停在完整 checkpoint 上（见 agents/core/run_control.py）
@@ -1538,7 +1569,9 @@ class AgentBridge:
 
     # ── 残留状态恢复 ──
 
-    async def _recover_stale_state(self, graph: CompiledStateGraph) -> None:
+    async def _recover_stale_state(
+        self, graph: CompiledStateGraph, state: StateSnapshot | None = None
+    ) -> None:
         """就地修复中断轮残留的图状态。
 
         stop 硬取消（或异常）后 checkpoint 会残留待执行节点且无 interrupt。
@@ -1548,7 +1581,8 @@ class AgentBridge:
         收干净；悬空 ≠ 未执行，见措辞）、ptl_retry flag 残留（清掉）。
         """
         try:
-            state = await graph.aget_state(self._config)
+            if state is None:
+                state = await graph.aget_state(self._config)
         except Exception:
             logger.warning(
                 "[AgentBridge] 无法获取图状态进行残留检测，跳过恢复",

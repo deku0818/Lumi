@@ -53,6 +53,8 @@
     "set_effort": { "params": ["provider", "model", "level"], "result": ["effort"], "note": "按模型设置思考档位（合法值=该模型 thinking.levels），持久化、下一轮生效" },
     "set_classifier": { "params": ["provider", "model"], "result": ["classifier"], "note": "设置 auto 审批模式的分类器模型指针，持久化、下一轮生效；provider/model 均空=清除(跟随会话模型)" },
     "set_titler": { "params": ["provider", "model"], "result": ["titler"], "note": "设置会话标题生成模型指针，持久化、下一次标题生成生效；provider/model 均空=清除(跟随会话模型)" },
+    "get_runtime_settings": { "params": [], "result": ["unattended_tool_mode"], "note": "机器级无人值守审批模式：auto（默认）或 privileged" },
+    "set_runtime_settings": { "params": ["unattended_tool_mode"], "result": ["unattended_tool_mode"], "note": "持久化全局无人值守模式，cron / 后台子代理 / workflow / memory cleanup / lumi -p 共用；飞书按渠道配置" },
     "set_tool_mode": { "params": ["tool_mode"], "result": ["tool_mode"], "note": "运行中实时切换工具审批模式（改共享 context.tool_mode，对当前轮后续工具立即生效）；不持锁、不持久化" },
     "set_workspace": { "params": ["path"], "result": ["workspace"], "note": "切换进程级工作目录（项目切换）：权限边界、bash 会话、会话列表过滤随之切换，已有会话不迁移" },
     "list_projects": { "params": [], "result": ["projects"], "note": "手动登记的项目清单（~/.lumi/projects.json），按最近使用降序（打开 / 切入绑定该项目的会话即刷新最近使用）；不下发「当前项目」——项目随会话绑定，前端按活动会话的 workspace 高亮" },

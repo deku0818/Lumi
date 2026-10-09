@@ -141,7 +141,9 @@ class _StubAgent:
         self.graph = graph
 
 
-async def test_background_agent_streams_activity_and_writes_result(tmp_path):
+async def test_background_agent_streams_activity_and_writes_result(
+    tmp_path, monkeypatch
+):
     from lumi.agents.runtime.bg_tasks import get_task_registry
 
     registry = get_task_registry()
@@ -171,9 +173,15 @@ async def test_background_agent_streams_activity_and_writes_result(tmp_path):
     ]
     graph = _StubGraph(states)
 
-    await _run_agent_background(
-        entry.task_id, _StubAgent(graph), None, {"messages": []}, entry.output_file
-    )
+    from lumi.agents.core.state import LumiAgentContext
+    from lumi.agents.tools.providers.agent import create_subagent
+
+    async def create_agent(**kwargs):
+        return _StubAgent(graph), LumiAgentContext()
+
+    monkeypatch.setattr("lumi.agents.core.graph.create_agent", create_agent)
+    run = await create_subagent(LumiAgentContext(), [])
+    await _run_agent_background(entry.task_id, run, "go", entry.output_file)
 
     # 最后一个快照即最终状态：结果照旧落盘
     assert entry.output_file.read_text(encoding="utf-8") == "结论：权限走 Deny→Allow"

@@ -892,13 +892,13 @@ def _run_headless(
 
     from lumi.gateway.bridge import AgentBridge, EventKind
 
-    # 默认 auto（与桌面一致）：命令行上没人应答审批，分类器逐个裁决
+    # 不带开关时按全局「无人值守审批模式」（命令行上没人应答审批，见 nodes.is_use_tool）
     if privileged:
         tool_mode = "privileged"
     elif accept_edits:
         tool_mode = "accept_edits"
     else:
-        tool_mode = "auto"
+        tool_mode = "default"
 
     async def _execute() -> None:
         # 注入 config.json 中的环境变量（API key 等）

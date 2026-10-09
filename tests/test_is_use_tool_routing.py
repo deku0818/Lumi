@@ -38,12 +38,15 @@ def _make_engine(rules=None, project_dir: Path | None = None) -> PermissionEngin
 def _runtime(engine, tool_mode="default"):
     """最小 runtime stub：is_use_tool 读 permission_engine / tool_mode / widen_boundary。
 
-    widen_boundary=None（headless，无 bridge 注入）：privileged 放行时不放宽边界，
+    审批通道存在但 widen_boundary=None（无 bridge 注入）：privileged 放行时不放宽边界，
     本文件只断言路由目标。放宽行为见 test_approval_boundary_widen。
     """
     return types.SimpleNamespace(
         context=LumiAgentContext(
-            permission_engine=engine, tool_mode=tool_mode, widen_boundary=None
+            permission_engine=engine,
+            tool_mode=tool_mode,
+            widen_boundary=None,
+            approval_broker=object(),
         )
     )
 

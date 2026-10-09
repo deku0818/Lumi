@@ -1,4 +1,4 @@
-"""无人应答的执行入口（lumi -p / dream）：auto 模式、不接审批通道（回归）。"""
+"""无人应答的执行入口（lumi -p / dream）：全局模式、不接审批通道（回归）。"""
 
 from __future__ import annotations
 
@@ -24,7 +24,7 @@ def _headless_bridge(captured: dict):
     return _Bridge
 
 
-def test_cli_prompt_defaults_to_auto_without_approval_channel() -> None:
+def test_cli_prompt_uses_global_mode_without_approval_channel() -> None:
     # 此前默认 default 模式且接着审批通道：遇写操作即无输出永久挂起
     from lumi.cli import _run_headless
 
@@ -35,7 +35,7 @@ def test_cli_prompt_defaults_to_auto_without_approval_channel() -> None:
         patch("lumi.cli._export_lumi_bin"),
     ):
         _run_headless("hi")
-    assert captured["stream"]["tool_mode"] == "auto"
+    assert captured["stream"]["tool_mode"] == "default"
     assert captured["init"]["interactive"] is False
 
 
@@ -52,8 +52,8 @@ def test_cli_privileged_flag_still_wins() -> None:
     assert captured["stream"]["tool_mode"] == "privileged"
 
 
-async def test_dream_agent_runs_in_auto_mode(tmp_path: Path) -> None:
-    # dream 的输入含群消息等不受信内容，不再以 privileged 运行；写记忆目录仍免审批
+async def test_dream_agent_leaves_mode_to_unattended_routing(tmp_path: Path) -> None:
+    # dream 不钉死模式，由统一路由读取全局设置；写记忆目录仍免审批
     from lumi.agents.memory.dream import _run_dream_fork
 
     seen: dict = {}
@@ -74,7 +74,7 @@ async def test_dream_agent_runs_in_auto_mode(tmp_path: Path) -> None:
         await _run_dream_fork(
             tmp_path, [], "p", label="dream", notify=False, record=lambda: None
         )
-    assert seen["mode"] == "auto"
+    assert seen["mode"] == "default"
 
 
 def test_cli_prints_only_main_agent_text(capsys) -> None:

@@ -318,6 +318,21 @@ def with_memory_instructions(system_prompt: str, project_dir: Path | None) -> st
     return f"{system_prompt}\n\n{instructions}" if system_prompt else instructions
 
 
+def build_system_prompt(
+    project_dir: Path | None,
+    *,
+    system_prompt: str | None = None,
+    enable_memory: bool = False,
+) -> str:
+    """创建与切换项目共用的系统提示词组装。"""
+    prompt = (
+        get_config().load_system_prompt(project_dir)
+        if system_prompt is None
+        else system_prompt
+    )
+    return with_memory_instructions(prompt, project_dir) if enable_memory else prompt
+
+
 async def create_agent(
     tools: list | None = None,
     system_prompt: str | None = None,
@@ -353,13 +368,12 @@ async def create_agent(
     Returns:
         (agent, context) 元组
     """
-    config = get_config()
-
     if tools is None:
         # 默认等冷池就位（cron 等单发调用方没有下一轮可自愈）；分层加载该项目的 MCP
         tools = await get_tools(project_dir=project_dir)
-    if system_prompt is None:
-        system_prompt = config.load_system_prompt(project_dir)
+    system_prompt = build_system_prompt(
+        project_dir, system_prompt=system_prompt, enable_memory=enable_memory
+    )
     # provider 随 model_name 同源：跟随 active 时取 active profile id；显式传名
     # （子 agent 配置的裸模型名）无从得知归属，留空走按名反查
     provider = ""
@@ -367,9 +381,6 @@ async def create_agent(
         resolved = provider_store.resolve()
         model_name = resolved.model
         provider = resolved.provider
-
-    if enable_memory:
-        system_prompt = with_memory_instructions(system_prompt, project_dir)
 
     # 复用或新建权限引擎（项目根随会话绑定，调用方未传则退回进程 cwd）
     if permission_engine is None:

@@ -16,6 +16,13 @@ const KEY = 'lumi-lang'
 type Dict = Record<string, string>
 
 const ZH: Dict = {
+    'settings.unattended': '无人值守任务',
+    'settings.unattendedMode': '审批模式',
+    'settings.unattendedHint': '这台机器的定时任务、后台子代理、工作流和记忆整理共用此设置。',
+    'settings.unattendedAuto': 'AI 审批',
+    'settings.unattendedPrivileged': '特权模式',
+    'settings.unattendedWarning': '特权模式会跳过 AI 审批并自动执行工具；禁止规则和受保护操作仍会拒绝。',
+
   'sidebar.newChat': '新对话',
   'sidebar.collapse': '收起侧栏',
   'sidebar.expand': '展开侧栏',
@@ -599,6 +606,13 @@ const ZH: Dict = {
 }
 
 const EN: Dict = {
+    'settings.unattended': 'Unattended tasks',
+    'settings.unattendedMode': 'Approval mode',
+    'settings.unattendedHint': 'Shared by scheduled tasks, background agents, workflows and memory cleanup on this machine.',
+    'settings.unattendedAuto': 'AI approval',
+    'settings.unattendedPrivileged': 'Privileged',
+    'settings.unattendedWarning': 'Privileged mode skips AI approval and runs tools automatically. Deny rules and protected operations still apply.',
+
   'sidebar.newChat': 'New chat',
   'sidebar.collapse': 'Collapse sidebar',
   'sidebar.expand': 'Expand sidebar',

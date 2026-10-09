@@ -1881,7 +1881,7 @@ export default function App() {
   // load_history 下发，不做序号/文本猜测：本地列表可能含后端没有的条目（发送失败
   // 残留等）。id 缺失或气泡已不在（历史被整理）即刷新对齐后端，不冒险截错。
   // newText 为空 = 重新生成（保留原气泡），非空 = 编辑重发（换成新气泡）。
-  const timeTravel = (itemId: number, newText?: string) => {
+  const timeTravel = (itemId: Item['id'], newText?: string) => {
     const sid = active
     const gw = connsRef.current[sid]
     const st = storeRef.current[sid]
@@ -1966,7 +1966,7 @@ export default function App() {
   const canTimeTravel =
     conn === 'open' && !running && !observingCronRun && !activeChannel && !approval && !clarify
   // 原地编辑中的用户气泡 id（一次只编辑一条；Cancel/切会话即退出，Save 前无任何实际修改）
-  const [editingId, setEditingId] = useState<number | null>(null)
+  const [editingId, setEditingId] = useState<Item['id'] | null>(null)
   useEffect(() => setEditingId(null), [active])
   // 连续工具分段只随 items 变化重算，避免每次渲染都扫描
   const segments = useMemo(() => groupItems(items), [items])

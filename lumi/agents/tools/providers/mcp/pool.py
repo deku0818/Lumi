@@ -221,16 +221,14 @@ class MCPSessionManager:
 
         interceptors = [ToolArgsInterceptor()]
 
-        # 按传输类型分组
-        persistent: dict[str, Any] = {}
-        stateless: dict[str, Any] = {}
-        for name, config in mcp_config.items():
-            target = persistent if _needs_persistent_session(config) else stateless
-            target[name] = config
-
-        all_tools: list[StructuredTool] = []
-        await self._start_servers(persistent, interceptors, all_tools, persistent=True)
-        await self._start_servers(stateless, interceptors, all_tools, persistent=False)
+        # 每个 server 独立加载；按配置顺序汇总，慢/失败的 server 不阻塞其它连接。
+        results = await asyncio.gather(
+            *(
+                self._start_server(name, config, interceptors)
+                for name, config in mcp_config.items()
+            )
+        )
+        all_tools = [tool for tools in results for tool in tools]
 
         self._tools = all_tools
         self._started = True
@@ -279,57 +277,38 @@ class MCPSessionManager:
             owner.cancel()
             raise
 
-    async def _start_servers(
+    async def _start_server(
         self,
-        servers: dict[str, Any],
+        server_name: str,
+        server_config: dict[str, Any],
         interceptors: list[ToolArgsInterceptor],
-        out_tools: list[StructuredTool],
-        persistent: bool,
-    ) -> None:
-        """逐个连接 server 并加载工具（persistent=True 建持久会话，否则无状态）。
-
-        超时/异常/状态记录脚手架两类共用——server_status 的形状与文案只此一份。
-        """
-        kind = "服务器" if persistent else "无状态服务器"
-        for server_name, server_config in servers.items():
-            try:
-                client = MultiServerMCPClient(
-                    {server_name: server_config},
-                    tool_interceptors=interceptors,
-                )
-                if persistent:
-                    tools = await self._load_persistent(
-                        client, server_name, interceptors
-                    )
-                    for t in tools:
-                        self._watch_session_lost(t)
-                else:
-                    async with asyncio.timeout(_SERVER_START_TIMEOUT):
-                        tools = await client.get_tools()
-                self._register_tools(server_name, tools, out_tools)
-                self.server_status[server_name] = {"ok": True, "tools": len(tools)}
-                logger.info(
-                    f"[MCP] {kind} {server_name} 已连接，加载了 {len(tools)} 个工具"
-                )
-            except (KeyboardInterrupt, SystemExit):
-                raise
-            except TimeoutError:
-                self.server_status[server_name] = {
-                    "ok": False,
-                    "error": f"连接超时（{_SERVER_START_TIMEOUT:.0f}s）",
-                }
-                logger.error(
-                    f"[MCP] {kind} {server_name} 连接超时（{_SERVER_START_TIMEOUT}s），"
-                    "已跳过：端口被其它程序占用/服务无响应时连接会无限挂起"
-                )
-            except Exception as e:
-                self.server_status[server_name] = {
-                    "ok": False,
-                    "error": format_exception_details(e)[:200],
-                }
-                logger.error(
-                    f"[MCP] {kind} {server_name} 加载失败: {format_exception_details(e)}"
-                )
+    ) -> list[StructuredTool]:
+        """连接单个 server；失败只记录本 server 的状态。"""
+        try:
+            client = MultiServerMCPClient(
+                {server_name: server_config}, tool_interceptors=interceptors
+            )
+            if _needs_persistent_session(server_config):
+                tools = await self._load_persistent(client, server_name, interceptors)
+                for tool in tools:
+                    self._watch_session_lost(tool)
+            else:
+                async with asyncio.timeout(_SERVER_START_TIMEOUT):
+                    tools = await client.get_tools()
+            out: list[StructuredTool] = []
+            self._register_tools(server_name, tools, out)
+            self.server_status[server_name] = {"ok": True, "tools": len(tools)}
+            logger.info(
+                "[MCP] 服务器 %s 已连接，加载了 %d 个工具", server_name, len(tools)
+            )
+            return out
+        except TimeoutError:
+            error = f"连接超时（{_SERVER_START_TIMEOUT:.0f}s）"
+        except Exception as e:
+            error = format_exception_details(e)[:200]
+        self.server_status[server_name] = {"ok": False, "error": error}
+        logger.error("[MCP] 服务器 %s 加载失败: %s", server_name, error)
+        return []
 
     @staticmethod
     def _register_tools(
@@ -401,8 +380,8 @@ _GLOBAL_POOL_KEY = "__global__"
 # 已启动池数上限：超过则优雅淘汰最久未用的池，bound 住长跑 serve 多项目切换的子进程
 # 增长。与 Claude Code「连接持进程生命周期」同思路，只是加一个宽松上限防病态无界增长。
 _MAX_POOLS = 16
-# 串行化 start：消除同一池并发首次初始化时重复 start 的竞态，也让淘汰在锁内进行
-start_lock = asyncio.Lock()
+# 淘汰单独串行化；项目启动互不等待。
+_eviction_lock = asyncio.Lock()
 # 池加载完成回调（gateway 注册，广播 mcp.status 给绑定该池的连接）
 _on_pool_loaded: Callable[[dict], None] | None = None
 # 关停闩：close_all_pools 置位后不再受理新加载——清理期间/之后残存的后台任务
@@ -437,6 +416,7 @@ class McpPool:
         # （面板 save/test 的显式重试除外，见 sync_config 的 force）
         self.attempted_hash = EMPTY_CONFIG_HASH
         self._load_task: asyncio.Task | None = None
+        self._start_lock = asyncio.Lock()
 
     @property
     def loading(self) -> bool:
@@ -486,13 +466,14 @@ class McpPool:
         try:
             if not mcp_config:
                 return
-            async with start_lock:
+            async with self._start_lock:
                 # 等锁期间池可能被 close（配置作废换代）：manager 已换新，
                 # 对旧 manager start 会 spawn 无人追踪的子进程，必须放弃本次加载
                 if self.manager is not manager:
                     return
                 if not manager.is_started:
                     await manager.start(mcp_config)
+            async with _eviction_lock:
                 await _evict_lru_pools(keep=self)
         except (KeyboardInterrupt, SystemExit):
             raise
@@ -600,7 +581,7 @@ def get_pool_status(project_dir: Path | None) -> dict:
 
 
 async def _evict_lru_pools(keep: McpPool) -> None:
-    """已启动的池数超上限时，优雅关闭最久未用的（keep 除外）。在 start_lock 内调用。
+    """已启动的池数超上限时，优雅关闭最久未用的（keep 除外）。在 _eviction_lock 内调用。
 
     close 会递增被淘汰池的版本号：仍绑着它的存活会话轮首感知换代、重建并按需重载。
     """

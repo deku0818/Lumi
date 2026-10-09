@@ -13,6 +13,7 @@ from lumi.gateway.channels.feishu.parse import (
     resolve_mentions,
     safe_filename,
 )
+from lumi.sessions.thread_runs import thread_runs
 
 
 class _Bridge:
@@ -34,7 +35,7 @@ def _channel(monkeypatch):
     bridge = _Bridge()
 
     async def fake_get(tid):
-        ch.bridge_pool._locks.setdefault(tid, asyncio.Lock())
+        ch.bridge_pool._locks.setdefault(tid, thread_runs.lock_for(tid))
         ch.bridge_pool._bridges.setdefault(tid, bridge)
         return bridge
 
@@ -236,3 +237,76 @@ async def test_queued_message_does_not_start_turn_on_closing_pool(monkeypatch):
     lock.release()
     await asyncio.wait_for(asyncio.gather(waiter, closing), 6)
     assert ran == []
+
+
+async def test_deleting_thread_cancels_active_and_discards_queued_messages(monkeypatch):
+    ch, _ = _channel(monkeypatch)
+    started = asyncio.Event()
+    batches = []
+
+    async def run_batch(_ch, bridge, chat_id, thread_id, batch):
+        batches.append([m.text for m in batch])
+        started.set()
+        await asyncio.Event().wait()
+
+    monkeypatch.setattr(ch.inbound, "_run_batch", run_batch)
+    active = asyncio.create_task(ch.inbound._admit("oc", "t", inb._Pending("A")))
+    await started.wait()
+    queued = asyncio.create_task(ch.inbound._admit("oc", "t", inb._Pending("B")))
+    await asyncio.sleep(0)
+    async with thread_runs.lock_for("t").cancel_and_hold():
+        assert not ch.inbound._queues
+        assert not ch.bridge_pool.run_tasks
+    results = await asyncio.gather(active, queued, return_exceptions=True)
+    assert all(isinstance(r, asyncio.CancelledError) for r in results)
+    assert batches == [["A"]]
+    ran = _record_batches(ch, monkeypatch)
+    await ch.inbound._admit("oc", "t", inb._Pending("new"))
+    assert ran == [(["new"], True)]
+
+
+async def test_deleting_thread_invalidates_pending_minute_event(monkeypatch):
+    ch, _ = _channel(monkeypatch)
+    data = SimpleNamespace(
+        event=SimpleNamespace(
+            minute_token="token",
+            subscriber_ids=[SimpleNamespace(open_id="ou_me")],
+        ),
+        header=SimpleNamespace(event_id="minute-delete"),
+    )
+    await ch.inbound.on_minute_generated(data)
+    item = ch.bridge_pool.minute_events[0]
+    async with item.run_lock.cancel_and_hold():
+        pass
+    await ch.inbound._drain_minute_events()
+    assert not ch.bridge_pool.minute_events
+    assert not ch.bridge_pool._bridges  # 不为删除前积压的事件重新建会话。
+
+
+async def test_deletion_cancellation_does_not_requeue_synthetic_turn(monkeypatch):
+    from lumi.sessions.thread_runs import preserve_poller
+
+    ch, _ = _channel(monkeypatch)
+    started = asyncio.Event()
+    requeued = []
+
+    async def run_turn(*args, **kwargs):
+        started.set()
+        await asyncio.Event().wait()
+
+    monkeypatch.setattr(inb, "run_turn", run_turn)
+    lock = thread_runs.lock_for("t-delete-notification")
+
+    async def poller():
+        async with preserve_poller(lock):
+            await ch.inbound._run_synthetic_turn(
+                None, "t-delete-notification", "oc", "hint", lambda: requeued.append(1)
+            )
+        return "alive"
+
+    task = asyncio.create_task(poller())
+    await started.wait()
+    async with lock.cancel_and_hold():
+        pass
+    assert await task == "alive"
+    assert not requeued

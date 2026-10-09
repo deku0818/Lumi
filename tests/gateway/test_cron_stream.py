@@ -41,6 +41,9 @@ def _fake_bridge(
             for e in events:
                 yield e
 
+        async def finalize_cancelled_stream(self, stream) -> None:
+            await stream.aclose()
+
         async def close(self) -> None: ...
 
     return _FakeBridge
@@ -110,8 +113,8 @@ async def test_runner_initializes_bridge_in_job_project():
     assert captured["project_dir"] == "/proj"
 
 
-async def test_runner_is_auto_mode_without_approval_channel():
-    """cron 无人应答：auto 模式、不接审批通道——需人工审批的直接自动拒绝，不再挂满超时。"""
+async def test_runner_uses_global_mode_without_approval_channel():
+    """cron 不接审批通道，模式交统一路由读取全局设置。"""
     captured: dict = {}
     fake = _fake_bridge([BridgeEvent(kind=EventKind.MESSAGE_DELTA, text="hi")])
 
@@ -127,7 +130,7 @@ async def test_runner_is_auto_mode_without_approval_channel():
     with patch("lumi.gateway.bridge.AgentBridge", _Bridge):
         await build_cron_stream_runner(_Hub())("do it", "cron-x", "/proj")
     assert captured["init"]["interactive"] is False
-    assert captured["stream"]["tool_mode"] == "auto"
+    assert "tool_mode" not in captured["stream"]
 
 
 async def test_drained_run_is_not_reported_as_success():

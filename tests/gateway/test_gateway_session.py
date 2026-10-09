@@ -16,6 +16,7 @@ import time
 from contextlib import suppress
 from types import SimpleNamespace
 
+import pytest
 from conftest import catalog_entry
 
 from lumi.gateway.bridge import BridgeEvent, EventKind
@@ -995,6 +996,71 @@ async def test_delete_session_closes_detached_owner_and_its_leftovers(monkeypatc
         owner_bridge.release.set()
         registry.discard("t-del-detached", owner)
         await owner.aclose()
+        await ctl.aclose()
+
+
+@pytest.mark.parametrize("during_init", [False, True])
+async def test_delete_session_cancels_cron_and_queued_desktop_turn(
+    monkeypatch, during_init
+):
+    from lumi.gateway.cron_stream import build_cron_stream_runner
+
+    _no_bg_tasks(monkeypatch)
+    tid = "cron-delete-shared"
+    log = []
+    entered = asyncio.Event()
+
+    class CronBridge:
+        async def initialize(self, **kwargs):
+            if during_init:
+                entered.set()
+                await asyncio.Event().wait()
+
+        def switch_thread(self, thread_id):
+            pass
+
+        async def stream_response(self, *args, **kwargs):
+            entered.set()
+            await asyncio.Event().wait()
+            yield  # pragma: no cover
+
+        async def finalize_cancelled_stream(self, stream):
+            await stream.aclose()
+            await asyncio.sleep(0)  # checkpoint 写回确实发生 await。
+            log.append("finalize")
+
+        async def close(self):
+            log.append("close")
+
+    monkeypatch.setattr("lumi.gateway.bridge.AgentBridge", CronBridge)
+    waiting_bridge = BlockingBridge()
+    waiting_bridge.current_thread_id = tid
+    waiting, _ = _make_session(waiting_bridge)
+    ctl, ctl_ch = _make_session(_DeleteLogBridge(log, "t-ctl"))
+    await waiting.start()
+    await ctl.start()
+    cron = asyncio.create_task(build_cron_stream_runner(BroadcastHub())("job", tid, ""))
+    try:
+        await entered.wait()
+        await waiting.handle_frame(
+            {"id": 1, "method": "send_message", "params": {"content": "queued"}}
+        )
+        await asyncio.sleep(0)
+        await ctl.handle_frame(
+            {"id": 2, "method": "delete_session", "params": {"thread_id": tid}}
+        )
+        await asyncio.wait_for(_drain(ctl), 1)
+        await _drain(waiting)
+        assert _result(ctl_ch, 2) == {"thread_id": tid}
+        expected = ["close", f"delete:{tid}"]
+        assert log == (expected if during_init else ["finalize", *expected])
+        assert not waiting_bridge.started.is_set()
+        with pytest.raises(asyncio.CancelledError):
+            await cron
+    finally:
+        cron.cancel()
+        await asyncio.gather(cron, return_exceptions=True)
+        await waiting.aclose()
         await ctl.aclose()
 
 

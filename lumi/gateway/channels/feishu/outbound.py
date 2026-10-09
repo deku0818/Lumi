@@ -7,12 +7,10 @@
 - ``message.start`` / ``message.retry`` → 记正文边界 / 回滚畸形响应
 - ``tool.start`` / ``tool.complete`` → 驱动"正在…"忙碌状态行
 - ``clarify.request``（ask 工具，IM 会话已禁用）→ 防御性按"取消作答"收尾
-- ``approval.request``（DENY / bypass-immune / 分类器 ask 等泄漏的人工审批）→ **不弹卡片**，
-  飞书侧一律自动拒绝，让模型改用无需审批的方式（privileged / auto 两模式通用）
 - ``error`` / 异常 / 取消 → 中止卡片并提示
 
-只处理主 agent 事件；子代理（``parent_run_id`` 非空）的内部活动不外显——审批例外，
-同样自动拒绝（否则子代理的 broker Future 无人收尾，该轮永挂）。
+只处理主 agent 事件；子代理（``parent_run_id`` 非空）的内部活动不外显。
+会话无人工审批通道，主/子代理的审批均由图内部自动拒绝。
 """
 
 from __future__ import annotations
@@ -26,12 +24,6 @@ from lumi.utils.logger import logger
 
 if TYPE_CHECKING:
     from lumi.gateway.channels.feishu.channel import FeishuChannel
-
-# 飞书会话不支持人工工具审批：泄漏的 approval.request 一律以此理由自动拒绝。
-_AUTO_REJECT = {
-    "decision": "reject",
-    "message": "当前会话不支持工具审批，已自动拒绝；请改用无需审批的方式完成。",
-}
 
 
 async def run_turn(
@@ -71,12 +63,6 @@ async def run_turn(
     try:
         async for evt in stream:
             kind = evt.kind
-            # 审批先于子代理过滤处理：前台子代理的审批同样挂着 broker Future，
-            # 不收尾则该轮永挂、会话锁永占
-            if kind == EventKind.APPROVAL:
-                if aid := str((evt.data or {}).get("approval_id") or ""):
-                    bridge.resolve_approval(aid, dict(_AUTO_REJECT))
-                continue
             if evt.parent_run_id:
                 continue  # 子代理内部活动不外显
             if kind == EventKind.MESSAGE_DELTA:

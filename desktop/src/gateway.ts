@@ -28,6 +28,7 @@ import type {
   ProjectResourceKind,
   ProviderProfile,
   RpcMethod,
+  RuntimeSettings,
   SessionMeta,
   SessionModelWire,
   SlashCommand,
@@ -260,7 +261,16 @@ export class Gateway {
     return this.request<{ titler: ModelPointer }>('set_titler', { provider, model })
   }
 
-  // 运行中实时切换工具审批模式：改后端共享 context，对当前轮后续工具立即生效
+  // 机器级无人值守设置：定时任务、后台代理与工作流共用
+  getRuntimeSettings(): Promise<RuntimeSettings> {
+    return this.request<RuntimeSettings>('get_runtime_settings')
+  }
+
+  setRuntimeSettings(settings: RuntimeSettings): Promise<RuntimeSettings> {
+    return this.request<RuntimeSettings>('set_runtime_settings', { ...settings })
+  }
+
+  // 运行中切换当前会话的审批模式
   setToolMode(toolMode: string): Promise<{ tool_mode: string }> {
     return this.request<{ tool_mode: string }>('set_tool_mode', { tool_mode: toolMode })
   }

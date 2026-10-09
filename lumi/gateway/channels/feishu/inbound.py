@@ -69,6 +69,12 @@ from lumi.models import provider_store
 from lumi.models.manager import allowed_levels
 from lumi.sessions import session_model
 from lumi.sessions.session_meta import delete_meta, update_meta
+from lumi.sessions.thread_runs import (
+    ThreadDeletingError,
+    ThreadRunLock,
+    preserve_poller,
+    thread_runs,
+)
 from lumi.utils.constants import NOTIFICATION_POLL_INTERVAL, SENDER_TAG
 from lumi.utils.logger import logger
 from lumi.utils.paths import lumi_tmp_dir
@@ -121,6 +127,14 @@ class _MinuteEvent:
 
     token: str
     open_id: str
+    run_lock: ThreadRunLock | None = field(default=None, compare=False, repr=False)
+    revision: int = field(default=0, compare=False, repr=False)
+
+    @property
+    def expired(self) -> bool:
+        return self.run_lock is not None and (
+            self.run_lock.deleting or self.run_lock.revision != self.revision
+        )
 
 
 def _model_line(model: str, effort: str) -> str:
@@ -433,12 +447,15 @@ class FeishuInbound:
         # 映射记在池上：热重载保留池但重建 inbound，通知 poller 靠它回投。
         # 存真实 chat_id（私聊的 thread key 是 open_id，但投递走 chat_id 更直接）
         pool.chat_ids[thread_id] = chat_id
+        lock = thread_runs.lock_for(thread_id)
+        revision = lock.revision
         bridge = await pool.get(thread_id)
+        if lock.deleting or lock.revision != revision:
+            return  # 建桥期间已清空会话，旧消息不再开轮。
         if env:
             # 每条消息无脑覆盖（同 chat 恒等值，群改名即刷新）；/direct 的任务不带 env
             # ——那一轮由 Claude Code 执行，本进程的 <env> 块与它无关
             bridge.set_env_extra(env)
-        lock = pool.lock(thread_id)
         if lock.locked():
             queue = self._queues.setdefault(thread_id, [])
             if len(queue) >= _MAX_QUEUE:
@@ -488,20 +505,25 @@ class FeishuInbound:
         调用方判完锁空闲后到本调用的 acquire 之间不得有 await（保持忙判原子）。
         """
         pool = self.channel.bridge_pool
-        async with pool.lock(thread_id):
-            if pool.closed:
-                return
-            pool.run_tasks[thread_id] = asyncio.current_task()
-            try:
-                await self._drain(
-                    self.channel,
-                    bridge,
-                    chat_id,
-                    thread_id,
-                    batch or self._queues.pop(thread_id, []),
-                )
-            finally:
-                pool.run_tasks.pop(thread_id, None)
+        try:
+            async with pool.lock(thread_id):
+                if pool.closed:
+                    return
+                pool.run_tasks[thread_id] = asyncio.current_task()
+                try:
+                    await self._drain(
+                        self.channel,
+                        bridge,
+                        chat_id,
+                        thread_id,
+                        batch or self._queues.pop(thread_id, []),
+                    )
+                finally:
+                    pool.run_tasks.pop(thread_id, None)
+        except (asyncio.CancelledError, ThreadDeletingError):
+            if thread_runs.is_deleting(thread_id):
+                self._queues.pop(thread_id, None)
+            raise
 
     # ── 渠道系统命令 ──
 
@@ -1021,7 +1043,12 @@ class FeishuInbound:
             logger.warning(f"妙记事件无 subscriber_ids，无法定位推送对象 token={token}")
             return
         for open_id in open_ids:
-            self.channel.bridge_pool.minute_events.append(_MinuteEvent(token, open_id))
+            thread_id = feishu_p2p_thread_id(open_id, self.channel.config.thread_prefix)
+            lock = thread_runs.lock_for(thread_id)
+            if not lock.deleting:
+                self.channel.bridge_pool.minute_events.append(
+                    _MinuteEvent(token, open_id, lock, lock.revision)
+                )
 
     async def _drain_minute_events(self) -> None:
         """认领待处理的妙记事件（与后台通知共用轮询节拍）。
@@ -1031,6 +1058,9 @@ class FeishuInbound:
         """
         pool = self.channel.bridge_pool
         for item in list(pool.minute_events):
+            if item.expired:
+                pool.minute_events.remove(item)
+                continue
             token = item.token
             thread_id = feishu_p2p_thread_id(
                 item.open_id, self.channel.config.thread_prefix
@@ -1048,12 +1078,15 @@ class FeishuInbound:
                     pool.minute_events.remove(item)
                     logger.error(f"妙记会话建桥失败 token={token}", exc_info=True)
                     continue
+            if item.expired:
+                pool.minute_events.remove(item)
+                continue
             # 自此到 async with 之间无 await 点，锁不会被抢（与通知轮同一范式）
             lock = pool.try_lock(thread_id)
             if lock is None or lock.locked():
                 continue  # 在跑的轮次持锁，下个 tick 再认领
             pool.minute_events.remove(item)
-            async with lock:
+            async with preserve_poller(lock):
                 try:
                     # 有真实 chat_id 就用，没有则 open_id 直投并回填（供通知轮认领）
                     target = pool.chat_ids.setdefault(thread_id, item.open_id)
@@ -1086,7 +1119,8 @@ class FeishuInbound:
                 synthetic=True,
             )
         except asyncio.CancelledError:
-            on_cancel()
+            if not thread_runs.is_deleting(thread_id):
+                on_cancel()  # 停机/重载可重投，主动删除则丢弃旧通知。
             raise
         # 本轮已入 checkpoint：通知 desktop 旁观刷新
         hub.on_channel_activity(thread_id, "feishu")
@@ -1146,13 +1180,13 @@ class FeishuInbound:
                 lock = pool.try_lock(thread_id)
                 if lock is None or lock.locked():
                     continue  # 在跑的轮次持锁，下个 tick 再认领
-                async with lock:
+                async with preserve_poller(lock):
                     try:
                         bridge = await pool.get(thread_id)
                         # 持锁期间排队的入站消息由它们自己的 task 等锁接手（见 _admit）
                         await self._run_notification_turn(bridge, thread_id, chat_id)
                     except Exception:
-                        # CancelledError 是 BaseException，不会被吞，自然传播停掉轮询
+                        # 普通异常仅跳过本轮；删除取消由 preserve_poller 吸收，停机取消传播。
                         logger.error(
                             f"Feishu 通知轮失败 thread={thread_id}", exc_info=True
                         )

@@ -14,6 +14,7 @@ from lumi.agents.cron.job_store import JobStore
 from lumi.agents.cron.models import Job, Schedule, ScheduleType
 from lumi.agents.cron.run_log import RunLog
 from lumi.agents.cron.scheduler import Scheduler
+from lumi.sessions.thread_runs import thread_runs
 
 
 @pytest.fixture
@@ -64,6 +65,36 @@ def scheduler(
     return Scheduler(
         job_store=job_store, run_log=run_log, delivery=delivery, stream_runner=runner
     )
+
+
+async def test_retention_delete_waits_for_active_thread_writeback(scheduler):
+    tid = "cron-retention-shared"
+    started = asyncio.Event()
+    log = []
+    checkpointer = AsyncMock()
+
+    async def remove(thread_id):
+        assert log == ["writeback"]
+        log.append("delete")
+
+    checkpointer.adelete_thread.side_effect = remove
+    scheduler._checkpointer = checkpointer
+
+    async def resumed_turn():
+        async with thread_runs.lock_for(tid):
+            started.set()
+            try:
+                await asyncio.Event().wait()
+            finally:
+                await asyncio.sleep(0)
+                log.append("writeback")
+
+    active = asyncio.create_task(resumed_turn())
+    await started.wait()
+    await asyncio.wait_for(scheduler._delete_thread(tid), 1)
+    with pytest.raises(asyncio.CancelledError):
+        await active
+    assert log == ["writeback", "delete"]
 
 
 def _make_interval_job(name: str = "test", interval: str = "5m") -> Job:

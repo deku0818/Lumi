@@ -54,7 +54,7 @@ from lumi.agents.tools.capability import is_local_path_tool, is_write_tool
 from lumi.models.chain import structured_output, tool_call_chain
 from lumi.models.manager import detect_protocol
 from lumi.models.provider_store import resolve, resolve_pointer
-from lumi.utils.config import get_config
+from lumi.utils.config import GlobalConfigManager, get_config
 from lumi.utils.logger import logger
 from lumi.utils.sizing import context_window_tokens
 
@@ -401,6 +401,13 @@ def is_use_tool(state: LumiAgentState, runtime: Runtime[LumiAgentContext]) -> st
         return "OnAgentStop"
 
     tool_mode = runtime.context.mode_root().tool_mode
+    # 无人应答（无审批通道）时，要问人的模式改用全局「无人值守审批模式」——唯一决定点，
+    # 各无人值守入口不再各自设 auto；显式给的 auto / privileged（如飞书渠道配置）原样保留
+    if runtime.context.approval_broker is None and tool_mode in (
+        "default",
+        "accept_edits",
+    ):
+        tool_mode = GlobalConfigManager.load().unattended_tool_mode
     decision = route_decision(tool_calls, tool_mode, runtime.context.permission_engine)
     # privileged 的「自动放行」本身即授权，这条路上既不审批也不过分类器，没有别的挂钩点
     if decision == "ToolExecutor" and tool_mode == "privileged":

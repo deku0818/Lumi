@@ -13,6 +13,7 @@ from collections.abc import Awaitable, Callable
 
 from lumi.agents.core.meta_message import extract_text_content
 from lumi.gateway.protocol import bridge_event_to_wire
+from lumi.sessions.thread_runs import thread_runs
 
 
 def build_cron_stream_runner(hub) -> Callable[[str, str, str], Awaitable[str]]:
@@ -22,43 +23,48 @@ def build_cron_stream_runner(hub) -> Callable[[str, str, str], Awaitable[str]]:
         # 延迟 import 避免 gateway.bridge 在 bootstrap 早期成环
         from lumi.gateway.bridge import AgentBridge, EventKind
 
-        bridge = AgentBridge()
-        # 在任务所属项目里跑（权限边界 / MCP / 项目说明随之加载）；空串 = 未绑定项目的
-        # 存量 / 表单任务，退回进程 cwd。wait_mcp=True：单发执行无下一轮自愈，须等 MCP 池就位。
-        # interactive=False：无人应答，需人工审批的直接自动拒绝、ask 直接取消，不挂满超时。
-        await bridge.initialize(
-            project_dir=project_dir, wait_mcp=True, interactive=False
-        )
-        bridge.switch_thread(thread_id)
-        error = ""
-        try:
-            # auto：分类器逐个裁决。synthetic：job prompt 是机器注入指令、
-            # 不作用户气泡显示（items: []），但助手/工具事件照常直播。
-            async for evt in bridge.stream_response(
-                prompt, tool_mode="auto", synthetic=True
-            ):
-                # 零观测者（无人在看这条 cron 线程）时不白建 wire 帧——token 级 delta 每 run
-                # 成百上千，构帧只在有人观测时才值得。错误检测独立于观测，恒执行。
-                if hub.has_observers(thread_id):
-                    hub.publish_thread_event(
-                        thread_id, bridge_event_to_wire(evt, thread_id)
-                    )
-                if evt.kind == EventKind.ERROR:
-                    error = evt.error or "cron 执行出错"
-            # stream_response 把异常吞成 ERROR 事件、不抛；这里补抛，使 scheduler 如实记
-            # failed 而非误记 success。瞬态网络错已由 bridge 内部重试过（MAX_STREAM_RETRIES），
-            # 走到这里即持久失败。
-            if error:
-                raise RuntimeError(error)
-            snap = await bridge.graph.aget_state(
-                {"configurable": {"thread_id": thread_id}}
-            )
-            if snap.next:
-                # 停机 drain 让图停在 super-step 边界、并没跑完：按「关机宽限期被取消」
-                # 处理——不记执行记录、AT 不删，重启后由补偿接手（否则半截输出记成 success）
-                raise asyncio.CancelledError("gateway drain")
-            return extract_text_content(snap.values["messages"][-1].content).strip()
-        finally:
-            await bridge.close()
+        async with thread_runs.lock_for(thread_id):
+            bridge = AgentBridge()
+            # 在任务所属项目里跑（权限边界 / MCP / 项目说明随之加载）；空串 = 未绑定项目的
+            # 存量 / 表单任务，退回进程 cwd。wait_mcp=True：单发执行无下一轮自愈，须等 MCP 池就位。
+            # interactive=False：无人应答，需人工审批的直接自动拒绝、ask 直接取消，不挂满超时。
+            stream = None
+            try:
+                await bridge.initialize(
+                    project_dir=project_dir, wait_mcp=True, interactive=False
+                )
+                bridge.switch_thread(thread_id)
+                error = ""
+                # 审批模式按全局「无人值守审批模式」（见 nodes.is_use_tool）。synthetic：job prompt
+                # 是机器注入指令、不作用户气泡显示（items: []），但助手/工具事件照常直播。
+                stream = bridge.stream_response(prompt, synthetic=True)
+                async for evt in stream:
+                    # 零观测者（无人在看这条 cron 线程）时不白建 wire 帧——token 级 delta 每 run
+                    # 成百上千，构帧只在有人观测时才值得。错误检测独立于观测，恒执行。
+                    if hub.has_observers(thread_id):
+                        hub.publish_thread_event(
+                            thread_id, bridge_event_to_wire(evt, thread_id)
+                        )
+                    if evt.kind == EventKind.ERROR:
+                        error = evt.error or "cron 执行出错"
+                # stream_response 把异常吞成 ERROR 事件、不抛；这里补抛，使 scheduler 如实记
+                # failed 而非误记 success。瞬态网络错已由 bridge 内部重试过（MAX_STREAM_RETRIES），
+                # 走到这里即持久失败。
+                if error:
+                    raise RuntimeError(error)
+                snap = await bridge.graph.aget_state(
+                    {"configurable": {"thread_id": thread_id}}
+                )
+                if snap.next:
+                    # 停机 drain 让图停在 super-step 边界、并没跑完：按「关机宽限期被取消」
+                    # 处理——不记执行记录、AT 不删，重启后由补偿接手（否则半截输出记成 success）
+                    raise asyncio.CancelledError("gateway drain")
+                return extract_text_content(snap.values["messages"][-1].content).strip()
+            except (asyncio.CancelledError, Exception):
+                if stream is not None:
+                    await bridge.finalize_cancelled_stream(stream)
+                raise
+            finally:
+                await bridge.close()
 
     return runner

@@ -9,11 +9,10 @@ from __future__ import annotations
 from pathlib import Path
 from typing import TYPE_CHECKING
 
-from lumi.agents.core.graph import with_memory_instructions
+from lumi.agents.core.graph import build_system_prompt
 from lumi.agents.core.hooks import build_config_hooks
 from lumi.agents.runtime.shell_session import get_shell_session_manager
 from lumi.models import provider_store
-from lumi.utils.config import get_config
 
 if TYPE_CHECKING:
     from lumi.agents.permissions.engine import PermissionEngine
@@ -74,10 +73,9 @@ class FolderManager:
         b.mark_workspace_bound()
         b.retarget_mcp(target)
         if b._context is not None:
-            prompt = get_config().load_system_prompt(target)
-            if b._context.memory_enabled:
-                prompt = with_memory_instructions(prompt, target)
-            b._context.system_prompt = prompt
+            b._context.system_prompt = build_system_prompt(
+                target, enable_memory=b._context.memory_enabled
+            )
         # checkpoint 元数据跟随新项目（下一轮 checkpoint 用新目录）
         if b._config is not None:
             b._config.setdefault("metadata", {})["workspace_dir"] = b.workspace_dir

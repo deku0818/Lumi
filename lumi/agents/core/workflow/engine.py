@@ -28,8 +28,6 @@ from typing import Any
 
 from lumi.agents.core.meta_message import extract_text_content
 from lumi.agents.core.state import LumiAgentContext
-from lumi.agents.runtime.bg_tasks import new_task_id
-from lumi.agents.runtime.shell_session import run_with_shell
 from lumi.utils.logger import logger
 
 _MAX_AGENTS = 1000
@@ -188,7 +186,7 @@ class WorkflowEngine:
         self._last_log_emit = 0.0
         # 子代理实例按 agent_name 缓存复用——同一具名/默认子代理在扇出里只建一次
         # （工具表 + graph 编译 + MCP 发现都不重复）；lock 保证并发首次每键只建一次。
-        self._agent_cache: dict[str | None, tuple[Any, Any]] = {}
+        self._agent_cache: dict[str | None, Any] = {}
         self._agent_cache_lock = asyncio.Lock()
 
     def compile(self) -> None:
@@ -295,11 +293,9 @@ class WorkflowEngine:
     ) -> Any:
         """派一个子代理。``schema`` 非空时强制结构化输出并返回校验过的 dict；
         否则返回子代理最后一条消息的文本。并发受 semaphore 排队。"""
-        from langchain_core.messages import HumanMessage
-
         # 子代理构建（含首键 MCP 发现等冷启动开销）放 semaphore 外：它自带缓存 + lock，
         # 扇出里每键只建一次，不该占用并发槽拖住其他单元——槽只在真正 invoke 时占。
-        sub_agent, context = await self._build_agent(agent_name)
+        run = await self._build_agent(agent_name)
         # 派发计数（含排队中）→ drawer 进度的 total；放在 build 成功之后：确保每个计入
         # total 的 agent 都会走到下方 finally 的 done++（build 失败的不计），否则 total 永久虚高、
         # 进度条到不了 100%。不发事件（避免突发扇出 N 次广播）。
@@ -322,20 +318,7 @@ class WorkflowEngine:
             self._emit_progress()  # 进入运行（running++）
 
             try:
-                # 无审批通道（与后台子代理同）：auto 由分类器逐个裁决，需人工审批的自动拒绝
-                context.tool_mode = "auto"
-                inputs: dict[str, Any] = {
-                    "messages": [HumanMessage(content=prompt)],
-                    "depth": self._depth,
-                }
-                if schema:
-                    inputs["output_schema"] = schema
-                # 每个子代理独立 shell：并行扇出不在同一把锁上串行，cd/env 不污染
-                # 兄弟代理与主会话；用完即回收
-                result = await run_with_shell(
-                    new_task_id("sub-"),
-                    sub_agent.graph.ainvoke(inputs, context=context),
-                )
+                result = await run(prompt, schema)
 
                 if schema:
                     out = result.get("structured_output")
@@ -355,7 +338,7 @@ class WorkflowEngine:
                 self._done += 1
                 self._emit_progress()  # 完成（done++）
 
-    async def _build_agent(self, agent_name: str | None) -> tuple[Any, Any]:
+    async def _build_agent(self, agent_name: str | None) -> Any:
         """按 ``agent_name`` 缓存复用子代理实例——同一具名/默认子代理在扇出里只建一次。
         具名子代理用其自身配置；缺省用通用子代理（默认模型 + 全工具去递归类）。"""
         cached = self._agent_cache.get(agent_name)
@@ -370,7 +353,7 @@ class WorkflowEngine:
                 self._agent_cache[agent_name] = cached
         return cached
 
-    async def _create_agent(self, agent_name: str | None) -> tuple[Any, Any]:
+    async def _create_agent(self, agent_name: str | None) -> Any:
         from lumi.agents.tools import get_tools, load_agents
         from lumi.agents.tools.providers.agent import create_subagent
 
@@ -381,7 +364,7 @@ class WorkflowEngine:
             tools = await get_tools(
                 disabled_tools=_SUBAGENT_DISABLED, project_dir=project_dir
             )
-            return await create_subagent(self._parent, tools)
+            return await create_subagent(self._parent, tools, depth=self._depth)
 
         configs = load_agents(name=agent_name, project_dir=project_dir)
         if not configs:
@@ -397,6 +380,7 @@ class WorkflowEngine:
             tools,
             system_prompt=cfg.system_prompt,
             model_name=cfg.model or None,
+            depth=self._depth,
         )
 
     # ---- 并发编排 -----------------------------------------------------------

@@ -157,7 +157,7 @@ auto 模式的分类器裁决与人工审批同权——AI 判断即用户授权
 
 实现走 `context.widen_boundary` 回调（由 bridge 在 `initialize` 注入 `FolderManager.widen_for_violations`，与 `approval_broker` 同一注入模式，子代理经 agent 工具传播）。最终落到与「添加文件夹」完全相同的 `add_ephemeral_workspace`（仅内存不持久化），故模型下一轮经 `folder_note` 会收到目录变更提醒。目录取法见 `folders._enclosing_dir`：路径本身是目录取自身，否则取最近的已存在祖先（越界路径常常整条尾巴都还不存在）；一路走到文件系统根仍不存在则放弃——把 `/` 纳入工作区等于关掉边界。
 
-分界是**有没有 bridge**，不是「是不是 cron」：`lumi serve` 下的 cron 整个 job 跑在 `AgentBridge` 上（`tool_mode="auto"`），已覆盖；真正落空的是 workflow 与后台子代理——这些路径无人值守，不该自行扩大文件系统访问面，正解是把目录预先写进 `permissions.json` 的 `workspaces`（持久化、跨 run 生效）。
+分界是**有没有 bridge**，不是「是不是 cron」：`lumi serve` 下的 cron 整个 job 跑在 `AgentBridge` 上（审批模式跟随全局无人值守配置），已覆盖；真正落空的是 workflow 与后台子代理——这些路径无人值守，不该自行扩大文件系统访问面，正解是把目录预先写进 `permissions.json` 的 `workspaces`（持久化、跨 run 生效）。
 
 ### 动态规则管理
 
@@ -334,6 +334,8 @@ filesystem provider 的 `validate_path()` 与 bash 工作目录都经此读取�
 - 异常时保守处理：评估失败 → 要求人工审批
 
 ### HumanApproval 节点
+
+`is_use_tool()` 在调用纯路由决策前统一选择无人值守模式：若 `approval_broker is None` 且模式为 `default` / `accept_edits`，改用 `GlobalConfigManager.load().unattended_tool_mode`（默认 `auto`）；显式 `auto` / `privileged` 保留。前台子代理经 `create_subagent(..., interactive=True)` 共享父 broker 与实时模式；后台子代理和 workflow 保持独立、无 broker，由统一路由读全局设置。飞书的 bridge 以 `interactive=False` 创建，审批在图内收尾，outbound 不再截获审批事件。
 
 `human_approval()` 先做 DENY 二次检查（命中直接构造拒绝 ToolMessage 并 `Command(goto="CallModel")` 让模型调整）；无审批通道（`context.approval_broker` 为 None，如后台子代理）自动拒绝 → CallModel；否则经 `ApprovalBroker` 原地 await 用户应答（`decisions` 逐个裁决，见 [approval-inflight.md](approval-inflight.md)）。应答为 `{"decision" | "decisions", "message", "set_tool_mode"}`，缺项按拒绝。
 

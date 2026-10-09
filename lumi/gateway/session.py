@@ -15,10 +15,11 @@ inline await 会卡住接收循环，使 stop 帧在整轮结束前都读不到�
 from __future__ import annotations
 
 import asyncio
+import hashlib
 import ntpath
 import os
 import time
-from contextlib import AsyncExitStack, suppress
+from contextlib import suppress
 from dataclasses import dataclass, field
 from pathlib import Path
 
@@ -38,12 +39,12 @@ from lumi.gateway import (
     mcp_rpc,
     office_rpc,
     project_config,
+    settings_rpc,
 )
 from lumi.gateway.bridge import AgentBridge, EventKind, providers
 from lumi.gateway.bridge.core import available_commands
 from lumi.gateway.broadcast import BroadcastHub, serialize_bg_tasks
 from lumi.gateway.channel import Channel
-from lumi.gateway.channels.manager import manager
 from lumi.gateway.projects import (
     add_project,
     list_projects,
@@ -57,6 +58,7 @@ from lumi.gateway.session_registry import SessionRegistry, registry
 from lumi.sessions import session_model
 from lumi.sessions.session_meta import delete_meta, load_all, update_meta
 from lumi.sessions.session_store import list_sessions
+from lumi.sessions.thread_runs import thread_runs
 from lumi.sessions.usage import last_ai_usage
 from lumi.utils.constants import (
     FEISHU_THREAD_PREFIX,
@@ -74,10 +76,6 @@ _STREAMING_METHODS = frozenset(
 # 断连续接（Case 1）：detached 会话无人接回的兜底回收时长（保底防进程内泄漏）
 _DETACH_TTL_SECONDS = 8 * 3600
 _WINDOWS_ROOTS_PATH = "__lumi_windows_roots__"
-
-# 进程内全部活会话（在线 + detached，start 登记、aclose 注销）：删会话据此找到
-# 持有该 thread 的会话先收尾其在途轮
-_live: set[GatewaySession] = set()
 
 
 def _windows_drive_roots() -> list[str]:
@@ -147,19 +145,35 @@ def _history_items(messages: list) -> list[dict]:
             )
 
     items: list[dict] = []
+    legacy_counts: dict[str, int] = {}
     for m in messages:
+        message_id = m.id
+        if not message_id:
+            # 兼容旧 checkpoint：正常写入均显式赋 id；只对缺 id 的消息计算内容指纹。
+            digest = hashlib.sha256(m.model_dump_json().encode()).hexdigest()
+            occurrence = legacy_counts.get(digest, 0)
+            legacy_counts[digest] = occurrence + 1
+            message_id = f"legacy:{digest}:{occurrence}"
         kind = getattr(m, "type", None)
         if kind == "human":
             if should_show_human_message(m):
-                items.extend(_user_items(m))
+                items.extend(
+                    {**item, "id": f"{message_id}:user:{i}"}
+                    for i, item in enumerate(_user_items(m))
+                )
         elif kind == "ai":
             text = extract_text_content(m.content)
             if text:
-                items.append({"kind": "assistant", "text": text})
-            for tc in getattr(m, "tool_calls", None) or []:
+                items.append(
+                    {"id": f"{message_id}:assistant", "kind": "assistant", "text": text}
+                )
+            for tc_index, tc in enumerate(getattr(m, "tool_calls", None) or []):
                 tc_id = tc.get("id", "")
                 items.append(
                     {
+                        "id": f"tool:{tc_id}"
+                        if tc_id
+                        else f"{message_id}:tool:{tc_index}",
                         "kind": "tool",
                         "name": tc.get("name", ""),
                         "args": tc.get("args", {}),
@@ -608,42 +622,18 @@ async def _rename_session(session: GatewaySession, params: dict) -> dict:
 
 
 async def _delete_session(session: GatewaySession, params: dict) -> dict:
-    """删会话：先停后删。
-
-    该 thread 可能正在别的连接（desktop 每会话一条连接）或 registry 里 detached 的
-    会话上跑：不先收尾，删后该轮会续写 checkpoint、会话「复活」。故持有者先收尾在途
-    轮（挂审批以拒绝收尾，否则取消并等其写回完毕），detached 的直接回收；删除期间持
-    各持有者的 run.lock，通知轮无从在删除途中起合成轮往该 thread 写回；最后停掉其
-    后台任务、丢弃其待认领通知（删后再无人认领）。
-    """
+    """统一取消 desktop / IM / cron 的运行与等待者，再持线程锁删除。"""
     tid = params.get("thread_id", "")
-    owners = [s for s in _live if s.current_thread_id == tid]
-    for owner in owners:
-        await owner._finalize_active_turn(wait=True)
-    if (detached := registry.take(tid)) is not None:
-        await detached.aclose()
-    async with AsyncExitStack() as stack:
-        for owner in owners:
-            await stack.enter_async_context(owner._run.lock)
+    if not tid:
+        raise ValueError("thread_id 不能为空")
+    async with thread_runs.lock_for(tid).cancel_and_hold():
+        # detached 表仅用于回收断连 bridge，不再参与发现/停止正在运行的任务。
+        if (detached := registry.take(tid)) is not None:
+            await detached.aclose()
         await cancel_thread_bg_tasks(tid)
-        # 渠道会话（清空会话）：持渠道侧运行锁再删，避开在途轮把删掉的历史写回；
-        # 非渠道 thread 不在任何池里，thread_lock 恒返回 None。
-        # 轮可能跑数分钟，等 5s 仍占用则如实报错让用户稍后再试，不无限挂 RPC。
-        chan_lock = manager.thread_lock(tid)
-        if chan_lock is not None:
-            try:
-                await asyncio.wait_for(chan_lock.acquire(), timeout=5.0)
-            except TimeoutError:
-                raise ValueError("渠道会话正在执行，请稍后再试") from None
-            try:
-                await session._bridge.delete_thread(tid)
-            finally:
-                chan_lock.release()
-        else:
-            await session._bridge.delete_thread(tid)
+        await session._bridge.delete_thread(tid)
         get_task_registry().notification_queue.drain_for(tid)
-    delete_meta(tid)  # 渠道会话的模型覆盖同存这条 meta，随之一并清
-    # 渠道会话：广播给其他连接/旁观视图刷新（与渠道侧 /clear 同口径）
+        delete_meta(tid)
     if channel_name := _channel_of(tid):
         session._hub.on_channel_activity(tid, channel_name)
     return {"thread_id": tid}
@@ -772,6 +762,7 @@ _DOMAIN_HANDLERS = {
     **mcp_rpc.HANDLERS,
     **env_rpc.HANDLERS,
     **office_rpc.HANDLERS,
+    **settings_rpc.HANDLERS,
 }
 
 # 本服务实现的全部 RPC 方法（供协议契约测试断言与 events.json 一致）
@@ -830,7 +821,6 @@ class GatewaySession:
 
     async def start(self) -> None:
         """握手：发 gateway.ready、注册广播、拉起后台通知轮询。"""
-        _live.add(self)
         await self._channel.send(self._ready_frame())
         await self._attach_channel()
         # 后台任务完成通知轮询：与主接收循环并发，空闲时把队列通知注入新一轮推回前端
@@ -916,8 +906,7 @@ class GatewaySession:
 
         # 流式方法 spawn 成独立 task：主循环立即回到读帧，使运行期间仍能收到 stop
         if method in _STREAMING_METHODS:
-            # 渠道会话只读旁观（服务端兜底，非仅 UI）：desktop 与 IM 侧各持独立
-            # bridge/锁，从这里发消息会绕过渠道的会话串行化、并发写坏同一 thread
+            # 渠道会话只读旁观（服务端兜底，非仅 UI），消息接收与回复投递由渠道负责。
             if _channel_of(self.current_thread_id):
                 if rid is not None:
                     await self._channel.send(
@@ -957,7 +946,6 @@ class GatewaySession:
 
     async def aclose(self) -> None:
         """连接收尾：注销广播、取消 TTL/通知/RPC/流式 task、关闭 bridge。"""
-        _live.discard(self)
         if self._ttl_task is not None:
             self._ttl_task.cancel()
             self._ttl_task = None
@@ -1025,7 +1013,10 @@ class GatewaySession:
 
     async def _run_stream(self, gen) -> dict:
         """串行化地跑一轮事件流（用户消息 / 命令）。审批挂起期间持锁不放。"""
-        async with self._run.lock:
+        tid = self.current_thread_id
+        async with thread_runs.lock_for(tid), self._run.lock:
+            if self.current_thread_id != tid:
+                raise ValueError("会话已切换，请重新发送消息")
             return await self._pump_with_finalize(gen)
 
     async def _finalize_active_turn(self, *, wait: bool) -> bool:
@@ -1164,8 +1155,7 @@ class GatewaySession:
             # 里合法滞留（等渠道 poller 认领），全局非空不代表本会话有活干。
             if not self._bridge.has_notifications(self._bridge.current_thread_id):
                 continue
-            # 渠道会话旁观连接不消费通知：注入 meta 轮 = 绕过渠道会话锁并发写共享
-            # thread（与 handle_frame 只读守卫同因）。通知留在队列，宁滞留不写坏。
+            # 渠道通知交由对应渠道消费/投递，桌面旁观连接只接收广播。
             if _channel_of(self._bridge.current_thread_id):
                 continue
             # 已有轮（运行中 / 排队等锁 / 挂审批）就等它跑完，不顶掉它的 _run.task
@@ -1180,8 +1170,11 @@ class GatewaySession:
 
     async def _run_synthetic_turn(self) -> None:
         """一轮后台通知合成轮：持锁认领本 thread 的通知并 pump。"""
+        tid = self.current_thread_id
         try:
-            async with self._run.lock:
+            async with thread_runs.lock_for(tid), self._run.lock:
+                if self.current_thread_id != tid:
+                    return
                 # 只认领归属本连接当前 thread 的通知——队列是进程级共享的，
                 # 按归属认领才不会把其他会话的后台任务通知抢到本会话注入
                 hint = self._bridge.drain_notification_hint(

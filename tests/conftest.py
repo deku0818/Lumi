@@ -175,6 +175,16 @@ def reset_task_registry():
 
 
 @pytest.fixture(autouse=True)
+def reset_thread_runs(monkeypatch):
+    """每个用例有独立事件循环，不复用上个循环里的进程级运行锁。"""
+    from weakref import WeakValueDictionary
+
+    from lumi.sessions.thread_runs import thread_runs
+
+    monkeypatch.setattr(thread_runs, "_locks", WeakValueDictionary())
+
+
+@pytest.fixture(autouse=True)
 def reset_agent_detector():
     """每次测试重置 AgentChangeDetector 单例，避免缓存 digest 跨测试泄漏。"""
     AgentChangeDetector.reset()

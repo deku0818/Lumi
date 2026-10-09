@@ -11,6 +11,7 @@ import { BackendsPanel } from './BackendsPanel'
 import { EnvPanel } from './EnvPanel'
 import { AboutPanel } from './AboutPanel'
 import { FontPicker } from './FontPicker'
+import { UnattendedSettings } from './UnattendedSettings'
 import { Section, SectionGroup, Row, SegmentedControl, segmentShell } from './SettingsKit'
 import { Switch } from '@/components/ui/switch'
 import { Dialog, DialogContent, DialogTitle } from '@/components/ui/dialog'
@@ -111,6 +112,7 @@ export function SettingsDialog({
               setUiFont={setUiFont}
               notify={notify}
               setNotify={setNotify}
+              gwFor={gwFor}
             />
           </TabsContent>
           <TabsContent value="models" className="flex-1 min-w-0 overflow-auto px-6 pb-6 pt-12 mt-0">
@@ -165,6 +167,7 @@ function GeneralPanel({
   setUiFont,
   notify,
   setNotify,
+  gwFor,
 }: {
   themePref: ThemePref
   setThemePref: (p: ThemePref) => void
@@ -172,6 +175,7 @@ function GeneralPanel({
   setUiFont: (p: FontPref) => void
   notify: boolean
   setNotify: (v: boolean) => void
+  gwFor: (id: string) => Gateway | undefined
 }) {
   const { t } = useI18n()
   return (
@@ -201,6 +205,7 @@ function GeneralPanel({
           <Switch checked={notify} onCheckedChange={setNotify} />
         </Row>
       </Section>
+      <UnattendedSettings gwFor={gwFor} />
     </SectionGroup>
   )
 }

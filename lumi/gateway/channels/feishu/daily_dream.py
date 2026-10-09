@@ -28,6 +28,7 @@ from lumi.agents.core.meta_message import latest_human_ts
 from lumi.agents.memory import dream_lock
 from lumi.agents.memory.dream import consolidate_session_dream
 from lumi.gateway.broadcast import hub
+from lumi.sessions.thread_runs import preserve_poller
 from lumi.utils.logger import logger
 
 # run-lock 被用户轮占用时的重试：最多 N 次、每次隔 M 秒，耗尽则本轮跳过该会话。
@@ -105,7 +106,7 @@ async def _dream_phase(pool) -> list[str]:
             if lock.locked():
                 still_busy.append(thread_id)
                 continue
-            async with lock:
+            async with preserve_poller(lock):
                 bridge = await pool.get(thread_id)
                 try:
                     if await _dream_one(bridge, thread_id):
@@ -135,15 +136,19 @@ async def _summary_phase(pool, config, channel_name: str, threads: list[str]) ->
         if lock is None:
             logger.info("[daily-dream] summary 跳过（始终忙）thread=%s", thread_id)
             return
-        async with sem, lock:  # 并发配额只圈住真正的压缩调用
-            try:
-                bridge = await pool.get(thread_id)
-                if await bridge.compact_thread():
-                    hub.on_channel_activity(thread_id, channel_name)
-            except Exception:
-                logger.error(
-                    "[daily-dream] summary 失败 thread=%s", thread_id, exc_info=True
-                )
+        revision = getattr(lock, "revision", 0)
+        async with sem:  # 等并发配额期间可能已有别的轮/删除接管会话。
+            if lock.locked() or getattr(lock, "revision", 0) != revision:
+                return
+            async with preserve_poller(lock):
+                try:
+                    bridge = await pool.get(thread_id)
+                    if await bridge.compact_thread():
+                        hub.on_channel_activity(thread_id, channel_name)
+                except Exception:
+                    logger.error(
+                        "[daily-dream] summary 失败 thread=%s", thread_id, exc_info=True
+                    )
 
     await asyncio.gather(*(_summarize_one(t) for t in threads))
 

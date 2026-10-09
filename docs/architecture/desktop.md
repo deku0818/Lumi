@@ -95,7 +95,8 @@ WS 断开时若会话仍有**活跃 / 挂起轮**（典型：挂在工具审批 
 - **`lumi/sessions/session_meta.py`** — JSON sidecar（`~/.lumi/checkpoints/session_meta.json`），按 `thread_id` 存 `pinned`/`title`，IM 渠道会话的 `channel_title`（群名/私聊对方姓名，入站时自动同步）/`channel_kind`（group/p2p），以及模型生成的 `auto_title`（+定稿标记 `auto_title_final`），仅写非默认值且内容不变不写盘。textual-free，可在 headless 服务直接使用。
 - **`list_sessions` RPC** — 合并 sidecar 元数据后注入 `title`（手动重命名 > 渠道自动名 > 自动生成标题）/`pinned`，并按 thread 前缀标注 `channel`/`channel_kind`（`gateway/session._channel_of` 是渠道判定单点，前端只消费 wire 字段），置顶项稳定排到最前。
 - **标题自动生成**（`lumi/gateway/titler.py`，对齐 claude-code 的 sessionTitle 机制）— desktop 会话第 1 条可见用户消息发出时即后台生成（不等本轮跑完），第 3 条时用对话尾部 1000 字符再生成一次纠偏后定稿；模型来自 providers 分区的 `titler` 指针（`set_titler` RPC / 设置→模型面板配置，未配则跟随会话 active 模型）。完成经 `session.title` 事件广播，前端就地更新侧栏；手动重命名永远优先（触发与写入前双重检查）。IM 渠道会话有 `channel_title`，不生成。
-- **删除（先停后删）** — 该 thread 可能正在别的连接（desktop 每会话一条连接）或 registry 里 detached 的会话上跑，不先收尾，删后该轮续写 checkpoint、会话「复活」。故 `delete_session` 先对进程内所有持有该 thread 的会话（`session._live`：start 登记、aclose 注销）`_finalize_active_turn(wait=True)`（挂审批以拒绝收尾，否则取消并等其写回完毕），detached 的经 `registry.take` 取出并 `aclose`；随后持各持有者的 `run.lock`（通知轮无从在删除途中起合成轮）停掉该 thread 的后台任务（`cancel_thread_bg_tasks`）、经 `bridge.delete_thread()` 清理 LangGraph 会话 checkpoint（`LumiAgent.adelete_thread`）、回收其上传附件与持久 shell、丢弃其待认领通知，最后删除 sidecar 元数据条目。渠道会话删除前另持渠道侧运行锁（`ChannelManager.thread_lock`），避开在途轮把删掉的历史写回。
+- **运行与删除共用线程锁** — `sessions/thread_runs.py` 维护进程内 `thread_id → ThreadRunLock`，desktop 用户轮/通知轮、飞书用户轮/通知轮/记忆整理、cron 都取同一把锁，避免多个连接并发写同一 checkpoint。连接自己的 `run.lock` 另保护 bridge 的可变指向。线程锁同时登记持有者与等待者，弱引用回收无人使用的锁。
+- **删除（先停后删）** — `delete_session` 经 `cancel_and_hold()` 封住新运行，取消当前轮和排队者，等待持锁区（包括取消后的写回）全部退出，然后独占删除：关闭 detached bridge、取消后台任务、清理 checkpoint / 上传附件 / 持久 shell、丢弃通知与 sidecar 元数据。无需枚举连接或渠道池，cron 在初始化阶段也受保护；cron 保留策略与任务清理同样使用删除屏障。飞书删除取消只结束当前合成轮，长期轮询继续；停机取消仍会结束轮询。删除前积压的入站消息与妙记事件不会重新创建会话，删除完成后的新消息可以开始新轮。
 
 前端 `Sidebar` 每行 hover 出现 `⋮` 菜单（置顶 / 重命名 / 删除）；删除走二次确认弹窗（`ConfirmDialog`），删除当前会话时自动另开新会话顶上。
 

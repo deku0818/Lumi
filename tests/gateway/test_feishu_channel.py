@@ -1856,10 +1856,12 @@ async def test_only_real_user_turn_pins_the_model(monkeypatch, tmp_path):
     bridge._active_agent_runs = {}
     bridge._context = SimpleNamespace(tool_mode="")
     bridge._create_checkpoint_before_turn = _anoop
-    bridge._stream = lambda _data: _aempty()
+    bridge._stream = lambda _data, **kw: _aempty()
     # 借真方法：本测就是要验证 _stream_turn 确实经它对齐
     bridge.align_session_model = lambda: AgentBridge.align_session_model(bridge)
-    bridge._stream_turn = lambda m, tm: AgentBridge._stream_turn(bridge, m, tm)
+    bridge._stream_turn = lambda m, tm, **kw: AgentBridge._stream_turn(
+        bridge, m, tm, **kw
+    )
 
     # 合成轮（_stream_turn 是它与真人轮共用的最小操作）：对齐但不固化
     async for _ in AgentBridge._stream_turn(bridge, HumanMessage("hi"), "default"):
@@ -1868,7 +1870,12 @@ async def test_only_real_user_turn_pins_the_model(monkeypatch, tmp_path):
     assert session_model.resolve("t1").pinned is False
 
     # 真人轮：固化
-    async for _ in AgentBridge._stream_user_turn(bridge, HumanMessage("hi"), "default"):
+    async for _ in AgentBridge._stream_user_turn(
+        bridge,
+        HumanMessage("hi"),
+        "default",
+        snapshot=SimpleNamespace(values={}),
+    ):
         pass
     assert session_model.resolve("t1").pinned is True
 
@@ -1963,34 +1970,23 @@ def test_model_override_meta_roundtrip(monkeypatch, tmp_path):
     assert session_meta.load_all().get("t1") is None
 
 
-async def test_subagent_approval_is_auto_rejected():
-    # 回归：前台子代理的审批事件带 parent_run_id，曾在自动拒绝之前被过滤掉——
-    # broker Future 无人 resolve，该轮永挂、会话锁永占
+async def test_feishu_pool_creates_noninteractive_sessions(monkeypatch):
+    # 拒绝在图内完成，主/子代理都没有 broker；不依赖 outbound 的事件顺序。
     from unittest.mock import AsyncMock, MagicMock
 
-    from lumi.gateway.bridge import BridgeEvent, EventKind
-    from lumi.gateway.channels.feishu import outbound
+    from lumi.gateway.channels.feishu.bridge_pool import BridgePool
 
-    resolved: list[tuple[str, object]] = []
-
-    class _Bridge:
-        async def stream_response(self, content, **kw):
-            yield BridgeEvent(
-                kind=EventKind.APPROVAL,
-                data={"approval_id": "a1"},
-                parent_run_id="sub-run",
-            )
-            yield BridgeEvent(kind=EventKind.TURN_COMPLETE)
-
-        def resolve_approval(self, aid, value):
-            resolved.append((aid, value))
-
-    channel = MagicMock()
-    channel.streaming = AsyncMock()
-    channel.config.tool_mode = "auto"
-    await outbound.run_turn(channel, _Bridge(), chat_id="c", reply_to="m", content="hi")
-    assert [aid for aid, _ in resolved] == ["a1"]
-    assert resolved[0][1]["decision"] == "reject"
+    bridge = MagicMock()
+    bridge.initialize = AsyncMock()
+    monkeypatch.setattr(
+        "lumi.gateway.channels.feishu.bridge_pool.AgentBridge", lambda: bridge
+    )
+    pool = BridgePool("/project")
+    assert await pool.get("t1") is bridge
+    assert await pool.get("t1") is bridge
+    bridge.initialize.assert_awaited_once_with(
+        "/project", disabled_tools=["ask"], interactive=False
+    )
 
 
 def _run_turn_channel():

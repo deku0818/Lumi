@@ -284,12 +284,11 @@ async def test_subagent_has_no_ask_tool() -> None:
     assert "bash" in _names(captured["tools"])
 
 
-async def test_background_agent_runs_in_auto_mode() -> None:
-    """后台子代理用 auto（分类器逐个裁决），不再固定 privileged——此前委派一次即可
-    让写操作绕过分类器。"""
+async def test_background_agent_leaves_mode_to_unattended_routing() -> None:
+    """后台子代理无审批通道、无父模式继承；由路由读取全局无人值守配置。"""
     captured: dict = {}
     p1, p2, p3, p4 = _patch_agent_internals(captured)
-    context = SimpleNamespace()
+    context = SimpleNamespace(tool_mode="default", approval_broker=None)
 
     async def fake_create_agent(**kwargs):
         return SimpleNamespace(graph=None), context
@@ -305,7 +304,8 @@ async def test_background_agent_runs_in_auto_mode() -> None:
         await agent.coroutine(
             name="worker", prompt="干活", runtime=_make_runtime(depth=0)
         )
-    assert context.tool_mode == "auto"
+    assert context.tool_mode == "default"
+    assert context.approval_broker is None
 
 
 def test_child_tools_strips_workflow_at_limit() -> None:
@@ -329,7 +329,7 @@ def test_foreground_subagent_follows_parent_mode_live() -> None:
     from lumi.agents.core.state import LumiAgentContext
 
     parent = LumiAgentContext(tool_mode="privileged")
-    child = LumiAgentContext(mode_parent=parent)
+    child = LumiAgentContext(mode_parent=parent, approval_broker=object())
     call = {"name": "write", "args": {"file_path": "x.txt", "content": ""}, "id": "1"}
     state = {"messages": [AIMessage(content="", tool_calls=[call])]}
     runtime = SimpleNamespace(context=child)

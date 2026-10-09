@@ -313,9 +313,6 @@ async def _run_dream_fork(
             checkpoint=None,
             project_dir=project_dir,
         )
-        # 无人应答：auto——写记忆目录本就免审批，其余写入交分类器；输入含群消息等不受信
-        # 内容，不给 privileged
-        ctx.tool_mode = "auto"
         inputs = {
             "messages": [*current_messages, HumanMessage(content=prompt_text)],
             "depth": 1,  # 防自递归：dream agent 的 stop 经 depth 门直接放行

@@ -27,6 +27,7 @@ from lumi.agents.cron.job_store import JobStore
 from lumi.agents.cron.models import Job, ScheduleType
 from lumi.agents.cron.run_log import RunLog, RunRecord
 from lumi.agents.runtime.bg_tasks import current_thread_id
+from lumi.sessions.thread_runs import thread_runs
 from lumi.utils.config import get_config
 from lumi.utils.constants import MAX_CRON_RUN_THREADS
 from lumi.utils.logger import logger
@@ -559,7 +560,8 @@ class Scheduler:
         ):
             return
         try:
-            await self._checkpointer.adelete_thread(thread_id)
+            async with thread_runs.lock_for(thread_id).cancel_and_hold():
+                await self._checkpointer.adelete_thread(thread_id)
         except Exception:
             logger.warning("删除会话 checkpoint 失败: %s", thread_id, exc_info=True)
 

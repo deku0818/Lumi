@@ -105,12 +105,14 @@ def test_concurrency_is_not_bound_to_cpu_count(monkeypatch):
     assert engine_mod._max_concurrency() >= 4
 
 
-async def test_subagents_run_in_auto_mode(invoked):
+async def test_subagents_leave_mode_to_unattended_routing(invoked):
     # workflow 子代理没有审批通道（与后台子代理同）：父为 privileged 时曾绕过分类器
     await _run(
         'return await agent("x")', parent=LumiAgentContext(tool_mode="privileged")
     )
-    assert invoked[0].tool_mode == "auto"
+    assert invoked[0].tool_mode == "default"
+    assert invoked[0].approval_broker is None
+    assert invoked[0].mode_parent is None
 
 
 async def test_subagents_run_at_child_depth(monkeypatch):

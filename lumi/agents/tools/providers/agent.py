@@ -54,13 +54,15 @@ async def create_subagent(
     *,
     system_prompt: str | None = None,
     model_name: str | None = None,
+    depth: int = 1,
+    interactive: bool = False,
 ):
     """子代理的唯一构建入口（agent 工具与 workflow 共用；工具集由调用方按各自规则选好）。
 
     复用父 PermissionEngine 与项目根（共享工作区边界）；不持久化、不带持久记忆
     （临时执行单元保持上下文干净，项目说明 LUMI.md 仍由 preprocess 注入）；<env> 的
-    渠道条目随父传播——子代理同样会被派去发飞书消息、拉群成员。执行时须包在
-    ``run_with_shell`` 里：cd/env 不污染父与兄弟代理。
+    渠道条目随父传播。返回的 run(prompt, schema) 统一构造输入、传播审批上下文，
+    并在独立 shell 中执行；可经 on_progress 接收每步状态。
     """
     from lumi.agents.core.graph import create_agent
 
@@ -73,7 +75,30 @@ async def create_subagent(
         enable_memory=False,
     )
     context.env_extra = parent.env_extra
-    return lumi_agent, context
+    if interactive:
+        context.approval_broker = parent.approval_broker
+        context.widen_boundary = parent.widen_boundary
+        context.mode_parent = parent
+
+    async def run(prompt: str, schema: dict | None = None, *, on_progress=None) -> dict:
+        inputs = {"messages": [HumanMessage(content=prompt)], "depth": depth}
+        if schema is not None:
+            inputs["output_schema"] = schema
+
+        async def execute() -> dict:
+            if on_progress is None:
+                return await lumi_agent.graph.ainvoke(inputs, context=context)
+            final: dict = {}
+            async for state in lumi_agent.graph.astream(
+                inputs, context=context, stream_mode="values"
+            ):
+                final = state
+                on_progress(state)
+            return final
+
+        return await run_with_shell(new_task_id("sub-"), execute())
+
+    return run
 
 
 def _child_tools(all_tools: list, child_depth: int, max_depth: int) -> list:
@@ -126,34 +151,19 @@ async def agent(
     all_tools = await get_tools(
         tools=agent_config.tools or None, project_dir=runtime.context.project_dir
     )
-    lumi_agent, context = await create_subagent(
+    run = await create_subagent(
         runtime.context,
         _child_tools(all_tools, child_depth, max_depth),
         system_prompt=agent_config.system_prompt,
         model_name=agent_config.model or None,
+        depth=child_depth,
+        interactive=not run_in_background,
     )
 
     if run_in_background:
-        return _start_background_agent(name, prompt, lumi_agent, context, child_depth)
+        return _start_background_agent(name, prompt, run)
 
-    # 前台同步执行路径：传播在途审批 Broker，子代理审批经父流的 astream_events 浮现，
-    # 白嫖 custom event 自带的 parent_ids 归属到本子代理卡片（旧 interrupt 无 checkpointer
-    # 不可用，broker 才解锁子代理审批）。后台子代理 detached、无活流可挂，刻意不传播。
-    context.approval_broker = runtime.context.approval_broker
-    # 边界放宽回调随审批通道一同传播：子代理复用父 PermissionEngine，其审批 / 分类器
-    # 裁决通过后放宽的是同一条边界（后台子代理无活流、也无审批，故不在此路径）
-    context.widen_boundary = runtime.context.widen_boundary
-    # 审批模式是会话属性：挂到父 context 上实时读写（父运行中切换即时生效）
-    context.mode_parent = runtime.context
-    inputs = {
-        "messages": [HumanMessage(content=prompt)],
-        "depth": child_depth,
-    }
-    # 子代理独立 shell：cd/env 不污染父与兄弟代理；用完即回收
-    sub_key = new_task_id("sub-")
-    invoke_result = await run_with_shell(
-        sub_key, lumi_agent.graph.ainvoke(inputs, context=context)
-    )
+    invoke_result = await run(prompt)
 
     content = invoke_result["messages"][-1].content if invoke_result["messages"] else ""
     return extract_text_content(content)
@@ -167,9 +177,7 @@ async def agent(
 def _start_background_agent(
     name: str,
     prompt: str,
-    lumi_agent,
-    context,
-    depth: int,
+    run,
 ) -> str:
     """注册后台 Agent 任务并 fire-and-forget 启动。"""
     task_id = new_task_id("bg_")
@@ -190,15 +198,8 @@ def _start_background_agent(
     registry = get_task_registry()
     registry.register(entry)
 
-    # 后台子 agent 无交互审批通道：auto 由分类器逐个裁决，需人工审批的自动拒绝
-    # （approval_broker 不传播）。不用 privileged——否则委派一次即可让写操作绕过分类器
-    context.tool_mode = "auto"
-    inputs = {
-        "messages": [HumanMessage(content=prompt)],
-        "depth": depth,
-    }
     async_task = asyncio.create_task(
-        _run_agent_background(task_id, lumi_agent, context, inputs, output_file)
+        _run_agent_background(task_id, run, prompt, output_file)
     )
     entry.async_task = async_task
     async_task.add_done_callback(make_bg_done_callback(task_id, "agent bg"))
@@ -236,32 +237,23 @@ def _agent_activity(state: dict, tools_done: int = 0) -> dict:
 
 async def _run_agent_background(
     task_id: str,
-    lumi_agent,
-    context,
-    inputs: dict,
+    run,
+    prompt: str,
     output_file: Path,
 ) -> None:
     """后台执行 Agent；收尾（写文件 / 状态 / 通知）走共用 run_background_task。"""
     registry = get_task_registry()
 
-    async def _stream() -> str:
-        # values 模式每个超步 yield 全量 state：既能逐步汇报活动，最后一个快照即最终
-        # 状态（无 checkpointer，跑完就取不回来了，只能边跑边留）
-        final: dict = {}
-        activity: dict = {}
-        async for state in lumi_agent.graph.astream(
-            inputs, context=context, stream_mode="values"
-        ):
-            final = state
-            activity = _agent_activity(state, activity.get("tools_done", 0))
-            registry.notify_progress(task_id, activity)
+    activity: dict = {}
+
+    def progress(state: dict) -> None:
+        nonlocal activity
+        activity = _agent_activity(state, activity.get("tools_done", 0))
+        registry.notify_progress(task_id, activity)
+
+    async def execute() -> str:
+        final = await run(prompt, on_progress=progress)
         msgs = final.get("messages") or []
         return extract_text_content(msgs[-1].content if msgs else "")
 
-    await run_background_task(
-        task_id,
-        output_file,
-        # 后台子代理独立 shell（键用 task_id，已唯一）：与父/兄弟隔离、用完回收
-        lambda: run_with_shell(task_id, _stream()),
-        cancel_text="任务被取消",
-    )
+    await run_background_task(task_id, output_file, execute, cancel_text="任务被取消")

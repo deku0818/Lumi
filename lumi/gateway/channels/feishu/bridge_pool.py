@@ -2,8 +2,7 @@
 
 IM 是单长连接承载 N 个用户/群，每个 chat 派生一个 thread_id，对应一个常驻 AgentBridge
 （无断开信号，按用户决定不做 TTL 回收，进程存活期间一直驻留、复用 checkpoint）。每个
-thread 配一把 ``asyncio.Lock`` 串行化本会话的轮次——同会话同一时刻只跑一条 stream，
-避免并发 stream 撞坏 LangGraph 状态。
+thread 复用进程内运行锁，和桌面、cron 一起串行化轮次，避免并发写 checkpoint。
 
 池同时承载**须跨配置热重载存活的会话态**（投递地址 / 在跑的轮 / 待处理妙记事件）：
 热重载保留池但重建 channel 及其 inbound，这些跟着会话走、不随传输层重建而丢。积压
@@ -14,8 +13,10 @@ thread 配一把 ``asyncio.Lock`` 串行化本会话的轮次——同会话同�
 from __future__ import annotations
 
 import asyncio
+from contextlib import AsyncExitStack
 
 from lumi.gateway.bridge import AgentBridge
+from lumi.sessions.thread_runs import ThreadRunLock, thread_runs
 from lumi.utils.logger import logger
 
 # IM channel 的会话禁用的工具：飞书等不走 ask 询问卡片，关掉 ask 让模型自行判断
@@ -29,7 +30,7 @@ class BridgePool:
     def __init__(self, workspace: str = "") -> None:
         self._workspace = workspace
         self._bridges: dict[str, AgentBridge] = {}
-        self._locks: dict[str, asyncio.Lock] = {}
+        self._locks: dict[str, ThreadRunLock] = {}
         # thread_id → 投递地址：通知 poller 回投用。值是 receive_id，群/私聊入站
         # 回填真实 chat_id（oc_），妙记推送到从未私聊过的人时回填 open_id（ou_）
         # ——两者都能投递，发送侧按前缀选 receive_id_type，故别拿它当 chat_id 用
@@ -60,11 +61,11 @@ class BridgePool:
             if bridge is None:
                 bridge = AgentBridge()
                 await bridge.initialize(
-                    self._workspace, disabled_tools=IM_DISABLED_TOOLS
+                    self._workspace, disabled_tools=IM_DISABLED_TOOLS, interactive=False
                 )
                 bridge.switch_thread(thread_id)
                 self._bridges[thread_id] = bridge
-                self._locks[thread_id] = asyncio.Lock()
+                self._locks[thread_id] = thread_runs.lock_for(thread_id)
                 logger.info(f"[BridgePool] 新建 AgentBridge thread={thread_id}")
             return bridge
 
@@ -72,7 +73,7 @@ class BridgePool:
         """已建桥则返回，否则 None（不隐式建桥——建桥重且常驻，只在真要跑轮时建）。"""
         return self._bridges.get(thread_id)
 
-    def lock(self, thread_id: str) -> asyncio.Lock:
+    def lock(self, thread_id: str) -> ThreadRunLock:
         """该 thread 的运行锁；建桥时一并创建，故此处必然存在。"""
         return self._locks[thread_id]
 
@@ -81,7 +82,7 @@ class BridgePool:
         lock = self.try_lock(thread_id)
         return lock is not None and lock.locked()
 
-    def try_lock(self, thread_id: str) -> asyncio.Lock | None:
+    def try_lock(self, thread_id: str) -> ThreadRunLock | None:
         """该 thread 的运行锁；未建桥（无此 thread）返回 None。"""
         return self._locks.get(thread_id)
 
@@ -97,20 +98,25 @@ class BridgePool:
             for bridge in self._bridges.values():
                 bridge.reject_pending()
             for task in self.run_tasks.values():
-                task.cancel()
-            # 池正被销毁，acquire 后不释放（无后续轮次）
-            acquires = [lock.acquire() for lock in self._locks.values()]
-            try:
-                await asyncio.wait_for(asyncio.gather(*acquires), timeout=5.0)
-            except TimeoutError:
-                logger.warning("[BridgePool] 在途轮未在 5s 内结束，强制关闭")
-            for thread_id, bridge in self._bridges.items():
+                if not task.cancelling():
+                    task.cancel()
+            # 共享线程锁必须释放：其他连接/后来重建的池仍使用同一把锁。
+            async with AsyncExitStack() as stack:
+                waits = [
+                    stack.enter_async_context(lock.idle())
+                    for lock in self._locks.values()
+                ]
                 try:
-                    await bridge.close()
-                except Exception as e:
-                    logger.warning(
-                        f"[BridgePool] 关闭 bridge thread={thread_id} 异常: {e}"
-                    )
+                    await asyncio.wait_for(asyncio.gather(*waits), timeout=5.0)
+                except TimeoutError:
+                    logger.warning("[BridgePool] 在途轮未在 5s 内结束，强制关闭")
+                for thread_id, bridge in self._bridges.items():
+                    try:
+                        await bridge.close()
+                    except Exception as e:
+                        logger.warning(
+                            f"[BridgePool] 关闭 bridge thread={thread_id} 异常: {e}"
+                        )
             self._bridges.clear()
             self._locks.clear()
             self.chat_ids.clear()
