@@ -1,6 +1,6 @@
 import { memo, useEffect, useRef, useState } from 'react'
 import { ChevronRight, FileText } from 'lucide-react'
-import type { Item } from '../../types'
+import type { AttachedFile, Item } from '../../types'
 import { toolStatusKey } from '../../toolMeta'
 import { fmtDuration, msgTime } from '@/lib/utils'
 import { Markdown } from '../Markdown'
@@ -119,10 +119,56 @@ function RetryHint() {
   )
 }
 
+const IMAGE_EXT = /\.(png|jpe?g|gif|webp|bmp|svg)$/i
+
+function FileChip({ f }: { f: AttachedFile }) {
+  return (
+    <span
+      title={f.path}
+      className="inline-flex items-center gap-1.5 rounded-full border px-2.5 py-1 text-xs border-primary/30 bg-primary/10 text-ink"
+    >
+      <FileText size={12} className="shrink-0 text-primary" />
+      <span className="max-w-52 truncate">{f.name}</span>
+    </span>
+  )
+}
+
+const THUMB =
+  'block size-30 shrink-0 overflow-hidden rounded-2xl border border-line/40 transition-shadow'
+
+// 图片附件统一 120×120 方块（居中裁切），点开预览看原图。取不到地址（远程无连接）
+// 或加载失败（断线 / 文件已删）退回文件胶囊，不出破图。
+function ImageThumb({ f, src, onOpen }: { f: AttachedFile; src?: string; onOpen?: (f: AttachedFile) => void }) {
+  const [failed, setFailed] = useState(false)
+  if (!src || failed) return <FileChip f={f} />
+  return (
+    <button
+      title={f.name}
+      onClick={() => onOpen?.(f)}
+      className={`${THUMB} cursor-zoom-in hover:shadow-[0_0_0_2px_color-mix(in_srgb,var(--color-accent)_45%,transparent),0_0_18px_color-mix(in_srgb,var(--color-accent)_25%,transparent)]`}
+    >
+      <img src={src} alt="" loading="lazy" onError={() => setFailed(true)} className="size-full object-cover" />
+    </button>
+  )
+}
+
 // memo：流式期间每个 delta 都重建 items 数组，但未变更项保持对象身份，
 // memo 让历史消息（尤其 ReactMarkdown 解析）不随每个 token 重渲染。
-export const ItemView = memo(function ItemView({ item }: { item: Exclude<Item, { kind: 'tool' }> }) {
+// fileSrc：附件路径 → 可加载地址（本地 lumi-file / 远程 /file，无连接给 undefined）；
+// onOpenImage：点缩略图打开预览面板。两者须为稳定引用，否则 memo 失效。
+export const ItemView = memo(function ItemView({
+  item,
+  fileSrc,
+  onOpenImage,
+}: {
+  item: Exclude<Item, { kind: 'tool' }>
+  fileSrc?: (path: string) => string | undefined
+  onOpenImage?: (f: AttachedFile) => void
+}) {
   if (item.kind === 'user') {
+    const files = item.files ?? []
+    const imageFiles = files.filter((f) => IMAGE_EXT.test(f.path))
+    const otherFiles = files.filter((f) => !IMAGE_EXT.test(f.path))
     return (
       <div className="flex flex-col items-end gap-1.5">
         {/* 消息头：发送者 · 发送时刻。渠道消息两者都有；desktop 消息只有 ts
@@ -133,29 +179,23 @@ export const ItemView = memo(function ItemView({ item }: { item: Exclude<Item, {
             {item.ts ? `${item.sender ? ' · ' : ''}${msgTime(item.ts)}` : ''}
           </div>
         )}
-        {item.images && item.images.length > 0 && (
+        {/* 乐观气泡的 base64 图片（turn.start 到达即换成后端路径）+ 图片附件：同尺寸方块一行 */}
+        {(item.images?.length || imageFiles.length > 0) && (
           <div className="flex flex-wrap gap-1.5 justify-end max-w-[80%]">
-            {item.images.map((src, i) => (
-              <img
-                key={i}
-                src={src}
-                alt=""
-                className="max-h-52 rounded-2xl border border-line/40 object-cover"
-              />
+            {item.images?.map((src, i) => (
+              <span key={i} className={THUMB}>
+                <img src={src} alt="" className="size-full object-cover" />
+              </span>
+            ))}
+            {imageFiles.map((f) => (
+              <ImageThumb key={f.path} f={f} src={fileSrc?.(f.path)} onOpen={onOpenImage} />
             ))}
           </div>
         )}
-        {item.files && item.files.length > 0 && (
+        {otherFiles.length > 0 && (
           <div className="flex flex-wrap gap-1.5 justify-end max-w-[80%]">
-            {item.files.map((f, i) => (
-              <span
-                key={i}
-                title={f.path}
-                className="inline-flex items-center gap-1.5 rounded-full border px-2.5 py-1 text-xs border-primary/30 bg-primary/10 text-ink"
-              >
-                <FileText size={12} className="shrink-0 text-primary" />
-                <span className="max-w-52 truncate">{f.name}</span>
-              </span>
+            {otherFiles.map((f, i) => (
+              <FileChip key={i} f={f} />
             ))}
           </div>
         )}

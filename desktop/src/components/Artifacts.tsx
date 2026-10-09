@@ -47,7 +47,7 @@ export function parseArtifacts(output: string): Artifact[] {
 const ext = (f: Artifact) => (f.name || f.path).toLowerCase().split('.').pop() || ''
 
 // 内容取用通道的唯一决策点：本地走 lumi-file 零拷贝，远程经该机器 serve 的 /file 端点流回
-const contentUrl = (path: string, remote?: boolean, gw?: Gateway) =>
+export const contentUrl = (path: string, remote?: boolean, gw?: Gateway) =>
   remote && gw ? gw.fileHttpUrl(path) : fileUrl(path)
 
 // 远程 iframe 内容经鉴权 fetch 落 blob: URL 再喂——token 只留在父应用的 fetch 里，

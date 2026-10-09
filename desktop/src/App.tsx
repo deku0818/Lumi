@@ -58,7 +58,7 @@ import { ApprovalDialog, type Decision } from './components/ApprovalDialog'
 import { ClarifyDialog, ASK_CANCELLED } from './components/ClarifyDialog'
 import { Sidebar } from './components/Sidebar'
 import { MachineIcon, MachinesProvider } from './components/MachineTabs'
-import { FileCards, PreviewPanel, parseArtifacts } from './components/Artifacts'
+import { FileCards, PreviewPanel, contentUrl, parseArtifacts } from './components/Artifacts'
 import { BgTasksSection } from './components/BgTasksDrawer'
 import { CronPage, RunsSection } from './components/CronPage'
 import { RightRail } from './components/RightRail'
@@ -288,6 +288,15 @@ export default function App() {
   const renamedRef = useRef<Set<string>>(new Set())
   // 每台机器一条「控制连接」：用于跨机器 fan-out list_sessions / 全局 RPC（非 chat 流）
   const controlConns = useRef<Record<string, Gateway>>({})
+  // 用户气泡图片缩略图：取用通道同预览面板（本地 lumi-file / 远程 /file）；远程无该机
+  // 连接给 undefined（退回文件胶囊），不回落读本地盘。稳定引用，保住 ItemView 的 memo
+  const activeGw = controlConns.current[activeBackend]
+  const thumbSrc = useMemo(
+    () => (path: string) =>
+      remoteBackend && !activeGw ? undefined : contentUrl(path, remoteBackend, activeGw),
+    [remoteBackend, activeGw],
+  )
+  const openImage = useCallback((f: AttachedFile) => setPreview({ ...f, kind: 'image' }), [])
   const cronJobsRef = useLatest(cronJobs)
   const refreshCronJobsRef = useRef<((only?: string) => void) | null>(null) // handleEvent 经此按机器刷新
   const scrollRef = useRef<HTMLDivElement>(null)
@@ -2511,7 +2520,7 @@ export default function App() {
                               remote={remoteBackend}
                             />
                           ) : (
-                            <ItemView key={key} item={seg.item} />
+                            <ItemView key={key} item={seg.item} fileSrc={thumbSrc} onOpenImage={openImage} />
                           )
                         // 用户气泡编辑态：气泡原位换成可编辑框（Save 前零副作用）
                         const userItem =

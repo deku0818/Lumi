@@ -264,6 +264,34 @@ async def test_turn_start_carries_user_message_id():
         await session.aclose()
 
 
+async def test_turn_start_carries_attachment_paths():
+    """开轮事件带出本轮附件后端路径（乐观气泡的 base64 图片据此换成落盘路径）。"""
+    bridge = FakeBridge(
+        events=[
+            BridgeEvent(
+                kind=EventKind.TURN_START,
+                message_id="mid-7",
+                data={"files": ["/u/a.png"]},
+            ),
+            BridgeEvent(kind=EventKind.TURN_COMPLETE),
+        ]
+    )
+    session, channel = _make_session(bridge)
+    await session.start()
+    try:
+        await session.handle_frame(
+            {"id": 1, "method": "send_message", "params": {"content": "hi"}}
+        )
+        await _drain(session)
+        start = next(e for e in channel.events() if e["params"]["type"] == "turn.start")
+        assert start["params"]["payload"] == {
+            "message_id": "mid-7",
+            "files": ["/u/a.png"],
+        }
+    finally:
+        await session.aclose()
+
+
 async def test_send_message_rejected_when_workspace_unbound():
     bridge = FakeBridge()
     bridge.workspace_bound = False

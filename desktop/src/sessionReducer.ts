@@ -86,14 +86,18 @@ export const userBubble = (text: string, images?: string[], files?: AttachedFile
 
 // 给最后一条尚未上锚的用户气泡打上后端消息 id（turn.start 事件驱动）。
 // 已上锚（历史回放带 id）或本轮无用户气泡（系统命令）时原数组返回，不触发重渲染。
-function anchorLastUser(items: Item[], messageId: string): Item[] {
+// files 非空时一并换成后端声明的附件（base64 图片 → 落盘路径），与重载历史后同源显示。
+function anchorLastUser(items: Item[], messageId: string, files?: string[]): Item[] {
   if (!messageId) return items
   for (let i = items.length - 1; i >= 0; i--) {
     const it = items[i]
     if (it.kind !== 'user') continue
     if (it.messageId) return items
     const copy = items.slice()
-    copy[i] = { ...it, id: `${messageId}:user:0`, messageId }
+    const att = files?.length
+      ? { images: undefined, files: files.map((p) => ({ path: p, name: p.split(/[\\/]/).pop() || p })) }
+      : {}
+    copy[i] = { ...it, ...att, id: `${messageId}:user:0`, messageId }
     return copy
   }
   return items
@@ -275,7 +279,7 @@ export function reduceEvent(store: Store, sid: string, ev: WireEvent, defaultMod
       // 发生——不同步的话，本会话此后切模型不会弹缓存失效确认
       n = {
         ...s,
-        items: anchorLastUser(s.items, ev.payload.message_id ?? ''),
+        items: anchorLastUser(s.items, ev.payload.message_id ?? '', ev.payload.files),
         model: s.model ?? defaultModel,
       }
       break

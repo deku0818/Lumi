@@ -46,7 +46,7 @@ export interface WireEventPayloads {
     running?: boolean
     run_started_at?: number | null
   }
-  'turn.start': { message_id: string }
+  'turn.start': { message_id: string; files?: string[] } // files：本轮附件的后端路径（含落盘的粘贴图片）
   'message.start': Record<string, never>
   'message.delta': { text: string; usage?: Usage }
   'thinking.delta': { text: string; usage?: Usage }

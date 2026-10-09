@@ -589,8 +589,13 @@ class AgentBridge:
         )
         # 开轮即广播本轮用户消息 id：前端据此给乐观气泡上锚（时间旅行按 id 截断）。
         # 走事件而非 RPC 返回值——id 是「轮的事实」而非「轮的结果」，中途 stop 的轮
-        # 同样需要它，且不必让每个流式入口都记得回传。
-        yield BridgeEvent(kind=EventKind.TURN_START, message_id=msg.id or "")
+        # 同样需要它，且不必让每个流式入口都记得回传。附带本轮附件的后端路径：乐观
+        # 气泡里的 base64 图片据此换成落盘路径，与重载历史后的显示同源。
+        yield BridgeEvent(
+            kind=EventKind.TURN_START,
+            message_id=msg.id or "",
+            data={"files": declared_file_paths(msg)},
+        )
         async for event in self._stream_turn(msg, tool_mode, snapshot=snapshot):
             yield event
 
