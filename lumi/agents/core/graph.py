@@ -325,11 +325,15 @@ def build_system_prompt(
     enable_memory: bool = False,
 ) -> str:
     """创建与切换项目共用的系统提示词组装。"""
+    from lumi.agents.memory.project_doc import PROJECT_DOC_INSTRUCTIONS
+
     prompt = (
         get_config().load_system_prompt(project_dir)
         if system_prompt is None
         else system_prompt
     )
+    if PROJECT_DOC_INSTRUCTIONS not in prompt:
+        prompt = "\n\n".join(filter(None, (prompt, PROJECT_DOC_INSTRUCTIONS)))
     return with_memory_instructions(prompt, project_dir) if enable_memory else prompt
 
 

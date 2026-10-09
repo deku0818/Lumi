@@ -61,7 +61,7 @@ def test_load_prompt_returns_none_when_nowhere(tmp_path):
 
 
 def test_system_prompt_concats_soul_and_agents(tmp_path):
-    """SOUL + AGENTS 按序拼接；无配置时空串（以无系统提示词运行）。"""
+    """SOUL + AGENTS 按序拼接；无配置时返回空串，框架规则由 graph 追加。"""
     cfg = LumiConfig(str(tmp_path))
     assert cfg.load_system_prompt() == ""  # default 风格无内置 prompts
     _write_prompt(cfg, "SOUL", "灵魂")

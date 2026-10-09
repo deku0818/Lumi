@@ -11,11 +11,13 @@
 | `default` | 默认风格。**不内置提示词**——系统提示词全部来自用户 `.lumi/prompts/`；内置 general-purpose / explore 两个子 Agent 与 lumi-config 技能 |
 | `code` | 面向软件工程。内置完整的系统提示词（SOUL / AGENTS）和 explore / plan 两个子 Agent；default 的子 Agent 与技能作为基底一并可用（同名 explore 以 code 为准） |
 
-每种风格可内置三类资源：`prompts/`（系统提示词）、`agents/`（子 Agent）、`skills/`（技能），三者均为可选。`default` 不带 `prompts/`，提示词全部来自用户 `.lumi/prompts/`；两处都没有时以空系统提示词运行（不报错）。
+每种风格可内置三类资源：`prompts/`（系统提示词）、`agents/`（子 Agent）、`skills/`（技能），三者均为可选。`default` 不带 `prompts/`，风格提示词来自用户 `.lumi/prompts/`；两处都没有时仍带框架的项目说明按需读取规则（不报错）。
 
 ### 提示词组装
 
 系统提示词由 `SOUL.md`、`AGENTS.md` 两个文件按此顺序**直接拼接**（不做 XML 包裹），任一文件缺失则跳过该段。
+
+框架随后追加项目说明按需读取规则。项目根及子目录的 `AGENTS.md` 正文由模型通过工具读取，与此处的 `prompts/AGENTS.md` 配置分开。
 
 ---
 

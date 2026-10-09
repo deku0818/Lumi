@@ -811,7 +811,7 @@ async def preprocess_messages(
 ) -> dict:
     """消息预处理节点：清理不完整的工具调用、重置工具取消标记，并分发
     UserPromptSubmit hooks（内置的上下文注入 hook 在此把 env / agent / skill /
-    记忆索引 / LUMI.md 按 marker 比对注入末条用户消息，见 :mod:`context_inject`）。
+    记忆索引 按 marker 比对注入末条用户消息，见 :mod:`context_inject`）。
 
     hook 返回的消息 update（同 id 替换末条 / 追加 reminder）合并进本节点返回值；
     ``Block`` 拦下本条提问、结束本轮（不调模型）。历史压缩在上游 ``Summarizer`` 已完成，

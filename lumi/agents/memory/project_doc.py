@@ -1,31 +1,16 @@
-"""项目根说明文件（CLAUDE.md 式）的加载。
-
-``LUMI.md`` 放在项目根，记录这个项目的约定与对 Lumi 的指示，会在会话首条消息以
-``<system-reminder>`` 注入上下文（主 + 子 agent 都注入）。与 style 系统提示词
-（``.lumi/prompts/`` 的 SOUL/AGENTS）不同：那是「Lumi 是谁」，这是「这个项目要什么」。
-"""
+"""项目说明的按需读取规则；正文由模型通过工具读取，不自动加载。"""
 
 from __future__ import annotations
 
-from pathlib import Path
+PROJECT_DOC_NAME = "AGENTS.md"
+"""项目说明文件名。"""
 
-from lumi.agents.memory.paths import read_text_or_none
+PROJECT_DOC_INSTRUCTIONS = f"""# 项目说明
 
-PROJECT_DOC_NAME = "LUMI.md"
-"""项目根说明文件名。"""
+开展工作时，识别并读取适用于当前任务的 `{PROJECT_DOC_NAME}`，
+再按其中的指令开展工作。先检查项目根；进入子目录工作前，检查从项目根到该目录
+沿途的同名文件。文件中的指令适用于其所在目录及子目录，更深层的指令在对应范围内
+优先；用户的明确指令优先于项目说明。
 
-MAX_DOC_BYTES = 50_000
-"""注入上限；超出截断并附警告，避免单文件撑爆上下文。"""
-
-
-def load_project_doc(project_dir: Path) -> str | None:
-    """读项目根的 ``LUMI.md``；不存在或为空返回 None，过长则截断并附警告。"""
-    content = read_text_or_none(project_dir / PROJECT_DOC_NAME)
-    if content is None:
-        return None
-    if len(content) > MAX_DOC_BYTES:
-        cut = content.rfind("\n", 0, MAX_DOC_BYTES)
-        content = content[: cut if cut > 0 else MAX_DOC_BYTES] + (
-            f"\n\n> 注意：{PROJECT_DOC_NAME} 过长，仅加载了一部分。"
-        )
-    return content
+项目说明正文不会自动加载到上下文；仅在任务需要时读取，不要一次性读取所有目录
+的说明。已读取的说明可在当前任务中复用；用户告知有更新或发现文件变化时重新读取。"""

@@ -71,7 +71,7 @@ class LumiAgentContext:
     memory_enabled: bool = field(default=False)
     """是否为本 agent 注入持久记忆（MEMORY.md 索引 + 系统提示词行为说明）。
     默认 False（opt-in），与 create_agent 一致；仅 bridge 的主对话 agent 置 True。
-    项目说明 LUMI.md 不受此开关影响，主/子 agent 均注入。"""
+    AGENTS.md 的按需读取规则不受此开关影响，主/子 agent 均带此规则。"""
 
     def mode_root(self) -> LumiAgentContext:
         """审批模式的归属 context：沿 ``mode_parent`` 上溯到会话根。"""

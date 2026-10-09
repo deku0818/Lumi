@@ -238,8 +238,8 @@ class LumiConfig:
     def load_system_prompt(self, project_dir: str | Path | None = None) -> str:
         """SOUL.md + AGENTS.md 按序直接拼接（不做 XML 包裹），逐个走 load_prompt 的解析链。
 
-        两文件都没有时返回空串（以无系统提示词运行，call_model 的 ``if system_prompt:``
-        会跳过 SystemMessage），不 fail-loud。
+        两文件都没有时返回空串，不 fail-loud；graph.build_system_prompt 仍会追加
+        框架的项目说明按需读取规则。
 
         Args:
             project_dir: 会话绑定的项目根；给定时项目 ``.lumi/prompts/`` 为最高层。
@@ -250,7 +250,7 @@ class LumiConfig:
             if (text := self.load_prompt(name, project_dir))
         ]
         if not parts:
-            logger.info(f"风格 '{self.active_style}' 无提示词配置，以空系统提示词运行")
+            logger.info(f"风格 '{self.active_style}' 无提示词配置")
             return ""
         logger.info(f"使用风格 '{self.active_style}' 的系统提示词")
         return "\n\n".join(parts)

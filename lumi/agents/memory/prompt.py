@@ -49,7 +49,7 @@ def build_memory_instructions(memory_dir: Path) -> str:
 - 代码模式、架构、文件路径、项目结构——读当前项目即可得知。
 - git 历史、谁改了什么——`git log` / `git blame` 才是权威。
 - 调试修复配方——修复在代码里，原因在 commit message 里。
-- 已写在项目说明（LUMI.md）里的内容。
+- 已写在项目说明（AGENTS.md）里的内容。
 - 临时任务细节、当前对话的过程状态。
 
 即便用户明确要求保存上述内容，也先反问「其中哪里是出乎意料 / 不显然的」，只存那部分。

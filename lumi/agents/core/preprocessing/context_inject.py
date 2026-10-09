@@ -1,4 +1,4 @@
-"""上下文注入 hook：env / agent / skill / 记忆索引 / LUMI.md 持久注入进末条用户消息。
+"""上下文注入 hook：env / agent / skill / 记忆索引 持久注入进末条用户消息。
 
 env 块用 `<env>` 标签（`constants.ENV_TAG`，块内无标题句、条目自解释、变更时原样重发
 整块），其余块走 `<system-reminder>`：环境是长期有效的事实，不是一次性提醒。
@@ -15,9 +15,9 @@ digest。每轮（UserPromptSubmit）比对 marker 与当前状态：
 - 全无变化 → 不注入文本，仅把 marker 前移到末条消息（content 字节不动、缓存
   无损）——保证"写过"名单窗口每轮收口、倒扫恒在上一条用户消息停下。
 
-已知限制（备案不修）：自改静默对 MEMORY.md / LUMI.md 是文件级判定，若模型改过
+已知限制（备案不修）：自改静默对 MEMORY.md 是文件级判定，若模型改过
 该文件的同一窗口内还有其它来源的改动（autoDream 在 fork 里写记忆、用户手改
-LUMI.md），会一并被静默且不补发。触发需两个写方挤进同一轮窗口，频率低、修复
+MEMORY.md），会一并被静默且不补发。触发需两个写方挤进同一轮窗口，频率低、修复
 需跨进程感知，接受此损失。
 
 正确性不变量：历史只被压缩改写，且压缩恒在本 hook **之前**发生（在线 Summarizer
@@ -30,7 +30,6 @@ LUMI.md），会一并被静默且不补发。触发需两个写方挤进同一�
 
 from __future__ import annotations
 
-from difflib import SequenceMatcher
 from pathlib import Path
 
 from langchain_core.messages import AIMessage, HumanMessage
@@ -46,14 +45,11 @@ from lumi.agents.core.preprocessing.agent_detector import AgentChangeDetector
 from lumi.agents.core.preprocessing.compact import find_pending_human
 from lumi.agents.core.preprocessing.memory import (
     MEMORY_HEADER,
-    PROJECT_DOC_HEADER,
     memory_index_lines,
-    project_doc_lines,
 )
 from lumi.agents.core.preprocessing.skill_detector import SkillChangeDetector
 from lumi.agents.core.preprocessing.system_info import system_info_body
 from lumi.agents.memory.paths import memory_entrypoint, resolve_under_project
-from lumi.agents.memory.project_doc import PROJECT_DOC_NAME
 from lumi.agents.permissions.workspace import get_authorized_directory
 from lumi.utils.constants import ENV_TAG
 from lumi.utils.hashing import short_hash
@@ -71,10 +67,6 @@ def entry_lines(configs: list) -> dict[str, str]:
         c.name: f"- {c.name}: {c.description}"
         for c in sorted(configs, key=lambda c: c.name)
     }
-
-
-_ANCHOR_MAX_CHARS = 30
-"""LUMI.md diff 内容锚的截断长度（锚 = 变更处上方最近的未变行原文）。"""
 
 
 def _scan_history(messages: list, project_dir: Path) -> tuple[dict | None, set[Path]]:
@@ -143,58 +135,6 @@ def _emit_keyed(
     return _prefer_shorter(diff, full), digests
 
 
-def _anchor_text(text: str) -> str:
-    if len(text) > _ANCHOR_MAX_CHARS:
-        text = text[:_ANCHOR_MAX_CHARS] + "…"
-    return f"「{text}」之后"
-
-
-def _line_span(i1: int, i2: int) -> str:
-    return f"原第 {i1 + 1}-{i2} 行" if i2 - i1 > 1 else f"原第 {i1 + 1} 行"
-
-
-def _doc_diff(old: list[str], lines: list[str], hashes: list[str]) -> list[str]:
-    """LUMI.md 行级 diff：内容锚（变更处上方最近的未变行原文）+ 行号定位。
-
-    被删行只有 hash 无原文——旧文本模型在历史里可见，锚 + 行号足以定位；
-    锚原文从当前文件取（未变行两侧一致）。
-    """
-    chunks: list[str] = []
-    anchor = ""
-    matcher = SequenceMatcher(None, old, hashes, autojunk=False)
-    for tag, i1, i2, j1, j2 in matcher.get_opcodes():
-        if tag == "equal":
-            nonblank = [line for line in lines[j1:j2] if line.strip()]
-            anchor = nonblank[-1] if nonblank else anchor
-            continue
-        where = _anchor_text(anchor) if anchor else "文档开头"
-        if tag == "delete":
-            chunks.append(f"- {where}的{_line_span(i1, i2)}已删除")
-        elif tag == "replace":
-            chunks.append(
-                f"- {where}（{_line_span(i1, i2)}）更新为:\n" + "\n".join(lines[j1:j2])
-            )
-        else:  # insert
-            chunks.append(f"- {where}新增:\n" + "\n".join(lines[j1:j2]))
-    return chunks
-
-
-def _emit_doc(
-    lines: list[str], old: list[str] | None, silenced: bool
-) -> tuple[str, list[str]]:
-    """LUMI.md 块 → (注入文本, 新行 hash 列表)。"""
-    hashes = [short_hash(line) for line in lines]
-    if old is None:
-        return _full_block(PROJECT_DOC_HEADER, lines), hashes
-    if hashes == old or silenced:
-        return "", hashes
-    diff = format_reminder(
-        f"{PROJECT_DOC_NAME} 内容有更新:", _doc_diff(old, lines, hashes)
-    )
-    full = _full_block(f"{PROJECT_DOC_NAME} 内容有更新，以下为完整最新版本:", lines)
-    return _prefer_shorter(diff, full), hashes
-
-
 def _has_agent_tool(tools: list) -> bool:
     return any(getattr(t, "name", None) == "agent" for t in tools)
 
@@ -224,7 +164,7 @@ async def context_inject_hook(ctx: HookContext) -> HookResult:
     target = messages[-1]
     if not isinstance(target, HumanMessage):
         # 工具轮中段刚被 PTL 兜底压缩：注入块连同 marker 一起删了，本轮后续调用就缺
-        # env / 技能 / 项目说明。注入到压缩原样保住的那条真人消息上（同 id 替换）
+        # env / 技能 / 记忆索引。注入到压缩原样保住的那条真人消息上（同 id 替换）
         if old_marker is not None:
             return None
         target = find_pending_human(messages)
@@ -283,12 +223,6 @@ async def context_inject_hook(ctx: HookContext) -> HookResult:
             else None,
         )
         parts.append(text)
-
-    doc_path = (project_dir / PROJECT_DOC_NAME).resolve()
-    text, marker["lumi_doc"] = _emit_doc(
-        project_doc_lines(project_dir), old.get("lumi_doc"), doc_path in written
-    )
-    parts.append(text)
 
     # 无变化也把 marker 前移写到末条（content 字节不动、不破缓存）：
     # ① "本会话写过"名单的窗口每轮收口——防止某次不改 digest 的 write（如改

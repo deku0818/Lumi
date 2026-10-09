@@ -47,7 +47,7 @@ lumi/styles/
 
 **空文件（或只剩 frontmatter）视同不存在**，继续往下找——否则一个被误清空的提示词会静默生效。各层都没有有效内容才返回 `None`。
 
-**系统提示词（SOUL.md / AGENTS.md）**：两文件各走一次上述解析链，按 `SOUL → AGENTS` 顺序以 `\n\n` **直接拼接**（不做 XML 包裹），任一缺失则跳过该段；都没有时 `load_system_prompt` 返回空串，agent 以无系统提示词运行（不 fail-loud）。
+**系统提示词（SOUL.md / AGENTS.md）**：两文件各走一次上述解析链，按 `SOUL → AGENTS` 顺序以 `\n\n` **直接拼接**（不做 XML 包裹），任一缺失则跳过该段；都没有时 `load_system_prompt` 返回空串（不 fail-loud）。`graph.build_system_prompt` 随后追加框架的项目说明按需读取规则；项目根及子目录的 `AGENTS.md` 正文由模型通过工具读取，与这里的 `prompts/AGENTS.md` 配置分开。
 
 **SUMMARY.md（压缩用）**：框架内置了兜底（`lumi/prompts/SUMMARY.md`），故未配置也能正常压缩，各调用点不再有「未配置 SUMMARY」的错误分支。第四层目前只放这一份——它是运行时基础设施而非风格表达，放进某个 style 会让其它 style 拿不到。
 

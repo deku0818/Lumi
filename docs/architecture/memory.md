@@ -1,4 +1,4 @@
-# 持久记忆 + 项目说明注入设计
+# 持久记忆注入 + 项目说明按需读取设计
 
 > 状态：写入侧主动写入 + 注入**已实现**（2026-06-28，v0.2.10），移植自 Claude Code 的 `memdir`。
 > **Dream（离线综合）+ 召回端裁决**亦**已实现**（2026-06-30，v0.2.12），见文末《Dream + 召回端裁决》。
@@ -7,10 +7,10 @@
 
 | | 持久记忆 | 项目说明 |
 |--|--|--|
-| 文件 | `~/.lumi/memory/projects/<项目>/`（`MEMORY.md` 索引 + topic `.md`） | 项目根 `LUMI.md` |
+| 文件 | `~/.lumi/memory/projects/<项目>/`（`MEMORY.md` 索引 + topic `.md`） | 项目根及子目录 `AGENTS.md` |
 | 谁写 | 模型在对话中自己 `write`/`edit` | 人手维护 |
 | 承载 | 跨会话积累「用户是谁 / 怎么协作 / 项目背景」 | 「这个项目要什么」 |
-| 注入范围 | 仅主 agent（`enable_memory`） | 主 + 子 agent |
+| 加载方式 | 索引注入，仅主 agent（`enable_memory`） | 主 + 子 agent 通过工具按需读取正文 |
 
 二者与 style 系统提示词（`.lumi/prompts/` 的 SOUL/AGENTS，「Lumi 是谁」）正交。
 
@@ -36,13 +36,16 @@
   `is_memory_path`（边界判定，resolve 两侧防 `..` 穿越与 symlink 逃逸）/ `read_text_or_none`（共用安全读）。
 - **`prompt.py`** — `build_memory_instructions()`（行为说明：taxonomy / 不该存什么 / 两步存法 /
   何时召回 / 推荐前验证）+ `load_memory_index()`（读 `MEMORY.md`，200 行截断）。
-- **`project_doc.py`** — `load_project_doc()`（读 `LUMI.md`，50KB 截断）。
+- **`project_doc.py`** — `PROJECT_DOC_INSTRUCTIONS`（主/子 agent 共用的按需读取规则）。
+  `graph.build_system_prompt()` 追加此规则；不读文件、不注入正文、不跟踪正文 diff。
 
 ## 三个接入点
 
 1. **行为说明 → 系统提示词**：`create_agent(enable_memory=True)` 时把 `build_memory_instructions`
-   追加到系统提示词尾部，并 `ensure_memory_dir`。
-2. **`MEMORY.md` 索引 + `LUMI.md`（+ env/agent/skill）→ 持久注入 + 增量 diff**：
+   追加到系统提示词尾部，并 `ensure_memory_dir`。所有 agent 均带 `AGENTS.md` 按需读取规则，
+   与 `enable_memory` 解耦：处理相关任务时检查项目根及目标子目录沿途的同名文件，读取
+   后遵循对应范围的指令，更深层优先。
+2. **`MEMORY.md` 索引（+ env/agent/skill）→ 持久注入 + 增量 diff**：
    `preprocessing/context_inject.py` 的 `context_inject_hook`（UserPromptSubmit 内置 hook，
    `preprocess_messages` 分发）把上下文块**注入进末条用户消息**（进历史、进 checkpoint），
    `additional_kwargs["ctx_digest"]` marker 记录「模型已知状态」的条目级 digest。无 marker
@@ -52,7 +55,8 @@
    且压缩恒在本 hook 之前（图拓扑 `Summarizer → PreprocessMessages → CallModel`）——hook
    永远在压缩后的世界运行，扫不到 marker 即全量重建，marker 存在 ⟺ 完整 diff 链可见。
    缓存收益：变更只动消息尾部，写记忆 / 改 skill 不再冲掉前缀历史缓存。
-   `MEMORY.md` 受 `context.memory_enabled` 门控，`LUMI.md` 不受。
+   `MEMORY.md` 受 `context.memory_enabled` 门控。`AGENTS.md` 不进入此注入链，
+   marker 不再存储旧的 `lumi_doc` 字段；旧会话历史中已注入的正文会保留到压缩或新建会话。
 
    > 变更判定的状态在**消息 marker 里**（per-thread、随 checkpoint 持久），不在进程单例——
    > detector（`FileSetChangeDetector`）退化为纯加载缓存，旧的单例 changed 失真问题不存在。

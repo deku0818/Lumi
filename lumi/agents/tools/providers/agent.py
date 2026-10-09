@@ -60,7 +60,7 @@ async def create_subagent(
     """子代理的唯一构建入口（agent 工具与 workflow 共用；工具集由调用方按各自规则选好）。
 
     复用父 PermissionEngine 与项目根（共享工作区边界）；不持久化、不带持久记忆
-    （临时执行单元保持上下文干净，项目说明 LUMI.md 仍由 preprocess 注入）；<env> 的
+    （临时执行单元保持上下文干净，AGENTS.md 仍按系统提示词规则按需读取）；<env> 的
     渠道条目随父传播。返回的 run(prompt, schema) 统一构造输入、传播审批上下文，
     并在独立 shell 中执行；可经 on_progress 接收每步状态。
     """

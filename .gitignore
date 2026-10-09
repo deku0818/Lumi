@@ -9,8 +9,8 @@ wheels/
 # Virtual environments
 .venv
 .lumi
-# 项目根说明文件（持久记忆功能注入上下文）：内容随项目/开发者而异，本地维护不进仓库
-LUMI.md
+# 本仓库的项目说明：本地维护，由模型按需读取；不忽略内置 prompts/AGENTS.md
+/AGENTS.md
 logs
 .claude
 test

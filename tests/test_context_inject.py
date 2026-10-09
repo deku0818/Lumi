@@ -2,7 +2,7 @@
 
 覆盖定稿的行为规则：首轮全量注入 + marker；无变化零注入仅 marker 前移；条目级
 增量 diff（相对上一个 marker）；diff 比全量长退化整块；自改静默（write 过的源
-文件不通知、marker 照常结算）；LUMI.md 行级 diff；压缩后无 marker 世界全量重建；
+文件不通知、marker 照常结算）；项目说明正文不注入；压缩后无 marker 世界全量重建；
 末条非 HumanMessage 跳过。
 """
 
@@ -30,7 +30,7 @@ def _cfg(name: str, desc: str, path: str | None = None) -> SimpleNamespace:
 
 @contextmanager
 def _patched(agents=(), skills=(), project_dir=None):
-    """mock 加载缓存单例 + 授权目录；project_dir=None 时记忆/LUMI.md 为空。"""
+    """mock 加载缓存单例 + 授权目录；project_dir=None 时记忆索引为空。"""
     proj = project_dir or Path("/nonexistent-proj")
     with (
         patch.object(context_inject.AgentChangeDetector, "get_instance") as ai,
@@ -114,7 +114,7 @@ async def test_first_turn_full_injection_and_marker():
     assert "<env>" in text and "- os: " in text  # env 全量
     assert "- myskill: do x" in text  # skill 全量
     marker = msg.additional_kwargs[CTX_DIGEST_KEY]
-    assert set(marker) == {"env", "skills", "lumi_doc"}  # 无 agent 工具 / 记忆关闭
+    assert set(marker) == {"env", "skills"}  # 无 agent 工具 / 记忆关闭
     assert "myskill" in marker["skills"]
     # 原始用户输入保留在注入块之后
     assert msg.content[-1]["text"] == "hi"
@@ -259,44 +259,51 @@ async def test_self_written_entry_settles_silently(tmp_path):
     assert again.update["messages"][0].content == "again"
 
 
-# === LUMI.md 行级 diff ===
+# === 项目说明由工具按需读取，不进入注入链 ===
 
 
-async def test_project_doc_line_diff(tmp_path):
-    doc = tmp_path / "LUMI.md"
-    stable = [f"第{i}节：足够长的项目约定说明，撑起全量块的体积" for i in range(10)]
-    doc.write_text("\n".join(["第一行", *stable]), encoding="utf-8")
+async def test_project_docs_never_injected_or_read(tmp_path):
+    doc = tmp_path / "AGENTS.md"
+    doc.write_text("项目约定正文", encoding="utf-8")
+    (tmp_path / "LUMI.md").write_text("旧版说明正文", encoding="utf-8")
     with _patched(project_dir=tmp_path):
-        first = await _run([HumanMessage(content="hi", id="m1")])
-        assert "第一行" in _injected_text(first.update["messages"][0])
-        messages = _apply([HumanMessage(content="hi", id="m1")], first)
-        messages.append(HumanMessage(content="next", id="m2"))
-        doc.write_text("\n".join(["改动的第一行", *stable]), encoding="utf-8")
-        cmd = await _run(messages)
-    text = _injected_text(cmd.update["messages"][0])
-    assert "LUMI.md 内容有更新:" in text
-    assert "改动的第一行" in text
-    # 文档开头变更无内容锚 → 用「文档开头」+ 行号定位
-    assert "文档开头（原第 1 行）更新为:" in text
-    assert stable[0] not in text  # 未变行不重发
+        with patch.object(
+            Path, "read_text", side_effect=AssertionError("不应读取正文")
+        ):
+            messages = await _seeded()
+        text = _injected_text(messages[-1])
+        assert "项目约定正文" not in text and "旧版说明正文" not in text
+        assert set(messages[-1].additional_kwargs[CTX_DIGEST_KEY]) == {"env", "skills"}
+        # 外部编辑、删除、重新创建说明文件，都不产生正文或 diff 注入。
+        for content in ("更新的项目约定", None, "重新创建的说明"):
+            if content is None:
+                doc.unlink()
+            else:
+                doc.write_text(content, encoding="utf-8")
+            messages.append(HumanMessage(content="next"))
+            with patch.object(
+                Path, "read_text", side_effect=AssertionError("不应读取正文")
+            ):
+                cmd = await _run(messages)
+            assert cmd.update["messages"][0].content == "next"
+            messages = _apply(messages, cmd)
+        # 压缩清掉 marker 后重建上下文，也不得重新加载说明正文。
+        with patch.object(
+            Path, "read_text", side_effect=AssertionError("不应读取正文")
+        ):
+            fresh = await _run([HumanMessage(content="压缩后的提问")])
+        assert "重新创建的说明" not in _injected_text(fresh.update["messages"][0])
 
 
-async def test_project_doc_diff_anchors_to_preceding_line(tmp_path):
-    """中间行变更：锚 = 变更处上方最近的未变行原文（截断）+ 行号。"""
-    doc = tmp_path / "LUMI.md"
-    lines = [f"第{i}节：足够长的项目约定说明，撑起全量块的体积" for i in range(10)]
-    doc.write_text("\n".join(lines), encoding="utf-8")
+async def test_legacy_project_doc_marker_is_dropped(tmp_path):
     with _patched(project_dir=tmp_path):
-        first = await _run([HumanMessage(content="hi", id="m1")])
-        messages = _apply([HumanMessage(content="hi", id="m1")], first)
-        messages.append(HumanMessage(content="next", id="m2"))
-        doc.write_text(
-            "\n".join([*lines[:5], "插入的新行", *lines[5:]]), encoding="utf-8"
-        )
+        messages = await _seeded()
+        messages[-1].additional_kwargs[CTX_DIGEST_KEY]["lumi_doc"] = ["old-hash"]
+        messages.append(HumanMessage(content="next"))
         cmd = await _run(messages)
-    text = _injected_text(cmd.update["messages"][0])
-    assert "插入的新行" in text
-    assert f"「{lines[4]}」之后新增:" in text  # 上方最近的未变行作锚
+    msg = cmd.update["messages"][0]
+    assert msg.content == "next"
+    assert "lumi_doc" not in msg.additional_kwargs[CTX_DIGEST_KEY]
 
 
 # === 记忆索引门控 ===
@@ -365,7 +372,7 @@ if __name__ == "__main__":
 
 async def test_reinjects_into_pending_human_after_mid_turn_compaction():
     # 回归：工具轮中段 PTL 压缩删掉了注入块（marker 一并剥掉），而末条不是用户消息，
-    # 本轮后续模型调用一直缺 <env> / 技能 / 项目说明，直到下一轮才恢复
+    # 本轮后续模型调用一直缺 <env> / 技能 / 记忆索引，直到下一轮才恢复
     from langchain_core.messages import AIMessage, ToolMessage
 
     from lumi.agents.core.preprocessing.compact import build_summary_carrier

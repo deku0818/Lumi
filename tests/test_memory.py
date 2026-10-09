@@ -1,22 +1,24 @@
-"""持久记忆 + 项目说明（LUMI.md）注入的纯函数测试。
+"""持久记忆注入 + 项目说明（AGENTS.md）按需读取的测试。
 
-覆盖：路径 sanitize / 边界判定、记忆行为说明组装、MEMORY.md 索引与 LUMI.md 加载、
+覆盖：路径 sanitize / 边界判定、行为说明组装、MEMORY.md 索引加载、
 路由免审批 carve-out、首条消息注入块。全部为纯字符串/路径断言，不执行真实工具。
 """
 
 from __future__ import annotations
 
 from pathlib import Path
+from unittest.mock import patch
 
+import pytest
+
+from lumi.agents.core.graph import build_system_prompt, create_agent
 from lumi.agents.core.preprocessing.memory import (
     memory_index_lines,
-    project_doc_lines,
 )
 from lumi.agents.memory import (
     build_memory_instructions,
     is_memory_path,
     load_memory_index,
-    load_project_doc,
     memory_dir,
     memory_entrypoint,
     paths,
@@ -99,16 +101,41 @@ def test_load_memory_index_truncates(tmp_path, monkeypatch):
     assert "仅加载了一部分" in out
 
 
-# === LUMI.md 项目说明加载 ===
+# === AGENTS.md 按需读取规则 ===
 
 
-def test_load_project_doc_missing(tmp_path):
-    assert load_project_doc(tmp_path) is None
+@pytest.mark.parametrize("enable_memory", [False, True])
+def test_project_instructions_without_reading_body(
+    tmp_path, monkeypatch, enable_memory
+):
+    _point_memory_root(monkeypatch, tmp_path / "memory")
+    (tmp_path / "AGENTS.md").write_text("不应自动加载的项目正文", encoding="utf-8")
+    with patch.object(Path, "read_text", side_effect=AssertionError("不应读取正文")):
+        prompt = build_system_prompt(
+            tmp_path, system_prompt="自定义指令", enable_memory=enable_memory
+        )
+    assert "自定义指令" in prompt
+    assert "AGENTS.md" in prompt and "沿途的同名文件" in prompt
+    assert "不应自动加载的项目正文" not in prompt
 
 
-def test_load_project_doc_reads(tmp_path):
-    (tmp_path / "LUMI.md").write_text("本项目用 uv 管理依赖", encoding="utf-8")
-    assert "uv" in load_project_doc(tmp_path)
+def test_project_instructions_in_default_and_inherited_prompt(tmp_path):
+    from lumi.utils.config.manager import LumiConfig
+
+    cfg = LumiConfig(str(tmp_path / "config"))
+    with patch("lumi.agents.core.graph.get_config", return_value=cfg):
+        prompt = build_system_prompt(tmp_path)
+    assert "AGENTS.md" in prompt
+    assert build_system_prompt(tmp_path, system_prompt=prompt) == prompt
+
+
+async def test_agent_without_memory_has_project_instructions(tmp_path):
+    _, context = await create_agent(
+        tools=[], system_prompt="子代理指令", model_name="fake", project_dir=tmp_path
+    )
+    assert not context.memory_enabled
+    assert "子代理指令" in context.system_prompt
+    assert "AGENTS.md" in context.system_prompt
 
 
 # === 路由免审批 carve-out ===
@@ -152,17 +179,14 @@ def test_route_non_memory_write_still_evaluated(monkeypatch):
 
 
 def test_reminder_empty_when_no_sources(tmp_path, monkeypatch):
-    """无 LUMI.md、无记忆索引 → 两块条目皆空（context_inject 不产生注入文本）。"""
+    """无记忆索引 → 记忆条目为空。"""
     _point_memory_root(monkeypatch, tmp_path)
-    assert project_doc_lines(tmp_path) == []
     assert memory_index_lines(tmp_path) == {}
 
 
-def test_project_doc_lines_and_index_keys(tmp_path, monkeypatch):
-    """LUMI.md 按行输出；MEMORY.md 索引行以行内文件名为条目 key。"""
+def test_memory_index_keys(tmp_path, monkeypatch):
+    """MEMORY.md 索引行以行内文件名为条目 key。"""
     _point_memory_root(monkeypatch, tmp_path)
-    (tmp_path / "LUMI.md").write_text("项目约定\n第二行", encoding="utf-8")
-    assert project_doc_lines(tmp_path) == ["项目约定", "第二行"]
 
     from lumi.agents.memory import ensure_memory_dir, memory_entrypoint
 
