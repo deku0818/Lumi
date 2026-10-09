@@ -1,14 +1,14 @@
 [project]
 # 发布名 lumi-harness（PyPI 上 lumi 已被占用）；命令名与包目录仍是 lumi
 name = "lumi-harness"
-version = "0.2.132"
+version = "0.2.133"
 description = "基于 LangGraph 的 AI Agent 框架"
 readme = "README.md"
 requires-python = ">=3.12"
 dependencies = [
     "fastapi>=0.134.0",
     "langchain>=1.2.10",
-    "langchain-anthropic>=1.4.0",
+    "langchain-anthropic>=1.7.3",
     "langchain-mcp-adapters>=0.2.1",
     "langchain-openai>=1.3.0",
     "langgraph>=1.2.11",

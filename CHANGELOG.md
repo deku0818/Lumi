@@ -1,5 +1,13 @@
 # Changelog
 
+## [0.2.133] - 2026-10-09
+
+### Fixed
+- **claude-opus-5-5 下 AI 审批恒转人工** — `langchain-anthropic` 1.5.3 的结构化输出恒强制 `tool_choice`，claude-opus-5-5 等模型对此一律 400，导致 auto 审批分类器（及会话标题生成）每次失败、fail-closed 转人工审批。升级至 1.7.5，对这类模型改为软引导。
+
+### Changed
+- **升级 langchain 系依赖** — langchain 1.4.4、langchain-core 1.6.9、langchain-openai 1.7.0、langgraph 1.2.14、langchain-mcp-adapters 0.3.2、langsmith 0.14.5；anthropic SDK 升至 1.x、openai SDK 升至 3.x。
+
 ## [0.2.132] - 2026-10-09
 
 ### Changed
