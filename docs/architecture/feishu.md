@@ -113,7 +113,7 @@ mention_key——`id=` 是**发送方应用**的 open_id（open_id 每应用一�
   引擎 → `<attached-file>路径</attached-file>` 注入正文，agent 用 `read` 读（PDF 渲染、文本直读）。
 - 回复某条消息时，一并拉取**被回复消息**里的图片/文件（用父消息 id 下载）；其正文按类型抽取
   （text / post / 卡片，@ 占位按父消息自己的 `mentions` 换姓名）记进 `_Pending.quote`，以「> 」引用块
-  前置到**模型侧**文本（`_render` / 直连 `texts`），气泡 `items` 不带——群聊 mention 模式下被引用的
+  前置到**模型侧**文本（`_render`），气泡 `items` 不带——群聊 mention 模式下被引用的
   内容通常不在会话历史里。父消息是本机器人自己发的（sender 为本 app_id）则跳过：已在历史里。
 
 **忙时排队 + 合并**（同会话同一时刻只跑一轮）：
@@ -142,7 +142,7 @@ mention_key——`id=` 是**发送方应用**的 open_id（open_id 每应用一�
 - **运行时命令**（`RUNTIME_COMMANDS`：/model /effort）：改本会话的模型 / 思考档位，落
   `session_meta` 按 thread 存，下一轮开跑前经 `align_session_model` 生效——只动本会话，
   别的群与 desktop 都不受影响。值不像切换操作的（中文 / 多词自然语言，见 `is_model_arg`）
-  不拦，按「未知命令照常喂模型」走；直连期同名命令归 relay（改 cc 的 `--model`，另一体系）。
+  不拦，按「未知命令照常喂模型」走。
   渠道配置里没有模型字段，解析链与 desktop 同源，见 [model-switching.md](model-switching.md)。
 - 群聊 mention 模式下显示名可含空格（"Lumi Bot"），解析对 @ 开头文本取第一个空白后跟
   `/` 的位置作命令起点，误切由已知命令表兜底。
@@ -226,54 +226,11 @@ CardKit「编辑同一张卡片」打字机：
 - 工具忙碌期 spinner 动画；纯工具轮（无正文）收尾落「✅ 已完成」而非空白卡。
 - 孤儿 buf 由 `_cleanup_loop` 按 `STREAM_BUF_TTL=300s` 驱逐。
 
-## 直连模式（relay.py + relay_turn.py）
-
-`/direct` 让飞书消息**直达本机的 Claude Code**，Lumi 不参与——thread 级路由开关，
-Lumi 自身会话原封不动，退出即无缝回到原对话。
-
-- **驱动方式**：每条消息拉一次 `claude -p --output-format stream-json --include-partial-messages
-  --verbose --permission-mode bypassPermissions [--resume <sid>]` 子进程（prompt 走 stdin），
-  跑完即退。不用 tmux / PTY 刮屏：会话文件（`~/.claude/projects/…/<sid>.jsonl`）才是共享
-  基质，终端 `claude --resume <sid>` 打开的就是同一段对话（双向接管）。
-- **事件折叠**（`relay.parse_stream_line` 纯函数 → `RelayEvent`）：`system/init` 与 `result`
-  的 sid 都即时落盘（resume 恒追最新）；`text_delta` → 打字机；`tool_use`/`tool_result` 配对
-  → 忙碌状态行（cc 工具名经 `_TOOL_ALIASES` 映射到同一张友好动作表）；子代理内部活动
-  （`parent_tool_use_id` 非空）不外显。单行超 10MB 只丢该事件不死整轮。
-- **绑定 sidecar**（`~/.lumi/channels/relay.json`，经 `utils/json_sidecar`）：
-  `{thread: {active, cwd, session_id}}`。`active` 落盘 → serve 重启后模式不静默失效；
-  `/direct exit` 清 `active` 保 sid（续接零成本），`/clear` 清 sid。
-- **命令面**（`SYSTEM_COMMANDS.direct`，仅 IM）：`/direct` 状态/用法 · `/direct claude [任务]`
-  续接进入 · `/direct new [任务]` 新会话进入 · `/direct exit` 退出。选项 `--dir 路径` /
-  `--model 别名或id` / `--effort low|medium|high|xhigh|max` / `--resume 会话UUID` 紧跟
-  子命令**独占首行**（任意顺序，值取到下一个 `--` 为止，路径含空格安全），任务换行写——
-  刻意不用引号包裹（输入法弯直混打、忘闭合会静默错切）；`--` 的破折号 / 全角变体（`—dir`）
-  同样认（中文输入法常把连打短横转成破折号）；不支持 `--key=value`。dir/model/effort 粘性；
-  换目录自动开新会话（会话属于项目），换模型不换会话（模型是每轮属性，resume 时切换生效且
-  记忆不丢）。`--resume` 显式接管指定 cc 会话（如终端里跑出来的），压过换目录开新会话的
-  规则、与 `new` 矛盾即拦；cc 续接复用同一 sid（2.1.237 实测，fork 需显式
-  `--fork-session`），此后所有轮都在这个会话里，终端随时可用同一 id 接管回去。
-  `--effort`/`--resume`（完整 UUID）本侧校验（cc 对无效值静默接受 / 短号报 No sessions
-  match），`--model` 拒多词（整串入库会让之后每轮都失败）、存在性交 cc 报错——三者同源
-  `relay.setting_invalid_hint`。
-- **直连中的 Lumi 通知**（妙记纪要 / 后台任务完成 / 日程提醒，`_run_synthetic_turn`）照常
-  推送，紧跟一张「⚡ 直连中」黄卡说明此刻回复会直达 cc、需要 Lumi 跟进先 `/direct exit`——
-  同一时刻只有一个工人在听，路由零特判、不搞回复链第二通道。
-  直连中 `/stop` `/clear` `/help` 语义切为作用于 cc；带值的 `/model opus` `/effort high`
-  （`RELAY_COMMANDS`）渠道层拦下改写绑定——透传给 cc 只对当次进程生效，拦截才能持久，
-  裸敲不拦、cc 本地直答当前值；其余文本（含 cc 自身斜杠命令）原样透传。
-- **路由定格**：`_Pending.relay` 在入队那一刻记录模式，`_drain` 按 `takewhile` 切连续段各走
-  各的——排队期间切换 `/direct` 不会把发给 Lumi 的消息喂给 cc（反之亦然），且保到达顺序。
-- **前置检查**（`relay_precheck`）：PATH 无 claude、或 root 运行未设 `IS_SANDBOX=1`（claude
-  拒绝 root 下 bypassPermissions，218 这类 root systemd 部署会命中）→ 进入即红卡拦下。
-- **收尾**：cc 出错时已流出的正文照常关卡保住再发红卡；`/stop` 经 `aclose()` →
-  `terminate_group` 杀整个进程组（shield 防二次 cancel 打断）；子进程秒退（未登录）时
-  stderr 尾部合成可读错误而非泛化"出错"。
-
 ## 系统直发卡片规范
 
-渠道层生成、不经模型、不进上下文的消息（/stop /clear /help /direct 应答、排队提示、错误）
+渠道层生成、不经模型、不进上下文的消息（/stop /clear /help 应答、排队提示、错误）
 统一「语义色 header + 正文 + 灰字 note」（`_markdown_card(title, template, note)`）：
-green 完成 / red 错误 / orange 提醒·Lumi 面板 / blue 信息 / yellow 直连；note 恒放
+green 完成 / red 错误 / orange 提醒·Lumi 面板 / blue 信息；note 恒放
 "下一步能做什么"。note 用 `grey()`（`<font color='grey'>`）而非 note 组件——schema 2.0
 已不支持 note 标签（真机 230099/200861）。title 为空则回落无 header 轻卡（流式降级等模型
 内容不套系统卡样式）。
@@ -399,9 +356,7 @@ desktop `设置 → 渠道`（`ChannelsPanel.tsx`，进 `SettingsDialog`）：�
 | `channels/feishu/channel.py` | lark WS 连接 + 收发 + 生命周期 + 状态 |
 | `channels/feishu/inbound.py` | 入站处理 / 媒体下载 / 排队合并 / 驱动 run / 后台任务通知轮询 |
 | `channels/feishu/parse.py` | 纯函数：content 解析（正文 / 媒体引用 / @ 姓名）、会话 key → thread、`<env>` 条目、/help 正文 |
-| `channels/feishu/outbound.py` | BridgeEvent 事件泵（`turn_closer` / `tool_activity` 与直连轮共用） |
-| `channels/relay.py` | 直连（/direct）渠道无关核心：绑定 sidecar / `--dir` 语法 / claude 无头轮驱动 + stream-json 解析 |
-| `channels/feishu/relay_turn.py` | 直连轮：RelayEvent 折叠成流式卡片 + 来源 footer |
+| `channels/feishu/outbound.py` | BridgeEvent 事件泵 |
 | `channels/feishu/streaming.py` `throttle.py` `update_queue.py` | CardKit 打字机卡片 |
 | `channels/feishu/setup.py` | 接入体检：凭证 / 权限 / 事件订阅 / 版本发布 |
 | `channels/feishu/scopes.py` | 所需权限与事件常量 + 开放平台直达链接（单一事实源） |

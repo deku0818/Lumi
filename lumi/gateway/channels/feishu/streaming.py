@@ -1,6 +1,6 @@
 """飞书 CardKit 流式卡片：首帧创建 → 定时器节流覆写 → 终态关闭。
 
-``outbound.run_turn`` / ``relay_turn`` 把事件流折叠成 :class:`FeishuStreaming` 的
+``outbound.run_turn`` 把事件流折叠成 :class:`FeishuStreaming` 的
 ``append`` / ``tool_activity`` / ``mark`` / ``reset`` / ``end`` 调用喂到这里。节流模型：每个 buf
 配一个 :class:`Throttle`（``loop.call_later`` 主动注册定时器，即使上游静默——工具执行 /
 网络抖动——也在 ``STREAM_MIN_MS`` 后把累积尾部自动刷出）+ 一个 :class:`UpdateQueue`
@@ -102,8 +102,7 @@ def _is_stream_closed(code: int) -> bool:
 
 def grey(text: str) -> str:
     """灰字辅助行的唯一写法。schema 2.0 已不支持 note 组件（真机 230099/200861
-    "unsupported tag note"），font grey 则一直可用——系统卡的 note 与直连卡的来源
-    footer 都经此渲染。"""
+    "unsupported tag note"），font grey 则一直可用——系统卡的 note 经此渲染。"""
     return f"<font color='grey'>{text}</font>"
 
 
@@ -252,9 +251,9 @@ class FeishuStreaming:
     async def _evict_stale(self) -> None:
         """驱逐真正的孤儿 buf：闲置超 TTL **且**该 chat 没有轮在跑。
 
-        轮在跑（持运行锁）的 buf 即使久无更新也不能动——直连 cc 深度思考 / 限流重试
-        / 子 agent 干活期间可能几分钟没有外显输出，此时驱逐等于把这一轮的答案切碎到
-        多张卡（后续输出重新建卡、终态只剩来源行）。
+        轮在跑（持运行锁）的 buf 即使久无更新也不能动——深度思考 / 限流重试 / 子 agent
+        干活期间可能几分钟没有外显输出，此时驱逐等于把这一轮的答案切碎到
+        多张卡（后续输出重新建卡）。
         """
         now = time.monotonic()
         pool = self.channel.bridge_pool

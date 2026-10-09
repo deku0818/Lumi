@@ -1,4 +1,4 @@
-"""飞书入站：排队接手、直连切目录守卫、妙记事件、@ 替换、富文本分段、附件落盘名。"""
+"""飞书入站：排队接手、妙记事件、@ 替换、富文本分段、附件落盘名。"""
 
 from __future__ import annotations
 
@@ -129,32 +129,9 @@ async def test_clear_hands_queued_message_to_its_own_task(monkeypatch):
         await asyncio.sleep(0)
 
     monkeypatch.setattr(ch.bridge_pool._bridges["t"], "delete_thread", slow_delete)
-    await ch.inbound._run_system_command("clear", "", "oc", "t", "m1")
+    await ch.inbound._run_system_command("clear", "oc", "t", "m1")
     await asyncio.wait_for(arrived[0], 2)
     assert ran == [(["清空期间"], True)]
-
-
-# ── 2. 直连切目录撞上在跑的轮：先停再开 ──
-
-
-async def test_direct_switching_dir_while_busy_asks_to_stop(monkeypatch, tmp_path):
-    # 回归：换目录会开新会话（sid 清空），但在跑的轮结束时把旧 sid 写回，静默续了
-    # 另一个项目的旧会话
-    ch, sent = _channel(monkeypatch)
-    old, new = tmp_path / "a", tmp_path / "b"
-    old.mkdir()
-    new.mkdir()
-    monkeypatch.setattr(inb, "relay_precheck", lambda: "")
-    monkeypatch.setattr(
-        inb, "binding_of", lambda tid: {"cwd": str(old), "session_id": "sid-old"}
-    )
-    written: list = []
-    monkeypatch.setattr(inb, "update_binding", lambda tid, **kw: written.append(kw))
-    await ch.bridge_pool.get("t")
-    await ch.bridge_pool.lock("t").acquire()
-    await ch.inbound._direct_enter(False, f"--dir {new}\n任务", "oc", "t", "m1")
-    assert written == []
-    assert "/stop" in sent[0][0]
 
 
 # ── 11 / 21. 妙记事件：建桥失败不反复重试；事件挂在池上，跨热重载保留 ──
@@ -203,14 +180,14 @@ def test_extract_post_text_keeps_line_structure():
             "title": "标题",
             "content": [
                 [
-                    {"tag": "text", "text": "/direct claude "},
-                    {"tag": "text", "text": "--dir /tmp"},
+                    {"tag": "text", "text": "/commit "},
+                    {"tag": "text", "text": "--amend"},
                 ],
                 [{"tag": "text", "text": "跑测试"}],
             ],
         }
     }
-    assert extract_post_text(content) == "标题\n/direct claude --dir /tmp\n跑测试"
+    assert extract_post_text(content) == "标题\n/commit --amend\n跑测试"
 
 
 # ── 18. 附件落盘名：用完整 file_key，不同文件同名不互相覆盖 ──

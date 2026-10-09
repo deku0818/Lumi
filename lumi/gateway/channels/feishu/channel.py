@@ -40,7 +40,7 @@ def _markdown_card(
     """一次性 markdown 卡片 JSON（非流式，系统直发消息 / 流式降级用）。
 
     系统直发消息统一「语义色 header + 正文 + 灰字 note」：template 用飞书原生枚举
-    （green 完成 / red 错误 / orange 提醒·Lumi 面板 / blue 信息 / yellow 直连），
+    （green 完成 / red 错误 / orange 提醒·Lumi 面板 / blue 信息），
     note 恒放"下一步能做什么"的提示。title 为空则回落无 header 轻卡（流式降级等
     模型内容不套系统卡样式）。
     """

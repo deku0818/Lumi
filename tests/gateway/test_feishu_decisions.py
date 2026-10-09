@@ -245,22 +245,6 @@ async def test_reply_quotes_parent_text_for_model_not_bubble(monkeypatch):
     assert captured["message_meta"]["items"][0]["text"] == "帮我总结"
 
 
-async def test_reply_quotes_parent_in_relay_prompt(monkeypatch):
-    """直连模式同样带上引用：cc 也需要知道「总结」的是哪段话。"""
-    parent = _parent("text", {"text": "被回复的话"}, "ou_other")
-    pending = await _admitted(monkeypatch, parent)
-
-    prompts: list[str] = []
-
-    async def fake_relay(ch, **kwargs):
-        prompts.append(kwargs["prompt"])
-
-    monkeypatch.setattr(inb, "run_relay_turn", fake_relay)
-    fi = FeishuChannel(FeishuChannelConfig()).inbound
-    await fi._run_relay_batch(fi.channel, "oc_dm", "t", [pending])
-    assert prompts == ["> 被回复的话\n帮我总结"]
-
-
 @pytest.mark.parametrize(
     "msg_type,content,expect",
     [

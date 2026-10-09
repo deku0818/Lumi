@@ -81,10 +81,6 @@ uv sync
     `/effort auto` 回到跟随模型默认。换模型会一并重置档位（旧档位对新模型多半不适用）；
   - `/goal <条件>` —— 设定会话目标，agent 持续工作直到条件达成（`/goal clear` 提前解除），
     详见 [slash-commands.md](slash-commands.md)；
-  - `/direct` —— 把本会话直连到 serve 机器上的 Claude Code（`/direct claude` 进入、
-    `/direct exit` 退出），以 `--permission-mode bypassPermissions` 免审批执行。有权跟机器人说话
-    的人即可触发（`allow_from` 默认 `*`，请按需收紧）；前提：PATH 里有 `claude`，以 root 运行
-    serve 需设 `IS_SANDBOX=1`；
   - `/compact` —— 压缩本会话历史（保留摘要），长期聊的群可手动瘦身；
   - `/dream-session` —— 立即整理本会话记忆（后台跑，完成会回音）；
   - 其余命令来自项目的技能目录（与 desktop 输入框的 `/` 补全同一套，如 `/commit`），

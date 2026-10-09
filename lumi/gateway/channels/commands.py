@@ -8,8 +8,6 @@ from __future__ import annotations
 
 import re
 
-from lumi.gateway.channels.relay import RELAY_COMMANDS
-
 # IM 渠道通用系统命令：渠道层直接执行，不进 agent、不排队。desktop 有终止/删除
 # 按钮，不需要它们，故不进 bridge.list_commands()（否则 desktop 补全里也会冒出来）。
 # handler 依赖各渠道的传输层，由渠道自己实现（飞书在 feishu/inbound.py 的 FeishuInbound），
@@ -18,20 +16,18 @@ SYSTEM_COMMANDS: dict[str, str] = {
     "stop": "停止当前正在执行的任务",
     "clear": "清空本会话历史",
     "help": "列出可用命令",
-    "direct": "直连本机编程工人（Claude Code）：/direct 查看用法",
 }
 
-# 渠道运行时命令：普通模式下改写会话级运行配置（sidecar 落盘）后热生效。
-# 直连期的同名命令归 relay（改 relay 绑定，见 relay.RELAY_COMMANDS），互不相扰。
+# 渠道运行时命令：改写会话级运行配置（sidecar 落盘）后热生效。
 RUNTIME_COMMANDS: dict[str, str] = {
     "model": "查看或切换本会话模型：/model 完整模型名（仅当前会话）",
     "effort": "查看或切换本会话思考档位：/effort high（仅当前会话）",
 }
 
-# 渠道层会拦截的全部命令名（系统 + 运行时 + 直连期 relay）：最高优先级，同名技能
+# 渠道层会拦截的全部命令名（系统 + 运行时）：最高优先级，同名技能
 # 一律被遮蔽——/help 过滤与技能命令匹配共用本集合，不再各自推导遮蔽范围。
-CHANNEL_COMMAND_NAMES: frozenset[str] = (
-    frozenset(SYSTEM_COMMANDS) | frozenset(RUNTIME_COMMANDS) | frozenset(RELAY_COMMANDS)
+CHANNEL_COMMAND_NAMES: frozenset[str] = frozenset(SYSTEM_COMMANDS) | frozenset(
+    RUNTIME_COMMANDS
 )
 
 

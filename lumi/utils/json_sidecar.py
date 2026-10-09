@@ -1,7 +1,7 @@
 """按 key 落盘的 JSON sidecar：读（损坏回落空）+ 合并写（空值删键、无变化不写、原子写；
 写前遇损坏文件先移走留档）。
 
-session_meta（会话用户标记）与 channels/relay（直连绑定）共用这一套读写语义，只有路径不同。
+session_meta（会话用户标记）的读写语义。
 """
 
 from __future__ import annotations
@@ -12,7 +12,7 @@ from pathlib import Path
 from lumi.utils.atomic_io import atomic_write_json, read_json_object_for_update
 from lumi.utils.logger import logger
 
-# path → (mtime_ns, data)：sidecar 被高频读取（直连绑定每条消息、模型覆盖每轮），
+# path → (mtime_ns, data)：sidecar 被高频读取（模型覆盖每轮），
 # mtime 不变即复用上次解析结果；写入走 atomic 换文件，mtime 变化自然失效。
 # 约定：调用方把返回值当只读（写一律经 _commit，见其注释）。
 _cache: dict[Path, tuple[int, dict]] = {}

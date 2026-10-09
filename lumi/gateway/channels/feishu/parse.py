@@ -90,7 +90,7 @@ def help_markdown(commands: list[dict]) -> str:
     渲染成大字标题（飞书真机如此），换行也一并被吞。
     """
     # 渠道命令遮蔽同名 bridge 命令：渠道层先拦截，同名技能/agent 层命令不可达，
-    # 列表只显示真正可用的那一个（遮蔽集含 relay 命令名，与技能匹配守卫同源）
+    # 列表只显示真正可用的那一个（与技能匹配守卫同源）
     commands = [c for c in commands if c["name"] not in CHANNEL_COMMAND_NAMES]
     skills = [c for c in commands if c.get("type") == "skill"]
     systems = [c for c in commands if c.get("type") != "skill"]

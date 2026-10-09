@@ -46,12 +46,11 @@ def test_parse_degenerate_forms_return_none():
 
 
 def test_channel_command_names_cover_all_tables():
-    # 遮蔽集 = 系统 + 运行时 + relay 三表并集：技能不得占用其中任何名字
+    # 遮蔽集 = 系统 + 运行时两表并集：技能不得占用其中任何名字
     assert {
         "stop",
         "clear",
         "help",
-        "direct",
         "model",
         "effort",
     } <= CHANNEL_COMMAND_NAMES

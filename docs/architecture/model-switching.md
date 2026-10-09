@@ -113,7 +113,6 @@ desktop 侧的 Effort 子菜单仍写 profile（按模型全局），这是有�
 | 子 agent | 其配置的 `model`（provider 留空，按名反查）；未配则跟随新会话默认（`graph.py:297`） |
 | 会话标题 / auto 审批分类器 | `titler` / `classifier` 用途指针；未配或失效 → 回退新会话默认（`provider_store.py:327`） |
 | 压缩摘要、结构化提取等内部链 | 跟随所在会话的模型，但 `apply_effort=False`——**不注入任何思考参数** |
-| `/direct` 直连期的 `/model` | 写 relay 绑定的 `--model`，那是 **Claude Code 的模型**，与本文无关（`channels/relay.py`） |
 
 ## 六、UI 契约
 
