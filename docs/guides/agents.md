@@ -33,9 +33,8 @@ Agent 配置文件采用 Markdown + YAML frontmatter 格式：
 name: <agent名称>          # 必填，唯一标识
 description: <简短描述>     # 必填，展示给主 Agent 的工具说明
 model: <模型名称>           # 可选，不填则使用默认模型
-tools:                      # 可选，填工具名（如 read、grep、bash），不填则用全部可用工具；未知名会被静默过滤
+tools:                      # 可选，填工具名（如 read、bash），不填则用全部可用工具；未知名会被静默过滤
   - read
-  - grep
   - bash
 ---
 
@@ -49,7 +48,7 @@ tools:                      # 可选，填工具名（如 read、grep、bash）�
 | `name` | 是 | Agent 的唯一名称，调用时使用 |
 | `description` | 是 | 简短描述，主 Agent 据此判断何时委托任务 |
 | `model` | 否 | 指定模型（如 `gpt-4o`、`claude-sonnet-4-20250514`），默认使用全局配置的模型 |
-| `tools` | 否 | 工具名白名单列表（如 `read`、`grep`、`bash`），空列表表示使用所有可用工具 |
+| `tools` | 否 | 工具名白名单列表（如 `read`、`bash`），空列表表示使用所有可用工具 |
 
 frontmatter 之后的 Markdown 内容即为该 Agent 的系统提示词。
 
@@ -65,8 +64,7 @@ name: code-reviewer
 description: 代码审查助手，检查代码质量和潜在问题
 tools:
   - read
-  - glob
-  - grep
+  - bash
 ---
 
 # 代码审查
@@ -90,8 +88,7 @@ description: 根据代码自动生成技术文档
 model: gpt-4o
 tools:
   - read
-  - glob
-  - grep
+  - bash
 ---
 
 # 文档生成器
@@ -106,6 +103,6 @@ tools:
 
 - Agent 文件必须以 `---` 开头的 YAML frontmatter 格式，否则会被跳过
 - `name` 字段需唯一，重复名称可能导致不可预期的行为
-- `tools` 字段支持逗号分隔的字符串格式（如 `tools: read, grep`）或 YAML 列表格式
+- `tools` 字段支持逗号分隔的字符串格式（如 `tools: read, bash`）或 YAML 列表格式
 - 子 Agent 不使用 checkpointer，执行完毕后状态不会持久化
 - 子 Agent 的执行受主 Agent 的 `recursion_limit` 约束

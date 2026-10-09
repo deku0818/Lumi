@@ -17,7 +17,6 @@ from .providers import (
     filesystem,
     mcp,
     skill,
-    todo,
     vision,
     workflow,
 )
@@ -30,7 +29,6 @@ from .registry import ToolRegistry, get_tool_registry
 _registry = get_tool_registry()
 _registry.register("filesystem", filesystem)
 _registry.register("bash", bash)
-_registry.register("todo", todo)
 _registry.register("ask", ask)
 _registry.register("cron", cron)
 _registry.register("skill", skill)

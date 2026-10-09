@@ -46,8 +46,8 @@ Layer 2: 权限引擎 (engine.py)
 ```python
 # 无论参数如何，始终为只读的工具
 _ALWAYS_READONLY: frozenset[str] = frozenset({
-    "read", "vision", "glob", "grep", "skill", "agent",
-    "ask", "todos",
+    "read", "vision", "skill", "agent",
+    "ask",
 })
 
 # 无论参数如何，始终为写入的工具
@@ -220,7 +220,7 @@ auto 模式的分类器裁决与人工审批同权——AI 判断即用户授权
 1. 工具名不匹配 → False
 2. 无模式（纯工具名）→ True
 3. bash 工具（`COMMAND_TOOLS`）→ `match_command_pattern()`，命令参数键 `COMMAND_ARG_KEYS`（`command` / `cmd`）
-4. 路径工具（`PATH_TOOLS`：read/write/edit/glob/grep）→ `match_path_pattern()`，路径参数键 `PATH_ARG_KEYS`（`file_path` / `path`）
+4. 路径工具（`PATH_TOOLS`：read/write/edit）→ `match_path_pattern()`，路径参数键 `PATH_ARG_KEYS`（`file_path` / `path`）
 5. 其他工具（如 MCP 工具）→ 尝试将模式与每个字符串参数值匹配
 
 ### 命令模式匹配

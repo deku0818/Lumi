@@ -5,6 +5,20 @@ from __future__ import annotations
 from langchain_core.tools import StructuredTool
 
 from lumi.agents.tools import get_tool_registry, get_tools
+from lumi.agents.tools.capability import is_write_tool
+
+
+async def test_removed_tools_are_not_builtin_or_readonly(monkeypatch):
+    import lumi.agents.tools as tools_pkg
+    from lumi.agents.tools import registry
+
+    monkeypatch.setattr(registry, "_registry", tools_pkg._registry)
+    tools = await get_tools(wait_mcp=False)
+    assert "todo" not in get_tool_registry()._providers
+    removed = {"todos", "grep", "glob"}
+    assert not removed & {tool.name for tool in tools}
+    # 外部工具若复用旧名字，也不能继承已删除内置工具的免审批身份。
+    assert all(is_write_tool(name, {}) for name in removed)
 
 
 async def test_builtin_wins_over_same_named_mcp_tool(monkeypatch):

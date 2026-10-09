@@ -147,10 +147,8 @@ The data directory defaults to `~/.lumi`; `LUMI_CONFIG_DIR` relocates all of it 
 | Tool | What it does |
 |------|------|
 | `read` / `write` / `edit` | Read (with line ranges) / write / precise string-replace editing |
-| `glob` / `grep` | File pattern matching / text content search (ripgrep-based, with fallback) |
-| `bash` | Run shell commands (persistent session) |
+| `bash` | Run shell commands and file searches (rg preferred, persistent session) |
 | `ask` | Ask the user a question and wait for the answer |
-| `todos` | Task-list management (live progress in the desktop right rail) |
 | `cron` | Scheduled jobs (create / delete / pause / run) |
 | `skill` | Invoke a custom skill |
 | `agent` | Delegate a task to a sub-agent |

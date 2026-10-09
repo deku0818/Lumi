@@ -6,9 +6,7 @@ import {
   FileText,
   FilePlus,
   FilePen,
-  Search,
   Bot,
-  ListChecks,
   Wrench,
   type LucideIcon,
 } from 'lucide-react'
@@ -24,7 +22,7 @@ type ToolMeta = {
   sum: string // 摘要动作（同动作合并计数），见 tool.sum.* 词条
   status: string // 运行中的状态指示器文案 i18n key（动作级粒度）
   title: (a: Record<string, unknown>, t: Translate, name: string) => string
-  // 工具行展示的参数；缺省 = 不展示（agent/todos 另有专门渲染）。未登记的工具（MCP 等）走 kvArgs
+  // 工具行展示的参数；缺省 = 不展示（agent 另有专门渲染）。未登记的工具（MCP 等）走 kvArgs
   args?: (a: Record<string, unknown>, t: Translate) => ToolArgs
 }
 // text：收起态第二行 / 展开块首行 / 复制内容；kv 非空时展开块改渲染键值表；shell 着色命令
@@ -57,24 +55,14 @@ const editArgs = (a: Record<string, unknown>, t: Translate): ToolArgs => ({
   text: argStr(a.file_path),
   chips: a.replace_all ? [t('tool.replaceAll')] : [],
 })
-const searchArgs = (a: Record<string, unknown>, t: Translate): ToolArgs => ({
-  text: [argStr(a.pattern), argStr(a.path) === '.' ? '' : argStr(a.path)].filter(Boolean).join('  ·  '),
-  chips: [argStr(a.glob), argStr(a.type), a.case_insensitive ? t('tool.ignoreCase') : ''].filter(Boolean),
-})
 const fileTitle = (a: Record<string, unknown>, _t: Translate, name: string) =>
   argStr(a.file_path) ? basename(argStr(a.file_path)) : name
-const searchTitle = (a: Record<string, unknown>, t: Translate) =>
-  argStr(a.pattern) ? t('tool.title.searchFor', { q: clip(argStr(a.pattern), 48) }) : t('tool.title.search')
-
 const TOOL_META: Record<string, ToolMeta> = {
   bash: { icon: SquareTerminal, sum: 'command', status: 'status.runCommand', title: (a, t) => clip(argStr(a.description) || t('tool.title.command')), args: bashArgs },
   read: { icon: FileText, sum: 'read', status: 'status.readFile', title: fileTitle, args: readArgs },
   write: { icon: FilePlus, sum: 'write', status: 'status.editFile', title: fileTitle, args: editArgs },
   edit: { icon: FilePen, sum: 'edit', status: 'status.editFile', title: fileTitle, args: editArgs },
-  grep: { icon: Search, sum: 'search', status: 'status.searching', title: searchTitle, args: searchArgs },
-  glob: { icon: Search, sum: 'search', status: 'status.searching', title: searchTitle, args: searchArgs },
   agent: { icon: Bot, sum: 'subagent', status: 'status.subtask', title: (a, t) => clip(argStr(a.prompt) || argStr(a.name) || t('tool.title.subagent')) },
-  todos: { icon: ListChecks, sum: 'todos', status: 'status.tool', title: (_a, t) => t('tool.title.todos') },
 }
 
 export const toolIcon = (name: string): LucideIcon => TOOL_META[name]?.icon ?? Wrench

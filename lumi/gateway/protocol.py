@@ -67,8 +67,6 @@ def _payload(evt: BridgeEvent) -> dict:
         return payload
     if kind == EventKind.COMPACTION_STATUS:
         return {"active": bool(evt.data and evt.data.get("active"))}
-    if kind == EventKind.TODOS_UPDATE:
-        return {"todos": (evt.data or {}).get("todos", [])}
     if kind in (EventKind.CLARIFY, EventKind.APPROVAL):
         return evt.data or {}
     if kind == EventKind.ERROR:

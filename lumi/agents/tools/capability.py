@@ -30,12 +30,9 @@ _ALWAYS_READONLY: frozenset[str] = frozenset(
     {
         "read",
         "vision",
-        "glob",
-        "grep",
         "skill",
         "agent",
         "ask",
-        "todos",
     }
 )
 

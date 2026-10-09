@@ -29,8 +29,8 @@ from lumi.utils.config import get_config
 from lumi.utils.logger import logger
 from lumi.utils.thread_id import is_channel_thread, is_cron_thread
 
-# dream agent 工具白名单：只读 + 写记忆目录。不给 bash/agent/cron/skill/workflow（防递归 + 防危险）。
-_DREAM_TOOL_NAMES = {"read", "grep", "glob", "write", "edit"}
+# dream 工具：bash 搜索 + read + 写记忆；沿用权限路由，不给 agent/cron/skill/workflow。
+_DREAM_TOOL_NAMES = {"bash", "read", "write", "edit"}
 # 时间门过后两次会话扫描的最小间隔（秒）——会话门长期不够时避免每次 stop 都建只读图查 DB。
 _SCAN_THROTTLE_SECONDS = 600
 # 持后台 dream task 的强引用，防 asyncio 只持弱引用、await LLM 时被 GC 取消。
@@ -300,6 +300,7 @@ async def _run_dream_fork(
         new_task_id,
         run_background_task,
     )
+    from lumi.agents.runtime.shell_session import run_with_shell
     from lumi.agents.tools import get_tools
 
     async with dream_lock.project_lock(project_dir):
@@ -334,7 +335,9 @@ async def _run_dream_fork(
             # 授权指向 dream 自己 engine（非 bridge 活引用，切项目不失配）+ 清 config hooks
             set_run_authorized_source_for(ctx.permission_engine)
             set_run_config_hooks(None)
-            result = await agent.graph.ainvoke(inputs, context=ctx)
+            result = await run_with_shell(
+                task_id, agent.graph.ainvoke(inputs, context=ctx)
+            )
             normalize_memory_index(
                 project_dir
             )  # 兜底剥索引行旧 [tag]、日期回填 frontmatter
@@ -367,13 +370,15 @@ def _consolidation_prompt(transcript_dir: Path) -> str:
 段为准**（那是唯一事实源）。
 
 当前这段对话的完整历史已在上文；其他近期会话已导出为扁平 text（一行一消息）放在
-`{transcript_dir}`，需要具体上下文时用 grep 窄关键词去查，**不要整篇读**。
+`{transcript_dir}`，需要具体上下文时通过 bash 用 rg 搜窄关键词，**不要整篇读**。
+
+bash 仅用于只读搜索和查看；记忆写入使用 write / edit。
 
 ## 阶段 1 — 定位
 - 列出记忆目录、读 MEMORY.md 索引，浏览已有 topic 文件，以便**改进而非新建重复**。
 
 ## 阶段 2 — 收集信号
-从上文当前会话 + 必要时 grep `{transcript_dir}` 里其他会话，找出值得长期记住的新信号
+从上文当前会话 + 必要时通过 bash 用 rg 搜 `{transcript_dir}` 里其他会话，找出值得长期记住的新信号
 （用户偏好、工作方式、项目背景等），只看你已经怀疑重要的东西。
 
 ## 阶段 3 — 综合（synthesis）
@@ -403,6 +408,8 @@ def _consolidation_prompt_session() -> str:
 
 ⚠️ 这段会话**紧接就会被摘要压缩、丢弃细节**——所以现在就要把值得留的先写进记忆，过后无法
 再从原始对话里捞。
+
+bash 仅用于只读搜索和查看；记忆写入使用 write / edit。
 
 ## 阶段 1 — 定位
 - 列出记忆目录、读 MEMORY.md 索引，浏览已有 topic 文件，以便**改进而非新建重复**。

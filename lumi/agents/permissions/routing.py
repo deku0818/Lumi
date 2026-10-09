@@ -123,7 +123,7 @@ def route_decision(
             args = tc.get("args", {})
             try:
                 decision = engine.evaluate(name, args)
-                # 只读工具（read/vision/glob/grep 等）不受工作区边界限制：只读无破坏性，
+                # 只读工具（read/vision 等）不受工作区边界限制：只读无破坏性，
                 # 可跨项目/读 URL；DENY 规则仍先于此拦截（上方 has_deny）。与 line 83 的
                 # 只读快路径一致（纯只读批次本就免边界，此处覆盖只读+写的混合批次）。
                 boundary_ok = not is_write_tool(

@@ -230,7 +230,7 @@ CHECKPOINT_AES_KEY_ENV = "LUMI_CHECKPOINT_AES_KEY"
 # 进 checkpoint 的自定义类型白名单。langgraph 默认「警告但放行」任意类型，日志每次
 # 读盘刷一条 "will be blocked in a future version"；显式列出后 msgpack 转严格模式：
 # 内置安全类型 + 这里列的才允许反序列化，其余被拦下并记 warning（值变空，不抛异常）。
-# 现存 checkpoint 库里扫出来的自定义类型只有 Todo 一个。
+# Todo 工具已移除；仍保留其类型注册，供已有 checkpoint 读取。
 # **新增会落进 state 的自定义类型时必须加到这里**，否则那个字段读回来是空的。
 _ALLOWED_CHECKPOINT_TYPES = (Todo,)
 

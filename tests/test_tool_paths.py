@@ -1,7 +1,7 @@
 """文件类工具的路径口径：展开 ``~``，相对路径基于会话项目根（主授权目录）而非进程 cwd。
 
 ``lumi serve`` 是多项目网关、从不 chdir：按进程 cwd 解析时，read("src/a.py") 读不到项目
-文件或读到别处同名文件，glob 搜的是 serve 的启动目录；而 write/edit 走 validate_path 按
+文件或读到别处同名文件；而 write/edit 走 validate_path 按
 项目解析——同一轮里读写指向不同文件。文本 read 还不展开 ``~``。
 """
 
@@ -14,7 +14,7 @@ import pytest
 
 from lumi.agents.permissions.engine import PermissionEngine
 from lumi.agents.tools.providers.artifacts import artifacts
-from lumi.agents.tools.providers.filesystem import glob, grep, read
+from lumi.agents.tools.providers.filesystem import read
 
 
 @pytest.fixture
@@ -42,13 +42,6 @@ async def test_read_relative_and_home(project):
     assert "in-project" in rel.content
     home = await read.ainvoke(_call("read", {"file_path": "~/notes.txt"}))
     assert "from-home" in home.content
-
-
-async def test_glob_and_grep_relative_path(project):
-    found = await glob.ainvoke({"pattern": "*.txt", "path": "src"})
-    assert str(project / "src" / "a.txt") in found
-    hits = await grep.ainvoke({"pattern": "project", "path": "src"})
-    assert str(project / "src" / "a.txt") in hits
 
 
 def test_artifacts_relative_path(project):

@@ -241,63 +241,6 @@ class TestBackendEdit:
         assert f.read_bytes() == b"a\nb\n"
 
 
-class TestBackendGlobInfo:
-    async def test_glob_py(self, backend, authorized_tmp_dir):
-        (authorized_tmp_dir / "main.py").write_text("pass")
-        (authorized_tmp_dir / "data.txt").write_text("data")
-        items = await backend.glob_info("*.py", str(authorized_tmp_dir))
-        assert len(items) == 1
-        assert "main.py" in items[0]["path"]
-
-    async def test_glob_recursive(self, backend, authorized_tmp_dir):
-        sub = authorized_tmp_dir / "pkg"
-        sub.mkdir()
-        (sub / "mod.py").write_text("pass")
-        (authorized_tmp_dir / "top.py").write_text("pass")
-        items = await backend.glob_info("**/*.py", str(authorized_tmp_dir))
-        assert len(items) == 2
-
-    async def test_glob_no_match(self, backend, authorized_tmp_dir):
-        items = await backend.glob_info("*.xyz", str(authorized_tmp_dir))
-        assert items == []
-
-
-class TestBackendGrepRaw:
-    async def test_grep_match(self, backend, authorized_tmp_dir):
-        f = authorized_tmp_dir / "code.py"
-        f.write_text("def hello():\n    pass\ndef world():\n    pass")
-        result = await backend.grep_raw("def \\w+", str(authorized_tmp_dir))
-        assert isinstance(result, dict)
-        assert "matches" in result
-        assert len(result["matches"]) >= 2
-        assert "total" in result
-        assert "offset" in result
-        assert "truncated" in result
-
-    async def test_grep_invalid_regex(self, backend, authorized_tmp_dir):
-        result = await backend.grep_raw("[invalid", str(authorized_tmp_dir))
-        assert isinstance(result, str)
-        assert "错误" in result
-
-    async def test_grep_no_match(self, backend, authorized_tmp_dir):
-        f = authorized_tmp_dir / "empty_search.txt"
-        f.write_text("nothing here")
-        result = await backend.grep_raw("zzzzz_no_match", str(authorized_tmp_dir))
-        assert isinstance(result, dict)
-        assert len(result["matches"]) == 0
-        assert result["total"] == 0
-        assert result["truncated"] is False
-
-    async def test_grep_file_glob_filter(self, backend, authorized_tmp_dir):
-        (authorized_tmp_dir / "a.py").write_text("target_word")
-        (authorized_tmp_dir / "b.txt").write_text("target_word")
-        result = await backend.grep_raw(
-            "target_word", str(authorized_tmp_dir), file_glob="*.py"
-        )
-        assert isinstance(result, dict)
-        assert all("a.py" in r["path"] for r in result["matches"])
-
-
 # ============================================================================
 # Tool wrapper 测试
 # ============================================================================
@@ -348,29 +291,6 @@ class TestToolWrappers:
         )
         assert "成功" in result
         assert "1" in result
-
-    async def test_grep_tool_format(self, authorized_tmp_dir):
-        from lumi.agents.tools.providers.filesystem import grep
-
-        (authorized_tmp_dir / "g.txt").write_text("findme here")
-        # 默认 output_mode 为 files_with_matches
-        result = await grep.ainvoke(
-            {"pattern": "findme", "path": str(authorized_tmp_dir)}
-        )
-        assert "找到" in result and "匹配文件" in result
-
-    async def test_grep_tool_content_mode(self, authorized_tmp_dir):
-        from lumi.agents.tools.providers.filesystem import grep
-
-        (authorized_tmp_dir / "g.txt").write_text("findme here")
-        result = await grep.ainvoke(
-            {
-                "pattern": "findme",
-                "path": str(authorized_tmp_dir),
-                "output_mode": "content",
-            }
-        )
-        assert "找到" in result and "匹配" in result
 
 
 async def test_multiline_edit_in_mixed_line_ending_file(authorized_tmp_dir):

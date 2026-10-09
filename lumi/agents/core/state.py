@@ -113,7 +113,7 @@ class LumiAgentState(TypedDict):
     消息一辈子没有 id，而 rewind 截断 / 半截判重 / 压缩选材全按 id 认消息。这条差异
     正反两面都有锁定用例。"""
     todos: NotRequired[list]
-    """任务列表，用于追踪复杂任务的执行进度"""
+    """旧 checkpoint 的兼容字段；内置 todo 工具与前端展示已移除。"""
     output_schema: NotRequired[dict[str, Any]]
     """结构化输出的 JSON Schema"""
     structured_output: NotRequired[dict[str, Any]]

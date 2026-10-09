@@ -25,7 +25,7 @@
 - **reference** — 外部系统指针（Linear、监控看板等）
 
 `MEMORY.md` 是**索引不是记忆**：每行一个指针 `- [标题](文件.md) — 一句结论`（破折号后写结论本身而非主题词，只看索引就知道该怎么做），无 frontmatter；
-注入上下文时截断到 200 行。各条记忆正文不随会话注入，只有模型主动 grep/read 时才进上下文。
+注入上下文时截断到 200 行。各条记忆正文不随会话注入，只有模型主动通过 bash 搜索或 read 时才进上下文。
 
 `~/.lumi/memory/projects/<项目>/` 的项目 key = 项目根绝对路径 sanitize（`/` → `-`，保留可读性，
 与 Claude Code 一致），home 级、跨会话持久，与 checkpoints 同级。
@@ -119,7 +119,7 @@
 5. **fork 当前主 agent → dream agent**：
    - system prompt = 主 agent **同一份**（`enable_memory=True`，记忆指令照常注入）—— **切病根①**
    - 初始 messages = 当前会话完整 `state["messages"]`（stop hook 当场可取，见 `on_agent_stop`）+ 末尾 consolidation `HumanMessage`（含 `transcriptDir` 路径）—— **切病根②**
-   - 工具限只读（read/grep/glob）+ 写记忆目录；headless（无 approval broker，非记忆写入安全拒）
+   - 工具含 read、bash 搜索 + write/edit 写记忆目录（bash 沿用权限路由）；headless（无 approval broker，非记忆写入安全拒）
    - **派生 context 清掉 hooks**（沿用 subagent-hook 隔离原则）→ dream 自己 stop 不派发任何 hook，根上无自递归
    - 不共享 prompt 缓存（LangGraph 无 CC 的 fork-cache 机制；低频任务无所谓）
 6. **后台任务** fire-and-forget，注册 bg-task（面板可取消）；stop hook 不阻塞，照常 `goto END`。

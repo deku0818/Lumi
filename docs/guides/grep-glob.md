@@ -1,59 +1,22 @@
-# Grep & Glob 工具使用指南
+# 文件与内容搜索
 
-Lumi 内置 `grep` 和 `glob` 两个文件搜索工具，分别用于文件内容搜索和文件路径匹配。
+内置 `grep`、`glob` 工具已移除，统一通过 `bash` 搜索，优先使用 `rg`。
 
----
+```bash
+# 搜索内容，显示行号
+rg -n -- '正则' src
+# 搜索字面文本
+rg -n -F -- 'interface{}' src
+# 按文件模式列出路径
+rg --files -g '*.py' src
+```
 
-## Grep 工具
+先限定目录与文件范围，再扩大搜索。`rg` 默认过滤隐藏文件及忽略规则命中的路径；
+需要时分别加 `--hidden`、`--no-ignore`。
 
-基于 ripgrep 的搜索工具，支持正则表达式、多种输出模式、上下文行和分页。未安装 ripgrep 时返回安装提示（`lumi env install rg`，或 设置 → 环境）。
+仅未安装 `rg` 时，内容搜索改用 `grep -rnE -- '正则' 路径`；文件查找改用
+`find 路径 -type f -name '文件名模式'`，按完整路径匹配改用 `-path`。
+参数与正则须遵循各命令自己的语法。`rg` / `grep` 退出码 1 表示无匹配，不能据此切换工具。
 
-### 参数
-
-| 参数 | 类型 | 默认值 | 说明 |
-|---|---|---|---|
-| `pattern` | `str` | （必填） | 正则表达式搜索模式 |
-| `path` | `str \| None` | `None` | 搜索目录，默认为当前工作目录 |
-| `glob` | `str \| None` | `None` | 文件过滤 glob 模式（如 `*.py`） |
-| `type` | `str \| None` | `None` | 按文件类型搜索（如 `py`、`js`） |
-| `output_mode` | `str` | `"files_with_matches"` | 输出模式（见下文） |
-| `case_insensitive` | `bool` | `False` | 大小写不敏感搜索 |
-| `multiline` | `bool` | `False` | 多行匹配模式 |
-| `after_context` | `int \| None` | `None` | 匹配行之后显示的行数 |
-| `before_context` | `int \| None` | `None` | 匹配行之前显示的行数 |
-| `context` | `int \| None` | `None` | 匹配行前后显示的行数 |
-| `offset` | `int` | `0` | 跳过前 N 条结果（分页偏移） |
-| `head_limit` | `int` | `0` | 限制返回结果数 |
-
-### 输出模式
-
-| 模式 | 说明 |
-|---|---|
-| `content` | 显示匹配行内容，支持上下文行和行号 |
-| `files_with_matches` | 仅显示包含匹配的文件路径（默认） |
-| `count` | 显示每个文件的匹配计数 |
-
----
-
-## Glob 工具
-
-基于 `wcmatch` 的文件路径匹配工具。
-
-### 参数
-
-| 参数 | 类型 | 默认值 | 说明 |
-|---|---|---|---|
-| `pattern` | `str` | （必填） | glob 匹配模式 |
-| `path` | `str` | `"."` | 搜索起始目录 |
-
-### Glob 语法
-
-| 模式 | 说明 | 示例 |
-|---|---|---|
-| `*` | 匹配单层目录中的任意字符 | `*.py` |
-| `**` | 递归匹配零或多层目录 | `**/*.py` |
-| `?` | 匹配单个字符 | `test_?.py` |
-| `{a,b}` | 花括号展开 | `*.{ts,tsx}` |
-| `[abc]` | 字符集 | `[Rr]eadme*` |
-
-返回按修改时间倒序排列的匹配文件列表，包含路径、大小和修改时间。
+文件读取、编辑、写入仍优先使用 `read`、`edit`、`write`。执行方式与权限见
+[bash 工具使用指南](bash.md)。

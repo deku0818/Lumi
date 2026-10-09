@@ -31,7 +31,6 @@ from lumi.agents.core.meta_message import (
 )
 from lumi.agents.runtime.bg_process import cancel_thread_bg_tasks
 from lumi.agents.runtime.bg_tasks import get_task_registry
-from lumi.agents.tools.providers.todo import todos_payload
 from lumi.gateway import (
     channel_rpc,
     cron_rpc,
@@ -307,8 +306,6 @@ async def _load_history(bridge: AgentBridge, params: dict) -> dict:
         "usage": last_ai_usage(snap),
         "model": model,
         "context_window": context_window,
-        # 右栏任务进度的历史还原：与 todos.update 事件同一真相源（state.todos）
-        "todos": todos_payload((snap.values or {}).get("todos", [])),
     }
 
 

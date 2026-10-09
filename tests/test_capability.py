@@ -14,14 +14,13 @@ from lumi.agents.tools.shell_syntax import has_background_operator
 class TestIsWriteTool:
     @pytest.mark.parametrize(
         "tool_name",
-        ["read", "glob", "grep", "skill", "agent"],
+        ["read", "skill", "agent"],
     )
     def test_readonly_tools(self, tool_name):
         assert not is_write_tool(tool_name, {})
 
-    @pytest.mark.parametrize("tool_name", ["ask", "todos"])
-    def test_ask_todos_are_readonly(self, tool_name):
-        assert not is_write_tool(tool_name, {})
+    def test_ask_is_readonly(self):
+        assert not is_write_tool("ask", {})
 
     @pytest.mark.parametrize("tool_name", ["write", "edit"])
     def test_write_tools(self, tool_name):

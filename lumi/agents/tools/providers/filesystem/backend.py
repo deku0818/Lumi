@@ -1,6 +1,6 @@
 """LocalFilesystemBackend - 本地文件操作后端
 
-提供文件读取、写入、编辑、glob 查找和 grep 搜索的底层实现，
+提供文件读取、写入、编辑的底层实现，
 以及格式化/校验用的纯函数 helper。所有路径在操作前都会经过授权目录校验。
 """
 
@@ -9,21 +9,10 @@ from __future__ import annotations
 import asyncio
 import codecs
 import locale
-from datetime import datetime
-from pathlib import Path
-
-import wcmatch.glob
 
 from lumi.agents.permissions.workspace import (
-    get_authorized_directory,
     resolve_tool_path,
     validate_path,
-)
-from lumi.agents.tools.providers.filesystem.ripgrep import (
-    _build_ripgrep_command,
-    _parse_ripgrep_content,
-    _parse_ripgrep_counts,
-    _parse_ripgrep_files,
 )
 
 # ============================================================================
@@ -31,8 +20,6 @@ from lumi.agents.tools.providers.filesystem.ripgrep import (
 # ============================================================================
 
 DEFAULT_READ_LIMIT = 2000
-DEFAULT_CONTENT_HEAD_LIMIT = 1000
-RIPGREP_TIMEOUT_SECONDS = 30
 BINARY_CHECK_BYTES = 8192
 
 # ============================================================================
@@ -87,33 +74,6 @@ def perform_string_replacement(
     if replace_all:
         return (content.replace(old_string, new_string), count)
     return (content.replace(old_string, new_string, 1), 1)
-
-
-def _glob_sync(search_path: Path, pattern: str) -> list[dict]:
-    """同步 glob（供 glob_info 经 asyncio.to_thread 调用，避免阻塞事件循环）。
-
-    由 wcmatch 按模式剪枝遍历（不先全树 rglob 再过滤——.venv / node_modules 整个走一遍
-    慢几十倍）；悬空符号链接等读不到的条目跳过，不让整个工具报错。
-    """
-    results: list[dict] = []
-    flags = wcmatch.glob.GLOBSTAR | wcmatch.glob.BRACE
-    for rel in wcmatch.glob.glob(pattern, root_dir=search_path, flags=flags):
-        item = search_path / rel
-        try:
-            if not item.is_file():
-                continue
-            stat = item.stat()
-        except OSError:
-            continue
-        results.append(
-            {
-                "path": str(item),
-                "is_dir": False,
-                "size": stat.st_size,
-                "modified_at": datetime.fromtimestamp(stat.st_mtime).isoformat(),
-            }
-        )
-    return sorted(results, key=lambda x: x["modified_at"], reverse=True)
 
 
 # ============================================================================
@@ -247,177 +207,6 @@ class LocalFilesystemBackend:
             return {"path": file_path, "error": f"编辑文件失败: {e}", "occurrences": 0}
 
         return {"path": file_path, "error": None, "occurrences": occurrences}
-
-    async def glob_info(self, pattern: str, path: str | None = None) -> list[dict]:
-        """使用 glob 模式递归查找文件
-
-        Args:
-            pattern: Glob 模式，如 '*.py' 或 '**/*.txt'
-            path: 搜索起始目录，默认为授权工作目录
-
-        Returns:
-            匹配文件的信息列表
-        """
-        if path is None:
-            search_path = get_authorized_directory()
-        else:
-            search_path = resolve_tool_path(path)
-
-        if not search_path.exists() or not search_path.is_dir():
-            return []
-
-        # 全树遍历对大目录（含 node_modules 等）可能很慢，放到线程执行，
-        # 避免同步遍历阻塞事件循环、卡住 WS/agent 流。
-        return await asyncio.to_thread(_glob_sync, search_path, pattern.lstrip("/"))
-
-    async def grep_raw(
-        self,
-        pattern: str,
-        path: str | None = None,
-        file_glob: str | None = None,
-        type_filter: str | None = None,
-        after_context: int | None = None,
-        before_context: int | None = None,
-        context: int | None = None,
-        case_insensitive: bool = False,
-        multiline: bool = False,
-        output_mode: str = "content",
-        offset: int = 0,
-        head_limit: int | None = None,
-        line_number: bool = True,
-    ) -> list[dict] | dict | str:
-        """在文件内容中搜索正则表达式模式
-
-        依赖 ripgrep：未安装时返回安装提示（不做纯 Python 降级——那条路不认
-        .gitignore、不支持 type / 上下文 / 多行，结果与 rg 语义对不上）。
-
-        Returns:
-            content 模式返回分页字典 {"matches", "total", "offset", "truncated"}
-            （total 只数匹配行，不含上下文行）；files_with_matches/count 模式返回
-            {"items", "total", "offset", "truncated"}；rg 报错（正则 / type / 路径）时
-            返回错误字符串。正则方言以 rg 为准，不做 Python re 预校验。
-        """
-
-        search_path = (
-            str(get_authorized_directory())
-            if path is None
-            else str(resolve_tool_path(path))
-        )
-
-        results = await self._ripgrep_search(
-            pattern,
-            search_path,
-            file_glob,
-            type_filter=type_filter,
-            after_context=after_context,
-            before_context=before_context,
-            context=context,
-            case_insensitive=case_insensitive,
-            multiline=multiline,
-            output_mode=output_mode,
-        )
-        if isinstance(results, str):
-            return results
-
-        # rg 多线程输出顺序不定，按路径稳定排序后分页才不漏不重（同文件内行序保留）
-        results.sort(key=lambda r: r["path"])
-        if output_mode == "content":
-            limit = head_limit if head_limit is not None else DEFAULT_CONTENT_HEAD_LIMIT
-            page = results[offset : offset + limit]
-            return {
-                "matches": page,
-                "total": sum(1 for r in results if not r.get("is_context")),
-                "offset": offset,
-                "truncated": len(results) > offset + len(page),
-            }
-        end = offset + head_limit if head_limit is not None else None
-        page = results[offset:end]
-        return {
-            "items": page,
-            "total": len(results),
-            "offset": offset,
-            "truncated": len(results) > offset + len(page),
-        }
-
-    async def _ripgrep_search(
-        self,
-        pattern: str,
-        search_path: str,
-        file_glob: str | None,
-        type_filter: str | None = None,
-        after_context: int | None = None,
-        before_context: int | None = None,
-        context: int | None = None,
-        case_insensitive: bool = False,
-        multiline: bool = False,
-        output_mode: str = "content",
-    ) -> list[dict] | str:
-        """使用 ripgrep 搜索；未安装或 rg 报错时返回错误字符串。"""
-        cmd = _build_ripgrep_command(
-            pattern,
-            search_path,
-            file_glob,
-            type_filter=type_filter,
-            after_context=after_context,
-            before_context=before_context,
-            context=context,
-            case_insensitive=case_insensitive,
-            multiline=multiline,
-            output_mode=output_mode,
-        )
-
-        ran = await self._run_ripgrep(cmd)
-        if ran is None:
-            return (
-                "错误: 未安装 ripgrep（rg），搜索不可用。请运行 `lumi env install rg`"
-                "（或在 设置 → 环境 中安装）后重试"
-            )
-        returncode, stdout, stderr = ran
-
-        if output_mode == "files_with_matches":
-            parsed = _parse_ripgrep_files(stdout)
-        elif output_mode == "count":
-            parsed = _parse_ripgrep_counts(stdout)
-        else:
-            parsed = _parse_ripgrep_content(stdout)
-        # 退出码 1 = 无匹配；2 = 出错，但有结果时是部分目录无权限之类，保留结果。
-        # 按解析结果判空而非 stdout：--json 模式出错时 stdout 仍有 summary 行
-        if not parsed and returncode not in (0, 1):
-            return f"错误: {stderr.strip() or f'rg 退出码 {returncode}'}"
-        return parsed
-
-    async def _run_ripgrep(self, cmd: list[str]) -> tuple[int, str, str] | None:
-        """执行 ripgrep，返回 (退出码, stdout, stderr)；未安装返回 None。
-
-        超时按错误返回。
-        """
-        try:
-            proc = await asyncio.create_subprocess_exec(
-                *cmd,
-                stdout=asyncio.subprocess.PIPE,
-                stderr=asyncio.subprocess.PIPE,
-            )
-            stdout_bytes, stderr_bytes = await asyncio.wait_for(
-                proc.communicate(), timeout=RIPGREP_TIMEOUT_SECONDS
-            )
-        except FileNotFoundError:
-            return None
-        except TimeoutError:
-            try:
-                proc.kill()
-            except ProcessLookupError:
-                pass
-            return (
-                -1,
-                "",
-                f"搜索超时（{RIPGREP_TIMEOUT_SECONDS}s），请缩小 path 或加 glob / type 过滤",
-            )
-
-        return (
-            proc.returncode,
-            stdout_bytes.decode("utf-8", errors="replace"),
-            stderr_bytes.decode("utf-8", errors="replace"),
-        )
 
 
 # ============================================================================

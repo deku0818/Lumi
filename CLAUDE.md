@@ -55,7 +55,7 @@ OfflineFlush（刻意无入边，离线写回锚点）→ END
 
 **PTL 兜底回路：** CallModel 撞 prompt-too-long 时由**节点级 error_handler**（`on_call_model_error`，挂在 `add_node(..., error_handler=)`）返回 `Command(goto="Summarizer", update={"ptl_retry": True})`，经 Summarizer 的 `_ptl_forced_compact`（绕阈值门、按 API round 保尾）压缩后走正常拓扑重试；成功清 `ptl_retry`，置位期间再撞直接原样抛出（每次 PTL 只换一次压缩机会）。用 error_handler 而非节点内 try/except 的原因：**节点自身返回**的 `Command(goto)` 会与其条件边取并集（曾为此在 `is_use_tool` 挂 ptl_retry 守卫防 Stop hooks 误分发），而 error_handler 的路由不触发条件边求值，守卫随之删除——不变量改由 `test_full_graph_ptl_roundtrip` 的 Stop hook 计数断言把住。
 
-**关键状态 `LumiAgentState`：** messages（`DeltaChannel` 增量通道）、todos、output_schema / structured_output、tool_cancelled、ptl_retry、depth。
+**关键状态 `LumiAgentState`：** messages（`DeltaChannel` 增量通道）、todos（旧会话兼容）、output_schema / structured_output、tool_cancelled、ptl_retry、depth。
 
 **messages 通道是 `DeltaChannel`**（不是 `add_messages`）：checkpoint 只存增量写入 + 周期快照，长会话不再每个 super-step 重写整段历史。两条随之而来的约束：① 压缩写回用 `Overwrite` 整体替换而非逐条 `RemoveMessage`（`build_compacted_update`）；② **`aupdate_state` 不自动补消息 id**（LangGraph 只在 `put_writes` 补节点写入的），补 id 只能在写入构造时做（放进 reducer 会让每次回放生成新 id）。因此**所有离线写回只走 `AgentBridge.flush_offline` 这一个出口**，由它统一补 id + 挂 `OfflineFlush` 锚点；③ `snapshot_frequency` 必须显式给（取 100），官方默认 1000 等于几乎不快照，会让读退化成 O(链长)。语义差异锁在 `tests/test_delta_channel.py`，出口契约锁在 `tests/gateway/test_offline_flush_stamps.py`。
 
@@ -68,7 +68,7 @@ OfflineFlush（刻意无入边，离线写回锚点）→ END
 ### 工具系统
 
 - **结构化输出**：伪工具 `__structured_output__` 机制，模型直接通过 tool args 输出结构化数据，无需额外 LLM 调用
-- **只读工具免审批**：`capability._ALWAYS_READONLY`（read/vision/glob/grep/skill/agent/ask/todos）与只读 bash 直接执行，DENY 规则仍先生效
+- **只读工具免审批**：`capability._ALWAYS_READONLY`（read/vision/skill/agent/ask）与只读 bash 直接执行，DENY 规则仍先生效
 
 ### 权限系统
 

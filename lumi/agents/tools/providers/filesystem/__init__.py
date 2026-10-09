@@ -1,9 +1,9 @@
 """Filesystem工具提供者 - 提供本地文件系统操作工具
 
-该模块提供文件读取、写入、编辑、列目录、glob查找和grep搜索功能。
+该模块提供文件读取、写入、编辑功能。
 所有文件操作都在授权目录范围内执行，通过路径校验确保安全。
 
-本包作为公共门面，re-export 后端（backend）、ripgrep 解析（ripgrep）与
+本包作为公共门面，re-export 后端（backend）与
 工具函数（tools）。read 工具因涉及多模态 dispatch 与测试 monkeypatch
 （read_image_with_token_budget 在本模块命名空间被替换），留在此处。
 """
@@ -24,9 +24,7 @@ from lumi.agents.core.meta_message import synthetic_human_message
 from lumi.agents.permissions.workspace import resolve_tool_path
 from lumi.agents.tools.providers.filesystem.backend import (
     BINARY_CHECK_BYTES,
-    DEFAULT_CONTENT_HEAD_LIMIT,
     DEFAULT_READ_LIMIT,
-    RIPGREP_TIMEOUT_SECONDS,
     LocalFilesystemBackend,
     check_empty_content,
     format_content_with_line_numbers,
@@ -47,12 +45,8 @@ from lumi.agents.tools.providers.filesystem.media import (
 )
 from lumi.agents.tools.providers.filesystem.tools import (
     EditInput,
-    GlobInput,
-    GrepInput,
     WriteInput,
     edit,
-    glob,
-    grep,
     write,
 )
 from lumi.utils.logger import logger
@@ -295,20 +289,14 @@ async def _read_pdf_rendered_command(
 
 __all__ = [
     "BINARY_CHECK_BYTES",
-    "DEFAULT_CONTENT_HEAD_LIMIT",
     "DEFAULT_READ_LIMIT",
-    "RIPGREP_TIMEOUT_SECONDS",
     "EditInput",
-    "GlobInput",
-    "GrepInput",
     "LocalFilesystemBackend",
     "WriteInput",
     "check_empty_content",
     "edit",
     "format_content_with_line_numbers",
     "get_backend",
-    "glob",
-    "grep",
     "perform_string_replacement",
     "read",
     "read_image_with_token_budget",

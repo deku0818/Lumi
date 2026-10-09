@@ -147,10 +147,8 @@ cd desktop && npm install && npm run dist
 | 工具 | 功能 |
 |------|------|
 | `read` / `write` / `edit` | 读取（支持行号范围）/ 写入 / 基于字符串替换的精确编辑 |
-| `glob` / `grep` | 文件模式匹配 / 文本内容搜索（基于 ripgrep，可降级） |
-| `bash` | 执行 Shell 命令（持久化会话） |
+| `bash` | 执行 Shell 命令与文件搜索（优先 rg，持久化会话） |
 | `ask` | 向用户提问并等待回答 |
-| `todos` | 任务列表管理（桌面右栏实时显示进度） |
 | `cron` | 定时任务（创建 / 删除 / 暂停 / 执行） |
 | `skill` | 调用自定义技能 |
 | `agent` | 委托任务给子 Agent |

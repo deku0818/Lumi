@@ -60,7 +60,6 @@ import { Sidebar } from './components/Sidebar'
 import { MachineIcon, MachinesProvider } from './components/MachineTabs'
 import { FileCards, PreviewPanel, parseArtifacts } from './components/Artifacts'
 import { BgTasksSection } from './components/BgTasksDrawer'
-import { TodosSection } from './components/TodosSection'
 import { CronPage, RunsSection } from './components/CronPage'
 import { RightRail } from './components/RightRail'
 import { ResizeHandle, usePersistedFlag, useResizableWidth } from './components/ResizeHandle'
@@ -1876,7 +1875,7 @@ export default function App() {
   sendRef.current = send // 供项目主页输入岛在 newSession 后调用（override 自带目标，无时序依赖）
 
   // ── 时间旅行（重新生成 / 编辑重发）──
-  // 以目标用户气泡为锚截断其后历史（后端同步删 checkpoint 消息 + 清 todos），再以
+  // 以目标用户气泡为锚截断其后历史（后端同步删 checkpoint 消息），再以
   // 原文（重答）或编辑后文本重走一轮。锚点只认 messageId——由 turn.start 上锚或
   // load_history 下发，不做序号/文本猜测：本地列表可能含后端没有的条目（发送失败
   // 残留等）。id 缺失或气泡已不在（历史被整理）即刷新对齐后端，不冒险截错。
@@ -1911,7 +1910,6 @@ export default function App() {
         ],
         running: true,
         runStart: Date.now(),
-        todos: [], // 后端截断时一并清空：被删轮次建立的任务列表不该带进重答轮
       },
     }))
     const rpc =
@@ -2316,11 +2314,8 @@ export default function App() {
   const railSessionVisible =
     view === 'chat' || (!!cronRunThread && keyThread(active) === cronRunThread)
   const railBg = railSessionVisible && activeBgTasks.length > 0
-  // 任务进度节：todos 随会话走（SessionState.todos），空列表不渲染
-  const activeTodos = store[active]?.todos
-  const railTodos = railSessionVisible && !!activeTodos?.length
   const showRail =
-    view === 'cronjob' ? !!activeCronJob : view === 'chat' && (railBg || railTodos)
+    view === 'cronjob' ? !!activeCronJob : view === 'chat' && railBg
   // 脉冲点 = 可见模块里确有东西在跑：隐藏的 bg 模块不算，直播中的 cron 执行算
   const railDot = (railBg && hasRunningBg) || cronLiveRuns.length > 0
 
@@ -2409,8 +2404,11 @@ export default function App() {
               </div>
             )}
             {/* 中段纯拖拽条：独立矩形，与按钮区互不重叠，无需挖洞。
-                会话标题只读无交互，放在拖拽条内不影响拖窗；mac 同按钮区下移对齐红绿灯中心线 */}
-            <div className={`flex-1 min-w-0 flex items-center ${isMacTitleBar ? 'app-drag' : ''}`}>
+                会话标题只读无交互，放在拖拽条内不影响拖窗；mac 同按钮区下移对齐红绿灯中心线。
+                右栏按钮绝对定位在聊天区末尾 40px 内，预留 48px 避免标题 / 项目标签与它重叠 */}
+            <div
+              className={`flex-1 min-w-0 flex items-center ${isMacTitleBar ? 'app-drag' : ''} ${showRail ? 'pr-12' : ''}`}
+            >
               {view === 'chat' && activeSession && (
                 <div
                   className={`flex min-w-0 items-center gap-2 select-none ${sidebarOpen ? 'pl-4' : 'pl-1'} ${
@@ -2668,7 +2666,6 @@ export default function App() {
                 onPick={pickRun}
               />
             )}
-            {railTodos && <TodosSection todos={activeTodos!} />}
             {railBg && (
               <BgTasksSection
                 tasks={activeBgTasks}

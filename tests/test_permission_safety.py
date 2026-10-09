@@ -52,10 +52,6 @@ class TestFileToolSafety:
         immune, _ = is_bypass_immune("read", {"file_path": "~/.bashrc"})
         assert immune is False
 
-    def test_glob_is_never_immune(self):
-        immune, _ = is_bypass_immune("glob", {"path": "~/.ssh/"})
-        assert immune is False
-
     def test_no_file_path_is_safe(self):
         immune, _ = is_bypass_immune("write", {"other": "value"})
         assert immune is False
@@ -208,10 +204,6 @@ class TestOtherTools:
 
     def test_agent_tool_is_safe(self):
         immune, _ = is_bypass_immune("agent", {"prompt": "do something"})
-        assert immune is False
-
-    def test_todos_tool_is_safe(self):
-        immune, _ = is_bypass_immune("todos", {"todos": []})
         assert immune is False
 
 

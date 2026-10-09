@@ -425,7 +425,7 @@ description: 一句话说明这个技能做什么、什么时候用
 const AGENT_TEMPLATE = `---
 name: {name}
 description: 一句话说明这个 Agent 负责什么
-# tools: read, grep   # 可选：限制工具白名单
+# tools: bash, read   # 可选：限制工具白名单
 ---
 
 （正文即系统提示词）

@@ -70,8 +70,6 @@ TOOL_FRIENDLY_ACTIONS = {
     "read": "查看文件",
     "write": "撰写文件",
     "edit": "修改文件",
-    "glob": "查找文件",
-    "grep": "检索内容",
     "todos": "梳理任务",
     "ask": "请求确认",
     "cron": "安排日程",

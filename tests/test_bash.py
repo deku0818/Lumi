@@ -1,5 +1,9 @@
 """Bash 工具测试"""
 
+import shutil
+
+import pytest
+
 from lumi.agents.runtime.shell_session import CommandResult
 from lumi.agents.tools.providers.bash import _format_result
 
@@ -35,6 +39,29 @@ async def test_bash_tool_executes_command(authorized_tmp_dir):
         {"command": "echo integration_test", "description": "集成测试"}
     )
     assert "integration_test" in result
+
+
+@pytest.mark.parametrize(
+    "command",
+    [
+        "rg --files -g '*.txt' 'search dir'",
+        "rg -n -F -- 'needle{}' 'search dir'",
+        "grep -rnE -- 'needle' 'search dir'",
+        "find 'search dir' -type f -name '*.txt'",
+    ],
+)
+async def test_search_via_bash(command, authorized_tmp_dir):
+    from lumi.agents.tools.providers.bash import bash
+
+    if command.startswith("rg ") and not shutil.which("rg"):
+        pytest.skip("ripgrep not installed")
+    directory = authorized_tmp_dir / "search dir"
+    directory.mkdir()
+    (directory / "result.txt").write_text("needle{}\n")
+    result = await bash.ainvoke({"command": command, "description": "搜索文件和内容"})
+    assert "search dir/result.txt" in result
+    if "-- '" in command:
+        assert "1:needle{}" in result
 
 
 async def test_background_rejects_shell_ampersand(authorized_tmp_dir):

@@ -19,7 +19,6 @@
       "note": "工具审批，经 resume(approval_id, value) 应答。ToolCallBrief 形状 {id, name, args, warnings?: string[], boundary_violations?: string[]}——风险提示挂在各自的调用上"
     },
     "turn.complete": { "payload": { "usage?": "Usage" } },
-    "todos.update": { "payload": { "todos": "TodoItem[]" }, "note": "todos 工具更新任务列表（全量替换语义，与图状态 state.todos 同步）；仅主 agent（子代理的 todos 不外发）。item 形状 {content, status: pending|in_progress|completed}" },
     "error": { "payload": { "message": "string" } },
     "cron.result": {
       "payload": { "job_id": "string", "job_name": "string", "status": "string", "output": "string", "started_at": "string", "duration_ms": "number", "thread_id": "string" },
@@ -74,7 +73,7 @@
     "list_sessions": { "params": ["limit?"], "result": ["sessions"], "note": "跨所有项目返回（不按当前 cwd 过滤）；每条 session 含 workspace_dir（前端按机器→项目分组）、channel（IM 渠道标识，空=desktop 会话）、channel_kind（group/p2p，图标区分）" },
     "new_session": { "params": ["workspace?"], "result": ["thread_id", "model", "provider", "pinned"], "note": "workspace 指定新会话所属项目目录，省略=当前 cwd；model/provider = 该会话生效模型（新会话即默认模型），pinned=该会话是否已固化过模型" },
     "switch_session": { "params": ["thread_id", "workspace?"], "result": ["thread_id", "model", "provider", "pinned"], "note": "workspace=该会话所属项目，切入时把进程 cwd 切过去；model/provider = 该会话生效模型，前端据此点亮选择器；pinned=false 表示该会话尚未开跑过、仍跟随新会话默认（前端据此决定要不要跟着默认漂移、切模型要不要先警告缓存失效）" },
-    "load_history": { "params": ["thread_id"], "result": ["items", "usage?", "model?", "context_window?", "todos?"], "note": "usage/model/context_window 用于还原上下文用量环；渠道旁观会话分母取会话真实模型窗口（context_window）；todos 为该会话 state.todos 快照（TodoItem[]），还原右栏任务进度；user item 带 message_id（时间旅行截断锚点，合并轮 1:N 共享同一 id）" },
+    "load_history": { "params": ["thread_id"], "result": ["items", "usage?", "model?", "context_window?"], "note": "usage/model/context_window 用于还原上下文用量环；渠道旁观会话分母取会话真实模型窗口（context_window）；user item 带 message_id（时间旅行截断锚点，合并轮 1:N 共享同一 id）" },
     "pin_session": { "params": ["thread_id", "pinned"], "result": ["thread_id", "pinned"] },
     "rename_session": { "params": ["thread_id", "title"], "result": ["thread_id", "title"] },
     "delete_session": { "params": ["thread_id"], "result": ["thread_id"] },

@@ -90,7 +90,7 @@ Lumi 内置了基于配置文件的工具权限管理系统。Agent 在执行工
 
 ### 路径模式（文件操作工具）
 
-适用于 `read`、`write`、`edit`、`glob`、`grep` 等工具：
+适用于 `read`、`write`、`edit` 等工具：
 
 - `*` 匹配单层目录中的任意字符（不含 `/`）
 - `**` 匹配零或多层目录
@@ -124,7 +124,7 @@ bash 复合命令（如 `git add . && git push`）会被拆分为独立子命令
 }
 ```
 
-超出边界的操作会在审批界面显示越界警告。只读工具（`read`、`glob`、`grep`）不受工作区边界限制。
+超出边界的操作会在审批界面显示越界警告。只读工具（如 `read`、`vision` 及只读 bash 命令）不受工作区边界限制。
 
 ---
 
@@ -150,8 +150,7 @@ bash 复合命令（如 `git add . && git push`）会被拆分为独立子命令
 | 工具 | 原因 |
 |---|---|
 | `ask` | 向用户提问，自带中断机制 |
-| `read`、`vision`、`glob`、`grep` | 只读操作，无副作用 |
-| `todos` | 仅修改会话内部状态 |
+| `read`、`vision` | 只读操作，无副作用 |
 | `skill` | 读取技能提示词，只读 |
 | `agent` | 子 agent 调度，权限由子 agent 自身独立评估（后台子代理跟随全局无人值守模式） |
 | `cron` | 定时任务管理（默认 allow 规则；任务跟随全局无人值守模式） |
@@ -243,8 +242,6 @@ lumi --privileged-danger -p "执行所有迁移"
   "permissions": {
     "allow": [
       "read",
-      "glob",
-      "grep",
       "bash(npm *)",
       "bash(git status)",
       "bash(git diff *)",

@@ -145,7 +145,7 @@ class TestBranch4_InternalTools:
 class TestBranch5And6_DenyBeforeReadonly:
     def test_all_readonly_routes_to_tool_executor(self):
         """6) 全只读工具（无 DENY）→ ToolExecutor，engine=None 也成立"""
-        tcs = [_tc("read", {"file_path": "/x"}), _tc("grep", {"pattern": "foo"})]
+        tcs = [_tc("read", {"file_path": "/x"}), _tc("bash", {"command": "rg foo ."})]
         assert _route(tcs, engine=None) == "ToolExecutor"
 
     def test_readonly_bash_routes_to_tool_executor(self):
@@ -169,10 +169,10 @@ class TestBranch5And6_DenyBeforeReadonly:
         assert _route(tcs, engine=engine) == "HumanApproval"
 
     def test_deny_in_mixed_readonly_batch_blocks_whole_batch(self):
-        """一个批次里只读 grep + 被 DENY 的只读 read → 整批被拦 HumanApproval"""
+        """一个批次里只读 bash 搜索 + 被 DENY 的只读 read → 整批被拦 HumanApproval"""
         engine = _make_engine([PermissionRule(tool="read", permission=Permission.DENY)])
         tcs = [
-            _tc("grep", {"pattern": "x"}),
+            _tc("bash", {"command": "rg x ."}),
             _tc("read", {"file_path": "/secret"}),
         ]
         assert _route(tcs, engine=engine) == "HumanApproval"

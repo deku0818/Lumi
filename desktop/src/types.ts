@@ -62,7 +62,6 @@ export interface WireEventPayloads {
     tool_calls: ToolCallBrief[]
   }
   'turn.complete': { usage?: Usage }
-  'todos.update': { todos: TodoItem[] }
   error: { message: string }
   'cron.result': {
     job_id: string
@@ -365,14 +364,6 @@ export interface HistorySnapshot {
   // 会话真实模型名与其上下文窗口：渠道旁观会话画上下文环的分母来源
   model?: string
   context_window?: number
-  // 会话 state.todos 快照：右栏任务进度的历史还原
-  todos?: TodoItem[]
-}
-
-// todos 工具的任务项（todos.update 事件 / load_history 快照，形状对齐后端 todos_payload）
-export interface TodoItem {
-  content: string
-  status: 'pending' | 'in_progress' | 'completed'
 }
 
 // 后台任务（bash / agent / workflow），后端 TaskRegistry 的序列化快照

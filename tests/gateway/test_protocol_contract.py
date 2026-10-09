@@ -60,7 +60,7 @@ def test_event_payload_keys_match_source_of_truth():
             args={"a": 1},
             tool_call_id="c",
             output="o",
-            data={"active": True, "todos": []},
+            data={"active": True},
             error="e",
             is_error=True,
             usage_metadata={"input_tokens": 1},

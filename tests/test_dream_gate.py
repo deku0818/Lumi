@@ -148,10 +148,13 @@ async def test_cancel_dream_entry_does_not_cancel_caller(tmp_path):
     from unittest.mock import AsyncMock, patch
 
     from lumi.agents.runtime.bg_tasks import TaskStatus, get_task_registry
+    from lumi.agents.runtime.shell_session import current_shell_key
 
     started = asyncio.Event()
+    shell_keys = []
 
     async def fake_ainvoke(inputs, context=None):
+        shell_keys.append(current_shell_key())
         started.set()
         await asyncio.sleep(30)
 
@@ -177,6 +180,7 @@ async def test_cancel_dream_entry_does_not_cancel_caller(tmp_path):
         await asyncio.wait_for(started.wait(), 5)
         registry = get_task_registry()
         entry = next(e for e in registry.all_tasks() if e.label == "dream-cancel")
+        assert shell_keys == [entry.task_id]
         assert registry.cancel_agent_task(entry.task_id)
         await asyncio.wait_for(caller, 5)  # 调用方正常返回，不抛 CancelledError
     assert entry.status == TaskStatus.FAILED

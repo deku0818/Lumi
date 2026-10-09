@@ -90,7 +90,7 @@ async def _try_offload_to_file(
         f"单次工具最大 {max_bytes} 字节\n"
         f"内容开头预览（前 {text_size(preview)} 字节）：\n"
         f"---\n{preview}\n---\n"
-        f"以上仅为开头，完整内容请使用 read 分段读取或 grep 搜索关键内容。"
+        f"以上仅为开头，完整内容请使用 read 分段读取或 bash 调用 rg 搜索关键内容。"
     )
 
 

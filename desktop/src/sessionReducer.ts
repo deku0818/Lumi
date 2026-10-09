@@ -7,7 +7,6 @@ import type {
   HistorySnapshot,
   Item,
   SessionModelWire,
-  TodoItem,
   ToolItem,
   Usage,
   WireEvent,
@@ -43,8 +42,6 @@ export type SessionState = {
   model?: ActiveModel
   // 历史压缩进行中（Summarizer 内部摘要调用期间为 true）；展示「正在压缩对话」指示
   compacting?: boolean
-  // todos 工具的任务列表快照（右栏任务进度节）；空/未定义 = 节不渲染
-  todos?: TodoItem[]
   // 本次模型调用开始时的 items 长度：message.retry 据此只回滚这一次调用流出的气泡，
   // 不误伤同一轮里更早迭代（已落库）的助手文字。message.start 每次调用都刷新。
   streamMark?: number
@@ -225,10 +222,6 @@ export function hydrateHistory(s: SessionState, r: HistorySnapshot): SessionStat
   return {
     ...s,
     items: hasStreaming(s) ? s.items : r.items.map(restore),
-    // todos 不套 items 的 hasStreaming 护栏：它是全量替换语义的 state 快照，由触发
-    // todos.update 的同一个 Command 原子写入，永不比已收到的事件旧；重连补拉时反而
-    // 更新（gap 期错过的 todos 更新只能靠这份快照补回，turn.complete 不带 todos）。
-    todos: r.todos ?? s.todos,
     ctx: ctxFromUsage(r.usage) ?? s.ctx,
     // 渠道旁观会话的上下文环分母来源（会话真实模型窗口）；desktop 自己的会话此值虽也回填但不消费。
     // 模型名与窗口成对更新：窗口未知（0，如目录查不到的模型）时整对保旧，避免明细弹窗
@@ -357,9 +350,6 @@ export function reduceEvent(store: Store, sid: string, ev: WireEvent, defaultMod
       n = q === s.clarify ? s : { ...s, clarify: q }
       break
     }
-    case 'todos.update':
-      n = { ...s, todos: ev.payload.todos ?? [] }
-      break
     case 'turn.complete':
       n = { ...endTurn(s), ctx: ctxFromUsage(ev.payload.usage) ?? s.ctx }
       break

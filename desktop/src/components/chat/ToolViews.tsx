@@ -182,7 +182,7 @@ function Fold({ open, children }: { open: boolean; children: ReactNode }) {
   )
 }
 
-// 参数选项 chip（超时 / 后台 / 行范围 / glob…）+ edit/write 的 +/- 行数
+// 参数选项 chip（超时 / 后台 / 行范围…）+ edit/write 的 +/- 行数
 function ArgChips({ chips, diff }: { chips: string[]; diff: DiffLine[] | null }) {
   const chip = 'shrink-0 rounded-md bg-ink/[0.06] px-1.5 font-sans text-[11px] leading-[19px] whitespace-nowrap'
   const add = diff?.filter((l) => l.kind === 'add').length

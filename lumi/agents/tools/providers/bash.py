@@ -49,35 +49,29 @@ class BashInput(BaseModel):
     )
 
 
-BASH_DESCRIPTION = """执行 bash 命令并返回输出。
+BASH_DESCRIPTION = """执行 bash 命令并返回输出。工作目录与环境变量在调用间保持。shell 非交互，不读取 rc / profile，继承服务进程环境；stdin 接 /dev/null，不支持交互输入。
 
-工作目录与环境变量在命令之间持久保持。shell 是非交互 bash（不读 rc / profile），只继承服务进程的环境（PATH 末尾加了工具箱 bin）；命令的 stdin 接 /dev/null，需要交互输入的命令拿不到输入。
+## 文件操作与搜索
+- 查找文件、搜索内容优先用 rg；仅未安装 rg 时，分别改用 find、grep。
+- 搜内容：rg -n -- '正则' 路径；字面文本加 -F，仅输出匹配文件路径用 -l，上下文用 -C。
+- 找文件：rg --files -g 'glob模式' 路径。模式加单引号，避免 shell 展开。
+- 先限定目录与文件范围，再扩大搜索。rg 默认过滤隐藏文件及忽略规则命中的路径；需要时分别加 --hidden、--no-ignore。
+- 无 rg 时：grep -rnE -- '正则' 路径；find 路径 -type f -name '文件名模式'，按完整路径匹配改用 -path。不要照搬 rg 专用参数或正则语法。
+- rg / grep 退出码 1 表示无匹配，不应因此切换搜索工具。
+- 读、改、写文件分别优先用 read、edit、write；专用工具无法完成时再用 shell。
+- 与用户交流直接输出文本，不用 echo / printf。
 
-**重要**：除非明确被要求、或已确认专用工具无法完成任务，避免用本工具跑 `find`、`grep`、`cat`、`head`、`tail`、`sed`、`awk`、`echo` 命令，改用对应的专用工具：
+## 执行规则
+- 路径含空格时加引号；优先使用绝对路径，避免不必要的 cd。
+- 同一会话的 bash 调用串行执行；后续命令仅在前一个成功时执行，用 && 连接。
+- Git：不 force push、不跳过 hooks、不 amend 或 rebase 已推送的提交；仅在用户明确要求时 commit / push。
+- 避免不必要的 sleep。
 
-- 找文件：用 `glob` 工具（而非 find / ls）
-- 搜内容：用 `grep` 工具（而非 grep / rg 命令）
-- 读文件：用 `read` 工具（而非 cat/head/tail）
-- 改文件：用 `edit` 工具（而非 sed/awk）
-- 写文件：用 `write` 工具（而非 echo > / cat <<EOF）
-- 与用户交流：直接输出文本（而非 echo/printf）
-
-## 关键规则
-
-- 文件路径包含空格时用双引号括起来
-- 尽量使用绝对路径，避免 `cd`
-- 同一会话的 bash 调用串行执行；依赖前一个命令结果的用 `&&` 串联，互不依赖的长任务用 `run_in_background`
-- Git 安全规则：不 force push；不跳过 hooks（--no-verify）；不 amend、不 rebase 已推送的提交；仅在用户明确要求时才 commit / push
-- 避免不必要的 `sleep`
-
-## 后台任务
-长耗时命令（构建 / 测试 / 下载 / 起服务）用 `run_in_background=true`：
-- 后台默认**不限时**；需要墙钟上限再传 `timeout`（起常驻服务保持默认即可，不会被砍）
-- 在后台执行后会立即返回 `task_id` 和输出文件路径
-- 命令完成时**自动**收到 `<task-notification>` 消息提示
-- **不要轮询** `background_task(action="status")`；**不要主动 read output_file**。等通知，期间继续做别的
-- 用户明确问进度才查 status；通知到达前**不要编造结果**，如实说任务还在跑
-- **前台 vs 后台**：需要结果继续推进 → 前台；有独立工作可并行 → 后台
+## 前台与后台
+- 需要命令结果才能继续时用前台；有独立工作可并行时，用 run_in_background=true。
+- 后台默认不限时；需要时间上限时设置 timeout。命令中不要另加后台符 &。
+- 后台启动后返回 task_id 和输出文件路径，完成时自动收到 <task-notification>。
+- 等通知期间继续其他工作，不主动轮询状态或读取输出文件；用户明确询问进度时才查询。通知到达前如实说明仍在运行，不编造结果。
 """
 
 
