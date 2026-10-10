@@ -1,10 +1,13 @@
-"""飞书入站：排队接手、妙记事件、@ 替换、富文本分段、附件落盘名。"""
+"""飞书入站：收件箱跑空者接手、妙记事件、@ 替换、富文本分段、附件落盘名。"""
 
 from __future__ import annotations
 
 import asyncio
 from types import SimpleNamespace
 
+from langchain_core.messages import HumanMessage
+
+from lumi.agents.core.inbox import Inbox
 from lumi.gateway.channels.config import FeishuChannelConfig
 from lumi.gateway.channels.feishu import inbound as inb
 from lumi.gateway.channels.feishu.channel import FeishuChannel
@@ -17,6 +20,28 @@ from lumi.sessions.thread_runs import thread_runs
 
 
 class _Bridge:
+    """入站路径用到的最小桥：收件箱用真实 Inbox。"""
+
+    def __init__(self):
+        self._inbox = Inbox()
+
+    def list_commands(self):
+        return []
+
+    async def interject(
+        self, content, attachments=None, message_id="", message_meta=None
+    ):
+        self._inbox.put(HumanMessage(content, id=message_id or None))
+
+    def withdraw_interjection(self, message_id):
+        return self._inbox.withdraw(message_id)
+
+    def take_interjections(self):
+        return self._inbox.take()
+
+    def pending_interjections(self):
+        return self._inbox.pending()
+
     def set_env_extra(self, lines):
         pass
 
@@ -50,35 +75,39 @@ def _channel(monkeypatch):
     return ch, sent
 
 
-def _record_batches(ch, monkeypatch) -> list:
+def _record_turns(ch, monkeypatch) -> list:
+    """打桩 run_turn：插话轮取走收件箱，记 (消息正文, 是否登记为可 /stop 的用户轮)。"""
     ran: list = []
 
-    async def fake_run_batch(_ch, bridge, chat_id, thread_id, batch):
-        own = ch.bridge_pool.run_tasks.get(thread_id) is asyncio.current_task()
-        ran.append(([m.text for m in batch], own))
+    async def fake_run_turn(_ch, bridge, *, chat_id, interjections=False, **kw):
+        own = asyncio.current_task() in ch.bridge_pool.run_tasks.values()
+        ran.append(([m.content for m in bridge.take_interjections()], own))
 
-    monkeypatch.setattr(ch.inbound, "_run_batch", fake_run_batch)
+    monkeypatch.setattr(inb, "run_turn", fake_run_turn)
     return ran
 
 
-# ── 1. 持锁期间入队的消息：锁一空就由自己的 task 接手 ──
+# ── 1. 持锁期间进箱的消息：锁一空就由跑空者接手 ──
 
 
 async def test_queued_messages_run_when_foreign_holder_releases(monkeypatch):
-    # 回归：妙记轮 / 每日整理 / 删会话持锁时入队的消息，持锁者不取队列，消息搁浅到
-    # 下一条消息才被捎带，且排在新消息后面（顺序颠倒）
+    # 回归：妙记轮 / 每日整理 / 删会话持锁时到达的消息，持锁者不取收件箱，消息搁浅到
+    # 下一条消息才被捎带
     ch, _ = _channel(monkeypatch)
-    ran = _record_batches(ch, monkeypatch)
-    await ch.bridge_pool.get("t")
+    ran = _record_turns(ch, monkeypatch)
+    bridge = await ch.bridge_pool.get("t")
     lock = ch.bridge_pool.lock("t")
     await lock.acquire()
     first = asyncio.create_task(ch.inbound._admit("oc", "t", inb._Pending("A")))
     await asyncio.sleep(0)
     second = asyncio.create_task(ch.inbound._admit("oc", "t", inb._Pending("B")))
     await asyncio.sleep(0)
+    # 忙时到达的消息只进收件箱，已有跑空者就不再派等锁者
+    assert second.done() and not first.done()
+    assert [m.content for m in bridge.pending_interjections()] == ["A", "B"]
     lock.release()
     await asyncio.wait_for(asyncio.gather(first, second), 2)
-    # 合并成一轮、顺序不变，且登记为可被 /stop 取消的用户轮
+    # 同一轮按序发出，且登记为可被 /stop 取消的用户轮
     assert ran == [(["A", "B"], True)]
 
 
@@ -88,7 +117,7 @@ async def test_notification_turn_leaves_queued_messages_to_their_own_task(
     # 回归：通知轮跑完后在 poller task 里接着跑积压的用户轮——/stop 停不了（误报
     # 「后台通知无法中断」），其他会话的通知 / 妙记也被它卡住
     ch, _ = _channel(monkeypatch)
-    ran = _record_batches(ch, monkeypatch)
+    ran = _record_turns(ch, monkeypatch)
     fi = ch.inbound
     await ch.bridge_pool.get("t")
     ch.bridge_pool.chat_ids["t"] = "oc"
@@ -117,7 +146,7 @@ async def test_notification_turn_leaves_queued_messages_to_their_own_task(
 async def test_clear_hands_queued_message_to_its_own_task(monkeypatch):
     # /clear 持锁窗口内到达的消息：清空完成后接着跑，不搁浅
     ch, _ = _channel(monkeypatch)
-    ran = _record_batches(ch, monkeypatch)
+    ran = _record_turns(ch, monkeypatch)
     monkeypatch.setattr(inb, "delete_meta", lambda tid: None)
     await ch.bridge_pool.get("t")
     arrived: list[asyncio.Task] = []
@@ -203,7 +232,7 @@ async def test_queued_message_does_not_start_turn_on_closing_pool(monkeypatch):
     # 积压者在等锁：池正被回收（停用 / 换项目 / 退出）时拿到锁也不再开新轮，
     # 否则 close_all 等锁超时后会在跑着的轮下面关掉 bridge
     ch, _ = _channel(monkeypatch)
-    ran = _record_batches(ch, monkeypatch)
+    ran = _record_turns(ch, monkeypatch)
     await ch.bridge_pool.get("t")
     lock = ch.bridge_pool.lock("t")
     await lock.acquire()
@@ -219,25 +248,27 @@ async def test_queued_message_does_not_start_turn_on_closing_pool(monkeypatch):
 async def test_deleting_thread_cancels_active_and_discards_queued_messages(monkeypatch):
     ch, _ = _channel(monkeypatch)
     started = asyncio.Event()
-    batches = []
+    turns = []
 
-    async def run_batch(_ch, bridge, chat_id, thread_id, batch):
-        batches.append([m.text for m in batch])
+    async def run_turn(_ch, bridge, **kwargs):
+        turns.append([m.content for m in bridge.take_interjections()])
         started.set()
         await asyncio.Event().wait()
 
-    monkeypatch.setattr(ch.inbound, "_run_batch", run_batch)
+    monkeypatch.setattr(inb, "run_turn", run_turn)
     active = asyncio.create_task(ch.inbound._admit("oc", "t", inb._Pending("A")))
     await started.wait()
-    queued = asyncio.create_task(ch.inbound._admit("oc", "t", inb._Pending("B")))
-    await asyncio.sleep(0)
+    # 轮在跑时到达：进收件箱即返回，等工具边界注入
+    await ch.inbound._admit("oc", "t", inb._Pending("B"))
+    bridge = ch.bridge_pool._bridges["t"]
+    assert len(bridge.pending_interjections()) == 1
     async with thread_runs.lock_for("t").cancel_and_hold():
-        assert not ch.inbound._queues
-        assert not ch.bridge_pool.run_tasks
-    results = await asyncio.gather(active, queued, return_exceptions=True)
-    assert all(isinstance(r, asyncio.CancelledError) for r in results)
-    assert batches == [["A"]]
-    ran = _record_batches(ch, monkeypatch)
+        assert bridge.pending_interjections() == []  # 删除丢弃未注入的消息
+        assert not ch.bridge_pool.run_tasks and not ch.inbound._draining
+    [result] = await asyncio.gather(active, return_exceptions=True)
+    assert isinstance(result, asyncio.CancelledError)
+    assert turns == [["A"]]
+    ran = _record_turns(ch, monkeypatch)
     await ch.inbound._admit("oc", "t", inb._Pending("new"))
     assert ran == [(["new"], True)]
 

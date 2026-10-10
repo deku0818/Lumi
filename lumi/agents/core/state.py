@@ -5,6 +5,7 @@ from typing import TYPE_CHECKING, Annotated, Any, NotRequired, TypedDict
 
 if TYPE_CHECKING:
     from lumi.agents.core.broker import ApprovalBroker
+    from lumi.agents.core.inbox import Inbox
     from lumi.agents.permissions.engine import PermissionEngine
 
 from dataclasses import dataclass, field
@@ -60,6 +61,9 @@ class LumiAgentContext:
     注入方式。None（headless / cron / 子 agent）= 无目标驱动。"""
     clear_goal: Callable[[str], None] | None = field(default=None)
     """按 thread_id 清会话 goal（达成 / 永远达不成时由 goal_stop_hook 调用），同上注入。"""
+    inbox: Inbox | None = field(default=None)
+    """运行中插话收件箱，由 bridge 注入。图在工具边界 / 模型想结束时取走注入当前轮。
+    None（headless / cron / 子 agent）= 不接受插话。"""
     env_extra: str = field(default="")
     """<env> 块尾部追加的会话级条目行（渠道无关，已按块内格式渲染好、含缩进）。
 

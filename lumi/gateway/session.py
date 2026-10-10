@@ -23,6 +23,7 @@ from contextlib import suppress
 from dataclasses import dataclass, field
 from pathlib import Path
 
+from lumi.agents.core.inbox import InboxFullError
 from lumi.agents.core.meta_message import (
     declared_items,
     extract_text_content,
@@ -128,6 +129,11 @@ def _user_items(m) -> list[dict]:
             out.append({"kind": "user", "text": text})
     # 时间旅行（重新生成 / 编辑重发）按 message_id 定位截断点；合并轮 1:N 共享同一 id
     return [{**it, "message_id": m.id} for it in out] if m.id else out
+
+
+def _wire_user_items(messages: list) -> list[dict]:
+    """未注入的插话 → 前端 user item 列表（托盘恢复 / stop 交还共用）。"""
+    return [it for m in messages for it in _user_items(m)]
 
 
 def _history_items(messages: list) -> list[dict]:
@@ -301,8 +307,13 @@ async def _load_history(bridge: AgentBridge, params: dict) -> dict:
     # 复用 bridge 末条 AI usage 提取，口径与流式一致。model/context_window 供渠道旁观会话
     # 画上下文环——旁观视图无本地 activeModel，分母须由会话真实模型决定。
     model, context_window = _snapshot_model_window(messages, thread_id)
+    pending = (
+        bridge.pending_interjections() if thread_id == bridge.current_thread_id else []
+    )
     return {
         "items": _history_items(messages),
+        # 尚未注入的插话不在 checkpoint 里：随快照带回，重连 / 重载后托盘不丢
+        "pending": _wire_user_items(pending),
         "usage": last_ai_usage(snap),
         "model": model,
         "context_window": context_window,
@@ -312,7 +323,19 @@ async def _load_history(bridge: AgentBridge, params: dict) -> dict:
 async def _stop(session: GatewaySession, params: dict) -> dict:
     # 中止当前用户轮：优先把挂起审批以拒绝收尾（保留历史），无挂起审批才硬取消 task。
     # 不等 task 结束，快速回应（取消处理自会补发 turn.complete 收尾）。
-    return {"stopped": await session._finalize_active_turn(wait=False)}
+    # 未注入的插话先取出交还客户端（退回输入框），否则轮收尾后会被当成新一轮发出。
+    returned = session._bridge.take_interjections()
+    return {
+        "stopped": await session._finalize_active_turn(wait=False),
+        "returned": _wire_user_items(returned),
+    }
+
+
+async def _withdraw_message(session: GatewaySession, params: dict) -> dict:
+    """撤回一条尚未注入的插话。withdrawn=False 表示已注入当前轮（以注入事件为准）。"""
+    return {
+        "withdrawn": session._bridge.withdraw_interjection(params.get("message_id", ""))
+    }
 
 
 async def _resume(session: GatewaySession, params: dict) -> dict:
@@ -709,6 +732,7 @@ async def _clear_finished_bg_tasks(session: GatewaySession, params: dict) -> dic
 # 新增方法只需在此登记 + events.json 声明，漂移会被测试直接抓住。
 _RPC_HANDLERS = {
     "stop": _stop,
+    "withdraw_message": _withdraw_message,
     "resume": _resume,
     "list_commands": _list_commands,
     "list_providers": _list_providers,
@@ -911,7 +935,12 @@ class GatewaySession:
                     )
                 return
             if self.has_active_turn():
-                if rid is not None:
+                if method == "send_message":
+                    # 运行中插话：进收件箱，由图在下一个工具边界注入当前轮
+                    task = asyncio.create_task(self._interject(rid, params))
+                    self._rpc_tasks.add(task)
+                    task.add_done_callback(self._rpc_tasks.discard)
+                elif rid is not None:
                     await self._channel.send(
                         {"id": rid, "error": {"message": "已有任务在执行"}}
                     )
@@ -952,6 +981,7 @@ class GatewaySession:
             self._notif_task.cancel()
             with suppress(asyncio.CancelledError):
                 await self._notif_task
+        self._bridge.take_interjections()  # 免得被取消的轮收尾时再起插话轮
         for task in (*self._rpc_tasks, self._run.task):
             if task is not None and not task.done():
                 if not task.cancelling():  # 已在取消收尾中的任务只等待不重复 cancel
@@ -967,6 +997,7 @@ class GatewaySession:
                 params.get("content", ""),
                 tool_mode=params.get("tool_mode", "default"),
                 attachments=params.get("files"),
+                message_id=params.get("message_id", ""),
             )
         if method == "regenerate":
             return self._bridge.stream_regenerate(
@@ -1023,6 +1054,8 @@ class GatewaySession:
         （轮在流生成中途）才硬取消 task。wait=True 时等 task 结束——switch_session 取锁前
         须等，否则该轮正挂在审批上持着锁会死锁；stop 不等，以便快速回应。
         """
+        # 未注入的插话随轮作废：不清则轮收尾后被当成新一轮发出（切会话时发到旧 thread）
+        self._bridge.take_interjections()
         rejected = self._bridge.reject_pending()
         task = self._run.task
         if task is None or task.done():
@@ -1070,6 +1103,42 @@ class GatewaySession:
                     await self._channel.send({"id": rid, "error": {"message": str(e)}})
         finally:
             self._run.clear_if(asyncio.current_task())
+            self._flush_interjections()
+
+    async def _interject(self, rid, params: dict) -> None:
+        """运行中插话入箱并应答 {queued, message_id}。"""
+        try:
+            mid = await self._bridge.interject(
+                params.get("content", ""),
+                attachments=params.get("files"),
+                message_id=params.get("message_id", ""),
+            )
+            # 构造期间（图片存盘有 await）轮可能已收尾、没人再取收件箱：自己起轮发出
+            self._flush_interjections()
+            if rid is not None:
+                await self._channel.send(
+                    {"id": rid, "result": {"queued": True, "message_id": mid}}
+                )
+        except Exception as e:
+            if not isinstance(e, InboxFullError):
+                logger.error("[WS] 插话入箱失败: %s", e, exc_info=True)
+            if rid is not None:
+                with suppress(Exception):
+                    await self._channel.send({"id": rid, "error": {"message": str(e)}})
+
+    def _flush_interjections(self) -> None:
+        """空闲且收件箱非空（插话没赶上工具边界，轮已结束）→ 另起一轮真实用户轮发出。
+
+        轮 task 的 finally 与插话入箱后各调一次；两处到这里都无 await，空闲判定与
+        登记原子，不会漏发也不会重复起轮。
+        """
+        if self.has_active_turn() or not self._bridge.pending_interjections():
+            return
+        self._run.begin(
+            asyncio.create_task(
+                self._run_streaming_rpc(None, self._bridge.stream_interjection_turn())
+            )
+        )
 
     def _maybe_generate_title(self, content: str | list) -> None:
         """用户消息发出时机会性生成会话标题（后台跑，不等本轮完成）。
@@ -1160,7 +1229,7 @@ class GatewaySession:
                 continue
             # 合成轮自成 task、在 task 内持锁：本循环被取消（detach / aclose）不连坐它，
             # 也不会在它仍挂着时释放锁。挂到 _run.task 使 stop 可取消、期间的新消息走
-            # handle_frame 的 busy-check 得到「已有任务在执行」
+            # handle_frame 的 busy-check 进插话收件箱
             self._run.begin(
                 asyncio.create_task(self._run_synthetic_turn()), synthetic=True
             )
@@ -1195,6 +1264,7 @@ class GatewaySession:
                     logger.error("[WS] 后台通知轮执行失败", exc_info=True)
         finally:
             self._run.clear_if(asyncio.current_task())
+            self._flush_interjections()
 
     async def _dispatch(self, method: str, params: dict) -> dict:
         """执行一个非流式 RPC 方法并返回结果（在独立 task 中运行，见 _run_rpc）。

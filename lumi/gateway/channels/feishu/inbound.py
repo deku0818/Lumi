@@ -1,4 +1,4 @@
-"""飞书入站消息处理：解析事件 → 派生 thread → 忙时排队合并 → 驱动一次 agent run。
+"""飞书入站消息处理：解析事件 → 派生 thread → 进收件箱 → 空闲开轮 / 忙时在工具边界插话。
 
 支持纯文本 / post 富文本 / 图片（下载为原始 base64 块，经 stream_response 的
 persist_image_blocks 统一存盘取路径，与文件附件一并由 bridge 拼 <attached-file>
@@ -20,6 +20,7 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import TYPE_CHECKING, Any
 
+from lumi.agents.core.inbox import InboxFullError
 from lumi.agents.runtime.bg_process import cancel_thread_bg_tasks
 from lumi.agents.runtime.bg_tasks import compose_notification_hint, get_task_registry
 from lumi.gateway.bridge.core import available_commands
@@ -72,25 +73,13 @@ if TYPE_CHECKING:
 # 入站去重 LRU 上限（飞书可能重复推送同一 message_id）
 _DEDUP_CACHE_SIZE = 1000
 
-# 同会话忙时的消息排队上限：跑完合并成一轮处理，超出此数的丢弃并提示
-_MAX_QUEUE = 10
-
 # 群名解析失败后的重试冷却（秒）：无名群/无权限的群不必每条消息都打一次 im.chat.get
 _TITLE_RETRY_COOLDOWN = 300.0
-
-# 多条消息合并成一轮时前置的提示：告知 agent 这本是连发的几条、后面的可能更正前面，
-# 只告知不写死规则（有时是补充而非覆盖）。单条不加。
-_MERGE_REMINDER = (
-    "<system-reminder>\n"
-    "以下是用户在你处理上一条消息期间连发的 {n} 条消息，已合并为本轮，按发送先后排列。"
-    "后面的可能是对前面的补充或更正，请综合判断用户当前真实的意图。\n"
-    "</system-reminder>\n"
-)
 
 
 @dataclass
 class _Pending:
-    """忙时排队的一条入站消息（媒体只记引用，下载延后到持锁处理时）。"""
+    """一条解析好的入站消息（媒体只记引用，进收件箱前才下载）。"""
 
     text: str
     image_refs: list[tuple[str, str]] = field(
@@ -177,15 +166,11 @@ def _render(m: _Pending) -> str:
     return body
 
 
-def merge_messages(batch: list[_Pending]) -> str:
-    """合并一批消息的文本：单条直接返回原文（仅加发送者标签）；多条加 reminder 顺次拼接。
-
-    <sender> 标签本身就是消息边界（每条渲染必带，发送者解析恒有兜底名），无需编号；
-    媒体-only 的消息用占位保住顺序，图片/文件实体仍另行附带。
-    """
-    if len(batch) == 1:
-        return _render(batch[0])
-    return _MERGE_REMINDER.format(n=len(batch)) + "\n\n".join(_render(m) for m in batch)
+def _message_meta(m: _Pending) -> dict:
+    """显示声明：{sender, ts, text} 结构化存进 additional_kwargs，desktop 气泡只读它、
+    不反解析正文——正文里的 <sender> 标签纯给模型看，字面标签无法伪造气泡。媒体-only
+    消息同样给占位文本，避免渲染出只有人名没有内容的悬空气泡。"""
+    return {"items": [{"sender": m.sender_name, "ts": m.ts, "text": _body(m)}]}
 
 
 class FeishuInbound:
@@ -194,8 +179,9 @@ class FeishuInbound:
     def __init__(self, channel: FeishuChannel) -> None:
         self.channel = channel
         self._seen: OrderedDict[str, None] = OrderedDict()
-        # thread_id → 忙时积压的消息；由当前持锁者跑完后合并处理
-        self._queues: dict[str, list[_Pending]] = {}
+        # thread_id → 正在（等锁 / 持锁）跑空本会话收件箱的 task：已有它在，新到的消息
+        # 进收件箱即可，由它注入当前轮或轮后另起一轮，不必再派一个等锁者
+        self._draining: dict[str, asyncio.Task] = {}
         # chat_id → 群名解析失败（无名群/无权限，缓存不收兜底名）后的下次重试时刻，
         # 免得这类群每条消息都白打一次 im.chat.get
         self._title_retry_at: dict[str, float] = {}
@@ -391,13 +377,13 @@ class FeishuInbound:
         pending: _Pending,
         env: str = "",
     ) -> None:
-        """把一条待处理消息交给本会话：空闲当场上锁跑，忙则排队（上限 _MAX_QUEUE，满则
-        丢弃并提示）。
+        """把一条消息交给本会话，与 desktop 同一套插话规则（见 agents/core/inbox.py）：
+        进收件箱；用户轮在跑则由图在下一个工具边界注入，否则（空闲 / 系统轮持锁）由
+        跑空收件箱的 task 拿锁后另起一轮。上限满则丢弃并提示。
 
-        队列里的首条由自己的 task 等锁接手、把积压合并跑完：持锁的不一定是会取队列的
-        用户轮（妙记轮 / 每日整理 / 删会话 / 通知轮），靠持锁者兜底会让消息搁浅到下一条
-        消息才被捎带。积压轮跑在消息自己的 task 里，照常登记 run_tasks 可被 /stop 取消。
-        忙判与入队相邻、其间无 await：事件循环上原子。
+        跑空者（``_draining``）至多一个：首个发现没有跑空者的消息由自己的 task 等锁接手
+        ——持锁的不一定是用户轮（妙记轮 / 每日整理 / 删会话 / 通知轮），靠持锁者兜底会让
+        消息搁浅到下一条消息才被捎带。技能命令插不进别的轮：忙时提示，空闲当场跑。
         """
         pool = self.channel.bridge_pool
         # 映射记在池上：热重载保留池但重建 inbound，通知 poller 靠它回投。
@@ -411,70 +397,129 @@ class FeishuInbound:
         if env:
             # 每条消息无脑覆盖（同 chat 恒等值，群改名即刷新）
             bridge.set_env_extra(env)
-        if lock.locked():
-            queue = self._queues.setdefault(thread_id, [])
-            if len(queue) >= _MAX_QUEUE:
-                await self.channel.send_markdown(
-                    chat_id,
-                    "消息有点多，等我回复后再发。",
-                    reply_to=pending.reply_to,
-                    title="⏳ 这条先跳过",
-                    template="orange",
-                )
+        command = self._skill_command(bridge, pending)
+        if command is not None:
+            if lock.locked():
+                await self._send_busy_hint(chat_id, pending.reply_to)
                 return
-            queue.append(pending)
-            if len(queue) > 1:
-                return  # 已有排在前面的积压者在等锁，它会一并取走
-            await self._locked_drain(bridge, chat_id, thread_id, [])
+            await self._locked_run(bridge, chat_id, thread_id, (command, pending))
             return
-        await self._locked_drain(bridge, chat_id, thread_id, [pending])
+        try:
+            await self._interject(bridge, thread_id, pending)
+        except InboxFullError:
+            await self.channel.send_markdown(
+                chat_id,
+                "消息有点多，等我回复后再发。",
+                reply_to=pending.reply_to,
+                title="⏳ 这条先跳过",
+                template="orange",
+            )
+            return
+        if lock.deleting or lock.revision != revision:
+            # 下载期间会话被清空：收件箱已随删除清场，这条不能留给新会话
+            bridge.withdraw_interjection(pending.reply_to)
+            return
+        # 进箱与跑空者判定之间无 await；正在取消的旧任务不会再取箱，新消息另派等锁者
+        draining = self._draining.get(thread_id)
+        if draining is not None and not draining.cancelling():
+            return
+        await self._locked_run(bridge, chat_id, thread_id)
 
-    async def _drain(
+    def _skill_command(self, bridge, m: _Pending) -> tuple[str, str] | None:
+        """纯文本且命中已知技能命令时返回 (name, extra)；未知的 /xxx 照常当普通消息。
+
+        渠道命令遮蔽同名技能：漏到这里的形态（如自然语言 /model）也不落入同名技能，
+        遮蔽到底，按普通文本喂模型。
+        """
+        if m.image_refs or m.file_refs:
+            return None
+        parsed = parse_slash_command(m.text)
+        if (
+            parsed
+            and parsed[0] not in CHANNEL_COMMAND_NAMES
+            and any(c["name"] == parsed[0] for c in bridge.list_commands())
+        ):
+            return parsed
+        return None
+
+    async def _interject(self, bridge, thread_id: str, m: _Pending) -> None:
+        """下载媒体、按普通用户消息构造后放进收件箱。消息 id 直接用飞书 message_id：
+        注入后的回复卡片据此锚到这条消息上。"""
+        # 图片/文件各自独立、相互无依赖 → 并发下载（gather 保序），多媒体不再 N 倍延迟
+        image_blocks: list[dict] = []
+        if m.image_refs:
+            results = await asyncio.gather(
+                *(self._image_block(mid, ik) for mid, ik in m.image_refs)
+            )
+            image_blocks = [b for b in results if b]
+        file_paths: list[str] = []
+        if m.file_refs:
+            target = inbound_dir(thread_id)
+            bridge.folders.add_folder(str(target))  # 授权该目录给本会话权限引擎
+            results = await asyncio.gather(
+                *(
+                    self._download_file(mid, fk, fname, target)
+                    for mid, fk, fname in m.file_refs
+                )
+            )
+            file_paths = [p for p in results if p]
+        await bridge.interject(
+            build_content(_render(m), image_blocks),
+            attachments=file_paths,
+            message_id=m.reply_to,
+            message_meta=_message_meta(m),
+        )
+
+    async def _locked_run(
         self,
-        ch: FeishuChannel,
         bridge,
         chat_id: str,
         thread_id: str,
-        batch: list[_Pending],
+        command: tuple[tuple[str, str], _Pending] | None = None,
     ) -> None:
-        """处理 batch + 期间排队的全部消息：每轮把积压的合并成一次 agent run，直到队空。
-
-        调用方已持本会话运行锁；期间到达的新消息因锁被占走入队，由本循环兜底取走，
-        故每轮跑完都重新 pop 队列直至为空。batch 为空时直接空转（通知轮的兜底调用）。
-        """
-        while batch:
-            await self._run_batch(ch, bridge, chat_id, thread_id, batch)
-            batch = self._queues.pop(thread_id, [])
-
-    async def _locked_drain(
-        self, bridge, chat_id: str, thread_id: str, batch: list[_Pending]
-    ) -> None:
-        """持锁跑一轮 drain，并登记 run_tasks 供 /stop 取消；batch 为空即接手积压队列。
+        """持锁跑空本会话收件箱（可选先跑一条技能命令轮），登记 run_tasks 供 /stop 取消。
 
         所有"拿锁跑用户轮"的入口统一走这里，登记不可能被漏掉（每条消息经
         run_coroutine_threadsafe 独立成 task，cancel 只杀本轮，不伤接收循环）。
+        每轮跑完都重查收件箱：没赶上工具边界的插话在此另起一轮。末次判空到登记注销
+        之间无 await，期间进箱的消息必然看到跑空者仍在、或看到它已退出而自己接手。
         调用方判完锁空闲后到本调用的 acquire 之间不得有 await（保持忙判原子）。
         """
         pool = self.channel.bridge_pool
+        me = asyncio.current_task()
+        self._draining[thread_id] = me
         try:
             async with pool.lock(thread_id):
                 if pool.closed:
                     return
-                pool.run_tasks[thread_id] = asyncio.current_task()
+                pool.run_tasks[thread_id] = me
                 try:
-                    await self._drain(
-                        self.channel,
-                        bridge,
-                        chat_id,
-                        thread_id,
-                        batch or self._queues.pop(thread_id, []),
-                    )
+                    if command is not None:
+                        cmd, m = command
+                        await run_turn(
+                            self.channel,
+                            bridge,
+                            chat_id=chat_id,
+                            reply_to=m.reply_to,
+                            command=cmd,
+                            message_meta=_message_meta(m),
+                        )
+                        hub.on_channel_activity(thread_id, "feishu")
+                    while bridge.pending_interjections():
+                        await run_turn(
+                            self.channel, bridge, chat_id=chat_id, interjections=True
+                        )
+                        # 本轮已入 checkpoint：通知 desktop 连接刷新会话列表 / 旁观视图
+                        hub.on_channel_activity(thread_id, "feishu")
                 finally:
                     pool.run_tasks.pop(thread_id, None)
         except (asyncio.CancelledError, ThreadDeletingError):
             if thread_runs.is_deleting(thread_id):
-                self._queues.pop(thread_id, None)
+                bridge.take_interjections()
             raise
+        finally:
+            if self._draining.get(thread_id) is me:
+                del self._draining[thread_id]
 
     # ── 渠道系统命令 ──
 
@@ -611,23 +656,25 @@ class FeishuInbound:
     async def _cmd_stop(self, chat_id: str, thread_id: str, message_id: str) -> None:
         """停止当前轮 + 本会话全部后台任务（IM 没有 desktop 的任务抽屉，这是唯一手段）。
 
-        停到轮才清积压队列——没停到任何东西时不能丢用户排队的消息。通知 poller
-        持锁跑的轮不登记 run_tasks（cancel 会杀掉整个轮询），不可中断，如实告知
-        而非误报"没有任务"。被停的后台任务仍走既有收尾链（FAILED + 通知入队）。
+        停到轮才清收件箱（未注入的插话，与 desktop 同：不会被执行，并如实告知）——没停
+        到任何东西时不能丢用户的消息。通知 poller 持锁跑的轮不登记 run_tasks（cancel
+        会杀掉整个轮询），不可中断，如实告知而非误报"没有任务"。被停的后台任务仍走
+        既有收尾链（FAILED + 通知入队）。
         """
         ch = self.channel
         pool = ch.bridge_pool
         task = pool.run_tasks.get(thread_id)
         run_stopped = task is not None and not task.done()
+        dropped = 0
         if run_stopped:
-            # 清积压再取消：只停当前轮的话，积压消息会立刻触发新一轮
-            self._queues.pop(thread_id, None)
             bridge = pool.peek(thread_id)
             if bridge is not None:
+                # 先清收件箱再取消：只停当前轮的话，未注入的插话会立刻另起一轮
+                dropped = len(bridge.take_interjections())
                 bridge.reject_pending()  # 停轮惯用法：挂起审批先拒绝收尾，再硬取消
             if not task.cancelling():
                 # 已在取消收尾中的轮不重复 cancel：第二发会把 run_turn 从收尾中
-                # 打出去提前放锁，积压的下一轮与游离的写回并发（同 desktop 守卫）
+                # 打出去提前放锁，下一轮与游离的写回并发（同 desktop 守卫）
                 task.cancel()
         bg_stopped = await cancel_thread_bg_tasks(thread_id)
         if not run_stopped and not bg_stopped:
@@ -654,6 +701,8 @@ class FeishuInbound:
             parts.append("已停止当前任务")
         if bg_stopped:
             parts.append(f"已停止 {bg_stopped} 个后台任务")
+        if dropped:
+            parts.append(f"另有 {dropped} 条未处理的消息已丢弃")
         await ch.send_markdown(
             chat_id,
             "，".join(parts) + "。",
@@ -869,7 +918,7 @@ class FeishuInbound:
                 async with preserve_poller(lock):
                     try:
                         bridge = await pool.get(thread_id)
-                        # 持锁期间排队的入站消息由它们自己的 task 等锁接手（见 _admit）
+                        # 持锁期间到达的消息留在收件箱，由跑空者等锁接手（见 _admit）
                         await self._run_notification_turn(bridge, thread_id, chat_id)
                     except Exception:
                         # 普通异常仅跳过本轮；删除取消由 preserve_poller 吸收，停机取消传播。
@@ -897,75 +946,6 @@ class FeishuInbound:
             compose_notification_hint(notifications),
             requeue,
         )
-
-    async def _run_batch(
-        self,
-        ch: FeishuChannel,
-        bridge,
-        chat_id: str,
-        thread_id: str,
-        batch: list[_Pending],
-    ) -> None:
-        """把一批（≥1 条）积压消息合并成一次 agent run。媒体在此下载（调用方已持锁）。"""
-        merged_text = merge_messages(batch)
-        image_refs = [r for m in batch for r in m.image_refs]
-        file_refs = [r for m in batch for r in m.file_refs]
-        reply_to = batch[-1].reply_to  # 回复批次里最近一条
-
-        # 斜杠命令：仅单条成批且纯文本时识别（混批/带媒体当普通文本）；语法命中后
-        # 再对照已知命令表，未知的 /xxx 照常喂模型。
-        command = None
-        if len(batch) == 1 and not image_refs and not file_refs:
-            parsed = parse_slash_command(batch[0].text)
-            # 渠道命令遮蔽同名技能：漏到这里的形态（如自然语言 /model）也不落入
-            # 同名技能，遮蔽到底，按普通文本喂模型
-            if (
-                parsed
-                and parsed[0] not in CHANNEL_COMMAND_NAMES
-                and any(c["name"] == parsed[0] for c in bridge.list_commands())
-            ):
-                command = parsed
-
-        # 图片/文件各自独立、相互无依赖 → 并发下载（gather 保序），多媒体不再 N 倍延迟
-        image_blocks: list[dict] = []
-        if image_refs:
-            results = await asyncio.gather(
-                *(self._image_block(mid, ik) for mid, ik in image_refs)
-            )
-            image_blocks = [b for b in results if b]
-        file_paths: list[str] = []
-        if file_refs:
-            target = inbound_dir(thread_id)
-            bridge.folders.add_folder(str(target))  # 授权该目录给本会话权限引擎
-            results = await asyncio.gather(
-                *(
-                    self._download_file(mid, fk, fname, target)
-                    for mid, fk, fname in file_refs
-                )
-            )
-            file_paths = [p for p in results if p]
-
-        await run_turn(
-            ch,
-            bridge,
-            chat_id=chat_id,
-            reply_to=reply_to,
-            content=build_content(merged_text, image_blocks),
-            command=command,
-            attachments=file_paths,
-            # 渲染数据与模型文本分离：每条原始消息的 {sender, ts, text} 结构化存进
-            # additional_kwargs，desktop 气泡只读它、不反解析正文——正文里的
-            # <sender> 标签纯给模型看，字面标签无法伪造气泡、也无对齐问题。
-            # 媒体-only 消息同样给占位文本，避免渲染出只有人名没有内容的悬空气泡
-            message_meta={
-                "items": [
-                    {"sender": m.sender_name, "ts": m.ts, "text": _body(m)}
-                    for m in batch
-                ]
-            },
-        )
-        # 本轮已入 checkpoint：通知所有 desktop 连接刷新会话列表 / 旁观视图
-        hub.on_channel_activity(thread_id, "feishu")
 
     def _is_bot_mentioned(self, message: Any) -> bool:
         """检查群消息是否 @ 了本机器人（@_all 或精确匹配 bot open_id）。

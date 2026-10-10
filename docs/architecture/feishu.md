@@ -79,7 +79,7 @@ lark_oapi.ws.client.loop`，与 uvicorn 主 loop 隔离。入站回调在 WS 线
 群策略（`group_policy=mention` 时仅 `@_all` 或精确匹配 `bot_open_id` 才响应；**不做** ou_
 启发式以免把真人误判为机器人）→ 解析文本（text / post / interactive，`parse.message_text`）→ 收集媒体引用 → 解析发送者显示名
 （`channel.directory`，群聊走群成员源、私聊走通讯录源）→ 派生 thread + 取 bridge + 运行锁 →
-排队或处理。发送者名挂在 `_Pending.sender_name` 上（解析失败恒退兜底名），渲染为
+进收件箱（见下「运行中插话」）。发送者名挂在 `_Pending.sender_name` 上（解析失败恒退兜底名），渲染为
 `<sender>姓名</sender>` 标签行（`constants.SENDER_TAG`，纯给模型看）；每条原始消息的
 `{sender, ts, text}` 另经 `message_meta` 结构化写进 `additional_kwargs["lumi"]["items"]`，
 desktop 气泡只读它、不反解析正文。会话显示名每条消息只解析一次（`_resolve_title`，兜底名
@@ -116,28 +116,34 @@ mention_key——`id=` 是**发送方应用**的 open_id（open_id 每应用一�
   前置到**模型侧**文本（`_render`），气泡 `items` 不带——群聊 mention 模式下被引用的
   内容通常不在会话历史里。父消息是本机器人自己发的（sender 为本 app_id）则跳过：已在历史里。
 
-**忙时排队 + 合并**（同会话同一时刻只跑一轮）：
-- 上一轮在跑（运行锁被占）时，新消息存入 `_queues[thread]`（上限 `_MAX_QUEUE=10`，满则丢弃
-  并提示）；忙判与 `async with lock` 相邻、其间无 `await`，事件循环上原子，避免 TOCTOU。
-- 持锁者跑完后 `_drain`：把期间积压的消息**合并成一轮**（`merge_messages`：单条带发送者前缀；
-  多条加 `<system-reminder>` + 编号列表、每条带发送者，媒体-only 占位保序），循环直到队空。
-- 媒体下载在持锁后用 `asyncio.gather` 并发。
-- 所有"拿锁跑用户轮"的入口统一走 `_locked_drain`：持锁 + 登记 `pool.run_tasks`（/stop 取消用）。
+**运行中插话**（与 desktop 同一套规则，收件箱在 bridge，见 `agents/core/inbox.py`；飞书只少了撤回）：
+- 每条普通消息先下载媒体（`asyncio.gather` 并发），按普通用户消息构造后 `bridge.interject` 进
+  收件箱（上限 `MAX_PENDING=10`，满则丢弃并提示）。HumanMessage id 直接用飞书 message_id。
+- 用户轮在跑：图在下一个工具边界 / 模型想结束时取走原样注入当前轮。
+  `run_turn` 收到 `message.injected` 即收掉当前卡片，之后的输出**回复到插话那条消息**上。
+- 系统轮（后台通知 / 妙记）里收件箱不开放：消息留到它结束后另起一轮，不混进纪要卡片。
+- 跑空者（`_draining`）至多一个：首个发现没有跑空者的消息由自己的 task 等锁接手
+  （`_locked_run`：持锁 + 登记 `pool.run_tasks` 供 /stop 取消），每轮跑完重查收件箱，没赶上
+  工具边界的消息另起一轮（`run_turn(interjections=True)`）。进箱与跑空者判定之间无 `await`，
+  末次判空到注销之间也无 `await`，事件循环上原子——持锁的是妙记 / 每日整理 / 通知轮也不会搁浅。
+  `/stop` 取消收尾期间的新消息另派一个等锁的跑空者，旧轮释放锁后接手，后续消息复用该等待者。
+- 多条消息按条注入、各自带 `<sender>`，回放逐条显示（不再合并成一段）。
 
 **斜杠命令**（解析在 `channels/commands.py`，渠道无关）：命令按类别天然定可用范围，无 surface
 标注机制——skill 命令（含 `/dream`）恒全 surface；渠道系统命令（`SYSTEM_COMMANDS`：/stop
 /clear /help）与运行时命令（`RUNTIME_COMMANDS`：/model /effort）恒仅 IM，不进
 `bridge.list_commands()`（desktop 有终止/删除按钮与模型选择器）。
 
-- **skill 命令**：`_run_batch` 里仅"单条成批 + 纯文本"时识别，语法命中后对照
+- **skill 命令**：`_skill_command` 仅纯文本时识别，语法命中后对照
   `bridge.list_commands()`，命中走 `bridge.stream_command`（与 desktop 同一约定的 skill
-  blocks），未知 `/xxx` 按普通文本喂模型。混批/带媒体一律当普通文本。
+  blocks），未知 `/xxx` 按普通文本喂模型。带媒体一律当普通文本。命令要单独开轮、插不进
+  别的轮：会话忙时回复忙碌提示，空闲当场跑。
 - **系统命令**：`on_message` 早期识别、即时执行不排队（/stop 恰是忙时才有意义）。
   `/stop` = 取消当前用户轮（`run_tasks` 登记的 task；先 `reject_pending` 再 cancel）+
-  并发停掉本 thread 全部运行中后台任务（`bg_process.cancel_thread_bg_tasks`）+ 清积压队列
-  （停到轮才清），取消后 `_drain_after_cancel` 接手取消窗口内入队的消息；通知 poller 持锁的
+  并发停掉本 thread 全部运行中后台任务（`bg_process.cancel_thread_bg_tasks`）+ 清收件箱
+  （停到轮才清，回复里写明丢弃了几条未处理的消息）；通知 poller 持锁的
   轮不登记（cancel 会杀轮询），如实回复"无法中断"。`/clear` = 持锁 `delete_thread` +
-  `delete_meta` + 广播（与 desktop 删除同口径），完成后接手持锁窗口入队的消息。`/help` =
+  `delete_meta` + 广播（与 desktop 删除同口径），期间到达的消息由跑空者等锁接手。`/help` =
   直答彩色 header 卡片（`available_commands` 模块级函数，不为此建桥）。
 - **运行时命令**（`RUNTIME_COMMANDS`：/model /effort）：改本会话的模型 / 思考档位，落
   `session_meta` 按 thread 存，下一轮开跑前经 `align_session_model` 生效——只动本会话，
@@ -202,7 +208,7 @@ mention_key——`id=` 是**发送方应用**的 open_id（open_id 每应用一�
   drain，通知留队下 tick 重试）→ drain 精确归属的通知 → `run_turn(synthetic=True)` 注入合成
   轮，模型读输出文件、结果经流式卡片推回群里 → `hub.on_channel_activity` 刷 desktop 旁观。
 - 健壮性：被取消（channel 停止/重载）时已 drain 的通知**重新入队**，新 poller 认领不丢结果；
-  单 thread 异常只记日志不杀轮询；持锁期间排队的入站消息由 poller 跑完后经 `_drain` 兜底取走。
+  单 thread 异常只记日志不杀轮询；持锁期间到达的入站消息留在收件箱，由跑空者等锁接手。
 
 配套约束在工具层：bash `run_in_background` 命令自带 shell 后台符 `&` 时直接报错
 （`capability.has_background_operator`，引号/转义/heredoc/算术扩展感知）——否则被追踪的

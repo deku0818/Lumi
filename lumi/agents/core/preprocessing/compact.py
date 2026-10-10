@@ -21,6 +21,7 @@ from langgraph.types import Overwrite
 
 from lumi.agents.core.meta_message import (
     extract_text_content,
+    is_interjection,
     is_reminder_message,
     message_ts,
     should_show_human_message,
@@ -81,6 +82,24 @@ def find_pending_human(messages: list[BaseMessage]) -> HumanMessage | None:
             return None
         after_reminder = False
     return None
+
+
+def pending_humans(messages: list[BaseMessage]) -> list[HumanMessage]:
+    """本轮未答完的全部真人消息（按原序）：``find_pending_human`` 那条；它是运行中
+    插话时，连同往前直到开轮那条之间的真人消息——开轮诉求与插话的修正缺一不可。"""
+    last = find_pending_human(messages)
+    if last is None:
+        return []
+    idx = next(i for i, m in enumerate(messages) if m is last)
+    earlier = [
+        m
+        for m in messages[:idx]
+        if isinstance(m, HumanMessage) and should_show_human_message(m)
+    ]
+    out = [last]
+    while is_interjection(out[0]) and earlier:
+        out.insert(0, earlier.pop())
+    return out
 
 
 def split_into_rounds(msgs: list[BaseMessage]) -> list[list[BaseMessage]]:
@@ -431,14 +450,15 @@ def build_compacted_update(
     SystemMessage）。
 
     ``keep_tail`` 是调用方指定要留的尾部（PTL 保尾的工具轮 / 在线路径的末条）；正在
-    被回答的那条真人消息由本函数认出来（``find_pending_human``），不在 ``keep_tail``
+    被回答的真人消息由本函数认出来（``pending_humans``，含运行中插话），不在 ``keep_tail``
     里就补在它前面——三条路径同一条规则，各自不再判一次。留下的都换新 id 并剥
     marker，见 :func:`_reattach`。carrier 继承被取代段里最后一条真人消息的 ts，使
     dream 判活基线不随压缩归零。
     """
-    pending = find_pending_human(messages)
-    if pending is not None and not any(m is pending for m in keep_tail):
-        keep_tail = [pending, *keep_tail]
+    pending = [
+        p for p in pending_humans(messages) if not any(m is p for m in keep_tail)
+    ]
+    keep_tail = [*pending, *keep_tail]
     carrier = build_summary_carrier(
         summary_text, ts=max((message_ts(m) for m in messages), default=0)
     )

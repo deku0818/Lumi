@@ -230,12 +230,12 @@ async def test_reply_quotes_parent_text_for_model_not_bubble(monkeypatch):
 
     captured: dict = {}
 
-    async def fake_run_turn(ch, bridge, **kwargs):
-        captured.update(kwargs)
+    class _Bridge:
+        async def interject(self, content, **kwargs):
+            captured.update(content=content, **kwargs)
 
-    monkeypatch.setattr(inb, "run_turn", fake_run_turn)
     fi = FeishuChannel(FeishuChannelConfig()).inbound
-    await fi._run_batch(fi.channel, None, "oc_dm", "t", [pending])
+    await fi._interject(_Bridge(), "t", pending)
 
     # 模型侧：引用块在正文之前，@ 占位已换成姓名
     assert captured["content"] == (

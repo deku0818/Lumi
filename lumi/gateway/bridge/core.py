@@ -20,6 +20,7 @@ from typing import TYPE_CHECKING
 from uuid import uuid4
 
 import httpx
+import httpx2
 from langchain_core.messages import (
     AIMessage,
     HumanMessage,
@@ -33,6 +34,7 @@ from langgraph.types import Command, StateSnapshot
 from lumi.agents.core.broker import LUMI_APPROVAL_EVENT, ApprovalBroker
 from lumi.agents.core.graph import LumiAgent, create_agent
 from lumi.agents.core.hooks import build_config_hooks, set_run_config_hooks
+from lumi.agents.core.inbox import LUMI_INJECT_EVENT, Inbox
 from lumi.agents.core.meta_message import (
     CTX_DIGEST_KEY,
     declared_file_paths,
@@ -180,6 +182,7 @@ class EventKind(StrEnum):
     """
 
     TURN_START = "turn.start"  # 真实用户轮开始，携带该轮用户消息 id（时间旅行锚点）
+    MESSAGE_INJECTED = "message.injected"  # 运行中插话已注入当前轮（data.message_ids）
     MESSAGE_START = "message.start"
     MESSAGE_DELTA = "message.delta"
     THINKING_DELTA = "thinking.delta"  # 模型思考增量（Anthropic thinking 块 / 方言 reasoning_content）
@@ -240,6 +243,8 @@ class AgentBridge:
         # resolve_approval 经非流式 resume RPC 唤醒挂起的 Future（见 docs/architecture/
         # approval-inflight.md）。
         self._broker = ApprovalBroker()
+        # 运行中插话收件箱：注入 context 供图在工具边界取走（见 agents/core/inbox.py）
+        self._inbox = Inbox()
         # 当前挂起的审批/澄清「已富化的对外事件」按 approval_id 留底，供 WS 重连后重发
         # （断开期会话原地挂着、Future 仍在，重连只需把卡片再推一遍）。resolve/reject 时清理。
         self._pending_approval_events: dict[str, BridgeEvent] = {}
@@ -316,6 +321,7 @@ class AgentBridge:
             self._context.approval_broker = self._broker
         # 授权通过后放宽工作区边界的回调（人工审批 / auto 分类器 / privileged 三条路共用）
         self._context.widen_boundary = self.folders.widen_for_violations
+        self._context.inbox = self._inbox
         # /goal 条件存 sessions 层 sidecar；goal_stop_hook 经这两个回调读 / 清
         self._context.get_goal = get_goal
         self._context.clear_goal = lambda tid: update_meta(tid, goal="")
@@ -492,6 +498,7 @@ class AgentBridge:
         synthetic: bool = False,
         message_meta: dict | None = None,
         attachments: list[str] | None = None,
+        message_id: str = "",
     ) -> AsyncGenerator[BridgeEvent, None]:
         """发送消息并 yield 事件流
 
@@ -506,6 +513,8 @@ class AgentBridge:
             attachments: 文件附件的后端本机路径（desktop 经 wire files 参数 /
                 飞书下载后传入）。与上传图片存盘路径合并：模型侧拼
                 <attached-file> 标签块注入，显示侧写进 items 的 files。
+            message_id: 前端待插入消息的预生成 id；上传期间原轮已结束时，仍广播
+                message.injected 让托盘消息落地，再以同一 id 开轮。
         """
         # 上传图片统一存盘（与普通文件附件合流，交 read/vision 按路径消费）。
         # 放在最前：checkpoint 标签 / items 文本都基于已归一的 content。
@@ -517,13 +526,74 @@ class AgentBridge:
             # 合成轮：无 checkpoint / 无边沿提醒（不是真实用户输入，不消费排队 note）
             gen = self._stream_turn(synthetic_human_message(content), tool_mode)
         else:
-            gen = self._stream_user_turn(
-                self._build_user_message(
-                    content, message_meta, (attachments or []) + image_paths
-                ),
-                tool_mode,
+            msg = self._build_user_message(
+                content,
+                message_meta,
+                (attachments or []) + image_paths,
+                message_id=message_id,
             )
+            if message_id:
+                yield BridgeEvent(
+                    kind=EventKind.MESSAGE_INJECTED,
+                    data={"message_ids": [message_id]},
+                )
+            gen = self._stream_user_turn(msg, tool_mode)
         async for event in gen:
+            yield event
+
+    # ── 运行中插话 ──
+
+    async def interject(
+        self,
+        content: str | list,
+        attachments: list[str] | None = None,
+        message_id: str = "",
+        message_meta: dict | None = None,
+    ) -> str:
+        """运行中插话：按普通用户消息构造（回放 / 时间旅行同常规消息）后放进收件箱，
+        由图在下一个工具边界注入当前轮。message_id 由调用方预生成——注入事件可能先于
+        本 RPC 的应答到达，客户端须事先就能认出自己的消息（飞书直接用入站消息 id，
+        回复锚点据此得来）。满额抛 InboxFullError。返回消息 id。"""
+        from lumi.gateway.uploads import persist_image_blocks
+
+        content, image_paths = await persist_image_blocks(content)
+        msg = self._build_user_message(
+            content,
+            message_meta,
+            (attachments or []) + image_paths,
+            message_id=message_id,
+        )
+        self._inbox.put(msg)
+        return msg.id
+
+    def withdraw_interjection(self, message_id: str) -> bool:
+        """撤回一条尚未注入的插话；已注入（或不存在）返回 False。"""
+        return self._inbox.withdraw(message_id)
+
+    def take_interjections(self) -> list[HumanMessage]:
+        """取走全部未注入的插话（stop / 切会话 / 断开时清场）。"""
+        return self._inbox.take()
+
+    def pending_interjections(self) -> list[HumanMessage]:
+        return self._inbox.pending()
+
+    async def stream_interjection_turn(
+        self, tool_mode: str | None = None
+    ) -> AsyncGenerator[BridgeEvent, None]:
+        """以收件箱里的消息开一轮真实用户轮（空闲时到达 / 没赶上工具边界的插话）。
+
+        tool_mode 缺省沿用 context 当前值（desktop 运行中可经 set_tool_mode 改）；
+        渠道传自己的配置值。"""
+        msgs = self._inbox.take()
+        if not msgs:
+            return
+        yield BridgeEvent(
+            kind=EventKind.MESSAGE_INJECTED,
+            data={"message_ids": [m.id for m in msgs]},
+        )
+        async for event in self._stream_user_turn(
+            msgs[0], tool_mode or self._context.tool_mode, extra=msgs[1:]
+        ):
             yield event
 
     async def _stream_turn(
@@ -532,8 +602,10 @@ class AgentBridge:
         tool_mode: str,
         *,
         snapshot: StateSnapshot | None = None,
+        extra: list[HumanMessage] | None = None,
     ) -> AsyncGenerator[BridgeEvent, None]:
-        """底层：以一条消息起一轮图执行（真实用户轮与合成轮共用的最小操作）。"""
+        """底层：以一条消息（及随后的 extra，多条插话合成轮）起一轮图执行
+        （真实用户轮与合成轮共用的最小操作）。"""
         # 跑图之前把模型对齐到本会话应然值（会话覆盖 / 新会话默认都可能在两轮之间变）
         self.align_session_model()
         # 新一轮对话，清理上一轮残留的 agent 追踪状态
@@ -541,7 +613,9 @@ class AgentBridge:
         # tool_mode 是 context（运行时共享、可变）真相源：本轮 UI 选择写入，运行中经
         # set_tool_mode 改它即对后续工具实时生效。不进 input_data（state 快照改不动）。
         self._context.tool_mode = tool_mode
-        async for event in self._stream({"messages": [msg]}, snapshot=snapshot):
+        async for event in self._stream(
+            {"messages": [msg, *(extra or [])]}, snapshot=snapshot
+        ):
             yield event
 
     async def _stream_user_turn(
@@ -550,6 +624,7 @@ class AgentBridge:
         tool_mode: str,
         *,
         snapshot: StateSnapshot | None = None,
+        extra: list[HumanMessage] | None = None,
     ) -> AsyncGenerator[BridgeEvent, None]:
         """真实用户轮：send / regenerate / edit_resend 三入口共用的开轮设置。
 
@@ -596,12 +671,24 @@ class AgentBridge:
             message_id=msg.id or "",
             data={"files": declared_file_paths(msg)},
         )
-        async for event in self._stream_turn(msg, tool_mode, snapshot=snapshot):
-            yield event
+        # 只有真实用户轮里图才取收件箱：系统轮（后台通知 / 妙记）期间到达的消息
+        # 留到它结束后另起一轮，不混进系统轮的回复
+        self._inbox.open = True
+        try:
+            async for event in self._stream_turn(
+                msg, tool_mode, snapshot=snapshot, extra=extra
+            ):
+                yield event
+        finally:
+            self._inbox.open = False
 
     @staticmethod
     def _build_user_message(
-        content: str | list, message_meta: dict | None, paths: list[str]
+        content: str | list,
+        message_meta: dict | None,
+        paths: list[str],
+        *,
+        message_id: str = "",
     ) -> HumanMessage:
         """构造真实用户消息：显示声明（lumi.items）+ 附件标签块注入。
 
@@ -632,12 +719,11 @@ class AgentBridge:
         if len(items) == 1 and "ts" not in items[0]:
             items = [{**items[0], "ts": meta["ts"]}]
         meta["items"] = items
-        # 显式赋 id（不等 add_messages 落库时补）：开轮即知 id，流式 RPC result
-        # 帧回传给前端做乐观气泡对账
+        # 构造时确定 id：沿用客户端待插入消息的 id，否则生成新 id，供开轮事件对账
         msg = HumanMessage(
             content=content,
             additional_kwargs={LUMI_META_KEY: meta},
-            id=str(uuid4()),
+            id=message_id or str(uuid4()),
         )
         if paths:
             tags = "\n".join(
@@ -1077,11 +1163,15 @@ class AgentBridge:
             await self._agent.aclose()
         await get_shell_session_manager().close_session(self.current_thread_id)
 
-    # 网络瞬态错误：流式传输中途断连可自动重试
+    # 网络瞬态错误：流式传输中途断连可自动重试。anthropic SDK 底层是 httpx2，
+    # 其异常与 httpx 无继承关系，两套都得列
     _TRANSIENT_NETWORK_ERRORS = (
         httpx.RemoteProtocolError,
         httpx.ConnectError,
         httpx.ReadError,
+        httpx2.RemoteProtocolError,
+        httpx2.ConnectError,
+        httpx2.ReadError,
     )
 
     async def _stream(
@@ -1292,7 +1382,10 @@ class AgentBridge:
 
         elif kind == "on_chat_model_end":
             output = event.get("data", {}).get("output")
-            usage = extract_usage(output) if output else None
+            # 用量只认主链 CallModel 与子代理：AutoClassify / 工具内 / goal 判官等内部
+            # 调用的 usage 会覆盖前端上下文环，造成读数在两次调用间来回跳
+            counted = output and (is_main or parent_id)
+            usage = extract_usage(output) if counted else None
             yield BridgeEvent(
                 kind=EventKind.MESSAGE_COMPLETE,
                 usage_metadata=usage,
@@ -1372,6 +1465,9 @@ class AgentBridge:
                 parent_run_id=parent_id,
                 run_id=run_id if name == "agent" else "",
             )
+
+        elif kind == "on_custom_event" and event.get("name") == LUMI_INJECT_EVENT:
+            yield BridgeEvent(kind=EventKind.MESSAGE_INJECTED, data=event.get("data"))
 
         elif kind == "on_custom_event" and event.get("name") == LUMI_MODEL_RETRY_EVENT:
             # 半截 buffer 无需在此清：重试那次调用的 on_chat_model_start 会重置

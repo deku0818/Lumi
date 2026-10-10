@@ -10,6 +10,7 @@ from __future__ import annotations
 import asyncio
 
 import httpx
+import httpx2
 import pytest
 from langchain_core.messages import HumanMessage
 from toy_graph import bridge_with, build_graph
@@ -19,6 +20,19 @@ from lumi.gateway.protocol import EventKind
 
 @pytest.mark.asyncio
 async def test_retry_uses_current_config_without_pinned_checkpoint_id(monkeypatch):
+    await _assert_retry_with_current_config(
+        monkeypatch, httpx.ReadError("connection reset")
+    )
+
+
+@pytest.mark.asyncio
+async def test_retry_on_httpx2_disconnect(monkeypatch):
+    """回归：anthropic SDK 走 httpx2，其异常不是 httpx 子类，曾漏过重试直接报错。"""
+    err = httpx2.RemoteProtocolError("incomplete chunked read")
+    await _assert_retry_with_current_config(monkeypatch, err)
+
+
+async def _assert_retry_with_current_config(monkeypatch, err: Exception) -> None:
     graph = build_graph(asyncio.Event(), ["reply", "reply"])
     config = {"configurable": {"thread_id": "t-retry", "checkpoint_id": "cp-PINNED"}}
     bridge = bridge_with(config, graph)
@@ -33,7 +47,7 @@ async def test_retry_uses_current_config_without_pinned_checkpoint_id(monkeypatc
         if attempts["n"] == 1:
             # 第 0 次跑到一半掉线：走 bridge 的 MAX_STREAM_RETRIES 分支
             async def boom():
-                raise httpx.ReadError("connection reset")
+                raise err
                 yield  # pragma: no cover
 
             return boom()

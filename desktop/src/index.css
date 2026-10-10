@@ -484,6 +484,18 @@ body.resizing-col * {
 /* 更新提示条的图标：复用光核呼吸，与 .lumi-orb 同一套「光」的语言（文字保持静止） */
 .update-breathe { animation: lumi-breathe 2.2s ease-in-out infinite; }
 
+/* ── 运行中插话：托盘里的待插入消息（金色虚线）+ 注入落地时气泡一次性光晕（只动容器，文字静止）── */
+.interject-chip {
+  border: 1px dashed color-mix(in srgb, var(--color-accent) 50%, transparent);
+  background: color-mix(in srgb, var(--color-accent) 6%, transparent);
+}
+@keyframes interject-land {
+  0% { box-shadow: 0 0 0 1px color-mix(in srgb, var(--color-accent) 60%, transparent), 0 0 0 transparent; }
+  35% { box-shadow: 0 0 0 1px color-mix(in srgb, var(--color-accent) 70%, transparent), 0 0 22px color-mix(in srgb, var(--color-accent) 45%, transparent); }
+  100% { box-shadow: 0 0 0 0 transparent, 0 0 0 transparent; }
+}
+.interject-land { animation: interject-land 1.1s ease-out; }
+
 /* ── 子代理卡片：运行中的有限工具窗口，新行从底部推入、旧行被挤出时向上淡出收起 ── */
 @keyframes subtool-in { from { opacity: 0; transform: translateY(6px); } to { opacity: 1; transform: none; } }
 @keyframes subtool-out {

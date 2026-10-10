@@ -13,8 +13,10 @@ import threading
 from types import SimpleNamespace
 
 import pytest
+from langchain_core.messages import HumanMessage
 
-from lumi.gateway.bridge import AgentBridge
+from lumi.agents.core.inbox import MAX_PENDING, Inbox
+from lumi.gateway.bridge import AgentBridge, BridgeEvent, EventKind
 from lumi.gateway.channels.config import FeishuChannelConfig
 from lumi.gateway.channels.feishu import inbound as inb
 from lumi.gateway.channels.feishu import outbound, parse
@@ -31,6 +33,7 @@ from lumi.gateway.channels.feishu.parse import (
     resolve_mentions,
     safe_filename,
 )
+from lumi.sessions.thread_runs import thread_runs
 from lumi.utils.constants import FEISHU_THREAD_PREFIX
 
 
@@ -210,55 +213,62 @@ def test_bot_mentioned_all():
     assert fi._is_bot_mentioned(_Msg("@张三", [_Mention("ou_x")])) is False
 
 
-# ── 忙时排队 + 合并 ──
-async def test_run_batch_merges_text_and_replies_to_latest(monkeypatch):
-    captured = {}
-    monkeypatch.setattr(inb, "run_turn", _capture_run_turn(captured))
+# ── 进收件箱：每条消息各自成一条用户消息 ──
+def _spy_interject(monkeypatch, bridge=None):
+    """真实 AgentBridge（不 initialize）上打桩 interject，记录实参。
+
+    先按真实签名绑定：调用方传了 interject 不认的参数时当场 TypeError。
+    """
+    bridge = bridge or AgentBridge()
+    signature = inspect.signature(AgentBridge.interject)
+    calls: list[dict] = []
+
+    async def fake_interject(*args, **kwargs):
+        calls.append(signature.bind(bridge, *args, **kwargs).arguments)
+
+    monkeypatch.setattr(bridge, "interject", fake_interject)
+    return bridge, calls
+
+
+async def test_interject_each_message_is_its_own_human_message():
+    # 连发的消息不再合并：各自成一条 HumanMessage，id 即飞书 message_id（回复锚点）
     fi = FeishuChannel(FeishuChannelConfig()).inbound
-    batch = [
-        inb._Pending("第一条", reply_to="m1"),
-        inb._Pending("第二条", reply_to="m2"),
-    ]
-    await fi._run_batch(fi.channel, None, "oc_x", "t", batch)
-    content = captured["content"]
-    assert (
-        "<system-reminder>" in content and "第一条" in content and "第二条" in content
-    )
-    assert captured["reply_to"] == "m2"  # 回复批次里最近一条
+    bridge = AgentBridge()
+    await fi._interject(bridge, "t", inb._Pending("第一条", reply_to="m1"))
+    await fi._interject(bridge, "t", inb._Pending("第二条", reply_to="m2"))
+    msgs = bridge.pending_interjections()
+    assert [(m.id, m.content) for m in msgs] == [("m1", "第一条"), ("m2", "第二条")]
 
 
-async def test_run_batch_merges_media(monkeypatch):
-    captured = {}
-    monkeypatch.setattr(inb, "run_turn", _capture_run_turn(captured))
+async def test_interject_media(monkeypatch):
     fi = FeishuChannel(FeishuChannelConfig()).inbound
 
     async def fake_img(mid, ik):
         return {"type": "image", "source": {"key": ik}}
 
     monkeypatch.setattr(fi, "_image_block", fake_img)
-    batch = [
-        inb._Pending("看图", image_refs=[("m1", "ik1")], reply_to="m1", ts=1000),
-        inb._Pending("", image_refs=[("m2", "ik2")], reply_to="m2", ts=2000),
-    ]
-    await fi._run_batch(fi.channel, None, "oc", "t", batch)
-    content = captured["content"]
-    assert content[0]["type"] == "text"
-    assert "看图" in content[0]["text"]
+    bridge, calls = _spy_interject(monkeypatch)
+    await fi._interject(
+        bridge,
+        "t",
+        inb._Pending("看图", image_refs=[("m1", "a"), ("m1", "b")], reply_to="m1"),
+    )
+    await fi._interject(
+        bridge, "t", inb._Pending("", image_refs=[("m2", "c")], reply_to="m2", ts=2000)
+    )
+    content = calls[0]["content"]
+    assert content[0] == {"type": "text", "text": "看图"}
     assert sum(1 for b in content if b.get("type") == "image") == 2
-    # 渲染数据结构化透传：每条原始消息的 sender/ts/text（desktop 气泡只读它）；
-    # 媒体-only 消息给占位文本，避免渲染出只有人名没有内容的悬空气泡
-    assert captured["message_meta"] == {
-        "items": [
-            {"sender": "", "ts": 1000, "text": "看图"},
-            {"sender": "", "ts": 2000, "text": "［图片］"},
-        ]
+    # 渲染数据结构化透传 sender/ts/text（desktop 气泡只读它）；媒体-only 消息给
+    # 占位文本，避免渲染出只有人名没有内容的悬空气泡
+    assert calls[1]["message_meta"] == {
+        "items": [{"sender": "", "ts": 2000, "text": "［图片］"}]
     }
+    assert calls[1]["message_id"] == "m2"
 
 
-async def test_run_batch_file_authorizes_inbound_dir(monkeypatch, tmp_path):
-    # 文件消息：落地目录经真实 AgentBridge 的 folders 授权给本会话，下载路径作附件交给 run_turn
-    captured = {}
-    monkeypatch.setattr(inb, "run_turn", _capture_run_turn(captured))
+async def test_interject_file_authorizes_inbound_dir(monkeypatch, tmp_path):
+    # 文件消息：落地目录经真实 AgentBridge 的 folders 授权给本会话，下载路径作附件进箱
     monkeypatch.setattr(inb, "inbound_dir", lambda thread_id: tmp_path)
     fi = FeishuChannel(FeishuChannelConfig()).inbound
 
@@ -266,11 +276,11 @@ async def test_run_batch_file_authorizes_inbound_dir(monkeypatch, tmp_path):
         return str(target / fname)
 
     monkeypatch.setattr(fi, "_download_file", fake_download)
-    bridge = AgentBridge()  # 不 initialize：folders 只记账，不需要权限引擎
-    batch = [inb._Pending("看附件", file_refs=[("m1", "fk1", "a.pdf")], reply_to="m1")]
-    await fi._run_batch(fi.channel, bridge, "oc", "t", batch)
+    bridge, calls = _spy_interject(monkeypatch)  # 不 initialize：folders 只记账
+    pending = inb._Pending("看附件", file_refs=[("m1", "fk1", "a.pdf")], reply_to="m1")
+    await fi._interject(bridge, "t", pending)
     assert bridge.folders.extra_folders == [str(tmp_path.resolve())]
-    assert captured["attachments"] == [str(tmp_path / "a.pdf")]
+    assert calls[0]["attachments"] == [str(tmp_path / "a.pdf")]
 
 
 # ── 渠道系统命令 ──
@@ -285,10 +295,19 @@ def _sent_collector(ch, monkeypatch):
     return sent
 
 
-async def test_stop_cancels_run_and_clears_queue(monkeypatch):
+def _inbox_bridge(*texts: str) -> AgentBridge:
+    """收件箱里已有待注入消息的真实 bridge（不 initialize）。"""
+    bridge = AgentBridge()
+    for text in texts:
+        bridge._inbox.put(HumanMessage(text))
+    return bridge
+
+
+async def test_stop_cancels_run_and_clears_inbox(monkeypatch):
     ch = FeishuChannel(FeishuChannelConfig())
     fi = ch.inbound
     sent = _sent_collector(ch, monkeypatch)
+    bridge = ch.bridge_pool._bridges["t"] = _inbox_bridge("插话1", "插话2")
 
     async def hang():
         await asyncio.sleep(30)
@@ -296,10 +315,10 @@ async def test_stop_cancels_run_and_clears_queue(monkeypatch):
     task = asyncio.create_task(hang())
     await asyncio.sleep(0)
     ch.bridge_pool.run_tasks["t"] = task
-    fi._queues["t"] = [inb._Pending("排队中")]
     await fi._run_system_command("stop", "oc", "t", "m1")
-    assert "t" not in fi._queues  # 积压一并清空，否则马上又触发新一轮
-    assert "已停止" in sent[0][0]
+    # 未注入的插话一并清空（否则马上又另起一轮），并如实告知
+    assert bridge.pending_interjections() == []
+    assert "已停止" in sent[0][0] and "另有 2 条未处理的消息已丢弃" in sent[0][0]
     with pytest.raises(asyncio.CancelledError):
         await task
 
@@ -348,18 +367,18 @@ async def test_stop_reports_run_and_bg_together(monkeypatch):
         await task
 
 
-async def test_stop_during_notification_turn_keeps_queue(monkeypatch):
-    # 通知 poller 持锁的轮不可取消：如实告知、不误报"没有任务"、不丢排队消息
+async def test_stop_during_notification_turn_keeps_inbox(monkeypatch):
+    # 通知 poller 持锁的轮不可取消：如实告知、不误报"没有任务"、不丢收件箱里的消息
     ch = FeishuChannel(FeishuChannelConfig())
     fi = ch.inbound
     sent = _sent_collector(ch, monkeypatch)
+    bridge = ch.bridge_pool._bridges["t"] = _inbox_bridge("等着的消息")
     lock = asyncio.Lock()
     await lock.acquire()
     ch.bridge_pool._locks["t"] = lock  # 锁被占但 run_tasks 无条目 = poller 轮
-    fi._queues["t"] = [inb._Pending("排队中")]
     await fi._run_system_command("stop", "oc", "t", "m1")
     assert "无法中断" in sent[0][0]
-    assert fi._queues["t"]  # 没停到任何东西，排队消息不能被丢
+    assert len(bridge.pending_interjections()) == 1  # 没停到任何东西，不能丢
 
 
 class _ClearBridge:
@@ -371,13 +390,31 @@ class _ClearBridge:
 
 
 class _EnvBridge:
-    """入站路径用到的最小桥：只接 set_env_extra。"""
+    """入站路径用到的最小桥：set_env_extra + 收件箱计数（进箱与跑轮由测试挡住）。"""
 
     def __init__(self):
         self.env = ""
 
     def set_env_extra(self, lines):
         self.env = lines
+
+    def pending_interjections(self):
+        return []
+
+
+def _capture_admitted(fi, monkeypatch) -> list[tuple[str, inb._Pending]]:
+    """挡住 _admit 之后的下载进箱与跑轮，记下每条进箱消息的 (thread_id, pending)。"""
+    admitted: list[tuple[str, inb._Pending]] = []
+
+    async def fake_interject(bridge, thread_id, m):
+        admitted.append((thread_id, m))
+
+    async def fake_locked_run(*args, **kwargs):
+        return None
+
+    monkeypatch.setattr(fi, "_interject", fake_interject)
+    monkeypatch.setattr(fi, "_locked_run", fake_locked_run)
+    return admitted
 
 
 def _patch_pool_get(ch, monkeypatch, bridge):
@@ -497,14 +534,9 @@ async def test_help_lists_skill_and_system_commands(monkeypatch):
     assert ch.bridge_pool._bridges == {}  # 没有因 /help 建桥
 
 
-# ── 斜杠命令路由 ──
-class _CmdBridge:
-    def list_commands(self):
-        return [{"name": "commit", "description": "", "type": "skill"}]
-
-
-def _capture_run_turn(captured):
-    """run_turn 的统一 fake：记录全部关键字实参（各测试按需断言）。
+# ── 斜杠命令路由 / 收件箱上限 ──
+def _capture_run_turn(turns: list[dict]):
+    """run_turn 的统一 fake：每轮记录全部关键字实参；插话轮取走收件箱记入 taken。
 
     先按真实签名绑定实参：调用方传了 run_turn 已删除的参数时当场 TypeError，
     不让宽松的 fake 掩盖接口脱节。
@@ -513,98 +545,162 @@ def _capture_run_turn(captured):
 
     async def fake_run_turn(ch, bridge, **kwargs):
         signature.bind(ch, bridge, **kwargs)
-        captured.update(kwargs)
+        if kwargs.get("interjections"):
+            kwargs["taken"] = [m.content for m in bridge.take_interjections()]
+        turns.append(kwargs)
 
     return fake_run_turn
 
 
-async def test_run_batch_known_slash_command_routes_to_command(monkeypatch):
-    captured = {}
-    monkeypatch.setattr(inb, "run_turn", _capture_run_turn(captured))
-    fi = FeishuChannel(FeishuChannelConfig()).inbound
-    batch = [inb._Pending("/commit fix bug", reply_to="m1", sender_name="李雷")]
-    await fi._run_batch(fi.channel, _CmdBridge(), "oc", "t", batch)
-    assert captured["command"] == ("commit", "fix bug")
+def _admit_setup(monkeypatch, bridge):
+    """真实 _admit / _locked_run，只挡建桥、跑轮与发消息。返回 (inbound, turns, sent)。"""
+    ch = FeishuChannel(FeishuChannelConfig())
+    turns: list[dict] = []
+    monkeypatch.setattr(inb, "run_turn", _capture_run_turn(turns))
+    _patch_pool_get(ch, monkeypatch, bridge)
+    return ch.inbound, turns, _sent_collector(ch, monkeypatch)
 
 
-async def test_run_batch_unknown_slash_is_plain_text(monkeypatch):
-    captured = {}
-    monkeypatch.setattr(inb, "run_turn", _capture_run_turn(captured))
-    fi = FeishuChannel(FeishuChannelConfig()).inbound
-    batch = [inb._Pending("/nope 你好", reply_to="m1")]
-    await fi._run_batch(fi.channel, _CmdBridge(), "oc", "t", batch)
-    assert captured["command"] is None
-    assert "/nope 你好" in captured["content"]
+def _cmd_bridge(monkeypatch) -> AgentBridge:
+    bridge = AgentBridge()
+    monkeypatch.setattr(
+        bridge,
+        "list_commands",
+        lambda: [{"name": "commit", "description": "", "type": "skill"}],
+    )
+    return bridge
 
 
-async def test_run_batch_merged_batch_command_not_recognized(monkeypatch):
-    # 混批（≥2 条）里的命令当普通文本，不触发命令路由
-    captured = {}
-    monkeypatch.setattr(inb, "run_turn", _capture_run_turn(captured))
-    fi = FeishuChannel(FeishuChannelConfig()).inbound
-    batch = [
-        inb._Pending("先看这个", reply_to="m1"),
-        inb._Pending("/commit", reply_to="m2"),
-    ]
-    await fi._run_batch(fi.channel, _CmdBridge(), "oc", "t", batch)
-    assert captured["command"] is None
+async def test_admit_known_skill_command_runs_command_turn(monkeypatch):
+    bridge = _cmd_bridge(monkeypatch)
+    fi, turns, _ = _admit_setup(monkeypatch, bridge)
+    pending = inb._Pending("/commit fix bug", reply_to="m1", sender_name="李雷")
+    await fi._admit("oc", "t", pending)
+    assert [t.get("command") for t in turns] == [("commit", "fix bug")]
+    assert turns[0]["reply_to"] == "m1"
+    assert bridge.pending_interjections() == []  # 命令不进收件箱
 
 
-def test_merge_messages_single_is_plain_text():
-    # 单条无发送者：原样返回，不加 reminder / 标签
-    assert inb.merge_messages([inb._Pending("帮我看下这个")]) == "帮我看下这个"
+async def test_admit_unknown_slash_is_plain_text(monkeypatch):
+    bridge = _cmd_bridge(monkeypatch)
+    fi, turns, _ = _admit_setup(monkeypatch, bridge)
+    await fi._admit("oc", "t", inb._Pending("/nope 你好", reply_to="m1"))
+    assert len(turns) == 1 and turns[0].get("command") is None
+    assert turns[0]["taken"] == ["/nope 你好"]
+
+
+async def test_admit_skill_command_when_busy_gets_hint(monkeypatch):
+    # 技能命令插不进别的轮：忙时提示先停，不排队、不进收件箱
+    bridge = _cmd_bridge(monkeypatch)
+    fi, turns, sent = _admit_setup(monkeypatch, bridge)
+    lock = thread_runs.lock_for("t-busy-skill")
+    await lock.acquire()
+    try:
+        await fi._admit("oc", "t-busy-skill", inb._Pending("/commit", reply_to="m1"))
+    finally:
+        lock.release()
+    assert turns == [] and bridge.pending_interjections() == []
+    assert "/stop" in sent[0][0]
+
+
+async def test_admit_inbox_full_replies_hint(monkeypatch):
+    bridge = _inbox_bridge(*(f"m{i}" for i in range(MAX_PENDING)))
+    fi, turns, sent = _admit_setup(monkeypatch, bridge)
+    await fi._admit("oc", "t", inb._Pending("再来一条", reply_to="m_over"))
+    assert "消息有点多" in sent[0][0]
+    assert turns == [] and len(bridge.pending_interjections()) == MAX_PENDING
+
+
+def test_render_single_is_plain_text():
+    # 单条无发送者 / 无引用：原样返回，不加标签
+    assert inb._render(inb._Pending("帮我看下这个")) == "帮我看下这个"
 
 
 def test_render_single_with_sender_tag():
-    out = inb.merge_messages([inb._Pending("帮我看下这个", sender_name="李雷")])
+    out = inb._render(inb._Pending("帮我看下这个", sender_name="李雷"))
     assert out == "<sender>李雷</sender>\n帮我看下这个"
 
 
-def test_merge_messages_multi_has_reminder_and_sender_tags():
-    out = inb.merge_messages(
-        [
-            inb._Pending("等等，先别删那个文件", sender_name="李雷"),
-            inb._Pending("改成用 SQLite", sender_name="韩梅梅"),
-            inb._Pending("", image_refs=[("m3", "ik")], sender_name="李雷"),
-        ]
+def test_render_media_placeholders():
+    # 媒体-only 消息给占位保住存在感；有文本则不用占位
+    assert inb._render(inb._Pending("", file_refs=[("m", "fk", "报告.pdf")])) == (
+        "［文件：报告.pdf］"
     )
-    assert "<system-reminder>" in out
-    assert "连发的 3 条消息" in out
-    assert "<sender>李雷</sender>\n等等，先别删那个文件" in out
-    assert "<sender>韩梅梅</sender>\n改成用 SQLite" in out
-    assert "<sender>李雷</sender>\n［图片］" in out  # 媒体-only 消息占位保序
-
-
-def test_merge_messages_media_placeholders():
-    out = inb.merge_messages(
-        [
-            inb._Pending("看下这两个"),
-            inb._Pending("", file_refs=[("m", "fk", "报告.pdf")]),
-            inb._Pending("", image_refs=[("a", "1"), ("b", "2")]),
-        ]
+    assert inb._render(inb._Pending("", image_refs=[("a", "1"), ("b", "2")])) == (
+        "［图片×2］"
     )
-    assert "看下这两个" in out
-    assert "［文件：报告.pdf］" in out
-    assert "［图片×2］" in out
+    assert inb._render(inb._Pending("看下", image_refs=[("a", "1")])) == "看下"
 
 
-async def test_drain_processes_first_then_merges_queued(monkeypatch):
-    fi = FeishuChannel(FeishuChannelConfig()).inbound
-    calls = []
+async def test_locked_run_reruns_for_interjections_that_missed_the_turn(monkeypatch):
+    # 没赶上工具边界的插话：本轮结束后由跑空者另起一轮，多条各自成消息同轮发出
+    bridge = _inbox_bridge("首条")
+    fi, turns, _ = _admit_setup(monkeypatch, bridge)
+    run = inb.run_turn
 
-    async def fake_run_batch(ch, bridge, chat_id, thread_id, batch):
-        calls.append([m.text for m in batch])
-        if len(calls) == 1:  # 模拟第一轮处理期间又来两条
-            fi._queues["t"] = [
-                inb._Pending("追加1", reply_to="m2"),
-                inb._Pending("追加2", reply_to="m3"),
-            ]
+    async def run_and_interject(ch, b, **kwargs):
+        await run(ch, b, **kwargs)
+        if len(turns) == 1:  # 模拟第一轮处理期间又来两条
+            b._inbox.put(HumanMessage("追加1"))
+            b._inbox.put(HumanMessage("追加2"))
 
-    monkeypatch.setattr(fi, "_run_batch", fake_run_batch)
-    await fi._drain(fi.channel, None, "oc", "t", [inb._Pending("首条", reply_to="m1")])
-    # 第一轮单独跑首条；第二轮把期间积压的两条合并成一轮
-    assert calls == [["首条"], ["追加1", "追加2"]]
-    assert "t" not in fi._queues  # 队列已清空
+    monkeypatch.setattr(inb, "run_turn", run_and_interject)
+    await fi.channel.bridge_pool.get("t")
+    await fi._locked_run(bridge, "oc", "t")
+    assert [t["taken"] for t in turns] == [["首条"], ["追加1", "追加2"]]
+    assert "t" not in fi._draining and "t" not in fi.channel.bridge_pool.run_tasks
+
+
+async def test_admit_during_stop_cleanup_starts_next_drain(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """旧轮被停止但尚在收尾，新消息应另派跑空者等锁接手。"""
+    bridge = _cmd_bridge(monkeypatch)
+    fi, turns, _ = _admit_setup(monkeypatch, bridge)
+    tid = "t-stop-cleanup"
+    fi.channel.bridge_pool._bridges[tid] = bridge
+    started = asyncio.Event()
+    cleanup_started = asyncio.Event()
+    release_cleanup = asyncio.Event()
+    run = inb.run_turn
+
+    async def run_with_cleanup(ch, b, **kwargs) -> None:
+        await run(ch, b, **kwargs)
+        if len(turns) == 1:
+            started.set()
+            try:
+                await asyncio.Event().wait()
+            finally:
+                cleanup_started.set()
+                await release_cleanup.wait()
+
+    monkeypatch.setattr(inb, "run_turn", run_with_cleanup)
+    first = asyncio.create_task(
+        fi._admit("oc", tid, inb._Pending("首条", reply_to="m1"))
+    )
+    tasks = [first]
+    try:
+        await started.wait()
+        await fi._cmd_stop("oc", tid, "stop")
+        await cleanup_started.wait()
+        second = asyncio.create_task(
+            fi._admit("oc", tid, inb._Pending("停止后的新消息", reply_to="m2"))
+        )
+        tasks.append(second)
+        await asyncio.sleep(0)  # 新消息登记等锁的跑空者，旧轮仍未收尾
+        assert fi._draining[tid] is second
+        await fi._admit("oc", tid, inb._Pending("再补一句", reply_to="m3"))
+        assert fi._draining[tid] is second  # 后续消息复用同一个等待者
+        release_cleanup.set()
+        with pytest.raises(asyncio.CancelledError):
+            await first
+        await second
+        assert [t["taken"] for t in turns] == [["首条"], ["停止后的新消息", "再补一句"]]
+        assert bridge.pending_interjections() == []
+        assert tid not in fi._draining and tid not in fi.channel.bridge_pool.run_tasks
+    finally:
+        release_cleanup.set()
+        await asyncio.gather(*tasks, return_exceptions=True)
 
 
 # ── 渠道运行时配置：ChannelRuntimeConfig 基类 ──────────
@@ -766,8 +862,8 @@ async def test_minute_event_without_token_skipped():
 
 async def test_minute_turn_targets_open_id_and_injects_token(monkeypatch):
     """私聊直投 open_id（send_markdown 按前缀选 receive_id_type），提示带 token。"""
-    captured = {}
-    monkeypatch.setattr(inb, "run_turn", _capture_run_turn(captured))
+    turns: list[dict] = []
+    monkeypatch.setattr(inb, "run_turn", _capture_run_turn(turns))
     ch = FeishuChannel(FeishuChannelConfig())
     fi = ch.inbound
     _sent_collector(ch, monkeypatch)
@@ -776,6 +872,7 @@ async def test_minute_turn_targets_open_id_and_injects_token(monkeypatch):
         None, "feishu-ou-me", "ou_me", inb._MinuteEvent("obcnTOK", "ou_me")
     )
 
+    [captured] = turns
     assert captured["chat_id"] == "ou_me"
     assert "obcnTOK" in captured["content"]
     assert captured["synthetic"] is True  # 合成轮：用户侧不显示注入文本
@@ -792,8 +889,8 @@ async def test_minute_turn_targets_open_id_and_injects_token(monkeypatch):
 
 async def test_minute_turn_sends_no_anchor_message(monkeypatch):
     """不发"正在整理…"占位消息：流式卡片经 Create API 直投，首条即内容本身。"""
-    captured = {}
-    monkeypatch.setattr(inb, "run_turn", _capture_run_turn(captured))
+    turns: list[dict] = []
+    monkeypatch.setattr(inb, "run_turn", _capture_run_turn(turns))
     ch = FeishuChannel(FeishuChannelConfig())
     fi = ch.inbound
     sent = _sent_collector(ch, monkeypatch)
@@ -803,7 +900,7 @@ async def test_minute_turn_sends_no_anchor_message(monkeypatch):
     )
 
     assert sent == []  # 一条占位消息都没发
-    assert captured["reply_to"] == ""  # 无锚点，交由 streaming 走 Create 直投
+    assert turns[0]["reply_to"] == ""  # 无锚点，交由 streaming 走 Create 直投
 
 
 async def test_drain_minute_events_skips_busy_session(monkeypatch):
@@ -898,23 +995,19 @@ async def _inbound_thread_of(ch, monkeypatch, chat_type, chat_id, open_id) -> st
     ——测试的全部意义就在于验证那一段。已打桩 bridge_pool.get，调用方无需重复。
     """
     fi = ch.inbound
-    captured = []
 
     async def fake_resolve(chat, ids):
         return {open_id: "张三"}
 
-    async def fake_drain(bridge, cid, thread_id, batch):
-        captured.append(thread_id)
-
     monkeypatch.setattr(ch.directory, "resolve_senders_in_chat", fake_resolve)
     monkeypatch.setattr(fi, "_sync_session_title", lambda *a, **k: None)
-    monkeypatch.setattr(fi, "_locked_drain", fake_drain)
+    admitted = _capture_admitted(fi, monkeypatch)
     _patch_pool_get(ch, monkeypatch, _EnvBridge())
 
     await fi.on_message(_inbound_event(chat_type, chat_id, open_id))
 
-    assert captured, "on_message 未跑到派生 thread 这一步（异常被 try/except 吞了）"
-    return captured[0]
+    assert admitted, "on_message 未跑到派生 thread 这一步（异常被 try/except 吞了）"
+    return admitted[0][0]
 
 
 async def test_inbound_p2p_thread_keyed_by_open_id(monkeypatch):
@@ -969,13 +1062,10 @@ async def test_inbound_hands_channel_env_to_the_bridge(monkeypatch):
     async def fake_chat_name(chat_id):
         return "产品研发群"
 
-    async def fake_drain(*a, **k):
-        return None
-
     monkeypatch.setattr(ch.directory, "resolve_senders_in_chat", fake_resolve)
     monkeypatch.setattr(ch.directory, "resolve_chat_name", fake_chat_name)
     monkeypatch.setattr(inb, "update_meta", lambda *a, **k: None)
-    monkeypatch.setattr(fi, "_locked_drain", fake_drain)
+    _capture_admitted(fi, monkeypatch)
     _patch_pool_get(ch, monkeypatch, bridge)
 
     await fi.on_message(_inbound_event("group", "oc_team", "ou_a"))
@@ -1041,17 +1131,13 @@ async def test_inbound_reads_a_bots_card_reply(monkeypatch):
     ch = FeishuChannel(FeishuChannelConfig())  # group_policy 默认 mention
     ch._bot_open_id = "ou_me"
     fi = ch.inbound
-    batches: list[str] = []
 
     async def fake_resolve(chat, ids):
         return {}
 
-    async def fake_drain(bridge, cid, thread_id, batch):
-        batches.append(batch[0].text)
-
     monkeypatch.setattr(ch.directory, "resolve_senders_in_chat", fake_resolve)
     monkeypatch.setattr(fi, "_sync_session_title", lambda *a, **k: None)
-    monkeypatch.setattr(fi, "_locked_drain", fake_drain)
+    admitted = _capture_admitted(fi, monkeypatch)
     _patch_pool_get(ch, monkeypatch, _EnvBridge())
 
     event = _inbound_event(
@@ -1069,7 +1155,7 @@ async def test_inbound_reads_a_bots_card_reply(monkeypatch):
 
     await fi.on_message(event)
 
-    assert batches == ["@Lumi 在的！联调正常 ✅"]
+    assert [m.text for _, m in admitted] == ["@Lumi 在的！联调正常 ✅"]
 
 
 async def test_inbound_takes_other_bots_at_but_never_its_own_message(monkeypatch):
@@ -1081,29 +1167,27 @@ async def test_inbound_takes_other_bots_at_but_never_its_own_message(monkeypatch
     ch = FeishuChannel(FeishuChannelConfig())  # group_policy 默认 mention
     ch._bot_open_id = "ou_me"
     fi = ch.inbound
-    ran: list[str] = []
 
     async def fake_resolve(chat, ids):
         return {}
 
-    async def fake_drain(bridge, cid, thread_id, batch):
-        ran.append(thread_id)
-
     monkeypatch.setattr(ch.directory, "resolve_senders_in_chat", fake_resolve)
     monkeypatch.setattr(fi, "_sync_session_title", lambda *a, **k: None)
-    monkeypatch.setattr(fi, "_locked_drain", fake_drain)
+    admitted = _capture_admitted(fi, monkeypatch)
     _patch_pool_get(ch, monkeypatch, _EnvBridge())
 
     await fi.on_message(
         _inbound_event("group", "oc_team", "ou_other_bot", "bot", [_Mention("ou_me")])
     )
-    assert ran == [feishu_thread_id("oc_team", FEISHU_THREAD_PREFIX)]
+    assert [t for t, _ in admitted] == [
+        feishu_thread_id("oc_team", FEISHU_THREAD_PREFIX)
+    ]
 
-    ran.clear()
+    admitted.clear()
     await fi.on_message(
         _inbound_event("group", "oc_team", "ou_me", "bot", [_Mention("ou_me")])
     )
-    assert ran == []
+    assert admitted == []
 
 
 async def test_bot_sender_name_resolved_via_app_lookup(monkeypatch):
@@ -1114,23 +1198,19 @@ async def test_bot_sender_name_resolved_via_app_lookup(monkeypatch):
     ch = FeishuChannel(FeishuChannelConfig())
     ch._bot_open_id = "ou_me"
     fi = ch.inbound
-    names: list[str] = []
 
     async def fake_bot_resolve(open_id, message_id):
         return "楚威的助手-a"
 
-    async def fake_drain(bridge, cid, thread_id, batch):
-        names.extend(m.sender_name for m in batch)
-
     monkeypatch.setattr(ch.directory, "resolve_bot_sender", fake_bot_resolve)
     monkeypatch.setattr(fi, "_sync_session_title", lambda *a, **k: None)
-    monkeypatch.setattr(fi, "_locked_drain", fake_drain)
+    admitted = _capture_admitted(fi, monkeypatch)
     _patch_pool_get(ch, monkeypatch, _EnvBridge())
 
     await fi.on_message(
         _inbound_event("group", "oc_team", "ou_other72fbe6", "bot", [_Mention("ou_me")])
     )
-    assert names == ["楚威的助手-a"]
+    assert [m.sender_name for _, m in admitted] == ["楚威的助手-a"]
 
 
 async def test_bot_sender_fallback_says_bot_not_user(monkeypatch):
@@ -1138,19 +1218,14 @@ async def test_bot_sender_fallback_says_bot_not_user(monkeypatch):
     ch = FeishuChannel(FeishuChannelConfig())  # directory 无 client → 反查必失败
     ch._bot_open_id = "ou_me"
     fi = ch.inbound
-    names: list[str] = []
-
-    async def fake_drain(bridge, cid, thread_id, batch):
-        names.extend(m.sender_name for m in batch)
-
     monkeypatch.setattr(fi, "_sync_session_title", lambda *a, **k: None)
-    monkeypatch.setattr(fi, "_locked_drain", fake_drain)
+    admitted = _capture_admitted(fi, monkeypatch)
     _patch_pool_get(ch, monkeypatch, _EnvBridge())
 
     await fi.on_message(
         _inbound_event("group", "oc_team", "ou_other72fbe6", "bot", [_Mention("ou_me")])
     )
-    assert names == ["机器人_72fbe6"]
+    assert [m.sender_name for _, m in admitted] == ["机器人_72fbe6"]
 
 
 async def test_fetch_bot_name_two_hops():
@@ -1700,6 +1775,7 @@ class _FakeBridge:
     def __init__(self):
         self.model_name = ""
         self.applied = None
+        self._inbox = Inbox()  # 真人轮期间开放插话
         # 真 bridge 的用户轮会按历史 marker 生成目录/档位提醒，这里给个恒空的桩
         self.folders = SimpleNamespace(
             folder_note=lambda known: "",
@@ -2042,3 +2118,46 @@ async def test_run_turn_exception_closes_graph_and_reports():
     assert len(finalized) == 1
     channel.streaming.end.assert_awaited()
     assert "出错" in channel.send_markdown.await_args.kwargs["title"]
+
+
+async def test_run_turn_injection_closes_card_and_reanchors():
+    # 轮中插话注入：先收掉当前卡片，之后的输出回复到最后一条插话上
+    from unittest.mock import call
+
+    class _Bridge:
+        async def stream_response(self, content, **kw):
+            yield BridgeEvent(kind=EventKind.MESSAGE_DELTA, text="前半")
+            yield BridgeEvent(
+                kind=EventKind.MESSAGE_INJECTED, data={"message_ids": ["m2", "m3"]}
+            )
+            yield BridgeEvent(kind=EventKind.MESSAGE_DELTA, text="后半")
+            yield BridgeEvent(kind=EventKind.TURN_COMPLETE)
+
+    channel = _run_turn_channel()
+    streaming = channel.streaming
+    await outbound.run_turn(channel, _Bridge(), chat_id="c", reply_to="m", content="hi")
+    assert streaming.mock_calls[:3] == [
+        call.append("c", "前半", "m"),
+        call.end("c", aborted=False, reply_to="m"),
+        call.append("c", "后半", "m3"),
+    ]
+    streaming.end.assert_awaited_with("c", aborted=True, reply_to="m3")
+
+
+async def test_run_turn_interjections_turn_replies_to_inbox_message():
+    # 以收件箱开轮：首个事件即注入，回复锚到收件箱里的消息（调用方不传 reply_to）
+    modes: list = []
+
+    class _Bridge:
+        async def stream_interjection_turn(self, tool_mode=None):
+            modes.append(tool_mode)
+            yield BridgeEvent(
+                kind=EventKind.MESSAGE_INJECTED, data={"message_ids": ["m1"]}
+            )
+            yield BridgeEvent(kind=EventKind.MESSAGE_DELTA, text="好的")
+            yield BridgeEvent(kind=EventKind.TURN_COMPLETE)
+
+    channel = _run_turn_channel()
+    await outbound.run_turn(channel, _Bridge(), chat_id="c", interjections=True)
+    assert modes == ["auto"]  # 走渠道配置的 tool_mode
+    channel.streaming.append.assert_awaited_once_with("c", "好的", "m1")

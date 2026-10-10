@@ -48,6 +48,17 @@ accepted 判定都靠 ``is_reminder_message`` 精确跳过 reminder，否则后�
 误当成 reminder 跳过、导致跨轮泄漏计数。"""
 
 
+INTERJECTION_KEY = "is_interjection"
+"""标记"运行中插话"注入的真实用户消息（见 ``agents/core/inbox.py``）。
+
+插话是真人输入、构成轮边界（与 reminder 相反），但不是开启本轮的那条：压缩保留
+「未答完的诉求」时须连同开轮消息一起留，见 ``compact.pending_humans``。"""
+
+
+def is_interjection(msg: object) -> bool:
+    return bool(_additional_kwargs(msg).get(INTERJECTION_KEY))
+
+
 def synthetic_human_message(
     content: str | list[dict[str, Any]], *, ts: int = 0
 ) -> HumanMessage:

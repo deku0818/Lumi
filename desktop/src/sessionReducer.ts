@@ -19,9 +19,15 @@ let _id = 0
 export const nid = () => ++_id
 
 
+export type PendingItem = Extract<Item, { kind: 'user' }>
+
 // 每个会话的独立状态
 export type SessionState = {
   items: Item[]
+  // 运行中插话：已发出、等下一个工具边界注入的用户消息（输入框上方托盘）。不进 items——
+  // 流式文字 / 工具卡都追加在 items 末尾，混进去会排错位置；注入时（message.injected）
+  // 才移入消息流。messageId 前端预生成，与后端同一 id
+  pending: PendingItem[]
   running: boolean
   // 本轮开始的墙钟时间（epoch 毫秒）：计时由此推算，切走再切回 / 重连都不归零
   runStart?: number
@@ -50,6 +56,7 @@ type Store = Record<string, SessionState>
 
 export const emptySession = (items: Item[] = []): SessionState => ({
   items,
+  pending: [],
   running: false,
   thinkingText: '',
   approval: [],
@@ -75,7 +82,7 @@ function restore(h: HistoryItem): Item {
 
 // 乐观插入的用户气泡（发送 / 编辑重发共用）。messageId 留空，等 turn.start 上锚。
 // ts 与服务端落库的到达时刻近似一致，重载前后时间头不跳变。
-export const userBubble = (text: string, images?: string[], files?: AttachedFile[]): Item => ({
+export const userBubble = (text: string, images?: string[], files?: AttachedFile[]): PendingItem => ({
   id: nid(),
   kind: 'user',
   text,
@@ -101,6 +108,27 @@ function anchorLastUser(items: Item[], messageId: string, files?: string[]): Ite
     return copy
   }
   return items
+}
+
+// 托盘增删（发送插话 / 撤回 / 停止退回 / 入箱失败）
+export const addPending = (s: SessionState, item: PendingItem): SessionState => ({
+  ...s,
+  pending: [...s.pending, item],
+})
+export const dropPending = (s: SessionState, messageIds: string[]): SessionState => ({
+  ...s,
+  pending: s.pending.filter((it) => !messageIds.includes(it.messageId ?? '')),
+})
+
+// 插话注入：收尾当前流式气泡（之后的回复另起一个），把托盘里对应的消息按序移入消息流
+// 并上锚。托盘里找不到的 id（空闲时乐观插入的气泡恰好被当插话收下）退回按 turn.start 上锚。
+function injectPending(s: SessionState, ids: string[]): SessionState {
+  let items = finishStreaming(s.items)
+  for (const mid of ids) {
+    const p = s.pending.find((it) => it.messageId === mid)
+    items = p ? [...items, { ...p, id: `${mid}:user:0`, landed: true }] : anchorLastUser(items, mid)
+  }
+  return { ...dropPending(s, ids), items }
 }
 
 // 把流式文本追加到最后一个仍在流式中的 assistant item；没有则新建。
@@ -226,6 +254,7 @@ export function hydrateHistory(s: SessionState, r: HistorySnapshot): SessionStat
   return {
     ...s,
     items: hasStreaming(s) ? s.items : r.items.map(restore),
+    pending: r.pending ? (r.pending.map(restore) as PendingItem[]) : s.pending,
     ctx: ctxFromUsage(r.usage) ?? s.ctx,
     // 渠道旁观会话的上下文环分母来源（会话真实模型窗口）；desktop 自己的会话此值虽也回填但不消费。
     // 模型名与窗口成对更新：窗口未知（0，如目录查不到的模型）时整对保旧，避免明细弹窗
@@ -277,11 +306,17 @@ export function reduceEvent(store: Store, sid: string, ev: WireEvent, defaultMod
       // 时间旅行按此 id 截断，不做序号/文本猜测。
       // 同时固化会话模型：真人轮开跑正是后端 session_model.pin 的时刻，两边同时
       // 发生——不同步的话，本会话此后切模型不会弹缓存失效确认
+      // 没赶上工具边界的插话由后端自行开轮（前端没调 startTurn）：在此置运行态
       n = {
         ...s,
         items: anchorLastUser(s.items, ev.payload.message_id ?? '', ev.payload.files),
         model: s.model ?? defaultModel,
+        running: true,
+        runStart: s.running ? s.runStart : Date.now(),
       }
+      break
+    case 'message.injected':
+      n = injectPending(s, ev.payload.message_ids ?? [])
       break
     case 'thinking.delta':
       n = { ...s, thinkingText: s.thinkingText + (ev.payload.text ?? '') }

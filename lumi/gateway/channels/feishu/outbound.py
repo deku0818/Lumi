@@ -31,24 +31,30 @@ async def run_turn(
     bridge,
     *,
     chat_id: str,
-    reply_to: str,
-    content: str | list,
+    reply_to: str = "",
+    content: str | list = "",
     message_meta: dict | None = None,
     synthetic: bool = False,
     attachments: list[str] | None = None,
     command: tuple[str, str] | None = None,
+    interjections: bool = False,
 ) -> None:
     """驱动一轮 agent run，把事件流渲染到飞书。
 
     synthetic=True 标记系统合成轮（后台任务通知），注入文本不作为用户消息呈现。
     attachments 为下载好的文件路径，交 bridge 统一注入标签块 + 写 items.files。
     command=(name, extra_text) 时走 bridge.stream_command（斜杠命令轮，content 不使用）。
+    interjections=True 时以收件箱里的消息开轮（bridge.stream_interjection_turn）。
+    插话注入（message.injected）时收掉当前卡片，之后的输出回复到插话那条消息上——
+    群里看到的就是 agent 在回应这句插话。
     终态收尾 ``streaming.end`` 幂等：首个终态路径收尾，finally 兜底重调空转。
     """
     streaming = channel.streaming
     tool_mode = channel.config.tool_mode
 
-    if command:
+    if interjections:
+        stream = bridge.stream_interjection_turn(tool_mode)
+    elif command:
         stream = bridge.stream_command(
             command[0], command[1], tool_mode=tool_mode, message_meta=message_meta
         )
@@ -69,6 +75,9 @@ async def run_turn(
                 await streaming.append(chat_id, evt.text, reply_to)
             elif kind == EventKind.MESSAGE_START:
                 streaming.mark(chat_id)
+            elif kind == EventKind.MESSAGE_INJECTED:
+                await streaming.end(chat_id, aborted=False, reply_to=reply_to)
+                reply_to = (evt.data or {}).get("message_ids", [reply_to])[-1]
             elif kind == EventKind.MESSAGE_RETRY:
                 await streaming.reset(chat_id, reply_to)
             elif kind == EventKind.TOOL_START:

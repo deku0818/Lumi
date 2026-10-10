@@ -13,6 +13,7 @@ import type {
   CronJob,
   CronRun,
   FeishuConfig,
+  HistoryItem,
   HistorySnapshot,
   McpScope,
   McpServerConfig,
@@ -194,15 +195,24 @@ export class Gateway {
 
   // content 为纯文本字符串，或多模态 content blocks 列表（text + image 块）；
   // files 为文件附件路径数组——后端统一拼标签给模型 + 写显示声明，前端不拼标签。
-  // 本轮用户消息 id 由开轮的 turn.start 事件下发，不在 result 里
+  // 本轮用户消息 id 由开轮的 turn.start 事件下发，不在 result 里。
+  // 轮进行中调用即运行中插话：后端不开流、立即应答 {queued, message_id}；messageId 由
+  // 前端预生成（注入事件可能先于应答到达，托盘须事先就能认出自己的消息）
   sendMessage(
     content: string | unknown[],
     toolMode?: string,
     files?: string[],
+    messageId?: string,
   ): Promise<unknown> {
     const params: Record<string, unknown> = { content }
     if (files && files.length > 0) params.files = files
+    if (messageId) params.message_id = messageId
     return this.request('send_message', withToolMode(params, toolMode))
+  }
+
+  // 撤回一条尚未注入的插话；withdrawn=false 表示已注入（以 message.injected 为准）
+  withdrawMessage(messageId: string): Promise<{ withdrawn: boolean }> {
+    return this.request('withdraw_message', { message_id: messageId })
   }
 
   // 时间旅行重答：截断该用户消息及其后全部历史并重建重走一轮，事件流同 send_message
@@ -224,7 +234,8 @@ export class Gateway {
     return this.request('resume', { approval_id: approvalId, value })
   }
 
-  stop(): Promise<unknown> {
+  // returned：未注入的插话（user 项形状），调用方退回输入框
+  stop(): Promise<{ stopped: boolean; returned?: HistoryItem[] }> {
     return this.request('stop')
   }
 

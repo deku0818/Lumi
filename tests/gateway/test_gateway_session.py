@@ -18,7 +18,9 @@ from types import SimpleNamespace
 
 import pytest
 from conftest import catalog_entry
+from langchain_core.messages import HumanMessage
 
+from lumi.agents.core.inbox import Inbox
 from lumi.gateway.bridge import BridgeEvent, EventKind
 from lumi.gateway.broadcast import BroadcastHub
 from lumi.gateway.session import GatewaySession, _snapshot_model_window
@@ -74,6 +76,8 @@ class FakeBridge:
         self._notifications = list(notifications or [])
         self.closed = False
         self.stream_response_calls: list[dict] = []
+        self._inbox = Inbox()
+        self.interjection_turns: list[list] = []
         self.resolve_calls: list[tuple] = []
         self.reject_pending_calls = 0
         self.finalize_calls = 0
@@ -85,6 +89,26 @@ class FakeBridge:
         self.stream_response_calls.append(
             {"content": content, "tool_mode": tool_mode, **kwargs}
         )
+        for evt in self._events:
+            yield evt
+
+    # 运行中插话：收件箱用真实现，开轮只记录取走的消息再吐预置事件
+    async def interject(self, content, attachments=None, message_id="", **_):
+        msg = HumanMessage(content=content, id=message_id or "auto-id")
+        self._inbox.put(msg)
+        return msg.id
+
+    def withdraw_interjection(self, message_id) -> bool:
+        return self._inbox.withdraw(message_id)
+
+    def take_interjections(self):
+        return self._inbox.take()
+
+    def pending_interjections(self):
+        return self._inbox.pending()
+
+    async def stream_interjection_turn(self):
+        self.interjection_turns.append([m.content for m in self._inbox.take()])
         for evt in self._events:
             yield evt
 
@@ -312,7 +336,8 @@ async def test_send_message_rejected_when_workspace_unbound():
 # -- 4. 流式进行中再来流式 → 互斥 --
 
 
-async def test_concurrent_streaming_is_rejected():
+async def test_other_streaming_methods_rejected_while_running():
+    """运行中只有 send_message 能插话；命令 / 时间旅行仍拒绝。"""
     bridge = BlockingBridge()
     session, channel = _make_session(bridge)
     await session.start()
@@ -322,12 +347,147 @@ async def test_concurrent_streaming_is_rejected():
         )
         await bridge.started.wait()  # 第一轮已进入阻塞
         await session.handle_frame(
-            {"id": 2, "method": "send_message", "params": {"content": "second"}}
+            {"id": 2, "method": "regenerate", "params": {"message_id": "m"}}
         )
         rejected = [f for f in channel.responses() if f["id"] == 2]
         assert rejected == [{"id": 2, "error": {"message": "已有任务在执行"}}]
     finally:
         bridge.release.set()
+        await session.aclose()
+
+
+async def test_send_while_running_queues_interjection():
+    """运行中 send_message 进收件箱并立即应答 queued，不开新流。"""
+    bridge = BlockingBridge()
+    session, channel = _make_session(bridge)
+    await session.start()
+    try:
+        await session.handle_frame(
+            {"id": 1, "method": "send_message", "params": {"content": "first"}}
+        )
+        await bridge.started.wait()
+        await session.handle_frame(
+            {
+                "id": 2,
+                "method": "send_message",
+                "params": {"content": "second", "message_id": "m-2"},
+            }
+        )
+        await asyncio.gather(*session._rpc_tasks)
+        assert _result(channel, 2) == {"queued": True, "message_id": "m-2"}
+        assert [m.id for m in bridge.pending_interjections()] == ["m-2"]
+        assert bridge.interjection_turns == []  # 首轮仍在跑，不另起轮
+    finally:
+        bridge.release.set()
+        await session.aclose()
+
+
+async def test_leftover_interjection_starts_next_turn():
+    """轮结束时收件箱仍有消息（没赶上工具边界）→ 自动另起一轮发出。"""
+    bridge = BlockingBridge()
+    session, channel = _make_session(bridge)
+    await session.start()
+    try:
+        await session.handle_frame(
+            {"id": 1, "method": "send_message", "params": {"content": "first"}}
+        )
+        await bridge.started.wait()
+        await session.handle_frame(
+            {"id": 2, "method": "send_message", "params": {"content": "second"}}
+        )
+        await asyncio.gather(*session._rpc_tasks)
+        bridge.release.set()
+        await _drain(session)  # 首轮收尾
+        await _drain(session)  # 收尾时起的插话轮
+        assert bridge.interjection_turns == [["second"]]
+        assert not session.has_active_turn()
+    finally:
+        await session.aclose()
+
+
+async def test_idle_send_forwards_client_message_id(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """上传完成时后端已空闲，仍须保留前端托盘里的消息 id。"""
+    bridge = FakeBridge()
+    session, channel = _make_session(bridge)
+    monkeypatch.setattr(session, "_maybe_generate_title", lambda content: None)
+    try:
+        await session.handle_frame(
+            {
+                "id": 1,
+                "method": "send_message",
+                "params": {
+                    "content": "补充",
+                    "message_id": "m-uploaded",
+                    "files": ["/tmp/report.pdf"],
+                },
+            }
+        )
+        await _drain(session)
+        [call] = bridge.stream_response_calls
+        assert call["message_id"] == "m-uploaded"
+        assert call["attachments"] == ["/tmp/report.pdf"]
+        assert _result(channel, 1) == {"ok": True}
+    finally:
+        await session.aclose()
+
+
+async def test_withdraw_interjection():
+    bridge = BlockingBridge()
+    session, channel = _make_session(bridge)
+    await session.start()
+    try:
+        await session.handle_frame(
+            {"id": 1, "method": "send_message", "params": {"content": "first"}}
+        )
+        await bridge.started.wait()
+        await session.handle_frame(
+            {
+                "id": 2,
+                "method": "send_message",
+                "params": {"content": "second", "message_id": "m-2"},
+            }
+        )
+        await asyncio.gather(*session._rpc_tasks)
+        await session.handle_frame(
+            {"id": 3, "method": "withdraw_message", "params": {"message_id": "m-2"}}
+        )
+        await asyncio.gather(*session._rpc_tasks)
+        assert _result(channel, 3) == {"withdrawn": True}
+        assert bridge.pending_interjections() == []
+    finally:
+        bridge.release.set()
+        await session.aclose()
+
+
+async def test_stop_returns_pending_interjections():
+    """stop 把未注入的插话交还客户端（退回输入框），且不再起插话轮。"""
+    bridge = BlockingBridge()
+    session, channel = _make_session(bridge)
+    await session.start()
+    try:
+        await session.handle_frame(
+            {"id": 1, "method": "send_message", "params": {"content": "first"}}
+        )
+        await bridge.started.wait()
+        await session.handle_frame(
+            {
+                "id": 2,
+                "method": "send_message",
+                "params": {"content": "second", "message_id": "m-2"},
+            }
+        )
+        await asyncio.gather(*session._rpc_tasks)
+        await session.handle_frame({"id": 9, "method": "stop", "params": {}})
+        await _drain(session)
+        returned = _result(channel, 9)["returned"]
+        assert [(it["text"], it["message_id"]) for it in returned] == [
+            ("second", "m-2")
+        ]
+        assert bridge.interjection_turns == []
+        assert not session.has_active_turn()
+    finally:
         await session.aclose()
 
 
@@ -347,7 +507,7 @@ async def test_stop_cancels_streaming_and_finalizes():
         await _drain(session)
 
         # stop 立即回 {stopped:True}
-        assert {"id": 9, "result": {"stopped": True}} in channel.responses()
+        assert _result(channel, 9) == {"stopped": True, "returned": []}
         # stop 先试图以拒绝收尾挂起审批（此处无挂起 → 返回 0 → 回退硬取消）
         assert bridge.reject_pending_calls == 1
         # 被取消的流式轮补发 turn.complete + 自身 {stopped:True}
@@ -383,7 +543,7 @@ async def test_stop_during_approval_rejects_and_completes_cleanly():
         assert bridge.reject_pending_calls == 1
         # 本轮干净完成（{ok:True}），而非取消的 {stopped:True}
         assert {"id": 1, "result": {"ok": True}} in channel.responses()
-        assert {"id": 5, "result": {"stopped": True}} in channel.responses()
+        assert _result(channel, 5) == {"stopped": True, "returned": []}
         # 本轮自身的 turn.complete 正常 pump 出（非取消补发）
         assert len(channel.events("turn.complete")) == 1
     finally:

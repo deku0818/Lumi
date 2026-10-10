@@ -5,9 +5,9 @@ IM 是单长连接承载 N 个用户/群，每个 chat 派生一个 thread_id，
 thread 复用进程内运行锁，和桌面、cron 一起串行化轮次，避免并发写 checkpoint。
 
 池同时承载**须跨配置热重载存活的会话态**（投递地址 / 在跑的轮 / 待处理妙记事件）：
-热重载保留池但重建 channel 及其 inbound，这些跟着会话走、不随传输层重建而丢。积压
-消息仍归 inbound 私有，但每条积压都有自己的 task 在等池上的锁（见 inbound._admit），
-重载后照样被接手。
+热重载保留池但重建 channel 及其 inbound，这些跟着会话走、不随传输层重建而丢。待处理
+消息在 bridge 的插话收件箱里（随 bridge 存活），跑空它的 task 在等池上的锁（见
+inbound._admit），重载后照样被接手。
 """
 
 from __future__ import annotations
@@ -43,7 +43,7 @@ class BridgePool:
         self.minute_events: list = []
         # 串行化"建桥"本身：首条消息并发到达同一新 thread 时只建一次
         self._init_lock = asyncio.Lock()
-        # 已进入回收：池不复用，等锁的积压者拿到锁也不再开新轮
+        # 已进入回收：池不复用，等锁的跑空者拿到锁也不再开新轮
         self.closed = False
 
     @property

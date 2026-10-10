@@ -200,7 +200,9 @@ export const ItemView = memo(function ItemView({
           </div>
         )}
         {item.text && (
-          <div className={`selectable ${USER_BUBBLE} max-w-[80%] wrap-anywhere`}>
+          <div
+            className={`selectable ${USER_BUBBLE} max-w-[80%] wrap-anywhere ${item.landed ? 'interject-land' : ''}`}
+          >
             {item.text}
           </div>
         )}

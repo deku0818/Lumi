@@ -66,6 +66,8 @@ def _payload(evt: BridgeEvent) -> dict:
         if evt.is_error:
             payload["is_error"] = True
         return payload
+    if kind == EventKind.MESSAGE_INJECTED:
+        return {"message_ids": (evt.data or {}).get("message_ids", [])}
     if kind == EventKind.COMPACTION_STATUS:
         return {"active": bool(evt.data and evt.data.get("active"))}
     if kind in (EventKind.CLARIFY, EventKind.APPROVAL):

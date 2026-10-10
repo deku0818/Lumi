@@ -18,6 +18,8 @@ import {
   PanelLeft,
 } from 'lucide-react'
 import {
+  addPending,
+  dropPending,
   emptySession,
   nid,
   hasStreaming,
@@ -26,6 +28,7 @@ import {
   resumeAfterReconnect,
   sessionModelPatch,
   userBubble,
+  type PendingItem,
   type SessionState,
 } from './sessionReducer'
 import { useLatest } from './hooks/useLatest'
@@ -335,6 +338,7 @@ export default function App() {
   // 当前活动会话的派生视图
   const cur = store[active]
   const items = cur?.items ?? []
+  const pending = cur?.pending ?? []
   const running = cur?.running ?? false
   const runStart = cur?.runStart
   const thinkingText = cur?.thinkingText ?? ''
@@ -1771,10 +1775,19 @@ export default function App() {
   // 重载历史对齐后端真相——被拒的乐观改动（幽灵气泡 / 提前截断）随整表替换消失
   const reportSendFailure = (sid: string, err: unknown) => {
     resetRunning(sid)
-    const message = err && typeof err === 'object' && 'message' in err ? String(err.message) : ''
-    if (message) toast.error(message)
+    toastRejection(err)
     reloadHistory(sid, keyThread(sid))
   }
+
+  // 亮出后端拒绝原因（无 message 的错误静默）
+  const toastRejection = (err: unknown) => {
+    const message = err && typeof err === 'object' && 'message' in err ? String(err.message) : ''
+    if (message) toast.error(message)
+  }
+
+  // 撤出托盘里的待插入消息（入箱失败 / 撤回 / 停止退回）
+  const dropFromTray = (sid: string, messageIds: string[]) =>
+    setStore((s) => (s[sid] ? { ...s, [sid]: dropPending(s[sid], messageIds) } : s))
 
   // 开轮：置 running，并可选地乐观插入用户气泡（系统命令轮传 null——它们不落库
   // 为用户消息，插了会在回合结束刷新时当着用户的面消失）
@@ -1803,8 +1816,17 @@ export default function App() {
     const attCount = imgs.length + fileRefs.length
     const gw = connsRef.current[sid]
     // 两种入口等价：非 override 时 sid=active，而 running 本就是 store[active]?.running
+    // 运行中发送 = 插话：进托盘，等后端在下一个工具边界注入（见 sendMessage 注释）
     const busy = storeRef.current[sid]?.running ?? false
-    if ((!text && attCount === 0) || busy || !gw) return
+    if ((!text && attCount === 0) || !gw) return
+    // 纯文本的已知斜杠命令走 run_command；带附件则一律走 send_message。
+    const [cmdName, cmdExtra] = attCount === 0 && text.startsWith('/') ? parseCommand(text) : ['', '']
+    const cmd = cmdName ? commands.find((c) => c.name === cmdName) : undefined
+    if (cmd && busy) {
+      // 命令要单独开轮，插不进运行中的轮：留在输入框，等这轮结束再发
+      toast.info(t('composer.commandBusy'))
+      return
+    }
     // 主动发送即视为「回到对话」：强制贴底，确保自己的消息与随后的回复都在视野内
     setPinned(true)
     if (!o) {
@@ -1817,21 +1839,24 @@ export default function App() {
       imgs.length ? imgs.map((a) => a.dataUrl) : undefined,
       files.length ? files : undefined,
     )
-    // 纯文本的已知斜杠命令走 run_command；带附件则一律走 send_message。
     // 此分支必须在乐观插入之前分流：/compact、/dream 这类系统命令不产生 checkpoint
     // 条目，不该插气泡（后端永远列不出，回合结束刷新时会当着用户的面消失；幽灵
     // 气泡还会破坏本地与后端 user 消息的对应关系）；技能命令会落库并声明
     // 「/名 输入」气泡，照常乐观插入（其 id 同样由 turn.start 上锚）。
-    if (attCount === 0 && text.startsWith('/')) {
-      const [name, extra] = parseCommand(text)
-      const cmd = commands.find((c) => c.name === name)
-      if (cmd) {
-        startTurn(sid, cmd.type === 'system' ? null : bubble)
-        gw.runCommand(name, extra, toolMode).catch((err) => reportSendFailure(sid, err))
-        return
-      }
+    if (cmd) {
+      startTurn(sid, cmd.type === 'system' ? null : bubble)
+      gw.runCommand(cmdName, cmdExtra, toolMode).catch((err) => reportSendFailure(sid, err))
+      return
     }
-    startTurn(sid, bubble)
+    // 插话 id 前端预生成：注入事件可能先于 RPC 应答到达，托盘须事先认得出自己的消息
+    const interjectId = busy ? crypto.randomUUID() : undefined
+    if (interjectId) {
+      setStore((s) =>
+        s[sid] ? { ...s, [sid]: addPending(s[sid], { ...bubble, messageId: interjectId }) } : s,
+      )
+    } else {
+      startTurn(sid, bubble)
+    }
     // 新会话首条消息：checkpoint 未落盘前后端列不出来，先乐观插入侧栏条目——
     // 否则首轮期间会话在侧栏缺席、切出去就回不来。回合结束的整表刷新会以
     // 后端真实数据替换（display_time 沿用后端的相对时间文案格式）。
@@ -1868,7 +1893,7 @@ export default function App() {
     // 后端存盘，本就无此问题）。放在乐观气泡之后：大文件上传不该卡住输入反馈。
     const dispatch = async () => {
       const filePaths = await gw.resolveAttachments(fileRefs, be !== 'local')
-      await gw.sendMessage(payload, toolMode, filePaths)
+      await gw.sendMessage(payload, toolMode, filePaths, interjectId)
     }
     dispatch().catch((err) => {
       // 发失败就把输入原样还回去（override 入口自管清空，不越俎代庖）：远程上传
@@ -1877,6 +1902,12 @@ export default function App() {
       if (!o) {
         setInput(text)
         setAttachments(atts)
+      }
+      if (interjectId) {
+        // 插话入箱失败（满额 / 断连）：只撤托盘，不动仍在跑的轮
+        dropFromTray(sid, [interjectId])
+        toastRejection(err)
+        return
       }
       reportSendFailure(sid, err)
     })
@@ -1928,9 +1959,39 @@ export default function App() {
     rpc.catch((err) => reportSendFailure(sid, err))
   }
 
-  // 中止当前流式轮：后端取消 task 并补发 turn.complete，running 随之复位
+  // 中止当前流式轮：后端取消 task 并补发 turn.complete，running 随之复位。
+  // 未注入的插话由后端交还：撤出托盘、正文退回输入框（接在已输入内容之后），不丢
   const stop = () => {
-    connsRef.current[active]?.stop().catch(() => {})
+    const sid = active
+    connsRef.current[sid]
+      ?.stop()
+      .then(({ returned = [] }) => {
+        if (!returned.length) return
+        dropFromTray(sid, returned.map((it) => it.message_id ?? ''))
+        restoreToInput(returned.map((it) => it.text ?? ''))
+      })
+      .catch(() => {})
+  }
+
+  // 撤回一条待插入消息：后端确认未注入才撤出托盘、退回输入框；已注入则等 message.injected
+  const withdraw = (item: PendingItem) => {
+    const sid = active
+    const mid = item.messageId ?? ''
+    connsRef.current[sid]
+      ?.withdrawMessage(mid)
+      .then(({ withdrawn }) => {
+        if (!withdrawn) return
+        dropFromTray(sid, [mid])
+        restoreToInput([item.text])
+      })
+      .catch(() => {})
+  }
+
+  // 退回的文本接回输入框（附件不退：已上传落盘，重发需重新添加）
+  const restoreToInput = (texts: string[]) => {
+    const back = texts.filter(Boolean).join('\n')
+    if (back) setInput((cur) => (cur.trim() ? `${cur}\n${back}` : back))
+    inputRef.current?.focus()
   }
 
   // 观测视图中断运行中的 cron run：调 stopCronRun（按 job_id 取消调度器里的执行），
@@ -2127,6 +2188,8 @@ export default function App() {
     </div>
   )
 
+  const hasDraft = input.trim() !== '' || attachments.length > 0
+
   // project=true：项目主页复用本输入栏。此刻无「活动会话」，故把三处与当前会话绑定的
   // 部件解耦——不显示上下文用量环（不读 cur.ctx，免后台流式 token 触发项目页重渲染）、
   // 永远显示发送键（不读活动会话 running）、隐藏文件夹菜单（会话级授权，发送前无会话可挂）。
@@ -2148,6 +2211,33 @@ export default function App() {
         onDragOver={(e) => e.preventDefault()}
         onDrop={onDropFiles}
       >
+      {/* 待插入托盘：运行中发出、等下一个工具边界送达的消息（注入后移入消息流） */}
+      {!project && pending.length > 0 && (
+        <div className="flex flex-col gap-1.5 px-3.5 pt-3">
+          {pending.map((p) => (
+            <div
+              key={p.id}
+              className="interject-chip subtool-enter flex items-center gap-2 rounded-xl px-2.5 py-1.5 text-xs"
+            >
+              <span className="lumi-orb lumi-orb-sm" />
+              <span className="min-w-0 flex-1 truncate text-ink">
+                {p.text || p.files?.map((f) => f.name).join(', ') || t('composer.pendingImage')}
+              </span>
+              <span className="shrink-0 text-[10.5px] text-muted-foreground">
+                {t('composer.pending')}
+              </span>
+              <button
+                onClick={() => withdraw(p)}
+                aria-label={t('composer.withdraw')}
+                title={t('composer.withdraw')}
+                className="shrink-0 rounded p-0.5 text-muted-foreground hover:text-ink hover:bg-line/60 transition"
+              >
+                <X size={12} />
+              </button>
+            </div>
+          ))}
+        </div>
+      )}
       {attachments.length > 0 && (
         <div className="flex flex-wrap gap-2 px-3.5 pt-3">
           {attachments.map((a) =>
@@ -2193,7 +2283,7 @@ export default function App() {
         onPaste={onPasteImages}
         // 项目主页看目标机器的连接（没有会话连接），聊天页看活动会话的
         disabled={(project ? pickerConn : conn) !== 'open' || observingCronRun}
-        placeholder={placeholder}
+        placeholder={!project && running ? t('composer.interject') : placeholder}
         highlightLen={cmdToken.length}
         inputRef={inputRef}
       />
@@ -2247,7 +2337,11 @@ export default function App() {
         <div className="flex items-center gap-1.5">
           {/* 项目模式无活动会话：不读 cur.ctx（免后台流式 token 触发项目页重渲染），整块不渲染 */}
           {!project && <ContextMeter usage={cur?.ctx} window={contextWindow} model={model} />}
-          {!project && (running || observingCronRun) && !approval && !clarify ? (
+          {/* 单键变形：运行中输入框空 = 停止，有内容 = 发送（插话） */}
+          {!project &&
+          (observingCronRun || (running && !hasDraft)) &&
+          !approval &&
+          !clarify ? (
             <Button
               size="icon"
               variant="destructive"
@@ -2261,10 +2355,7 @@ export default function App() {
             <Button
               size="icon"
               onClick={submitCurrent}
-              disabled={
-                (!input.trim() && attachments.length === 0) ||
-                (!project && (running || conn !== 'open'))
-              }
+              disabled={!hasDraft || (!project && conn !== 'open')}
               aria-label={t('composer.send')}
               className="rounded-full"
             >

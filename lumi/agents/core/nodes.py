@@ -16,7 +16,9 @@ from langgraph.types import Command
 from pydantic import BaseModel, Field
 
 from lumi.agents.core.hooks import HookContext, dispatch_hooks, has_hooks
+from lumi.agents.core.inbox import LUMI_INJECT_EVENT
 from lumi.agents.core.meta_message import (
+    INTERJECTION_KEY,
     should_show_human_message,
     visible_user_text,
 )
@@ -320,6 +322,9 @@ async def tool_executor(
             trailing.append(abort_msg)
             halt = True
 
+    if not halt:
+        # 工具边界：本批 tool_result 之后注入插话，下一次 CallModel 即可看到
+        trailing += await take_interjections(runtime)
     update = {"messages": [*results, *trailing]}
     if halt:
         update["tool_cancelled"] = True
@@ -369,6 +374,29 @@ def after_tool_executor(state: LumiAgentState) -> str:
     return "CallModel"
 
 
+async def take_interjections(runtime: Runtime[LumiAgentContext]) -> list[HumanMessage]:
+    """取走运行中插话（无收件箱 / 无消息返回空），打插话标记并广播注入事件。
+
+    消息在 bridge 侧已按普通用户消息构造（id、显示声明齐全），原样注入、不加说明：
+    排在 tool_result 之后的独立用户消息本身即可辨；回放与时间旅行同常规消息。
+    """
+    inbox = runtime.context.inbox
+    msgs = inbox.take() if inbox is not None and inbox.open else []
+    if not msgs:
+        return []
+    await adispatch_custom_event(
+        LUMI_INJECT_EVENT, {"message_ids": [m.id for m in msgs]}
+    )
+    return [
+        m.model_copy(
+            update={
+                "additional_kwargs": {**m.additional_kwargs, INTERJECTION_KEY: True}
+            }
+        )
+        for m in msgs
+    ]
+
+
 async def on_agent_stop(
     state: LumiAgentState,
     runtime: Runtime[LumiAgentContext],
@@ -382,6 +410,10 @@ async def on_agent_stop(
     ``runtime`` 透传进 HookContext，供 auto_dream_stop_hook 取 context（system_prompt /
     permission_engine / memory_enabled）——它是 dream hook 拿运行时上下文的唯一通道。
     """
+    # 模型想结束时仍有插话：注入并拉回，Stop hooks 留到它下次想结束时再分发
+    interjections = await take_interjections(runtime)
+    if interjections:
+        return Command(update={"messages": interjections}, goto="CallModel")
     ctx = HookContext(
         state=state, config=config, event="Stop", payload={}, runtime=runtime
     )

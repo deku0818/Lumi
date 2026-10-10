@@ -111,6 +111,17 @@ WS 断开时若会话仍有**活跃 / 挂起轮**（典型：挂在工具审批 
 - 截断后消息会以**新 id** 重挂，故前端重挂气泡时清掉旧 `messageId`、等本轮 `turn.start` 重新上锚——留着旧 id 会让下一次时间旅行指向已删除的消息。
 - 渠道旁观 / cron 观测 / 运行中 / 有在途审批时不提供该操作（服务端另有流式方法的渠道只读兜底）。
 
+### 运行中插话
+
+agent 运行时仍可发消息：消息不打断当前轮，而是在**下一个工具边界**（或模型想结束时）注入当前轮，模型据此调整。飞书渠道同一套规则（见 [feishu.md](feishu.md)），只少了撤回。
+
+- **收件箱在 bridge**（`agents/core/inbox.py`，挂在主 agent 的 `LumiAgentContext.inbox`，子代理为 None）。运行中的 `send_message` 不开流：`bridge.interject` 按普通用户消息构造（`_build_user_message`，id / 显示声明齐全，回放与时间旅行同常规消息）后进箱，立即应答 `{queued, message_id}`。id 由前端预生成——`message.injected` 可能先于应答到达。上限 10 条。
+- **上传后已空闲**：带预生成 `message_id` 的消息仍先发 `message.injected`，再以同一 id 发 `turn.start` 开轮；托盘照常移入消息流，不依赖上传前的运行态。
+- **注入点**：`tool_executor` 在本批 tool_result 之后追加（provider 要求 tool_result 紧跟 tool_use）；`on_agent_stop` 有插话就注入并拉回 `CallModel`。消息原样注入、不加说明（tool_result 之后的独立用户消息本身即可辨），每条打 `INTERJECTION_KEY`；压缩保留未答完诉求时开轮消息与插话一并原样保住（`compact.pending_humans`）。
+- **只在真实用户轮开放**（`Inbox.open`，`_stream_user_turn` 期间为 True）：后台通知等系统轮里到达的消息不混进系统轮回复。没赶上的（系统轮 / 轮已结束 / 无工具边界的 `/compact`）由 `GatewaySession._flush_interjections` 在轮 task 收尾时另起一轮（`stream_interjection_turn`：先发 `message.injected` 再走常规 `turn.start`）。判空与起轮之间无 `await`，不漏发不重发。
+- **停止 / 撤回**：`stop` 先取走收件箱、随结果 `returned` 交还，前端撤出托盘、正文退回输入框；`withdraw_message` 撤回单条（已注入返回 false，以注入事件为准）。切会话 / 断开时随轮作废。
+- **前端**（方案 C）：待插入消息存 `SessionState.pending`、渲染在输入框上方托盘（金色虚线 + 光点 + 撤回），**不进 `items`**——流式文字与工具卡都追加在 items 末尾，混进去会排错位置。`message.injected` 时收尾当前流式气泡、把对应条目移入消息流并放一次落地光晕（`.interject-land`）。运行中按钮单键变形：输入框空 = 停止，有内容 = 发送。斜杠命令要单独开轮，运行中不发、提示稍后。`load_history` 带回 `pending`，重连 / 重载后托盘不丢。
+
 **IM 渠道会话在 desktop 只读旁观**：侧栏是项目树（各机器项目组扁平并列、按最近活跃排序，组头图标颜色区分机器；组头「＋」在该项目新建、「🔍」项目内搜索），飞书等渠道会话与桌面会话同一条路径按 `workspace_dir` 归组，在组内「飞书 · 机器人名」子组展示（`channel` 字段驱动；机器人启用前必须绑项目，不存在无项目的渠道会话）；打开后顶部渠道横幅（群名 / 审批模式 / 绑定项目 / 直达渠道设置），输入区替换为只读提示。只读在服务端兜底（流式方法对渠道 thread 直接拒绝；后台通知轮对渠道 thread 不消费）——desktop 与渠道 `BridgePool` 各持独立 bridge/锁，写入会绕过渠道的会话串行化。渠道跑完一轮广播 `channel.activity`，desktop 只刷该机器会话列表、正在旁观则重载历史（切回旁观会话也强制重拉）。消息级时间戳在 `bridge.stream_response` 统一落库（`additional_kwargs["lumi"].ts`，渠道另带 per-消息 `items`），气泡头渲染「发送者 · 时刻」。
 
 ## 项目与工作目录
