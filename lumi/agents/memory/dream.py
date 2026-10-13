@@ -290,7 +290,6 @@ async def _run_dream_fork(
     from lumi.agents.core.graph import create_agent
     from lumi.agents.core.hooks.dispatch import set_run_config_hooks
     from lumi.agents.core.meta_message import extract_text_content
-    from lumi.agents.permissions.workspace import set_run_authorized_source_for
     from lumi.agents.runtime.bg_tasks import (
         BackgroundTaskEntry,
         TaskKind,
@@ -301,6 +300,7 @@ async def _run_dream_fork(
         run_background_task,
     )
     from lumi.agents.runtime.shell_session import run_with_shell
+    from lumi.agents.runtime.workspace import set_project_source
     from lumi.agents.tools import get_tools
 
     async with dream_lock.project_lock(project_dir):
@@ -332,8 +332,8 @@ async def _run_dream_fork(
         get_task_registry().register(entry)
 
         async def _produce() -> str:
-            # 授权指向 dream 自己 engine（非 bridge 活引用，切项目不失配）+ 清 config hooks
-            set_run_authorized_source_for(ctx.permission_engine)
+            # 项目指向 dream 自己的目录（切项目不失配）+ 清 config hooks
+            set_project_source(lambda: project_dir)
             set_run_config_hooks(None)
             result = await run_with_shell(
                 task_id, agent.graph.ainvoke(inputs, context=ctx)

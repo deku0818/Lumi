@@ -21,7 +21,7 @@ from langchain_core.messages import HumanMessage
 from langchain_core.tools import tool
 from pydantic import Field
 
-from lumi.agents.permissions.workspace import resolve_tool_path
+from lumi.agents.runtime.workspace import resolve_tool_path
 from lumi.agents.tools.providers.filesystem.media import (
     PDF_INLINE_PAGE_THRESHOLD,
     PDF_MAGIC,

@@ -88,9 +88,9 @@ Output File: /path/to/output.log
 
 ---
 
-## 权限与工作区
+## 权限与工作目录
 
 - bash 命令受权限规则约束，参考 [permissions.md](permissions.md)
 - 复合命令（`cmd1 && cmd2`、换行分隔、`$(…)` 里的命令）会拆分子命令逐个评估，取最严格结果
-- 只读命令（`ls`、`cat`、`git status`、`grep` 等）默认绕过审批
-- 写操作命令涉及工作区边界外的路径时需要审批，审批卡会提示越界（见 [permissions.md](permissions.md)）
+- 所有命令统一匹配权限规则；只读命令也不会绕过显式 ask / deny
+- 项目目录仅作为 Shell 初始工作目录，写入其他目录仍按相同权限规则与审批模式评估。

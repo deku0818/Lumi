@@ -10,7 +10,7 @@ import os
 import platform
 import sys
 
-from lumi.agents.permissions.workspace import get_authorized_directory
+from lumi.agents.runtime.workspace import get_project_directory
 
 
 def _detect_shell() -> str:
@@ -34,7 +34,7 @@ def collect_system_info() -> dict[str, str]:
         "python": platform.python_version(),
         "shell": _detect_shell(),
         # 本会话授权主目录（per-run）：项目随会话绑定，不再是进程级 os.getcwd()
-        "cwd": str(get_authorized_directory()),
+        "cwd": str(get_project_directory()),
     }
 
 

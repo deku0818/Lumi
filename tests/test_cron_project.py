@@ -15,7 +15,7 @@ from lumi.agents.cron.job_store import JobStore
 from lumi.agents.cron.models import Job, Schedule, ScheduleType
 from lumi.agents.cron.run_log import RunLog
 from lumi.agents.cron.scheduler import Scheduler
-from lumi.agents.permissions.workspace import set_run_authorized_source
+from lumi.agents.runtime.workspace import set_project_source
 from lumi.agents.tools.providers.cron import cron, init_cron_tool
 
 
@@ -53,7 +53,7 @@ def test_job_dict_roundtrip_keeps_project():
 async def test_cron_tool_records_session_project(scheduler: Scheduler, tmp_path: Path):
     project = tmp_path / "proj"
     project.mkdir()
-    set_run_authorized_source(lambda: [project])
+    set_project_source(lambda: project)
     try:
         await cron.ainvoke(
             {
@@ -64,7 +64,7 @@ async def test_cron_tool_records_session_project(scheduler: Scheduler, tmp_path:
             }
         )
     finally:
-        set_run_authorized_source(None)
+        set_project_source(None)
     [job] = await scheduler._job_store.load()
     assert job.project_dir == str(project)
 

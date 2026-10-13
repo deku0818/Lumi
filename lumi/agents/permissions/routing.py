@@ -1,195 +1,48 @@
-"""is_use_tool 的路由决策纯函数。
-
-把工具调用批次（tool_calls 非空后）的全部分支逻辑从 core.nodes.is_use_tool 下沉
-到此处，使核心节点变薄壳，路由语义集中在 permissions 层。
-
-依赖方向：permissions → tools.capability（合法，无环），不 import core。
-"""
+"""按权限规则与审批模式独立判定一个工具调用。"""
 
 from __future__ import annotations
 
-from pathlib import Path
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, Literal
 
-from lumi.agents.core.structured_tool import is_internal_tool
-from lumi.agents.memory import is_memory_path
 from lumi.agents.permissions.models import PermissionDecision
-from lumi.agents.permissions.safety import is_bypass_immune
-from lumi.agents.permissions.workspace import get_authorized_directory
-from lumi.agents.tools.capability import is_file_edit_tool, is_write_tool
+from lumi.agents.tools.capability import is_file_edit_tool
 from lumi.utils.logger import logger
 
 if TYPE_CHECKING:
     from lumi.agents.permissions.engine import PermissionEngine
 
 
-def _is_memory_write(tc: dict, project_dir: Path) -> bool:
-    """该 tool_call 是否为写入本项目记忆目录的 write/edit。"""
-    name = tc.get("name", "")
-    if not is_file_edit_tool(name):
-        return False
-    file_path = tc.get("args", {}).get("file_path")
-    return isinstance(file_path, str) and is_memory_path(file_path, project_dir)
-
-
 def route_decision(
-    tool_calls: list[dict],
+    tool_call: dict,
     tool_mode: str,
     engine: PermissionEngine | None,
-) -> str:
-    """对一批非空 tool_calls 计算下一节点名。
+) -> Literal["ToolExecutor", "HumanApproval", "AutoClassify", "Reject"]:
+    """deny 总是拒绝，allow 总是放行；ask / 未匹配按模式裁决。
 
-    按以下顺序短路（is_use_tool 只做「无 tool_calls → OnAgentStop」，其余都在这里）：
-    1. 纯内部伪工具 → ToolExecutor（绕过权限审批）；混合批次落到正常评估
-    2. 权限引擎 DENY 预检（命中或评估抛错）→ HumanApproval（先于只读短路，deny 不可绕过）
-    3. 只读工具批次 → ToolExecutor
-    4. bypass-immune（所有模式）→ HumanApproval
-    5. 全部是写本项目持久记忆目录 → ToolExecutor
-    6. 权限引擎完整评估（写操作另过工作区边界）：
-        - privileged → ASK 审批，其余放行
-        - auto → ALLOW 放行，其余交 AutoClassify（AI 分类器裁决）
-        - default → 全 ALLOW 放行，否则 HumanApproval
-        - accept_edits → 同 default，另把工作区内未命中规则的文件编辑视同 ALLOW
+    privileged 直接放行，auto 交 AI，default 交人工。
+    accept_edits 仅对未匹配规则的 write/edit 自动放行。
     """
-    if any(is_internal_tool(tc.get("name", "")) for tc in tool_calls):
-        if all(is_internal_tool(tc.get("name", "")) for tc in tool_calls):
-            # 纯内部伪工具：安全的框架控制流，闭包内自校验，绕过权限审批快速进 ToolExecutor
-            return "ToolExecutor"
-        # 混合批次（内部工具 + 其他工具）：不绕过审批，落到下方正常权限评估，
-        # 兄弟工具该 DENY/ASK/审批的照常处理，内部工具随批一起评估（read-only，无害）
-        logger.warning("[is_use_tool] 内部工具与其他工具混合调用，按正常权限评估整批")
-
-    # 权限引擎 DENY 检查（优先于 bypass，deny 规则不可绕过）
-    if engine is not None:
-        engine.reload()
-        for tc in tool_calls:
-            try:
-                decision = engine.evaluate(tc["name"], tc.get("args", {}))
-                if decision == PermissionDecision.DENY:
-                    return "HumanApproval"
-            except Exception as e:
-                logger.error(
-                    "[PermissionCheck] DENY 前置检查异常 (%s): %s, 保守要求审批",
-                    tc["name"],
-                    e,
-                    exc_info=True,
-                )
-                # fail-closed：评估抛错时直接审批，否则该工具可能被下方只读短路
-                # 跳过完整评估而绕过它本应命中的 DENY 规则
-                return "HumanApproval"
-
-    # 只读工具跳过审批，直接执行（内部伪工具是安全框架控制流，视为只读参与短路）
-    if all(
-        is_internal_tool(tc.get("name", ""))
-        or not is_write_tool(tc.get("name", ""), tc.get("args", {}))
-        for tc in tool_calls
-    ):
-        return "ToolExecutor"
-
-    # bypass-immune 安全检查（所有模式都执行）
-    for tc in tool_calls:
-        args = tc.get("args", {})
-        try:
-            immune, reason = is_bypass_immune(tc["name"], args)
-        except Exception as e:
-            logger.error(
-                "[SafetyCheck] bypass-immune 检查异常 (%s): %s, 保守要求审批",
-                tc["name"],
-                e,
-                exc_info=True,
-            )
-            return "HumanApproval"
-        if immune:
-            logger.warning("[SafetyCheck] Bypass-immune: %s", reason)
-            return "HumanApproval"
-
-    # 持久记忆目录写入：所有模式自动放行（DENY / bypass-immune 已在上方短路，安全）。
-    # 记忆系统的价值在于不打断对话，故 write/edit 到 ~/.lumi/memory/<本项目>/ 不弹审批。
-    # 项目根取本 run 授权目录（与记忆注入同源），不依赖 engine 内部状态。
-    mem_project = get_authorized_directory()
-    if all(_is_memory_write(tc, mem_project) for tc in tool_calls):
-        return "ToolExecutor"
-
-    # 权限引擎完整评估（deny 已在上方处理，此处处理 allow/ask/unmatched）
-
-    if engine is not None:
-        # 引擎已在上方 DENY 预检处 reload；同一同步调用内 mtime 不变，无需再次 reload
-        has_deny = False
-        has_ask = False
-        all_allowed = True
-
-        for tc in tool_calls:
-            name = tc["name"]
-            args = tc.get("args", {})
-            try:
-                decision = engine.evaluate(name, args)
-                # 只读工具（read/vision 等）不受工作区边界限制：只读无破坏性，
-                # 可跨项目/读 URL；DENY 规则仍先于此拦截（上方 has_deny）。与 line 83 的
-                # 只读快路径一致（纯只读批次本就免边界，此处覆盖只读+写的混合批次）。
-                boundary_ok = not is_write_tool(
-                    name, args
-                ) or engine.check_workspace_boundary(name, args)
-                logger.debug(
-                    "[PermissionCheck] 工具 %s: decision=%s, boundary_ok=%s",
-                    name,
-                    decision.value,
-                    boundary_ok,
-                )
-                if decision == PermissionDecision.DENY:
-                    has_deny = True
-                    break
-                if decision == PermissionDecision.ASK:
-                    has_ask = True
-                # accept_edits = default + 工作区内的文件编辑视同 allow（显式 ask 规则照样审批）
-                edit_ok = (
-                    tool_mode == "accept_edits"
-                    and is_file_edit_tool(name)
-                    and decision == PermissionDecision.UNMATCHED
-                )
-                if (
-                    decision != PermissionDecision.ALLOW and not edit_ok
-                ) or not boundary_ok:
-                    all_allowed = False
-            except Exception as e:
-                logger.error(
-                    "[PermissionCheck] 工具 %s 权限评估异常: %s, 保守要求审批",
-                    name,
-                    e,
-                    exc_info=True,
-                )
-                # 评估异常时保守处理：所有模式都要求人工审批
-                return "HumanApproval"
-
-        # DENY：所有模式下路由到审批节点（节点内自动拒绝）
-        if has_deny:
-            return "HumanApproval"
-
-        # privileged 模式：ASK 仍需审批，其余自动放行
-        if tool_mode == "privileged":
-            if has_ask:
-                return "HumanApproval"
-            return "ToolExecutor"
-
-        # auto 模式：engine 已显式 ALLOW + 边界 OK 直接放行（用户明示信任，
-        # 等价 CC 的 rule-allow 先于分类器）；其余本该问人的批次交分类器裁决。
-        # DENY 与 bypass-immune 已在上方短路到 HumanApproval，对 auto 同样免疫。
-        if tool_mode == "auto":
-            if all_allowed:
-                return "ToolExecutor"
-            return "AutoClassify"
-
-        # default 模式：全部 ALLOW + 边界 OK 才直接执行
-        if all_allowed:
-            return "ToolExecutor"
-
-        return "HumanApproval"
-
-    # engine is None：privileged 放行，auto 交分类器，default/accept_edits 审批
-    if tool_mode == "privileged":
-        logger.warning("[is_use_tool] 权限引擎不可用，privileged 模式直接放行")
+    try:
+        decision = (
+            engine.evaluate(tool_call["name"], tool_call.get("args", {}))
+            if engine is not None
+            else PermissionDecision.UNMATCHED
+        )
+    except Exception:
+        logger.exception(
+            "[PermissionCheck] 工具 %s 权限评估失败，拒绝该调用", tool_call["name"]
+        )
+        return "Reject"
+    if decision == PermissionDecision.DENY:
+        return "Reject"
+    if decision == PermissionDecision.ALLOW or tool_mode == "privileged":
         return "ToolExecutor"
     if tool_mode == "auto":
-        logger.warning("[is_use_tool] 权限引擎不可用，auto 模式交分类器裁决")
         return "AutoClassify"
-    logger.warning("[is_use_tool] 权限引擎不可用，回退到人工审批")
+    if (
+        tool_mode == "accept_edits"
+        and decision == PermissionDecision.UNMATCHED
+        and is_file_edit_tool(tool_call["name"])
+    ):
+        return "ToolExecutor"
     return "HumanApproval"

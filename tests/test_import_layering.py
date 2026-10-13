@@ -15,11 +15,11 @@ def test_context_inject_imports_standalone():
     assert r.returncode == 0, r.stderr
 
 
-def test_permissions_workspace_stays_light():
+def test_runtime_workspace_stays_light():
     # 回归：permissions/__init__ 无人消费的 re-export 经 engine 把 PDF / MCP / 调度器
-    # 整棵拖进来，只想拿授权目录的模块也要付上千个模块的导入
+    # 整棵拖进来，只想拿项目目录的模块也要付上千个模块的导入
     r = _run(
-        "import sys, lumi.agents.permissions.workspace\n"
+        "import sys, lumi.agents.runtime.workspace\n"
         "print(sorted(m for m in ('fitz', 'mcp', 'apscheduler') if m in sys.modules))"
     )
     assert r.stdout.strip() == "[]", r.stdout + r.stderr

@@ -74,7 +74,6 @@ import { ContextMeter } from './components/ContextMeter'
 import { ProjectHomePage } from './components/ProjectHomePage'
 import { ProjectsPage } from './components/ProjectsPage'
 import { DirBrowser } from './components/DirBrowser'
-import { FolderMenu } from './components/FolderMenu'
 import { CommandMenu } from './components/CommandMenu'
 import { Composer } from './components/Composer'
 import { AppTitleBar } from './components/AppTitleBar'
@@ -173,10 +172,7 @@ export default function App() {
   // 项目页是被「新建会话」阻断跳转到的（而非用户主动点「项目」标签）时，顶部提示为什么在这里
   const [needProjectHint, setNeedProjectHint] = useState(false)
   const [showNewProject, setShowNewProject] = useState(false)
-  const [addingFolder, setAddingFolder] = useState(false) // 添加可访问目录的浏览器开关
   const [pendingRemoveProject, setPendingRemoveProject] = useState<Project | null>(null)
-  // 各会话临时添加的额外可访问目录（连接级状态的前端镜像）
-  const [folderStore, setFolderStore] = useState<Record<string, string[]>>({})
   const [input, setInput] = useState('')
   const [commands, setCommands] = useState<SlashCommand[]>([])
   const [cmdSel, setCmdSel] = useState(0)
@@ -321,8 +317,6 @@ export default function App() {
   const cronRefreshAtRef = useRef(new Map<string, number>()) // cron.jobs 本机经两条连接各来一次，按机器去重
   // 面板刷新信号合并：同一池的广播每条绑定连接各收一帧，微任务尾只发一次
   const mcpSignalQueuedRef = useRef(false)
-  // 临时目录是连接级（bridge 内存）状态：重连得到全新 bridge 后需重放，故镜像到 ref
-  const folderStoreRef = useLatest(folderStore)
 
   useEffect(() => {
     localStorage.setItem('lumi-cron-read-runs', JSON.stringify(readRuns))
@@ -555,7 +549,7 @@ export default function App() {
             /* 非法 URL：保留原始串，连接失败由 Gateway 的重连/failed 态呈现 */
           }
           const gw = new Gateway(connectUrl)
-          // 本连接所属会话的复合 key（backend+thread）——store/connsRef/folderStore 皆以此为键；
+          // 本连接所属会话的复合 key（backend+thread）——store/connsRef 皆以此为键；
           // 发给后端的 wire 仍用裸 thread（myThread）。
           const targetKey = targetThread ? sessionKey(backendId, targetThread) : ''
           // 创建即登记（不等 ready）：快速连点同一会话时 activate 的复用分支能立即命中，
@@ -618,9 +612,6 @@ export default function App() {
                     .switchSession(myThread, myWorkspace)
                     .then((r) => applySessionModel(myKey, r))
                     .catch(() => {})
-                  for (const f of folderStoreRef.current[myKey] ?? []) {
-                    void gw.addFolder(f)
-                  }
                   // 复位运行态：断连时 sendMessage 的 catch 已 resetRunning(false)，续接后
                   // 据后端实际运行态恢复 running（否则挂起轮被当空闲，stop 隐藏/输入栏启用）；
                   // 后端已空闲则收掉断开前残留的流式气泡 / 运行中工具卡。
@@ -1246,7 +1237,7 @@ export default function App() {
       .then((r) => applySessionModel(key, r))
       .catch((e) => console.error('set_session_model 失败:', e))
   }
-  // 项目主页没有「本会话」可切（active 还是上一个会话，改它是张冠李戴，同 FolderMenu /
+  // 项目主页没有「本会话」可切（active 还是上一个会话，改它是张冠李戴，同模型 /
   // ApprovalModePicker 的 !project 取舍）：那里选模型的意思是「我要开的新会话用它」，
   // 故改「新会话默认」。会话内切换直接生效，不弹确认（换模型可逆，不值得阻断）。
   const switchModel = (provider: string, model: string, project: boolean) => {
@@ -1572,32 +1563,6 @@ export default function App() {
     [gwForBackend],
   )
 
-  // 临时目录增减都发到当前会话的连接上（连接级/会话级状态），结果回写 folderStore
-  const applyFolderOp = useCallback(
-    async (op: (gw: Gateway) => Promise<{ folders: string[] }>) => {
-      const tid = activeRef.current
-      const gw = connsRef.current[tid]
-      if (!gw) return
-      try {
-        const r = await op(gw)
-        setFolderStore((s) => ({ ...s, [tid]: r.folders }))
-      } catch {
-        /* 忽略：连接波动时静默 */
-      }
-    },
-    [],
-  )
-
-  // 打开目录浏览器（浏览的是当前会话所在机器的文件系统，而非本地原生选择器）
-  const addFolder = useCallback(() => {
-    if (connsRef.current[activeRef.current]) setAddingFolder(true)
-  }, [])
-
-  const removeFolder = useCallback(
-    (path: string) => void applyFolderOp((gw) => gw.removeFolder(path)),
-    [applyFolderOp],
-  )
-
   // 在任务会话视图内切换到某次执行的会话（不改变 view），并标记该次执行为已读。
   // 已读集合封顶 500 条（对象按插入序，砍最旧的），避免 localStorage 无限增长。
   // 定时任务所属机器（操作/执行会话都路由到它）
@@ -1698,12 +1663,6 @@ export default function App() {
     connsRef.current[key]?.close()
     delete connsRef.current[key]
     setStore((s) => {
-      if (!(key in s)) return s
-      const n = { ...s }
-      delete n[key]
-      return n
-    })
-    setFolderStore((s) => {
       if (!(key in s)) return s
       const n = { ...s }
       delete n[key]
@@ -1866,7 +1825,8 @@ export default function App() {
       setSessions((prev) => [
         {
           thread_id: tid,
-          first_message: text,
+          // 摘要与后端一致，避免回复完成后标题跳变。
+          first_message: [...text].slice(0, 100).join(''),
           title: '',
           pinned: false,
           created_at: new Date().toISOString(),
@@ -2298,15 +2258,6 @@ export default function App() {
           >
             <Plus />
           </Button>
-          {/* 文件夹是会话级授权：项目主页发送前尚无会话可挂（active 是上个会话，
-              显示/改它都是错的），发送后可在聊天页添加。故项目模式下隐藏。 */}
-          {!project && (
-            <FolderMenu
-              folders={folderStore[active] ?? []}
-              onAdd={() => void addFolder()}
-              onRemove={(p) => void removeFolder(p)}
-            />
-          )}
           {/* 项目主页指向的是「新会话默认」（那里还没有会话，active 是上一个），
               聊天页指向本会话的模型 */}
           <ModelPicker
@@ -2805,19 +2756,6 @@ export default function App() {
           })}
           onPick={(p) => void createProject(p, basename(p), projectsMachine)}
           onCancel={() => setShowNewProject(false)}
-        />
-      )}
-      {addingFolder && (
-        <DirBrowser
-          gw={connsRef.current[active]}
-          title={t('folder.chooseOn', {
-            machine: machines.find((m) => m.id === activeBackend)?.name ?? activeBackend,
-          })}
-          onPick={(p) => {
-            void applyFolderOp((gw) => gw.addFolder(p))
-            setAddingFolder(false)
-          }}
-          onCancel={() => setAddingFolder(false)}
         />
       )}
       {pendingRemoveProject && (

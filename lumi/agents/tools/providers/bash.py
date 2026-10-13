@@ -9,7 +9,6 @@ from __future__ import annotations
 from langchain_core.tools import tool
 from pydantic import BaseModel, Field
 
-from lumi.agents.permissions.workspace import get_authorized_directory
 from lumi.agents.runtime.bg_process import get_bg_manager
 from lumi.agents.runtime.bg_tasks import current_thread_id
 from lumi.agents.runtime.shell_session import (
@@ -17,6 +16,7 @@ from lumi.agents.runtime.shell_session import (
     current_shell_key,
     get_shell_session_manager,
 )
+from lumi.agents.runtime.workspace import get_project_directory
 from lumi.agents.tools.shell_syntax import has_background_operator
 from lumi.utils.logger import logger
 
@@ -88,7 +88,7 @@ async def bash(
     120s；后台省略即不限时（后台常用于起服务/长跑，默认有界会被误杀）。
     """
     try:
-        working_dir = str(get_authorized_directory())
+        working_dir = str(get_project_directory())
         session_mgr = get_shell_session_manager()
         # shell 会话键：子代理用其专属 key（run_with_shell 注入，与父/兄弟隔离、用完回收），
         # 否则用本会话 thread。共用 "default" 时并发会话/子代理的 cd 会互相污染、相对路径

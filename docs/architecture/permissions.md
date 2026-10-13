@@ -1,6 +1,6 @@
 # 权限系统架构
 
-权限系统位于 `lumi/agents/permissions/`，负责在 Agent 执行工具调用前评估权限、检查工作区边界、保护敏感文件。本文档面向开发者，介绍内部架构、数据流和扩展方式。
+权限系统位于 `lumi/agents/permissions/`，负责在 Agent 执行工具调用前逐个评估权限。本文档面向开发者，介绍内部架构、数据流和扩展方式。
 
 用户使用指南见 [`docs/guides/permissions.md`](../guides/permissions.md)。
 
@@ -11,70 +11,32 @@
 ```
 lumi/agents/permissions/
 ├── models.py         # 数据模型：枚举、frozen dataclass、常量
-├── engine.py         # 权限引擎：协调配置加载、规则匹配、边界检查
+├── engine.py         # 权限引擎：协调配置加载、规则匹配
 ├── config_loader.py  # 三级配置加载、JSONC 解析、合并
 ├── matcher.py        # 规则匹配器：命令模式、路径模式
-├── boundary.py       # 工作区边界检查器：路径提取与边界判定
-├── routing.py        # route_decision：is_use_tool 的路由决策纯函数
-├── safety.py         # Bypass-immune 安全检查：受保护文件/命令检测
-├── validators.py     # Bash 命令安全警告（非阻断）
-└── workspace.py      # 授权路径管理（进程全局兜底 + per-run contextvar 覆盖，供 filesystem provider 使用）
+├── routing.py        # route_decision：单个工具调用的权限决策纯函数
+└── validators.py     # Bash 命令安全警告（非阻断）
 
-lumi/agents/tools/capability.py    # 只读/写入工具判定 + bash 复合命令拆分
-lumi/agents/tools/shell_syntax.py  # bash 保守词法切分（只读判定 / 规则匹配 / 边界 / 写保护共用）
+lumi/agents/runtime/workspace.py # 会话项目目录上下文与路径解析
+lumi/agents/tools/capability.py    # 文件编辑类型判定 + bash 复合命令拆分
+lumi/agents/tools/shell_syntax.py  # bash 保守词法切分（规则匹配与后台操作符检测共用）
 ```
 
 ---
 
-## 两层工具限制机制
+## 统一判定与逐个执行
 
-权限系统采用两层架构，各层职责独立：
+`routing.route_decision(tool_call, tool_mode, engine)` 独立判断一个调用：
 
-```
-Layer 1: 只读/写入判定 (capability.py)
-  ↓ 判断工具调用是否写入操作 → 只读则跳过审批直接执行
-Layer 2: 权限引擎 (engine.py)
-  ↓ 规则匹配 + 工作区边界 → allow/deny/ask/unmatched
-```
+| 规则 | default | accept_edits | privileged | auto |
+|---|---|---|---|---|
+| deny | 拒绝 | 拒绝 | 拒绝 | 拒绝 |
+| allow | 执行 | 执行 | 执行 | 执行 |
+| ask | 人工审批 | 人工审批 | 执行 | AI 审批 |
+| 未匹配 | 人工审批 | write/edit 执行，其余人工审批 | 执行 | AI 审批 |
 
-### Layer 1: 只读/写入判定（capability.py）
-
-权限系统不再用位标志声明工具副作用，而是用「只读 vs 写入」二分判定：只读工具跳过审批直接执行，写入工具走后续策略与权限引擎。
-
-核心常量与函数：
-
-```python
-# 无论参数如何，始终为只读的工具
-_ALWAYS_READONLY: frozenset[str] = frozenset({
-    "read", "vision", "skill", "agent",
-    "ask",
-})
-
-# 无论参数如何，始终为写入的工具
-_ALWAYS_WRITE: frozenset[str] = frozenset({"write", "edit"})
-
-# cron 中的只读操作
-_CRON_READONLY_OPS: frozenset[str] = frozenset({"list", "runs"})
-```
-
-`is_write_tool(tool_name, tool_args) -> bool`：
-- 在 `_ALWAYS_READONLY` 中 → 只读（False）
-- 在 `_ALWAYS_WRITE` 中 → 写入（True）
-- `bash` → 由 `is_readonly_command(command)` 动态判断
-- `cron` → `operation` 不在 `_CRON_READONLY_OPS` 中视为写入
-- 未知工具 → fail-closed，默认视为写入
-
-`is_file_edit_tool()` 仅判断 write/edit（不含 bash）。
-
-bash 命令统一经 `shell_syntax.parse_command` 切成子命令（`Segment`：原文 / 去引号的词 / 写重定向目标）。它不实现完整 bash 语法，只保证在「会执行哪些子命令、写哪些文件」上不比 bash 乐观：引号、转义、`$'…'`、注释与 heredoc 正文按 bash 规则处理；分隔符含 `&&`、`||`、`;`、`|`、`&`、换行与子 shell 括号；命令替换 / 进程替换 / 反引号里的命令作为独立子命令拆出；开头的 `if`/`then`/`do`/`!`/`{`/`time` 等关键字切掉（变量赋值前缀保留，它会改变命令行为）；值在执行时才确定的词（变量、命令替换）以 `DYNAMIC` 标记。
-
-`is_readonly_command(command)`：含 `$(`、反引号、`<(`、`>(` 一律非只读；否则每个子命令都须命中白名单 `_READONLY_COMMANDS`（按词匹配，如 `ls`、`git status`）、不带 `_UNSAFE_OPTIONS` 里有副作用的选项（`find -exec/-delete`、`rg --pre`、`fd -x`、`sort -o`、`git log --output` 等）、操作数不超过 `_MAX_OPERANDS`（`uniq IN OUT`），且没有写重定向（`2>/dev/null`、`2>&1` 不算）。能执行子命令、写文件或联网的程序（`xargs`、`env`、`awk`、`sed`、`curl`、`wget`、`dig`、`uv run …` 等）不在白名单，交审批模式裁决。
-
-`split_compound_command(command)` 返回各子命令原文，供权限引擎的复合命令评估逐个匹配规则——deny 规则因此看得到换行、命令替换、注释之后藏着的子命令。
-
-### Layer 2: PermissionEngine（engine.py）
-
-规则匹配 + 工作区边界检查，详见下文。
+没有只读免审、记忆写入免审或受保护路径的强制审批例外。权限评估失败只拒绝该调用。
+`capability.py` 保留文件编辑类型判定和 `split_compound_command`，后者用同一套 Shell 词法切分让 bash 子命令分别匹配配置规则；同一个 bash 调用仍以最严格的匹配结果整体裁决。
 
 ---
 
@@ -88,17 +50,17 @@ class PermissionDecision(Enum): # allow | deny | ask | unmatched
 
 @dataclass(frozen=True)
 class PermissionRule:           # tool: str, permission: Permission
-class PermissionConfig:         # workspaces: tuple[str], permissions: tuple[PermissionRule]
+class PermissionConfig:         # permissions: tuple[PermissionRule]
 ```
 
 常量：
-- `DEFAULT_RULES`：`cron`、`artifacts` 两条 ALLOW（artifacts 越界仍审批）
+- `DEFAULT_RULES`：`cron`、`artifacts`、`__structured_output__` 三条 ALLOW
 
 ---
 
 ## 权限引擎（engine.py）
 
-`PermissionEngine` 是权限系统的核心入口，协调配置加载、规则匹配和边界检查。
+`PermissionEngine` 是权限系统的核心入口，协调配置加载和规则匹配。
 
 ### 初始化
 
@@ -107,10 +69,9 @@ engine = PermissionEngine(project_dir=Path("."), user_config_dir=Path("~/.lumi")
 ```
 
 1. 通过 `ConfigLoader` 加载三级配置并合并
-2. 构建 `WorkspaceBoundary` 并同步到 `workspace.py` 的全局授权目录
-3. 配置加载失败时回退到无规则状态（所有调用返回 `unmatched`）
+2. 没有用户规则时保留内置 `DEFAULT_RULES`；其余调用返回 `unmatched`
 
-`rebase(project_dir)` 切换项目根目录：重载新目录的权限配置并重建工作区边界。
+`rebase(project_dir)` 切换项目根目录：重载新目录的权限配置。
 
 ### 评估流程
 
@@ -127,44 +88,13 @@ _STRICTNESS = {Permission.DENY: 0, Permission.ASK: 1, Permission.ALLOW: 2}
 
 复合命令严格度：`ANY deny → DENY; ANY ask → ASK; ANY unmatched → UNMATCHED; ALL allow → ALLOW`。
 
-### 边界检查
+### 项目与热重载
 
-`check_workspace_boundary(tool_name, tool_args) -> bool`:
+- `project_dir` — 引擎绑定的项目根，用于发现项目权限配置和解析路径规则。
+- `rebase(project_dir)` — 切换项目并重新加载配置。
+- `reload()` — 文件 mtime 变化后重载；加载异常时保留旧配置。
 
-1. `WorkspaceBoundary.extract_paths_from_tool_call()` 从工具参数提取路径：标量键 `_PATH_ARG_KEYS`（`file_path` / `path`）取字符串值，列表键 `_PATH_LIST_ARG_KEYS`（`filepaths`，如 `artifacts`）逐项提取；新增带路径参数的工具时须把对应键名登记进来，否则不参与边界检查。bash 取 `bash_write_targets(command, with_cwd=True)`：每个子命令的写重定向、写入类命令（`rm`/`mv`/`mkdir`/`touch`/`chmod`/`tee` 等）的路径参数、`cp`/`ln` 的目标与 `cd` 的目录；读取来源（`<` 输入、`cp` 的源、`cat` 的参数）不算，值未知的路径（`"$DIR"`）按越界处理
-2. 相对路径基于项目目录解析
-3. 逐个检查是否在任一工作区目录下
-4. 无法提取路径时视为边界内（不阻断）；解析异常时保守拒绝
-
-`get_boundary_violations()` 返回超出边界的路径列表，供审批 UI 展示。
-
-**边界与审批是两道正交的门，批准会连带放宽边界。** 权限规则（allow/ask/deny）与工作区边界各自独立否决：路由层要求 `decision == ALLOW && boundary_ok` 才直放，工具执行期 `filesystem/backend.py` 还会再过一次 `workspace.validate_path`。因此边界外的路径若只过审批不放宽边界，会同时踩两个坑——`write`/`edit` 在执行期照抛 `PermissionError`，而 default / auto 模式因 `boundary_ok` 恒 `False` 每轮重新回到审批，**连配置里写好的 allow 规则都永远不生效**。
-
-故**三条授权路径在放行前都放宽边界**，同调 `nodes._widen_boundary_for()` 把本批越界路径所在目录纳入本会话工作区：
-
-| 路径 | 挂钩点 |
-|---|---|
-| 人工审批 | `human_approval` 的 `approve` 分支 |
-| auto 分类器 | `auto_classify` 的 `approve` 分支 |
-| privileged | `is_use_tool` 路由出 `ToolExecutor` 时 |
-
-auto 模式的分类器裁决与人工审批同权——AI 判断即用户授权，否则 auto 模式会陷入「每轮重新送分类器、每轮白付一次模型调用，写操作却永远被 `validate_path` 拒」。privileged 是「自动放行」的显式授权，边界不该再当第二道门。
-
-**三条路径的放宽面完全一致，都只覆盖本批里 `is_local_path_tool()`（`write` / `edit` / `bash`）∩ `is_write_tool()` 的调用**，两个条件缺一不可：
-
-- **只读调用不放宽** —— 批次天然是混合的（纯只读批次在 `route_decision` 更早处就短路了），批准一次越界 `read` 不该换来该目录的**写**权限。
-- **只限已知的本机路径工具** —— MCP 等外部工具的 `path` / `file_path` 参数含义未知（可能是 URL、库名、远端路径），拿它去开本地目录写权限没有根据；而 `is_write_tool()` 对未知工具 fail-closed 恒 `True`，不显式限定工具名就会把每个带 `path` 参数的 MCP 调用都算进来。代价：`artifacts` 等其余受边界约束的工具越界时不放宽，需用户显式「添加文件夹」。
-
-实现走 `context.widen_boundary` 回调（由 bridge 在 `initialize` 注入 `FolderManager.widen_for_violations`，与 `approval_broker` 同一注入模式，子代理经 agent 工具传播）。最终落到与「添加文件夹」完全相同的 `add_ephemeral_workspace`（仅内存不持久化），故模型下一轮经 `folder_note` 会收到目录变更提醒。目录取法见 `folders._enclosing_dir`：路径本身是目录取自身，否则取最近的已存在祖先（越界路径常常整条尾巴都还不存在）；一路走到文件系统根仍不存在则放弃——把 `/` 纳入工作区等于关掉边界。
-
-分界是**有没有 bridge**，不是「是不是 cron」：`lumi serve` 下的 cron 整个 job 跑在 `AgentBridge` 上（审批模式跟随全局无人值守配置），已覆盖；真正落空的是 workflow 与后台子代理——这些路径无人值守，不该自行扩大文件系统访问面，正解是把目录预先写进 `permissions.json` 的 `workspaces`（持久化、跨 run 生效）。
-
-### 动态规则管理
-
-- `add_ephemeral_workspace(directory)` / `remove_ephemeral_workspace(directory)` — 会话级「添加文件夹」，存于引擎独立字段 `_ephemeral_workspaces`（仅内存、不持久化；与会被 `reload()`/`rebase()` 从磁盘覆盖的 `_config.workspaces` 分离，故跨配置重载/项目切换存活）
-- `authorized_directories()` — 返回本引擎当前边界（项目根 + 配置 workspaces + 会话级 ephemeral），即每轮 run 注入给 per-run 授权来源的值
-- `project_dir` — 本引擎绑定的项目根（会话级，随 `rebase` 变化）
-- `reload()` — 检查文件 mtime 变更后重新加载，重建边界失败时回滚旧配置
+项目目录用于确定配置和相对路径，不限制工具可访问的文件位置。写入项目外文件仍按同一套规则、审批模式评估。
 
 ---
 
@@ -183,7 +113,6 @@ auto 模式的分类器裁决与人工审批同权——AI 判断即用户授权
 
 ```jsonc
 {
-  "workspaces": ["/extra/dir"],
   "permissions": {
     "allow": ["read", "bash(npm *)"],
     "deny":  ["bash(rm -rf *)"],
@@ -194,15 +123,15 @@ auto 模式的分类器裁决与人工审批同权——AI 判断即用户授权
 
 ### 合并策略
 
-`_merge_configs(configs)` — 按优先级从低到高遍历，同一工具表达式的规则以最后出现的为准（后覆盖前），但 DENY 例外：同一表达式已有 DENY 时后来的 ALLOW/ASK 一律跳过，deny 规则不可被其他层（或同文件内）更低严格度的规则覆盖。最后追加 `DEFAULT_RULES` 中未被覆盖的规则。workspaces 取并集并去重。
+`_merge_configs(configs)` — 按优先级从低到高遍历，同一工具表达式的规则以最后出现的为准（后覆盖前），但 DENY 例外：同一表达式已有 DENY 时后来的 ALLOW/ASK 一律跳过，deny 规则不可被其他层（或同文件内）更低严格度的规则覆盖。最后追加 `DEFAULT_RULES` 中未被覆盖的规则。
 
 ### 持久化
 
-引擎不写配置文件：规则与 `workspaces` 只来自用户手写的三层 JSON，会话内的授权（审批放宽边界、「添加文件夹」）一律仅内存。
+引擎只读取三层 JSON 中的权限规则，不写配置。单次审批不修改规则。旧配置里的 `workspaces` 字段会被忽略，可删除。
 
 ### 热重载
 
-`needs_reload()` — 基于 mtime 检测文件变更（含文件被删除）。`PermissionEngine.reload()` 在每次 `is_use_tool()` 路由时调用，仅在文件变更时实际重新加载。重建边界检查器失败时回滚到旧配置。
+`needs_reload()` — 基于 mtime 检测文件变更（含文件被删除）。`PermissionEngine.reload()` 在 `ToolExecutor` 每批调用开始时执行，仅在文件变更时实际重新加载。加载异常时保留旧配置。
 
 ---
 
@@ -238,46 +167,6 @@ auto 模式的分类器裁决与人工审批同权——AI 判断即用户授权
 
 ---
 
-## 工作区边界检查（boundary.py）
-
-`WorkspaceBoundary` 从工具调用中提取路径并检查边界：
-
-### 路径提取
-
-- 文件工具：从 `file_path` / `path` 标量键、`filepaths` 列表键提取
-- bash 工具：解析命令字符串，识别已知路径操作命令（`_BASH_PATH_COMMANDS`：`ls`、`cat`、`cd`、`cp`、`mv`、`rm`、`mkdir`、`touch`、`chmod`、`chown`），提取非标志参数
-  - 跳过 `sudo` 和 env 赋值前缀
-  - 识别重定向符号（`>`、`>>` 等）后的路径
-  - 识别 heredoc 操作符（`<<`），截断 heredoc 内容
-  - 遇到管道/分号停止解析
-  - shlex 解析失败时返回哨兵路径 `Path("/⟨unparseable-command⟩")`（视为越界）
-
-### 边界判定
-
-`is_within_boundary(path)` — `Path.resolve()` 后逐个检查是否为某个工作区目录的子路径（`relative_to()`）。
-
----
-
-## Bypass-immune 安全检查（safety.py）
-
-即使 privileged 模式也不可跳过的硬安全边界。仅检查写入类操作（read 不阻断），所有检查都是纯字符串/路径比较，不执行任何命令。
-
-`is_bypass_immune(tool_name, tool_args) -> (bool, str)`:
-
-### write/edit 工具
-
-目标路径按工具执行同一口径归一（展开 `~`、相对路径基于项目根、resolve `..`；同时比对完全 resolve 与只 resolve 父目录两种形态，符号链接两头都拦）后，检查是否在受保护列表中：
-- Home 目录精确匹配（`_PROTECTED_HOME_PATHS`）：`.bashrc`、`.bash_profile`、`.zshrc`、`.zprofile`、`.profile`、`.login`、`.gitconfig`
-- Home 目录前缀匹配（`_PROTECTED_HOME_PREFIXES`）：`.ssh/`、`.gnupg/`
-- 项目路径匹配（`_PROTECTED_PROJECT_PATHS`，任意目录下同名即命中，含 `~/.lumi/` 全局层）：权限规则 `.lumi/permissions.json`、`.lumi/permissions.local.json`，以及会自动执行命令的配置 `.lumi/hooks.json`、`.lumi/hooks.local.json`、`.lumi/mcp_server.json`、`.lumi/config.json`（`env` 注入进程环境）、`.git/config`；前缀 `.git/hooks/`
-
-### bash 工具
-
-1. 危险命令模式（`_DANGEROUS_COMMAND_PATTERNS`）：`curl ... | sh`、`wget ... | bash`
-2. 写入受保护路径检测：`bash_write_targets(command)`（与边界检查同源，含重定向、`tee`、`sed -i`、`cp`/`mv`/`rm` 等）的每个目标按上述同一口径归一后比对；值未知的目标（`$HOME/.bashrc`）按静态尾部比对。相对路径以项目根为基准——shell 此前 cd 到别处无从得知，属尽力而为
-
----
-
 ## Bash 安全警告（validators.py）
 
 `validate_bash_command(command) -> list[SafetyWarning]`
@@ -286,88 +175,36 @@ auto 模式的分类器裁决与人工审批同权——AI 判断即用户授权
 
 ---
 
-## 授权路径管理（workspace.py）
+## 项目目录上下文（runtime/workspace.py）
 
-filesystem provider 的 `validate_path()` 与 bash 工作目录都经此读取授权目录。**两层来源，读取时 per-run 覆盖优先于进程全局兜底**：
+`set_project_source()` 在每轮 run 起点注入项目目录回调，`get_project_directory()` 读取该目录；直接调用 Graph 时从运行时 context 的权限引擎或 `project_dir` 取项目，无 run 上下文时退回进程 cwd。bridge 注入本会话的 `workspace_dir` 来源，dream 注入自己的项目目录。contextvar 隔离并发 run，子任务继承上下文，回调可反映项目切换。
 
-- **进程全局兜底** `_authorized_directories`：无 run 上下文时使用（测试、启动期），由 `PermissionEngine._rebuild_boundary()` 在初始化/重载时经 `set_authorized_directory()`（重置为主目录）+ `add_authorized_directory()`（追加）同步。
-- **per-run 覆盖** `_run_authorized_source` contextvar：每次 agent run 由 bridge 在 `_stream` 起点（`lumi serve` 下的 cron 经 `cron_stream` 同样跑在 `AgentBridge` 上）经 `set_run_authorized_source_for(engine, extra_folders)` 注入本会话引擎的 `authorized_directories` 方法（**实时回调，非快照**）。设置后覆盖兜底。
+`resolve_tool_path()` 统一展开 `~`、归一化 `..` 和符号链接，相对路径基于项目根，绝对路径可指向任意目录。文件工具读取、写入和编辑都用同一解析口径；Bash 用项目目录作为初始 cwd。路径解析不做范围校验，实际访问受操作系统权限约束。
 
-读取 API（`get_authorized_directory()` / `get_all_authorized_directories()` / `validate_path()`）一律走「run 覆盖 → 全局兜底 → cwd」三级。
-
-**为什么用 per-run contextvar 而非纯进程全局**：一个 `lumi serve` 进程承载多条 WS 连接（每连接一个 bridge / engine），项目随会话绑定（见 [desktop.md](desktop.md)）。若各 engine 都只写同一个进程全局，并发会话会互相清洗——A 会话「添加的目录」会被 B 会话重建边界时抹掉。contextvar 按 run 隔离，各读各的引擎边界；存**实时回调**而非快照，使后台子代理（`asyncio.create_task` 拷贝上下文）与跨工具步 `reload()` 都能即时看到引擎边界的变化。
-
-`set_run_authorized_source_for(engine, ...)` 是 run 起点的统一封装：有引擎注入其实时回调；无引擎（构造失败的降级态）降级为 `[cwd, *extra_folders]` 的本轮快照。
-
-> 子代理另经 `shell_session.run_with_shell` 在 `copy_context` 副本里隔离各自的 shell 会话（`cd`/env 不串父/兄弟、用完回收），见 [desktop.md](desktop.md)。
+子代理另经 `shell_session.run_with_shell` 隔离各自的 shell 会话（`cd`/env 不串父/兄弟、用完回收），见 [desktop.md](desktop.md)。
 
 ---
 
 ## Graph 节点集成
 
-路由决策在 `lumi/agents/permissions/routing.py` 的 `route_decision()`；`lumi/agents/core/nodes.py` 的 `is_use_tool()` 条件边只是薄壳（无 tool_calls 时直接返回 OnAgentStop，其余交给 `route_decision`）。结构化输出已改为真工具（内部伪工具 `__structured_output__`），不再有独立的 `ExtractStructuredOutput` 节点：
+`is_use_tool()` 在无 tool_calls 时返回 `OnAgentStop`，有调用时统一进入 `ToolExecutor`。
+权限决策和实际执行都在 `tool_executor()` 内按调用并发进行：
 
-```
-路由优先级：
+1. 批次开始时 `engine.reload()` 热重载配置。
+2. 每个调用读取当前有效审批模式，经 `route_decision()` 判定。
+3. DENY / 评估错误只为该调用生成拒绝 ToolMessage；ALLOW / 特权放行立即通过 ToolNode 执行。
+4. AI 审批每次只收到一个调用；approve 后立即执行，reject / 调用失败仅拒绝当前调用。
+5. 人工审批仅发送需要审批的调用，独立等待 Broker；拒绝不影响兄弟调用。
+6. 汇总结果：按原调用顺序排列全部 ToolMessage，然后追加图片回灌与 hook reminder，保证 provider 配对协议。
 
-1. 无 tool_calls → OnAgentStop（分发 Stop hooks，默认 END）
-2. 纯内部伪工具（如结构化输出）→ ToolExecutor（闭包内自校验，绕过权限审批）；
-   内部工具与其他工具混合的批次不绕过，落到下方正常评估
-3. 权限引擎 DENY 前置检查（所有模式）→ 命中或评估异常则 HumanApproval（deny 不可绕过，先于只读短路）
-4. 全部只读工具（Layer 1: is_write_tool 全 False）→ ToolExecutor
-5. bypass-immune 安全检查（所有模式）→ 命中则 HumanApproval
-6. 全部是写入本项目记忆目录的 write/edit → ToolExecutor（所有模式）
-7. 权限引擎完整评估:
-   ├─ 有 DENY → HumanApproval（节点内自动拒绝）
-   ├─ privileged 模式: ASK → HumanApproval，其余 → ToolExecutor
-   ├─ auto 模式: 全部 ALLOW + 边界 OK → ToolExecutor，否则 → AutoClassify
-   ├─ default 模式: 全部 ALLOW + 边界 OK → ToolExecutor，否则 → HumanApproval
-   └─ accept_edits 模式: 同 default，另把工作区内未命中规则的文件编辑(write/edit)视同 ALLOW
-      （allow 规则照常生效，显式 ask 规则照样审批）
-8. 引擎不可用: privileged → ToolExecutor，auto → AutoClassify，其余 → HumanApproval
-```
+`human_approval()` 与 `auto_classify()` 是执行器调用的审批辅助函数，不再是整批路由节点。只有全部未执行且存在人工拒绝时才结束本轮；规则 / AI 拒绝继续回模型。用户停止通过 Broker 的 `stop` 标记结束本轮，即使已有其他调用执行，也不继续调用模型。
 
-关键设计：
-- `engine.reload()` 在路由入口调用，实现热重载
-- DENY 预检在只读短路之前，确保 deny 规则对只读工具也生效
-- bypass-immune 检查在只读短路之后、记忆目录放行与所有模式策略之前
-- 异常时保守处理：评估失败 → 要求人工审批
+图保留旧 `HumanApproval` / `AutoClassify` 节点名作为新执行器的别名，仅用于读取和恢复旧 checkpoint；新调用统一进入 `ToolExecutor`。
 
-### HumanApproval 节点
+`effective_tool_mode()` 统一选择无人值守模式：无审批通道且模式为 default / accept_edits 时读取全局设置，显式 auto / privileged 保留。前台子代理共享父会话实时模式；后台子代理、workflow 和 cron 使用同一套规则。`allow` 调用无需任何审批通道，人工审批无通道时只拒绝当前调用。
 
-`is_use_tool()` 在调用纯路由决策前统一选择无人值守模式：若 `approval_broker is None` 且模式为 `default` / `accept_edits`，改用 `GlobalConfigManager.load().unattended_tool_mode`（默认 `auto`）；显式 `auto` / `privileged` 保留。前台子代理经 `create_subagent(..., interactive=True)` 共享父 broker 与实时模式；后台子代理和 workflow 保持独立、无 broker，由统一路由读全局设置。飞书的 bridge 以 `interactive=False` 创建，审批在图内收尾，outbound 不再截获审批事件。
-
-`human_approval()` 先做 DENY 二次检查（命中直接构造拒绝 ToolMessage 并 `Command(goto="CallModel")` 让模型调整）；无审批通道（`context.approval_broker` 为 None，如后台子代理）自动拒绝 → CallModel；否则经 `ApprovalBroker` 原地 await 用户应答（`decisions` 逐个裁决，见 [approval-inflight.md](approval-inflight.md)）。应答为 `{"decision" | "decisions", "message", "set_tool_mode"}`，缺项按拒绝。
-
----
+PreToolUse / PostToolUse hooks 保持其既有语义；非阻断 Bash 告警继续在审批 UI 中展示。
 
 ## 扩展指南
 
-### 添加新的只读工具
-
-在 `capability.py` 的 `_ALWAYS_READONLY` 中加入工具名，即可跳过审批直接执行：
-
-```python
-_ALWAYS_READONLY = frozenset({..., "my_readonly_tool"})
-```
-
-### 添加新的 bash 只读命令
-
-在 `capability.py` 的 `_READONLY_COMMANDS` 列表中添加命令（多词如 `"git status"` 按词匹配）；该命令若有能执行子命令或写文件的选项，同时登记进 `_UNSAFE_OPTIONS`：
-
-```python
-_UNSAFE_OPTIONS = {..., ("my-readonly-cmd",): ("--exec", "-o")}
-```
-
-### 添加 bypass-immune 受保护路径
-
-在 `safety.py` 的 `_PROTECTED_HOME_PATHS`、`_PROTECTED_HOME_PREFIXES`、`_PROTECTED_PROJECT_PATHS` 或 `_PROTECTED_PROJECT_PREFIXES` 中添加。
-
-### 添加危险 bash 命令警告
-
-在 `validators.py` 的 `_DANGER_PATTERNS` 中添加 `(re.compile(...), level, message)` 元组。
-
-### 添加新的路径操作命令（边界检查）
-
-在 `boundary.py` 的 `_BASH_PATH_COMMANDS` 中添加命令名。
-
+新增工具无需登记只读豁免。需要默认允许的工具可以在 `models.DEFAULT_RULES` 中定义显式 ALLOW，用户配置仍可覆盖。危险命令的提示在 `validators.py` 中添加，不改变权限裁决。

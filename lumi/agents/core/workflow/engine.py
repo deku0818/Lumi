@@ -8,7 +8,7 @@
 安全靠隔离不靠禁止：受限命名空间去掉 ``import`` / ``open`` 等无关内建，**只为避免误触、
 不是安全边界**——编排脚本由受信的主 agent（LLM）生成（与 bash 工具同级），蓄意脚本仍可经
 语言级 dunder 遍历逃逸回主进程，故**绝不可喂不可信脚本**。子代理复用父 ``PermissionEngine``，
-工具调用仍受工作区边界 + 权限规则约束。
+工具调用仍受权限规则约束。
 
 > 移植自 Claude Code 内置 Workflow 工具的设计；本版不含 ``run`` / ``sh`` 确定性执行层
 > （Lumi 无沙箱）——确定性重活由 ``agent()`` 子代理经其工具完成。
@@ -162,8 +162,7 @@ class WorkflowEngine:
         depth: int = 1,
     ) -> None:
         self._script = script
-        # 父 context：子代理经 create_subagent 复用其 PermissionEngine（共享工作区边界 +
-        # 权限规则，故读得到父正在处理的工作文件——review/audit 类编排能跑的前提）、
+        # 父 context：子代理经 create_subagent 复用其 PermissionEngine（共享权限规则）、
         # 项目根（MCP 分层加载/冷池等待随父项目走）与渠道 env
         self._parent = parent or LumiAgentContext()
         self._args = args

@@ -98,7 +98,6 @@ export function ApprovalDialog({
 function CallDetail({ call }: { call: ToolCallBrief }) {
   const { t } = useI18n()
   const args = argEntries(call)
-  const boundary = call.boundary_violations ?? []
   return (
     <>
       <div className="mb-3 mt-0.5 flex items-center gap-2.5">
@@ -121,12 +120,6 @@ function CallDetail({ call }: { call: ToolCallBrief }) {
               <FoldValue text={argText(v)} />
             </div>
           ))}
-        </div>
-      )}
-      {boundary.length > 0 && (
-        <div className="mt-2.5 text-xs text-error">
-          ⚠ {t('approval.boundary')}
-          {boundary.join('、')}
         </div>
       )}
       {(call.warnings ?? []).map((w, i) => (

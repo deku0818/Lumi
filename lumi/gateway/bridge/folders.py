@@ -1,8 +1,4 @@
-"""Folder / workspace 管理：会话项目切换与本会话临时可访问目录。
-
-临时目录状态（``extra_folders`` / 已通知快照）归本类所有；bridge 反向引用只用来
-触达运行时 context（权限引擎）与项目切换的连带动作（MCP 池 / checkpoint 元数据 / shell）。
-"""
+"""会话项目切换与 Ultra 模式提醒。"""
 
 from __future__ import annotations
 
@@ -18,41 +14,19 @@ if TYPE_CHECKING:
     from lumi.agents.permissions.engine import PermissionEngine
     from lumi.gateway.bridge.core import AgentBridge
 
-# 真实用户消息 additional_kwargs 上的 marker：本轮起模型已知的额外目录 / Ultra 状态
+# 真实用户消息 additional_kwargs 上的 marker：本轮起模型已知的 Ultra 状态
 REMINDED_KEY = "lumi_reminded"
 
 
-def _enclosing_dir(path: str) -> Path | None:
-    """越界路径对应的应授权目录：目录取自身，文件 / 待创建路径取最近的已存在祖先。
-
-    取「最近的已存在祖先」而非直接 parent，是因为越界路径常常整条尾巴都还不存在
-    （``write /b-dir/new/deep/x.txt``），拿不存在的 parent 去 add_folder 只会失败。
-    一路走到文件系统根仍不存在则放弃——把 ``/`` 加进工作区等于关掉边界，远超出
-    「放宽该目录」的授权语义。
-    """
-    resolved = Path(path).expanduser().resolve()
-    # 用 anchor 而非 root：Windows 下 root 只有 \，与盘符根 D:\ 永远等不上
-    root = Path(resolved.anchor)
-    for candidate in (resolved, *resolved.parents):
-        if candidate == root:
-            return None
-        if candidate.is_dir():
-            return candidate
-    return None
-
-
 class FolderManager:
-    """工作目录切换与本会话临时目录管理。"""
+    """会话工作目录切换与 Ultra 模式提醒。"""
 
     def __init__(self, bridge: AgentBridge) -> None:
         self._bridge = bridge
-        # 本会话临时添加的额外可访问目录（不持久化，连接断开即失效）
-        self.extra_folders: list[str] = []
 
     @property
     def _engine(self) -> PermissionEngine | None:
-        """本会话的权限引擎；``initialize()`` 之前为 None——此时只记账不同步引擎，
-        建连后的首次 initialize 会按 extra_folders 重放。"""
+        """本会话的权限引擎，initialize 之前为 None。"""
         context = self._bridge._context
         return context.permission_engine if context is not None else None
 
@@ -62,7 +36,7 @@ class FolderManager:
         只 rebase 本 bridge 的权限引擎、重载本会话项目的 config hooks、重建系统提示词
         （项目层 SOUL/AGENTS + 记忆目录）、更新 checkpoint 元数据、重置本会话当前
         thread 的持久 shell（原地改项目时它仍驻留旧目录）。
-        **不动进程 cwd、不重建其它会话的边界、不碰进程级 hooks**——多会话各绑各项目，
+        **不动进程 cwd、不碰其它会话与进程级 hooks**——多会话各绑各项目，
         互不影响。
         """
         b = self._bridge
@@ -84,71 +58,15 @@ class FolderManager:
         return {"workspace": str(target)}
 
     def rebase_workspace(self, target: Path) -> None:
-        """把本 bridge 的权限引擎 + config hooks 重建到 target（会话级，不动进程）。
-
-        engine.rebase 只重载新项目的持久化配置，会话级 ephemeral workspace
-        （「添加文件夹」）存于引擎独立字段、跨 rebase 自动保留，无需重新加回。
-        config hooks 与引擎独立，随项目切换重载（下一轮 _stream 注入 per-run）。
-        """
+        """重建本会话的权限引擎和 config hooks，不改变进程 cwd。"""
         self._bridge._config_hooks = build_config_hooks(target)
         engine = self._engine
         if engine is not None:
             engine.rebase(target)
 
-    def add_folder(self, path: str) -> dict:
-        """临时把目录加进本会话可访问范围（仅内存，不持久化）。"""
-        target = Path(path).expanduser().resolve()
-        if not target.is_dir():
-            raise ValueError(f"目录不存在: {target}")
-        folder = str(target)
-        if folder not in self.extra_folders:
-            self.extra_folders.append(folder)
-            engine = self._engine
-            if engine is not None:
-                engine.add_ephemeral_workspace(folder)
-        return {"folders": list(self.extra_folders)}
-
-    def widen_for_violations(self, violations: list[str]) -> None:
-        """批准越界操作 → 把路径所在目录纳入本会话工作区，等价于替用户点「添加文件夹」。
-
-        为什么批准必须连带放宽边界见 docs/architecture/permissions.md。
-        """
-        for raw in violations:
-            directory = _enclosing_dir(raw)
-            if directory is not None:
-                self.add_folder(str(directory))
-
-    def remove_folder(self, path: str) -> dict:
-        """移除临时添加的目录。"""
-        folder = str(Path(path).expanduser().resolve())
-        if folder in self.extra_folders:
-            self.extra_folders.remove(folder)
-            engine = self._engine
-            if engine is not None:
-                engine.remove_ephemeral_workspace(folder)
-        return {"folders": list(self.extra_folders)}
-
     def reminded_state(self) -> dict:
-        """本轮起模型应知的额外目录 / Ultra 状态（挂在注入提醒的用户消息上作 marker）。"""
-        return {"folders": list(self.extra_folders), "ultra": self._ultra_active()}
-
-    def folder_note(self, known: list[str]) -> str:
-        """与模型已知的额外目录做差，生成 system-reminder 文本（无变更返回空串）。
-
-        添加后又移除的目录自然抵消，不产生提醒。
-        """
-        added = [f for f in self.extra_folders if f not in known]
-        removed = sorted(set(known) - set(self.extra_folders))
-        if not added and not removed:
-            return ""
-        lines: list[str] = []
-        if added:
-            lines.append("用户已将以下目录添加到本会话可访问范围：")
-            lines.extend(f"- {f}" for f in added)
-        if removed:
-            lines.append("用户已将以下目录从本会话可访问范围移除：")
-            lines.extend(f"- {f}" for f in removed)
-        return "<system-reminder>\n" + "\n".join(lines) + "\n</system-reminder>\n"
+        """本轮起模型应知的 Ultra 状态（挂在注入提醒的用户消息上作 marker）。"""
+        return {"ultra": self._ultra_active()}
 
     def ultra_note(self, known: bool) -> str:
         """Ultra 档位开/关切换时的边沿编排提醒（缓存安全）。

@@ -30,12 +30,12 @@ def _cfg(name: str, desc: str, path: str | None = None) -> SimpleNamespace:
 
 @contextmanager
 def _patched(agents=(), skills=(), project_dir=None):
-    """mock 加载缓存单例 + 授权目录；project_dir=None 时记忆索引为空。"""
+    """mock 加载缓存单例 + 项目目录；project_dir=None 时记忆索引为空。"""
     proj = project_dir or Path("/nonexistent-proj")
     with (
         patch.object(context_inject.AgentChangeDetector, "get_instance") as ai,
         patch.object(context_inject.SkillChangeDetector, "get_instance") as si,
-        patch.object(context_inject, "get_authorized_directory", return_value=proj),
+        patch.object(context_inject, "get_project_directory", return_value=proj),
     ):
         ai.return_value.peek.return_value = list(agents)
         si.return_value.peek.return_value = list(skills)
@@ -392,7 +392,7 @@ async def test_reinjects_into_pending_human_after_mid_turn_compaction():
 
 
 async def test_announced_lists_use_session_project_like_the_tools():
-    # 回归：注入按授权目录（无项目时是进程 cwd）列技能 / 子代理，skill / agent 工具却按
+    # 回归：注入按项目目录（无项目时是进程 cwd）列技能 / 子代理，skill / agent 工具却按
     # 会话 context.project_dir 查——CLI 等无项目场景宣告了 cwd 下的技能，调用时却「不存在」
     rt = _runtime(tools=[SimpleNamespace(name="agent")])
     rt.context.project_dir = None

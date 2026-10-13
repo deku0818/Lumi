@@ -68,7 +68,7 @@ Lumi 后端真实结构 = **以 `agents/core` LangGraph 图为中枢、向外辐
 | M1 | 职责过载大文件群 | `nodes 773` · `checkpoint 700` · `session 660` · `filesystem 1073` · `scheduler 648` · `engine 424` |
 | M2 | 进程级广播 `_bg_dirty`/`_desktop_delivery`/`_broadcast_tasks` 绑死 WS 模块全局 | `server/ws.py` |
 | M3 | cron CRUD 双实现（工具 vs `cron_rpc.py`），校验语义已分叉 | `tools/providers/cron.py`, `server/cron_rpc.py` |
-| M4 | `workspace.py` 全局可变状态 = 第二事实源，多 Engine 互相覆盖 | `permissions/workspace.py`, `engine.py` |
+| M4 | 已移除目录授权全局状态，项目上下文按 run 隔离 | `runtime/workspace.py`, `engine.py` |
 | M5 | 相对时间格式化两份重复且不一致（`5 minutes ago` vs `5m ago`） | `sessions/session_store.py`, `runtime/checkpoint.py` |
 | M6 | 卸载/截断逻辑两份重复（时间戳精度不一致），后者还是死代码 | `core/node_helpers/execution.py`, `messages.py` |
 | M7 | `filesystem` `GrepInput` 12 字段声明两遍须手工同步 | `tools/providers/filesystem/__init__.py` |
@@ -163,7 +163,7 @@ lumi/
 
 - **core/**：`is_use_tool` 180 行权限路由下沉 permissions 为 `route_decision(...)` 纯函数，消除 core→permissions 延迟 import；合并 H8 两遍评估；`preprocessing/` 与 `node_helpers/` 边界重划合并 message_injection；清 `SimpleAgent` 残留。
 - **tools/**：`filesystem/__init__.py`(1073) 拆 backend/grep/media_read/tools；删 mcp 死代码；`capability.py` 硬编码集合 → 每个 tool 自带 readonly metadata（单一事实源）+ 收紧 curl/wget；抽后台任务启动样板。
-- **permissions/**：接收下沉的 `route_decision`；消除 `workspace.py` 全局可变（修子 Agent 串扰）；`__init__` 不再 re-export tools 符号；重写 permissions.md。
+- **permissions/**：接收下沉的 `route_decision`；移除目录授权全局状态，项目上下文迁入 `runtime/workspace.py`（隔离并发 run）；`__init__` 不再 re-export tools 符号；重写 permissions.md。
 - **runtime/**：`session.py`(660) 拆 shell/bg；`checkpoint.py`(700) 拆持久化/diff/管理器/清理；`_atomic_write_json` → `utils/atomic_io.py`；`provider_store`+`model_*` 合并到 `lumi/models/`。
 - **cron/**：`scheduler.py`(648) 拆 JobRunner/重试/Compensation/锁；抽 `CronService` 统一 CRUD（消除 M3）；统一 logger。
 - **hooks/workflow**：删未接线事件 + `side_effect` 死分支；抽共享 `run_subprocess_with_timeout`（5 处重复 SIGTERM→SIGKILL）；`WorkflowEngine` 拆 SubAgentFactory + ProgressTracker。
@@ -179,7 +179,7 @@ lumi/
 `_atomic_write_json` → `utils/atomic_io.py`（5 importer 改路径）；统一相对时间格式化为单一 util；统一卸载实现（删死拷贝）；统一 logger 获取；收敛 `PATH_ARG_KEYS`/能力常量单点。
 
 ### 阶段 2 — 拆大文件（行为不变）
-filesystem→4 模块；session 拆 shell/bg；checkpoint 拆 4 层；scheduler 拆 JobRunner 等；nodes 权限路由下沉 permissions + 合并两遍评估；engine 抽边界公共方法 + 删防御代码。**前置补测**：先补 `sessions/`/`ws.py`/`bridge.py` 覆盖作安全网。
+filesystem→4 模块；session 拆 shell/bg；checkpoint 拆 4 层；scheduler 拆 JobRunner 等；nodes 权限路由下沉 permissions + 合并两遍评估；engine 专注权限规则 + 删防御代码。**前置补测**：先补 `sessions/`/`ws.py`/`bridge.py` 覆盖作安全网。
 
 ### 阶段 3 — 收拢模型层 + 合并双实现
 建 `lumi/models/`（移 model_*+provider_store+llm_chain）；抽 `CronService` 统一 cron CRUD；`events.json` 补 payload 类型 + `WireEvent` discriminated union。
@@ -194,5 +194,5 @@ filesystem→4 模块；session 拆 shell/bg；checkpoint 拆 4 层；scheduler 
 - **命名**：import-as 全面禁止（ruff ICN）；`runtime/session.py`→`shell_session.py`、`SessionManager`→`ShellSessionManager`（与 `lumi/sessions/` 区分）；跨模块复用符号去下划线放公共位置；`EventKind` 成员名 = wire 值（`CLARIFY_REQUEST`）。
 - **目录**：测试镜像源码分层 `tests/{gateway,core,tools,...}/`；`__init__.py` 门面策略统一（不混用 re-export 与全路径）。
 - **分层单向**：`utils` ← `models` ← `agents/*` ← `gateway`；函数体内延迟 import = 边界划错红旗，重构后消除。
-- **事实源单点**：tool readonly metadata / WorkspaceBoundary / `provider_store.resolve` / `utils/atomic_io` / 相对时间格式化各唯一来源。
+- **事实源单点**：tool readonly metadata / 项目路径解析 / `provider_store.resolve` / `utils/atomic_io` / 相对时间格式化各唯一来源。
 - **文档同步**：`protocol/events.json` 协议唯一事实源；架构文档随重构更新，加 CI 校验「文档引用的 `lumi/**.py` 路径真实存在」防漂移。

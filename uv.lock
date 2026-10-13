@@ -838,7 +838,7 @@ wheels = [
 
 [[package]]
 name = "lumi-harness"
-version = "0.2.135"
+version = "0.2.136"
 source = { editable = "." }
 dependencies = [
     { name = "apscheduler" },

@@ -1,4 +1,5 @@
-from dataclasses import replace
+import asyncio
+from dataclasses import dataclass, replace
 from typing import Literal
 
 from langchain_core.callbacks import adispatch_custom_event
@@ -52,7 +53,6 @@ from lumi.agents.core.structured_tool import (
 )
 from lumi.agents.permissions.models import PermissionDecision
 from lumi.agents.permissions.routing import route_decision
-from lumi.agents.tools.capability import is_local_path_tool, is_write_tool
 from lumi.models.chain import structured_output, tool_call_chain
 from lumi.models.manager import detect_protocol
 from lumi.models.provider_store import resolve, resolve_pointer
@@ -210,15 +210,7 @@ async def _pre_tool_hooks(
         return cmd, []
     existing = _cmd_messages(cmd)
     reason = next((m.content for m in existing if isinstance(m, AIMessage)), "blocked")
-    tool_msgs = [
-        ToolMessage(
-            content=reason,
-            tool_call_id=tc.get("id", ""),
-            name=tc["name"],
-            status="error",
-        )
-        for tc in pending
-    ]
+    tool_msgs = build_reject_messages(pending, content=reason)
     return _halt({**(cmd.update or {}), "messages": [*tool_msgs, *existing]}), []
 
 
@@ -254,6 +246,13 @@ def _split_tool_output(output) -> tuple[list[ToolMessage], list[Command]]:
     commands = [it for it in items if isinstance(it, Command)]
     messages = [m for it in items if isinstance(it, dict) for m in it["messages"]]
     return messages, commands
+
+
+@dataclass(frozen=True)
+class _ToolCallResult:
+    output: dict | list | Command
+    executed: bool = False
+    end_requested: bool = False
 
 
 async def tool_executor(
@@ -292,10 +291,35 @@ async def tool_executor(
 
     tool_node = ToolNode(tools, handle_tool_errors=handle_tool_error)
     # 直接喂 ToolCall 列表：只跑未应答的；工具注入的 state 由 ToolNode 从 config 读真实图状态
-    output = await tool_node.ainvoke(
-        [{**tc, "type": "tool_call"} for tc in pending], config
-    )
-    tool_messages, commands = _split_tool_output(output)
+    engine = runtime.context.permission_engine
+    if engine is not None:
+        engine.reload()
+
+    async def execute_one(tc: dict) -> _ToolCallResult:
+        route = route_decision(tc, effective_tool_mode(runtime.context), engine)
+        if route == "Reject":
+            messages = build_reject_messages(
+                [tc], content="此调用被权限策略拒绝，禁止换工具绕过该限制。"
+            )
+            return _ToolCallResult({"messages": messages})
+        if route in ("HumanApproval", "AutoClassify"):
+            approve = human_approval if route == "HumanApproval" else auto_classify
+            decision = await approve(state, runtime, [tc])
+            if decision.goto != "ToolExecutor":
+                return _ToolCallResult(
+                    replace(decision, goto=()), end_requested=decision.goto == END
+                )
+        output = await tool_node.ainvoke([{**tc, "type": "tool_call"}], config)
+        return _ToolCallResult(output, executed=True)
+
+    # 每个调用自行审批后立即执行，兄弟调用的拒绝或挂起不阻止已允许的调用。
+    outputs = await asyncio.gather(*(execute_one(tc) for tc in pending))
+    tool_messages: list[ToolMessage] = []
+    commands: list[Command] = []
+    for result in outputs:
+        messages, tool_commands = _split_tool_output(result.output)
+        tool_messages.extend(messages)
+        commands.extend(tool_commands)
     await truncate_tool_results(tool_messages)
     merged = [*tool_messages, *(m for c in commands for m in _cmd_messages(c))]
     # tool_result 按 tool_use 的顺序排（Command 里的与普通结果分两路收集，原序已丢）
@@ -305,13 +329,16 @@ async def tool_executor(
         key=lambda m: order.get(m.tool_call_id, len(order)),
     )
     trailing = [*(m for m in merged if not isinstance(m, ToolMessage)), *extra_msgs]
-    halt = False
+    halt = any((c.update or {}).get("tool_cancelled") for c in commands) or (
+        not any(result.executed for result in outputs)
+        and any(result.end_requested for result in outputs)
+    )
 
     if has_hooks("PostToolUse"):
         post_cmd = await _post_tool_hooks(state, config, visible, results)
         if post_cmd is not None:
             trailing += _cmd_messages(post_cmd)
-            halt = post_cmd.goto == END
+            halt = halt or post_cmd.goto == END
 
     # structured_output 连续失败兜底：本轮累计失败 >= 上限时强制结束循环。
     # 计数用纯净的 ToolMessage（不含注入的 reminder HumanMessage，否则尾扫会被
@@ -332,7 +359,14 @@ async def tool_executor(
         return update
     # Command 的其余 update（todos / structured_output）原样保留，messages 已并入上面
     stripped = [
-        replace(c, update={k: v for k, v in c.update.items() if k != "messages"})
+        replace(
+            c,
+            update={
+                k: v
+                for k, v in c.update.items()
+                if k not in ("messages", "tool_cancelled")
+            },
+        )
         for c in commands
     ]
     return [*stripped, update]
@@ -422,57 +456,24 @@ async def on_agent_stop(
 
 
 def is_use_tool(state: LumiAgentState, runtime: Runtime[LumiAgentContext]) -> str:
-    """条件路由函数 - 判断下一步执行哪个节点
-
-    无 tool_calls → OnAgentStop（分发 Stop hooks）；其余分支见
-    ``permissions.routing.route_decision`` 的 docstring。
-    """
-    tool_calls = state["messages"][-1].tool_calls
-    if not tool_calls:
-        # 模型未调工具想结束 → OnAgentStop 节点分发 Stop hooks（默认 END）
-        return "OnAgentStop"
-
-    tool_mode = runtime.context.mode_root().tool_mode
-    # 无人应答（无审批通道）时，要问人的模式改用全局「无人值守审批模式」——唯一决定点，
-    # 各无人值守入口不再各自设 auto；显式给的 auto / privileged（如飞书渠道配置）原样保留
-    if runtime.context.approval_broker is None and tool_mode in (
-        "default",
-        "accept_edits",
-    ):
-        tool_mode = GlobalConfigManager.load().unattended_tool_mode
-    decision = route_decision(tool_calls, tool_mode, runtime.context.permission_engine)
-    # privileged 的「自动放行」本身即授权，这条路上既不审批也不过分类器，没有别的挂钩点
-    if decision == "ToolExecutor" and tool_mode == "privileged":
-        _widen_boundary_for(tool_calls, runtime)
-    return decision
+    """有工具调用就进入执行器，权限在执行器内逐个判定。"""
+    return "ToolExecutor" if state["messages"][-1].tool_calls else "OnAgentStop"
 
 
-def _widen_boundary_for(tool_calls: list, runtime: Runtime[LumiAgentContext]) -> None:
-    """授权通过后把本批越界路径所在目录纳入本会话工作区。
-
-    边界与审批是两道正交的门，只过审批不放宽边界会同时踩两个坑——详见
-    docs/architecture/permissions.md「边界与审批是两道正交的门」。回调由 bridge
-    注入，headless 无 bridge 保持 None（不放宽）。
-
-    只放宽本批里会被边界拦下的**写**调用（本机路径工具 ∩ 写操作）：批次是混合的
-    （纯只读批次在 route_decision 更早处就短路了），批准一次越界 read 不该换来该
-    目录的写权。
-    """
-    engine = runtime.context.permission_engine
-    widen = runtime.context.widen_boundary
-    if engine is None or widen is None:
-        return
-    for tc in tool_calls:
-        name = tc.get("name", "")
-        args = tc.get("args", {})
-        if is_local_path_tool(name) and is_write_tool(name, args):
-            widen(engine.get_boundary_violations(name, args))
+def effective_tool_mode(context: LumiAgentContext) -> str:
+    """无人工通道时，交互模式跟随全局无人值守设置；显式 auto / privileged 保留。"""
+    mode = context.mode_root().tool_mode
+    if context.approval_broker is None and mode in ("default", "accept_edits"):
+        return GlobalConfigManager.load().unattended_tool_mode
+    return mode
 
 
 async def human_approval(
-    state: LumiAgentState, runtime: Runtime[LumiAgentContext]
+    state: LumiAgentState,
+    runtime: Runtime[LumiAgentContext],
+    tool_calls: list[dict],
 ) -> Command:
-    """经在途审批 Broker 原地挂起，等待用户审批
+    """审批传入的调用；执行器每次只传入一个待审调用
 
     Graph 侧处理：
     - DENY 命中 → 跳过审批，直接拒绝并路由回 CallModel
@@ -481,25 +482,23 @@ async def human_approval(
       - 有允许 → 被拒的补拒绝 ToolMessage，其余进 ToolExecutor
       - 全拒绝 / cancel → END（附带拒绝 / 取消原因 ToolMessage）
 
-    风险提示与越界路径由 Bridge 层富化（on_custom_event 分支）。应答为 dict：批量
+    命令风险提示由 Bridge 层富化（on_custom_event 分支）。应答为 dict：批量
     {"decision", "message"?, "set_tool_mode"?} 或逐个 {"decisions": [...], "message"?}
     （stop / 切会话收尾挂起审批时以 reject_value 返回拒绝）。
     """
-    last_message = state["messages"][-1]
     tool_calls_data = [
         {"id": tc.get("id", ""), "name": tc["name"], "args": tc["args"]}
-        for tc in last_message.tool_calls
+        for tc in tool_calls
     ]
 
-    # DENY 命中：不发审批，直接拒绝并路由回 CallModel 让模型调整。route_decision 只
-    # 返回节点名、条件边又写不了 state，DENY 与 ASK 到此同名，故此处再评估一次分辨。
+    # 审批开始前再次确认禁止规则，禁止规则不可被人工允许覆盖。
     engine = runtime.context.permission_engine
     if engine is not None and any(
         engine.evaluate(tc["name"], tc.get("args", {})) == PermissionDecision.DENY
-        for tc in last_message.tool_calls
+        for tc in tool_calls
     ):
         messages = build_reject_messages(
-            last_message.tool_calls,
+            tool_calls,
             content="你执行的此操作命中了用户的禁止策略，你的操作可能被用户视为危险操作，你应该思考此操作的风险使用更低风险的操作来完成目标。",
         )
         return Command(goto="CallModel", update={"messages": messages})
@@ -509,7 +508,7 @@ async def human_approval(
     broker = runtime.context.approval_broker
     if broker is None:
         messages = build_reject_messages(
-            last_message.tool_calls,
+            tool_calls,
             content="当前运行环境无交互式审批通道，已自动拒绝该操作，请改用无需审批的方式完成目标。",
         )
         return Command(goto="CallModel", update={"messages": messages})
@@ -518,7 +517,7 @@ async def human_approval(
     # 保留历史（而非取消丢弃），等价于用户点了"拒绝"。
     result = await broker.request(
         {"type": "tool_approval", "tool_calls": tool_calls_data},
-        {"decision": "reject", "message": "用户停止了本轮，已拒绝该操作"},
+        {"decision": "reject", "message": "用户停止了本轮，已拒绝该操作", "stop": True},
     )
 
     # 应答来自 wire（resume 的 value 由客户端给），形状不可信：非 dict 一律按拒绝收尾，
@@ -530,8 +529,16 @@ async def human_approval(
         )
         result = {"decision": "reject", "message": "审批应答格式非法，已拒绝该操作"}
 
+    if result.get("stop"):
+        return _halt(
+            {
+                "messages": build_reject_messages(
+                    tool_calls, content=result.get("message", "用户停止了本轮")
+                )
+            }
+        )
+
     # 批量 {decision} 应答展开成同值列表，与逐个审批的 decisions 走同一裁决
-    tool_calls = last_message.tool_calls
     decisions = result.get("decisions") or [result.get("decision", "reject")] * len(
         tool_calls
     )
@@ -573,7 +580,6 @@ def _apply_decisions(
     # 无需经 Command.update 写 state（state 已无此字段）。子代理审批卡里切换的是会话模式。
     if set_tool_mode:
         runtime.context.mode_root().tool_mode = set_tool_mode
-    _widen_boundary_for(approved, runtime)
     update = (
         {"messages": build_reject_messages(rejected, content=content)}
         if rejected
@@ -599,6 +605,7 @@ def build_reject_messages(
             content=content,
             tool_call_id=tc.get("id", ""),
             name=tc["name"],
+            status="error",
         )
         for tc in tool_calls
     ]
@@ -614,7 +621,7 @@ class _ClassifierVerdict(BaseModel):
 
 
 _CLASSIFIER_SYSTEM = """你是 Lumi 的工具调用安全分类器（auto 审批模式）。
-基于安全性判断即将执行的一批工具调用，输出二选一裁决：
+基于安全性判断即将执行的一个工具调用，输出二选一裁决：
 - approve：安全、符合用户当前意图的操作，自动放行
 - reject：危险、破坏性、越权或与用户意图相悖的操作，自动拒绝
 
@@ -638,18 +645,17 @@ def _latest_user_intent(messages: list) -> str:
 
 
 async def auto_classify(
-    state: LumiAgentState, runtime: Runtime[LumiAgentContext]
+    state: LumiAgentState,
+    runtime: Runtime[LumiAgentContext],
+    tool_calls: list[dict],
 ) -> Command:
-    """auto 模式：用 AI 分类器替代人工审批裁决一批工具调用。
+    """auto 模式：用 AI 分类器裁决当前工具调用。
 
-    仅在 route_decision 判定「本该问人」时进入（DENY / bypass-immune 已在更早
-    的免疫闸短路到 HumanApproval，不会到这里）。裁决：
+    只收到本次需要 AI 审批的调用；兄弟调用分别判定。裁决：
     - approve → ToolExecutor（自动放行）
     - reject  → CallModel（自动拒绝，附原因让模型改用更低风险的方式，复用 DENY 语义）
-    分类器调用失败 fail-closed → HumanApproval。
+    分类器调用失败仅拒绝该调用。
     """
-    last_message = state["messages"][-1]
-    tool_calls = last_message.tool_calls
     rendered = "\n".join(f"- {tc['name']}({tc.get('args', {})})" for tc in tool_calls)
 
     # chain 构造一并纳入 try：create_llm/with_structured_output 在构造期也可能抛
@@ -677,28 +683,32 @@ async def auto_classify(
         )
     except Exception as e:
         logger.error(
-            "[AutoClassify] 分类器调用失败，fail-closed 转人工审批: %s",
+            "[AutoClassify] 分类器调用失败，拒绝该调用: %s",
             e,
             exc_info=True,
         )
-        return Command(goto="HumanApproval")
+        return Command(
+            goto="CallModel",
+            update={
+                "messages": build_reject_messages(
+                    tool_calls, content="AI 审批失败，已拒绝该调用，请稍后重试。"
+                )
+            },
+        )
 
     logger.info("[AutoClassify] 裁决=%s 原因=%s", verdict.decision, verdict.reason)
-    match verdict.decision:
-        case "approve":
-            _widen_boundary_for(tool_calls, runtime)
-            return Command(goto="ToolExecutor")
-        case _:  # reject（及任何非 approve 值）：自动拒绝，附原因回喂模型
-            messages = build_reject_messages(
-                tool_calls,
-                content=(
-                    f"此操作被 auto 模式安全分类器自动拒绝：{verdict.reason}。"
-                    "你可以改用自然完成同一目标的其他工具，但**不得**用换工具的方式"
-                    "绕过这条拦截（如借 bash 重定向/sed/python 去做被拦的写操作）。"
-                    "若该能力确有必要，请停下并向用户说明你要做什么、为何需要授权。"
-                ),
-            )
-            return Command(goto="CallModel", update={"messages": messages})
+    if verdict.decision == "approve":
+        return Command(goto="ToolExecutor")
+    messages = build_reject_messages(
+        tool_calls,
+        content=(
+            f"此操作被 auto 模式安全分类器自动拒绝：{verdict.reason}。"
+            "你可以改用自然完成同一目标的其他工具，但**不得**用换工具的方式"
+            "绕过这条拦截（如借 bash 重定向/sed/python 去做被拦的写操作）。"
+            "若该能力确有必要，请停下并向用户说明你要做什么、为何需要授权。"
+        ),
+    )
+    return Command(goto="CallModel", update={"messages": messages})
 
 
 async def _summarize(

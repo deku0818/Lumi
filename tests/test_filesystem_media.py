@@ -450,8 +450,8 @@ def _call_read(file_path: str, **kwargs) -> any:
 class TestReadDispatchText:
     """文本路径回归:行为应与修改前完全一致"""
 
-    async def test_text_file_returns_tool_message(self, authorized_tmp_dir: Path):
-        f = authorized_tmp_dir / "foo.py"
+    async def test_text_file_returns_tool_message(self, project_tmp_dir: Path):
+        f = project_tmp_dir / "foo.py"
         f.write_text("print('hi')\nprint('bye')")
         result = await _call_read(str(f))
         # 文本路径仍返回 str,LangChain 自动包装为 ToolMessage
@@ -461,24 +461,24 @@ class TestReadDispatchText:
         assert "print('hi')" in result.content
         assert "print('bye')" in result.content
 
-    async def test_text_file_with_offset_limit(self, authorized_tmp_dir: Path):
-        f = authorized_tmp_dir / "lines.txt"
+    async def test_text_file_with_offset_limit(self, project_tmp_dir: Path):
+        f = project_tmp_dir / "lines.txt"
         f.write_text("\n".join(f"line{i}" for i in range(10)))
         result = await _call_read(str(f), offset=2, limit=3)
         assert "line2" in result.content
         assert "line4" in result.content
         assert "line9" not in result.content
 
-    async def test_nonexistent_file(self, authorized_tmp_dir: Path):
-        result = await _call_read(str(authorized_tmp_dir / "ghost.txt"))
+    async def test_nonexistent_file(self, project_tmp_dir: Path):
+        result = await _call_read(str(project_tmp_dir / "ghost.txt"))
         assert "不存在" in result.content
 
 
 class TestReadDispatchImage:
     """图片分支:应返回 Command,包含 ToolMessage + HumanMessage"""
 
-    async def test_png_returns_command(self, authorized_tmp_dir: Path):
-        f = authorized_tmp_dir / "test.png"
+    async def test_png_returns_command(self, project_tmp_dir: Path):
+        f = project_tmp_dir / "test.png"
         f.write_bytes(make_png_bytes(100, 100))
         result = await _call_read(str(f))
         from langgraph.types import Command
@@ -493,8 +493,8 @@ class TestReadDispatchImage:
         assert "test.png" in msgs[0].content
         assert isinstance(msgs[1], HumanMessage)
 
-    async def test_png_human_message_has_image_block(self, authorized_tmp_dir: Path):
-        f = authorized_tmp_dir / "test.png"
+    async def test_png_human_message_has_image_block(self, project_tmp_dir: Path):
+        f = project_tmp_dir / "test.png"
         f.write_bytes(make_png_bytes(50, 50))
         result = await _call_read(str(f))
         human_msg = result.update["messages"][1]
@@ -504,9 +504,9 @@ class TestReadDispatchImage:
         assert "text" in types
         assert "image" in types
 
-    async def test_image_block_anthropic_format(self, authorized_tmp_dir: Path):
+    async def test_image_block_anthropic_format(self, project_tmp_dir: Path):
         """必须是 Anthropic 格式: {type:'image', source:{type:'base64',...}}"""
-        f = authorized_tmp_dir / "test.jpg"
+        f = project_tmp_dir / "test.jpg"
         f.write_bytes(make_jpeg_bytes(100, 100))
         result = await _call_read(str(f))
         human_msg = result.update["messages"][1]
@@ -519,16 +519,16 @@ class TestReadDispatchImage:
         assert image_block["source"]["media_type"] == "image/jpeg"
         assert len(image_block["source"]["data"]) > 0
 
-    async def test_jpg_extension(self, authorized_tmp_dir: Path):
-        f = authorized_tmp_dir / "test.jpg"
+    async def test_jpg_extension(self, project_tmp_dir: Path):
+        f = project_tmp_dir / "test.jpg"
         f.write_bytes(make_jpeg_bytes())
         result = await _call_read(str(f))
         from langgraph.types import Command
 
         assert isinstance(result, Command)
 
-    async def test_corrupt_image_returns_error(self, authorized_tmp_dir: Path):
-        f = authorized_tmp_dir / "bad.png"
+    async def test_corrupt_image_returns_error(self, project_tmp_dir: Path):
+        f = project_tmp_dir / "bad.png"
         f.write_bytes(b"definitely-not-an-image")
         result = await _call_read(str(f))
         from langgraph.types import Command
@@ -539,7 +539,7 @@ class TestReadDispatchImage:
         assert "错误" in msgs[0].content
 
     async def test_image_generic_exception_path(
-        self, authorized_tmp_dir: Path, monkeypatch
+        self, project_tmp_dir: Path, monkeypatch
     ):
         """_read_image_command 的 generic exception 分支应返回友好提示。
 
@@ -553,7 +553,7 @@ class TestReadDispatchImage:
             raise RuntimeError("simulated boom")
 
         monkeypatch.setattr(fs_mod, "read_image_with_token_budget", _boom)
-        f = authorized_tmp_dir / "x.png"
+        f = project_tmp_dir / "x.png"
         f.write_bytes(make_png_bytes())
         result = await _call_read(str(f))
         msgs = result.update["messages"]
@@ -565,11 +565,9 @@ class TestReadDispatchImage:
 class TestReadDispatchPDF:
     """PDF 分支:统一渲染为图片,不传 pages 时渲染全部页(≤10)"""
 
-    async def test_small_pdf_renders_all_pages_anthropic(
-        self, authorized_tmp_dir: Path
-    ):
+    async def test_small_pdf_renders_all_pages_anthropic(self, project_tmp_dir: Path):
         """小 PDF 不传 pages → 自动渲染全部页为 image block,不发 document"""
-        f = authorized_tmp_dir / "small.pdf"
+        f = project_tmp_dir / "small.pdf"
         f.write_bytes(make_pdf_bytes(3))
         result = await _call_read(str(f))
         from langgraph.types import Command
@@ -590,9 +588,9 @@ class TestReadDispatchPDF:
             for b in human_msg.content
         )
 
-    async def test_small_pdf_renders_all_pages_openai(self, authorized_tmp_dir: Path):
+    async def test_small_pdf_renders_all_pages_openai(self, project_tmp_dir: Path):
         """OpenAI 不传 pages 行为与 Anthropic 一致:渲染全部页"""
-        f = authorized_tmp_dir / "small.pdf"
+        f = project_tmp_dir / "small.pdf"
         f.write_bytes(make_pdf_bytes(2))
         result = await _call_read(str(f))
         from langgraph.types import Command
@@ -606,9 +604,9 @@ class TestReadDispatchPDF:
         ]
         assert len(image_blocks) == 2
 
-    async def test_pdf_too_many_pages_errors(self, authorized_tmp_dir: Path):
+    async def test_pdf_too_many_pages_errors(self, project_tmp_dir: Path):
         """> 10 页不传 pages 应报错并建议 pages 格式"""
-        f = authorized_tmp_dir / "big.pdf"
+        f = project_tmp_dir / "big.pdf"
         f.write_bytes(make_pdf_bytes(15))
         result = await _call_read(str(f))
         msgs = result.update["messages"]
@@ -616,9 +614,9 @@ class TestReadDispatchPDF:
         assert "15 页" in msgs[0].content or "15" in msgs[0].content
         assert "pages" in msgs[0].content
 
-    async def test_pdf_rendered_path_with_pages(self, authorized_tmp_dir: Path):
+    async def test_pdf_rendered_path_with_pages(self, project_tmp_dir: Path):
         """传 pages 渲染指定页"""
-        f = authorized_tmp_dir / "book.pdf"
+        f = project_tmp_dir / "book.pdf"
         f.write_bytes(make_pdf_bytes(5))
         result = await _call_read(str(f), pages="1-3")
         from langgraph.types import Command
@@ -632,26 +630,26 @@ class TestReadDispatchPDF:
         ]
         assert len(image_blocks) == 3
 
-    async def test_pdf_invalid_pages_param(self, authorized_tmp_dir: Path):
-        f = authorized_tmp_dir / "doc.pdf"
+    async def test_pdf_invalid_pages_param(self, project_tmp_dir: Path):
+        f = project_tmp_dir / "doc.pdf"
         f.write_bytes(make_pdf_bytes(5))
         result = await _call_read(str(f), pages="10-5")
         msgs = result.update["messages"]
         assert len(msgs) == 1
         assert "错误" in msgs[0].content
 
-    async def test_pdf_corrupt_magic_bytes_rejected(self, authorized_tmp_dir: Path):
+    async def test_pdf_corrupt_magic_bytes_rejected(self, project_tmp_dir: Path):
         """伪装的 PDF 应在 dispatch 层被 magic bytes 拦截"""
-        f = authorized_tmp_dir / "fake.pdf"
+        f = project_tmp_dir / "fake.pdf"
         f.write_bytes(make_corrupt_pdf_bytes())
         result = await _call_read(str(f))
         msgs = result.update["messages"]
         assert len(msgs) == 1
         assert "PDF" in msgs[0].content
 
-    async def test_tool_call_id_passthrough(self, authorized_tmp_dir: Path):
+    async def test_tool_call_id_passthrough(self, project_tmp_dir: Path):
         """所有 Command 返回的 ToolMessage 必须带上原始 tool_call_id"""
-        f = authorized_tmp_dir / "x.png"
+        f = project_tmp_dir / "x.png"
         f.write_bytes(make_png_bytes())
         result = await _call_read(str(f))
         tool_msg = result.update["messages"][0]
@@ -666,26 +664,24 @@ class TestSyntheticHumanMessageDeclaration:
     被当成用户说的话一样)。
     """
 
-    async def test_image_human_message_declares_empty(self, authorized_tmp_dir: Path):
-        f = authorized_tmp_dir / "x.png"
+    async def test_image_human_message_declares_empty(self, project_tmp_dir: Path):
+        f = project_tmp_dir / "x.png"
         f.write_bytes(make_png_bytes())
         result = await _call_read(str(f))
         human_msg = result.update["messages"][1]
         assert human_msg.additional_kwargs["lumi"]["items"] == []
 
-    async def test_pdf_small_human_message_declares_empty(
-        self, authorized_tmp_dir: Path
-    ):
-        f = authorized_tmp_dir / "x.pdf"
+    async def test_pdf_small_human_message_declares_empty(self, project_tmp_dir: Path):
+        f = project_tmp_dir / "x.pdf"
         f.write_bytes(make_pdf_bytes(2))
         result = await _call_read(str(f))
         human_msg = result.update["messages"][1]
         assert human_msg.additional_kwargs["lumi"]["items"] == []
 
     async def test_pdf_with_pages_human_message_declares_empty(
-        self, authorized_tmp_dir: Path
+        self, project_tmp_dir: Path
     ):
-        f = authorized_tmp_dir / "x.pdf"
+        f = project_tmp_dir / "x.pdf"
         f.write_bytes(make_pdf_bytes(3))
         result = await _call_read(str(f), pages="1-2")
         human_msg = result.update["messages"][1]

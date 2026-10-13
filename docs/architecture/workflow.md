@@ -51,10 +51,10 @@ system+tools 缓存前缀。详见 [thinking.md](thinking.md) 的 Ultra 一节�
 
 并发上限 `min(16, CPU-2)`（semaphore）；终身上限 `_MAX_AGENTS=1000`。
 
-## 子代理（共享父沙箱语义）
+## 子代理（共享父权限规则）
 
 `agent()` 与 agent 工具共用 `create_subagent(<父 context>, tools)` 建子 LumiAgent（不持久化），
-**复用父 PermissionEngine**——天然共享工作区边界，子代理读得到父正在处理的工作文件
+**复用父 PermissionEngine**——共享权限规则，子代理读得到父正在处理的工作文件
 （review / audit 类编排能跑的前提），不需要沙箱；项目根与渠道 env 同样随父。每个子代理经
 `run_with_shell` 拿独立 shell（`cd`/env 不串兄弟与主会话、用完回收）。子代理工具集禁用
 `agent / workflow / ask / cron / background_task`（防递归 + 后台 graph 无法 interrupt 的 ask）。
@@ -92,7 +92,7 @@ system+tools 缓存前缀。详见 [thinking.md](thinking.md) 的 Ultra 一节�
 - **新增后台 `TaskKind`**：register / `cancel_background_task`（bg_process.py）/ `format_notification`
   三处会处理 kind；停止逻辑已收口到 `cancel_background_task`，新增 kind 只改它一处。
 - **威胁模型**：受限 `__builtins__` 只防误触不防对抗（脚本在主进程 `exec`，可经 dunder 遍历逃逸）。
-  脚本由受信主 agent 生成（与 bash 工具同信任级），**绝不可喂不可信脚本**；真正隔离边界是子代理工具的权限引擎。
+  脚本由受信主 agent 生成（与 bash 工具同信任级），**绝不可喂不可信脚本**；子代理工具的执行仍由权限规则与审批模式控制。
 - **`serialize_task` 字段派生**：从 dataclass 字段派生（排除 `async_task` / `prompt`），新增字段
   默认上线；前端 `BgTask` 类型是唯一「该不该收」的闸门。
 

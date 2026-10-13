@@ -8,7 +8,7 @@ from __future__ import annotations
 from dataclasses import dataclass
 from enum import Enum
 
-# 工具参数中表示文件路径的键名（按优先顺序匹配），供 matcher / boundary 共用
+# 工具参数中表示文件路径的键名（按优先顺序匹配），供路径规则匹配使用
 PATH_ARG_KEYS: tuple[str, ...] = ("file_path", "path")
 
 
@@ -35,7 +35,7 @@ class PermissionRule:
 
     Attributes:
         tool: 工具表达式，如 "bash(npm *)"
-        permission: allow 或 deny
+        permission: allow、deny 或 ask
     """
 
     tool: str
@@ -47,16 +47,16 @@ class PermissionConfig:
     """权限配置（不可变）
 
     Attributes:
-        workspaces: 工作区目录路径列表
         permissions: 权限规则元组
     """
 
-    workspaces: tuple[str, ...] = ()
     permissions: tuple[PermissionRule, ...] = ()
 
 
 DEFAULT_RULES: tuple[PermissionRule, ...] = (
+    # 框架结构化输出控制流；与其他规则一样可被用户 ask / deny 覆盖。
+    PermissionRule(tool="__structured_output__", permission=Permission.ALLOW),
     PermissionRule(tool="cron", permission=Permission.ALLOW),
-    # 只呈现不改动文件；越界照样审批（完整评估仍要求 boundary_ok）
+    # 只呈现文件，不改动文件
     PermissionRule(tool="artifacts", permission=Permission.ALLOW),
 )

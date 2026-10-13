@@ -65,18 +65,9 @@ def _config_from_dict(data: dict[str, Any]) -> PermissionConfig:
     Returns:
         PermissionConfig 实例
     """
-    workspaces = data.get("workspaces", [])
-    if not isinstance(workspaces, list):
-        # 字符串会被逐字符展开（"/opt/x" → "/" 进边界），非列表一律丢弃
-        logger.warning("workspaces 须为路径列表，已忽略: %r", workspaces)
-        workspaces = []
-    valid = tuple(w for w in workspaces if isinstance(w, str) and w)
-    if len(valid) != len(workspaces):
-        logger.warning("跳过无效 workspace 项: %r", workspaces)
     raw_permissions = data.get("permissions", {})
     permissions = _parse_rules(raw_permissions) if raw_permissions else ()
     return PermissionConfig(
-        workspaces=valid,
         permissions=permissions,
     )
 
@@ -96,14 +87,8 @@ def _merge_configs(configs: list[PermissionConfig]) -> PermissionConfig:
     """
     # 使用 dict 保持插入顺序，后插入的覆盖先插入的
     rule_map: dict[str, PermissionRule] = {}
-    all_workspaces: list[str] = []
-    seen_workspaces: set[str] = set()
 
     for cfg in configs:
-        for ws in cfg.workspaces:
-            if ws not in seen_workspaces:
-                all_workspaces.append(ws)
-                seen_workspaces.add(ws)
         for rule in cfg.permissions:
             prev = rule_map.get(rule.tool)
             if prev is not None and prev.permission == Permission.DENY:
@@ -116,7 +101,6 @@ def _merge_configs(configs: list[PermissionConfig]) -> PermissionConfig:
             rule_map[rule.tool] = rule
 
     return PermissionConfig(
-        workspaces=tuple(all_workspaces),
         permissions=tuple(rule_map.values()),
     )
 

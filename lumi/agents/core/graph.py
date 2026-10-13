@@ -18,9 +18,7 @@ from psycopg.rows import dict_row
 from lumi.agents.core.hooks import builtin  # noqa: F401
 from lumi.agents.core.nodes import (
     after_tool_executor,
-    auto_classify,
     call_model,
-    human_approval,
     is_use_tool,
     on_agent_stop,
     on_call_model_error,
@@ -83,8 +81,9 @@ class LumiAgent:
         # PTL 兜底走节点级 error_handler，理由见 nodes.on_call_model_error
         add("CallModel", call_model, error_handler=on_call_model_error)
         add("ToolExecutor", tool_executor)
-        add("HumanApproval", human_approval)
-        add("AutoClassify", auto_classify)
+        # 旧 checkpoint 可能仍指向这些节点；保留名称，执行时使用新的逐个权限流程。
+        add("HumanApproval", tool_executor)
+        add("AutoClassify", tool_executor)
         add("OnAgentStop", on_agent_stop)
         # 离线写回锚点：正常流程永远不路由到它（刻意无入边）。bridge 在图不运行时
         # 经 aupdate_state 写状态（中断收尾的半截回复/补合成 ToolMessage、离线压缩
@@ -110,16 +109,15 @@ class LumiAgent:
             is_use_tool,
             {
                 "ToolExecutor": "ToolExecutor",
-                "HumanApproval": "HumanApproval",
-                "AutoClassify": "AutoClassify",
                 "OnAgentStop": "OnAgentStop",
             },
         )
-        self.builder.add_conditional_edges(
-            "ToolExecutor",
-            after_tool_executor,
-            {"CallModel": "CallModel", "END": END},
-        )
+        for name in ("ToolExecutor", "HumanApproval", "AutoClassify"):
+            self.builder.add_conditional_edges(
+                name,
+                after_tool_executor,
+                {"CallModel": "CallModel", "END": END},
+            )
         self.builder.add_edge("OfflineFlush", END)
 
     async def adelete_thread(self, thread_id: str) -> None:
@@ -365,7 +363,7 @@ async def create_agent(
                      绑定后由调用方显式传入，新建引擎时不再依赖进程 cwd。
                      hooks 已改为按会话经 contextvar 注入，此处不再加载。
         enable_memory: 是否为本 agent 启用持久记忆（默认 False，opt-in）。持久记忆有副作用
-                       （写磁盘 / 改系统提示词 / 注入上下文 / 写入免审批），故只有面向用户的
+                       （写磁盘 / 改系统提示词 / 注入上下文），故只有面向用户的
                        对话入口（bridge，含经它执行的 cron）显式传 True；子 agent、workflow
                        不带记忆。
 

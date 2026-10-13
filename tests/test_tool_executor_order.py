@@ -22,6 +22,10 @@ class _BatchToolNode:
         pass
 
     async def ainvoke(self, calls, config=None):
+        if calls[0]["name"] == "bash":
+            return {
+                "messages": [ToolMessage(content="ok", tool_call_id="b", name="bash")]
+            }
         image = HumanMessage(content=[{"type": "text", "text": "图片内容"}])
         return [
             Command(
@@ -34,7 +38,6 @@ class _BatchToolNode:
                     ]
                 }
             ),
-            {"messages": [ToolMessage(content="ok", tool_call_id="b", name="bash")]},
         ]
 
 
@@ -53,7 +56,9 @@ async def test_tool_results_precede_injected_media(monkeypatch):
             {"name": "bash", "args": {"command": "ls"}, "id": "b"},
         ],
     )
-    result = await graph.ainvoke({"messages": [ai]}, context=LumiAgentContext())
+    result = await graph.ainvoke(
+        {"messages": [ai]}, context=LumiAgentContext(tool_mode="privileged")
+    )
     kinds = [type(m).__name__ for m in result["messages"]]
     assert kinds == ["AIMessage", "ToolMessage", "ToolMessage", "HumanMessage"]
 
@@ -83,7 +88,7 @@ async def test_post_tool_hooks_run_when_batch_contains_a_command(monkeypatch):
     )
     with replace_hooks("PostToolUse", [post_hook]):
         result = await builder.compile().ainvoke(
-            {"messages": [ai]}, context=LumiAgentContext()
+            {"messages": [ai]}, context=LumiAgentContext(tool_mode="privileged")
         )
     assert seen == [["read", "bash"]]
     kinds = [type(m).__name__ for m in result["messages"]]
@@ -109,10 +114,9 @@ async def test_structured_output_abort_counts_batches_with_commands(monkeypatch)
                 status="error",
             )
             todo = ToolMessage(content="ok", tool_call_id="t", name="todos")
-            return [
-                Command(update={"messages": [todo], "todos": []}),
-                {"messages": [bad]},
-            ]
+            if calls[0]["name"] == "todos":
+                return [Command(update={"messages": [todo], "todos": []})]
+            return {"messages": [bad]}
 
     monkeypatch.setattr(nodes, "ToolNode", _FailingBatch)
     prior = [
@@ -144,4 +148,4 @@ async def test_structured_output_abort_counts_batches_with_commands(monkeypatch)
 
 
 class _Runtime:
-    context = LumiAgentContext()
+    context = LumiAgentContext(tool_mode="privileged")

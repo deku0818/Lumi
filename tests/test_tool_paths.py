@@ -1,27 +1,24 @@
-"""文件类工具的路径口径：展开 ``~``，相对路径基于会话项目根（主授权目录）而非进程 cwd。
+"""文件类工具的路径口径：展开 ``~``，相对路径基于会话项目根而非进程 cwd。
 
 ``lumi serve`` 是多项目网关、从不 chdir：按进程 cwd 解析时，read("src/a.py") 读不到项目
-文件或读到别处同名文件；而 write/edit 走 validate_path 按
-项目解析——同一轮里读写指向不同文件。文本 read 还不展开 ``~``。
+文件或读到别处同名文件，因此 read/write/edit 统一按项目解析，并展开 ``~``。
 """
 
 from __future__ import annotations
 
 import json
-from pathlib import Path
 
 import pytest
 
-from lumi.agents.permissions.engine import PermissionEngine
 from lumi.agents.tools.providers.artifacts import artifacts
 from lumi.agents.tools.providers.filesystem import read
 
 
 @pytest.fixture
-def project(tmp_path, monkeypatch, authorized_tmp_dir):
-    """会话项目 = 授权目录；进程 cwd 与 HOME 各指向别处。"""
-    (authorized_tmp_dir / "src").mkdir()
-    (authorized_tmp_dir / "src" / "a.txt").write_text("in-project\n")
+def project(tmp_path, monkeypatch, project_tmp_dir):
+    """会话项目与进程 cwd 分离；进程 cwd 与 HOME 各指向别处。"""
+    (project_tmp_dir / "src").mkdir()
+    (project_tmp_dir / "src" / "a.txt").write_text("in-project\n")
     elsewhere = tmp_path.parent / f"{tmp_path.name}-cwd"
     (elsewhere / "src").mkdir(parents=True)
     (elsewhere / "src" / "a.txt").write_text("wrong-dir\n")
@@ -30,7 +27,7 @@ def project(tmp_path, monkeypatch, authorized_tmp_dir):
     home.mkdir()
     (home / "notes.txt").write_text("from-home\n")
     monkeypatch.setenv("HOME", str(home))
-    return authorized_tmp_dir
+    return project_tmp_dir
 
 
 def _call(name: str, args: dict) -> dict:
@@ -47,10 +44,3 @@ async def test_read_relative_and_home(project):
 def test_artifacts_relative_path(project):
     [entry] = json.loads(artifacts.invoke({"filepaths": ["src/a.txt"]}))
     assert entry["path"] == str(project / "src" / "a.txt")
-
-
-def test_boundary_check_expands_home(project):
-    # ~/x 曾被拼成 <项目>/~/x 判为界内，实际写到的却是家目录
-    engine = PermissionEngine(project)
-    violations = engine.get_boundary_violations("write", {"file_path": "~/x.txt"})
-    assert violations == [str(Path.home() / "x.txt")]

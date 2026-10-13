@@ -48,7 +48,7 @@ server → client   {method:"event", params:<wire event>}       # 流式事件
 - **RPC 方法**：
   - 流式：`send_message`、`resume`、`run_command`（运行斜杠命令）、`regenerate` / `edit_resend`（时间旅行，见下方「重新生成 / 编辑重发」）。
   - 会话：`list_sessions`、`new_session`、`switch_session`、`load_history`、`pin_session`、`rename_session`、`delete_session`。
-  - 项目 / 工作目录：`list_projects`、`add_project`、`remove_project`、`rename_project`、`set_default_project`（设为/取消默认项目，至多一个，见下方「聊天必须绑定项目」）、`set_workspace`（绑定本会话项目，会话级、不动进程 cwd）、`add_folder` / `remove_folder`（本会话临时目录）。连接 URL 另可带 `?workspace=`，open 握手即把本会话引擎 pin 到该项目。
+  - 项目 / 工作目录：`list_projects`、`add_project`、`remove_project`、`rename_project`、`set_default_project`（设为/取消默认项目，至多一个，见下方「聊天必须绑定项目」）、`set_workspace`（绑定本会话项目，会话级、不动进程 cwd）。连接 URL 另可带 `?workspace=`，open 握手即把本会话引擎 pin 到该项目。
   - 模型供应商：`list_providers`、`test_provider`、`set_provider`、`save_provider`、`delete_provider`。
   - 定时任务：`list_cron_jobs`、`create/update/delete/toggle_cron_job`、`run_cron_job`、`list_cron_runs`。
   - 其它：`stop`（中止当前流式轮）、`list_commands`（拉取斜杠命令；项目主页经目标机器的控制连接带 `workspace` 按项目取）。
@@ -68,7 +68,8 @@ server → client   {method:"event", params:<wire event>}       # 流式事件
 shell / 后台任务会话等全局单例由 `shutdown_shared_runtime()` 在 lifespan shutdown
 时统一关闭。后台任务的完成通知按归属认领——任务注册时经
 `ContextVar` 捕获所属 thread_id，各连接的通知轮询只取走归属自己当前 thread（或无归属）
-的通知，不会把别的会话的任务结果注入本会话。
+的通知，不会把别的会话的任务结果注入本会话。通知续跑沿用当前会话的工具审批模式，
+不会把用户选择的特权 / AI 审批模式重置为普通模式。
 
 ## 断连续接（会话与 WS 解耦）
 
@@ -129,15 +130,14 @@ agent 运行时仍可发消息：消息不打断当前轮，而是在**下一个
 **项目 = 工作目录，随会话绑定**（不再是进程级单一 cwd）。会话列表按 checkpoint metadata 的 `workspace_dir` 过滤分组。
 
 - **会话级项目绑定**：每条 WS 连接 = 一个 bridge / 引擎，引擎在 `initialize` 时直接 pin 到本会话项目——open 握手经连接 URL 的 `?workspace=` 携带（与 `?token=` 同机制），`bridge.initialize(project_dir=...)` 据此新建权限引擎、构造本项目 config hooks、写 checkpoint 元数据。**不动进程 `os.chdir`**，故同进程多会话各绑各项目、并发互不影响。`bridge.workspace_dir` 取本引擎 `project_dir`（无引擎退回进程 cwd 兜底展示值），是会话项目的单一来源（`gateway.ready` / 元数据 / `system_info` 注入都据此）；`bridge.workspace_bound` 是与之独立的布尔态——`workspace_dir` 在未绑定时仍会给出 cwd 兜底值（仅供展示），只有 `workspace_bound` 才代表"真绑定了项目"。
-- **聊天必须绑定项目**：`GatewaySession.handle_frame` 对 `send_message` / `run_command` 在 `workspace_bound=False` 时直接拒绝（`{"error":{"message":"请先选择项目再开始对话"}}`），不放行静默退回进程 cwd 的未绑定会话——堵住"不选项目直接聊天"落在不可控 cwd、`PermissionEngine` 边界检查形同虚设的口子。关卡刻意只加在 desktop WS 聊天入口：cron（后台调度，不经 WS）、飞书 channel（自有一道更严的关卡：`workspace` 必填，未绑定项目直接拒绝启动，见 [feishu.md](feishu.md)）都不受影响，两者都不经过 `handle_frame`。前端配合：`gateway.ready` 的 `workspace_bound` 字段告诉前端是否该把 `payload.workspace` 当真项目写进本地状态（未绑定时只是兜底展示值，写进去会污染侧栏项目分组）；app 冷启动、切会话、"新建会话" 均已改为绑定失败/无默认项目时主动跳转项目选择器，不再放行空 `workspace=''` 的会话。
-- **per-run 授权 / hooks 注入**：filesystem/bash 工具不持有引擎，故 bridge 在每轮 `_stream` 起点经 contextvar 注入本会话引擎的授权目录来源（`set_run_authorized_source_for`）与 config hooks（`set_run_config_hooks`），serve 下 cron 经 `cron_stream` 也跑在 AgentBridge 上、同在 `_stream` 注入；各 run 按 contextvar 隔离，不被并发会话重建进程全局所清洗。详见 [permissions.md](permissions.md) / [hooks.md](hooks.md)。
-- **`set_workspace`（会话级改项目）**：只 rebase 本 bridge 引擎、重载本会话 config hooks、更新元数据、重置本会话当前 thread 的持久 shell——**不 chdir、不影响其它会话**。原 `_active_bridges` 进程级 rebase-all 已随 cwd 进程级模型一并移除。前端「打开项目」= 经 open 握手开一条绑定到该项目的新会话（不再先 `set_workspace` 改进程态）；`set_workspace` RPC 主要用于原地改当前会话项目（及未来复用单连接的非 desktop client）。`set_workspace` / `add_folder` / `remove_folder` 在 `_dispatch` 中持 `run.lock`，与运行中的轮次互斥。
+- **聊天必须绑定项目**：`GatewaySession.handle_frame` 对 `send_message` / `run_command` 在 `workspace_bound=False` 时直接拒绝（`{"error":{"message":"请先选择项目再开始对话"}}`），不放行静默退回进程 cwd 的未绑定会话——堵住"不选项目直接聊天"落在非预期 cwd 的问题。关卡刻意只加在 desktop WS 聊天入口：cron（后台调度，不经 WS）、飞书 channel（自有一道更严的关卡：`workspace` 必填，未绑定项目直接拒绝启动，见 [feishu.md](feishu.md)）都不受影响，两者都不经过 `handle_frame`。前端配合：`gateway.ready` 的 `workspace_bound` 字段告诉前端是否该把 `payload.workspace` 当真项目写进本地状态（未绑定时只是兜底展示值，写进去会污染侧栏项目分组）；app 冷启动、切会话、"新建会话" 均已改为绑定失败/无默认项目时主动跳转项目选择器，不再放行空 `workspace=''` 的会话。
+- **per-run 项目 / hooks 注入**：bridge 在每轮 `_stream` 起点通过 `set_project_source` 注入会话项目目录，通过 `set_run_config_hooks` 注入 config hooks。contextvar 隔离并发 run；serve 下 cron 也走同一入口。项目目录用于文件路径解析和 Bash 初始 cwd，不限制文件访问范围。详见 [permissions.md](permissions.md) / [hooks.md](hooks.md)。
+- **`set_workspace`（会话级改项目）**：只 rebase 本 bridge 引擎、重载本会话 config hooks、更新元数据、重置本会话当前 thread 的持久 shell——**不 chdir、不影响其它会话**。原 `_active_bridges` 进程级 rebase-all 已随 cwd 进程级模型一并移除。前端「打开项目」= 经 open 握手开一条绑定到该项目的新会话（不再先 `set_workspace` 改进程态）；`set_workspace` RPC 主要用于原地改当前会话项目（及未来复用单连接的非 desktop client）。`set_workspace` 在 `_dispatch` 中持 `run.lock`，与运行中的轮次互斥。
 - **项目清单**：纯手动登记，持久化在 `~/.lumi/lumi.json` 的 `projects` 分区（`lumi/gateway/projects.py`，复用 `_atomic_write_json`），按 `last_used` 降序。`list_projects` 只返回 `{projects}`——不下发「当前项目」：项目随会话绑定，项目页高亮由前端按活动会话的 `workspaceDir` 决定（同机器才高亮）；`add_project`（缺省用目录末端名，重复添加保留用户重命名）/ `remove_project`（只删条目，不动磁盘）/ `rename_project`。`last_used` 在真正用到项目时经 `touch_project` 刷新：带 `?workspace=` 打开会话连接且绑定成功、`switch_session` 本次确认了绑定、`set_workspace` 成功。
 - **默认项目**：每条目可带 `default: bool`，`set_default_project(path, default)` 保证至多一个默认（设新的自动顶掉旧的；取消默认只清目标自身，不碰其它条目）。前端"新建会话"（`App.tsx::goNewChat`，app 冷启动路径同款逻辑）每次都问后端要最新 `list_projects()`（不信任本地缓存，default 可能刚在别的窗口/设备改过），有默认项目直接绑定新会话，没有则跳项目选择器（顶部提示"选一个项目开始对话；点「⋯」→「设为默认」，以后新建会话直接进"）。`ProjectsPage` 项目卡「⋯」菜单可设为/取消默认，卡片名旁挂静止金星标记（`.proj-star`，设为默认那一刻光环扩散一次）。
   - **默认的兜底两条**：清单原本为空时 `add_project` 直接把首个项目标为默认（新用户建完就能开聊）；清单非空但**所有条目都不含 `default` 键**（= 该机制上线前登记、从没碰过它）时，`list_projects` 一次性把最近使用的回填为默认并落盘。判据是「有没有这个键」而非「值真不真」——主动取消过默认的人条目上是 `default: False`，带键即不回填，用户意愿不会被覆盖。
-- **添加文件夹（本会话临时）**：`add_folder` / `remove_folder` 把目录临时加进**本连接**引擎的 `_ephemeral_workspaces`（引擎独立字段、仅内存、与会被 `reload()`/`rebase()` 从磁盘重载的 `_config.workspaces` 分离，故跨配置重载 / 项目切换存活；连接断开即失效），变更经 `<system-reminder>`（`folder_note` + `inject_text_into_message` 前置注入块，带 `injected_prefix` 计数）在下一条用户消息告知模型；「模型已知哪些目录」取自历史里最近一条真实用户消息的 `lumi_reminded` marker 而非 bridge 内存，故 rewind / 压缩 / 重连后自动补发。WS 重连复用同一 URL（含 `?workspace=`）使新 bridge 重新 pin，前端再按 `folderStore` 重放 `add_folder`。
 - **持久 shell 按会话 / 子代理隔离**：bash 的持久 shell 不再全进程共用一个，而是按 `current_thread_id` 分（会话私有，`cd`/env 不串别的会话），断连（`bridge.close`）/ 删会话（`delete_thread`）时回收，避免长跑 serve 累积孤儿进程。子代理（`agent` 工具）经 `shell_session.run_with_shell` 在 `copy_context` 副本里用专属 key 跑、拿独立 shell（`cd` 不污染父 / 兄弟、用完即弃），不继承父 shell 状态（在项目根 fresh 起）。
-- **前端**：侧栏「项目」入口（`onOpenProjects`）打开 `ProjectsPage`（搜索 + 排序 + 卡片，当前项目金描边）；`DirBrowser`（经 `list_dir` RPC 浏览后端目录）新建项目；composer 底栏 `FolderMenu`（图标 + 数量徽标 + 增减菜单）。
+- **前端**：侧栏「项目」入口（`onOpenProjects`）打开 `ProjectsPage`（搜索 + 排序 + 卡片，当前项目金描边）；`DirBrowser`（经 `list_dir` RPC 浏览后端目录）新建项目。
 
 ## 多机界面：连接态即可用性
 
@@ -247,7 +247,7 @@ cron 子系统是进程级资源（与会话无关）：serve 在 lifespan 中�
 `+` 按钮 / 拖拽 / 粘贴均经 `addFiles()` 加入附件，按 MIME 分两路：
 
 - **图片**：`FileReader` 读成 base64 data URL，发送时拆为 Anthropic 原生 `image` 块（后端按模型再转 OpenAI/Bedrock），气泡里渲染缩略图。
-- **其它文件（PDF / 视频 / docx…）**：经 Electron `webUtils.getPathForFile`（`preload.cjs` 暴露；Electron 33 起 `File.path` 已移除）取**绝对路径**，发送时以 `<attached-file>路径</attached-file>` 文本块注入消息，Agent 用 `read` 工具按路径读取。**不预授权**——能否读取交给现有权限引擎 / 工作区边界。取不到路径（如非文件系统来源的拖拽）不静默吞掉，经 toast 提示失败。
+- **其它文件（PDF / 视频 / docx…）**：经 Electron `webUtils.getPathForFile`（`preload.cjs` 暴露；Electron 33 起 `File.path` 已移除）取**绝对路径**，发送时以 `<attached-file>路径</attached-file>` 文本块注入消息，Agent 用 `read` 工具按路径读取。读取遵循现有权限规则。取不到路径（如非文件系统来源的拖拽）不静默吞掉，经 toast 提示失败。
 
 `<attached-file>` 是纯模型侧约定（agent 用 read 读取路径）：前端经 wire `files` 参数只发路径数组，`bridge._build_user_message` 统一拼标签块注入 content（`injected_prefix` 计数）并把 `{path, name}` 写进显示声明 `lumi.items` 的 `files`；历史恢复的文件胶囊直接读 items，不解析正文。标签名 `ATTACHED_FILE_TAG` 定义在 `lumi/utils/constants.py`。气泡内文件渲染成品牌金描边胶囊（仅文件名 + hover tooltip）。
 
@@ -259,7 +259,7 @@ cron 子系统是进程级资源（与会话无关）：serve 在 lifespan 中�
 
 Agent 产出文件后调 `artifacts` 工具把它们作为「制品」呈现给用户。后端 `lumi/agents/tools/providers/artifacts.py` 只做本地元数据收集（无对象存储）：单次 `os.stat`（避免 isfile→getsize 的 TOCTOU）+ `mimetypes` 猜 MIME + 按扩展名分类 `kind`，返回 `{path, name, mime_type, size, kind}` 的 JSON 列表（不存在 / 非常规文件返回 `{path, error}`，顺序与输入一致）。这是常驻工具，走现有 `tool.start/complete` 事件流——**协议无新增事件**，前端按工具名 `artifacts` 特化渲染。
 
-- **边界约束**：`artifacts` 的 `filepaths`（列表）经 `boundary.py` 的 `_PATH_LIST_ARG_KEYS` 逐项提取参与工作区边界检查，与 `bash`/`filesystem` 同等受限——不是绕过权限读任意文件的后门。
+- **权限规则**：`artifacts` 默认 allow；用户配置的 deny / ask 仍参与权限评估。
 - **聊天卡片**（`FileCards`，`desktop/src/components/Artifacts.tsx`）：artifacts 在 `groupItems` 里单独成段（不并入灰色工具组），解析一次 JSON 缓存在段上（随 `items` 记忆化）。每个文件渲染成单色类型图标卡片（按 `kind` 选 lucide 字形，不上彩色）+ 文件名 + 类型/大小 + 「Show in Folder」按钮。**卡片层不加载任何文件字节**。
 - **右侧停靠预览面板**（`PreviewPanel`）：点卡片在聊天区右侧滑出（可拖宽、持久化 `lumi-preview-width`、Esc/✕ 关、切会话自动关）。打开时经 `lumi:path-exists` 探测一次存在性：缺失 → `MissingState`（文件已移动/改名/删除 + 重新检查）；存在 → 按类型渲染。
 - **预览分型**：图片 / PDF / HTML 经 `lumi-file://` 协议内嵌（`<img>`/`<iframe>`），文本 / Markdown 本地经主进程 IPC `lumi:read-text` 读头 500KB（renderer 对 `lumi-file` 的 fetch 恒被 CORS 拦——自定义协议不在跨源白名单，也不能开 `corsEnabled`，否则打穿下述 HTML 沙箱），远程经 `/file` 带 `Range` 取头 500KB，读后渲染；视频 / 音频 / Office / 未知类型 → 统一 `NoPreview`（提示 + 「用系统应用打开」）。**大小门控**：`> 50MB`（UI 阈值，用元数据 `size` 判定不读文件）走 `NoPreview` 提示「文件较大」。**HTML 安全**：`sandbox="allow-scripts"`（不带 `allow-same-origin`）——脚本可运行让交互页正常，但 iframe 是 opaque origin，对 `lumi-file` 的 fetch 跨域被拦，恶意页读不到本地文件外传。
@@ -334,7 +334,7 @@ macOS 关窗后应用驻留 Dock，sidecar 保持运行，Dock 唤起（activate
 | `desktop/src/components/CronPage.tsx` | 定时任务管理页 + 执行记录模块（`RunsSection`） |
 | `desktop/src/components/RightRail.tsx` | 统一右栏（收放钮 + `RailSection` 模块卡容器） |
 | `desktop/src/components/BgTasksDrawer.tsx` | 后台任务模块（`BgTasksSection`，运行中卡片 + 已完成折叠组） |
-| `desktop/src/components/{ProjectsPage,DirBrowser,FolderMenu}.tsx` | 项目管理页 + 目录浏览（新建项目）+ 添加文件夹菜单 |
+| `desktop/src/components/{ProjectsPage,DirBrowser}.tsx` | 项目管理页 + 目录浏览（新建项目） |
 | `desktop/src/i18n.ts` | 国际化（中文 / English） |
 | `lumi/gateway/channels/ws.py` | FastAPI WS 端点 + RPC dispatch |
 | `lumi/gateway/projects.py` | 项目清单持久化（`~/.lumi/lumi.json` 的 `projects` 分区） |

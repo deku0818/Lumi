@@ -15,7 +15,7 @@ import stat
 from langchain_core.tools import tool
 from pydantic import BaseModel, Field
 
-from lumi.agents.permissions.workspace import resolve_tool_path
+from lumi.agents.runtime.workspace import resolve_tool_path
 
 # kind 决定前端渲染形态：image=缩略图，其余=类型图标卡片。
 # 扩展名优先（mimetypes 对 .md/.ts 等返回 None），mime 兜底。

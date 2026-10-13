@@ -53,7 +53,7 @@ def test_cli_privileged_flag_still_wins() -> None:
 
 
 async def test_dream_agent_leaves_mode_to_unattended_routing(tmp_path: Path) -> None:
-    # dream 不钉死模式，由统一路由读取全局设置；写记忆目录仍免审批
+    # dream 不钉死模式，由统一路由读取全局设置；记忆写入遵守相同规则
     from lumi.agents.memory.dream import _run_dream_fork
 
     seen: dict = {}

@@ -1,14 +1,12 @@
 """工具权限控制系统 - 权限引擎
 
-核心入口，协调配置加载、规则匹配、工作区边界检查。
+核心入口，协调配置加载、规则匹配。
 """
 
 from __future__ import annotations
 
 from pathlib import Path
 
-from lumi.agents.memory.paths import resolve_under_project
-from lumi.agents.permissions.boundary import WorkspaceBoundary
 from lumi.agents.permissions.config_loader import ConfigLoader
 from lumi.agents.permissions.matcher import (
     COMMAND_ARG_KEYS,
@@ -21,10 +19,6 @@ from lumi.agents.permissions.models import (
     PermissionConfig,
     PermissionDecision,
 )
-from lumi.agents.permissions.workspace import (
-    add_authorized_directory,
-    set_authorized_directory,
-)
 from lumi.agents.tools.capability import split_compound_command
 from lumi.utils.logger import logger
 
@@ -32,7 +26,7 @@ from lumi.utils.logger import logger
 class PermissionEngine:
     """权限引擎 - 协调配置加载与权限评估
 
-    负责加载权限配置、评估工具调用权限、管理工作区边界。
+    负责加载权限配置、评估工具调用权限。
     初始化失败时回退到无规则状态（所有调用返回 unmatched）。
     """
 
@@ -51,14 +45,8 @@ class PermissionEngine:
         # 保存用户配置目录：rebase() 切项目时需复用，否则会退回默认 ~/.lumi，
         # 把自定义目录下的用户级权限规则悄悄丢掉
         self._user_config_dir = user_config_dir
-        # 会话级临时工作区（「添加文件夹」）。独立于 _config——后者会被
-        # reload()/rebase() 从磁盘整体覆盖，若把 ephemeral 混进去，配置文件一变更
-        # 用户本会话加的目录就被悄悄撤销。单独存字段使其跨 reload/rebase 存活。
-        self._ephemeral_workspaces: list[Path] = []
         self._loader = ConfigLoader(project_dir, user_config_dir)
         self._config = self._loader.load()
-        # 构建工作区边界检查器并同步到 filesystem 层
-        self._rebuild_boundary()
 
     @property
     def config(self) -> PermissionConfig:
@@ -70,48 +58,11 @@ class PermissionEngine:
         """本引擎绑定的项目根目录（会话级，随 rebase 变化）。"""
         return self._project_dir
 
-    def _rebuild_boundary(self) -> None:
-        """重建工作区边界检查器并同步到 filesystem 授权目录。
-
-        边界 = 项目根 + 配置 workspaces + 会话级 ephemeral workspaces。
-        ephemeral 不存在 _config 里，故 reload()/rebase() 重载配置后仍保留。
-        """
-        workspace_paths = [self._project_dir]
-        for ws in self._config.workspaces:
-            p = Path(ws)
-            if p.is_absolute():
-                workspace_paths.append(p)
-            else:
-                workspace_paths.append(self._project_dir / p)
-        workspace_paths.extend(self._ephemeral_workspaces)
-        # 持久记忆目录（~/.lumi/memory/projects/<本项目>/）纳入边界：使 write/edit 能
-        # 写到项目外的记忆目录（validate_path 与边界检查同时放行）。免审批另由 routing 短路。
-        from lumi.agents.memory import memory_dir
-
-        workspace_paths.append(memory_dir(self._project_dir))
-        self._boundary = WorkspaceBoundary(workspace_paths)
-
-        # 同步到 filesystem 层的授权目录列表
-        set_authorized_directory(self._project_dir)
-        for wp in workspace_paths[1:]:
-            add_authorized_directory(wp)
-
-    def authorized_directories(self) -> list[Path]:
-        """本引擎当前授权目录（项目根在首位 + 配置 workspaces + 会话级 ephemeral）。
-
-        供 bridge 在每轮 run 起点注入到 filesystem 层的 per-run 授权上下文，
-        使同进程多会话并发时各 run 的工具按本会话边界校验路径，互不串扰。
-
-        boundary.workspaces 属性已返回新列表（保护内部状态），直接返回即可、不再 wrap。
-        """
-        return self._boundary.workspaces
-
     def rebase(self, project_dir: Path) -> None:
-        """切换项目根目录：重载新目录的权限配置并重建工作区边界。"""
+        """切换项目根目录：重载新目录的权限配置。"""
         self._project_dir = project_dir.resolve()
         self._loader = ConfigLoader(self._project_dir, self._user_config_dir)
         self._config = self._loader.load()
-        self._rebuild_boundary()
 
     def evaluate(self, tool_name: str, tool_args: dict) -> PermissionDecision:
         """评估单个工具调用的权限决策。
@@ -195,44 +146,6 @@ class PermissionEngine:
             return PermissionDecision.UNMATCHED
         return PermissionDecision.ALLOW
 
-    def check_workspace_boundary(self, tool_name: str, tool_args: dict) -> bool:
-        """工具调用是否在工作区边界内（提取不到路径视为边界内）。"""
-        violations = self.get_boundary_violations(tool_name, tool_args)
-        if violations:
-            logger.warning(
-                "[PermissionEngine] 工具 %s 超出工作区边界：%s", tool_name, violations
-            )
-        return not violations
-
-    def get_boundary_violations(self, tool_name: str, tool_args: dict) -> list[str]:
-        """超出工作区边界的路径列表（相对路径基于项目目录解析）。"""
-        paths = self._boundary.extract_paths_from_tool_call(tool_name, tool_args)
-        # 与工具执行同一口径：先展开 ~ 再按项目根解析（~/x 先拼项目根就成了界内的
-        # <项目>/~/x，实际写到的却是家目录）
-        resolved = [resolve_under_project(p, self._project_dir) for p in paths]
-        return [str(p) for p in resolved if not self._boundary.is_within_boundary(p)]
-
-    def add_ephemeral_workspace(self, directory: str) -> None:
-        """临时把目录加入工作区（仅内存，不持久化；会话级「添加文件夹」用）。
-
-        存独立的 _ephemeral_workspaces 而非 _config.workspaces——后者会被
-        reload()/rebase() 从磁盘整体覆盖，导致用户本会话添加的目录在权限配置
-        文件变更（如用户手改 permissions.local.json）后被悄悄撤销。
-        """
-        resolved = Path(directory).resolve()
-        if resolved in self._ephemeral_workspaces:
-            return
-        self._ephemeral_workspaces.append(resolved)
-        self._rebuild_boundary()
-
-    def remove_ephemeral_workspace(self, directory: str) -> None:
-        """移除临时加入的工作区目录并重建边界。"""
-        resolved = Path(directory).resolve()
-        if resolved not in self._ephemeral_workspaces:
-            return
-        self._ephemeral_workspaces.remove(resolved)
-        self._rebuild_boundary()
-
     def reload(self) -> None:
         """重新加载配置文件（仅在文件变更时）。"""
         if not self._loader.needs_reload():
@@ -244,10 +157,4 @@ class PermissionEngine:
             logger.error("重新加载权限配置失败", exc_info=True)
             return
 
-        old_config = self._config
         self._config = new_config
-        try:
-            self._rebuild_boundary()
-        except Exception:
-            logger.error("重建工作区边界失败，回滚配置", exc_info=True)
-            self._config = old_config

@@ -32,7 +32,7 @@ class TestFormatResult:
         assert _format_result(r) == "Error: Exit code 1"
 
 
-async def test_bash_tool_executes_command(authorized_tmp_dir):
+async def test_bash_tool_executes_command(project_tmp_dir):
     from lumi.agents.tools.providers.bash import bash
 
     result = await bash.ainvoke(
@@ -50,12 +50,12 @@ async def test_bash_tool_executes_command(authorized_tmp_dir):
         "find 'search dir' -type f -name '*.txt'",
     ],
 )
-async def test_search_via_bash(command, authorized_tmp_dir):
+async def test_search_via_bash(command, project_tmp_dir):
     from lumi.agents.tools.providers.bash import bash
 
     if command.startswith("rg ") and not shutil.which("rg"):
         pytest.skip("ripgrep not installed")
-    directory = authorized_tmp_dir / "search dir"
+    directory = project_tmp_dir / "search dir"
     directory.mkdir()
     (directory / "result.txt").write_text("needle{}\n")
     result = await bash.ainvoke({"command": command, "description": "搜索文件和内容"})
@@ -64,7 +64,7 @@ async def test_search_via_bash(command, authorized_tmp_dir):
         assert "1:needle{}" in result
 
 
-async def test_background_rejects_shell_ampersand(authorized_tmp_dir):
+async def test_background_rejects_shell_ampersand(project_tmp_dir):
     """后台任务命令自带 & 时不执行、直接报错（守卫在 start_task 之前，不会真起任务）。"""
     from lumi.agents.tools.providers.bash import bash
 
@@ -94,7 +94,7 @@ async def test_shell_sessions_isolated_per_thread():
     assert mgr.get_session("thread-B") is sb  # 只关指定 thread，不影响其它会话
 
 
-async def test_bash_keys_shell_by_current_thread(monkeypatch, authorized_tmp_dir):
+async def test_bash_keys_shell_by_current_thread(monkeypatch, project_tmp_dir):
     """回归（review #3）：bash 按 current_thread_id 取 shell，而非全局共用 "default"。
 
     并发会话共用 "default" 时，一个会话的 cd 会污染另一个、相对路径跑错项目。

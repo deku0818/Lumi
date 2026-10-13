@@ -75,9 +75,9 @@ Desktop 端：`lumi serve` 在 lifespan 中经 `setup_cron()` 启动调度器，
   （`Scheduler.purge_job_data`）；一次性（at）任务执行完自删时不级联（保留结果可查）
 - Scheduler 自持的常驻 checkpointer 只用于保留策略与级联删除；它初始化失败时这两项清理不做，
   执行本身不受影响（checkpointer 由 bridge 自带）
-- **在任务所属项目里执行**：serve 下 cron 经 `cron_stream` 用 AgentBridge 跑，授权目录、
+- **在任务所属项目里执行**：serve 下 cron 经 `cron_stream` 用 AgentBridge 跑，项目目录、
   config hooks、MCP 与普通会话同一条注入路径。`Job.project_dir` 记下创建时会话的项目
-  （cron 工具取当前 run 的主授权目录），执行时 `initialize(project_dir=...)`；空串
+  （cron 工具取当前 run 的项目目录），执行时 `initialize(project_dir=...)`；空串
   （存量任务 / 桌面表单创建）退回进程 cwd。详见 [permissions.md](permissions.md) /
   [hooks.md](hooks.md)
 

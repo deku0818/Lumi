@@ -46,7 +46,7 @@ def ensure_memory_dir(project_dir: Path) -> Path:
 
 def resolve_under_project(path: str | Path, project_dir: Path) -> Path:
     """展开 ``~``、相对路径基于项目根解析并 resolve——工具路径归一化的单一口径
-    （文件工具执行、边界检查、is_memory_path 的免审批判定与 context_inject 的自改静默
+    （文件工具执行、context_inject 的自改静默
     比对共用）。"""
     target = Path(path).expanduser()
     if not target.is_absolute():

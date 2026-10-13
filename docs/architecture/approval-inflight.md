@@ -93,9 +93,10 @@ broker 三个方法：`request(payload, reject_value)`、`resolve(approval_id, d
 - `LumiAgentContext` 新增 `approval_broker` 字段（默认 `None`，`TYPE_CHECKING` import 避免 agents→gateway 运行时依赖）。无 bridge 的 headless 调用（cron / workflow）保持 `None`。
 
 ### `agents/core/nodes.py`
-- `human_approval` 改 **async**，`interrupt(...)` → `await ctx.approval_broker.request({...}, {"decision":"reject","message":...})`。DENY 快速拒绝分支、三态路由（approve→ToolExecutor / reject·cancel→END）**保留不变**，只换「怎么拿到 decision」。
-  - 后续（v0.2.125）应答扩展为**逐个审批** `{decisions: [...], message?}`（与 `tool_calls` 同序，缺项按拒绝）：有允许时被拒的补拒绝 ToolMessage 后进 ToolExecutor（`tool_executor` 只把未应答的 ToolCall 喂给 ToolNode），全拒绝 / cancel 仍 END。旧 `{decision}`（飞书、上面的 `reject_value`）展开成同值列表走同一裁决 `_apply_decisions`。
-- 新增 **headless 守卫**：`approval_broker is None`（cron / workflow / 后台子代理）→ fail-closed 自动拒绝并路由回 `CallModel`，让自治 agent 改用无需审批的方式，而非崩溃。
+- `ToolExecutor` 对每个调用独立匹配权限、审批并立即执行。规则和 AI 拒绝只影响该调用；其他已允许的调用照常执行，不等待兄弟审批。
+- `human_approval()` 是执行器调用的辅助函数，收到单个待审调用后经 `ApprovalBroker` 原地挂起。保留 `{decision}` / `{decisions, message?, set_tool_mode?}` 应答协议与缺项拒绝语义。
+- 全部未执行且存在人工拒绝时结束本轮；规则 / AI 拒绝回给模型调整。Broker 的 `stop` 标记表示停止整轮，即使已有其他调用执行也不再继续模型。
+- 无人工通道时仅拒绝需要人工审批的调用，ALLOW 无需审批通道。auto 的分类器异常只拒绝对应调用。
 
 ### `agents/tools/providers/ask.py`
 - 删 `from __future__ import annotations`（否则 `ToolRuntime` 注解被字符串化、注入失效，registry 加载期有 fail-fast 守卫）、加显式 `args_schema=AskInput` + `runtime: ToolRuntime` 注入，改 **async**。
@@ -103,7 +104,7 @@ broker 三个方法：`request(payload, reject_value)`、`resolve(approval_id, d
 - 同样的 **headless 守卫**：`approval_broker is None` → 返回「无交互通道，自行判断后继续」让模型续跑。
 
 ### `agents/tools/providers/agent.py`
-- 前台子代理 `create_agent` 后 `context.approval_broker = runtime.context.approval_broker`——子代理审批经父流 `astream_events` 浮现、白嫖 `parent_ids` 归属（旧 interrupt 无 checkpointer 不可用，broker 才解锁子代理审批）。后台子代理 detached、无活流可挂，**刻意不传播**（保持 `None`，bypass-immune 审批走 headless 守卫 fail-closed）。
+- 前台子代理 `create_agent` 后 `context.approval_broker = runtime.context.approval_broker`——子代理审批经父流 `astream_events` 浮现、白嫖 `parent_ids` 归属（旧 interrupt 无 checkpointer 不可用，broker 才解锁子代理审批）。后台子代理 detached、无活流可挂，**刻意不传播**（保持 `None`，需人工审批但无通道时只拒绝对应调用）。
 
 ### `gateway/bridge/broker.py`（新增）
 - `ApprovalBroker`：`request` / `resolve` / `reject_all`。
@@ -152,7 +153,7 @@ broker 三个方法：`request(payload, reject_value)`、`resolve(approval_id, d
    - 等待期间 `set_provider` 等配置类 RPC 等审批结束再生效，可接受。
 3. **命名**：wire 方法名保留 `resume`（仅改非流式），不改名，减小前端 diff。
 4. **ask 同批迁移**：ask 与 human_approval 一起改 broker——二者共用 `resume` 入口，迁 human_approval 后 tool_approval 应答必须非流式，ask 若仍 interrupt 则其恢复需流式，同名方法无法兼具两种语义，故必须同批。
-5. **broker 注入** = bridge 在 `create_agent` 后事后赋值（与 `widen_boundary` 回调同一注入模式，避免 agents→gateway 反向依赖）。
+5. **broker 注入** = bridge 在 `create_agent` 后事后赋值（避免 agents→gateway 反向依赖）。
 6. **权限富化留 bridge** = `ApprovalEnricher` 从旧 `_check_interrupts` 调用点平移到新 `on_custom_event` 分支，节点只发裸 `tool_calls`。
 7. **headless fail-closed** = 无 broker（cron / workflow / 后台子代理）时 human_approval 自动拒绝、ask 提示继续，不崩溃。
 

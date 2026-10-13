@@ -33,7 +33,9 @@ class _FakeToolNode:
 
 
 def _runtime(tools):
-    return SimpleNamespace(context=LumiAgentContext(tools=tools))
+    return SimpleNamespace(
+        context=LumiAgentContext(tools=tools, tool_mode="privileged")
+    )
 
 
 def _ai_with_tool_call(name="echo", args=None, tc_id="1"):

@@ -13,7 +13,7 @@ files（显示侧），让 read / vision 工具按路径消费。
 
 为何在后端存盘（而非前端发路径）：字节落到「后端本机」，本地与远程后端都能读到
 （前端本地路径在远程后端上不存在）。集中存 ~/.lumi/uploads 不污染用户项目；
-read / vision 为只读工具、不受工作区边界限制（见 permissions.routing），故能直接读取。
+read / vision 为只读工具，可直接按绝对路径读取（显式 deny 规则仍生效）。
 """
 
 from __future__ import annotations

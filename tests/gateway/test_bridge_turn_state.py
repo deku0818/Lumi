@@ -55,6 +55,45 @@ async def test_offline_flush_clears_ptl_retry(tmp_path, bridge):
     assert state.values.get("ptl_retry") is False
 
 
+@pytest.mark.parametrize("mode", ["default", "accept_edits", "auto", "privileged"])
+async def test_notification_turn_preserves_current_tool_mode(tmp_path, bridge, mode):
+    with (
+        patch(
+            "lumi.models.chain.create_llm",
+            return_value=ScriptedLLM(script=[[AIMessageChunk(content="ok")]]),
+        ),
+        patch.object(AgentBridge, "_build_tools", new=_no_tools),
+    ):
+        await bridge.initialize(project_dir=str(tmp_path))
+        bridge.set_tool_mode(mode)
+        events = [
+            e async for e in bridge.stream_response("后台任务已完成", synthetic=True)
+        ]
+    assert events[-1].kind.value == "turn.complete"
+    assert bridge._context.tool_mode == mode
+
+
+@pytest.mark.parametrize(
+    "kwargs, expected",
+    [({}, "default"), ({"synthetic": True, "tool_mode": "auto"}, "auto")],
+)
+async def test_response_tool_mode_defaults_and_explicit_override(
+    tmp_path, bridge, kwargs, expected
+):
+    with (
+        patch(
+            "lumi.models.chain.create_llm",
+            return_value=ScriptedLLM(script=[[AIMessageChunk(content="ok")]]),
+        ),
+        patch.object(AgentBridge, "_build_tools", new=_no_tools),
+    ):
+        await bridge.initialize(project_dir=str(tmp_path))
+        bridge.set_tool_mode("privileged")
+        events = [e async for e in bridge.stream_response("hi", **kwargs)]
+    assert events[-1].kind.value == "turn.complete"
+    assert bridge._context.tool_mode == expected
+
+
 async def test_set_workspace_rebuilds_project_prompt_and_memory(tmp_path, bridge):
     # 回归：切项目只 rebase 了权限引擎，系统提示词（项目层 SOUL）与记忆目录仍是旧项目的
     from lumi.agents.memory import memory_dir
@@ -80,26 +119,27 @@ async def _send(bridge: AgentBridge, gen) -> str:
     return str(next(m for m in messages if m.id == message_id).content)
 
 
-async def test_folder_reminder_follows_history_not_bridge_memory(tmp_path, bridge):
+async def test_ultra_reminder_follows_history_not_bridge_memory(tmp_path, bridge):
     # 回归：「已通知」存在 bridge 内存里——重新生成删掉携带提醒的消息后不再重发，
     # 同 thread 换一个 bridge（重连）也不知道模型见过什么
-    extra = tmp_path / "extra"
-    extra.mkdir()
     reply = [[AIMessageChunk(content="ok")]]
     with (
         patch("lumi.models.chain.create_llm", return_value=ScriptedLLM(script=reply)),
         patch.object(AgentBridge, "_build_tools", new=_no_tools),
+        patch(
+            "lumi.gateway.bridge.folders.FolderManager._ultra_active", return_value=True
+        ) as ultra,
     ):
         await bridge.initialize(project_dir=str(tmp_path))
-        bridge.folders.add_folder(str(extra))
         first_id = ""
         async for e in bridge.stream_response("hi"):
             first_id = first_id or e.message_id
         regen = await _send(bridge, bridge.stream_regenerate(first_id))
-        assert str(extra) in regen  # 重答轮重新告知
+        assert "Ultra 编排模式已开启" in regen  # 重答轮重新告知
         again = await _send(bridge, bridge.stream_response("again"))
-        assert str(extra) not in again  # 历史里已有，不重复
+        assert "Ultra 编排模式已开启" not in again  # 历史里已有，不重复
 
+        ultra.return_value = False
         other = AgentBridge()
         try:
             await other.initialize(project_dir=str(tmp_path))
@@ -107,7 +147,7 @@ async def test_folder_reminder_follows_history_not_bridge_memory(tmp_path, bridg
             text = await _send(other, other.stream_response("x"))
         finally:
             await other.close()
-    assert "移除" in text and str(extra) in text
+    assert "Ultra 编排模式已关闭" in text
 
 
 async def test_user_turns_share_one_start_snapshot(tmp_path, bridge):
@@ -134,3 +174,43 @@ async def test_user_turns_share_one_start_snapshot(tmp_path, bridge):
                 message_id = next(e.message_id for e in events if e.message_id)
                 # 一次开轮快照（提醒 + 残留修复/截断共用），一次收尾 usage 快照。
                 assert reads.await_count == 2
+
+
+@pytest.mark.parametrize("legacy_node", ["HumanApproval", "AutoClassify"])
+async def test_legacy_pending_approval_keeps_history_during_recovery(
+    tmp_path, bridge, legacy_node
+):
+    from langchain_core.messages import ToolMessage
+    from langgraph.graph import END, START, StateGraph
+
+    from lumi.agents.core.state import LumiAgentState
+
+    with patch.object(AgentBridge, "_build_tools", new=_no_tools):
+        await bridge.initialize(project_dir=str(tmp_path))
+    ai = AIMessage(
+        content="保留这段回复",
+        tool_calls=[{"name": "read", "args": {"file_path": "x"}, "id": "legacy-call"}],
+    )
+    builder = StateGraph(LumiAgentState)
+    builder.add_node("CallModel", lambda state: {"messages": [ai]})
+    builder.add_node(legacy_node, lambda state: {})
+    builder.add_edge(START, "CallModel")
+    builder.add_edge("CallModel", legacy_node)
+    builder.add_edge(legacy_node, END)
+    old = builder.compile(
+        checkpointer=bridge.graph.checkpointer, interrupt_before=[legacy_node]
+    )
+    await old.ainvoke({"messages": []}, bridge._config)
+
+    assert (await bridge.graph.aget_state(bridge._config)).next == (legacy_node,)
+    await bridge._recover_stale_state(bridge.graph)
+    snap = await bridge.graph.aget_state(bridge._config)
+    assert snap.next == ()
+    assert any(
+        isinstance(m, AIMessage) and m.content == ai.content
+        for m in snap.values["messages"]
+    )
+    assert any(
+        isinstance(m, ToolMessage) and m.tool_call_id == "legacy-call"
+        for m in snap.values["messages"]
+    )

@@ -120,5 +120,4 @@ vision(file_path, question)
 字段说明：`model` 为视觉辅助模型名（空 = 不启用 vision 工具）；`base_url` / `api_key` 留空则复用 `providers` 分区里含该模型的 profile 连接。
 
 > 桌面上传的图片本身也会经 `persist_image_blocks` 存到 `~/.lumi/uploads/` 并以
-> `<attached-file>` 路径引用交给模型（与普通文件一致）；read/vision 为只读工具、不受工作区
-> 边界限制，故能直接读取。
+> `<attached-file>` 路径引用交给模型（与普通文件一致）；read/vision 为只读工具，可直接按绝对路径读取，显式 deny 规则仍生效。

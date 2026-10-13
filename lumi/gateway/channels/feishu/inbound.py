@@ -455,7 +455,6 @@ class FeishuInbound:
         file_paths: list[str] = []
         if m.file_refs:
             target = inbound_dir(thread_id)
-            bridge.folders.add_folder(str(target))  # 授权该目录给本会话权限引擎
             results = await asyncio.gather(
                 *(
                     self._download_file(mid, fk, fname, target)

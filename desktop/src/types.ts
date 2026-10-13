@@ -31,7 +31,6 @@ export interface ToolCallBrief {
   name?: string
   args?: unknown
   warnings?: string[]
-  boundary_violations?: string[]
   [k: string]: unknown
 }
 

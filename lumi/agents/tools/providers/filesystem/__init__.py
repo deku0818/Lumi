@@ -1,7 +1,7 @@
 """Filesystem工具提供者 - 提供本地文件系统操作工具
 
 该模块提供文件读取、写入、编辑功能。
-所有文件操作都在授权目录范围内执行，通过路径校验确保安全。
+相对路径基于当前会话项目根解析，绝对路径可指向任意目录。
 
 本包作为公共门面，re-export 后端（backend）与
 工具函数（tools）。read 工具因涉及多模态 dispatch 与测试 monkeypatch
@@ -21,7 +21,7 @@ from langgraph.types import Command
 from pydantic import Field
 
 from lumi.agents.core.meta_message import synthetic_human_message
-from lumi.agents.permissions.workspace import resolve_tool_path
+from lumi.agents.runtime.workspace import resolve_tool_path
 from lumi.agents.tools.providers.filesystem.backend import (
     BINARY_CHECK_BYTES,
     DEFAULT_READ_LIMIT,

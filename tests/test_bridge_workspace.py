@@ -37,68 +37,6 @@ async def test_close_reaps_thread_shell():
     assert "t-reap" not in mgr._sessions  # 断连即回收
 
 
-async def test_set_workspace_preserves_extra_folders(tmp_path):
-    """切目录后本会话临时目录保留（无虚假移除提醒）。"""
-    extra = tmp_path / "extra"
-    extra.mkdir()
-    dest = tmp_path / "dest"
-    dest.mkdir()
-    bridge = AgentBridge()
-    bridge.folders.add_folder(str(extra))
-    known = bridge.folders.extra_folders[:]  # 已告知模型
-    await bridge.folders.set_workspace(str(dest))
-    assert bridge.folders.extra_folders == [str(extra.resolve())]
-    # 临时目录未变 → 不产生任何增减提醒
-    assert bridge.folders.folder_note(known) == ""
-
-
-def test_add_remove_folder(tmp_path):
-    bridge = AgentBridge()
-    extra = tmp_path / "extra"
-    extra.mkdir()
-    resolved = str(extra.resolve())
-    assert bridge.folders.add_folder(str(extra))["folders"] == [resolved]
-    # 重复添加去重
-    assert bridge.folders.add_folder(str(extra))["folders"] == [resolved]
-    assert bridge.folders.remove_folder(str(extra))["folders"] == []
-
-
-def test_add_folder_rejects_missing_dir(tmp_path):
-    bridge = AgentBridge()
-    with pytest.raises(ValueError):
-        bridge.folders.add_folder(str(tmp_path / "nope"))
-
-
-def test_folder_note_add_then_remove_lifecycle(tmp_path):
-    bridge = AgentBridge()
-    extra = tmp_path / "extra"
-    extra.mkdir()
-    resolved = str(extra.resolve())
-
-    # 添加 → 与模型已知（无）做差产出添加提醒
-    bridge.folders.add_folder(str(extra))
-    note = bridge.folders.folder_note([])
-    assert resolved in note and "添加" in note
-    # 模型已知 = 当前 → 空串（提醒只发一次）
-    assert bridge.folders.folder_note([resolved]) == ""
-
-    # 移除 → 中性措辞的移除提醒
-    bridge.folders.remove_folder(str(extra))
-    note = bridge.folders.folder_note([resolved])
-    assert resolved in note and "移除" in note
-    assert "不应" not in note
-
-
-def test_folder_note_add_remove_cancels_out(tmp_path):
-    bridge = AgentBridge()
-    extra = tmp_path / "extra"
-    extra.mkdir()
-    bridge.folders.add_folder(str(extra))
-    bridge.folders.remove_folder(str(extra))
-    # 消息发出前加了又删 → 抵消，不打扰模型
-    assert bridge.folders.folder_note([]) == ""
-
-
 def test_injected_note_marked_structurally():
     """注入块打 injected_prefix 计数，显示侧按结构掉块——不依赖正则识别正文。"""
     from langchain_core.messages import HumanMessage
@@ -107,7 +45,7 @@ def test_injected_note_marked_structurally():
     from lumi.agents.core.node_helpers.messages import inject_text_into_message
 
     msg = HumanMessage(content="你好")
-    # 注入两条 note（folder + ultra 场景），且刻意不带 <system-reminder> 标签，
+    # 注入多条 note，且刻意不带 <system-reminder> 标签，
     # 证明显示侧走的是计数掉块而非正则
     msg = inject_text_into_message(msg, "note-a\n")
     msg = inject_text_into_message(msg, "note-b\n")

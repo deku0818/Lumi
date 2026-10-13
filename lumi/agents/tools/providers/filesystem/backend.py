@@ -1,7 +1,7 @@
 """LocalFilesystemBackend - 本地文件操作后端
 
 提供文件读取、写入、编辑的底层实现，
-以及格式化/校验用的纯函数 helper。所有路径在操作前都会经过授权目录校验。
+以及格式化/校验用的纯函数 helper。相对路径基于当前会话项目根解析。
 """
 
 from __future__ import annotations
@@ -10,10 +10,7 @@ import asyncio
 import codecs
 import locale
 
-from lumi.agents.permissions.workspace import (
-    resolve_tool_path,
-    validate_path,
-)
+from lumi.agents.runtime.workspace import resolve_tool_path
 
 # ============================================================================
 # Constants
@@ -85,7 +82,7 @@ class LocalFilesystemBackend:
     """本地文件操作后端
 
     所有文件操作通过 pathlib 和本地进程执行，
-    所有路径在操作前都会经过授权目录校验。
+    相对路径基于当前会话项目根解析。
     """
 
     async def read(
@@ -141,7 +138,7 @@ class LocalFilesystemBackend:
 
     async def write(self, file_path: str, content: str) -> dict[str, str | None]:
         """创建新文件并写入内容"""
-        resolved = validate_path(file_path)
+        resolved = resolve_tool_path(file_path)
 
         if resolved.exists():
             return {
@@ -166,7 +163,7 @@ class LocalFilesystemBackend:
         replace_all: bool = False,
     ) -> dict[str, str | int | None]:
         """通过字符串替换编辑文件"""
-        resolved = validate_path(file_path)
+        resolved = resolve_tool_path(file_path)
 
         if not resolved.exists():
             return {

@@ -1,7 +1,7 @@
 """持久记忆注入 + 项目说明（AGENTS.md）按需读取的测试。
 
 覆盖：路径 sanitize / 边界判定、行为说明组装、MEMORY.md 索引加载、
-路由免审批 carve-out、首条消息注入块。全部为纯字符串/路径断言，不执行真实工具。
+记忆写入的统一权限路由、首条消息注入块。全部为纯字符串/路径断言，不执行真实工具。
 """
 
 from __future__ import annotations
@@ -24,7 +24,7 @@ from lumi.agents.memory import (
     paths,
 )
 from lumi.agents.memory.prompt import MAX_INDEX_LINES
-from lumi.agents.permissions.routing import _is_memory_write, route_decision
+from lumi.agents.permissions.routing import route_decision
 
 _PROJ = Path("/Users/x/Cocoon/Lumi")
 
@@ -50,7 +50,7 @@ def test_is_memory_path_outside():
 
 
 def test_is_memory_path_project_file_is_not_memory():
-    """项目内的普通文件不算记忆路径（免审批只针对记忆目录）。"""
+    """项目内的普通文件不算记忆路径。"""
     assert is_memory_path(str(_PROJ / "foo.py"), _PROJ) is False
 
 
@@ -138,41 +138,17 @@ async def test_agent_without_memory_has_project_instructions(tmp_path):
     assert "AGENTS.md" in context.system_prompt
 
 
-# === 路由免审批 carve-out ===
+# === 记忆写入沿用同一权限规则 ===
 
 
-def _write_tc(file_path: str) -> dict:
-    return {"name": "write", "args": {"file_path": file_path, "content": "x"}}
-
-
-def test_is_memory_write_true_for_memory_path():
-    assert _is_memory_write(_write_tc(str(memory_dir(_PROJ) / "f.md")), _PROJ) is True
-
-
-def test_is_memory_write_false_for_project_path():
-    assert _is_memory_write(_write_tc(str(_PROJ / "f.py")), _PROJ) is False
-
-
-def test_is_memory_write_false_for_non_edit_tool():
-    assert _is_memory_write({"name": "bash", "args": {}}, _PROJ) is False
-
-
-def test_route_memory_write_auto_allows(monkeypatch):
-    """default 模式下，写记忆目录免审批直接 ToolExecutor（engine=None 也成立）。"""
-    monkeypatch.setattr(
-        "lumi.agents.permissions.routing.get_authorized_directory", lambda: _PROJ
-    )
-    tcs = [_write_tc(str(memory_dir(_PROJ) / "feedback_x.md"))]
-    assert route_decision(tcs, "default", None) == "ToolExecutor"
-
-
-def test_route_non_memory_write_still_evaluated(monkeypatch):
-    """写项目外普通文件不走记忆 carve-out（engine=None → default 回退审批）。"""
-    monkeypatch.setattr(
-        "lumi.agents.permissions.routing.get_authorized_directory", lambda: _PROJ
-    )
-    tcs = [_write_tc("/tmp/evil.sh")]
-    assert route_decision(tcs, "default", None) == "HumanApproval"
+def test_route_memory_write_requires_approval():
+    tc = {
+        "name": "write",
+        "args": {"file_path": str(memory_dir(_PROJ) / "f.md"), "content": "x"},
+    }
+    assert route_decision(tc, "default", None) == "HumanApproval"
+    assert route_decision(tc, "auto", None) == "AutoClassify"
+    assert route_decision(tc, "privileged", None) == "ToolExecutor"
 
 
 # === 首条消息注入块 ===

@@ -25,7 +25,6 @@ from lumi.agents.core.workflow import (
     WorkflowOutcome,
     WorkflowScriptError,
 )
-from lumi.agents.permissions.workspace import resolve_tool_path
 from lumi.agents.runtime.bg_tasks import (
     BackgroundTaskEntry,
     TaskKind,
@@ -36,6 +35,7 @@ from lumi.agents.runtime.bg_tasks import (
     new_task_id,
     run_background_task,
 )
+from lumi.agents.runtime.workspace import resolve_tool_path
 from lumi.utils.config import get_config
 
 
@@ -160,7 +160,7 @@ async def workflow(
         return "workflow 需要提供 script（内联脚本）或 path（脚本文件路径）之一。"
     name = name or "workflow"
 
-    # 子代理经父 context 复用 PermissionEngine（共享工作区边界）、项目根与渠道 env；
+    # 子代理经父 context 复用 PermissionEngine（共享权限规则）、项目根与渠道 env；
     # 无审批通道，以 auto 运行。
     engine = WorkflowEngine(
         script, parent=runtime.context, args=args, name=name, depth=depth + 1

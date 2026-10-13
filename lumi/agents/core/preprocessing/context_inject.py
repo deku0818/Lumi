@@ -50,7 +50,7 @@ from lumi.agents.core.preprocessing.memory import (
 from lumi.agents.core.preprocessing.skill_detector import SkillChangeDetector
 from lumi.agents.core.preprocessing.system_info import system_info_body
 from lumi.agents.memory.paths import memory_entrypoint, resolve_under_project
-from lumi.agents.permissions.workspace import get_authorized_directory
+from lumi.agents.runtime.workspace import get_project_directory
 from lumi.utils.constants import ENV_TAG
 from lumi.utils.hashing import short_hash
 
@@ -159,7 +159,7 @@ async def context_inject_hook(ctx: HookContext) -> HookResult:
     if not messages:
         return None
 
-    project_dir = get_authorized_directory()
+    project_dir = get_project_directory()
     old_marker, written = _scan_history(messages, project_dir)
     target = messages[-1]
     if not isinstance(target, HumanMessage):

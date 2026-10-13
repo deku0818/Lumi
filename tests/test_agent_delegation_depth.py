@@ -88,7 +88,6 @@ def _make_runtime(depth: int) -> SimpleNamespace:
         context=SimpleNamespace(
             permission_engine=None,
             approval_broker=None,
-            widen_boundary=None,
             tool_mode="default",
             project_dir=None,
             env_extra="",
@@ -325,17 +324,22 @@ async def test_workflow_refused_at_depth_limit() -> None:
 def test_foreground_subagent_follows_parent_mode_live() -> None:
     """回归：前台子代理的 tool_mode 曾是委派瞬间的快照——父会话运行中从 privileged
     切回 default，子代理的写操作照样免审批。"""
-    from lumi.agents.core.nodes import is_use_tool
+    from lumi.agents.core.nodes import effective_tool_mode
     from lumi.agents.core.state import LumiAgentContext
+    from lumi.agents.permissions.routing import route_decision
 
     parent = LumiAgentContext(tool_mode="privileged")
     child = LumiAgentContext(mode_parent=parent, approval_broker=object())
     call = {"name": "write", "args": {"file_path": "x.txt", "content": ""}, "id": "1"}
-    state = {"messages": [AIMessage(content="", tool_calls=[call])]}
-    runtime = SimpleNamespace(context=child)
-    assert is_use_tool(state, runtime) == "ToolExecutor"
+    assert (
+        route_decision(call, effective_tool_mode(child), child.permission_engine)
+        == "ToolExecutor"
+    )
     parent.tool_mode = "default"
-    assert is_use_tool(state, runtime) == "HumanApproval"
+    assert (
+        route_decision(call, effective_tool_mode(child), child.permission_engine)
+        == "HumanApproval"
+    )
 
 
 async def test_foreground_subagent_links_parent_mode() -> None:

@@ -85,7 +85,7 @@ class FakeBridge:
         self.started = asyncio.Event()
         self.release = asyncio.Event()
 
-    async def stream_response(self, content, *, tool_mode="default", **kwargs):
+    async def stream_response(self, content, *, tool_mode=None, **kwargs):
         self.stream_response_calls.append(
             {"content": content, "tool_mode": tool_mode, **kwargs}
         )
@@ -626,7 +626,7 @@ async def test_switch_session_recovers_workspace_from_thread():
     """打开无 workspace 的既有线程（cron 执行线程）时，从其 checkpoint 记录恢复项目绑定。
 
     前端对 cron 线程 activate(tid, '', backend) 不带 workspace；不恢复则切到新 thread 后
-    mark_workspace_unbound，工作区边界关卡拒发「请先选择项目」。
+    mark_workspace_unbound，项目绑定检查拒发「请先选择项目」。
     """
     bridge = FakeBridge()
     bridge.workspace_bound = False  # 起始未绑定，凸显恢复效果
@@ -681,25 +681,19 @@ async def test_unknown_method_returns_error():
 
 
 async def test_notification_loop_injects_and_pumps():
-    """直接测 _notification_loop 的注入路径：有通知 → drain → stream_response(synthetic)。"""
+    """通知续跑不指定审批模式，由 bridge 沿用当前会话。"""
     events = [BridgeEvent(kind=EventKind.MESSAGE_DELTA, text="bg done")]
     bridge = FakeBridge(events=events, notifications=["后台任务已完成"])
     session, channel = _make_session(bridge)
 
-    # 不走真实 sleep 轮询，直接驱动一次注入（语义等价 loop 抢锁后的体）
-    async with session._run.lock:
-        hint = bridge.drain_notification_hint(bridge.current_thread_id)
-        await session._pump(
-            bridge.stream_response(hint, tool_mode="default", synthetic=True)
-        )
+    await session._run_synthetic_turn()
 
     # 注入作为不可见合成轮，事件被 pump 出
     assert [e["params"]["type"] for e in channel.events()] == ["message.delta"]
     # synthetic 标记透传
     assert bridge.stream_response_calls[0]["synthetic"] is True
     assert bridge.stream_response_calls[0]["content"] == "后台任务已完成"
-    # 注：完整 _notification_loop（含 NOTIFICATION_POLL_INTERVAL 轮询、与挂起审批轮
-    # 持锁的竞争）只能靠真实 desktop 联调验证。
+    assert bridge.stream_response_calls[0]["tool_mode"] is None
 
 
 async def test_notification_loop_cancel_keeps_parked_turn(monkeypatch):

@@ -109,8 +109,7 @@ mention_key——`id=` 是**发送方应用**的 open_id（open_id 每应用一�
 - 图片（image / post 内嵌 / 被回复消息的图）→ 下载 → 走仓库统一压缩管线
   （`media.maybe_resize_and_downsample_image` + `compress_image_with_token_budget`，满足
   5MB/2000px 硬约束 + token 预算）→ base64 Anthropic content block，与 desktop 发图同构。
-- 文件 → 下载到 `<系统临时区>/lumi/feishu/<thread>/`（如 Linux `/tmp/lumi/feishu/<thread>/`）→ `bridge.folders.add_folder()` 授权该目录给会话权限
-  引擎 → `<attached-file>路径</attached-file>` 注入正文，agent 用 `read` 读（PDF 渲染、文本直读）。
+- 文件 → 下载到 `<系统临时区>/lumi/feishu/<thread>/`（如 Linux `/tmp/lumi/feishu/<thread>/`）→ `<attached-file>路径</attached-file>` 注入正文，agent 用 `read` 读（PDF 渲染、文本直读）。
 - 回复某条消息时，一并拉取**被回复消息**里的图片/文件（用父消息 id 下载）；其正文按类型抽取
   （text / post / 卡片，@ 占位按父消息自己的 `mentions` 换姓名）记进 `_Pending.quote`，以「> 」引用块
   前置到**模型侧**文本（`_render`），气泡 `items` 不带——群聊 mention 模式下被引用的
@@ -188,8 +187,7 @@ mention_key——`id=` 是**发送方应用**的 open_id（open_id 每应用一�
 | `approval.request` | 泄漏的工具审批 → 一律自动 `resolve_approval(reject)`，永不弹审批卡 |
 | `turn.complete` / `error` / 异常 / 取消 | 收尾流式卡（`ended` 标志保证只收尾一次） |
 
-**审批语义**：`tool_mode` 取配置（`auto` AI 审批 / `privileged` 自动放行），两档下「泄漏的人工
-审批触点」（DENY / bypass-immune / 分类器异常回落）一律自动拒绝。**ask 工具已禁用**——`BridgePool`
+**审批语义**：`tool_mode` 取配置（`auto` AI 审批 / `privileged` 自动放行）。DENY 一律拒绝，ALLOW 一律执行；ASK 在特权模式执行、auto 模式交 AI。规则 / AI 拒绝及分类器异常仅拒绝对应调用，无人工审批回落。**ask 工具已禁用**——`BridgePool`
 默认 `disabled_tools=["ask"]`（经 `AgentBridge.initialize → create_agent(tools=…)`），模型无从
 调用，遇需澄清时自行判断而非弹卡片。子代理的审批事件带 `parent_run_id`，同样自动拒绝（先于子代理
 过滤处理，否则其 broker Future 无人收尾、该轮永挂）；子代理一律不带 `ask`。

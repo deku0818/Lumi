@@ -1,25 +1,12 @@
-"""权限配置容错：手写配置的畸形字段不能扩大边界，也不能让引擎构造失败。"""
+"""权限配置容错：路径规则归一化与 deny 优先级。"""
 
 from __future__ import annotations
 
 import json
-from pathlib import Path
 
 import pytest
 
 from lumi.agents.permissions.engine import PermissionEngine
-
-
-@pytest.mark.parametrize("bad", ["/opt/shared", 5, [None, "", 3]])
-def test_malformed_workspaces_are_dropped(tmp_path, bad):
-    # 字符串被逐字符展开成 "/"、"o"…，"/" 进了边界；5 / [None] 让构造直接抛 TypeError
-    project = tmp_path / "proj"
-    (project / ".lumi").mkdir(parents=True)
-    (project / ".lumi" / "permissions.json").write_text(json.dumps({"workspaces": bad}))
-    engine = PermissionEngine(project, user_config_dir=tmp_path / "home")
-    assert engine.get_boundary_violations("write", {"file_path": "/etc/passwd"}) == [
-        str(Path("/etc/passwd").resolve())  # macOS 上 /etc → /private/etc
-    ]
 
 
 @pytest.mark.parametrize(

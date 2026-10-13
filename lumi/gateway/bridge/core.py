@@ -55,7 +55,6 @@ from lumi.agents.core.run_control import (
     with_run_control,
 )
 from lumi.agents.core.state import LumiAgentContext
-from lumi.agents.permissions.workspace import set_run_authorized_source_for
 from lumi.agents.runtime.bg_tasks import (
     SUBAGENT_SPAWNING_TOOLS,
     compose_notification_hint,
@@ -63,6 +62,7 @@ from lumi.agents.runtime.bg_tasks import (
     get_task_registry,
 )
 from lumi.agents.runtime.shell_session import get_shell_session_manager
+from lumi.agents.runtime.workspace import set_project_source
 from lumi.agents.tools.providers.mcp import (
     close_all_pools,
     get_pool_status,
@@ -319,8 +319,6 @@ class AgentBridge:
         # 注入在途审批 Broker（与 permission_engine 同源，事后赋值，零改 create_agent 签名）
         if interactive:
             self._context.approval_broker = self._broker
-        # 授权通过后放宽工作区边界的回调（人工审批 / auto 分类器 / privileged 三条路共用）
-        self._context.widen_boundary = self.folders.widen_for_violations
         self._context.inbox = self._inbox
         # /goal 条件存 sessions 层 sidecar；goal_stop_hook 经这两个回调读 / 清
         self._context.get_goal = get_goal
@@ -494,7 +492,7 @@ class AgentBridge:
     async def stream_response(
         self,
         content: str | list,
-        tool_mode: str = "default",
+        tool_mode: str | None = None,
         synthetic: bool = False,
         message_meta: dict | None = None,
         attachments: list[str] | None = None,
@@ -504,7 +502,7 @@ class AgentBridge:
 
         Args:
             content: 纯文本字符串或多模态 content blocks 列表。
-            tool_mode: 工具审批模式（default / accept_edits / privileged）。
+            tool_mode: 工具审批模式；缺省时合成轮沿用当前会话，用户轮为 default。
             synthetic: 系统合成轮（后台任务通知等）：声明无可显示（items: []）、
                 不建 Rewind checkpoint、不注入 folder/ultra 提醒。
             message_meta: UI 侧渲染元数据（IM 渠道的 per-消息 items 等），挂到
@@ -521,6 +519,9 @@ class AgentBridge:
         from lumi.gateway.uploads import persist_image_blocks
 
         content, image_paths = await persist_image_blocks(content)
+
+        if tool_mode is None:
+            tool_mode = self._context.tool_mode if synthetic else "default"
 
         if synthetic:
             # 合成轮：无 checkpoint / 无边沿提醒（不是真实用户输入，不消费排队 note）
@@ -633,7 +634,7 @@ class AgentBridge:
         # 固化本会话模型：只有真人轮算「会话开跑了」——合成的后台通知轮 / 压缩轮走
         # _stream_turn 与 compact_thread，它们只对齐不固化，不替用户做决定
         session_model.pin(self.current_thread_id)
-        # 「添加文件夹」增减与 Ultra 档位切换的边沿提醒随下一条真实用户消息注入
+        # Ultra 档位切换的边沿提醒随下一条真实用户消息注入
         # （注入不碰 items 故不污染 Rewind 标签；reminder 一旦前置进历史即长驻且
         # 不碰系统提示词，缓存安全）。「模型已知什么」取自当前历史里最近的 marker，
         # 不存 bridge 内存：rewind / 压缩删掉携带提醒的消息、重连换 bridge 都自动重发。
@@ -648,12 +649,8 @@ class AgentBridge:
             {},
         )
         folders = self.folders
-        for note in (
-            folders.folder_note(known.get("folders", [])),
-            folders.ultra_note(known.get("ultra", False)),
-        ):
-            if note:
-                msg = inject_text_into_message(msg, note)
+        if note := folders.ultra_note(known.get("ultra", False)):
+            msg = inject_text_into_message(msg, note)
         msg = msg.model_copy(
             update={
                 "additional_kwargs": {
@@ -1189,12 +1186,7 @@ class AgentBridge:
         try:
             graph = self._agent.graph
 
-            # 注入本会话的授权目录来源 + config hooks 到当前 run 上下文：filesystem/bash
-            # 工具按 contextvar 取范围，使同进程多会话并发各 run 互不串扰、不被彼此重建
-            # 进程全局所清洗（见 permissions.workspace 两层来源说明）。降级（无引擎）兜底
-            # 逻辑收在 set_run_authorized_source_for。
-            engine = self._context.permission_engine if self._context else None
-            set_run_authorized_source_for(engine, self.folders.extra_folders)
+            set_project_source(lambda: Path(self.workspace_dir))
             set_run_config_hooks(self._config_hooks)
 
             # MCP 池后台就位/换代后，轮首重建工具列表（后台加载不阻塞就绪的配套拼图：
@@ -1490,7 +1482,7 @@ class AgentBridge:
             else:  # tool_approval：bridge 层富化权限评估 / 选项
                 approval_evt = BridgeEvent(
                     kind=EventKind.APPROVAL,
-                    data=enrich_tool_approval(self._context.permission_engine, data),
+                    data=enrich_tool_approval(data),
                     parent_run_id=parent_id,
                 )
             # 留底供 WS 重连重发（节点续跑/被拒时由 resolve/reject 清理）

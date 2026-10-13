@@ -15,8 +15,8 @@ os.environ["LUMI_CONFIG_DIR"] = tempfile.mkdtemp(prefix="lumi-test-")
 
 import pytest  # noqa: E402
 
-import lumi.agents.permissions.workspace as workspace
 import lumi.agents.runtime.bg_tasks as task_registry
+import lumi.agents.runtime.workspace as workspace
 import lumi.agents.tools.registry as registry
 from lumi.agents.core.hooks import set_run_config_hooks
 from lumi.agents.core.preprocessing.agent_detector import AgentChangeDetector
@@ -55,12 +55,10 @@ def catalog_entry(context_length: int = 0, max_output: int = 0, model_id: str = 
 
 
 @pytest.fixture
-def authorized_tmp_dir(tmp_path):
-    """设置 authorized_directory 为 tmp_path，teardown 恢复"""
-    old = workspace._authorized_directories[:]
-    workspace._authorized_directories = [tmp_path]
-    yield tmp_path
-    workspace._authorized_directories = old
+def project_tmp_dir(tmp_path):
+    """当前 run 的项目目录。"""
+    workspace.set_project_source(lambda: tmp_path)
+    return tmp_path
 
 
 @pytest.fixture(autouse=True)
@@ -129,16 +127,11 @@ def isolated_config(tmp_path, monkeypatch):
 
 
 @pytest.fixture(autouse=True)
-def reset_run_authorized():
-    """每次测试清空 per-run 授权目录来源 contextvar + 进程全局兜底，避免跨测试泄漏。
-
-    （bridge stream / cron 会设置 contextvar；测试可能调 set_authorized_directory 改全局。）
-    """
-    workspace._run_authorized_source.set(None)
-    old = workspace._authorized_directories[:]
+def reset_project_context():
+    """每次测试清空会话项目上下文，避免跨测试泄漏。"""
+    workspace.set_project_source(None)
     yield
-    workspace._run_authorized_source.set(None)
-    workspace._authorized_directories = old
+    workspace.set_project_source(None)
 
 
 @pytest.fixture(autouse=True)

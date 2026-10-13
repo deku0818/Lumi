@@ -267,8 +267,8 @@ async def test_interject_media(monkeypatch):
     assert calls[1]["message_id"] == "m2"
 
 
-async def test_interject_file_authorizes_inbound_dir(monkeypatch, tmp_path):
-    # 文件消息：落地目录经真实 AgentBridge 的 folders 授权给本会话，下载路径作附件进箱
+async def test_interject_file_passes_attachment_path(monkeypatch, tmp_path):
+    # 文件消息：下载路径直接作为附件进入会话收件箱
     monkeypatch.setattr(inb, "inbound_dir", lambda thread_id: tmp_path)
     fi = FeishuChannel(FeishuChannelConfig()).inbound
 
@@ -276,10 +276,9 @@ async def test_interject_file_authorizes_inbound_dir(monkeypatch, tmp_path):
         return str(target / fname)
 
     monkeypatch.setattr(fi, "_download_file", fake_download)
-    bridge, calls = _spy_interject(monkeypatch)  # 不 initialize：folders 只记账
+    bridge, calls = _spy_interject(monkeypatch)
     pending = inb._Pending("看附件", file_refs=[("m1", "fk1", "a.pdf")], reply_to="m1")
     await fi._interject(bridge, "t", pending)
-    assert bridge.folders.extra_folders == [str(tmp_path.resolve())]
     assert calls[0]["attachments"] == [str(tmp_path / "a.pdf")]
 
 

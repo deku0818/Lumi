@@ -37,7 +37,9 @@ SCHEMA = {
 
 
 def _runtime(tools):
-    return SimpleNamespace(context=LumiAgentContext(tools=tools))
+    return SimpleNamespace(
+        context=LumiAgentContext(tools=tools, tool_mode="privileged")
+    )
 
 
 class _StructuredFakeToolNode:
@@ -78,6 +80,12 @@ class _MixedFakeToolNode:
         pass
 
     async def ainvoke(self, calls, config=None):
+        if calls[0]["name"] == "bash":
+            return {
+                "messages": [
+                    ToolMessage(content="x" * 100, tool_call_id="2", name="bash")
+                ]
+            }
         return [
             Command(
                 update={
@@ -85,11 +93,6 @@ class _MixedFakeToolNode:
                     "messages": [_ok_tm("1")],
                 }
             ),
-            {
-                "messages": [
-                    ToolMessage(content="x" * 100, tool_call_id="2", name="bash")
-                ]
-            },
         ]
 
 
@@ -405,7 +408,7 @@ def test_is_use_tool_pure_structured_fastpaths():
     assert is_use_tool({"messages": [last]}, _runtime([])) == "ToolExecutor"
 
 
-def test_is_use_tool_mixed_structured_not_bypassed():
+def test_mixed_structured_batch_enters_individual_permission_checks():
     last = AIMessage(
         content="",
         tool_calls=[
@@ -413,8 +416,8 @@ def test_is_use_tool_mixed_structured_not_bypassed():
             {"name": "bash", "args": {"command": "rm -rf /"}, "id": "2"},
         ],
     )
-    # 混合批次不走结构化快速路径，落到正常权限评估（危险 bash → 不应自动 ToolExecutor）
-    assert is_use_tool({"messages": [last]}, _runtime([])) != "ToolExecutor"
+    # 执行器对每个调用单独评估，不再整批路由到审批。
+    assert is_use_tool({"messages": [last]}, _runtime([])) == "ToolExecutor"
 
 
 # === Fix: 可空必填字段 ===
@@ -439,7 +442,9 @@ async def test_structured_tool_nullable_required_accepts_null():
 
 async def test_tool_executor_mixed_output_keeps_command_and_messages(monkeypatch):
     monkeypatch.setattr(nodes, "ToolNode", _MixedFakeToolNode)
-    state = {"messages": [_call({"name": "Lumi"})], "output_schema": SCHEMA}
+    ai = _call({"name": "Lumi"})
+    ai.tool_calls.append({"name": "bash", "args": {"command": "ls"}, "id": "2"})
+    state = {"messages": [ai], "output_schema": SCHEMA}
     result = await tool_executor(state, _runtime([]), {})
     cmd, update = result
     assert cmd.update == {"structured_output": {"name": "Lumi"}}

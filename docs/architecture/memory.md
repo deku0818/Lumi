@@ -60,17 +60,12 @@
 
    > 变更判定的状态在**消息 marker 里**（per-thread、随 checkpoint 持久），不在进程单例——
    > detector（`FileSetChangeDetector`）退化为纯加载缓存，旧的单例 changed 失真问题不存在。
-3. **写入免审批 carve-out**：`routing.route_decision` 在 bypass-immune 之后短路——写记忆目录的
-   `write`/`edit` 所有 tool_mode 直接 `ToolExecutor`（项目根取 `get_authorized_directory()`，
-   与注入同源）；同时 `engine._rebuild_boundary` 把记忆目录并入工作区边界，使 `validate_path` 放行。
-
-   **顺序很关键**：DENY 规则、只读短路、bypass-immune 都在 carve-out
-   **之前**，故用户的 DENY 规则仍能拦住记忆写入；carve-out 只免掉「本该问人」的审批。
+3. **统一权限**：记忆目录的 `write` / `edit` 与普通文件遵守同一套规则，
+   deny 拒绝、allow 放行；ask 在特权模式放行、auto 模式交 AI 审批，没有记忆免审特例。
 
 ## opt-in 语义
 
-`create_agent(enable_memory=...)` **默认 False**。持久记忆有副作用（写盘 / 改 prompt / 注入上下文 /
-写入免审批），故只有面向用户的对话入口 `bridge` 显式传 `True`；子 agent（`agent.py`）、workflow
+`create_agent(enable_memory=...)` **默认 False**。持久记忆有副作用（写盘 / 改 prompt / 注入上下文），故只有面向用户的对话入口 `bridge` 显式传 `True`；子 agent（`agent.py`）、workflow
 走默认 False 天然干净。cron 经 `cron_stream` → `AgentBridge.initialize` 执行，与普通会话一样带记忆，
 但 cron 线程不触发 autoDream（`auto_dream_stop_hook` 的 `is_cron_thread` 闸）。这样「需要记忆的少数显式声明」而非「不需要的多数记得排除」，新增调用方默认安全。
 

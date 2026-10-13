@@ -36,7 +36,7 @@ LumiAgent（指挥官）
               ├─ session/prompt(task)
               │     ↓ session/update（流）         → dispatch_custom_event → BridgeEvent(parent_run_id)
               │     ↓ session/request_permission   → PermissionEngine.evaluate → ApprovalBroker
-              │     ↓ fs/read_text_file·write      → LocalFilesystemBackend（边界检查+变更追踪）
+              │     ↓ fs/read_text_file·write      → LocalFilesystemBackend（路径解析+变更追踪）
               └─ 收到 stop_reason → 返回汇总文本给 LumiAgent
 ```
 
@@ -88,8 +88,8 @@ ACP `session/request_permission(tool_call)` → `PermissionEngine.evaluate()`：
 
 **工具名归一化**：Claude Code 报上来的是它自己的工具名/参数形状（它的 bash/edit），`PermissionEngine` 规则按 Lumi 工具名写。中间需一层映射（ACP tool kind + raw input → `evaluate()` 能认的形状）。MVP 先简单映射（bash→bash、文件写→write），后续细化。
 
-### 文件回调 → 边界检查白嫖
-ACP `fs/read_text_file` / `fs/write_text_file` → `LocalFilesystemBackend.read/write`，自动获得工作区边界检查 + 文件变更追踪。
+### 文件回调 → 复用文件后端
+ACP `fs/read_text_file` / `fs/write_text_file` → `LocalFilesystemBackend.read/write`，复用统一路径解析与文件变更追踪。
 
 > 是否真走 client fs 取决于 `initialize` 能力协商——Claude Code adapter 自带 runtime/tools，**可能用它自己的 fs**。MVP：Lumi 声明 fs 能力，用不用随它，不强依赖。
 

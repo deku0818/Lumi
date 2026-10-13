@@ -36,11 +36,11 @@ class LumiAgentContext:
     """PermissionEngine 实例，用于工具权限评估"""
     tool_mode: str = field(default="default")
     """工具审批模式（运行时真相源，所有节点共享同一 context 实例，bridge 侧可随时改）:
-    - "default": 权限引擎评估，未通过则经审批 Broker 询问用户
-    - "accept_edits": 文件编辑工具(write/edit)在工作区内自动放行，bash 等仍需审批
-    - "privileged": 权限引擎评估但自动放行，仅 bypass-immune 仍需审批
-    - "auto": AI 审批模式——本该问人的批次交分类器(AutoClassify 节点)裁决
-      approve/ask/reject；DENY 与 bypass-immune 仍免疫，强制走人工审批
+    所有模式下 deny 拒绝、allow 放行，ask / 未匹配的调用分别按模式处理：
+    - "default": 经审批 Broker 询问用户
+    - "accept_edits": 未匹配规则的 write/edit 自动放行，其余询问用户
+    - "privileged": 自动放行
+    - "auto": 每个调用独立交 AI 分类器裁决 approve / reject
     放在 context（而非 state）：state 是每个 super-step 的快照，运行中改不动；context
     是共享可变引用，bridge 改它后下一个节点 runtime.context 立即读到 → 支持运行中实时切换。"""
     mode_parent: LumiAgentContext | None = field(default=None)
@@ -51,13 +51,9 @@ class LumiAgentContext:
     """在途审批 Broker，由 bridge 在 create_agent 后注入（与 permission_engine 同源）。
     节点 / ask 工具经它原地 await 审批。子 agent 由 agent 工具从父 context 传播。
     无 bridge 的纯 graph 调用（headless）保持 None。"""
-    widen_boundary: Callable[[list[str]], None] | None = field(default=None)
-    """放宽本会话工作区边界的回调，由 bridge 注入（同 approval_broker，事后赋值）。
-    授权（人工审批 / auto 分类器 / privileged）通过后调用，把越界路径所在目录纳入本
-    会话工作区。无 bridge 的纯 graph 调用（headless）保持 None，边界不放宽。"""
     get_goal: Callable[[str], str] | None = field(default=None)
     """按 thread_id 读会话当前 ``/goal`` 条件（未设定返回空串），由 bridge 注入。
-    goal 存 sessions 层的 sidecar，core 不直接依赖 sessions——同 widen_boundary 的
+    goal 存 sessions 层的 sidecar，core 不直接依赖 sessions——同 approval_broker 的
     注入方式。None（headless / cron / 子 agent）= 无目标驱动。"""
     clear_goal: Callable[[str], None] | None = field(default=None)
     """按 thread_id 清会话 goal（达成 / 永远达不成时由 goal_stop_hook 调用），同上注入。"""

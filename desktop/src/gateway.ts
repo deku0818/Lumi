@@ -520,14 +520,6 @@ export class Gateway {
     return this.request<{ ok: boolean; path?: string; error?: string }>('make_dir', { path })
   }
 
-  addFolder(path: string): Promise<{ folders: string[] }> {
-    return this.request<{ folders: string[] }>('add_folder', { path })
-  }
-
-  removeFolder(path: string): Promise<{ folders: string[] }> {
-    return this.request<{ folders: string[] }>('remove_folder', { path })
-  }
-
   listSessions(): Promise<{ sessions: SessionMeta[] }> {
     return this.request<{ sessions: SessionMeta[] }>('list_sessions', { limit: 50 })
   }

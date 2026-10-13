@@ -537,17 +537,6 @@ async def _project_copy_builtin(session: GatewaySession, params: dict) -> dict:
     )
 
 
-# 改写本连接 engine 的边界，与运行中的轮次互斥
-async def _add_folder(session: GatewaySession, params: dict) -> dict:
-    async with session._run.lock:
-        return session._bridge.folders.add_folder(params.get("path", ""))
-
-
-async def _remove_folder(session: GatewaySession, params: dict) -> dict:
-    async with session._run.lock:
-        return session._bridge.folders.remove_folder(params.get("path", ""))
-
-
 def _model_payload(target: session_model.SessionModel) -> dict:
     """会话模型的 wire 形状。pinned 一并下发：它是「这个会话开跑过没有」的权威答案，
     前端据此决定切模型要不要先警告缓存失效、以及能否跟随新会话默认漂移——让前端拿
@@ -582,7 +571,7 @@ async def _switch_session(session: GatewaySession, params: dict) -> dict:
     if changing_thread:
         await session._finalize_active_turn(wait=True)
         # 前端未带 workspace（如打开 cron 执行线程续聊）：从线程自身 checkpoint 恢复其
-        # 记录的项目，否则下方绑定分支会 mark_workspace_unbound，工作区边界关卡拒发消息。
+        # 记录的项目，否则下方绑定分支会 mark_workspace_unbound，项目绑定检查拒发消息。
         # 仅对既有 thread（显式传了 thread_id）恢复——新会话的 tid 是刚生成的、必然无 checkpoint。
         if not workspace and params.get("thread_id"):
             workspace = await session._bridge.recorded_workspace_dir(tid)
@@ -759,8 +748,6 @@ _RPC_HANDLERS = {
     "project_resource_write": _project_resource_write,
     "project_resource_delete": _project_resource_delete,
     "project_copy_builtin": _project_copy_builtin,
-    "add_folder": _add_folder,
-    "remove_folder": _remove_folder,
     "list_sessions": _list_sessions_rpc,
     "new_session": _switch_session,
     "switch_session": _switch_session,
@@ -947,7 +934,7 @@ class GatewaySession:
                 return
             # 权威关卡（send_message + run_command 均覆盖，见上方 _STREAMING_METHODS）：
             # 未绑定项目（open 未带 workspace 且未调过 set_workspace）一律拒绝——否则会静默
-            # 落在 workspace_dir 兜底的进程 cwd 上，工作区边界形同虚设。前端已引导先选项目，
+            # 落在 workspace_dir 兜底的进程 cwd 上，偏离用户选择的项目。前端已引导先选项目，
             # 这里兜底防绕过（见 desktop App.tsx 的 requireProject/goNewChat）。
             if not self._bridge.workspace_bound:
                 if rid is not None:
@@ -1251,9 +1238,7 @@ class GatewaySession:
                 logger.info("[WS] 注入后台任务通知")
                 try:
                     await self._pump_with_finalize(
-                        self._bridge.stream_response(
-                            hint, tool_mode="default", synthetic=True
-                        )
+                        self._bridge.stream_response(hint, synthetic=True)
                     )
                 except asyncio.CancelledError:
                     # stop / aclose 取消了本轮：图收尾已内置于 pump，补发 turn.complete

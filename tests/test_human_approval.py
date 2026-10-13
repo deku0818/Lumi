@@ -39,7 +39,6 @@ def _runtime(decision=None, engine=None):
         context=LumiAgentContext(
             permission_engine=engine,
             approval_broker=_FakeBroker(decision),
-            widen_boundary=None,  # headless/无 bridge：边界不放宽（见 test_approval_boundary_widen）
             tool_mode="default",
         )
     )
@@ -50,7 +49,7 @@ _TCS = [{"id": "tc1", "name": "bash", "args": {"command": "ls"}}]
 
 async def test_approve_routes_to_tool_executor():
     rt = _runtime(decision={"decision": "approve"})
-    cmd = await human_approval(_state(_TCS), rt)
+    cmd = await human_approval(_state(_TCS), rt, _TCS)
     assert cmd.goto == "ToolExecutor"
     # broker 收到正确 payload
     payload = rt.context.approval_broker.calls[0]
@@ -62,7 +61,7 @@ async def test_approve_routes_to_tool_executor():
 
 async def test_approve_with_set_tool_mode_switches_context():
     rt = _runtime(decision={"decision": "approve", "set_tool_mode": "privileged"})
-    cmd = await human_approval(_state(_TCS), rt)
+    cmd = await human_approval(_state(_TCS), rt, _TCS)
     assert cmd.goto == "ToolExecutor"
     # set_tool_mode 现在改共享 context（运行时真相源），不再走 Command.update
     assert rt.context.tool_mode == "privileged"
@@ -70,7 +69,7 @@ async def test_approve_with_set_tool_mode_switches_context():
 
 async def test_reject_routes_to_end_with_message():
     rt = _runtime(decision={"decision": "reject", "message": "不行"})
-    cmd = await human_approval(_state(_TCS), rt)
+    cmd = await human_approval(_state(_TCS), rt, _TCS)
     assert cmd.goto == END
     msg = cmd.update["messages"][0]
     assert msg.tool_call_id == "tc1"
@@ -79,7 +78,7 @@ async def test_reject_routes_to_end_with_message():
 
 async def test_cancel_routes_to_end():
     rt = _runtime(decision={"decision": "cancel"})
-    cmd = await human_approval(_state(_TCS), rt)
+    cmd = await human_approval(_state(_TCS), rt, _TCS)
     assert cmd.goto == END
     assert cmd.update["messages"][0].tool_call_id == "tc1"
 
@@ -87,7 +86,7 @@ async def test_cancel_routes_to_end():
 async def test_deny_skips_broker_and_routes_to_call_model():
     """DENY 命中：跳过 broker（不发审批），直接拒绝并路由回 CallModel。"""
     rt = _runtime(decision={"decision": "approve"}, engine=_DenyEngine())
-    cmd = await human_approval(_state(_TCS), rt)
+    cmd = await human_approval(_state(_TCS), rt, _TCS)
     assert cmd.goto == "CallModel"
     # broker 未被调用
     assert rt.context.approval_broker.calls == []
@@ -96,11 +95,9 @@ async def test_deny_skips_broker_and_routes_to_call_model():
 async def test_no_broker_headless_fails_closed():
     """无审批通道（headless：cron / workflow，approval_broker=None）：fail-closed 拒绝回 CallModel，不崩溃。"""
     rt = SimpleNamespace(
-        context=SimpleNamespace(
-            permission_engine=None, approval_broker=None, widen_boundary=None
-        )
+        context=SimpleNamespace(permission_engine=None, approval_broker=None)
     )
-    cmd = await human_approval(_state(_TCS), rt)
+    cmd = await human_approval(_state(_TCS), rt, _TCS)
     assert cmd.goto == "CallModel"
     assert cmd.update["messages"][0].tool_call_id == "tc1"
 
@@ -116,14 +113,14 @@ _TCS3 = [
 
 async def test_per_call_all_approve_executes_whole_batch():
     rt = _runtime(decision={"decisions": ["approve"] * 3})
-    cmd = await human_approval(_state(_TCS3), rt)
+    cmd = await human_approval(_state(_TCS3), rt, _TCS3)
     assert cmd.goto == "ToolExecutor"
     assert not cmd.update
 
 
 async def test_per_call_all_reject_ends_turn():
     rt = _runtime(decision={"decisions": ["reject"] * 3, "message": "不行"})
-    cmd = await human_approval(_state(_TCS3), rt)
+    cmd = await human_approval(_state(_TCS3), rt, _TCS3)
     assert cmd.goto == END
     assert [m.tool_call_id for m in cmd.update["messages"]] == ["a", "b", "c"]
 
@@ -133,7 +130,7 @@ async def test_per_call_partial_rejects_only_rejected_then_executes():
     rt = _runtime(
         decision={"decisions": ["approve", "reject", "approve"], "message": "不行"}
     )
-    cmd = await human_approval(_state(_TCS3), rt)
+    cmd = await human_approval(_state(_TCS3), rt, _TCS3)
     assert cmd.goto == "ToolExecutor"
     msgs = cmd.update["messages"]
     assert [m.tool_call_id for m in msgs] == ["b"]
@@ -143,7 +140,7 @@ async def test_per_call_partial_rejects_only_rejected_then_executes():
 async def test_per_call_missing_decision_fails_closed():
     """decisions 短于 tool_calls：缺项按拒绝。"""
     rt = _runtime(decision={"decisions": ["approve"]})
-    cmd = await human_approval(_state(_TCS3), rt)
+    cmd = await human_approval(_state(_TCS3), rt, _TCS3)
     assert cmd.goto == "ToolExecutor"
     assert [m.tool_call_id for m in cmd.update["messages"]] == ["b", "c"]
 
@@ -156,7 +153,7 @@ async def test_malformed_answer_fails_closed():
     """
     for bad in (None, "approve", ["approve"], 42):
         rt = _runtime(decision=bad)
-        cmd = await human_approval(_state(_TCS3), rt)
+        cmd = await human_approval(_state(_TCS3), rt, _TCS3)
         assert cmd.goto == END, f"{bad!r} 应按拒绝收尾"
         assert len(cmd.update["messages"]) == 3  # 三个调用各补一条拒绝 ToolMessage
 
@@ -188,7 +185,9 @@ async def test_tool_executor_runs_only_unanswered_calls(monkeypatch):
     ai = AIMessage(content="", tool_calls=_TCS3)
     state = {"messages": [ai, *build_reject_messages([_TCS3[1]], content="不行")]}
     result = await tool_executor(
-        state, SimpleNamespace(context=LumiAgentContext(tools=[])), {}
+        state,
+        SimpleNamespace(context=LumiAgentContext(tools=[], tool_mode="privileged")),
+        {},
     )
     assert executed == ["a", "c"]
     assert [m.tool_call_id for m in result["messages"]] == ["a", "c"]
@@ -219,11 +218,9 @@ async def test_stop_via_reject_keeps_user_message_and_clean_state():
 
     async def approval_node(state):
         rt = SimpleNamespace(
-            context=SimpleNamespace(
-                permission_engine=None, approval_broker=broker, widen_boundary=None
-            )
+            context=SimpleNamespace(permission_engine=None, approval_broker=broker)
         )
-        return await human_approval(state, rt)
+        return await human_approval(state, rt, state["messages"][-1].tool_calls)
 
     g = StateGraph(_GS)
     g.add_node("call_model", call_model)
