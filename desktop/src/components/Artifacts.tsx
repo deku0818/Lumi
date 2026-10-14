@@ -1,4 +1,4 @@
-import { useEffect, useRef, useState } from 'react'
+import { useEffect, useRef, useState, type JSX } from 'react'
 import { Markdown } from './Markdown'
 import {
   File,
@@ -11,9 +11,7 @@ import {
   Music,
   Folder,
   ExternalLink,
-  Copy,
   RefreshCw,
-  X,
   type LucideIcon,
 } from 'lucide-react'
 import type { Gateway } from '../gateway'
@@ -122,7 +120,9 @@ const KIND_ICON: Record<string, LucideIcon> = {
   text: FileText,
   doc: FileText,
 }
-const fileIcon = (f: Artifact): LucideIcon => KIND_ICON[f.kind || ''] || File
+export function fileIcon(file: Artifact): LucideIcon {
+  return KIND_ICON[file.kind || ''] || File
+}
 
 const typeText = (f: Artifact) => (ext(f) || f.kind || 'file').toUpperCase()
 
@@ -210,22 +210,16 @@ export function FileCards({
   )
 }
 
-// ── 右侧停靠预览面板 ──
+// ── 预览内容：由 PreviewWindow 管理标签、缩放与关闭 ──
 // gw：当前会话所在机器的连接，Office 转换 RPC / 就地安装 / 远程文件 HTTP 通道走它；
 // remote：文件在远程后端，内容经 gw.fileHttpUrl 流回，本地打开/访达按钮隐藏
-export function PreviewPanel({
-  file,
-  gw,
-  remote,
-  onClose,
-}: {
+type PreviewContentProps = {
   file: Artifact
   gw?: Gateway
   remote?: boolean
-  onClose: () => void
-}) {
-  const { t } = useI18n()
-  const Icon = fileIcon(file)
+}
+
+export function PreviewContent({ file, gw, remote }: PreviewContentProps): JSX.Element {
   // 存在性只在打开预览时探测一次（卡片渲染不探）：null=检查中，true/false=结果。
   // nonce 递增 = 「重新检查」重新探测（文件可能又回来了）。远程文件用 HEAD 探测
   // （/file 端点原生支持），本地走主进程 IPC。
@@ -236,11 +230,14 @@ export function PreviewPanel({
     setExists(null)
     // 远程按状态码判：只有 404 = 不存在（413 超限等文件仍在，交给 PreviewBody 的
     // 分支给出正确文案）；无该机连接时不能拿本地盘探测冒充，视为存在、由 body 报错
-    const probe = remote
-      ? gw
-        ? fetch(gw.fileHttpUrl(file.path), { method: 'HEAD' }).then((r) => r.status !== 404)
-        : Promise.resolve(true)
-      : Promise.resolve(window.lumi.pathExists?.(file.path) ?? true)
+    let probe: Promise<boolean>
+    if (!remote) {
+      probe = Promise.resolve(window.lumi.pathExists?.(file.path) ?? true)
+    } else if (gw) {
+      probe = fetch(gw.fileHttpUrl(file.path), { method: 'HEAD' }).then((r) => r.status !== 404)
+    } else {
+      probe = Promise.resolve(true)
+    }
     probe
       .then((ok) => alive && setExists(!!ok))
       // 探测本身失败（网络中断 / 代理拦 HEAD / IPC 异常）说明「探不到」，不等于
@@ -251,51 +248,13 @@ export function PreviewPanel({
     }
   }, [file.path, nonce, remote, gw])
 
-  useEffect(() => {
-    const onKey = (e: KeyboardEvent) => {
-      if (e.key === 'Escape') onClose()
-    }
-    window.addEventListener('keydown', onKey)
-    return () => window.removeEventListener('keydown', onKey)
-  }, [onClose])
-
-  const act =
-    'grid place-items-center w-[30px] h-[30px] rounded-md text-muted-foreground hover:bg-ink/10 hover:text-ink transition-colors'
-  // 浮框整板（.demos/preview-float-panel.html 方案 A 定稿）：与右栏模块卡同族的玻璃浮卡,
-  // 头部融在玻璃里不画分割线,内容区内嵌小圆角实底
   return (
-    <aside className="sidebar-float rounded-card flex flex-col h-full min-w-0 overflow-hidden">
-      <div className="flex items-center gap-1.5 px-3 py-2 shrink-0">
-        <Icon size={16} className="text-muted-foreground shrink-0 mr-1" />
-        <span className="flex-1 min-w-0 truncate text-[13.5px] font-semibold">
-          {file.name || file.path}
-        </span>
-        <button className={act} title={t('files.copyPath')} onClick={() => void navigator.clipboard.writeText(file.path)}>
-          <Copy size={15} />
-        </button>
-        {!remote && (
-          <>
-            <button className={act} title={t('files.showInFolder')} onClick={() => void window.lumi.revealInFolder?.(file.path)}>
-              <Folder size={15} />
-            </button>
-            <button className={act} title={t('files.openExternal')} onClick={() => void window.lumi.openPath?.(file.path)}>
-              <ExternalLink size={15} />
-            </button>
-          </>
-        )}
-        <span className="w-px h-[18px] bg-line mx-0.5" />
-        <button className={act} title={t('common.close')} onClick={onClose}>
-          <X size={15} />
-        </button>
-      </div>
-      <div className="flex-1 overflow-auto min-h-0 mx-2.5 mb-2.5 rounded-[10px] bg-canvas">
-        {exists === null ? null : exists ? (
-          <PreviewBody file={file} gw={gw} remote={remote} />
-        ) : (
-          <MissingState file={file} onRecheck={() => setNonce((n) => n + 1)} />
-        )}
-      </div>
-    </aside>
+    <div className="h-full overflow-auto">
+      {exists === true && <PreviewBody file={file} gw={gw} remote={remote} />}
+      {exists === false && (
+        <MissingState file={file} onRecheck={() => setNonce((n) => n + 1)} />
+      )}
+    </div>
   )
 }
 

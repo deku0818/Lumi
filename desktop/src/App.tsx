@@ -4,6 +4,7 @@ import {
   useLayoutEffect,
   useMemo,
   useRef,
+  useReducer,
   useState,
 } from 'react'
 import {
@@ -61,8 +62,10 @@ import { ApprovalDialog, type Decision } from './components/ApprovalDialog'
 import { ClarifyDialog, ASK_CANCELLED } from './components/ClarifyDialog'
 import { Sidebar } from './components/Sidebar'
 import { MachineIcon, MachinesProvider } from './components/MachineTabs'
-import { FileCards, PreviewPanel, contentUrl, parseArtifacts } from './components/Artifacts'
+import { FileCards, contentUrl, parseArtifacts } from './components/Artifacts'
 import { BgTasksSection } from './components/BgTasksDrawer'
+import { PreviewWindow } from './components/PreviewWindow.tsx'
+import { emptyPreviewState, previewReducer } from './lib/previewState.ts'
 import { CronPage, RunsSection } from './components/CronPage'
 import { RightRail } from './components/RightRail'
 import { ResizeHandle, usePersistedFlag, useResizableWidth } from './components/ResizeHandle'
@@ -227,8 +230,8 @@ export default function App() {
   const [attachments, setAttachments] = useState<Attachment[]>([])
   // 主区视图：聊天 / 项目管理页 / 定时任务管理页 / 任务会话视图（某任务的某次执行对话 + Runs 侧栏）
   const [bgTasks, setBgTasks] = useState<BgTask[]>([]) // 后台任务全量快照（按 thread 过滤展示）
-  const [preview, setPreview] = useState<Artifact | null>(null) // artifacts 右侧预览面板（null=关）
-  // 可拖拽边栏宽度（持久化）：左侧会话栏 + 统一右栏 + 文件预览
+  const [preview, dispatchPreview] = useReducer(previewReducer, emptyPreviewState)
+  // 可拖拽边栏宽度（持久化）：左侧会话栏；右栏按是否有预览选择宽度
   const sidebarW = useResizableWidth('lumi-sidebar-width', 256, 200, 420)
   // 悬浮侧栏展开/收起（持久化）
   const [sidebarOpen, toggleSidebar] = usePersistedFlag('lumi-sidebar-open')
@@ -238,7 +241,7 @@ export default function App() {
   // 与左侧栏同参（默认 256、拖拽 200-420），左右观感对称；键名带 v2 让早期 320 的
   // 旧存值失效回默认（旧键 lumi-rail-width 未发布过，只存在于开发机）
   const railW = useResizableWidth('lumi-rail-width-v2', 256, 200, 420)
-  const previewW = useResizableWidth('lumi-preview-width', 520, 360, 920)
+  const previewW = useResizableWidth('lumi-preview-width', 440, 360, 920)
   const [view, setView] = useState<'chat' | 'projects' | 'project' | 'scheduled' | 'cronjob'>('chat')
   // 项目主页当前查看的项目（view='project' 时有效）
   const [projectHome, setProjectHome] = useState<{ backend: string; path: string } | null>(null)
@@ -295,7 +298,29 @@ export default function App() {
       remoteBackend && !activeGw ? undefined : contentUrl(path, remoteBackend, activeGw),
     [remoteBackend, activeGw],
   )
-  const openImage = useCallback((f: AttachedFile) => setPreview({ ...f, kind: 'image' }), [])
+  const openPreview = useCallback(function openPreview(file: Artifact): void {
+    dispatchPreview({ type: 'open', owner: activeRef.current, file })
+    if (!railOpen) toggleRail()
+  }, [railOpen, toggleRail])
+  const closeAllPreviews = useCallback(function closeAllPreviews(): void {
+    dispatchPreview({ type: 'close-all' })
+  }, [])
+  const selectPreview = useCallback(function selectPreview(path: string): void {
+    dispatchPreview({ type: 'select', path })
+  }, [])
+  const closePreviewTab = useCallback(function closePreviewTab(path: string): void {
+    dispatchPreview({ type: 'close', path })
+  }, [])
+  const togglePreviewExpanded = useCallback(function togglePreviewExpanded(): void {
+    dispatchPreview({ type: 'toggle-expanded' })
+  }, [])
+  const toggleRightRail = useCallback(function toggleRightRail(): void {
+    dispatchPreview({ type: 'shrink' })
+    toggleRail()
+  }, [toggleRail])
+  const openImage = useCallback(function openImage(file: AttachedFile): void {
+    openPreview({ ...file, kind: 'image' })
+  }, [openPreview])
   const cronJobsRef = useLatest(cronJobs)
   const refreshCronJobsRef = useRef<((only?: string) => void) | null>(null) // handleEvent 经此按机器刷新
   const scrollRef = useRef<HTMLDivElement>(null)
@@ -1272,7 +1297,7 @@ export default function App() {
       const seq = ++activationSeqRef.current
       if (key) {
         setActive(key)
-        setPreview(null)
+        closeAllPreviews()
       }
       // 死连接驱逐：failed / 主动关闭的连接不再自愈，占着 key 会让复用分支永远拿到死连接
       if (key && connsRef.current[key]?.dead) delete connsRef.current[key]
@@ -1301,10 +1326,10 @@ export default function App() {
       // 按连接真实状态点灯：openConnection 失败路径也会 resolve（乐观切换契约），
       // 硬编码 'open' 会在连接实际已断时点亮假绿灯
       setConn(connsRef.current[key]?.state ?? 'open')
-      setPreview(null) // 切会话关掉预览，避免上个会话的文件残留
+      closeAllPreviews() // 切会话关掉预览，避免上个会话的文件残留
       return key
     },
-    [openConnection, reloadHistory],
+    [openConnection, reloadHistory, closeAllPreviews],
   )
 
   const openProjects = useCallback(() => {
@@ -2365,8 +2390,12 @@ export default function App() {
   const railSessionVisible =
     view === 'chat' || (!!cronRunThread && keyThread(active) === cronRunThread)
   const railBg = railSessionVisible && activeBgTasks.length > 0
-  const showRail =
-    view === 'cronjob' ? !!activeCronJob : view === 'chat' && railBg
+  const hasPreview =
+    (view === 'chat' || view === 'cronjob') && preview.owner === active && preview.files.length > 0
+  const previewExpanded = hasPreview && preview.expanded && railOpen
+  const rightRailWidth = hasPreview ? previewW : railW
+  const railSectionsOpen = railOpen && !previewExpanded
+  const showRail = hasPreview || (view === 'cronjob' ? !!activeCronJob : view === 'chat' && railBg)
   // 脉冲点 = 可见模块里确有东西在跑：隐藏的 bg 模块不算，直播中的 cron 执行算
   const railDot = (railBg && hasRunningBg) || cronLiveRuns.length > 0
 
@@ -2388,7 +2417,7 @@ export default function App() {
       {/* 悬浮侧栏占位：宽度动画（侧栏本体绝对定位于其中，收起时向左滑出） */}
       <div
         className="relative shrink-0 transition-[width] duration-300 ease-out"
-        style={{ width: sidebarOpen ? sidebarW.width + FLOAT_GAP * 2 : 0 }}
+        style={{ width: sidebarOpen ? sidebarW.width + FLOAT_GAP * 2 : 0, display: previewExpanded ? 'none' : undefined }}
       >
       <Sidebar
         width={sidebarW.width}
@@ -2420,9 +2449,9 @@ export default function App() {
       />
       </div>
       {/* floating：把手从占位容器边缘贴回悬浮面板的可见右缘 */}
-      {sidebarOpen && <ResizeHandle {...sidebarW} edge="right" floating />}
+      {sidebarOpen && !previewExpanded && <ResizeHandle {...sidebarW} edge="right" floating />}
 
-      <main className="flex-1 flex flex-col min-w-0">
+      <main className="flex-1 flex flex-col min-w-0" style={previewExpanded ? { display: 'none' } : undefined}>
         {showTopStrip && (
           // 拖拽区与按钮区并排分离（互不重叠的矩形）：不在 drag 大条上给按钮挖洞——
           // 洞依赖 Chromium 的区域重采样，实测会因动画/布局时序失效导致按钮下半不可点。
@@ -2557,8 +2586,8 @@ export default function App() {
                             <FileCards
                               key={key}
                               files={seg.files}
-                              onOpen={setPreview}
-                              activePath={preview?.path}
+                              onOpen={openPreview}
+                              activePath={hasPreview ? preview.activePath ?? undefined : undefined}
                               remote={remoteBackend}
                             />
                           ) : (
@@ -2670,63 +2699,60 @@ export default function App() {
           </div>
         )}
       </main>
-      {/* 右侧两栏与左侧栏同级（不放进 main）：否则会被 main 内的 topStrip 压低一截，
-          顶边对不上左侧栏。代价是它们上方那段不再是窗口拖拽区——本就被面板占满。 */}
-      {/* 文件预览浮框（方案 A）：上下 FLOAT_GAP、右缘 4px 缝，占位挤压聊天区；
-          顶边与左侧栏齐平（同级挂载），故与 RightRail 一样放在 main 外 */}
-      {view === 'chat' && preview && (
-        <>
-          <ResizeHandle {...previewW} edge="left" />
-          <div style={{ width: previewW.width }} className="shrink-0 h-full py-2.5 pr-1">
-            <PreviewPanel
-              file={preview}
-              // 只认目标机器的连接，缺位给 undefined（面板显示加载失败）
-              gw={controlConns.current[activeBackend]}
-              remote={remoteBackend}
-              onClose={() => setPreview(null)}
-            />
-          </div>
-        </>
-      )}
-      {/* 统一右栏：chat / cronjob 共用一个实例（同一开合状态、同一宽度）。
-          cron 会话置顶「执行记录」，后台任务等通用模块只声明一次、两视图同构往下叠。
-          enter 仅聊天视图：首个后台任务出现时整栏动画入场，不猛挤聊天栏；
-          切视图时组件保持挂载，不会重放。 */}
+      {/* 预览、执行记录与后台任务共用一列浮卡；放大时只显示预览工作区。 */}
       {showRail && (
         <>
-          {railOpen && <ResizeHandle {...railW} edge="left" />}
+          {railSectionsOpen && <ResizeHandle {...rightRailWidth} edge="left" />}
           <RightRail
-            width={railW.width}
+            width={rightRailWidth.width}
             open={railOpen}
-            onToggle={toggleRail}
+            expanded={previewExpanded}
+            onToggle={toggleRightRail}
             dot={railDot}
-            enter={view === 'chat'}
+            enter={view === 'chat' && !hasPreview}
           >
-            {view === 'cronjob' && activeCronJob && (
-              // key=任务 id：换任务即重挂，节折叠态不跨任务残留（整栏开合在 App，不受影响）
-              <RunsSection
-                key={activeCronJob}
-                api={runsRailApi}
-                machine={cronBackendOf(activeCronJob)}
-                jobId={activeCronJob}
-                open={railOpen}
-                activeThread={cronRunThread}
-                readRuns={readRuns}
-                version={cronVersion}
-                liveRuns={cronLiveRuns}
-                onPick={pickRun}
+            {hasPreview && (
+              <PreviewWindow
+                key={active}
+                files={preview.files}
+                activePath={preview.activePath}
+                expanded={previewExpanded}
+                nativeTitleBar={isMacTitleBar}
+                gw={controlConns.current[activeBackend]}
+                remote={remoteBackend}
+                onSelect={selectPreview}
+                onCloseTab={closePreviewTab}
+                onClose={closeAllPreviews}
+                onToggleExpanded={togglePreviewExpanded}
               />
             )}
-            {railBg && (
-              <BgTasksSection
-                tasks={activeBgTasks}
-                open={railOpen}
-                onStop={stopBgTask}
-                onDismiss={dismissBgTask}
-                onReadOutput={readBgTaskOutput}
-                onClearFinished={clearFinishedBgTasks}
-              />
-            )}
+            <div className={previewExpanded ? 'hidden' : 'contents'} inert={previewExpanded}>
+              {view === 'cronjob' && activeCronJob && (
+                // key=任务 id：换任务即重挂，节折叠态不跨任务残留（整栏开合在 App，不受影响）
+                <RunsSection
+                  key={activeCronJob}
+                  api={runsRailApi}
+                  machine={cronBackendOf(activeCronJob)}
+                  jobId={activeCronJob}
+                  open={railSectionsOpen}
+                  activeThread={cronRunThread}
+                  readRuns={readRuns}
+                  version={cronVersion}
+                  liveRuns={cronLiveRuns}
+                  onPick={pickRun}
+                />
+              )}
+              {railBg && (
+                <BgTasksSection
+                  tasks={activeBgTasks}
+                  open={railSectionsOpen}
+                  onStop={stopBgTask}
+                  onDismiss={dismissBgTask}
+                  onReadOutput={readBgTaskOutput}
+                  onClearFinished={clearFinishedBgTasks}
+                />
+              )}
+            </div>
           </RightRail>
         </>
       )}

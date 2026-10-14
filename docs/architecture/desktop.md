@@ -261,7 +261,7 @@ Agent 产出文件后调 `artifacts` 工具把它们作为「制品」呈现给�
 
 - **权限规则**：`artifacts` 默认 allow；用户配置的 deny / ask 仍参与权限评估。
 - **聊天卡片**（`FileCards`，`desktop/src/components/Artifacts.tsx`）：artifacts 在 `groupItems` 里单独成段（不并入灰色工具组），解析一次 JSON 缓存在段上（随 `items` 记忆化）。每个文件渲染成单色类型图标卡片（按 `kind` 选 lucide 字形，不上彩色）+ 文件名 + 类型/大小 + 「Show in Folder」按钮。**卡片层不加载任何文件字节**。
-- **右侧停靠预览面板**（`PreviewPanel`）：点卡片在聊天区右侧滑出（可拖宽、持久化 `lumi-preview-width`、Esc/✕ 关、切会话自动关）。打开时经 `lumi:path-exists` 探测一次存在性：缺失 → `MissingState`（文件已移动/改名/删除 + 重新检查）；存在 → 按类型渲染。
+- **预览浮卡**（`PreviewWindow` + `PreviewContent`）：与执行记录、后台任务共用 `RightRail`。顶部一行文件 tab、更多菜单、放大/缩回及关闭；同路径重复打开切回已有 tab，关闭当前 tab 后选相邻文件，最后一个 tab 关闭后移除浮卡。小窗缩放真实内容，点击放大后原地铺满工作区；各 tab 内容保持挂载，切换和缩放保留模型与滚动状态。整组收放图标在放大时移到右上角，收起时恢复普通布局。切会话自动关闭全部 tab，预览状态同时校验机器与会话身份。内容仍在打开时探测存在性，缺失时显示 `MissingState` 与重新检查入口。
 - **预览分型**：图片 / PDF / HTML 经 `lumi-file://` 协议内嵌（`<img>`/`<iframe>`），文本 / Markdown 本地经主进程 IPC `lumi:read-text` 读头 500KB（renderer 对 `lumi-file` 的 fetch 恒被 CORS 拦——自定义协议不在跨源白名单，也不能开 `corsEnabled`，否则打穿下述 HTML 沙箱），远程经 `/file` 带 `Range` 取头 500KB，读后渲染；视频 / 音频 / Office / 未知类型 → 统一 `NoPreview`（提示 + 「用系统应用打开」）。**大小门控**：`> 50MB`（UI 阈值，用元数据 `size` 判定不读文件）走 `NoPreview` 提示「文件较大」。**HTML 安全**：`sandbox="allow-scripts"`（不带 `allow-same-origin`）——脚本可运行让交互页正常，但 iframe 是 opaque origin，对 `lumi-file` 的 fetch 跨域被拦，恶意页读不到本地文件外传。
 - **`lumi-file://` 协议**：`electron/main.cjs` 以 `protocol.registerSchemesAsPrivileged` + `protocol.handle` 实现，让 renderer 在 http origin 下安全引用本地文件（绕过 `file://` 限制）。URL 形如 `lumi-file://local/<abs-path>`（固定 host=local，自定义 standard scheme 不允许空 host；各路径段 `encodeURIComponent`）。handler 先 `stat`，`> MAX_SERVE_BYTES`(128MB) 返 413（兜底防超大文件读进内存撑爆主进程），否则按 `PREVIEW_MIME` 设 content-type 返回。
 - **IPC**：`lumi:open-path`（`shell.openPath`）/ `lumi:reveal-path`（`shell.showItemInFolder`）/ `lumi:path-exists`（异步 `fs.promises.access`，避免离线网络盘同步阻塞主进程），经 `preload.cjs` 暴露为 `window.lumi.{openPath,revealInFolder,pathExists}`。
@@ -291,11 +291,11 @@ macOS 关窗后应用驻留 Dock，sidecar 保持运行，Dock 唤起（activate
 
 ## 可调宽边栏
 
-三栏布局（左侧会话栏 + 统一右栏 + 文件预览）均可拖拽调宽，各自宽度存 localStorage（`lumi-sidebar-width` / `lumi-rail-width-v2` / `lumi-preview-width`），越界或脏值回退默认值。统一封装在 `desktop/src/components/ResizeHandle.tsx`：`useResizableWidth(key, def, min, max)` 是单一事实源（lazy-init + 自带边界钳制的 setter + useEffect 持久化，与 `font.ts` / `theme.ts` 同构，持久化开关同址 `usePersistedFlag`），`<ResizeHandle>` 作为 flex 兄弟节点的拖拽分隔条（`edge` 决定加宽方向）。把手全程不可见，只以 `col-resize` 光标提示；`floating` 标记悬浮面板场景，据 `edge` 自动把热区平移 `FLOAT_GAP` 贴回面板可见边缘（统一右栏面板左缘即栏左缘，无需平移）。拖拽期间给 `body` 挂 `resizing-col` 类，全局停用过渡并统一 `col-resize` 光标，让边栏即时跟手（亦压制面板开合动画，松手恢复）。
+左侧会话栏与统一右栏可拖拽调宽。预览浮卡与执行记录、后台任务同列排列：有预览时使用 `lumi-preview-width`（默认 440px），否则使用 `lumi-rail-width-v2`（默认 256px）；左侧保持 `lumi-sidebar-width`。各宽度由 `useResizableWidth` 持久化到 localStorage，越界或脏值回退默认值。放大预览时暂时隐藏左侧栏和聊天区域，缩回后恢复原布局与右栏宽度；浮卡和 iframe 不重挂载。
 
-**统一右栏（`RightRail.tsx`）**：执行记录 / 后台任务等以 `RailSection` 模块卡竖排（玻璃材质、节头计数、独立折叠、键盘可达），定时任务会话置顶「执行记录」，通用模块两视图同构往下叠。整栏一颗收放钮：浮于聊天区右上角（与左侧栏收起钮同线 y≈27、同 ghost/icon-sm 款式），收起时栏宽归零、聊天区铺到窗口边、钮贴右缘；开合状态（`lumi-rail-open`）与宽度两视图共用。收起即停一切隐藏开销（秒表 tick / 执行记录拉取 / 屏外动画合成）。
+**统一右栏（`RightRail.tsx`）**：执行记录 / 后台任务等以 `RailSection` 模块卡竖排（玻璃材质、节头计数、独立折叠、键盘可达），定时任务会话置顶「执行记录」，通用模块两视图同构往下叠。预览与任务共用整栏一颗收放钮（预览放大时移入右上角）：浮于聊天区右上角（与左侧栏收起钮同线 y≈27、同 ghost/icon-sm 款式），收起时栏宽归零、聊天区铺到窗口边、钮贴右缘；开合状态（`lumi-rail-open`）与宽度两视图共用。收起即停一切隐藏开销（秒表 tick / 执行记录拉取 / 屏外动画合成）。
 
-**悬浮栏的层级约定**：两条悬浮玻璃栏（左侧会话栏 / 统一右栏）在 `App.tsx` 里都挂在 `<main>` **之外**、与左侧栏同级的 flex 行上——放进 `<main>` 会被其内的 topStrip 压低一截，顶边对不齐。反之像 `PreviewPanel` 这类贴合内容的**非悬浮**面板留在 `<main>` 内。新增右栏模块时挂进 `RightRail` 的 children 即可。
+**悬浮栏的层级约定**：两条悬浮玻璃栏（左侧会话栏 / 统一右栏）在 `App.tsx` 里都挂在 `<main>` **之外**、与左侧栏同级的 flex 行上——放进 `<main>` 会被其内的 topStrip 压低一截，顶边对不齐。预览浮卡作为统一右栏的第一个模块；放大时保持同一组件实例，仅切换为铺满工作区的布局。新增右栏模块时挂进 `RightRail` 的 children 即可。
 
 ## 应用内更新
 
@@ -333,6 +333,8 @@ macOS 关窗后应用驻留 Dock，sidecar 保持运行，Dock 唤起（activate
 | `desktop/src/{font.ts,components/FontPicker.tsx}` | 界面字体偏好（本机字体枚举 + 字号）+ CSS 变量覆写 |
 | `desktop/src/components/CronPage.tsx` | 定时任务管理页 + 执行记录模块（`RunsSection`） |
 | `desktop/src/components/RightRail.tsx` | 统一右栏（收放钮 + `RailSection` 模块卡容器） |
+| `desktop/src/components/PreviewWindow.tsx` | 多 tab 预览浮卡、文件操作菜单与应用内放大 |
+| `desktop/src/lib/previewState.ts` | 文件去重、相邻 tab 选择与会话隔离状态 |
 | `desktop/src/components/BgTasksDrawer.tsx` | 后台任务模块（`BgTasksSection`，运行中卡片 + 已完成折叠组） |
 | `desktop/src/components/{ProjectsPage,DirBrowser}.tsx` | 项目管理页 + 目录浏览（新建项目） |
 | `desktop/src/i18n.ts` | 国际化（中文 / English） |
