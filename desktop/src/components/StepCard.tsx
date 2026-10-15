@@ -89,14 +89,14 @@ export function StepCard({
   }, [])
 
   return (
-    <div className={cn(CARD_L2, 'overflow-hidden shadow-sm')}>
+    <div className={cn(CARD_L2, 'rounded-card overflow-hidden shadow-sm')}>
       <div
         className={cn(
           'flex items-center gap-2.5 py-3 pl-4 pr-3.5 transition-shadow',
           above && 'relative z-[1] shadow-[0_6px_10px_-8px_rgb(0_0_0/0.3)]',
         )}
       >
-        <span className="lumi-orb" />
+        <span className="lumi-orb lumi-orb-wait" />
         <h2 className="text-sm font-semibold">{title}</h2>
         {total > 1 && (
           <div className="ml-auto flex h-[26px] items-center rounded-full bg-line/45 px-0.5 text-xs text-muted-foreground tabular-nums">
@@ -117,7 +117,7 @@ export function StepCard({
       <div
         ref={viewport}
         onScroll={measureShade}
-        className="max-h-[50vh] overflow-y-auto transition-[height] duration-300 ease-[cubic-bezier(0.2,0.8,0.2,1)]"
+        className="max-h-[50vh] overflow-y-auto transition-[height] duration-200 ease-[var(--ease-out)]"
         style={{ height }}
       >
         <div ref={inner} className="px-4 pb-4 pt-0.5">
@@ -128,7 +128,7 @@ export function StepCard({
       </div>
       <div
         className={cn(
-          'flex items-center gap-2 border-t border-line/70 bg-canvas/35 px-3.5 py-2.5 transition-shadow',
+          'step-actions flex items-center gap-2 border-t border-line/70 bg-canvas/35 px-3.5 py-2.5 transition-shadow',
           below && 'shadow-[0_-6px_10px_-8px_rgb(0_0_0/0.3)]',
         )}
       >

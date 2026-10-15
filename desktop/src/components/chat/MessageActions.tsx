@@ -137,7 +137,7 @@ export const CopyButton = memo(function CopyButton({ text }: { text: string }) {
       aria-label={t('common.copy')}
       className="text-muted-foreground"
     >
-      {copied ? <Check className="text-success" /> : <Copy />}
+      {copied ? <Check className="text-success copy-confirm" /> : <Copy />}
     </Button>
   )
 })

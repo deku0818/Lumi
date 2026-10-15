@@ -3,6 +3,7 @@ import { cva, type VariantProps } from "class-variance-authority"
 import { Tabs as TabsPrimitive } from "radix-ui"
 
 import { cn } from "@/lib/utils"
+import { SegmentIndicator } from './segment-indicator'
 
 function Tabs({
   className,
@@ -40,6 +41,7 @@ const tabsListVariants = cva(
 function TabsList({
   className,
   variant = "default",
+  children,
   ...props
 }: React.ComponentProps<typeof TabsPrimitive.List> &
   VariantProps<typeof tabsListVariants>) {
@@ -47,9 +49,12 @@ function TabsList({
     <TabsPrimitive.List
       data-slot="tabs-list"
       data-variant={variant}
-      className={cn(tabsListVariants({ variant }), className)}
+      className={cn(tabsListVariants({ variant }), variant === 'default' && 'segment-track', className)}
       {...props}
-    />
+    >
+      {variant === 'default' && <SegmentIndicator />}
+      {children}
+    </TabsPrimitive.List>
   )
 }
 

@@ -1,7 +1,33 @@
-import { useMemo, type ReactNode } from 'react'
-import ReactMarkdown from 'react-markdown'
+import { Children, isValidElement, useLayoutEffect, useMemo, useRef, type ComponentProps, type ReactNode } from 'react'
+import ReactMarkdown, { type ExtraProps } from 'react-markdown'
 import remarkGfm from 'remark-gfm'
 import rehypeHighlight from 'rehype-highlight'
+import { rehypeReveal } from '../lib/graphemeReveal'
+import { CopyButton } from './chat/MessageActions'
+
+function codeText(children: ReactNode): string {
+  return Children.toArray(children).map(child =>
+    typeof child === 'string' || typeof child === 'number' ? String(child)
+      : isValidElement<{ children?: ReactNode }>(child) ? codeText(child.props.children) : '',
+  ).join('')
+}
+
+function CodeBlock({ children }: ComponentProps<'pre'>) {
+  const code = Children.toArray(children).find(isValidElement<{ className?: string }>)
+  const language = isValidElement<{ className?: string }>(code)
+    ? code.props.className?.match(/language-([\w+-]+)/)?.[1] : undefined
+  return (
+    <div className="md-code-block">
+      <div className="md-code-header"><span>{language || 'code'}</span><CopyButton text={codeText(children)} /></div>
+      <pre>{children}</pre>
+    </div>
+  )
+}
+
+// Markdown 重解析可能复用 tail 的 span；以源 offset 给内部元素换 key，确保只播新字素。
+function RevealSpan({ node, children, ...props }: ComponentProps<'span'> & ExtraProps) {
+  return <span key={node?.position?.start.offset} {...props}>{children}</span>
+}
 
 // 无协议相对链接点击会把整个窗口导航走导致应用重载，链接按去向分流：
 // #fragment 页内滚动；带协议的（http/mailto/vscode…）经 target=_blank 走
@@ -77,20 +103,33 @@ function MdLink({
 export function Markdown({
   children,
   onFileLink,
+  streaming = false,
+  animateInitial = false,
 }: {
   children: string
   onFileLink?: (name: string) => void
+  streaming?: boolean
+  animateInitial?: boolean
 }) {
+  // 首次实时出现可包括首段；已展示内容重挂载以现有文本为基线，不重播历史。
+  const previous = useRef(animateInitial ? '' : children)
+  const from = children.startsWith(previous.current) ? previous.current.length : children.length
+  useLayoutEffect(() => { previous.current = children }, [children])
+  const plugins = useMemo(() => streaming
+    ? [rehypeHighlight, [rehypeReveal, { from }] as [typeof rehypeReveal, { from: number }]]
+    : [rehypeHighlight], [streaming, from])
   const components = useMemo(
     () => ({
       a: (p: { href?: string; title?: string; children?: ReactNode }) => (
         <MdLink {...p} onFileLink={onFileLink} />
       ),
+      pre: CodeBlock,
+      span: RevealSpan,
     }),
     [onFileLink],
   )
   return (
-    <ReactMarkdown remarkPlugins={[remarkGfm]} rehypePlugins={[rehypeHighlight]} components={components}>
+    <ReactMarkdown remarkPlugins={[remarkGfm]} rehypePlugins={plugins} components={components}>
       {children}
     </ReactMarkdown>
   )

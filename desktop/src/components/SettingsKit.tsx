@@ -4,6 +4,7 @@ import type { CheckTone, EnvProgress } from '../types'
 import { cn } from '@/lib/utils'
 import { useI18n } from '../i18n'
 import { CARD_L2 } from './glass'
+import { SegmentIndicator } from './ui/segment-indicator'
 import { Button } from '@/components/ui/button'
 import { Dialog, DialogContent, DialogHeader, DialogTitle } from '@/components/ui/dialog'
 import './orb.css'
@@ -232,16 +233,18 @@ export function SegmentedControl<T extends string>({
   className?: string
 }) {
   return (
-    <div className={cn(segmentShell, className)}>
+    <div className={cn(segmentShell, 'segment-track', className)}>
+      <SegmentIndicator />
       {options.map((o) => {
         const on = o.val === value
         return (
           <button
             key={o.val}
             onClick={() => onChange(o.val)}
+            aria-pressed={on}
             title={o.title}
             className={`flex items-center gap-1.5 px-2.5 py-1 rounded-md text-sm transition ${
-              on ? 'bg-surface text-ink shadow-sm' : 'text-muted-foreground hover:text-ink'
+              on ? 'text-ink' : 'text-muted-foreground hover:text-ink'
             }`}
           >
             {o.icon && <o.icon size={15} className="shrink-0" />}

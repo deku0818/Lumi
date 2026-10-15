@@ -822,7 +822,8 @@ export default function App() {
     const be = keyBackend(active)
     return bgTasks.filter((tk) => tk.thread_id === tid && beOf(tk) === be)
   }, [bgTasks, active])
-  const hasRunningBg = activeBgTasks.some((tk) => tk.status === 'running')
+  const runningBgCount = activeBgTasks.filter((tk) => tk.status === 'running').length
+  const hasRunningBg = runningBgCount > 0
   const isMacTitleBar = (window.lumi.platform ?? 'win32') === 'darwin'
   // 侧栏收起时也保留顶条：给浮钮组（展开/新对话）让出高度，避免盖住页面内容
   const showTopStrip = isMacTitleBar || !sidebarOpen
@@ -2227,7 +2228,7 @@ export default function App() {
         <div className="flex flex-wrap gap-2 px-3.5 pt-3">
           {attachments.map((a) =>
             a.kind === 'image' ? (
-              <div key={a.id} className="relative group/att">
+              <div key={a.id} className="attachment-arrive relative group/att">
                 <img
                   src={a.dataUrl}
                   alt={a.name}
@@ -2245,7 +2246,7 @@ export default function App() {
               <div
                 key={a.id}
                 title={a.path}
-                className="relative group/att flex items-center gap-2 max-w-56 h-9 pl-2 pr-2.5 rounded-xl border border-line/40 bg-canvas"
+                className="attachment-arrive relative group/att flex items-center gap-2 max-w-56 h-9 pl-2 pr-2.5 rounded-xl border border-line/40 bg-canvas"
               >
                 <FileText size={15} className="shrink-0 text-muted-foreground" />
                 <span className="min-w-0 truncate text-xs text-ink">{a.name}</span>
@@ -2576,7 +2577,8 @@ export default function App() {
                     <div ref={scrollRef} onScroll={onScroll} className="h-full overflow-auto">
                     <div className="chat-body max-w-3xl mx-auto w-full px-6 py-8 space-y-5">
                       {segments.map((seg) => {
-                        const key = segKey(seg)
+                        const key = seg.kind === 'item' && seg.item.kind === 'user' && seg.item.arrival
+                          ? `arrival:${seg.item.arrival.id}` : segKey(seg)
                         const node =
                           seg.kind === 'tools' ? (
                             <ToolGroup key={key} tools={seg.tools} />
@@ -2636,8 +2638,7 @@ export default function App() {
                           </HoverActions>
                         )
                       })}
-                      {/* 状态指示器常驻：运行中显示阶段文案，中断（审批/澄清）时
-                          保持显示等待态，完成后退化为无文字的静止光点 */}
+                      {/* 运行 / 等待 / 后台任务显示状态，无活动时整行隐藏，历史留在右栏。 */}
                       <StatusIndicator
                         items={items}
                         running={running || observingCronRun}
@@ -2646,6 +2647,12 @@ export default function App() {
                         streaming={streaming}
                         thinkingText={thinkingText}
                         compacting={compacting}
+                        backgroundCount={runningBgCount}
+                        onOpenTasks={() => {
+                          if (previewExpanded) dispatchPreview({ type: 'toggle-expanded' })
+                          if (!railOpen) toggleRail()
+                        }}
+                        failed={conn === 'failed'}
                       />
                     </div>
                     </div>

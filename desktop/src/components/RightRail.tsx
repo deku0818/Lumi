@@ -122,7 +122,7 @@ export function RailSection({
         )}
         <span className="ml-auto flex items-center gap-1">
           <ChevronDown
-            className={`size-4 shrink-0 text-muted-foreground transition-transform duration-300 ease-[cubic-bezier(.32,.72,0,1)] ${
+            className={`size-4 shrink-0 text-muted-foreground transition-transform duration-200 ease-[var(--ease-out)] ${
               collapsed ? '-rotate-90' : ''
             }`}
           />
@@ -131,7 +131,7 @@ export function RailSection({
       {/* 外层只负责裁剪（0fr 时把内层 padding 一起收掉，否则折叠后残留一条空底） */}
       <div
         inert={collapsed}
-        className={`grid transition-[grid-template-rows,opacity] duration-300 ease-[cubic-bezier(.32,.72,0,1)] ${
+        className={`grid transition-[grid-template-rows,opacity] duration-200 ease-[var(--ease-out)] ${
           collapsed ? 'grid-rows-[0fr] opacity-0' : 'grid-rows-[1fr]'
         }`}
       >

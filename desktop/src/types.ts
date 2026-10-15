@@ -135,9 +135,10 @@ export type Item =
   // sender：IM 渠道消息的发送者（desktop 消息无）；ts：所有用户消息的发送时刻（毫秒，
   // 底层统一落库）。气泡头渲染「李雷 · 14:02」或仅时间
   // messageId：后端 HumanMessage id（load_history 下发），时间旅行截断锚点；本轮乐观插入的没有
+  // arrival：仅本地新消息持有的稳定入场标记，上锚不换 React key，历史水合不携带
   // landed：运行中插话刚注入消息流（挂载时放一次落地光晕；重载历史后不再有）
-  | { id: string | number; kind: 'user'; text: string; images?: string[]; files?: AttachedFile[]; sender?: string; ts?: number; messageId?: string; landed?: boolean }
-  | { id: string | number; kind: 'assistant'; text: string; streaming: boolean }
+  | { id: string | number; kind: 'user'; text: string; images?: string[]; files?: AttachedFile[]; sender?: string; ts?: number; messageId?: string; landed?: boolean; arrival?: { id: number } }
+  | { id: string | number; kind: 'assistant'; text: string; streaming: boolean; arrival?: { id: number } }
   | {
       id: string | number
       kind: 'tool'

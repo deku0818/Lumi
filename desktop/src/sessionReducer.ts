@@ -82,14 +82,10 @@ function restore(h: HistoryItem): Item {
 
 // 乐观插入的用户气泡（发送 / 编辑重发共用）。messageId 留空，等 turn.start 上锚。
 // ts 与服务端落库的到达时刻近似一致，重载前后时间头不跳变。
-export const userBubble = (text: string, images?: string[], files?: AttachedFile[]): PendingItem => ({
-  id: nid(),
-  kind: 'user',
-  text,
-  images,
-  files,
-  ts: Date.now(),
-})
+export const userBubble = (text: string, images?: string[], files?: AttachedFile[]): PendingItem => {
+  const id = nid()
+  return { id, kind: 'user', text, images, files, ts: Date.now(), arrival: { id } }
+}
 
 // 给最后一条尚未上锚的用户气泡打上后端消息 id（turn.start 事件驱动）。
 // 已上锚（历史回放带 id）或本轮无用户气泡（系统命令）时原数组返回，不触发重渲染。
@@ -141,7 +137,8 @@ function appendDelta(items: Item[], text: string): Item[] {
       return copy
     }
   }
-  return [...items, { id: nid(), kind: 'assistant', text, streaming: true }]
+  const id = nid()
+  return [...items, { id, kind: 'assistant', text, streaming: true, arrival: { id } }]
 }
 
 // 结束所有流式中的 assistant 气泡。轮次边界（complete/error）必须调用：

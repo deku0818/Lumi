@@ -5,31 +5,44 @@
 @custom-variant dark (&:is(.dark *));
 
 /* Lumi 双主题色板。
-   暗色为暖中性炭灰（去除旧版的蓝紫冷调，配暖金 accent 与暖白亮色主题）；
+   四层暖灰表面（底层 / 画布 / 面板 / 内层），保留 Lumi 品牌金；
    运行时通过根元素 .light class 切换；@theme inline 让 Tailwind 工具类引用这些变量。 */
 :root {
-  --color-canvas: #1a1a19;
-  --color-surface: #262624;
-  --color-panel: #201f1d;
-  --color-line: #383734;
+  --color-base: #151515;
+  --color-canvas: #20201e;
+  --color-surface: #2c2b28;
+  --color-panel: #262624;
+  --color-line: #3c3b36;
   --color-separator: #565450;
   --color-ink: #ececea;
-  --color-muted: #8f8d87;
+  --color-muted: #a4a19b;
   --color-accent: #ffcc00;
   --color-accent-dim: #66645c;
   --color-success: #4cd964;
   --color-error: #d94c4c;
   --color-info: #42a5f5;
   color-scheme: dark;
+  --ui-weight-medium: 460;
+  --ui-weight-semibold: 560;
+  --motion-fast: 60ms;
+  --motion-snap: 120ms;
+  --motion-base: 200ms;
+  --motion-sheet: 300ms;
+  --motion-slow: 450ms;
+  --ease-out: cubic-bezier(.165, .84, .44, 1);
+  --ease-snap: cubic-bezier(.32, .72, 0, 1);
+  --ease-overshoot: cubic-bezier(.34, 1.3, .64, 1);
+  --shadow-card: 0 4px 16px rgb(0 0 0 / .26);
+  --shadow-popover: 0 10px 32px rgb(0 0 0 / .28);
   /* 默认界面字体栈的唯一真相（font.ts 选中字体时也引用它做回退） */
   --font-fallback: system-ui, -apple-system, "Segoe UI", "PingFang SC", sans-serif;
   /* shadcn 语义令牌映射到我们的暖炭灰+金调色板：引用 --color-* 故随 .light 自动切换，
      无需 shadcn 的 .dark 约定。primary=品牌金，accent=悬停浅底（非品牌色）。 */
   --background: var(--color-canvas);
   --foreground: var(--color-ink);
-  --card: var(--color-surface);
+  --card: var(--color-panel);
   --card-foreground: var(--color-ink);
-  --popover: var(--color-surface);
+  --popover: var(--color-panel);
   --popover-foreground: var(--color-ink);
   --primary: var(--color-accent);
   --primary-foreground: var(--color-canvas);
@@ -49,8 +62,8 @@
   --chart-3: var(--color-success);
   --chart-4: var(--color-error);
   --chart-5: var(--color-muted);
-  --radius: 0.625rem;
-  --sidebar: var(--color-canvas);
+  --radius: 0.5rem;
+  --sidebar: var(--color-base);
   --sidebar-foreground: var(--color-ink);
   --sidebar-primary: var(--color-accent);
   --sidebar-primary-foreground: var(--color-canvas);
@@ -61,23 +74,33 @@
 }
 
 :root.light {
-  /* 暖白系：背景带暖黄底，文本暖褐，边框暖灰（配 Lumi 暗金 accent） */
-  --color-canvas: #f7f4ed;
-  --color-surface: #efebe1;
-  --color-panel: #fdfbf6;
-  --color-line: #ddd6c8;
-  --color-separator: #ccc4b2;
-  --color-ink: #2b2620;
-  --color-muted: #78726a;
+  /* 参考的暖灰亮色表面，强调色保留 Lumi 暗金。 */
+  --color-base: #f5f5f3;
+  --color-canvas: #fcfcfb;
+  --color-surface: #f5f5f3;
+  --color-panel: #ffffff;
+  --color-line: #e5e3de;
+  --color-separator: #d4d1ca;
+  --color-ink: #373634;
+  --color-muted: #6b6863;
   --color-accent: #b8860b;
   --color-accent-dim: #a89a78;
   --color-success: #3ba855;
   --color-error: #b33a3a;
   --color-info: #1565c0;
   color-scheme: light;
+  --ui-weight-medium: 500;
+  --ui-weight-semibold: 600;
+  --shadow-card: 0 4px 16px rgb(0 0 0 / .07);
+  --shadow-popover: 0 10px 32px rgb(0 0 0 / .12);
 }
 
 @theme inline {
+  --color-base: var(--color-base);
+  --font-weight-medium: var(--ui-weight-medium);
+  --font-weight-semibold: var(--ui-weight-semibold);
+  --default-transition-duration: var(--motion-snap);
+  --default-transition-timing-function: var(--ease-out);
   --color-canvas: var(--color-canvas);
   --color-surface: var(--color-surface);
   --color-panel: var(--color-panel);
@@ -125,13 +148,13 @@
   --color-card: var(--card);
   --color-foreground: var(--foreground);
   --color-background: var(--background);
-  --radius-sm: calc(var(--radius) * 0.6);
-  --radius-md: calc(var(--radius) * 0.8);
-  --radius-lg: var(--radius);
-  --radius-xl: calc(var(--radius) * 1.4);
-  --radius-2xl: calc(var(--radius) * 1.8);
-  --radius-3xl: calc(var(--radius) * 2.2);
-  --radius-4xl: calc(var(--radius) * 2.6);
+  --radius-sm: 4px;
+  --radius-md: 8px;
+  --radius-lg: 8px;
+  --radius-xl: 12px;
+  --radius-2xl: 18px;
+  --radius-3xl: 22px;
+  --radius-4xl: 22px;
   /* 悬浮面板 / 弹窗专用圆角（rounded-panel）：与 macOS 窗口外框弧度一致 */
   --radius-panel: 12px;
   /* 右栏模块卡专用（rounded-card）：卡只有 ~260 宽、90~290 高，套 panel 的 12px
@@ -177,7 +200,7 @@ pre {
 }
 
 ::selection {
-  background: rgba(255, 204, 0, 0.2);
+  background: color-mix(in srgb, var(--color-accent) 20%, transparent);
 }
 
 /* 标题栏：hiddenInset 下红绿灯浮于内容，顶部留出可拖动条 */
@@ -213,34 +236,22 @@ pre {
   line-height: 1.35;
 }
 
-/* ── 悬浮面板材质（macOS 天气式）：左侧栏 / 右后台任务栏 / Composer 输入岛共用。
-   半透明底 + 细描边 + 弥散影；不用 backdrop-filter——当前布局下面板背后只有平色
-   canvas，模糊无视觉差却逐帧吃 GPU（若未来面板改为真 overlay 叠在内容上再加回）── */
+/* 已确认的四层暖灰表面：底层 / 画布 / 面板 / 内层，保留品牌金。 */
 .sidebar-float,
 .composer-glass {
-  background: color-mix(in srgb, var(--color-panel) 72%, transparent);
-  border: 1px solid color-mix(in srgb, var(--color-ink) 9%, transparent);
-  box-shadow:
-    0 8px 32px rgba(0, 0, 0, 0.35),
-    inset 0 1px 0 color-mix(in srgb, var(--color-ink) 6%, transparent);
+  background: var(--color-panel);
+  border: 1px solid color-mix(in srgb, var(--color-ink) 7%, transparent);
+  box-shadow: var(--shadow-card);
 }
-/* 输入岛底色更实一档，保证输入内容可读性 */
+.sidebar-float { background: var(--color-base); }
 .composer-glass {
-  background: color-mix(in srgb, var(--color-panel) 78%, transparent);
+  transition: border-color var(--motion-base) var(--ease-out), box-shadow var(--motion-base) var(--ease-out);
 }
-:root.light .sidebar-float,
-:root.light .composer-glass {
-  box-shadow:
-    0 8px 32px rgba(0, 0, 0, 0.14),
-    inset 0 1px 0 rgba(255, 255, 255, 0.5);
-}
-/* 亮色底只调面板，输入岛两主题恒 78% */
-:root.light .sidebar-float {
-  background: color-mix(in srgb, var(--color-panel) 66%, transparent);
-}
-/* 聚焦高亮写在此处：本类非分层，@layer utilities 里的 focus-within:border-* 压不过它 */
 .composer-glass:focus-within {
   border-color: color-mix(in srgb, var(--color-accent) 40%, transparent);
+  box-shadow: var(--shadow-card),
+    0 0 0 2px color-mix(in srgb, var(--color-accent) 10%, transparent),
+    inset 0 0 0 1px color-mix(in srgb, var(--color-accent) 16%, transparent);
 }
 
 /* 侧栏收放钮入场（左顶条展开钮 / 左侧栏收起钮 / 右栏收放钮共用）：在最终位置淡入，
@@ -271,10 +282,10 @@ pre {
   from { translate: 110% 0; opacity: 0; }
 }
 .rail-enter {
-  animation: rail-w-in 0.3s ease-out;
+  animation: rail-w-in var(--motion-sheet) var(--ease-snap);
 }
 .rail-enter .rail-panel {
-  animation: rail-panel-in 0.3s ease-out;
+  animation: rail-panel-in var(--motion-sheet) var(--spring-panel, var(--ease-snap));
 }
 
 /* 文件预览与后台任务同列：小窗缩放真实内容，放大后原地展开为工作区。 */
@@ -441,7 +452,7 @@ body.resizing-col * {
   field-sizing: content;
 }
 
-/* composer 内部滚动条：轨道上下留白避开 24px 大圆角；
+/* composer 内部滚动条：轨道上下留白避开 22px 大圆角；
    滑块用透明边框 + background-clip 内缩，与右边缘保持距离 */
 .composer::-webkit-scrollbar {
   width: 14px;
@@ -477,14 +488,17 @@ body.resizing-col * {
 /* ── Markdown 渲染（助手回复，紧凑密度） ── */
 .md {
   line-height: 1.6;
-  word-break: break-word;
+  word-break: normal;
+  overflow-wrap: anywhere;
 }
 .md > :first-child { margin-top: 0; }
 .md > :last-child { margin-bottom: 0; }
-.md p { margin: 0.5em 0; }
+.md strong { font-weight: var(--ui-weight-semibold); }
+.md p { margin: 0.5em 0; text-wrap: pretty; }
 .md h1, .md h2, .md h3, .md h4 {
   margin: 0.85em 0 0.4em;
-  font-weight: 600;
+  font-weight: var(--ui-weight-semibold);
+  text-wrap: balance;
   line-height: 1.3;
 }
 .md h1 { font-size: 1.25em; }
@@ -560,7 +574,7 @@ body.resizing-col * {
 .md .hljs-addition { color: var(--color-success); }
 .md .hljs-link { color: var(--color-info); text-decoration: underline; }
 .md .hljs-emphasis { font-style: italic; }
-.md .hljs-strong { font-weight: 600; }
+.md .hljs-strong { font-weight: var(--ui-weight-semibold); }
 
 /* ── 状态指示器「光」主题（Lumi = 光明）：光点光晕 + 流光文字 ── */
 @keyframes lumi-breathe {
@@ -600,7 +614,7 @@ body.resizing-col * {
 
 /* 分步卡（审批 / ask）翻页：按前进/后退方向滑入，--step-dx 由组件给正负 */
 @keyframes step-slide { from { opacity: 0; transform: translateX(var(--step-dx, 0)); } }
-.step-slide { animation: step-slide 0.28s cubic-bezier(0.2, 0.8, 0.2, 1); }
+.step-slide { animation: step-slide var(--motion-base) var(--ease-out); }
 
 /* 更新提示条的图标：复用光核呼吸，与 .lumi-orb 同一套「光」的语言（文字保持静止） */
 .update-breathe { animation: lumi-breathe 2.2s ease-in-out infinite; }
@@ -623,8 +637,8 @@ body.resizing-col * {
   0% { opacity: 1; max-height: 40px; transform: none; }
   100% { opacity: 0; max-height: 0; transform: translateY(-6px); }
 }
-.subtool-enter { animation: subtool-in .26s ease-out; }
-.subtool-leave { animation: subtool-out .26s ease-in forwards; overflow: hidden; }
+.subtool-enter { animation: subtool-in var(--motion-base) var(--ease-out); }
+.subtool-leave { animation: subtool-out var(--motion-base) ease-in forwards; overflow: hidden; }
 
 /* 并发面板每行行首小光点：运行=金色呼吸，完成=绿色静止 */
 .subagent-dot { width: 7px; height: 7px; border-radius: 50%; flex: none; }
@@ -686,3 +700,47 @@ body.resizing-col * {
     @apply font-sans;
   }
 }
+
+/* 同类交互共享节奏；图标反馈不带动按钮文字。 */
+[data-slot="button"] { transition-duration: var(--motion-snap); }
+[data-slot="button"] svg { transition: scale 220ms var(--spring-button, var(--ease-snap)); }
+[data-slot="button"]:active:not(:disabled):not([aria-haspopup]) svg { scale: .88; }
+[data-slot="switch"], [data-slot="switch-thumb"] { transition-duration: var(--motion-snap); transition-timing-function: var(--spring-button, var(--ease-snap)); }
+[data-slot="dialog-overlay"] { animation-duration: var(--motion-base); }
+[data-slot="dialog-content"], [data-slot="dropdown-menu-content"], [data-slot="dropdown-menu-sub-content"] {
+  box-shadow: var(--shadow-popover);
+  animation-duration: var(--motion-sheet);
+  animation-timing-function: var(--spring-popover, var(--ease-out));
+}
+.rail-panel { transition-timing-function: var(--spring-panel, var(--ease-snap)); }
+.lumi-fold { grid-template-rows: 1fr; transition: grid-template-rows var(--motion-base) var(--ease-out), opacity var(--motion-base) var(--ease-out); }
+.lumi-fold-closed { grid-template-rows: 0fr; opacity: 0; }
+.lumi-orb-wait::before { animation: none; opacity: .3; }
+.lumi-orb-wait::after { animation: none; }
+.lumi-orb-error::before { display: none; }
+.lumi-orb-error::after { animation: none; background: var(--color-error); box-shadow: none; }
+@keyframes grapheme-reveal { from { opacity: 0; filter: blur(6px); } to { opacity: 1; filter: blur(0); } }
+.grapheme-reveal { animation: grapheme-reveal 90ms cubic-bezier(.215,.61,.355,1) both; }
+@keyframes user-arrive { from { opacity: 0; transform: translateY(6px) scale(.985); } to { opacity: 1; transform: none; } }
+.user-arrive { animation: user-arrive var(--motion-sheet) var(--spring-button, var(--ease-overshoot)); }
+@keyframes attachment-arrive { from { opacity: 0; transform: translateX(10px); } to { opacity: 1; transform: none; } }
+@keyframes attachment-pulse { 50% { border-color: color-mix(in srgb, var(--color-accent) 35%, var(--color-line)); box-shadow: 0 0 9px color-mix(in srgb, var(--color-accent) 8%, transparent); } }
+.attachment-arrive { animation: attachment-arrive var(--motion-sheet) var(--ease-out), attachment-pulse 1.6s ease-in-out 1; }
+@keyframes copy-confirm { from { opacity: 0; scale: .75; } to { opacity: 1; scale: 1; } }
+.copy-confirm { animation: copy-confirm 450ms var(--spring-feedback, var(--ease-out)); }
+.md-code-block { overflow: hidden; border: 1px solid var(--color-line); border-radius: 12px; margin: .6em 0; background: var(--color-surface); }
+.md-code-header { display: flex; align-items: center; justify-content: space-between; gap: 8px; height: 32px; padding: 0 10px 0 13px; border-bottom: 1px solid var(--color-line); color: var(--color-muted); font: 11px/1.5 var(--font-sans); user-select: none; }
+.md-code-block > pre { border: 0; margin: 0; border-radius: 0; background: transparent; }
+.segment-track { border: 0; position: relative; isolation: isolate; display: inline-flex; height: 32px; padding: 3px; border-radius: 8px; }
+.segment-track button { position: relative; z-index: 1; border-radius: 4px; min-width: 0; height: 26px; }
+.segment-indicator { position: absolute; z-index: 0; pointer-events: none; top: 3px; bottom: 3px; border-radius: 4px; background: var(--color-panel); box-shadow: 0 1px 3px rgb(0 0 0 / .08); transition: left var(--motion-snap) var(--ease-snap), width var(--motion-snap) var(--ease-snap); }
+.md svg { vertical-align: -.125em; }
+@media (prefers-reduced-motion: reduce) {
+  *, *::before, *::after { animation-duration: .01ms !important; animation-delay: 0ms !important; animation-iteration-count: 1 !important; transition-duration: .01ms !important; scroll-behavior: auto !important; }
+  .grapheme-reveal { animation: none; }
+}
+
+.segment-track [data-slot="tabs-trigger"] { background: transparent; box-shadow: none; z-index: 1; }
+.step-actions > [data-slot="button"] { height: 32px; font-size: 14px; padding-inline: 10px; }
+
+.rail-panel .sidebar-float { background: var(--color-panel); }

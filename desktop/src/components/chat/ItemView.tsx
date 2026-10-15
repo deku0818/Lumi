@@ -7,11 +7,14 @@ import { Markdown } from '../Markdown'
 import { useI18n } from '../../i18n'
 import { USER_BUBBLE } from './MessageActions'
 import type { ToolItem } from './ToolViews'
+import { Fold } from '../ui/fold'
+
+const seenArrivals = new WeakSet<object>()
 
 // 会话底部常驻状态指示器（参考 Claude）：
 // - 运行中：光点 + 当前阶段文案 + 本轮计时；思考阶段右侧箭头点开看流式思考
 // - 中断（审批/澄清/计划）：保持显示「等待确认…」，计时继续
-// - 完成：退化为无文字的静止光点，留在最后一条消息下
+// - 无活动时隐藏；后台任务继续运行时保留入口，历史由右栏查看
 // 阶段优先级：等待确认 > 工具执行中 > 思考中 > 正文输出中 > 兜底「正在处理…」。
 export function StatusIndicator({
   items,
@@ -21,6 +24,9 @@ export function StatusIndicator({
   streaming,
   thinkingText,
   compacting,
+  backgroundCount = 0,
+  onOpenTasks,
+  failed = false,
 }: {
   items: Item[]
   running: boolean
@@ -29,6 +35,9 @@ export function StatusIndicator({
   streaming: boolean
   thinkingText: string
   compacting: boolean
+  backgroundCount?: number
+  onOpenTasks?: () => void
+  failed?: boolean
 }) {
   const { t } = useI18n()
   const [open, setOpen] = useState(false)
@@ -46,14 +55,7 @@ export function StatusIndicator({
     if (open && boxRef.current) boxRef.current.scrollTop = boxRef.current.scrollHeight
   }, [thinkingText, open])
 
-  if (!running) {
-    // 完成态：无文字的静止光点
-    return (
-      <div className="mt-2">
-        <span className="lumi-orb lumi-orb-idle" />
-      </div>
-    )
-  }
+  if (!running && !backgroundCount && !failed) return null
 
   let runningTool: ToolItem | undefined
   for (let i = items.length - 1; i >= 0; i--) {
@@ -64,28 +66,37 @@ export function StatusIndicator({
       break
     }
   }
-  const thinking = !waiting && !runningTool && !streaming && !!thinkingText
-  const label = waiting
-    ? t('status.waiting')
-    : compacting
-      ? t('status.compacting')
-      : runningTool
-        ? t(toolStatusKey(runningTool.name))
-        : thinking
-          ? t('common.thinking')
-          : streaming
-            ? t('status.writing')
-            : t('status.working')
+  const thinking = running && !failed && !waiting && !runningTool && !streaming && !!thinkingText
+  const label = failed
+    ? t('status.connectionFailed')
+    : !running && backgroundCount > 0
+      ? t('status.background', { n: backgroundCount })
+      : waiting
+        ? t('status.waiting')
+        : compacting
+          ? t('status.compacting')
+          : runningTool
+            ? t(toolStatusKey(runningTool.name))
+            : thinking
+              ? t('common.thinking')
+              : streaming
+                ? t('status.writing')
+                : t('status.working')
 
   return (
     <div className="mt-2">
       <div className="flex items-center gap-2.5 text-muted-foreground text-sm">
-        <span className="lumi-orb" />
+        <span className={`lumi-orb ${failed ? 'lumi-orb-error' : waiting ? 'lumi-orb-wait' : ''}`} />
         <span>{label}</span>
-        {sec > 0 && <span className="text-xs opacity-60">· {fmtDuration(sec)}</span>}
+        {running && sec > 0 && <span className="text-xs opacity-60 tabular-nums">· {fmtDuration(sec)}</span>}
+        {backgroundCount > 0 && onOpenTasks && (
+          <button onClick={onOpenTasks} className="text-xs text-primary hover:underline">{t('bg.title')} · {backgroundCount}</button>
+        )}
         {thinking && (
           <button
             onClick={() => setOpen((o) => !o)}
+            aria-expanded={open}
+            aria-label={t('common.thinking')}
             className="px-1.5 text-muted-foreground hover:text-ink transition-colors"
           >
             <ChevronRight
@@ -95,14 +106,14 @@ export function StatusIndicator({
           </button>
         )}
       </div>
-      {thinking && open && (
+      <Fold open={thinking && open}>
         <pre
           ref={boxRef}
           className="text-xs mt-1.5 ml-6 px-3 py-2 rounded-lg bg-surface/60 border border-line/60 overflow-auto max-h-28 whitespace-pre-wrap text-muted-foreground/90 leading-relaxed"
         >
           {thinkingText}
         </pre>
-      )}
+      </Fold>
     </div>
   )
 }
@@ -165,12 +176,15 @@ export const ItemView = memo(function ItemView({
   fileSrc?: (path: string) => string | undefined
   onOpenImage?: (f: AttachedFile) => void
 }) {
+  const arrival = item.kind === 'user' || item.kind === 'assistant' ? item.arrival : undefined
+  const [arriving] = useState(() => !!arrival && !seenArrivals.has(arrival))
+  useEffect(() => { if (arrival) seenArrivals.add(arrival) }, [arrival])
   if (item.kind === 'user') {
     const files = item.files ?? []
     const imageFiles = files.filter((f) => IMAGE_EXT.test(f.path))
     const otherFiles = files.filter((f) => !IMAGE_EXT.test(f.path))
     return (
-      <div className="flex flex-col items-end gap-1.5">
+      <div className={`flex flex-col items-end gap-1.5 ${arriving ? 'user-arrive' : ''}`}>
         {/* 消息头：发送者 · 发送时刻。渠道消息两者都有；desktop 消息只有 ts
             （stream_response 统一落库的到达时刻），只显示时间 */}
         {(item.sender || item.ts) && (
@@ -212,7 +226,7 @@ export const ItemView = memo(function ItemView({
   if (item.kind === 'assistant') {
     return (
       <div className="md md-serif">
-        <Markdown>{item.text}</Markdown>
+        <Markdown streaming={item.streaming} animateInitial={arriving && item.streaming}>{item.text}</Markdown>
       </div>
     )
   }
@@ -220,8 +234,8 @@ export const ItemView = memo(function ItemView({
     return <RetryHint />
   }
   return (
-    <div className="selectable text-sm text-error/80 bg-error/5 rounded-xl px-3.5 py-2.5">
-      {item.text}
+    <div className="selectable flex items-start gap-2 text-sm text-error/80 bg-error/5 rounded-xl px-3.5 py-2.5">
+      <span className="lumi-orb lumi-orb-error mt-1" /><span>{item.text}</span>
     </div>
   )
 })

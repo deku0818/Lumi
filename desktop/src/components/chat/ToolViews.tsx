@@ -1,4 +1,4 @@
-import { memo, useMemo, useState, type ReactNode } from 'react'
+import { memo, useMemo, useState } from 'react'
 import { ChevronRight } from 'lucide-react'
 import type { Item } from '../../types'
 import { isKnownTool, summarizeTools, toolArgs, toolIcon, toolStatusKey, toolTitle } from '../../toolMeta'
@@ -6,6 +6,7 @@ import { MAX_DIFF_LINES, foldContext, toolDiff, type DiffLine } from '../../diff
 import { shellTokens } from '../../shell'
 import { useI18n } from '../../i18n'
 import { CopyButton } from './MessageActions'
+import { Fold } from '../ui/fold'
 
 export type ToolItem = Extract<Item, { kind: 'tool' }>
 
@@ -21,9 +22,9 @@ export const ToolGroup = memo(function ToolGroup({ tools }: { tools: ToolItem[] 
   const { t } = useI18n()
   const running = tools.some((t) => !t.done)
   const hasError = tools.some((t) => t.error)
-  // override=null 时按 hasError 决定默认展开；出错的工具组默认展开但仍可手动收起
+  // 默认运行 / 出错时展开；用户明确开合后，后续流式更新不抢回选择。
   const [override, setOverride] = useState<boolean | null>(null)
-  const open = running || (override ?? hasError)
+  const open = override ?? (running || hasError)
   const summary = running
     ? (() => {
         const done = summarizeTools(
@@ -37,7 +38,8 @@ export const ToolGroup = memo(function ToolGroup({ tools }: { tools: ToolItem[] 
   return (
     <div>
       <button
-        onClick={() => setOverride((o) => !(o ?? hasError))}
+        aria-expanded={open}
+        onClick={() => setOverride(!open)}
         className="flex items-center gap-1.5 text-sm text-muted-foreground hover:text-ink transition"
       >
         {running && <span className="text-primary animate-pulse text-[10px]">●</span>}
@@ -48,13 +50,13 @@ export const ToolGroup = memo(function ToolGroup({ tools }: { tools: ToolItem[] 
           className={`shrink-0 opacity-60 transition-transform ${open ? 'rotate-90' : ''}`}
         />
       </button>
-      {open && (
+      <Fold open={open}>
         <div className="mt-1.5 ml-0.5 border-l border-line/40 pl-3 space-y-0.5">
           {tools.map((t) => (
             <ToolRow key={t.id} item={t} />
           ))}
         </div>
-      )}
+      </Fold>
     </div>
   )
 },
@@ -169,18 +171,6 @@ const ToolRow = memo(function ToolRow({ item }: { item: ToolItem }) {
     </div>
   )
 })
-
-// 高度平滑开合：grid-rows 0fr↔1fr（内容常驻 DOM 才有过渡；收起时 inert 免 Tab 进隐藏内容）
-function Fold({ open, children }: { open: boolean; children: ReactNode }) {
-  return (
-    <span
-      inert={!open}
-      className={`grid transition-[grid-template-rows,opacity] duration-300 ease-[cubic-bezier(0.2,0.8,0.2,1)] ${open ? 'grid-rows-[1fr]' : 'grid-rows-[0fr] opacity-0'}`}
-    >
-      <span className="block min-h-0 overflow-hidden">{children}</span>
-    </span>
-  )
-}
 
 // 参数选项 chip（超时 / 后台 / 行范围…）+ edit/write 的 +/- 行数
 function ArgChips({ chips, diff }: { chips: string[]; diff: DiffLine[] | null }) {
