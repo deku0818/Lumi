@@ -211,7 +211,12 @@ async def test_start_emits_gateway_ready():
         assert len(ready) == 1
         params = ready[0]["params"]
         assert params["session_id"] == "t-1"
+        from lumi import __version__
+        from lumi.gateway.protocol import PROTOCOL
+
         assert params["payload"] == {
+            "version": __version__,
+            "protocol": PROTOCOL,
             "model": "fake-model",
             "workspace": ANY_WORKSPACE,
             "workspace_bound": True,
@@ -1349,3 +1354,80 @@ async def test_ws_open_with_bound_workspace_touches_project(monkeypatch):
     await ws_mod.ws_endpoint(_OpenWs({"workspace": "/p/a"}))
     await ws_mod.ws_endpoint(_OpenWs({}))
     assert touched == ["/p/a"]
+
+
+@pytest.mark.parametrize("close_rpc", [False, True])
+async def test_native_ssh_disconnect_detaches_active_turn_and_reattaches(
+    tmp_path, close_rpc
+):
+    from lumi.gateway.session_registry import registry
+    from lumi.remote.daemon import Client, SessionChannel
+    from lumi.remote.protocol import read_frame
+
+    class Writer:
+        def __init__(self):
+            self.data = bytearray()
+
+        def write(self, value):
+            self.data.extend(value)
+
+        async def drain(self):
+            pass
+
+        def close(self):
+            pass
+
+        async def wait_closed(self):
+            pass
+
+    reader, writer = asyncio.StreamReader(), Writer()
+    client = Client(tmp_path, reader, writer)
+    bridge = BlockingBridge()
+    bridge.current_thread_id = "native-detach-test"
+    bridge._pending_events = [
+        BridgeEvent(kind=EventKind.APPROVAL, data={"approval_id": "native-approval"})
+    ]
+    session = GatewaySession(
+        bridge, SessionChannel(client.output, "first"), BroadcastHub()
+    )
+    client.sessions["first"] = session
+    await session.start()
+    await session.handle_frame(
+        {"id": 1, "method": "send_message", "params": {"content": "hello"}}
+    )
+    await bridge.started.wait()
+    try:
+        if close_rpc:
+            await client.dispatch({"id": 99, "op": "close", "channel": "first"})
+            assert "first" not in client.sessions
+            responses = asyncio.StreamReader()
+            responses.feed_data(writer.data)
+            while (await read_frame(responses)).get("id") != 99:
+                pass
+        else:
+            reader.feed_eof()
+            await client.run()
+        assert session.has_active_turn() and not bridge.closed
+        next_writer = Writer()
+        reconnected = Client(tmp_path, None, next_writer)
+        await reconnected.open_session(
+            {"channel": "second", "thread": bridge.current_thread_id}
+        )
+        assert reconnected.sessions["second"] is session
+        frames = asyncio.StreamReader()
+        frames.feed_data(next_writer.data)
+        ready = await read_frame(frames)
+        assert ready["channel"] == "second"
+        assert ready["frame"]["params"]["payload"]["running"] is True
+        approval = await read_frame(frames)
+        assert approval["channel"] == "second"
+        assert (
+            approval["frame"]["params"]["payload"]["approval_id"] == "native-approval"
+        )
+        bridge.release.set()
+        await _drain(session)
+        await reconnected.close_session("second")
+        assert bridge.closed
+    finally:
+        registry.discard(bridge.current_thread_id, session)
+        await session.aclose()

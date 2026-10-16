@@ -1,4 +1,4 @@
-import { memo, useCallback, useEffect, useState, type ReactNode } from 'react'
+import { memo, useCallback, useEffect, useState, type JSX, type ReactNode } from 'react'
 import {
   ArrowLeft,
   Bot,
@@ -41,6 +41,21 @@ type Sheet =
   | { mode: 'view'; kind: ProjectResourceKind; name: string }
   | { mode: 'create'; kind: 'skill' | 'agent' }
 
+type ProjectHomePageProps = {
+  project: { name: string; path: string }
+  machine: string // 项目所在机器：概览拉取挂在它的连接态上
+  isDefault: boolean
+  api: () => Gateway | undefined
+  sessions: SessionMeta[]
+  cronJobs: CronJob[]
+  // 输入岛 = App 传入的标准输入栏（project 模式），与聊天页完全一致
+  composerSlot: ReactNode
+  onOpenSession: (tid: string) => void
+  // 空 = 打开定时页；jobId = 直达该任务；create = 直接打开创建表单（绑定本项目）
+  onOpenScheduled: (target?: { jobId?: string; create?: boolean }) => void
+  onToggleCron: (jobId: string, enabled: boolean) => void
+}
+
 // memo：App 是流式事件的重渲染热点，props 已在 App 侧全部稳定引用，
 // 停在项目主页时后台 token 不再引发整页 reconcile
 export const ProjectHomePage = memo(function ProjectHomePage({
@@ -51,25 +66,10 @@ export const ProjectHomePage = memo(function ProjectHomePage({
   sessions,
   cronJobs,
   composerSlot,
-  onBack,
   onOpenSession,
   onOpenScheduled,
   onToggleCron,
-}: {
-  project: { name: string; path: string }
-  machine: string // 项目所在机器：概览拉取挂在它的连接态上
-  isDefault: boolean
-  api: () => Gateway | undefined
-  sessions: SessionMeta[]
-  cronJobs: CronJob[]
-  // 输入岛 = App 传入的标准输入栏（project 模式），与聊天页完全一致
-  composerSlot: ReactNode
-  onBack: () => void
-  onOpenSession: (tid: string) => void
-  // 空 = 打开定时页；jobId = 直达该任务；create = 直接打开创建表单（绑定本项目）
-  onOpenScheduled: (target?: { jobId?: string; create?: boolean }) => void
-  onToggleCron: (jobId: string, enabled: boolean) => void
-}) {
+}: ProjectHomePageProps): JSX.Element {
   const { t } = useI18n()
   const [overview, setOverview] = useState<ProjectOverview | null>(null)
   const [sheet, setSheet] = useState<Sheet | null>(null)
@@ -103,46 +103,47 @@ export const ProjectHomePage = memo(function ProjectHomePage({
   return (
     <div className="flex-1 overflow-auto">
       <div className="max-w-4xl mx-auto w-full px-8 pt-4 pb-12">
-        <div className="flex items-center gap-1.5 text-xs text-muted-foreground mb-4 select-none">
-          <button onClick={onBack} className="hover:text-ink transition">
-            {t('projects.title')}
-          </button>
-          <span>/</span>
-          <span className="text-ink">{project.name}</span>
+        <div className="mb-5">
+          <div className="flex items-center gap-2">
+            <h1 className="serif text-2xl select-none">{project.name}</h1>
+            {isDefault && <Star size={14} className="proj-star" fill="currentColor" />}
+          </div>
+          <div className="mt-1 text-[11.5px] text-muted-foreground font-mono truncate" title={project.path}>
+            {project.path}
+          </div>
         </div>
 
         <div className="grid grid-cols-[1fr_280px] gap-7">
           {/* ══ 左列 ══ */}
-          <div className="min-w-0">
-            <div className="mb-5">
-              <div className="flex items-center gap-2">
-                <h1 className="serif text-2xl select-none">{project.name}</h1>
-                {isDefault && <Star size={14} className="proj-star" fill="currentColor" />}
-              </div>
-              <div className="mt-1 text-[11.5px] text-muted-foreground font-mono truncate" title={project.path}>
-                {project.path}
-              </div>
-            </div>
-
+          <div className="min-w-0 flex flex-col">
             {/* 输入岛：与聊天页同一套输入栏（发送即在此项目新建会话并携带首条消息） */}
             <div className="mb-1">{composerSlot}</div>
 
-            {pinned.length > 0 && (
-              <>
-                <SectionLabel>{t('sidebar.pinned')}</SectionLabel>
-                {pinned.map((s) => (
-                  <SessionRow key={s.thread_id} s={s} onOpen={onOpenSession} />
-                ))}
-              </>
-            )}
-            <SectionLabel count={recent.length}>{t('projhome.sessions')}</SectionLabel>
-            {recent.length === 0 ? (
-              <div className="py-6 text-xs text-muted-foreground select-none">
-                {t('projhome.noSessions')}
-              </div>
-            ) : (
-              recent.map((s) => <SessionRow key={s.thread_id} s={s} onOpen={onOpenSession} />)
-            )}
+            <SectionLabel count={sessions.length}>{t('projhome.sessions')}</SectionLabel>
+            {/* 会话不撑高网格，填满右列卡片决定的剩余高度。 */}
+            <div
+              className="flex-1 min-h-0 [contain:size] overflow-y-auto overscroll-contain [scrollbar-gutter:stable] -ml-3 pl-3 pr-1.5"
+              tabIndex={0}
+              role="region"
+              aria-label={t('projhome.sessions')}
+            >
+              {pinned.length > 0 && (
+                <>
+                  <SectionLabel>{t('sidebar.pinned')}</SectionLabel>
+                  {pinned.map((s) => (
+                    <SessionRow key={s.thread_id} s={s} onOpen={onOpenSession} />
+                  ))}
+                  <SectionLabel count={recent.length}>{t('projhome.sessions')}</SectionLabel>
+                </>
+              )}
+              {recent.length === 0 ? (
+                <div className="py-6 text-xs text-muted-foreground select-none">
+                  {t('projhome.noSessions')}
+                </div>
+              ) : (
+                recent.map((s) => <SessionRow key={s.thread_id} s={s} onOpen={onOpenSession} />)
+              )}
+            </div>
           </div>
 
           {/* ══ 右列 ══ */}
@@ -175,23 +176,16 @@ export const ProjectHomePage = memo(function ProjectHomePage({
                   )
                 })}
               </div>
-              {prompt?.source ? (
+              {prompt?.source && (
                 <>
                   <div
                     onClick={() => setSheet({ mode: 'view', kind: 'prompt', name: promptTab })}
-                    className="text-[11.5px] leading-relaxed text-ink/85 line-clamp-5 cursor-pointer hover:text-ink whitespace-pre-wrap"
+                    className="text-[11.5px] leading-relaxed text-ink/85 cursor-pointer hover:text-ink whitespace-pre-wrap [overflow-wrap:anywhere]"
                   >
                     {prompt.body.trim()}
                   </div>
                   <div className="mt-2 text-[10.5px] text-muted-foreground/70 font-mono truncate">{prompt.path}</div>
                 </>
-              ) : (
-                <button
-                  onClick={() => setSheet({ mode: 'view', kind: 'prompt', name: promptTab })}
-                  className="text-left text-[11.5px] text-muted-foreground italic hover:text-ink transition"
-                >
-                  {t('projhome.promptEmpty')}
-                </button>
               )}
             </Card>
 
@@ -204,7 +198,7 @@ export const ProjectHomePage = memo(function ProjectHomePage({
                   <button
                     key={m.name}
                     onClick={() => setSheet({ mode: 'view', kind: 'memory', name: m.name })}
-                    className={`flex items-center gap-2 w-full text-left px-2 py-1 -mx-2 rounded-lg hover:bg-surface transition ${
+                    className={`flex items-center gap-2 w-full text-left py-1 rounded-lg hover:bg-surface transition ${
                       m.name === 'MEMORY.md' ? 'text-primary' : 'text-ink/85'
                     }`}
                   >
@@ -230,7 +224,7 @@ export const ProjectHomePage = memo(function ProjectHomePage({
                 <EmptyHint>{t('projhome.scheduledEmpty')}</EmptyHint>
               ) : (
                 cronJobs.map((j) => (
-                  <div key={j.id} className="flex items-center gap-2 py-1.5 border-t border-line/40 first:border-0">
+                  <div key={j.id} className="flex items-center gap-2 py-1.5 pr-1.5 border-t border-line/40 first:border-0">
                     <button onClick={() => onOpenScheduled({ jobId: j.id })} className="flex-1 min-w-0 text-left">
                       <div className="text-xs truncate">{j.name}</div>
                       <div className="text-[10.5px] text-muted-foreground truncate">
@@ -263,7 +257,7 @@ export const ProjectHomePage = memo(function ProjectHomePage({
                       key={s.name}
                       title={s.description}
                       onClick={() => setSheet({ mode: 'view', kind: 'skill', name: s.name })}
-                      className="inline-flex items-center gap-1 px-2.5 py-1 rounded-full bg-surface border border-line/70 text-[11px] font-mono text-ink/85 hover:border-primary/40 transition"
+                      className="inline-flex items-center gap-1 max-w-full [overflow-wrap:anywhere] px-2.5 py-1 rounded-full bg-surface border border-line/70 text-[11px] font-mono text-ink/85 hover:border-primary/40 transition"
                     >
                       {s.builtin && <Lock size={9} className="text-muted-foreground/70" />}
                       {s.name}
@@ -299,7 +293,7 @@ export const ProjectHomePage = memo(function ProjectHomePage({
                       <Bot size={11} className="shrink-0 mt-0.5 text-muted-foreground/70" />
                     )}
                     <span className="min-w-0">
-                      <span className="block text-xs font-mono">{a.name}</span>
+                      <span className="block text-xs font-mono truncate">{a.name}</span>
                       <span className="block text-[10.5px] text-muted-foreground truncate">{a.description}</span>
                     </span>
                   </button>
@@ -382,7 +376,14 @@ function Card({
         )}
         <span className="ml-auto">{action}</span>
       </div>
-      {children}
+      <div
+        className="max-h-48 overflow-y-auto overscroll-contain [scrollbar-gutter:stable] pr-1.5"
+        tabIndex={0}
+        role="region"
+        aria-label={title}
+      >
+        {children}
+      </div>
     </div>
   )
 }

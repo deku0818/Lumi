@@ -165,7 +165,7 @@ function ImageThumb({ f, src, onOpen }: { f: AttachedFile; src?: string; onOpen?
 
 // memo：流式期间每个 delta 都重建 items 数组，但未变更项保持对象身份，
 // memo 让历史消息（尤其 ReactMarkdown 解析）不随每个 token 重渲染。
-// fileSrc：附件路径 → 可加载地址（本地 lumi-file / 远程 /file，无连接给 undefined）；
+// fileSrc：附件路径 → 可加载地址（本地 lumi-file / 远程 lumi-remote，无连接给 undefined）；
 // onOpenImage：点缩略图打开预览面板。两者须为稳定引用，否则 memo 失效。
 export const ItemView = memo(function ItemView({
   item,

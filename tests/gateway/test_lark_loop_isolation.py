@@ -13,12 +13,10 @@ from __future__ import annotations
 import asyncio
 import threading
 
-import lark_oapi.ws.client as ws_client
-
 from lumi.gateway.channels.feishu.lark_loop import use_loop_in_this_thread
 
 
-def _run_bot(name: str, seen: dict, barrier: threading.Barrier) -> None:
+def _run_bot(name: str, seen: dict, barrier: threading.Barrier, ws_client) -> None:
     """模拟一个 feishu-ws 线程：建自己的 loop → 登记 → 等对方也登记完 → 读全局。"""
     loop = asyncio.new_event_loop()
     asyncio.set_event_loop(loop)
@@ -28,12 +26,12 @@ def _run_bot(name: str, seen: dict, barrier: threading.Barrier) -> None:
         seen[name] = loop
         # SDK 真正的用法：直接拿全局跑协程，必须落在本线程的 loop 上
         ws_client.loop.run_until_complete(asyncio.sleep(0))
-        seen[name + ":resolved_is_own"] = _resolved_loop() is loop
+        seen[name + ":resolved_is_own"] = _resolved_loop(ws_client) is loop
     finally:
         loop.close()
 
 
-def _resolved_loop():
+def _resolved_loop(ws_client):
     """代理背后、当前线程实际指向的那个 loop。
 
     代理把属性转发给真 loop，故取一个绑定方法的 ``__self__`` 即可反查回本体
@@ -42,11 +40,11 @@ def _resolved_loop():
     return ws_client.loop.call_soon.__self__
 
 
-def test_two_ws_threads_get_their_own_loop():
+def test_two_ws_threads_get_their_own_loop(ws_client):
     seen: dict = {}
     barrier = threading.Barrier(2)
     threads = [
-        threading.Thread(target=_run_bot, args=(name, seen, barrier))
+        threading.Thread(target=_run_bot, args=(name, seen, barrier, ws_client))
         for name in ("botA", "botB")
     ]
     for t in threads:
@@ -64,7 +62,7 @@ def test_two_ws_threads_get_their_own_loop():
     assert seen["botA"] is not seen["botB"]  # 两个 loop 确实不是同一个
 
 
-def test_unregistered_thread_falls_back():
+def test_unregistered_thread_falls_back(ws_client):
     """没登记过的线程仍读到 fallback（原本那个 loop）——打补丁前后行为一致。
 
     装代理与探测都在**各自的子线程**里做：主线程一旦登记过，thread-local 会在整个

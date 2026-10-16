@@ -1,15 +1,10 @@
 """上传附件持久化：把到达后端的字节存进 ``~/.lumi/uploads/``、路径交还调用方。
 
-「哪些字节落到哪」只由本模块决定——两条上行管道都汇到这里：
-- 内联图片（desktop / 飞书 base64 image block）→ ``persist_image_blocks``，在
-  ``stream_response`` 入口剥出并存盘；
-- desktop 远程附件（HTTP ``POST /upload``）→ ``save_upload``，边收边写。
-
-两条管道不合并（飞书在进程内直接产 image block，没有指向自己的 HTTP 客户端；
-反过来 100MB 文件也不该塞进 JSON-RPC 帧走 base64），但存盘这一半只有一份实现：
-落盘布局 / 上限 / 保留清理（删会话时回收，见 remove_uploads）都在本模块改一次。产出的路径由 bridge 与
-文件附件统一拼 ``<attached-file>`` 标签块（模型侧）+ 写进 ``lumi.items`` 的
-files（显示侧），让 read / vision 工具按路径消费。
+内联图片经 ``persist_image_blocks`` 存盘；独立 HTTP API 经 ``save_upload``
+流式写入。原生 SSH 桌面附件由 ``lumi.remote.daemon`` 每块最多 1 MiB 写入同一
+uploads 目录，同样遵守 ``MAX_UPLOAD_BYTES``；断连清理未完成上传。
+产出的路径由 bridge 拼 ``<attached-file>`` 标签并写进 ``lumi.items`` 的 files，
+由 read / vision 工具按路径消费。删会话时统一经 ``remove_uploads`` 回收。
 
 为何在后端存盘（而非前端发路径）：字节落到「后端本机」，本地与远程后端都能读到
 （前端本地路径在远程后端上不存在）。集中存 ~/.lumi/uploads 不污染用户项目；

@@ -1,3 +1,5 @@
+import { dispatchDraft, type Attachment } from './messageDelivery.ts'
+import { getControlConnection, openChatConnection } from './gatewayConnections.ts'
 import {
   useCallback,
   useEffect,
@@ -6,6 +8,7 @@ import {
   useRef,
   useReducer,
   useState,
+  type ReactNode,
 } from 'react'
 import {
   FileText,
@@ -21,19 +24,20 @@ import {
 import {
   addPending,
   dropPending,
-  emptySession,
   nid,
-  hasStreaming,
   hydrateHistory,
   reduceEvent,
-  resumeAfterReconnect,
   sessionModelPatch,
   userBubble,
   type PendingItem,
   type SessionState,
 } from './sessionReducer'
 import { useLatest } from './hooks/useLatest'
+import { errorMessage } from '@/lib/utils'
 import { Gateway } from './gateway'
+import { NewChatTarget } from './components/NewChatTarget'
+import { HomeNightSky } from './components/HomeNightSky'
+import { SshPrompts } from './components/SshPrompts'
 import type {
   ActiveModel,
   AttachedFile,
@@ -45,16 +49,15 @@ import type {
   Machine,
   ModelPointer,
   CronJob,
-  HistoryItem,
   Item,
   Artifact,
   Project,
+  ProjectTarget,
   ProviderProfile,
   SessionMeta,
   SessionModelWire,
   SlashCommand,
   ToolMode,
-  Usage,
   WireEvent,
 } from './types'
 import { EMPTY_BG_OUTPUT } from './types'
@@ -91,12 +94,6 @@ import { Button } from '@/components/ui/button'
 import { useTheme } from './theme'
 import { useUiFont } from './font'
 import { useI18n } from './i18n'
-
-// 输入栏附件：图片嵌入（base64 data URL），其它文件引用绝对路径 + 留住 File 本体
-// （远程后端要把内容上传过去，前端本机路径在对端不存在）
-type Attachment =
-  | { id: number; kind: 'image'; dataUrl: string; name: string }
-  | { id: number; kind: 'file'; path: string; name: string; blob: File }
 
 type Segment =
   | { kind: 'tools'; tools: ToolItem[] }
@@ -176,6 +173,8 @@ export default function App() {
   const [needProjectHint, setNeedProjectHint] = useState(false)
   const [showNewProject, setShowNewProject] = useState(false)
   const [pendingRemoveProject, setPendingRemoveProject] = useState<Project | null>(null)
+  const [newTarget, setNewTarget] = useState<ProjectTarget | null>(null)
+  const newTargetRevision = useRef(0)
   const [input, setInput] = useState('')
   const [commands, setCommands] = useState<SlashCommand[]>([])
   const [cmdSel, setCmdSel] = useState(0)
@@ -225,8 +224,7 @@ export default function App() {
   const [uiFont, setUiFont] = useUiFont()
   const { t } = useI18n()
   const [notify, setNotify] = useState(() => localStorage.getItem('lumi-notify') === '1')
-  // 图片嵌入消息（dataUrl→image 块）；其它文件只带绝对路径，发送时写进消息文本，
-  // 由 Agent 用工具读取（不在此预授权，交给现有权限流程）
+  // 本地图片内联；SSH 附件统一上传并发路径，由 Agent 按现有权限流程读取。
   const [attachments, setAttachments] = useState<Attachment[]>([])
   // 主区视图：聊天 / 项目管理页 / 定时任务管理页 / 任务会话视图（某任务的某次执行对话 + Runs 侧栏）
   const [bgTasks, setBgTasks] = useState<BgTask[]>([]) // 后台任务全量快照（按 thread 过滤展示）
@@ -242,12 +240,14 @@ export default function App() {
   // 旧存值失效回默认（旧键 lumi-rail-width 未发布过，只存在于开发机）
   const railW = useResizableWidth('lumi-rail-width-v2', 256, 200, 420)
   const previewW = useResizableWidth('lumi-preview-width', 440, 360, 920)
-  const [view, setView] = useState<'chat' | 'projects' | 'project' | 'scheduled' | 'cronjob'>('chat')
+  const [view, setView] = useState<'chat' | 'newchat' | 'projects' | 'project' | 'scheduled' | 'cronjob'>('newchat')
   // 项目主页当前查看的项目（view='project' 时有效）
   const [projectHome, setProjectHome] = useState<{ backend: string; path: string } | null>(null)
   // 模型菜单 / 斜杠命令 / 输入框连接态的目标：项目主页随主页（那里还没有会话），聊天页随
   // 活动会话。各回调按 ref 判废：请求在途时目标变了，晚到的旧响应丢弃
-  const homeTarget = view === 'project' ? projectHome : null
+  let homeTarget: { backend: string; path: string } | null = null
+  if (view === 'project') homeTarget = projectHome
+  else if (view === 'newchat') homeTarget = newTarget
   const pickerBackend = homeTarget ? homeTarget.backend : activeBackend
   const pickerRef = useLatest(pickerBackend)
   const cmdTargetRef = useLatest(homeTarget ? sessionKey(homeTarget.backend, homeTarget.path) : active)
@@ -290,7 +290,8 @@ export default function App() {
   const renamedRef = useRef<Set<string>>(new Set())
   // 每台机器一条「控制连接」：用于跨机器 fan-out list_sessions / 全局 RPC（非 chat 流）
   const controlConns = useRef<Record<string, Gateway>>({})
-  // 用户气泡图片缩略图：取用通道同预览面板（本地 lumi-file / 远程 /file）；远程无该机
+  const controlOpening = useRef<Record<string, Promise<Gateway> | undefined>>({})
+  // 用户气泡图片缩略图：取用通道同预览面板（本地 lumi-file / 远程 lumi-remote）；远程无该机
   // 连接给 undefined（退回文件胶囊），不回落读本地盘。稳定引用，保住 ItemView 的 memo
   const activeGw = controlConns.current[activeBackend]
   const thumbSrc = useMemo(
@@ -552,181 +553,11 @@ export default function App() {
 
   // 为某会话建立一条独立 WS 连接（每会话一条，互不阻塞）。targetThread=null 为新会话。
   const openConnection = useCallback(
-    (targetThread: string | null, targetWorkspace = '', backendId = 'local'): Promise<string> => {
-      return new Promise<string>((resolve) => {
-        void (async () => {
-          const { wsUrl } = await window.lumi.getConnection(backendId)
-          // open 握手携带 workspace：后端据此把本会话引擎直接 pin 到该项目（项目随会话
-          // 绑定，不动进程 cwd），省掉 ready 后再 switch 改项目的来回。重连复用同一 URL，
-          // 故新 bridge 也会被重新 pin。
-          // new URL 对非法地址会抛（远程机器 URL 仅经弱校验入库）；catch 后退回原始串交给
-          // WebSocket 层，其 onclose→failed 优雅降级，避免抛进本 IIFE 致 Promise 永不 resolve。
-          let connectUrl = wsUrl
-          try {
-            const u = new URL(wsUrl)
-            if (targetWorkspace) u.searchParams.set('workspace', targetWorkspace)
-            // 已有会话：初次连接（含 Ctrl+R 重载后点回会话）即携带 ?thread=，让后端在建空
-            // bridge 前先认领回断连期仍挂着的会话（parked 审批/运行轮原样还在）。新会话无
-            // thread（握手分配后由 bindThread 补给后续重连）。
-            if (targetThread) u.searchParams.set('thread', targetThread)
-            connectUrl = u.toString()
-          } catch {
-            /* 非法 URL：保留原始串，连接失败由 Gateway 的重连/failed 态呈现 */
-          }
-          const gw = new Gateway(connectUrl)
-          // 本连接所属会话的复合 key（backend+thread）——store/connsRef 皆以此为键；
-          // 发给后端的 wire 仍用裸 thread（myThread）。
-          const targetKey = targetThread ? sessionKey(backendId, targetThread) : ''
-          // 创建即登记（不等 ready）：快速连点同一会话时 activate 的复用分支能立即命中，
-          // 不会开出重复连接；boot 清理也能收殓在途连接。死连接由 activate 驱逐后重建。
-          if (targetKey) connsRef.current[targetKey] = gw
-          let myThread = ''
-          let myKey = ''
-          // 本连接所属项目；重连得到全新 bridge 后据此切回原 thread + 重放临时目录
-          let myWorkspace = ''
-          let ready = false
-          // 本地视图是否已与后端历史对齐：初次加载被瞬断打断、重连（断开期事件已丢）、
-          // 快照取自轮次进行中时保持 false，重连 ready / 轮次收尾时补拉
-          let loaded = false
-          // 补拉在途标记：防抖动连接下多个 ready 并发重复 loadHistory
-          let loadingHistory = false
-          // 历史快照统一落位（初次加载 / 补拉共用）。仅当快照被真正应用（无流式在途）且
-          // 后端空闲（轮次进行中的快照缺在途调用的输出）时才算对齐——否则置 loaded 会把
-          // 缺失内容永久关在补拉门外
-          const applySnapshot = (
-            key: string,
-            r: { items: HistoryItem[]; usage?: Usage; model?: string; context_window?: number },
-            patch: Partial<SessionState> = {},
-          ) => {
-            setStore((s) => {
-              const cur = s[key]
-              if (!cur) return s
-              const next = { ...hydrateHistory(cur, r), ...patch }
-              if (!hasStreaming(next) && !next.running) loaded = true
-              return { ...s, [key]: next }
-            })
-          }
-          const backfillHistory = () => {
-            if (loaded || loadingHistory || !myThread) return
-            loadingHistory = true
-            void gw
-              .loadHistory(myThread)
-              .then((r) => applySnapshot(myKey, r))
-              .catch(() => {})
-              .finally(() => {
-                loadingHistory = false
-              })
-          }
-          gw.onEvent((ev) => {
-            if (ev.type === 'gateway.ready') {
-              // workspace_bound=false 时 payload.workspace 只是进程 cwd 兜底展示值，不是真
-              // 绑定的项目——写进 workspaceDir 会污染侧栏项目分组等展示，未绑定就不写。
-              // workspaceDir = 活动会话的项目：重连时后台会话的 ready 不得覆盖它
-              if (ev.payload.workspace_bound && ev.payload.workspace && myKey === activeRef.current) {
-                setWorkspaceDir(ev.payload.workspace)
-              }
-              if (ready) {
-                // 重连：服务端给的是全新 bridge（新 session_id），切回本连接原 thread
-                // 恢复后端绑定，否则会丢弃原会话、并多出一个幽灵空会话。
-                // 新 bridge 的临时目录为空，需重放本会话已添加的目录，否则徽标显示
-                // 有目录而后端实际访问不到。
-                if (myThread) {
-                  // 重连拿到的是全新 bridge：切回原 thread 时后端会按会话解析模型，
-                  // 用返回值刷新显示（新 bridge 的 ready 报的是默认，不是本会话的）
-                  void gw
-                    .switchSession(myThread, myWorkspace)
-                    .then((r) => applySessionModel(myKey, r))
-                    .catch(() => {})
-                  // 复位运行态：断连时 sendMessage 的 catch 已 resetRunning(false)，续接后
-                  // 据后端实际运行态恢复 running（否则挂起轮被当空闲，stop 隐藏/输入栏启用）；
-                  // 后端已空闲则收掉断开前残留的流式气泡 / 运行中工具卡。
-                  setStore((s) =>
-                    s[myKey]
-                      ? {
-                          ...s,
-                          [myKey]: resumeAfterReconnect(
-                            s[myKey],
-                            !!ev.payload.running,
-                            ev.payload.run_started_at ?? undefined,
-                          ),
-                        }
-                      : s,
-                  )
-                  // 断开期间的事件已丢：以历史快照对账补回 gap 期消息（真正对齐才置
-                  // loaded，失败或轮次仍在跑时留给下次重连 / 轮次收尾）
-                  loaded = false
-                  backfillHistory()
-                }
-                return
-              }
-              ready = true
-              // 初始拉取后台任务快照（之后变更经 bg_tasks.update 推送）；按本机分段替换
-              void gw
-                .listBgTasks()
-                .then((r) => setBgTasks((prev) => replaceBackendTasks(prev, backendId, r.tasks)))
-                .catch(() => {})
-              if (targetThread) {
-                // 已有会话：切到该 thread 并加载历史。switchSession 可能因项目目录已被删/改名
-                // 而被后端拒（set_workspace 抛错）；必须吞掉，否则 Promise 永不 resolve、会话卡死。
-                void (async () => {
-                  // 先占位 store：使续接重发的审批卡有处可落（否则在 loadHistory
-                  // 完成前到达会被事件处理器的 `if (!s) return` 丢弃）。
-                  setStore((s) => ({ ...s, [targetKey]: s[targetKey] ?? emptySession() }))
-                  // 身份先行：下方 await 可能因瞬断 reject（sidecar 重启窗口），若身份
-                  // 未落，重连分支认不回本会话、resolve 永不调用，会话将永久空白。
-                  myThread = targetThread
-                  myKey = targetKey
-                  myWorkspace = targetWorkspace
-                  gw.bindThread(targetThread)
-                  try {
-                    // 结果带该会话生效的模型（ready 报的是默认，不是本会话的）
-                    applySessionModel(targetKey, await gw.switchSession(targetThread, targetWorkspace))
-                  } catch {
-                    /* 目录失效等：仍打开会话（后端已降级，不切 cwd） */
-                  }
-                  try {
-                    const r = await gw.loadHistory(targetThread)
-                    // 水合历史（保留续接期间已落入的审批/澄清队列与流式在途内容）；
-                    // running 据后端运行态恢复（续接的挂起轮要显示运行态，否则被当空闲）。
-                    applySnapshot(targetKey, r, {
-                      running: !!ev.payload.running,
-                      runStart: ev.payload.run_started_at ?? undefined,
-                    })
-                  } catch {
-                    /* 瞬断等：历史未加载（loaded=false），重连 ready 分支补拉 */
-                  }
-                  // UI 已乐观切到本会话，连接问题由指示灯呈现；无论成败都 resolve，
-                  // 不让 activate 悬置
-                  resolve(targetKey)
-                })()
-              } else {
-                // 新会话：用握手分配的 thread；记录其所在项目（open 已 pin，握手下发的
-                // workspace 即本会话项目），供重连时切回原 thread。
-                myThread = ev.session_id ?? ''
-                myKey = sessionKey(backendId, myThread)
-                myWorkspace = ev.payload.workspace || ''
-                loaded = true // 新会话无历史可拉（重连后照常对账）
-                gw.bindThread(myThread) // 重连携带 ?thread= → 后端断连续接
-                connsRef.current[myKey] = gw
-                setStore((s) => ({ ...s, [myKey]: emptySession() }))
-                resolve(myKey)
-              }
-            } else {
-              handleEvent(ev, backendId)
-              // 补拉曾因流式在途被丢弃（loaded 仍 false）：轮次收尾后流式气泡已收，
-              // 快照可安全整表替换，此时重试把掉线前的历史找回来
-              if ((ev.type === 'turn.complete' || ev.type === 'error') && !loaded) {
-                backfillHistory()
-              }
-            }
-          })
-          gw.onState((st) => {
-            if (myKey && myKey === activeRef.current) setConn(st)
-          })
-          gw.connect()
-        })()
-      })
-    },
+    (targetThread: string | null, targetWorkspace = '', backendId = 'local'): Promise<string> =>
+      openChatConnection(targetThread, targetWorkspace, backendId, {
+        connsRef, activeRef, setStore, setConn, setWorkspaceDir, applySessionModel, handleEvent,
+        onTasks: (backend, tasks) => setBgTasks(prev => replaceBackendTasks(prev, backend, tasks)),
+      }),
     [handleEvent],
   )
 
@@ -936,15 +767,14 @@ export default function App() {
     refreshCronJobsRef.current = refreshCronJobs
   }, [refreshCronJobs])
 
-  // 重连某机器：重新从配置取最新地址（设置里可能改过 url/token）再 reconnect，
+  // 重连某机器：重新从配置取最新地址（设置里可能改过 SSH 配置）再 reconnect，
   // 否则 Gateway 仍持有构造时的旧地址。启用的机器其连接恒在 controlConns 里（失败态不删），
   // 走到无连接分支的只有已禁用/已删机器——这些不该建连（建连由 syncBackends 按 enabled 决定）。
   const reconnectMachine = useCallback(async (backend: string) => {
     const gw = controlConns.current[backend]
     if (!gw) return
-    const { wsUrl } = await window.lumi.getConnection(backend)
-    gw.setUrl(wsUrl)
-    gw.reconnect()
+    const connection = await window.lumi.getConnection(backend)
+    gw.rebase(connection)
   }, [])
 
   // 乐观局部更新某会话字段（pin/重命名/自动标题共用）。按 thread + backend 精确匹配：
@@ -971,17 +801,10 @@ export default function App() {
 
   // 为某机器开控制连接（幂等）：ready 后拉它的会话 + 定时任务，连接态记入 machineConn。
   const openControlConn = useCallback(
-    (backend: string) => {
-      const existing = controlConns.current[backend]
-      if (existing) {
-        // 已有连接：健康则幂等返回；已停摆（failed/被关闭）则换最新地址复活——
-        // 否则远程瞬断进 failed 后会永久滞留，syncBackends 命中本守卫也唤不醒它。
-        if (existing.dead) void reconnectMachine(backend)
-        return
-      }
-      void (async () => {
-        const { wsUrl } = await window.lumi.getConnection(backend)
-        const gw = new Gateway(wsUrl)
+    (backend: string): Promise<Gateway> => {
+      return getControlConnection(backend, controlConns.current, controlOpening.current, async () => {
+        const connection = await window.lumi.getConnection(backend)
+        const gw = new Gateway(connection)
         gw.onEvent((ev) => {
           if (ev.type === 'gateway.ready') {
             // 只刷这台机器：每台 ready 都全量拉一遍，N 台机器启动就是 N² 次请求
@@ -1025,10 +848,25 @@ export default function App() {
         })
         controlConns.current[backend] = gw
         gw.connect()
-      })()
+        return gw
+      }, reconnectMachine)
     },
     [refreshSessions, refreshCronJobs, refreshChannels, reloadHistory, reconnectMachine, patchSession, handleEvent, clearMachineSnapshots],
   )
+
+  const ensureMachine = useCallback(async (backend: string) => {
+    if (backend !== 'local') {
+      const state = await window.lumi.backends?.list()
+      const machine = state?.remotes.find(item => item.id === backend)
+      if (machine?.enabled === false) {
+        await window.lumi.backends?.save({ id: backend, enabled: true })
+        window.dispatchEvent(new CustomEvent('lumi:backends-changed'))
+      }
+    }
+    const gateway = await openControlConn(backend)
+    await gateway.whenReady()
+    return gateway
+  }, [openControlConn])
 
   // 同步机器表 → 开新机器的控制连接、关掉已删机器的，刷新会话。BackendsPanel 增删后回调此。
   const syncBackends = useCallback(async () => {
@@ -1036,7 +874,7 @@ export default function App() {
     // 全量（含已禁用）入 machines：machineColor 按数组下标取色，删项会让其余机器串色
     const list = [
       { id: 'local', name: '本地', enabled: true },
-      ...(data?.remotes ?? []).map((r) => ({ id: r.id, name: r.name || r.url, enabled: r.enabled !== false })),
+      ...(data?.remotes ?? []).map((r) => ({ id: r.id, name: r.name || r.host, enabled: r.enabled !== false })),
     ]
     setMachines(list)
     // 仅对启用的机器开控制连接；禁用的（含本次刚关掉的）一并断开
@@ -1072,7 +910,9 @@ export default function App() {
         delete connsRef.current[key]
       }
     }
-    for (const id of wanted) openControlConn(id)
+    for (const id of wanted) void openControlConn(id).catch(() => {
+      setMachineConn(current => ({ ...current, [id]: 'failed' }))
+    })
     void refreshSessions()
   }, [openControlConn, refreshSessions, clearMachineSnapshots])
 
@@ -1110,25 +950,15 @@ export default function App() {
     }
   }, [syncBackends])
 
-  // 开局会话（本地一条新会话连接）。聊天必须绑定项目——有默认项目就直接绑上，没有则转去
-  // 项目选择器提示。查默认项目走本地控制连接，须等它连上：早于握手去查必然落空，有默认
-  // 项目也会被误送去选择器。一次性（bootedRef），重连不重跑。
+  // A new chat is a target draft. Create its backend session only on send.
   const localConn = machineConn.local
   useEffect(() => {
     if (localConn !== 'open' || bootedRef.current) return
     bootedRef.current = true
-    void (async () => {
-      const workspace = (await fetchDefaultProject('local')) || ''
-      const tid = await openConnection(null, workspace, 'local')
-      if (!bootedRef.current) return // 期间 effect 被拆（HMR）
-      setActive(tid)
-      setConn(connsRef.current[tid]?.state ?? 'open')
-      if (!workspace) {
-        setNeedProjectHint(true)
-        setView('projects')
-      }
-    })()
-  }, [localConn, fetchDefaultProject, openConnection])
+    void fetchDefaultProject('local').then(workspace => {
+      if (workspace && bootedRef.current) setNewTarget(current => current || { backend: 'local', path: workspace, name: basename(workspace) })
+    })
+  }, [localConn, fetchDefaultProject])
 
   // 兜底自愈：窗口重获焦点 / 网络恢复时，唤醒退避耗尽停摆的连接（它们不会自己再试，
   // 离开久了回来就一直离线），连上后各处挂在连接态上的取数自动重跑；焦点同时全量刷新
@@ -1151,23 +981,38 @@ export default function App() {
   }, [refreshSessions])
 
   // BackendsPanel 增删/编辑远程机器后广播此事件 → 重连各机器、刷新合并列表（无 reload）。
-  // detail.reconnectId：编辑了某机器的地址/token，需对该机器换址重连（syncBackends 幂等不会重建）。
+  // detail.reconnectId：编辑了某机器的SSH 配置，需对该机器换址重连（syncBackends 幂等不会重建）。
   useEffect(() => {
     const onChanged = (e: Event) => {
       void syncBackends()
       const id = (e as CustomEvent<{ reconnectId?: string }>).detail?.reconnectId
       if (!id) return
-      void reconnectMachine(id)
-      // 会话连接同样持有旧地址 / token：换址重连，否则 1008 死在旧 token 上
-      void window.lumi.getConnection(id).then(({ wsUrl }) => {
+      void reconnectMachine(id).catch(error => toast.error(errorMessage(error)))
+      // 会话连接同样持有旧连接信息：换址重连，否则 1008 死在旧 token 上
+      void window.lumi.getConnection(id).then(connection => {
         for (const [key, gw] of Object.entries(connsRef.current)) {
-          if (keyBackend(key) === id) gw.rebase(wsUrl)
+          if (keyBackend(key) === id) gw.rebase(connection)
         }
-      })
+      }).catch(error => toast.error(errorMessage(error)))
     }
     window.addEventListener('lumi:backends-changed', onChanged)
     return () => window.removeEventListener('lumi:backends-changed', onChanged)
   }, [syncBackends, reconnectMachine])
+
+  useEffect(() => window.lumi.ssh.onStatus(status => {
+    if (status.phase === 'ready') {
+      void window.lumi.getConnection(status.id).then(connection => {
+        const control = controlConns.current[status.id]
+        if (control?.state !== 'open') control?.rebase(connection)
+        for (const [key, gateway] of Object.entries(connsRef.current)) {
+          if (keyBackend(key) === status.id && gateway.state !== 'open') gateway.rebase(connection)
+        }
+      }).catch(() => {})
+    }
+    if (status.phase === 'offline') {
+      setMachineConn(current => ({ ...current, [status.id]: 'closed' }))
+    }
+  }), [])
 
   // 按机器拉项目（方案甲先选机器）。「当前项目」高亮 = 活动会话的 workspaceDir
   // （由 activate/gateway.ready 维护），不再由后端下发。
@@ -1291,9 +1136,8 @@ export default function App() {
     async (target: string | null, workspace = '', backend = 'local') => {
       // key = 会话前端身份（backend+thread）；target 为裸 thread（新会话时 null）
       let key = target ? sessionKey(backend, target) : ''
-      // 乐观切换：建连可能长时间悬置（openConnection 只在 ready 时 resolve——
-      // sidecar 重启/离线期间既不成功也不失败），先把 UI 落到目标会话（空内容 +
-      // 黄灯示意），避免 view 已切、active 未动的脱节（如 cron 视图残留渲染成普通聊天）。
+      // 乐观切换：握手/重试需要时间，先把 UI 落到目标会话（空内容 + 黄灯示意），
+      // 避免 view 已切、active 未动的脱节（如 cron 视图残留渲染成普通聊天）。
       // 晚到的建连结果经 seq 判废弃：用户已切走时不回拽视图。
       const seq = ++activationSeqRef.current
       if (key) {
@@ -1350,26 +1194,7 @@ export default function App() {
     [projectsMachine, refreshProjects],
   )
 
-  // 聊天必须绑定项目：无默认项目时阻断式跳去项目选择器，不放行空 workspace 会话。
-  // 不做"有活跃项目就复用"的图方便捷径——workspaceDir 只是镜像当前会话绑的目录，
-  // 可能是旧版本 cwd 兜底遗留、从未登记进项目列表，拿它当"合法当前项目"复用等于
-  // 复活刚堵掉的口子。真正安全的复用信号是后端书签列表里显式登记的 default 项目。
-  const requireProject = useCallback(
-    (backend?: string, opts?: { skipRefresh?: boolean }) => {
-      if (backend) {
-        // skipRefresh：调用方（goNewChat）刚拿到本 backend 的最新列表，只切机器不清空重拉；
-        // 否则（含拉取失败）走 selectProjectsMachine 重拉——同机器也要拉，不能沿用失败留下的旧态
-        if (opts?.skipRefresh) setProjectsMachine(backend)
-        else selectProjectsMachine(backend)
-      }
-      setNeedProjectHint(true)
-      setView('projects')
-    },
-    [selectProjectsMachine],
-  )
-
-  // 在指定机器开新会话（方案甲：边栏每台机器各有「＋新对话」）。workspace 须非空——
-  // 调用方（openProject 等）已保证，不再兜底放行空 workspace。
+  // 在指定机器与工作目录开新会话；不登记项目时也显式传入所选机器的主目录。
   const newSession = useCallback(
     async (backend = 'local', workspace = '') => {
       setView('chat')
@@ -1383,22 +1208,17 @@ export default function App() {
   // 指定机器「新建会话」：有登记过的默认项目就直接进，否则阻断去选择器。每次都问
   // 后端要最新列表（而非信任本地缓存的 projects state）——default 标记可能刚在另一
   // 台设备/另一个窗口改过。
-  const goNewChat = useCallback(
-    async (backend: string) => {
-      const workspace = await fetchDefaultProject(backend)
-      if (workspace) {
-        await newSession(backend, workspace)
-      } else if (workspace === null) {
-        // 拉取失败（连接波动）：走 requireProject 的 selectProjectsMachine 重新拉取重试
-        requireProject(backend)
-      } else {
-        // 已拿到本机器最新列表（fetchDefaultProject 内已同步 projects state）、确认
-        // 没有默认项目：跳选择器但不用再重新拉一遍刚拿到手的结果
-        requireProject(backend, { skipRefresh: true })
-      }
-    },
-    [fetchDefaultProject, newSession, requireProject],
-  )
+  const goNewChat = useCallback(async (backend: string) => {
+    const revision = ++newTargetRevision.current
+    setView('newchat')
+    setActive('')
+    try {
+      const gateway = await ensureMachine(backend)
+      const result = await gateway.listProjects()
+      const project = result.projects.find(item => item.default) || result.projects[0]
+      if (newTargetRevision.current === revision) setNewTarget(project ? { backend, path: project.path, name: project.name } : { backend, path: '', name: t('picker.choose') })
+    } catch (error) { toast.error(errorMessage(error)) }
+  }, [ensureMachine, t])
   // 稳定引用，让 memo 化的 AppTitleBar 在流式 token 重渲染时不陪跑。
   const startNewChat = useCallback(() => void goNewChat(activeBackend), [activeBackend, goNewChat])
 
@@ -1478,22 +1298,23 @@ export default function App() {
   // 项目主页输入岛：复用主输入栏（input/attachments/斜杠命令全共用），发送即在此项目
   // 新建会话并携带首条消息。新会话此刻还没进 active，override 自带目标与附件，规避渲染时序依赖。
   const startProjectChat = useCallback(async () => {
-    if (!projectHome) return
+    const target = homeTarget
+    if (!target?.path) { toast.info(t('ssh.selectProject')); return }
     const text = input.trim()
     const atts = attachments
     if (!text && atts.length === 0) return
-    // 机器离线时建连接会一直悬挂（既不成功也不失败）：先拦下并提示，别让下面清空后把
-    // 用户输入吞掉。
-    if (controlConns.current[projectHome.backend]?.state !== 'open') {
+    // 机器已知离线时直接提示，保留草稿供恢复连接后重试。
+    if (controlConns.current[target.backend]?.state !== 'open') {
       toast.error(t('projhome.offline'))
       return
     }
-    const key = await newSession(projectHome.backend, projectHome.path)
-    sendRef.current({ text, key, workspace: projectHome.path, atts })
+    let key: string
+    try { key = await newSession(target.backend, target.path) } catch (error) { setView(view === 'newchat' ? 'newchat' : 'project'); toast.error(errorMessage(error)); return }
+    sendRef.current({ text, key, workspace: target.path, atts })
     // 清空放在发送派发之后：建会话若中途失败/悬挂，输入仍留在框里可重试，不丢字。
     setInput('')
     setAttachments([])
-  }, [projectHome, newSession, input, attachments, t])
+  }, [homeTarget, newSession, input, attachments, t, view])
 
   // 项目主页专用 API：只认目标机器的控制连接，缺位返回 undefined（同 gwForBackend）。
   // useCallback 稳定引用：ProjectHomePage 的加载 effect 依赖它，不稳会随 App 重渲染风暴重发
@@ -1709,7 +1530,7 @@ export default function App() {
         reader.onload = () => {
           if (typeof reader.result === 'string') {
             const url = reader.result
-            setAttachments((a) => [...a, { id: nid(), kind: 'image', dataUrl: url, name: f.name }])
+            setAttachments((a) => [...a, { id: nid(), kind: 'image', dataUrl: url, name: f.name, blob: f }])
           }
         }
         reader.readAsDataURL(f)
@@ -1864,31 +1685,10 @@ export default function App() {
         ...prev,
       ])
     }
-    let payload: string | unknown[] = text
-    if (imgs.length > 0) {
-      const blocks: unknown[] = text ? [{ type: 'text', text }] : []
-      // 图片拆为 Anthropic 原生图片块（后端按模型再转 OpenAI/Bedrock 格式）
-      for (const a of imgs) {
-        const m = /^data:([^;]+);base64,(.*)$/s.exec(a.dataUrl)
-        if (m) blocks.push({ type: 'image', source: { type: 'base64', media_type: m[1], data: m[2] } })
-      }
-      payload = blocks
-    }
-    // 文件附件只发路径数组：后端统一拼 <attached-file> 标签块给模型 + 写显示声明 items
-    // （远程后端上 resolveAttachments 会先把内容传过去换成对端路径；图片走 base64 由
-    // 后端存盘，本就无此问题）。放在乐观气泡之后：大文件上传不该卡住输入反馈。
-    const dispatch = async () => {
-      const filePaths = await gw.resolveAttachments(fileRefs, be !== 'local')
-      await gw.sendMessage(payload, toolMode, filePaths, interjectId)
-    }
-    dispatch().catch((err) => {
-      // 发失败就把输入原样还回去（override 入口自管清空，不越俎代庖）：远程上传
-      // 可能跑上几十秒，此时正文与附件早已从输入框清掉，只弹个 toast 等于让用户
-      // 白打一遍字、重新挑一遍文件
-      if (!o) {
-        setInput(text)
-        setAttachments(atts)
-      }
+    dispatchDraft(gw, { text, attachments: atts }, { remote: be !== 'local', toolMode, messageId: interjectId }, (err) => {
+      // 首条消息的 override 同样需要恢复：上传失败时后端尚未收到正文或附件。
+      setInput(text)
+      setAttachments(atts)
       if (interjectId) {
         // 插话入箱失败（满额 / 断连）：只撤托盘，不动仍在跑的轮
         dropFromTray(sid, [interjectId])
@@ -2094,7 +1894,7 @@ export default function App() {
 
   // 输入栏发送路由：项目主页复用同一输入栏，发送即在此项目新建会话并携带首条消息；
   // 其余视图（聊天/欢迎页）发往当前会话。回车与发送键共用。
-  const submitCurrent = () => (view === 'project' ? void startProjectChat() : send())
+  const submitCurrent = () => ((view === 'project' || view === 'newchat') ? void startProjectChat() : send())
 
   const onComposerKey = (e: React.KeyboardEvent<HTMLTextAreaElement>) => {
     // 输入法组合中（拼音选字等）的按键全部交给 IME：选字回车不应触发发送/菜单确认
@@ -2273,8 +2073,8 @@ export default function App() {
         highlightLen={cmdToken.length}
         inputRef={inputRef}
       />
-      <div className="flex items-center justify-between gap-3 px-3 pb-2.5">
-        <div className="flex items-center gap-0.5">
+      <div className="composer-toolbar flex items-center justify-between gap-3 px-3 pb-2.5">
+        <div className="composer-tools flex items-center gap-0.5">
           <Button
             variant="ghost"
             size="icon-sm"
@@ -2286,7 +2086,7 @@ export default function App() {
           </Button>
           {/* 项目主页指向的是「新会话默认」（那里还没有会话，active 是上一个），
               聊天页指向本会话的模型 */}
-          <ModelPicker
+          <div className="composer-model"><ModelPicker
             providers={providers}
             active={project ? defaultModel : sessionModel}
             machine={{
@@ -2295,11 +2095,11 @@ export default function App() {
               color: machineColor(pickerBackend, machines),
             }}
             multi={machines.filter((m) => m.enabled !== false).length > 1}
-            project={basename(project ? projectHome?.path ?? '' : workspaceDir)}
+            project={basename(project ? homeTarget?.path ?? '' : workspaceDir)}
             onSwitch={(p, m) => switchModel(p, m, project)}
             onSwitchEffort={(lv) => switchEffort(lv, project ? defaultModel : sessionModel)}
           />
-          <ApprovalModePicker
+          </div><div className="composer-approval"><ApprovalModePicker
             value={toolMode}
             onChange={(m) => {
               setToolMode(m)
@@ -2309,9 +2109,9 @@ export default function App() {
               if (!project) connsRef.current[active]?.setToolMode(m).catch(() => {})
             }}
             classifierLabel={classifier.provider ? classifier.model : undefined}
-          />
+          /></div>
         </div>
-        <div className="flex items-center gap-1.5">
+        <div className="composer-submit flex items-center gap-1.5">
           {/* 项目模式无活动会话：不读 cur.ctx（免后台流式 token 触发项目页重渲染），整块不渲染 */}
           {!project && <ContextMeter usage={cur?.ctx} window={contextWindow} model={model} />}
           {/* 单键变形：运行中输入框空 = 停止，有内容 = 发送（插话） */}
@@ -2332,7 +2132,7 @@ export default function App() {
             <Button
               size="icon"
               onClick={submitCurrent}
-              disabled={!hasDraft || (!project && conn !== 'open')}
+              disabled={!hasDraft || (project && (!homeTarget?.path || pickerConn !== 'open')) || (!project && conn !== 'open')}
               aria-label={t('composer.send')}
               className="rounded-full"
             >
@@ -2405,12 +2205,223 @@ export default function App() {
     [machines, machineConn, machineErr, reconnectMachine],
   )
 
+  function renderMainContent(): ReactNode {
+    if (view === 'newchat') return (
+      <div className="new-chat-home flex-1 flex flex-col items-center justify-center px-6">
+        <HomeNightSky />
+        <div className="mb-9 text-center"><h1 className="serif text-2xl">{t('ssh.welcome')}</h1></div>
+        <div className="new-chat-entry w-full max-w-[760px]">
+          <NewChatTarget value={newTarget} onChange={target => { newTargetRevision.current++; setNewTarget(target) }} ensureMachine={ensureMachine} />
+          {composer(t('composer.empty'), true)}
+        </div>
+      </div>
+    )
+    if (view === 'projects') return (
+      <ProjectsPage
+        projects={projects}
+        current={projectsMachine === activeBackend ? workspaceDir : ''}
+        machine={projectsMachine}
+        needProjectHint={needProjectHint}
+        onSelectMachine={selectProjectsMachine}
+        // 点项目一律进项目主页——主页输入岛本身就能在此项目开聊，故无论是主动浏览
+        // 还是被「新建会话」阻断跳来（needProjectHint），落点一致，不再偶发跳到欢迎页。
+        onOpen={(p) => openProjectHome(p, projectsMachine)}
+        onNew={() => setShowNewProject(true)}
+        onRemove={(path) =>
+          setPendingRemoveProject(projects?.find((p) => p.path === path) ?? null)
+        }
+        onRename={(path, name) => renameProjectInList(path, name, projectsMachine)}
+        onSetDefault={(path, isDefault) => setProjectDefault(path, isDefault, projectsMachine)}
+      />
+    )
+    if (view === 'project' && homeProjectInfo) return (
+      <ProjectHomePage
+        project={homeProjectInfo}
+        machine={projectHome?.backend ?? 'local'}
+        isDefault={!!homeProject?.default}
+        api={projectHomeApi}
+        sessions={homeSessions}
+        cronJobs={homeCronJobs}
+        composerSlot={projectComposer}
+        onOpenSession={openHomeSession}
+        onOpenScheduled={openHomeScheduled}
+        onToggleCron={toggleHomeCron}
+      />
+    )
+    if (view === 'scheduled') return (
+      <CronPage
+        api={gwForBackend}
+        initialMachine={cronEntry.machine}
+        initialJobId={cronEntry.jobId}
+        createIn={cronEntry.createIn}
+        jobs={cronJobs}
+        runningJobs={cronRunning}
+        version={cronVersion}
+        onOpenRun={(tid, jid) => void openCronJob(jid, tid)}
+        onRefresh={refreshCronJobs}
+      />
+    )
+    return (
+      <div className="flex-1 flex min-h-0">
+        <div className="flex-1 flex flex-col min-w-0">
+          {view === 'cronjob' && !cronRunThread ? (
+            // 任务还没有可查看的执行会话：显示空态，避免把消息误发进无关会话
+            <div className="flex-1 grid place-items-center text-sm text-muted-foreground select-none">
+              {t('cron.noRuns')}
+            </div>
+          ) : view === 'cronjob' && !hasMessages ? (
+            // 乐观切换后历史尚未加载：占位而非欢迎页——欢迎页带可编辑输入框，
+            // 手快会把消息误发进定时任务执行线程
+            <div className="flex-1 grid place-items-center text-sm text-muted-foreground select-none">
+              {t('chat.loading')}
+            </div>
+          ) : hasMessages ? (
+            <>
+              {activeChannel && channelBanner()}
+              <div className="relative flex-1 min-h-0">
+                {/* 顶栏渐隐：内容滚到顶栏时淡出而非硬切。高度不超过 chat-body 的 py-8，
+                        停在顶部时首条内容不被遮；right-2 让开滚动条 */}
+                <div className="chat-top-fade pointer-events-none absolute left-0 right-2 top-0 z-10 h-8" />
+                <div ref={scrollRef} onScroll={onScroll} className="h-full overflow-auto">
+                  <div className="chat-body max-w-3xl mx-auto w-full px-6 py-8 space-y-5">
+                    {segments.map((seg) => {
+                      const key = seg.kind === 'item' && seg.item.kind === 'user' && seg.item.arrival
+                        ? `arrival:${seg.item.arrival.id}` : segKey(seg)
+                      const node =
+                        seg.kind === 'tools' ? (
+                          <ToolGroup key={key} tools={seg.tools} />
+                        ) : seg.kind === 'agent' ? (
+                          <AgentGroup key={key} items={seg.items} />
+                        ) : seg.kind === 'files' ? (
+                          <FileCards
+                            key={key}
+                            files={seg.files}
+                            onOpen={openPreview}
+                            activePath={hasPreview ? preview.activePath ?? undefined : undefined}
+                            remote={remoteBackend}
+                          />
+                        ) : (
+                          <ItemView key={key} item={seg.item} fileSrc={thumbSrc} onOpenImage={openImage} />
+                        )
+                      // 用户气泡编辑态：气泡原位换成可编辑框（Save 前零副作用）
+                      const userItem =
+                        seg.kind === 'item' && seg.item.kind === 'user' ? seg.item : null
+                      if (userItem && editingId === userItem.id) {
+                        return (
+                          <EditBubble
+                            key={key}
+                            initial={userItem.text}
+                            onCancel={() => setEditingId(null)}
+                            onSave={(text) => timeTravel(userItem.id, text)}
+                          />
+                        )
+                      }
+                      // 悬停操作条：用户气泡挂时间旅行 + 复制（空闲且非旁观才给截断类
+                      // 操作），助手轮挂复制——末轮（activeKey）在飞时不给，历史轮恒可。
+                      // 两侧共用同一个 HoverActions，悬停显隐的几何与时序只此一处。
+                      const copyText = userItem
+                        ? userItem.text
+                        : key === activeKey && running
+                          ? undefined
+                          : copyMap.get(key)
+                      const timeTravelable = userItem && canTimeTravel
+                      if (!copyText && !timeTravelable) return node
+                      return (
+                        <HoverActions key={key} node={node} align={userItem ? 'end' : 'start'}>
+                          {timeTravelable && (
+                            <>
+                              <IconAction
+                                icon={RotateCcw}
+                                label={t('chat.regenerate')}
+                                onClick={() => timeTravel(userItem.id)}
+                              />
+                              <IconAction
+                                icon={Pencil}
+                                label={t('chat.edit')}
+                                onClick={() => setEditingId(userItem.id)}
+                              />
+                            </>
+                          )}
+                          {copyText && <CopyButton text={copyText} />}
+                        </HoverActions>
+                      )
+                    })}
+                    {/* 运行 / 等待 / 后台任务显示状态，无活动时整行隐藏，历史留在右栏。 */}
+                    <StatusIndicator
+                      items={items}
+                      running={running || observingCronRun}
+                      runStart={liveRun ? Date.parse(liveRun.started_at) : runStart}
+                      waiting={!!(approval || clarify)}
+                      streaming={streaming}
+                      thinkingText={thinkingText}
+                      compacting={compacting}
+                      backgroundCount={runningBgCount}
+                      onOpenTasks={() => {
+                        if (previewExpanded) dispatchPreview({ type: 'toggle-expanded' })
+                        if (!railOpen) toggleRail()
+                      }}
+                      failed={conn === 'failed'}
+                    />
+                  </div>
+                </div>
+                {showJump && (
+                  <button
+                    type="button"
+                    onClick={jumpToBottom}
+                    title={t('chat.toBottom')}
+                    aria-label={t('chat.toBottom')}
+                    className="scroll-jump absolute bottom-4 left-1/2 -ml-[17px]"
+                  >
+                    <ChevronDown className="h-[18px] w-[18px]" />
+                  </button>
+                )}
+              </div>
+              <div className="px-6 pb-5">
+                <div className="max-w-3xl mx-auto w-full">
+                  {/* 审批/澄清：渲染在输入框上方，切走时随会话留在原处 */}
+                  {/* key=approval_id：队首换成下一条挂起项时重置分步状态 */}
+                  {approval && (
+                    <ApprovalDialog
+                      key={String(approval.approval_id)}
+                      data={approval}
+                      onSubmit={decide}
+                    />
+                  )}
+                  {clarify && (
+                    <ClarifyDialog
+                      key={String(clarify.approval_id)}
+                      data={clarify}
+                      onSubmit={(answer) => resumeWith(answer, 'clarify')}
+                      onCancel={() => resumeWith(ASK_CANCELLED, 'clarify')}
+                    />
+                  )}
+                  {activeChannel ? readonlyBar : composer(t('composer.reply'))}
+                </div>
+              </div>
+            </>
+          ) : (
+            <div className="flex-1 flex flex-col items-center justify-center px-6 -mt-8">
+              <div className="mb-8 flex items-center gap-2.5 select-none">
+                <span className="text-primary text-3xl">✦</span>
+                <span className="serif text-3xl">Lumi</span>
+              </div>
+              <div className="w-full max-w-2xl">
+                {activeChannel ? readonlyBar : composer(t('composer.empty'))}
+              </div>
+            </div>
+          )}
+        </div>
+      </div>
+    )
+  }
+
   return (
     // 机器连接态 + 重连入口下发给所有「先选机器」的界面（设置各面板 / 项目页 / 定时页），
     // 它们据此在机器离线时停掉配置读写入口（见 MachineScope）。memo 化：App 每个流式
     // token 都重渲染，裸对象会让所有消费者跟着一起重渲
     <MachinesProvider value={machinesCtx}>
-    <div className="h-full flex flex-col bg-canvas">
+    <SshPrompts />
+    <div className="app-canvas h-full flex flex-col bg-canvas">
       {!isMacTitleBar && (
         <AppTitleBar onNewChat={startNewChat} onOpenSettings={openSettings} />
       )}
@@ -2510,201 +2521,7 @@ export default function App() {
             </div>
           </div>
         )}
-        {view === 'projects' ? (
-          <ProjectsPage
-            projects={projects}
-            current={projectsMachine === activeBackend ? workspaceDir : ''}
-              machine={projectsMachine}
-            needProjectHint={needProjectHint}
-            onSelectMachine={selectProjectsMachine}
-            // 点项目一律进项目主页——主页输入岛本身就能在此项目开聊，故无论是主动浏览
-            // 还是被「新建会话」阻断跳来（needProjectHint），落点一致，不再偶发跳到欢迎页。
-            onOpen={(p) => openProjectHome(p, projectsMachine)}
-            onNew={() => setShowNewProject(true)}
-            onRemove={(path) =>
-              setPendingRemoveProject(projects?.find((p) => p.path === path) ?? null)
-            }
-            onRename={(path, name) => renameProjectInList(path, name, projectsMachine)}
-            onSetDefault={(path, isDefault) => setProjectDefault(path, isDefault, projectsMachine)}
-          />
-        ) : view === 'project' && homeProjectInfo ? (
-          <ProjectHomePage
-            project={homeProjectInfo}
-            machine={projectHome?.backend ?? 'local'}
-            isDefault={!!homeProject?.default}
-            api={projectHomeApi}
-            sessions={homeSessions}
-            cronJobs={homeCronJobs}
-            composerSlot={projectComposer}
-            onBack={openProjects}
-            onOpenSession={openHomeSession}
-            onOpenScheduled={openHomeScheduled}
-            onToggleCron={toggleHomeCron}
-          />
-        ) : view === 'scheduled' ? (
-          <CronPage
-            api={gwForBackend}
-            initialMachine={cronEntry.machine}
-            initialJobId={cronEntry.jobId}
-            createIn={cronEntry.createIn}
-              jobs={cronJobs}
-            runningJobs={cronRunning}
-            version={cronVersion}
-            onOpenRun={(tid, jid) => void openCronJob(jid, tid)}
-            onRefresh={refreshCronJobs}
-          />
-        ) : (
-          <div className="flex-1 flex min-h-0">
-            <div className="flex-1 flex flex-col min-w-0">
-              {view === 'cronjob' && !cronRunThread ? (
-                // 任务还没有可查看的执行会话：显示空态，避免把消息误发进无关会话
-                <div className="flex-1 grid place-items-center text-sm text-muted-foreground select-none">
-                  {t('cron.noRuns')}
-                </div>
-              ) : view === 'cronjob' && !hasMessages ? (
-                // 乐观切换后历史尚未加载：占位而非欢迎页——欢迎页带可编辑输入框，
-                // 手快会把消息误发进定时任务执行线程
-                <div className="flex-1 grid place-items-center text-sm text-muted-foreground select-none">
-                  {t('chat.loading')}
-                </div>
-              ) : hasMessages ? (
-                <>
-                  {activeChannel && channelBanner()}
-                  <div className="relative flex-1 min-h-0">
-                    {/* 顶栏渐隐：内容滚到顶栏时淡出而非硬切。高度不超过 chat-body 的 py-8，
-                        停在顶部时首条内容不被遮；right-2 让开滚动条 */}
-                    <div className="pointer-events-none absolute left-0 right-2 top-0 z-10 h-8 bg-gradient-to-b from-canvas to-transparent" />
-                    <div ref={scrollRef} onScroll={onScroll} className="h-full overflow-auto">
-                    <div className="chat-body max-w-3xl mx-auto w-full px-6 py-8 space-y-5">
-                      {segments.map((seg) => {
-                        const key = seg.kind === 'item' && seg.item.kind === 'user' && seg.item.arrival
-                          ? `arrival:${seg.item.arrival.id}` : segKey(seg)
-                        const node =
-                          seg.kind === 'tools' ? (
-                            <ToolGroup key={key} tools={seg.tools} />
-                          ) : seg.kind === 'agent' ? (
-                            <AgentGroup key={key} items={seg.items} />
-                          ) : seg.kind === 'files' ? (
-                            <FileCards
-                              key={key}
-                              files={seg.files}
-                              onOpen={openPreview}
-                              activePath={hasPreview ? preview.activePath ?? undefined : undefined}
-                              remote={remoteBackend}
-                            />
-                          ) : (
-                            <ItemView key={key} item={seg.item} fileSrc={thumbSrc} onOpenImage={openImage} />
-                          )
-                        // 用户气泡编辑态：气泡原位换成可编辑框（Save 前零副作用）
-                        const userItem =
-                          seg.kind === 'item' && seg.item.kind === 'user' ? seg.item : null
-                        if (userItem && editingId === userItem.id) {
-                          return (
-                            <EditBubble
-                              key={key}
-                              initial={userItem.text}
-                              onCancel={() => setEditingId(null)}
-                              onSave={(text) => timeTravel(userItem.id, text)}
-                            />
-                          )
-                        }
-                        // 悬停操作条：用户气泡挂时间旅行 + 复制（空闲且非旁观才给截断类
-                        // 操作），助手轮挂复制——末轮（activeKey）在飞时不给，历史轮恒可。
-                        // 两侧共用同一个 HoverActions，悬停显隐的几何与时序只此一处。
-                        const copyText = userItem
-                          ? userItem.text
-                          : key === activeKey && running
-                            ? undefined
-                            : copyMap.get(key)
-                        const timeTravelable = userItem && canTimeTravel
-                        if (!copyText && !timeTravelable) return node
-                        return (
-                          <HoverActions key={key} node={node} align={userItem ? 'end' : 'start'}>
-                            {timeTravelable && (
-                              <>
-                                <IconAction
-                                  icon={RotateCcw}
-                                  label={t('chat.regenerate')}
-                                  onClick={() => timeTravel(userItem.id)}
-                                />
-                                <IconAction
-                                  icon={Pencil}
-                                  label={t('chat.edit')}
-                                  onClick={() => setEditingId(userItem.id)}
-                                />
-                              </>
-                            )}
-                            {copyText && <CopyButton text={copyText} />}
-                          </HoverActions>
-                        )
-                      })}
-                      {/* 运行 / 等待 / 后台任务显示状态，无活动时整行隐藏，历史留在右栏。 */}
-                      <StatusIndicator
-                        items={items}
-                        running={running || observingCronRun}
-                        runStart={liveRun ? Date.parse(liveRun.started_at) : runStart}
-                        waiting={!!(approval || clarify)}
-                        streaming={streaming}
-                        thinkingText={thinkingText}
-                        compacting={compacting}
-                        backgroundCount={runningBgCount}
-                        onOpenTasks={() => {
-                          if (previewExpanded) dispatchPreview({ type: 'toggle-expanded' })
-                          if (!railOpen) toggleRail()
-                        }}
-                        failed={conn === 'failed'}
-                      />
-                    </div>
-                    </div>
-                    {showJump && (
-                      <button
-                        type="button"
-                        onClick={jumpToBottom}
-                        title={t('chat.toBottom')}
-                        aria-label={t('chat.toBottom')}
-                        className="scroll-jump absolute bottom-4 left-1/2 -ml-[17px]"
-                      >
-                        <ChevronDown className="h-[18px] w-[18px]" />
-                      </button>
-                    )}
-                  </div>
-                  <div className="px-6 pb-5">
-                    <div className="max-w-3xl mx-auto w-full">
-                      {/* 审批/澄清：渲染在输入框上方，切走时随会话留在原处 */}
-                      {/* key=approval_id：队首换成下一条挂起项时重置分步状态 */}
-                      {approval && (
-                        <ApprovalDialog
-                          key={String(approval.approval_id)}
-                          data={approval}
-                          onSubmit={decide}
-                        />
-                      )}
-                      {clarify && (
-                        <ClarifyDialog
-                          key={String(clarify.approval_id)}
-                          data={clarify}
-                          onSubmit={(answer) => resumeWith(answer, 'clarify')}
-                          onCancel={() => resumeWith(ASK_CANCELLED, 'clarify')}
-                        />
-                      )}
-                      {activeChannel ? readonlyBar : composer(t('composer.reply'))}
-                    </div>
-                  </div>
-                </>
-              ) : (
-                <div className="flex-1 flex flex-col items-center justify-center px-6 -mt-8">
-                  <div className="mb-8 flex items-center gap-2.5 select-none">
-                    <span className="text-primary text-3xl">✦</span>
-                    <span className="serif text-3xl">Lumi</span>
-                  </div>
-                  <div className="w-full max-w-2xl">
-                    {activeChannel ? readonlyBar : composer(t('composer.empty'))}
-                  </div>
-                </div>
-              )}
-            </div>
-          </div>
-        )}
+        {renderMainContent()}
       </main>
       {/* 预览、执行记录与后台任务共用一列浮卡；放大时只显示预览工作区。 */}
       {showRail && (
@@ -2784,9 +2601,7 @@ export default function App() {
       {showNewProject && (
         <DirBrowser
           gw={gwForBackend(projectsMachine)}
-          title={t('projects.chooseOn', {
-            machine: machines.find((m) => m.id === projectsMachine)?.name ?? projectsMachine,
-          })}
+          machine={projectsMachine}
           onPick={(p) => void createProject(p, basename(p), projectsMachine)}
           onCancel={() => setShowNewProject(false)}
         />

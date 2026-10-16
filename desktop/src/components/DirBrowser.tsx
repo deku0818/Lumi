@@ -1,172 +1,154 @@
-import { useCallback, useEffect, useState } from 'react'
-import { Folder, FolderPlus, CornerLeftUp } from 'lucide-react'
-import type { Gateway } from '../gateway'
-import { useI18n } from '../i18n'
-import {
-  Dialog,
-  DialogContent,
-  DialogDescription,
-  DialogFooter,
-  DialogHeader,
-  DialogTitle,
-} from '@/components/ui/dialog'
-import { Button } from '@/components/ui/button'
+import { directoryCrumbs } from '@/lib/directory'
+import { basename,errorMessage } from '@/lib/utils'
+import { ArrowRight,ArrowUp,ChevronRight,Folder,FolderPlus,Home,Laptop,Pencil,Server,X } from 'lucide-react'
+import { useCallback,useEffect,useRef,useState,type JSX } from 'react'
+import type { Gateway } from '../gateway.ts'
+import { useI18n } from '../i18n.ts'
+import { useMachines } from './MachineTabs.tsx'
+import { ScrollFade } from './ScrollFade.tsx'
+import { Button } from './ui/button.tsx'
+import { Dialog,DialogContent,DialogDescription,DialogTitle } from './ui/dialog.tsx'
 
-// 通用远程目录浏览器：经传入的连接（某台机器）浏览它的文件系统、可新建文件夹，
-// 选定目录回调 onPick(path)。新建项目 / 添加可访问目录共用——确保选的是「目标机器」的路径。
-export function DirBrowser({
-  gw,
-  title,
-  onPick,
-  onCancel,
-}: {
+type DirBrowserProps = {
   gw?: Gateway
-  title: string
+  machine: string
   onPick: (path: string) => void
   onCancel: () => void
-}) {
+}
+
+/** All project entry points browse the filesystem belonging to this Gateway. */
+export function DirBrowser({ gw, machine, onPick, onCancel }: DirBrowserProps): JSX.Element {
   const { t } = useI18n()
+  const machines = useMachines()
+  const name = machine === 'local' ? t('directory.computer') : machines.find(item => item.id === machine)?.name || machine
+  const MachineIcon = machine === 'local' ? Laptop : Server
   const [cwd, setCwd] = useState('')
+  const [address, setAddress] = useState('')
   const [parent, setParent] = useState<string | null>(null)
   const [dirs, setDirs] = useState<string[]>([])
-  const [selectable, setSelectable] = useState(true)
+  const [selectable, setSelectable] = useState(false)
+  const [loading, setLoading] = useState(false)
+  const [editing, setEditing] = useState(false)
   const [creating, setCreating] = useState(false)
+  const [making, setMaking] = useState(false)
   const [newName, setNewName] = useState('')
-  const [mkErr, setMkErr] = useState('')
-
-  const load = useCallback(
-    async (path: string) => {
-      if (!gw) return
-      try {
-        const r = await gw.listDir(path)
-        setCwd(r.path)
-        // parent 是后端不透明 token（Windows 盘符根的上级是虚拟「此电脑」哨兵），原样回传给 load，勿规范化
-        setParent(r.parent)
-        setDirs(r.dirs)
-        setSelectable(r.selectable ?? true)
-      } catch {
-        /* 连接波动：保持现状 */
-      }
-    },
-    [gw],
-  )
-
-  useEffect(() => {
-    void load('') // 初始 = home
-  }, [load])
-
-  const join = (d: string) => {
-    if (!cwd) return d
-    return cwd.endsWith('/') || cwd.endsWith('\\') ? cwd + d : cwd + '/' + d
-  }
-
-  const doMkdir = async () => {
-    const name = newName.trim()
-    if (!name || !gw || !selectable) return
-    setMkErr('')
-    const r = await gw.makeDir(join(name)).catch(() => ({ ok: false, error: t('projects.mkdirRequestFailed') }))
-    if (!r.ok) {
-      setMkErr(r.error || t('projects.mkdirFailed')) // 权限不足/同名文件等：保留输入，给出原因
-      return
+  const [error, setError] = useState('')
+  const [mkError, setMkError] = useState('')
+  const request = useRef(0)
+  const home = useRef('')
+  const crumbsRef = useRef<HTMLDivElement>(null)
+  const load = useCallback(async (path: string) => {
+    if (!gw) return
+    const seq = ++request.current
+    setLoading(true)
+    setError('')
+    try {
+      const result = await gw.listDir(path)
+      if (seq !== request.current) return
+      if (!home.current) home.current = result.path
+      setCwd(result.path)
+      setAddress(result.path)
+      setParent(result.parent)
+      setDirs(result.dirs)
+      setSelectable(result.selectable ?? true)
+      setEditing(false)
+      setCreating(false)
+      setMkError('')
+    } catch (error) {
+      if (seq === request.current) setError(errorMessage(error))
+    } finally {
+      if (seq === request.current) setLoading(false)
     }
-    setCreating(false)
-    setNewName('')
-    void load(cwd)
+  }, [gw])
+  useEffect(() => {
+    home.current = ''
+    void load('')
+    return () => { request.current++ }
+  }, [load])
+  useEffect(() => {
+    const el = crumbsRef.current
+    if (el) el.scrollLeft = el.scrollWidth
+  }, [cwd, editing])
+  function join(name: string): string {
+    if (!cwd) return name
+    if (/[\\/]$/.test(cwd)) return cwd + name
+    const separator = cwd.includes('\\') ? '\\' : '/'
+    return cwd + separator + name
   }
 
-  const input =
-    'flex-1 rounded-lg border border-line bg-canvas px-3 py-1.5 text-sm outline-none focus:border-primary/40'
-
-  return (
-    <Dialog open onOpenChange={(o) => !o && onCancel()}>
-      <DialogContent
-        className="sm:max-w-lg"
-        // 新建文件夹时 Esc 只退出新建，不关整个目录浏览器（Radix 在 document 捕获阶段
-        // 处理 Esc，输入框里拦不住，只能在这里分流）
-        onEscapeKeyDown={(e) => {
-          if (!creating) return
-          e.preventDefault()
-          setCreating(false)
-        }}
-      >
-        <DialogHeader>
-          <DialogTitle>{title}</DialogTitle>
-          <DialogDescription className="sr-only">{title}</DialogDescription>
-        </DialogHeader>
-
-        <div className="flex items-center gap-2 text-xs">
-          <button
-            disabled={!parent}
-            onClick={() => parent && void load(parent)}
-            className="shrink-0 size-7 grid place-items-center rounded-md text-muted-foreground hover:text-ink hover:bg-line/30 disabled:opacity-30 transition"
-            title={t('projects.parentDir')}
-          >
-            <CornerLeftUp size={15} />
-          </button>
-          <span className="truncate font-mono text-muted-foreground" title={cwd || t('projects.computer')}>
-            {cwd || t('projects.computer')}
-          </span>
-        </div>
-
-        <div className="h-56 overflow-auto rounded-xl border border-line bg-canvas">
-          {dirs.length === 0 ? (
-            <div className="p-4 text-xs text-muted-foreground/70">{t('projects.noSubdir')}</div>
-          ) : (
-            dirs.map((d) => (
-              <button
-                key={d}
-                onClick={() => void load(join(d))}
-                className="flex w-full items-center gap-2 px-3 py-2 text-sm text-left hover:bg-surface transition"
-              >
-                <Folder size={14} className="shrink-0 text-muted-foreground" />
-                <span className="truncate">{d}</span>
-              </button>
-            ))
-          )}
-        </div>
-
-        {!selectable ? null : creating ? (
-          <div>
-            <div className="flex items-center gap-2">
-              <input
-                autoFocus
-                value={newName}
-                onChange={(e) => {
-                  setNewName(e.target.value)
-                  setMkErr('')
-                }}
-                onKeyDown={(e) => {
-                  // 输入法组字时的回车是确认候选词，不是提交
-                  if (e.key === 'Enter' && !e.nativeEvent.isComposing) void doMkdir()
-                }}
-                placeholder={t('projects.folderName')}
-                className={input}
-              />
-              <Button size="sm" onClick={() => void doMkdir()}>
-                {t('projects.create')}
-              </Button>
+  async function mkdir(): Promise<void> {
+    const name = newName.trim()
+    if (!gw || !selectable || !name || making) return
+    if (name === '.' || name === '..' || /[\\/]/.test(name)) { setMkError(t('ssh.invalidFolderName')); return }
+    const seq = request.current
+    setMaking(true); setMkError('')
+    try {
+      const result = await gw.makeDir(join(name))
+      if (seq !== request.current) return
+      if (!result.ok) { setMkError(result.error || t('projects.mkdirFailed')); return }
+      setNewName(''); await load(cwd)
+    } catch (e) { if (seq === request.current) setMkError(errorMessage(e)) }
+    finally { setMaking(false) }
+  }
+  const busy = loading || making
+  const crumbs = directoryCrumbs(cwd)
+  function emptyLabel(): string {
+    if (loading) return t('common.loading')
+    if (error) return t('directory.unavailable')
+    return t('projects.noSubdir')
+  }
+  return <Dialog open onOpenChange={open => !open && onCancel()}>
+    <DialogContent className="lumi-dialog directory-dialog p-0 gap-0 overflow-hidden sm:max-w-[560px]" showCloseButton={false}
+      onEscapeKeyDown={e => {
+        if (!creating && !editing) return
+        e.preventDefault()
+        if (creating) setCreating(false)
+        else { setEditing(false); setAddress(cwd); setError('') }
+      }}>
+      <div className="directory-heading">
+        <DialogTitle className="text-[16px] text-ink">{t('ssh.chooseFolder')}</DialogTitle>
+        <span className="lumi-machine-pill" title={name}><MachineIcon size={12} /><span>{name}</span></span>
+        <Button variant="ghost" size="icon-sm" className="ml-auto text-muted-foreground" onClick={onCancel} aria-label={t('common.close')}><X /></Button>
+        <DialogDescription className="sr-only">{t('directory.description', { machine: name })}</DialogDescription>
+      </div>
+      <div className="directory-navigation">
+        <Button variant="ghost" size="icon" disabled={parent === null || busy} onClick={() => parent !== null && void load(parent)} title={t('projects.parentDir')} aria-label={t('projects.parentDir')}><ArrowUp /></Button>
+        <Button variant="ghost" size="icon" disabled={!home.current || busy} onClick={() => void load(home.current)} title={t('directory.home')} aria-label={t('directory.home')}><Home /></Button>
+        <div className="directory-address" title={cwd}>
+          {editing ? <><input autoFocus value={address} aria-label={t('ssh.directoryPath')} onChange={e => setAddress(e.target.value)}
+            onKeyDown={e => { if (e.key === 'Enter' && !e.nativeEvent.isComposing) void load(address) }} />
+            <Button variant="ghost" size="icon-xs" disabled={busy} onClick={() => void load(address)} aria-label={t('ssh.go')}><ArrowRight /></Button></> : <>
+            <div ref={crumbsRef} className="directory-crumbs">
+              {!selectable && !cwd ? <span>{t('directory.computer')}</span> : crumbs.map((crumb, i) => <span key={crumb.path}>
+                {i > 0 && <ChevronRight size={11} />}<button disabled={busy} title={crumb.path} aria-label={crumb.path} onClick={() => void load(crumb.path)}>{i === 0 ? <><MachineIcon size={12} /><span>{crumb.label === '/' ? '' : crumb.label}</span></> : crumb.label}</button>
+              </span>)}
             </div>
-            {mkErr && <div className="mt-1 text-xs text-error">{mkErr}</div>}
-          </div>
-        ) : (
-          <button
-            onClick={() => setCreating(true)}
-            className="flex items-center gap-1.5 text-xs text-muted-foreground hover:text-ink transition w-fit"
-          >
-            <FolderPlus size={14} />
-            {t('projects.newFolder')}
-          </button>
-        )}
-
-        <DialogFooter>
-          <Button variant="outline" onClick={onCancel}>
-            {t('common.cancel')}
-          </Button>
-          <Button disabled={!cwd || !selectable} onClick={() => onPick(cwd)}>
-            {t('projects.useThisDir')}
-          </Button>
-        </DialogFooter>
-      </DialogContent>
-    </Dialog>
-  )
+            <Button variant="ghost" size="icon-xs" disabled={busy} onClick={() => { setAddress(cwd); setEditing(true) }} title={t('directory.editPath')} aria-label={t('directory.editPath')}><Pencil /></Button>
+          </>}
+        </div>
+        <Button variant="ghost" className="directory-new" disabled={!selectable || busy} onClick={() => { setCreating(!creating); setMkError('') }} title={t('projects.newFolder')} aria-label={t('projects.newFolder')}><FolderPlus /><span>{t('projects.newFolder')}</span></Button>
+      </div>
+      {error && <p role="alert" className="directory-error">{error}</p>}
+      <div className="directory-list-shell">
+        <ScrollFade className="directory-list">
+          {dirs.length ? dirs.map(dir => <button key={dir} disabled={busy} className="directory-row" onClick={() => void load(join(dir))}>
+            <Folder size={15} /><span>{dir}</span><ChevronRight size={12} />
+          </button>) : <div className="directory-empty"><Folder size={27} /><span>{emptyLabel()}</span></div>}
+        </ScrollFade>
+      </div>
+      {creating && <div className="directory-mkdir">
+        <input autoFocus value={newName} disabled={making} onChange={e => { setNewName(e.target.value); setMkError('') }} aria-label={t('projects.folderName')} placeholder={t('projects.folderName')}
+          onKeyDown={e => { if (e.key === 'Enter' && !e.nativeEvent.isComposing) void mkdir() }} />
+        <Button variant="outline" disabled={making || !newName.trim()} onClick={() => void mkdir()}>{t('projects.create')}</Button>
+        <Button variant="ghost" size="icon" onClick={() => setCreating(false)} aria-label={t('common.cancel')}><X /></Button>
+      </div>}
+      {mkError && <p role="alert" className="directory-error">{mkError}</p>}
+      <div className="directory-meta"><span>{busy && <><span className="lumi-orb lumi-orb-sm" />{t('common.loading')}</>}</span><span>{t('directory.count', { count: dirs.length })}</span></div>
+      <div className="directory-footer">
+        <div className="directory-selection" title={cwd}><Folder size={16} /><div><strong>{basename(cwd) || (selectable ? cwd : t('directory.computer'))}</strong><small>{t('directory.current')}</small></div></div>
+        <Button variant="outline" onClick={onCancel}>{t('common.cancel')}</Button>
+        <Button disabled={!cwd || !selectable || busy || editing} onClick={() => onPick(cwd)}>{t('directory.choose')}</Button>
+      </div>
+    </DialogContent>
+  </Dialog>
 }

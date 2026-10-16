@@ -68,7 +68,7 @@ def fake_uv(monkeypatch):
 
 
 def test_uv_found_next_to_lumi_when_path_is_trimmed(tmp_path, monkeypatch):
-    # 回归：sudo 精简 PATH 下找不到 ~/.local/bin/uv——install.sh 把 uv 与 lumi 装进同一目录
+    # 回归：sudo 精简 PATH 下找不到 ~/.local/bin/uv——用户级安装可把 uv 与 lumi 放在同一目录
     from lumi.gateway.toolbox import ToolStatus
 
     bin_dir = tmp_path / "bin"

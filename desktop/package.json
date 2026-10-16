@@ -1,7 +1,7 @@
 {
   "name": "lumi-desktop",
   "private": true,
-  "version": "0.2.64",
+  "version": "0.3.1",
   "type": "module",
   "main": "electron/main.cjs",
   "scripts": {
@@ -26,6 +26,14 @@
       {
         "from": "../dist/lumi-backend",
         "to": "lumi-backend"
+      },
+      {
+        "from": "../dist/remote",
+        "to": "remote-backend"
+      },
+      {
+        "from": "../lumi/remote/bootstrap.py",
+        "to": "remote-backend/bootstrap.py"
       }
     ],
     "electronDist": "node_modules/electron/dist",
@@ -64,7 +72,10 @@
       ],
       "category": "Development",
       "icon": "assets/icon.png"
-    }
+    },
+    "asarUnpack": [
+      "electron/ssh-askpass*.cjs"
+    ]
   },
   "dependencies": {
     "electron-updater": "^6.8.9"

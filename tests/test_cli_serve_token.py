@@ -14,6 +14,7 @@ def test_token_env_is_consumed(monkeypatch, isolated_config):
     # MCP 等子进程全都继承这枚能驱动 agent 的令牌
     from lumi.gateway.channels import ws
 
+    monkeypatch.setattr(ws.app.state, "token", "", raising=False)
     seen: dict = {}
     monkeypatch.setattr(
         "uvicorn.run", lambda app, **kw: seen.update(env=dict(os.environ))

@@ -1,8 +1,8 @@
 {
-  "$comment": "Lumi 前端(desktop / 未来 TS TUI) 与后端的 WebSocket 协议契约。语言中立的单一事实来源：TS 端 import 本文件 derive 静态类型，Python 后端用契约测试(tests/gateway/test_protocol_contract.py)锁住一致性。payload 字段中 '?' 后缀表示可选。新增/改名事件或方法时，只改这里，两端的类型与测试随之收敛。",
-  "version": 1,
+  "$comment": "Lumi 前端(desktop / 未来 TS TUI) 与后端的 Gateway JSON-RPC 协议契约。语言中立的单一事实来源：TS 端 import 本文件 derive 静态类型，Python 后端用契约测试(tests/gateway/test_protocol_contract.py)锁住一致性。payload 字段中 '?' 后缀表示可选。新增/改名事件或方法时，只改这里，两端的类型与测试随之收敛。",
+  "version": 2,
   "events": {
-    "gateway.ready": { "payload": { "model": "string", "workspace": "string", "workspace_bound": "boolean", "running": "boolean", "run_started_at": "number|null" }, "note": "连接握手，由 ws 端点直接发出；workspace 未绑定(workspace_bound=false)时仍给出进程 cwd 兜底值，仅供展示，不代表已绑定项目。running/run_started_at（epoch 毫秒）为续接时的活跃轮状态，供前端恢复运行态与本轮计时。model 仅供展示（握手时连接尚未绑定 thread，它是新会话默认而非某个会话的模型）——会话模型由 switch_session / new_session 下发" },
+    "gateway.ready": { "payload": { "version": "string", "protocol": "number", "model": "string", "workspace": "string", "workspace_bound": "boolean", "running": "boolean", "run_started_at": "number|null" }, "note": "连接握手，由 ws 端点直接发出；workspace 未绑定(workspace_bound=false)时仍给出进程 cwd 兜底值，仅供展示，不代表已绑定项目。running/run_started_at（epoch 毫秒）为续接时的活跃轮状态，供前端恢复运行态与本轮计时。model 仅供展示（握手时连接尚未绑定 thread，它是新会话默认而非某个会话的模型）——会话模型由 switch_session / new_session 下发" },
     "turn.start": { "payload": { "message_id": "string" }, "note": "真实用户轮开始（send_message / regenerate / edit_resend / 技能命令），携带该轮用户消息的落库 id；前端据此给乐观气泡上锚，时间旅行按 id 截断。开轮即发故中途 stop 的轮同样带到；系统命令（/compact 等）不产生用户消息、不发此事件" },
     "message.start": { "payload": {} },
     "message.delta": { "payload": { "text": "string", "usage?": "Usage" } },
@@ -102,6 +102,6 @@
     "get_mcp_status": { "params": ["project?"], "result": ["loading", "servers"], "note": "项目会话池的最近加载状态（后台加载中 loading=true；servers 同 mcp.status 事件形状）。project 空 = 全局池" },
     "env_status": { "params": [], "result": ["tools", "installing", "bin_dir"], "note": "环境工具箱状态：核心工具（uv/rg/node）+ 可选组件（officecli）各自 EnvToolStatus {name,source,version,path}（source ∈ system|toolbox|missing，system=用户自装、永不覆盖）；installing 为进行中的安装 target（空=空闲），面板打开时据此恢复进行中态；bin_dir 为该机器工具箱安装目录的绝对路径（前端直接展示，不拼 ~）。飞书组件有项目维度，归 diagnose_feishu_setup 的本地环境组" },
     "env_install": { "params": ["target", "project?"], "result": ["started"], "note": "触发安装（target ∈ all|uv|rg|node|officecli|lark-cli|feishu-skills；all=装齐全部 missing 的工具（核心+可选，见 toolbox.ALL_TOOLS）；feishu-skills 装到 project 的 .lumi/skills/，project 空=全局兜底）。立即返回，进度走 env.progress、结束广播 env.state（装齐时终态 target='all'）；同 target 进行中时返回 started=false" },
-    "render_office": { "params": ["path"], "result": ["ok", "html_path?", "reason?", "message?"], "note": "docx/xlsx/pptx → 自包含 HTML（officecli 转换，产物按源文件 mtime 缓存在该机器 cache/office_preview），前端拿 html_path 走 lumi-file iframe（远程后端经 /file 端点）。ok=false 时 reason ∈ missing（officecli 未装，前端引导 env_install）| unsupported（扩展名不支持）| error（message 为 cli 输出开头的人话段）" }
+    "render_office": { "params": ["path"], "result": ["ok", "html_path?", "reason?", "message?"], "note": "docx/xlsx/pptx → 自包含 HTML（officecli 转换，产物按源文件 mtime 缓存在该机器 cache/office_preview），前端拿 html_path 走本地 lumi-file 或原生 SSH lumi-remote 预览。ok=false 时 reason ∈ missing（officecli 未装，前端引导 env_install）| unsupported（扩展名不支持）| error（message 为 cli 输出开头的人话段）" }
   }
 }

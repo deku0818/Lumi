@@ -1,5 +1,5 @@
 // Electron 主进程：拉起 lumi serve sidecar、创建窗口、经 IPC 把 ws 连接信息给 renderer。
-const { app, BrowserWindow, clipboard, ipcMain, protocol, session, shell, Notification, Menu } = require('electron')
+const { app, BrowserWindow, clipboard, ipcMain, protocol, session, shell, Notification, Menu, dialog } = require('electron')
 const { spawn, execFile } = require('node:child_process')
 const { promisify } = require('node:util')
 const execFileAsync = promisify(execFile)
@@ -20,6 +20,7 @@ const DEV_ORIGIN = new URL(process.env.VITE_DEV_SERVER_URL || 'http://127.0.0.1:
 // 自定义协议：让 renderer 安全引用本地文件（绕过 http origin 下的 file:// 限制），
 // 用于 artifacts 预览面板里 <img>/<iframe> 加载图片/PDF/HTML。必须在 app ready 前登记。
 protocol.registerSchemesAsPrivileged([
+  { scheme: 'lumi-remote', privileges: { standard: true, secure: true, supportFetchAPI: true, stream: true, corsEnabled: true } },
   { scheme: 'lumi-file', privileges: { standard: true, secure: true, supportFetchAPI: true, stream: true, bypassCSP: true } },
 ])
 
@@ -390,62 +391,13 @@ function createWindow() {
   }
 }
 
-// ── 多机后端注册表（~/Library/.../userData/backends.json）──
-// 形状：{ remotes: [{id, name, url, token, enabled?}] }
-// 本地 sidecar 是隐式后端（id='local'），不入表；远程机器才持久化。
-function backendsFile() {
-  return path.join(app.getPath('userData'), 'backends.json')
-}
-function readBackends() {
-  try {
-    const d = JSON.parse(fs.readFileSync(backendsFile(), 'utf8'))
-    return { remotes: Array.isArray(d.remotes) ? d.remotes : [] }
-  } catch {
-    return { remotes: [] }
-  }
-}
-// 含远程机器 token：仅本人可读（0600），先写临时文件再 rename，写到一半崩溃不留坏文件
-function writeBackends(d) {
-  try {
-    const tmp = backendsFile() + '.tmp'
-    fs.writeFileSync(tmp, JSON.stringify(d, null, 2), { mode: 0o600 })
-    fs.renameSync(tmp, backendsFile())
-  } catch (e) {
-    console.error('[backends] 写入失败:', e)
-  }
-}
-// 把后端 id 解析为带 token 的 WS 地址。local → 本地 sidecar；远程 → 表里的 url+token。
-function connectionFor(id) {
-  if (id && id !== 'local') {
-    const r = readBackends().remotes.find((x) => x.id === id)
-    if (r) {
-      const sep = r.url.includes('?') ? '&' : '?'
-      return { wsUrl: `${r.url}${sep}token=${encodeURIComponent(r.token || '')}` }
-    }
-  }
-  return { wsUrl: `ws://127.0.0.1:${wsPort}/ws?token=${LOCAL_TOKEN}` }
-}
-
-// renderer 按 backendId 拿对应机器的 WS 地址（带 token）。
-// 方案甲：前端为每台机器各开连接，不存在"活动机器"，按 id 取。
-ipcMain.handle('lumi:connection', (_e, id) => connectionFor(id))
-ipcMain.handle('lumi:backends:list', () => readBackends())
-ipcMain.handle('lumi:backends:save', (_e, b) => {
-  const d = readBackends()
-  if (b.id) {
-    const i = d.remotes.findIndex((x) => x.id === b.id)
-    if (i >= 0) d.remotes[i] = { ...d.remotes[i], ...b }
-  } else {
-    d.remotes.push({ id: crypto.randomBytes(6).toString('hex'), name: b.name, url: b.url, token: b.token || '' })
-  }
-  writeBackends(d)
-  return d
-})
-ipcMain.handle('lumi:backends:remove', (_e, id) => {
-  const d = readBackends()
-  d.remotes = d.remotes.filter((x) => x.id !== id)
-  writeBackends(d)
-  return d
+// Remote machines expose SSH data channels; only the local sidecar uses WebSocket.
+const { setupSsh } = require('./ssh-ipc.cjs')
+const { registerRemoteFilePolicy } = require('./remote-files.cjs')
+const ssh = setupSsh({ app, ipcMain, BrowserWindow, dialog, projectRoot: PROJECT_ROOT, environmentPath: sidecarPath })
+ipcMain.handle('lumi:connection', (_event, id) => {
+  if (id && id !== 'local') return ssh.connection(id)
+  return { kind: 'local', wsUrl: `ws://127.0.0.1:${wsPort}/ws?token=${LOCAL_TOKEN}` }
 })
 
 // artifacts 预览：用系统默认应用打开 / 在访达中显示该文件
@@ -556,6 +508,9 @@ app.whenReady().then(async () => {
       return new Response('Not found', { status: 404 })
     }
   })
+  protocol.handle('lumi-remote', request => ssh.file(request))
+  // Remote previews are fetched by the application frame, never by sandboxed artifact scripts.
+  registerRemoteFilePolicy(session.defaultSession, BrowserWindow)
   // macOS dev：Dock 图标运行时设置（打包后由 bundle 的 icns 接管）
   if (app.dock) app.dock.setIcon(APP_ICON)
   sidecarPath() // 尽早 kick off 登录 shell 求值，与下面几步重叠
@@ -577,8 +532,10 @@ app.on('window-all-closed', () => {
 
 // 退出等 sidecar 停完（最多 SIDECAR_STOP_MS）：先拦下本次 quit，停完再重新 quit——
 // 第二次进来时 serveProc 已空，直接放行
+let closing = false
 app.on('before-quit', (event) => {
-  if (!serveProc) return
+  if (closing) return
   event.preventDefault()
-  stopSidecar().then(() => app.quit())
+  closing = true
+  Promise.all([stopSidecar(), ssh.close()]).finally(() => app.quit())
 })

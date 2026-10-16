@@ -1,6 +1,8 @@
 # protocol/
 
-Lumi 前端与后端之间 WebSocket 协议的**语言中立单一事实来源**。
+Lumi 前端与后端之间 Gateway JSON-RPC 协议的**语言中立单一事实来源**。
+
+业务帧用于本地 WebSocket 和原生 SSH 的逻辑会话通道。SSH 长度前缀与管理帧见 `lumi/remote/protocol.py`、`desktop/electron/remote-wire.cjs`。
 
 ## 为什么独立
 

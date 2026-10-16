@@ -33,9 +33,6 @@ ENV PATH="/app/.venv/bin:$PATH"
 WORKDIR /workspace
 
 EXPOSE 8765
-# 监听 0.0.0.0 对外；token 经 LUMI_TOKEN 环境变量传入（公网部署务必设置），不进命令行。
-# 例：docker run -p 8765:8765 -e LUMI_TOKEN=<你的口令> \
-#       -v ~/.lumi:/root/.lumi -v /srv/projects:/srv/projects ycw0818/lumi-harness
-# 公网建议前面挂 Caddy/nginx 终止 TLS（wss://），不要裸暴露明文 ws。
-# 非 Docker 部署（uv tool install + systemd unit 样例）见 docs/guides/deploy.md。
+# Standalone API container; desktop remote access uses SSH user services.
+# Publish on loopback (-p 127.0.0.1:8765:8765) and inject LUMI_TOKEN.
 ENTRYPOINT ["tini", "--", "lumi", "serve", "--host", "0.0.0.0", "--port", "8765"]

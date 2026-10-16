@@ -1,6 +1,8 @@
-// WS JSON-RPC 客户端：对接 lumi serve 的 /ws。
+// Transport-independent JSON-RPC client: local WebSocket or native SSH IPC.
 // 方法与事件见 protocol/events.json。带指数退避自动重连（sidecar 启动需要时间）。
 import type {
+  GatewayConnection,
+  GatewayOptions,
   ActiveModel,
   BgTask,
   BgTaskOutput,
@@ -35,11 +37,12 @@ import type {
   SlashCommand,
   WireEvent,
 } from './types'
+import { SshSocket } from './sshSocket'
 import { fmtSize } from '@/lib/utils'
 
 const MAX_RETRY = 5 // 连续失败这么多次后停止自动重连
 
-// 附件上传上限，与后端 /upload 的 _MAX_FILE_BYTES 一致（ws.py）
+// 附件上传上限，与后端 uploads.MAX_UPLOAD_BYTES 一致
 const MAX_UPLOAD_BYTES = 128 * 1024 * 1024
 
 // 附带工具审批模式：给了就原样透传（含 'default'），不靠「缺省即 default」的隐式约定
@@ -52,7 +55,8 @@ type StateHandler = (s: ConnState) => void
 type Pending = { resolve: (v: unknown) => void; reject: (e: unknown) => void }
 
 export class Gateway {
-  private ws: WebSocket | null = null
+  private ws: WebSocket | SshSocket | null = null
+  private handshaken = false
   private nextId = 1
   private pending = new Map<number, Pending>()
   private eventHandlers = new Set<EventHandler>()
@@ -63,41 +67,15 @@ export class Gateway {
   private currentState: ConnState = 'connecting'
   private lastError: ConnError = ''
 
-  constructor(private url: string) {}
+  constructor(private connection: GatewayConnection, private options: GatewayOptions = {}) {}
 
-  // 地址可能在设置里被改（编辑远程机器的 url/token）；调用方在重连前更新，下次 connect 生效
-  setUrl(url: string): void {
-    this.url = url
-  }
-
-  // 机器地址 / token 在设置里改了：换到新地址（保留本连接自带的 workspace / thread）并重连
-  rebase(base: string): void {
-    try {
-      const next = new URL(base)
-      const cur = new URL(this.url)
-      for (const k of ['workspace', 'thread']) {
-        const v = cur.searchParams.get(k)
-        if (v) next.searchParams.set(k, v)
-      }
-      this.url = next.toString()
-    } catch {
-      this.url = base // 非法地址：connect 会停在 failed
-    }
+  rebase(connection: GatewayConnection): void {
+    this.connection = connection
     this.reconnect()
   }
 
-  // 绑定本连接的会话 thread：写进 URL，使断线重连自动携带 ?thread=，触发后端「断连续接」
-  // ——接回断开期仍挂着的会话（parked 审批/运行轮原样还在），而非新建 bridge 丢掉它。
-  // 握手拿到 thread 后调用一次即可。
   bindThread(threadId: string): void {
-    if (!threadId) return
-    try {
-      const u = new URL(this.url)
-      u.searchParams.set('thread', threadId)
-      this.url = u.toString()
-    } catch {
-      /* 非法 URL：忽略，退回无续接（旧行为） */
-    }
+    if (threadId) this.options = { ...this.options, thread: threadId }
   }
 
   // 弃用当前 socket：解绑回调（否则其 onclose 还会再排一次重连）、reject 在飞请求、关闭。
@@ -113,6 +91,7 @@ export class Gateway {
     if (!ws) return
     ws.onopen = ws.onclose = ws.onmessage = ws.onerror = null
     this.ws = null
+    this.handshaken = false
     this.flushPending(new Error('连接已断开'))
     try {
       ws.close()
@@ -124,9 +103,15 @@ export class Gateway {
   connect(): void {
     this.teardown()
     this.setState('connecting')
-    let ws: WebSocket
+    let ws: WebSocket | SshSocket
     try {
-      ws = new WebSocket(this.url)
+      if (this.connection.kind === 'ssh') ws = new SshSocket(this.connection.backend, this.options)
+      else {
+        const url = new URL(this.connection.wsUrl)
+        if (this.options.workspace) url.searchParams.set('workspace', this.options.workspace)
+        if (this.options.thread) url.searchParams.set('thread', this.options.thread)
+        ws = new WebSocket(url.toString())
+      }
     } catch {
       // 非法地址：构造同步抛错、不会有 onclose，重试也只会再抛——直接停在 failed
       this.lastError = 'unreachable'
@@ -136,9 +121,9 @@ export class Gateway {
     this.ws = ws
     ws.onopen = () => {
       this.lastError = ''
-      this.setState('open')
     }
-    ws.onclose = (ev) => {
+    ws.onclose = (ev: { code: number }) => {
+      this.handshaken = false
       // 原因先于状态记录：状态变更会同步通知订阅者，它们读的就是这里的值
       this.lastError = ev.code === 1008 ? 'auth' : 'unreachable'
       this.setState('closed')
@@ -150,27 +135,31 @@ export class Gateway {
       // 停在 closed 让用户从机器连接灯看出是配置问题。
       if (ev.code === 1008) {
         this.closedByUser = true
-        console.warn('[gateway] 鉴权失败 (1008)，停止重连：', this.url)
+        console.warn('[gateway] 连接认证失败，停止重连')
         return
       }
       if (this.closedByUser) return
       // 退避重试耗尽：停在 failed 态，不再自动重连，等用户从连接灯主动点重连
       if (this.retry >= MAX_RETRY) {
         this.setState('failed')
-        console.warn(`[gateway] 重连 ${MAX_RETRY} 次失败，停止自动重连：`, this.url)
+        console.warn('[gateway] 重连失败，停止自动重连')
         return
       }
       const delay = Math.min(8000, 500 * 2 ** Math.min(this.retry++, 4))
       this.reconnectTimer = setTimeout(() => this.connect(), delay)
     }
-    ws.onmessage = (e) => this.onMessage(JSON.parse(e.data))
+    ws.onmessage = (e: { data: unknown }) => this.onMessage(JSON.parse(String(e.data)))
   }
 
   private onMessage(frame: any): void {
     if (frame.method === 'event') {
       // 退避计数到握手完成才清零：服务端 accept 后立刻关闭（如初始化失败）时 onopen
       // 照样会触发，在那里清零会让退避永远停在首档、永不进 failed
-      if (frame.params?.type === 'gateway.ready') this.retry = 0
+      if (frame.params?.type === 'gateway.ready') {
+        this.retry = 0
+        this.handshaken = true
+        this.setState('open')
+      }
       for (const h of this.eventHandlers) h(frame.params)
     } else if (frame.id != null) {
       const p = this.pending.get(frame.id)
@@ -374,22 +363,10 @@ export class Gateway {
     return this.request('render_office', { path })
   }
 
-  // HTTP 通道：从本连接的 WS 地址派生（ws→http 同主机同端口同 token）。
-  // 原地改 URL 而非从 host 手拼：保留反代路径前缀（wss://x/lumi/ws → https://x/lumi/file）
-  private httpUrl(endpoint: string, key: string, value: string): string {
-    const u = new URL(this.url)
-    u.protocol = u.protocol === 'wss:' ? 'https:' : 'http:'
-    u.pathname = u.pathname.replace(/\/ws\/?$/, endpoint)
-    const token = u.searchParams.get('token')
-    u.search = ''
-    u.searchParams.set(key, value)
-    if (token) u.searchParams.set('token', token)
-    return u.toString()
-  }
-
-  // 文件下行：远程后端的预览走它（lumi-file 只能读本机盘），office 渲染产物同理。
-  fileHttpUrl(path: string): string {
-    return this.httpUrl('/file', 'path', path)
+  fileUrl(path: string): string {
+    if (this.connection.kind !== 'ssh') throw Error('Remote file URL requires an SSH connection')
+    const rooted = path.startsWith('/') ? path : '/' + path
+    return 'lumi-remote://file/' + encodeURIComponent(this.connection.backend) + rooted.split('/').map(encodeURIComponent).join('/')
   }
 
   // 附件上行的唯一决策点（对应下行的 contentUrl）：本地后端直接用路径（零拷贝），
@@ -400,17 +377,25 @@ export class Gateway {
     return Promise.all(atts.map((a) => this.uploadFile(a.blob)))
   }
 
-  // 超限在本地先拦：服务端回 413 时请求体还没读完，连接一断浏览器只抛通用网络错，
-  // 「文件太大」这个真正的原因反而永远到不了用户眼前。
+  // 上传前检查大小，避免超限文件占用 SSH 通道。
   private async uploadFile(file: File): Promise<string> {
     if (file.size > MAX_UPLOAD_BYTES)
       throw new Error(`${file.name} 超过 ${fmtSize(MAX_UPLOAD_BYTES)} 上限`)
-    const r = await fetch(this.httpUrl('/upload', 'name', file.name), {
-      method: 'POST',
-      body: file,
-    })
-    if (!r.ok) throw new Error(`${file.name} 上传失败（${r.status}）`)
-    return ((await r.json()) as { path: string }).path
+    if (this.connection.kind !== 'ssh') throw Error('Upload requires an SSH connection')
+    const backend = this.connection.backend
+    const { upload } = await window.lumi.remote.upload<{ upload: string }>(backend, 'begin', { name: file.name })
+    let finished = false
+    try {
+      for (let offset = 0; offset < file.size; offset += 1024 * 1024) {
+        const bytes = new Uint8Array(await file.slice(offset, offset + 1024 * 1024).arrayBuffer())
+        await window.lumi.remote.upload(backend, 'chunk', { upload, bytes })
+      }
+      const result = await window.lumi.remote.upload<{ path: string }>(backend, 'finish', { upload })
+      finished = true
+      return result.path
+    } finally {
+      if (!finished) await window.lumi.remote.upload(backend, 'cancel', { upload }).catch(() => {})
+    }
   }
 
   // —— MCP 服务器：读写该机器的全局层或 <project>/.lumi 下 mcp_server.json，下次新会话加载生效。
@@ -617,6 +602,27 @@ export class Gateway {
 
   clearFinishedBgTasks(): Promise<{ cleared: number }> {
     return this.request<{ cleared: number }>('clear_finished_bg_tasks')
+  }
+
+  whenReady(timeout = 60000): Promise<void> {
+    if (this.handshaken) return Promise.resolve()
+    if (this.dead) return Promise.reject(new Error('Lumi 连接已停止。'))
+    return new Promise((resolve, reject) => {
+      function finish(error?: Error): void {
+        clearTimeout(timer)
+        offEvent()
+        offState()
+        if (error) reject(error)
+        else resolve()
+      }
+      const offEvent = this.onEvent(event => {
+        if (event.type === 'gateway.ready') finish()
+      })
+      const offState = this.onState(state => {
+        if (state === 'failed') finish(new Error('Lumi 连接失败。'))
+      })
+      const timer = setTimeout(() => finish(new Error('Lumi 握手超时。')), timeout)
+    })
   }
 
   onEvent(h: EventHandler): () => void {

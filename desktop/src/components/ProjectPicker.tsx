@@ -137,7 +137,7 @@ export function ProjectPicker({
       {addErr && <div className="text-[11px] text-error">{addErr}</div>}
 
       {creating && (
-        <DirBrowser gw={gw} title={t('projects.new')} onPick={onCreated} onCancel={() => setCreating(false)} />
+        <DirBrowser gw={gw} machine={machine} onPick={onCreated} onCancel={() => setCreating(false)} />
       )}
 
       {pending !== null && confirmSwitch && (

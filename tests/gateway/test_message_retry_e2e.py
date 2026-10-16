@@ -84,14 +84,19 @@ def _isolated(isolated_config):
 
 async def _run(script: list[list[AIMessageChunk]], tmp_path):
     bridge = AgentBridge()
-    with (
-        patch("lumi.models.chain.create_llm", return_value=ScriptedLLM(script=script)),
-        patch.object(AgentBridge, "_build_tools", new=_no_tools),
-    ):
-        await bridge.initialize(project_dir=str(tmp_path))
-        events = [evt async for evt in bridge.stream_response("你好")]
-    state = await bridge._agent.graph.aget_state(bridge._config)
-    return [e.kind.value for e in events], events, state.values["messages"]
+    try:
+        with (
+            patch(
+                "lumi.models.chain.create_llm", return_value=ScriptedLLM(script=script)
+            ),
+            patch.object(AgentBridge, "_build_tools", new=_no_tools),
+        ):
+            await bridge.initialize(project_dir=str(tmp_path))
+            events = [evt async for evt in bridge.stream_response("你好")]
+        state = await bridge._agent.graph.aget_state(bridge._config)
+        return [e.kind.value for e in events], events, state.values["messages"]
+    finally:
+        await bridge.close()
 
 
 @pytest.mark.asyncio

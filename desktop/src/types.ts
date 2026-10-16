@@ -433,7 +433,46 @@ export interface Artifact {
 
 // 远程后端（机器）注册项；本地 sidecar 是隐式后端（id='local'），不入此表。
 // enabled=false：已配置但不连接（不开控制连接、侧栏隐藏）；缺省视为启用。
-export type BackendRemote = { id: string; name: string; url: string; token: string; enabled?: boolean }
+export type BackendRemote = {
+  id: string
+  name: string
+  host: string
+  user?: string
+  port?: number | null
+  authMethod?: 'config' | 'file' | 'paste' | 'password'
+  identityFile?: string
+  dataDir?: string
+  enabled?: boolean
+}
+export type SshCredentials = {
+  privateKey?: string
+  passphrase?: string
+  password?: string
+  keepKey?: boolean
+}
+export type SshStatus = {
+  id: string
+  phase: 'connecting' | 'checking' | 'installing' | 'starting' | 'attaching' | 'ready' | 'offline' | 'error'
+  message: string
+  dataDir?: string
+  preparation?: 'reuse'
+  stage?: SshStatus['phase']
+  code?: string
+}
+export type SshQuestion = {
+  id: string
+  machine: string
+  kind: 'trust' | 'secret' | 'prepare'
+  prompt: string
+  host?: string
+  fingerprint?: string
+  dataDir?: string
+  installed?: boolean
+}
+export type ProjectTarget = { backend: string; path: string; name: string; unscoped?: boolean }
+export type GatewayConnection = { kind: 'local'; wsUrl: string } | { kind: 'ssh'; backend: string }
+export type GatewayOptions = { workspace?: string; thread?: string }
+export type RemoteEvent = { type: 'frame'; channel: string; frame: unknown } | { type: 'close'; channel: string; message: string }
 export type BackendsState = { remotes: BackendRemote[] }
 
 // —— IM 渠道（飞书等）——
@@ -570,11 +609,32 @@ declare global {
       menuCommand?: (command: string) => Promise<void>
       onMenuAction?: (cb: (action: string) => void) => () => void
       setMenuLabels?: (labels: Record<string, string>) => Promise<void>
-      getConnection: (backendId?: string) => Promise<{ wsUrl: string }>
+      getConnection: (backendId?: string) => Promise<GatewayConnection>
       backends?: {
         list: () => Promise<BackendsState>
-        save: (b: Partial<BackendRemote>) => Promise<BackendsState>
+        save: (b: Partial<BackendRemote>, credentials?: SshCredentials) => Promise<BackendsState>
         remove: (id: string) => Promise<BackendsState>
+      }
+      ssh: {
+        hosts: () => Promise<{ alias: string }[]>
+        resolve: (config: Partial<BackendRemote>) => Promise<{ hostname: string; user: string; port: string; identityFile: string; jump: string }>
+        connect: (id: string, credentials?: SshCredentials) => Promise<GatewayConnection>
+        disconnect: (id: string) => Promise<void>
+        statuses: () => Promise<SshStatus[]>
+        questions: () => Promise<SshQuestion[]>
+        answer: (id: string, answer: string | null) => Promise<void>
+        pickKey: () => Promise<string | null>
+        cleanKeys: (id: string) => Promise<void>
+        onStatus: (cb: (state: SshStatus) => void) => () => void
+        onQuestion: (cb: (question: SshQuestion) => void) => () => void
+        onQuestionClosed: (cb: (id: string) => void) => () => void
+      }
+      remote: {
+        open: (backend: string, channel: string, options: GatewayOptions) => Promise<unknown>
+        send: (channel: string, frame: unknown) => Promise<void>
+        close: (channel: string) => Promise<void>
+        upload: <T = unknown>(backend: string, operation: 'begin' | 'chunk' | 'finish' | 'cancel', value: Record<string, unknown>) => Promise<T>
+        onEvent: (cb: (event: RemoteEvent) => void) => () => void
       }
       getPathForFile?: (file: File) => string
       openPath?: (path: string) => Promise<string>

@@ -110,37 +110,23 @@ Open a project and you land on its home: the input island on the left starts a c
 - **Permission rules** ([permissions.md](docs/guides/permissions.md)): loaded from user-level / project-shared / project-local, evaluated Deny → Allow → Unmatched, plus a workspace boundary check.
 - **Approval modes**: `Default` (permission engine decides) · `Accept Edits` (in-workspace edits auto-approved) · `Privileged` (allow all, dangerous ops still blocked) · `Auto` (an AI classifier decides approve / ask / reject).
 
-### Multi-machine / remote
+### Multiple machines / SSH
 
-The packaged desktop app is a **multi-machine client**: it connects to the local backend on startup, and you can add remote machines under "Settings → Connections" (`wss://…/ws` + token). Sessions are organized by "machine → project → session".
+The desktop connects to a complete remote Lumi over native SSH. The new-chat project menu selects a machine and project, creates remote projects, or adds SSH hosts. Settings → Connections manages the same machines.
+
+Host discovery reads SSH config including Include; system OpenSSH resolves users, ports, identities and jump hosts. Authentication supports key files, pasted keys, passwords and passphrases, with first-use fingerprint confirmation. Remote Lumi owns model calls, tools, conversations and files. The desktop prepares the environment and SSH data channel; service-address/token entry has been removed. The folder picker browses the target machine and accepts paths.
 
 ## Distribution / deployment
 
-Lumi ships as two artifacts: the **backend `lumi`** (`lumi serve`, local or on a server) + the **desktop client** (Electron, connects to local/remote).
+Build the complete desktop bundle with the local backend and portable remote wheel:
 
-**One-line server install** (Linux + systemd — see the [deployment guide](docs/guides/deploy.md)):
+    ./scripts/build-desktop.sh
 
-```bash
-curl -fsSL https://raw.githubusercontent.com/deku0818/Lumi/main/scripts/install.sh | sudo sh
-```
+Remote hosts support Linux (systemd user services with linger) and macOS (the logged-in user's launchd). Python 3 is required; uv prepares Python 3.12 and an isolated environment. No sudo or additional Lumi TCP port is needed. See the [SSH remote guide](docs/guides/deploy.md).
 
-Installs the package, writes `lumi.service`, starts it, **verifies with a real handshake** (a wrong token must be rejected — otherwise anyone who reaches the port gets in), and prints the connection string. The service runs as **the person who invoked it**, with data in their own `~/.lumi` — no extra system user; `--user` overrides. Re-run to upgrade; the token is kept.
+Remote data remains in the SSH user's `~/.lumi`. A resident process holds an instance lock and communicates through a private Unix socket and the SSH byte stream. Disconnecting leaves it running. Desktop and remote versions must match. Version 0.2 service-address connections and automatic migration are no longer supported; existing services are never stopped automatically.
 
-Point the desktop client's "Settings → Connections" at the printed `ws://<host-ip>:8765/ws?token=…`; model API keys are configured in the desktop app, not on the server. Day-to-day: `lumi update`, `lumi status`, `lumi logs -f`.
-
-```bash
-# Run one locally
-lumi serve --port 8765 --token <secret>
-
-# Backend (Docker)
-docker run -p 8765:8765 -v ~/.lumi:/root/.lumi -v "$PWD":"$PWD" \
-  -e LUMI_TOKEN=<secret> ycw0818/lumi-harness
-
-# Desktop client installers (dmg / exe / AppImage)
-cd desktop && npm install && npm run dist
-```
-
-The data directory defaults to `~/.lumi`; `LUMI_CONFIG_DIR` relocates all of it (keys, sessions, memory, logs, toolbox). For public deployments, always terminate TLS (`wss://`) behind Caddy/nginx and set a token — never expose plain `ws` directly.
+CLI, HTTP API and container deployments remain independent interfaces, not desktop remote connection methods.
 
 ## Built-in tools
 

@@ -36,6 +36,8 @@ from lumi.gateway.channels.feishu.parse import (
 from lumi.sessions.thread_runs import thread_runs
 from lumi.utils.constants import FEISHU_THREAD_PREFIX
 
+pytestmark = pytest.mark.usefixtures("ws_client")
+
 
 # ── thread 派生 ──
 def test_feishu_thread_id_is_dns1035():
@@ -2067,8 +2069,10 @@ async def test_feishu_pool_creates_noninteractive_sessions(monkeypatch):
 def _run_turn_channel():
     from unittest.mock import AsyncMock, MagicMock
 
+    from lumi.gateway.channels.feishu.streaming import FeishuStreaming
+
     channel = MagicMock()
-    channel.streaming = AsyncMock()
+    channel.streaming = MagicMock(spec=FeishuStreaming)
     channel.send_markdown = AsyncMock()
     channel.config.tool_mode = "auto"
     return channel
@@ -2115,6 +2119,7 @@ async def test_run_turn_exception_closes_graph_and_reports():
     channel = _run_turn_channel()
     await outbound.run_turn(channel, _Bridge(), chat_id="c", reply_to="m", content="hi")
     assert len(finalized) == 1
+    channel.streaming.mark.assert_called_once_with("c")
     channel.streaming.end.assert_awaited()
     assert "出错" in channel.send_markdown.await_args.kwargs["title"]
 

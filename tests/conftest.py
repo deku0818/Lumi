@@ -14,6 +14,7 @@ os.environ["PATH"] += os.pathsep + os.path.join(
 os.environ["LUMI_CONFIG_DIR"] = tempfile.mkdtemp(prefix="lumi-test-")
 
 import pytest  # noqa: E402
+import pytest_asyncio
 
 import lumi.agents.runtime.bg_tasks as task_registry
 import lumi.agents.runtime.workspace as workspace
@@ -283,6 +284,14 @@ def http_client():
     transport = httpx.ASGITransport(app=ws.app)
     yield httpx.AsyncClient(transport=transport, base_url="http://test")
     ws.app.state.token = ""
+
+
+@pytest_asyncio.fixture(scope="session", loop_scope="session")
+async def ws_client():
+    """在测试会话拥有的活跃 loop 中导入 SDK，避免 import 期创建无人关闭的 fallback。"""
+    import lark_oapi.ws.client as client
+
+    return client
 
 
 def apply_messages_update(existing: list, update) -> list:

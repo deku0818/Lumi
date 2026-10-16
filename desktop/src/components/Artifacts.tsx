@@ -44,15 +44,12 @@ export function parseArtifacts(output: string): Artifact[] {
 
 const ext = (f: Artifact) => (f.name || f.path).toLowerCase().split('.').pop() || ''
 
-// 内容取用通道的唯一决策点：本地走 lumi-file 零拷贝，远程经该机器 serve 的 /file 端点流回
+// 内容取用通道的唯一决策点：本地走 lumi-file 零拷贝，远程通过 SSH 数据通道取回
 export const contentUrl = (path: string, remote?: boolean, gw?: Gateway) =>
-  remote && gw ? gw.fileHttpUrl(path) : fileUrl(path)
+  remote && gw ? gw.fileUrl(path) : fileUrl(path)
 
-// 远程 iframe 内容经鉴权 fetch 落 blob: URL 再喂——token 只留在父应用的 fetch 里，
-// 不进 iframe 可读的 location。sandbox=allow-scripts 的脚本本可读 location.href 偷出
-// URL 里的 token，再拿它打 CORS='*' 的 /file 端点读任意远程文件外传；改喂 blob 后
-// 帧的 location 是 blob:null（opaque origin，无 token、连远程 host 都不知道），
-// 这条链彻底断掉。本地 lumi-file:// URL 无 token，直接用不 fetch。
+// Remote HTML stays in an opaque blob iframe. The private file protocol only accepts
+// requests from the application frame, so artifact scripts cannot read other files.
 function useFrameSrc(url: string, remote?: boolean): { src: string; loading: boolean; err: boolean } {
   const [blob, setBlob] = useState('')
   const [err, setErr] = useState(false)
@@ -82,18 +79,15 @@ function useFrameSrc(url: string, remote?: boolean): { src: string; loading: boo
   return { src: blob, loading: !blob && !err, err }
 }
 
-// 带脚本的 iframe 预览（html / office 渲染产物）：远程经 blob 通道（见 useFrameSrc），
-// 本地直用 lumi-file URL。pdf/图片不走这里——它们不跑脚本，token 在 URL 里也无从外泄，
-// 且直用 URL 能让 Chromium 按需分段拉取，不必整块 blob 进内存。
-function FramePreview({
-  url,
-  title,
-  remote,
-}: {
+// 远程 iframe 均由主页面 fetch 后加载 blob；HTML 隔离脚本，PDF 使用内置查看器。
+type FramePreviewProps = {
   url: string
   title: string
   remote?: boolean
-}) {
+  pdf?: boolean
+}
+
+function FramePreview({ url, title, remote, pdf = false }: FramePreviewProps): JSX.Element | null {
   const { t } = useI18n()
   const { src, loading, err } = useFrameSrc(url, remote)
   if (err) return <div className="p-6 text-sm text-error/80">{t('files.loadFailed')}</div>
@@ -103,9 +97,8 @@ function FramePreview({
       src={src}
       title={title}
       className="w-full h-full border-0"
-      // opaque origin + 无 token（blob:null / 本地 lumi-file 无 token）：脚本可跑让
-      // 交互页正常，但读不到本地文件、也偷不到 token
-      sandbox="allow-scripts"
+      // HTML 使用 opaque origin；PDF 交给内置查看器，不能加禁用插件的 sandbox。
+      sandbox={pdf ? undefined : 'allow-scripts'}
     />
   )
 }
@@ -211,8 +204,8 @@ export function FileCards({
 }
 
 // ── 预览内容：由 PreviewWindow 管理标签、缩放与关闭 ──
-// gw：当前会话所在机器的连接，Office 转换 RPC / 就地安装 / 远程文件 HTTP 通道走它；
-// remote：文件在远程后端，内容经 gw.fileHttpUrl 流回，本地打开/访达按钮隐藏
+// gw：当前会话所在机器的连接，Office 转换 RPC / 就地安装 / 远程 SSH 文件通道走它；
+// remote：文件在远程后端，内容经 gw.fileUrl 流回，本地打开/访达按钮隐藏
 type PreviewContentProps = {
   file: Artifact
   gw?: Gateway
@@ -222,7 +215,7 @@ type PreviewContentProps = {
 export function PreviewContent({ file, gw, remote }: PreviewContentProps): JSX.Element {
   // 存在性只在打开预览时探测一次（卡片渲染不探）：null=检查中，true/false=结果。
   // nonce 递增 = 「重新检查」重新探测（文件可能又回来了）。远程文件用 HEAD 探测
-  // （/file 端点原生支持），本地走主进程 IPC。
+  // （SSH 文件协议支持），本地走主进程 IPC。
   const [exists, setExists] = useState<boolean | null>(null)
   const [nonce, setNonce] = useState(0)
   useEffect(() => {
@@ -234,7 +227,7 @@ export function PreviewContent({ file, gw, remote }: PreviewContentProps): JSX.E
     if (!remote) {
       probe = Promise.resolve(window.lumi.pathExists?.(file.path) ?? true)
     } else if (gw) {
-      probe = fetch(gw.fileHttpUrl(file.path), { method: 'HEAD' }).then((r) => r.status !== 404)
+      probe = fetch(gw.fileUrl(file.path), { method: 'HEAD' }).then((r) => r.status !== 404)
     } else {
       probe = Promise.resolve(true)
     }
@@ -282,7 +275,9 @@ function MissingState({ file, onRecheck }: { file: Artifact; onRecheck: () => vo
   )
 }
 
-function PreviewBody({ file, gw, remote }: { file: Artifact; gw?: Gateway; remote?: boolean }) {
+type PreviewBodyProps = { file: Artifact; gw?: Gateway; remote?: boolean }
+
+export function PreviewBody({ file, gw, remote }: PreviewBodyProps): JSX.Element {
   const { t } = useI18n()
   const kind = previewKind(file)
   // 远程但无该机连接：宁可报加载失败，也不落回 lumi-file 读本地盘——同路径文件
@@ -299,12 +294,10 @@ function PreviewBody({ file, gw, remote }: { file: Artifact; gw?: Gateway; remot
         <img src={url} alt={file.name} className="max-w-full rounded-lg border border-line" />
       </div>
     )
-  // pdf 不跑脚本，直用 URL（Chromium PDF 查看器按需分段拉取，不整块进内存）
+  // 远程 PDF 也由主页面取回，避免子 frame 直接访问受限的文件协议。
   if (kind === 'pdf')
-    return (
-      <iframe src={url} title={file.name || file.path} className="w-full h-full border-0" />
-    )
-  // html 可能带脚本 → 走 blob 通道（远程）隔绝 token，见 FramePreview
+    return <FramePreview url={url} title={file.name || file.path} remote={remote} pdf />
+  // html 可能带脚本 → 走 blob 通道（远程）隔离文件访问，见 FramePreview
   if (kind === 'html')
     return <FramePreview url={url} title={file.name || file.path} remote={remote} />
   if (kind === 'markdown' || kind === 'text')
@@ -367,7 +360,7 @@ function OfficePreview({ file, gw, remote }: { file: Artifact; gw?: Gateway; rem
   }, [gw, file.path, nonce])
 
   if (result.status === 'ready')
-    // 渲染产物生成在会话所在机器，取用通道同源文件（contentUrl）；远程经 blob 隔绝 token
+    // 渲染产物生成在会话所在机器，取用通道同源文件（contentUrl）；远程经 blob 隔离文件访问
     return (
       <FramePreview
         url={contentUrl(result.htmlPath, remote, gw)}
@@ -475,13 +468,12 @@ function TextPreview({ url, localPath, markdown }: { url: string; localPath?: st
     setText(null)
     setErr(false)
     // 本地经主进程 IPC 读头 500KB：renderer 对 lumi-file 的 fetch 恒被 CORS 拦（见 main.cjs
-    // lumi:read-text）。远程经 /file 只取头 500KB：Range 是 CORS 安全列表头（单段 bytes=0-N
-    // 不触发预检），FileResponse 原生支持 → 回 206 只传这一段，而非整块下载 49MB 只为显示 1%。
+    // lumi:read-text）。远程经 SSH 文件协议按 Range 只取头 500KB，避免整块下载。
     // slice 仍保留：服务端忽略 Range 时的兜底上限
     const read = localPath
       ? window.lumi.readText(localPath)
       : fetch(url, { headers: { Range: `bytes=0-${500_000 - 1}` } }).then((r) => {
-          // 远程 /file 通道的非 2xx（401/404/413）带空体：不查状态码会渲染成静默空白
+          // 远程文件通道的非 2xx 带空体：不查状态码会渲染成静默空白
           // （206 部分内容 r.ok 为真，正常放行）
           if (!r.ok) throw new Error(`HTTP ${r.status}`)
           return r.text()

@@ -110,37 +110,23 @@ cd Lumi
 - **权限规则**（[permissions.md](docs/guides/permissions.md)）：用户级 / 项目共享 / 项目本地三处加载，取最严格匹配（Deny > Ask > Allow > Unmatched）。
 - **审批模式**：`Default`（权限引擎判定）· `Accept Edits`（文件编辑自动放行）· `Privileged`（禁止规则拒绝，其余放行）· `Auto`（交 AI 分类器裁决 approve / reject）。
 
-### 多机 / 远程
+### 多机 / SSH 远端
 
-打包后的桌面 app 是**多机 client**：启动连本地后端，也可在「设置 → 连接」加远程机器（`wss://…/ws` + token）。会话列表按「机器 → 项目 → 会话」组织。
+桌面端原生通过 SSH 连接完整远端 Lumi。新会话输入框旁可以搜索和选择「机器 + 项目」、新建远端项目或添加 SSH 主机；设置 → 连接管理同一组机器。
+
+自动读取本机 SSH config（含 Include），由系统 OpenSSH 解析用户、端口、密钥与跳板机。支持私钥文件、粘贴私钥、密码和密钥口令；首次确认主机指纹。远端负责模型、工具、会话与文件，桌面负责环境准备与 SSH 数据通道，不再提供服务地址或 token 输入。目录选择直接浏览目标机器，也可输入路径。
 
 ## 分发 / 部署
 
-Lumi 分两个产物：**后端 `lumi`**（`lumi serve`，本地或服务器）+ **桌面 client**（Electron，连本地/远程）。
+完整桌面包包含本地后端和跨平台远端 wheel。打包：
 
-**服务器一行装完**（Linux + systemd，详见 [部署指南](docs/guides/deploy.md)）：
+    ./scripts/build-desktop.sh
 
-```bash
-curl -fsSL https://raw.githubusercontent.com/deku0818/Lumi/main/scripts/install.sh | sudo sh
-```
+SSH 远端支持 Linux（systemd 用户服务，需要 linger）和 macOS（登录用户 launchd），远端需 Python 3；uv 准备 Python 3.12 与独立环境。无需 sudo 或额外的 Lumi TCP 端口，详见 [SSH 远端指南](docs/guides/deploy.md)。
 
-装包 → 生成 `lumi.service` → 起服务 → **真握手验证**（错误令牌必须被拒，否则那是台谁都能连的机器）→ 打印连接串。服务以**调用者本人**的身份运行、数据落在他的 `~/.lumi`，不另造系统用户；`--user` 可改身份。重跑即升级，沿用原令牌。
+远端数据默认在 SSH 用户 `~/.lumi`。常驻进程通过私有 Unix socket 与 SSH 数据通道连接，保留实例锁；关闭桌面不停止远端进程。桌面与远端须为同一版本，不兼容 0.2 服务地址连接，不自动迁移或停止旧服务。
 
-桌面端「设置 → 连接」填打印出来的 `ws://<本机IP>:8765/ws?token=…`；模型 API Key 在桌面端配，服务器上不用管。日常运维：`lumi update` 升级、`lumi status` 体检、`lumi logs -f` 看日志。
-
-```bash
-# 本机跑一个
-lumi serve --port 8765 --token <口令>
-
-# 后端（Docker）
-docker run -p 8765:8765 -v ~/.lumi:/root/.lumi -v "$PWD":"$PWD" \
-  -e LUMI_TOKEN=<口令> ycw0818/lumi-harness
-
-# 桌面 client 安装包（dmg / exe / AppImage）
-cd desktop && npm install && npm run dist
-```
-
-数据目录默认 `~/.lumi`，用 `LUMI_CONFIG_DIR` 可整体改道（密钥 / 会话 / 记忆 / 日志 / 工具箱一起搬）。公网部署务必前置 Caddy/nginx 终止 TLS（`wss://`）并设置令牌，切勿裸暴露明文 `ws`。
+CLI、HTTP API 与容器镜像仍可独立使用，它们不是桌面远端连接方式。
 
 ## 内置工具
 

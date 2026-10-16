@@ -1,186 +1,56 @@
-# 服务器部署
+# SSH 远端 Lumi
 
-Lumi 后端是一个 PyPI 包（`lumi-harness`，命令叫 `lumi`）。`lumi serve` 起一个 WebSocket
-网关，桌面端连它。
+Lumi 0.3 桌面远端入口统一为原生 SSH。Agent、模型、工具、MCP、定时任务和会话运行在目标机器。桌面通过 SSH 数据通道连接常驻进程，不需要额外的 Lumi TCP 端口、服务地址或令牌。
 
-**进程怎么活着由你决定**——前台跑、systemd、Docker 都行。`lumi` 自己不做守护进程：一个
-PyPI 包做不出崩溃拉起、开机自启、资源限制，做半套只会让人误以为它守着。它只管两件自己
-才知道答案的事：这个包怎么升级（`lumi update`），以及那个跑着的服务通不通（`lumi status`）。
+## 连接与认证
 
-## 一行装完（Linux + systemd）
+从新会话机器菜单或「设置 → 连接」添加主机。自动读取本机 `~/.ssh/config` 的明确 Host 别名并递归处理 Include，通配规则不列为具体机器。选中后由系统 `ssh -G` 解析 Match、IdentityFile、ProxyJump 等语义。手动添加支持主机、用户、SSH 端口和私钥；SSH 端口默认沿用配置或 22。
 
-```bash
-curl -fsSL https://raw.githubusercontent.com/deku0818/Lumi/main/scripts/install.sh | sudo sh
-```
+认证可沿用 SSH config/ssh-agent、私钥文件、粘贴私钥或密码，口令按需输入。粘贴私钥默认仅当前连接，临时目录 0700、文件 0600；主动保存写入本机应用专用密钥目录，普通主机配置只保存引用。退出、取消和断开清理临时文件，密码与口令不持久化。本机认证询问通过 Unix socket（Windows 为命名管道）传递。
 
-装包 → 生成 `lumi.service` → 起服务 → **真握手验证** → 打印连接串。带参数：
+连接窗口展示 SSH 验证、检查环境、安装/启动和建立数据通道的真实阶段。首次安装先说明数据目录并等待确认；同版本常驻实例直接复用。首次连接确认指纹，身份变化由 OpenSSH 拒绝，不自动覆盖 known_hosts。添加主机不改写 SSH config。配置解析只针对选中的主机，不后台执行所有 Match exec 条目。
 
-```bash
-curl -fsSL https://raw.githubusercontent.com/deku0818/Lumi/main/scripts/install.sh | sudo sh -s -- --port 9000
-```
+## 远端条件
 
-| 选项 | 说明 |
-|---|---|
-| `--user <用户名>` | 服务运行身份（默认：**调用 sudo 的那个人**，不是 root，也不新建 lumi 用户） |
-| `--port <端口>` | 监听端口（默认 8765） |
-| `--token <令牌>` | 访问令牌（默认自动生成；重跑沿用原令牌） |
-| `--version <版本>` | 装指定版本（默认最新） |
-| `--data-dir <目录>` | 数据目录（默认该用户的 `~/.lumi`） |
+需 Python 3 和 Python 包网络。Linux 需 systemd 用户服务与 linger，可检查：
 
-服务以**你自己**的身份跑，数据就落在你平时的 `~/.lumi`——跟手动敲 `lumi serve` 完全一致，
-不另造系统用户、不另立数据目录。重跑即升级：沿用原令牌与数据，只换版本并重启。
+    systemctl --user show-environment
+    loginctl show-user "$USER" -p Linger
 
-卸载：
+没有 linger 时需有权限用户在目标机器启用 `loginctl enable-linger`，Lumi 不擅自 sudo。macOS 使用登录用户 LaunchAgents，需可用 GUI 用户域。Windows 远端宿主暂不支持。
 
-```bash
-sudo systemctl disable --now lumi
-sudo rm /etc/systemd/system/lumi.service /etc/lumi.env
-uv tool uninstall lumi-harness      # 数据仍留在 ~/.lumi
-```
+## 安装与实例
 
-## 手动装
+确认首次安装后，桌面上传随附 wheel。优先使用已有 uv，缺失时从官方安装器装到本实例 tools 目录。Python、缓存与虚拟环境均位于本实例，不升级全局 Python 或其他应用。
 
-不想跑脚本，或机器上没有 systemd：
+默认数据目录始终为 SSH 用户的 `~/.lumi`，高级设置可显式选择独立目录：
 
-```bash
-uv tool install lumi-harness   # 或 pipx install lumi-harness
-uv tool update-shell           # 把工具目录（~/.local/bin）加进 PATH；装完敲不到 lumi 就是缺这步
-```
+    <data>/
+      lumi.json、checkpoints、uploads、memory 等用户数据
+      remote-runtime/
+        agent.sock             # 私有 Unix socket，0600
+        instance.lock          # 常驻进程持有的独占锁，0600
+        instance.json          # 运行版本、协议、PID、程序路径，0600
+        bootstrap.lock         # 安装和启动串行化
+        versions/<version>/    # 独立运行环境
+        tools/、cache/、python/
 
-## 配
+常驻进程在整个生命周期持有实例锁，同一数据目录只能运行一个原生远端实例。进程退出后操作系统释放锁；下一次启动取得锁后才能清理遗留 socket。仅管理由该数据目录哈希派生的用户服务：Linux unit 在 `~/.config/systemd/user/`，macOS plist 在 `~/Library/LaunchAgents/`。
 
-机器级数据（密钥 / 会话 / 记忆 / 日志 / 工具箱）全在 `~/.lumi`，`LUMI_CONFIG_DIR` 可整体
-改道到别处——服务器上常指到 `/opt/lumi/data`，机器上已有 `~/.lumi` 的话把变量指过去就是
-原地接管，不必搬几百 MB 会话。
+每台机器共用一条 SSH 标准输入/输出数据通道，远端 attach 进程转接到上述 Unix socket。会话、目录操作、上传和预览都在同一通道传输，不建立 TCP 转发。常驻进程不监听 Lumi TCP 端口。
 
+## 项目与续接
 
-**模型 API Key 不在服务器上配。** 桌面端连上来之后在「设置 → 模型」里填，写进服务器的
-`<数据目录>/lumi.json`（600）。
+新会话发送前可切换机器和项目且保留草稿，首次发送才创建会话；已有会话不被重定向。项目页、项目菜单与新会话统一使用 C 文件夹选择器；目录浏览通过目标机器 `list_dir` / `make_dir`，支持上一级、主目录、面包屑、输入路径、新建和确认。「不在项目中工作」使用所选机器的主目录，不登记为项目。
 
-## 跑
+文件分块传输，每块最多 1 MiB，单文件最多 128 MiB。未完成的上传在断连时清理。远端文件预览通过桌面的 `lumi-remote:` 协议读取；HTML 预览使用隔离的 blob iframe，不能借此访问其他远端文件。
 
-```bash
-LUMI_TOKEN=<你的口令> lumi serve --host 0.0.0.0 --port 8765
-```
+关闭桌面只关闭 SSH，远端用户服务继续运行。重连复用进程并恢复历史、审批；活跃/挂起轮保留最多 8 小时。后端进程重启不保留内存审批 Future，也不自动重放副作用请求。
 
-令牌只经环境变量进程内传递，不进命令行（`ps` 里看不到）。桌面端「设置 → 连接」填
-`ws://<本机IP>:8765/ws?token=<你的口令>`。
+## 版本边界
 
-## 验
+桌面与原生远端必须为同一版本和同一传输协议，运行版本由 socket 握手确认。不同版本明确报错，不自动替换正在运行的实例。0.2 的服务地址连接、端口探测和自动迁移不再支持。
 
-```bash
-lumi status
-```
+不会自动停止旧 Docker/系统服务、删除旧数据或合并实例。若旧服务仍在使用同一个数据目录，请先由用户停止它再使用原生实例，避免两个进程写同一数据；实例锁仅约束原生远端进程。
 
-它不看「进程活着」这类指标——那种指标在一台**谁都能连**的机器上照样是绿的。真实检查是
-拿一个必然错误的令牌连一次 WS：
-
-| 结果 | 结论 |
-|---|---|
-| 被拒 | 服务活着**且**鉴权生效 ✅ |
-| 居然连上还能 `list_sessions` | 服务活着，但没设令牌，**谁都能连** ⚠️ |
-| 连不上 | 没在跑 |
-
-加 `--token <口令>` 会再跑一条正向探针，证明这台服务真能干活（端口开着但引擎卡死时，
-负向探针照样会痛快回绝）。
-
-退出码给脚本用：**0** 在跑且鉴权生效 ・ **3** 在跑但没设令牌 ・ **1** 没在跑或异常
-（安装脚本就是靠它判成败；2 留给 click 的用法错误，不占用）。
-
-日志：`lumi logs -f`。
-
-## 常驻（systemd）
-
-要开机自启与崩溃拉起，自己写一份 unit。存成 `/etc/systemd/system/lumi.service`：
-
-```ini
-[Unit]
-Description=Lumi backend (lumi serve)
-After=network-online.target
-Wants=network-online.target
-
-[Service]
-Type=simple
-User=<你的用户名>
-# ExecStart 必须写绝对路径：systemd 不读你的 shell 配置，PATH 里没有 ~/.local/bin。
-# 路径取 `uv tool dir --bin` 的输出
-ExecStart=/home/<你>/.local/bin/lumi serve --host 0.0.0.0 --port 8765
-# 显式给 HOME：机器级数据（密钥 / 会话 / 记忆 / 日志 / 工具箱）默认落在 $HOME/.lumi
-Environment=HOME=/home/<你>
-# Environment=LUMI_CONFIG_DIR=/opt/lumi/data   # 可选：另立数据目录
-# 进程从不 chdir（项目按会话绑定绝对路径），这里只是给个保证存在的落脚点，
-# 免得 cwd 落在 / 上让相对路径写进根目录
-WorkingDirectory=/home/<你>
-# 令牌经环境文件进来，不写进 ExecStart（否则 ps 里人人可见）
-EnvironmentFile=/etc/lumi.env
-Restart=always
-RestartSec=3
-
-[Install]
-WantedBy=multi-user.target
-```
-
-```bash
-echo 'LUMI_TOKEN=<你的口令>' | sudo tee /etc/lumi.env >/dev/null && sudo chmod 600 /etc/lumi.env
-sudo systemctl daemon-reload && sudo systemctl enable --now lumi
-lumi status                    # 别只看 systemctl is-active
-```
-
-服务日志 `journalctl -u lumi -f`；agent 侧日志 `lumi logs -f`。
-
-## 升级
-
-```bash
-lumi update --check            # 只看有没有新版
-lumi update                    # 升级；跑着的服务仍是旧代码，它会提示你
-sudo systemctl restart lumi    # 你的进程你重启（unit 名 / 容器名 lumi 不知道）
-lumi status                    # 复验
-```
-
-`lumi update --version <旧版本>` 可以回退到指定版本。
-
-## Docker
-
-```bash
-docker run -d --name lumi --restart unless-stopped -p 8765:8765 \
-  -e LUMI_TOKEN=<你的口令> \
-  -v /opt/lumi/data:/root/.lumi \
-  -v /srv/项目:/srv/项目 \
-  ycw0818/lumi-harness
-```
-
-镜像随 `v*` tag 发布到 Docker Hub。容器**只看得见挂进去的宿主机目录**，所以至少要挂一个
-项目目录——建议宿主机路径与容器路径写成一样的，桌面端登记项目时不用换算。
-
-Docker 模式下升级走 `docker pull` + 重建容器，不用 `lumi update`（镜像里装的包重建即丢）。
-
-## 项目目录（不是「工作区」）
-
-`lumi serve` 是多项目网关：**项目按会话绑定绝对路径**，一台机器上可以有任意多个、放在任意
-位置；未绑定项目的会话会被直接拒绝（"请先选择项目再开始对话"）。所以不存在一个全局的
-"工作目录"要配——宿主机部署下项目建在哪都行，只要服务运行身份读写得了。
-
-## TLS（公网必做）
-
-Lumi **没有沙箱**：agent 的 `bash`、文件读写直接作用于这台服务器的真实环境。明文 `ws` 上的
-令牌一旦被截，等于把这台机器交出去。用 Caddy 反代（自动签证书）：
-
-```caddyfile
-lumi.example.com {
-    reverse_proxy 127.0.0.1:8765
-}
-```
-
-桌面端改填 `wss://lumi.example.com/ws?token=<令牌>`，并把 8765 从公网防火墙关掉。
-
-## 网络受限的机器
-
-国内服务器常见两种卡点：
-
-- **装 uv 卡住**：`astral.sh/uv/install.sh` 会跳转到 GitHub Releases。变通：先装 Python 3.12，
-  `pip install uv`（PyPI 通常可达）。
-- **`lumi update` 连不上 PyPI**：给 uv / pip 配好镜像源即可，`lumi update` 用的就是它们。
-
-## 相关
-
-- 桌面端多机连接：[desktop 架构](../architecture/desktop.md)
+CLI、HTTP API 与容器仍是独立接口，不提供桌面服务地址回退。

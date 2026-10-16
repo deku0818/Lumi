@@ -115,5 +115,5 @@ uv sync
 - **日志报 `connect failed, requires python-socks`**：环境有 SOCKS 代理但缺 `python-socks`，
   重新 `uv sync`。
 - **看不懂图**：确认你在「设置 → 模型」选的是**支持视觉**的多模态模型。
-- **多机/远程**：飞书 channel 跑在 serve 所在的机器，配置和凭证也在那台机器；desktop 经 WS 远程
+- **多机/远程**：飞书 channel 跑在 Lumi 常驻进程或独立 serve 所在的机器，配置和凭证也在那台机器；desktop 经 SSH 远程
   编辑即可。

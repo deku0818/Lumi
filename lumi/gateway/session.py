@@ -476,8 +476,8 @@ async def _list_dir(session: GatewaySession, params: dict) -> dict:
             for e in os.scandir(path)
             if e.is_dir() and not e.name.startswith(".")
         )
-    except OSError:
-        dirs = []
+    except OSError as error:
+        raise ValueError(str(error)) from error
     return {
         "path": path,
         "parent": _parent_for_list_dir(path),
@@ -808,10 +808,15 @@ class GatewaySession:
         return self._bridge.current_thread_id
 
     def _ready_frame(self) -> dict:
+        from lumi import __version__
+        from lumi.gateway.protocol import PROTOCOL
+
         return event_frame(
             ServerEvent.GATEWAY_READY,
             self._bridge.current_thread_id,
             {
+                "version": __version__,
+                "protocol": PROTOCOL,
                 "model": self._bridge.model_name,
                 "workspace": self._bridge.workspace_dir,
                 # workspace 未绑定时仍会给出进程 cwd 兜底值（仅供展示），前端须据此区分

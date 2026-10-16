@@ -1,6 +1,6 @@
 # Desktop 应用架构
 
-Lumi 桌面应用（Electron + TS 前端）的内部实现。前端通过 WebSocket 复用后端的 `AgentBridge`。协议契约见 [`protocol/README.md`](../../protocol/README.md)。
+Lumi 桌面应用（Electron + TS 前端）的内部实现。前端通过本地 WebSocket 或原生 SSH 数据通道复用后端的 `AgentBridge`。协议契约见 [`protocol/README.md`](../../protocol/README.md)。
 
 > 现状：dev 模式经 `uv run lumi serve` 拉起 sidecar；打包发行走 `scripts/build-desktop.sh`——PyInstaller 打后端（onedir）经 electron-builder `extraResources` 内嵌进 app，打包版优先用内嵌后端，无则退回 PATH 上的 `lumi`（uv tool install 自装），都没有则作纯远程 client 使用。
 
@@ -10,7 +10,7 @@ Lumi 桌面应用（Electron + TS 前端）的内部实现。前端通过 WebSoc
 
 ---
 
-## 进程结构
+## 本地进程结构
 
 ```
 ┌─────────────────── Electron ───────────────────┐
@@ -35,9 +35,31 @@ Lumi 桌面应用（Electron + TS 前端）的内部实现。前端通过 WebSoc
 - **renderer**：纯前端，无 Node 访问（`contextIsolation`）。只通过 preload 暴露的 `getConnection()` 拿到 `ws://127.0.0.1:<port>/ws`。
 - **sidecar**：headless FastAPI（`lumi serve`）。
 
-## WS / JSON-RPC 帧协议
+## 原生 SSH 远端（0.3）
 
-一条 WS 连接 = 一个会话上下文（独立 `AgentBridge`，可切换 thread）。同一时刻只跑一轮用户流式响应，但所有 RPC（流式与非流式）都 spawn 成独立 task 执行，接收循环持续读帧——流式轮运行期间 `stop` 帧随时可达；需要 `run.lock` 的方法（切会话、切本会话模型等）在后台等锁，不会卡住接收循环。中断（approval/clarify）后等待 `resume`。
+桌面远端只登记 SSH 身份，不接收服务 URL/token。`ssh-ipc.cjs` 管理主机配置、认证问题队列与受控会话 IPC；`ssh-manager.cjs` 管理系统 OpenSSH、临时密钥、取消与自动恢复。`ssh-auth.cjs` 准备私有目录和 askpass 认证代理，认证询问使用私有 Unix socket，Windows 桌面使用命名管道。`remote-files.cjs` 负责文件读取、Range 响应及主 frame 访问限制。
+
+`ssh-config.cjs` 从用户配置与 Include 枚举明确主机别名；仅在选中主机后由 `ssh -G` 解析有效配置。SSH config 不被应用改写，密码、口令和私钥内容不进入普通连接配置、模型上下文或远端 Lumi。主动保存的私钥仅留在本机应用专用目录，文件 0600。
+
+打包同时分发 Python wheel 与 stdlib bootstrap。默认数据目录保持 `~/.lumi`。`lumi/remote/bootstrap.py` 经 SSH 准备 `<data>/remote-runtime/` 下的版本环境并安装 systemd 用户服务或 LaunchAgent。`lumi.remote.daemon` 持有生命周期实例锁，监听权限 0600 的 `agent.sock`，不创建 TCP 监听器；重复启动必须先取得锁，不能破坏已有 socket。旧 0.2 服务和配置没有兼容或自动迁移路径。
+
+每台机器一条长连接 SSH 启动 `lumi.remote.attach`，将 stdin/stdout 原样转接 Unix socket。`remote-wire.cjs` 与 `lumi.remote.protocol` 使用 4 字节大端长度前缀的 JSON 帧，最大 16 MiB。传输握手协议为 1，包含实际运行版本、PID、数据目录与程序路径，桌面与远端版本必须相同；Gateway 业务协议仍为 2。通道 id 将控制连接和多会话复用在同一字节流中；`SshSocket` 让 renderer Gateway 继续使用既有 RPC、事件与断连续接语义。本地 sidecar 保持 WebSocket 接口。
+
+renderer 导航、销毁或取消时释放其通道；活跃会话由既有 registry 暂存，重连按 thread 续接。SSH 断开不会停止远端常驻进程，也不自动重发副作用请求。上传与文件读取分块走同一通道，每块最多 1 MiB；断连清理未完成上传。`lumi-remote:` 协议以流方式提供主界面的远端预览与 Range 读取，子 frame 禁止调用。HTML 内容由主 frame 取回后在隔离 blob iframe 中显示。
+
+新会话首先是 ProjectTarget（机器 id + 目录）的草稿，发送第一条消息时才创建后端会话。NewChatTarget 与 ProjectCreateDialog 复用 SSH 添加流程；切换目标保留输入，历史会话不被重新定向。DirBrowser 经目标机器 RPC 浏览目录，支持输入路径；缺失或无权限的路径返回错误，不再显示可选空目录。
+
+连接界面直接使用主进程发出的 `connecting → checking → installing/starting → attaching → ready` 状态。安装确认携带实际数据目录和已安装信息；错误保留失败阶段与原因，不通过前端计时器推算进度。`SshQuestionProvider` 维护认证问题队列：打开的连接窗口承接本机对应请求，其余重连请求由全局 `SshPrompts` 处理。安装确认、主机指纹和密钥口令在同一连接窗口内展示；取消先结束待确认请求，再等待 SSH 子进程退出，避免安装确认挂起时断开死锁。
+
+所有项目入口使用同一个 C 版 `DirBrowser`，机器由调用入口指定。上级 token 原样传回后端，主目录取首次成功 RPC 的返回值；面包屑保留 POSIX、Windows 盘符和 UNC 路径。Windows 虚拟盘符列表不能被选择为目录。路径编辑、目录新建与整个弹窗的 Escape 分层处理；请求序号避免过期目录响应覆盖当前路径。列表边缘渐隐随实际滚动位置变化，短列表不渐隐。
+
+聊天输入区、选择菜单、C 文件夹弹窗和 SSH 弹窗分别采用已确认 demo 的表面参数；不叠加通用外发光。微光静止，只有正在执行的状态光点运动，并遵循系统减少动态效果偏好。搜索输入不使用黄色聚焦框，键盘菜单导航继续保留。
+
+原服务地址入口、迁移逻辑、公网安装脚本及相关测试已移除。独立 CLI/HTTP API 的健康检查继续保留，既有 Docker/系统服务不会被自动接管或停止。
+
+## Gateway JSON-RPC 帧协议
+
+一条本地 WS 连接或 SSH 逻辑通道 = 一个会话上下文（独立 `AgentBridge`，可切换 thread）。同一时刻只跑一轮用户流式响应，但所有 RPC（流式与非流式）都 spawn 成独立 task 执行，接收循环持续读帧——流式轮运行期间 `stop` 帧随时可达；需要 `run.lock` 的方法（切会话、切本会话模型等）在后台等锁，不会卡住接收循环。中断（approval/clarify）后等待 `resume`。
 
 ```
 client → server   {id, method, params}
@@ -48,11 +70,11 @@ server → client   {method:"event", params:<wire event>}       # 流式事件
 - **RPC 方法**：
   - 流式：`send_message`、`resume`、`run_command`（运行斜杠命令）、`regenerate` / `edit_resend`（时间旅行，见下方「重新生成 / 编辑重发」）。
   - 会话：`list_sessions`、`new_session`、`switch_session`、`load_history`、`pin_session`、`rename_session`、`delete_session`。
-  - 项目 / 工作目录：`list_projects`、`add_project`、`remove_project`、`rename_project`、`set_default_project`（设为/取消默认项目，至多一个，见下方「聊天必须绑定项目」）、`set_workspace`（绑定本会话项目，会话级、不动进程 cwd）。连接 URL 另可带 `?workspace=`，open 握手即把本会话引擎 pin 到该项目。
+  - 项目 / 工作目录：`list_projects`、`add_project`、`remove_project`、`rename_project`、`set_default_project`（设为/取消默认项目，至多一个，见下方「聊天必须绑定项目」）、`set_workspace`（绑定本会话项目，会话级、不动进程 cwd）。连接选项携带 `workspace`（本地 WS 为查询参数、SSH 为 open 帧字段），握手即将本会话引擎绑定到该项目。
   - 模型供应商：`list_providers`、`test_provider`、`set_provider`、`save_provider`、`delete_provider`。
   - 定时任务：`list_cron_jobs`、`create/update/delete/toggle_cron_job`、`run_cron_job`、`list_cron_runs`。
   - 其它：`stop`（中止当前流式轮）、`list_commands`（拉取斜杠命令；项目主页经目标机器的控制连接带 `workspace` 按项目取）。
-- **HTTP 旁路**（同主机同端口同 token，URL 由本连接的 WS 地址原地改写派生，保留反代路径前缀）：文件字节走不了 JSON-RPC 帧，故另开两个端点——`GET /file` 下行（远程后端的预览 / office 产物，见「artifacts 制品文件预览」）与 `POST /upload` 上行（远程后端的输入栏附件，见「输入栏文件附件」）。两者共用 `token_ok` 与 CORS 头；上传因 Content-Type 非安全清单值需应答 `OPTIONS` 预检。落盘一律归 `gateway/uploads.py`（与内联图片同一个存盘口），`ws.py` 只做鉴权 / 净化 / 闸门 / 状态码。
+- **独立 HTTP API**：`lumi serve` 仍提供鉴权的 `GET /file` 和 `POST /upload`，供 API 客户端使用。原生 SSH 桌面通过数据通道传输文件，不派生 HTTP 地址。
 - **wire 事件**：`turn.start`（真实用户轮开始，带该轮用户消息 id 及附件后端路径 `files`——乐观气泡里的 base64 图片据此换成落盘路径，与重载历史同源显示）、`message.*`、`tool.*`（含 `tool.generating`）、`clarify/approval`、`turn.complete`、`error`，加握手帧 `gateway.ready`。
 - **进程级广播事件**：`cron.result` / `cron.running` / `bg_tasks.update` / `mcp.status` 不属于任何会话。前端在 `App.tsx` 的 `PROCESS_EVENTS` 集合里声明它们，会话连接与控制连接都转给同一个 `handleEvent`——远程机器通常没有活跃会话连接，只有控制连接，不转发它的定时/后台任务在界面上就是静止的。本机经两条连接各收一次，故这些处理器一律按机器整段覆盖或自带去重。机器断连/被移除时 `clearMachineSnapshots` 清掉它那份快照，否则等不到「结束」那一帧的任务会永远显示运行中。
 
@@ -62,7 +84,7 @@ server → client   {method:"event", params:<wire event>}       # 流式事件
 
 `lumi/gateway/bridge/core.py` 是中立桥接层（desktop 与 IM 渠道共用），把 LangGraph 的原始事件封装为干净的 `BridgeEvent` 流。`EventKind` 成员值直接采用对外 wire 命名（`namespace.verb`），`lumi/gateway/protocol.py` 只做 `BridgeEvent → {type, session_id, payload}` 的 payload 重组，无额外映射层。
 
-每条 WS 连接独立持有一个 `AgentBridge` 实例，`current_thread_id` 即该连接当前会话。多会话并发时各连接互不阻塞。
+每条会话通道独立持有一个 `AgentBridge` 实例，`current_thread_id` 即该连接当前会话。多会话并发时各连接互不阻塞。
 
 进程级共享资源的边界：连接干净关闭（无活跃轮）时 `bridge.close()` 只清理该 bridge 自身；MCP 子进程、
 shell / 后台任务会话等全局单例由 `shutdown_shared_runtime()` 在 lifespan shutdown
@@ -71,14 +93,14 @@ shell / 后台任务会话等全局单例由 `shutdown_shared_runtime()` 在 lif
 的通知，不会把别的会话的任务结果注入本会话。通知续跑沿用当前会话的工具审批模式，
 不会把用户选择的特权 / AI 审批模式重置为普通模式。
 
-## 断连续接（会话与 WS 解耦）
+## 断连续接（会话与传输解耦）
 
-WS 断开时若会话仍有**活跃 / 挂起轮**（典型：挂在工具审批 / ask 上），不直接 aclose，而是把会话连同其 `AgentBridge` / parked turn / `ApprovalBroker` / 挂起 Future **原地留存**，等同 thread 的 WS 重连接回——renderer 重载（Ctrl+R）、网络抖动、休眠唤醒后，审批仍在、运行轮继续。**无需 checkpoint 重放，Future 一直在内存里**。
+通道断开时若会话仍有**活跃 / 挂起轮**（典型：挂在工具审批 / ask 上），不直接 aclose，而是把会话连同其 `AgentBridge` / parked turn / `ApprovalBroker` / 挂起 Future **原地留存**，等同 thread 的通道重连接回——renderer 重载（Ctrl+R）、网络抖动、休眠唤醒后，审批仍在、运行轮继续。**无需 checkpoint 重放，Future 一直在内存里**。
 
 - **`lumi/gateway/session_registry.py`**：进程内 `thread_id → 已 detached 的 GatewaySession`。只存 detached 会话；干净关闭 / TTL 到期即移除。
 - **`GatewaySession.detach()`**（断开且 `should_detach()`）：摘掉死 channel（换 `_NoopChannel`，断连期事件丢弃）、停掉通知轮、登记进 registry、挂 `_DETACH_TTL_SECONDS`（8h 兜底回收）。`should_detach()` 排除**纯后台通知 meta 轮**（无用户在等），除非它自身正挂着审批。
 - **`GatewaySession.reattach(channel)`**（同 thread 重连）：取消 TTL、换上新 channel、重注册广播、重起通知轮、重发 `gateway.ready`（带 `running` 与本轮开始时刻 `run_started_at`，epoch 毫秒）并把挂起的审批 / 澄清卡片再推一遍（`bridge.pending_approval_events()`）。
-- **前端配合**（`desktop/src/`）：每会话一条独立 WS（`connsRef[key]`，`key = sessionKey(backend, thread)` 复合键——IM channel 的 thread_id 按 chat_id 确定性派生，同一飞书群在本地/远程两台 server 上 thread 同名，只用 thread 当键会让两条会话在 client 里塌缩成一条，故会话身份一律带机器维度；切到别的会话不碰本会话连接）；连接 URL 带 `?thread=`（含 Ctrl+R 重载后点回会话的初次连接），后端据此在建空 bridge 前先认领回 detached 会话；`approval` / `clarify` 改按 `approval_id` 排队（渲染队首、逐个出队，并发审批不互相覆盖），重连重发按 `approval_id` 去重；`running` 据 `gateway.ready.running` 复位（断连时 `sendMessage` 的 catch 已置 false）；状态行计时由会话状态里的 `runStart` 推算（开轮时取本地时刻，重连 / 重载取 `run_started_at`），切会话、重连都不归零。
+- **前端配合**（`desktop/src/`）：每会话一条独立逻辑通道（`connsRef[key]`，`key = sessionKey(backend, thread)` 复合键——IM channel 的 thread_id 按 chat_id 确定性派生，同一飞书群在本地/远程两台 server 上 thread 同名，只用 thread 当键会让两条会话在 client 里塌缩成一条，故会话身份一律带机器维度；切到别的会话不碰本会话连接）；连接选项带 `thread`（本地为 URL 查询参数、SSH 为 open 帧字段，含 Ctrl+R 重载后点回会话的初次连接），后端据此在建空 bridge 前先认领回 detached 会话；`approval` / `clarify` 改按 `approval_id` 排队（渲染队首、逐个出队，并发审批不互相覆盖），重连重发按 `approval_id` 去重；`running` 据 `gateway.ready.running` 复位（断连时 `sendMessage` 的 catch 已置 false）；状态行计时由会话状态里的 `runStart` 推算（开轮时取本地时刻，重连 / 重载取 `run_started_at`），切会话、重连都不归零。
 - **边界**：仅 sidecar 存活的断连可救（**Case 1**）；**后端进程重启（Case 2）** 不幸存——in-memory Future 随进程消失，刻意不做落盘（见 [approval-inflight.md](./approval-inflight.md)）。`switch_session` 切回**同 thread**且有活跃轮时不收尾本轮（早返回），避免误杀正挂着的审批。
 
 ## 子代理事件归属（多层委派）
@@ -130,11 +152,11 @@ agent 运行时仍可发消息：消息不打断当前轮，而是在**下一个
 **项目 = 工作目录，随会话绑定**（不再是进程级单一 cwd）。会话列表按 checkpoint metadata 的 `workspace_dir` 过滤分组。
 
 - **会话级项目绑定**：每条 WS 连接 = 一个 bridge / 引擎，引擎在 `initialize` 时直接 pin 到本会话项目——open 握手经连接 URL 的 `?workspace=` 携带（与 `?token=` 同机制），`bridge.initialize(project_dir=...)` 据此新建权限引擎、构造本项目 config hooks、写 checkpoint 元数据。**不动进程 `os.chdir`**，故同进程多会话各绑各项目、并发互不影响。`bridge.workspace_dir` 取本引擎 `project_dir`（无引擎退回进程 cwd 兜底展示值），是会话项目的单一来源（`gateway.ready` / 元数据 / `system_info` 注入都据此）；`bridge.workspace_bound` 是与之独立的布尔态——`workspace_dir` 在未绑定时仍会给出 cwd 兜底值（仅供展示），只有 `workspace_bound` 才代表"真绑定了项目"。
-- **聊天必须绑定项目**：`GatewaySession.handle_frame` 对 `send_message` / `run_command` 在 `workspace_bound=False` 时直接拒绝（`{"error":{"message":"请先选择项目再开始对话"}}`），不放行静默退回进程 cwd 的未绑定会话——堵住"不选项目直接聊天"落在非预期 cwd 的问题。关卡刻意只加在 desktop WS 聊天入口：cron（后台调度，不经 WS）、飞书 channel（自有一道更严的关卡：`workspace` 必填，未绑定项目直接拒绝启动，见 [feishu.md](feishu.md)）都不受影响，两者都不经过 `handle_frame`。前端配合：`gateway.ready` 的 `workspace_bound` 字段告诉前端是否该把 `payload.workspace` 当真项目写进本地状态（未绑定时只是兜底展示值，写进去会污染侧栏项目分组）；app 冷启动、切会话、"新建会话" 均已改为绑定失败/无默认项目时主动跳转项目选择器，不再放行空 `workspace=''` 的会话。
+- **聊天必须绑定项目**：`GatewaySession.handle_frame` 对 `send_message` / `run_command` 在 `workspace_bound=False` 时直接拒绝（`{"error":{"message":"请先选择项目再开始对话"}}`），不放行静默退回进程 cwd 的未绑定会话——堵住"不选项目直接聊天"落在非预期 cwd 的问题。关卡刻意只加在 desktop WS 聊天入口：cron（后台调度，不经 WS）、飞书 channel（自有一道更严的关卡：`workspace` 必填，未绑定项目直接拒绝启动，见 [feishu.md](feishu.md)）都不受影响，两者都不经过 `handle_frame`。前端配合：`gateway.ready` 的 `workspace_bound` 字段告诉前端是否该把 `payload.workspace` 当真项目写进本地状态（未绑定时只是兜底展示值，写进去会污染侧栏项目分组）；已有会话仍绑定真实项目；新会话先保留目标草稿，发送前必须明确工作目录，不放行空 `workspace=''` 的会话。「不在项目中工作」显式读取所选机器主目录作为工作目录，不登记项目，也不绕过后端绑定检查。
 - **per-run 项目 / hooks 注入**：bridge 在每轮 `_stream` 起点通过 `set_project_source` 注入会话项目目录，通过 `set_run_config_hooks` 注入 config hooks。contextvar 隔离并发 run；serve 下 cron 也走同一入口。项目目录用于文件路径解析和 Bash 初始 cwd，不限制文件访问范围。详见 [permissions.md](permissions.md) / [hooks.md](hooks.md)。
 - **`set_workspace`（会话级改项目）**：只 rebase 本 bridge 引擎、重载本会话 config hooks、更新元数据、重置本会话当前 thread 的持久 shell——**不 chdir、不影响其它会话**。原 `_active_bridges` 进程级 rebase-all 已随 cwd 进程级模型一并移除。前端「打开项目」= 经 open 握手开一条绑定到该项目的新会话（不再先 `set_workspace` 改进程态）；`set_workspace` RPC 主要用于原地改当前会话项目（及未来复用单连接的非 desktop client）。`set_workspace` 在 `_dispatch` 中持 `run.lock`，与运行中的轮次互斥。
 - **项目清单**：纯手动登记，持久化在 `~/.lumi/lumi.json` 的 `projects` 分区（`lumi/gateway/projects.py`，复用 `_atomic_write_json`），按 `last_used` 降序。`list_projects` 只返回 `{projects}`——不下发「当前项目」：项目随会话绑定，项目页高亮由前端按活动会话的 `workspaceDir` 决定（同机器才高亮）；`add_project`（缺省用目录末端名，重复添加保留用户重命名）/ `remove_project`（只删条目，不动磁盘）/ `rename_project`。`last_used` 在真正用到项目时经 `touch_project` 刷新：带 `?workspace=` 打开会话连接且绑定成功、`switch_session` 本次确认了绑定、`set_workspace` 成功。
-- **默认项目**：每条目可带 `default: bool`，`set_default_project(path, default)` 保证至多一个默认（设新的自动顶掉旧的；取消默认只清目标自身，不碰其它条目）。前端"新建会话"（`App.tsx::goNewChat`，app 冷启动路径同款逻辑）每次都问后端要最新 `list_projects()`（不信任本地缓存，default 可能刚在别的窗口/设备改过），有默认项目直接绑定新会话，没有则跳项目选择器（顶部提示"选一个项目开始对话；点「⋯」→「设为默认」，以后新建会话直接进"）。`ProjectsPage` 项目卡「⋯」菜单可设为/取消默认，卡片名旁挂静止金星标记（`.proj-star`，设为默认那一刻光环扩散一次）。
+- **默认项目**：每条目可带 `default: bool`，`set_default_project(path, default)` 保证至多一个默认（设新的自动顶掉旧的；取消默认只清目标自身，不碰其它条目）。前端"新建会话"（`App.tsx::goNewChat`，app 冷启动路径同款逻辑）每次都问后端要最新 `list_projects()`（不信任本地缓存，default 可能刚在别的窗口/设备改过），有默认项目作为新会话的目标草稿，没有则由输入框旁项目菜单选择（顶部提示"选一个项目开始对话；点「⋯」→「设为默认」，以后新建会话直接进"）。`ProjectsPage` 项目卡「⋯」菜单可设为/取消默认，卡片名旁挂静止金星标记（`.proj-star`，设为默认那一刻光环扩散一次）。
   - **默认的兜底两条**：清单原本为空时 `add_project` 直接把首个项目标为默认（新用户建完就能开聊）；清单非空但**所有条目都不含 `default` 键**（= 该机制上线前登记、从没碰过它）时，`list_projects` 一次性把最近使用的回填为默认并落盘。判据是「有没有这个键」而非「值真不真」——主动取消过默认的人条目上是 `default: False`，带键即不回填，用户意愿不会被覆盖。
 - **持久 shell 按会话 / 子代理隔离**：bash 的持久 shell 不再全进程共用一个，而是按 `current_thread_id` 分（会话私有，`cd`/env 不串别的会话），断连（`bridge.close`）/ 删会话（`delete_thread`）时回收，避免长跑 serve 累积孤儿进程。子代理（`agent` 工具）经 `shell_session.run_with_shell` 在 `copy_context` 副本里用专属 key 跑、拿独立 shell（`cd` 不污染父 / 兄弟、用完即弃），不继承父 shell 状态（在项目根 fresh 起）。
 - **前端**：侧栏「项目」入口（`onOpenProjects`）打开 `ProjectsPage`（搜索 + 排序 + 卡片，当前项目金描边）；`DirBrowser`（经 `list_dir` RPC 浏览后端目录）新建项目。
@@ -251,7 +273,7 @@ cron 子系统是进程级资源（与会话无关）：serve 在 lifespan 中�
 
 `<attached-file>` 是纯模型侧约定（agent 用 read 读取路径）：前端经 wire `files` 参数只发路径数组，`bridge._build_user_message` 统一拼标签块注入 content（`injected_prefix` 计数）并把 `{path, name}` 写进显示声明 `lumi.items` 的 `files`；历史恢复的文件胶囊直接读 items，不解析正文。标签名 `ATTACHED_FILE_TAG` 定义在 `lumi/utils/constants.py`。气泡内文件渲染成品牌金描边胶囊（仅文件名 + hover tooltip）。
 
-**远程后端**：上面那条绝对路径是**前端本机**的，在对端机器上并不存在——直接发过去 agent 只会 read 到个 404。故附件上行的取值收敛在 `gateway.resolveAttachments(atts, remote)`（对应下行的 `contentUrl`）：本地后端原样用路径（零拷贝），远程后端先把文件内容 `POST /upload` 传过去、改用返回的对端路径。附件本体（`File`）为此留在输入栏附件项上，上传排在乐观气泡之后（大文件不卡输入反馈），失败则把正文与附件原样还回输入框。图片天然无此问题——它们本就以 base64 走 WS 到后端存盘。`save_upload` 的 128MB 上限边收边数（分块传输不带 Content-Length 也拦得住，超限回 413），超限 / 客户端中途断开都连同独占目录删掉半截文件。
+**远程后端**：附件路径指向前端本机，在目标机器上不存在。`gateway.resolveAttachments(atts, remote)` 本地直接返回路径，远端通过 SSH 分块上传并返回对端路径，每块最多 1 MiB，单文件上限 128 MiB。附件 `File` 留在输入栏条目上，上传排在乐观气泡之后，失败则恢复正文与附件。SSH 图片与普通文件统一分块上传，消息只携带对端路径；本地图片继续使用内联消息块。取消或断连清理未完成的独占上传目录。
 
 **上传保留**：`~/.lumi/uploads/` 下的文件（远程附件 + 内联图片）随会话删除回收——`bridge.delete_thread` 删 checkpoint 前先读出该会话消息 `lumi.items[].files` 声明的路径，删后经 `uploads.remove_uploads` 只删落在 uploads 目录里的那些（本地后端附件是用户原文件，绝不碰）。已被压缩 / 时间旅行截掉的消息声明的附件不在当前历史里，不回收。office 预览缓存（`~/.lumi/cache/office_preview/`）在 `gateway_process()` 启动时清掉 7 天前生成的产物（`office_rpc.prune_cache`）。
 
@@ -262,7 +284,7 @@ Agent 产出文件后调 `artifacts` 工具把它们作为「制品」呈现给�
 - **权限规则**：`artifacts` 默认 allow；用户配置的 deny / ask 仍参与权限评估。
 - **聊天卡片**（`FileCards`，`desktop/src/components/Artifacts.tsx`）：artifacts 在 `groupItems` 里单独成段（不并入灰色工具组），解析一次 JSON 缓存在段上（随 `items` 记忆化）。每个文件渲染成单色类型图标卡片（按 `kind` 选 lucide 字形，不上彩色）+ 文件名 + 类型/大小 + 「Show in Folder」按钮。**卡片层不加载任何文件字节**。
 - **预览浮卡**（`PreviewWindow` + `PreviewContent`）：与执行记录、后台任务共用 `RightRail`。顶部一行文件 tab、更多菜单、放大/缩回及关闭；同路径重复打开切回已有 tab，关闭当前 tab 后选相邻文件，最后一个 tab 关闭后移除浮卡。小窗缩放真实内容，点击放大后原地铺满工作区；各 tab 内容保持挂载，切换和缩放保留模型与滚动状态。整组收放图标在放大时移到右上角，收起时恢复普通布局。切会话自动关闭全部 tab，预览状态同时校验机器与会话身份。内容仍在打开时探测存在性，缺失时显示 `MissingState` 与重新检查入口。
-- **预览分型**：图片 / PDF / HTML 经 `lumi-file://` 协议内嵌（`<img>`/`<iframe>`），文本 / Markdown 本地经主进程 IPC `lumi:read-text` 读头 500KB（renderer 对 `lumi-file` 的 fetch 恒被 CORS 拦——自定义协议不在跨源白名单，也不能开 `corsEnabled`，否则打穿下述 HTML 沙箱），远程经 `/file` 带 `Range` 取头 500KB，读后渲染；视频 / 音频 / Office / 未知类型 → 统一 `NoPreview`（提示 + 「用系统应用打开」）。**大小门控**：`> 50MB`（UI 阈值，用元数据 `size` 判定不读文件）走 `NoPreview` 提示「文件较大」。**HTML 安全**：`sandbox="allow-scripts"`（不带 `allow-same-origin`）——脚本可运行让交互页正常，但 iframe 是 opaque origin，对 `lumi-file` 的 fetch 跨域被拦，恶意页读不到本地文件外传。
+- **预览分型**：本地图片 / PDF / HTML 经 `lumi-file:` 协议，文本经 `lumi:read-text` 读取前 500 KiB。远端图片走 `lumi-remote:`，文本使用 Range 读取前 500 KiB；PDF 与 HTML 由主 frame 取回后生成 blob iframe。超过 50 MiB 的 UI 预览进入文件较大提示。HTML 使用 `sandbox="allow-scripts"`，不带 `allow-same-origin`；本地文件跨域读取被阻止，远端协议在 webRequest 层拒绝子 frame 请求。
 - **`lumi-file://` 协议**：`electron/main.cjs` 以 `protocol.registerSchemesAsPrivileged` + `protocol.handle` 实现，让 renderer 在 http origin 下安全引用本地文件（绕过 `file://` 限制）。URL 形如 `lumi-file://local/<abs-path>`（固定 host=local，自定义 standard scheme 不允许空 host；各路径段 `encodeURIComponent`）。handler 先 `stat`，`> MAX_SERVE_BYTES`(128MB) 返 413（兜底防超大文件读进内存撑爆主进程），否则按 `PREVIEW_MIME` 设 content-type 返回。
 - **IPC**：`lumi:open-path`（`shell.openPath`）/ `lumi:reveal-path`（`shell.showItemInFolder`）/ `lumi:path-exists`（异步 `fs.promises.access`，避免离线网络盘同步阻塞主进程），经 `preload.cjs` 暴露为 `window.lumi.{openPath,revealInFolder,pathExists}`。
 
@@ -321,7 +343,10 @@ macOS 关窗后应用驻留 Dock，sidecar 保持运行，Dock 唤起（activate
 | `desktop/electron/main.cjs` | sidecar 生命周期、窗口、端口分配 |
 | `desktop/electron/updater.cjs` | 应用内更新状态机（Win/Linux 全自动、macOS 半自动） |
 | `desktop/src/{update.ts,components/AboutPanel.tsx}` | 更新状态订阅 hook + 设置→关于面板 |
-| `desktop/src/gateway.ts` | WS JSON-RPC 客户端（指数退避自动重连，超 `MAX_RETRY` 转 `failed` 态，等用户手动重连或窗口焦点 / 网络恢复时 `wake()`；`setUrl` 支持改址重连；URL 可带 `?workspace=` open 握手 pin 项目） |
+| `desktop/src/gateway.ts` | 本地 WebSocket / SSH JSON-RPC 客户端，负责请求、握手和指数退避；`rebase` 更新连接信息，`wake` 恢复已耗尽重试的连接 |
+| `desktop/src/gatewayConnections.ts` | 控制连接复用、聊天连接的 thread 身份、断线续接与历史对账；App 通过回调接收状态和事件 |
+| `desktop/src/messageDelivery.ts` | 本地图片内联、远程附件上传与消息派发；失败交回调用方恢复草稿 |
+| `desktop/src/lib/sshFormState.ts` | SSH 表单字段初始化及字段、临时凭证、连接过程的独立类型 |
 | `desktop/src/App.tsx` | 会话状态机、事件路由、聊天流渲染 |
 | `desktop/src/components/Sidebar.tsx` | 会话列表 + 右键菜单 + 内联重命名 |
 | `desktop/src/components/ResizeHandle.tsx` | 边栏拖拽调宽（`useResizableWidth` hook + 分隔条，宽度持久化） |

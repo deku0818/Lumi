@@ -1,6 +1,17 @@
 // 上下文隔离桥：只暴露受控的连接信息获取接口，不给 renderer 任何 Node 能力。
 const { contextBridge, ipcRenderer, webUtils } = require('electron')
 
+const remoteListeners = new Set()
+ipcRenderer.on('lumi:remote:event', (_event, frame) => { for (const cb of remoteListeners) cb(frame) })
+
+function subscribe(event, callback) {
+  function listener(_event, value) {
+    callback(value)
+  }
+  ipcRenderer.on(event, listener)
+  return () => ipcRenderer.removeListener(event, listener)
+}
+
 contextBridge.exposeInMainWorld('lumi', {
   platform: process.platform,
   windowControls: {
@@ -27,8 +38,32 @@ contextBridge.exposeInMainWorld('lumi', {
   // 多机后端注册表：本地 sidecar 恒在（id=local），远程机器可增删
   backends: {
     list: () => ipcRenderer.invoke('lumi:backends:list'),
-    save: (b) => ipcRenderer.invoke('lumi:backends:save', b),
+    save: (b, credentials) => ipcRenderer.invoke('lumi:backends:save', b, credentials),
     remove: (id) => ipcRenderer.invoke('lumi:backends:remove', id),
+  },
+  ssh: {
+    hosts: () => ipcRenderer.invoke('lumi:ssh:hosts'),
+    resolve: (config) => ipcRenderer.invoke('lumi:ssh:resolve', config),
+    connect: (id, credentials) => ipcRenderer.invoke('lumi:ssh:connect', id, credentials),
+    disconnect: (id) => ipcRenderer.invoke('lumi:ssh:disconnect', id),
+    statuses: () => ipcRenderer.invoke('lumi:ssh:statuses'),
+    questions: () => ipcRenderer.invoke('lumi:ssh:questions'),
+    answer: (id, answer) => ipcRenderer.invoke('lumi:ssh:answer', id, answer),
+    pickKey: () => ipcRenderer.invoke('lumi:ssh:pick-key'),
+    cleanKeys: (id) => ipcRenderer.invoke('lumi:ssh:clean-keys', id),
+    onStatus: (cb) => subscribe('lumi:ssh:status', cb),
+    onQuestion: (cb) => subscribe('lumi:ssh:question', cb),
+    onQuestionClosed: (cb) => subscribe('lumi:ssh:question-closed', cb),
+  },
+  remote: {
+    open: (machine, channel, options) => ipcRenderer.invoke('lumi:remote:open', machine, channel, options),
+    send: (channel, frame) => ipcRenderer.invoke('lumi:remote:send', channel, frame),
+    close: channel => ipcRenderer.invoke('lumi:remote:close', channel),
+    upload: (machine, operation, value) => ipcRenderer.invoke('lumi:remote:upload', machine, operation, value),
+    onEvent: cb => {
+      remoteListeners.add(cb)
+      return () => remoteListeners.delete(cb)
+    },
   },
   // artifacts 预览：用系统应用打开 / 在访达中显示 / 探测文件是否还在 / 读本地文本
   openPath: (p) => ipcRenderer.invoke('lumi:open-path', p),

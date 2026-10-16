@@ -14,6 +14,8 @@ from enum import StrEnum
 
 from lumi.gateway.bridge import BridgeEvent, EventKind
 
+PROTOCOL = 2
+
 
 class ServerEvent(StrEnum):
     """不经 BridgeEvent、由服务端直接广播的 wire 事件。

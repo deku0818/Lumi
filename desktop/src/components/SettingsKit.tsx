@@ -1,12 +1,12 @@
-import { type ComponentProps, type ReactNode, useRef, useState } from 'react'
-import { Check, Copy, Eye, EyeOff, Plus, X, type LucideIcon } from 'lucide-react'
+import { type ComponentProps, type JSX, type ReactNode, useRef, useState } from 'react'
+import { Check, ChevronDown, Copy, Eye, EyeOff, Plus, X, type LucideIcon } from 'lucide-react'
 import type { CheckTone, EnvProgress } from '../types'
 import { cn } from '@/lib/utils'
 import { useI18n } from '../i18n'
 import { CARD_L2 } from './glass'
 import { SegmentIndicator } from './ui/segment-indicator'
 import { Button } from '@/components/ui/button'
-import { Dialog, DialogContent, DialogHeader, DialogTitle } from '@/components/ui/dialog'
+import { Dialog, DialogContent, DialogHeader, DialogTitle, DialogDescription } from '@/components/ui/dialog'
 import './orb.css'
 
 // 分段控件 / 步进器共用的药丸容器（SettingsDialog 的 stepper 也 import 复用，避免边框透明度漂移）。
@@ -98,7 +98,7 @@ export function Field({
   )
 }
 
-// 统一输入框样式（合并原三套 bg-canvas/60·bg-surface·bg-canvas 的分歧）。只经 TextInput / SecretInput 使用。
+// 表单控件共用的基础样式：文字、凭证、原生下拉框保持一致。
 const inputClass =
   'w-full h-9 px-3 rounded-lg text-sm bg-canvas/50 text-ink border border-line/50 outline-none transition focus:border-primary/50 focus:ring-2 focus:ring-primary/15 placeholder:text-muted-foreground/50'
 
@@ -106,6 +106,18 @@ export function TextInput({ type, className, ...props }: ComponentProps<'input'>
   // cn = clsx + tailwind-merge：调用方的 className 能正确覆盖 inputClass 里的冲突项（如 h-8 覆盖 h-9）。
   // type 透传：text/time/number 都走本组件；凭证类输入用 SecretInput。
   return <input type={type ?? 'text'} className={cn(inputClass, className)} {...props} />
+}
+
+// 保留原生选择与键盘行为；箭头单独定位，避免浏览器默认箭头贴边。
+type NativeSelectProps = ComponentProps<'select'>
+
+export function NativeSelect({ className, ...props }: NativeSelectProps): JSX.Element {
+  return (
+    <div className="relative">
+      <select className={cn(inputClass, 'appearance-none pr-9 truncate disabled:opacity-50', className)} {...props} />
+      <ChevronDown size={14} aria-hidden="true" className={cn('pointer-events-none absolute right-3 top-1/2 -translate-y-1/2 text-muted-foreground', props.disabled && 'opacity-50')} />
+    </div>
+  )
 }
 
 // 凭证输入框（受控，value 必为 string）：小眼睛切换明文/密文 + 一键复制
@@ -488,30 +500,35 @@ export function Loading({ className }: { className?: string }) {
 // 表单弹窗外壳：统一头(标题) / 体(可滚动) / 尾(操作条)。渠道、远程机器、Provider 三处编辑/添加共用。
 // 约定「条件挂载即打开」——调用方用 {editing && <FormModal .../>} 控制显隐，故无需 open 属性。
 // footer 内容由各表单自排（约定：左侧测试/次要操作，右侧取消/保存，用 <div className="flex-1" /> 撑开）。
+type FormModalProps = {
+  onClose: () => void
+  title: ReactNode
+  footer?: ReactNode
+  description?: ReactNode
+  children: ReactNode
+  className?: string
+  bodyClassName?: string
+}
+
 export function FormModal({
   onClose,
   title,
+  description,
   footer,
   children,
   className = 'sm:max-w-md',
   bodyClassName = 'max-h-[62vh]',
-}: {
-  onClose: () => void
-  title: ReactNode
-  footer?: ReactNode
-  children: ReactNode
-  className?: string
-  bodyClassName?: string
-}) {
+}: FormModalProps): JSX.Element {
   return (
     <Dialog open onOpenChange={(o) => !o && onClose()}>
       <DialogContent showCloseButton className={cn('p-0 gap-0 overflow-hidden', className)}>
         <DialogHeader className="px-5 pt-5 pb-3 border-b border-line/40">
-          <DialogTitle className="text-sm">{title}</DialogTitle>
+          <DialogTitle className="text-sm text-ink">{title}</DialogTitle>
+          {description && <DialogDescription className="text-[11px] text-muted-foreground">{description}</DialogDescription>}
         </DialogHeader>
         <div className={cn('px-5 py-4 overflow-auto', bodyClassName)}>{children}</div>
         {footer && (
-          <div className="px-5 py-3.5 border-t border-line/40 flex items-center gap-3">{footer}</div>
+          <div className="form-modal-footer px-5 py-3.5 border-t border-line/40 flex items-center gap-3">{footer}</div>
         )}
       </DialogContent>
     </Dialog>

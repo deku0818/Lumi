@@ -28,6 +28,8 @@ uv run --managed-python --python 3.12 --with pyinstaller pyinstaller \
   --collect-data lumi --copy-metadata lumi-harness \
   scripts/pyinstaller_entry.py
 
+uv build --wheel --out-dir dist/remote
+
 echo "── 桌面安装包 (electron-builder) ──"
 cd desktop
 # npm ci：清光 node_modules 按 lockfile 精确重装（electron 二进制走 ~/Library/Caches/electron 缓存，不依赖网络）
