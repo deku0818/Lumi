@@ -2,12 +2,18 @@ name: Build Desktop
 
 # 云端出 Windows(.exe) + macOS(.dmg) 桌面安装包。
 # PyInstaller 不能交叉编译，故每个平台在各自 runner 上原生构建（复用 scripts/build-desktop.sh）。
-# 触发：推 v* tag 自动构建并附到 Release；也可在 Actions 页手动 Run。
+# 触发：推 v* tag 自动构建并附到 Release；手动 Run 可指定现有标签补发，留空则仅构建。
 on:
   push:
     tags:
       - "v*"
   workflow_dispatch:
+    inputs:
+      release_tag:
+        description: "要构建并补发的现有版本标签（留空时仅构建）"
+        type: string
+        required: false
+        default: ""
 
 permissions:
   contents: write # 附加产物到 Release 需要写权限
@@ -54,6 +60,8 @@ jobs:
     runs-on: ${{ matrix.os }}
     steps:
       - uses: actions/checkout@v4
+        with:
+          ref: ${{ inputs.release_tag || github.ref }}
 
       # uv 按 pyproject 的 requires-python 自动下 Python，无需 setup-python
       - uses: astral-sh/setup-uv@v6
@@ -111,13 +119,16 @@ jobs:
 
       # 远端安装依赖 PyPI；版本不可用时保留构建产物，阻止发布桌面更新。
       - name: Verify remote backend is available on PyPI
-        if: startsWith(github.ref, 'refs/tags/')
+        if: startsWith(github.ref, 'refs/tags/') || inputs.release_tag
         shell: bash
+        env:
+          RELEASE_TAG: ${{ inputs.release_tag || github.ref_name }}
         run: |
           uv run --no-project --python 3.12 python - <<'PY'
-          import runpy, tomllib
+          import os, runpy, tomllib
           from pathlib import Path
-          version = tomllib.loads(Path('pyproject.toml').read_text())['project']['version']
+          version = tomllib.loads(Path('pyproject.toml').read_text(encoding='utf-8'))['project']['version']
+          assert os.environ['RELEASE_TAG'] == f'v{version}', 'Release tag does not match package version'
           runpy.run_path('lumi/remote/bootstrap.py')['require_release'](version)
           PY
 
@@ -127,9 +138,10 @@ jobs:
       # macOS 的 .zip 同理：Squirrel.Mac 只认 zip，dmg 仅供人工首次安装。
       # 两个 mac job 的 latest-mac.yml 会在这里互相覆盖，由后置的 merge-mac-metadata 修正。
       - name: Attach to Release
-        if: startsWith(github.ref, 'refs/tags/')
+        if: startsWith(github.ref, 'refs/tags/') || inputs.release_tag
         uses: softprops/action-gh-release@v2
         with:
+          tag_name: ${{ inputs.release_tag || github.ref_name }}
           files: |
             desktop/release/*.exe
             desktop/release/*.dmg
@@ -149,7 +161,7 @@ jobs:
   # 对只有一份来源的平台，合并是恒等操作，留着即可 —— 加回架构时无需改这里。
   merge-update-metadata:
     needs: build
-    if: startsWith(github.ref, 'refs/tags/')
+    if: startsWith(github.ref, 'refs/tags/') || inputs.release_tag
     runs-on: ubuntu-latest
     steps:
       - uses: actions/download-artifact@v4
@@ -169,6 +181,7 @@ jobs:
           python - << 'PY'
           import glob, os, yaml
           from collections import defaultdict
+          from pathlib import Path
 
           groups = defaultdict(list)
           for p in sorted(glob.glob('dist/*/latest*.yml')):
@@ -176,7 +189,7 @@ jobs:
           assert groups, '没找到任何 latest*.yml，build job 的产物上传可能已损坏'
 
           for name, paths in sorted(groups.items()):
-              docs = [yaml.safe_load(open(p)) for p in paths]
+              docs = [yaml.safe_load(Path(p).read_text(encoding='utf-8')) for p in paths]
               versions = {d['version'] for d in docs}
               assert len(versions) == 1, f'{name}: 各 job 版本不一致 {versions}'
               files, seen = [], set()
@@ -192,7 +205,7 @@ jobs:
               # electron-builder 自己选定的主产物，无需猜扩展名。
               fallback = next((d for d in docs if 'arm64' not in d['path']), docs[0])
               merged = {**docs[0], 'files': files, 'path': fallback['path'], 'sha512': fallback['sha512']}
-              yaml.safe_dump(merged, open(name, 'w'), default_flow_style=False, sort_keys=False)
+              Path(name).write_text(yaml.safe_dump(merged, default_flow_style=False, sort_keys=False), encoding='utf-8')
               # 日志里的「份来源」按平台解读：
               #   macOS(latest-mac.yml) —— 两个架构共用同一文件名，正常恒为 2 份；只有 1 份
               #     说明另一架构的 job 挂了（fail-fast: false 允许部分成功）。
@@ -202,9 +215,10 @@ jobs:
               #     getArchPrefixForUpdateFile，与 electron-updater 读取端的 getChannelFilePrefix 对应），
               #     latest-linux.yml 与 latest-linux-arm64.yml 本就是两个文件，恒为 1 份。
               print(f'=== {name}: {len(paths)} 份来源 → {len(files)} 个包 ===')
-              print(open(name).read())
+              print(Path(name).read_text(encoding='utf-8'))
           PY
 
       - uses: softprops/action-gh-release@v2
         with:
+          tag_name: ${{ inputs.release_tag || github.ref_name }}
           files: latest*.yml
