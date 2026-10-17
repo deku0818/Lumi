@@ -20,7 +20,64 @@ PROTOCOL = 1
 
 
 def run(args: list[str], **kwargs) -> subprocess.CompletedProcess:
-    return subprocess.run(args, capture_output=True, text=True, check=True, **kwargs)
+    try:
+        return subprocess.run(
+            args, capture_output=True, text=True, check=True, **kwargs
+        )
+    except subprocess.CalledProcessError as error:
+        raise RuntimeError(error.stderr.strip() or str(error)) from error
+
+
+def installed(executable: Path, version: str) -> bool:
+    if (
+        not executable.is_file()
+        or not (executable.parent / "lumi").is_file()
+        or not (executable.parent.parent / ".installed").is_file()
+    ):
+        return False
+    result = subprocess.run(
+        [
+            str(executable),
+            "-c",
+            "from importlib.metadata import version; print(version('lumi-harness'))",
+        ],
+        capture_output=True,
+        text=True,
+    )
+    return result.returncode == 0 and result.stdout.strip() == version
+
+
+def require_release(version: str) -> None:
+    """Check availability before publishing the desktop release."""
+    with urllib.request.urlopen(
+        f"https://pypi.org/pypi/lumi-harness/{version}/json", timeout=30
+    ) as response:
+        files = json.load(response)["urls"]
+    if not any(not file["yanked"] for file in files):
+        raise RuntimeError(f"PyPI 上没有可安装的 lumi-harness=={version} 版本。")
+
+
+def check_update(ready: dict | None, version: str) -> None:
+    if not ready or ready["version"] == version:
+        return
+    current_match = re.fullmatch(r"(\d+)\.(\d+)\.(\d+)", ready["version"])
+    target_match = re.fullmatch(r"(\d+)\.(\d+)\.(\d+)", version)
+    if not current_match or not target_match:
+        raise RuntimeError(
+            f"远端版本 {ready['version']} 与桌面版本 {version} 不匹配，无法自动切换。"
+        )
+    current_release = tuple(map(int, current_match.groups()))
+    target_release = tuple(map(int, target_match.groups()))
+    if current_release > target_release:
+        raise RuntimeError(
+            f"远端 Lumi 版本 {ready['version']} 高于当前桌面版本 {version}，请先更新桌面。"
+        )
+
+
+def progress(phase: str, data: Path) -> None:
+    print(
+        "LUMI_STATUS:" + json.dumps({"phase": phase, "dataDir": str(data)}), flush=True
+    )
 
 
 def runtime_info(data: Path) -> dict | None:
@@ -94,25 +151,55 @@ def write_private(path: Path, content: str) -> None:
 
 
 def install_uv(root: Path) -> Path:
-    existing = shutil.which("uv") or str(Path.home() / ".local/bin/uv")
-    if Path(existing).is_file():
-        return Path(existing)
+    for existing in (
+        shutil.which("uv"),
+        Path.home() / ".local/bin/uv",
+        root / "tools/uv",
+    ):
+        if existing and Path(existing).is_file():
+            return Path(existing)
     target = root / "tools"
     target.mkdir(mode=0o700, exist_ok=True)
     env = {**os.environ, "UV_INSTALL_DIR": str(target), "UV_NO_MODIFY_PATH": "1"}
     with urllib.request.urlopen(
         "https://astral.sh/uv/install.sh", timeout=30
     ) as response:
-        script = response.read()
-    subprocess.run(
+        script = response.read().decode()
+    run(
         ["sh"],
         input=script,
         env=env,
-        capture_output=True,
-        check=True,
         timeout=180,
     )
     return target / "uv"
+
+
+def install_version(root: Path, executable: Path, version: str) -> None:
+    uv = install_uv(root)
+    env = {
+        **os.environ,
+        "UV_CACHE_DIR": str(root / "cache"),
+        "UV_PYTHON_INSTALL_DIR": str(root / "python"),
+    }
+    version_dir = executable.parent.parent
+    if not executable.exists():
+        run([str(uv), "venv", "--python", "3.12", str(version_dir)], env=env)
+    run(
+        [
+            str(uv),
+            "pip",
+            "install",
+            "--python",
+            str(executable),
+            "--index-url",
+            "https://pypi.org/simple",
+            f"lumi-harness=={version}",
+        ],
+        env=env,
+    )
+    write_private(version_dir / ".installed", version)
+    if not installed(executable, version):
+        raise RuntimeError("远端安装的 Lumi 版本不正确，请重试。")
 
 
 def service_paths(root: Path, host: str) -> tuple[str, Path]:
@@ -190,6 +277,53 @@ def start_service(root: Path, data: Path, executable: Path, host: str) -> None:
             run(["launchctl", "bootstrap", domain, str(path)])
 
 
+def stop_service(root: Path, host: str) -> None:
+    name, _ = service_paths(root, host)
+    if host == "systemd":
+        run(["systemctl", "--user", "stop", name])
+    else:
+        target = f"gui/{os.getuid()}/" + name
+        status = subprocess.run(["launchctl", "print", target], capture_output=True)
+        if status.returncode == 0:
+            run(["launchctl", "bootout", target])
+    import fcntl
+
+    with (root / "instance.lock").open("a") as lock:
+        for _ in range(90):
+            try:
+                fcntl.flock(lock, fcntl.LOCK_EX | fcntl.LOCK_NB)
+                return
+            except BlockingIOError:
+                time.sleep(1)
+    raise RuntimeError("远端旧版本尚未退出，请稍后重试。")
+
+
+def wait_ready(data: Path, version: str) -> dict:
+    for _ in range(90):
+        ready = runtime_info(data)
+        if ready and ready["version"] == version:
+            return ready
+        time.sleep(1)
+    root = data / "remote-runtime"
+    if platform.system() == "Linux":
+        name, _ = service_paths(root, "systemd")
+        logs = subprocess.run(
+            ["journalctl", "--user", "-u", name, "-n", "40", "--no-pager"],
+            capture_output=True,
+            text=True,
+        )
+        details = logs.stdout or logs.stderr
+    else:
+        log = root / "service.log"
+        details = ""
+        if log.is_file():
+            with log.open("rb") as source:
+                end = source.seek(0, os.SEEK_END)
+                source.seek(max(0, end - 8000))
+                details = source.read(8000).decode("utf-8", errors="replace")
+    raise RuntimeError("远端 Lumi 未能启动。\n" + details[-8000:])
+
+
 def bootstrap(request: dict) -> dict:
     data = Path(request.get("data_dir") or "~/.lumi").expanduser().resolve()
     if any(char in str(data) for char in "\r\n\x00"):
@@ -200,14 +334,16 @@ def bootstrap(request: dict) -> dict:
     root = data / "remote-runtime"
     executable = root / "versions" / version / "bin/python"
     ready = runtime_info(data)
-    if ready and ready["version"] != version:
-        raise RuntimeError("远端 Lumi 与桌面版本不一致，请更新远端后重新连接。")
     if request["action"] == "probe":
         return {
             "data_dir": str(data),
-            "installed": (executable.parent / "lumi").is_file(),
+            "installed": installed(executable, version),
+            "managed": (root / "versions").is_dir(),
             "runtime": ready,
         }
+    check_update(ready, version)
+    if ready and ready["version"] == version:
+        return ready
     host = host_service()
     root.mkdir(parents=True, mode=0o700, exist_ok=True)
     root.chmod(0o700)
@@ -217,52 +353,37 @@ def bootstrap(request: dict) -> dict:
     with (root / "bootstrap.lock").open("a") as lock:
         fcntl.flock(lock, fcntl.LOCK_EX)
         ready = runtime_info(data)
-        if ready:
-            if ready["version"] != version:
-                raise RuntimeError("远端 Lumi 与桌面版本不一致，请更新远端后重新连接。")
+        check_update(ready, version)
+        if ready and ready["version"] == version:
             return ready
-        if not (executable.parent / "lumi").is_file():
-            uv = install_uv(root)
-            env = {
-                **os.environ,
-                "UV_CACHE_DIR": str(root / "cache"),
-                "UV_PYTHON_INSTALL_DIR": str(root / "python"),
-            }
-            if not executable.exists():
-                run(
-                    [
-                        str(uv),
-                        "venv",
-                        "--python",
-                        "3.12",
-                        str(executable.parent.parent),
-                    ],
-                    env=env,
-                )
-            run(
-                [
-                    str(uv),
-                    "pip",
-                    "install",
-                    "--python",
-                    str(executable),
-                    str(request["wheel"]),
-                ],
-                env=env,
-            )
+        if not installed(executable, version):
+            progress("updating" if ready else "installing", data)
+            install_version(root, executable, version)
         name, _ = service_paths(root, host)
         if (
-            host == "systemd"
+            not ready
+            and host == "systemd"
             and subprocess.run(
                 ["systemctl", "--user", "is-active", name], capture_output=True
             ).returncode
             == 0
         ):
             raise RuntimeError("远端 Lumi 正在运行但未完成握手，请检查此实例日志。")
-        start_service(root, data, executable, host)
-        for _ in range(90):
-            ready = runtime_info(data)
+        progress("restarting" if ready else "starting", data)
+        try:
             if ready:
-                return ready
-            time.sleep(1)
-        raise RuntimeError("远端 Lumi 未就绪，请检查此实例服务日志。")
+                stop_service(root, host)
+            start_service(root, data, executable, host)
+            return wait_ready(data, version)
+        except Exception as error:
+            if not ready:
+                raise
+            try:
+                stop_service(root, host)
+                start_service(root, data, Path(ready["executable"]), host)
+                wait_ready(data, ready["version"])
+            except Exception as recovery_error:
+                raise RuntimeError(
+                    f"远端更新失败：{error}\n恢复旧服务失败：{recovery_error}"
+                ) from error
+            raise RuntimeError(f"远端更新失败，已恢复旧服务：{error}") from error

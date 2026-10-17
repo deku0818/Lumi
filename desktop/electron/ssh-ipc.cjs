@@ -1,13 +1,10 @@
+const crypto = require('node:crypto')
 const fs = require('node:fs')
 const fsp = require('node:fs/promises')
 const path = require('node:path')
-const crypto = require('node:crypto')
-const { execFile } = require('node:child_process')
-const { promisify } = require('node:util')
 const { SshManager } = require('./ssh-manager.cjs')
 const { sshArgs } = require('./ssh-config.cjs')
 const { createRemoteFileHandler } = require('./remote-files.cjs')
-const execFileAsync = promisify(execFile)
 const REMOTE_FIELDS = ['name', 'host', 'user', 'port', 'identityFile', 'dataDir', 'enabled', 'authMethod']
 
 function validateBackendId(id) {
@@ -18,11 +15,10 @@ function isManagedKey(file, id) {
   return file === id + '.pem' || file.startsWith(id + '-')
 }
 
-function setupSsh({ app, ipcMain, BrowserWindow, dialog, projectRoot, environmentPath }) {
+function setupSsh({ app, ipcMain, BrowserWindow, dialog, projectRoot }) {
   const registry = path.join(app.getPath('userData'), 'backends.json')
   const keyDirectory = path.join(app.getPath('userData'), 'ssh-keys')
   const pending = new Map()
-  let bundle
   const broadcast = (event, value) => {
     for (const win of BrowserWindow.getAllWindows()) if (!win.webContents.isDestroyed()) win.webContents.send(event, value)
   }
@@ -43,16 +39,6 @@ function setupSsh({ app, ipcMain, BrowserWindow, dialog, projectRoot, environmen
       broadcast('lumi:ssh:status', state)
     },
     ask,
-    wheel: () => {
-      if (!bundle) bundle = (async () => {
-        const directory = app.isPackaged ? path.join(process.resourcesPath, 'remote-backend') : path.join(projectRoot, 'dist/remote')
-        if (!app.isPackaged) await execFileAsync('uv', ['build', '--wheel', '--out-dir', directory], { cwd: projectRoot, env: { ...process.env, PATH: await environmentPath() }, timeout: 120000 })
-        const file = (await fsp.readdir(directory)).find(name => name.startsWith('lumi_harness-' + manager.version + '-') && name.endsWith('.whl'))
-        if (!file) throw new Error('桌面安装包缺少远端 Lumi wheel。')
-        return path.join(directory, file)
-      })().catch(error => { bundle = null; throw error })
-      return bundle
-    },
   })
   function write(value) {
     fs.mkdirSync(path.dirname(registry), { recursive: true })

@@ -33,7 +33,7 @@ test('IPC registry ignores unsupported records and keeps SSH key bytes out of JS
     app:{isPackaged:false,getPath:()=>directory},
     ipcMain:{handle:(name,handler)=>handlers.set(name,handler)},
     BrowserWindow:{getAllWindows:()=>[]},dialog:{},
-    projectRoot:path.resolve(__dirname,'../..'),environmentPath:async()=>process.env.PATH,
+    projectRoot:path.resolve(__dirname,'../..'),
   })
   try {
     const listed=await handlers.get('lumi:backends:list')()
@@ -154,21 +154,142 @@ test('askpass executable preload returns a broker answer without executing the p
   } finally {await new Promise(resolve=>server.close(resolve));fs.rmSync(directory,{recursive:true,force:true})}
 })
 
-test('remote preparation asks only for installation and rejects incompatible native runtimes', async () => {
-  const {SshManager}=require('../electron/ssh-manager.cjs')
-  const states=[],questions=[]
-  const manager=new SshManager({version:'0.3.0',emit:state=>states.push(state),ask:async question=>{questions.push(question);return null}})
-  const session={config:{id:'test',host:'safe'},children:new Set()}
-  manager.bootstrap=async()=>({runtime:null,installed:false,data_dir:'/fixture/lumi'})
-  await assert.rejects(manager.open(session),/取消准备/)
-  assert.deepEqual(states.map(state=>state.phase),['connecting','checking'])
-  assert.equal(questions[0].installed,false)
-  assert.equal(questions[0].dataDir,'/fixture/lumi')
-  manager.bootstrap=async()=>({runtime:{transport:'ssh-stdio',protocol:1,version:'0.2.138'},installed:true,data_dir:'/fixture/lumi'})
-  await assert.rejects(manager.open(session),/版本不一致/)
-  assert.equal(questions.length,1)
-  assert.equal(states.at(-1).preparation,'reuse')
+test('remote preparation asks only on first installation and upgrades older versions automatically', async function () {
+  const { SshManager } = require('../electron/ssh-manager.cjs')
+  const states = []
+  const questions = []
+  const manager = new SshManager({
+    version: '0.3.1',
+    emit: state => states.push(state),
+    ask: async function (question) {
+      questions.push(question)
+      return null
+    },
+  })
+  const session = { config: { id: 'test', host: 'safe' }, children: new Set() }
+  manager.bootstrap = async () => ({ runtime: null, installed: false, data_dir: '/fixture/lumi' })
+  await assert.rejects(manager.open(session), /取消准备/)
+  assert.deepEqual(states.map(state => state.phase), ['connecting', 'checking'])
+  assert.equal(questions[0].installed, false)
+  assert.equal(questions[0].dataDir, '/fixture/lumi')
+
+  const requests = []
+  manager.bootstrap = async function (_session, request) {
+    requests.push(request)
+    if (request.action === 'probe') {
+      return {
+        runtime: { transport: 'ssh-stdio', protocol: 1, version: '0.3.0' },
+        installed: false,
+        data_dir: '/fixture/lumi',
+      }
+    }
+    session.cancelled = true
+    return { transport: 'ssh-stdio', protocol: 1, version: '0.3.1' }
+  }
+  await assert.rejects(manager.open(session), /取消/)
+  assert.equal(questions.length, 1)
+  assert.equal(states.at(-1).phase, 'updating')
+  assert.deepEqual(requests.map(request => request.action), ['probe', 'connect'])
+  assert.equal(requests[1].version, '0.3.1')
+  assert.equal('wheel' in requests[1], false)
+
+  session.cancelled = false
+  manager.bootstrap = async function (_session, request) {
+    if (request.action === 'probe') {
+      return { runtime: null, installed: false, managed: true, data_dir: '/fixture/lumi' }
+    }
+    session.cancelled = true
+    return { transport: 'ssh-stdio', protocol: 1, version: '0.3.1' }
+  }
+  await assert.rejects(manager.open(session), /取消/)
+  assert.equal(questions.length, 1, 'An existing managed installation must not ask again')
   await manager.close()
+})
+
+test('a newer remote rejection reaches the desktop without a preparation question', async function () {
+  const { SshManager } = require('../electron/ssh-manager.cjs')
+  const states = []
+  const diagnostic = '远端 Lumi 版本 0.3.10 高于当前桌面版本 0.3.9，请先更新桌面。'
+  const manager = new SshManager({
+    version: '0.3.9',
+    emit: state => states.push(state),
+    ask: async function () {
+      assert.fail('An existing service must not prompt for installation')
+    },
+  })
+  manager.init = async function () {}
+  manager.bootstrap = async function (_session, request) {
+    if (request.action === 'probe') {
+      return {
+        runtime: { transport: 'ssh-stdio', protocol: 1, version: '0.3.10' },
+        installed: false,
+        data_dir: '/fixture/lumi',
+      }
+    }
+    throw new Error(diagnostic)
+  }
+  try {
+    await assert.rejects(
+      manager.connect({ id: 'old-desktop', host: 'safe' }),
+      error => error.message === diagnostic,
+    )
+    assert.equal(states.at(-1).phase, 'error')
+    assert.equal(states.at(-1).message, diagnostic)
+  } finally {
+    await manager.close()
+  }
+})
+
+test('bootstrap streams fragmented UTF-8 progress and returns complete original errors', async function () {
+  const { SshManager } = require('../electron/ssh-manager.cjs')
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), 'lumi-bootstrap-test-'))
+  const states = []
+  const manager = new SshManager({
+    version: '0.3.0',
+    bootstrapPath: path.resolve(__dirname, '../../lumi/remote/bootstrap.py'),
+    emit: state => states.push(state),
+  })
+  const session = { config: { id: 'test', host: 'fixture' }, children: new Set(), cancelled: false }
+  const payload = [
+    'LUMI_STATUS:' + JSON.stringify({ phase: 'updating', dataDir: '/fixture/远端' }),
+    'LUMI_STATUS:' + JSON.stringify({ phase: 'restarting', dataDir: '/fixture/远端' }),
+    'LUMI_RESULT:' + JSON.stringify({ version: '0.3.0' }),
+    '',
+  ].join('\n')
+  const responder = path.join(root, 'responder.cjs')
+  fs.writeFileSync(responder, `
+    process.stdin.resume()
+    process.stdin.on('end', async function () {
+      const bytes = Buffer.from(${JSON.stringify(payload)})
+      for (const byte of bytes) {
+        process.stdout.write(Buffer.from([byte]))
+        await new Promise(resolve => setTimeout(resolve, 1))
+      }
+    })
+  `)
+  fs.writeFileSync(
+    path.join(root, 'ssh'),
+    '#!/bin/sh\nexec ' + JSON.stringify(process.execPath) + ' ' + JSON.stringify(responder) + '\n',
+    { mode: 0o700 },
+  )
+  manager.environment = () => ({ ...process.env, PATH: root + path.delimiter + process.env.PATH })
+  try {
+    const result = await manager.bootstrap(session, { action: 'connect', version: '0.3.0' })
+    assert.equal(result.version, '0.3.0')
+    assert.deepEqual(
+      states.map(state => [state.phase, state.dataDir]),
+      [['updating', '/fixture/远端'], ['restarting', '/fixture/远端']],
+    )
+    const diagnostic = 'Failed to download dependency\nConnection reset by peer'
+    manager.command = async () => 'LUMI_ERROR:' + diagnostic + '\n'
+    await assert.rejects(
+      manager.bootstrap(session, { action: 'connect', version: '0.3.0' }),
+      error => error.message === diagnostic,
+    )
+  } finally {
+    await manager.close()
+    fs.rmSync(root, { recursive: true, force: true })
+  }
 })
 
 test('disconnect resolves a pending preparation question before awaiting the opening', async () => {
@@ -203,7 +324,7 @@ test('renderer navigation cancels an opening SSH channel without starting a late
   SshManager.prototype.send=async (machine,message)=>sent.push({machine,message})
   SshManager.prototype.request=async ()=>{throw Error('Cancelled opening must not create a session')}
   fs.writeFileSync(path.join(directory,'backends.json'),JSON.stringify({remotes:[{id:'aws',host:'aws-node-01'}]}))
-  const api=setupSsh({app:{isPackaged:false,getPath:()=>directory},ipcMain:{handle:(name,handler)=>handlers.set(name,handler)},BrowserWindow:{getAllWindows:()=>[]},dialog:{},projectRoot:path.resolve(__dirname,'../..'),environmentPath:async()=>process.env.PATH})
+  const api=setupSsh({app:{isPackaged:false,getPath:()=>directory},ipcMain:{handle:(name,handler)=>handlers.set(name,handler)},BrowserWindow:{getAllWindows:()=>[]},dialog:{},projectRoot:path.resolve(__dirname,'../..')})
   const owner=new EventEmitter()
   owner.mainFrame={frameTreeNodeId:7};owner.isDestroyed=()=>false
   const event={sender:owner,senderFrame:owner.mainFrame}

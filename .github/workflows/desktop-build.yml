@@ -109,7 +109,19 @@ jobs:
             desktop/release/latest*.yml
           if-no-files-found: error
 
-      # 仅 tag 触发时附到 Release；同一 tag 的两个平台 job 各自 append 产物。
+      # 远端安装依赖 PyPI；版本不可用时保留构建产物，阻止发布桌面更新。
+      - name: Verify remote backend is available on PyPI
+        if: startsWith(github.ref, 'refs/tags/')
+        shell: bash
+        run: |
+          uv run --no-project --python 3.12 python - <<'PY'
+          import runpy, tomllib
+          from pathlib import Path
+          version = tomllib.loads(Path('pyproject.toml').read_text())['project']['version']
+          runpy.run_path('lumi/remote/bootstrap.py')['require_release'](version)
+          PY
+
+      # 仅 tag 触发时附到 Release；各平台 job 各自 append 产物。
       # latest*.yml 与 .blockmap 是 electron-updater 的更新元数据：前者供客户端比对版本，
       # 后者供差量下载。少传任一，应用内更新就查不到新版本 —— 不是可选项。
       # macOS 的 .zip 同理：Squirrel.Mac 只认 zip，dmg 仅供人工首次安装。

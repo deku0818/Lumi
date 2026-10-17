@@ -470,7 +470,17 @@ export type SshCredentials = {
 }
 export type SshStatus = {
   id: string
-  phase: 'connecting' | 'checking' | 'installing' | 'starting' | 'attaching' | 'ready' | 'offline' | 'error'
+  phase:
+    | 'connecting'
+    | 'checking'
+    | 'installing'
+    | 'updating'
+    | 'starting'
+    | 'restarting'
+    | 'attaching'
+    | 'ready'
+    | 'offline'
+    | 'error'
   message: string
   dataDir?: string
   preparation?: 'reuse'

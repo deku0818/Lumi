@@ -1,8 +1,9 @@
 const { spawn, execFile } = require('node:child_process')
-const { promisify } = require('node:util')
+const crypto = require('node:crypto')
 const fs = require('node:fs/promises')
 const path = require('node:path')
-const crypto = require('node:crypto')
+const { StringDecoder } = require('node:string_decoder')
+const { promisify } = require('node:util')
 const { RemoteWire } = require('./remote-wire.cjs')
 const { sshArgs, sshHosts } = require('./ssh-config.cjs')
 const { prepareSshStorage, startAuthenticationBroker } = require('./ssh-auth.cjs')
@@ -16,8 +17,8 @@ function quote(value) {
 }
 
 class SshManager {
-  constructor({ directory, version, bootstrapPath, wheel, emit, ask }) {
-    Object.assign(this, { directory, version, bootstrapPath, wheel, emit, ask })
+  constructor({ directory, version, bootstrapPath, emit, ask }) {
+    Object.assign(this, { directory, version, bootstrapPath, emit, ask })
     this.sessions = new Map()
     this.pendingConnections = new Map()
     this.recoveries = new Map()
@@ -71,14 +72,26 @@ class SshManager {
     }
   }
 
-  command(session, command, input = '') {
+  command(session, command, input = '', onLine = () => {}) {
     return new Promise((resolve, reject) => {
       if (session.cancelled) { reject(new Error('连接已取消。')); return }
       const child = spawn('ssh', [...sshArgs(session.config), '--', session.config.host, command], { env: this.environment(session.config.id), stdio: ['pipe', 'pipe', 'pipe'] })
       session.children.add(child)
       let stdout = '', stderr = ''
+      let pendingLine = ''
+      const decoder = new StringDecoder('utf8')
       session.authenticationDetails = ''
-      child.stdout.on('data', chunk => { stdout += chunk; if (stdout.length > 4 * 1024 * 1024) child.kill() })
+      child.stdout.on('data', chunk => {
+        const value = decoder.write(chunk)
+        stdout += value
+        pendingLine += value
+        let newline
+        while ((newline = pendingLine.indexOf('\n')) >= 0) {
+          onLine(pendingLine.slice(0, newline))
+          pendingLine = pendingLine.slice(newline + 1)
+        }
+        if (stdout.length > 4 * 1024 * 1024) child.kill()
+      })
       child.stderr.on('data', chunk => { stderr = (stderr + chunk).slice(-8000); session.authenticationDetails = stderr })
       child.on('error', reject)
       child.on('close', code => {
@@ -101,9 +114,13 @@ try:
 except Exception as e:
  print("LUMI_ERROR:"+str(e))
 `
-    const stdout = await this.command(session, 'python3 -', script)
-    const error = stdout.split('\n').find(line => line.startsWith('LUMI_ERROR:'))
-    if (error) throw new Error(error.slice(11))
+    const stdout = await this.command(session, 'python3 -u -', script, line => {
+      if (!line.startsWith('LUMI_STATUS:') || session.cancelled) return
+      const status = JSON.parse(line.slice(12))
+      this.state(session.config.id, status.phase, '', { dataDir: status.dataDir })
+    })
+    const error = /^LUMI_ERROR:([\s\S]*)/m.exec(stdout)
+    if (error) throw new Error(error[1].trim())
     const result = stdout.split('\n').find(line => line.startsWith('LUMI_RESULT:'))
     if (!result) throw new Error('远端未返回有效的 Lumi 启动结果。')
     return JSON.parse(result.slice(12))
@@ -150,23 +167,21 @@ except Exception as e:
     this.state(id, 'connecting', '连接 SSH 主机')
     const probe = await this.bootstrap(session, { action: 'probe', version: this.version, data_dir: config.dataDir })
     this.state(id, 'checking', '检查远端 Lumi', { dataDir: probe.data_dir })
-    if (!probe.installed && !probe.runtime) {
+    if (!probe.installed && !probe.runtime && !probe.managed) {
       const answer = await this.ask({ machine: id, kind: 'prepare', installed: false, dataDir: probe.data_dir,
         prompt: '将在当前 SSH 用户下安装 Lumi 常驻进程。数据目录：' + probe.data_dir })
       if (answer !== 'yes') throw new Error('已取消准备远端 Lumi。')
     }
     let instance = probe.runtime
-    if (!instance) {
-      let wheel
-      if (!probe.installed) {
-        this.state(id, 'installing', '安装远端 Lumi', { dataDir: probe.data_dir })
-        wheel = await this.wheel()
-        const remoteFile = probe.data_dir + '/remote-runtime/' + path.basename(wheel)
-        await this.command(session, 'umask 077; mkdir -p ' + quote(probe.data_dir + '/remote-runtime') + '; cat > ' + quote(remoteFile), await fs.readFile(wheel))
-        wheel = remoteFile
-      } else this.state(id, 'starting', '启动远端 Lumi', { dataDir: probe.data_dir })
-      instance = await this.bootstrap(session, { action: 'connect', version: this.version, data_dir: config.dataDir, wheel })
-    } else this.state(id, 'starting', '复用远端 Lumi', { dataDir: probe.data_dir, preparation: 'reuse' })
+    if (!instance || instance.version !== this.version) {
+      let phase = 'installing'
+      if (instance) phase = 'updating'
+      else if (probe.installed) phase = 'starting'
+      this.state(id, phase, '', { dataDir: probe.data_dir })
+      instance = await this.bootstrap(session, { action: 'connect', version: this.version, data_dir: config.dataDir })
+    } else {
+      this.state(id, 'starting', '复用远端 Lumi', { dataDir: probe.data_dir, preparation: 'reuse' })
+    }
     if (session.cancelled) throw new Error('连接已取消。')
     if (instance.transport !== 'ssh-stdio' || instance.protocol !== 1 || instance.version !== this.version) throw Error('远端 Lumi 与当前桌面版本不一致。')
     this.state(id, 'attaching', '建立 SSH 数据通道', { dataDir: probe.data_dir })

@@ -41,7 +41,9 @@ Lumi 桌面应用（Electron + TS 前端）的内部实现。前端通过本地 
 
 `ssh-config.cjs` 从用户配置与 Include 枚举明确主机别名；仅在选中主机后由 `ssh -G` 解析有效配置。SSH config 不被应用改写，密码、口令和私钥内容不进入普通连接配置、模型上下文或远端 Lumi。主动保存的私钥仅留在本机应用专用目录，文件 0600。
 
-打包同时分发 Python wheel 与 stdlib bootstrap。默认数据目录保持 `~/.lumi`。`lumi/remote/bootstrap.py` 经 SSH 准备 `<data>/remote-runtime/` 下的版本环境并安装 systemd 用户服务或 LaunchAgent。`lumi.remote.daemon` 持有生命周期实例锁，监听权限 0600 的 `agent.sock`，不创建 TCP 监听器；重复启动必须先取得锁，不能破坏已有 socket。旧 0.2 服务和配置没有兼容或自动迁移路径。
+桌面仅附带 stdlib bootstrap，不附带远端 Python wheel；开发与打包版均由远端通过 uv 从 PyPI 安装 `lumi-harness==<桌面版本>`，不构建或上传本地 wheel。默认数据目录保持 `~/.lumi`。`lumi/remote/bootstrap.py` 经 SSH 准备 `<data>/remote-runtime/` 下的版本环境并安装 systemd 用户服务或 LaunchAgent。`lumi.remote.daemon` 持有生命周期实例锁，监听权限 0600 的 `agent.sock`，不创建 TCP 监听器；重复启动必须先取得锁，不能破坏已有 socket。旧 0.2 服务和配置没有兼容或自动迁移路径。
+
+连接时复用相同版本；远端发布版本较旧时，在 bootstrap 锁内先安装并确认目标版本，再停止旧服务、切换并验证新服务。版本按数字逐段比较，并在取得锁后再次检查；远端较新时提示更新桌面，不自动降级，无法比较的非正式版本也不自动切换。安装完成标记与实际包版本共同决定环境是否可复用，中途失败的安装会重试。安装失败不停止旧服务；切换失败时尝试恢复旧服务。服务重启会中断未完成任务，不具备跨进程自动续跑能力。PyPI 版本可用性只在桌面发布前检查；不可用时不上传桌面 Release 产物。运行时直接执行 uv 安装并返回原始错误，不额外请求 PyPI JSON API。本地运行未发布版本时也遵循同一安装规则。
 
 每台机器一条长连接 SSH 启动 `lumi.remote.attach`，将 stdin/stdout 原样转接 Unix socket。`remote-wire.cjs` 与 `lumi.remote.protocol` 使用 4 字节大端长度前缀的 JSON 帧，最大 16 MiB。传输握手协议为 1，包含实际运行版本、PID、数据目录与程序路径，桌面与远端版本必须相同；Gateway 业务协议仍为 2。通道 id 将控制连接和多会话复用在同一字节流中；`SshSocket` 让 renderer Gateway 继续使用既有 RPC、事件与断连续接语义。本地 sidecar 保持 WebSocket 接口。
 
@@ -49,7 +51,7 @@ renderer 导航、销毁或取消时释放其通道；活跃会话由既有 regi
 
 新会话首先是 ProjectTarget（机器 id + 目录）的草稿，发送第一条消息时才创建后端会话。NewChatTarget 与 ProjectCreateDialog 复用 SSH 添加流程；切换目标保留输入，历史会话不被重新定向。DirBrowser 经目标机器 RPC 浏览目录，支持输入路径；缺失或无权限的路径返回错误，不再显示可选空目录。
 
-连接界面直接使用主进程发出的 `connecting → checking → installing/starting → attaching → ready` 状态。安装确认携带实际数据目录和已安装信息；错误保留失败阶段与原因，不通过前端计时器推算进度。`SshQuestionProvider` 维护认证问题队列：打开的连接窗口承接本机对应请求，其余重连请求由全局 `SshPrompts` 处理。安装确认、主机指纹和密钥口令在同一连接窗口内展示；取消先结束待确认请求，再等待 SSH 子进程退出，避免安装确认挂起时断开死锁。
+连接界面直接使用主进程和远端 bootstrap 发出的 `connecting → checking → installing/updating/starting/restarting → attaching → ready` 状态。首次安装确认携带实际数据目录和已安装信息；后续更新不重复确认。错误保留失败阶段与原始原因（包括多行安装输出），不按文本分类或猜测原因，也不通过前端计时器推算进度。`SshQuestionProvider` 维护认证问题队列：打开的连接窗口承接本机对应请求，其余重连请求由全局 `SshPrompts` 处理。安装确认、主机指纹和密钥口令在同一连接窗口内展示；取消先结束待确认请求，再等待 SSH 子进程退出，避免安装确认挂起时断开死锁。
 
 所有项目入口使用同一个 C 版 `DirBrowser`，机器由调用入口指定。上级 token 原样传回后端，主目录取首次成功 RPC 的返回值；面包屑保留 POSIX、Windows 盘符和 UNC 路径。Windows 虚拟盘符列表不能被选择为目录。路径编辑、目录新建与整个弹窗的 Escape 分层处理；请求序号避免过期目录响应覆盖当前路径。列表边缘渐隐随实际滚动位置变化，短列表不渐隐。
 

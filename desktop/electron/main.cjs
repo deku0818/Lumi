@@ -394,7 +394,7 @@ function createWindow() {
 // Remote machines expose SSH data channels; only the local sidecar uses WebSocket.
 const { setupSsh } = require('./ssh-ipc.cjs')
 const { registerRemoteFilePolicy } = require('./remote-files.cjs')
-const ssh = setupSsh({ app, ipcMain, BrowserWindow, dialog, projectRoot: PROJECT_ROOT, environmentPath: sidecarPath })
+const ssh = setupSsh({ app, ipcMain, BrowserWindow, dialog, projectRoot: PROJECT_ROOT })
 ipcMain.handle('lumi:connection', (_event, id) => {
   if (id && id !== 'local') return ssh.connection(id)
   return { kind: 'local', wsUrl: `ws://127.0.0.1:${wsPort}/ws?token=${LOCAL_TOKEN}` }

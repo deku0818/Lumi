@@ -13,7 +13,9 @@ export function sshStep(status: SshStatus | null, question: SshQuestion | null):
       return 2
     case 'checking':
     case 'installing':
+    case 'updating':
     case 'starting':
+    case 'restarting':
       return 1
     default:
       return 0
@@ -102,7 +104,7 @@ export function SshConnectionBody({ machine, status, question, error, answer }: 
       </form>}
       {(step === 1 || question?.kind === 'prepare') && <div className="ssh-state-path"><Folder size={13} /><span>{dataDir}</span></div>}
       {question?.kind === 'prepare' && <small>{t('ssh.installOnce')}</small>}
-      {phase === 'installing' && !error && <small>{t('ssh.installThenConnect')}</small>}
+      {['installing', 'updating', 'restarting'].includes(phase) && !error && <small>{t('ssh.installThenConnect')}</small>}
     </div>
     <details className="ssh-details"><summary>{t('ssh.connectionDetails')}</summary><dl><dt>{t('ssh.host')}</dt><dd>{machine.host}</dd><dt>{t('ssh.auth')}</dt><dd>{t('ssh.auth.' + (machine.authMethod || 'config'))}</dd><dt>{t('ssh.dataDir')}</dt><dd>{dataDir}</dd></dl></details>
   </div>

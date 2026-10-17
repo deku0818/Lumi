@@ -118,13 +118,13 @@ cd Lumi
 
 ## 分发 / 部署
 
-完整桌面包包含本地后端和跨平台远端 wheel。打包：
+完整桌面包包含本地后端和远端引导脚本；远端通过 uv 从 PyPI 安装与桌面匹配的 `lumi-harness` 版本。打包：
 
     ./scripts/build-desktop.sh
 
 SSH 远端支持 Linux（systemd 用户服务，需要 linger）和 macOS（登录用户 launchd），远端需 Python 3；uv 准备 Python 3.12 与独立环境。无需 sudo 或额外的 Lumi TCP 端口，详见 [SSH 远端指南](docs/guides/deploy.md)。
 
-远端数据默认在 SSH 用户 `~/.lumi`。常驻进程通过私有 Unix socket 与 SSH 数据通道连接，保留实例锁；关闭桌面不停止远端进程。桌面与远端须为同一版本，不兼容 0.2 服务地址连接，不自动迁移或停止旧服务。
+远端数据默认在 SSH 用户 `~/.lumi`。常驻进程通过私有 Unix socket 与 SSH 数据通道连接，保留实例锁；关闭桌面不停止远端进程。连接时复用同版本实例，远端版本较旧时自动升级并重启，较新时提示更新桌面。安装失败保留旧服务，切换失败尝试恢复旧版本；重启会中断未完成任务。不兼容 0.2 服务地址连接，不自动迁移或停止旧 Docker/系统服务。
 
 CLI、HTTP API 与容器镜像仍可独立使用，它们不是桌面远端连接方式。
 
