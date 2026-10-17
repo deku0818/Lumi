@@ -56,6 +56,7 @@ from lumi.gateway.projects import (
 from lumi.gateway.protocol import ServerEvent, bridge_event_to_wire, event_frame
 from lumi.gateway.session_registry import SessionRegistry, registry
 from lumi.sessions import session_model
+from lumi.sessions.fork import ForkSessionResult, fork_session
 from lumi.sessions.session_meta import delete_meta, load_all, update_meta
 from lumi.sessions.session_store import list_sessions
 from lumi.sessions.thread_runs import thread_runs
@@ -662,6 +663,16 @@ async def _load_history_rpc(session: GatewaySession, params: dict) -> dict:
     return await _load_history(session._bridge, params)
 
 
+async def _fork_session(session: GatewaySession, params: dict) -> ForkSessionResult:
+    return await fork_session(
+        session._bridge.graph,
+        params.get("thread_id", ""),
+        params.get("checkpoint_id", ""),
+        params.get("message_id", ""),
+        params.get("request_id", ""),
+    )
+
+
 async def _list_bg_tasks(session: GatewaySession, params: dict) -> dict:
     """全部后台任务快照（前端按当前 thread_id 过滤）。"""
     return {"tasks": serialize_bg_tasks()}
@@ -758,6 +769,7 @@ _RPC_HANDLERS = {
     "new_session": _switch_session,
     "switch_session": _switch_session,
     "load_history": _load_history_rpc,
+    "fork_session": _fork_session,
     "pin_session": _pin_session,
     "rename_session": _rename_session,
     "delete_session": _delete_session,

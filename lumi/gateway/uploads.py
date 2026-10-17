@@ -85,18 +85,34 @@ async def save_upload(name: str, chunks: AsyncIterator[bytes]) -> str:
     return str(dest)
 
 
-def remove_uploads(paths: Iterable[str]) -> None:
+def managed_uploads(paths: Iterable[str]) -> set[str]:
+    """归一化托管上传路径，供会话共享引用登记；不读取或复制文件。"""
+    root = uploads_dir().resolve()
+    managed: set[str] = set()
+    for value in paths:
+        if value.startswith(("https://", "http://")):
+            continue
+        path = Path(value).resolve()
+        if path.parent == root or path.parent.parent == root:
+            managed.add(str(path))
+    return managed
+
+
+def remove_uploads(paths: Iterable[str], *, retained: Iterable[str] = ()) -> None:
     """删除会话声明过的上传件（删会话时回收）。
 
     只动 uploads 目录里的路径：本地后端的附件是用户自己的原文件（零拷贝发路径），
     url 附件不落盘，都不碰。``save_upload`` 的独占 uuid 子目录随文件一并删掉。
     """
     root = uploads_dir().resolve()
+    kept = {Path(path).resolve() for path in retained}
+    kept_dirs = {path.parent for path in kept}
     for p in paths:
         path = Path(p).resolve()
-        if path.parent == root:  # 内联图片：直接平铺在 uploads 下
+        if path.parent == root and path not in kept:  # 内联图片：平铺在 uploads 下
             path.unlink(missing_ok=True)
-        elif path.parent.parent == root:  # save_upload：uploads/<uuid>/<name>
+        elif path.parent.parent == root and path.parent not in kept_dirs:
+            # 同目录只要还有共享引用，就不能回收整个上传目录。
             shutil.rmtree(path.parent, ignore_errors=True)
 
 

@@ -39,6 +39,7 @@ from lumi.agents.core.meta_message import (
     CTX_DIGEST_KEY,
     declared_file_paths,
     extract_text_content,
+    history_message_ids,
     strip_ctx_digest,
     strip_injected_prefix,
     synthetic_human_message,
@@ -73,8 +74,8 @@ from lumi.gateway.bridge.approval import enrich_tool_approval
 from lumi.gateway.bridge.folders import REMINDED_KEY, FolderManager
 from lumi.models import provider_store
 from lumi.sessions import session_model
-from lumi.sessions.history import HistoryReader, message_checkpoint
-from lumi.sessions.session_meta import get_goal, update_meta
+from lumi.sessions.history import HistoryReader, can_fork_message, message_checkpoint
+from lumi.sessions.session_meta import get_goal, load_all, update_meta
 from lumi.sessions.session_model import SessionModel
 from lumi.sessions.usage import extract_usage, last_ai_usage
 from lumi.utils.config import get_config
@@ -456,8 +457,19 @@ class AgentBridge:
                     for m in await self.snapshot_messages(thread_id)
                     for p in declared_file_paths(m)
                 ]
+                meta = load_all().get(thread_id, {})
+                files.extend(meta.get("shared_uploads", []))
+                files.extend(meta.get("fork_uploads", []))  # 兼容此前已创建的附件副本
                 await self._agent.adelete_thread(thread_id)
-                await asyncio.to_thread(remove_uploads, files)
+                # 先同步释放本会话引用，再检查剩余引用，避免并发删除双方都保留文件。
+                update_meta(thread_id, shared_uploads=None)
+                retained = [
+                    path
+                    for owner, entry in load_all().items()
+                    if owner != thread_id
+                    for path in entry.get("shared_uploads", [])
+                ]
+                await asyncio.to_thread(remove_uploads, files, retained=retained)
         finally:
             await get_shell_session_manager().close_session(thread_id)
 
@@ -1640,15 +1652,26 @@ class AgentBridge:
 
         在途审批不再跨流中断，故流跑完即一轮结束，无需检测挂起态。
         """
+        fork_point = None
         try:
             state = await self._agent.graph.aget_state(self._config)
             usage = last_ai_usage(state)
+            messages = state.values.get("messages", [])
+            if messages and can_fork_message(messages[-1]):
+                fork_point = {
+                    "message_id": history_message_ids(messages)[-1],
+                    "checkpoint_id": state.config["configurable"]["checkpoint_id"],
+                }
         except Exception as e:
             logger.error(
                 "[AgentBridge] 取 turn.complete usage 失败: %s", e, exc_info=True
             )
             usage = None
-        return BridgeEvent(kind=EventKind.TURN_COMPLETE, usage_metadata=usage)
+        return BridgeEvent(
+            kind=EventKind.TURN_COMPLETE,
+            usage_metadata=usage,
+            data={"fork_point": fork_point} if fork_point else None,
+        )
 
     # ── 在途审批应答（委派 ApprovalBroker）──
 

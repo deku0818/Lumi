@@ -49,6 +49,8 @@ def _payload(evt: BridgeEvent) -> dict:
         payload = {"usage": evt.usage_metadata} if evt.usage_metadata else {}
         if kind == EventKind.MESSAGE_COMPLETE and evt.message_id:
             payload["message_id"] = evt.message_id
+        if kind == EventKind.TURN_COMPLETE and (evt.data or {}).get("fork_point"):
+            payload["fork_point"] = evt.data["fork_point"]
         return payload
     if kind == EventKind.TURN_START:
         files = (evt.data or {}).get("files")

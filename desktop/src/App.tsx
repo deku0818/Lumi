@@ -42,17 +42,18 @@ import { HomeNightSky } from './components/HomeNightSky'
 import { SshPrompts } from './components/SshPrompts'
 import type {
   ActiveModel,
+  Artifact,
   AttachedFile,
   BgTask,
   BgTaskOutput,
   ChannelInfo,
   ConnError,
   ConnState,
+  CronJob,
+  ForkPoint,
+  Item,
   Machine,
   ModelPointer,
-  CronJob,
-  Item,
-  Artifact,
   Project,
   ProjectTarget,
   ProviderProfile,
@@ -61,7 +62,7 @@ import type {
   SlashCommand,
   ToolMode,
   WireEvent,
-} from './types'
+} from './types.ts'
 import { EMPTY_BG_OUTPUT } from './types'
 import { ApprovalDialog, type Decision } from './components/ApprovalDialog'
 import { ClarifyDialog, ASK_CANCELLED } from './components/ClarifyDialog'
@@ -86,7 +87,7 @@ import { CommandMenu } from './components/CommandMenu'
 import { Composer } from './components/Composer'
 import { AppTitleBar } from './components/AppTitleBar'
 import { StatusIndicator, ItemView } from './components/chat/ItemView'
-import { EditBubble, HoverActions, IconAction, CopyButton } from './components/chat/MessageActions'
+import { CopyButton, EditBubble, ForkButton, HoverActions, IconAction } from './components/chat/MessageActions.tsx'
 import { ToolGroup, type ToolItem } from './components/chat/ToolViews'
 import { AgentGroup } from './components/chat/AgentViews'
 import { toast } from './components/Toast'
@@ -102,6 +103,8 @@ type Segment =
   | { kind: 'agent'; items: ToolItem[] }
   | { kind: 'files'; item: ToolItem; files: Artifact[] }
   | { kind: 'item'; item: Exclude<Item, { kind: 'tool' }> }
+
+type AssistantItem = Extract<Item, { kind: 'assistant' }>
 
 // 把连续的 tool item 合并成一段，其余 item 各自独立 —— 用于工具分组渲染。
 // 子代理（name==='agent'）也按连续合并成一段：单个渲染成滚动窗口卡片，并发多个
@@ -1776,6 +1779,40 @@ export default function App() {
   }
   sendRef.current = send // 供项目主页输入岛在 newSession 后调用（override 自带目标，无时序依赖）
 
+  // ── 会话分支 ──
+  const [forking, setForking] = useState<string | null>(null)
+  const forkBusyRef = useRef(false)
+  const forkRequestsRef = useRef(new Map<string, string>())
+  async function forkChat(point: ForkPoint): Promise<void> {
+    const sourceKey = activeRef.current
+    const gateway = connsRef.current[sourceKey]
+    if (!gateway || forkBusyRef.current) return
+    const requestKey = `${sourceKey}:${point.checkpoint_id}:${point.message_id}`
+    const requestId = forkRequestsRef.current.get(requestKey) ?? crypto.randomUUID()
+    forkRequestsRef.current.set(requestKey, requestId)
+    forkBusyRef.current = true
+    setForking(requestKey)
+    const activationSeq = activationSeqRef.current
+    const backend = keyBackend(sourceKey)
+    try {
+      const result = await gateway.forkSession(
+        keyThread(sourceKey), point.checkpoint_id, point.message_id, requestId,
+      )
+      forkRequestsRef.current.delete(requestKey)
+      await refreshSessions(backend)
+      // 请求期间用户可能已切走；新会话保留在侧栏，不把用户拉回。
+      if (activeRef.current === sourceKey && activationSeqRef.current === activationSeq) {
+        setView('chat')
+        await activate(result.thread_id, result.workspace_dir, backend)
+      }
+    } catch (error) {
+      toast.error(errorMessage(error))
+    } finally {
+      forkBusyRef.current = false
+      setForking(null)
+    }
+  }
+
   // ── 时间旅行（重新生成 / 编辑重发）──
   // 以目标用户气泡为锚截断其后历史（后端同步删 checkpoint 消息），再以
   // 原文（重答）或编辑后文本重走一轮。锚点只认 messageId——由 turn.start 上锚或
@@ -1899,7 +1936,7 @@ export default function App() {
 
   const streaming = items.some((it) => it.kind === 'assistant' && it.streaming)
   const hasMessages = items.length > 0 || !!cur?.historyCursor || !!cur?.historyUnavailable
-  let historyStatus: ReactNode = t('chat.historyAll')
+  let historyStatus: ReactNode = null
   if (cur?.historyLoading) {
     historyStatus = <><span className="lumi-orb" />{t('chat.historyLoading')}</>
   } else if (cur?.historyError) {
@@ -1926,33 +1963,33 @@ export default function App() {
   // - 一轮文字↔工具交错时，中间文字段是过程，不给复制；只复制本轮**最终**那段助手文字。
   // - 按钮落点 = 本轮最后一个可锚定 segment（文字本身，或其后的工具如 ask）下方；
   //   错误气泡（notice）不占锚点，避免复制按钮挂到红色错误下面。
-  // - copyMap: segment key → 该轮最终助手文本；activeKey: 末轮（在飞轮）的锚点 key。
+  // - replyMap: segment key → 该轮最终助手消息（正文与分支锚点）；activeKey: 末轮的锚点 key。
   //   渲染时只对 activeKey 这一条按 running 把关（历史轮始终可复制）；末轮 running=true
   //   （生成中 / ask 等中断 pending）不出，收尾（完成或 stop→turn.complete）才出。
-  const { copyMap, activeKey } = useMemo(() => {
-    const map = new Map<string, string>()
-    let text: string | null = null // 本轮最终助手文字
+  const { replyMap, activeKey } = useMemo(() => {
+    const map = new Map<string, AssistantItem>()
+    let reply: AssistantItem | null = null
     let lastKey: string | null = null // 本轮最后一个可锚定 segment 的 key
     for (const seg of segments) {
       const kind = seg.kind === 'item' ? seg.item.kind : 'tools'
       if (kind === 'user') {
-        if (text && lastKey) map.set(lastKey, text) // 收尾上一轮
-        text = null
+        if (reply && lastKey) map.set(lastKey, reply) // 收尾上一轮
+        reply = null
         lastKey = null
       } else if (kind !== 'notice' && kind !== 'retry') {
         // 助手文字/工具才能锚定复制按钮；错误气泡(notice)/重试提示跳过，不占锚点
         lastKey = segKey(seg)
         if (seg.kind === 'item' && seg.item.kind === 'assistant' && seg.item.text) {
-          text = seg.item.text
+          reply = seg.item
         }
       }
     }
     let activeKey: string | null = null
-    if (text && lastKey) {
-      map.set(lastKey, text) // 末轮收尾，记锚点供 running 把关
+    if (reply && lastKey) {
+      map.set(lastKey, reply) // 末轮收尾，记锚点供 running 把关
       activeKey = lastKey
     }
-    return { copyMap: map, activeKey }
+    return { replyMap: map, activeKey }
   }, [segments])
 
   // 斜杠命令补全：命令模式下按前缀过滤，菜单可被 Esc 临时关闭
@@ -2381,9 +2418,11 @@ export default function App() {
                 <div className="chat-top-fade pointer-events-none absolute left-0 right-2 top-0 z-10 h-8" />
                 <div ref={scrollRef} onScroll={onScroll} className="h-full overflow-auto" style={{ overflowAnchor: 'none' }}>
                   <div className="chat-body max-w-3xl mx-auto w-full px-6 py-8 space-y-5">
-                    <div className="h-6 flex justify-center items-center gap-2.5 text-xs text-muted-foreground" role="status">
-                      {historyStatus}
-                    </div>
+                    {historyStatus && (
+                      <div className="h-6 flex justify-center items-center gap-2.5 text-xs text-muted-foreground" role="status">
+                        {historyStatus}
+                      </div>
+                    )}
                     {segments.map((seg) => {
                       const key = seg.kind === 'item' && seg.item.kind === 'user' && seg.item.arrival
                         ? `arrival:${seg.item.arrival.id}` : segKey(seg)
@@ -2422,8 +2461,9 @@ export default function App() {
                       // 两侧共用同一个 HoverActions，悬停显隐的几何与时序只此一处。
                       let copyText: string | undefined
                       if (userItem) copyText = userItem.text
-                      else if (key !== activeKey || !running) copyText = copyMap.get(key)
+                      else if (key !== activeKey || !running) copyText = replyMap.get(key)?.text
                       const timeTravelable = userItem && canTimeTravel && !!userItem.messageId
+                      const forkPoint = !userItem && canTimeTravel ? replyMap.get(key)?.forkPoint : undefined
                       if (!copyText && !timeTravelable) return <div key={key} data-history-id={key}>{node}</div>
                       return (
                         <div key={key} data-history-id={key}>
@@ -2443,6 +2483,13 @@ export default function App() {
                               </>
                             )}
                             {copyText && <CopyButton text={copyText} />}
+                            {forkPoint && (
+                              <ForkButton
+                                busy={forking === `${active}:${forkPoint.checkpoint_id}:${forkPoint.message_id}`}
+                                disabled={forking !== null}
+                                onClick={() => void forkChat(forkPoint)}
+                              />
+                            )}
                           </HoverActions>
                         </div>
                       )

@@ -1,5 +1,5 @@
-import { memo, useEffect, useRef, useState, type ReactNode } from 'react'
-import { Check, Copy, Info, type LucideIcon } from 'lucide-react'
+import { memo, useEffect, useRef, useState, type ReactElement, type ReactNode } from 'react'
+import { Check, Copy, Info, Split, type LucideIcon } from 'lucide-react'
 import { Button } from '@/components/ui/button'
 import { Tooltip, TooltipContent, TooltipTrigger } from '@/components/ui/tooltip'
 import { useI18n } from '../../i18n'
@@ -110,6 +110,31 @@ export function IconAction({
       className="text-muted-foreground"
     >
       <Icon />
+    </Button>
+  )
+}
+
+interface ForkButtonProps {
+  busy: boolean
+  disabled: boolean
+  onClick: () => void
+}
+
+export function ForkButton({ busy, disabled, onClick }: ForkButtonProps): ReactElement {
+  const { t } = useI18n()
+  const label = t(busy ? 'chat.forking' : 'chat.fork')
+  return (
+    <Button
+      variant="ghost"
+      size="icon-sm"
+      disabled={disabled}
+      onClick={onClick}
+      title={label}
+      aria-label={label}
+      aria-busy={busy}
+      className="text-muted-foreground"
+    >
+      {busy ? <span className="lumi-orb" /> : <Split className="rotate-90" />}
     </Button>
   )
 }

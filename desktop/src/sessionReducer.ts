@@ -4,6 +4,7 @@ import type { CtxUsage } from './components/ContextMeter.tsx'
 import type {
   ActiveModel,
   AttachedFile,
+  ForkPoint,
   HistoryItem,
   HistorySnapshot,
   Item,
@@ -75,7 +76,7 @@ function restore(h: HistoryItem): Item {
   if (h.kind === 'user')
     return { id: h.id ?? nid(), kind: 'user', text: h.text ?? '', images: h.images, files: h.files, sender: h.sender, ts: h.ts, messageId: h.message_id }
   if (h.kind === 'assistant')
-    return { id: h.id ?? nid(), kind: 'assistant', text: h.text ?? '', streaming: false }
+    return { id: h.id ?? nid(), kind: 'assistant', text: h.text ?? '', streaming: false, forkPoint: h.fork_point }
   return {
     id: h.id ?? nid(),
     kind: 'tool',
@@ -172,6 +173,18 @@ const endTurn = (s: SessionState): SessionState => ({
 
 function finishTurn(items: Item[]): Item[] {
   return finishStreaming(items.filter((it) => it.kind !== 'retry'))
+}
+
+function attachForkPoint(items: Item[], point: ForkPoint | undefined): Item[] {
+  if (!point) return items
+  for (let i = items.length - 1; i >= 0; i--) {
+    const item = items[i]
+    if (item.kind !== 'assistant') continue
+    const updated = items.slice()
+    updated[i] = { ...item, forkPoint: point }
+    return updated
+  }
+  return items
 }
 
 // 子代理内部事件归属：把 tool.start/complete 与 token 用量写进 runId 匹配的 agent 卡片。
@@ -517,9 +530,15 @@ export function reduceEvent(store: Store, sid: string, ev: WireEvent, defaultMod
       n = q === s.clarify ? s : { ...s, clarify: q }
       break
     }
-    case 'turn.complete':
-      n = { ...endTurn(s), ctx: ctxFromUsage(ev.payload.usage) ?? s.ctx }
+    case 'turn.complete': {
+      const ended = endTurn(s)
+      n = {
+        ...ended,
+        items: attachForkPoint(ended.items, ev.payload.fork_point),
+        ctx: ctxFromUsage(ev.payload.usage) ?? s.ctx,
+      }
       break
+    }
     case 'error': {
       // 出错中断的流（bridge 只发 error、无 message.complete）也要收尾气泡 + 关弹窗
       const ended = endTurn(s)

@@ -146,6 +146,20 @@ async def test_remove_uploads_only_touches_uploads_dir(_tmp_uploads, tmp_path):
     assert kept.exists()
 
 
+async def test_remove_uploads_preserves_directory_with_shared_sibling(_tmp_uploads):
+    path = await umod.save_upload("report.csv", _chunks(b"data"))
+    from pathlib import Path
+
+    uploaded = Path(path)
+    sibling = uploaded.with_name("report.csv.bak")
+    sibling.write_bytes(b"backup")
+    umod.remove_uploads([path], retained=[str(sibling)])
+    assert uploaded.read_bytes() == b"data"
+    assert sibling.read_bytes() == b"backup"
+    umod.remove_uploads([str(sibling)])
+    assert not uploaded.parent.exists()
+
+
 async def test_delete_thread_removes_declared_uploads(_tmp_uploads, tmp_path):
     from langchain_core.messages import HumanMessage
     from langgraph.checkpoint.memory import MemorySaver

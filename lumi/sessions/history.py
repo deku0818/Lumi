@@ -19,10 +19,21 @@ from lumi.agents.core.meta_message import (
     history_message_ids,
     should_show_human_message,
 )
+from lumi.agents.core.node_helpers.messages import dangling_tool_calls
 from lumi.sessions.thread_runs import ThreadRunLock, thread_runs
 
 if TYPE_CHECKING:
     from langgraph.graph.state import CompiledStateGraph
+
+
+def can_fork_message(message: BaseMessage) -> bool:
+    """仅完整的助手正文可作为分支点，工具过程和中断的半截正文不可。"""
+    return (
+        message.type == "ai"
+        and bool(extract_text_content(message.content))
+        and not getattr(message, "tool_calls", None)
+        and not message.additional_kwargs.get("lumi", {}).get("interrupted")
+    )
 
 
 @dataclass(frozen=True)
@@ -77,7 +88,10 @@ class _Cursor:
             raise ValueError("无效的历史分页游标") from exc
 
 
-def _summary(messages: list[BaseMessage]) -> tuple[BaseMessage, str] | None:
+type HistorySegment = tuple[list[BaseMessage], _Cursor]
+
+
+def summary_message(messages: list[BaseMessage]) -> tuple[BaseMessage, str] | None:
     for msg, identity in zip(messages, history_message_ids(messages)):
         if (
             msg.type in ("human", "system")
@@ -91,7 +105,7 @@ def _summary(messages: list[BaseMessage]) -> tuple[BaseMessage, str] | None:
 def _previous(
     thread_id: str, checkpoint_id: str, messages: list[BaseMessage]
 ) -> _Cursor | None:
-    summary = _summary(messages)
+    summary = summary_message(messages)
     if summary is None:
         return None
     msg, identity = summary
@@ -185,7 +199,7 @@ class HistoryReader:
                 messages = value.value if isinstance(value, Overwrite) else value
                 if not isinstance(messages, list):
                     continue
-                summary = _summary(messages)
+                summary = summary_message(messages)
                 if summary and summary[1] == cursor.summary_id:
                     before = await graph.aget_state(saved.config)
                     retained = messages[messages.index(summary[0]) + 1 :]
@@ -199,10 +213,10 @@ class HistoryReader:
             stored = saved.checkpoint.get("channel_values", {}).get("messages")
             stored = getattr(stored, "value", stored)
             if isinstance(stored, list):
-                summary = _summary(stored)
+                summary = summary_message(stored)
                 same_carrier = summary and summary[1] == cursor.summary_id
                 if summary and not summary[0].id and post_messages is not None:
-                    post_summary = _summary(post_messages)[0]
+                    post_summary = summary_message(post_messages)[0]
                     stored_tail = stored[stored.index(summary[0]) + 1 :]
                     post_tail = post_messages[post_messages.index(post_summary) + 1 :]
                     # 旧 Overwrite 的 carrier 可能在下一次 add_messages 时才获得 id。
@@ -215,7 +229,7 @@ class HistoryReader:
                 if same_carrier:
                     post_messages = stored
                 elif post_messages is not None:
-                    after_summary = _summary(post_messages)[0]
+                    after_summary = summary_message(post_messages)[0]
                     retained = post_messages[post_messages.index(after_summary) + 1 :]
                     return self._legacy_link(cursor, checkpoint_id, stored, retained)
             if not saved.parent_config:
@@ -313,6 +327,19 @@ class HistoryReader:
                 for m, identity in zip(messages, identities)
             ]
             self._items = render(normalized)
+            fork_ids = {
+                identity
+                for message, identity in zip(messages, identities)
+                if can_fork_message(message)
+            }
+            for item in self._items:
+                if item["kind"] == "assistant":
+                    identity = item["id"].removesuffix(":assistant")
+                    if identity in fork_ids:
+                        item["fork_point"] = {
+                            "message_id": identity,
+                            "checkpoint_id": position.checkpoint_id,
+                        }
             self._excluded = {
                 it["id"]
                 for it in render(
@@ -364,16 +391,68 @@ class HistoryReader:
             }
         return result
 
+    async def fork_segments(
+        self,
+        graph: CompiledStateGraph,
+        thread_id: str,
+        checkpoint_id: str,
+        message_id: str,
+    ) -> list[HistorySegment]:
+        """分支上下文与其引用的压缩原文，按从新到旧排列，不读取无关超步。"""
+        position = _Cursor(thread_id, checkpoint_id)
+        snapshot = await graph.aget_state(self._config(position))
+        messages = list(snapshot.values.get("messages", []))
+        identities = history_message_ids(messages)
+        if message_id not in identities:
+            raise ValueError("分支消息不存在，请刷新会话")
+        index = identities.index(message_id)
+        if not can_fork_message(messages[index]):
+            raise ValueError("只能从已完成的助手回复创建分支")
+        # 被保尾重挂的回复可能落在一个已概括未来的摘要之后，恢复它压缩前的上下文。
+        earlier, index = await message_checkpoint(
+            graph, thread_id, messages, index, checkpoint_id=checkpoint_id
+        )
+        if earlier is not None:
+            snapshot = earlier
+            messages = list(snapshot.values["messages"])
+            position = replace(
+                position,
+                checkpoint_id=snapshot.config["configurable"]["checkpoint_id"],
+            )
+        messages = messages[: index + 1]
+        if dangling_tool_calls(messages):
+            raise ValueError("该回复的工具调用尚未完成，无法创建分支")
+        segments = [(messages, position)]
+        seen = {position.checkpoint_id}
+        while previous := _previous(thread_id, position.checkpoint_id, messages):
+            previous = replace(previous, aliases=position.aliases)
+            if previous.summary_id:
+                previous = await self._legacy_cursor(graph, previous)
+                if previous is None:
+                    raise ValueError("压缩前记录已不可用，无法创建完整分支")
+            if previous.checkpoint_id in seen:
+                raise ValueError("历史索引循环，无法创建分支")
+            seen.add(previous.checkpoint_id)
+            snapshot = await graph.aget_state(self._config(previous))
+            if not snapshot.values:
+                raise ValueError("压缩前记录已不可用，无法创建完整分支")
+            messages = list(snapshot.values.get("messages", []))
+            segments.append((messages, previous))
+            position = previous
+        return segments
+
 
 async def message_checkpoint(
     graph: CompiledStateGraph,
     thread_id: str,
     messages: list[BaseMessage],
     index: int,
+    *,
+    checkpoint_id: str = "",
 ) -> tuple[StateSnapshot | None, int]:
-    """找到目标用户消息压缩前的最早状态，供 rewind 建立不含旧未来的分支。"""
+    """找到目标消息压缩前的最早状态，供 rewind / fork 排除旧未来。"""
     identity = history_message_ids(messages)[index]
-    position = _previous(thread_id, "", messages)
+    position = _previous(thread_id, checkpoint_id, messages)
     reader = HistoryReader()
     source: StateSnapshot | None = None
     seen: set[str] = set()

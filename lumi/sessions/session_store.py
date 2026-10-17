@@ -26,6 +26,7 @@ from lumi.agents.core.meta_message import (
     should_show_human_message,
     visible_user_text,
 )
+from lumi.sessions.session_meta import load_all
 from lumi.utils.logger import logger
 from lumi.utils.thread_id import CRON_THREAD_PREFIX
 
@@ -217,10 +218,13 @@ async def list_sessions(
 
     metadata_filter = {"workspace_dir": workspace} if workspace else None
     pairs = await _get_thread_ids(graph, filter=metadata_filter)
+    pending = {tid for tid, entry in load_all().items() if entry.get("fork_pending")}
     # cron 执行会话不进会话列表（即使续聊后带上 workspace 元数据也不"转正"），
     # 只能从定时任务详情的执行记录进入
     candidates = [
-        (tid, cid) for tid, cid in pairs if not tid.startswith(f"{CRON_THREAD_PREFIX}-")
+        (tid, cid)
+        for tid, cid in pairs
+        if tid not in pending and not tid.startswith(f"{CRON_THREAD_PREFIX}-")
     ]
 
     # 分批并发加载 state：串行 aget_state 在会话多时是侧栏刷新的延迟瓶颈；

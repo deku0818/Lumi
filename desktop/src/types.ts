@@ -62,7 +62,7 @@ export interface WireEventPayloads {
     approval_id: string
     tool_calls: ToolCallBrief[]
   }
-  'turn.complete': { usage?: Usage }
+  'turn.complete': { usage?: Usage; fork_point?: ForkPoint }
   error: { message: string }
   'cron.result': {
     job_id: string
@@ -131,6 +131,17 @@ export interface AttachedFile {
   name: string
 }
 
+export interface ForkPoint {
+  message_id: string
+  checkpoint_id: string
+}
+
+export interface ForkSessionResult {
+  thread_id: string
+  title: string
+  workspace_dir: string
+}
+
 export type Item =
   // sender：IM 渠道消息的发送者（desktop 消息无）；ts：所有用户消息的发送时刻（毫秒，
   // 底层统一落库）。气泡头渲染「李雷 · 14:02」或仅时间
@@ -138,7 +149,7 @@ export type Item =
   // arrival：仅本地新消息持有的稳定入场标记，上锚不换 React key，历史水合不携带
   // landed：运行中插话刚注入消息流（挂载时放一次落地光晕；重载历史后不再有）
   | { id: string | number; kind: 'user'; text: string; images?: string[]; files?: AttachedFile[]; sender?: string; ts?: number; messageId?: string; landed?: boolean; arrival?: { id: number } }
-  | { id: string | number; kind: 'assistant'; text: string; streaming: boolean; arrival?: { id: number } }
+  | { id: string | number; kind: 'assistant'; text: string; streaming: boolean; forkPoint?: ForkPoint; arrival?: { id: number } }
   | {
       id: string | number
       kind: 'tool'
@@ -359,6 +370,7 @@ export interface HistoryItem {
   output?: string
   tool_call_id?: string
   message_id?: string // user 项：后端消息 id（时间旅行截断锚点）
+  fork_point?: ForkPoint // assistant 项：可独立还原的历史分支点
 }
 
 // load_history 的返回（对齐后端 session.py load_history）

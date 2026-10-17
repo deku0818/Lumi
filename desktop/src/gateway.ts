@@ -1,8 +1,6 @@
 // Transport-independent JSON-RPC client: local WebSocket or native SSH IPC.
 // 方法与事件见 protocol/events.json。带指数退避自动重连（sidecar 启动需要时间）。
 import type {
-  GatewayConnection,
-  GatewayOptions,
   ActiveModel,
   BgTask,
   BgTaskOutput,
@@ -10,21 +8,24 @@ import type {
   ChannelInfo,
   ConnError,
   ConnState,
-  ModelLimits,
-  ModelPointer,
   CronJob,
   CronRun,
+  DiagnoseCheck,
+  EnvInstallTarget,
+  EnvStatus,
   FeishuConfig,
+  ForkSessionResult,
+  GatewayConnection,
+  GatewayOptions,
   HistoryItem,
   HistorySnapshot,
   McpScope,
   McpServerConfig,
-  McpServers,
   McpServerStatus,
+  McpServers,
   McpTestResult,
-  DiagnoseCheck,
-  EnvInstallTarget,
-  EnvStatus,
+  ModelLimits,
+  ModelPointer,
   Project,
   ProjectOverview,
   ProjectResource,
@@ -36,7 +37,7 @@ import type {
   SessionModelWire,
   SlashCommand,
   WireEvent,
-} from './types'
+} from './types.ts'
 import { SshSocket } from './sshSocket'
 import { fmtSize } from '@/lib/utils'
 
@@ -207,6 +208,20 @@ export class Gateway {
   // 时间旅行重答：截断该用户消息及其后全部历史并重建重走一轮，事件流同 send_message
   regenerate(messageId: string, toolMode?: string): Promise<unknown> {
     return this.request('regenerate', withToolMode({ message_id: messageId }, toolMode))
+  }
+
+  forkSession(
+    threadId: string,
+    checkpointId: string,
+    messageId: string,
+    requestId: string,
+  ): Promise<ForkSessionResult> {
+    return this.request('fork_session', {
+      thread_id: threadId,
+      checkpoint_id: checkpointId,
+      message_id: messageId,
+      request_id: requestId,
+    })
   }
 
   // 编辑重发（原子）：截断该用户消息及其后全部历史，以编辑后文本 + 原附件重走一轮
