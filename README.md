@@ -52,7 +52,7 @@
 
 ## 为什么选择 Lumi
 
-- **面向所有人** — 读书笔记、旅行计划、周报、报销、家庭开支……不写代码也能用；需要写代码时切到 `code` 风格，就配好了完整编程提示词与探索/规划子 Agent。
+- **面向所有人** — 读书笔记、旅行计划、周报、报销、家庭开支……不写代码也能用；通过提示词、技能和子 Agent 按项目扩展能力。
 - **两种用法，一套大脑** — 桌面应用专注深度工作，飞书随手交办；同一个后端、同一份记忆与配置。
 - **你的数据在你自己机器上** — 开源、[MIT 协议](LICENSE)、本地运行，模型 Key 和会话都存在你自己的机器；也支持自建服务器远程部署。
 - **可扩展** — [技能](docs/guides/slash-commands.md)、[子 Agent](docs/guides/agents.md)、[MCP 协议](https://modelcontextprotocol.io/)、[定时任务](docs/guides/cron.md)、[多 Agent Workflow](docs/architecture/workflow.md)，多数改配置即扩展，无需改代码。
@@ -80,7 +80,6 @@ cd Lumi
 
 ```json
 {
-  "style": "default",
   "env": {
     "LLM_MODEL_NAME": "gpt-4o",
     "OPENAI_API_KEY": "sk-xxx",
@@ -98,10 +97,10 @@ cd Lumi
 聊天必须绑定一个项目（工作目录）。每个项目一套配置（提示词 / 记忆 / 定时 / 技能 / 子 Agent），按三层叠加、逐层同名覆盖：
 
 ```
-风格内置  <  全局层 ~/.lumi/  <  项目层 <项目>/.lumi/
+内置 lumi/styles/  <  全局层 ~/.lumi/  <  项目层 <项目>/.lumi/
 ```
 
-点进一个项目就是它的主页：左边输入岛直接在这个项目里开聊，右边五张卡（提示词 / 记忆 / 定时 / 技能 / 子 Agent）所见即会话所加载，项目层可增删改。详见 [风格系统](docs/guides/styles.md)。
+点进一个项目就是它的主页：左边输入岛直接在这个项目里开聊，右边五张卡（提示词 / 记忆 / 定时 / 技能 / 子 Agent）所见即会话所加载，项目层可增删改。详见 [内置资源与用户覆盖](docs/guides/styles.md)。
 
 ### 权限与审批
 
@@ -152,7 +151,7 @@ CLI、HTTP API 与容器镜像仍可独立使用，它们不是桌面远端连�
 | 完整配置 | [config.md](docs/guides/config.md) | · | 飞书渠道 | [feishu.md](docs/guides/feishu.md) |
 | 权限控制 | [permissions.md](docs/guides/permissions.md) | · | 定时任务 | [cron.md](docs/guides/cron.md) |
 | 子 Agent | [agents.md](docs/guides/agents.md) | · | 斜杠命令 / 技能 | [slash-commands.md](docs/guides/slash-commands.md) |
-| 风格系统 | [styles.md](docs/guides/styles.md) | · | 持久记忆 | [memory.md](docs/guides/memory.md) |
+| 内置资源 | [styles.md](docs/guides/styles.md) | · | 持久记忆 | [memory.md](docs/guides/memory.md) |
 | 桌面架构 | [desktop.md](docs/architecture/desktop.md) | · | 多 Agent Workflow | [workflow.md](docs/architecture/workflow.md) |
 | 思考管理 | [thinking.md](docs/architecture/thinking.md) | · | 上下文压缩 | [compact.md](docs/architecture/compact.md) |
 

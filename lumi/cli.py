@@ -57,14 +57,6 @@ def _default(
         str | None,
         typer.Option("-p", "--prompt", help="非交互模式：执行 prompt 后退出"),
     ] = None,
-    style: Annotated[
-        str | None,
-        typer.Option(
-            "-s",
-            "--style",
-            help="系统提示词风格（如 code），覆盖 config.json 中的 style 配置（仅 -p 模式）",
-        ),
-    ] = None,
     privileged_danger: Annotated[
         bool,
         typer.Option(
@@ -88,19 +80,13 @@ def _default(
     inject_path()
     _export_lumi_bin()
     if ctx.invoked_subcommand is not None:
-        # 这些选项只作用于 -p：配子命令时静默丢弃会让人以为 serve 用上了（serve 还会
-        # 重建配置单例，-s 的覆盖本就留不住），明确报错
-        if prompt is not None or style is not None or privileged_danger or accept_edits:
+        # 这些选项只作用于 -p，配子命令时明确报错，避免被静默丢弃。
+        if prompt is not None or privileged_danger or accept_edits:
             raise typer.BadParameter(
-                "-p / -s / --privileged-danger / --accept-edits 仅用于 `lumi -p` 模式，"
+                "-p / --privileged-danger / --accept-edits 仅用于 `lumi -p` 模式，"
                 "不能与子命令同用"
             )
         return
-
-    if style is not None:
-        from lumi.utils.config import get_config
-
-        get_config().set_style_override(style)
 
     if prompt is not None:
         _run_headless(prompt, privileged=privileged_danger, accept_edits=accept_edits)

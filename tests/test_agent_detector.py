@@ -125,13 +125,15 @@ def test_cache_correctness_after_modification() -> None:
         assert {"alpha", "beta"} <= {a.name for a in detector.peek()}
 
 
-def test_style_switch_refreshes_builtin_agents(tmp_path, isolated_config):
-    """回归：内置层不参与 digest，改项目 style 后缓存长期沿用旧风格的内置子代理。"""
-    lumi_dir = tmp_path / ".lumi"
-    lumi_dir.mkdir()
-    (lumi_dir / "config.json").write_text('{"style": "default"}', encoding="utf-8")
+def test_project_override_refreshes_builtin_agent(tmp_path, isolated_config):
+    """项目覆盖新增、删除后，缓存须在项目版本与内置版本间切换。"""
     detector = AgentChangeDetector.get_instance(tmp_path)
-    assert "general-purpose" in {a.name for a in detector.peek()}
-
-    (lumi_dir / "config.json").write_text('{"style": "code"}', encoding="utf-8")
-    assert "plan" in {a.name for a in detector.peek()}
+    builtin = next(a for a in detector.peek() if a.name == "explore")
+    agents_dir = tmp_path / ".lumi" / "agents"
+    agents_dir.mkdir(parents=True)
+    override = _create_agent_file(agents_dir, "explore", "项目探索指令")
+    assert next(a for a in detector.peek() if a.name == "explore").system_prompt == (
+        "项目探索指令"
+    )
+    override.unlink()
+    assert next(a for a in detector.peek() if a.name == "explore") == builtin

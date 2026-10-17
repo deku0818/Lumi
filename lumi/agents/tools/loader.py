@@ -94,18 +94,15 @@ def config_layers(
 ) -> list[tuple[str, Path]]:
     """(来源标签, 目录) 列表，优先级从低到高，逐层同名覆盖。
 
-    style 内置（builtin：default 恒为基底，非 default 风格再叠其上）→ 进程配置目录
-    （global）→ 项目 ``.lumi/``（project，仅在传入 project_dir 时存在）。
+    内置 ``styles/{subdir}/``（builtin）→ 进程配置目录（global）→ 项目 ``.lumi/``
+    （project，仅在传入 project_dir 时存在）。
     load_skills/load_agents、detector 的变更扫描、gateway/project_config 的 UI
-    聚合都消费这一份——层序只写在这里。prompts 不走此基底（default 无内置 prompts）。
+    聚合都消费这一份——层序只写在这里。prompts 的对应解析链见 manager.prompt_layers。
     """
     from lumi.styles import STYLES_ROOT
 
     config = get_config()
-    style = config.active_style_for(project_dir)
-    layers = [
-        ("builtin", STYLES_ROOT / s / subdir) for s in dict.fromkeys(("default", style))
-    ]
+    layers = [("builtin", STYLES_ROOT / subdir)]
     layers.append(("global", config.config_dir / subdir))
     if project_dir:
         layers.append(("project", Path(project_dir) / ".lumi" / subdir))
@@ -162,14 +159,14 @@ def load_agents(
 ) -> list[AgentConfig]:
     """加载 Agent 配置。
 
-    加载优先级: 风格内置 agents → 进程配置 ``.lumi/agents/`` → 项目 ``.lumi/agents/``
+    加载优先级: 内置 agents → 进程配置 ``.lumi/agents/`` → 项目 ``.lumi/agents/``
     (逐层同名覆盖)。项目层随会话绑定的项目传入——不传则保持进程级两层（TUI /
     无项目场景）。
 
     Args:
         name: 只返回指定名称的 agent。
         directory: 只加载该目录、不叠任何层（测试用），与 change_detector 的
-            ``explicit_dir`` 同义——叠上内置层的话，风格自带的定义会混进结果。
+            ``explicit_dir`` 同义——叠上内置层的话，内置定义会混进结果。
         project_dir: 会话绑定的项目根，其 ``.lumi/agents/`` 为最高层。
     """
     layers = (
@@ -225,7 +222,7 @@ def load_skills(
 ) -> list[SkillConfig]:
     """加载 Skill 配置。
 
-    加载优先级: 风格内置 skills → 进程配置 ``.lumi/skills/`` → 项目 ``.lumi/skills/``
+    加载优先级: 内置 skills → 进程配置 ``.lumi/skills/`` → 项目 ``.lumi/skills/``
     (逐层同名覆盖)。目录结构: ``<skills_dir>/<skill_name>/SKILL.md``
 
     Args:

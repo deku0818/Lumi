@@ -55,15 +55,20 @@ def test_missing_subcommand_still_exits_two():
 @pytest.mark.parametrize(
     "args",
     [
-        ["-s", "code", "status"],
         ["--privileged-danger", "status"],
         ["--accept-edits", "status"],
         ["-p", "hi", "status"],
     ],
 )
 def test_root_options_with_subcommand_are_rejected(args):
-    # 回归：根选项只作用于 -p 模式，配子命令时曾被静默丢弃（以为 serve 用上了 code 风格
-    # / 特权模式，其实没有）
+    # 根选项只作用于 -p 模式，配子命令时不能静默丢弃。
     result = runner.invoke(app, args)
     assert result.exit_code == 2
     assert "-p" in result.output
+
+
+@pytest.mark.parametrize("option", ["-s", "--style"])
+def test_style_option_is_removed(option):
+    result = runner.invoke(app, [option, "code", "-p", "hi"])
+    assert result.exit_code == 2
+    assert "No such option" in result.output

@@ -7,7 +7,7 @@
 ## 工作原理
 
 1. `agent` 工具静态注册到 `ToolRegistry`（恒注册，与 skill 一致），不依赖启动期是否存在配置
-2. 可用代理列表经 `<system-reminder>` 动态注入对话：`AgentChangeDetector` 检测 `.lumi/agents/*.md` 变更后刷新（与 `lumi/styles/{style}/agents/*.md` 内置代理合并），新增/删除代理无需重启或重建工具 schema
+2. 可用代理列表经 `<system-reminder>` 动态注入对话：`AgentChangeDetector` 检测 `.lumi/agents/*.md` 变更后刷新（与 `lumi/styles/agents/*.md` 内置代理合并），新增/删除代理无需重启或重建工具 schema
 3. 对话中持有 `agent` 工具的 Agent 根据 `description` 判断是否委托任务
 4. 调用时创建独立的 `LumiAgent` 子实例（无 checkpointer），执行完毕后返回结果
 
@@ -23,7 +23,7 @@
 | 模块 | 路径 | 职责 |
 |---|---|---|
 | 工具实现 | `lumi/agents/tools/providers/agent.py` | Agent 工具核心逻辑：委派深度网关、创建子 LumiAgent |
-| Agent 加载 | `lumi/agents/tools/loader.py` | 扫描解析 `.lumi/agents` 与风格内置 Agent 配置（`load_agents`） |
+| Agent 加载 | `lumi/agents/tools/loader.py` | 扫描解析 `.lumi/agents` 与内置 Agent 配置（`load_agents`） |
 | 变更检测 / 注入 | `lumi/agents/core/preprocessing/{agent_detector,context_inject}.py` | 检测 `.lumi/agents` 变更，把可用列表注入 `<system-reminder>` |
 
 ## 前端集成

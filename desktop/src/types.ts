@@ -197,15 +197,14 @@ export type ProjectResourceKind = 'skill' | 'agent' | 'prompt' | 'memory'
 // 提示词解析结果：source 标注命中层（''=三层都没有）；body=剥好 frontmatter 的正文（预览用）
 interface ProjectPromptInfo {
   name: 'SOUL' | 'AGENTS'
-  source: '' | 'project' | 'style' | 'builtin'
+  source: '' | 'project' | 'global' | 'builtin'
   path: string
   content: string
   body: string
 }
 
-// source：builtin=style 内置 / global=进程配置层 / project=项目 .lumi（仅此层可编辑）
+// source：builtin=内置 / global=进程配置层 / project=项目 .lumi（仅此层可编辑）
 export interface ProjectOverview {
-  style: string
   prompts: ProjectPromptInfo[]
   skills: { name: string; description: string; source: string; builtin: boolean }[]
   agents: { name: string; description: string; tools: string[]; source: string; builtin: boolean }[]

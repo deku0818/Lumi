@@ -63,7 +63,7 @@
     "remove_project": { "params": ["path"], "result": ["projects"], "note": "只删清单条目，不动磁盘" },
     "rename_project": { "params": ["path", "name"], "result": ["projects"] },
     "set_default_project": { "params": ["path", "default"], "result": ["projects"], "note": "设为/取消默认项目（「新建会话」直接落地的项目）；至多一个，设新的自动顶掉旧的" },
-    "project_overview": { "params": ["path"], "result": ["style", "prompts", "skills", "agents", "memory"], "note": "项目主页一次拉全：SOUL/AGENTS 提示词（含解析来源 project|style|builtin）、技能与子 Agent 清单（builtin 标记内置只读）、记忆文件列表。定时任务复用 list_cron_jobs" },
+    "project_overview": { "params": ["path"], "result": ["prompts", "skills", "agents", "memory"], "note": "项目主页一次拉全：SOUL/AGENTS 提示词（含解析来源 project|global|builtin）、技能与子 Agent 清单（builtin 标记内置只读）、记忆文件列表。定时任务复用 list_cron_jobs" },
     "project_resource_read": { "params": ["path", "kind", "name", "file?"], "result": ["content", "body", "files?", "builtin?", "source?", "path?"], "note": "读单个资源全文；kind ∈ skill|agent|prompt|memory。content=原文（编辑用），body=后端剥好 frontmatter 的正文（阅读视图用，剥离逻辑单点在后端）。skill 额外返回目录内 md 文件清单，file 指定读哪个（缺省 SKILL.md）" },
     "project_resource_write": { "params": ["path", "kind", "name", "content", "file?", "create?"], "result": ["ok", "path"], "note": "写项目 .lumi/ 层资源（新建或覆盖，按需建目录；create=true 时目标已存在即报错，防「新建」覆盖已有定义）；内置层不可写。技能 SKILL.md 与 Agent 定义在落盘前校验 frontmatter（须含 name/description 且 name 与资源名一致），坏格式当场报错而非静默写入" },
     "project_resource_delete": { "params": ["path", "kind", "name"], "result": ["ok", "restored_builtin"], "note": "删项目层资源；restored_builtin=true 表示同名内置仍在（效果为恢复内置版本）" },

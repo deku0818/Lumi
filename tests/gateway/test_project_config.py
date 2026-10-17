@@ -20,8 +20,8 @@ def isolated_config_dir(tmp_path_factory, monkeypatch):
 
 @pytest.fixture
 def builtin_agent() -> str:
-    """default 风格内置 agent 名（文件 stem）。"""
-    return next(f.stem for f in (STYLES_ROOT / "default" / "agents").glob("*.md"))
+    """内置 agent 名（文件 stem）。"""
+    return next(f.stem for f in (STYLES_ROOT / "agents").glob("*.md"))
 
 
 def agent_md(name: str, desc: str = "描述") -> str:
@@ -59,7 +59,7 @@ def test_overview_merges_layers(project: Path):
     assert skills["my-skill"]["builtin"] is False
     assert agents["my-agent"]["builtin"] is False
     assert agents["my-agent"]["tools"] == ["read"]
-    # default 风格内置 agents（explore / general-purpose）应并入且标记内置
+    # 内置 agents（explore / general-purpose）应并入且标记内置
     assert any(a["builtin"] for a in ov["agents"])
     assert [p["name"] for p in ov["prompts"]] == ["SOUL", "AGENTS"]
 
@@ -161,11 +161,11 @@ def test_copy_builtin_then_delete_restores(project: Path, builtin_agent: str):
 def test_copy_builtin_skill_tolerates_leftover_dir(
     project: Path, tmp_path_factory, monkeypatch
 ):
-    # 伪造 style 内置技能（monkeypatch STYLES_ROOT 指向临时树，不碰仓库源码）
+    # 伪造内置技能（monkeypatch STYLES_ROOT 指向临时树，不碰仓库源码）
     import lumi.styles
 
     styles_root = tmp_path_factory.mktemp("styles")
-    fake = styles_root / "default" / "skills" / "fake-builtin"
+    fake = styles_root / "skills" / "fake-builtin"
     fake.mkdir(parents=True)
     (fake / "SKILL.md").write_text(skill_md("fake-builtin"), encoding="utf-8")
     monkeypatch.setattr(lumi.styles, "STYLES_ROOT", styles_root)
@@ -196,16 +196,18 @@ def test_prompt_overview_body_strips_frontmatter(project: Path):
     assert soul["content"].startswith("---")
 
 
-def test_prompt_chain_project_over_style(project: Path):
-    import json
-
-    (project / ".lumi" / "config.json").write_text(
-        json.dumps({"style": "code"}), encoding="utf-8"
-    )
-    # code 风格自带 SOUL.md → source=style
+def test_prompt_chain_project_over_builtin(
+    project: Path, tmp_path_factory, monkeypatch
+):
+    styles_root = tmp_path_factory.mktemp("styles")
+    prompts = styles_root / "prompts"
+    prompts.mkdir()
+    (prompts / "SOUL.md").write_text("内置灵魂", encoding="utf-8")
+    monkeypatch.setattr("lumi.styles.STYLES_ROOT", styles_root)
     ov = project_config.overview(project)
     soul = next(p for p in ov["prompts"] if p["name"] == "SOUL")
-    assert soul["source"] == "style"
+    assert soul["source"] == "builtin"
+    assert soul["content"] == "内置灵魂"
     # 项目层写入后覆盖
     project_config.write_resource(project, "prompt", "SOUL", "项目灵魂")
     ov = project_config.overview(project)

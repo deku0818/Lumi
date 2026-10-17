@@ -79,7 +79,7 @@ def test_load_agents_from_directory(tmp_path, monkeypatch):
         (tmp_path / f"{name}.md").write_text(
             f"---\nname: {name}\ndescription: {name} desc\n---\nprompt for {name}"
         )
-    # mock 掉风格内置 agents，只测试用户目录加载
+    # mock 掉内置 agents，只测试用户目录加载
     empty_dir = tmp_path / "_empty_style"
     empty_dir.mkdir()
     monkeypatch.setattr("lumi.styles.STYLES_ROOT", empty_dir)
@@ -106,7 +106,7 @@ def test_load_skills_directory_format(tmp_path, monkeypatch):
     (skill_dir / "SKILL.md").write_text(
         "---\nname: my-skill\ndescription: A skill\n---\nDo something"
     )
-    # mock 掉风格内置 skills，只测试用户目录加载
+    # mock 掉内置 skills，只测试用户目录加载
     empty_dir = tmp_path / "_empty_style"
     empty_dir.mkdir()
     monkeypatch.setattr("lumi.styles.STYLES_ROOT", empty_dir)

@@ -2,22 +2,8 @@
 
 所有字段均可选，未配置时使用默认值；未知字段会被静默忽略。某一顶层段校验失败（如类型写错）只让该段回默认并记 warning，其余段照常生效；JSON 语法错误则整份回退默认。读哪份 config.json 取决于入口：
 
-- **`lumi serve`（桌面端 / 服务器）**：只读用户级 `~/.lumi/config.json`（设了 `LUMI_CONFIG_DIR` 则读那里）；项目 `.lumi/config.json` 里只有 `style` 生效（按会话所属项目）。
+- **`lumi serve`（桌面端 / 服务器）**：只读用户级 `~/.lumi/config.json`（设了 `LUMI_CONFIG_DIR` 则读那里）；项目资源通过 `<项目>/.lumi/prompts/`、`agents/`、`skills/` 单独覆盖。
 - **命令行 `lumi -p`**：按当前目录向上发现，`./.lumi/config.json` 存在则用它，否则用户级。
-
----
-
-## style — 提示词风格
-
-```json
-{
-  "style": "code"
-}
-```
-
-默认值为 `"default"`。指定系统提示词和子 Agent 配置的风格，详见 [styles.md](styles.md)。
-
-`lumi -p` 可用 `-s code` 覆盖（对桌面 / `lumi serve` 无效）。优先级：CLI（仅 `lumi -p`）> 项目 `.lumi/config.json` 的 `style` > 进程 config.json > `default`。
 
 ---
 
@@ -157,7 +143,6 @@
 
 ```json
 {
-  "style": "code",
   "env": {
     "LLM_MODEL_NAME": "qwen3-max",
     "OPENAI_API_KEY": "sk-xxx",

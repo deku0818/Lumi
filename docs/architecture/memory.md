@@ -12,7 +12,7 @@
 | 承载 | 跨会话积累「用户是谁 / 怎么协作 / 项目背景」 | 「这个项目要什么」 |
 | 加载方式 | 索引注入，仅主 agent（`enable_memory`） | 主 + 子 agent 通过工具按需读取正文 |
 
-二者与 style 系统提示词（`.lumi/prompts/` 的 SOUL/AGENTS，「Lumi 是谁」）正交。
+二者与 系统提示词（`.lumi/prompts/` 的 SOUL/AGENTS，「Lumi 是谁」）正交。
 
 ## 存储结构
 

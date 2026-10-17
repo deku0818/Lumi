@@ -1,77 +1,43 @@
-# 风格系统使用指南
+# 内置资源与用户覆盖
 
-风格系统为 Lumi 提供了一套可切换的提示词、子 Agent 和技能配置预设。不同风格适用于不同使用场景，用户也可以在此基础上覆盖任意部分。
+Lumi 的通用提示词、子 Agent 和技能直接放在 `lumi/styles/` 下，所有会话共用，不再区分风格。
 
----
+## 内置资源
 
-## 内置风格
+- `prompts/COMPACT.md`：通用上下文压缩提示词。
+- `agents/explore.md`、`agents/general-purpose.md`：探索与通用子 Agent。
+- `skills/lumi-config/`：Lumi 配置技能。
 
-| 风格 | 说明 |
-|------|------|
-| `default` | 默认风格。**不内置提示词**——系统提示词全部来自用户 `.lumi/prompts/`；内置 general-purpose / explore 两个子 Agent 与 lumi-config 技能 |
-| `code` | 面向软件工程。内置完整的系统提示词（SOUL / AGENTS）和 explore / plan 两个子 Agent；default 的子 Agent 与技能作为基底一并可用（同名 explore 以 code 为准） |
+系统提示词 `SOUL.md`、`AGENTS.md` 由用户在全局或项目 `.lumi/prompts/` 中提供；两文件按 `SOUL → AGENTS` 顺序直接拼接，缺失的部分跳过。框架随后追加项目说明按需读取规则，项目根及子目录的 `AGENTS.md` 正文由模型通过工具读取，与这里的提示词配置分开。
 
-每种风格可内置三类资源：`prompts/`（系统提示词）、`agents/`（子 Agent）、`skills/`（技能），三者均为可选。`default` 不带 `prompts/`，风格提示词来自用户 `.lumi/prompts/`；两处都没有时仍带框架的项目说明按需读取规则（不报错）。
+## 加载优先级
 
-### 提示词组装
+三类资源均按同名覆盖：
 
-系统提示词由 `SOUL.md`、`AGENTS.md` 两个文件按此顺序**直接拼接**（不做 XML 包裹），任一文件缺失则跳过该段。
-
-框架随后追加项目说明按需读取规则。项目根及子目录的 `AGENTS.md` 正文由模型通过工具读取，与此处的 `prompts/AGENTS.md` 配置分开。
-
----
-
-## 配置方式
-
-### config.json
-
-在全局 `~/.lumi/config.json`（所有会话）或项目 `<项目>/.lumi/config.json`（只影响该项目的会话）写 `style`：
-
-```json
-{
-  "style": "code"
-}
+```
+内置 lumi/styles/ < 全局层 ~/.lumi/ < 项目层 <项目>/.lumi/
 ```
 
-### CLI 参数（仅 `lumi -p`）
+桌面端 / `lumi serve` 的全局层固定在用户数据目录；`lumi -p` 的进程配置目录按当前目录向上发现。显式设置 `LUMI_CONFIG_DIR` 时使用指定目录。
 
-```bash
-lumi -s code -p "重构这个模块"
-```
-
-`-s` 只对 `lumi -p` 生效，对桌面 / `lumi serve` 无效。
-
-优先级：CLI `-s`（仅 `-p`）> 项目 `.lumi/config.json` > `~/.lumi/config.json` > 默认值 `"default"`
-
----
+压缩调用当前未传入项目目录，COMPACT 只读取进程配置层和内置版本；项目单独配置的 COMPACT 暂不参与该调用。
 
 ## 用户覆盖
 
-用户无需修改 style 源文件，只需在 `.lumi/` 下放置同名文件即可覆盖：
+用户无需修改内置文件，在全局或项目 `.lumi/` 下放置同名文件即可覆盖：
 
 ```
 .lumi/
 ├── prompts/
-│   ├── SOUL.md                    # 覆盖 style 的 SOUL.md
-│   └── AGENTS.md                  # 覆盖 style 的 AGENTS.md
+│   ├── SOUL.md
+│   ├── AGENTS.md
+│   └── COMPACT.md
 ├── agents/
-│   └── explore.md                 # 覆盖 style 的 explore 子 Agent
+│   └── explore.md
 └── skills/
-    └── my-skill/SKILL.md          # 覆盖 style 的同名 skill
+    └── my-skill/SKILL.md
 ```
 
-加载优先级：项目 `.lumi/` > 全局 `~/.lumi/` > style 内置（prompts / agents / skills 三类一致）。其中 agents / skills 的 style 内置层 = `default` 基底 + 当前 style（同名以当前 style 为准），切到非 default 风格不会丢掉 default 自带的 general-purpose 子 Agent 与 lumi-config 技能；prompts 无此基底（default 不内置提示词）。升级 Lumi 时自动获取改进，用户只需覆盖想要自定义的部分。
+提示词为空或只有 frontmatter 时视同未配置，继续查找下一层。技能与子 Agent 定义需包含有效的 `name`、`description` 等 frontmatter，加载规则见 [子 Agent 指南](agents.md)。
 
----
-
-## 创建自定义风格
-
-在 `lumi/styles/` 下创建新目录（三个子目录均可选）：
-
-```bash
-mkdir -p lumi/styles/my-style/prompts
-mkdir -p lumi/styles/my-style/agents
-mkdir -p lumi/styles/my-style/skills
-```
-
-在 `prompts/` 下放置 SOUL.md、AGENTS.md，在 `agents/` 下放置子 Agent 配置，在 `skills/<name>/SKILL.md` 下放置技能。不提供 `prompts/` 的风格（如 `default`）提示词全部由用户 `.lumi/prompts/` 提供。
+项目主页提供提示词、技能和子 Agent 的查看与编辑。编辑和删除只作用于项目层；内置与全局资源可先复制到项目再修改。删除项目覆盖后，同名的低层资源重新生效。

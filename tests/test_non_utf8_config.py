@@ -4,7 +4,7 @@ from __future__ import annotations
 
 from lumi.agents.tools.loader import _parse_md_file
 from lumi.agents.tools.providers.mcp.config import _read_json_dict
-from lumi.utils.config.manager import LumiConfig, project_style_override
+from lumi.utils.config.manager import LumiConfig
 
 
 def _gbk(path, text):
@@ -20,11 +20,6 @@ def test_skill_file(tmp_path):
 
 def test_mcp_config(tmp_path):
     assert _read_json_dict(_gbk(tmp_path / "mcp_server.json", '{"名": {}}')) == {}
-
-
-def test_project_style(tmp_path):
-    _gbk(tmp_path / ".lumi" / "config.json", '{"style": "代码"}')
-    assert project_style_override(tmp_path) is None
 
 
 def test_prompt_layers(isolated_config, tmp_path):

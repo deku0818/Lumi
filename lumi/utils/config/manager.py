@@ -49,24 +49,6 @@ def strip_frontmatter(content: str) -> str:
     return parse_frontmatter(content)[1]
 
 
-# 框架内置提示词（lumi/prompts/）：load_prompt 解析链的最后一层兜底
-BUILTIN_PROMPTS_DIR = Path(__file__).parents[2] / "prompts"
-
-
-def project_style_override(project_dir: Path) -> str | None:
-    """项目 .lumi/config.json 声明的 style（缺失/无效返回 None）。
-
-    只挑 style 字段、不走 Config 全量校验：项目层 config.json 可能只为声明 style
-    或 MCP 而存在，其余字段坏掉不应连带 style 失效。
-    """
-    try:
-        data = json.loads((project_dir / ".lumi" / "config.json").read_text("utf-8"))
-    except (OSError, ValueError):  # 含 JSONDecodeError / 非 UTF-8
-        return None
-    style = data.get("style")
-    return str(style) if style else None
-
-
 class LumiConfig:
     """Lumi 配置管理器
 
@@ -84,18 +66,6 @@ class LumiConfig:
         self.discovery = ConfigDiscovery(config_dir)
         self._config: Config | None = None
         self._config_dir: Path | None = None
-        self._style_override: str | None = None
-
-    def set_style_override(self, style: str) -> None:
-        """设置风格覆盖（CLI --style 参数优先于 config.json）"""
-        self._style_override = style
-
-    @property
-    def active_style(self) -> str:
-        """当前生效的风格名称。优先级：CLI override > config.json > "default" """
-        if self._style_override is not None:
-            return self._style_override
-        return self.config.style
 
     @classmethod
     def get_instance(
@@ -157,7 +127,7 @@ class LumiConfig:
             return Config(**config_dict)
         except ValidationError as e:
             # 只丢校验失败的顶层段（回默认），其余照常生效：整份回退会连带丢掉
-            # env 里的 API key、style 等无关配置
+            # env 里的 API key 等无关配置
             bad = {err["loc"][0] for err in e.errors()}
             logger.warning(f"config.json 段 {sorted(bad)} 校验失败，已按默认处理: {e}")
             return Config(**{k: v for k, v in config_dict.items() if k not in bad})
@@ -201,24 +171,12 @@ class LumiConfig:
         """获取 prompts 目录路径"""
         return self.config_dir / "prompts"
 
-    def active_style_for(self, project_dir: str | Path | None) -> str:
-        """某项目会话生效的风格：CLI override > 项目 .lumi/config.json > 进程配置 > default。
-
-        项目声明的 style 只影响绑定到该项目的会话；未声明时跟随进程级 active_style。
-        项目主页（gateway/project_config）与运行时加载共用本判定，两边永不背离。
-        """
-        if self._style_override:
-            return self._style_override
-        if project_dir and (style := project_style_override(Path(project_dir))):
-            return style
-        return self.active_style
-
     def prompt_layers(
         self, name: str, project_dir: str | Path | None = None
     ) -> list[tuple[str, Path]]:
         """单个提示词的解析层序：(来源标签, 文件路径)，优先级从高到低。
 
-        项目 ``.lumi/prompts/`` > 进程配置 ``prompts_dir`` > 风格内置 > 框架内置。
+        项目 ``.lumi/prompts/`` > 进程配置 ``prompts_dir`` > 内置 ``styles/prompts/``。
         load_prompt 取第一个非空层；项目主页用标签展示「生效于哪一层」——链只写在这里。
         """
         from lumi.styles import STYLES_ROOT
@@ -228,11 +186,8 @@ class LumiConfig:
             layers.append(
                 ("project", Path(project_dir) / ".lumi" / "prompts" / f"{name}.md")
             )
-        # 风格没有 prompts/ 是常态（default 即如此），路径不存在由 resolve_prompt 跳过
-        style_dir = STYLES_ROOT / self.active_style_for(project_dir) / "prompts"
         layers.append(("global", self.prompts_dir / f"{name}.md"))
-        layers.append(("style", style_dir / f"{name}.md"))
-        layers.append(("builtin", BUILTIN_PROMPTS_DIR / f"{name}.md"))
+        layers.append(("builtin", STYLES_ROOT / "prompts" / f"{name}.md"))
         return layers
 
     def load_system_prompt(self, project_dir: str | Path | None = None) -> str:
@@ -250,9 +205,9 @@ class LumiConfig:
             if (text := self.load_prompt(name, project_dir))
         ]
         if not parts:
-            logger.info(f"风格 '{self.active_style}' 无提示词配置")
+            logger.info("无系统提示词配置")
             return ""
-        logger.info(f"使用风格 '{self.active_style}' 的系统提示词")
+        logger.info("已加载系统提示词")
         return "\n\n".join(parts)
 
     def resolve_prompt(
@@ -276,10 +231,7 @@ class LumiConfig:
     def load_prompt(
         self, name: str, project_dir: str | Path | None = None
     ) -> str | None:
-        """加载单个提示词正文：项目 > 进程配置 > 风格内置 > 框架内置。
-
-        框架内置（``lumi/prompts/``）是最后一层兜底，只放「缺了就跑不起来」的提示词
-        （目前仅 COMPACT——未配置时压缩会直接失败）。
+        """加载单个提示词正文：项目 > 进程配置 > 内置。
 
         Args:
             name: 提示词文件名（不包含后缀）

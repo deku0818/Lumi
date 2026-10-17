@@ -30,7 +30,7 @@ dream 系按载体分流：desktop 短会话只见 `/dream`，IM 长会话（一
 
 ## 技能命令
 
-技能命令从项目 `.lumi/skills/`（及全局 `~/.lumi/skills/`、所用 style 的 `skills/`）自动加载。每个技能目录下需包含
+技能命令从项目 `.lumi/skills/`（及全局 `~/.lumi/skills/`、内置 `lumi/styles/skills/`）自动加载。每个技能目录下需包含
 `SKILL.md`，定义技能的名称、描述和 prompt。
 
 ```

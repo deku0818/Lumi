@@ -101,16 +101,12 @@ OfflineFlush（刻意无入边，离线写回锚点）→ END
 - **前端**（`desktop/src/`）：`gateway.ts` 每会话一条 WS 连接（指数退避重连）；`App.tsx` 会话状态机 + 聊天流渲染；`Sidebar.tsx` 会话列表 + `⋮` 右键菜单（置顶/重命名/删除）；`ProjectHomePage.tsx` 项目主页（点项目卡片进入：输入岛新建会话 + 项目会话流 + 提示词/记忆/定时/技能/子 Agent 五卡，项目层资源支持增删改、内置/全局层只读可「复制到项目」）。
 - **模型解析与思考管理**（详见 `docs/architecture/thinking.md`）：`provider_store.resolve()` 是「模型 + 连接 + 思考档位」单一事实源；`create_llm(apply_effort=...)` 默认不注入思考参数（仅主对话链 `call_model` 传 True，内部链天然干净）。思考能力（有无/档位枚举/开关）来自 models.dev（`lumi/models/catalog.py`，缓存 `~/.lumi/cache/`，context_length 同源），档位按模型存 profile 的 `effort` dict；`lumi/models/manager.effort_params()` 是档位→协议参数的唯一映射点（原生值直传，不存在档位翻译；auto：OpenAI 系 / 无思考能力模型不传参数，Anthropic effort 型 = adaptive thinking）。入口为 desktop ModelPicker（Claude 式三行 + 二级菜单）。**模型是会话属性**：按 thread 存在 session_meta、首轮固化、每轮开跑前经 `bridge.align_session_model()` 对齐，desktop 与 IM 共用 `sessions/session_model.py` 一条解析链（会话模型 > 新会话默认），渠道配置里没有模型字段——详见 `docs/architecture/model-switching.md`。
 
-### 风格系统（Styles）
+### 内置资源与配置分层
 
-`lumi/styles/` 下每个子目录是一种风格，可含 `prompts/`、`agents/`、`skills/` 三类子目录（均可选）。
+`lumi/styles/` 直接包含 `prompts/`、`agents/`、`skills/`，所有会话共用通用资源，不再区分 default / code 或其它风格。
 
-- **加载优先级（三层，逐层同名覆盖）**：style 内置（skills/agents 为 `default` 基底 + 当前 style 叠加，同名当前 style 胜）< 全局层（进程配置目录；`lumi serve` 恒钉 `~/.lumi`，不随启动目录漂移）< 项目层（`<项目>/.lumi/`，随会话绑定的项目，仅该项目生效）。skills/agents 层序单源在 `loader.config_layers`，prompts 在 `manager.prompt_layers`（另有第四层框架内置 `lumi/prompts/` 兜底；空文件视同没有，继续往下找）。桌面「项目主页」的展示与增删改（`gateway/project_config.py`）消费同一层序，UI 所见即会话所加载
-- **用户数据根**：机器级数据（`lumi.json` 密钥 / checkpoints / memory / logs / 工具箱 / cron / cache / uploads）全部挂在 `utils/paths.py` 的 `lumi_home()` 下——`LUMI_CONFIG_DIR` > `~/.lumi`，改一个环境变量整体搬家（服务器部署即靠它，见 `docs/guides/deploy.md`）。取值点多为模块级常量（import 时求值），故环境变量须在进程启动前设好；锁定测试 `tests/test_lumi_home.py` 在子进程里验证全部路径跟随。与配置**发现链**（`ConfigDiscovery`，解决「这次读哪份项目配置」）职责不同，别混用
-- **配置方式**：项目 `.lumi/config.json` 的 `style`（仅该项目生效）> 进程 `config.json` 的 `style`；CLI `-s/--style` 仅对 `lumi -p` 生效（优先级最高）
-- **内置风格**：`default`（默认，**不带内置 prompts**，提示词全部来自 `.lumi/prompts/`；可内置 skill/agent）、`code`（完整编程提示词 + explore/plan 子 Agent）
-- **提示词组装**：`SOUL/AGENTS` 两文件按序**直接拼接**（不做 XML 包裹），缺失即跳过；`default` 无内置 prompts 时全靠 `.lumi/prompts/`，都没有则 `load_system_prompt` 返回空串（以无系统提示词运行）。`COMPACT`（压缩用）走同一条 `load_prompt` 解析链，但框架内置了兜底（`lumi/prompts/COMPACT.md`）——未配置也能压缩，故各调用点不再有「未配置 COMPACT」的错误分支
-- **工具描述**：内置工具的 description 直接写在各工具函数的 docstring 里；`registry._collect_tools_from_module` 加载时统一 `inspect.cleandoc` 抹掉源码缩进（外部 MCP 工具走异步 loader，不经此处）。工具描述不再可经 style/`.lumi` 配置覆盖
-- **`active_style_for(project)`**（`LumiConfig`）：返回某项目会话生效的风格名，CLI override > 项目 `.lumi/config.json` > 进程 config.json（`active_style` 属性）> "default"
-
-
+- **加载优先级**：内置 `lumi/styles/` < 全局层（进程配置目录；`lumi serve` 恒钉用户数据目录）< 项目层（`<项目>/.lumi/`，随会话绑定的项目）。技能与子 Agent 的层序单源在 `loader.config_layers`，提示词在 `manager.prompt_layers`；来源标签统一为 `builtin/global/project`。桌面项目主页消费相同层序，编辑和删除仅作用于项目层。
+- **内置资源**：通用 `prompts/COMPACT.md`、`agents/explore.md`、`agents/general-purpose.md` 与 `skills/lumi-config/`。项目自定义资源继续通过 `.lumi/` 同名覆盖。
+- **提示词组装**：`SOUL/AGENTS` 两文件剥掉 frontmatter 后按序直接拼接，缺失即跳过；内置目录不提供这两个文件。`COMPACT` 走同一解析链，由内置通用版兜底。空提示词视同没有，继续往下找；当前压缩调用未传项目目录，仅使用进程配置和内置层。
+- **用户数据根**：机器级数据（密钥 / checkpoints / memory / logs / 工具箱 / cron / cache / uploads）统一挂在 `utils/paths.py` 的 `lumi_home()` 下，`LUMI_CONFIG_DIR` > `~/.lumi`。与选择进程配置目录的 `ConfigDiscovery` 职责分开；环境变量须在进程启动前设置。
+- **工具描述**：内置工具的 description 直接写在函数 docstring；`registry._collect_tools_from_module` 加载时统一清理缩进，不经提示词目录覆盖。

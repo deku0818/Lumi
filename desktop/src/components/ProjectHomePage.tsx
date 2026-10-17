@@ -515,7 +515,7 @@ function SheetBody({ api, path, sheet, onClose, onChanged, onSwitch }: SheetProp
   }, [api, path, sheet, file, tick, newName, textDirty])
 
   const builtin = !creating && !!res?.builtin
-  // 提示词的编辑恒写项目层（即使当前命中 style/builtin——保存即产生项目覆盖）
+  // 提示词的编辑恒写项目层（即使当前命中 global/builtin——保存即产生项目覆盖）
   const editable = creating || kind === 'prompt' || (!builtin && kind !== 'memory')
   const validNewName = NAME_RE.test(newName.trim())
 

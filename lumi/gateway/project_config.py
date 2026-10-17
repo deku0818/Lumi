@@ -1,7 +1,7 @@
 """项目主页资源聚合：按项目目录读取/写入提示词、技能、子 Agent 与记忆。
 
 资源分三层，与运行时加载链完全同源（loader.load_skills/load_agents 与
-manager.prompt_layers 是层序的单一事实源）：style 内置（builtin，只读）→
+manager.prompt_layers 是层序的单一事实源）：内置（builtin，只读）→
 进程配置目录（global，本页只读）→ 项目 ``.lumi/``（project，可编辑），
 逐层同名覆盖——UI 展示的「生效」即会话实际加载的。
 
@@ -54,7 +54,6 @@ def overview(project: Path) -> dict:
     """项目主页一次拉全：prompts / skills / agents / memory。"""
     project = project.resolve()
     return {
-        "style": get_config().active_style_for(project),
         "prompts": [_prompt_info(project, n) for n in PROMPT_NAMES],
         "skills": _list_skills(project),
         "agents": _list_agents(project),
@@ -242,7 +241,7 @@ def write_resource(
 
 
 def delete_resource(project: Path, kind: str, name: str) -> dict:
-    """删项目层资源。同名低层（global/style）仍在时相当于「恢复该层版本」。"""
+    """删项目层资源。同名低层（global/builtin）仍在时相当于「恢复该层版本」。"""
     project = project.resolve()
     _check_name(name)
     if kind == "skill":

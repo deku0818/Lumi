@@ -18,7 +18,7 @@ from lumi.utils.logger import logger
 class FileSetChangeDetector[T]:
     """文件集加载缓存基类（按 子类 × 项目 一实例，各子类自持 ``_instances``）。
 
-    变更源是 builtin（随生效 style 切换目录）+ global + project 三层（目录集来自
+    变更源是 builtin + global + project 三层（目录集来自
     loader.config_layers）。子类只声明 ``_subdir``/``_pattern`` 与 ``_load``。
     """
 

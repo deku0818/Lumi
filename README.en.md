@@ -52,7 +52,7 @@ Turn on "Meeting Minutes" and just **record a voice memo** or **hold a meeting (
 
 ## Why Lumi
 
-- **For everyone** — reading notes, travel plans, status reports, expenses, household budgets… no code needed; when you *do* need to code, switch to the `code` style, which comes with a full coding prompt set plus explore/plan sub-agents.
+- **For everyone** — reading notes, travel plans, status reports, expenses, household budgets… no code needed; customize each project with prompts, skills, and sub-agents.
 - **Two ways in, one brain** — the desktop app for focused deep work, Feishu for quick hand-offs; same backend, same memory and config.
 - **Your data stays on your machine** — open source, [MIT-licensed](LICENSE), runs locally; model keys and conversations live on your own machine. Self-hosted remote deployment is supported too.
 - **Extensible** — [skills](docs/guides/slash-commands.md), [sub-agents](docs/guides/agents.md), the [MCP protocol](https://modelcontextprotocol.io/), [scheduled jobs](docs/guides/cron.md), [multi-agent workflows](docs/architecture/workflow.md) — most of it extends by config, no code changes.
@@ -80,7 +80,6 @@ cd Lumi
 
 ```json
 {
-  "style": "default",
   "env": {
     "LLM_MODEL_NAME": "gpt-4o",
     "OPENAI_API_KEY": "sk-xxx",
@@ -98,10 +97,10 @@ Full config: [docs/guides/config.md](docs/guides/config.md); Feishu setup: [docs
 Every chat must be bound to a project (working directory). Each project has its own config set (prompts / memory / schedules / skills / sub-agents), stacked in three layers where later layers override same-named entries:
 
 ```
-style built-in  <  global layer ~/.lumi/  <  project layer <project>/.lumi/
+built-in lumi/styles/  <  global layer ~/.lumi/  <  project layer <project>/.lumi/
 ```
 
-Open a project and you land on its home: the input island on the left starts a chat right inside that project, and the five cards on the right (prompts / memory / schedules / skills / sub-agents) are exactly what the session loads — the project layer is editable. See the [styles guide](docs/guides/styles.md).
+Open a project and you land on its home: the input island on the left starts a chat right inside that project, and the five cards on the right (prompts / memory / schedules / skills / sub-agents) are exactly what the session loads — the project layer is editable. See the [built-in resource guide](docs/guides/styles.md).
 
 ### Permissions and approval
 
@@ -152,7 +151,7 @@ Tool descriptions live in each tool function's docstring; external tools are wir
 | Full config | [config.md](docs/guides/config.md) | · | Feishu channel | [feishu.md](docs/guides/feishu.md) |
 | Permissions | [permissions.md](docs/guides/permissions.md) | · | Scheduled jobs | [cron.md](docs/guides/cron.md) |
 | Sub-agents | [agents.md](docs/guides/agents.md) | · | Slash commands / skills | [slash-commands.md](docs/guides/slash-commands.md) |
-| Styles | [styles.md](docs/guides/styles.md) | · | Persistent memory | [memory.md](docs/guides/memory.md) |
+| Built-in resources | [styles.md](docs/guides/styles.md) | · | Persistent memory | [memory.md](docs/guides/memory.md) |
 | Desktop architecture | [desktop.md](docs/architecture/desktop.md) | · | Multi-agent workflow | [workflow.md](docs/architecture/workflow.md) |
 | Thinking management | [thinking.md](docs/architecture/thinking.md) | · | Context compaction | [compact.md](docs/architecture/compact.md) |
 

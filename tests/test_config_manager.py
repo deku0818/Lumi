@@ -5,28 +5,29 @@ from __future__ import annotations
 import json
 from pathlib import Path
 
+from lumi.styles import STYLES_ROOT
 from lumi.utils.config.manager import LumiConfig
+from lumi.utils.config.models import Config
 
 
 def test_loads_config_json(tmp_path):
     (tmp_path / "config.json").write_text(
-        json.dumps({"style": "code", "env": {"FOO": "bar"}}), encoding="utf-8"
+        json.dumps({"env": {"FOO": "bar"}}), encoding="utf-8"
     )
     cfg = LumiConfig(str(tmp_path))
-    assert cfg.config.style == "code"
     assert cfg.config.env == {"FOO": "bar"}
 
 
 def test_missing_returns_defaults(tmp_path):
     cfg = LumiConfig(str(tmp_path))
-    assert cfg.config.style == "default"
+    assert cfg.config == Config()
 
 
 def test_ignores_legacy_yaml(tmp_path):
     """config.yaml 不再被读取。"""
-    (tmp_path / "config.yaml").write_text("style: code\n", encoding="utf-8")
+    (tmp_path / "config.yaml").write_text("env:\n  FOO: bar\n", encoding="utf-8")
     cfg = LumiConfig(str(tmp_path))
-    assert cfg.config.style == "default"  # 未读 yaml
+    assert cfg.config == Config()  # 未读 yaml
 
 
 def _write_prompt(cfg: LumiConfig, name: str, text: str) -> None:
@@ -34,9 +35,15 @@ def _write_prompt(cfg: LumiConfig, name: str, text: str) -> None:
     (cfg.prompts_dir / f"{name}.md").write_text(text, encoding="utf-8")
 
 
-def test_load_prompt_falls_back_to_builtin(tmp_path):
-    """未配置 .lumi/prompts/COMPACT.md 时取框架内置——否则压缩直接报错。"""
-    text = LumiConfig(str(tmp_path)).load_prompt("COMPACT")
+def test_load_compact_prompt_from_builtin(tmp_path):
+    """未配置压缩提示词时取统一的内置版本。"""
+    cfg = LumiConfig(str(tmp_path))
+    resolved = cfg.resolve_prompt("COMPACT")
+    assert resolved is not None
+    source, path, _ = resolved
+    assert source == "builtin"
+    assert path == STYLES_ROOT / "prompts" / "COMPACT.md"
+    text = cfg.load_prompt("COMPACT")
     assert text and "摘要" in text
 
 
@@ -45,6 +52,22 @@ def test_load_prompt_prefers_user_over_builtin(tmp_path):
     cfg = LumiConfig(str(tmp_path))
     _write_prompt(cfg, "COMPACT", "我的摘要指令")
     assert cfg.load_prompt("COMPACT") == "我的摘要指令"
+
+
+def test_load_prompt_prefers_project_over_global_and_builtin(tmp_path):
+    cfg = LumiConfig(str(tmp_path / "global"))
+    _write_prompt(cfg, "COMPACT", "全局摘要指令")
+    project = tmp_path / "project"
+    prompts = project / ".lumi" / "prompts"
+    prompts.mkdir(parents=True)
+    (prompts / "COMPACT.md").write_text("项目摘要指令", encoding="utf-8")
+    assert cfg.load_prompt("COMPACT", project) == "项目摘要指令"
+    (prompts / "COMPACT.md").unlink()
+    assert cfg.load_prompt("COMPACT", project) == "全局摘要指令"
+    (cfg.prompts_dir / "COMPACT.md").unlink()
+    assert cfg.resolve_prompt("COMPACT", project)[1] == (
+        STYLES_ROOT / "prompts" / "COMPACT.md"
+    )
 
 
 def test_load_prompt_skips_empty_file(tmp_path):
@@ -56,14 +79,14 @@ def test_load_prompt_skips_empty_file(tmp_path):
 
 
 def test_load_prompt_returns_none_when_nowhere(tmp_path):
-    """三层都没有才 None。"""
+    """各层都没有才 None。"""
     assert LumiConfig(str(tmp_path)).load_prompt("NO_SUCH_PROMPT") is None
 
 
 def test_system_prompt_concats_soul_and_agents(tmp_path):
     """SOUL + AGENTS 按序拼接；无配置时返回空串，框架规则由 graph 追加。"""
     cfg = LumiConfig(str(tmp_path))
-    assert cfg.load_system_prompt() == ""  # default 风格无内置 prompts
+    assert cfg.load_system_prompt() == ""  # 仅内置压缩提示词
     _write_prompt(cfg, "SOUL", "灵魂")
     _write_prompt(cfg, "AGENTS", "规则")
     assert cfg.load_system_prompt() == "灵魂\n\n规则"
@@ -93,12 +116,18 @@ def test_explicit_config_dir_owns_toolbox(tmp_path):
 
 
 def test_invalid_section_drops_only_that_section(tmp_path):
-    # 某一段校验失败只丢该段：此前整份回退默认，env 里的 API key、style 一并丢失
+    # 某一段校验失败只丢该段，其余配置仍生效。
     (tmp_path / "config.json").write_text(
-        json.dumps({"style": "code", "env": {"FOO": "bar"}, "agents": "oops"}),
+        json.dumps(
+            {
+                "token": {"compact_threshold": 0.5},
+                "env": {"FOO": "bar"},
+                "agents": "oops",
+            }
+        ),
         encoding="utf-8",
     )
     cfg = LumiConfig(str(tmp_path))
-    assert cfg.config.style == "code"
+    assert cfg.config.token.compact_threshold == 0.5
     assert cfg.config.env == {"FOO": "bar"}
     assert cfg.config.agents == type(cfg.config.agents)()  # 坏段回默认
