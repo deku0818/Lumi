@@ -57,7 +57,9 @@ OfflineFlush（刻意无入边，离线写回锚点）→ END
 
 **关键状态 `LumiAgentState`：** messages（`DeltaChannel` 增量通道）、todos（旧会话兼容）、output_schema / structured_output、tool_cancelled、ptl_retry、depth。
 
-**messages 通道是 `DeltaChannel`**（不是 `add_messages`）：checkpoint 只存增量写入 + 周期快照，长会话不再每个 super-step 重写整段历史。两条随之而来的约束：① 压缩写回用 `Overwrite` 整体替换而非逐条 `RemoveMessage`（`build_compacted_update`）；② **`aupdate_state` 不自动补消息 id**（LangGraph 只在 `put_writes` 补节点写入的），补 id 只能在写入构造时做（放进 reducer 会让每次回放生成新 id）。因此**所有离线写回只走 `AgentBridge.flush_offline` 这一个出口**，由它统一补 id + 挂 `OfflineFlush` 锚点；③ `snapshot_frequency` 必须显式给（取 100），官方默认 1000 等于几乎不快照，会让读退化成 O(链长)。语义差异锁在 `tests/test_delta_channel.py`，出口契约锁在 `tests/gateway/test_offline_flush_stamps.py`。
+**messages 通道是 `DeltaChannel`**（不是 `add_messages`）：checkpoint 存增量写入 + 周期快照，长会话不再每个 super-step 重写整段历史。① 压缩写回用 `Overwrite` 整体替换（`build_compacted_update`）；② LangGraph 1.2.15 在节点与 `aupdate_state` 写入时均补齐消息 id（含 `Overwrite` 内的消息），离线 `Overwrite` 同时生成独立快照；**所有离线写回仍只走 `AgentBridge.flush_offline`**，统一挂 `OfflineFlush` 锚点并清理 PTL 重试标志；③ `snapshot_frequency` 显式取 100，避免恢复时回放过长增量链。语义锁在 `tests/test_delta_channel.py`，出口契约锁在 `tests/gateway/test_offline_flush_stamps.py`。
+
+**显示历史与模型上下文分开**：`sessions/history.py` 复用压缩前 checkpoint，前端先加载最新 50 个展示条目，向上滚动再加载更早记录。摘要 carrier 保存历史索引，重挂消息用 `history_id` 保持显示身份；整段配对工具结果后分页，按身份与顺序锚点合并。归档用户消息只读；编辑当前上下文中曾被压缩保留的消息时先恢复其压缩前状态再截断，避免旧未来进入重答轮。详见 `docs/architecture/summary.md`。
 
 **协作式停机：** `lumi/agents/core/run_control.py` 的 `drain_all()` 让在跑的图停在 super-step 边界（checkpoint 完整、`next` 指向待执行节点；不续跑，下一轮开跑前由 `_recover_stale_state` 按中断轮收尾），由 `bootstrap.drain_runs()` 在拆任何子系统之前调用（`lumi serve` 的 lifespan 在渠道会话池关闭前先调）。与用户按停的硬 cancel 分工不同：cancel 要立刻、可能落在节点半途（靠 `persist_partial_reply` 事后修），drain 要 checkpoint 完整、切不断正在流的模型调用；前台子代理 / workflow 的子图继承同一 control，会让父级工具步在半途结束。因 `astream_events(version="v2")` 不转发 `control=`，改经 config 注入带 control 的 parent runtime（用到私有常量，由 `tests/test_drain.py` 锁住）。
 

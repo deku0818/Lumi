@@ -1,5 +1,3 @@
-import { dispatchDraft, type Attachment } from './messageDelivery.ts'
-import { getControlConnection, openChatConnection } from './gatewayConnections.ts'
 import {
   useCallback,
   useEffect,
@@ -21,17 +19,21 @@ import {
   X,
   PanelLeft,
 } from 'lucide-react'
+import { getControlConnection, openChatConnection } from './gatewayConnections.ts'
+import { captureHistoryScroll, restoreHistoryScroll, type HistoryScrollAnchor } from './historyScroll.ts'
+import { dispatchDraft, type Attachment } from './messageDelivery.ts'
 import {
   addPending,
   dropPending,
-  nid,
   hydrateHistory,
+  nid,
+  prependHistory,
   reduceEvent,
   sessionModelPatch,
   userBubble,
   type PendingItem,
   type SessionState,
-} from './sessionReducer'
+} from './sessionReducer.ts'
 import { useLatest } from './hooks/useLatest'
 import { errorMessage } from '@/lib/utils'
 import { Gateway } from './gateway'
@@ -130,14 +132,18 @@ function groupItems(items: Item[]): Segment[] {
 }
 
 // segment 的稳定 React key / 复制映射 key（不依赖数组下标，切片/虚拟化也不错位）
-const segKey = (seg: Segment): string =>
-  seg.kind === 'tools'
-    ? `g${seg.tools[0].id}`
-    : seg.kind === 'agent'
-      ? `a${seg.items[0].id}`
-      : seg.kind === 'files'
-        ? `f${seg.item.id}`
-        : `i${seg.item.id}`
+function segKey(segment: Segment): string {
+  switch (segment.kind) {
+    case 'tools':
+      return `g${segment.tools[0].historyGroup ?? segment.tools[0].id}`
+    case 'agent':
+      return `a${segment.items[0].historyGroup ?? segment.items[0].id}`
+    case 'files':
+      return `f${segment.item.id}`
+    case 'item':
+      return `i${segment.item.id}`
+  }
+}
 
 const replaceBackendTasks = (prev: BgTask[], backend: string, tasks: BgTask[]): BgTask[] => {
   const mine = prev.filter((t) => beOf(t) === backend)
@@ -325,6 +331,9 @@ export default function App() {
   const cronJobsRef = useLatest(cronJobs)
   const refreshCronJobsRef = useRef<((only?: string) => void) | null>(null) // handleEvent 经此按机器刷新
   const scrollRef = useRef<HTMLDivElement>(null)
+  const historyScrollRef = useRef<{ sid: string; anchor: HistoryScrollAnchor } | null>(null)
+  const historyRequests = useRef(new Set<string>())
+  const loadOlderRef = useRef<() => void>(() => {})
   // 聊天流「粘底」：贴底时才跟随流式输出，用户上滚即放手（不再抢界面）。
   // pinnedRef 供自动滚动 effect 同步判定；showJump 驱动「回到底部」浮钮渲染。
   const pinnedRef = useRef(true)
@@ -555,6 +564,7 @@ export default function App() {
   const openConnection = useCallback(
     (targetThread: string | null, targetWorkspace = '', backendId = 'local'): Promise<string> =>
       openChatConnection(targetThread, targetWorkspace, backendId, {
+        getSession: key => storeRef.current[key],
         connsRef, activeRef, setStore, setConn, setWorkspaceDir, applySessionModel, handleEvent,
         onTasks: (backend, tasks) => setBgTasks(prev => replaceBackendTasks(prev, backend, tasks)),
       }),
@@ -577,6 +587,13 @@ export default function App() {
       setPinned(true)
     }
     const el = scrollRef.current
+    const historyScroll = historyScrollRef.current
+    if (el && historyScroll?.sid === active) {
+      restoreHistoryScroll(el, historyScroll.anchor)
+      historyScrollRef.current = null
+      return
+    }
+    historyScrollRef.current = null
     if (el && pinnedRef.current) el.scrollTo({ top: el.scrollHeight })
   }, [active, items, running, approval, clarify, thinkingText, setPinned])
 
@@ -588,6 +605,7 @@ export default function App() {
     const dist = el.scrollHeight - el.scrollTop - el.clientHeight
     if (dist > 80) setPinned(false)
     else if (dist < 30) setPinned(true)
+    if (el.scrollTop < 120) loadOlderRef.current()
   }, [setPinned])
 
   const jumpToBottom = useCallback(() => {
@@ -708,15 +726,73 @@ export default function App() {
     })
   }, [])
 
-  // 重拉某会话历史并整表替换其 items（渠道会话旁观刷新 / 切回对账共用）
-  const reloadHistory = useCallback((key: string, threadId: string) => {
+  // 更新最新一页，保留已经加载的更早记录。
+  const reloadHistory = useCallback(function reloadHistory(key: string, threadId: string): void {
+    const revision = storeRef.current[key]?.historyRevision ?? 0
     connsRef.current[key]
       ?.loadHistory(threadId)
-      .then((r) =>
-        setStore((s) => (s[key] ? { ...s, [key]: hydrateHistory(s[key], r) } : s)),
-      )
+      .then((snapshot) => {
+        setStore((store) => {
+          const current = store[key]
+          if (!current || (current.historyRevision ?? 0) !== revision) return store
+          return { ...store, [key]: hydrateHistory(current, snapshot) }
+        })
+      })
       .catch(() => {})
   }, [])
+
+  const loadOlderHistory = useCallback(async function loadOlderHistory(sid: string): Promise<void> {
+    const state = storeRef.current[sid]
+    const cursor = state?.historyCursor
+    const gw = connsRef.current[sid]
+    if (!cursor || !gw || historyRequests.current.has(sid)) return
+    historyRequests.current.add(sid)
+    setStore((store) => {
+      const current = store[sid]
+      if (!current) return store
+      return { ...store, [sid]: { ...current, historyLoading: true, historyError: undefined } }
+    })
+    try {
+      const page = await gw.loadHistory(keyThread(sid), cursor)
+      if (storeRef.current[sid]?.historyCursor !== cursor || connsRef.current[sid] !== gw) return
+      if (activeRef.current === sid && scrollRef.current) {
+        historyScrollRef.current = { sid, anchor: captureHistoryScroll(scrollRef.current) }
+        setPinned(false)
+      }
+      setStore((store) => {
+        const current = store[sid]
+        if (current?.historyCursor !== cursor) {
+          if (historyScrollRef.current?.sid === sid) historyScrollRef.current = null
+          return store
+        }
+        return { ...store, [sid]: prependHistory(current, page, cursor) }
+      })
+    } catch (error) {
+      setStore((store) => {
+        const current = store[sid]
+        if (current?.historyCursor !== cursor) return store
+        return { ...store, [sid]: { ...current, historyLoading: false, historyError: errorMessage(error) } }
+      })
+    } finally {
+      historyRequests.current.delete(sid)
+      const current = storeRef.current[sid]
+      if (activeRef.current === sid && current?.historyCursor && !current.historyError
+        && (current.historyCursor !== cursor || connsRef.current[sid] !== gw)
+        && scrollRef.current && scrollRef.current.scrollTop < 120) {
+        queueMicrotask(() => loadOlderRef.current())
+      }
+    }
+  }, [setPinned])
+  loadOlderRef.current = () => {
+    const sid = activeRef.current
+    if (!storeRef.current[sid]?.historyError) void loadOlderHistory(sid)
+  }
+  useEffect(() => {
+    const el = scrollRef.current
+    if (conn === 'open' && cur?.historyCursor && !cur.historyLoading && !cur.historyError && el && el.scrollTop < 120) {
+      loadOlderRef.current()
+    }
+  }, [active, conn, cur?.historyCursor, cur?.historyLoading, cur?.historyError])
 
   // 各机器 IM 渠道快照（飞书组头状态灯 / 旁观横幅的审批模式与绑定项目）。
   // 各机器 ready 时只刷本机（only），设置面板关闭时全量（渠道配置在设置里改）；
@@ -1736,13 +1812,20 @@ export default function App() {
         ],
         running: true,
         runStart: Date.now(),
+        historyCursor: null,
+        historyReset: true,
+        historyRevision: (s[sid].historyRevision ?? 0) + 1,
+        historyLoading: false,
       },
     }))
     const rpc =
       newText === undefined
         ? gw.regenerate(mid, toolMode)
         : gw.editResend(mid, newText, toolMode)
-    rpc.catch((err) => reportSendFailure(sid, err))
+    rpc.catch((err) => {
+      reportSendFailure(sid, err)
+      reloadHistory(sid, keyThread(sid))
+    })
   }
 
   // 中止当前流式轮：后端取消 task 并补发 turn.complete，running 随之复位。
@@ -1815,7 +1898,21 @@ export default function App() {
     resumeWith({ decisions, message: t('approval.rejectedMessage') }, 'approval')
 
   const streaming = items.some((it) => it.kind === 'assistant' && it.streaming)
-  const hasMessages = items.length > 0
+  const hasMessages = items.length > 0 || !!cur?.historyCursor || !!cur?.historyUnavailable
+  let historyStatus: ReactNode = t('chat.historyAll')
+  if (cur?.historyLoading) {
+    historyStatus = <><span className="lumi-orb" />{t('chat.historyLoading')}</>
+  } else if (cur?.historyError) {
+    historyStatus = (
+      <button onClick={() => void loadOlderHistory(active)} title={cur.historyError} className="hover:text-ink">
+        {t('chat.historyRetry')}
+      </button>
+    )
+  } else if (cur?.historyUnavailable) {
+    historyStatus = t('chat.historyUnavailable')
+  } else if (cur?.historyCursor) {
+    historyStatus = t('chat.historyMore')
+  }
   // 时间旅行操作（重新生成/编辑重发）可用：空闲、已连接、非渠道/cron 旁观、无在途审批
   const canTimeTravel =
     conn === 'open' && !running && !observingCronRun && !activeChannel && !approval && !clarify
@@ -2282,8 +2379,11 @@ export default function App() {
                 {/* 顶栏渐隐：内容滚到顶栏时淡出而非硬切。高度不超过 chat-body 的 py-8，
                         停在顶部时首条内容不被遮；right-2 让开滚动条 */}
                 <div className="chat-top-fade pointer-events-none absolute left-0 right-2 top-0 z-10 h-8" />
-                <div ref={scrollRef} onScroll={onScroll} className="h-full overflow-auto">
+                <div ref={scrollRef} onScroll={onScroll} className="h-full overflow-auto" style={{ overflowAnchor: 'none' }}>
                   <div className="chat-body max-w-3xl mx-auto w-full px-6 py-8 space-y-5">
+                    <div className="h-6 flex justify-center items-center gap-2.5 text-xs text-muted-foreground" role="status">
+                      {historyStatus}
+                    </div>
                     {segments.map((seg) => {
                       const key = seg.kind === 'item' && seg.item.kind === 'user' && seg.item.arrival
                         ? `arrival:${seg.item.arrival.id}` : segKey(seg)
@@ -2308,42 +2408,43 @@ export default function App() {
                         seg.kind === 'item' && seg.item.kind === 'user' ? seg.item : null
                       if (userItem && editingId === userItem.id) {
                         return (
-                          <EditBubble
-                            key={key}
-                            initial={userItem.text}
-                            onCancel={() => setEditingId(null)}
-                            onSave={(text) => timeTravel(userItem.id, text)}
-                          />
+                          <div key={key} data-history-id={key}>
+                            <EditBubble
+                              initial={userItem.text}
+                              onCancel={() => setEditingId(null)}
+                              onSave={(text) => timeTravel(userItem.id, text)}
+                            />
+                          </div>
                         )
                       }
                       // 悬停操作条：用户气泡挂时间旅行 + 复制（空闲且非旁观才给截断类
                       // 操作），助手轮挂复制——末轮（activeKey）在飞时不给，历史轮恒可。
                       // 两侧共用同一个 HoverActions，悬停显隐的几何与时序只此一处。
-                      const copyText = userItem
-                        ? userItem.text
-                        : key === activeKey && running
-                          ? undefined
-                          : copyMap.get(key)
-                      const timeTravelable = userItem && canTimeTravel
-                      if (!copyText && !timeTravelable) return node
+                      let copyText: string | undefined
+                      if (userItem) copyText = userItem.text
+                      else if (key !== activeKey || !running) copyText = copyMap.get(key)
+                      const timeTravelable = userItem && canTimeTravel && !!userItem.messageId
+                      if (!copyText && !timeTravelable) return <div key={key} data-history-id={key}>{node}</div>
                       return (
-                        <HoverActions key={key} node={node} align={userItem ? 'end' : 'start'}>
-                          {timeTravelable && (
-                            <>
-                              <IconAction
-                                icon={RotateCcw}
-                                label={t('chat.regenerate')}
-                                onClick={() => timeTravel(userItem.id)}
-                              />
-                              <IconAction
-                                icon={Pencil}
-                                label={t('chat.edit')}
-                                onClick={() => setEditingId(userItem.id)}
-                              />
-                            </>
-                          )}
-                          {copyText && <CopyButton text={copyText} />}
-                        </HoverActions>
+                        <div key={key} data-history-id={key}>
+                          <HoverActions node={node} align={userItem ? 'end' : 'start'}>
+                            {timeTravelable && (
+                              <>
+                                <IconAction
+                                  icon={RotateCcw}
+                                  label={t('chat.regenerate')}
+                                  onClick={() => timeTravel(userItem.id)}
+                                />
+                                <IconAction
+                                  icon={Pencil}
+                                  label={t('chat.edit')}
+                                  onClick={() => setEditingId(userItem.id)}
+                                />
+                              </>
+                            )}
+                            {copyText && <CopyButton text={copyText} />}
+                          </HoverActions>
+                        </div>
                       )
                     })}
                     {/* 运行 / 等待 / 后台任务显示状态，无活动时整行隐藏，历史留在右栏。 */}

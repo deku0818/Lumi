@@ -1,8 +1,6 @@
 """离线写回的两条约定由 ``AgentBridge.flush_offline`` 这一个出口保证。
 
-- 补消息 id：messages 通道是 DeltaChannel，``aupdate_state`` 不像节点写入那样自动
-  补 id（见 ``stamp_missing_ids``）。漏补是**静默**的——消息一辈子没 id，而 rewind
-  截断 / 半截判重 / 压缩选材全按 id 认消息。
+- 补消息 id：委托 LangGraph 1.2.15 的 ``aupdate_state``，含 Overwrite 内的消息。
 - 挂 ``OfflineFlush`` 锚点：写完 ``next`` 即空，不派生任何任务。
 
 分散在各调用点「记得调」是先前的形态；这里锁的是出口本身，新增写回路径只要走它
@@ -40,7 +38,7 @@ async def test_flush_offline_stamps_ids_and_leaves_checkpoint_clean():
 
 @pytest.mark.asyncio
 async def test_flush_offline_stamps_inside_overwrite():
-    """压缩走的是 ``Overwrite`` 包装，补 id 要能穿透它。"""
+    """压缩的 Overwrite 内消息也由 LangGraph 补齐 id。"""
     from lumi.agents.core.preprocessing.compact import build_compacted_update
 
     graph = LumiAgent(checkpointer=MemorySaver()).graph

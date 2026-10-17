@@ -123,13 +123,21 @@ shell / 后台任务会话等全局单例由 `shutdown_shared_runtime()` 在 lif
 
 前端 `Sidebar` 每行 hover 出现 `⋮` 菜单（置顶 / 重命名 / 删除）；删除走二次确认弹窗（`ConfirmDialog`），删除当前会话时自动另开新会话顶上。
 
+### 历史记录的渐进加载
+
+`load_history(thread_id, cursor?, limit?)` 首次返回最近 50 个展示条目，默认页大小可通过 `limit` 调整（1～200）。`next_cursor` 非空时继续向前读取；原文来自既有 checkpoint，不另建消息存储。工具调用与结果在整段恢复时配对，分页不截断工具结果。
+
+页内 `order` 包含已重挂消息的顺序锚点，`insert_before` 标明页尾边界；前端按稳定身份合并，避免工具轮与保留用户消息、插话错序。首次返回的 `user_message_ids` 标明当前模型上下文中的可编辑用户消息；归档用户消息只读。`message.complete.message_id` 将实时助手气泡与后续历史快照关联，避免重复。
+
+向上加载保持当前可见消息位置及工具组展开状态；重连刷新保留已加载的旧记录，编辑重发后清理旧分支缓存。过期请求不覆盖新状态，失败提供重试；缺失 checkpoint 返回 `history_unavailable`。首次快照同时返回 `pending`、usage 和模型窗口信息，较早分页只更新历史条目。索引和旧会话兼容细节见 [summary.md](summary.md#压缩前记录的渐进加载)。
+
 ### 重新生成 / 编辑重发（时间旅行）
 
-用户气泡 hover 出操作条（`HoverActions`，与助手侧复制按钮同一个组件）：**重新生成**原样重答，**编辑**把气泡原位换成可编辑框（`EditBubble`；Cancel 零副作用，Save 才提交）。两者语义相同——**以该条消息为锚，它之后的历史全部消失**，不是分支。
+仍在当前模型上下文中的用户气泡 hover 出操作条（`HoverActions`，与助手侧复制按钮同一个组件）：**重新生成**原样重答，**编辑**把气泡原位换成可编辑框（`EditBubble`；Cancel 零副作用，Save 才提交）。两者都以该条消息为锚，截断当前对话中其后的内容并重新生成；仅存在压缩前记录中的用户消息只读。
 
 - **锚点是消息 id，不是序号**。`turn.start` 事件在开轮即广播本轮用户消息的落库 id，前端给乐观气泡上锚（`anchorLastUser`）；历史回放的 id 来自 `load_history` 的 `message_id`。之所以走事件而非 RPC 返回值：id 是「轮的事实」而非「轮的结果」，中途 stop 的轮同样需要它，且不必让每个流式入口都记得回传。本地列表可能含后端没有的条目（发送失败残留、系统命令），按序号对齐会指错消息。
 - **`regenerate` / `edit_resend` 都是单个原子流式 RPC**：截断与重发共处一轮、持同一把 `run.lock`。拆成「截断 RPC + send」会留出竞态窗口，中间任何失败都让编辑文本连同被删历史一起丢失。
-- **后端截断**（`AgentBridge.rewind_before_message`）走 `OfflineFlush` 锚点 + `RemoveMessage`，与 `compact_thread` 同一条离线写回路径；同一次 `aupdate_state` 里清空 `todos`（被删轮次建立的任务列表不该带进重答轮），并剥掉新末条的 `ctx_digest` marker（见 [summary.md](summary.md) 的 marker 不变量）。
+- **后端截断**（`AgentBridge.rewind_before_message`）经 `message_checkpoint` 定位目标消息压缩前的最早状态；如需恢复，从该 checkpoint 分叉并 `Overwrite` 为目标之前的消息，否则用 `RemoveMessage` 截断当前状态。两者都经 `OfflineFlush` 写回，同时清空 `todos`，剥掉新末条的 `ctx_digest` marker（见 [summary.md](summary.md) 的 marker 不变量）。必需 checkpoint 缺失时拒绝回退且不改当前状态。
 - **重答的消息是重建的，不是原样重投**：checkpoint 里的 content 已烤入原轮的上下文注入块，原样重投会与新一轮注入叠加（token 逐次翻倍且新旧 env 互相矛盾）。重建 = `strip_injected_prefix` 回到用户原样输入 → 交 `_build_user_message` 走与新消息完全相同的构造流水线，附件标签由显示声明（`items[].files`）重新派生。该构造对重发幂等。
 - 截断后消息会以**新 id** 重挂，故前端重挂气泡时清掉旧 `messageId`、等本轮 `turn.start` 重新上锚——留着旧 id 会让下一次时间旅行指向已删除的消息。
 - 渠道旁观 / cron 观测 / 运行中 / 有在途审批时不提供该操作（服务端另有流式方法的渠道只读兜底）。

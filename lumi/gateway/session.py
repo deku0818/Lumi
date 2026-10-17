@@ -15,7 +15,6 @@ inline await 会卡住接收循环，使 stop 帧在整轮结束前都读不到�
 from __future__ import annotations
 
 import asyncio
-import hashlib
 import ntpath
 import os
 import time
@@ -27,6 +26,7 @@ from lumi.agents.core.inbox import InboxFullError
 from lumi.agents.core.meta_message import (
     declared_items,
     extract_text_content,
+    history_message_ids,
     should_show_human_message,
     visible_user_text,
 )
@@ -150,15 +150,7 @@ def _history_items(messages: list) -> list[dict]:
             )
 
     items: list[dict] = []
-    legacy_counts: dict[str, int] = {}
-    for m in messages:
-        message_id = m.id
-        if not message_id:
-            # 兼容旧 checkpoint：正常写入均显式赋 id；只对缺 id 的消息计算内容指纹。
-            digest = hashlib.sha256(m.model_dump_json().encode()).hexdigest()
-            occurrence = legacy_counts.get(digest, 0)
-            legacy_counts[digest] = occurrence + 1
-            message_id = f"legacy:{digest}:{occurrence}"
+    for m, message_id in zip(messages, history_message_ids(messages)):
         kind = getattr(m, "type", None)
         if kind == "human":
             if should_show_human_message(m):
@@ -301,6 +293,14 @@ async def _load_history(bridge: AgentBridge, params: dict) -> dict:
     thread_id = params.get("thread_id", "")
     if bridge.graph is None or not thread_id:
         return {"items": []}
+    if params.get("cursor"):
+        return await bridge.history_reader.page(
+            bridge.graph,
+            thread_id,
+            _history_items,
+            cursor=params["cursor"],
+            limit=params.get("limit", 50),
+        )
     snap = await bridge.graph.aget_state({"configurable": {"thread_id": thread_id}})
     messages = (snap.values or {}).get("messages", [])
     # usage 随 items 回给前端还原上下文用量指示器（仅存前端内存，重启/切会话后本是空的）；
@@ -311,7 +311,13 @@ async def _load_history(bridge: AgentBridge, params: dict) -> dict:
         bridge.pending_interjections() if thread_id == bridge.current_thread_id else []
     )
     return {
-        "items": _history_items(messages),
+        **await bridge.history_reader.page(
+            bridge.graph,
+            thread_id,
+            _history_items,
+            limit=params.get("limit", 50),
+            snapshot=snap,
+        ),
         # 尚未注入的插话不在 checkpoint 里：随快照带回，重连 / 重载后托盘不丢
         "pending": _wire_user_items(pending),
         "usage": last_ai_usage(snap),

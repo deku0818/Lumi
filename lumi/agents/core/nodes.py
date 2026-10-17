@@ -725,8 +725,13 @@ async def _summarize(
     调用方按各自语义决定抛出（正常路径）还是放行（PTL 路径）。
     """
     try:
+        execution = runtime.execution_info
         update, ptl_retries = await compact_messages(
-            messages, to_summarize, keep_tail, runtime.context
+            messages,
+            to_summarize,
+            keep_tail,
+            runtime.context,
+            checkpoint_id=execution.checkpoint_id if execution else "",
         )
     except Exception as exc:
         fail_count = record_circuit_failure(

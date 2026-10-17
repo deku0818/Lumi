@@ -7,13 +7,14 @@
 - 同 id 替换（``persist_partial_reply`` 的承重墙：半截回复被全文原地顶掉）
 - ``RemoveMessage`` 删除（rewind 截断）
 - ``Overwrite`` 整体替换（压缩写回）
-- 节点写入自动补 id（LangGraph 的 put_writes 负责）
-- ``aupdate_state`` **不**自动补 id → 离线写回必须自己 stamp（Lumi 的 contract）
+- 离线写入自动补 id，含 Overwrite 内的消息，读回保持稳定
+- 离线 Overwrite 生成独立快照，同时保留压缩前历史
 """
 
 from __future__ import annotations
 
 from typing import Annotated, TypedDict
+from unittest.mock import patch
 
 import pytest
 from conftest import apply_messages_update, messages_channel
@@ -23,8 +24,11 @@ from langgraph.checkpoint.memory import MemorySaver
 from langgraph.graph.message import add_messages
 from langgraph.types import Overwrite
 
-from lumi.agents.core.graph import LumiAgent
-from lumi.agents.core.node_helpers.messages import stamp_missing_ids
+from lumi.agents.core.graph import (
+    CHECKPOINT_AES_KEY_ENV,
+    LumiAgent,
+    _checkpoint_serde,
+)
 
 
 def test_messages_channel_is_delta():
@@ -58,33 +62,88 @@ def test_overwrite_replaces_whole_history():
 
 
 @pytest.mark.asyncio
-async def test_node_writes_get_ids_assigned():
-    """节点写入的 id=None 消息由 LangGraph 在 put_writes 补 id（Lumi 不必插手）。"""
+async def test_offline_writes_preserve_existing_ids():
     graph = LumiAgent(checkpointer=MemorySaver()).graph
     config = {"configurable": {"thread_id": "t-delta-node"}}
     await graph.aupdate_state(
         config,
-        stamp_missing_ids({"messages": [HumanMessage("h")]}),
+        {"messages": [HumanMessage("h", id="h1")]},
         as_node="OfflineFlush",
     )
     snapshot = (await graph.aget_state(config)).values["messages"]
-    assert all(m.id for m in snapshot)
+    assert snapshot[0].id == "h1"
 
 
 @pytest.mark.asyncio
-async def test_aupdate_state_does_not_assign_ids_so_lumi_must_stamp():
-    """DeltaChannel 的 id 补全只在 put_writes 发生，aupdate_state 不经那条路。
-
-    这条是**反向锁**：哪天 LangGraph 把 aupdate_state 也补上了，本测试会红，
-    届时 stamp_missing_ids 就可以删掉，而不是留着当不知所以的祖传代码。
-    """
+@pytest.mark.parametrize("overwrite", [False, True])
+async def test_offline_writes_assign_stable_ids(overwrite):
+    """LangGraph 1.2.15 为普通与 Overwrite 写入补 id；重读和按 id 删除均可用。"""
     graph = LumiAgent(checkpointer=MemorySaver()).graph
     config = {"configurable": {"thread_id": "t-delta-raw"}}
+    messages = [HumanMessage("没有 id")]
     await graph.aupdate_state(
-        config, {"messages": [HumanMessage("没有 id")]}, as_node="OfflineFlush"
+        config,
+        {"messages": Overwrite(value=messages) if overwrite else messages},
+        as_node="OfflineFlush",
     )
     snapshot = (await graph.aget_state(config)).values["messages"]
-    assert snapshot[0].id is None, "LangGraph 已自行补 id，stamp_missing_ids 可以删了"
+    message_id = snapshot[0].id
+    assert message_id
+    assert (await graph.aget_state(config)).values["messages"][0].id == message_id
+    await graph.aupdate_state(
+        config,
+        {"messages": [RemoveMessage(id=message_id)]},
+        as_node="OfflineFlush",
+    )
+    assert (await graph.aget_state(config)).values["messages"] == []
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("encrypted", [False, True])
+async def test_offline_compaction_restores_without_ancestor_replay(
+    tmp_path, monkeypatch, encrypted
+):
+    """压缩快照重开数据库后可独立恢复，压缩前的原文仍可按 checkpoint 读取。"""
+    from langgraph.checkpoint.sqlite.aio import AsyncSqliteSaver
+
+    if encrypted:
+        monkeypatch.setenv(CHECKPOINT_AES_KEY_ENV, "0123456789abcdef")
+    else:
+        monkeypatch.delenv(CHECKPOINT_AES_KEY_ENV, raising=False)
+    db = str(tmp_path / "compaction.db")
+    config = {"configurable": {"thread_id": "compaction"}}
+    async with AsyncSqliteSaver.from_conn_string(db) as saver:
+        saver.serde = _checkpoint_serde()
+        graph = LumiAgent(checkpointer=saver).graph
+        before = await graph.aupdate_state(
+            config,
+            {
+                "messages": [
+                    HumanMessage("旧问题", id="h1"),
+                    AIMessage("旧回答", id="a1"),
+                ]
+            },
+            as_node="OfflineFlush",
+        )
+        await graph.aupdate_state(
+            config,
+            {"messages": Overwrite(value=[HumanMessage("摘要")])},
+            as_node="OfflineFlush",
+        )
+
+    async with AsyncSqliteSaver.from_conn_string(db) as saver:
+        saver.serde = _checkpoint_serde()
+        graph = LumiAgent(checkpointer=saver).graph
+        with patch.object(
+            saver,
+            "aget_delta_channel_history",
+            side_effect=AssertionError("压缩后的快照不应回放祖先"),
+        ):
+            messages = (await graph.aget_state(config)).values["messages"]
+        assert [m.content for m in messages] == ["摘要"]
+        assert messages[0].id
+        old = (await graph.aget_state(before)).values["messages"]
+        assert [(m.content, m.id) for m in old] == [("旧问题", "h1"), ("旧回答", "a1")]
 
 
 @pytest.mark.asyncio

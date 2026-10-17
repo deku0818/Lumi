@@ -49,7 +49,7 @@ export interface WireEventPayloads {
   'message.start': Record<string, never>
   'message.delta': { text: string; usage?: Usage }
   'thinking.delta': { text: string; usage?: Usage }
-  'message.complete': { usage?: Usage }
+  'message.complete': { usage?: Usage; message_id?: string }
   'message.retry': Record<string, never>
   // 运行中插话已注入（工具边界 / 轮后另起一轮）：托盘里对应的待插入消息移入消息流
   'message.injected': { message_ids: string[] }
@@ -147,6 +147,7 @@ export type Item =
       args: unknown
       output: string
       done: boolean
+      historyGroup?: string // 分页向前合并工具组时保留原组身份和展开状态
       error?: boolean
       // 子代理（name==='agent'）专用：自身 run_id（子工具事件经 parent_run_id 归属到此）、
       // 内部工具调用流、token 累计（来自子代理 message.complete 的 usage）
@@ -363,6 +364,11 @@ export interface HistoryItem {
 // load_history 的返回（对齐后端 session.py load_history）
 export interface HistorySnapshot {
   items: HistoryItem[]
+  next_cursor?: string | null
+  user_message_ids?: Record<string, string>
+  history_unavailable?: boolean
+  insert_before?: string
+  order?: string[] // 包含已重挂消息的顺序锚点，正文仅在 items 中返回一次
   // 当前会话尚未注入的插话（user 项形状）：重连 / 重载后恢复托盘
   pending?: HistoryItem[]
   usage?: Usage

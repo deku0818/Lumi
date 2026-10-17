@@ -21,7 +21,6 @@ from lumi.agents.core.graph import (
     _checkpoint_serde,
     _digest_history,
 )
-from lumi.agents.core.node_helpers.messages import stamp_missing_ids
 from lumi.agents.core.state import LumiAgentContext
 
 _SECRET = "绝密内容-XYZZY"
@@ -66,7 +65,7 @@ async def test_encrypted_checkpoint_hides_plaintext_on_disk(tmp_path, monkeypatc
     config = {"configurable": {"thread_id": "enc"}}
     await graph.aupdate_state(
         config,
-        stamp_missing_ids({"messages": [HumanMessage(_SECRET)]}),
+        {"messages": [HumanMessage(_SECRET)]},
         as_node="OfflineFlush",
     )
     readback = [m.content for m in (await graph.aget_state(config)).values["messages"]]

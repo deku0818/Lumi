@@ -522,8 +522,8 @@ export class Gateway {
     })
   }
 
-  loadHistory(threadId: string): Promise<HistorySnapshot> {
-    return this.request<HistorySnapshot>('load_history', { thread_id: threadId })
+  loadHistory(threadId: string, cursor?: string): Promise<HistorySnapshot> {
+    return this.request<HistorySnapshot>('load_history', { thread_id: threadId, ...(cursor ? { cursor } : {}) })
   }
 
   pinSession(threadId: string, pinned: boolean): Promise<unknown> {

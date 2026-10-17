@@ -20,7 +20,10 @@ from langchain_core.messages import AIMessage, BaseMessage, HumanMessage
 from langgraph.types import Overwrite
 
 from lumi.agents.core.meta_message import (
+    HISTORY_ID_KEY,
+    HISTORY_KEY,
     extract_text_content,
+    history_message_ids,
     is_interjection,
     is_reminder_message,
     message_ts,
@@ -425,7 +428,7 @@ def build_summary_carrier(summary_text: str, *, ts: int = 0) -> HumanMessage:
     return synthetic_human_message(format_summary_block(summary_text), ts=ts)
 
 
-def _reattach(msg: BaseMessage) -> BaseMessage:
+def _reattach(msg: BaseMessage, history_id: str) -> BaseMessage:
     """压缩后重挂一条消息：换新 id + 剥 ctx_digest marker。
 
     换新 id：重挂的原文与摘要 carrier 同属一次 ``Overwrite``，换 id 让前端把它当新
@@ -435,11 +438,24 @@ def _reattach(msg: BaseMessage) -> BaseMessage:
     在 content 里不动——``injected_prefix`` 计数与 ``<attached-file>`` 标签块共用，
     按计数剥会连附件路径一起丢；多留一个陈旧块只是噪音，丢路径是损失。
     """
-    return strip_ctx_digest(msg).model_copy(update={"id": str(uuid4())})
+    clean = strip_ctx_digest(msg)
+    return clean.model_copy(
+        update={
+            "id": str(uuid4()),
+            "additional_kwargs": {
+                **clean.additional_kwargs,
+                HISTORY_ID_KEY: history_id,
+            },
+        }
+    )
 
 
 def build_compacted_update(
-    messages: list[BaseMessage], keep_tail: list[BaseMessage], summary_text: str
+    messages: list[BaseMessage],
+    keep_tail: list[BaseMessage],
+    summary_text: str,
+    *,
+    checkpoint_id: str = "",
 ) -> dict:
     """压缩写回：整条 messages 通道一次性替换为 ``[摘要 carrier, 保留的原文]``。
 
@@ -462,7 +478,18 @@ def build_compacted_update(
     carrier = build_summary_carrier(
         summary_text, ts=max((message_ts(m) for m in messages), default=0)
     )
-    return {"messages": Overwrite(value=[carrier, *(_reattach(m) for m in keep_tail)])}
+    identities = dict(zip(map(id, messages), history_message_ids(messages)))
+    kept_ids = [identities[id(m)] for m in keep_tail]
+    if checkpoint_id:
+        carrier.additional_kwargs[HISTORY_KEY] = {
+            "checkpoint_id": checkpoint_id,
+            "exclude": kept_ids,
+        }
+    return {
+        "messages": Overwrite(
+            value=[carrier, *(_reattach(m, hid) for m, hid in zip(keep_tail, kept_ids))]
+        )
+    }
 
 
 async def compact_messages(
@@ -470,6 +497,8 @@ async def compact_messages(
     to_summarize: list[BaseMessage],
     keep_tail: list[BaseMessage],
     context: LumiAgentContext,
+    *,
+    checkpoint_id: str = "",
 ) -> tuple[dict, int]:
     """三条压缩路径的共用主干：SUMMARY 提示词 + token 配置 → ``run_summary`` →
     ``build_compacted_update``。返回 ``(state update, PTL 重试次数)``。
@@ -490,4 +519,6 @@ async def compact_messages(
         max_retry=token.summary_ptl_retry_max,
         drop_ratio=token.summary_ptl_retry_drop_ratio,
     )
-    return build_compacted_update(messages, keep_tail, summary_text), ptl_retries
+    return build_compacted_update(
+        messages, keep_tail, summary_text, checkpoint_id=checkpoint_id
+    ), ptl_retries

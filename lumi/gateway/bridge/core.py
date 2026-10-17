@@ -29,7 +29,7 @@ from langchain_core.messages import (
 from langchain_core.runnables.config import RunnableConfig
 from langgraph.errors import GraphBubbleUp, GraphDrained
 from langgraph.runtime import RunControl
-from langgraph.types import Command, StateSnapshot
+from langgraph.types import Command, Overwrite, StateSnapshot
 
 from lumi.agents.core.broker import LUMI_APPROVAL_EVENT, ApprovalBroker
 from lumi.agents.core.graph import LumiAgent, create_agent
@@ -46,7 +46,6 @@ from lumi.agents.core.meta_message import (
 from lumi.agents.core.node_helpers.messages import (
     dangling_tool_calls,
     inject_text_into_message,
-    stamp_missing_ids,
 )
 from lumi.agents.core.nodes import LUMI_MODEL_RETRY_EVENT, build_reject_messages
 from lumi.agents.core.run_control import (
@@ -74,6 +73,7 @@ from lumi.gateway.bridge.approval import enrich_tool_approval
 from lumi.gateway.bridge.folders import REMINDED_KEY, FolderManager
 from lumi.models import provider_store
 from lumi.sessions import session_model
+from lumi.sessions.history import HistoryReader, message_checkpoint
 from lumi.sessions.session_meta import get_goal, update_meta
 from lumi.sessions.session_model import SessionModel
 from lumi.sessions.usage import extract_usage, last_ai_usage
@@ -238,6 +238,7 @@ class AgentBridge:
         self._agent: LumiAgent | None = None
         self._context: LumiAgentContext | None = None
         self._config: RunnableConfig | None = None
+        self.history_reader = HistoryReader()
         self.model_name: str = ""
         # 在途审批 Broker：本连接唯一实例，注入 context 供节点 / ask 工具 await 审批，
         # resolve_approval 经非流式 resume RPC 唤醒挂起的 Future（见 docs/architecture/
@@ -921,12 +922,19 @@ class AgentBridge:
         self.align_session_model()
         # 整段 body 进摘要（含末条 AI 回复，否则最后一句既不在历史也不在摘要里）；
         # 末条若是没等到回答的用户消息，其原话由 build_compacted_update 保住
-        snapshot = await self.snapshot_messages()
+        state = await self.graph.aget_state(self._config)
+        snapshot = list(state.values.get("messages", []))
         body = select_for_compaction(snapshot)
         if body is None:
             return False
 
-        update, _ = await compact_messages(snapshot, body, [], self._context)
+        update, _ = await compact_messages(
+            snapshot,
+            body,
+            [],
+            self._context,
+            checkpoint_id=state.config["configurable"]["checkpoint_id"],
+        )
         await self.flush_offline(update)
         logger.info(
             "[compact_thread] 已压缩 thread=%s（%d 条历史 → 摘要）",
@@ -935,17 +943,15 @@ class AgentBridge:
         )
         return True
 
-    async def flush_offline(self, update: dict, graph=None) -> None:
+    async def flush_offline(
+        self, update: dict, graph=None, *, config: RunnableConfig | None = None
+    ) -> None:
         """离线写回 state 的**唯一出口**（图不在跑时经 ``aupdate_state`` 改状态）。
 
-        两条规矩都在这里落实，调用方不必各记一遍——漏了都是静默的：
-
-        - ``stamp_missing_ids``：messages 通道是 DeltaChannel，``aupdate_state``
-          不像节点写入那样自动补消息 id（见该函数 docstring）。漏补则这些消息
-          一辈子没 id，而 rewind 截断 / 半截判重 / 压缩选材全按 id 认消息。
-        - ``as_node="OfflineFlush"``：CallModel 的条件边要 Runtime 注入而
-          aupdate_state 给不了（必抛 Missing required config key）；OfflineFlush
-          是无入边的锚点，出边直达 END，写完 next 即空（见 graph.py 节点注释）。
+        ``as_node="OfflineFlush"``：CallModel 的条件边要 Runtime 注入而
+        aupdate_state 给不了（必抛 Missing required config key）；OfflineFlush
+        是无入边的锚点，出边直达 END，写完 next 即空（见 graph.py 节点注释）。
+        缺失消息 id 与 Overwrite 快照由 LangGraph 1.2.15 的写入路径处理。
 
         ``graph`` 缺省取 ``self.graph``；中断收尾路径持有自己那个引用，显式传入。
         """
@@ -953,8 +959,8 @@ class AgentBridge:
         # 离线写回一律意味着在途的 PTL 重试已放弃（stop 写回半截 / rewind / 压缩）：
         # 清掉标志，否则下一轮被迫无视阈值做一次有损压缩
         await target.aupdate_state(
-            self._config,
-            stamp_missing_ids({**update, "ptl_retry": False}),
+            config if config is not None else self._config,
+            {**update, "ptl_retry": False},
             as_node="OfflineFlush",
         )
 
@@ -980,28 +986,48 @@ class AgentBridge:
         )
         if idx is None:
             return None
-        removed = messages[idx:]
-        update: list = [RemoveMessage(id=m.id) for m in removed if m.id]
-        if idx and CTX_DIGEST_KEY in messages[idx - 1].additional_kwargs:
-            update.append(strip_ctx_digest(messages[idx - 1]))
+        original = messages[idx]
+        source, target_index = await message_checkpoint(
+            self.graph, self.current_thread_id, messages, idx
+        )
+        source_messages = list(source.values["messages"]) if source else messages
+        removed = source_messages[target_index:]
+        prefix = source_messages[:target_index]
+        if prefix and CTX_DIGEST_KEY in prefix[-1].additional_kwargs:
+            prefix[-1] = strip_ctx_digest(prefix[-1])
         # todos 与消息同为 state 字段但无历史可回溯：不清会把「已删未来」的任务列表
         # 带进重答轮（模型往幽灵清单续写），一并清空、由重答轮自行重建
-        await self.flush_offline({"messages": update, "todos": []})
-        del messages[idx:]
-        if messages and CTX_DIGEST_KEY in messages[-1].additional_kwargs:
-            messages[-1] = strip_ctx_digest(messages[-1])
+        if source:
+            # 从目标原始 checkpoint 分叉，旧压缩的后续记录不再属于新分支。
+            rewind_config = {
+                **self._config,
+                "configurable": {
+                    **self._config["configurable"],
+                    **source.config["configurable"],
+                },
+            }
+            await self.flush_offline(
+                {"messages": Overwrite(value=prefix), "todos": []}, config=rewind_config
+            )
+        else:
+            update = [RemoveMessage(id=m.id) for m in removed if m.id]
+            if prefix and prefix[-1] is not source_messages[target_index - 1]:
+                update.append(prefix[-1])
+            await self.flush_offline({"messages": update, "todos": []})
+        self._config["configurable"].pop("checkpoint_id", None)
+        messages[:] = prefix
         logger.info(
             "[rewind] thread=%s 截断 %d 条消息（自 %s 起）",
             self.current_thread_id,
             len(removed),
             message_id,
         )
-        return removed[0]
+        return original
 
     async def _rewind_or_raise(
         self, message_id: str
     ) -> tuple[HumanMessage, StateSnapshot]:
-        """一次读快照完成截断，并把截断后的历史交给重发轮复用。"""
+        """读取当前快照，必要时恢复压缩前分支，将截断后的历史交给重发轮。"""
         snapshot = await self.graph.aget_state(self._config)
         messages = list((snapshot.values or {}).get("messages", []))
         original = await self.rewind_before_message(message_id, messages=messages)
@@ -1064,7 +1090,9 @@ class AgentBridge:
         """把一段文本作为一条完整助手消息 yield（命令回执共用的四事件收尾）。"""
         yield BridgeEvent(kind=EventKind.MESSAGE_START)
         yield BridgeEvent(kind=EventKind.MESSAGE_DELTA, text=text)
-        yield BridgeEvent(kind=EventKind.MESSAGE_COMPLETE)
+        yield BridgeEvent(
+            kind=EventKind.MESSAGE_COMPLETE, message_id=f"command:{uuid4()}"
+        )
         yield BridgeEvent(kind=EventKind.TURN_COMPLETE)
 
     async def _stream_compact_command(self) -> AsyncGenerator[BridgeEvent, None]:
@@ -1382,6 +1410,7 @@ class AgentBridge:
                 kind=EventKind.MESSAGE_COMPLETE,
                 usage_metadata=usage,
                 parent_run_id=parent_id,
+                message_id=(getattr(output, "id", "") or "") if is_main else "",
             )
 
         elif kind == "on_tool_start":

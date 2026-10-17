@@ -107,11 +107,9 @@ class LumiAgentState(TypedDict):
     （``persist_partial_reply`` 的承重墙）、``RemoveMessage`` 删除、``Overwrite``
     整体替换、以及对存量 ``add_messages`` checkpoint 的读兼容。
 
-    **唯一不一致、且会咬人的地方**：``add_messages`` 给 ``id=None`` 的消息自动补
-    UUID，本通道**只在节点写入时**补（LangGraph 的 ``put_writes``），``aupdate_state``
-    不补。所有离线写回必须先过 ``node_helpers.messages.stamp_missing_ids``，否则那些
-    消息一辈子没有 id，而 rewind 截断 / 半截判重 / 压缩选材全按 id 认消息。这条差异
-    正反两面都有锁定用例。"""
+    LangGraph 1.2.15 在节点与 ``aupdate_state`` 写入时均补齐缺失的消息 id，含
+    ``Overwrite`` 内的消息；读回保持同一 id。离线 ``Overwrite`` 也会生成完整快照，
+    后续恢复不再回溯压缩前的增量链。"""
     todos: NotRequired[list]
     """旧 checkpoint 的兼容字段；内置 todo 工具与前端展示已移除。"""
     output_schema: NotRequired[dict[str, Any]]

@@ -1,8 +1,8 @@
 import type { Dispatch, SetStateAction } from 'react'
 import { Gateway } from './gateway.ts'
-import { emptySession, hasStreaming, hydrateHistory, resumeAfterReconnect, type SessionState } from './sessionReducer.ts'
 import { sessionKey } from './lib/utils.ts'
-import type { BgTask, ConnState, GatewayConnection, GatewayOptions, HistoryItem, SessionModelWire, Usage, WireEvent } from './types.ts'
+import { emptySession, hasStreaming, hydrateHistory, resumeAfterReconnect, type SessionState } from './sessionReducer.ts'
+import type { BgTask, ConnState, GatewayConnection, GatewayOptions, HistorySnapshot, SessionModelWire, WireEvent } from './types.ts'
 
 type Ref<T> = { current: T }
 
@@ -30,6 +30,7 @@ export type ChatConnectionContext = {
   connsRef: Ref<Record<string, Gateway>>
   activeRef: Ref<string>
   setStore: Dispatch<SetStateAction<Record<string, SessionState>>>
+  getSession?: (key: string) => SessionState | undefined
   setConn: (state: ConnState) => void
   setWorkspaceDir: (path: string) => void
   applySessionModel: (key: string, model: SessionModelWire) => void
@@ -68,25 +69,28 @@ export function openChatConnection(targetThread: string | null, targetWorkspace:
       // 历史快照统一落位（初次加载 / 补拉共用）。仅当快照被真正应用（无流式在途）且
       // 后端空闲（轮次进行中的快照缺在途调用的输出）时才算对齐——否则置 loaded 会把
       // 缺失内容永久关在补拉门外
-      const applySnapshot = (
+      function applySnapshot(
         key: string,
-        r: { items: HistoryItem[]; usage?: Usage; model?: string; context_window?: number },
+        snapshot: HistorySnapshot,
         patch: Partial<SessionState> = {},
-      ) => {
+        revision?: number,
+      ): void {
         setStore((s) => {
           const cur = s[key]
           if (!cur) return s
-          const next = { ...hydrateHistory(cur, r), ...patch }
+          if (revision !== undefined && (cur.historyRevision ?? 0) !== revision) return s
+          const next = { ...hydrateHistory(cur, snapshot), ...patch }
           if (!hasStreaming(next) && !next.running) loaded = true
           return { ...s, [key]: next }
         })
       }
-      const backfillHistory = () => {
+      function backfillHistory(): void {
         if (loaded || loadingHistory || !myThread) return
         loadingHistory = true
+        const revision = context.getSession?.(myKey)?.historyRevision ?? 0
         void gw
           .loadHistory(myThread)
-          .then((r) => applySnapshot(myKey, r))
+          .then((r) => applySnapshot(myKey, r, {}, context.getSession ? revision : undefined))
           .catch(() => { })
           .finally(() => {
             loadingHistory = false
@@ -158,13 +162,19 @@ export function openChatConnection(targetThread: string | null, targetWorkspace:
                 /* 目录失效等：仍打开会话（后端已降级，不切 cwd） */
               }
               try {
+                const revision = context.getSession?.(targetKey)?.historyRevision ?? 0
                 const r = await gw.loadHistory(targetThread)
                 // 水合历史（保留续接期间已落入的审批/澄清队列与流式在途内容）；
                 // running 据后端运行态恢复（续接的挂起轮要显示运行态，否则被当空闲）。
-                applySnapshot(targetKey, r, {
-                  running: !!ev.payload.running,
-                  runStart: ev.payload.run_started_at ?? undefined,
-                })
+                applySnapshot(
+                  targetKey,
+                  r,
+                  {
+                    running: !!ev.payload.running,
+                    runStart: ev.payload.run_started_at ?? undefined,
+                  },
+                  context.getSession ? revision : undefined,
+                )
               } catch {
                 /* 瞬断等：历史未加载（loaded=false），重连 ready 分支补拉 */
               }
@@ -188,6 +198,7 @@ export function openChatConnection(targetThread: string | null, targetWorkspace:
           handleEvent(ev, backendId)
           // 补拉曾因流式在途被丢弃（loaded 仍 false）：轮次收尾后流式气泡已收，
           // 快照可安全整表替换，此时重试把掉线前的历史找回来
+          if (ev.type === 'turn.complete') loaded = false
           if ((ev.type === 'turn.complete' || ev.type === 'error') && !loaded) {
             backfillHistory()
           }

@@ -80,6 +80,7 @@ def _fake_config():
 
 
 _RUNTIME = SimpleNamespace(
+    execution_info=None,
     context=SimpleNamespace(
         tools=[],
         system_prompt="SYS",
@@ -87,7 +88,7 @@ _RUNTIME = SimpleNamespace(
         provider="",
         effort=None,
         memory_enabled=True,
-    )
+    ),
 )
 _CONFIG = {"configurable": {"thread_id": "ptl-test"}}
 

@@ -17,6 +17,7 @@
 
 from __future__ import annotations
 
+import hashlib
 import json
 from collections.abc import Iterator
 from typing import Any
@@ -38,6 +39,28 @@ CTX_DIGEST_KEY = "ctx_digest"
 
 与 items / injected_prefix 同放：消息元数据键的单一真源。注入侧写 marker、压缩侧
 （``preprocessing.compact``）剥 marker，两侧都从这里取键名、不互相 import。"""
+
+HISTORY_ID_KEY = "history_id"
+"""压缩重挂前的稳定消息身份，只用于显示去重，不参与模型消息配对。"""
+
+HISTORY_KEY = "history"
+"""摘要载体的历史索引：压缩前 checkpoint 与已重挂的消息身份。"""
+
+
+def history_message_ids(messages: list[BaseMessage]) -> list[str]:
+    """显示侧稳定身份，兼容没有 id 的旧消息及同内容重复消息。"""
+    counts: dict[str, int] = {}
+    ids: list[str] = []
+    for msg in messages:
+        identity = msg.additional_kwargs.get(HISTORY_ID_KEY) or msg.id
+        if not identity:
+            digest = hashlib.sha256(msg.model_dump_json().encode()).hexdigest()
+            occurrence = counts.get(digest, 0)
+            counts[digest] = occurrence + 1
+            identity = f"legacy:{digest}:{occurrence}"
+        ids.append(identity)
+    return ids
+
 
 REMINDER_KEY = "is_hook_reminder"
 """标记"hook 注入的 system-reminder"的键名。

@@ -1,5 +1,6 @@
 // 会话状态与事件归约。store = { [sessionKey]: SessionState }，多会话并发：A 在跑时可切到 B，
 // 互不影响。本文件只有纯函数——系统通知 / toast 等副作用在 hooks/useEventNotifications。
+import type { CtxUsage } from './components/ContextMeter.tsx'
 import type {
   ActiveModel,
   AttachedFile,
@@ -11,8 +12,7 @@ import type {
   Usage,
   WireEvent,
   WireEventPayloads,
-} from './types'
-import type { CtxUsage } from './components/ContextMeter'
+} from './types.ts'
 
 // 单 app 实例，模块级自增 id 即可，避免 hook 依赖问题。
 let _id = 0
@@ -24,6 +24,13 @@ export type PendingItem = Extract<Item, { kind: 'user' }>
 // 每个会话的独立状态
 export type SessionState = {
   items: Item[]
+  historyCursor?: string | null
+  historyRevision?: number
+  historyReset?: boolean
+  historyUserIds?: Record<string, string>
+  historyLoading?: boolean
+  historyError?: string
+  historyUnavailable?: boolean
   // 运行中插话：已发出、等下一个工具边界注入的用户消息（输入框上方托盘）。不进 items——
   // 流式文字 / 工具卡都追加在 items 末尾，混进去会排错位置；注入时（message.injected）
   // 才移入消息流。messageId 前端预生成，与后端同一 id
@@ -143,9 +150,11 @@ function appendDelta(items: Item[], text: string): Item[] {
 
 // 结束所有流式中的 assistant 气泡。轮次边界（complete/error）必须调用：
 // 残留的 streaming 气泡会被下一轮 appendDelta 匹配，新回复拼进旧气泡。
-function finishStreaming(items: Item[]): Item[] {
+function finishStreaming(items: Item[], messageId?: string): Item[] {
   return items.map((it) =>
-    it.kind === 'assistant' && it.streaming ? { ...it, streaming: false } : it,
+    it.kind === 'assistant' && it.streaming
+      ? { ...it, streaming: false, ...(messageId ? { id: `${messageId}:assistant` } : {}) }
+      : it,
   )
 }
 
@@ -247,17 +256,138 @@ export const hasStreaming = (s: SessionState): boolean =>
 // 已有流式在途内容时保留现有 items 不覆盖：checkpoint 快照比正在流出的直播轮旧，
 // 整体替换会截断刚流入的助手内容/工具卡。调用方置 loaded 前须自查 hasStreaming——
 // 快照被丢弃时置 loaded 会把掉线前的历史永久关在补拉门外。
-export function hydrateHistory(s: SessionState, r: HistorySnapshot): SessionState {
+export function hydrateHistory(state: SessionState, snapshot: HistorySnapshot): SessionState {
+  const existing = new Map(state.items.map(item => [historyItemKey(item), item]))
+  const fresh = snapshot.items.map(restore).map(item => ({ ...existing.get(historyItemKey(item)), ...item }))
+  const hydrated: SessionState = {
+    ...state,
+    pending: snapshot.pending ? (snapshot.pending.map(restore) as PendingItem[]) : state.pending,
+    ctx: ctxFromUsage(snapshot.usage) ?? state.ctx,
+    // 模型名与窗口成对更新，窗口未知时整对保旧。
+    ...(snapshot.context_window ? { ctxModel: snapshot.model, ctxWindow: snapshot.context_window } : {}),
+  }
+  if (hasStreaming(state)) return hydrated
+
+  const freshKeys = new Set(fresh.map(historyItemKey))
+  // 最新页中的共享消息可能夹着已加载的压缩前记录，按顺序合并而非裁成前缀。
+  const keepHistory = !state.historyReset && 'next_cursor' in snapshot && (fresh.length > 0 || !!snapshot.next_cursor)
+  let lastOverlap = -1
+  state.items.forEach((item, index) => {
+    if (freshKeys.has(historyItemKey(item))) lastOverlap = index
+  })
+  const receipts = keepHistory && lastOverlap >= 0
+    ? state.items.slice(lastOverlap + 1).filter(item => String(item.id).startsWith('command:'))
+    : []
+  const receiptKeys = new Set(receipts.map(historyItemKey))
+  const previous = keepHistory
+    ? state.items
+      .filter(item => (typeof item.id === 'string' || item.kind === 'tool') && !receiptKeys.has(historyItemKey(item)))
+      .map(item => syncHistoryUser(item, snapshot.user_message_ids))
+    : []
+  return {
+    ...hydrated,
+    items: [...mergeHistory(previous, fresh), ...receipts],
+    historyCursor: snapshot.next_cursor,
+    historyUserIds: snapshot.user_message_ids,
+    historyLoading: false,
+    historyReset: false,
+    historyError: undefined,
+    historyUnavailable: snapshot.history_unavailable,
+  }
+}
+
+export function historyItemKey(item: Item): string {
+  if (item.kind === 'tool' && item.toolCallId) return `tool:${item.toolCallId}`
+  return String(item.id)
+}
+
+function syncHistoryUser(item: Item, ids?: Record<string, string>): Item {
+  if (item.kind === 'user' && ids) return { ...item, messageId: ids[String(item.id)] }
+  return item
+}
+
+export function prependHistory(s: SessionState, page: HistorySnapshot, cursor?: string): SessionState {
+  if (cursor !== undefined && s.historyCursor !== cursor) return s
+  const incoming = page.items.map(restore).map(it => syncHistoryUser(it, s.historyUserIds))
+  const items = mergeHistory(s.items, incoming, page.order, page.insert_before ?? null)
+  let streamMark = s.streamMark
+  if (streamMark !== undefined) {
+    const firstStreaming = s.items[streamMark]
+    streamMark = firstStreaming
+      ? items.findIndex(item => historyItemKey(item) === historyItemKey(firstStreaming))
+      : items.length
+  }
   return {
     ...s,
-    items: hasStreaming(s) ? s.items : r.items.map(restore),
-    pending: r.pending ? (r.pending.map(restore) as PendingItem[]) : s.pending,
-    ctx: ctxFromUsage(r.usage) ?? s.ctx,
-    // 渠道旁观会话的上下文环分母来源（会话真实模型窗口）；desktop 自己的会话此值虽也回填但不消费。
-    // 模型名与窗口成对更新：窗口未知（0，如目录查不到的模型）时整对保旧，避免明细弹窗
-    // 出现「新模型名 · 旧模型窗口」的错配。
-    ...(r.context_window ? { ctxModel: r.model, ctxWindow: r.context_window } : {}),
+    items,
+    streamMark,
+    historyCursor: page.next_cursor,
+    historyUnavailable: page.history_unavailable,
+    historyLoading: false,
+    historyError: undefined,
   }
+}
+
+function mergeHistory(
+  existing: Item[],
+  incoming: Item[],
+  order: string[] = incoming.map(historyItemKey),
+  before?: string | null,
+): Item[] {
+  const known = new Set(existing.map(historyItemKey))
+  const updates = new Map(incoming.map(it => [historyItemKey(it), it]))
+  const queued = new Set<string>()
+  const insertions = new Map<string, Item[]>()
+  const head: Item[] = []
+  const tail: Item[] = []
+  let pending: Item[] = []
+  function flushPending(anchor?: string | null): void {
+    if (anchor === null || (anchor !== undefined && !known.has(anchor))) {
+      if (existing.length) {
+        const first = historyItemKey(existing[0])
+        insertions.set(first, [...(insertions.get(first) ?? []), ...pending])
+      } else {
+        head.push(...pending)
+      }
+    } else if (anchor === undefined) {
+      tail.push(...pending)
+    } else {
+      insertions.set(anchor, [...(insertions.get(anchor) ?? []), ...pending])
+    }
+    pending = []
+  }
+  for (const key of order) {
+    const item = updates.get(key)
+    if (known.has(key)) {
+      flushPending(key)
+    } else if (item && !queued.has(key)) {
+      pending.push(item)
+      queued.add(key)
+    }
+  }
+  flushPending(before)
+  const result = [...head]
+  for (const old of existing) {
+    const key = historyItemKey(old)
+    const block = insertions.get(key) ?? []
+    // 前插合并工具组时沿用原组身份，避免展开状态被重置。
+    if (old.kind === 'tool') {
+      const group = historyToolGroup(old)
+      for (let i = block.length - 1; group && i >= 0; i--) {
+        const it = block[i]
+        if (it.kind !== 'tool' || historyToolGroup(it) !== group) break
+        block[i] = { ...it, historyGroup: old.historyGroup ?? String(old.id) }
+      }
+    }
+    const item = updates.get(key)
+    result.push(...block, item ? { ...old, ...item } : old)
+  }
+  return [...result, ...tail]
+}
+
+function historyToolGroup(it: ToolItem): string | null {
+  if (it.name === 'artifacts' || it.name === 'present_files') return null
+  return it.name === 'agent' ? 'agent' : 'tools'
 }
 
 // 重连 ready 后按后端运行态复位本会话。断开期间的事件已丢（detach 期落 NoopChannel），
@@ -307,6 +437,7 @@ export function reduceEvent(store: Store, sid: string, ev: WireEvent, defaultMod
       n = {
         ...s,
         items: anchorLastUser(s.items, ev.payload.message_id ?? '', ev.payload.files),
+        historyRevision: (s.historyRevision ?? 0) + 1,
         model: s.model ?? defaultModel,
         running: true,
         runStart: s.running ? s.runStart : Date.now(),
@@ -329,7 +460,7 @@ export function reduceEvent(store: Store, sid: string, ev: WireEvent, defaultMod
       n = { ...s, streamMark: s.items.length }
       break
     case 'message.complete':
-      n = { ...s, items: finishStreaming(s.items), ctx: ctxFromUsage(ev.payload.usage) ?? s.ctx }
+      n = { ...s, items: finishStreaming(s.items, ev.payload.message_id), ctx: ctxFromUsage(ev.payload.usage) ?? s.ctx }
       break
     case 'message.retry':
       // 后端丢弃了畸形响应重试：回滚本次调用流出的气泡，原位留一行提示

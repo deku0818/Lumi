@@ -2,7 +2,7 @@
 
 ## 概述
 
-Lumi 的 Summary 机制在对话历史接近模型上下文窗口时自动压缩中间消息。流程采用**串行 + 当轮就地替换**设计：`Summarizer` 节点位于 `CallModel` 之前的关键路径上，超阈值时**当轮**生成摘要并立即用 `RemoveMessage` 删除历史 + 把摘要前置到末条 Human——即将溢出的这次调用立刻受益，而非等下一轮。
+Lumi 的 Summary 机制在对话历史接近模型上下文窗口时自动压缩中间消息。流程采用**串行 + 当轮就地替换**设计：`Summarizer` 节点位于 `CallModel` 之前的关键路径上，超阈值时**当轮**生成摘要，以 `Overwrite` 将 messages 替换为「摘要 carrier + 保留原文」——即将溢出的这次调用立刻受益，而非等下一轮。
 
 为承受「串行后 summarizer 失败会连带本轮失败」，摘要生成带 **PTL 截头重试**（自身超长时按 API round 丢头部重试）与**进程内熔断器**（同 thread 连续失败超阈值后短暂放行 CallModel）。压缩节点内部的摘要 LLM 调用由 gateway 拦截，**不外泄为助手消息**。
 
@@ -41,7 +41,7 @@ START
 2. **阈值判断** — `context_window_tokens < 阈值` → 返回放行。
 3. **消息分区** — 跳过头部 SystemMessage（不删除）；尾必须是 HumanMessage（不变量，否则报错）；中间消息为待摘要内容。可压缩消息 < 2 条时直接放行。
 4. **生成摘要（`_summarize`）** — 剔除悬空 tool_use，沿用主对话 system_prompt + tools 前缀调 `run_summary`（缓存命中因 provider 而异：OpenAI 系前缀自动缓存可复用；Anthropic 下摘要链不带主链的思考参数、也不在消息上打断点，不命中主对话缓存，按全价计）；自身撞 prompt-too-long 时先由 `strip_images_from_messages` 把 image/document block 换成占位（仅一次），仍超长再按 `summary_ptl_retry_drop_ratio` 从头部丢弃整组 round 重试，至多 `summary_ptl_retry_max` 次。失败则记录熔断计数并抛出。
-5. **就地替换** — 成功后清零熔断，返回 `[RemoveMessage(历史…), RemoveMessage(末条 Human), carrier, 换新 id 的末条 Human]`。摘要作独立 carrier 插在末条 Human 之前；上下文注入块不在此重建——下游 `PreprocessMessages` 的 `context_inject` hook 在压缩后的历史上扫不到 marker，自动全量重注入（见 `context_inject.py`）。
+5. **就地替换** — 成功后清零熔断，返回 `Overwrite([carrier, 保留原文的副本…])`。摘要作独立 carrier 插在保留原文之前；副本更新运行时 id、保留稳定 `history_id`，carrier 记录压缩前 checkpoint 索引。上下文注入块不在此重建——下游 `PreprocessMessages` 的 `context_inject` hook 在压缩后的历史上扫不到 marker，自动全量重注入（见 `context_inject.py`）。
 
 ## 摘要 carrier 格式
 
@@ -58,7 +58,7 @@ Human({用户原始消息 + context_inject 全量注入块})
 
 - **触发**：`call_model` 不再自捕 PTL，异常交给节点级 `error_handler`（`on_call_model_error`，`add_node(..., error_handler=)`）：`is_ptl_error` 命中则返回 `Command(goto="Summarizer", update={"ptl_retry": True})`；`ptl_retry` 已置位（刚压缩过仍超长）或非 PTL 异常则原样抛出——**每次 PTL 只换一次压缩机会**，收敛且不死循环。
 - **强制压缩**（`_ptl_forced_compact`）：绕阈值门与「尾必须 Human」不变量，`select_for_ptl_compaction` 按 API round 保留尾部 `_PTL_KEEP_TAIL_ROUNDS`（=2）组（保住进行中的工具轮），其余进摘要；共用 `_summarize` + 熔断器。任何不可压 / 摘要失败都返回 `{}` 放行，靠 `ptl_retry` 守卫在重试再撞时抛原 PTL。
-- **写回**：`Overwrite([System?, carrier, 尾部换新 id 副本])`——整条 messages 通道一次替换（messages 是 `DeltaChannel`，逐条 `RemoveMessage` 会多留一串待回放的删除写入）。尾部仍换新 id，让前端把重挂的原文当新条目；`tool_call_id` 配对在 content 里，不受消息 id 更换影响。`ptl_retry` 不在此清除，`CallModel` 成功后才清。
+- **写回**：`Overwrite([carrier, 保留原文的副本…])`——整条 messages 通道一次替换（messages 是 `DeltaChannel`，逐条 `RemoveMessage` 会多留一串待回放的删除写入）。保留消息更新运行时 id，显示侧通过稳定 `history_id` 去重；工具调用与结果使用 `tool_call_id` 配对，不受消息 id 更换影响。`ptl_retry` 不在此清除，`CallModel` 成功后才清。
 - **为什么是 error_handler 而非节点内 try/except**：LangGraph 中**节点自身返回**的 `Command(goto)` 与其条件边取并集——PTL 路由步 `is_use_tool` 也会被求值，末条 `ToolMessage` 会把 `OnAgentStop` 拉进同一 superstep 误分发 Stop hooks（旧实现为此在 `is_use_tool` 挂 `ptl_retry` 守卫返回 `END`）。`error_handler` 的路由不触发条件边求值，守卫已删除，不变量由 `test_full_graph_ptl_roundtrip` 的 Stop hook 计数断言把住。
 - **不外泄**：摘要调用在 `Summarizer` 节点名下运行，gateway 的 `compaction.status` 拦截天然生效（见下节）——这正是把反应式压缩做成路由回 `Summarizer`、而非内联在 `CallModel` 里的主因。
 
@@ -86,7 +86,7 @@ IM 每日整理的 summary 阶段调用：
   的干净 AIMessage（= 已完成一轮的空闲会话），且末条之外至少有一条可删消息。
 - **写回**（`build_compacted_update` → `AgentBridge.flush_offline`）：整条 messages 通道
   `Overwrite` 成 `[Human(<summary>), 保留的原文]`（state 不存 SystemMessage）。`flush_offline` 是离线写回的唯一出口，
-  它统一补消息 id（`aupdate_state` 不像节点写入那样自动补）并挂 `OfflineFlush` 锚点。
+  它挂 `OfflineFlush` 锚点；消息 id 由 LangGraph 1.2.15 自动补齐，离线 `Overwrite` 同时生成完整快照，后续恢复不再回溯压缩前的增量链。
 - **一个刻意的"不带"与一个"继承"**：末条 AI 副本**不带 usage_metadata**——`context_window_tokens` 无
   usage 锚点时退化为字节估算，压缩后不会因旧 usage 误判仍超阈值；摘要载体**继承**被压历史中
   最新一条真人消息的 lumi ts（`build_summary_carrier`），判活基线（`latest_human_ts`）不随压缩
@@ -95,6 +95,28 @@ IM 每日整理的 summary 阶段调用：
 
 压缩后首条真实 human 可能已并入摘要，`session_store._summary_from_snapshot` 不再因取不到
 首条 human 丢弃会话（`first_message` 留空，标题由上层 meta 兜住）。
+
+## 压缩前记录的渐进加载
+
+摘要载体的 `additional_kwargs.history` 保存压缩前 checkpoint ID 和重挂消息身份；
+重挂消息通过 `history_id` 保持显示身份稳定，运行时消息 ID 仍按原规则更新。
+在线压缩取 `Runtime.execution_info.checkpoint_id`，离线压缩取读到的快照 ID。
+
+`sessions/history.py` 复用 checkpoint 原文：首次返回最新 50 个展示条目，前端向上滚动时
+用不透明 `next_cursor` 读取更早的一页。整段恢复并完成工具调用/结果配对后才分页；
+每条连接仅缓存最近读取的一段。未带索引的旧摘要在首次上翻时沿真实祖先链定位压缩写入，
+按重挂消息的完整结构和顺序识别保留部分，不按正文全局去重。
+
+页的 `order` 包含已重挂消息的顺序锚点，`insert_before` 标明页尾边界；前端据此将一页内
+不同区间的旧记录合并到对应位置，处理 PTL 的用户消息、插话与工具轮交错。最新页刷新也按
+共享锚点合并，保留中间已经加载的旧记录。
+历史加载不修改模型上下文；压缩前用户消息只读，仍在当前上下文的用户消息保留编辑/重答锚点。
+滚动补入保持当前可见消息位置，过期游标的异步结果不会恢复编辑前的旧分支。
+旧 checkpoint 被清理时明确报告较早记录不可用。
+
+编辑或重新生成仍被保留的用户消息时，沿历史索引找到该消息压缩前的最早 checkpoint，
+从那里建立回退分支，仅保留目标之前的上下文与历史链接，避免旧工具结果或含有后续内容的
+摘要进入新分支。前端清理旧分支缓存后重新加载。必需 checkpoint 缺失时，回退失败且不修改会话。
 
 ## 设计要点
 
