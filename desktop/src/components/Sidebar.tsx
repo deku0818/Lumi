@@ -1,31 +1,33 @@
-import { memo, useEffect, useRef, useState, type ReactNode } from 'react'
+import { memo, useEffect, useRef, useState, type JSX, type ReactNode } from 'react'
+import { Tooltip as TooltipPrimitive } from 'radix-ui'
 import {
+  ArrowUpCircle,
+  Check,
   ChevronRight,
+  ChevronsUpDown,
   Clock,
   Folder,
+  Globe,
+  Laptop,
   MoreVertical,
   PanelLeft,
+  Pencil,
   Pin,
   PinOff,
-  Pencil,
-  Trash2,
-  Settings,
-  Globe,
-  Check,
-  ChevronsUpDown,
   Plus,
   Search,
   Send,
+  Settings,
+  Trash2,
   User,
   Users,
   WifiOff,
   X,
-  ArrowUpCircle,
 } from 'lucide-react'
 import { useUpdateState } from '../update'
 import { MachineIcon, MachineMark, ReconnectButton, useMachineConn, type MachineMarker } from './MachineTabs'
 import type { ChannelInfo, ConnState, Machine, SessionMeta } from '../types'
-import { basename, botOfThread, machineColor, machineName, sessionKey, beOf, FLOAT_GAP } from '@/lib/utils'
+import { basename, botOfThread, machineColor, machineName, sessionKey, beOf, timeAgo, FLOAT_GAP } from '@/lib/utils'
 import { useI18n, LANGS } from '../i18n'
 import {
   DropdownMenu,
@@ -198,6 +200,7 @@ export const Sidebar = memo(function Sidebar({
       active={keyOf(s) === currentKey}
       state={activity[keyOf(s)]}
       name={dispName(s)}
+      environment={beOf(s) === 'local' ? t('backends.local') : machineName(beOf(s), machines)}
       {...opts}
       onSelect={onSelect}
       onPin={onPin}
@@ -569,24 +572,12 @@ function AccountMenu({
   )
 }
 
-// 会话行：（多机时）机器标记 + 待处理光点 + 渠道图标 + 名 + ⋮ 菜单
-function SessionRow({
-  session,
-  active,
-  state,
-  name,
-  machine,
-  bullet,
-  query,
-  onSelect,
-  onPin,
-  onRename,
-  onDelete,
-}: {
+type SessionRowProps = {
   session: SessionMeta
   active: boolean
   state?: 'running' | 'attention'
   name: string
+  environment: string
   machine?: MachineMarker // 多机时行首机器标记（扁平流用；项目树里机器身份在组头）
   bullet?: boolean // 项目树里的行首空心圆点（执行中实心金；当前会话靠行底色区分）；渠道行仍用群/私聊图标
   query?: string
@@ -594,10 +585,73 @@ function SessionRow({
   onPin: (threadId: string, backend: string, pinned: boolean) => void
   onRename: (threadId: string, backend: string, title: string) => void
   onDelete: (session: SessionMeta) => void
-}) {
-  const { t } = useI18n()
+}
+
+// 会话行：（多机时）机器标记 + 待处理光点 + 渠道图标 + 名 + ⋮ 菜单
+function SessionRow({
+  session,
+  active,
+  state,
+  name,
+  environment,
+  machine,
+  bullet,
+  query,
+  onSelect,
+  onPin,
+  onRename,
+  onDelete,
+}: SessionRowProps): JSX.Element {
+  const { t, lang } = useI18n()
   const [renaming, setRenaming] = useState(false)
+  const [hovered, setHovered] = useState(false)
+  const [menuOpen, setMenuOpen] = useState(false)
+  const [tooltipOpen, setTooltipOpen] = useState(false)
+  const titleClipRef = useRef<HTMLSpanElement>(null)
+  const titleTextRef = useRef<HTMLSpanElement>(null)
   const backend = session.backend || 'local'
+  const EnvironmentIcon = backend === 'local' ? Laptop : Globe
+  const preview = hovered && !menuOpen && !renaming
+  const createdAt = Date.parse(session.created_at)
+
+  useEffect(function syncTitleScroll() {
+    const clip = titleClipRef.current
+    const text = titleTextRef.current
+    if (!preview || !clip || !text) return
+
+    const reducedMotion = window.matchMedia('(prefers-reduced-motion: reduce)')
+    let animation: Animation | undefined
+    const restartScroll = function (): void {
+      animation?.cancel()
+      const distance = text.scrollWidth - clip.clientWidth
+      if (distance <= 0 || reducedMotion.matches) return
+      animation = text.animate(
+        [{ transform: 'translateX(0)' }, { transform: `translateX(-${distance}px)` }],
+        {
+          delay: 650,
+          duration: Math.max(1600, (distance / 34) * 1000),
+          easing: 'cubic-bezier(.22,.05,.18,1)',
+          fill: 'forwards',
+        },
+      )
+    }
+    const observer = new ResizeObserver(restartScroll)
+    observer.observe(clip)
+    observer.observe(text)
+    reducedMotion.addEventListener('change', restartScroll)
+    restartScroll()
+    return function stopTitleScroll(): void {
+      observer.disconnect()
+      reducedMotion.removeEventListener('change', restartScroll)
+      animation?.cancel()
+    }
+  }, [preview, name])
+
+  function handleMenuOpenChange(open: boolean): void {
+    setMenuOpen(open)
+    setHovered(false)
+    setTooltipOpen(false)
+  }
 
   if (renaming) {
     return (
@@ -612,65 +666,117 @@ function SessionRow({
   }
 
   return (
-    <div className="group relative mb-0.5">
-      <button
-        onClick={() => onSelect(session.thread_id, backend)}
-        title={session.first_message}
-        className={`flex w-full items-center gap-2 pl-3 pr-8 py-[5px] rounded-lg text-[13px] transition ${
-          active ? 'bg-surface text-ink' : 'text-ink/80 hover:bg-surface/60 hover:text-ink'
-        }`}
+    <TooltipPrimitive.Root
+      delayDuration={260}
+      disableHoverableContent
+      open={tooltipOpen && !menuOpen}
+      onOpenChange={setTooltipOpen}
+    >
+      <div
+        className="session-row group relative mb-0.5 rounded-lg"
+        data-preview={preview}
+        onPointerEnter={(event) => {
+          if (event.pointerType === 'mouse') setHovered(true)
+        }}
+        onPointerLeave={() => setHovered(false)}
       >
-        {machine && <MachineMark id={machine.id} color={machine.color} title={machine.name} />}
-        {bullet && !session.channel && (
-          // 圆点左移 3px、右边补回 3px：标题文字位置不变，只拉开点与标题的距离
-          <span
-            className={`shrink-0 size-1.5 -ml-[3px] mr-[3px] rounded-full border ${state === 'running' ? 'border-primary bg-primary lumi-blink' : 'border-separator'}`}
-          />
-        )}
-        {/* 渠道会话：群/私聊图标（最近流、搜索结果、飞书分组内统一）。-ml 让 13px 图标与
-            普通行的圆点同中心线、标题与普通行标题同起点 */}
-        {session.channel &&
-          (session.channel_kind === 'p2p' ? (
-            <User size={13} className="shrink-0 -ml-[7px] text-success/80" />
-          ) : (
-            <Users size={13} className="shrink-0 -ml-[7px] text-info/80" />
-          ))}
-        <span className="flex-1 min-w-0 truncate text-left">{query ? highlight(name, query) : name}</span>
-        {/* 仅「等你处理」保留提醒点（需你操作）；置顶进段不带 📌、进行中不带脉冲点 */}
-        {state === 'attention' && (
-          <span
-            title={t('sidebar.needsYou')}
-            className="shrink-0 size-1.5 rounded-full bg-primary shadow-[0_0_0_3px_color-mix(in_srgb,var(--color-accent)_22%,transparent)]"
-          />
-        )}
-      </button>
-      <DropdownMenu>
-        <DropdownMenuTrigger asChild>
+        <TooltipPrimitive.Trigger asChild>
           <button
-            aria-label={t('sidebar.sessionActions')}
-            className="absolute right-1 top-1/2 -translate-y-1/2 size-6 grid place-items-center rounded-md text-muted-foreground hover:bg-line/30 hover:text-ink transition opacity-0 group-hover:opacity-100 data-[state=open]:opacity-100 outline-none"
+            onClick={() => onSelect(session.thread_id, backend)}
+            onFocus={() => setHovered(true)}
+            onBlur={() => setHovered(false)}
+            className={`session-select flex w-full items-center gap-2 pl-3 pr-8 py-[5px] rounded-lg text-[13px] transition ${
+              active ? 'bg-surface text-ink' : 'text-ink/80'
+            }`}
           >
-            <MoreVertical size={15} />
+            {machine && <MachineMark id={machine.id} color={machine.color} title={machine.name} />}
+            {bullet && !session.channel && (
+              // 圆点左移 3px、右边补回 3px：标题文字位置不变，只拉开点与标题的距离
+              <span
+                className={`shrink-0 size-1.5 -ml-[3px] mr-[3px] rounded-full border ${state === 'running' ? 'border-primary bg-primary lumi-blink' : 'border-separator'}`}
+              />
+            )}
+            {/* 渠道会话：群/私聊图标（最近流、搜索结果、飞书分组内统一）。-ml 让 13px 图标与
+                普通行的圆点同中心线、标题与普通行标题同起点 */}
+            {session.channel &&
+              (session.channel_kind === 'p2p' ? (
+                <User size={13} className="shrink-0 -ml-[7px] text-success/80" />
+              ) : (
+                <Users size={13} className="shrink-0 -ml-[7px] text-info/80" />
+              ))}
+            <span ref={titleClipRef} className="session-title-clip flex-1 min-w-0 truncate text-left">
+              <span
+                ref={titleTextRef}
+                className={`inline-block align-bottom ${preview ? 'whitespace-nowrap' : 'max-w-full truncate'}`}
+              >
+                {query ? highlight(name, query) : name}
+              </span>
+            </span>
+            {/* 仅「等你处理」保留提醒点（需你操作）；置顶进段不带 📌、进行中不带脉冲点 */}
+            {state === 'attention' && (
+              <span
+                title={t('sidebar.needsYou')}
+                className="shrink-0 size-1.5 rounded-full bg-primary shadow-[0_0_0_3px_color-mix(in_srgb,var(--color-accent)_22%,transparent)]"
+              />
+            )}
           </button>
-        </DropdownMenuTrigger>
-        <DropdownMenuContent align="start" className="w-44">
-          <DropdownMenuItem onClick={() => onPin(session.thread_id, backend, !session.pinned)}>
-            {session.pinned ? <PinOff /> : <Pin />}
-            {session.pinned ? t('sidebar.unpin') : t('sidebar.pin')}
-          </DropdownMenuItem>
-          <DropdownMenuItem onClick={() => setRenaming(true)}>
-            <Pencil />
-            {t('sidebar.rename')}
-          </DropdownMenuItem>
-          <DropdownMenuSeparator />
-          {/* 渠道会话删的是共享 checkpoint（群里下条消息会「失忆」重开），文案如实 */}
-          <DropdownMenuItem variant="destructive" onClick={() => onDelete(session)}>
-            <Trash2 />
-            {session.channel ? t('sidebar.clearSession') : t('sidebar.delete')}
-          </DropdownMenuItem>
-        </DropdownMenuContent>
-      </DropdownMenu>
-    </div>
+        </TooltipPrimitive.Trigger>
+        <DropdownMenu onOpenChange={handleMenuOpenChange}>
+          <DropdownMenuTrigger asChild>
+            <button
+              aria-label={t('sidebar.sessionActions')}
+              className="absolute right-1 top-1/2 -translate-y-1/2 size-6 grid place-items-center rounded-md text-muted-foreground hover:bg-line/30 hover:text-ink transition opacity-0 group-hover:opacity-100 group-focus-within:opacity-100 data-[state=open]:opacity-100 outline-none"
+            >
+              <MoreVertical size={15} />
+            </button>
+          </DropdownMenuTrigger>
+          <DropdownMenuContent align="start" className="w-44">
+            <DropdownMenuItem onClick={() => onPin(session.thread_id, backend, !session.pinned)}>
+              {session.pinned ? <PinOff /> : <Pin />}
+              {session.pinned ? t('sidebar.unpin') : t('sidebar.pin')}
+            </DropdownMenuItem>
+            <DropdownMenuItem onClick={() => setRenaming(true)}>
+              <Pencil />
+              {t('sidebar.rename')}
+            </DropdownMenuItem>
+            <DropdownMenuSeparator />
+            {/* 渠道会话删的是共享 checkpoint（群里下条消息会「失忆」重开），文案如实 */}
+            <DropdownMenuItem variant="destructive" onClick={() => onDelete(session)}>
+              <Trash2 />
+              {session.channel ? t('sidebar.clearSession') : t('sidebar.delete')}
+            </DropdownMenuItem>
+          </DropdownMenuContent>
+        </DropdownMenu>
+      </div>
+      <TooltipPrimitive.Portal>
+        <TooltipPrimitive.Content
+          side="right"
+          align="start"
+          sideOffset={8}
+          collisionPadding={8}
+          className="session-hover-card"
+        >
+          <div className="flex items-start gap-3 mb-1.5">
+            <span className="min-w-0 flex-1 break-words text-[13px] leading-[1.45] font-medium">{name}</span>
+            {Number.isFinite(createdAt) && (
+              <time dateTime={session.created_at} className="shrink-0 pt-0.5 text-[10px] text-muted-foreground">
+                {timeAgo(createdAt / 1000, lang)}
+              </time>
+            )}
+          </div>
+          <div className="flex items-center gap-3 text-[11px] leading-4 text-muted-foreground">
+            <span className="flex min-w-0 items-center gap-[5px]">
+              <Folder size={12} className="shrink-0" />
+              <span className="truncate">{session.workspace_dir ? basename(session.workspace_dir) : t('projects.default')}</span>
+            </span>
+            <span className="flex min-w-0 items-center gap-[5px]">
+              <EnvironmentIcon size={12} className="shrink-0" />
+              <span className="truncate">{environment}</span>
+            </span>
+          </div>
+        </TooltipPrimitive.Content>
+      </TooltipPrimitive.Portal>
+    </TooltipPrimitive.Root>
   )
 }
 

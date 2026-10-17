@@ -244,6 +244,39 @@ pre {
   box-shadow: var(--shadow-card);
 }
 .sidebar-float { background: var(--color-base); }
+
+/* 会话悬停：整行高亮，只有被截断的标题移动；详细信息通过 Portal 展示。 */
+.session-row:hover .session-select,
+.session-row:focus-within .session-select {
+  background: color-mix(in srgb, var(--color-ink) 8%, var(--color-base));
+  color: var(--color-ink);
+  box-shadow: inset 0 0 0 1px color-mix(in srgb, var(--color-ink) 3%, transparent);
+}
+.session-row[data-preview="true"] .session-title-clip {
+  text-overflow: clip;
+  mask-image: linear-gradient(to right, transparent, #000 5px, #000 calc(100% - 10px), transparent);
+}
+.session-hover-card {
+  z-index: 50;
+  width: 320px;
+  max-width: min(calc(100vw - 16px), var(--radix-tooltip-content-available-width));
+  padding: 9px 11px;
+  border: 1px solid color-mix(in srgb, var(--color-ink) 14%, transparent);
+  border-radius: 10px;
+  background: var(--color-panel);
+  color: var(--color-ink);
+  box-shadow: var(--shadow-popover);
+  pointer-events: none;
+  animation: session-hover-in 150ms var(--ease-out);
+}
+@keyframes session-hover-in {
+  from { opacity: 0; transform: translateY(3px); }
+  to { opacity: 1; transform: translateY(0); }
+}
+@media (prefers-reduced-motion: reduce) {
+  .session-hover-card { animation: none; }
+}
+
 .composer-glass {
   transition: border-color var(--motion-base) var(--ease-out), box-shadow var(--motion-base) var(--ease-out);
 }
