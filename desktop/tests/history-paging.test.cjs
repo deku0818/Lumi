@@ -31,7 +31,7 @@ test('reconnect refreshes latest page while retaining older pages and current us
   assert.equal(state.historyCursor, 'new-cursor')
 })
 
-test('a summary-only current checkpoint preserves already visible history until upward loading', () => {
+test('a compact-only current checkpoint preserves already visible history until upward loading', () => {
   const state = hydrateHistory(emptySession(), snapshot([user(1), assistant(1)], null))
   const next = hydrateHistory(state, snapshot([], 'archive'))
   assert.equal(next.items.length, 2)

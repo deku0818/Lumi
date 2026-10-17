@@ -193,7 +193,7 @@ class EventKind(StrEnum):
     )
     TOOL_GENERATING = "tool.generating"  # LLM 正在生成工具调用参数
     COMPACTION_STATUS = (
-        "compaction.status"  # 历史压缩进行中（Summarizer 内部摘要调用不外泄为助手消息）
+        "compaction.status"  # 历史压缩进行中（Compact 内部摘要调用不外泄为助手消息）
     )
     TOOL_START = "tool.start"
     TOOL_COMPLETE = "tool.complete"
@@ -914,9 +914,9 @@ class AgentBridge:
     async def compact_thread(self) -> bool:
         """对当前 thread 的空闲历史强制压缩一次（不流式、不触发模型对话）。
 
-        供 IM 渠道每日 dream 后的 summary 阶段调用：读 checkpoint 快照 → 复用 summarizer
-        的压缩核（``run_summary``）→ 经 ``aupdate_state`` 把摘要 carrier 写回 checkpoint
-        （整条通道 Overwrite，压缩后历史 = ``[System?, Human(<summary>)]``，另有一条
+        供 IM 渠道每日 dream 后的 compact 阶段调用：读 checkpoint 快照 → 复用 compact
+        的压缩核（``run_compact``）→ 经 ``aupdate_state`` 把摘要 carrier 写回 checkpoint
+        （整条通道 Overwrite，压缩后历史 = ``[System?, Human(<compact>)]``，另有一条
         尚未被回答的用户消息时原样重挂在 carrier 之后；下条真实用户消息到来时由
         context_inject 全量重建上下文），全程不经 astream_events 故不外泄到渠道。
 
@@ -1356,12 +1356,12 @@ class AgentBridge:
         # 确保 agent 自身的 on_tool_start 不会自匹配）
         self._track_agent_run(kind, event.get("name", ""), run_id)
 
-        # 压缩节点(Summarizer)内部的摘要 LLM 调用：不作为 message.* 流出
+        # 压缩节点(Compact)内部的摘要 LLM 调用：不作为 message.* 流出
         # （astream_events 会把它逐字浮现成 on_chat_model_stream，否则摘要
         # 全文会泄漏成助手回答），改用 compaction.status 驱动「正在压缩」指示。
         # 对齐 claude-code：压缩调用内部消费 + 'compacting' 状态，不进用户流。
         if kind.startswith("on_chat_model") and (
-            event.get("metadata", {}).get("langgraph_node") == "Summarizer"
+            event.get("metadata", {}).get("langgraph_node") == "Compact"
         ):
             # start→压缩开始、end/error→结束；stream 直接丢弃（摘要不外泄）
             if kind != "on_chat_model_stream":
@@ -1555,7 +1555,7 @@ class AgentBridge:
 
     @staticmethod
     def _is_main_call_model(event: dict) -> bool:
-        """事件是否来自主链 CallModel 节点（排除 Summarizer/AutoClassify 等内部链）。"""
+        """事件是否来自主链 CallModel 节点（排除 Compact/AutoClassify 等内部链）。"""
         return event.get("metadata", {}).get("langgraph_node") == "CallModel"
 
     async def finalize_cancelled_stream(self, gen: AsyncGenerator) -> None:
@@ -1732,7 +1732,7 @@ class AgentBridge:
         update: dict = {}
         if state.values.get("ptl_retry"):
             # 中断落在 PTL 强制压缩期间会把 flag 留在 checkpoint——不清掉的话
-            # 下一轮 Summarizer 见 flag 绕过阈值门无条件有损压缩
+            # 下一轮 Compact 见 flag 绕过阈值门无条件有损压缩
             update["ptl_retry"] = False
         if dangling:
             update["messages"] = build_reject_messages(

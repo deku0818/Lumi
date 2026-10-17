@@ -1,4 +1,4 @@
-"""summary 压缩辅助单元测试：round 分组 / PTL 截头重试 / 熔断器 / 图像剥离。
+"""compact 压缩辅助单元测试：round 分组 / PTL 截头重试 / 熔断器 / 图像剥离。
 
 纯逻辑断言，不触发真实 LLM。
 """
@@ -29,8 +29,9 @@ from lumi.agents.core.meta_message import (
 )
 from lumi.agents.core.preprocessing import compact
 from lumi.agents.core.preprocessing.compact import (
+    build_compact_carrier,
     build_compacted_update,
-    build_summary_carrier,
+    compact_with_ptl_retry,
     find_pending_human,
     is_circuit_open,
     is_ptl_error,
@@ -41,7 +42,6 @@ from lumi.agents.core.preprocessing.compact import (
     select_for_ptl_compaction,
     split_into_rounds,
     strip_images_from_messages,
-    summarize_with_ptl_retry,
     truncate_head_for_ptl_retry,
 )
 from lumi.utils.config.models import TokenConfig
@@ -87,8 +87,8 @@ def test_select_for_ptl_keeps_tail_rounds():
     msgs = tool_loop_history()  # rounds: [Human], [a0,t0], [a1,t1], [a2,t2], [a3,t3]
     selected = select_for_ptl_compaction(msgs, keep_rounds=2)
     assert selected is not None
-    to_summarize, tail = selected
-    assert [m.id for m in to_summarize] == ["h", "a0", "t0", "a1", "t1"]
+    to_compact, tail = selected
+    assert [m.id for m in to_compact] == ["h", "a0", "t0", "a1", "t1"]
     assert [m.id for m in tail] == ["a2", "t2", "a3", "t3"]
 
 
@@ -114,9 +114,9 @@ def test_select_for_ptl_trailing_human_stays_in_tail():
     ]  # rounds: [h0], [a0], [a1], [a2,h1]
     selected = select_for_ptl_compaction(msgs, keep_rounds=2)
     assert selected is not None
-    to_summarize, tail = selected
+    to_compact, tail = selected
     assert [m.id for m in tail] == ["a1", "a2", "h1"]
-    assert [m.id for m in to_summarize] == ["h0", "a0"]
+    assert [m.id for m in to_compact] == ["h0", "a0"]
 
 
 # ─────────────────────────── 图像剥离 ───────────────────────────
@@ -164,7 +164,7 @@ def test_is_ptl_error_rejects_non_ptl():
 # ─────────────────────────── PTL 截头重试 ───────────────────────────
 
 
-async def test_summarize_retries_on_ptl_then_succeeds():
+async def test_compact_retries_on_ptl_then_succeeds():
     msgs = [
         HumanMessage(content="h0"),
         AIMessage(content="a1"),
@@ -179,7 +179,7 @@ async def test_summarize_retries_on_ptl_then_succeeds():
             AIMessage(content="摘要"),
         ]
     )
-    content, attempts = await summarize_with_ptl_retry(
+    content, attempts = await compact_with_ptl_retry(
         msgs, "PROMPT", chain, max_retry=3, drop_ratio=0.3
     )
     assert content == "摘要"
@@ -199,18 +199,18 @@ async def test_summarize_retries_on_ptl_then_succeeds():
         AIMessage(content="   "),
     ],
 )
-async def test_summarize_rejects_non_text_summary(response):
-    # 回归：摘要回复不做校验——模型回空或去调工具时，写回的是空 <summary> 或前言，
+async def test_compact_rejects_non_text_compact(response):
+    # 回归：摘要回复不做校验——模型回空或去调工具时，写回的是空 <compact> 或前言，
     # 整段历史被不可逆替换。失败应抛出，走现有的熔断 / 失败路径
     chain = AsyncMock()
     chain.ainvoke = AsyncMock(return_value=response)
     with pytest.raises(ValueError):
-        await summarize_with_ptl_retry(
+        await compact_with_ptl_retry(
             [HumanMessage("h")], "PROMPT", chain, max_retry=1, drop_ratio=0.3
         )
 
 
-async def test_summarize_joins_all_text_blocks():
+async def test_compact_joins_all_text_blocks():
     chain = AsyncMock()
     chain.ainvoke = AsyncMock(
         return_value=AIMessage(
@@ -221,13 +221,13 @@ async def test_summarize_joins_all_text_blocks():
             ]
         )
     )
-    text, _ = await summarize_with_ptl_retry(
+    text, _ = await compact_with_ptl_retry(
         [HumanMessage("h")], "PROMPT", chain, max_retry=1, drop_ratio=0.3
     )
     assert text == "第一段\n第二段"
 
 
-async def test_summarize_strips_images_before_truncating_on_ptl():
+async def test_compact_strips_images_before_truncating_on_ptl():
     # 首次带原图撞 PTL → 第一档缓解剥图（不截头），剥图后成功
     img_human = HumanMessage(
         content=[
@@ -247,7 +247,7 @@ async def test_summarize_strips_images_before_truncating_on_ptl():
 
     chain = AsyncMock()
     chain.ainvoke = AsyncMock(side_effect=_invoke)
-    content, attempts = await summarize_with_ptl_retry(
+    content, attempts = await compact_with_ptl_retry(
         msgs, "PROMPT", chain, max_retry=3, drop_ratio=0.3
     )
     assert content == "摘要"
@@ -270,9 +270,9 @@ def _capture_chain() -> tuple[object, dict]:
     return _Chain(), captured
 
 
-async def _run_summary(history: list, model_name: str = "claude-x") -> str:
-    """跑一次 run_summary，固定住与本组测试无关的那些参数。"""
-    text, _ = await compact.run_summary(
+async def _run_compact(history: list, model_name: str = "claude-x") -> str:
+    """跑一次 run_compact，固定住与本组测试无关的那些参数。"""
+    text, _ = await compact.run_compact(
         history,
         "PROMPT",
         tools=[],
@@ -284,7 +284,7 @@ async def _run_summary(history: list, model_name: str = "claude-x") -> str:
     return text
 
 
-async def test_run_summary_drops_dangling_tool_use():
+async def test_run_compact_drops_dangling_tool_use():
     """上一轮工具执行中途被取消 → 落库的 AIMessage(tool_use) 没有配对结果，
     摘要链不经 PreprocessMessages 的清理，原样发出去会被 provider 400。"""
     chain, captured = _capture_chain()
@@ -298,11 +298,11 @@ async def test_run_summary_drops_dangling_tool_use():
         HumanMessage(content="新问题", id="h1"),
     ]
     with patch.object(compact, "tool_call_chain", return_value=chain):
-        await _run_summary(history)
+        await _run_compact(history)
     assert [m.id for m in captured["messages"] if m.id] == ["h0", "h1"]
 
 
-async def test_run_summary_transforms_media_for_non_anthropic():
+async def test_run_compact_transforms_media_for_non_anthropic():
     # OpenAI 协议模型：摘要首次调用须把 image block 转成 image_url，不漏发 Anthropic 原生格式
     img_human = HumanMessage(
         content=[
@@ -315,7 +315,7 @@ async def test_run_summary_transforms_media_for_non_anthropic():
     )
     chain, captured = _capture_chain()
     with patch.object(compact, "tool_call_chain", return_value=chain):
-        text = await _run_summary([img_human], model_name="gpt-4o")
+        text = await _run_compact([img_human], model_name="gpt-4o")
     assert text == "摘要"
     sent = captured["messages"][0].content
     assert {
@@ -325,22 +325,22 @@ async def test_run_summary_transforms_media_for_non_anthropic():
     assert any(isinstance(b, dict) and b.get("type") == "image_url" for b in sent)
 
 
-async def test_summarize_non_ptl_error_raises_immediately():
+async def test_compact_non_ptl_error_raises_immediately():
     chain = AsyncMock()
     chain.ainvoke = AsyncMock(side_effect=ValueError("boom"))
     with pytest.raises(ValueError):
-        await summarize_with_ptl_retry(
+        await compact_with_ptl_retry(
             [HumanMessage(content="h")], "P", chain, max_retry=3, drop_ratio=0.3
         )
     assert chain.ainvoke.await_count == 1
 
 
-async def test_summarize_raises_when_cannot_truncate_further():
+async def test_compact_raises_when_cannot_truncate_further():
     # 单 round 截不动 → PTL 直接抛出，不无限重试
     chain = AsyncMock()
     chain.ainvoke = AsyncMock(side_effect=PTLError("prompt is too long"))
     with pytest.raises(PTLError):
-        await summarize_with_ptl_retry(
+        await compact_with_ptl_retry(
             [HumanMessage(content="h")], "P", chain, max_retry=3, drop_ratio=0.3
         )
     assert chain.ainvoke.await_count == 1
@@ -379,7 +379,7 @@ def test_circuit_expires_after_reset_seconds(monkeypatch):
     assert not is_circuit_open(tid, 3, 600)
 
 
-# ─────────────────────── summarizer 只注入摘要 ───────────────────────
+# ─────────────────────── compact 只注入摘要 ───────────────────────
 
 
 def _human_text(msg) -> str:
@@ -400,8 +400,8 @@ def _pending_human_history() -> list:
     ]
 
 
-def _summarizer_env(*, context_length: int, summary_threshold: float) -> tuple:
-    """summarizer 的最小运行环境 ``(runtime, fake get_config)``。
+def _compact_env(*, context_length: int, compact_threshold: float) -> tuple:
+    """compact 的最小运行环境 ``(runtime, fake get_config)``。
 
     token 段用真实 ``TokenConfig``（只覆盖本用例关心的两个值）：新增字段时测试跟着
     生产默认走，不会因手搓 SimpleNamespace 缺字段而假绿。
@@ -415,20 +415,20 @@ def _summarizer_env(*, context_length: int, summary_threshold: float) -> tuple:
     fake_config = SimpleNamespace(
         config=SimpleNamespace(
             token=TokenConfig(
-                context_length=context_length, summary_threshold=summary_threshold
+                context_length=context_length, compact_threshold=compact_threshold
             )
         ),
-        load_prompt=lambda name: "SUMMARY PROMPT",
+        load_prompt=lambda name: "COMPACT PROMPT",
     )
     return runtime, fake_config
 
 
-async def test_summarizer_emits_carrier_before_last_human():
+async def test_compact_emits_carrier_before_last_human():
     """压缩产出独立摘要 carrier + 末条 Human 原样重排到 carrier 之后；
     上下文块不在此重注入——下游 PreprocessMessages 的 context_inject hook
     在压缩后的历史上全量重建。"""
     messages = _pending_human_history()
-    runtime, fake_config = _summarizer_env(context_length=1000, summary_threshold=0.5)
+    runtime, fake_config = _compact_env(context_length=1000, compact_threshold=0.5)
     with (
         patch.object(nodes, "get_config", return_value=fake_config),
         patch.object(compact, "get_config", return_value=fake_config),
@@ -436,11 +436,11 @@ async def test_summarizer_emits_carrier_before_last_human():
         patch.object(nodes, "resolve", return_value=resolved(0)),  # 不查真实目录
         patch.object(
             compact,
-            "run_summary",
-            new=AsyncMock(return_value=("SUMMARY_TEXT", 0)),
+            "run_compact",
+            new=AsyncMock(return_value=("COMPACT_TEXT", 0)),
         ),
     ):
-        result = await nodes.summarizer(
+        result = await nodes.compact(
             {"messages": messages}, runtime, {"configurable": {"thread_id": "tm"}}
         )
 
@@ -450,7 +450,7 @@ async def test_summarizer_emits_carrier_before_last_human():
     assert [type(m).__name__ for m in merged] == ["HumanMessage", "HumanMessage"]
     carrier, last = merged
     carrier_text = _human_text(carrier)
-    assert "<summary>" in carrier_text and "SUMMARY_TEXT" in carrier_text
+    assert "<compact>" in carrier_text and "COMPACT_TEXT" in carrier_text
     assert "system-reminder" not in carrier_text  # 上下文块交给下游 hook 全量重建
     assert _human_text(last) == "现在的问题"  # 用户消息在 carrier 之后、内容原样
     assert last.id != "h3"  # 换新 id 才能真正 append 到 carrier 之后
@@ -467,27 +467,25 @@ async def test_summarizer_emits_carrier_before_last_human():
         (0, 100_000, False),  # 目录未收录 → 退回 200K 分母，100K < 140K 不压
     ],
 )
-async def test_summary_threshold_follows_real_model_window(
+async def test_compact_threshold_follows_real_model_window(
     model_window, usage, should_compact
 ):
     """阈值分母取会话实际模型的窗口；目录查不到才用 token.context_length 兜底。"""
     messages = _pending_human_history()
-    runtime, fake_config = _summarizer_env(
-        context_length=200_000, summary_threshold=0.7
-    )
-    run_summary = AsyncMock(return_value=("SUMMARY_TEXT", 0))
+    runtime, fake_config = _compact_env(context_length=200_000, compact_threshold=0.7)
+    run_compact = AsyncMock(return_value=("COMPACT_TEXT", 0))
     with (
         patch.object(nodes, "get_config", return_value=fake_config),
         patch.object(compact, "get_config", return_value=fake_config),
         patch.object(nodes, "context_window_tokens", return_value=usage),
         patch.object(nodes, "resolve", return_value=resolved(model_window)),
-        patch.object(compact, "run_summary", new=run_summary),
+        patch.object(compact, "run_compact", new=run_compact),
     ):
-        result = await nodes.summarizer(
+        result = await nodes.compact(
             {"messages": messages}, runtime, {"configurable": {"thread_id": "tw"}}
         )
 
-    assert run_summary.await_count == (1 if should_compact else 0)
+    assert run_compact.await_count == (1 if should_compact else 0)
     assert bool(result) is should_compact
 
 
@@ -520,7 +518,7 @@ def test_select_compacts_small_conversation():
     assert [m.content for m in body] == ["h0", "a0"]
 
 
-def test_select_skips_when_nothing_to_summarize():
+def test_select_skips_when_nothing_to_compact():
     # body 仅剩末条 AI（无可压消息）→ 不白跑摘要
     assert select_for_compaction([AIMessage(content="a", id="a")]) is None
 
@@ -537,7 +535,7 @@ def test_select_accepts_trailing_pending_human():
 def test_select_skips_when_last_is_synthetic_human():
     # 摘要 carrier / 后台通知（items: []）不是用户诉求，不构成可压末条
     msgs = _conversation(5)
-    msgs.append(build_summary_carrier("往期摘要"))
+    msgs.append(build_compact_carrier("往期摘要"))
     assert select_for_compaction(msgs) is None
 
 
@@ -571,6 +569,16 @@ def test_build_update_replaces_body_with_carrier():
     assert "浓缩摘要" in merged[0].content
 
 
+def test_build_update_preserves_distinct_equal_messages():
+    tail = HumanMessage("same")
+    pending = tail.model_copy()
+    assert tail == pending and tail is not pending
+    update = build_compacted_update([tail, pending], [tail], "context")
+    kept = update["messages"].value[1:]
+    assert len(kept) == 2 and all(message.content == "same" for message in kept)
+    assert len({message.additional_kwargs["history_id"] for message in kept}) == 2
+
+
 def test_build_update_reattaches_pending_human_verbatim():
     """末条是未被回答的用户消息 → 原话重挂在 carrier 之后（换新 id 才排得过去）。"""
     msgs = [*_conversation(2), _user("我的问题", "pending", ts=9000)]
@@ -579,7 +587,7 @@ def test_build_update_reattaches_pending_human_verbatim():
 
     merged = apply_messages_update(msgs, update["messages"])
     assert [_human_text(m) for m in merged if isinstance(m, HumanMessage)][-2:] == [
-        "<summary>\n浓缩摘要\n</summary>\n",
+        "<compact>\n浓缩摘要\n</compact>\n",
         "我的问题",
     ]
     assert merged[-1].id != "pending"
@@ -631,7 +639,7 @@ def test_find_pending_human_stops_at_answered_turn():
     # 工具循环中段：末条 Tool，上一问还没答完
     assert find_pending_human(tool_loop_history()).id == "h"
     # 合成消息不算诉求
-    assert find_pending_human([build_summary_carrier("摘要")]) is None
+    assert find_pending_human([build_compact_carrier("摘要")]) is None
 
 
 def test_find_pending_human_sees_through_reminder_pullback():

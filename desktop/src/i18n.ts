@@ -543,8 +543,8 @@ const ZH: Dict = {
   'channels.dreamDesc': '到点自动沉淀记忆 + 压缩会话，长会话不再无限膨胀',
   'channels.dreamTime': '执行时间（每天）',
   'channels.dreamTimeHint': '建议选低峰时段',
-  'channels.summaryConcurrency': 'Summary 最大并发',
-  'channels.summaryConcurrencyHint': '限流防接口 429；dream 恒串行',
+  'channels.compactConcurrency': '压缩最大并发',
+  'channels.compactConcurrencyHint': '限流防接口 429；dream 恒串行',
   'channels.deleteTitle': '删除机器人「{name}」？',
   'channels.deleteMessage':
     '将断开其飞书连接、回收进行中的会话池与 lark-cli 专属身份（用户授权一并清除）。**聊天历史不会删除**，重新配置同一应用后可另起会话。',
@@ -1253,8 +1253,8 @@ const EN: Dict = {
   'channels.dreamDesc': 'Consolidate memory and compact sessions on schedule so long sessions stop growing forever',
   'channels.dreamTime': 'Run time (daily)',
   'channels.dreamTimeHint': 'Pick an off-peak hour',
-  'channels.summaryConcurrency': 'Max summary concurrency',
-  'channels.summaryConcurrencyHint': 'Rate limit against API 429s; dream itself is always serial',
+  'channels.compactConcurrency': 'Max compaction concurrency',
+  'channels.compactConcurrencyHint': 'Rate limit against API 429s; dream itself is always serial',
   'channels.deleteTitle': 'Delete bot “{name}”?',
   'channels.deleteMessage':
     'Disconnects it from Feishu and reclaims its in-flight session pool and dedicated lark-cli identity (user authorization is cleared too). **Chat history is kept**; reconfiguring the same app can start fresh sessions.',

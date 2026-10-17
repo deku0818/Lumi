@@ -10,6 +10,7 @@ from typer.testing import CliRunner
 from lumi.cli import _CHECK_MARKS, app
 from lumi.gateway.channels import store
 from lumi.gateway.channels.feishu.checks import Check
+from lumi.utils.config import user_store
 
 runner = CliRunner()
 
@@ -73,11 +74,45 @@ def test_config_short_secret_fully_masked():
     assert "app_secret: （已设置）" in shown.stdout
 
 
-def test_config_int_field_rejects_non_numeric():
-    """非数字给用法级报错，不是 Python 栈回溯——这条 CLI 的调用方是零基础用户和 agent。"""
-    result = runner.invoke(app, ["feishu", "config", "summary_max_concurrency=abc"])
+@pytest.mark.parametrize("existing", [False, True], ids=["create", "update"])
+def test_config_compact_concurrency_roundtrip(existing):
+    """压缩并发配置可新建、更新，并经持久化和 CLI 显示往返。"""
+    previous = None
+    if existing:
+        seeded = runner.invoke(
+            app,
+            ["feishu", "config", "app_id=cli_x", "compact_max_concurrency=2"],
+        )
+        assert seeded.exit_code == 0, seeded.output
+        previous = store.load_feishu_bots()[0]
+
+    result = runner.invoke(app, ["feishu", "config", "compact_max_concurrency=7"])
+    assert result.exit_code == 0, result.output
+    bots = store.load_feishu_bots()
+    assert len(bots) == 1
+    assert bots[0].compact_max_concurrency == 7
+    if previous:
+        assert bots[0].id == previous.id
+        assert bots[0].app_id == previous.app_id
+
+    persisted = user_store.read_section("channels", {})["feishu"][0]
+    assert persisted["compact_max_concurrency"] == 7
+    shown = runner.invoke(app, ["feishu", "config"])
+    assert shown.exit_code == 0, shown.output
+    assert "compact_max_concurrency: 7" in shown.stdout
+
+
+@pytest.mark.parametrize("value", ["abc", "0", "9"])
+def test_config_compact_concurrency_rejects_invalid_values(value):
+    """非数字和超范围的并发配置均拒绝保存。"""
+    result = runner.invoke(
+        app, ["feishu", "config", f"compact_max_concurrency={value}"]
+    )
     assert result.exit_code != 0
+    assert "保存失败" in result.output
+    assert "未知字段" not in result.output
     assert "ValueError" not in (result.output + str(result.exception or ""))
+    assert store.load_feishu_bots() == []
 
 
 def test_config_rejects_unknown_field():

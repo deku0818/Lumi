@@ -35,23 +35,23 @@ def _write_prompt(cfg: LumiConfig, name: str, text: str) -> None:
 
 
 def test_load_prompt_falls_back_to_builtin(tmp_path):
-    """未配置 .lumi/prompts/SUMMARY.md 时取框架内置——否则压缩直接报错。"""
-    text = LumiConfig(str(tmp_path)).load_prompt("SUMMARY")
+    """未配置 .lumi/prompts/COMPACT.md 时取框架内置——否则压缩直接报错。"""
+    text = LumiConfig(str(tmp_path)).load_prompt("COMPACT")
     assert text and "摘要" in text
 
 
 def test_load_prompt_prefers_user_over_builtin(tmp_path):
     """用户自定义压过内置，顺序写反即在此暴露。"""
     cfg = LumiConfig(str(tmp_path))
-    _write_prompt(cfg, "SUMMARY", "我的摘要指令")
-    assert cfg.load_prompt("SUMMARY") == "我的摘要指令"
+    _write_prompt(cfg, "COMPACT", "我的摘要指令")
+    assert cfg.load_prompt("COMPACT") == "我的摘要指令"
 
 
 def test_load_prompt_skips_empty_file(tmp_path):
     """空文件（含只剩 frontmatter）等同于没有，继续往下找。"""
     cfg = LumiConfig(str(tmp_path))
-    _write_prompt(cfg, "SUMMARY", "---\nname: summary\n---\n")
-    text = cfg.load_prompt("SUMMARY")
+    _write_prompt(cfg, "COMPACT", "---\nname: compact\n---\n")
+    text = cfg.load_prompt("COMPACT")
     assert text and "摘要" in text
 
 

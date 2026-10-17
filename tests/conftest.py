@@ -199,8 +199,8 @@ def reset_hooks_state():
 
 
 @pytest.fixture(autouse=True)
-def reset_summary_circuits():
-    """每次测试清空 summary / PTL 压缩共享的进程级熔断器状态，避免跨测试串染。"""
+def reset_compact_circuits():
+    """每次测试清空 compact / PTL 压缩共享的进程级熔断器状态，避免跨测试串染。"""
     from lumi.agents.core.preprocessing.compact import clear_all_circuits
 
     clear_all_circuits()
@@ -232,10 +232,10 @@ def tool_loop_history() -> list:
 
 
 @pytest.fixture
-def run_summarizer():
-    """驱动串行 summarizer：mock 掉 LLM 链 / 配置 / token 计数，强制触发压缩。
+def run_compact_node():
+    """驱动串行 compact：mock 掉 LLM 链 / 配置 / token 计数，强制触发压缩。
 
-    返回 ``await run_summarizer(state, runtime, summary_text, thread_id)``，断言压缩后
+    返回 ``await run_compact_node(state, runtime, compacted_text, thread_id)``，断言压缩后
     返回的 messages（RemoveMessage + 注入了摘要/技能/agent 提示的末条 Human）。
     """
     from types import SimpleNamespace
@@ -245,25 +245,25 @@ def run_summarizer():
 
     from lumi.utils.config.models import TokenConfig
 
-    async def _run(state, runtime, summary_text, thread_id):
-        # summarizer 取 context.system_prompt / model_name 传给（已 mock 的）链，需补齐
+    async def _run(state, runtime, compacted_text, thread_id):
+        # compact 取 context.system_prompt / model_name 传给（已 mock 的）链，需补齐
         runtime.context.system_prompt = ""
         runtime.context.model_name = ""
         fake_chain = SimpleNamespace(
-            ainvoke=AsyncMock(return_value=AIMessage(content=summary_text))
+            ainvoke=AsyncMock(return_value=AIMessage(content=compacted_text))
         )
         fake_config = SimpleNamespace(
             config=SimpleNamespace(token=TokenConfig()),
-            load_prompt=lambda name: "SUMMARY PROMPT",
+            load_prompt=lambda name: "COMPACT PROMPT",
         )
         with (
             patch("lumi.agents.core.nodes.context_window_tokens", return_value=10**9),
             patch("lumi.agents.core.nodes.tool_call_chain", return_value=fake_chain),
             patch("lumi.agents.core.nodes.get_config", return_value=fake_config),
         ):
-            from lumi.agents.core.nodes import summarizer
+            from lumi.agents.core.nodes import compact
 
-            return await summarizer(
+            return await compact(
                 state, runtime, {"configurable": {"thread_id": thread_id}}
             )
 
@@ -313,7 +313,7 @@ def graph_run_config(**token_overrides):
 
     token 段用真实 ``TokenConfig``（只覆盖调用方关心的字段）：新增字段时测试跟着
     生产默认走，不会因手搓 SimpleNamespace 缺字段而假绿——同 test_compact 的
-    ``_summarizer_env``，此处多带一个 ``agents`` 段供 call_model 取 max_tokens。
+    ``_compact_env``，此处多带一个 ``agents`` 段供 call_model 取 max_tokens。
     """
     from types import SimpleNamespace
 
@@ -324,7 +324,7 @@ def graph_run_config(**token_overrides):
             agents=SimpleNamespace(max_tokens=None),
             token=TokenConfig(**token_overrides),
         ),
-        load_prompt=lambda name: "SUMMARY PROMPT",
+        load_prompt=lambda name: "COMPACT PROMPT",
     )
 
 

@@ -90,11 +90,11 @@
     "once_tool_ratio": 0.1,
     "round_tool_ratio": 0.3,
     "context_length": 200000,
-    "summary_threshold": 0.7,
-    "summary_ptl_retry_max": 3,
-    "summary_ptl_retry_drop_ratio": 0.3,
-    "summary_failure_circuit_threshold": 3,
-    "summary_circuit_reset_seconds": 600
+    "compact_threshold": 0.7,
+    "compact_ptl_retry_max": 3,
+    "compact_ptl_retry_drop_ratio": 0.3,
+    "compact_failure_circuit_threshold": 3,
+    "compact_circuit_reset_seconds": 600
   }
 }
 ```
@@ -102,9 +102,9 @@
 字段说明：
 - `once_tool_ratio` / `round_tool_ratio`：单次工具结果 / 单轮全部工具结果的最大占比（相对 `context_length`，按字节衡量）；超出的结果被截断或卸载到文件。
 - `context_length`：上下文窗口的兜底值。工具结果上限恒以它为基准；压缩阈值优先用 models.dev 里该模型的真实窗口，查不到才用它。
-- `summary_threshold`：上下文用量达到模型窗口的这个比例时自动压缩历史。
-- `summary_ptl_retry_max` / `summary_ptl_retry_drop_ratio`：压缩请求本身超长时，最多截头重试几次、每次丢掉多少比例的最早轮次。
-- `summary_failure_circuit_threshold` / `summary_circuit_reset_seconds`：同一会话压缩连续失败这么多次后暂停压缩，过多少秒再试。
+- `compact_threshold`：上下文用量达到模型窗口的这个比例时自动压缩历史。
+- `compact_ptl_retry_max` / `compact_ptl_retry_drop_ratio`：压缩请求本身超长时，最多截头重试几次、每次丢掉多少比例的最早轮次。
+- `compact_failure_circuit_threshold` / `compact_circuit_reset_seconds`：同一会话压缩连续失败这么多次后暂停压缩，过多少秒再试。
 
 ---
 
@@ -170,7 +170,7 @@
   },
   "token": {
     "context_length": 200000,
-    "summary_threshold": 0.7
+    "compact_threshold": 0.7
   },
   "llm_params": {
     "anthropic": {

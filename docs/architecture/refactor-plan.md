@@ -72,7 +72,7 @@ Lumi 后端真实结构 = **以 `agents/core` LangGraph 图为中枢、向外辐
 | M5 | 相对时间格式化两份重复且不一致（`5 minutes ago` vs `5m ago`） | `sessions/session_store.py`, `runtime/checkpoint.py` |
 | M6 | 卸载/截断逻辑两份重复（时间戳精度不一致），后者还是死代码 | `core/node_helpers/execution.py`, `messages.py` |
 | M7 | `filesystem` `GrepInput` 12 字段声明两遍须手工同步 | `tools/providers/filesystem/__init__.py` |
-| M8 | TUI 残留文档/命名/死字段（`summary.md` 路径全失效、`GlobalConfig` 死字段等） | 多处 |
+| M8 | TUI 残留文档/命名/死字段（`compact.md` 路径全失效、`GlobalConfig` 死字段等） | 多处 |
 | M9 | **ruff 零配置** — 禁 import-as / 无用 import 无机器护栏 | `pyproject.toml` |
 | M10 | `curl`/`wget`/`ping` 列入只读白名单（可落盘，绕过审批风险） | `tools/capability.py` |
 
@@ -173,7 +173,7 @@ lumi/
 ## 5. 分阶段路线图（每阶段独立可交付、保持可运行、测试可通过）
 
 ### 阶段 0 — 清扫与护栏（低风险）
-删 `general_tools.py`/`clipboard.py`/`api/`（560 行）+ mcp 三处死链路（180 行）+ nodes/messages/execution 死代码 + TUI 死字段；删 `tests/tui/` 空壳；重写 `permissions.md` + 修 `summary.md`/`plan.md`/`checkpoint.md` 失效路径（`checkpoint.md` 已随文件级 checkpoint 一并删除） + 修 CLAUDE.md 权限文件名；**新增 `[tool.ruff]`**（ICN 禁 import-as / F401 / I isort）；全仓清 `SimpleAgent`/`TUI` 残留命名。
+删 `general_tools.py`/`clipboard.py`/`api/`（560 行）+ mcp 三处死链路（180 行）+ nodes/messages/execution 死代码 + TUI 死字段；删 `tests/tui/` 空壳；重写 `permissions.md` + 修 `compact.md`/`plan.md`/`checkpoint.md` 失效路径（`checkpoint.md` 已随文件级 checkpoint 一并删除） + 修 CLAUDE.md 权限文件名；**新增 `[tool.ruff]`**（ICN 禁 import-as / F401 / I isort）；全仓清 `SimpleAgent`/`TUI` 残留命名。
 
 ### 阶段 1 — 提公共原语，断开分层倒置
 `_atomic_write_json` → `utils/atomic_io.py`（5 importer 改路径）；统一相对时间格式化为单一 util；统一卸载实现（删死拷贝）；统一 logger 获取；收敛 `PATH_ARG_KEYS`/能力常量单点。

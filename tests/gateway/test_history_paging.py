@@ -1,7 +1,8 @@
 """真实 SQLite checkpoint 的分段读取、旧压缩兼容和分页配对。"""
 
+import asyncio
 from types import SimpleNamespace
-from unittest.mock import AsyncMock, patch
+from unittest.mock import AsyncMock, Mock, patch
 
 import pytest
 from conftest import graph_run_config, resolved
@@ -12,13 +13,21 @@ from langgraph.graph import END, START, MessagesState, StateGraph
 from lumi.agents.core import graph as graph_module
 from lumi.agents.core import nodes
 from lumi.agents.core.graph import CHECKPOINT_AES_KEY_ENV, LumiAgent, _checkpoint_serde
-from lumi.agents.core.meta_message import HISTORY_ID_KEY, HISTORY_KEY, INTERJECTION_KEY
+from lumi.agents.core.meta_message import (
+    HISTORY_ID_KEY,
+    HISTORY_KEY,
+    INTERJECTION_KEY,
+    history_message_ids,
+)
 from lumi.agents.core.preprocessing import compact
 from lumi.agents.core.preprocessing.compact import build_compacted_update
 from lumi.agents.core.state import LumiAgentContext, LumiAgentState
 from lumi.gateway.bridge import AgentBridge
+from lumi.gateway.channels.config import FeishuChannelConfig
+from lumi.gateway.channels.feishu import inbound as feishu_inbound
+from lumi.gateway.channels.feishu.channel import FeishuChannel
 from lumi.gateway.session import _history_items, _load_history
-from lumi.sessions.history import HistoryReader
+from lumi.sessions.history import HistoryReader, compact_message
 from lumi.sessions.thread_runs import thread_runs
 from tests.gateway.test_message_retry_e2e import _no_tools
 from tests.gateway.toy_graph import bridge_with
@@ -33,6 +42,24 @@ async def history_graph(tmp_path, monkeypatch, request):
     async with AsyncSqliteSaver.from_conn_string(str(tmp_path / "history.db")) as saver:
         saver.serde = _checkpoint_serde()
         yield LumiAgent(checkpointer=saver).graph
+
+
+@pytest.fixture
+def feishu_clear(history_graph, monkeypatch):
+    channel = FeishuChannel(FeishuChannelConfig())
+    channel.bridge_pool._locks["thread"] = thread_runs.lock_for("thread")
+    bridge = SimpleNamespace(
+        delete_thread=AsyncMock(side_effect=history_graph.checkpointer.adelete_thread)
+    )
+    monkeypatch.setattr(channel.bridge_pool, "get", AsyncMock(return_value=bridge))
+    monkeypatch.setattr(channel, "send_markdown", AsyncMock())
+    monkeypatch.setattr(feishu_inbound, "delete_meta", lambda _: None)
+    monkeypatch.setattr(feishu_inbound.hub, "on_channel_activity", lambda *_: None)
+
+    async def clear():
+        await channel.inbound._run_system_command("clear", "chat", "thread", "command")
+
+    return clear
 
 
 def config(thread="thread"):
@@ -58,7 +85,7 @@ async def compress(graph, keep=0, legacy=False):
     update = build_compacted_update(
         messages,
         messages[-keep:] if keep else [],
-        "summary",
+        "compact",
         checkpoint_id=before.config["configurable"]["checkpoint_id"],
     )
     if legacy:
@@ -103,7 +130,7 @@ async def test_multiple_compactions_preserve_every_original_once(history_graph, 
         (it["kind"], it["text"]) for it in _history_items(original)
     ]
     assert len({it["id"] for it in items}) == 20
-    assert all("summary" not in it.get("text", "") for it in items)
+    assert all("compact" not in it.get("text", "") for it in items)
     assert not any(it.get("message_id") for it in items[:-6])
 
 
@@ -422,13 +449,19 @@ async def test_segment_is_restored_once_for_multiple_pages(history_graph):
     assert len(items) == 20 and restore.await_count == 1
 
 
-async def test_deleting_a_thread_invalidates_cached_pages(history_graph):
+@pytest.mark.parametrize("via_feishu", [False, True], ids=["delete", "feishu-clear"])
+async def test_deleting_a_thread_invalidates_cached_pages(
+    history_graph, feishu_clear, via_feishu
+):
     graph = history_graph
     await write(graph, turn(1))
     reader = HistoryReader()
     page = await reader.page(graph, "thread", _history_items, limit=1)
-    async with thread_runs.lock_for("thread").cancel_and_hold():
-        await graph.checkpointer.adelete_thread("thread")
+    if via_feishu:
+        await feishu_clear()
+    else:
+        async with thread_runs.lock_for("thread").cancel_and_hold():
+            await graph.checkpointer.adelete_thread("thread")
     missing = await reader.page(
         graph, "thread", _history_items, cursor=page["next_cursor"]
     )
@@ -488,9 +521,9 @@ async def test_online_compaction_links_to_the_actual_input_checkpoint(history_gr
     graph = history_graph
     await write(graph, turn(1))
     builder = StateGraph(LumiAgentState)
-    builder.add_node("Summarizer", nodes.summarizer)
-    builder.add_edge(START, "Summarizer")
-    builder.add_edge("Summarizer", END)
+    builder.add_node("Compact", nodes.compact)
+    builder.add_edge(START, "Compact")
+    builder.add_edge("Compact", END)
     online = builder.compile(checkpointer=graph.checkpointer)
     fake_config = graph_run_config(context_length=2)
     with (
@@ -498,7 +531,7 @@ async def test_online_compaction_links_to_the_actual_input_checkpoint(history_gr
         patch.object(nodes, "resolve", return_value=resolved(context_window=2)),
         patch.object(compact, "get_config", return_value=fake_config),
         patch.object(
-            compact, "run_summary", new=AsyncMock(return_value=("summary", 0))
+            compact, "run_compact", new=AsyncMock(return_value=("compact", 0))
         ),
     ):
         await online.ainvoke(
@@ -558,7 +591,7 @@ async def test_streamed_time_travel_after_ptl_uses_the_restored_branch(
                 build_compacted_update(
                     messages,
                     messages[-4:],
-                    "obsolete future summary",
+                    "obsolete future compact",
                     checkpoint_id=before.config["configurable"]["checkpoint_id"],
                 )
             )
@@ -578,7 +611,7 @@ async def test_streamed_time_travel_after_ptl_uses_the_restored_branch(
             events = [event async for event in stream]
             assert not any(event.kind.value == "error" for event in events)
             assert seen and not any(m.type == "tool" for m in seen)
-            assert not any("obsolete future summary" in str(m.content) for m in seen)
+            assert not any("obsolete future compact" in str(m.content) for m in seen)
             items = _history_items(await bridge.snapshot_messages())
             expected = "original request" if action == "regenerate" else "edited"
             assert [it["text"] for it in items] == [
@@ -589,3 +622,193 @@ async def test_streamed_time_travel_after_ptl_uses_the_restored_branch(
             ]
     finally:
         await bridge.close()
+
+
+@pytest.mark.parametrize("mode", ["latest", "rpc", "cursor"])
+@pytest.mark.parametrize("via_feishu", [False, True], ids=["delete", "feishu-clear"])
+async def test_deletion_during_history_read_discards_old_snapshot(
+    history_graph, feishu_clear, mode, via_feishu
+):
+    graph = history_graph
+    await write(graph, turn(1) + turn(2))
+    first = await HistoryReader().page(graph, "thread", _history_items, limit=1)
+    reader = HistoryReader()
+    captured, resume = asyncio.Event(), asyncio.Event()
+    original = graph.aget_state
+
+    async def delayed_read(*args, **kwargs):
+        snapshot = await original(*args, **kwargs)
+        captured.set()
+        await resume.wait()
+        return snapshot
+
+    bridge = SimpleNamespace(
+        graph=graph,
+        history_reader=reader,
+        current_thread_id="thread",
+        pending_interjections=lambda: [],
+    )
+    with patch.object(graph, "aget_state", side_effect=delayed_read):
+        if mode == "rpc":
+            request = _load_history(bridge, {"thread_id": "thread", "limit": 1})
+        else:
+            request = reader.page(
+                graph,
+                "thread",
+                _history_items,
+                cursor=first["next_cursor"] if mode == "cursor" else None,
+                limit=1,
+            )
+        task = asyncio.create_task(request)
+        try:
+            await asyncio.wait_for(captured.wait(), 5)
+            if via_feishu:
+                await feishu_clear()
+            else:
+                async with thread_runs.lock_for("thread").cancel_and_hold():
+                    await graph.checkpointer.adelete_thread("thread")
+        finally:
+            resume.set()
+        result = await asyncio.wait_for(task, 5)
+    assert result == {"items": [], "next_cursor": None, "history_unavailable": True}
+    missing = await reader.page(
+        graph, "thread", _history_items, cursor=first["next_cursor"], limit=1
+    )
+    assert missing["history_unavailable"] and not missing["items"]
+
+
+@pytest.mark.parametrize("busy", [False, True], ids=["idle", "running"])
+async def test_latest_history_reuses_only_idle_snapshots(history_graph, busy):
+    graph = history_graph
+    await write(graph, turn(1) + turn(2))
+    reader = HistoryReader()
+    render = Mock(wraps=_history_items)
+    lock = thread_runs.lock_for("thread")
+    if busy:
+        await lock.acquire()
+    try:
+        first = await reader.page(graph, "thread", render, limit=1)
+        second = await reader.page(graph, "thread", render, limit=1)
+    finally:
+        if busy:
+            lock.release()
+    assert first == second
+    full_renders = sum(bool(call.args[0]) for call in render.call_args_list)
+    assert full_renders == (2 if busy else 1)
+
+
+async def test_cached_rpc_history_still_refreshes_pending_and_reads_latest(
+    history_graph,
+):
+    graph = history_graph
+    await write(graph, turn(1))
+    bridge = SimpleNamespace(
+        graph=graph,
+        history_reader=HistoryReader(),
+        current_thread_id="thread",
+        pending_interjections=Mock(side_effect=[[], [HumanMessage("new pending")]]),
+    )
+    with (
+        patch.object(graph, "aget_state", wraps=graph.aget_state) as restore,
+        patch("lumi.gateway.session._history_items", wraps=_history_items) as render,
+    ):
+        first = await _load_history(bridge, {"thread_id": "thread"})
+        second = await _load_history(bridge, {"thread_id": "thread"})
+    assert first["items"] == second["items"]
+    assert first["pending"] == [] and second["pending"][0]["text"] == "new pending"
+    assert restore.await_count == 2
+    assert sum(bool(call.args[0]) for call in render.call_args_list) == 1
+
+
+async def test_latest_history_cache_is_invalidated_by_rewind(history_graph):
+    graph = history_graph
+    await write(graph, turn(1) + turn(2))
+    reader = HistoryReader()
+    before = await reader.page(graph, "thread", _history_items)
+    assert before["items"][-1]["text"] == "answer 2"
+    await bridge_with(config(), graph).rewind_before_message("h2")
+    after = await reader.page(graph, "thread", _history_items)
+    assert [item["text"] for item in after["items"]] == ["question 1", "answer 1"]
+
+
+async def test_pending_node_writes_refresh_history_without_new_checkpoint(
+    history_graph, monkeypatch
+):
+    saver = history_graph.checkpointer
+    allow_node, base_saved, output_saved, next_blocked, allow_checkpoint = (
+        asyncio.Event() for _ in range(5)
+    )
+    original_put, original_writes = saver.aput, saver.aput_writes
+
+    async def compact_node(_state):
+        await allow_node.wait()
+        return {"messages": [AIMessage("completed output", id="output")]}
+
+    async def put(cfg, checkpoint, metadata, versions):
+        if metadata.get("step") == 1:
+            next_blocked.set()
+            await allow_checkpoint.wait()
+        result = await original_put(cfg, checkpoint, metadata, versions)
+        if metadata.get("step") == 0:
+            base_saved.set()
+        return result
+
+    async def put_writes(cfg, writes, task_id, task_path=""):
+        await original_writes(cfg, writes, task_id, task_path)
+        if allow_node.is_set() and any(channel == "messages" for channel, _ in writes):
+            output_saved.set()
+
+    monkeypatch.setattr(graph_module, "compact", compact_node)
+    monkeypatch.setattr(saver, "aput", put)
+    monkeypatch.setattr(saver, "aput_writes", put_writes)
+    graph = LumiAgent(checkpointer=saver).graph
+    reader = HistoryReader()
+    render = Mock(wraps=_history_items)
+    task = asyncio.create_task(
+        graph.ainvoke(
+            {"messages": [HumanMessage("question", id="human")]},
+            config(),
+            interrupt_after=["Compact"],
+        )
+    )
+    try:
+        await asyncio.wait_for(base_saved.wait(), 5)
+        before = await graph.aget_state(config())
+        await reader.page(graph, "thread", render, snapshot=before)
+        allow_node.set()
+        await asyncio.wait_for(output_saved.wait(), 5)
+        await asyncio.wait_for(next_blocked.wait(), 5)
+        after = await graph.aget_state(config())
+        assert (
+            before.config["configurable"]["checkpoint_id"]
+            == after.config["configurable"]["checkpoint_id"]
+        )
+        assert not after.next and after.tasks
+        for _ in range(2):
+            page = await reader.page(graph, "thread", render, snapshot=after)
+            assert [item["text"] for item in page["items"]] == [
+                "question",
+                "completed output",
+            ]
+        assert sum(bool(call.args[0]) for call in render.call_args_list) == 3
+    finally:
+        allow_node.set()
+        allow_checkpoint.set()
+        await asyncio.wait_for(task, 5)
+
+
+@pytest.mark.parametrize("has_carrier", [False, True])
+def test_carrier_lookup_does_not_serialize_unrelated_messages(has_carrier):
+    carrier = compact.build_compact_carrier("context")
+    carrier.id = "carrier"
+    unrelated = ToolMessage("large result", tool_call_id="call")
+    messages = [carrier, unrelated] if has_carrier else [unrelated]
+    with patch.object(unrelated, "model_dump_json", side_effect=AssertionError):
+        assert compact_message(messages) == (
+            (carrier, "carrier") if has_carrier else None
+        )
+
+
+def test_carrier_without_id_preserves_stable_history_identity():
+    messages = [HumanMessage("older"), compact.build_compact_carrier("context")]
+    assert compact_message(messages) == (messages[1], history_message_ids(messages)[1])

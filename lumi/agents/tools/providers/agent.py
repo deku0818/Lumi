@@ -220,7 +220,7 @@ def _agent_activity(state: dict, tools_done: int = 0) -> dict:
     后台代理的 output_file 完成时才写，运行中唯一能看的就是这个：``tool`` 为当前发起
     的工具调用（模型思考中 / 刚收完工具结果时为 None），``tools_done`` 为已完成的工具数。
 
-    计数取 ``max(已知值, 本快照所见)``：Summarizer 压缩会 Overwrite 整段替换掉历史，
+    计数取 ``max(已知值, 本快照所见)``：Compact 压缩会 Overwrite 整段替换掉历史，
     只数当前快照的话，长任务压缩后计数会当着用户的面往回跳。
     """
     messages = state.get("messages") or []

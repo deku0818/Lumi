@@ -24,9 +24,9 @@ _CONFIG = SimpleNamespace(
         agents=SimpleNamespace(max_tokens=None),
         token=SimpleNamespace(
             context_length=100_000,
-            summary_threshold=0.9,
-            summary_failure_circuit_threshold=3,
-            summary_circuit_reset_seconds=60,
+            compact_threshold=0.9,
+            compact_failure_circuit_threshold=3,
+            compact_circuit_reset_seconds=60,
         ),
     ),
 )

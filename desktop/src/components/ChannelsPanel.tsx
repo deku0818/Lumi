@@ -75,7 +75,7 @@ const emptyFeishu = (t: Translate): FeishuConfig => ({
   minutes_enabled: false,
   daily_dream_enabled: false,
   daily_dream_time: '03:00',
-  summary_max_concurrency: 3,
+  compact_max_concurrency: 3,
 })
 
 // 渠道面板（设置 → 渠道）。列表视图：各 IM 渠道卡片（状态灯 + 开关 + 编辑）；
@@ -591,15 +591,15 @@ function FeishuForm({
               onChange={(e) => set({ daily_dream_time: e.target.value })}
             />
           </Field>
-          <Field label={t('channels.summaryConcurrency')} hint={t('channels.summaryConcurrencyHint')}>
+          <Field label={t('channels.compactConcurrency')} hint={t('channels.compactConcurrencyHint')}>
             <TextInput
               type="number"
               min={1}
               max={8}
-              value={cfg.summary_max_concurrency}
+              value={cfg.compact_max_concurrency}
               onChange={(e) =>
                 set({
-                  summary_max_concurrency: Math.min(
+                  compact_max_concurrency: Math.min(
                     8,
                     Math.max(1, Number(e.target.value) || 1),
                   ),

@@ -40,7 +40,7 @@ Lumi 并非仅仅面向Coder，也面向所有非技术人员。
 
 **Graph 流程：**
 ```
-START → Summarizer（超阈值当轮就地压缩 / ptl_retry 置位则绕阈值强制压缩）
+START → Compact（超阈值当轮就地压缩 / ptl_retry 置位则绕阈值强制压缩）
   → PreprocessMessages（UserPromptSubmit hook 注入上下文；hook Block 则 END）
   → CallModel → is_use_tool() 条件路由:
   ├─ ToolExecutor（已授权 / 只读批次 / 纯内部伪工具 / 本项目记忆目录写入；DENY 预检先于只读短路）→ after_tool_executor → CallModel（循环；Block / 结构化输出失败上限置 tool_cancelled → END）
@@ -53,13 +53,13 @@ OfflineFlush（刻意无入边，离线写回锚点）→ END
 
 压缩恒在上下文注入之前：hook 永远在压缩后的世界运行，marker 由压缩侧恒剥（`compact._reattach`）后自动全量重建（见 `preprocessing/context_inject.py`）。在线 / PTL / 离线三条压缩路径共用 `compact.build_compacted_update`：删整段 → 摘要 carrier → 重挂 `keep`；**正在被回答的那条真人消息（`find_pending_human`）恒原样保住**，不让摘要转述取代用户原话；carrier 继承被删真人消息的 `ts`，使 dream 判活基线（`latest_human_ts`）不随压缩归零。
 
-**PTL 兜底回路：** CallModel 撞 prompt-too-long 时由**节点级 error_handler**（`on_call_model_error`，挂在 `add_node(..., error_handler=)`）返回 `Command(goto="Summarizer", update={"ptl_retry": True})`，经 Summarizer 的 `_ptl_forced_compact`（绕阈值门、按 API round 保尾）压缩后走正常拓扑重试；成功清 `ptl_retry`，置位期间再撞直接原样抛出（每次 PTL 只换一次压缩机会）。用 error_handler 而非节点内 try/except 的原因：**节点自身返回**的 `Command(goto)` 会与其条件边取并集（曾为此在 `is_use_tool` 挂 ptl_retry 守卫防 Stop hooks 误分发），而 error_handler 的路由不触发条件边求值，守卫随之删除——不变量改由 `test_full_graph_ptl_roundtrip` 的 Stop hook 计数断言把住。
+**PTL 兜底回路：** CallModel 撞 prompt-too-long 时由**节点级 error_handler**（`on_call_model_error`，挂在 `add_node(..., error_handler=)`）返回 `Command(goto="Compact", update={"ptl_retry": True})`，经 Compact 的 `_ptl_forced_compact`（绕阈值门、按 API round 保尾）压缩后走正常拓扑重试；成功清 `ptl_retry`，置位期间再撞直接原样抛出（每次 PTL 只换一次压缩机会）。用 error_handler 而非节点内 try/except 的原因：**节点自身返回**的 `Command(goto)` 会与其条件边取并集（曾为此在 `is_use_tool` 挂 ptl_retry 守卫防 Stop hooks 误分发），而 error_handler 的路由不触发条件边求值，守卫随之删除——不变量改由 `test_full_graph_ptl_roundtrip` 的 Stop hook 计数断言把住。
 
 **关键状态 `LumiAgentState`：** messages（`DeltaChannel` 增量通道）、todos（旧会话兼容）、output_schema / structured_output、tool_cancelled、ptl_retry、depth。
 
 **messages 通道是 `DeltaChannel`**（不是 `add_messages`）：checkpoint 存增量写入 + 周期快照，长会话不再每个 super-step 重写整段历史。① 压缩写回用 `Overwrite` 整体替换（`build_compacted_update`）；② LangGraph 1.2.15 在节点与 `aupdate_state` 写入时均补齐消息 id（含 `Overwrite` 内的消息），离线 `Overwrite` 同时生成独立快照；**所有离线写回仍只走 `AgentBridge.flush_offline`**，统一挂 `OfflineFlush` 锚点并清理 PTL 重试标志；③ `snapshot_frequency` 显式取 100，避免恢复时回放过长增量链。语义锁在 `tests/test_delta_channel.py`，出口契约锁在 `tests/gateway/test_offline_flush_stamps.py`。
 
-**显示历史与模型上下文分开**：`sessions/history.py` 复用压缩前 checkpoint，前端先加载最新 50 个展示条目，向上滚动再加载更早记录。摘要 carrier 保存历史索引，重挂消息用 `history_id` 保持显示身份；整段配对工具结果后分页，按身份与顺序锚点合并。归档用户消息只读；编辑当前上下文中曾被压缩保留的消息时先恢复其压缩前状态再截断，避免旧未来进入重答轮。详见 `docs/architecture/summary.md`。
+**显示历史与模型上下文分开**：`sessions/history.py` 复用压缩前 checkpoint，前端先加载最新 50 个展示条目，向上滚动再加载更早记录。摘要 carrier 保存历史索引，重挂消息用 `history_id` 保持显示身份；整段配对工具结果后分页，按身份与顺序锚点合并。归档用户消息只读；编辑当前上下文中曾被压缩保留的消息时先恢复其压缩前状态再截断，避免旧未来进入重答轮。详见 `docs/architecture/compact.md`。
 
 **协作式停机：** `lumi/agents/core/run_control.py` 的 `drain_all()` 让在跑的图停在 super-step 边界（checkpoint 完整、`next` 指向待执行节点；不续跑，下一轮开跑前由 `_recover_stale_state` 按中断轮收尾），由 `bootstrap.drain_runs()` 在拆任何子系统之前调用（`lumi serve` 的 lifespan 在渠道会话池关闭前先调）。与用户按停的硬 cancel 分工不同：cancel 要立刻、可能落在节点半途（靠 `persist_partial_reply` 事后修），drain 要 checkpoint 完整、切不断正在流的模型调用；前台子代理 / workflow 的子图继承同一 control，会让父级工具步在半途结束。因 `astream_events(version="v2")` 不转发 `control=`，改经 config 注入带 control 的 parent runtime（用到私有常量，由 `tests/test_drain.py` 锁住）。
 
@@ -109,7 +109,7 @@ OfflineFlush（刻意无入边，离线写回锚点）→ END
 - **用户数据根**：机器级数据（`lumi.json` 密钥 / checkpoints / memory / logs / 工具箱 / cron / cache / uploads）全部挂在 `utils/paths.py` 的 `lumi_home()` 下——`LUMI_CONFIG_DIR` > `~/.lumi`，改一个环境变量整体搬家（服务器部署即靠它，见 `docs/guides/deploy.md`）。取值点多为模块级常量（import 时求值），故环境变量须在进程启动前设好；锁定测试 `tests/test_lumi_home.py` 在子进程里验证全部路径跟随。与配置**发现链**（`ConfigDiscovery`，解决「这次读哪份项目配置」）职责不同，别混用
 - **配置方式**：项目 `.lumi/config.json` 的 `style`（仅该项目生效）> 进程 `config.json` 的 `style`；CLI `-s/--style` 仅对 `lumi -p` 生效（优先级最高）
 - **内置风格**：`default`（默认，**不带内置 prompts**，提示词全部来自 `.lumi/prompts/`；可内置 skill/agent）、`code`（完整编程提示词 + explore/plan 子 Agent）
-- **提示词组装**：`SOUL/AGENTS` 两文件按序**直接拼接**（不做 XML 包裹），缺失即跳过；`default` 无内置 prompts 时全靠 `.lumi/prompts/`，都没有则 `load_system_prompt` 返回空串（以无系统提示词运行）。`SUMMARY`（压缩用）走同一条 `load_prompt` 解析链，但框架内置了兜底（`lumi/prompts/SUMMARY.md`）——未配置也能压缩，故各调用点不再有「未配置 SUMMARY」的错误分支
+- **提示词组装**：`SOUL/AGENTS` 两文件按序**直接拼接**（不做 XML 包裹），缺失即跳过；`default` 无内置 prompts 时全靠 `.lumi/prompts/`，都没有则 `load_system_prompt` 返回空串（以无系统提示词运行）。`COMPACT`（压缩用）走同一条 `load_prompt` 解析链，但框架内置了兜底（`lumi/prompts/COMPACT.md`）——未配置也能压缩，故各调用点不再有「未配置 COMPACT」的错误分支
 - **工具描述**：内置工具的 description 直接写在各工具函数的 docstring 里；`registry._collect_tools_from_module` 加载时统一 `inspect.cleandoc` 抹掉源码缩进（外部 MCP 工具走异步 loader，不经此处）。工具描述不再可经 style/`.lumi` 配置覆盖
 - **`active_style_for(project)`**（`LumiConfig`）：返回某项目会话生效的风格名，CLI override > 项目 `.lumi/config.json` > 进程 config.json（`active_style` 属性）> "default"
 

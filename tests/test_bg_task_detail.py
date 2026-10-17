@@ -209,7 +209,7 @@ def test_workflow_last_log_capped():
 
 
 def test_agent_tools_done_never_goes_backwards():
-    """Summarizer 压缩会 RemoveMessage 删历史；只数当前快照的话计数会当场往回跳。"""
+    """Compact 压缩会 RemoveMessage 删历史；只数当前快照的话计数会当场往回跳。"""
     before = {
         "messages": [
             ToolMessage(content="a", tool_call_id="1"),
@@ -218,7 +218,7 @@ def test_agent_tools_done_never_goes_backwards():
         ]
     }
     assert _agent_activity(before)["tools_done"] == 3
-    after = {"messages": [ToolMessage(content="summary", tool_call_id="9")]}
+    after = {"messages": [ToolMessage(content="compact", tool_call_id="9")]}
     assert _agent_activity(after, 3)["tools_done"] == 3
 
 

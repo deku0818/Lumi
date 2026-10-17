@@ -262,7 +262,7 @@ class LumiConfig:
 
         「空文件（或只有 frontmatter）等同于没有、继续往下找」的判定只写在这里
         ——load_prompt 与项目主页（gateway/project_config）共用，两边永不背离：
-        否则一个误清空的 SUMMARY.md 会让摘要在无指令下生成。
+        否则一个误清空的 COMPACT.md 会让摘要在无指令下生成。
         """
         for source, path in self.prompt_layers(name, project_dir):
             try:
@@ -279,7 +279,7 @@ class LumiConfig:
         """加载单个提示词正文：项目 > 进程配置 > 风格内置 > 框架内置。
 
         框架内置（``lumi/prompts/``）是最后一层兜底，只放「缺了就跑不起来」的提示词
-        （目前仅 SUMMARY——未配置时压缩会直接失败）。
+        （目前仅 COMPACT——未配置时压缩会直接失败）。
 
         Args:
             name: 提示词文件名（不包含后缀）

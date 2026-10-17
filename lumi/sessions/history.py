@@ -43,7 +43,7 @@ class _Cursor:
     end: int | None = None
     exclude: tuple[str, ...] = ()
     archived: bool = False
-    summary_id: str = ""
+    compact_id: str = ""
     aliases: tuple[tuple[str, str], ...] = ()
 
     def encode(self) -> str:
@@ -76,7 +76,7 @@ class _Cursor:
                 )
                 or not all(isinstance(identity, str) for identity in cursor.exclude)
                 or type(cursor.archived) is not bool
-                or not isinstance(cursor.summary_id, str)
+                or not isinstance(cursor.compact_id, str)
                 or not all(
                     len(pair) == 2 and all(isinstance(part, str) for part in pair)
                     for pair in cursor.aliases
@@ -91,13 +91,16 @@ class _Cursor:
 type HistorySegment = tuple[list[BaseMessage], _Cursor]
 
 
-def summary_message(messages: list[BaseMessage]) -> tuple[BaseMessage, str] | None:
-    for msg, identity in zip(messages, history_message_ids(messages)):
+def compact_message(messages: list[BaseMessage]) -> tuple[BaseMessage, str] | None:
+    for index, msg in enumerate(messages):
         if (
             msg.type in ("human", "system")
             and (msg.type == "system" or not should_show_human_message(msg))
-            and extract_text_content(msg.content).startswith("<summary>")
+            and extract_text_content(msg.content).startswith("<compact>")
         ):
+            identity = msg.additional_kwargs.get(HISTORY_ID_KEY) or msg.id
+            if not identity:
+                identity = history_message_ids(messages[: index + 1])[-1]
             return msg, identity
     return None
 
@@ -105,10 +108,10 @@ def summary_message(messages: list[BaseMessage]) -> tuple[BaseMessage, str] | No
 def _previous(
     thread_id: str, checkpoint_id: str, messages: list[BaseMessage]
 ) -> _Cursor | None:
-    summary = summary_message(messages)
-    if summary is None:
+    compact = compact_message(messages)
+    if compact is None:
         return None
-    msg, identity = summary
+    msg, identity = compact
     link = msg.additional_kwargs.get(HISTORY_KEY)
     if link:
         return _Cursor(
@@ -118,7 +121,7 @@ def _previous(
             archived=True,
         )
     # 旧摘要没有索引。等用户真正翻到这里才沿祖先查找，不拖慢首次打开。
-    return _Cursor(thread_id, checkpoint_id, archived=True, summary_id=identity)
+    return _Cursor(thread_id, checkpoint_id, archived=True, compact_id=identity)
 
 
 def _reattached_value(msg: BaseMessage) -> dict:
@@ -170,6 +173,7 @@ class HistoryReader:
         self._previous: _Cursor | None = None
         self._excluded: set[str] = set()
         self._run_lock: ThreadRunLock | None = None
+        self._settled = False
 
     @staticmethod
     def _config(cursor: _Cursor) -> dict:
@@ -199,10 +203,10 @@ class HistoryReader:
                 messages = value.value if isinstance(value, Overwrite) else value
                 if not isinstance(messages, list):
                     continue
-                summary = summary_message(messages)
-                if summary and summary[1] == cursor.summary_id:
+                compact = compact_message(messages)
+                if compact and compact[1] == cursor.compact_id:
                     before = await graph.aget_state(saved.config)
-                    retained = messages[messages.index(summary[0]) + 1 :]
+                    retained = messages[messages.index(compact[0]) + 1 :]
                     return self._legacy_link(
                         cursor,
                         checkpoint_id,
@@ -213,24 +217,24 @@ class HistoryReader:
             stored = saved.checkpoint.get("channel_values", {}).get("messages")
             stored = getattr(stored, "value", stored)
             if isinstance(stored, list):
-                summary = summary_message(stored)
-                same_carrier = summary and summary[1] == cursor.summary_id
-                if summary and not summary[0].id and post_messages is not None:
-                    post_summary = summary_message(post_messages)[0]
-                    stored_tail = stored[stored.index(summary[0]) + 1 :]
-                    post_tail = post_messages[post_messages.index(post_summary) + 1 :]
+                compact = compact_message(stored)
+                same_carrier = compact and compact[1] == cursor.compact_id
+                if compact and not compact[0].id and post_messages is not None:
+                    post_compact = compact_message(post_messages)[0]
+                    stored_tail = stored[stored.index(compact[0]) + 1 :]
+                    post_tail = post_messages[post_messages.index(post_compact) + 1 :]
                     # 旧 Overwrite 的 carrier 可能在下一次 add_messages 时才获得 id。
                     # 同结构 carrier + 保留消息的 id 前缀一致，说明仍是同一次压缩。
                     same_carrier = same_carrier or (
-                        _reattached_value(summary[0]) == _reattached_value(post_summary)
+                        _reattached_value(compact[0]) == _reattached_value(post_compact)
                         and history_message_ids(stored_tail)
                         == history_message_ids(post_tail)[: len(stored_tail)]
                     )
                 if same_carrier:
                     post_messages = stored
                 elif post_messages is not None:
-                    after_summary = summary_message(post_messages)[0]
-                    retained = post_messages[post_messages.index(after_summary) + 1 :]
+                    after_compact = compact_message(post_messages)[0]
+                    retained = post_messages[post_messages.index(after_compact) + 1 :]
                     return self._legacy_link(cursor, checkpoint_id, stored, retained)
             if not saved.parent_config:
                 break
@@ -271,18 +275,16 @@ class HistoryReader:
         if type(limit) is not int or not 1 <= limit <= 200:
             raise ValueError("历史分页大小须为 1～200")
         run_lock = thread_runs.lock_for(thread_id)
+        revision = run_lock.history_revision
+        unavailable = {"items": [], "next_cursor": None, "history_unavailable": True}
         if run_lock.deleting:
-            return {"items": [], "next_cursor": None, "history_unavailable": True}
+            return unavailable
         if cursor:
             position = _Cursor.decode(cursor, thread_id)
-            if position.summary_id:
+            if position.compact_id:
                 position = await self._legacy_cursor(graph, position)
                 if position is None:
-                    return {
-                        "items": [],
-                        "next_cursor": None,
-                        "history_unavailable": True,
-                    }
+                    return unavailable
         else:
             snapshot = snapshot or await graph.aget_state(
                 {"configurable": {"thread_id": thread_id}}
@@ -290,25 +292,39 @@ class HistoryReader:
             checkpoint_id = (
                 (snapshot.config or {}).get("configurable", {}).get("checkpoint_id")
             )
-            if not checkpoint_id:
-                return {
-                    "items": render(snapshot.values.get("messages", [])),
-                    "next_cursor": None,
-                }
-            position = _Cursor(thread_id, checkpoint_id)
+            position = _Cursor(thread_id, checkpoint_id or "")
+
+        # 读取可以跨过删除的 await；旧结果不能被记到删除后的 revision 下。
+        if run_lock.deleting or run_lock.history_revision != revision:
+            return unavailable
+        if not position.checkpoint_id:
+            return {
+                "items": render(snapshot.values.get("messages", [])),
+                "next_cursor": None,
+            }
 
         key = (
             id(graph.checkpointer),
             thread_id,
-            run_lock.revision,
+            revision,
             position.checkpoint_id,
             position.exclude,
             position.aliases,
         )
-        if self._key != key or snapshot is not None:
+        # 最新状态会合入同一 checkpoint 的待写入结果；只复用前后均已静止的快照。
+        settled = (
+            snapshot is not None
+            and not snapshot.next
+            and not snapshot.tasks
+            and not run_lock.locked()
+        )
+        refresh = snapshot is not None and not (settled and self._settled)
+        if self._key != key or refresh:
             snap = snapshot or await graph.aget_state(self._config(position))
+            if run_lock.deleting or run_lock.history_revision != revision:
+                return unavailable
             if not snap.values:
-                return {"items": [], "next_cursor": None, "history_unavailable": True}
+                return unavailable
             messages = snap.values.get("messages", [])
             # 整段配对后才分页，ToolMessage 即使不在同一页，输出也完整。
             excluded = set(position.exclude)
@@ -355,6 +371,7 @@ class HistoryReader:
                 self._previous = replace(self._previous, aliases=position.aliases)
             self._key = key
             self._run_lock = run_lock
+            self._settled = settled
 
         end = len(self._items) if position.end is None else position.end
         if position.end is None:
@@ -426,7 +443,7 @@ class HistoryReader:
         seen = {position.checkpoint_id}
         while previous := _previous(thread_id, position.checkpoint_id, messages):
             previous = replace(previous, aliases=position.aliases)
-            if previous.summary_id:
+            if previous.compact_id:
                 previous = await self._legacy_cursor(graph, previous)
                 if previous is None:
                     raise ValueError("压缩前记录已不可用，无法创建完整分支")
@@ -457,9 +474,9 @@ async def message_checkpoint(
     source: StateSnapshot | None = None
     seen: set[str] = set()
     while position:
-        if not position.summary_id and identity not in position.exclude:
+        if not position.compact_id and identity not in position.exclude:
             break  # 目标是压缩后新增的消息，不需要恢复更早状态。
-        if position.summary_id:
+        if position.compact_id:
             if not position.checkpoint_id:
                 current = await graph.aget_state(
                     {"configurable": {"thread_id": thread_id}}

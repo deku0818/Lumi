@@ -333,11 +333,12 @@ async def test_memory_gated_by_memory_enabled(tmp_path, monkeypatch):
 
 
 async def test_full_reinjection_after_compaction():
-    """压缩后历史 = [Human(<summary>), Human(用户)]（marker 随旧消息删除）→
+    """压缩后历史 = [Human(<compact>), Human(用户)]（marker 随旧消息删除）→
     hook 对末条注入全量，carrier 不受影响。"""
-    from lumi.agents.core.preprocessing.compact import format_summary_block
+    from lumi.agents.core.preprocessing.compact import build_compact_carrier
 
-    carrier = HumanMessage(content=format_summary_block("摘要"), id="c1")
+    carrier = build_compact_carrier("摘要")
+    carrier.id = "c1"
     with _patched(skills=[_cfg("s", "d")]):
         cmd = await _run([carrier, HumanMessage(content="hi", id="m2")])
     msg = cmd.update["messages"][0]
@@ -375,11 +376,11 @@ async def test_reinjects_into_pending_human_after_mid_turn_compaction():
     # 本轮后续模型调用一直缺 <env> / 技能 / 记忆索引，直到下一轮才恢复
     from langchain_core.messages import AIMessage, ToolMessage
 
-    from lumi.agents.core.preprocessing.compact import build_summary_carrier
+    from lumi.agents.core.preprocessing.compact import build_compact_carrier
 
     pending = HumanMessage(content="帮我改一下配置", id="h1")
     messages = [
-        build_summary_carrier("往期摘要"),
+        build_compact_carrier("往期摘要"),
         pending,
         AIMessage(content="", tool_calls=[{"name": "read", "args": {}, "id": "c"}]),
         ToolMessage(content="ok", tool_call_id="c"),

@@ -48,9 +48,7 @@ async def test_offline_flush_writes_and_leaves_clean_state(graph):
 
 def test_bridge_referenced_node_names_exist(graph):
     """bridge 侧字面量引用的节点名必须存在于真实图——改名时此处先红。"""
-    assert {"CallModel", "Summarizer", "ToolExecutor", "OfflineFlush"} <= set(
-        graph.nodes
-    )
+    assert {"CallModel", "Compact", "ToolExecutor", "OfflineFlush"} <= set(graph.nodes)
 
 
 @pytest.mark.asyncio

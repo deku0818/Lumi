@@ -197,7 +197,7 @@ async def test_compressed_fork_survives_source_delete_and_database_reopen(
         update = build_compacted_update(
             messages,
             messages[-2:],
-            "summary",
+            "compact",
             checkpoint_id=state.config["configurable"]["checkpoint_id"],
         )
         if legacy:
@@ -242,7 +242,7 @@ async def test_compressed_fork_survives_source_delete_and_database_reopen(
         assert nested["title"].endswith(" · 分支 2")
 
 
-async def test_archived_reply_and_retained_reply_never_inherit_future_summary(database):
+async def test_archived_reply_and_retained_reply_never_inherit_future_compact(database):
     agent, _ = database
     graph = agent.graph
     await seed(graph)
@@ -525,7 +525,7 @@ async def test_deleting_compressed_branch_reclaims_its_archived_uploads(
         build_compacted_update(
             before.values["messages"],
             [],
-            "summary",
+            "compact",
             checkpoint_id=before.config["configurable"]["checkpoint_id"],
         ),
         as_node="OfflineFlush",
@@ -546,14 +546,14 @@ async def test_deleting_compressed_branch_reclaims_its_archived_uploads(
     assert not attachment.exists()
 
 
-async def test_fork_uses_selected_checkpoint_even_after_source_rewind_removes_legacy_summary(
+async def test_fork_uses_selected_checkpoint_even_after_source_rewind_removes_legacy_compact(
     database,
 ):
     agent, _ = database
     graph = agent.graph
     before_compaction = await seed(graph, 4)
     before = await snapshot(graph)
-    update = build_compacted_update(before.values["messages"], [], "old summary")
+    update = build_compacted_update(before.values["messages"], [], "old compact")
     await graph.aupdate_state(config(), update, as_node="OfflineFlush")
     await graph.aupdate_state(
         config(),
@@ -586,7 +586,7 @@ async def test_pending_fork_is_hidden_and_deletion_waits_for_initialization(
         build_compacted_update(
             before.values["messages"],
             [],
-            "summary",
+            "compact",
             checkpoint_id=before.config["configurable"]["checkpoint_id"],
         ),
         as_node="OfflineFlush",
@@ -733,7 +733,7 @@ async def test_branch_regenerate_after_source_delete_stays_visible_and_restores_
         build_compacted_update(
             before.values["messages"],
             before.values["messages"][-2:],
-            "summary",
+            "compact",
             checkpoint_id=before.config["configurable"]["checkpoint_id"],
         ),
         as_node="OfflineFlush",

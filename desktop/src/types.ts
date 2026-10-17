@@ -530,7 +530,7 @@ export interface FeishuConfig {
   minutes_enabled: boolean // 妙记纪要：录音/会议生成妙记后自动整理纪要推私聊
   daily_dream_enabled: boolean
   daily_dream_time: string
-  summary_max_concurrency: number
+  compact_max_concurrency: number
 }
 // 逐项体检结果，机器人接入与妙记链路共用（后端 feishu/checks.py 的 Check）。
 // 两条链路的前置条件都彼此独立，且任一断裂的表现都是「静默不工作、零报错」，

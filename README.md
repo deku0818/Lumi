@@ -154,7 +154,7 @@ CLI、HTTP API 与容器镜像仍可独立使用，它们不是桌面远端连�
 | 子 Agent | [agents.md](docs/guides/agents.md) | · | 斜杠命令 / 技能 | [slash-commands.md](docs/guides/slash-commands.md) |
 | 风格系统 | [styles.md](docs/guides/styles.md) | · | 持久记忆 | [memory.md](docs/guides/memory.md) |
 | 桌面架构 | [desktop.md](docs/architecture/desktop.md) | · | 多 Agent Workflow | [workflow.md](docs/architecture/workflow.md) |
-| 思考管理 | [thinking.md](docs/architecture/thinking.md) | · | 对话摘要 | [summary.md](docs/architecture/summary.md) |
+| 思考管理 | [thinking.md](docs/architecture/thinking.md) | · | 上下文压缩 | [compact.md](docs/architecture/compact.md) |
 
 ## 开发
 

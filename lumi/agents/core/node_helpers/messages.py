@@ -165,7 +165,7 @@ def drop_incomplete_tool_calls(messages: list[Any]) -> list[Any]:
     """滤掉无结果的 AIMessage(tool_use)，返回可安全发送的投影。
 
     与 :func:`cleanup_incomplete_tool_calls` 的区别是不改 state、只做一次性投影：
-    摘要调用（``run_summary``）走自己的 chain、不经 PreprocessMessages 的清理，而它拿
+    摘要调用（``run_compact``）走自己的 chain、不经 PreprocessMessages 的清理，而它拿
     到的历史可能带残留 tool_use——上一轮工具执行中途被取消 / 进程被杀后用户又发了新
     消息，落库的 AIMessage(tool_use) 就没有配对结果。
     """

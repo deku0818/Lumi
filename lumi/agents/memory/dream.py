@@ -44,7 +44,7 @@ async def auto_dream_stop_hook(ctx: HookContext) -> HookResult:
     if state.get("depth", 0) > 0:
         return None
     # 长会话（IM 渠道）不走 Stop 触发的增量 dream——一群/一人是单个永久会话，凑不出
-    # 「N 个新会话」的增量门语义；改由渠道每日定时统一 dream + summary（见 feishu channel）。
+    # 「N 个新会话」的增量门语义；改由渠道每日定时统一 dream + compact（见 feishu channel）。
     thread_id = (ctx.config.get("configurable") or {}).get("thread_id", "")
     if is_channel_thread(thread_id):
         return None
@@ -399,7 +399,7 @@ def _consolidation_prompt_session() -> str:
     """长会话 dream 指令：只面向**当前这一段永久会话**，无其他会话、无 transcript。
 
     与 ``_consolidation_prompt`` 是两种任务框架——这里是"回顾与某个群/某个人的同一段
-    对话，把耐久信号沉淀进记忆"，且这段会话**紧接会被 summary 压掉细节**，所以先把值得
+    对话，把耐久信号沉淀进记忆"，且这段会话**紧接会被 compact 压掉细节**，所以先把值得
     留的写进记忆再压缩。"""
     return """# Dream：本会话记忆沉淀
 

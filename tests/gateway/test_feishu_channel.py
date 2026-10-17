@@ -420,7 +420,7 @@ def _capture_admitted(fi, monkeypatch) -> list[tuple[str, inb._Pending]]:
 
 def _patch_pool_get(ch, monkeypatch, bridge):
     async def fake_get(tid):
-        ch.bridge_pool._locks.setdefault(tid, asyncio.Lock())
+        ch.bridge_pool._locks.setdefault(tid, thread_runs.lock_for(tid))
         return bridge
 
     monkeypatch.setattr(ch.bridge_pool, "get", fake_get)
@@ -444,11 +444,18 @@ async def test_clear_busy_prompts_stop_first(monkeypatch):
     sent = _sent_collector(ch, monkeypatch)
     bridge = _ClearBridge()
     _patch_pool_get(ch, monkeypatch, bridge)
-    lock = asyncio.Lock()
+    lock = thread_runs.lock_for("t")
+    revision = lock.revision
+    history_revision = lock.history_revision
     await lock.acquire()
     ch.bridge_pool._locks["t"] = lock
-    await ch.inbound._run_system_command("clear", "oc", "t", "m1")
+    try:
+        await ch.inbound._run_system_command("clear", "oc", "t", "m1")
+    finally:
+        lock.release()
     assert bridge.deleted == []
+    assert lock.revision == revision
+    assert lock.history_revision == history_revision
     assert "/stop" in sent[0][0]
 
 

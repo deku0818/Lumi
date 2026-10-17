@@ -1,6 +1,6 @@
 ---
-name: summary
-description: 框架内置的默认 Summarizer 提示词（未配置 .lumi/prompts/SUMMARY.md 时使用）
+name: compact
+description: 框架内置的默认 Compact 提示词（未配置 .lumi/prompts/COMPACT.md 时使用）
 ---
 你的任务是把以上对话压缩成一份摘要，供后续对话继续使用。
 

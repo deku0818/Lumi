@@ -1,7 +1,7 @@
-"""Summary 压缩的辅助：PTL retry / 熔断器 / 图像剥离 / API round 分组 + 离线强制压缩。
+"""上下文压缩辅助：PTL retry / 熔断器 / 图像剥离 / API round 分组 + 离线强制压缩。
 
-主体服务于 ``lumi.agents.core.nodes.summarizer`` 节点（串行拓扑
-``Summarizer → PreprocessMessages → CallModel``，summary 在关键路径上，故失败需熔断
+主体服务于 ``lumi.agents.core.nodes.compact`` 节点（串行拓扑
+``Compact → PreprocessMessages → CallModel``，compact 在关键路径上，故失败需熔断
 兜底、自身超长需 PTL 截头重试）。文件末尾另有**离线强制压缩**选材
 （``select_for_compaction``）与三条路径共用的主干 ``compact_messages``，供
 ``AgentBridge.compact_thread`` / ``/compact`` 命令 / IM 每日整理对空闲会话主动压缩，
@@ -93,15 +93,16 @@ def pending_humans(messages: list[BaseMessage]) -> list[HumanMessage]:
     last = find_pending_human(messages)
     if last is None:
         return []
+    if not is_interjection(last):
+        return [last]
     idx = next(i for i, m in enumerate(messages) if m is last)
-    earlier = [
-        m
-        for m in messages[:idx]
-        if isinstance(m, HumanMessage) and should_show_human_message(m)
-    ]
     out = [last]
-    while is_interjection(out[0]) and earlier:
-        out.insert(0, earlier.pop())
+    for msg in reversed(messages[:idx]):
+        if isinstance(msg, HumanMessage) and should_show_human_message(msg):
+            out.append(msg)
+            if not is_interjection(msg):
+                break
+    out.reverse()
     return out
 
 
@@ -150,18 +151,18 @@ _PTL_KEEP_TAIL_ROUNDS = 2
 def select_for_ptl_compaction(
     messages: list[BaseMessage], keep_rounds: int = _PTL_KEEP_TAIL_ROUNDS
 ) -> tuple[list[BaseMessage], list[BaseMessage]] | None:
-    """PTL 反应式压缩选材：返回 ``(to_summarize, tail)``，不可压返回 ``None``。
+    """PTL 反应式压缩选材：返回 ``(to_compact, tail)``，不可压返回 ``None``。
 
-    与 summarizer 节点不同，此路径可发生在工具循环中段（末条是 ToolMessage），
+    与 compact 节点不同，此路径可发生在工具循环中段（末条是 ToolMessage），
     故按 API round 切组、保留尾部 ``keep_rounds`` 组，其余进摘要。rounds ≤
     keep_rounds + 1 时头部只剩前导组（往往就是当前用户消息），压缩有害无益，返回 None。
     """
     rounds = split_into_rounds(messages)
     if len(rounds) <= keep_rounds + 1:
         return None
-    to_summarize = [m for r in rounds[:-keep_rounds] for m in r]
+    to_compact = [m for r in rounds[:-keep_rounds] for m in r]
     tail = [m for r in rounds[-keep_rounds:] for m in r]
-    return to_summarize, tail
+    return to_compact, tail
 
 
 _MEDIA_REPLACEMENTS = {
@@ -187,9 +188,9 @@ def messages_have_media(msgs: list[BaseMessage]) -> bool:
 def strip_images_from_messages(msgs: list[BaseMessage]) -> list[BaseMessage]:
     """把 image / document block 替换为 ``[image]`` / ``[document]`` 文本占位。
 
-    仅在 summary 调用撞 PTL 时作为**第一档缓解**（保全文字、只丢图，比截头损失小），
-    不再无条件预剥——预剥会让 messages 偏离主循环发出的字节、砸掉在线 summarizer
-    在前缀自动缓存的 provider（OpenAI 系）上本可命中的热缓存读（见 :func:`run_summary`）。
+    仅在 compact 调用撞 PTL 时作为**第一档缓解**（保全文字、只丢图，比截头损失小），
+    不再无条件预剥——预剥会让 messages 偏离主循环发出的字节、砸掉在线 compact
+    在前缀自动缓存的 provider（OpenAI 系）上本可命中的热缓存读（见 :func:`run_compact`）。
     无图消息原样放行不复制；只对真有图/文档的消息做 model_copy。
     """
     result: list[BaseMessage] = []
@@ -209,8 +210,8 @@ def strip_images_from_messages(msgs: list[BaseMessage]) -> list[BaseMessage]:
     return result
 
 
-async def summarize_with_ptl_retry(
-    messages_to_summarize: list[BaseMessage],
+async def compact_with_ptl_retry(
+    messages_to_compact: list[BaseMessage],
     prompt: str,
     chain,
     *,
@@ -220,14 +221,14 @@ async def summarize_with_ptl_retry(
     """主入口：调 chain → PTL →（先剥图，再截头）→ 再调，直到成功或超 ``max_retry``。
 
     首次尝试带原图，与主循环发出的消息字节一致（缓存命中范围因 provider 而异，见
-    :func:`run_summary`）；仅当撞 PTL 时才逐档缓解：第一档剥图（保全文字、只丢图，仅一次），
+    :func:`run_compact`）；仅当撞 PTL 时才逐档缓解：第一档剥图（保全文字、只丢图，仅一次），
     仍 PTL 再按 round 截头。
 
-    返回 ``(summary_text, ptl_retry_count)``。摘要链带着全部工具（与主循环前缀一致），
+    返回 ``(compacted_text, ptl_retry_count)``。摘要链带着全部工具（与主循环前缀一致），
     模型回空或转去调工具时抛 ``ValueError``——交给调用方的熔断 / 失败路径，绝不能拿
     空摘要或一段前言去替换整段历史。
     """
-    work = list(messages_to_summarize)
+    work = list(messages_to_compact)
     attempt = 0
     stripped = False
     while True:
@@ -254,7 +255,7 @@ async def summarize_with_ptl_retry(
             attempt += 1
 
 
-async def run_summary(
+async def run_compact(
     messages: list,
     prompt: str,
     *,
@@ -265,12 +266,12 @@ async def run_summary(
     max_retry: int,
     drop_ratio: float,
 ) -> tuple[str, int]:
-    """跑一次摘要：剔残留 tool_use → 与主链同前缀的 tool_call_chain → 带原图调用 → PTL 时先剥图再截头 → 提取文本。
+    """执行一次上下文压缩：剔残留 tool_use → 与主链同前缀的 tool_call_chain → 带原图调用 → PTL 时先剥图再截头 → 提取文本。
 
-    summarizer 节点与离线 ``AgentBridge.compact_thread`` 共用这段（与主对话相同的
+    compact 节点与离线 ``AgentBridge.compact_thread`` 共用这段（与主对话相同的
     system_prompt + tools 前缀，摘要本身不调工具）。首次带原图，与主循环发出的消息字节一致；
-    图仅在撞 PTL 时才由 ``summarize_with_ptl_retry`` 剥除。**不含**节点专属的熔断 / 阈值——
-    调用方按需包裹。返回 ``(summary_text, ptl_retries)``。
+    图仅在撞 PTL 时才由 ``compact_with_ptl_retry`` 剥除。**不含**节点专属的熔断 / 阈值——
+    调用方按需包裹。返回 ``(compacted_text, ptl_retries)``。
 
     缓存复用因 provider 而异：OpenAI 系按前缀自动缓存，字节一致的前缀（含消息）能读到主循环
     的缓存。**Anthropic 下摘要调用不命中主对话的缓存**：摘要链不带主链的思考参数（thinking /
@@ -285,7 +286,7 @@ async def run_summary(
 
     残留 tool_use 的剔除（``drop_incomplete_tool_calls``）放在本函数而非各调用点：
     三条压缩路径都不经 PreprocessMessages 的清理，而中途被取消的工具轮是各路径共通的
-    输入形态（在线 summarizer 是图首节点、先于清理；离线压缩在轮外）。
+    输入形态（在线 compact 是图首节点、先于清理；离线压缩在轮外）。
     """
     transformed: list = []
     for m in drop_incomplete_tool_calls(messages):
@@ -302,13 +303,13 @@ async def run_summary(
         provider=provider,
         streaming=False,
     )
-    return await summarize_with_ptl_retry(
+    return await compact_with_ptl_retry(
         transformed, prompt, chain, max_retry=max_retry, drop_ratio=drop_ratio
     )
 
 
 # ---------------------------------------------------------------------------
-# 熔断器：同一 thread summary 连续失败超阈值后短暂放行 CallModel，不再重试
+# 熔断器：同一 thread compact 连续失败超阈值后短暂放行 CallModel，不再重试
 # ---------------------------------------------------------------------------
 
 
@@ -370,7 +371,7 @@ _circuits = _CircuitStore()
 
 
 def is_circuit_open(thread_id: str, threshold: int, reset_sec: int) -> bool:
-    """同一 thread summary 连续失败 ``threshold`` 次后熔断 ``reset_sec`` 秒。"""
+    """同一 thread compact 连续失败 ``threshold`` 次后熔断 ``reset_sec`` 秒。"""
     return _circuits.is_open(thread_id, threshold, reset_sec)
 
 
@@ -380,7 +381,7 @@ def record_circuit_failure(thread_id: str, reset_sec: int = 600) -> int:
 
 
 def reset_circuit(thread_id: str) -> None:
-    """summary 成功后清零计数。"""
+    """compact 成功后清零计数。"""
     _circuits.reset(thread_id)
 
 
@@ -391,7 +392,7 @@ def clear_all_circuits() -> None:
 
 # ---------------------------------------------------------------------------
 # 离线强制压缩：对空闲会话的完整历史做一次压缩（供 AgentBridge.compact_thread /
-# /compact 命令 / IM 每日整理调用）。与上面的 summarizer 节点共用压缩核，但绕开节点专属的
+# /compact 命令 / IM 每日整理调用）。与上面的 compact 节点共用压缩核，但绕开节点专属的
 # 阈值门 / "末条必须 HumanMessage" / 熔断器——那些只在即将溢出的当轮调用里才有意义。
 # ---------------------------------------------------------------------------
 
@@ -412,12 +413,7 @@ def select_for_compaction(messages: list) -> list[BaseMessage] | None:
     return list(messages) if clean_ai or find_pending_human(messages) is last else None
 
 
-def format_summary_block(summary_text: str) -> str:
-    """将摘要文本包裹为 ``<summary>`` 标签块。"""
-    return f"<summary>\n{summary_text}\n</summary>\n"
-
-
-def build_summary_carrier(summary_text: str, *, ts: int = 0) -> HumanMessage:
+def build_compact_carrier(compacted_text: str, *, ts: int = 0) -> HumanMessage:
     """摘要 carrier：声明无可显示的合成消息（不渲染为用户气泡），独立于用户消息
     存在，在线/离线压缩共用——carrier 形态的单一真源。
 
@@ -425,7 +421,7 @@ def build_summary_carrier(summary_text: str, *, ts: int = 0) -> HumanMessage:
     可能把全部真人消息删光，dream 判活基线（``latest_human_ts``）随之归零、该会话
     从此对 dream 隐身；carrier 继承该时刻把基线留住——那条消息确实在 ts 时刻存在过。
     """
-    return synthetic_human_message(format_summary_block(summary_text), ts=ts)
+    return synthetic_human_message(f"<compact>\n{compacted_text}\n</compact>\n", ts=ts)
 
 
 def _reattach(msg: BaseMessage, history_id: str) -> BaseMessage:
@@ -453,7 +449,7 @@ def _reattach(msg: BaseMessage, history_id: str) -> BaseMessage:
 def build_compacted_update(
     messages: list[BaseMessage],
     keep_tail: list[BaseMessage],
-    summary_text: str,
+    compacted_text: str,
     *,
     checkpoint_id: str = "",
 ) -> dict:
@@ -471,12 +467,11 @@ def build_compacted_update(
     marker，见 :func:`_reattach`。carrier 继承被取代段里最后一条真人消息的 ts，使
     dream 判活基线不随压缩归零。
     """
-    pending = [
-        p for p in pending_humans(messages) if not any(m is p for m in keep_tail)
-    ]
+    tail_ids = {id(m) for m in keep_tail}
+    pending = [p for p in pending_humans(messages) if id(p) not in tail_ids]
     keep_tail = [*pending, *keep_tail]
-    carrier = build_summary_carrier(
-        summary_text, ts=max((message_ts(m) for m in messages), default=0)
+    carrier = build_compact_carrier(
+        compacted_text, ts=max((message_ts(m) for m in messages), default=0)
     )
     identities = dict(zip(map(id, messages), history_message_ids(messages)))
     kept_ids = [identities[id(m)] for m in keep_tail]
@@ -494,31 +489,31 @@ def build_compacted_update(
 
 async def compact_messages(
     messages: list[BaseMessage],
-    to_summarize: list[BaseMessage],
+    to_compact: list[BaseMessage],
     keep_tail: list[BaseMessage],
     context: LumiAgentContext,
     *,
     checkpoint_id: str = "",
 ) -> tuple[dict, int]:
-    """三条压缩路径的共用主干：SUMMARY 提示词 + token 配置 → ``run_summary`` →
+    """三条压缩路径的共用主干：COMPACT 提示词 + token 配置 → ``run_compact`` →
     ``build_compacted_update``。返回 ``(state update, PTL 重试次数)``。
 
     选材（在线保末条 / PTL 按 round 保尾 / 离线整段）各路径自己定，其余全在这里；
-    节点专属的阈值门与熔断记账留在 ``nodes.summarizer``，离线 ``compact_thread``
+    节点专属的阈值门与熔断记账留在 ``nodes.compact``，离线 ``compact_thread``
     不带。摘要模型 / tools / system_prompt 取自会话 ``context``（与主对话同一前缀）。
     """
     config = get_config()
     token = config.config.token
-    summary_text, ptl_retries = await run_summary(
-        to_summarize,
-        config.load_prompt("SUMMARY"),
+    compacted_text, ptl_retries = await run_compact(
+        to_compact,
+        config.load_prompt("COMPACT"),
         tools=context.tools,
         system_prompt=context.system_prompt,
         model_name=context.model_name,
         provider=context.provider,
-        max_retry=token.summary_ptl_retry_max,
-        drop_ratio=token.summary_ptl_retry_drop_ratio,
+        max_retry=token.compact_ptl_retry_max,
+        drop_ratio=token.compact_ptl_retry_drop_ratio,
     )
     return build_compacted_update(
-        messages, keep_tail, summary_text, checkpoint_id=checkpoint_id
+        messages, keep_tail, compacted_text, checkpoint_id=checkpoint_id
     ), ptl_retries

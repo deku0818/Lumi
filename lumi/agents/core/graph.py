@@ -19,11 +19,11 @@ from lumi.agents.core.hooks import builtin  # noqa: F401
 from lumi.agents.core.nodes import (
     after_tool_executor,
     call_model,
+    compact,
     is_use_tool,
     on_agent_stop,
     on_call_model_error,
     preprocess_messages,
-    summarizer,
     tool_executor,
 )
 from lumi.agents.core.state import LumiAgentContext, LumiAgentState
@@ -77,7 +77,7 @@ class LumiAgent:
             self.builder.add_node(name, action, trace_policy=_DIGEST_HISTORY, **kwargs)
 
         add("PreprocessMessages", preprocess_messages)
-        add("Summarizer", summarizer)
+        add("Compact", compact)
         # PTL 兜底走节点级 error_handler，理由见 nodes.on_call_model_error
         add("CallModel", call_model, error_handler=on_call_model_error)
         add("ToolExecutor", tool_executor)
@@ -94,11 +94,11 @@ class LumiAgent:
 
     def _draw_edges(self):
         """添加边"""
-        # 串行：Summarizer（当轮就地压缩）→ Preprocess（UserPromptSubmit hook 注入
+        # 串行：Compact（当轮就地压缩）→ Preprocess（UserPromptSubmit hook 注入
         # 上下文）→ CallModel。压缩在前，注入永远发生在压缩后的世界里——旧注入块
         # 与 marker 随历史删除，hook 自动全量重建；hook 注入的消息也不会被当轮压掉。
-        self.builder.add_edge(START, "Summarizer")
-        self.builder.add_edge("Summarizer", "PreprocessMessages")
+        self.builder.add_edge(START, "Compact")
+        self.builder.add_edge("Compact", "PreprocessMessages")
         self.builder.add_conditional_edges(
             "PreprocessMessages",
             after_tool_executor,

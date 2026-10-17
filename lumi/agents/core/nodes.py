@@ -121,9 +121,9 @@ LUMI_MODEL_RETRY_EVENT = "lumi_model_retry"
 
 
 async def on_call_model_error(state: LumiAgentState, error: NodeError) -> Command:
-    """CallModel 的节点级 error_handler：撞 prompt-too-long 就绕回 Summarizer 强制压缩。
+    """CallModel 的节点级 error_handler：撞 prompt-too-long 就绕回 Compact 强制压缩。
 
-    压缩后经正常拓扑重试（摘要调用在 Summarizer 节点名下运行，bridge 的压缩事件
+    压缩后经正常拓扑重试（摘要调用在 Compact 节点名下运行，bridge 的压缩事件
     过滤天然生效）。``ptl_retry`` 已置位说明刚压缩过仍超长（或压缩被放行跳过），
     原样抛出——每次 PTL 只换一次压缩机会，用户看到的恒是 PTL 而非内部错误。
     非 PTL 的错误一律原样抛出，与没有 handler 时逐字节相同。
@@ -135,8 +135,8 @@ async def on_call_model_error(state: LumiAgentState, error: NodeError) -> Comman
     """
     if not is_ptl_error(error.error) or state.get("ptl_retry"):
         raise error.error
-    logger.warning("[CallModel] prompt-too-long，路由回 Summarizer 强制压缩重试")
-    return Command(goto="Summarizer", update={"ptl_retry": True})
+    logger.warning("[CallModel] prompt-too-long，路由回 Compact 强制压缩重试")
+    return Command(goto="Compact", update={"ptl_retry": True})
 
 
 async def _invoke_validated(chain, messages: list) -> AIMessage:
@@ -711,15 +711,15 @@ async def auto_classify(
     return Command(goto="CallModel", update={"messages": messages})
 
 
-async def _summarize(
+async def _compact(
     messages: list,
-    to_summarize: list,
+    to_compact: list,
     keep_tail: list,
     runtime: Runtime[LumiAgentContext],
     thread_id: str,
     token_config,
 ) -> dict | None:
-    """摘要正常路径与 PTL 强制压缩的共用核：``compact_messages`` + 熔断记账。
+    """正常压缩与 PTL 强制压缩的共用核：``compact_messages`` + 熔断记账。
 
     成功清零熔断计数、返回压缩写回 update；失败记一次失败、返回 ``None``——
     调用方按各自语义决定抛出（正常路径）还是放行（PTL 路径）。
@@ -728,17 +728,17 @@ async def _summarize(
         execution = runtime.execution_info
         update, ptl_retries = await compact_messages(
             messages,
-            to_summarize,
+            to_compact,
             keep_tail,
             runtime.context,
             checkpoint_id=execution.checkpoint_id if execution else "",
         )
     except Exception as exc:
         fail_count = record_circuit_failure(
-            thread_id, token_config.summary_circuit_reset_seconds
+            thread_id, token_config.compact_circuit_reset_seconds
         )
         logger.warning(
-            "[Summarizer] 摘要生成失败 thread=%s err=%s 连续失败=%d",
+            "[Compact] 摘要生成失败 thread=%s err=%s 连续失败=%d",
             thread_id,
             type(exc).__name__,
             fail_count,
@@ -746,31 +746,31 @@ async def _summarize(
         return None
     reset_circuit(thread_id)
     logger.info(
-        "[Summarizer] 压缩完成，%d 条进摘要、保留 %d 条，PTL 重试 %d 次",
-        len(to_summarize),
+        "[Compact] 压缩完成，%d 条进摘要、保留 %d 条，PTL 重试 %d 次",
+        len(to_compact),
         len(keep_tail),
         ptl_retries,
     )
     return update
 
 
-async def summarizer(
+async def compact(
     state: LumiAgentState,
     runtime: Runtime[LumiAgentContext],
     config: RunnableConfig,
 ) -> dict:
     """串行压缩历史消息，本轮 CallModel 直接看到压缩后的 messages。
 
-    串行拓扑：``Summarizer → PreprocessMessages → CallModel``——超阈值时当轮就地
+    串行拓扑：``Compact → PreprocessMessages → CallModel``——超阈值时当轮就地
     压缩（删历史 + 摘要作独立 carrier 消息插在重挂的用户消息之前），即将溢出的这次
     调用立刻受益。压缩先于 PreprocessMessages 的 UserPromptSubmit hook：上下文注入
     永远发生在压缩后的世界里（marker 由 ``build_compacted_update`` 恒剥，hook 扫不到
-    即注入全量），在线/离线压缩后的形态同构：``[Human(<summary>), Human(ctx全量+用户消息)]``。
+    即注入全量），在线/离线压缩后的形态同构：``[Human(<compact>), Human(ctx全量+用户消息)]``。
 
     与主对话同一 system_prompt + tools 前缀，只在末尾追加摘要指令（缓存命中因 provider
-    而异，Anthropic 下不命中主对话缓存，见 ``compact.run_summary``）。
+    而异，Anthropic 下不命中主对话缓存，见 ``compact.run_compact``）。
 
-    - 不超阈值（``模型窗口 * summary_threshold``，真实 usage）→ 直接放行
+    - 不超阈值（``模型窗口 * compact_threshold``，真实 usage）→ 直接放行
     - 熔断器打开（同 thread 连续失败超阈值且未到 reset）→ 直接放行
     - ``ptl_retry`` 置位（CallModel 撞 PTL 路由回来）→ 绕过阈值门走
       :func:`_ptl_forced_compact` 强制压缩
@@ -782,13 +782,13 @@ async def summarizer(
     token_config = get_config().config.token
     thread_id = (config.get("configurable") or {}).get("thread_id", "_anon")
 
-    # 熔断打开：同 thread summary 连续失败超阈值，本轮直接放行 CallModel
+    # 熔断打开：同 thread compact 连续失败超阈值，本轮直接放行 CallModel
     if is_circuit_open(
         thread_id,
-        token_config.summary_failure_circuit_threshold,
-        token_config.summary_circuit_reset_seconds,
+        token_config.compact_failure_circuit_threshold,
+        token_config.compact_circuit_reset_seconds,
     ):
-        logger.warning("[Summarizer] 熔断打开 thread=%s，跳过压缩直接放行", thread_id)
+        logger.warning("[Compact] 熔断打开 thread=%s，跳过压缩直接放行", thread_id)
         return {}
 
     messages = list(state["messages"])
@@ -802,16 +802,16 @@ async def summarizer(
         resolve(runtime.context.model_name, runtime.context.provider).context_window
         or token_config.context_length
     )
-    threshold = window * token_config.summary_threshold
+    threshold = window * token_config.compact_threshold
     total_tokens = context_window_tokens(messages)
     stat = f"上下文 token {total_tokens} / 阈值 {threshold:.0f}（窗口 {window}）"
     if total_tokens < threshold:
-        logger.debug(f"[Summarizer] {stat}，无需压缩")
+        logger.debug(f"[Compact] {stat}，无需压缩")
         return {}
 
-    logger.info(f"[Summarizer] {stat}，开始压缩")
+    logger.info(f"[Compact] {stat}，开始压缩")
     if not messages or not isinstance(messages[-1], HumanMessage):
-        raise ValueError("[Summarizer] 最后一条消息必须是 HumanMessage")
+        raise ValueError("[Compact] 最后一条消息必须是 HumanMessage")
 
     # 可压缩消息过少（≤1 条）时压缩收益甚微，直接放行
     if sum(1 for msg in messages[:-1] if msg.id) < 2:
@@ -819,34 +819,34 @@ async def summarizer(
 
     # 摘要作独立 carrier 插在重挂的末条之前（正在被回答的真人消息由
     # build_compacted_update 自己认出来一并保住）
-    update = await _summarize(
+    update = await _compact(
         messages, messages[:-1], [messages[-1]], runtime, thread_id, token_config
     )
     if update is None:
-        raise RuntimeError("[Summarizer] 摘要生成失败")
+        raise RuntimeError("[Compact] 摘要生成失败")
     return update
 
 
 async def _ptl_forced_compact(
     messages: list, runtime: Runtime[LumiAgentContext], thread_id: str, token_config
 ) -> dict:
-    """CallModel 撞 PTL 后路由回 Summarizer 的强制压缩：绕过阈值门与「尾必须
+    """CallModel 撞 PTL 后路由回 Compact 的强制压缩：绕过阈值门与「尾必须
     Human」不变量（PTL 多发生在工具循环中段，末条是 ToolMessage），按 API round
     保尾选材。任何原因不可压 / 摘要失败都返回 ``{}`` 放行——CallModel 重试再撞
     PTL 时 ``ptl_retry`` 已置位、直接抛原错误（用户看到的恒是 PTL 而非内部错误）。
 
     正在被回答的那条真人 Human 与尾部 round 一并原样重挂（``build_compacted_update``
     的 ``keep``）——PTL 多发生在工具循环中段，那条 Human 早被 round 分组卷进
-    to_summarize，删掉模型就只剩摘要转述、答不准用户真正要什么。
+    to_compact，删掉模型就只剩摘要转述、答不准用户真正要什么。
     ``ptl_retry`` 不在此清除（CallModel 成功后才清），压缩后仍超长时守卫生效。
     """
     selected = select_for_ptl_compaction(messages)
     if selected is None:
-        logger.warning("[Summarizer] PTL 强制压缩：可压缩 round 不足，放行")
+        logger.warning("[Compact] PTL 强制压缩：可压缩 round 不足，放行")
         return {}
-    to_summarize, tail = selected
-    update = await _summarize(
-        messages, to_summarize, tail, runtime, thread_id, token_config
+    to_compact, tail = selected
+    update = await _compact(
+        messages, to_compact, tail, runtime, thread_id, token_config
     )
     return update if update is not None else {}
 
@@ -861,7 +861,7 @@ async def preprocess_messages(
     记忆索引 按 marker 比对注入末条用户消息，见 :mod:`context_inject`）。
 
     hook 返回的消息 update（同 id 替换末条 / 追加 reminder）合并进本节点返回值；
-    ``Block`` 拦下本条提问、结束本轮（不调模型）。历史压缩在上游 ``Summarizer`` 已完成，
+    ``Block`` 拦下本条提问、结束本轮（不调模型）。历史压缩在上游 ``Compact`` 已完成，
     本节点恒在压缩后的世界里运行。
     """
     messages = state["messages"]

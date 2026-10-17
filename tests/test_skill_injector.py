@@ -161,7 +161,7 @@ def test_inject_prepends_reminder_and_preserves_original(
     original_content = copy.deepcopy(message.content)
 
     # 执行注入（turn_context 已不再用 inject_*_into_message，此处直接验证底层
-    # inject_text_into_message 的 prepend + 不可变契约——它仍由 summary 注入在用）
+    # inject_text_into_message 的 prepend + 不可变契约——它由上下文注入使用）
     new_message = inject_text_into_message(message, format_skill_reminder(skills))
 
     # 1. 原始消息 content 未被修改

@@ -154,7 +154,7 @@ Tool descriptions live in each tool function's docstring; external tools are wir
 | Sub-agents | [agents.md](docs/guides/agents.md) | · | Slash commands / skills | [slash-commands.md](docs/guides/slash-commands.md) |
 | Styles | [styles.md](docs/guides/styles.md) | · | Persistent memory | [memory.md](docs/guides/memory.md) |
 | Desktop architecture | [desktop.md](docs/architecture/desktop.md) | · | Multi-agent workflow | [workflow.md](docs/architecture/workflow.md) |
-| Thinking management | [thinking.md](docs/architecture/thinking.md) | · | Conversation summary | [summary.md](docs/architecture/summary.md) |
+| Thinking management | [thinking.md](docs/architecture/thinking.md) | · | Context compaction | [compact.md](docs/architecture/compact.md) |
 
 > Guide docs are currently written in Chinese.
 

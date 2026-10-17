@@ -720,7 +720,12 @@ class FeishuInbound:
             await self._send_busy_hint(chat_id, message_id)
             return
         async with lock:
-            await bridge.delete_thread(thread_id)
+            try:
+                await bridge.delete_thread(thread_id)
+            finally:
+                # 清空结束前失效历史缓存；保留普通锁，让期间到达的消息继续排队。
+                # checkpoint 已删、附件清理再失败或被取消时，也不能复用旧历史。
+                lock.history_revision += 1
         # 连会话级模型覆盖一并清（同存一条 meta）：thread_id 确定性派生，
         # 不清则「全新对话」下一条消息又静默套回旧覆盖
         delete_meta(thread_id)

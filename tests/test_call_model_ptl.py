@@ -1,12 +1,12 @@
-"""PTL 反应式压缩测试：call_model 路由决策 + summarizer 的 PTL 强制压缩分支。
+"""PTL 反应式压缩测试：call_model 路由决策 + compact 的 PTL 强制压缩分支。
 
-mock chain / run_summary / get_config，不触发真实 LLM。验证：
+mock chain / run_compact / get_config，不触发真实 LLM。验证：
 - call_model 撞 PTL → 原样抛给节点级 error_handler
-- error_handler 撞 PTL → Command(goto="Summarizer", update={"ptl_retry": True})
+- error_handler 撞 PTL → Command(goto="Compact", update={"ptl_retry": True})
 - ptl_retry 已置位再撞 PTL / 非 PTL 异常 → 原样 raise
 - 成功响应清 ptl_retry
-- summarizer PTL 分支：强制压缩产出 removes + carrier + 尾部换新 id 重加；
-  熔断打开 / round 不足 / 无 SUMMARY prompt / 摘要失败 → 返回 {} 放行
+- compact PTL 分支：强制压缩产出 removes + carrier + 尾部换新 id 重加；
+  熔断打开 / round 不足 / 无 COMPACT prompt / 摘要失败 → 返回 {} 放行
 """
 
 from __future__ import annotations
@@ -61,11 +61,11 @@ def _tool_round(tag: str) -> list:
 
 _TOKEN_CONFIG = SimpleNamespace(
     context_length=1000,
-    summary_threshold=0.5,
-    summary_failure_circuit_threshold=3,
-    summary_circuit_reset_seconds=60,
-    summary_ptl_retry_max=2,
-    summary_ptl_retry_drop_ratio=0.3,
+    compact_threshold=0.5,
+    compact_failure_circuit_threshold=3,
+    compact_circuit_reset_seconds=60,
+    compact_ptl_retry_max=2,
+    compact_ptl_retry_drop_ratio=0.3,
 )
 
 
@@ -75,7 +75,7 @@ def _fake_config():
             agents=SimpleNamespace(max_tokens=None),
             token=_TOKEN_CONFIG,
         ),
-        load_prompt=lambda name: "SUMMARY PROMPT",
+        load_prompt=lambda name: "COMPACT PROMPT",
     )
 
 
@@ -120,13 +120,13 @@ async def _handle(exc: BaseException, state: dict):
     )
 
 
-async def test_ptl_routes_to_summarizer():
+async def test_ptl_routes_to_compactr():
     result = await _handle(
         PTLError("prompt is too long"),
         {"messages": tool_loop_history()},
     )
     assert isinstance(result, Command)
-    assert result.goto == "Summarizer"
+    assert result.goto == "Compact"
     assert result.update == {"ptl_retry": True}
 
 
@@ -162,32 +162,32 @@ async def test_success_without_flag_no_flag_update():
     assert "ptl_retry" not in result
 
 
-# ─────────────────────────── summarizer PTL 强制压缩分支 ───────────────────────────
+# ─────────────────────────── compact PTL 强制压缩分支 ───────────────────────────
 
 
-async def _run_summarizer_ptl(messages, run_summary=None):
+async def _run_compact_node_ptl(messages, run_compact=None):
     with (
         patch.object(nodes, "get_config", return_value=_fake_config()),
         patch.object(compact, "get_config", return_value=_fake_config()),
         patch.object(
             compact,
-            "run_summary",
-            new=run_summary or AsyncMock(return_value=("SUMMARY_TEXT", 0)),
+            "run_compact",
+            new=run_compact or AsyncMock(return_value=("COMPACT_TEXT", 0)),
         ),
     ):
-        return await nodes.summarizer(
+        return await nodes.compact(
             {"messages": messages, "ptl_retry": True}, _RUNTIME, _CONFIG
         )
 
 
 async def test_forced_compact_mid_tool_loop():
     messages = tool_loop_history()
-    result = await _run_summarizer_ptl(messages)
+    result = await _run_compact_node_ptl(messages)
 
     # 过真实 messages 通道断言合并后形态：
     # [carrier, 正在被回答的提问, 尾部 2 round 新 id 副本]
     merged = apply_messages_update(messages, result["messages"])
-    assert isinstance(merged[0], HumanMessage) and "<summary>" in merged[0].content
+    assert isinstance(merged[0], HumanMessage) and "<compact>" in merged[0].content
     # "q" 是模型正在回答的诉求，压缩不能把它删成摘要转述
     assert [m.content for m in merged[1:]] == ["q", "a2", "t2", "a3", "t3"]
     assert merged[1].id != "h"  # 换新 id 才排得到 carrier 之后
@@ -200,7 +200,7 @@ async def test_forced_compact_mid_tool_loop():
 
 async def test_forced_compact_keeps_pending_human_mid_history():
     """当前提问不在历史开头时同样要保住：round 分组把它并进前一个 AI 的 round，
-    工具循环长于 keep_rounds 就会被卷进 to_summarize。"""
+    工具循环长于 keep_rounds 就会被卷进 to_compact。"""
     messages = [
         _user_message("很早的问题", "h0", ts=1000),
         *_tool_round("a0"),
@@ -209,7 +209,7 @@ async def test_forced_compact_keeps_pending_human_mid_history():
         *_tool_round("a2"),
         *_tool_round("a3"),
     ]
-    result = await _run_summarizer_ptl(messages)
+    result = await _run_compact_node_ptl(messages)
 
     merged = apply_messages_update(messages, result["messages"])
     texts = [m.content for m in merged if isinstance(m, HumanMessage)]
@@ -224,24 +224,24 @@ async def test_forced_compact_insufficient_rounds_passes_through():
         AIMessage(content="a", id="a"),
         ToolMessage(content="t", tool_call_id="x", id="t"),
     ]
-    run_summary = AsyncMock()
-    result = await _run_summarizer_ptl(messages, run_summary=run_summary)
+    run_compact = AsyncMock()
+    result = await _run_compact_node_ptl(messages, run_compact=run_compact)
     assert result == {}
-    run_summary.assert_not_awaited()
+    run_compact.assert_not_awaited()
 
 
 async def test_forced_compact_circuit_open_passes_through():
     for _ in range(3):
         record_circuit_failure("ptl-test", reset_sec=60)
-    run_summary = AsyncMock()
-    result = await _run_summarizer_ptl(tool_loop_history(), run_summary=run_summary)
+    run_compact = AsyncMock()
+    result = await _run_compact_node_ptl(tool_loop_history(), run_compact=run_compact)
     assert result == {}
-    run_summary.assert_not_awaited()
+    run_compact.assert_not_awaited()
 
 
-async def test_forced_compact_summary_failure_passes_through_and_records_circuit():
-    run_summary = AsyncMock(side_effect=RuntimeError("summary broke"))
-    result = await _run_summarizer_ptl(tool_loop_history(), run_summary=run_summary)
+async def test_forced_compact_failure_passes_through_and_records_circuit():
+    run_compact = AsyncMock(side_effect=RuntimeError("compact broke"))
+    result = await _run_compact_node_ptl(tool_loop_history(), run_compact=run_compact)
     assert result == {}
     # 熔断计数 +1：再失败 2 次即打开
     record_circuit_failure("ptl-test", reset_sec=60)
@@ -253,7 +253,7 @@ async def test_forced_compact_summary_failure_passes_through_and_records_circuit
 
 
 async def test_full_graph_ptl_roundtrip():
-    """真实拓扑走完整回路：CallModel PTL → error_handler 路由回 Summarizer 强制
+    """真实拓扑走完整回路：CallModel PTL → error_handler 路由回 Compact 强制
     压缩 → PreprocessMessages → CallModel 重试成功 → OnAgentStop → END。
 
     锁两件事：PTL 路由步**不**分发 Stop hooks（error_handler 的 Command 路由不触发
@@ -277,7 +277,7 @@ async def test_full_graph_ptl_roundtrip():
         patch.object(nodes, "resolve", return_value=resolved(0)),
         patch.object(compact, "get_config", return_value=_fake_config()),
         patch.object(
-            compact, "run_summary", new=AsyncMock(return_value=("SUMMARY_TEXT", 0))
+            compact, "run_compact", new=AsyncMock(return_value=("COMPACT_TEXT", 0))
         ),
     ):
         from lumi.agents.core import graph as graph_module
@@ -302,7 +302,7 @@ async def test_full_graph_ptl_roundtrip():
     assert result["ptl_retry"] is False
     contents = [m.content for m in result["messages"]]
     # [carrier, 当前提问, 尾部 2 round, 重试响应]；头部历史已压缩
-    assert "<summary>" in contents[0] and "SUMMARY_TEXT" in contents[0]
+    assert "<compact>" in contents[0] and "COMPACT_TEXT" in contents[0]
     # 当前提问原话保住，且压缩删掉的上下文注入块已在它上面重建（本轮后续调用不缺 env）
     from lumi.agents.core.meta_message import visible_user_text
 

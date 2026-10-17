@@ -22,7 +22,7 @@ from lumi.agents.core.meta_message import (
 )
 from lumi.gateway.uploads import managed_uploads
 from lumi.sessions import session_model
-from lumi.sessions.history import HistoryReader, HistorySegment, summary_message
+from lumi.sessions.history import HistoryReader, HistorySegment, compact_message
 from lumi.sessions.session_meta import delete_meta, load_all, update_meta
 from lumi.sessions.thread_runs import thread_runs
 from lumi.utils.config.global_manager import GlobalConfigManager
@@ -66,8 +66,8 @@ def _copy_messages(
         clone.additional_kwargs[HISTORY_ID_KEY] = aliases.get(identity, identity)
         copied.append(clone)
     # 连旧版无索引摘要也改为新会话自己的 checkpoint，绝不引用来源会话。
-    if previous_id and (summary := summary_message(copied)):
-        summary[0].additional_kwargs[HISTORY_KEY] = {
+    if previous_id and (compact := compact_message(copied)):
+        compact[0].additional_kwargs[HISTORY_KEY] = {
             "checkpoint_id": previous_id,
             "exclude": previous_exclude,
         }

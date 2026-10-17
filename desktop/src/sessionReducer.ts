@@ -54,7 +54,7 @@ export type SessionState = {
   // 本会话**已固化**的模型（后端 switch_session / set_session_model 下发）。未固化时
   // 留空，由 sessionModel 落到 defaultModel——固化与否是后端的判断，前端只存结果
   model?: ActiveModel
-  // 历史压缩进行中（Summarizer 内部摘要调用期间为 true）；展示「正在压缩对话」指示
+  // 历史压缩进行中（Compact 内部摘要调用期间为 true）；展示「正在压缩对话」指示
   compacting?: boolean
   // 本次模型调用开始时的 items 长度：message.retry 据此只回滚这一次调用流出的气泡，
   // 不误伤同一轮里更早迭代（已落库）的助手文字。message.start 每次调用都刷新。

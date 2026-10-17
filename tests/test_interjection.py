@@ -15,6 +15,7 @@ from lumi.agents.core.meta_message import (
     declared_file_paths,
     declared_items,
     is_interjection,
+    reminder_human_message,
 )
 from lumi.agents.core.preprocessing.compact import pending_humans
 from lumi.agents.core.state import LumiAgentContext, LumiAgentState
@@ -109,6 +110,25 @@ def test_pending_humans_keeps_opener_with_interjection():
         interjection,
     ]
     assert pending_humans(msgs) == [opener, interjection]
+
+
+def test_pending_humans_keeps_multiple_interjections_in_original_order():
+    opener = _user("same", "opener")
+    extras = [_user("same", "extra1"), _user("same", "extra2")]
+    for message in extras:
+        message.additional_kwargs["is_interjection"] = True
+    messages = [
+        _user("old question", "old"),
+        AIMessage("old answer"),
+        opener,
+        extras[0],
+        reminder_human_message("reminder"),
+        extras[1],
+    ]
+    assert [id(message) for message in pending_humans(messages)] == [
+        id(opener),
+        *(id(message) for message in extras),
+    ]
 
 
 async def test_bridge_interject_builds_regular_user_message():

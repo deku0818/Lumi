@@ -5,6 +5,7 @@ from __future__ import annotations
 import asyncio
 from types import SimpleNamespace
 
+import pytest
 from langchain_core.messages import HumanMessage
 
 from lumi.agents.core.inbox import Inbox
@@ -149,9 +150,13 @@ async def test_clear_hands_queued_message_to_its_own_task(monkeypatch):
     ran = _record_turns(ch, monkeypatch)
     monkeypatch.setattr(inb, "delete_meta", lambda tid: None)
     await ch.bridge_pool.get("t")
+    lock = ch.bridge_pool.lock("t")
+    revision = lock.revision
+    history_revision = lock.history_revision
     arrived: list[asyncio.Task] = []
 
     async def slow_delete(tid):
+        assert not lock.deleting
         arrived.append(
             asyncio.create_task(ch.inbound._admit("oc", "t", inb._Pending("清空期间")))
         )
@@ -161,6 +166,63 @@ async def test_clear_hands_queued_message_to_its_own_task(monkeypatch):
     await ch.inbound._run_system_command("clear", "oc", "t", "m1")
     await asyncio.wait_for(arrived[0], 2)
     assert ran == [(["清空期间"], True)]
+    assert not arrived[0].cancelled()
+    assert lock.revision == revision
+    assert lock.history_revision == history_revision + 1
+
+
+async def test_clear_invalidates_history_even_when_cleanup_fails(monkeypatch):
+    ch, _ = _channel(monkeypatch)
+    bridge = await ch.bridge_pool.get("t")
+    lock = ch.bridge_pool.lock("t")
+    revision = lock.revision
+    history_revision = lock.history_revision
+
+    async def failed_cleanup(tid):
+        raise OSError("checkpoint removed, attachment cleanup failed")
+
+    monkeypatch.setattr(bridge, "delete_thread", failed_cleanup)
+    with pytest.raises(OSError, match="cleanup failed"):
+        await ch.inbound._run_system_command("clear", "oc", "t", "m1")
+    assert lock.revision == revision
+    assert lock.history_revision == history_revision + 1
+    assert not lock.locked() and not lock.deleting
+
+
+async def test_clear_keeps_message_still_being_prepared(monkeypatch):
+    ch, _ = _channel(monkeypatch)
+    ran = _record_turns(ch, monkeypatch)
+    bridge = await ch.bridge_pool.get("t")
+    monkeypatch.setattr(inb, "delete_meta", lambda tid: None)
+    deleting, finish_delete, preparing, finish_prepare = (
+        asyncio.Event() for _ in range(4)
+    )
+    original_interject = ch.inbound._interject
+
+    async def slow_delete(tid):
+        deleting.set()
+        await finish_delete.wait()
+
+    async def slow_interject(*args):
+        preparing.set()
+        await finish_prepare.wait()
+        await original_interject(*args)
+
+    monkeypatch.setattr(bridge, "delete_thread", slow_delete)
+    monkeypatch.setattr(ch.inbound, "_interject", slow_interject)
+    clear = asyncio.create_task(
+        ch.inbound._run_system_command("clear", "oc", "t", "m1")
+    )
+    await asyncio.wait_for(deleting.wait(), 2)
+    message = asyncio.create_task(
+        ch.inbound._admit("oc", "t", inb._Pending("清空后完成准备", reply_to="m2"))
+    )
+    await asyncio.wait_for(preparing.wait(), 2)
+    finish_delete.set()
+    await asyncio.wait_for(clear, 2)
+    finish_prepare.set()
+    await asyncio.wait_for(message, 2)
+    assert ran == [(["清空后完成准备"], True)]
 
 
 # ── 11 / 21. 妙记事件：建桥失败不反复重试；事件挂在池上，跨热重载保留 ──

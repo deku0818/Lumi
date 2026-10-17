@@ -20,7 +20,7 @@ digest。每轮（UserPromptSubmit）比对 marker 与当前状态：
 MEMORY.md），会一并被静默且不补发。触发需两个写方挤进同一轮窗口，频率低、修复
 需跨进程感知，接受此损失。
 
-正确性不变量：历史只被压缩改写，且压缩恒在本 hook **之前**发生（在线 Summarizer
+正确性不变量：历史只被压缩改写，且压缩恒在本 hook **之前**发生（在线 Compact
 是图首节点、先于 PreprocessMessages；离线 build_compacted_update 在轮外）——压缩
 删掉基线块的同时**恒剥掉所有 marker**（``compact._reattach``，含原样保留的用户
 消息与保尾的工具轮），本 hook 永远在压缩后的世界运行，扫不到 marker 即全量重建。

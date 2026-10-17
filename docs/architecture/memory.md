@@ -52,7 +52,7 @@
    （首轮 / 压缩后——marker 随旧消息删除）全量注入；条目变更只注**增量 diff**（相对上一个
    marker）、diff 比全量长退化整块；变更源文件被本会话 write/edit 过则**静默结算**（marker
    更新不注文本）；全无变化零注入、仅 marker 前移到末条。正确性不变量：历史只被压缩改写，
-   且压缩恒在本 hook 之前（图拓扑 `Summarizer → PreprocessMessages → CallModel`）——hook
+   且压缩恒在本 hook 之前（图拓扑 `Compact → PreprocessMessages → CallModel`）——hook
    永远在压缩后的世界运行，扫不到 marker 即全量重建，marker 存在 ⟺ 完整 diff 链可见。
    缓存收益：变更只动消息尾部，写记忆 / 改 skill 不再冲掉前缀历史缓存。
    `MEMORY.md` 受 `context.memory_enabled` 门控。`AGENTS.md` 不进入此注入链，

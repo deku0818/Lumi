@@ -28,6 +28,8 @@ class ThreadRunLock:
         self._owner: asyncio.Task | None = None
         self.deleting = False
         self.revision = 0
+        # 历史失效与入站消息作废分开：/clear 后仍保留期间排队、准备中的新消息。
+        self.history_revision = 0
 
     def locked(self) -> bool:
         # release 与排队者真正接手之间，asyncio.Lock.locked() 短暂为 False。
@@ -82,6 +84,7 @@ class ThreadRunLock:
         async with self._delete_lock:
             self.deleting = True
             self.revision += 1
+            self.history_revision += 1
             try:
                 for task in tuple(self._tasks):
                     # 二次取消会打断 finalize 中的写回；已取消的只等收尾。

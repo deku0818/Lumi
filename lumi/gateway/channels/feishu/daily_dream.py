@@ -1,16 +1,16 @@
-"""IM 渠道每日记忆整理：到点对有新消息的长会话先串行 dream、再并发 summary。
+"""IM 渠道每日记忆整理：到点对有新消息的长会话先串行 dream、再并发 compact。
 
 长会话（一群/一人一个常驻 thread）不走 Stop 钩子的增量 dream（见 dream.auto_dream_stop_hook
 对渠道 thread 的抑制），改由本循环统一编排：
 
 - **阶段一 · Dream（串行）**：共享同一 ``MEMORY.md``，一次只跑一个防写坏；每个 thread 持
   自己的 run-lock 跑长会话 dream（只综合当前会话）。lock 被用户轮占用则整批有限次重试，仍
-  抢不到本轮整个跳过该会话（dream+summary 都不做），留到明天——不让单个活跃群卡死整批。
-- **阶段二 · Summary（并发限流）**：各改各的 checkpoint，互不干扰；``Semaphore`` 限并发防
+  抢不到本轮整个跳过该会话（dream+compact 都不做），留到明天——不让单个活跃群卡死整批。
+- **阶段二 · compact（并发限流）**：各改各的 checkpoint，互不干扰；``Semaphore`` 限并发防
   接口 429。对刚 dream 成功的 thread 强制压缩历史（``AgentBridge.compact_thread``）。
 
 判活：存在落库 ts 晚于该 thread 上次 dream 快照时刻（``dream_lock.read_thread_dreamed_at``）
-的真实 human → 有新内容。基于时间戳而非消息计数，summary 压缩历史不影响判定。dream 成功
+的真实 human → 有新内容。基于时间戳而非消息计数，compact 压缩历史不影响判定。dream 成功
 即由 ``consolidate_session_dream`` 写回该 thread 的快照时刻；dream 间互斥由
 ``_run_dream_fork`` 内的 per-project 锁兜底，本循环无需自管。
 
@@ -68,7 +68,7 @@ async def _acquire_idle_lock(pool, thread_id: str):
 async def _dream_one(bridge, thread_id: str) -> bool:
     """持锁跑单个长会话 dream，返回是否 dream **成功**（无新消息 / 综合失败则 False）。
 
-    调用方已持锁。返回值把关 summary 阶段——先沉淀再压缩的次序只在 dream 成功时成立，
+    调用方已持锁。返回值把关 compact 阶段——先沉淀再压缩的次序只在 dream 成功时成立，
     失败就压会把未入记忆的历史永久压掉。dream 的异常被 bg-task 收尾吞掉（写 FAILED、
     不上抛），故成功与否看**快照时刻有没有推进**：``record_thread_dream`` 仅在综合
     成功后写入，是现成的成功信号。
@@ -91,8 +91,8 @@ async def _dream_phase(pool) -> list[str]:
     """阶段一：串行 dream 有新消息的 thread，返回成功 dream 的 thread 列表。
 
     忙 thread **整批**重试：每轮把当下空闲的都 dream 掉、忙的收集起来，一轮只睡一次
-    ``_LOCK_RETRY_SECONDS``；``_LOCK_ATTEMPTS`` 轮后仍忙则本轮跳过（不进 summary 阶段）。
-    刻意不复用 ``_acquire_idle_lock``——那是**单 thread** 等锁（summary 阶段各等各的），
+    ``_LOCK_RETRY_SECONDS``；``_LOCK_ATTEMPTS`` 轮后仍忙则本轮跳过（不进 compact 阶段）。
+    刻意不复用 ``_acquire_idle_lock``——那是**单 thread** 等锁（compact 阶段各等各的），
     在这里逐个等会让等待时间随忙会话数线性累加，且空闲会话要排在忙会话的重试后面。
     """
     pending = list(pool.chat_ids)
@@ -127,14 +127,14 @@ async def _dream_phase(pool) -> list[str]:
     return dreamed
 
 
-async def _summary_phase(pool, config, channel_name: str, threads: list[str]) -> None:
+async def _compact_phase(pool, config, channel_name: str, threads: list[str]) -> None:
     """阶段二：对刚 dream 成功的 thread 并发限流强制压缩历史。"""
-    sem = asyncio.Semaphore(max(1, config.summary_max_concurrency))
+    sem = asyncio.Semaphore(max(1, config.compact_max_concurrency))
 
-    async def _summarize_one(thread_id: str) -> None:
+    async def _compact_one(thread_id: str) -> None:
         lock = await _acquire_idle_lock(pool, thread_id)  # 等锁时不占并发配额
         if lock is None:
-            logger.info("[daily-dream] summary 跳过（始终忙）thread=%s", thread_id)
+            logger.info("[daily-dream] compact 跳过（始终忙）thread=%s", thread_id)
             return
         revision = getattr(lock, "revision", 0)
         async with sem:  # 等并发配额期间可能已有别的轮/删除接管会话。
@@ -147,20 +147,20 @@ async def _summary_phase(pool, config, channel_name: str, threads: list[str]) ->
                         hub.on_channel_activity(thread_id, channel_name)
                 except Exception:
                     logger.error(
-                        "[daily-dream] summary 失败 thread=%s", thread_id, exc_info=True
+                        "[daily-dream] compact 失败 thread=%s", thread_id, exc_info=True
                     )
 
-    await asyncio.gather(*(_summarize_one(t) for t in threads))
+    await asyncio.gather(*(_compact_one(t) for t in threads))
 
 
 async def _run_cycle(pool, config, channel_name: str) -> None:
-    """一次完整周期：全部 dream（串行）→ 屏障 → 全部 summary（并发限流）。"""
+    """一次完整周期：全部 dream（串行）→ 屏障 → 全部 compact（并发限流）。"""
     dreamed = await _dream_phase(pool)
     if not dreamed:
         logger.info("[daily-dream] 本轮无会话需整理")
         return
-    logger.info("[daily-dream] %d 个会话已 dream，开始并发 summary", len(dreamed))
-    await _summary_phase(pool, config, channel_name, dreamed)
+    logger.info("[daily-dream] %d 个会话已 dream，开始并发 compact", len(dreamed))
+    await _compact_phase(pool, config, channel_name, dreamed)
 
 
 async def daily_dream_loop(pool, config, channel_name: str) -> None:

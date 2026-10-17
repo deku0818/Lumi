@@ -88,7 +88,7 @@ def synthetic_human_message(
     """构造合成 HumanMessage：声明 ``items: []``（给模型看、无可显示）。
 
     ``ts``（毫秒）仅摘要 carrier 传：压缩把真人消息删光时由它继承那条消息的落库时刻，
-    见 ``build_summary_carrier``。0 = 不写该键（``message_ts`` 缺键即 0，语义一致）。
+    见 ``build_compact_carrier``。0 = 不写该键（``message_ts`` 缺键即 0，语义一致）。
     """
     meta: dict[str, Any] = {"items": []}
     if ts:
@@ -225,7 +225,7 @@ def latest_human_ts(messages: list) -> float:
     ts 由 bridge 构造真实用户消息时写入 ``additional_kwargs["lumi"]["ts"]``（本机时钟、
     毫秒），其余合成消息（reminder / 后台通知 / 工具回灌）一律不带——故判据即「human
     且带 ts」。供 dream 判定「自上次综合以来有无新内容」：基于时间戳而非消息计数，且
-    压缩把真人消息删光时由摘要 carrier 继承该时刻（见 ``build_summary_carrier``），
+    压缩把真人消息删光时由摘要 carrier 继承该时刻（见 ``build_compact_carrier``），
     判活基线不随压缩归零。
     """
     return (

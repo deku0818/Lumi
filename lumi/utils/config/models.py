@@ -49,10 +49,10 @@ class AgentsConfig(BaseModel):
 class TokenConfig(BaseModel):
     """Token / 字节处理配置类
 
-    once_tool_ratio / round_tool_ratio / summary_threshold 均为比例（0~1），分母见各自
-    description（前两者是 context_length，summary_threshold 是模型真实窗口）。
+    once_tool_ratio / round_tool_ratio / compact_threshold 均为比例（0~1），分母见各自
+    description（前两者是 context_length，compact_threshold 是模型真实窗口）。
     阈值类（工具结果大小）以 UTF-8 字节衡量，按 BYTES_PER_TOKEN 把 token 预算换算
-    成字节；上下文窗口预算（summary）保持 token 语义。实际值通过属性方法计算。
+    成字节；上下文窗口预算（compact）保持 token 语义。实际值通过属性方法计算。
     """
 
     once_tool_ratio: float = Field(
@@ -67,23 +67,23 @@ class TokenConfig(BaseModel):
         default=200000,
         description="上下文窗口 token 数兜底值：工具结果大小上限恒以此为基准；压缩阈值优先用 models.dev 目录里该模型的真实窗口，仅目录未收录时退到此值",
     )
-    summary_threshold: float = Field(
+    compact_threshold: float = Field(
         default=0.7,
-        description="触发总结的阈值比例，当上下文窗口 token 数（真实 usage，含 system prompt + tools + 历史）>= 模型真实窗口 * summary_threshold 时触发",
+        description="触发压缩的阈值比例，当上下文窗口 token 数（真实 usage，含 system prompt + tools + 历史）>= 模型真实窗口 * compact_threshold 时触发",
     )
-    summary_ptl_retry_max: int = Field(
+    compact_ptl_retry_max: int = Field(
         default=3,
-        description="summary 自身撞 prompt-too-long 时的 PTL 截头重试次数上限",
+        description="compact 自身撞 prompt-too-long 时的 PTL 截头重试次数上限",
     )
-    summary_ptl_retry_drop_ratio: float = Field(
+    compact_ptl_retry_drop_ratio: float = Field(
         default=0.3,
         description="每次 PTL retry 从头部丢弃的 API round 比例（按 AIMessage 切组）",
     )
-    summary_failure_circuit_threshold: int = Field(
+    compact_failure_circuit_threshold: int = Field(
         default=3,
-        description="同 thread summary 连续失败 N 次后熔断，下一轮直接放行 CallModel",
+        description="同 thread compact 连续失败 N 次后熔断，下一轮直接放行 CallModel",
     )
-    summary_circuit_reset_seconds: int = Field(
+    compact_circuit_reset_seconds: int = Field(
         default=600,
         description="熔断打开后多少秒允许再次尝试压缩",
     )

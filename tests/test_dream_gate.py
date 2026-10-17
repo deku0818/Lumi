@@ -116,13 +116,13 @@ def test_latest_ts_zero_when_no_ts():
     assert latest_human_ts([]) == 0.0
 
 
-def test_latest_ts_counts_summary_carrier_watermark():
+def test_latest_ts_counts_compact_carrier_watermark():
     """压缩把真人消息删光后，摘要 carrier 继承的 ts 就是判活基线——否则
     该 thread 从此对 dream 隐身（0.0 恒 ≤ dreamed_at）。"""
-    from lumi.agents.core.preprocessing.compact import build_summary_carrier
+    from lumi.agents.core.preprocessing.compact import build_compact_carrier
 
-    assert latest_human_ts([build_summary_carrier("摘要", ts=3_000_000)]) == 3000.0
-    assert latest_human_ts([build_summary_carrier("摘要")]) == 0.0
+    assert latest_human_ts([build_compact_carrier("摘要", ts=3_000_000)]) == 3000.0
+    assert latest_human_ts([build_compact_carrier("摘要")]) == 0.0
 
 
 def test_latest_ts_dict_format():

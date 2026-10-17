@@ -86,8 +86,8 @@ async def test_dream_one_runs_and_records_snapshot_ts(monkeypatch):
     assert before <= snapshot_ts <= time.time() and notify is False
 
 
-async def test_dream_one_failed_dream_blocks_summary(monkeypatch):
-    """综合失败（bg-task 吞异常、快照时刻未推进）→ False，把关 summary 不压未沉淀历史。"""
+async def test_dream_one_failed_dream_blocks_compact(monkeypatch):
+    """综合失败（bg-task 吞异常、快照时刻未推进）→ False，把关 compact 不压未沉淀历史。"""
     monkeypatch.setattr(dream_lock, "read_thread_dreamed_at", lambda p, t: 0.0)
 
     async def failed_consolidate(*a, **k):

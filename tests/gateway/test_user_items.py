@@ -45,7 +45,7 @@ def test_user_items_undeclared_message_falls_back_to_content():
 
 def test_user_items_declared_empty_yields_no_bubbles():
     # items: [] = 合成消息声明"无可显示"（摘要 carrier / 后台通知）
-    m = HumanMessage(content="<summary>往期摘要</summary>", additional_kwargs=_lumi([]))
+    m = HumanMessage(content="<compact>往期摘要</compact>", additional_kwargs=_lumi([]))
     assert _user_items(m) == []
 
 

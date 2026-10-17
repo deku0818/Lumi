@@ -253,9 +253,9 @@ IM 长会话（一群/一人一个永久 thread）不走 Stop 钩子的增量 dr
 
 1. **Dream（串行）**：遍历 `pool.chat_ids` 里有新消息的 thread，各持自己的运行锁跑长会话
    dream（`consolidate_session_dream`，只综合当前会话、`notify=False` 静默）。忙 thread 整批
-   重试（3 轮 × 180s），仍忙则本轮整个跳过（dream+summary 都不做，留到明天）。
-2. **Summary（并发限流）**：对刚 dream **成功**的 thread 强制压缩历史
-   （`AgentBridge.compact_thread`，见 `summary.md` 离线压缩节），`Semaphore(summary_max_concurrency)`
+   重试（3 轮 × 180s），仍忙则本轮整个跳过（dream+compact 都不做，留到明天）。
+2. **Compact（并发限流）**：对刚 dream **成功**的 thread 强制压缩历史
+   （`AgentBridge.compact_thread`，见 `compact.md` 离线压缩节），`Semaphore(compact_max_concurrency)`
    限流防 429；压缩后 `hub.on_channel_activity` 通知 desktop 刷新。
 
 **判活**：存在落库 ts（`additional_kwargs["lumi"]["ts"]`，`stream_response` 写入的本机时钟毫秒）
@@ -265,9 +265,9 @@ IM 长会话（一群/一人一个永久 thread）不走 Stop 钩子的增量 dr
 
 **次序不变量：先沉淀再压缩，dream 失败不压缩。** 摘要载体继承被压历史中最新一条真人消息的
 ts，压缩不改变判活基线：无人说话的会话不会被误判有新内容，未沉淀就被压掉的窗口也仍判为活跃、
-次日 dream 可见其摘要；次序不变量保护的只是摘要未保留的原文细节。因此 `_dream_one` 的返回值把关 summary 阶段：dream 的异常被 bg-task 收尾吞掉（写
+次日 dream 可见其摘要；次序不变量保护的只是摘要未保留的原文细节。因此 `_dream_one` 的返回值把关 compact 阶段：dream 的异常被 bg-task 收尾吞掉（写
 FAILED 不上抛），成功与否看**快照时刻有没有推进**（`record_thread_dream` 仅综合成功后写入），
-失败的 thread 不进 summary、历史留到明天重试。两个已评估接受的残余路径：手动 `/compact`
+失败的 thread 不进 compact、历史留到明天重试。两个已评估接受的残余路径：手动 `/compact`
 压掉未 dream 的窗口、以及 dream 结束到 compact 之间落库的消息被一起压掉——两者内容都以浓缩
 形式留在摘要载体里，后续 dream（输入含完整 messages）仍可见并沉淀，丢的只是摘要未保留的细节。
 
@@ -366,7 +366,7 @@ desktop `设置 → 渠道`（`ChannelsPanel.tsx`，进 `SettingsDialog`）：�
 | `channels/feishu/scopes.py` | 所需权限与事件常量 + 开放平台直达链接（单一事实源） |
 | `channels/feishu/checks.py` | 诊断结果结构 `Check` + `blocked_tail`（与妙记共用） |
 | `channels/feishu/bridge_pool.py` | 每 thread 常驻 bridge + 运行锁 + thread→chat 映射 |
-| `channels/feishu/daily_dream.py` | 每日定时整理：dream 串行 → summary 并发限流压缩 |
+| `channels/feishu/daily_dream.py` | 每日定时整理：dream 串行 → compact 并发限流压缩 |
 | `channels/feishu/directory.py` | 成员/群名解析（open_id → 显示名）+ 两层缓存 + 启动预热 |
 | `channels/feishu/caching.py` | 通用线程安全懒加载缓存 `CachingDirectory[K, V]` |
 | `channels/feishu/lark_call.py` | lark SDK 同步调用错误样板 |

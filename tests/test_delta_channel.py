@@ -56,7 +56,7 @@ def test_remove_message_deletes():
 def test_overwrite_replaces_whole_history():
     merged = apply_messages_update(
         [HumanMessage("q", id="h1"), AIMessage("a", id="a1")],
-        Overwrite(value=[HumanMessage("<summary>", id="s1")]),
+        Overwrite(value=[HumanMessage("<compact>", id="s1")]),
     )
     assert [m.id for m in merged] == ["s1"]
 

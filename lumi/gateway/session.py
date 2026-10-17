@@ -292,17 +292,25 @@ def _snapshot_model_window(messages: list, thread_id: str) -> tuple[str, int]:
 
 async def _load_history(bridge: AgentBridge, params: dict) -> dict:
     thread_id = params.get("thread_id", "")
-    if bridge.graph is None or not thread_id:
+    graph = bridge.graph
+    if graph is None or not thread_id:
         return {"items": []}
     if params.get("cursor"):
         return await bridge.history_reader.page(
-            bridge.graph,
+            graph,
             thread_id,
             _history_items,
             cursor=params["cursor"],
             limit=params.get("limit", 50),
         )
-    snap = await bridge.graph.aget_state({"configurable": {"thread_id": thread_id}})
+    run_lock = thread_runs.lock_for(thread_id)
+    revision = run_lock.history_revision
+    unavailable = {"items": [], "next_cursor": None, "history_unavailable": True}
+    if run_lock.deleting:
+        return unavailable
+    snap = await graph.aget_state({"configurable": {"thread_id": thread_id}})
+    if run_lock.deleting or run_lock.history_revision != revision:
+        return unavailable
     messages = (snap.values or {}).get("messages", [])
     # usage 随 items 回给前端还原上下文用量指示器（仅存前端内存，重启/切会话后本是空的）；
     # 复用 bridge 末条 AI usage 提取，口径与流式一致。model/context_window 供渠道旁观会话
@@ -313,7 +321,7 @@ async def _load_history(bridge: AgentBridge, params: dict) -> dict:
     )
     return {
         **await bridge.history_reader.page(
-            bridge.graph,
+            graph,
             thread_id,
             _history_items,
             limit=params.get("limit", 50),

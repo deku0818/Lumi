@@ -6,7 +6,7 @@
    的 **UTF-8 字节大小**衡量：又快又简单，对中英混合比"字符数 / token 数"更稳定
    （实测字节/token 跨度约 1.8×，字符/token 约 5×）。
 
-2. 上下文窗口预算（summary 触发、trim）——硬上限真在 token。优先读模型响应的真实
+2. 上下文窗口预算（compact 触发、trim）——硬上限真在 token。优先读模型响应的真实
    ``usage_metadata``（``context_window_tokens``），仅对其后新增消息用 ``estimate_tokens``
    按字节粗估；trim 这类需对任意子集计数的场景直接用 ``content_size`` + ``estimate_tokens``。
 
@@ -94,7 +94,7 @@ def _usage_window_tokens(msg: Any) -> int | None:
 
 
 def context_window_tokens(messages: list) -> int:
-    """当前上下文窗口的 token 数（summary 触发判断用）。
+    """当前上下文窗口的 token 数（compact 触发判断用）。
 
     取最近一条带 usage 的消息的真实窗口，加上其后新增消息的字节估算；没有任何
     usage（首轮 / sub-agent 首调）时整体退化为字节估算。
