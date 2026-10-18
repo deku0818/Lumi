@@ -246,14 +246,23 @@ pre {
 .sidebar-float { background: var(--color-base); }
 
 /* 会话悬停：整行高亮，只有被截断的标题移动；详细信息通过 Portal 展示。 */
+/* 常态让标题延伸到行尾；菜单可见时才预留按钮位置。 */
+.session-row:hover .session-select,
+.session-row:focus-within .session-select,
+.session-row[data-menu-open="true"] .session-select {
+  padding-right: 32px;
+}
 .session-row:hover .session-select,
 .session-row:focus-within .session-select {
   background: color-mix(in srgb, var(--color-ink) 8%, var(--color-base));
   color: var(--color-ink);
   box-shadow: inset 0 0 0 1px color-mix(in srgb, var(--color-ink) 3%, transparent);
 }
-.session-row[data-preview="true"] .session-title-clip {
-  text-overflow: clip;
+/* 仅长标题在右侧渐隐；悬停滚动时左侧也柔化，短标题保持完整清晰。 */
+.session-row[data-title-overflow="true"] .session-title-clip {
+  mask-image: linear-gradient(to right, #000 calc(100% - 14px), transparent);
+}
+.session-row[data-title-overflow="true"][data-preview="true"] .session-title-clip {
   mask-image: linear-gradient(to right, transparent, #000 5px, #000 calc(100% - 10px), transparent);
 }
 .session-hover-card {

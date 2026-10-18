@@ -607,6 +607,7 @@ function SessionRow({
   const [hovered, setHovered] = useState(false)
   const [menuOpen, setMenuOpen] = useState(false)
   const [tooltipOpen, setTooltipOpen] = useState(false)
+  const [titleOverflow, setTitleOverflow] = useState(false)
   const titleClipRef = useRef<HTMLSpanElement>(null)
   const titleTextRef = useRef<HTMLSpanElement>(null)
   const backend = session.backend || 'local'
@@ -617,14 +618,15 @@ function SessionRow({
   useEffect(function syncTitleScroll() {
     const clip = titleClipRef.current
     const text = titleTextRef.current
-    if (!preview || !clip || !text) return
+    if (!clip || !text) return
 
     const reducedMotion = window.matchMedia('(prefers-reduced-motion: reduce)')
     let animation: Animation | undefined
     const restartScroll = function (): void {
       animation?.cancel()
       const distance = text.scrollWidth - clip.clientWidth
-      if (distance <= 0 || reducedMotion.matches) return
+      setTitleOverflow(distance > 0)
+      if (!preview || distance <= 0 || reducedMotion.matches) return
       animation = text.animate(
         [{ transform: 'translateX(0)' }, { transform: `translateX(-${distance}px)` }],
         {
@@ -645,7 +647,7 @@ function SessionRow({
       reducedMotion.removeEventListener('change', restartScroll)
       animation?.cancel()
     }
-  }, [preview, name])
+  }, [preview, name, renaming])
 
   function handleMenuOpenChange(open: boolean): void {
     setMenuOpen(open)
@@ -675,6 +677,8 @@ function SessionRow({
       <div
         className="session-row group relative mb-0.5 rounded-lg"
         data-preview={preview}
+        data-title-overflow={titleOverflow}
+        data-menu-open={menuOpen}
         onPointerEnter={(event) => {
           if (event.pointerType === 'mouse') setHovered(true)
         }}
@@ -685,7 +689,7 @@ function SessionRow({
             onClick={() => onSelect(session.thread_id, backend)}
             onFocus={() => setHovered(true)}
             onBlur={() => setHovered(false)}
-            className={`session-select flex w-full items-center gap-2 pl-3 pr-8 py-[5px] rounded-lg text-[13px] transition ${
+            className={`session-select flex w-full items-center gap-2 pl-3 pr-2 py-[5px] rounded-lg text-[13px] transition-colors ${
               active ? 'bg-surface text-ink' : 'text-ink/80'
             }`}
           >
@@ -704,11 +708,8 @@ function SessionRow({
               ) : (
                 <Users size={13} className="shrink-0 -ml-[7px] text-info/80" />
               ))}
-            <span ref={titleClipRef} className="session-title-clip flex-1 min-w-0 truncate text-left">
-              <span
-                ref={titleTextRef}
-                className={`inline-block align-bottom ${preview ? 'whitespace-nowrap' : 'max-w-full truncate'}`}
-              >
+            <span ref={titleClipRef} className="session-title-clip flex-1 min-w-0 overflow-hidden whitespace-nowrap text-left">
+              <span ref={titleTextRef} className="inline-block align-bottom whitespace-nowrap">
                 {query ? highlight(name, query) : name}
               </span>
             </span>
