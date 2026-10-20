@@ -45,7 +45,15 @@ _LOG_EMIT_INTERVAL = 0.5
 
 # Workflow 子代理禁用的工具：agent / workflow 防递归扇出；ask 在后台 graph 无法 interrupt
 # 会挂；cron / background_task 是编排层专属，子代理不该碰。
-_SUBAGENT_DISABLED = ["agent", "workflow", "ask", "cron", "background_task"]
+_SUBAGENT_DISABLED = [
+    "agent_create",
+    "agent_list",
+    "agent_message",
+    "workflow",
+    "ask",
+    "cron",
+    "background_task",
+]
 
 # 注入脚本的安全内建：去掉 import / open / eval / exec 等，保留编排常用的纯函数。
 _SAFE_BUILTIN_NAMES = (

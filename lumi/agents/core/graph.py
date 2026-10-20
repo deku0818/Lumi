@@ -3,7 +3,6 @@ from pathlib import Path
 
 import aiosqlite
 from langgraph.checkpoint.base import BaseCheckpointSaver
-from langgraph.checkpoint.memory import InMemorySaver
 from langgraph.checkpoint.postgres.aio import AsyncPostgresSaver
 from langgraph.checkpoint.serde.base import SerializerProtocol
 from langgraph.checkpoint.serde.jsonplus import JsonPlusSerializer
@@ -186,16 +185,6 @@ class LumiAgent:
                 # checkpoint_blobs 以 (thread_id, channel, version) 为键，
                 # 无法按 checkpoint_id 精确清理；孤立 blob 无害，
                 # 在 adelete_thread 时会一并删除。
-        elif isinstance(cp, InMemorySaver):
-            # 仅清理根 namespace（""）
-            ns_dict = cp.storage.get(thread_id, {}).get("", {})
-            to_remove = [cid for cid in ns_dict if cid > checkpoint_id]
-            deleted = len(to_remove)
-            for cid in to_remove:
-                del ns_dict[cid]
-            for key in list(cp.writes.keys()):
-                if key[0] == thread_id and key[1] == "" and key[2] > checkpoint_id:
-                    del cp.writes[key]
         else:
             logger.error(
                 "[LumiAgent] aprune_checkpoints_after: 不支持的 checkpointer 类型 %s，"
@@ -264,7 +253,7 @@ async def create_checkpointer(
     """根据指定模式创建 checkpointer 实例
 
     Args:
-        checkpoint: 检查点模式，可选值为 "memory"、"sqlite"、"postgres"、None。
+        checkpoint: 检查点模式，可选值为 "sqlite"、"postgres"、None。
                     None 表示不使用 checkpointer。
 
     Returns:
@@ -300,7 +289,7 @@ async def create_checkpointer(
             await checkpointer.setup()
             return checkpointer
         case _:
-            return InMemorySaver(serde=_checkpoint_serde())
+            raise ValueError(f"不支持的检查点模式: {checkpoint}")
 
 
 def with_memory_instructions(system_prompt: str, project_dir: Path | None) -> str:

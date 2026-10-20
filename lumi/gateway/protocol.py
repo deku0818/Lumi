@@ -30,6 +30,7 @@ class ServerEvent(StrEnum):
     CRON_RUNNING = "cron.running"
     CRON_JOBS = "cron.jobs"
     BG_TASKS_UPDATE = "bg_tasks.update"
+    SUBAGENT_EVENT = "subagent.event"
     CHANNEL_ACTIVITY = "channel.activity"
     SESSION_TITLE = "session.title"
     MCP_STATUS = "mcp.status"

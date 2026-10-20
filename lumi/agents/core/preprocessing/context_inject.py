@@ -56,7 +56,9 @@ from lumi.utils.hashing import short_hash
 
 _SELF_EDIT_TOOLS = frozenset({"write", "edit"})
 
-AGENT_HEADER = "以下 agent 可用于 agent 工具:"
+AGENT_HEADER = (
+    "以下配置可用于 agent_create；已有实例用 agent_list 查询、agent_message 继续联系:"
+)
 SKILL_HEADER = "以下技能可用于 skill 工具:"
 
 
@@ -136,7 +138,7 @@ def _emit_keyed(
 
 
 def _has_agent_tool(tools: list) -> bool:
-    return any(getattr(t, "name", None) == "agent" for t in tools)
+    return any(getattr(t, "name", None) == "agent_create" for t in tools)
 
 
 def _source_map(configs: list, written: set[Path]) -> dict[str, Path]:

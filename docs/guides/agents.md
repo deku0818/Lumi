@@ -2,6 +2,34 @@
 
 Lumi 支持通过 Markdown 文件定义自定义子 Agent，将复杂任务委托给专门的代理自主执行。
 
+主 Agent 通过三个工具管理持久 subagent：
+
+```python
+# 默认 Lumi，或选择现有 Lumi 角色
+agent_create(prompt="调查这个问题")
+agent_create(name="translator", prompt="翻译这段文字")
+
+# 直接启动已安装、已登录的原生 CLI，无需角色 Markdown 文件
+agent_create(name="codex", prompt="调查测试失败的原因")
+agent_create(name="claude", prompt="审查当前改动")
+
+# 可选择其他工作目录，相对路径基于主会话的当前目录
+agent_create(name="claude", cwd="../another-project", prompt="调查这个项目")
+
+agent_list()
+agent_message(agent_id="创建时返回的 ID", prompt="请继续验证第二个结论")
+```
+
+同一实例保留自己的上下文，消息按顺序执行。默认后台运行并自动回传每轮结果，
+主 Agent 无需轮询；`run_in_background=false` 可等待本轮并直接取得结果。
+`agent_id` 是实例 ID，`turn_id` 是轮次 ID。以下文件格式仅用于自定义 Lumi 角色。
+新实例和轮次使用固定 8 字符短 ID（如 `a7k3m9q2`、`t4n8p6r1`），跨重启保持稳定。
+Codex / Claude Code 自己的原生会话 ID 由 Lumi 内部保存，无需模型复制。
+`codex`、`claude` 是保留名称。实例归属主会话，不按目录隔离；`cwd` 默认继承创建时的
+主会话目录，后续续聊始终沿用该实例保存的目录。同一主会话切换目录后，仍可查询和联系
+此前创建的 subagent；不同会话在相同目录工作也不能互相访问对方的实例。
+本版提供只读观测后端接口，尚未修改桌面 UI，也不支持人类直接输入 subagent 消息。
+
 ---
 
 ## 快速开始
@@ -20,7 +48,7 @@ description: 专业翻译助手，支持中英互译
 翻译时保持原文的语气和风格，专业术语需准确。
 ```
 
-启动 Lumi 后，主 Agent 会自动发现并注册该工具，在对话中可直接调用。
+启动 Lumi 后，主 Agent 会自动发现该角色，通过 `agent_create(name="translator", prompt=...)` 使用。
 
 ---
 
@@ -104,5 +132,7 @@ tools:
 - Agent 文件必须以 `---` 开头的 YAML frontmatter 格式，否则会被跳过
 - `name` 字段需唯一，重复名称可能导致不可预期的行为
 - `tools` 字段支持逗号分隔的字符串格式（如 `tools: read, bash`）或 YAML 列表格式
-- 子 Agent 不使用 checkpointer，执行完毕后状态不会持久化
+- subagent 使用独立持久上下文，完成后可通过 `agent_message` 继续对话
+- 外部执行器使用原生 CLI 的认证与上下文；本版不支持人类交互审批，遇到请求会阻塞该轮并回报主 Agent
+- 后端重启不会自动重做未完成任务；主 Agent 可查询状态后向原实例发送新消息
 - 子 Agent 的执行受主 Agent 的 `recursion_limit` 约束

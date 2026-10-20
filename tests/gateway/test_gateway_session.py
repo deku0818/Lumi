@@ -92,6 +92,9 @@ class FakeBridge:
         for evt in self._events:
             yield evt
 
+    async def reconcile_subagent_deliveries(self):
+        pass
+
     # 运行中插话：收件箱用真实现，开轮只记录取走的消息再吐预置事件
     async def interject(self, content, attachments=None, message_id="", **_):
         msg = HumanMessage(content=content, id=message_id or "auto-id")

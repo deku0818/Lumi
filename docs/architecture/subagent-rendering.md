@@ -2,6 +2,10 @@
 
 本文档记录 desktop 前端如何渲染子代理执行反馈。
 
+> 下文为历史 `agent` 工具的内嵌渲染协议。持久 subagent 已改用
+> `agent_create` / `agent_list` / `agent_message`，新增独立历史和 `subagent.event`
+> 只读观测协议；本轮尚未改动 UI。当前后端见 [agents.md](agents.md)。
+
 ---
 
 ## Desktop 前端的子代理渲染

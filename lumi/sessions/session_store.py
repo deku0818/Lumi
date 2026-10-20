@@ -28,7 +28,7 @@ from lumi.agents.core.meta_message import (
 )
 from lumi.sessions.session_meta import load_all
 from lumi.utils.logger import logger
-from lumi.utils.thread_id import CRON_THREAD_PREFIX
+from lumi.utils.thread_id import CRON_THREAD_PREFIX, is_subagent_thread
 
 if TYPE_CHECKING:
     from langgraph.graph.state import CompiledStateGraph
@@ -150,7 +150,7 @@ async def _get_thread_ids(
             rows = await cur.fetchall()
         return [(row["thread_id"], row["checkpoint_id"]) for row in rows]
 
-    # InMemorySaver 等其余类型：alist 在内存中遍历，无反序列化开销。
+    # 注入的其他 checkpointer：通过通用 alist 接口遍历。
     # alist(config=None) 返回所有 checkpoint，按 checkpoint_id DESC，
     # 只取每个 thread 的第一条（最新的）
     seen: set[str] = set()
@@ -224,7 +224,9 @@ async def list_sessions(
     candidates = [
         (tid, cid)
         for tid, cid in pairs
-        if tid not in pending and not tid.startswith(f"{CRON_THREAD_PREFIX}-")
+        if tid not in pending
+        and not tid.startswith(f"{CRON_THREAD_PREFIX}-")
+        and not is_subagent_thread(tid)
     ]
 
     # 分批并发加载 state：串行 aget_state 在会话多时是侧栏刷新的延迟瓶颈；

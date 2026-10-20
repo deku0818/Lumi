@@ -54,6 +54,7 @@ class PermissionConfig:
 
 
 DEFAULT_RULES: tuple[PermissionRule, ...] = (
+    PermissionRule(tool="agent_list", permission=Permission.ALLOW),
     # 框架结构化输出控制流；与其他规则一样可被用户 ask / deny 覆盖。
     PermissionRule(tool="__structured_output__", permission=Permission.ALLOW),
     PermissionRule(tool="cron", permission=Permission.ALLOW),

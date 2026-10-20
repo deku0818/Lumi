@@ -4,6 +4,7 @@ Lumi 的 thread_id 按前缀区分会话来源，各处分流（session 列表�
 
 - desktop / API 会话：``t-<uuid hex>``（:func:`generate_thread_id` 默认前缀）
 - cron 执行会话：``cron-<uuid hex>``（前缀 :data:`CRON_THREAD_PREFIX`）
+- 持久 subagent：``a`` 加 7 位小写字母数字；兼容已有 ``subagent_<uuid hex>``
 - IM 渠道常驻会话：``<渠道前缀><会话 key>``，由 :func:`sanitize_thread_id` 收敛成
   小写字母 / 数字 / ``-``、不超过 63 字符的确定性 id（飞书为 ``feishu-<chat_id>``），
   同一群 / 同一人跨重启落回同一 thread
@@ -36,6 +37,13 @@ def is_channel_thread(thread_id: str) -> bool:
 def is_cron_thread(thread_id: str) -> bool:
     """是否是 cron 执行线程（``cron-`` 前缀）。观测直播 / dream 分流据此判定。"""
     return thread_id.startswith(CRON_THREAD_PREFIX)
+
+
+def is_subagent_thread(thread_id: str) -> bool:
+    """Short instance IDs and previously persisted subagent threads are read-only."""
+    return thread_id.startswith("subagent_") or bool(
+        re.fullmatch(r"a[a-z0-9]{7}", thread_id)
+    )
 
 
 def generate_thread_id(prefix: str = "t") -> str:

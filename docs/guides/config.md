@@ -39,7 +39,7 @@
 }
 ```
 
-字段说明：`max_tokens` 为模型单次输出 token 数的**兜底**值（优先用设置→模型里按模型配的覆盖值，其次 models.dev 探测到的该模型输出上限，两者都没有才用它）；`recursion_limit` 为 Agent 最大执行轮次；`max_delegation_depth` 为子 Agent 委派的最大嵌套层数（主 Agent 为第 0 层，到上限的子 Agent 不再能继续委派，0 = 禁止委派）；`checkpoint` 为检查点存储模式（`sqlite` | `memory` | `postgres`）；`postgres_uri` 为 PostgreSQL 连接 URI（仅 `checkpoint=postgres` 时需要）。
+字段说明：`max_tokens` 为模型单次输出 token 数的**兜底**值（优先用设置→模型里按模型配的覆盖值，其次 models.dev 探测到的该模型输出上限，两者都没有才用它）；`recursion_limit` 为 Agent 最大执行轮次；`max_delegation_depth` 为子 Agent 委派的最大嵌套层数（主 Agent 为第 0 层，到上限的子 Agent 不再能继续委派，0 = 禁止委派）；`checkpoint` 为检查点存储模式（`sqlite` | `postgres`）；`postgres_uri` 为 PostgreSQL 连接 URI（仅 `checkpoint=postgres` 时需要）。
 
 ### vision — 视觉辅助模型
 
@@ -63,7 +63,6 @@
 | 值 | 说明 | 适用场景 |
 |---|---|---|
 | `sqlite` | SQLite 文件持久化（默认），跨重启保留 | 单机部署、需要会话恢复 |
-| `memory` | 内存存储，进程退出后丢失，且同进程内连接间互相隔离 | 开发调试、临时使用 |
 | `postgres` | PostgreSQL 持久化 | 多实例部署、生产环境 |
 
 ---

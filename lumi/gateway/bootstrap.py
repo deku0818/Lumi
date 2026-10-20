@@ -15,6 +15,10 @@ from lumi.agents.core.run_control import drain_all, wait_drained
 from lumi.agents.cron.delivery import DeliveryManager
 from lumi.agents.cron.runtime import setup_cron
 from lumi.agents.runtime.bg_tasks import get_task_registry
+from lumi.agents.runtime.subagents import (
+    close_subagent_services,
+    get_subagent_service,
+)
 from lumi.gateway import office_rpc
 from lumi.gateway.bridge import shutdown_shared_runtime
 from lumi.gateway.broadcast import hub
@@ -54,6 +58,13 @@ async def gateway_process():
     from lumi.utils.config import get_config
 
     get_config().apply_env()
+    from lumi.gateway.subagents import publish_subagent_event
+
+    subagents_runtime = get_subagent_service()
+    subagents_runtime.on_event = lambda agent_id, event: publish_subagent_event(
+        hub, agent_id, event
+    )
+    subagents_runtime.start()
     office_rpc.prune_cache()
 
     # 后台定期刷新 models.dev 模型目录（思考能力 + context_length 数据源）。
@@ -98,6 +109,7 @@ async def gateway_process():
     finally:
         # 宿主已在拆渠道前 drain 过时这里是空操作；没有渠道的宿主靠这一处
         await drain_runs()
+        await close_subagent_services()
         # 断连续接挂着的会话无人再接回：关掉其 bridge（非 daemon 的 aiosqlite 线程
         # 不关，解释器退出时 join 永久阻塞）
         for session in registry.pop_all():

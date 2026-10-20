@@ -40,6 +40,7 @@ from lumi.gateway import (
     office_rpc,
     project_config,
     settings_rpc,
+    subagents,
 )
 from lumi.gateway.bridge import AgentBridge, EventKind, providers
 from lumi.gateway.bridge.core import available_commands
@@ -749,6 +750,9 @@ async def _clear_finished_bg_tasks(session: GatewaySession, params: dict) -> dic
 # 非流式 RPC 分发表。契约测试从 IMPLEMENTED_METHODS 读取实现的方法集合，
 # 新增方法只需在此登记 + events.json 声明，漂移会被测试直接抓住。
 _RPC_HANDLERS = {
+    "list_subagents": subagents.list_subagents,
+    "subagent_history": subagents.subagent_history,
+    "observe_subagent": subagents.observe_subagent,
     "stop": _stop,
     "withdraw_message": _withdraw_message,
     "resume": _resume,
@@ -1265,6 +1269,7 @@ class GatewaySession:
                     return
                 # 只认领归属本连接当前 thread 的通知——队列是进程级共享的，
                 # 按归属认领才不会把其他会话的后台任务通知抢到本会话注入
+                await self._bridge.reconcile_subagent_deliveries()
                 hint = self._bridge.drain_notification_hint(
                     self._bridge.current_thread_id
                 )

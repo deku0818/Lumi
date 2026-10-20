@@ -168,6 +168,14 @@ def reset_task_registry():
     task_registry._registry = None
 
 
+@pytest_asyncio.fixture(autouse=True)
+async def reset_subagent_services():
+    from lumi.agents.runtime.subagents import close_subagent_services
+
+    yield
+    await close_subagent_services()
+
+
 @pytest.fixture(autouse=True)
 def reset_thread_runs(monkeypatch):
     """每个用例有独立事件循环，不复用上个循环里的进程级运行锁。"""

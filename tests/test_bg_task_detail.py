@@ -4,8 +4,6 @@ import asyncio
 from contextlib import suppress
 from pathlib import Path
 
-from langchain_core.messages import AIMessage, HumanMessage, ToolMessage
-
 from lumi.agents.runtime.bg_tasks import (
     BackgroundTaskEntry,
     TaskKind,
@@ -13,7 +11,6 @@ from lumi.agents.runtime.bg_tasks import (
     read_output_tail,
     serialize_task,
 )
-from lumi.agents.tools.providers.agent import _agent_activity, _run_agent_background
 
 
 def _entry(tmp_path: Path, prompt: str = "") -> BackgroundTaskEntry:
@@ -83,115 +80,6 @@ def test_read_output_tail_missing_file(tmp_path):
 
 
 # ---------------------------------------------------------------------------
-# _agent_activity
-# ---------------------------------------------------------------------------
-
-
-def test_activity_reports_pending_tool_calls():
-    state = {
-        "messages": [
-            HumanMessage(content="go"),
-            AIMessage(
-                content="",
-                tool_calls=[
-                    {"name": "grep", "args": {}, "id": "1"},
-                    {"name": "read", "args": {}, "id": "2"},
-                ],
-            ),
-        ]
-    }
-    assert _agent_activity(state) == {"tool": "grep, read", "tools_done": 0}
-
-
-def test_activity_counts_finished_tools_and_clears_tool_when_thinking():
-    state = {
-        "messages": [
-            HumanMessage(content="go"),
-            AIMessage(content="", tool_calls=[{"name": "grep", "args": {}, "id": "1"}]),
-            ToolMessage(content="hit", tool_call_id="1"),
-        ]
-    }
-    assert _agent_activity(state) == {"tool": None, "tools_done": 1}
-
-
-def test_activity_on_empty_state():
-    assert _agent_activity({}) == {"tool": None, "tools_done": 0}
-
-
-# ---------------------------------------------------------------------------
-# _run_agent_background：流式跑完仍写出最终结果，且沿途汇报活动
-# ---------------------------------------------------------------------------
-
-
-class _StubGraph:
-    """按序 yield state 快照的假 graph（values 模式的形状）。"""
-
-    def __init__(self, states: list[dict]) -> None:
-        self._states = states
-        self.calls: list[dict] = []
-
-    async def astream(self, inputs, *, context=None, stream_mode=None):
-        self.calls.append({"inputs": inputs, "stream_mode": stream_mode})
-        for s in self._states:
-            yield s
-
-
-class _StubAgent:
-    def __init__(self, graph) -> None:
-        self.graph = graph
-
-
-async def test_background_agent_streams_activity_and_writes_result(
-    tmp_path, monkeypatch
-):
-    from lumi.agents.runtime.bg_tasks import get_task_registry
-
-    registry = get_task_registry()
-    entry = _entry(tmp_path)
-    registry.register(entry)
-
-    states = [
-        {"messages": [HumanMessage(content="go")]},
-        {
-            "messages": [
-                HumanMessage(content="go"),
-                AIMessage(
-                    content="", tool_calls=[{"name": "grep", "args": {}, "id": "1"}]
-                ),
-            ]
-        },
-        {
-            "messages": [
-                HumanMessage(content="go"),
-                AIMessage(
-                    content="", tool_calls=[{"name": "grep", "args": {}, "id": "1"}]
-                ),
-                ToolMessage(content="hit", tool_call_id="1"),
-                AIMessage(content="结论：权限走 Deny→Allow"),
-            ]
-        },
-    ]
-    graph = _StubGraph(states)
-
-    from lumi.agents.core.state import LumiAgentContext
-    from lumi.agents.tools.providers.agent import create_subagent
-
-    async def create_agent(**kwargs):
-        return _StubAgent(graph), LumiAgentContext()
-
-    monkeypatch.setattr("lumi.agents.core.graph.create_agent", create_agent)
-    run = await create_subagent(LumiAgentContext(), [])
-    await _run_agent_background(entry.task_id, run, "go", entry.output_file)
-
-    # 最后一个快照即最终状态：结果照旧落盘
-    assert entry.output_file.read_text(encoding="utf-8") == "结论：权限走 Deny→Allow"
-    assert registry.get(entry.task_id).status == TaskStatus.COMPLETED
-    # 流式跑，且最后一次汇报的是终态活动（工具已收完 → tool 为空、tools_done=1）
-    assert graph.calls[0]["stream_mode"] == "values"
-    assert registry.get(entry.task_id).progress == {"tool": None, "tools_done": 1}
-
-
-# ---------------------------------------------------------------------------
 # 进度快照里的可增长字段都必须有界（同一份快照会被反复广播给每条连接）
 # ---------------------------------------------------------------------------
 
@@ -206,20 +94,6 @@ def test_workflow_last_log_capped():
     engine._log("z" * 5000)
 
     assert len(seen[-1]["last_log"]) == _LAST_LOG_LIMIT
-
-
-def test_agent_tools_done_never_goes_backwards():
-    """Compact 压缩会 RemoveMessage 删历史；只数当前快照的话计数会当场往回跳。"""
-    before = {
-        "messages": [
-            ToolMessage(content="a", tool_call_id="1"),
-            ToolMessage(content="b", tool_call_id="2"),
-            ToolMessage(content="c", tool_call_id="3"),
-        ]
-    }
-    assert _agent_activity(before)["tools_done"] == 3
-    after = {"messages": [ToolMessage(content="compact", tool_call_id="9")]}
-    assert _agent_activity(after, 3)["tools_done"] == 3
 
 
 async def test_workflow_task_carries_description_as_intent(tmp_path, monkeypatch):

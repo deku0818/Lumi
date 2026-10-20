@@ -121,7 +121,7 @@ async def test_first_turn_full_injection_and_marker():
 
 
 async def test_agents_gated_by_agent_tool():
-    agent_tool = SimpleNamespace(name="agent")
+    agent_tool = SimpleNamespace(name="agent_create")
     agents = [_cfg("zeta", "z"), _cfg("alpha", "a")]
     with _patched(agents=agents):
         cmd = await _run([HumanMessage(content="hi")], _runtime(tools=[agent_tool]))
@@ -395,7 +395,7 @@ async def test_reinjects_into_pending_human_after_mid_turn_compaction():
 async def test_announced_lists_use_session_project_like_the_tools():
     # 回归：注入按项目目录（无项目时是进程 cwd）列技能 / 子代理，skill / agent 工具却按
     # 会话 context.project_dir 查——CLI 等无项目场景宣告了 cwd 下的技能，调用时却「不存在」
-    rt = _runtime(tools=[SimpleNamespace(name="agent")])
+    rt = _runtime(tools=[SimpleNamespace(name="agent_create")])
     rt.context.project_dir = None
     with (
         _patched() as _,

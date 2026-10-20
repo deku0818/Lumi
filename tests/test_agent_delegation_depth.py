@@ -1,7 +1,7 @@
 """agent 工具委派深度限制测试
 
 覆盖：
-- _child_tools 纯函数门控（按 child_depth/max_depth 决定是否保留 agent 工具）
+- _subagent_tools 纯函数门控（按 subagent_depth/max_depth 决定是否保留 agent 工具）
 - 配置默认 max_delegation_depth == 3
 - agent 工具达上限时拒绝委派
 - 委派时 depth 逐层 +1 传播到子代理 inputs，且子代理工具集按深度门控
@@ -10,13 +10,16 @@
 from __future__ import annotations
 
 from types import SimpleNamespace
-from unittest.mock import patch
 
 import pytest
 from langchain_core.messages import AIMessage
 
-from lumi.agents.tools.loader import AgentConfig
-from lumi.agents.tools.providers.agent import _child_tools, agent
+from lumi.agents.tools.providers.agent import (
+    _subagent_tools,
+    agent_create,
+    agent_list,
+    agent_message,
+)
 from lumi.agents.tools.providers.skill import skill
 from lumi.agents.tools.providers.workflow import workflow
 from lumi.utils.config import get_config
@@ -34,24 +37,30 @@ def _names(tools: list) -> set[str]:
 # --- 纯函数门控 ---
 
 
-def test_child_tools_keeps_agent_below_limit() -> None:
-    tools = [_FakeTool("agent"), _FakeTool("bash"), _FakeTool("read")]
-    assert "agent" in _names(_child_tools(tools, child_depth=1, max_depth=3))
-    assert "agent" in _names(_child_tools(tools, child_depth=2, max_depth=3))
+def test_subagent_tools_keeps_agent_below_limit() -> None:
+    tools = [_FakeTool("agent_create"), _FakeTool("bash"), _FakeTool("read")]
+    assert "agent_create" in _names(
+        _subagent_tools(tools, subagent_depth=1, max_depth=3)
+    )
+    assert "agent_create" in _names(
+        _subagent_tools(tools, subagent_depth=2, max_depth=3)
+    )
 
 
-def test_child_tools_strips_agent_at_limit() -> None:
-    tools = [_FakeTool("agent"), _FakeTool("bash")]
-    # child_depth 到顶：子代理不再具备 agent 工具，但其它工具保留
-    stripped = _child_tools(tools, child_depth=3, max_depth=3)
-    assert "agent" not in _names(stripped)
+def test_subagent_tools_strips_agent_at_limit() -> None:
+    tools = [_FakeTool("agent_create"), _FakeTool("bash")]
+    # subagent_depth 到顶：子代理不再具备 agent 工具，但其它工具保留
+    stripped = _subagent_tools(tools, subagent_depth=3, max_depth=3)
+    assert "agent_create" not in _names(stripped)
     assert "bash" in _names(stripped)
 
 
-def test_child_tools_max_depth_one_strips_immediately() -> None:
-    tools = [_FakeTool("agent"), _FakeTool("bash")]
+def test_subagent_tools_max_depth_one_strips_immediately() -> None:
+    tools = [_FakeTool("agent_create"), _FakeTool("bash")]
     # max_depth=1：主 agent 委派出的第 1 层子代理即不能再委派
-    assert "agent" not in _names(_child_tools(tools, child_depth=1, max_depth=1))
+    assert "agent_create" not in _names(
+        _subagent_tools(tools, subagent_depth=1, max_depth=1)
+    )
 
 
 # --- 配置默认值与校验 ---
@@ -98,99 +107,8 @@ def _make_runtime(depth: int) -> SimpleNamespace:
 async def test_refuses_when_at_depth_limit() -> None:
     """current_depth >= max_depth 时直接拒绝，不创建子代理。"""
     runtime = _make_runtime(depth=3)  # 默认 max=3 → 3>=3
-    result = await agent.coroutine(name="worker", prompt="干活", runtime=runtime)
+    result = await agent_create.coroutine(name="worker", prompt="干活", runtime=runtime)
     assert "最大委派层数" in result
-
-
-def _patch_agent_internals(captured: dict):
-    """patch agent 工具的重依赖：load_agents / get_tools / create_agent / run_with_shell。"""
-
-    async def fake_get_tools(tools=None, project_dir=None, **kwargs):
-        return [_FakeTool("agent"), _FakeTool("bash")]
-
-    async def fake_ainvoke(inputs, context=None):
-        captured["inputs"] = inputs
-        return {"messages": [AIMessage(content="done")]}
-
-    async def fake_create_agent(**kwargs):
-        captured["tools"] = kwargs["tools"]
-        lumi_agent = SimpleNamespace(graph=SimpleNamespace(ainvoke=fake_ainvoke))
-        return lumi_agent, SimpleNamespace()
-
-    async def fake_run_with_shell(key, coro):
-        return await coro
-
-    cfg = AgentConfig(name="worker", description="d", system_prompt="p")
-    return (
-        # agent 工具经按项目缓存的 detector 取配置（lazy import），stub 掉实例获取
-        patch(
-            "lumi.agents.core.preprocessing.agent_detector.AgentChangeDetector.get_instance",
-            return_value=SimpleNamespace(peek=lambda: [cfg]),
-        ),
-        patch(
-            "lumi.agents.tools.get_tools",
-            side_effect=fake_get_tools,
-        ),
-        patch("lumi.agents.core.graph.create_agent", side_effect=fake_create_agent),
-        patch(
-            "lumi.agents.tools.providers.agent.run_with_shell",
-            side_effect=fake_run_with_shell,
-        ),
-    )
-
-
-async def test_propagates_incremented_depth_and_keeps_agent_tool() -> None:
-    """depth=1 委派：子代理 inputs.depth==2，且 child_depth=2<3 保留 agent 工具。"""
-    captured: dict = {}
-    p1, p2, p3, p4 = _patch_agent_internals(captured)
-    with p1, p2, p3, p4:
-        await agent.coroutine(
-            name="worker",
-            prompt="干活",
-            runtime=_make_runtime(depth=1),
-            run_in_background=False,
-        )
-
-    assert captured["inputs"]["depth"] == 2
-    assert "agent" in _names(captured["tools"])
-
-
-async def test_strips_agent_tool_for_last_allowed_layer() -> None:
-    """depth=2 委派：child_depth=3>=3，子代理 inputs.depth==3 但不再带 agent 工具。"""
-    captured: dict = {}
-    p1, p2, p3, p4 = _patch_agent_internals(captured)
-    with p1, p2, p3, p4:
-        await agent.coroutine(
-            name="worker",
-            prompt="干活",
-            runtime=_make_runtime(depth=2),
-            run_in_background=False,
-        )
-
-    assert captured["inputs"]["depth"] == 3
-    assert "agent" not in _names(captured["tools"])
-
-
-async def test_defaults_to_background() -> None:
-    """不传 run_in_background 时默认走后台路径。"""
-    captured: dict = {}
-    p1, p2, p3, p4 = _patch_agent_internals(captured)
-    with (
-        p1,
-        p2,
-        p3,
-        p4,
-        patch(
-            "lumi.agents.tools.providers.agent._start_background_agent",
-            return_value="bg started",
-        ) as bg,
-    ):
-        result = await agent.coroutine(
-            name="worker", prompt="干活", runtime=_make_runtime(depth=0)
-        )
-
-    bg.assert_called_once()
-    assert result == "bg started"
 
 
 async def _invoke_via_toolnode(tool_obj, args: dict) -> str:
@@ -215,7 +133,9 @@ async def _invoke_via_toolnode(tool_obj, args: dict) -> str:
 @pytest.mark.parametrize(
     "tool_obj, args, marker",
     [
-        (agent, {"name": "__nonexistent__", "prompt": "x"}, "not found"),
+        (agent_create, {"name": "__nonexistent__", "prompt": "x"}, "not found"),
+        (agent_list, {}, "thread_id"),
+        (agent_message, {"agent_id": "__nonexistent__", "prompt": "x"}, "不存在"),
         (workflow, {}, "script"),
         (skill, {"name": "__nonexistent__"}, "不存在"),
     ],
@@ -263,54 +183,10 @@ def test_collect_tools_rejects_stringized_runtime() -> None:
 # --- 子代理的审批模式与工具集（回归）---
 
 
-async def test_subagent_has_no_ask_tool() -> None:
-    """子代理拿不到 ask：IM 渠道无处作答，后台无人应答，前台也不该绕过主 agent 直接问用户。"""
-    captured: dict = {}
-    p1, p2, p3, p4 = _patch_agent_internals(captured)
-
-    async def tools_with_ask(tools=None, project_dir=None, **kwargs):
-        return [_FakeTool("agent"), _FakeTool("bash"), _FakeTool("ask")]
-
-    with p1, p2 as get_tools, p3, p4:
-        get_tools.side_effect = tools_with_ask
-        await agent.coroutine(
-            name="worker",
-            prompt="干活",
-            runtime=_make_runtime(depth=0),
-            run_in_background=False,
-        )
-    assert "ask" not in _names(captured["tools"])
-    assert "bash" in _names(captured["tools"])
-
-
-async def test_background_agent_leaves_mode_to_unattended_routing() -> None:
-    """后台子代理无审批通道、无父模式继承；由路由读取全局无人值守配置。"""
-    captured: dict = {}
-    p1, p2, p3, p4 = _patch_agent_internals(captured)
-    context = SimpleNamespace(tool_mode="default", approval_broker=None)
-
-    async def fake_create_agent(**kwargs):
-        return SimpleNamespace(graph=None), context
-
-    with (
-        p1,
-        p2,
-        p3 as create_agent,
-        p4,
-        patch("lumi.agents.tools.providers.agent._run_agent_background"),
-    ):
-        create_agent.side_effect = fake_create_agent
-        await agent.coroutine(
-            name="worker", prompt="干活", runtime=_make_runtime(depth=0)
-        )
-    assert context.tool_mode == "default"
-    assert context.approval_broker is None
-
-
-def test_child_tools_strips_workflow_at_limit() -> None:
+def test_subagent_tools_strips_workflow_at_limit() -> None:
     # 回归：到顶的子代理曾仍带 workflow 工具，委派层数上限管不到 workflow 扇出
-    tools = [_FakeTool("agent"), _FakeTool("workflow"), _FakeTool("bash")]
-    assert _names(_child_tools(tools, child_depth=3, max_depth=3)) == {"bash"}
+    tools = [_FakeTool("agent_create"), _FakeTool("workflow"), _FakeTool("bash")]
+    assert _names(_subagent_tools(tools, subagent_depth=3, max_depth=3)) == {"bash"}
 
 
 async def test_workflow_refused_at_depth_limit() -> None:
@@ -340,50 +216,3 @@ def test_foreground_subagent_follows_parent_mode_live() -> None:
         route_decision(call, effective_tool_mode(child), child.permission_engine)
         == "HumanApproval"
     )
-
-
-async def test_foreground_subagent_links_parent_mode() -> None:
-    captured: dict = {}
-    p1, p2, p3, p4 = _patch_agent_internals(captured)
-    context = SimpleNamespace()
-
-    async def fake_create_agent(**kwargs):
-        async def ainvoke(inputs, context=None):
-            return {"messages": [AIMessage(content="done")]}
-
-        return SimpleNamespace(graph=SimpleNamespace(ainvoke=ainvoke)), context
-
-    runtime = _make_runtime(depth=0)
-    with p1, p2, p3 as create_agent, p4:
-        create_agent.side_effect = fake_create_agent
-        await agent.coroutine(
-            name="worker", prompt="x", runtime=runtime, run_in_background=False
-        )
-    assert context.mode_parent is runtime.context
-
-
-async def test_subagent_result_is_text_only() -> None:
-    """回归：子代理最终消息只有 thinking 块时，思考原文（带签名）被字符串化交给父代理；
-    多个 text 块时只取了第一个。"""
-    captured: dict = {}
-    p1, p2, p3, p4 = _patch_agent_internals(captured)
-    blocks = [
-        {"type": "thinking", "thinking": "SECRET", "signature": "sig"},
-        {"type": "text", "text": "PART1"},
-        {"type": "text", "text": "PART2"},
-    ]
-
-    async def fake_create_agent(**kwargs):
-        async def ainvoke(inputs, context=None):
-            return {"messages": [AIMessage(content=blocks)]}
-
-        return SimpleNamespace(
-            graph=SimpleNamespace(ainvoke=ainvoke)
-        ), SimpleNamespace()
-
-    with p1, p2, p3 as create_agent, p4:
-        create_agent.side_effect = fake_create_agent
-        out = await agent.coroutine(
-            name="worker", prompt="x", runtime=_make_runtime(0), run_in_background=False
-        )
-    assert out == "PART1\nPART2"

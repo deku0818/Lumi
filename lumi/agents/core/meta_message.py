@@ -246,6 +246,21 @@ def visible_user_text(msg: object) -> str:
     return extract_text_content(strip_injected_prefix(msg)).strip()
 
 
+def extract_thinking_content(message: BaseMessage) -> str:
+    """OpenAI reasoning_content and Anthropic thinking share one display contract."""
+    kwargs = getattr(message, "additional_kwargs", None) or {}
+    if reasoning := kwargs.get("reasoning_content"):
+        return reasoning
+    content = getattr(message, "content", None)
+    if isinstance(content, list):
+        return "".join(
+            item.get("thinking", "")
+            for item in content
+            if isinstance(item, dict) and item.get("type") == "thinking"
+        )
+    return ""
+
+
 def extract_text_content(content: str | list) -> str:
     """从消息 content 中提取纯文本。
 

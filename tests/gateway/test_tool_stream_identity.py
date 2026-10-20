@@ -10,6 +10,7 @@ from langgraph.graph import END, START, StateGraph
 
 from lumi.agents.core.nodes import tool_executor
 from lumi.agents.core.state import LumiAgentContext, LumiAgentState
+from lumi.agents.runtime.subagents.lumi import translate_lumi_event
 from lumi.agents.tools.providers.bash import bash
 from lumi.gateway.bridge import AgentBridge, EventKind
 from lumi.gateway.session import _history_items
@@ -32,7 +33,7 @@ async def test_timeout_finishes_same_tool_and_survives_history_reload(project_tm
         "args": {"command": "sleep 5", "description": "超时回归", "timeout": 0.05},
         "id": "call-timeout",
     }
-    events = []
+    events, subagent_events = [], []
     async with asyncio.timeout(5):
         async for event in graph.astream_events(
             {"messages": [AIMessage(content="", tool_calls=[call])]},
@@ -41,6 +42,9 @@ async def test_timeout_finishes_same_tool_and_survives_history_reload(project_tm
             version="v2",
         ):
             events.extend(bridge._translate_event(event))
+            translate_lumi_event(
+                event, lambda kind, payload: subagent_events.append((kind, payload))
+            )
     tools = [
         e for e in events if e.kind in (EventKind.TOOL_START, EventKind.TOOL_COMPLETE)
     ]
@@ -48,6 +52,15 @@ async def test_timeout_finishes_same_tool_and_survives_history_reload(project_tm
     assert tools[-1].is_error
     assert "Timeout" in tools[-1].output
     assert "0.05" in tools[-1].output
+    subagent_tools = [
+        payload
+        for kind, payload in subagent_events
+        if kind in ("tool.start", "tool.complete")
+    ]
+    assert [event["tool_call_id"] for event in subagent_tools] == [call["id"]] * 2
+    assert subagent_tools[0]["args"] == tools[0].args == call["args"]
+    assert subagent_tools[-1]["is_error"]
+    assert "Timeout" in subagent_tools[-1]["output"]
     messages = (await graph.aget_state(config)).values["messages"]
     assert isinstance(messages[-1], ToolMessage)
     assert messages[-1].status == "error"

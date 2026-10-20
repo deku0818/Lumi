@@ -1,51 +1,18 @@
-"""Agent 工具提供者 - 将复杂任务委托给子代理执行。"""
+"""Create, discover and continue persistent subagent sessions; workflow keeps its temporary runner."""
 
-# 注意：本模块**不能**加 `from __future__ import annotations`。它会把 `runtime: ToolRuntime`
-# 注解字符串化，导致 langchain 在工具调用时认不出该注入参数、不注入 → "missing runtime"。
-# 任何声明 `runtime: ToolRuntime` 注入参数的工具模块同理（见回归测试 test_runtime_injected_via_toolnode）。
-
-import asyncio
-import time
+# ToolRuntime must remain a concrete annotation for LangChain's parameter injection.
+import json
 from pathlib import Path
 
-from langchain_core.messages import HumanMessage, ToolMessage
+from langchain_core.messages import HumanMessage
 from langchain_core.tools import tool
 from langgraph.prebuilt.tool_node import ToolRuntime
 from pydantic import BaseModel, Field
 
-from lumi.agents.core.meta_message import extract_text_content
-from lumi.agents.runtime.bg_tasks import (
-    BackgroundTaskEntry,
-    TaskKind,
-    TaskStatus,
-    bg_tasks_dir,
-    get_task_registry,
-    make_bg_done_callback,
-    new_task_id,
-    run_background_task,
-)
+from lumi.agents.runtime.bg_tasks import current_thread_id, new_task_id
 from lumi.agents.runtime.shell_session import run_with_shell
+from lumi.agents.runtime.subagents import get_subagent_service
 from lumi.utils.config import get_config
-
-_AGENT_DESCRIPTION = """启动一个专门的子代理（独立上下文）来自主完成复杂任务。每种代理类型都具备特定的能力和可用工具。
-
-## 如何调用：
-- 用本工具并指定 name（代理名称）与 prompt（交给它的任务描述）
-
-## 何时使用：
-- 当任务匹配可用的代理类型、有可并行运行的独立工作，或回答问题需要跨多个文件查阅时，请使用此功能
-- 委托处理后，你将获得结论，而非原始文件内容。若只需查找单一事实且已知具体文件、符号或值，请直接搜索
-- 一旦委托就不要再自行执行，请等待结果返回
-- 多个互不依赖的任务应在同一条消息里一次性并行派出，不要派一个等一个
-
-## 何时不用：
-- 单点查询或你自己两三步就能完成的事——直接做比派代理更快
-
-## 注意事项：
-- 可用代理列表会在对话中的 `<system-reminder>` 里给出，且随项目动态变化——始终以最新列表为准，列表之外的代理无法调用
-- 子代理默认在后台运行，完成时会通知你
-- 仅当单个子任务的结果是继续推进的唯一前提，才传 run_in_background=false 以同步方式运行
-- 子代理的最终消息将作为工具结果返回给你，不会展示给用户——请转达关键信息"""
 
 
 async def create_subagent(
@@ -57,7 +24,7 @@ async def create_subagent(
     depth: int = 1,
     interactive: bool = False,
 ):
-    """子代理的唯一构建入口（agent 工具与 workflow 共用；工具集由调用方按各自规则选好）。
+    """Workflow 等临时执行单元的构建入口；持久 subagent 由运行时执行器管理。
 
     复用父 PermissionEngine 与项目根（共享权限规则）；不持久化、不带持久记忆
     （临时执行单元保持上下文干净，AGENTS.md 仍按系统提示词规则按需读取）；<env> 的
@@ -100,159 +67,158 @@ async def create_subagent(
     return run
 
 
-def _child_tools(all_tools: list, child_depth: int, max_depth: int) -> list:
+def _subagent_tools(all_tools: list, subagent_depth: int, max_depth: int) -> list:
     """子代理工具集：不含 ask（向用户提问只归主 agent——IM 渠道无处作答、后台无人应答）；
-    未达委派上限保留 agent / workflow（可继续往下委派），否则剔除以防无限递归。"""
-    excluded = {"ask"} if child_depth < max_depth else {"ask", "agent", "workflow"}
+    未达委派上限保留 agent_create / workflow（可继续往下委派），否则剔除以防无限递归。"""
+    excluded = (
+        {"ask"} if subagent_depth < max_depth else {"ask", "agent_create", "workflow"}
+    )
     return [t for t in all_tools if t.name not in excluded]
 
 
-class AgentInput(BaseModel):
-    """Agent 工具的输入参数"""
-
-    name: str = Field(description="用于此任务的 agent 名称")
-    prompt: str = Field(description="交给 agent 执行的任务的描述")
+class AgentCreateInput(BaseModel):
+    name: str | None = Field(
+        default=None,
+        description="codex / claude 直接启动对应原生 CLI；其他名称选择 Lumi 角色，省略使用默认 Lumi",
+    )
+    cwd: str | None = Field(
+        default=None,
+        min_length=1,
+        description="实例工作目录；默认继承主会话当前目录，相对路径基于该目录解析，续聊保持不变",
+    )
+    prompt: str = Field(min_length=1, description="第一轮任务：目标、背景和期望产出")
     run_in_background: bool = Field(
-        default=True,
-        description="默认后台运行，完成后自动收到含结果的通知；仅当该结果是继续推进的唯一前提且期间无事可做时，才设为 false 以同步方式运行",
+        default=True, description="默认后台执行并自动回传结果；false 等待本轮结果"
     )
 
 
-@tool(description=_AGENT_DESCRIPTION, args_schema=AgentInput)
-async def agent(
-    name: str,
+class AgentMessageInput(BaseModel):
+    agent_id: str = Field(description="agent_create 或 agent_list 返回的稳定实例 ID")
+    prompt: str = Field(min_length=1, description="发给原子会话的新任务或补查要求")
+    run_in_background: bool = Field(
+        default=True, description="默认后台执行；已有任务运行时排队，不并发执行两轮"
+    )
+
+
+def _parent_id(runtime: ToolRuntime) -> str:
+    config = getattr(runtime, "config", None) or {}
+    return config.get("configurable", {}).get("thread_id") or current_thread_id.get()
+
+
+def _working_directory(runtime: ToolRuntime, cwd: str | None) -> Path:
+    context = runtime.context
+    project = context.project_dir
+    if project is None and context.permission_engine is not None:
+        project = context.permission_engine.project_dir
+    base = Path(project or Path.cwd()).resolve()
+    directory = Path(cwd).expanduser() if cwd is not None else base
+    return (base / directory).resolve()
+
+
+def _request_key(runtime: ToolRuntime, parent_id: str, operation: str) -> str | None:
+    call_id = getattr(runtime, "tool_call_id", None)
+    return f"{parent_id}:{operation}:{call_id}" if call_id else None
+
+
+def _json(value: object) -> str:
+    return json.dumps(value, ensure_ascii=False)
+
+
+@tool(
+    args_schema=AgentCreateInput,
+    description="""创建独立上下文的可持续子代理并派出第一轮任务。
+name 为 codex / claude 时直接调用原生 CLI；其他名称选择 system-reminder 中的 Lumi 角色，省略使用默认 Lumi。
+cwd 默认继承主会话当前目录，可显式指定其他目录；目录绑定实例，后续 agent_message 沿用。
+实例归属当前主会话，主会话切换工作目录不影响查询、续聊和结果回传。
+返回稳定 agent_id 和本轮 turn_id/task_id。默认后台运行，完成自动收到对应轮次的结果；
+期间继续其他工作，不要轮询。需要追问时用 agent_message 联系原实例，不要重复创建。
+仅当该结果是继续工作的唯一前提且期间无事可做时，设 run_in_background=false。
+子代理看不到主对话，prompt 应写清目标与背景。只做两三步的单点查询请直接执行。""",
+)
+async def agent_create(
+    prompt: str,
+    runtime: ToolRuntime,
+    name: str | None = None,
+    cwd: str | None = None,
+    run_in_background: bool = True,
+) -> str:
+    """Create a named subagent instance; new instance identity is independent of its first task."""
+    from lumi.agents.core.preprocessing.agent_detector import AgentChangeDetector
+
+    depth = runtime.state.get("depth", 0)
+    maximum = get_config().config.agents.max_delegation_depth
+    if depth >= maximum:
+        return f"已达到最大委派层数（{maximum}），无法再委派子代理"
+    executor = {"codex": "codex", "claude": "claude_code"}.get(name, "lumi")
+    definition = {"name": name or "lumi", "executor": executor, "system_prompt": ""}
+    if name and executor == "lumi":
+        configs = AgentChangeDetector.get_instance(runtime.context.project_dir).peek()
+        profile = next((config for config in configs if config.name == name), None)
+        if profile is None:
+            return f"Agent '{name}' not found"
+        definition.update(profile.model_dump())
+    parent_id = _parent_id(runtime)
+    try:
+        working_dir = _working_directory(runtime, cwd)
+        service = get_subagent_service()
+        receipt = service.create(
+            parent_id,
+            str(working_dir),
+            definition,
+            depth + 1,
+            prompt,
+            notify=run_in_background,
+            request_key=_request_key(runtime, parent_id, "create"),
+            env_extra=runtime.context.env_extra,
+            tool_mode=runtime.context.tool_mode,
+        )
+        if not run_in_background:
+            receipt = await service.wait(receipt["turn_id"])
+        return _json(receipt)
+    except (ValueError, RuntimeError) as error:
+        return _json({"error": str(error)})
+
+
+@tool(
+    description="""列出当前会话已创建的子代理实例（不是可创建的配置类型）。
+返回稳定 agent_id、执行器、任务状态、最近轮次和结果摘要。只读取元数据，不启动执行器。
+用于重新定位已有实例、压缩上下文后恢复联系；完成会自动通知，不要反复轮询等待。"""
+)
+async def agent_list(runtime: ToolRuntime) -> str:
+    """Read subagents owned by the caller, without invoking a model or restoring a process."""
+    parent_id = _parent_id(runtime)
+    if not parent_id:
+        return _json({"error": "需要当前会话 thread_id"})
+    return _json({"agents": get_subagent_service().list_agents(parent_id)})
+
+
+@tool(
+    args_schema=AgentMessageInput,
+    description="""向已有子代理继续发送消息，保留它此前的上下文。
+agent_id 必须来自当前会话的 agent_create 或 agent_list。统一支持 Lumi、Codex、Claude Code。
+每次消息分配独立 turn_id；原子代理正在运行时排队，空闲后执行。
+默认后台运行并自动回传本轮结果，不要轮询。不需要重新创建实例。
+仅当结果是继续推进的唯一前提时设 run_in_background=false，等待本轮结果。""",
+)
+async def agent_message(
+    agent_id: str,
     prompt: str,
     runtime: ToolRuntime,
     run_in_background: bool = True,
 ) -> str:
-    """Agent工具 - 委托给 LumiAgent 执行"""
-
-    # 委派深度网关：当前 agent 已达上限则拒绝再委派（主 agent depth=0）
-    current_depth: int = runtime.state.get("depth", 0)
-    max_depth: int = get_config().config.agents.max_delegation_depth
-    if current_depth >= max_depth:
-        return f"已达到最大委派层数（{max_depth}），无法再委派子代理"
-    child_depth = current_depth + 1
-
-    # 走按项目缓存的 detector（与上下文注入的 agent 列表同源），文件未变不重解析
-    from lumi.agents.core.preprocessing.agent_detector import AgentChangeDetector
-
-    agent_configs = AgentChangeDetector.get_instance(runtime.context.project_dir).peek()
-    agent_config = next((a for a in agent_configs if a.name == name), None)
-    if agent_config is None:
-        return f"Agent '{name}' not found"
-
-    # 子代理工具：未达上限保留 agent 工具（可继续委派），到顶则剔除。
-    # 项目随父 context 显式传递；get_tools 默认等冷池就位（子代理无轮首刷新可自愈）。
-    # lazy import：providers 不能顶层引 tools 包（包 __init__ 反向注册本模块，成环）
-    from lumi.agents.tools import get_tools
-
-    all_tools = await get_tools(
-        tools=agent_config.tools or None, project_dir=runtime.context.project_dir
-    )
-    run = await create_subagent(
-        runtime.context,
-        _child_tools(all_tools, child_depth, max_depth),
-        system_prompt=agent_config.system_prompt,
-        model_name=agent_config.model or None,
-        depth=child_depth,
-        interactive=not run_in_background,
-    )
-
-    if run_in_background:
-        return _start_background_agent(name, prompt, run)
-
-    invoke_result = await run(prompt)
-
-    content = invoke_result["messages"][-1].content if invoke_result["messages"] else ""
-    return extract_text_content(content)
-
-
-# ---------------------------------------------------------------------------
-# Background agent helpers
-# ---------------------------------------------------------------------------
-
-
-def _start_background_agent(
-    name: str,
-    prompt: str,
-    run,
-) -> str:
-    """注册后台 Agent 任务并 fire-and-forget 启动。"""
-    task_id = new_task_id("bg_")
-
-    output_file = bg_tasks_dir() / f"{task_id}.txt"
-
-    entry = BackgroundTaskEntry(
-        task_id=task_id,
-        kind=TaskKind.AGENT,
-        status=TaskStatus.RUNNING,
-        label=f"agent:{name}",
-        started_at=time.time(),
-        output_file=output_file,
-        agent_name=name,
-        prompt=prompt,
-    )
-
-    registry = get_task_registry()
-    registry.register(entry)
-
-    async_task = asyncio.create_task(
-        _run_agent_background(task_id, run, prompt, output_file)
-    )
-    entry.async_task = async_task
-    async_task.add_done_callback(make_bg_done_callback(task_id, "agent bg"))
-
-    return (
-        f"后台代理任务已启动\n"
-        f"Task ID: {task_id}\n"
-        f"Agent: {name}\n"
-        f"Output File: {output_file.resolve()}\n"
-        f"\n"
-        f"完成时你会自动收到通知（含结果）。在此之前**不要**轮询状态或读取 Output File，"
-        f"等通知即可——期间请继续做别的事。\n"
-    )
-
-
-def _agent_activity(state: dict, tools_done: int = 0) -> dict:
-    """从状态快照抽后台代理的活动摘要（drawer 卡片的「它正在做什么」）。
-
-    后台代理的 output_file 完成时才写，运行中唯一能看的就是这个：``tool`` 为当前发起
-    的工具调用（模型思考中 / 刚收完工具结果时为 None），``tools_done`` 为已完成的工具数。
-
-    计数取 ``max(已知值, 本快照所见)``：Compact 压缩会 Overwrite 整段替换掉历史，
-    只数当前快照的话，长任务压缩后计数会当着用户的面往回跳。
-    """
-    messages = state.get("messages") or []
-    last = messages[-1] if messages else None
-    calls = getattr(last, "tool_calls", None) or []
-    return {
-        "tool": ", ".join(c["name"] for c in calls) or None,
-        "tools_done": max(
-            tools_done, sum(1 for m in messages if isinstance(m, ToolMessage))
-        ),
-    }
-
-
-async def _run_agent_background(
-    task_id: str,
-    run,
-    prompt: str,
-    output_file: Path,
-) -> None:
-    """后台执行 Agent；收尾（写文件 / 状态 / 通知）走共用 run_background_task。"""
-    registry = get_task_registry()
-
-    activity: dict = {}
-
-    def progress(state: dict) -> None:
-        nonlocal activity
-        activity = _agent_activity(state, activity.get("tools_done", 0))
-        registry.notify_progress(task_id, activity)
-
-    async def execute() -> str:
-        final = await run(prompt, on_progress=progress)
-        msgs = final.get("messages") or []
-        return extract_text_content(msgs[-1].content if msgs else "")
-
-    await run_background_task(task_id, output_file, execute, cancel_text="任务被取消")
+    """Submit another FIFO turn to an owned subagent instance."""
+    parent_id = _parent_id(runtime)
+    try:
+        service = get_subagent_service()
+        receipt = service.message(
+            parent_id,
+            agent_id,
+            prompt,
+            notify=run_in_background,
+            request_key=_request_key(runtime, parent_id, "message"),
+        )
+        if not run_in_background:
+            receipt = await service.wait(receipt["turn_id"])
+        return _json(receipt)
+    except (ValueError, RuntimeError) as error:
+        return _json({"error": str(error)})

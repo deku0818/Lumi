@@ -1,5 +1,8 @@
 # ACP Client（编排外部 Agent）
 
+> 历史设计备选，当前实现未采用 ACP：Codex 走原生 app-server，Claude Code 走官方
+> Agent SDK，统一为可续聊 subagent。当前方案与权限边界见 [agents.md](agents.md)。
+
 让 `LumiAgent` 作为 [Agent Client Protocol](https://agentclientprotocol.com)（ACP）的 **client**，把外部编程 agent（Claude Code、Codex、Gemini CLI…）当「工人」拉起来派活——Lumi 扮演 ACP 里编辑器/IDE 的角色，外部 agent 作为 ACP server 子进程。
 
 > 现状：设计已定稿，待实施。**实施顺序：先做 [在途审批改造](./approval-inflight.md)**，再做本文——因为 ACP 的权限回调直接复用在途审批的 `ApprovalBroker`，没有它 ACP 的审批无处落脚。

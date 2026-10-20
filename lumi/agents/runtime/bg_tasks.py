@@ -35,7 +35,9 @@ def owned_by(entry: BackgroundTaskEntry, thread_id: str) -> bool:
 # create_task 处）。bridge 按此登记 run_id 做子代理事件归属——漏登记的后果是
 # 子代理流被判为主链：错挂进主气泡、文本混入半截回复 buffer（workflow 曾因此
 # 漏网）。新增此类工具时在此登记。
-SUBAGENT_SPAWNING_TOOLS: frozenset[str] = frozenset({"agent", "workflow"})
+SUBAGENT_SPAWNING_TOOLS: frozenset[str] = frozenset(
+    {"agent", "agent_create", "agent_message", "workflow"}
+)
 
 
 def bg_tasks_dir() -> Path:
@@ -101,6 +103,7 @@ class BackgroundTaskEntry:
     exit_code: int | None = None
     error: str | None = None
     agent_name: str | None = None
+    subagent_id: str | None = None
     prompt: str = ""
     # Workflow 任务跑完的子代理扇出数（仅 WORKFLOW 类型有意义，用于通知摘要）
     agent_count: int | None = None
@@ -194,7 +197,9 @@ def compose_notification_hint(notifications: list[str]) -> str:
     desktop 与飞书 poller 共用此单一来源。
     """
     combined = "\n".join(notifications)
-    return f"{combined}\nRead the output file to retrieve the result."
+    if any("<output-file>" in message for message in notifications):
+        return f"{combined}\nRead the output file to retrieve the result."
+    return combined
 
 
 def _format_bash_summary(entry: BackgroundTaskEntry) -> str:
@@ -365,6 +370,9 @@ class TaskRegistry:
         # 状态/进度变更观察者：server 层注册，把变更广播给 desktop drawer（同 cron
         # 的 on_job_status 模式）。未注册（测试）→ 不广播。同步回调，内部自行调度异步。
         self._on_change: Callable[[], None] | None = None
+        self._notification_handlers: list[
+            Callable[[BackgroundTaskEntry, str], bool]
+        ] = []
 
     @property
     def notification_queue(self) -> NotificationQueue:
@@ -373,6 +381,16 @@ class TaskRegistry:
     def set_on_change(self, callback: Callable[[], None] | None) -> None:
         """注册变更观察者（register / update_status / notify_progress 后触发）。"""
         self._on_change = callback
+
+    def add_notification_handler(
+        self, handler: Callable[[BackgroundTaskEntry, str], bool]
+    ) -> None:
+        self._notification_handlers.append(handler)
+
+    def remove_notification_handler(
+        self, handler: Callable[[BackgroundTaskEntry, str], bool]
+    ) -> None:
+        self._notification_handlers.remove(handler)
 
     def _fire_change(self) -> None:
         if self._on_change is None:
@@ -455,8 +473,17 @@ class TaskRegistry:
         if entry is None:
             logger.warning("[TaskRegistry] 通知入队失败，任务不存在: %s", task_id)
             return
+        if entry.subagent_id:
+            return  # Persistent subagent turns own their durable, deduplicated result delivery.
         try:
             xml = format_notification(entry)
+            for handler in tuple(self._notification_handlers):
+                try:
+                    if handler(entry, xml):
+                        return
+                except Exception:
+                    logger.exception("后台任务回传处理失败，保留原通知")
+                    break
             self._notification_queue.enqueue(xml, entry.thread_id)
         except Exception:
             logger.error(

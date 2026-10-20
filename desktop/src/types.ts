@@ -38,6 +38,7 @@ export interface ToolCallBrief {
 // 全部事件名索引本表，漏写任一个 tsc 即报错（别给本表加 Record 索引签名——那会让漏写
 // 的键静默落到签名上，检查失效）。events.json 承载语言中立的同构契约。
 export interface WireEventPayloads {
+  'subagent.event': { agent_id: string; turn_id: string; seq: number; event_type: string; data: Record<string, unknown> }
   'gateway.ready': {
     model: string
     workspace: string

@@ -911,10 +911,16 @@ class FeishuInbound:
             except Exception:
                 logger.error("妙记事件轮询失败", exc_info=True)
             queue = get_task_registry().notification_queue
-            if queue.is_empty():
+            from lumi.agents.runtime.subagents import subagent_service_if_started
+
+            subagents_runtime = subagent_service_if_started()
+            if queue.is_empty() and subagents_runtime is None:
                 continue
             for thread_id, chat_id in list(pool.chat_ids.items()):
-                if not queue.has_for(thread_id):
+                if not queue.has_for(thread_id) and not (
+                    subagents_runtime
+                    and subagents_runtime.store.has_deliveries(thread_id)
+                ):
                     continue
                 lock = pool.try_lock(thread_id)
                 if lock is None or lock.locked():
@@ -934,14 +940,18 @@ class FeishuInbound:
         self, bridge, thread_id: str, chat_id: str
     ) -> None:
         """认领本 thread 的完成通知并跑一轮 meta run（调用方已持本会话运行锁）。"""
+        await bridge.reconcile_subagent_deliveries()
         notifications = bridge.drain_notifications(thread_id)
         if not notifications:
             return
 
         def requeue() -> None:
+            from lumi.agents.runtime.subagents.service import RESULT_NOTIFICATION_PREFIX
+
             queue = get_task_registry().notification_queue
             for xml in notifications:
-                queue.enqueue(xml, thread_id)
+                if not xml.startswith(RESULT_NOTIFICATION_PREFIX):
+                    queue.enqueue(xml, thread_id)
 
         await self._run_synthetic_turn(
             bridge,

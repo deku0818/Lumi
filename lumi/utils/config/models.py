@@ -9,7 +9,7 @@ from pydantic import BaseModel, Field, model_validator
 
 from lumi.utils.sizing import BYTES_PER_TOKEN
 
-type CheckpointMode = Literal["memory", "sqlite", "postgres"]
+type CheckpointMode = Literal["sqlite", "postgres"]
 
 
 class AgentsConfig(BaseModel):
@@ -32,7 +32,7 @@ class AgentsConfig(BaseModel):
     )
     checkpoint: CheckpointMode = Field(
         default="sqlite",
-        description="检查点存储模式：'sqlite' - SQLite 持久化存储（默认）；'memory' - 内存存储（进程私有，每条连接互相隔离）；'postgres' - PostgreSQL 持久化存储",
+        description="检查点存储模式：'sqlite' - SQLite 持久化存储（默认）；'postgres' - PostgreSQL 持久化存储",
     )
     postgres_uri: str = Field(
         default="",
