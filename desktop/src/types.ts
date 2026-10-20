@@ -367,6 +367,7 @@ export interface HistoryItem {
   name?: string
   args?: unknown
   output?: string
+  is_error?: boolean
   tool_call_id?: string
   message_id?: string // user 项：后端消息 id（时间旅行截断锚点）
   fork_point?: ForkPoint // assistant 项：可独立还原的历史分支点

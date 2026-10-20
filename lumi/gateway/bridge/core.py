@@ -1435,10 +1435,7 @@ class AgentBridge:
             else:
                 tool_call_id = ""
                 args = {}
-            # 未注入 tool_call_id 的工具（如 bash）回退到 run_id：
-            # run_id 每次执行唯一，且 on_tool_start/end 共享同一个，
-            # 避免前端按空 id 把多个工具输出匹配混淆。
-            tool_call_id = self._resolve_tool_call_id(name, tool_call_id, run_id)
+            tool_call_id = self._resolve_tool_call_id(event, tool_call_id)
             yield BridgeEvent(
                 kind=EventKind.TOOL_START,
                 name=name,
@@ -1452,9 +1449,11 @@ class AgentBridge:
             name = event.get("name", "unknown")
             data = event.get("data", {})
             output = data.get("output", "")
+            is_error = getattr(output, "status", None) == "error"
             if isinstance(output, Command):
                 msgs = (output.update or {}).get("messages", [])
                 if msgs and hasattr(msgs[0], "content"):
+                    is_error = getattr(msgs[0], "status", None) == "error"
                     output = msgs[0].content
                 else:
                     output = ""
@@ -1464,13 +1463,13 @@ class AgentBridge:
             inp = data.get("input", {})
             if isinstance(inp, dict):
                 tool_call_id = inp.get("tool_call_id", "")
-            # 普通工具回退 run_id（与 on_tool_start 对齐）
-            tool_call_id = self._resolve_tool_call_id(name, tool_call_id, run_id)
+            tool_call_id = self._resolve_tool_call_id(event, tool_call_id)
 
             yield BridgeEvent(
                 kind=EventKind.TOOL_COMPLETE,
                 name=name,
                 output=str(output) if output else "",
+                is_error=is_error,
                 tool_call_id=tool_call_id,
                 parent_run_id=parent_id,
                 run_id=run_id if name == "agent" else "",
@@ -1488,7 +1487,7 @@ class AgentBridge:
                 return
             inp = event.get("data", {}).get("input", {})
             args_tcid = inp.get("tool_call_id", "") if isinstance(inp, dict) else ""
-            tool_call_id = self._resolve_tool_call_id(name, args_tcid, run_id)
+            tool_call_id = self._resolve_tool_call_id(event, args_tcid)
             yield BridgeEvent(
                 kind=EventKind.TOOL_COMPLETE,
                 name=name,
@@ -1533,13 +1532,13 @@ class AgentBridge:
             yield approval_evt
 
     @staticmethod
-    def _resolve_tool_call_id(name: str, args_tcid: str, run_id: str) -> str:
-        """解析工具对外的 wire tool_call_id。
-
-        用注入的 tool_call_id，缺失时回退到 run_id（每次执行唯一，on_tool_start/end
-        共享同一个）。在途审批后工具单次执行、不再跨 resume 重发，无需稳定 id。
-        """
-        return args_tcid or run_id
+    def _resolve_tool_call_id(event: dict, args_tcid: str) -> str:
+        """优先用 ToolExecutor 传入的真实调用 id，使直播与历史能原位对账。"""
+        return (
+            event.get("metadata", {}).get("lumi_tool_call_id")
+            or args_tcid
+            or event.get("run_id", "")
+        )
 
     def _track_agent_run(self, kind: str, name: str, run_id: str) -> None:
         """派生子代理的工具开始时登记 run_id，供子代理事件归属

@@ -21,7 +21,7 @@ RETRY_BASE_WAIT: Final[int] = 5
 
 # ── Shell 会话超时 ──
 
-DEFAULT_COMMAND_TIMEOUT: Final[float] = 120.0
+DEFAULT_COMMAND_TIMEOUT: Final[float] = 180.0
 """execute() 默认超时秒数"""
 
 GRACEFUL_SHUTDOWN_TIMEOUT: Final[float] = 5.0

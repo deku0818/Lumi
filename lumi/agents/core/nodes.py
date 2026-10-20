@@ -309,7 +309,12 @@ async def tool_executor(
                 return _ToolCallResult(
                     replace(decision, goto=()), end_requested=decision.goto == END
                 )
-        output = await tool_node.ainvoke([{**tc, "type": "tool_call"}], config)
+        # 流式事件与 checkpoint 使用同一个调用 id（普通工具的 input 不含注入 id）。
+        tool_config = {
+            **config,
+            "metadata": {**config.get("metadata", {}), "lumi_tool_call_id": tc["id"]},
+        }
+        output = await tool_node.ainvoke([{**tc, "type": "tool_call"}], tool_config)
         return _ToolCallResult(output, executed=True)
 
     # 每个调用自行审批后立即执行，兄弟调用的拒绝或挂起不阻止已允许的调用。

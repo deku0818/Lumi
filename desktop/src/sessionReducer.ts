@@ -85,6 +85,7 @@ function restore(h: HistoryItem): Item {
     args: h.args,
     output: h.output ?? '',
     done: true,
+    error: !!h.is_error,
   }
 }
 

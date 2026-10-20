@@ -1,8 +1,11 @@
 """Bash 工具测试"""
 
 import shutil
+from types import SimpleNamespace
+from unittest.mock import AsyncMock
 
 import pytest
+from pydantic import ValidationError
 
 from lumi.agents.runtime.shell_session import CommandResult
 from lumi.agents.tools.providers.bash import _format_result
@@ -39,6 +42,70 @@ async def test_bash_tool_executes_command(project_tmp_dir):
         {"command": "echo integration_test", "description": "集成测试"}
     )
     assert "integration_test" in result
+
+
+@pytest.mark.parametrize(
+    "options, expected_timeout",
+    [
+        ({}, 180),
+        ({"timeout": 0.5}, 0.5),
+        ({"timeout": 600}, 600),
+        ({"run_in_background": True}, None),
+        ({"run_in_background": True, "timeout": 0.5}, None),
+        ({"run_in_background": True, "timeout": 600}, None),
+    ],
+)
+async def test_bash_forwards_timeout(
+    options, expected_timeout, monkeypatch, project_tmp_dir
+):
+    from lumi.agents.tools.providers import bash as bash_mod
+
+    execute = AsyncMock(return_value=CommandResult("ok", 0, True, False))
+    session = SimpleNamespace(cwd=str(project_tmp_dir), execute=execute)
+    start_task = AsyncMock(
+        return_value=SimpleNamespace(
+            task_id="bg-test", output_file=project_tmp_dir / "out"
+        )
+    )
+    monkeypatch.setattr(
+        bash_mod,
+        "get_shell_session_manager",
+        lambda: SimpleNamespace(get_session=lambda **kwargs: session),
+    )
+    monkeypatch.setattr(
+        bash_mod, "get_bg_manager", lambda: SimpleNamespace(start_task=start_task)
+    )
+
+    await bash_mod.bash.ainvoke(
+        {"command": "echo ok", "description": "超时规则", **options}
+    )
+
+    if options.get("run_in_background"):
+        start_task.assert_awaited_once_with(
+            command="echo ok",
+            timeout=expected_timeout,
+            working_dir=str(project_tmp_dir),
+        )
+        execute.assert_not_awaited()
+    else:
+        execute.assert_awaited_once_with("echo ok", timeout=expected_timeout)
+        start_task.assert_not_awaited()
+
+
+@pytest.mark.parametrize("timeout", [None, 0, -1, 600.1])
+@pytest.mark.parametrize("run_in_background", [False, True])
+async def test_bash_rejects_invalid_timeout(timeout, run_in_background):
+    from lumi.agents.tools.providers.bash import bash
+
+    with pytest.raises(ValidationError):
+        await bash.ainvoke(
+            {
+                "command": "echo ok",
+                "description": "非法超时",
+                "timeout": timeout,
+                "run_in_background": run_in_background,
+            }
+        )
 
 
 @pytest.mark.parametrize(
@@ -105,7 +172,7 @@ async def test_bash_keys_shell_by_current_thread(monkeypatch, project_tmp_dir):
     seen_thread_ids: list[str] = []
 
     class _FakeSession:
-        async def execute(self, command, timeout=120.0):
+        async def execute(self, command, timeout=180.0):
             return CommandResult(
                 stdout="ok", exit_code=0, success=True, timed_out=False
             )

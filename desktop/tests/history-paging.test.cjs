@@ -8,6 +8,25 @@ const user = (n, message = `m${n}`) => ({ id: `h${n}:user:0`, kind: 'user', text
 const assistant = n => ({ id: `a${n}:assistant`, kind: 'assistant', text: `a${n}` })
 const snapshot = (items, cursor = null, ids = {}) => ({ items, next_cursor: cursor, user_message_ids: ids })
 
+test('stopping and reloading two live tools updates both rows without duplicating them', () => {
+  const model = { model: 'fake', provider: '' }
+  const event = (s, type, payload = {}) => reduceEvent({ session: s }, 'session', { type, payload }, model).session
+  let state = emptySession()
+  for (const id of ['one', 'two']) {
+    state = event(state, 'tool.start', { name: 'bash', tool_call_id: id, args: { command: 'sleep 120' } })
+  }
+  state = event(state, 'tool.complete', { tool_call_id: 'two', output: 'Error: Timeout', is_error: true })
+  state = event(state, 'turn.complete')
+  state = hydrateHistory(state, snapshot(['one', 'two'].map(id => ({
+    id: `tool:${id}`, kind: 'tool', name: 'bash', tool_call_id: id,
+    output: id === 'two' ? 'Error: Timeout' : '', is_error: id === 'two',
+  }))))
+  assert.equal(state.items.length, 2)
+  assert.ok(state.items.every(it => it.done))
+  assert.equal(state.items[1].error, true)
+  assert.equal(state.running, false)
+})
+
 test('prepend keeps chronological order, deduplicates boundaries and leaves live state intact', () => {
   let state = hydrateHistory(emptySession(), snapshot([user(3), assistant(3)], 'older', { 'h3:user:0': 'm3' }))
   state = { ...state, ctx: { sentinel: true }, pending: [user(9)], approval: [{ id: 'approval' }] }

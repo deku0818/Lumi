@@ -144,11 +144,14 @@ def _history_items(messages: list) -> list[dict]:
     可见性判断复用 lumi.sessions 下的纯逻辑。
     """
     tool_outputs: dict[str, str] = {}
+    tool_errors: set[str] = set()
     for m in messages:
         if getattr(m, "type", None) == "tool":
             tool_outputs[getattr(m, "tool_call_id", "")] = extract_text_content(
                 m.content
             )
+            if getattr(m, "status", None) == "error":
+                tool_errors.add(m.tool_call_id)
 
     items: list[dict] = []
     for m, message_id in zip(messages, history_message_ids(messages)):
@@ -178,6 +181,7 @@ def _history_items(messages: list) -> list[dict]:
                         "tool_call_id": tc_id,
                         "output": tool_outputs.get(tc_id, ""),
                         "done": True,
+                        "is_error": tc_id in tool_errors,
                     }
                 )
     return items
