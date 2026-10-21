@@ -38,7 +38,7 @@ import { useLatest } from './hooks/useLatest'
 import { errorMessage } from '@/lib/utils'
 import { Gateway } from './gateway'
 import { NewChatTarget } from './components/NewChatTarget'
-import { HomeNightSky } from './components/HomeNightSky'
+import { HomeBackdrop } from './components/HomeBackdrop'
 import { SshPrompts } from './components/SshPrompts'
 import type {
   ActiveModel,
@@ -2325,7 +2325,7 @@ export default function App() {
     />
     if (view === 'newchat') return (
       <div className="new-chat-home flex-1 flex flex-col items-center justify-center px-6">
-        <HomeNightSky />
+        <HomeBackdrop />
         <div className="mb-9 text-center"><h1 className="serif text-2xl">{t('ssh.welcome')}</h1></div>
         <div className="new-chat-entry w-full max-w-[760px]">
           <NewChatTarget value={newTarget} onChange={target => { newTargetRevision.current++; setNewTarget(target) }} ensureMachine={ensureMachine} />
@@ -2553,7 +2553,7 @@ export default function App() {
     // token 都重渲染，裸对象会让所有消费者跟着一起重渲
     <MachinesProvider value={machinesCtx}>
     <SshPrompts />
-    <div className="app-canvas h-full flex flex-col bg-canvas">
+    <div className={`app-canvas h-full flex flex-col bg-canvas${view === 'newchat' && !subagentExpanded ? ' app-home' : ''}`}>
       {!isMacTitleBar && (
         <AppTitleBar onNewChat={startNewChat} onOpenSettings={openSettings} />
       )}
