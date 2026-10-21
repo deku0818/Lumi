@@ -6,6 +6,7 @@
 from __future__ import annotations
 
 from pathlib import Path
+from typing import Literal
 
 from pydantic import BaseModel, Field, ValidationError
 
@@ -27,6 +28,7 @@ class AgentConfig(BaseModel):
     tools: list[str] = Field(default_factory=list, description="代理使用的工具列表")
     system_prompt: str = Field(description="代理的系统提示词")
     path: str | None = Field(default=None, description="定义文件路径（自改静默判定用）")
+    executor: Literal["lumi", "codex", "claude_code"] = "lumi"
 
 
 class SkillConfig(BaseModel):

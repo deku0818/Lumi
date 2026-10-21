@@ -11,12 +11,35 @@
 
 `name="codex"` 和 `name="claude"` 为内置保留入口，直接调用原生 CLI；其他名称选择 Lumi
 角色，省略时使用默认 Lumi。没有公开的 `executor` 参数，执行类型仅由后端记录。
-Codex 和 Claude Code 无需 `.lumi/agents/*.md` 包装。
+Codex 和 Claude Code 无需 `.lumi/agents/*.md` 包装，默认关闭。用户在项目主页「子 Agent」
+卡片的 ＋ 号菜单中启用或关闭；已启用的显示勾选，未启用的显示加号，「自定义 Agent」沿用
+角色创建弹窗。项目配置保存在该目录的 `.lumi/agents.json`，格式为 `{"codex": true, "claude": false}`；
+不继承机器级开关，也不跨项目生效。启用前只运行版本与登录状态检查，不调用模型，
+不回传账户或凭据；检测未通过时提示具体原因，不保存启用状态。
 它们优先使用宿主机器 PATH 中已安装、已认证的 `codex` / `claude`，再检查用户的
 `~/.local/bin/`。Codex 还识别 `CODEX_CLI_PATH` 和 macOS 已安装 ChatGPT Desktop 内置的
 `codex-cli/CodexCLI.app/Contents/MacOS/codex`，无需为了此安装形态再装一份独立 CLI。
 查找发生在运行 Lumi 后端的机器上；远程连接不会使用本机的桌面应用程序。
 Lumi 不代为安装、登录或修改外部 CLI 的凭据。
+
+`AgentChangeDetector.peek()` 合并已有 Lumi 角色与已启用、检查通过的原生入口，项目主页、
+`system-reminder` 和 `agent_create` 共用这份清单。工具描述只说明用法，不枚举 Agent。
+原生名称不能由同名 Markdown 文件覆盖，详情复用项目资源弹窗，但没有角色文件编辑入口。
+CLI 探测复用环境检测的命令执行和版本解析；状态按可执行文件路径缓存 30 秒，
+各项目共用机器检测缓存，启用时强制重查。CLI 检测在线程中执行，不阻塞网关事件循环。
+设置变更广播 `agents.changed {project}`，仅刷新对应项目的清单，主 Agent 在下次上下文注入时收到清单变化。
+关闭后不能新建该类型实例；已有实例保留原角色快照、原生会话与工作目录，仍可通过
+`agent_message` 续聊。原生 CLI 登录失效或程序移除不清除用户的启用偏好，但会从可用清单移除。
+
+### Codex 客户端写入锁边界
+
+2026-10-21 的桌面日志确认：同一原生会话的页面激活后，ChatGPT Desktop 会调用
+`thread/resume` 并成为 `owner`；此后 Lumi 的独立 app-server 恢复该会话会收到
+`already has an active writer`。日志没有记录页面激活的来源，不能据此认定桌面仅在后台
+运行就会接管所有新会话。原生会话被用户删除后，则可能收到 `no rollout found`。
+
+当前版本接受这两个外部会话边界，不与客户端抢锁，不自动接管、不删除锁、不杀客户端
+进程，也不静默新建会话替代原上下文。原生打开按钮不保证只读，可能触发上述写入权冲突。
 
 实例仅归属创建它的主会话 `parent_id`，不按项目目录分组或授权。同一主会话可以拥有多个
 不同工作目录的 subagent；其他主会话即使使用相同目录，也不能访问这些实例。
@@ -44,9 +67,11 @@ Claude SDK 每轮在同一个任务中打开和关闭作用域，避免 AnyIO �
 Codex 的原生 `thread_id`、Claude Code 的原生 `session_id` 按原样保存在内部句柄中。
 同一实例 FIFO 串行，不同实例可以并行；每个委派深度最多同时执行四个实例。
 每个轮次有独立的取消任务。按 `task_id` 停止只取消该轮，排队轮次不会误停正在执行的轮次；
+桌面实例卡片通过 `stop_subagent(agent_id)` 复用运行时的实例级停止，一次取消该实例所有运行和
+排队轮次，不影响其他实例；`stop_bg_task(task_id)` 保持单轮语义。
 删除主会话时递归停止全部子实例及其后台 Bash / Workflow，等待收尾并清除它们的通知。
 Lumi 深度按 `agents.max_delegation_depth` 限制，达到上限移除 `agent_create` 和 `workflow`，
-保留联系自己已有实例的能力；所有 Lumi subagent 均无 `ask` 工具或人工审批通道。
+保留联系自己已有实例的能力；Lumi subagent 的 `ask` 只向主 Agent 转交问题，没有人工审批通道。
 
 配置目录的 `checkpoints/subagents.db` 保存实例、角色快照、原生句柄、轮次、事件和结果回传记录。
 事件先落库再广播，按递增 `seq` 分页。一个数据目录同时只能由一个运行时持有执行权。
@@ -67,18 +92,50 @@ Lumi 深度按 `agents.max_delegation_depth` 限制，达到上限移除 `agent_
 ## 权限与终止
 
 Lumi 使用项目权限引擎及委派时的运行模式快照，无人应答的审批沿用无人值守路由。
-Codex 默认 read-only sandbox，原生审批或提问均拒绝并将本轮标记 `blocked`。
-Claude Code 保留原生配置，PreToolUse 拦截 Lumi 项目的显式 deny / ask，权限回调按 Lumi
-权限和运行模式判断；需要人类应答时拒绝并标记 `blocked`。本版不代理交互审批。
-原生工具不会映射成 Lumi 工具执行，也不会自动批准外部请求。
+外部执行器默认完全访问、无人值守执行，新建与恢复会话均显式应用该模式：
+Codex 使用 `approvalPolicy=never` 与 `sandbox=danger-full-access`；Claude Code 使用
+`permission_mode=bypassPermissions` 并关闭原生命令沙箱，保留其他原生配置及 Lumi 项目显式 deny
+规则，普通调用自动放行。
+Claude Code 的 PreToolUse 与权限回调共用同一判定，Lumi 权限规则中的 ask 不再阻塞外部执行器。
+本版不代理交互审批；完全访问下仍出现的 Codex 审批请求会拒绝并标记 `blocked`。
+原生工具不会映射成 Lumi 工具执行；只读观测指人类入口，不限制子代理的文件与命令操作。
 停止任务或关闭运行时会取消所属执行并关闭 SDK / app-server 资源，队列中的任务不会偷偷继续。
+
+## 问题转交与回答
+
+Lumi 复用现有 `ask` 的问题 schema 和结果配对，通过 context 中的 `request_parent_input`
+记录问题并干净结束图；Claude Code 捕获 `AskUserQuestion`，Codex 捕获
+`item/tool/requestUserInput`。Codex 不返回空答案，而是先发出 `turn/interrupt`，再关闭自己持有的
+app-server 后转交问题；中断失败或超时也保留问题，不依赖自然完成事件。原生 thread ID 保持不变。
+三者统一结束当前轮次，以 `blocked` 回传完整 `questions`。
+问题只保存在 `turn.complete.questions`，与轮次终态在同一 SQLite 事务落库，同步工具结果和后台持久化回执共用 `next_action` 指引：
+主 Agent 先依据上下文和可验证的信息回答，仅缺少用户决策时才调用自己的 `ask`；取得答案后
+用 `agent_message` 把问题与答案发给同一 `agent_id`，继续原任务。用户取消时不发送虚构答案。
+
+回答沿用原来的 Lumi checkpoint、Codex thread 或 Claude session，开启新一轮，不在原生提问
+调用上原地挂起。等待期间释放执行槽位；问题离线或重启后仍可通过既有回执恢复投递。
+不增加新工具、RPC 或子会话输入框；后续完成结果与其他轮次使用相同的回传和去重机制。
 
 ## 只读观测与模块
 
 后端 RPC `list_subagents`、`subagent_history`、`observe_subagent` 均限当前父会话；
 观察时先订阅再读取快照，`subagent.event` 按 `seq` 去重，缺失事件通过历史补齐。
 记录包括用户任务、模型正文、工具调用、原生事件、归属信息和终态。
-不提供人类发送消息的 RPC；普通聊天不能切换绑定到 subagent。UI 本版尚未接入这些接口。
+不提供人类发送消息的 RPC；普通聊天不能切换绑定到 subagent。
+Desktop 右侧按实例展示运行状态与空闲历史，点击后在侧栏观察，也可展开到主区域；没有执行器
+切换标签，其他实例通过返回列表选择。详情按轮次显示委派、正文、工具参数与输出、转交主 Agent 的问题与选项和错误，不显示轮次跳转栏或原始事件。
+问题内容与主会话 ask 共用展示组件，子会话没有作答控件；文件结果复用 `FileCards` 和现有预览入口，保留本机/远程通道。
+运行中的思考过程复用主会话底部状态组件：显示光点与状态文字，点击箭头展开当前思考；
+进入正文、工具执行或结束后收起，不作为历史记录单独展示。已完成轮次默认折叠，打开过的轮次与阅读位置在查看方式或实例切换时保留；历史分页加载完成后再恢复阅读位置。
+
+`useSubagents` 只使用当前主会话的连接，事件由独立观察器消费，不进入主对话 reducer。
+列表通过现有后台任务通知刷新；详情按需订阅，关闭后调用 `unobserve_subagent`，不影响执行。
+新轮次排队时，正在运行的轮次仍默认展开；手动展开或收起优先。最终输出仅与当前实例的根回复
+去重，嵌套回复不参与该判断。
+实时流不推进确认游标；打开、重连、聚焦及轮次完成时，从已确认的持久历史游标补齐并按 seq
+去重，历史晚于实时流到达时也不会重复追加正文。原始事件仍保留在后端历史中。
+本机 Codex 的原生打开按钮使用限定 UUID 的专用 Electron IPC；远程记录只提供会话 ID 复制，
+不把远端会话映射成本机打开操作。普通 Markdown 的外链协议限制保持独立。
 
 | 模块 | 职责 |
 |---|---|
@@ -86,7 +143,11 @@ Claude Code 保留原生配置，PreToolUse 拦截 Lumi 项目的显式 deny / a
 | `agents/core/stream_events.py` | 主会话与 Lumi subagent 共用的工具事件 ID、参数解析 |
 | `agents/runtime/subagents/` | FIFO 调度、执行器适配、生命周期、结果投递 |
 | `sessions/subagents.py` | SQLite 数据与事件、回执持久化 |
-| `gateway/subagents.py` | 只读历史、订阅、事件发布 |
+| `gateway/subagents.py` | 只读历史、订阅、事件发布与实例级停止 |
+| `desktop/src/hooks/useSubagents.ts` | 当前主会话实例、详情订阅与视图状态 |
+| `desktop/src/lib/subagentObserver.ts` | 实时投递与持久历史分页对齐 |
+| `desktop/src/lib/subagentTimeline.ts` | 三种执行器事件投影为统一多轮记录 |
+| `desktop/src/components/Subagents.tsx` | 实例列表和只读详情 |
 
 Workflow 的临时执行单元仍使用 `create_subagent()`，保持一次性、无 checkpointer 的原有语义。
 历史 `agent` 工具的内嵌渲染协议仍保留读取兼容，见 [subagent-rendering.md](subagent-rendering.md)。

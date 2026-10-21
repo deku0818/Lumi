@@ -14,7 +14,9 @@ import re
 import shutil
 from pathlib import Path
 
+from lumi.agents.core.preprocessing.agent_detector import AgentChangeDetector
 from lumi.agents.memory.paths import memory_dir, read_text_or_none
+from lumi.agents.runtime.subagents.availability import NATIVE_AGENTS, enabled_agents
 from lumi.agents.tools.loader import (
     _load_agents_from_dir,
     _load_skills_from_dir,
@@ -57,6 +59,7 @@ def overview(project: Path) -> dict:
         "prompts": [_prompt_info(project, n) for n in PROMPT_NAMES],
         "skills": _list_skills(project),
         "agents": _list_agents(project),
+        "external_agents": enabled_agents(project),
         "memory": _list_memory(project),
     }
 
@@ -92,17 +95,26 @@ def _list_skills(project: Path) -> list[dict]:
 
 
 def _list_agents(project: Path) -> list[dict]:
-    merged: dict[str, dict] = {}
-    for source, layer in config_layers("agents", project):
-        for a in _load_agents_from_dir(layer).values():
-            merged[a.name] = {
-                "name": a.name,
-                "description": a.description,
-                "tools": a.tools,
+    agents = []
+    for agent in AgentChangeDetector.get_instance(project).peek():
+        source = "native"
+        if agent.path:
+            source = next(
+                source
+                for source, layer in reversed(config_layers("agents", project))
+                if Path(agent.path).is_relative_to(layer)
+            )
+        agents.append(
+            {
+                "name": agent.name,
+                "description": agent.description,
+                "tools": agent.tools,
                 "source": source,
                 "builtin": source != "project",
+                "executor": agent.executor,
             }
-    return sorted(merged.values(), key=lambda a: (a["builtin"], a["name"]))
+        )
+    return sorted(agents, key=lambda agent: (agent["builtin"], agent["name"]))
 
 
 def _list_memory(project: Path) -> list[dict]:
@@ -178,6 +190,17 @@ def read_resource(project: Path, kind: str, name: str, file: str = "") -> dict:
             "path": _display_path(skill_dir, project),
         }
     if kind == "agent":
+        if name in NATIVE_AGENTS:
+            agent = NATIVE_AGENTS[name]
+            return {
+                "content": "",
+                "body": agent.description
+                + "\n\n使用本机已登录的原生程序执行，保留独立会话上下文。在当前项目的子 Agent ＋号菜单中管理启用状态。",
+                "source": "native",
+                "builtin": True,
+                "native": True,
+                "executor": agent.executor,
+            }
         agent_file, source = _agent_file(project, name)
         content = agent_file.read_text("utf-8")
         return {
@@ -217,6 +240,7 @@ def write_resource(
     换成模板，且无法撤销。
     """
     project = project.resolve()
+    _check_native_agent(kind, name)
     if kind == "skill":
         _check_name(name)
         if not file or file == "SKILL.md":
@@ -243,6 +267,7 @@ def write_resource(
 def delete_resource(project: Path, kind: str, name: str) -> dict:
     """删项目层资源。同名低层（global/builtin）仍在时相当于「恢复该层版本」。"""
     project = project.resolve()
+    _check_native_agent(kind, name)
     _check_name(name)
     if kind == "skill":
         target = project / ".lumi" / "skills" / name
@@ -268,6 +293,7 @@ def delete_resource(project: Path, kind: str, name: str) -> dict:
 def copy_builtin(project: Path, kind: str, name: str) -> dict:
     """把内置/全局层资源复制到项目层产生可编辑副本（同名覆盖机制随即生效）。"""
     project = project.resolve()
+    _check_native_agent(kind, name)
     if kind == "skill":
         src, source = _skill_dir(project, name)
         if source == "project":
@@ -286,3 +312,10 @@ def copy_builtin(project: Path, kind: str, name: str) -> dict:
         shutil.copy2(src, dst)
         return {"ok": True, "path": _display_path(dst, project)}
     raise ValueError(f"资源类型不可复制: {kind}")
+
+
+def _check_native_agent(kind: str, name: str) -> None:
+    if kind == "agent" and name in NATIVE_AGENTS:
+        raise ValueError(
+            "原生 Agent 在项目的子 Agent ＋号菜单中管理，不创建或修改角色文件"
+        )

@@ -3,7 +3,7 @@
   "version": 2,
   "events": {
     "gateway.ready": { "payload": { "version": "string", "protocol": "number", "model": "string", "workspace": "string", "workspace_bound": "boolean", "running": "boolean", "run_started_at": "number|null" }, "note": "连接握手，由 ws 端点直接发出；workspace 未绑定(workspace_bound=false)时仍给出进程 cwd 兜底值，仅供展示，不代表已绑定项目。running/run_started_at（epoch 毫秒）为续接时的活跃轮状态，供前端恢复运行态与本轮计时。model 仅供展示（握手时连接尚未绑定 thread，它是新会话默认而非某个会话的模型）——会话模型由 switch_session / new_session 下发" },
-    "turn.start": { "payload": { "message_id": "string" }, "note": "真实用户轮开始（send_message / regenerate / edit_resend / 技能命令），携带该轮用户消息的落库 id；前端据此给乐观气泡上锚，时间旅行按 id 截断。开轮即发故中途 stop 的轮同样带到；系统命令（/compact 等）不产生用户消息、不发此事件" },
+    "turn.start": { "payload": { "message_id": "string" }, "note": "轮开始，前端据此恢复运行态与停止按钮。真实用户轮（send_message / regenerate / edit_resend / 技能命令）携带用户消息的落库 id，供乐观气泡上锚、时间旅行与模型固化；后台通知自动续答的 message_id 为空，不上锚、不固化模型。系统命令（/compact 等）不发此事件" },
     "message.start": { "payload": {} },
     "message.delta": { "payload": { "text": "string", "usage?": "Usage" } },
     "thinking.delta": { "payload": { "text": "string", "usage?": "Usage" }, "note": "模型思考增量（Anthropic thinking 块 / 方言 reasoning_content）" },
@@ -33,6 +33,7 @@
     "session.title": { "payload": { "thread_id": "string", "title": "string" }, "note": "desktop 会话首轮结束后自动生成标题完成，由 BroadcastHub 直接广播；前端就地更新侧栏该会话的显示名" },
     "mcp.status": { "payload": { "project": "string", "servers": "McpServerStatus[]" }, "note": "某项目 MCP 池后台加载完成，由 BroadcastHub 直接广播（不经 EventKind）。server 含 name/ok 与 tools（成功的工具数）或 error（失败原因）；前端对失败项 toast、MCP 面板刷徽标。project 空串 = 全局池" },
     "env.progress": { "payload": { "target": "string", "phase": "string", "percent": "number" }, "note": "工具箱安装进度，由 BroadcastHub 直接广播（不经 EventKind）；节流到整数百分比变化，percent=-1 表示进度不可知（解压/npm 阶段）" },
+    "agents.changed": { "payload": { "project": "string" }, "note": "指定项目的 Agent 启用设置变更，项目概览按项目路径刷新" },
     "env.state": { "payload": { "tools": "EnvToolStatus[]", "target": "string", "bin_dir": "string", "error?": "object" }, "note": "一次安装结束后的全量环境状态（tools 同 env_status 结果形状），target 为本次安装目标——多面板据此只响应与自己相关的安装（环境页 / 渠道体检各自订阅）。失败时附 error{target,message}；bin_dir 同 env_status（广播即全量，前端无需自己留存上一次的值）" }
   },
   "events_note": "任意事件 payload 都可能附带 parent_run_id（非空时表示属于某个子代理）",
@@ -64,8 +65,8 @@
     "remove_project": { "params": ["path"], "result": ["projects"], "note": "只删清单条目，不动磁盘" },
     "rename_project": { "params": ["path", "name"], "result": ["projects"] },
     "set_default_project": { "params": ["path", "default"], "result": ["projects"], "note": "设为/取消默认项目（「新建会话」直接落地的项目）；至多一个，设新的自动顶掉旧的" },
-    "project_overview": { "params": ["path"], "result": ["prompts", "skills", "agents", "memory"], "note": "项目主页一次拉全：SOUL/AGENTS 提示词（含解析来源 project|global|builtin）、技能与子 Agent 清单（builtin 标记内置只读）、记忆文件列表。定时任务复用 list_cron_jobs" },
-    "project_resource_read": { "params": ["path", "kind", "name", "file?"], "result": ["content", "body", "files?", "builtin?", "source?", "path?"], "note": "读单个资源全文；kind ∈ skill|agent|prompt|memory。content=原文（编辑用），body=后端剥好 frontmatter 的正文（阅读视图用，剥离逻辑单点在后端）。skill 额外返回目录内 md 文件清单，file 指定读哪个（缺省 SKILL.md）" },
+    "project_overview": { "params": ["path"], "result": ["prompts", "skills", "agents", "memory", "external_agents"], "note": "项目主页一次拉全：SOUL/AGENTS 提示词（含解析来源 project|global|builtin）、技能与子 Agent 清单（builtin 标记内置只读）、记忆文件列表。定时任务复用 list_cron_jobs" },
+    "project_resource_read": { "params": ["path", "kind", "name", "file?"], "result": ["content", "body", "files?", "builtin?", "source?", "path?", "native?", "executor?"], "note": "读单个资源全文；kind ∈ skill|agent|prompt|memory。content=原文（编辑用），body=后端剥好 frontmatter 的正文（阅读视图用，剥离逻辑单点在后端）。skill 额外返回目录内 md 文件清单，file 指定读哪个（缺省 SKILL.md）" },
     "project_resource_write": { "params": ["path", "kind", "name", "content", "file?", "create?"], "result": ["ok", "path"], "note": "写项目 .lumi/ 层资源（新建或覆盖，按需建目录；create=true 时目标已存在即报错，防「新建」覆盖已有定义）；内置层不可写。技能 SKILL.md 与 Agent 定义在落盘前校验 frontmatter（须含 name/description 且 name 与资源名一致），坏格式当场报错而非静默写入" },
     "project_resource_delete": { "params": ["path", "kind", "name"], "result": ["ok", "restored_builtin"], "note": "删项目层资源；restored_builtin=true 表示同名内置仍在（效果为恢复内置版本）" },
     "project_copy_builtin": { "params": ["path", "kind", "name"], "result": ["ok", "path"], "note": "把内置技能目录/Agent 文件复制到项目 .lumi/ 产生可编辑副本（同名覆盖机制随即生效）" },
@@ -88,8 +89,10 @@
     "stop_cron_run": { "params": ["job_id"], "result": ["stopped"], "note": "中断该任务正在进行的执行；stopped=是否确有一次运行被取消。取消后现场经 checkpoint 保留可续聊，run 记为 status=stopped" },
     "list_cron_runs": { "params": ["job_id", "limit?"], "result": ["runs"], "note": "run 含 thread_id（非空时可经 switch_session 跳转该次执行的会话续聊）" },
     "list_subagents": { "params": [], "result": ["agents"], "note": "当前会话拥有的子代理实例元数据，只读；各实例 cwd 独立持久化，不按主会话当前目录过滤" },
-    "subagent_history": { "params": ["agent_id", "after?", "limit?"], "result": ["agent_id", "executor", "events", "cursor"], "note": "按持久 seq 分页读取子会话过程，仅校验父会话归属，与当前工作目录无关" },
-    "observe_subagent": { "params": ["agent_id", "after?", "limit?"], "result": ["agent_id", "executor", "events", "cursor"], "note": "先订阅 subagent.event 再读取历史，客户端按 seq 去重；不启动执行器" },
+    "subagent_history": { "params": ["agent_id", "after?", "limit?"], "result": ["agent_id", "executor", "events", "cursor", "native_session_id?"], "note": "按持久 seq 分页读取子会话过程，仅校验父会话归属，与当前工作目录无关" },
+    "observe_subagent": { "params": ["agent_id", "after?", "limit?"], "result": ["agent_id", "executor", "events", "cursor", "native_session_id?"], "note": "先订阅 subagent.event 再读取历史，客户端按 seq 去重；不启动执行器" },
+    "unobserve_subagent": { "params": ["agent_id"], "result": ["agent_id"], "note": "取消当前连接对该实例的观察；不停止执行，不影响其他观察者" },
+    "stop_subagent": { "params": ["agent_id"], "result": ["stopped"], "note": "停止当前父会话所属实例的全部运行和排队轮次，不影响其他实例；stop_bg_task 仍只取消一个轮次" },
     "list_bg_tasks": { "params": [], "result": ["tasks"], "note": "后台任务全量快照（bash/agent/workflow），前端按当前 thread_id 过滤；亦经 bg_tasks.update 事件实时推送" },
     "read_bg_task_output": { "params": ["task_id"], "result": ["text", "size", "truncated"], "note": "后台任务输出文件尾部（至多 8KB，truncated=文件更长）供卡片输出预览。仅 streams_output 的任务（bash）可实时 tail；agent/workflow 完成时才写，运行中返回空文本。任务不存在或不属于本会话同样返回 {text:\"\",size:0,truncated:false}" },
     "stop_bg_task": { "params": ["task_id"], "result": ["stopped", "error?"], "note": "停止运行中的后台任务（drawer 详情停止按钮）" },
@@ -106,6 +109,7 @@
     "test_mcp_server": { "params": ["config"], "result": ["ok", "error?", "server?", "latency_ms?", "tools?", "prompts?", "resources?"], "note": "用给定配置临时建一次会话验证连通性（探测本身不动常驻会话池；通过则视为显式重试，有 server 加载失败的池换代重连）：成功返回 server{name,version}、握手耗时与 tools/prompts/resources 能力清单（工具含 input_schema、提示含 arguments）；失败返回 error 文本" },
     "get_mcp_status": { "params": ["project?"], "result": ["loading", "servers"], "note": "项目会话池的最近加载状态（后台加载中 loading=true；servers 同 mcp.status 事件形状）。project 空 = 全局池" },
     "env_status": { "params": [], "result": ["tools", "installing", "bin_dir"], "note": "环境工具箱状态：核心工具（uv/rg/node）+ 可选组件（officecli）各自 EnvToolStatus {name,source,version,path}（source ∈ system|toolbox|missing，system=用户自装、永不覆盖）；installing 为进行中的安装 target（空=空闲），面板打开时据此恢复进行中态；bin_dir 为该机器工具箱安装目录的绝对路径（前端直接展示，不拼 ~）。飞书组件有项目维度，归 diagnose_feishu_setup 的本地环境组" },
+    "set_project_agent": { "params": ["path", "name", "enabled"], "result": ["name", "enabled"], "note": "按项目保存外部 Agent 开关；开启前强制检查本机程序及登录，关闭不影响已有实例续聊" },
     "env_install": { "params": ["target", "project?"], "result": ["started"], "note": "触发安装（target ∈ all|uv|rg|node|officecli|lark-cli|feishu-skills；all=装齐全部 missing 的工具（核心+可选，见 toolbox.ALL_TOOLS）；feishu-skills 装到 project 的 .lumi/skills/，project 空=全局兜底）。立即返回，进度走 env.progress、结束广播 env.state（装齐时终态 target='all'）；同 target 进行中时返回 started=false" },
     "render_office": { "params": ["path"], "result": ["ok", "html_path?", "reason?", "message?"], "note": "docx/xlsx/pptx → 自包含 HTML（officecli 转换，产物按源文件 mtime 缓存在该机器 cache/office_preview），前端拿 html_path 走本地 lumi-file 或原生 SSH lumi-remote 预览。ok=false 时 reason ∈ missing（officecli 未装，前端引导 env_install）| unsupported（扩展名不支持）| error（message 为 cli 输出开头的人话段）" }
   }

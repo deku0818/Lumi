@@ -445,14 +445,13 @@ export function reduceEvent(store: Store, sid: string, ev: WireEvent, defaultMod
       // 开轮广播本轮用户消息 id：给最后一条尚未上锚的用户气泡补上（run.lock 保证
       // 每会话同时只有一轮在飞，故「最后一条无 messageId 的用户气泡」无歧义）。
       // 时间旅行按此 id 截断，不做序号/文本猜测。
-      // 同时固化会话模型：真人轮开跑正是后端 session_model.pin 的时刻，两边同时
-      // 发生——不同步的话，本会话此后切模型不会弹缓存失效确认
+      // 只有携带用户消息 id 的真人轮才固化模型；自动续答的 id 留空，只恢复运行态。
       // 没赶上工具边界的插话由后端自行开轮（前端没调 startTurn）：在此置运行态
       n = {
         ...s,
         items: anchorLastUser(s.items, ev.payload.message_id ?? '', ev.payload.files),
         historyRevision: (s.historyRevision ?? 0) + 1,
-        model: s.model ?? defaultModel,
+        model: ev.payload.message_id ? (s.model ?? defaultModel) : s.model,
         running: true,
         runStart: s.running ? s.runStart : Date.now(),
       }

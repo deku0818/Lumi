@@ -181,7 +181,7 @@ class EventKind(StrEnum):
     BridgeEvent.kind 即为前端收到的事件 type，无需额外映射层。
     """
 
-    TURN_START = "turn.start"  # 真实用户轮开始，携带该轮用户消息 id（时间旅行锚点）
+    TURN_START = "turn.start"  # 开轮；真实用户轮携带消息 id，合成轮留空
     MESSAGE_INJECTED = "message.injected"  # 运行中插话已注入当前轮（data.message_ids）
     MESSAGE_START = "message.start"
     MESSAGE_DELTA = "message.delta"
@@ -557,6 +557,7 @@ class AgentBridge:
                 msg.additional_kwargs.setdefault("lumi", {})["subagent_deliveries"] = (
                     deliveries
                 )
+            yield BridgeEvent(kind=EventKind.TURN_START)
             gen = self._stream_turn(msg, tool_mode)
         else:
             msg = self._build_user_message(

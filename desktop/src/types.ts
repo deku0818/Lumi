@@ -87,6 +87,7 @@ export interface WireEventPayloads {
     bin_dir: string
     error?: { target: string; message: string }
   }
+  'agents.changed': { project: string }
 }
 
 // env_install 的安装目标：核心工具为机器级；feishu-skills 装到 project 的 .lumi/skills/；
@@ -112,6 +113,8 @@ export interface EnvStatus {
   // 该机器工具箱安装目录的绝对路径（后端给真值，前端不拼 ~/.lumi）
   bin_dir: string
 }
+
+export type ExternalAgentName = 'codex' | 'claude'
 // env.progress payload 去掉 target 的形状，进度状态机与进度条组件共用
 export type EnvProgress = { phase: string; percent: number }
 
@@ -206,9 +209,10 @@ interface ProjectPromptInfo {
 
 // source：builtin=内置 / global=进程配置层 / project=项目 .lumi（仅此层可编辑）
 export interface ProjectOverview {
+  external_agents: Partial<Record<ExternalAgentName, boolean>>
   prompts: ProjectPromptInfo[]
   skills: { name: string; description: string; source: string; builtin: boolean }[]
-  agents: { name: string; description: string; tools: string[]; source: string; builtin: boolean }[]
+  agents: { name: string; description: string; tools: string[]; source: string; builtin: boolean; executor?: 'lumi' | 'codex' | 'claude_code' }[]
   memory: { name: string; size: number }[]
 }
 
@@ -222,6 +226,7 @@ export interface ProjectResource {
   source?: string
   path?: string
   missing?: boolean // memory：索引里还有链接但文件已被删
+  native?: boolean
 }
 
 // 斜杠命令（对齐后端 list_commands：当前为技能命令）
@@ -417,6 +422,7 @@ export interface BgTask {
   // bash 为空——命令本身就是 label，再存一份只会让每次全量快照都多带一遍
   prompt: string
   agent_name: string | null
+  subagent_id?: string | null
   thread_id: string
   started_at: number
   completed_at: number | null
@@ -438,6 +444,42 @@ export interface BgTaskOutput {
   truncated: boolean
 }
 export const EMPTY_BG_OUTPUT: BgTaskOutput = { text: '', size: 0, truncated: false }
+
+export type SubagentTurnStatus = 'queued' | 'running' | 'completed' | 'failed' | 'cancelled' | 'interrupted' | 'blocked'
+export interface SubagentSummary {
+  agent_id: string
+  name: string
+  title: string
+  executor: 'lumi' | 'codex' | 'claude_code'
+  cwd: string
+  status: 'queued' | 'running' | 'idle'
+  active_turn_id: string | null
+  active_ordinal: number | null
+  queued_count: number
+  turn_count: number
+  last_turn_id: string
+  last_turn_status: SubagentTurnStatus
+  summary: string
+}
+export interface SubagentEvent {
+  seq: number
+  agent_id: string
+  turn_id: string
+  type: string
+  payload: Record<string, unknown>
+}
+export interface SubagentHistory {
+  agent_id: string
+  executor: SubagentSummary['executor']
+  native_session_id?: string | null
+  events: SubagentEvent[]
+  cursor: number
+}
+export interface SubagentViewState {
+  top: number
+  pinned: boolean
+  folds: Record<string, boolean>
+}
 
 // artifacts 工具返回的单个文件元数据（后端 providers/artifacts.py）。
 // kind ∈ image/pdf/video/audio/archive/doc/sheet/text/file；不存在的路径带 error。
@@ -667,6 +709,7 @@ declare global {
       }
       getPathForFile?: (file: File) => string
       openPath?: (path: string) => Promise<string>
+      openCodexThread?: (id: string) => Promise<void>
       revealInFolder?: (path: string) => Promise<void>
       pathExists?: (path: string) => Promise<boolean>
       readText: (path: string) => Promise<string>

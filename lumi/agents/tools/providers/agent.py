@@ -1,6 +1,7 @@
 """Create, discover and continue persistent subagent sessions; workflow keeps its temporary runner."""
 
 # ToolRuntime must remain a concrete annotation for LangChain's parameter injection.
+import asyncio
 import json
 from pathlib import Path
 
@@ -68,18 +69,16 @@ async def create_subagent(
 
 
 def _subagent_tools(all_tools: list, subagent_depth: int, max_depth: int) -> list:
-    """子代理工具集：不含 ask（向用户提问只归主 agent——IM 渠道无处作答、后台无人应答）；
+    """持久子代理的 ask 由执行器转交主 Agent，不直接向用户发问；
     未达委派上限保留 agent_create / workflow（可继续往下委派），否则剔除以防无限递归。"""
-    excluded = (
-        {"ask"} if subagent_depth < max_depth else {"ask", "agent_create", "workflow"}
-    )
+    excluded = {"agent_create", "workflow"} if subagent_depth >= max_depth else set()
     return [t for t in all_tools if t.name not in excluded]
 
 
 class AgentCreateInput(BaseModel):
     name: str | None = Field(
         default=None,
-        description="codex / claude 直接启动对应原生 CLI；其他名称选择 Lumi 角色，省略使用默认 Lumi",
+        description="可用 Agent 名称见 system-reminder；省略使用默认子代理",
     )
     cwd: str | None = Field(
         default=None,
@@ -94,7 +93,9 @@ class AgentCreateInput(BaseModel):
 
 class AgentMessageInput(BaseModel):
     agent_id: str = Field(description="agent_create 或 agent_list 返回的稳定实例 ID")
-    prompt: str = Field(min_length=1, description="发给原子会话的新任务或补查要求")
+    prompt: str = Field(
+        min_length=1, description="发给原子会话的新任务、补查要求或问题的答案"
+    )
     run_in_background: bool = Field(
         default=True, description="默认后台执行；已有任务运行时排队，不并发执行两轮"
     )
@@ -127,7 +128,7 @@ def _json(value: object) -> str:
 @tool(
     args_schema=AgentCreateInput,
     description="""创建独立上下文的可持续子代理并派出第一轮任务。
-name 为 codex / claude 时直接调用原生 CLI；其他名称选择 system-reminder 中的 Lumi 角色，省略使用默认 Lumi。
+可用 Agent 名称和能力见 system-reminder；省略 name 时使用默认子代理。
 cwd 默认继承主会话当前目录，可显式指定其他目录；目录绑定实例，后续 agent_message 沿用。
 实例归属当前主会话，主会话切换工作目录不影响查询、续聊和结果回传。
 返回稳定 agent_id 和本轮 turn_id/task_id。默认后台运行，完成自动收到对应轮次的结果；
@@ -149,16 +150,19 @@ async def agent_create(
     maximum = get_config().config.agents.max_delegation_depth
     if depth >= maximum:
         return f"已达到最大委派层数（{maximum}），无法再委派子代理"
-    executor = {"codex": "codex", "claude": "claude_code"}.get(name, "lumi")
-    definition = {"name": name or "lumi", "executor": executor, "system_prompt": ""}
-    if name and executor == "lumi":
-        configs = AgentChangeDetector.get_instance(runtime.context.project_dir).peek()
-        profile = next((config for config in configs if config.name == name), None)
-        if profile is None:
-            return f"Agent '{name}' not found"
-        definition.update(profile.model_dump())
     parent_id = _parent_id(runtime)
     try:
+        definition = {"name": "lumi", "executor": "lumi", "system_prompt": ""}
+        if name:
+            configs = await asyncio.to_thread(
+                AgentChangeDetector.get_instance(runtime.context.project_dir).peek
+            )
+            profile = next((config for config in configs if config.name == name), None)
+            if profile is None:
+                raise ValueError(
+                    f"Agent '{name}' 未启用或不可用，请查看 system-reminder 中的可用清单"
+                )
+            definition = profile.model_dump()
         working_dir = _working_directory(runtime, cwd)
         service = get_subagent_service()
         receipt = service.create(
@@ -195,9 +199,11 @@ async def agent_list(runtime: ToolRuntime) -> str:
 @tool(
     args_schema=AgentMessageInput,
     description="""向已有子代理继续发送消息，保留它此前的上下文。
-agent_id 必须来自当前会话的 agent_create 或 agent_list。统一支持 Lumi、Codex、Claude Code。
+agent_id 必须来自当前会话的 agent_create 或 agent_list。
 每次消息分配独立 turn_id；原子代理正在运行时排队，空闲后执行。
 默认后台运行并自动回传本轮结果，不要轮询。不需要重新创建实例。
+结果包含 questions 时先依据主会话上下文自行回答；确需用户决策才用 ask，获得答案后
+用 agent_message 将问题及答案发给同一 agent_id，继续原任务，不要重新创建实例。
 仅当结果是继续推进的唯一前提时设 run_in_background=false，等待本轮结果。""",
 )
 async def agent_message(

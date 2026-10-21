@@ -11,8 +11,8 @@ from .types import (
     Emit,
     SaveHandle,
     Subagent,
-    SubagentBlockedError,
     SubagentExecutor,
+    SubagentQuestionError,
     SubagentTurn,
 )
 
@@ -46,7 +46,7 @@ class ClaudeExecutor(SubagentExecutor):
         from lumi.agents.permissions.models import PermissionDecision
 
         engine = PermissionEngine(Path(agent.workspace))
-        blocked: list[str] = []
+        questions: list[dict] = []
         tool_names: dict[str, str] = {}
         names = {
             "Bash": "bash",
@@ -57,48 +57,43 @@ class ClaudeExecutor(SubagentExecutor):
             "Grep": "grep",
         }
 
-        async def pre_tool(data: dict, tool_use_id: str | None, context: Any) -> dict:
-            name = data.get("tool_name", "")
-            args = data.get("tool_input") or {}
+        def denied_reason(name: str, args: dict) -> str | None:
             engine.reload()
             decision = engine.evaluate(names.get(name, name), args)
-            if (
-                decision in (PermissionDecision.DENY, PermissionDecision.ASK)
-                or name == "AskUserQuestion"
-            ):
-                if decision != PermissionDecision.DENY:
-                    blocked.append(f"Claude Code 需要审批或输入: {name}")
+            if decision == PermissionDecision.DENY:
                 emit("permission.denied", {"name": name, "args": args})
-                return {
-                    "hookSpecificOutput": {
-                        "hookEventName": "PreToolUse",
-                        "permissionDecision": "deny",
-                        "permissionDecisionReason": "Lumi 项目权限规则拒绝此调用",
-                    }
-                }
-            return {"continue_": True}
-
-        async def can_use_tool(name: str, args: dict, context: Any) -> Any:
-            engine.reload()
-            decision = engine.evaluate(names.get(name, name), args)
-            permitted = decision == PermissionDecision.ALLOW or (
-                decision == PermissionDecision.UNMATCHED
-                and (
-                    agent.tool_mode == "privileged"
-                    or agent.tool_mode == "accept_edits"
-                    and name in ("Write", "Edit")
-                )
-            )
-            if permitted and name != "AskUserQuestion":
-                return PermissionResultAllow(updated_input=args)
-            reason = f"Claude Code 需要审批或输入: {name}"
-            if decision != PermissionDecision.DENY:
-                blocked.append(reason)
+                return "Lumi 项目权限规则拒绝此调用"
+            if name == "AskUserQuestion":
+                for question in args.get("questions") or []:
+                    if question not in questions:
+                        questions.append(question)
+                reason = "问题已转交主 Agent，等待回答后继续当前子会话"
                 emit(
                     "approval.request",
                     {"name": name, "args": args, "status": "blocked"},
                 )
-            return PermissionResultDeny(message=reason)
+                return reason
+            return None
+
+        async def pre_tool(data: dict, tool_use_id: str | None, context: Any) -> dict:
+            reason = denied_reason(
+                data.get("tool_name", ""), data.get("tool_input") or {}
+            )
+            if reason:
+                return {
+                    **({"continue_": False, "stopReason": reason} if questions else {}),
+                    "hookSpecificOutput": {
+                        "hookEventName": "PreToolUse",
+                        "permissionDecision": "deny",
+                        "permissionDecisionReason": reason,
+                    },
+                }
+            return {"continue_": True}
+
+        async def can_use_tool(name: str, args: dict, context: Any) -> Any:
+            if reason := denied_reason(name, args):
+                return PermissionResultDeny(message=reason)
+            return PermissionResultAllow(updated_input=args)
 
         command = agent.definition.get("command")
         if command and len(command) != 1:
@@ -109,7 +104,8 @@ class ClaudeExecutor(SubagentExecutor):
             "include_partial_messages": True,
             "cli_path": cli_path,
             "system_prompt": {"type": "preset", "preset": "claude_code"},
-            "permission_mode": "default",
+            "permission_mode": "bypassPermissions",
+            "sandbox": {"enabled": False},
             "can_use_tool": can_use_tool,
             "hooks": {"PreToolUse": [HookMatcher(matcher=None, hooks=[pre_tool])]},
             "setting_sources": ["user", "project", "local"],
@@ -178,8 +174,9 @@ class ClaudeExecutor(SubagentExecutor):
                         continue
                     if native_id and message.session_id != native_id:
                         raise RuntimeError("Claude Code 返回了不同会话，拒绝保存")
-                    if blocked:
-                        raise SubagentBlockedError("; ".join(blocked))
+                    save_handle({"session_id": message.session_id})
+                    if questions:
+                        raise SubagentQuestionError(questions)
                     if (
                         message.is_error
                         or message.subtype != "success"
@@ -189,7 +186,6 @@ class ClaudeExecutor(SubagentExecutor):
                         raise RuntimeError(
                             f"Claude Code 本轮失败: {message.subtype} ({message.terminal_reason}): {detail}"
                         )
-                    save_handle({"session_id": message.session_id})
                     emit("usage", {"usage": message.usage})
                     return message.result or ""
                 else:
@@ -211,6 +207,8 @@ class ClaudeExecutor(SubagentExecutor):
                                     },
                                 )
                     emit("native.event", {"message": _plain(message)})
+        if questions:
+            raise SubagentQuestionError(questions)
         raise RuntimeError("Claude Code 未返回本轮完成事件")
 
     async def close(self) -> None:

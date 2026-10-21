@@ -1,6 +1,8 @@
 // ask 工具交互：一次一题（单选点选项即翻下一题，多选 / 自填点「下一个」），多题时末页总览可点回
 // 修改。按后端 _format_answers 同款格式构造 answer 字符串（每行 `{question} → {labels}`）。取消发 ASK_CANCELLED。
 import { useState } from 'react'
+import type { Question } from '../types'
+import { QuestionContent, QuestionOptionText, questionOptions } from './QuestionContent'
 import { Check } from 'lucide-react'
 import { useI18n } from '../i18n'
 import { Button } from '@/components/ui/button'
@@ -9,27 +11,14 @@ import { GROUP, StepCard, StepReview, useStepper } from './StepCard'
 
 const ASK_CANCELLED = '__ask_cancelled__'
 
-interface QOption {
-  label: string
-  description?: string
-}
-interface Question {
-  question: string
-  header?: string
-  options: QOption[]
-  multiSelect?: boolean
-}
 interface ClarifyData {
   questions?: Question[]
 }
 
-// 末尾 label 为空的项是「自定义输入」占位，过滤掉、单独用文本框
-const realOpts = (q: Question) => q.options.filter((o) => o.label)
-
 const replaceAt = <T,>(arr: T[], i: number, value: T): T[] => arr.map((x, j) => (j === i ? value : x))
 
 function answerLabels(q: Question, picked: Set<number>, custom: string): string[] {
-  const o = realOpts(q)
+  const o = questionOptions(q)
   const labels = [...picked]
     .sort((a, b) => a - b)
     .map((i) => o[i]?.label)
@@ -123,18 +112,9 @@ export function ClarifyDialog({
           ))}
         />
       ) : (
-        <>
-          {q.header && (
-            <div className="mb-1 mt-0.5 text-[11px] font-semibold tracking-wide text-primary">{q.header}</div>
-          )}
-          <div className="mb-3 text-[15px] font-semibold leading-snug">
-            {q.question}
-            {q.multiSelect && (
-              <span className="ml-1.5 text-xs font-normal text-muted-foreground">{t('clarify.multi')}</span>
-            )}
-          </div>
+        <QuestionContent question={q}>
           <div className={GROUP}>
-            {realOpts(q).map((o, oi) => {
+            {questionOptions(q).map((o, oi) => {
               const on = sel[step.index].has(oi)
               return (
                 <button
@@ -147,12 +127,7 @@ export function ClarifyDialog({
                   )}
                 >
                   <Indicator on={on} multi={!!q.multiSelect} />
-                  <span className="min-w-0">
-                    <span className="text-[13.5px]">{o.label}</span>
-                    {o.description && (
-                      <span className="mt-px block text-xs text-muted-foreground">{o.description}</span>
-                    )}
-                  </span>
+                  <QuestionOptionText option={o} />
                 </button>
               )
             })}
@@ -171,7 +146,7 @@ export function ClarifyDialog({
               />
             </label>
           </div>
-        </>
+        </QuestionContent>
       )}
     </StepCard>
   )

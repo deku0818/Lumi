@@ -68,12 +68,14 @@ import { ApprovalDialog, type Decision } from './components/ApprovalDialog'
 import { ClarifyDialog, ASK_CANCELLED } from './components/ClarifyDialog'
 import { Sidebar } from './components/Sidebar'
 import { MachineIcon, MachinesProvider } from './components/MachineTabs'
-import { FileCards, contentUrl, parseArtifacts } from './components/Artifacts'
+import { FileCards, contentUrl } from './components/Artifacts'
 import { BgTasksSection } from './components/BgTasksDrawer'
 import { PreviewWindow } from './components/PreviewWindow.tsx'
 import { emptyPreviewState, previewReducer } from './lib/previewState.ts'
 import { CronPage, RunsSection } from './components/CronPage'
 import { RightRail } from './components/RightRail'
+import { SubagentDetail, SubagentsSection } from './components/Subagents'
+import { useSubagents } from './hooks/useSubagents'
 import { ResizeHandle, usePersistedFlag, useResizableWidth } from './components/ResizeHandle'
 import { ConfirmDialog } from './components/ConfirmDialog'
 import { SettingsDialog } from './components/SettingsDialog'
@@ -88,7 +90,8 @@ import { Composer } from './components/Composer'
 import { AppTitleBar } from './components/AppTitleBar'
 import { StatusIndicator, ItemView } from './components/chat/ItemView'
 import { CopyButton, EditBubble, ForkButton, HoverActions, IconAction } from './components/chat/MessageActions.tsx'
-import { ToolGroup, type ToolItem } from './components/chat/ToolViews'
+import { ToolGroup } from './components/chat/ToolViews'
+import { groupItems, segKey } from './lib/chatSegments'
 import { AgentGroup } from './components/chat/AgentViews'
 import { toast } from './components/Toast'
 import { isCommandMode, parseCommand, matchCommands } from './slash'
@@ -98,55 +101,7 @@ import { useTheme } from './theme'
 import { useUiFont } from './font'
 import { useI18n } from './i18n'
 
-type Segment =
-  | { kind: 'tools'; tools: ToolItem[] }
-  | { kind: 'agent'; items: ToolItem[] }
-  | { kind: 'files'; item: ToolItem; files: Artifact[] }
-  | { kind: 'item'; item: Exclude<Item, { kind: 'tool' }> }
-
 type AssistantItem = Extract<Item, { kind: 'assistant' }>
-
-// 把连续的 tool item 合并成一段，其余 item 各自独立 —— 用于工具分组渲染。
-// 子代理（name==='agent'）也按连续合并成一段：单个渲染成滚动窗口卡片，并发多个
-// 渲染成一张「N 个子 Agent」面板（每行一个 agent）。
-function groupItems(items: Item[]): Segment[] {
-  const segs: Segment[] = []
-  for (const it of items) {
-    if (it.kind === 'tool' && it.name === 'agent') {
-      const last = segs[segs.length - 1]
-      if (last?.kind === 'agent') last.items.push(it)
-      else segs.push({ kind: 'agent', items: [it] })
-    } else if (it.kind === 'tool' && (it.name === 'artifacts' || it.name === 'present_files')) {
-      // artifacts 不并入灰色工具组：单独成段，渲染成文件卡片。
-      // 兼容旧名 present_files：历史 checkpoint 里存的是当时的工具名（见
-      // session.py 的 _history_items 直取 tool_call.name），改名前的会话重开
-      // 仍要出卡片。输出 JSON 形状未变，认名即可。
-      // 在此（随 items 记忆化）解析一次 JSON，避免每次渲染都 parse。
-      segs.push({ kind: 'files', item: it, files: parseArtifacts(it.output) })
-    } else if (it.kind === 'tool') {
-      const last = segs[segs.length - 1]
-      if (last?.kind === 'tools') last.tools.push(it)
-      else segs.push({ kind: 'tools', tools: [it] })
-    } else {
-      segs.push({ kind: 'item', item: it })
-    }
-  }
-  return segs
-}
-
-// segment 的稳定 React key / 复制映射 key（不依赖数组下标，切片/虚拟化也不错位）
-function segKey(segment: Segment): string {
-  switch (segment.kind) {
-    case 'tools':
-      return `g${segment.tools[0].historyGroup ?? segment.tools[0].id}`
-    case 'agent':
-      return `a${segment.items[0].historyGroup ?? segment.items[0].id}`
-    case 'files':
-      return `f${segment.item.id}`
-    case 'item':
-      return `i${segment.item.id}`
-  }
-}
 
 const replaceBackendTasks = (prev: BgTask[], backend: string, tasks: BgTask[]): BgTask[] => {
   const mine = prev.filter((t) => beOf(t) === backend)
@@ -288,6 +243,7 @@ export default function App() {
   const seenCronRef = useRef(new Set<string>())
   const fileInputRef = useRef<HTMLInputElement>(null)
   const connsRef = useRef<Record<string, Gateway>>({})
+  const subagents = useSubagents(connsRef.current[active], active, keyThread(active), view === 'chat' || view === 'cronjob', railOpen)
   const activeRef = useLatest(active)
   // activate 调用序号：判废晚到的建连结果（openConnection 悬置期间用户切走后不回拽）
   const activationSeqRef = useRef(0)
@@ -309,9 +265,10 @@ export default function App() {
     [remoteBackend, activeGw],
   )
   const openPreview = useCallback(function openPreview(file: Artifact): void {
+    subagents.close()
     dispatchPreview({ type: 'open', owner: activeRef.current, file })
     if (!railOpen) toggleRail()
-  }, [railOpen, toggleRail])
+  }, [railOpen, toggleRail, subagents.close])
   const closeAllPreviews = useCallback(function closeAllPreviews(): void {
     dispatchPreview({ type: 'close-all' })
   }, [])
@@ -427,6 +384,7 @@ export default function App() {
   // 否则本地/远程同名 thread（飞书群）的事件会串进同一条会话。
   const handleEvent = useCallback((ev: WireEvent, backend: string) => {
     const { type, payload } = ev
+    if (type === 'subagent.event') return // The selected observer owns this independent timeline.
     // cron 事件是进程级广播（与会话无关），在 session 路由之前单独处理
     if (type === 'cron.running') {
       // 进程级快照，只替换发来那台机器的那一段（别把其他机器的运行态抹了）。
@@ -674,8 +632,24 @@ export default function App() {
     const be = keyBackend(active)
     return bgTasks.filter((tk) => tk.thread_id === tid && beOf(tk) === be)
   }, [bgTasks, active])
-  const runningBgCount = activeBgTasks.filter((tk) => tk.status === 'running').length
+  const traditionalBgTasks = useMemo(() => activeBgTasks.filter(task => !task.subagent_id), [activeBgTasks])
+  const runningBgCount = traditionalBgTasks.filter((tk) => tk.status === 'running').length
+    + subagents.agents.filter(agent => agent.status !== 'idle').length
   const hasRunningBg = runningBgCount > 0
+  const openSubagent = useCallback((id: string) => {
+    subagents.select(id)
+    dispatchPreview({ type: 'shrink' })
+    if (!railOpen) toggleRail()
+  }, [subagents.select, railOpen, toggleRail])
+  const toggleSubagentExpanded = useCallback(() => {
+    if (subagents.expanded && !railOpen) toggleRail()
+    subagents.toggleExpanded()
+  }, [subagents.expanded, subagents.toggleExpanded, railOpen, toggleRail])
+  const stopSubagent = async (agent: import('./types').SubagentSummary): Promise<void> => {
+    const result = await connsRef.current[active]?.stopSubagent(agent.agent_id)
+    if (!result?.stopped) throw new Error(t('subagent.stopFailed'))
+    subagents.refresh()
+  }
   const isMacTitleBar = (window.lumi.platform ?? 'win32') === 'darwin'
   // 侧栏收起时也保留顶条：给浮钮组（展开/新对话）让出高度，避免盖住页面内容
   const showTopStrip = isMacTitleBar || !sidebarOpen
@@ -1401,7 +1375,6 @@ export default function App() {
     () => (projectHome ? controlConns.current[projectHome.backend] : undefined),
     [projectHome],
   )
-
   // 项目主页 props 全部稳定引用：App 是流式事件的重渲染热点（后台会话每个 token 都
   // 触发 setStore），配合 ProjectHomePage 的 memo()，停在项目页时不再整页 reconcile
   // 当前项目的登记条目（name/default 都从这一次 find 取）
@@ -2324,15 +2297,19 @@ export default function App() {
   // 挂进 cron 右栏，停止/移除还真能杀错任务
   const railSessionVisible =
     view === 'chat' || (!!cronRunThread && keyThread(active) === cronRunThread)
-  const railBg = railSessionVisible && activeBgTasks.length > 0
+  const railBg = railSessionVisible && traditionalBgTasks.length > 0
+  const railAgents = railSessionVisible && (subagents.agents.length > 0 || !!subagents.listError)
+  const selectedSubagent = railSessionVisible ? subagents.agents.find(agent => agent.agent_id === subagents.selectedId) : undefined
+  const subagentExpanded = !!selectedSubagent && subagents.expanded
+  const subagentSide = !!selectedSubagent && !subagentExpanded
   const hasPreview =
-    (view === 'chat' || view === 'cronjob') && preview.owner === active && preview.files.length > 0
+    (view === 'chat' || view === 'cronjob') && preview.owner === active && preview.files.length > 0 && !subagentSide && !subagentExpanded
   const previewExpanded = hasPreview && preview.expanded && railOpen
-  const rightRailWidth = hasPreview ? previewW : railW
+  const rightRailWidth = hasPreview || subagentSide ? previewW : railW
   const railSectionsOpen = railOpen && !previewExpanded
-  const showRail = hasPreview || (view === 'cronjob' ? !!activeCronJob : view === 'chat' && railBg)
+  const showRail = hasPreview || (view === 'cronjob' ? !!activeCronJob : view === 'chat' && (railBg || railAgents))
   // 脉冲点 = 可见模块里确有东西在跑：隐藏的 bg 模块不算，直播中的 cron 执行算
-  const railDot = (railBg && hasRunningBg) || cronLiveRuns.length > 0
+  const railDot = (railSessionVisible && hasRunningBg) || cronLiveRuns.length > 0
 
   const machinesCtx = useMemo(
     () => ({ machines, conn: machineConn, err: machineErr, reconnect: reconnectMachine }),
@@ -2340,6 +2317,12 @@ export default function App() {
   )
 
   function renderMainContent(): ReactNode {
+    if (subagentExpanded && selectedSubagent) return <SubagentDetail
+      key={`${active}:${selectedSubagent.agent_id}`}
+      agent={selectedSubagent} detail={subagents.detail} position={subagents.position} expanded
+      remote={remoteBackend} online={conn === 'open'}
+      onBack={subagents.close} onExpand={toggleSubagentExpanded} onRetry={subagents.retryDetail} onOpenFile={openPreview}
+    />
     if (view === 'newchat') return (
       <div className="new-chat-home flex-1 flex flex-col items-center justify-center px-6">
         <HomeNightSky />
@@ -2370,6 +2353,7 @@ export default function App() {
     )
     if (view === 'project' && homeProjectInfo) return (
       <ProjectHomePage
+        key={`${projectHome?.backend ?? 'local'}:${homeProjectInfo.path}`}
         project={homeProjectInfo}
         machine={projectHome?.backend ?? 'local'}
         isDefault={!!homeProject?.default}
@@ -2428,7 +2412,7 @@ export default function App() {
                         ? `arrival:${seg.item.arrival.id}` : segKey(seg)
                       const node =
                         seg.kind === 'tools' ? (
-                          <ToolGroup key={key} tools={seg.tools} />
+                          <ToolGroup key={key} tools={seg.tools} onOpenSubagent={openSubagent} />
                         ) : seg.kind === 'agent' ? (
                           <AgentGroup key={key} items={seg.items} />
                         ) : seg.kind === 'files' ? (
@@ -2683,6 +2667,12 @@ export default function App() {
             dot={railDot}
             enter={view === 'chat' && !hasPreview}
           >
+            {subagentSide && selectedSubagent && <SubagentDetail
+              key={`${active}:${selectedSubagent.agent_id}`}
+              agent={selectedSubagent} detail={subagents.detail} position={subagents.position} expanded={false}
+              remote={remoteBackend} online={conn === 'open'}
+              onBack={subagents.close} onExpand={toggleSubagentExpanded} onRetry={subagents.retryDetail} onOpenFile={openPreview}
+            />}
             {hasPreview && (
               <PreviewWindow
                 key={active}
@@ -2698,7 +2688,8 @@ export default function App() {
                 onToggleExpanded={togglePreviewExpanded}
               />
             )}
-            <div className={previewExpanded ? 'hidden' : 'contents'} inert={previewExpanded}>
+            <div className={previewExpanded || subagentSide ? 'hidden' : 'contents'} inert={previewExpanded || subagentSide}>
+              {railAgents && <SubagentsSection agents={subagents.agents} tasks={activeBgTasks} selectedId={subagents.selectedId} error={subagents.listError} onSelect={openSubagent} onStop={stopSubagent} />}
               {view === 'cronjob' && activeCronJob && (
                 // key=任务 id：换任务即重挂，节折叠态不跨任务残留（整栏开合在 App，不受影响）
                 <RunsSection
@@ -2716,7 +2707,7 @@ export default function App() {
               )}
               {railBg && (
                 <BgTasksSection
-                  tasks={activeBgTasks}
+                  tasks={traditionalBgTasks}
                   open={railSectionsOpen}
                   onStop={stopBgTask}
                   onDismiss={dismissBgTask}

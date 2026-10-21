@@ -36,6 +36,7 @@ class ServerEvent(StrEnum):
     MCP_STATUS = "mcp.status"
     ENV_PROGRESS = "env.progress"
     ENV_STATE = "env.state"
+    AGENTS_CHANGED = "agents.changed"
 
 
 def _payload(evt: BridgeEvent) -> dict:

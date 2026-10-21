@@ -2,6 +2,13 @@
 
 Lumi 支持通过 Markdown 文件定义自定义子 Agent，将复杂任务委托给专门的代理自主执行。
 
+使用 Codex 或 Claude Code 前，在项目主页「子 Agent」卡片点击 ＋，选择对应入口即可启用；
+再次点击勾选的入口可关闭。「自定义 Agent」沿用现有的角色创建方式。
+它们默认关闭，启用时检查运行 Lumi 后端的机器上是否已安装并登录；检查不会启动模型任务，
+Lumi 不会自动安装或登录这些程序。开关保存在项目的 `.lumi/agents.json`，各项目独立，
+远程项目也保存在对应的远程目录。启用且检查通过后，项目清单和主 Agent 的 `system-reminder`
+都会显示该入口，无需角色 Markdown 文件。关闭限制新建，已有实例仍可继续对话。
+
 主 Agent 通过三个工具管理持久 subagent：
 
 ```python
@@ -9,7 +16,7 @@ Lumi 支持通过 Markdown 文件定义自定义子 Agent，将复杂任务委�
 agent_create(prompt="调查这个问题")
 agent_create(name="translator", prompt="翻译这段文字")
 
-# 直接启动已安装、已登录的原生 CLI，无需角色 Markdown 文件
+# 在当前项目的子 Agent 菜单开启后，调用原生 CLI，无需角色 Markdown 文件
 agent_create(name="codex", prompt="调查测试失败的原因")
 agent_create(name="claude", prompt="审查当前改动")
 
@@ -28,7 +35,9 @@ Codex / Claude Code 自己的原生会话 ID 由 Lumi 内部保存，无需模�
 `codex`、`claude` 是保留名称。实例归属主会话，不按目录隔离；`cwd` 默认继承创建时的
 主会话目录，后续续聊始终沿用该实例保存的目录。同一主会话切换目录后，仍可查询和联系
 此前创建的 subagent；不同会话在相同目录工作也不能互相访问对方的实例。
-本版提供只读观测后端接口，尚未修改桌面 UI，也不支持人类直接输入 subagent 消息。
+桌面右侧的子代理列表按实例展示状态；点击可查看每轮任务、回复、工具执行和错误，支持在
+侧栏或主区域查看。详情只读，后续消息仍由主 Agent 通过 `agent_message` 派发。
+本机 Codex 实例可从详情头部打开原生会话；停止执行会同时取消该实例尚未开始的排队消息。
 
 ---
 
@@ -133,6 +142,7 @@ tools:
 - `name` 字段需唯一，重复名称可能导致不可预期的行为
 - `tools` 字段支持逗号分隔的字符串格式（如 `tools: read, bash`）或 YAML 列表格式
 - subagent 使用独立持久上下文，完成后可通过 `agent_message` 继续对话
-- 外部执行器使用原生 CLI 的认证与上下文；本版不支持人类交互审批，遇到请求会阻塞该轮并回报主 Agent
+- 外部执行器使用原生 CLI 的认证与上下文，默认完全访问：Codex 关闭执行沙箱并使用 never 审批策略，Claude Code 使用 bypassPermissions 并关闭命令沙箱；新建和继续会话均生效
+- 子代理的问题通过 `questions` 回传主 Agent；主 Agent 能回答就直接回答，缺少用户决策时用自己的 `ask` 提问，再通过 `agent_message` 回复原实例继续任务。子会话保持只读，Claude Code 仍遵守显式禁止规则
 - 后端重启不会自动重做未完成任务；主 Agent 可查询状态后向原实例发送新消息
 - 子 Agent 的执行受主 Agent 的 `recursion_limit` 约束

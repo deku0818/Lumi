@@ -17,7 +17,6 @@ import os
 import platform
 import re
 import shutil
-import subprocess
 import tarfile
 import tempfile
 import urllib.request
@@ -28,6 +27,8 @@ from dataclasses import asdict, dataclass
 from hashlib import sha256
 from pathlib import Path
 
+from lumi.utils.cli import run_cli as _run
+from lumi.utils.cli import version_from_output
 from lumi.utils.config import get_config
 from lumi.utils.config.manager import parse_frontmatter
 from lumi.utils.logger import logger
@@ -48,9 +49,7 @@ _COMPANIONS = {"uv": ("uvx",)}
 # 进度回调：(阶段描述, 0..1 或 None=不可知)
 ProgressFn = Callable[[str, float | None], None]
 
-_VERSION_RE = re.compile(r"(\d+\.\d+\.\d+)")
 _SHA256_RE = re.compile(r"\b[0-9a-fA-F]{64}\b")
-_CLI_TIMEOUT = 30
 
 
 @dataclass(frozen=True)
@@ -121,34 +120,13 @@ def _exe(name: str) -> str:
     return f"{name}.exe" if _plat()[0] == "win" else name
 
 
-def _run(cmd: list[str], timeout: int = _CLI_TIMEOUT) -> tuple[bool, str]:
-    """跑一次子命令，返回 (成功, stdout 或 stderr)。
-
-    显式按 UTF-8 解码：``text=True`` 走的是系统 locale 编码，中文 Windows 上
-    是 cp936，lark-cli 的中文 JSON 一到那儿就 UnicodeDecodeError（体检误报
-    「不支持 skills 子命令」）。
-    """
-    try:
-        proc = subprocess.run(
-            cmd,
-            capture_output=True,
-            encoding="utf-8",
-            errors="replace",
-            timeout=timeout,
-        )
-        return proc.returncode == 0, proc.stdout or proc.stderr
-    except Exception as e:
-        return False, str(e)
-
-
 def _version_of(path: str, name: str) -> str:
     """跑 --version 解析版本号；失败返回空串（存在但版本未知）。"""
     ok, out = _run([path, "--version"], timeout=10)
     if not ok:
         logger.debug(f"取 {name} 版本失败: {out[:200]}")
     # 非零退出也照样解析：有的工具把版本打在 stderr 且退出码不为 0
-    match = _VERSION_RE.search(out)
-    return match.group(1) if match else ""
+    return version_from_output(out)
 
 
 def locate(name: str) -> ToolStatus:

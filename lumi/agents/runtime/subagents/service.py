@@ -26,6 +26,7 @@ from .types import (
     SubagentBlockedError,
     SubagentDeliveryUnknownError,
     SubagentExecutor,
+    SubagentQuestionError,
     SubagentTurn,
 )
 
@@ -49,6 +50,21 @@ def default_executor(kind: str) -> SubagentExecutor:
 RESULT_NOTIFICATION_PREFIX = "子代理本轮结果（需要继续沟通时使用 agent_message）：\n"
 
 
+def question_handoff(result: dict) -> dict:
+    """The same instructions accompany synchronous results and durable notifications."""
+    if not result.get("questions"):
+        return result
+    return {
+        **result,
+        "next_action": (
+            "子代理需要你回答 questions。先根据主会话上下文、已知事实或可验证的信息回答；"
+            "仅当缺少真正属于用户的决策时，使用 ask 向用户提问。获得答案后，"
+            "用 agent_message 把问题和答案发给本结果的同一 agent_id，继续原任务。"
+            "不要重新创建实例，不要把未回答或取消的问题当成已有答案。"
+        ),
+    }
+
+
 def result_notification(delivery: dict) -> str:
     """JSON keeps provider output inside data, including any XML-looking output."""
     content = {
@@ -65,7 +81,11 @@ def result_notification(delivery: dict) -> str:
             "error",
         )
     }
-    return RESULT_NOTIFICATION_PREFIX + json.dumps(content, ensure_ascii=False)
+    if delivery.get("questions"):
+        content["questions"] = delivery["questions"]
+    return RESULT_NOTIFICATION_PREFIX + json.dumps(
+        question_handoff(content), ensure_ascii=False
+    )
 
 
 class TimelineWriter:
@@ -294,15 +314,18 @@ class SubagentService:
 
     def receipt(self, turn_id: str) -> dict:
         turn = self.store.turn(turn_id)
-        return {
-            "agent_id": turn.agent_id,
-            "turn_id": turn.turn_id,
-            "task_id": turn.turn_id,
-            "ordinal": turn.ordinal,
-            "status": turn.status,
-            "output": turn.output,
-            "error": turn.error,
-        }
+        return question_handoff(
+            {
+                "agent_id": turn.agent_id,
+                "turn_id": turn.turn_id,
+                "task_id": turn.turn_id,
+                "ordinal": turn.ordinal,
+                "status": turn.status,
+                "output": turn.output,
+                "error": turn.error,
+                **self.store.question_details(turn),
+            }
+        )
 
     async def wait(self, turn_id: str) -> dict:
         if self.store.turn(turn_id).status not in TERMINAL_STATUSES:
@@ -325,6 +348,8 @@ class SubagentService:
         return {
             "agent_id": agent_id,
             "executor": agent.executor,
+            "native_session_id": agent.handle.get("thread_id")
+            or agent.handle.get("session_id"),
             "events": events,
             "cursor": events[-1]["seq"] if events else after,
         }
@@ -412,7 +437,14 @@ class SubagentService:
                 status = "blocked"
             elif isinstance(error, SubagentDeliveryUnknownError):
                 status = "interrupted"
-            self._finish(turn, status, error=str(error))
+            self._finish(
+                turn,
+                status,
+                error=str(error),
+                questions=error.questions
+                if isinstance(error, SubagentQuestionError)
+                else None,
+            )
             if executor:
                 await executor.close()
 
@@ -422,6 +454,7 @@ class SubagentService:
         status: str,
         output: str = "",
         error: str = "",
+        questions: list[dict] | None = None,
     ) -> None:
         if (
             status != "completed"
@@ -429,7 +462,7 @@ class SubagentService:
             and self.store.is_notification(turn.turn_id)
         ):
             output = turn.prompt
-        self.store.finish(turn.turn_id, status, output, error)
+        self.store.finish(turn.turn_id, status, output, error, questions=questions)
         self._publish_latest(turn.agent_id)
         path = self.output_dir / f"{turn.turn_id}.txt"
         try:

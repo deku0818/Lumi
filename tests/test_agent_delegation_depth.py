@@ -133,7 +133,7 @@ async def _invoke_via_toolnode(tool_obj, args: dict) -> str:
 @pytest.mark.parametrize(
     "tool_obj, args, marker",
     [
-        (agent_create, {"name": "__nonexistent__", "prompt": "x"}, "not found"),
+        (agent_create, {"name": "__nonexistent__", "prompt": "x"}, "未启用或不可用"),
         (agent_list, {}, "thread_id"),
         (agent_message, {"agent_id": "__nonexistent__", "prompt": "x"}, "不存在"),
         (workflow, {}, "script"),

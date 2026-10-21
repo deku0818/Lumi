@@ -10,7 +10,14 @@ from langchain_core.messages import HumanMessage
 
 from lumi.agents.core.stream_events import tool_event_args, tool_event_call_id
 
-from .types import Emit, SaveHandle, Subagent, SubagentExecutor, SubagentTurn
+from .types import (
+    Emit,
+    SaveHandle,
+    Subagent,
+    SubagentExecutor,
+    SubagentQuestionError,
+    SubagentTurn,
+)
 
 
 class LumiExecutor(SubagentExecutor):
@@ -25,6 +32,7 @@ class LumiExecutor(SubagentExecutor):
         from lumi.agents.runtime.workspace import set_project_source
         from lumi.agents.tools import get_tools
         from lumi.agents.tools.providers.agent import _subagent_tools
+        from lumi.agents.tools.providers.ask import ask
         from lumi.utils.config import get_config
 
         project = Path(agent.workspace)
@@ -32,6 +40,8 @@ class LumiExecutor(SubagentExecutor):
         tools = await get_tools(
             tools=agent.definition.get("tools") or None, project_dir=project
         )
+        if not any(tool.name == "ask" for tool in tools):
+            tools = [*tools, ask]
         lumi, context = await create_agent(
             tools=_subagent_tools(tools, agent.depth, settings.max_delegation_depth),
             system_prompt=agent.definition.get("system_prompt") or None,
@@ -42,6 +52,11 @@ class LumiExecutor(SubagentExecutor):
         )
         context.env_extra = agent.env_extra
         context.tool_mode = agent.tool_mode
+        questions: list[dict] = []
+        context.request_parent_input = questions.extend
+        context.env_extra += (
+            "\n需要补充信息时调用 ask，问题将交给主 Agent；不要编造用户的选择。"
+        )
         config = {
             "configurable": {"thread_id": agent.agent_id},
             "metadata": {"workspace_dir": agent.workspace, "subagent": True},
@@ -84,6 +99,8 @@ class LumiExecutor(SubagentExecutor):
                 async for event in events:
                     translate_lumi_event(event, emit)
             final = await lumi.graph.aget_state(config)
+            if questions:
+                raise SubagentQuestionError(questions)
             if final.next:
                 raise RuntimeError("子代理在完成前被中断")
             messages = final.values.get("messages") or []

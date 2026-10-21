@@ -101,6 +101,20 @@ async def ask(
     """向用户提问并等待回答（经在途审批 Broker 挂起）"""
     questions_data = [_build_question_data(i, q) for i, q in enumerate(questions)]
 
+    if request_parent := getattr(runtime.context, "request_parent_input", None):
+        request_parent(questions_data)
+        return Command(
+            update={
+                "messages": [
+                    ToolMessage(
+                        content="问题已交回主 Agent，等待它回答后继续当前子会话。",
+                        tool_call_id=tool_call_id,
+                    )
+                ],
+                "tool_cancelled": True,
+            }
+        )
+
     # 无审批通道（headless：cron / workflow / 后台子代理，context.approval_broker 为 None）：
     # 无法向用户提问，返回提示让自治 agent 自行判断后继续，而非崩溃。
     broker = runtime.context.approval_broker

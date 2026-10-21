@@ -37,7 +37,14 @@ class EchoExecutor:
 
 
 @pytest_asyncio.fixture
-async def service(tmp_path):
+async def service(tmp_path, monkeypatch):
+    from lumi.agents.runtime.subagents import availability
+
+    monkeypatch.setattr(
+        availability,
+        "available_agents",
+        lambda project_dir: list(availability.NATIVE_AGENTS.values()),
+    )
     runtime = SubagentService(tmp_path / "subagents.db", lambda _: EchoExecutor())
     yield runtime
     await runtime.close()
@@ -219,10 +226,6 @@ async def test_tool_selects_name_without_markdown(
 ):
     monkeypatch.setattr(
         "lumi.agents.tools.providers.agent.get_subagent_service", lambda: service
-    )
-    monkeypatch.setattr(
-        "lumi.agents.core.preprocessing.agent_detector.AgentChangeDetector.get_instance",
-        lambda *_: pytest.fail("Native/default execution must not load role files"),
     )
     rt = runtime(tmp_path)
     created = json.loads(

@@ -232,6 +232,7 @@ class SubagentStore:
         status: TurnStatus,
         output: str = "",
         error: str = "",
+        questions: list[dict] | None = None,
     ) -> None:
         turn = self.turn(turn_id)
         if turn.status in TERMINAL_STATUSES:
@@ -252,6 +253,7 @@ class SubagentStore:
                     "output": output,
                     "error": error,
                     "ordinal": turn.ordinal,
+                    **({"questions": questions} if questions else {}),
                 },
             )
             if turn.notify:
@@ -363,16 +365,28 @@ class SubagentStore:
                 ).fetchone()
             )
             active = self.conn.execute(
-                "SELECT status FROM subagent_turns WHERE agent_id=? AND status IN ('queued','running') ORDER BY ordinal LIMIT 1",
+                "SELECT turn_id,ordinal,status FROM subagent_turns WHERE agent_id=? AND status IN ('queued','running') ORDER BY ordinal LIMIT 1",
                 (agent.agent_id,),
             ).fetchone()
+            prompt = self.conn.execute(
+                "SELECT prompt FROM subagent_turns WHERE agent_id=? ORDER BY ordinal LIMIT 1",
+                (agent.agent_id,),
+            ).fetchone()[0]
+            queued = self.conn.execute(
+                "SELECT COUNT(*) FROM subagent_turns WHERE agent_id=? AND status='queued'",
+                (agent.agent_id,),
+            ).fetchone()[0]
             results.append(
                 {
                     "agent_id": agent.agent_id,
                     "name": agent.name,
+                    "title": " ".join(prompt.split())[:80],
                     "executor": agent.executor,
                     "cwd": agent.workspace,
                     "status": active["status"] if active else "idle",
+                    "active_turn_id": active["turn_id"] if active else None,
+                    "active_ordinal": active["ordinal"] if active else None,
+                    "queued_count": queued,
                     "turn_count": latest.ordinal,
                     "last_turn_id": latest.turn_id,
                     "last_turn_status": latest.status,
@@ -389,7 +403,22 @@ class SubagentStore:
             "WHERE d.parent_id=? AND d.delivered!=1 ORDER BY t.created_at",
             (parent_id,),
         ).fetchall()
-        return [{**dict(row), **asdict(self.turn(row["turn_id"]))} for row in rows]
+        results = []
+        for row in rows:
+            turn = self.turn(row["turn_id"])
+            results.append({**dict(row), **asdict(turn), **self.question_details(turn)})
+        return results
+
+    def question_details(self, turn: SubagentTurn) -> dict:
+        if turn.status != "blocked":
+            return {}
+        row = self.conn.execute(
+            "SELECT payload FROM subagent_events WHERE agent_id=? AND turn_id=? "
+            "AND type='turn.complete' ORDER BY seq DESC LIMIT 1",
+            (turn.agent_id, turn.turn_id),
+        ).fetchone()
+        questions = json.loads(row["payload"]).get("questions")
+        return {"questions": questions} if questions else {}
 
     def has_deliveries(self, parent_id: str) -> bool:
         return (

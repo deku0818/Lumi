@@ -73,6 +73,35 @@ async def test_notification_turn_preserves_current_tool_mode(tmp_path, bridge, m
     assert bridge._context.tool_mode == mode
 
 
+@pytest.mark.parametrize("fails", [False, True])
+async def test_notification_turn_emits_running_lifecycle(tmp_path, bridge, fails):
+    from lumi.gateway.protocol import bridge_event_to_wire
+    from lumi.sessions import session_model
+
+    model = (
+        _BreaksMidStream()
+        if fails
+        else ScriptedLLM(script=[[AIMessageChunk(content="后台结果续答")]])
+    )
+    with (
+        patch("lumi.models.chain.create_llm", return_value=model),
+        patch.object(AgentBridge, "_build_tools", new=_no_tools),
+    ):
+        await bridge.initialize(project_dir=str(tmp_path))
+        events = [
+            bridge_event_to_wire(e, bridge.current_thread_id)["params"]
+            async for e in bridge.stream_response("后台任务已完成", synthetic=True)
+        ]
+
+    kinds = [e["type"] for e in events]
+    assert kinds[0] == "turn.start"
+    assert kinds.count("turn.start") == 1
+    assert events[0]["payload"] == {"message_id": ""}
+    assert "message.delta" in kinds
+    assert kinds[-1] == ("error" if fails else "turn.complete")
+    assert not session_model.resolve(bridge.current_thread_id).pinned
+
+
 @pytest.mark.parametrize(
     "kwargs, expected",
     [({}, "default"), ({"synthetic": True, "tool_mode": "auto"}, "auto")],

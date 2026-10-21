@@ -9,6 +9,7 @@ from contextlib import suppress
 from typing import Any
 
 from lumi.agents.runtime.bg_process import terminate_group
+from lumi.utils.constants import GRACEFUL_SHUTDOWN_TIMEOUT
 
 from .executables import resolve_cli
 from .types import (
@@ -18,6 +19,7 @@ from .types import (
     SubagentBlockedError,
     SubagentDeliveryUnknownError,
     SubagentExecutor,
+    SubagentQuestionError,
     SubagentTurn,
 )
 
@@ -59,8 +61,8 @@ class CodexExecutor(SubagentExecutor):
         self._write({"method": "initialized"})
         options: dict[str, Any] = {
             "cwd": agent.workspace,
-            "approvalPolicy": "on-request",
-            "sandbox": agent.definition.get("sandbox", "read-only"),
+            "approvalPolicy": "never",
+            "sandbox": "danger-full-access",
         }
         if prompt := agent.definition.get("system_prompt"):
             options["developerInstructions"] = prompt
@@ -99,7 +101,7 @@ class CodexExecutor(SubagentExecutor):
                 record = json.loads(line)
                 if "method" in record:
                     if "id" in record:
-                        # This read-only backend cannot silently approve native interactions.
+                        # Full access avoids normal approvals; actual interaction still has no UI.
                         await self._answer_request(record)
                     elif self._active:
                         self._events.put_nowait(record)
@@ -123,6 +125,11 @@ class CodexExecutor(SubagentExecutor):
     async def _answer_request(self, record: dict) -> None:
         method = record["method"]
         params = record.get("params") or {}
+        if method == "item/tool/requestUserInput":
+            # Keep the native request unanswered until the owning run interrupts it.
+            # Calling _request here would deadlock the reader on its own response.
+            self._events.put_nowait(record)
+            return
         self._blocked = f"Codex 需要原生交互: {method}"
         self._emit(
             "approval.request",
@@ -134,8 +141,6 @@ class CodexExecutor(SubagentExecutor):
             else:
                 result = {"decision": "decline"}
             self._write({"id": record["id"], "result": result})
-        elif method == "item/tool/requestUserInput":
-            self._write({"id": record["id"], "result": {"answers": {}}})
         else:
             self._write(
                 {
@@ -195,7 +200,19 @@ class CodexExecutor(SubagentExecutor):
                 if params.get("turnId", native_turn_id) != native_turn_id:
                     continue
                 method = event["method"]
-                if method == "item/agentMessage/delta":
+                if method == "item/tool/requestUserInput":
+                    questions = params.get("questions") or []
+                    # Do not give Codex an empty answer and let it continue guessing.
+                    # Always hand back the captured questions, even if interrupt fails;
+                    # the outer cleanup closes only this executor's owned app-server.
+                    with suppress(Exception):
+                        async with asyncio.timeout(GRACEFUL_SHUTDOWN_TIMEOUT):
+                            await self._request(
+                                "turn/interrupt",
+                                {"threadId": self._thread_id, "turnId": native_turn_id},
+                            )
+                    raise SubagentQuestionError(questions)
+                elif method == "item/agentMessage/delta":
                     emit(
                         "message.delta",
                         {

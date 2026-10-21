@@ -30,6 +30,7 @@ MEMORY.md），会一并被静默且不补发。触发需两个写方挤进同�
 
 from __future__ import annotations
 
+import asyncio
 from pathlib import Path
 
 from langchain_core.messages import AIMessage, HumanMessage
@@ -188,7 +189,9 @@ async def context_inject_hook(ctx: HookContext) -> HookResult:
 
     if _has_agent_tool(runtime.context.tools):
         # 列表按会话项目取，与 agent / skill 工具查找同源（宣告了的一定调得到）
-        agents = AgentChangeDetector.get_instance(runtime.context.project_dir).peek()
+        agents = await asyncio.to_thread(
+            AgentChangeDetector.get_instance(runtime.context.project_dir).peek
+        )
         text, marker["agents"] = _emit_keyed(
             "agent 列表",
             AGENT_HEADER,

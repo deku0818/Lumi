@@ -67,6 +67,7 @@ contextBridge.exposeInMainWorld('lumi', {
   },
   // artifacts 预览：用系统应用打开 / 在访达中显示 / 探测文件是否还在 / 读本地文本
   openPath: (p) => ipcRenderer.invoke('lumi:open-path', p),
+  openCodexThread: (id) => ipcRenderer.invoke('lumi:open-codex-thread', id),
   revealInFolder: (p) => ipcRenderer.invoke('lumi:reveal-path', p),
   pathExists: (p) => ipcRenderer.invoke('lumi:path-exists', p),
   readText: (p) => ipcRenderer.invoke('lumi:read-text', p),

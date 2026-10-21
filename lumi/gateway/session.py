@@ -515,14 +515,39 @@ async def _make_dir(session: GatewaySession, params: dict) -> dict:
         return {"ok": False, "error": str(e)}
 
 
-# 项目主页资源（prompts/skills/agents/memory）：纯文件操作，不经 bridge、不持锁。
-# 文件 IO 很小（配置级 md），直接同步执行（同 _list_dir 的做法）。
+# 项目主页资源不经 bridge、不持锁；读取放在线程中，避免 Agent 可用性检测阻塞事件循环。
+# 写入仍是很小的配置文件操作，直接同步执行。
 async def _project_overview(session: GatewaySession, params: dict) -> dict:
-    return project_config.overview(Path(params.get("path", "")))
+    return await asyncio.to_thread(
+        project_config.overview, Path(params.get("path", ""))
+    )
+
+
+async def _set_project_agent(session: GatewaySession, params: dict) -> dict:
+    from lumi.agents.runtime.subagents import availability
+
+    if not params.get("path"):
+        raise ValueError("需要指定项目目录")
+    project = Path(params["path"]).expanduser().resolve()
+    if not project.is_dir():
+        raise ValueError("项目目录不存在")
+    name, enabled = params.get("name"), params.get("enabled")
+    if name not in availability.NATIVE_AGENTS or not isinstance(enabled, bool):
+        raise ValueError("需要有效的外部 Agent 名称与布尔 enabled")
+    if enabled:
+        check = await asyncio.to_thread(availability.check_agent, name, True)
+        if check.state != "ready":
+            label = "Codex" if name == "codex" else "Claude Code"
+            reason = {"missing": "未安装", "login": "未登录", "error": "检查未通过"}
+            raise ValueError(f"{label} {reason[check.state]}")
+    availability.set_enabled(project, name, enabled)
+    await session._hub.send_event(ServerEvent.AGENTS_CHANGED, {"project": str(project)})
+    return {"name": name, "enabled": enabled}
 
 
 async def _project_resource_read(session: GatewaySession, params: dict) -> dict:
-    return project_config.read_resource(
+    return await asyncio.to_thread(
+        project_config.read_resource,
         Path(params.get("path", "")),
         params.get("kind", ""),
         params.get("name", ""),
@@ -753,6 +778,8 @@ _RPC_HANDLERS = {
     "list_subagents": subagents.list_subagents,
     "subagent_history": subagents.subagent_history,
     "observe_subagent": subagents.observe_subagent,
+    "unobserve_subagent": subagents.unobserve_subagent,
+    "stop_subagent": subagents.stop_subagent,
     "stop": _stop,
     "withdraw_message": _withdraw_message,
     "resume": _resume,
@@ -777,6 +804,7 @@ _RPC_HANDLERS = {
     "list_dir": _list_dir,
     "make_dir": _make_dir,
     "project_overview": _project_overview,
+    "set_project_agent": _set_project_agent,
     "project_resource_read": _project_resource_read,
     "project_resource_write": _project_resource_write,
     "project_resource_delete": _project_resource_delete,

@@ -32,16 +32,6 @@ export const fileUrl = (p: string) => {
   return 'lumi-file://local' + rooted.split('/').map(encodeURIComponent).join('/')
 }
 
-// artifacts 工具输出（JSON 字符串）→ 文件列表；非法 JSON 退化为空。
-export function parseArtifacts(output: string): Artifact[] {
-  try {
-    const data = JSON.parse(output)
-    return Array.isArray(data) ? data : []
-  } catch {
-    return []
-  }
-}
-
 const ext = (f: Artifact) => (f.name || f.path).toLowerCase().split('.').pop() || ''
 
 // 内容取用通道的唯一决策点：本地走 lumi-file 零拷贝，远程通过 SSH 数据通道取回

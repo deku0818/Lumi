@@ -1,4 +1,4 @@
-"""Read-only subagent observations; dispatch remains exclusively in the Agent tools."""
+"""Subagent observations and cancellation; dispatch remains in the Agent tools."""
 
 from __future__ import annotations
 
@@ -33,6 +33,21 @@ async def observe_subagent(session: GatewaySession, params: dict) -> dict:
     # not gaps. Clients deduplicate by seq and paginate any missing history.
     session._hub.add_observer(agent_id, session._channel)
     return await subagent_history(session, params)
+
+
+async def unobserve_subagent(session: GatewaySession, params: dict) -> dict:
+    agent_id = params["agent_id"]
+    get_subagent_service().store.owned_agent(session.current_thread_id, agent_id)
+    session._hub.remove_observer(agent_id, session._channel)
+    return {"agent_id": agent_id}
+
+
+async def stop_subagent(session: GatewaySession, params: dict) -> dict:
+    return {
+        "stopped": await get_subagent_service().stop(
+            session.current_thread_id, params["agent_id"]
+        )
+    }
 
 
 def publish_subagent_event(hub, agent_id: str, event: dict) -> None:

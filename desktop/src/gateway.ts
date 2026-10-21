@@ -13,6 +13,7 @@ import type {
   DiagnoseCheck,
   EnvInstallTarget,
   EnvStatus,
+  ExternalAgentName,
   FeishuConfig,
   ForkSessionResult,
   GatewayConnection,
@@ -36,6 +37,8 @@ import type {
   SessionMeta,
   SessionModelWire,
   SlashCommand,
+  SubagentHistory,
+  SubagentSummary,
   WireEvent,
 } from './types.ts'
 import { SshSocket } from './sshSocket'
@@ -643,6 +646,30 @@ export class Gateway {
   onEvent(h: EventHandler): () => void {
     this.eventHandlers.add(h)
     return () => this.eventHandlers.delete(h)
+  }
+
+  listSubagents(): Promise<{ agents: SubagentSummary[] }> {
+    return this.request('list_subagents')
+  }
+
+  setProjectAgent(path: string, name: ExternalAgentName, enabled: boolean): Promise<{ name: ExternalAgentName; enabled: boolean }> {
+    return this.request('set_project_agent', { path, name, enabled })
+  }
+
+  subagentHistory(agentId: string, after = 0, limit = 500): Promise<SubagentHistory> {
+    return this.request('subagent_history', { agent_id: agentId, after, limit })
+  }
+
+  observeSubagent(agentId: string, after = 0, limit = 500): Promise<SubagentHistory> {
+    return this.request('observe_subagent', { agent_id: agentId, after, limit })
+  }
+
+  unobserveSubagent(agentId: string): Promise<{ agent_id: string }> {
+    return this.request('unobserve_subagent', { agent_id: agentId })
+  }
+
+  stopSubagent(agentId: string): Promise<{ stopped: boolean }> {
+    return this.request('stop_subagent', { agent_id: agentId })
   }
 
   onState(h: StateHandler): () => void {

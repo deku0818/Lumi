@@ -60,5 +60,13 @@ class SubagentBlockedError(RuntimeError):
     """The native agent needs an interaction this read-only entry cannot answer."""
 
 
+class SubagentQuestionError(SubagentBlockedError):
+    """End this turn with questions; the parent replies through agent_message."""
+
+    def __init__(self, questions: list[dict[str, Any]]) -> None:
+        self.questions = questions
+        super().__init__("子代理需要补充信息，问题已交回主 Agent")
+
+
 class SubagentDeliveryUnknownError(RuntimeError):
     """Transport failed after submission; never automatically send the prompt again."""

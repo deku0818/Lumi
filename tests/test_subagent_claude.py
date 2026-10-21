@@ -10,7 +10,7 @@ from lumi.agents.permissions.models import PermissionDecision
 from lumi.agents.runtime.subagents.claude import ClaudeExecutor
 from lumi.agents.runtime.subagents.types import (
     Subagent,
-    SubagentBlockedError,
+    SubagentQuestionError,
     SubagentTurn,
 )
 
@@ -120,6 +120,10 @@ async def test_native_cli_options_partial_events_and_resume(agent, monkeypatch):
         == "answer"
     )
     assert options_seen[0].cli_path == "/native/claude"
+    assert all(
+        options.permission_mode == "bypassPermissions" for options in options_seen
+    )
+    assert all(options.sandbox == {"enabled": False} for options in options_seen)
     assert options_seen[0].resume is None and options_seen[1].resume == "native-42"
     assert options_seen[0].system_prompt == {"type": "preset", "preset": "claude_code"}
     assert (
@@ -129,8 +133,8 @@ async def test_native_cli_options_partial_events_and_resume(agent, monkeypatch):
     assert any(k == "tool.complete" and p["output"] == "contents" for k, p in events)
 
 
-@pytest.mark.parametrize("decision", [PermissionDecision.DENY, PermissionDecision.ASK])
-async def test_project_rules_apply_even_to_native_preapproved_tools(
+@pytest.mark.parametrize("decision", list(PermissionDecision))
+async def test_full_access_allows_tools_except_explicit_project_denials(
     agent, monkeypatch, decision
 ):
     monkeypatch.setattr(
@@ -142,36 +146,78 @@ async def test_project_rules_apply_even_to_native_preapproved_tools(
         response = await hook(
             {"tool_name": "Bash", "tool_input": {"command": "echo x"}}, "tool-1", {}
         )
-        assert response["hookSpecificOutput"]["permissionDecision"] == "deny"
         permission = await options.can_use_tool("Bash", {"command": "echo x"}, {})
-        assert isinstance(permission, sdk.PermissionResultDeny)
+        if decision == PermissionDecision.DENY:
+            assert response["hookSpecificOutput"]["permissionDecision"] == "deny"
+            assert isinstance(permission, sdk.PermissionResultDeny)
+        else:
+            assert response == {"continue_": True}
+            assert isinstance(permission, sdk.PermissionResultAllow)
 
     client(monkeypatch, [result()], inspect)
-    if decision == PermissionDecision.ASK:
-        with pytest.raises(SubagentBlockedError):
-            await ClaudeExecutor().run(agent, turn(), lambda *_: None, lambda _: None)
-    else:
-        assert (
-            await ClaudeExecutor().run(agent, turn(), lambda *_: None, lambda _: None)
-            == "answer"
-        )
+    assert (
+        await ClaudeExecutor().run(agent, turn(), lambda *_: None, lambda _: None)
+        == "answer"
+    )
 
 
-async def test_native_human_question_cannot_be_auto_approved(agent, monkeypatch):
+@pytest.mark.parametrize("has_result", [True, False])
+async def test_native_question_is_handed_back_with_options_and_session(
+    agent, monkeypatch, has_result
+):
     monkeypatch.setattr(
         "lumi.agents.permissions.engine.PermissionEngine.evaluate",
         lambda *_: PermissionDecision.ALLOW,
     )
 
     async def inspect(options):
+        hook = options.hooks["PreToolUse"][0].hooks[0]
+        response = await hook(
+            {"tool_name": "AskUserQuestion", "tool_input": {"questions": questions}},
+            "question",
+            {},
+        )
+        assert response["continue_"] is False
+        assert response["hookSpecificOutput"]["permissionDecision"] == "deny"
         assert isinstance(
-            await options.can_use_tool("AskUserQuestion", {}, {}),
+            await options.can_use_tool("AskUserQuestion", {"questions": questions}, {}),
             sdk.PermissionResultDeny,
         )
 
-    client(monkeypatch, [result()], inspect)
-    with pytest.raises(SubagentBlockedError):
-        await ClaudeExecutor().run(agent, turn(), lambda *_: None, lambda _: None)
+    questions = [
+        {
+            "question": "选择哪种格式？",
+            "header": "格式",
+            "options": [
+                {"label": "CSV", "description": "表格"},
+                {"label": "JSON", "description": "结构化"},
+            ],
+            "multiSelect": False,
+        }
+    ]
+    client(
+        monkeypatch,
+        [result()]
+        if has_result
+        else [sdk.SystemMessage("init", {"session_id": "native-42"})],
+        inspect,
+    )
+    handle = {}
+    with pytest.raises(SubagentQuestionError) as error:
+        await ClaudeExecutor().run(agent, turn(), lambda *_: None, handle.update)
+    assert error.value.questions == questions
+    assert handle == {"session_id": "native-42"}
+
+    async def inspect_resume(options):
+        assert options.resume == "native-42"
+
+    client(monkeypatch, [result()], inspect_resume)
+    assert (
+        await ClaudeExecutor().run(
+            replace(agent, handle=handle), turn(), lambda *_: None, handle.update
+        )
+        == "answer"
+    )
 
 
 @pytest.mark.parametrize(

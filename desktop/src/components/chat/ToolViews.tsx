@@ -18,7 +18,7 @@ export type ToolItem = Extract<Item, { kind: 'tool' }>
 export const sameItems = (a: ToolItem[], b: ToolItem[]) =>
   a.length === b.length && a.every((x, i) => x === b[i])
 
-export const ToolGroup = memo(function ToolGroup({ tools }: { tools: ToolItem[] }) {
+export const ToolGroup = memo(function ToolGroup({ tools, onOpenSubagent }: { tools: ToolItem[]; onOpenSubagent?: (id: string) => void }) {
   const { t } = useI18n()
   const running = tools.some((t) => !t.done)
   const hasError = tools.some((t) => t.error)
@@ -37,6 +37,14 @@ export const ToolGroup = memo(function ToolGroup({ tools }: { tools: ToolItem[] 
 
   return (
     <div>
+      {onOpenSubagent && tools.map(tool => {
+        if (!['agent_create', 'agent_message'].includes(tool.name) || !tool.done) return null
+        let id: unknown
+        try { id = JSON.parse(tool.output).agent_id } catch { return null }
+        if (typeof id !== 'string') return null
+        const agentId = id
+        return <button key={`subagent:${tool.id}`} className="mb-1 flex items-center gap-1 text-xs text-muted-foreground hover:text-ink" onClick={() => onOpenSubagent(agentId)}>{t('subagent.taskLink', { id: agentId })}<ChevronRight size={12} /></button>
+      })}
       <button
         aria-expanded={open}
         onClick={() => setOverride(!open)}
@@ -60,7 +68,7 @@ export const ToolGroup = memo(function ToolGroup({ tools }: { tools: ToolItem[] 
     </div>
   )
 },
-(prev, next) => sameItems(prev.tools, next.tools))
+(prev, next) => sameItems(prev.tools, next.tools) && prev.onOpenSubagent === next.onOpenSubagent)
 
 // 展开后的工具明细行。收起：图标 + 标题 + 第二行关键参数（命令着色 / 路径 / 搜索词 / 键值）
 // 与非默认选项 chip，扫一眼就知道调了什么。展开：整行合成一张卡——标题行作卡头（悬停只亮卡头），

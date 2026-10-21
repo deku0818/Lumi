@@ -51,6 +51,10 @@ class LumiAgentContext:
     """在途审批 Broker，由 bridge 在 create_agent 后注入（与 permission_engine 同源）。
     节点 / ask 工具经它原地 await 审批。子 agent 由 agent 工具从父 context 传播。
     无 bridge 的纯 graph 调用（headless）保持 None。"""
+    request_parent_input: Callable[[list[dict[str, Any]]], None] | None = field(
+        default=None
+    )
+    """持久子代理的 ask 转交入口；记录问题后结束本轮，由主 Agent 回答并续聊。"""
     get_goal: Callable[[str], str] | None = field(default=None)
     """按 thread_id 读会话当前 ``/goal`` 条件（未设定返回空串），由 bridge 注入。
     goal 存 sessions 层的 sidecar，core 不直接依赖 sessions——同 approval_broker 的

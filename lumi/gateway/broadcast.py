@@ -176,6 +176,15 @@ class BroadcastHub(ResultDelivery):
             if not obs:
                 del self._observers[thread_id]
 
+    def remove_observer(self, thread_id: str, channel: Channel) -> None:
+        observers = self._observers.get(thread_id)
+        if observers is None:
+            return
+        if observer := observers.pop(channel, None):
+            observer.close()
+        if not observers:
+            del self._observers[thread_id]
+
     def has_observers(self, thread_id: str) -> bool:
         """该 thread 是否有观测者——runner 据此短路 bridge_event_to_wire，零观测者不白建帧。"""
         return bool(self._observers.get(thread_id))

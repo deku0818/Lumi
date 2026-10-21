@@ -7,6 +7,7 @@ const net = require('node:net')
 const fs = require('node:fs')
 const path = require('node:path')
 const crypto = require('node:crypto')
+const { codexThreadUrl } = require('./codex-links.cjs')
 const { setupUpdater } = require('./updater.cjs')
 
 // 本地 sidecar 的访问令牌：每次启动随机生成，经环境变量 LUMI_TOKEN 注入（不走 argv：
@@ -402,6 +403,7 @@ ipcMain.handle('lumi:connection', (_event, id) => {
 
 // artifacts 预览：用系统默认应用打开 / 在访达中显示该文件
 ipcMain.handle('lumi:open-path', (_e, p) => shell.openPath(String(p)))
+ipcMain.handle('lumi:open-codex-thread', (_e, id) => shell.openExternal(codexThreadUrl(id)))
 ipcMain.handle('lumi:reveal-path', (_e, p) => shell.showItemInFolder(String(p)))
 // 预览打开时探测文件是否还在（被移动/改名/删除则 false）；渲染卡片时不调，零开销。
 // 用异步 access：避免 existsSync 在离线网络盘上同步阻塞整个主进程。

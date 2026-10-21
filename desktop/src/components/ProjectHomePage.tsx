@@ -4,6 +4,7 @@ import {
   Bot,
   Brain,
   Clock,
+  Code2,
   FileText,
   Lock,
   MessageSquare,
@@ -11,12 +12,14 @@ import {
   Pin,
   Plus,
   Star,
+  Sparkles,
   Trash2,
   Zap,
 } from 'lucide-react'
 import type { Gateway } from '../gateway'
 import type {
   CronJob,
+  ExternalAgentName,
   ProjectOverview,
   ProjectResource,
   ProjectResourceKind,
@@ -31,7 +34,9 @@ import { Button } from '@/components/ui/button'
 import { Switch } from '@/components/ui/switch'
 import { Dialog, DialogContent, DialogTitle } from '@/components/ui/dialog'
 import { CARD_L1 } from './glass'
+import { DropdownMenu, DropdownMenuTrigger, DropdownMenuContent, DropdownMenuCheckboxItem, DropdownMenuItem, DropdownMenuSeparator } from './ui/dropdown-menu'
 import { describeSchedule } from './CronPage'
+import { ClaudeIcon, CodexIcon } from './AgentBrandIcons'
 
 // 项目主页（交互定稿见 .demos/project-home.html）：点进项目卡片后的落地页。
 // 左列 = 输入岛（发送即在此项目新建会话）+ 该项目会话流；右列 = 项目画像五卡
@@ -75,7 +80,7 @@ export const ProjectHomePage = memo(function ProjectHomePage({
   const [sheet, setSheet] = useState<Sheet | null>(null)
   const [promptTab, setPromptTab] = useState<'SOUL' | 'AGENTS'>('SOUL')
 
-  // 概览加载：ovTick 驱动重拉（写操作后 +1）；挂在机器连接态上，连上 / 重连成功即重拉
+  // 概览加载：写操作、Agent 配置变更及连上 / 重连成功时重拉
   // （断线期间进来不会定格成空卡片）；stale 判废防切换项目时旧响应倒灌
   const [ovTick, setOvTick] = useState(0)
   const refresh = useCallback(() => setOvTick((n) => n + 1), [])
@@ -83,14 +88,21 @@ export const ProjectHomePage = memo(function ProjectHomePage({
     machine,
     () => {
       let stale = false
-      api()
-        ?.projectOverview(project.path)
-        .then((ov) => {
-          if (!stale) setOverview(ov)
-        })
-        .catch(() => {})
+      let request = 0
+      const gw = api()
+      const load = () => {
+        const current = ++request
+        return gw?.projectOverview(project.path)
+          .then((ov) => {
+            if (!stale && current === request) setOverview(ov)
+          })
+          .catch(() => {})
+      }
+      load()
+      const off = gw?.onEvent(event => { if (event.type === 'agents.changed' && event.payload.project === project.path) load() })
       return () => {
         stale = true
+        off?.()
       }
     },
     [api, project.path, ovTick],
@@ -273,31 +285,35 @@ export const ProjectHomePage = memo(function ProjectHomePage({
               title={t('projhome.agents')}
               count={overview?.agents.length}
               action={
-                <CardAction title={t('projhome.newAgent')} onClick={() => setSheet({ mode: 'create', kind: 'agent' })}>
-                  <Plus size={12} />
-                </CardAction>
+                <ProjectAgentMenu
+                  key={`${machine}:${project.path}`}
+                  api={api}
+                  path={project.path}
+                  enabled={overview?.external_agents}
+                  onCreate={() => setSheet({ mode: 'create', kind: 'agent' })}
+                />
               }
             >
               {!overview?.agents.length ? (
                 <EmptyHint>{t('projhome.agentsEmpty')}</EmptyHint>
               ) : (
-                overview.agents.map((a) => (
-                  <button
-                    key={a.name}
-                    onClick={() => setSheet({ mode: 'view', kind: 'agent', name: a.name })}
-                    className="flex items-start gap-2 w-full text-left py-1.5 border-t border-line/40 first:border-0"
-                  >
-                    {a.builtin ? (
-                      <Lock size={11} className="shrink-0 mt-0.5 text-muted-foreground/70" />
-                    ) : (
-                      <Bot size={11} className="shrink-0 mt-0.5 text-muted-foreground/70" />
-                    )}
-                    <span className="min-w-0">
-                      <span className="block text-xs font-mono truncate">{a.name}</span>
-                      <span className="block text-[10.5px] text-muted-foreground truncate">{a.description}</span>
-                    </span>
-                  </button>
-                ))
+                overview.agents.map((a) => {
+                  let Icon = a.builtin ? Lock : Bot
+                  if (a.source === 'native') Icon = a.executor === 'codex' ? Code2 : Sparkles
+                  return (
+                    <button
+                      key={a.name}
+                      onClick={() => setSheet({ mode: 'view', kind: 'agent', name: a.name })}
+                      className="flex items-start gap-2 w-full text-left py-1.5 border-t border-line/40 first:border-0"
+                    >
+                      <Icon size={11} className="shrink-0 mt-0.5 text-muted-foreground/70" />
+                      <span className="min-w-0">
+                        <span className="block text-xs font-mono truncate">{a.name}</span>
+                        <span className="block text-[10.5px] text-muted-foreground truncate">{a.description}</span>
+                      </span>
+                    </button>
+                  )
+                })
               )}
             </Card>
           </div>
@@ -408,6 +424,52 @@ function CardAction({
   )
 }
 
+function ProjectAgentMenu({ api, path, enabled, onCreate }: {
+  api: () => Gateway | undefined
+  path: string
+  enabled?: Partial<Record<ExternalAgentName, boolean>>
+  onCreate: () => void
+}) {
+  const { t } = useI18n()
+  const [saving, setSaving] = useState<ExternalAgentName | null>(null)
+  const items = [
+    { name: 'codex' as const, label: 'Codex', Icon: CodexIcon },
+    { name: 'claude' as const, label: 'Claude Code', Icon: ClaudeIcon },
+  ]
+  const change = async (name: ExternalAgentName, checked: boolean) => {
+    const gw = api()
+    if (!gw || saving) return
+    setSaving(name)
+    try {
+      await gw.setProjectAgent(path, name, checked)
+    } catch (error) {
+      toast.error(errorMessage(error))
+    } finally {
+      setSaving(null)
+    }
+  }
+  return <DropdownMenu>
+    <DropdownMenuTrigger asChild>
+      <button title={t('projhome.newAgent')} aria-label={t('projhome.newAgent')} className="size-6 grid place-items-center rounded-md text-muted-foreground hover:bg-surface hover:text-ink transition"><Plus size={12} /></button>
+    </DropdownMenuTrigger>
+    <DropdownMenuContent align="end" className="w-44">
+      {items.map(({ name, label, Icon }) => <DropdownMenuCheckboxItem
+        key={name}
+        checked={!!enabled?.[name]}
+        disabled={!enabled || !!saving || !api()}
+        onSelect={event => event.preventDefault()}
+        onCheckedChange={checked => void change(name, checked)}
+      >
+        <Icon size={16} className="text-muted-foreground" />{label}
+        {saving === name ? <span role="status" aria-label={t('env.detecting')} className="lumi-orb" style={{ position: 'absolute', right: 12, width: 6, height: 6 }} />
+          : !enabled?.[name] && <Plus size={14} className="text-muted-foreground" style={{ position: 'absolute', right: 8 }} />}
+      </DropdownMenuCheckboxItem>)}
+      <DropdownMenuSeparator />
+      <DropdownMenuItem onSelect={onCreate}><Pencil size={16} className="text-muted-foreground" />{t('projhome.customAgent')}</DropdownMenuItem>
+    </DropdownMenuContent>
+  </DropdownMenu>
+}
+
 function EmptyHint({ children }: { children: React.ReactNode }) {
   return <div className="text-[11.5px] text-muted-foreground/80 italic select-none">{children}</div>
 }
@@ -515,6 +577,10 @@ function SheetBody({ api, path, sheet, onClose, onChanged, onSwitch }: SheetProp
   }, [api, path, sheet, file, tick, newName, textDirty])
 
   const builtin = !creating && !!res?.builtin
+  let badgeKey = 'projhome.builtin'
+  let tipKey = 'projhome.builtinTip'
+  if (res?.source === 'global') { badgeKey = 'projhome.globalBadge'; tipKey = 'projhome.globalTip' }
+  if (res?.native) { badgeKey = 'projhome.nativeAgent'; tipKey = 'projhome.nativeAgentTip' }
   // 提示词的编辑恒写项目层（即使当前命中 global/builtin——保存即产生项目覆盖）
   const editable = creating || kind === 'prompt' || (!builtin && kind !== 'memory')
   const validNewName = NAME_RE.test(newName.trim())
@@ -611,7 +677,7 @@ function SheetBody({ api, path, sheet, onClose, onChanged, onSwitch }: SheetProp
         {builtin && (
           <span className="inline-flex items-center gap-1 px-2 py-0.5 rounded-full bg-muted-foreground/12 text-[10px] text-muted-foreground">
             <Lock size={9} />
-            {t(res?.source === 'global' ? 'projhome.globalBadge' : 'projhome.builtin')}
+            {t(badgeKey)}
           </span>
         )}
         {res?.path && !creating && (
@@ -654,16 +720,16 @@ function SheetBody({ api, path, sheet, onClose, onChanged, onSwitch }: SheetProp
       {/* 内置提示条 */}
       {builtin && !confirming && (kind === 'skill' || kind === 'agent') && (
         <div className="flex items-center gap-2.5 px-5 py-2.5 text-[11.5px] text-muted-foreground border-b border-line/60">
-          {t(res?.source === 'global' ? 'projhome.globalTip' : 'projhome.builtinTip', {
+          {t(tipKey, {
             kind: kindLabel,
           })}
-          <button
+          {!res?.native && <button
             onClick={copyToProject}
             className="px-2.5 py-1 rounded-full border border-dashed border-primary/45 text-primary/90 hover:bg-primary/10 transition"
           >
             {t('projhome.copyToProject')}
-          </button>
-          <span className="text-muted-foreground/60">{t('projhome.copyNote')}</span>
+          </button>}
+          {!res?.native && <span className="text-muted-foreground/60">{t('projhome.copyNote')}</span>}
         </div>
       )}
 
