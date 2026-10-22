@@ -32,11 +32,11 @@ export function ConfirmDialog({
   const { t } = useI18n()
   return (
     <Dialog open onOpenChange={(o) => !o && onCancel()}>
-      <DialogContent showCloseButton={false} className="sm:max-w-sm p-5">
+      <DialogContent showCloseButton={false} className="p-5">
         <DialogHeader>
-          <DialogTitle className={icon ? 'flex items-center gap-2' : undefined}>
-            {icon}
-            {title}
+          <DialogTitle className={icon ? 'flex items-start gap-2' : undefined}>
+            {icon && <span className="flex h-[1.375em] shrink-0 items-center">{icon}</span>}
+            <span className="min-w-0">{title}</span>
           </DialogTitle>
           <DialogDescription className="break-words leading-relaxed">{message}</DialogDescription>
         </DialogHeader>

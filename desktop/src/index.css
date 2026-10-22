@@ -96,7 +96,7 @@
 }
 
 @theme inline {
-  --color-base: var(--color-base);
+  /* base 仅作 CSS 背景变量，不注册为颜色工具类，避免覆盖 text-base 字号。 */
   --font-weight-medium: var(--ui-weight-medium);
   --font-weight-semibold: var(--ui-weight-semibold);
   --default-transition-duration: var(--motion-snap);
@@ -243,21 +243,69 @@ pre {
   border: 1px solid color-mix(in srgb, var(--color-ink) 7%, transparent);
   box-shadow: var(--shadow-card);
 }
-.sidebar-float { background: var(--color-base); }
+.sidebar-float { --sidebar-background: var(--color-base); background: var(--sidebar-background); }
 
-/* 会话悬停：整行高亮，只有被截断的标题移动；详细信息通过 Portal 展示。 */
-/* 常态让标题延伸到行尾；菜单可见时才预留按钮位置。 */
-.session-row:hover .session-select,
-.session-row:focus-within .session-select,
-.session-row[data-menu-open="true"] .session-select {
-  padding-right: 32px;
+/* 项目侧栏：标题共用对齐线；收起紧凑，展开后才增加组间留白。 */
+.sidebar-navigation { padding: 4px 10px 10px; }
+.sidebar-utility { display: grid; grid-template-columns: 1fr 1fr; gap: 4px; margin-top: 2px; }
+.sidebar-search {
+  display: flex; align-items: center; gap: 7px; height: 30px; margin: 8px 2px 0; padding: 0 9px;
+  color: var(--color-muted); background: color-mix(in srgb, var(--color-base) 25%, transparent);
+  border: 1px solid color-mix(in srgb, var(--color-line) 70%, transparent); border-radius: 7px;
 }
+.sidebar-search:focus-within { border-color: color-mix(in srgb, var(--color-accent) 40%, var(--color-line)); }
+.sidebar-search input { flex: 1; min-width: 0; background: transparent; outline: none; font-size: 12px; }
+.sidebar-search input::placeholder { color: var(--color-muted); }
+.sidebar-search button { display: grid; place-items: center; width: 20px; height: 24px; border-radius: 4px; }
+.sidebar-search button:hover { color: var(--color-ink); }
+.sidebar-scroll { padding: 4px 10px 12px; scrollbar-width: thin; scrollbar-color: color-mix(in srgb, var(--color-muted) 20%, transparent) transparent; overflow-anchor: none; }
+.sidebar-project { margin-bottom: 12px; transition: margin-bottom 260ms var(--ease-out); }
+.sidebar-project[data-open="false"] { margin-bottom: 2px; }
+.sidebar-project-head { position: relative; display: flex; align-items: center; height: 34px; border-radius: 8px; }
+.sidebar-project-head:hover { background: color-mix(in srgb, var(--color-ink) 4%, transparent); }
+.sidebar-project-toggle { display: flex; flex: 1; min-width: 0; height: 34px; align-items: center; gap: 6px; padding: 0 7px; text-align: left; border-radius: 8px; font-size: 12px; }
+.sidebar-project-machine { display: flex; align-items: center; gap: 4px; margin-left: auto; padding-right: 25px; min-width: 0; max-width: 45%; font-size: 10px; color: var(--color-muted); }
+.sidebar-project-add { position: absolute; display: grid; place-items: center; right: 4px; top: 5px; width: 24px; height: 24px; border-radius: 6px; color: var(--color-muted); opacity: 0; transition: opacity 140ms, background 140ms; }
+.sidebar-project-head:hover .sidebar-project-add,
+.sidebar-project-head:focus-within .sidebar-project-add { opacity: 1; }
+.sidebar-project-add:hover { background: var(--color-surface); color: var(--color-ink); }
+.sidebar-project-state { width: 6px; height: 6px; flex-shrink: 0; border-radius: 50%; background: var(--color-accent); }
+.sidebar-project-state[data-state="running"] { animation: lumi-breathe 2.2s ease-in-out infinite; }
+.sidebar-fold { display: grid; grid-template-rows: 1fr; opacity: 1; transition: grid-template-rows 260ms var(--ease-out), opacity 180ms ease; }
+.sidebar-fold[data-open="false"] { grid-template-rows: 0fr; opacity: 0; pointer-events: none; }
+.sidebar-project-body { padding-top: 2px; }
+.sidebar-show-more { display: flex; align-items: center; width: 100%; height: 28px; padding: 0 8px 0 27px; text-align: left; font-size: 11px; color: var(--color-muted); }
+.sidebar-show-more:hover { color: var(--color-ink); }
+
+/* 状态与菜单占同一个尾部槽位；悬停只交叉淡入，不改变标题宽度。 */
+.session-row { --session-background: var(--sidebar-background); }
+.session-row:hover,
+.session-row:focus-within,
+.session-row[data-menu-open="true"] { --session-background: color-mix(in srgb, var(--color-ink) 4%, var(--sidebar-background)); }
+.session-row[data-active="true"] { --session-background: color-mix(in srgb, var(--color-ink) 7%, var(--sidebar-background)); }
+.session-select { position: relative; height: 32px; padding: 0 8px 0 12px; background: var(--session-background); }
+.session-row[data-project="true"] .session-select { padding-left: 27px; }
+.session-row[data-project="true"] .session-channel-icon { position: absolute; left: 7px; }
+.session-source-icon { display: inline-block; width: 14px; height: 14px; background: currentColor; mask-size: contain; mask-repeat: no-repeat; mask-position: center; }
+.session-row[data-project="true"][data-source="feishu"] .session-select { padding-left: 47px; }
+.session-row[data-project="true"][data-source="feishu"] .session-source-icon { position: absolute; left: 7px; }
+.session-row[data-project="true"][data-source="feishu"] .session-channel-icon { left: 27px; }
+.session-row[data-state] .session-select { padding-right: 34px; }
 .session-row:hover .session-select,
-.session-row:focus-within .session-select {
-  background: color-mix(in srgb, var(--color-ink) 8%, var(--color-base));
-  color: var(--color-ink);
-  box-shadow: inset 0 0 0 1px color-mix(in srgb, var(--color-ink) 3%, transparent);
-}
+.session-row:focus-within .session-select { color: var(--color-ink); }
+.session-status { position: absolute; right: 12px; top: 10px; width: 12px; height: 12px; pointer-events: none; transition: opacity 110ms; }
+.session-status::after { content: ''; position: absolute; inset: 3px; border-radius: 50%; background: var(--color-accent); box-shadow: 0 0 8px color-mix(in srgb, var(--color-accent) 70%, transparent); }
+.session-status[data-state="running"]::after { animation: lumi-breathe 2.2s ease-in-out infinite; }
+.session-status[data-state="running"]::before { content: ''; position: absolute; inset: 0; border-radius: 50%; border: 1px solid color-mix(in srgb, var(--color-accent) 50%, transparent); animation: lumi-ripple 2.2s ease-out infinite; }
+.session-status[data-state="attention"]::after { box-shadow: 0 0 0 3px color-mix(in srgb, var(--color-accent) 14%, transparent); }
+.session-actions { right: 6px; background: var(--session-background); box-shadow: -5px 0 8px var(--session-background); opacity: 0; pointer-events: none; transition: opacity 110ms, background 110ms; }
+.session-row:hover .session-actions,
+.session-row:focus-within .session-actions,
+.session-row[data-menu-open="true"] .session-actions { opacity: 1; pointer-events: auto; }
+.session-row:hover .session-status,
+.session-row:focus-within .session-status,
+.session-row[data-menu-open="true"] .session-status { opacity: 0; }
+.session-actions:hover { background: color-mix(in srgb, var(--color-ink) 7%, var(--session-background)); }
 /* 仅长标题在右侧渐隐；悬停滚动时左侧也柔化，短标题保持完整清晰。 */
 .session-row[data-title-overflow="true"] .session-title-clip {
   mask-image: linear-gradient(to right, #000 calc(100% - 14px), transparent);
@@ -785,7 +833,7 @@ body.resizing-col * {
 .segment-track [data-slot="tabs-trigger"] { background: transparent; box-shadow: none; z-index: 1; }
 .step-actions > [data-slot="button"] { height: 32px; font-size: 14px; padding-inline: 10px; }
 
-.rail-panel .sidebar-float { background: var(--color-panel); }
+.rail-panel .sidebar-float { --sidebar-background: var(--color-panel); background: var(--sidebar-background); }
 
 /* Approved SSH/new-chat surfaces: the quiet halo remains visible in both themes. */
 .composer-glass { background: linear-gradient(180deg,var(--color-panel),color-mix(in srgb,var(--color-panel) 98%,var(--color-canvas))); border-color:color-mix(in srgb,var(--color-line) 60%,transparent); box-shadow:0 2px 5px color-mix(in srgb,var(--color-ink) 2%,transparent),0 12px 35px -12px color-mix(in srgb,var(--color-ink) 9%,transparent),inset 0 1px 0 color-mix(in srgb,var(--color-panel) 95%,transparent); }
@@ -989,3 +1037,4 @@ body.resizing-col * {
 :root:not(.light) aside.sidebar-float,
 :root:not(.light) .composer-glass,
 :root:not(.light) .composer-glass:focus-within { background:#242424; }
+:root:not(.light) aside.sidebar-float { --sidebar-background: #242424; }

@@ -1,6 +1,6 @@
 import { createContext, useContext, useEffect } from 'react'
 import type { ReactNode } from 'react'
-import { WifiOff, RotateCw, Laptop, Cloud } from 'lucide-react'
+import { WifiOff, RotateCw, Laptop } from 'lucide-react'
 import type { ConnState, ConnError, Machine } from '../types'
 import { machineColor } from '@/lib/utils'
 import { useI18n } from '../i18n'
@@ -54,8 +54,26 @@ export function useConnectedEffect(
   }, [...deps, scope])
 }
 
+function CloudIcon({ size }: { size: number }) {
+  return (
+    <svg
+      width={size}
+      height={size}
+      viewBox="0 0 24 24"
+      fill="none"
+      stroke="currentColor"
+      strokeWidth={1.8}
+      strokeLinecap="round"
+      strokeLinejoin="round"
+      aria-hidden="true"
+    >
+      <path d="M6.4 19H18a4.2 4.2 0 0 0 1.7-8.04 3.1 3.1 0 0 0-4.88-3.01A5.1 5.1 0 0 0 5.25 9.8 4.7 4.7 0 0 0 6.4 19Z" />
+    </svg>
+  )
+}
+
 // 机器类型图标：本地=笔记本、远程=云端
-const machineGlyph = (id: string) => (id === 'local' ? Laptop : Cloud)
+const machineGlyph = (id: string) => (id === 'local' ? Laptop : CloudIcon)
 
 // 一行/一处要标「哪台机器」时传的三元组（侧栏会话行与定时任务行、模型 chip 共用）
 export type MachineMarker = { id: string; name: string; color: string }

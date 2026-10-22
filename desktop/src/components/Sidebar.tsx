@@ -3,20 +3,20 @@ import { Tooltip as TooltipPrimitive } from 'radix-ui'
 import {
   ArrowUpCircle,
   Check,
-  ChevronRight,
   ChevronsUpDown,
   Clock,
   Folder,
+  FolderClosed,
+  FolderOpen,
   Globe,
   Laptop,
-  MoreVertical,
+  MoreHorizontal,
   PanelLeft,
   Pencil,
   Pin,
   PinOff,
   Plus,
   Search,
-  Send,
   Settings,
   Trash2,
   User,
@@ -40,6 +40,7 @@ import {
   DropdownMenuSubContent,
 } from '@/components/ui/dropdown-menu'
 import { Button } from '@/components/ui/button'
+import feishuIcon from '../assets/feishu.svg'
 
 const CONN_DOT: Record<ConnState, string> = {
   connecting: 'bg-primary',
@@ -48,7 +49,7 @@ const CONN_DOT: Record<ConnState, string> = {
   failed: 'bg-error',
 }
 
-const CAP = 5 // 每个项目分组默认显示的会话数（置顶/进行中不计入，永远显示）
+const CAP = 5 // 默认显示最近 5 条；置顶和活跃会话始终显示。
 
 // 会话前端身份 = backend + thread_id（与 App 的 store/activity key 同源）；飞书群在
 // 本地/远程 thread 同名，只用 thread_id 会串号，故一律取复合 key。
@@ -56,7 +57,7 @@ const keyOf = (s: SessionMeta) => sessionKey(beOf(s), s.thread_id)
 
 const projName = (dir: string) => (dir ? basename(dir) : '默认')
 
-// 折叠态持久化到 localStorage：返回 [record, toggle]，项目组 / 飞书子组共用。
+// 项目折叠态持久化到 localStorage：返回 [record, toggle]。
 function usePersistedToggle(key: string): [Record<string, boolean>, (k: string) => void] {
   const [map, setMap] = useState<Record<string, boolean>>(() => {
     try {
@@ -82,8 +83,7 @@ type ProjectGroup = {
   dir: string
   name: string
   recency: number
-  desktop: SessionMeta[]
-  channel: SessionMeta[]
+  sessions: SessionMeta[]
 }
 
 function projectGroupsFor(sessions: SessionMeta[], backend: string): ProjectGroup[] {
@@ -93,12 +93,13 @@ function projectGroupsFor(sessions: SessionMeta[], backend: string): ProjectGrou
     const dir = s.workspace_dir || ''
     let g = map.get(dir)
     if (!g) {
-      g = { backend, dir, name: projName(dir), recency: 0, desktop: [], channel: [] }
+      g = { backend, dir, name: projName(dir), recency: 0, sessions: [] }
       map.set(dir, g)
     }
     g.recency = Math.max(g.recency, Date.parse(s.created_at || '') || 0)
-    ;(s.channel ? g.channel : g.desktop).push(s)
+    g.sessions.push(s)
   }
+  for (const group of map.values()) group.sessions.sort(byRecency)
   return [...map.values()]
 }
 
@@ -117,6 +118,14 @@ function highlight(text: string, q: string): ReactNode {
       <span className="text-primary font-medium">{text.slice(i, i + q.length)}</span>
       {text.slice(i + q.length)}
     </>
+  )
+}
+
+function SidebarFold({ open, children }: { open: boolean; children: ReactNode }): JSX.Element {
+  return (
+    <div className="sidebar-fold" data-open={open} inert={!open}>
+      <div className="min-h-0 overflow-hidden">{children}</div>
+    </div>
   )
 }
 
@@ -155,7 +164,7 @@ export const Sidebar = memo(function Sidebar({
   sessions: SessionMeta[]
   loadedBackends: Record<string, true> // 该机器 list_sessions 成功返回过才允许显示「暂无会话」
   machines: Machine[]
-  channels: Record<string, ChannelInfo[]> // 机器 id → IM 渠道列表（飞书子组头取机器人名）
+  channels: Record<string, ChannelInfo[]> // 机器 id → IM 渠道列表（用于会话来源信息）
   currentKey: string
   conn: ConnState
   backend: string // 当前会话所在机器（底栏显示连接名）
@@ -176,15 +185,30 @@ export const Sidebar = memo(function Sidebar({
 }) {
   const { t } = useI18n()
   const machineConn = useMachineConn()
-  // 项目内搜索：组头「🔍」打开，一次只开一个项目；query 只筛该项目（含飞书子组）
-  const [search, setSearch] = useState<{ key: string; q: string } | null>(null)
+  const [search, setSearch] = useState('')
+  const searchRef = useRef<HTMLInputElement>(null)
   const [expanded, setExpanded] = useState<Record<string, boolean>>({})
   const [collapsedP, toggleP] = usePersistedToggle('lumi-sidebar-pcol')
+  const query = search.trim()
+  const queryLower = query.toLowerCase()
+
+  useEffect(() => {
+    if (!open) return
+    const focusSearch = (event: KeyboardEvent): void => {
+      if ((event.metaKey || event.ctrlKey) && event.key.toLowerCase() === 'k') {
+        event.preventDefault()
+        searchRef.current?.focus()
+      }
+    }
+    window.addEventListener('keydown', focusSearch)
+    return () => window.removeEventListener('keydown', focusSearch)
+  }, [open])
 
   // 禁用（已配置但不连接）的机器从侧栏隐藏；machineColor 仍用全量 machines 保持配色稳定
   const visibleMachines = machines.filter((m) => m.enabled !== false)
   const multi = visibleMachines.length > 1
   const dispName = (s: SessionMeta) => s.title || s.first_message || t('sidebar.untitled')
+  const matchesSearch = (s: SessionMeta) => dispName(s).toLowerCase().includes(queryLower)
   // 多机时行首一枚机器标记（形状分本地/云端、颜色分是哪一台，不再写「机器·项目」文字）；
   // 会话行与定时任务行同一份，只认 backend 字段
   const markOf = (x: { backend?: string | null }): MachineMarker | undefined =>
@@ -192,8 +216,8 @@ export const Sidebar = memo(function Sidebar({
       ? { id: beOf(x), color: machineColor(beOf(x), machines), name: machineName(beOf(x), machines) }
       : undefined
 
-  // 扁平流（置顶段）传 machine；项目树传 bullet（+ 搜索态 query）
-  const row = (s: SessionMeta, opts: { machine?: MachineMarker; bullet?: boolean; query?: string }) => (
+  // 置顶段带机器标记；项目内使用统一的标题对齐线。
+  const row = (s: SessionMeta, opts: { machine?: MachineMarker; project?: boolean; query?: string }) => (
     <SessionRow
       key={keyOf(s)}
       session={s}
@@ -201,6 +225,7 @@ export const Sidebar = memo(function Sidebar({
       state={activity[keyOf(s)]}
       name={dispName(s)}
       environment={beOf(s) === 'local' ? t('backends.local') : machineName(beOf(s), machines)}
+      channelName={s.channel ? botOfThread(channels[beOf(s)] ?? [], s.thread_id)?.config.name : undefined}
       {...opts}
       onSelect={onSelect}
       onPin={onPin}
@@ -209,137 +234,72 @@ export const Sidebar = memo(function Sidebar({
     />
   )
 
-  // 项目组：组头（机器识别色图标 + 项目名 + 折叠箭头 + 悬停「＋ 🔍」）+ 限量桌面会话
-  // + 飞书子组；搜索态下改为输入框 + 该项目内（含飞书）的扁平命中结果。组头字重颜色与区段标签同档，会话标题才是视觉主体；折叠箭头展开态悬停
-  // 才现、收起态常显（否则收起的项目与没会话的项目长得一样）。机器只靠图标颜色区分。
+  // 搜索时展开命中的项目，不改写用户保存的折叠状态。
   const renderProject = (pg: ProjectGroup) => {
     const key = `${pg.backend}::${pg.dir}`
     const collapsed = !!collapsedP[key]
-    const keep = new Set<string>()
-    pg.desktop.forEach((s, i) => {
-      if (s.pinned || activity[keyOf(s)] || i < CAP) keep.add(keyOf(s))
-    })
     const showAll = expanded[key]
-    const shown = showAll ? pg.desktop : pg.desktop.filter((s) => keep.has(keyOf(s)))
-    const hidden = pg.desktop.length - shown.length
-    const searching = search?.key === key
-    const q = searching ? search.q.trim() : ''
-    const hits = q
-      ? [...pg.desktop, ...pg.channel]
-          .filter((s) => dispName(s).toLowerCase().includes(q.toLowerCase()))
-          .sort(byRecency)
-      : null
+    const shown = showAll
+      ? pg.sessions
+      : pg.sessions.filter((s, i) => i < CAP || s.pinned || !!activity[keyOf(s)])
+    const hidden = pg.sessions.length - shown.length
+    const hits = query ? pg.sessions.filter(matchesSearch) : null
+    if (hits && !hits.length) return null
+    const projectOpen = !collapsed || !!query
+    const ProjectFolder = projectOpen ? FolderOpen : FolderClosed
+    const projectStates = pg.sessions.map((s) => activity[keyOf(s)])
+    const projectState = (['attention', 'running'] as const).find((state) => projectStates.includes(state))
     return (
-      <div key={key}>
-        <div className="group/header flex items-center gap-1.5 pl-1 pr-1 pt-2.5 pb-1 text-xs text-muted-foreground/80 hover:text-muted-foreground transition">
-          <button onClick={() => toggleP(key)} className="flex flex-1 min-w-0 items-center gap-1.5 text-left">
-            <MachineIcon id={pg.backend} size={14} />
-            <span className="min-w-0 truncate">{pg.name}</span>
-            <ChevronRight
-              size={12}
-              className={`shrink-0 transition-all ${collapsed ? '' : 'rotate-90 opacity-0 group-hover/header:opacity-100'}`}
-            />
+      <div key={key} className="sidebar-project" data-open={projectOpen}>
+        <div className="sidebar-project-head">
+          <button onClick={() => toggleP(key)} className="sidebar-project-toggle" aria-expanded={projectOpen}>
+            <ProjectFolder size={14} className="shrink-0 text-muted-foreground" />
+            <span className="min-w-0 truncate font-medium">{pg.name}</span>
+            {!projectOpen && projectState && (
+              <span className="sidebar-project-state" data-state={projectState} title={t(projectState === 'running' ? 'bg.running' : 'sidebar.needsYou')} />
+            )}
+            {pg.backend !== 'local' && (
+              <span className="sidebar-project-machine">
+                <MachineIcon id={pg.backend} size={11} />
+                <span className="truncate">{machineName(pg.backend, machines)}</span>
+              </span>
+            )}
           </button>
           <button
             onClick={() => onNewChatIn(pg.backend, pg.dir)}
             title={t('sidebar.newChat')}
-            className="shrink-0 grid size-5 place-items-center rounded opacity-0 group-hover/header:opacity-100 hover:bg-line/30 hover:text-ink transition"
+            className="sidebar-project-add"
           >
             <Plus size={13} />
           </button>
-          <button
-            onClick={() => setSearch(searching ? null : { key, q: '' })}
-            title={t('sidebar.search')}
-            className={`shrink-0 grid size-5 place-items-center rounded hover:bg-line/30 hover:text-ink transition ${
-              searching ? 'text-ink' : 'opacity-0 group-hover/header:opacity-100'
-            }`}
-          >
-            <Search size={13} />
-          </button>
         </div>
-        {searching && (
-          <div className="mx-1 mb-1 flex items-center gap-2 px-2.5 py-1 rounded-lg bg-surface/70 border border-line/50 focus-within:border-primary/40 transition">
-            <input
-              autoFocus
-              value={search.q}
-              onChange={(e) => setSearch({ key, q: e.target.value })}
-              onKeyDown={(e) => e.key === 'Escape' && setSearch(null)}
-              placeholder={t('sidebar.search')}
-              className="flex-1 min-w-0 bg-transparent outline-none text-[13px] text-ink placeholder:text-muted-foreground/60"
-            />
-            <button onClick={() => setSearch(null)} className="shrink-0 text-muted-foreground hover:text-ink">
-              <X size={13} />
-            </button>
+        <SidebarFold open={projectOpen}>
+          <div className="sidebar-project-body">
+            {hits ? hits.map((s) => row(s, { project: true, query })) : (
+              <>
+                {shown.map((s) => row(s, { project: true }))}
+                {hidden > 0 && (
+                  <button
+                    onClick={() => setExpanded((e) => ({ ...e, [key]: true }))}
+                    className="sidebar-show-more"
+                  >
+                    {t('sidebar.showAll', { n: pg.sessions.length })}
+                  </button>
+                )}
+                {showAll && pg.sessions.length > CAP && (
+                  <button
+                    onClick={() => setExpanded((e) => ({ ...e, [key]: false }))}
+                    className="sidebar-show-more"
+                  >
+                    {t('common.showLess')}
+                  </button>
+                )}
+              </>
+            )}
           </div>
-        )}
-        {hits ? (
-          hits.length ? (
-            hits.map((s) => row(s, { bullet: true, query: q }))
-          ) : (
-            <div className="px-3 py-3 text-center text-xs text-muted-foreground">{t('sidebar.noMatch')}</div>
-          )
-        ) : !collapsed && (
-          <>
-            {shown.map((s) => row(s, { bullet: true }))}
-            {hidden > 0 && (
-              <button
-                onClick={() => setExpanded((e) => ({ ...e, [key]: true }))}
-                className="w-full text-left px-3 py-1 text-[10.5px] text-muted-foreground/55 hover:text-primary transition"
-              >
-                {t('sidebar.showAll', { n: pg.desktop.length })}
-              </button>
-            )}
-            {showAll && pg.desktop.length > CAP && (
-              <button
-                onClick={() => setExpanded((e) => ({ ...e, [key]: false }))}
-                className="w-full text-left px-3 py-1 text-[10.5px] text-muted-foreground/55 hover:text-primary transition"
-              >
-                {t('common.showLess')}
-              </button>
-            )}
-            {renderFeishuSub(pg)}
-          </>
-        )}
+        </SidebarFold>
       </div>
     )
-  }
-
-  // 项目内飞书子组（可折叠二级组）：「飞书 · 机器人名」+ 缩进一级的会话行。按 thread 前缀
-  // 归属机器人各成一组（一个项目一个机器人，多组只在换绑/旧数据时出现）；机器人已删则只显「飞书」。
-  const renderFeishuSub = (pg: ProjectGroup) => {
-    if (!pg.channel.length) return null
-    const chans = channels[pg.backend] ?? []
-    const groups = new Map<string, SessionMeta[]>()
-    for (const s of pg.channel) {
-      const botId = botOfThread(chans, s.thread_id)?.config.id ?? ''
-      const arr = groups.get(botId)
-      if (arr) arr.push(s)
-      else groups.set(botId, [s])
-    }
-    return [...groups.entries()].map(([botId, group]) => {
-      const key = `${pg.backend}::${pg.dir}::feishu::${botId}`
-      const collapsed = !!collapsedP[key]
-      const bot = chans.find((c) => c.config.id === botId)?.config.name
-      return (
-        <div key={key}>
-          <button
-            onClick={() => toggleP(key)}
-            className="group/header w-full flex items-center gap-1.5 pl-1.5 pr-2 pt-1.5 pb-0.5 text-left text-[11px] text-muted-foreground/80 hover:text-muted-foreground transition"
-          >
-            <Send size={11} className="shrink-0" />
-            <span className="min-w-0 truncate">
-              {t('sidebar.feishu')}
-              {bot && <span> · {bot}</span>}
-            </span>
-            <ChevronRight
-              size={11}
-              className={`shrink-0 transition-all ${collapsed ? '' : 'rotate-90 opacity-0 group-hover/header:opacity-100'}`}
-            />
-          </button>
-          {!collapsed && <div>{group.sort(byRecency).map((s) => row(s, { bullet: true }))}</div>}
-        </div>
-      )
-    })
   }
 
   // 没有任何项目组的机器才需要一行占位：离线 / 确凿空态 / 连接中（有组的机器由组头图标说明身份）
@@ -378,23 +338,24 @@ export const Sidebar = memo(function Sidebar({
     )
   }
 
-  // 内容区：置顶段 + 项目组（所有可见机器扁平并列、按最近活跃排序，机器身份由组头图标
-  // 颜色承载）+ 无项目组机器的占位。定时任务不进侧栏，走顶部「定时任务」入口。
+  // 置顶段 + 项目组（跨机器按最近活跃排序）+ 无项目组机器的占位。
   const groups = visibleMachines
     .flatMap((m) => projectGroupsFor(sessions, m.id))
     .sort((a, b) => b.recency - a.recency)
   const withGroups = new Set(groups.map((g) => g.backend))
-  const pinned = sessions.filter((s) => s.pinned).sort(byRecency)
+  const pinned = sessions.filter((s) => s.pinned && matchesSearch(s)).sort(byRecency)
+  const projects = groups.map(renderProject).filter((project) => project !== null)
+  const noMatch = query && !pinned.length && !projects.length
   const content = (
     <>
       {pinned.length > 0 && (
         <>
           <SectionLabel>{t('sidebar.pinned')}</SectionLabel>
-          {pinned.map((s) => row(s, { machine: markOf(s) }))}
+          {pinned.map((s) => row(s, { machine: markOf(s), query }))}
         </>
       )}
-      {groups.map(renderProject)}
-      {visibleMachines.filter((m) => !withGroups.has(m.id)).map(renderMachinePlaceholder)}
+      {noMatch ? <div className="px-3 py-3 text-center text-xs text-muted-foreground">{t('sidebar.noMatch')}</div> : projects}
+      {!query && visibleMachines.filter((m) => !withGroups.has(m.id)).map(renderMachinePlaceholder)}
     </>
   )
 
@@ -424,36 +385,54 @@ export const Sidebar = memo(function Sidebar({
           <PanelLeft />
         </Button>
       </div>
-      <div className="px-2 pb-2">
+      <div className="sidebar-navigation">
         <Button
           variant="ghost"
           onClick={onNew}
-          className="no-drag w-full justify-start gap-2 h-auto pl-1 pr-2 py-2 rounded-xl"
+          className="no-drag w-full justify-start gap-2 h-[34px] px-2.5 rounded-lg"
         >
-          <span className="text-primary text-base leading-none">＋</span>
+          <Plus size={16} className="text-primary" />
           {t('sidebar.newChat')}
         </Button>
-        <button
-          onClick={onOpenProjects}
-          className={`no-drag relative w-full flex items-center gap-2 pl-1 pr-2 py-2 rounded-xl text-sm transition ${
-            projectsActive ? 'bg-surface text-ink' : 'text-muted-foreground hover:bg-surface/60 hover:text-ink'
-          }`}
-        >
-          <Folder size={15} className="shrink-0" />
-          {t('sidebar.projects')}
-        </button>
-        <button
-          onClick={onOpenScheduled}
-          className={`no-drag relative w-full flex items-center gap-2 pl-1 pr-2 py-2 rounded-xl text-sm transition ${
-            scheduledActive ? 'bg-surface text-ink' : 'text-muted-foreground hover:bg-surface/60 hover:text-ink'
-          }`}
-        >
-          <Clock size={15} className="shrink-0" />
-          {t('sidebar.scheduled')}
-        </button>
+        <div className="sidebar-utility">
+          <button
+            onClick={onOpenProjects}
+            className={`no-drag relative w-full flex items-center gap-2 px-2.5 h-8 rounded-lg text-xs transition ${
+              projectsActive ? 'bg-surface text-ink' : 'text-muted-foreground hover:bg-surface/60 hover:text-ink'
+            }`}
+          >
+            <Folder size={15} className="shrink-0" />
+            {t('sidebar.projects')}
+          </button>
+          <button
+            onClick={onOpenScheduled}
+            className={`no-drag relative w-full flex items-center gap-2 px-2.5 h-8 rounded-lg text-xs transition ${
+              scheduledActive ? 'bg-surface text-ink' : 'text-muted-foreground hover:bg-surface/60 hover:text-ink'
+            }`}
+          >
+            <Clock size={15} className="shrink-0" />
+            {t('sidebar.scheduled')}
+          </button>
+        </div>
+        <div className="sidebar-search">
+          <Search size={13} className="shrink-0" />
+          <input
+            ref={searchRef}
+            value={search}
+            onChange={(event) => setSearch(event.target.value)}
+            onKeyDown={(event) => { if (event.key === 'Escape') setSearch('') }}
+            placeholder={t('sidebar.search')}
+            aria-label={t('sidebar.search')}
+          />
+          {search && (
+            <button onClick={() => { setSearch(''); searchRef.current?.focus() }} aria-label={t('common.close')}>
+              <X size={12} />
+            </button>
+          )}
+        </div>
       </div>
 
-      <div className="flex-1 overflow-y-auto overflow-x-hidden px-2 pb-2">{content}</div>
+      <div className="sidebar-scroll flex-1 overflow-y-auto overflow-x-hidden">{content}</div>
 
       <div className="p-2 border-t border-line/20 space-y-1.5">
         <UpdateBar />
@@ -578,8 +557,9 @@ type SessionRowProps = {
   state?: 'running' | 'attention'
   name: string
   environment: string
+  channelName?: string
   machine?: MachineMarker // 多机时行首机器标记（扁平流用；项目树里机器身份在组头）
-  bullet?: boolean // 项目树里的行首空心圆点（执行中实心金；当前会话靠行底色区分）；渠道行仍用群/私聊图标
+  project?: boolean // 项目内会话统一对齐；渠道行在标题左侧保留群/私聊图标
   query?: string
   onSelect: (threadId: string, backend: string) => void
   onPin: (threadId: string, backend: string, pinned: boolean) => void
@@ -587,15 +567,16 @@ type SessionRowProps = {
   onDelete: (session: SessionMeta) => void
 }
 
-// 会话行：（多机时）机器标记 + 待处理光点 + 渠道图标 + 名 + ⋮ 菜单
+// 会话行：机器/渠道图标 + 标题；运行标识与菜单共用右侧位置，悬停不改变布局。
 function SessionRow({
   session,
   active,
   state,
   name,
   environment,
+  channelName,
   machine,
-  bullet,
+  project,
   query,
   onSelect,
   onPin,
@@ -611,6 +592,8 @@ function SessionRow({
   const titleClipRef = useRef<HTMLSpanElement>(null)
   const titleTextRef = useRef<HTMLSpanElement>(null)
   const backend = session.backend || 'local'
+  const isFeishu = session.channel === 'feishu'
+  const sourceName = channelName ? `${t('sidebar.feishu')} · ${channelName}` : t('sidebar.feishu')
   const EnvironmentIcon = backend === 'local' ? Laptop : Globe
   const preview = hovered && !menuOpen && !renaming
   const createdAt = Date.parse(session.created_at)
@@ -624,7 +607,8 @@ function SessionRow({
     let animation: Animation | undefined
     const restartScroll = function (): void {
       animation?.cancel()
-      const distance = text.scrollWidth - clip.clientWidth
+      // 菜单覆盖行尾，滚动终点补偿覆盖宽度，布局本身保持不动。
+      const distance = text.scrollWidth - clip.clientWidth + (preview && !state ? 24 : 0)
       setTitleOverflow(distance > 0)
       if (!preview || distance <= 0 || reducedMotion.matches) return
       animation = text.animate(
@@ -647,7 +631,7 @@ function SessionRow({
       reducedMotion.removeEventListener('change', restartScroll)
       animation?.cancel()
     }
-  }, [preview, name, renaming])
+  }, [preview, name, renaming, state])
 
   function handleMenuOpenChange(open: boolean): void {
     setMenuOpen(open)
@@ -675,7 +659,11 @@ function SessionRow({
       onOpenChange={setTooltipOpen}
     >
       <div
-        className="session-row group relative mb-0.5 rounded-lg"
+        className="session-row group relative rounded-lg"
+        data-project={project}
+        data-source={session.channel}
+        data-active={active}
+        data-state={state}
         data-preview={preview}
         data-title-overflow={titleOverflow}
         data-menu-open={menuOpen}
@@ -689,46 +677,48 @@ function SessionRow({
             onClick={() => onSelect(session.thread_id, backend)}
             onFocus={() => setHovered(true)}
             onBlur={() => setHovered(false)}
-            className={`session-select flex w-full items-center gap-2 pl-3 pr-2 py-[5px] rounded-lg text-[13px] transition-colors ${
+            className={`session-select flex w-full items-center gap-2 rounded-lg text-[13px] transition-colors ${
               active ? 'bg-surface text-ink' : 'text-ink/80'
             }`}
           >
             {machine && <MachineMark id={machine.id} color={machine.color} title={machine.name} />}
-            {bullet && !session.channel && (
-              // 圆点左移 3px、右边补回 3px：标题文字位置不变，只拉开点与标题的距离
+            {isFeishu && (
               <span
-                className={`shrink-0 size-1.5 -ml-[3px] mr-[3px] rounded-full border ${state === 'running' ? 'border-primary bg-primary lumi-blink' : 'border-separator'}`}
+                className="session-source-icon shrink-0 text-muted-foreground"
+                style={{ maskImage: `url(${feishuIcon})` }}
+                role="img"
+                aria-label={t('sidebar.feishu')}
+                title={sourceName}
               />
             )}
-            {/* 渠道会话：群/私聊图标（最近流、搜索结果、飞书分组内统一）。-ml 让 13px 图标与
-                普通行的圆点同中心线、标题与普通行标题同起点 */}
             {session.channel &&
               (session.channel_kind === 'p2p' ? (
-                <User size={13} className="shrink-0 -ml-[7px] text-success/80" />
+                <User size={13} className="session-channel-icon shrink-0 text-muted-foreground" />
               ) : (
-                <Users size={13} className="shrink-0 -ml-[7px] text-info/80" />
+                <Users size={13} className="session-channel-icon shrink-0 text-muted-foreground" />
               ))}
             <span ref={titleClipRef} className="session-title-clip flex-1 min-w-0 overflow-hidden whitespace-nowrap text-left">
               <span ref={titleTextRef} className="inline-block align-bottom whitespace-nowrap">
                 {query ? highlight(name, query) : name}
               </span>
             </span>
-            {/* 仅「等你处理」保留提醒点（需你操作）；置顶进段不带 📌、进行中不带脉冲点 */}
-            {state === 'attention' && (
-              <span
-                title={t('sidebar.needsYou')}
-                className="shrink-0 size-1.5 rounded-full bg-primary shadow-[0_0_0_3px_color-mix(in_srgb,var(--color-accent)_22%,transparent)]"
-              />
-            )}
           </button>
         </TooltipPrimitive.Trigger>
+        {state && (
+          <span
+            className="session-status"
+            data-state={state}
+            role="img"
+            aria-label={t(state === 'running' ? 'bg.running' : 'sidebar.needsYou')}
+          />
+        )}
         <DropdownMenu onOpenChange={handleMenuOpenChange}>
           <DropdownMenuTrigger asChild>
             <button
               aria-label={t('sidebar.sessionActions')}
-              className="absolute right-1 top-1/2 -translate-y-1/2 size-6 grid place-items-center rounded-md text-muted-foreground hover:bg-line/30 hover:text-ink transition opacity-0 group-hover:opacity-100 group-focus-within:opacity-100 data-[state=open]:opacity-100 outline-none"
+              className="session-actions absolute top-1/2 -translate-y-1/2 size-6 grid place-items-center rounded-md text-muted-foreground hover:text-ink outline-none"
             >
-              <MoreVertical size={15} />
+              <MoreHorizontal size={15} />
             </button>
           </DropdownMenuTrigger>
           <DropdownMenuContent align="start" className="w-44">
@@ -775,6 +765,7 @@ function SessionRow({
               <span className="truncate">{environment}</span>
             </span>
           </div>
+          {isFeishu && <div className="mt-1 text-[11px] leading-4 text-muted-foreground">{sourceName}</div>}
         </TooltipPrimitive.Content>
       </TooltipPrimitive.Portal>
     </TooltipPrimitive.Root>
