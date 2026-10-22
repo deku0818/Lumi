@@ -39,6 +39,7 @@ import { errorMessage } from '@/lib/utils'
 import { Gateway } from './gateway'
 import { NewChatTarget } from './components/NewChatTarget'
 import { HomeBackdrop } from './components/HomeBackdrop'
+import { HomeGreeting } from './components/HomeGreeting'
 import { SshPrompts } from './components/SshPrompts'
 import type {
   ActiveModel,
@@ -2326,7 +2327,7 @@ export default function App() {
     if (view === 'newchat') return (
       <div className="new-chat-home flex-1 flex flex-col items-center justify-center px-6">
         <HomeBackdrop />
-        <div className="mb-9 text-center"><h1 className="serif text-2xl">{t('ssh.welcome')}</h1></div>
+        <HomeGreeting paused={hasDraft} />
         <div className="new-chat-entry w-full max-w-[760px]">
           <NewChatTarget value={newTarget} onChange={target => { newTargetRevision.current++; setNewTarget(target) }} ensureMachine={ensureMachine} />
           {composer(t('composer.empty'), true)}
