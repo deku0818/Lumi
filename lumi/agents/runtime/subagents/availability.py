@@ -21,13 +21,13 @@ NativeName = Literal["codex", "claude"]
 NATIVE_AGENTS = {
     "codex": AgentConfig(
         name="codex",
-        description="通过 Codex 调查、分析并处理独立任务，支持持续沟通。",
+        description="使用 Codex 作为agent。Codex 根据工作目录读取项目约束、读取和存储项目记忆，必须明确指定任务所属项目的 cwd。",
         executor="codex",
         system_prompt="",
     ),
     "claude": AgentConfig(
         name="claude",
-        description="通过 Claude Code 处理复杂或多步骤任务，支持持续沟通。",
+        description="使用 Claude Code 作为agent。Claude Code 根据工作目录读取项目约束、读取和存储项目记忆，必须明确指定任务所属项目的 cwd。",
         executor="claude_code",
         system_prompt="",
     ),

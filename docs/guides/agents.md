@@ -12,8 +12,7 @@ Lumi 不会自动安装或登录这些程序。开关保存在项目的 `.lumi/a
 主 Agent 通过三个工具管理持久 subagent：
 
 ```python
-# 默认 Lumi，或选择现有 Lumi 角色
-agent_create(prompt="调查这个问题")
+# name 必填，从可用清单中选择现有 Lumi 角色
 agent_create(name="translator", prompt="翻译这段文字")
 
 # 在当前项目的子 Agent 菜单开启后，调用原生 CLI，无需角色 Markdown 文件

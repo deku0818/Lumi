@@ -218,9 +218,7 @@ def runtime(tmp_path, depth=0):
     )
 
 
-@pytest.mark.parametrize(
-    "name,kind", [(None, "lumi"), ("codex", "codex"), ("claude", "claude_code")]
-)
+@pytest.mark.parametrize("name,kind", [("codex", "codex"), ("claude", "claude_code")])
 async def test_tool_selects_name_without_markdown(
     service, tmp_path, monkeypatch, name, kind
 ):
@@ -246,13 +244,13 @@ async def test_tool_selects_name_without_markdown(
     assert continued["output"] == "one / two"
     listing = json.loads(await agent_list.coroutine(runtime=rt))["agents"]
     assert listing[0]["executor"] == kind
-    assert listing[0]["name"] == (name or "lumi")
+    assert listing[0]["name"] == name
     assert listing[0]["cwd"] == str(tmp_path)
     assert service.store.agent(created["agent_id"]).depth == 1
     assert not service.store.has_deliveries("parent")
 
 
-@pytest.mark.parametrize("name", [None, "codex", "claude"])
+@pytest.mark.parametrize("name", ["codex", "claude"])
 @pytest.mark.parametrize("directory_mode", ["inherited", "relative", "absolute"])
 async def test_instance_cwd_survives_parent_directory_change(
     service, tmp_path, monkeypatch, name, directory_mode
@@ -409,6 +407,17 @@ def test_create_schema_uses_name_and_optional_cwd():
         "prompt",
         "run_in_background",
     }
+    assert "name" in agent_create.tool_call_schema.model_json_schema()["required"]
+
+
+@pytest.mark.parametrize("args", [{}, {"name": None}, {"name": ""}])
+async def test_create_rejects_missing_or_empty_name(args, service):
+    from pydantic import ValidationError
+
+    with pytest.raises(ValidationError) as error:
+        await agent_create.ainvoke({"prompt": "work", **args})
+    assert error.value.errors()[0]["loc"] == ("name",)
+    assert service.list_agents("parent") == []
 
 
 async def test_nested_subagent_results_are_queued_for_parent(service, tmp_path):

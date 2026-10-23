@@ -5,12 +5,12 @@
 
 ## 工具与执行器
 
-- `agent_create(prompt, name=None, cwd=None, run_in_background=true)`：创建稳定实例并提交第一轮。
+- `agent_create(prompt, name, cwd=None, run_in_background=true)`：创建稳定实例并提交第一轮，`name` 必填。
 - `agent_list()`：列出当前主会话拥有的实例及各自 `cwd`；只读元数据，不恢复进程或调用模型。
 - `agent_message(agent_id, prompt, run_in_background=true)`：向原实例提交后续轮次。
 
 `name="codex"` 和 `name="claude"` 为内置保留入口，直接调用原生 CLI；其他名称选择 Lumi
-角色，省略时使用默认 Lumi。没有公开的 `executor` 参数，执行类型仅由后端记录。
+角色，名称必须来自当前可用清单。没有公开的 `executor` 参数，执行类型仅由后端记录。
 Codex 和 Claude Code 无需 `.lumi/agents/*.md` 包装，默认关闭。用户在项目主页「子 Agent」
 卡片的 ＋ 号菜单中启用或关闭；已启用的显示勾选，未启用的显示加号，「自定义 Agent」沿用
 角色创建弹窗。项目配置保存在该目录的 `.lumi/agents.json`，格式为 `{"codex": true, "claude": false}`；
