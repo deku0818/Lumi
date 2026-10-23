@@ -1,5 +1,7 @@
 import { useCallback, useEffect, useRef, useState } from 'react'
 import {
+  ArrowLeft,
+  ChevronRight,
   AlertTriangle,
   Boxes,
   Check,
@@ -18,11 +20,12 @@ import type {
   ModelLimits,
   ModelPointer,
   ProviderProfile,
+  ProviderProtocol,
 } from '../types'
 import type { Gateway } from '../gateway'
 import { useI18n } from '../i18n'
 import { MachineScope, useConnectedEffect } from './MachineTabs'
-import { Empty, EntityCard, Field, FormModal, Row, Section, SectionGroup, SecretInput, StatusDot, TextInput } from './SettingsKit'
+import { Empty, EntityCard, Field, FormModal, NativeSelect, Row, Section, SectionGroup, SecretInput, StatusDot, TextInput } from './SettingsKit'
 import type { StatusTone } from './SettingsKit'
 import {
   DropdownMenu,
@@ -36,6 +39,7 @@ import { cn, errorMessage, fmtTokensFull } from '@/lib/utils'
 import { toast } from './Toast'
 import { ConfirmDialog } from './ConfirmDialog'
 import { CARD_L3 } from './glass'
+import { providerPresets, protocolOptions, compatibilityOptions } from '../lib/providerPresets'
 
 type TestResult = { ok: boolean; error?: string; latency_ms?: number }
 type RowTest = 'testing' | TestResult | undefined
@@ -43,7 +47,8 @@ type RowTest = 'testing' | TestResult | undefined
 // 存字符串而非数字：输入框清空态与「填了 0」必须可区分，且不必在每次击键时解析。
 // cat = 用户指定的 models.dev 目录条目 id，空串 = 跟随自动匹配。
 type ModelRow = { id: number; name: string; test: RowTest; ctx: string; out: string; cat: string }
-type Form = { id?: string; name: string; base_url: string; api_key: string; models: ModelRow[] }
+type Connection = Pick<ProviderProfile, 'protocol' | 'compatibility'>
+type Form = { id?: string; name: string; base_url: string; api_key: string; models: ModelRow[]; preset: string; protocol: ProviderProtocol; compatibility: string }
 
 let _rid = 0
 const newId = () => ++_rid
@@ -52,6 +57,7 @@ const newRow = (name = ''): ModelRow => ({ id: newId(), name, test: undefined, c
 const numText = (n: number | undefined) => (n ? String(n) : '')
 
 const emptyForm = (): Form => ({
+  preset: 'custom', protocol: 'openai', compatibility: 'standard',
   name: '',
   base_url: '',
   api_key: '',
@@ -60,6 +66,7 @@ const emptyForm = (): Form => ({
 
 const formFrom = (p: ProviderProfile): Form => ({
   id: p.id,
+  preset: p.preset ?? 'custom', protocol: p.protocol ?? '', compatibility: p.compatibility ?? '',
   name: p.name,
   base_url: p.base_url,
   api_key: p.api_key,
@@ -154,8 +161,8 @@ export function ProvidersPanel({
       })
       .catch((e) => toast.error(errorMessage(e)))
   const onDelete = (id: string) => gw?.deleteProvider(id).then(apply).catch(() => {})
-  const onTest = (baseUrl: string, apiKey: string, model: string): Promise<TestResult> =>
-    gw?.testProvider(baseUrl, apiKey, model) ??
+  const onTest = (baseUrl: string, apiKey: string, model: string, connection: Connection): Promise<TestResult> =>
+    gw?.testProvider(baseUrl, apiKey, model, connection) ??
     Promise.resolve({ ok: false, error: t('sidebar.disconnected') })
   // useCallback：CatalogBadge 的搜索 effect 以它为依赖，每次渲染换引用会让搜索反复重发
   const onSearchCatalog = useCallback(
@@ -439,9 +446,10 @@ function ProviderForm({
   match: Record<string, CatalogMatch>
   savedCatalog: Record<string, string>
   fallback: ModelLimits
-  onTest: (baseUrl: string, apiKey: string, model: string) => Promise<TestResult>
+  onTest: (baseUrl: string, apiKey: string, model: string, connection: Connection) => Promise<TestResult>
   onSearchCatalog: (query: string) => Promise<CatalogEntry[]>
-  onSubmit: (draft: {
+  onSubmit: (draft: Connection & {
+    preset: string
     id?: string
     name: string
     base_url: string
@@ -456,7 +464,20 @@ function ProviderForm({
   const { t } = useI18n()
   // 草稿存本组件本地（与 FeishuForm/RemoteForm 一致）：键入不再 setState 到父级、避免整页重渲染。
   const [form, setForm] = useState<Form>(initial)
+  const currentForm = useRef(form)
+  currentForm.current = form
   const editing = form.id != null
+  const [selecting, setSelecting] = useState(!editing)
+  const drafts = useRef<Record<string, Form>>({})
+  const pickPreset = (preset: typeof providerPresets[number]) => {
+    drafts.current[form.preset] = { ...form, models: form.models.map(m => m.test === 'testing' ? { ...m, test: undefined } : m) }
+    setForm(drafts.current[preset.id] ?? {
+      ...emptyForm(), id: form.id, preset: preset.id,
+      name: preset.name, base_url: preset.base_url, protocol: preset.protocol,
+      compatibility: preset.compatibility, models: [newRow(preset.model)],
+    })
+    setSelecting(false)
+  }
   // 去重：同名模型会在选择弹窗里造成重复 key + 双高亮，保存时按名去重
   const validModels = [...new Set(form.models.map((m) => m.name.trim()).filter(Boolean))]
   // 提供商名称、Base URL（必填）、至少一个模型
@@ -472,11 +493,18 @@ function ProviderForm({
     const name = row.name.trim()
     if (!name || row.test === 'testing') return
     patchModel(row.id, { test: 'testing' })
+    const applyTest = (test: TestResult) => {
+      const current = currentForm.current
+      if (current.base_url !== form.base_url || current.api_key !== form.api_key ||
+          current.protocol !== form.protocol || current.compatibility !== form.compatibility ||
+          current.models.find(m => m.id === row.id)?.name.trim() !== name) return
+      patchModel(row.id, { test })
+    }
     try {
-      const r = await onTest(form.base_url.trim(), form.api_key.trim(), name)
-      patchModel(row.id, { test: r })
+      const r = await onTest(form.base_url.trim(), form.api_key.trim(), name, { protocol: form.protocol, compatibility: form.compatibility })
+      applyTest(r)
     } catch {
-      patchModel(row.id, { test: { ok: false, error: t('providers.requestFailed') } })
+      applyTest({ ok: false, error: t('providers.requestFailed') })
     }
   }
 
@@ -498,6 +526,7 @@ function ProviderForm({
     if (!canSave) return
     onSubmit({
       id: form.id,
+      preset: form.preset, protocol: form.protocol, compatibility: form.compatibility,
       name: form.name.trim(),
       base_url: form.base_url.trim(),
       api_key: form.api_key.trim(),
@@ -515,27 +544,52 @@ function ProviderForm({
       <Button variant="ghost" onClick={onCancel}>
         {t('common.cancel')}
       </Button>
-      <Button onClick={submit} disabled={!canSave}>
+      {!selecting && <Button onClick={submit} disabled={!canSave}>
         {editing ? t('common.save') : t('common.add')}
-      </Button>
+      </Button>}
     </>
   )
 
   return (
     <FormModal
       onClose={onCancel}
-      title={editing ? t('providers.editTitle') : t('providers.addTitle')}
+      title={selecting ? t('providers.choose') : (
+        <span className="flex items-center gap-2">
+          <Button variant="ghost" size="icon-sm" onClick={() => setSelecting(true)} aria-label={t('providers.back')}><ArrowLeft /></Button>
+          {form.preset === 'custom' ? t('providers.custom') : providerPresets.find(p => p.id === form.preset)?.name ?? form.name}
+        </span>
+      )}
+      description={selecting ? t('providers.chooseHint') : t('providers.connectHint')}
+      className="sm:max-w-[560px]"
       footer={footer}
     >
-      <div className="space-y-4">
+      {selecting ? <div className="grid grid-cols-2 gap-2.5">
+        {providerPresets.map(preset => <button
+          key={preset.id} type="button" onClick={() => pickPreset(preset)}
+          className={cn('flex h-14 items-center gap-3 rounded-lg border border-line bg-canvas px-3 text-left text-sm hover:bg-surface focus-visible:outline-2 focus-visible:outline-primary', preset.id === 'custom' && 'col-span-2 h-12')}
+        >
+          <span className="flex size-7 shrink-0 items-center justify-center rounded-md border border-line text-xs text-muted-foreground">{preset.mark}</span>
+          <span>{preset.id === 'custom' ? t('providers.custom') : preset.name}</span>
+          <ChevronRight size={14} className="ml-auto text-muted-foreground" />
+        </button>)}
+      </div> : <div className="space-y-4">
+        {form.preset === 'custom' && <Field label={t('providers.protocol')}>
+          <NativeSelect className="w-full" value={form.protocol} onChange={e => {
+            const protocol = e.target.value as ProviderProtocol
+            setForm(f => ({ ...f, protocol, compatibility: compatibilityOptions[protocol][0]?.[0] ?? '', models: f.models.map(m => ({ ...m, test: undefined })) }))
+          }}>
+            {!form.protocol && <option value="">{t('providers.legacy')}</option>}
+            {protocolOptions.map(([value, label]) => <option key={value} value={value}>{label}</option>)}
+          </NativeSelect>
+        </Field>}
         <Field label={t('providers.name')}>
           <TextInput value={form.name} onChange={(e) => setForm((f) => ({ ...f, name: e.target.value }))} placeholder={t('providers.namePlaceholder')} />
         </Field>
         <Field label={t('providers.baseUrl')}>
-          <TextInput value={form.base_url} onChange={(e) => setForm((f) => ({ ...f, base_url: e.target.value }))} placeholder={t('providers.baseUrlPlaceholder')} />
+          <TextInput value={form.base_url} onChange={(e) => setForm((f) => ({ ...f, base_url: e.target.value, models: f.models.map(m => ({ ...m, test: undefined })) }))} placeholder={t('providers.baseUrlPlaceholder')} />
         </Field>
         <Field label={t('providers.apiKey')}>
-          <SecretInput value={form.api_key} onChange={(e) => setForm((f) => ({ ...f, api_key: e.target.value }))} placeholder="sk-…" />
+          <SecretInput value={form.api_key} onChange={(e) => setForm((f) => ({ ...f, api_key: e.target.value, models: f.models.map(m => ({ ...m, test: undefined })) }))} placeholder="sk-…" />
         </Field>
 
         <div>
@@ -563,7 +617,19 @@ function ProviderForm({
             {t('providers.addModel')}
           </Button>
         </div>
-      </div>
+        <details className="border-t border-line pt-3">
+          <summary className="cursor-pointer text-xs text-muted-foreground">{t('providers.advanced')}</summary>
+          <div className="mt-3">
+            <Field label={t('providers.compatibility')}>
+              <NativeSelect className="w-full" value={form.compatibility} disabled={!form.protocol} onChange={e => setForm(f => ({ ...f, compatibility: e.target.value, models: f.models.map(m => ({ ...m, test: undefined })) }))}>
+                {!form.protocol && <option value="">{t('providers.legacy')}</option>}
+                {compatibilityOptions[form.protocol].map(([value, label]) => <option key={value} value={value}>{label}</option>)}
+              </NativeSelect>
+            </Field>
+            <p className="mt-1.5 text-[11px] text-muted-foreground">{t('providers.compatibilityHint')}</p>
+          </div>
+        </details>
+      </div>}
     </FormModal>
   )
 }

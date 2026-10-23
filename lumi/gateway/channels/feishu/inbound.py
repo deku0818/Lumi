@@ -610,7 +610,10 @@ class FeishuInbound:
         """
         ch = self.channel
         current = session_model.resolve(thread_id)
-        levels = list(dict.fromkeys(["auto", *allowed_levels(current.model)]))
+        resolved = provider_store.resolve(current.model, current.provider)
+        levels = list(
+            dict.fromkeys(["auto", *allowed_levels(current.model, resolved.protocol)])
+        )
         options = "可选：" + " ".join(f"`{lv}`" for lv in levels)
         if not value:
             # 未设会话级档位时生效的是该模型在 profile 里的档位（desktop 选择器写的），

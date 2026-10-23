@@ -1801,12 +1801,12 @@ class _FakeBridge:
 
 def _fake_resolve(model_name=None, provider=""):
     """镜像 resolve() 契约：None=全局默认；按名解析已知模型回 profile，未知回空连接。"""
+    from lumi.models.provider_store import ResolvedModel
+
     if model_name is None:
-        return SimpleNamespace(model="g-default", provider="pg", effort="auto")
+        return ResolvedModel("g-default", "", "", provider="pg")
     known = {"g-default": "pg", "ov-model": "po", "m2": "p2"}
-    return SimpleNamespace(
-        model=model_name, provider=known.get(model_name, ""), effort="auto"
-    )
+    return ResolvedModel(model_name, "", "", provider=known.get(model_name, ""))
 
 
 def _isolate_meta(monkeypatch, tmp_path):
@@ -1819,7 +1819,9 @@ def _patch_session_model(monkeypatch, levels=()):
     from lumi.sessions import session_model
 
     monkeypatch.setattr(session_model.provider_store, "resolve", _fake_resolve)
-    monkeypatch.setattr(session_model, "allowed_levels", lambda model: list(levels))
+    monkeypatch.setattr(
+        session_model, "allowed_levels", lambda model, protocol="": list(levels)
+    )
 
 
 def test_session_model_precedence(monkeypatch, tmp_path):
@@ -2004,7 +2006,9 @@ async def test_cmd_session_effort_lists_auto_once(monkeypatch, tmp_path):
     # allowed_levels 对多数形态本就以 auto 打头，裸拼会列出两个 auto
     _isolate_meta(monkeypatch, tmp_path)
     _patch_session_model(monkeypatch)
-    monkeypatch.setattr(inb, "allowed_levels", lambda model: ["auto", "low", "high"])
+    monkeypatch.setattr(
+        inb, "allowed_levels", lambda model, protocol="": ["auto", "low", "high"]
+    )
     ch = FeishuChannel(FeishuChannelConfig())
     sent = _sent_collector(ch, monkeypatch)
 
@@ -2022,7 +2026,9 @@ async def test_cmd_session_effort_validates_against_current_model(
     _isolate_meta(monkeypatch, tmp_path)
     _patch_session_model(monkeypatch, levels=("low", "high"))
     # 命令侧的可选档位与解析侧同源（都问 allowed_levels），测试里一并顶掉
-    monkeypatch.setattr(inb, "allowed_levels", lambda model: ["low", "high"])
+    monkeypatch.setattr(
+        inb, "allowed_levels", lambda model, protocol="": ["low", "high"]
+    )
     ch = FeishuChannel(FeishuChannelConfig())
     sent = _sent_collector(ch, monkeypatch)
 

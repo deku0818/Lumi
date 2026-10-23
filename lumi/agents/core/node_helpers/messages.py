@@ -1,6 +1,6 @@
 """消息处理辅助模块
 
-提供消息预处理函数：清理不完整工具调用、卸载大型工具结果、Anthropic 缓存断点注入。
+提供消息预处理函数：清理不完整工具调用、卸载大型工具结果。
 """
 
 from __future__ import annotations
@@ -11,7 +11,6 @@ from typing import Any
 from langchain_core.messages import AIMessage, HumanMessage, RemoveMessage, ToolMessage
 
 from lumi.agents.core.meta_message import INJECTED_PREFIX_KEY, injected_prefix
-from lumi.models.cache import CACHE_CONTROL
 from lumi.utils.logger import logger
 
 # ---------------------------------------------------------------------------
@@ -186,47 +185,3 @@ def cleanup_incomplete_tool_calls(messages: list[Any]) -> list[RemoveMessage]:
         )
         to_remove.append(RemoveMessage(id=msg.id))
     return to_remove
-
-
-# ---------------------------------------------------------------------------
-# Anthropic prompt 缓存
-# ---------------------------------------------------------------------------
-
-
-def _add_cache_control(
-    msg: HumanMessage | AIMessage | ToolMessage,
-) -> HumanMessage | AIMessage | ToolMessage:
-    """为消息最后一个内容块添加 ``cache_control``，返回新消息对象。"""
-    content = msg.content
-
-    if isinstance(content, str):
-        new_content: list[dict[str, Any]] = [
-            {"type": "text", "text": content, "cache_control": CACHE_CONTROL}
-        ]
-    elif isinstance(content, list) and content:
-        new_content = list(content)
-        last = new_content[-1]
-        if isinstance(last, dict):
-            new_content[-1] = {**last, "cache_control": CACHE_CONTROL}
-        elif isinstance(last, str):
-            new_content[-1] = {
-                "type": "text",
-                "text": last,
-                "cache_control": CACHE_CONTROL,
-            }
-        else:
-            return msg
-    else:
-        return msg
-
-    return msg.model_copy(update={"content": new_content})
-
-
-def inject_message_cache_breakpoints(messages: list[Any]) -> None:
-    """为消息列表末尾添加缓存断点（滑动窗口策略）。
-
-    在倒数第 2 条和最后 1 条消息上添加 ``cache_control``，使每轮请求的断点随对话
-    向后滑动。仅对 Anthropic 模型有意义。
-    """
-    for idx in range(max(len(messages) - 2, 0), len(messages)):
-        messages[idx] = _add_cache_control(messages[idx])

@@ -302,6 +302,7 @@ async def run_compact(
         model_name=model_name,
         provider=provider,
         streaming=False,
+        cache_history=False,
     )
     return await compact_with_ptl_retry(
         transformed, prompt, chain, max_retry=max_retry, drop_ratio=drop_ratio

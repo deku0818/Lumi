@@ -57,10 +57,13 @@ def list_providers() -> dict:
             "base_url": p.base_url,
             "api_key": p.api_key,
             "models": list(p.models),
+            "protocol": p.protocol,
+            "compatibility": p.compatibility,
+            "preset": p.preset,
             "thinking": {
                 m: {
                     "control": hit[m].entry.control if hit[m].entry else "none",
-                    "levels": list(levels_for(hit[m].entry, m)),
+                    "levels": list(levels_for(hit[m].entry, m, p.protocol)),
                     "effort": p.effort.get(m, "auto"),
                 }
                 for m in p.models
@@ -143,7 +146,9 @@ def set_titler(provider_id: str, model: str) -> dict:
     return {"titler": provider_store.set_pointer("titler", provider_id, model)}
 
 
-async def test_provider(base_url: str, api_key: str, model: str) -> dict:
+async def test_provider(
+    base_url: str, api_key: str, model: str, protocol: str = "", compatibility: str = ""
+) -> dict:
     """用给定连接对模型发一个最小请求验证可达性。
 
     短超时（15s）+ 不缓存 + 不重试，连不上的地址会快速失败而非干等。
@@ -160,7 +165,13 @@ async def test_provider(base_url: str, api_key: str, model: str) -> dict:
     if api_key:
         kwargs["api_key"] = api_key
     try:
-        llm = create_llm(model_name=model, use_cache=False, **kwargs)
+        llm = create_llm(
+            model_name=model,
+            use_cache=False,
+            protocol=protocol,
+            compatibility=compatibility,
+            **kwargs,
+        )
         t0 = time.monotonic()
         await llm.ainvoke([HumanMessage(content="ping")])
         return {"ok": True, "latency_ms": int((time.monotonic() - t0) * 1000)}

@@ -327,7 +327,9 @@ def test_create_llm_effort_override(catalog, monkeypatch):
     )
     seen: list[str] = []
     monkeypatch.setattr(
-        manager, "effort_params", lambda model, level: seen.append(level) or {}
+        manager,
+        "effort_params",
+        lambda model, level, *connection: seen.append(level) or {},
     )
     monkeypatch.setattr(manager, "ChatAnthropic", lambda **kw: kw)
     monkeypatch.setattr(manager, "DialectChatOpenAI", lambda **kw: kw)
@@ -341,6 +343,52 @@ def test_create_llm_effort_override(catalog, monkeypatch):
         "claude-opus-4-6", use_cache=False, apply_effort=True, effort=None
     )
     assert seen[-1] == "low"  # 不覆盖 → 沿用 resolve() 的 low
+
+
+@pytest.mark.parametrize(
+    "level,expected",
+    [
+        ("high", {"effort": "high"}),
+        ("off", {"effort": "none"}),
+        ("on", {"enabled": True}),
+    ],
+)
+def test_openrouter_uses_gateway_reasoning_parameter(catalog, level, expected):
+    from lumi.models.manager import create_llm
+
+    model = "gpt-5.2" if level == "high" else "mimo-v2.5-pro"
+    llm = create_llm(
+        model,
+        protocol="openai",
+        compatibility="openrouter",
+        apply_effort=True,
+        effort=level,
+        api_key="test",
+        base_url="https://example.com/v1",
+        use_cache=False,
+    )
+    assert llm.extra_body["reasoning"] == expected
+    assert llm.use_responses_api is False
+    assert "reasoning_effort" not in llm._get_request_payload([])
+    assert "thinking" not in llm.extra_body
+
+
+def test_kimi_preserved_thinking_does_not_mutate_callers_params(monkeypatch):
+    from lumi.models.manager import create_llm
+
+    monkeypatch.setattr("lumi.models.catalog.lookup", lambda name: None)
+    params = {"thinking": {"type": "enabled"}}
+    llm = create_llm(
+        "kimi-k2.6",
+        protocol="openai",
+        compatibility="kimi",
+        extra_body=params,
+        api_key="test",
+        base_url="https://example.com/v1",
+        use_cache=False,
+    )
+    assert llm.extra_body["thinking"] == {"type": "enabled", "keep": "all"}
+    assert params == {"thinking": {"type": "enabled"}}
 
 
 def test_structured_output_softens_tool_choice_for_thinking_only(catalog, monkeypatch):

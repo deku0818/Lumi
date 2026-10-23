@@ -1,7 +1,6 @@
 """LLM 实例创建与缓存。
 
-协议由模型名自动判定（claude / anthropic / minimax → ChatAnthropic，其余 → ChatOpenAI；
-Bedrock 形如 us.anthropic.claude-* 同样走 ChatAnthropic 客户端）。
+协议由供应商配置指定；未配置的旧 profile 才按模型名判定。
 未显式传连接时，由 provider_store 按 active profile 解析 base_url / api_key。
 
 也是**厂商方言与端点怪癖**的落点（名字 → 厂商的判定、档位 → 协议参数的映射、
@@ -13,42 +12,26 @@ import json
 import os
 from typing import TYPE_CHECKING, Any, Literal
 
-from langchain_anthropic import ChatAnthropic
-from langchain_openai import ChatOpenAI
+from langchain_core.language_models import BaseChatModel
 
+from lumi.models.adapters import (
+    DialectChatOpenAI,
+    ReplayChatGoogle,
+)
+from lumi.models.adapters import (
+    ReplayChatAnthropic as ChatAnthropic,
+)
 from lumi.utils.logger import logger
 
 if TYPE_CHECKING:
     from lumi.models.catalog import ModelEntry
 
-Protocol = Literal["anthropic", "openai"]
+Protocol = Literal["anthropic", "openai", "responses", "gemini"]
 
 _cache: dict[str, Any] = {}
 # SDK 重试次数（指数退避约 0.5→8s 封顶，或按 retry-after）：SDK 默认 2 次对 529 过载
 # 偏少；chain 外不叠 with_retry，此即唯一重试层
 _MAX_RETRIES = 5
-
-
-class DialectChatOpenAI(ChatOpenAI):
-    """保留方言推理字段 reasoning_content 的 ChatOpenAI。
-
-    DeepSeek / Kimi / MiMo / Qwen 等 OpenAI 兼容端点把思考增量放在
-    delta.reasoning_content（非标字段），ChatOpenAI 会静默丢弃——导致
-    思考期间前端收不到任何增量，长思考看起来像卡死。这里在流式转换后
-    把它补进 additional_kwargs；请求构造不读该字段，不会回传给服务端。
-    """
-
-    def _convert_chunk_to_generation_chunk(
-        self, chunk: dict, default_chunk_class: type, base_generation_info: dict | None
-    ):
-        gen = super()._convert_chunk_to_generation_chunk(
-            chunk, default_chunk_class, base_generation_info
-        )
-        if gen is not None and (choices := chunk.get("choices")):
-            reasoning = (choices[0].get("delta") or {}).get("reasoning_content")
-            if reasoning:
-                gen.message.additional_kwargs["reasoning_content"] = reasoning
-        return gen
 
 
 def get_default_model_name() -> str:
@@ -69,14 +52,16 @@ def _is_qwen_dialect(model_name: str) -> bool:
     return "qwen" in (model_name or "").lower()
 
 
-def allowed_levels(model_name: str) -> tuple[str, ...]:
+def allowed_levels(model_name: str, protocol: str = "") -> tuple[str, ...]:
     """该模型可设的思考档位集合（UI 下发与校验共用同一份）。"""
     from lumi.models.catalog import lookup
 
-    return levels_for(lookup(model_name), model_name)
+    return levels_for(lookup(model_name), model_name, protocol)
 
 
-def levels_for(entry: "ModelEntry | None", model_name: str) -> tuple[str, ...]:
+def levels_for(
+    entry: "ModelEntry | None", model_name: str, protocol: str = ""
+) -> tuple[str, ...]:
     """目录条目 → 可设档位集合。
 
     收 entry 而非只收名字，是为了描述**目录条目本身**（如手动指定映射时的候选
@@ -97,7 +82,7 @@ def levels_for(entry: "ModelEntry | None", model_name: str) -> tuple[str, ...]:
     # 编排）。仅对有思考能力的模型提供——none 型上面已返回，不渲染 ultra。
     if entry.control == "toggle":
         base = ("on", "off")
-    elif detect_protocol(model_name) == "anthropic":
+    elif (protocol or detect_protocol(model_name)) == "anthropic":
         base = ("auto", *entry.values, "off")
     else:
         extra = ("off",) if entry.has_toggle and "off" not in entry.values else ()
@@ -126,7 +111,9 @@ def _thinking_toggle(model_name: str) -> bool:
     return entry is not None and entry.toggle_anywhere
 
 
-def effort_params(model_name: str, level: str) -> dict:
+def effort_params(
+    model_name: str, level: str, protocol: str = "", compatibility: str = ""
+) -> dict:
     """思考档位 → 协议参数（唯一映射点）。
 
     档位值来自 models.dev（model_catalog），是各模型原生值，选什么发什么，
@@ -142,12 +129,16 @@ def effort_params(model_name: str, level: str) -> dict:
     - toggle 的 on/off：按厂商方言分支——Qwen（DashScope/百炼）用扁平
       enable_thinking 布尔；DeepSeek / MiMo 系用 thinking.type enabled/disabled
     """
-    allowed = allowed_levels(model_name)
+    protocol = protocol or detect_protocol(model_name)
+    qwen = compatibility == "qwen" or (
+        not compatibility and _is_qwen_dialect(model_name)
+    )
+    allowed = allowed_levels(model_name, protocol)
 
     # effort 型 qwen 的 allowed_levels 无 "off"（UI 不给 Off），会被下面的门控挡掉——但
     # force_no_thinking 的内部链必须真能关掉思考，故在门控前直通，且仅限确有关思考通道
     # 者（thinking-only 的 qwen 传 false 会被 API 拒绝）。原因见 thinking.md 的方言节。
-    if level == "off" and _is_qwen_dialect(model_name) and _thinking_toggle(model_name):
+    if level == "off" and qwen and _thinking_toggle(model_name):
         return {"extra_body": {"enable_thinking": False}}
 
     if level != "auto" and level not in allowed:
@@ -156,9 +147,37 @@ def effort_params(model_name: str, level: str) -> dict:
     # ultra 非协议值，是 Lumi 顶档：思考层面 = 委派给该模型最高原生档（唯一别名点，
     # 下游协议分支无需感知 ultra）。「解锁 workflow」由轮内提醒承载，与思考参数无关。
     if level == "ultra":
-        return effort_params(model_name, _native_max_level(model_name))
+        return effort_params(
+            model_name, _native_max_level(model_name), protocol, compatibility
+        )
 
-    if detect_protocol(model_name) == "anthropic":
+    if compatibility == "openrouter":
+        if level == "auto":
+            return {}
+        reasoning = (
+            {"enabled": True}
+            if level == "on"
+            else {"effort": "none" if level == "off" else level}
+        )
+        # ChatOpenAI 的 reasoning 参数会隐式改用 Responses；网关 Chat 接口走 extra_body。
+        return (
+            {"extra_body": {"reasoning": reasoning}}
+            if protocol == "openai"
+            else {"reasoning": reasoning}
+        )
+    if protocol == "gemini":
+        if level == "auto":
+            return {}
+        if level in {"on", "off"}:
+            return {"thinking_budget": -1 if level == "on" else 0}
+        return {"reasoning_effort": level}
+    if protocol == "responses":
+        return (
+            {}
+            if level == "auto"
+            else {"reasoning": {"effort": "none" if level == "off" else level}}
+        )
+    if protocol == "anthropic":
         if level == "off" or allowed == ("auto",):
             return {}  # 关闭 = 不传 thinking（API 默认不思考）；无能力模型同
         adaptive = {"thinking": {"type": "adaptive", "display": "summarized"}}
@@ -172,14 +191,14 @@ def effort_params(model_name: str, level: str) -> dict:
         enabled = level == "on"
         # Qwen3（DashScope/百炼）方言：扁平 enable_thinking 布尔；其余（DeepSeek/MiMo）
         # 走 thinking.type。错误码 InternalError.Algo.* 即 DashScope。
-        if _is_qwen_dialect(model_name):
+        if qwen:
             return {"extra_body": {"enable_thinking": enabled}}
         state = "enabled" if enabled else "disabled"
         return {"extra_body": {"thinking": {"type": state}}}
     return {"reasoning_effort": level, "use_responses_api": False}
 
 
-def rejects_forced_tool_choice(model_name: str) -> bool:
+def rejects_forced_tool_choice(model_name: str, compatibility: str = "") -> bool:
     """该模型是否无法承受强制 tool_choice（required / 指定工具）。
 
     DashScope（qwen）在思考模式下一律拒绝强制 tool_choice（实测 400）；而 thinking-only
@@ -188,7 +207,10 @@ def rejects_forced_tool_choice(model_name: str) -> bool:
     qwen 不在此列（它压根不进思考模式）。消费方是 chain.structured_output 的软引导降级。
     """
     return (
-        _is_qwen_dialect(model_name)
+        (
+            compatibility == "qwen"
+            or (not compatibility and _is_qwen_dialect(model_name))
+        )
         and allowed_levels(model_name) != ("auto",)  # 有思考能力
         and not _thinking_toggle(model_name)  # 且关不掉
     )
@@ -201,8 +223,10 @@ def create_llm(
     force_no_thinking: bool = False,
     effort: str | None = None,
     provider: str = "",
+    protocol: str = "",
+    compatibility: str = "",
     **llm_params,
-) -> ChatAnthropic | ChatOpenAI:
+) -> BaseChatModel:
     """创建 LLM 实例（同参数命中缓存）。
 
     连接解析：显式传入 base_url / api_key 时原样使用；否则由
@@ -226,6 +250,7 @@ def create_llm(
     的 MAX_STREAM_RETRIES 兜。
     """
     from lumi.models import provider_store
+    from lumi.models.connection import validate_connection
     from lumi.utils.config import get_config
 
     level = "auto"
@@ -235,6 +260,9 @@ def create_llm(
         resolved = provider_store.resolve(model_name, provider)
         model_name = resolved.model
         level = resolved.effort
+        provider = resolved.provider
+        protocol = protocol or resolved.protocol
+        compatibility = compatibility or resolved.compatibility
         if resolved.base_url:
             llm_params["base_url"] = resolved.base_url
         if resolved.api_key:
@@ -243,12 +271,24 @@ def create_llm(
     if effort is not None:
         level = effort
 
-    protocol = detect_protocol(model_name)
+    if protocol and compatibility:
+        validate_connection(protocol, compatibility)
+    configured_protocol = protocol
+    protocol = protocol or detect_protocol(model_name)
+    if not compatibility:
+        compatibility = next(
+            (
+                name
+                for name in ("qwen", "deepseek", "kimi", "mimo", "glm", "minimax")
+                if name in model_name.lower()
+            ),
+            "local",
+        )
     config_params = get_config().config.llm_params.get_params_for_model_type(protocol)
     if apply_effort:
-        level_params = effort_params(model_name, level)
+        level_params = effort_params(model_name, level, protocol, compatibility)
     elif force_no_thinking:
-        level_params = effort_params(model_name, "off")
+        level_params = effort_params(model_name, "off", protocol, compatibility)
     else:
         level_params = {}
     final_params = {
@@ -257,10 +297,63 @@ def create_llm(
         "model": model_name,
         **llm_params,
     }
+    if level_params.get("extra_body") or llm_params.get("extra_body"):
+        final_params["extra_body"] = {
+            **config_params.get("extra_body", {}),
+            **level_params.get("extra_body", {}),
+            **llm_params.get("extra_body", {}),
+        }
     final_params.setdefault("max_retries", _MAX_RETRIES)
-    if protocol == "openai":
+    if not configured_protocol and final_params.get("use_responses_api"):
+        protocol = "responses"
+    if protocol in {"openai", "responses"}:
         # 功能性标志而非调参：流式响应里携带 token 用量统计
         final_params.setdefault("stream_usage", True)
+        # 新配置以选中的接口为准；旧配置保留显式参数和 SDK 的自动路由。
+        if configured_protocol:
+            final_params["use_responses_api"] = protocol == "responses"
+        final_params["lumi_compatibility"] = compatibility
+        if protocol == "responses":
+            final_params["include"] = list(
+                dict.fromkeys(
+                    [*final_params.get("include", []), "reasoning.encrypted_content"]
+                )
+            )
+            final_params.setdefault(
+                "store", bool(final_params.get("use_previous_response_id"))
+            )
+        elif compatibility == "glm":
+            body = final_params.setdefault("extra_body", {})
+            body["thinking"] = {"clear_thinking": False, **body.get("thinking", {})}
+    if protocol == "openai":
+        from lumi.models.catalog import lookup
+
+        entry = lookup(model_name)
+        canonical = entry.id if entry else model_name
+        if compatibility == "qwen" and canonical.startswith(
+            (
+                "qwen3.6-plus",
+                "qwen3.7-plus",
+                "qwen3.7-max",
+                "qwen3.7-flash",
+                "qwen3.8-max",
+                "qwen3.8-omni-flash",
+            )
+        ):
+            final_params.setdefault("extra_body", {}).setdefault(
+                "preserve_thinking", True
+            )
+        if compatibility == "kimi" and canonical.startswith(("kimi-k2.6", "kimi-k2.7")):
+            body = final_params.setdefault("extra_body", {})
+            body["thinking"] = {"keep": "all", **body.get("thinking", {})}
+    if protocol == "gemini":
+        final_params.setdefault("include_thoughts", True)
+    final_params["lumi_origin"] = (
+        provider,
+        final_params.get("base_url", "").rstrip("/"),
+        protocol,
+        model_name,
+    )
     # 思考开启时采样参数互斥（Anthropic 直接 400，OpenAI 推理模型不支持）
     if final_params.get("thinking") or final_params.get("reasoning_effort"):
         for key in ("temperature", "top_p", "top_k"):
@@ -272,7 +365,9 @@ def create_llm(
     if cache_key and cache_key in _cache:
         return _cache[cache_key]
 
-    cls = ChatAnthropic if protocol == "anthropic" else DialectChatOpenAI
+    cls = {"anthropic": ChatAnthropic, "gemini": ReplayChatGoogle}.get(
+        protocol, DialectChatOpenAI
+    )
     logger.debug(f"创建 {cls.__name__} 模型: {model_name}")
     llm = cls(**final_params)
     if cache_key:

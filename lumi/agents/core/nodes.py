@@ -30,7 +30,6 @@ from lumi.agents.core.node_helpers.execution import (
 from lumi.agents.core.node_helpers.messages import (
     cleanup_incomplete_tool_calls,
     dangling_tool_calls,
-    inject_message_cache_breakpoints,
     is_malformed_tool_call,
 )
 from lumi.agents.core.preprocessing.compact import (
@@ -81,12 +80,13 @@ async def call_model(
     # 输出上限按模型取（用户覆盖 > models.dev 探测），全局 agents.max_tokens 仅作兜底。
     # 给小了不是"省钱"而是把模型的 tool_call 参数从中间切断——截断的 JSON 被
     # 补全解析后会变成缺字段（报错）或半截字符串（静默写坏文件）。
+    resolved = resolve(model_name, runtime.context.provider)
+    protocol = resolved.protocol or detect_protocol(model_name)
     chain = tool_call_chain(
         actual_tools,
         system_prompt=system_prompt,
         model_name=model_name,
-        max_tokens=resolve(model_name, runtime.context.provider).max_tokens
-        or get_config().config.agents.max_tokens,
+        max_tokens=resolved.max_tokens or get_config().config.agents.max_tokens,
         tool_choice=None,
         apply_effort=True,  # 思考档位只在主对话链生效
         effort=runtime.context.effort,  # 渠道会话的档位覆盖（None=跟随 profile）
@@ -94,15 +94,13 @@ async def call_model(
     )
     messages = list(state["messages"])
 
-    # Anthropic 模型：为对话消息注入缓存断点（滑动窗口策略）
-    if detect_protocol(model_name) == "anthropic":
-        inject_message_cache_breakpoints(messages)
-
     # 多模态 block 内部统一 Anthropic 风格,在此按 provider 转换
     transformed_messages: list = []
     for m in messages:
         if isinstance(m, HumanMessage) and isinstance(m.content, list):
-            new_content = await message_transform(m.content, model_name=model_name)
+            new_content = await message_transform(
+                m.content, model_name=model_name, protocol=protocol
+            )
             transformed_messages.append(m.model_copy(update={"content": new_content}))
         else:
             transformed_messages.append(m)

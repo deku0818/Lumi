@@ -249,16 +249,30 @@ def visible_user_text(msg: object) -> str:
 def extract_thinking_content(message: BaseMessage) -> str:
     """OpenAI reasoning_content and Anthropic thinking share one display contract."""
     kwargs = getattr(message, "additional_kwargs", None) or {}
-    if reasoning := kwargs.get("reasoning_content"):
+    if reasoning := kwargs.get("reasoning_content") or kwargs.get("reasoning"):
         return reasoning
     content = getattr(message, "content", None)
     if isinstance(content, list):
-        return "".join(
+        thinking = "".join(
             item.get("thinking", "")
+            if item.get("type") == "thinking"
+            else item.get("reasoning", "")
+            or "".join(part.get("text", "") for part in item.get("summary", []))
             for item in content
-            if isinstance(item, dict) and item.get("type") == "thinking"
+            if isinstance(item, dict) and item.get("type") in {"thinking", "reasoning"}
         )
-    return ""
+        if thinking:
+            return thinking
+    details = kwargs.get("reasoning_details", []) or [
+        item
+        for batch in kwargs.get("lumi_reasoning_details_deltas", [])
+        for item in batch
+    ]
+    return "".join(
+        item.get("text") or item.get("summary") or ""
+        for item in details
+        if isinstance(item, dict)
+    )
 
 
 def extract_text_content(content: str | list) -> str:

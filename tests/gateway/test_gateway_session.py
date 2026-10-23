@@ -949,6 +949,7 @@ def test_snapshot_model_window_channel_follows_default(monkeypatch):
         "lumi.models.provider_store.resolve",
         lambda name=None, provider="": SimpleNamespace(
             model=name or "active-model",
+            protocol="",
             provider="pg",
             effort="auto",
             context_window=128_000 if (name or "active-model") == "active-model" else 0,

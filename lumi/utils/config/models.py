@@ -157,10 +157,13 @@ class LlmParamsConfig(BaseModel):
 
     openai: ModelTypeParamsConfig = Field(default_factory=ModelTypeParamsConfig)
     anthropic: ModelTypeParamsConfig = Field(default_factory=ModelTypeParamsConfig)
+    gemini: ModelTypeParamsConfig = Field(default_factory=ModelTypeParamsConfig)
 
     def get_params_for_model_type(self, protocol: str) -> dict:
-        """根据协议（anthropic / openai）获取对应的参数配置"""
-        cfg = self.anthropic if protocol == "anthropic" else self.openai
+        """按接口获取参数；Responses 复用 openai，其余使用各自配置。"""
+        cfg = getattr(
+            self, protocol if protocol in {"anthropic", "gemini"} else "openai"
+        )
         return cfg.to_dict()
 
 

@@ -108,8 +108,7 @@ create_llm(..., apply_effort=False)               ← 翻转默认：注入显�
 - `list_providers` 为每个模型附带思考能力（由 models.dev 算出），
   **前端不再硬编码档位列表**，选项完全后端驱动。
 - `set_effort(provider, model, level)`。
-- 思考内容流式展示（`thinking.delta` 事件、`DialectChatOpenAI` 保留
-  `reasoning_content`）与本设计正交，已实现，不变。
+- 思考内容流式展示仍走 `thinking.delta`；原始回复与回传规则见下节。
 
 ### Desktop 选择器（参考 Claude Desktop，demo 已确认：`.demos/lumi-effort-picker.html`）
 
@@ -147,8 +146,7 @@ create_llm(..., apply_effort=False)               ← 翻转默认：注入显�
 - **覆盖表**：`ProviderProfile.catalog`（model → 目录条目 id），与 `context` / `max_tokens`
   并列存在 profile 里、随模型增删一并清理；空串 = 恢复自动匹配。
 - **生效是全局的**：`provider_store` 读盘 / 写盘时把各 profile 的覆盖拍平发布给
-  `catalog.set_aliases`。按名而非按 profile，是因为思考链（`allowed_levels` /
-  `effort_params` / `rejects_forced_tool_choice`）全程只有模型名、拿不到 profile；且
+  `catalog.set_aliases`。目录能力仍按模型名查询；接口协议和兼容规则另按 profile 解析。
   「`plan-glm-5.2` 到底是哪个模型」是名字的属性，不是连接的属性。代价：同名别名在两个
   profile 指向不同条目时后写者覆盖前者。
 - **匹配来源随结果一起上报**：`catalog.match()` 返回 `Match(entry, kind)`，
@@ -182,6 +180,33 @@ ultracode。选中后做两件事：**原生思考拉到该模型最高档** + *
 
 ## 不做
 
-运行时能力探测、budget_tokens 预算制、ReasoningTrace 落库、
-Cherry Studio 式人工兼容矩阵（AGPL，且 models.dev 已覆盖）、
-OpenAI Responses API（钉死 Chat Completions）、静默降级（错误即时透传）。
+运行时能力探测、budget_tokens 预算制、独立 ReasoningTrace 存储表、
+Cherry Studio 式人工模型能力矩阵（AGPL，且 models.dev 已覆盖）、
+静默降级（错误即时透传）。思考状态直接复用已有消息持久化。
+
+
+## 供应商接口与思考回传
+
+供应商配置保存 `protocol`（openai / responses / anthropic / gemini）、
+`compatibility` 和界面预设 `preset`。选择预设后填写连接，只有自定义显示接口类型；
+兼容规则位于默认折叠的高级设置。连接测试与实际模型调用共用这些参数。
+旧 profile 的接口字段为空时保留原来的名称判定、显式 API 参数和 SDK 自动路由，
+不批量改写用户配置。新 profile 的显式接口选择优先于旧参数。
+
+`models/reasoning.py` 是历史发送投影的唯一入口，四种客户端共用：
+- 完整回复标记来源 `(profile id, base_url, protocol, model)`，随 checkpoint 保存。
+- 同来源原样回传 thinking、reasoning、签名及加密块；其它来源只在发送副本里剔除，
+  正文与工具调用保留。过滤后为空的纯思考消息不发送；外来响应的服务端 ID 也去掉，
+  防止 `previous_response_id` 自动载入被过滤的上下文。
+- A→B→A 时原历史仍在，A 的思考可重新使用；来源不明的升级前消息不猜测归属。
+- 原生 Anthropic / Responses / Gemini 的序列化由 LangChain 处理；OpenAI Chat
+  兼容接口在 `models/adapters.py` 补齐思考字段的流式、非流式接收与回传。
+  结构化 reasoning 只拼接相邻同源文本/摘要，加密块保持独立：OpenRouter 保留
+  index，Kimi 的 summary/encrypted 块回传时去掉流式 index。Gemini 经 Chat
+  兼容接口返回的工具签名单独保存，按工具 ID 回传，切模型时与思考一起过滤。
+  DeepSeek / Kimi / MiMo 需要字段但历史没有思考时发送空格占位，绝不伪造丢失的思考。
+- Qwen 已支持的型号开启 `preserve_thinking`，GLM 使用 `clear_thinking: false`，
+  Kimi K2.6 / K2.7 使用 `keep: all`；OpenRouter 通过统一 `reasoning` 参数控制思考。
+  Responses 请求加密 reasoning，默认关闭服务端存储；显式启用服务端续接时默认开启存储。
+
+这里只保证本地历史和请求构造的契约，不代表所有代理端点都遵循厂商原生规则。

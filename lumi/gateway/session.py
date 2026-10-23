@@ -392,6 +392,8 @@ async def _test_provider(session: GatewaySession, params: dict) -> dict:
         params.get("base_url", ""),
         params.get("api_key", ""),
         params.get("model", ""),
+        params.get("protocol", ""),
+        params.get("compatibility", ""),
     )
 
 

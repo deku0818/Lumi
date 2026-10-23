@@ -237,7 +237,12 @@ export interface SlashCommand {
 }
 
 // 模型供应商 profile（对齐后端 provider_store.ProviderProfile）：一套连接挂多个模型
+export type ProviderProtocol = '' | 'openai' | 'responses' | 'anthropic' | 'gemini'
+
 export interface ProviderProfile {
+  protocol?: ProviderProtocol
+  compatibility?: string
+  preset?: string
   id: string
   name: string
   base_url: string

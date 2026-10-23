@@ -84,7 +84,8 @@ def structured_output(
     # 模型名取自已构造的客户端（ChatOpenAI 用 model_name / ChatAnthropic 用 model），
     # 与真正发给端点的那个名字同源。
     if structure_method == "function_calling" and rejects_forced_tool_choice(
-        getattr(llm, "model_name", None) or llm.model
+        getattr(llm, "model_name", None) or llm.model,
+        getattr(llm, "lumi_compatibility", ""),
     ):
         structured_llm = llm.with_structured_output(
             structure, method=structure_method, tool_choice="auto"
@@ -105,6 +106,7 @@ def tool_call_chain(
     apply_effort: bool = False,
     effort: str | None = None,
     provider: str = "",
+    cache_history: bool = True,
     **llm_params,
 ):
     """
@@ -124,6 +126,7 @@ def tool_call_chain(
         apply_effort: 注入当前模型的思考档位（仅主对话链传 True）
         effort: 显式覆盖思考档位（None=跟随 profile；渠道会话用它独立配置）
         provider: model_name 所属 profile id（空=按名反查）；同名模型跨 profile 不串味
+        cache_history: Anthropic 消息历史缓存；摘要链关闭，固定系统断点不受影响
         **llm_params: LLM的其他参数
     """
     # streaming 是功能性标志：TUI / desktop 的逐 token 输出依赖它
@@ -147,29 +150,23 @@ def tool_call_chain(
         **default_llm_params,
     )
 
-    if tool_choice is not None:
-        llm_with_tools = llm.bind_tools(tools, tool_choice=tool_choice)
-    else:
-        llm_with_tools = llm.bind_tools(tools)
+    cache_params = (
+        {"cache_control": CACHE_CONTROL}
+        if cache_history and isinstance(llm, ChatAnthropic)
+        else {}
+    )
+    llm_with_tools = llm.bind_tools(tools, tool_choice=tool_choice, **cache_params)
 
     # 系统消息 = **纯静态** system_prompt（Anthropic 带 cache_control 断点）。保持纯净、字节恒定，
     # 使其成为所有 provider（含消息级缓存的兼容 provider）都能可靠命中的独立缓存单元。
     messages = []
     if system_prompt:
-        if isinstance(llm, ChatAnthropic):
-            messages.append(
-                SystemMessage(
-                    content=[
-                        {
-                            "type": "text",
-                            "text": system_prompt,
-                            "cache_control": CACHE_CONTROL,
-                        }
-                    ]
-                )
-            )
-        else:
-            messages.append(SystemMessage(content=system_prompt))
+        content = (
+            [{"type": "text", "text": system_prompt, "cache_control": CACHE_CONTROL}]
+            if isinstance(llm, ChatAnthropic)
+            else system_prompt
+        )
+        messages.append(SystemMessage(content=content))
 
     messages.append(MessagesPlaceholder(variable_name="messages"))
 

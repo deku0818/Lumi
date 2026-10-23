@@ -22,7 +22,7 @@ _BEDROCK_CLAUDE = re.compile(r"^(?:[a-z]+\.)?anthropic\.claude-", re.IGNORECASE)
 
 
 async def message_transform(
-    question: str | list[dict], model_name: str
+    question: str | list[dict], model_name: str, protocol: str = ""
 ) -> str | list[dict]:
     """转换用户问题的 content 内容（按目标模型 provider 归一化多模态图片块）
 
@@ -35,9 +35,10 @@ async def message_transform(
     if isinstance(question, str):
         return question
 
-    if _BEDROCK_CLAUDE.match(model_name):
+    protocol = protocol or detect_protocol(model_name)
+    if protocol == "anthropic" and _BEDROCK_CLAUDE.match(model_name):
         return await _convert_content_images_for_bedrock(question)
-    if detect_protocol(model_name) == "openai":
+    if protocol != "anthropic":
         return _convert_content_to_openai_format(question, model_name)
     # anthropic: 保持原格式
     return question

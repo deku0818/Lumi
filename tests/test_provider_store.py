@@ -24,6 +24,31 @@ def _p(name="A", base="u", key="k", models=("m1",)):
     return {"name": name, "base_url": base, "api_key": key, "models": list(models)}
 
 
+def test_explicit_connection_roundtrip_and_partial_update(store_path):
+    saved = provider_store.upsert(
+        {
+            **_p(models=("claude-alias",)),
+            "protocol": "openai",
+            "compatibility": "qwen",
+            "preset": "qwen",
+        }
+    )
+    resolved = provider_store.resolve("claude-alias", saved.id)
+    assert resolved.protocol == "openai"
+    assert resolved.compatibility == "qwen"
+    assert resolved.conn_kwargs()["protocol"] == "openai"
+    updated = provider_store.upsert({**_p(models=("claude-alias",)), "id": saved.id})
+    assert (updated.protocol, updated.compatibility, updated.preset) == (
+        "openai",
+        "qwen",
+        "qwen",
+    )
+    reloaded = provider_store.load()[0][0]
+    assert reloaded == updated
+    with pytest.raises(ValueError, match="接口类型"):
+        provider_store.upsert({**_p(), "protocol": "gemini", "compatibility": "qwen"})
+
+
 @pytest.fixture
 def pinned_catalog(monkeypatch):
     """钉住目录探测值：断言限制取值链的测试不能依赖本机 ~/.lumi/cache 是否存在。
@@ -197,7 +222,7 @@ def test_effort_per_model_set_and_resolve(store_path, monkeypatch):
     monkeypatch.setattr(
         provider_store,
         "allowed_levels",
-        lambda m: ("auto", "low", "high") if m == "m1" else ("auto",),
+        lambda m, protocol="": ("auto", "low", "high") if m == "m1" else ("auto",),
     )
     s = provider_store.upsert(_p(models=("m1", "m2")))
     assert provider_store.set_effort(s.id, "m1", "high") == "high"
@@ -213,7 +238,9 @@ def test_effort_per_model_set_and_resolve(store_path, monkeypatch):
 
 
 def test_effort_survives_profile_edit(store_path, monkeypatch):
-    monkeypatch.setattr(provider_store, "allowed_levels", lambda m: ("auto", "max"))
+    monkeypatch.setattr(
+        provider_store, "allowed_levels", lambda m, protocol="": ("auto", "max")
+    )
     s = provider_store.upsert(_p(models=("m1", "m2")))
     provider_store.set_effort(s.id, "m1", "max")
     # 编辑 profile（不带 effort 字段）→ 档位记忆保留；删掉的模型记录被清理
@@ -276,7 +303,9 @@ def test_pointer_clear_and_invalid_pointer(store_path, kind):
 
 def test_pointer_survives_unrelated_writes(store_path, monkeypatch):
     """set_effort / set_active / 另一指针的写操作不丢失既有指针。"""
-    monkeypatch.setattr(provider_store, "allowed_levels", lambda m: ("auto", "high"))
+    monkeypatch.setattr(
+        provider_store, "allowed_levels", lambda m, protocol="": ("auto", "high")
+    )
     s = provider_store.upsert(_p(models=("m1", "m2")))
     provider_store.set_pointer("classifier", s.id, "m2")
     provider_store.set_pointer("titler", s.id, "m1")

@@ -2,7 +2,7 @@
 
 一个 profile = 一套连接（name、base_url、api_key）+ 该连接下的一组模型 models
 + 按模型的思考档位 effort（model → level，只存非 auto）。
-协议（OpenAI / Anthropic 客户端）仍由 model 名自动判定（见 manager.detect_protocol）。
+新配置显式保存 protocol / compatibility；旧配置留空时沿用名称判定。
 active 指向「某 profile 下的某个 model」。存储为 ~/.lumi/lumi.json 的 "providers" 分区（含密钥，整体 chmod 600）：
 
     {"active": {"provider": "<id>", "model": "<model>"},
@@ -25,6 +25,7 @@ import uuid
 from dataclasses import asdict, dataclass, field, replace
 
 from lumi.models import catalog
+from lumi.models.connection import validate_connection
 from lumi.models.manager import allowed_levels, get_default_model_name
 from lumi.utils.config import user_store
 
@@ -43,6 +44,9 @@ class ProviderProfile:
     base_url: str
     api_key: str
     models: tuple[str, ...]
+    protocol: str = ""
+    compatibility: str = ""
+    preset: str = "custom"
     effort: dict[str, str] = field(default_factory=dict)
     """按模型的思考档位（model → level），只存非 auto。"""
     context: dict[str, int] = field(default_factory=dict)
@@ -73,6 +77,9 @@ def _coerce_profile(x: dict) -> ProviderProfile | None:
         base_url=x.get("base_url", ""),
         api_key=x.get("api_key", ""),
         models=models,
+        protocol=x.get("protocol", ""),
+        compatibility=x.get("compatibility", ""),
+        preset=x.get("preset", "custom"),
         effort=_coerce_str_map(x.get("effort"), models),
         context=_coerce_limits(x.get("context"), models),
         max_tokens=_coerce_limits(x.get("max_tokens"), models),
@@ -192,11 +199,11 @@ def set_effort(provider_id: str, model: str, level: str) -> str | None:
     合法档位 = model_catalog.allowed_levels(model)；auto 永远合法
     且即删除记录（恢复"未设置=不传参数"，只存非 auto）。
     """
-    if level != "auto" and level not in allowed_levels(model):
-        return None
     profiles, active, pointers = _load_all()
     prof = next((p for p in profiles if p.id == provider_id), None)
     if prof is None or model not in prof.models:
+        return None
+    if level != "auto" and level not in allowed_levels(model, prof.protocol):
         return None
     effort = {m: lv for m, lv in prof.effort.items() if m != model}
     if level != "auto":
@@ -223,11 +230,20 @@ class ResolvedModel:
     """解析落在的 profile id；空 = 无连接覆盖（未匹配到任何 profile）。
     调用方回填 context.provider 时用它，后续 resolve 得以精确定位同一 profile。"""
 
+    protocol: str = ""
+    compatibility: str = ""
+
     def conn_kwargs(self) -> dict:
         """非空的 base_url / api_key 连接参数，直接 ** 进 create_llm / chain 工厂。"""
         return {
             k: v
-            for k, v in (("base_url", self.base_url), ("api_key", self.api_key))
+            for k, v in (
+                ("base_url", self.base_url),
+                ("api_key", self.api_key),
+                ("protocol", self.protocol),
+                ("compatibility", self.compatibility),
+                ("provider", self.provider),
+            )
             if v
         }
 
@@ -291,6 +307,8 @@ def _resolved(
         effort,
         *limits(prof, model),
         provider=prof.id if prof else "",
+        protocol=prof.protocol if prof else "",
+        compatibility=prof.compatibility if prof else "",
     )
 
 
@@ -364,12 +382,18 @@ def upsert(profile: dict) -> ProviderProfile:
     )
     old = next((p for p in profiles if p.id == pid), None)
     effort = {m: lv for m, lv in old.effort.items() if m in models} if old else {}
+    protocol = profile.get("protocol", old.protocol if old else "")
+    compatibility = profile.get("compatibility", old.compatibility if old else "")
+    validate_connection(protocol, compatibility)
     saved = ProviderProfile(
         id=pid,
         name=profile.get("name", ""),
         base_url=profile.get("base_url", ""),
         api_key=profile.get("api_key", ""),
         models=models,
+        protocol=protocol,
+        compatibility=compatibility,
+        preset=profile.get("preset", old.preset if old else "custom"),
         effort=effort,
         context=_coerce_limits(profile.get("context"), models),
         max_tokens=_coerce_limits(profile.get("max_tokens"), models),

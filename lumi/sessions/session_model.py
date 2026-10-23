@@ -48,7 +48,7 @@ def resolve(thread_id: str) -> SessionModel:
             return SessionModel(
                 resolved.model,
                 resolved.provider,
-                _valid_effort(meta, resolved.model),
+                _valid_effort(meta, resolved.model, resolved.protocol),
                 True,
             )
         update_meta(thread_id, model="", model_provider="", effort="")
@@ -59,14 +59,17 @@ def resolve(thread_id: str) -> SessionModel:
     # 沿用新会话默认时会话级档位照样生效：只设过 /effort 没设过 /model 是常态
     resolved = provider_store.resolve()
     return SessionModel(
-        resolved.model, resolved.provider, _valid_effort(meta, resolved.model), False
+        resolved.model,
+        resolved.provider,
+        _valid_effort(meta, resolved.model, resolved.protocol),
+        False,
     )
 
 
-def _valid_effort(meta: dict, model: str) -> str | None:
+def _valid_effort(meta: dict, model: str, protocol: str = "") -> str | None:
     """会话级档位，不在该模型能力内则视同未设（换过模型后旧档位不再适用）。"""
     level = meta.get("effort", "")
-    return level if level and level in allowed_levels(model) else None
+    return level if level and level in allowed_levels(model, protocol) else None
 
 
 def pin(thread_id: str) -> SessionModel:

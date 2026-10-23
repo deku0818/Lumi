@@ -303,11 +303,13 @@ export class Gateway {
     baseUrl: string,
     apiKey: string,
     model: string,
+    connection: Pick<ProviderProfile, 'protocol' | 'compatibility'> = {},
   ): Promise<{ ok: boolean; error?: string; latency_ms?: number }> {
     return this.request<{ ok: boolean; error?: string; latency_ms?: number }>('test_provider', {
       base_url: baseUrl,
       api_key: apiKey,
       model,
+      ...connection,
     })
   }
 

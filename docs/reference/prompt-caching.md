@@ -38,11 +38,20 @@ Prompt 缓存基于**严格的前缀匹配**：从第一个字节开始逐字匹
 
 ## 缓存断点标记策略
 
-`cache_control: {"type": "ephemeral"}` 是缓存断点标记。采用**滑动窗口**策略：
+Lumi 的 Anthropic 缓存统一使用 `cache_control: {"type": "ephemeral", "ttl": "1h"}`：
 
-- 只标在 system prompt 和对话末尾最后 1-2 条消息
-- 中间消息无需标记 — 前面不变时自动被缓存前缀覆盖
-- 每轮新请求，断点随对话"向后滑动"
+- `tool_call_chain` 保留静态 system prompt 的固定断点，并在绑定模型时开启历史缓存。
+- 官方 `api.anthropic.com` 使用请求顶层 `cache_control`，由服务端自动移动消息末尾断点。
+- 代理和 Anthropic 兼容端点由 `ReplayChatAnthropic` 将顶层参数转换为最后一个可缓存内容块的断点，复用 LangChain 的块选择函数。
+- Graph 不再给最后两条消息手工添加标记；缓存参数仅用于构造请求，不写入原始历史，也不改动 thinking 或签名。
+- 摘要链通过 `cache_history=False` 保持原有行为：仅固定系统断点，不启用消息尾部缓存。其他协议不注入 Anthropic 缓存参数。
+
+当前依赖范围已支持此路径，无需升级 SDK。兼容端点转换使用
+`langchain-anthropic` 的内部辅助函数，升级依赖时用 `tests/test_prompt_cache.py`
+验证请求格式和历史不变性。请求格式正确不代表缓存命中；实际命中仍取决于
+服务端支持、前缀一致性、最小 token 数和有效期。
+
+参考：[LangChain 自动缓存](https://docs.langchain.com/oss/python/integrations/chat/anthropic#automatic-caching)、[Anthropic Prompt Caching](https://platform.claude.com/docs/en/build-with-claude/prompt-caching)。
 
 ---
 
