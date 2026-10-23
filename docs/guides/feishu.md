@@ -94,17 +94,17 @@ uv sync
 开启「妙记纪要」开关后：你**录音**或**开会（须开云录制）** → 飞书生成妙记 → Lumi 自动取回
 **逐字稿**（带说话人与时间戳）→ 整理成纪要推到与机器人的私聊。实测录完约 20 秒送达。
 
-首次启用要满足以下条件，配置弹窗里会逐项体检，没通过的直接给命令或链接：
+首次启用要满足以下条件，配置弹窗里会逐项体检，没通过的可就地授权或打开配置链接：
 
 | 检查项 | 没通过怎么办 |
 |---|---|
 | lark-cli 已安装 | 「接入体检 → 本地环境」里 **一键安装**（经 npm 装进 Lumi 工具箱自有目录，免 sudo；机器上没有 Node 时先去 **设置 → 环境** 装好；系统自带的 Node 缺 npm 时用系统包管理器补装 npm，或卸载系统 Node 后在 **设置 → 环境** 安装）。也可自己 `npm i -g @larksuite/cli` 装到系统全局（在系统 PATH 上即被识别，优先于工具箱） |
 | lark-cli 身份已同步 | 机器人需有专属 lark-cli profile（保存机器人时自动同步）。未同步时妙记体检停在这一步、启动时也不建事件订阅——不会回落到你电脑上的全局 lark-cli 身份；在渠道页点一次**保存**即可（老版本 lark-cli 需先升级） |
-| 用户已授权 | 终端跑体检面板给出的授权命令扫码——它带着 `--profile <机器人 profile>`，授权落在该机器人名下（各机器人各自授权）；手敲则是 `lark-cli --profile <cli_profile> auth login --recommend --scope "minutes:minutes.basic:read,minutes:minutes.transcript:export"`（读妙记内容必须**用户身份**，应用身份会被拒；login 只请求命令里指定的 scope，应用开通了也不会自动带上，所以必须显式 `--scope`） |
-| 妙记权限已开通 | 点面板给出的开放平台链接，在「**用户身份权限**」tab 下开通 `minutes:minutes.basic:read` 与 `minutes:minutes.transcript:export`（应用身份不生效）并**发布版本**，然后重跑上面的 login 命令使新权限进 token |
+| 用户已授权 | 点击 **立即授权**，在卡片内用飞书扫码确认，或点 **在浏览器中授权**。Lumi 自动等待授权结果，成功后继续检查权限并重建事件订阅；二维码过期可点 **重新获取**，取消或关闭设置会停止等待。授权落在该机器上当前机器人的专属 profile，各机器人相互独立。终端方式仍可使用 `lark-cli --profile <cli_profile> auth login --recommend --scope "minutes:minutes.basic:read,minutes:minutes.transcript:export"` |
+| 妙记权限已开通 | 点面板给出的开放平台链接，在「**用户身份权限**」tab 下开通 `minutes:minutes.basic:read` 与 `minutes:minutes.transcript:export`（应用身份不生效）并**发布版本**，然后点 **已开通，重新授权** |
 | 事件订阅生效 | 开放平台「事件与回调」添加 `minutes.minute.generated_v1`（添加后需发布版本）。Lumi 每次启动会自动重建订阅 |
 
-> ⚠️ 授权有效期 **7 天**（refresh_token），超期需重新授权——照样用体检面板给出的命令（带 `--profile <机器人 profile>`）。
+> 授权失效时，在体检面板点 **立即授权** 重新扫码。访问令牌可刷新时由 CLI 自动刷新，无需反复扫码。
 > 另外**别用 `lark-cli event consume` 长期占用**——它退出时会主动取消订阅，导致妙记功能静默失效；
 > 真发生了，重开一次配置弹窗即可自动修复（体检第四项会重建订阅）。
 

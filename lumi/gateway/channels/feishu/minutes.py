@@ -186,7 +186,8 @@ def diagnose(app_id: str, profile: str = "") -> list[dict]:
                 name="尚未授权或授权已失效",
                 detail=user.get("message") or "读取妙记内容需以用户身份登录",
                 fix_cmd=_login_cmd(profile),
-                fix_note="终端执行后扫码授权；refresh_token 有效期 7 天，届时需重新登录",
+                fix_auth=True,
+                fix_note="授权用于读取你的妙记内容；授权失效时，可在这里重新授权",
             )
         )
         return blocked_tail(checks, _STEPS, "需先完成授权")
@@ -206,7 +207,8 @@ def diagnose(app_id: str, profile: str = "") -> list[dict]:
                 # 权限」tab 下；tenant 侧开通不会进 user_access_token
                 fix_url=auth_url(app_id, MINUTES_SCOPES, token_type="user"),
                 fix_cmd=_login_cmd(profile),
-                fix_note="需开通在「用户身份权限」下（应用身份不生效），开通并发布版本后执行上述命令重新授权",
+                fix_auth=True,
+                fix_note="需开通在「用户身份权限」下（应用身份不生效），开通并发布版本后重新授权",
             )
         )
         return blocked_tail(checks, _STEPS, "需先开通权限")

@@ -27,6 +27,7 @@ import type {
   McpTestResult,
   ModelLimits,
   ModelPointer,
+  MinutesAuthStart,
   Project,
   ProjectOverview,
   ProjectResource,
@@ -362,6 +363,18 @@ export class Gateway {
   // 妙记链路体检（打开配置弹窗时调）：走子进程 + 网络，后端已丢线程池，可能耗时 1-2s
   diagnoseMinutes(name: string, config: Partial<FeishuConfig>): Promise<{ checks: DiagnoseCheck[] }> {
     return this.request<{ checks: DiagnoseCheck[] }>('diagnose_minutes', { name, config })
+  }
+
+  startMinutesAuth(config: Partial<FeishuConfig>): Promise<MinutesAuthStart> {
+    return this.request('start_minutes_auth', { config })
+  }
+
+  finishMinutesAuth(authId: string): Promise<{ status: 'authorized' | 'expired' | 'cancelled' }> {
+    return this.request('finish_minutes_auth', { auth_id: authId })
+  }
+
+  cancelMinutesAuth(authId: string): Promise<{ status: 'cancelled' }> {
+    return this.request('cancel_minutes_auth', { auth_id: authId })
   }
 
   // —— 环境工具箱：agent 任务工具链（uv/rg/node + 飞书组件）的探测与安装 ——

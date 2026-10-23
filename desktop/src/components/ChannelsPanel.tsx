@@ -22,6 +22,7 @@ import type {
   DiagnoseCheck,
 } from '../types'
 import { useEnvInstall } from './useEnvInstall'
+import { useMinutesAuth } from './useMinutesAuth'
 import type { Gateway } from '../gateway'
 import { useI18n, type Translate } from '../i18n'
 import { ConfirmDialog } from './ConfirmDialog'
@@ -322,7 +323,7 @@ function useDiagnose(call: () => Promise<{ checks: DiagnoseCheck[] }> | undefine
     const my = ++seq.current
     setLoading(true)
     setError('')
-    p.then((r) => my === seq.current && setChecks(r.checks))
+    return p.then((r) => my === seq.current && setChecks(r.checks))
       .catch((e) => my === seq.current && setError(errorMessage(e)))
       .finally(() => my === seq.current && setLoading(false))
   }
@@ -563,11 +564,11 @@ function FeishuForm({
             />
           }
         >
-          <CheckPanel
-            key={panelKey(minutes.checks)}
-            {...minutes}
-            subject={t('channels.minutesSubject')}
-            ready={t('channels.minutesReady')}
+          <MinutesPanel
+            key={`${machine}:${cfg.app_id}:${cfg.cli_profile ?? ''}`}
+            diagnosis={minutes}
+            gw={gw}
+            config={cfg}
           />
         </GroupCard>
 
@@ -628,6 +629,77 @@ function FeishuForm({
 const panelKey = (checks: DiagnoseCheck[] | null) =>
   checks?.map((c) => `${c.key}${c.tone}`).join() ?? 'none'
 
+function MinutesPanel({ diagnosis, gw, config }: {
+  diagnosis: ReturnType<typeof useDiagnose>
+  gw?: Gateway
+  config: FeishuConfig
+}) {
+  const { t } = useI18n()
+  const auth = useMinutesAuth(gw, config, diagnosis.run)
+  const { state, seconds } = auth
+  if (state.phase === 'idle') return (
+    <CheckPanel key={panelKey(diagnosis.checks)} {...diagnosis}
+      subject={t('channels.minutesSubject')} ready={t('channels.minutesReady')}
+      onAuthorize={gw ? auth.start : undefined} />
+  )
+  const failed = state.phase === 'error'
+  const checking = state.phase === 'checking'
+  const busy = state.phase === 'preparing' || state.phase === 'waiting' || checking
+  const title = t(`channels.auth.${state.phase}`)
+  return (
+    <DiagShell bar={failed ? 'bg-error/60' : 'bg-primary/60'}>
+      <div className={diagRow} aria-live="polite">
+        {busy ? <Loading /> : <StatusDot tone={failed ? 'error' : 'warn'} />}
+        <span className={cn('flex-1', failed ? 'text-error' : 'text-ink')}>{title}</span>
+        <span className="flex shrink-0 gap-1" aria-hidden="true">
+          {['bg-success', checking ? 'bg-success' : failed ? 'bg-error' : 'bg-primary', 'bg-separator', 'bg-separator'].map((color, i) => <i key={i} className={cn('size-[5px] rounded-full', color)} />)}
+        </span>
+        {!checking && <button onClick={auth.cancel} className="text-[11px] text-muted-foreground hover:text-ink">{t('common.cancel')}</button>}
+      </div>
+      <div className="border-t border-line/50 px-3 pb-2.5">
+        <div className="flex items-center gap-2.5 py-2 text-xs"><StatusDot tone="ok" />lark-cli {t('channels.auth.installed')}</div>
+        <div className="flex items-start gap-2.5 border-t border-line/55 py-2">
+          <span className="mt-1.5"><StatusDot tone={checking ? 'ok' : failed ? 'error' : 'warn'} /></span>
+          <div className="min-w-0 flex-1">
+            <div className="text-xs">{t(checking ? 'channels.auth.authorized' : 'channels.auth.user')}</div>
+            {state.phase === 'preparing' && <div className="mt-3 flex items-center gap-2 text-[11px] text-muted-foreground"><Loading />{t('channels.auth.preparingQr')}</div>}
+            {state.phase === 'waiting' && (
+              <div className="mt-3 flex flex-wrap items-center gap-4 rounded-lg border border-line bg-surface/60 p-3">
+                <img src={state.qrCode} alt={t('channels.auth.qrAlt')} className="size-32 shrink-0 rounded-lg bg-white p-2" />
+                <div className="min-w-0 flex-1 basis-40">
+                  <div className="text-xs font-semibold">{t('channels.auth.scan')}</div>
+                  <p className="mt-1 mb-2 text-[11px] text-muted-foreground">{t('channels.auth.scanHint')}</p>
+                  <Button asChild variant="outline" size="sm" className="h-8 text-[11px]">
+                    <a href={state.url} target="_blank" rel="noreferrer">{t('channels.auth.browser')}</a>
+                  </Button>
+                  <div className="mt-2 text-[11px] text-muted-foreground">{t('channels.auth.expires', { time: `${Math.floor(seconds / 60).toString().padStart(2, '0')}:${(seconds % 60).toString().padStart(2, '0')}` })}</div>
+                </div>
+              </div>
+            )}
+            {(state.phase === 'error' || state.phase === 'expired') && (
+              <div className="mt-1">
+                <p role={failed ? 'alert' : undefined} className={cn('break-words text-[11px]', failed ? 'text-error' : 'text-muted-foreground')}>{state.phase === 'error' ? state.message : t('channels.auth.expiredHint')}</p>
+                <Button size="sm" className="mt-2 h-8 text-[11px]" onClick={auth.start}>{t(failed ? 'channels.auth.retry' : 'channels.auth.refresh')}</Button>
+              </div>
+            )}
+          </div>
+        </div>
+        {['scope', 'subscription'].map((key) => (
+          <div key={key} className="flex items-start gap-2.5 border-t border-line/55 py-2">
+            <span className="mt-1.5"><StatusDot tone="idle" /></span>
+            <div><div className="text-xs text-muted-foreground">{t(`channels.auth.${key}`)}</div>
+              <div className="mt-0.5 flex items-center gap-2 text-[11px] text-muted-foreground">
+                {checking && key === 'scope' && <Loading />}
+                {t(checking && key === 'scope' ? 'channels.auth.checkingHint' : `channels.auth.after.${key}`)}
+              </div>
+            </div>
+          </div>
+        ))}
+      </div>
+    </DiagShell>
+  )
+}
+
 // 凭证落盘路径：后端给绝对路径（前端拼 ~/.lumi 既看不懂，--config-dir 时还会说谎），
 // 尚未取到时退回一句不带路径的说法。两处文案共用一份，免得各写各的措辞
 function ConfigPath({ path }: { path: string }) {
@@ -653,6 +725,7 @@ function CheckPanel({
   onFix,
   onNavigate,
   fixProgress,
+  onAuthorize,
 }: ReturnType<typeof useDiagnose> & {
   subject: string
   ready: string
@@ -661,6 +734,7 @@ function CheckPanel({
   // 跳转修复：check.fix_nav 非空时渲染「去那个面板」的按钮
   onNavigate?: (tab: string) => void
   fixProgress?: Record<string, EnvProgress>
+  onAuthorize?: () => void
 }) {
   const { t } = useI18n()
   const bad = checks?.filter((c) => c.tone === 'error') ?? []
@@ -771,6 +845,7 @@ function CheckPanel({
                   onFix={onFix}
                   onNavigate={onNavigate}
                   progress={fixProgress?.[c.fix_action]}
+                  onAuthorize={onAuthorize}
                 />
               </div>
             ))}
@@ -806,11 +881,13 @@ function CheckRow({
   onFix,
   onNavigate,
   progress,
+  onAuthorize,
 }: {
   check: DiagnoseCheck
   onFix?: (action: EnvInstallTarget) => void
   onNavigate?: (tab: string) => void
   progress?: EnvProgress
+  onAuthorize?: () => void
 }) {
   const { t } = useI18n()
   // const 收窄让闭包里也保持 EnvInstallTarget 类型（直接用 check.fix_action 在回调内不收窄）
@@ -830,16 +907,26 @@ function CheckRow({
             {check.emphasis && <strong className="text-ink">{check.emphasis}</strong>}
           </div>
         )}
-        {check.fix_cmd && (
+        {check.fix_cmd && !(check.fix_auth && onAuthorize) && (
           <div className="mt-1.5 rounded-lg border border-line bg-surface px-2.5 py-1.5 font-mono text-[11px] select-all overflow-x-auto whitespace-nowrap">
             {check.fix_cmd}
           </div>
         )}
-        {check.fix_url && (
+        {check.fix_url && !(check.fix_auth && onAuthorize) && (
           <FixLink href={check.fix_url}>{t('channels.openPlatform')}</FixLink>
         )}
         {check.fix_note && (
           <div className="text-[11px] text-muted-foreground mt-1">{check.fix_note}</div>
+        )}
+        {check.fix_auth && check.key === 'scope' && onAuthorize && (
+          <div className="mt-2 flex flex-wrap gap-2">
+            {check.fix_url && <Button asChild variant="outline" size="sm" className="h-8 text-[11px]">
+              <a href={check.fix_url} target="_blank" rel="noreferrer">{t('channels.openPlatform')}</a>
+            </Button>}
+            <Button size="sm" className="h-8 text-[11px]" onClick={onAuthorize}>
+              {t('channels.auth.reauthorize')}
+            </Button>
+          </div>
         )}
         {/* 修复入口不在本页（如缺 Node.js）：送到唯一的那个入口，不在此复制一份安装按钮。
             标签取自 tab 名而非某一条检查的内容——这行是各条链路共用的，具体做什么由
@@ -850,6 +937,11 @@ function CheckRow({
           </FixLink>
         )}
       </div>
+      {check.fix_auth && check.key === 'auth' && onAuthorize && (
+        <Button size="sm" className="mt-0.5 h-8 shrink-0 text-[11px]" onClick={onAuthorize}>
+          {t('channels.auth.start')}
+        </Button>
+      )}
       {/* 就地修复按钮：一键安装（cli / 技能包），进行中由上方进度条替代 */}
       {fixAction && check.tone !== 'ok' && !progress && onFix && (
         <Button size="sm" className="mt-0.5 h-6 px-2.5 text-[11px]" onClick={() => onFix(fixAction)}>

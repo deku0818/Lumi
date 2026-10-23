@@ -107,6 +107,6 @@ OfflineFlush（刻意无入边，离线写回锚点）→ END
 
 - **加载优先级**：内置 `lumi/styles/` < 全局层（进程配置目录；`lumi serve` 恒钉用户数据目录）< 项目层（`<项目>/.lumi/`，随会话绑定的项目）。技能与子 Agent 的层序单源在 `loader.config_layers`，提示词在 `manager.prompt_layers`；来源标签统一为 `builtin/global/project`。桌面项目主页消费相同层序，编辑和删除仅作用于项目层。
 - **内置资源**：通用 `prompts/COMPACT.md`、`agents/explore.md`、`agents/general-purpose.md` 与 `skills/lumi-config/`。项目自定义资源继续通过 `.lumi/` 同名覆盖。
-- **提示词组装**：`SOUL/AGENTS` 两文件剥掉 frontmatter 后按序直接拼接，缺失即跳过；内置目录不提供这两个文件。`COMPACT` 走同一解析链，由内置通用版兜底。空提示词视同没有，继续往下找；当前压缩调用未传项目目录，仅使用进程配置和内置层。
+- **提示词组装**：仅加载 `SOUL.md`，剥掉 frontmatter 后直接使用正文；内置目录不提供 SOUL。`prompts/AGENTS.md` 不再加载，项目主页直接读写根目录 `AGENTS.md`，运行时按需读取项目说明。`COMPACT` 走提示词解析链，由内置通用版兜底。空提示词视同没有，继续往下找；当前压缩调用未传项目目录，仅使用进程配置和内置层。
 - **用户数据根**：机器级数据（密钥 / checkpoints / memory / logs / 工具箱 / cron / cache / uploads）统一挂在 `utils/paths.py` 的 `lumi_home()` 下，`LUMI_CONFIG_DIR` > `~/.lumi`。与选择进程配置目录的 `ConfigDiscovery` 职责分开；环境变量须在进程启动前设置。
 - **工具描述**：内置工具的 description 直接写在函数 docstring；`registry._collect_tools_from_module` 加载时统一清理缩进，不经提示词目录覆盖。

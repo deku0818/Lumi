@@ -34,7 +34,7 @@ class FolderManager:
         """把本会话（bridge）的项目切到 path——项目随会话绑定。
 
         只 rebase 本 bridge 的权限引擎、重载本会话项目的 config hooks、重建系统提示词
-        （项目层 SOUL/AGENTS + 记忆目录）、更新 checkpoint 元数据、重置本会话当前
+        （项目层 SOUL + 项目说明读取规则 + 记忆目录）、更新 checkpoint 元数据、重置本会话当前
         thread 的持久 shell（原地改项目时它仍驻留旧目录）。
         **不动进程 cwd、不碰其它会话与进程级 hooks**——多会话各绑各项目，
         互不影响。

@@ -25,6 +25,7 @@ class Check:
     tone: Tone = "ok"
     detail: str = ""
     fix_cmd: str = ""  # 可复制的终端命令
+    fix_auth: bool = False  # desktop 就地扫码授权；CLI 仍可使用 fix_cmd
     fix_url: str = ""  # 开放平台直达链接
     fix_note: str = ""  # 补充说明
     # 接在 detail 之后加粗显示的内容（如「哪些功能不可用」）

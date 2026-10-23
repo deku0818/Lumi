@@ -191,24 +191,20 @@ class LumiConfig:
         return layers
 
     def load_system_prompt(self, project_dir: str | Path | None = None) -> str:
-        """SOUL.md + AGENTS.md 按序直接拼接（不做 XML 包裹），逐个走 load_prompt 的解析链。
+        """加载 SOUL.md 正文作为系统提示词。
 
-        两文件都没有时返回空串，不 fail-loud；graph.build_system_prompt 仍会追加
-        框架的项目说明按需读取规则。
+        未配置时返回空串；graph.build_system_prompt 仍会追加项目根及子目录
+        AGENTS.md 的按需读取规则，不加载 prompts/AGENTS.md。
 
         Args:
             project_dir: 会话绑定的项目根；给定时项目 ``.lumi/prompts/`` 为最高层。
         """
-        parts = [
-            text
-            for name in ("SOUL", "AGENTS")
-            if (text := self.load_prompt(name, project_dir))
-        ]
-        if not parts:
+        prompt = self.load_prompt("SOUL", project_dir)
+        if not prompt:
             logger.info("无系统提示词配置")
             return ""
         logger.info("已加载系统提示词")
-        return "\n\n".join(parts)
+        return prompt
 
     def resolve_prompt(
         self, name: str, project_dir: str | Path | None = None

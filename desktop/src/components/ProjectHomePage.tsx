@@ -188,16 +188,23 @@ export const ProjectHomePage = memo(function ProjectHomePage({
                   )
                 })}
               </div>
-              {prompt?.source && (
-                <>
-                  <div
-                    onClick={() => setSheet({ mode: 'view', kind: 'prompt', name: promptTab })}
-                    className="text-[11.5px] leading-relaxed text-ink/85 cursor-pointer hover:text-ink whitespace-pre-wrap [overflow-wrap:anywhere]"
-                  >
-                    {prompt.body.trim()}
-                  </div>
-                  <div className="mt-2 text-[10.5px] text-muted-foreground/70 font-mono truncate">{prompt.path}</div>
-                </>
+              {promptTab === 'AGENTS' && overview && !prompt?.body.trim() ? (
+                <button
+                  onClick={() => setSheet({ mode: 'view', kind: 'prompt', name: 'AGENTS' })}
+                  className="text-left"
+                >
+                  <EmptyHint>{t('projhome.projectDocEmpty')}</EmptyHint>
+                </button>
+              ) : prompt?.source && (
+                <div
+                  onClick={() => setSheet({ mode: 'view', kind: 'prompt', name: promptTab })}
+                  className="text-[11.5px] leading-relaxed text-ink/85 cursor-pointer hover:text-ink whitespace-pre-wrap [overflow-wrap:anywhere]"
+                >
+                  {prompt.body.trim()}
+                </div>
+              )}
+              {prompt?.path && (
+                <div className="mt-2 text-[10.5px] text-muted-foreground/70 font-mono truncate">{prompt.path}</div>
               )}
             </Card>
 
@@ -563,8 +570,8 @@ function SheetBody({ api, path, sheet, onClose, onChanged, onSwitch }: SheetProp
         if (stale) return
         setRes(r)
         setText(r.content)
-        // 未配置的提示词（三层都没有）：没有可看的，直接落到编辑态开写
-        if (sheet.kind === 'prompt' && !r.content) setEditing(true)
+        // 提示词未配置或项目说明为空：直接落到编辑态开写
+        if (sheet.kind === 'prompt' && !r.body.trim()) setEditing(true)
       })
       .catch((e) => {
         if (stale) return
@@ -581,7 +588,7 @@ function SheetBody({ api, path, sheet, onClose, onChanged, onSwitch }: SheetProp
   let tipKey = 'projhome.builtinTip'
   if (res?.source === 'global') { badgeKey = 'projhome.globalBadge'; tipKey = 'projhome.globalTip' }
   if (res?.native) { badgeKey = 'projhome.nativeAgent'; tipKey = 'projhome.nativeAgentTip' }
-  // 提示词的编辑恒写项目层（即使当前命中 global/builtin——保存即产生项目覆盖）
+  // AGENTS 编辑项目根文件；SOUL 编辑项目层覆盖
   const editable = creating || kind === 'prompt' || (!builtin && kind !== 'memory')
   const validNewName = NAME_RE.test(newName.trim())
 

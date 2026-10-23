@@ -216,6 +216,46 @@ def test_prompt_chain_project_over_builtin(
     assert soul["content"] == "项目灵魂"
 
 
+@pytest.mark.parametrize("content", [None, "", "---\ntitle: 项目约定\n---\n正文\n"])
+def test_project_doc_ignores_legacy_prompt_layers(
+    project: Path, tmp_path_factory, monkeypatch, content
+):
+    """项目说明缺失或为空时也不能回退到旧 prompts/AGENTS.md。"""
+    styles_root = tmp_path_factory.mktemp("styles")
+    monkeypatch.setattr("lumi.styles.STYLES_ROOT", styles_root)
+    for root in (project / ".lumi", LumiConfig.get_instance().config_dir, styles_root):
+        prompts = root / "prompts"
+        prompts.mkdir(parents=True, exist_ok=True)
+        (prompts / "AGENTS.md").write_text("旧提示词", encoding="utf-8")
+    if content is not None:
+        (project / "AGENTS.md").write_text(content, encoding="utf-8")
+    expected = {
+        "name": "AGENTS",
+        "source": "" if content is None else "project",
+        "path": "AGENTS.md",
+        "content": content or "",
+        "body": "正文" if content else "",
+    }
+    assert project_config.read_resource(project, "prompt", "AGENTS") == expected
+    overview = project_config.overview(project)
+    assert next(p for p in overview["prompts"] if p["name"] == "AGENTS") == expected
+
+
+def test_project_doc_writes_root_file(project: Path):
+    legacy = project / ".lumi" / "prompts" / "AGENTS.md"
+    legacy.parent.mkdir()
+    legacy.write_text("旧提示词", encoding="utf-8")
+    content = "---\ntitle: 项目约定\n---\n正文\n"
+    result = project_config.write_resource(project, "prompt", "AGENTS", content)
+    assert result == {"ok": True, "path": "AGENTS.md"}
+    assert (project / "AGENTS.md").read_text(encoding="utf-8") == content
+    assert legacy.read_text(encoding="utf-8") == "旧提示词"
+    with pytest.raises(ValueError, match="已存在"):
+        project_config.write_resource(project, "prompt", "AGENTS", "覆盖", create=True)
+    project_config.write_resource(project, "prompt", "AGENTS", "更新")
+    assert (project / "AGENTS.md").read_text(encoding="utf-8") == "更新"
+
+
 def test_create_refuses_to_overwrite_existing(tmp_path):
     # 回归：项目主页「新建」用已有名字会把用户写过的定义整体换成模板
     project = tmp_path / "proj"

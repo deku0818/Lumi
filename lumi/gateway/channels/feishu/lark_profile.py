@@ -13,10 +13,12 @@ app_id 只能存在于一个 profile——机器上已有指向本 app 的 profi
 
 from __future__ import annotations
 
+import asyncio
 import json
 import os
 import shutil
 import subprocess
+import sys
 
 from lumi.gateway.channels import store
 from lumi.gateway.channels.config import FeishuChannelConfig, resolve_ref
@@ -62,6 +64,36 @@ def run_cli(
     except Exception as e:
         return -1, str(e)
     return proc.returncode, proc.stdout or proc.stderr
+
+
+async def run_cli_async(
+    *args: str, profile: str, timeout: float = _TIMEOUT, cwd: str | None = None
+) -> tuple[int, str]:
+    """可取消的 CLI 调用；扫码等待不能占线程，取消时连同 npm wrapper 子进程回收。"""
+    from lumi.agents.runtime.bg_process import terminate_group
+
+    exe = shutil.which(CLI)
+    if exe is None:
+        return -1, f"{CLI} 不在 PATH"
+    try:
+        proc = await asyncio.create_subprocess_exec(
+            exe,
+            *args,
+            stdin=asyncio.subprocess.DEVNULL,
+            stdout=asyncio.subprocess.PIPE,
+            stderr=asyncio.subprocess.PIPE,
+            env={**os.environ, "LARKSUITE_CLI_PROFILE": profile},
+            cwd=cwd,
+            start_new_session=sys.platform != "win32",
+        )
+    except OSError as e:
+        return -1, str(e)
+    try:
+        async with asyncio.timeout(timeout):
+            out, err = await proc.communicate()
+        return proc.returncode, (out or err).decode("utf-8", errors="replace")
+    finally:
+        await terminate_group(proc)
 
 
 def _list_profiles() -> list[dict] | None:

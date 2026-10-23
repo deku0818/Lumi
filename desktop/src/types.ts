@@ -198,7 +198,7 @@ export interface Project {
 // 资源类别：技能（目录）/ 子 Agent（单 md）/ 提示词（SOUL|AGENTS）/ 记忆（只读）
 export type ProjectResourceKind = 'skill' | 'agent' | 'prompt' | 'memory'
 
-// 提示词解析结果：source 标注命中层（''=三层都没有）；body=剥好 frontmatter 的正文（预览用）
+// SOUL 按层解析；AGENTS 直接读取项目根文件。source='' 表示未配置；body 用于预览
 interface ProjectPromptInfo {
   name: 'SOUL' | 'AGENTS'
   source: '' | 'project' | 'global' | 'builtin'
@@ -207,7 +207,7 @@ interface ProjectPromptInfo {
   body: string
 }
 
-// source：builtin=内置 / global=进程配置层 / project=项目 .lumi（仅此层可编辑）
+// source：builtin=内置 / global=进程配置层 / project=项目资源（含根目录 AGENTS.md）
 export interface ProjectOverview {
   external_agents: Partial<Record<ExternalAgentName, boolean>>
   prompts: ProjectPromptInfo[]
@@ -581,6 +581,10 @@ export interface FeishuConfig {
 // 一项检查的三态。warn = 通过但有功能降级（如缺可选权限）：仍算就绪，
 // 但汇总条不得宣称「全部生效」，否则与详情里的「暂不可用」自相矛盾。
 export type CheckTone = 'ok' | 'warn' | 'error'
+export type MinutesAuthStart =
+  | { status: 'expired' }
+  | { status: 'waiting'; auth_id: string; verification_url: string; qr_code: string; expires_in: number }
+
 export interface DiagnoseCheck {
   // 接入：credentials/scopes/events/version；妙记：cli/auth/scope/subscription
   key: string
@@ -588,6 +592,7 @@ export interface DiagnoseCheck {
   tone: CheckTone
   detail: string
   fix_cmd: string
+  fix_auth?: boolean
   fix_url: string
   fix_note: string
   // 接在 detail 之后加粗显示（如「哪些功能不可用」），由后端给定

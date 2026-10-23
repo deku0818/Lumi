@@ -83,13 +83,25 @@ def test_load_prompt_returns_none_when_nowhere(tmp_path):
     assert LumiConfig(str(tmp_path)).load_prompt("NO_SUCH_PROMPT") is None
 
 
-def test_system_prompt_concats_soul_and_agents(tmp_path):
-    """SOUL + AGENTS 按序拼接；无配置时返回空串，框架规则由 graph 追加。"""
-    cfg = LumiConfig(str(tmp_path))
+def test_system_prompt_only_loads_soul(tmp_path, monkeypatch):
+    """各层旧 AGENTS 提示词及项目说明都不自动加载；SOUL 仍按层覆盖。"""
+    cfg = LumiConfig(str(tmp_path / "global"))
     assert cfg.load_system_prompt() == ""  # 仅内置压缩提示词
+    project = tmp_path / "project"
+    prompts = project / ".lumi" / "prompts"
+    prompts.mkdir(parents=True)
+    (prompts / "AGENTS.md").write_text("旧项目规则", encoding="utf-8")
+    (project / "AGENTS.md").write_text("按需读取的项目说明", encoding="utf-8")
+    _write_prompt(cfg, "AGENTS", "旧全局规则")
+    builtin = tmp_path / "builtin"
+    (builtin / "prompts").mkdir(parents=True)
+    (builtin / "prompts" / "AGENTS.md").write_text("旧内置规则", encoding="utf-8")
+    monkeypatch.setattr("lumi.styles.STYLES_ROOT", builtin)
+    assert cfg.load_system_prompt(project) == ""
     _write_prompt(cfg, "SOUL", "灵魂")
-    _write_prompt(cfg, "AGENTS", "规则")
-    assert cfg.load_system_prompt() == "灵魂\n\n规则"
+    assert cfg.load_system_prompt(project) == "灵魂"
+    (prompts / "SOUL.md").write_text("项目灵魂", encoding="utf-8")
+    assert cfg.load_system_prompt(project) == "项目灵魂"
 
 
 def test_toolbox_is_machine_level(tmp_path, monkeypatch):

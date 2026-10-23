@@ -77,6 +77,27 @@ async def _diagnose_minutes(params: dict) -> dict:
     return {"checks": checks}
 
 
+async def _start_minutes_auth(params: dict) -> dict:
+    from lumi.gateway.channels.feishu import minutes_auth
+
+    config = params.get("config") or {}
+    return await minutes_auth.start(
+        config.get("app_id") or "", config.get("cli_profile") or ""
+    )
+
+
+async def _finish_minutes_auth(params: dict) -> dict:
+    from lumi.gateway.channels.feishu import minutes_auth
+
+    return await minutes_auth.finish(params.get("auth_id") or "")
+
+
+async def _cancel_minutes_auth(params: dict) -> dict:
+    from lumi.gateway.channels.feishu import minutes_auth
+
+    return minutes_auth.cancel(params.get("auth_id") or "")
+
+
 async def _diagnose_setup(params: dict) -> dict:
     cfg = FeishuChannelConfig.model_validate(params.get("config") or {})
     return {"checks": await diagnose_bot(cfg, minutes=False)}
@@ -120,5 +141,8 @@ HANDLERS = {
     "save_channel": _save_channel,
     "delete_channel": _delete_channel,
     "diagnose_minutes": _diagnose_minutes,
+    "start_minutes_auth": _start_minutes_auth,
+    "finish_minutes_auth": _finish_minutes_auth,
+    "cancel_minutes_auth": _cancel_minutes_auth,
     "diagnose_feishu_setup": _diagnose_setup,
 }

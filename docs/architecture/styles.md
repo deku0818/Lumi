@@ -41,9 +41,9 @@ lumi/styles/
 2. `{config_dir}/prompts/{name}.md`，来源 `global`。
 3. `lumi/styles/prompts/{name}.md`，来源 `builtin`。
 
-空文件或只有 frontmatter 时继续向下查找，各层都没有有效正文才返回 `None`。`load_prompt` 和项目主页共用此判定。
+空文件或只有 frontmatter 时继续向下查找，各层都没有有效正文才返回 `None`。`load_prompt` 和项目主页的 SOUL 标签共用此判定。
 
-**系统提示词**：`SOUL.md` / `AGENTS.md` 各走一次解析链，剥掉 frontmatter 后按序用两个换行直接拼接，不做 XML 包裹。两者都缺失时返回空串，框架仍追加项目说明按需读取规则。内置目录当前不提供这两个文件。
+**系统提示词**：仅加载 `SOUL.md`，剥掉 frontmatter 后直接使用正文；未配置时返回空串。框架仍追加项目说明按需读取规则。`prompts/AGENTS.md` 不再加载；项目主页的 AGENTS 标签直接读写根目录 `AGENTS.md`，不回退到全局或内置层，正文仍由模型按需读取。内置目录当前不提供 SOUL 文件。
 
 **压缩提示词**：`COMPACT.md` 使用统一通用版，由内置层兜底。压缩调用当前未传入项目目录，只读取进程配置层和内置版本。
 

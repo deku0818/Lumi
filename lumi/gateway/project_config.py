@@ -4,6 +4,7 @@
 manager.prompt_layers 是层序的单一事实源）：内置（builtin，只读）→
 进程配置目录（global，本页只读）→ 项目 ``.lumi/``（project，可编辑），
 逐层同名覆盖——UI 展示的「生效」即会话实际加载的。
+项目说明 AGENTS.md 直接读写项目根目录文件，不走提示词覆盖链。
 
 写/删/复制只作用于项目层；其余层资源经「复制到项目」产生可编辑副本后再改。
 """
@@ -16,6 +17,7 @@ from pathlib import Path
 
 from lumi.agents.core.preprocessing.agent_detector import AgentChangeDetector
 from lumi.agents.memory.paths import memory_dir, read_text_or_none
+from lumi.agents.memory.project_doc import PROJECT_DOC_NAME
 from lumi.agents.runtime.subagents.availability import NATIVE_AGENTS, enabled_agents
 from lumi.agents.tools.loader import (
     _load_agents_from_dir,
@@ -65,8 +67,22 @@ def overview(project: Path) -> dict:
 
 
 def _prompt_info(project: Path, name: str) -> dict:
-    """命中层解析走 manager.resolve_prompt（与运行时 load_prompt 同一份判定）。"""
-    resolved = get_config().resolve_prompt(name, project)
+    """AGENTS 读项目说明；SOUL 与运行时共用提示词覆盖链。"""
+    if name == "AGENTS":
+        path = project / PROJECT_DOC_NAME
+        try:
+            content = path.read_text(encoding="utf-8")
+        except FileNotFoundError:
+            return {
+                "name": name,
+                "source": "",
+                "path": PROJECT_DOC_NAME,
+                "content": "",
+                "body": "",
+            }
+        resolved = ("project", path, content)
+    else:
+        resolved = get_config().resolve_prompt(name, project)
     if resolved is None:
         return {"name": name, "source": "", "path": "", "content": "", "body": ""}
     source, path, content = resolved
@@ -254,7 +270,11 @@ def write_resource(
     elif kind == "prompt":
         if name not in PROMPT_NAMES:
             raise ValueError(f"未知提示词: {name}")
-        target = project / ".lumi" / "prompts" / f"{name}.md"
+        target = (
+            project / PROJECT_DOC_NAME
+            if name == "AGENTS"
+            else project / ".lumi" / "prompts" / f"{name}.md"
+        )
     else:
         raise ValueError(f"资源类型不可写: {kind}")
     if create and target.exists():

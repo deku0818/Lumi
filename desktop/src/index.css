@@ -267,7 +267,7 @@ pre {
 .sidebar-project-machine { display: flex; align-items: center; gap: 4px; margin-left: auto; padding-right: 25px; min-width: 0; max-width: 45%; font-size: 10px; color: var(--color-muted); }
 .sidebar-project-add { position: absolute; display: grid; place-items: center; right: 4px; top: 5px; width: 24px; height: 24px; border-radius: 6px; color: var(--color-muted); opacity: 0; transition: opacity 140ms, background 140ms; }
 .sidebar-project-head:hover .sidebar-project-add,
-.sidebar-project-head:focus-within .sidebar-project-add { opacity: 1; }
+.sidebar-project-head:has(:focus-visible) .sidebar-project-add { opacity: 1; }
 .sidebar-project-add:hover { background: var(--color-surface); color: var(--color-ink); }
 .sidebar-project-state { width: 6px; height: 6px; flex-shrink: 0; border-radius: 50%; background: var(--color-accent); }
 .sidebar-project-state[data-state="running"] { animation: lumi-breathe 2.2s ease-in-out infinite; }

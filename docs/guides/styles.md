@@ -8,7 +8,7 @@ Lumi 的通用提示词、子 Agent 和技能直接放在 `lumi/styles/` 下，�
 - `agents/explore.md`、`agents/general-purpose.md`：探索与通用子 Agent。
 - `skills/lumi-config/`：Lumi 配置技能。
 
-系统提示词 `SOUL.md`、`AGENTS.md` 由用户在全局或项目 `.lumi/prompts/` 中提供；两文件按 `SOUL → AGENTS` 顺序直接拼接，缺失的部分跳过。框架随后追加项目说明按需读取规则，项目根及子目录的 `AGENTS.md` 正文由模型通过工具读取，与这里的提示词配置分开。
+系统提示词 `SOUL.md` 由用户在全局或项目 `.lumi/prompts/` 中提供。框架随后追加项目说明按需读取规则，项目根及子目录的 `AGENTS.md` 正文由模型通过工具读取。`prompts/AGENTS.md` 不再作为系统提示词加载。
 
 ## 加载优先级
 
@@ -30,7 +30,6 @@ Lumi 的通用提示词、子 Agent 和技能直接放在 `lumi/styles/` 下，�
 .lumi/
 ├── prompts/
 │   ├── SOUL.md
-│   ├── AGENTS.md
 │   └── COMPACT.md
 ├── agents/
 │   └── explore.md
@@ -41,3 +40,5 @@ Lumi 的通用提示词、子 Agent 和技能直接放在 `lumi/styles/` 下，�
 提示词为空或只有 frontmatter 时视同未配置，继续查找下一层。技能与子 Agent 定义需包含有效的 `name`、`description` 等 frontmatter，加载规则见 [子 Agent 指南](agents.md)。
 
 项目主页提供提示词、技能和子 Agent 的查看与编辑。编辑和删除只作用于项目层；内置与全局资源可先复制到项目再修改。删除项目覆盖后，同名的低层资源重新生效。
+
+提示词卡片中的 `AGENTS.md` 直接查看和编辑项目根目录文件；不存在时可在此创建，不走提示词覆盖链。
