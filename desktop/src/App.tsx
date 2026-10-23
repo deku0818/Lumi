@@ -19,7 +19,7 @@ import {
   X,
   PanelLeft,
 } from 'lucide-react'
-import { getControlConnection, openChatConnection } from './gatewayConnections.ts'
+import { getControlConnection, openChatConnection, restoreMachineConnections } from './gatewayConnections.ts'
 import { captureHistoryScroll, restoreHistoryScroll, type HistoryScrollAnchor } from './historyScroll.ts'
 import { dispatchDraft, type Attachment } from './messageDelivery.ts'
 import {
@@ -41,6 +41,7 @@ import { NewChatTarget } from './components/NewChatTarget'
 import { HomeBackdrop } from './components/HomeBackdrop'
 import { HomeGreeting } from './components/HomeGreeting'
 import { SshPrompts } from './components/SshPrompts'
+import { watchSshStatuses } from './lib/sshStatus'
 import type {
   ActiveModel,
   Artifact,
@@ -61,6 +62,7 @@ import type {
   SessionMeta,
   SessionModelWire,
   SlashCommand,
+  SshStatus,
   ToolMode,
   WireEvent,
 } from './types.ts'
@@ -171,6 +173,8 @@ export default function App() {
   // 当前会话在远程机器上：文件预览据此选取用通道并隐藏本地打开入口
   const remoteBackend = activeBackend !== 'local'
   const [showSettings, setShowSettings] = useState(false)
+  const [sshStatuses, setSshStatuses] = useState<Record<string, SshStatus>>({})
+  const [settingsConnection, setSettingsConnection] = useState<{ machine: string }>()
   // 当前会话的列表元数据（memo：App 每个流式 token 都重渲染，别每次 O(sessions) 扫）。
   // channel 只消费 wire 字段（服务端 _channel_of 是唯一判定点），非空 = 只读旁观。
   const activeSession = useMemo(
@@ -182,6 +186,11 @@ export default function App() {
   const [settingsTab, setSettingsTab] = useState<'channels' | undefined>()
   const openSettings = useCallback(() => {
     setSettingsTab(undefined)
+    setSettingsConnection(undefined)
+    setShowSettings(true)
+  }, [])
+  const openConnectionSettings = useCallback((machine: string) => {
+    setSettingsConnection({ machine })
     setShowSettings(true)
   }, [])
   const [pendingDelete, setPendingDelete] = useState<SessionMeta | null>(null)
@@ -1053,20 +1062,17 @@ export default function App() {
     return () => window.removeEventListener('lumi:backends-changed', onChanged)
   }, [syncBackends, reconnectMachine])
 
-  useEffect(() => window.lumi.ssh.onStatus(status => {
+  useEffect(() => watchSshStatuses(window.lumi.ssh, status => {
+    setSshStatuses(current => ({ ...current, [status.id]: status }))
     if (status.phase === 'ready') {
-      void window.lumi.getConnection(status.id).then(connection => {
-        const control = controlConns.current[status.id]
-        if (control?.state !== 'open') control?.rebase(connection)
-        for (const [key, gateway] of Object.entries(connsRef.current)) {
-          if (keyBackend(key) === status.id && gateway.state !== 'open') gateway.rebase(connection)
-        }
-      }).catch(() => {})
+      void window.lumi.getConnection(status.id).then(connection =>
+        restoreMachineConnections(status.id, connection, controlConns.current, connsRef.current, openControlConn),
+      ).catch(() => {})
     }
     if (status.phase === 'offline') {
       setMachineConn(current => ({ ...current, [status.id]: 'closed' }))
     }
-  }), [])
+  }), [openControlConn])
 
   // 按机器拉项目（方案甲先选机器）。「当前项目」高亮 = 活动会话的 workspaceDir
   // （由 activate/gateway.ready 维护），不再由后端下发。
@@ -2062,6 +2068,7 @@ export default function App() {
           <button
             onClick={() => {
               setSettingsTab('channels')
+              setSettingsConnection(undefined)
               setShowSettings(true)
             }}
             className="shrink-0 text-info hover:underline"
@@ -2313,8 +2320,8 @@ export default function App() {
   const railDot = (railSessionVisible && hasRunningBg) || cronLiveRuns.length > 0
 
   const machinesCtx = useMemo(
-    () => ({ machines, conn: machineConn, err: machineErr, reconnect: reconnectMachine }),
-    [machines, machineConn, machineErr, reconnectMachine],
+    () => ({ machines, conn: machineConn, err: machineErr, reconnect: reconnectMachine, ssh: sshStatuses, openConnection: openConnectionSettings }),
+    [machines, machineConn, machineErr, reconnectMachine, sshStatuses, openConnectionSettings],
   )
 
   function renderMainContent(): ReactNode {
@@ -2724,6 +2731,7 @@ export default function App() {
       {showSettings && (
         <SettingsDialog
           initialTab={settingsTab}
+          connectionTarget={settingsConnection}
           themePref={themePref}
           setThemePref={setThemePref}
           uiFont={uiFont}

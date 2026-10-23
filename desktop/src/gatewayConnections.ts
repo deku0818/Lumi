@@ -1,10 +1,26 @@
 import type { Dispatch, SetStateAction } from 'react'
 import { Gateway } from './gateway.ts'
-import { sessionKey } from './lib/utils.ts'
+import { keyBackend, sessionKey } from './lib/utils.ts'
 import { emptySession, hasStreaming, hydrateHistory, resumeAfterReconnect, type SessionState } from './sessionReducer.ts'
 import type { BgTask, ConnState, GatewayConnection, GatewayOptions, HistorySnapshot, SessionModelWire, WireEvent } from './types.ts'
 
 type Ref<T> = { current: T }
+
+// SSH ready 只表示传输恢复：首次连接失败时还没有控制 Gateway，需要补建。
+export async function restoreMachineConnections(
+  backend: string,
+  connection: GatewayConnection,
+  controls: Record<string, Gateway>,
+  chats: Record<string, Gateway>,
+  openControl: (backend: string) => Promise<Gateway>,
+): Promise<void> {
+  const control = controls[backend]
+  if (!control) await openControl(backend)
+  else if (control.state !== 'open') control.rebase(connection)
+  for (const [key, gateway] of Object.entries(chats)) {
+    if (keyBackend(key) === backend && gateway.state !== 'open') gateway.rebase(connection)
+  }
+}
 
 export function getControlConnection(
   backend: string,

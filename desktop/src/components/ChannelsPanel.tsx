@@ -644,7 +644,7 @@ function MinutesPanel({ diagnosis, gw, config }: {
   )
   const failed = state.phase === 'error'
   const checking = state.phase === 'checking'
-  const busy = state.phase === 'preparing' || state.phase === 'waiting' || checking
+  const busy = state.phase === 'preparing' || state.phase === 'applying' || state.phase === 'waiting' || checking
   const title = t(`channels.auth.${state.phase}`)
   return (
     <DiagShell bar={failed ? 'bg-error/60' : 'bg-primary/60'}>
@@ -662,6 +662,21 @@ function MinutesPanel({ diagnosis, gw, config }: {
           <span className="mt-1.5"><StatusDot tone={checking ? 'ok' : failed ? 'error' : 'warn'} /></span>
           <div className="min-w-0 flex-1">
             <div className="text-xs">{t(checking ? 'channels.auth.authorized' : 'channels.auth.user')}</div>
+            {state.phase === 'restricted' && (
+              <div className="mt-2">
+                <p className="text-[11px] text-muted-foreground">{t('channels.auth.restrictedHint')}</p>
+                <div className="mt-3 rounded-lg border border-line bg-primary/5 p-3">
+                  <div className="text-xs">{t('channels.auth.allowTitle', { name: config.name })}</div>
+                  <p className="mt-1 text-[11px] text-muted-foreground">{t('channels.auth.allowHint')}</p>
+                  <p className="mt-1 text-[11px] text-muted-foreground">{t('channels.auth.allowScope')}</p>
+                  <div className="mt-3 flex flex-wrap gap-2">
+                    <Button size="sm" className="h-8 text-[11px]" onClick={auth.allow}>{t('channels.auth.allow')}</Button>
+                    <Button variant="outline" size="sm" className="h-8 text-[11px]" onClick={auth.cancel}>{t('channels.auth.later')}</Button>
+                  </div>
+                </div>
+              </div>
+            )}
+            {state.phase === 'applying' && <div className="mt-3 flex items-center gap-2 text-[11px] text-muted-foreground"><Loading />{t('channels.auth.applyingHint')}</div>}
             {state.phase === 'preparing' && <div className="mt-3 flex items-center gap-2 text-[11px] text-muted-foreground"><Loading />{t('channels.auth.preparingQr')}</div>}
             {state.phase === 'waiting' && (
               <div className="mt-3 flex flex-wrap items-center gap-4 rounded-lg border border-line bg-surface/60 p-3">

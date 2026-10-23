@@ -365,8 +365,8 @@ export class Gateway {
     return this.request<{ checks: DiagnoseCheck[] }>('diagnose_minutes', { name, config })
   }
 
-  startMinutesAuth(config: Partial<FeishuConfig>): Promise<MinutesAuthStart> {
-    return this.request('start_minutes_auth', { config })
+  startMinutesAuth(config: Partial<FeishuConfig>, allowUserIdentity = false): Promise<MinutesAuthStart> {
+    return this.request('start_minutes_auth', { config, allow_user_identity: allowUserIdentity })
   }
 
   finishMinutesAuth(authId: string): Promise<{ status: 'authorized' | 'expired' | 'cancelled' }> {

@@ -1,9 +1,10 @@
 import { createContext, useContext, useEffect } from 'react'
 import type { ReactNode } from 'react'
 import { WifiOff, RotateCw, Laptop } from 'lucide-react'
-import type { ConnState, ConnError, Machine } from '../types'
+import type { ConnState, ConnError, Machine, SshStatus } from '../types'
 import { machineColor } from '@/lib/utils'
 import { useI18n } from '../i18n'
+import { sshBusy } from '../lib/sshStatus'
 
 // 机器表 + 各机器的实时连接态 + 重连入口。侧栏、设置各面板、项目/定时页都要按它决定
 // 「这台机器现在能不能读写」，逐层透传要穿过五六个组件，故走 context（App 在根部一次性提供）。
@@ -12,13 +13,31 @@ type MachinesCtx = {
   conn: Record<string, ConnState>
   err: Record<string, ConnError> // 连不上的原因（'' = 没出过错）
   reconnect: (id: string) => void
+  ssh: Record<string, SshStatus>
+  openConnection: (id: string) => void
 }
-const Ctx = createContext<MachinesCtx>({ machines: [], conn: {}, err: {}, reconnect: () => {} })
+const Ctx = createContext<MachinesCtx>({ machines: [], conn: {}, err: {}, reconnect: () => {}, ssh: {}, openConnection: () => {} })
 export const MachinesProvider = Ctx.Provider
 
 export const useMachines = (): Machine[] => useContext(Ctx).machines
 // 全量连接态：给侧栏这类在循环/辅助函数里按机器取状态、用不了按 id hook 的地方
 export const useMachineConn = (): Record<string, ConnState> => useContext(Ctx).conn
+export const useMachineSsh = (): Record<string, SshStatus> => useContext(Ctx).ssh
+
+export function ConnectionProgressLink({ id }: { id: string }) {
+  const { ssh, openConnection } = useContext(Ctx)
+  const { t } = useI18n()
+  const status = ssh[id]
+  if (!status) return null
+  const error = status.phase === 'error'
+  return <button onClick={() => openConnection(id)} className="remote-progress-link">
+    {error ? <WifiOff size={14} className="text-error" /> : <span className="lumi-orb lumi-orb-sm" />}
+    <span className="min-w-0">
+      <span className="block truncate">{t('ssh.state.' + status.phase)}</span>
+      <span className="block text-primary text-[10px] mt-0.5">{t('ssh.viewProgress')} →</span>
+    </span>
+  </button>
+}
 
 // 某台机器现在处于哪一种状态：连上了 / 还在试 / 已经不试了。
 // 关键是 closed 默认属于「还在试」——Gateway 撞断线后自行退避重连，每一轮都会
@@ -207,8 +226,11 @@ export function MachineScope({
 // 重连期间框不会消失也不会跳，视觉上就没有闪烁。
 function MachineOffline({ id, retrying, auth }: { id: string; retrying: boolean; auth: boolean }) {
   const { t } = useI18n()
+  const { ssh } = useContext(Ctx)
+  const progress = sshBusy(ssh[id]) || ssh[id]?.phase === 'error'
   return (
     <div className="flex min-h-[188px] flex-col items-center justify-center gap-2.5 rounded-xl border border-dashed border-separator px-4 py-10 text-center">
+      {progress ? <ConnectionProgressLink id={id} /> : <>
       {retrying ? (
         <span className="lumi-orb" style={{ width: 22, height: 22 }} />
       ) : (
@@ -220,6 +242,7 @@ function MachineOffline({ id, retrying, auth }: { id: string; retrying: boolean;
       </div>
       {/* 还在自动重试时不给按钮：点了也只是同一件事，反而让人以为卡住了 */}
       {!retrying && <ReconnectButton id={id} label={t('machines.reconnect')} className="mt-1" />}
+      </>}
     </div>
   )
 }

@@ -16,6 +16,7 @@ from __future__ import annotations
 import asyncio
 import json
 import os
+import re
 import shutil
 import subprocess
 import sys
@@ -29,6 +30,14 @@ _TIMEOUT = 20
 
 # LARKSUITE_CLI_PROFILE 自这个版本起可用（env 选 profile + profile add 非交互）
 MIN_CLI_VERSION = (1, 0, 92)
+
+
+def parse_strict_mode(code: int, out: str) -> str:
+    """解析 CLI 的运行时有效身份限制（此命令只提供文本输出）。"""
+    match = re.match(r"strict-mode: (bot|user|off) \(source: .+\)", out.strip())
+    if code or match is None:
+        raise ValueError("无法读取飞书身份限制，请检查 lark-cli 后重试")
+    return match[1]
 
 
 def _own_name(bot_id: str) -> str:

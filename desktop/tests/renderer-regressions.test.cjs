@@ -177,6 +177,57 @@ test('failed control openings can retry; stopped gateways reconnect before reuse
   assert.equal(await opening, gateway)
 })
 
+test('SSH ready after failed startup creates the missing control gateway and loads sessions', async () => {
+  const { getControlConnection, restoreMachineConnections } = loadRenderer('src/gatewayConnections.ts')
+  const connections = {}, openings = {}, ready = deferred()
+  let sshReady = false, created = 0, machineState = 'failed', sessions = []
+  const create = async () => {
+    if (!sshReady) throw Error('SSH unavailable')
+    created++
+    await ready.promise
+    const gateway = { state: 'open', dead: false, rebase: () => assert.fail('New gateway connects itself') }
+    connections.remote = gateway
+    machineState = 'open'
+    sessions = ['restored session']
+    return gateway
+  }
+  const open = id => getControlConnection(id, connections, openings, create, async () => assert.fail('No old gateway to reconnect'))
+  await assert.rejects(open('remote'), /SSH unavailable/)
+  assert.equal(connections.remote, undefined)
+
+  sshReady = true
+  const connection = { kind: 'ssh', backend: 'remote' }
+  const first = restoreMachineConnections('remote', connection, connections, {}, open)
+  const second = restoreMachineConnections('remote', connection, connections, {}, open)
+  assert.equal(created, 1, 'Repeated ready events share the pending control opening')
+  ready.resolve()
+  await Promise.all([first, second])
+  assert.equal(machineState, 'open')
+  assert.deepEqual(sessions, ['restored session'])
+  await restoreMachineConnections('remote', connection, connections, {}, open)
+  assert.equal(created, 1)
+})
+
+test('SSH restoration reconnects only closed channels on that machine and preserves live gateways', async () => {
+  const { restoreMachineConnections } = loadRenderer('src/gatewayConnections.ts')
+  const { sessionKey } = loadRenderer('src/lib/utils.ts')
+  const restored = []
+  const gateway = (id, state) => ({ state, rebase: connection => restored.push([id, connection.backend]) })
+  const controls = { remote: gateway('control', 'failed'), other: gateway('other control', 'closed') }
+  const chats = {
+    [sessionKey('remote', 'closed')]: gateway('closed chat', 'closed'),
+    [sessionKey('remote', 'live')]: gateway('live chat', 'open'),
+    [sessionKey('other', 'closed')]: gateway('other chat', 'closed'),
+  }
+  const open = async () => assert.fail('Existing gateways must be reused')
+  const connection = { kind: 'ssh', backend: 'remote' }
+  await restoreMachineConnections('remote', connection, controls, chats, open)
+  assert.deepEqual(restored, [['control', 'remote'], ['closed chat', 'remote']])
+  controls.remote.state = 'open'
+  await restoreMachineConnections('remote', connection, controls, {}, open)
+  assert.equal(restored.length, 2)
+})
+
 test('chat reconnect preserves thread identity, live running state and event routing', async () => {
   const ready = deferred(), models = [], events = []
   let gateway, store = {}

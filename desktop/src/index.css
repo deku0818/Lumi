@@ -967,6 +967,16 @@ body.resizing-col * {
 .ssh-state-card { padding:21px 20px 19px; min-height:154px; border:1px solid color-mix(in srgb,var(--color-line) 65%,transparent); border-radius:13px; background:linear-gradient(135deg,var(--color-canvas),color-mix(in srgb,var(--color-canvas) 30%,var(--color-panel))); }
 .ssh-state-card h3 { display:flex; align-items:center; gap:10px; font-size:14px; font-weight:550; margin:0 0 9px; }
 .ssh-state-card h3 > svg { color:var(--color-accent); flex-shrink:0; }
+.remote-progress-link { display:flex; align-items:flex-start; gap:8px; width:100%; padding:7px 10px; border-radius:7px; text-align:left; font-size:11px; color:var(--color-muted); }
+.remote-progress-link:hover { background:var(--color-surface); color:var(--color-ink); }
+.remote-progress-link > :first-child { margin-top:2px; flex-shrink:0; }
+.remote-connection { border-radius:12px; }
+.remote-connection:focus-visible { outline:1px solid color-mix(in srgb,var(--color-accent) 40%,transparent); outline-offset:3px; }
+.remote-connection-progress { padding:17px 15px 14px; border:1px solid var(--color-line); border-top:0; border-radius:0 0 12px 12px; }
+.remote-connection:has(.remote-connection-progress) > :first-child { border-radius:12px 12px 0 0; }
+.remote-connection-progress .ssh-steps { margin-bottom:16px; }
+.remote-connection-progress .ssh-state-card { padding:16px; min-height:0; }
+.remote-connection-footer { display:flex; align-items:center; justify-content:space-between; gap:12px; margin-top:14px; color:var(--color-muted); font-size:10px; }
 .ssh-state-error h3 > svg { color:var(--color-error); }
 .ssh-state-card p { white-space:pre-wrap; overflow-wrap:anywhere; font-size:11px; line-height:1.85; color:var(--color-muted); }
 .ssh-state-card small { display:block; font-size:10px; margin-top:12px; color:var(--color-muted); }

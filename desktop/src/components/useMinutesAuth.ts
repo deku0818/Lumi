@@ -4,7 +4,7 @@ import type { FeishuConfig } from '../types'
 import { errorMessage } from '@/lib/utils'
 
 type AuthState =
-  | { phase: 'idle' | 'preparing' | 'checking' | 'expired' }
+  | { phase: 'idle' | 'preparing' | 'checking' | 'expired' | 'restricted' | 'applying' }
   | { phase: 'waiting'; qrCode: string; url: string; expiresAt: number }
   | { phase: 'error'; message: string }
 
@@ -50,18 +50,19 @@ export function useMinutesAuth(
     return () => clearInterval(timer)
   }, [state]) // eslint-disable-line react-hooks/exhaustive-deps
 
-  const start = async () => {
+  const start = async (allowUserIdentity: boolean) => {
     if (!gw) return
     release()
     const my = seq.current
-    setState({ phase: 'preparing' })
+    setState({ phase: allowUserIdentity ? 'applying' : 'preparing' })
     try {
-      const result = await gw.startMinutesAuth(config)
+      const result = await gw.startMinutesAuth(config, allowUserIdentity)
       if (my !== seq.current) {
         if (result.status === 'waiting') void gw.cancelMinutesAuth(result.auth_id).catch(() => {})
         return
       }
       if (result.status === 'expired') return setState({ phase: 'expired' })
+      if (result.status === 'restricted') return setState({ phase: 'restricted' })
       flow.current = { gw, id: result.auth_id }
       setSeconds(Math.ceil(result.expires_in))
       setState({ phase: 'waiting', qrCode: result.qr_code, url: result.verification_url,
@@ -81,5 +82,5 @@ export function useMinutesAuth(
     }
   }
 
-  return { state, seconds, start, cancel }
+  return { state, seconds, start: () => start(false), allow: () => start(true), cancel }
 }

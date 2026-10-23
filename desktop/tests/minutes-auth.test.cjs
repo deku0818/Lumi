@@ -104,3 +104,72 @@ test('gateway errors are shown and pending authorization is cancelled', async ()
   assert.equal(states[0].message, '连接已断开')
   assert.deepEqual(cancelled, ['auth-a'])
 })
+
+test('restricted identity waits for explicit consent, then resumes QR authorization on the same gateway', async () => {
+  const calls = [], finish = deferred()
+  const { hook, states } = fixture({
+    startMinutesAuth: async (config, allow) => {
+      calls.push({ config, allow })
+      return allow ? waiting : { status: 'restricted' }
+    },
+    finishMinutesAuth: () => finish.promise,
+  })
+  await hook.start()
+  assert.equal(states[0].phase, 'restricted')
+  assert.equal(calls.length, 1)
+  assert.equal(calls[0].allow, false)
+  const pending = hook.allow()
+  assert.equal(states[0].phase, 'applying')
+  await tick()
+  assert.equal(states[0].phase, 'waiting')
+  assert.deepEqual(calls[1], { config: calls[0].config, allow: true })
+  finish.resolve({ status: 'authorized' })
+  await pending
+  assert.equal(states[0].phase, 'idle')
+})
+
+test('declining identity change does not send consent; another attempt still requires confirmation', async () => {
+  const consent = []
+  const { hook, states } = fixture({
+    startMinutesAuth: async (_, allow) => { consent.push(allow); return { status: 'restricted' } },
+  })
+  await hook.start()
+  hook.cancel()
+  assert.equal(states[0].phase, 'idle')
+  assert.deepEqual(consent, [false])
+  await hook.start()
+  assert.equal(states[0].phase, 'restricted')
+  assert.deepEqual(consent, [false, false])
+})
+
+test('closing or changing robot during identity change discards the late QR', async () => {
+  const start = deferred(), cancelled = []
+  const { hook, effects } = fixture({
+    startMinutesAuth: () => start.promise,
+    cancelMinutesAuth: async id => cancelled.push(id),
+    finishMinutesAuth: () => { throw Error('Must not poll after changing robot') },
+  })
+  const cleanup = effects[0]()
+  const pending = hook.allow()
+  cleanup()
+  start.resolve(waiting)
+  await pending
+  assert.deepEqual(cancelled, ['auth-a'])
+})
+
+test('failed identity change shows an error and retry never silently reuses consent', async () => {
+  const consent = []
+  const { hook, states } = fixture({
+    startMinutesAuth: async (_, allow) => {
+      consent.push(allow)
+      if (allow) throw { message: '配置写入失败' }
+      return { status: 'restricted' }
+    },
+  })
+  await hook.allow()
+  assert.equal(states[0].phase, 'error')
+  assert.equal(states[0].message, '配置写入失败')
+  await hook.start()
+  assert.equal(states[0].phase, 'restricted')
+  assert.deepEqual(consent, [true, false])
+})

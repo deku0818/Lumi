@@ -583,6 +583,7 @@ export interface FeishuConfig {
 export type CheckTone = 'ok' | 'warn' | 'error'
 export type MinutesAuthStart =
   | { status: 'expired' }
+  | { status: 'restricted' }
   | { status: 'waiting'; auth_id: string; verification_url: string; qr_code: string; expires_in: number }
 
 export interface DiagnoseCheck {

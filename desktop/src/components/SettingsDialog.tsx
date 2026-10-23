@@ -1,4 +1,4 @@
-import { useState } from 'react'
+import { useEffect, useState } from 'react'
 import { SlidersHorizontal, Boxes, Server, Send, Plug, Wrench, Info, Monitor, Sun, Moon, Minus, Plus } from 'lucide-react'
 import type { Gateway } from '../gateway'
 import type { ThemePref } from '../theme'
@@ -30,6 +30,7 @@ export type SettingsTab =
 // general：外观（主题）+ 语言；models：模型供应商管理（原输入框模型选择器迁移至此）。
 export function SettingsDialog({
   initialTab,
+  connectionTarget,
   themePref,
   setThemePref,
   uiFont,
@@ -41,6 +42,7 @@ export function SettingsDialog({
   onClose,
 }: {
   initialTab?: SettingsTab // 打开时定位的 tab
+  connectionTarget?: { machine: string }
   themePref: ThemePref
   setThemePref: (p: ThemePref) => void
   uiFont: FontPref
@@ -53,7 +55,10 @@ export function SettingsDialog({
 }) {
   const { t } = useI18n()
   // 受控 tab：面板之间要能互相跳（渠道页体检发现缺 Node.js → 送到环境页安装）
-  const [tab, setTab] = useState<SettingsTab>(initialTab ?? 'general')
+  const [tab, setTab] = useState<SettingsTab>(connectionTarget ? 'connections' : initialTab ?? 'general')
+  useEffect(() => {
+    if (connectionTarget) setTab('connections')
+  }, [connectionTarget])
   // 跳转来源指定的机器：体检跑在哪台机器上，就装到哪台机器（默认跟 EnvPanel 自己的）
   const [envMachine, setEnvMachine] = useState<string | undefined>(undefined)
   const navClass =
@@ -149,7 +154,7 @@ export function SettingsDialog({
             />
           </TabsContent>
           <TabsContent value="connections" className="flex-1 min-w-0 overflow-auto px-6 pb-6 pt-12 mt-0">
-            <BackendsPanel />
+            <BackendsPanel connectionTarget={connectionTarget} />
           </TabsContent>
           <TabsContent value="about" className="flex-1 min-w-0 overflow-auto px-6 pb-6 pt-12 mt-0">
             <AboutPanel />

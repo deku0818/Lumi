@@ -82,7 +82,9 @@ async def _start_minutes_auth(params: dict) -> dict:
 
     config = params.get("config") or {}
     return await minutes_auth.start(
-        config.get("app_id") or "", config.get("cli_profile") or ""
+        config.get("app_id") or "",
+        config.get("cli_profile") or "",
+        allow_user_identity=params.get("allow_user_identity") is True,
     )
 
 

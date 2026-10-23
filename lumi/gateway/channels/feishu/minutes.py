@@ -18,7 +18,7 @@ from dataclasses import asdict
 from lumi.gateway import toolbox
 from lumi.gateway.channels.config import resolve_ref
 from lumi.gateway.channels.feishu.checks import Check, blocked_tail
-from lumi.gateway.channels.feishu.lark_profile import CLI, run_cli
+from lumi.gateway.channels.feishu.lark_profile import CLI, parse_strict_mode, run_cli
 from lumi.gateway.channels.feishu.scopes import (
     MINUTE_EVENT,
     MINUTES_SCOPES,
@@ -217,6 +217,28 @@ def diagnose(app_id: str, profile: str = "") -> list[dict]:
     # ④ 服务端订阅（顺带把它重建好——诊断即修复）
     error = ensure_subscription(profile)
     if error:
+        # auth status 只报告 token 状态：已登录也可能被 bot 模式拦住。
+        # 仅失败时补查身份限制，不修改身份配置；读不到时仍展示原订阅错误。
+        try:
+            mode = parse_strict_mode(*run_cli("config", "strict-mode", profile=profile))
+        except ValueError:
+            mode = ""
+        if mode == "bot":
+            return blocked_tail(
+                [
+                    checks[0],
+                    Check(
+                        key="auth",
+                        tone="error",
+                        name="需要允许用户授权",
+                        detail="当前仅允许机器人身份，读取妙记需要用户身份",
+                        fix_auth=True,
+                        fix_note="点击授权，在确认后仅调整当前机器人的身份限制",
+                    ),
+                ],
+                _STEPS,
+                "需先允许用户身份",
+            )
         logger.warning(f"妙记订阅诊断失败: {error}")
         checks.append(
             Check(

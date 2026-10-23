@@ -1,6 +1,7 @@
 import { Children, isValidElement, useLayoutEffect, useMemo, useRef, type ComponentProps, type ReactNode } from 'react'
 import ReactMarkdown, { type ExtraProps } from 'react-markdown'
 import remarkGfm from 'remark-gfm'
+import remarkBreaks from 'remark-breaks'
 import rehypeHighlight from 'rehype-highlight'
 import { rehypeReveal } from '../lib/graphemeReveal'
 import { CopyButton } from './chat/MessageActions'
@@ -105,11 +106,13 @@ export function Markdown({
   onFileLink,
   streaming = false,
   animateInitial = false,
+  preserveLineBreaks = false,
 }: {
   children: string
   onFileLink?: (name: string) => void
   streaming?: boolean
   animateInitial?: boolean
+  preserveLineBreaks?: boolean
 }) {
   // 首次实时出现可包括首段；已展示内容重挂载以现有文本为基线，不重播历史。
   const previous = useRef(animateInitial ? '' : children)
@@ -129,7 +132,7 @@ export function Markdown({
     [onFileLink],
   )
   return (
-    <ReactMarkdown remarkPlugins={[remarkGfm]} rehypePlugins={plugins} components={components}>
+    <ReactMarkdown remarkPlugins={preserveLineBreaks ? [remarkGfm, remarkBreaks] : [remarkGfm]} rehypePlugins={plugins} components={components}>
       {children}
     </ReactMarkdown>
   )

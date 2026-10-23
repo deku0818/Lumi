@@ -25,7 +25,8 @@ import {
   X,
 } from 'lucide-react'
 import { useUpdateState } from '../update'
-import { MachineIcon, MachineMark, ReconnectButton, useMachineConn, type MachineMarker } from './MachineTabs'
+import { ConnectionProgressLink, MachineIcon, MachineMark, ReconnectButton, useMachineConn, useMachineSsh, type MachineMarker } from './MachineTabs'
+import { sshBusy } from '../lib/sshStatus'
 import type { ChannelInfo, ConnState, Machine, SessionMeta } from '../types'
 import { basename, botOfThread, machineColor, machineName, sessionKey, beOf, timeAgo, FLOAT_GAP } from '@/lib/utils'
 import { useI18n, LANGS } from '../i18n'
@@ -185,6 +186,7 @@ export const Sidebar = memo(function Sidebar({
 }) {
   const { t } = useI18n()
   const machineConn = useMachineConn()
+  const ssh = useMachineSsh()
   const [search, setSearch] = useState('')
   const searchRef = useRef<HTMLInputElement>(null)
   const [expanded, setExpanded] = useState<Record<string, boolean>>({})
@@ -206,6 +208,8 @@ export const Sidebar = memo(function Sidebar({
 
   // 禁用（已配置但不连接）的机器从侧栏隐藏；machineColor 仍用全量 machines 保持配色稳定
   const visibleMachines = machines.filter((m) => m.enabled !== false)
+  const progressMachines = visibleMachines.filter(m => sshBusy(ssh[m.id]) || ssh[m.id]?.phase === 'error')
+  const progressIds = new Set(progressMachines.map(m => m.id))
   const multi = visibleMachines.length > 1
   const dispName = (s: SessionMeta) => s.title || s.first_message || t('sidebar.untitled')
   const matchesSearch = (s: SessionMeta) => dispName(s).toLowerCase().includes(queryLower)
@@ -348,6 +352,12 @@ export const Sidebar = memo(function Sidebar({
   const noMatch = query && !pinned.length && !projects.length
   const content = (
     <>
+      {progressMachines.map(m => <div key={m.id} className="mb-2">
+        <div className="flex items-center gap-1.5 px-2.5 pt-2 pb-1 text-xs text-muted-foreground">
+          <MachineMark id={m.id} size={14} /><span className="truncate">{m.name}</span>
+        </div>
+        <ConnectionProgressLink id={m.id} />
+      </div>)}
       {pinned.length > 0 && (
         <>
           <SectionLabel>{t('sidebar.pinned')}</SectionLabel>
@@ -355,7 +365,7 @@ export const Sidebar = memo(function Sidebar({
         </>
       )}
       {noMatch ? <div className="px-3 py-3 text-center text-xs text-muted-foreground">{t('sidebar.noMatch')}</div> : projects}
-      {!query && visibleMachines.filter((m) => !withGroups.has(m.id)).map(renderMachinePlaceholder)}
+      {!query && visibleMachines.filter((m) => !withGroups.has(m.id) && !progressIds.has(m.id)).map(renderMachinePlaceholder)}
     </>
   )
 

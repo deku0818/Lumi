@@ -102,7 +102,7 @@
     "save_channel": { "params": ["name", "config"], "result": ["channels"], "note": "保存一个飞书机器人配置（按 config.id upsert，缺 id 即新建）到 ~/.lumi/lumi.json 的 channels 分区（密钥 chmod 600），同步 lark-cli 专属身份并实时停旧起新，返回更新后的列表" },
     "delete_channel": { "params": ["name", "bot_id"], "result": ["channels"], "note": "删除一个飞书机器人（含回收其 lark-cli 专属身份 profile），实时停传输并回收会话池，返回更新后的列表" },
     "diagnose_minutes": { "params": ["name", "config"], "result": ["checks"], "note": "妙记链路逐项体检（lark-cli / 用户授权 / 妙记权限 / 事件订阅）；四者任一断裂都表现为静默收不到事件，故需逐项定位。顺带幂等重建订阅。check.tone ∈ ok|warn|error，warn=通过但有功能降级" },
-    "start_minutes_auth": { "params": ["config"], "result": ["status", "auth_id?", "verification_url?", "qr_code?", "expires_in?"], "note": "按机器人 profile 发起妙记设备码授权，返回二维码 data URL 与剩余有效秒数；设备码和 token 不发给前端" },
+    "start_minutes_auth": { "params": ["config", "allow_user_identity?"], "result": ["status", "auth_id?", "verification_url?", "qr_code?", "expires_in?"], "note": "按机器人 profile 发起妙记设备码授权；仅 bot 身份时返回 restricted，用户显式确认 allow_user_identity=true 后仅修改该 profile 并继续授权。返回二维码 data URL 与剩余有效秒数；设备码和 token 不发给前端" },
     "finish_minutes_auth": { "params": ["auth_id"], "result": ["status"], "note": "等待扫码并由 CLI 保存用户授权；status=authorized|expired|cancelled，成功后前端自动体检并重建订阅" },
     "cancel_minutes_auth": { "params": ["auth_id"], "result": ["status"], "note": "取消设备码授权并回收等待进程，幂等" },
     "diagnose_feishu_setup": { "params": ["name", "config"], "result": ["checks"], "note": "机器人接入逐项体检（凭证 / 机器人权限 / 事件订阅 / 版本发布）；四者全部从「应用版本信息」接口一次读出（scopes/event_infos/status）。该接口自身需 application:application.app_version:readonly，未开通回 99991672，故第①项会先引导开通它。失败项带开放平台直达修复链接" },

@@ -14,6 +14,7 @@ import {
   Star,
   Sparkles,
   Trash2,
+  X,
   Zap,
 } from 'lucide-react'
 import type { Gateway } from '../gateway'
@@ -202,9 +203,6 @@ export const ProjectHomePage = memo(function ProjectHomePage({
                 >
                   {prompt.body.trim()}
                 </div>
-              )}
-              {prompt?.path && (
-                <div className="mt-2 text-[10.5px] text-muted-foreground/70 font-mono truncate">{prompt.path}</div>
               )}
             </Card>
 
@@ -517,7 +515,7 @@ function ResourceSheet(props: SheetProps) {
   const { sheet, onClose } = props
   return (
     <Dialog open onOpenChange={(o) => !o && onClose()}>
-      <DialogContent className="sm:max-w-2xl w-full p-0 gap-0 overflow-hidden" showCloseButton>
+      <DialogContent className="sm:max-w-2xl w-full p-0 gap-0 overflow-hidden" showCloseButton={false}>
         {/* 内层按资源身份 keyed：浮层内切换资源（记忆 wiki 互链 / 创建后转查看）时
             per-resource 状态自动重置，Dialog 骨架保持挂载不重放开场动画 */}
         <SheetBody
@@ -655,7 +653,7 @@ function SheetBody({ api, path, sheet, onClose, onChanged, onSwitch }: SheetProp
   return (
     <>
       {/* 头部 */}
-      <div className="flex items-center gap-2.5 px-5 py-3.5 border-b border-line/60 pr-12">
+      <div className="flex h-16 items-center gap-2.5 pl-5 pr-4 border-b border-line/60">
         {creating ? (
           <input
             autoFocus
@@ -675,7 +673,7 @@ function SheetBody({ api, path, sheet, onClose, onChanged, onSwitch }: SheetProp
                 title={t('projhome.backToIndex')}
                 onClick={() => onSwitch({ mode: 'view', kind: 'memory', name: 'MEMORY.md' })}
               >
-                <ArrowLeft size={13} />
+                <ArrowLeft size={15} />
               </SheetBtn>
             )}
             <DialogTitle className="text-[13.5px] font-mono font-semibold">{sheet.name}</DialogTitle>
@@ -695,17 +693,20 @@ function SheetBody({ api, path, sheet, onClose, onChanged, onSwitch }: SheetProp
             {kind === 'skill' ? '.lumi/skills/…/SKILL.md' : '.lumi/agents/….md'}
           </span>
         )}
-        <span className="ml-auto flex items-center gap-0.5">
+        <span className="ml-auto flex shrink-0 items-center gap-1">
           {editable && !editing && (
             <SheetBtn title={t('projhome.edit')} onClick={() => setEditing(true)}>
-              <Pencil size={13} />
+              <Pencil size={15} />
             </SheetBtn>
           )}
           {!creating && !builtin && (kind === 'skill' || kind === 'agent') && (
             <SheetBtn danger title={t('projhome.delete')} onClick={() => setConfirming(true)}>
-              <Trash2 size={13} />
+              <Trash2 size={15} />
             </SheetBtn>
           )}
+          <SheetBtn title={t('common.close')} onClick={onClose}>
+            <X size={15} />
+          </SheetBtn>
         </span>
       </div>
 
@@ -799,7 +800,7 @@ function SheetBody({ api, path, sheet, onClose, onChanged, onSwitch }: SheetProp
             </div>
           ) : (
             <div className="flex-1 overflow-y-auto px-5 py-4 md text-[12.5px] selectable animate-in fade-in">
-              <Markdown onFileLink={kind === 'memory' ? openMemoryFile : undefined}>
+              <Markdown preserveLineBreaks onFileLink={kind === 'memory' ? openMemoryFile : undefined}>
                 {res.body}
               </Markdown>
             </div>
@@ -824,8 +825,9 @@ function SheetBtn({
   return (
     <button
       title={title}
+      aria-label={title}
       onClick={onClick}
-      className={`size-7 grid place-items-center rounded-md text-muted-foreground transition ${
+      className={`size-8 shrink-0 grid place-items-center rounded-lg text-muted-foreground transition focus-visible:outline-2 focus-visible:outline-primary/55 focus-visible:outline-offset-2 ${
         danger ? 'hover:bg-destructive/15 hover:text-destructive' : 'hover:bg-surface hover:text-ink'
       }`}
     >

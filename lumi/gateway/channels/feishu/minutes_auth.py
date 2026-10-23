@@ -10,7 +10,11 @@ from pathlib import Path
 from tempfile import TemporaryDirectory
 from uuid import uuid4
 
-from lumi.gateway.channels.feishu.lark_profile import profile_status, run_cli_async
+from lumi.gateway.channels.feishu.lark_profile import (
+    parse_strict_mode,
+    profile_status,
+    run_cli_async,
+)
 from lumi.gateway.channels.feishu.scopes import MINUTES_SCOPES
 
 
@@ -52,12 +56,32 @@ def _payload(code: int, out: str) -> dict:
     return data
 
 
-async def start(app_id: str, profile: str) -> dict:
+async def _strict_mode(profile: str) -> str:
+    return parse_strict_mode(
+        *await run_cli_async("config", "strict-mode", profile=profile)
+    )
+
+
+async def start(
+    app_id: str, profile: str, *, allow_user_identity: bool = False
+) -> dict:
     """校验机器人身份 → 获取设备码 → 本地生成 PNG；不向 desktop 暴露设备码。"""
     status, detail = await asyncio.to_thread(profile_status, app_id, profile)
     if status != "ok":
         raise ValueError(detail or "请先保存机器人，同步 lark-cli 身份后再授权")
     try:
+        if await _strict_mode(profile) == "bot":
+            if not allow_user_identity:
+                return {"status": "restricted"}
+            code, _ = await run_cli_async(
+                "config", "strict-mode", "off", profile=profile
+            )
+            if code:
+                raise ValueError(
+                    "无法允许当前机器人使用用户身份，请检查配置写入权限后重试"
+                )
+            if await _strict_mode(profile) == "bot":
+                raise ValueError("当前环境仍限制用户身份，请联系该机器的管理员处理")
         data = _payload(
             *await run_cli_async(
                 "auth",

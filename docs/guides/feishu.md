@@ -100,7 +100,7 @@ uv sync
 |---|---|
 | lark-cli 已安装 | 「接入体检 → 本地环境」里 **一键安装**（经 npm 装进 Lumi 工具箱自有目录，免 sudo；机器上没有 Node 时先去 **设置 → 环境** 装好；系统自带的 Node 缺 npm 时用系统包管理器补装 npm，或卸载系统 Node 后在 **设置 → 环境** 安装）。也可自己 `npm i -g @larksuite/cli` 装到系统全局（在系统 PATH 上即被识别，优先于工具箱） |
 | lark-cli 身份已同步 | 机器人需有专属 lark-cli profile（保存机器人时自动同步）。未同步时妙记体检停在这一步、启动时也不建事件订阅——不会回落到你电脑上的全局 lark-cli 身份；在渠道页点一次**保存**即可（老版本 lark-cli 需先升级） |
-| 用户已授权 | 点击 **立即授权**，在卡片内用飞书扫码确认，或点 **在浏览器中授权**。Lumi 自动等待授权结果，成功后继续检查权限并重建事件订阅；二维码过期可点 **重新获取**，取消或关闭设置会停止等待。授权落在该机器上当前机器人的专属 profile，各机器人相互独立。终端方式仍可使用 `lark-cli --profile <cli_profile> auth login --recommend --scope "minutes:minutes.basic:read,minutes:minutes.transcript:export"` |
+| 用户已授权 | 点击 **立即授权**，在卡片内用飞书扫码确认，或点 **在浏览器中授权**。若提示「需要允许用户授权」，点击 **允许并继续授权**：Lumi 只调整当前所选机器上这个机器人的身份限制，随后继续扫码；全局限制和其他机器人不变。Lumi 自动等待授权结果，成功后继续检查权限并重建事件订阅；二维码过期可点 **重新获取**，取消或关闭设置会停止等待。授权落在该机器上当前机器人的专属 profile，各机器人相互独立。终端方式仍可使用 `lark-cli --profile <cli_profile> auth login --recommend --scope "minutes:minutes.basic:read,minutes:minutes.transcript:export"` |
 | 妙记权限已开通 | 点面板给出的开放平台链接，在「**用户身份权限**」tab 下开通 `minutes:minutes.basic:read` 与 `minutes:minutes.transcript:export`（应用身份不生效）并**发布版本**，然后点 **已开通，重新授权** |
 | 事件订阅生效 | 开放平台「事件与回调」添加 `minutes.minute.generated_v1`（添加后需发布版本）。Lumi 每次启动会自动重建订阅 |
 

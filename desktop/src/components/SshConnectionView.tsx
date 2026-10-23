@@ -38,16 +38,17 @@ type SshConnectionBodyProps = {
   question: SshQuestion | null
   error: string
   answer?: AnswerQuestion
+  showHost?: boolean
 }
 
-export function SshConnectionBody({ machine, status, question, error, answer }: SshConnectionBodyProps): JSX.Element {
+export function SshConnectionBody({ machine, status, question, error, answer, showHost = true }: SshConnectionBodyProps): JSX.Element {
   const { t } = useI18n()
   const [secret, setSecret] = useState('')
   useEffect(() => setSecret(''), [question?.id])
   const ready = status?.phase === 'ready' && !error
   const step = sshStep(status, question)
   const phase = status?.phase || 'connecting'
-  const busy = !question && !error && !ready
+  const busy = !question && !error && !ready && phase !== 'offline' && phase !== 'error'
   const dataDir = question?.dataDir || status?.dataDir || machine.dataDir || '~/.lumi'
   let title = t('ssh.state.' + phase)
   let description = t('ssh.stateHint.' + phase)
@@ -91,7 +92,7 @@ export function SshConnectionBody({ machine, status, question, error, answer }: 
   }
 
   return <div className="ssh-process">
-    <div className="ssh-host-summary"><span className="ssh-host-avatar"><Server size={18} /></span><div><strong>{machine.name || machine.host}</strong><small>{machine.user ? machine.user + '@' : ''}{machine.host}{machine.port ? ' · ' + machine.port : ''}</small></div><span className="ssh-secure"><ShieldCheck size={13} />SSH</span></div>
+    {showHost && <div className="ssh-host-summary"><span className="ssh-host-avatar"><Server size={18} /></span><div><strong>{machine.name || machine.host}</strong><small>{machine.user ? machine.user + '@' : ''}{machine.host}{machine.port ? ' · ' + machine.port : ''}</small></div><span className="ssh-secure"><ShieldCheck size={13} />SSH</span></div>}
     <ol className="ssh-steps" aria-label={t('ssh.connectionSteps')}>
       {['ssh.step.verify', 'ssh.step.prepare', 'ssh.step.connect'].map(renderStep)}
     </ol>
