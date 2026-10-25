@@ -18,7 +18,7 @@ Lumi 的通用提示词、子 Agent 和技能直接放在 `lumi/styles/` 下，�
 内置 lumi/styles/ < 全局层 ~/.lumi/ < 项目层 <项目>/.lumi/
 ```
 
-桌面端 / `lumi serve` 的全局层固定在用户数据目录；`lumi -p` 的进程配置目录按当前目录向上发现。显式设置 `LUMI_CONFIG_DIR` 时使用指定目录。
+桌面端 / `lumi serve` 的全局层固定在用户数据目录；`lumi -p` 未设 `LUMI_CONFIG_DIR` 时先检查当前目录的 `.lumi/`，不向父目录查找，然后回退用户级目录。完整发现规则见 [配置指南](config.md)。
 
 压缩调用当前未传入项目目录，COMPACT 只读取进程配置层和内置版本；项目单独配置的 COMPACT 暂不参与该调用。
 

@@ -31,7 +31,7 @@ lumi/styles/
 
 `load_skills` / `load_agents` 逐层同名覆盖；同名资源以解析后的 `name` 为身份。`FileSetChangeDetector` 按子类和项目缓存加载结果，依据定义文件的路径、mtime 和大小感知变更。桌面项目主页 `gateway/project_config.py` 消费相同层序，编辑、删除和复制只作用于项目层。
 
-`lumi serve` 的全局层固定在用户数据目录，不随启动目录漂移；`lumi -p` 仍按 cwd 向上发现进程配置目录。
+`lumi serve` 的全局层固定在用户数据目录，不随启动目录漂移；`lumi -p` 通过 `ConfigDiscovery` 选择进程配置目录：显式目录 > `LUMI_CONFIG_DIR` > 当前目录的 `.lumi/` > 用户级 `.lumi/` > 当前目录的 `.lumi/`（尚不存在时）。不遍历父目录，判断依据是目录是否存在，而非 `config.json` 是否存在。
 
 ### 提示词
 
@@ -49,7 +49,9 @@ lumi/styles/
 
 ### 定义文件校验
 
-技能 `SKILL.md` 与 agent `*.md` 在项目主页写入时经 `validate_definition` 校验：frontmatter 须含 `name` / `description`，且 `name` 与目录名或文件名一致。加载侧跳过无效定义，避免坏文件遮住可用的低层资源。
+项目主页写入技能 `SKILL.md` 与 agent `*.md` 时经 `validate_definition` 校验：frontmatter 须含非空 `name` / `description`，且 `name` 与目录名或文件名一致。
+
+运行时加载侧的要求更宽：缺少有效 frontmatter 或 `name` 时跳过，`description` 缺失按空串处理，不检查名称与路径一致。因此手工编辑文件应遵守项目主页的完整要求；不能依赖加载侧拒绝所有无效覆盖。
 
 ### 工具描述
 

@@ -10,7 +10,7 @@
 为三类**结构性困难**设计：要全面（分解并行覆盖）、要有把握（多视角独立验证）、
 规模超出一个上下文（大范围审计 / 迁移 / 扫描）。单点查询、琐碎改动、纯对话**不要**用。
 
-**门控（缓存安全）**：workflow 工具**始终注册**（永不增删，缓存前缀恒定）；它用不用
+**门控（缓存安全）**：允许委派的主会话中，workflow 工具不随档位增删（委派深度门控仍可移除它）；它用不用
 靠**行为门控**——工具描述里写死「仅 Ultra 档位开启、或用户明确要求时使用」。Ultra 信号
 经**边沿触发 system-reminder** 传达（`FolderManager.ultra_note`，仅在开/关切换那轮前置到当轮
 消息、不碰系统提示词；reminder 一旦进历史即长驻，无需每轮重复），故 toggle Ultra 不废
@@ -49,15 +49,15 @@ system+tools 缓存前缀。详见 [thinking.md](thinking.md) 的 Ultra 一节�
 - `pipeline(items, *stages)` — async，**无屏障**：每个 item 独立穿过所有 stage（默认优先用）。
 - `phase(title)` / `log(*msg)` / 全局 `args`。
 
-并发上限 `min(16, CPU-2)`（semaphore）；终身上限 `_MAX_AGENTS=1000`。
+并发上限 `max(4, min(16, CPU-2))`（semaphore）；终身上限 `_MAX_AGENTS=1000`。
 
 ## 子代理（共享父权限规则）
 
-`agent()` 与 agent 工具共用 `create_subagent(<父 context>, tools)` 建子 LumiAgent（不持久化），
+`agent()` 使用 `create_subagent(<父 context>, tools)` 建临时子 LumiAgent（不持久化），持久子代理走独立执行器，见 [agents.md](agents.md)。临时执行单元
 **复用父 PermissionEngine**——共享权限规则，子代理读得到父正在处理的工作文件
 （review / audit 类编排能跑的前提），不需要沙箱；项目根与渠道 env 同样随父。每个子代理经
 `run_with_shell` 拿独立 shell（`cd`/env 不串兄弟与主会话、用完回收）。子代理工具集禁用
-`agent / workflow / ask / cron / background_task`（防递归 + 后台 graph 无法 interrupt 的 ask）。
+`agent_create / agent_list / agent_message / workflow / ask / cron / background_task`（不继续委派或向人提问）。
 
 ## 实时进度
 
@@ -73,7 +73,7 @@ system+tools 缓存前缀。详见 [thinking.md](thinking.md) 的 Ultra 一节�
 `BackgroundTaskManager.start_task` 也注册于此）。统一收口：
 
 - **停止**：`bg_process.cancel_background_task(task_id)` 按 kind 内部分派（BASH→bg_manager 杀进程，
-  AGENT/WORKFLOW→`cancel_agent_task` 取消 asyncio.Task）——ws / TUI / `background_task` 工具共用。
+  AGENT/WORKFLOW→`cancel_agent_task` 取消 asyncio.Task）——网关 / `background_task` 工具共用。
 - **生命周期骨架**：`bg_tasks.run_background_task(task_id, output_file, produce, *, cancel_text)`
   + `make_bg_done_callback` — agent / workflow 后台任务共用收尾（写文件 / 状态 / 通知）。
 - **清理**：终态任务可经 `dismiss(task_id)` 单条移除或 `clear_finished(thread_id)` 批量清；
@@ -81,7 +81,7 @@ system+tools 缓存前缀。详见 [thinking.md](thinking.md) 的 Ultra 一节�
 
 ### 实时推送
 
-`TaskRegistry.set_on_change(cb)` 单槽观察者（server 层注册，TUI / 测试不订阅）。任一变更
+`TaskRegistry.set_on_change(cb)` 单槽观察者（gateway 层注册，纯图调用 / 测试可不订阅）。任一变更
 （register / update_status / notify_progress）→ `_on_bg_task_change` → **~100ms 去抖合并** →
 广播 `bg_tasks.update`（全量快照 `serialize_task`，前端按 thread_id 过滤）。协议事件 + RPC
 （`list_bg_tasks` / `stop_bg_task` / `dismiss_bg_task` / `clear_finished_bg_tasks`）见

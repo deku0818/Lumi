@@ -21,4 +21,6 @@ Lumi 前端与后端之间 Gateway JSON-RPC 协议的**语言中立单一事实�
 
 ## 改协议的唯一流程
 
-改 `events.json` → 跑 `pytest tests/gateway/test_protocol_contract.py`（Python 端对齐）+ `tsc`（TS 端对齐）。两个都绿，协议就同步了。
+先改 `events.json`，再同步 Python 生产者、RPC handler 和 TS 消费者。运行 `uv run pytest tests/gateway/test_protocol_contract.py` 检查名称集合，并在 `desktop/` 运行 `npx tsc --noEmit` 检查类型。payload / params 的语义还需相关端点或行为测试验证；名称契约与编译通过不等于所有字段语义均已覆盖。
+
+外部调用示例见 [API 指南](../docs/guides/api.md)。

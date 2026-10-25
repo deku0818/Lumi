@@ -54,7 +54,7 @@ class PermissionConfig:         # permissions: tuple[PermissionRule]
 ```
 
 常量：
-- `DEFAULT_RULES`：`cron`、`artifacts`、`__structured_output__` 三条 ALLOW
+- `DEFAULT_RULES`：`agent_list`、`cron`、`artifacts`、`__structured_output__` 四条 ALLOW；具体含义见 [默认规则](../guides/permissions.md#默认规则)。
 
 ---
 
@@ -201,7 +201,7 @@ _STRICTNESS = {Permission.DENY: 0, Permission.ASK: 1, Permission.ALLOW: 2}
 
 图保留旧 `HumanApproval` / `AutoClassify` 节点名作为新执行器的别名，仅用于读取和恢复旧 checkpoint；新调用统一进入 `ToolExecutor`。
 
-`effective_tool_mode()` 统一选择无人值守模式：无审批通道且模式为 default / accept_edits 时读取全局设置，显式 auto / privileged 保留。前台子代理共享父会话实时模式；后台子代理、workflow 和 cron 使用同一套规则。`allow` 调用无需任何审批通道，人工审批无通道时只拒绝当前调用。
+`effective_tool_mode()` 统一选择无人值守模式：无审批通道且模式为 default / accept_edits 时读取全局设置，显式 auto / privileged 保留。持久 Lumi 子代理保存委派时的模式快照，不接人工 Broker；Workflow 临时执行单元同样沿用无人值守规则。`allow` 调用无需任何审批通道，人工审批无通道时只拒绝当前调用。持久子代理的问题转交与外部执行器权限见 [子代理架构](agents.md)。
 
 PreToolUse / PostToolUse hooks 保持其既有语义；非阻断 Bash 告警继续在审批 UI 中展示。
 

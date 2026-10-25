@@ -2,7 +2,7 @@
 
 [![Python 3.12+](https://img.shields.io/badge/python-3.12+-blue.svg)](https://www.python.org/downloads/)
 [![License: MIT](https://img.shields.io/badge/License-MIT-green.svg)](LICENSE)
-[![Version](https://img.shields.io/badge/version-0.3.9-orange.svg)](CHANGELOG.md)
+[![Version](https://img.shields.io/badge/version-0.3.13-orange.svg)](CHANGELOG.md)
 [![LangGraph](https://img.shields.io/badge/LangGraph-powered-purple.svg)](https://langchain-ai.github.io/langgraph/)
 [![Electron](https://img.shields.io/badge/Desktop-Electron-2ea6ff.svg)](https://www.electronjs.org/)
 
@@ -10,7 +10,7 @@
 
 **一个开源的 AI 同事。** 在桌面应用里跟它聊，或者直接在飞书里 @ 它——把日常事务真正交出去、做完。
 
-不只是聊天：它有记忆、会用工具、能定时干活、能读你的文件、能开完会自动把纪要发给你。面向所有人，不只是程序员。
+不只是聊天：它有记忆、会用工具、能定时干活、能读你的文件、能接收妙记就绪通知并按需整理纪要。面向所有人，不只是程序员。
 
 <p align="center">
   <img src="docs/images/project-home.png" width="860" alt="Lumi 项目主页">
@@ -35,11 +35,9 @@
 
 不用切工具——把 Lumi 拉进飞书，它就是群里一位随叫随到的同事。私聊发消息，或群里 @ 它；文字、图片、文件都能发。详见 [飞书接入指南](docs/guides/feishu.md)。
 
-### ✨ 开完会，纪要自动就到了
+### ✨ 妙记就绪后，接着安排下一步
 
-打开「妙记纪要」开关后，你**录个音**、或**开个会（开启云录制）**——飞书生成妙记，Lumi 就自动取回带说话人和时间戳的**逐字稿**，整理成一份纪要，推到你和它的私聊里。**实测录完约 20 秒送达，你什么都不用点。**
-
-> 会议结束、走出会议室，纪要已经躺在飞书里了。
+打开「妙记纪要」开关后，录音或开启云录制的会议生成新妙记时，Lumi 会在你与机器人的私聊中跟进，询问下一步。你可以让它读取带说话人与时间戳的逐字稿、生成纪要或安排后续任务。首次启用需完成用户授权，详见 [飞书指南](docs/guides/feishu.md)。
 
 ### 还有
 
@@ -56,7 +54,7 @@
 - **两种用法，一套大脑** — 桌面应用专注深度工作，飞书随手交办；同一个后端、同一份记忆与配置。
 - **你的数据在你自己机器上** — 开源、[MIT 协议](LICENSE)、本地运行，模型 Key 和会话都存在你自己的机器；也支持自建服务器远程部署。
 - **可扩展** — [技能](docs/guides/slash-commands.md)、[子 Agent](docs/guides/agents.md)、[MCP 协议](https://modelcontextprotocol.io/)、[定时任务](docs/guides/cron.md)、[多 Agent Workflow](docs/architecture/workflow.md)，多数改配置即扩展，无需改代码。
-- **多模型自由** — OpenAI / Anthropic / Bedrock / 任意 OpenAI 兼容 API，思考档位按模型可配，随时热切换。
+- **多模型自由** — OpenAI Chat / Responses、Anthropic、Gemini 及相应兼容 API，思考档位按模型可配，随时热切换。
 
 <p align="center">
   <img src="docs/images/mcp.png" width="760" alt="Lumi MCP 面板">
@@ -65,6 +63,8 @@
 > 通过 MCP（Model Context Protocol）接入外部工具：按机器、按「全局 / 项目」层配置，STDIO / HTTP 均支持，开关即用。
 
 ## 快速开始
+
+日常使用可从 [GitHub Releases](https://github.com/deku0818/Lumi/releases) 下载桌面安装包，按 [安装指南](docs/guides/install.md) 完成首次配置。以下是源码开发方式。
 
 前置要求：[uv](https://docs.astral.sh/uv/)、Node.js（含 npm）、Python 3.12+（uv 会自动装）。
 
@@ -88,7 +88,7 @@ cd Lumi
 }
 ```
 
-完整配置见 [docs/guides/config.md](docs/guides/config.md)；接飞书见 [docs/guides/feishu.md](docs/guides/feishu.md)。
+配置文件与生效规则见 [配置指南](docs/guides/config.md)；接飞书见 [docs/guides/feishu.md](docs/guides/feishu.md)。
 
 ## 核心概念
 
@@ -104,10 +104,10 @@ cd Lumi
 
 ### 权限与审批
 
-> ⚠️ **无沙箱**：Lumi 不做隔离，agent 的工具（`bash`、文件读写等）**直接作用于你本地真实环境**。工具执行由权限规则、审批模式和敏感文件保护控制——建议保持默认审批，谨慎使用 `Privileged`（一律放行）。
+> ⚠️ **无沙箱**：工具直接作用于后端所在机器的真实环境。项目目录用于选择配置和解析路径，不限制文件访问范围。
 
-- **权限规则**（[permissions.md](docs/guides/permissions.md)）：用户级 / 项目共享 / 项目本地三处加载，取最严格匹配（Deny > Ask > Allow > Unmatched）。
-- **审批模式**：`Default`（权限引擎判定）· `Accept Edits`（文件编辑自动放行）· `Privileged`（禁止规则拒绝，其余放行）· `Auto`（交 AI 分类器裁决 approve / reject）。
+- **权限规则**（[使用指南](docs/guides/permissions.md)）：用户级 / 项目共享 / 项目本地加载，取最严格匹配（Deny > Ask > Allow > Unmatched）。没有只读或记忆写入免审。
+- **审批模式**：桌面默认 `Auto`，需审批的调用逐个交 AI 裁决；`Default` 交人工；`Accept Edits` 仅自动允许未匹配规则的文件编辑；`Privileged` 拒绝 deny，其余放行。Bash 风险提示本身不阻断执行。
 
 ### 多机 / SSH 远端
 
@@ -125,7 +125,7 @@ SSH 远端支持 Linux（systemd 用户服务，需要 linger）和 macOS（登�
 
 远端数据默认在 SSH 用户 `~/.lumi`。常驻进程通过私有 Unix socket 与 SSH 数据通道连接，保留实例锁；关闭桌面不停止远端进程。连接时复用同版本实例，远端版本较旧时自动升级并重启，较新时提示更新桌面。安装失败保留旧服务，切换失败尝试恢复旧版本；重启会中断未完成任务。不兼容 0.2 服务地址连接，不自动迁移或停止旧 Docker/系统服务。
 
-CLI、HTTP API 与容器镜像仍可独立使用，它们不是桌面远端连接方式。
+CLI、Gateway RPC 与文件 HTTP 端点可独立使用，容器适用于独立 API 部署，见 [CLI](docs/guides/cli.md) 和 [API](docs/guides/api.md)。
 
 ## 内置工具
 
@@ -136,7 +136,7 @@ CLI、HTTP API 与容器镜像仍可独立使用，它们不是桌面远端连�
 | `ask` | 向用户提问并等待回答 |
 | `cron` | 定时任务（创建 / 删除 / 暂停 / 执行） |
 | `skill` | 调用自定义技能 |
-| `agent` | 委托任务给子 Agent |
+| `agent_create` / `agent_list` / `agent_message` | 创建、查询和续聊持久子 Agent |
 | `workflow` | 多 Agent 编排（一段确定性 Python 脚本调度一群子代理） |
 | `background_task` | 管理后台运行的任务（Bash 命令 / 子 Agent） |
 | `artifacts` | 把产出文件作为制品呈现到界面供查看 / 预览（含 Office 窗口内预览） |
@@ -145,6 +145,8 @@ CLI、HTTP API 与容器镜像仍可独立使用，它们不是桌面远端连�
 工具描述写在各工具函数 docstring 里；外部工具经 MCP 接入。
 
 ## 文档
+
+[全部文档与阅读顺序](docs/README.md) · [安装](docs/guides/install.md) · [CLI](docs/guides/cli.md) · [MCP](docs/guides/mcp.md) · [备份恢复](docs/guides/backup.md)
 
 | 主题 | 链接 | · | 主题 | 链接 |
 |------|------|---|------|------|

@@ -4,7 +4,7 @@
 
 **在配置过程中可能会存在很多未知的问题，请主动解决。**
 
-三件套装在 Lumi 自己的工具箱目录里，**不动系统、不需要 sudo**；系统里已经有的
+工具链装在 Lumi 自己的工具箱目录里，**不动系统、不需要 sudo**；系统里已经有的
 版本永远优先，不会被覆盖。工具箱目录以体检末行打印的为准（默认 `~/.lumi/bin`，
 配置目录被 `LUMI_CONFIG_DIR` 显式改过就跟着走）。
 
@@ -12,7 +12,8 @@
 |---|---|---|
 | **uv** | Python 运行时与包管理 | 需要 Python 的任务全跑不了 |
 | **node**（含 npm / npx） | JS 运行时 | npm 生态用不了；接飞书要用的 lark-cli 也装不上 |
-| **rg**（ripgrep） | 高速搜索 | **可选**——没有只是搜索慢一点，会自动降级 |
+| **rg**（ripgrep） | 高速搜索 | **可选**——没有时通过 bash 使用 find / grep |
+| **officecli** | Office 文件预览转换 | **可选**——没有时用系统应用打开 |
 
 ## 一、先体检
 
@@ -21,12 +22,12 @@
 ```
 
 每行形如 `uv: 系统 v0.11.32 /opt/homebrew/bin/uv` 或 `node: 缺失`，
-末行是工具箱目录。三个都不是「缺失」就已经齐了，直接告诉用户可以开始用。
+末行是工具箱目录。所需工具都不是「缺失」就已经齐了，直接告诉用户可以开始用。
 
 ## 二、征得同意再装
 
 先用一句人话汇报：缺哪几个、各是干什么的、装到哪个目录、大概要等多久
-（node 是三者里最大的，网络慢时要等几分钟）。然后询问用户是否现在装。
+（Node / OfficeCLI 等下载在网络慢时可能要等几分钟）。然后询问用户是否现在装。
 
 ## 三、安装缺失工具
 
@@ -56,19 +57,18 @@
 
 ## 装不上 lark-cli 时
 
-lark-cli 不归 `env install` 管（它只认三件套），你直接动手装，装好验证完再交差：
+lark-cli 不归 `env install` 管（它管理 uv / node / rg / officecli），你直接动手装，装好验证完再交差：
 
 1. **先看 node**：lark-cli 是 npm 包，node 缺失就先按上面流程装 node。
-2. **装完必须接线**（两条都要跑）：
+2. **安装到 Lumi 自有 prefix，再接入工具箱 bin**：
 
    ```bash
-   npm install -g @larksuite/cli
-   ln -sf "$(npm prefix -g)/bin/lark-cli" "<工具箱目录>/lark-cli"
+   npm install -g --prefix "<工具箱根>/npm-global" @larksuite/cli
+   ln -sf "<工具箱根>/npm-global/bin/lark-cli" "<工具箱 bin>/lark-cli"
    ```
 
-   工具箱目录取 `env status` 末行。第二条不能省：npm 的全局目录不在 PATH 上，
-   不接线就会「装成功了却找不到命令」。装完跑 `lark-cli --version` 验证。
-   Windows 没有 `ln`：用 `npm prefix -g` 指向目录里的完整路径调用即可。
+   `env status` 末行给的是工具箱 **bin** 目录（默认 `~/.lumi/bin`），其父目录才是工具箱根。两处占位符须替换为体检结果推导出的真实路径；不直接执行裸 `npm install -g`，避免写入系统全局目录。装完跑 `lark-cli --version` 验证。
+   Windows 使用相同的自有 prefix，入口在 `<工具箱根>/npm-global/lark-cli.cmd`；可用其完整路径执行，不使用 POSIX 的 ln 命令。桌面接入体检的一键安装会自动处理入口。
 3. **npm 报「配代理 / 公司镜像」（corporate npm mirror）**：先别去折腾网络——
    这个包的安装脚本用系统 `curl` 下载二进制，精简 Linux（Docker 常见）没有 curl
    时报的也是这段话，真实原因在上文的 `spawnSync curl ENOENT`。

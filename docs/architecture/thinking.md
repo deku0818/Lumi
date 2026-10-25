@@ -1,147 +1,67 @@
-# 思考管理（Thinking / Effort）设计
+# 思考档位与模型适配
 
-> 状态：方案定稿（2026-06-11），待实施。取代 `docs/1.md`（外部参考资料，保留备查）。
-> 本文档中所有数据源结论均经实测验证。
+当前实现包括模型能力目录、按模型保存的默认档位、会话级覆盖和四种接口的思考回传。模型选择与固化规则见 [会话模型](model-switching.md)；这里维护能力、参数构造与历史发送的契约。
 
-## 产品原则（以终为始）
+## 档位与 Auto
 
-1. **用户永远选不到会报错的档位**——UI 只展示当前模型真正支持的思考控制。
-2. **没有思考能力的模型，思考配置整个不渲染**（不是置灰）。
-3. **`Auto` 恒为默认与安全底座**：不下发任何思考参数，对任意模型零风险。
-4. 档位按模型记忆：给 Claude 设 max、给 MiMo 设 off，切换互不干扰。
-5. 档位值用英文原样展示（low/medium/high/max/xhigh…），不翻译。
+界面只展示后端 `manager.allowed_levels()` 返回的档位，值沿用模型原生英文，不做跨厂商档位翻译；用户未设会话档位时沿用该模型 profile 中的默认值。
 
-## 能力数据源：models.dev
-
-`https://models.dev/api.json`（MIT，社区维护，141 provider / 5000+ 模型）。
-单文件缓存到 `~/.lumi/`（TTL 24h，离线沿用旧缓存），模型名匹配复用
-`model_info.py` 的策略（精确 → 尾部 → fuzzy）。
-
-每个模型的 `reasoning` / `reasoning_options` 直接决定 UI 与下发。
-**Auto 的语义按形态不同**（核心修正：Auto = "让模型自己决定"，而非一律不传）：
-
-| 形态 | UI 选项 | Auto 含义 | 关闭方式 |
-|---|---|---|---|
-| anthropic effort 型（Claude） | Auto / 原生档位 / Off | **adaptive**（开思考，深度自适应——这正是 Auto 的本义） | Off = 不传 thinking（API 默认不思考） |
-| openai effort 型（GPT 系） | Auto / 原生档位（含 none 若有） | 不传 = 模型默认（推理模型默认即思考，本就"自动"） | 原生 none |
-| toggle 型（MiMo/Kimi/GLM） | **仅 On / Off**（无 Auto——开关模型只有两种行为） | （未设置=不传参数；此类模型默认开思考，UI 按 On 展示） | Off |
-| `reasoning: false` / 未匹配 / 常开型 | 不渲染控制 | 不传参数 | — |
-
-`budget_tokens` 类型**忽略**（被 adaptive+effort 取代的旧范式，不进 Lumi）。
-
-由此**不存在档位映射表**：models.dev 的 values 就是各模型原生值
-（Claude 的 `max`、GPT 的 `xhigh` 直接透传），Cherry Studio 式的
-人工兼容矩阵和 OpenRouter 数据源均不需要。
-
-> 为什么不是 OpenRouter：其 `supported_parameters` 只有二值 `reasoning`
-> 标志，无档位枚举（全量扫描验证）；`reasoning_effort` 标志严重漏报
-> （338 个模型仅 4 个带标，Claude/GPT/MiMo 均缺失）。
-> `model_info.py` 的 context_length 链路也一并迁到 models.dev
-> （`limit.context`），OpenRouter 退役。
-
-## 参数写法（唯一仍需代码维护的小表）
-
-models.dev 描述能力，不描述直连端点的参数写法。写法按协议 + 控制类型：
-
-| 控制类型 | anthropic 协议 | openai 协议 |
+| 能力形态 | 可选项（另有 Ultra 时见下文） | Auto / 未设置的语义 |
 |---|---|---|
-| effort 档位 | `thinking: {type: adaptive, display: summarized}` + `output_config: {effort: <值>}` | `reasoning_effort: <值>` + `use_responses_api=False` |
-| toggle On/Off | （Anthropic 无 toggle 型） | `extra_body: {thinking: {type: enabled/disabled}}`（DeepSeek 系方言，MiMo 实测有效）；Qwen（DashScope/百炼）方言为扁平 `extra_body: {enable_thinking: <bool>}` |
-| Auto | 不传任何参数 | 不传任何参数 |
+| Anthropic effort 型 | Auto、原生档位、Off | Auto 开启 adaptive thinking，由模型决定深度；Off 不注入 thinking |
+| OpenAI effort 型 | Auto、原生档位；模型支持时附 Off | Auto 不传档位参数，使用端点默认 |
+| toggle 型 | On、Off | 未设置时不传参数，界面按 On 展示；不单列 Auto |
+| 无控制、未匹配或目录不可用 | 仅内部 auto，界面隐藏控制 | 不传档位参数 |
 
-思考开启时剔除 `temperature/top_p/top_k`（互斥）。遇到不吃 DeepSeek 系
-toggle 写法的方言再加一行特例——失败模式安全：报错即时透传，用户切回
-Auto 即恢复。
+Auto 的具体写法由所选协议与兼容规则决定，不能将它统称为“总是不传参数”。无效或失效的非 auto 值不下发。内部链默认 `apply_effort=False`，不注入主对话档位；需强制工具输出时可用 `force_no_thinking`，关闭能力与工具选择限制均由适配层判断。
 
-Qwen 的 Off 走**门控前直通**（`effort_params` 顶部）：effort 型 qwen 的 Off 不进
-`allowed_levels`（UI 不给 Off），但 `force_no_thinking` 的内部链必须真能关掉思考，
-否则 DashScope 在思考模式下拒绝强制 `tool_choice` → 400。直通只对确有 `toggle_anywhere`
-通道者生效。
+## 能力目录与解析
 
-**thinking-only 模型（任何 provider 都无 toggle）**：思考关不掉，`effort_params(..., "off")`
-返 `{}`——绝不注入端点会拒的参数（DashScope 对 `qwen3.8-max-preview` 把
-`enable_thinking` 限定为 True，传 false 即 400）。这类模型连**强制 `tool_choice`** 也
-不接受（思考模式下拒绝 `required`/指定工具），故 `manager.rejects_forced_tool_choice()`
-判定后，`structured_output` 覆盖 `with_structured_output` 默认注入的 `tool_choice` 为
-`auto` 降级软引导——照旧绑定同一 schema 工具，只是不强制。软引导下模型可以改用散文
-回答（解析器给 `None`），链尾 `_require_structured_result` 显式抛错：分类器据此
-fail-closed 转人工审批，判官 / titler 照常上抛。
+能力来自 models.dev，由 `lumi/models/catalog.py` 缓存到数据根 `cache/models_dev.json`（TTL 24 小时）。后端启动可后台刷新，离线沿用缓存；无缓存、无匹配时不展示思考控制。目录同时提供上下文与输出上限，用户显式覆盖优先。
 
-## 数据模型
+按模型名手动指定 → 精确 → fuzzy 匹配。多 provider 同名时选择 reasoning_options 最完整的单个条目，不拼接各端点的档位；`toggle_anywhere` 另汇总“是否有可关闭思考的通道”，仅用于关思考判断。运行时不逐模型发请求探测能力。
+
+`provider_store.resolve(model_name, provider)` 同时解析模型、连接、默认档位与限额。provider 非空时精确选择 profile；失效则按模型名回查，active 优先。会话 provider 来自 session meta，用途模型来自 classifier / titler 指针，渠道配置不保存模型字段。
+
+## 配置与调用链
 
 ```json
-// lumi.json 的 providers 分区
-{"profiles": [{
-  "id": "…", "name": "MiMo", "base_url": "…", "api_key": "…",
-  "models": ["mimo-v2.5-pro"],
-  "effort": {"mimo-v2.5-pro": "off"}     // 按模型，只存非 auto
-}]}
+{
+  "providers": {
+    "profiles": [{
+      "id": "example", "name": "Example", "base_url": "https://api.example.com/v1",
+      "api_key": "sk-xxx", "protocol": "openai", "models": ["example-model"],
+      "effort": {"example-model": "high"}
+    }]
+  }
+}
 ```
 
-顶层全局 `effort` 字段废弃。存的值即原生值（`"high"` / `"xhigh"` /
-`"on"` / `"off"`），校验规则：值 ∈ 该模型 models.dev options ∪ {auto,on,off}，
-不合法（数据更新后失效）静默回退 auto。
+`effort` 存在数据根 `lumi.json` 的 profile 中；只设置当前模型实际支持的值。顶层全局 effort 已废弃。主对话 `call_model → tool_call_chain → create_llm(apply_effort=True)` 使用会话覆盖或 profile 默认，`effort_params` 是档位到协议参数的映射入口。
 
-`resolve(model_name, provider="")`：(连接, 模型) 才是完整身份——同名模型存在于
-多个 profile 时仅按名反查会把连接 / 档位 / 限额取到别家（active 优先）。provider
-非空时精确取该 profile，失效（profile 已删 / 模型被移出）退回按名反查。provider
-的来源：desktop 主路径从 active 指针带出（`apply_active`）、渠道会话存在
-`ChannelRuntimeConfig.provider`（老配置为空 = 按名反查，重选一次模型自动补上）、
-用途指针（titler / classifier）本就按 (provider, model) 存取。
+| 协议 / 兼容规则 | 非自动档位的参数 |
+|---|---|
+| Anthropic effort | adaptive thinking + output_config.effort；Off 不注入 |
+| OpenAI Chat effort | reasoning_effort |
+| Responses | reasoning.effort |
+| Gemini 原生 | reasoning_effort；On/Off 使用 thinking_budget |
+| OpenRouter | reasoning，Chat 接口通过 extra_body 发送 |
+| Qwen toggle | extra_body.enable_thinking |
+| DeepSeek / MiMo 等 toggle | extra_body.thinking.type |
 
-## 注入链路（含已定的地基重构）
+具体方言由 `manager.py` 与 `adapters.py` 实现，接口类型优先使用 profile 的显式配置。思考参数与采样参数的兼容处理、强制 tool_choice 降级均在模型层，节点不重复维护兼容表。
 
-```
-ResolvedModel(model, base_url, api_key, effort,   ← resolve() 一次读盘全返回
-              context_window, max_tokens,         ← 限制：用户覆盖 > models.dev 探测 > 0(未知)
-              provider)                           ← 解析落在的 profile id（回填 context 用）
-        │
-create_llm(..., apply_effort=False)               ← 翻转默认：注入显式 opt-in
-        │   仅 call_model 的 tool_call_chain 传 True；
-        │   摘要 / 结构化提取 / test_provider / 内部链全部默认干净，
-        │   llm_chain 中散落的 thinking=None 对冲逻辑整段删除。
-        └─ apply_effort=True：查 models.dev 能力 → 按写法表生成参数
-```
+不能关闭思考且拒绝强制 tool_choice 的模型，结构化链降级为绑定 schema 的 auto 工具选择；未得到结构化结果会抛错。审批分类器据此拒绝对应调用，其他内部用途由调用方处理错误。
 
-## 协议与 UI
+## 桌面与飞书入口
 
-- `list_providers` 为每个模型附带思考能力（由 models.dev 算出），
-  **前端不再硬编码档位列表**，选项完全后端驱动。
-- `set_effort(provider, model, level)`。
-- 思考内容流式展示仍走 `thinking.delta`；原始回复与回传规则见下节。
+- ModelPicker 按后端能力展示 Effort / Thinking 子菜单，无能力时隐藏；toggle 型提供 On / Off，有思考控制时另附 Ultra。
+- 桌面 Effort 修改 profile 的按模型默认值；飞书 `/effort` 修改本会话覆盖，换模型清除覆盖。
+- `list_providers` 返回模型能力，`set_effort` 保存默认档位；流式思考走 `thinking.delta`，历史回传规则见文末。
 
-### Desktop 选择器（参考 Claude Desktop，demo 已确认：`.demos/lumi-effort-picker.html`）
+## 代理别名的手动映射
 
-- **Chip**（输入条右下角）：`<模型名> <档位> ▾`，Auto 时只显示模型名。
-- **一级菜单仅三行**：当前模型 ✓（带供应商小字）/ `Effort ›`（右侧显当前值；
-  toggle 型显示 `Thinking ›`；无思考模型该行不渲染）/ `More models ›`。
-- **二级菜单**（两者互斥弹出）：
-  - Effort：顶部一句说明 + `Auto（默认）` + models.dev 原生档位原样列出；
-    toggle 型为 Auto / On / Off 三项。
-  - More models：按供应商分组的模型列表，点选即切换。
-- effort 与 toggle 并存的模型（如 deepseek-v4）：显示 effort 档位列表，
-  并附加 Off 项（toggle 提供关闭能力）。
-- TUI `/effort`：无参列出当前模型可用档位，带参校验后设置，同一份数据。
-
-### models.dev 接入细节
-
-- 缓存 `~/.lumi/cache/models_dev.json`（含 fetched_at，TTL 24h），
-  `lumi serve` / TUI 启动后台刷新；无网络沿用旧缓存；无缓存时
-  所有模型按「无思考控制」处理（安全降级，仅 Auto）。
-- 匹配：全 provider 扁平化后按模型名 **手动指定 → 精确 → fuzzy**（见下节）；多 provider 同名时取
-  reasoning_options 最完整的**单个**条目（档位写法按 provider 而异，跨 provider 混搭
-  会造出没有端点实现的档位组合）。唯一跨 provider 汇总的是 `toggle_anywhere`——「该模型
-  存在关思考的通道」：provider 各报各自暴露的控制项，择优条目没报 toggle 不代表关不掉
-  （`qwen3.7-plus` 在一处只报 effort、另一处只报 toggle）。`toggle_anywhere` **只**服务关思考
-  判定，不参与 `allowed_levels`（否则几十个 openai 协议 effort 模型会凭空多出 Off 档）。
-- `model_info.py` 的 context_length 一并迁来（`limit.context`），OpenRouter 退役。
-
-### 代理别名的手动映射
-
-代理 / 网关暴露的模型名在目录里没有同名条目（`plan-glm-5.2`、`aidong-claude-sonnet-5`），
-只能靠 fuzzy 猜，而猜错时**上下文窗口、输出上限、思考档位一起取自另一个模型**——
-实测 `plan-glm-5.2` 会猜中 `umans-glm-5.2`（`plan`/`umans` 的偶然字母重叠让它比真名
-`glm-5.2` 分还高），窗口从 1,048,560 缩到 405,504，档位从七档缩成两档且丢掉 Off。
+代理 / 网关的模型别名可能没有同名目录条目，fuzzy 匹配错误会同时影响上下文窗口、输出上限与思考档位。可在供应商设置中手动指定目录条目。
 
 - **覆盖表**：`ProviderProfile.catalog`（model → 目录条目 id），与 `context` / `max_tokens`
   并列存在 profile 里、随模型增删一并清理；空串 = 恢复自动匹配。
@@ -168,7 +88,7 @@ ultracode。选中后做两件事：**原生思考拉到该模型最高档** + *
 - **思考映射（唯一别名点）**：`effort_params(model, "ultra")` 委派给该模型最高原生档
   （`_native_max_level`：effort 型取 `values[-1]` 如 Claude→max / GPT→high；toggle→on）。
   下游协议分支无需感知 ultra。
-- **编排解锁（缓存安全）**：workflow 工具**始终注册**，不随档位增删（增删工具会废 prompt
+- **编排解锁（缓存安全）**：允许委派的主会话中，workflow 工具不随档位增删；委派深度门控仍可移除该工具（增删工具会废 prompt
   缓存前缀）。Ultra 信号经**边沿触发 system-reminder** 传达——`FolderManager.ultra_note()`
   与模型已知的档位做差（取自历史里最近一条真实用户消息的 `lumi_reminded` marker，rewind /
   压缩 / 重连后自动重发），仅在 off↔ultra 切换那轮前置到当轮真实消息（非 meta 轮），开注入
@@ -176,14 +96,6 @@ ultracode。选中后做两件事：**原生思考拉到该模型最高档** + *
   **不碰系统提示词**，故 toggle Ultra 只动最便宜的每轮消息尾、不废 system+tools 缓存前缀。
   workflow 工具描述里写死「仅 Ultra 或用户明确要求时使用」。详见 [workflow.md](workflow.md)。
 - **UI**：Effort 子菜单底部分隔线 + 呼吸金光点 + 副标题（ModelPicker.tsx）；chip 上金字。
-  demo `.demos/lumi-ultra-tier.html`。
-
-## 不做
-
-运行时能力探测、budget_tokens 预算制、独立 ReasoningTrace 存储表、
-Cherry Studio 式人工模型能力矩阵（AGPL，且 models.dev 已覆盖）、
-静默降级（错误即时透传）。思考状态直接复用已有消息持久化。
-
 
 ## 供应商接口与思考回传
 

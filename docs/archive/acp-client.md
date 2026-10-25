@@ -1,11 +1,10 @@
 # ACP Client（编排外部 Agent）
 
-> 历史设计备选，当前实现未采用 ACP：Codex 走原生 app-server，Claude Code 走官方
-> Agent SDK，统一为可续聊 subagent。当前方案与权限边界见 [agents.md](agents.md)。
+> 归档：未采用的历史设计备选，后文“待实施”和里程碑不代表当前计划。当前 Codex 走原生 app-server，Claude Code 走官方 Agent SDK，统一为可续聊 subagent。当前方案与权限边界见 [子代理架构](../architecture/agents.md)。
 
 让 `LumiAgent` 作为 [Agent Client Protocol](https://agentclientprotocol.com)（ACP）的 **client**，把外部编程 agent（Claude Code、Codex、Gemini CLI…）当「工人」拉起来派活——Lumi 扮演 ACP 里编辑器/IDE 的角色，外部 agent 作为 ACP server 子进程。
 
-> 现状：设计已定稿，待实施。**实施顺序：先做 [在途审批改造](./approval-inflight.md)**，再做本文——因为 ACP 的权限回调直接复用在途审批的 `ApprovalBroker`，没有它 ACP 的审批无处落脚。
+> 原方案状态：设计已定稿，待实施。**实施顺序：先做 [在途审批改造](../architecture/approval-inflight.md)**，再做本文——因为 ACP 的权限回调直接复用在途审批的 `ApprovalBroker`，没有它 ACP 的审批无处落脚。
 >
 > 已定方向：走 **ACP 标准协议**（非裸 CLI/PTY 包装）；首发 worker = **Claude Code**；先做 **单点委派**（打通管道），Council / fan-out 留后。
 
@@ -78,7 +77,7 @@ lumi/agents/tools/providers/
 ### 事件回流 → 复用 `parent_run_id`
 外部进程事件不在 LangGraph 流里。在委派工具内，每收到一条 ACP `session/update`，用 `adispatch_custom_event` 派发；因发生在工具 callback 上下文，LangChain 自动带 `parent_ids`。`bridge/core.py` 加分支把这类 custom event 映射成 `BridgeEvent`（`MESSAGE_DELTA` / `TOOL_START` / `TOOL_COMPLETE`），`parent_run_id` 自动填好 → **前端无需改动，直接渲染成子卡片**。
 
-> 这与 [在途审批](./approval-inflight.md) 用的是同一条 `adispatch_custom_event` → `on_custom_event` 通道，bridge 的分支可统一设计。
+> 这与 [在途审批](../architecture/approval-inflight.md) 用的是同一条 `adispatch_custom_event` → `on_custom_event` 通道，bridge 的分支可统一设计。
 
 ### 权限回调 → 统一审批（依赖在途审批）
 ACP `session/request_permission(tool_call)` → `PermissionEngine.evaluate()`：

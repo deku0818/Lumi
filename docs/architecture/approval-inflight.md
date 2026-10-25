@@ -1,187 +1,61 @@
-# 在途审批（不依赖 checkpoint 的审批机制）
+# 在途审批与提问
 
-把工具审批与 ask 提问从「LangGraph `interrupt()` + checkpoint 重放」改造为「`asyncio.Future` 在途请求-响应」。一条用户轮从 prompt 到 `turn.complete` 是**一条不断的事件流**，审批/提问只是流内部的一次挂起，而非把流切断后重放节点。
+桌面工具审批和主代理 `ask` 通过 `ApprovalBroker` 的内存 Future 原地等待回答。一条用户轮从 prompt 到 `turn.complete` 保持同一事件流，回答不重放工具节点；checkpoint 继续负责会话历史持久化。
 
-> 状态：**已实施（as-built）**。broker 地基 + human_approval + ask 全迁 broker + 删 interrupt 残留一并落地（原计划的 PR1/2/3 合并完成）。动机源于 [ACP client 接入](./acp-client.md)——外部 agent（如 Claude Code）干活中途经 ACP `request_permission` 回调要权限，此刻外部子进程是活的，无法用 interrupt 的「重放节点」语义，必须改为在途审批。**ACP `delegate` 复用本机制尚未落地**（见末尾「后续」）。
+## Broker 与协议
 
----
+实现位于 `lumi/agents/core/broker.py`，由 Bridge 注入 `LumiAgentContext.approval_broker`：
 
-## 为什么改
+| 方法 | 语义 |
+|---|---|
+| `request(payload, reject_value)` | 分配 approval_id，派发 custom event，等待 Future；退出时移除注册项 |
+| `resolve(approval_id, decision)` | 按 ID 唤醒请求；未知或已完成 ID 返回 False |
+| `reject_all()` | 用各请求自己的拒绝/取消值收尾，返回处理数 |
 
-`interrupt()` 的恢复语义是**重放整个节点**：中断点状态存入 checkpoint，`Command(resume=value)` 把节点从头再跑一遍、让 `interrupt()` 返回 resume 值。对 Lumi 自己的工具这没问题（工具本就还没执行）。但它和两类场景天然冲突：
-
-- **外部有状态子进程**（ACP 委派的 Claude Code）：审批发生在 `delegate` 工具已跑起来、子进程活着的中途。重放节点 = 重新 spawn 子进程，会话丢失。
-- **并发审批**：单个 `interrupt()` 只能表达一个挂起点。主 agent + 多个子/外部 agent 并发要审批时，无法区分。
-
-此外 **子 agent 无 checkpointer**（`create_agent` 不带 checkpointer），`interrupt()` 依赖 checkpointer 落盘，故旧机制下子代理审批根本不可用。在途审批用一个按 `approval_id` 寻址的 Future 注册表替代，天然支持「节点原地挂起」「并发多审批」「子代理审批」。
-
-## 边界：checkpoint 保留，只去掉审批耦合
-
-`checkpointer` 在 Lumi 身上承担两件独立的事，本次只动第一件：
-
-| 用途 | 旧 | 新 |
-| --- | --- | --- |
-| 审批/提问的中断-恢复 | `interrupt()` 存状态 → `Command(resume=)` 重放节点 | **移除**，改 Future（broker） |
-| 会话历史持久化（`list_sessions` / `load_history` 由 checkpoint 派生） | 每轮结束写 checkpoint | **保留不动** |
-
-graph 仍带 `checkpointer` 编译，会话列表、历史加载完全不受影响。
-
----
-
-## 核心机制：ApprovalBroker + custom event
-
-`ApprovalBroker`（`lumi/gateway/bridge/broker.py`）是一个按 `approval_id` 寻址的 Future 注册表，注入到 `LumiAgentContext`（注入路径与 `permission_engine` 一致），是节点层与会话层之间唯一的耦合点。
-
-```python
-# 节点侧（human_approval / ask 内）——不再 interrupt()
-decision = await ctx.approval_broker.request(
-    {"type": "tool_approval", "tool_calls": tool_calls_data},  # 或 {"type": "ask", ...}
-    reject_value,   # 本请求被 stop/切会话收尾时返回的"拒绝"决策（见「锁语义」）
-)
-
-# broker.request 内部：
-#   1. approval_id = uuid4().hex; fut = loop.create_future()
-#      registry[approval_id] = (fut, reject_value)
-#   2. await adispatch_custom_event("lumi_approval", {"approval_id": ..., **payload})
-#   3. return await fut          ← 节点在此原地挂起，astream_events 随之 park
-#   （finally 清理 registry）
+```text
+ToolExecutor / ask
+  → broker.request
+  → lumi_approval custom event
+  → Bridge：approval.request / clarify.request（带 approval_id）
+  → 客户端 resume {approval_id, value}
+  → broker.resolve
+  → 原节点继续 → 原事件流继续
 ```
 
-会话层（`gateway/session.py`）收到应答帧时，经非流式 `resume(approval_id, value)` RPC：
+`resume` 是非流式控制 RPC；原运行 task 与锁在等待审批时仍存活。流式调用、响应格式和事件字段见 [协议](../../protocol/README.md)。`astream_events` 显式使用 v2，custom event 带有运行归属信息。
 
-```python
-bridge.resolve_approval(approval_id, value)
-#   → broker.resolve：registry[approval_id][0].set_result(value) → 节点 await 立刻返回
-```
+工具审批的 `value` 可用 `{decision: "approve"|"reject", message?, set_tool_mode?}`，也兼容逐项 `decisions`；缺项或非法结果按拒绝处理。主代理提问使用问题 schema 和答案映射，见 `ask.py` 与 `ClarifyDialog.tsx`。
 
-broker 三个方法：`request(payload, reject_value)`、`resolve(approval_id, decision)`、`reject_all() -> int`（按各请求自带的 `reject_value` 收尾全部挂起，用于 stop/切会话）。**没有 cancel 方法**——硬取消统一靠取消跑 `astream_events` 的外层 task，取消会传播到挂在 broker 上的节点、`request` 的 `finally` 自动清 registry（已实测）。
+## 逐个工具审批
 
-**为什么用 `adispatch_custom_event`**：它发出的事件天然走 `astream_events`，自带 `run_id` / `parent_ids`。`bridge._stream` 现成的 `_resolve_subagent_parent()` 直接给它算出 `parent_run_id`——子 Agent / ACP 外部 agent 的审批 **parent 归属白嫖现有流式归属机制**，前端渲染成子卡片下的审批无需额外工作。
+`is_use_tool` 对有工具调用的响应统一路由到 `ToolExecutor`。执行器在批次开始热重载权限，然后对每个调用独立决定、审批并执行：
 
-> 地基**已验证**（langchain-core 1.4.3）：`adispatch_custom_event` 在 `astream_events`（显式 `version="v2"`）以 `on_custom_event` 浮现，带非空 `run_id` 与 root→parent 有序的 `parent_ids`，`data` 原样透传。`astream_events` 的 `version="v2"` 已显式锁死，防默认漂移。
+- deny 拒绝，allow 立即执行；其他结果按当前审批模式处理。
+- AI 每次只判断一个调用；拒绝或分类器异常只拒绝当前调用，不回落人工审批。
+- 人工待审调用独立等待 Broker，已允许的兄弟调用可以立即执行。
+- 结果按原 tool_call 顺序写回。只有全部未执行且存在人工拒绝时才结束本轮；规则 / AI 拒绝交回模型调整。
+- Broker 的 stop 标记结束整轮，即使已有兄弟调用执行，也不再继续模型。
 
----
+`human_approval()` / `auto_classify()` 是执行器内的辅助函数，图中的同名旧节点只用于恢复已有 checkpoint。权限矩阵见 [权限架构](permissions.md)。
 
-## 端到端时序
+## 停止、切换与断连
 
-```
-旧（interrupt + checkpoint）:
-  prompt流 → 命中审批 → interrupt() → astream 提前结束 → _check_interrupts 发 APPROVAL
-          → run.task 完成、run.lock 释放、awaiting_resume=True
-          → 【新的流式 resume RPC】→ Command(resume) → 重放 human_approval 节点 → 继续
+停止或切换 thread 时，`reject_pending()` 先以拒绝/取消结果收尾挂起请求，让图干净完成并保留用户消息；没有挂起请求时可硬取消运行 task。切换等待旧轮释放连接锁，停止请求先快速返回。Broker 没有单独的 cancel 方法；外层 task 取消会传播至 Future 等待，并在 finally 清理注册项。
 
-新（Future 在途）:
-  prompt流 ────────────────────────────────────────────────────► 一条流，全程不断
-     │ 命中审批 → broker.request → dispatch APPROVAL 事件（内联流出）→ 节点 await Future
-     │                                            run.task 仍活 · run.lock 仍持
-     │ ◄── 【非流式 resume RPC】resolve Future ──┐
-     │ 节点 await 返回 → ToolExecutor → 继续 ◄───┘
-     └ … → turn.complete → 流结束、锁释放
-```
+传输断开而后端仍存活时，活跃或挂起轮可随 `GatewaySession.detach()` 原地保留。同 thread 重连时恢复会话，重发待处理审批；默认最多保留 8 小时。后端进程重启后 Future 消失，不自动重放副作用请求或继续审批。详见 [断连续接](desktop.md#断连续接会话与传输解耦)。
 
-要点：
+进程内同 thread 的运行和删除由 `sessions/thread_runs.py` 共用锁协调，避免多个连接并发写 checkpoint；连接自身的运行锁保护 Bridge 指向。这个互斥不跨后端进程。
 
-- **审批应答从流式变非流式**。必须如此：`session.py` 的 `handle_frame` 在 `run.task` 活着时会把流式方法拒成「已有任务在执行」。原 prompt 流还活着，应答只能走轻量控制 RPC。`resume` 仍叫 `resume`（wire 方法名不变），仅由流式改非流式。
-- 事件继续从**原 prompt 流**吐出，不开新流。前端事件订阅本就是连接级 `{method:"event"}` 推送，与触发的 RPC 无关 → **前端事件渲染零改动**。
-- `dispatch` 在 `await fut` 之前同步完成，故 APPROVAL 卡片先到客户端，节点随后才挂起。
+## 无人值守与子代理
 
----
+cron、dream、Workflow 临时执行单元和持久 Lumi 子代理不接人工 Broker。模式为 default / accept_edits 时使用全局无人值守设置，显式 auto / privileged 保留；deny 总是拒绝。若仍有调用进入人工审批辅助函数，无通道时只拒绝该调用。
 
-## 逐层改动清单（as-built）
+持久 Lumi 子代理通过 `request_parent_input` 将 `ask` 问题回传主 Agent，保存问题后结束当前轮；主 Agent 回答，再用 `agent_message` 继续原实例。Codex / Claude Code 使用各自原生提问适配，不把外部工具映射为桌面 Broker 审批。执行权限见 [子代理架构](agents.md)。未采用的 ACP 设计见 [历史归档](../archive/acp-client.md)。
 
-### `agents/core/state.py`
-- `LumiAgentContext` 新增 `approval_broker` 字段（默认 `None`，`TYPE_CHECKING` import 避免 agents→gateway 运行时依赖）。无 bridge 的 headless 调用（cron / workflow）保持 `None`。
+## 回归验证
 
-### `agents/core/nodes.py`
-- `ToolExecutor` 对每个调用独立匹配权限、审批并立即执行。规则和 AI 拒绝只影响该调用；其他已允许的调用照常执行，不等待兄弟审批。
-- `human_approval()` 是执行器调用的辅助函数，收到单个待审调用后经 `ApprovalBroker` 原地挂起。保留 `{decision}` / `{decisions, message?, set_tool_mode?}` 应答协议与缺项拒绝语义。
-- 全部未执行且存在人工拒绝时结束本轮；规则 / AI 拒绝回给模型调整。Broker 的 `stop` 标记表示停止整轮，即使已有其他调用执行也不再继续模型。
-- 无人工通道时仅拒绝需要人工审批的调用，ALLOW 无需审批通道。auto 的分类器异常只拒绝对应调用。
-
-### `agents/tools/providers/ask.py`
-- 删 `from __future__ import annotations`（否则 `ToolRuntime` 注解被字符串化、注入失效，registry 加载期有 fail-fast 守卫）、加显式 `args_schema=AskInput` + `runtime: ToolRuntime` 注入，改 **async**。
-- `interrupt(...)` → `await ctx.approval_broker.request({"type":"ask", ...}, ASK_CANCELLED)`。
-- 同样的 **headless 守卫**：`approval_broker is None` → 返回「无交互通道，自行判断后继续」让模型续跑。
-
-### `agents/tools/providers/agent.py`
-- 前台子代理 `create_agent` 后 `context.approval_broker = runtime.context.approval_broker`——子代理审批经父流 `astream_events` 浮现、白嫖 `parent_ids` 归属（旧 interrupt 无 checkpointer 不可用，broker 才解锁子代理审批）。后台子代理 detached、无活流可挂，**刻意不传播**（保持 `None`，需人工审批但无通道时只拒绝对应调用）。
-
-### `gateway/bridge/broker.py`（新增）
-- `ApprovalBroker`：`request` / `resolve` / `reject_all`。
-
-### `gateway/bridge/core.py`
-- `AgentBridge.__init__` 建 `self._broker = ApprovalBroker()`；`initialize()` 在 `create_agent` 后 `self._context.approval_broker = self._broker`（事后赋值，零改 `create_agent` 签名）。
-- `_stream()` astream_events 显式 `version="v2"`；主循环新增 `kind == "on_custom_event" and name == "lumi_approval"` 分支 → 按 `data["type"]` yield `CLARIFY`（ask）/ `APPROVAL`（tool_approval，经 `_enrich_tool_approval` 富化），`parent_run_id` 复用已算的 `_resolve_subagent_parent` 结果。
-- 流结束 `yield await self._turn_complete_event()`（取 state 末条 AI message 的 usage），替代旧 `_check_interrupts`。
-- 新增 `resolve_approval(approval_id, value)` / `reject_pending() -> int`（委派 broker）。
-- **删除**：`_check_interrupts`、`stream_resume`、`_subagent_marker`、`_INTERRUPT_TOOLS` 常量及 `_resolve_tool_call_id` 的 checkpoint_ns 特判、BYPASS「interrupt 提前 on_tool_end」补丁。
-- `_active_agent_runs` 由 `dict[str, list[str]]` 改 **`set[str]`**——values（parent_ids）只被已删的 `_subagent_marker` 用，`_resolve_subagent_parent` 只用 key 成员判定，故 values 已死。审批卡片与流式事件现走**同一**归属（`_resolve_subagent_parent`），并行兄弟靠各自 `parent_ids` 能精确区分（优于旧 `_subagent_marker` 的「放弃挂主 agent」）。
-- `_recover_stale_state` **保留不动**（与审批正交，处理崩溃/rewind 残留；其 `has_interrupts` 提前返回现为永假的防御性死分支，无害）。
-
-### `gateway/session.py`
-- `resume` 从 `_STREAMING_METHODS` 移到 `_RPC_HANDLERS`（新 `_resume` handler 调 `bridge.resolve_approval(approval_id, value)`）。**wire 方法名保留 `resume`**，params 改 `["approval_id", "value"]`。
-- **删除**：`awaiting_resume` 旗标（在途等待期间 `run.lock` 由 `_run_stream` 持着，后台通知轮抢锁自然被挡）、`_INTERRUPT_KINDS`、`_pump` 末尾 `last_kind` 判定。
-- `_finalize_active_turn(wait)`（stop 用 `wait=False`、switch_session 用 `wait=True`）：见「锁语义」。
-
-### `gateway/protocol.py` + `protocol/events.json`
-- `resume`：`streaming: true` 去掉（改非流式），params → `["approval_id", "value"]`。
-- `approval.request` / `clarify.request` payload 增 `approval_id`（custom event 自带，经 `data` 透传，`protocol.py` 无需改）。
-- 契约测试（`tests/gateway/test_protocol_contract.py`）只断言事件名/方法名集合——`resume` 仍在 `IMPLEMENTED_METHODS`、`APPROVAL/CLARIFY` 仍在 `EventKind`，故方法/事件名集合不变，契约测试无需改。
-
-### `desktop/src`
-- `gateway.ts` `resume(approvalId, value)` → `request('resume', {approval_id, value})`（非流式，不消费返回流）。
-- `App.tsx` `resumeWith` / `decide`：回发时从存储的 approval/clarify payload 取 `approval_id` 带上。`turn.complete` / `error` 处理器**清掉 `approval`/`clarify`**——stop/切会话把挂起审批以拒绝收尾时不经 `decide`/`resume` 清理，靠 `turn.complete` 兜底关闭弹窗。`ApprovalDialog` / `ClarifyDialog` 组件不动。
-- `types.ts` `WireEventPayloads`：clarify/approval payload 加 `approval_id`。
-
----
-
-## 净效果：删多于加
-
-中断+checkpoint 在审批链路上的擦屁股代码整片消失：`_check_interrupts`、`stream_resume`、`_subagent_marker`、`awaiting_resume`、`_INTERRUPT_TOOLS` / checkpoint_ns 稳定 id、BYPASS 提前 on_tool_end 补丁，`_active_agent_runs` 由 dict 瘦成 set。一条 run 一条流，心智大幅简化。
-
----
-
-## 已定决策
-
-1. **断连分两种，只救一种**（v0.2.1 更新）：
-   - **Case 1 — WS 断连、sidecar 存活**（renderer 重载 / 网络抖动 / 休眠）：**已实现断连续接**——挂着审批的会话不 aclose 而是 detach 留存、同 thread 重连接回并重发审批卡，Future 一直在内存里，审批不丢（见 [desktop.md「断连续接」](./desktop.md)）。
-   - **Case 2 — 后端进程重启**：挂起审批丢失、该轮作废、需重发。不做 sidecar 落盘（in-memory Future 随进程消失，需 checkpoint 重放才能续，刻意不做；本地 sidecar 作废一轮可接受）。
-2. **锁语义 = stop/切会话以「拒绝」收尾挂起审批（保留历史），而非取消丢弃**。这是 as-built 相对原设计的关键调整：
-   - 每个 `broker.request` 自带 `reject_value`（tool_approval 为 `{"decision":"reject",...}`，ask 为 `ASK_CANCELLED`）。
-   - `_finalize_active_turn`：若有挂起审批（`reject_pending() > 0`）→ broker 以各请求的 `reject_value` 收尾 → 节点续跑到 reject→END → 本轮**干净完成**、checkpoint `next` 为空、下一轮不被 `_recover_stale_state` 回退 → **用户消息保留在历史里**（与旧 interrupt 行为一致）。若无挂起审批（轮在流生成中途）→ 硬取消 task。
-   - `stop` 用 `wait=False`（快速回应）；`switch_session` 用 `wait=True`（等本轮释放 `run.lock` 再取锁切换，否则该轮挂在审批上持锁会死锁）。
-   - 等待期间 `set_provider` 等配置类 RPC 等审批结束再生效，可接受。
-3. **命名**：wire 方法名保留 `resume`（仅改非流式），不改名，减小前端 diff。
-4. **ask 同批迁移**：ask 与 human_approval 一起改 broker——二者共用 `resume` 入口，迁 human_approval 后 tool_approval 应答必须非流式，ask 若仍 interrupt 则其恢复需流式，同名方法无法兼具两种语义，故必须同批。
-5. **broker 注入** = bridge 在 `create_agent` 后事后赋值（避免 agents→gateway 反向依赖）。
-6. **权限富化留 bridge** = `ApprovalEnricher` 从旧 `_check_interrupts` 调用点平移到新 `on_custom_event` 分支，节点只发裸 `tool_calls`。
-7. **headless fail-closed** = 无 broker（cron / workflow / 后台子代理）时 human_approval 自动拒绝、ask 提示继续，不崩溃。
-
----
-
-## 对 ACP 的红利
-
-原生工具审批与外部 agent 审批是**同一条机制**：
-
-- ACP `delegate` 工具收到 Claude Code 的 `request_permission` → 同样 `await ctx.approval_broker.request(归一化后的 payload, reject_value)`。
-- 它发的 APPROVAL 事件带 `parent_run_id`（custom event 自带，前提是 dispatch 发生在该 agent run 仍在 `_active_agent_runs` 活跃窗口内）→ 前端直接渲染成 Claude Code 子卡片下的审批。
-- 并发挂起审批靠 `approval_id` 区分——新机制天生支持，旧的单一 interrupt 做不到。
-
----
-
-## 后续
-
-- **已落地（v0.2.1）**：WS 断连续接（Case 1）——见上「已定决策 1」与 [desktop.md「断连续接」](./desktop.md)。审批的 in-memory Future 现可跨 WS 重连存活。
-- **未落地**：ACP `delegate` 复用 broker（`request_permission` → broker 的 payload 归一化）。整条 ACP 链路是纯设计稿且依赖本在途审批先落地（已落地），归一化的 payload 形状随 broker 契约定稿后再核对。两份文档的 PR 编号曾撞号——后续 ACP 工作建议用 `ACP-PR*` 编号避免与本文档混淆。
-- **未落地**：「一个 thread 同时只能有一个活会话」目前无强制——多客户端 / 同会话双开 + 快重连竞态下，displaced 会话 aclose 会误杀同 thread 共享 shell、新旧会话可能短暂双绑同 thread。单 app 单用户不触发；远程多机时建议补**线程级会话注册表 + 互斥**统一解决。
-
----
-
-## 测试覆盖
-
-- **broker**（`tests/gateway/test_approval_broker.py`）：`request` 挂起 → `resolve` 唤醒返回正确 decision；并发多 `approval_id` 互不串扰；`reject_all` 按各请求 `reject_value` 收尾并返回处理数；端到端取消（外层 task cancel 传播到挂起节点、registry 不泄漏）。
-- **human_approval 节点**（`tests/test_human_approval.py`）：approve/reject/cancel 三态路由 + set_tool_mode + DENY 快速拒绝 + headless 无 broker fail-closed；真实图 e2e——stop 经 `reject_all` 收尾后 checkpoint `next` 为空、用户消息保留。
-- **ask 工具**（`tests/test_ask.py`）：审批 payload 构造、Command 返回、取消置 flag、headless 无 broker 续跑。
-- **会话编排**（`tests/gateway/test_gateway_session.py`）：resume 非流式经 broker resolve；stop/switch_session 取消进行中的轮并补发 `turn.complete`；挂在审批上 stop → 以拒绝干净跑完（非硬取消）。
-- **子代理归属**（`tests/gateway/test_subagent_attribution.py`）：`_resolve_subagent_parent` 多层委派 + 并行兄弟各按自身 parent_ids 归属。
-- **协议契约**（`tests/gateway/test_protocol_contract.py`）：`IMPLEMENTED_METHODS` 与 `events.json` 事件名/方法名集合一致。
+- `tests/gateway/test_approval_broker.py`：请求寻址、并发、拒绝收尾与取消清理。
+- `tests/test_per_tool_permissions.py`：同批调用互不阻塞、结果配对与局部拒绝。
+- `tests/test_human_approval.py`、`tests/test_ask.py`：审批与主代理提问语义。
+- `tests/gateway/test_gateway_session.py`：非流式 resume、停止与会话切换。
+- `tests/gateway/test_protocol_contract.py`：RPC / 事件名称契约。

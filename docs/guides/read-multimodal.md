@@ -87,7 +87,7 @@ meta 标记使这条消息在 restore / session 列表中不显示，仅用于�
 - PDF 超过 10 页未传 `pages` → 提示 `pages='1-10'` 示例
 - `pages` 页码越界 → 提示有效范围
 
-错误返回时 `ToolMessage.status="error"`,TUI 会以错误样式渲染。
+错误返回时 `ToolMessage.status="error"`，桌面工具卡会显示失败状态。
 
 ---
 

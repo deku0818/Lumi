@@ -70,7 +70,8 @@ server → client   {method:"event", params:<wire event>}       # 流式事件
 ```
 
 - **RPC 方法**：
-  - 流式：`send_message`、`resume`、`run_command`（运行斜杠命令）、`regenerate` / `edit_resend`（时间旅行，见下方「重新生成 / 编辑重发」）。
+  - 流式：`send_message`、`run_command`（运行斜杠命令）、`regenerate` / `edit_resend`（时间旅行，见下方「重新生成 / 编辑重发」）。
+  - 控制：`resume`（带 approval_id 原地回答审批/提问，非流式）、`stop`。
   - 会话：`list_sessions`、`new_session`、`switch_session`、`load_history`、`pin_session`、`rename_session`、`delete_session`。
   - 项目 / 工作目录：`list_projects`、`add_project`、`remove_project`、`rename_project`、`set_default_project`（设为/取消默认项目，至多一个，见下方「聊天必须绑定项目」）、`set_workspace`（绑定本会话项目，会话级、不动进程 cwd）。连接选项携带 `workspace`（本地 WS 为查询参数、SSH 为 open 帧字段），握手即将本会话引擎绑定到该项目。
   - 模型供应商：`list_providers`、`test_provider`、`set_provider`、`save_provider`、`delete_provider`。
@@ -105,13 +106,11 @@ shell / 后台任务会话等全局单例由 `shutdown_shared_runtime()` 在 lif
 - **前端配合**（`desktop/src/`）：每会话一条独立逻辑通道（`connsRef[key]`，`key = sessionKey(backend, thread)` 复合键——IM channel 的 thread_id 按 chat_id 确定性派生，同一飞书群在本地/远程两台 server 上 thread 同名，只用 thread 当键会让两条会话在 client 里塌缩成一条，故会话身份一律带机器维度；切到别的会话不碰本会话连接）；连接选项带 `thread`（本地为 URL 查询参数、SSH 为 open 帧字段，含 Ctrl+R 重载后点回会话的初次连接），后端据此在建空 bridge 前先认领回 detached 会话；`approval` / `clarify` 改按 `approval_id` 排队（渲染队首、逐个出队，并发审批不互相覆盖），重连重发按 `approval_id` 去重；`running` 据 `gateway.ready.running` 复位（断连时 `sendMessage` 的 catch 已置 false）；状态行计时由会话状态里的 `runStart` 推算（开轮时取本地时刻，重连 / 重载取 `run_started_at`），切会话、重连都不归零。
 - **边界**：仅 sidecar 存活的断连可救（**Case 1**）；**后端进程重启（Case 2）** 不幸存——in-memory Future 随进程消失，刻意不做落盘（见 [approval-inflight.md](./approval-inflight.md)）。`switch_session` 切回**同 thread**且有活跃轮时不收尾本轮（早返回），避免误杀正挂着的审批。
 
-## 子代理事件归属（多层委派）
+## 子代理观测与历史兼容
 
-子代理（`agent` 工具）可多层委派（`agents.max_delegation_depth` 默认 3，主 agent 为第 0 层）。前端按 `parent_run_id` 把子代理事件聚成轻量分组卡片展示——**该标记仅用于展示，故归属错误不影响功能**。
+持久子代理使用独立的 `subagent.event` 与按 seq 分页的历史，不进入主对话 reducer。桌面通过 `useSubagents`、观察器和时间线投影，按实例展示多轮任务、正文、工具与问题；视图只读，后续任务由主 Agent 经 `agent_message` 派发。完整边界和模块见 [子代理架构](agents.md)。
 
-`bridge/core.py` 的 `_active_agent_runs` 是 `set[str]`：`on_tool_start` 且工具名 ∈ `SUBAGENT_SPAWNING_TOOLS`（agent / workflow）时登记，每轮开始清空、工具结束不移除（后台子代理工具返回后仍在产事件）。流式事件与审批 / 澄清（custom event 自带 `parent_ids`）共用 `_resolve_subagent_parent`：从 `parent_ids`（root→直接父序）正序取首个活跃 run，并行兄弟可精确归属。
-
-**已知限制**（展示层、功能零影响）：孙及更深活动展平到顶层子代理卡片，看不到层级树——子代理经 `create_agent(checkpoint=None)` 无 checkpointer，主图不保留其嵌套结构。
+旧 `agent` 工具产生的 `parent_run_id` 内嵌渲染仍保留读取兼容，见 [历史说明](../archive/subagent-rendering.md)。不能将该兼容路径的无 checkpointer、子事件丢弃等限制套用到当前持久子代理。
 
 ## 会话管理
 
@@ -200,16 +199,13 @@ agent 运行时仍可发消息：消息不打断当前轮，而是在**下一个
   输入的凭证会跟着没——这正是 `SettingsDialog` 给渠道页加 `forceMount` 要防的事。作用域外的
   新建入口（项目页/定时页的「新建」按钮）则各自 `disabled`。
 - **失败原因**：`Gateway.lastError`（1008 → `auth`，其余 → `unreachable`，连上即清空）经 App 的
-  `machineErr` 随 context 下发。「连接」列表的机器行平时显示地址，连不上时**就地换成人话**
-  （令牌无效，连接被拒绝 / 连不上，请检查地址与网络），地址退到悬停 title；显示的是实时连接态而非
-  某次测试的快照，机器自愈后红字自己消失，故不需要「重试」按钮。新增机器的「保存」也不再自跑一次
-  检测：保存后立刻建立的控制连接本身就是检测，结论长期挂在行上。
+  `machineErr` 随 context 下发。SSH 主机的准备与失败阶段由连接进度面板展示，并支持重试；Gateway 的连接态决定业务面板是否可用。原服务地址 / token 表单已移除，不能将旧 WS 鉴权状态当作 SSH 用户认证提示。
 
 ## 模型供应商管理
 
 用户自定义的「连接 + 模型」持久化在 `~/.lumi/lumi.json` 的 `providers` 分区（明文，`chmod 600`，含 `api_key`），由 `lumi/models/provider_store.py` 读写——textual-free，desktop 前端经 RPC 读写。
 
-- **数据模型**：一个 **profile** = 一套连接（`name` / `base_url` / `api_key`）+ 该连接下的一组 `models`；`active` 指向「某 profile 下的某个 model」。协议（OpenAI / Anthropic 客户端）仍由 model 名经 `lumi/models/manager.detect_protocol` 自动判定，无需配置。`provider_store` 兼容旧格式（单 `model` 字段、`active` 为字符串 id），读取时自动迁移并把失效 `active` 归位到首个可用模型。
+- **数据模型**：一个 **profile** = 一套连接（`name` / `base_url` / `api_key`）+ 该连接下的一组 `models`；`active` 指向「某 profile 下的某个 model」。新 profile 显式保存 `protocol`（openai / responses / anthropic / gemini）、`compatibility` 与界面 `preset`，连接测试与实际调用共用。旧 profile 未指定接口时保留名称判定与 SDK 路由；接口和思考回传见 [thinking.md](thinking.md)。`provider_store` 兼容旧格式（单 `model` 字段、`active` 为字符串 id），读取时自动迁移并把失效 `active` 归位到首个可用模型。
 - **运行时生效**：模型是会话属性，每轮开跑前 `bridge.align_session_model()` 对齐 `context.model_name` / `provider`，连接由 `provider_store.resolve()` 解析。
 - **RPC**：`list_providers`（列全部 profile + active）、`save_provider` / `delete_provider`（增删改，返回刷新后的 `{profiles, active}`）、`set_provider`（切换 active，返回 `{active, model}`）、`test_provider`（用给定连接对模型发最小请求验证可达，15s 短超时、不缓存不重试）。provider 写类 RPC（`set/save/delete_provider`、`set_effort`、`set_classifier`、`set_titler`）改的是机器级配置（同步读改写，单事件循环内不交错），**不持** `run.lock`——持锁只会让改档位 / 默认模型挂到本轮结束，新配置在下一轮开跑前对齐生效；只有改本会话运行时 context 的 `set_session_model` 持锁。
 - **前端**：`SettingsDialog` + `ProvidersPanel` 完成增 / 删 / 改 / 测试；`ModelPicker`（顶栏）做快速切换。
@@ -278,7 +274,7 @@ cron 子系统是进程级资源（与会话无关）：serve 在 lifespan 中�
 
 `+` 按钮 / 拖拽 / 粘贴均经 `addFiles()` 加入附件，按 MIME 分两路：
 
-- **图片**：`FileReader` 读成 base64 data URL，发送时拆为 Anthropic 原生 `image` 块（后端按模型再转 OpenAI/Bedrock），气泡里渲染缩略图。
+- **图片**：`FileReader` 读成 base64 data URL，发送时拆为 Anthropic 原生 `image` 块（后端按所选模型接口适配），气泡里渲染缩略图。
 - **其它文件（PDF / 视频 / docx…）**：经 Electron `webUtils.getPathForFile`（`preload.cjs` 暴露；Electron 33 起 `File.path` 已移除）取**绝对路径**，发送时以 `<attached-file>路径</attached-file>` 文本块注入消息，Agent 用 `read` 工具按路径读取。读取遵循现有权限规则。取不到路径（如非文件系统来源的拖拽）不静默吞掉，经 toast 提示失败。
 
 `<attached-file>` 是纯模型侧约定（agent 用 read 读取路径）：前端经 wire `files` 参数只发路径数组，`bridge._build_user_message` 统一拼标签块注入 content（`injected_prefix` 计数）并把 `{path, name}` 写进显示声明 `lumi.items` 的 `files`；历史恢复的文件胶囊直接读 items，不解析正文。标签名 `ATTACHED_FILE_TAG` 定义在 `lumi/utils/constants.py`。气泡内文件渲染成品牌金描边胶囊（仅文件名 + hover tooltip）。
@@ -373,7 +369,7 @@ macOS 关窗后应用驻留 Dock，sidecar 保持运行，Dock 唤起（activate
 | `desktop/src/components/BgTasksDrawer.tsx` | 后台任务模块（`BgTasksSection`，运行中卡片 + 已完成折叠组） |
 | `desktop/src/components/{ProjectsPage,DirBrowser}.tsx` | 项目管理页 + 目录浏览（新建项目） |
 | `desktop/src/i18n.ts` | 国际化（中文 / English） |
-| `lumi/gateway/channels/ws.py` | FastAPI WS 端点 + RPC dispatch |
+| `lumi/gateway/channels/ws.py` | FastAPI WS / HTTP 传输端点，RPC 编排在 GatewaySession |
 | `lumi/gateway/projects.py` | 项目清单持久化（`~/.lumi/lumi.json` 的 `projects` 分区） |
 | `lumi/gateway/protocol.py` | BridgeEvent → wire 序列化 |
 | `lumi/gateway/cron_rpc.py` | 定时任务 RPC 方法实现 |

@@ -81,7 +81,7 @@
 
 # Dream + 召回端裁决（已实现，v0.2.12）
 
-> 状态：已实现（2026-06-30，v0.2.12）。范围**仅 desktop 短会话**（会话边界清晰）。长会话/飞书、extractMemories 搁置。
+> 当前有两种入口：desktop Stop hook / `/dream` 综合当前与其他近期会话；IM `/dream-session` / 每日 Dream 仅综合对应常驻会话。逐轮 extractMemories 未实现。
 >
 > 设计源于推倒 2026-06-30 删除的旧版 autoDream（综合质量不满意）。下文「三病根」即旧版与本方案的差异根因。
 > **实现落点**：`agents/memory/dream.py`（hook 门控 + runner）、`dream_lock.py`（锁/lastAt/节流）、
@@ -114,7 +114,7 @@
 5. **fork 当前主 agent → dream agent**：
    - system prompt = 主 agent **同一份**（`enable_memory=True`，记忆指令照常注入）—— **切病根①**
    - 初始 messages = 当前会话完整 `state["messages"]`（stop hook 当场可取，见 `on_agent_stop`）+ 末尾 consolidation `HumanMessage`（含 `transcriptDir` 路径）—— **切病根②**
-   - 工具含 read、bash 搜索 + write/edit 写记忆目录（bash 沿用权限路由）；headless（无 approval broker，非记忆写入安全拒）
+   - 工具含 read、bash 搜索 + write/edit 写记忆目录；全部写入与普通工具共用无人值守权限路由，无记忆目录免审
    - **派生 context 清掉 hooks**（沿用 subagent-hook 隔离原则）→ dream 自己 stop 不派发任何 hook，根上无自递归
    - 不共享 prompt 缓存（LangGraph 无 CC 的 fork-cache 机制；低频任务无所谓）
 6. **后台任务** fire-and-forget，注册 bg-task（面板可取消）；stop hook 不阻塞，照常 `goto END`。
@@ -164,5 +164,5 @@ IM 每日整理另有「先沉淀再压缩、dream 失败绝不压缩」的次�
 
 ## 旧基建复用清单
 
-- **回来（可更简）**：transcript 导出（改 text、只导其他会话、复用 `meta_message`）、门控阶梯、dream 状态持久化（sqlite `dream_state.db`）、bg-task 注册、记忆写入 carve-out。
+- **回来（可更简）**：transcript 导出（改 text、只导其他会话、复用 `meta_message`）、门控阶梯、dream 状态持久化（sqlite `dream_state.db`）、bg-task 注册。
 - **不回来**：内联 taxonomy（改复用 system prompt）、`enable_memory=False` 防递归（改 hook 隔离）、四阶段里的「自由判决」部分。

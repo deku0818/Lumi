@@ -12,7 +12,7 @@
 | **Stop** | 模型不调工具想结束 | `OnAgentStop` 节点（`nodes.py`） | first_intercept |
 | **PreToolUse** | 工具执行前 | `tool_executor` 节点开头 | collect |
 | **PostToolUse** | 工具结果合并后 | `tool_executor` 节点末尾 | collect |
-| **UserPromptSubmit** | 每轮模型调用前 | `PreprocessMessages` 节点（`nodes.preprocess_messages`） | collect |
+| **UserPromptSubmit** | 用户轮入口及 PTL 折返压缩后的预处理；普通工具循环不重复经过 | `PreprocessMessages` 节点（`nodes.preprocess_messages`） | collect |
 
 **为何 Stop 用独立节点**：`is_use_tool` 是纯条件路由函数，只能返回字符串、不能返回
 `Command`。而 hook 要能注入消息（`AdditionalContext`）或改路由（`Block`），必须落在
@@ -117,9 +117,9 @@ Stop hook 照常分发，各自有 depth 闸。workflow 子代理的 `depth` 为
 ## 内部工具
 
 `is_internal_tool`（`structured_tool.py` 的 `INTERNAL_TOOL_NAMES` 单一事实源）判定框架
-内部伪工具（当前仅 `__structured_output__`）。内部工具：(1) 不暴露给用户 hook 的
-PreToolUse/PostToolUse payload（宽 matcher 不会误触发）；(2) **纯内部批次**绕过权限审批
-快速进 ToolExecutor，但与其他工具**混合的批次不绕过**，照常走权限评估。
+内部工具（当前仅 `__structured_output__`）不暴露给用户 hook 的
+PreToolUse/PostToolUse payload（宽 matcher 不会误触发）。其权限仍逐个经过统一规则，
+内置 ALLOW 可被用户的 ask / deny 覆盖；纯内部与混合批次没有审批豁免差异。
 
 ## 关键文件
 

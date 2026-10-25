@@ -57,8 +57,9 @@ Desktop 端：`lumi serve` 在 lifespan 中经 `setup_cron()` 启动调度器，
 
 1. 经注入的 `stream_runner`（`lumi/gateway/cron_stream.py`）新建一个 AgentBridge 执行，
    落在专属的 `cron-` 前缀 thread 中（checkpointer 由 bridge 自带），像普通会话一样可回看、可续聊
-2. 将任务的 `prompt` 作为输入，`tool_mode` 设为 `auto`（分类器逐个裁决）；bridge 以
-   `interactive=False` 初始化、不接审批通道，需人工审批的操作直接自动拒绝、`ask` 直接取消
+2. 将任务的 `prompt` 作为合成输入；bridge 以 `interactive=False` 初始化、不接审批通道，
+   工具按全局无人值守模式（`auto` 或 `privileged`）执行，deny 始终拒绝；`ask` 直接取消。
+   模式解析见 [权限架构](permissions.md)
 3. 使用 `asyncio.wait_for` 限制执行时间，默认超时 6000 秒（100 分钟）
 4. 执行完成后通过 DeliveryManager 广播结果到所有已注册的投递通道
 5. 记录执行日志到 RunLog（含本次执行的 `thread_id`）
@@ -89,8 +90,7 @@ cron 层**不做重试**：模型调用的瞬态错误（限流 / 5xx / 断连�
 重试过，到 Scheduler 的失败（含整轮超时）按最终结果记为 `failed` / `timeout`，写入
 执行日志并广播，等下一次调度。一次性（at）任务无论成败执行完即删除。
 
-`Job.consecutive_errors` 是早期 cron 级重试留下的历史字段，仅为兼容旧 `jobs.json`
-保留，不再更新。
+旧 `jobs.json` 中的 `consecutive_errors` 会在读取时忽略，当前 `Job` 不再声明或写入该字段。
 
 ---
 
@@ -127,7 +127,7 @@ Scheduler 启动时检查每个启用的任务是否有离线期间错过的执�
       "prompt": "总结今天的待办事项",
       "enabled": true,
       "created_at": "2025-01-15T08:00:00",
-      "consecutive_errors": 0
+      "project_dir": "/path/to/project"
     }
   ]
 }

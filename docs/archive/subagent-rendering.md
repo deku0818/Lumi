@@ -1,10 +1,10 @@
 # Sub-Agent 中断与渲染
 
-本文档记录 desktop 前端如何渲染子代理执行反馈。
+本文记录旧 `agent` 工具的内嵌渲染，供历史记录兼容维护时查阅。
 
 > 下文为历史 `agent` 工具的内嵌渲染协议。持久 subagent 已改用
 > `agent_create` / `agent_list` / `agent_message`，新增独立历史和 `subagent.event`
-> 只读观测协议，Desktop 已接入独立右栏与多轮详情。当前实现见 [agents.md](agents.md)。
+> 只读观测协议，Desktop 已接入独立右栏与多轮详情。当前实现见 [子代理架构](../architecture/agents.md)。
 
 ---
 

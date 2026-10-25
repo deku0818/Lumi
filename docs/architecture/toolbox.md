@@ -16,22 +16,23 @@ Agent 任务工具链的探测与安装。实现在 `lumi/gateway/toolbox.py`（
 | 飞书集成 | lark-cli（机器级）+ 技能包（**项目级**） | 「设置 → 渠道 → 飞书」接入体检的「本地环境」组就地一键装 |
 
 - **uv**：一个二进制 = 整个 Python 生态（`uv run --python 3.12`、`uvx`）。
-- **ripgrep**：现有纯 Python 降级链保留作兜底；装上后大仓库搜索快一个数量级。
+- **ripgrep**：模型优先通过 Bash 使用 rg 搜索；未安装时使用系统 find / grep，不再提供内置 grep / glob 工具。
 - **Node.js**：官方 tarball（自带 npm），agent 的 JS 任务 + lark-cli 的 npm 安装路径。
 - **OfficeCLI**：Office 文档引擎（.NET 自包含单二进制，免解压直落 bin_dir），docx/xlsx/pptx → 自包含 HTML 的预览转换靠它（`gateway/office_rpc.py` 的 `render_office`）；缺失时 Office 文件降级为「用系统应用打开」，预览面板可就地引导安装。后端只有 `ALL_TOOLS` 单枚举——环境页的「核心 / 可选」两栏是纯展示分组，由前端 `EnvPanel` 独家持有。
-- **飞书技能包**：占模型上下文（description 常驻注入），按「谁用谁装」装到渠道绑定项目的 `.lumi/skills/`，不进全局、不在环境页；未绑定项目时退回全局层兜底。
+- **飞书技能包**：占模型上下文（description 常驻注入），按「谁用谁装」装到渠道绑定项目的 `.lumi/skills/`，不进全局、不在环境页；未绑定项目时不能同步技能包。
 
 ## 目录布局
 
-**工具箱是机器级的，不随 cwd 漂移**：显式指定过配置目录（`--config-dir` / `LUMI_CONFIG_DIR`）就跟着它，否则恒为 `~/.lumi`（`LumiConfig.toolbox_dir`，`bin_dir` / node 树都由它派生）。配置层本身仍走发现链，两者只在这一点上分开——不分开的话，在任何带 `.lumi/` 的项目里启动的 serve / headless / CLI 各看到一个空工具箱，桌面端刚装好的 rg 在那儿显示成「缺失」。测试与容器设 `LUMI_CONFIG_DIR` 时，工具箱与 `skills/`、`cache/` 一并隔离：
+**工具箱是机器级的，不随 cwd 漂移**：显式指定过配置目录（内部构造参数 / `LUMI_CONFIG_DIR`）就跟着它，否则恒为 `~/.lumi`（`LumiConfig.toolbox_dir`，`bin_dir` / node 树都由它派生）。配置层本身仍走发现链，两者只在这一点上分开——不分开的话，在任何带 `.lumi/` 的项目里启动的 serve / headless / CLI 各看到一个空工具箱，桌面端刚装好的 rg 在那儿显示成「缺失」。测试与容器设 `LUMI_CONFIG_DIR` 时，工具箱与 `skills/`、`cache/` 一并隔离：
 
 ```
 ~/.lumi/            # 即 <工具箱根目录>（LumiConfig.toolbox_dir）
   bin/              # 统一入口：uv、rg 实体；node/npm/npx、lark-cli 为 symlink（Windows 为 .cmd shim）
-  node/             # Node tarball 解压树（npm i -g 的全局包也落在这棵树里）
+  node/             # Node tarball 解压树
+  npm-global/       # lark-cli 专用 npm prefix
 ```
 
-`npm i -g @larksuite/cli` 用工具箱 npm 时默认 prefix 即 `node/` 树，装出的 `lark-cli` 接入 `bin/`；卸载 = 删 `node/` + 清 `bin/` 链接，干净可逆。**但落点恒问 `npm prefix -g`、不按这条默认硬拼**（原因见 `_npm_global_bin` 的注释）。
+`install_lark_cli` 无论使用系统还是工具箱 npm，均传 `--prefix <工具箱根>/npm-global`，再将可执行入口链接到 `bin/`。不写系统 npm 的全局目录。移除自装 lark-cli 时清理该 prefix 和对应入口，Node 安装可单独保留。
 
 ## 探测与优先级
 
@@ -55,7 +56,7 @@ Agent 任务工具链的探测与安装。实现在 `lumi/gateway/toolbox.py`（
 
 ## 命令行入口与 agent 自助安装
 
-`lumi env status` / `lumi env install [uv|node|rg]`（`lumi/cli.py`）是同一套 toolbox 的命令行面，供无 GUI 的 serve 机器与 **agent 自己**使用——agent 可以在会话里带零基础用户把环境装齐，用户只需回答装或不装。逐项装而非一次 `all`：一项失败不连累后面（rg 可选，失败不拦路）。已装的一律跳过，这条规矩只写在 `install_missing` 里，桌面按钮与命令行共用。
+`lumi env status` / `lumi env install [uv|node|rg|officecli]`（`lumi/cli.py`）是同一套 toolbox 的命令行面，供无 GUI 的 serve 机器与 **agent 自己**使用——agent 可以在会话里带零基础用户把环境装齐，用户只需回答装或不装。CLI 留空 target 时逐项安装全部缺失工具，一项失败继续其余项；单项安装传具体名称。已装的一律跳过，这条规矩只写在 `install_missing` 里，桌面按钮与命令行共用。
 
 `inject_path()` 旁的 `_export_lumi_bin()` 再补一个 `LUMI_BIN`：本 CLI 的可执行入口。打包版后端在 app 的 resources 目录里、**不在 PATH 上**，agent 的 shell 无从定位它（技能里写 `"${LUMI_BIN:-lumi}"`，Windows 的 cmd 写 `"%LUMI_BIN%"`）。配置目录不跟着导（理由见 `_export_lumi_bin` 的注释）。
 
@@ -71,8 +72,8 @@ Agent 任务工具链的探测与安装。实现在 `lumi/gateway/toolbox.py`（
 | --- | --- |
 | `uv` / `rg` | 下载 → 校验 → 从包内提取单二进制到 `bin/`，chmod 755 |
 | `node` | 下载 → 解压整棵树到 `node/`（剥单一顶层目录）→ `node`/`npm`/`npx` 链入 `bin/` |
-| `all` | 串行只装 `missing` 的核心工具（进度清晰、失败好归因），`system`/`toolbox` 跳过 |
-| `lark-cli` | **只走 npm**（它的官方分发渠道即 npm 包）：`npm i -g @larksuite/cli` → 装完若不在 PATH 上，按 `npm prefix -g` 报出的目录链入 `bin/`。缺 npm 时**不代装 node**，抛错由体检把人引到「设置 → 环境」；npm 失败带出原文，不再静默降级 |
+| `all` | 串行只装 `missing` 的全部工具（进度清晰、失败好归因），`system`/`toolbox` 跳过 |
+| `lark-cli` | **只走 npm**（它的官方分发渠道即 npm 包）：`npm install -g --prefix <工具箱根>/npm-global @larksuite/cli` → 将该 prefix 的命令入口链入 `bin/`。缺 npm 时**不代装 node**，抛错由体检把人引到「设置 → 环境」；npm 失败带出原文，不再静默降级 |
 | `feishu-skills` | `lark-cli skills list/read` 导出到 `<项目>/.lumi/skills/`，按 frontmatter `version` 增量；子进程冷启动 ~200ms，共享线程池并发导出 |
 
 技能清单读取（`lark_skill_versions`）**必须区分 `None` 与空 dict**：`None` = 清单读不到（cli 过旧等），当成「0 个技能待装」会让体检报 error 而安装是空操作，永远修不绿——此时正确出路是升级 cli，故不给 `fix_action`。同理 `skills_status` 把缺失项计入 `outdated`，否则 cli 升级新增的技能永远不会提示安装。
@@ -84,7 +85,7 @@ Agent 任务工具链的探测与安装。实现在 `lumi/gateway/toolbox.py`（
 - **事件** `env.progress{target, phase, percent}`：节流到「阶段变化或整数百分比前进」才广播；`percent = -1` 表示进度不可知（解压 / npm 阶段）。`target` 恒为具体组件名——装齐时逐工具下发（`all` 永不上 progress 线），前端各行各显示各的；每装完一个工具补发「完成 100%」终态，该行不停在最后一条脉冲。
 - **事件** `env.state{tools, target, bin_dir, error?}`：一次安装结束后的全量状态广播，所有连接同步刷新（与 `bg_tasks` 的「快照广播、前端过滤」同范式）。带 `target` 是因为多面板各自订阅——无 target 时一处的安装结束会误清另一处的进度、提前重跑无关体检。
 
-**全局互斥**：`_installing` 单值即不变量本身。target 之间有重叠（`all` ⊃ ALL_TOOLS，`lark-cli` 经 npm 写进 `node/` 树），并行会让两条线程写同一二进制 / rmtree 同一棵树，故任一安装进行中即拒绝新安装（返回 `started: false`）。
+**全局互斥**：`_installing` 单值即不变量本身。target 之间有重叠（`all` ⊃ ALL_TOOLS，组件可能更新被后续安装使用的命令与入口），并行会让两条线程写同一二进制 / rmtree 同一棵树，故任一安装进行中即拒绝新安装（返回 `started: false`）。
 
 ## 前端
 
@@ -94,5 +95,5 @@ Agent 任务工具链的探测与安装。实现在 `lumi/gateway/toolbox.py`（
 
 ## 与现有机制的衔接
 
-- **rg 降级链**：保留，工具箱只是让降级不再发生。
+- **搜索**：rg 是可选工具；搜索命令与降级规则见 [搜索指南](../guides/grep-glob.md)。
 - **妙记体检**：lark-cli 相关检查项与本地环境组共用同一套 `detect`，装完重跑即绿。

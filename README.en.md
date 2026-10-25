@@ -2,7 +2,7 @@
 
 [![Python 3.12+](https://img.shields.io/badge/python-3.12+-blue.svg)](https://www.python.org/downloads/)
 [![License: MIT](https://img.shields.io/badge/License-MIT-green.svg)](LICENSE)
-[![Version](https://img.shields.io/badge/version-0.2.99-orange.svg)](CHANGELOG.md)
+[![Version](https://img.shields.io/badge/version-0.3.13-orange.svg)](CHANGELOG.md)
 [![LangGraph](https://img.shields.io/badge/LangGraph-powered-purple.svg)](https://langchain-ai.github.io/langgraph/)
 [![Electron](https://img.shields.io/badge/Desktop-Electron-2ea6ff.svg)](https://www.electronjs.org/)
 
@@ -10,7 +10,7 @@
 
 **An open-source AI coworker.** Talk to it in a desktop app, or just @ it inside Feishu (Lark) — and actually hand off your daily work to get done.
 
-It's more than chat: it has memory, uses tools, runs scheduled jobs, reads your files, and can automatically send you the notes after a meeting ends. Built for everyone, not just programmers.
+It's more than chat: it has memory, uses tools, runs scheduled jobs, reads your files, and can follow up when new Feishu Minutes are ready. Built for everyone, not just programmers.
 
 <p align="center">
   <img src="docs/images/project-home.png" width="860" alt="Lumi project home">
@@ -35,11 +35,9 @@ It remembers your preferences and project context ([persistent memory](docs/guid
 
 No tool-switching — add Lumi to Feishu (Lark) and it's a coworker in your chats, always on call. DM it, or @ it in a group; send text, images, and files. See the [Feishu setup guide](docs/guides/feishu.md).
 
-### ✨ The meeting ends, and the notes are already there
+### ✨ Follow up when meeting transcripts are ready
 
-Turn on "Meeting Minutes" and just **record a voice memo** or **hold a meeting (with cloud recording on)** — Feishu generates the Minutes, and Lumi automatically fetches the **transcript** (with speakers and timestamps), writes it up, and pushes the notes to your DM with the bot. **In practice it lands ~20 seconds after you stop recording — with zero clicks from you.**
-
-> By the time you walk out of the meeting room, the notes are already waiting in Feishu.
+Turn on "Meeting Minutes" and complete user authorization. When a recording or cloud-recorded meeting produces new Minutes, Lumi follows up in your DM with the bot and asks what to do next. You can request a transcript, meeting notes or follow-up tasks. See the [Feishu guide](docs/guides/feishu.md).
 
 ### And more
 
@@ -56,7 +54,7 @@ Turn on "Meeting Minutes" and just **record a voice memo** or **hold a meeting (
 - **Two ways in, one brain** — the desktop app for focused deep work, Feishu for quick hand-offs; same backend, same memory and config.
 - **Your data stays on your machine** — open source, [MIT-licensed](LICENSE), runs locally; model keys and conversations live on your own machine. Self-hosted remote deployment is supported too.
 - **Extensible** — [skills](docs/guides/slash-commands.md), [sub-agents](docs/guides/agents.md), the [MCP protocol](https://modelcontextprotocol.io/), [scheduled jobs](docs/guides/cron.md), [multi-agent workflows](docs/architecture/workflow.md) — most of it extends by config, no code changes.
-- **Model freedom** — OpenAI / Anthropic / Bedrock / any OpenAI-compatible API, with per-model thinking levels, hot-swappable anytime.
+- **Model freedom** — OpenAI Chat / Responses, Anthropic, Gemini and compatible APIs, with per-model thinking levels, hot-swappable anytime.
 
 <p align="center">
   <img src="docs/images/mcp.png" width="760" alt="Lumi MCP panel">
@@ -65,6 +63,8 @@ Turn on "Meeting Minutes" and just **record a voice memo** or **hold a meeting (
 > Plug in external tools via MCP (Model Context Protocol): configured per machine and per "global / project" layer, over STDIO or HTTP, toggle and go.
 
 ## Quick start
+
+For everyday use, download a desktop installer from [GitHub Releases](https://github.com/deku0818/Lumi/releases) and follow the [installation guide](docs/guides/install.md). The commands below are for source development.
 
 Prerequisites: [uv](https://docs.astral.sh/uv/), Node.js (with npm), Python 3.12+ (uv installs it for you).
 
@@ -104,10 +104,10 @@ Open a project and you land on its home: the input island on the left starts a c
 
 ### Permissions and approval
 
-> ⚠️ **No sandbox**: Lumi does not isolate anything — the agent's tools (`bash`, file read/write, etc.) **act directly on your real local environment**. Permission rules + approval mode + workspace boundary are the only safety boundary — keep the default approval mode, and use `Privileged` (allow everything) with care.
+> ⚠️ **No sandbox**: tools act on the backend machine's real environment. The project directory selects configuration and resolves paths; it does not restrict file access.
 
-- **Permission rules** ([permissions.md](docs/guides/permissions.md)): loaded from user-level / project-shared / project-local, evaluated Deny → Allow → Unmatched, plus a workspace boundary check.
-- **Approval modes**: `Default` (permission engine decides) · `Accept Edits` (in-workspace edits auto-approved) · `Privileged` (allow all, dangerous ops still blocked) · `Auto` (an AI classifier decides approve / ask / reject).
+- **Permission rules** ([guide](docs/guides/permissions.md)): loaded from user, shared project and local project files; the strictest match wins: Deny > Ask > Allow > Unmatched. Read-only tools and memory writes have no approval exemption.
+- **Approval modes**: desktop defaults to `Auto` (AI approves or rejects each call). `Default` asks a human; `Accept Edits` allows unmatched file edits; `Privileged` rejects deny rules and allows everything else. Bash risk warnings do not block execution by themselves.
 
 ### Multiple machines / SSH
 
@@ -117,15 +117,15 @@ Host discovery reads SSH config including Include; system OpenSSH resolves users
 
 ## Distribution / deployment
 
-Build the complete desktop bundle with the local backend and portable remote wheel:
+Build the desktop bundle with the local backend and remote bootstrap script. Remote hosts install the matching `lumi-harness` version from PyPI through uv:
 
     ./scripts/build-desktop.sh
 
 Remote hosts support Linux (systemd user services with linger) and macOS (the logged-in user's launchd). Python 3 is required; uv prepares Python 3.12 and an isolated environment. No sudo or additional Lumi TCP port is needed. See the [SSH remote guide](docs/guides/deploy.md).
 
-Remote data remains in the SSH user's `~/.lumi`. A resident process holds an instance lock and communicates through a private Unix socket and the SSH byte stream. Disconnecting leaves it running. Desktop and remote versions must match. Version 0.2 service-address connections and automatic migration are no longer supported; existing services are never stopped automatically.
+Remote data remains in the SSH user's `~/.lumi`. A resident process holds an instance lock and communicates through a private Unix socket and the SSH byte stream. Disconnecting leaves it running. Desktop and remote versions must match. Older remote releases are automatically upgraded; newer remote releases require a desktop update. Installation failure keeps the old service; a failed switch attempts to restore it. Restarting interrupts unfinished tasks. Version 0.2 service-address connections and automatic migration are no longer supported; existing services are never stopped automatically.
 
-CLI, HTTP API and container deployments remain independent interfaces, not desktop remote connection methods.
+The [CLI](docs/guides/cli.md), Gateway RPC and file HTTP endpoints remain independent interfaces. Containers support standalone API deployments; see the [API guide](docs/guides/api.md).
 
 ## Built-in tools
 
@@ -136,7 +136,7 @@ CLI, HTTP API and container deployments remain independent interfaces, not deskt
 | `ask` | Ask the user a question and wait for the answer |
 | `cron` | Scheduled jobs (create / delete / pause / run) |
 | `skill` | Invoke a custom skill |
-| `agent` | Delegate a task to a sub-agent |
+| `agent_create` / `agent_list` / `agent_message` | Create, list and continue persistent sub-agents |
 | `workflow` | Multi-agent orchestration (a deterministic Python script scheduling a fleet of sub-agents) |
 | `background_task` | Manage background-running tasks (bash commands / sub-agents) |
 | `artifacts` | Surface produced files as artifacts in the UI to view / preview (incl. in-window Office preview) |
@@ -145,6 +145,8 @@ CLI, HTTP API and container deployments remain independent interfaces, not deskt
 Tool descriptions live in each tool function's docstring; external tools are wired in via MCP.
 
 ## Documentation
+
+[Documentation index](docs/README.md) · [Installation](docs/guides/install.md) · [CLI](docs/guides/cli.md) · [MCP](docs/guides/mcp.md) · [Backup and restore](docs/guides/backup.md)
 
 | Topic | Link | · | Topic | Link |
 |------|------|---|------|------|

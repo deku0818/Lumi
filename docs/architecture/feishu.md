@@ -2,7 +2,7 @@
 
 飞书（Lark）IM channel 的内部实现——把 Lumi Agent 接到飞书机器人，私聊 / 群 @ 即可对话。
 用户使用指南见 [`docs/guides/feishu.md`](../guides/feishu.md)。是首个 IM channel，设计可延伸到
-企业微信等（gateway 层的 channel 中立化见 [`refactor-plan.md`](./refactor-plan.md)）。
+企业微信等；gateway 与 Bridge 的当前分工见 [运行时总览](runtime.md)。
 
 ---
 
@@ -129,7 +129,7 @@ mention_key——`id=` 是**发送方应用**的 open_id（open_id 每应用一�
 - 多条消息按条注入、各自带 `<sender>`，回放逐条显示（不再合并成一段）。
 
 **斜杠命令**（解析在 `channels/commands.py`，渠道无关）：命令按类别天然定可用范围，无 surface
-标注机制——skill 命令（含 `/dream`）恒全 surface；渠道系统命令（`SYSTEM_COMMANDS`：/stop
+标注机制——skill 命令两端共用；内置记忆命令按会话载体分为 desktop `/dream` 与 IM `/dream-session`；渠道系统命令（`SYSTEM_COMMANDS`：/stop
 /clear /help）与运行时命令（`RUNTIME_COMMANDS`：/model /effort）恒仅 IM，不进
 `bridge.list_commands()`（desktop 有终止/删除按钮与模型选择器）。
 
@@ -190,7 +190,7 @@ mention_key——`id=` 是**发送方应用**的 open_id（open_id 每应用一�
 **审批语义**：`tool_mode` 取配置（`auto` AI 审批 / `privileged` 自动放行）。DENY 一律拒绝，ALLOW 一律执行；ASK 在特权模式执行、auto 模式交 AI。规则 / AI 拒绝及分类器异常仅拒绝对应调用，无人工审批回落。**ask 工具已禁用**——`BridgePool`
 默认 `disabled_tools=["ask"]`（经 `AgentBridge.initialize → create_agent(tools=…)`），模型无从
 调用，遇需澄清时自行判断而非弹卡片。子代理的审批事件带 `parent_run_id`，同样自动拒绝（先于子代理
-过滤处理，否则其 broker Future 无人收尾、该轮永挂）；子代理一律不带 `ask`。
+过滤处理，否则其 broker Future 无人收尾、该轮永挂）。持久 Lumi 子代理另保留 `ask` 将问题转交主 Agent，原生执行器同样通过持久回执回传问题；这不等于在飞书弹出子代理审批卡。
 
 ## 后台任务完成通知（notification poller）
 
@@ -342,7 +342,7 @@ FAILED 不上抛），成功与否看**快照时刻有没有推进**（`record_t
 
 desktop `设置 → 渠道`（`ChannelsPanel.tsx`，进 `SettingsDialog`）：机器人列表（每机器人一行：
 名称 + 项目 + 连接状态 + 开关 + 编辑，末尾「新建飞书机器人」虚线行、企业微信「即将支持」）→ 机器人配置弹窗（凭证 / 审批模式 / 群策略 / 白名单 / 绑定项目 +
-测试连接 + 保存并重连）。**绑定项目**（`WorkspacePicker`）不再手填路径：从该机器已登记的项目
+接入体检 + 保存并重连）。**绑定项目**（`WorkspacePicker`）不再手填路径：从该机器已登记的项目
 （`list_projects`）里下拉选，可内联「新建项目」（`DirBrowser` + `add_project`）；切换已绑定项目
 会弹确认提醒（保存后回收进行中的飞书会话、历史不丢），无项目时空态引导新建；已被其他机器人
 绑定的项目在下拉里置灰并标注被谁占用（1:1 约束）。已保存的机器人弹窗底部有「删除」（确认后

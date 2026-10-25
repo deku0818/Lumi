@@ -150,4 +150,4 @@ Desktop 右侧按实例展示运行状态与空闲历史，点击后在侧栏观
 | `desktop/src/components/Subagents.tsx` | 实例列表和只读详情 |
 
 Workflow 的临时执行单元仍使用 `create_subagent()`，保持一次性、无 checkpointer 的原有语义。
-历史 `agent` 工具的内嵌渲染协议仍保留读取兼容，见 [subagent-rendering.md](subagent-rendering.md)。
+历史 `agent` 工具的内嵌渲染协议仍保留读取兼容，见 [归档说明](../archive/subagent-rendering.md)。

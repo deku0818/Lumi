@@ -69,8 +69,7 @@
 | 改某模型的档位默认（`set_effort`） | ✅ 下一轮（未设会话级档位时） | ✅ 同左 | ✅ | ✅ |
 | 改连接凭证（base_url / api_key） | ✅ 下一轮 | ✅ | ✅ | ✅ |
 
-无内存缓存兜着这张表：`user_store.read_section` 每次读盘（`user_store.py:26`），
-`create_llm` 的实例缓存以**全部最终参数**为键（`manager.py:262`）——盘上一变就是新实例。
+`user_store.read_section` 每次读盘，`create_llm` 的实例缓存以**全部最终参数**为键——盘上一变就是新实例。
 
 **自愈**：会话模型指向的模型已不在任何连接下（用户删了模型或删了连接）时，`resolve()`
 就地清除该覆盖并落回默认。不校验的代价是拿死模型名打空连接，会话永久卡死。
@@ -85,7 +84,7 @@
 模型档位默认（profile.effort[model]） ← desktop ModelPicker 的 Effort 子菜单
 ```
 
-`context.effort = None` 表示"跟随 profile"，非 None 才绕过（`manager.py:217`）。
+`context.effort = None` 表示"跟随 profile"，非 None 才绕过（`create_llm` 的 effort 参数）。
 换模型即清会话级档位（`set_model` 一并清）——旧档位多半不在新模型的能力内；
 即便残留，`_valid_effort` 也会视同未设，不下发端点不认的值。
 
@@ -110,8 +109,8 @@ desktop 侧的 Effort 子菜单仍写 profile（按模型全局），这是有�
 
 | 入口 | 模型 |
 |---|---|
-| 子 agent | 其配置的 `model`（provider 留空，按名反查）；未配则跟随新会话默认（`graph.py:297`） |
-| 会话标题 / auto 审批分类器 | `titler` / `classifier` 用途指针；未配或失效 → 回退新会话默认（`provider_store.py:327`） |
+| 子 agent | 其配置的 `model`（provider 留空，按名反查）；未配则跟随新会话默认（`create_agent` 默认模型解析） |
+| 会话标题 / auto 审批分类器 | `titler` / `classifier` 用途指针；未配或失效 → 回退新会话默认（`provider_store.resolve_pointer`） |
 | 压缩摘要、结构化提取等内部链 | 跟随所在会话的模型，但 `apply_effort=False`——**不注入任何思考参数** |
 
 ## 六、UI 契约

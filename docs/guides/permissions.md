@@ -142,7 +142,7 @@ bash 复合命令（如 `git add . && git push`）会被拆分为独立子命令
 只读工具、记忆写入、Shell / Git / SSH 配置和权限配置都遵守同一规则，没有隐式免审或强制人工审批名单。
 同批调用独立审批后立即执行：一个被拒绝或等待审批，不影响其他已允许的调用。结果按原工具调用顺序写回；只有本批全部未执行且存在人工拒绝时才结束本轮，权限规则或 AI 拒绝会回给模型继续调整。用户点击停止仍会结束本轮。
 
-内置默认 allow 规则为 `cron`、`artifacts`、`__structured_output__`（框架结构化输出工具），均可通过配置覆盖。
+内置默认 allow 规则见下方「默认规则」，均可通过配置覆盖。
 
 ---
 
@@ -179,7 +179,7 @@ lumi --privileged-danger -p "执行所有迁移"
 
 设置保存在 `~/.lumi/lumi.json` 的 `settings.unattended_tool_mode` 字段，值为 `auto` 或 `privileged`。统一路由在没有审批通道时读取它；显式指定的 `auto` / `privileged` 保留，`lumi -p --privileged-danger` 仍可显式覆盖。`--accept-edits` 在无人值守入口也跟随全局设置。
 
-这些入口均无人工审批通道：禁止规则和 AI 拒绝的调用直接拒绝；AI 审批失败也仅拒绝对应调用，提问直接取消，不会挂起等待。子代理一律不带 `ask` 工具。飞书保留渠道配置的 `auto` / `privileged` 模式，主代理和前台子代理均无人工审批通道，不显示审核按钮。
+这些入口均无人工审批通道：禁止规则和 AI 拒绝的调用直接拒绝；AI 审批失败也仅拒绝对应调用，不会回落人工审批。cron / dream 的提问取消，Workflow 临时执行单元不带 `ask`；持久 Lumi 子代理保留 `ask`，将问题回传主 Agent 后结束当前轮，由主 Agent 回答并续聊。飞书主代理禁用 `ask`，保留渠道配置的 `auto` / `privileged` 模式，不显示审核按钮。外部 Codex / Claude Code 的执行权限见 [子 Agent 指南](agents.md)。
 
 ## Bash 命令安全警告
 
@@ -197,8 +197,9 @@ lumi --privileged-danger -p "执行所有迁移"
 
 ## 默认规则
 
-系统内置以下默认规则（可被用户配置覆盖）：
+系统内置以下默认规则（可被用户配置覆盖；定义在 `lumi/agents/permissions/models.py`）：
 
+- `agent_list` → allow（读取当前主会话拥有的子代理实例）
 - `cron` → allow
 - `artifacts` → allow（只呈现文件，不改动文件）
 - `__structured_output__` → allow（框架结构化输出工具）
