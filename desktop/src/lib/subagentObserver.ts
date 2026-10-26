@@ -1,5 +1,6 @@
 import type { Gateway } from '../gateway.ts'
 import type { SubagentEvent } from '../types.ts'
+import { errorMessage } from './utils.ts'
 
 type Client = Pick<Gateway, 'state' | 'onEvent' | 'observeSubagent' | 'subagentHistory' | 'unobserveSubagent'>
 export interface SubagentFeedUpdate {
@@ -35,7 +36,7 @@ export function observeSubagent(client: Client, agentId: string, after: number, 
         }
       } catch (error) {
         subscribe = true
-        if (active) update({ error: String(error instanceof Error ? error.message : error) })
+        if (active) update({ error: errorMessage(error) })
       }
       if (active) update({ loading: false })
     }

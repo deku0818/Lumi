@@ -340,6 +340,7 @@ async def test_parent_handles_question_using_existing_ask_and_agent_message(
             {**agent.definition, "executor": "codex"},
             1,
             "question",
+            title="测试任务",
         )
         receipt = await service.wait(first["turn_id"])
         assert receipt["status"] == "blocked"

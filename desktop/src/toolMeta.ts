@@ -58,7 +58,7 @@ const editArgs = (a: Record<string, unknown>, t: Translate): ToolArgs => ({
 const fileTitle = (a: Record<string, unknown>, _t: Translate, name: string) =>
   argStr(a.file_path) ? basename(argStr(a.file_path)) : name
 const TOOL_META: Record<string, ToolMeta> = {
-  agent_create: { icon: Bot, sum: 'delegate', status: 'subagent.status.running', title: (a, t) => clip(argStr(a.prompt) || t('subagent.title')), args: a => ({ text: argStr(a.prompt), chips: [argStr(a.name), argStr(a.cwd)].filter(Boolean) }) },
+  agent_create: { icon: Bot, sum: 'delegate', status: 'subagent.status.running', title: (a, t) => clip(argStr(a.title) || argStr(a.prompt) || t('subagent.title')), args: a => ({ text: argStr(a.prompt), chips: [argStr(a.name), argStr(a.cwd)].filter(Boolean) }) },
   agent_message: { icon: Bot, sum: 'followup', status: 'subagent.status.running', title: (a, t) => clip(argStr(a.prompt) || t('subagent.title')), args: a => ({ text: argStr(a.prompt), chips: [argStr(a.agent_id)].filter(Boolean) }) },
   agent_list: { icon: Bot, sum: 'listAgents', status: 'subagent.status.running', title: (_a, t) => t('subagent.title') },
   bash: { icon: SquareTerminal, sum: 'command', status: 'status.runCommand', title: (a, t) => clip(argStr(a.description) || t('tool.title.command')), args: bashArgs },

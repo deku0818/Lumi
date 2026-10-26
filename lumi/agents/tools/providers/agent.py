@@ -80,6 +80,10 @@ class AgentCreateInput(BaseModel):
         min_length=1,
         description="agent名称；可用 Agent 名称见 <system-reminder>",
     )
+    title: str = Field(
+        min_length=1,
+        description="简短、具体的任务标题，通常为 6–12 个字或 2–5 个单词。",
+    )
     cwd: str | None = Field(
         default=None,
         min_length=1,
@@ -142,6 +146,7 @@ async def agent_create(
     prompt: str,
     runtime: ToolRuntime,
     name: str,
+    title: str,
     cwd: str | None = None,
     run_in_background: bool = True,
 ) -> str:
@@ -170,6 +175,7 @@ async def agent_create(
             profile.model_dump(),
             depth + 1,
             prompt,
+            title=title,
             notify=run_in_background,
             request_key=_request_key(runtime, parent_id, "create"),
             env_extra=runtime.context.env_extra,

@@ -71,7 +71,7 @@ import { ApprovalDialog, type Decision } from './components/ApprovalDialog'
 import { ClarifyDialog, ASK_CANCELLED } from './components/ClarifyDialog'
 import { Sidebar } from './components/Sidebar'
 import { MachineIcon, MachinesProvider } from './components/MachineTabs'
-import { FileCards, contentUrl } from './components/Artifacts'
+import { contentUrl } from './components/Artifacts'
 import { BgTasksSection } from './components/BgTasksDrawer'
 import { PreviewWindow } from './components/PreviewWindow.tsx'
 import { emptyPreviewState, previewReducer } from './lib/previewState.ts'
@@ -91,11 +91,10 @@ import { DirBrowser } from './components/DirBrowser'
 import { CommandMenu } from './components/CommandMenu'
 import { Composer } from './components/Composer'
 import { AppTitleBar } from './components/AppTitleBar'
-import { StatusIndicator, ItemView } from './components/chat/ItemView'
+import { StatusIndicator } from './components/chat/ItemView'
 import { CopyButton, EditBubble, ForkButton, HoverActions, IconAction } from './components/chat/MessageActions.tsx'
-import { ToolGroup } from './components/chat/ToolViews'
+import { ChatContent, ChatSegment } from './components/chat/ChatContent'
 import { groupItems, segKey } from './lib/chatSegments'
-import { AgentGroup } from './components/chat/AgentViews'
 import { toast } from './components/Toast'
 import { isCommandMode, parseCommand, matchCommands } from './slash'
 import { clip, basename, botOfThread, machineColor, machineName, sessionKey, keyThread, keyBackend, beOf, FLOAT_GAP } from '@/lib/utils'
@@ -253,7 +252,7 @@ export default function App() {
   const seenCronRef = useRef(new Set<string>())
   const fileInputRef = useRef<HTMLInputElement>(null)
   const connsRef = useRef<Record<string, Gateway>>({})
-  const subagents = useSubagents(connsRef.current[active], active, keyThread(active), view === 'chat' || view === 'cronjob', railOpen)
+  const subagents = useSubagents(connsRef.current[active], active, keyThread(active), view === 'chat' || view === 'cronjob', railOpen && !(preview.owner === active && preview.expanded))
   const activeRef = useLatest(active)
   // activate 调用序号：判废晚到的建连结果（openConnection 悬置期间用户切走后不回拽）
   const activationSeqRef = useRef(0)
@@ -2310,6 +2309,12 @@ export default function App() {
   const selectedSubagent = railSessionVisible ? subagents.agents.find(agent => agent.agent_id === subagents.selectedId) : undefined
   const subagentExpanded = !!selectedSubagent && subagents.expanded
   const subagentSide = !!selectedSubagent && !subagentExpanded
+  const subagentDetail = selectedSubagent && <SubagentDetail
+    key={`${active}:${selectedSubagent.agent_id}`}
+    agent={selectedSubagent} detail={subagents.detail} position={subagents.position} expanded={subagentExpanded}
+    remote={remoteBackend} online={conn === 'open'}
+    onBack={subagents.close} onExpand={toggleSubagentExpanded} onRetry={subagents.retryDetail} onOpenFile={openPreview} onStop={stopSubagent}
+  />
   const hasPreview =
     (view === 'chat' || view === 'cronjob') && preview.owner === active && preview.files.length > 0 && !subagentSide && !subagentExpanded
   const previewExpanded = hasPreview && preview.expanded && railOpen
@@ -2325,12 +2330,7 @@ export default function App() {
   )
 
   function renderMainContent(): ReactNode {
-    if (subagentExpanded && selectedSubagent) return <SubagentDetail
-      key={`${active}:${selectedSubagent.agent_id}`}
-      agent={selectedSubagent} detail={subagents.detail} position={subagents.position} expanded
-      remote={remoteBackend} online={conn === 'open'}
-      onBack={subagents.close} onExpand={toggleSubagentExpanded} onRetry={subagents.retryDetail} onOpenFile={openPreview}
-    />
+    if (subagentExpanded) return subagentDetail
     if (view === 'newchat') return (
       <div className="new-chat-home flex-1 flex flex-col items-center justify-center px-6">
         <HomeBackdrop />
@@ -2409,7 +2409,7 @@ export default function App() {
                         停在顶部时首条内容不被遮；right-2 让开滚动条 */}
                 <div className="chat-top-fade pointer-events-none absolute left-0 right-2 top-0 z-10 h-8" />
                 <div ref={scrollRef} onScroll={onScroll} className="h-full overflow-auto" style={{ overflowAnchor: 'none' }}>
-                  <div className="chat-body max-w-3xl mx-auto w-full px-6 py-8 space-y-5">
+                  <ChatContent>
                     {historyStatus && (
                       <div className="h-6 flex justify-center items-center gap-2.5 text-xs text-muted-foreground" role="status">
                         {historyStatus}
@@ -2418,22 +2418,11 @@ export default function App() {
                     {segments.map((seg) => {
                       const key = seg.kind === 'item' && seg.item.kind === 'user' && seg.item.arrival
                         ? `arrival:${seg.item.arrival.id}` : segKey(seg)
-                      const node =
-                        seg.kind === 'tools' ? (
-                          <ToolGroup key={key} tools={seg.tools} onOpenSubagent={openSubagent} />
-                        ) : seg.kind === 'agent' ? (
-                          <AgentGroup key={key} items={seg.items} />
-                        ) : seg.kind === 'files' ? (
-                          <FileCards
-                            key={key}
-                            files={seg.files}
-                            onOpen={openPreview}
-                            activePath={hasPreview ? preview.activePath ?? undefined : undefined}
-                            remote={remoteBackend}
-                          />
-                        ) : (
-                          <ItemView key={key} item={seg.item} fileSrc={thumbSrc} onOpenImage={openImage} />
-                        )
+                      const node = <ChatSegment
+                        key={key} segment={seg} remote={remoteBackend}
+                        onOpenFile={openPreview} activePath={hasPreview ? preview.activePath ?? undefined : undefined}
+                        fileSrc={thumbSrc} onOpenImage={openImage}
+                      />
                       // 用户气泡编辑态：气泡原位换成可编辑框（Save 前零副作用）
                       const userItem =
                         seg.kind === 'item' && seg.item.kind === 'user' ? seg.item : null
@@ -2488,6 +2477,7 @@ export default function App() {
                     })}
                     {/* 运行 / 等待 / 后台任务显示状态，无活动时整行隐藏，历史留在右栏。 */}
                     <StatusIndicator
+                      variant="orbit"
                       items={items}
                       running={running || observingCronRun}
                       runStart={liveRun ? Date.parse(liveRun.started_at) : runStart}
@@ -2502,7 +2492,7 @@ export default function App() {
                       }}
                       failed={conn === 'failed'}
                     />
-                  </div>
+                  </ChatContent>
                 </div>
                 {showJump && (
                   <button
@@ -2675,12 +2665,7 @@ export default function App() {
             dot={railDot}
             enter={view === 'chat' && !hasPreview}
           >
-            {subagentSide && selectedSubagent && <SubagentDetail
-              key={`${active}:${selectedSubagent.agent_id}`}
-              agent={selectedSubagent} detail={subagents.detail} position={subagents.position} expanded={false}
-              remote={remoteBackend} online={conn === 'open'}
-              onBack={subagents.close} onExpand={toggleSubagentExpanded} onRetry={subagents.retryDetail} onOpenFile={openPreview}
-            />}
+            {subagentSide && subagentDetail}
             {hasPreview && (
               <PreviewWindow
                 key={active}
@@ -2697,7 +2682,7 @@ export default function App() {
               />
             )}
             <div className={previewExpanded || subagentSide ? 'hidden' : 'contents'} inert={previewExpanded || subagentSide}>
-              {railAgents && <SubagentsSection agents={subagents.agents} tasks={activeBgTasks} selectedId={subagents.selectedId} error={subagents.listError} onSelect={openSubagent} onStop={stopSubagent} />}
+              {railAgents && <SubagentsSection agents={subagents.agents} timelines={subagents.details} selectedId={subagents.selectedId} error={subagents.listError} onSelect={openSubagent} onStop={stopSubagent} />}
               {view === 'cronjob' && activeCronJob && (
                 // key=任务 id：换任务即重挂，节折叠态不跨任务残留（整栏开合在 App，不受影响）
                 <RunsSection

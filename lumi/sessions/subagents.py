@@ -36,6 +36,7 @@ class SubagentStore:
             CREATE TABLE IF NOT EXISTS subagents (
                 agent_id TEXT PRIMARY KEY, parent_id TEXT NOT NULL,
                 workspace TEXT NOT NULL, name TEXT NOT NULL, executor TEXT NOT NULL,
+                title TEXT NOT NULL DEFAULT '',
                 definition TEXT NOT NULL, depth INTEGER NOT NULL,
                 env_extra TEXT NOT NULL, tool_mode TEXT NOT NULL,
                 handle TEXT NOT NULL DEFAULT '{}', created_at REAL NOT NULL
@@ -61,6 +62,14 @@ class SubagentStore:
             CREATE INDEX IF NOT EXISTS subagent_deliveries_parent
                 ON subagent_deliveries(parent_id, delivered);
         """)
+        columns = {
+            row["name"] for row in self.conn.execute("PRAGMA table_info(subagents)")
+        }
+        if "title" not in columns:
+            self.conn.execute(
+                "ALTER TABLE subagents ADD COLUMN title TEXT NOT NULL DEFAULT ''"
+            )
+            self.conn.commit()
 
     def close(self) -> None:
         self.conn.close()
@@ -102,6 +111,8 @@ class SubagentStore:
         prompt: str,
         notify: bool,
         request_key: str | None = None,
+        *,
+        title: str,
     ) -> SubagentTurn:
         if previous := self.request(request_key):
             owner = self.agent(previous.agent_id)
@@ -110,13 +121,16 @@ class SubagentStore:
                 or owner.workspace != workspace
                 or owner.definition != definition
                 or previous.prompt != prompt
+                or owner.title != title
             ):
                 raise ValueError("请求标识已用于另一条创建请求")
             return previous
         agent_id = self._new_id("subagents", "agent_id", "a")
         with self.conn:
             self.conn.execute(
-                "INSERT INTO subagents VALUES (?,?,?,?,?,?,?,?,?,?,?)",
+                "INSERT INTO subagents (agent_id,parent_id,workspace,name,executor,"
+                "definition,depth,env_extra,tool_mode,handle,created_at,title) "
+                "VALUES (?,?,?,?,?,?,?,?,?,?,?,?)",
                 (
                     agent_id,
                     parent_id,
@@ -129,6 +143,7 @@ class SubagentStore:
                     tool_mode,
                     "{}",
                     time.time(),
+                    title,
                 ),
             )
             return self._submit(agent_id, prompt, notify, request_key)
@@ -368,10 +383,6 @@ class SubagentStore:
                 "SELECT turn_id,ordinal,status FROM subagent_turns WHERE agent_id=? AND status IN ('queued','running') ORDER BY ordinal LIMIT 1",
                 (agent.agent_id,),
             ).fetchone()
-            prompt = self.conn.execute(
-                "SELECT prompt FROM subagent_turns WHERE agent_id=? ORDER BY ordinal LIMIT 1",
-                (agent.agent_id,),
-            ).fetchone()[0]
             queued = self.conn.execute(
                 "SELECT COUNT(*) FROM subagent_turns WHERE agent_id=? AND status='queued'",
                 (agent.agent_id,),
@@ -380,7 +391,7 @@ class SubagentStore:
                 {
                     "agent_id": agent.agent_id,
                     "name": agent.name,
-                    "title": " ".join(prompt.split())[:80],
+                    "title": agent.title,
                     "executor": agent.executor,
                     "cwd": agent.workspace,
                     "status": active["status"] if active else "idle",

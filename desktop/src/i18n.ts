@@ -25,10 +25,9 @@ const ZH: Dict = {
   "tool.sum.listAgents.n": "查看了 {n} 次子代理",
 
   "subagent.title": "子代理",
+  "subagent.completedCount": "{n} 已完成",
   "subagent.runningCount": "{n} 运行中",
-  "subagent.round": "第 {n} 轮",
   "subagent.queuedCount": "{n} 条排队",
-  "subagent.idleCount": "空闲 · {n}",
   "subagent.status.queued": "排队中",
   "subagent.status.running": "处理中",
   "subagent.status.completed": "已完成",
@@ -49,8 +48,6 @@ const ZH: Dict = {
   "subagent.retry": "重新加载",
   "subagent.empty": "尚无处理记录",
   "subagent.disconnected": "连接已断开，恢复后自动补齐记录",
-  "subagent.taskLink": "查看子代理 · {id}",
-  "subagent.lastCompleted": "上一轮完成",
   "subagent.stopFailed": "未能停止执行",
 
   "ssh.secretValue": "密码或密钥口令",
@@ -829,9 +826,8 @@ const EN: Dict = {
 
   "subagent.title": "Subagents",
   "subagent.runningCount": "{n} running",
-  "subagent.round": "Turn {n}",
   "subagent.queuedCount": "{n} queued",
-  "subagent.idleCount": "Idle · {n}",
+  "subagent.completedCount": "{n} completed",
   "subagent.status.queued": "Queued",
   "subagent.status.running": "Running",
   "subagent.status.completed": "Completed",
@@ -852,8 +848,6 @@ const EN: Dict = {
   "subagent.retry": "Reload",
   "subagent.empty": "No execution records yet",
   "subagent.disconnected": "Disconnected. History will catch up when reconnected.",
-  "subagent.taskLink": "View subagent · {id}",
-  "subagent.lastCompleted": "Last turn completed",
   "subagent.stopFailed": "Could not stop execution",
 
   "ssh.secretValue": "Password or key passphrase",

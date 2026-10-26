@@ -13,14 +13,14 @@ Lumi 不会自动安装或登录这些程序。开关保存在项目的 `.lumi/a
 
 ```python
 # name 必填，从可用清单中选择现有 Lumi 角色
-agent_create(name="translator", prompt="翻译这段文字")
+agent_create(name="translator", title="翻译任务", prompt="翻译这段文字")
 
 # 在当前项目的子 Agent 菜单开启后，调用原生 CLI，无需角色 Markdown 文件
-agent_create(name="codex", prompt="调查测试失败的原因")
-agent_create(name="claude", prompt="审查当前改动")
+agent_create(name="codex", title="测试失败调查", prompt="调查测试失败的原因")
+agent_create(name="claude", title="代码审查", prompt="审查当前改动")
 
 # 可选择其他工作目录，相对路径基于主会话的当前目录
-agent_create(name="claude", cwd="../another-project", prompt="调查这个项目")
+agent_create(name="claude", title="项目调查", cwd="../another-project", prompt="调查这个项目")
 
 agent_list()
 agent_message(agent_id="创建时返回的 ID", prompt="请继续验证第二个结论")
@@ -34,7 +34,9 @@ Codex / Claude Code 自己的原生会话 ID 由 Lumi 内部保存，无需模�
 `codex`、`claude` 是保留名称。实例归属主会话，不按目录隔离；`cwd` 默认继承创建时的
 主会话目录，后续续聊始终沿用该实例保存的目录。同一主会话切换目录后，仍可查询和联系
 此前创建的 subagent；不同会话在相同目录工作也不能互相访问对方的实例。
-桌面右侧的子代理列表按实例展示状态；点击可查看每轮任务、回复、工具执行和错误，支持在
+创建时 `title` 必填，由主 Agent 填写简短、具体的任务标题，通常为 6–12 个字或 2–5 个单词，用于区分同名实例；`name` 仍从可用角色或原生入口中选择。
+
+桌面右侧的子代理列表按任务标题和角色名称展示实时状态；点击可查看每轮任务、回复、工具执行和错误，支持在
 侧栏或主区域查看。详情只读，后续消息仍由主 Agent 通过 `agent_message` 派发。
 本机 Codex 实例可从详情头部打开原生会话；停止执行会同时取消该实例尚未开始的排队消息。
 
@@ -56,7 +58,7 @@ description: 专业翻译助手，支持中英互译
 翻译时保持原文的语气和风格，专业术语需准确。
 ```
 
-启动 Lumi 后，主 Agent 会自动发现该角色，通过 `agent_create(name="translator", prompt=...)` 使用。
+启动 Lumi 后，主 Agent 会自动发现该角色，通过 `agent_create(name="translator", title="翻译任务", prompt=...)` 使用。
 
 ---
 

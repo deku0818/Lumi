@@ -40,14 +40,26 @@ async def test_stop_instance_cancels_running_and_queued_turns_only(
     session = SimpleNamespace(current_thread_id="parent")
     try:
         first = service.create(
-            "parent", str(tmp_path), {"name": "worker"}, 1, "running", notify=False
+            "parent",
+            str(tmp_path),
+            {"name": "worker"},
+            1,
+            "running",
+            notify=False,
+            title="测试任务",
         )
         second = service.message(
             "parent", first["agent_id"], "queued one", notify=False
         )
         third = service.message("parent", first["agent_id"], "queued two", notify=False)
         other = service.create(
-            "parent", str(tmp_path), {"name": "other"}, 1, "other running", notify=False
+            "parent",
+            str(tmp_path),
+            {"name": "other"},
+            1,
+            "other running",
+            notify=False,
+            title="测试任务",
         )
         async with asyncio.timeout(3):
             while len(started) < 2:
@@ -87,6 +99,7 @@ async def test_observation_is_scoped_subscribed_before_snapshot_and_persisted(
         "default",
         "question",
         True,
+        title="测试任务",
     )
     channel = object()
     order = []
@@ -137,7 +150,15 @@ async def test_receipt_ack_requires_committed_parent_checkpoint(tmp_path, monkey
         "lumi.agents.runtime.subagents.subagent_service_if_started", lambda: service
     )
     turn = service.store.create(
-        "parent", str(tmp_path), {"name": "test"}, 1, "", "default", "question", True
+        "parent",
+        str(tmp_path),
+        {"name": "test"},
+        1,
+        "",
+        "default",
+        "question",
+        True,
+        title="测试任务",
     )
     service.store.finish(turn.turn_id, "completed", "answer")
     bridge = AgentBridge()
@@ -206,6 +227,7 @@ async def test_instance_metadata_distinguishes_active_round_from_queued_round(
         "default",
         "Review\nthis project",
         False,
+        title="Code review",
     )
     service.store.start(first.turn_id)
     second = service.store.submit(first.agent_id, "follow up", False)
@@ -214,7 +236,7 @@ async def test_instance_metadata_distinguishes_active_round_from_queued_round(
     session = SimpleNamespace(current_thread_id="parent")
     try:
         summary = (await list_subagents(session, {}))["agents"][0]
-        assert summary["title"] == "Review this project"
+        assert summary["title"] == "Code review"
         assert summary["active_turn_id"] == first.turn_id
         assert summary["active_ordinal"] == 1 and summary["turn_count"] == 2
         assert (
@@ -237,10 +259,26 @@ async def test_unobserve_only_removes_that_instance_and_connection(
     service = SubagentService(tmp_path / "subagents.db")
     monkeypatch.setattr("lumi.gateway.subagents.get_subagent_service", lambda: service)
     first = service.store.create(
-        "parent", str(tmp_path), {"name": "codex"}, 1, "", "default", "first", False
+        "parent",
+        str(tmp_path),
+        {"name": "codex"},
+        1,
+        "",
+        "default",
+        "first",
+        False,
+        title="测试任务",
     )
     second = service.store.create(
-        "parent", str(tmp_path), {"name": "lumi"}, 1, "", "default", "second", False
+        "parent",
+        str(tmp_path),
+        {"name": "lumi"},
+        1,
+        "",
+        "default",
+        "second",
+        False,
+        title="测试任务",
     )
 
     class Channel:

@@ -94,7 +94,13 @@ async def test_background_tool_completion_continues_owner_and_returns_to_root(
     service = SubagentService(tmp_path / "sessions.db", lambda _: Worker())
     try:
         first = service.create(
-            "root", str(tmp_path), {"name": "worker"}, 1, "start", notify=False
+            "root",
+            str(tmp_path),
+            {"name": "worker"},
+            1,
+            "start",
+            notify=False,
+            title="测试任务",
         )
         await service.wait(first["turn_id"])
         await asyncio.wait_for(received.wait(), 3)
@@ -136,7 +142,13 @@ async def test_deleting_parent_stops_nested_tool_tasks_and_drains_notifications(
     service = SubagentService(tmp_path / "sessions.db", lambda _: Worker())
     try:
         owner = service.create(
-            "root", str(tmp_path), {"name": "owner"}, 1, "parent", notify=False
+            "root",
+            str(tmp_path),
+            {"name": "owner"},
+            1,
+            "parent",
+            notify=False,
+            title="测试任务",
         )
         await service.wait(owner["turn_id"])
         nested = service.create(
@@ -146,6 +158,7 @@ async def test_deleting_parent_stops_nested_tool_tasks_and_drains_notifications(
             2,
             "spawn",
             notify=False,
+            title="测试任务",
         )
         await service.wait(nested["turn_id"])
         job = jobs[0]
@@ -192,7 +205,13 @@ async def test_stopping_queued_turn_preserves_current_and_later_turns(
     service = SubagentService(tmp_path / "sessions.db", lambda _: Worker())
     try:
         first = service.create(
-            "root", str(tmp_path), {"name": "worker"}, 1, "first", notify=False
+            "root",
+            str(tmp_path),
+            {"name": "worker"},
+            1,
+            "first",
+            notify=False,
+            title="测试任务",
         )
         await entered.wait()
         queued = service.message("root", first["agent_id"], "skip", notify=False)
@@ -219,7 +238,15 @@ async def test_restart_routes_completed_nested_result_exactly_once(
     path = tmp_path / "sessions.db"
     store = SubagentStore(path)
     owner = store.create(
-        "root", str(tmp_path), {"name": "owner"}, 1, "", "default", "parent", False
+        "root",
+        str(tmp_path),
+        {"name": "owner"},
+        1,
+        "",
+        "default",
+        "parent",
+        False,
+        title="测试任务",
     )
     store.finish(owner.turn_id, "completed", "ready")
     nested = store.create(
@@ -231,6 +258,7 @@ async def test_restart_routes_completed_nested_result_exactly_once(
         "default",
         "nested",
         True,
+        title="测试任务",
     )
     store.finish(nested.turn_id, "completed", "nested result")
     if crash_point != "finished":
@@ -291,7 +319,15 @@ async def test_restart_preserves_fifo_with_queued_note_and_unforwarded_result(
     path = tmp_path / "sessions.db"
     store = SubagentStore(path)
     owner = store.create(
-        "root", str(tmp_path), {"name": "owner"}, 1, "", "default", "parent", False
+        "root",
+        str(tmp_path),
+        {"name": "owner"},
+        1,
+        "",
+        "default",
+        "parent",
+        False,
+        title="测试任务",
     )
     store.finish(owner.turn_id, "completed", "ready")
 
@@ -305,6 +341,7 @@ async def test_restart_preserves_fifo_with_queued_note_and_unforwarded_result(
             "default",
             prompt,
             True,
+            title="测试任务",
         )
         store.finish(nested.turn_id, "completed", prompt)
         return next(
@@ -371,7 +408,13 @@ async def test_stopping_running_turn_allows_next_round_to_proceed(tmp_path):
     service = SubagentService(tmp_path / "sessions.db", lambda _: Worker())
     try:
         first = service.create(
-            "root", str(tmp_path), {"name": "worker"}, 1, "first", notify=False
+            "root",
+            str(tmp_path),
+            {"name": "worker"},
+            1,
+            "first",
+            notify=False,
+            title="测试任务",
         )
         await entered.wait()
         second = service.message("root", first["agent_id"], "second", notify=False)
@@ -386,7 +429,15 @@ async def test_running_notification_is_not_replayed_but_preserves_its_payload(tm
     path = tmp_path / "sessions.db"
     store = SubagentStore(path)
     owner = store.create(
-        "root", str(tmp_path), {"name": "owner"}, 1, "", "default", "parent", False
+        "root",
+        str(tmp_path),
+        {"name": "owner"},
+        1,
+        "",
+        "default",
+        "parent",
+        False,
+        title="测试任务",
     )
     store.finish(owner.turn_id, "completed")
     note = store.submit(
@@ -436,7 +487,15 @@ async def test_reasoning_deltas_are_persisted_in_subagent_history(
     service = SubagentService(tmp_path / "sessions.db")
     try:
         turn = service.store.create(
-            "root", str(tmp_path), {"name": "worker"}, 1, "", "default", "work", False
+            "root",
+            str(tmp_path),
+            {"name": "worker"},
+            1,
+            "",
+            "default",
+            "work",
+            False,
+            title="测试任务",
         )
         writer = TimelineWriter(service, turn.agent_id, turn.turn_id)
         translate_lumi_event(
@@ -473,7 +532,15 @@ async def test_deleting_parent_cleans_persistent_child_history(
 ):
     service = SubagentService(tmp_path / "sessions.db")
     turn = service.store.create(
-        "root", str(tmp_path), {"name": "worker"}, 1, "", "default", "work", False
+        "root",
+        str(tmp_path),
+        {"name": "worker"},
+        1,
+        "",
+        "default",
+        "work",
+        False,
+        title="测试任务",
     )
     service.store.finish(turn.turn_id, "completed", "ready")
     parent = LumiAgent(await create_checkpointer("sqlite"))

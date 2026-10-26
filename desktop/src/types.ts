@@ -483,7 +483,6 @@ export interface SubagentHistory {
 export interface SubagentViewState {
   top: number
   pinned: boolean
-  folds: Record<string, boolean>
 }
 
 // artifacts 工具返回的单个文件元数据（后端 providers/artifacts.py）。

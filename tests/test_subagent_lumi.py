@@ -59,12 +59,19 @@ async def test_lumi_preserves_independent_checkpoints_and_depth(
             3,
             "one",
             notify=False,
+            title="测试任务",
         )
         assert (await service.wait(first["turn_id"]))["output"] == "answer\npart2"
         second = service.message("parent", first["agent_id"], "two", notify=False)
         assert (await service.wait(second["turn_id"]))["output"] == "answer\npart2"
         other = service.create(
-            "parent", str(tmp_path), {"name": "other"}, 1, "different", notify=False
+            "parent",
+            str(tmp_path),
+            {"name": "other"},
+            1,
+            "different",
+            notify=False,
+            title="测试任务",
         )
         await service.wait(other["turn_id"])
         assert len(inputs[0]) == 1 and len(inputs[1]) == 3 and len(inputs[2]) == 1
@@ -154,6 +161,7 @@ async def test_lumi_ask_is_checkpointed_and_resumes_after_runtime_restart(
             "开始",
             notify=notify,
             tool_mode="privileged",
+            title="测试任务",
         )
         result = await service.wait(first["turn_id"])
         assert result["status"] == "blocked"

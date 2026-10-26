@@ -20,6 +20,7 @@ def create(store, tmp_path, request_key=None):
         "one",
         False,
         request_key,
+        title="测试任务",
     )
 
 

@@ -245,8 +245,13 @@ class SubagentService:
         request_key: str | None = None,
         env_extra: str = "",
         tool_mode: str = "default",
+        *,
+        title: str,
     ) -> dict:
         self._validate_input(parent_id, workspace, prompt)
+        title = title.strip()
+        if not title:
+            raise ValueError("任务标题不能为空")
         self.start()
         turn = self.store.create(
             parent_id,
@@ -258,6 +263,7 @@ class SubagentService:
             prompt,
             notify,
             request_key,
+            title=title,
         )
         return self._schedule(turn)
 

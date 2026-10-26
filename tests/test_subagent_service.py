@@ -61,6 +61,7 @@ def create(service, tmp_path, prompt="one", **kwargs):
         },
         1,
         prompt,
+        title=kwargs.pop("title", "测试任务"),
         **kwargs,
     )
 
@@ -179,7 +180,15 @@ async def test_restart_never_replays_unfinished_work(tmp_path):
     path = tmp_path / "restart.db"
     store = SubagentStore(path)
     running = store.create(
-        "parent", str(tmp_path), {"name": "test"}, 1, "", "default", "one", True
+        "parent",
+        str(tmp_path),
+        {"name": "test"},
+        1,
+        "",
+        "default",
+        "one",
+        True,
+        title="测试任务",
     )
     store.start(running.turn_id)
     queued = store.submit(running.agent_id, "two", True)
@@ -228,7 +237,11 @@ async def test_tool_selects_name_without_markdown(
     rt = runtime(tmp_path)
     created = json.loads(
         await agent_create.coroutine(
-            name=name, prompt="one", runtime=rt, run_in_background=False
+            name=name,
+            prompt="one",
+            runtime=rt,
+            run_in_background=False,
+            title="测试任务",
         )
     )
     assert created["status"] == "completed"
@@ -245,6 +258,7 @@ async def test_tool_selects_name_without_markdown(
     listing = json.loads(await agent_list.coroutine(runtime=rt))["agents"]
     assert listing[0]["executor"] == kind
     assert listing[0]["name"] == name
+    assert listing[0]["title"] == "测试任务"
     assert listing[0]["cwd"] == str(tmp_path)
     assert service.store.agent(created["agent_id"]).depth == 1
     assert not service.store.has_deliveries("parent")
@@ -272,6 +286,7 @@ async def test_instance_cwd_survives_parent_directory_change(
             prompt="one",
             runtime=rt,
             run_in_background=False,
+            title="测试任务",
         )
     )
     assert first["status"] == "completed"
@@ -329,7 +344,11 @@ async def test_invalid_cwd_does_not_create_an_instance(service, tmp_path, monkey
     )
     result = json.loads(
         await agent_create.coroutine(
-            name="claude", cwd="missing", prompt="work", runtime=runtime(tmp_path)
+            name="claude",
+            cwd="missing",
+            prompt="work",
+            runtime=runtime(tmp_path),
+            title="测试任务",
         )
     )
     assert "工作目录不存在" in result["error"]
@@ -387,6 +406,7 @@ async def test_lumi_role_selection_still_uses_parent_configuration(
             prompt="translate",
             runtime=runtime(tmp_path),
             run_in_background=False,
+            title="测试任务",
         )
     )
     agent = service.store.agent(result["agent_id"])
@@ -403,11 +423,17 @@ def test_create_schema_uses_name_and_optional_cwd():
 
     assert set(AgentCreateInput.model_fields) == {
         "name",
+        "title",
         "cwd",
         "prompt",
         "run_in_background",
     }
-    assert "name" in agent_create.tool_call_schema.model_json_schema()["required"]
+    schema = agent_create.tool_call_schema.model_json_schema()
+    assert set(schema["required"]) == {"name", "title", "prompt"}
+    assert (
+        schema["properties"]["title"]["description"]
+        == "简短、具体的任务标题，通常为 6–12 个字或 2–5 个单词。"
+    )
 
 
 @pytest.mark.parametrize("args", [{}, {"name": None}, {"name": ""}])
@@ -415,7 +441,7 @@ async def test_create_rejects_missing_or_empty_name(args, service):
     from pydantic import ValidationError
 
     with pytest.raises(ValidationError) as error:
-        await agent_create.ainvoke({"prompt": "work", **args})
+        await agent_create.ainvoke({"prompt": "work", "title": "测试任务", **args})
     assert error.value.errors()[0]["loc"] == ("name",)
     assert service.list_agents("parent") == []
 
@@ -424,7 +450,12 @@ async def test_nested_subagent_results_are_queued_for_parent(service, tmp_path):
     parent = create(service, tmp_path, notify=False)
     await service.wait(parent["turn_id"])
     nested = service.create(
-        parent["agent_id"], str(tmp_path), {"name": "nested"}, 2, "work"
+        parent["agent_id"],
+        str(tmp_path),
+        {"name": "nested"},
+        2,
+        "work",
+        title="测试任务",
     )
     await service.wait(nested["turn_id"])
     # Completion commits the parent's follow-up before exposing the nested result.
@@ -460,3 +491,136 @@ def test_tools_registered_without_old_alias():
         "agent_list",
         "agent_message",
     }
+
+
+@pytest.mark.parametrize("args", [{}, {"title": None}, {"title": ""}])
+async def test_create_requires_a_task_title(args, service):
+    from pydantic import ValidationError
+
+    with pytest.raises(ValidationError) as error:
+        await agent_create.ainvoke({"name": "codex", "prompt": "work", **args})
+    assert error.value.errors()[0]["loc"] == ("title",)
+    assert service.list_agents("parent") == []
+
+
+async def test_same_name_titles_survive_continuation_and_restart(service, tmp_path):
+    first = create(
+        service,
+        tmp_path,
+        "Inspect the connection files",
+        title="  SSH 重连检查  ",
+        notify=False,
+    )
+    second = create(
+        service,
+        tmp_path,
+        "Inspect message rendering",
+        title="消息流渲染检查",
+        notify=False,
+    )
+    await asyncio.gather(
+        service.wait(first["turn_id"]), service.wait(second["turn_id"])
+    )
+    followup = service.message(
+        "parent", first["agent_id"], "Verify another detail", notify=False
+    )
+    await service.wait(followup["turn_id"])
+    await service.close()
+    reopened = SubagentService(
+        tmp_path / "subagents.db",
+        lambda _: pytest.fail("Listing must not start an executor"),
+    )
+    try:
+        agents = reopened.list_agents("parent")
+        assert [agent["name"] for agent in agents] == ["worker", "worker"]
+        assert [agent["title"] for agent in agents] == [
+            "SSH 重连检查",
+            "消息流渲染检查",
+        ]
+        assert [agent["agent_id"] for agent in agents] == [
+            first["agent_id"],
+            second["agent_id"],
+        ]
+    finally:
+        await reopened.close()
+
+
+async def test_title_is_part_of_creation_request_identity(service, tmp_path):
+    first = create(service, tmp_path, title="First task", request_key="title-key")
+    assert (
+        create(service, tmp_path, title="First task", request_key="title-key")[
+            "turn_id"
+        ]
+        == first["turn_id"]
+    )
+    with pytest.raises(ValueError, match="另一条创建请求"):
+        create(service, tmp_path, title="Another task", request_key="title-key")
+    assert len(service.list_agents("parent")) == 1
+    await service.wait(first["turn_id"])
+
+
+async def test_blank_title_cannot_start_an_instance(service, tmp_path):
+    with pytest.raises(ValueError, match="任务标题不能为空"):
+        create(service, tmp_path, title="  \n  ")
+    assert service.list_agents("parent") == []
+
+
+def test_legacy_store_migration_preserves_identity_without_inventing_a_title(tmp_path):
+    import sqlite3
+
+    path = tmp_path / "legacy.db"
+    with sqlite3.connect(path) as conn:
+        conn.execute("""CREATE TABLE subagents (
+            agent_id TEXT PRIMARY KEY, parent_id TEXT NOT NULL,
+            workspace TEXT NOT NULL, name TEXT NOT NULL, executor TEXT NOT NULL,
+            definition TEXT NOT NULL, depth INTEGER NOT NULL,
+            env_extra TEXT NOT NULL, tool_mode TEXT NOT NULL,
+            handle TEXT NOT NULL DEFAULT '{}', created_at REAL NOT NULL
+        )""")
+        conn.execute(
+            "INSERT INTO subagents VALUES (?,?,?,?,?,?,?,?,?,?,?)",
+            (
+                "alegacy0",
+                "parent",
+                str(tmp_path),
+                "explore",
+                "lumi",
+                '{"name":"explore"}',
+                1,
+                "",
+                "default",
+                '{"session_id":"native-original"}',
+                1,
+            ),
+        )
+    for _ in range(2):
+        store = SubagentStore(path)
+        try:
+            agent = store.agent("alegacy0")
+            assert agent.title == ""
+            assert agent.handle == {"session_id": "native-original"}
+            # Old instances have a task already; provide that historical turn once.
+            if not store.conn.execute(
+                "SELECT 1 FROM subagent_turns WHERE agent_id=?", (agent.agent_id,)
+            ).fetchone():
+                store.submit(
+                    agent.agent_id,
+                    "A long task prompt must not become the title",
+                    False,
+                )
+            assert store.list_agents("parent")[0]["title"] == ""
+            if _ == 0:
+                created = store.create(
+                    "parent",
+                    str(tmp_path),
+                    {"name": "explore"},
+                    1,
+                    "",
+                    "default",
+                    "new full prompt",
+                    False,
+                    title="新任务",
+                )
+                assert store.agent(created.agent_id).title == "新任务"
+        finally:
+            store.close()

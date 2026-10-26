@@ -3,23 +3,25 @@ import type { Gateway } from '../gateway.ts'
 import type { SubagentSummary, SubagentViewState } from '../types.ts'
 import { emptySubagentTimeline, mergeSubagentTimeline } from '../lib/subagentTimeline.ts'
 import { observeSubagent } from '../lib/subagentObserver.ts'
+import { errorMessage } from '../lib/utils.ts'
+import { useLatest } from './useLatest.ts'
 
-const emptyDetail = { ...emptySubagentTimeline, owner: '', id: '', cursor: 0, nativeId: null as string | null, loading: false, error: '' }
+const emptyDetail = { ...emptySubagentTimeline, cursor: 0, nativeId: null as string | null, loading: false, error: '' }
 
 export function useSubagents(gateway: Gateway | undefined, owner: string, parentId: string, enabled: boolean, visible: boolean) {
   const [list, setList] = useState({ owner: '', agents: [] as SubagentSummary[], error: '' })
   const [selection, setSelection] = useState({ owner: '', id: null as string | null, expanded: false })
-  const [detail, setDetail] = useState(emptyDetail)
-  const cached = useRef(detail)
-  cached.current = detail
+  const [feeds, setFeeds] = useState({ owner: '', entries: {} as Record<string, typeof emptyDetail> })
+  const cached = useLatest(feeds)
+  const observers = useRef(new Map<string, ReturnType<typeof observeSubagent>>())
   const refreshRef = useRef(() => {})
-  const detailRefresh = useRef(() => {})
   const positions = useRef(new Map<string, SubagentViewState>())
   const selectedId = selection.owner === owner ? selection.id : null
   const expanded = !!selectedId && selection.expanded
-  const observing = enabled && (visible || expanded)
+  const agents = list.owner === owner ? list.agents : []
+  const details = feeds.owner === owner ? feeds.entries : {}
   const positionKey = `${owner}\0${selectedId}`
-  if (!positions.current.has(positionKey)) positions.current.set(positionKey, { top: 0, pinned: true, folds: {} })
+  if (!positions.current.has(positionKey)) positions.current.set(positionKey, { top: 0, pinned: true })
   const position = positions.current.get(positionKey)!
 
   useEffect(() => {
@@ -35,7 +37,7 @@ export function useSubagents(gateway: Gateway | undefined, owner: string, parent
           const result = await gateway!.listSubagents()
           if (alive) setList({ owner, agents: result.agents, error: '' })
         } catch (error) {
-          if (alive) setList(old => ({ owner, agents: old.owner === owner ? old.agents : [], error: String(error instanceof Error ? error.message : error) }))
+          if (alive) setList(old => ({ owner, agents: old.owner === owner ? old.agents : [], error: errorMessage(error) }))
         }
       }
       fetching = false
@@ -54,36 +56,55 @@ export function useSubagents(gateway: Gateway | undefined, owner: string, parent
     return () => { alive = false; off(); refreshRef.current = () => {} }
   }, [gateway, owner, parentId, enabled])
 
+  // One observer per visible instance: cards and detail consume the same timeline.
   useEffect(() => {
-    if (!gateway || !observing || !selectedId) return
-    const previous = cached.current
-    const cursor = previous.owner === owner && previous.id === selectedId ? previous.cursor : 0
-    setDetail(old => old.owner === owner && old.id === selectedId ? old : { ...emptyDetail, owner, id: selectedId, loading: true })
-    const observer = observeSubagent(gateway, selectedId, cursor, change => {
-      setDetail(old => {
-        const current = old.owner === owner && old.id === selectedId ? old : { ...emptyDetail, owner, id: selectedId }
-        return {
-          ...current, ...mergeSubagentTimeline(current, change.events ?? []),
-          cursor: change.cursor ?? current.cursor,
-          nativeId: change.nativeId === undefined ? current.nativeId : change.nativeId,
-          loading: change.loading ?? current.loading,
-          error: change.error ?? current.error,
-        }
+    const current = observers.current
+    const refresh = () => current.forEach(observer => observer.refresh())
+    window.addEventListener('focus', refresh)
+    return () => {
+      window.removeEventListener('focus', refresh)
+      current.forEach(observer => observer.close())
+      current.clear()
+    }
+  }, [gateway, owner])
+
+  useEffect(() => {
+    const wanted = new Set<string>()
+    if (gateway && enabled && (visible || expanded)) {
+      if (selectedId) wanted.add(selectedId)
+      else for (const agent of agents) if (agent.status === 'running') wanted.add(agent.agent_id)
+    }
+    for (const [id, observer] of observers.current) {
+      if (!wanted.has(id)) { observer.close(); observers.current.delete(id) }
+    }
+    for (const id of wanted) {
+      if (observers.current.has(id)) continue
+      const previous = cached.current.owner === owner ? cached.current.entries[id] : undefined
+      const observer = observeSubagent(gateway!, id, previous?.cursor ?? 0, change => {
+        setFeeds(old => {
+          const entries = old.owner === owner ? old.entries : {}
+          const current = entries[id] ?? emptyDetail
+          return { owner, entries: { ...entries, [id]: {
+            ...current, ...mergeSubagentTimeline(current, change.events ?? []),
+            cursor: change.cursor ?? current.cursor,
+            nativeId: change.nativeId === undefined ? current.nativeId : change.nativeId,
+            loading: change.loading ?? current.loading,
+            error: change.error ?? current.error,
+          } } }
+        })
       })
-    })
-    detailRefresh.current = observer.refresh
-    window.addEventListener('focus', observer.refresh)
-    return () => { window.removeEventListener('focus', observer.refresh); observer.close(); detailRefresh.current = () => {} }
-  }, [gateway, owner, selectedId, observing])
+      observers.current.set(id, observer)
+    }
+  }, [gateway, owner, enabled, visible, expanded, selectedId, agents])
 
   const select = useCallback((id: string) => setSelection(old => ({ owner, id, expanded: old.owner === owner && old.expanded })), [owner])
   const close = useCallback(() => setSelection({ owner, id: null, expanded: false }), [owner])
   const toggleExpanded = useCallback(() => setSelection(old => ({ ...old, expanded: !old.expanded })), [])
   return {
-    agents: list.owner === owner ? list.agents : [], listError: list.owner === owner ? list.error : '',
+    agents, details, listError: list.owner === owner ? list.error : '',
     selectedId, expanded, select, close, toggleExpanded, position,
-    detail: detail.owner === owner && detail.id === selectedId ? detail : emptyDetail,
+    detail: selectedId ? details[selectedId] ?? emptyDetail : emptyDetail,
     refresh: () => refreshRef.current(),
-    retryDetail: () => detailRefresh.current(),
+    retryDetail: () => { if (selectedId) observers.current.get(selectedId)?.refresh() },
   }
 }

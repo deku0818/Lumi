@@ -108,7 +108,7 @@ shell / 后台任务会话等全局单例由 `shutdown_shared_runtime()` 在 lif
 
 ## 子代理观测与历史兼容
 
-持久子代理使用独立的 `subagent.event` 与按 seq 分页的历史，不进入主对话 reducer。桌面通过 `useSubagents`、观察器和时间线投影，按实例展示多轮任务、正文、工具与问题；视图只读，后续任务由主 Agent 经 `agent_message` 派发。完整边界和模块见 [子代理架构](agents.md)。
+持久子代理使用独立的 `subagent.event` 与按 seq 分页的历史，不进入主对话 reducer。桌面通过 `useSubagents`、观察器和时间线投影，按任务标题和角色名称展示实例，列表卡片与选中详情共享实时记录，多轮任务、正文、工具与问题连续展示；视图只读，后续任务由主 Agent 经 `agent_message` 派发。完整边界和模块见 [子代理架构](agents.md)。
 
 旧 `agent` 工具产生的 `parent_run_id` 内嵌渲染仍保留读取兼容，见 [历史说明](../archive/subagent-rendering.md)。不能将该兼容路径的无 checkpointer、子事件丢弃等限制套用到当前持久子代理。
 

@@ -92,15 +92,17 @@ export function RailSection({
   title,
   count,
   children,
+  className,
 }: {
   title: string
+  className?: string
   count?: React.ReactNode // 数字或「3 运行中」这类摘要串
   children: React.ReactNode
 }) {
   const [collapsed, setCollapsed] = useState(false)
   const toggle = () => setCollapsed((c) => !c)
   return (
-    <section className="sidebar-float rounded-card shrink-0 overflow-hidden">
+    <section className={cn("sidebar-float rounded-card shrink-0 overflow-hidden", className)}>
       {/* div 化的节头要自己补齐 button 的键盘语义：tabIndex 可聚焦 + Enter/Space 触发 */}
       <div
         role="button"

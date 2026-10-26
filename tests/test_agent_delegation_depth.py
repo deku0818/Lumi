@@ -107,7 +107,9 @@ def _make_runtime(depth: int) -> SimpleNamespace:
 async def test_refuses_when_at_depth_limit() -> None:
     """current_depth >= max_depth 时直接拒绝，不创建子代理。"""
     runtime = _make_runtime(depth=3)  # 默认 max=3 → 3>=3
-    result = await agent_create.coroutine(name="worker", prompt="干活", runtime=runtime)
+    result = await agent_create.coroutine(
+        name="worker", prompt="干活", runtime=runtime, title="测试任务"
+    )
     assert "最大委派层数" in result
 
 
@@ -133,7 +135,11 @@ async def _invoke_via_toolnode(tool_obj, args: dict) -> str:
 @pytest.mark.parametrize(
     "tool_obj, args, marker",
     [
-        (agent_create, {"name": "__nonexistent__", "prompt": "x"}, "未启用或不可用"),
+        (
+            agent_create,
+            {"name": "__nonexistent__", "title": "测试任务", "prompt": "x"},
+            "未启用或不可用",
+        ),
         (agent_list, {}, "thread_id"),
         (agent_message, {"agent_id": "__nonexistent__", "prompt": "x"}, "不存在"),
         (workflow, {}, "script"),

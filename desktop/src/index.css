@@ -698,6 +698,29 @@ body.resizing-col * {
 .lumi-orb-idle::before { animation: none; opacity: 0; }
 .lumi-orb-idle::after { animation: none; opacity: 0.75; }
 
+/* 主会话底部 B1：实心光核 + 两颗反向绕行的光粒，无轨道线。 */
+@keyframes lumi-orbit-spin { to { transform: rotate(360deg); } }
+.lumi-orbit::before { display: none; }
+.lumi-orbit::after {
+  inset: 36%; background: var(--color-accent); opacity: 1;
+  box-shadow: 0 0 4px color-mix(in srgb, var(--color-accent) 65%, transparent);
+  animation: none;
+}
+.lumi-orbit-particle {
+  position: absolute; inset: 0; border-radius: 50%;
+  animation: lumi-orbit-spin 2.6s linear infinite;
+}
+.lumi-orbit-particle::after {
+  content: ''; position: absolute; left: 42%; top: -5%; width: 23%; height: 23%;
+  border-radius: 50%; background: var(--color-accent);
+  box-shadow: 0 0 3px color-mix(in srgb, var(--color-accent) 65%, transparent);
+}
+.lumi-orbit-particle-inner {
+  inset: 17%; opacity: .62; animation-duration: 1.8s; animation-direction: reverse;
+}
+.lumi-orbit.lumi-orb-wait .lumi-orbit-particle,
+.lumi-orbit.lumi-orb-error .lumi-orbit-particle { display: none; }
+
 /* 侧栏执行中会话的行首金点：缓慢明灭（2.4s 一周期） */
 @keyframes lumi-blink { 50% { opacity: 0.25; } }
 .lumi-blink { animation: lumi-blink 2.4s ease-in-out infinite; }
@@ -833,7 +856,8 @@ body.resizing-col * {
 .segment-track [data-slot="tabs-trigger"] { background: transparent; box-shadow: none; z-index: 1; }
 .step-actions > [data-slot="button"] { height: 32px; font-size: 14px; padding-inline: 10px; }
 
-.rail-panel .sidebar-float { --sidebar-background: var(--color-panel); background: var(--sidebar-background); }
+/* 子会话使用共享会话画布，避免右栏面板材质覆盖它的底色。 */
+.rail-panel .sidebar-float:not(.app-canvas) { --sidebar-background: var(--color-panel); background: var(--sidebar-background); }
 
 /* Approved SSH/new-chat surfaces: the quiet halo remains visible in both themes. */
 .composer-glass { background: linear-gradient(180deg,var(--color-panel),color-mix(in srgb,var(--color-panel) 98%,var(--color-canvas))); border-color:color-mix(in srgb,var(--color-line) 60%,transparent); box-shadow:0 2px 5px color-mix(in srgb,var(--color-ink) 2%,transparent),0 12px 35px -12px color-mix(in srgb,var(--color-ink) 9%,transparent),inset 0 1px 0 color-mix(in srgb,var(--color-panel) 95%,transparent); }

@@ -240,13 +240,19 @@ async def test_disabled_creation_rejected_but_existing_instances_continue(
     )
     try:
         denied = json.loads(
-            await agent_create.coroutine(name=name, prompt="first", runtime=runtime)
+            await agent_create.coroutine(
+                name=name, prompt="first", runtime=runtime, title="测试任务"
+            )
         )
         assert "error" in denied and service.list_agents("parent") == []
         await probes.set_agent(name, True)
         first = json.loads(
             await agent_create.coroutine(
-                name=name, prompt="first", runtime=runtime, run_in_background=False
+                name=name,
+                prompt="first",
+                runtime=runtime,
+                run_in_background=False,
+                title="测试任务",
             )
         )
         assert first["status"] == "completed"
@@ -254,7 +260,9 @@ async def test_disabled_creation_rejected_but_existing_instances_continue(
         await probes.set_agent(name, False)
         runtime.tool_call_id = "two"
         assert "error" in json.loads(
-            await agent_create.coroutine(name=name, prompt="new", runtime=runtime)
+            await agent_create.coroutine(
+                name=name, prompt="new", runtime=runtime, title="测试任务"
+            )
         )
         resumed = json.loads(
             await agent_message.coroutine(

@@ -40,7 +40,7 @@ function viewport(position, options = {}) {
         agent: { agent_id: 'agent', executor: 'codex', cwd: '/tmp', status: 'idle', last_turn_status: 'completed' },
         detail: { rounds, events: [], loading, error, nativeId: null }, position,
         expanded: true, remote: false, online: true,
-        onBack() {}, onExpand() {}, onRetry() {}, onOpenFile() {}, ...options,
+        onBack() {}, onExpand() {}, onRetry() {}, onOpenFile() {}, async onStop() {}, ...options,
       })
       hooks[0].current = element
       onScroll = findNode(tree, node => node?.props?.ref === hooks[0]).props.onScroll
@@ -51,7 +51,7 @@ function viewport(position, options = {}) {
 }
 
 test('returning to an instance waits for complete history and preserves its reading offset', () => {
-  const saved = { top: 300, pinned: false, folds: {} }, view = viewport(saved)
+  const saved = { top: 300, pinned: false }, view = viewport(saved)
   view.render(false, [])
   view.scroll(0)
   assert.equal(saved.top, 300, 'Empty history must not overwrite the saved position')
@@ -70,14 +70,14 @@ test('returning to an instance waits for complete history and preserves its read
 })
 
 test('an instance already loaded when changing view restores without another fetch', () => {
-  const view = viewport({ top: 300, pinned: false, folds: { one: true } })
+  const view = viewport({ top: 300, pinned: false })
   view.element.scrollHeight = 2000
   view.render(false, [{ id: 'one' }])
   assert.equal(view.element.scrollTop, 300)
 })
 
 test('a pinned instance follows new content after restoration', () => {
-  const saved = { top: 100, pinned: true, folds: {} }, view = viewport(saved)
+  const saved = { top: 100, pinned: true }, view = viewport(saved)
   view.render(true, [])
   view.element.scrollHeight = 2000
   view.render(false, [{ id: 'one' }])
@@ -100,10 +100,11 @@ for (const remote of [false, true]) {
     const file = { name: 'report.csv', path: '/tmp/report.csv', kind: 'sheet' }
     const timeline = mergeSubagentTimeline(emptySubagentTimeline, [{ seq: 1, agent_id: 'agent', turn_id: 'one', type: 'tool.complete', payload: { name: 'artifacts', tool_call_id: 'files', output: JSON.stringify([file]) } }])
     let opened
-    const view = viewport({ top: 0, pinned: true, folds: {} }, { remote, onOpenFile: file => { opened = file } })
+    const view = viewport({ top: 0, pinned: true }, { remote, onOpenFile: file => { opened = file } })
     const tree = view.render(false, timeline.rounds)
     const round = findNode(tree, node => !!node?.props?.round)
-    const card = findNode(round.type.type(round.props), node => Array.isArray(node?.props?.files))
+    const segment = findNode(round.type.type(round.props), node => node?.props?.segment?.kind === 'files')
+    const card = segment.type(segment.props)
     assert.equal(card.props.remote, remote)
     card.props.onOpen(card.props.files[0])
     assert.deepEqual(JSON.parse(JSON.stringify(opened)), file)
@@ -111,7 +112,7 @@ for (const remote of [false, true]) {
 }
 
 test('a failed history fetch cannot consume restoration before retry succeeds', () => {
-  const view = viewport({ top: 300, pinned: false, folds: {} })
+  const view = viewport({ top: 300, pinned: false })
   view.render(true, [{ id: 'live-fragment' }])
   view.render(false, [{ id: 'live-fragment' }], 'disconnected')
   assert.equal(view.element.scrollTop, 0)

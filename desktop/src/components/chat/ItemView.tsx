@@ -27,6 +27,7 @@ export function StatusIndicator({
   backgroundCount = 0,
   onOpenTasks,
   failed = false,
+  variant = 'default',
 }: {
   items: Item[]
   running: boolean
@@ -38,6 +39,7 @@ export function StatusIndicator({
   backgroundCount?: number
   onOpenTasks?: () => void
   failed?: boolean
+  variant?: 'default' | 'orbit'
 }) {
   const { t } = useI18n()
   const [open, setOpen] = useState(false)
@@ -45,11 +47,11 @@ export function StatusIndicator({
   const boxRef = useRef<HTMLPreElement>(null)
   // 计时由本轮开始时刻推算（存在会话状态里），组件重挂载不归零；waiting 期间照走
   useEffect(() => {
-    if (!running) return
+    if (!running || !runStart) return
     setNow(Date.now())
     const id = setInterval(() => setNow(Date.now()), 1000)
     return () => clearInterval(id)
-  }, [running])
+  }, [running, runStart])
   const sec = runStart ? Math.max(0, Math.floor((now - runStart) / 1000)) : 0
   useEffect(() => {
     if (open && boxRef.current) boxRef.current.scrollTop = boxRef.current.scrollHeight
@@ -86,7 +88,9 @@ export function StatusIndicator({
   return (
     <div className="mt-2">
       <div className="flex items-center gap-2.5 text-muted-foreground text-sm">
-        <span className={`lumi-orb ${failed ? 'lumi-orb-error' : waiting ? 'lumi-orb-wait' : ''}`} />
+        <span aria-hidden="true" className={`lumi-orb${variant === 'orbit' ? ' lumi-orbit' : ''} ${failed ? 'lumi-orb-error' : waiting ? 'lumi-orb-wait' : ''}`}>
+          {variant === 'orbit' && <><i className="lumi-orbit-particle" /><i className="lumi-orbit-particle lumi-orbit-particle-inner" /></>}
+        </span>
         <span>{label}</span>
         {running && sec > 0 && <span className="text-xs opacity-60 tabular-nums">· {fmtDuration(sec)}</span>}
         {backgroundCount > 0 && onOpenTasks && (

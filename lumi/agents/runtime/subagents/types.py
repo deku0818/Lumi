@@ -28,6 +28,7 @@ class Subagent:
     tool_mode: str
     handle: dict[str, Any]
     created_at: float
+    title: str = ""
 
 
 @dataclass(frozen=True)
