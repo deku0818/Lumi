@@ -1,4 +1,5 @@
 import { basename,errorMessage } from '@/lib/utils'
+import { defaultProjectTarget } from '@/lib/projects'
 import { Check,ChevronDown,ChevronRight,Folder,Globe,Laptop,Plus,Server,Settings2,X } from 'lucide-react'
 import { useEffect,useRef,useState,type JSX,type KeyboardEvent } from 'react'
 import type { Gateway } from '../gateway.ts'
@@ -73,8 +74,7 @@ export function NewChatTarget({ value, onChange, ensureMachine }: NewChatTargetP
       const gateway = await ensureMachine(id)
       const result = await gateway.listProjects()
       if (seq !== choice.current) return
-      const project = result.projects.find(item => item.default) || result.projects[0]
-      onChange(project ? { backend: id, path: project.path, name: project.name } : { backend: id, path: '', name: t('picker.choose') })
+      onChange(defaultProjectTarget(id, result.projects, t('picker.choose')))
       setRevision(current => current + 1)
     } catch (e) { if (seq === choice.current) toast.error(errorMessage(e)) }
   }

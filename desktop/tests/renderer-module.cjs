@@ -7,7 +7,7 @@ function loadRenderer(file, globals = {}, external = []) {
   const { outputFiles } = buildSync({
     entryPoints: [path.join(__dirname, '..', file)],
     bundle: true, write: false, platform: 'node', format: 'cjs',
-    loader: { '.css': 'empty', '.svg': 'dataurl' }, external,
+    loader: { '.css': 'empty', '.svg': 'dataurl', '.png': 'dataurl' }, external,
   })
   const module = { exports: {} }
   vm.runInNewContext(outputFiles[0].text, {

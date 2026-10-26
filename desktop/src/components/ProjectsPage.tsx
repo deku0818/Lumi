@@ -3,7 +3,6 @@ import {
   Check,
   ChevronDown,
   Folder,
-  Info,
   MoreVertical,
   Pencil,
   Plus,
@@ -33,7 +32,6 @@ export function ProjectsPage({
   projects,
   current,
   machine,
-  needProjectHint,
   onSelectMachine,
   onOpen,
   onNew,
@@ -44,7 +42,6 @@ export function ProjectsPage({
   projects: Project[] | null // null = 尚未拉到，列表区留空而非谎报「还没有项目」
   current: string
   machine: string
-  needProjectHint?: boolean
   onSelectMachine: (id: string) => void
   onOpen: (path: string) => void
   onNew: () => void
@@ -101,13 +98,6 @@ export function ProjectsPage({
         </div>
 
         <MachineScope value={machine} onChange={onSelectMachine}>
-
-        {needProjectHint && (
-          <div className="mb-5 flex items-center gap-2.5 rounded-xl border border-info/25 bg-info/10 px-3.5 py-2.5 text-xs text-ink">
-            <Info size={14} className="shrink-0 text-info" />
-            {t('projects.needProjectHint')}
-          </div>
-        )}
 
         <div className="flex items-center gap-2.5 mb-5 rounded-xl bg-surface border border-line/50 px-3.5 py-2.5 text-muted-foreground focus-within:border-primary/40 transition-colors">
           <Search size={14} className="shrink-0" />

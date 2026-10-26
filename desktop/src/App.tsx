@@ -101,6 +101,7 @@ import { clip, basename, botOfThread, machineColor, machineName, sessionKey, key
 import { Button } from '@/components/ui/button'
 import { useTheme } from './theme'
 import { useUiFont } from './font'
+import { defaultProjectTarget } from './lib/projects'
 import { useI18n } from './i18n'
 
 type AssistantItem = Extract<Item, { kind: 'assistant' }>
@@ -132,11 +133,13 @@ export default function App() {
   // handleEvent（稳定 useCallback）里做 mcp.status 的当前工作区过滤，须经 ref 读最新值
   const workspaceDirRef = useLatest(workspaceDir)
   // null = 该机器列表尚未成功拉到（未连上 / 拉取中 / 失败）——不能渲染成「还没有项目」
-  const [projects, setProjects] = useState<Project[] | null>(null)
+  const [projectsByBackend, setProjectsByBackend] = useState<Record<string, Project[]>>({})
   // 项目视图作用的机器（方案甲「先选机器」）
   const [projectsMachine, setProjectsMachine] = useState('local')
-  // 项目页是被「新建会话」阻断跳转到的（而非用户主动点「项目」标签）时，顶部提示为什么在这里
-  const [needProjectHint, setNeedProjectHint] = useState(false)
+  const projects = projectsByBackend[projectsMachine] ?? null
+  const setProjects = useCallback((backend: string, items: Project[]) => {
+    setProjectsByBackend(current => ({ ...current, [backend]: items }))
+  }, [])
   const [showNewProject, setShowNewProject] = useState(false)
   const [pendingRemoveProject, setPendingRemoveProject] = useState<Project | null>(null)
   const [newTarget, setNewTarget] = useState<ProjectTarget | null>(null)
@@ -978,22 +981,18 @@ export default function App() {
     void refreshSessions()
   }, [openControlConn, refreshSessions, clearMachineSnapshots])
 
-  // 查该机器登记的默认项目路径，顺带把 projects 同步成最新——boot effect
-  // 与下方 goNewChat 共用同一份查找逻辑，避免各自倒腾一遍 listProjects。
-  // 返回 null = 没查到（连接波动等），空串 = 查到了但确实没有默认项目，两者调用方处理不同
-  // （前者该重试，后者不用）。声明在 boot effect 之前，纯是为了这条 useEffect 能引用它。
-  const fetchDefaultProject = useCallback(
-    async (backend: string): Promise<string | null> => {
+  // 启动和项目管理共用查询与缓存更新；失败时保留该机器的现有列表。
+  const refreshProjects = useCallback(
+    async (backend: string): Promise<Project[] | undefined> => {
       try {
         const r = await gwForBackend(backend)?.listProjects()
-        if (!r) return null
-        setProjects(r.projects)
-        return r.projects.find((p) => p.default)?.path ?? ''
+        if (r) setProjects(backend, r.projects)
+        return r?.projects
       } catch {
-        return null
+        return undefined
       }
     },
-    [gwForBackend],
+    [gwForBackend, setProjects],
   )
 
   // 初始：起各机器控制连接（合并会话列表）；开局会话见下一条 effect。
@@ -1017,10 +1016,11 @@ export default function App() {
   useEffect(() => {
     if (localConn !== 'open' || bootedRef.current) return
     bootedRef.current = true
-    void fetchDefaultProject('local').then(workspace => {
+    void refreshProjects('local').then(projects => {
+      const workspace = projects?.find(project => project.default)?.path
       if (workspace && bootedRef.current) setNewTarget(current => current || { backend: 'local', path: workspace, name: basename(workspace) })
     })
-  }, [localConn, fetchDefaultProject])
+  }, [localConn, refreshProjects])
 
   // 兜底自愈：窗口重获焦点 / 网络恢复时，唤醒退避耗尽停摆的连接（它们不会自己再试，
   // 离开久了回来就一直离线），连上后各处挂在连接态上的取数自动重跑；焦点同时全量刷新
@@ -1073,19 +1073,6 @@ export default function App() {
     }
   }), [openControlConn])
 
-  // 按机器拉项目（方案甲先选机器）。「当前项目」高亮 = 活动会话的 workspaceDir
-  // （由 activate/gateway.ready 维护），不再由后端下发。
-  const refreshProjects = useCallback(
-    async (backend = 'local') => {
-      try {
-        const r = await gwForBackend(backend)?.listProjects()
-        if (r) setProjects(r.projects)
-      } catch {
-        /* 忽略：连接波动时静默 */
-      }
-    },
-    [gwForBackend],
-  )
   // 项目列表挂在所选机器的连接态上：连上 / 重连成功即重拉。开局抢在握手前、断线期间
   // 拉取失败都靠这里补上，不再定格成「还没有项目」
   const projectsConn = machineConn[projectsMachine]
@@ -1159,26 +1146,23 @@ export default function App() {
       .finally(() => loadProviders(backend))
   }
 
-  // 切模型：只切**本会话**（下一轮生效），别的会话与「新会话默认」都不动。
-  // key 在开弹窗时就捕获：确认期间用户可能已切走会话，那时的 activeRef 是别人
-  const applySwitchModel = (provider: string, model: string, key: string) => {
-    connsRef.current[key]
-      ?.setSessionModel(provider, model)
-      .then((r) => applySessionModel(key, r))
-      .catch((e) => console.error('set_session_model 失败:', e))
-  }
   // 项目主页没有「本会话」可切（active 还是上一个会话，改它是张冠李戴，同模型 /
   // ApprovalModePicker 的 !project 取舍）：那里选模型的意思是「我要开的新会话用它」，
   // 故改「新会话默认」。会话内切换直接生效，不弹确认（换模型可逆，不值得阻断）。
   const switchModel = (provider: string, model: string, project: boolean) => {
     if (project) {
-      gwForBackend(projectHome?.backend ?? 'local')
+      const backend = pickerBackend
+      gwForBackend(backend)
         ?.setProvider(provider, model)
-        .then((r) => setDefaultModel(r.active))
+        .then((r) => { if (pickerRef.current === backend) setDefaultModel(r.active) })
         .catch((e) => console.error('set_provider 失败:', e))
       return
     }
-    applySwitchModel(provider, model, activeRef.current)
+    const key = activeRef.current
+    connsRef.current[key]
+      ?.setSessionModel(provider, model)
+      .then((r) => applySessionModel(key, r))
+      .catch((e) => console.error('set_session_model 失败:', e))
   }
 
   // 设置面板改了某机器的 provider 后回调：若改的正是模型菜单所指机器，刷新之
@@ -1200,6 +1184,7 @@ export default function App() {
       // 晚到的建连结果经 seq 判废弃：用户已切走时不回拽视图。
       const seq = ++activationSeqRef.current
       if (key) {
+        setWorkspaceDir(workspace)
         setActive(key)
         closeAllPreviews()
       }
@@ -1237,17 +1222,14 @@ export default function App() {
   )
 
   const openProjects = useCallback(() => {
-    setNeedProjectHint(false) // 用户主动点「项目」标签，不是被新建会话逼过来的，不提示
     setView('projects')
     void refreshProjects(projectsMachine)
   }, [refreshProjects, projectsMachine])
 
-  // 项目视图切机器（先选机器）。换机器先清成未加载（别把上一台的列表挂在这台名下），
-  // 由连接态 effect 拉取；点的仍是当前机器则就地重拉
+  // 项目列表按机器保存，切换后由连接态 effect 刷新；再次点当前机器则就地重拉。
   const selectProjectsMachine = useCallback(
     (machine: string) => {
       if (machine === projectsMachine) return void refreshProjects(machine)
-      setProjects(null)
       setProjectsMachine(machine)
     },
     [projectsMachine, refreshProjects],
@@ -1269,17 +1251,17 @@ export default function App() {
   // 台设备/另一个窗口改过。
   const goNewChat = useCallback(async (backend: string) => {
     const revision = ++newTargetRevision.current
+    setNewTarget({ backend, path: '', name: t('picker.choose') })
     setView('newchat')
     setActive('')
     try {
       const gateway = await ensureMachine(backend)
       const result = await gateway.listProjects()
-      const project = result.projects.find(item => item.default) || result.projects[0]
-      if (newTargetRevision.current === revision) setNewTarget(project ? { backend, path: project.path, name: project.name } : { backend, path: '', name: t('picker.choose') })
+      if (newTargetRevision.current === revision) setNewTarget(defaultProjectTarget(backend, result.projects, t('picker.choose')))
     } catch (error) { toast.error(errorMessage(error)) }
   }, [ensureMachine, t])
   // 稳定引用，让 memo 化的 AppTitleBar 在流式 token 重渲染时不陪跑。
-  const startNewChat = useCallback(() => void goNewChat(activeBackend), [activeBackend, goNewChat])
+  const startNewChat = useCallback(() => void goNewChat(pickerBackend), [pickerBackend, goNewChat])
 
   useEffect(() => {
     return window.lumi.onMenuAction?.((action) => {
@@ -1331,19 +1313,6 @@ export default function App() {
     [projectHome],
   )
 
-  // 打开项目 = 在该机器开一条绑定到此项目的新会话（项目经 open 握手随会话绑定，
-  // 不再先在共享连接上 setWorkspace 改进程态——那对新会话的独立连接无效）
-  const openProject = useCallback(
-    async (path: string, backend = 'local') => {
-      try {
-        await newSession(backend, path)
-      } catch {
-        /* 忽略：连接波动时静默 */
-      }
-    },
-    [newSession],
-  )
-
   // 项目主页：点项目卡片进入落地页（会话流 + 提示词/记忆/定时/技能/Agent 五卡）
   const openProjectHome = useCallback((path: string, backend = 'local') => {
     setProjectHome({ backend, path })
@@ -1385,7 +1354,7 @@ export default function App() {
   // 触发 setStore），配合 ProjectHomePage 的 memo()，停在项目页时不再整页 reconcile
   // 当前项目的登记条目（name/default 都从这一次 find 取）
   const homeProject = projectHome
-    ? projects?.find((p) => p.path === projectHome.path)
+    ? projectsByBackend[projectHome.backend]?.find((p) => p.path === projectHome.path)
     : undefined
   const homeProjectInfo = useMemo(
     () =>
@@ -1431,13 +1400,13 @@ export default function App() {
       setShowNewProject(false)
       try {
         const r = await gwForBackend(backend)?.addProject(path, name)
-        if (r) setProjects(r.projects)
-        await openProject(path, backend)
+        if (r) setProjects(backend, r.projects)
+        await newSession(backend, path)
       } catch {
         /* 目录不可用等：保持页面现状 */
       }
     },
-    [gwForBackend, openProject],
+    [gwForBackend, newSession, setProjects],
   )
 
   // 只删书签列表条目：移除的项目若正是当前会话绑定的目录，该会话本身仍在正常工作
@@ -1446,26 +1415,26 @@ export default function App() {
   // 该会话真实的 MCP 故障 toast 被误判为"跨项目噪音"而静默吞掉。
   const removeProjectFromList = useCallback(
     (path: string, backend = 'local') => {
-      gwForBackend(backend)?.removeProject(path).then((r) => setProjects(r.projects)).catch(() => {})
+      gwForBackend(backend)?.removeProject(path).then((r) => setProjects(backend, r.projects)).catch(() => {})
     },
-    [gwForBackend],
+    [gwForBackend, setProjects],
   )
 
   const renameProjectInList = useCallback(
     (path: string, name: string, backend = 'local') => {
-      gwForBackend(backend)?.renameProject(path, name).then((r) => setProjects(r.projects)).catch(() => {})
+      gwForBackend(backend)?.renameProject(path, name).then((r) => setProjects(backend, r.projects)).catch(() => {})
     },
-    [gwForBackend],
+    [gwForBackend, setProjects],
   )
 
   const setProjectDefault = useCallback(
     (path: string, isDefault: boolean, backend = 'local') => {
       gwForBackend(backend)
         ?.setDefaultProject(path, isDefault)
-        .then((r) => setProjects(r.projects))
+        .then((r) => setProjects(backend, r.projects))
         .catch(() => {})
     },
-    [gwForBackend],
+    [gwForBackend, setProjects],
   )
 
   // 在任务会话视图内切换到某次执行的会话（不改变 view），并标记该次执行为已读。
@@ -2346,10 +2315,8 @@ export default function App() {
         projects={projects}
         current={projectsMachine === activeBackend ? workspaceDir : ''}
         machine={projectsMachine}
-        needProjectHint={needProjectHint}
         onSelectMachine={selectProjectsMachine}
-        // 点项目一律进项目主页——主页输入岛本身就能在此项目开聊，故无论是主动浏览
-        // 还是被「新建会话」阻断跳来（needProjectHint），落点一致，不再偶发跳到欢迎页。
+        // 点项目进入主页，再由主页输入栏开聊。
         onOpen={(p) => openProjectHome(p, projectsMachine)}
         onNew={() => setShowNewProject(true)}
         onRemove={(path) =>
@@ -2571,9 +2538,9 @@ export default function App() {
         machines={machines}
         channels={channels}
         currentKey={view === 'chat' ? active : ''}
-        conn={conn}
-        backend={activeBackend}
-        workspace={workspaceDir}
+        conn={homeTarget ? machineConn[homeTarget.backend] ?? 'connecting' : conn}
+        backend={pickerBackend}
+        workspace={homeTarget ? homeTarget.path : workspaceDir}
         activity={activity}
         projectsActive={view === 'projects' || view === 'project'}
         scheduledActive={view === 'scheduled'}

@@ -51,6 +51,8 @@ renderer 导航、销毁或取消时释放其通道；活跃会话由既有 regi
 
 新会话首先是 ProjectTarget（机器 id + 目录）的草稿，发送第一条消息时才创建后端会话。NewChatTarget 与 ProjectCreateDialog 复用 SSH 添加流程；切换目标保留输入，历史会话不被重新定向。DirBrowser 经目标机器 RPC 浏览目录，支持输入路径；缺失或无权限的路径返回错误，不再显示可选空目录。
 
+侧栏底部在新对话页和项目主页跟随目标项目、机器及其控制连接；聊天页跟随活动会话。切会话时立即同步目标项目目录，连接失败也不保留上一条会话的项目名。新对话页和项目主页的模型选择修改目标机器的新会话默认模型；切走后返回的旧机器响应不覆盖当前选择。
+
 连接界面直接使用主进程和远端 bootstrap 发出的 `connecting → checking → installing/updating/starting/restarting → attaching → ready` 状态。首次安装确认携带实际数据目录和已安装信息；后续更新不重复确认。错误保留失败阶段与原始原因（包括多行安装输出），不按文本分类或猜测原因，也不通过前端计时器推算进度。`SshQuestionProvider` 维护认证问题队列：打开的连接窗口承接本机对应请求，其余重连请求由全局 `SshPrompts` 处理。安装确认、主机指纹和密钥口令在同一连接窗口内展示；取消先结束待确认请求，再等待 SSH 子进程退出，避免安装确认挂起时断开死锁。
 
 所有项目入口使用同一个 C 版 `DirBrowser`，机器由调用入口指定。上级 token 原样传回后端，主目录取首次成功 RPC 的返回值；面包屑保留 POSIX、Windows 盘符和 UNC 路径。Windows 虚拟盘符列表不能被选择为目录。路径编辑、目录新建与整个弹窗的 Escape 分层处理；请求序号避免过期目录响应覆盖当前路径。列表边缘渐隐随实际滚动位置变化，短列表不渐隐。
@@ -165,7 +167,7 @@ agent 运行时仍可发消息：消息不打断当前轮，而是在**下一个
 - **per-run 项目 / hooks 注入**：bridge 在每轮 `_stream` 起点通过 `set_project_source` 注入会话项目目录，通过 `set_run_config_hooks` 注入 config hooks。contextvar 隔离并发 run；serve 下 cron 也走同一入口。项目目录用于文件路径解析和 Bash 初始 cwd，不限制文件访问范围。详见 [permissions.md](permissions.md) / [hooks.md](hooks.md)。
 - **`set_workspace`（会话级改项目）**：只 rebase 本 bridge 引擎、重载本会话 config hooks、更新元数据、重置本会话当前 thread 的持久 shell——**不 chdir、不影响其它会话**。原 `_active_bridges` 进程级 rebase-all 已随 cwd 进程级模型一并移除。前端「打开项目」= 经 open 握手开一条绑定到该项目的新会话（不再先 `set_workspace` 改进程态）；`set_workspace` RPC 主要用于原地改当前会话项目（及未来复用单连接的非 desktop client）。`set_workspace` 在 `_dispatch` 中持 `run.lock`，与运行中的轮次互斥。
 - **项目清单**：纯手动登记，持久化在 `~/.lumi/lumi.json` 的 `projects` 分区（`lumi/gateway/projects.py`，复用 `_atomic_write_json`），按 `last_used` 降序。`list_projects` 只返回 `{projects}`——不下发「当前项目」：项目随会话绑定，项目页高亮由前端按活动会话的 `workspaceDir` 决定（同机器才高亮）；`add_project`（缺省用目录末端名，重复添加保留用户重命名）/ `remove_project`（只删条目，不动磁盘）/ `rename_project`。`last_used` 在真正用到项目时经 `touch_project` 刷新：带 `?workspace=` 打开会话连接且绑定成功、`switch_session` 本次确认了绑定、`set_workspace` 成功。
-- **默认项目**：每条目可带 `default: bool`，`set_default_project(path, default)` 保证至多一个默认（设新的自动顶掉旧的；取消默认只清目标自身，不碰其它条目）。前端"新建会话"（`App.tsx::goNewChat`，app 冷启动路径同款逻辑）每次都问后端要最新 `list_projects()`（不信任本地缓存，default 可能刚在别的窗口/设备改过），有默认项目作为新会话的目标草稿，没有则由输入框旁项目菜单选择（顶部提示"选一个项目开始对话；点「⋯」→「设为默认」，以后新建会话直接进"）。`ProjectsPage` 项目卡「⋯」菜单可设为/取消默认，卡片名旁挂静止金星标记（`.proj-star`，设为默认那一刻光环扩散一次）。
+- **默认项目**：每条目可带 `default: bool`，`set_default_project(path, default)` 保证至多一个默认（设新的自动顶掉旧的；取消默认只清目标自身，不碰其它条目）。点击“新对话”或在目标选择器中切机器时，重新查询 `list_projects()`，共用 `defaultProjectTarget` 选择默认项目；无默认时取列表首项，列表为空时保留机器、等待用户选项目。冷启动只预选本地已登记的默认项目。`ProjectsPage` 项目卡「⋯」菜单可设为/取消默认，卡片名旁挂静止金星标记（`.proj-star`，设为默认那一刻光环扩散一次）。
   - **默认的兜底两条**：清单原本为空时 `add_project` 直接把首个项目标为默认（新用户建完就能开聊）；清单非空但**所有条目都不含 `default` 键**（= 该机制上线前登记、从没碰过它）时，`list_projects` 一次性把最近使用的回填为默认并落盘。判据是「有没有这个键」而非「值真不真」——主动取消过默认的人条目上是 `default: False`，带键即不回填，用户意愿不会被覆盖。
 - **持久 shell 按会话 / 子代理隔离**：bash 的持久 shell 不再全进程共用一个，而是按 `current_thread_id` 分（会话私有，`cd`/env 不串别的会话），断连（`bridge.close`）/ 删会话（`delete_thread`）时回收，避免长跑 serve 累积孤儿进程。子代理（`agent` 工具）经 `shell_session.run_with_shell` 在 `copy_context` 副本里用专属 key 跑、拿独立 shell（`cd` 不污染父 / 兄弟、用完即弃），不继承父 shell 状态（在项目根 fresh 起）。
 - **前端**：侧栏「项目」入口（`onOpenProjects`）打开 `ProjectsPage`（搜索 + 排序 + 卡片，当前项目金描边）；`DirBrowser`（经 `list_dir` RPC 浏览后端目录）新建项目。
@@ -191,7 +193,7 @@ agent 运行时仍可发消息：消息不打断当前轮，而是在**下一个
   供应商 / MCP / 环境三页的列表加载共用（渠道页因叠加 `active` 条件仍自持 offline 判断）。
   **约定：凡按机器取数一律走它**（项目主页概览、定时执行记录、飞书绑定项目选择同样接入）；App 本身
   是 context 提供方用不了 hook，项目列表与开局查默认项目直接依赖 `machineConn[machine] === 'open'`
-  写 effect，语义相同。项目列表未成功拉到时为 `null`（列表区留空），不渲染成「还没有项目」。
+  写 effect，语义相同。启动查询和项目页刷新共用 `refreshProjects`，查询及项目修改返回的列表按机器保存，晚到的其它机器响应不会覆盖当前机器的列表。目标机器的列表未成功拉到时为 `null`（列表区留空），不渲染成「还没有项目」。
 - **停摆唤醒**：`stopped` 里的退避耗尽不是终态——窗口重获焦点 / `online` 时 App 对全部控制连接与
   会话连接调 `Gateway.wake()`（仅 `failed` 且非主动关闭 / 非 1008 才重连）。离开久了（睡眠、断网
   超过约 15s 的退避窗口）回来即自愈，连上后上面挂在连接态的取数自动重跑，无需逐处写补拉。
