@@ -12,6 +12,7 @@
   --color-canvas: #20201e;
   --color-surface: #2c2b28;
   --color-panel: #262624;
+  --sidebar-background: #242424;
   --color-line: #3c3b36;
   --color-separator: #565450;
   --color-ink: #ececea;
@@ -79,6 +80,7 @@
   --color-canvas: #fcfcfb;
   --color-surface: #f5f5f3;
   --color-panel: #ffffff;
+  --sidebar-background: var(--color-base);
   --color-line: #e5e3de;
   --color-separator: #d4d1ca;
   --color-ink: #373634;
@@ -243,7 +245,9 @@ pre {
   border: 1px solid color-mix(in srgb, var(--color-ink) 7%, transparent);
   box-shadow: var(--shadow-card);
 }
-.sidebar-float { --sidebar-background: var(--color-base); background: var(--sidebar-background); }
+.sidebar-float,
+.subagent-detail { background: var(--sidebar-background); }
+.rail-section { --color-surface: color-mix(in srgb, var(--color-ink) 3%, var(--sidebar-background)); }
 
 /* 项目侧栏：标题共用对齐线；收起紧凑，展开后才增加组间留白。 */
 .sidebar-navigation { padding: 4px 10px 10px; }
@@ -495,7 +499,7 @@ pre {
   box-shadow: 0 3px 10px #0002;
 }
 .rail-panel-expanded { gap: 0; overflow: hidden; }
-.preview-window-expanded { height: auto; flex: 1; border: 0; background: var(--color-panel); }
+.preview-window-expanded { height: auto; flex: 1; border: 0; background: var(--sidebar-background); }
 .preview-window-expanded .preview-window-header { padding-right: 44px; border-bottom: 1px solid var(--color-line); }
 .preview-window-expanded .preview-viewport { margin: 0; border-radius: 0; }
 
@@ -536,6 +540,13 @@ body.resizing-col * {
 ::-webkit-scrollbar-thumb:hover {
   background: var(--color-accent);
 }
+
+/* 输入栏按自身宽度收紧，审批与发送按钮不挤压，模型名优先省略。 */
+.composer-tools, .composer-model { min-width: 0; }
+.composer-model > button { max-width: min(15rem, 100%); }
+.composer-approval, .composer-submit, .composer-tools > button { flex-shrink: 0; }
+.composer-approval > button { height: 32px; white-space: nowrap; }
+.composer-approval > button svg { flex-shrink: 0; }
 
 /* textarea 随内容自增高度 */
 .composer {
@@ -856,9 +867,6 @@ body.resizing-col * {
 .segment-track [data-slot="tabs-trigger"] { background: transparent; box-shadow: none; z-index: 1; }
 .step-actions > [data-slot="button"] { height: 32px; font-size: 14px; padding-inline: 10px; }
 
-/* 子会话使用共享会话画布，避免右栏面板材质覆盖它的底色。 */
-.rail-panel .sidebar-float:not(.app-canvas) { --sidebar-background: var(--color-panel); background: var(--sidebar-background); }
-
 /* Approved SSH/new-chat surfaces: the quiet halo remains visible in both themes. */
 .composer-glass { background: linear-gradient(180deg,var(--color-panel),color-mix(in srgb,var(--color-panel) 98%,var(--color-canvas))); border-color:color-mix(in srgb,var(--color-line) 60%,transparent); box-shadow:0 2px 5px color-mix(in srgb,var(--color-ink) 2%,transparent),0 12px 35px -12px color-mix(in srgb,var(--color-ink) 9%,transparent),inset 0 1px 0 color-mix(in srgb,var(--color-panel) 95%,transparent); }
 .composer-glass:focus-within { border-color:color-mix(in srgb,var(--color-line) 60%,transparent); box-shadow:0 2px 5px color-mix(in srgb,var(--color-ink) 2%,transparent),0 12px 35px -12px color-mix(in srgb,var(--color-ink) 9%,transparent),inset 0 1px 0 color-mix(in srgb,var(--color-panel) 95%,transparent); }
@@ -1048,7 +1056,7 @@ body.resizing-col * {
 .new-chat-entry .composer-submit { order:4; }
 .new-chat-entry .composer-layer { min-height:79px; padding:17px 18px 10px; font-size:13px; line-height:1.7; }
 .new-chat-entry .composer-toolbar { padding:0 13px 12px; grid-template-columns:28px auto minmax(0,1fr) 30px; }
-.new-chat-entry .composer-approval > button,.new-chat-entry .composer-model > button { height:30px; }
+.new-chat-entry .composer-model > button { height:30px; }
 .new-chat-entry .composer-submit > button { width:30px; height:30px; background:linear-gradient(150deg,color-mix(in srgb,var(--color-accent) 80%,var(--color-panel)),var(--color-accent)); box-shadow:inset 0 1px 0 color-mix(in srgb,var(--color-panel) 30%,transparent),0 2px 5px color-mix(in srgb,var(--color-accent) 12%,transparent); }
 .new-chat-target button svg { stroke-width:1.5; }
 .lumi-target-menu svg { stroke-width:1.4; }
@@ -1068,7 +1076,5 @@ body.resizing-col * {
 .app-canvas.app-home { background:radial-gradient(ellipse at 86% 8%,color-mix(in srgb,var(--color-accent) 2.5%,transparent),transparent 60%),radial-gradient(ellipse at 10% 100%,color-mix(in srgb,var(--color-info) 2%,transparent),transparent 50%),var(--chat-background); }
 .light .app-canvas.app-home { background:radial-gradient(ellipse at 85% 0,color-mix(in srgb,var(--color-accent) 5%,transparent),transparent 55%),linear-gradient(180deg,color-mix(in srgb,var(--color-info) 7%,var(--chat-background)),var(--chat-background) 60%); }
 .chat-top-fade { background:linear-gradient(to bottom,var(--chat-background),transparent); }
-:root:not(.light) aside.sidebar-float,
 :root:not(.light) .composer-glass,
-:root:not(.light) .composer-glass:focus-within { background:#242424; }
-:root:not(.light) aside.sidebar-float { --sidebar-background: #242424; }
+:root:not(.light) .composer-glass:focus-within { background:var(--sidebar-background); }

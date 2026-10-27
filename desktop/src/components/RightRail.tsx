@@ -102,7 +102,7 @@ export function RailSection({
   const [collapsed, setCollapsed] = useState(false)
   const toggle = () => setCollapsed((c) => !c)
   return (
-    <section className={cn("sidebar-float rounded-card shrink-0 overflow-hidden", className)}>
+    <section className={cn("rail-section sidebar-float rounded-card shrink-0 overflow-hidden", className)}>
       {/* div 化的节头要自己补齐 button 的键盘语义：tabIndex 可聚焦 + Enter/Space 触发 */}
       <div
         role="button"

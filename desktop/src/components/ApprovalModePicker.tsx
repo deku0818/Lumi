@@ -39,6 +39,7 @@ export function ApprovalModePicker({
       <DropdownMenuTrigger asChild>
         <button
           title={t('approval.label')}
+          aria-label={t(`approval.${value}` as const)}
           className={`group flex items-center gap-1.5 px-2 py-1 rounded-lg text-xs transition outline-none border ${
             isAuto
               ? 'border-primary/45 text-primary bg-primary/[0.08]'

@@ -1,5 +1,5 @@
 import { memo, useMemo, useState } from 'react'
-import { ChevronRight } from 'lucide-react'
+import { ChevronRight, CircleAlert } from 'lucide-react'
 import type { Item } from '../../types'
 import { isKnownTool, summarizeTools, toolArgs, toolIcon, toolStatusKey, toolTitle } from '../../toolMeta'
 import { MAX_DIFF_LINES, foldContext, toolDiff, type DiffLine } from '../../diff'
@@ -21,7 +21,8 @@ export const sameItems = (a: ToolItem[], b: ToolItem[]) =>
 export const ToolGroup = memo(function ToolGroup({ tools }: { tools: ToolItem[] }) {
   const { t } = useI18n()
   const running = tools.some((t) => !t.done)
-  const hasError = tools.some((t) => t.error)
+  const failedCount = tools.filter((t) => t.error).length
+  const hasError = failedCount > 0
   // 默认运行 / 出错时展开；用户明确开合后，后续流式更新不抢回选择。
   const [override, setOverride] = useState<boolean | null>(null)
   const open = override ?? (running || hasError)
@@ -43,8 +44,17 @@ export const ToolGroup = memo(function ToolGroup({ tools }: { tools: ToolItem[] 
         className="flex items-center gap-1.5 text-sm text-muted-foreground hover:text-ink transition"
       >
         {running && <span className="text-primary animate-pulse text-[10px]">●</span>}
-        {!running && hasError && <span className="text-error text-[10px]">●</span>}
-        <span className={hasError ? 'text-error' : ''}>{summary}</span>
+        <span>{summary}</span>
+        {!running && hasError && (
+          <span
+            role="img"
+            title={t('tool.failedCount', { n: failedCount })}
+            aria-label={t('tool.failedCount', { n: failedCount })}
+            className="ml-0.5 shrink-0 text-muted-foreground/75"
+          >
+            <CircleAlert size={12} aria-hidden="true" />
+          </span>
+        )}
         <ChevronRight
           size={14}
           className={`shrink-0 opacity-60 transition-transform ${open ? 'rotate-90' : ''}`}
@@ -106,7 +116,7 @@ const ToolRow = memo(function ToolRow({ item }: { item: ToolItem }) {
     </div>
   ) : hasOutput ? (
     <pre
-      className={`m-0 max-h-60 overflow-auto whitespace-pre-wrap break-all px-3 py-2 ${errored ? 'text-error/90' : 'text-muted-foreground/90'}`}
+      className="m-0 max-h-60 overflow-auto whitespace-pre-wrap break-all px-3 py-2 text-muted-foreground/90"
     >
       {item.output.slice(0, 4000)}
       {item.output.length > 4000 && '\n' + t('common.truncated')}
@@ -126,14 +136,19 @@ const ToolRow = memo(function ToolRow({ item }: { item: ToolItem }) {
       >
         <Icon
           size={15}
-          className={`mt-[3px] shrink-0 ${!item.done ? 'text-primary animate-pulse' : errored ? 'text-error' : 'text-muted-foreground'}`}
+          className={`mt-[3px] shrink-0 ${!item.done ? 'text-primary animate-pulse' : 'text-muted-foreground'}`}
         />
         <span className="min-w-0 flex-1">
           <span className="flex min-w-0 items-center gap-1.5">
             {/* 未登记工具（MCP 等）的参数已在第二行键值里，标题用工具名免重复 */}
-            <span className={`truncate ${errored ? 'text-error' : 'text-ink/80'}`}>
+            <span className="truncate text-ink/80">
               {isKnownTool(item.name) ? toolTitle(item.name, item.args, t) : item.name}
             </span>
+            {errored && (
+              <span className="shrink-0 rounded border border-line px-1 text-[10px] leading-4 font-normal text-muted-foreground">
+                {t('tool.failed')}
+              </span>
+            )}
             {open && chips}
           </span>
           {args.text && (

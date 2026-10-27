@@ -217,7 +217,7 @@ agent 运行时仍可发消息：消息不打断当前轮，而是在**下一个
 composer 右下角（发送键左侧）一粒圆环，实时反映「当前对话占用 / 模型上下文窗口」，落地见 `desktop/src/components/ContextMeter.tsx`。
 
 - **数据**：占用量取最近一次模型调用的 `usage.input_tokens`（含缓存命中部分，即「当前上下文」），由 `App.tsx` 的 `ctxFromUsage` 从 `message.complete` / `turn.complete` 事件提炼写入 `SessionState.ctx`（回合中流式刷新）；窗口取 active 模型的上下文长度——`list_providers` 在每个 profile 附 `context: {model: context_length}`（来自 models.dev catalog，与思考能力 `thinking` 同源 `lookup(m)`），前端按 `activeModel` 派生 `contextWindow`。
-- **形态**：默认仅圆环，颜色即档位（绿 `<60%` / 金 `60–85%` / 红 `>85%`，取主题 `--color-success/accent/error`）；点击经 Radix DropdownMenu 向上弹出明细——大进度条 + 已用/总量 + 分项（输入 / 输出 / 缓存命中，取 `input_token_details` / `output_token_details`）+ 当前模型与窗口。临界态（`>85%`）圆环发光呼吸 + 红色「上下文将满」提示条。数据未就绪（无 usage 或窗口未知 = 0）时静默不渲染。
+- **形态**：默认仅圆环，颜色即档位（绿 `<60%` / 金 `60–85%` / 红 `>85%`，取主题 `--color-success/accent/error`）；点击经 Radix DropdownMenu 向上弹出明细——大进度条 + 已用/窗口容量 + 分项（输入 / 输出 / 缓存命中，取 `input_token_details` / `output_token_details`）+ 当前模型名称。模型名称过长时省略，悬停查看全名。临界态（`>85%`）圆环发光呼吸 + 红色「上下文将满」提示条。数据未就绪（无 usage 或窗口未知 = 0）时静默不渲染。
 
 ## 定时任务管理
 
@@ -324,6 +324,8 @@ macOS 关窗后应用驻留 Dock，sidecar 保持运行，Dock 唤起（activate
 左侧会话栏与统一右栏可拖拽调宽。预览浮卡与执行记录、后台任务同列排列：有预览时使用 `lumi-preview-width`（默认 440px），否则使用 `lumi-rail-width-v2`（默认 256px）；左侧保持 `lumi-sidebar-width`。各宽度由 `useResizableWidth` 持久化到 localStorage，越界或脏值回退默认值。放大预览时暂时隐藏左侧栏和聊天区域，缩回后恢复原布局与右栏宽度；浮卡和 iframe 不重挂载。
 
 **统一右栏（`RightRail.tsx`）**：执行记录 / 后台任务等以 `RailSection` 模块卡竖排（玻璃材质、节头计数、独立折叠、键盘可达），定时任务会话置顶「执行记录」，通用模块两视图同构往下叠。预览与任务共用整栏一颗收放钮（预览放大时移入右上角）：浮于聊天区右上角（与左侧栏收起钮同线 y≈27、同 ghost/icon-sm 款式），收起时栏宽归零、聊天区铺到窗口边、钮贴右缘；开合状态（`lumi-rail-open`）与宽度两视图共用。收起即停一切隐藏开销（秒表 tick / 执行记录拉取 / 屏外动画合成）。
+
+**侧栏材质**：左右侧栏、文件预览与子代理窗口外壳共用 `--sidebar-background`，随深浅主题切换。右栏模块的内卡通过轻微明暗差区分层级；子代理正文沿用主会话画布，文件预览内容保留自身显示背景。预览放大后继续使用同一外壳底色。
 
 **悬浮栏的层级约定**：两条悬浮玻璃栏（左侧会话栏 / 统一右栏）在 `App.tsx` 里都挂在 `<main>` **之外**、与左侧栏同级的 flex 行上——放进 `<main>` 会被其内的 topStrip 压低一截，顶边对不齐。预览浮卡作为统一右栏的第一个模块；放大时保持同一组件实例，仅切换为铺满工作区的布局。新增右栏模块时挂进 `RightRail` 的 children 即可。
 

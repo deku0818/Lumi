@@ -10,12 +10,13 @@ import { ChatContent, ChatSegment } from './chat/ChatContent'
 import { ItemView, StatusIndicator } from './chat/ItemView'
 import { CopyButton } from './chat/MessageActions'
 import { Button } from './ui/button'
+import { Tooltip, TooltipContent, TooltipTrigger } from './ui/tooltip'
 import { QuestionContent } from './QuestionContent'
 
 function SubagentHeading({ agent }: { agent: SubagentSummary }) {
   return <span className="flex min-w-0 items-center gap-2" title={agent.cwd}>
     <span className="min-w-0 truncate text-[13px] font-semibold" title={agent.title || agent.name}>{agent.title || agent.name}</span>
-    {agent.title && <span className="shrink-0 rounded-[5px] bg-surface px-1.5 text-[11.5px] font-normal text-muted-foreground">{agent.name}</span>}
+    {agent.title && <span className="shrink-0 rounded-[5px] bg-ink/5 px-1.5 text-[11.5px] font-normal text-muted-foreground">{agent.name}</span>}
   </span>
 }
 
@@ -34,8 +35,8 @@ export function SubagentsSection({ agents, timelines = {}, selectedId, error, on
   const activeCount = [running ? t('subagent.runningCount', { n: running }) : '', queued ? t('subagent.queuedInstances', { n: queued }) : ''].filter(Boolean).join(' · ')
   const count = activeCount || (agents.length > 0 && agents.every(agent => agent.last_turn_status === 'completed') ? t('subagent.completedCount', { n: agents.length }) : agents.length)
   if (!agents.length && !error) return null
-  return <RailSection title={t('subagent.title')} count={count} className="app-canvas">
-    <div className="px-2 pb-2 space-y-2">
+  return <RailSection title={t('subagent.title')} count={count}>
+    <div className="space-y-2">
       {error && <p role="alert" className="px-2 text-xs text-error break-words">{error}</p>}
       {agents.map(agent => <AgentCard key={agent.agent_id} agent={agent} selected={agent.agent_id === selectedId}
         round={timelines[agent.agent_id]?.rounds.find(round => round.id === agent.active_turn_id)} onSelect={onSelect} onStop={onStop} />)}
@@ -50,17 +51,17 @@ function AgentCard({ agent, round, selected, onSelect, onStop }: {
   const { t } = useI18n()
   const status = agent.status === 'idle' ? agent.last_turn_status : agent.status
   const error = ['failed', 'blocked', 'interrupted'].includes(status)
-  return <article className={`group relative cursor-pointer rounded-lg border ${selected ? 'border-primary/40' : 'border-line/70'}`} onClick={event => {
+  return <article className={`group relative cursor-pointer rounded-lg border bg-surface ${selected ? 'border-primary/40' : 'border-line/45'}`} onClick={event => {
     if (!(event.target as HTMLElement).closest('button')) onSelect(agent.agent_id)
   }}>
-    <button onClick={() => onSelect(agent.agent_id)} className="block w-full rounded-lg px-3 py-2.5 pr-8 text-left hover:bg-ink/[0.02]" aria-label={agent.title || agent.name}>
+    <button onClick={() => onSelect(agent.agent_id)} className="block w-full rounded-lg px-2.5 py-2.5 pr-8 text-left hover:bg-ink/[0.02]" aria-label={agent.title || agent.name}>
       <SubagentHeading agent={agent} />
     </button>
-    {status === 'running' && <div className="px-3 pb-3"><SubagentActivity round={round} /></div>}
-    {(status === 'queued' || status === 'running' && agent.queued_count > 0) && <p className="px-3 pb-2 text-xs text-muted-foreground">
+    {status === 'running' && <div className="px-2.5 pb-3"><SubagentActivity round={round} /></div>}
+    {(status === 'queued' || status === 'running' && agent.queued_count > 0) && <p className="px-2.5 pb-2 text-xs text-muted-foreground">
       {agent.queued_count > 0 ? t('subagent.queuedCount', { n: agent.queued_count }) : t('subagent.status.queued')}
     </p>}
-    {(error || status === 'cancelled') && <p role={error ? 'alert' : 'status'} className={`px-3 pb-2 text-xs ${error ? 'text-error' : 'text-muted-foreground'}`}>{t(`subagent.status.${status}`)}</p>}
+    {(error || status === 'cancelled') && <p role={error ? 'alert' : 'status'} className={`px-2.5 pb-2 text-xs ${error ? 'text-error' : 'text-muted-foreground'}`}>{t(`subagent.status.${status}`)}</p>}
     <SubagentStop agent={agent} onStop={onStop} compact />
   </article>
 }
@@ -73,12 +74,17 @@ function SubagentStop({ agent, onStop, compact = false }: {
   const [error, setError] = useState('')
   if (!agent.active_turn_id) return null
   return <>
-    <Button variant="ghost" size={compact ? 'icon-sm' : 'sm'}
-      className={compact ? 'absolute right-1 top-1 size-6 text-muted-foreground opacity-0 group-hover:opacity-100 focus-visible:opacity-100' : 'ml-auto text-xs'}
-      disabled={stopping} title={t('subagent.stop')} aria-label={t('subagent.stop')} onClick={() => {
-        setStopping(true); setError('')
-        void onStop(agent).catch(reason => setError(errorMessage(reason))).finally(() => setStopping(false))
-      }}><Square size={compact ? 11 : 13} />{!compact && t('composer.stop')}</Button>
+    <Tooltip delayDuration={0}>
+      <TooltipTrigger asChild>
+        <Button variant="ghost" size="icon-sm"
+          className={`size-[26px] rounded-full bg-ink/5 text-muted-foreground hover:bg-error/12 hover:text-error ${compact ? 'absolute bottom-2 right-2' : 'ml-auto'}`}
+          disabled={stopping} aria-label={t('subagent.stop')} onClick={() => {
+            setStopping(true); setError('')
+            void onStop(agent).catch(reason => setError(errorMessage(reason))).finally(() => setStopping(false))
+          }}><Square className="size-[9px] fill-current stroke-0" /></Button>
+      </TooltipTrigger>
+      <TooltipContent side="top" sideOffset={6}>{t('subagent.stop')}</TooltipContent>
+    </Tooltip>
     {error && <p role="alert" className="px-2 pb-2 text-xs text-error break-words">{error}</p>}
   </>
 }
@@ -117,7 +123,7 @@ export function SubagentDetail({ agent, detail, expanded, remote, online, onBack
       element.scrollTop = element.scrollHeight
     }
   }, [position, detail.rounds, detail.loading, detail.error])
-  return <section aria-label={agent.title || agent.name} className={`flex min-h-0 flex-1 flex-col overflow-hidden app-canvas ${expanded ? '' : 'sidebar-float rounded-card'}`}>
+  return <section aria-label={agent.title || agent.name} className={`subagent-detail flex min-h-0 flex-1 flex-col overflow-hidden ${expanded ? '' : 'sidebar-float rounded-card'}`}>
     <header className="titlebar-interactive flex shrink-0 items-center gap-1.5 border-b border-line/60 px-2 py-2">
       <Button variant="ghost" size={expanded ? 'sm' : 'icon-sm'} title={t(expanded ? 'subagent.backMain' : 'subagent.back')} aria-label={t(expanded ? 'subagent.backMain' : 'subagent.back')} onClick={onBack}><ArrowLeft />{expanded && <span className="text-xs">{t('subagent.backMain')}</span>}</Button>
       <div className="min-w-0 flex-1"><SubagentHeading agent={agent} /></div>
@@ -127,7 +133,7 @@ export function SubagentDetail({ agent, detail, expanded, remote, online, onBack
       {!expanded && <Button variant="ghost" size="icon-sm" title={t('common.close')} aria-label={t('common.close')} onClick={onBack}><X /></Button>}
     </header>
     {(!online || detail.error || nativeError) && <div role="alert" className="shrink-0 px-4 py-2 text-xs text-error break-words">{detail.error || nativeError || t('subagent.disconnected')}<button className="ml-2 underline" onClick={onRetry}>{t('subagent.retry')}</button></div>}
-    <div className="relative flex min-h-0 flex-1">
+    <div className="app-canvas relative flex min-h-0 flex-1">
       <div ref={scroll} className="min-w-0 flex-1 overflow-auto" onScroll={() => {
         if (restored.current !== position) return
         const element = scroll.current!

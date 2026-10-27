@@ -120,10 +120,10 @@ export function ContextMeter({
         {row(t('ctx.output'), usage.output, 'var(--color-success)')}
         {usage.cacheRead > 0 && row(t('ctx.cache'), usage.cacheRead, 'var(--color-accent-dim)')}
         <div className="my-2 h-px bg-line" />
-        <div className="flex items-center justify-between text-[11px] text-muted-foreground">
-          <span>{t('ctx.model')}</span>
-          <b className="font-medium text-ink">
-            {model} · {fmtTokens(window)}
+        <div className="flex items-center justify-between gap-3 text-[11px] leading-[17px] text-muted-foreground">
+          <span className="shrink-0 whitespace-nowrap">{t('ctx.model')}</span>
+          <b className="min-w-0 truncate font-medium text-ink" title={model}>
+            {model}
           </b>
         </div>
         {level === 'crit' && (
