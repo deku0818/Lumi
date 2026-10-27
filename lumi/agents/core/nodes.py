@@ -32,6 +32,7 @@ from lumi.agents.core.node_helpers.messages import (
     dangling_tool_calls,
     is_malformed_tool_call,
 )
+from lumi.agents.core.node_helpers.skills import deduplicate_skill_results
 from lumi.agents.core.preprocessing.compact import (
     compact_messages,
     is_circuit_open,
@@ -324,6 +325,8 @@ async def tool_executor(
         tool_messages.extend(messages)
         commands.extend(tool_commands)
     await truncate_tool_results(tool_messages)
+    # 并行调用看不到兄弟结果；合并时按顺序检查，且只认可截断后实际保留的全文。
+    tool_messages = deduplicate_skill_results(pending, tool_messages)
     merged = [*tool_messages, *(m for c in commands for m in _cmd_messages(c))]
     # tool_result 按 tool_use 的顺序排（Command 里的与普通结果分两路收集，原序已丢）
     order = {tc["id"]: i for i, tc in enumerate(pending)}

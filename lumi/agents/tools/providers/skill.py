@@ -1,16 +1,12 @@
-"""Skill 工具提供者 - 提供基于提示词模板的技能工具
-
-技能目录结构:
-- .skills/skill_name/SKILL.md    主配置文件
-- .skills/skill_name/*.md        辅助文档
-- .skills/skill_name/scripts/    可执行脚本
-"""
+"""Skill 工具与手动命令共用的技能正文渲染与上下文去重。"""
 
 # 注意：本模块**不能**加 `from __future__ import annotations`——它会把
 # `runtime: ToolRuntime` 变成字符串注解，LangGraph 的注入识别失效（同 agent.py 的约定，
 # 见回归测试 test_runtime_injected_via_toolnode）。
+from collections.abc import Sequence
 from pathlib import Path
 
+from langchain_core.messages import BaseMessage, HumanMessage, ToolMessage
 from langchain_core.tools import tool
 from langgraph.prebuilt.tool_node import ToolRuntime
 from pydantic import BaseModel, Field
@@ -52,17 +48,55 @@ async def skill(name: str, runtime: ToolRuntime) -> str:
     if skill_config is None:
         return f"技能 '{name}' 不存在，请检查技能名称是否正确"
 
-    return render_skill(skill_config)
+    return render_skill(skill_config, runtime.state.get("messages", []))
 
 
-def render_skill(skill_config: SkillConfig) -> str:
-    """技能正文 + 资源目录提示（skill 工具与 /技能 斜杠命令共用）。
-
-    源目录即胜出层 SKILL.md 所在目录（path 由 loader 落好）——内置技能在安装包里，
-    正文说的「本目录 references/」不给出路径模型无从找起。
-    """
+def render_skill(
+    skill_config: SkillConfig,
+    messages: Sequence[BaseMessage] = (),
+) -> str:
+    """返回技能全文或已加载提示，两者都附带资源目录标签。"""
     source_dir = Path(skill_config.path).parent if skill_config.path else None
     skill_path = str(source_dir) if source_dir else f"skills/{skill_config.name}"
-    return (
-        f"{skill_config.prompt}\n\n---\n**Tips**: 技能资源位于 `{skill_path}/` 目录下。"
+    resources = (
+        f"<skill-resources>技能资源位于 `{skill_path}/` 目录下。</skill-resources>"
     )
+    content = f"{skill_config.prompt}\n\n{resources}"
+    # 只认可当前消息中实际保留的全文；短提示、摘要和截断结果均不能充当已加载记录。
+    # 无独立缓存：会话隔离、重启恢复、时间旅行和压缩自然遵循现有 messages。
+    blocks = [
+        {"type": "text", "text": f"<command-name>/{skill_config.name}</command-name>"},
+        *skill_content_blocks(content),
+    ]
+    for msg in messages:
+        if isinstance(msg, ToolMessage):
+            loaded = (
+                msg.name == "skill" and msg.status != "error" and msg.content == content
+            )
+        else:
+            loaded = (
+                isinstance(msg, HumanMessage)
+                and isinstance(msg.content, list)
+                and all(block in msg.content for block in blocks)
+            )
+        if loaded:
+            return skill_loaded_notice(skill_config.name, resources)
+    return content
+
+
+def skill_loaded_notice(name: str, resources: str) -> str:
+    """普通调用和批内去重共用的短提示。"""
+    return (
+        f"技能 '{name}' 已在当前上下文中加载且未变化，"
+        "请继续遵循此前的完整内容执行本次任务。"
+        f"\n\n{resources}"
+    )
+
+
+def skill_content_blocks(content: str) -> list[dict[str, str]]:
+    """将 render_skill 的输出拆成同级正文块和资源块。"""
+    body, resources = content.rsplit("\n\n<skill-resources>", 1)
+    return [
+        {"type": "text", "text": f"<skill-content>{body}</skill-content>"},
+        {"type": "text", "text": f"<skill-resources>{resources}"},
+    ]

@@ -107,21 +107,21 @@ def build_skill_command_blocks(
     """构建技能斜杠命令发给 Agent 的结构化 content blocks（各前端共用）。
 
     与 Agent 侧的命令解析约定保持一致，是该格式的单一事实来源：
-        Block 0: <command-name>/xxx</command-name><command-type>skill</command-type>
-        Block 1: <skill-content>{content}</skill-content>
-        Block 2 (可选): <user-input>{extra_text}</user-input>
+        Block 0: <command-name>/xxx</command-name>
+        Block 1: <skill-content>{正文或短提示}</skill-content>
+        Block 2: <skill-resources>{资源目录提示}</skill-resources>
+        Block 3 (可选): <user-input>{extra_text}</user-input>
 
     Args:
         skill_name: 技能名称（不含前导 "/"）。
         content: 技能正文（``render_skill`` 的产物：正文 + 资源目录提示）。
         extra_text: 用户在斜杠命令后追加的原始文本。
     """
-    meta = (
-        f"<command-name>/{skill_name}</command-name><command-type>skill</command-type>"
-    )
+    from lumi.agents.tools.providers.skill import skill_content_blocks
+
     blocks: list[dict] = [
-        {"type": "text", "text": meta},
-        {"type": "text", "text": f"<skill-content>{content}</skill-content>"},
+        {"type": "text", "text": f"<command-name>/{skill_name}</command-name>"},
+        *skill_content_blocks(content),
     ]
     if extra_text:
         blocks.append(
@@ -887,7 +887,9 @@ class AgentBridge:
 
         from lumi.agents.tools.providers.skill import render_skill
 
-        blocks = build_skill_command_blocks(name, render_skill(skill), extra_text)
+        blocks = build_skill_command_blocks(
+            name, render_skill(skill, await self.snapshot_messages()), extra_text
+        )
         # 显示声明：desktop 无 message_meta 时声明「/名 输入」单条（content 是
         # 命令 wire 格式，纯给模型看）；IM 渠道自带 items（用户敲的原文）原样用
         message_meta = dict(message_meta or {})

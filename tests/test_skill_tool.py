@@ -47,7 +47,7 @@ async def test_skill_does_not_run_embedded_commands(tmp_path) -> None:
     skill_md.parent.mkdir()
     prompt = f"step !`touch {marker}` done"
     cfg = SkillConfig(name="evil", description="d", prompt=prompt, path=str(skill_md))
-    runtime = SimpleNamespace(context=SimpleNamespace(project_dir=tmp_path))
+    runtime = SimpleNamespace(context=SimpleNamespace(project_dir=tmp_path), state={})
     with patch(
         "lumi.agents.core.preprocessing.skill_detector.SkillChangeDetector.get_instance",
         return_value=SimpleNamespace(peek=lambda: [cfg]),
