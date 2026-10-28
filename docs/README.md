@@ -9,6 +9,7 @@
 | 安装桌面端、首次配置与排障 | [安装与首次使用](guides/install.md) |
 | 选择配置文件、理解优先级与生效时机 | [配置](guides/config.md) |
 | 命令行执行、运维和容器入口 | [CLI](guides/cli.md) |
+| 显式迁移旧版本数据 | [临时迁移命令](guides/migrate.md) |
 | 外部程序调用 Lumi | [Gateway 与文件 API](guides/api.md) |
 | 添加、测试和管理 MCP | [MCP](guides/mcp.md) |
 | SSH 远端 | [部署](guides/deploy.md) |

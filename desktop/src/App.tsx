@@ -241,8 +241,6 @@ export default function App() {
   // 已查看过的执行会话，持久化。侧栏「N new」与 Runs 栏蓝点同源派生自它：
   // 未读 = 任务的 run_threads 减去本集合，故桌面端离线期间的执行重连后照样算未读
   const [readRuns, setReadRuns] = useState<Record<string, true>>(() => {
-    // 未读改为派生后 lumi-cron-unread 不再被读写，顺手清掉老用户的残留
-    localStorage.removeItem('lumi-cron-unread')
     try {
       return JSON.parse(localStorage.getItem('lumi-cron-read-runs') || '{}')
     } catch {

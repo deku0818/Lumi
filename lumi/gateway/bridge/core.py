@@ -465,7 +465,6 @@ class AgentBridge:
                 ]
                 meta = load_all().get(thread_id, {})
                 files.extend(meta.get("shared_uploads", []))
-                files.extend(meta.get("fork_uploads", []))  # 兼容此前已创建的附件副本
                 await self._agent.adelete_thread(thread_id)
                 # 先同步释放本会话引用，再检查剩余引用，避免并发删除双方都保留文件。
                 update_meta(thread_id, shared_uploads=None)
@@ -1029,8 +1028,6 @@ class AgentBridge:
         prefix = source_messages[:target_index]
         if prefix and CTX_DIGEST_KEY in prefix[-1].additional_kwargs:
             prefix[-1] = strip_ctx_digest(prefix[-1])
-        # todos 与消息同为 state 字段但无历史可回溯：不清会把「已删未来」的任务列表
-        # 带进重答轮（模型往幽灵清单续写），一并清空、由重答轮自行重建
         if source:
             # 从目标原始 checkpoint 分叉，旧压缩的后续记录不再属于新分支。
             rewind_config = {
@@ -1041,13 +1038,13 @@ class AgentBridge:
                 },
             }
             await self.flush_offline(
-                {"messages": Overwrite(value=prefix), "todos": []}, config=rewind_config
+                {"messages": Overwrite(value=prefix)}, config=rewind_config
             )
         else:
             update = [RemoveMessage(id=m.id) for m in removed if m.id]
             if prefix and prefix[-1] is not source_messages[target_index - 1]:
                 update.append(prefix[-1])
-            await self.flush_offline({"messages": update, "todos": []})
+            await self.flush_offline({"messages": update})
         self._config["configurable"].pop("checkpoint_id", None)
         messages[:] = prefix
         logger.info(
@@ -1071,7 +1068,6 @@ class AgentBridge:
             values={
                 **snapshot.values,
                 "messages": messages,
-                "todos": [],
                 "ptl_retry": False,
             },
             next=(),

@@ -58,8 +58,6 @@ def _db() -> sqlite3.Connection:
             "(project_key TEXT, thread_id TEXT, dreamed_at REAL,"
             " PRIMARY KEY(project_key, thread_id))"
         )
-        # 旧的 per-会话 human 计数游标表已被时间戳判定取代
-        _conn.execute("DROP TABLE IF EXISTS dream_cursor")
         _conn.commit()
     return _conn
 

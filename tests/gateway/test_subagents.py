@@ -207,7 +207,7 @@ async def test_receipt_ack_requires_committed_parent_checkpoint(tmp_path, monkey
         await service.close()
 
 
-@pytest.mark.parametrize("agent_id", ["subagent_1", "a7k3m9q2"])
+@pytest.mark.parametrize("agent_id", ["a7k3m9q2"])
 def test_subagent_cannot_be_bound_as_a_human_chat(agent_id):
     with pytest.raises(ValueError, match="只读"):
         AgentBridge().switch_thread(agent_id)

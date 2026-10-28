@@ -30,6 +30,7 @@ lumi serve --host 127.0.0.1 --port 8765
 |---|---|
 | `lumi status` | 版本、安装方式、数据目录与服务状态 |
 | `lumi logs -f` | 跟踪运行日志 |
+| `lumi migrate --check` / `--apply` | [临时旧数据迁移](migrate.md)，不自动备份 |
 | `lumi update` | 更新可独立升级的 CLI 安装；源码、容器和桌面内嵌后端按各自方式更新 |
 | `lumi env status` | 检查 uv / Node / rg / OfficeCLI |
 | `lumi env install [uv\|node\|rg\|officecli]` | 留空装齐缺失项，指定名称只装该工具；已安装的跳过 |

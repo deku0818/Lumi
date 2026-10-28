@@ -1,0 +1,91 @@
+"""临时迁移旧 MEMORY.md 索引，返回待写内容，不自动落盘。"""
+
+from __future__ import annotations
+
+import re
+from datetime import datetime
+from pathlib import Path
+
+from lumi.agents.memory.paths import read_text_or_none
+from lumi.utils.config.manager import parse_frontmatter
+
+# - [标题](文件.md) 可选 [tag] 可选 — 结论。标题用非贪婪 `.*?` 锚定到 `](…md)`，
+# 故标题内含 `]`（如 `[修复 [bug] 的记录]`）也能正确匹配，不在第一个 `]` 处误断。
+_PTR_RE = re.compile(
+    r"^(?P<head>\s*-\s*\[.*?\]\((?P<file>[^)]+\.md)\))"
+    r"(?:\s*\[(?P<tag>[^\]]*)\])?"
+    r"(?P<rest>.*)$"
+)
+# legacy tag 全量匹配：`type · 日期` 或纯 `日期`；别的方括号内容是正文，不许剥。
+_LEGACY_TAG_RE = re.compile(
+    r"(?:(?:user|feedback|project|reference)\s*·\s*)?(?P<date>\d{4}-\d{2}-\d{2})"
+)
+
+
+def _file_date(topic: Path) -> str:
+    """topic 文件 mtime 的绝对日期（YYYY-MM-DD，本地时区），作缺失 date 的近似值。
+
+    本地时区与主 agent 手写日期（取 env 的本地 currentDate）同源一致。"""
+    try:
+        return datetime.fromtimestamp(topic.stat().st_mtime).strftime("%Y-%m-%d")
+    except OSError:
+        return datetime.now().strftime("%Y-%m-%d")
+
+
+def _backfill_date(topic: Path, date: str, updates: dict[Path, str]) -> bool:
+    """topic frontmatter 缺 ``date`` 时补上；返回 frontmatter 里现在是否有 date。
+
+    边界规则与 :func:`parse_frontmatter` 同一套（lstrip BOM/空白后首行须为 ``---``），
+    不会把 date 插到 frontmatter 之外。"""
+    content = updates.get(topic) or read_text_or_none(topic)
+    if content is None:
+        return False
+    meta, _ = parse_frontmatter(content)
+    if not meta:
+        return False
+    if "date" in meta:
+        return True
+    # meta 非空即保证存在独立成行的闭合 ---（与 parse_frontmatter 同套 lstrip 规则）
+    lines = content.lstrip("﻿ \t\r\n").split("\n")
+    close = next(i for i in range(1, len(lines)) if lines[i].strip() == "---")
+    lines.insert(close, f"date: {date}")
+    updates[topic] = "\n".join(lines) + "\n"
+    return True
+
+
+def migrate_memory_directory(mem_dir: Path) -> dict[Path, str]:
+    """读 MEMORY.md，剥 legacy ``[tag]``（日期先回填 frontmatter）、给缺 date 的
+    topic 补近似日期，幂等重写。无索引则跳过。"""
+    updates: dict[Path, str] = {}
+    entry = mem_dir / "MEMORY.md"
+    text = read_text_or_none(entry)
+    if text is None:
+        return updates
+
+    out_lines: list[str] = []
+    for line in text.splitlines():
+        m = _PTR_RE.match(line)
+        if not m:
+            out_lines.append(line)
+            continue
+        topic = (mem_dir / m.group("file")).resolve()
+        if not topic.is_relative_to(mem_dir.resolve()):
+            out_lines.append(line)  # 绝对路径 / ../ 指针：记忆目录外的文件一概不碰
+            continue
+        tag = m.group("tag")
+        if tag is None:
+            _backfill_date(
+                topic, _file_date(topic), updates
+            )  # 新格式行：只补缺失的 date
+            out_lines.append(line)
+            continue
+        legacy = _LEGACY_TAG_RE.fullmatch(tag.strip())
+        if legacy is None or not _backfill_date(topic, legacy.group("date"), updates):
+            out_lines.append(line)  # 非 legacy tag / 日期无处安放 → 原样保留
+            continue
+        rest = m.group("rest").strip()
+        out_lines.append(m.group("head") + (f" {rest}" if rest else ""))
+
+    if out_lines != text.splitlines():
+        updates[entry] = "\n".join(out_lines) + "\n"
+    return updates

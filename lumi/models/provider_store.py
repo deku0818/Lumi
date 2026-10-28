@@ -15,8 +15,6 @@ classifier / titler 是独立于对话 active 的「用途指针」（auto 审�
 缺省/失效时回退会话 active 模型；经 get_pointers / resolve_pointer / set_pointer 读写。
 
 无 textual 依赖，可在 headless 服务（lumi serve）中直接使用。
-兼容旧格式（profile 用单个 "model" 字段、active 为字符串 id；
-顶层全局 "effort" 字段已废弃，读取时忽略）。
 """
 
 from __future__ import annotations
@@ -44,8 +42,8 @@ class ProviderProfile:
     base_url: str
     api_key: str
     models: tuple[str, ...]
-    protocol: str = ""
-    compatibility: str = ""
+    protocol: str = "openai"
+    compatibility: str = "standard"
     preset: str = "custom"
     effort: dict[str, str] = field(default_factory=dict)
     """按模型的思考档位（model → level），只存非 auto。"""
@@ -62,12 +60,11 @@ class ProviderProfile:
 
 
 def _coerce_profile(x: dict) -> ProviderProfile | None:
-    """把一条原始记录转成 ProviderProfile，兼容旧的单 model 字段。"""
+    """把一条当前格式记录转成 ProviderProfile。"""
     if not isinstance(x, dict) or "id" not in x or "name" not in x:
         return None
+    validate_connection(x.get("protocol", ""), x.get("compatibility", ""))
     raw_models = x.get("models")
-    if not raw_models and x.get("model"):  # 旧格式：单个 model
-        raw_models = [x["model"]]
     models = tuple(
         m.strip() for m in (raw_models or []) if isinstance(m, str) and m.strip()
     )
@@ -159,8 +156,6 @@ def _parse(data: dict) -> tuple[list[ProviderProfile], Active, dict[str, dict]]:
     profiles = [p for p in map(_coerce_profile, data.get("profiles", [])) if p]
     _publish_aliases(profiles)
     raw_active = data.get("active", {})
-    if isinstance(raw_active, str):  # 旧格式：active 为 provider id
-        raw_active = {"provider": raw_active, "model": ""}
     pointers = {k: _kept_pointer(profiles, data.get(k)) for k in _POINTER_KINDS}
     return profiles, _normalize_active(profiles, raw_active), pointers
 
@@ -382,8 +377,10 @@ def upsert(profile: dict) -> ProviderProfile:
     )
     old = next((p for p in profiles if p.id == pid), None)
     effort = {m: lv for m, lv in old.effort.items() if m in models} if old else {}
-    protocol = profile.get("protocol", old.protocol if old else "")
-    compatibility = profile.get("compatibility", old.compatibility if old else "")
+    protocol = profile.get("protocol", old.protocol if old else "openai")
+    compatibility = profile.get(
+        "compatibility", old.compatibility if old else "standard"
+    )
     validate_connection(protocol, compatibility)
     saved = ProviderProfile(
         id=pid,

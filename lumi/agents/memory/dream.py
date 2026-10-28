@@ -338,9 +338,7 @@ async def _run_dream_fork(
             result = await run_with_shell(
                 task_id, agent.graph.ainvoke(inputs, context=ctx)
             )
-            normalize_memory_index(
-                project_dir
-            )  # 兜底剥索引行旧 [tag]、日期回填 frontmatter
+            normalize_memory_index(project_dir)  # 为 topic 补齐缺失的日期
             # 综合成功才推进快照时刻（失败则不动，下次仍按旧边界判活）
             record()
             msgs = result.get("messages") or []

@@ -64,11 +64,6 @@ class FeishuChannelConfig(ChannelRuntimeConfig):
         "会话 thread 命名空间、lark-cli profile 名都由它派生",
     )
     name: str = Field(default="飞书机器人", description="展示名（仅本机 UI 用）")
-    legacy_threads: bool = Field(
-        default=False,
-        description="旧版单机器人迁移标记：会话 thread 沿用不带机器人段的 "
-        "feishu-{key}（保住历史会话），新建机器人恒为 False 走 feishu-{id}-{key}",
-    )
     enabled: bool = Field(default=False, description="是否启用飞书 Channel")
     app_id: str = Field(default="", description="飞书应用 App ID（支持 ${ENV} 引用）")
     app_secret: str = Field(
@@ -108,12 +103,10 @@ class FeishuChannelConfig(ChannelRuntimeConfig):
         """本机器人会话 thread 的确定性前缀。
 
         同一个群里可能坐着两个 Lumi 机器人（不同项目各一个），chat_id 相同——thread
-        必须带机器人段才不撞会话。仅旧版迁移来的那一条沿用裸 ``feishu-``，保住历史。
+        必须带机器人段才不撞会话。
         前端 ``desktop/src/lib/utils.ts`` 的 ``botOfThread`` 按同一规则反解会话归属：
         thread id 是持久化的 checkpoint 标识，此派生等于 wire 约定，两端一起才改。
         """
-        if self.legacy_threads:
-            return FEISHU_THREAD_PREFIX
         return f"{FEISHU_THREAD_PREFIX}{self.id}-"
 
     cli_profile: str = Field(

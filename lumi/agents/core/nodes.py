@@ -265,7 +265,7 @@ async def tool_executor(
     - PreToolUse：``Block`` 补齐 ToolMessage(status=error) 配对后终止；
       ``AdditionalContext`` 收集为 reminder，工具仍执行，结果注入 ToolMessage 之后。
     - PostToolUse：hook 看到截断后的最终 ToolMessage，reminder 追加到末尾。
-    工具自身返回的 Command（todos / read 图片 / 结构化输出等，都只带 state 更新、不带
+    工具自身返回的 Command（结构化输出 / read 图片 / 结构化输出等，都只带 state 更新、不带
     路由）照常经 PostToolUse 与失败上限检查；其 messages 抽出与其余结果合并，全部
     ToolMessage 在前、附带的其它消息（读图回灌的 HumanMessage、reminder）在后——provider
     要求同批 tool_result 紧跟 tool_use，中间夹一条 user 内容即违反协议。
@@ -363,7 +363,7 @@ async def tool_executor(
         update["tool_cancelled"] = True
     if not commands:
         return update
-    # Command 的其余 update（todos / structured_output）原样保留，messages 已并入上面
+    # Command 的其余 update（structured_output）原样保留，messages 已并入上面
     stripped = [
         replace(
             c,

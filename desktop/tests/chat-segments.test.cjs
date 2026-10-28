@@ -39,7 +39,7 @@ test('main conversation keeps legacy agents and file cards separate from command
   const groups = groupItems([
     tool('cmd'), tool('agent-one', { name: 'agent' }), tool('agent-two', { name: 'agent' }),
     tool('files', { name: 'artifacts', output: JSON.stringify([file]) }),
-    tool('legacy-files', { name: 'present_files', output: 'invalid' }), tool('last'),
+    tool('legacy-files', { name: 'artifacts', output: 'invalid' }), tool('last'),
   ])
   assert.deepEqual(plain(groups.map(group => group.kind)), ['tools', 'agent', 'files', 'files', 'tools'])
   assert.equal(groups[1].items.length, 2)

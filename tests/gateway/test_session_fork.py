@@ -13,8 +13,6 @@ from langgraph.types import Overwrite
 from lumi.agents.core import graph as graph_module
 from lumi.agents.core.graph import CHECKPOINT_AES_KEY_ENV, LumiAgent, _checkpoint_serde
 from lumi.agents.core.meta_message import (
-    HISTORY_ID_KEY,
-    HISTORY_KEY,
     declared_file_paths,
     history_message_ids,
 )
@@ -184,10 +182,7 @@ async def test_fork_at_ninth_turn_survives_source_regenerate_at_fifth(
     assert (await snapshot(graph)).config == source.config
 
 
-@pytest.mark.parametrize("legacy", [False, True])
-async def test_compressed_fork_survives_source_delete_and_database_reopen(
-    database, legacy
-):
+async def test_compressed_fork_survives_source_delete_and_database_reopen(database):
     agent, path = database
     graph = agent.graph
     await seed(graph, 4)
@@ -200,10 +195,6 @@ async def test_compressed_fork_survives_source_delete_and_database_reopen(
             "compact",
             checkpoint_id=state.config["configurable"]["checkpoint_id"],
         )
-        if legacy:
-            for message in update["messages"].value:
-                message.additional_kwargs.pop(HISTORY_KEY, None)
-                message.additional_kwargs.pop(HISTORY_ID_KEY, None)
         await graph.aupdate_state(config(), update, as_node="OfflineFlush")
         await graph.aupdate_state(
             config(),
@@ -546,14 +537,19 @@ async def test_deleting_compressed_branch_reclaims_its_archived_uploads(
     assert not attachment.exists()
 
 
-async def test_fork_uses_selected_checkpoint_even_after_source_rewind_removes_legacy_compact(
+async def test_fork_uses_selected_checkpoint_even_after_source_rewind_removes_compact(
     database,
 ):
     agent, _ = database
     graph = agent.graph
     before_compaction = await seed(graph, 4)
     before = await snapshot(graph)
-    update = build_compacted_update(before.values["messages"], [], "old compact")
+    update = build_compacted_update(
+        before.values["messages"],
+        [],
+        "compact",
+        checkpoint_id=before.config["configurable"]["checkpoint_id"],
+    )
     await graph.aupdate_state(config(), update, as_node="OfflineFlush")
     await graph.aupdate_state(
         config(),

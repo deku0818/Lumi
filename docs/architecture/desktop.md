@@ -140,7 +140,7 @@ shell / 后台任务会话等全局单例由 `shutdown_shared_runtime()` 在 lif
 
 - **锚点是消息 id，不是序号**。`turn.start` 事件在开轮即广播本轮用户消息的落库 id，前端给乐观气泡上锚（`anchorLastUser`）；历史回放的 id 来自 `load_history` 的 `message_id`。之所以走事件而非 RPC 返回值：id 是「轮的事实」而非「轮的结果」，中途 stop 的轮同样需要它，且不必让每个流式入口都记得回传。本地列表可能含后端没有的条目（发送失败残留、系统命令），按序号对齐会指错消息。
 - **`regenerate` / `edit_resend` 都是单个原子流式 RPC**：截断与重发共处一轮、持同一把 `run.lock`。拆成「截断 RPC + send」会留出竞态窗口，中间任何失败都让编辑文本连同被删历史一起丢失。
-- **后端截断**（`AgentBridge.rewind_before_message`）经 `message_checkpoint` 定位目标消息压缩前的最早状态；如需恢复，从该 checkpoint 分叉并 `Overwrite` 为目标之前的消息，否则用 `RemoveMessage` 截断当前状态。两者都经 `OfflineFlush` 写回，同时清空 `todos`，剥掉新末条的 `ctx_digest` marker（见 [compact.md](compact.md) 的 marker 不变量）。必需 checkpoint 缺失时拒绝回退且不改当前状态。
+- **后端截断**（`AgentBridge.rewind_before_message`）经 `message_checkpoint` 定位目标消息压缩前的最早状态；如需恢复，从该 checkpoint 分叉并 `Overwrite` 为目标之前的消息，否则用 `RemoveMessage` 截断当前状态。两者都经 `OfflineFlush` 写回，剥掉新末条的 `ctx_digest` marker（见 [compact.md](compact.md) 的 marker 不变量）。必需 checkpoint 缺失时拒绝回退且不改当前状态。
 - **重答的消息是重建的，不是原样重投**：checkpoint 里的 content 已烤入原轮的上下文注入块，原样重投会与新一轮注入叠加（token 逐次翻倍且新旧 env 互相矛盾）。重建 = `strip_injected_prefix` 回到用户原样输入 → 交 `_build_user_message` 走与新消息完全相同的构造流水线，附件标签由显示声明（`items[].files`）重新派生。该构造对重发幂等。
 - 截断后消息会以**新 id** 重挂，故前端重挂气泡时清掉旧 `messageId`、等本轮 `turn.start` 重新上锚——留着旧 id 会让下一次时间旅行指向已删除的消息。
 - 渠道旁观 / cron 观测 / 运行中 / 有在途审批时不提供该操作（服务端另有流式方法的渠道只读兜底）。

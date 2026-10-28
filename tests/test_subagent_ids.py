@@ -122,7 +122,7 @@ async def test_previously_persisted_long_ids_still_resume(tmp_path, monkeypatch)
     "thread_id,expected",
     [
         ("a7k3m9q2", True),
-        ("subagent_46aa8ac61ce14845a6a05efc00f87c24", True),
+        ("subagent_46aa8ac61ce14845a6a05efc00f87c24", False),
         ("t4n8p6r1", False),
         ("t-46aa8ac61ce14845a6a05efc00f87c24", False),
         ("abc", False),

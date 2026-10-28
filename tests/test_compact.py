@@ -570,9 +570,9 @@ def test_build_update_replaces_body_with_carrier():
 
 
 def test_build_update_preserves_distinct_equal_messages():
-    tail = HumanMessage("same")
-    pending = tail.model_copy()
-    assert tail == pending and tail is not pending
+    tail = HumanMessage("same", id="first")
+    pending = tail.model_copy(update={"id": "second"})
+    assert tail.content == pending.content and tail is not pending
     update = build_compacted_update([tail, pending], [tail], "context")
     kept = update["messages"].value[1:]
     assert len(kept) == 2 and all(message.content == "same" for message in kept)

@@ -119,7 +119,7 @@
    - 不共享 prompt 缓存（LangGraph 无 CC 的 fork-cache 机制；低频任务无所谓）
 6. **后台任务** fire-and-forget，注册 bg-task（面板可取消）；stop hook 不阻塞，照常 `goto END`。
 7. **dream 四阶段**：orient → gather → consolidate → prune。重心 **synthesis**，**不做自由判决** —— **切病根③**。
-8. **收尾**：写/更新记忆 + 规范化 `MEMORY.md`（剥 legacy `[type · 日期]` tag、把日期归位到 frontmatter，见召回端）；清 `transcriptDir`。
+8. **收尾**：写/更新记忆，为索引指向的 topic 补齐缺失的日期；清 `transcriptDir`。
 
 **Dream 全程 per-project**：lastAt、每 thread 快照时刻、导出、写入全部按当前 project（sqlite 按 `project_key` 列隔离）。
 - lastAt / 每 thread 快照时刻存独立 `~/.lumi/checkpoints/dream_state.db`（`dream_meta`/`dream_thread` 两表，同步 `sqlite3`）：**不放记忆目录**避免清理 `.md` 时误删；原子写；`last_at` 从「文件 mtime 隐式」变显式列。丢失是软失败（退化重数、最坏多跑一次幂等 dream）。
@@ -130,7 +130,7 @@
 把「记忆会过时/会矛盾」从整理端挪到召回端，让活模型就着当前 query 当场裁决：
 
 - **`type` + 写入日期住 topic 文件 frontmatter**（`date` 字段，绝对日期），索引行只留结论——索引每行都是「该怎么做」，比对新旧才需要打开 topic 文件。
-  - 填法：**主 agent 手写为主 + dream 兜底规范化**（`normalize_memory_index`：剥 legacy `[type · 日期]` tag 并把日期回填 frontmatter——回填成功才剥、信息不丢；新格式行缺 `date` 时以 mtime 补近似值）。
+  - 填法：**主 agent 手写为主 + dream 兜底补齐**（`normalize_memory_index`：topic 缺 `date` 时以 mtime 补近似值）。
 - **判断指引进系统提示**（`build_memory_instructions`）：同情境多条 → 取写入日期（frontmatter 的 `date`）最新；据 project/reference 行动前先验证现状。
 - **不对称衰减**（落召回，不落 dream）：
   - `user`/`feedback`：**不衰减**，靠「取最新日期」自然覆盖，纯时间流逝不触发任何处理。

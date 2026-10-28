@@ -32,8 +32,7 @@
 
 每个飞书 chat（私聊 / 群）→ 一个常驻会话
 `thread_id = sanitize_thread_id(f"{bot.thread_prefix}{key}")`——`thread_prefix` 恒为
-`feishu-{bot.id}-`（同一个群里可能坐着两个 Lumi 机器人，chat_id 相同也不撞会话），仅旧版
-单机器人迁移来的那条（`legacy_threads=True`）沿用裸 `feishu-`，保住历史会话。thread →
+`feishu-{bot.id}-`（同一个群里可能坐着两个 Lumi 机器人，chat_id 相同也不撞会话）。thread →
 一个 `AgentBridge`，复用与 desktop 完全相同的 Agent 运行时（`stream_response` 产
 `BridgeEvent` 流）。飞书侧只做「传输适配 + 事件折叠成卡片」，不碰 bridge / graph。
 

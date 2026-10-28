@@ -20,11 +20,8 @@ export function groupItems(items: Item[], parents: Readonly<Record<string, strin
     if (it.kind === 'tool' && it.name === 'agent') {
       if (last?.kind === 'agent') last.items.push(it)
       else segs.push({ kind: 'agent', items: [it] })
-    } else if (it.kind === 'tool' && (it.name === 'artifacts' || it.name === 'present_files')) {
+    } else if (it.kind === 'tool' && it.name === 'artifacts') {
       // artifacts 不并入灰色工具组：单独成段，渲染成文件卡片。
-      // 兼容旧名 present_files：历史 checkpoint 里存的是当时的工具名（见
-      // session.py 的 _history_items 直取 tool_call.name），改名前的会话重开
-      // 仍要出卡片。输出 JSON 形状未变，认名即可。
       // 在此（随 items 记忆化）解析一次 JSON，避免每次渲染都 parse。
       segs.push({ kind: 'files', item: it, files: parseArtifacts(it.output) })
     } else if (it.kind === 'tool') {

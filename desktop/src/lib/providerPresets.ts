@@ -6,7 +6,6 @@ export const protocolOptions: Array<[ProviderProtocol, string]> = [
 ]
 
 export const compatibilityOptions: Record<ProviderProtocol, Array<[string, string]>> = {
-  '': [],
   openai: [['standard', 'OpenAI'], ['qwen', 'Qwen / DashScope'], ['deepseek', 'DeepSeek'],
     ['kimi', 'Kimi / Moonshot'], ['glm', 'GLM'], ['mimo', 'MiMo'], ['minimax', 'MiniMax'],
     ['openrouter', 'OpenRouter'], ['local', 'OpenAI compatible']],

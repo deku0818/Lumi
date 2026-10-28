@@ -56,16 +56,15 @@ def _allocate_title(root: str, base_title: str) -> str:
 
 def _copy_messages(
     messages: list[BaseMessage],
-    aliases: dict[str, str],
     previous_id: str,
     previous_exclude: list[str],
 ) -> list[BaseMessage]:
     copied: list[BaseMessage] = []
     for message, identity in zip(messages, history_message_ids(messages)):
         clone = strip_ctx_digest(message.model_copy(deep=True))
-        clone.additional_kwargs[HISTORY_ID_KEY] = aliases.get(identity, identity)
+        clone.additional_kwargs[HISTORY_ID_KEY] = identity
         copied.append(clone)
-    # 连旧版无索引摘要也改为新会话自己的 checkpoint，绝不引用来源会话。
+    # 历史索引指向分支自己的 checkpoint。
     if previous_id and (compact := compact_message(copied)):
         compact[0].additional_kwargs[HISTORY_KEY] = {
             "checkpoint_id": previous_id,
@@ -82,22 +81,18 @@ async def _write_history(
     previous_id = ""
     previous_exclude: list[str] = []
     for messages, position in reversed(segments):
-        aliases = dict(position.aliases)
-        copied = _copy_messages(messages, aliases, previous_id, previous_exclude)
+        copied = _copy_messages(messages, previous_id, previous_exclude)
         saved = await graph.aupdate_state(
             target,
             {
                 "messages": Overwrite(copied),
                 "ptl_retry": False,
                 "tool_cancelled": False,
-                "todos": [],
             },
             as_node="OfflineFlush",
         )
         previous_id = saved["configurable"]["checkpoint_id"]
-        previous_exclude = [
-            aliases.get(identity, identity) for identity in position.exclude
-        ]
+        previous_exclude = list(position.exclude)
 
 
 def _base_title(metadata: dict[str, Any], messages: list[BaseMessage]) -> str:

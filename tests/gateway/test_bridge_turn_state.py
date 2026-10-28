@@ -205,10 +205,7 @@ async def test_user_turns_share_one_start_snapshot(tmp_path, bridge):
                 assert reads.await_count == 2
 
 
-@pytest.mark.parametrize("legacy_node", ["HumanApproval", "AutoClassify"])
-async def test_legacy_pending_approval_keeps_history_during_recovery(
-    tmp_path, bridge, legacy_node
-):
+async def test_pending_execution_keeps_history_during_recovery(tmp_path, bridge):
     from langchain_core.messages import ToolMessage
     from langgraph.graph import END, START, StateGraph
 
@@ -222,16 +219,16 @@ async def test_legacy_pending_approval_keeps_history_during_recovery(
     )
     builder = StateGraph(LumiAgentState)
     builder.add_node("CallModel", lambda state: {"messages": [ai]})
-    builder.add_node(legacy_node, lambda state: {})
+    builder.add_node("ToolExecutor", lambda state: {})
     builder.add_edge(START, "CallModel")
-    builder.add_edge("CallModel", legacy_node)
-    builder.add_edge(legacy_node, END)
+    builder.add_edge("CallModel", "ToolExecutor")
+    builder.add_edge("ToolExecutor", END)
     old = builder.compile(
-        checkpointer=bridge.graph.checkpointer, interrupt_before=[legacy_node]
+        checkpointer=bridge.graph.checkpointer, interrupt_before=["ToolExecutor"]
     )
     await old.ainvoke({"messages": []}, bridge._config)
 
-    assert (await bridge.graph.aget_state(bridge._config)).next == (legacy_node,)
+    assert (await bridge.graph.aget_state(bridge._config)).next == ("ToolExecutor",)
     await bridge._recover_stale_state(bridge.graph)
     snap = await bridge.graph.aget_state(bridge._config)
     assert snap.next == ()

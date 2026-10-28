@@ -117,11 +117,11 @@ def test_resolve_named_model_prefers_active_profile(store_path):
     provider_store.set_active(a.id, "m1")
     # 同名模型存在于多个 profile：active 优先
     assert provider_store.resolve("m1") == provider_store.ResolvedModel(
-        "m1", "ua", "ka", provider=a.id
+        "m1", "ua", "ka", protocol="openai", compatibility="standard", provider=a.id
     )
     # 不在 active profile 的模型：兜底反查其他 profile
     assert provider_store.resolve("m2") == provider_store.ResolvedModel(
-        "m2", "ub", "kb", provider=b.id
+        "m2", "ub", "kb", protocol="openai", compatibility="standard", provider=b.id
     )
     assert b.id != a.id
 
@@ -191,32 +191,6 @@ def test_delete_active_provider_reassigns(store_path):
     assert active == {"provider": a.id, "model": "m1"}
 
 
-def test_legacy_single_model_format_migrates(store_path):
-    # 旧格式：profile 用单个 "model" 字段，active 为字符串 id
-    store_path.write_text(
-        json.dumps(
-            {
-                "providers": {
-                    "active": "old1",
-                    "profiles": [
-                        {
-                            "id": "old1",
-                            "name": "旧",
-                            "base_url": "u",
-                            "api_key": "k",
-                            "model": "claude-x",
-                        }
-                    ],
-                }
-            }
-        ),
-        encoding="utf-8",
-    )
-    profiles, active = provider_store.load()
-    assert profiles[0].models == ("claude-x",)
-    assert active == {"provider": "old1", "model": "claude-x"}
-
-
 def test_effort_per_model_set_and_resolve(store_path, monkeypatch):
     # 隔离 models.dev 能力：m1 支持 low/high，m2 仅 auto
     monkeypatch.setattr(
@@ -259,7 +233,7 @@ def test_pointer_unset_falls_back_to_session_model(store_path, kind):
     assert provider_store.get_pointers()[kind] == {}
     # 回退 = resolve()（会话模型 + 其连接）
     assert provider_store.resolve_pointer(kind) == provider_store.ResolvedModel(
-        "m1", "ua", "ka", provider=s.id
+        "m1", "ua", "ka", protocol="openai", compatibility="standard", provider=s.id
     )
     assert s.models == ("m1",)
 
@@ -270,7 +244,9 @@ def test_unset_classifier_follows_given_session_model(store_path):
     b = provider_store.upsert(_p("B", base="ub", key="kb", models=("m2",)))
     assert provider_store.resolve_pointer(
         "classifier", "m2", b.id
-    ) == provider_store.ResolvedModel("m2", "ub", "kb", provider=b.id)
+    ) == provider_store.ResolvedModel(
+        "m2", "ub", "kb", protocol="openai", compatibility="standard", provider=b.id
+    )
 
 
 @pytest.mark.parametrize("kind", _KINDS)
@@ -285,7 +261,7 @@ def test_pointer_set_resolves_exact_connection(store_path, kind):
     assert provider_store.get_pointers()[kind] == {"provider": b.id, "model": "haiku"}
     # active 仍是 A 的 m1，但指针解析到 B 的连接
     assert provider_store.resolve_pointer(kind) == provider_store.ResolvedModel(
-        "haiku", "ub", "kb", provider=b.id
+        "haiku", "ub", "kb", protocol="openai", compatibility="standard", provider=b.id
     )
 
 

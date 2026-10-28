@@ -62,14 +62,6 @@ class SubagentStore:
             CREATE INDEX IF NOT EXISTS subagent_deliveries_parent
                 ON subagent_deliveries(parent_id, delivered);
         """)
-        columns = {
-            row["name"] for row in self.conn.execute("PRAGMA table_info(subagents)")
-        }
-        if "title" not in columns:
-            self.conn.execute(
-                "ALTER TABLE subagents ADD COLUMN title TEXT NOT NULL DEFAULT ''"
-            )
-            self.conn.commit()
 
     def close(self) -> None:
         self.conn.close()

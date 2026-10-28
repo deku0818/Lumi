@@ -8,7 +8,7 @@
                  "tool_mode": "auto|privileged", "workspace": str, ...}, ...]}
 
 一台机器多个机器人（列表一条一个），项目 ↔ 机器人 1:1、app_id 全局唯一（同一飞书
-应用起两条长连接会重复收事件）。旧版单对象格式在读取时就地迁移成单元素列表。
+应用起两条长连接会重复收事件）。
 """
 
 from __future__ import annotations
@@ -19,7 +19,6 @@ from pathlib import Path
 
 from lumi.gateway.channels.config import FeishuChannelConfig, resolve_ref
 from lumi.utils.config import user_store
-from lumi.utils.hashing import short_hash
 from lumi.utils.logger import logger
 
 
@@ -38,23 +37,8 @@ def config_path() -> str:
 
 
 def _raw_bots(data: dict) -> list[dict]:
-    """channels 分区里的飞书机器人原始条目列表；旧版单对象就地迁移（仅内存，不落盘）。
-
-    迁移 id 取 app_id 摘要而非随机数，故各进程各次读取都迁出同一结果——读路径保持
-    纯读（shell spawn 等热路径也会走到这里，从读代码里写盘既堵事件循环又与并发写
-    互撞），落盘交给首次 save/delete 顺带完成。``legacy_threads=True`` 让这条机器人
-    的会话沿用旧 ``feishu-{key}``，历史不丢。
-    """
+    """读取当前格式的飞书机器人列表。"""
     raw = data.get("feishu")
-    if isinstance(raw, dict):
-        migrated = {
-            **raw,
-            "id": short_hash(raw.get("app_id") or "default"),
-            "name": raw.get("name") or "飞书机器人",
-            "legacy_threads": True,
-        }
-        data["feishu"] = [migrated]
-        return data["feishu"]
     return raw if isinstance(raw, list) else []
 
 

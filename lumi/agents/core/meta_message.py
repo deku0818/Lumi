@@ -17,7 +17,6 @@
 
 from __future__ import annotations
 
-import hashlib
 import json
 from collections.abc import Iterator
 from typing import Any
@@ -48,16 +47,12 @@ HISTORY_KEY = "history"
 
 
 def history_message_ids(messages: list[BaseMessage]) -> list[str]:
-    """显示侧稳定身份，兼容没有 id 的旧消息及同内容重复消息。"""
-    counts: dict[str, int] = {}
+    """读取当前消息的稳定显示身份。"""
     ids: list[str] = []
     for msg in messages:
         identity = msg.additional_kwargs.get(HISTORY_ID_KEY) or msg.id
         if not identity:
-            digest = hashlib.sha256(msg.model_dump_json().encode()).hexdigest()
-            occurrence = counts.get(digest, 0)
-            counts[digest] = occurrence + 1
-            identity = f"legacy:{digest}:{occurrence}"
+            raise ValueError("消息缺少稳定 id")
         ids.append(identity)
     return ids
 
@@ -294,16 +289,14 @@ def extract_text_content(content: str | list) -> str:
 
 
 def _tool_call_name(tc) -> str:
-    """工具调用名，兼容 dict（标准 tool_call）与 ToolCall 对象（某些反序列化路径）。"""
-    if isinstance(tc, dict):
-        return tc.get("name") or "?"
-    return getattr(tc, "name", None) or "?"
+    """标准 tool_call 字典的工具名。"""
+    return tc.get("name") or "?"
 
 
 def _tool_call_desc(tc) -> str:
     """工具调用的 ``name(args)`` 描述。args 经 json.dumps 天然单行（换行被转义）。"""
     name = _tool_call_name(tc)
-    args = tc.get("args") if isinstance(tc, dict) else getattr(tc, "args", None)
+    args = tc.get("args")
     if not args:
         return name
     return f"{name}({json.dumps(args, ensure_ascii=False, default=str)})"

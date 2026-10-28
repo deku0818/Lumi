@@ -2,7 +2,7 @@
 
 用真实 LumiAgent 图 + MemorySaver 锁四件事：按 message_id 截断到位、
 新末条的 ctx_digest marker 被剥（不剥会让 context_inject 误判漏注上下文）、
-todos 随截断清空（不清会把已删未来的任务列表带进重答轮）、目标不存在时不动 state。
+目标不存在时不动 state。
 重建测试锁「剥注入前缀 + 重挂附件标签」——不剥会让重发轮与新注入叠加。
 """
 
@@ -71,19 +71,6 @@ async def test_rewind_strips_ctx_digest_on_new_tail():
     assert tail.content == "a1"
     assert tail.id == seeded[1].id  # 同 id 原地重挂，位置与身份不变
     assert CTX_DIGEST_KEY not in tail.additional_kwargs
-
-
-@pytest.mark.asyncio
-async def test_rewind_clears_todos():
-    bridge = _bridge()
-    seeded = await _seed(
-        bridge,
-        [HumanMessage("h1"), AIMessage("a1"), HumanMessage("h2")],
-        todos=[{"content": "幽灵任务", "status": "pending"}],
-    )
-    await bridge.rewind_before_message(seeded[2].id)
-    state = await bridge.graph.aget_state(bridge._config)
-    assert state.values.get("todos") == []
 
 
 @pytest.mark.asyncio

@@ -9,10 +9,9 @@ from dataclasses import asdict, dataclass, replace
 from typing import TYPE_CHECKING
 
 from langchain_core.messages import BaseMessage
-from langgraph.types import Overwrite, StateSnapshot
+from langgraph.types import StateSnapshot
 
 from lumi.agents.core.meta_message import (
-    CTX_DIGEST_KEY,
     HISTORY_ID_KEY,
     HISTORY_KEY,
     extract_text_content,
@@ -43,8 +42,6 @@ class _Cursor:
     end: int | None = None
     exclude: tuple[str, ...] = ()
     archived: bool = False
-    compact_id: str = ""
-    aliases: tuple[tuple[str, str], ...] = ()
 
     def encode(self) -> str:
         return base64.urlsafe_b64encode(json.dumps(asdict(self)).encode()).decode()
@@ -63,7 +60,6 @@ class _Cursor:
                 **{
                     **data,
                     "exclude": tuple(data.get("exclude", [])),
-                    "aliases": tuple(tuple(pair) for pair in data.get("aliases", [])),
                 }
             )
             if (
@@ -76,11 +72,6 @@ class _Cursor:
                 )
                 or not all(isinstance(identity, str) for identity in cursor.exclude)
                 or type(cursor.archived) is not bool
-                or not isinstance(cursor.compact_id, str)
-                or not all(
-                    len(pair) == 2 and all(isinstance(part, str) for part in pair)
-                    for pair in cursor.aliases
-                )
             ):
                 raise ValueError
             return cursor
@@ -94,13 +85,11 @@ type HistorySegment = tuple[list[BaseMessage], _Cursor]
 def compact_message(messages: list[BaseMessage]) -> tuple[BaseMessage, str] | None:
     for index, msg in enumerate(messages):
         if (
-            msg.type in ("human", "system")
-            and (msg.type == "system" or not should_show_human_message(msg))
+            msg.type == "human"
+            and not should_show_human_message(msg)
             and extract_text_content(msg.content).startswith("<compact>")
         ):
             identity = msg.additional_kwargs.get(HISTORY_ID_KEY) or msg.id
-            if not identity:
-                identity = history_message_ids(messages[: index + 1])[-1]
             return msg, identity
     return None
 
@@ -111,7 +100,7 @@ def _previous(
     compact = compact_message(messages)
     if compact is None:
         return None
-    msg, identity = compact
+    msg, _ = compact
     link = msg.additional_kwargs.get(HISTORY_KEY)
     if link:
         return _Cursor(
@@ -120,50 +109,7 @@ def _previous(
             exclude=tuple(link["exclude"]),
             archived=True,
         )
-    # 旧摘要没有索引。等用户真正翻到这里才沿祖先查找，不拖慢首次打开。
-    return _Cursor(thread_id, checkpoint_id, archived=True, compact_id=identity)
-
-
-def _reattached_value(msg: BaseMessage) -> dict:
-    value = msg.model_dump(exclude={"id"})
-    value["additional_kwargs"].pop(CTX_DIGEST_KEY, None)
-    value["additional_kwargs"].pop(HISTORY_ID_KEY, None)
-    return value
-
-
-def _display_alias(identity: str, aliases: tuple[tuple[str, str], ...]) -> str:
-    for original, reattached in aliases:
-        if identity.startswith(f"{original}:"):
-            return reattached + identity[len(original) :]
-    return identity
-
-
-def _legacy_exclusions(
-    before: list[BaseMessage], retained: list[BaseMessage]
-) -> tuple[tuple[str, ...], tuple[tuple[str, str], ...]]:
-    """旧压缩换了 id：按重挂原文的完整结构和原有顺序匹配，保留同文不同轮。"""
-    identities = history_message_ids(before)
-    position = len(before)
-    excluded: list[str] = []
-    aliases: list[tuple[str, str]] = []
-    for msg, retained_id in reversed(
-        list(zip(retained, history_message_ids(retained)))
-    ):
-        value = _reattached_value(msg)
-        match = next(
-            (
-                i
-                for i in range(position - 1, -1, -1)
-                if _reattached_value(before[i]) == value
-            ),
-            None,
-        )
-        if match is None:
-            raise ValueError("无法匹配旧压缩记录的保留消息")
-        excluded.append(identities[match])
-        aliases.append((identities[match], retained_id))
-        position = match
-    return tuple(excluded), tuple(aliases)
+    return None
 
 
 class HistoryReader:
@@ -185,83 +131,6 @@ class HistoryReader:
             }
         }
 
-    async def _legacy_cursor(
-        self, graph: CompiledStateGraph, cursor: _Cursor
-    ) -> _Cursor | None:
-        saver = graph.checkpointer
-        saved = await saver.aget_tuple(self._config(cursor))
-        seen: set[str] = set()
-        post_messages: list[BaseMessage] | None = None
-        while saved:
-            checkpoint_id = saved.config["configurable"]["checkpoint_id"]
-            if checkpoint_id in seen:
-                return None
-            seen.add(checkpoint_id)
-            for _, channel, value in saved.pending_writes or []:
-                if channel != "messages":
-                    continue
-                messages = value.value if isinstance(value, Overwrite) else value
-                if not isinstance(messages, list):
-                    continue
-                compact = compact_message(messages)
-                if compact and compact[1] == cursor.compact_id:
-                    before = await graph.aget_state(saved.config)
-                    retained = messages[messages.index(compact[0]) + 1 :]
-                    return self._legacy_link(
-                        cursor,
-                        checkpoint_id,
-                        before.values.get("messages", []),
-                        retained,
-                    )
-            # add_messages 时代的 checkpoint 自带整份消息，不一定留有压缩写入。
-            stored = saved.checkpoint.get("channel_values", {}).get("messages")
-            stored = getattr(stored, "value", stored)
-            if isinstance(stored, list):
-                compact = compact_message(stored)
-                same_carrier = compact and compact[1] == cursor.compact_id
-                if compact and not compact[0].id and post_messages is not None:
-                    post_compact = compact_message(post_messages)[0]
-                    stored_tail = stored[stored.index(compact[0]) + 1 :]
-                    post_tail = post_messages[post_messages.index(post_compact) + 1 :]
-                    # 旧 Overwrite 的 carrier 可能在下一次 add_messages 时才获得 id。
-                    # 同结构 carrier + 保留消息的 id 前缀一致，说明仍是同一次压缩。
-                    same_carrier = same_carrier or (
-                        _reattached_value(compact[0]) == _reattached_value(post_compact)
-                        and history_message_ids(stored_tail)
-                        == history_message_ids(post_tail)[: len(stored_tail)]
-                    )
-                if same_carrier:
-                    post_messages = stored
-                elif post_messages is not None:
-                    after_compact = compact_message(post_messages)[0]
-                    retained = post_messages[post_messages.index(after_compact) + 1 :]
-                    return self._legacy_link(cursor, checkpoint_id, stored, retained)
-            if not saved.parent_config:
-                break
-            saved = await saver.aget_tuple(saved.parent_config)
-        return None
-
-    @staticmethod
-    def _legacy_link(
-        cursor: _Cursor,
-        checkpoint_id: str,
-        before: list[BaseMessage],
-        retained: list[BaseMessage],
-    ) -> _Cursor:
-        exclude, aliases = _legacy_exclusions(before, retained)
-        previous_aliases = dict(cursor.aliases)
-        mapping = {
-            original: previous_aliases.get(reattached, reattached)
-            for original, reattached in aliases
-        }
-        return _Cursor(
-            cursor.thread_id,
-            checkpoint_id,
-            exclude=exclude,
-            archived=True,
-            aliases=tuple(mapping.items()),
-        )
-
     async def page(
         self,
         graph: CompiledStateGraph,
@@ -281,10 +150,6 @@ class HistoryReader:
             return unavailable
         if cursor:
             position = _Cursor.decode(cursor, thread_id)
-            if position.compact_id:
-                position = await self._legacy_cursor(graph, position)
-                if position is None:
-                    return unavailable
         else:
             snapshot = snapshot or await graph.aget_state(
                 {"configurable": {"thread_id": thread_id}}
@@ -309,7 +174,6 @@ class HistoryReader:
             revision,
             position.checkpoint_id,
             position.exclude,
-            position.aliases,
         )
         # 最新状态会合入同一 checkpoint 的待写入结果；只复用前后均已静止的快照。
         settled = (
@@ -329,20 +193,7 @@ class HistoryReader:
             # 整段配对后才分页，ToolMessage 即使不在同一页，输出也完整。
             excluded = set(position.exclude)
             identities = history_message_ids(messages)
-            normalized = [
-                m
-                if m.id
-                else m.model_copy(
-                    update={
-                        "additional_kwargs": {
-                            **m.additional_kwargs,
-                            HISTORY_ID_KEY: identity,
-                        }
-                    }
-                )
-                for m, identity in zip(messages, identities)
-            ]
-            self._items = render(normalized)
+            self._items = render(messages)
             fork_ids = {
                 identity
                 for message, identity in zip(messages, identities)
@@ -361,14 +212,12 @@ class HistoryReader:
                 for it in render(
                     [
                         m
-                        for m, identity in zip(normalized, identities)
+                        for m, identity in zip(messages, identities)
                         if identity in excluded
                     ]
                 )
             }
             self._previous = _previous(thread_id, position.checkpoint_id, messages)
-            if self._previous:
-                self._previous = replace(self._previous, aliases=position.aliases)
             self._key = key
             self._run_lock = run_lock
             self._settled = settled
@@ -392,14 +241,9 @@ class HistoryReader:
         }
         if cursor:
             # 被重挂的消息虽然不重复返回正文，仍是页内的顺序锚点。
-            result["order"] = [
-                _display_alias(it["id"], position.aliases)
-                for it in self._items[start:end]
-            ]
+            result["order"] = [it["id"] for it in self._items[start:end]]
         if cursor and end < len(self._items):
-            result["insert_before"] = _display_alias(
-                self._items[end]["id"], position.aliases
-            )
+            result["insert_before"] = self._items[end]["id"]
         if not cursor:
             result["user_message_ids"] = {
                 it["id"]: it["message_id"]
@@ -442,11 +286,6 @@ class HistoryReader:
         segments = [(messages, position)]
         seen = {position.checkpoint_id}
         while previous := _previous(thread_id, position.checkpoint_id, messages):
-            previous = replace(previous, aliases=position.aliases)
-            if previous.compact_id:
-                previous = await self._legacy_cursor(graph, previous)
-                if previous is None:
-                    raise ValueError("压缩前记录已不可用，无法创建完整分支")
             if previous.checkpoint_id in seen:
                 raise ValueError("历史索引循环，无法创建分支")
             seen.add(previous.checkpoint_id)
@@ -474,20 +313,8 @@ async def message_checkpoint(
     source: StateSnapshot | None = None
     seen: set[str] = set()
     while position:
-        if not position.compact_id and identity not in position.exclude:
+        if identity not in position.exclude:
             break  # 目标是压缩后新增的消息，不需要恢复更早状态。
-        if position.compact_id:
-            if not position.checkpoint_id:
-                current = await graph.aget_state(
-                    {"configurable": {"thread_id": thread_id}}
-                )
-                position = replace(
-                    position,
-                    checkpoint_id=current.config["configurable"]["checkpoint_id"],
-                )
-            position = await reader._legacy_cursor(graph, position)
-            if position is None:
-                raise ValueError("压缩前记录已不可用，无法安全回退")
         if position.checkpoint_id in seen:
             raise ValueError("历史索引循环，无法安全回退")
         seen.add(position.checkpoint_id)
@@ -496,13 +323,8 @@ async def message_checkpoint(
             raise ValueError("压缩前记录已不可用，无法安全回退")
         earlier = snapshot.values.get("messages", [])
         identities = history_message_ids(earlier)
-        aliases = dict(position.aliases)
         found = next(
-            (
-                i
-                for i, key in enumerate(identities)
-                if key == identity or aliases.get(key) == identity
-            ),
+            (i for i, key in enumerate(identities) if key == identity),
             None,
         )
         if found is None:

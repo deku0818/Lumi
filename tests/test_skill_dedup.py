@@ -147,7 +147,7 @@ async def test_compaction_keeps_short_command_and_reload_waits_for_next_call(
 ):
     loaded = command(cfg, id="loaded")
     latest = command(cfg, render_skill(cfg, [loaded]))
-    history = [loaded, AIMessage(content="已完成"), latest]
+    history = [loaded, AIMessage(content="已完成", id="completed"), latest]
     tail = history if keep_full else [latest]
     compressed = build_compacted_update(history, tail, "之前使用过 probe")
     messages = compressed["messages"].value
@@ -308,12 +308,16 @@ async def test_ptl_keeps_skill_tool_note_and_next_call_loads_full(cfg, source):
     read_result = ToolMessage(content="文件内容", name="read", tool_call_id="read")
     history = [
         *previous,
-        AIMessage(content="上次完成"),
+        AIMessage(content="上次完成", id="previous-complete"),
         current,
         skill_call,
         skill_result,
         read_call,
         read_result,
+    ]
+    history = [
+        m if m.id else m.model_copy(update={"id": f"message-{i}"})
+        for i, m in enumerate(history)
     ]
     _, tail = select_for_ptl_compaction(history)
     messages = build_compacted_update(history, tail, "之前使用过 probe 技能")[

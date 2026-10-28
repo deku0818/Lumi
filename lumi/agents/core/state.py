@@ -27,7 +27,7 @@ class LumiAgentContext:
     provider: str = field(default="")
     """model_name 所属的供应商 profile id；(连接, 模型) 才是完整身份——同名模型
     存在于多个 profile 时，仅按名反查会把连接/档位/限额取到别家（active 优先）。
-    空 = 未知来源（老渠道配置 / headless），resolve 退回按名反查，行为同旧版。"""
+    空 = 无显式连接（headless / 按名称选模型的调用），resolve 按名查找连接。"""
     effort: str | None = field(default=None)
     """思考档位覆盖：None = 跟随该模型 profile 的档位（desktop 会话走这条，由 ModelPicker
     存进 provider_store）；非 None = 强制用此档位、绕过 profile（IM 渠道会话用它独立配置
@@ -114,8 +114,6 @@ class LumiAgentState(TypedDict):
     LangGraph 1.2.15 在节点与 ``aupdate_state`` 写入时均补齐缺失的消息 id，含
     ``Overwrite`` 内的消息；读回保持同一 id。离线 ``Overwrite`` 也会生成完整快照，
     后续恢复不再回溯压缩前的增量链。"""
-    todos: NotRequired[list]
-    """旧 checkpoint 的兼容字段；内置 todo 工具与前端展示已移除。"""
     output_schema: NotRequired[dict[str, Any]]
     """结构化输出的 JSON Schema"""
     structured_output: NotRequired[dict[str, Any]]

@@ -106,6 +106,26 @@ def _redact_token(record) -> bool:
     return True
 
 
+@app.command("migrate")
+def migrate(
+    check: bool = typer.Option(False, "--check", help="只检查需要迁移的数据（默认）"),
+    apply: bool = typer.Option(False, "--apply", help="离线迁移旧数据，不创建备份"),
+) -> None:
+    """临时命令：将旧数据迁移为当前格式；执行 --apply 前请停止 Lumi 后端。"""
+    if check and apply:
+        raise typer.BadParameter("--check 与 --apply 不能同时使用")
+    import asyncio
+
+    from lumi._migrate import migrate as run_migration
+
+    try:
+        for line in asyncio.run(run_migration(apply=apply)):
+            typer.echo(line)
+    except Exception as error:
+        typer.echo(f"迁移失败：{error}", err=True)
+        raise typer.Exit(1) from error
+
+
 @app.command("serve")
 def serve(
     host: str = typer.Option("127.0.0.1", help="监听地址"),
@@ -458,10 +478,7 @@ def feishu_config(
 
     if new and bot:
         raise typer.BadParameter("--new 与 --bot 互斥")
-    # 无 --new、无 --bot 且一个机器人都没有：视同新建（旧版单机器人时代的部署脚本
-    # 即此用法）。显式给了 --bot 则必须命中——零机器人时静默新建会让脚本以为更新了
-    # 目标，实际凭空多出一条残缺配置
-    if new or (not bots and not bot):
+    if new:
         data = {}
     else:
         data = _select_bot(bots, bot).model_dump()

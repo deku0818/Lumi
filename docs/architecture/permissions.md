@@ -199,7 +199,7 @@ _STRICTNESS = {Permission.DENY: 0, Permission.ASK: 1, Permission.ALLOW: 2}
 
 `human_approval()` 与 `auto_classify()` 是执行器调用的审批辅助函数，不再是整批路由节点。只有全部未执行且存在人工拒绝时才结束本轮；规则 / AI 拒绝继续回模型。用户停止通过 Broker 的 `stop` 标记结束本轮，即使已有其他调用执行，也不继续调用模型。
 
-图保留旧 `HumanApproval` / `AutoClassify` 节点名作为新执行器的别名，仅用于读取和恢复旧 checkpoint；新调用统一进入 `ToolExecutor`。
+图中统一注册 `ToolExecutor`，审批是执行器内部的逐工具决策。
 
 `effective_tool_mode()` 统一选择无人值守模式：无审批通道且模式为 default / accept_edits 时读取全局设置，显式 auto / privileged 保留。持久 Lumi 子代理保存委派时的模式快照，不接人工 Broker；Workflow 临时执行单元同样沿用无人值守规则。`allow` 调用无需任何审批通道，人工审批无通道时只拒绝当前调用。持久子代理的问题转交与外部执行器权限见 [子代理架构](agents.md)。
 

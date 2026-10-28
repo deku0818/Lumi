@@ -24,9 +24,8 @@ function initial(): FontPref {
       return { family: v.family, size: typeof v.size === 'number' ? v.size : DEFAULT_SIZE }
     }
   } catch {
-    // 旧版本只存裸字体名字符串（JSON.parse 抛错）→ 迁移为 family
   }
-  return { family: raw, size: DEFAULT_SIZE }
+  return { family: '', size: DEFAULT_SIZE }
 }
 
 function apply({ family, size }: FontPref): void {

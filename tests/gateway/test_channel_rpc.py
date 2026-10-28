@@ -56,32 +56,8 @@ def test_load_empty_on_corrupt(sidecar):
     assert store.load_feishu_bots() == []
 
 
-def test_legacy_single_config_migrates(sidecar):
-    """旧版单对象格式读取时就地迁移成列表，id 确定性、legacy_threads 保住老会话。"""
-    user_store.write_section(
-        "channels",
-        {"feishu": {"enabled": False, "app_id": "cli_old", "workspace": "/w"}},
-    )
-    bots = store.load_feishu_bots()
-    assert len(bots) == 1
-    bot = bots[0]
-    assert bot.app_id == "cli_old"
-    assert bot.legacy_threads is True
-    assert bot.thread_prefix == "feishu-"  # 老会话 key 不变
-    # 读路径纯读不落盘（shell spawn 热路径也会走到），id 确定性派生不随读取漂移
-    assert store.load_feishu_bots()[0].id == bot.id
-    raw = user_store.read_section("channels", {})["feishu"]
-    assert isinstance(raw, dict)
-    # 首次保存顺带把迁移落盘成列表
-    store.save_feishu_bot({**bot.model_dump(), "name": "改名"})
-    raw = user_store.read_section("channels", {})["feishu"]
-    assert isinstance(raw, list)
-    assert raw[0]["id"] == bot.id and raw[0]["legacy_threads"] is True
-
-
 def test_new_bot_thread_prefix_carries_id(sidecar):
     saved = store.save_feishu_bot({"app_id": "cli_x"})
-    assert saved.legacy_threads is False
     assert saved.thread_prefix == f"feishu-{saved.id}-"
     assert saved.cli_profile == ""  # 未同步：由 sync_profile 解析后写回
 

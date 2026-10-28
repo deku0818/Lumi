@@ -1,4 +1,4 @@
-"""真实 SQLite checkpoint 的分段读取、旧压缩兼容和分页配对。"""
+"""真实 SQLite checkpoint 的当前历史索引和分页配对。"""
 
 import asyncio
 from types import SimpleNamespace
@@ -8,16 +8,14 @@ import pytest
 from conftest import graph_run_config, resolved
 from langchain_core.messages import AIMessage, HumanMessage, RemoveMessage, ToolMessage
 from langgraph.checkpoint.sqlite.aio import AsyncSqliteSaver
-from langgraph.graph import END, START, MessagesState, StateGraph
+from langgraph.graph import END, START, StateGraph
 
 from lumi.agents.core import graph as graph_module
 from lumi.agents.core import nodes
 from lumi.agents.core.graph import CHECKPOINT_AES_KEY_ENV, LumiAgent, _checkpoint_serde
 from lumi.agents.core.meta_message import (
-    HISTORY_ID_KEY,
     HISTORY_KEY,
     INTERJECTION_KEY,
-    history_message_ids,
 )
 from lumi.agents.core.preprocessing import compact
 from lumi.agents.core.preprocessing.compact import build_compacted_update
@@ -79,7 +77,7 @@ def turn(number, text=None):
     ]
 
 
-async def compress(graph, keep=0, legacy=False):
+async def compress(graph, keep=0):
     before = await graph.aget_state(config())
     messages = before.values["messages"]
     update = build_compacted_update(
@@ -88,10 +86,6 @@ async def compress(graph, keep=0, legacy=False):
         "compact",
         checkpoint_id=before.config["configurable"]["checkpoint_id"],
     )
-    if legacy:
-        for msg in update["messages"].value:
-            msg.additional_kwargs.pop(HISTORY_KEY, None)
-            msg.additional_kwargs.pop(HISTORY_ID_KEY, None)
     await graph.aupdate_state(config(), update, as_node="OfflineFlush")
     return before
 
@@ -111,14 +105,13 @@ async def read_all(graph, limit=3, reader=None):
     pytest.fail("分页游标没有前进")
 
 
-@pytest.mark.parametrize("legacy", [False, True])
-async def test_multiple_compactions_preserve_every_original_once(history_graph, legacy):
+async def test_multiple_compactions_preserve_every_original_once(history_graph):
     graph = history_graph
     original = [m for n in range(1, 11) for m in turn(n, "repeated text")]
     await write(graph, original[:8])
-    await compress(graph, keep=2, legacy=legacy)
+    await compress(graph, keep=2)
     await write(graph, original[8:16])
-    await compress(graph, keep=2, legacy=legacy)
+    await compress(graph, keep=2)
     await write(graph, original[16:])
     reader = HistoryReader()
     latest = await reader.page(graph, "thread", _history_items, limit=4)
@@ -155,8 +148,7 @@ async def test_tools_are_paired_before_page_slicing(history_graph):
     assert tool["output"] == "complete result" and tool["tool_call_id"] == "tc"
 
 
-@pytest.mark.parametrize("legacy", [False, True])
-async def test_default_page_preserves_internal_retained_anchors(history_graph, legacy):
+async def test_default_page_preserves_internal_retained_anchors(history_graph):
     graph = history_graph
     original = turn(0) + [HumanMessage("pending", id="pending")]
     for n in range(3):
@@ -169,7 +161,7 @@ async def test_default_page_preserves_internal_retained_anchors(history_graph, l
             ToolMessage(f"output {n}", id=f"out{n}", tool_call_id=f"tc{n}"),
         ]
     await write(graph, original)
-    await compress(graph, keep=4, legacy=legacy)
+    await compress(graph, keep=4)
     reader = HistoryReader()
     current = await reader.page(graph, "thread", _history_items)
     page = await reader.page(
@@ -189,13 +181,12 @@ async def test_default_page_preserves_internal_retained_anchors(history_graph, l
     assert page["insert_before"] == "tool:tc1"
 
 
-@pytest.mark.parametrize("legacy", [False, True])
 async def test_rewind_preserves_earlier_archives_without_reintroducing_future(
-    history_graph, legacy
+    history_graph,
 ):
     graph = history_graph
     await write(graph, turn(0))
-    await compress(graph, legacy=legacy)
+    await compress(graph)
     await write(graph, turn(1) + [HumanMessage("target", id="target")])
     for n in range(3):
         await write(
@@ -209,7 +200,7 @@ async def test_rewind_preserves_earlier_archives_without_reintroducing_future(
                 ToolMessage(f"output {n}", id=f"out{n}", tool_call_id=f"tc{n}"),
             ],
         )
-    await compress(graph, keep=4, legacy=legacy)
+    await compress(graph, keep=4)
     await write(graph, [AIMessage("completed", id="completed")])
     target = next(
         m
@@ -232,9 +223,8 @@ async def test_rewind_preserves_earlier_archives_without_reintroducing_future(
     ]
 
 
-@pytest.mark.parametrize("legacy", [False, True])
 async def test_rewind_of_retained_interjection_keeps_only_preceding_tool_results(
-    history_graph, legacy
+    history_graph,
 ):
     graph = history_graph
     messages = [HumanMessage("first", id="first")]
@@ -256,7 +246,7 @@ async def test_rewind_of_retained_interjection_keeps_only_preceding_tool_results
             ToolMessage(f"output {n}", id=f"out{n}", tool_call_id=f"tc{n}"),
         ]
     await write(graph, messages)
-    await compress(graph, keep=2, legacy=legacy)
+    await compress(graph, keep=2)
     await write(graph, [AIMessage("completed", id="completed")])
     target = next(
         m
@@ -306,9 +296,8 @@ async def test_rewind_fails_without_mutation_if_required_original_checkpoint_is_
     assert after.values["messages"] == snapshot.values["messages"]
 
 
-@pytest.mark.parametrize("legacy", [False, True])
 async def test_editing_completed_ptl_turn_forks_before_its_archived_future(
-    history_graph, legacy
+    history_graph,
 ):
     graph = history_graph
     original = turn(0) + [HumanMessage("original request", id="target")]
@@ -322,9 +311,9 @@ async def test_editing_completed_ptl_turn_forks_before_its_archived_future(
             ToolMessage(f"output {n}", id=f"out{n}", tool_call_id=f"tc{n}"),
         ]
     await write(graph, original[:9])
-    await compress(graph, keep=4, legacy=legacy)
+    await compress(graph, keep=4)
     await write(graph, original[9:])
-    await compress(graph, keep=4, legacy=legacy)
+    await compress(graph, keep=4)
     await write(graph, [AIMessage("completed original turn", id="completed")])
     bridge = bridge_with(config(), graph)
     target = next(
@@ -349,9 +338,8 @@ async def test_editing_completed_ptl_turn_forks_before_its_archived_future(
     assert not any(it["kind"] == "tool" for it in items)
 
 
-@pytest.mark.parametrize("legacy", [False, True])
 async def test_pending_user_kept_before_tail_does_not_reorder_archived_tool_rounds(
-    history_graph, legacy
+    history_graph,
 ):
     graph = history_graph
     original = turn(0) + [HumanMessage("pending", id="pending")]
@@ -365,7 +353,7 @@ async def test_pending_user_kept_before_tail_does_not_reorder_archived_tool_roun
             ToolMessage(f"output {n}", id=f"tool-result-{n}", tool_call_id=f"tc{n}"),
         ]
     await write(graph, original)
-    await compress(graph, keep=4, legacy=legacy)
+    await compress(graph, keep=4)
     reader = HistoryReader()
     page = await reader.page(graph, "thread", _history_items, limit=50)
     items = page["items"]
@@ -478,26 +466,6 @@ async def test_cursor_is_bound_to_thread_and_invalid_cursors_are_rejected(
     for cursor in [first["next_cursor"], "garbage", "W10="]:
         with pytest.raises(ValueError, match="游标"):
             await reader.page(graph, "other", _history_items, cursor=cursor)
-
-
-async def test_legacy_full_snapshots_without_delta_writes_are_readable(history_graph):
-    graph = history_graph
-    builder = StateGraph(MessagesState)
-    builder.add_node("OfflineFlush", lambda _: {})
-    builder.add_edge(START, "OfflineFlush")
-    builder.add_edge("OfflineFlush", END)
-    legacy = builder.compile(checkpointer=graph.checkpointer)
-    await write(legacy, turn(1) + turn(2))
-    await compress(legacy, keep=2, legacy=True)
-    await write(legacy, turn(3))
-    async with graph.checkpointer.conn.execute(
-        "DELETE FROM writes WHERE thread_id = ?", ("thread",)
-    ):
-        await graph.checkpointer.conn.commit()
-    items = await read_all(graph, limit=1)
-    assert [it["text"] for it in items] == [
-        m.content for n in range(1, 4) for m in turn(n)
-    ]
 
 
 async def test_rpc_older_pages_do_not_replace_live_usage_or_pending(history_graph):
@@ -807,8 +775,3 @@ def test_carrier_lookup_does_not_serialize_unrelated_messages(has_carrier):
         assert compact_message(messages) == (
             (carrier, "carrier") if has_carrier else None
         )
-
-
-def test_carrier_without_id_preserves_stable_history_identity():
-    messages = [HumanMessage("older"), compact.build_compact_carrier("context")]
-    assert compact_message(messages) == (messages[1], history_message_ids(messages)[1])

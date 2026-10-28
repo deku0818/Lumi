@@ -12,9 +12,9 @@ CallModel 的 prompt-too-long 异常 → Compact → 正常拓扑重试
 OfflineFlush → END（无入边，仅作离线写回锚点）
 ```
 
-`is_use_tool()` 只区分有无工具。权限判断、AI 或人工审批和工具执行都在 `ToolExecutor` 内逐个进行。`HumanApproval` / `AutoClassify` 仅保留为旧 checkpoint 的恢复节点名，执行同一个新执行器。
+`is_use_tool()` 只区分有无工具。权限判断、AI 或人工审批和工具执行都在 `ToolExecutor` 内逐个进行，图中只注册当前节点。
 
-`LumiAgentState` 保存 messages、结构化输出、终止标记、PTL 重试标记与委派深度；`todos` 仅兼容旧会话。messages 使用 `DeltaChannel`，每 100 次更新存完整快照，其余保存增量。工具审批模式、模型连接、系统提示词、权限引擎、Broker 和项目目录放在 `LumiAgentContext`，由 `Runtime` 传入节点。`tool_mode` 不在 state 中，支持运行时切换。
+`LumiAgentState` 保存 messages、结构化输出、终止标记、PTL 重试标记与委派深度。messages 使用 `DeltaChannel`，每 100 次更新存完整快照，其余保存增量。工具审批模式、模型连接、系统提示词、权限引擎、Broker 和项目目录放在 `LumiAgentContext`，由 `Runtime` 传入节点。`tool_mode` 不在 state 中，支持运行时切换。
 
 `__structured_output__` 是注册的真工具：参数通过 JSON Schema 校验，成功写入结构化结果，失败以工具结果交模型修正。Stop hook 可提醒模型补交结构化输出；连续失败和拉回次数均有上限。见 [Hooks](hooks.md)。
 

@@ -237,7 +237,7 @@ export interface SlashCommand {
 }
 
 // 模型供应商 profile（对齐后端 provider_store.ProviderProfile）：一套连接挂多个模型
-export type ProviderProtocol = '' | 'openai' | 'responses' | 'anthropic' | 'gemini'
+export type ProviderProtocol = 'openai' | 'responses' | 'anthropic' | 'gemini'
 
 export interface ProviderProfile {
   protocol?: ProviderProtocol
@@ -561,8 +561,6 @@ export interface FeishuConfig {
   id: string
   // 展示名（仅本机 UI 用）
   name: string
-  // 旧版单机器人迁移标记：会话 thread 沿用不带机器人段的 key（前端只透传不消费）
-  legacy_threads?: boolean
   // 已同步的 lark-cli profile 名（后端保存时解析写回；前端只透传不消费）
   cli_profile?: string
   enabled: boolean

@@ -66,7 +66,7 @@ const emptyForm = (): Form => ({
 
 const formFrom = (p: ProviderProfile): Form => ({
   id: p.id,
-  preset: p.preset ?? 'custom', protocol: p.protocol ?? '', compatibility: p.compatibility ?? '',
+  preset: p.preset ?? 'custom', protocol: p.protocol ?? 'openai', compatibility: p.compatibility ?? 'standard',
   name: p.name,
   base_url: p.base_url,
   api_key: p.api_key,
@@ -578,7 +578,6 @@ function ProviderForm({
             const protocol = e.target.value as ProviderProtocol
             setForm(f => ({ ...f, protocol, compatibility: compatibilityOptions[protocol][0]?.[0] ?? '', models: f.models.map(m => ({ ...m, test: undefined })) }))
           }}>
-            {!form.protocol && <option value="">{t('providers.legacy')}</option>}
             {protocolOptions.map(([value, label]) => <option key={value} value={value}>{label}</option>)}
           </NativeSelect>
         </Field>}
@@ -622,7 +621,6 @@ function ProviderForm({
           <div className="mt-3">
             <Field label={t('providers.compatibility')}>
               <NativeSelect className="w-full" value={form.compatibility} disabled={!form.protocol} onChange={e => setForm(f => ({ ...f, compatibility: e.target.value, models: f.models.map(m => ({ ...m, test: undefined })) }))}>
-                {!form.protocol && <option value="">{t('providers.legacy')}</option>}
                 {compatibilityOptions[form.protocol].map(([value, label]) => <option key={value} value={value}>{label}</option>)}
               </NativeSelect>
             </Field>

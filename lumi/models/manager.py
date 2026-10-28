@@ -309,7 +309,7 @@ def create_llm(
     if protocol in {"openai", "responses"}:
         # 功能性标志而非调参：流式响应里携带 token 用量统计
         final_params.setdefault("stream_usage", True)
-        # 新配置以选中的接口为准；旧配置保留显式参数和 SDK 的自动路由。
+        # 显式协议决定接口；无 profile 的独立调用仍支持 SDK 参数和自动路由。
         if configured_protocol:
             final_params["use_responses_api"] = protocol == "responses"
         final_params["lumi_compatibility"] = compatibility

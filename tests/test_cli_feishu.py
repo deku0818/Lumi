@@ -42,7 +42,14 @@ def test_config_set_then_show_roundtrip():
     """写入后显示的值可照抄回写入语法：bool 是 true/false、列表逗号连接。"""
     result = runner.invoke(
         app,
-        ["feishu", "config", "app_id=cli_x", "allow_from=ou_1,ou_2", "workspace=/w"],
+        [
+            "feishu",
+            "config",
+            "--new",
+            "app_id=cli_x",
+            "allow_from=ou_1,ou_2",
+            "workspace=/w",
+        ],
     )
     assert result.exit_code == 0, result.output
     assert store.load_feishu_bots()[0].allow_from == ["ou_1", "ou_2"]
@@ -56,7 +63,7 @@ def test_config_set_then_show_roundtrip():
 def test_config_secret_from_stdin_and_masked_display():
     """app_secret=- 从 stdin 读，显示时打码——密钥不该出现在命令行参数或完整回显里。"""
     result = runner.invoke(
-        app, ["feishu", "config", "app_secret=-"], input="topsecret-value\n"
+        app, ["feishu", "config", "--new", "app_secret=-"], input="topsecret-value\n"
     )
     assert result.exit_code == 0, result.output
     assert store.load_feishu_bots()[0].app_secret == "topsecret-value"
@@ -68,7 +75,7 @@ def test_config_secret_from_stdin_and_masked_display():
 
 def test_config_short_secret_fully_masked():
     """短密文露 6 位前缀等于全露，改为只报「已设置」。"""
-    runner.invoke(app, ["feishu", "config", "app_secret=-"], input="sekr3t\n")
+    runner.invoke(app, ["feishu", "config", "--new", "app_secret=-"], input="sekr3t\n")
     shown = runner.invoke(app, ["feishu", "config"])
     assert "sekr3t" not in shown.stdout
     assert "app_secret: （已设置）" in shown.stdout
@@ -81,12 +88,20 @@ def test_config_compact_concurrency_roundtrip(existing):
     if existing:
         seeded = runner.invoke(
             app,
-            ["feishu", "config", "app_id=cli_x", "compact_max_concurrency=2"],
+            ["feishu", "config", "--new", "app_id=cli_x", "compact_max_concurrency=2"],
         )
         assert seeded.exit_code == 0, seeded.output
         previous = store.load_feishu_bots()[0]
 
-    result = runner.invoke(app, ["feishu", "config", "compact_max_concurrency=7"])
+    result = runner.invoke(
+        app,
+        [
+            "feishu",
+            "config",
+            *([] if existing else ["--new"]),
+            "compact_max_concurrency=7",
+        ],
+    )
     assert result.exit_code == 0, result.output
     bots = store.load_feishu_bots()
     assert len(bots) == 1
@@ -106,7 +121,7 @@ def test_config_compact_concurrency_roundtrip(existing):
 def test_config_compact_concurrency_rejects_invalid_values(value):
     """非数字和超范围的并发配置均拒绝保存。"""
     result = runner.invoke(
-        app, ["feishu", "config", f"compact_max_concurrency={value}"]
+        app, ["feishu", "config", "--new", f"compact_max_concurrency={value}"]
     )
     assert result.exit_code != 0
     assert "保存失败" in result.output
@@ -131,7 +146,7 @@ def test_config_explicit_bot_with_no_bots_errors():
 
 def test_config_enable_without_workspace_fails():
     """启用必须绑定项目——与 desktop save_channel 同一条校验，两个入口不许有两套规则。"""
-    result = runner.invoke(app, ["feishu", "config", "enabled=true"])
+    result = runner.invoke(app, ["feishu", "config", "--new", "enabled=true"])
     assert result.exit_code == 1
     assert "绑定项目" in result.output
     assert not any(b.enabled for b in store.load_feishu_bots())
@@ -145,7 +160,7 @@ def test_sync_skills_requires_workspace():
 
 
 def test_sync_skills_reports_count():
-    runner.invoke(app, ["feishu", "config", "workspace=/w"])
+    runner.invoke(app, ["feishu", "config", "--new", "workspace=/w"])
     with patch("lumi.gateway.toolbox.sync_lark_skills", return_value=3) as sync:
         result = runner.invoke(app, ["feishu", "sync-skills"])
     assert result.exit_code == 0
@@ -165,7 +180,7 @@ def test_diagnose_prints_fix_and_exits_nonzero_on_error():
             fix_note="开通后需发布版本",
         )
     )
-    runner.invoke(app, ["feishu", "config", "app_id=cli_x"])
+    runner.invoke(app, ["feishu", "config", "--new", "app_id=cli_x"])
     with _diagnosed(bot=[bad]):
         result = runner.invoke(app, ["feishu", "diagnose"])
     assert result.exit_code == 1
@@ -186,7 +201,9 @@ def test_diagnose_marks_render_on_legacy_console():
 def test_diagnose_includes_minutes_when_enabled():
     """妙记开着才追加妙记四项——没开时跑 lark-cli 子进程纯属浪费且必报错。"""
     ok = asdict(Check(key="auth", name="用户授权有效", group="妙记"))
-    runner.invoke(app, ["feishu", "config", "workspace=/w", "minutes_enabled=true"])
+    runner.invoke(
+        app, ["feishu", "config", "--new", "workspace=/w", "minutes_enabled=true"]
+    )
     with _diagnosed(minutes=[ok]) as minutes:
         result = runner.invoke(app, ["feishu", "diagnose"])
     minutes.assert_called_once()
@@ -201,7 +218,7 @@ def test_diagnose_includes_minutes_when_enabled():
 def test_diagnose_all_ok_exits_zero():
     """全绿退出码 0——agent 复检闭环靠它判定「配好了」。"""
     ok = asdict(Check(key="credentials", name="应用凭证有效"))
-    runner.invoke(app, ["feishu", "config", "app_id=cli_x"])
+    runner.invoke(app, ["feishu", "config", "--new", "app_id=cli_x"])
     with _diagnosed(bot=[ok]):
         result = runner.invoke(app, ["feishu", "diagnose"])
     assert result.exit_code == 0

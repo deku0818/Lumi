@@ -28,7 +28,6 @@ from lumi.agents.core.nodes import (
 from lumi.agents.core.state import LumiAgentContext, LumiAgentState
 from lumi.agents.permissions.engine import PermissionEngine
 from lumi.agents.tools import get_tools
-from lumi.agents.tools.providers.todo import Todo
 from lumi.models import provider_store
 from lumi.utils.config import CheckpointMode, GlobalConfigManager, get_config
 from lumi.utils.logger import logger
@@ -80,9 +79,6 @@ class LumiAgent:
         # PTL 兜底走节点级 error_handler，理由见 nodes.on_call_model_error
         add("CallModel", call_model, error_handler=on_call_model_error)
         add("ToolExecutor", tool_executor)
-        # 旧 checkpoint 可能仍指向这些节点；保留名称，执行时使用新的逐个权限流程。
-        add("HumanApproval", tool_executor)
-        add("AutoClassify", tool_executor)
         add("OnAgentStop", on_agent_stop)
         # 离线写回锚点：正常流程永远不路由到它（刻意无入边）。bridge 在图不运行时
         # 经 aupdate_state 写状态（中断收尾的半截回复/补合成 ToolMessage、离线压缩
@@ -111,12 +107,11 @@ class LumiAgent:
                 "OnAgentStop": "OnAgentStop",
             },
         )
-        for name in ("ToolExecutor", "HumanApproval", "AutoClassify"):
-            self.builder.add_conditional_edges(
-                name,
-                after_tool_executor,
-                {"CallModel": "CallModel", "END": END},
-            )
+        self.builder.add_conditional_edges(
+            "ToolExecutor",
+            after_tool_executor,
+            {"CallModel": "CallModel", "END": END},
+        )
         self.builder.add_edge("OfflineFlush", END)
 
     async def adelete_thread(self, thread_id: str) -> None:
@@ -214,13 +209,6 @@ async def close_checkpointer(checkpointer: BaseCheckpointSaver | None) -> None:
 
 CHECKPOINT_AES_KEY_ENV = "LUMI_CHECKPOINT_AES_KEY"
 
-# 进 checkpoint 的自定义类型白名单。langgraph 默认「警告但放行」任意类型，日志每次
-# 读盘刷一条 "will be blocked in a future version"；显式列出后 msgpack 转严格模式：
-# 内置安全类型 + 这里列的才允许反序列化，其余被拦下并记 warning（值变空，不抛异常）。
-# Todo 工具已移除；仍保留其类型注册，供已有 checkpoint 读取。
-# **新增会落进 state 的自定义类型时必须加到这里**，否则那个字段读回来是空的。
-_ALLOWED_CHECKPOINT_TYPES = (Todo,)
-
 
 def _checkpoint_serde() -> SerializerProtocol:
     """checkpoint 序列化器：类型白名单恒生效，配了密钥再叠一层 AES 加密。
@@ -232,7 +220,7 @@ def _checkpoint_serde() -> SerializerProtocol:
     写入恢复明文、已加密的读不回来。加密依赖可选包：
     ``pip install 'lumi-harness[encryption]'``。
     """
-    base = JsonPlusSerializer(allowed_msgpack_modules=_ALLOWED_CHECKPOINT_TYPES)
+    base = JsonPlusSerializer(allowed_msgpack_modules=None)  # 仅 SDK 内置安全类型
     key = os.environ.get(CHECKPOINT_AES_KEY_ENV, "").encode()
     if not key:
         return base

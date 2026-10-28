@@ -36,7 +36,7 @@ ToolExecutor / ask
 - 结果按原 tool_call 顺序写回。只有全部未执行且存在人工拒绝时才结束本轮；规则 / AI 拒绝交回模型调整。
 - Broker 的 stop 标记结束整轮，即使已有兄弟调用执行，也不再继续模型。
 
-`human_approval()` / `auto_classify()` 是执行器内的辅助函数，图中的同名旧节点只用于恢复已有 checkpoint。权限矩阵见 [权限架构](permissions.md)。
+`human_approval()` / `auto_classify()` 是执行器内的辅助函数。权限矩阵见 [权限架构](permissions.md)。
 
 ## 停止、切换与断连
 
