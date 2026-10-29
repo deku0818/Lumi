@@ -2,6 +2,31 @@ const test = require('node:test')
 const assert = require('node:assert/strict')
 const { loadRenderer } = require('./renderer-module.cjs')
 
+test('dropdown submenus use a portal without losing styles, content or interaction props', () => {
+  const { DropdownMenu } = require('radix-ui')
+  const { DropdownMenuSubContent } = loadRenderer('src/components/ui/dropdown-menu.tsx', {}, [
+    'react', 'react/jsx-runtime', 'radix-ui', 'lucide-react',
+  ])
+  const onEscapeKeyDown = () => {}
+  const element = DropdownMenuSubContent({
+    className: 'w-60 max-h-80 overflow-auto',
+    children: 'model options',
+    sideOffset: 4,
+    onEscapeKeyDown,
+  })
+
+  assert.equal(element.type, DropdownMenu.Portal, 'Submenus must escape parent overflow and backdrop-filter')
+  const content = element.props.children
+  assert.equal(content.type, DropdownMenu.SubContent)
+  assert.equal(content.props['data-slot'], 'dropdown-menu-sub-content')
+  for (const className of ['lumi-popover', 'w-60', 'max-h-80', 'overflow-auto']) {
+    assert.ok(content.props.className.split(' ').includes(className))
+  }
+  assert.equal(content.props.children, 'model options')
+  assert.equal(content.props.sideOffset, 4)
+  assert.equal(content.props.onEscapeKeyDown, onEscapeKeyDown)
+})
+
 function tick() {
   return new Promise(resolve => setImmediate(resolve))
 }
