@@ -681,6 +681,32 @@ body.resizing-col * {
 .md .hljs-emphasis { font-style: italic; }
 .md .hljs-strong { font-weight: var(--ui-weight-semibold); }
 
+/* 命令执行时的银白流光：只移动高光，文字、失败图标与箭头保持原位。 */
+.tool-summary-shimmer {
+  --shimmer-base: var(--color-muted);
+  --shimmer-light: white;
+  --shimmer-mid: color-mix(in srgb,var(--shimmer-light) 55%,var(--shimmer-base));
+  color: transparent;
+  background-image: linear-gradient(105deg,var(--shimmer-base) 0%,var(--shimmer-base) 40%,var(--shimmer-mid) 47%,var(--shimmer-light) 49%,var(--shimmer-light) 51%,var(--shimmer-mid) 53%,var(--shimmer-base) 60%,var(--shimmer-base) 100%);
+  background-size: 280% 100%;
+  background-position: 100% 0;
+  background-clip: text;
+  -webkit-background-clip: text;
+  animation: tool-summary-light 3.2s linear infinite;
+}
+:root.light .tool-summary-shimmer {
+  --shimmer-base: color-mix(in srgb,var(--color-muted) 92%,var(--color-ink));
+  --shimmer-light: color-mix(in srgb,white 69%,var(--color-ink));
+  --shimmer-mid: color-mix(in srgb,var(--shimmer-light) 50%,var(--shimmer-base));
+}
+@keyframes tool-summary-light {
+  0% { background-position: 100% 0; }
+  72%,100% { background-position: 0% 0; }
+}
+@media (prefers-reduced-motion: reduce) {
+  .tool-summary-shimmer { animation: none; background: none; color: inherit; }
+}
+
 /* ── 状态指示器「光」主题（Lumi = 光明）：光点光晕 + 流光文字 ── */
 @keyframes lumi-breathe {
   50% { transform: scale(0.72); filter: brightness(1.35); }

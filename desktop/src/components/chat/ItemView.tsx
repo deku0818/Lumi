@@ -1,8 +1,8 @@
 import { memo, useEffect, useRef, useState } from 'react'
 import { ChevronRight, FileText } from 'lucide-react'
 import type { AttachedFile, Item } from '../../types'
-import { toolStatusKey } from '../../toolMeta'
-import { fmtDuration, msgTime } from '@/lib/utils'
+import { argStr, toolStatusKey } from '../../toolMeta'
+import { asRecord, fmtDuration, msgTime } from '@/lib/utils'
 import { Markdown } from '../Markdown'
 import { useI18n } from '../../i18n'
 import { USER_BUBBLE } from './MessageActions'
@@ -69,6 +69,7 @@ export function StatusIndicator({
     }
   }
   const thinking = running && !failed && !waiting && !runningTool && !streaming && !!thinkingText
+  const description = runningTool?.name === 'bash' ? argStr(asRecord(runningTool.args).description).trim() : ''
   const label = failed
     ? t('status.connectionFailed')
     : !running && backgroundCount > 0
@@ -78,7 +79,7 @@ export function StatusIndicator({
         : compacting
           ? t('status.compacting')
           : runningTool
-            ? t(toolStatusKey(runningTool.name))
+            ? description || t(toolStatusKey(runningTool.name))
             : thinking
               ? t('common.thinking')
               : streaming
@@ -91,8 +92,8 @@ export function StatusIndicator({
         <span aria-hidden="true" className={`lumi-orb${variant === 'orbit' ? ' lumi-orbit' : ''} ${failed ? 'lumi-orb-error' : waiting ? 'lumi-orb-wait' : ''}`}>
           {variant === 'orbit' && <><i className="lumi-orbit-particle" /><i className="lumi-orbit-particle lumi-orbit-particle-inner" /></>}
         </span>
-        <span>{label}</span>
-        {running && sec > 0 && <span className="text-xs opacity-60 tabular-nums">· {fmtDuration(sec)}</span>}
+        <span className="min-w-0 truncate" title={label}>{label}</span>
+        {running && sec > 0 && <span className="shrink-0 whitespace-nowrap text-xs opacity-60 tabular-nums">· {fmtDuration(sec)}</span>}
         {backgroundCount > 0 && onOpenTasks && (
           <button onClick={onOpenTasks} className="text-xs text-primary hover:underline">{t('bg.title')} · {backgroundCount}</button>
         )}

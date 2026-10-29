@@ -12,7 +12,8 @@ export type ToolItem = Extract<Item, { kind: 'tool' }>
 
 // 工具（单个或多个）统一渲染为一行自然语言摘要（参考 Claude：
 // "Edited 2 files, ran a command, read a file ›"）。无卡片、低调融入文本流，
-// 点击展开看每个工具的细节。运行中强制展开看进度，完成后默认折叠。
+// 点击展开看每个工具的细节。运行 / 出错时默认展开，完成后默认折叠。
+// 各状态共用摘要与样式；仅失败时在末尾追加中性提示图标，运行状态由底栏展示。
 // groupItems 每次产出新的数组包装，但元素身份稳定：逐元素同身份即视为未变。
 // ToolGroup / AgentGroup 的 memo 比较器共用，避免流式文本期间整组（含 diff 计算）重渲染。
 export const sameItems = (a: ToolItem[], b: ToolItem[]) =>
@@ -21,20 +22,13 @@ export const sameItems = (a: ToolItem[], b: ToolItem[]) =>
 export const ToolGroup = memo(function ToolGroup({ tools }: { tools: ToolItem[] }) {
   const { t } = useI18n()
   const running = tools.some((t) => !t.done)
+  const commandRunning = tools.some((tool) => tool.name === 'bash' && !tool.done)
   const failedCount = tools.filter((t) => t.error).length
   const hasError = failedCount > 0
   // 默认运行 / 出错时展开；用户明确开合后，后续流式更新不抢回选择。
   const [override, setOverride] = useState<boolean | null>(null)
   const open = override ?? (running || hasError)
-  const summary = running
-    ? (() => {
-        const done = summarizeTools(
-          tools.filter((tool) => tool.done),
-          t,
-        )
-        return done ? `${done}…` : t('status.working')
-      })()
-    : summarizeTools(tools, t)
+  const summary = summarizeTools(tools, t)
 
   return (
     <div>
@@ -43,9 +37,8 @@ export const ToolGroup = memo(function ToolGroup({ tools }: { tools: ToolItem[] 
         onClick={() => setOverride(!open)}
         className="flex items-center gap-1.5 text-sm text-muted-foreground hover:text-ink transition"
       >
-        {running && <span className="text-primary animate-pulse text-[10px]">●</span>}
-        <span>{summary}</span>
-        {!running && hasError && (
+        <span className={commandRunning ? 'tool-summary-shimmer' : undefined}>{summary}</span>
+        {hasError && (
           <span
             role="img"
             title={t('tool.failedCount', { n: failedCount })}
