@@ -1,4 +1,4 @@
-import { Laptop,Pencil,Plus,Server,Trash2 } from 'lucide-react'
+import { Laptop,SquarePen,Plus,Server,Trash2 } from 'lucide-react'
 import { useEffect,useRef,useState,type JSX } from 'react'
 import { useI18n } from '../i18n.ts'
 import type { BackendRemote,BackendsState } from '../types.ts'
@@ -56,7 +56,7 @@ export function BackendsPanel({ connectionTarget }: { connectionTarget?: { machi
             meta={<StatusDot tone={busy ? 'warn' : tone} pulse={busy} />}
             subtitle={active && status ? t('ssh.state.' + status.phase) : machine.host}
             badge={status && <Button variant="ghost" size="sm" className="text-[11px] text-muted-foreground" aria-expanded={showProgress} aria-controls={'connection-' + machine.id} onClick={() => setExpanded(showProgress ? undefined : machine.id)}>{t(showProgress ? 'ssh.hideProgress' : 'ssh.viewProgress')}</Button>}
-            actions={<><Button disabled={busy} variant="ghost" size="icon-sm" onClick={() => setEditing(machine)} aria-label={t('backends.edit')}><Pencil /></Button><Button variant="ghost" size="icon-sm" onClick={() => setDeleting(machine)} aria-label={t('common.delete')}><Trash2 /></Button></>}
+            actions={<><Button disabled={busy} variant="ghost" size="icon-sm" onClick={() => setEditing(machine)} aria-label={t('backends.edit')}><SquarePen /></Button><Button variant="ghost" size="icon-sm" onClick={() => setDeleting(machine)} aria-label={t('common.delete')}><Trash2 /></Button></>}
             trailing={<Switch checked={active} onCheckedChange={enabled => void toggle(machine, enabled)} />} />
           {showProgress && <div id={'connection-' + machine.id} className="remote-connection-progress">
             <SshConnectionBody machine={machine} status={status} question={null} error={status.phase === 'error' ? status.message : ''} showHost={false} />

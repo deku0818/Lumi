@@ -69,9 +69,9 @@ export function FontPicker({ value, onChange }: { value: string; onChange: (f: s
             onChange={(e) => setQuery(e.target.value)}
             onKeyDown={(e) => e.key === 'Escape' && setOpen(false)}
             placeholder={t('settings.uiFont.search')}
-            className="w-full px-3 py-2 text-sm bg-canvas/60 border-b border-line/30 outline-none text-ink placeholder:text-muted-foreground"
+            className="lumi-popover-search outline-none text-ink placeholder:text-muted-foreground"
           />
-          <div className="max-h-64 overflow-auto py-1">
+          <div className="max-h-64 overflow-auto">
             <Item label={t('settings.uiFont.default')} selected={!value} onClick={() => pick('')} />
             {shown.map((f) => (
               <Item key={f} label={f} font={f} selected={f === value} onClick={() => pick(f)} />
@@ -105,7 +105,7 @@ function Item({
   return (
     <button
       onClick={onClick}
-      className="w-full flex items-center justify-between gap-2 px-3 py-1.5 text-left text-sm text-ink hover:bg-line/30 transition"
+      className="lumi-menu-option w-full flex items-center justify-between text-left text-ink transition"
     >
       <span className="truncate" style={font ? { fontFamily: cssFamily(font) } : undefined}>
         {label}

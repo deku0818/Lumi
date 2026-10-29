@@ -11,7 +11,7 @@ import {
 import {
   FileText,
   ChevronDown,
-  Pencil,
+  SquarePen,
   RotateCcw,
   Square,
   Plus,
@@ -2422,7 +2422,7 @@ export default function App() {
                                   onClick={() => timeTravel(userItem.id)}
                                 />
                                 <IconAction
-                                  icon={Pencil}
+                                  icon={SquarePen}
                                   label={t('chat.edit')}
                                   onClick={() => setEditingId(userItem.id)}
                                 />

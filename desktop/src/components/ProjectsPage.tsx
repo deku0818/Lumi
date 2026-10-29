@@ -4,7 +4,7 @@ import {
   ChevronDown,
   Folder,
   MoreVertical,
-  Pencil,
+  TextCursorInput,
   Plus,
   Search,
   Star,
@@ -207,7 +207,7 @@ function ProjectCard({
           </DropdownMenuTrigger>
           <DropdownMenuContent align="start" className="w-44">
             <DropdownMenuItem onClick={onRenameStart}>
-              <Pencil />
+              <TextCursorInput />
               {t('projects.rename')}
             </DropdownMenuItem>
             <DropdownMenuItem

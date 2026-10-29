@@ -1,5 +1,5 @@
 import { useCallback, useEffect, useMemo, useState } from 'react'
-import { AlertTriangle, ChevronDown, ChevronRight, Globe, Pencil, Plus, Radar, Terminal, Trash2, X } from 'lucide-react'
+import { AlertTriangle, ChevronDown, ChevronRight, Globe, SquarePen, Plus, Radar, Terminal, Trash2, X } from 'lucide-react'
 import type {
   McpPromptInfo,
   McpResourceInfo,
@@ -351,7 +351,7 @@ function ServerCard({
             <Radar />
           </Button>
           <Button variant="ghost" size="icon-sm" onClick={onEdit} className="text-muted-foreground">
-            <Pencil />
+            <SquarePen />
           </Button>
           <Button
             variant="ghost"

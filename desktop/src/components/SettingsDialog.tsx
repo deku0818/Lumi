@@ -68,7 +68,7 @@ export function SettingsDialog({
     <Dialog open onOpenChange={(o) => !o && onClose()}>
       <DialogContent
         showCloseButton
-        className="sm:max-w-3xl w-full h-[34rem] p-0 gap-0 overflow-hidden flex"
+        className="lumi-settings-dialog sm:max-w-3xl w-full h-[34rem] p-0 gap-0 overflow-hidden flex"
       >
         <DialogTitle className="sr-only">{t('settings.title')}</DialogTitle>
         <Tabs value={tab} onValueChange={(v) => setTab(v as SettingsTab)} orientation="vertical" className="flex h-full w-full gap-0">

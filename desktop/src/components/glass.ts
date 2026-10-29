@@ -10,7 +10,7 @@
 //    单一档位在第 3、4 层时相邻两框同色、只剩缩进可辨，交替则任意深度都有边界。
 //    取 canvas 而非 panel——panel 与 surface 的明暗关系在亮暗主题里是相反的，
 //    混用会让同一条嵌套链的深浅走向随主题翻转。
-// POPOVER 浮层菜单（斜杠命令补全、字体下拉）：刻意不透明——菜单与弹窗不玻璃化。
+// POPOVER 与 Radix 菜单共用 popups.css 的轻透材质；正文卡片仍保持实色。
 export const CARD_L1 = 'rounded-2xl border border-line/45 bg-panel'
 export const CARD_L2 = 'rounded-xl border border-line/60 bg-panel'
 export const CARD_L3 = 'rounded-lg border border-line/45 bg-surface'
@@ -19,8 +19,7 @@ export const CARD_L3_ALT = 'rounded-lg border border-line/45 bg-canvas'
 /** 递归嵌套区第 depth 层的卡壳（depth 从 1 起）：奇数层 ALT、偶数层 L3，逐层互换。 */
 export const nestedTier = (depth: number): string =>
   depth % 2 === 1 ? CARD_L3_ALT : CARD_L3
-export const POPOVER =
-  'rounded-xl border border-line/40 bg-panel shadow-lg overflow-hidden'
+export const POPOVER = 'lumi-popover overflow-hidden'
 
 // L1 可点卡片的悬停：底色收满 + 描边加重，与 L1 成对使用。
 export const CARD_L1_HOVER = 'hover:bg-panel hover:border-line/70 transition'

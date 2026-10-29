@@ -24,7 +24,7 @@ export function CommandMenu({
 
   return (
     <div className={`mb-1.5 ${POPOVER}`}>
-      <div ref={ref} className="max-h-64 overflow-auto py-1">
+      <div ref={ref} className="max-h-64 overflow-auto">
         {commands.map((cmd, i) => (
           <button
             key={cmd.name}
@@ -33,12 +33,12 @@ export function CommandMenu({
               onPick(cmd)
             }}
             onMouseEnter={() => onHover(i)}
-            className={`w-full flex items-baseline gap-3 px-4 py-1.5 text-left transition-colors ${
-              i === selected ? 'bg-primary/10' : 'hover:bg-white/5'
+            className={`lumi-menu-option w-full flex items-baseline text-left transition-colors ${
+              i === selected ? 'bg-primary/10' : ''
             }`}
           >
             <span className="text-primary font-medium shrink-0">/{cmd.name}</span>
-            <span className="text-sm text-muted-foreground truncate">{cmd.description}</span>
+            <span className="text-xs text-muted-foreground truncate">{cmd.description}</span>
           </button>
         ))}
       </div>

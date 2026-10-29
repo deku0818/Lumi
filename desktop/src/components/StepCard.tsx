@@ -89,7 +89,7 @@ export function StepCard({
   }, [])
 
   return (
-    <div className={cn(CARD_L2, 'rounded-card overflow-hidden shadow-sm')}>
+    <div className={cn(CARD_L2, 'lumi-step-card rounded-card overflow-hidden shadow-sm')}>
       <div
         className={cn(
           'flex items-center gap-2.5 py-3 pl-4 pr-3.5 transition-shadow',

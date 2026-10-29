@@ -8,7 +8,7 @@ import {
   FileText,
   Lock,
   MessageSquare,
-  Pencil,
+  SquarePen,
   Pin,
   Plus,
   Star,
@@ -167,7 +167,7 @@ export const ProjectHomePage = memo(function ProjectHomePage({
               title={t('projhome.prompts')}
               action={
                 <CardAction title={t('projhome.edit')} onClick={() => setSheet({ mode: 'view', kind: 'prompt', name: promptTab })}>
-                  <Pencil size={12} />
+                  <SquarePen size={12} />
                 </CardAction>
               }
             >
@@ -470,7 +470,7 @@ function ProjectAgentMenu({ api, path, enabled, onCreate }: {
           : !enabled?.[name] && <Plus size={14} className="text-muted-foreground" style={{ position: 'absolute', right: 8 }} />}
       </DropdownMenuCheckboxItem>)}
       <DropdownMenuSeparator />
-      <DropdownMenuItem onSelect={onCreate}><Pencil size={16} className="text-muted-foreground" />{t('projhome.customAgent')}</DropdownMenuItem>
+      <DropdownMenuItem onSelect={onCreate}><SquarePen size={16} className="text-muted-foreground" />{t('projhome.customAgent')}</DropdownMenuItem>
     </DropdownMenuContent>
   </DropdownMenu>
 }
@@ -696,7 +696,7 @@ function SheetBody({ api, path, sheet, onClose, onChanged, onSwitch }: SheetProp
         <span className="ml-auto flex shrink-0 items-center gap-1">
           {editable && !editing && (
             <SheetBtn title={t('projhome.edit')} onClick={() => setEditing(true)}>
-              <Pencil size={15} />
+              <SquarePen size={15} />
             </SheetBtn>
           )}
           {!creating && !builtin && (kind === 'skill' || kind === 'agent') && (

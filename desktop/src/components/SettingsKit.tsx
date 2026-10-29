@@ -521,12 +521,12 @@ export function FormModal({
 }: FormModalProps): JSX.Element {
   return (
     <Dialog open onOpenChange={(o) => !o && onClose()}>
-      <DialogContent showCloseButton className={cn('p-0 gap-0 overflow-hidden', className)}>
+      <DialogContent showCloseButton className={cn('lumi-form-dialog p-0 gap-0 overflow-hidden', className)}>
         <DialogHeader className="px-5 pt-5 pb-3 border-b border-line/40">
           <DialogTitle className="text-sm text-ink">{title}</DialogTitle>
           {description && <DialogDescription className="text-[11px] text-muted-foreground">{description}</DialogDescription>}
         </DialogHeader>
-        <div className={cn('px-5 py-4 overflow-auto', bodyClassName)}>{children}</div>
+        <div className={cn('form-modal-body px-5 py-4 overflow-auto', bodyClassName)}>{children}</div>
         {footer && (
           <div className="form-modal-footer px-5 py-3.5 border-t border-line/40 flex items-center gap-3">{footer}</div>
         )}

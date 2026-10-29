@@ -1,0 +1,132 @@
+/* Approved Apple-inspired surfaces, with the compact Raycast-proposal dimensions.
+   Keep full-content cards opaque; translucency belongs to transient surfaces. */
+:root {
+  --popup-shadow: 0 2px 5px rgb(0 0 0 / .08), 0 22px 48px -12px rgb(0 0 0 / .36), inset 0 1px 0 color-mix(in srgb, var(--color-ink) 13%, transparent);
+}
+:root.light {
+  --popup-shadow: 0 2px 5px rgb(0 0 0 / .03), 0 22px 48px -12px rgb(0 0 0 / .16), inset 0 1px 0 color-mix(in srgb, var(--color-panel) 80%, transparent);
+}
+:is(.lumi-popover, .lumi-modal, .lumi-toast, .session-hover-card, [data-slot="tooltip-content"]) {
+  --popup-fill: 83%;
+  --popup-radius: 18px;
+  border: 1px solid color-mix(in srgb, var(--color-ink) 12%, transparent);
+  border-radius: var(--popup-radius);
+  background: var(--color-panel);
+  color: var(--color-ink);
+  box-shadow: var(--popup-shadow);
+}
+@supports (backdrop-filter: blur(1px)) {
+  :is(.lumi-popover, .lumi-modal, .lumi-toast, .session-hover-card, [data-slot="tooltip-content"]) {
+    background: linear-gradient(160deg, color-mix(in srgb, var(--color-ink) 5%, transparent), transparent 52%), color-mix(in srgb, var(--color-panel) var(--popup-fill), transparent);
+    backdrop-filter: blur(32px) saturate(125%);
+  }
+}
+.lumi-popover { padding: 7px; }
+.lumi-popover :is([data-slot="dropdown-menu-item"], [data-slot="dropdown-menu-checkbox-item"], [data-slot="dropdown-menu-radio-item"], [data-slot="dropdown-menu-sub-trigger"]),
+.lumi-menu-option {
+  min-height: 34px;
+  padding: 6px 10px;
+  gap: 10px;
+  border-radius: 12px;
+  font-size: 12.5px;
+  line-height: 1.6;
+}
+.lumi-popover :is([data-slot="dropdown-menu-checkbox-item"], [data-slot="dropdown-menu-radio-item"]) { padding-right: 32px; }
+.lumi-popover [data-inset="true"] { padding-left: 28px; }
+.lumi-popover :is([data-slot="dropdown-menu-item"], [data-slot="dropdown-menu-checkbox-item"], [data-slot="dropdown-menu-radio-item"], [data-slot="dropdown-menu-sub-trigger"]) > svg {
+  width: 15px;
+  height: 15px;
+  stroke-width: 1.65;
+}
+.lumi-popover [data-highlighted], .lumi-menu-option:hover {
+  background: color-mix(in srgb, var(--color-ink) 10%, transparent);
+}
+.lumi-popover [data-variant="destructive"][data-highlighted] {
+  background: color-mix(in srgb, var(--color-error) 12%, transparent);
+}
+.lumi-popover [data-slot="dropdown-menu-separator"] {
+  margin: 6px 9px;
+  background: color-mix(in srgb, var(--color-line) 60%, transparent);
+}
+.lumi-popover [data-slot="dropdown-menu-label"] { padding: 7px 10px; }
+.lumi-menu-search, .lumi-popover-search {
+  height: 35px;
+  margin: 0 6px 5px;
+  padding: 0 8px;
+  border: 0;
+  border-radius: 11px;
+  background: color-mix(in srgb, var(--color-canvas) 60%, transparent);
+  color: var(--color-muted);
+}
+.lumi-menu-search { display: flex; align-items: center; gap: 8px; }
+.lumi-menu-search input { min-width: 0; flex: 1; width: 100%; border: 0; background: transparent; color: var(--color-ink); outline: none; }
+.lumi-menu-search input, .lumi-popover-search { font-size: 12px; }
+.lumi-popover-search { width: calc(100% - 12px); }
+.lumi-step-card { border-radius: 20px; }
+.lumi-modal {
+  --popup-fill: 96%;
+  --popup-radius: 25px;
+  max-height: calc(100dvh - 32px);
+  overflow-y: auto;
+}
+.lumi-modal [data-slot="dialog-title"] { font-size: 18px; font-weight: var(--ui-weight-medium); letter-spacing: -.4px; }
+.lumi-modal [data-slot="dialog-close"] {
+  top: 20px;
+  right: 20px;
+  width: 20px;
+  height: 20px;
+  padding: 4px;
+  border-radius: 50%;
+  background: color-mix(in srgb, var(--color-ink) 6%, transparent);
+  color: var(--color-muted);
+}
+.lumi-modal [data-slot="dialog-close"] svg { width: 12px; height: 12px; }
+.lumi-modal [data-slot="button"][data-size="default"] {
+  height: 32px;
+  padding-inline: 13px;
+  border-radius: 18px;
+  font-size: 12px;
+}
+.lumi-modal [data-slot="button"]:is([data-variant="outline"], [data-variant="ghost"]):not([data-slot="dialog-close"]) {
+  border-color: transparent;
+  background: color-mix(in srgb, var(--color-ink) 7%, transparent);
+}
+.lumi-modal [data-slot="button"]:is([data-variant="outline"], [data-variant="ghost"]):hover {
+  background: color-mix(in srgb, var(--color-ink) 11%, transparent);
+}
+.lumi-modal [data-slot="button"][data-variant="destructive"] {
+  background: color-mix(in srgb, var(--color-error) 85%, var(--color-base));
+}
+.lumi-form-dialog { display: flex; flex-direction: column; overflow: hidden; }
+.lumi-form-dialog > [data-slot="dialog-header"] {
+  flex-shrink: 0;
+  padding: 25px 25px 9px;
+  border: 0;
+  gap: 5px;
+}
+.lumi-form-dialog > [data-slot="dialog-header"] [data-slot="dialog-title"] { padding-right: 25px; }
+.lumi-form-dialog .form-modal-body { min-height: 0; padding: 17px 25px 22px; }
+.lumi-form-dialog :is(input, select, textarea) { font-size: 12px; }
+.lumi-form-dialog :is(input:not([type="checkbox"]):not([type="radio"]), select, textarea) { background: var(--color-canvas); }
+.lumi-form-dialog > .form-modal-footer {
+  flex-shrink: 0;
+  padding: 0 25px 23px;
+  border: 0;
+  gap: 8px;
+}
+.ssh-dialog > .form-modal-footer { flex-wrap: wrap; }
+.lumi-confirm-dialog > [data-slot="dialog-header"] { padding: 29px 28px 22px; gap: 13px; }
+.lumi-confirm-dialog [data-slot="dialog-description"] { font-size: 12px; line-height: 1.85; }
+.lumi-confirm-dialog > [data-slot="dialog-footer"] { padding: 0 25px 23px; }
+.lumi-settings-dialog [data-slot="tabs-list"] { background: color-mix(in srgb, var(--color-canvas) 80%, transparent); }
+.lumi-settings-dialog [data-slot="tabs-content"] { background: var(--color-panel); }
+.directory-heading > button { border-radius: 50%; }
+.session-hover-card { padding: 13px 14px; }
+[data-slot="tooltip-content"] { --popup-radius: 12px; padding: 7px 10px; font-size: 11px; }
+.lumi-toast { max-width: calc(100vw - 32px); padding: 10px 13px; font-size: 12px; overflow-wrap: anywhere; }
+@media (max-width: 560px) {
+  .lumi-form-dialog > [data-slot="dialog-header"], .lumi-form-dialog .form-modal-body, .lumi-form-dialog > .form-modal-footer { padding-inline: 20px; }
+}
+@media (prefers-reduced-transparency: reduce) {
+  :is(.lumi-popover, .lumi-modal, .lumi-toast, .session-hover-card, [data-slot="tooltip-content"]) { background: var(--color-panel); backdrop-filter: none; }
+}

@@ -32,7 +32,7 @@ export function ConfirmDialog({
   const { t } = useI18n()
   return (
     <Dialog open onOpenChange={(o) => !o && onCancel()}>
-      <DialogContent showCloseButton={false} className="p-5">
+      <DialogContent showCloseButton={false} className="lumi-confirm-dialog p-0 gap-0">
         <DialogHeader>
           <DialogTitle className={icon ? 'flex items-start gap-2' : undefined}>
             {icon && <span className="flex h-[1.375em] shrink-0 items-center">{icon}</span>}

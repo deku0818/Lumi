@@ -1,6 +1,6 @@
 import { directoryCrumbs } from '@/lib/directory'
 import { basename,errorMessage } from '@/lib/utils'
-import { ArrowRight,ArrowUp,ChevronRight,Folder,FolderPlus,Home,Laptop,Pencil,Server,X } from 'lucide-react'
+import { ArrowRight,ArrowUp,ChevronRight,Folder,FolderPlus,Home,Laptop,SquarePen,Server,X } from 'lucide-react'
 import { useCallback,useEffect,useRef,useState,type JSX } from 'react'
 import type { Gateway } from '../gateway.ts'
 import { useI18n } from '../i18n.ts'
@@ -123,7 +123,7 @@ export function DirBrowser({ gw, machine, onPick, onCancel }: DirBrowserProps): 
                 {i > 0 && <ChevronRight size={11} />}<button disabled={busy} title={crumb.path} aria-label={crumb.path} onClick={() => void load(crumb.path)}>{i === 0 ? <><MachineIcon size={12} /><span>{crumb.label === '/' ? '' : crumb.label}</span></> : crumb.label}</button>
               </span>)}
             </div>
-            <Button variant="ghost" size="icon-xs" disabled={busy} onClick={() => { setAddress(cwd); setEditing(true) }} title={t('directory.editPath')} aria-label={t('directory.editPath')}><Pencil /></Button>
+            <Button variant="ghost" size="icon-xs" disabled={busy} onClick={() => { setAddress(cwd); setEditing(true) }} title={t('directory.editPath')} aria-label={t('directory.editPath')}><SquarePen /></Button>
           </>}
         </div>
         <Button variant="ghost" className="directory-new" disabled={!selectable || busy} onClick={() => { setCreating(!creating); setMkError('') }} title={t('projects.newFolder')} aria-label={t('projects.newFolder')}><FolderPlus /><span>{t('projects.newFolder')}</span></Button>

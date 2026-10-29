@@ -12,7 +12,7 @@ import {
   Laptop,
   MoreHorizontal,
   PanelLeft,
-  Pencil,
+  TextCursorInput,
   Pin,
   PinOff,
   Plus,
@@ -737,7 +737,7 @@ function SessionRow({
               {session.pinned ? t('sidebar.unpin') : t('sidebar.pin')}
             </DropdownMenuItem>
             <DropdownMenuItem onClick={() => setRenaming(true)}>
-              <Pencil />
+              <TextCursorInput />
               {t('sidebar.rename')}
             </DropdownMenuItem>
             <DropdownMenuSeparator />

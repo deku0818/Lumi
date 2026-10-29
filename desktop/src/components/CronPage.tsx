@@ -12,7 +12,7 @@ import {
   Clock,
   Info,
   Loader2,
-  Pencil,
+  SquarePen,
   Play,
   Plus,
   Square,
@@ -330,7 +330,7 @@ function JobDetail({
         <h1 className="serif text-3xl min-w-0 break-words">{job.name}</h1>
         <div className="shrink-0 flex items-center gap-1">
           <Button variant="ghost" size="icon-sm" onClick={onEdit} aria-label={t('cron.editTitle')} className="text-muted-foreground">
-            <Pencil />
+            <SquarePen />
           </Button>
           <Button variant="ghost" size="icon-sm" onClick={onDelete} aria-label={t('cron.deleteTitle')} className="text-muted-foreground">
             <Trash2 />
@@ -414,7 +414,7 @@ function JobFormDialog({
 
   return (
     <Dialog open onOpenChange={(o) => !o && onClose()}>
-      <DialogContent className="sm:max-w-lg">
+      <DialogContent className="sm:max-w-lg p-6">
         <DialogHeader>
           <DialogTitle>{job ? t('cron.editTitle') : t('cron.createTitle')}</DialogTitle>
         </DialogHeader>

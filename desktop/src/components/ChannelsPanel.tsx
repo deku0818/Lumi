@@ -8,7 +8,7 @@ import {
   MessageCircle,
   Mic,
   Moon,
-  Pencil,
+  SquarePen,
   Plus,
   Send,
   ShieldCheck,
@@ -301,7 +301,7 @@ function ChannelCard({
       subtitle={state === 'error' ? <span className="text-error">{sub}</span> : sub}
       actions={
         <Button variant="ghost" size="icon-sm" onClick={onEdit} aria-label={t('common.edit')} className="text-muted-foreground">
-          <Pencil />
+          <SquarePen />
         </Button>
       }
       trailing={<Switch checked={enabled} onCheckedChange={onToggle} />}

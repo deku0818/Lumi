@@ -46,12 +46,7 @@ const subscribe = (cb: () => void) => {
 }
 
 const ICON = { error: AlertCircle, success: CheckCircle2, info: Info }
-// 容器只给边框 + 淡底（文字统一 text-ink）；图标单独上语义色，避免与正文色冲突
-const TONE = {
-  error: 'border-error/35 bg-error/10',
-  success: 'border-success/35 bg-success/10',
-  info: 'border-info/35 bg-info/10',
-}
+// 语义色集中到图标，外壳与其他轻透浮层保持一致。
 const ICON_COLOR = { error: 'text-error', success: 'text-success', info: 'text-info' }
 
 export function ToastHost() {
@@ -75,7 +70,7 @@ function ToastRow({ entry }: { entry: ToastEntry }) {
   const visible = shown && !entry.leaving
   return (
     <div
-      className={`inline-flex items-center gap-2 rounded-full border px-4 py-1.5 text-[12.5px] text-ink bg-panel shadow-lg transition-all duration-200 ${TONE[entry.kind]} ${
+      className={`lumi-toast inline-flex items-center gap-2 text-ink transition-all duration-200 ${
         visible ? 'opacity-100 translate-y-0' : 'opacity-0 -translate-y-2'
       }`}
     >

@@ -5,7 +5,7 @@ import {
   AlertTriangle,
   Boxes,
   Check,
-  Pencil,
+  SquarePen,
   Trash2,
   Plus,
   Loader2,
@@ -230,7 +230,7 @@ export function ProvidersPanel({
                       aria-label={t('providers.edit')}
                       className="text-muted-foreground"
                     >
-                      <Pencil />
+                      <SquarePen />
                     </Button>
                     <Button
                       variant="ghost"
@@ -867,7 +867,7 @@ function CatalogBadge({
           // 上下键仍冒泡出去用于在结果间移动。
           onKeyDown={(e) => e.key.length === 1 && e.stopPropagation()}
           placeholder={t('providers.catalogSearch')}
-          className="w-full h-8 px-3 bg-transparent border-b border-line/60 text-xs outline-none placeholder:text-muted-foreground"
+          className="lumi-popover-search outline-none placeholder:text-muted-foreground"
         />
         <div className="max-h-60 overflow-y-auto p-1">
           {entries.length === 0 ? (
