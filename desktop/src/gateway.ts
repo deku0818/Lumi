@@ -10,6 +10,7 @@ import type {
   ConnState,
   CronJob,
   CronRun,
+  DailyDreamSchedule,
   DiagnoseCheck,
   EnvInstallTarget,
   EnvStatus,
@@ -343,6 +344,10 @@ export class Gateway {
   // 原样展示），保存即实时重连 ——
   getChannels(): Promise<{ channels: ChannelInfo[]; config_path: string }> {
     return this.request<{ channels: ChannelInfo[]; config_path: string }>('get_channels')
+  }
+
+  getDailyDreamSchedule(time: string): Promise<DailyDreamSchedule> {
+    return this.request<DailyDreamSchedule>('get_daily_dream_schedule', { time })
   }
 
   saveChannel(name: string, config: Partial<FeishuConfig>): Promise<{ channels: ChannelInfo[] }> {

@@ -40,13 +40,16 @@ _IDLE_SLEEP_SECONDS = 3600
 _WAKE_CHECK_SECONDS = 300
 
 
-def seconds_until_next(now: datetime, hhmm: str) -> float:
-    """从 ``now`` 到下一个 ``HH:MM`` 的秒数（当日已过则顺延明日）。纯函数，供测试。"""
+def next_dream_time(now: datetime, hhmm: str) -> datetime:
+    """下一个服务器墙钟 ``HH:MM``；跳时缺失的钟点顺延到有效分钟。"""
     hh, mm = (int(x) for x in hhmm.split(":", 1))
     target = now.replace(hour=hh, minute=mm, second=0, microsecond=0)
     if target <= now:
         target += timedelta(days=1)
-    return (target - now).total_seconds()
+    # 跳时区间的墙钟不存在：转换后会变成另一个钟点。调度与预览都顺延到区间末尾。
+    while target.astimezone().replace(tzinfo=None) != target:
+        target += timedelta(minutes=1)
+    return target
 
 
 async def _acquire_idle_lock(pool, thread_id: str):
@@ -175,9 +178,7 @@ async def daily_dream_loop(pool, config, channel_name: str) -> None:
             continue
         now = datetime.now()
         try:
-            target = now + timedelta(
-                seconds=seconds_until_next(now, config.daily_dream_time)
-            )
+            target = next_dream_time(now, config.daily_dream_time)
         except ValueError:
             logger.warning(
                 "[daily-dream] 无法解析 daily_dream_time=%r，空转",

@@ -551,6 +551,12 @@ export type RemoteEvent = { type: 'frame'; channel: string; frame: unknown } | {
 export type BackendsState = { remotes: BackendRemote[] }
 
 // —— IM 渠道（飞书等）——
+export interface DailyDreamSchedule {
+  next_run_at: string // 服务器下次执行的 ISO 时间，含该日期的 UTC 偏移
+  timezone: string // 服务器时区简称（如 UTC / CST / EST）
+  refresh_after_seconds: number // 服务器计算的剩余实际秒数，避免客户端时钟偏差影响刷新
+}
+
 type ChannelStatusState = 'off' | 'stopped' | 'connecting' | 'connected' | 'error'
 interface ChannelStatus {
   state: ChannelStatusState

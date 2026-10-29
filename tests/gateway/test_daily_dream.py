@@ -11,31 +11,29 @@ from langchain_core.messages import HumanMessage
 
 from lumi.agents.memory import dream_lock
 from lumi.gateway.channels.feishu import daily_dream
-from lumi.gateway.channels.feishu.daily_dream import _dream_one, seconds_until_next
+from lumi.gateway.channels.feishu.daily_dream import _dream_one, next_dream_time
 from lumi.utils.constants import LUMI_META_KEY
 
 
 def test_target_later_same_day():
     now = datetime(2026, 7, 5, 3, 0, 0)
-    assert seconds_until_next(now, "04:30") == 90 * 60
+    assert next_dream_time(now, "04:30") == datetime(2026, 7, 5, 4, 30)
 
 
 def test_target_already_passed_rolls_to_tomorrow():
     now = datetime(2026, 7, 5, 5, 0, 0)
-    # 今天 03:00 已过 → 明天 03:00 = 22 小时
-    assert seconds_until_next(now, "03:00") == 22 * 3600
+    assert next_dream_time(now, "03:00") == datetime(2026, 7, 6, 3)
 
 
 def test_target_equal_now_rolls_forward_full_day():
     now = datetime(2026, 7, 5, 3, 0, 0)
     # target <= now 时顺延次日，避免同分钟内重复触发
-    assert seconds_until_next(now, "03:00") == 24 * 3600
+    assert next_dream_time(now, "03:00") == datetime(2026, 7, 6, 3)
 
 
 def test_ignores_seconds_and_micros_in_now():
     now = datetime(2026, 7, 5, 3, 0, 30, 500)
-    # 目标秒/微秒清零，03:01 距 03:00:30.0005 = 29.9995s
-    assert seconds_until_next(now, "03:01") == 60 - 30.0005
+    assert next_dream_time(now, "03:01") == datetime(2026, 7, 5, 3, 1)
 
 
 # --- _dream_one 判活：真实 human 落库 ts vs 该 thread 上次 dream 快照时刻 ---

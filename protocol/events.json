@@ -99,6 +99,7 @@
     "dismiss_bg_task": { "params": ["task_id"], "result": ["dismissed"], "note": "从列表移除一个终态后台任务；运行中不可移除" },
     "clear_finished_bg_tasks": { "params": [], "result": ["cleared"], "note": "清除当前会话全部终态后台任务，返回移除数" },
     "get_channels": { "params": [], "result": ["channels", "config_path"], "note": "IM channel（飞书等）配置 + 运行状态列表，每个飞书机器人一条（config.id 区分）；channel 含 name/enabled/config/status，status.state ∈ off|stopped|connecting|connected|error；config_path 为该机器 lumi.json 的绝对路径（面板原样展示，前端不拼 ~）" },
+    "get_daily_dream_schedule": { "params": ["time"], "result": ["next_run_at", "timezone", "refresh_after_seconds"], "note": "只读预览：按服务器墙钟计算下一个 HH:MM，夏令时跳过的钟点顺延到首个有效分钟；next_run_at 为带目标日期 UTC 偏移的 ISO 时间，timezone 为服务器该时刻的时区简称，refresh_after_seconds 为服务器计算的剩余实际秒数（不依赖客户端时钟）；不保存配置、不触发 Dream" },
     "save_channel": { "params": ["name", "config"], "result": ["channels"], "note": "保存一个飞书机器人配置（按 config.id upsert，缺 id 即新建）到 ~/.lumi/lumi.json 的 channels 分区（密钥 chmod 600），同步 lark-cli 专属身份并实时停旧起新，返回更新后的列表" },
     "delete_channel": { "params": ["name", "bot_id"], "result": ["channels"], "note": "删除一个飞书机器人（含回收其 lark-cli 专属身份 profile），实时停传输并回收会话池，返回更新后的列表" },
     "diagnose_minutes": { "params": ["name", "config"], "result": ["checks"], "note": "妙记链路逐项体检（lark-cli / 用户授权 / 妙记权限 / 事件订阅）；四者任一断裂都表现为静默收不到事件，故需逐项定位。顺带幂等重建订阅。check.tone ∈ ok|warn|error，warn=通过但有功能降级" },

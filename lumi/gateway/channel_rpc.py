@@ -9,6 +9,7 @@
 from __future__ import annotations
 
 import asyncio
+from datetime import datetime
 
 from lumi.gateway.channels.config import FeishuChannelConfig
 from lumi.gateway.channels.store import (
@@ -62,6 +63,20 @@ async def _get_channels(params: dict) -> dict:
     # config_path：凭证落盘的绝对路径，面板原样展示（`~/.lumi/lumi.json` 这种
     # 写法非技术用户看不懂，Windows 上尤甚）
     return {"channels": _list_channels(), "config_path": config_path()}
+
+
+async def _get_daily_dream_schedule(params: dict) -> dict:
+    from lumi.gateway.channels.feishu.daily_dream import next_dream_time
+
+    now = datetime.now()
+    target = next_dream_time(now, params["time"])
+    # 对目标日期取系统时区，不能沿用「现在」的固定 UTC 偏移（跨夏令时会不同）。
+    local = target.astimezone()
+    return {
+        "next_run_at": local.isoformat(),
+        "timezone": local.tzname(),
+        "refresh_after_seconds": target.timestamp() - now.timestamp(),
+    }
 
 
 # 诊断/存删都含同步的磁盘 / 子进程 / 网络调用，一律丢线程池免得阻塞 WS 事件循环
@@ -140,6 +155,7 @@ async def _save_channel(params: dict) -> dict:
 
 HANDLERS = {
     "get_channels": _get_channels,
+    "get_daily_dream_schedule": _get_daily_dream_schedule,
     "save_channel": _save_channel,
     "delete_channel": _delete_channel,
     "diagnose_minutes": _diagnose_minutes,

@@ -48,6 +48,7 @@ import {
 import { Button } from '@/components/ui/button'
 import { Switch } from '@/components/ui/switch'
 import { CARD_L2 } from './glass'
+import { DreamSchedule } from './DreamSchedule'
 
 // 文案里 **…** 段加粗（确认弹窗里用户唯一需据以决策的信息）
 const emphasize = (s: string): ReactNode =>
@@ -585,7 +586,10 @@ function FeishuForm({
           }
           bodyClassName="grid grid-cols-2 gap-4"
         >
-          <Field label={t('channels.dreamTime')} hint={t('channels.dreamTimeHint')}>
+          <Field label={<span className="flex items-center justify-between gap-2">
+            {t('channels.dreamTime')}
+            <span className="text-[10px]">{t('channels.dreamServerTime')}</span>
+          </span>} hint={t('channels.dreamTimeHint')}>
             <TextInput
               type="time"
               value={cfg.daily_dream_time}
@@ -608,6 +612,7 @@ function FeishuForm({
               }
             />
           </Field>
+          <DreamSchedule key={`${machine}:${cfg.daily_dream_time}`} gw={gw} machine={machine} time={cfg.daily_dream_time} />
         </GroupCard>
       </div>
 
