@@ -1,4 +1,4 @@
-import { createElement, type ReactNode } from 'react'
+import { createElement, type ComponentProps, type ReactNode } from 'react'
 import { renderToStaticMarkup } from 'react-dom/server'
 import { I18nProvider } from '../../src/i18n'
 import { ClarifyDialog } from '../../src/components/ClarifyDialog'
@@ -11,7 +11,7 @@ function Providers({ children }: { children: ReactNode }) {
   return createElement(I18nProvider, { children: createElement(TooltipProvider, { children }) })
 }
 
-export function renderDetail(timeline: SubagentTimeline, remote = false): string {
+export function renderDetail(timeline: SubagentTimeline, remote = false, options: Partial<ComponentProps<typeof SubagentDetail>> = {}): string {
   const agent: SubagentSummary = {
     agent_id: 'agent', name: 'codex', title: 'Review', executor: 'codex', cwd: '/tmp',
     status: 'running', active_turn_id: 'one', active_ordinal: 1, queued_count: 1,
@@ -23,6 +23,7 @@ export function renderDetail(timeline: SubagentTimeline, remote = false): string
       expanded: true, remote, online: true,
       onBack: () => {}, onExpand: () => {}, onRetry: () => {}, onOpenFile: () => {}, onStop: async () => {},
       position: { top: 0, pinned: true },
+      ...options,
     }),
   }))
 }

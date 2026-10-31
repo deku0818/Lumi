@@ -1,6 +1,6 @@
 import { Copy, ExternalLink, Folder, Maximize2, Minimize2, MoreHorizontal, X } from 'lucide-react'
 import {
-  memo, useEffect, useLayoutEffect, useRef, useState,
+  memo, useEffect, useRef, useState,
   type JSX, type KeyboardEvent as ReactKeyboardEvent, type MouseEvent,
 } from 'react'
 import {
@@ -16,7 +16,6 @@ type PreviewWindowProps = {
   files: Artifact[]
   activePath: string | null
   expanded: boolean
-  nativeTitleBar: boolean
   gw?: Gateway
   remote: boolean
   onSelect: (path: string) => void
@@ -30,34 +29,15 @@ function previewName(file: Artifact): string {
 }
 
 export const PreviewWindow = memo(function PreviewWindow({
-  files, activePath, expanded, nativeTitleBar, gw, remote,
+  files, activePath, expanded, gw, remote,
   onSelect, onCloseTab, onClose, onToggleExpanded,
 }: PreviewWindowProps): JSX.Element {
   const { t } = useI18n()
   const [menuOpen, setMenuOpen] = useState(false)
-  const [size, setSize] = useState({ width: 420, height: 296 })
-  const viewportRef = useRef<HTMLDivElement>(null)
   const tabsRef = useRef<HTMLDivElement>(null)
   const activeFile = files.find(file => file.path === activePath) ?? files[0]
   const expandLabel = t(expanded ? 'files.shrink' : 'files.expand')
   const ExpandIcon = expanded ? Minimize2 : Maximize2
-
-  useLayoutEffect(() => {
-    const viewport = viewportRef.current!
-    function measure(): void {
-      const { clientWidth: width, clientHeight: height } = viewport
-      // 隐藏的右栏保留上次尺寸，避免 iframe 被缩到 0 而丢失模型状态。
-      if (!width || !height) return
-      setSize(previous => {
-        if (previous.width === width && previous.height === height) return previous
-        return { width, height }
-      })
-    }
-    measure()
-    const observer = new ResizeObserver(measure)
-    observer.observe(viewport)
-    return () => observer.disconnect()
-  }, [])
 
   useEffect(() => {
     tabsRef.current?.querySelector('[aria-selected="true"]')?.scrollIntoView({ block: 'nearest', inline: 'nearest' })
@@ -103,12 +83,10 @@ export const PreviewWindow = memo(function PreviewWindow({
     tabsRef.current?.querySelectorAll<HTMLButtonElement>('[role="tab"]')[next]?.focus()
   }
 
-  const scale = expanded ? 1 : Math.min(1, size.width / 980)
   return (
     <section className={`preview-window ${expanded ? 'preview-window-expanded' : 'sidebar-float rounded-card'}`} aria-label={t('files.previewWindow')}>
       <header
         className="preview-window-header"
-        style={expanded && nativeTitleBar ? { paddingLeft: 100 } : undefined}
         onDoubleClick={handleHeaderDoubleClick}
       >
         <div ref={tabsRef} className="preview-tabs titlebar-interactive" role="tablist" aria-label={t('files.previewTabs')}>
@@ -160,7 +138,7 @@ export const PreviewWindow = memo(function PreviewWindow({
           <button title={t('files.closeWindow')} aria-label={t('files.closeWindow')} onClick={onClose}><X size={15} /></button>
         </div>
       </header>
-      <div ref={viewportRef} className="preview-viewport">
+      <div className="preview-viewport">
         {files.map(file => {
           const selected = file.path === activePath
           return (
@@ -172,17 +150,13 @@ export const PreviewWindow = memo(function PreviewWindow({
               aria-hidden={!selected}
               inert={!selected}
               style={{
-                width: expanded ? size.width : 980,
-                height: size.height / scale,
-                transform: `scale(${scale})`,
-                visibility: selected ? 'visible' : 'hidden',
+                visibility: selected ? undefined : 'hidden',
               }}
             >
               <PreviewContent file={file} gw={gw} remote={remote} />
             </div>
           )
         })}
-        {!expanded && <button className="preview-enlarge-hit" aria-label={t('files.expand')} onClick={onToggleExpanded}><span><Maximize2 size={12} />{t('files.clickToExpand')}</span></button>}
       </div>
     </section>
   )

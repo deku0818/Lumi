@@ -6,6 +6,8 @@ const { loadRenderer } = require('./renderer-module.cjs')
 // Run the actual component's layout effects with a viewport that clamps offsets like the DOM.
 function viewport(position, options = {}) {
   const hooks = [], dependencies = []
+  const listeners = new Map()
+  let onResize
   let index = 0, layout = [], effects = [], onScroll
   const useEffect = queue => (callback, deps) => {
     const slot = index++, old = dependencies[slot]
@@ -24,7 +26,9 @@ function viewport(position, options = {}) {
   const { SubagentDetail } = loadRenderer('src/components/Subagents.tsx', {
     process, Buffer, TextEncoder, TextDecoder, setImmediate, clearImmediate,
     require: name => name === 'react' ? react : require(name),
-    localStorage: { getItem: () => 'zh' }, navigator: { language: 'zh' }, window: { lumi: {} },
+    localStorage: { getItem: () => 'zh' }, navigator: { language: 'zh' },
+    window: { lumi: {}, addEventListener: (type, fn) => listeners.set(type, fn), removeEventListener: type => listeners.delete(type) },
+    ResizeObserver: class { constructor(callback) { onResize = callback } observe() {} disconnect() {} },
   }, ['react', 'react/*', 'react-dom', 'react-dom/*'])
   const element = {
     scrollHeight: 200, clientHeight: 200, top: 0,
@@ -33,6 +37,8 @@ function viewport(position, options = {}) {
   }
   return {
     element,
+    resize() { onResize() },
+    key(event) { listeners.get('keydown')?.(event) },
     scroll(top) { element.scrollTop = top; onScroll() },
     render(loading, rounds, error = '') {
       index = 0; layout = []; effects = []
@@ -49,6 +55,17 @@ function viewport(position, options = {}) {
     },
   }
 }
+
+test('Escape returns from expanded reading and respects an already handled key', () => {
+  let returns = 0
+  const view = viewport({ top: 0, pinned: true }, { onBack: () => returns++ })
+  view.render(false, [])
+  view.key({ key: 'Escape', defaultPrevented: true })
+  view.key({ key: 'Enter', defaultPrevented: false })
+  assert.equal(returns, 0)
+  view.key({ key: 'Escape', defaultPrevented: false })
+  assert.equal(returns, 1)
+})
 
 test('returning to an instance waits for complete history and preserves its reading offset', () => {
   const saved = { top: 300, pinned: false }, view = viewport(saved)
@@ -85,6 +102,19 @@ test('a pinned instance follows new content after restoration', () => {
   view.element.scrollHeight = 2500
   view.render(false, [{ id: 'one' }, { id: 'two' }])
   assert.equal(view.element.scrollTop, 2300)
+})
+
+test('resizing the reading panel follows the bottom only while pinned', () => {
+  const saved = { top: 0, pinned: true }, view = viewport(saved)
+  view.element.scrollHeight = 2000
+  view.render(false, [{ id: 'one' }])
+  view.element.clientHeight = 400
+  view.resize()
+  assert.equal(view.element.scrollTop, 1600)
+  view.scroll(300)
+  view.element.clientHeight = 500
+  view.resize()
+  assert.equal(view.element.scrollTop, 300)
 })
 
 function findNode(node, predicate) {

@@ -248,6 +248,25 @@ pre {
 }
 .sidebar-float,
 .subagent-detail { background: var(--sidebar-background); }
+.workspace-window {
+  --workspace-motion: 220ms cubic-bezier(.2, .7, .25, 1);
+  position: absolute;
+  inset: 0 0 0 auto;
+  z-index: 30;
+  display: flex;
+  min-width: 0;
+  pointer-events: none;
+  transition: width var(--workspace-motion), padding var(--workspace-motion);
+}
+.workspace-window > :is(.subagent-detail, .preview-window) { min-width: 0; width: 100%; pointer-events: auto; }
+.workspace-window > :is(.subagent-detail, .preview-window) > header { transition: padding-left var(--workspace-motion); }
+.workspace-window-native-titlebar > :is(.subagent-detail, .preview-window) > header { padding-left: 100px; }
+.workspace-window-resize { position: absolute; z-index: 1; left: -5px; top: 0; bottom: 0; width: 10px; pointer-events: auto; }
+.workspace-window-resize > div { width: 10px; height: 100%; margin: 0; }
+@media (prefers-reduced-motion: reduce) {
+  .workspace-window,
+  .workspace-window > :is(.subagent-detail, .preview-window) > header { transition: none; }
+}
 .rail-section { --color-surface: color-mix(in srgb, var(--color-ink) 3%, var(--sidebar-background)); }
 
 /* 项目侧栏：标题共用对齐线；收起紧凑，展开后才增加组间留白。 */
@@ -377,14 +396,15 @@ pre {
   animation: rail-panel-in var(--motion-sheet) var(--spring-panel, var(--ease-snap));
 }
 
-/* 文件预览与后台任务同列：小窗缩放真实内容，放大后原地展开为工作区。 */
+/* 文件原尺寸阅读，侧栏与放大状态共用同一个文档实例。 */
 .preview-window {
-  height: 360px;
-  flex-shrink: 0;
+  flex: 1;
+  min-width: 0;
   min-height: 0;
   display: flex;
   flex-direction: column;
   overflow: hidden;
+  background: var(--sidebar-background);
 }
 .preview-window-header {
   display: flex;
@@ -395,13 +415,14 @@ pre {
   flex-shrink: 0;
   min-width: 0;
   user-select: none;
+  border-bottom: 1px solid var(--color-line);
 }
 .preview-tabs {
   display: flex;
   gap: 3px;
   align-items: center;
   overflow-x: auto;
-  scrollbar-width: thin;
+  scrollbar-width: none;
   min-width: 0;
   flex: 0 1 auto;
 }
@@ -432,6 +453,7 @@ pre {
 }
 .preview-tab > [role="tab"] span { overflow: hidden; text-overflow: ellipsis; }
 .preview-tab svg { flex-shrink: 0; color: var(--color-muted); }
+.preview-tabs::-webkit-scrollbar { display: none; }
 .preview-tab-close {
   width: 22px;
   height: 22px;
@@ -465,38 +487,30 @@ pre {
   flex: 1;
   min-height: 0;
   overflow: hidden;
-  margin: 0 10px 10px;
-  border-radius: 10px;
   background: var(--color-canvas);
 }
-.preview-document { position: absolute; top: 0; left: 0; transform-origin: top left; }
-.preview-enlarge-hit {
-  position: absolute;
-  inset: 0;
-  width: 100%;
-  height: 100%;
-  cursor: zoom-in;
-  display: flex;
-  align-items: flex-end;
-  justify-content: flex-end;
-  padding: 11px;
-}
-.preview-enlarge-hit > span {
-  display: flex;
-  align-items: center;
-  gap: 6px;
-  font-size: 10px;
-  border: 1px solid var(--color-line);
-  background: var(--color-panel);
-  color: var(--color-ink);
-  border-radius: 6px;
-  padding: 5px 8px;
-  box-shadow: 0 3px 10px #0002;
-}
-.rail-panel-expanded { gap: 0; overflow: hidden; }
-.preview-window-expanded { height: auto; flex: 1; border: 0; background: var(--sidebar-background); }
-.preview-window-expanded .preview-window-header { padding-right: 44px; border-bottom: 1px solid var(--color-line); }
-.preview-window-expanded .preview-viewport { margin: 0; border-radius: 0; }
+.preview-document { position: absolute; inset: 0; min-width: 0; min-height: 0; }
+
+/* Markdown 文件中的只读笔记属性，不作用于聊天正文。 */
+.note-preview{max-width:768px;width:100%;margin:0 auto;padding:24px;font-size:calc(var(--ui-font-size,13px) + 1px);overflow-wrap:anywhere}
+.note-properties{font-size:12px;line-height:1.7;padding-bottom:18px;margin-bottom:24px;border-bottom:1px solid var(--color-line);font-family:var(--font-sans)}
+.note-properties summary{display:flex;align-items:center;justify-content:space-between;list-style:none;color:var(--color-muted);font-size:11px;cursor:pointer;user-select:none;padding:0 0 9px}
+.note-properties summary::-webkit-details-marker{display:none}
+.note-properties:not([open]){padding-bottom:6px;margin-bottom:24px}
+.note-properties:not([open]) summary svg{rotate:-90deg}
+.note-properties dl{margin:0}
+.note-property{display:grid;grid-template-columns:104px minmax(0,1fr);gap:10px;align-items:start;min-height:31px;padding:4px 0}
+.note-property dt{display:flex;align-items:center;gap:8px;color:var(--color-muted);padding-top:1px}
+.note-property dt svg{flex-shrink:0;opacity:.7}
+.note-property dd{margin:0;min-width:0;white-space:pre-wrap}
+.note-property a{color:var(--color-info);text-decoration:none;cursor:pointer}
+.note-property a:hover{text-decoration:underline}
+.note-tags{display:flex;gap:5px;flex-wrap:wrap}
+.note-tag{display:inline-flex;align-items:center;max-width:100%;border:1px solid var(--color-line);background:color-mix(in srgb,var(--color-ink) 3%,transparent);border-radius:6px;padding:0 7px;font-size:11px;color:var(--color-muted)}
+.note-empty{color:var(--color-muted);opacity:.6}
+
+.preview-window-expanded { border: 0; }
+.preview-window-expanded .preview-window-header { height: 54px; padding-right: 8px; }
 
 /* 拖拽调整边栏宽度时：全局 col-resize 光标、禁选、停用过渡（让边栏即时跟手） */
 body.resizing-col {
@@ -507,6 +521,8 @@ body.resizing-col * {
   user-select: none !important;
   transition: none !important;
 }
+/* Keep move/up events in the parent document while dragging past embedded content. */
+body.resizing-col iframe { pointer-events: none !important; }
 
 .serif {
   font-family: ui-serif, Georgia, "Songti SC", "Noto Serif SC", serif;

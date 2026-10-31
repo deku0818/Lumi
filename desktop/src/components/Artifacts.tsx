@@ -1,5 +1,5 @@
 import { useEffect, useRef, useState, type JSX } from 'react'
-import { Markdown } from './Markdown'
+import { NotePreview } from './NotePreview'
 import {
   File,
   FileText,
@@ -280,8 +280,8 @@ export function PreviewBody({ file, gw, remote }: PreviewBodyProps): JSX.Element
   if (kind === 'office') return <OfficePreview file={file} gw={gw} remote={remote} />
   if (kind === 'image')
     return (
-      <div className="p-6 grid place-items-center">
-        <img src={url} alt={file.name} className="max-w-full rounded-lg border border-line" />
+      <div className="p-6 h-full grid grid-cols-1 grid-rows-1 place-items-center">
+        <img src={url} alt={file.name} className="max-h-full max-w-full object-contain rounded-lg border border-line" />
       </div>
     )
   // 远程 PDF 也由主页面取回，避免子 frame 直接访问受限的文件协议。
@@ -477,13 +477,8 @@ function TextPreview({ url, localPath, markdown }: { url: string; localPath?: st
   }, [url, localPath])
   if (err) return <div className="p-6 text-sm text-error/80">{t('files.loadFailed')}</div>
   if (text == null) return <div className="p-6 text-sm text-muted-foreground">…</div>
-  if (markdown)
-    return (
-      <div className="md p-6 max-w-3xl mx-auto">
-        <Markdown>{text}</Markdown>
-      </div>
-    )
+  if (markdown) return <NotePreview text={text} />
   return (
-    <pre className="p-5 text-xs leading-relaxed font-mono whitespace-pre overflow-auto selectable">{text}</pre>
+    <pre className="h-full min-h-0 m-0 p-5 text-xs leading-relaxed font-mono whitespace-pre overflow-auto selectable">{text}</pre>
   )
 }

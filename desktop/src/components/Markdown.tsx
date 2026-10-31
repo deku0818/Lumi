@@ -1,10 +1,20 @@
 import { Children, isValidElement, useLayoutEffect, useMemo, useRef, type ComponentProps, type ReactNode } from 'react'
-import ReactMarkdown, { type ExtraProps } from 'react-markdown'
+import ReactMarkdown, { type ExtraProps, type Options } from 'react-markdown'
 import remarkGfm from 'remark-gfm'
 import remarkBreaks from 'remark-breaks'
+import remarkWikiLink from 'remark-wiki-link'
 import rehypeHighlight from 'rehype-highlight'
 import { rehypeReveal } from '../lib/graphemeReveal'
 import { CopyButton } from './chat/MessageActions'
+import { NOTE_LINK_PREFIX, noteLinkHref } from '../lib/noteMarkdown'
+
+const noteLinkPlugins: NonNullable<Options['remarkPlugins']> = [[remarkWikiLink, {
+  aliasDivider: '|',
+  pageResolver: (name: string) => [name],
+  hrefTemplate: noteLinkHref,
+  wikiLinkClassName: 'note-link',
+  newClassName: 'note-link-unresolved',
+}]]
 
 function codeText(children: ReactNode): string {
   return Children.toArray(children).map(child =>
@@ -49,18 +59,26 @@ function memoryFileName(href: string): string | null {
   }
 }
 
-function MdLink({
+export function MarkdownLink({
   href,
   title,
   children,
   onFileLink,
+  onNoteLink,
 }: {
   href?: string
   title?: string
   children?: ReactNode
   onFileLink?: (name: string) => void
+  onNoteLink?: (target: string) => void
 }) {
   if (href) {
+    if (onNoteLink && href.startsWith(NOTE_LINK_PREFIX)) {
+      let target: string
+      try { target = decodeURIComponent(href.slice(NOTE_LINK_PREFIX.length)) }
+      catch { return <span>{children}</span> }
+      return <a href={href} title={target} onClick={event => { event.preventDefault(); onNoteLink(target) }}>{children}</a>
+    }
     if (href.startsWith('#')) {
       return (
         <a href={href} title={title}>
@@ -104,12 +122,14 @@ function MdLink({
 export function Markdown({
   children,
   onFileLink,
+  onNoteLink,
   streaming = false,
   animateInitial = false,
   preserveLineBreaks = false,
 }: {
   children: string
   onFileLink?: (name: string) => void
+  onNoteLink?: (target: string) => void
   streaming?: boolean
   animateInitial?: boolean
   preserveLineBreaks?: boolean
@@ -124,15 +144,20 @@ export function Markdown({
   const components = useMemo(
     () => ({
       a: (p: { href?: string; title?: string; children?: ReactNode }) => (
-        <MdLink {...p} onFileLink={onFileLink} />
+        <MarkdownLink {...p} onFileLink={onFileLink} onNoteLink={onNoteLink} />
       ),
       pre: CodeBlock,
       span: RevealSpan,
     }),
-    [onFileLink],
+    [onFileLink, onNoteLink],
   )
+  const remarkPlugins = useMemo(() => [
+    remarkGfm,
+    ...(preserveLineBreaks ? [remarkBreaks] : []),
+    ...(onNoteLink ? noteLinkPlugins : []),
+  ], [preserveLineBreaks, onNoteLink])
   return (
-    <ReactMarkdown remarkPlugins={preserveLineBreaks ? [remarkGfm, remarkBreaks] : [remarkGfm]} rehypePlugins={plugins} components={components}>
+    <ReactMarkdown remarkPlugins={remarkPlugins} rehypePlugins={plugins} components={components}>
       {children}
     </ReactMarkdown>
   )

@@ -1,7 +1,7 @@
 {
   "name": "lumi-desktop",
   "private": true,
-  "version": "0.3.20",
+  "version": "0.3.21",
   "type": "module",
   "main": "electron/main.cjs",
   "scripts": {
@@ -78,6 +78,7 @@
   },
   "devDependencies": {
     "@tailwindcss/vite": "^4.0.0",
+    "@types/js-yaml": "^4.0.9",
     "@types/react": "^19.0.0",
     "@types/react-dom": "^19.0.0",
     "@vitejs/plugin-react": "^4.3.0",
@@ -86,6 +87,7 @@
     "concurrently": "^9.0.0",
     "electron": "^43.1.0",
     "electron-builder": "^26.15.3",
+    "js-yaml": "^4.3.2",
     "lucide-react": "^1.17.0",
     "radix-ui": "^1.5.0",
     "react": "^19.0.0",
@@ -94,6 +96,7 @@
     "rehype-highlight": "^7.0.2",
     "remark-breaks": "^4.0.0",
     "remark-gfm": "^4.0.1",
+    "remark-wiki-link": "^2.0.1",
     "shadcn": "^4.11.0",
     "tailwind-merge": "^3.6.0",
     "tailwindcss": "^4.0.0",

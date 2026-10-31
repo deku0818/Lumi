@@ -9,6 +9,8 @@ export function cn(...inputs: ClassValue[]) {
 // ResizeHandle 需回移一个间距贴到面板可见边缘。mac 红绿灯坐标以 electron/main.cjs 的
 // trafficLightPosition 为唯一事实源（x 由本间距派生、y 含用户目感微调），改这里要同步那边。
 export const FLOAT_GAP = 10
+// 右侧浮动窗口与窗口边缘的间距。
+export const RAIL_EDGE_GAP = 4
 
 // 文本截断与路径文件名提取（工具标题 / 计划对话框等共用）
 export const clip = (s: string, n = 72) => (s.length > n ? s.slice(0, n) + '…' : s)

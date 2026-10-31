@@ -1,4 +1,4 @@
-import { memo, useLayoutEffect, useMemo, useRef, useState } from 'react'
+import { memo, useEffect, useLayoutEffect, useMemo, useRef, useState } from 'react'
 import { ArrowLeft, ChevronDown, ExternalLink, Eye, Maximize2, Minimize2, Square, X } from 'lucide-react'
 import type { Artifact, SubagentSummary, SubagentViewState } from '../types'
 import type { SubagentRound, SubagentTimeline } from '../lib/subagentTimeline'
@@ -8,7 +8,6 @@ import { useI18n } from '../i18n'
 import { RailSection } from './RightRail'
 import { ChatContent, ChatSegment } from './chat/ChatContent'
 import { ItemView, StatusIndicator } from './chat/ItemView'
-import { CopyButton } from './chat/MessageActions'
 import { Button } from './ui/button'
 import { Tooltip, TooltipContent, TooltipTrigger } from './ui/tooltip'
 import { QuestionContent } from './QuestionContent'
@@ -110,6 +109,14 @@ export function SubagentDetail({ agent, detail, expanded, remote, online, onBack
   const [jump, setJump] = useState(false)
   const [nativeError, setNativeError] = useState('')
   const nativeId = detail.nativeId
+  useEffect(() => {
+    if (!expanded) return
+    const onKey = (event: KeyboardEvent) => {
+      if (event.key === 'Escape' && !event.defaultPrevented) onBack()
+    }
+    window.addEventListener('keydown', onKey)
+    return () => window.removeEventListener('keydown', onKey)
+  }, [expanded, onBack])
   useLayoutEffect(() => {
     const element = scroll.current
     if (!element) return
@@ -123,13 +130,22 @@ export function SubagentDetail({ agent, detail, expanded, remote, online, onBack
       element.scrollTop = element.scrollHeight
     }
   }, [position, detail.rounds, detail.loading, detail.error])
+  useEffect(() => {
+    const element = scroll.current
+    if (!element) return
+    const observer = new ResizeObserver(() => {
+      if (restored.current === position && position.pinned) element.scrollTop = element.scrollHeight
+    })
+    observer.observe(element)
+    return () => observer.disconnect()
+  }, [position])
   return <section aria-label={agent.title || agent.name} className={`subagent-detail flex min-h-0 flex-1 flex-col overflow-hidden ${expanded ? '' : 'sidebar-float rounded-card'}`}>
-    <header className="titlebar-interactive flex shrink-0 items-center gap-1.5 border-b border-line/60 px-2 py-2">
-      <Button variant="ghost" size={expanded ? 'sm' : 'icon-sm'} title={t(expanded ? 'subagent.backMain' : 'subagent.back')} aria-label={t(expanded ? 'subagent.backMain' : 'subagent.back')} onClick={onBack}><ArrowLeft />{expanded && <span className="text-xs">{t('subagent.backMain')}</span>}</Button>
-      <div className="min-w-0 flex-1"><SubagentHeading agent={agent} /></div>
-      {!remote && agent.executor === 'codex' && nativeId && window.lumi.openCodexThread && <Button variant="ghost" size="icon-sm" title={t('subagent.nativeOpen')} aria-label={t('subagent.nativeOpen')} onClick={() => { setNativeError(''); void window.lumi.openCodexThread!(nativeId).catch(error => setNativeError(errorMessage(error))) }}><ExternalLink size={14} /></Button>}
-      {nativeId && agent.executor !== 'lumi' && <span title={t('subagent.nativeId')}><CopyButton text={nativeId} /></span>}
-      <Button variant="ghost" size="icon-sm" title={t(expanded ? 'subagent.shrink' : 'subagent.expand')} aria-label={t(expanded ? 'subagent.shrink' : 'subagent.expand')} onClick={onExpand}>{expanded ? <Minimize2 /> : <Maximize2 />}</Button>
+    <header className={`flex shrink-0 items-center gap-1.5 border-b border-line/60 ${expanded ? 'app-drag h-[54px] px-4' : 'titlebar-interactive px-2 py-2'}`}>
+      <Button className="titlebar-interactive" variant="ghost" size={expanded ? 'sm' : 'icon-sm'} title={t(expanded ? 'subagent.backMain' : 'subagent.back')} aria-label={t(expanded ? 'subagent.backMain' : 'subagent.back')} onClick={onBack}><ArrowLeft />{expanded && <span className="text-xs">{t('subagent.backMain')}</span>}</Button>
+      {expanded && <span className="mx-1 h-4 w-px shrink-0 bg-line" />}
+      <div className="flex min-w-0 flex-1 items-center gap-2"><SubagentHeading agent={agent} />{expanded && <span className="shrink-0 text-[11px] text-muted-foreground">{t('subagent.title')}</span>}</div>
+      {!remote && agent.executor === 'codex' && nativeId && window.lumi.openCodexThread && <Button className="titlebar-interactive" variant="ghost" size="icon-sm" title={t('subagent.nativeOpen')} aria-label={t('subagent.nativeOpen')} onClick={() => { setNativeError(''); void window.lumi.openCodexThread!(nativeId).catch(error => setNativeError(errorMessage(error))) }}><ExternalLink size={14} /></Button>}
+      <Button className="titlebar-interactive" variant="ghost" size="icon-sm" title={t(expanded ? 'subagent.shrink' : 'subagent.expand')} aria-label={t(expanded ? 'subagent.shrink' : 'subagent.expand')} onClick={onExpand}>{expanded ? <Minimize2 /> : <Maximize2 />}</Button>
       {!expanded && <Button variant="ghost" size="icon-sm" title={t('common.close')} aria-label={t('common.close')} onClick={onBack}><X /></Button>}
     </header>
     {(!online || detail.error || nativeError) && <div role="alert" className="shrink-0 px-4 py-2 text-xs text-error break-words">{detail.error || nativeError || t('subagent.disconnected')}<button className="ml-2 underline" onClick={onRetry}>{t('subagent.retry')}</button></div>}

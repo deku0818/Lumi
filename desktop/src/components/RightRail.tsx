@@ -3,11 +3,9 @@
 import { ChevronDown, PanelRight } from 'lucide-react'
 import { useState, type JSX, type ReactNode } from 'react'
 import { Button } from '@/components/ui/button.tsx'
-import { cn, FLOAT_GAP } from '@/lib/utils.ts'
+import { cn, FLOAT_GAP, RAIL_EDGE_GAP } from '@/lib/utils.ts'
 import { useI18n } from '../i18n.ts'
 
-// 面板右缘到窗口边的缝：比通用 FLOAT_GAP 收紧（Cowork 式贴边）
-const RAIL_EDGE_GAP = 4
 // 卡片投影（sidebar-float 的 0 8px 32px）外溢量：滚动容器 overflow 会裁掉溢出的投影
 // 形成硬边，故容器向左/上下外扩出这段留白，由 padding 把卡片推回原位
 const SHADOW_BLEED = 32
@@ -18,7 +16,6 @@ type RightRailProps = {
   onToggle: () => void
   dot?: boolean // 收起态在钮上亮脉冲点（有任务在跑）
   enter?: boolean // 挂载时播放入场动画（宽度展开+面板滑入）：聊天视图首个后台任务出现用
-  expanded?: boolean // 预览放大后占用整个工作区，收放按钮移入右上角
   children: ReactNode
 }
 
@@ -28,17 +25,15 @@ export function RightRail({
   onToggle,
   dot,
   enter,
-  expanded = false,
   children,
 }: RightRailProps): JSX.Element {
   const { t } = useI18n()
   const toggleLabel = t(open ? 'rail.collapse' : 'rail.expand')
   const toggleAnimation = open ? 'toggle-fade-in' : 'toggle-fade-in-alt'
-  const togglePosition = expanded ? 'right-2 top-2' : cn(toggleAnimation, '-left-10 top-[13px]')
   return (
     <aside
-      style={expanded ? undefined : { width: open ? width + RAIL_EDGE_GAP : 0 }}
-      className={expanded ? 'relative z-20 flex-1 min-w-0' : `relative z-20 shrink-0 transition-[width] duration-300 ease-out ${enter ? 'rail-enter' : ''}`}
+      style={{ width: open ? width + RAIL_EDGE_GAP : 0 }}
+      className={`relative z-20 shrink-0 transition-[width] duration-300 ease-out ${enter ? 'rail-enter' : ''}`}
     >
       {/* 收放钮：浮在聊天区右上角（Cowork 式，锚在栏左缘外侧 -left-10 = 钮 28 + 缝 12，
           缝里让出聊天区滚动条），栏收起（宽 0）后同一锚点贴近窗口右缘（滚动条在钮右侧，
@@ -56,7 +51,7 @@ export function RightRail({
         onClick={onToggle}
         title={toggleLabel}
         aria-label={toggleLabel}
-        className={cn(togglePosition, 'titlebar-interactive absolute z-10 text-muted-foreground hover:text-ink')}
+        className={cn(toggleAnimation, 'titlebar-interactive absolute -left-10 top-[13px] z-10 text-muted-foreground hover:text-ink')}
       >
         <PanelRight />
         {dot && !open && (
@@ -70,12 +65,12 @@ export function RightRail({
       <div
         inert={!open}
         style={{
-          width: expanded ? '100%' : width + SHADOW_BLEED + RAIL_EDGE_GAP,
-          padding: expanded ? 0 : `${FLOAT_GAP}px ${RAIL_EDGE_GAP}px ${FLOAT_GAP}px ${SHADOW_BLEED}px`,
+          width: width + SHADOW_BLEED + RAIL_EDGE_GAP,
+          padding: `${FLOAT_GAP}px ${RAIL_EDGE_GAP}px ${FLOAT_GAP}px ${SHADOW_BLEED}px`,
         }}
         // 外扩的留白压在聊天区上：容器不吃事件（点击穿透到聊天滚动条），卡片自己恢复；
         // aside 的 z-20 让投影盖过聊天区的顶栏渐隐层（z-10），否则投影被切出竖直硬边
-        className={`rail-panel ${expanded ? 'rail-panel-expanded' : ''} pointer-events-none [&>*]:pointer-events-auto absolute top-0 bottom-0 right-0 flex flex-col gap-2.5 overflow-y-auto transition-[translate,opacity,visibility] duration-300 ease-out ${
+        className={`rail-panel pointer-events-none [&>*]:pointer-events-auto absolute top-0 bottom-0 right-0 flex flex-col gap-2.5 overflow-y-auto transition-[translate,opacity,visibility] duration-300 ease-out ${
           open ? '' : 'translate-x-[110%] opacity-0 invisible'
         }`}
       >

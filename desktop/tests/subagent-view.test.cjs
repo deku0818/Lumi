@@ -14,6 +14,20 @@ const running = mergeSubagentTimeline(emptySubagentTimeline, [
 ])
 const queued = [event(3, 'message.submitted', { text: 'QUEUED_SENTINEL' }, 'two')]
 
+for (const expanded of [false, true]) {
+  test(`${expanded ? 'expanded' : 'side'} header has navigation without a native session copy control`, () => {
+    const html = renderDetail(running, false, {
+      expanded, detail: { ...running, nativeId: 'native-session-private-id', loading: false, error: '' },
+    })
+    const header = html.match(/<header\b[\s\S]*?<\/header>/)[0]
+    assert.ok(header.includes(expanded ? '返回主会话' : '返回子代理列表'))
+    assert.ok(header.includes(expanded ? '在侧栏查看' : '在主区查看'))
+    assert.ok(!header.includes('native-session-private-id'))
+    assert.ok(!header.includes('lucide-copy'))
+    assert.equal(header.includes('关闭'), !expanded)
+  })
+}
+
 test('queuing another round keeps both task messages visible', () => {
   assert.ok(renderDetail(running).includes('RUNNING_SENTINEL'))
   const html = renderDetail(mergeSubagentTimeline(running, queued))

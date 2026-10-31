@@ -77,6 +77,7 @@ import { PreviewWindow } from './components/PreviewWindow.tsx'
 import { emptyPreviewState, previewReducer } from './lib/previewState.ts'
 import { CronPage, RunsSection } from './components/CronPage'
 import { RightRail } from './components/RightRail'
+import { WorkspaceWindow } from './components/WorkspaceWindow'
 import { SubagentDetail, SubagentsSection } from './components/Subagents'
 import { useSubagents } from './hooks/useSubagents'
 import { ResizeHandle, usePersistedFlag, useResizableWidth } from './components/ResizeHandle'
@@ -565,14 +566,14 @@ export default function App() {
       return
     }
     historyScrollRef.current = null
-    if (el && pinnedRef.current) el.scrollTo({ top: el.scrollHeight })
-  }, [active, items, running, approval, clarify, thinkingText, setPinned])
+    if (el?.clientHeight && pinnedRef.current) el.scrollTo({ top: el.scrollHeight })
+  }, [active, items, running, approval, clarify, thinkingText, setPinned, subagents.expanded])
 
   // 滚动判定贴底，带滞回：距底 > 80px 才放手并浮出浮钮，回到 < 30px 才重新贴底并收起。
   // 中间留死区，避免用户停在边界附近时抖动反复 mount/卸载浮钮（光环涟漪重复闪）。
   const onScroll = useCallback(() => {
     const el = scrollRef.current
-    if (!el) return
+    if (!el?.clientHeight) return
     const dist = el.scrollHeight - el.scrollTop - el.clientHeight
     if (dist > 80) setPinned(false)
     else if (dist < 30) setPinned(true)
@@ -2275,7 +2276,6 @@ export default function App() {
   const railAgents = railSessionVisible && (subagents.agents.length > 0 || !!subagents.listError)
   const selectedSubagent = railSessionVisible ? subagents.agents.find(agent => agent.agent_id === subagents.selectedId) : undefined
   const subagentExpanded = !!selectedSubagent && subagents.expanded
-  const subagentSide = !!selectedSubagent && !subagentExpanded
   const subagentDetail = selectedSubagent && <SubagentDetail
     key={`${active}:${selectedSubagent.agent_id}`}
     agent={selectedSubagent} detail={subagents.detail} position={subagents.position} expanded={subagentExpanded}
@@ -2283,10 +2283,12 @@ export default function App() {
     onBack={subagents.close} onExpand={toggleSubagentExpanded} onRetry={subagents.retryDetail} onOpenFile={openPreview} onStop={stopSubagent}
   />
   const hasPreview =
-    (view === 'chat' || view === 'cronjob') && preview.owner === active && preview.files.length > 0 && !subagentSide && !subagentExpanded
+    (view === 'chat' || view === 'cronjob') && preview.owner === active && preview.files.length > 0 && !selectedSubagent
   const previewExpanded = hasPreview && preview.expanded && railOpen
-  const rightRailWidth = hasPreview || subagentSide ? previewW : railW
-  const railSectionsOpen = railOpen && !previewExpanded
+  const workspaceExpanded = subagentExpanded || previewExpanded
+  const hasWorkspaceWindow = !!selectedSubagent || hasPreview
+  const railWidth = hasWorkspaceWindow ? previewW.width : railW.width
+  const railSectionsOpen = railOpen && !hasWorkspaceWindow
   const showRail = hasPreview || (view === 'cronjob' ? !!activeCronJob : view === 'chat' && (railBg || railAgents))
   // 脉冲点 = 可见模块里确有东西在跑：隐藏的 bg 模块不算，直播中的 cron 执行算
   const railDot = (railSessionVisible && hasRunningBg) || cronLiveRuns.length > 0
@@ -2297,7 +2299,6 @@ export default function App() {
   )
 
   function renderMainContent(): ReactNode {
-    if (subagentExpanded) return subagentDetail
     if (view === 'newchat') return (
       <div className="new-chat-home flex-1 flex flex-col items-center justify-center px-6">
         <HomeBackdrop />
@@ -2524,7 +2525,8 @@ export default function App() {
       {/* 悬浮侧栏占位：宽度动画（侧栏本体绝对定位于其中，收起时向左滑出） */}
       <div
         className="relative shrink-0 transition-[width] duration-300 ease-out"
-        style={{ width: sidebarOpen ? sidebarW.width + FLOAT_GAP * 2 : 0, display: previewExpanded ? 'none' : undefined }}
+        style={{ width: sidebarOpen ? sidebarW.width + FLOAT_GAP * 2 : 0 }}
+        inert={workspaceExpanded} aria-hidden={workspaceExpanded}
       >
       <Sidebar
         width={sidebarW.width}
@@ -2556,9 +2558,10 @@ export default function App() {
       />
       </div>
       {/* floating：把手从占位容器边缘贴回悬浮面板的可见右缘 */}
-      {sidebarOpen && !previewExpanded && <ResizeHandle {...sidebarW} edge="right" floating />}
+      {sidebarOpen && <ResizeHandle {...sidebarW} edge="right" floating />}
 
-      <main className="flex-1 flex flex-col min-w-0" style={previewExpanded ? { display: 'none' } : undefined}>
+      {/* 主会话留在面板背后，避免展开时重排；全窗口时不可交互或聚焦。 */}
+      <main className="flex-1 flex flex-col min-w-0 min-h-0" inert={workspaceExpanded} aria-hidden={workspaceExpanded}>
         {showTopStrip && (
           // 拖拽区与按钮区并排分离（互不重叠的矩形）：不在 drag 大条上给按钮挖洞——
           // 洞依赖 Chromium 的区域重采样，实测会因动画/布局时序失效导致按钮下半不可点。
@@ -2618,35 +2621,18 @@ export default function App() {
         )}
         {renderMainContent()}
       </main>
-      {/* 预览、执行记录与后台任务共用一列浮卡；放大时只显示预览工作区。 */}
+      {/* 右栏保留占位；打开详情时隐藏卡片，交给浮动窗口展示。 */}
       {showRail && (
-        <>
-          {railSectionsOpen && <ResizeHandle {...rightRailWidth} edge="left" />}
+        <div className="contents" style={workspaceExpanded ? { visibility: 'hidden' } : undefined} inert={workspaceExpanded} aria-hidden={workspaceExpanded}>
+          {railSectionsOpen && <ResizeHandle {...railW} edge="left" />}
           <RightRail
-            width={rightRailWidth.width}
+            width={railWidth}
             open={railOpen}
-            expanded={previewExpanded}
             onToggle={toggleRightRail}
             dot={railDot}
             enter={view === 'chat' && !hasPreview}
           >
-            {subagentSide && subagentDetail}
-            {hasPreview && (
-              <PreviewWindow
-                key={active}
-                files={preview.files}
-                activePath={preview.activePath}
-                expanded={previewExpanded}
-                nativeTitleBar={isMacTitleBar}
-                gw={controlConns.current[activeBackend]}
-                remote={remoteBackend}
-                onSelect={selectPreview}
-                onCloseTab={closePreviewTab}
-                onClose={closeAllPreviews}
-                onToggleExpanded={togglePreviewExpanded}
-              />
-            )}
-            <div className={previewExpanded || subagentSide ? 'hidden' : 'contents'} inert={previewExpanded || subagentSide}>
+            <div className={hasWorkspaceWindow ? 'hidden' : 'contents'} inert={hasWorkspaceWindow}>
               {railAgents && <SubagentsSection agents={subagents.agents} timelines={subagents.details} selectedId={subagents.selectedId} error={subagents.listError} onSelect={openSubagent} onStop={stopSubagent} />}
               {view === 'cronjob' && activeCronJob && (
                 // key=任务 id：换任务即重挂，节折叠态不跨任务残留（整栏开合在 App，不受影响）
@@ -2675,8 +2661,26 @@ export default function App() {
               )}
             </div>
           </RightRail>
-        </>
+        </div>
       )}
+
+      {hasWorkspaceWindow && <WorkspaceWindow
+        {...previewW} open={railOpen} expanded={workspaceExpanded} nativeTitleBar={isMacTitleBar}
+        className={selectedSubagent ? 'subagent-window' : 'file-preview-window'}
+      >
+        {selectedSubagent ? subagentDetail : <PreviewWindow
+          key={active}
+          files={preview.files}
+          activePath={preview.activePath}
+          expanded={previewExpanded}
+          gw={controlConns.current[activeBackend]}
+          remote={remoteBackend}
+          onSelect={selectPreview}
+          onCloseTab={closePreviewTab}
+          onClose={closeAllPreviews}
+          onToggleExpanded={togglePreviewExpanded}
+        />}
+      </WorkspaceWindow>}
 
       {showSettings && (
         <SettingsDialog

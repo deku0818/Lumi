@@ -112,6 +112,8 @@ shell / 后台任务会话等全局单例由 `shutdown_shared_runtime()` 在 lif
 
 持久子代理使用独立的 `subagent.event` 与按 seq 分页的历史，不进入主对话 reducer。桌面通过 `useSubagents`、观察器和时间线投影，按任务标题和角色名称展示实例，列表卡片与选中详情共享实时记录，多轮任务、正文、工具与问题连续展示；视图只读，后续任务由主 Agent 经 `agent_message` 派发。完整边界和模块见 [子代理架构](agents.md)。
 
+详情可从右侧面板向左展开为全窗口阅读区，与文件预览共用 `WorkspaceWindow`。主会话与侧栏保持挂载，放大时禁止背景交互；收回面板不重建详情，保留阅读位置，贴底时随内容和窗口尺寸继续跟随。放大详情中的返回按钮与 Escape 返回主会话，缩回按钮保留右侧详情。标题栏不再提供原生会话 ID 复制，符合条件的本地 Codex 实例仍可在原生应用中打开。
+
 旧 `agent` 工具产生的 `parent_run_id` 内嵌渲染仍保留读取兼容，见 [历史说明](../archive/subagent-rendering.md)。不能将该兼容路径的无 checkpointer、子事件丢弃等限制套用到当前持久子代理。
 
 ## 会话管理
@@ -293,7 +295,9 @@ Agent 产出文件后调 `artifacts` 工具把它们作为「制品」呈现给�
 
 - **权限规则**：`artifacts` 默认 allow；用户配置的 deny / ask 仍参与权限评估。
 - **聊天卡片**（`FileCards`，`desktop/src/components/Artifacts.tsx`）：artifacts 在 `groupItems` 里单独成段（不并入灰色工具组），解析一次 JSON 缓存在段上（随 `items` 记忆化）。每个文件渲染成单色类型图标卡片（按 `kind` 选 lucide 字形，不上彩色）+ 文件名 + 类型/大小 + 「Show in Folder」按钮。**卡片层不加载任何文件字节**。
-- **预览浮卡**（`PreviewWindow` + `PreviewContent`）：与执行记录、后台任务共用 `RightRail`。顶部一行文件 tab、更多菜单、放大/缩回及关闭；同路径重复打开切回已有 tab，关闭当前 tab 后选相邻文件，最后一个 tab 关闭后移除浮卡。小窗缩放真实内容，点击放大后原地铺满工作区；各 tab 内容保持挂载，切换和缩放保留模型与滚动状态。整组收放图标在放大时移到右上角，收起时恢复普通布局。切会话自动关闭全部 tab，预览状态同时校验机器与会话身份。内容仍在打开时探测存在性，缺失时显示 `MissingState` 与重新检查入口。
+- **预览窗口**（`PreviewWindow` + `PreviewContent`）：使用右栏位置和宽度，打开时隐藏执行记录、后台任务等模块。顶部一行文件 tab、更多菜单、放大/缩回及关闭；同路径重复打开切回已有 tab，关闭当前 tab 后选相邻文件，最后一个 tab 关闭后移除窗口。正文按原尺寸占满可用高度，可直接选择、滚动和操作，不覆盖点击放大层；图片保持比例并限制在可用区域内，代码保留横向滚动。切会话自动关闭全部 tab，预览状态同时校验机器与会话身份。内容仍在打开时探测存在性，缺失时显示 `MissingState` 与重新检查入口。
+- **共用窗口容器**（`WorkspaceWindow`）：文件与子代理详情的宽度、拖拽把手、隐藏和 macOS 原生标题栏留白集中管理。放大时固定右缘、向左扩展并覆盖整个应用窗口，只改变容器尺寸，不缩放文字；遵循系统减少动态效果偏好。文件各 tab 在切换、放大/缩回及右栏收起时保持挂载，保留滚动位置与 HTML 交互状态；文件预览中的 Escape 缩回右侧面板，打开菜单时先处理菜单关闭。拖拽宽度期间暂时停用 iframe 指针事件，避免移动和松开事件丢失。
+- **Markdown 笔记**（`NotePreview`）：顶部 YAML 映射解析为可折叠的只读属性区，数组值以标签样式展示；没有属性时直接显示正文，解析失败保留原文。属性文本与正文支持 `[[目标]]`、`[[目标|别名]]`，点击仅提示目标笔记，尚不定位或跳转文件。代码与嵌入语法保持原文；聊天正文沿用原有 Markdown 规则。YAML 由 `js-yaml` 的 Core schema 解析，正文双链通过 `remark-wiki-link` 接入统一 Markdown 渲染器，属性与正文复用链接点击处理。
 - **预览分型**：本地图片 / PDF / HTML 经 `lumi-file:` 协议，文本经 `lumi:read-text` 读取前 500 KiB。远端图片走 `lumi-remote:`，文本使用 Range 读取前 500 KiB；PDF 与 HTML 由主 frame 取回后生成 blob iframe。超过 50 MiB 的 UI 预览进入文件较大提示。HTML 使用 `sandbox="allow-scripts"`，不带 `allow-same-origin`；本地文件跨域读取被阻止，远端协议在 webRequest 层拒绝子 frame 请求。
 - **`lumi-file://` 协议**：`electron/main.cjs` 以 `protocol.registerSchemesAsPrivileged` + `protocol.handle` 实现，让 renderer 在 http origin 下安全引用本地文件（绕过 `file://` 限制）。URL 形如 `lumi-file://local/<abs-path>`（固定 host=local，自定义 standard scheme 不允许空 host；各路径段 `encodeURIComponent`）。handler 先 `stat`，`> MAX_SERVE_BYTES`(128MB) 返 413（兜底防超大文件读进内存撑爆主进程），否则按 `PREVIEW_MIME` 设 content-type 返回。
 - **IPC**：`lumi:open-path`（`shell.openPath`）/ `lumi:reveal-path`（`shell.showItemInFolder`）/ `lumi:path-exists`（异步 `fs.promises.access`，避免离线网络盘同步阻塞主进程），经 `preload.cjs` 暴露为 `window.lumi.{openPath,revealInFolder,pathExists}`。
