@@ -114,7 +114,7 @@ export const ProjectHomePage = memo(function ProjectHomePage({
   const recent = sessions.filter((s) => !s.pinned)
 
   return (
-    <div className="flex-1 overflow-auto">
+    <div className="flex-1 overflow-auto [scrollbar-gutter:stable]">
       <div className="max-w-4xl mx-auto w-full px-8 pt-4 pb-12">
         <div className="mb-5">
           <div className="flex items-center gap-2">
@@ -189,12 +189,12 @@ export const ProjectHomePage = memo(function ProjectHomePage({
                   )
                 })}
               </div>
-              {promptTab === 'AGENTS' && overview && !prompt?.body.trim() ? (
+              {overview && !prompt?.body.trim() ? (
                 <button
-                  onClick={() => setSheet({ mode: 'view', kind: 'prompt', name: 'AGENTS' })}
+                  onClick={() => setSheet({ mode: 'view', kind: 'prompt', name: promptTab })}
                   className="text-left"
                 >
-                  <EmptyHint>{t('projhome.projectDocEmpty')}</EmptyHint>
+                  <EmptyHint>{t('projhome.promptEmpty')}</EmptyHint>
                 </button>
               ) : prompt?.source && (
                 <div

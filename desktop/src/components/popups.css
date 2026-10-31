@@ -66,9 +66,14 @@
 .lumi-modal {
   --popup-fill: 96%;
   --popup-radius: 25px;
+  width: calc(100% - 32px);
   max-height: calc(100dvh - 32px);
+  /* Long content must shrink within the dialog instead of widening its grid. */
+  grid-template-columns: minmax(0, 1fr);
+  overflow-wrap: anywhere;
   overflow-y: auto;
 }
+.lumi-modal > * { min-width: 0; }
 .lumi-modal [data-slot="dialog-title"] { font-size: 18px; font-weight: var(--ui-weight-medium); letter-spacing: -.4px; }
 .lumi-modal [data-slot="dialog-close"] {
   top: 20px;
