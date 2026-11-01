@@ -3,26 +3,22 @@
 // 详情页：返回链接 → 大标题 + 编辑/删除/立即运行 → 开关 + 状态 + 下次运行
 //        → 左右两栏「执行记录 | 任务内容」。
 // 数据经 gateway 的 cron RPC 读写；cron.result/cron.running 事件由 App 转为
-// version/runningJobs props 驱动刷新，本组件不直接订阅 WS。
-import { memo, useCallback, useState } from 'react'
+// version/activeRuns props 驱动刷新，本组件不直接订阅 WS。
+import { useCallback, useState } from 'react'
 import {
-  AlertTriangle,
   ChevronLeft,
-  ChevronRight,
   Clock,
   Info,
   Loader2,
   SquarePen,
   Play,
   Plus,
-  Square,
   Trash2,
 } from 'lucide-react'
-import type { CronJob, CronRun } from '../types'
+import type { CronActiveRun, CronJob } from '../types'
 import { useI18n, type Translate } from '../i18n'
 import { ConfirmDialog } from './ConfirmDialog'
-import { MachineScope, useConnectedEffect, useMachine } from './MachineTabs'
-import { RailSection } from './RightRail'
+import { MachineScope, useMachine } from './MachineTabs'
 import {
   Dialog,
   DialogContent,
@@ -31,12 +27,14 @@ import {
 } from '@/components/ui/dialog'
 import { Switch } from '@/components/ui/switch'
 import { Button } from '@/components/ui/button'
-import { beOf, cn, errorMessage, fmtDuration } from '@/lib/utils'
-import { CARD_L1, CARD_L1_HOVER, CARD_L3 } from './glass'
+import { beOf, errorMessage } from '@/lib/utils'
+import { CARD_L1, CARD_L1_HOVER } from './glass'
 import { Empty } from './SettingsKit'
+import { RunRecords } from './CronRuns'
+import { useCronRuns, type CronRunsApi } from '../hooks/useCronRuns'
 
 // 后端能力句柄：App 注入所选机器控制连接的 Gateway 子集，便于解耦与测试
-export interface CronApi {
+export interface CronApi extends CronRunsApi {
   listCronJobs(): Promise<{ jobs: CronJob[] }>
   createCronJob(name: string, schedule: string, prompt: string, projectDir?: string): Promise<{ job: CronJob }>
   updateCronJob(
@@ -46,7 +44,6 @@ export interface CronApi {
   deleteCronJob(jobId: string): Promise<{ job_id: string }>
   toggleCronJob(jobId: string, enabled: boolean): Promise<{ job: CronJob }>
   runCronJob(jobId: string): Promise<{ ok: boolean }>
-  listCronRuns(jobId: string, limit?: number): Promise<{ runs: CronRun[] }>
 }
 
 const pad = (n: number) => String(n).padStart(2, '0')
@@ -54,19 +51,6 @@ const pad = (n: number) => String(n).padStart(2, '0')
 const fmtTime = (iso: string) => {
   const d = new Date(iso)
   return `${d.getFullYear()}-${pad(d.getMonth() + 1)}-${pad(d.getDate())} ${pad(d.getHours())}:${pad(d.getMinutes())}`
-}
-
-// 执行记录卡片用：时刻为主、日期为次，分开返回。同年省略年份（6月8日 / Jun 8）。
-const runParts = (iso: string, lang: string) => {
-  const d = new Date(iso)
-  const time = `${pad(d.getHours())}:${pad(d.getMinutes())}`
-  const sameYear = d.getFullYear() === new Date().getFullYear()
-  const date = d.toLocaleDateString(lang === 'zh' ? 'zh-CN' : 'en-US', {
-    ...(sameYear ? {} : { year: 'numeric' }),
-    month: 'short',
-    day: 'numeric',
-  })
-  return { date, time }
 }
 
 // 调度规则人类可读化：覆盖常见形态（间隔简写、每天/每周 cron、一次性），
@@ -115,7 +99,7 @@ export function CronPage({
   initialJobId,
   createIn,
   jobs,
-  runningJobs,
+  activeRuns,
   version,
   onOpenRun,
   onRefresh,
@@ -125,7 +109,7 @@ export function CronPage({
   initialJobId?: string // 打开时直达的任务详情（从项目主页点某条任务）
   createIn?: string // 打开时即弹创建表单并绑定该项目（项目主页「新建任务」）
   jobs: CronJob[] // App 持有的跨机器合并列表（带 backend 标记）
-  runningJobs: Record<string, string[]> // 机器 → 该机器运行中的 job id
+  activeRuns: Record<string, CronActiveRun[]>
   version: number
   onOpenRun: (threadId: string, jobId: string) => void
   onRefresh: (backend: string) => void // 只刷这台机器的任务列表
@@ -144,6 +128,7 @@ export function CronPage({
   const gw = api(machine)
   // 传给子组件：操作落在选中机器。稳定引用——否则每次渲染换新身份会让 useCronRuns 反复重拉。
   const boundApi = useCallback(() => gw, [gw])
+  const machineRuns = activeRuns[machine]
   const shownJobs = jobs.filter((j) => (j.backend || 'local') === machine)
   // 稳定引用：MachineScope 的自动落回效应把它当依赖，每渲染换身份会让效应反复重挂
   const pickMachine = useCallback((m: string) => {
@@ -174,7 +159,7 @@ export function CronPage({
         <JobDetail
           api={boundApi}
           job={selected}
-          running={(runningJobs[beOf(selected)] ?? []).includes(selected.id)}
+          machineRuns={machineRuns}
           version={version}
           onBack={() => setSelectedId(null)}
           onEdit={() => setDialog({ job: selected })}
@@ -222,7 +207,7 @@ export function CronPage({
                 <JobCard
                   key={job.id}
                   job={job}
-                  running={(runningJobs[beOf(job)] ?? []).includes(job.id)}
+                  running={machineRuns?.some(r => r.job_id === job.id) ?? false}
                   onOpen={() => setSelectedId(job.id)}
                   onToggle={(v) => toggle(job, v)}
                 />
@@ -295,7 +280,7 @@ function JobCard({
 function JobDetail({
   api,
   job,
-  running,
+  machineRuns,
   version,
   onBack,
   onEdit,
@@ -306,7 +291,7 @@ function JobDetail({
 }: {
   api: () => CronApi | undefined
   job: CronJob
-  running: boolean
+  machineRuns?: CronActiveRun[]
   version: number
   onBack: () => void
   onEdit: () => void
@@ -316,6 +301,8 @@ function JobDetail({
   onOpenRun: (threadId: string, jobId: string) => void
 }) {
   const { t } = useI18n()
+  const entries = useCronRuns(api, beOf(job), job.id, version, machineRuns)
+  const running = machineRuns?.some(r => r.job_id === job.id) ?? false
   return (
     <div className="max-w-4xl mx-auto w-full px-8 py-6">
       <button
@@ -353,13 +340,7 @@ function JobDetail({
       <div className="mt-8 pt-6 border-t border-line/30 grid grid-cols-1 md:grid-cols-[5fr_7fr] gap-10">
         <div>
           <div className="text-sm text-muted-foreground mb-2">{t('cron.tabRuns')}</div>
-          <RunList
-            api={api}
-            machine={beOf(job)}
-            jobId={job.id}
-            version={version}
-            onOpenRun={(tid) => onOpenRun(tid, job.id)}
-          />
+          <RunRecords entries={entries} onPick={(tid) => onOpenRun(tid, job.id)} />
         </div>
         <div>
           <div className="text-sm text-muted-foreground mb-2">{t('cron.prompt')}</div>
@@ -490,234 +471,5 @@ function Field({
         hint && <div className="text-[11px] text-muted-foreground/70 mt-1.5">{hint}</div>
       )}
     </label>
-  )
-}
-
-// RunsSection / RunList 共用的数据拉取：version 变化（有任务完成执行）时重新拉取；
-// enabled=false（右栏收起）时不拉——完全不可见还随 cron 事件白拉 50 条，重新可见时依赖变化自动补拉
-function useCronRuns(
-  api: () => CronApi | undefined,
-  machine: string, // 挂在该机器连接态上：连上 / 重连成功即重拉，断线期间的失败不会定格成「无记录」
-  jobId: string,
-  version: number,
-  limit = 20,
-  enabled = true,
-): CronRun[] | null {
-  const [runs, setRuns] = useState<CronRun[] | null>(null)
-  useConnectedEffect(
-    machine,
-    () => {
-      if (!enabled) return
-      api()
-        ?.listCronRuns(jobId, limit)
-        .then((r) => setRuns(r.runs ?? []))
-        .catch(() => setRuns([]))
-    },
-    [api, jobId, version, limit, enabled],
-  )
-  return runs
-}
-
-// 单次执行的状态标记：失败/超时 ⚠；成功仅在未读时显示蓝点
-function RunStatusMark({ run, unread }: { run: CronRun; unread?: boolean }) {
-  // 用户自己按停的：中性灰方块，不当失败渲染
-  if (run.status === 'stopped') {
-    return <Square size={11} className="shrink-0 text-muted-foreground fill-current" />
-  }
-  if (run.status !== 'success') {
-    return (
-      <AlertTriangle
-        size={12}
-        className={`shrink-0 ${run.status === 'timeout' ? 'text-primary' : 'text-error'}`}
-      />
-    )
-  }
-  return unread ? <span className="size-1.5 rounded-full bg-info shrink-0" /> : null
-}
-
-// 执行记录卡片左侧的时刻（主）+ 日期（次）列，完成条目与运行中活条目共用。
-function RunTimeCol({ startedAt, lang }: { startedAt: string; lang: string }) {
-  const { date, time } = runParts(startedAt, lang)
-  return (
-    <div className="flex-1 min-w-0">
-      <div className="text-sm font-semibold tabular-nums leading-tight">{time}</div>
-      <div className="text-[11px] text-muted-foreground truncate mt-0.5">{date}</div>
-    </div>
-  )
-}
-
-// 执行记录卡片的行内容（时刻为主 + 日期为次 + 耗时 + 状态标记），RunsSection / RunList 共用。
-function RunRowInner({ run, lang, unread }: { run: CronRun; lang: string; unread?: boolean }) {
-  return (
-    <>
-      <RunTimeCol startedAt={run.started_at} lang={lang} />
-      <span className="text-[11px] text-muted-foreground tabular-nums shrink-0">
-        {fmtDuration(Math.round(run.duration_ms / 1000))}
-      </span>
-      <RunStatusMark run={run} unread={unread} />
-    </>
-  )
-}
-
-// 失败/超时记录的错误全文。run 会话里看不到它——错误只作为 ERROR 事件流过、从不落进
-// checkpoint，点进失败的 run 是一片空白；RunRecord.error 是唯一能看全失败原因的地方，
-// 故直接摊开不折叠，且放在按钮外（按钮内选文本会误触跳转，错误就是用来复制的）。
-function RunError({ run }: { run: CronRun }) {
-  const { t } = useI18n()
-  if (run.status === 'stopped') {
-    return <div className="px-3 pb-2.5 -mt-0.5 text-[11px] text-muted-foreground">{t('cron.runStopped')}</div>
-  }
-  if (run.status === 'success' || !run.error) return null
-  return (
-    <div className="selectable px-3 pb-2.5 -mt-0.5 text-[11px] leading-relaxed text-error/90 whitespace-pre-wrap break-words">
-      {run.error}
-    </div>
-  )
-}
-
-// 任务会话右栏的「执行记录」模块（挂在 RightRail 里，定时任务会话置顶）：
-// 活条目置顶转圈、点进观测直播；当前查看高亮描边；蓝点=未读；无会话旧记录灰显。
-// run 卡外壳：活条目/完成条目/详情页 RunList 行共用基串；高亮与 hover 配方只此一份。
-// 壳与行两分——壳竖向堆叠（行 + 失败时的错误全文），行是单条内容
-const RUN_CARD = 'w-full flex flex-col items-stretch text-left transition'
-const RUN_ROW = 'w-full flex items-center gap-2.5 px-3 py-2.5 text-left'
-const runCardCls = (active: boolean) =>
-  cn(
-    CARD_L3,
-    RUN_CARD,
-    active ? 'border-primary/45 bg-primary/[0.08]' : 'hover:bg-surface/70 hover:border-primary/30',
-  )
-
-// memo：观测直播时 App 每 token 重渲染，50 条记录卡不该陪跑（props 经 App 侧
-// useMemo/useCallback 稳定：api/onPick/liveRuns）
-export const RunsSection = memo(function RunsSection({
-  api,
-  jobId,
-  open,
-  machine,
-  activeThread,
-  readRuns,
-  version,
-  liveRuns,
-  onPick,
-}: {
-  api: () => CronApi | undefined
-  machine: string
-  jobId: string
-  open: boolean // 右栏开合：收起时暂停拉取
-  activeThread: string | null
-  readRuns: Record<string, true>
-  version: number
-  liveRuns: { thread_id: string; started_at: string }[]
-  onPick: (threadId: string) => void
-}) {
-  const { t, lang } = useI18n()
-  const runs = useCronRuns(api, machine, jobId, version, 50, open)
-  // 运行中的 run 已完成日志尚未落，故从 liveRuns 单独在顶部渲染活条目；一旦该次跑完
-  // 进入 runs（同 thread_id），就从活条目里去掉，避免与完成条目重复。
-  const doneThreads = new Set((runs ?? []).map((r) => r.thread_id))
-  const live = liveRuns.filter((r) => !doneThreads.has(r.thread_id))
-
-  return (
-    <RailSection
-      title={t('cron.tabRuns')}
-      count={runs === null ? undefined : runs.length + live.length}
-    >
-      <div className="flex flex-col gap-2.5">
-        {/* 运行中的活条目：置顶、转圈、可点进观测直播；跑完后转为下方的完成条目 */}
-        {live.map((r) => {
-          const active = r.thread_id === activeThread
-          return (
-            <button
-              key={r.thread_id}
-              onClick={() => onPick(r.thread_id)}
-              className={cn(runCardCls(active), RUN_ROW)}
-            >
-              <RunTimeCol startedAt={r.started_at} lang={lang} />
-              <Loader2 size={13} className="shrink-0 animate-spin text-primary" />
-            </button>
-          )
-        })}
-        {runs?.length === 0 && live.length === 0 && (
-          <div className="px-0.5 py-1 text-xs text-muted-foreground">{t('cron.noRuns')}</div>
-        )}
-        {(runs ?? []).map((r) => {
-          const active = !!r.thread_id && r.thread_id === activeThread
-          return (
-            <div
-              key={r.thread_id || r.started_at}
-              className={
-                !r.thread_id
-                  ? cn(CARD_L3, RUN_CARD, 'opacity-60')
-                  : runCardCls(active)
-              }
-            >
-              <button
-                disabled={!r.thread_id}
-                onClick={() => r.thread_id && onPick(r.thread_id)}
-                title={r.error || r.output_summary}
-                className={cn(RUN_ROW, !r.thread_id && 'cursor-default')}
-              >
-                <RunRowInner run={r} lang={lang} unread={!!r.thread_id && !readRuns[r.thread_id]} />
-              </button>
-              <RunError run={r} />
-            </div>
-          )
-        })}
-      </div>
-    </RailSection>
-  )
-})
-
-// 执行记录列表（详情页左栏）：时间 + 耗时 + 状态标记。
-// 有会话的记录点击跳转到该次执行的会话（可续聊）；无会话的旧记录点击展开摘要。
-function RunList({
-  api,
-  machine,
-  jobId,
-  version,
-  onOpenRun,
-}: {
-  api: () => CronApi | undefined
-  machine: string
-  jobId: string
-  version: number
-  onOpenRun: (threadId: string) => void
-}) {
-  const { t, lang } = useI18n()
-  const runs = useCronRuns(api, machine, jobId, version)
-  const [open, setOpen] = useState<number | null>(null)
-
-  if (runs === null) return null
-  if (runs.length === 0) {
-    return <div className="py-6 text-sm text-muted-foreground">{t('cron.noRuns')}</div>
-  }
-  return (
-    <div className="flex flex-col gap-2">
-      {runs.map((r, i) => (
-        <div key={r.thread_id || r.started_at} className={`${CARD_L3} overflow-hidden`}>
-          <button
-            onClick={() =>
-              r.thread_id ? onOpenRun(r.thread_id) : setOpen(open === i ? null : i)
-            }
-            className={cn('group', RUN_ROW, 'hover:bg-surface/70')}
-          >
-            <RunRowInner run={r} lang={lang} />
-            {r.thread_id && (
-              <ChevronRight
-                size={14}
-                className="shrink-0 text-muted-foreground opacity-0 group-hover:opacity-100 transition-opacity"
-              />
-            )}
-          </button>
-          <RunError run={r} />
-          {open === i && !r.thread_id && (
-            <div className="selectable px-3 pb-3 -mt-0.5 text-xs leading-relaxed whitespace-pre-wrap break-words text-muted-foreground">
-              {r.output_summary || '—'}
-            </div>
-          )}
-        </div>
-      ))}
-    </div>
   )
 }

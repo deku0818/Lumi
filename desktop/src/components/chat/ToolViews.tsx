@@ -12,7 +12,7 @@ export type ToolItem = Extract<Item, { kind: 'tool' }>
 
 // 工具（单个或多个）统一渲染为一行自然语言摘要（参考 Claude：
 // "Edited 2 files, ran a command, read a file ›"）。无卡片、低调融入文本流，
-// 点击展开看每个工具的细节。运行 / 出错时默认展开，完成后默认折叠。
+// 点击展开看每个工具的细节。各状态默认折叠，仅由用户手动开合。
 // 各状态共用摘要与样式；仅失败时在末尾追加中性提示图标，运行状态由底栏展示。
 // groupItems 每次产出新的数组包装，但元素身份稳定：逐元素同身份即视为未变。
 // ToolGroup / AgentGroup 的 memo 比较器共用，避免流式文本期间整组（含 diff 计算）重渲染。
@@ -21,20 +21,17 @@ export const sameItems = (a: ToolItem[], b: ToolItem[]) =>
 
 export const ToolGroup = memo(function ToolGroup({ tools }: { tools: ToolItem[] }) {
   const { t } = useI18n()
-  const running = tools.some((t) => !t.done)
   const commandRunning = tools.some((tool) => tool.name === 'bash' && !tool.done)
   const failedCount = tools.filter((t) => t.error).length
   const hasError = failedCount > 0
-  // 默认运行 / 出错时展开；用户明确开合后，后续流式更新不抢回选择。
-  const [override, setOverride] = useState<boolean | null>(null)
-  const open = override ?? (running || hasError)
+  const [open, setOpen] = useState(false)
   const summary = summarizeTools(tools, t)
 
   return (
     <div>
       <button
         aria-expanded={open}
-        onClick={() => setOverride(!open)}
+        onClick={() => setOpen((value) => !value)}
         className="flex items-center gap-1.5 text-sm text-muted-foreground hover:text-ink transition"
       >
         <span className={commandRunning ? 'tool-summary-shimmer' : undefined}>{summary}</span>
@@ -68,7 +65,7 @@ export const ToolGroup = memo(function ToolGroup({ tools }: { tools: ToolItem[] 
 // 展开后的工具明细行。收起：图标 + 标题 + 第二行关键参数（命令着色 / 路径 / 搜索词 / 键值）
 // 与非默认选项 chip，扫一眼就知道调了什么。展开：整行合成一张卡——标题行作卡头（悬停只亮卡头），
 // 发丝线下是命令/路径（或键值表）、虚线下接输出或 diff；chip 挪到标题行，复制悬停才出现。
-// 卡边即行边，左右不留悬空的缩进与错位。出错行默认展开。
+// 卡边即行边，左右不留悬空的缩进与错位。各状态默认折叠。
 const ToolRow = memo(function ToolRow({ item }: { item: ToolItem }) {
   const { t } = useI18n()
   const errored = !!item.error
@@ -77,8 +74,8 @@ const ToolRow = memo(function ToolRow({ item }: { item: ToolItem }) {
   const args = toolArgs(item.name, item.args, t)
   const hasOutput = item.done && !!item.output
   const expandable = !!args.text || !!diff || hasOutput
-  const [override, setOverride] = useState<boolean | null>(null)
-  const open = expandable && (override ?? errored)
+  const [expanded, setExpanded] = useState(false)
+  const open = expandable && expanded
   // 展开体首次打开才挂载、之后常驻（收起动画要内容在）：成组展开时不为每行预渲染输出 / diff
   const [seen, setSeen] = useState(false)
   const Icon = toolIcon(item.name)
@@ -123,7 +120,7 @@ const ToolRow = memo(function ToolRow({ item }: { item: ToolItem }) {
         onClick={() => {
           if (!expandable) return
           setSeen(true)
-          setOverride((o) => !(o ?? errored))
+          setExpanded((value) => !value)
         }}
         className={`w-full px-2 py-1.5 flex items-start gap-2.5 text-left text-sm ${open ? 'rounded-t-[10px]' : 'rounded-lg'} ${expandable ? 'hover:bg-ink/5' : 'cursor-default'}`}
       >

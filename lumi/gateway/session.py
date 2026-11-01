@@ -907,10 +907,11 @@ class GatewaySession:
         """把当前 channel 挂进广播通道（start / reattach 共用）。
 
         注册即声明其 MCP 池绑定（mcp_key 为 live 回调，随 set_workspace 跟随）；
-        随后补发已完成加载的池状态——initialize 触发的后台加载可能在注册前就
+        随后补发当前 cron 运行快照与已完成加载的池状态。initialize 的加载可能在注册前就
         完成并广播（无人接收），detach 期间完成的广播同样落空，补发兜底这两个
         窗口，前端失败 toast 60s 去重天然消化重复。"""
         self._hub.register(self._channel, mcp_key=self._bridge.mcp_pool_key)
+        await self._hub.send_cron_status(self._channel)
         payload = self._bridge.mcp_status_payload()
         if payload is not None:
             await self._channel.send(event_frame(ServerEvent.MCP_STATUS, "", payload))
@@ -965,13 +966,13 @@ class GatewaySession:
             self._ttl_task.cancel()
             self._ttl_task = None
         self._channel = channel
+        await channel.send(self._ready_frame())
         await self._attach_channel()
         if is_cron_thread(self.current_thread_id):
             self._hub.add_observer(self.current_thread_id, channel)
         # 重起通知轮（detach 时停掉了）：恢复后台任务完成反馈推送
         if self._notif_task is None:
             self._notif_task = asyncio.create_task(self._notification_loop())
-        await channel.send(self._ready_frame())
         for evt in self._bridge.pending_approval_events():
             await channel.send(bridge_event_to_wire(evt, self.current_thread_id))
 

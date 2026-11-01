@@ -12,6 +12,66 @@ from lumi.gateway.bridge import BridgeEvent, EventKind
 from lumi.gateway.cron_stream import build_cron_stream_runner
 
 
+@pytest.mark.parametrize("stop", [True, False], ids=["user-stop", "timeout"])
+async def test_cancelled_run_finishes_observers_after_persisting(tmp_path, stop):
+    """复用普通会话的 turn.complete 收尾与历史回读，不让观测会话残留 running。"""
+    from lumi.agents.cron.delivery import DeliveryManager
+    from lumi.agents.cron.job_store import JobStore
+    from lumi.agents.cron.models import Job, Schedule, ScheduleType
+    from lumi.agents.cron.run_log import RunLog
+    from lumi.agents.cron.scheduler import Scheduler
+
+    started = asyncio.Event()
+    persisted = False
+
+    class Bridge(_fake_bridge([])):
+        async def stream_response(self, prompt, **kwargs):
+            yield BridgeEvent(kind=EventKind.TURN_START)
+            yield BridgeEvent(
+                kind=EventKind.TOOL_START, name="bash", tool_call_id="tool"
+            )
+            started.set()
+            await asyncio.Event().wait()
+
+        async def finalize_cancelled_stream(self, stream):
+            nonlocal persisted
+            await super().finalize_cancelled_stream(stream)
+            persisted = True
+
+    class Hub(_Hub):
+        def publish_thread_event(self, thread_id, frame):
+            if frame["params"]["type"] == "turn.complete":
+                assert persisted  # 事件到达后前端立即回读，checkpoint 须已落盘
+            super().publish_thread_event(thread_id, frame)
+
+    hub = Hub()
+    store = JobStore(tmp_path / "jobs.json")
+    scheduler = Scheduler(
+        store,
+        RunLog(tmp_path / "runs"),
+        DeliveryManager(),
+        build_cron_stream_runner(hub),
+        execution_timeout=10 if stop else 0.02,
+    )
+    job = Job(
+        name="cancel",
+        schedule=Schedule(type=ScheduleType.INTERVAL, value="5m"),
+        prompt="run",
+    )
+    await store.upsert(job)
+    with patch("lumi.gateway.bridge.AgentBridge", Bridge):
+        await scheduler.trigger(job.id)
+        task = scheduler._running_tasks[job.id]
+        await started.wait()
+        if stop:
+            assert scheduler.cancel_job(job.id)
+        record = await task
+    assert record.status == ("stopped" if stop else "timeout")
+    terminal = [f for f in hub.published if f["params"]["type"] == "turn.complete"]
+    assert len(terminal) == 1
+    assert terminal[0]["params"]["session_id"] == record.thread_id
+
+
 class _Hub:
     def __init__(self) -> None:
         self.published: list[dict] = []
@@ -60,8 +120,12 @@ async def test_runner_raises_on_error_event():
         runner = build_cron_stream_runner(hub)
         with pytest.raises(RuntimeError, match="boom"):
             await runner("do it", "cron-x", "")
-    # 错误事件仍直播给观测者（前端能看到），只是额外补抛让状态如实
-    assert len(hub.published) == 2
+    # 错误如实展示；结束事件触发持久历史回读，清理中断的流式与工具状态。
+    assert [f["params"]["type"] for f in hub.published] == [
+        "message.delta",
+        "error",
+        "turn.complete",
+    ]
 
 
 async def test_runner_skips_publish_without_observers():
@@ -89,14 +153,36 @@ async def test_runner_skips_publish_without_observers():
 async def test_runner_returns_output_on_success():
     """无 ERROR 事件时返回终态 output。"""
     hub = _Hub()
-    events = [BridgeEvent(kind=EventKind.MESSAGE_DELTA, text="hi")]
+    events = [
+        BridgeEvent(kind=EventKind.MESSAGE_DELTA, text="hi"),
+        BridgeEvent(kind=EventKind.TURN_COMPLETE),
+    ]
     with patch(
         "lumi.gateway.bridge.AgentBridge", _fake_bridge(events, final_text="最终答复")
     ):
         runner = build_cron_stream_runner(hub)
         output = await runner("do it", "cron-x", "")
     assert output == "最终答复"
-    assert len(hub.published) == 1
+    assert [f["params"]["type"] for f in hub.published] == [
+        "message.delta",
+        "turn.complete",
+    ]
+
+
+async def test_unreported_stream_error_finishes_observers():
+    class Bridge(_fake_bridge([])):
+        async def stream_response(self, prompt, **kwargs):
+            yield BridgeEvent(kind=EventKind.TURN_START)
+            raise RuntimeError("stream failed")
+
+    hub = _Hub()
+    with patch("lumi.gateway.bridge.AgentBridge", Bridge):
+        with pytest.raises(RuntimeError, match="stream failed"):
+            await build_cron_stream_runner(hub)("do it", "cron-x", "")
+    assert [f["params"]["type"] for f in hub.published] == [
+        "turn.start",
+        "turn.complete",
+    ]
 
 
 async def test_runner_initializes_bridge_in_job_project():

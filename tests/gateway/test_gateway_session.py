@@ -231,6 +231,57 @@ async def test_start_emits_gateway_ready():
     assert bridge.closed is True
 
 
+async def test_reload_restores_running_cron_snapshot():
+    """任务已开始后刷新：新会话不等下一次状态变更就能恢复运行态与直播入口。"""
+    hub = BroadcastHub()
+    runs = [
+        {
+            "job_id": "job-a",
+            "thread_id": "cron-a",
+            "started_at": "2026-10-31T23:00:00+08:00",
+        }
+    ]
+    hub.on_cron_job_status(runs)
+    await asyncio.sleep(0)  # 开始广播已经发生，刷新后的连接没有收到它
+    channel = FakeChannel()
+    session = GatewaySession(FakeBridge(), channel, hub)
+    await session.start()
+    try:
+        assert channel.events("cron.running")[0]["params"]["payload"]["runs"] == runs
+    finally:
+        await session.aclose()
+
+
+@pytest.mark.parametrize("finished", [False, True])
+async def test_reattach_restores_latest_cron_snapshot(finished):
+    """断线期间任务开始 / 完成：续接恢复最新快照，不能残留旧运行态。"""
+    from lumi.gateway.session_registry import SessionRegistry
+
+    session, _ = _make_session(BlockingBridge())
+    await session.start()
+    session.detach(SessionRegistry())
+    runs = [
+        {
+            "job_id": "job-a",
+            "thread_id": "cron-a",
+            "started_at": "2026-10-31T23:00:00+08:00",
+        }
+    ]
+    session._hub.on_cron_job_status(runs)
+    if finished:
+        session._hub.on_cron_job_status([])
+    await asyncio.sleep(0)
+    channel = FakeChannel()
+    try:
+        await session.reattach(channel)
+        expected = [] if finished else runs
+        assert (
+            channel.events("cron.running")[0]["params"]["payload"]["runs"] == expected
+        )
+    finally:
+        await session.aclose()
+
+
 # -- 2. 非流式 RPC --
 
 
@@ -258,13 +309,14 @@ async def test_streaming_send_message_pumps_events_then_result():
     bridge = FakeBridge(events=events)
     session, channel = _make_session(bridge)
     await session.start()
+    channel.frames.clear()  # 握手与进程级初始快照不属于本轮事件
     try:
         await session.handle_frame(
             {"id": 1, "method": "send_message", "params": {"content": "hello"}}
         )
         await _drain(session)
         # 事件按序 pump 出
-        assert [e["params"]["type"] for e in channel.events()][1:] == [
+        assert [e["params"]["type"] for e in channel.events()] == [
             "message.delta",
             "turn.complete",
         ]
@@ -1423,6 +1475,10 @@ async def test_native_ssh_disconnect_detaches_active_turn_and_reattaches(
         ready = await read_frame(frames)
         assert ready["channel"] == "second"
         assert ready["frame"]["params"]["payload"]["running"] is True
+        snapshot = await read_frame(frames)
+        assert snapshot["channel"] == "second"
+        assert snapshot["frame"]["params"]["type"] == "cron.running"
+        assert snapshot["frame"]["params"]["payload"]["runs"] == []
         approval = await read_frame(frames)
         assert approval["channel"] == "second"
         assert (

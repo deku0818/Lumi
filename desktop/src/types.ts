@@ -352,6 +352,12 @@ export interface CronJob {
   backend?: string
 }
 
+export interface CronActiveRun {
+  job_id: string
+  thread_id: string
+  started_at: string
+}
+
 // 单次执行记录（对齐后端 RunRecord.to_dict）
 export interface CronRun {
   job_id: string

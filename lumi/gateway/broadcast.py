@@ -86,6 +86,8 @@ class BroadcastHub(ResultDelivery):
         self._channels: dict[Channel, Callable[[], str] | None] = {}
         self._bg_dirty = False
         self._bg_flush_scheduled = False
+        # 保留最新运行快照：新连接 / 重连不能只等下一次开始或结束广播。
+        self._cron_runs: list[dict] = []
         # cron 执行直播：thread_id → {channel: 观测者}
         self._observers: dict[str, dict[Channel, _Observer]] = {}
 
@@ -147,7 +149,14 @@ class BroadcastHub(ResultDelivery):
         每条含 ``{job_id, thread_id, started_at}``——前端据此既标「运行中」job，也在
         执行记录顶部显示可点进观测的活条目（thread_id 非空时）。
         """
+        self._cron_runs = runs
         spawn(self.send_event(ServerEvent.CRON_RUNNING, {"runs": runs}))
+
+    async def send_cron_status(self, channel: Channel) -> None:
+        """连接挂入时补发最新运行快照，包括空列表（清掉断线前残留状态）。"""
+        await channel.send(
+            event_frame(ServerEvent.CRON_RUNNING, "", {"runs": self._cron_runs})
+        )
 
     def on_cron_jobs_changed(self) -> None:
         """JobStore 同步回调：任务增删改后广播 cron.jobs，前端据此重拉任务列表。

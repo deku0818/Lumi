@@ -44,6 +44,14 @@ Desktop 端：`lumi serve` 在 lifespan 中经 `setup_cron()` 启动调度器，
 把任务结果（`cron.result`）与运行状态（`cron.running`）广播给所有活跃 WS 连接；
 管理界面见 `desktop/src/components/CronPage.tsx`，协议见 `protocol/events.json`。
 
+BroadcastHub 保留最新 `cron.running` 快照，新连接与断连续接在 `gateway.ready` 后
+立即补发（含空快照），刷新桌面端不会丢失仍在运行的任务。详情页与会话右栏共用
+执行记录组件，将实时条目与完成日志按 `thread_id` 合并；日志落盘前即可点击进入
+执行会话观测事件流，完成后以日志替换实时条目。错误详情在独立浮层展示，不改变行高。
+前端仅保存按机器划分的运行快照，按钮与观测态从快照派生；详情页和右栏共用
+`useCronRuns` 筛选与合并记录、`RunRecords` 渲染内容。执行因停止、超时或异常中断时，
+runner 先持久化中断现场，再补发尚未发送的 `turn.complete`，复用普通会话的收尾与历史回读。
+
 跨进程互斥：同一 workspace 的 `jobs.json` 可能同时被多个 `lumi serve` 进程加载，
 `Scheduler.start()` 经 `<cron_dir>/scheduler.lock` 文件锁（flock）保证只有一个进程
 实际调度——后启动者跳过调度但仍可管理任务（CRUD / Run now），否则每个任务会在

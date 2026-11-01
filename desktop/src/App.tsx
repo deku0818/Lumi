@@ -51,6 +51,7 @@ import type {
   ChannelInfo,
   ConnError,
   ConnState,
+  CronActiveRun,
   CronJob,
   ForkPoint,
   Item,
@@ -75,7 +76,8 @@ import { contentUrl } from './components/Artifacts'
 import { BgTasksSection } from './components/BgTasksDrawer'
 import { PreviewWindow } from './components/PreviewWindow.tsx'
 import { emptyPreviewState, previewReducer } from './lib/previewState.ts'
-import { CronPage, RunsSection } from './components/CronPage'
+import { CronPage } from './components/CronPage'
+import { RunsSection } from './components/CronRuns'
 import { RightRail } from './components/RightRail'
 import { WorkspaceWindow } from './components/WorkspaceWindow'
 import { SubagentDetail, SubagentsSection } from './components/Subagents'
@@ -228,13 +230,8 @@ export default function App() {
   const pickerBackend = homeTarget ? homeTarget.backend : activeBackend
   const pickerRef = useLatest(pickerBackend)
   const cmdTargetRef = useLatest(homeTarget ? sessionKey(homeTarget.backend, homeTarget.path) : active)
-  // 运行中任务：机器 → 该机器正在执行的 job id。按机器分段——每台机器各发各的进程级快照
-  const [cronRunning, setCronRunning] = useState<Record<string, string[]>>({})
-  // 运行中的 run（含 thread_id）：机器 → 活条目。cronRunning 从这里派生，另供执行记录
-  // 顶部显示可点进观测的活条目、以及观测视图的运行态门控
-  const [cronActiveRuns, setCronActiveRuns] = useState<
-    Record<string, { job_id: string; thread_id: string; started_at: string }[]>
-  >({})
+  // 每台机器一份运行快照；按钮状态、执行记录和观测态均从这里派生。
+  const [cronActiveRuns, setCronActiveRuns] = useState<Record<string, CronActiveRun[]>>({})
   const [cronVersion, setCronVersion] = useState(0) // 递增触发 cron 数据刷新
   const [cronJobs, setCronJobs] = useState<CronJob[]>([]) // 侧栏任务分组数据
   const [activeCronJob, setActiveCronJob] = useState<string | null>(null) // 任务会话视图当前任务
@@ -402,20 +399,12 @@ export default function App() {
       // 本机同一份快照会经会话连接 + 控制连接各来一次，内容没变就保持引用不动，
       // 否则每次都换新对象、把 memo 化的 Sidebar 白拖着重渲染一遍
       const runs = payload.runs ?? []
-      // 本机同一份快照经会话连接 + 控制连接各来一次，内容没变就保持引用不动，
-      // 避免白触发 RunsSection / observingCronRun 消费方重渲染（同 cronRunning 的去重）
       setCronActiveRuns((prev) => {
         const cur = prev[backend]
         const same =
           cur?.length === runs.length &&
           cur.every((r, i) => r.thread_id === runs[i].thread_id && r.job_id === runs[i].job_id)
         return same ? prev : { ...prev, [backend]: runs }
-      })
-      setCronRunning((prev) => {
-        const next = runs.map((r) => r.job_id)
-        const cur = prev[backend]
-        const same = cur?.length === next.length && cur.every((v, i) => v === next[i])
-        return same ? prev : { ...prev, [backend]: next }
       })
       return
     }
@@ -856,7 +845,6 @@ export default function App() {
   // 任务永远显示运行中（定时任务的运行脉冲点还会顶掉未读角标）。重连后 gateway.ready
   // 各自重新拉一份，故清空是安全的。
   const clearMachineSnapshots = useCallback((backend: string) => {
-    setCronRunning((r) => (r[backend]?.length ? { ...r, [backend]: [] } : r))
     setCronActiveRuns((r) => (r[backend]?.length ? { ...r, [backend]: [] } : r))
     setBgTasks((prev) =>
       prev.some((t) => beOf(t) === backend) ? replaceBackendTasks(prev, backend, []) : prev,
@@ -1466,20 +1454,14 @@ export default function App() {
     [activate],
   )
 
-  // 打开某任务的会话视图：默认选中最近一次有会话的执行（在任务所属机器上查/开）
+  // 列表已经选定执行记录，复用同一个打开/标读入口。
   const openCronJob = useCallback(
-    async (jobId: string, threadId?: string) => {
+    async (jobId: string, threadId: string) => {
       setView('cronjob')
       setActiveCronJob(jobId)
-      // auto-open 最近一次有会话的执行：run_threads 已是倒序的可跳转 run，取头即可
-      // （RunsSection 自己拉完整列表，这里不必再走一趟 listCronRuns）。
-      // 未读随「点开即标已读」自然消：这条经 openRunThread 标记，其余留待逐条点开
-      const job = cronJobsRef.current.find((j) => j.id === jobId)
-      const tid = threadId ?? job?.run_threads?.[0]
-      setCronRunThread(tid ?? null)
-      if (tid) await openRunThread(tid, beOf(job ?? {}))
+      await openRunThread(threadId, cronBackendOf(jobId))
     },
-    [openRunThread],
+    [openRunThread, cronBackendOf],
   )
 
   // 会话标记（pin/重命名/删除）存在各机器自己的 ~/.lumi，故按会话所属机器路由（backend 由行透传）
@@ -2253,16 +2235,8 @@ export default function App() {
   )
 
   // ── 统一右栏派生量（布尔量廉价，每渲染重算即可；数组 memo 是为 RunsSection 的 memo 不被击穿）──
-  // 当前定时任务的直播执行：喂 RunsSection 活条目 + 收起态脉冲点
-  const cronLiveRuns = useMemo(
-    () =>
-      view === 'cronjob' && activeCronJob
-        ? (cronActiveRuns[cronBackendOf(activeCronJob)] ?? []).filter(
-            (r) => r.job_id === activeCronJob && r.thread_id,
-          )
-        : [],
-    [view, activeCronJob, cronActiveRuns, cronBackendOf],
-  )
+  const cronMachineRuns = cronActiveRuns[cronBackendOf(activeCronJob ?? '')]
+  const hasLiveCronRun = view === 'cronjob' && !!activeCronJob && !!cronMachineRuns?.some(r => r.job_id === activeCronJob && r.thread_id)
   const pickRun = useCallback(
     (tid: string) => void openRunThread(tid, cronBackendOf(activeCronJob ?? '')),
     [openRunThread, cronBackendOf, activeCronJob],
@@ -2291,7 +2265,7 @@ export default function App() {
   const railSectionsOpen = railOpen && !hasWorkspaceWindow
   const showRail = hasPreview || (view === 'cronjob' ? !!activeCronJob : view === 'chat' && (railBg || railAgents))
   // 脉冲点 = 可见模块里确有东西在跑：隐藏的 bg 模块不算，直播中的 cron 执行算
-  const railDot = (railSessionVisible && hasRunningBg) || cronLiveRuns.length > 0
+  const railDot = (railSessionVisible && hasRunningBg) || hasLiveCronRun
 
   const machinesCtx = useMemo(
     () => ({ machines, conn: machineConn, err: machineErr, reconnect: reconnectMachine, ssh: sshStatuses, openConnection: openConnectionSettings }),
@@ -2347,7 +2321,7 @@ export default function App() {
         initialJobId={cronEntry.jobId}
         createIn={cronEntry.createIn}
         jobs={cronJobs}
-        runningJobs={cronRunning}
+        activeRuns={cronActiveRuns}
         version={cronVersion}
         onOpenRun={(tid, jid) => void openCronJob(jid, tid)}
         onRefresh={refreshCronJobs}
@@ -2645,7 +2619,7 @@ export default function App() {
                   activeThread={cronRunThread}
                   readRuns={readRuns}
                   version={cronVersion}
-                  liveRuns={cronLiveRuns}
+                  machineRuns={cronMachineRuns}
                   onPick={pickRun}
                 />
               )}
