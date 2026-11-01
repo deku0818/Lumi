@@ -697,7 +697,7 @@ body.resizing-col iframe { pointer-events: none !important; }
 .md .hljs-emphasis { font-style: italic; }
 .md .hljs-strong { font-weight: var(--ui-weight-semibold); }
 
-/* 命令执行时的银白流光：只移动高光，文字、失败图标与箭头保持原位。 */
+/* 工具执行时的银白流光：只移动高光，文字、失败图标与箭头保持原位。 */
 .tool-summary-shimmer {
   --shimmer-base: var(--color-muted);
   --shimmer-light: white;

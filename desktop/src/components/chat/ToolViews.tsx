@@ -21,7 +21,7 @@ export const sameItems = (a: ToolItem[], b: ToolItem[]) =>
 
 export const ToolGroup = memo(function ToolGroup({ tools }: { tools: ToolItem[] }) {
   const { t } = useI18n()
-  const commandRunning = tools.some((tool) => tool.name === 'bash' && !tool.done)
+  const running = tools.some((tool) => !tool.done)
   const failedCount = tools.filter((t) => t.error).length
   const hasError = failedCount > 0
   const [open, setOpen] = useState(false)
@@ -34,7 +34,7 @@ export const ToolGroup = memo(function ToolGroup({ tools }: { tools: ToolItem[] 
         onClick={() => setOpen((value) => !value)}
         className="flex items-center gap-1.5 text-sm text-muted-foreground hover:text-ink transition"
       >
-        <span className={commandRunning ? 'tool-summary-shimmer' : undefined}>{summary}</span>
+        <span className={running ? 'tool-summary-shimmer' : undefined}>{summary}</span>
         {hasError && (
           <span
             role="img"
