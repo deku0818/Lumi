@@ -70,11 +70,15 @@ const TOOL_META: Record<string, ToolMeta> = {
 
 export const toolIcon = (name: string): LucideIcon => TOOL_META[name]?.icon ?? Wrench
 
+// MCP 完整名称只用于调用与分组，展示统一为「服务器 / 工具名」。
+export const toolDisplayName = (name: string): string =>
+  name.replace(/^mcp__(.+?)__(.+)$/, '$1 / $2')
+
 // 状态行文案键（未登记的工具走通用 status.tool）
 export const toolStatusKey = (name: string): string =>
   TOOL_META[name]?.status ?? 'status.tool'
 
-// 是否是登记过的内置工具：未登记的（MCP 等）标题栏直接显示工具名
+// 是否是登记过的内置工具：未登记的（MCP 等）标题栏使用展示名称
 export const isKnownTool = (name: string): boolean => name in TOOL_META
 
 // 聚合成「编辑了 2 个文件，运行了 1 条命令」/ "Edited 2 files, ran a command" 式摘要：
@@ -84,7 +88,7 @@ export function summarizeTools(tools: ToolItem[], t: Translate): string {
   for (const tool of tools) {
     const sum = TOOL_META[tool.name]?.sum
     const key = sum ?? `other:${tool.name}`
-    const g = groups.get(key) ?? { sum: sum ?? 'other', name: sum ? '' : tool.name, n: 0 }
+    const g = groups.get(key) ?? { sum: sum ?? 'other', name: sum ? '' : toolDisplayName(tool.name), n: 0 }
     groups.set(key, { ...g, n: g.n + 1 })
   }
   const phrases = [...groups.values()].map(({ sum, name, n }) =>

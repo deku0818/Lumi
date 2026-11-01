@@ -316,8 +316,9 @@ class MCPSessionManager:
         tools: list[StructuredTool],
         out_tools: list[StructuredTool],
     ) -> None:
-        """把工具追加到输出列表（顺带压平坏 schema）。"""
+        """为模型侧工具名加服务命名空间，并压平坏 schema；调用闭包保留 MCP 原名。"""
         for t in tools:
+            t.name = f"mcp__{server_name}__{t.name}"
             if isinstance(t.args_schema, dict):
                 flat = flatten_top_level_combinators(t.args_schema)
                 if flat is not t.args_schema:

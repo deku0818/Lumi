@@ -1,7 +1,7 @@
 import { memo, useMemo, useState } from 'react'
 import { ChevronRight, CircleAlert } from 'lucide-react'
 import type { Item } from '../../types'
-import { isKnownTool, summarizeTools, toolArgs, toolIcon, toolStatusKey, toolTitle } from '../../toolMeta'
+import { isKnownTool, summarizeTools, toolArgs, toolDisplayName, toolIcon, toolStatusKey, toolTitle } from '../../toolMeta'
 import { MAX_DIFF_LINES, foldContext, toolDiff, type DiffLine } from '../../diff'
 import { shellTokens } from '../../shell'
 import { useI18n } from '../../i18n'
@@ -132,7 +132,7 @@ const ToolRow = memo(function ToolRow({ item }: { item: ToolItem }) {
           <span className="flex min-w-0 items-center gap-1.5">
             {/* 未登记工具（MCP 等）的参数已在第二行键值里，标题用工具名免重复 */}
             <span className="truncate text-ink/80">
-              {isKnownTool(item.name) ? toolTitle(item.name, item.args, t) : item.name}
+              {isKnownTool(item.name) ? toolTitle(item.name, item.args, t) : toolDisplayName(item.name)}
             </span>
             {errored && (
               <span className="shrink-0 rounded border border-line px-1 text-[10px] leading-4 font-normal text-muted-foreground">

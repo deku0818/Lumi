@@ -38,7 +38,7 @@ async def test_persistent_and_stateless_servers_start_together(monkeypatch):
             "broken": {"transport": "sse"},
         }
     )
-    assert [t.name for t in tools] == ["stdio", "http"]
+    assert [t.name for t in tools] == ["mcp__stdio__stdio", "mcp__http__http"]
     assert manager.server_status["stdio"]["ok"]
     assert manager.server_status["http"]["ok"]
     assert not manager.server_status["broken"]["ok"]

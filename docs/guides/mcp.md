@@ -38,3 +38,11 @@ lumi mcp remove demo
 - npx / uvx 找不到：在该后端机器检查 Node 或 uv；首次拉包超时先验证网络和包源。401 / 403 按服务方要求修复凭据。
 
 MCP 配置支持 stdio、HTTP / SSE；SSE 的 CLI transport 使用 `-t sse`。工具仍遵循 Lumi 的统一权限规则。
+
+## 工具命名
+
+暴露给模型的工具名统一为 `mcp__<配置中的服务器名称>__<原始工具名>`。例如 `github` 服务器的 `search` 工具名为 `mcp__github__search`，避免不同服务器之间以及与内置工具重名。
+
+桌面端的工具组摘要与展开明细统一显示 `服务器 / 工具名`（例如 `github / search`）；计数仍按完整工具名分组，不合并不同服务器的同名工具。
+
+权限规则、工具筛选与 PreToolUse / PostToolUse hooks 的 matcher 使用这个完整名称。原先按原始工具名编写的规则需同步更新。MCP 请求仍使用原始工具名，`config.json` 的 `tool_args` 参数映射也继续匹配原始工具名。连接测试列出的仍是服务器声明的原始名称。
