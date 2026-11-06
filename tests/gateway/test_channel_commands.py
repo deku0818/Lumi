@@ -65,3 +65,11 @@ def test_is_model_arg_cjk_and_multiword_fall_through():
     assert not is_model_arg("换成最便宜的那个")  # 无空格中文单 token
     assert not is_model_arg("claude-opus-4-8 谢谢")
     assert not is_model_arg("帮我 看下 哪个便宜")
+
+
+def test_is_model_arg_with_connection_prefix():
+    assert is_model_arg("lss/gpt-6.1-sol")
+    assert is_model_arg("OpenAI Responses API/gpt-6.1-sol")
+    assert is_model_arg("阿里云百炼/qwen/model")
+    assert not is_model_arg("lss/")
+    assert not is_model_arg("lss/gpt-6.1-sol 谢谢")

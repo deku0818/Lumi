@@ -117,10 +117,10 @@ def _provider_models() -> list[tuple[str, str, str]]:
 
 
 def _model_listing(entries: list[tuple[str, str, str]]) -> list[str]:
-    """/model 卡片的可选模型段：灰字组标题 + 每行 `模型` — 连接名。"""
+    """/model 卡片的可选模型段：列出可直接复制的连接名/模型名。"""
     return [
         "<font color='grey'>可选模型</font>",
-        *(f"`{m}` — {name}" for _, name, m in entries),
+        *(f"`{name}/{m}`" for _, name, m in entries),
     ]
 
 
@@ -285,7 +285,7 @@ class FeishuInbound:
                     parsed[0], chat_id, thread_id, message_id
                 )
                 return
-            # /model、/effort：本会话热切换。值不像切换操作的（中文/多词自然语言）
+            # /model、/effort：本会话热切换（连接名可含中文/空格）。值不像切换操作的
             # 不拦，按「未知命令照常喂模型」的既有契约走
             if parsed and parsed[0] in RUNTIME_COMMANDS and is_model_arg(parsed[1]):
                 runtime_cmd = (
@@ -539,7 +539,7 @@ class FeishuInbound:
     async def _cmd_session_model(
         self, value: str, chat_id: str, thread_id: str, message_id: str
     ) -> None:
-        """普通模式的 /model：裸敲看本会话生效模型 + 可选列表，带完整模型名只切本会话。
+        """/model：裸敲列出模型，带模型名或连接名/模型名只切本会话。
 
         写的是会话级覆盖（sidecar 落盘），下一轮开跑前经 ``align_session_model`` 对齐
         ——只动本会话，别的群 / desktop 都不受影响。``/model default`` 落回新会话默认。
@@ -558,7 +558,7 @@ class FeishuInbound:
                 ),
                 reply_to=message_id,
                 title="🧠 会话模型",
-                note="/model 完整模型名 切换（仅本会话）· /model default 恢复默认",
+                note="/model 模型名 或 /model 连接名/模型名 切换（仅本会话）· /model default 恢复默认",
             )
             return
         if value == "default":
@@ -574,7 +574,12 @@ class FeishuInbound:
             return
         entries = _provider_models()
         q = value.lower()
+        # 先按完整模型名匹配，保留带命名空间的模型（如 org/model）的既有用法。
         matches = [e for e in entries if e[2].lower() == q]
+        qualified = False
+        if not matches:
+            matches = [e for e in entries if f"{e[1]}/{e[2]}".lower() == q]
+            qualified = True
         if not matches:
             await ch.send_markdown(
                 chat_id,
@@ -584,10 +589,9 @@ class FeishuInbound:
                 template="red",
             )
             return
-        # 同名模型可能挂在多个连接下：连接偏好交给 resolve()（指定 profile 精确
-        # 命中 > active 优先按名反查），不在这里重复实现它的契约
+        # 指定连接时直接使用匹配的 profile；仅给模型名时沿用 resolve() 的连接偏好。
         model = matches[0][2]
-        pid = provider_store.resolve(model).provider
+        pid = matches[0][0] if qualified else provider_store.resolve(model).provider
         pname = next((n for i, n, _ in matches if i == pid), matches[0][1])
         session_model.set_model(thread_id, model, pid)
         await ch.send_markdown(

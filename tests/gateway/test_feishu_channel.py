@@ -2002,6 +2002,56 @@ async def test_cmd_session_model_switches_only_this_chat(monkeypatch, tmp_path):
     assert session_model.resolve("t-a").model == "g-default"
 
 
+@pytest.mark.parametrize(
+    ("connection", "value", "model"),
+    [
+        ("LSS", "lss/gpt-6.1-sol", "gpt-6.1-sol"),
+        ("LSS", "LSS/GPT-6.1-SOL", "gpt-6.1-sol"),
+        (
+            "OpenAI Responses API",
+            "OpenAI Responses API/gpt-6.1-sol",
+            "gpt-6.1-sol",
+        ),
+        ("阿里云百炼", "阿里云百炼/qwen-model", "qwen-model"),
+        ("LSS", "lss/org/model", "org/model"),
+    ],
+)
+async def test_cmd_session_model_selects_connection(
+    monkeypatch, tmp_path, connection, value, model
+):
+    from lumi.models import provider_store
+    from lumi.sessions import session_model
+
+    _isolate_meta(monkeypatch, tmp_path)
+    profiles = [
+        provider_store.ProviderProfile("p1", "Default", "", "", (model,)),
+        provider_store.ProviderProfile("p2", connection, "", "", (model,)),
+    ]
+    active = {"provider": "p1", "model": model}
+    monkeypatch.setattr(provider_store, "load", lambda: (profiles, active))
+    ch = FeishuChannel(FeishuChannelConfig())
+    sent = _sent_collector(ch, monkeypatch)
+
+    await ch.inbound._cmd_session_model("", "oc", "t-a", "m1")
+    assert f"`{connection}/{model}`" in sent[-1][0]
+
+    await ch.inbound._cmd_session_model(value, "oc", "t-a", "m2")
+    current = session_model.resolve("t-a")
+    assert (current.provider, current.model) == ("p2", model)
+    assert f"（{connection}）" in sent[-1][0]
+    assert session_model.resolve("t-b").provider == "p1"
+    assert active == {"provider": "p1", "model": model}
+
+    # 指定了不存在的连接时不能悄悄退回其他连接。
+    await ch.inbound._cmd_session_model(f"missing/{model}", "oc", "t-a", "m3")
+    assert "未找到模型" in sent[-1][1]
+    assert session_model.resolve("t-a").provider == "p2"
+
+    # 仍兼容裸模型名（包括 org/model），按原有规则使用默认连接。
+    await ch.inbound._cmd_session_model(model, "oc", "t-a", "m4")
+    assert session_model.resolve("t-a").provider == "p1"
+
+
 async def test_cmd_session_effort_lists_auto_once(monkeypatch, tmp_path):
     # allowed_levels 对多数形态本就以 auto 打头，裸拼会列出两个 auto
     _isolate_meta(monkeypatch, tmp_path)

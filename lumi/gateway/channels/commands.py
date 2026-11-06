@@ -20,7 +20,7 @@ SYSTEM_COMMANDS: dict[str, str] = {
 
 # 渠道运行时命令：改写会话级运行配置（sidecar 落盘）后热生效。
 RUNTIME_COMMANDS: dict[str, str] = {
-    "model": "查看或切换本会话模型：/model 完整模型名（仅当前会话）",
+    "model": "查看或切换本会话模型：/model 模型名 或 /model 连接名/模型名（仅当前会话）",
     "effort": "查看或切换本会话思考档位：/effort high（仅当前会话）",
 }
 
@@ -32,12 +32,14 @@ CHANNEL_COMMAND_NAMES: frozenset[str] = frozenset(SYSTEM_COMMANDS) | frozenset(
 
 
 def is_model_arg(value: str) -> bool:
-    """/model 的值是否像一次切换操作：空（查状态）、default、或单个 ASCII 词
-    （完整模型名或拼错的尝试，拦下反馈）。含 CJK 或多词的按自然语言喂模型——
-    分词启发式对中文失效（无空格句子是单 token），必须看字符集。"""
+    """空、default 或单个 ASCII 模型名；连接名前缀可含中文、空格。
+
+    不带连接前缀的中文或多词仍按自然语言喂模型。
+    """
     if not value or value == "default":
         return True
-    return len(value.split()) == 1 and value.isascii()
+    model = value.rsplit("/", 1)[-1]
+    return len(model.split()) == 1 and model.isascii()
 
 
 # mention 场景下命令起点：第一个前面是空白、以 "/" 开头的片段（到文本末尾）
