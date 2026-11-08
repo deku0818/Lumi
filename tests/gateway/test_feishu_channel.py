@@ -1995,6 +1995,7 @@ async def test_cmd_session_model_switches_only_this_chat(monkeypatch, tmp_path):
     # /model default → 落回新会话默认
     await ch.inbound._cmd_session_model("default", "oc", "t-a", "m2")
     assert session_model.resolve("t-a").model == "g-default"
+    assert sent[-1][0] == "模型：`g-default`"  # 无连接名时保留模型名
 
     # 不存在的模型：红卡 + 不写任何覆盖
     await ch.inbound._cmd_session_model("nope", "oc", "t-a", "m3")
@@ -2034,6 +2035,7 @@ async def test_cmd_session_model_selects_connection(
 
     await ch.inbound._cmd_session_model("", "oc", "t-a", "m1")
     assert f"`{connection}/{model}`" in sent[-1][0]
+    assert sent[-1][0].splitlines()[0] == f"当前：`Default/{model}`"
 
     await ch.inbound._cmd_session_model(value, "oc", "t-a", "m2")
     current = session_model.resolve("t-a")
@@ -2041,6 +2043,10 @@ async def test_cmd_session_model_selects_connection(
     assert f"（{connection}）" in sent[-1][0]
     assert session_model.resolve("t-b").provider == "p1"
     assert active == {"provider": "p1", "model": model}
+
+    # 同名模型按当前会话的连接 ID 展示，不能误用全局默认连接。
+    await ch.inbound._cmd_session_model("", "oc", "t-a", "m-status")
+    assert sent[-1][0].splitlines()[0] == f"当前：`{connection}/{model}`"
 
     # 指定了不存在的连接时不能悄悄退回其他连接。
     await ch.inbound._cmd_session_model(f"missing/{model}", "oc", "t-a", "m3")
@@ -2050,6 +2056,9 @@ async def test_cmd_session_model_selects_connection(
     # 仍兼容裸模型名（包括 org/model），按原有规则使用默认连接。
     await ch.inbound._cmd_session_model(model, "oc", "t-a", "m4")
     assert session_model.resolve("t-a").provider == "p1"
+
+    await ch.inbound._cmd_session_model("default", "oc", "t-a", "m5")
+    assert sent[-1][0] == f"模型：`Default/{model}`"
 
 
 async def test_cmd_session_effort_lists_auto_once(monkeypatch, tmp_path):

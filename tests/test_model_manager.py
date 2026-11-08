@@ -473,7 +473,7 @@ def test_structured_output_guards_both_branches(catalog, monkeypatch, model):
 
 @pytest.mark.parametrize("model", ["claude-opus-4-6", "gpt-5.2"])
 def test_create_llm_sdk_is_single_retry_layer(catalog, monkeypatch, model):
-    """重试只留 SDK 一层：默认 max_retries=5（SDK 自带 408/409/429/5xx 含 529、
+    """重试只留 SDK 一层：默认 max_retries=10（SDK 自带 408/409/429/5xx 含 529、
     retry-after / x-should-retry），调用方显式给的值（如连通性测试的 0）不被覆盖。"""
     from lumi.models import manager
     from lumi.models.provider_store import ResolvedModel
@@ -482,7 +482,7 @@ def test_create_llm_sdk_is_single_retry_layer(catalog, monkeypatch, model):
         "lumi.models.provider_store.resolve",
         lambda name=None, provider="": ResolvedModel(model, "", "sk-test", "auto"),
     )
-    assert manager.create_llm(model, use_cache=False).max_retries == 5
+    assert manager.create_llm(model, use_cache=False).max_retries == 10
     assert manager.create_llm(model, use_cache=False, max_retries=0).max_retries == 0
 
 

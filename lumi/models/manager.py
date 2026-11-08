@@ -31,7 +31,7 @@ Protocol = Literal["anthropic", "openai", "responses", "gemini"]
 _cache: dict[str, Any] = {}
 # SDK 重试次数（指数退避约 0.5→8s 封顶，或按 retry-after）：SDK 默认 2 次对 529 过载
 # 偏少；chain 外不叠 with_retry，此即唯一重试层
-_MAX_RETRIES = 5
+_MAX_RETRIES = 10
 
 
 def get_default_model_name() -> str:

@@ -124,6 +124,13 @@ def _model_listing(entries: list[tuple[str, str, str]]) -> list[str]:
     ]
 
 
+def _model_label(
+    current: session_model.SessionModel, entries: list[tuple[str, str, str]]
+) -> str:
+    name = next((name for pid, name, _ in entries if pid == current.provider), "")
+    return f"{name}/{current.model}" if name else current.model
+
+
 def inbound_dir(thread_id: str) -> Path:
     """本会话飞书入站文件落地目录（/tmp/lumi/feishu/<thread>/），下载文件存这里。"""
     return lumi_tmp_dir("feishu", thread_id)
@@ -547,13 +554,14 @@ class FeishuInbound:
         ch = self.channel
         if not value:
             current = session_model.resolve(thread_id)
+            entries = _provider_models()
             await ch.send_markdown(
                 chat_id,
                 "\n".join(
                     [
-                        f"当前：`{current.model}`",
+                        f"当前：`{_model_label(current, entries)}`",
                         "",
-                        *_model_listing(_provider_models()),
+                        *_model_listing(entries),
                     ]
                 ),
                 reply_to=message_id,
@@ -563,9 +571,10 @@ class FeishuInbound:
             return
         if value == "default":
             session_model.set_model(thread_id, "", "")
+            current = session_model.resolve(thread_id)
             await ch.send_markdown(
                 chat_id,
-                f"模型：`{session_model.resolve(thread_id).model}`",
+                f"模型：`{_model_label(current, _provider_models())}`",
                 reply_to=message_id,
                 title="✅ 已恢复默认",
                 template="green",
